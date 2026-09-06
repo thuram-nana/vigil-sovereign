@@ -41,6 +41,10 @@ def _downgrade(obj: Any) -> LLMDecision:
     """Validate the raw dict into an ``LLMDecision`` and downgrade a structurally-incomplete action to
     the safest still-valid one (never up, never a silent no-op that proceeds). Raises on a
     fundamentally invalid object so ``parse_proposal`` falls back to the caller's fail-closed default."""
+    # accept the model's suggested ask_user answers under either key ("options" is the natural one to emit;
+    # the field is question_options). ADVISORY only — a picked option is folded back as the resume answer.
+    if isinstance(obj, dict) and obj.get("options") and not obj.get("question_options"):
+        obj = {**obj, "question_options": obj.get("options")}
     decision = LLMDecision.model_validate(obj)
     a = decision.action
     if a == ActionType.USE_TOOL and decision.tool is None:
@@ -218,6 +222,26 @@ def _finding_from_claim(claim: dict, source: str) -> Finding:
 OracleFn = Callable[[str, OutputAnalysis], Optional[str]]
 
 
+def _confirmed_class(evidence_ref: str, analysis: "Optional[OutputAnalysis]") -> str:
+    """The class the ORACLE actually confirmed, for LABELLING a FACT (never a tool name). Prefer the class
+    encoded in the signed evidence ref (``web:<class>:…`` / ``rt:<class>:…`` / ``access:<class>:…`` minted by
+    the live re-drives), then the model's claimed ``extracted_info.bug_class`` (the re-drive mints ONLY the
+    claimed class, so they agree). Light, stdlib-only normalisation (react stays import-clean: no framework).
+    Returns "" when neither is available (the caller keeps the generic label)."""
+    import re  # noqa: PLC0415 — stdlib; react.py must not import framework
+    m = re.match(r"^(?:web|rt|access):([a-z0-9_]+):", str(evidence_ref or ""))
+    if m:
+        return m.group(1)
+    try:
+        bc = str((getattr(analysis, "extracted_info", {}) or {}).get("bug_class") or "").strip().lower()
+        bc = bc.replace("-", "_").replace(" ", "_")
+        while "__" in bc:
+            bc = bc.replace("__", "_")
+        return bc
+    except Exception:  # noqa: BLE001 — a malformed analysis never breaks intake
+        return ""
+
+
 def intake_result(
     raw_output: str,
     analysis: Optional[OutputAnalysis],
@@ -252,6 +276,14 @@ def intake_result(
         if evidence_ref and str(evidence_ref).strip():   # a whitespace/garbage ref mints NO fact
             exploit.status = "fact"
             exploit.evidence_ref = str(evidence_ref)
+            # Label the FACT with the class the ORACLE confirmed (from the signed ref, else the claimed
+            # class), NOT the tool that surfaced it — so the Findings screen reads "open_redirect", not
+            # "httpx". The signed evidence_ref is unchanged; only the human-facing labels are corrected.
+            _cls = _confirmed_class(str(evidence_ref), analysis)
+            if _cls:
+                exploit.bug_class = _cls
+                exploit.title = f"{_cls} — oracle-confirmed exploit"
+                exploit.ref = f"exploit:{_cls}"
             facts.append(exploit)
         else:
             exploit.status = "lead"

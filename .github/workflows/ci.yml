@@ -384,6 +384,8 @@ jobs:
               --ignore=integration/tests/test_sbom.py \
               --ignore=integration/tests/test_web_redrive.py \
               --ignore=integration/tests/test_web_redrive_proof_sink.py \
+              --ignore=integration/tests/test_engine_web_redrive_seam.py \
+              --ignore=integration/tests/test_engine_runtime_redrive_seam.py \
               --ignore=integration/tests/test_typed_outcomes.py \
               --ignore=integration/tests/test_engine_live.py \
               --ignore=integration/tests/test_engine_terminal.py \
@@ -478,6 +480,8 @@ jobs:
               integration/tests/test_sbom.py \
               integration/tests/test_web_redrive.py \
               integration/tests/test_web_redrive_proof_sink.py \
+              integration/tests/test_engine_web_redrive_seam.py \
+              integration/tests/test_engine_runtime_redrive_seam.py \
               integration/tests/test_release_gate_deceptive_tool.py \
               integration/tests/test_release_gate_false_fact.py \
               integration/tests/test_release_gate_offline_replay.py \
@@ -573,6 +577,11 @@ jobs:
               integration/tests/test_panic.py \
               integration/tests/test_sovereign_bridge_offense.py \
               integration/tests/test_restricted_mode_offense.py \
+              integration/tests/test_per_run_cancel_isolation.py \
+              integration/tests/test_offense_pending_count.py \
+              integration/tests/test_report_from_progress.py \
+              integration/tests/test_enh2_unique_slug.py \
+              integration/tests/test_loopback_charter.py \
               integration/tests/test_mesh_cicd_posture.py -q
           else
             # STRICT branch protection ⇒ a mergeable PR is up to date with main and this committed

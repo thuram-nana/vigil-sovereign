@@ -154,7 +154,12 @@ def finding_from_spine(*, base_dir: str, slug: str, target_repo: str, finding_re
         raise TrustedFindingError(
             f"{spine_path} FAILED integrity verification — refusing to patch from a tampered spine (fail-closed)")
 
-    state = spine.rebuild(engagement=slug)
+    # F2b (finding #3): the run-state spine is now partitioned by RUN (run_key), not the bare slug, so an
+    # engagement=slug read would find NO records (they carry the run_id tag) and wrongly report "no confirmed
+    # facts". Read with engagement=None → the global-latest snapshot in this per-slug {slug}.spine file.
+    # Behaviour-preserving: the file is per-slug and rebuild returns a single global-latest, never a union —
+    # exactly what the old slug read returned when every record was slug-tagged.
+    state = spine.rebuild()
     facts = [f for f in getattr(state, "facts", [])
              if str(getattr(f, "status", "")) == "fact" and str(getattr(f, "evidence_ref", "") or "").strip()]
     if not facts:

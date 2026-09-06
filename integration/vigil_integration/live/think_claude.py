@@ -66,7 +66,12 @@ from ..tools import redact_tool_args
 logger = logging.getLogger("vigil.live.think_claude")
 
 # The think step is a decision-shaped call; correctness matters more than cost → default to Opus.
-DEFAULT_MODEL = "claude-opus-5"
+DEFAULT_MODEL = "claude-opus-4-8"
+# AUTO-FALLBACK target (owner ask): when the chosen/current model returns NO usable decision — a refusal
+# comes back as EMPTY text, and garbage/oversized output also lands on the fail-closed ASK_USER pause — the
+# live think step retries ONCE on this model and SAYS SO in the decision rationale. Model-specific only:
+# never for a transport/auth error (the same client/key would fail again), and never a model → itself.
+_FALLBACK_MODEL = "claude-opus-4-8"
 DEFAULT_MAX_TOKENS = 4096
 
 # The env vars the Settings model picker writes (see apps/sigil/.../ui/settings.py). Reading them here is
@@ -464,10 +469,74 @@ Respond with one JSON object with an "action" field, one of:
     "informational" | "exploitation" | "post_exploitation".
   - "deploy_fireteam": spawn specialists. Include "fireteam": [ <member objects> ].
   - "switch_skill": change playbook. Include "skill": str.
-  - "ask_user": pause for a human. Include "question": str.
+  - "ask_user": pause for a human. Include "question": str, and OPTIONALLY "options": [str, ...] — a short
+    list of suggested answers the operator can pick with one click (they can always type their own instead).
+    Use options when the answer is a choice (which target / which approach / yes-no-with-a-reason).
   - "complete": end the engagement. Include "summary": str.
 You may also include "reasoning": str and an "output_analysis" object with your CLAIMS about the prior
 tool output (exploit_succeeded, verdict, findings[]). Those claims are LEADS only — never facts.
+
+When a prior tool result REVEALS a vulnerability VIGIL can INDEPENDENTLY RE-VERIFY, set
+exploit_succeeded=true AND fill "extracted_info" with the "bug_class" so VIGIL's oracle RE-DRIVES the
+endpoint and mints the FACT over FRESH target bytes (your claim alone never mints — the re-drive is what
+confirms). Keep the SAME use_tool decision's tool_args pointed at the vulnerable endpoint URL
+(scheme://host:port/path); VIGIL re-drives THAT endpoint. These re-drives are NON-DESTRUCTIVE — they need
+NO destructive tool and NO second tool call, so do this on the SAME step the recon response revealed it,
+rather than proposing another tool.
+
+IMPORTANT — you do NOT receive the raw tool response (secret-safety keeps target bytes out of this
+prompt). Decide from the REQUEST you sent, not from a response you cannot see. When you probe an endpoint
+whose SHAPE matches a re-verifiable class below, set exploit_succeeded=true + extracted_info.bug_class on
+THAT SAME use_tool step. VIGIL's deterministic oracle then RE-DRIVES the endpoint itself and mints ONLY if
+it truly reproduces over fresh bytes — so a wrong guess COSTS NOTHING (it stays a LEAD, never a false FACT).
+Therefore: claim it on the FIRST probe of a matching endpoint; never wait to "see" the response, and never
+re-run the same probe hoping to observe more.
+
+Re-verifiable "bug_class" values — match on the endpoint/payload you PROBED:
+  - "open_redirect" — the endpoint takes a redirect parameter (next/url/redirect/return/dest/continue) and
+    you pointed it at an off-site host. (JUST set bug_class + keep tool_args on that URL.)
+  - "path_traversal" — a file/download/path/include parameter you fed a traversal payload (../../etc/passwd).
+  - "exposure" — a secret/config path you requested (/.env, /actuator/env, /.git/config).
+  - "cors" — an API endpoint you probed for cross-origin credentialed reads.
+  - "host_header_injection" — an endpoint you probed with a hostile Host header.
+  - "graphql_introspection" — a GraphQL endpoint (/graphql) you probed for schema introspection.
+  - "xss" — a parameter you injected an HTML/script canary into (search/q/ref/comment/name).
+  - "error_based_sqli" — a parameter you injected a SQL quote/payload into. ALSO give "insertion_point"
+    (the parameter name, e.g. q) and "request_payload" (the exact payload, e.g. ').
+For every class EXCEPT error_based_sqli, JUST set bug_class and keep tool_args on the endpoint URL — VIGIL
+crafts and injects its OWN canary/probe and the deterministic oracle judges the fresh bytes:
+  "output_analysis": {{"exploit_succeeded": true, "extracted_info": {{"bug_class": "path_traversal"}}}}
+For error_based_sqli include insertion_point + request_payload:
+  "output_analysis": {{"exploit_succeeded": true, "extracted_info": {{
+     "bug_class": "error_based_sqli",
+     "insertion_point": "<parameter name, e.g. q>",
+     "request_payload": "<the payload that triggered the DB error, e.g. '>" }}}}
+This is the non-destructive path to a confirmed FACT; it needs no destructive tool.
+
+For "use_tool", tool_name MUST be EXACTLY one of these REGISTERED tools — any other name is refused by the
+executor ("no argv builder"), so never invent names like "http_get"/"http_request":
+  - "httpx"   — HTTP probe + fingerprint (status, headers, tech). USE THIS for the FIRST recon of a web target.
+  - "nmap"    — port + service/version scan.
+  - "nuclei"  — templated vulnerability scan.
+  - "ffuf"    — content/path fuzzing (routes, hidden endpoints).
+  - "sqlmap"  — SQL injection.
+  - "nikto"   — web-server misconfiguration scan.
+  - "wapiti"  — web-app scan (XSS / SQLi / etc.).
+  - "zaproxy" — ZAP active web scan.
+  - "hydra"   — credential brute-force.
+Put the target in tool_args (e.g. {{"url": "http://host:port/"}} or {{"target": "host"}}). ALWAYS use the
+host:port from the "target" line in the header above — NEVER build a URL from the engagement name (it is a
+label, not a hostname); a tool call to any host outside the authorized scope is refused before it runs.
+
+COMPLETE when the objective is met — do not keep going. If VIGIL's oracle has already CONFIRMED the
+finding(s) your objective asked for (the header shows "confirmed_facts", and the Recent-actions block marks
+an action "outcome=ran (oracle confirmed N fact(s))"), choose "complete" now with a "summary" of what was
+confirmed. One confirmed FACT that satisfies the objective is success; stop there unless the objective
+EXPLICITLY asks for more. NEVER re-propose the SAME tool call two turns running: an action marked
+"outcome=refused: awaiting ... approval" will stay refused until the operator signs it (re-proposing only
+floods them with duplicate prompts — instead COMPLETE, or propose a DIFFERENT action), and an action already
+marked "oracle confirmed" needs no re-run. If nothing new can advance the objective, "complete" (or
+"ask_user" if a human decision is genuinely needed) — never spin on a settled action.
 
 Prefer the least-invasive action that advances the objective. If you are unsure or the context is
 insufficient, choose "ask_user". Emit ONLY the JSON object.
@@ -515,7 +584,23 @@ def _recent_actions_digest(state: object) -> str:
             red = redact_tool_args(args) if isinstance(args, dict) else {}
         except Exception:  # noqa: BLE001 — redaction must never crash; drop the args instead
             red = {}
-        lines.append(wrap_untrusted_inline(f"tool={tool} args={red}", label="PRIOR_ACTION"))
+        # OUTCOME so the model does not blindly RE-PROPOSE an action that already RAN (and confirmed a
+        # fact) or was REFUSED pending the operator's signature — re-proposing a refused action changes
+        # nothing and floods the operator with duplicate approvals. outcome/reason are engine-set (the
+        # conjunctive gate's / executor's own verdict), not attacker-influenced.
+        _oc = str(entry.get("outcome") or "")
+        _rsn = str(entry.get("reason") or "")
+        if _oc == "ran":
+            _nf = entry.get("facts")
+            tail = " outcome=ran" + (f" (oracle confirmed {_nf} fact(s) — do NOT re-run this)" if _nf else "")
+        elif _oc == "deny":
+            tail = (" outcome=refused: awaiting your operator's signed approval — re-proposing will NOT "
+                    "change this; COMPLETE or choose a DIFFERENT action"
+                    if "approval" in _rsn.lower()
+                    else " outcome=refused (" + _rsn[:80] + ")")
+        else:
+            tail = (" outcome=" + _oc) if _oc else ""
+        lines.append(wrap_untrusted_inline(f"tool={tool} args={red}{tail}", label="PRIOR_ACTION"))
     return "\n".join(lines)
 
 
@@ -525,6 +610,7 @@ def _build_messages(state: object, prompt_ctx: object) -> tuple[str, str]:
     Never raises: a broken ``state`` degrades to a minimal-but-valid prompt."""
     slug = str(getattr(state, "engagement_slug", "") or "")[:200]
     objective = str(getattr(state, "objective", "") or "")[:2000]
+    target = str(getattr(state, "target", "") or "")[:500]
     phase = getattr(getattr(state, "phase", None), "value", None) or str(getattr(state, "phase", ""))
     iteration = getattr(state, "iteration", 0)
     try:
@@ -536,7 +622,9 @@ def _build_messages(state: object, prompt_ctx: object) -> tuple[str, str]:
     header = (
         "Decide the next action for this engagement.\n"
         f"engagement: {slug}\n"
-        f"phase: {phase}\n"
+        + (f"target (the authoritative in-scope URL — aim EVERY tool call at THIS host:port; the\n"
+           f"  engagement name above is NOT a hostname): {target}\n" if target else "")
+        + f"phase: {phase}\n"
         f"iteration: {iteration}\n"
         f"confirmed_facts: {n_facts}\n"
         f"open_leads: {n_leads}\n"
@@ -686,6 +774,16 @@ def _invoke_with_backoff(client: Any, params: dict) -> Any:
         raise last
 
 
+def _no_usable_decision(decision: LLMDecision) -> bool:
+    """True when ``parse_decision`` could extract NO decision from the model — the fail-closed ASK_USER
+    default (a REFUSAL returns empty text; garbage / oversized output also land here). This is
+    MODEL-SPECIFIC (a different model may not decline), so it is worth ONE fallback to ``_FALLBACK_MODEL``.
+    A model that DELIBERATELY chose ask_user (carrying its OWN question) is NOT this and never falls back."""
+    from ..agent.react import _FAILCLOSED_DEFAULT
+    return (decision.action == _FAILCLOSED_DEFAULT.action
+            and (decision.reasoning or "") == _FAILCLOSED_DEFAULT.reasoning)
+
+
 def _think_via_client(client: Any, system: str, user: str, *, model: str, max_tokens: int) -> LLMDecision:
     """One live think call through an injected/real client, fail-closed on ANY error. Current-generation
     models get adaptive extended thinking (``thinking: {type: "adaptive"}``) and the effort chosen in the UI;
@@ -727,6 +825,15 @@ def _think_via_client(client: Any, system: str, user: str, *, model: str, max_to
     if len(text) > _MAX_RESPONSE_CHARS:  # bound hostile oversized output before the parser sees it
         text = text[:_MAX_RESPONSE_CHARS]
     decision = parse_decision(text)
+    if _no_usable_decision(decision) and model != _FALLBACK_MODEL:
+        logger.warning("live think: model %r returned no usable decision (refusal/empty/unparseable) — "
+                       "falling back once to %r", model, _FALLBACK_MODEL)
+        fb = _think_via_client(client, system, user, model=_FALLBACK_MODEL, max_tokens=max_tokens)
+        if not _no_usable_decision(fb) and not getattr(fb, "error_class", None):
+            note = (f"[model fallback: '{model}' returned no usable decision (it likely declined the "
+                    f"request); reasoning continued on '{_FALLBACK_MODEL}'.] ")
+            return fb.model_copy(update={"reasoning": (note + (fb.reasoning or "")).strip()})
+        return decision  # the fallback ALSO failed → keep the original fail-closed human pause
     logger.debug("live think decision: action=%s", decision.action.value)
     return decision
 

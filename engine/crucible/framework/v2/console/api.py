@@ -65,9 +65,16 @@ def status_data() -> dict[str, Any]:
         # showed as 0). Read-only + total; same import-clean broker path api.approvals() uses. Base-wide
         # (approvals are keyed under VIGIL_BASE_DIR, not per-engagement), matching api.approvals().
         try:
-            from vigil_integration.live.approval_broker import approvals_root, list_pending
+            import os  # local import: `os` is NOT module-level in this file, so a bare `os.environ` ref
+                       # below raised NameError that the broad except silently turned into 0 — the offense
+                       # pending count read 0 forever (the exact "showed as 0" bug this counter was added to
+                       # fix). Mirrors the sibling api.approvals(), which already imports os locally.
+            from vigil_integration.live.approval_broker import (approvals_root, list_pending,
+                                                                 signed_request_ids)
             base = os.environ.get("VIGIL_BASE_DIR") or ".vigil-live"
-            return len(list_pending(approvals_root(base)))
+            root = approvals_root(base)
+            signed = signed_request_ids(root)   # already-approved requests are no longer "waiting for you"
+            return len([p for p in list_pending(root) if p.request_id not in signed])
         except Exception:  # noqa: BLE001 — a count is best-effort; never break /api/status
             return 0
 
@@ -371,6 +378,10 @@ def list_runs(slug: str = "") -> dict[str, Any]:
                 # carries a short reason so the UI can say WHAT failed, not just "error".
                 "run_kind": meta.get("run_kind", meta.get("mode", "")),
                 "resumable": bool(meta.get("resumable", False)),
+                # Wave 7: a run that exited 0 but PAUSED carries the resumable pause reason
+                # (awaiting_approval / anti-spin / ask_user / plan-only) so the UI shows an honest Paused
+                # state + Resume affordance instead of a false "Done".
+                "paused": str(meta.get("paused", "") or ""),
                 "interrupted_reason": meta.get("interrupted_reason", ""),
                 "rc": meta.get("rc"),
                 "error": str(meta.get("error", "") or "")[:500],
@@ -550,27 +561,97 @@ def approvals(slug: str = "") -> dict[str, Any]:
     def _read() -> list[dict[str, Any]]:
         # approval_broker is import-clean (vigil_core + stdlib only) — safe to import in the offense plane
         # (unlike the rest of vigil_integration, which is FATAL-2 to import here). It holds NO private key.
-        from vigil_integration.live.approval_broker import approvals_root, list_pending
+        from vigil_integration.live.approval_broker import (approvals_root, list_pending,
+                                                                 signed_request_ids)
+        root = approvals_root(base)
+        # A request that already carries a SIGNED token has been APPROVED — it is no longer awaiting your
+        # signature, so exclude it. Without this the UI kept showing the "needs approval" card AFTER the
+        # operator approved (the pending file lingers on disk until the run consumes the token).
+        signed = signed_request_ids(root)
         return [{"request_id": p.request_id, "tool_name": p.tool_name, "target": p.target,
                  "action_digest": p.action_digest, "nonce": p.nonce, "args_preview": p.args_preview,
-                 "created_at_iso": p.created_at_iso} for p in list_pending(approvals_root(base))]
+                 "created_at_iso": p.created_at_iso}
+                for p in list_pending(root) if p.request_id not in signed]
 
     pending = _safe(_read, default=[]) or []
     return {"ok": True, "slug": str(slug or ""), "base_dir": base, "pending": pending}
 
 
+def _findings_from_progress(run_dir: Any) -> list[dict[str, Any]]:
+    """Recover a run's findings from its ``progress.jsonl`` stream (the offense reasoning spine mirror) —
+    the source of truth for an INTEGRATION `vigil engage` (chat-launched), which is spawned with
+    ``capture_report=False`` and so never writes a ``report.json``. Each ``kind=="finding"`` event is mapped
+    to the same finding shape the Findings screen renders, marking a FACT (``verified_by_oracle``) vs a LEAD.
+    Console-safe: reads a local file only, no imports. Deduped by (title, location, grounding). Total."""
+    from pathlib import Path
+    prog = Path(run_dir) / "progress.jsonl"
+    out: list[dict[str, Any]] = []
+    try:
+        text = prog.read_text(encoding="utf-8")
+    except OSError:
+        return []
+    for line in text.splitlines():
+        rec = _safe(lambda l=line: json.loads(l), default=None)
+        if not isinstance(rec, dict) or rec.get("kind") != "finding":
+            continue
+        pl = rec.get("payload") or {}
+        fact = bool(pl.get("verified_by_oracle"))
+        out.append({
+            "title": pl.get("title") or pl.get("summary") or pl.get("bug_class") or "finding",
+            # the CONFIRMED bug class, never the tool that surfaced it — no fall back to `surface`
+            # (that displayed "httpx" as the bug class before the finding carried its real class).
+            "bug_class": pl.get("bug_class") or "",
+            "severity": pl.get("severity") or ("High" if fact else "Info"),
+            "confidence": "Certain" if fact else "Tentative",
+            # a FACT is confirmed by the deterministic ORACLE (its re-drive), not by the recon tool; a LEAD
+            # is attributed to the surface/tool that proposed it.
+            "confirmed_by": ("oracle" if fact else "") or pl.get("surface") or "",
+            "verified_by_oracle": fact,
+            "grounding": "fact" if fact else "lead",
+            "kind": "finding",
+            "location": pl.get("target") or pl.get("host") or "",
+            "evidence": pl.get("summary") or pl.get("ref") or "",
+            "re_verifiable": fact,
+            "references": [],
+            "remediation": "",
+            "ref": pl.get("ref") or "",
+        })
+    seen, dedup = set(), []
+    for f in out:
+        k = (f["title"], f["location"], f["grounding"])
+        if k in seen:
+            continue
+        seen.add(k)
+        dedup.append(f)
+    return dedup
+
+
 def run_report(run_id: str) -> dict[str, Any]:
     """The saved `build_report` document for a console run (findings + attack_paths +
-    summary), or an error marker if it has not finished yet."""
+    summary), or an error marker if it has not finished yet. When there is no rendered ``report.json`` (an
+    INTEGRATION chat-launched `vigil engage`, spawned capture_report=False), fall back to the run's
+    ``progress.jsonl`` so its oracle-confirmed FACTs still appear on the Findings screen (fixing the
+    'Findings screen is empty for chat runs' limitation)."""
     from . import actions
 
     rep = actions.run_dir(run_id) / "report.json"
     doc = _safe(lambda: json.loads(rep.read_text(encoding="utf-8")), default=None)
-    if doc is None:
-        meta = _safe(lambda: json.loads((actions.run_dir(run_id) / "meta.json").read_text(encoding="utf-8")), default={})
-        return {"run_id": run_id, "pending": True, "status": meta.get("status", "unknown")}
-    doc["run_id"] = run_id
-    return doc
+    if doc is not None:
+        doc["run_id"] = run_id
+        return doc
+
+    meta = _safe(lambda: json.loads((actions.run_dir(run_id) / "meta.json").read_text(encoding="utf-8")), default={})
+    findings = _findings_from_progress(actions.run_dir(run_id))
+    status = str(meta.get("status", "unknown"))
+    # Still nothing AND still going ⇒ genuinely pending. Otherwise return what the stream produced (possibly
+    # an empty list for a finished run that found nothing — the screen then honestly shows "no findings").
+    if not findings and status == "running":
+        return {"run_id": run_id, "pending": True, "status": status}
+    facts = sum(1 for f in findings if f.get("verified_by_oracle"))
+    return {"run_id": run_id, "status": status, "source": "progress-stream",
+            "target": meta.get("target", ""), "tool": meta.get("engine", "integration"),
+            "findings": findings, "attack_paths": [], "discovered_endpoints": [],
+            "summary": {"findings": len(findings), "facts": facts, "leads": len(findings) - facts}}
 
 
 def _no_send(_request):  # pragma: no cover - chaining is pure reasoning, never sends

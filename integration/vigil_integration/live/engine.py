@@ -37,6 +37,7 @@ Import-clean: pydantic + stdlib + the already-import-clean sibling modules; heav
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import json
 from typing import Any, Callable, Optional
 from urllib.parse import urlsplit
 
@@ -46,6 +47,7 @@ from ..agent.react import apply_intake, authorize_edge, intake_result
 from ..agent.state import ActionType, AgentState, Finding, LLMDecision, Phase
 from ..agent.targets import extract_target
 from .tool_intake import analysis_from_tool_output
+from .approval_token import APPROVAL_REJECTED_REASON, APPROVAL_REJECTED_PAUSE
 
 # The governed LOCAL terminal tool name (mirrors executor._TERMINAL_TOOL — kept as a local literal so engine
 # imports nothing from executor). A terminal command inspects HOST state; its output is advisory, never
@@ -110,6 +112,54 @@ PersistSpineFn = Callable[[], None]
 SpinePostFn = Callable[..., Optional[int]]
 
 _GENESIS = "0" * 64
+# Display cap (chars) for the REDACTED command-output excerpt carried on a tool_result spine event so the UI
+# can render a real tool-call card. Bounds the event size; the full redacted output stays in the signed record.
+_CARD_EXCERPT_CAP = 4000
+# Anti-spin backstop (finding #1 follow-up): end a run that re-proposes the IDENTICAL use_tool action every
+# turn. The (this-many + 1)'th consecutive identical proposal ends the run with COMPLETE — the first
+# proposal's fate (ran+confirmed, or refused pending approval) is already settled, so re-proposing changes
+# nothing, floods the operator with duplicate approvals, and burns iterations. ONLY identical repeats trip
+# it; varied exploration never does. The think prompt already tells a well-behaved agent to COMPLETE after
+# its objective FACT is confirmed — this is the deterministic guard for when it does not.
+_MAX_IDENTICAL_REPROPOSALS = 2
+
+
+def _is_awaiting_approval_denial(reason: str) -> bool:
+    """True when an executor deny is really the WARDEN QUEUE condition — an in-envelope action that just
+    needs a SIGNED owner approval (the pending is already published by the approval binding) — as opposed to
+    a HARD deny (out of scope / kill-switch / bad host). Used to PAUSE the run resumably at awaiting_approval
+    instead of letting the model re-propose the same action into anti-spin while the signature is in flight."""
+    r = (reason or "").lower()
+    return ("needs owner approval" in r) or ("requires owner approval" in r)
+
+
+def _is_rejected_approval_denial(reason: str) -> bool:
+    """True when an executor deny is the "the operator DID approve, but the approval can no longer be spent"
+    condition — a token was FOUND + bound to this action but ``consume_token`` REJECTED it (expired past its
+    window / already single-use-spent / otherwise invalid). Set by the M2 gate as a FIXED
+    ``APPROVAL_REJECTED_REASON`` phrase (spaces → never spoofable by an echoed host). DISTINCT from :func:`_is_awaiting_approval_denial` (no approval yet):
+    both PAUSE resumably, but this one tells the operator to APPROVE AGAIN rather than showing the same
+    "awaiting your first approval" that reads as an invisible loop. The engine checks THIS matcher BEFORE the
+    awaiting one — that ordering (not string-disjointness) makes the label deterministic even if a consume
+    reason happened to also contain "owner approval"."""
+    return APPROVAL_REJECTED_REASON in (reason or "").lower()
+
+
+def _action_signature(tool: Any) -> str:
+    """A stable (tool_name, canonical args) signature for anti-spin repeat detection. json.dumps with
+    sort_keys recurses into NESTED dicts (so insertion order can never make two identical actions look
+    different and defeat the guard); default=str tolerates odd values. tool_name is length-prefixed so the
+    name/args boundary can never collide two different actions. Empty on a missing/broken tool."""
+    try:
+        name = str(getattr(tool, "tool_name", "") or "")
+        args = getattr(tool, "tool_args", None)
+        try:
+            argrepr = json.dumps(args, sort_keys=True, default=str, ensure_ascii=False)
+        except Exception:  # noqa: BLE001 — a non-serialisable arg still gets a stable-enough fallback
+            argrepr = repr(args)
+        return f"{len(name)}:{name}|{argrepr}"
+    except Exception:  # noqa: BLE001 — a hostile tool object must not crash the loop
+        return ""
 
 
 @dataclass(frozen=True)
@@ -178,7 +228,7 @@ class RunReport(BaseModel):
     detection_facts: int = 0
     detection_leads: int = 0
     checkpoints: list[str] = Field(default_factory=list)
-    paused: str = ""                       # "" | "ask_user" | "awaiting_approval"
+    paused: str = ""                       # "" | "ask_user" | "awaiting_approval" | "approval_rejected"
     done: bool = False
     resumed: bool = False                  # True iff this run CONTINUED a prior checkpointed state (W2b)
 
@@ -243,7 +293,8 @@ class VigilEngine:
         # crash AFTER a tool ran but BEFORE its checkpoint resumes at that iteration and RE-RUNS its tool.
         # Every re-run still re-gates + re-confirms through the oracle (no auth bypass), but an offense tool
         # CAN re-fire on resume — resume is at-least-once, not exactly-once. A COMPLETED run is a no-op.
-        state = AgentState(engagement_slug=self.slug, objective=objective, phase=Phase.INFORMATIONAL)
+        state = AgentState(engagement_slug=self.slug, objective=objective, phase=Phase.INFORMATIONAL,
+                           target=str(seed_url or ""))
         seq = 1
         start_it = 0
         if resume and self.seams.rebuild is not None:
@@ -262,6 +313,7 @@ class VigilEngine:
             if has_progress and hs >= 1:                    # real state AND a real seq to continue past
                 state = prior
                 state.engagement_slug = self.slug          # identity/objective stay authoritative
+                state.target = str(seed_url or "")         # the authoritative in-scope target for this run
                 if objective:
                     state.objective = objective
                 report.resumed = True
@@ -275,6 +327,11 @@ class VigilEngine:
                     start_it = int(getattr(prior, "iteration", 0) or 0) + 1
                     report.iterations = start_it
 
+        # anti-spin repeat tracking (finding #1): the last USE_TOOL signature + its consecutive-repeat count,
+        # and the set of signatures that already RAN this engagement (so a re-proposal of a completed action is
+        # skipped rather than re-sent to the executor — where its spent single-use approval would surface a
+        # scary "refused by executor" for an action that in fact already succeeded).
+        last_tool_sig, tool_repeat, ran_sigs = "", 0, set()
         for it in range(start_it, self.max_iterations):
             state.iteration = it
             report.iterations = it + 1
@@ -292,6 +349,54 @@ class VigilEngine:
                 report.paused = "plan-only"
                 state.done = True
                 break
+
+            # DEDUPE (operator ask): the agent sometimes RE-PROPOSES a tool it already ran this engagement.
+            # Re-running it needs a fresh single-use approval it does not have, so the executor would deny it
+            # and the operator would see "refused by executor" for an action that ALREADY SUCCEEDED. Its
+            # result stands, so SKIP the duplicate — a benign note, NEVER a refusal, never a second execution,
+            # never a second approval prompt. A DIFFERENT action (different tool/target/args) is not a dupe.
+            if (decision.action == ActionType.USE_TOOL and decision.tool is not None
+                    and _action_signature(decision.tool) in ran_sigs):
+                report.decisions[-1] = "skip(already-ran)"
+                self._spine_post("observation", {"source": "dedupe",
+                    "summary": ("skipped a re-proposal of a tool that already ran this engagement — its result "
+                                "stands, so it is not re-run (and never shows as refused).")})
+                state.execution_trace.append({"iteration": it, "action": "use_tool",
+                    "tool": (decision.tool.tool_name if decision.tool else ""), "outcome": "skipped",
+                    "reason": "already ran this engagement — duplicate skipped"})
+                self._checkpoint(state, seq, report)
+                seq += 1
+                continue
+
+            # ANTI-SPIN (finding #1): stop a run that keeps re-proposing the IDENTICAL use_tool action on
+            # consecutive turns WITHOUT making progress. A successful run RESETS the counter (see the run
+            # branches below), so only a signature that repeats while NOT advancing — the same tool refused
+            # (executor deny / gate deny, e.g. an >=A2 tool with no signed token) or re-proposed after already
+            # running — accumulates. On the (cap+1)'th such repeat the run STOPS as PAUSED "anti-spin": it is
+            # deliberately NOT marked done (a give-up is not an objective-met COMPLETE), so a consumer can tell
+            # them apart and the run stays RESUMABLE (approve the pending action, then resume). SCOPE, honestly:
+            # this is a WITHIN-RUN, per-`engage()` counter — it declutters the process view and stops burning
+            # iterations; it does NOT dedupe approval prompts ACROSS resumes, and an ALTERNATING two-action
+            # cycle (A,B,A,B…) resets it every turn and is bounded only by max_iterations. It can only STOP a
+            # run early — never run a tool, never touch the gate / oracle / scope.
+            if decision.action == ActionType.USE_TOOL and decision.tool is not None:
+                _sig = _action_signature(decision.tool)
+                if _sig and _sig == last_tool_sig:
+                    tool_repeat += 1
+                else:
+                    last_tool_sig, tool_repeat = _sig, 0
+                if tool_repeat >= _MAX_IDENTICAL_REPROPOSALS:
+                    report.decisions[-1] = "stopped(anti-spin)"
+                    self._spine_post("observation", {
+                        "source": "anti-spin",
+                        "summary": (f"stopped: the agent re-proposed the identical action {tool_repeat + 1} "
+                                    f"turns running without progress; {len(report.facts)} fact(s) confirmed. "
+                                    "Re-proposing a settled action (already run, or refused with no new "
+                                    "approval) advances nothing — stopping to save iterations. Resumable.")})
+                    report.paused = "anti-spin"
+                    break
+            else:
+                last_tool_sig, tool_repeat = "", 0
 
             # W6b — a classified BACKEND-CALL failure the think seam fail-closed over (network / api /
             # api_transient) is mirrored to the spine as an OBSERVATION so the operator's process box shows
@@ -316,7 +421,11 @@ class VigilEngine:
                 # mirror writes the full payload — so the console can surface this question as a chat bubble
                 # the operator actually answers (without it, an ask_user pause looks like an empty run).
                 "agent_question": (str(decision.question or "")
-                                   if decision.action == ActionType.ASK_USER else "")})
+                                   if decision.action == ActionType.ASK_USER else ""),
+                # S2: the agent's suggested answers (click-to-pick + "Other → type your own"), carried so the
+                # console can render option buttons on the chat question bubble. Advisory; authorises nothing.
+                "agent_question_options": ([str(o) for o in (decision.question_options or [])][:12]
+                                           if decision.action == ActionType.ASK_USER else [])})
             if decision.action == ActionType.USE_TOOL and decision.tool is not None:
                 _oa = decision.output_analysis
                 _info = getattr(_oa, "extracted_info", {}) if _oa is not None else {}
@@ -395,11 +504,32 @@ class VigilEngine:
             # T3b — record the tool OUTCOME (a provenance-labelled observation, never a fact), linked to its
             # tool_call. Covers BOTH the ran and the refused/errored branch below with one post point.
             _ran = bool(getattr(exec_res, "ran", False))
-            self._spine_post("tool_result", {
+            _tr_payload = {
                 "tool": (getattr(exec_res, "tool", "") or (decision.tool.tool_name if decision.tool else "")),
                 "ok": _ran, "refused": not _ran, "gate": "" if _ran else "executor",
                 "summary": str(getattr(exec_res, "outcome", "") or ""),
-                "note": "" if _ran else str(getattr(exec_res, "reason", "") or "")}, parent_id=_tc_id)
+                "note": "" if _ran else str(getattr(exec_res, "reason", "") or "")}
+            # Richer tool-call card (W-UX5): surface the REDACTED command + a capped, ALREADY-redacted output
+            # excerpt + exit/timing so the UI can render a real command/output card. SECRET-SAFE by
+            # construction: `argv` and `record.stdout/stderr` are the executor's F3-redacted fields (built via
+            # `_redact_str` in `_build_record`) — the RAW `exec_res.stdout` is NEVER put on the spine. Bounded
+            # to _CARD_EXCERPT_CAP for the event; the full redacted output stays in the signed ExecRecord.
+            if _ran:
+                _rec = getattr(exec_res, "record", None)
+                _out = str(getattr(_rec, "stdout", "") or "")
+                _err = str(getattr(_rec, "stderr", "") or "")
+                _argv = list(getattr(_rec, "argv", None) or getattr(exec_res, "argv", ()) or [])
+                _tr_payload.update({
+                    "argv": [str(a) for a in _argv],                 # REDACTED command (F3 vocabulary + secret positions masked)
+                    "exit_code": getattr(exec_res, "exit_code", None),
+                    "timed_out": bool(getattr(exec_res, "timed_out", False)),
+                    "truncated": bool(getattr(exec_res, "truncated", False)),
+                    "output_bytes": len(str(getattr(exec_res, "stdout", "") or "")),
+                    "output_excerpt": _out[:_CARD_EXCERPT_CAP],       # REDACTED (record.stdout is _redact_str'd)
+                    "output_excerpt_truncated": len(_out) > _CARD_EXCERPT_CAP,
+                    "stderr_excerpt": _err[:_CARD_EXCERPT_CAP],
+                })
+            self._spine_post("tool_result", _tr_payload, parent_id=_tc_id)
             if not getattr(exec_res, "ran", False):
                 report.denied_edges.append(getattr(exec_res, "reason", "tool call not run"))
                 self._spine_post("refusal", {                # T3b — the executor's fail-closed deny as evidence
@@ -412,7 +542,40 @@ class VigilEngine:
                 self._emit(getattr(exec_res, "record", None))
                 self._checkpoint(state, seq, report)
                 seq += 1
+                # AWAITING-APPROVAL PAUSE: when the executor denied specifically because the action needs a
+                # SIGNED owner approval (a QUEUE condition — in-envelope, pending already published by the
+                # approval binding), PAUSE the run RESUMABLY at awaiting_approval instead of letting the model
+                # re-propose the identical action into anti-spin. The operator signs it and RESUMES; on resume
+                # the token exists and the executor allows it. Without this, approve-then-continue dies on
+                # anti-spin right as the signature lands (the pre-approval denials had already accumulated).
+                # REJECTED-FIRST ordering (load-bearing): a token was FOUND + bound but consume REJECTED it
+                # (expired / already-spent). Distinct from "no approval yet" so the operator is told to
+                # APPROVE AGAIN, not shown the same "awaiting your first approval" invisible loop. Checked
+                # BEFORE the awaiting matcher because a consume reject reason could also contain the WARDEN
+                # "requires owner approval" phrase — the ORDER, not string-disjointness, decides the label.
+                _dr = str(getattr(exec_res, "reason", "") or "")
+                if _is_rejected_approval_denial(_dr):
+                    report.queued_edges.append(_dr or "approval rejected")
+                    report.paused = APPROVAL_REJECTED_PAUSE
+                    state.awaiting_approval = True
+                    break
+                if _is_awaiting_approval_denial(_dr):
+                    report.queued_edges.append(_dr or "awaiting approval")
+                    report.paused = "awaiting_approval"
+                    state.awaiting_approval = True
+                    break
                 continue
+
+            # ANTI-SPIN RESET (finding #1, part B): the tool RAN this turn — that is progress, so clear the
+            # repeat counter. Only NON-advancing identical repeats (a tool refused / re-proposed without
+            # running) accumulate toward the stop, so a legitimate poll or a transient-error retry that
+            # actually runs is never force-completed. Also record the RAN signature so a later re-proposal of
+            # the exact same action is SKIPPED (dedupe above) instead of re-denied as "refused by executor".
+            last_tool_sig, tool_repeat = "", 0
+            if decision.action == ActionType.USE_TOOL and decision.tool is not None:
+                _rs = _action_signature(decision.tool)
+                if _rs:
+                    ran_sigs.add(_rs)
 
             # T3 — a governed LOCAL terminal command inspects HOST state (a file, a process, uname): its output
             # is NOT target-produced evidence, so it is ADVISORY ONLY and must NEVER enter oracle intake — a
@@ -479,11 +642,15 @@ class VigilEngine:
             # T3b — the ORACLE INTAKE result on the spine: each oracle-confirmed FACT as a finding event
             # (linked to the raw observation), each LEAD as a labelled observation (never a finding — only a
             # fired oracle mints a fact, mirrored honestly here).
+            _ftarget = extract_target(getattr(decision.tool, "tool_args", None)) if decision.tool else ""
             for _f in intake.facts:
                 self._spine_post("finding", {
                     "ref": getattr(_f, "ref", ""), "title": getattr(_f, "title", ""),
                     "severity": getattr(_f, "severity", ""), "bug_class": getattr(_f, "bug_class", ""),
                     "surface": getattr(_f, "source", ""), "summary": getattr(_f, "title", ""),
+                    # the endpoint the FACT was confirmed against, so the Findings screen shows a location
+                    # instead of a blank (the surface stays the tool that surfaced it).
+                    "target": _ftarget,
                     "status": "fact", "verified_by_oracle": True}, parent_id=_obs_id)
             for _ld in intake.leads:
                 self._spine_post("observation", {
@@ -522,6 +689,17 @@ class VigilEngine:
         # offline reader can verify it (making overclaim O9 true for the last chain that wasn't file-backed).
         # Best-effort + fail-closed: a persist error is swallowed and never affects the run's truth.
         self._persist_spine()
+
+        # TERMINAL RUN SUMMARY (Wave 7) — one machine-readable event so a supervisor reading progress.jsonl
+        # can tell a PAUSED run (awaiting a signature / anti-spin / ask_user / plan-only) from a genuinely
+        # DONE one. The CLI exits 0 either way (a pause is resumable, not an error), so without this the
+        # console would key off the exit code alone and mislabel every pause "done" (no Resume affordance).
+        self._spine_post("run_summary", {
+            "paused": report.paused or "",
+            "done": bool(getattr(report, "done", False)),
+            "fact_count": int(getattr(report, "fact_count", 0) or 0),
+            "iterations": int(getattr(report, "iterations", 0) or 0),
+        })
         return report
 
     # -- seam adapters (each fail-closed / total) ---------------------------------------------------
@@ -599,12 +777,16 @@ class VigilEngine:
 
     @staticmethod
     def _redrive_spec(decision: LLMDecision, exec_res: Any) -> Optional[dict]:
-        """Derive the T2 live-re-drive request-spec (``base_url`` / ``endpoint_path`` / ``param`` /
-        ``payload`` / ``nonce_param``) for an ``error_based_sqli`` ``exploit_succeeded`` candidate, from the
+        """Derive the T2 live-re-drive request-spec for an ``exploit_succeeded`` candidate, from the
         candidate's TOOL ARGS (the target the tool call named) + the LLM's ``output_analysis`` (its proposed
-        insertion point + payload — the "where to look", which the LLM is allowed to propose). Returns None
-        unless it is an error_based_sqli exploit claim with a COMPLETE, reconstructable spec (fail-closed →
-        the seam stays LEAD-only).
+        insertion point + payload — the "where to look", which the LLM is allowed to propose). Returns one of
+        two shapes, or None when the claim is not re-drivable (fail-closed → the seam stays LEAD-only):
+
+          * ``{"kind": "sqli", base_url, endpoint_path, param, payload, nonce_param, bug_class}`` — the
+            error_signature SQLi family (LiveHttpAdapter path); needs a COMPLETE, reconstructable spec.
+          * ``{"kind": "web", "url", "bug_class"}`` — a web-fact class (open_redirect / cors /
+            host_header_injection / graphql_introspection / oidc_redirect_uri); the reviewed web_redrive
+            engine only needs the URL.
 
         The LLM's claimed ``oracle_context`` (the response bytes) is NEVER read for the fact — only the
         request-side "where to look" is sourced from the model here; the FACT is decided by the re-driven
@@ -620,9 +802,16 @@ class VigilEngine:
         if not isinstance(info, dict):
             return None
         octx = info.get("oracle_context") if isinstance(info.get("oracle_context"), dict) else {}
-        # CLASS GATE (cheap; the seam re-normalizes authoritatively): only error_based_sqli re-drives.
-        bug_class = str(info.get("bug_class") or octx.get("bug_class") or "")
-        if bug_class.strip().lower().replace("-", "_").replace(" ", "_") != "error_based_sqli":
+        # CLASS GATE. Normalize AUTHORITATIVELY via the verifier (never a hand-rolled normalizer — that
+        # missed the alias/`__`-collapse folds and could disagree with the wiring gate; landmine 2). The
+        # seam re-normalizes again, so this is proposal-triage only. Two re-drive families are reachable:
+        # the error_signature SQLi family (sqli/sql_injection/error_based_sqli → the LiveHttpAdapter path)
+        # and the web-fact classes (open_redirect/cors/host_header_injection/graphql_introspection/
+        # oidc_redirect_uri → the reviewed web_redrive engine). Any other class returns None (LEAD-only).
+        try:
+            from framework.v2.verify.verifier import normalize_bug_class  # noqa: PLC0415 (FATAL-2)
+            bug_class = normalize_bug_class(str(info.get("bug_class") or octx.get("bug_class") or ""))
+        except Exception:  # noqa: BLE001 — cannot normalize ⇒ cannot honestly triage → LEAD (fail-closed)
             return None
         target = extract_target(getattr(tool, "tool_args", None))   # the ONE shared tool-args target reader
         if not target:
@@ -630,16 +819,45 @@ class VigilEngine:
         sp = urlsplit(target if "://" in target else "http://" + target)
         if not sp.hostname:
             return None
-        base_url = f"{(sp.scheme or 'http')}://{sp.netloc}"
-        endpoint_path = sp.path or "/"
-        param = str(info.get("insertion_point") or octx.get("payload_param") or "").strip()
-        payload = str(info.get("request_payload") or info.get("payload")
-                      or octx.get("request_payload") or "").strip()
-        nonce_param = str(info.get("nonce_param") or "rc").strip() or "rc"
-        if not (param and payload):
-            return None
-        return {"base_url": base_url, "endpoint_path": endpoint_path, "param": param,
-                "payload": payload, "nonce_param": nonce_param, "bug_class": "error_based_sqli"}
+
+        # WEB-FACT classes: the reviewed live.web_redrive engine only needs the URL (it injects its OWN
+        # canary across query/path/cookie/body surfaces and runs the shipped checks + predicate oracle).
+        try:
+            # oidc_redirect_uri is excluded from the LLM-claim seam (red-pen BLOCK-1): its A07 impact is not
+            # oracle-verifiable, so it must never be upgraded from the model's free-text class label.
+            from .web_redrive import LLM_CLAIM_WEB_FACT_CLASSES  # noqa: PLC0415 — import-clean tuple (FATAL-2)
+        except Exception:  # noqa: BLE001 — module unavailable ⇒ no web re-drive (SQLi path still works)
+            LLM_CLAIM_WEB_FACT_CLASSES = ()
+        if bug_class in LLM_CLAIM_WEB_FACT_CLASSES:
+            full = target if "://" in target else "http://" + target
+            return {"kind": "web", "url": full, "bug_class": bug_class}
+
+        # RUNTIME response-derived classes (path_traversal / reflected xss / exposure): the runner-owned
+        # runtime_redrive engine needs only the URL (it crafts the probe + runs the matching oracle).
+        try:
+            from .runtime_redrive import RUNTIME_FACT_CLASSES  # noqa: PLC0415 — import-clean tuple (FATAL-2)
+        except Exception:  # noqa: BLE001 — module unavailable ⇒ no runtime re-drive (other paths work)
+            RUNTIME_FACT_CLASSES = ()
+        if bug_class in RUNTIME_FACT_CLASSES:
+            full = target if "://" in target else "http://" + target
+            return {"kind": "runtime", "url": full, "bug_class": bug_class}
+
+        # error_signature SQLi FAMILY (landmine 1): MERIDIAN labels its error-based plant `sqli`, and the
+        # model may say `sqli`/`sql_injection`/`error_based_sqli`. Accept them all — the error_signature
+        # oracle only fires over a real datastore-error signature, so a boolean/time-based `sqli` that
+        # leaks no error simply re-drives and stays a LEAD (sound: the oracle, not the label, decides).
+        if bug_class in ("error_based_sqli", "sqli"):
+            base_url = f"{(sp.scheme or 'http')}://{sp.netloc}"
+            endpoint_path = sp.path or "/"
+            param = str(info.get("insertion_point") or octx.get("payload_param") or "").strip()
+            payload = str(info.get("request_payload") or info.get("payload")
+                          or octx.get("request_payload") or "").strip()
+            nonce_param = str(info.get("nonce_param") or "rc").strip() or "rc"
+            if not (param and payload):
+                return None
+            return {"kind": "sqli", "base_url": base_url, "endpoint_path": endpoint_path, "param": param,
+                    "payload": payload, "nonce_param": nonce_param, "bug_class": "error_based_sqli"}
+        return None
 
     def _approved(self, decision: LLMDecision, state: AgentState) -> bool:
         if self.seams.approval is None:

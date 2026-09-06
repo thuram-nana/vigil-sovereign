@@ -29,6 +29,7 @@ import importlib.util
 import json
 import os
 import re
+import secrets
 import shutil
 import signal
 import subprocess
@@ -84,6 +85,55 @@ _CLOUD_LABEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 ._:@-]{0,127}\Z")
 
 def _valid_slug(slug: str) -> bool:
     return bool(slug) and ".." not in slug and _SLUG_RE.match(slug) is not None
+
+
+# A module-process lock that serialises the check-then-act around STARTING a run of a given slug (fresh
+# launch is unique-by-construction, but a concurrent DOUBLE-RESUME of ONE paused run would otherwise both
+# pass _slug_has_running_run and fork that slug's spine). Held across the guard + the status=running commit
+# in retry_run, it makes that window atomic WITHIN this console process (the only process that starts runs).
+_SLUG_LAUNCH_LOCK = threading.Lock()
+
+
+def _unique_engagement_slug(raw: str, run_id: str) -> str:
+    """ENH2: the slug for an AGENTIC chat launch, made globally UNIQUE PER RUN by construction — so every
+    send owns a DISJOINT ``{slug}.spine`` hash-chain (and its own escalations ledger, instruction queue,
+    auto-charter, signed authority) and two concurrent sends can never fork one spine.
+
+    The invariant is a property of the STRING: ``base + "-" + suffix`` where the suffix embeds the
+    already-collision-free ``run_id`` (traceability) AND a fresh ``secrets.token_hex`` tail. The tail alone
+    carries the disjointness, so it does NOT rely on ``_new_run_id`` being unique: two same-millisecond
+    run_ids still get distinct slugs. The base is truncated so the suffix is NEVER eaten, and the whole slug
+    stays one path-safe component within _SLUG_RE (<=64) / _slugify's 48-char cap. Fail-closed: the result is
+    asserted _valid_slug before it is returned; the rare invalid-base fallback carries its OWN 64-bit tail so
+    it stays disjoint too."""
+    tail = secrets.token_hex(4)                                  # 8 hex chars of per-launch entropy
+    rid = _slugify(str(run_id or ""), fallback="")              # run_id is [0-9A-Za-z._-]; slugifies to itself
+    suffix = f"{rid}-{tail}" if rid else tail
+    base = _slugify(str(raw) or "loopback", fallback="loopback")[: max(1, 47 - len(suffix))]
+    slug = f"{base}-{suffix}"
+    if not _valid_slug(slug):                                    # never mint a path-unsafe / oversized slug
+        slug = f"loopback-{secrets.token_hex(8)}"                # guaranteed-valid, still-disjoint fallback
+    return slug
+
+
+def _launch_contained_reason(base_slug: str) -> str:
+    """ENH2 containment (security must-fix): under unique-per-run slugs a FRESH slug has its own untripped
+    kill-switch, so a SOFT emergency-stop (restricted mode) would NOT contain a new chat send — it would
+    mint a new slug and run, defeating the control. Before minting a fresh slug + spawning, consult the
+    STABLE restricted-mode transition state (the emergency-stop landing state) and REFUSE while it is
+    active. This NARROWS (refuses), never widens. Real ``vigil panic`` masks/stops the command unit, so no
+    new send can arrive there — this covers the soft-stop path the panel flagged. Fail-safe on error: if the
+    state cannot be read, PROCEED (that is exactly today's behaviour — no NEW regression — and restricted
+    mode is a rare state); a positive read is authoritative and refuses."""
+    try:
+        from vigil_integration.restricted_mode import is_restricted  # import-clean (stdlib+vigil_core)
+        if is_restricted(_live_base()):
+            return ("The system is in RESTRICTED MODE (emergency stop) — new target-touching engagements "
+                    "are refused until you recover it (clear the kill-switches, then `vigil emergency-stop "
+                    "--leave`). Read-only diagnosis and evidence export stay available.")
+    except Exception:  # noqa: BLE001 — cannot determine → proceed (today's behaviour; never break launches)
+        return ""
+    return ""
 
 
 def _valid_cloud_label(target: str) -> tuple[bool, str]:
@@ -235,7 +285,7 @@ def launch_cloud(slug: str, mode: str, target: str, *, provider: str = "") -> di
 _AEGIS_MODES = frozenset({"observe", "enforce"})
 
 # The valid assessment modes and the wizard target-types they back.
-_MODES = frozenset({"url", "codebase", "tool", "suite", "aegis"})
+_MODES = frozenset({"url", "codebase", "tool", "suite", "aegis", "sast"})
 
 # The offense engine's ENGAGE capability packs — the "tools" the wizard offers under
 # "pick tools". Each id maps to a REAL, already-gated `engage` flag (single source of
@@ -439,7 +489,12 @@ def launch_scan(target: str, *, max_pages: int = 60, use_library: bool = True,
 
 
 def _new_run_id() -> str:
-    return time.strftime("%Y%m%d-%H%M%S") + f"-{int(time.time() * 1000) % 1000:03d}"
+    # A random tail makes the id COLLISION-FREE even for two calls in the same millisecond (two concurrent
+    # resumes, a double-click) — closing a latent run_dir/meta.json collision AND removing the substrate the
+    # retry-race guard below must not depend on. Nothing parses a run_id by format (only _SAFE_RUN_ID
+    # validates it as a safe path component), so the longer tail is safe at every call site.
+    return (time.strftime("%Y%m%d-%H%M%S") + f"-{int(time.time() * 1000) % 1000:03d}-"
+            + secrets.token_hex(3))
 
 
 def _slugify(raw: str, *, fallback: str) -> str:
@@ -604,7 +659,16 @@ def _spawn_background(run_id: str, rd: Path, cmd: list[str], meta: dict, *,
         # writer for a live run: cancel_run signals and then waits for THIS write (it only writes the status
         # itself for an ORPHANED run with no live supervisor), so there is no double-write race.
         status = "done" if ok else ("cancelled" if (rc is not None and rc < 0) else "error")
-        _write_meta(run_id, **{**meta, "status": status, "pid": proc.pid,
+        # A run that exited 0 but PAUSED (awaiting a signature / anti-spin / ask_user / plan-only) is not
+        # "done": read the engine's terminal run_summary and mark it "paused" so the UI shows an honest
+        # Paused state + a Resume affordance instead of a false "Done" (Wave 7). Any other engine (no
+        # run_summary event) is unaffected — paused_reason stays "".
+        paused_reason = ""
+        if ok:
+            paused_reason = str((_run_outcome(run_id) or {}).get("paused") or "").strip()
+            if paused_reason:
+                status = "paused"
+        _write_meta(run_id, **{**meta, "status": status, "pid": proc.pid, "paused": paused_reason,
                                "rc": rc, "stderr": (err or "")[-2000:] if not ok else "",
                                "finished": time.time()})
         # AUTO-RESUME loop, first half: if an integration engage linked to a CHAT session just paused at
@@ -630,15 +694,41 @@ def _maybe_surface_agent_question(run_id: str, meta: dict) -> None:
     if not sid:
         return
     dec = _last_decision(run_id)
-    if str(dec.get("choice") or "") != "ask_user":
+    choice = str(dec.get("choice") or "")
+    if choice != "ask_user":
+        # AWAITING APPROVAL (Wave 8): the run paused for a SIGNED owner approval (not ask_user). Post one
+        # transcript notice so the chat isn't silent while the process box shows the approvable action. The
+        # terminal run_summary carries the pause reason; a non-chat engage has no transcript so it no-ops.
+        _paused = str((_run_outcome(run_id) or {}).get("paused") or "")
+        if _paused in ("awaiting_approval", "approval_rejected"):
+            tool = str(dec.get("tool") or "").strip()
+            from . import chat                          # local import — chat imports actions (avoid a cycle)
+            if _paused == "approval_rejected":
+                # ENH1: a token WAS approved but could not be spent (expired / already used). Tell the
+                # operator to APPROVE AGAIN, not "awaiting your first approval" — the invisible-loop copy.
+                note = ("I'm paused — my last approval" + (f" for {tool}" if tool else "")
+                        + " expired or was already used, so it couldn't be spent. Approve it again in the "
+                          "process box (Approve / Deny / Deny & redirect), or reply here to steer me, and "
+                          "I'll continue.")
+                chat.post_engine_notice(sid, note, run_id=str(run_id), slug=str(meta.get("slug") or ""),
+                                        kind="approval_rejected")
+            else:
+                note = ("I'm paused — my next step" + (f" ({tool})" if tool else "")
+                        + " needs your signed approval before it can run. Approve it in the process box "
+                          "(Approve / Deny / Deny & redirect), or reply here to steer me, and I'll continue.")
+                chat.post_engine_notice(sid, note, run_id=str(run_id), slug=str(meta.get("slug") or ""),
+                                        kind="awaiting_approval")
         return
     question = str(dec.get("agent_question") or "").strip()
     if not question:
         # honest fallback: the engine paused to ask but the model gave no question text — say so, so the
         # bubble is never empty (the operator still knows a reply will resume the run).
         question = "I need your input to continue. Reply here with your answer and I'll resume the engagement."
+    # S2: the agent's suggested answers (click-to-pick); advisory. Sanitised to a bounded list of strings.
+    opts = dec.get("agent_question_options")
+    options = [str(o).strip() for o in opts if str(o).strip()][:12] if isinstance(opts, list) else []
     from . import chat                                  # local import — chat imports actions (avoid a cycle)
-    chat.post_agent_question(sid, question, run_id=str(run_id), slug=str(meta.get("slug") or ""))
+    chat.post_agent_question(sid, question, run_id=str(run_id), slug=str(meta.get("slug") or ""), options=options)
 
 
 def reconcile_orphaned_runs() -> int:
@@ -909,6 +999,10 @@ def retry_run(run_id: str) -> dict:
     if not isinstance(cmd, list) or not cmd:
         return {"ok": False, "error": "this run has no recorded command to relaunch"}
     slug = str(meta.get("slug") or "")
+    # Fast fail for the obvious duplicate (avoids the setup work below); the AUTHORITATIVE, race-free guard
+    # is the atomic re-check under _SLUG_LAUNCH_LOCK immediately before the status=running commit (ENH2
+    # must-fix: two concurrent resumes of ONE paused run reuse the SAME recorded slug + --run-key and would
+    # otherwise both pass this check-then-act and fork that slug's spine).
     if slug and _slug_has_running_run(slug):
         return {"ok": False, "error": f"a run for '{slug}' is already in progress — wait for it or cancel it"}
     # GAP-1 (Strix sovereignty) — RE-APPLY the per-session model pin on the RETRY/RESUME path, or a retried
@@ -950,7 +1044,15 @@ def retry_run(run_id: str) -> dict:
     if strix_env:                       # GAP-1: record the re-applied LOCAL pin (audit/UI); never a key/endpoint
         new_meta["strix_llm"] = strix_env.get("STRIX_LLM", "")
         new_meta["model_backend"] = "local"
-    _write_meta(new_id, **new_meta, status="running")
+    # ATOMIC guard (ENH2 must-fix): serialise the "no other run of this slug is running" check with the
+    # status=running commit, so two concurrent resumes of one paused run cannot BOTH pass and fork the
+    # shared {slug}.spine. The lock spans only the fast re-check + the meta write (the spawn is outside it);
+    # _spawn_background is called AFTER, so a slow child start never holds the lock. Cross-process is out of
+    # scope — this console process is the sole starter of runs.
+    with _SLUG_LAUNCH_LOCK:
+        if slug and _slug_has_running_run(slug):
+            return {"ok": False, "error": f"a run for '{slug}' is already in progress — wait for it or cancel it"}
+        _write_meta(new_id, **new_meta, status="running")
     # capture_report only for the loopback scan (JSON on stdout); engage/strix report elsewhere.
     capture_report = ("scan" in new_cmd and "--format" in new_cmd)
     # a Strix run needs its Proof Studio env re-pointed at the NEW run dir (else its proofs mis-locate).
@@ -1004,7 +1106,7 @@ def _vigil_bin() -> "str | None":
 
 
 def _integration_engage_cmd(target: str, slug: str, session_id: str, scan_mode: str,
-                            *, model: str = "", backend: str = "") -> "list | None":
+                            *, model: str = "", backend: str = "", objective: str = "") -> "list | None":
     """The argv for a LOOPBACK agentic engage via the integration `vigil engage` engine — the OODA loop
     with mid-run operator-message steering, ``--resume``, the owner-signed approval broker, and fireteam —
     or None if no `vigil` entrypoint resolves. Graph projection is OPTIONAL: the engine mirrors facts to
@@ -1030,6 +1132,12 @@ def _integration_engage_cmd(target: str, slug: str, session_id: str, scan_mode: 
     cmd = [vigil, "engage", target, "--slug", slug, "--scope", "127.0.0.1",
            "--session", session_id, "--base-dir", _live_base(),
            "--max-iterations", str(_GRAPH_ITERS.get(scan_mode, 12))]
+    # Thread the operator's OBJECTIVE (the chat prompt) into the engage so the OODA loop has a goal from
+    # iteration 0 — without it the engine's first think has an empty objective and (correctly) pauses at
+    # ask_user "no objective or scope is defined", which felt like a dead end on a fresh chat send. Bounded.
+    obj = str(objective or "").strip()[:400]
+    if obj:
+        cmd += ["--objective", obj]
     be = str(backend or "").strip()
     md = str(model or "").strip()
     if be:
@@ -1600,6 +1708,31 @@ def _last_decision(run_id: str) -> dict:
                     pl = ev.get("payload")
                     if isinstance(pl, dict) and pl.get("choice"):
                         last = pl
+    except OSError:
+        return {}
+    return last
+
+
+def _run_outcome(run_id: str) -> dict:
+    """The payload of the LAST ``run_summary`` event in a run's progress.jsonl (``{}`` if none). The
+    integration engine posts exactly one at the end of ``engage`` (engine.py) carrying ``paused`` (the
+    resumable pause reason: awaiting_approval / anti-spin / ask_user / plan-only, or "" when the run truly
+    finished), ``done``, and ``fact_count``. It lets the supervisor tell a PAUSED run from a DONE one even
+    though the CLI exits 0 for both. Total; a missing/torn file yields ``{}`` (treated as 'no pause')."""
+    last: dict = {}
+    try:
+        p = run_dir(run_id) / "progress.jsonl"
+        with p.open("r", encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    ev = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(ev, dict) and ev.get("kind") == "run_summary" and isinstance(ev.get("payload"), dict):
+                    last = ev["payload"]
     except OSError:
         return {}
     return last
@@ -2325,6 +2458,25 @@ def launch_assessment(body: dict) -> dict:
         return {"run_id": run_id, "status": "running", "mode": mode, "slug": slug, "stream": "progress",
                 **unapplied}
 
+    # ---- sast → the NATIVE source review (DAA static analysis → URK confirm/refute) ----
+    # A white-box review of a codebase path/repo, distinct from the vendored Strix codebase mode: it runs
+    # the engine's own `framework.v2 analysis review`, needs NO Docker, and emits a per-finding confirm/
+    # refute verdict. Path-validated; background-spawned; capability packs do not apply (engage flags).
+    if mode == "sast":
+        src = Path(target).expanduser()
+        if not src.exists():
+            return {"error": f"source-review path does not exist: {target}"}
+        slug = _slugify(body.get("slug") or "source-review", fallback="source-review")
+        cmd = [sys.executable, "-m", "framework.v2", "analysis", "review",
+               "--root", str(src), "--slug", slug, "--max-reviews", "5"]
+        unapplied = _unapplied("a native source review (DAA → URK confirm/refute)",
+                               "Capability packs are offensive engage flags; the analysis reviewer takes none.")
+        meta = {**base, **unapplied, "slug": slug, "cmd": cmd, "stream": "none", "status": "running"}
+        _write_meta(run_id, **meta)
+        _spawn_background(run_id, rd, cmd, meta, capture_report=False)
+        return {"run_id": run_id, "status": "running", "mode": mode, "slug": slug, "stream": "none",
+                **unapplied}
+
     # ---- aegis → the defensive dual (detect over a telemetry/log file) -----
     if mode == "aegis":
         sub = str(body.get("aegis_action", "detect")).strip().lower()
@@ -2362,15 +2514,31 @@ def launch_assessment(body: dict) -> dict:
     # re-implementing it: the block runs iff the first three conjuncts are met — i.e. the only unmet reason
     # left is a missing `vigil` entrypoint (handled below by the `gcmd is None` fall-through) or none at all.
     if _agentic_unmet_reason(body, is_loopback=is_loopback) in ("", "vigil_not_on_path"):
-        gslug = _slugify(body.get("slug") or "loopback", fallback="loopback")
+        # ENH2 CONTAINMENT (security): before minting a FRESH unique slug + spawning, consult the stable
+        # restricted-mode state — a fresh slug has its own untripped kill-switch, so a soft emergency-stop
+        # must still block a new engagement here (it can't rely on a per-slug trip). NARROWS, never widens.
+        _contained = _launch_contained_reason(str(body.get("slug") or "loopback"))
+        if _contained:
+            return {"error": _contained}
+        # ENH2 (B-unique-always): a GLOBALLY-UNIQUE slug per launch, so every send owns a DISJOINT
+        # {slug}.spine hash-chain — two concurrent sends can never fork one spine. Uniqueness is a property
+        # of the string (base + run_id + a random tail), independent of _new_run_id. retry_run reuses this
+        # exact recorded slug on --resume, and resume-on-reply/steer key off it, so continuity is preserved.
+        gslug = _unique_engagement_slug(body.get("slug") or "loopback", run_id)
         # GAP-1 — thread the per-session model pick into the CHILD engage as a first-class launch field, not
         # display metadata. A LOCAL pick makes the child route its think (and every fireteam member) through
         # the loopback-enforced provider with NO cloud failover; a CLOUD pick sends the chosen model string.
         # Prefer the turn's model, else the session's persisted pin (so a later/steered launch stays pinned).
         launch_model, launch_backend = _resolve_launch_model(model, session_id)
         gcmd = _integration_engage_cmd(target, gslug, session_id, scan_mode,
-                                       model=launch_model, backend=launch_backend)
+                                       model=launch_model, backend=launch_backend, objective=objective)
         if gcmd is not None:
+            # F2b (finding #3): give THIS run a disjoint run-state checkpoint partition keyed by its run_id, so
+            # a later --resume reads its OWN paused state, not a prior/foreign loopback run's completed head.
+            # Recorded in meta["cmd"] below; retry_run reuses this argv verbatim (only run-dir PATHS are
+            # rewritten, and this bare run_id is not a path), so a --resume inherits the parent's --run-key and
+            # reads the parent's partition. A partition key only — grants no authority.
+            gcmd = [*gcmd, "--run-key", run_id]
             unapplied = _unapplied("an agentic `vigil engage` run (the bridge takes no pack flags)",
                                        "Re-run it with the agentic engine OFF to use them.")
             graphed = bool(os.environ.get("NEO4J_URI"))
@@ -2830,9 +2998,15 @@ def run_emergency_stop(action: str) -> dict:
     and records the transition on the chain; `leave` lifts it (owner-gated at the route). Shells the exec-only
     `vigil`, fail-closed on a bad action / unresolvable bin. Enter/leave are NOT terminal — the console stays up."""
     action = str(action or "").strip()
-    argv = {"status": ["emergency-stop", "--status"],
-            "enter": ["emergency-stop", "--reason", "UI-initiated"],
-            "leave": ["emergency-stop", "--leave"]}.get(action)
+    # Record/read the restricted-mode transition under the SAME base-dir the containment preflight reads
+    # (_launch_contained_reason -> is_restricted(_live_base())). Without this the CLI default (a CWD-relative
+    # '.vigil-live') can differ from the console's absolute _live_base() (VIGIL_LIVE_DIR in the `vigil up`
+    # setup), so the ENTER would land where the reader does NOT look and a soft emergency-stop would fail to
+    # contain a new unique-slug engagement (red-pen HIGH). Pin it here — mirrors _integration_engage_cmd.
+    _base = _live_base()
+    argv = {"status": ["emergency-stop", "--base-dir", _base, "--status"],
+            "enter": ["emergency-stop", "--base-dir", _base, "--reason", "UI-initiated"],
+            "leave": ["emergency-stop", "--base-dir", _base, "--leave"]}.get(action)
     if argv is None:
         return {"ok": False, "error": "action must be 'status', 'enter', or 'leave'"}
     vigil = _vigil_bin()
@@ -4173,7 +4347,7 @@ def terminal_propose(intent, run_id=None, session_id=None) -> dict:
     try:
         client = anthropic.Anthropic(api_key=key)
         resp = client.messages.create(
-            model="claude-opus-5", max_tokens=_term_mx,
+            model="claude-opus-4-8", max_tokens=_term_mx,
             system=_TERM_ROUTER_SYSTEM,
             messages=[{"role": "user", "content": user}],
         )

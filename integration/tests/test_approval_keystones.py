@@ -240,3 +240,113 @@ def test_strix_hook_binds_and_shows_the_real_command(tmp_path):
     # stays blocked. (Before BLOCK-1's fix the digest was a constant and B would have run under A's signature.)
     with pytest.raises(WardenDenied):
         _run(hook.on_tool_start(_ctx("exec_command", cmd_b), None, _Tool("exec_command")))
+
+
+# ---------------------------------------------------------------------------------------------------
+# ENH1 — a FOUND-but-REJECTED token pauses DISTINCTLY (approval_rejected), security unchanged
+# ---------------------------------------------------------------------------------------------------
+
+
+def test_build_approval_gate_rejected_token_pauses_distinctly(tmp_path):
+    from vigil_core.gate import GateVerdict
+
+    from vigil_integration.live.wiring import build_approval_gate
+
+    base, kp, authority = _provisioned(tmp_path)
+    args = {"command": "whoami"}
+    act = ApprovalAction("terminal.run", "127.0.0.1", action_digest("terminal.run", "127.0.0.1", args))
+
+    def queue_gate(tool_name, target, destructive=False, **kw):
+        return GateVerdict(False, "queue", "A2 requires owner approval", True, None)
+
+    # (a) an EXPIRED token bound to THIS action → consume rejects → DISTINCT approval_rejected queue verdict.
+    expired = _sign(kp, act, "n-exp-" + "e" * 22, ttl=10.0, now=time.time() - 10_000)
+    g = build_approval_gate(queue_gate, authority=authority, ledger=NonceLedger(str(tmp_path / "n1")),
+                            now=time.time, token_source=lambda: (expired, act))
+    v = g("terminal.run", "127.0.0.1", False)
+    assert not v.allowed and v.outcome == "queue", "SECURITY unchanged: a rejected token still queues/denies"
+    assert "owner approval rejected" in v.reason.lower(), "must carry the distinct marker"
+    # MF3: the FIXED reason must NOT leak raw consume internals (e.g. token key_id / 'consumed'/'window').
+    assert "key_id" not in v.reason.lower()
+
+    # (b) NEGATIVE CONTROL: no token at all → generic queue, NO approval_rejected marker (stays 'awaiting').
+    g2 = build_approval_gate(queue_gate, authority=authority, ledger=NonceLedger(str(tmp_path / "n2")),
+                             now=time.time, token_source=lambda: None)
+    v2 = g2("terminal.run", "127.0.0.1", False)
+    assert v2.outcome == "queue" and "owner approval rejected" not in v2.reason.lower()
+
+    # (c) an ALREADY-CONSUMED (single-use-spent) token → also approval_rejected (spend once, re-present).
+    ledger = NonceLedger(str(tmp_path / "n3"))
+    valid = _sign(kp, act, "n-live-" + "f" * 21)
+    g_ok = build_approval_gate(queue_gate, authority=authority, ledger=ledger, now=time.time,
+                               token_source=lambda: (valid, act))
+    assert g_ok("terminal.run", "127.0.0.1", False).allowed, "the valid token upgrades once"
+    g_again = build_approval_gate(queue_gate, authority=authority, ledger=ledger, now=time.time,
+                                  token_source=lambda: (valid, act))
+    v3 = g_again("terminal.run", "127.0.0.1", False)
+    assert v3.outcome == "queue" and "owner approval rejected" in v3.reason.lower(), "a replayed token is rejected"
+
+    # (d) a CRUCIBLE deny is STILL never widened, even when a token is present (the reject path is queue-only).
+    def deny_gate(tool_name, target, destructive=False, **kw):
+        return GateVerdict(False, "deny", "out of scope", False, None)
+    g4 = build_approval_gate(deny_gate, authority=authority, ledger=NonceLedger(str(tmp_path / "n4")),
+                             now=time.time, token_source=lambda: (expired, act))
+    v4 = g4("terminal.run", "127.0.0.1", False)
+    assert v4.outcome == "deny" and "owner approval rejected" not in v4.reason.lower()
+
+
+# ---------------------------------------------------------------------------------------------------
+# ENH1 SITE 8 — find_signed_token PREFERS a live, unspent token over an accumulated stale shadow
+# ---------------------------------------------------------------------------------------------------
+
+
+def _act(tmp_args=None):
+    args = tmp_args or {"command": "ls"}
+    return ApprovalAction("terminal.run", "127.0.0.1", action_digest("terminal.run", "127.0.0.1", args))
+
+
+def test_find_signed_token_prefers_live_over_stale_shadow(tmp_path):
+    base, kp, authority = _provisioned(tmp_path)
+    root = B.approvals_root(base)
+    act = _act()
+    now = time.time()
+    expired = _sign(kp, act, "n-expired-" + "a" * 18, ttl=10.0, now=now - 10_000)
+    live = _sign(kp, act, "n-live-" + "b" * 20, now=now)
+    # Write so the EXPIRED token sorts FIRST by filename (reproduces the real accumulation loop).
+    B.write_signed_token(root, "aa-expired", expired)
+    B.write_signed_token(root, "zz-live", live)
+    # legacy (now=None) returns first-by-name = the expired shadow (unchanged behaviour for old callers).
+    leg = B.find_signed_token(root, act)
+    assert leg is not None and leg[0].nonce == expired.nonce
+    # now-aware PREFERS the live token regardless of filename order.
+    found = B.find_signed_token(root, act, now=now)
+    assert found is not None and found[0].nonce == live.nonce, "must skip the stale shadow for a live token"
+
+
+def test_find_signed_token_returns_expired_when_no_live_but_none_when_no_match(tmp_path):
+    base, kp, authority = _provisioned(tmp_path)
+    root = B.approvals_root(base)
+    act = _act()
+    now = time.time()
+    # only an expired token on disk → returned (NOT None) so the gate can still emit approval_rejected.
+    expired = _sign(kp, act, "n-only-expired-" + "c" * 12, ttl=10.0, now=now - 10_000)
+    B.write_signed_token(root, "only-expired", expired)
+    got = B.find_signed_token(root, act, now=now)
+    assert got is not None and got[0].nonce == expired.nonce
+    # a token for a DIFFERENT action is never returned → None (so a no-token pause stays awaiting, not rejected).
+    other = ApprovalAction("terminal.run", "127.0.0.1", action_digest("terminal.run", "127.0.0.1", {"command": "id"}))
+    assert B.find_signed_token(root, other, now=now) is None
+
+
+def test_find_signed_token_skips_already_consumed(tmp_path):
+    base, kp, authority = _provisioned(tmp_path)
+    root = B.approvals_root(base)
+    act = _act()
+    now = time.time()
+    spent = _sign(kp, act, "n-spent-" + "d" * 18, now=now)
+    live = _sign(kp, act, "n-unspent-" + "e" * 16, now=now)
+    B.write_signed_token(root, "aa-spent", spent)
+    B.write_signed_token(root, "zz-unspent", live)
+    consumed = {spent.nonce}
+    found = B.find_signed_token(root, act, now=now, is_consumed=lambda n: n in consumed)
+    assert found is not None and found[0].nonce == live.nonce, "must skip an already-single-use-spent token"

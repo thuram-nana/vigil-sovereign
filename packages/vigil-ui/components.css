@@ -290,6 +290,25 @@ table.tbl tr.click { cursor: pointer; } table.tbl tr.click:hover td { background
   border-left: 1px solid var(--border-strong); box-shadow: var(--shadow-2); transform: translateX(100%); transition: transform .2s ease;
   z-index: 60; display: flex; flex-direction: column; }
 #drawer.open { transform: translateX(0); }
+
+/* dockable / resizable / maximizable activity panel -------------------------- */
+/* Bottom dock: full width, height driven by --drawer-h (or an inline style JS sets while dragging). */
+#drawer.dock-bottom { top: auto; left: 0; right: 0; bottom: 0; width: auto; max-width: none;
+  height: var(--drawer-h, 46vh); max-height: 94vh; border-left: none; border-top: 1px solid var(--border-strong);
+  transform: translateY(100%); }
+#drawer.dock-bottom.open { transform: translateY(0); }
+/* Maximized: fill the viewport regardless of dock, and the drag handle stands down. */
+#drawer.max { top: 0; left: 0; right: 0; bottom: 0; width: auto !important; height: auto !important;
+  max-width: none; max-height: none; }
+/* The drag strip — left edge when side-docked, top edge when bottom-docked. */
+#drawer .dz { position: absolute; z-index: 2; background: transparent; touch-action: none; }
+#drawer .dz:hover, #drawer .dz.active { background: var(--border-strong); opacity: .8; }
+#drawer:not(.dock-bottom) .dz { left: -3px; top: 0; width: 8px; height: 100%; cursor: ew-resize; }
+#drawer.dock-bottom .dz { top: -3px; left: 0; height: 8px; width: 100%; cursor: ns-resize; }
+#drawer.max .dz { display: none; }
+#drawer.resizing { transition: none; user-select: none; }
+#drawer .dh .iconbtn.on { color: var(--text-0); background: var(--bg-3); }
+
 #drawer .dh { display: flex; align-items: center; gap: var(--sp-3); padding: var(--sp-5); border-bottom: 1px solid var(--border); }
 #drawer .dh h2 { font-size: var(--fs-xl); flex: 1; }
 #drawer .db { padding: var(--sp-5); overflow-y: auto; }
@@ -476,17 +495,47 @@ textarea { min-height: 80px; resize: vertical; }
 /* E3 — the model picker's consequence line: the sovereignty trade-off, visible at the moment of choosing. */
 .chat-model-note { font-size: var(--fs-xs); color: var(--text-2); margin-top: 4px; }
 
-/* F2 — the chat composer, laid out cohesively: the accreted controls sit in ONE labeled "Run options" panel,
-   set apart from the message composer. Same controls + behaviour; the grouping is the redesign. */
-.chat-runopts { margin-top: 10px; padding: 10px 12px; border: 1px solid var(--border); border-radius: var(--r-2);
-  background: var(--bg-1); display: flex; flex-direction: column; gap: 8px; }
-.chat-runopts-cap { font-size: var(--fs-xs); color: var(--text-2); text-transform: uppercase; letter-spacing: .04em; font-weight: 600; }
-.chat-runopts-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
-.chat-composer { display: flex; gap: 8px; margin-top: 10px; align-items: flex-end; flex-wrap: wrap; }
+/* ── Chat screen — professional layout system ─────────────────────────────────
+   Hierarchy: sessions rail · main column (transcript fills → docked composer card → secondary context →
+   collapsed engine settings). Layout lives here in classes, not scattered inline styles. */
+#chat-wrap { display: flex; gap: 16px; align-items: stretch; margin-top: 12px; min-height: 62vh; }
+#chat-sessions { width: 244px; flex: 0 0 244px; display: flex; flex-direction: column; gap: 8px; }
+#chat-main { flex: 1 1 auto; display: flex; flex-direction: column; min-width: 0; gap: 10px; }
+@media (max-width: 860px) { #chat-wrap { flex-direction: column; } #chat-sessions { width: auto; flex: 0 0 auto; } }
+#chat-list.chat-transcript { flex: 1 1 auto; overflow-y: auto; padding: 10px; border: 1px solid var(--border);
+  border-radius: var(--r-3); background: var(--bg-1); min-height: 260px; }
+
+/* the docked composer CARD — attachments · run options · input · usage · footer, one cohesive unit */
+.chat-dock { border: 1px solid var(--border-strong); border-radius: var(--r-3); background: var(--bg-2);
+  padding: 10px 12px; display: flex; flex-direction: column; gap: 8px; box-shadow: var(--shadow-1); }
+.chat-composer { display: flex; gap: 8px; align-items: flex-end; flex-wrap: wrap; margin: 0; }
 .chat-composer .input { flex: 1 1 auto; min-width: 0; }   /* the message box grows to fill the row */
+.chat-usage { margin: 0; font-size: var(--fs-xs); color: var(--text-2); font-variant-numeric: tabular-nums; }
+.chat-foot { display: flex; align-items: center; gap: 6px; font-size: var(--fs-xs); color: var(--text-2); }
+.chat-foot .glyph svg { width: 13px; height: 13px; }
 .chat-agentic { display: inline-flex; align-items: center; gap: 6px; font-size: var(--fs-xs);
   color: var(--text-1); white-space: nowrap; cursor: pointer; user-select: none; }
 .chat-agentic input { width: auto; margin: 0; }
+
+/* run options — a compact disclosure (one line by default, expandable) */
+.chat-runopts { margin: 0; padding: 0; border: 0; background: transparent; }
+.chat-runopts > summary.chat-runopts-cap { display: flex; align-items: center; gap: 6px; cursor: pointer;
+  font-size: var(--fs-xs); color: var(--text-2); text-transform: uppercase; letter-spacing: .04em;
+  font-weight: 600; padding: 2px 0; list-style: none; }
+.chat-runopts > summary::-webkit-details-marker { display: none; }
+.chat-runopts > summary .glyph svg { width: 13px; height: 13px; }
+.chat-runopts-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; padding-top: 8px; }
+
+/* secondary context (plan checklist + linked chats) + the collapsed system-wide engine settings */
+.chat-context { display: flex; flex-direction: column; gap: 10px; }
+.chat-context:empty { display: none; }
+.chat-engine-settings { border: 1px dashed var(--border); border-radius: var(--r-2); background: var(--bg-1); padding: 6px 10px; }
+.chat-engine-settings > summary { cursor: pointer; font-size: var(--fs-xs); color: var(--text-2);
+  display: flex; align-items: center; gap: 6px; list-style: none; }
+.chat-engine-settings > summary::-webkit-details-marker { display: none; }
+.chat-engine-settings > summary .glyph svg { width: 13px; height: 13px; }
+.chat-engine-settings[open] { padding-bottom: 10px; }
+.chat-engine-settings[open] > summary { margin-bottom: 8px; }
 
 /* hypothesis ledger (Phase C): suspicions recorded from the chat; each closes itself when an oracle
    confirms a matching finding. Open = the lead register; confirmed = the green FACT shield. */
@@ -637,9 +686,19 @@ textarea { min-height: 80px; resize: vertical; }
 .pb-pill:hover { color: var(--text-0); }
 .pb-pill .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--text-2); }
 .pb-pill.live .dot { background: var(--st-running); animation: pulse 1.4s ease-in-out infinite; }
-.pb-card { width: 380px; max-width: 92vw; height: 340px; min-width: 260px; min-height: 150px; max-height: 82vh;
+.pb-card { width: 380px; max-width: 96vw; height: 340px; min-width: 260px; min-height: 150px; max-height: 90vh;
   display: flex; flex-direction: column; background: var(--bg-2); border: 1px solid var(--border-strong);
-  border-radius: var(--r-2); box-shadow: var(--shadow-2); overflow: hidden; resize: both; animation: fadein .2s ease; }
+  border-radius: var(--r-2); box-shadow: var(--shadow-2); overflow: hidden; position: relative; animation: fadein .2s ease; }
+/* #2 RESIZE: the box is anchored bottom-right, so a native bottom-right `resize` handle grows off-screen and
+   is unusable. A custom TOP-LEFT grip (dragged up/left) grows the box INTO the screen; size is persisted. */
+.pb-grip { position: absolute; top: 0; left: 0; width: 18px; height: 18px; cursor: nwse-resize; z-index: 3;
+  touch-action: none; }
+.pb-grip::before { content: ""; position: absolute; top: 4px; left: 4px; width: 8px; height: 8px;
+  border-top: 2px solid var(--text-2); border-left: 2px solid var(--text-2); border-radius: 1px; }
+.pb-grip:hover::before { border-color: var(--owner); }
+.pb-card.pb-max { width: 96vw !important; height: 90vh !important; }
+/* #3 THINKING rows: show the model's full plain-words rationale (wrap, don't ellipsis-truncate). */
+.pb-row.pb-think-row .pb-m { white-space: normal; overflow: visible; text-overflow: clip; line-height: 1.45; }
 .pb-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 8px 10px;
   border-bottom: 1px solid var(--border); flex: 0 0 auto; }
 .pb-title { display: flex; align-items: center; gap: 7px; min-width: 0; }
@@ -662,8 +721,40 @@ textarea { min-height: 80px; resize: vertical; }
 .pb-act:focus-visible { outline: 2px solid var(--owner); outline-offset: 1px; }
 .pb-step { padding: 6px 10px; font-size: var(--fs-xs); color: var(--text-1); border-bottom: 1px solid var(--border);
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 0 0 auto; }
+/* operator ask: a clear terminal "Done" — green + bold when the followed run has finished. */
+.pb-step.pb-done { color: var(--st-confirmed); font-weight: 700; }
+.pb-step.pb-paused { color: var(--st-queued); font-weight: 700; }
 .pb-feed { flex: 1 1 auto; overflow-y: auto; overflow-x: hidden; padding: 2px 0; }
 .pb-empty { padding: 18px 14px; color: var(--text-2); font-size: var(--fs-sm); text-align: center; line-height: 1.5; }
+/* S3: per-message actions (copy / edit-&-resend / regenerate) — a subtle hover row */
+.msg-actions { display: flex; gap: 4px; margin-top: 6px; opacity: 0; transition: opacity .12s ease; }
+div:hover > div > .msg-actions, .msg-actions:focus-within { opacity: 1; }
+.msg-act { display: inline-flex; align-items: center; gap: 4px; font-size: var(--fs-xs); color: var(--text-2);
+  background: transparent; border: 1px solid transparent; border-radius: var(--r-1); padding: 2px 6px; cursor: pointer; }
+.msg-act:hover { color: var(--text-0); background: var(--bg-3); border-color: var(--border); }
+.msg-act .glyph svg { width: 14px; height: 14px; }
+/* S2: click-to-pick answers for an agent question (+ "Other → type your own") */
+.answer-options { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.answer-options .btn.sm { font-size: var(--fs-xs); }
+.btn.ghost { background: transparent; border: 1px dashed var(--border-strong); }
+.btn.ghost:hover { background: var(--bg-3); }
+/* S6: composer slash-command menu */
+.slash-menu { background: var(--bg-1); border: 1px solid var(--border-strong); border-radius: var(--r-2);
+  box-shadow: var(--shadow-2); max-height: 300px; overflow-y: auto; padding: 4px; }
+.slash-item { display: flex; gap: 10px; align-items: baseline; width: 100%; text-align: left; background: transparent;
+  border: 0; border-radius: var(--r-1); padding: 7px 10px; cursor: pointer; color: var(--text-0); }
+.slash-item:hover { background: var(--bg-3); }
+.slash-cmd { font-family: var(--font-mono); font-size: var(--fs-sm); color: var(--accent, var(--text-0)); white-space: nowrap; }
+.slash-desc { font-size: var(--fs-xs); color: var(--text-2); overflow: hidden; text-overflow: ellipsis; }
+/* S5: a tool step in the process box is clickable → opens the command/output card */
+.pb-row.pb-clickable { cursor: pointer; }
+.pb-row.pb-clickable:hover { background: var(--bg-3); }
+/* S1: pending-approval cards inside the process box (chat approval interrupt) */
+.pb-approvals { flex: 0 0 auto; max-height: 55%; overflow-y: auto; border-bottom: 2px solid var(--owner-line);
+  padding: 10px; background: var(--owner-dim); }
+.pb-approvals-h { display: flex; align-items: center; gap: 6px; font-size: var(--fs-xs); font-weight: 700;
+  color: var(--owner); margin-bottom: 8px; text-transform: uppercase; letter-spacing: .04em; }
+.pb-approvals-h .dot, .pb-approvals-h svg { animation: pulse 1.4s ease-in-out infinite; }
 .pb-row { display: grid; grid-template-columns: 22px 1fr auto; gap: 8px; padding: 5px 10px;
   border-bottom: 1px solid var(--border); animation: fadein .3s ease; }
 .pb-row .pb-ico { width: 20px; height: 20px; display: grid; place-items: center; color: var(--text-2); }
@@ -675,6 +766,8 @@ textarea { min-height: 80px; resize: vertical; }
 .pb-tag.pb-blocked { color: var(--st-blocked); background: color-mix(in srgb, var(--st-blocked) 16%, transparent); }
 .pb-tag.pb-failed { color: var(--st-blocked); background: color-mix(in srgb, var(--st-blocked) 12%, transparent); }
 .pb-row.pb-blocked .pb-ico, .pb-row.pb-failed .pb-ico { color: var(--st-blocked); }
+.pb-tag.pb-approval { color: var(--st-queued); background: color-mix(in srgb, var(--st-queued) 16%, transparent); }
+.pb-row.pb-approval .pb-ico { color: var(--st-queued); }  /* a >=A2 action awaiting your signature — not an error */
 /* an oracle-CONFIRMED finding earns the proven-fact colour; a LEAD stays neutral (never the fact colour). */
 .pb-row.pb-finding .pb-ico { color: var(--st-confirmed); }
 .pb-row.pb-finding .pb-tag { color: var(--st-confirmed); background: color-mix(in srgb, var(--st-confirmed) 14%, transparent); }
@@ -695,3 +788,38 @@ textarea { min-height: 80px; resize: vertical; }
 .nav-item:focus-visible { outline-offset: -2px; }
 a:focus-visible, button:focus-visible, [role="link"]:focus-visible, input:focus-visible,
 select:focus-visible, textarea:focus-visible { outline: 2px solid var(--st-running); outline-offset: 2px; }
+/* S7: per-turn token usage / running context meter under the composer */
+.chat-usage { margin-top: 6px; font-size: var(--fs-xs); color: var(--text-2); font-variant-numeric: tabular-nums; }
+/* S10: safe markdown in assistant replies */
+.md { line-height: 1.5; }
+.md-p { margin: 0 0 8px; } .md .md-p:last-child { margin-bottom: 0; }
+.md-code { background: var(--bg-0); border: 1px solid var(--border); border-radius: var(--r-1); padding: 8px 10px;
+  overflow-x: auto; font-family: var(--font-mono); font-size: var(--fs-xs); white-space: pre; margin: 6px 0; }
+.md-ic { background: var(--bg-0); border: 1px solid var(--border); border-radius: 3px; padding: 0 4px; font-family: var(--font-mono); font-size: .92em; }
+.md-ul, .md-ol { margin: 4px 0 8px; padding-left: 22px; } .md-ul li, .md-ol li { margin: 2px 0; }
+.md-h1, .md-h2, .md-h3, .md-h4 { font-weight: 650; margin: 8px 0 4px; line-height: 1.3; }
+.md-h1 { font-size: var(--fs-lg); } .md-h2 { font-size: var(--fs-md); } .md-h3, .md-h4 { font-size: var(--fs-sm); }
+.md a { color: var(--accent, #6b8afd); text-decoration: underline; }
+/* S11: attachment image thumbnail */
+.att-thumb { width: 28px; height: 28px; object-fit: cover; border-radius: var(--r-1); border: 1px solid var(--border); vertical-align: middle; margin-right: 4px; }
+/* S9: plan/hypothesis checklist */
+.chk { display: inline-flex; align-items: center; }
+.chk .glyph svg { width: 15px; height: 15px; }
+.chk-done { color: var(--ok, #3fb950); } .chk-no { color: var(--sev-high, #e5a13a); } .chk-open { color: var(--text-2); }
+.chk-row.is-done .shield { opacity: .85; } .chk-count { color: var(--text-2); font-weight: 400; font-size: var(--fs-xs); }
+/* Chat sessions rail (professional, tidy rows) */
+.chat-new { width: 100%; }
+.chat-rail-cap { font-size: var(--fs-xs); color: var(--text-2); text-transform: uppercase; letter-spacing: .04em;
+  font-weight: 600; margin: 6px 2px 2px; }
+.chat-session-row { display: flex; gap: 4px; align-items: stretch; border-radius: var(--r-2); }
+.chat-session-row .iconbtn.sm { opacity: 0; transition: opacity .12s ease; }
+.chat-session-row:hover .iconbtn.sm, .chat-session-row.on .iconbtn.sm { opacity: 1; }
+.chat-session { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; align-items: flex-start;
+  gap: 1px; text-align: left; background: transparent; border: 1px solid transparent; border-radius: var(--r-2);
+  padding: 7px 10px; cursor: pointer; color: var(--text-0); }
+.chat-session:hover { background: var(--bg-2); border-color: var(--border); }
+.chat-session.on { background: var(--bg-3); border-color: var(--border-strong); }
+.chat-session-t { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--fs-sm); }
+.chat-session-m { font-size: var(--fs-xs); color: var(--text-2); }
+.iconbtn.sm { width: 30px; height: 30px; }
+.chat-empty { padding: 24px; }

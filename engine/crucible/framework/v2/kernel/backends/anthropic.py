@@ -50,7 +50,7 @@ from ..llm import (
 
 
 _log = v2log.get_logger(__name__)
-_DEFAULT_MODEL = "claude-opus-5"
+_DEFAULT_MODEL = "claude-opus-4-8"
 
 
 def _supports_sampling(model: str) -> bool:

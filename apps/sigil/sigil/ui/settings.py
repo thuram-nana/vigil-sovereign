@@ -222,6 +222,8 @@ _EXTRA_DELIVERED_ENV = (_EFFORT_ENV, _STRIX_EFFORT_ENV)   # non-provider model-p
 # marks the choice that routes the offense engine to the local Claude Code session (a BACKEND, no API
 # key). The other ids are the Claude model identifiers this project targets across the codebase.
 MODEL_CHOICES = (
+    {"id": "claude-opus-4-8", "label": "Claude Opus 4.8",
+     "note": "Best for authorized offensive-security runs — handles pentest planning that Opus 5's safety may decline. Needs an API key.", "keyless": False},
     {"id": "claude-opus-5", "label": "Claude Opus 5",
      "note": "Most capable — deepest reasoning over your target. Needs an API key.", "keyless": False},
     {"id": "claude-sonnet-5", "label": "Claude Sonnet 5",
@@ -257,11 +259,11 @@ _PROVIDER_ORDER = ("anthropic", "anthropic-zdr", "bedrock", "vertex", "mistral",
                    "self-hosted", "ollama", "claude-code")
 PROVIDERS: dict[str, dict[str, Any]] = {
     "anthropic": {"label": "Claude (Anthropic API)", "backend": "", "model_var": _ANTHROPIC_MODEL_ENV,
-                  "models": ["claude-opus-5", "claude-sonnet-5", "claude-haiku-4-5-20251001"],
+                  "models": ["claude-opus-4-8", "claude-opus-5", "claude-sonnet-5", "claude-haiku-4-5-20251001"],
                   "keyless": False, "keys": ["ANTHROPIC_API_KEY"], "config": (),
                   "strix": "anthropic/{model}", "sovereign_model": True},
     "anthropic-zdr": {"label": "Claude (zero-data-retention API)", "backend": "anthropic-zdr",
-                      "model_var": _ANTHROPIC_MODEL_ENV, "models": ["claude-opus-5", "claude-sonnet-5"],
+                      "model_var": _ANTHROPIC_MODEL_ENV, "models": ["claude-opus-4-8", "claude-opus-5", "claude-sonnet-5"],
                       "keyless": False, "keys": ["ANTHROPIC_API_KEY"], "config": (),
                       "strix": "anthropic/{model}", "sovereign_model": True},
     "bedrock": {"label": "Claude on AWS Bedrock", "backend": "bedrock", "model_var": "CRUCIBLE_BEDROCK_MODEL",

@@ -28,6 +28,17 @@ from typing import Any
 WEB_FACT_CLASSES = ("open_redirect", "cors", "host_header_injection", "graphql_introspection",
                     "oidc_redirect_uri")
 
+# The subset of WEB_FACT_CLASSES a re-drive may mint from an LLM-SUPPLIED class claim (the autonomous engage
+# seam, wiring._live_web_redrive_fact). oidc_redirect_uri is EXCLUDED: its distinguishing A07 impact (a broken
+# redirect_uri at an OAuth/OIDC authorization endpoint that leaks the auth code/token) is NOT verified by any
+# predicate — the live evidence is byte-identical to a plain open_redirect (a 3xx Location to the canary
+# host), so the OIDC classification rests ENTIRELY on the claimant's label. That is defensible when the claim
+# is a tool report (proof.run, where web_redrive still accepts oidc), but NOT when the claim is the model's
+# free text: an honest / hallucinating / prompt-injected LLM could label a plain open redirect "oidc" and
+# obtain a signed A07 certificate the deterministic layer only proved as A01. Until an OIDC-specific oracle
+# (independent code/token evidence) exists, the LLM-claim seam never upgrades to oidc. (red-pen BLOCK-1)
+LLM_CLAIM_WEB_FACT_CLASSES = tuple(c for c in WEB_FACT_CLASSES if c != "oidc_redirect_uri")
+
 
 @dataclass
 class WebRedriveResult:

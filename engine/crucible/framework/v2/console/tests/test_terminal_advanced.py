@@ -92,7 +92,7 @@ def test_router_command_mode_proposes_and_is_dryrun_checked(monkeypatch):
     assert r["mode"] == "command"
     assert r["ok"] is True and r["command"] == "tail -n 20 /etc/hostname"
     assert r["verdict"]["verdict"] == "queued"                 # re-checked, not trusted — queues for approval
-    assert captured["create_kwargs"]["model"] == "claude-opus-5"
+    assert captured["create_kwargs"]["model"] == "claude-opus-4-8"   # the branch default (feat: opus 4.8)
 
 
 def test_router_answer_mode_is_readonly_and_cited(monkeypatch):

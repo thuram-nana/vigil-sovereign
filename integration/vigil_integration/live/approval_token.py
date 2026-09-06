@@ -55,6 +55,21 @@ from .nonce_ledger import NonceLedger
 _APPROVAL_DOMAIN = b"vigil-peraction-approval-v1\x00"
 _APPROVAL_SCHEMA = "vigil-peraction-approval"
 
+# The load-bearing markers that classify a "the operator DID approve, but the approval can no longer be
+# spent" pause (expired past its dead-man's-switch window / already single-use-spent / otherwise invalid),
+# as DISTINCT from "no approval yet". TWO paired constants (both referenced across wiring.py + engine.py so a
+# rename can never silently split the sides):
+#   * APPROVAL_REJECTED_REASON — the SUBSTRING the M2 gate embeds in the rejected-token queue verdict's reason
+#     and the engine matches on. It CONTAINS SPACES on purpose: an executor hard-deny reason can echo an
+#     untrusted target host (never spaces), so a space-bearing phrase can NEVER be spoofed into a hard-deny
+#     reason — the same property that makes the pre-existing "requires owner approval" awaiting matcher immune
+#     (a bare single-token marker was NOT immune — red-pen). It is also disjoint from the awaiting phrases
+#     ("needs/requires owner approval"); the engine still checks rejected FIRST as a backup.
+#   * APPROVAL_REJECTED_PAUSE — the value ``report.paused`` takes AND the console/UI pause label (an
+#     identifier, no spaces), compared literally by the supervisor + app.js.
+APPROVAL_REJECTED_REASON = "owner approval rejected"
+APPROVAL_REJECTED_PAUSE = "approval_rejected"
+
 
 def _is_real(x: object) -> bool:
     # a genuine real number, but NOT bool (bool is an int subclass; a boolean window is malformed)

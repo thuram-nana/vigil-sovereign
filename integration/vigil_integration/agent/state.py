@@ -22,7 +22,7 @@ from __future__ import annotations
 from enum import Enum
 from typing import Any, Optional
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 class Phase(str, Enum):
@@ -73,6 +73,34 @@ class OutputAnalysis(BaseModel):
     extracted_info: dict[str, Any] = Field(default_factory=dict)
     notes: str = ""
 
+    @field_validator("findings", mode="before")
+    @classmethod
+    def _coerce_findings(cls, v: Any) -> Any:
+        """ROBUSTNESS: real models routinely emit ``findings`` as a list of STRINGS (or a bare string)
+        instead of the documented list-of-dicts. Without this, that one malformed field raises a
+        ValidationError that rejects the WHOLE ``LLMDecision`` — silently dropping ``exploit_succeeded`` /
+        ``extracted_info`` and downgrading a genuine confirmation to the safest action (ask_user), so the
+        live re-drive never fires. Coerce each non-dict element to ``{"summary": <text>}``. Findings are
+        ADVISORY leads only — the FACT-minting re-drive reads ``exploit_succeeded`` + ``extracted_info``,
+        never ``findings`` — so this loosening cannot affect oracle soundness."""
+        if v is None:
+            return []
+        if isinstance(v, (str, bytes)):
+            v = [v]
+        if not isinstance(v, list):
+            return v            # a truly unexpected shape → let pydantic raise its normal error
+        out: list = []
+        for item in v:
+            if isinstance(item, dict):
+                out.append(item)
+            elif isinstance(item, bytes):
+                out.append({"summary": item.decode("utf-8", "replace")})
+            elif isinstance(item, str):
+                out.append({"summary": item})
+            else:
+                out.append({"summary": str(item)})
+        return out
+
 
 class LLMDecision(BaseModel):
     """The single structured object a ``think`` step emits; ``action`` routes the whole ReAct cycle.
@@ -101,6 +129,10 @@ class LLMDecision(BaseModel):
     skill: Optional[str] = None
     # ask_user / complete
     question: Optional[str] = None
+    # ask_user: OPTIONAL suggested answers, so the operator can pick one (or "Other → type your own"). ADVISORY
+    # only — the chosen text is folded back as the resume answer exactly like a free-text reply; it authorises
+    # nothing and relaxes no gate (a picked option still steers, never runs, on its own).
+    question_options: list[str] = Field(default_factory=list)
     summary: Optional[str] = None
     # inline analysis of the PRIOR tool output (claims → leads)
     output_analysis: Optional[OutputAnalysis] = None
@@ -155,6 +187,14 @@ class AgentState(BaseModel):
     phase: Phase = Phase.INFORMATIONAL
     iteration: int = 0
     objective: str = ""
+    # The authoritative in-scope target the operator seeded the engagement with (the `vigil engage`
+    # seed URL, e.g. "http://127.0.0.1:19010/records/search?q=test"). ADVISORY to the think step: it is
+    # surfaced in the TRUSTED prompt header so the model aims tool calls at the real host:port instead
+    # of fabricating one from the engagement name (the observed failure was the model targeting
+    # "http://<slug>/..." → out-of-scope deny). It can NEVER relax scope: the executor's egress guard
+    # and the conjunctive gate re-enforce the signed scope on the executor-resolved host regardless of
+    # what the model proposes here.
+    target: str = ""
     facts: list[Finding] = Field(default_factory=list)     # oracle-confirmed only
     leads: list[Finding] = Field(default_factory=list)     # LLM/tool proposals
     execution_trace: list[dict[str, Any]] = Field(default_factory=list)

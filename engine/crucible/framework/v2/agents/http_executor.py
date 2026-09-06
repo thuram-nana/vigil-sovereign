@@ -69,8 +69,15 @@ from .scope_gate import ScopeDecision, Posture, is_destructive, validate_action
 
 _log = v2log.get_logger(__name__)
 
-# Body-excerpt cap (bytes). The full body is archived to evidence/.
-_BODY_EXCERPT_BYTES = 8 * 1024
+# Body-excerpt cap (bytes). The full body is archived to evidence/, but oracles (and the T2 SQLi
+# re-drive's error_signature confirmation) fire over THIS returned excerpt — so a signature that sits
+# past the cap is invisible to them and a genuinely-confirmed finding is silently demoted to a LEAD. An
+# 8 KiB cap truncated real error signatures that render in a page's MAIN CONTENT, after the head / nav /
+# inline CSS (measured: a datastore-error banner at byte ~12.6 KiB of a ~12.9 KiB page → the re-drive
+# oracle never saw it, minting 0 FACTs). 64 KiB covers error/boolean signatures in realistic pages while
+# staying bounded; the `truncated` flag on the returned dict still tells a differential check the excerpt
+# is a prefix when a body exceeds even this.
+_BODY_EXCERPT_BYTES = 64 * 1024
 
 # Per-posture rate parameters: (min_seconds_between_requests, jitter_seconds_max).
 _RATE_PROFILES: dict[Posture, tuple[float, float]] = {

@@ -381,6 +381,7 @@ _ALIASES: dict[str, str] = {
     # oracle proves AUTOMATION, not a "scraping" attack — P1), never its own confirmed class.
     "jailbreak": "prompt_injection",
     "llm_prompt_injection": "prompt_injection",
+    "llm_injection": "prompt_injection",
     "indirect_prompt_injection": "prompt_injection",
     "system_prompt_leak": "system_prompt_disclosure",
     "system_prompt_exfiltration": "system_prompt_disclosure",

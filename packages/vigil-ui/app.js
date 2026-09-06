@@ -798,8 +798,17 @@
       h("div#nav", { role: "navigation", "aria-label": "Primary" }),
       h("div#main", null, h("div.wrap#screen")),
     ]));
-    document.body.appendChild(h("div#drawer", null, [h("div.dh", null, [h("h2#drawer-title", null, "Detail"),
-      h("button.iconbtn", { "aria-label": "Close detail panel", onClick: closeDrawer }, V.icon("x"))]), h("div.db#drawer-body")]));
+    document.body.appendChild(h("div#drawer", { "aria-hidden": "true" }, [
+      h("div.dz#drawer-dz", { role: "separator", "aria-label": "Resize panel (drag)" }),
+      h("div.dh", null, [
+        h("h2#drawer-title", null, "Detail"),
+        h("button.iconbtn#drawer-dock", { "aria-label": "Dock the panel to the bottom or the side", title: "Dock to bottom / side", onClick: cycleDrawerDock }, V.icon("dock-bottom")),
+        h("button.iconbtn#drawer-max", { "aria-label": "Maximize or restore the panel", title: "Maximize / restore", onClick: toggleDrawerMax }, V.icon("maximize")),
+        h("button.iconbtn", { "aria-label": "Close detail panel", onClick: closeDrawer }, V.icon("x")),
+      ]),
+      h("div.db#drawer-body"),
+    ]));
+    installDrawerControls();
     renderNav();
   }
 
@@ -807,9 +816,76 @@
   function openDrawer(title, body) {
     V.$("#drawer-title").textContent = title || "Detail";
     V.mount(V.$("#drawer-body"), body);
-    V.$("#drawer").classList.add("open");
+    applyDrawerState();                       // honour the operator's remembered dock/size each open
+    const d = V.$("#drawer"); d.classList.add("open"); d.setAttribute("aria-hidden", "false");
   }
-  function closeDrawer() { V.$("#drawer").classList.remove("open"); }
+  function closeDrawer() { const d = V.$("#drawer"); d.classList.remove("open"); d.setAttribute("aria-hidden", "true"); }
+
+  // ---- drawer dock / resize / maximize (the "expand the activity box" controls) --------------------
+  // A single detail/activity panel the whole app opens things into. The operator can drag it wider (or,
+  // when docked to the bottom, taller), flip it between a right dock and a bottom dock, or maximize it to
+  // fill the viewport — and the choice + size PERSIST across opens and reloads (localStorage, per browser).
+  const DRAWER_KEY = "vigil.drawer";
+  function drawerState() {
+    try { return JSON.parse(localStorage.getItem(DRAWER_KEY) || "{}") || {}; } catch (e) { return {}; }
+  }
+  function saveDrawerState(s) { try { localStorage.setItem(DRAWER_KEY, JSON.stringify(s || {})); } catch (e) { /* private mode / blocked — the panel just won't remember */ } }
+  function applyDrawerState() {
+    const el = V.$("#drawer"); if (!el) return;
+    const s = drawerState();
+    const bottom = s.dock === "bottom";
+    el.classList.toggle("dock-bottom", bottom);
+    el.classList.toggle("max", !!s.max);
+    // inline size wins over the CSS default; cleared when maximized so .max fills the viewport
+    el.style.width = ""; el.style.height = "";
+    if (!s.max) {
+      if (bottom) { if (s.height) el.style.height = s.height + "px"; }
+      else { if (s.width) el.style.width = s.width + "px"; }
+    }
+    const maxBtn = V.$("#drawer-max");
+    if (maxBtn) { V.mount(maxBtn, V.icon(s.max ? "minimize" : "maximize")); maxBtn.classList.toggle("on", !!s.max);
+      maxBtn.title = s.max ? "Restore panel" : "Maximize panel"; }
+    const dockBtn = V.$("#drawer-dock");
+    if (dockBtn) { V.mount(dockBtn, V.icon(bottom ? "dock-right" : "dock-bottom")); dockBtn.classList.toggle("on", bottom);
+      dockBtn.title = bottom ? "Dock to the right" : "Dock to the bottom"; }
+  }
+  function toggleDrawerMax() { const s = drawerState(); s.max = !s.max; saveDrawerState(s); applyDrawerState(); }
+  function cycleDrawerDock() { const s = drawerState(); s.dock = (s.dock === "bottom") ? "right" : "bottom"; s.max = false; saveDrawerState(s); applyDrawerState(); }
+  function installDrawerControls() {
+    const el = V.$("#drawer"); const dz = V.$("#drawer-dz"); if (!el || !dz) return;
+    let drag = null;
+    dz.addEventListener("pointerdown", function (e) {
+      const s = drawerState(); if (s.max) return;            // nothing to resize while maximized
+      e.preventDefault();
+      const r = el.getBoundingClientRect();
+      drag = { bottom: s.dock === "bottom", startX: e.clientX, startY: e.clientY, startW: r.width, startH: r.height };
+      dz.classList.add("active"); el.classList.add("resizing");
+      try { dz.setPointerCapture(e.pointerId); } catch (_e) { /* older engines: falls back to window move */ }
+    });
+    dz.addEventListener("pointermove", function (e) {
+      if (!drag) return;
+      if (drag.bottom) {
+        let hh = drag.startH - (e.clientY - drag.startY);     // drag the top edge UP = taller
+        el.style.height = Math.max(160, Math.min(window.innerHeight * 0.94, hh)) + "px";
+      } else {
+        let ww = drag.startW - (e.clientX - drag.startX);      // panel hugs the right edge: drag LEFT = wider
+        el.style.width = Math.max(320, Math.min(window.innerWidth * 0.94, ww)) + "px";
+      }
+    });
+    function endDrag() {
+      if (!drag) return;
+      // Persist the size we actually APPLIED this drag (the inline style), not a re-measured rect — they
+      // agree in a browser, and this is the value the operator dragged to.
+      const s = drawerState();
+      if (drag.bottom) s.height = parseInt(el.style.height, 10) || Math.round(el.getBoundingClientRect().height);
+      else s.width = parseInt(el.style.width, 10) || Math.round(el.getBoundingClientRect().width);
+      saveDrawerState(s);
+      drag = null; dz.classList.remove("active"); el.classList.remove("resizing");
+    }
+    dz.addEventListener("pointerup", endDrag);
+    dz.addEventListener("pointercancel", endDrag);
+    applyDrawerState();                                       // paint the remembered state at boot
+  }
 
   function toggleTheme() {
     const cur = document.documentElement.getAttribute("data-theme");
@@ -1971,11 +2047,15 @@
     observation:   { label: "Observed", icon: "find", cat: "observe",
       sum: function (p) { return (p.source ? p.source + ": " : "") + (p.summary || p.surface || ""); } },
     hypothesis:    { label: "Hypothesis", icon: "brain", cat: "orient",
-      sum: function (p) { return (p.handle ? p.handle + " · " : "") + (p.bug_class || "") + (p.surface ? " @ " + p.surface : "") + (p.status ? " — " + p.status : ""); } },
+      sum: function (p) { var head = (p.bug_class || "") + (p.surface ? " @ " + p.surface : "") + (p.status ? " — " + p.status : "");
+        var r = (p.rationale || "").trim(); return r ? (head ? head + " — " + r : r) : head; } },
     plan:          { label: "Plan", icon: "assess", cat: "plan",
       sum: function (p) { return p.next_action || p.plan_id || ""; } },
-    decision:      { label: "Decision", icon: "gear", cat: "plan",
-      sum: function (p) { return (p.question || "") + (p.choice ? " → " + p.choice : ""); } },
+    decision:      { label: "Thinking", icon: "gear", cat: "plan",
+      // Show the model's PLAIN-WORDS reasoning (its "why"), like Claude Code narrates — with the chosen
+      // action in brackets. Falls back to the question→choice when no rationale was carried.
+      sum: function (p) { var r = (p.rationale || "").trim(); var c = p.choice || "";
+        return r ? (r + (c ? "  [" + c + "]" : "")) : ((p.question || "") + (c ? " → " + c : "")); } },
     action:        { label: "Action", icon: "bolt", cat: "act",
       sum: function (p) { return (p.tool || "") + (p.args_summary ? " · " + p.args_summary : ""); } },
     tool_call:     { label: "Tool call", icon: "bolt", cat: "act",
@@ -1983,7 +2063,9 @@
     result:        { label: "Result", icon: function (p) { return p.success ? "check" : "x"; }, cat: "result",
       sum: function (p) { return (p.success ? "ok" : "fail") + (p.status_code ? " · HTTP " + p.status_code : "") + (p.note ? " · " + p.note : ""); } },
     tool_result:   { label: "Tool result", icon: function (p) { return p.refused ? "x" : (p.ok ? "check" : "dot"); }, cat: "result",
-      sum: function (p) { return (p.tool || "") + " · " + (p.refused ? "refused by " + (p.gate || "gate") : (p.ok ? "ok" : "no result")) + (p.summary ? " · " + p.summary : (p.note ? " · " + p.note : "")); } },
+      sum: function (p) { return (p.tool || "") + " · " + (p.refused ? "refused by " + (p.gate || "gate") : (p.ok ? "ok" : "no result"))
+        + (p.exit_code != null ? " · exit " + p.exit_code : "") + (p.output_bytes ? " · " + p.output_bytes + " B" : "")
+        + (p.summary ? " · " + p.summary : (p.note ? " · " + p.note : "")); } },
     finding:       { label: "Finding", icon: "shield", cat: "finding",
       sum: function (p) { return (p.bug_class || "") + (p.title ? " — " + p.title : (p.summary ? " — " + p.summary : "")); } },
     critique:      { label: "Critique", icon: "book", cat: "review",
@@ -2686,16 +2768,188 @@
   }
 
   // ---- Live run view ---------------------------------------------------------
-  let liveES = null, liveTimers = [];
+  let liveES = null, liveTimers = [], liveApprovalModal = null;
   function teardownLive() {
     if (liveES) { try { liveES.close(); } catch (e) {} liveES = null; }
     liveTimers.forEach(function (t) { clearInterval(t); });
     liveTimers = [];
+    if (liveApprovalModal) { try { liveApprovalModal.close(); } catch (e) {} liveApprovalModal = null; }  // don't leave a proposal popup floating after navigation
+  }
+
+  // Shared approval interaction (Claude-Code "propose" interrupt: Approve / Deny / Deny-&-redirect), used by
+  // BOTH the Live view and Chat so there is ONE implementation. `ctx` = { mem:{popped,seen,modal}, slugOf():
+  // string, reason:string, after():void, onModal(m):void }. `mem` is per-surface — its own baseline +
+  // one-at-a-time guard. The signed-approval model is untouched: Approve/Deny post the signed SOV /api/action;
+  // "Deny & redirect" DENIES the exact proposal and sends the note as ordinary mid-run guidance (/api/instruct).
+  function makeApprovalUX(ctx) {
+    function act(action, seq) {
+      V.postJSON(SOV("/api/action"), { action: action, seq: seq, reason: action + " " + (ctx.reason || "") })
+        .then(function (r) { if (r && r.error) { V.toast(r.error, true); return; }
+          V.toast(action === "approve" ? "Approved." : "Denied."); if (ctx.after) ctx.after(); })
+        .catch(function (e) { V.toast((e && e.message) || "Action failed", true); });
+    }
+    function popModal(a) {
+      ctx.mem.popped[a.seq] = true;   // never re-pop the same proposal (dismiss = "I'll use the list")
+      const redirect = h("input.input", { type: "text",
+        placeholder: "Tell the agent what to do instead… (for Deny & redirect)" });
+      const body = h("div.stack", null, [
+        h("div.why", null, (a.agent ? a.agent + " proposes: " : "The agent proposes an action that ")
+          + (a.subject || "requires your sign-off")),
+        h("div.kv", null, [
+          h("span.k", null, "Action"), h("span.v", null, a.kind || "action"),
+          h("span.k", null, "Tier"), h("span.v", null, a.tier || "—"),
+          h("span.k", null, "Request"), h("span.v.mono", null, "seq " + a.seq),
+        ]),
+        redirect,
+        h("p.helper", null, "Approve runs exactly this one action under the gates. Deny refuses it. "
+          + "Deny & redirect refuses it AND sends your note to steer the agent so it re-plans. "
+          + "Dismiss (Esc) to decide later from the list."),
+      ]);
+      const done = function () { if (m) m.close(); ctx.mem.modal = null; if (ctx.onModal) ctx.onModal(null); };
+      const denyRedirect = function () {
+        const t = (redirect.value || "").trim();
+        if (!t) { V.toast("Type what the agent should do instead first.", true); if (redirect.focus) redirect.focus(); return; }
+        injectIntoRun(ctx.slugOf && ctx.slugOf(), redirect);   // steer (honest toast about live vs queued)
+        act("deny", a.seq);                                    // and refuse the exact proposal
+        done();
+      };
+      redirect.addEventListener("keydown", function (e) { if (e.key === "Enter") { e.preventDefault(); denyRedirect(); } });
+      const m = openModal("Approve this action?", body, [
+        h("button.btn", { onClick: denyRedirect }, [V.icon("edit"), "Deny & redirect"]),
+        h("button.btn.danger", { onClick: function () { act("deny", a.seq); done(); } }, [V.icon("x"), "Deny"]),
+        h("button.btn.owner", { onClick: function () { act("approve", a.seq); done(); } }, [V.icon("check"), "Approve"]),
+      ], { onCancel: function () { ctx.mem.modal = null; if (ctx.onModal) ctx.onModal(null); } });
+      ctx.mem.modal = m; if (ctx.onModal) ctx.onModal(m);   // module-ref so a teardown can close it on navigation
+    }
+    // baseline whatever is already pending on entry (no nag), then INTERRUPT for a NEW proposal; one at a time.
+    function maybePop(pend) {
+      if (ctx.mem.modal) return;
+      if (!ctx.mem.seen) { pend.forEach(function (a) { ctx.mem.popped[a.seq] = true; }); ctx.mem.seen = true; return; }
+      for (let i = 0; i < pend.length; i++) { if (!ctx.mem.popped[pend[i].seq]) { popModal(pend[i]); return; } }
+    }
+    function card(a) {
+      return h("div.approval", null, [
+        h("div.ah", null, [V.icon("key"), h("span.t", null, (a.kind || "action") + " · seq " + a.seq),
+          a.tier ? h("span.pill.sm", null, "tier " + a.tier) : null]),
+        h("div.why", null, (a.agent ? a.agent + " → " : "") + (a.subject || "requires owner sign-off")),
+        h("div.acts", null, [
+          h("button.btn.owner", { onClick: function () { act("approve", a.seq); } }, [V.icon("check"), "Approve"]),
+          h("button.btn.danger", { onClick: function () { act("deny", a.seq); } }, [V.icon("x"), "Deny"]),
+          h("button.btn", { title: "Deny this proposal and tell the agent what to do instead",
+            onClick: function () { if (!ctx.mem.modal) popModal(a); } }, [V.icon("edit"), "Deny & redirect"]),
+        ]),
+      ]);
+    }
+    function reset() { ctx.mem.popped = {}; ctx.mem.seen = false; if (ctx.mem.modal) { try { ctx.mem.modal.close(); } catch (e) {} } ctx.mem.modal = null; }
+    return { act: act, popModal: popModal, maybePop: maybePop, card: card, reset: reset };
+  }
+
+  // Shared tool-call CARD (command + redacted output + badges), used by the Live timeline AND the chat
+  // process box. `toolPairFrom` links a tool_call with its tool_result (by parent_id) within any events array.
+  function toolPairFrom(events, e) {
+    events = events || [];
+    if (e.kind === "tool_call") return { call: e, result: events.find(function (x) { return x.kind === "tool_result" && x.parent_id === e.id; }) || null };
+    if (e.kind === "tool_result") return { call: events.find(function (x) { return x.kind === "tool_call" && x.id === e.parent_id; }) || null, result: e };
+    return { call: null, result: null };
+  }
+  function toolCardBody(call, result) {
+    const cp = (call && call.payload) || {}; const rp = (result && result.payload) || {};
+    const argv = (rp.argv && rp.argv.length) ? rp.argv.join(" ") : "";
+    const ran = rp.ok === true; const refused = rp.refused === true;
+    const badges = [];
+    const badge = function (label, cls) { if (label != null && label !== "") badges.push(h("span.pill.sm" + (cls ? "." + cls : ""), null, String(label))); };
+    badge((cp.tier || rp.tier) ? "tier " + (cp.tier || rp.tier) : "");
+    badge(cp.target || "");
+    badge(refused ? ("refused" + (rp.gate ? " · " + rp.gate : "")) : (ran ? "ran" : (rp.summary || "pending")), refused ? "danger" : (ran ? "ok" : ""));
+    if (rp.exit_code != null) badge("exit " + rp.exit_code, rp.exit_code === 0 ? "ok" : "danger");
+    if (rp.timed_out) badge("timed out", "danger");
+    if (rp.truncated) badge("truncated");
+    if (rp.output_bytes != null) badge(rp.output_bytes + " B out");
+    const out = [];
+    out.push(h("div.dsection", null, [h("span.label", null, "COMMAND"),
+      argv ? h("pre.code", { style: { marginTop: "8px" } }, argv)
+           : h("div.hint", null, "No command — this call did not run" + (rp.note ? " (" + rp.note + ")" : "") + ".")]));
+    if (badges.length) out.push(h("div.dsection", { style: { display: "flex", gap: "6px", flexWrap: "wrap" } }, badges));
+    if (rp.output_excerpt) out.push(h("div.dsection", null, [
+      h("span.label", null, "OUTPUT" + (rp.output_excerpt_truncated ? " (truncated — the full redacted output is in the signed record)" : "")),
+      h("pre.code", { style: { marginTop: "8px" } }, rp.output_excerpt)]));
+    if (rp.stderr_excerpt) out.push(h("div.dsection", null, [h("span.label", null, "STDERR"),
+      h("pre.code", { style: { marginTop: "8px" } }, rp.stderr_excerpt)]));
+    if (refused && rp.note) out.push(h("div.legend", null, [V.icon("info"), rp.note]));
+    out.push(h("div.dsection", null, [h("span.label", null, "RAW PAYLOAD (redacted)"),
+      h("pre.code", { style: { marginTop: "8px" } }, JSON.stringify({ tool_call: cp, tool_result: rp }, null, 2))]));
+    return out;
+  }
+
+  // S10: a SAFE markdown renderer for assistant replies. XSS-safe by construction — every text run becomes a
+  // DOM text node (h() → createTextNode), NEVER innerHTML; links accept only http(s)/mailto hrefs (any other
+  // scheme renders as plain text). Supports a practical subset: fenced + inline code, bold/italic, links,
+  // bullet/numbered lists, headings, and paragraphs with line breaks.
+  function _mdInline(text) {
+    const rest = String(text);
+    const nodes = [];
+    const re = /(`[^`]+`)|(\*\*[^*]+\*\*)|(\*[^*]+\*)|(\[[^\]]+\]\([^)\s]+\))/g;
+    let last = 0, m;
+    while ((m = re.exec(rest)) !== null) {
+      if (m.index > last) nodes.push(rest.slice(last, m.index));
+      const tok = m[0];
+      if (tok.charAt(0) === "`") nodes.push(h("code.md-ic", null, tok.slice(1, -1)));
+      else if (tok.slice(0, 2) === "**") nodes.push(h("strong", null, tok.slice(2, -2)));
+      else if (tok.charAt(0) === "*") nodes.push(h("em", null, tok.slice(1, -1)));
+      else {
+        const mm = /^\[([^\]]+)\]\(([^)\s]+)\)$/.exec(tok);
+        if (mm && /^(https?:|mailto:)/i.test(mm[2])) nodes.push(h("a", { href: mm[2], target: "_blank", rel: "noopener noreferrer" }, mm[1]));
+        else nodes.push(mm ? mm[1] : tok);        // unsafe/relative scheme → just the visible text
+      }
+      last = re.lastIndex;
+    }
+    if (last < rest.length) nodes.push(rest.slice(last));
+    return nodes.length ? nodes : [rest];
+  }
+  function renderMarkdown(text) {
+    const lines = String(text || "").split("\n");
+    const out = []; let i = 0;
+    const special = /^```|^\s*[-*]\s+|^\s*\d+\.\s+|^#{1,4}\s+/;
+    while (i < lines.length) {
+      const line = lines[i];
+      if (/^```/.test(line.trim())) {
+        const fence = []; i++;
+        while (i < lines.length && !/^```/.test(lines[i].trim())) { fence.push(lines[i]); i++; }
+        i++;                                        // skip the closing fence
+        out.push(h("pre.md-code", null, h("code", null, fence.join("\n")))); continue;
+      }
+      const hm = /^(#{1,4})\s+(.*)$/.exec(line);
+      if (hm) { out.push(h("div.md-h" + hm[1].length, null, _mdInline(hm[2]))); i++; continue; }
+      if (/^\s*[-*]\s+/.test(line)) {
+        const items = [];
+        while (i < lines.length && /^\s*[-*]\s+/.test(lines[i])) { items.push(h("li", null, _mdInline(lines[i].replace(/^\s*[-*]\s+/, "")))); i++; }
+        out.push(h("ul.md-ul", null, items)); continue;
+      }
+      if (/^\s*\d+\.\s+/.test(line)) {
+        const items = [];
+        while (i < lines.length && /^\s*\d+\.\s+/.test(lines[i])) { items.push(h("li", null, _mdInline(lines[i].replace(/^\s*\d+\.\s+/, "")))); i++; }
+        out.push(h("ol.md-ol", null, items)); continue;
+      }
+      if (line.trim() === "") { i++; continue; }
+      const para = [line]; i++;
+      while (i < lines.length && lines[i].trim() !== "" && !special.test(lines[i])) { para.push(lines[i]); i++; }
+      const pn = [];
+      para.forEach(function (ln, idx) { if (idx) pn.push(h("br")); _mdInline(ln).forEach(function (n) { pn.push(n); }); });
+      out.push(h("div.md-p", null, pn));
+    }
+    return out.length ? out : [String(text || "")];
   }
 
   function renderLive(screen) {
     const L = { run: null, runs: [], events: [], seen: {}, filter: "all", snapshot: null, started: null,
-      inbox: [], inboxLoaded: false, inboxLoading: false, elsewhere: "", scanDone: false, reconciled: false };
+      inbox: [], inboxLoaded: false, inboxLoading: false, elsewhere: "", scanDone: false, reconciled: false,
+      // approval "propose" popup memory (baseline-on-entry + one-at-a-time), driven by the shared makeApprovalUX.
+      approvalMem: { popped: {}, seen: false, modal: null } };
+    // the shared approve/deny/deny-&-redirect interaction, bound to THIS view's run + snapshot refresh.
+    const AUX = makeApprovalUX({ mem: L.approvalMem, reason: "from Live view",
+      slugOf: function () { return L.run && L.run.slug; },
+      after: function () { pollSnapshot(); },
+      onModal: function (m) { liveApprovalModal = m; } });
     const want = hashQuery().run || "";
 
     V.mount(screen, [
@@ -2722,6 +2976,7 @@
       L.events = []; L.seen = {}; L.snapshot = null; L.started = L.run && L.run.started; L.elsewhere = "";
       L.inbox = []; L.inboxLoaded = false; L.inboxLoading = false;   // per-engagement advisory inbox (B4)
       L.scanDone = false; L.reconciled = false;   // per-run: re-arm the terminal reconcile for the new run
+      AUX.reset();   // re-baseline approvals + close any open modal for the new run
       history.replaceState(null, "", "#/live?run=" + encodeURIComponent(runId));
       if (L.run) attachStream();
       drawBody();
@@ -2882,16 +3137,38 @@
       const running = run.status === "running";
       const statusPill = running ? V.pill("Live", "live", null) : V.pill(run.status || "done", run.status === "error" ? "danger" : "idle", null);
       const elapsed = L.started ? fmtElapsed((Date.now() / 1000) - L.started) : "—";
-      const stop = h("button.btn.danger", { disabled: !running || !run.slug, title: "Trip this engagement's kill-switch (offense-side hard stop)",
-        onClick: stopRun }, [V.icon("x"), "Stop run"]);
+      // Lifecycle controls (Claude-Code-style). WHILE RUNNING: "Stop run" cancels THIS run's process only
+      // (its memory — the signed engagement spine — is KEPT, so it can be resumed; siblings keep going), and
+      // "Halt engagement" is the heavier kill-switch that stops EVERY run of the job. ONCE ENDED: "Resume
+      // run" continues it from the last checkpoint (memory intact), or restarts if the run's kind can't
+      // resume mid-flight. So an operator can pause (Stop → later Resume) or end (Stop and walk away — the
+      // memory stays on the spine as history) without ever losing progress.
+      const ended = !running && !!run.status &&
+        ["error", "interrupted", "cancelled", "done", "completed"].indexOf(run.status) >= 0;
+      const stop = h("button.btn.danger", { disabled: !running || !run.run_id,
+        title: "Stop just THIS run — signals its process (SIGTERM→SIGKILL). Its memory (the engagement spine) is KEPT, so you can Resume it later. Other runs of the same job keep going.",
+        onClick: cancelThisRun }, [V.icon("x"), "Stop run"]);
+      const halt = h("button.btn", { disabled: !running || !run.slug,
+        title: "Emergency halt: trip this engagement's kill-switch — stops EVERY run of this job and blocks new tool calls until you clear it in Approvals & Safety.",
+        onClick: haltEngagement }, [V.icon("shield"), "Halt engagement"]);
+      const resume = (ended && run.run_id) ? h("button.btn.owner", {
+        title: run.resumable
+          ? "Resume this run from its last signed checkpoint — its memory is intact, so it continues where it left off."
+          : "Relaunch this run — this run's kind can't resume mid-flight, so it restarts from the beginning (a new linked run).",
+        onClick: function () { runRetry(run.run_id, function () { selectRun(run.run_id); }); } },
+        [V.icon("play"), run.resumable ? "Resume run" : "Restart run"]) : null;
+      const controls = running ? [stop, halt] : (resume ? [resume] : []);
       return [
         h("div", { style: { display: "flex", alignItems: "center", gap: "12px", flexWrap: "wrap" } }, [
           statusPill,
           h("b.mono", null, run.target || run.slug || run.run_id),
           h("span.pill.sm", null, run.mode || "url"),
+          // the run id distinguishes two runs of the SAME prompt/target in the selector + when killing one
+          run.run_id ? h("span.pill.sm.mono", { title: "This run's id — use it to tell two same-prompt runs apart" }, "run " + run.run_id) : null,
+          // once ended, say the memory is kept so "stopped" never reads as "lost"
+          ended ? h("span.pill.sm", { title: "This run's memory (the signed engagement spine) is kept — Resume continues from the last checkpoint" }, "memory kept") : null,
           h("span.muted", { style: { marginLeft: "auto" } }, [V.icon("live"), " ", elapsed]),
-          stop,
-        ]),
+        ].concat(controls)),
         h("div.muted", { style: { marginTop: "8px" } }, "Phase: " + phaseLabel()),
         h("div.grid.cols-4", { style: { marginTop: "12px" } }, [
           V.tile("Actions", String(c.calls), "tool calls"),
@@ -2901,37 +3178,37 @@
         ]),
       ];
     }
-    function stopRun() {
-      if (!L.run || !L.run.slug) return;
-      V.postJSON(OFF("/api/killswitch/" + encodeURIComponent(L.run.slug) + "/trip"), { reason: "stopped from Live view" })
+    // Per-run cancel: SIGTERM→SIGKILL only THIS run's process (server: /api/run/<id>/cancel → cancel_run).
+    // The one-of-two-same-prompt-runs control — it never touches sibling runs or the kill-switch.
+    function cancelThisRun() {
+      const run = L.run; if (!run || !run.run_id) return;
+      V.postJSON(OFF("/api/run/" + encodeURIComponent(run.run_id) + "/cancel"), {})
+        .then(function (r) {
+          if (r && r.error) { V.toast(r.error, true); return; }
+          const st = (r && r.status) || "cancelled";
+          // honest wording: say what the server reports, and that siblings are untouched
+          V.toast("Run " + run.run_id + " is now " + st + (r && r.terminated ? " (process stopped)" : "") + ". Other runs of this job keep going.");
+          run.status = st; updateHeader();
+        })
+        .catch(function (e) { V.toast((e && e.message) || "Could not stop this run", true); });
+    }
+    // Emergency halt for the WHOLE engagement — the kill-switch (all runs of this slug + new tool calls).
+    function haltEngagement() {
+      const run = L.run; if (!run || !run.slug) return;
+      if (!confirm("Halt the WHOLE engagement \"" + run.slug + "\"?\n\nThis trips the kill-switch: every run of this job stops and no new tool calls run until you clear it in Approvals & Safety. To stop just this one run, use \"Stop run\" instead.")) return;
+      V.postJSON(OFF("/api/killswitch/" + encodeURIComponent(run.slug) + "/trip"), { reason: "halted from Live view" })
         .then(function (r) { if (r && r.error) { V.toast(r.error, true); return; } V.toast("Kill-switch tripped — the engagement will halt.");
           L.run.status = "stopping"; updateHeader(); })
-        .catch(function (e) { V.toast((e && e.message) || "Could not stop the run", true); });
+        .catch(function (e) { V.toast((e && e.message) || "Could not halt the engagement", true); });
     }
 
-    // ---- approvals (sovereign plane) ----
+    // ---- approvals (sovereign plane) — the interrupt + cards come from the shared makeApprovalUX (AUX) ----
     function drawApprovals() {
       const host = V.$("#live-approvals"); if (!host) return;
       const pend = (L.snapshot && L.snapshot.pending_approvals) || [];
+      AUX.maybePop(pend);
       if (!pend.length) { V.mount(host, null); return; }
-      V.mount(host, V.card("Waiting for your approval", "OWNER", h("div.stack", null, pend.map(approvalCard)), true));
-    }
-    function approvalCard(a) {
-      return h("div.approval", null, [
-        h("div.ah", null, [V.icon("key"), h("span.t", null, (a.kind || "action") + " · seq " + a.seq),
-          a.tier ? h("span.pill.sm", null, "tier " + a.tier) : null]),
-        h("div.why", null, (a.agent ? a.agent + " → " : "") + (a.subject || "requires owner sign-off")),
-        h("div.acts", null, [
-          h("button.btn.owner", { onClick: function () { act("approve", a.seq); } }, [V.icon("check"), "Approve"]),
-          h("button.btn.danger", { onClick: function () { act("deny", a.seq); } }, [V.icon("x"), "Deny"]),
-        ]),
-      ]);
-    }
-    function act(action, seq) {
-      V.postJSON(SOV("/api/action"), { action: action, seq: seq, reason: action + " from Live view" })
-        .then(function (r) { if (r && r.error) { V.toast(r.error, true); return; }
-          V.toast(action === "approve" ? "Approved." : "Denied."); pollSnapshot(); })
-        .catch(function (e) { V.toast((e && e.message) || "Action failed", true); });
+      V.mount(host, V.card("Waiting for your approval", "OWNER", h("div.stack", null, pend.map(AUX.card)), true));
     }
 
     // ---- graph + timeline ----
@@ -3029,6 +3306,12 @@
       ]);
     }
     function openEventDrawer(e) {
+      // tool_call / tool_result → the shared paired command/output card (uses the now-resizable drawer)
+      if (e.kind === "tool_call" || e.kind === "tool_result") {
+        const pair = toolPairFrom(L.events, e);
+        openDrawer("Tool call", toolCardBody(pair.call, pair.result));
+        return;
+      }
       const p = e.payload || {};
       const kv = [];
       const put = function (k, v) { kv.push(h("div.kv", null, [h("div.k", null, k), h("div.v", null, String(v))])); };
@@ -5051,6 +5334,23 @@
   // Approve ONE queued offense action from the UI. The sovereign cockpit signs in-process with your owner
   // key (route-via-sovereign). First time, it needs the offense authority bound to that key — if the backend
   // says so, confirm the one-time bind and retry. `then` refreshes the queue.
+  function _afterOffenseApprove(p, then) {
+    pboxForgetApproval(p.request_id);
+    V.toast("Approved — the action can run.");
+    if (then) then();
+    // APPROVE-THEN-CONTINUE (Wave 7): a run still block-waiting for the signature consumes the token
+    // and continues on its own; a run that already PAUSED (operator slow past the wait window) needs
+    // an explicit Resume. Only resume one that is actually paused-awaiting-approval, so this never
+    // double-fires (the backend also refuses a second running run of a slug). Followed-run only.
+    setTimeout(function () {
+      var _pp = PBOX.run && String(PBOX.run.paused || "");
+      if (PBOX.run && PBOX.run.status === "paused" && (_pp === "awaiting_approval" || _pp === "approval_rejected")) {
+        V.toast("Resuming the run with your approval…");
+        pboxRetry();
+      }
+    }, 1500);
+  }
+
   function offenseApprove(p, then) {
     V.postJSON(SOV("/api/action"), { action: "offense_approve", request_id: p.request_id })
       .then(function (r) {
@@ -5061,13 +5361,13 @@
             if (b && b.error) { V.toast(b.error, true); return; }
             V.postJSON(SOV("/api/action"), { action: "offense_approve", request_id: p.request_id })
               .then(function (r2) {
-                if (r2 && r2.ok) { V.toast("Approved — the action can run."); if (then) then(); }
+                if (r2 && r2.ok) { _afterOffenseApprove(p, then); }
                 else { V.toast((r2 && r2.error) || "Approve failed", true); }
               }).catch(function (e) { V.toast((e && e.message) || "Approve failed", true); });
           }).catch(function (e) { V.toast((e && e.message) || "Bind failed", true); });
           return;
         }
-        if (r && r.ok) { V.toast("Approved — the action can run."); if (then) then(); }
+        if (r && r.ok) { _afterOffenseApprove(p, then); }
         else { V.toast((r && r.error) || "Approve failed — are you on the owner plane?", true); }
       })
       .catch(function (e) { V.toast((e && e.message) || "Approve failed", true); });
@@ -5077,7 +5377,7 @@
     if (!confirm("Deny this action? It is removed from the queue and the run's request is refused.")) return;
     V.postJSON(SOV("/api/action"), { action: "offense_deny", request_id: p.request_id })
       .then(function (r) {
-        if (r && r.ok) { V.toast("Denied."); if (then) then(); }
+        if (r && r.ok) { pboxForgetApproval(p.request_id); V.toast("Denied."); if (then) then(); }
         else { V.toast((r && r.error) || "Deny failed", true); }
       })
       .catch(function (e) { V.toast((e && e.message) || "Deny failed", true); });
@@ -7005,7 +7305,7 @@
   const CHAT_MAX_ATTACH = 12;
   // Records the ENGINE authors itself: a launch, a refusal, an error, a prompt for a target, an
   // attachment receipt. Anything else an assistant says is model prose → a LEAD, and is badged as one.
-  const CHAT_ENGINE_KINDS = { launched: 1, refused: 1, error: 1, need_target: 1, attached: 1, system: 1, agent_question: 1 };
+  const CHAT_ENGINE_KINDS = { launched: 1, refused: 1, error: 1, need_target: 1, attached: 1, system: 1, agent_question: 1, awaiting_approval: 1, approval_rejected: 1 };
 
   function fmtBytes(n) {
     const b = Number(n) || 0;
@@ -7316,9 +7616,9 @@
     V.mount(screen, [
       h("div.screen-head", null, [h("h1", null, "Chat"),
         h("span.sub", null, "Ask in plain language, or attach a zip, files and images and ask about them. Answers are leads; the gated run is what mints facts.")]),
-      h("div#chat-wrap", { style: { display: "flex", gap: "16px", alignItems: "stretch", marginTop: "12px", minHeight: "60vh" } }, [
-        h("div#chat-sessions", { style: { width: "240px", flex: "0 0 240px", display: "flex", flexDirection: "column", gap: "8px" } }, h("div.empty", null, "…")),
-        h("div#chat-main", { style: { flex: "1 1 auto", display: "flex", flexDirection: "column", minWidth: "0" } }, h("div.empty", null, "Loading…")),
+      h("div#chat-wrap", null, [
+        h("div#chat-sessions", null, h("div.empty", null, "…")),
+        h("div#chat-main", null, h("div.empty", null, "Loading…")),
       ]),
     ]);
 
@@ -7437,45 +7737,53 @@
 
     function drawSessions() {
       const host = V.$("#chat-sessions"); if (!host) return;
-      const rows = [h("button.btn.primary", { style: { width: "100%" }, onClick: function () { openSession(""); } }, [V.icon("bolt"), "New chat"])];
+      const rows = [
+        h("button.btn.primary.chat-new", { onClick: function () { openSession(""); } }, [V.icon("bolt"), "New chat"]),
+        h("div.chat-rail-cap", null, "Chats"),
+      ];
       if (!C.sessions.length) {
-        rows.push(h("div.hint", { style: { marginTop: "8px" } }, "No saved chats yet. Start one above."));
+        rows.push(h("div.hint", null, "No saved chats yet. Start one above."));
       } else {
         C.sessions.forEach(function (s) {
           const active = s.id === C.id;
           const turns = turnsOf(s.id);
           const links = (s.connections || []).length;
-          const main = h("button.btn" + (active ? ".owner" : ""), {
-            style: { flex: "1 1 auto", minWidth: "0", textAlign: "left", justifyContent: "flex-start", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" },
+          const main = h("button.chat-session" + (active ? ".on" : ""), {
             title: titleOf(s.id) + (links ? ("\ndraws on " + links + " other chat" + (links === 1 ? "" : "s")) : ""),
             onClick: function () { openSession(s.id); },
           }, [
-            h("span", null, titleOf(s.id)),
-            h("span.dim", { style: { marginLeft: "6px", fontSize: "var(--fs-xs)" } },
-              (turns != null ? "· " + turns : "") + (links ? " · " + links + "⛓" : "")),
+            h("span.chat-session-t", null, titleOf(s.id)),
+            h("span.chat-session-m", null,
+              (turns != null ? turns + (turns === 1 ? " turn" : " turns") : "") + (links ? " · " + links + "⛓" : "")),
           ]);
-          const rn = h("button.btn", { title: "Rename chat", "aria-label": "Rename chat",
-            style: { flex: "0 0 auto", padding: "0 8px" },
+          const rn = h("button.iconbtn.sm", { title: "Rename chat", "aria-label": "Rename chat",
             onClick: function (e) { if (e) e.stopPropagation(); renameChat(s); } }, V.icon("edit"));
-          const del = h("button.btn", { title: "Delete chat", "aria-label": "Delete chat",
-            style: { flex: "0 0 auto", padding: "0 8px" },
+          const del = h("button.iconbtn.sm", { title: "Delete chat", "aria-label": "Delete chat",
             onClick: function (e) { if (e) e.stopPropagation(); deleteChat(s); } }, V.icon("trash"));
-          rows.push(h("div", { style: { display: "flex", gap: "4px", alignItems: "stretch" } }, [main, rn, del]));
+          rows.push(h("div.chat-session-row" + (active ? ".on" : ""), null, [main, rn, del]));
         });
       }
       V.mount(host, rows);
     }
 
     function renameChat(s) {
+      // S12: a proper modal (Esc/backdrop-cancel, focus-managed) instead of window.prompt.
       const cur = titleOf(s.id);
-      const name = window.prompt("Rename chat:", cur === "(empty)" ? "" : cur);
-      if (name === null) return;                 // cancelled
-      const t = String(name).trim();
-      if (!t) { V.toast("Title must not be empty.", true); return; }
-      V.postJSON(OFF("/api/chat/rename"), { chat_id: s.id, title: t }).then(function (d) {
-        if (d && d.error) { V.toast(d.error, true); return; }
-        loadChatList().then(function () { drawSessions(); drawMain(); });
-      }).catch(function (e) { V.toast(String(e), true); });
+      const nameInput = h("input.input", { type: "text", value: cur === "(empty)" ? "" : cur,
+        placeholder: "Chat title", style: { width: "100%" } });
+      function save() {
+        const t = (nameInput.value || "").trim();
+        if (!t) { V.toast("Title must not be empty.", true); if (nameInput.focus) nameInput.focus(); return; }
+        if (m) m.close();
+        V.postJSON(OFF("/api/chat/rename"), { chat_id: s.id, title: t }).then(function (d) {
+          if (d && d.error) { V.toast(d.error, true); return; }
+          loadChatList().then(function () { drawSessions(); drawMain(); });
+        }).catch(function (e) { V.toast(String(e), true); });
+      }
+      nameInput.addEventListener("keydown", function (e) { if (e.key === "Enter") { e.preventDefault(); save(); } });
+      const m = openModal("Rename chat", h("div.stack", null, [nameInput]), [
+        h("button.btn.primary", { onClick: save }, [V.icon("check"), "Rename"]),
+      ]);
     }
 
     function deleteChat(s) {
@@ -7504,8 +7812,11 @@
           key: "att" + (++C.seq), name: String(f.name || "file"), size: Number(f.size) || 0,
           status: "uploading", pct: 0, err: "", refusals: [], consented: false, sent: false,
           id: "", sha256: "", kind: "", files: null, fileList: [], more: 0, path: "",
-          abortRef: { aborted: false },
+          abortRef: { aborted: false }, previewUrl: "",
         };
+        // S11: a local image thumbnail (object URL from the picked File — never leaves the browser; the
+        // actual bytes still upload + gate exactly as before).
+        try { if (f.type && f.type.indexOf("image/") === 0) a.previewUrl = URL.createObjectURL(f); } catch (e) {}
         C.attach.push(a);
         drawAttach();
         V.uploadChunked({
@@ -7616,7 +7927,9 @@
       const cls = a.status === "failed" ? ".chip.bad"
         : ((a.status === "uploading" || a.status === "removing") ? ".chip.busy"
           : (a.sent ? ".chip.sent" : ".chip"));
-      const bits = [h("span.nm", { title: a.name }, a.name), h("span.meta", null, fmtBytes(a.size))];
+      const bits = [];
+      if (a.previewUrl) bits.push(h("img.att-thumb", { src: a.previewUrl, alt: a.name, title: a.name }));   // S11
+      bits.push(h("span.nm", { title: a.name }, a.name), h("span.meta", null, fmtBytes(a.size)));
       if (a.files != null) bits.push(h("span.meta", null, "· " + a.files + " file" + (a.files === 1 ? "" : "s")));
       if (a.status === "uploading") {
         bits.push(h("span.bar", null, h("span.bar-fill", { style: { width: a.pct + "%" } })));
@@ -7712,8 +8025,15 @@
       const host = V.$("#chat-hyps"); if (!host) return;
       const hyps = C.hyps || [];
       if (!hyps.length) { V.clear(host); return; }
+      // S9: render the live plan/hypothesis ledger as a Claude-Code-style CHECKLIST — a state icon per item
+      // (✓ confirmed by a finding · ✗ refuted · ○ open) with a running progress count. Data is the same
+      // engine-driven ledger (C.hyps); each item still closes only when an oracle confirms a matching finding.
+      const done = hyps.filter(function (hp) { return String(hp.status || "open") === "confirmed"; }).length;
       const rows = hyps.map(function (hp) {
         const st = String(hp.status || "open");
+        const chk = st === "confirmed" ? h("span.chk.chk-done", null, V.icon("check"))
+          : st === "refuted" ? h("span.chk.chk-no", null, V.icon("x"))
+            : h("span.chk.chk-open", null, V.icon("dot"));
         // "Confirmed by a finding" (not a bare FACT badge): the hypothesis is LINKED to a real
         // oracle-confirmed finding (shown by its ref below), it is not itself the minted fact (red-pen F3).
         const badge = st === "confirmed" ? h("span.shield", null, [V.icon("check"), "Confirmed by a finding"])
@@ -7723,15 +8043,16 @@
         if (hp.would_confirm) meta.push(h("div.dim", { style: { fontSize: "var(--fs-xs)" } }, "Confirm if: " + hp.would_confirm));
         if (hp.would_refute) meta.push(h("div.dim", { style: { fontSize: "var(--fs-xs)" } }, "Refute if: " + hp.would_refute));
         if (st === "confirmed" && hp.finding_ref) meta.push(h("div.dim", { style: { fontSize: "var(--fs-xs)" } }, "Closed by run: " + hp.finding_ref));
-        return h("div.hyp-row", null, [
+        return h("div.hyp-row.chk-row" + (st === "confirmed" ? ".is-done" : ""), null, [
           h("div", { style: { display: "flex", gap: "8px", alignItems: "baseline", flexWrap: "wrap" } },
-            [badge, h("span", null, String(hp.statement || ""))]),
+            [chk, badge, h("span", null, String(hp.statement || ""))]),
         ].concat(meta));
       });
       V.mount(host, h("div.hyp-panel", null, [
-        h("div.label", null, "Hypotheses"),
+        h("div.label", null, [h("span", null, "Plan · hypotheses"),
+          h("span.chk-count", null, "  " + done + " / " + hyps.length + " confirmed")]),
         h("div.hint", { style: { marginBottom: "6px", fontSize: "var(--fs-xs)" } },
-          "Suspicions recorded from this conversation. Each closes itself when an oracle confirms a matching finding."),
+          "The live plan for this conversation — each item closes itself (✓) only when an oracle confirms a matching finding."),
       ].concat(rows)));
     }
 
@@ -7840,7 +8161,20 @@
       }));
     }
 
-    function bubble(m) {
+    // S2: click-to-pick suggested answers for an agent question, with an "Other → type your own" escape
+    // hatch. A pick just fills the composer and sends it — the SAME reply path that auto-resumes the run
+    // (no new endpoint, no relaxed gate). Rendered only on the PENDING question.
+    function answerOptions(opts) {
+      const btns = (opts || []).map(function (opt) {
+        return h("button.btn.sm", { onClick: function () { input.value = String(opt); doSend(); } }, String(opt));
+      });
+      btns.push(h("button.btn.sm.ghost", { title: "Type your own answer in the composer below",
+        onClick: function () { try { input.focus(); input.scrollIntoView({ block: "center" }); } catch (e) {} } },
+        [V.icon("edit"), "Other…"]));
+      return h("div.answer-options", null, btns);
+    }
+    function bubble(m, i, arr) {
+      const isPendingQ = m.kind === "agent_question" && arr && i === arr.length - 1;
       const isUser = m.role === "user";
       const wrap = { style: { display: "flex", justifyContent: isUser ? "flex-end" : "flex-start", margin: "8px 0" } };
       const box = {
@@ -7869,11 +8203,48 @@
         kids.push(h("div", { style: { marginBottom: "6px", display: "flex", alignItems: "center", gap: "6px" } },
           [h("span.shield", { style: { color: "var(--owner, #d4af37)" } }, [V.icon("info"), "The engagement is asking you"])]));
         kids.push(h("div", null, String(m.text || m.reply || "")));
+        // click-to-pick options on the PENDING question (a historical one just shows its text).
+        if (isPendingQ && Array.isArray(m.options) && m.options.length) kids.push(answerOptions(m.options));
         kids.push(h("div.dim", { style: { fontSize: "var(--fs-xs)", marginTop: "8px" } },
-          "Reply below and I'll resume the engagement with your answer."));
+          (isPendingQ && m.options && m.options.length)
+            ? "Pick an answer above, or type your own below — I'll resume the engagement with it."
+            : "Reply below and I'll resume the engagement with your answer."));
         return h("div", wrap, h("div", box, kids));
       }
-      kids.push(h("div", null, String(m.text || m.reply || "")));
+      // AWAITING APPROVAL (Wave 8): the engagement paused because its next step needs a SIGNED owner
+      // approval. Surface it IN the transcript (not only the floating process box), styled amber so a
+      // blocked run never reads as idle. The interactive Approve / Deny / Deny & redirect live in the
+      // process box below (owner key stays sovereign-side); a reply here steers + resumes.
+      if (m.kind === "approval_rejected") {
+        // ENH1: the operator DID approve, but the approval expired or was already used, so it couldn't be
+        // spent. A DISTINCT red register (vs awaiting's amber) + "approve again" copy, so a recoverable
+        // state never reads as the same "awaiting your first approval" invisible loop. Placed BEFORE the
+        // isLead markdown push with an early return (mirrors awaiting_approval; isLead falls through).
+        box.style.borderColor = "var(--st-deny, #d9534f)";
+        box.style.borderLeftWidth = "3px";
+        kids.push(h("div", { style: { marginBottom: "6px", display: "flex", alignItems: "center", gap: "6px" } },
+          [h("span.shield", { style: { color: "var(--st-deny, #d9534f)" } },
+            [V.icon("key"), "Paused — your last approval expired or was already used"])]));
+        kids.push(h("div", null, String(m.text || "")));
+        kids.push(h("div.dim", { style: { fontSize: "var(--fs-xs)", marginTop: "8px" } },
+          "Approve it AGAIN in the process box (Approve / Deny / Deny & redirect), or reply here to steer me — then I continue."));
+        return h("div", wrap, h("div", box, kids));
+      }
+      if (m.kind === "awaiting_approval") {
+        box.style.borderColor = "var(--st-queued, #d4af37)";
+        box.style.borderLeftWidth = "3px";
+        kids.push(h("div", { style: { marginBottom: "6px", display: "flex", alignItems: "center", gap: "6px" } },
+          [h("span.shield", { style: { color: "var(--st-queued, #d4af37)" } },
+            [V.icon("key"), "Paused — awaiting your approval"])]));
+        kids.push(h("div", null, String(m.text || "")));
+        kids.push(h("div.dim", { style: { fontSize: "var(--fs-xs)", marginTop: "8px" } },
+          "Approve it in the process box (Approve / Deny / Deny & redirect), or reply here to steer me — then I continue."));
+        return h("div", wrap, h("div", box, kids));
+      }
+      // S10: assistant replies render as SAFE markdown (code/bold/lists/links); user messages stay literal.
+      kids.push(isLead
+        ? h("div.md", null, renderMarkdown(m.text || m.reply || ""))
+        : h("div", { style: { whiteSpace: "pre-wrap", wordBreak: "break-word" } }, String(m.text || m.reply || "")));
       const atts = recordAttachments(m);
       if (atts) kids.push(atts);
       // GROUNDED-IN legend (A2): the VERIFIED sources this lead drew on, in visibly distinct registers —
@@ -7943,6 +8314,25 @@
         ]));
       }
       if (m.kind === "refused" || m.kind === "error") { box.style.borderColor = "var(--sev-high, #e5a13a)"; }
+      // S3: per-message actions (copy / edit-&-resend / regenerate) on plain text bubbles — a hover row like
+      // Claude Code. Copy reuses copyText; Edit repopulates the composer for the operator to tweak + send;
+      // Regenerate re-sends the preceding user turn. All go through the normal send path (no new endpoint).
+      if (isUser || isLead) {
+        const text = String(m.text || m.reply || "");
+        const acts = [h("button.msg-act", { title: "Copy this message", onClick: function () { copyText(text); } }, [V.icon("clip"), "Copy"])];
+        if (isUser) {
+          acts.push(h("button.msg-act", { title: "Put this back in the composer to edit and resend",
+            onClick: function () { input.value = text; try { input.focus(); input.scrollIntoView({ block: "center" }); } catch (e) {} } }, [V.icon("edit"), "Edit & resend"]));
+        }
+        if (isLead) {
+          acts.push(h("button.msg-act", { title: "Re-run the question that produced this reply",
+            onClick: function () {
+              var prev = ""; for (var j = (i || 0) - 1; j >= 0; j--) { if (arr[j] && arr[j].role === "user") { prev = String(arr[j].text || ""); break; } }
+              if (prev) { input.value = prev; doSend(); } else { V.toast("No earlier message to regenerate from.", true); }
+            } }, [V.icon("live"), "Regenerate"]));
+        }
+        kids.push(h("div.msg-actions", null, acts));
+      }
       return h("div", wrap, h("div", box, kids));
     }
 
@@ -7971,6 +8361,7 @@
       let onClick = null;
       let icon = "bolt";
       if (action === "scan_codebase") { onClick = function () { launchScan(String(p.target || "")); }; }
+      else if (action === "scan_sast") { icon = "assess"; onClick = function () { launchSast(String(p.target || "")); }; }
       else if (action === "scan_url") { icon = "live"; onClick = function () { launchUrlScan(String(p.target || "")); }; }
       else if (action === "open_screen") {
         icon = "book";
@@ -8174,6 +8565,24 @@
 
     // The same gated launcher every other entry point uses — scope charter-signed, target-touching steps
     // held for approval. The chat only ASKS for it; it cannot widen scope or skip a gate.
+    function launchSast(path) {
+      // Native source review (framework.v2 analysis review — DAA static analysis + per-finding confirm/
+      // refute). Distinct from launchScan (the vendored Strix codebase mode); mode:"sast", no Docker.
+      if (C.busy || !path) return;
+      C.busy = true;
+      V.postJSON(OFF("/api/chat/send"), {
+        chat_id: C.id || undefined,
+        message: "Run the native source review (static analysis + confirm/refute) over the files at " + path,
+        target: path, mode: "sast",
+      }).then(function (r) {
+        if (r && r.error && !r.reply) V.toast(r.error, true);
+        if (r && r.run_id && r.slug) setEngagement(String(r.slug));
+        if (r && r.chat_id) adoptChatId(String(r.chat_id));
+        return refreshTranscript();
+      }).catch(function (e) { V.toast((e && e.message) || "Could not start the source review — is the offense console up?", true); })
+        .then(function () { C.busy = false; loadChatList().then(function () { drawSessions(); drawMain(); scrollDown(); }); });
+    }
+
     function launchScan(path) {
       if (C.busy || !path) return;
       C.busy = true;
@@ -8193,6 +8602,11 @@
     function drawMain() {
       const host = V.$("#chat-main"); if (!host) return;
       const st = C.st || {};
+      // A PENDING engagement question = the transcript's LAST message is an unanswered agent_question. When
+      // present we pin a banner above the transcript and steer the operator to the ONE composer where the
+      // answer goes (a reply auto-resumes the paused run) — so the question can never scroll out of view.
+      const _pendingQ = (C.messages.length && C.messages[C.messages.length - 1].kind === "agent_question")
+        ? C.messages[C.messages.length - 1] : null;
       // THESE controls are SYSTEM-WIDE: they set the model + effort the ENGINE reasons with (engagements,
       // scans, the codebase agent) via the SAME owner-plane actions the Settings screen posts
       // (`set_model` / `set_effort`), effective on the engine's next `vigil up`. They are DISTINCT from the
@@ -8221,11 +8635,10 @@
         h("button.btn.sm.owner", { onClick: function () { settingsAct({ action: "set_effort", effort: effortSel.value, reason: "set effort from Chat" }, "System effort set — effective on the next `vigil up`.", load); } }, "Set system effort"),
       ]) : h("div.hint", { style: { marginBottom: "8px" } }, "The system-wide model & effort controls need the owner plane (start with `vigil up`).");
 
-      const list = h("div#chat-list.dropzone", { style: { flex: "1 1 auto", overflowY: "auto", padding: "4px 2px", border: "1px solid var(--border)", borderRadius: "var(--r-3)", background: "var(--bg-1)" } },
+      const list = h("div#chat-list.dropzone.chat-transcript", null,
         C.messages.length ? C.messages.map(bubble)
-          : h("div.empty", { style: { padding: "24px" } }, [h("div.big", null, "What should we test?"),
-              h("p", null, "Ask in plain language — “scan http://127.0.0.1:8080 for auth bugs” — or drop a zip of a codebase, loose files or screenshots here and ask about them (“does this have weaknesses in its authentication?”)."),
-              h("p", { style: { marginTop: "8px" } }, "Answers about uploaded material are leads. Findings are oracle-confirmed; target-touching steps wait for your approval.")]));
+          : h("div.empty.chat-empty", null, [h("div.big", null, "What should we test?"),
+              h("p", null, "Ask in plain language — e.g. “scan http://127.0.0.1:8080 for auth bugs” — or drop a zip, files or screenshots and ask about them. Type “/” for commands or “@” to reference an attachment.")]));
 
       // drag-and-drop onto the transcript. The counter survives the dragleave that fires when the
       // pointer crosses a CHILD element, which is why a bare boolean flickers here.
@@ -8311,7 +8724,10 @@
         title: "Ask the agentic engine to fan out into a bounded fireteam — multiple agents on parallel subtasks (each ≤A2, oracle-bounded). Their steps stream below, attributed per member.",
         onClick: function () { requestFireteam(); } }, [V.icon("brain"), "Fireteam"]);
       const send = h("button.btn.primary", { onClick: doSend }, [V.icon("bolt"), "Send"]);
-      input.addEventListener("keydown", function (e) { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); doSend(); } });
+      input.addEventListener("keydown", function (e) {
+        if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); doSend(); return; }
+        if (e.key === "Escape" && C.stream && C.stream.stop) { e.preventDefault(); C.stream.stop(); }   // S4: stop the streaming reply
+      });
 
       // E3 — build the model <select> from the sovereignty-aware roster. A model the current tier FORBIDS is
       // rendered disabled with the reason in its tooltip; the trust class rides each label. If the roster
@@ -8351,6 +8767,109 @@
           + "bounded members when its plan calls for it; each member's steps stream below, attributed.", false);
       }
 
+      // S6: composer SLASH-COMMANDS. Type "/" for a discovery menu; a leading /command runs a chat action
+      // instead of sending a message. Each maps to an EXISTING gated action (no new powers) — a slash is a
+      // shortcut, never a bypass. An unrecognised /token is sent as an ordinary message (never swallowed).
+      const SLASH = [
+        { cmd: "/scan", arg: "<path|url>", desc: "Gated scan of a codebase path or a URL", run: function (a) {
+            if (!a) { V.toast("Usage: /scan <path or url>", true); return; }
+            if (/^https?:\/\//i.test(a)) launchUrlScan(a); else launchScan(a); } },
+        { cmd: "/url", arg: "<url>", desc: "Scan a website / API URL", run: function (a) { if (a) launchUrlScan(a); else V.toast("Usage: /url <url>", true); } },
+        { cmd: "/plan", desc: "Switch to Plan reasoning", run: function () { C.reasonMode = "plan"; if (reasonSel) reasonSel.value = "plan"; V.toast("Plan mode — ask your question.", false); try { input.focus(); } catch (e) {} } },
+        { cmd: "/research", desc: "Switch to Research reasoning", run: function () { C.reasonMode = "research"; if (reasonSel) reasonSel.value = "research"; V.toast("Research mode.", false); try { input.focus(); } catch (e) {} } },
+        { cmd: "/model", desc: "Pick the model for this chat", run: function () { try { sessModelSel.focus(); } catch (e) {} } },
+        { cmd: "/fireteam", desc: "Compose a fireteam directive", run: function () { requestFireteam(); } },
+        { cmd: "/resume", desc: "Resume the paused run from its last checkpoint", run: function () {
+            if (PBOX.run && runIsRetryable(PBOX.run)) pboxRetry();
+            else V.toast("No paused/resumable run to resume.", true); } },
+        { cmd: "/stop", desc: "Stop the running engagement", run: function () {
+            if (PBOX.run && PBOX.run.status === "running") pboxCancel();
+            else V.toast("No running engagement to stop.", true); } },
+        { cmd: "/approve", desc: "Approve the pending owner action", run: function () {
+            var pend = PBOX.offenseApprovals || [];
+            if (pend.length) offenseApprove(pend[0], function () { pboxApprovalPoll(); });
+            else V.toast("Nothing is awaiting your approval.", true); } },
+        { cmd: "/findings", desc: "Open the Findings screen", run: function () { location.hash = "#/findings"; } },
+        { cmd: "/report", desc: "Open the Report screen", run: function () { location.hash = "#/report"; } },
+        { cmd: "/status", desc: "Show the followed run's status", run: function () {
+            var r = PBOX.run;
+            V.toast(r ? ("Run " + (r.slug || r.run_id) + " \u2014 " + (r.status || "unknown")
+                         + (r.paused ? " (" + r.paused + ")" : ""))
+                      : "No run is being followed.", false); } },
+        { cmd: "/new", desc: "Start a new chat", run: function () { openSession(""); } },
+        { cmd: "/clear", desc: "Start a new chat", run: function () { openSession(""); } },
+      ];
+      function runSlash(msg) {
+        const sp = msg.search(/\s/);
+        const cmd = (sp < 0 ? msg : msg.slice(0, sp)).toLowerCase();
+        const arg = sp < 0 ? "" : msg.slice(sp + 1).trim();
+        const hit = SLASH.find(function (s) { return s.cmd === cmd; });
+        if (!hit) return false;                    // not a known command → send as an ordinary message
+        hideSlash(); hit.run(arg); return true;
+      }
+      const slashMenu = h("div.slash-menu", { style: { display: "none" } });
+      document.body.appendChild(slashMenu);
+      function hideSlash() { slashMenu.style.display = "none"; }
+      function updateSlash() {
+        const v = input.value || "";
+        if (v.charAt(0) !== "/" || /\s/.test(v)) { hideSlash(); return; }
+        const q = v.toLowerCase();
+        const hits = SLASH.filter(function (s) { return s.cmd.indexOf(q) === 0; });
+        if (!hits.length) { hideSlash(); return; }
+        V.mount(slashMenu, hits.map(function (s) {
+          return h("button.slash-item", { onClick: function () {
+            if (s.arg) { input.value = s.cmd + " "; try { input.focus(); } catch (e) {} updateSlash(); }
+            else { input.value = ""; hideSlash(); s.run(""); }
+          } }, [h("span.slash-cmd", null, s.cmd + (s.arg ? " " + s.arg : "")), h("span.slash-desc", null, s.desc)]);
+        }));
+        const r = input.getBoundingClientRect();
+        slashMenu.style.display = "block"; slashMenu.style.position = "fixed";
+        slashMenu.style.left = r.left + "px";
+        slashMenu.style.bottom = (window.innerHeight - r.top + 6) + "px";
+        slashMenu.style.width = Math.min(r.width || 460, 460) + "px";
+        slashMenu.style.zIndex = "70";
+      }
+      input.addEventListener("input", updateSlash);
+      input.addEventListener("blur", function () { setTimeout(hideSlash, 150); });   // let a menu click land first
+
+      // S8: @-mentions — reference an attached FILE or a LINKED CHAT from the composer. Frontend-only; it
+      // inserts "@name" (files are already in the answer context — a mention just points the question at one).
+      const mentionMenu = h("div.slash-menu", { style: { display: "none" } });
+      document.body.appendChild(mentionMenu);
+      function hideMention() { mentionMenu.style.display = "none"; }
+      function mentionSources() {
+        const out = [];
+        (C.attach || []).forEach(function (a) { if (a && a.name) out.push({ label: a.name, kind: "file" }); });
+        const row = rowOf(C.id); const conns = (row && row.connections) || [];
+        conns.forEach(function (cid) { out.push({ label: titleOf(cid) || String(cid), kind: "linked chat" }); });
+        return out;
+      }
+      function currentMention() {
+        const v = input.value || ""; const pos = (input.selectionStart != null) ? input.selectionStart : v.length;
+        const mm = /@([\w.\-]*)$/.exec(v.slice(0, pos));
+        return mm ? { q: mm[1], start: pos - mm[0].length, end: pos } : null;
+      }
+      function updateMention() {
+        const cm = currentMention();
+        if (!cm) { hideMention(); return; }
+        const q = cm.q.toLowerCase();
+        const hits = mentionSources().filter(function (s) { return !q || s.label.toLowerCase().indexOf(q) >= 0; }).slice(0, 8);
+        if (!hits.length) { hideMention(); return; }
+        hideSlash();
+        V.mount(mentionMenu, hits.map(function (s) {
+          return h("button.slash-item", { onClick: function () {
+            const v = input.value; input.value = v.slice(0, cm.start) + "@" + s.label + " " + v.slice(cm.end);
+            hideMention(); try { input.focus(); } catch (e) {}
+          } }, [h("span.slash-cmd", null, "@" + s.label), h("span.slash-desc", null, s.kind)]);
+        }));
+        const r = input.getBoundingClientRect();
+        mentionMenu.style.display = "block"; mentionMenu.style.position = "fixed";
+        mentionMenu.style.left = r.left + "px"; mentionMenu.style.bottom = (window.innerHeight - r.top + 6) + "px";
+        mentionMenu.style.width = Math.min(r.width || 460, 460) + "px"; mentionMenu.style.zIndex = "70";
+      }
+      input.addEventListener("input", updateMention);
+      input.addEventListener("blur", function () { setTimeout(hideMention, 150); });
+
       // The plain-language consequence of the current pick — shown under the picker so the sovereignty
       // trade-off is visible at the moment of choosing, not buried.
       function modelConsequence() {
@@ -8370,6 +8889,8 @@
       // remove it — which now really deletes it on the console.
       function doSend() {
         const msg = (input.value || "").trim();
+        // S6: a leading /command runs a chat action instead of sending it as a message (unknown → sent normally).
+        if (msg && msg.charAt(0) === "/" && runSlash(msg)) { input.value = ""; hideSlash(); return; }
         const outgoing = C.attach.filter(function (a) { return a.status === "ready"; });
         if (C.busy) return;
         if (!msg && !outgoing.length) return;
@@ -8414,6 +8935,11 @@
         if (r && r.run_id && r.slug) setEngagement(String(r.slug));   // a LAUNCH turn scopes to its run
         if (r && r.chat_id) adoptChatId(String(r.chat_id));
         if (r && Array.isArray(r.hypotheses)) C.hyps = r.hypotheses;  // Phase C: show the ledger at once
+        // S7: remember this turn's token usage + accumulate a running context estimate for the meter.
+        if (r && r.usage && (r.usage.input_tokens != null || r.usage.output_tokens != null)) {
+          C.lastUsage = r.usage;
+          C.ctxTokens = (C.ctxTokens || 0) + (r.usage.input_tokens || 0) + (r.usage.output_tokens || 0);
+        }
         (outgoing || []).forEach(function (a) { a.sent = true; });
         input.value = ""; target.value = "";
       }
@@ -8440,14 +8966,18 @@
       // authoritative bubble with its lead badge / proposals / sources / coverage). Any fallback or error
       // routes to the reliable /send path so a turn is never dropped.
       function streamSend(payload, msg, outgoing) {
-        C.stream = { text: "", msg: msg };
+        // S4: an AbortController so the operator can STOP the streaming reply (button + Esc). `aborted` tells
+        // the catch/incomplete paths this was a deliberate Stop (never a dropped connection) so we don't re-send.
+        const ctrl = (typeof AbortController !== "undefined") ? new AbortController() : null;
+        let aborted = false;
+        C.stream = { text: "", msg: msg, stop: function () { aborted = true; if (ctrl) { try { ctrl.abort(); } catch (e) {} } } };
         drawStreamBubble();
         // `committed` guards against a DUPLICATE turn (red-pen MEDIUM-1): once the server has sent an
         // event-stream response it has ALREADY persisted the turn (it appends before emitting `done`), so a
         // later abort or a render error must NOT re-POST to /send — that would double-record the turn AND
         // make a second billable model call. We only re-send when the stream never established.
         let committed = false;
-        return streamChat(payload, function (tok) { C.stream.text += tok; drawStreamBubble(); })
+        return streamChat(payload, function (tok) { C.stream.text += tok; drawStreamBubble(); }, ctrl && ctrl.signal)
           .then(function (res) {
             if (res && res.fallback) {                 // not streamable — the server persisted NOTHING → /send
               C.stream = null; removeStreamBubble();
@@ -8456,7 +8986,8 @@
             committed = true;                          // got an event-stream ⇒ the server committed the turn
             if (res && res.incomplete) {               // stream aborted after commit — reload the saved answer
               C.stream = null; removeStreamBubble();
-              V.toast("The connection dropped mid-reply — the answer was saved; reloading it.", false);
+              V.toast(aborted ? "Stopped — reloading whatever the run had already saved."
+                              : "The connection dropped mid-reply — the answer was saved; reloading it.", false);
               return refreshTranscript().then(finishSend);
             }
             afterSendResult(res, outgoing);
@@ -8464,6 +8995,7 @@
           })
           .catch(function () {
             C.stream = null; removeStreamBubble();
+            if (aborted) { V.toast("Stopped.", false); return finishSend(); }   // deliberate Stop — never re-send
             if (committed) return finishSend();        // a post-commit (e.g. render) error — never re-send
             return sendViaPost(payload, outgoing);     // the stream never established — safe to send once
           });
@@ -8473,11 +9005,13 @@
       // "text/event-stream" response streams `token`/`done` events (onToken per delta, resolves with the
       // final result); a JSON response (the server couldn't stream this turn) resolves with {fallback:true}.
       // Same credentials the rest of the page uses (custom header + token); the browser sets Sec-Fetch-Site.
-      function streamChat(payload, onToken) {
+      function streamChat(payload, onToken, signal) {
         const hh = { "X-Requested-With": "vigil-ui", "Content-Type": "application/json" };
         const t = V.token(); if (t) hh["X-SIGIL-Token"] = t;
-        return fetch(OFF("/api/chat/stream"), { method: "POST", headers: hh, credentials: "same-origin",
-            cache: "no-store", body: JSON.stringify(payload) }).then(function (resp) {
+        const opts = { method: "POST", headers: hh, credentials: "same-origin",
+            cache: "no-store", body: JSON.stringify(payload) };
+        if (signal) opts.signal = signal;              // S4: lets the operator abort the streaming reply
+        return fetch(OFF("/api/chat/stream"), opts).then(function (resp) {
           const ct = (resp.headers.get("Content-Type") || "").toLowerCase();
           if (ct.indexOf("text/event-stream") < 0) {
             // not streamable (fallback) or an error status — read JSON and signal fallback
@@ -8525,8 +9059,10 @@
           const textEl = h("div#chat-stream-text", { style: { whiteSpace: "pre-wrap", wordBreak: "break-word" } }, "");
           const box = h("div", { style: { maxWidth: "80%", padding: "10px 12px", borderRadius: "var(--r-3)",
             background: "var(--bg-2)", color: "var(--text-0)", border: "1px solid var(--border)" } },
-            [h("div", { style: { marginBottom: "6px" } },
-               h("span.shield.lead", null, [V.icon("info"), "Lead — streaming…"])), textEl]);
+            [h("div", { style: { marginBottom: "6px", display: "flex", alignItems: "center", justifyContent: "space-between", gap: "8px" } },
+               [h("span.shield.lead", null, [V.icon("info"), "Lead — streaming…"]),
+                // S4: stop generating (also Esc in the composer). Keeps the partial shown; reloads saved state.
+                h("button.btn.sm", { title: "Stop generating (Esc)", onClick: function () { if (C.stream && C.stream.stop) C.stream.stop(); } }, [V.icon("x"), "Stop"])]), textEl]);
           wrap = h("div#chat-stream-wrap", null, [
             bubble({ role: "user", text: C.stream.msg }),
             h("div", { style: { display: "flex", justifyContent: "flex-start", margin: "8px 0" } }, box),
@@ -8534,33 +9070,61 @@
           l.appendChild(wrap);
         }
         const te = V.$("#chat-stream-text");
-        if (te) te.textContent = (C.stream.text || "") + " ▌";
+        // S7: an honest thinking indicator — until the first token flows, the model is thinking.
+        if (te) te.textContent = C.stream.text ? (C.stream.text + " ▌") : "Thinking…";
         l.scrollTop = l.scrollHeight;
       }
       function removeStreamBubble() { const w = V.$("#chat-stream-wrap"); if (w && w.parentNode) w.parentNode.removeChild(w); }
 
-      V.mount(host, [
-        controls,
-        list,
-        h("div#chat-attach"),
-        h("div#chat-links"),
-        h("div#chat-hyps"),
-        // F2 — the accreted controls grouped into ONE labeled "Run options" cluster (how the NEXT message is
-        // handled: target, mode, reasoning depth, model sovereignty, the agentic engine, a fireteam), visually
-        // set apart from the message composer below. Same controls, same behaviour — just legible.
-        h("div.chat-runopts", null, [
-          h("div.chat-runopts-cap", null, "Run options — how the next message is handled"),
-          h("div.chat-runopts-row", null, [target, modeSel, reasonSel, sessModelSel, agenticTog, fireteamBtn]),
-          modelNote,
-          toolRow,
-        ]),
-        h("div.chat-composer", null, [attachBtn, fileInput, input, send]),
-        h("div.hint", { style: { marginTop: "6px" } },
-          "Attachments are read on this machine and only sent to the model after you approve them once. "
-          + "An answer about them is a lead — a finding becomes a fact only when an oracle confirms it in a "
-          + "gated run (scope charter-signed, target-touching steps wait for your approval). The conversation "
-          + "is saved locally under .vigil-live/chats/."),
+      // AWAITING-REPLY banner: pinned above the transcript so a paused engagement's question can't scroll out
+      // of view; "Reply now" focuses the ONE composer where the answer goes (typing there auto-resumes the run).
+      const askBanner = _pendingQ ? h("div.chat-askbanner", {
+        style: { marginBottom: "8px", padding: "10px 12px", borderRadius: "var(--r-3)",
+          border: "1px solid var(--owner, #d4af37)", borderLeft: "3px solid var(--owner, #d4af37)",
+          background: "var(--owner-bg, var(--bg-2))", display: "flex", alignItems: "center",
+          gap: "10px", flexWrap: "wrap" } }, [
+        h("span.shield", { style: { color: "var(--owner, #d4af37)", fontWeight: "600", whiteSpace: "nowrap" } },
+          [V.icon("info"), "Waiting for your answer"]),
+        h("div", { style: { flex: "1 1 240px", minWidth: "0" } }, String(_pendingQ.text || _pendingQ.reply || "")),
+        // S2: the same click-to-pick options as the bubble, so the operator can answer without scrolling up.
+        (_pendingQ && Array.isArray(_pendingQ.options) && _pendingQ.options.length)
+          ? h("div", { style: { flex: "1 1 100%" } }, answerOptions(_pendingQ.options))
+          : h("button.btn.sm.owner", { onClick: function () { try { input.focus(); input.scrollIntoView({ block: "center" }); } catch (e) {} } }, "Reply now"),
+      ]) : null;
+      // Clean, professional hierarchy: the TRANSCRIPT is the focus (fills); a single docked COMPOSER CARD
+      // holds the attachments strip, the run-options, the input row, the usage meter and a one-line footer;
+      // secondary CONTEXT (plan checklist + linked chats) sits below; and the system-wide engine settings are
+      // tucked into a collapsed disclosure at the very bottom so they never dominate the conversation.
+      const usage = (C.lastUsage ? h("div.chat-usage", null,
+        "Last turn: " + (C.lastUsage.input_tokens != null ? C.lastUsage.input_tokens + " in" : "—")
+        + " / " + (C.lastUsage.output_tokens != null ? C.lastUsage.output_tokens + " out" : "—") + " tokens"
+        + (C.ctxTokens ? "  ·  ~" + C.ctxTokens.toLocaleString() + " this conversation" : "")) : null);
+      // F2 — run options grouped into ONE compact, collapsible cluster (target/mode/reasoning/model/agentic/
+      // fireteam) so they're one line by default and out of the way when not needed. Same controls, same
+      // behaviour. Open by default the first time; the operator can fold it.
+      const runopts = h("details.chat-runopts", { open: "open" }, [
+        h("summary.chat-runopts-cap", null, [V.icon("gear"), h("span", null, "Run options — how the next message is handled")]),
+        h("div.chat-runopts-row", null, [target, modeSel, reasonSel, sessModelSel, agenticTog, fireteamBtn]),
+        modelNote,
+        toolRow,
       ]);
+      const dock = h("div.chat-dock", null, [
+        h("div#chat-attach"),                                  // attachments strip (drawn by drawAttach)
+        runopts,
+        h("div.chat-composer", null, [attachBtn, fileInput, input, send]),
+        usage,
+        h("div.chat-foot", { title: "Attachments are read on this machine and only sent to the model after you "
+          + "approve them once. A chat answer is a LEAD — a finding becomes a FACT only when an oracle confirms "
+          + "it in a gated run. Conversations are saved locally under .vigil-live/chats/." },
+          [V.icon("info"), h("span", null, "Answers are leads · a gated run mints facts · saved locally")]),
+      ]);
+      const contextPanels = h("div.chat-context", null, [h("div#chat-hyps"), h("div#chat-links")]);
+      const engineSettings = h("details.chat-engine-settings", null, [
+        h("summary", null, [V.icon("gear"), h("span", null, "Engine model & effort — system-wide (not this chat)")]),
+        controls,
+      ]);
+      V.mount(host, [askBanner, list, dock, contextPanels, engineSettings]);
+      if (_pendingQ) { try { input.focus(); } catch (e) {} }   // steer the operator straight to the reply box
       drawAttach();
       drawLinks();
       drawHyps();
@@ -9572,12 +10136,103 @@
   var PBOX_KEY = "vigil-process-box";
   var PBOX_CAP = 200;                                   // rows kept in the scrollback ring buffer
   var PBOX = { es: null, run: null, following: "", events: [], seen: {}, poll: null,
-               ui: { open: false, dismissed: false } };
+               // S1: the approve/deny/deny-&-redirect interrupt in CHAT — the PBOX follows the run globally,
+               // so it surfaces approvals on any screen (chat included) via the SHARED makeApprovalUX.
+               approvalMem: { popped: {}, seen: false, modal: null }, pendingApprovals: [],
+               // S1b: OFFENSE engage approvals (request_id-keyed, keyless broker) — a chat-launched engage's
+               // queued tool lives HERE, not in the sovereign snapshot the seq-based AUX polls. Own baseline
+               // + one-at-a-time guard (mirrors approvalMem, keyed by request_id).
+               offenseApprovals: [], offenseMem: { popped: {}, seen: false, modal: null, base: ".vigil-live" },
+               ui: { open: false, dismissed: false, w: 0, h: 0, max: false } };
+  var pboxApprovalModal = null;
+  var PBOX_AUX = makeApprovalUX({
+    mem: PBOX.approvalMem, reason: "from chat",
+    slugOf: function () { return PBOX.run && PBOX.run.slug; },
+    after: function () { pboxApprovalPoll(); },
+    onModal: function (m) { pboxApprovalModal = m; } });
+
+  // S1b: the OFFENSE-approval interrupt for chat. Offense engage approvals are request_id-keyed and are
+  // signed route-via-sovereign (offenseApprove/offenseDeny → SOV /api/action; the cockpit signs with the
+  // owner key, the offense console stays keyless), so they need their own card/pop distinct from the
+  // seq-based sovereign AUX. Same discipline: baseline what is already queued on entry (no nag), then
+  // interrupt for a NEW one, one modal at a time across BOTH approval kinds.
+  function pboxOffenseCard(p) {
+    var refresh = function () { pboxApprovalPoll(); };
+    return h("div.approval", null, [
+      h("div.ah", null, [V.icon("key"),
+        h("span.t", null, (p.tool_name || "action") + " → " + (p.target || "—")),
+        h("span.pill.sm", null, "offense")]),
+      p.args_preview ? h("div.why", null,
+        h("div.mono.dim", { style: { fontSize: "var(--fs-xs)", wordBreak: "break-all" } }, p.args_preview)) : null,
+      h("div.acts", null, [
+        h("button.btn.owner", { onClick: function () { offenseApprove(p, refresh); } }, [V.icon("check"), "Approve"]),
+        h("button.btn.danger", { onClick: function () { offenseDeny(p, refresh); } }, [V.icon("x"), "Deny"]),
+      ]),
+    ]);
+  }
+  function pboxOffensePop(p) {
+    PBOX.offenseMem.popped[p.request_id] = true;   // never re-pop the same request (dismiss = use the card)
+    var cmd = "vigil approve sign --base-dir " + (PBOX.offenseMem.base || ".vigil-live")
+            + " --request-id " + p.request_id;
+    var redirect = h("input.input", { type: "text",
+      placeholder: "Tell the agent what to do instead\u2026 (for Deny & redirect)" });
+    var body = h("div.stack", null, [
+      h("div.why", null, "The agent's next step needs your signed approval before it can run."),
+      h("div.kv", null, [
+        h("span.k", null, "Tool"), h("span.v", null, p.tool_name || "action"),
+        h("span.k", null, "Target"), h("span.v.mono", null, p.target || "—"),
+      ]),
+      p.args_preview ? h("div.mono.dim", { style: { fontSize: "var(--fs-xs)", wordBreak: "break-all" } }, p.args_preview) : null,
+      redirect,
+      h("p.helper", null, "Approve signs it in the sovereign cockpit with your owner key (it never reaches "
+        + "the offense console) and the run continues. Deny refuses it. Deny & redirect refuses it AND sends "
+        + "your note to steer the agent so it re-plans. You can also sign from a terminal:"),
+      h("code.mono", { style: { fontSize: "var(--fs-xs)", wordBreak: "break-all", display: "block" } }, cmd),
+    ]);
+    var done = function () { if (m) { try { m.close(); } catch (e) {} } PBOX.offenseMem.modal = null; };
+    var refresh = function () { pboxApprovalPoll(); };
+    var denyRedirect = function () {
+      var t = (redirect.value || "").trim();
+      if (!t) { V.toast("Type what the agent should do instead first.", true); if (redirect.focus) redirect.focus(); return; }
+      injectIntoRun((PBOX.run && PBOX.run.slug) || "", redirect);   // steer (honest toast: live vs queued)
+      offenseDeny(p, refresh);                                       // and refuse the exact action
+      done();
+    };
+    redirect.addEventListener("keydown", function (e) { if (e.key === "Enter") { e.preventDefault(); denyRedirect(); } });
+    var m = openModal("Approve this action?", body, [
+      h("button.btn", { onClick: denyRedirect }, [V.icon("edit"), "Deny & redirect"]),
+      h("button.btn.danger", { onClick: function () { offenseDeny(p, refresh); done(); } }, [V.icon("x"), "Deny"]),
+      h("button.btn.owner", { onClick: function () { offenseApprove(p, refresh); done(); } }, [V.icon("check"), "Approve"]),
+    ], { onCancel: function () { PBOX.offenseMem.modal = null; } });
+    PBOX.offenseMem.modal = m;
+  }
+  function pboxOffenseMaybePop(pend) {
+    if (PBOX.offenseMem.modal || PBOX.approvalMem.modal) return;   // one modal at a time across both kinds
+    if (!PBOX.offenseMem.seen) { pend.forEach(function (p) { PBOX.offenseMem.popped[p.request_id] = true; }); PBOX.offenseMem.seen = true; return; }
+    for (var i = 0; i < pend.length; i++) { if (!PBOX.offenseMem.popped[pend[i].request_id]) { pboxOffensePop(pend[i]); return; } }
+  }
+  function pboxOffenseReset() {
+    PBOX.offenseMem.popped = {}; PBOX.offenseMem.seen = false;
+    if (PBOX.offenseMem.modal) { try { PBOX.offenseMem.modal.close(); } catch (e) {} }
+    PBOX.offenseMem.modal = null;
+  }
+
+  // #1b: the moment an offense approval is ACTED on (approve/deny), drop it from the box optimistically so
+  // the card/popup disappears at once — the pending file lingers on disk until the run consumes the token,
+  // and the 4s poll would otherwise keep re-showing an already-approved card (the "popup after I approve" bug).
+  function pboxForgetApproval(rid) {
+    if (!rid) return;
+    PBOX.offenseApprovals = (PBOX.offenseApprovals || []).filter(function (x) { return x.request_id !== rid; });
+    if (PBOX.offenseMem) { PBOX.offenseMem.popped[rid] = true;                 // never re-pop it
+      if (PBOX.offenseMem.modal) { try { PBOX.offenseMem.modal.close(); } catch (e) {} PBOX.offenseMem.modal = null; } }
+    if (PBOX.ui.open && !PBOX.ui.dismissed) pboxRenderShell();
+  }
 
   function pboxLoadUI() {
     try {
       var s = JSON.parse(localStorage.getItem(PBOX_KEY) || "{}");
-      if (s && typeof s === "object") { PBOX.ui.open = !!s.open; PBOX.ui.dismissed = !!s.dismissed; }
+      if (s && typeof s === "object") { PBOX.ui.open = !!s.open; PBOX.ui.dismissed = !!s.dismissed;
+        PBOX.ui.w = Number(s.w) || 0; PBOX.ui.h = Number(s.h) || 0; PBOX.ui.max = !!s.max; }
     } catch (e) { /* storage off — defaults (collapsed, visible) */ }
   }
   function pboxSaveUI() {
@@ -9599,8 +10254,15 @@
   }
   function pboxTag(e) {
     var p = e.payload || {};
-    if (e.kind === "refusal") return { cls: "pb-blocked", label: "blocked" };
-    if (e.kind === "tool_result" && p.refused) return { cls: "pb-blocked", label: "blocked" };
+    if (e.kind === "refusal" || (e.kind === "tool_result" && p.refused)) {
+      // A >=A2 offense action QUEUED for your signature is NOT an error — it is WAITING ON YOU. Render it as
+      // a distinct amber "needs approval", not a red "blocked". Only a genuine gate DENY (out-of-scope,
+      // kill-switch, structurally-invalid) is "blocked". This is the per-action gate working, not a failure.
+      var _rsn = String(p.reason || p.note || "").toLowerCase();
+      if (/owner approval|requires\s+(?:a\s+)?signed|requires\s+.*approval|awaiting\s+.*approval|needs\s+.*approval/.test(_rsn))
+        return { cls: "pb-approval", label: "needs approval" };
+      return { cls: "pb-blocked", label: "blocked" };
+    }
     if (e.kind === "tool_result" && p.ok === false) return { cls: "pb-failed", label: "failed" };
     if (e.kind === "result" && p.success === false) return { cls: "pb-failed", label: "failed" };
     var ec = pboxErrClass(e);                          // W6b: network vs API vs blocked, so WHY is clear
@@ -9619,6 +10281,31 @@
     }
     return { cls: "", label: "" };
   }
+  // The RESULT card an operator opens from a finding row — the oracle VERDICT + details, XSS-safe (all
+  // values are DOM text nodes). A FACT is a deterministic oracle re-execution over the target's own bytes;
+  // a LEAD is an unconfirmed model/tool proposal.
+  function findingCardBody(p) {
+    p = p || {};
+    var fact = isFact(p);
+    var kv = [];
+    function add(k, v) { if (v) { kv.push(h("span.k", null, k)); kv.push(h("span.v", null, String(v))); } }
+    add("Verdict", fact ? "FACT — oracle-confirmed" : "LEAD — unconfirmed");
+    add("Finding", p.title || p.summary || p.bug_class || "finding");
+    add("Bug class", p.bug_class);
+    add("Surface", p.surface);
+    add("Target", p.target || p.host);
+    add("Severity", p.severity);
+    add("Reference", p.ref);
+    add("Evidence", p.evidence_ref ? "signed evidence certificate attached"
+                                   : (fact ? "oracle re-drive over fresh target bytes" : ""));
+    return h("div.stack", null, [
+      h("div.why" + (fact ? ".ok" : ""), null, fact
+        ? "Confirmed by a deterministic oracle re-executing the exploit over the target's OWN response bytes — a signed FACT, not a model claim."
+        : "An unconfirmed LEAD (a model/tool proposal). Only an oracle-confirmed finding is a FACT."),
+      h("div.kv", null, kv),
+    ]);
+  }
+
   function pboxRow(e) {
     var p = e.payload || {};
     var m = KIND_META[e.kind] || { label: e.kind, sum: function () { return ""; } };
@@ -9626,7 +10313,19 @@
     var t = e.posted_at ? String(e.posted_at).slice(11, 19) : (e.id != null ? "#" + e.id : "");
     var isErr = !!pboxErrClass(e);
     var sum = isErr ? (p.summary || p.detail || p.error_class || "the model call failed") : (m.sum(p) || "—");
-    return h("div.pb-row" + (st.cls ? "." + st.cls : ""), null, [
+    // S5: a tool step opens the full command/output CARD in the (resizable) drawer — inline tool cards in chat.
+    var isTool = e.kind === "tool_call" || e.kind === "tool_result";
+    // THINKING rows (decision/hypothesis/reasoning) show the model's plain-words rationale — let them WRAP
+    // (full text) instead of the one-line-ellipsis every other row uses.
+    var isThink = e.kind === "decision" || e.kind === "hypothesis" || e.kind === "reasoning";
+    // A FINDING row opens the RESULT card — "where do I see the fact": click the finding to see the full
+    // oracle verdict (FACT vs LEAD) + details, right here in the chat.
+    var isFinding = e.kind === "finding";
+    var attrs = isTool ? { style: { cursor: "pointer" }, title: "Show the command + output",
+      onClick: function () { var pr = toolPairFrom(PBOX.events, e); openDrawer("Tool call", toolCardBody(pr.call, pr.result)); } }
+      : (isFinding ? { style: { cursor: "pointer" }, title: "Show the finding / fact",
+        onClick: function () { openDrawer(isFact(p) ? "Confirmed FACT" : "Lead (unconfirmed)", findingCardBody(p)); } } : null);
+    return h("div.pb-row" + (st.cls ? "." + st.cls : "") + (isTool || isFinding ? ".pb-clickable" : "") + (isThink ? ".pb-think-row" : ""), attrs, [
       h("span.pb-ico", null, V.icon(isErr ? "x" : kindIcon(e.kind, p))),
       h("div.pb-body", null, [
         h("div.pb-k", null, [isErr ? "Backend error" : m.label,
@@ -9636,7 +10335,35 @@
       h("span.pb-t", null, t),
     ]);
   }
+  // is the followed run in a TERMINAL (finished) state? (anything but running / no status yet)
+  function pboxIsTerminal() {
+    return !!(PBOX.run && PBOX.run.status && PBOX.run.status !== "running");
+  }
   function pboxStepText() {
+    // TERMINAL: when the run has FINISHED, print a clear "Done" (with the confirmed-fact count) instead of
+    // leaving the last mid-run step up, so the operator plainly sees it completed (operator ask).
+    if (pboxIsTerminal()) {
+      // PAUSED (Wave 7): not Done — the run stopped resumably. Say WHY and what unblocks it, so the
+      // operator never reads a blocked run as finished, and can approve/reply then Resume.
+      if (PBOX.run.status === "paused") {
+        var _pr = String((PBOX.run && PBOX.run.paused) || "");
+        var _pm = _pr === "approval_rejected" ? "Paused \u2014 your last approval expired or was already used; approve the pending action again, then Resume"
+                : _pr === "awaiting_approval" ? "Paused \u2014 awaiting your approval; approve the pending action, then Resume"
+                : _pr === "anti-spin" ? "Paused \u2014 stopped after repeating an action; Resume to continue"
+                : _pr === "ask_user" ? "Paused \u2014 waiting for your reply below"
+                : _pr === "plan-only" ? "Paused \u2014 plan ready (no tools were run)"
+                : ("Paused" + (_pr ? " \u2014 " + _pr : ""));
+        return "\u23F8 " + _pm;
+      }
+      var _facts = 0;
+      for (var j = 0; j < PBOX.events.length; j++) {
+        if (PBOX.events[j].kind === "finding" && isFact(PBOX.events[j].payload || {})) _facts++;
+      }
+      var _lbl = ({ done: "Done", completed: "Done", error: "Ended with an error",
+                    interrupted: "Interrupted", cancelled: "Cancelled" })[PBOX.run.status] || PBOX.run.status;
+      return "\u2713 " + _lbl + (_facts ? " \u2014 " + _facts + " fact(s) confirmed"
+                                         : " \u2014 no facts confirmed");
+    }
     for (var i = PBOX.events.length - 1; i >= 0; i--) {
       var e = PBOX.events[i], p = e.payload || {};
       // W6c: carry the WHY, not just WHAT was refused. W6b's pboxErrClass supersedes the older
@@ -9655,7 +10382,10 @@
   function pboxIsRunning() { return !!(PBOX.run && PBOX.run.status === "running"); }
   function pboxUpdateChrome() {
     // update just the pill/step/dot without rebuilding the feed (so scroll position is preserved).
-    var step = V.$("#pb-step"); if (step) step.textContent = pboxStepText() || "waiting…";
+    var step = V.$("#pb-step");
+    if (step) { step.textContent = pboxStepText() || "waiting…";
+      step.className = "pb-step" + ((PBOX.run && PBOX.run.status === "paused") ? " pb-paused"
+                                    : (pboxIsTerminal() ? " pb-done" : "")); }
     var pill = V.$("#pb-pill");
     if (pill) {
       pill.className = "pb-pill" + (pboxIsRunning() ? " live" : "");
@@ -9682,7 +10412,10 @@
   // W4 — run control (shared by the process box and the Runs table). Non-destructive lifecycle: Cancel
   // terminates the run's process; Retry relaunches its recorded argv (Resume where the CLI supports it).
   function runIsRetryable(r) {
-    return !!(r && r.run_id && (r.status === "error" || r.status === "interrupted" || r.status === "cancelled"));
+    // "paused" (Wave 7): a run that exited resumably (awaiting a signature / anti-spin / ask_user /
+    // plan-only) offers Resume — the same runRetry path, which resumes from the last signed checkpoint.
+    return !!(r && r.run_id && (r.status === "error" || r.status === "interrupted"
+                                || r.status === "cancelled" || r.status === "paused"));
   }
   // in-flight guard: a second click on the same run's control is ignored until the first resolves, so a
   // double-click can never fire two concurrent cancels/retries (the backend also refuses a second running
@@ -9719,6 +10452,31 @@
   function pboxRetry() {
     if (PBOX.run) runRetry(PBOX.run.run_id, function () { PBOX.following = ""; pboxPoll(); });  // follow the NEW run
   }
+  // #2 RESIZE/MAXIMIZE: the process box is a bottom-right HUD, so a native bottom-right resize handle grows
+  // off-screen. A TOP-LEFT grip dragged up/left grows it INTO the screen; the size + maximized state persist.
+  function pboxToggleMax() { PBOX.ui.max = !PBOX.ui.max; pboxSaveUI(); pboxRenderShell(); }
+  function pboxStartResize(ev) {
+    ev.preventDefault();
+    var card = V.$(".pb-card"); if (!card) return;
+    var sx = ev.clientX, sy = ev.clientY;
+    var r = card.getBoundingClientRect(), sw = r.width, sh = r.height;
+    var maxW = window.innerWidth * 0.96, maxH = window.innerHeight * 0.90;
+    function move(e2) {
+      // bottom-right anchored → dragging the grip up/left (negative delta) ENLARGES the box.
+      var w = Math.max(260, Math.min(maxW, sw + (sx - e2.clientX)));
+      var h = Math.max(150, Math.min(maxH, sh + (sy - e2.clientY)));
+      card.style.width = w + "px"; card.style.height = h + "px";
+      PBOX.ui.w = Math.round(w); PBOX.ui.h = Math.round(h); PBOX.ui.max = false;
+    }
+    function up() {
+      document.removeEventListener("pointermove", move);
+      document.removeEventListener("pointerup", up);
+      pboxSaveUI();
+    }
+    document.addEventListener("pointermove", move);
+    document.addEventListener("pointerup", up);
+  }
+
   function pboxRenderShell() {
     var host = pboxHost();
     if (PBOX.ui.dismissed) { host.style.display = "none"; return; }
@@ -9744,13 +10502,28 @@
             ? h("button.pb-act.pb-retry", { title: pboxRetryTitle(), onClick: pboxRetry },
                 (PBOX.run && PBOX.run.resumable) ? "Resume" : "Retry")
             : null)),
+        h("button.pb-x", { title: PBOX.ui.max ? "Restore size" : "Maximize",
+          "aria-label": PBOX.ui.max ? "Restore activity size" : "Maximize activity",
+          onClick: pboxToggleMax }, V.icon(PBOX.ui.max ? "minimize" : "maximize")),
         h("button.pb-x", { title: "Minimize", "aria-label": "Minimize activity",
           onClick: function () { PBOX.ui.open = false; pboxSaveUI(); pboxRenderShell(); } }, "–"),
         h("button.pb-x", { title: "Hide", "aria-label": "Hide activity",
           onClick: function () { PBOX.ui.dismissed = true; pboxSaveUI(); pboxHost().style.display = "none"; } }, "×"),
       ]),
     ]);
-    var step = h("div.pb-step#pb-step", null, pboxStepText() || "waiting…");
+    var step = h("div.pb-step" + ((PBOX.run && PBOX.run.status === "paused") ? ".pb-paused"
+                 : (pboxIsTerminal() ? ".pb-done" : "")) + "#pb-step", null, pboxStepText() || "waiting…");
+    // S1/S1b: pending approvals for the followed run — sovereign (seq-based) AND offense-engage (request_id)
+    // cards right in the box, so a chat-launched engage's queued tool is actionable without leaving the chat.
+    var sovCards = (PBOX.pendingApprovals && PBOX.pendingApprovals.length)
+      ? PBOX.pendingApprovals.map(PBOX_AUX.card) : [];
+    var offCards = (PBOX.offenseApprovals && PBOX.offenseApprovals.length)
+      ? PBOX.offenseApprovals.map(pboxOffenseCard) : [];
+    var allCards = sovCards.concat(offCards);
+    var approvals = allCards.length
+      ? h("div.pb-approvals", null, [h("div.pb-approvals-h", null, [V.icon("key"), h("span", null, "Waiting for your approval")])]
+          .concat(allCards))
+      : null;
     var body;
     if (PBOX.run && PBOX.run.stream === "none") {
       body = h("div.pb-feed#pb-feed", null,
@@ -9762,7 +10535,12 @@
     } else {
       body = h("div.pb-feed#pb-feed", null, PBOX.events.slice(-PBOX_CAP).map(pboxRow));
     }
-    V.mount(host, h("div.pb-card", null, [head, step, body]));
+    var cardStyle = {};
+    if (!PBOX.ui.max && PBOX.ui.w && PBOX.ui.h) { cardStyle.width = PBOX.ui.w + "px"; cardStyle.height = PBOX.ui.h + "px"; }
+    var grip = h("div.pb-grip#pb-grip", { title: "Drag to resize" });
+    V.mount(host, h("div.pb-card" + (PBOX.ui.max ? ".pb-max" : ""), { style: cardStyle },
+      [grip, head, step, approvals, body]));
+    var g = V.$("#pb-grip"); if (g) g.addEventListener("pointerdown", pboxStartResize);
     var f = V.$("#pb-feed"); if (f) f.scrollTop = f.scrollHeight;   // land at the newest on (re)open
   }
   function pboxOnEvent(e) {
@@ -9783,6 +10561,35 @@
     if (PBOX.es) { try { PBOX.es.close(); } catch (e) {} PBOX.es = null; }
     PBOX.events = []; PBOX.seen = {};
   }
+  // S1: poll the sovereign-plane pending approvals for the followed run and INTERRUPT with the shared
+  // approve/deny/deny-&-redirect modal — so a chat operator never misses a proposal. Live owns the interrupt
+  // on its own screen (it has its own AUX + inline cards); everywhere else the global PBOX pops it.
+  function pboxApprovalPoll() {
+    V.getJSON(SOV("/api/snapshot")).then(function (s) {
+      PBOX.pendingApprovals = (s && s.pending_approvals) || [];
+      if ((location.hash || "").indexOf("#/live") !== 0) PBOX_AUX.maybePop(PBOX.pendingApprovals);
+      if (PBOX.ui.open && !PBOX.ui.dismissed) pboxRenderShell();
+    }).catch(function () { /* sovereign plane offline — approvals just won't show */ });
+    // S1b: ALSO surface OFFENSE engage approvals. The chat launches an offense `vigil engage`; its queued
+    // higher-tier tool is published to the keyless offense broker (OFF /api/approvals/), which the sovereign
+    // snapshot above does NOT carry — so without this a chat-launched engage that paused at awaiting_approval
+    // would never surface its approval in the chat (the gap this closes).
+    V.getJSON(OFF("/api/approvals/loopback")).then(function (d) {
+      var had = (PBOX.offenseApprovals || []).length;
+      PBOX.offenseApprovals = (d && d.pending) || [];
+      PBOX.offenseMem.base = (d && d.base_dir) || PBOX.offenseMem.base;
+      // #1: an offense action is BLOCKING the run on your signature — make it impossible to miss. A NEWLY
+      // pending approval un-hides + opens the process box so the actionable Approve/Deny card is visible
+      // (the operator asked "why can I only SEE 'needs approval', not act on it" — the card lives in the box).
+      if (PBOX.offenseApprovals.length && !had) {
+        if (PBOX.ui.dismissed) { PBOX.ui.dismissed = false; }
+        if (!PBOX.ui.open) { PBOX.ui.open = true; }
+        pboxSaveUI(); pboxHost().style.display = "";
+      }
+      if ((location.hash || "").indexOf("#/live") !== 0) pboxOffenseMaybePop(PBOX.offenseApprovals);
+      if (PBOX.ui.open && !PBOX.ui.dismissed) pboxRenderShell();
+    }).catch(function () { /* offense plane offline — offense approvals just won't show */ });
+  }
   function pboxFollow(run) {
     // (re)subscribe to a run's live feed. Held in PBOX.es (never liveES), so a route change can't kill it.
     pboxDetach();
@@ -9790,6 +10597,8 @@
     // permanent kill). It comes back as whatever it was (pill if collapsed), never force-expanded.
     if (run && PBOX.ui.dismissed) { PBOX.ui.dismissed = false; pboxSaveUI(); }
     PBOX.run = run; PBOX.following = run ? run.run_id : "";
+    PBOX_AUX.reset();   // S1: re-baseline approvals for the newly-followed run
+    pboxOffenseReset(); // S1b: re-baseline OFFENSE approvals too
     if (run && run.stream === "blackboard" && run.slug) {
       PBOX.es = V.sse(OFF("/api/blackboard?slug=" + encodeURIComponent(run.slug)), pboxOnEvent, function () {});
     } else if (run && run.stream === "progress") {
@@ -9866,7 +10675,8 @@
     pboxLoadUI();
     pboxRenderShell();
     pboxPoll();
-    PBOX.poll = setInterval(function () { if (!document.hidden) pboxPoll(); }, 4000);
+    pboxApprovalPoll();
+    PBOX.poll = setInterval(function () { if (!document.hidden) { pboxPoll(); pboxApprovalPoll(); } }, 4000);
   }
 
   // ---- boot ------------------------------------------------------------------

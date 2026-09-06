@@ -90,6 +90,103 @@ def test_valid_json_decision_via_fake_client(state):
     assert d.action == ActionType.USE_TOOL and d.tool.tool_name == "nmap"
 
 
+# --- REGRESSION: the authoritative in-scope target is surfaced in the TRUSTED header so the model aims
+# tool calls at the real host:port instead of fabricating "http://<engagement-slug>/..." (the observed
+# failure: the model built the URL from the engagement name → out-of-scope deny, zero tools, zero FACTs).
+
+
+def test_target_is_rendered_in_the_trusted_header():
+    from vigil_integration.live.think_claude import _build_messages
+    st = AgentState(
+        engagement_slug="chatfact-diag",
+        objective="Confirm error-based SQL injection at /records/search on the q parameter.",
+        phase=Phase.INFORMATIONAL,
+        target="http://127.0.0.1:19010/records/search?q=test",
+    )
+    _system, user = _build_messages(st, {})
+    # the real host:port is present, ABOVE the untrusted context region (i.e. in the trusted framing)
+    assert "http://127.0.0.1:19010/records/search?q=test" in user
+    head = user.split("UNTRUSTED", 1)[0]
+    assert "http://127.0.0.1:19010" in head
+    # and the model is told to aim at it and NOT to treat the engagement name as a host
+    assert "aim EVERY tool call" in user
+    assert "NOT a hostname" in user
+
+
+def test_system_prompt_documents_the_error_based_sqli_redrive_fields():
+    """The non-destructive SQLi FACT path needs the model to fill extracted_info with the exact fields the
+    engine's re-drive spec reads (bug_class / insertion_point / request_payload). Guard that the roster
+    prompt still documents them, so the model can trigger the oracle re-drive instead of only ever proposing
+    a destructive tool."""
+    from vigil_integration.live.think_claude import _SYSTEM_PROMPT
+    for needle in ("error_based_sqli", "insertion_point", "request_payload", "exploit_succeeded"):
+        assert needle in _SYSTEM_PROMPT, f"system prompt no longer documents {needle!r} for the re-drive path"
+
+
+def test_no_target_keeps_the_header_backward_compatible():
+    from vigil_integration.live.think_claude import _build_messages
+    st = AgentState(engagement_slug="loopback", objective="probe", phase=Phase.INFORMATIONAL)
+    _system, user = _build_messages(st, {})
+    # no target set → no target line at all (unchanged prompt shape for callers that never set it)
+    assert "target (" not in user
+
+
+def test_engine_seeds_state_target_reaches_the_think_prompt():
+    """End-to-end through think(): the state.target the engine sets from the seed URL is what the model
+    is shown as the host to hit — captured from the client kwargs, not asserted on internal strings only."""
+    from vigil_integration.live.think_claude import _build_messages  # noqa: F401  (import-safety)
+    st = AgentState(engagement_slug="loopback", objective="confirm sqli",
+                    phase=Phase.INFORMATIONAL, target="http://127.0.0.1:18080/search?q=x")
+    fc = FakeClient(text=json.dumps({"action": "ask_user", "reasoning": "need more"}))
+    think(st, {}, client=fc)
+    msgs = fc.captured.get("messages") or []
+    blob = json.dumps(msgs)
+    assert "http://127.0.0.1:18080/search?q=x" in blob
+
+
+# --- AUTO-FALLBACK: a model that returns NO usable decision (a refusal → empty text) falls back ONCE ------
+# to _FALLBACK_MODEL (claude-opus-4-8) and SAYS SO in the rationale; a genuine ask_user never falls back;
+# the fallback model itself never recurses.
+
+
+def test_no_usable_decision_falls_back_to_opus48(state):
+    from vigil_integration.live.think_claude import _think_via_client
+    valid = json.dumps({"action": "use_tool", "tool": {"tool_name": "nmap"}, "reasoning": "recon"})
+
+    class _ModelAware:
+        def __init__(self):
+            self.models: list = []
+            self.messages = self
+
+        def create(self, **kw):
+            self.models.append(kw.get("model"))
+            # the CHOSEN model "declines" (a refusal comes back as empty text); the fallback answers
+            return _Response(valid if kw.get("model") == "claude-opus-4-8" else "")
+
+    c = _ModelAware()
+    d = _think_via_client(c, "sys", "user", model="claude-opus-5", max_tokens=1024)
+    assert d.action == ActionType.USE_TOOL and d.tool.tool_name == "nmap"
+    assert c.models == ["claude-opus-5", "claude-opus-4-8"]          # tried the chosen, fell back exactly ONCE
+    assert "claude-opus-4-8" in (d.reasoning or "") and "fallback" in (d.reasoning or "").lower()
+
+
+def test_genuine_ask_user_does_not_trigger_a_fallback(state):
+    from vigil_integration.live.think_claude import _think_via_client
+    ask = json.dumps({"action": "ask_user", "reasoning": "need scope", "question": "which host?"})
+    c = FakeClient(text=ask)
+    d = _think_via_client(c, "s", "u", model="claude-opus-5", max_tokens=1024)
+    assert d.action == ActionType.ASK_USER and d.question == "which host?"
+    assert c.captured["model"] == "claude-opus-5"                    # a DELIBERATE ask_user → no second call
+
+
+def test_fallback_model_itself_never_recurses(state):
+    from vigil_integration.live.think_claude import _think_via_client
+    c = FakeClient(text="")                                          # opus-4-8 also returns nothing usable
+    d = _think_via_client(c, "s", "u", model="claude-opus-4-8", max_tokens=1024)
+    assert d.action == ActionType.ASK_USER                           # fail-closed pause, NO infinite fallback
+    assert c.captured["model"] == "claude-opus-4-8"                  # exactly one call (model == fallback)
+
+
 def test_resolve_model_explicit_then_env_then_default(monkeypatch):
     monkeypatch.delenv("CRUCIBLE_ANTHROPIC_MODEL", raising=False)
     monkeypatch.delenv("SIGIL_LLM_MODEL", raising=False)

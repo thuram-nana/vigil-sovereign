@@ -210,6 +210,7 @@ def _cmd_engage(args: argparse.Namespace) -> int:
             return 2
     cfg = EngineConfig(
         slug=args.slug, session_id=str(getattr(args, "session", "") or ""),
+        run_key=str(getattr(args, "run_key", "") or ""),   # F2b: run-scoped checkpoint partition (finding #3)
         connections=tuple(connect),
         base_dir=args.base_dir, replay=replay, api_key=None, brain=brain,
         model=(pick_model or None), backend=(pick_backend or None),
@@ -3618,6 +3619,12 @@ def build_parser() -> argparse.ArgumentParser:
                     help="the SESSION this run belongs to (F3): the per-session knowledge-graph partition "
                          "key. Runs sharing a session accumulate + reuse each other's prior context; empty "
                          "falls back to the slug. A partition/organisation key only — it grants no authority.")
+    pe.add_argument("--run-key", default="",
+                    help="F2b (finding #3): the RESUMABLE-UNIT id (the console run_id) — the run-state "
+                         "CHECKPOINT partition key. Runs get DISJOINT checkpoint partitions so a --resume "
+                         "reads its OWN paused state, never a prior/foreign run's completed head. Empty falls "
+                         "back to --slug. A --resume MUST pass the same --run-key as the run it continues "
+                         "(retry_run does this by reusing the parent argv). A partition key only — no authority.")
     pe.add_argument("--connect", default="",
                     help="comma-separated CONNECTED session ids (F4) whose graph partitions this run may "
                          "UNION as priors (a read-time scope; each prior stays origin-tagged + "

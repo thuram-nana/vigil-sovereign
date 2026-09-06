@@ -202,6 +202,17 @@ class EngineConfig:
     # owns a disjoint graph + its own accumulating prior context); empty falls back to the slug. It is a
     # partition/organisation key only — it grants no authority and never widens scope.
     session_id: str = ""
+    # F2b: the RESUMABLE-UNIT id (the console run_id) — the run-state CHECKPOINT partition key. Each run owns
+    # a DISJOINT checkpoint partition so a --resume reads its OWN paused state, never a prior/foreign run's
+    # done=True head. Finding #3: slug is the constant "loopback" for every loopback run AND all loopback runs
+    # share one {slug}.spine file + one "loopback" engagement tag, so rebuild_head returned the GLOBAL latest
+    # loopback snapshot (usually a prior COMPLETED run) and a resumed pause NO-OP'd. session_id is too coarse
+    # (one chat drives many runs under one stable session, so an earlier COMPLETED engagement's higher-seq
+    # done=True snapshot outranks a later paused one in the same session partition — the hole stays open). A
+    # partition key ONLY — grants no authority, never widens scope. Empty falls back to the slug (byte-identical
+    # to pre-fix). retry_run reuses the parent argv, so a --resume inherits the parent's run_key = the resume
+    # link; a pre-fix run with no --run-key falls back to slug = correct automatic migration.
+    run_key: str = ""
     # F4: the operator-CONSENTED connected session ids whose graph partitions this run may UNION as priors
     # (a read-time scope; each unioned prior stays origin-tagged and non-authoritative). Empty = isolated.
     connections: Sequence[str] = ()
@@ -354,6 +365,13 @@ def build_engine(config: EngineConfig) -> VigilEngine:
     prov = config.provisioned or provision_authority(
         slug=config.slug, scope=config.scope, base_dir=config.base_dir, vault=op_vault)
 
+    # Materialize the CRUCIBLE charter form of this run's LOOPBACK authorization so the T2 SQLi re-drive's
+    # HttpExecutor scope gate (which reads targets/<slug>/charter.md) agrees with the engine's own signed
+    # --scope authority. Loopback-only + never-overwrite + honestly-labelled; a no-op for non-loopback scope
+    # or an existing charter. Without this, an autonomous engage's confirmed SQLi stays a LEAD (re-drive
+    # refused as charter_missing). See ensure_loopback_charter.
+    ensure_loopback_charter(config.slug, config.scope)
+
     # -- attestation (WS-6): operator identity + signer + durable ledger writer ---------------------
     op_kp = config.operator_keypair or load_or_create_operator_keypair(
         path=str(base / "operator.key"), vault=op_vault)
@@ -452,13 +470,18 @@ def build_engine(config: EngineConfig) -> VigilEngine:
     elif effective_authority is not None:
         import time as _time
         _nonce_dir = config.approval_nonce_dir or str(base / "approval-nonces")
+        # ONE ledger, shared by the broker's live-token PRE-FILTER (SITE 8) and the gate's authoritative
+        # check-AND-burn (consume_token). Sharing it lets token_source skip an already-single-use-spent
+        # shadow token in favour of a live one, while consume_token stays the SOLE burn authority.
+        _nonce_ledger = NonceLedger(_nonce_dir)
         if config.approval_token_source is not None:
             _token_source = config.approval_token_source        # injectable (tests)
         else:
-            approval_broker = ApprovalBroker(approvals_root(config.base_dir), now=_time.time)
+            approval_broker = ApprovalBroker(approvals_root(config.base_dir), now=_time.time,
+                                             is_consumed=_nonce_ledger.is_consumed)
             _token_source = approval_broker.token_source
         approval_gate = build_approval_gate(
-            gate, authority=effective_authority, ledger=NonceLedger(_nonce_dir),
+            gate, authority=effective_authority, ledger=_nonce_ledger,
             now=_time.time, token_source=_token_source,
         )
     else:
@@ -642,18 +665,25 @@ def build_engine(config: EngineConfig) -> VigilEngine:
             return True
         return bool(config.owner_approves_offense)
 
+    # F2b state partition (finding #3): key the run-state checkpoint by the RUN (fall back to the slug). ONE
+    # expression used by BOTH the WRITE (checkpoint) and the READ (rebuild) seams — key them apart and
+    # rebuild(run) misses the writes, has_progress goes False, and a paused run FRESH-starts, re-firing every
+    # pre-pause offense tool (the fatal asymmetric-keying mode). Mirrors graph_partition (below) but per-RUN,
+    # because one session drives many runs and the resume must read THIS run's own paused head, not a sibling's.
+    _ckpt_key = (config.run_key or "").strip() or config.slug
+
     def checkpoint(state: AgentState, seq: int) -> Any:
         try:
-            return spine.write_state(state, seq=seq, engagement=config.slug)
+            return spine.write_state(state, seq=seq, engagement=_ckpt_key)
         except Exception:  # noqa: BLE001 — a spine outage is a recorded no-op, never fatal to the run
             return None
 
     def rebuild() -> "tuple[AgentState, int]":
-        # W2b resume: ONE read → (last SIGNED offline-verified AgentState, its head_seq) for this slug, so
-        # the state and the seq are always from the SAME snapshot (no two-read race). (fresh, 0) on an
-        # empty/unreadable/forged spine (deny-by-default). Total; never raises.
+        # W2b resume: ONE read → (last SIGNED offline-verified AgentState, its head_seq) for THIS RUN (slug
+        # fallback), so the state and the seq are always from the SAME snapshot (no two-read race). (fresh, 0)
+        # on an empty/unreadable/forged spine (deny-by-default). Total; never raises.
         try:
-            return spine.rebuild_head(engagement=config.slug)
+            return spine.rebuild_head(engagement=_ckpt_key)
         except Exception:  # noqa: BLE001
             return (AgentState(), 0)
 
@@ -1017,6 +1047,67 @@ def coerce_int_safe(value: Any) -> int:
         return 0
 
 
+def _host_is_loopback(host: str) -> bool:
+    """True IFF ``host`` is a loopback literal (127.0.0.0/8 or ::1) or ``localhost``."""
+    import ipaddress
+    h = str(host or "").strip().strip("`").rstrip(".").lower()
+    if not h:
+        return False
+    if h == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(h.strip("[]")).is_loopback
+    except ValueError:
+        return False
+
+
+def ensure_loopback_charter(slug: str, scope: Sequence[str]) -> Optional[str]:
+    """Materialize a signed CRUCIBLE charter for ``slug`` scoped to ``scope`` when — and ONLY when —
+    every in-scope host is a loopback literal (the owner's own machine).
+
+    WHY: the integration engine authorizes tool calls through the signed ``--scope`` authority (its own
+    executor's egress guard), but the T2 SQLi re-drive rides a CRUCIBLE ``HttpExecutor`` whose scope gate
+    reads ``targets/<slug>/charter.md`` (``ethics.require_charter_signed`` + ``require_in_scope``). An
+    autonomously-launched engage (e.g. the chat's per-session slug) has no charter file, so the re-drive is
+    refused as ``charter_missing`` → ``reachable=False`` → a confirmed SQLi stays a LEAD instead of a FACT,
+    even though the engine's own executor reached the same host. This writes the charter form of the SAME
+    authorization the run already enforces so BOTH gates agree.
+
+    FAIL-CLOSED + honest: (1) writes ONLY when EVERY scope host is loopback — a non-loopback target still
+    requires a real, human-signed charter (this never auto-authorizes an external host); (2) NEVER overwrites
+    an existing charter (a real one wins); (3) the ``Signed:`` line is honestly labelled as an auto-charter
+    for an owner loopback owner-test, not a forged human signature. Returns the charter path written, or None
+    (nothing written / not applicable / any error — never raises into engine construction)."""
+    try:
+        hosts = [str(h).strip() for h in (scope or ()) if str(h).strip()]
+        if not hosts or not all(_host_is_loopback(h) for h in hosts):
+            return None    # external host in scope → require a real signed charter (fail-closed)
+        from framework.v2.common import paths as _paths
+        cp = _paths.charter_path(slug)
+        if cp.exists():
+            return None    # respect an existing (possibly human-signed) charter — never overwrite
+        cp.parent.mkdir(parents=True, exist_ok=True)
+        rows = "\n".join(f"| {h} | owner loopback (auto-provisioned) |" for h in hosts)
+        date = datetime.date.today().isoformat()
+        charter = (
+            f"# Engagement Charter — {slug}\n\n"
+            "Auto-provisioned by `vigil engage` for an OWNER LOOPBACK owner-test. This materializes, in the\n"
+            "CRUCIBLE charter form the re-drive scope gate reads, the SAME loopback authorization the run\n"
+            "already enforces end-to-end (the signed `--scope` authority + the console's `is_loopback` gate).\n"
+            "It is written ONLY when every in-scope host is a loopback literal, and never overwrites an\n"
+            "existing charter.\n\n"
+            "## 2. In-scope systems\n\n"
+            "| Host | Notes |\n|------|-------|\n"
+            f"{rows}\n\n"
+            "## 3. Authorization\n\n"
+            f"Signed: `vigil-engage auto-charter (owner loopback)`  Date: `{date}`\n"
+        )
+        cp.write_text(charter, encoding="utf-8")
+        return str(cp)
+    except Exception:  # noqa: BLE001 — charter provisioning is best-effort; failure just leaves the re-drive
+        return None    # LEAD-only (fail-closed), never a crash in engine construction
+
+
 def _build_gate(prov: Provisioned, *, ceiling: str = "A1",
                 classify: Optional[Callable[[str], str]] = None) -> Optional[Callable[..., Any]]:
     """The conjunctive gate over the signed authority. None (⇒ every tool call DENIED) if the framework
@@ -1186,9 +1277,27 @@ def build_approval_gate(
             from .approval_token import consume_token
             decision = consume_token(token, action, authority=authority, now=float(now()), ledger=ledger)
         except Exception:  # noqa: BLE001 — any verification/burn error leaves the action queued (fail-closed)
-            return verdict
+            return verdict                       # infra/burn error (NOT a rejected signature) → stays queued
         if not decision.authorized:
-            return verdict                       # invalid / expired / replayed token → stays queued
+            # A token WAS found + bound to THIS action, but the owner-signed approval was REJECTED (expired
+            # past its dead-man's-switch window, already single-use-spent, or otherwise no longer valid). This
+            # is DISTINCT from "no approval yet" (the no-token / mismatch branches above, which stay generic):
+            # the operator DID approve, but that approval can't be spent, so the run must pause telling them to
+            # APPROVE AGAIN — not the generic "awaiting your first approval" that reads as an invisible loop.
+            #
+            # SECURITY UNCHANGED: outcome stays "queue" (allowed=False) exactly as the old `return verdict`
+            # did — the executor still DENIES; consume_token burns the nonce ONLY after every check passes, so
+            # a reject spends nothing. ONLY the reason string differs. The reason is a FIXED marker + fixed
+            # copy — the raw `decision.reason` is NOT interpolated, so a planted-token field (e.g. token.key_id
+            # inside a key-id-mismatch reason) can never reach report.queued_edges or the append-only spine,
+            # and the marker stays a clean signal. The engine classifies this by CHECK ORDERING (rejected
+            # BEFORE awaiting), so this need not be string-disjoint from the WARDEN "requires owner approval".
+            from .approval_token import APPROVAL_REJECTED_REASON
+            from ..conjunctive_gate import GateVerdict
+            return GateVerdict(False, "queue",
+                               f"{APPROVAL_REJECTED_REASON}: your last approval expired or was already used "
+                               "— approve again",
+                               getattr(verdict, "crucible_allowed", True), getattr(verdict, "warden", None))
 
         from ..conjunctive_gate import GateVerdict
         return GateVerdict(True, "allow",
@@ -1365,11 +1474,28 @@ def _build_oracle(
         if not isinstance(info, dict):
             return None
 
-        # T2 — LIVE RE-DRIVE (error_based_sqli only): a FACT from the TARGET's FRESH response bytes, NOT the
-        # LLM's claimed context. Any failure/refusal/silence returns None → the claim stays a LEAD below.
+        # T2 — LIVE RE-DRIVE (error_signature SQLi family): a FACT from the TARGET's FRESH response bytes,
+        # NOT the LLM's claimed context. Any failure/refusal/silence returns None → the claim stays a LEAD.
         fact_ref = _live_redrive_fact(prov, redrive_executor_factory, info, redrive)
         if fact_ref:
             return fact_ref
+
+        # T2 — WEB-FACT RE-DRIVE (open_redirect / cors / host_header_injection / graphql_introspection /
+        # oidc_redirect_uri): route the claim through the reviewed ``live.web_redrive`` engine, which injects
+        # its OWN canary through a gated, DNS-pinned send, runs the shipped checks + deterministic oracle,
+        # admits each atomic branch against its declared capability, and mints via
+        # certify_admitted(provenance="live_redrive"). A gate refusal / no channel / an oracle non-fire all
+        # yield family_verdict != FACT → the claim stays a LEAD below (fail-closed).
+        web_ref = _live_web_redrive_fact(prov, info, redrive)
+        if web_ref:
+            return web_ref
+
+        # T2 — RUNTIME RE-DRIVE (path_traversal / reflected xss / exposure): route through the runner-owned
+        # runtime_redrive engine (gated send → the matching deterministic oracle → per-branch admit →
+        # certify_admitted provenance="live_redrive"). A non-confirmation stays a LEAD below (fail-closed).
+        runtime_ref = _live_runtime_redrive_fact(prov, info, redrive)
+        if runtime_ref:
+            return runtime_ref
 
         # LEAD-ONLY fallback (AUDIT G4): a boolean/other-class candidate, or an error_based_sqli whose live
         # re-drive did not reproduce, lands here. The deterministic oracle still runs so the LEAD is honestly
@@ -1506,6 +1632,115 @@ def _live_redrive_fact(
                                observed={"channel_established": True})
     except Exception:  # noqa: BLE001 — a cert/admission error confirms nothing (fail-closed)
         return None
+
+
+def _live_web_redrive_fact(prov: Provisioned, info: dict, redrive: Optional[dict]) -> Optional[str]:
+    """T2 — RE-DRIVE a web-fact class (``open_redirect`` / ``cors`` / ``host_header_injection`` /
+    ``graphql_introspection`` / ``oidc_redirect_uri``) through the reviewed :mod:`live.web_redrive` engine
+    and return a signed FACT's ``finding_ref`` ONLY when web_redrive independently confirms the CLAIMED class
+    over VIGIL's OWN gated, DNS-pinned live capture.
+
+    web_redrive injects its OWN canary (never the LLM's proposed value), runs the shipped ``scanner.checks``
+    probes + the deterministic ``predicate_oracle``, fans the response into atomic evidence branches, admits
+    each against its declared capability, and mints via ``certify_admitted(provenance="live_redrive")`` — the
+    same non-LLM channel the sovereign anti-hallucination gate requires. The FACT is tied to the CLAIM: a
+    minted certificate is returned only when ``family_verdict(claimed) == "FACT"`` (a sibling class web_redrive
+    also probes and confirms does NOT relabel THIS claim). A gate refusal / no established channel / an oracle
+    non-fire all yield a non-FACT family verdict → None → the claim stays a LEAD (fail-closed). The LLM's
+    claimed ``oracle_context`` is never read for the fact.
+
+    FATAL-2: every framework/web_redrive import is function-local (this is the offense-side re-drive path)."""
+    if not isinstance(redrive, dict):
+        return None
+    url = str(redrive.get("url") or "").strip()
+    if not url:
+        return None
+    try:
+        from framework.v2.verify.verifier import normalize_bug_class  # noqa: PLC0415
+        # LLM_CLAIM_WEB_FACT_CLASSES excludes oidc_redirect_uri: from an LLM-supplied class the OIDC (A07)
+        # impact is unverifiable (live evidence == a plain open_redirect), so this seam never upgrades to
+        # oidc (red-pen BLOCK-1). web_redrive still accepts oidc from a tool-report claim in proof.run.
+        from .web_redrive import LLM_CLAIM_WEB_FACT_CLASSES, web_redrive  # noqa: PLC0415 (framework at CALL)
+    except Exception:  # noqa: BLE001 — module unavailable ⇒ cannot re-drive → LEAD (fail-closed)
+        return None
+    claimed = normalize_bug_class(str(redrive.get("bug_class") or info.get("bug_class") or ""))
+    if claimed not in LLM_CLAIM_WEB_FACT_CLASSES:
+        return None    # not an LLM-claimable web-fact class → nothing for this seam to confirm → LEAD
+
+    try:
+        # ``prov.slug`` is BOTH the gate-authorization slug and the certificate-binding slug (the run's
+        # authority is provisioned under it), so the two scopes are identical by construction — mirrors
+        # ``proof.run._web_redrive_mint``. ``claimed_class`` gates the oidc branch (identical predicate to
+        # open_redirect, so it must fire only when the claim IS oidc, never as a severity upgrade).
+        wr = web_redrive(url, slug=prov.slug, engagement_slug=prov.slug, signers=prov.signers,
+                         claimed_class=claimed)
+    except Exception:  # noqa: BLE001 — any re-drive/transport/cert error is an unconfirmed claim → LEAD
+        return None
+
+    # Tie the FACT to the CLAIMED class: mint only if web_redrive independently confirmed THAT class.
+    try:
+        if wr.family_verdict(claimed) != "FACT":
+            return None
+    except Exception:  # noqa: BLE001 — cannot read the verdict ⇒ treat as unconfirmed → LEAD
+        return None
+    # Return the FACT certificate that belongs to the CLAIMED class (web_redrive may also have signed
+    # sibling-class facts on the same URL; those are persisted but must not relabel this claim).
+    for f in getattr(wr, "facts", []) or []:
+        try:
+            if getattr(f, "is_fact", False) and normalize_bug_class(getattr(f, "bug_class", "")) == claimed:
+                ref = str(getattr(f, "finding_ref", "") or "")
+                if ref:
+                    return ref
+        except Exception:  # noqa: BLE001 — a malformed result entry is skipped, never crashes the seam
+            continue
+    return None    # family verdict said FACT but no matching signed cert surfaced → LEAD (fail-closed)
+
+
+def _live_runtime_redrive_fact(prov: Provisioned, info: dict, redrive: Optional[dict]) -> Optional[str]:
+    """T2 — RE-DRIVE a RESPONSE-DERIVED class (``path_traversal`` / ``xss`` reflected / ``exposure``) through
+    the runner-owned :mod:`live.runtime_redrive` engine and return a signed FACT's ``finding_ref`` ONLY when
+    the matching deterministic oracle (side_effect / reflection_context / predicate) confirms the CLAIMED
+    class over VIGIL's OWN gated live capture.
+
+    Mirrors :func:`_live_web_redrive_fact`: the runner crafts its own probe (never the LLM's payload), mints
+    via ``certify_admitted(provenance="live_redrive")``, and the FACT is tied to the CLAIM
+    (``family_verdict(claimed) == "FACT"`` and the returned cert's ``bug_class == claimed``). A gate refusal /
+    no channel / an oracle non-fire all yield a non-FACT → None → the claim stays a LEAD (fail-closed). Unlike
+    the web seam, runtime_redrive runs ONLY the claimed class, so there is no sibling to disambiguate.
+
+    FATAL-2: every framework/runtime_redrive import is function-local (offense-side re-drive path)."""
+    if not isinstance(redrive, dict):
+        return None
+    url = str(redrive.get("url") or "").strip()
+    if not url:
+        return None
+    try:
+        from framework.v2.verify.verifier import normalize_bug_class  # noqa: PLC0415
+        from .runtime_redrive import RUNTIME_FACT_CLASSES, runtime_redrive  # noqa: PLC0415 (framework at CALL)
+    except Exception:  # noqa: BLE001 — module unavailable ⇒ cannot re-drive → LEAD (fail-closed)
+        return None
+    claimed = normalize_bug_class(str(redrive.get("bug_class") or info.get("bug_class") or ""))
+    if claimed not in RUNTIME_FACT_CLASSES:
+        return None    # not a runtime-redrive class → nothing for this seam to confirm → LEAD
+    try:
+        rr = runtime_redrive(url, slug=prov.slug, engagement_slug=prov.slug, signers=prov.signers,
+                             claimed_class=claimed)
+    except Exception:  # noqa: BLE001 — any re-drive/transport/cert error is an unconfirmed claim → LEAD
+        return None
+    try:
+        if rr.family_verdict(claimed) != "FACT":
+            return None
+    except Exception:  # noqa: BLE001 — cannot read the verdict ⇒ treat as unconfirmed → LEAD
+        return None
+    for f in getattr(rr, "facts", []) or []:
+        try:
+            if getattr(f, "is_fact", False) and normalize_bug_class(getattr(f, "bug_class", "")) == claimed:
+                ref = str(getattr(f, "finding_ref", "") or "")
+                if ref:
+                    return ref
+        except Exception:  # noqa: BLE001 — a malformed result entry is skipped, never crashes the seam
+            continue
+    return None    # family verdict said FACT but no matching signed cert surfaced → LEAD (fail-closed)
 
 
 # ---------------------------------------------------------------------------------------------------
