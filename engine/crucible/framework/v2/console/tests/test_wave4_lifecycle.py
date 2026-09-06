@@ -63,9 +63,15 @@ def test_emergency_stop_argv_per_action(monkeypatch):
         seen["argv"] = a
         return _P(0, "ok")
     monkeypatch.setattr(subprocess, "run", _rec)
-    actions.run_emergency_stop("status");  assert seen["argv"][1:] == ["emergency-stop", "--status"]
-    actions.run_emergency_stop("enter");   assert seen["argv"][1:3] == ["emergency-stop", "--reason"]
-    actions.run_emergency_stop("leave");   assert seen["argv"][1:] == ["emergency-stop", "--leave"]
+    # run_emergency_stop pins --base-dir _live_base() so the restricted-mode ledger is written where the
+    # launch-path containment check reads it (ENH2 red-pen HIGH). Assert the verb + that pin + the action
+    # flag (the base VALUE is _live_base()-dynamic, so it is not pinned here).
+    actions.run_emergency_stop("status")
+    assert seen["argv"][1] == "emergency-stop" and "--base-dir" in seen["argv"] and seen["argv"][-1] == "--status"
+    actions.run_emergency_stop("enter")
+    assert seen["argv"][1] == "emergency-stop" and "--base-dir" in seen["argv"] and "--reason" in seen["argv"]
+    actions.run_emergency_stop("leave")
+    assert seen["argv"][1] == "emergency-stop" and "--base-dir" in seen["argv"] and seen["argv"][-1] == "--leave"
 
 
 # --- panic / down: DETACHED spawn ------------------------------------------------

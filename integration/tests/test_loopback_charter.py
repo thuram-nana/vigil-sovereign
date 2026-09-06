@@ -11,6 +11,13 @@ from __future__ import annotations
 
 import pytest
 
+# This suite exercises `ensure_loopback_charter`, whose writer + reader both resolve
+# `framework.v2.common.paths.charter_path` (and it patches `framework.v2.common.ethics`), so it needs the
+# offense `framework` — absent in the sovereign CI leg. importorskip so it SKIPS there instead of failing;
+# it RUNS in the offense leg, where it is registered in .github/workflows/ci.yml (guard:
+# integration/tests/test_ci_framework_tests_run_in_offense_leg.py).
+pytest.importorskip("framework")
+
 from vigil_integration.live.wiring import ensure_loopback_charter, _host_is_loopback
 
 

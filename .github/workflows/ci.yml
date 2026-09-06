@@ -581,6 +581,7 @@ jobs:
               integration/tests/test_offense_pending_count.py \
               integration/tests/test_report_from_progress.py \
               integration/tests/test_enh2_unique_slug.py \
+              integration/tests/test_loopback_charter.py \
               integration/tests/test_mesh_cicd_posture.py -q
           else
             # STRICT branch protection ⇒ a mergeable PR is up to date with main and this committed
