@@ -160,6 +160,9 @@ class PatchResult(BaseModel):
     evidence_ref: str = ""
     pr_ref: str = ""
     patched_paths: list[str] = Field(default_factory=list)
+    # the exact unified diff that was APPROVED and git-applied into the disposable clone — surfaced so
+    # the operator can `git apply` the same fix in their real tree (the clone is never their source).
+    applied_diff: str = ""
     verification: Optional[FixVerification] = None
     reason: str = ""
     steps: list[PipelineStep] = Field(default_factory=list)
@@ -423,9 +426,10 @@ def _call_propose(propose_patch: Optional[Callable[[Any], Any]], request: Any) -
 
 
 def _refuse(rec: _Recorder, remediation_id: str, status: str, reason: str, *,
-            patched_paths: Optional[list[str]] = None) -> PatchResult:
+            patched_paths: Optional[list[str]] = None, applied_diff: str = "") -> PatchResult:
     return PatchResult(remediation_id=str(remediation_id or ""), status=status, opened_pr=False,
-                       remediated=False, patched_paths=patched_paths or [], reason=reason, steps=rec.steps)
+                       remediated=False, patched_paths=patched_paths or [], applied_diff=applied_diff or "",
+                       reason=reason, steps=rec.steps)
 
 
 # --- the loop ----------------------------------------------------------------------------------------
@@ -520,6 +524,9 @@ def autopatch(
 
     approved = _dedup_by_path(approved)
     approved_paths = [pf.path for pf in approved]
+    applied_diff = "\n".join(
+        (pf.diff_text if pf.diff_text.endswith("\n") else pf.diff_text + "\n")
+        for pf in approved if (pf.diff_text or "").strip())
     if not approved:
         reason = "no patch file approved in-window — refusing to build or open an empty PR (fail-closed)"
         rec.add("edits-empty", TIER_EDIT, "deny", reason)
@@ -527,17 +534,17 @@ def autopatch(
     if any(p in _BULK_TOKENS or p.startswith("-") for p in approved_paths):
         reason = "refusing a wildcard/flag staging path — VIGIL never runs 'git add -A' (fail-closed)"
         rec.add("edits-wildcard", TIER_EDIT, "deny", reason)
-        return _refuse(rec, rid, "unsafe-staging", reason, patched_paths=approved_paths)
+        return _refuse(rec, rid, "unsafe-staging", reason, patched_paths=approved_paths, applied_diff=applied_diff)
 
     # (4) BUILD — A3, inside the disposable, egress-gated fsjob sandbox.
     allowed, outcome, gwhy = _gate_allows(gate, "sandbox_build", repo, False)
     rec.add("build", TIER_BUILD, outcome, gwhy, {"paths": approved_paths})
     if not allowed:
-        return _refuse(rec, rid, "build-denied", f"build gate refused: {gwhy}", patched_paths=approved_paths)
+        return _refuse(rec, rid, "build-denied", f"build gate refused: {gwhy}", patched_paths=approved_paths, applied_diff=applied_diff)
     ok, bres, ereason = _exec_ok(build, request, approved)
     rec.add("build-exec", TIER_BUILD, "ok" if ok else "fail", ereason, {"paths": approved_paths})
     if not ok:
-        return _refuse(rec, rid, "build-failed", f"sandbox build failed: {ereason}", patched_paths=approved_paths)
+        return _refuse(rec, rid, "build-failed", f"sandbox build failed: {ereason}", patched_paths=approved_paths, applied_diff=applied_diff)
     patched_build = getattr(bres, "build_ref", "") or bres
 
     # (5) OPEN PR — A3 DESTRUCTIVE (the gate's threshold-destruction leg) AND an explicit m-of-n quorum.
@@ -545,16 +552,16 @@ def autopatch(
     rec.add("pr-gate", TIER_PR, outcome, gwhy, {"paths": approved_paths})
     if not allowed:
         return _refuse(rec, rid, "pr-denied", f"PR gate refused (destructive/threshold): {gwhy}",
-                       patched_paths=approved_paths)
+                       patched_paths=approved_paths, applied_diff=applied_diff)
     qok, qreason = _quorum_ok(quorum, request)
     rec.add("pr-quorum", TIER_PR, "allow" if qok else "deny", qreason)
     if not qok:
         return _refuse(rec, rid, "pr-quorum-denied",
-                       f"PR blocked — m-of-n threshold not met: {qreason}", patched_paths=approved_paths)
+                       f"PR blocked — m-of-n threshold not met: {qreason}", patched_paths=approved_paths, applied_diff=applied_diff)
     ok, prres, ereason = _exec_ok(open_pr, request, approved)   # stages ONLY the explicit approved files
     rec.add("pr-exec", TIER_PR, "ok" if ok else "fail", ereason, {"paths": approved_paths})
     if not ok:
-        return _refuse(rec, rid, "pr-failed", f"opening the PR failed: {ereason}", patched_paths=approved_paths)
+        return _refuse(rec, rid, "pr-failed", f"opening the PR failed: {ereason}", patched_paths=approved_paths, applied_diff=applied_diff)
     pr_ref = str(getattr(prres, "pr_ref", "") or "")
 
     # (6) VERIFY — 'remediated' is minted ONLY after the fix-verification oracle goes SILENT.
@@ -566,6 +573,7 @@ def autopatch(
     return PatchResult(
         remediation_id=rid, status=status, opened_pr=True, remediated=verification.remediated,
         evidence_ref=verification.evidence_ref, pr_ref=pr_ref, patched_paths=approved_paths,
+        applied_diff=applied_diff,
         verification=verification, reason=verification.reason, steps=rec.steps,
     )
 

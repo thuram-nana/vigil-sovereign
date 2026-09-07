@@ -436,6 +436,13 @@ def _cmd_patch(args: argparse.Namespace) -> int:
     print("--- result ---")
     print(f"status         : {result.status}")
     print(f"applied_paths  : {list(result.patched_paths) or '-'}")
+    # The exact unified diff that was APPROVED + git-applied into the DISPOSABLE clone. The clone is never the
+    # operator's source, so this is how the fix reaches their tree: save it and `git apply` it there (then
+    # `vigil codescan --verify` / the Fixes screen's Verify to confirm the rule cleared).
+    if getattr(result, "applied_diff", ""):
+        print("--- applied diff (git apply this in your repo) ---")
+        print(result.applied_diff.rstrip("\n"))
+        print("--- end diff ---")
     print(f"opened_pr      : {result.opened_pr}   pr_ref={result.pr_ref or '-'}")
     print(f"remediated     : {result.remediated}")
     if verify_oracle is not None:

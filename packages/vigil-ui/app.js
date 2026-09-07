@@ -5961,9 +5961,10 @@
           "Apply runs the gated `vigil patch` ladder — your click is the operator approval for the "
           + "non-destructive stages AND a blanket up-front approval of every proposed edit (no per-file "
           + "prompt); the edits land in a disposable clone, so your source is never touched and no PR is "
-          + "opened. Verify re-runs the deterministic static rule over YOUR source: `cleared` means the "
-          + "rule no longer fires anywhere in the tree (apply the shown diff to your tree first). It proves "
-          + "the pattern is gone, not that a runtime exploit was ever reachable."),
+          + "opened. The output below includes the APPLIED DIFF — save it and `git apply` it in your repo. "
+          + "Then Verify re-runs the deterministic static rule over YOUR source: `cleared` means the rule "
+          + "no longer fires anywhere in the tree. It proves the pattern is gone, not that a runtime "
+          + "exploit was ever reachable."),
         h("div#" + outId, { style: { marginTop: "8px" } }),
         h("div#" + voutId, { style: { marginTop: "8px" } }),
       ]);
