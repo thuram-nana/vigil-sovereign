@@ -60,7 +60,7 @@ dependencies = [
 anthropic   = ["anthropic>=0.40,<1"]
 embeddings  = ["sentence-transformers>=2,<6"]
 analysis    = ["semgrep>=1.100"]
-smt         = ["z3-solver>=4.12,<5"]
+smt         = ["z3-solver>=5.1.0.0,<6"]
 numerics    = ["numpy>=2.4.6,<3"]
 saml        = ["signxml>=5,<6"]                # opt-in cryptographic SAML XML-DSig verification (pulls lxml + cryptography)
 dev         = ["pytest>=9.1.1,<11", "mypy>=2.3.1,<3"]
