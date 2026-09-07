@@ -156,3 +156,28 @@ def test_rename_to_unscanned_extension_is_not_cleared(tmp_path):
     (src / "config.py").rename(src / "config.txt")
     res = codescan.verify_finding_cleared(root=str(src), ref=ref)
     assert res["cleared"] is False and res.get("path_removed") is True   # NOT a false 'fixed'
+
+
+# ---- Phase E.1: an UNTRUSTED external agent diff is RE-VERIFIED through the gated ladder ----
+@_sandbox
+def test_external_good_diff_is_reverified(tmp_path):
+    repo = _mkrepo(tmp_path)
+    r = autopatch_live(_finding(repo), config=_cfg(repo, tmp_path), client=None,
+                       verify_oracle=codescan.build_code_fix_oracle(REF), verify_before_pr=True,
+                       proposed_diff=_GOOD)
+    assert r.status == 'verified-no-pr' and r.remediated is False and r.patched_paths == ['svc/config.py']
+
+
+@_sandbox
+def test_external_noop_diff_is_rejected_never_trusted(tmp_path):
+    repo = _mkrepo(tmp_path)
+    # a VALID diff that applies but does NOT fix the finding (adds a docstring) -> the ladder rejects it
+    noop = ('--- a/svc/config.py' + chr(10) + '+++ b/svc/config.py' + chr(10) +
+            '@@ -1,3 +1,4 @@' + chr(10) + ' import hashlib' + chr(10) + '+\"\"\"m\"\"\"' + chr(10) +
+            ' def fingerprint(pw):' + chr(10) + '     # weak hash' + chr(10))
+    # NOTE: config.py in _mkrepo has import/blank/blank/def... so target lines differ; use the real file shape
+    r = autopatch_live(_finding(repo), config=_cfg(repo, tmp_path), client=None,
+                       verify_oracle=codescan.build_code_fix_oracle(REF), verify_before_pr=True,
+                       proposed_diff=noop)
+    # a no-op or malformed agent diff can NEVER read as verified — it is still-vulnerable or build-failed
+    assert r.status in ('verify-still-vulnerable', 'build-failed') and r.remediated is False

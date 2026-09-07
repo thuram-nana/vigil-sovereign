@@ -529,6 +529,7 @@ def autopatch_live(finding: Any, *, config: CodefixConfig, client: Any = None,
                    verify_oracle: Optional[Callable[[Any, Any], Any]] = None,
                    max_fix_attempts: int = 1,
                    verify_before_pr: bool = False,
+                   proposed_diff: str = "",
                    now: Optional[Callable[[], float]] = None) -> PatchResult:
     """Run the sovereign auto-patch loop against REAL executors: propose (Claude) → clone → apply-in-sandbox
     → (if ``config.pr_enabled`` AND a ``quorum`` passes AND a GitHub token is provisioned) open a gated PR.
@@ -544,6 +545,16 @@ def autopatch_live(finding: Any, *, config: CodefixConfig, client: Any = None,
     Returns the loop's PatchResult (the full gated ladder + status)."""
     session = CodefixSession(config, client=client, killswitch=killswitch, operator_present=operator_present)
     clock = now or time.monotonic
+
+    # Phase E.1 — UNTRUSTED-AGENT RE-VERIFY: when an external diff is supplied (e.g. from the Strix agentic
+    # front-end), it is the ONLY proposal — the inline coder is bypassed — and it is driven through the SAME
+    # gated apply -> build/test gate -> oracle verify ladder. The agent's self-reported "fixed" is never
+    # trusted: the diff earns `verified-no-pr` ONLY if OUR ladder confirms it. No iteration (a fixed diff has
+    # nothing to re-propose), so attempts are pinned to 1.
+    _external = str(proposed_diff or "").strip()
+    if _external:
+        session.propose = lambda _request: _external   # type: ignore[assignment]
+        max_fix_attempts = 1
 
     def approval(_pf: Any) -> PatchApproval:
         if config.apply_edits:

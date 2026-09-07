@@ -449,9 +449,20 @@ def _cmd_patch(args: argparse.Namespace) -> int:
         apply_edits=bool(args.apply_edits), model=resolve_model(args.model),  # --model > Settings choice > default
         build_cmd=_deep_build_cmd,
         pr_enabled=bool(args.open_pr), pr_base=args.pr_base)
+    _ext_diff = ""
+    if str(getattr(args, "proposed_diff", "") or "").strip():
+        try:
+            with open(args.proposed_diff, encoding="utf-8", errors="replace") as _fh:
+                _ext_diff = _fh.read(200_000)   # bounded read of the external agent's diff
+        except OSError as exc:
+            print(f"vigil patch: cannot read --proposed-diff {args.proposed_diff!r}: {exc}", file=sys.stderr)
+            return 2
+        print(f"proposed_diff  : external ({len(_ext_diff)} B) — the coder is BYPASSED; this diff is re-verified "
+              f"through the gated ladder (the agent's self-report is never trusted)")
     result = autopatch_live(finding, config=cfg, client=None, operator_present=bool(args.approve),
                             quorum=quorum, verify_oracle=verify_oracle,
-                            verify_before_pr=deep, max_fix_attempts=(max(1, int(args.fix_attempts)) if deep else 1))
+                            verify_before_pr=deep, max_fix_attempts=(max(1, int(args.fix_attempts)) if deep else 1),
+                            proposed_diff=_ext_diff)
 
     print("--- result ---")
     print(f"status         : {result.status}")
@@ -3899,6 +3910,10 @@ def build_parser() -> argparse.ArgumentParser:
                              "(earns `verified-no-pr`; never the signed `remediated`).")
     ppatch.add_argument("--fix-attempts", type=int, default=3,
                         help="max self-correcting attempts for --deep (default 3).")
+    ppatch.add_argument("--proposed-diff", default="",
+                        help="path to a unified diff from an external agent (e.g. Strix). It becomes the ONLY "
+                             "proposal and is RE-VERIFIED through the gated apply+build+oracle ladder — the "
+                             "agent's self-report is never trusted. Pair with --deep to build/test + verify it.")
     ppatch.set_defaults(func=_cmd_patch)
 
     prem = sub.add_parser(
