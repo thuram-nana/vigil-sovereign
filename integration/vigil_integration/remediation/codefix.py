@@ -173,6 +173,7 @@ class CodeFixRequest(BaseModel):
     target_branch: str = "main"
     branch_prefix: str = "vigil-fix/"
     title: str = ""
+    retry_context: str = ""     # deep-fix Phase C: prior build/test failure text fed back to the coder so it self-corrects
 
     @property
     def fix_branch(self) -> str:

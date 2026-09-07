@@ -451,6 +451,8 @@ def autopatch(
     target_repo: str = "",
     target_branch: str = "",
     seq_start: int = 0,
+    retry_context: str = "",
+    verify_before_pr: bool = False,
 ) -> PatchResult:
     """Drive the AIxCC auto-patch loop for one finding, fail-closed at every stage.
 
@@ -482,6 +484,14 @@ def autopatch(
         return _refuse(rec, rid, "refused-not-confirmed",
                        "auto-patch REFUSED: the spawn boundary declined a non-confirmed finding")
     repo = request.target_repo or request.finding.target or request.remediation_id
+    # deep-fix Phase C: carry prior build/test failure text into the coder's next proposal (default "" ⇒
+    # byte-identical to a single-shot run). The request model declares `retry_context`, so this is a plain
+    # field set — not an untrusted extra attr.
+    if retry_context:
+        try:
+            request.retry_context = str(retry_context)
+        except Exception:  # noqa: BLE001 — a model that rejects it just means no feedback, never a crash
+            pass
 
     # (1) PROPOSE — the injected coder LLM returns a minimal unified-diff PROPOSAL (untrusted).
     proposed = parse_unified_diff(_call_propose(propose_patch, request))
@@ -546,6 +556,33 @@ def autopatch(
     if not ok:
         return _refuse(rec, rid, "build-failed", f"sandbox build failed: {ereason}", patched_paths=approved_paths, applied_diff=applied_diff)
     patched_build = getattr(bres, "build_ref", "") or bres
+
+    # (4b) PRE-PR VERIFY (deep-fix Phase D) — re-fire the finding oracle over the PATCHED CLONE *before* the
+    # PR leg, so a NON-PR deep fix is still oracle-verified. The `remediated` type-lock is UNTOUCHED (it needs
+    # a signed cert AND an opened PR); a DETERMINISTIC oracle going silent on a passed build earns the honest,
+    # weaker `verified-no-pr`. OFF by default (`verify_before_pr=False`) ⇒ the flow falls through to the PR
+    # gate exactly as before (byte-identical).
+    if verify_before_pr:
+        try:
+            fired = _oracle_fired(oracle(request, patched_build)) if oracle is not None else None
+            oerr = ""
+        except Exception as exc:   # noqa: BLE001 — an oracle error confirms nothing (fail-closed to unverified)
+            fired, oerr = None, f": {exc}"
+        tests_ok = getattr(bres, "tests_passed", None)
+        _tnote = "; build/tests passed" if tests_ok else ""
+        if fired is None:
+            vstatus, vreason = "unverified", f"verify oracle returned no usable verdict (fail-closed){oerr}"
+        elif fired:
+            vstatus, vreason = "still-vulnerable", "the finding STILL fires on the patched clone — not fixed"
+        else:
+            vstatus, vreason = "verified-no-pr", f"the finding's rule no longer fires on the patched clone{_tnote}"
+        rec.add("pre-pr-verify", TIER_BUILD, "ok" if fired is False else "fail", vreason, {"verify": vstatus})
+        return PatchResult(
+            remediation_id=rid, status=("verify-" + vstatus if vstatus != "verified-no-pr" else "verified-no-pr"),
+            opened_pr=False, remediated=False, patched_paths=approved_paths, applied_diff=applied_diff,
+            verification=FixVerification(status=vstatus, remediated=False, reason=vreason),
+            reason=vreason, steps=rec.steps,
+        )
 
     # (5) OPEN PR — A3 DESTRUCTIVE (the gate's threshold-destruction leg) AND an explicit m-of-n quorum.
     allowed, outcome, gwhy = _gate_allows(gate, "github_pr", repo, True)

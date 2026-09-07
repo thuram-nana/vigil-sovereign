@@ -36,12 +36,16 @@ from ..autopatch.loop import PatchApproval, PatchResult, autopatch
 from ..remediation.codefix import is_safe_repo_path, render_untrusted_finding
 from ..warden_gate import decide_tool
 from .executor import subprocess_runner
+from .sandbox_exec import SandboxUnavailable, run_sandboxed
 from .think_claude import _build_live_client, _extract_text, _resolve_key, llm_egress_refusal
 from .wiring import default_classify
 
 logger = logging.getLogger("vigil.live.codefix_runner")
 
-_MAX_CONTEXT_BYTES = 8192
+_MAX_CONTEXT_BYTES = 8192            # per sibling file
+_PRIMARY_CONTEXT_BYTES = 16384       # the finding's own file (larger budget)
+_MAX_CONTEXT_FILES = 6               # finding file + up to N same-dir siblings
+_MAX_TOTAL_CONTEXT_BYTES = 48000     # global budget across the repo-context set
 _PATCH_NAME = ".vigil-fix.patch"
 
 
@@ -53,12 +57,14 @@ class CodefixConfig:
     target_repo: str
     base_dir: str
     target_branch: str = ""
-    build_cmd: tuple[str, ...] = ()          # reserved for LAP-later (needs a cwd-capable sandbox runner)
+    build_cmd: str = ""                       # dep-light build/compile gate (Axis A); run in the sandbox clone
+    test_cmd: str = ""                        # repo test command, run in the sandbox clone when dep-light
+    build_timeout: float = 300.0             # per build/test command, inside the bwrap sandbox
     git_bin: str = "git"
     apply_edits: bool = False
     approve_window_s: float = 3600.0
     model: str = "claude-opus-5"             # a CURRENT model; `vigil patch` resolves the Settings choice
-    max_tokens: int = 4000
+    max_tokens: int = 8000
     clone_timeout: float = 120.0
     apply_timeout: float = 120.0
     # --- LAP-3 destructive PR leg (OFF by default) ------------------------------------------------
@@ -81,6 +87,8 @@ class _Exec:
     branch: str = ""
     build_ref: str = ""
     pr_ref: str = ""
+    tests_passed: Optional[bool] = None   # True/False when a build/test cmd ran; None = not run (skipped)
+    build_ran: bool = False
 
 
 @dataclass
@@ -133,6 +141,52 @@ def _file_from_target(target: Any) -> str:
     p = (m.group(1) if m else t).strip()
     ok, _ = is_safe_repo_path(p)
     return p if ok else ""
+
+
+def _gather_repo_context(repo: str, primary: str) -> list[tuple[str, str]]:
+    """Repo-AWARE context for the coder (deep-fix Phase A): the finding's own file (larger budget) plus its
+    same-directory source siblings (same extension) — the local module neighborhood a correct fix usually
+    needs. Every path is validated by ``is_safe_repo_path`` and read read-only from the LOCAL repo; budgeted
+    by file count (``_MAX_CONTEXT_FILES``) and total bytes (``_MAX_TOTAL_CONTEXT_BYTES``). Total: a URL repo,
+    a missing file, or any OS error yields what it has (never raises). The multi-FILE diff the model may then
+    return is already accepted end-to-end by ``parse_unified_diff`` + the edit/build chain."""
+    if not repo or "://" in repo or not primary:
+        return []
+    out: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    total = 0
+
+    def _add(relpath: str, cap: int) -> None:
+        nonlocal total
+        if not relpath or relpath in seen or len(out) >= _MAX_CONTEXT_FILES or total >= _MAX_TOTAL_CONTEXT_BYTES:
+            return
+        ok, _why = is_safe_repo_path(relpath)
+        if not ok:
+            return
+        local = os.path.join(repo, relpath)
+        try:
+            if not os.path.isfile(local):
+                return
+            with open(local, encoding="utf-8", errors="replace") as fh:
+                content = fh.read(cap)
+        except OSError:
+            return
+        seen.add(relpath)
+        out.append((relpath, content))
+        total += len(content)
+
+    _add(primary, _PRIMARY_CONTEXT_BYTES)                    # 1) the finding's own file
+    d = os.path.dirname(primary)
+    ext = os.path.splitext(primary)[1]
+    sib_dir = os.path.join(repo, d) if d else repo
+    try:
+        names = sorted(os.listdir(sib_dir)) if os.path.isdir(sib_dir) else []
+    except OSError:
+        names = []
+    for name in names:                                      # 2) same-dir, same-extension siblings
+        if ext and os.path.splitext(name)[1] == ext:
+            _add(os.path.join(d, name) if d else name, _MAX_CONTEXT_BYTES)
+    return out
 
 
 class CodefixSession:
@@ -243,7 +297,31 @@ class CodefixSession:
                 os.unlink(patch_path)
             except OSError:
                 pass
-        return _Exec(True, reason="fix applies cleanly to the real code (sandbox clone)", build_ref=self.workdir)
+        # Phase B — Axis-A GATE: run the dep-light build/test command(s) INSIDE the network-isolated bwrap
+        # sandbox (writes confined to the clone; no egress). A non-zero exit BLOCKS the fix (it broke the
+        # code); it never CERTIFIES one (that is the oracle's job, Phase D). No command configured ⇒ the gate
+        # is the git-apply check above (honest: tests_passed stays None). bwrap absent ⇒ degrade to
+        # apply-check-only rather than block (fail-open ONLY for the missing-sandbox case, never for a failure).
+        cmds = [c for c in (self.config.build_cmd, self.config.test_cmd) if (c or "").strip()]
+        if not cmds:
+            return _Exec(True, reason="fix applies cleanly to the real code (sandbox clone; no build/test cmd)",
+                         build_ref=self.workdir, tests_passed=None, build_ran=False)
+        for cmd in cmds:
+            try:
+                res = run_sandboxed(cmd, workspace=self.workdir, timeout=self.config.build_timeout)
+            except SandboxUnavailable as exc:
+                return _Exec(True, reason=f"applies cleanly; build/test gate SKIPPED ({exc})",
+                             build_ref=self.workdir, tests_passed=None, build_ran=False)
+            except ValueError as exc:
+                return _Exec(False, reason=f"build/test gate refused: {exc}", build_ref=self.workdir,
+                             tests_passed=False, build_ran=True)
+            if res.timed_out or res.exit_code != 0:
+                tail = (res.stderr or res.stdout or "").strip()[-1200:]
+                why = "timed out" if res.timed_out else f"exit {res.exit_code}"
+                return _Exec(False, reason=f"build/test FAILED in the sandbox clone ({why}): {tail}",
+                             build_ref=self.workdir, tests_passed=False, build_ran=True)
+        return _Exec(True, reason="fix applies cleanly AND passes the build/test gate in the sandbox clone",
+                     build_ref=self.workdir, tests_passed=True, build_ran=True)
 
     def open_pr(self, request: Any, approved: Any) -> _Exec:
         """The DESTRUCTIVE, outward-facing leg (LAP-3): stage ONLY the explicit approved paths (never
@@ -300,24 +378,30 @@ class CodefixSession:
         if finding is None:
             return ""
         fpath = _file_from_target(getattr(finding, "target", ""))
-        context = ""
-        if fpath and self.config.target_repo and "://" not in self.config.target_repo:
-            local = os.path.join(self.config.target_repo, fpath)
-            try:
-                if os.path.isfile(local):
-                    with open(local, encoding="utf-8", errors="replace") as fh:
-                        context = fh.read(_MAX_CONTEXT_BYTES)
-            except OSError:
-                context = ""
+        # Phase A: feed the model the repo NEIGHBORHOOD (the finding's file + same-dir siblings), not one file,
+        # so it can make a correct, possibly MULTI-FILE fix. `retry_context` (Phase C) carries prior build/test
+        # failure text back into the prompt so the coder self-corrects.
+        ctx_files = _gather_repo_context(self.config.target_repo, fpath)
+        if ctx_files:
+            blocks = "\n\n".join(f"File `{cp}`:\n```\n{cc}\n```" for cp, cc in ctx_files)
+            files_note = (f"\n\nThe finding is in `{fpath}`. Relevant files from the repository "
+                          f"(modify whichever are needed for a correct fix):\n{blocks}\n")
+        else:
+            files_note = f"\n\nThe likely file is `{fpath or '(unknown — infer from the finding)'}`.\n"
+        retry_note = ""
+        _rc = getattr(request, "retry_context", "") or ""
+        if _rc:
+            retry_note = ("\n\nA PREVIOUS attempt's patch FAILED the build/tests. Fix the ROOT cause; do not "
+                          "repeat it. Failure output:\n```\n" + str(_rc)[:4000] + "\n```\n")
         prompt = (
             "You are a security fix engineer. A vulnerability has been CONFIRMED by a deterministic oracle. "
-            "Propose the MINIMAL fix as a unified diff.\n\n"
+            "Propose the MINIMAL, correct fix as a unified diff.\n\n"
             + render_untrusted_finding(finding)
-            + (f"\n\nThe file to fix is `{fpath}`. Its current content:\n```\n{context}\n```\n" if context
-               else f"\n\nThe likely file is `{fpath or '(unknown — infer from the finding)'}`.\n")
-            + "\nReturn ONLY a unified diff. Each file MUST start with consecutive lines "
-              "`--- a/<repo-relative-path>` then `+++ b/<repo-relative-path>` (repo-relative paths only; "
-              "no absolute paths, no `..`). No prose, no code fences."
+            + files_note
+            + retry_note
+            + "\nReturn ONLY a unified diff. You MAY modify MULTIPLE files. Each file MUST start with "
+              "consecutive lines `--- a/<repo-relative-path>` then `+++ b/<repo-relative-path>` (repo-relative "
+              "paths only; no absolute paths, no `..`). No prose, no code fences."
         )
         # SOVEREIGNTY GATE — the coder is a model egress carrying REAL SOURCE from the operator's repo, so
         # it passes the same `kernel.sovereignty` ladder as every other egress path (see
@@ -430,6 +514,8 @@ def autopatch_live(finding: Any, *, config: CodefixConfig, client: Any = None,
                    killswitch: Any = None, operator_present: bool = True,
                    quorum: Optional[Callable[[Any], Any]] = None,
                    verify_oracle: Optional[Callable[[Any, Any], Any]] = None,
+                   max_fix_attempts: int = 1,
+                   verify_before_pr: bool = False,
                    now: Optional[Callable[[], float]] = None) -> PatchResult:
     """Run the sovereign auto-patch loop against REAL executors: propose (Claude) → clone → apply-in-sandbox
     → (if ``config.pr_enabled`` AND a ``quorum`` passes AND a GitHub token is provisioned) open a gated PR.
@@ -454,9 +540,25 @@ def autopatch_live(finding: Any, *, config: CodefixConfig, client: Any = None,
     def _deny_quorum(_request: Any) -> _Quorum:
         return _Quorum(approved=False, reason="m-of-n destruction quorum not provisioned")
 
-    return autopatch(
-        finding, gate=session.gate, oracle=verify_oracle, propose_patch=session.propose,
-        clone=session.clone, build=session.build, open_pr=session.open_pr,
-        quorum=quorum or _deny_quorum, approval=approval, now=clock,
-        target_repo=config.target_repo, target_branch=config.target_branch,
-    )
+    # deep-fix Phase C — ITERATE-until-green: on a `build-failed` result (the patch broke the compile/test
+    # gate), re-run the WHOLE gated ladder up to `max_fix_attempts` times, feeding the failure text back to the
+    # coder (`retry_context`) so it self-corrects. Each attempt re-clones (the clone executor rmtree's + re-
+    # clones — no state bleed) and re-proposes. Only `build-failed` is retried (a proposal/gate/quorum refusal
+    # is not a fixable-by-re-proposing failure). max_fix_attempts=1 ⇒ exactly one call, byte-identical to before.
+    attempts = max(1, int(max_fix_attempts or 1))
+    retry_context = ""
+    result = None
+    for i in range(attempts):
+        result = autopatch(
+            finding, gate=session.gate, oracle=verify_oracle, propose_patch=session.propose,
+            clone=session.clone, build=session.build, open_pr=session.open_pr,
+            quorum=quorum or _deny_quorum, approval=approval, now=clock,
+            target_repo=config.target_repo, target_branch=config.target_branch,
+            retry_context=retry_context, verify_before_pr=verify_before_pr,
+        )
+        # retry on a failure a re-proposal can fix: the patch broke the build/tests, OR it built but the
+        # finding still fires (verify-still-vulnerable). A proposal/gate/quorum refusal is terminal.
+        if result.status not in ("build-failed", "verify-still-vulnerable") or i == attempts - 1:
+            return result
+        retry_context = (result.reason or "")[:4000]   # feed the failure back into the next proposal
+    return result  # pragma: no cover — the loop always returns inside

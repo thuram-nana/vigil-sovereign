@@ -203,6 +203,35 @@ def run_codescan(*, root: str, slug: str, base_dir: str, max_files: int = 5000) 
             "summary": {"findings": len(findings_out), "facts": len(findings_out), "leads": 0}}
 
 
+class CodeFixVerdict:
+    """A fix-verification verdict for a CODE finding, shaped for ``autopatch.verify_patch``'s reader
+    (``.fired`` True = the vulnerable pattern STILL matches; False = it no longer fires). It carries NO signed
+    ``cert`` — the DAA re-run is deterministic + re-runnable, so a silent verdict earns the honest
+    ``verified-no-pr`` status, never the signed ``remediated`` (which stays reserved for the live-oracle +
+    m-of-n PR path)."""
+
+    __slots__ = ("fired", "detail")
+
+    def __init__(self, fired: bool, detail: dict[str, Any]) -> None:
+        self.fired = bool(fired)
+        self.detail = detail
+
+
+def build_code_fix_oracle(finding_ref: str, *, max_files: int = 5000) -> Any:
+    """Build the deep-fix verify oracle for a code finding: ``oracle(request, patched_build)`` re-runs the DAA
+    rule over the PATCHED clone (``patched_build`` = the clone workdir / its ``build_ref``) and reports whether
+    the finding still fires. Deterministic, offline, non-destructive — the code-finding analogue of the HTTP
+    re-drive oracle, and the sole thing that turns a built patch into ``verified-no-pr``."""
+    ref = str(finding_ref or "")
+
+    def _oracle(_request: Any, patched_build: Any) -> CodeFixVerdict:
+        root = str(getattr(patched_build, "build_ref", "") or patched_build or "")
+        res = verify_finding_cleared(root=root, ref=ref, max_files=max_files)
+        return CodeFixVerdict(fired=not bool(res.get("cleared")), detail=res)
+
+    return _oracle
+
+
 def verify_finding_cleared(*, root: str, ref: str, max_files: int = 5000) -> dict[str, Any]:
     """The fix-verification oracle for a code finding: re-run DAA over ``root`` and report whether the finding
     still fires. ``cleared`` is True iff the finding's rule no longer matches at its file (when the ref carries a
