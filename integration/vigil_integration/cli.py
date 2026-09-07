@@ -428,6 +428,11 @@ def _cmd_patch(args: argparse.Namespace) -> int:
     # DETERMINISTIC code oracle (not the HTTP re-drive), so it needs no --verify-base-url and earns the honest
     # `verified-no-pr` (never the signed `remediated`, which still needs the live oracle + m-of-n PR).
     deep = bool(getattr(args, "deep", False))
+    if getattr(args, "agent", "none") == "strix" and not deep:
+        print("vigil patch: --agent strix requires --deep (the agent's diff is re-verified by the deep ladder)",
+              file=sys.stderr)
+        return 2
+    _agent_diff = ""
     _deep_build_cmd = ""
     if deep:
         if str(getattr(args, "verify_base_url", "") or "").strip():
@@ -439,6 +444,11 @@ def _cmd_patch(args: argparse.Namespace) -> int:
         _plan = detect_build_plan(finding.target_repo)
         _deep_build_cmd = _plan.build_cmd
         verify_oracle = build_code_fix_oracle(finding.ref)
+        if getattr(args, "agent", "none") == "strix":
+            from .strix_fix import default_fix_instruction, run_strix_fix
+            _instr = default_fix_instruction(finding, test_cmd=_plan.build_cmd)
+            _agent_diff, _agent_note = run_strix_fix(finding.target_repo, _instr, base_dir=args.repo_base_dir)
+            print(f"agent          : strix — {_agent_note}")
         print(f"deep fix       : ON — repo-aware, iterate\u2264{max(1, int(args.fix_attempts))}, "
               f"gate=[{_plan.build_cmd or 'apply-check only'}] ({_plan.note}), verify=daa-rule-cleared-on-clone")
 
@@ -449,8 +459,10 @@ def _cmd_patch(args: argparse.Namespace) -> int:
         apply_edits=bool(args.apply_edits), model=resolve_model(args.model),  # --model > Settings choice > default
         build_cmd=_deep_build_cmd,
         pr_enabled=bool(args.open_pr), pr_base=args.pr_base)
-    _ext_diff = ""
-    if str(getattr(args, "proposed_diff", "") or "").strip():
+    _ext_diff = _agent_diff or ""
+    if _agent_diff:
+        pass   # the agentic front-end already produced the diff (printed above); it is re-verified below
+    elif str(getattr(args, "proposed_diff", "") or "").strip():
         try:
             with open(args.proposed_diff, encoding="utf-8", errors="replace") as _fh:
                 _ext_diff = _fh.read(200_000)   # bounded read of the external agent's diff
@@ -3910,6 +3922,9 @@ def build_parser() -> argparse.ArgumentParser:
                              "(earns `verified-no-pr`; never the signed `remediated`).")
     ppatch.add_argument("--fix-attempts", type=int, default=3,
                         help="max self-correcting attempts for --deep (default 3).")
+    ppatch.add_argument("--agent", choices=("none", "strix"), default="none",
+                        help="with --deep: run an AGENTIC front-end (strix) to PRODUCE the fix diff, then "
+                             "re-verify it through the gated ladder (the agent is never trusted). Docker required.")
     ppatch.add_argument("--proposed-diff", default="",
                         help="path to a unified diff from an external agent (e.g. Strix). It becomes the ONLY "
                              "proposal and is RE-VERIFIED through the gated apply+build+oracle ladder — the "
