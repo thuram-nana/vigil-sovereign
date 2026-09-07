@@ -56,6 +56,10 @@ BRIDGE_COMBINATIONS = [
      {"stream": "progress", "mode": "codebase"}, False, False, True),
     ("aegis (defensive)",
      {"stream": "none", "mode": "aegis"}, False, False, True),
+    # DAA codescan (sast): stream 'none' like aegis, but it DOES capture a report.json (capture_report=True),
+    # so the predicate must NOT class it no-report — it falls through to its real report/findings.
+    ("codebase / DAA codescan (sast)",
+     {"stream": "none", "mode": "sast", "engine": "codescan-daa"}, True, False, False),
     ("agentic vigil engage bridge (url)",
      {"stream": "progress", "mode": "url", "engine": "integration"}, False, False, True),
     ("agentic vigil engage bridge (suite)",
@@ -116,7 +120,7 @@ def test_predicate_source_includes_the_integration_engine_axis() -> None:
         "without it a completed agentic run reads 'Still running' forever"
     )
     # keep the pre-existing axes too (a fix must not drop the aegis / codebase cases)
-    assert 'run.stream === "none"' in expr, "predicate dropped the aegis (stream 'none') case"
+    assert 'run.mode === "aegis"' in expr, "predicate dropped the aegis case"
     assert 'run.mode === "codebase"' in expr, "predicate dropped the codebase (Strix) case"
 
 

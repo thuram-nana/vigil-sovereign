@@ -333,6 +333,19 @@
       "rationale": "Applies a code fix over a provenance-grounded finding through the gated executor."
     },
     {
+      "id": "cli.codescan",
+      "name": "vigil codescan",
+      "surface": "cli-native",
+      "status": "LIVE",
+      "verb": "codescan",
+      "anchor": {
+        "file": "integration/vigil_integration/cli.py",
+        "symbol": "_cmd_codescan"
+      },
+      "check": "cli-native-verb",
+      "rationale": "Deterministic DAA static scan of a local codebase; writes findings to the signed spine (a re-runnable static fact) and re-runs the rule as the fix-verification oracle. No traffic, no LLM."
+    },
+    {
       "id": "cli.posture",
       "name": "vigil posture",
       "surface": "cli-native",

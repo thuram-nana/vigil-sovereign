@@ -3880,7 +3880,10 @@
   // stream 'blackboard', is handled by the blackboard branch above before this predicate is reached.) Without
   // the engine test an agentic run sat on "Still running… no saved report YET", false twice over: it has
   // finished, and no report is ever coming.
-  function p3RunCapturesNoReport(run) { return run.stream === "none" || run.mode === "codebase" || run.engine === "integration"; }
+  // NB: the AEGIS no-report case keys on mode === "aegis" (NOT stream === "none"): a DAA codescan run is
+  // also stream "none" but DOES capture a report.json, so it must fall through to its real report,
+  // never the "captures no report" empty state.
+  function p3RunCapturesNoReport(run) { return run.mode === "aegis" || run.mode === "codebase" || run.engine === "integration"; }
   function p3NoReportEmpty(run, what) {
     if (run.stream === "blackboard") {
       return h("div.empty", null, [h("div.big", null, "This run reports on the reasoning spine"),
