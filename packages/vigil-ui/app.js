@@ -2071,7 +2071,18 @@
     critique:      { label: "Critique", icon: "book", cat: "review",
       sum: function (p) { return (p.decision || "") + ((p.objections || []).length ? " · " + p.objections.join("; ") : ""); } },
     critic_verdict:{ label: "Critic", icon: "book", cat: "review",
-      sum: function (p) { return (p.critic || "") + ": " + (p.verdict || "") + (p.severity ? " (" + p.severity + ")" : ""); } },
+      // The server calibrates a verdict about a LEAD: an objection to a finding that never claimed to be a
+      // fact is EXPECTED (advisory only; the oracle stays the authority), so it reads calmly instead of as a
+      // "(major)" alarm. A verdict about a real FACT keeps its true severity (an object there is a demotion).
+      sum: function (p) {
+        var sev = p.display_severity || p.severity;
+        if (p.expected) return (p.critic || "") + ": " + (p.verdict || "") + " \u00b7 " + (p.display_note || "routine check — kept as lead");
+        return (p.critic || "") + ": " + (p.verdict || "") + (sev ? " (" + sev + ")" : ""); } },
+    // A folded run of ROUTINE critic checks on leads (see foldRoutineCritics) — one calm summary row in
+    // place of the per-lead triple-flood, so genuine demotions / fact endorsements are not buried.
+    critic_summary:{ label: "Critics", icon: "book", cat: "review",
+      sum: function (p) { var f = p.findings ? (" across " + p.findings + " lead" + (p.findings === 1 ? "" : "s")) : "";
+        return (p.count || 0) + " routine critic checks" + f + " — all correctly kept as leads (no fact affected)"; } },
     reflection:    { label: "Reflection", icon: "brain", cat: "review",
       sum: function (p) { return (p.trigger ? p.trigger + ": " : "") + (p.reorientation || (p.observations || []).join("; ")); } },
     reward:        { label: "Reward", icon: "dot", cat: "review",
@@ -2091,6 +2102,33 @@
   };
   function kindIcon(kind, p) { const m = KIND_META[kind]; if (!m) return "dot"; return typeof m.icon === "function" ? m.icon(p || {}) : m.icon; }
   function isFact(p) { return !!(p && p.verified_by_oracle); }
+
+  // Fold a run of consecutive ROUTINE critic verdicts (those about LEADS — see the server's
+  // _calibrate_critic) into ONE calm summary row, so the per-lead critic-triple flood cannot bury a
+  // genuine demotion or a fact endorsement. Pure over the events array (applied at render), so it is
+  // robust to incremental/streaming arrival. Non-routine verdicts (about real facts) pass through
+  // untouched and stay individually visible. A short run (< 4) is left as-is — nothing to collapse.
+  function foldRoutineCritics(events) {
+    var out = [], i = 0, n = events.length;
+    while (i < n) {
+      var e = events[i], p = e.payload || {};
+      if (e.kind === "critic_verdict" && p.routine) {
+        var j = i, cnt = 0, last = e, targets = {};
+        while (j < n && events[j].kind === "critic_verdict" && (events[j].payload || {}).routine) {
+          cnt++; last = events[j];
+          var tg = (events[j].payload || {}).target_event_id;
+          if (tg != null) targets[tg] = 1;
+          j++;
+        }
+        if (cnt >= 4) {
+          out.push({ kind: "critic_summary", id: last.id, posted_at: last.posted_at,
+                     payload: { count: cnt, findings: Object.keys(targets).length } });
+        } else { for (var k = i; k < j; k++) out.push(events[k]); }
+        i = j;
+      } else { out.push(e); i++; }
+    }
+    return out;
+  }
 
   // ---- New Assessment wizard -------------------------------------------------
   const TARGET_TYPES = [
@@ -3277,6 +3315,7 @@
       let rows = L.events;
       if (L.filter === "facts") rows = rows.filter(function (e) { return e.kind === "finding" && isFact(e.payload); });
       else if (L.filter === "leads") rows = rows.filter(function (e) { return e.kind === "finding" && !isFact(e.payload); });
+      rows = foldRoutineCritics(rows);   // one calm summary row in place of the routine per-lead critic flood
       if (!rows.length) {
         V.mount(host, h("div.empty", null, L.events.length ? "No events match this filter." : liveEmptyText()));
         return;
@@ -3299,7 +3338,8 @@
       } else if (e.kind === "tool_result" && p.refused) {
         meta.push(h("span.st.st-blocked", null, [h("span.dot"), "refused"]));
       }
-      return h("div.trow.kind-" + e.kind + ".new", { onClick: function () { openEventDrawer(e); } }, [
+      var _muted = (e.kind === "critic_summary" || (e.kind === "critic_verdict" && p.expected)) ? ".pb-muted" : "";
+      return h("div.trow.kind-" + e.kind + ".new" + _muted, { onClick: function () { openEventDrawer(e); } }, [
         h("div.ico", null, V.icon(kindIcon(e.kind, p))),
         h("div.body", null, [h("div.k", null, m.label), h("div.m", null, m.sum(p) || "—")]),
         h("div.meta", null, meta.concat([h("span.t", null, e.posted_at ? String(e.posted_at).slice(11, 19) : (e.id != null ? "#" + e.id : ""))])),
@@ -10349,7 +10389,8 @@
       onClick: function () { var pr = toolPairFrom(PBOX.events, e); openDrawer("Tool call", toolCardBody(pr.call, pr.result)); } }
       : (isFinding ? { style: { cursor: "pointer" }, title: "Show the finding / fact",
         onClick: function () { openDrawer(isFact(p) ? "Confirmed FACT" : "Lead (unconfirmed)", findingCardBody(p)); } } : null);
-    return h("div.pb-row" + (st.cls ? "." + st.cls : "") + (isTool || isFinding ? ".pb-clickable" : "") + (isThink ? ".pb-think-row" : ""), attrs, [
+    var _muted = (e.kind === "critic_summary" || (e.kind === "critic_verdict" && p.expected)) ? ".pb-muted" : "";
+    return h("div.pb-row" + (st.cls ? "." + st.cls : "") + (isTool || isFinding ? ".pb-clickable" : "") + (isThink ? ".pb-think-row" : "") + _muted, attrs, [
       h("span.pb-ico", null, V.icon(isErr ? "x" : kindIcon(e.kind, p))),
       h("div.pb-body", null, [
         h("div.pb-k", null, [isErr ? "Backend error" : m.label,
@@ -10565,7 +10606,7 @@
         pboxIsRunning() ? "Waiting for the first step…"
                         : "No active run. Start an assessment and its steps stream here, live."));
     } else {
-      body = h("div.pb-feed#pb-feed", null, PBOX.events.slice(-PBOX_CAP).map(pboxRow));
+      body = h("div.pb-feed#pb-feed", null, foldRoutineCritics(PBOX.events.slice(-PBOX_CAP)).map(pboxRow));
     }
     var cardStyle = {};
     if (!PBOX.ui.max && PBOX.ui.w && PBOX.ui.h) { cardStyle.width = PBOX.ui.w + "px"; cardStyle.height = PBOX.ui.h + "px"; }
@@ -10587,7 +10628,18 @@
       var s = {}; PBOX.events.forEach(function (x) { if (x.id != null) s[x.id] = 1; }); PBOX.seen = s;
     }
     pboxUpdateChrome();
-    if (PBOX.ui.open && !PBOX.ui.dismissed) pboxAppendRow(e);
+    if (PBOX.ui.open && !PBOX.ui.dismissed) {
+      // A routine critic verdict (about a lead) is folded into a summary row — appending it individually
+      // would defeat the fold, so coalesce the burst into ONE full re-render instead of a per-row append.
+      if (e.kind === "critic_verdict" && (e.payload || {}).routine) pboxScheduleRender();
+      else pboxAppendRow(e);
+    }
+  }
+  function pboxScheduleRender() {
+    if (PBOX._renderPending) return;
+    PBOX._renderPending = true;
+    setTimeout(function () { PBOX._renderPending = false;
+      if (PBOX.ui.open && !PBOX.ui.dismissed) pboxRenderShell(); }, 120);
   }
   function pboxDetach() {
     if (PBOX.es) { try { PBOX.es.close(); } catch (e) {} PBOX.es = null; }
