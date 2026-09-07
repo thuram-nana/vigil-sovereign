@@ -5387,7 +5387,7 @@
     var cmd = "vigil approve sign --base-dir " + base + " --request-id " + p.request_id;
     var refresh = function () { var b = V.$("#safety-pending"); if (b) loadPendingApprovals(); };
     return h("div.approval", null, [
-      h("div.ah", null, [V.icon("key"), h("span.t", null, (p.tool_name || "action") + " → " + (p.target || "—"))]),
+      h("div.ah", null, [V.icon("key"), h("span.t", null, pbActionLabel(p) + " → " + (p.target || "—"))]),
       h("div.why", null, [
         h("div.mono.dim", { style: { fontSize: "var(--fs-xs)", wordBreak: "break-all" } },
           "request " + (p.request_id || "—") + (p.created_at_iso ? (" · " + p.created_at_iso) : "")),
@@ -10156,11 +10156,25 @@
   // owner key, the offense console stays keyless), so they need their own card/pop distinct from the
   // seq-based sovereign AUX. Same discipline: baseline what is already queued on entry (no nag), then
   // interrupt for a NEW one, one modal at a time across BOTH approval kinds.
+  function pbActionLabel(p) {
+    // A fan-out (deploy_fireteam) reads as a friendly "Approve fan-out" label naming the agent count; every
+    // other offense action shows its tool name. Governed identically — Approve signs the SAME per-action token.
+    if (p && p.tool_name === "deploy_fireteam") {
+      var n = 0;
+      try {
+        var a = p.args_preview;
+        if (a && typeof a === "object") { n = a.members || 0; }
+        else if (typeof a === "string") { var m = a.match(/members["']?\s*[:=]\s*(\d+)/); if (m) { n = +m[1]; } }
+      } catch (e) { /* label is best-effort */ }
+      return "fan-out — deploy " + (n ? n + " " : "") + "specialist agent" + (n === 1 ? "" : "s");
+    }
+    return (p && p.tool_name) || "action";
+  }
   function pboxOffenseCard(p) {
     var refresh = function () { pboxApprovalPoll(); };
     return h("div.approval", null, [
       h("div.ah", null, [V.icon("key"),
-        h("span.t", null, (p.tool_name || "action") + " → " + (p.target || "—")),
+        h("span.t", null, pbActionLabel(p) + " → " + (p.target || "—")),
         h("span.pill.sm", null, "offense")]),
       p.args_preview ? h("div.why", null,
         h("div.mono.dim", { style: { fontSize: "var(--fs-xs)", wordBreak: "break-all" } }, p.args_preview)) : null,
@@ -10179,7 +10193,7 @@
     var body = h("div.stack", null, [
       h("div.why", null, "The agent's next step needs your signed approval before it can run."),
       h("div.kv", null, [
-        h("span.k", null, "Tool"), h("span.v", null, p.tool_name || "action"),
+        h("span.k", null, "Action"), h("span.v", null, pbActionLabel(p)),
         h("span.k", null, "Target"), h("span.v.mono", null, p.target || "—"),
       ]),
       p.args_preview ? h("div.mono.dim", { style: { fontSize: "var(--fs-xs)", wordBreak: "break-all" } }, p.args_preview) : null,

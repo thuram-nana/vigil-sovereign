@@ -2589,6 +2589,15 @@ def launch_assessment(body: dict) -> dict:
         return {"error": f"a remote engage needs a signed charter/authority for slug {slug!r} — "
                          f"provision one first (it carries the signed scope; the console cannot mint it)"}
 
+    # CONTAINMENT (red-pen HIGH): the framework `engage`/`--autonomous` branch mints a FRESH slug whose
+    # kill-switch is untripped, so a soft emergency-stop (restricted mode) would NOT contain it — the same
+    # ENH2 gap the agentic branch closes with _launch_contained_reason. Consult the SAME stable restricted-
+    # mode signal here before provisioning a charter or spawning, so a whole-app / suite run is refused
+    # while restricted. NARROWS, never widens.
+    _contained = _launch_contained_reason(str(body.get("slug") or host))
+    if _contained:
+        return {"error": _contained}
+
     # LOOPBACK auto-charter: the framework `engage` / `--autonomous` engine reads a SIGNED charter at
     # targets/<slug>/charter.md (ethics.require_charter_signed); a fresh slug has none, so a loopback
     # whole-system run would otherwise refuse `charter_missing`. Materialize the SAME loopback

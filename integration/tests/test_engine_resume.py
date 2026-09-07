@@ -444,3 +444,37 @@ def test_is_rejected_approval_denial_helper():
     # checking rejected FIRST (see test_rejected_first_ordering_wins_over_awaiting_substring).
     both = "authorization denied: owner approval rejected: ... A2 requires owner approval"
     assert _is_rejected_approval_denial(both) and _is_awaiting_approval_denial(both)
+
+
+# --- Phase 3: deploy_fireteam is approve-then-run (pauses without approval, deploys with it) --------
+def test_deploy_fireteam_pauses_without_approval_then_deploys_with_it():
+    from vigil_integration.agent.state import ActionType, LLMDecision
+    ft = [{"member_id": "m1", "role": "auth", "capped_tier": "A1", "tools": ["httpx"]}]
+
+    def _dep():
+        return LLMDecision(action=ActionType.DEPLOY_FIRETEAM, fireteam=ft)
+
+    def _outcome():
+        return SimpleNamespace(facts=[], leads=[], escalations=[], spine_refs=[], refused=False)
+
+    # (a) NO approval → pause at awaiting_approval; the fan-out must NOT deploy.
+    calls = {"n": 0}
+    seams = EngineSeams(
+        attest=_attest_allow, think=ReplayThinker([_dep(), _complete()]),
+        gate=lambda *a: SimpleNamespace(allowed=True, outcome="allow", reason="ok"),
+        approval=lambda *a: False,
+        deploy_fireteam=lambda d, s, seq: (calls.__setitem__("n", calls["n"] + 1) or _outcome()))
+    rep = _engine(seams).engage(TARGET)
+    assert rep.paused == "awaiting_approval", f"a deploy_fireteam without approval must pause, got {rep.paused!r}"
+    assert calls["n"] == 0, "the fan-out must NOT deploy without a signed approval"
+
+    # (b) approval satisfied → the fan-out runs exactly once (approve-then-run).
+    calls2 = {"n": 0}
+    seams2 = EngineSeams(
+        attest=_attest_allow, think=ReplayThinker([_dep(), _complete()]),
+        gate=lambda *a: SimpleNamespace(allowed=True, outcome="allow", reason="ok"),
+        approval=lambda *a: True,
+        deploy_fireteam=lambda d, s, seq: (calls2.__setitem__("n", calls2["n"] + 1) or _outcome()))
+    rep2 = _engine(seams2).engage(TARGET)
+    assert calls2["n"] == 1, "an approved deploy_fireteam must run the fan-out exactly once"
+    assert rep2.done is True
