@@ -577,6 +577,108 @@ def approvals(slug: str = "") -> dict[str, Any]:
     return {"ok": True, "slug": str(slug or ""), "base_dir": base, "pending": pending}
 
 
+def _standards_controls_for(bug_class: str) -> dict[str, Any] | None:
+    """Pure table lookup: the CWE / OWASP taxonomy a ``bug_class`` denotes (``report.standards``),
+    imported lazily so this console module keeps no import-time dependency on the report package."""
+    from ..report import standards
+    return standards.controls_for(bug_class)
+
+
+def _classify_finding(f: dict[str, Any]) -> dict[str, Any]:
+    """Stamp a finding dict with its weakness-class taxonomy — the CWE id(s) and OWASP Top-10 category
+    its ``bug_class`` denotes — so every finding is shown CLASSIFIED (bug class + CWE), not merely named.
+
+    HONEST SCOPE: this is DATA about the class (a confirmed XSS *is* CWE-79 by definition); it is NOT a
+    compliance-coverage assertion. The stronger "this control is covered" claim is made only by
+    ``report.standards.map_finding`` over a proof that RE-FIRES now, and is shown on the Compliance screen.
+    Total + additive: adds ``cwe``/``owasp`` only when absent (never overwrites a caller's own value) and is
+    a no-op on any error or an unmapped class. No traffic, no oracle, no mutation of authority."""
+    if not isinstance(f, dict) or f.get("cwe"):
+        return f
+    bc = str(f.get("bug_class") or "")
+    if not bc:
+        return f
+    controls = _safe(lambda: _standards_controls_for(bc), default=None)
+    if isinstance(controls, dict):
+        cwe = controls.get("cwe") or []
+        if cwe:
+            f["cwe"] = list(cwe)
+        if controls.get("owasp"):
+            f["owasp"] = controls.get("owasp")
+    return f
+
+
+def _findings_from_blackboard(slug: str) -> list[dict[str, Any]]:
+    """Recover a ``--spine`` engagement's findings from the blackboard event spine — the source of truth
+    for a whole-app SUITE / autonomous ``framework.v2 engage --spine`` run, which streams findings to the
+    spine (``stream=blackboard``) and writes NO ``report.json`` or ``progress.jsonl`` to its run dir. Each
+    ``kind=="finding"`` event is mapped to the SAME finding shape the Findings screen renders (a FACT vs a
+    LEAD by the recorded ``verified_by_oracle`` — the identical trust the ``progress.jsonl`` path already
+    uses; the Re-verify button / Evidence browser re-fire the retained proof offline), deduped by
+    (title, location, grounding), and CLASSIFIED (bug class + CWE). Read-only over the append-only spine;
+    sends no traffic. Total: ``[]`` on any error or an engagement the spine does not know.
+
+    A whole-app run's slug is UNIQUE to that run (``_unique_engagement_slug``), so the spine's findings for
+    the slug are exactly that run's — no cross-run bleed. This fallback fires only when the run dir carries
+    no rendered/streamed findings at all, so it never shadows a report.json or progress stream."""
+    if not slug:
+        return []
+    from ..agents.blackboard import open_blackboard
+
+    def _read() -> list[Any]:
+        bb = open_blackboard()
+        try:
+            return bb.read(engagement=slug, kinds=["finding"], limit=5000)
+        finally:
+            try:
+                bb.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+    rows = _safe(_read, default=[]) or []
+    out: list[dict[str, Any]] = []
+    for r in rows:
+        pl = getattr(r, "payload", None) or {}
+        if not isinstance(pl, dict):
+            continue
+        fact = bool(pl.get("verified_by_oracle"))
+        oc = pl.get("oracle_context")
+        conf = pl.get("confidence")
+        out.append(_classify_finding({
+            "title": pl.get("title") or pl.get("summary") or pl.get("bug_class") or "finding",
+            "bug_class": pl.get("bug_class") or "",
+            "severity": pl.get("severity") or ("High" if fact else "Info"),
+            "confidence": conf if conf not in (None, "") else ("Certain" if fact else "Tentative"),
+            # a FACT is confirmed by the deterministic ORACLE; a LEAD is attributed to its surface/tool.
+            "confirmed_by": ("oracle" if fact else "") or pl.get("oracle_kind") or pl.get("surface") or "",
+            "verified_by_oracle": fact,
+            "grounding": "fact" if fact else "lead",
+            "kind": "finding",
+            "location": pl.get("surface") or "",
+            "surface": pl.get("surface") or "",
+            "evidence": pl.get("summary") or "",
+            "impact": pl.get("impact") or "",
+            "oracle_kind": pl.get("oracle_kind") or "",
+            "oracle_rationale": pl.get("oracle_rationale") or "",
+            "oracle_context": oc,
+            "cvss_vector": pl.get("cvss_vector") or "",
+            "cvss_base": pl.get("cvss_base"),
+            "derived_from_hypothesis": pl.get("derived_from_hypothesis"),
+            "re_verifiable": bool(fact and oc),
+            "references": [],
+            "remediation": "",
+            "ref": pl.get("finding_slug") or "",
+        }))
+    seen, dedup = set(), []
+    for f in out:
+        k = (f["title"], f["location"], f["grounding"])
+        if k in seen:
+            continue
+        seen.add(k)
+        dedup.append(f)
+    return dedup
+
+
 def _findings_from_progress(run_dir: Any) -> list[dict[str, Any]]:
     """Recover a run's findings from its ``progress.jsonl`` stream (the offense reasoning spine mirror) —
     the source of truth for an INTEGRATION `vigil engage` (chat-launched), which is spawned with
@@ -623,7 +725,7 @@ def _findings_from_progress(run_dir: Any) -> list[dict[str, Any]]:
             continue
         seen.add(k)
         dedup.append(f)
-    return dedup
+    return [_classify_finding(f) for f in dedup]
 
 
 def run_report(run_id: str) -> dict[str, Any]:
@@ -638,17 +740,30 @@ def run_report(run_id: str) -> dict[str, Any]:
     doc = _safe(lambda: json.loads(rep.read_text(encoding="utf-8")), default=None)
     if doc is not None:
         doc["run_id"] = run_id
+        _fl = doc.get("findings")
+        if isinstance(_fl, list):
+            doc["findings"] = [_classify_finding(f) for f in _fl]
         return doc
 
     meta = _safe(lambda: json.loads((actions.run_dir(run_id) / "meta.json").read_text(encoding="utf-8")), default={})
     findings = _findings_from_progress(actions.run_dir(run_id))
+    source = "progress-stream"
+    # A whole-app SUITE / autonomous `--spine` run writes no report.json or progress.jsonl to its run dir —
+    # its findings live on the blackboard event spine under the run's (unique) slug. Recover them so the
+    # Findings screen shows the whole-app run's oracle-confirmed FACTs instead of an empty page. Only when
+    # the run dir yielded nothing, so this never shadows a rendered report or a live progress stream.
+    if not findings:
+        slug = str((meta or {}).get("slug") or "")
+        bb_findings = _safe(lambda: _findings_from_blackboard(slug), default=[]) or []
+        if bb_findings:
+            findings, source = bb_findings, "spine"
     status = str(meta.get("status", "unknown"))
     # Still nothing AND still going ⇒ genuinely pending. Otherwise return what the stream produced (possibly
     # an empty list for a finished run that found nothing — the screen then honestly shows "no findings").
     if not findings and status == "running":
         return {"run_id": run_id, "pending": True, "status": status}
     facts = sum(1 for f in findings if f.get("verified_by_oracle"))
-    return {"run_id": run_id, "status": status, "source": "progress-stream",
+    return {"run_id": run_id, "status": status, "source": source,
             "target": meta.get("target", ""), "tool": meta.get("engine", "integration"),
             "findings": findings, "attack_paths": [], "discovered_endpoints": [],
             "summary": {"findings": len(findings), "facts": facts, "leads": len(findings) - facts}}
@@ -781,6 +896,7 @@ def remediate_plan(run_id: str) -> dict[str, Any]:
     # highest severity first (stable), then by bug_class, for a deterministic list
     _sev = {"critical": 4, "high": 3, "medium": 2, "moderate": 2, "low": 1, "info": 0}
     fixable.sort(key=lambda x: (-_sev.get(str(x["severity"]).lower(), -1), str(x["bug_class"])))
+    fixable = [_classify_finding(f) for f in fixable]
     return {**base, "fixable": fixable, "fixable_count": len(fixable), "lead_count": leads,
             "summary": doc.get("summary", "") if isinstance(doc, dict) else ""}
 

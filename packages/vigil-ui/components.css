@@ -823,3 +823,9 @@ select:focus-visible, textarea:focus-visible { outline: 2px solid var(--st-runni
 .chat-session-m { font-size: var(--fs-xs); color: var(--text-2); }
 .iconbtn.sm { width: 30px; height: 30px; }
 .chat-empty { padding: 24px; }
+
+/* Calibrated critic feed: a routine critic check about a LEAD (advisory only; never affects a fact) and
+   the folded "N routine critic checks" summary read as quiet context, not an alarm. Genuine demotions
+   (a critic objecting to a real FACT) keep full weight. See foldRoutineCritics / _calibrate_critic. */
+.pb-row.pb-muted, .trow.pb-muted { opacity: .58; }
+.pb-row.pb-muted:hover, .trow.pb-muted:hover { opacity: .82; }

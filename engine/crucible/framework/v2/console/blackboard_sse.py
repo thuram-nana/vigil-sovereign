@@ -54,6 +54,10 @@ class BlackboardTailer:
         self._db_path = db_path
         self._bb: Any = None
         self._open_failed = False
+        # target_event_id -> the target finding's verified_by_oracle (True=fact, False=lead). Populated as
+        # finding events stream by; a reconnect (cursor past the finding) falls back to a direct bb.get().
+        # Used ONLY to CALIBRATE the display of a critic verdict (below) — never to change the spine.
+        self._finding_grounding: dict[int, bool] = {}
 
     def _blackboard(self) -> Any:
         if self._bb is None and not self._open_failed:
@@ -81,8 +85,68 @@ class BlackboardTailer:
         out: list[tuple[int, dict[str, Any]]] = []
         for row in rows:
             self._cursor = max(self._cursor, int(row.id))
-            out.append((int(row.id), _row_to_event(row)))
+            ev = _row_to_event(row)
+            if row.kind == "finding":
+                self._finding_grounding[int(row.id)] = bool((row.payload or {}).get("verified_by_oracle"))
+            elif row.kind == "critic_verdict":
+                self._calibrate_critic(ev, bb)
+            out.append((int(row.id), ev))
         return out
+
+    # ---- display calibration (view-only; the stored spine is never touched) ----
+
+    def _target_grounding(self, target_event_id: Any, bb: Any) -> bool | None:
+        """Is a critic verdict's TARGET finding a fact (True) or a lead (False)? None when the target is
+        not a known finding. Cached; a cache miss (reconnect past the finding) reads the row directly."""
+        try:
+            tid = int(target_event_id)
+        except (TypeError, ValueError):
+            return None
+        if tid in self._finding_grounding:
+            return self._finding_grounding[tid]
+        try:
+            tgt = bb.get(tid)
+        except Exception:
+            tgt = None
+        if tgt is not None and getattr(tgt, "kind", None) == "finding":
+            g = bool((tgt.payload or {}).get("verified_by_oracle"))
+            self._finding_grounding[tid] = g
+            return g
+        return None
+
+    def _calibrate_critic(self, ev: dict[str, Any], bb: Any) -> None:
+        """Annotate a critic_verdict's EMITTED view (never the stored row) so the UI can render an
+        objection to a LEAD calmly instead of as an alarm. Doctrine-preserving: a critic is advisory and
+        the oracle stays the sole authority — this only changes how the verdict READS.
+
+          * A verdict about a finding that never claimed to be a fact (target is a LEAD) is ROUTINE noise —
+            a lead cannot be promoted or demoted by a critic. It is flagged ``routine`` so the feed can fold
+            the flood, and an OBJECT on a lead is additionally marked ``expected`` with a calm note and a
+            downgraded ``display_severity`` ('major' -> 'info'): the finding was correctly a lead all along.
+          * A verdict about a CONFIRMED fact (target is a FACT) is NOT routine and keeps its real severity —
+            an object here is a genuine demotion (a fact whose proof did not re-ground) and must stay loud."""
+        pl = ev.get("payload")
+        if not isinstance(pl, dict):
+            return
+        verdict = str(pl.get("verdict") or "")
+        sev = str(pl.get("severity") or "info")
+        grounded = self._target_grounding(pl.get("target_event_id"), bb)
+        pl = dict(pl)  # copy: enrich the view, leave the append-only row untouched
+        pl["target_grounding"] = "fact" if grounded is True else ("lead" if grounded is False else None)
+        if grounded is False:
+            pl["routine"] = True
+            if verdict == "object":
+                pl["display_severity"] = "info"
+                pl["expected"] = True
+                pl["display_note"] = "lead — not oracle-grounded (expected)"
+            else:
+                pl["display_severity"] = sev
+                pl["expected"] = False
+        else:
+            pl["routine"] = False
+            pl["expected"] = False
+            pl["display_severity"] = sev
+        ev["payload"] = pl
 
     def close(self) -> None:
         if self._bb is not None:

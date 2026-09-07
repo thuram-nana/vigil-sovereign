@@ -180,6 +180,7 @@ def finding_from_spine(*, base_dir: str, slug: str, target_repo: str, finding_re
         bug_class=str(getattr(f, "bug_class", "") or ""),
         severity=str(getattr(f, "severity", "") or ""),
         target=str(getattr(f, "target", "") or ""),
+        source=str(getattr(f, "source", "") or ""),   # carry the daa:<rule_id> static qualifier forward
         confirmed=True,
         evidence_ref=str(getattr(f, "evidence_ref", "")),
         spine_hash=str(getattr(f, "evidence_ref", "")),

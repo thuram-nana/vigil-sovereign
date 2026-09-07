@@ -506,15 +506,20 @@ def test_sast_is_a_valid_mode():
     assert "sast" in actions._MODES
 
 
-def test_sast_routes_to_native_analysis_review_and_validates_path(stub_launch, tmp_path):
+def test_sast_routes_to_deterministic_codescan_and_validates_path(stub_launch, tmp_path, monkeypatch):
+    monkeypatch.setattr(actions, "_vigil_bin", lambda: "/usr/bin/vigil")
+    monkeypatch.setattr(actions, "_strix_runtime_base_dir", lambda: str(tmp_path / "base"))
     src = tmp_path / "repo"; src.mkdir()
     (src / "app.py").write_text("import os\nos.system('x')\n", encoding="utf-8")
     r = actions.launch_assessment({"mode": "sast", "target": str(src)})
     cmd, meta = stub_launch(r["run_id"])
-    assert cmd[:4] == [actions.sys.executable, "-m", "framework.v2", "analysis"]
-    assert "review" in cmd and "--root" in cmd and str(src) in cmd
-    assert "--slug" in cmd and "--max-reviews" in cmd
+    # the deterministic DAA codebase scan: `vigil codescan --root <src> --slug <slug> --base-dir <base>`
+    assert cmd[:3] == ["/usr/bin/vigil", "codescan", "--root"]
+    assert str(src) in cmd and "--slug" in cmd and "--base-dir" in cmd
     assert meta["mode"] == "sast" and r["mode"] == "sast"
+    # meta records the base_dir the signed <slug>.spine is written to (fix_precondition reads it back)
+    assert meta["base_dir"] == str(tmp_path / "base") and meta["engine"] == "codescan-daa"
+    assert meta["target"] == str(src)
     # a missing path fails honestly (no spawn)
     missing = actions.launch_assessment({"mode": "sast", "target": str(tmp_path / "gone")})
     assert "error" in missing

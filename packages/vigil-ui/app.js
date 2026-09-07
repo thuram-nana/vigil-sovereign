@@ -2071,7 +2071,18 @@
     critique:      { label: "Critique", icon: "book", cat: "review",
       sum: function (p) { return (p.decision || "") + ((p.objections || []).length ? " · " + p.objections.join("; ") : ""); } },
     critic_verdict:{ label: "Critic", icon: "book", cat: "review",
-      sum: function (p) { return (p.critic || "") + ": " + (p.verdict || "") + (p.severity ? " (" + p.severity + ")" : ""); } },
+      // The server calibrates a verdict about a LEAD: an objection to a finding that never claimed to be a
+      // fact is EXPECTED (advisory only; the oracle stays the authority), so it reads calmly instead of as a
+      // "(major)" alarm. A verdict about a real FACT keeps its true severity (an object there is a demotion).
+      sum: function (p) {
+        var sev = p.display_severity || p.severity;
+        if (p.expected) return (p.critic || "") + ": " + (p.verdict || "") + " \u00b7 " + (p.display_note || "routine check — kept as lead");
+        return (p.critic || "") + ": " + (p.verdict || "") + (sev ? " (" + sev + ")" : ""); } },
+    // A folded run of ROUTINE critic checks on leads (see foldRoutineCritics) — one calm summary row in
+    // place of the per-lead triple-flood, so genuine demotions / fact endorsements are not buried.
+    critic_summary:{ label: "Critics", icon: "book", cat: "review",
+      sum: function (p) { var f = p.findings ? (" across " + p.findings + " lead" + (p.findings === 1 ? "" : "s")) : "";
+        return (p.count || 0) + " routine critic checks" + f + " — all correctly kept as leads (no fact affected)"; } },
     reflection:    { label: "Reflection", icon: "brain", cat: "review",
       sum: function (p) { return (p.trigger ? p.trigger + ": " : "") + (p.reorientation || (p.observations || []).join("; ")); } },
     reward:        { label: "Reward", icon: "dot", cat: "review",
@@ -2092,9 +2103,36 @@
   function kindIcon(kind, p) { const m = KIND_META[kind]; if (!m) return "dot"; return typeof m.icon === "function" ? m.icon(p || {}) : m.icon; }
   function isFact(p) { return !!(p && p.verified_by_oracle); }
 
+  // Fold a run of consecutive ROUTINE critic verdicts (those about LEADS — see the server's
+  // _calibrate_critic) into ONE calm summary row, so the per-lead critic-triple flood cannot bury a
+  // genuine demotion or a fact endorsement. Pure over the events array (applied at render), so it is
+  // robust to incremental/streaming arrival. Non-routine verdicts (about real facts) pass through
+  // untouched and stay individually visible. A short run (< 4) is left as-is — nothing to collapse.
+  function foldRoutineCritics(events) {
+    var out = [], i = 0, n = events.length;
+    while (i < n) {
+      var e = events[i], p = e.payload || {};
+      if (e.kind === "critic_verdict" && p.routine) {
+        var j = i, cnt = 0, last = e, targets = {};
+        while (j < n && events[j].kind === "critic_verdict" && (events[j].payload || {}).routine) {
+          cnt++; last = events[j];
+          var tg = (events[j].payload || {}).target_event_id;
+          if (tg != null) targets[tg] = 1;
+          j++;
+        }
+        if (cnt >= 4) {
+          out.push({ kind: "critic_summary", id: last.id, posted_at: last.posted_at,
+                     payload: { count: cnt, findings: Object.keys(targets).length } });
+        } else { for (var k = i; k < j; k++) out.push(events[k]); }
+        i = j;
+      } else { out.push(e); i++; }
+    }
+    return out;
+  }
+
   // ---- New Assessment wizard -------------------------------------------------
   const TARGET_TYPES = [
-    { mode: "codebase", icon: "book", t: "Scan a codebase", d: "Point at a local path or repo; the AI reads and reasons over the source (Strix)." },
+    { mode: "codebase", icon: "book", t: "Scan a codebase", d: "Point at a local path or repo. Deterministic DAA static scan (fix-enabled, no Docker) by default; Strix agent optional." },
     { mode: "url", icon: "live", t: "Scan a website / API", d: "Give a URL; VIGIL engages it through the full gate. A 127.0.0.1 target runs a quick loopback scan." },
     { mode: "tool", icon: "bolt", t: "Run one tool", d: "Pick one real tool from this host's roster and run the gated engagement that drives it." },
     { mode: "suite", icon: "brain", t: "Full autonomous suite", d: "The autonomous OODA loop drives the whole arsenal (gated, oracle-adjudicated)." },
@@ -2199,7 +2237,7 @@
     // `tool` is the TOOL the operator picked (what they see); `tools` is what the launch payload can
     // actually carry — the capability id that drives it. Keeping both means the summary can name the
     // tool while the request stays something the server really honours.
-    const W = { step: 1, mode: "", target: "", slug: "", authorized: false, mount: false,
+    const W = { step: 1, mode: "", target: "", slug: "", authorized: false, mount: false, cbEngine: "daa",
       scope: [], scopeInput: "", objective: "", scan_mode: "standard", aiTools: true,
       tool: "", tools: [], apply_fixes: false, aegis_action: "detect",
       session_id: "", graph_backed: false, sessions: [],
@@ -2261,8 +2299,13 @@
     // operator reads cannot disagree with the engine the run picks. `agentic` mirrors the graph-backed
     // opt-in the wizard offers today (loopback + session); `graph_backed` is the legacy alias the server
     // also honours. Only the fields the routing/gate reads are included.
+    // A codebase scan runs one of two engines: the DETERMINISTIC DAA static oracle (default — no Docker, and
+    // the ONLY codebase path that grounds a gated fix in the signed spine) launches as mode "sast"; the Strix
+    // agent (Docker + LLM) launches as "codebase". The wizard keeps its internal mode "codebase" either way so
+    // its config/gating/review all apply; only the LAUNCH mode is remapped here.
+    function launchMode() { return (W.mode === "codebase" && W.cbEngine !== "strix") ? "sast" : W.mode; }
     function planBody() {
-      return { mode: W.mode, target: W.target.trim(), slug: W.slug.trim(),
+      return { mode: launchMode(), target: W.target.trim(), slug: W.slug.trim(),
         session_id: W.session_id, agentic: !!W.graph_backed, graph_backed: !!W.graph_backed,
         cloud_mode: W.cloud_mode };
     }
@@ -2294,9 +2337,20 @@
     function stepWhere() {
       const rows = [];
       if (W.mode === "codebase") {
+        rows.push(field("Scan engine",
+          h("select", { onChange: function (e) { W.cbEngine = e.target.value; updateSummary(); refreshFoot(); draw(); } }, [
+            h("option", { value: "daa", selected: W.cbEngine !== "strix" }, "Deterministic DAA — static rules, no Docker, fix-enabled"),
+            h("option", { value: "strix", selected: W.cbEngine === "strix" }, "Strix agent — Docker + LLM, broader"),
+          ]),
+          W.cbEngine === "strix"
+            ? "The vendored Strix agent chooses its own analysis passes (needs Docker + a model). Findings are model-driven."
+            : "DAA runs deterministic static rules over the source and writes each finding into the signed spine, so a gated fix can be applied and re-verified. No Docker, no model needed to scan."));
         rows.push(field("Codebase path", h("input", { type: "text", value: W.target, placeholder: "/home/you/project  or  https://github.com/org/repo",
-          onInput: function (e) { W.target = e.target.value; updateSummary(); refreshFoot(); } }), "A local path (or a git URL Strix can clone). Large trees: use bind-mount below."));
-        rows.push(checkbox("Bind-mount instead of copy (large monorepos)", W.mount, function (v) { W.mount = v; }));
+          onInput: function (e) { W.target = e.target.value; updateSummary(); refreshFoot(); } }),
+          W.cbEngine === "strix" ? "A local path (or a git URL Strix can clone). Large trees: use bind-mount below."
+                                 : "A local path (or a git URL to clone). DAA reads the source read-only."));
+        if (W.cbEngine === "strix")
+          rows.push(checkbox("Bind-mount instead of copy (large monorepos)", W.mount, function (v) { W.mount = v; }));
       } else if (W.mode === "aegis") {
         rows.push(field("Telemetry / log file", h("input", { type: "text", value: W.target, placeholder: "/path/to/telemetry-envelope.json",
           onInput: function (e) { W.target = e.target.value; updateSummary(); refreshFoot(); } }), "AEGIS detect runs its defensive oracles over one TelemetryEnvelope/log file."));
@@ -2505,7 +2559,7 @@
         }
         body.push(fixesCheckbox());
       } else {
-        const legendTxt = W.mode === "codebase" ? "Strix chooses its own analysis passes over the source."
+        const legendTxt = W.mode === "codebase" ? (W.cbEngine === "strix" ? "Strix chooses its own analysis passes over the source." : "DAA runs deterministic static rules over the source; each finding is written to the signed spine (fix-enabled).")
           : W.mode === "cloud" ? "The posture sensor runs its full deterministic check set over your imported inventory."
             : "AEGIS runs its full defensive oracle set over the telemetry.";
         body.push(h("div.legend", null, [V.icon("info"), legendTxt]));
@@ -2710,7 +2764,7 @@
       // them only made the request look richer than it was.
       const wantGraph = wantsGraph();
       const body = {
-        mode: W.mode, target: W.target.trim(), slug: W.slug.trim(), scope: W.scope,
+        mode: launchMode(), target: W.target.trim(), slug: W.slug.trim(), scope: W.scope,
         objective: W.objective.trim(), scan_mode: W.scan_mode,
         // `packsRun` is the SAME predicate the picker above is drawn from, so what was offered and what
         // is sent cannot drift: a branch that would drop the packs is never asked to carry them.
@@ -3277,6 +3331,7 @@
       let rows = L.events;
       if (L.filter === "facts") rows = rows.filter(function (e) { return e.kind === "finding" && isFact(e.payload); });
       else if (L.filter === "leads") rows = rows.filter(function (e) { return e.kind === "finding" && !isFact(e.payload); });
+      rows = foldRoutineCritics(rows);   // one calm summary row in place of the routine per-lead critic flood
       if (!rows.length) {
         V.mount(host, h("div.empty", null, L.events.length ? "No events match this filter." : liveEmptyText()));
         return;
@@ -3299,7 +3354,8 @@
       } else if (e.kind === "tool_result" && p.refused) {
         meta.push(h("span.st.st-blocked", null, [h("span.dot"), "refused"]));
       }
-      return h("div.trow.kind-" + e.kind + ".new", { onClick: function () { openEventDrawer(e); } }, [
+      var _muted = (e.kind === "critic_summary" || (e.kind === "critic_verdict" && p.expected)) ? ".pb-muted" : "";
+      return h("div.trow.kind-" + e.kind + ".new" + _muted, { onClick: function () { openEventDrawer(e); } }, [
         h("div.ico", null, V.icon(kindIcon(e.kind, p))),
         h("div.body", null, [h("div.k", null, m.label), h("div.m", null, m.sum(p) || "—")]),
         h("div.meta", null, meta.concat([h("span.t", null, e.posted_at ? String(e.posted_at).slice(11, 19) : (e.id != null ? "#" + e.id : ""))])),
@@ -3708,10 +3764,23 @@
   // fact tier) vs "intel" / "ungrounded" / "unclassified" (inferred/unproven). Pinned by
   // test_worldmodel_grounding_vocab.py so a backend rename can't silently make this lie.
   function p3WmFact(g) { return g === "grounded"; }
+  // A STATIC fact: confirmed by a deterministic DAA static rule over the SOURCE (source/oracle_kind
+  // "daa:<rule_id>"), not by a live-exploit oracle. It IS a re-runnable fact (the pattern is present), but it
+  // is NOT proof the sink is reachable at runtime — so it is labelled distinctly from a live-oracle fact.
+  function p3IsStatic(f) {
+    var ob = String((f && (f.oracle_kind || f.confirmed_by)) || "");
+    return ob.indexOf("daa:") === 0;
+  }
   function p3Surface(f) {
     return f.location || f.surface || f.insertion_point || f.param || f.endpoint || "—";
   }
   function p3Oracle(f) { return f.confirmed_by || f.oracle_kind || "—"; }
+  // The weakness-class taxonomy the server stamps onto every finding (report.standards): the CWE id(s)
+  // and OWASP Top-10 category the bug_class denotes. Shown INLINE beside the bug class so a finding reads
+  // as "xss · CWE-79", not just "xss". Class DATA, not a compliance-coverage claim (that is the Compliance
+  // screen). Empty string when the class is unmapped or the server did not classify it — no fabrication.
+  function p3Cwe(f) { return (f && f.cwe && f.cwe.length) ? f.cwe.join(", ") : ""; }
+  function p3Owasp(f) { return (f && f.owasp) ? f.owasp : ""; }
   function p3Rationale(f) { return f.oracle_rationale || f.evidence || f.rationale || ""; }
   function p3Sev(f) { return String(f.severity || "").trim(); }
   function p3SevChip(sev) {
@@ -3719,7 +3788,9 @@
     return s ? h("span.sev.sev-" + s, null, sev) : h("span.muted", null, "—");
   }
   function p3StatusChip(f) {
-    if (p3IsFact(f)) return h("span.shield", null, [V.icon("check"), "CONFIRMED"]);
+    if (p3IsFact(f)) return p3IsStatic(f)
+      ? h("span.shield", { title: "Confirmed by a deterministic static rule over the source (pattern present); not a live-exploit proof" }, [V.icon("check"), "STATIC"])
+      : h("span.shield", null, [V.icon("check"), "CONFIRMED"]);
     // a LEAD is explicitly "not proven". If it is an ACTIVE finding whose oracle failed to
     // re-ground (contradicted / ungrounded), say so honestly rather than a bland "lead".
     const g = f.grounding;
@@ -3809,7 +3880,10 @@
   // stream 'blackboard', is handled by the blackboard branch above before this predicate is reached.) Without
   // the engine test an agentic run sat on "Still running… no saved report YET", false twice over: it has
   // finished, and no report is ever coming.
-  function p3RunCapturesNoReport(run) { return run.stream === "none" || run.mode === "codebase" || run.engine === "integration"; }
+  // NB: the AEGIS no-report case keys on mode === "aegis" (NOT stream === "none"): a DAA codescan run is
+  // also stream "none" but DOES capture a report.json, so it must fall through to its real report,
+  // never the "captures no report" empty state.
+  function p3RunCapturesNoReport(run) { return run.mode === "aegis" || run.mode === "codebase" || run.engine === "integration"; }
   function p3NoReportEmpty(run, what) {
     if (run.stream === "blackboard") {
       return h("div.empty", null, [h("div.big", null, "This run reports on the reasoning spine"),
@@ -3869,7 +3943,8 @@
             h("tbody", null, rows.map(function (f) {
               return h("tr.click", { onClick: function () { p3OpenFindingDrawer(run, f); } }, [
                 h("td", null, p3SevChip(p3Sev(f))),
-                h("td", null, h("b.mono", null, f.bug_class || "—")),
+                h("td", null, [h("b.mono", null, f.bug_class || "—"),
+                  p3Cwe(f) ? h("span.pill.sm", { style: { marginLeft: "6px" }, title: p3Owasp(f) ? ("OWASP " + p3Owasp(f)) : "" }, p3Cwe(f)) : null]),
                 h("td", null, h("span.mono", { style: { fontSize: "var(--fs-xs)", wordBreak: "break-all" } }, p3Surface(f))),
                 h("td", null, h("span.mono", { style: { fontSize: "var(--fs-xs)" } }, p3Oracle(f))),
                 h("td", null, p3StatusChip(f)),
@@ -3915,12 +3990,17 @@
     const kv = [];
     const put = function (k, v) { if (v == null || v === "") return; kv.push(h("div.kv", null, [h("div.k", null, k), h("div.v", null, String(v))])); };
     const fact = p3IsFact(f);
-    put("Verdict", fact ? "CONFIRMED — an oracle re-fired over the retained evidence (a FACT)"
+    put("Verdict", fact ? (p3IsStatic(f)
+        ? ("STATIC FACT — a deterministic rule (" + p3Oracle(f) + ") matched your source; the vulnerable "
+           + "pattern is PRESENT and re-runnable, but this is not a live-exploit proof of reachability")
+        : "CONFIRMED — an oracle re-fired over the retained evidence (a FACT)")
       : (f.grounding === "contradicted" ? "CONTRADICTED — the oracle did NOT re-ground this claim"
         : f.grounding === "ungrounded" ? "UNGROUNDED — no live oracle proof"
           : "LEAD — a proposal, not proven"));
     put("Severity", p3Sev(f) || "—");
     put("Bug class", f.bug_class);
+    put("CWE", p3Cwe(f));
+    put("OWASP", p3Owasp(f) ? ("OWASP Top 10 — " + p3Owasp(f)) : "");
     put("Surface", p3Surface(f));
     put("Oracle kind", p3Oracle(f));
     if (f.confidence != null && f.confidence !== "") put("Confidence", f.confidence);
@@ -5870,15 +5950,22 @@
         "In-console apply is unavailable for this run: " + (whyNot || "its precondition is not met.")
         + " You can still apply from the CLI with `vigil patch`.");
     } else {
+      var vbtnId = "fx-vbtn-" + idx, voutId = "fx-vout-" + idx;
       applyBlock = h("div", { style: { marginTop: "10px" } }, [
         h("button.btn.sm#" + btnId, { onClick: function () { applyFix(runId, f.ref, btnId, outId); } },
           [V.icon("bolt"), "Apply fix (gated)"]),
+        h("button.btn.sm.ghost#" + vbtnId, { style: { marginLeft: "8px" },
+          onClick: function () { verifyFix(runId, f.ref, vbtnId, voutId); } },
+          [V.icon("check"), "Verify (re-scan)"]),
         h("span.hint", { style: { marginLeft: "8px" } },
-          "Runs the gated `vigil patch` ladder for this finding. Your click is the operator approval for the "
-          + "non-destructive stages AND a blanket up-front approval of every proposed edit — there is no "
-          + "per-file prompt on this path. The edits land in a disposable clone: your source is never touched "
-          + "and no PR is opened."),
+          "Apply runs the gated `vigil patch` ladder — your click is the operator approval for the "
+          + "non-destructive stages AND a blanket up-front approval of every proposed edit (no per-file "
+          + "prompt); the edits land in a disposable clone, so your source is never touched and no PR is "
+          + "opened. Verify re-runs the deterministic static rule over YOUR source: `cleared` means the "
+          + "rule no longer fires anywhere in the tree (apply the shown diff to your tree first). It proves "
+          + "the pattern is gone, not that a runtime exploit was ever reachable."),
         h("div#" + outId, { style: { marginTop: "8px" } }),
+        h("div#" + voutId, { style: { marginTop: "8px" } }),
       ]);
     }
     return h("div.fix-card", null, [
@@ -5886,6 +5973,7 @@
         h("span.vbadge." + (sevClass(f.severity) || "muted"), null, (f.severity || "?").toUpperCase()),
         h("b", null, f.title || f.bug_class || "finding"),
         f.bug_class ? h("span.pill.sm", null, f.bug_class) : null,
+        p3Cwe(f) ? h("span.pill.sm", { title: p3Owasp(f) ? ("OWASP " + p3Owasp(f)) : "" }, p3Cwe(f)) : null,
       ]),
       f.location ? h("div.mono.dim", { style: { fontSize: "var(--fs-xs)", margin: "4px 0" } }, f.location) : null,
       h("div.fix-rem", null, [h("span.label", null, "Remediation"), h("p", null, f.remediation)]),
@@ -5914,6 +6002,29 @@
       .catch(function (e) {
         if (btn) btn.disabled = false;
         if (out) V.mount(out, h("div.legend", null, [V.icon("x"), (e && e.message) || "apply failed"]));
+      });
+  }
+  function verifyFix(runId, ref, btnId, outId) {
+    var btn = V.$("#" + btnId), out = V.$("#" + outId);
+    if (btn) btn.disabled = true;
+    if (out) V.mount(out, h("div.dim", null, "Re-scanning your source with the deterministic rule…"));
+    V.postJSON(OFF("/api/remediate/" + encodeURIComponent(runId) + "/" + encodeURIComponent(ref) + "/verify"), {})
+      .then(function (r) {
+        if (btn) btn.disabled = false;
+        if (!out) return;
+        if (r && r.error) { V.mount(out, h("div.legend", null, [V.icon("info"), r.error])); return; }
+        var stillAt = (r.still_fires_at || []).join(", ");
+        V.mount(out, h("div.legend", null, [V.icon(r.cleared ? "check" : "x"),
+          r.cleared
+            ? "CLEARED — the deterministic rule no longer fires anywhere in your source (the vulnerable pattern is gone)."
+            : ((r.moved ? "STILL PRESENT (moved) — the rule now fires at a different path"
+                        : "STILL PRESENT — the rule still fires")
+               + (stillAt ? " at " + stillAt : "")
+               + ". Apply the proposed diff to your source, then Verify again.")]));
+      })
+      .catch(function (e) {
+        if (btn) btn.disabled = false;
+        if (out) V.mount(out, h("div.legend", null, [V.icon("x"), (e && e.message) || "verify failed"]));
       });
   }
 
@@ -10339,7 +10450,8 @@
       onClick: function () { var pr = toolPairFrom(PBOX.events, e); openDrawer("Tool call", toolCardBody(pr.call, pr.result)); } }
       : (isFinding ? { style: { cursor: "pointer" }, title: "Show the finding / fact",
         onClick: function () { openDrawer(isFact(p) ? "Confirmed FACT" : "Lead (unconfirmed)", findingCardBody(p)); } } : null);
-    return h("div.pb-row" + (st.cls ? "." + st.cls : "") + (isTool || isFinding ? ".pb-clickable" : "") + (isThink ? ".pb-think-row" : ""), attrs, [
+    var _muted = (e.kind === "critic_summary" || (e.kind === "critic_verdict" && p.expected)) ? ".pb-muted" : "";
+    return h("div.pb-row" + (st.cls ? "." + st.cls : "") + (isTool || isFinding ? ".pb-clickable" : "") + (isThink ? ".pb-think-row" : "") + _muted, attrs, [
       h("span.pb-ico", null, V.icon(isErr ? "x" : kindIcon(e.kind, p))),
       h("div.pb-body", null, [
         h("div.pb-k", null, [isErr ? "Backend error" : m.label,
@@ -10375,6 +10487,14 @@
       }
       var _lbl = ({ done: "Done", completed: "Done", error: "Ended with an error",
                     interrupted: "Interrupted", cancelled: "Cancelled" })[PBOX.run.status] || PBOX.run.status;
+      // A whole-app / suite run (stream="blackboard") writes its findings to the evidence spine + Findings
+      // screen, NOT this box's progress stream \u2014 so the inline count can read 0 even when the engine
+      // confirmed real vulnerabilities. Direct the operator to Findings instead of a FALSE "no facts
+      // confirmed" (the inline count still shows when the stream did surface facts).
+      if (PBOX.run.stream === "blackboard" && !_facts) {
+        return "\u2713 " + _lbl + " \u2014 whole-app scan complete; open the Findings screen for the "
+             + "confirmed vulnerabilities";
+      }
       return "\u2713 " + _lbl + (_facts ? " \u2014 " + _facts + " fact(s) confirmed"
                                          : " \u2014 no facts confirmed");
     }
@@ -10547,7 +10667,7 @@
         pboxIsRunning() ? "Waiting for the first step…"
                         : "No active run. Start an assessment and its steps stream here, live."));
     } else {
-      body = h("div.pb-feed#pb-feed", null, PBOX.events.slice(-PBOX_CAP).map(pboxRow));
+      body = h("div.pb-feed#pb-feed", null, foldRoutineCritics(PBOX.events.slice(-PBOX_CAP)).map(pboxRow));
     }
     var cardStyle = {};
     if (!PBOX.ui.max && PBOX.ui.w && PBOX.ui.h) { cardStyle.width = PBOX.ui.w + "px"; cardStyle.height = PBOX.ui.h + "px"; }
@@ -10569,7 +10689,18 @@
       var s = {}; PBOX.events.forEach(function (x) { if (x.id != null) s[x.id] = 1; }); PBOX.seen = s;
     }
     pboxUpdateChrome();
-    if (PBOX.ui.open && !PBOX.ui.dismissed) pboxAppendRow(e);
+    if (PBOX.ui.open && !PBOX.ui.dismissed) {
+      // A routine critic verdict (about a lead) is folded into a summary row — appending it individually
+      // would defeat the fold, so coalesce the burst into ONE full re-render instead of a per-row append.
+      if (e.kind === "critic_verdict" && (e.payload || {}).routine) pboxScheduleRender();
+      else pboxAppendRow(e);
+    }
+  }
+  function pboxScheduleRender() {
+    if (PBOX._renderPending) return;
+    PBOX._renderPending = true;
+    setTimeout(function () { PBOX._renderPending = false;
+      if (PBOX.ui.open && !PBOX.ui.dismissed) pboxRenderShell(); }, 120);
   }
   function pboxDetach() {
     if (PBOX.es) { try { PBOX.es.close(); } catch (e) {} PBOX.es = null; }

@@ -1167,7 +1167,7 @@ _CHAT_SYSTEM = (
     "Allowed actions ONLY (anything else is dropped): "
     "\"scan_codebase\" (offer the gated codebase assessment of the attached code — the server supplies the "
     "path, you never do; propose it only when code is attached); "
-    "\"scan_sast\" (offer the NATIVE source review — DAA static analysis + per-finding confirm/refute — of the attached code; the server supplies the path, you never do; propose it only when code is attached); "
+    "\"scan_sast\" (offer the DETERMINISTIC DAA codebase scan of the attached code — static rules → CWE-tagged findings written to the signed spine, so a gated fix can be applied and re-verified; no Docker, no model needed to scan; the server supplies the path, you never do; propose it only when code is attached); "
     "\"scan_url\" with a \"target\" URL drawn from the conversation (the gated web/API assessment); "
     "\"open_screen\" with a \"screen\" in {findings, report, proof, live, replay}. "
     "Each entry: an \"action\", a short \"label\", a one-line \"why\". Omit the block entirely if nothing "

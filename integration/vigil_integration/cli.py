@@ -2179,6 +2179,44 @@ def _cmd_detect(args: argparse.Namespace) -> int:
 _CLOUD_EXPLOIT_MODES = ("imds", "secret", "gcp-sa", "iam-escalation", "k8s-rbac", "k8s-rbac-grant")
 
 
+def _cmd_codescan(args: argparse.Namespace) -> int:
+    """Deterministic local-codebase scan (DAA static oracle) that GROUNDS a gated fix.
+
+    Default: run DAA over ``--root`` and write each confirmed finding into the engagement's OWN signed offense
+    spine at ``<base-dir>/<slug>.spine`` (the same provenance store ``vigil patch --from-spine`` reads), then
+    print the findings JSON (CWE-tagged) on stdout for the console's Findings screen. Non-destructive; no
+    network; no LLM. A DAA rule match over the real source is a re-runnable STATIC fact — never a live-exploit
+    claim (each finding records ``source=daa:<rule_id>``).
+
+    ``--verify --ref <ref>``: the FIX-VERIFICATION oracle — re-run DAA over ``--root`` and report whether the
+    finding still fires. Exit 0 iff CLEARED (the rule no longer fires at its file), else 1. This is how a code
+    fix is confirmed without any live target: apply the diff, re-scan, the rule goes silent."""
+    import json as _json
+
+    from .codescan import run_codescan, verify_finding_cleared
+
+    root = str(args.root or "").strip()
+    if not root:
+        print("vigil codescan: --root is required", file=sys.stderr)
+        return 2
+    if args.verify:
+        ref = str(args.ref or "").strip()
+        if not ref:
+            print("vigil codescan --verify: --ref <finding-ref> is required", file=sys.stderr)
+            return 2
+        res = verify_finding_cleared(root=root, ref=ref, max_files=args.max_files)
+        print(_json.dumps(res, indent=2))
+        return 0 if res.get("cleared") else 1
+    slug = str(args.slug or "").strip() or "codebase"
+    try:
+        res = run_codescan(root=root, slug=slug, base_dir=args.base_dir, max_files=args.max_files)
+    except Exception as exc:  # noqa: BLE001 — a scan/spine failure is reported, never a traceback to the console
+        print(_json.dumps({"error": f"{type(exc).__name__}: {exc}"}))
+        return 2
+    print(_json.dumps(res, indent=2))
+    return 0
+
+
 def _cmd_cloud_exploit(args: argparse.Namespace) -> int:
     """`vigil cloud-exploit <mode> --capture <file.json>` — route ONE retained cloud/K8s exploitation capture
     through its deterministic oracle → admission → (on a confirmed achieved-effect) a SIGNED, offline-
@@ -4172,6 +4210,16 @@ def build_parser() -> argparse.ArgumentParser:
                           "over the same run then produce an identical MANIFEST)")
     pdo.set_defaults(func=_cmd_dossier)
 
+    pcs = sub.add_parser("codescan",
+                         help="deterministic local-codebase scan (DAA) that grounds a gated fix in the signed spine")
+    pcs.add_argument("--root", required=True, help="the codebase path to scan (or re-scan for --verify)")
+    pcs.add_argument("--slug", default="codebase", help="engagement slug (the signed <slug>.spine key)")
+    pcs.add_argument("--base-dir", default=".vigil-live", help="engagement base dir holding <slug>.spine")
+    pcs.add_argument("--max-files", type=int, default=5000)
+    pcs.add_argument("--verify", action="store_true",
+                     help="fix-verification oracle: re-run DAA and report whether --ref still fires (exit 0 iff cleared)")
+    pcs.add_argument("--ref", default="", help="the finding ref to verify (with --verify)")
+    pcs.set_defaults(func=_cmd_codescan)
     pd = sub.add_parser("detect", help="run the Detection Mirror over log files (defensive oracle plane)")
     pd.add_argument("--access-log", default="", help="a CLF access log (edge/injection/recon oracles)")
     pd.add_argument("--auth-log", default="", help="an auth log (credential oracles)")

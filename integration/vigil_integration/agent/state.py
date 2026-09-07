@@ -165,6 +165,9 @@ class Finding(BaseModel):
     status: str = "lead"          # "lead" | "fact"
     evidence_ref: str = ""        # spine record hash / SCITT cert id when status == "fact"
     source: str = ""              # which tool/step proposed it
+    target: str = ""              # where the finding lives — a URL, or "path:line" for a code finding (the
+                                  # gated auto-patch reads this to locate the file to fix). Optional + default
+                                  # "" so it round-trips old spines unchanged.
 
     @model_validator(mode="after")
     def _fact_needs_evidence(self) -> "Finding":

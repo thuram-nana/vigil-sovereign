@@ -1,5 +1,5 @@
-"""Wave 5 — the chat can launch the NATIVE source review (framework.v2 analysis review — DAA static
-analysis + per-finding confirm/refute), distinct from the vendored Strix codebase mode.
+"""Wave 5 — the chat can launch the DETERMINISTIC DAA codebase scan (`vigil codescan` — static rules →
+signed spine, fix-enabled), distinct from the vendored Strix codebase mode.
 
 Docs-only drift guard (reads files, no framework import): pins the end-to-end wiring across the three
 layers so a rename cannot silently break the chat's source-review affordance.
@@ -14,10 +14,12 @@ CHAT = (REPO / "engine" / "crucible" / "framework" / "v2" / "console" / "chat.py
 ACTIONS = (REPO / "engine" / "crucible" / "framework" / "v2" / "console" / "actions.py").read_text(encoding="utf-8")
 
 
-def test_actions_declares_sast_mode_and_runs_native_analysis_review():
+def test_actions_declares_sast_mode_and_runs_deterministic_codescan():
     assert '"sast"' in ACTIONS and 'mode == "sast"' in ACTIONS, "the sast launch branch is gone"
-    # the branch runs the ENGINE's own analysis reviewer, not Strix, and validates the path
-    assert '"analysis", "review"' in ACTIONS and '"--root"' in ACTIONS and '"--max-reviews"' in ACTIONS
+    # the branch runs the ENGINE's own deterministic DAA codebase scan (vigil codescan), not Strix, writing
+    # the signed spine + capturing the findings report, and validates the path
+    assert '"codescan"' in ACTIONS and '"--root"' in ACTIONS and '"--base-dir"' in ACTIONS
+    assert 'capture_report=True' in ACTIONS, "the codescan findings must be captured to report.json"
     assert "source-review path does not exist" in ACTIONS, "the sast path must be validated"
 
 
