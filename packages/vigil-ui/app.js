@@ -2132,7 +2132,7 @@
 
   // ---- New Assessment wizard -------------------------------------------------
   const TARGET_TYPES = [
-    { mode: "codebase", icon: "book", t: "Scan a codebase", d: "Point at a local path or repo; the AI reads and reasons over the source (Strix)." },
+    { mode: "codebase", icon: "book", t: "Scan a codebase", d: "Point at a local path or repo. Deterministic DAA static scan (fix-enabled, no Docker) by default; Strix agent optional." },
     { mode: "url", icon: "live", t: "Scan a website / API", d: "Give a URL; VIGIL engages it through the full gate. A 127.0.0.1 target runs a quick loopback scan." },
     { mode: "tool", icon: "bolt", t: "Run one tool", d: "Pick one real tool from this host's roster and run the gated engagement that drives it." },
     { mode: "suite", icon: "brain", t: "Full autonomous suite", d: "The autonomous OODA loop drives the whole arsenal (gated, oracle-adjudicated)." },
@@ -2237,7 +2237,7 @@
     // `tool` is the TOOL the operator picked (what they see); `tools` is what the launch payload can
     // actually carry — the capability id that drives it. Keeping both means the summary can name the
     // tool while the request stays something the server really honours.
-    const W = { step: 1, mode: "", target: "", slug: "", authorized: false, mount: false,
+    const W = { step: 1, mode: "", target: "", slug: "", authorized: false, mount: false, cbEngine: "daa",
       scope: [], scopeInput: "", objective: "", scan_mode: "standard", aiTools: true,
       tool: "", tools: [], apply_fixes: false, aegis_action: "detect",
       session_id: "", graph_backed: false, sessions: [],
@@ -2299,8 +2299,13 @@
     // operator reads cannot disagree with the engine the run picks. `agentic` mirrors the graph-backed
     // opt-in the wizard offers today (loopback + session); `graph_backed` is the legacy alias the server
     // also honours. Only the fields the routing/gate reads are included.
+    // A codebase scan runs one of two engines: the DETERMINISTIC DAA static oracle (default — no Docker, and
+    // the ONLY codebase path that grounds a gated fix in the signed spine) launches as mode "sast"; the Strix
+    // agent (Docker + LLM) launches as "codebase". The wizard keeps its internal mode "codebase" either way so
+    // its config/gating/review all apply; only the LAUNCH mode is remapped here.
+    function launchMode() { return (W.mode === "codebase" && W.cbEngine !== "strix") ? "sast" : W.mode; }
     function planBody() {
-      return { mode: W.mode, target: W.target.trim(), slug: W.slug.trim(),
+      return { mode: launchMode(), target: W.target.trim(), slug: W.slug.trim(),
         session_id: W.session_id, agentic: !!W.graph_backed, graph_backed: !!W.graph_backed,
         cloud_mode: W.cloud_mode };
     }
@@ -2332,9 +2337,20 @@
     function stepWhere() {
       const rows = [];
       if (W.mode === "codebase") {
+        rows.push(field("Scan engine",
+          h("select", { onChange: function (e) { W.cbEngine = e.target.value; updateSummary(); refreshFoot(); draw(); } }, [
+            h("option", { value: "daa", selected: W.cbEngine !== "strix" }, "Deterministic DAA — static rules, no Docker, fix-enabled"),
+            h("option", { value: "strix", selected: W.cbEngine === "strix" }, "Strix agent — Docker + LLM, broader"),
+          ]),
+          W.cbEngine === "strix"
+            ? "The vendored Strix agent chooses its own analysis passes (needs Docker + a model). Findings are model-driven."
+            : "DAA runs deterministic static rules over the source and writes each finding into the signed spine, so a gated fix can be applied and re-verified. No Docker, no model needed to scan."));
         rows.push(field("Codebase path", h("input", { type: "text", value: W.target, placeholder: "/home/you/project  or  https://github.com/org/repo",
-          onInput: function (e) { W.target = e.target.value; updateSummary(); refreshFoot(); } }), "A local path (or a git URL Strix can clone). Large trees: use bind-mount below."));
-        rows.push(checkbox("Bind-mount instead of copy (large monorepos)", W.mount, function (v) { W.mount = v; }));
+          onInput: function (e) { W.target = e.target.value; updateSummary(); refreshFoot(); } }),
+          W.cbEngine === "strix" ? "A local path (or a git URL Strix can clone). Large trees: use bind-mount below."
+                                 : "A local path (or a git URL to clone). DAA reads the source read-only."));
+        if (W.cbEngine === "strix")
+          rows.push(checkbox("Bind-mount instead of copy (large monorepos)", W.mount, function (v) { W.mount = v; }));
       } else if (W.mode === "aegis") {
         rows.push(field("Telemetry / log file", h("input", { type: "text", value: W.target, placeholder: "/path/to/telemetry-envelope.json",
           onInput: function (e) { W.target = e.target.value; updateSummary(); refreshFoot(); } }), "AEGIS detect runs its defensive oracles over one TelemetryEnvelope/log file."));
@@ -2543,7 +2559,7 @@
         }
         body.push(fixesCheckbox());
       } else {
-        const legendTxt = W.mode === "codebase" ? "Strix chooses its own analysis passes over the source."
+        const legendTxt = W.mode === "codebase" ? (W.cbEngine === "strix" ? "Strix chooses its own analysis passes over the source." : "DAA runs deterministic static rules over the source; each finding is written to the signed spine (fix-enabled).")
           : W.mode === "cloud" ? "The posture sensor runs its full deterministic check set over your imported inventory."
             : "AEGIS runs its full defensive oracle set over the telemetry.";
         body.push(h("div.legend", null, [V.icon("info"), legendTxt]));
@@ -2748,7 +2764,7 @@
       // them only made the request look richer than it was.
       const wantGraph = wantsGraph();
       const body = {
-        mode: W.mode, target: W.target.trim(), slug: W.slug.trim(), scope: W.scope,
+        mode: launchMode(), target: W.target.trim(), slug: W.slug.trim(), scope: W.scope,
         objective: W.objective.trim(), scan_mode: W.scan_mode,
         // `packsRun` is the SAME predicate the picker above is drawn from, so what was offered and what
         // is sent cannot drift: a branch that would drop the packs is never asked to carry them.
@@ -5919,15 +5935,21 @@
         "In-console apply is unavailable for this run: " + (whyNot || "its precondition is not met.")
         + " You can still apply from the CLI with `vigil patch`.");
     } else {
+      var vbtnId = "fx-vbtn-" + idx, voutId = "fx-vout-" + idx;
       applyBlock = h("div", { style: { marginTop: "10px" } }, [
         h("button.btn.sm#" + btnId, { onClick: function () { applyFix(runId, f.ref, btnId, outId); } },
           [V.icon("bolt"), "Apply fix (gated)"]),
+        h("button.btn.sm.ghost#" + vbtnId, { style: { marginLeft: "8px" },
+          onClick: function () { verifyFix(runId, f.ref, vbtnId, voutId); } },
+          [V.icon("check"), "Verify (re-scan)"]),
         h("span.hint", { style: { marginLeft: "8px" } },
-          "Runs the gated `vigil patch` ladder for this finding. Your click is the operator approval for the "
-          + "non-destructive stages AND a blanket up-front approval of every proposed edit — there is no "
-          + "per-file prompt on this path. The edits land in a disposable clone: your source is never touched "
-          + "and no PR is opened."),
+          "Apply runs the gated `vigil patch` ladder — your click is the operator approval for the "
+          + "non-destructive stages AND a blanket up-front approval of every proposed edit (no per-file "
+          + "prompt); the edits land in a disposable clone, so your source is never touched and no PR is "
+          + "opened. Verify re-runs the deterministic static rule over YOUR source: `cleared` means the "
+          + "finding is gone (apply the shown diff to your tree first)."),
         h("div#" + outId, { style: { marginTop: "8px" } }),
+        h("div#" + voutId, { style: { marginTop: "8px" } }),
       ]);
     }
     return h("div.fix-card", null, [
@@ -5964,6 +5986,27 @@
       .catch(function (e) {
         if (btn) btn.disabled = false;
         if (out) V.mount(out, h("div.legend", null, [V.icon("x"), (e && e.message) || "apply failed"]));
+      });
+  }
+  function verifyFix(runId, ref, btnId, outId) {
+    var btn = V.$("#" + btnId), out = V.$("#" + outId);
+    if (btn) btn.disabled = true;
+    if (out) V.mount(out, h("div.dim", null, "Re-scanning your source with the deterministic rule…"));
+    V.postJSON(OFF("/api/remediate/" + encodeURIComponent(runId) + "/" + encodeURIComponent(ref) + "/verify"), {})
+      .then(function (r) {
+        if (btn) btn.disabled = false;
+        if (!out) return;
+        if (r && r.error) { V.mount(out, h("div.legend", null, [V.icon("info"), r.error])); return; }
+        var stillAt = (r.still_fires_at || []).join(", ");
+        V.mount(out, h("div.legend", null, [V.icon(r.cleared ? "check" : "x"),
+          r.cleared
+            ? "CLEARED — the rule no longer fires; this finding is fixed in your source."
+            : ("STILL PRESENT — the rule still fires" + (stillAt ? " at " + stillAt : "")
+               + ". Apply the proposed diff to your source, then Verify again.")]));
+      })
+      .catch(function (e) {
+        if (btn) btn.disabled = false;
+        if (out) V.mount(out, h("div.legend", null, [V.icon("x"), (e && e.message) || "verify failed"]));
       });
   }
 

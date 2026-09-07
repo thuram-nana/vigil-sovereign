@@ -2466,17 +2466,26 @@ def launch_assessment(body: dict) -> dict:
         src = Path(target).expanduser()
         if not src.exists():
             return {"error": f"source-review path does not exist: {target}"}
+        vigil = _vigil_bin()
+        if not vigil:
+            return {"error": "the `vigil` entrypoint is not resolvable (set VIGIL_BIN / activate the venv) — "
+                             "the deterministic codebase scan runs through it"}
         slug = _slugify(body.get("slug") or "source-review", fallback="source-review")
-        cmd = [sys.executable, "-m", "framework.v2", "analysis", "review",
-               "--root", str(src), "--slug", slug, "--max-reviews", "5"]
-        unapplied = _unapplied("a native source review (DAA → URK confirm/refute)",
-                               "Capability packs are offensive engage flags; the analysis reviewer takes none.")
-        meta = {**base, **unapplied, "slug": slug, "cmd": cmd, "stream": "none", "status": "running"}
+        cbase = _strix_runtime_base_dir()   # ABSOLUTE engagement base the signed <slug>.spine is written to
+        # DETERMINISTIC DAA codebase scan (the operator-chosen static oracle): `vigil codescan` runs DAA over
+        # the source, writes each finding into the signed <cbase>/<slug>.spine (the SAME provenance store
+        # `vigil patch --from-spine` reads — so a gated fix can ground on it), and prints the findings JSON,
+        # which capture_report mirrors to report.json so the Findings screen shows them (CWE-tagged). A DAA
+        # match is a re-runnable STATIC fact, never a live-exploit claim. No LLM, no Docker, no network.
+        cmd = [vigil, "codescan", "--root", str(src), "--slug", slug, "--base-dir", cbase]
+        unapplied = _unapplied("a deterministic DAA codebase scan (static rules \u2192 signed spine; fix-enabled)",
+                               "Capability packs are offensive engage flags; the codebase scanner takes none.")
+        meta = {**base, **unapplied, "slug": slug, "cmd": cmd, "stream": "none", "status": "running",
+                "mode": "sast", "target": str(src), "base_dir": cbase, "engine": "codescan-daa"}
         _write_meta(run_id, **meta)
-        _spawn_background(run_id, rd, cmd, meta, capture_report=False)
+        _spawn_background(run_id, rd, cmd, meta, capture_report=True)
         return {"run_id": run_id, "status": "running", "mode": mode, "slug": slug, "stream": "none",
                 **unapplied}
-
     # ---- aegis → the defensive dual (detect over a telemetry/log file) -----
     if mode == "aegis":
         sub = str(body.get("aegis_action", "detect")).strip().lower()
@@ -3657,12 +3666,17 @@ def fix_precondition(run_id: str) -> dict:
                                   "engagement slug."}
     out["slug"] = slug
     repo = str(meta.get("target") or "").strip()
-    # only a codebase (Strix) run has a source tree to patch; a live-target (URL/cloud/aegis) run has nothing.
-    if str(meta.get("mode")) != "codebase" or not repo:
+    # only a codebase run (Strix `codebase`, or the deterministic DAA `sast` codescan) has a source tree to
+    # patch; a live-target (URL/cloud/aegis) run has nothing. The DAA codescan is the one that ALSO writes the
+    # signed spine below, so it is the path that becomes runnable end-to-end here.
+    if str(meta.get("mode")) not in ("codebase", "sast") or not repo:
         return {**out, "why_not": "this run has no repository to patch — the gated auto-patch applies to a "
-                                  "codebase (Strix) run's source. Run a codebase assessment to enable a "
-                                  "gated fix here."}
+                                  "codebase run's source. Run a codebase (DAA) scan to enable a gated fix here."}
     out["repo"] = repo
+    # prefer the base_dir the run itself recorded (the DAA codescan writes <base>/<slug>.spine there), so this
+    # check and `vigil patch` always agree on the same base even if the ambient env differs.
+    base_dir = str(meta.get("base_dir") or base_dir)
+    out["base_dir"] = base_dir
     vigil = _vigil_bin()
     if not vigil:
         return {**out, "why_not": "the `vigil` entrypoint is not resolvable (set VIGIL_BIN / activate the venv)"}
@@ -3684,6 +3698,46 @@ def fix_precondition(run_id: str) -> dict:
             f"`vigil engage --slug {slug} --base-dir {base_dir}` (which writes the signed spine), then apply "
             "the fix here.")}
     return {**out, "runnable": True}
+
+
+def verify_fix(run_id: str, finding_ref: str) -> dict:
+    """Fixes screen — the DETERMINISTIC fix-verification oracle for a codebase (DAA) finding: re-run the DAA
+    rule over the run's source and report whether the finding still fires. ``cleared=True`` iff the rule no
+    longer matches at its file — the honest, offline, non-destructive "did the fix remove it?" check. The
+    operator applies the proposed diff to their source, then clicks Verify (or re-scans); a cleared result is
+    the proof the finding is gone. Shells ``vigil codescan --verify`` (exit 0 ⇔ cleared).
+
+    Fail-closed: an unsafe ref refuses before argv; a non-codebase run (no repo to re-scan) returns a clean
+    ``cleared=False`` with the reason. Never raises for a bad run id beyond ``run_dir``'s guard."""
+    run_dir(run_id)                             # traversal-guarded; raises ValueError on a bad id → 404
+    finding_ref = str(finding_ref or "").strip()
+    if not _valid_finding_ref(finding_ref):
+        return {"ok": False, "cleared": False, "error": "invalid finding reference"}
+    pre = fix_precondition(run_id)
+    if not pre["repo"]:
+        return {"ok": False, "cleared": False,
+                "error": pre.get("why_not") or "this run has no codebase to re-scan for verification"}
+    vigil = pre.get("vigil") or _vigil_bin()
+    if not vigil:
+        return {"ok": False, "cleared": False, "error": "the `vigil` entrypoint is not resolvable"}
+    cmd = [vigil, "codescan", "--verify", "--root", pre["repo"], "--ref", finding_ref]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=600)  # noqa: S603
+    except (OSError, subprocess.SubprocessError) as e:
+        return {"ok": False, "cleared": False, "error": f"the verify re-scan failed: {type(e).__name__}: {e}"}
+    try:
+        detail = json.loads(proc.stdout) if proc.stdout else {}
+    except (ValueError, TypeError):
+        detail = {}
+    if not isinstance(detail, dict):
+        detail = {}
+    cleared = (proc.returncode == 0) and bool(detail.get("cleared"))
+    return {"ok": True, "cleared": cleared, "finding_ref": finding_ref, "repo": pre["repo"],
+            "still_fires_at": detail.get("still_fires_at", []),
+            "command": f"vigil codescan --verify --root <repo> --ref {finding_ref}",
+            "note": ("Re-runs the deterministic DAA rule over the run's source. `cleared=True` means the rule "
+                     "no longer fires at its file — the finding is gone. Apply the proposed diff to your "
+                     "source first; this checks YOUR tree, not the disposable clone the Apply step patched.")}
 
 
 def apply_fix(run_id: str, finding_ref: str) -> dict:

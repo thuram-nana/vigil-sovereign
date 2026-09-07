@@ -506,6 +506,7 @@ jobs:
               integration/tests/test_deliverable_chain.py \
               integration/tests/test_session_dossier.py \
               integration/tests/test_fix_oracle.py \
+              integration/tests/test_codescan.py \
               integration/tests/test_fix_ladder_matches_the_gate.py \
               integration/tests/test_remediation_cert.py \
               integration/tests/test_remediation_conformance.py \
