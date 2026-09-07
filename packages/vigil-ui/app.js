@@ -10375,6 +10375,14 @@
       }
       var _lbl = ({ done: "Done", completed: "Done", error: "Ended with an error",
                     interrupted: "Interrupted", cancelled: "Cancelled" })[PBOX.run.status] || PBOX.run.status;
+      // A whole-app / suite run (stream="blackboard") writes its findings to the evidence spine + Findings
+      // screen, NOT this box's progress stream \u2014 so the inline count can read 0 even when the engine
+      // confirmed real vulnerabilities. Direct the operator to Findings instead of a FALSE "no facts
+      // confirmed" (the inline count still shows when the stream did surface facts).
+      if (PBOX.run.stream === "blackboard" && !_facts) {
+        return "\u2713 " + _lbl + " \u2014 whole-app scan complete; open the Findings screen for the "
+             + "confirmed vulnerabilities";
+      }
       return "\u2713 " + _lbl + (_facts ? " \u2014 " + _facts + " fact(s) confirmed"
                                          : " \u2014 no facts confirmed");
     }
