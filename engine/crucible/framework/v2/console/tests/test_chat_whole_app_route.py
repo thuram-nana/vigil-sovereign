@@ -85,9 +85,12 @@ def test_helpers_unit():
 
 def test_whole_app_route_refused_when_restricted(monkeypatch):
     # red-pen HIGH: a whole-app suite launch must be CONTAINED by restricted mode (emergency stop), like the
-    # agentic path — the suite branch now consults _launch_contained_reason before provisioning/spawning.
-    import vigil_integration.restricted_mode as rm
-    monkeypatch.setattr(rm, "is_restricted", lambda base_dir: True)
+    # agentic path — the suite branch now consults _launch_contained_reason before provisioning/spawning and
+    # refuses when it returns a reason. Drive that wiring by stubbing _launch_contained_reason (the
+    # restricted-mode read itself is tested where vigil_integration is importable; this asserts the launcher
+    # REFUSES + does not spawn, and needs no cross-env import so it runs in the framework CI leg too).
+    monkeypatch.setattr(actions_mod, "_launch_contained_reason",
+                        lambda base_slug: "The system is in RESTRICTED MODE (emergency stop) — refused.")
     spawned = {"n": 0}
     monkeypatch.setattr(actions_mod, "_vigil_bin", lambda: "vigil")
     monkeypatch.setattr(actions_mod, "_spawn_background",
