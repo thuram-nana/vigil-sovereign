@@ -3751,6 +3751,48 @@ def verify_fix(run_id: str, finding_ref: str) -> dict:
                      "first; this checks YOUR tree, not the disposable clone the Apply step patched.")}
 
 
+def deep_fix(run_id: str, finding_ref: str, *, fix_attempts: int = 3) -> dict:
+    """Fixes screen (deep) — the Claude-Code-class DEEP FIX for ONE codebase finding: shells
+    ``vigil patch --deep`` (repo-aware, iterate-until-green with the build/test gate in the sandbox clone,
+    then re-run the finding's DETERMINISTIC oracle over the patched clone). Same provenance grounding
+    (``--from-spine``) and same disposable-clone / never-``--open-pr`` posture as :func:`apply_fix`; it just
+    iterates + verifies. Success is ``verified-no-pr`` (the rule cleared AND the build passed) — never the
+    signed ``remediated`` (which still needs the live oracle + m-of-n PR). Returns the verb's real output
+    (transcript + verdict + the applied diff to ``git apply``), or its fail-closed refusal verbatim."""
+    run_dir(run_id)
+    finding_ref = str(finding_ref or "").strip()
+    if not _valid_finding_ref(finding_ref):
+        return {"ok": False, "runnable": False, "error": "invalid finding reference"}
+    pre = fix_precondition(run_id)
+    if not pre["runnable"]:
+        out = {"ok": False, "runnable": False, "error": pre["why_not"]}
+        if pre["spine"]:
+            out["command"] = (f"vigil patch --deep --from-spine {pre['slug']} --finding-ref {finding_ref} "
+                              f"--target-repo <repo> --base-dir {pre['base_dir']} --apply-edits --approve")
+        return out
+    slug, repo, base_dir = pre["slug"], pre["repo"], pre["base_dir"]
+    attempts = max(1, min(int(fix_attempts or 3), 6))   # bound the self-correcting loop
+    cmd = [pre["vigil"], "patch", "--deep", "--fix-attempts", str(attempts),
+           "--from-spine", slug, "--finding-ref", finding_ref,
+           "--target-repo", repo, "--base-dir", base_dir, "--apply-edits", "--approve"]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=2400)  # noqa: S603
+    except (OSError, subprocess.SubprocessError) as e:
+        return {"ok": False, "error": f"the deep-fix ladder failed to run: {type(e).__name__}: {e}"}
+    out = ((proc.stdout or "") + (("\n--- stderr ---\n" + proc.stderr) if proc.stderr else "")).strip()[-12000:]
+    verified = proc.returncode == 0    # `vigil patch --deep` exits 0 ONLY on verified-no-pr
+    return {"ok": verified, "runnable": True, "rc": proc.returncode, "verified": verified,
+            "finding_ref": finding_ref, "slug": slug, "attempts": attempts,
+            "command": ("vigil patch --deep --from-spine " + slug + " --finding-ref " + finding_ref
+                        + " --target-repo <repo> --base-dir " + base_dir + " --apply-edits --approve"),
+            "output": out or "(no output)",
+            "note": ("Deep fix: repo-aware, self-correcting (up to " + str(attempts) + " attempts), each patch "
+                     "built/tested in a DISPOSABLE clone (your source is never touched, no PR). Success is "
+                     "`verified-no-pr` \u2014 the finding's deterministic rule no longer fires on the patched "
+                     "clone AND the build/tests pass \u2014 which is NOT the signed `remediated` (that needs "
+                     "the live oracle + an m-of-n PR). Apply the shown diff to your tree, then Verify.")}
+
+
 def apply_fix(run_id: str, finding_ref: str) -> dict:
     """Fixes screen (U1): run the GATED, NON-DESTRUCTIVE auto-patch ladder for ONE oracle-confirmed finding by
     shelling ``vigil patch`` — the SAME provenance-grounded gated verb the CLI uses. The driving finding comes

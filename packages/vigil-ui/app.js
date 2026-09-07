@@ -5950,10 +5950,13 @@
         "In-console apply is unavailable for this run: " + (whyNot || "its precondition is not met.")
         + " You can still apply from the CLI with `vigil patch`.");
     } else {
-      var vbtnId = "fx-vbtn-" + idx, voutId = "fx-vout-" + idx;
+      var vbtnId = "fx-vbtn-" + idx, voutId = "fx-vout-" + idx, dbtnId = "fx-dbtn-" + idx, doutId = "fx-dout-" + idx;
       applyBlock = h("div", { style: { marginTop: "10px" } }, [
         h("button.btn.sm#" + btnId, { onClick: function () { applyFix(runId, f.ref, btnId, outId); } },
           [V.icon("bolt"), "Apply fix (gated)"]),
+        h("button.btn.sm.primary#" + dbtnId, { style: { marginLeft: "8px" },
+          onClick: function () { deepFix(runId, f.ref, dbtnId, doutId); } },
+          [V.icon("brain"), "Deep fix (iterate + verify)"]),
         h("button.btn.sm.ghost#" + vbtnId, { style: { marginLeft: "8px" },
           onClick: function () { verifyFix(runId, f.ref, vbtnId, voutId); } },
           [V.icon("check"), "Verify (re-scan)"]),
@@ -5966,6 +5969,7 @@
           + "no longer fires anywhere in the tree. It proves the pattern is gone, not that a runtime "
           + "exploit was ever reachable."),
         h("div#" + outId, { style: { marginTop: "8px" } }),
+        h("div#" + doutId, { style: { marginTop: "8px" } }),
         h("div#" + voutId, { style: { marginTop: "8px" } }),
       ]);
     }
@@ -6026,6 +6030,30 @@
       .catch(function (e) {
         if (btn) btn.disabled = false;
         if (out) V.mount(out, h("div.legend", null, [V.icon("x"), (e && e.message) || "verify failed"]));
+      });
+  }
+  function deepFix(runId, ref, btnId, outId) {
+    var btn = V.$("#" + btnId), out = V.$("#" + outId);
+    if (btn) btn.disabled = true;
+    if (out) V.mount(out, h("div.dim", null, "Deep fix: repo-aware, iterating (build/test the patch in a disposable clone, then re-verify the finding)\u2026 this can take a minute."));
+    V.postJSON(OFF("/api/remediate/" + encodeURIComponent(runId) + "/" + encodeURIComponent(ref) + "/deepfix"), {})
+      .then(function (r) {
+        if (btn) btn.disabled = false;
+        if (!out) return;
+        if (r && r.error) { V.mount(out, h("div.legend", null, [V.icon("info"), r.error])); return; }
+        V.mount(out, [
+          h("div.legend", null, [V.icon(r.verified ? "check" : "info"),
+            r.verified
+              ? "VERIFIED (no PR) \u2014 the fix built/tested clean AND the finding's rule no longer fires on the patched clone. Apply the diff below to your tree, then Verify."
+              : "Not verified \u2014 the deep-fix loop did not reach a clean, finding-clearing patch (see the transcript). Your source was not touched; no PR was opened."]),
+          r.command ? h("div.mono.dim", { style: { fontSize: "var(--fs-xs)", margin: "4px 0" } }, r.command) : null,
+          r.note ? h("div.hint", null, r.note) : null,
+          h("pre.mono", { style: { marginTop: "6px", maxHeight: "320px", overflow: "auto", fontSize: "var(--fs-xs)", whiteSpace: "pre-wrap" } }, r.output || "(no output)"),
+        ]);
+      })
+      .catch(function (e) {
+        if (btn) btn.disabled = false;
+        if (out) V.mount(out, h("div.legend", null, [V.icon("x"), (e && e.message) || "deep fix failed"]));
       });
   }
 
