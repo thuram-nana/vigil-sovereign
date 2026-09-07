@@ -237,7 +237,11 @@ def _committed_sidecar_env() -> dict[str, str]:
     for line in env_block.splitlines():
         m = re.match(r'\s+(VIGIL_GATEWAY_[A-Z_]+):\s*"([^"]*)"\s*$', line)
         if m:
-            env[m.group(1)] = m.group(2)
+            val = m.group(2)
+            # subnet/IP are compose interpolations (relocatable subnet); at rest the env is unset so compose
+            # substitutes the `:-default` — resolve it here to load the SAME ruleset apply-firewall would.
+            dm = re.match(r'^\$\{[A-Z_]+:-(.*)\}$', val)
+            env[m.group(1)] = dm.group(1) if dm else val
     return env
 
 

@@ -62,6 +62,7 @@ def test_render_compose_binds_sandbox_ip_not_all_interfaces():
     assert bind_ip == "172.31.240.2"
     frag = net.render_compose()
     assert "0.0.0.0" not in frag
-    assert f'"--host", "{bind_ip}"' in frag
-    assert f"ipv4_address: {bind_ip}" in frag
+    # emitted as compose interpolations whose DEFAULT is the pinned .2 bind (relocatable subnet)
+    assert f'"--host", "${{VIGIL_GATEWAY_GATEWAY_IP:-{bind_ip}}}"' in frag
+    assert f"ipv4_address: ${{VIGIL_GATEWAY_GATEWAY_IP:-{bind_ip}}}" in frag
     assert "VIGIL_GATEWAY_PROXY_TOKEN" in frag

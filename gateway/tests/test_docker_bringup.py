@@ -209,10 +209,26 @@ def test_committed_compose_matches_render_and_is_sane():
     from vigil_gateway.docker import IMAGE_REPO, IMAGE_TAG_ENV
     assert f"image: {IMAGE_REPO}:${{{IMAGE_TAG_ENV}:-latest}}" in committed
     assert "internal: true" in committed                               # the sandbox net is deny-default
-    assert f"ipv4_address: {net.sandbox_gateway_ip()}" in committed     # the pinned sandbox-net bind
+    # the pinned sandbox-net bind is emitted as a compose interpolation whose DEFAULT is the .2 host, so
+    # an operator can relocate the gateway onto a free /24 (byte-identical when the env is unset).
+    assert f"ipv4_address: ${{VIGIL_GATEWAY_GATEWAY_IP:-{net.sandbox_gateway_ip()}}}" in committed
     assert "healthcheck:" in committed and "start_period:" in committed  # W0-6 gate-readiness probe (--wait)
     for netname in (SANDBOX_NETWORK, EGRESS_NETWORK):
         assert netname in committed
+
+
+def test_render_compose_subnet_is_relocatable():
+    # The default render carries the interpolation form (relocatable); a non-default subnet flows through to
+    # BOTH the network subnet and the derived .2 gateway IP everywhere, with NO stray default left behind.
+    default = SandboxNetworking().render_compose()
+    assert "${VIGIL_GATEWAY_SANDBOX_SUBNET:-172.31.240.0/24}" in default
+    assert "${VIGIL_GATEWAY_GATEWAY_IP:-172.31.240.2}" in default
+    moved = SandboxNetworking(sandbox_subnet="172.20.0.0/24").render_compose()
+    assert "${VIGIL_GATEWAY_SANDBOX_SUBNET:-172.20.0.0/24}" in moved
+    assert "${VIGIL_GATEWAY_GATEWAY_IP:-172.20.0.2}" in moved     # .2 derived from the moved subnet
+    # no stray pinned default in the DIRECTIVE lines (the doc-note comment legitimately cites the default)
+    moved_directives = "\n".join(l for l in moved.splitlines() if not l.lstrip().startswith("#"))
+    assert "172.31.240" not in moved_directives
 
 
 def test_render_compose_refuses_unsafe_charter_slug():
@@ -379,8 +395,9 @@ def test_render_compose_emits_the_firewall_backstop_sidecar():
     assert 'restart: "no"' in sidecar                              # one-shot
     assert "no-new-privileges:true" in sidecar
     # it is handed the network coordinates apply-firewall needs (and no charter slug — it needs none)
-    assert 'VIGIL_GATEWAY_GATEWAY_IP: "172.31.240.2"' in sidecar
-    assert 'VIGIL_GATEWAY_SANDBOX_SUBNET: "172.31.240.0/24"' in sidecar
+    # emitted as compose interpolations whose DEFAULT is the pinned value (relocatable subnet)
+    assert 'VIGIL_GATEWAY_GATEWAY_IP: "${VIGIL_GATEWAY_GATEWAY_IP:-172.31.240.2}"' in sidecar
+    assert 'VIGIL_GATEWAY_SANDBOX_SUBNET: "${VIGIL_GATEWAY_SANDBOX_SUBNET:-172.31.240.0/24}"' in sidecar
     # ...and the bridge IFACE, so govern() matches by interface (v4 AND v6). A v4-only source-subnet
     # match left IPv6 sandbox egress policy-accepted (red-pen sx-s3 IPv6 bypass).
     assert 'VIGIL_GATEWAY_SANDBOX_IFACE: "vigil-sbx0"' in sidecar
