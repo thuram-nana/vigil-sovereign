@@ -3712,6 +3712,12 @@
     return f.location || f.surface || f.insertion_point || f.param || f.endpoint || "—";
   }
   function p3Oracle(f) { return f.confirmed_by || f.oracle_kind || "—"; }
+  // The weakness-class taxonomy the server stamps onto every finding (report.standards): the CWE id(s)
+  // and OWASP Top-10 category the bug_class denotes. Shown INLINE beside the bug class so a finding reads
+  // as "xss · CWE-79", not just "xss". Class DATA, not a compliance-coverage claim (that is the Compliance
+  // screen). Empty string when the class is unmapped or the server did not classify it — no fabrication.
+  function p3Cwe(f) { return (f && f.cwe && f.cwe.length) ? f.cwe.join(", ") : ""; }
+  function p3Owasp(f) { return (f && f.owasp) ? f.owasp : ""; }
   function p3Rationale(f) { return f.oracle_rationale || f.evidence || f.rationale || ""; }
   function p3Sev(f) { return String(f.severity || "").trim(); }
   function p3SevChip(sev) {
@@ -3869,7 +3875,8 @@
             h("tbody", null, rows.map(function (f) {
               return h("tr.click", { onClick: function () { p3OpenFindingDrawer(run, f); } }, [
                 h("td", null, p3SevChip(p3Sev(f))),
-                h("td", null, h("b.mono", null, f.bug_class || "—")),
+                h("td", null, [h("b.mono", null, f.bug_class || "—"),
+                  p3Cwe(f) ? h("span.pill.sm", { style: { marginLeft: "6px" }, title: p3Owasp(f) ? ("OWASP " + p3Owasp(f)) : "" }, p3Cwe(f)) : null]),
                 h("td", null, h("span.mono", { style: { fontSize: "var(--fs-xs)", wordBreak: "break-all" } }, p3Surface(f))),
                 h("td", null, h("span.mono", { style: { fontSize: "var(--fs-xs)" } }, p3Oracle(f))),
                 h("td", null, p3StatusChip(f)),
@@ -3921,6 +3928,8 @@
           : "LEAD — a proposal, not proven"));
     put("Severity", p3Sev(f) || "—");
     put("Bug class", f.bug_class);
+    put("CWE", p3Cwe(f));
+    put("OWASP", p3Owasp(f) ? ("OWASP Top 10 — " + p3Owasp(f)) : "");
     put("Surface", p3Surface(f));
     put("Oracle kind", p3Oracle(f));
     if (f.confidence != null && f.confidence !== "") put("Confidence", f.confidence);
@@ -5886,6 +5895,7 @@
         h("span.vbadge." + (sevClass(f.severity) || "muted"), null, (f.severity || "?").toUpperCase()),
         h("b", null, f.title || f.bug_class || "finding"),
         f.bug_class ? h("span.pill.sm", null, f.bug_class) : null,
+        p3Cwe(f) ? h("span.pill.sm", { title: p3Owasp(f) ? ("OWASP " + p3Owasp(f)) : "" }, p3Cwe(f)) : null,
       ]),
       f.location ? h("div.mono.dim", { style: { fontSize: "var(--fs-xs)", margin: "4px 0" } }, f.location) : null,
       h("div.fix-rem", null, [h("span.label", null, "Remediation"), h("p", null, f.remediation)]),
