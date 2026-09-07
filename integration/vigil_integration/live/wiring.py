@@ -654,14 +654,55 @@ def build_engine(config: EngineConfig) -> VigilEngine:
             scope=offense_scope, **kw,
         )
 
+    def _fireteam_deploy_token_ok(decision: Any) -> bool:
+        # GOVERNED per-action approval for a FAN-OUT (Phase 3): bind the deploy to THIS wave's exact member
+        # specs (an action_digest over them), publish a pending the console can show, and require a matching
+        # signed, single-use, OWNER-signed token — NEVER a blanket standing grant. consume_token stays the
+        # SOLE authority (owner signature + window + single-use burn); approving one plan can never authorize
+        # a different set of members (the digest binds them). Any error / no token -> False -> the engine
+        # pauses at awaiting_approval (resumable once the operator signs it). Reached ONLY in token mode.
+        try:
+            import time as _t
+            from .approval_token import ApprovalAction, action_digest, consume_token
+            members = list(getattr(decision, "fireteam", None) or [])
+            if not members:
+                return False
+            tgt = str(config.slug or "loopback")
+            digest = action_digest("deploy_fireteam", tgt, members)
+            act = ApprovalAction("deploy_fireteam", tgt, digest)
+            src = _token_source
+            if approval_broker is not None:
+                approval_broker.bind(act, args_preview={"deploy_fireteam": True, "members": len(members)})
+                src = approval_broker.token_source
+            found = src() if callable(src) else None
+            if not (isinstance(found, tuple) and len(found) == 2):
+                return False
+            token, action = found
+            if getattr(action, "tool_name", None) != "deploy_fireteam" or getattr(action, "target", None) != tgt:
+                return False
+            # Defense-in-depth (red-pen nit): also require the returned action's digest to equal the digest
+            # WE just computed over THESE members — so an owner token minted for a different member set can
+            # never authorize this fan-out even if a caller-supplied token_source returned a mismatched action
+            # (consume_token binds token<->action, this binds action<->our members).
+            if getattr(action, "action_digest", None) != digest:
+                return False
+            d = consume_token(token, action, authority=effective_authority, now=_t.time(), ledger=_nonce_ledger)
+            return bool(getattr(d, "authorized", False))
+        except Exception:  # noqa: BLE001 — any error denies the fan-out (fail-closed)
+            return False
+
     def approval(decision: Any, state: Any) -> bool:
         # TOKEN MODE: route a queued TOOL call to the per-action token gate (the real, per-action, single-use
-        # check is re-made at execution — a queued tool with no valid token is DENIED there, never run). A
-        # phase escalation / fireteam deploy is NOT re-gated by that gate, so it stays behind the operator's
-        # STANDING approval (unchanged) — token mode is never MORE permissive than today for those.
-        # STANDING MODE (no authority): the operator's standing approval, exactly as before.
+        # check is re-made at execution — a queued tool with no valid token is DENIED there, never run).
+        # A fan-out (deploy_fireteam) is ALSO per-action approvable now (Phase 3): a signed, single-use
+        # deploy_fireteam token bound to this wave's members satisfies it — the console 'Approve fan-out'
+        # signs it — so the Chat can run multiple agents WITHOUT a blanket --approve-offense grant. A phase
+        # escalation is still only the standing grant. STANDING MODE (no authority): unchanged.
         from ..agent.state import ActionType
-        if _token_gate_active and getattr(decision, "action", None) == ActionType.USE_TOOL:
+        _act = getattr(decision, "action", None)
+        if _token_gate_active and _act == ActionType.USE_TOOL:
+            return True
+        if _token_gate_active and _act == ActionType.DEPLOY_FIRETEAM and _fireteam_deploy_token_ok(decision):
             return True
         return bool(config.owner_approves_offense)
 

@@ -155,12 +155,22 @@ def _wants_whole_app_scan(message: str) -> bool:
 
 
 def _is_loopback_url(target: str) -> bool:
-    """True iff ``target`` is an http(s) URL on the owner's loopback — the only surface the whole-system
-    autonomous route auto-authorizes (a remote target still needs a human-signed charter)."""
+    """True iff ``target``'s host is a genuine loopback — an IP in 127.0.0.0/8 or ::1, or ``localhost``.
+    SOUND host check (red-pen): validate the host as an IP literal via ``ipaddress`` rather than a
+    ``startswith('127.')`` prefix, so an attacker-registrable name like ``127.0.0.1.evil.com`` or
+    ``127.evil.com`` is NOT misread as loopback. Only used to CHOOSE the whole-app route; the launcher
+    re-gates with the strict exact-loopback set + the engine's own charter/scope gate, so this is a router
+    hint, never the sole authorization."""
     try:
+        import ipaddress
         from urllib.parse import urlsplit
-        h = (urlsplit(str(target or "")).hostname or "").lower()
-        return h in ("127.0.0.1", "localhost", "::1") or h.startswith("127.")
+        h = (urlsplit(str(target or "")).hostname or "").strip().lower()
+        if h == "localhost":
+            return True
+        try:
+            return ipaddress.ip_address(h).is_loopback   # 127.0.0.0/8 or ::1 (a real IP literal only)
+        except ValueError:
+            return False                                  # a name (or garbage) is never loopback here
     except Exception:  # noqa: BLE001
         return False
 

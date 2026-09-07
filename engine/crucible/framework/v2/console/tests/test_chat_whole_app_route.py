@@ -75,4 +75,25 @@ def test_helpers_unit():
     assert not chat._wants_whole_app_scan("engage http://127.0.0.1:8080/login")
     assert chat._is_loopback_url("http://127.0.0.1:19010/x")
     assert chat._is_loopback_url("http://localhost:8080/")
+    assert chat._is_loopback_url("http://[::1]:8080/")
     assert not chat._is_loopback_url("http://evil.example/")
+    # red-pen: attacker-registrable names that merely START with 127. are NOT loopback
+    assert not chat._is_loopback_url("http://127.0.0.1.evil.com/")
+    assert not chat._is_loopback_url("http://127.evil.com/")
+    assert not chat._is_loopback_url("http://127.0.0.1@evil.com/")
+
+
+def test_whole_app_route_refused_when_restricted(monkeypatch):
+    # red-pen HIGH: a whole-app suite launch must be CONTAINED by restricted mode (emergency stop), like the
+    # agentic path — the suite branch now consults _launch_contained_reason before provisioning/spawning.
+    import vigil_integration.restricted_mode as rm
+    monkeypatch.setattr(rm, "is_restricted", lambda base_dir: True)
+    spawned = {"n": 0}
+    monkeypatch.setattr(actions_mod, "_vigil_bin", lambda: "vigil")
+    monkeypatch.setattr(actions_mod, "_spawn_background",
+                        lambda *a, **k: spawned.__setitem__("n", spawned["n"] + 1))
+    out = actions_mod.launch_assessment({"mode": "suite", "target": "http://127.0.0.1:19010/",
+                                         "objective": "x", "scan_mode": "deep", "slug": "wholeapp-x",
+                                         "session_id": "s", "tools": ["recon"]})
+    assert out.get("error") and "restricted" in out["error"].lower(), out
+    assert spawned["n"] == 0, "a restricted-mode whole-app launch must NOT spawn"
