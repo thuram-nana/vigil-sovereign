@@ -37,6 +37,7 @@ from ..remediation.codefix import is_safe_repo_path, render_untrusted_finding
 from ..warden_gate import decide_tool
 from .executor import subprocess_runner
 from .sandbox_exec import SandboxUnavailable, run_sandboxed
+from ..tools.mcp_registry import _redact_str
 from .think_claude import _build_live_client, _extract_text, _resolve_key, llm_egress_refusal
 from .wiring import default_classify
 
@@ -164,12 +165,22 @@ def _gather_repo_context(repo: str, primary: str) -> list[tuple[str, str]]:
         if not ok:
             return
         local = os.path.join(repo, relpath)
+        # SECURITY (red-pen #5): is_safe_repo_path is purely LEXICAL — it stops `..`/absolute/flags but not a
+        # symlink. A `.py`-named symlink in the finding's dir pointing OUTSIDE the repo would otherwise be read
+        # and shipped to the coder LLM (arbitrary out-of-repo file read → egress). Reject any symlink on the
+        # path AND confirm the resolved real path stays strictly under the repo before opening.
         try:
-            if not os.path.isfile(local):
+            if os.path.islink(local):
                 return
-            with open(local, encoding="utf-8", errors="replace") as fh:
+            real_repo = os.path.realpath(repo)
+            real_local = os.path.realpath(local)
+            if os.path.commonpath([real_repo, real_local]) != real_repo or real_local == real_repo:
+                return
+            if not os.path.isfile(real_local) or os.path.islink(real_local):
+                return
+            with open(real_local, encoding="utf-8", errors="replace") as fh:
                 content = fh.read(cap)
-        except OSError:
+        except (OSError, ValueError):
             return
         seen.add(relpath)
         out.append((relpath, content))
@@ -316,7 +327,9 @@ class CodefixSession:
                 return _Exec(False, reason=f"build/test gate refused: {exc}", build_ref=self.workdir,
                              tests_passed=False, build_ran=True)
             if res.timed_out or res.exit_code != 0:
-                tail = (res.stderr or res.stdout or "").strip()[-1200:]
+                # the sandbox build/test output can echo a secret from a failing test (a token/DB URL) — scrub
+                # it before it lands in the operator-facing `reason` (which reaches stdout + the console).
+                tail = _redact_str((res.stderr or res.stdout or "").strip()[-1200:])
                 why = "timed out" if res.timed_out else f"exit {res.exit_code}"
                 return _Exec(False, reason=f"build/test FAILED in the sandbox clone ({why}): {tail}",
                              build_ref=self.workdir, tests_passed=False, build_ran=True)
@@ -545,7 +558,7 @@ def autopatch_live(finding: Any, *, config: CodefixConfig, client: Any = None,
     # coder (`retry_context`) so it self-corrects. Each attempt re-clones (the clone executor rmtree's + re-
     # clones — no state bleed) and re-proposes. Only `build-failed` is retried (a proposal/gate/quorum refusal
     # is not a fixable-by-re-proposing failure). max_fix_attempts=1 ⇒ exactly one call, byte-identical to before.
-    attempts = max(1, int(max_fix_attempts or 1))
+    attempts = max(1, min(int(max_fix_attempts or 1), 10))   # clamp: bound paid coder calls + clones
     retry_context = ""
     result = None
     for i in range(attempts):

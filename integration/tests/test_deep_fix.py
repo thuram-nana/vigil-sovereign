@@ -131,3 +131,28 @@ def test_verified_no_pr_never_mints_remediated(tmp_path):
     r = autopatch_live(_finding(repo), config=_cfg(repo, tmp_path), client=_client(_GOOD),
                        verify_oracle=codescan.build_code_fix_oracle(REF), verify_before_pr=True, max_fix_attempts=1)
     assert r.remediated is False and not r.opened_pr and not r.evidence_ref
+
+
+# ---- security: repo-context must not follow a symlink out of the repo (red-pen HIGH #5) ----
+def test_context_refuses_symlink_escape(tmp_path):
+    import os
+    from vigil_integration.live.codefix_runner import _gather_repo_context
+    repo = tmp_path / "repo"; (repo / "svc").mkdir(parents=True)
+    (repo / "svc" / "config.py").write_text("import hashlib\n", encoding="utf-8")
+    secret = tmp_path / "outside.py"; secret.write_text('KEY="sk-DO-NOT-EGRESS"\n', encoding="utf-8")
+    os.symlink(str(secret), str(repo / "svc" / "notes.py"))   # attacker-planted .py symlink out of repo
+    ctx = _gather_repo_context(str(repo), "svc/config.py")
+    paths = [pth for pth, _ in ctx]; blob = "".join(c for _, c in ctx)
+    assert "svc/notes.py" not in paths and "DO-NOT-EGRESS" not in blob
+
+
+# ---- security: a rename to an unscanned extension must NOT read as cleared (evasion guard) ----
+def test_rename_to_unscanned_extension_is_not_cleared(tmp_path):
+    src = tmp_path / "src"; (src).mkdir()
+    (src / "config.py").write_text("import hashlib\ndef f(p):\n    return hashlib.md5(p).hexdigest()\n", encoding="utf-8")
+    ref = codescan.make_ref("DAA-WEAK-HASH", "config.py", 3)
+    assert codescan.verify_finding_cleared(root=str(src), ref=ref)["cleared"] is False   # still there
+    # "fix" = rename the vulnerable file to an unscanned extension (the pattern is hidden, not removed)
+    (src / "config.py").rename(src / "config.txt")
+    res = codescan.verify_finding_cleared(root=str(src), ref=ref)
+    assert res["cleared"] is False and res.get("path_removed") is True   # NOT a false 'fixed'

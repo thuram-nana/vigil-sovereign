@@ -563,13 +563,26 @@ def autopatch(
     # weaker `verified-no-pr`. OFF by default (`verify_before_pr=False`) ⇒ the flow falls through to the PR
     # gate exactly as before (byte-identical).
     if verify_before_pr:
+        # (red-pen LOW) The `verified-no-pr` terminal has NO signed-cert requirement (by design), so here we
+        # accept ONLY a verdict carrying an EXPLICIT bool `.fired` attribute — a bare/empty string (which
+        # `_oracle_fired` would read as "silent") can never mint verified. A None/garbage/errored verdict, or a
+        # missing oracle, fails closed to `unverified`.
         try:
-            fired = _oracle_fired(oracle(request, patched_build)) if oracle is not None else None
+            _v = oracle(request, patched_build) if oracle is not None else None
             oerr = ""
         except Exception as exc:   # noqa: BLE001 — an oracle error confirms nothing (fail-closed to unverified)
-            fired, oerr = None, f": {exc}"
+            _v, oerr = None, f": {exc}"
+        _f = getattr(_v, "fired", None)
+        fired = _f if isinstance(_f, bool) else None
         tests_ok = getattr(bres, "tests_passed", None)
-        _tnote = "; build/tests passed" if tests_ok else ""
+        # (crypto-notary MEDIUM) Surface whether the build/test GATE actually ran — a `verified-no-pr` minted
+        # with the gate SKIPPED (bwrap unavailable) must say so, not imply tests passed.
+        if tests_ok is True:
+            _tnote = "; build/tests passed"
+        elif "SKIP" in str(getattr(bres, "reason", "")).upper():
+            _tnote = "; build/test gate SKIPPED (bwrap unavailable) — apply-check only"
+        else:
+            _tnote = "; no build/test gate configured (apply-check only)"
         if fired is None:
             vstatus, vreason = "unverified", f"verify oracle returned no usable verdict (fail-closed){oerr}"
         elif fired:

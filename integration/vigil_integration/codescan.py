@@ -255,7 +255,26 @@ def verify_finding_cleared(*, root: str, ref: str, max_files: int = 5000) -> dic
     # recorded-path-gone-but-fires-elsewhere case so the operator is not misled.
     hits = [f for f in daa if f.rule_id == rule_id]
     at_recorded_path = path is not None and any(f.path == path for f in hits)
+    # EVASION GUARD (red-pen/crypto-notary MEDIUM): if the finding's recorded file is GONE from the tree, a
+    # rule-fires-nowhere result does NOT prove the pattern was removed — the file may have been renamed to an
+    # UNSCANNED extension (e.g. .py -> .txt), moving the vulnerable code out of DAA's view. DAA only scans a
+    # fixed extension set, so we cannot see it. Report NOT cleared (path_removed) so a rename can never read as
+    # fixed; a legitimate delete lands here too and is honestly surfaced for manual confirmation.
+    path_removed = False
+    if path is not None and not hits:
+        try:
+            import os as _os
+            path_removed = not _os.path.isfile(_os.path.join(str(root), path))
+        except OSError:
+            path_removed = True
+    cleared = (len(hits) == 0) and not path_removed
+    reason = ("" if cleared else
+              ("the finding's file is gone from the tree (moved/renamed/deleted) — a re-scan cannot confirm the "
+               "pattern was removed vs. hidden in an unscanned file; verify manually" if path_removed else
+               "the finding's rule still fires"))
     return {"ref": ref, "rule_id": rule_id, "path": path,
-            "cleared": len(hits) == 0,
+            "cleared": cleared,
             "moved": bool(hits) and path is not None and not at_recorded_path,
+            "path_removed": path_removed,
+            "reason": reason,
             "still_fires_at": [f"{f.path}:{f.line}" for f in hits]}
