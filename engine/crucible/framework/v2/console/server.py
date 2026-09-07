@@ -852,6 +852,12 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             if path.startswith("/api/reverify/"):
                 self._json(actions.reverify_run(path[len("/api/reverify/"):].strip("/")))
                 return
+            if path.startswith("/api/remediate/") and path.endswith("/deepfix"):
+                # Deep fix (iterate-until-green + oracle-verify) — mirrors /apply's path-based ref.
+                mid = path[len("/api/remediate/"):-len("/deepfix")].strip("/")
+                run_id, _, fref = mid.partition("/")
+                self._json(actions.deep_fix(run_id, fref))
+                return
             if path.startswith("/api/remediate/") and path.endswith("/verify"):
                 # Deterministic DAA re-scan verify of one codebase finding (mirrors /apply's path-based ref).
                 mid = path[len("/api/remediate/"):-len("/verify")].strip("/")

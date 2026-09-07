@@ -160,6 +160,9 @@ class PatchResult(BaseModel):
     evidence_ref: str = ""
     pr_ref: str = ""
     patched_paths: list[str] = Field(default_factory=list)
+    # the exact unified diff that was APPROVED and git-applied into the disposable clone — surfaced so
+    # the operator can `git apply` the same fix in their real tree (the clone is never their source).
+    applied_diff: str = ""
     verification: Optional[FixVerification] = None
     reason: str = ""
     steps: list[PipelineStep] = Field(default_factory=list)
@@ -423,9 +426,10 @@ def _call_propose(propose_patch: Optional[Callable[[Any], Any]], request: Any) -
 
 
 def _refuse(rec: _Recorder, remediation_id: str, status: str, reason: str, *,
-            patched_paths: Optional[list[str]] = None) -> PatchResult:
+            patched_paths: Optional[list[str]] = None, applied_diff: str = "") -> PatchResult:
     return PatchResult(remediation_id=str(remediation_id or ""), status=status, opened_pr=False,
-                       remediated=False, patched_paths=patched_paths or [], reason=reason, steps=rec.steps)
+                       remediated=False, patched_paths=patched_paths or [], applied_diff=applied_diff or "",
+                       reason=reason, steps=rec.steps)
 
 
 # --- the loop ----------------------------------------------------------------------------------------
@@ -447,6 +451,8 @@ def autopatch(
     target_repo: str = "",
     target_branch: str = "",
     seq_start: int = 0,
+    retry_context: str = "",
+    verify_before_pr: bool = False,
 ) -> PatchResult:
     """Drive the AIxCC auto-patch loop for one finding, fail-closed at every stage.
 
@@ -478,6 +484,14 @@ def autopatch(
         return _refuse(rec, rid, "refused-not-confirmed",
                        "auto-patch REFUSED: the spawn boundary declined a non-confirmed finding")
     repo = request.target_repo or request.finding.target or request.remediation_id
+    # deep-fix Phase C: carry prior build/test failure text into the coder's next proposal (default "" ⇒
+    # byte-identical to a single-shot run). The request model declares `retry_context`, so this is a plain
+    # field set — not an untrusted extra attr.
+    if retry_context:
+        try:
+            request.retry_context = str(retry_context)
+        except Exception:  # noqa: BLE001 — a model that rejects it just means no feedback, never a crash
+            pass
 
     # (1) PROPOSE — the injected coder LLM returns a minimal unified-diff PROPOSAL (untrusted).
     proposed = parse_unified_diff(_call_propose(propose_patch, request))
@@ -520,6 +534,9 @@ def autopatch(
 
     approved = _dedup_by_path(approved)
     approved_paths = [pf.path for pf in approved]
+    applied_diff = "\n".join(
+        (pf.diff_text if pf.diff_text.endswith("\n") else pf.diff_text + "\n")
+        for pf in approved if (pf.diff_text or "").strip())
     if not approved:
         reason = "no patch file approved in-window — refusing to build or open an empty PR (fail-closed)"
         rec.add("edits-empty", TIER_EDIT, "deny", reason)
@@ -527,34 +544,74 @@ def autopatch(
     if any(p in _BULK_TOKENS or p.startswith("-") for p in approved_paths):
         reason = "refusing a wildcard/flag staging path — VIGIL never runs 'git add -A' (fail-closed)"
         rec.add("edits-wildcard", TIER_EDIT, "deny", reason)
-        return _refuse(rec, rid, "unsafe-staging", reason, patched_paths=approved_paths)
+        return _refuse(rec, rid, "unsafe-staging", reason, patched_paths=approved_paths, applied_diff=applied_diff)
 
     # (4) BUILD — A3, inside the disposable, egress-gated fsjob sandbox.
     allowed, outcome, gwhy = _gate_allows(gate, "sandbox_build", repo, False)
     rec.add("build", TIER_BUILD, outcome, gwhy, {"paths": approved_paths})
     if not allowed:
-        return _refuse(rec, rid, "build-denied", f"build gate refused: {gwhy}", patched_paths=approved_paths)
+        return _refuse(rec, rid, "build-denied", f"build gate refused: {gwhy}", patched_paths=approved_paths, applied_diff=applied_diff)
     ok, bres, ereason = _exec_ok(build, request, approved)
     rec.add("build-exec", TIER_BUILD, "ok" if ok else "fail", ereason, {"paths": approved_paths})
     if not ok:
-        return _refuse(rec, rid, "build-failed", f"sandbox build failed: {ereason}", patched_paths=approved_paths)
+        return _refuse(rec, rid, "build-failed", f"sandbox build failed: {ereason}", patched_paths=approved_paths, applied_diff=applied_diff)
     patched_build = getattr(bres, "build_ref", "") or bres
+
+    # (4b) PRE-PR VERIFY (deep-fix Phase D) — re-fire the finding oracle over the PATCHED CLONE *before* the
+    # PR leg, so a NON-PR deep fix is still oracle-verified. The `remediated` type-lock is UNTOUCHED (it needs
+    # a signed cert AND an opened PR); a DETERMINISTIC oracle going silent on a passed build earns the honest,
+    # weaker `verified-no-pr`. OFF by default (`verify_before_pr=False`) ⇒ the flow falls through to the PR
+    # gate exactly as before (byte-identical).
+    if verify_before_pr:
+        # (red-pen LOW) The `verified-no-pr` terminal has NO signed-cert requirement (by design), so here we
+        # accept ONLY a verdict carrying an EXPLICIT bool `.fired` attribute — a bare/empty string (which
+        # `_oracle_fired` would read as "silent") can never mint verified. A None/garbage/errored verdict, or a
+        # missing oracle, fails closed to `unverified`.
+        try:
+            _v = oracle(request, patched_build) if oracle is not None else None
+            oerr = ""
+        except Exception as exc:   # noqa: BLE001 — an oracle error confirms nothing (fail-closed to unverified)
+            _v, oerr = None, f": {exc}"
+        _f = getattr(_v, "fired", None)
+        fired = _f if isinstance(_f, bool) else None
+        tests_ok = getattr(bres, "tests_passed", None)
+        # (crypto-notary MEDIUM) Surface whether the build/test GATE actually ran — a `verified-no-pr` minted
+        # with the gate SKIPPED (bwrap unavailable) must say so, not imply tests passed.
+        if tests_ok is True:
+            _tnote = "; build/tests passed"
+        elif "SKIP" in str(getattr(bres, "reason", "")).upper():
+            _tnote = "; build/test gate SKIPPED (bwrap unavailable) — apply-check only"
+        else:
+            _tnote = "; no build/test gate configured (apply-check only)"
+        if fired is None:
+            vstatus, vreason = "unverified", f"verify oracle returned no usable verdict (fail-closed){oerr}"
+        elif fired:
+            vstatus, vreason = "still-vulnerable", "the finding STILL fires on the patched clone — not fixed"
+        else:
+            vstatus, vreason = "verified-no-pr", f"the finding's rule no longer fires on the patched clone{_tnote}"
+        rec.add("pre-pr-verify", TIER_BUILD, "ok" if fired is False else "fail", vreason, {"verify": vstatus})
+        return PatchResult(
+            remediation_id=rid, status=("verify-" + vstatus if vstatus != "verified-no-pr" else "verified-no-pr"),
+            opened_pr=False, remediated=False, patched_paths=approved_paths, applied_diff=applied_diff,
+            verification=FixVerification(status=vstatus, remediated=False, reason=vreason),
+            reason=vreason, steps=rec.steps,
+        )
 
     # (5) OPEN PR — A3 DESTRUCTIVE (the gate's threshold-destruction leg) AND an explicit m-of-n quorum.
     allowed, outcome, gwhy = _gate_allows(gate, "github_pr", repo, True)
     rec.add("pr-gate", TIER_PR, outcome, gwhy, {"paths": approved_paths})
     if not allowed:
         return _refuse(rec, rid, "pr-denied", f"PR gate refused (destructive/threshold): {gwhy}",
-                       patched_paths=approved_paths)
+                       patched_paths=approved_paths, applied_diff=applied_diff)
     qok, qreason = _quorum_ok(quorum, request)
     rec.add("pr-quorum", TIER_PR, "allow" if qok else "deny", qreason)
     if not qok:
         return _refuse(rec, rid, "pr-quorum-denied",
-                       f"PR blocked — m-of-n threshold not met: {qreason}", patched_paths=approved_paths)
+                       f"PR blocked — m-of-n threshold not met: {qreason}", patched_paths=approved_paths, applied_diff=applied_diff)
     ok, prres, ereason = _exec_ok(open_pr, request, approved)   # stages ONLY the explicit approved files
     rec.add("pr-exec", TIER_PR, "ok" if ok else "fail", ereason, {"paths": approved_paths})
     if not ok:
-        return _refuse(rec, rid, "pr-failed", f"opening the PR failed: {ereason}", patched_paths=approved_paths)
+        return _refuse(rec, rid, "pr-failed", f"opening the PR failed: {ereason}", patched_paths=approved_paths, applied_diff=applied_diff)
     pr_ref = str(getattr(prres, "pr_ref", "") or "")
 
     # (6) VERIFY — 'remediated' is minted ONLY after the fix-verification oracle goes SILENT.
@@ -566,6 +623,7 @@ def autopatch(
     return PatchResult(
         remediation_id=rid, status=status, opened_pr=True, remediated=verification.remediated,
         evidence_ref=verification.evidence_ref, pr_ref=pr_ref, patched_paths=approved_paths,
+        applied_diff=applied_diff,
         verification=verification, reason=verification.reason, steps=rec.steps,
     )
 

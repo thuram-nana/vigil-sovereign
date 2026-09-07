@@ -203,6 +203,35 @@ def run_codescan(*, root: str, slug: str, base_dir: str, max_files: int = 5000) 
             "summary": {"findings": len(findings_out), "facts": len(findings_out), "leads": 0}}
 
 
+class CodeFixVerdict:
+    """A fix-verification verdict for a CODE finding, shaped for ``autopatch.verify_patch``'s reader
+    (``.fired`` True = the vulnerable pattern STILL matches; False = it no longer fires). It carries NO signed
+    ``cert`` — the DAA re-run is deterministic + re-runnable, so a silent verdict earns the honest
+    ``verified-no-pr`` status, never the signed ``remediated`` (which stays reserved for the live-oracle +
+    m-of-n PR path)."""
+
+    __slots__ = ("fired", "detail")
+
+    def __init__(self, fired: bool, detail: dict[str, Any]) -> None:
+        self.fired = bool(fired)
+        self.detail = detail
+
+
+def build_code_fix_oracle(finding_ref: str, *, max_files: int = 5000) -> Any:
+    """Build the deep-fix verify oracle for a code finding: ``oracle(request, patched_build)`` re-runs the DAA
+    rule over the PATCHED clone (``patched_build`` = the clone workdir / its ``build_ref``) and reports whether
+    the finding still fires. Deterministic, offline, non-destructive — the code-finding analogue of the HTTP
+    re-drive oracle, and the sole thing that turns a built patch into ``verified-no-pr``."""
+    ref = str(finding_ref or "")
+
+    def _oracle(_request: Any, patched_build: Any) -> CodeFixVerdict:
+        root = str(getattr(patched_build, "build_ref", "") or patched_build or "")
+        res = verify_finding_cleared(root=root, ref=ref, max_files=max_files)
+        return CodeFixVerdict(fired=not bool(res.get("cleared")), detail=res)
+
+    return _oracle
+
+
 def verify_finding_cleared(*, root: str, ref: str, max_files: int = 5000) -> dict[str, Any]:
     """The fix-verification oracle for a code finding: re-run DAA over ``root`` and report whether the finding
     still fires. ``cleared`` is True iff the finding's rule no longer matches at its file (when the ref carries a
@@ -226,7 +255,26 @@ def verify_finding_cleared(*, root: str, ref: str, max_files: int = 5000) -> dic
     # recorded-path-gone-but-fires-elsewhere case so the operator is not misled.
     hits = [f for f in daa if f.rule_id == rule_id]
     at_recorded_path = path is not None and any(f.path == path for f in hits)
+    # EVASION GUARD (red-pen/crypto-notary MEDIUM): if the finding's recorded file is GONE from the tree, a
+    # rule-fires-nowhere result does NOT prove the pattern was removed — the file may have been renamed to an
+    # UNSCANNED extension (e.g. .py -> .txt), moving the vulnerable code out of DAA's view. DAA only scans a
+    # fixed extension set, so we cannot see it. Report NOT cleared (path_removed) so a rename can never read as
+    # fixed; a legitimate delete lands here too and is honestly surfaced for manual confirmation.
+    path_removed = False
+    if path is not None and not hits:
+        try:
+            import os as _os
+            path_removed = not _os.path.isfile(_os.path.join(str(root), path))
+        except OSError:
+            path_removed = True
+    cleared = (len(hits) == 0) and not path_removed
+    reason = ("" if cleared else
+              ("the finding's file is gone from the tree (moved/renamed/deleted) — a re-scan cannot confirm the "
+               "pattern was removed vs. hidden in an unscanned file; verify manually" if path_removed else
+               "the finding's rule still fires"))
     return {"ref": ref, "rule_id": rule_id, "path": path,
-            "cleared": len(hits) == 0,
+            "cleared": cleared,
             "moved": bool(hits) and path is not None and not at_recorded_path,
+            "path_removed": path_removed,
+            "reason": reason,
             "still_fires_at": [f"{f.path}:{f.line}" for f in hits]}

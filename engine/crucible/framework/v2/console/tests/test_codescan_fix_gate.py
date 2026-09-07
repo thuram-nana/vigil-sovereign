@@ -85,3 +85,42 @@ def test_verify_fix_rejects_unsafe_ref(tmp_path, monkeypatch):
     _run(tmp_path, "r5", {"status": "done", "mode": "sast", "slug": "s", "target": "/x", "base_dir": "/b"})
     out = actions.verify_fix("r5", "../etc/passwd")
     assert out["ok"] is False and out["cleared"] is False
+
+
+def test_deep_fix_spawns_vigil_patch_deep(tmp_path, monkeypatch):
+    monkeypatch.setattr(actions, "console_dir", lambda: tmp_path)
+    monkeypatch.setattr(actions, "_vigil_bin", lambda: "/usr/bin/vigil")
+    base = tmp_path / "base"; spine = base / "cbslug.spine"
+    _run(tmp_path, "rd", {"status": "done", "mode": "sast", "slug": "cbslug",
+                          "target": str(tmp_path / "src"), "base_dir": str(base)}, spine_at=spine)
+
+    def _fake_run(cmd, **kw):
+        # the deep verb: `vigil patch --deep --fix-attempts N --from-spine ... --apply-edits --approve`
+        assert cmd[:3] == ["/usr/bin/vigil", "patch", "--deep"], cmd
+        assert "--fix-attempts" in cmd and "--from-spine" in cmd and "--apply-edits" in cmd and "--approve" in cmd
+        assert "--open-pr" not in cmd   # deep fix is NEVER a PR from the console
+        return types.SimpleNamespace(returncode=0, stdout="status         : verified-no-pr\n", stderr="")
+    monkeypatch.setattr(subprocess, "run", _fake_run)
+    out = actions.deep_fix("rd", "DAA-EVAL~x~L1", fix_attempts=3)
+    assert out["ok"] is True and out["verified"] is True and out["runnable"] is True
+
+
+def test_deep_fix_reports_unverified_on_nonzero(tmp_path, monkeypatch):
+    monkeypatch.setattr(actions, "console_dir", lambda: tmp_path)
+    monkeypatch.setattr(actions, "_vigil_bin", lambda: "/usr/bin/vigil")
+    base = tmp_path / "base"; spine = base / "cbslug.spine"
+    _run(tmp_path, "rd2", {"status": "done", "mode": "sast", "slug": "cbslug",
+                           "target": str(tmp_path / "src"), "base_dir": str(base)}, spine_at=spine)
+    monkeypatch.setattr(subprocess, "run",
+                        lambda cmd, **kw: types.SimpleNamespace(returncode=1, stdout="status         : verify-still-vulnerable\n", stderr=""))
+    out = actions.deep_fix("rd2", "DAA-EVAL~x~L1")
+    assert out["ok"] is False and out["verified"] is False   # exit!=0 -> not verified (no false 'fixed')
+
+
+def test_deep_fix_refused_when_no_spine(tmp_path, monkeypatch):
+    monkeypatch.setattr(actions, "console_dir", lambda: tmp_path)
+    monkeypatch.setattr(actions, "_vigil_bin", lambda: "/usr/bin/vigil")
+    _run(tmp_path, "rd3", {"status": "done", "mode": "sast", "slug": "noscan",
+                           "target": str(tmp_path / "src"), "base_dir": str(tmp_path / "base")})
+    out = actions.deep_fix("rd3", "DAA-EVAL~x~L1")
+    assert out["ok"] is False and out["runnable"] is False

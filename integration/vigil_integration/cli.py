@@ -424,18 +424,77 @@ def _cmd_patch(args: argparse.Namespace) -> int:
             print(_no_verify)
             print(f"vigil patch: WARNING — {_no_verify}", file=sys.stderr)
 
+    # DEEP FIX (Phases A-D): repo-aware, iterate-until-green, oracle-verified over the patched clone. Uses the
+    # DETERMINISTIC code oracle (not the HTTP re-drive), so it needs no --verify-base-url and earns the honest
+    # `verified-no-pr` (never the signed `remediated`, which still needs the live oracle + m-of-n PR).
+    deep = bool(getattr(args, "deep", False))
+    if getattr(args, "agent", "none") == "strix" and not deep:
+        print("vigil patch: --agent strix requires --deep (the agent's diff is re-verified by the deep ladder)",
+              file=sys.stderr)
+        return 2
+    _agent_diff = ""
+    _deep_build_cmd = ""
+    if deep:
+        if str(getattr(args, "verify_base_url", "") or "").strip():
+            print("vigil patch: --deep uses the deterministic code oracle — do not combine with --verify-base-url",
+                  file=sys.stderr)
+            return 2
+        from .codescan import build_code_fix_oracle
+        from .remediation.buildsys import detect_build_plan
+        _plan = detect_build_plan(finding.target_repo)
+        _deep_build_cmd = _plan.build_cmd
+        verify_oracle = build_code_fix_oracle(finding.ref)
+        if getattr(args, "agent", "none") == "strix":
+            from .strix_fix import default_fix_instruction, run_strix_fix
+            _instr = default_fix_instruction(finding, test_cmd=_plan.build_cmd)
+            _agent_diff, _agent_note = run_strix_fix(finding.target_repo, _instr, base_dir=args.repo_base_dir)
+            print(f"agent          : strix — {_agent_note}")
+            if not str(_agent_diff or "").strip():
+                # PROVENANCE (red-pen MEDIUM): with --agent strix, NEVER silently fall back to the inline
+                # coder — that would emit a fix attributed to strix though Claude produced it. Fail closed.
+                print("--- result ---")
+                print("status         : no-agent-diff")
+                print("remediated     : False")
+                print("reason         : the strix agent produced no git-appliable diff — refusing to fall back "
+                      "to the inline coder under --agent strix (run without --agent for the inline deep fix)")
+                return 1
+        print(f"deep fix       : ON — repo-aware, iterate\u2264{max(1, int(args.fix_attempts))}, "
+              f"gate=[{_plan.build_cmd or 'apply-check only'}] ({_plan.note}), verify=daa-rule-cleared-on-clone")
+
     # (4) config + run the gated ladder. client=None ⇒ the coder is built from ANTHROPIC_API_KEY (env, never
     #     argv); apply_edits/pr_enabled are explicit opt-ins; the GitHub token is read from the child env only.
     cfg = CodefixConfig(
         target_repo=finding.target_repo, base_dir=args.repo_base_dir, target_branch=args.target_branch,
         apply_edits=bool(args.apply_edits), model=resolve_model(args.model),  # --model > Settings choice > default
+        build_cmd=_deep_build_cmd,
         pr_enabled=bool(args.open_pr), pr_base=args.pr_base)
+    _ext_diff = _agent_diff or ""
+    if _agent_diff:
+        pass   # the agentic front-end already produced the diff (printed above); it is re-verified below
+    elif str(getattr(args, "proposed_diff", "") or "").strip():
+        try:
+            with open(args.proposed_diff, encoding="utf-8", errors="replace") as _fh:
+                _ext_diff = _fh.read(200_000)   # bounded read of the external agent's diff
+        except OSError as exc:
+            print(f"vigil patch: cannot read --proposed-diff {args.proposed_diff!r}: {exc}", file=sys.stderr)
+            return 2
+        print(f"proposed_diff  : external ({len(_ext_diff)} B) — the coder is BYPASSED; this diff is re-verified "
+              f"through the gated ladder (the agent's self-report is never trusted)")
     result = autopatch_live(finding, config=cfg, client=None, operator_present=bool(args.approve),
-                            quorum=quorum, verify_oracle=verify_oracle)
+                            quorum=quorum, verify_oracle=verify_oracle,
+                            verify_before_pr=deep, max_fix_attempts=(max(1, int(args.fix_attempts)) if deep else 1),
+                            proposed_diff=_ext_diff)
 
     print("--- result ---")
     print(f"status         : {result.status}")
     print(f"applied_paths  : {list(result.patched_paths) or '-'}")
+    # The exact unified diff that was APPROVED + git-applied into the DISPOSABLE clone. The clone is never the
+    # operator's source, so this is how the fix reaches their tree: save it and `git apply` it there (then
+    # `vigil codescan --verify` / the Fixes screen's Verify to confirm the rule cleared).
+    if getattr(result, "applied_diff", ""):
+        print("--- applied diff (git apply this in your repo) ---")
+        print(result.applied_diff.rstrip("\n"))
+        print("--- end diff ---")
     print(f"opened_pr      : {result.opened_pr}   pr_ref={result.pr_ref or '-'}")
     print(f"remediated     : {result.remediated}")
     if verify_oracle is not None:
@@ -449,6 +508,10 @@ def _cmd_patch(args: argparse.Namespace) -> int:
     # or `vigil patch --verify-base-url ... && echo fixed` would print "fixed" for a STILL-VULNERABLE target.
     if str(result.status).startswith("refused"):
         return 1
+    if deep:
+        # deep fix success == `verified-no-pr` (the rule cleared on the patched clone AND the build/tests
+        # passed). Anything else (build-failed / verify-still-vulnerable / unverified) is a non-zero failure.
+        return 0 if result.status == "verified-no-pr" else 1
     if verify_oracle is not None and not bool(result.remediated):
         return 1
     return 0
@@ -3862,6 +3925,19 @@ def build_parser() -> argparse.ArgumentParser:
                              "OUTPUT — the operator's own run output in the owner-operated model — and is "
                              "trusted as such; it is matched to the trusted finding by check_id (exact, "
                              "fail-closed). Do NOT point this at another engagement's proofs/.")
+    ppatch.add_argument("--deep", action="store_true",
+                        help="DEEP FIX: repo-aware, iterate-until-green (build/tests in the sandbox clone), "
+                             "verified by re-running the finding's deterministic oracle over the patched clone "
+                             "(earns `verified-no-pr`; never the signed `remediated`).")
+    ppatch.add_argument("--fix-attempts", type=int, default=3,
+                        help="max self-correcting attempts for --deep (default 3).")
+    ppatch.add_argument("--agent", choices=("none", "strix"), default="none",
+                        help="with --deep: run an AGENTIC front-end (strix) to PRODUCE the fix diff, then "
+                             "re-verify it through the gated ladder (the agent is never trusted). Docker required.")
+    ppatch.add_argument("--proposed-diff", default="",
+                        help="path to a unified diff from an external agent (e.g. Strix). It becomes the ONLY "
+                             "proposal and is RE-VERIFIED through the gated apply+build+oracle ladder — the "
+                             "agent's self-report is never trusted. Pair with --deep to build/test + verify it.")
     ppatch.set_defaults(func=_cmd_patch)
 
     prem = sub.add_parser(
