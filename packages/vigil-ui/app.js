@@ -5951,12 +5951,19 @@
         + " You can still apply from the CLI with `vigil patch`.");
     } else {
       var vbtnId = "fx-vbtn-" + idx, voutId = "fx-vout-" + idx, dbtnId = "fx-dbtn-" + idx, doutId = "fx-dout-" + idx;
+      var sxId = "fx-strix-" + idx;
       applyBlock = h("div", { style: { marginTop: "10px" } }, [
         h("button.btn.sm#" + btnId, { onClick: function () { applyFix(runId, f.ref, btnId, outId); } },
           [V.icon("bolt"), "Apply fix (gated)"]),
         h("button.btn.sm.primary#" + dbtnId, { style: { marginLeft: "8px" },
-          onClick: function () { deepFix(runId, f.ref, dbtnId, doutId); } },
+          onClick: function () { deepFix(runId, f.ref, dbtnId, doutId, sxId); } },
           [V.icon("brain"), "Deep fix (iterate + verify)"]),
+        h("label.hint", { style: { marginLeft: "8px", cursor: "pointer", userSelect: "none" }, title:
+          "Agentic front-end: the vendored Strix agent proposes the diff (needs Docker + a live gated egress "
+          + "gateway). Strix is UNTRUSTED \u2014 its diff is re-verified by the SAME build/test + oracle ladder; "
+          + "if it yields no usable diff you get 'no-agent-diff', never a silent fall-back to the inline coder." },
+          [ h("input#" + sxId, { type: "checkbox", style: { width: "auto", marginRight: "4px" } }),
+            "Agentic (Strix)" ]),
         h("button.btn.sm.ghost#" + vbtnId, { style: { marginLeft: "8px" },
           onClick: function () { verifyFix(runId, f.ref, vbtnId, voutId); } },
           [V.icon("check"), "Verify (re-scan)"]),
@@ -6032,11 +6039,15 @@
         if (out) V.mount(out, h("div.legend", null, [V.icon("x"), (e && e.message) || "verify failed"]));
       });
   }
-  function deepFix(runId, ref, btnId, outId) {
+  function deepFix(runId, ref, btnId, outId, strixId) {
     var btn = V.$("#" + btnId), out = V.$("#" + outId);
+    var sx = strixId ? V.$("#" + strixId) : null;
+    var agent = (sx && sx.checked) ? "strix" : "none";
     if (btn) btn.disabled = true;
-    if (out) V.mount(out, h("div.dim", null, "Deep fix: repo-aware, iterating (build/test the patch in a disposable clone, then re-verify the finding)\u2026 this can take a minute."));
-    V.postJSON(OFF("/api/remediate/" + encodeURIComponent(runId) + "/" + encodeURIComponent(ref) + "/deepfix"), {})
+    if (out) V.mount(out, h("div.dim", null, agent === "strix"
+      ? "Deep fix (agentic): launching the Strix front-end in a sandboxed container, then re-verifying its diff through the gated build/test + oracle ladder\u2026 this can take a few minutes."
+      : "Deep fix: repo-aware, iterating (build/test the patch in a disposable clone, then re-verify the finding)\u2026 this can take a minute."));
+    V.postJSON(OFF("/api/remediate/" + encodeURIComponent(runId) + "/" + encodeURIComponent(ref) + "/deepfix"), { agent: agent })
       .then(function (r) {
         if (btn) btn.disabled = false;
         if (!out) return;
