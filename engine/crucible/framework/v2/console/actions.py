@@ -468,6 +468,12 @@ def launch_scan(target: str, *, max_pages: int = 60, use_library: bool = True,
             return
         if proc.returncode == 0 and (out or "").strip():
             (rd / "report.json").write_text(out, encoding="utf-8")
+            # AT-REST perms: a captured report can carry finding EVIDENCE (a matched source line — for a
+            # secret-class rule, potentially a live secret from the operator's tree). Restrict to owner-only.
+            try:
+                os.chmod(rd / "report.json", 0o600)
+            except OSError:
+                pass
             # Write the renderer-shape findings.json this PRODUCTION run's reports render from (W16-7 AC2).
             # Best-effort: the dossier can still adapt report.json on its own if this is skipped.
             _write_findings_json(rd)
@@ -2470,7 +2476,10 @@ def launch_assessment(body: dict) -> dict:
         if not vigil:
             return {"error": "the `vigil` entrypoint is not resolvable (set VIGIL_BIN / activate the venv) — "
                              "the deterministic codebase scan runs through it"}
-        slug = _slugify(body.get("slug") or "source-review", fallback="source-review")
+        # UNIQUE slug per run so each scan owns a DISJOINT <slug>.spine — two scans (a re-scan, or a
+        # different repo) can never shadow each other's findings via the global-latest read (crypto-notary
+        # MEDIUM). Mirrors the whole-app suite path's per-run slug.
+        slug = _unique_engagement_slug(body.get("slug") or "source-review", run_id)
         cbase = _strix_runtime_base_dir()   # ABSOLUTE engagement base the signed <slug>.spine is written to
         # DETERMINISTIC DAA codebase scan (the operator-chosen static oracle): `vigil codescan` runs DAA over
         # the source, writes each finding into the signed <cbase>/<slug>.spine (the SAME provenance store
@@ -3733,11 +3742,13 @@ def verify_fix(run_id: str, finding_ref: str) -> dict:
         detail = {}
     cleared = (proc.returncode == 0) and bool(detail.get("cleared"))
     return {"ok": True, "cleared": cleared, "finding_ref": finding_ref, "repo": pre["repo"],
-            "still_fires_at": detail.get("still_fires_at", []),
+            "still_fires_at": detail.get("still_fires_at", []), "moved": bool(detail.get("moved")),
             "command": f"vigil codescan --verify --root <repo> --ref {finding_ref}",
             "note": ("Re-runs the deterministic DAA rule over the run's source. `cleared=True` means the rule "
-                     "no longer fires at its file — the finding is gone. Apply the proposed diff to your "
-                     "source first; this checks YOUR tree, not the disposable clone the Apply step patched.")}
+                     "no longer fires ANYWHERE in the tree (conservative — a moved/renamed vulnerable file "
+                     "keeps it not-cleared, never a false 'fixed'). It proves the vulnerable PATTERN is gone, "
+                     "not that a runtime exploit was ever reachable. Apply the proposed diff to your source "
+                     "first; this checks YOUR tree, not the disposable clone the Apply step patched.")}
 
 
 def apply_fix(run_id: str, finding_ref: str) -> dict:

@@ -3764,6 +3764,13 @@
   // fact tier) vs "intel" / "ungrounded" / "unclassified" (inferred/unproven). Pinned by
   // test_worldmodel_grounding_vocab.py so a backend rename can't silently make this lie.
   function p3WmFact(g) { return g === "grounded"; }
+  // A STATIC fact: confirmed by a deterministic DAA static rule over the SOURCE (source/oracle_kind
+  // "daa:<rule_id>"), not by a live-exploit oracle. It IS a re-runnable fact (the pattern is present), but it
+  // is NOT proof the sink is reachable at runtime — so it is labelled distinctly from a live-oracle fact.
+  function p3IsStatic(f) {
+    var ob = String((f && (f.oracle_kind || f.confirmed_by)) || "");
+    return ob.indexOf("daa:") === 0;
+  }
   function p3Surface(f) {
     return f.location || f.surface || f.insertion_point || f.param || f.endpoint || "—";
   }
@@ -3781,7 +3788,9 @@
     return s ? h("span.sev.sev-" + s, null, sev) : h("span.muted", null, "—");
   }
   function p3StatusChip(f) {
-    if (p3IsFact(f)) return h("span.shield", null, [V.icon("check"), "CONFIRMED"]);
+    if (p3IsFact(f)) return p3IsStatic(f)
+      ? h("span.shield", { title: "Confirmed by a deterministic static rule over the source (pattern present); not a live-exploit proof" }, [V.icon("check"), "STATIC"])
+      : h("span.shield", null, [V.icon("check"), "CONFIRMED"]);
     // a LEAD is explicitly "not proven". If it is an ACTIVE finding whose oracle failed to
     // re-ground (contradicted / ungrounded), say so honestly rather than a bland "lead".
     const g = f.grounding;
@@ -3978,7 +3987,10 @@
     const kv = [];
     const put = function (k, v) { if (v == null || v === "") return; kv.push(h("div.kv", null, [h("div.k", null, k), h("div.v", null, String(v))])); };
     const fact = p3IsFact(f);
-    put("Verdict", fact ? "CONFIRMED — an oracle re-fired over the retained evidence (a FACT)"
+    put("Verdict", fact ? (p3IsStatic(f)
+        ? ("STATIC FACT — a deterministic rule (" + p3Oracle(f) + ") matched your source; the vulnerable "
+           + "pattern is PRESENT and re-runnable, but this is not a live-exploit proof of reachability")
+        : "CONFIRMED — an oracle re-fired over the retained evidence (a FACT)")
       : (f.grounding === "contradicted" ? "CONTRADICTED — the oracle did NOT re-ground this claim"
         : f.grounding === "ungrounded" ? "UNGROUNDED — no live oracle proof"
           : "LEAD — a proposal, not proven"));
@@ -5947,7 +5959,8 @@
           + "non-destructive stages AND a blanket up-front approval of every proposed edit (no per-file "
           + "prompt); the edits land in a disposable clone, so your source is never touched and no PR is "
           + "opened. Verify re-runs the deterministic static rule over YOUR source: `cleared` means the "
-          + "finding is gone (apply the shown diff to your tree first)."),
+          + "rule no longer fires anywhere in the tree (apply the shown diff to your tree first). It proves "
+          + "the pattern is gone, not that a runtime exploit was ever reachable."),
         h("div#" + outId, { style: { marginTop: "8px" } }),
         h("div#" + voutId, { style: { marginTop: "8px" } }),
       ]);
@@ -6000,8 +6013,10 @@
         var stillAt = (r.still_fires_at || []).join(", ");
         V.mount(out, h("div.legend", null, [V.icon(r.cleared ? "check" : "x"),
           r.cleared
-            ? "CLEARED — the rule no longer fires; this finding is fixed in your source."
-            : ("STILL PRESENT — the rule still fires" + (stillAt ? " at " + stillAt : "")
+            ? "CLEARED — the deterministic rule no longer fires anywhere in your source (the vulnerable pattern is gone)."
+            : ((r.moved ? "STILL PRESENT (moved) — the rule now fires at a different path"
+                        : "STILL PRESENT — the rule still fires")
+               + (stillAt ? " at " + stillAt : "")
                + ". Apply the proposed diff to your source, then Verify again.")]));
       })
       .catch(function (e) {

@@ -78,6 +78,9 @@ class TriageFinding(BaseModel):
     severity: str = ""
     target: str = ""
     confirmed: bool = False          # True ⇔ oracle-confirmed FACT (may spawn a remediation)
+    source: str = ""                 # provenance qualifier of the confirming oracle, e.g. "daa:<rule_id>" for
+                                     # a deterministic STATIC-analysis fact — honest about WHAT confirmed it
+                                     # (a static match over the source), never a live-exploit claim. "" = unset.
     evidence_ref: str = ""           # signed proof; REQUIRED when confirmed
     spine_hash: str = ""
     attack_chain_path: list[str] = Field(default_factory=list)

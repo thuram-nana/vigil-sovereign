@@ -40,31 +40,62 @@ def _unb64(s: str) -> str:
     return base64.urlsafe_b64decode((s + pad).encode("ascii")).decode("utf-8")
 
 
+def _rule_is_clean(rule_id: str) -> bool:
+    """A rule_id safe to embed VERBATIM in a ref (readable) — no ``~`` delimiter and argv-safe on its own.
+    Built-in DAA-* ids are clean; a hostile external id (semgrep/gitleaks check_id with a ``~``, space, or
+    leading dash) is NOT, and is b64-encoded instead so make_ref/parse_ref stay exact inverses AND argv-safe."""
+    return bool(rule_id) and "~" not in rule_id and not rule_id.startswith("-") \
+        and not any(c in rule_id for c in "/\\ \t\r\n") and ".." not in rule_id
+
+
 def make_ref(rule_id: str, rel_path: str, line: int) -> str:
-    """A stable, argv-safe, RECOVERABLE finding ref: ``<rule_id>~<b64 path>~L<line>``. The path is encoded so
-    the fix-verification oracle can re-scan exactly the file the rule fired on. Falls back to a non-recoverable
-    ``<rule_id>~H<hash>`` when the encoded ref would exceed the argv/lookup bound (then verify degrades to
+    """A stable, argv-safe, RECOVERABLE finding ref. Clean (built-in) rule ids stay readable:
+    ``<rule_id>~<b64 path>~L<line>``. A dirty external rule id (contains ``~``/space/leading-dash) is encoded
+    whole: ``Z~<b64 rule_id>~<b64 path>~L<line>`` — still fully recoverable and argv-safe. Falls back to a
+    non-recoverable hash form only when the encoded ref would exceed the lookup bound (verify then degrades to
     'does this rule still fire anywhere', which is conservative — never a false 'fixed')."""
-    ref = f"{rule_id}~{_b64(rel_path)}~L{int(line)}"
+    if _rule_is_clean(rule_id):
+        ref = f"{rule_id}~{_b64(rel_path)}~L{int(line)}"
+    else:
+        ref = f"Z~{_b64(rule_id)}~{_b64(rel_path)}~L{int(line)}"
     if len(ref) <= 190 and _ref_is_argv_safe(ref):
         return ref
     from hashlib import sha256
-    return f"{rule_id}~H{sha256(f'{rel_path}:{line}'.encode()).hexdigest()[:16]}"
+    return f"Z~{_b64(rule_id)}~H{sha256(f'{rel_path}:{line}'.encode()).hexdigest()[:16]}"
 
 
 def parse_ref(ref: str) -> tuple[str, str | None, int | None]:
-    """Recover ``(rule_id, rel_path|None, line|None)`` from a ref made by :func:`make_ref`. A hashed-fallback
-    ref (``~H...``) or a malformed ref yields ``(rule_id, None, None)`` so verify falls back to rule-anywhere."""
-    parts = str(ref or "").split("~")
-    if len(parts) != 3 or not parts[0]:
-        return (parts[0] if parts else "", None, None)
-    rule_id, enc, ln = parts
-    if enc.startswith("H"):
-        return (rule_id, None, None)
+    """Recover ``(rule_id, rel_path|None, line|None)`` from a ref made by :func:`make_ref` — the exact inverse
+    over every id make_ref accepts. A hashed-fallback ref (``~H...``) yields ``(rule_id, None, None)`` so verify
+    falls back to rule-anywhere; a malformed ref yields ``("" , None, None)`` (verify then refuses)."""
+    r = str(ref or "")
+    if "~" not in r:
+        return (r, None, None)
+    # b64-encoded-rule form: Z~<b64 rule_id>~(<b64 path>~L<line> | H<hash>)
+    if r.startswith("Z~"):
+        rest = r[2:]
+        enc_rule, _, tail = rest.partition("~")
+        try:
+            rid = _unb64(enc_rule)
+        except Exception:  # noqa: BLE001
+            return ("", None, None)
+        if tail.startswith("H") or "~" not in tail:
+            return (rid, None, None)   # hashed fallback → rule-anywhere
+        enc_path, _, ln = tail.partition("~")
+        try:
+            return (rid, _unb64(enc_path), int(ln[1:]) if ln.startswith("L") else None)
+        except Exception:  # noqa: BLE001
+            return (rid, None, None)
+    # verbatim clean-rule form: <rule_id>~<b64 path>~L<line>  (rsplit so a rule_id containing "~" — which
+    # _rule_is_clean forbids, but be robust — is never truncated).
+    head, _, last = r.rpartition("~")
+    if last.startswith("H"):
+        return (head, None, None)      # <rule_id>~H<hash> → rule-anywhere
+    rule_id, _, enc = head.rpartition("~")
+    if not rule_id:
+        return (head, None, None)
     try:
-        path = _unb64(enc)
-        line = int(ln[1:]) if ln.startswith("L") else None
-        return (rule_id, path, line)
+        return (rule_id, _unb64(enc), int(last[1:]) if last.startswith("L") else None)
     except Exception:  # noqa: BLE001 — a bad ref degrades to rule-anywhere, never a crash
         return (rule_id, None, None)
 
@@ -151,7 +182,15 @@ def run_codescan(*, root: str, slug: str, base_dir: str, max_files: int = 5000) 
     kp = load_or_create_spine_keypair(path=str(base / DEFAULT_SPINE_KEY_FILE), vault=vault)
     spine_path = base / f"{slug}.spine"
     spine = VigilCoreSpine(kp, str(spine_path))
-    spine.write_state(state, seq=1, engagement=None)   # one signed snapshot; finding_from_spine reads global-latest
+    # MONOTONIC seq: a re-scan (or a scan that reuses a slug) appends a NEW snapshot that SUPERSEDES the prior
+    # by recency — finding_from_spine reads global-latest by (seq, hash), so without this every scan wrote
+    # seq=1 and the winner was decided by hash order, letting a stale/foreign scan shadow this one. head_seq
+    # is verifier-gated and total (0 on a fresh/empty spine).
+    try:
+        _seq = int(spine.head_seq()) + 1
+    except Exception:  # noqa: BLE001 — a fresh/unreadable spine starts the clock at 1
+        _seq = 1
+    spine.write_state(state, seq=_seq, engagement=None)
 
     counts: dict[str, int] = {}
     for fo in findings_out:
@@ -179,7 +218,15 @@ def verify_finding_cleared(*, root: str, ref: str, max_files: int = 5000) -> dic
     except Exception as exc:  # noqa: BLE001 — cannot re-scan ⇒ cannot claim cleared (fail-closed to NOT-fixed)
         return {"ref": ref, "rule_id": rule_id, "path": path, "cleared": False,
                 "reason": f"re-scan failed: {type(exc).__name__}: {exc}"}
-    hits = [f for f in daa if f.rule_id == rule_id and (path is None or f.path == path)]
+    # SOUNDNESS: `cleared` requires the rule to fire NOWHERE in the tree for this rule_id — NOT merely at the
+    # originally-recorded path. Narrowing to the exact path would report `cleared` when the vulnerable code was
+    # simply MOVED/renamed (the rule still fires at a new path) — a false 'fixed', the worst outcome. Checking
+    # rule-anywhere is strictly conservative: it never claims fixed while the pattern remains, and when the rule
+    # has several instances it stays not-cleared until they are ALL gone. `moved` flags exactly the
+    # recorded-path-gone-but-fires-elsewhere case so the operator is not misled.
+    hits = [f for f in daa if f.rule_id == rule_id]
+    at_recorded_path = path is not None and any(f.path == path for f in hits)
     return {"ref": ref, "rule_id": rule_id, "path": path,
             "cleared": len(hits) == 0,
+            "moved": bool(hits) and path is not None and not at_recorded_path,
             "still_fires_at": [f"{f.path}:{f.line}" for f in hits]}
