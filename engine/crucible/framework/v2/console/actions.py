@@ -2589,6 +2589,29 @@ def launch_assessment(body: dict) -> dict:
         return {"error": f"a remote engage needs a signed charter/authority for slug {slug!r} — "
                          f"provision one first (it carries the signed scope; the console cannot mint it)"}
 
+    # CONTAINMENT (red-pen HIGH): the framework `engage`/`--autonomous` branch mints a FRESH slug whose
+    # kill-switch is untripped, so a soft emergency-stop (restricted mode) would NOT contain it — the same
+    # ENH2 gap the agentic branch closes with _launch_contained_reason. Consult the SAME stable restricted-
+    # mode signal here before provisioning a charter or spawning, so a whole-app / suite run is refused
+    # while restricted. NARROWS, never widens.
+    _contained = _launch_contained_reason(str(body.get("slug") or host))
+    if _contained:
+        return {"error": _contained}
+
+    # LOOPBACK auto-charter: the framework `engage` / `--autonomous` engine reads a SIGNED charter at
+    # targets/<slug>/charter.md (ethics.require_charter_signed); a fresh slug has none, so a loopback
+    # whole-system run would otherwise refuse `charter_missing`. Materialize the SAME loopback
+    # authorization the run already enforces (the console's is_loopback gate + the --spine loopback pin)
+    # via the shared, fail-closed helper — loopback-only, never overwrites a real charter, never raises.
+    # This unlocks the whole-system suite/autonomous path (New Assessment AND the chat whole-app bridge)
+    # for a loopback target, mirroring what the integration engine already does (wiring.ensure_loopback_charter).
+    if is_loopback:
+        try:
+            from vigil_integration.live.wiring import ensure_loopback_charter
+            ensure_loopback_charter(slug, ["127.0.0.1"])
+        except Exception:  # noqa: BLE001 — best-effort; the engine's own charter/scope gate still applies
+            pass
+
     cmd = [sys.executable, "-m", "framework.v2", "engage", slug, target, "--spine",
            "--request-budget", str(_ENGAGE_DEPTH[scan_mode])]
     if mode == "suite":

@@ -136,6 +136,45 @@ _CHAT_RETRYABLE_NAMES = frozenset({
 # `_scan_offer` from reading a target out of a manifest field), a url is shape-checked, a screen must be
 # in the allowlist. Anything unknown, malformed, or unavailable is dropped, not surfaced.
 # ---------------------------------------------------------------------------
+# WHOLE-SYSTEM intent: when the operator asks to scan the ENTIRE app / find ALL vulnerabilities (or uses
+# the explicit `/scan-all` verb), route to the autonomous SUITE engine (crawl → discover → multi-probe →
+# prove) instead of the single-loop agentic engage. Keyword-driven so a plain single-endpoint request
+# (`engage <one-url>`) is untouched.
+_WHOLE_APP_MARKERS = (
+    "find all", "all vuln", "all the vuln", "every vuln", "all the bug", "whole app", "whole site",
+    "whole system", "entire app", "entire site", "entire system", "full scan", "full assessment",
+    "scan everything", "audit everything", "deep scan", "scan the whole", "scan the entire",
+)
+
+
+def _wants_whole_app_scan(message: str) -> bool:
+    m = (message or "").lower()
+    if m.strip().startswith("/scan-all"):
+        return True
+    return any(k in m for k in _WHOLE_APP_MARKERS)
+
+
+def _is_loopback_url(target: str) -> bool:
+    """True iff ``target``'s host is a genuine loopback — an IP in 127.0.0.0/8 or ::1, or ``localhost``.
+    SOUND host check (red-pen): validate the host as an IP literal via ``ipaddress`` rather than a
+    ``startswith('127.')`` prefix, so an attacker-registrable name like ``127.0.0.1.evil.com`` or
+    ``127.evil.com`` is NOT misread as loopback. Only used to CHOOSE the whole-app route; the launcher
+    re-gates with the strict exact-loopback set + the engine's own charter/scope gate, so this is a router
+    hint, never the sole authorization."""
+    try:
+        import ipaddress
+        from urllib.parse import urlsplit
+        h = (urlsplit(str(target or "")).hostname or "").strip().lower()
+        if h == "localhost":
+            return True
+        try:
+            return ipaddress.ip_address(h).is_loopback   # 127.0.0.0/8 or ::1 (a real IP literal only)
+        except ValueError:
+            return False                                  # a name (or garbage) is never loopback here
+    except Exception:  # noqa: BLE001
+        return False
+
+
 _PROPOSAL_ACTIONS = frozenset({"scan_codebase", "scan_sast", "scan_url", "open_screen"})
 # Only screens the interface actually ROUTES (app.js dispatch) — a proposal must never open a dead stub.
 _PROPOSAL_SCREENS = frozenset({"findings", "report", "proof", "live", "replay"})
@@ -2708,18 +2747,36 @@ def chat_send(body: dict) -> dict:
 
         return _finish_need_target(chat_id)
 
-    launch = actions.launch_assessment({
-        "mode": mode, "target": target, "objective": message,
-        "scan_mode": str(body.get("scan_mode", "standard")),
-        "slug": str(body.get("slug", "")), "model": model,
-        "session_id": chat_id,                        # F2: link the launched run to this chat's session
-        "tools": [str(t) for t in (body.get("tools") or [])],
-        # The chat IS the agentic operator: route its LOOPBACK engagements to the integration `vigil
-        # engage` engine (OODA loop + mid-run steering + --resume + fireteam), whose live steps now stream
-        # to the process box (the bridge). Loopback-gated in the launcher; a remote target falls through
-        # to the charter-gated offense engage unchanged. Honours an explicit opt-out (agentic: false).
-        "agentic": bool(body.get("agentic", True)),
-    })
+    # WHOLE-SYSTEM route: when the operator asks to scan the WHOLE app / find ALL vulnerabilities (or uses
+    # the /scan-all verb) against a LOOPBACK url, launch the autonomous *suite* engine
+    # (`framework.v2 engage --autonomous`: crawl → discover every endpoint → multi-probe → oracle-prove)
+    # instead of the single-loop agentic engage that only tests the one url it is given. The launcher
+    # provisions the loopback charter and the framework engine keeps its own gate (destructive steps still
+    # default-deny). A plain single-endpoint `engage <url>` stays on the agentic single-loop path below.
+    _suite = _wants_whole_app_scan(message) and mode == "url" and _is_loopback_url(target)
+    if _suite:
+        launch = actions.launch_assessment({
+            "mode": "suite", "target": target, "objective": message,
+            "scan_mode": "deep",
+            # a FRESH greenfield slug per whole-app run (no stale authority doc → no W16-2 refusal); the
+            # launcher auto-provisions its loopback charter.
+            "slug": actions._unique_engagement_slug("wholeapp", actions._new_run_id()),
+            "model": model, "session_id": chat_id,
+            "tools": ["recon"],                       # broaden surface; the autonomous multi-probe does the rest
+        })
+    else:
+        launch = actions.launch_assessment({
+            "mode": mode, "target": target, "objective": message,
+            "scan_mode": str(body.get("scan_mode", "standard")),
+            "slug": str(body.get("slug", "")), "model": model,
+            "session_id": chat_id,                        # F2: link the launched run to this chat's session
+            "tools": [str(t) for t in (body.get("tools") or [])],
+            # The chat IS the agentic operator: route its LOOPBACK engagements to the integration `vigil
+            # engage` engine (OODA loop + mid-run steering + --resume + fireteam), whose live steps now stream
+            # to the process box (the bridge). Loopback-gated in the launcher; a remote target falls through
+            # to the charter-gated offense engage unchanged. Honours an explicit opt-out (agentic: false).
+            "agentic": bool(body.get("agentic", True)),
+        })
     if launch.get("error"):
         # An archive that was unpacked and then could not be launched must still SAY it was unpacked —
         # the files are on disk and the chat now holds them, whatever happened next.
@@ -2733,7 +2790,12 @@ def chat_send(body: dict) -> dict:
     # wait for approval on *every* target-touching step. Name the engine too, so a run that used to be a
     # read-only scan is not silently described the same as the agentic OODA engine.
     engine = str(launch.get("engine") or "")
-    if engine == "integration":
+    if _suite:
+        how = ("It crawls the WHOLE app, discovers every reachable endpoint, and multi-probes each — "
+               "findings are oracle-confirmed; higher-tier, exploit, and destructive steps still wait for "
+               "your signed approval (destructive POSTs default-deny). Watch findings appear as it roams.")
+        what = "a whole-system autonomous"
+    elif engine == "integration":
         how = ("It reasons, runs tools, and steers live — low-tier recon runs automatically and any "
                "higher-tier, exploit, or destructive step waits for your signed approval. Add a message "
                "below to steer it while it runs.")

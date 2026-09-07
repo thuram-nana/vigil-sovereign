@@ -350,3 +350,46 @@ def test_find_signed_token_skips_already_consumed(tmp_path):
     consumed = {spent.nonce}
     found = B.find_signed_token(root, act, now=now, is_consumed=lambda n: n in consumed)
     assert found is not None and found[0].nonce == live.nonce, "must skip an already-single-use-spent token"
+
+
+# ---------------------------------------------------------------------------------------------------
+# Phase 3 — a fan-out (deploy_fireteam) is per-action approvable: a token binds to THIS wave's members
+# ---------------------------------------------------------------------------------------------------
+
+
+def test_deploy_fireteam_token_binds_members_and_is_single_use(tmp_path):
+    base, kp, authority = _provisioned(tmp_path)
+    root = B.approvals_root(base)
+    members = [{"member_id": "m1", "role": "auth", "capped_tier": "A1", "tools": ["httpx"]},
+               {"member_id": "m2", "role": "injection", "capped_tier": "A2", "tools": ["sqlmap"]}]
+    tgt = "loopback"
+    digest = action_digest("deploy_fireteam", tgt, members)
+    act = ApprovalAction("deploy_fireteam", tgt, digest)
+
+    nonce = "n-ft-" + "a" * 22
+    req = B.publish_pending(root, act, nonce=nonce, args_preview={"members": len(members)}, now_iso="x")
+    assert req.tool_name == "deploy_fireteam"
+    tok = _sign(kp, act, nonce)
+    B.write_signed_token(root, req.request_id, tok)
+
+    ledger = NonceLedger(str(tmp_path / "ft-nonces"))
+    d1 = consume_token(tok, act, authority=authority, now=time.time(), ledger=ledger)
+    assert d1.authorized, d1.reason                        # a matching signed token authorizes the fan-out
+    d2 = consume_token(tok, act, authority=authority, now=time.time(), ledger=ledger)
+    assert not d2.authorized and "consumed" in d2.reason.lower()   # single-use (replay denied)
+
+    # a DIFFERENT member set → different digest → the token does NOT authorize it (approving one plan can
+    # never authorize a different fan-out).
+    other = [{"member_id": "m1", "role": "exfil everything", "capped_tier": "A2", "tools": ["nuclei"]}]
+    other_act = ApprovalAction("deploy_fireteam", tgt, action_digest("deploy_fireteam", tgt, other))
+    d3 = consume_token(tok, other_act, authority=authority, now=time.time(),
+                       ledger=NonceLedger(str(tmp_path / "ft-n2")))
+    assert not d3.authorized, "a token for one fan-out plan must not authorize a different set of members"
+
+    # a NON-owner (forged) signature over the same action → denied (owner signature is the authority).
+    attacker = generate_keypair()
+    forged = mint_token(act, owner_private_key_b64=attacker.private_key_b64, key_id="owner",
+                        nonce="n-ft-forged-" + "b" * 12, not_before=time.time(), not_after=time.time() + 300)
+    d4 = consume_token(forged, act, authority=authority, now=time.time(),
+                       ledger=NonceLedger(str(tmp_path / "ft-n3")))
+    assert not d4.authorized, "a forged (non-owner) fan-out token must be denied"

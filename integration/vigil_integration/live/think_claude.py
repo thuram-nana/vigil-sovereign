@@ -467,7 +467,13 @@ Respond with one JSON object with an "action" field, one of:
   - "plan_tools": propose a wave. Include "plan": [ <tool objects as above> ].
   - "transition_phase": escalate. Include "target_phase": one of
     "informational" | "exploitation" | "post_exploitation".
-  - "deploy_fireteam": spawn specialists. Include "fireteam": [ <member objects> ].
+  - "deploy_fireteam": spawn up to 5 PARALLEL specialist sub-agents that divide labour on THIS target
+    (e.g. one lane per bug-class: auth, injection, access-control). Use it for a COMPLEX target with
+    several INDEPENDENT testable surfaces — not a single simple endpoint. Include "fireteam": a list of
+    1-5 member objects, each {{"member_id": str, "role": "<one line: what this specialist tests>",
+    "capped_tier": "A1" or "A2" (NEVER "A3"), "tools": [str, ...]}}. At most 5 members, at most 3 run at
+    once; each is a bounded sub-loop that proposes the same tools you would, and every wave FACT is still
+    oracle-confirmed. A deploy WAITS for the operator's signed approval before it runs.
   - "switch_skill": change playbook. Include "skill": str.
   - "ask_user": pause for a human. Include "question": str, and OPTIONALLY "options": [str, ...] — a short
     list of suggested answers the operator can pick with one click (they can always type their own instead).
