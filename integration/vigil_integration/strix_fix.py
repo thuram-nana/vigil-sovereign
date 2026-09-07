@@ -24,6 +24,8 @@ from typing import Any, Callable, Optional
 _DIFF_FENCE = re.compile(r"```(?:diff|patch)\s*\n(.*?)```", re.DOTALL)
 # a block is a usable UNIFIED diff only if it carries real file headers we can git-apply.
 _UNIFIED_HDR = re.compile(r"(?m)^(?:diff --git |--- (?:a/|/dev/null)|\+\+\+ (?:b/|/dev/null))")
+_MAX_REPORT_FILES = 200          # bound the walk over the untrusted agent-written tree
+_MAX_REPORT_BYTES = 2_000_000    # per-file read cap (a huge/pathological .md can't pressure host memory)
 
 
 def extract_unified_diff(*search_dirs: str, cap: int = 200_000) -> str:
@@ -40,12 +42,13 @@ def extract_unified_diff(*search_dirs: str, cap: int = 200_000) -> str:
             continue
         try:
             root = Path(d)
-            files = [root] if root.is_file() else sorted(root.rglob("*.md")) if root.is_dir() else []
+            files = [root] if root.is_file() else (sorted(root.rglob("*.md"))[:_MAX_REPORT_FILES] if root.is_dir() else [])
         except OSError:
             continue
         for f in files:
             try:
-                text = f.read_text(encoding="utf-8", errors="replace")
+                with f.open(encoding="utf-8", errors="replace") as _fh:
+                    text = _fh.read(_MAX_REPORT_BYTES)   # bounded read of an untrusted report file
             except OSError:
                 continue
             for m in _DIFF_FENCE.finditer(text):

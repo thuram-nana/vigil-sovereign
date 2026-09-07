@@ -449,6 +449,15 @@ def _cmd_patch(args: argparse.Namespace) -> int:
             _instr = default_fix_instruction(finding, test_cmd=_plan.build_cmd)
             _agent_diff, _agent_note = run_strix_fix(finding.target_repo, _instr, base_dir=args.repo_base_dir)
             print(f"agent          : strix — {_agent_note}")
+            if not str(_agent_diff or "").strip():
+                # PROVENANCE (red-pen MEDIUM): with --agent strix, NEVER silently fall back to the inline
+                # coder — that would emit a fix attributed to strix though Claude produced it. Fail closed.
+                print("--- result ---")
+                print("status         : no-agent-diff")
+                print("remediated     : False")
+                print("reason         : the strix agent produced no git-appliable diff — refusing to fall back "
+                      "to the inline coder under --agent strix (run without --agent for the inline deep fix)")
+                return 1
         print(f"deep fix       : ON — repo-aware, iterate\u2264{max(1, int(args.fix_attempts))}, "
               f"gate=[{_plan.build_cmd or 'apply-check only'}] ({_plan.note}), verify=daa-rule-cleared-on-clone")
 
