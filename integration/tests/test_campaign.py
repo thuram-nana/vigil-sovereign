@@ -9,8 +9,8 @@ import pytest
 
 from vigil_core import generate_keypair
 from vigil_integration.remediation.campaign import (
-    rank_findings, run_campaign, build_ledger, verify_ledger, trust_root_from_pubkeys,
-    STATUS_ATTESTED, STATUS_VERIFIED, STATUS_DEGRADED, STATUS_FAILED,
+    rank_findings, run_campaign, build_ledger, verify_ledger, trust_root_from_pubkeys, LEDGER_SCHEMA,
+    STATUS_ATTESTED, STATUS_VERIFIED, STATUS_DEGRADED, STATUS_FAILED, STATUS_DEDUPED, STATUS_SKIPPED,
 )
 
 
@@ -52,7 +52,8 @@ def test_campaign_statuses_and_attest_only_on_verified():
     assert by["a"] == STATUS_ATTESTED and by["v"] == STATUS_VERIFIED
     assert by["f"] == STATUS_FAILED and by["d"] == STATUS_DEGRADED
     assert set(attested_refs) == {"v", "a"}            # attest_one called ONLY on verified-no-pr
-    assert camp["counts"] == {STATUS_ATTESTED: 1, STATUS_VERIFIED: 1, STATUS_DEGRADED: 1, STATUS_FAILED: 1}
+    assert camp["counts"] == {STATUS_ATTESTED: 1, STATUS_VERIFIED: 1, STATUS_DEGRADED: 1, STATUS_FAILED: 1,
+                              STATUS_DEDUPED: 0, STATUS_SKIPPED: 0}
 
 
 def test_campaign_a_raising_fix_is_failed_not_a_crash():
@@ -65,7 +66,9 @@ def test_campaign_a_raising_fix_is_failed_not_a_crash():
 def test_campaign_max_findings_caps_and_counts_skipped():
     fs = [_f(f"r{i}", "high", source=f"daa:{i}") for i in range(5)]
     camp = run_campaign(fs, fix_one=lambda f: _r("verified-no-pr"), max_findings=2)
-    assert camp["total"] == 2 and camp["skipped"] == 3
+    assert camp["total_run"] == 2 and camp["total_findings"] == 5
+    assert camp["counts"][STATUS_SKIPPED] == 3          # cap-dropped facts are RECORDED, not dropped
+    assert len(camp["entries"]) == 5                    # every confirmed fact has a ledger entry
 
 
 # ---------- the signed, hash-chained ledger ----------
@@ -116,3 +119,30 @@ def test_cli_remediate_campaign_verb_arg_guard(tmp_path):
     assert cli._cmd_remediate_campaign(ns) == 2      # missing --target-repo → hard refusal
     ns2 = _t.SimpleNamespace(target_repo=str(tmp_path), from_spine="", repo_base_dir=str(tmp_path))
     assert cli._cmd_remediate_campaign(ns2) == 2     # missing --from-spine → hard refusal
+
+
+def test_deduped_facts_are_recorded_in_the_ledger_not_dropped():
+    # same rule+file at two lines: one is fixed, the OTHER is recorded as `deduped` (covered_by the primary),
+    # so the signed ledger accounts for BOTH confirmed facts — never a silent drop.
+    fs = [_f("a", "high", source="daa:R", target="svc/x.py:5"),
+          _f("b", "high", source="daa:R", target="svc/x.py:9")]
+    camp = run_campaign(fs, fix_one=lambda f: _r("verified-no-pr"))
+    by = {e["ref"]: e for e in camp["entries"]}
+    assert len(camp["entries"]) == 2
+    assert by["a"]["status"] == STATUS_VERIFIED
+    assert by["b"]["status"] == STATUS_DEDUPED and by["b"]["covered_by"] == "a"
+
+
+def test_spine_head_cannot_satisfy_verify_ledger():
+    # a head signed with the PLAIN slug (as the offense spine head is) must NOT verify as a ledger head —
+    # the ledger binds a domain-separated engagement_slug.
+    from vigil_core.chain import build_chain, sign_head
+    from vigil_core import digest_payload
+    kp = generate_keypair()
+    entries = run_campaign([_f("a")], fix_one=lambda f: _r("verified-no-pr"))["entries"]
+    chain = build_chain([digest_payload(e) for e in entries])
+    spine_head = sign_head(chain, engagement_slug="s", signers=[("k1", kp.private_key_b64)])  # PLAIN slug
+    forged = {"schema": LEDGER_SCHEMA, "slug": "s", "entries": entries,
+              "chain": [c.model_dump() for c in chain], "head": spine_head.model_dump()}
+    ok, why = verify_ledger(forged, trust_root=trust_root_from_pubkeys({"k1": kp.public_key_b64}))
+    assert ok is False and "remediation-ledger head" in why

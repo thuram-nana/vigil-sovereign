@@ -28,6 +28,8 @@ STATUS_ATTESTED = "attested"        # verified-no-pr AND a signed attestation wa
 STATUS_VERIFIED = "verified"        # verified-no-pr (oracle cleared) — no attestation requested/minted
 STATUS_DEGRADED = "degraded"        # the ladder ended honestly short (no proposal / unverified / skipped)
 STATUS_FAILED = "failed"            # build-failed / verify-still-vulnerable / a refusal
+STATUS_DEDUPED = "deduped"          # a confirmed fact covered by another entry (same rule+file) — accounted, not dropped
+STATUS_SKIPPED = "skipped"          # a confirmed fact not run because of the --max-findings cap (explicit bound)
 
 
 def _sev(f: Any) -> int:
@@ -94,19 +96,44 @@ def _entry_for(f: Any, result: Any, attestation_note: Optional[str]) -> dict:
     }
 
 
+def _cover_entry(f: Any, status: str, note: str, *, covered_by: str = "") -> dict:
+    """A ledger entry for a confirmed fact that was NOT individually fixed — deduped into another entry, or
+    skipped by the cap. It is RECORDED (in the signed ledger), never silently dropped."""
+    return {
+        "ref": str(getattr(f, "ref", "")),
+        "bug_class": str(getattr(f, "bug_class", "") or ""),
+        "severity": str(getattr(f, "severity", "") or ""),
+        "target": str(getattr(f, "target", "") or ""),
+        "ladder_status": "",
+        "status": status,
+        "verified_no_pr": False,
+        "suite_ran": False,
+        "tests_passed": None,
+        "attestation": "",
+        "covered_by": covered_by,
+        "patched_paths": [],
+        "reason": note,
+    }
+
+
 def run_campaign(findings: "list[Any]", *, fix_one: Callable[[Any], Any],
                  attest_one: Optional[Callable[[Any, Any], Optional[str]]] = None,
                  max_findings: int = 0, dedupe: bool = True) -> dict:
-    """Run the gated fix per ranked finding (each in its own disposable clone), attest each verified one
-    when ``attest_one`` is given, and return ``{entries, counts, skipped}``. A per-finding exception is an
-    honest FAILED entry, never a crash of the whole campaign. ``max_findings`` (0 = all) bounds the run."""
-    ranked = rank_findings(findings, dedupe=dedupe)
-    skipped = max(0, len(findings) - len(ranked))
-    if max_findings and max_findings > 0:
-        skipped += max(0, len(ranked) - max_findings)
-        ranked = ranked[:max_findings]
-    entries: list[dict] = []
+    """Run the gated fix per ranked finding (each in its own disposable clone), attest each verified one when
+    ``attest_one`` is given, and return ``{entries, counts, total_findings, total_run}``. EVERY confirmed
+    fact appears in ``entries`` — a deduped fact as a ``deduped`` entry (``covered_by`` the primary ref) and a
+    cap-dropped fact as a ``skipped`` entry — so the signed ledger accounts for the whole surface (no fact is
+    silently dropped). A per-finding exception is an honest FAILED entry, never a campaign crash."""
+    ranked = rank_findings(findings, dedupe=dedupe)            # deduped + severity-ordered
+    ranked_ids = {id(f) for f in ranked}
+    primary_by_key: dict[tuple[str, str], str] = {}
     for f in ranked:
+        primary_by_key.setdefault(_dedupe_key(f), str(getattr(f, "ref", "")))
+    to_run = ranked[:max_findings] if (max_findings and max_findings > 0) else list(ranked)
+    run_ids = {id(f) for f in to_run}
+
+    entries: list[dict] = []
+    for f in to_run:
         try:
             result = fix_one(f)
         except Exception as exc:  # noqa: BLE001 — one finding's failure must not kill the campaign
@@ -118,9 +145,23 @@ def run_campaign(findings: "list[Any]", *, fix_one: Callable[[Any], Any],
             except Exception as exc:  # noqa: BLE001
                 note = f"attestation SKIPPED: {type(exc).__name__}: {exc}"
         entries.append(_entry_for(f, result, note))
+    # RECORD (don't drop) the deduped facts — each covered by the primary with the same (rule, file)
+    for f in findings:
+        if id(f) in ranked_ids:
+            continue
+        cover = primary_by_key.get(_dedupe_key(f), "")
+        entries.append(_cover_entry(f, STATUS_DEDUPED, f"covered by {cover} (same rule+file)", covered_by=cover))
+    # RECORD the cap-skipped facts (ranked but beyond --max-findings)
+    for f in ranked:
+        if id(f) in run_ids:
+            continue
+        entries.append(_cover_entry(f, STATUS_SKIPPED, "not run: --max-findings cap"))
+
     counts = {k: sum(1 for e in entries if e["status"] == k)
-              for k in (STATUS_ATTESTED, STATUS_VERIFIED, STATUS_DEGRADED, STATUS_FAILED)}
-    return {"entries": entries, "counts": counts, "skipped": skipped, "total": len(entries)}
+              for k in (STATUS_ATTESTED, STATUS_VERIFIED, STATUS_DEGRADED, STATUS_FAILED,
+                        STATUS_DEDUPED, STATUS_SKIPPED)}
+    return {"entries": entries, "counts": counts,
+            "total_findings": len(findings), "total_run": len(to_run)}
 
 
 def build_ledger(entries: "list[dict]", *, slug: str, signers: "list[tuple[str, str]]") -> dict:
@@ -131,7 +172,10 @@ def build_ledger(entries: "list[dict]", *, slug: str, signers: "list[tuple[str, 
         raise ValueError("refusing to build an UNSIGNED ledger: at least one signer is required")
     digests = [digest_payload(e) for e in entries]
     chain = build_chain(digests)
-    head = sign_head(chain, engagement_slug=str(slug or ""), signers=list(signers))
+    # DOMAIN-SEPARATE the ledger head from the offense SPINE head: both use vigil_core.chain.sign_head (shared
+    # crucible-evidence domain), so we bind the ledger TYPE into the signed engagement_slug. A spine head
+    # (plain slug) then can never satisfy verify_ledger's slug check below — no cross-protocol head replay.
+    head = sign_head(chain, engagement_slug=f"{LEDGER_SCHEMA}:{slug or ''}", signers=list(signers))
     return {
         "schema": LEDGER_SCHEMA,
         "slug": str(slug or ""),
@@ -166,6 +210,9 @@ def verify_ledger(ledger: dict, *, trust_root: TrustRoot) -> tuple[bool, str]:
         if not ok:
             return False, why
         head = SignedChainHead.model_validate(ledger.get("head") or {})
+        expect_slug = f"{LEDGER_SCHEMA}:{ledger.get('slug', '')}"
+        if head.engagement_slug != expect_slug:
+            return False, f"head is not a remediation-ledger head (engagement_slug {head.engagement_slug!r} != {expect_slug!r})"
         ok, why = verify_head(head, chain, trust_root)
         return (True, "ledger verified") if ok else (False, why)
     except Exception as exc:  # noqa: BLE001 — malformed material is unverified, never a crash
