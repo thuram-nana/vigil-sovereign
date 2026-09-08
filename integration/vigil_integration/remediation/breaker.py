@@ -2,9 +2,9 @@
 
 The oracle (rule cleared) + the real test suite are necessary but not sufficient: a "fix" can PASS both by
 GAMING them rather than fixing the bug —
-  * editing the very TESTS it is validated against (rewrite the assertion so it passes),
-  * RENAMING / COPYING a test file out of collection (git-extended `rename to` / `copy to` — the file stops
-    being collected, so the failing test disappears and the suite goes green),
+  * editing the very TESTS it is validated against (rewrite the assertion so it passes) — whether via a plain
+    hunk, a git-extended `rename`/`copy` that moves the test out of collection, or a `GIT binary patch` that
+    overwrites the test's bytes (the latter two carry NO `+++`/`---` pair, yet `git apply` honors them),
   * SKIPPING / xfail-ing tests, or disabling collection via a pytest config (a skipped/ignored test never
     fails, so the suite goes green),
   * adding a SECURITY-analyzer SUPPRESSION (``# nosec`` / ``# semgrep:ignore`` / eslint-disable) so a
@@ -29,9 +29,10 @@ different FP profiles:
     collides with OpenAPI/AsyncAPI spec trees); RSpec is caught by the ``_spec.rb`` filename instead.
 
 The test-file check consumes the CALLER's already-canonicalised changed-paths (loop.py's approved PatchFile
-paths) so diff-header tricks (tab-timestamps, git path-quoting) cannot evade it; and it ALSO scans the raw
-diff body for git-extended ``rename``/``copy`` targets, which carry no ``+++``/``---`` pair and are therefore
-absent from the caller's path set. Pure stdlib; total on any input.
+paths) so diff-header tricks (tab-timestamps, git path-quoting) cannot evade it; and it ALSO derives paths
+from every ``diff --git`` header (which precedes rename, copy, ``GIT binary patch`` and mode-change blocks
+alike — all of which lack a ``+++``/``---`` pair and are absent from the caller's path set). Pure stdlib;
+total on any input.
 """
 from __future__ import annotations
 
@@ -51,10 +52,15 @@ _TEST_PATH = re.compile(
     r"|\.spec\.[jt]sx?$|\.test\.[jt]sx?$"                  # jest x.spec.ts / x.test.ts
     r"|(Test|Tests|IT)\.java$", re.IGNORECASE)
 
-# git-extended `rename from/to` and `copy from/to` headers name a path with NO `+++`/`---` pair, so they are
-# absent from the caller's changed-paths AND from `_diff_targets`. `git apply` honors them, so a fix can move
-# a TEST file out of collection this way and green the suite. We scan the raw body for these targets too. The
-# anchor at column 0 matches only git meta lines (diff content lines start with `+`/`-`/space).
+# A `diff --git a/<x> b/<y>` header PRECEDES EVERY git-extended block — rename, copy, `GIT binary patch`,
+# mode change — including the ones that carry NO `+++`/`---` pair and are therefore absent from the caller's
+# changed-paths AND from `_diff_targets`. `git apply` honors all of them, so a fix can neutralize a TEST file
+# through any of them (rename it out of collection, overwrite its assertions via a binary patch) and green the
+# suite. Deriving touched paths from this header is the AUTHORITATIVE catch-all. The `^` anchor matches only
+# the git meta line (diff content lines start with `+`/`-`/space).
+_GIT_DIFF_HDR = re.compile(r"^diff --git (.+)$")
+
+# git-extended `rename from/to` and `copy from/to` headers (kept as an explicit secondary signal).
 _GIT_RENAMECOPY = re.compile(r"^(?:rename|copy)\s+(?:from|to)\s+(.+?)\s*$")
 
 # ADDED lines (diff `+`) that disable/skip a test IN CODE — QUALIFIED forms only (a bare `.skip(` is idiomatic
@@ -118,6 +124,37 @@ def _diff_targets(diff: str) -> list[str]:
     return out
 
 
+def _split_git_diff_paths(rest: str) -> list[str]:
+    """Both paths named on a `diff --git a/<x> b/<y>` header. git c-quotes a path (each independently) only
+    when it has unusual chars; unquoted paths never contain spaces. Best-effort for a demote-only heuristic."""
+    rest = rest.strip()
+    out: list[str] = []
+    for q in re.findall(r'"((?:\\.|[^"\\])*)"', rest):           # c-quoted segment(s)
+        try:
+            dec = q.encode("utf-8", "replace").decode("unicode_escape", "replace")
+        except Exception:
+            dec = q
+        p = _unquote_path(dec)
+        if p and p != "/dev/null":
+            out.append(p)
+    for tok in re.findall(r'(?<!\S)[ab]/\S+', rest):            # unquoted a/… b/… tokens
+        p = tok[2:]
+        if p and p != "/dev/null":
+            out.append(p)
+    return out
+
+
+def _gitdiff_header_paths(diff: str) -> list[str]:
+    """Every path named on a `diff --git` header — the authoritative touched-path set that also covers files
+    mutated with NO `+++`/`---` pair (rename, copy, GIT binary patch, mode change)."""
+    out: list[str] = []
+    for line in diff.splitlines():
+        m = _GIT_DIFF_HDR.match(line)
+        if m:
+            out.extend(_split_git_diff_paths(m.group(1)))
+    return out
+
+
 def _renamecopy_paths(diff: str) -> list[str]:
     """Paths named by git-extended `rename from/to` / `copy from/to` headers (which carry NO `+++`/`---` pair,
     so they are invisible to the caller's changed-paths and to `_diff_targets`)."""
@@ -148,17 +185,17 @@ def inspect_fix(diff: str, *, rule_id: str = "", changed_paths: Optional["list[s
         return BreakerVerdict(False)
     cheats: list[str] = []
 
-    targets = list(changed_paths) if changed_paths is not None else _diff_targets(diff)
-    test_files = [p for p in targets if p and _TEST_PATH.search(str(p))]
+    # The caller's canonical modified paths (trusted for the normal edit path) UNION every path named by a
+    # git-extended block: `diff --git` headers (authoritative — covers rename/copy/binary-patch/mode-change,
+    # which have NO +++/--- pair) plus the explicit rename/copy targets. This catches a fix that neutralizes a
+    # TEST file through ANY git-apply-honored mechanism, not only a plain hunk edit.
+    base = list(changed_paths) if changed_paths is not None else _diff_targets(diff)
+    all_paths = base + _gitdiff_header_paths(diff) + _renamecopy_paths(diff)
+    test_files = sorted({p for p in all_paths if p and _TEST_PATH.search(str(p))})
     if test_files:
-        cheats.append(f"the fix EDITS test file(s) it is validated against ({', '.join(sorted(set(test_files))[:5])}) "
-                      "— a vulnerability fix must change the vulnerable code, not its tests")
-
-    # BLOCK-A: git-extended rename/copy of a test file (invisible to the +++/--- path set) greens the suite.
-    rc_test = [p for p in _renamecopy_paths(diff) if _TEST_PATH.search(str(p))]
-    if rc_test:
-        cheats.append(f"the fix RENAMES/COPIES test file(s) ({', '.join(sorted(set(rc_test))[:5])}) — moving a "
-                      "test out of collection stops it running, so 'tests passed' would be gamed")
+        cheats.append(f"the fix TOUCHES test file(s) it is validated against ({', '.join(test_files[:5])}) — a "
+                      "vulnerability fix must change the vulnerable code, not edit / rename / copy / "
+                      "binary-patch a test out of the suite")
 
     added = _added_lines(diff)
     if any(_TEST_DISABLE.search(ln) for ln in added):

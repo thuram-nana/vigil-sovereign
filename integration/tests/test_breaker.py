@@ -107,6 +107,28 @@ def test_rename_or_copy_of_a_test_file_is_a_cheat_BLOCKA():
     assert inspect_fix(prod_rename, changed_paths=[]).cheated is False
 
 
+def test_binary_patch_of_a_test_file_is_a_cheat_BLOCKA2():
+    # red-pen 3rd-pass: a `GIT binary patch` block also carries NO +++/--- pair and git apply honors it, so a
+    # fix could overwrite a test's assertions via binary bytes. Derived from the `diff --git` header, it is caught.
+    binpatch = (
+        "diff --git a/svc/config.py b/svc/config.py\n"
+        "--- a/svc/config.py\n+++ b/svc/config.py\n@@ -1,1 +1,1 @@\n-x = 1\n+x = 2\n"
+        "diff --git a/tests/test_x.py b/tests/test_x.py\n"
+        "index 70a318c0346b5412bf480aac6c116389113c0e55..10bb558f92e2605d58a3af1a29ced7befe7f5dff 100644\n"
+        "GIT binary patch\ndelta 12\nTcmY#VVq};g!x~aln#u(L4kZGi\n\nliteral 34\n"
+        "ncmYdEO;adIEiQ>KE6vH%(6r)G0D{Eg;?$xN1-HbU;#4jG#*PZ`\n")
+    # caller's canonical path set omits the binary-patched test (no +++/--- pair) — exactly the evasion
+    v = inspect_fix(binpatch, changed_paths=["svc/config.py"])
+    assert v.cheated, v.reason
+    assert "test_x.py" in v.reason
+    # a mode-change-only block targeting a test (no hunk) is likewise caught via the diff --git header
+    modechg = ("diff --git a/tests/test_y.py b/tests/test_y.py\nold mode 100644\nnew mode 100755\n")
+    assert inspect_fix(modechg, changed_paths=[]).cheated
+    # a binary patch of a PRODUCTION asset (no test) is NOT a cheat
+    prod_bin = ("diff --git a/assets/logo.png b/assets/logo.png\nGIT binary patch\ndelta 3\nzcmXyz\n")
+    assert inspect_fix(prod_bin, changed_paths=["assets/logo.png"]).cheated is False
+
+
 def test_spec_and_apidir_production_files_are_not_test_edits_BLOCKB():
     # red-pen BLOCK-B: a bare `spec/` dir is an OpenAPI/AsyncAPI spec tree, not RSpec — NOT a test edit
     for path in ("spec/openapi.yaml", "api/spec/schema.json", "contracts/spec/payments.yaml"):
