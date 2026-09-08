@@ -16,7 +16,7 @@ Best-effort by nature: a regex import scan misses computed/dynamic specifiers an
 that only means falling back to siblings; it never breaks a fix, and it READS (never executes) the untrusted
 repo. Bounded (total traversal + reverse-scan file count + an ALWAYS-capped per-file read) and TOTAL: it never
 raises AND never blocks — a FIFO/device/socket named like a source file, or a symlink escaping the repo, is
-refused via an ``os.stat`` (S_ISREG + realpath-containment) check BEFORE any ``open``.
+refused via a realpath-containment check plus an ``os.stat`` S_ISREG check, both BEFORE any ``open``.
 """
 from __future__ import annotations
 

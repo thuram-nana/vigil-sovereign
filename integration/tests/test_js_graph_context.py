@@ -86,13 +86,18 @@ def test_special_files_and_escaping_symlinks_do_not_hang_or_oom(tmp_path):
     except (AttributeError, OSError, NotImplementedError):
         pass
 
-    def _boom(signum, frame):
-        raise TimeoutError("js_graph_context_paths hung on a special file (BLOCK not fixed)")
+    class _Hang(BaseException):                                          # NOT an Exception -> the provider's
+        pass                                                             # `except (OSError, ValueError)` / `except
+    def _boom(signum, frame):                                            # Exception` cannot swallow it (red-pen nit:
+        raise _Hang()                                                    # TimeoutError is an OSError and WAS swallowed)
     old = signal.signal(signal.SIGALRM, _boom) if hasattr(signal, "SIGALRM") else None
     if old is not None:
         signal.alarm(15)
     try:
         paths = js_graph_context_paths(str(r), "src/primary.ts")          # must return (no hang, no OOM)
+    except _Hang:
+        signal.alarm(0)
+        raise AssertionError("js_graph_context_paths HUNG on a special file (FIFO/device) — BLOCK not fixed")
     finally:
         if old is not None:
             signal.alarm(0); signal.signal(signal.SIGALRM, old)
