@@ -11,7 +11,7 @@ import shutil
 import pytest
 
 from vigil_core import generate_keypair
-from vigil_core.signed_build_manifest import digest_tree
+from vigil_integration.remediation.attestation import source_tree_digest
 
 from vigil_integration.remediation.attestation import (
     mint_remediation_attestation, verify_remediation_attestation, AttestationError,
@@ -117,7 +117,7 @@ def test_offline_vuln_gone_rerun_catches_a_false_attestation(tmp_path):
 
     patched = tmp_path / "patched"; (patched / "svc").mkdir(parents=True)
     (patched / "svc" / "config.py").write_text(vuln.replace("md5", "sha256"), encoding="utf-8")
-    pdig, _ = digest_tree(str(patched))
+    pdig = source_tree_digest(str(patched))
     good = mint_remediation_attestation(
         finding_ref=ref, bug_class="Weak Cryptography", target="svc/config.py:5",
         oracle_kind="daa:DAA-WEAK-HASH", rule_id="DAA-WEAK-HASH",
@@ -128,7 +128,7 @@ def test_offline_vuln_gone_rerun_catches_a_false_attestation(tmp_path):
 
     unpatched = tmp_path / "unpatched"; (unpatched / "svc").mkdir(parents=True)
     (unpatched / "svc" / "config.py").write_text(vuln, encoding="utf-8")   # md5 still present
-    udig, _ = digest_tree(str(unpatched))
+    udig = source_tree_digest(str(unpatched))
     liar = mint_remediation_attestation(
         finding_ref=ref, bug_class="Weak Cryptography", target="svc/config.py:5",
         oracle_kind="daa:DAA-WEAK-HASH", rule_id="DAA-WEAK-HASH",
@@ -229,3 +229,38 @@ def test_cli_mints_attestation_on_verified_fix(tmp_path):
     # no key => honest SKIP, never a silent unsigned mint
     args.attest_key = ""
     assert "SKIPPED" in (cli._mint_deep_fix_attestation(result, finding, args, plan) or "")
+
+
+def test_mint_refuses_when_bound_tree_still_fires_untracked(tmp_path):
+    """crypto-notary BLOCKING: the minter grounds vuln_gone on the EXACT tree it binds by re-running the
+    oracle over it. A working tree with an UNTRACKED file that still matches the rule must REFUSE the mint —
+    never a 'MINTED [vuln-gone]' over a tree where the rule still fires."""
+    pytest.importorskip("framework")
+    import subprocess, types, shutil
+    if not shutil.which("git"):
+        pytest.skip("needs git")
+    from vigil_integration import cli, codescan
+    def _git(*a, cwd):
+        subprocess.run(["git", *a], cwd=cwd, check=True, capture_output=True)
+    repo = tmp_path / "repo"; (repo / "svc").mkdir(parents=True)
+    (repo / "svc" / "config.py").write_text('import hashlib\n\n\ndef fp(pw):\n    return hashlib.md5(pw.encode()).hexdigest()\n', encoding="utf-8")
+    _git("init", "-q", cwd=repo); _git("add", "-A", cwd=repo)
+    _git("-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "i", cwd=repo)
+    (repo / "svc" / "config.py").write_text('import hashlib\n\n\ndef fp(pw):\n    return hashlib.sha256(pw.encode()).hexdigest()\n', encoding="utf-8")
+    diff = subprocess.run(["git", "diff"], cwd=repo, capture_output=True, text=True).stdout
+    _git("checkout", "--", ".", cwd=repo)
+    (repo / "svc" / "extra.py").write_text('import hashlib\n\n\ndef g(x):\n    return hashlib.md5(x).hexdigest()\n', encoding="utf-8")   # UNTRACKED md5, not touched by the fix
+    base = tmp_path / "base"; base.mkdir()
+    rep = codescan.run_codescan(root=str(repo), slug="s", base_dir=str(base))
+    ref = next((f["ref"] for f in rep["findings"] if "WEAK-HASH" in f["ref"]), None)
+    if not ref:
+        pytest.skip("DAA did not flag md5 here")
+    kp = generate_keypair(); keyf = tmp_path / "k.b64"; keyf.write_text(kp.private_key_b64, encoding="ascii")
+    result = types.SimpleNamespace(status="verified-no-pr", applied_diff=diff, suite_ran=False, tests_passed=None)
+    finding = types.SimpleNamespace(target_repo=str(repo), ref=ref, bug_class="Weak Cryptography",
+                                    target="svc/config.py:5", evidence_ref="sha256:demo")
+    args = types.SimpleNamespace(attest=True, attest_key=str(keyf), attest_key_id="k1", dep_cache="",
+                                 from_spine="s", repo_base_dir=str(base))
+    note = cli._mint_deep_fix_attestation(result, finding, args, types.SimpleNamespace(test_cmd=""))
+    assert note is not None and "MINTED" not in note   # the untracked md5 makes the re-run FIRE
+    assert "REFUSED" in note or "still" in note.lower() or "SKIPPED" in note

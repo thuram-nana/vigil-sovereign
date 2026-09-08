@@ -250,6 +250,8 @@ def _mint_deep_fix_attestation(result: Any, finding: Any, args: argparse.Namespa
     raises out (any failure returns an honest SKIPPED note — the verified-no-pr result still stands)."""
     if not getattr(args, "attest", False):
         return None
+    if str(getattr(result, "status", "")) != "verified-no-pr":
+        return None   # defence in depth: NEVER mint on anything but a real oracle-cleared fix
     import json as _json, os as _os, re as _re, shutil as _sh, subprocess as _sp, tempfile as _tf
     key_file = str(getattr(args, "attest_key", "") or "").strip()
     if not key_file:
@@ -263,14 +265,14 @@ def _mint_deep_fix_attestation(result: Any, finding: Any, args: argparse.Namespa
     repo = getattr(finding, "target_repo", "") or ""
     if not diff.strip() or not repo or not _os.path.isdir(repo):
         return "attestation SKIPPED: no applied diff / target repo to bind"
-    from .remediation.attestation import mint_remediation_attestation, AttestationError
-    from .codescan import parse_ref
-    from vigil_core.signed_build_manifest import digest_tree
+    from .remediation.attestation import (mint_remediation_attestation, AttestationError,
+                                          source_tree_digest, DEFAULT_TREE_EXCLUDES)
+    from .codescan import parse_ref, verify_finding_cleared
     from vigil_core.canonical import sha256_hex
     rule_id, _pth, _ln = parse_ref(getattr(finding, "ref", ""))
     tmp = _tf.mkdtemp(prefix="vigil-attest-")
     try:
-        base_dig, _ = digest_tree(repo)
+        base_dig = source_tree_digest(repo)
         dst = _os.path.join(tmp, "tree")
         _sh.copytree(repo, dst, symlinks=False, ignore=_sh.ignore_patterns(".git", ".venv", "venv", "__pycache__"))
         pf = _os.path.join(tmp, "fix.patch")
@@ -278,13 +280,19 @@ def _mint_deep_fix_attestation(result: Any, finding: Any, args: argparse.Namespa
         ap = _sp.run(["git", "apply", pf], cwd=dst, capture_output=True, text=True)  # noqa: S607 — throwaway copy
         if ap.returncode != 0:
             return f"attestation SKIPPED: could not reconstruct the patched tree (git apply: {(ap.stderr or '').strip()[:120]})"
-        patched_dig, _ = digest_tree(dst)
+        # GROUND the VULN-GONE claim on the EXACT tree we bind (not the upstream status over a different
+        # clone): re-run the deterministic oracle over dst. An untracked rule-match in the working tree, or any
+        # divergence from what was verified, makes this fire → mint REFUSES (fail-closed) rather than assert a
+        # false vuln-gone. (crypto-notary BLOCKING.)
+        _vg = verify_finding_cleared(root=dst, ref=getattr(finding, "ref", ""))
+        vuln_gone = bool(_vg.get("cleared") if isinstance(_vg, dict) else getattr(_vg, "cleared", False))
+        patched_dig = source_tree_digest(dst)
         behavior_established = bool(getattr(result, "suite_ran", False) and getattr(result, "tests_passed", None) is True)
         deps_digest = ""
         _cache = str(getattr(args, "dep_cache", "") or "").strip()
         if behavior_established and _cache and _os.path.isdir(_cache):
             try:
-                deps_digest, _ = digest_tree(_cache)
+                deps_digest = source_tree_digest(_cache)
             except Exception:  # noqa: BLE001
                 deps_digest = ""
         att = mint_remediation_attestation(
@@ -292,11 +300,12 @@ def _mint_deep_fix_attestation(result: Any, finding: Any, args: argparse.Namespa
             target=getattr(finding, "target", ""), oracle_kind=f"daa:{rule_id}", rule_id=rule_id or "",
             base_tree_digest=base_dig, patched_tree_digest=patched_dig,
             diff_digest="sha256:" + sha256_hex(diff.encode("utf-8")),
-            vuln_gone=True, original_evidence_ref=getattr(finding, "evidence_ref", ""),
+            vuln_gone=vuln_gone, original_evidence_ref=getattr(finding, "evidence_ref", ""),
             behavior_established=behavior_established,
             test_cmd=(getattr(plan, "test_cmd", "") if behavior_established else ""),
             deps_digest=deps_digest, suite_ran=getattr(result, "suite_ran", False),
-            tests_passed=getattr(result, "tests_passed", None), signers=[(key_id, priv)])
+            tests_passed=getattr(result, "tests_passed", None),
+            tree_excludes=DEFAULT_TREE_EXCLUDES, signers=[(key_id, priv)])
         slug = str(getattr(args, "from_spine", "") or "fix").strip() or "fix"
         safe_ref = _re.sub(r"[^A-Za-z0-9._-]", "_", str(getattr(finding, "ref", "att")))[:80]
         outp = _os.path.join(str(getattr(args, "repo_base_dir", ".") or "."), f"{slug}-{safe_ref}.attestation.json")
