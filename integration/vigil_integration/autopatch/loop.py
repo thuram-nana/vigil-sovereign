@@ -163,6 +163,10 @@ class PatchResult(BaseModel):
     # the exact unified diff that was APPROVED and git-applied into the disposable clone — surfaced so
     # the operator can `git apply` the same fix in their real tree (the clone is never their source).
     applied_diff: str = ""
+    # W5b: the behavior-preserved axis of a deep fix, surfaced so a signed Remediation Attestation can bind
+    # it. suite_ran = the REAL test suite actually ran; tests_passed = it passed (None = the suite did not run).
+    suite_ran: bool = False
+    tests_passed: Optional[bool] = None
     verification: Optional[FixVerification] = None
     reason: str = ""
     steps: list[PipelineStep] = Field(default_factory=list)
@@ -593,6 +597,8 @@ def autopatch(
         return PatchResult(
             remediation_id=rid, status=("verify-" + vstatus if vstatus != "verified-no-pr" else "verified-no-pr"),
             opened_pr=False, remediated=False, patched_paths=approved_paths, applied_diff=applied_diff,
+            suite_ran=bool(getattr(bres, "suite_ran", False)),
+            tests_passed=getattr(bres, "tests_passed", None),
             verification=FixVerification(status=vstatus, remediated=False, reason=vreason),
             reason=vreason, steps=rec.steps,
         )

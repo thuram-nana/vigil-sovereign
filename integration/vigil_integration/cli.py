@@ -243,6 +243,80 @@ def _cmd_engage(args: argparse.Namespace) -> int:
     return 0
 
 
+def _mint_deep_fix_attestation(result: Any, finding: Any, args: argparse.Namespace, plan: Any) -> "Optional[str]":
+    """On a verified-no-pr deep fix, mint a signed Proof-Carrying Remediation Attestation (PCR/W5b) binding
+    VULN-GONE (the oracle cleared) + BEHAVIOR-PRESERVED (the real suite, if it ran) to the base/patched tree
+    digests + the diff. Returns a one-line status to print, or None when --attest was not requested. Never
+    raises out (any failure returns an honest SKIPPED note — the verified-no-pr result still stands)."""
+    if not getattr(args, "attest", False):
+        return None
+    import json as _json, os as _os, re as _re, shutil as _sh, subprocess as _sp, tempfile as _tf
+    key_file = str(getattr(args, "attest_key", "") or "").strip()
+    if not key_file:
+        return "attestation SKIPPED: --attest needs --attest-key <ed25519-private-key-b64 file>"
+    try:
+        priv = open(key_file, encoding="ascii").read().strip()
+    except OSError as exc:
+        return f"attestation SKIPPED: cannot read --attest-key ({exc})"
+    key_id = str(getattr(args, "attest_key_id", "") or "owner").strip() or "owner"
+    diff = getattr(result, "applied_diff", "") or ""
+    repo = getattr(finding, "target_repo", "") or ""
+    if not diff.strip() or not repo or not _os.path.isdir(repo):
+        return "attestation SKIPPED: no applied diff / target repo to bind"
+    from .remediation.attestation import mint_remediation_attestation, AttestationError
+    from .codescan import parse_ref
+    from vigil_core.signed_build_manifest import digest_tree
+    from vigil_core.canonical import sha256_hex
+    rule_id, _pth, _ln = parse_ref(getattr(finding, "ref", ""))
+    tmp = _tf.mkdtemp(prefix="vigil-attest-")
+    try:
+        base_dig, _ = digest_tree(repo)
+        dst = _os.path.join(tmp, "tree")
+        _sh.copytree(repo, dst, symlinks=False, ignore=_sh.ignore_patterns(".git", ".venv", "venv", "__pycache__"))
+        pf = _os.path.join(tmp, "fix.patch")
+        open(pf, "w", encoding="utf-8").write(diff if diff.endswith("\n") else diff + "\n")
+        ap = _sp.run(["git", "apply", pf], cwd=dst, capture_output=True, text=True)  # noqa: S607 — throwaway copy
+        if ap.returncode != 0:
+            return f"attestation SKIPPED: could not reconstruct the patched tree (git apply: {(ap.stderr or '').strip()[:120]})"
+        patched_dig, _ = digest_tree(dst)
+        behavior_established = bool(getattr(result, "suite_ran", False) and getattr(result, "tests_passed", None) is True)
+        deps_digest = ""
+        _cache = str(getattr(args, "dep_cache", "") or "").strip()
+        if behavior_established and _cache and _os.path.isdir(_cache):
+            try:
+                deps_digest, _ = digest_tree(_cache)
+            except Exception:  # noqa: BLE001
+                deps_digest = ""
+        att = mint_remediation_attestation(
+            finding_ref=getattr(finding, "ref", ""), bug_class=getattr(finding, "bug_class", ""),
+            target=getattr(finding, "target", ""), oracle_kind=f"daa:{rule_id}", rule_id=rule_id or "",
+            base_tree_digest=base_dig, patched_tree_digest=patched_dig,
+            diff_digest="sha256:" + sha256_hex(diff.encode("utf-8")),
+            vuln_gone=True, original_evidence_ref=getattr(finding, "evidence_ref", ""),
+            behavior_established=behavior_established,
+            test_cmd=(getattr(plan, "test_cmd", "") if behavior_established else ""),
+            deps_digest=deps_digest, suite_ran=getattr(result, "suite_ran", False),
+            tests_passed=getattr(result, "tests_passed", None), signers=[(key_id, priv)])
+        slug = str(getattr(args, "from_spine", "") or "fix").strip() or "fix"
+        safe_ref = _re.sub(r"[^A-Za-z0-9._-]", "_", str(getattr(finding, "ref", "att")))[:80]
+        outp = _os.path.join(str(getattr(args, "repo_base_dir", ".") or "."), f"{slug}-{safe_ref}.attestation.json")
+        try:
+            _os.makedirs(_os.path.dirname(outp) or ".", exist_ok=True)
+            with open(outp, "w", encoding="utf-8") as fh:
+                _json.dump(att, fh, indent=2)
+            _os.chmod(outp, 0o600)
+        except OSError as exc:
+            return f"attestation minted but could not write it: {exc}"
+        tier = "fully-sound (vuln-gone + behavior)" if behavior_established else "vuln-gone (behavior not established)"
+        return f"attestation MINTED [{tier}] -> {outp} (verify offline: vigil verify-remediation {outp} --trust-root <keys> --patched-root <tree>)"
+    except AttestationError as exc:
+        return f"attestation REFUSED (fail-closed): {exc}"
+    except Exception as exc:  # noqa: BLE001 — minting must never crash a good fix
+        return f"attestation SKIPPED: {type(exc).__name__}: {exc}"
+    finally:
+        _sh.rmtree(tmp, ignore_errors=True)
+
+
 def _cmd_patch(args: argparse.Namespace) -> int:
     """LAP-3b: run the gated auto-patch ladder over a PROVENANCE-GROUNDED confirmed finding.
 
@@ -519,6 +593,10 @@ def _cmd_patch(args: argparse.Namespace) -> int:
         print(f"verification   : {getattr(result.verification, 'status', '(none)')}")
     if result.reason:
         print(f"reason         : {result.reason}")
+    if deep and result.status == "verified-no-pr":
+        _att = _mint_deep_fix_attestation(result, finding, args, _plan)
+        if _att:
+            print(f"attestation    : {_att}")
     # Honest exit. Without verification requested: non-zero only on an outright refusal (not-confirmed / gate
     # deny) — a propose-only or applied-in-clone or opened-PR run is a success and a "no proposal" (e.g. no API
     # key) is reported, not crashed. WITH --verify-base-url the caller asked "is it actually fixed?", so ONLY a
@@ -4033,6 +4111,17 @@ def build_parser() -> argparse.ArgumentParser:
                              "(pip --no-index --find-links); the suite then runs as the behavior-preserved "
                              "gate. Absent ⇒ the real suite is skipped honestly (compile-gate only). Build a "
                              "wheelhouse with `pip download -r requirements.txt pytest -d <dir>`.")
+    ppatch.add_argument("--attest", action="store_true",
+                        help="with --deep: on a verified-no-pr fix, MINT a signed Proof-Carrying Remediation "
+                             "Attestation binding VULN-GONE + BEHAVIOR-PRESERVED to the base/patched tree "
+                             "digests + the diff (needs --attest-key). Written to <base-dir>/<slug>-<ref>."
+                             "attestation.json; re-verify OFFLINE with `vigil verify-remediation`.")
+    ppatch.add_argument("--attest-key", default="",
+                        help="path to a file holding the Ed25519 PRIVATE key (base64) that signs the "
+                             "attestation. The key is read from the file, never from argv.")
+    ppatch.add_argument("--attest-key-id", default="owner",
+                        help="the signer key_id recorded in the attestation (matches a --trust-root entry at "
+                             "verify time). Default: owner.")
     ppatch.set_defaults(func=_cmd_patch)
 
     prem = sub.add_parser(
