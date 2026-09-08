@@ -346,6 +346,19 @@
       "rationale": "OFFLINE, zero-trust verification of a Proof-Carrying Remediation Attestation: re-derives the m-of-n signature and, given the patched tree, re-runs the VULN-GONE oracle (and the real suite with a dep cache). Read-only; exit 0 only when the oracles re-executed sound."
     },
     {
+      "id": "cli.remediate-campaign",
+      "name": "vigil remediate-campaign",
+      "surface": "cli-native",
+      "status": "GATED",
+      "verb": "remediate-campaign",
+      "anchor": {
+        "file": "integration/vigil_integration/cli.py",
+        "symbol": "_cmd_remediate_campaign"
+      },
+      "check": "cli-native-verb",
+      "rationale": "Batch remediation over every confirmed fact on a codebase's signed spine: ranks/dedupes, runs the gated deep-fix per finding on a disposable clone (never a PR), optionally mints a Remediation Attestation per verified fix, and emits a signed hash-chained remediation ledger."
+    },
+    {
       "id": "cli.codescan",
       "name": "vigil codescan",
       "surface": "cli-native",
