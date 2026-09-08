@@ -57,7 +57,7 @@
         "symbol": "_cmd_approve_sign"
       },
       "check": "cli-native-verb",
-      "rationale": "Manages the signed per-action approval token (provision-authority|list|sign) — owner-gated."
+      "rationale": "Manages the signed per-action approval token (provision-authority|list|sign) \u2014 owner-gated."
     },
     {
       "id": "cli.assemble-destruction",
@@ -148,7 +148,7 @@
         "symbol": "_cmd_gauntlet"
       },
       "check": "cli-native-verb",
-      "rationale": "Native verb (W16-16 #522) drives the AI-Gauntlet adapter against a loopback target; parser registered and handler resolves. GATED on the deferred live garak/PyRIT runner image (docs/DEFERRED-INFRA.md) — without --runner-cmd it honestly reports available:false and mints zero findings, never a fabricated one."
+      "rationale": "Native verb (W16-16 #522) drives the AI-Gauntlet adapter against a loopback target; parser registered and handler resolves. GATED on the deferred live garak/PyRIT runner image (docs/DEFERRED-INFRA.md) \u2014 without --runner-cmd it honestly reports available:false and mints zero findings, never a fabricated one."
     },
     {
       "id": "cli.doctor",
@@ -331,6 +331,19 @@
       },
       "check": "cli-native-verb",
       "rationale": "Applies a code fix over a provenance-grounded finding through the gated executor."
+    },
+    {
+      "id": "cli.verify-remediation",
+      "name": "vigil verify-remediation",
+      "surface": "cli-native",
+      "status": "LIVE",
+      "verb": "verify-remediation",
+      "anchor": {
+        "file": "integration/vigil_integration/cli.py",
+        "symbol": "_cmd_verify_remediation"
+      },
+      "check": "cli-native-verb",
+      "rationale": "OFFLINE, zero-trust verification of a Proof-Carrying Remediation Attestation: re-derives the m-of-n signature and, given the patched tree, re-runs the VULN-GONE oracle (and the real suite with a dep cache). Read-only; exit 0 only when the oracles re-executed sound."
     },
     {
       "id": "cli.codescan",
@@ -696,7 +709,7 @@
     },
     {
       "id": "ui.activity",
-      "name": "UI screen — Activity",
+      "name": "UI screen \u2014 Activity",
       "surface": "ui-screen",
       "status": "LIVE",
       "screen": "activity",
@@ -708,7 +721,7 @@
     },
     {
       "id": "ui.apikeys",
-      "name": "UI screen — API Keys",
+      "name": "UI screen \u2014 API Keys",
       "surface": "ui-screen",
       "status": "LIVE",
       "screen": "apikeys",
@@ -720,7 +733,7 @@
     },
     {
       "id": "ui.assess",
-      "name": "UI screen — New Assessment",
+      "name": "UI screen \u2014 New Assessment",
       "surface": "ui-screen",
       "status": "LIVE",
       "screen": "assess",
@@ -732,7 +745,7 @@
     },
     {
       "id": "ui.assurance",
-      "name": "UI screen — Assurance",
+      "name": "UI screen \u2014 Assurance",
       "surface": "ui-screen",
       "status": "LIVE",
       "screen": "assurance",
@@ -744,7 +757,7 @@
     },
     {
       "id": "ui.brain",
-      "name": "UI screen — Brain Planner",
+      "name": "UI screen \u2014 Brain Planner",
       "surface": "ui-screen",
       "status": "LIVE",
       "screen": "brain",
@@ -756,7 +769,7 @@
     },
     {
       "id": "ui.budgets",
-      "name": "UI screen — Budgets",
+      "name": "UI screen \u2014 Budgets",
       "surface": "ui-screen",
       "status": "LIVE",
       "screen": "budgets",
@@ -768,7 +781,7 @@
     },
     {
       "id": "ui.ceremonies",
-      "name": "UI screen — Ceremonies",
+      "name": "UI screen \u2014 Ceremonies",
       "surface": "ui-screen",
       "status": "LIVE",
       "screen": "ceremonies",
@@ -780,7 +793,7 @@
     },
     {
       "id": "ui.charter",
-      "name": "UI screen — Charter",
+      "name": "UI screen \u2014 Charter",
       "surface": "ui-screen",
       "status": "LIVE",
       "screen": "charter",
@@ -792,7 +805,7 @@
     },
     {
       "id": "ui.chat",
-      "name": "UI screen — Chat",
+      "name": "UI screen \u2014 Chat",
       "surface": "ui-screen",
       "status": "LIVE",
       "screen": "chat",
@@ -804,7 +817,7 @@
     },
     {
       "id": "ui.compliance",
-      "name": "UI screen — Compliance",
+      "name": "UI screen \u2014 Compliance",
       "surface": "ui-screen",
       "status": "LIVE",
       "screen": "compliance",
@@ -816,7 +829,7 @@
     },
     {
       "id": "ui.defense",
-      "name": "UI screen — Defense (AEGIS)",
+      "name": "UI screen \u2014 Defense (AEGIS)",
       "surface": "ui-screen",
       "status": "LIVE",
       "screen": "defense",
@@ -828,7 +841,7 @@
     },
     {
       "id": "ui.findings",
-      "name": "UI screen — Findings",
+      "name": "UI screen \u2014 Findings",
       "surface": "ui-screen",
       "status": "LIVE",
       "screen": "findings",
@@ -840,7 +853,7 @@
     },
     {
       "id": "ui.fixes",
-      "name": "UI screen — Fixes",
+      "name": "UI screen \u2014 Fixes",
       "surface": "ui-screen",
       "status": "LIVE",
       "screen": "fixes",
@@ -852,7 +865,7 @@
     },
     {
       "id": "ui.governance",
-      "name": "UI screen — Governance",
+      "name": "UI screen \u2014 Governance",
       "surface": "ui-screen",
       "status": "LIVE",
       "screen": "governance",
@@ -864,7 +877,7 @@
     },
     {
       "id": "ui.home",
-      "name": "UI screen — Home",
+      "name": "UI screen \u2014 Home",
       "surface": "ui-screen",
       "status": "LIVE",
       "screen": "home",
@@ -876,7 +889,7 @@
     },
     {
       "id": "ui.knowledge",
-      "name": "UI screen — Knowledge",
+      "name": "UI screen \u2014 Knowledge",
       "surface": "ui-screen",
       "status": "LIVE",
       "screen": "knowledge",
@@ -888,7 +901,7 @@
     },
     {
       "id": "ui.library",
-      "name": "UI screen — Engagement Library",
+      "name": "UI screen \u2014 Engagement Library",
       "surface": "ui-screen",
       "status": "LIVE",
       "screen": "library",
@@ -900,7 +913,7 @@
     },
     {
       "id": "ui.live",
-      "name": "UI screen — Live",
+      "name": "UI screen \u2014 Live",
       "surface": "ui-screen",
       "status": "LIVE",
       "screen": "live",
@@ -912,7 +925,7 @@
     },
     {
       "id": "ui.manual",
-      "name": "UI screen — Manual",
+      "name": "UI screen \u2014 Manual",
       "surface": "ui-screen",
       "status": "LIVE",
       "screen": "manual",
@@ -924,7 +937,7 @@
     },
     {
       "id": "ui.mcp",
-      "name": "UI screen — MCP Servers",
+      "name": "UI screen \u2014 MCP Servers",
       "surface": "ui-screen",
       "status": "LIVE",
       "screen": "mcp",
@@ -936,7 +949,7 @@
     },
     {
       "id": "ui.posture",
-      "name": "UI screen — Posture",
+      "name": "UI screen \u2014 Posture",
       "surface": "ui-screen",
       "status": "LIVE",
       "screen": "posture",
@@ -948,7 +961,7 @@
     },
     {
       "id": "ui.proof",
-      "name": "UI screen — Proof Studio",
+      "name": "UI screen \u2014 Proof Studio",
       "surface": "ui-screen",
       "status": "LIVE",
       "screen": "proof",
@@ -960,7 +973,7 @@
     },
     {
       "id": "ui.replay",
-      "name": "UI screen — Replay",
+      "name": "UI screen \u2014 Replay",
       "surface": "ui-screen",
       "status": "LIVE",
       "screen": "replay",
@@ -972,7 +985,7 @@
     },
     {
       "id": "ui.report",
-      "name": "UI screen — Report",
+      "name": "UI screen \u2014 Report",
       "surface": "ui-screen",
       "status": "LIVE",
       "screen": "report",
@@ -984,7 +997,7 @@
     },
     {
       "id": "ui.safety",
-      "name": "UI screen — Safety",
+      "name": "UI screen \u2014 Safety",
       "surface": "ui-screen",
       "status": "LIVE",
       "screen": "safety",
@@ -996,7 +1009,7 @@
     },
     {
       "id": "ui.sessions",
-      "name": "UI screen — Sessions",
+      "name": "UI screen \u2014 Sessions",
       "surface": "ui-screen",
       "status": "LIVE",
       "screen": "sessions",
@@ -1008,7 +1021,7 @@
     },
     {
       "id": "ui.settings",
-      "name": "UI screen — Settings",
+      "name": "UI screen \u2014 Settings",
       "surface": "ui-screen",
       "status": "LIVE",
       "screen": "settings",
@@ -1020,7 +1033,7 @@
     },
     {
       "id": "ui.strix",
-      "name": "UI screen — Strix Control",
+      "name": "UI screen \u2014 Strix Control",
       "surface": "ui-screen",
       "status": "LIVE",
       "screen": "strix",
@@ -1032,7 +1045,7 @@
     },
     {
       "id": "ui.system",
-      "name": "UI screen — System",
+      "name": "UI screen \u2014 System",
       "surface": "ui-screen",
       "status": "LIVE",
       "screen": "system",
@@ -1044,7 +1057,7 @@
     },
     {
       "id": "ui.durability",
-      "name": "UI screen — Durability",
+      "name": "UI screen \u2014 Durability",
       "surface": "ui-screen",
       "status": "LIVE",
       "screen": "durability",
@@ -1056,7 +1069,7 @@
     },
     {
       "id": "ui.terminal",
-      "name": "UI screen — Terminal",
+      "name": "UI screen \u2014 Terminal",
       "surface": "ui-screen",
       "status": "LIVE",
       "screen": "terminal",
@@ -1068,7 +1081,7 @@
     },
     {
       "id": "ui.tools",
-      "name": "UI screen — Tools",
+      "name": "UI screen \u2014 Tools",
       "surface": "ui-screen",
       "status": "LIVE",
       "screen": "tools",
@@ -1080,7 +1093,7 @@
     },
     {
       "id": "ui.trust",
-      "name": "UI screen — Trust Root",
+      "name": "UI screen \u2014 Trust Root",
       "surface": "ui-screen",
       "status": "LIVE",
       "screen": "trust",
@@ -1092,7 +1105,7 @@
     },
     {
       "id": "ui.users",
-      "name": "UI screen — Users",
+      "name": "UI screen \u2014 Users",
       "surface": "ui-screen",
       "status": "LIVE",
       "screen": "users",
@@ -1160,7 +1173,7 @@
         "symbol": "to_client_config"
       },
       "check": "symbol-exists",
-      "rationale": "The pluggable MCP-server MANIFEST layer is built and validated (least-privilege phases, fail-closed cross-server validation, secret redaction) and to_client_config produces the transport config a live client would consume — but NO runtime consumes it: the client that actually speaks to an MCP server is a later slice (see the module docstring). test_mcp_live_client_seam_is_still_unwired asserts to_client_config has zero runtime call-sites, so wiring it forces this status off BUILT-NOT-WIRED. W17 milestone item."
+      "rationale": "The pluggable MCP-server MANIFEST layer is built and validated (least-privilege phases, fail-closed cross-server validation, secret redaction) and to_client_config produces the transport config a live client would consume \u2014 but NO runtime consumes it: the client that actually speaks to an MCP server is a later slice (see the module docstring). test_mcp_live_client_seam_is_still_unwired asserts to_client_config has zero runtime call-sites, so wiring it forces this status off BUILT-NOT-WIRED. W17 milestone item."
     },
     {
       "id": "cli.escrow-passphrase",
@@ -1199,7 +1212,7 @@
         "symbol": "_cmd_fireteam_resolve"
       },
       "check": "cli-native-verb",
-      "rationale": "W17-7 #541 Tier-B escalation resolve loop (list|approve|resolve): the operator signs an owner approval for an over-cap fireteam member escalation and the offense resolver applies the registry's signed-only resolve() — owner-key gated; without a signed approval an escalation still auto-rejects at its deadline (fail-closed)."
+      "rationale": "W17-7 #541 Tier-B escalation resolve loop (list|approve|resolve): the operator signs an owner approval for an over-cap fireteam member escalation and the offense resolver applies the registry's signed-only resolve() \u2014 owner-key gated; without a signed approval an escalation still auto-rejects at its deadline (fail-closed)."
     }
   ]
 }

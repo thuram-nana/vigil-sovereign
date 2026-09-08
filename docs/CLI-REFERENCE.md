@@ -138,6 +138,7 @@ a new sub-parser that is not documented here turns the required check red.
 | `vigil identity` | Export the offense stable identity PUBLIC keys (spine + governance) for owner delegation. |
 | `vigil patch` | Run the gated auto-patch ladder over a provenance-grounded confirmed finding. |
 | `vigil codescan` | Deterministic DAA static scan of a local codebase: writes each finding into the signed `<slug>.spine` (a re-runnable STATIC fact, `source=daa:<rule_id>`) so a gated fix can ground on it, and emits CWE-tagged findings JSON. `--verify --ref <ref>` re-runs the rule (exit 0 iff it fires nowhere) as the fix-verification oracle. |
+| `vigil verify-remediation` | OFFLINE, zero-trust verify of a Proof-Carrying Remediation Attestation: re-derives the m-of-n Ed25519 signature over the domain-tagged body and, given `--patched-root`, re-digests the tree (binding) and RE-RUNS the VULN-GONE DAA oracle (with `--dep-cache`, the real test suite too). Trusts neither VIGIL, the model, nor the CI. Exit 0 only when the oracles re-executed and the fix is sound; 3 = signature-only; 1 = fail. |
 | `vigil remediate` | Run the four-state live remediation proof (`--prove`) over a provenance-grounded finding. |
 | `vigil reprove` | The continuous re-proof service — loop the four-state live re-proof on a cadence, appending signed results. |
 | `vigil floor` | The offense anti-rollback floor ↔ witnessed-checkpoint anchor (`floor witness …`). |
