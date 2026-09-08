@@ -65,6 +65,7 @@ class CodefixConfig:
     install_specs: tuple = ()                 # pip install ARGS for the REAL suite (buildsys); needs a dep cache
     dep_cache_dir: str = ""                   # host wheelhouse/pip-cache dir mounted READ-ONLY for an OFFLINE install
     plan_language: str = ""                   # buildsys-detected language (drives the real-test composer)
+    plan_pkg_manager: str = ""                # buildsys-detected JS/TS package manager (npm|yarn|pnpm)
     context_paths_provider: Optional[Callable[[str, str], "Optional[list]"]] = None  # W2: (repo, primary)->ranked relpaths; None=>same-dir siblings
     build_timeout: float = 300.0             # per build/test command, inside the bwrap sandbox
     git_bin: str = "git"
@@ -336,7 +337,8 @@ class CodefixSession:
         cache = self.config.dep_cache_dir
         if cache and self.config.install_specs and (self.config.test_cmd or "").strip() and os.path.isdir(cache):
             _plan = BuildPlan(test_cmd=self.config.test_cmd, install_specs=tuple(self.config.install_specs),
-                              language=self.config.plan_language or "python")
+                              language=self.config.plan_language or "python",
+                              pkg_manager=self.config.plan_pkg_manager)
             _composed = compose_offline_test_command(_plan, cache_dir_in_box=_DEPCACHE_BOX)
             if _composed:
                 real_cmd, ro_binds = _composed, ((cache, _DEPCACHE_BOX),)

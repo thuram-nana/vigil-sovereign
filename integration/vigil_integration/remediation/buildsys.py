@@ -21,6 +21,7 @@ be simple basenames (no repo-supplied free text) — so the composed `/bin/sh -c
 
 from __future__ import annotations
 
+import json
 import os
 import re
 from dataclasses import dataclass, field
@@ -37,6 +38,7 @@ class BuildPlan:
     deps_files: tuple[str, ...] = ()          # detected dependency manifests (basenames)
     needs_network: bool = False               # True ⇒ install_specs need deps from a cache or a gated network
     language: str = ""
+    pkg_manager: str = ""                     # JS/TS package manager: npm | yarn | pnpm ("" for others)
     note: str = ""
 
 
@@ -91,6 +93,76 @@ def _py_install_specs(repo: str) -> tuple[tuple[str, ...], tuple[str, ...]]:
     return tuple(specs), tuple(dict.fromkeys(found))
 
 
+# JS/TS test runners we can invoke with a FIXED command (no repo free-text) — devDep/dep name -> npx invocation
+_JS_RUNNERS = (("jest", "npx --offline jest"), ("vitest", "npx --offline vitest run"),
+               ("mocha", "npx --offline mocha"), ("jasmine", "npx --offline jasmine"),
+               ("ava", "npx --offline ava"))
+# lockfile -> package manager + its offline frozen install (FIXED literals only)
+_JS_LOCKS = (("package-lock.json", "npm"), ("npm-shrinkwrap.json", "npm"),
+             ("yarn.lock", "yarn"), ("pnpm-lock.yaml", "pnpm"))
+# the CLOSED set of JS test commands compose_offline_test_command will interpolate — defence in depth so a
+# caller-built BuildPlan with an arbitrary test_cmd can never inject shell (mirrors the python tier's fixed cmd)
+_JS_TEST_CMDS = frozenset(
+    ["npm test --silent", "yarn test", "pnpm test"] + [inv for _n, inv in _JS_RUNNERS])
+
+
+def _read_package_json(repo: str) -> dict:
+    """Parse ``package.json`` (bounded read). Total: any error yields ``{}``."""
+    try:
+        fp = os.path.join(repo, "package.json")
+        if not os.path.isfile(fp) or os.path.getsize(fp) > 4_000_000:
+            return {}
+        with open(fp, encoding="utf-8", errors="replace") as fh:
+            obj = json.loads(fh.read())
+        return obj if isinstance(obj, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _js_pkg_manager(repo: str) -> str:
+    """The package manager from the lockfile present (npm > yarn > pnpm precedence by lockfile presence)."""
+    for lock, pm in _JS_LOCKS:
+        if _has(repo, lock):
+            return pm
+    return ""
+
+
+def _js_test_cmd(repo: str, pm: str) -> str:
+    """A FIXED test command for the repo, or "" if no runnable suite is detected. Prefers the project's own
+    ``scripts.test`` (run via the detected PM) — faithful, and never interpolates the script's text — then
+    falls back to a known runner found in (dev)dependencies. Injection-free: the returned string is composed
+    only from fixed literals (the PM name and runner are from closed allowlists)."""
+    pkg = _read_package_json(repo)
+    scripts = pkg.get("scripts") if isinstance(pkg.get("scripts"), dict) else {}
+    test_script = str(scripts.get("test", "") or "")
+    # npm's init placeholder ("Error: no test specified") is not a real suite
+    if test_script and "no test specified" not in test_script.lower():
+        runner = {"npm": "npm test --silent", "yarn": "yarn test", "pnpm": "pnpm test"}.get(pm, "npm test --silent")
+        return runner
+    deps = {}
+    for k in ("devDependencies", "dependencies", "peerDependencies"):
+        d = pkg.get(k)
+        if isinstance(d, dict):
+            deps.update(d)
+    for name, invocation in _JS_RUNNERS:
+        if name in deps:
+            return invocation
+    return ""
+
+
+def _js_offline_install(pm: str, cache_in_box: str) -> str:
+    """The offline, frozen install for ``pm`` using the read-only cache/store mounted at ``cache_in_box``.
+    FIXED literals only + the caller-controlled absolute cache path."""
+    if pm == "npm":
+        return f'npm_config_cache="{cache_in_box}" npm ci --offline --no-audit --no-fund'
+    if pm == "yarn":
+        return f'yarn install --offline --frozen-lockfile --cache-folder "{cache_in_box}"'
+    if pm == "pnpm":
+        return f'pnpm install --offline --frozen-lockfile --store-dir "{cache_in_box}"'
+    return ""
+
+
+
 def detect_build_plan(repo: str) -> BuildPlan:
     """Best-effort (build_cmd, test_cmd, install_specs) for ``repo``. The dependency-free ``build_cmd`` is the
     always-runnable floor; ``test_cmd``/``install_specs`` describe the REAL suite the caller runs only once
@@ -113,12 +185,22 @@ def detect_build_plan(repo: str) -> BuildPlan:
         return BuildPlan(build_cmd=build_cmd, test_cmd="", language="python",
                          note="python: byte-compile gate (compileall); no test suite detected")
 
-    # ---- JavaScript/TypeScript (real suite is Wave D; today: dep-free syntax floor) ----
-    if _has(repo, "package.json") or _any_ext(repo, ".js"):
+    # ---- JavaScript/TypeScript (Wave D: real jest/vitest/mocha suite + node --check floor) ----
+    if _has(repo, "package.json") or _any_ext(repo, ".js") or _any_ext(repo, ".ts"):
+        floor = "find . -path ./node_modules -prune -o -name '*.js' -print0 | xargs -0 -r -n1 node --check"
+        pm = _js_pkg_manager(repo)
+        test_cmd = _js_test_cmd(repo, pm) if pm else ""
+        if test_cmd:
+            lock = next((lk for lk, m in _JS_LOCKS if _has(repo, lk)), "")
+            return BuildPlan(
+                build_cmd=floor, test_cmd=test_cmd, install_specs=(lock,) if lock else (),
+                deps_files=(lock,) if lock else (), needs_network=True, language="javascript", pkg_manager=pm,
+                note=f"javascript: node --check floor + REAL {pm} suite ({test_cmd}) "
+                     "(needs node_modules from an offline cache/store or a gated install)")
         return BuildPlan(
-            build_cmd="find . -path ./node_modules -prune -o -name '*.js' -print0 | xargs -0 -r -n1 node --check",
-            test_cmd="", language="javascript",
-            note="javascript: node --check syntax gate; real npm suite is a later wave")
+            build_cmd=floor, test_cmd="", language="javascript",
+            note="javascript: node --check syntax gate; no runnable test suite detected "
+                 "(no lockfile, or no scripts.test / jest|vitest|mocha)")
 
     # ---- Go (later wave) ----
     if _has(repo, "go.mod"):
@@ -149,9 +231,21 @@ def compose_offline_test_command(plan: BuildPlan, *, cache_dir_in_box: str) -> s
     venv, installs the repo's deps OFFLINE from the wheelhouse/cache (``--no-index --find-links``), and runs
     the REAL test suite from that venv. Returns "" when the plan has no real suite. Injection-free: only the
     validated specs + the (caller-controlled, absolute) cache path are interpolated."""
-    if not plan.test_cmd or not plan.install_specs or plan.language != "python":
+    if not plan.test_cmd:
         return ""
     if not (cache_dir_in_box or "").startswith("/"):
+        return ""
+
+    if plan.language == "javascript":
+        # offline, frozen install from the mounted npm/yarn/pnpm cache, then the detected runner. The install
+        # + runner are FIXED literals (PM + runner from closed allowlists); only the absolute cache path and
+        # the (allowlisted) test_cmd are interpolated.
+        install = _js_offline_install(plan.pkg_manager, cache_dir_in_box)
+        if not install or plan.test_cmd not in _JS_TEST_CMDS:   # only an allowlisted runner is interpolated
+            return ""
+        return f"set -e; {install}; {plan.test_cmd}"
+
+    if plan.language != "python" or not plan.install_specs:
         return ""
     specs = _validated_specs(plan.install_specs)
     if not specs:
