@@ -535,6 +535,19 @@ def _cmd_patch(args: argparse.Namespace) -> int:
         _deep_install_specs = _plan.install_specs
         _deep_language = _plan.language
         _dep_cache = str(getattr(args, "dep_cache", "") or "").strip()
+        if not _dep_cache and bool(getattr(args, "fetch_deps", False)):
+            import os as _os
+            if not bool(getattr(args, "approve", False)):
+                print("vigil patch: --fetch-deps egresses to download wheels — pass --approve (operator-present) "
+                      "to authorize the gated fetch", file=sys.stderr)
+                return 2
+            from .remediation.depfetch import fetch_deps
+            _fr = fetch_deps(finding.target_repo, _os.path.join(args.repo_base_dir, ".dep-cache"),
+                             install_specs=_plan.install_specs, index_url=str(getattr(args, "index_url", "") or ""))
+            print(f"dep fetch      : {'OK' if _fr.ok else 'SKIPPED'} ({_fr.count} artifact(s)) — {_fr.note}")
+            if _fr.ok:
+                _dep_cache = _fr.cache_dir   # W1a offline tier now runs the REAL suite from this wheelhouse
+                args.dep_cache = _fr.cache_dir   # OBS-1: pin it so the attestation's deps_digest binds this wheelhouse
         from .remediation.graph_context import graph_context_paths   # W2: cross-file (call-graph) context
         _ctx_provider = graph_context_paths
         verify_oracle = build_code_fix_oracle(finding.ref)
@@ -2428,6 +2441,18 @@ def _cmd_remediate_campaign(args: argparse.Namespace) -> int:
     if not findings:
         print("vigil remediate-campaign: no confirmed facts on the spine"); return 1
 
+    if not str(getattr(args, "dep_cache", "") or "").strip() and bool(getattr(args, "fetch_deps", False)):
+        if not bool(getattr(args, "approve", False)):
+            print("vigil remediate-campaign: --fetch-deps egresses — pass --approve to authorize the gated fetch",
+                  file=sys.stderr); return 2
+        from .remediation.depfetch import fetch_deps
+        _fr = fetch_deps(repo, _os.path.join(str(args.repo_base_dir or "."), ".dep-cache"),
+                         install_specs=detect_build_plan(repo).install_specs,
+                         index_url=str(getattr(args, "index_url", "") or ""))
+        print(f"dep fetch      : {'OK' if _fr.ok else 'SKIPPED'} ({_fr.count} artifact(s)) — {_fr.note}")
+        if _fr.ok:
+            args.dep_cache = _fr.cache_dir   # every finding's deep fix now runs the REAL suite offline
+
     def _fix_one(f: Any) -> Any:
         return _deep_fix_one(f, args)
 
@@ -4199,6 +4224,15 @@ def build_parser() -> argparse.ArgumentParser:
                              "(pip --no-index --find-links); the suite then runs as the behavior-preserved "
                              "gate. Absent ⇒ the real suite is skipped honestly (compile-gate only). Build a "
                              "wheelhouse with `pip download -r requirements.txt pytest -d <dir>`.")
+    ppatch.add_argument("--fetch-deps", action="store_true",
+                        help="with --deep: GATED `pip download` of the repo's deps into <base-dir>/.dep-cache "
+                             "(egress-guarded, needs --approve), so the REAL test suite runs OFFLINE from that "
+                             "wheelhouse. The fix/test sandbox keeps its zero-egress floor — the network is "
+                             "ONLY this fetch, never the box. NOTE: in guard-off (default) mode the "
+                             "host-side pip honours the repo's requirements-embedded indices/build hooks; "
+                             "the resulting artifacts are still contained at install/test time by the "
+                             "zero-egress box. Use VIGIL_EGRESS_GUARD=require to constrain the fetch.")
+    ppatch.add_argument("--index-url", default="", help="a PyPI index URL for --fetch-deps (default: pip's)")
     ppatch.add_argument("--attest", action="store_true",
                         help="with --deep: on a verified-no-pr fix, MINT a signed Proof-Carrying Remediation "
                              "Attestation binding VULN-GONE + BEHAVIOR-PRESERVED to the base/patched tree "
@@ -4598,6 +4632,10 @@ def build_parser() -> argparse.ArgumentParser:
     prc.add_argument("--approve", action="store_true", help="operator-present approval for the non-destructive gate")
     prc.add_argument("--fix-attempts", type=int, default=3, help="iterate-until-green budget per finding")
     prc.add_argument("--dep-cache", default="", help="wheelhouse for the offline REAL test suite (behavior gate)")
+    prc.add_argument("--fetch-deps", action="store_true",
+                     help="GATED `pip download` of the repo's deps into <base-dir>/.dep-cache (egress-guarded, "
+                          "needs --approve) so every finding's REAL suite runs OFFLINE; the sandbox stays zero-egress")
+    prc.add_argument("--index-url", default="", help="PyPI index URL for --fetch-deps")
     prc.add_argument("--max-findings", type=int, default=0, help="cap the campaign (0 = all ranked findings)")
     prc.add_argument("--no-dedupe", action="store_true", help="do NOT dedupe findings by (rule, file)")
     prc.add_argument("--model", default="", help="coder model override (default: Settings choice)")
