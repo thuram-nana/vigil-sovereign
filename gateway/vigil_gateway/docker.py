@@ -331,6 +331,9 @@ class SandboxNetworking:
 # the ambient env through). Set them CONSISTENTLY — the IP must be the .2 host of the subnet (Docker takes
 # .1 for the bridge). Unset ⇒ byte-identical to the pinned defaults. The network NAME (vigil_sandbox) and
 # bridge iface (vigil-sbx0, which the firewall governs by) are unchanged, so nothing else needs to move.
+# TIP: pick the relocation /24 OUTSIDE Docker's default auto-pool (172.16.0.0/12) — e.g. a 10.x /24. The
+# sibling vigil_egress network has no pinned subnet, so Docker auto-assigns it a 172.x /16; a 172.x sandbox
+# /24 can land inside that and fail with 'Pool overlaps'. A 10.x /24 sidesteps it.
 networks:
   {self.sandbox_network}:
     name: {self.sandbox_network}
