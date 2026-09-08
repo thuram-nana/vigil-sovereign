@@ -10,7 +10,7 @@ from pathlib import Path
 from vigil_integration.remediation.buildsys import (
     BuildPlan, detect_build_plan, compose_offline_test_command, _validated_specs,
 )
-from vigil_integration.live.sandbox_exec import build_bwrap_argv, _safe_ro_bind, _BWRAP_BASE_FLAGS
+from vigil_integration.live.sandbox_exec import build_bwrap_argv, _safe_ro_bind, _safe_box_target, _BWRAP_BASE_FLAGS
 
 
 # ---------- buildsys: real-suite detection ----------
@@ -96,3 +96,21 @@ def test_unsafe_ro_binds_are_rejected(tmp_path):
     for target in ("/a", "/b", "/c", "notabsolute"):
         assert target not in argv                            # no dropped target became a bind arg
     assert _safe_ro_bind(str(missing)) is None and _safe_ro_bind(rel) is None and _safe_ro_bind(str(sym)) is None
+
+
+def test_ro_bind_refuses_host_socket_dirs_and_shadowing_box_targets(tmp_path):
+    # HOST system roots + socket/kernel trees are refused (a read-only bind of /run would expose docker.sock
+    # to connect() from inside the box — a pivot to host root that --unshare-net cannot stop).
+    for d in ("/", "/run", "/run/foo", "/proc", "/sys", "/dev", "/etc", "/usr", "/var", "/home", "/lib"):
+        assert _safe_ro_bind(d) is None, d
+    cache = tmp_path / "wh"; cache.mkdir()
+    assert _safe_ro_bind(str(cache)) is not None            # a real cache dir is fine
+    # BOX mount points that shadow a base mount / dangerous dir are refused; a fresh top-level is ok.
+    for bad in ("/usr", "/etc", "/tmp", "/run", "/", "/usr/lib", "relative", "/var/cache"):
+        assert not _safe_box_target(bad), bad
+    assert _safe_box_target("/vigil-depcache")
+    # end-to-end: a /run->/run bind and a cache->/usr bind never reach the argv (only the base /usr survives)
+    argv = build_bwrap_argv("echo", tmp_path, bwrap="bwrap",
+                            ro_binds=(("/run", "/run"), (str(cache), "/usr")))
+    assert argv.count("--ro-bind") == 1
+    assert "/run" not in argv

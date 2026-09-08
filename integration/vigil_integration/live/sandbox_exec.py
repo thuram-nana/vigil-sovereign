@@ -102,11 +102,27 @@ def _safe_workspace(workspace: str | os.PathLike) -> Optional[Path]:
         return None
 
 
+# A read-only bind still exposes any UNIX SOCKET in the bound dir to connect() from INSIDE the box — pathname
+# sockets live in the MOUNT namespace, which --unshare-net does NOT isolate (the same reason we never
+# --ro-bind / /). So binding /run (docker.sock, D-Bus) would be a pivot to host root even read-only. Refuse the
+# system roots outright, and refuse ANYTHING under the socket/kernel filesystems. A dependency cache is never
+# one of these. HOST side (source of the bind):
+_RO_BIND_DENY_EXACT = frozenset({
+    "/", "/run", "/var", "/proc", "/sys", "/dev", "/etc", "/usr",
+    "/bin", "/sbin", "/lib", "/lib32", "/lib64", "/libx32", "/boot", "/root", "/home"})
+_RO_BIND_DENY_TREES = ("/run", "/proc", "/sys", "/dev")   # + anything BENEATH these (sockets / kernel ifaces)
+# BOX side (mount point inside the box): must be a FRESH path that shadows no base mount and is no dangerous
+# dir — e.g. /vigil-depcache. Never /usr, /etc, /tmp, /run, / … (which would shadow or expose host state).
+_BOX_TARGET_DENY_TREES = (
+    "/usr", "/bin", "/sbin", "/lib", "/lib32", "/lib64", "/libx32", "/etc", "/proc", "/dev", "/tmp",
+    "/run", "/sys", "/var", "/boot", "/root", "/home")
+
+
 def _safe_ro_bind(host: str | os.PathLike) -> Optional[Path]:
-    """A host path safe to mount READ-ONLY into the box: an absolute, existing, NON-symlink directory,
-    resolved. ``None`` (⇒ skip) otherwise. Read-only + operator-chosen (a dependency cache / wheelhouse),
-    so the risk is host-config disclosure of that dir only; the egress floor and workspace-write floor are
-    untouched. Total — never raises."""
+    """A host path safe to mount READ-ONLY into the box: an absolute, existing, NON-symlink directory that is
+    NOT a system root and NOT under a socket/kernel filesystem (see the deny-lists above). ``None`` (⇒ skip)
+    otherwise. Read-only + operator-chosen (a dependency cache / wheelhouse); the egress and workspace-write
+    floors are untouched. Total — never raises."""
     try:
         p = Path(host)
         if not p.is_absolute() or p.is_symlink() or not p.is_dir():
@@ -114,9 +130,23 @@ def _safe_ro_bind(host: str | os.PathLike) -> Optional[Path]:
         rp = p.resolve(strict=True)
         if rp.is_symlink() or not rp.is_dir():
             return None
+        sp = rp.as_posix()
+        if sp in _RO_BIND_DENY_EXACT or any(sp == d or sp.startswith(d + "/") for d in _RO_BIND_DENY_TREES):
+            return None    # refuse the host system roots + the socket/kernel trees (pivot-to-host risk)
         return rp
     except (OSError, ValueError, RuntimeError):
         return None
+
+
+def _safe_box_target(box: str) -> bool:
+    """The in-box mount point is safe iff it is absolute, not '/', and shadows no base mount / dangerous dir."""
+    try:
+        b = os.path.normpath(str(box))
+    except (TypeError, ValueError):
+        return False
+    if not os.path.isabs(b) or b == "/":
+        return False
+    return not any(b == d or b.startswith(d + "/") for d in _BOX_TARGET_DENY_TREES)
 
 
 def build_bwrap_argv(command: str, workspace: Path, *, bwrap: str,
@@ -128,8 +158,8 @@ def build_bwrap_argv(command: str, workspace: Path, *, bwrap: str,
     extra: list[str] = []
     for host, box in ro_binds:
         rp = _safe_ro_bind(host)
-        if rp is not None and box and os.path.isabs(box):
-            extra += ["--ro-bind", str(rp), box]   # read-only; NEVER a writable or host-socket path
+        if rp is not None and _safe_box_target(box):
+            extra += ["--ro-bind", str(rp), os.path.normpath(str(box))]   # read-only; validated host+box
     return [bwrap, *(_BWRAP_BASE_FLAGS), *extra, "--bind", ws, ws, "--chdir", ws, "--", "/bin/sh", "-c", command]
 
 
