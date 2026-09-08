@@ -40,7 +40,7 @@ dependencies = [
     "mcp==2.1.1",
     "numpy>=2.4.6,<3",
     "onnxruntime==1.29.0",
-    "pydantic==2.13.4",
+    "pydantic==2.13.5",
     "PyYAML>=6",                  # structural kubeconfig safety gate (refuse exec/cmd-path plugins)
     "qdrant-client==1.19.0",
 ]
