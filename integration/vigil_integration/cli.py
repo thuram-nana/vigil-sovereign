@@ -547,6 +547,7 @@ def _cmd_patch(args: argparse.Namespace) -> int:
             print(f"dep fetch      : {'OK' if _fr.ok else 'SKIPPED'} ({_fr.count} artifact(s)) — {_fr.note}")
             if _fr.ok:
                 _dep_cache = _fr.cache_dir   # W1a offline tier now runs the REAL suite from this wheelhouse
+                args.dep_cache = _fr.cache_dir   # OBS-1: pin it so the attestation's deps_digest binds this wheelhouse
         from .remediation.graph_context import graph_context_paths   # W2: cross-file (call-graph) context
         _ctx_provider = graph_context_paths
         verify_oracle = build_code_fix_oracle(finding.ref)
@@ -4227,7 +4228,10 @@ def build_parser() -> argparse.ArgumentParser:
                         help="with --deep: GATED `pip download` of the repo's deps into <base-dir>/.dep-cache "
                              "(egress-guarded, needs --approve), so the REAL test suite runs OFFLINE from that "
                              "wheelhouse. The fix/test sandbox keeps its zero-egress floor — the network is "
-                             "ONLY this fetch, never the box.")
+                             "ONLY this fetch, never the box. NOTE: in guard-off (default) mode the "
+                             "host-side pip honours the repo's requirements-embedded indices/build hooks; "
+                             "the resulting artifacts are still contained at install/test time by the "
+                             "zero-egress box. Use VIGIL_EGRESS_GUARD=require to constrain the fetch.")
     ppatch.add_argument("--index-url", default="", help="a PyPI index URL for --fetch-deps (default: pip's)")
     ppatch.add_argument("--attest", action="store_true",
                         help="with --deep: on a verified-no-pr fix, MINT a signed Proof-Carrying Remediation "
