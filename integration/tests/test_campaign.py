@@ -56,6 +56,11 @@ def test_campaign_statuses_and_attest_only_on_verified():
                               STATUS_DEDUPED: 0, STATUS_SKIPPED: 0}
 
 
+def test_cheat_suspected_is_classified_failed():
+    camp = run_campaign([_f("x")], fix_one=lambda f: _r("verify-cheat-suspected"))
+    assert camp["entries"][0]["status"] == STATUS_FAILED   # a gamed fix is a FAILED entry, never verified
+
+
 def test_campaign_a_raising_fix_is_failed_not_a_crash():
     def fix_one(f):
         raise RuntimeError("boom")

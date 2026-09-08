@@ -267,3 +267,19 @@ def test_graph_context_paths_finds_callers_and_callees(tmp_path):
     assert "svc/dep.py" in paths        # the file that DEFINES what primary calls
     assert "svc/caller.py" in paths     # the file that CALLS what primary defines (regression surface)
     assert "svc/primary.py" not in paths  # the finding's own file is excluded (added separately, first)
+
+
+# ---- W6: the adversarial breaker blocks a cheating fix even when the rule clears ----
+_CHEAT = ("--- a/svc/config.py\n+++ b/svc/config.py\n@@ -4,3 +4,3 @@\n def fingerprint(pw):\n"
+          "     # weak hash\n-    return hashlib.md5(pw.encode()).hexdigest()\n"
+          "+    return hashlib.sha256(pw.encode()).hexdigest()  # nosec\n")
+
+
+@_sandbox
+def test_breaker_blocks_a_cheating_fix_that_clears_the_rule(tmp_path):
+    # the diff genuinely removes md5 (the DAA rule CLEARS) but also adds a `# nosec` suppression — the
+    # adversarial breaker catches the gaming, so this is verify-cheat-suspected, NOT verified-no-pr.
+    repo = _mkrepo(tmp_path)
+    r = autopatch_live(_finding(repo), config=_cfg(repo, tmp_path), client=_client(_CHEAT),
+                       verify_oracle=codescan.build_code_fix_oracle(REF), verify_before_pr=True, max_fix_attempts=1)
+    assert r.status == "verify-cheat-suspected" and r.remediated is False

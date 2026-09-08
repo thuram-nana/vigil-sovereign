@@ -68,7 +68,8 @@ def _entry_for(f: Any, result: Any, attestation_note: Optional[str]) -> dict:
         status = STATUS_ATTESTED
     elif verified:
         status = STATUS_VERIFIED
-    elif status_raw in ("build-failed", "verify-still-vulnerable", "failed") or status_raw.startswith("refused") \
+    elif status_raw in ("build-failed", "verify-still-vulnerable", "verify-cheat-suspected", "failed") \
+            or status_raw.startswith("refused") \
             or status_raw.endswith("-denied") or status_raw == "pr-quorum-denied":
         status = STATUS_FAILED
     else:
