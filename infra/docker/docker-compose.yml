@@ -71,7 +71,7 @@ services:
       # Govern by INTERFACE, not source-subnet: family-agnostic (drops v4 AND v6 sandbox egress to the
       # deny-default chain) and spoof-proof. A v4-only saddr match would leave IPv6 egress policy-accepted.
       VIGIL_GATEWAY_SANDBOX_IFACE: "vigil-sbx0"
-    command: ["vigil-gateway", "apply-firewall"]
+    command: ["apply-firewall"]   # ENTRYPOINT is ["vigil-gateway"]; the token is not repeated
 
   vigil-gateway:
     image: vigil-gateway:${VIGIL_GATEWAY_IMAGE_TAG:-latest}
@@ -99,7 +99,7 @@ services:
       # the (unreadable-in-container) CHARTER_SLUG and fail-closes, exactly as before. The never-liftable
       # metadata/RFC1918 floor is charter-independent and unaffected.
       VIGIL_GATEWAY_SCOPE_HOSTS: "${VIGIL_GATEWAY_SCOPE_HOSTS:-}"
-    command: ["vigil-gateway", "serve-proxy", "--host", "${VIGIL_GATEWAY_GATEWAY_IP:-172.31.240.2}", "--port", "48081"]
+    command: ["serve-proxy", "--host", "${VIGIL_GATEWAY_GATEWAY_IP:-172.31.240.2}", "--port", "48081"]
     healthcheck:
       # The gate is only "up" when the proxy is actually LISTENING on its pinned sandbox bind. A bad or
       # missing charter scope makes serve-proxy fail closed and exit, which this probe (and `up --wait`)

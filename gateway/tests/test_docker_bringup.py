@@ -389,7 +389,10 @@ def test_render_compose_emits_the_firewall_backstop_sidecar():
     assert "vigil-gateway-firewall:" in frag, "the backstop is loaded by a dedicated one-shot sidecar"
     sidecar = frag.split("vigil-gateway-firewall:")[1].split("\n  vigil-gateway:")[0]
     # it runs apply-firewall in the HOST netns with ONLY CAP_NET_ADMIN, then exits
-    assert 'command: ["vigil-gateway", "apply-firewall"]' in sidecar
+    # the ENTRYPOINT is ["vigil-gateway"], so the command must NOT repeat that token (doing so runs
+    # `vigil-gateway vigil-gateway apply-firewall` and argparse rejects it — the container exits 2)
+    assert 'command: ["apply-firewall"]' in sidecar
+    assert '"vigil-gateway", "apply-firewall"' not in sidecar
     assert "network_mode: host" in sidecar
     assert "NET_ADMIN" in sidecar and "- ALL" in sidecar           # cap_drop ALL, cap_add only NET_ADMIN
     assert 'restart: "no"' in sidecar                              # one-shot
@@ -424,7 +427,10 @@ def test_committed_compose_carries_the_backstop_sidecar():
     repo = pathlib.Path(__file__).resolve().parents[2]
     committed = (repo / "infra" / "docker" / "docker-compose.yml").read_text(encoding="utf-8")
     assert "vigil-gateway-firewall:" in committed
-    assert 'command: ["vigil-gateway", "apply-firewall"]' in committed
+    assert 'command: ["apply-firewall"]' in committed
+    # neither command repeats the ENTRYPOINT token (the gateway-bring-up regression #430 introduced)
+    assert '"vigil-gateway", "apply-firewall"' not in committed
+    assert '"vigil-gateway", "serve-proxy"' not in committed
     assert "condition: service_completed_successfully" in committed
     # the IPv6-governance wiring must be in the committed artifact too, not just render_compose()
     assert 'VIGIL_GATEWAY_SANDBOX_IFACE: "vigil-sbx0"' in committed
