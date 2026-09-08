@@ -434,6 +434,10 @@ def _cmd_patch(args: argparse.Namespace) -> int:
         return 2
     _agent_diff = ""
     _deep_build_cmd = ""
+    _deep_test_cmd = ""
+    _deep_install_specs: tuple = ()
+    _deep_language = ""
+    _dep_cache = ""
     if deep:
         if str(getattr(args, "verify_base_url", "") or "").strip():
             print("vigil patch: --deep uses the deterministic code oracle — do not combine with --verify-base-url",
@@ -443,10 +447,14 @@ def _cmd_patch(args: argparse.Namespace) -> int:
         from .remediation.buildsys import detect_build_plan
         _plan = detect_build_plan(finding.target_repo)
         _deep_build_cmd = _plan.build_cmd
+        _deep_test_cmd = _plan.test_cmd
+        _deep_install_specs = _plan.install_specs
+        _deep_language = _plan.language
+        _dep_cache = str(getattr(args, "dep_cache", "") or "").strip()
         verify_oracle = build_code_fix_oracle(finding.ref)
         if getattr(args, "agent", "none") == "strix":
             from .strix_fix import default_fix_instruction, run_strix_fix
-            _instr = default_fix_instruction(finding, test_cmd=_plan.build_cmd)
+            _instr = default_fix_instruction(finding, test_cmd=_plan.test_cmd or _plan.build_cmd)
             _agent_diff, _agent_note = run_strix_fix(finding.target_repo, _instr, base_dir=args.repo_base_dir)
             print(f"agent          : strix — {_agent_note}")
             if not str(_agent_diff or "").strip():
@@ -458,15 +466,22 @@ def _cmd_patch(args: argparse.Namespace) -> int:
                 print("reason         : the strix agent produced no git-appliable diff — refusing to fall back "
                       "to the inline coder under --agent strix (run without --agent for the inline deep fix)")
                 return 1
+        if _dep_cache and _plan.test_cmd and _plan.install_specs:
+            _suite = f"REAL pytest suite (offline deps from {_dep_cache})"
+        elif _plan.test_cmd:
+            _suite = "real suite AVAILABLE but no --dep-cache → compile-gate only (behavior axis skipped honestly)"
+        else:
+            _suite = "compile gate only (no test suite detected)"
         print(f"deep fix       : ON — repo-aware, iterate\u2264{max(1, int(args.fix_attempts))}, "
-              f"gate=[{_plan.build_cmd or 'apply-check only'}] ({_plan.note}), verify=daa-rule-cleared-on-clone")
+              f"gate=[{_plan.build_cmd or 'apply-check only'}] + {_suite} ({_plan.note}), verify=daa-rule-cleared-on-clone")
 
     # (4) config + run the gated ladder. client=None ⇒ the coder is built from ANTHROPIC_API_KEY (env, never
     #     argv); apply_edits/pr_enabled are explicit opt-ins; the GitHub token is read from the child env only.
     cfg = CodefixConfig(
         target_repo=finding.target_repo, base_dir=args.repo_base_dir, target_branch=args.target_branch,
         apply_edits=bool(args.apply_edits), model=resolve_model(args.model),  # --model > Settings choice > default
-        build_cmd=_deep_build_cmd,
+        build_cmd=_deep_build_cmd, test_cmd=_deep_test_cmd, install_specs=_deep_install_specs,
+        dep_cache_dir=_dep_cache, plan_language=_deep_language,
         pr_enabled=bool(args.open_pr), pr_base=args.pr_base)
     _ext_diff = _agent_diff or ""
     if _agent_diff:
@@ -3938,6 +3953,12 @@ def build_parser() -> argparse.ArgumentParser:
                         help="path to a unified diff from an external agent (e.g. Strix). It becomes the ONLY "
                              "proposal and is RE-VERIFIED through the gated apply+build+oracle ladder — the "
                              "agent's self-report is never trusted. Pair with --deep to build/test + verify it.")
+    ppatch.add_argument("--dep-cache", default="",
+                        help="with --deep: a host directory (pip wheelhouse / cache of .whl files) mounted "
+                             "READ-ONLY into the sandbox so the REAL test suite's deps install OFFLINE "
+                             "(pip --no-index --find-links); the suite then runs as the behavior-preserved "
+                             "gate. Absent ⇒ the real suite is skipped honestly (compile-gate only). Build a "
+                             "wheelhouse with `pip download -r requirements.txt pytest -d <dir>`.")
     ppatch.set_defaults(func=_cmd_patch)
 
     prem = sub.add_parser(

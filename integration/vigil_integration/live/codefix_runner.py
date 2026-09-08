@@ -34,6 +34,7 @@ from vigil_core.gate import GateVerdict
 
 from ..autopatch.loop import PatchApproval, PatchResult, autopatch
 from ..remediation.codefix import is_safe_repo_path, render_untrusted_finding
+from ..remediation.buildsys import BuildPlan, compose_offline_test_command
 from ..warden_gate import decide_tool
 from .executor import subprocess_runner
 from .sandbox_exec import SandboxUnavailable, run_sandboxed
@@ -48,6 +49,7 @@ _PRIMARY_CONTEXT_BYTES = 16384       # the finding's own file (larger budget)
 _MAX_CONTEXT_FILES = 6               # finding file + up to N same-dir siblings
 _MAX_TOTAL_CONTEXT_BYTES = 48000     # global budget across the repo-context set
 _PATCH_NAME = ".vigil-fix.patch"
+_DEPCACHE_BOX = "/vigil-depcache"   # read-only mount point for the offline dep cache/wheelhouse
 
 
 @dataclass
@@ -59,7 +61,10 @@ class CodefixConfig:
     base_dir: str
     target_branch: str = ""
     build_cmd: str = ""                       # dep-light build/compile gate (Axis A); run in the sandbox clone
-    test_cmd: str = ""                        # repo test command, run in the sandbox clone when dep-light
+    test_cmd: str = ""                        # the REAL test invocation (buildsys), run when deps are resolvable
+    install_specs: tuple = ()                 # pip install ARGS for the REAL suite (buildsys); needs a dep cache
+    dep_cache_dir: str = ""                   # host wheelhouse/pip-cache dir mounted READ-ONLY for an OFFLINE install
+    plan_language: str = ""                   # buildsys-detected language (drives the real-test composer)
     build_timeout: float = 300.0             # per build/test command, inside the bwrap sandbox
     git_bin: str = "git"
     apply_edits: bool = False
@@ -88,8 +93,9 @@ class _Exec:
     branch: str = ""
     build_ref: str = ""
     pr_ref: str = ""
-    tests_passed: Optional[bool] = None   # True/False when a build/test cmd ran; None = not run (skipped)
+    tests_passed: Optional[bool] = None   # True iff the REAL test suite ran and passed; False iff it ran and failed; None = not run
     build_ran: bool = False
+    suite_ran: bool = False               # True iff the REAL test suite (not just the compile floor) actually ran
 
 
 @dataclass
@@ -308,33 +314,67 @@ class CodefixSession:
                 os.unlink(patch_path)
             except OSError:
                 pass
-        # Phase B — Axis-A GATE: run the dep-light build/test command(s) INSIDE the network-isolated bwrap
-        # sandbox (writes confined to the clone; no egress). A non-zero exit BLOCKS the fix (it broke the
-        # code); it never CERTIFIES one (that is the oracle's job, Phase D). No command configured ⇒ the gate
-        # is the git-apply check above (honest: tests_passed stays None). bwrap absent ⇒ degrade to
-        # apply-check-only rather than block (fail-open ONLY for the missing-sandbox case, never for a failure).
-        cmds = [c for c in (self.config.build_cmd, self.config.test_cmd) if (c or "").strip()]
-        if not cmds:
+        # Phase B — Axis-A GATE, two tiers (see remediation.buildsys). All run INSIDE the network-isolated
+        # bwrap sandbox (writes confined to the clone; NO egress on the test tier). A non-zero exit BLOCKS
+        # the fix; the gate never CERTIFIES one (that is the oracle's job, Phase D).
+        #   (1) dependency-FREE compile/syntax FLOOR (build_cmd) — always run when set; NOT the behavior signal.
+        #   (2) the REAL TEST SUITE — run ONLY when its deps resolve from an OFFLINE cache/wheelhouse
+        #       (dep_cache_dir) mounted READ-ONLY. Its pass IS the behavior-preserved signal
+        #       (tests_passed=True, suite_ran=True); its failure BLOCKS. When it cannot run the axis is
+        #       honestly SKIPPED (tests_passed stays None) — a suite that never ran is NEVER reported passed.
+        floor = (self.config.build_cmd or "").strip()
+        real_cmd = ""
+        ro_binds: tuple = ()
+        cache = self.config.dep_cache_dir
+        if cache and self.config.install_specs and (self.config.test_cmd or "").strip() and os.path.isdir(cache):
+            _plan = BuildPlan(test_cmd=self.config.test_cmd, install_specs=tuple(self.config.install_specs),
+                              language=self.config.plan_language or "python")
+            _composed = compose_offline_test_command(_plan, cache_dir_in_box=_DEPCACHE_BOX)
+            if _composed:
+                real_cmd, ro_binds = _composed, ((cache, _DEPCACHE_BOX),)
+
+        if not floor and not real_cmd:
             return _Exec(True, reason="fix applies cleanly to the real code (sandbox clone; no build/test cmd)",
                          build_ref=self.workdir, tests_passed=None, build_ran=False)
-        for cmd in cmds:
+
+        build_ran = False
+        if floor:   # (1) compile floor — cheap fail-fast
             try:
-                res = run_sandboxed(cmd, workspace=self.workdir, timeout=self.config.build_timeout)
+                res = run_sandboxed(floor, workspace=self.workdir, timeout=self.config.build_timeout)
             except SandboxUnavailable as exc:
                 return _Exec(True, reason=f"applies cleanly; build/test gate SKIPPED ({exc})",
                              build_ref=self.workdir, tests_passed=None, build_ran=False)
             except ValueError as exc:
-                return _Exec(False, reason=f"build/test gate refused: {exc}", build_ref=self.workdir,
+                return _Exec(False, reason=f"build gate refused: {exc}", build_ref=self.workdir,
                              tests_passed=False, build_ran=True)
+            build_ran = True
             if res.timed_out or res.exit_code != 0:
-                # the sandbox build/test output can echo a secret from a failing test (a token/DB URL) — scrub
-                # it before it lands in the operator-facing `reason` (which reaches stdout + the console).
                 tail = _redact_str((res.stderr or res.stdout or "").strip()[-1200:])
                 why = "timed out" if res.timed_out else f"exit {res.exit_code}"
-                return _Exec(False, reason=f"build/test FAILED in the sandbox clone ({why}): {tail}",
+                return _Exec(False, reason=f"compile gate FAILED in the sandbox clone ({why}): {tail}",
                              build_ref=self.workdir, tests_passed=False, build_ran=True)
-        return _Exec(True, reason="fix applies cleanly AND passes the build/test gate in the sandbox clone",
-                     build_ref=self.workdir, tests_passed=True, build_ran=True)
+
+        if real_cmd:   # (2) REAL test suite — the behavior-preserved oracle
+            try:
+                res = run_sandboxed(real_cmd, workspace=self.workdir, timeout=self.config.build_timeout,
+                                    ro_binds=ro_binds)
+            except SandboxUnavailable as exc:
+                return _Exec(True, reason=f"applies cleanly + compiles; REAL test suite SKIPPED ({exc})",
+                             build_ref=self.workdir, tests_passed=None, build_ran=build_ran)
+            except ValueError as exc:
+                return _Exec(False, reason=f"test gate refused: {exc}", build_ref=self.workdir,
+                             tests_passed=False, build_ran=True, suite_ran=True)
+            if res.timed_out or res.exit_code != 0:
+                tail = _redact_str((res.stderr or res.stdout or "").strip()[-1200:])
+                why = "timed out" if res.timed_out else f"exit {res.exit_code}"
+                return _Exec(False, reason=f"REAL test suite FAILED in the sandbox clone ({why}): {tail}",
+                             build_ref=self.workdir, tests_passed=False, build_ran=True, suite_ran=True)
+            return _Exec(True, reason="fix applies, compiles, AND passes the REAL test suite in the sandbox clone",
+                         build_ref=self.workdir, tests_passed=True, build_ran=True, suite_ran=True)
+
+        # floor only (no real suite available) — behavior axis honestly not established
+        return _Exec(True, reason="fix applies cleanly AND passes the compile gate (real test suite not run)",
+                     build_ref=self.workdir, tests_passed=None, build_ran=build_ran)
 
     def open_pr(self, request: Any, approved: Any) -> _Exec:
         """The DESTRUCTIVE, outward-facing leg (LAP-3): stage ONLY the explicit approved paths (never

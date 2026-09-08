@@ -102,12 +102,35 @@ def _safe_workspace(workspace: str | os.PathLike) -> Optional[Path]:
         return None
 
 
-def build_bwrap_argv(command: str, workspace: Path, *, bwrap: str) -> list[str]:
+def _safe_ro_bind(host: str | os.PathLike) -> Optional[Path]:
+    """A host path safe to mount READ-ONLY into the box: an absolute, existing, NON-symlink directory,
+    resolved. ``None`` (⇒ skip) otherwise. Read-only + operator-chosen (a dependency cache / wheelhouse),
+    so the risk is host-config disclosure of that dir only; the egress floor and workspace-write floor are
+    untouched. Total — never raises."""
+    try:
+        p = Path(host)
+        if not p.is_absolute() or p.is_symlink() or not p.is_dir():
+            return None
+        rp = p.resolve(strict=True)
+        if rp.is_symlink() or not rp.is_dir():
+            return None
+        return rp
+    except (OSError, ValueError, RuntimeError):
+        return None
+
+
+def build_bwrap_argv(command: str, workspace: Path, *, bwrap: str,
+                     ro_binds: tuple[tuple[str, str], ...] = ()) -> list[str]:
     """The full argv: ``bwrap <isolation flags> --bind <ws> <ws> --chdir <ws> -- /bin/sh -c <command>``.
     The command is a SINGLE argv element after ``-c`` (it runs in a shell INSIDE the isolated box, which is
     safe — the box cannot egress or escape), so it can never inject into bwrap's OWN option list."""
     ws = str(workspace)
-    return [bwrap, *(_BWRAP_BASE_FLAGS), "--bind", ws, ws, "--chdir", ws, "--", "/bin/sh", "-c", command]
+    extra: list[str] = []
+    for host, box in ro_binds:
+        rp = _safe_ro_bind(host)
+        if rp is not None and box and os.path.isabs(box):
+            extra += ["--ro-bind", str(rp), box]   # read-only; NEVER a writable or host-socket path
+    return [bwrap, *(_BWRAP_BASE_FLAGS), *extra, "--bind", ws, ws, "--chdir", ws, "--", "/bin/sh", "-c", command]
 
 
 def _default_runner(argv: list[str], *, timeout: float, output_cap: int) -> SandboxOutcome:
@@ -145,6 +168,7 @@ def run_sandboxed(
     workspace: str | os.PathLike,
     timeout: float = DEFAULT_TIMEOUT,
     output_cap: int = DEFAULT_OUTPUT_CAP,
+    ro_binds: tuple[tuple[str, str], ...] = (),
     run: Callable[..., SandboxOutcome] = _default_runner,
 ) -> SandboxOutcome:
     """Run ``command`` inside the network-isolated, workspace-confined bwrap sandbox. Fail-CLOSED: a missing
@@ -168,5 +192,5 @@ def run_sandboxed(
         raise SandboxUnavailable(
             "bubblewrap (bwrap) is not installed — the isolated write/exec tier cannot run; install bwrap "
             "(apt install bubblewrap). There is deliberately NO un-sandboxed fallback.")
-    argv = build_bwrap_argv(cmd, ws, bwrap=bwrap)
+    argv = build_bwrap_argv(cmd, ws, bwrap=bwrap, ro_binds=tuple(ro_binds or ()))
     return run(argv, timeout=timeout, output_cap=output_cap)
