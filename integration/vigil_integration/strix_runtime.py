@@ -64,14 +64,32 @@ def resolve_strix_bin() -> str:
     this adapter run in (``.venv-offense/bin/strix``) — so a child spawned with a scrubbed ``PATH`` still
     finds it; else fall back to ``PATH``; else the bare name (a caller that already has it on ``PATH``).
     Total: never raises.
+
+    NOTE: check the interpreter's UNRESOLVED parent first. A venv's ``bin/python`` is typically a SYMLINK to
+    the system interpreter (``.venv-offense/bin/python3.13 -> /usr/bin/python3.13``); ``Path(sys.executable).
+    resolve()`` follows it to ``/usr/bin``, which holds no ``strix`` — so the old resolve-first logic silently
+    fell through to ``shutil.which`` and, with the child's PATH lacking the venv bin, returned the bare name
+    ``"strix"``. Spawned with ``cwd`` set to a tempdir that is NOT the venv bin, that bare name is not found
+    and the launch dies with FileNotFoundError → rc 127 (no diff). Prefer the venv bin dir (unresolved), then
+    the resolved parent, then PATH.
     """
-    try:
-        cand = Path(sys.executable).resolve().parent / "strix"
-        if cand.exists():
-            return str(cand)
-    except Exception:  # noqa: BLE001 — a weird sys.executable must never crash the locator
-        pass
+    for base in (Path(sys.executable).parent,                 # the venv bin dir (unresolved — survives the symlink)
+                 _resolved_parent(sys.executable)):           # fall back to the resolved interpreter dir
+        try:
+            if base is not None:
+                cand = base / "strix"
+                if cand.exists():
+                    return str(cand)
+        except Exception:  # noqa: BLE001 — a weird sys.executable must never crash the locator
+            pass
     return shutil.which("strix") or "strix"
+
+
+def _resolved_parent(exe: str) -> "Path | None":
+    try:
+        return Path(exe).resolve().parent
+    except Exception:  # noqa: BLE001
+        return None
 
 
 def resolve_base_dir(explicit: Optional[str] = None) -> str:

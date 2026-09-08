@@ -111,6 +111,23 @@ def test_negative_control_the_runtime_adapter_really_locates_the_binary():
     assert SR.resolve_strix_bin().endswith("strix")
 
 
+def test_resolve_strix_bin_survives_a_symlinked_venv_python(tmp_path, monkeypatch):
+    """Regression: a venv's bin/python is usually a SYMLINK to the system interpreter. resolve_strix_bin must
+    look in the venv bin dir (the symlink's own parent), not the RESOLVED target dir — else it misses the
+    venv's `strix`, falls through to PATH, returns the bare name, and a spawn with a foreign cwd dies rc 127.
+    """
+    import os
+    sysbin = tmp_path / "sysbin"; sysbin.mkdir()
+    real_py = sysbin / "python3"; real_py.write_text("#!/bin/sh\n"); os.chmod(real_py, 0o755)
+    venvbin = tmp_path / "venv" / "bin"; venvbin.mkdir(parents=True)
+    (venvbin / "strix").write_text("#!/bin/sh\n"); os.chmod(venvbin / "strix", 0o755)
+    venv_py = venvbin / "python3"; venv_py.symlink_to(real_py)   # the classic venv layout
+    monkeypatch.setattr(SR.sys, "executable", str(venv_py))
+    monkeypatch.setattr(SR.shutil, "which", lambda _n: None)     # PATH does NOT have strix (the child's case)
+    got = SR.resolve_strix_bin()
+    assert got == str(venvbin / "strix"), got   # the venv strix, NOT the bare name or the sysbin dir
+
+
 def test_the_console_sources_its_strix_bin_from_the_adapter():
     """The console's codebase spawn builds its argv from the adapter's locator, not a raw ``which`` — so it
     cannot drift into a second, un-pre-flighted way to find the binary."""
