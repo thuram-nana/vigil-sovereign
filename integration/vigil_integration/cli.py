@@ -2301,7 +2301,7 @@ def _cmd_verify_remediation(args: argparse.Namespace) -> int:
     RE-RUN the VULN-GONE oracle (the DAA rule must fire nowhere); with --dep-cache also RE-RUN the real test
     suite (behavior-preserved). Nothing is trusted from the minter. Exit 0 iff the attestation VERIFIES."""
     import json as _json
-    from .remediation.attestation import verify_remediation_attestation
+    from .remediation.attestation import verify_remediation_attestation, TIER_UNVERIFIED
     try:
         att = _json.loads(open(args.attestation, encoding="utf-8").read())
     except (OSError, ValueError) as exc:
@@ -2354,7 +2354,16 @@ def _cmd_verify_remediation(args: argparse.Namespace) -> int:
     for r in v.reasons:
         print(f"note           : {r}")
     print(f"ok             : {v.ok}")
-    return 0 if v.ok else 1
+    if not v.ok:
+        return 1
+    if v.tier == TIER_UNVERIFIED:
+        # HONEST exit contract (crypto-notary MEDIUM): the signature + binding verified, but NO oracle was
+        # re-executed (no --patched-root). Exit 0 is reserved for a RE-EXECUTED, sound result so a gate keying
+        # on the exit code can never mistake "trust the minter" for "re-verified". Distinct code = 3.
+        print("note           : signature + binding verified, but the oracles were NOT re-executed "
+              "(pass --patched-root for the zero-trust re-run). Exit 3 = signature-only, not a full guarantee.")
+        return 3
+    return 0
 
 
 def _cmd_cloud_exploit(args: argparse.Namespace) -> int:

@@ -28,7 +28,11 @@ from vigil_core import canonical_json, digest_payload, sign, verify_one
 from vigil_core.signed_build_manifest import digest_tree
 
 _ATT_SCHEMA = "vigil-remediation-attestation-v1"
-_ATT_DOMAIN = b"vigil-remediation-attestation-v1\x00"   # domain tag binding the whole attestation to its signatures
+# Domain separator: a self-contained literal (no import-time coupling to a specific vigil_core version), also
+# recorded centrally in vigil_core.spine_domains.DOMAIN_TAGS["remediation-attestation"] as the registry of
+# record. It ends in NUL and is distinct from every other tag, so a signature here can never replay under
+# another protocol's tag and vice-versa (verified by the crypto-notary review).
+_ATT_DOMAIN = b"vigil-remediation-attestation-v1\x00"
 
 # behavior-axis tiers
 BEHAVIOR_ESTABLISHED = "established"          # the real suite ran AND passed
@@ -140,20 +144,27 @@ def _authentic(att: dict, trust_root_pubkeys: "dict[str, str]", threshold: int) 
     m-of-n: authentic iff that count >= threshold."""
     body = {k: v for k, v in att.items() if k != "signatures"}
     msg = _signing_bytes(body)
-    good: set[str] = set()
-    for s in att.get("signatures", []) or []:
-        kid, sig = str(s.get("key_id", "")), str(s.get("sig", ""))
+    sigs = att.get("signatures")
+    if not isinstance(sigs, list):    # malformed shape is NOT authentic — never a crash (crypto-notary MEDIUM)
+        sigs = []
+    good: set[str] = set()            # DISTINCT key_ids that verified
+    seen_pubs: set[str] = set()       # …AND distinct public keys — one key can't satisfy m-of-n twice (LOW)
+    for entry in sigs:
+        if not isinstance(entry, dict):
+            continue
+        kid, sig = str(entry.get("key_id", "")), str(entry.get("sig", ""))
         pub = trust_root_pubkeys.get(kid)
-        if not pub or not sig:
+        if not pub or not sig or kid in good or pub in seen_pubs:
             continue
         try:
             if verify_one(pub, msg, sig):
                 good.add(kid)
+                seen_pubs.add(pub)
         except Exception:  # noqa: BLE001 — malformed material is not authentic, never a crash
             continue
-    return (len(good) >= max(1, threshold)), len(good), (
-        "" if len(good) >= max(1, threshold)
-        else f"m-of-n not met: {len(good)} valid distinct signer(s) < threshold {max(1, threshold)}")
+    thr = max(1, threshold)
+    return (len(good) >= thr), len(good), (
+        "" if len(good) >= thr else f"m-of-n not met: {len(good)} valid distinct signer(s) < threshold {thr}")
 
 
 def verify_remediation_attestation(

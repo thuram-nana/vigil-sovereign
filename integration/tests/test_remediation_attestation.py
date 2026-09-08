@@ -147,9 +147,27 @@ def test_cli_verify_remediation_verb(tmp_path):
     ap = tmp_path / "att.json"; ap.write_text(json.dumps(att), encoding="utf-8")
     tr = tmp_path / "tr.json"; tr.write_text(json.dumps({"k1": pub}), encoding="utf-8")
     ns = types.SimpleNamespace(attestation=str(ap), trust_root=str(tr), threshold=1, patched_root="", dep_cache="")
-    assert cli._cmd_verify_remediation(ns) == 0
+    assert cli._cmd_verify_remediation(ns) == 3   # authentic but signature-only (no --patched-root) → NOT exit 0
     att["binding"]["diff_digest"] = "sha256:tampered"; ap.write_text(json.dumps(att), encoding="utf-8")
     assert cli._cmd_verify_remediation(ns) == 1
     ns2 = types.SimpleNamespace(attestation=str(ap), trust_root=str(tmp_path / "nope.json"),
                                 threshold=1, patched_root="", dep_cache="")
     assert cli._cmd_verify_remediation(ns2) == 2
+
+
+# ---------- hardening (crypto-notary follow-ups) ----------
+def test_malformed_signatures_shapes_never_crash():
+    pub, priv = _kp()
+    att = mint_remediation_attestation(**_BASE, vuln_gone=True, signers=[("k1", priv)])
+    for bad in ("a-string", 123, {"not": "a list"}, [None], [123], ["str"], [{"key_id": 1}]):
+        att2 = dict(att); att2["signatures"] = bad
+        v = verify_remediation_attestation(att2, trust_root_pubkeys={"k1": pub})   # must NOT raise
+        assert not v.ok and v.tier == TIER_FAIL
+
+
+def test_same_pubkey_under_two_ids_cannot_satisfy_threshold_two():
+    pub, priv = _kp()
+    # enrol ONE physical key under two key_ids and sign twice with it
+    att = mint_remediation_attestation(**_BASE, vuln_gone=True, signers=[("k1", priv), ("k2", priv)])
+    v = verify_remediation_attestation(att, trust_root_pubkeys={"k1": pub, "k2": pub}, threshold=2)
+    assert not v.ok and v.signer_count == 1   # one physical key = one signer, cannot meet 2-of-n
