@@ -543,9 +543,14 @@ def _cmd_patch(args: argparse.Namespace) -> int:
                 print("vigil patch: --fetch-deps egresses to download wheels — pass --approve (operator-present) "
                       "to authorize the gated fetch", file=sys.stderr)
                 return 2
-            from .remediation.depfetch import fetch_deps
-            _fr = fetch_deps(finding.target_repo, _os.path.join(args.repo_base_dir, ".dep-cache"),
-                             install_specs=_plan.install_specs, index_url=str(getattr(args, "index_url", "") or ""))
+            _cache_dir = _os.path.join(args.repo_base_dir, ".dep-cache")
+            if _plan.language == "javascript" and _plan.pkg_manager:
+                from .remediation.js_depfetch import fetch_js_deps   # Wave D: gated npm/yarn/pnpm fetch
+                _fr = fetch_js_deps(finding.target_repo, _cache_dir, pkg_manager=_plan.pkg_manager)
+            else:
+                from .remediation.depfetch import fetch_deps
+                _fr = fetch_deps(finding.target_repo, _cache_dir,
+                                 install_specs=_plan.install_specs, index_url=str(getattr(args, "index_url", "") or ""))
             print(f"dep fetch      : {'OK' if _fr.ok else 'SKIPPED'} ({_fr.count} artifact(s)) — {_fr.note}")
             if _fr.ok:
                 _dep_cache = _fr.cache_dir   # W1a offline tier now runs the REAL suite from this wheelhouse
