@@ -36,11 +36,36 @@ def test_extract_keeps_headered_diff_drops_headerless(tmp_path):
     assert "--- a/x.py" in ex and "no headers here" not in ex
 
 
+def test_extract_drops_workspace_fix_rooted_diff(tmp_path):
+    # W4 fails-closed: if the agent emits a diff rooted at the writable /workspace/fix copy (headers NOT a//b/),
+    # extraction DROPS it (only git-appliable a//b//dev/null/diff --git headers survive) -> empty -> no-agent-diff.
+    (tmp_path / "penetration_test_report.md").write_text(
+        "# r\n```diff\n--- /workspace/fix/svc/config.py\n+++ /workspace/fix/svc/config.py\n"
+        "@@ -1 +1 @@\n-md5\n+sha256\n```\n", encoding="utf-8")
+    assert strix_fix.extract_unified_diff(str(tmp_path)).strip() == ""
+
+
 def test_default_fix_instruction_mentions_diff_and_finding():
     f = TriageFinding(ref=REF, bug_class="Weak Cryptography", severity="Medium", target="svc/config.py:3",
                       confirmed=True, evidence_ref="sha256:x")
     instr = strix_fix.default_fix_instruction(f, test_cmd="python3 -m compileall -q .")
     assert REF in instr and "diff" in instr.lower() and "compileall" in instr
+    # W4: the RO-mount working-copy guidance is present (the mount is read-only; edit a writable copy)
+    assert "READ-ONLY" in instr and "/workspace" in instr and "cp -a" in instr
+
+
+def test_run_strix_fix_uses_mount_not_target_and_captures_argv(tmp_path):
+    # W4: the launch argv must use --mount (bind, no OOM copy), NOT --target (file-by-file stream = exit 137).
+    seen = {}
+    def _fake_launch(argv, *, base_dir, runner):
+        seen["argv"] = list(argv)
+        return 0                                  # pretend Strix ran and exited clean
+    root = str(tmp_path / "clone"); os.makedirs(root, exist_ok=True)
+    diff, note = strix_fix.run_strix_fix(root, "fix it", base_dir=str(tmp_path / "b"), launch=_fake_launch)
+    assert "--mount" in seen["argv"] and root in seen["argv"]
+    assert "--target" not in seen["argv"]                       # the OOM-prone path is gone
+    assert seen["argv"][seen["argv"].index("--mount") + 1] == root
+    assert diff == "" and "no git-appliable diff" in note        # empty report dir -> fail-closed, no crash
 
 
 def _repo(tmp_path):
@@ -55,6 +80,21 @@ def _repo(tmp_path):
 def _f(repo):
     return TriageFinding(ref=REF, bug_class="Weak Cryptography", severity="Medium", target="svc/config.py:3",
                          confirmed=True, evidence_ref="sha256:x", target_repo=str(repo), source="daa:DAA-WEAK-HASH")
+
+
+@_sandbox
+def test_agentic_workspace_prefixed_diff_fails_closed(tmp_path):
+    # W4 fails-closed: an a/fix/... two-level-prefixed git diff survives extraction (diff --git header) but
+    # `git apply -p1` strips only `a/`, leaving `fix/svc/config.py` which is NOT in the clone -> build-failed,
+    # NEVER verified-no-pr / remediated. Proves a wrong-prefix agent diff cannot forge a verification.
+    repo = _repo(tmp_path)
+    bad = ("--- a/fix/svc/config.py\n+++ b/fix/svc/config.py\n@@ -1,3 +1,3 @@\n import hashlib\n def f(p):\n"
+           "-    return hashlib.md5(p).hexdigest()\n+    return hashlib.sha256(p).hexdigest()\n")
+    cfg = CodefixConfig(target_repo=str(repo), base_dir=str(tmp_path / "b"),
+                        build_cmd="python3 -m compileall -q .", apply_edits=True, model="x")
+    r = strix_fix.agentic_deepfix(_f(repo), config=cfg, verify_oracle=codescan.build_code_fix_oracle(REF),
+                                  produce_diff=lambda root, instr: (bad, "fake"))
+    assert r.status != "verified-no-pr" and r.remediated is False
 
 
 @_sandbox

@@ -70,27 +70,40 @@ def extract_unified_diff(*search_dirs: str, cap: int = 200_000) -> str:
 def default_fix_instruction(finding: Any, *, test_cmd: str = "") -> str:
     """A fix-oriented Strix instruction for one confirmed finding (white-box). Asks it to fix the ROOT cause,
     keep the change minimal, run the tests, and include the unified diff in its report (which is how the fix
-    reaches the host — the container is ephemeral)."""
+    reaches the host — the container is ephemeral).
+
+    The codebase is bind-mounted READ-ONLY (``--mount``; W4 — this avoids the SDK's file-by-file ``--target``
+    copy that OOM-killed the workspace-materialization child, exit 137). Only the mount subdir is read-only;
+    the rest of ``/workspace`` is a writable overlay, so the instruction tells the agent to copy the source to
+    a writable dir before editing + testing. VIGIL never uses the in-container edits — it re-applies the
+    reported repo-relative diff to its OWN disposable clone and re-verifies with its own oracle + suite."""
     ref = str(getattr(finding, "ref", "") or "")
     bug = str(getattr(finding, "bug_class", "") or "")
     tgt = str(getattr(finding, "target", "") or "")
     tnote = f" Run `{test_cmd}` and iterate until it passes." if test_cmd else ""
     return (f"White-box FIX task. A deterministic oracle CONFIRMED a {bug or 'vulnerability'} "
-            f"({ref}) at {tgt}. Fix the ROOT cause with the MINIMAL change; do not weaken tests or hide the "
-            f"pattern.{tnote} In your final report, INCLUDE the complete fix as a fenced ```diff block with "
-            f"`--- a/<path>` / `+++ b/<path>` headers (repo-relative paths) — this is how the fix is returned.")
+            f"({ref}) at {tgt}. The target codebase is bind-mounted READ-ONLY under `/workspace`; BEFORE "
+            f"editing, copy it to a writable working directory (e.g. `cp -a /workspace/<dir> /workspace/fix && "
+            f"cd /workspace/fix`) and make ALL changes there. Fix the ROOT cause with the MINIMAL change; do "
+            f"not weaken tests or hide the pattern.{tnote} In your final report, INCLUDE the complete fix as a "
+            f"fenced ```diff block with `--- a/<path>` / `+++ b/<path>` headers (repo-relative paths, NOT the "
+            f"/workspace/fix prefix) — this is how the fix is returned to the host.")
 
 
 def run_strix_fix(root: str, instruction: str, *, base_dir: str, timeout: float = 1800.0,
                   scan_mode: str = "standard", launch: Optional[Callable[..., int]] = None) -> tuple[str, str]:
-    """LIVE: run Strix headless (``--non-interactive --target <root> --instruction <fix>``) through the gated
+    """LIVE: run Strix headless (``--non-interactive --mount <root> --instruction <fix>``) through the gated
     ``strix_runtime`` (Docker + sandbox-net + sovereignty), then extract the produced unified diff from its
     run report. Returns ``(diff, note)``; ``diff`` is "" when Strix produced no git-appliable diff (the run
     then fails closed to a non-verified result upstream). Total — a Docker/agent failure yields ("", reason)."""
     from . import strix_runtime
     _launch = launch or strix_runtime.launch
     work = tempfile.mkdtemp(prefix="vigil-strixfix-")   # Strix writes strix_runs/<name> under its CWD
-    argv = ["--non-interactive", "--target", str(root), "--scan-mode", scan_mode, "--instruction", instruction]
+    # W4: bind-mount the clone READ-ONLY (--mount) rather than stream it in file-by-file (--target), which
+    # OOM-killed the SDK's workspace-copy child (exit 137) on non-trivial repos. VIGIL extracts the diff from
+    # the report and re-verifies on its own clone, so a read-only source is fine (the instruction has the agent
+    # copy it to a writable overlay dir to edit + test).
+    argv = ["--non-interactive", "--mount", str(root), "--scan-mode", scan_mode, "--instruction", instruction]
 
     def _runner(cmd: list, env: dict) -> int:
         import subprocess
