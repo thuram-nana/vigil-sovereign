@@ -540,7 +540,7 @@ def _cmd_patch(args: argparse.Namespace) -> int:
         if not _dep_cache and bool(getattr(args, "fetch_deps", False)):
             import os as _os
             if not bool(getattr(args, "approve", False)):
-                print("vigil patch: --fetch-deps egresses to download wheels — pass --approve (operator-present) "
+                print("vigil patch: --fetch-deps egresses to download third-party dependencies — pass --approve (operator-present) "
                       "to authorize the gated fetch", file=sys.stderr)
                 return 2
             _cache_dir = _os.path.join(args.repo_base_dir, ".dep-cache")
@@ -553,8 +553,8 @@ def _cmd_patch(args: argparse.Namespace) -> int:
                                  install_specs=_plan.install_specs, index_url=str(getattr(args, "index_url", "") or ""))
             print(f"dep fetch      : {'OK' if _fr.ok else 'SKIPPED'} ({_fr.count} artifact(s)) — {_fr.note}")
             if _fr.ok:
-                _dep_cache = _fr.cache_dir   # W1a offline tier now runs the REAL suite from this wheelhouse
-                args.dep_cache = _fr.cache_dir   # OBS-1: pin it so the attestation's deps_digest binds this wheelhouse
+                _dep_cache = _fr.cache_dir   # W1a offline tier now runs the REAL suite from this fetched cache
+                args.dep_cache = _fr.cache_dir   # OBS-1: pin it so the attestation's deps_digest binds this fetched cache
         from .remediation.graph_context import graph_context_paths   # W2: cross-file (call-graph) context
         _ctx_provider = graph_context_paths
         verify_oracle = build_code_fix_oracle(finding.ref)
