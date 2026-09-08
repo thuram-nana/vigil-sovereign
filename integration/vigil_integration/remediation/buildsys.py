@@ -107,7 +107,9 @@ _JS_TEST_CMDS = frozenset(
 
 
 def _read_package_json(repo: str) -> dict:
-    """Parse ``package.json`` (bounded read). Total: any error yields ``{}``."""
+    """Parse ``package.json`` (bounded read). TOTAL: package.json is repo-controlled (the codebase being
+    remediated), so ANY failure — an OSError, a JSON ValueError, or a RecursionError/MemoryError from
+    deeply-nested-but-valid JSON under the size cap — yields ``{}`` (floor-only detection), never a raise."""
     try:
         fp = os.path.join(repo, "package.json")
         if not os.path.isfile(fp) or os.path.getsize(fp) > 4_000_000:
@@ -115,7 +117,7 @@ def _read_package_json(repo: str) -> dict:
         with open(fp, encoding="utf-8", errors="replace") as fh:
             obj = json.loads(fh.read())
         return obj if isinstance(obj, dict) else {}
-    except (OSError, ValueError):
+    except Exception:  # noqa: BLE001 — a hostile package.json must degrade to floor-only, never crash detection
         return {}
 
 
@@ -134,7 +136,8 @@ def _js_test_cmd(repo: str, pm: str) -> str:
     only from fixed literals (the PM name and runner are from closed allowlists)."""
     pkg = _read_package_json(repo)
     scripts = pkg.get("scripts") if isinstance(pkg.get("scripts"), dict) else {}
-    test_script = str(scripts.get("test", "") or "")
+    raw_test = scripts.get("test")
+    test_script = raw_test if isinstance(raw_test, str) else ""   # a non-string scripts.test is malformed, not a suite
     # npm's init placeholder ("Error: no test specified") is not a real suite
     if test_script and "no test specified" not in test_script.lower():
         runner = {"npm": "npm test --silent", "yarn": "yarn test", "pnpm": "pnpm test"}.get(pm, "npm test --silent")

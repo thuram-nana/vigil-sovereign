@@ -85,6 +85,23 @@ def test_js_compose_offline_npm_ci_then_runner():
     assert "pnpm install --offline --frozen-lockfile" in pc and '--store-dir "/c"' in pc
 
 
+def test_js_detect_is_total_on_hostile_package_json(tmp_path):
+    # red-pen BLOCK: a deeply-nested (valid) package.json under the size cap raised RecursionError before the
+    # reader was made truly total. package.json is repo-controlled, so detect_build_plan must NEVER raise.
+    import json as _json
+    r = tmp_path / "hostile"; r.mkdir()
+    (r / "package-lock.json").write_text("{}", encoding="utf-8")
+    (r / "package.json").write_text("[" * 100000 + "]" * 100000, encoding="utf-8")   # ~200 KB, deeply nested
+    plan = detect_build_plan(str(r))                                                  # must not raise
+    assert plan.language == "javascript" and plan.test_cmd == ""                      # unparseable -> floor only
+    # other hostile shapes: a list-typed package.json, binary bytes, a scripts/devDeps of the wrong type
+    for body in ("[1,2,3]", "\x00\x01 not json", '{"scripts": [1,2], "devDependencies": "nope"}',
+                 '{"scripts": {"test": 42}}'):
+        (r / "package.json").write_text(body, encoding="utf-8", errors="replace")
+        p2 = detect_build_plan(str(r))                                                # total, no raise
+        assert p2.language == "javascript" and p2.test_cmd == ""
+
+
 def test_js_compose_rejects_non_allowlisted_test_cmd_and_bad_inputs():
     # a caller-built plan with an arbitrary (injection) test_cmd is REFUSED (only allowlisted runners compose)
     evil = BuildPlan(test_cmd="jest; rm -rf /", language="javascript", pkg_manager="npm")
