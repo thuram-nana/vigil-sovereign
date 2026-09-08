@@ -103,6 +103,38 @@ def test_deep_fix_spawns_vigil_patch_deep(tmp_path, monkeypatch):
     monkeypatch.setattr(subprocess, "run", _fake_run)
     out = actions.deep_fix("rd", "DAA-EVAL~x~L1", fix_attempts=3)
     assert out["ok"] is True and out["verified"] is True and out["runnable"] is True
+    # default is the inline coder, NOT the agentic front-end
+    assert out["agent"] == "none" and "--agent strix" not in out["command"]
+
+
+def test_deep_fix_agent_strix_appends_flag(tmp_path, monkeypatch):
+    # The console Strix toggle threads `--agent strix` into the SAME gated `vigil patch --deep` argv; the
+    # produced diff is re-verified by the same ladder, so this is a front-end selector, never a gate relaxation.
+    monkeypatch.setattr(actions, "console_dir", lambda: tmp_path)
+    monkeypatch.setattr(actions, "_vigil_bin", lambda: "/usr/bin/vigil")
+    base = tmp_path / "base"; spine = base / "cbslug.spine"
+    _run(tmp_path, "rdx", {"status": "done", "mode": "sast", "slug": "cbslug",
+                           "target": str(tmp_path / "src"), "base_dir": str(base)}, spine_at=spine)
+    seen = {}
+
+    def _fake_run(cmd, **kw):
+        seen["cmd"] = cmd
+        assert cmd[:3] == ["/usr/bin/vigil", "patch", "--deep"], cmd
+        i = cmd.index("--agent")           # must be present AND value must be strix
+        assert cmd[i + 1] == "strix", cmd
+        assert "--open-pr" not in cmd      # still never a PR from the console
+        return types.SimpleNamespace(returncode=0, stdout="status         : verified-no-pr\n", stderr="")
+    monkeypatch.setattr(subprocess, "run", _fake_run)
+    out = actions.deep_fix("rdx", "DAA-EVAL~x~L1", agent="strix")
+    assert out["agent"] == "strix" and "--agent strix" in out["command"]
+    # a bogus agent value falls back to the inline coder (fail-safe default), never an unknown --agent arg
+    def _fake_run_none(cmd, **kw):
+        seen["cmd"] = cmd
+        assert "--agent" not in cmd, cmd
+        return types.SimpleNamespace(returncode=0, stdout="status         : verified-no-pr" + chr(10), stderr="")
+    monkeypatch.setattr(subprocess, "run", _fake_run_none)
+    out2 = actions.deep_fix("rdx", "DAA-EVAL~x~L1", agent="../../etc")
+    assert out2["agent"] == "none" and "--agent" not in seen["cmd"]
 
 
 def test_deep_fix_reports_unverified_on_nonzero(tmp_path, monkeypatch):

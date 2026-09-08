@@ -3751,7 +3751,7 @@ def verify_fix(run_id: str, finding_ref: str) -> dict:
                      "first; this checks YOUR tree, not the disposable clone the Apply step patched.")}
 
 
-def deep_fix(run_id: str, finding_ref: str, *, fix_attempts: int = 3) -> dict:
+def deep_fix(run_id: str, finding_ref: str, *, fix_attempts: int = 3, agent: str = "none") -> dict:
     """Fixes screen (deep) — the Claude-Code-class DEEP FIX for ONE codebase finding: shells
     ``vigil patch --deep`` (repo-aware, iterate-until-green with the build/test gate in the sandbox clone,
     then re-run the finding's DETERMINISTIC oracle over the patched clone). Same provenance grounding
@@ -3772,9 +3772,15 @@ def deep_fix(run_id: str, finding_ref: str, *, fix_attempts: int = 3) -> dict:
         return out
     slug, repo, base_dir = pre["slug"], pre["repo"], pre["base_dir"]
     attempts = max(1, min(int(fix_attempts or 3), 6))   # bound the self-correcting loop
+    _agent = "strix" if str(agent or "").strip().lower() == "strix" else "none"
     cmd = [pre["vigil"], "patch", "--deep", "--fix-attempts", str(attempts),
            "--from-spine", slug, "--finding-ref", finding_ref,
            "--target-repo", repo, "--base-dir", base_dir, "--apply-edits", "--approve"]
+    if _agent == "strix":
+        # AGENTIC front-end: Strix produces the diff (in the gated Docker sandbox), then it is re-verified by
+        # the same ladder. Needs the gated egress gateway up (`vigil services up`); a gateway-down run fails
+        # closed to no-agent-diff (never a false fix).
+        cmd += ["--agent", "strix"]
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=2400)  # noqa: S603
     except (OSError, subprocess.SubprocessError) as e:
@@ -3782,9 +3788,10 @@ def deep_fix(run_id: str, finding_ref: str, *, fix_attempts: int = 3) -> dict:
     out = ((proc.stdout or "") + (("\n--- stderr ---\n" + proc.stderr) if proc.stderr else "")).strip()[-12000:]
     verified = proc.returncode == 0    # `vigil patch --deep` exits 0 ONLY on verified-no-pr
     return {"ok": verified, "runnable": True, "rc": proc.returncode, "verified": verified,
-            "finding_ref": finding_ref, "slug": slug, "attempts": attempts,
+            "finding_ref": finding_ref, "slug": slug, "attempts": attempts, "agent": _agent,
             "command": ("vigil patch --deep --from-spine " + slug + " --finding-ref " + finding_ref
-                        + " --target-repo <repo> --base-dir " + base_dir + " --apply-edits --approve"),
+                        + " --target-repo <repo> --base-dir " + base_dir + " --apply-edits --approve"
+                        + (" --agent strix" if _agent == "strix" else "")),
             "output": out or "(no output)",
             "note": ("Deep fix: repo-aware, self-correcting (up to " + str(attempts) + " attempts), each patch "
                      "built/tested in a DISPOSABLE clone (your source is never touched, no PR). Success is "
