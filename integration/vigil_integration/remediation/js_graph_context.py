@@ -14,16 +14,20 @@ safe read (containment + byte budget), so path safety lives in ONE place. Fail-S
 
 Best-effort by nature: a regex import scan misses computed/dynamic specifiers and tsconfig path aliases, but
 that only means falling back to siblings; it never breaks a fix, and it READS (never executes) the untrusted
-repo. Bounded (file count + per-file bytes) and TOTAL (never raises).
+repo. Bounded (total traversal + reverse-scan file count + an ALWAYS-capped per-file read) and TOTAL: it never
+raises AND never blocks — a FIFO/device/socket named like a source file, or a symlink escaping the repo, is
+refused via an ``os.stat`` (S_ISREG + realpath-containment) check BEFORE any ``open``.
 """
 from __future__ import annotations
 
 import os
 import re
+import stat
 from typing import Optional
 
 _MAX_GRAPH_PATHS = 12          # cap the neighborhood shown (codefix_runner budgets bytes/files too)
 _MAX_CALLER_WALK = 4000        # bound the reverse-import scan over an untrusted tree
+_MAX_ENTRY_WALK = 200_000     # bound TOTAL directory traversal (a repo of millions of non-JS files can't stall us)
 _MAX_FILE_BYTES = 262_144      # per-file bounded read
 _JS_EXTS = (".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs")
 _SKIP_DIRS = {".git", "node_modules", ".venv", "venv", "__pycache__", "dist", "build", ".next", "coverage", "out"}
@@ -34,14 +38,21 @@ _IMPORT_SPEC = re.compile(
     r"""(?:\bfrom\s+|\brequire\s*\(\s*|\bimport\s*\(\s*|\bimport\s+)['"]([^'"\n]+)['"]""")
 
 
-def _read(path: str) -> str:
+def _read(path: str, repo_real: str) -> str:
+    """Bounded read of a REGULAR file that stays inside the repo. Rejects — WITHOUT opening — a special file
+    (a FIFO named ``x.ts`` would hang ``open()`` forever) or a symlink that escapes the repo (``x.ts ->
+    /dev/zero`` would OOM an unbounded read). ``os.stat`` follows the symlink but never blocks, so the
+    S_ISREG check happens before any ``open``. The read is ALWAYS capped at ``_MAX_FILE_BYTES``."""
     try:
-        if os.path.getsize(path) > _MAX_FILE_BYTES:
-            with open(path, encoding="utf-8", errors="replace") as fh:
-                return fh.read(_MAX_FILE_BYTES)
-        with open(path, encoding="utf-8", errors="replace") as fh:
-            return fh.read()
-    except OSError:
+        rp = os.path.realpath(path)
+        if os.path.commonpath([repo_real, rp]) != repo_real:      # symlink escapes the repo -> refuse
+            return ""
+        st = os.stat(path)                                        # follows symlink; never blocks (unlike open)
+        if not stat.S_ISREG(st.st_mode):                          # FIFO / device / socket / dir -> refuse
+            return ""
+        with open(path, "rb") as fh:
+            return fh.read(_MAX_FILE_BYTES).decode("utf-8", "replace")   # ALWAYS bounded
+    except (OSError, ValueError):
         return ""
 
 
@@ -79,9 +90,13 @@ def _resolve(repo: str, from_file: str, spec: str) -> Optional[str]:
 def _iter_js_files(repo: str):
     """Bounded walk yielding repo-relative JS/TS file paths, skipping VCS/vendor/build dirs."""
     seen = 0
-    for root, dirs, files in os.walk(repo):
+    entries = 0
+    for root, dirs, files in os.walk(repo):                       # followlinks=False (default): no symlinked-dir cycles
         dirs[:] = [d for d in dirs if d not in _SKIP_DIRS]
         for f in files:
+            entries += 1
+            if entries > _MAX_ENTRY_WALK:                         # bound TOTAL traversal on a hostile tree
+                return
             if not f.endswith(_JS_EXTS):
                 continue
             seen += 1
@@ -97,6 +112,7 @@ def js_graph_context_paths(repo: str, primary: str, *, max_paths: int = _MAX_GRA
     try:
         if not repo or "://" in repo or not primary or not primary.endswith(_JS_EXTS):
             return None
+        repo_real = os.path.realpath(repo)
         prim_abs = os.path.join(repo, primary)
         if not os.path.isfile(prim_abs):
             return None
@@ -110,7 +126,7 @@ def js_graph_context_paths(repo: str, primary: str, *, max_paths: int = _MAX_GRA
                 ranked.append(path)
 
         # 1) import targets of primary (deps a correct fix depends on)
-        for spec in _specs(_read(prim_abs)):
+        for spec in _specs(_read(prim_abs, repo_real)):
             _push(_resolve(repo, primary, spec))
 
         # 2) callers — files whose imports resolve to primary (the regression surface)
@@ -118,7 +134,7 @@ def js_graph_context_paths(repo: str, primary: str, *, max_paths: int = _MAX_GRA
             for cand in _iter_js_files(repo):
                 if cand == primary or cand in seen:
                     continue
-                for spec in _specs(_read(os.path.join(repo, cand))):
+                for spec in _specs(_read(os.path.join(repo, cand), repo_real)):
                     if _resolve(repo, cand, spec) == primary:
                         _push(cand)
                         break
