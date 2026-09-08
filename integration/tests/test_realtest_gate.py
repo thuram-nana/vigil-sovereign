@@ -143,6 +143,19 @@ def test_jvm_maven_and_gradle(tmp_path):
         assert 'gradle --offline --gradle-user-home "/gh" test' in gc
 
 
+def test_compose_rejects_shell_unsafe_cache_path_all_tiers():
+    # red-pen note: cache_dir_in_box is interpolated inside double-quotes; a path with shell metacharacters
+    # must be REFUSED (not just "must be absolute"). Covers every language tier in one gate.
+    evil = '/x"; touch /tmp/pwn; echo "'
+    plans = [BuildPlan(test_cmd="python -m pytest -q", install_specs=("pytest",), language="python"),
+             BuildPlan(test_cmd="npm test --silent", language="javascript", pkg_manager="npm"),
+             BuildPlan(test_cmd="go test ./...", language="go", pkg_manager="go-mod"),
+             BuildPlan(test_cmd="mvn -o -q test", language="jvm", pkg_manager="maven")]
+    for pl in plans:
+        assert compose_offline_test_command(pl, cache_dir_in_box=evil) == "", pl.language
+        assert compose_offline_test_command(pl, cache_dir_in_box="/vigil-depcache") != "", pl.language  # sane path OK
+
+
 def test_go_jvm_compose_rejects_bad_inputs():
     for pm in ("go-mod", "go-vendor"):
         assert compose_offline_test_command(BuildPlan(test_cmd="go test ./...", language="go", pkg_manager=pm),

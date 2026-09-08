@@ -31,6 +31,11 @@ from dataclasses import dataclass, field
 
 # a conservative basename allowlist so a detected filename can never inject shell metacharacters
 _SAFE_NAME = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
+# a shell-SAFE absolute in-box path: the composed `/bin/sh -c` strings interpolate cache_dir_in_box inside
+# double-quotes, so beyond "must be absolute" it must carry NO shell metacharacters (a hostile path like
+# `/x"; rm -rf / #` would otherwise break out of the quotes). Today the only runtime caller passes the fixed
+# constant `/vigil-depcache`; this gate makes the injection-free property hold even for a future caller.
+_SAFE_ABS_PATH = re.compile(r"^/[A-Za-z0-9._/-]{1,512}$")
 
 
 @dataclass(frozen=True)
@@ -293,7 +298,7 @@ def compose_offline_test_command(plan: BuildPlan, *, cache_dir_in_box: str) -> s
     validated specs + the (caller-controlled, absolute) cache path are interpolated."""
     if not plan.test_cmd:
         return ""
-    if not (cache_dir_in_box or "").startswith("/"):
+    if not _SAFE_ABS_PATH.match(cache_dir_in_box or ""):   # absolute AND shell-safe (no metacharacters)
         return ""
 
     if plan.language == "javascript":
