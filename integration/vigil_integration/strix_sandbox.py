@@ -85,7 +85,10 @@ def preflight(*, allow_ungated: Optional[bool] = None, networking: Any = None) -
     try:
         if networking is None:
             from vigil_gateway.docker import SandboxNetworking  # VIGIL-owned; not the vendored agent
-            networking = SandboxNetworking()
+            # from_env so a RELOCATED gateway (non-default sandbox subnet) hands the sandbox the RIGHT proxy
+            # coordinates — a bare SandboxNetworking() would pin the child to the default 172.31.240.2 and the
+            # gated egress would be unreachable. Unset env ⇒ byte-identical to the default.
+            networking = SandboxNetworking.from_env()
     except Exception as exc:  # noqa: BLE001 — an unusable gateway package is a refusal, never a bypass
         return _refuse(f"the gateway package could not be loaded ({type(exc).__name__}: {exc})",
                        overridden=overridden)

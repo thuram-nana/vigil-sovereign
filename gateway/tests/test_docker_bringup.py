@@ -217,6 +217,22 @@ def test_committed_compose_matches_render_and_is_sane():
         assert netname in committed
 
 
+def test_sandbox_networking_from_env_relocates(monkeypatch):
+    # from_env honours a relocated subnet and derives the gateway IP as its .2; unset ⇒ the pinned default.
+    monkeypatch.delenv("VIGIL_GATEWAY_SANDBOX_SUBNET", raising=False)
+    assert SandboxNetworking.from_env().sandbox_subnet == "172.31.240.0/24"
+    assert SandboxNetworking.from_env().sandbox_gateway_ip() == "172.31.240.2"
+    monkeypatch.setenv("VIGIL_GATEWAY_SANDBOX_SUBNET", "10.88.7.0/24")
+    assert SandboxNetworking.from_env().sandbox_subnet == "10.88.7.0/24"
+    assert SandboxNetworking.from_env().sandbox_gateway_ip() == "10.88.7.2"   # the child's proxy host
+    # a malformed value fails safe to the pinned default (never a crash, never an empty subnet)
+    monkeypatch.setenv("VIGIL_GATEWAY_SANDBOX_SUBNET", "not-a-subnet")
+    assert SandboxNetworking.from_env().sandbox_subnet == "172.31.240.0/24"
+    # dual-stack: the first entry is the v4 subnet used for the pin
+    monkeypatch.setenv("VIGIL_GATEWAY_SANDBOX_SUBNET", "10.88.7.0/24, fd00:88:7::/64")
+    assert SandboxNetworking.from_env().sandbox_subnet == "10.88.7.0/24"
+
+
 def test_render_compose_subnet_is_relocatable():
     # The default render carries the interpolation form (relocatable); a non-default subnet flows through to
     # BOTH the network subnet and the derived .2 gateway IP everywhere, with NO stray default left behind.

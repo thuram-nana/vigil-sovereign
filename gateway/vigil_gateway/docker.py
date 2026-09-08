@@ -218,6 +218,28 @@ class SandboxNetworking:
     proxy_port: int = 48081
     sandbox_bridge: str = SANDBOX_BRIDGE   # deterministic bridge iface — governs v4+v6, spoof-proof
 
+    @classmethod
+    def from_env(cls) -> "SandboxNetworking":
+        """Build from the environment so a RELOCATED gateway is honoured everywhere the coordinates are
+        derived — not just in the compose. Reads VIGIL_GATEWAY_SANDBOX_SUBNET (first entry if dual-stack)
+        and VIGIL_GATEWAY_PROXY_PORT, each falling back to the pinned default. The gateway IP is derived as
+        the subnet's .2 (``sandbox_gateway_ip``), matching the compose's ``VIGIL_GATEWAY_GATEWAY_IP`` default;
+        unset ⇒ byte-identical to ``SandboxNetworking()``. Never raises (a malformed subnet ⇒ the default)."""
+        import os as _os
+        raw = (_os.environ.get("VIGIL_GATEWAY_SANDBOX_SUBNET", "") or "").split(",")[0].strip()
+        subnet = cls.sandbox_subnet
+        if raw:
+            try:
+                ipaddress.ip_network(raw, strict=False)   # validate; bad value ⇒ keep the safe default
+                subnet = raw
+            except ValueError:
+                pass
+        try:
+            port = int(_os.environ.get("VIGIL_GATEWAY_PROXY_PORT", "") or cls.proxy_port)
+        except ValueError:
+            port = cls.proxy_port
+        return cls(sandbox_subnet=subnet, proxy_port=port)
+
     def strix_env(self) -> dict[str, str]:
         """The env a caller must set so Strix pins the sandbox onto the locked-down net."""
         return {STRIX_NETWORK_ENV: self.sandbox_network}
