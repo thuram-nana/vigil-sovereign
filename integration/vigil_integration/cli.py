@@ -438,6 +438,7 @@ def _cmd_patch(args: argparse.Namespace) -> int:
     _deep_install_specs: tuple = ()
     _deep_language = ""
     _dep_cache = ""
+    _ctx_provider = None
     if deep:
         if str(getattr(args, "verify_base_url", "") or "").strip():
             print("vigil patch: --deep uses the deterministic code oracle — do not combine with --verify-base-url",
@@ -451,6 +452,8 @@ def _cmd_patch(args: argparse.Namespace) -> int:
         _deep_install_specs = _plan.install_specs
         _deep_language = _plan.language
         _dep_cache = str(getattr(args, "dep_cache", "") or "").strip()
+        from .remediation.graph_context import graph_context_paths   # W2: cross-file (call-graph) context
+        _ctx_provider = graph_context_paths
         verify_oracle = build_code_fix_oracle(finding.ref)
         if getattr(args, "agent", "none") == "strix":
             from .strix_fix import default_fix_instruction, run_strix_fix
@@ -481,7 +484,7 @@ def _cmd_patch(args: argparse.Namespace) -> int:
         target_repo=finding.target_repo, base_dir=args.repo_base_dir, target_branch=args.target_branch,
         apply_edits=bool(args.apply_edits), model=resolve_model(args.model),  # --model > Settings choice > default
         build_cmd=_deep_build_cmd, test_cmd=_deep_test_cmd, install_specs=_deep_install_specs,
-        dep_cache_dir=_dep_cache, plan_language=_deep_language,
+        dep_cache_dir=_dep_cache, plan_language=_deep_language, context_paths_provider=_ctx_provider,
         pr_enabled=bool(args.open_pr), pr_base=args.pr_base)
     _ext_diff = _agent_diff or ""
     if _agent_diff:
