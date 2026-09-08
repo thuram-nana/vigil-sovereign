@@ -170,7 +170,13 @@ def _committed_firewall_sidecar_env() -> dict[str, str]:
     for line in env_block.splitlines():
         m = _re.match(r'\s+(VIGIL_GATEWAY_[A-Z_]+):\s*"([^"]*)"\s*$', line)
         if m:
-            env[m.group(1)] = m.group(2)
+            val = m.group(2)
+            # The subnet/IP are emitted as compose interpolations (relocatable subnet). When the env is
+            # unset — as at rest — compose substitutes the `:-default`, so resolve that here to reproduce the
+            # values the committed sidecar applies by default. A revert that drops the iface env is still
+            # caught (that var has no interpolation to strip).
+            dm = _re.match(r'^\$\{[A-Z_]+:-(.*)\}$', val)
+            env[m.group(1)] = dm.group(1) if dm else val
     return env
 
 

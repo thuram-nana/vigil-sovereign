@@ -11,6 +11,16 @@
 # proxy at http://vigil:$VIGIL_GATEWAY_PROXY_TOKEN@172.31.240.2:48081 so it presents
 # the Basic credential. Unset = no client auth (the bind address + internal:true network are
 # then the only thing keeping the proxy sandbox-only).
+# SUBNET IS RELOCATABLE (de-hardcode): the sandbox subnet + the gateway's pinned .2 address default to
+# 172.31.240.0/24 / .2, but both are compose interpolations, so an operator whose host already uses that
+# /24 (e.g. an overlapping 172.31.0.0/16 bridge) can move the whole gateway onto a free /24 by exporting
+# VIGIL_GATEWAY_SANDBOX_SUBNET and VIGIL_GATEWAY_GATEWAY_IP before `vigil services up` (compose_up passes
+# the ambient env through). Set them CONSISTENTLY — the IP must be the .2 host of the subnet (Docker takes
+# .1 for the bridge). Unset ⇒ byte-identical to the pinned defaults. The network NAME (vigil_sandbox) and
+# bridge iface (vigil-sbx0, which the firewall governs by) are unchanged, so nothing else needs to move.
+# TIP: pick the relocation /24 OUTSIDE Docker's default auto-pool (172.16.0.0/12) — e.g. a 10.x /24. The
+# sibling vigil_egress network has no pinned subnet, so Docker auto-assigns it a 172.x /16; a 172.x sandbox
+# /24 can land inside that and fail with 'Pool overlaps'. A 10.x /24 sidesteps it.
 networks:
   vigil_sandbox:
     name: vigil_sandbox
@@ -21,7 +31,7 @@ networks:
       com.docker.network.bridge.name: vigil-sbx0
     ipam:
       config:
-        - subnet: 172.31.240.0/24
+        - subnet: ${VIGIL_GATEWAY_SANDBOX_SUBNET:-172.31.240.0/24}
   vigil_egress:
     name: vigil_egress
 
@@ -58,13 +68,13 @@ services:
     read_only: true             # rootfs immutable (parity with the proxy); nft -f - reads stdin, no scratch
     restart: "no"               # one-shot: load the backstop, then exit 0
     environment:
-      VIGIL_GATEWAY_GATEWAY_IP: "172.31.240.2"
-      VIGIL_GATEWAY_SANDBOX_SUBNET: "172.31.240.0/24"
+      VIGIL_GATEWAY_GATEWAY_IP: "${VIGIL_GATEWAY_GATEWAY_IP:-172.31.240.2}"
+      VIGIL_GATEWAY_SANDBOX_SUBNET: "${VIGIL_GATEWAY_SANDBOX_SUBNET:-172.31.240.0/24}"
       VIGIL_GATEWAY_PROXY_PORT: "48081"
       # Govern by INTERFACE, not source-subnet: family-agnostic (drops v4 AND v6 sandbox egress to the
       # deny-default chain) and spoof-proof. A v4-only saddr match would leave IPv6 egress policy-accepted.
       VIGIL_GATEWAY_SANDBOX_IFACE: "vigil-sbx0"
-    command: ["vigil-gateway", "apply-firewall"]
+    command: ["apply-firewall"]   # ENTRYPOINT is ["vigil-gateway"]; the token is not repeated
 
   vigil-gateway:
     image: vigil-gateway:${VIGIL_GATEWAY_IMAGE_TAG:-latest}
@@ -74,7 +84,7 @@ services:
         condition: service_completed_successfully   # fail-closed: no proxy unless the backstop loaded
     networks:
       vigil_sandbox:
-        ipv4_address: 172.31.240.2   # pinned so the proxy can bind ONLY the sandbox interface
+        ipv4_address: ${VIGIL_GATEWAY_GATEWAY_IP:-172.31.240.2}   # pinned so the proxy can bind ONLY the sandbox interface
       vigil_egress: {}   # world-facing: the only interface with a default route
     cap_drop:
       - ALL
@@ -83,7 +93,7 @@ services:
     read_only: true
     environment:
       VIGIL_GATEWAY_PROXY_PORT: "48081"
-      VIGIL_GATEWAY_PROXY_HOST: "172.31.240.2"
+      VIGIL_GATEWAY_PROXY_HOST: "${VIGIL_GATEWAY_GATEWAY_IP:-172.31.240.2}"
       VIGIL_GATEWAY_PROXY_TOKEN: "${VIGIL_GATEWAY_PROXY_TOKEN:-}"
       VIGIL_GATEWAY_CHARTER_SLUG: "${VIGIL_GATEWAY_CHARTER_SLUG:-}"   # provenance/logging (scope via SCOPE_HOSTS)
       # B2 (option c): the HOST-VERIFIED signed-scope SNAPSHOT the launcher injects after verifying the SIGNED
@@ -92,13 +102,13 @@ services:
       # the (unreadable-in-container) CHARTER_SLUG and fail-closes, exactly as before. The never-liftable
       # metadata/RFC1918 floor is charter-independent and unaffected.
       VIGIL_GATEWAY_SCOPE_HOSTS: "${VIGIL_GATEWAY_SCOPE_HOSTS:-}"
-    command: ["vigil-gateway", "serve-proxy", "--host", "172.31.240.2", "--port", "48081"]
+    command: ["serve-proxy", "--host", "${VIGIL_GATEWAY_GATEWAY_IP:-172.31.240.2}", "--port", "48081"]
     healthcheck:
       # The gate is only "up" when the proxy is actually LISTENING on its pinned sandbox bind. A bad or
       # missing charter scope makes serve-proxy fail closed and exit, which this probe (and `up --wait`)
       # surface as UNHEALTHY instead of a silent exit-0-but-dead container. Read-only-safe: a bare TCP
       # connect, no writes, no third-party deps (the runtime image is stdlib-only python).
-      test: ["CMD", "python", "-c", "import socket; socket.create_connection(('172.31.240.2', 48081), 2).close()"]
+      test: ["CMD", "python", "-c", "import socket; socket.create_connection(('${VIGIL_GATEWAY_GATEWAY_IP:-172.31.240.2}', 48081), 2).close()"]
       interval: 10s
       timeout: 3s
       retries: 3

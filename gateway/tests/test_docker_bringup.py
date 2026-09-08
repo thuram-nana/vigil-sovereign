@@ -209,10 +209,42 @@ def test_committed_compose_matches_render_and_is_sane():
     from vigil_gateway.docker import IMAGE_REPO, IMAGE_TAG_ENV
     assert f"image: {IMAGE_REPO}:${{{IMAGE_TAG_ENV}:-latest}}" in committed
     assert "internal: true" in committed                               # the sandbox net is deny-default
-    assert f"ipv4_address: {net.sandbox_gateway_ip()}" in committed     # the pinned sandbox-net bind
+    # the pinned sandbox-net bind is emitted as a compose interpolation whose DEFAULT is the .2 host, so
+    # an operator can relocate the gateway onto a free /24 (byte-identical when the env is unset).
+    assert f"ipv4_address: ${{VIGIL_GATEWAY_GATEWAY_IP:-{net.sandbox_gateway_ip()}}}" in committed
     assert "healthcheck:" in committed and "start_period:" in committed  # W0-6 gate-readiness probe (--wait)
     for netname in (SANDBOX_NETWORK, EGRESS_NETWORK):
         assert netname in committed
+
+
+def test_sandbox_networking_from_env_relocates(monkeypatch):
+    # from_env honours a relocated subnet and derives the gateway IP as its .2; unset ⇒ the pinned default.
+    monkeypatch.delenv("VIGIL_GATEWAY_SANDBOX_SUBNET", raising=False)
+    assert SandboxNetworking.from_env().sandbox_subnet == "172.31.240.0/24"
+    assert SandboxNetworking.from_env().sandbox_gateway_ip() == "172.31.240.2"
+    monkeypatch.setenv("VIGIL_GATEWAY_SANDBOX_SUBNET", "10.88.7.0/24")
+    assert SandboxNetworking.from_env().sandbox_subnet == "10.88.7.0/24"
+    assert SandboxNetworking.from_env().sandbox_gateway_ip() == "10.88.7.2"   # the child's proxy host
+    # a malformed value fails safe to the pinned default (never a crash, never an empty subnet)
+    monkeypatch.setenv("VIGIL_GATEWAY_SANDBOX_SUBNET", "not-a-subnet")
+    assert SandboxNetworking.from_env().sandbox_subnet == "172.31.240.0/24"
+    # dual-stack: the first entry is the v4 subnet used for the pin
+    monkeypatch.setenv("VIGIL_GATEWAY_SANDBOX_SUBNET", "10.88.7.0/24, fd00:88:7::/64")
+    assert SandboxNetworking.from_env().sandbox_subnet == "10.88.7.0/24"
+
+
+def test_render_compose_subnet_is_relocatable():
+    # The default render carries the interpolation form (relocatable); a non-default subnet flows through to
+    # BOTH the network subnet and the derived .2 gateway IP everywhere, with NO stray default left behind.
+    default = SandboxNetworking().render_compose()
+    assert "${VIGIL_GATEWAY_SANDBOX_SUBNET:-172.31.240.0/24}" in default
+    assert "${VIGIL_GATEWAY_GATEWAY_IP:-172.31.240.2}" in default
+    moved = SandboxNetworking(sandbox_subnet="172.20.0.0/24").render_compose()
+    assert "${VIGIL_GATEWAY_SANDBOX_SUBNET:-172.20.0.0/24}" in moved
+    assert "${VIGIL_GATEWAY_GATEWAY_IP:-172.20.0.2}" in moved     # .2 derived from the moved subnet
+    # no stray pinned default in the DIRECTIVE lines (the doc-note comment legitimately cites the default)
+    moved_directives = "\n".join(l for l in moved.splitlines() if not l.lstrip().startswith("#"))
+    assert "172.31.240" not in moved_directives
 
 
 def test_render_compose_refuses_unsafe_charter_slug():
@@ -373,14 +405,18 @@ def test_render_compose_emits_the_firewall_backstop_sidecar():
     assert "vigil-gateway-firewall:" in frag, "the backstop is loaded by a dedicated one-shot sidecar"
     sidecar = frag.split("vigil-gateway-firewall:")[1].split("\n  vigil-gateway:")[0]
     # it runs apply-firewall in the HOST netns with ONLY CAP_NET_ADMIN, then exits
-    assert 'command: ["vigil-gateway", "apply-firewall"]' in sidecar
+    # the ENTRYPOINT is ["vigil-gateway"], so the command must NOT repeat that token (doing so runs
+    # `vigil-gateway vigil-gateway apply-firewall` and argparse rejects it — the container exits 2)
+    assert 'command: ["apply-firewall"]' in sidecar
+    assert '"vigil-gateway", "apply-firewall"' not in sidecar
     assert "network_mode: host" in sidecar
     assert "NET_ADMIN" in sidecar and "- ALL" in sidecar           # cap_drop ALL, cap_add only NET_ADMIN
     assert 'restart: "no"' in sidecar                              # one-shot
     assert "no-new-privileges:true" in sidecar
     # it is handed the network coordinates apply-firewall needs (and no charter slug — it needs none)
-    assert 'VIGIL_GATEWAY_GATEWAY_IP: "172.31.240.2"' in sidecar
-    assert 'VIGIL_GATEWAY_SANDBOX_SUBNET: "172.31.240.0/24"' in sidecar
+    # emitted as compose interpolations whose DEFAULT is the pinned value (relocatable subnet)
+    assert 'VIGIL_GATEWAY_GATEWAY_IP: "${VIGIL_GATEWAY_GATEWAY_IP:-172.31.240.2}"' in sidecar
+    assert 'VIGIL_GATEWAY_SANDBOX_SUBNET: "${VIGIL_GATEWAY_SANDBOX_SUBNET:-172.31.240.0/24}"' in sidecar
     # ...and the bridge IFACE, so govern() matches by interface (v4 AND v6). A v4-only source-subnet
     # match left IPv6 sandbox egress policy-accepted (red-pen sx-s3 IPv6 bypass).
     assert 'VIGIL_GATEWAY_SANDBOX_IFACE: "vigil-sbx0"' in sidecar
@@ -407,7 +443,10 @@ def test_committed_compose_carries_the_backstop_sidecar():
     repo = pathlib.Path(__file__).resolve().parents[2]
     committed = (repo / "infra" / "docker" / "docker-compose.yml").read_text(encoding="utf-8")
     assert "vigil-gateway-firewall:" in committed
-    assert 'command: ["vigil-gateway", "apply-firewall"]' in committed
+    assert 'command: ["apply-firewall"]' in committed
+    # neither command repeats the ENTRYPOINT token (the gateway-bring-up regression #430 introduced)
+    assert '"vigil-gateway", "apply-firewall"' not in committed
+    assert '"vigil-gateway", "serve-proxy"' not in committed
     assert "condition: service_completed_successfully" in committed
     # the IPv6-governance wiring must be in the committed artifact too, not just render_compose()
     assert 'VIGIL_GATEWAY_SANDBOX_IFACE: "vigil-sbx0"' in committed
