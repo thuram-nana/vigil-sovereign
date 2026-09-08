@@ -41,6 +41,22 @@ def test_default_fix_instruction_mentions_diff_and_finding():
                       confirmed=True, evidence_ref="sha256:x")
     instr = strix_fix.default_fix_instruction(f, test_cmd="python3 -m compileall -q .")
     assert REF in instr and "diff" in instr.lower() and "compileall" in instr
+    # W4: the RO-mount working-copy guidance is present (the mount is read-only; edit a writable copy)
+    assert "READ-ONLY" in instr and "/workspace" in instr and "cp -a" in instr
+
+
+def test_run_strix_fix_uses_mount_not_target_and_captures_argv(tmp_path):
+    # W4: the launch argv must use --mount (bind, no OOM copy), NOT --target (file-by-file stream = exit 137).
+    seen = {}
+    def _fake_launch(argv, *, base_dir, runner):
+        seen["argv"] = list(argv)
+        return 0                                  # pretend Strix ran and exited clean
+    root = str(tmp_path / "clone"); os.makedirs(root, exist_ok=True)
+    diff, note = strix_fix.run_strix_fix(root, "fix it", base_dir=str(tmp_path / "b"), launch=_fake_launch)
+    assert "--mount" in seen["argv"] and root in seen["argv"]
+    assert "--target" not in seen["argv"]                       # the OOM-prone path is gone
+    assert seen["argv"][seen["argv"].index("--mount") + 1] == root
+    assert diff == "" and "no git-appliable diff" in note        # empty report dir -> fail-closed, no crash
 
 
 def _repo(tmp_path):
