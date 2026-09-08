@@ -42,11 +42,20 @@ def _import_relpaths(repo: str, module: str) -> list[str]:
     return out
 
 
+_JS_EXTS = (".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs")
+
+
 def graph_context_paths(repo: str, primary: str, *, max_paths: int = _MAX_GRAPH_PATHS) -> Optional[list[str]]:
-    """Ranked repo-relative neighborhood of ``primary`` (callee defs, then callers, then import targets),
-    excluding ``primary`` itself. ``None`` on any failure (⇒ the caller uses the same-dir-sibling default).
-    Never raises."""
+    """Language-dispatching ranked repo-relative neighborhood of ``primary``, excluding ``primary`` itself.
+    Python (.py) uses the framework symbol index (callee defs, callers, import targets); JS/TS routes to the
+    self-contained import-graph resolver. ``None`` on any failure or unsupported language (⇒ same-dir-sibling
+    default). Never raises."""
     if not repo or "://" in repo or not primary:
+        return None
+    if primary.endswith(_JS_EXTS):                                   # Wave D: JS/TS import graph
+        from .js_graph_context import js_graph_context_paths        # noqa: PLC0415 — stdlib-only sibling
+        return js_graph_context_paths(repo, primary, max_paths=max_paths)
+    if not primary.endswith(".py"):                                  # only python + js/ts have a resolver
         return None
     try:
         from framework.v2.analysis.index import build_symbol_index   # noqa: PLC0415 — FATAL-2: offense-only, lazy
