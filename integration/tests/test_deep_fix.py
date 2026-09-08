@@ -241,7 +241,15 @@ def test_gather_repo_context_reads_graph_extra_paths_safely(tmp_path):
     import os
     (repo / "svc" / "escape.py").symlink_to("/etc/passwd")
     ctx2 = _gather_repo_context(str(repo), "svc/config.py", extra_paths=["svc/escape.py"])
-    assert all(p != "svc/escape.py" for p, _ in ctx2)   # symlink rejected
+    assert all(p != "svc/escape.py" for p, _ in ctx2)   # last-component symlink rejected
+    # (red-pen fence) the DEEPER escapes are also rejected among graph paths: lexical `..` / absolute, and a
+    # SYMLINKED DIRECTORY whose final component is a real file (os.path.islink(local) is False there — only
+    # the realpath-containment check catches it). None leak out-of-repo bytes.
+    (repo / "svc" / "linkdir").symlink_to("/etc")
+    for esc in ("../SECRET", "svc/../../SECRET", "/etc/passwd", "svc/linkdir/passwd"):
+        ctx3 = _gather_repo_context(str(repo), "svc/config.py", extra_paths=[esc])
+        assert all(pp != esc for pp, _ in ctx3), esc
+        assert all("root:" not in cc for _, cc in ctx3), esc   # no /etc/passwd bytes reached the coder
 
 
 def test_graph_context_paths_finds_callers_and_callees(tmp_path):
