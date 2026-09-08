@@ -46,8 +46,8 @@ logger = logging.getLogger("vigil.live.codefix_runner")
 
 _MAX_CONTEXT_BYTES = 8192            # per sibling file
 _PRIMARY_CONTEXT_BYTES = 16384       # the finding's own file (larger budget)
-_MAX_CONTEXT_FILES = 6               # finding file + up to N same-dir siblings
-_MAX_TOTAL_CONTEXT_BYTES = 48000     # global budget across the repo-context set
+_MAX_CONTEXT_FILES = 10              # finding file + up to N related files (graph neighborhood or same-dir siblings)
+_MAX_TOTAL_CONTEXT_BYTES = 64000     # global budget across the repo-context set
 _PATCH_NAME = ".vigil-fix.patch"
 _DEPCACHE_BOX = "/vigil-depcache"   # read-only mount point for the offline dep cache/wheelhouse
 
@@ -65,6 +65,7 @@ class CodefixConfig:
     install_specs: tuple = ()                 # pip install ARGS for the REAL suite (buildsys); needs a dep cache
     dep_cache_dir: str = ""                   # host wheelhouse/pip-cache dir mounted READ-ONLY for an OFFLINE install
     plan_language: str = ""                   # buildsys-detected language (drives the real-test composer)
+    context_paths_provider: Optional[Callable[[str, str], "Optional[list]"]] = None  # W2: (repo, primary)->ranked relpaths; None=>same-dir siblings
     build_timeout: float = 300.0             # per build/test command, inside the bwrap sandbox
     git_bin: str = "git"
     apply_edits: bool = False
@@ -150,13 +151,16 @@ def _file_from_target(target: Any) -> str:
     return p if ok else ""
 
 
-def _gather_repo_context(repo: str, primary: str) -> list[tuple[str, str]]:
-    """Repo-AWARE context for the coder (deep-fix Phase A): the finding's own file (larger budget) plus its
-    same-directory source siblings (same extension) — the local module neighborhood a correct fix usually
-    needs. Every path is validated by ``is_safe_repo_path`` and read read-only from the LOCAL repo; budgeted
-    by file count (``_MAX_CONTEXT_FILES``) and total bytes (``_MAX_TOTAL_CONTEXT_BYTES``). Total: a URL repo,
-    a missing file, or any OS error yields what it has (never raises). The multi-FILE diff the model may then
-    return is already accepted end-to-end by ``parse_unified_diff`` + the edit/build chain."""
+def _gather_repo_context(repo: str, primary: str, *, extra_paths: "Optional[list[str]]" = None) -> list[tuple[str, str]]:
+    """Repo-AWARE context for the coder (deep-fix Phase A/W2): the finding's own file (larger budget) plus a
+    neighborhood. When ``extra_paths`` is supplied (a graph-ranked list of relpaths — callees, callers,
+    imports, from ``remediation.graph_context``) those are read, in order, as the CROSS-FILE neighborhood; a
+    correct fix that spans modules then sees the callers/definitions it must touch. When ``extra_paths`` is
+    None the default is the finding's SAME-DIRECTORY siblings (the framework-free fallback). Every path is
+    validated by ``is_safe_repo_path`` + a symlink/realpath containment guard, read read-only from the LOCAL
+    repo, and budgeted by file count + total bytes. Total: a URL repo, a missing file, or any OS error yields
+    what it has (never raises). The multi-FILE diff the model may then return is accepted end-to-end by
+    ``parse_unified_diff`` + the edit/build chain."""
     if not repo or "://" in repo or not primary:
         return []
     out: list[tuple[str, str]] = []
@@ -193,16 +197,20 @@ def _gather_repo_context(repo: str, primary: str) -> list[tuple[str, str]]:
         total += len(content)
 
     _add(primary, _PRIMARY_CONTEXT_BYTES)                    # 1) the finding's own file
-    d = os.path.dirname(primary)
-    ext = os.path.splitext(primary)[1]
-    sib_dir = os.path.join(repo, d) if d else repo
-    try:
-        names = sorted(os.listdir(sib_dir)) if os.path.isdir(sib_dir) else []
-    except OSError:
-        names = []
-    for name in names:                                      # 2) same-dir, same-extension siblings
-        if ext and os.path.splitext(name)[1] == ext:
-            _add(os.path.join(d, name) if d else name, _MAX_CONTEXT_BYTES)
+    if extra_paths:                                          # 2a) graph-ranked cross-file neighborhood (W2)
+        for rp in extra_paths:
+            _add(rp, _MAX_CONTEXT_BYTES)
+    else:                                                    # 2b) same-dir, same-extension siblings (default)
+        d = os.path.dirname(primary)
+        ext = os.path.splitext(primary)[1]
+        sib_dir = os.path.join(repo, d) if d else repo
+        try:
+            names = sorted(os.listdir(sib_dir)) if os.path.isdir(sib_dir) else []
+        except OSError:
+            names = []
+        for name in names:
+            if ext and os.path.splitext(name)[1] == ext:
+                _add(os.path.join(d, name) if d else name, _MAX_CONTEXT_BYTES)
     return out
 
 
@@ -434,7 +442,14 @@ class CodefixSession:
         # Phase A: feed the model the repo NEIGHBORHOOD (the finding's file + same-dir siblings), not one file,
         # so it can make a correct, possibly MULTI-FILE fix. `retry_context` (Phase C) carries prior build/test
         # failure text back into the prompt so the coder self-corrects.
-        ctx_files = _gather_repo_context(self.config.target_repo, fpath)
+        extra_paths = None
+        _prov = self.config.context_paths_provider
+        if _prov is not None and fpath:
+            try:
+                extra_paths = _prov(self.config.target_repo, fpath)   # graph neighborhood (offense-side, framework-local)
+            except Exception:  # noqa: BLE001 — a provider failure must never break the fix; fall back to siblings
+                extra_paths = None
+        ctx_files = _gather_repo_context(self.config.target_repo, fpath, extra_paths=extra_paths)
         if ctx_files:
             blocks = "\n\n".join(f"File `{cp}`:\n```\n{cc}\n```" for cp, cc in ctx_files)
             files_note = (f"\n\nThe finding is in `{fpath}`. Relevant files from the repository "

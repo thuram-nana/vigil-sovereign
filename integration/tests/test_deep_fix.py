@@ -227,3 +227,35 @@ def test_real_test_suite_failure_blocks_the_fix(tmp_path, monkeypatch):
     r = autopatch_live(_finding(repo), config=cfg, client=_client(_GOOD),
                        verify_oracle=codescan.build_code_fix_oracle(REF), verify_before_pr=True, max_fix_attempts=1)
     assert r.status == "build-failed" and r.remediated is False   # a suite that fails is NEVER verified
+
+
+# ---- W2: call-graph / cross-file comprehension context ----
+def test_gather_repo_context_reads_graph_extra_paths_safely(tmp_path):
+    from vigil_integration.live.codefix_runner import _gather_repo_context
+    repo = _mkrepo(tmp_path)   # svc/config.py + svc/util.py
+    # a graph-supplied path OUTSIDE the same dir is read; the finding's file is always first
+    ctx = _gather_repo_context(str(repo), "svc/config.py", extra_paths=["svc/util.py"])
+    paths = [p for p, _ in ctx]
+    assert paths[0] == "svc/config.py" and "svc/util.py" in paths
+    # the symlink/containment guard still applies to graph-supplied paths (no out-of-repo read)
+    import os
+    (repo / "svc" / "escape.py").symlink_to("/etc/passwd")
+    ctx2 = _gather_repo_context(str(repo), "svc/config.py", extra_paths=["svc/escape.py"])
+    assert all(p != "svc/escape.py" for p, _ in ctx2)   # symlink rejected
+
+
+def test_graph_context_paths_finds_callers_and_callees(tmp_path):
+    pytest.importorskip("framework")   # build_symbol_index
+    from vigil_integration.remediation.graph_context import graph_context_paths
+    repo = tmp_path / "g"; (repo / "svc").mkdir(parents=True)
+    (repo / "svc" / "__init__.py").write_text("", encoding="utf-8")
+    (repo / "svc" / "primary.py").write_text(
+        "from svc.dep import helper\n\n\ndef target():\n    return helper()\n", encoding="utf-8")
+    (repo / "svc" / "dep.py").write_text("def helper():\n    return 1\n", encoding="utf-8")      # CALLEE def
+    (repo / "svc" / "caller.py").write_text(
+        "from svc.primary import target\n\n\ndef use():\n    return target()\n", encoding="utf-8")  # CALLER
+    paths = graph_context_paths(str(repo), "svc/primary.py")
+    assert paths is not None
+    assert "svc/dep.py" in paths        # the file that DEFINES what primary calls
+    assert "svc/caller.py" in paths     # the file that CALLS what primary defines (regression surface)
+    assert "svc/primary.py" not in paths  # the finding's own file is excluded (added separately, first)
