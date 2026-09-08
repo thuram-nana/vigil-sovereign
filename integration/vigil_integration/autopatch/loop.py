@@ -56,6 +56,7 @@ from ..remediation import (
     may_remediate,
     spawn_remediation,
 )
+from ..remediation.breaker import inspect_fix as _breaker_inspect
 from ..remediation.codefix import (
     TIER_BUILD,
     TIER_CLONE,
@@ -592,8 +593,15 @@ def autopatch(
         elif fired:
             vstatus, vreason = "still-vulnerable", "the finding STILL fires on the patched clone — not fixed"
         else:
-            vstatus, vreason = "verified-no-pr", f"the finding's rule no longer fires on the patched clone{_tnote}"
-        rec.add("pre-pr-verify", TIER_BUILD, "ok" if fired is False else "fail", vreason, {"verify": vstatus})
+            # W6: the rule cleared AND the build/tests passed — but re-run the ADVERSARIAL breaker over the
+            # fix's OWN diff. A "fix" that got here by editing its tests, skipping/xfail-ing tests, or adding a
+            # rule suppression is a CHEAT the oracle+suite cannot see; it is NOT certified (never verified-no-pr).
+            _bv = _breaker_inspect(applied_diff)
+            if _bv.cheated:
+                vstatus, vreason = "cheat-suspected", "the fix gamed the gate (adversarial breaker): " + _bv.reason
+            else:
+                vstatus, vreason = "verified-no-pr", f"the finding's rule no longer fires on the patched clone{_tnote}"
+        rec.add("pre-pr-verify", TIER_BUILD, "ok" if vstatus == "verified-no-pr" else "fail", vreason, {"verify": vstatus})
         return PatchResult(
             remediation_id=rid, status=("verify-" + vstatus if vstatus != "verified-no-pr" else "verified-no-pr"),
             opened_pr=False, remediated=False, patched_paths=approved_paths, applied_diff=applied_diff,
