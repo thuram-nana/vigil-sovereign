@@ -518,6 +518,7 @@ def _cmd_patch(args: argparse.Namespace) -> int:
     _agent_diff = ""
     _deep_build_cmd = ""
     _deep_test_cmd = ""
+    _deep_pkg_manager = ""
     _deep_install_specs: tuple = ()
     _deep_language = ""
     _dep_cache = ""
@@ -532,6 +533,7 @@ def _cmd_patch(args: argparse.Namespace) -> int:
         _plan = detect_build_plan(finding.target_repo)
         _deep_build_cmd = _plan.build_cmd
         _deep_test_cmd = _plan.test_cmd
+        _deep_pkg_manager = _plan.pkg_manager
         _deep_install_specs = _plan.install_specs
         _deep_language = _plan.language
         _dep_cache = str(getattr(args, "dep_cache", "") or "").strip()
@@ -580,7 +582,7 @@ def _cmd_patch(args: argparse.Namespace) -> int:
         target_repo=finding.target_repo, base_dir=args.repo_base_dir, target_branch=args.target_branch,
         apply_edits=bool(args.apply_edits), model=resolve_model(args.model),  # --model > Settings choice > default
         build_cmd=_deep_build_cmd, test_cmd=_deep_test_cmd, install_specs=_deep_install_specs,
-        dep_cache_dir=_dep_cache, plan_language=_deep_language, context_paths_provider=_ctx_provider,
+        dep_cache_dir=_dep_cache, plan_language=_deep_language, plan_pkg_manager=_deep_pkg_manager, context_paths_provider=_ctx_provider,
         pr_enabled=bool(args.open_pr), pr_base=args.pr_base)
     _ext_diff = _agent_diff or ""
     if _agent_diff:
@@ -2412,6 +2414,7 @@ def _deep_fix_one(finding: Any, args: argparse.Namespace) -> Any:
         apply_edits=bool(getattr(args, "apply_edits", False)), model=resolve_model(getattr(args, "model", "")),
         build_cmd=plan.build_cmd, test_cmd=plan.test_cmd, install_specs=plan.install_specs,
         dep_cache_dir=str(getattr(args, "dep_cache", "") or "").strip(), plan_language=plan.language,
+        plan_pkg_manager=plan.pkg_manager,
         context_paths_provider=graph_context_paths, pr_enabled=False)   # a campaign is DIFF+LEDGER only, never a PR
     return autopatch_live(
         finding, config=cfg, client=None, operator_present=bool(getattr(args, "approve", False)),

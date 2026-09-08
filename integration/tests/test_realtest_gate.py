@@ -25,6 +25,112 @@ def _pyrepo(tmp_path, *, tests: bool) -> Path:
     return r
 
 
+# ---------- buildsys: JS/TS real-suite detection (Wave D) ----------
+def _jsrepo(tmp_path, *, lock="package-lock.json", scripts_test="jest", devdeps=None, name="jsr"):
+    import json as _json
+    r = tmp_path / name; (r / "src").mkdir(parents=True)
+    (r / "src" / "app.js").write_text("module.exports = x => x;\n", encoding="utf-8")
+    pkg = {"name": "x", "version": "0.0.0"}
+    if scripts_test is not None:
+        pkg["scripts"] = {"test": scripts_test}
+    if devdeps:
+        pkg["devDependencies"] = {d: "*" for d in devdeps}
+    (r / "package.json").write_text(_json.dumps(pkg), encoding="utf-8")
+    if lock:
+        (r / lock).write_text("{}\n" if lock.endswith(".json") else "# lock\n", encoding="utf-8")
+    return r
+
+
+def test_js_detects_real_npm_suite_via_scripts_test(tmp_path):
+    plan = detect_build_plan(str(_jsrepo(tmp_path, lock="package-lock.json", scripts_test="jest")))
+    assert plan.language == "javascript" and plan.pkg_manager == "npm"
+    assert plan.test_cmd == "npm test --silent" and plan.needs_network is True
+    assert "node --check" in plan.build_cmd and plan.deps_files == ("package-lock.json",)
+
+
+def test_js_detects_runner_from_devdeps_when_no_scripts_test(tmp_path):
+    plan = detect_build_plan(str(_jsrepo(tmp_path, lock="package-lock.json", scripts_test=None, devdeps=["vitest"])))
+    assert plan.test_cmd == "npx --offline vitest run" and plan.pkg_manager == "npm"
+
+
+def test_js_yarn_and_pnpm_package_managers(tmp_path):
+    yp = detect_build_plan(str(_jsrepo(tmp_path, lock="yarn.lock", scripts_test="jest", name="y")))
+    assert yp.pkg_manager == "yarn" and yp.test_cmd == "yarn test"
+    pp = detect_build_plan(str(_jsrepo(tmp_path, lock="pnpm-lock.yaml", scripts_test="jest", name="p")))
+    assert pp.pkg_manager == "pnpm" and pp.test_cmd == "pnpm test"
+
+
+def test_js_no_lockfile_or_placeholder_test_is_floor_only(tmp_path):
+    # no lockfile -> no reproducible install -> floor only
+    nl = detect_build_plan(str(_jsrepo(tmp_path, lock=None, scripts_test="jest", name="nl")))
+    assert nl.language == "javascript" and nl.test_cmd == "" and "node --check" in nl.build_cmd
+    # npm-init placeholder is not a real suite
+    ph = detect_build_plan(str(_jsrepo(tmp_path, lock="package-lock.json",
+                                       scripts_test='echo "Error: no test specified" && exit 1', name="ph")))
+    assert ph.test_cmd == "" and ph.language == "javascript"
+
+
+def test_js_compose_offline_npm_ci_then_runner():
+    plan = BuildPlan(test_cmd="npm test --silent", language="javascript", pkg_manager="npm",
+                     install_specs=("package-lock.json",))
+    cmd = compose_offline_test_command(plan, cache_dir_in_box="/vigil-npmcache")
+    assert 'npm_config_cache="/vigil-npmcache"' in cmd and "npm ci --offline" in cmd
+    assert cmd.strip().endswith("npm test --silent") and cmd.startswith("set -e;")
+    # yarn / pnpm variants use the frozen offline install with the mounted store
+    yc = compose_offline_test_command(BuildPlan(test_cmd="yarn test", language="javascript", pkg_manager="yarn"),
+                                      cache_dir_in_box="/c")
+    assert "yarn install --offline --frozen-lockfile" in yc and '--cache-folder "/c"' in yc
+    pc = compose_offline_test_command(BuildPlan(test_cmd="pnpm test", language="javascript", pkg_manager="pnpm"),
+                                      cache_dir_in_box="/c")
+    assert "pnpm install --offline --frozen-lockfile" in pc and '--store-dir "/c"' in pc
+
+
+def test_js_detect_is_total_on_hostile_package_json(tmp_path):
+    # red-pen BLOCK: a deeply-nested (valid) package.json under the size cap raised RecursionError before the
+    # reader was made truly total. package.json is repo-controlled, so detect_build_plan must NEVER raise.
+    import json as _json
+    r = tmp_path / "hostile"; r.mkdir()
+    (r / "package-lock.json").write_text("{}", encoding="utf-8")
+    (r / "package.json").write_text("[" * 100000 + "]" * 100000, encoding="utf-8")   # ~200 KB, deeply nested
+    plan = detect_build_plan(str(r))                                                  # must not raise
+    assert plan.language == "javascript" and plan.test_cmd == ""                      # unparseable -> floor only
+    # other hostile shapes: a list-typed package.json, binary bytes, a scripts/devDeps of the wrong type
+    for body in ("[1,2,3]", "\x00\x01 not json", '{"scripts": [1,2], "devDependencies": "nope"}',
+                 '{"scripts": {"test": 42}}'):
+        (r / "package.json").write_text(body, encoding="utf-8", errors="replace")
+        p2 = detect_build_plan(str(r))                                                # total, no raise
+        assert p2.language == "javascript" and p2.test_cmd == ""
+
+
+def test_detect_is_total_on_a_walk_recursionerror(tmp_path, monkeypatch):
+    # red-pen adjacent finding: os.walk is RECURSIVE on Python < 3.13, so a pathologically deep repo tree
+    # raised RecursionError past detect_build_plan's OSError-only guard. Simulate it (env-independent) and
+    # assert detection stays TOTAL — degrades to floor/empty, never raises.
+    import vigil_integration.remediation.buildsys as B
+    r = tmp_path / "deep"; (r / "svc").mkdir(parents=True)
+    (r / "pyproject.toml").write_text("[project]\nname='x'\nversion='0'\n", encoding="utf-8")
+    (r / "svc" / "app.py").write_text("def f():\n    return 1\n", encoding="utf-8")
+
+    def _boom_walk(*a, **k):
+        raise RecursionError("maximum recursion depth exceeded")
+    monkeypatch.setattr(B.os, "walk", _boom_walk)
+
+    plan = B.detect_build_plan(str(r))                 # must NOT raise
+    # pyproject is found via _has() (no walk); _has_tests' walk self-degrades -> floor-only, honest SKIP
+    assert plan.language == "python" and "compileall" in plan.build_cmd and plan.test_cmd == ""
+
+
+def test_js_compose_rejects_non_allowlisted_test_cmd_and_bad_inputs():
+    # a caller-built plan with an arbitrary (injection) test_cmd is REFUSED (only allowlisted runners compose)
+    evil = BuildPlan(test_cmd="jest; rm -rf /", language="javascript", pkg_manager="npm")
+    assert compose_offline_test_command(evil, cache_dir_in_box="/c") == ""
+    # relative cache and unknown PM are refused
+    assert compose_offline_test_command(BuildPlan(test_cmd="npm test --silent", language="javascript",
+                                                  pkg_manager="npm"), cache_dir_in_box="rel") == ""
+    assert compose_offline_test_command(BuildPlan(test_cmd="npm test --silent", language="javascript",
+                                                  pkg_manager="deno"), cache_dir_in_box="/c") == ""
+
+
 def test_detects_real_pytest_suite_and_install_specs(tmp_path):
     plan = detect_build_plan(str(_pyrepo(tmp_path, tests=True)))
     assert plan.language == "python"
