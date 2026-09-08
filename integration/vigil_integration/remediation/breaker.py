@@ -125,8 +125,19 @@ def _diff_targets(diff: str) -> list[str]:
 
 
 def _split_git_diff_paths(rest: str) -> list[str]:
-    """Both paths named on a `diff --git a/<x> b/<y>` header. git c-quotes a path (each independently) only
-    when it has unusual chars; unquoted paths never contain spaces. Best-effort for a demote-only heuristic."""
+    """Both paths named on a `diff --git a/<x> b/<y>` header.
+
+    The header is inherently ambiguous when a path contains a SPACE (git does NOT c-quote a plain space), so a
+    naive `\\S+` split truncates it. Three sources, unioned:
+
+    * c-quoted segments — git c-quotes control chars, ``"``, ``\\`` and high-bit bytes; recovered here (so a
+      TAB/high-bit path is caught).
+    * the equal-halves form ``a/P b/P`` — the blocks that rely SOLELY on this header (``GIT binary patch``,
+      mode change) leave the path UNCHANGED, so both halves are identical and we recover P EXACTLY by a
+      midpoint split, spaces and all. (git only emits DIFFERING header paths for a rename/copy, whose paths
+      are recovered space-preserving from the ``rename/copy from/to`` lines by ``_renamecopy_paths``.)
+    * distinct unquoted ``a/…``/``b/…`` tokens — the no-space case, and the unquoted side of a mixed header.
+    """
     rest = rest.strip()
     out: list[str] = []
     for q in re.findall(r'"((?:\\.|[^"\\])*)"', rest):           # c-quoted segment(s)
@@ -137,7 +148,12 @@ def _split_git_diff_paths(rest: str) -> list[str]:
         p = _unquote_path(dec)
         if p and p != "/dev/null":
             out.append(p)
-    for tok in re.findall(r'(?<!\S)[ab]/\S+', rest):            # unquoted a/… b/… tokens
+    if rest.startswith("a/"):                                    # equal-halves `a/P b/P` (space-safe)
+        s = rest[2:]
+        mid = (len(s) - 3) // 2
+        if mid > 0 and s[mid:mid + 3] == " b/" and s[:mid] == s[mid + 3:]:
+            out.append(s[:mid])
+    for tok in re.findall(r'(?<!\S)[ab]/\S+', rest):            # unquoted a/… b/… tokens (no-space)
         p = tok[2:]
         if p and p != "/dev/null":
             out.append(p)
