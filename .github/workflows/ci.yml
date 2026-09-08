@@ -509,6 +509,7 @@ jobs:
               integration/tests/test_codescan.py \
               integration/tests/test_deep_fix.py \
               integration/tests/test_remediation_attestation.py \
+              integration/tests/test_campaign.py \
               integration/tests/test_strix_fix.py \
               integration/tests/test_fix_ladder_matches_the_gate.py \
               integration/tests/test_remediation_cert.py \
