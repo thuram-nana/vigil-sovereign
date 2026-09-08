@@ -102,6 +102,57 @@ def test_js_detect_is_total_on_hostile_package_json(tmp_path):
         assert p2.language == "javascript" and p2.test_cmd == ""
 
 
+# ---------- buildsys: Go + JVM real-suite detection (Wave D) ----------
+def _gorepo(tmp_path, *, vendored, name="gor"):
+    r = tmp_path / name; r.mkdir()
+    (r / "go.mod").write_text("module x\n\ngo 1.22\n", encoding="utf-8")
+    (r / "main.go").write_text("package main\nfunc main() {}\n", encoding="utf-8")
+    if vendored:
+        (r / "vendor").mkdir()
+        (r / "vendor" / "modules.txt").write_text("# vendored\n", encoding="utf-8")
+    return r
+
+
+def test_go_vendored_runs_offline_without_a_cache(tmp_path):
+    plan = detect_build_plan(str(_gorepo(tmp_path, vendored=True)))
+    assert plan.language == "go" and plan.pkg_manager == "go-vendor"
+    assert plan.test_cmd == "go test ./..." and plan.needs_network is False
+    cmd = compose_offline_test_command(plan, cache_dir_in_box="/vigil-gocache")
+    assert "GOFLAGS=-mod=vendor" in cmd and "GOPROXY=off" in cmd and cmd.strip().endswith("go test ./...")
+
+
+def test_go_module_needs_the_module_cache(tmp_path):
+    plan = detect_build_plan(str(_gorepo(tmp_path, vendored=False, name="gom")))
+    assert plan.pkg_manager == "go-mod" and plan.needs_network is True
+    cmd = compose_offline_test_command(plan, cache_dir_in_box="/vigil-gocache")
+    assert 'GOMODCACHE="/vigil-gocache"' in cmd and "GOPROXY=off" in cmd and "go test ./..." in cmd
+
+
+def test_jvm_maven_and_gradle(tmp_path):
+    mvn = tmp_path / "mvn"; mvn.mkdir(); (mvn / "pom.xml").write_text("<project/>\n", encoding="utf-8")
+    mp = detect_build_plan(str(mvn))
+    assert mp.language == "jvm" and mp.pkg_manager == "maven" and mp.test_cmd == "mvn -o -q test"
+    mc = compose_offline_test_command(mp, cache_dir_in_box="/m2")
+    assert 'mvn -o -q -Dmaven.repo.local="/m2" test' in mc
+
+    for gf in ("build.gradle", "build.gradle.kts"):
+        g = tmp_path / ("g" + gf); g.mkdir(); (g / gf).write_text("plugins {}\n", encoding="utf-8")
+        gp = detect_build_plan(str(g))
+        assert gp.language == "jvm" and gp.pkg_manager == "gradle" and gp.test_cmd == "gradle --offline test"
+        gc = compose_offline_test_command(gp, cache_dir_in_box="/gh")
+        assert 'gradle --offline --gradle-user-home "/gh" test' in gc
+
+
+def test_go_jvm_compose_rejects_bad_inputs():
+    for pm in ("go-mod", "go-vendor"):
+        assert compose_offline_test_command(BuildPlan(test_cmd="go test ./...", language="go", pkg_manager=pm),
+                                            cache_dir_in_box="rel") == ""       # cache must be absolute
+    assert compose_offline_test_command(BuildPlan(test_cmd="x", language="go", pkg_manager="go-bogus"),
+                                        cache_dir_in_box="/c") == ""            # unknown go mode
+    assert compose_offline_test_command(BuildPlan(test_cmd="x", language="jvm", pkg_manager="sbt"),
+                                        cache_dir_in_box="/c") == ""            # unknown jvm tool
+
+
 def test_detect_is_total_on_a_walk_recursionerror(tmp_path, monkeypatch):
     # red-pen adjacent finding: os.walk is RECURSIVE on Python < 3.13, so a pathologically deep repo tree
     # raised RecursionError past detect_build_plan's OSError-only guard. Simulate it (env-independent) and
