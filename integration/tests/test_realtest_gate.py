@@ -102,6 +102,24 @@ def test_js_detect_is_total_on_hostile_package_json(tmp_path):
         assert p2.language == "javascript" and p2.test_cmd == ""
 
 
+def test_detect_is_total_on_a_walk_recursionerror(tmp_path, monkeypatch):
+    # red-pen adjacent finding: os.walk is RECURSIVE on Python < 3.13, so a pathologically deep repo tree
+    # raised RecursionError past detect_build_plan's OSError-only guard. Simulate it (env-independent) and
+    # assert detection stays TOTAL — degrades to floor/empty, never raises.
+    import vigil_integration.remediation.buildsys as B
+    r = tmp_path / "deep"; (r / "svc").mkdir(parents=True)
+    (r / "pyproject.toml").write_text("[project]\nname='x'\nversion='0'\n", encoding="utf-8")
+    (r / "svc" / "app.py").write_text("def f():\n    return 1\n", encoding="utf-8")
+
+    def _boom_walk(*a, **k):
+        raise RecursionError("maximum recursion depth exceeded")
+    monkeypatch.setattr(B.os, "walk", _boom_walk)
+
+    plan = B.detect_build_plan(str(r))                 # must NOT raise
+    # pyproject is found via _has() (no walk); _has_tests' walk self-degrades -> floor-only, honest SKIP
+    assert plan.language == "python" and "compileall" in plan.build_cmd and plan.test_cmd == ""
+
+
 def test_js_compose_rejects_non_allowlisted_test_cmd_and_bad_inputs():
     # a caller-built plan with an arbitrary (injection) test_cmd is REFUSED (only allowlisted runners compose)
     evil = BuildPlan(test_cmd="jest; rm -rf /", language="javascript", pkg_manager="npm")

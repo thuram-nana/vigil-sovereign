@@ -14,9 +14,12 @@ Two tiers of gate, in increasing strength:
     caller falls back to the dependency-free floor and marks the test axis honestly SKIPPED — a real test
     suite that could not run is NEVER reported as passed.
 
-This detector is PURE + TOTAL: it reads only the presence of well-known files, never imports `framework`,
-never runs anything, and its emitted commands contain only FIXED literals + detected filenames validated to
-be simple basenames (no repo-supplied free text) — so the composed `/bin/sh -c` string is injection-free.
+This detector is PURE + TOTAL: it reads only the presence of well-known files (and parses package.json in a
+fully-guarded reader), never imports `framework`, never runs anything, and is total on any attacker-influenced
+repo — a hostile package.json or a pathological directory tree (RecursionError from `os.walk` on Python < 3.13)
+degrades to a floor/empty plan rather than raising. Its emitted commands contain only FIXED literals + detected
+filenames validated to be simple basenames (no repo-supplied free text) — so the composed `/bin/sh -c` string
+is injection-free.
 """
 
 from __future__ import annotations
@@ -47,16 +50,21 @@ def _has(repo: str, *names: str) -> bool:
 
 
 def _any_ext(repo: str, ext: str, *, max_walk: int = 4000) -> bool:
-    """Is there at least one file with ``ext`` anywhere in the tree? Bounded walk; skips VCS/vendor dirs."""
+    """Is there at least one file with ``ext`` anywhere in the tree? Bounded walk; skips VCS/vendor dirs.
+    TOTAL: a hostile/pathological tree (e.g. a RecursionError from the recursive ``os.walk`` on Python < 3.13,
+    or an OSError mid-walk) degrades to "not found" (False), never a raise."""
     seen = 0
-    for root, dirs, files in os.walk(repo):
-        dirs[:] = [d for d in dirs if d not in (".git", "node_modules", ".venv", "venv", "__pycache__", "dist", "build")]
-        for f in files:
-            seen += 1
-            if seen > max_walk:
-                return False
-            if f.endswith(ext):
-                return True
+    try:
+        for root, dirs, files in os.walk(repo):
+            dirs[:] = [d for d in dirs if d not in (".git", "node_modules", ".venv", "venv", "__pycache__", "dist", "build")]
+            for f in files:
+                seen += 1
+                if seen > max_walk:
+                    return False
+                if f.endswith(ext):
+                    return True
+    except (OSError, RecursionError, MemoryError):
+        return False
     return False
 
 
@@ -65,14 +73,17 @@ def _has_tests(repo: str) -> bool:
     if _has(repo, "pytest.ini", "tox.ini") or _has(repo, "tests") or _has(repo, "test"):
         return True
     seen = 0
-    for root, dirs, files in os.walk(repo):
-        dirs[:] = [d for d in dirs if d not in (".git", "node_modules", ".venv", "venv", "__pycache__", "dist", "build")]
-        for f in files:
-            seen += 1
-            if seen > 6000:
-                return False
-            if (f.startswith("test_") and f.endswith(".py")) or f.endswith("_test.py"):
-                return True
+    try:
+        for root, dirs, files in os.walk(repo):
+            dirs[:] = [d for d in dirs if d not in (".git", "node_modules", ".venv", "venv", "__pycache__", "dist", "build")]
+            for f in files:
+                seen += 1
+                if seen > 6000:
+                    return False
+                if (f.startswith("test_") and f.endswith(".py")) or f.endswith("_test.py"):
+                    return True
+    except (OSError, RecursionError, MemoryError):
+        return False
     return False
 
 
@@ -169,7 +180,17 @@ def _js_offline_install(pm: str, cache_in_box: str) -> str:
 def detect_build_plan(repo: str) -> BuildPlan:
     """Best-effort (build_cmd, test_cmd, install_specs) for ``repo``. The dependency-free ``build_cmd`` is the
     always-runnable floor; ``test_cmd``/``install_specs`` describe the REAL suite the caller runs only once
-    deps are resolved (offline cache or gated network). Total: an unreadable repo yields an empty plan."""
+    deps are resolved (offline cache or gated network). TOTAL: ``repo`` is attacker-influenced (the codebase
+    being remediated), so ANY failure — unreadable repo, hostile package.json, or a pathological directory
+    tree that crashes ``os.walk`` (RecursionError on Python < 3.13) — degrades to a floor/empty plan, never a
+    raise. The walk helpers self-degrade to "not found"; this outer guard is the belt for anything else."""
+    try:
+        return _detect_build_plan_inner(repo)
+    except Exception:  # noqa: BLE001 — detection over an attacker-influenced repo must never crash the fix ladder
+        return BuildPlan(note="build-system detection failed on a hostile repo; build/test axis skipped")
+
+
+def _detect_build_plan_inner(repo: str) -> BuildPlan:
     try:
         if not repo or "://" in repo or not os.path.isdir(repo):
             return BuildPlan(note="no local repo to analyze")
