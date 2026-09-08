@@ -2295,6 +2295,68 @@ def _cmd_codescan(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_verify_remediation(args: argparse.Namespace) -> int:
+    """OFFLINE, zero-trust verification of a Proof-Carrying Remediation Attestation: re-derive the m-of-n
+    signature over the domain-tagged body, and — given --patched-root — re-DIGEST the tree (binding) and
+    RE-RUN the VULN-GONE oracle (the DAA rule must fire nowhere); with --dep-cache also RE-RUN the real test
+    suite (behavior-preserved). Nothing is trusted from the minter. Exit 0 iff the attestation VERIFIES."""
+    import json as _json
+    from .remediation.attestation import verify_remediation_attestation
+    try:
+        att = _json.loads(open(args.attestation, encoding="utf-8").read())
+    except (OSError, ValueError) as exc:
+        print(f"vigil verify-remediation: cannot read attestation {args.attestation!r}: {exc}", file=sys.stderr)
+        return 2
+    root: dict = {}
+    if args.trust_root:
+        try:
+            root = _json.loads(open(args.trust_root, encoding="utf-8").read())
+        except (OSError, ValueError) as exc:
+            print(f"vigil verify-remediation: cannot read --trust-root: {exc}", file=sys.stderr)
+            return 2
+    if not isinstance(root, dict) or not root:
+        print("vigil verify-remediation: --trust-root must be a JSON object {key_id: public_key_b64}", file=sys.stderr)
+        return 2
+
+    reverify_suite = None
+    if args.patched_root and args.dep_cache:
+        def reverify_suite(patched: str, _test_cmd: str, cache: str) -> bool:
+            # copy the patched tree to a throwaway dir and re-run its REAL suite OFFLINE in the sandbox
+            # (the operator-supplied tree is never written to); deps come only from the read-only cache.
+            import tempfile as _tf, shutil as _sh, os as _os
+            from .remediation.buildsys import detect_build_plan, compose_offline_test_command
+            from .live.sandbox_exec import run_sandboxed, SandboxUnavailable
+            tmp = _tf.mkdtemp(prefix="vigil-reverify-")
+            dst = _os.path.join(tmp, "tree")
+            try:
+                _sh.copytree(patched, dst, symlinks=False,
+                             ignore=_sh.ignore_patterns(".git", ".venv", "venv", "__pycache__"))
+                cmd = compose_offline_test_command(detect_build_plan(dst), cache_dir_in_box="/vigil-depcache")
+                if not cmd:
+                    return False
+                res = run_sandboxed(cmd, workspace=dst, timeout=600.0, ro_binds=((cache, "/vigil-depcache"),))
+                return (not res.timed_out) and res.exit_code == 0
+            except (OSError, SandboxUnavailable):
+                return False
+            finally:
+                _sh.rmtree(tmp, ignore_errors=True)
+
+    v = verify_remediation_attestation(
+        att, trust_root_pubkeys=root, threshold=int(args.threshold or 1),
+        patched_root=(args.patched_root or None), dep_cache=(args.dep_cache or None),
+        reverify_suite=reverify_suite)
+    print("--- remediation attestation ---")
+    print(f"tier           : {v.tier}")
+    print(f"authentic      : {v.authentic} ({v.signer_count} distinct signer(s))")
+    print(f"vuln_gone      : re-verified={v.vuln_gone_reverified}")
+    print(f"behavior       : established={v.behavior_established} re-verified={v.behavior_reverified}")
+    print(f"bound          : {v.bound}")
+    for r in v.reasons:
+        print(f"note           : {r}")
+    print(f"ok             : {v.ok}")
+    return 0 if v.ok else 1
+
+
 def _cmd_cloud_exploit(args: argparse.Namespace) -> int:
     """`vigil cloud-exploit <mode> --capture <file.json>` — route ONE retained cloud/K8s exploitation capture
     through its deterministic oracle → admission → (on a confirmed achieved-effect) a SIGNED, offline-
@@ -4317,6 +4379,23 @@ def build_parser() -> argparse.ArgumentParser:
                      help="fix-verification oracle: re-run DAA and report whether --ref still fires (exit 0 iff cleared)")
     pcs.add_argument("--ref", default="", help="the finding ref to verify (with --verify)")
     pcs.set_defaults(func=_cmd_codescan)
+
+    pvr = sub.add_parser("verify-remediation",
+                         help="OFFLINE, zero-trust verify of a Proof-Carrying Remediation Attestation "
+                              "(re-derive the m-of-n signature; with --patched-root RE-RUN the VULN-GONE "
+                              "oracle over the tree; with --dep-cache also RE-RUN the real test suite)")
+    pvr.add_argument("attestation", help="path to the attestation JSON")
+    pvr.add_argument("--trust-root", required=True,
+                     help="JSON file {key_id: public_key_b64} of the trusted signer(s) — the OUT-OF-BAND "
+                          "trust anchor (never taken from the attestation itself)")
+    pvr.add_argument("--threshold", type=int, default=1, help="m-of-n: minimum distinct valid signers")
+    pvr.add_argument("--patched-root", default="",
+                     help="the PATCHED tree to re-run the oracles over (re-digest binding + re-run the DAA "
+                          "rule). Absent ⇒ signature + binding only, oracles NOT re-run (tier 'unverified').")
+    pvr.add_argument("--dep-cache", default="",
+                     help="with --patched-root: a wheelhouse to re-run the REAL test suite OFFLINE (the "
+                          "behavior-preserved axis). The patched tree is copied to a throwaway dir, never written.")
+    pvr.set_defaults(func=_cmd_verify_remediation)
     pd = sub.add_parser("detect", help="run the Detection Mirror over log files (defensive oracle plane)")
     pd.add_argument("--access-log", default="", help="a CLF access log (edge/injection/recon oracles)")
     pd.add_argument("--auth-log", default="", help="an auth log (credential oracles)")
