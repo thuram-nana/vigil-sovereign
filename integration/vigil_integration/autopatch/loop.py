@@ -596,7 +596,7 @@ def autopatch(
             # W6: the rule cleared AND the build/tests passed — but re-run the ADVERSARIAL breaker over the
             # fix's OWN diff. A "fix" that got here by editing its tests, skipping/xfail-ing tests, or adding a
             # rule suppression is a CHEAT the oracle+suite cannot see; it is NOT certified (never verified-no-pr).
-            _bv = _breaker_inspect(applied_diff)
+            _bv = _breaker_inspect(applied_diff, changed_paths=approved_paths)   # canonical paths — no header-trick evasion
             if _bv.cheated:
                 vstatus, vreason = "cheat-suspected", "the fix gamed the gate (adversarial breaker): " + _bv.reason
             else:
