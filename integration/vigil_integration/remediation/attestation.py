@@ -24,8 +24,10 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
 
+import hashlib as _hashlib
+import os as _os
+
 from vigil_core import canonical_json, digest_payload, sign, verify_one
-from vigil_core.signed_build_manifest import digest_tree
 
 _ATT_SCHEMA = "vigil-remediation-attestation-v1"
 # Domain separator: a self-contained literal (no import-time coupling to a specific vigil_core version), also
@@ -43,6 +45,44 @@ TIER_FULLY_SOUND = "fully-sound"     # authentic + VULN-GONE re-verified + BEHAV
 TIER_VULN_ONLY = "vuln-gone-only"    # authentic + VULN-GONE re-verified; behavior not established (honest)
 TIER_UNVERIFIED = "unverified"       # signature/binding ok but a re-execution was not performed
 TIER_FAIL = "fail"                   # a hard failure (bad signature, mismatch, or the vuln is NOT gone)
+
+
+# The canonical "source tree" exclusion set for a remediation binding. It EXCLUDES vcs/venv/build dirs so the
+# digest is reproducible whether taken over the minter's throwaway copy OR the operator's real repo (which
+# has a .git). Dir-name entries prune directories; dot-prefixed entries are filename suffix excludes. This is
+# the ONE scheme both the minter and the verifier use, and it is recorded inside the signed binding so a
+# future scheme change can never silently break a prior attestation's verification.
+DEFAULT_TREE_EXCLUDES = (".git", ".hg", ".svn", ".venv", "venv", "node_modules", "__pycache__",
+                         ".pyc", ".pyo", ".DS_Store")
+
+
+def source_tree_digest(root: str, *, excludes: "tuple[str, ...]" = DEFAULT_TREE_EXCLUDES) -> str:
+    """Deterministic ``sha256:`` over the SOURCE files under ``root`` (sorted "<relpath>\0<filehash>"),
+    pruning excluded DIR NAMES (``.git`` etc.) and skipping excluded filename suffixes and symlinks. Unlike a
+    whole-tree digest this is reproducible across a checkout that has a ``.git`` and one that does not — the
+    property a remediation binding needs. Raises ``AttestationError`` on a missing/unreadable root."""
+    if not root or not _os.path.isdir(root):
+        raise AttestationError(f"not a directory: {root!r}")
+    names = frozenset(e for e in excludes if not e.startswith("."))
+    suffixes = tuple(e for e in excludes if e.startswith("."))
+    entries: list[str] = []
+    for dirpath, dirnames, filenames in _os.walk(root, followlinks=False):
+        dirnames[:] = sorted(d for d in dirnames if d not in names)
+        for fn in sorted(filenames):
+            if fn in names or (suffixes and fn.endswith(suffixes)):
+                continue
+            full = _os.path.join(dirpath, fn)
+            if _os.path.islink(full):        # a symlink is not shippable content (and a traversal risk)
+                continue
+            try:
+                with open(full, "rb") as fh:
+                    fh_digest = _hashlib.sha256(fh.read()).hexdigest()
+            except OSError:
+                continue
+            rel = _os.path.relpath(full, root).replace(_os.sep, "/")
+            entries.append(f"{rel}\0{fh_digest}")
+    entries.sort()
+    return "sha256:" + _hashlib.sha256("\n".join(entries).encode("utf-8")).hexdigest()
 
 
 def _canon(obj: Any) -> bytes:
@@ -77,6 +117,7 @@ def mint_remediation_attestation(
     suite_ran: bool = False,
     tests_passed: Optional[bool] = None,
     behavior_note: str = "",
+    tree_excludes: "tuple[str, ...]" = DEFAULT_TREE_EXCLUDES,   # recorded so verify re-digests identically
     signers: "list[tuple[str, str]]" = (),   # [(key_id, private_key_b64), ...] — m-of-n
 ) -> dict:
     """Mint a signed attestation. FAIL-CLOSED: refuses unless ``vuln_gone`` is True; refuses to record the
@@ -105,7 +146,7 @@ def mint_remediation_attestation(
         "vuln_gone": {"cleared": True, "oracle_kind": oracle_kind, "rule_id": rule_id},
         "behavior_preserved": behavior,
         "binding": {"base_tree_digest": base_tree_digest, "patched_tree_digest": patched_tree_digest,
-                    "diff_digest": diff_digest},
+                    "diff_digest": diff_digest, "tree_excludes": list(tree_excludes)},
         "signatures": [],
     }
     body = {k: v for k, v in att.items() if k != "signatures"}
@@ -204,7 +245,8 @@ def verify_remediation_attestation(
     if patched_root:
         # (a) binding: the supplied tree must be the one attested
         try:
-            dig, _ = digest_tree(patched_root)
+            _excl = tuple(binding.get("tree_excludes") or DEFAULT_TREE_EXCLUDES)
+            dig = source_tree_digest(patched_root, excludes=_excl)   # SAME scheme the minter used (recorded above)
         except Exception as exc:  # noqa: BLE001
             return _fail(f"cannot digest patched_root: {type(exc).__name__}: {exc}", authentic=True, signer_count=n)
         bound = (dig == binding.get("patched_tree_digest"))
