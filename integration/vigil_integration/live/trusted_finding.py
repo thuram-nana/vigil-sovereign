@@ -126,16 +126,14 @@ def finding_from_envelope(*, envelope_path: str, owner_pubkey: str, delegation_p
     )
 
 
-def finding_from_spine(*, base_dir: str, slug: str, target_repo: str, finding_ref: str = "",
-                       target_branch: str = "") -> Any:
-    """Build a CONFIRMED ``TriageFinding`` from the engagement's OWN signed offense spine (Option B — the
-    offense-local convenience). ``VigilCoreSpine.verify()`` audits the whole ``{slug}.spine`` file fail-closed
-    (every Ed25519 entry sig + the vigil_core hash-chain), then ``.rebuild()`` re-verifies each record and the
-    fact/evidence validator — so a rebuilt ``state.facts`` entry is cryptographically confirmed, not a copied
-    flag. Picks the single confirmed fact (or the one matching ``finding_ref``); refuses ambiguity."""
+def _load_confirmed_facts(*, base_dir: str, slug: str) -> "tuple[list, Path]":
+    """The ONE verified-spine loader: audit ``{slug}.spine`` fail-closed (every Ed25519 entry sig + the
+    vigil_core hash-chain via ``VigilCoreSpine.verify()``), ``rebuild()`` it (each record + the fact/evidence
+    validator re-verified), and return the cryptographically CONFIRMED facts (status=fact with a signed
+    evidence_ref). Shared by the single-finding and the campaign loaders so the security logic can never drift.
+    Raises ``TrustedFindingError`` on a missing/tampered spine or no confirmed facts."""
     from vigil_core.vault import Vault
 
-    from ..remediation.triage import TriageFinding
     from .spine_identity import DEFAULT_SPINE_KEY_FILE, load_or_create_spine_keypair
     from .spine_vigilcore import VigilCoreSpine
 
@@ -164,16 +162,12 @@ def finding_from_spine(*, base_dir: str, slug: str, target_repo: str, finding_re
              if str(getattr(f, "status", "")) == "fact" and str(getattr(f, "evidence_ref", "") or "").strip()]
     if not facts:
         raise TrustedFindingError(f"{spine_path}: no confirmed facts to patch")
-    if str(finding_ref or "").strip():
-        facts = [f for f in facts if str(getattr(f, "ref", "")) == str(finding_ref)]
-        if not facts:
-            raise TrustedFindingError(f"no confirmed fact with ref {finding_ref!r} on {spine_path}")
-    if len(facts) > 1:
-        refs = ", ".join(sorted(str(getattr(f, "ref", "")) for f in facts))
-        raise TrustedFindingError(
-            f"{spine_path} has {len(facts)} confirmed facts — pass --finding-ref to choose one of: {refs}")
+    return facts, spine_path
 
-    f = facts[0]
+
+def _fact_to_triage(f: Any, *, target_repo: str, target_branch: str) -> Any:
+    """A CONFIRMED ``TriageFinding`` from a rebuilt, cryptographically-verified spine fact."""
+    from ..remediation.triage import TriageFinding
     return TriageFinding(
         ref=str(getattr(f, "ref", "")),
         title=str(getattr(f, "title", "") or ""),
@@ -187,6 +181,33 @@ def finding_from_spine(*, base_dir: str, slug: str, target_repo: str, finding_re
         target_repo=str(target_repo or ""),
         target_branch=str(target_branch or ""),
     )
+
+
+def findings_from_spine(*, base_dir: str, slug: str, target_repo: str, target_branch: str = "") -> "list":
+    """ALL confirmed facts on the engagement's signed spine as ``TriageFinding``s (PCR/W3 — the campaign
+    loader). Same fail-closed verify+rebuild as :func:`finding_from_spine`; unlike it, MANY facts is the
+    expected case, not an ambiguity. Deterministic order (by ref)."""
+    facts, _ = _load_confirmed_facts(base_dir=base_dir, slug=slug)
+    facts = sorted(facts, key=lambda f: str(getattr(f, "ref", "")))
+    return [_fact_to_triage(f, target_repo=target_repo, target_branch=target_branch) for f in facts]
+
+
+def finding_from_spine(*, base_dir: str, slug: str, target_repo: str, finding_ref: str = "",
+                       target_branch: str = "") -> Any:
+    """Build a CONFIRMED ``TriageFinding`` from the engagement's OWN signed offense spine (Option B — the
+    offense-local convenience). Verify+rebuild via :func:`_load_confirmed_facts` (fail-closed). Picks the
+    single confirmed fact (or the one matching ``finding_ref``); refuses ambiguity."""
+    facts, spine_path = _load_confirmed_facts(base_dir=base_dir, slug=slug)
+    if str(finding_ref or "").strip():
+        facts = [f for f in facts if str(getattr(f, "ref", "")) == str(finding_ref)]
+        if not facts:
+            raise TrustedFindingError(f"no confirmed fact with ref {finding_ref!r} on {spine_path}")
+    if len(facts) > 1:
+        refs = ", ".join(sorted(str(getattr(f, "ref", "")) for f in facts))
+        raise TrustedFindingError(
+            f"{spine_path} has {len(facts)} confirmed facts — pass --finding-ref to choose one of: {refs}")
+
+    return _fact_to_triage(facts[0], target_repo=target_repo, target_branch=target_branch)
 
 
 def load_destruction_authority(*, trust_root_path: str, mandatory_signer_ids: Iterable[str]) -> Any:

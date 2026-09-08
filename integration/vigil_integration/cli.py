@@ -2385,6 +2385,85 @@ def _cmd_codescan(args: argparse.Namespace) -> int:
     return 0
 
 
+def _deep_fix_one(finding: Any, args: argparse.Namespace) -> Any:
+    """Run the gated deep-fix ladder for ONE finding on its own disposable clone (repo-aware context + real-
+    test gate + oracle re-verify), NEVER opening a PR. Returns the PatchResult. Reuses the exact same
+    executor/oracle/config as `vigil patch --deep` so a campaign fix is identically gated."""
+    from .codescan import build_code_fix_oracle
+    from .remediation.buildsys import detect_build_plan
+    from .remediation.graph_context import graph_context_paths
+    plan = detect_build_plan(finding.target_repo)
+    cfg = CodefixConfig(
+        target_repo=finding.target_repo, base_dir=args.repo_base_dir,
+        target_branch=str(getattr(args, "target_branch", "") or ""),
+        apply_edits=bool(getattr(args, "apply_edits", False)), model=resolve_model(getattr(args, "model", "")),
+        build_cmd=plan.build_cmd, test_cmd=plan.test_cmd, install_specs=plan.install_specs,
+        dep_cache_dir=str(getattr(args, "dep_cache", "") or "").strip(), plan_language=plan.language,
+        context_paths_provider=graph_context_paths, pr_enabled=False)   # a campaign is DIFF+LEDGER only, never a PR
+    return autopatch_live(
+        finding, config=cfg, client=None, operator_present=bool(getattr(args, "approve", False)),
+        verify_oracle=build_code_fix_oracle(finding.ref), verify_before_pr=True,
+        max_fix_attempts=max(1, int(getattr(args, "fix_attempts", 3) or 3)))
+
+
+def _cmd_remediate_campaign(args: argparse.Namespace) -> int:
+    """Batch remediation over EVERY confirmed fact on a codebase's signed spine: rank + dedupe, run the gated
+    deep-fix per finding (own clone, never a PR), optionally mint a Remediation Attestation per verified fix,
+    and emit a SIGNED, hash-chained remediation LEDGER. Exit 0 iff no finding ended FAILED."""
+    import json as _json, os as _os
+    from .live.trusted_finding import findings_from_spine
+    from .remediation.buildsys import detect_build_plan
+    from .remediation.campaign import run_campaign, build_ledger
+    repo = str(getattr(args, "target_repo", "") or "").strip()
+    slug = str(getattr(args, "from_spine", "") or "").strip()
+    if not repo or not _os.path.isdir(repo):
+        print("vigil remediate-campaign: --target-repo <existing dir> is required", file=sys.stderr); return 2
+    if not slug:
+        print("vigil remediate-campaign: --from-spine <slug> is required", file=sys.stderr); return 2
+    try:
+        findings = findings_from_spine(base_dir=args.repo_base_dir, slug=slug, target_repo=repo,
+                                       target_branch=str(getattr(args, "target_branch", "") or ""))
+    except Exception as exc:  # noqa: BLE001
+        print(f"vigil remediate-campaign: cannot load findings: {exc}", file=sys.stderr); return 2
+    if not findings:
+        print("vigil remediate-campaign: no confirmed facts on the spine"); return 1
+
+    def _fix_one(f: Any) -> Any:
+        return _deep_fix_one(f, args)
+
+    _attest_one = None
+    if bool(getattr(args, "attest", False)):
+        def _attest_one(f: Any, result: Any) -> "Optional[str]":
+            return _mint_deep_fix_attestation(result, f, args, detect_build_plan(f.target_repo))
+
+    camp = run_campaign(findings, fix_one=_fix_one, attest_one=_attest_one,
+                        max_findings=int(getattr(args, "max_findings", 0) or 0),
+                        dedupe=not bool(getattr(args, "no_dedupe", False)))
+    print(f"--- remediation campaign: {camp['total_findings']} confirmed fact(s), {camp['total_run']} fixed-attempted ---")
+    for e in camp["entries"]:
+        extra = f"  -> {e['attestation']}" if e.get("attestation") else ""
+        print(f"  {e['status']:9} {e['ref']}  [{e['bug_class']}]  ({e['ladder_status']}){extra}")
+    print(f"counts         : {camp['counts']}")
+
+    key_file = str(getattr(args, "attest_key", "") or "").strip()
+    if key_file:
+        try:
+            priv = open(key_file, encoding="ascii").read().strip()
+            key_id = str(getattr(args, "attest_key_id", "") or "owner").strip() or "owner"
+            ledger = build_ledger(camp["entries"], slug=slug, signers=[(key_id, priv)])
+            outp = _os.path.join(str(args.repo_base_dir or "."), f"{slug}.remediation-ledger.json")
+            _os.makedirs(_os.path.dirname(outp) or ".", exist_ok=True)
+            with open(outp, "w", encoding="utf-8") as fh:
+                _json.dump(ledger, fh, indent=2)
+            _os.chmod(outp, 0o600)
+            print(f"signed ledger  : {outp} (verify: the entries are hash-chained + the head is m-of-n signed)")
+        except Exception as exc:  # noqa: BLE001
+            print(f"ledger SKIPPED : {exc}")
+    else:
+        print("ledger         : SKIPPED (pass --attest-key to sign the hash-chained ledger)")
+    return 0 if camp["counts"]["failed"] == 0 else 1
+
+
 def _cmd_verify_remediation(args: argparse.Namespace) -> int:
     """OFFLINE, zero-trust verification of a Proof-Carrying Remediation Attestation: re-derive the m-of-n
     signature over the domain-tagged body, and — given --patched-root — re-DIGEST the tree (binding) and
@@ -4506,6 +4585,27 @@ def build_parser() -> argparse.ArgumentParser:
                      help="with --patched-root: a wheelhouse to re-run the REAL test suite OFFLINE (the "
                           "behavior-preserved axis). The patched tree is copied to a throwaway dir, never written.")
     pvr.set_defaults(func=_cmd_verify_remediation)
+
+    prc = sub.add_parser("remediate-campaign",
+                         help="batch remediation over EVERY confirmed fact on a codebase's signed spine: rank "
+                              "+ dedupe, run the gated deep-fix per finding (own clone, never a PR), optionally "
+                              "mint an attestation per verified fix, and emit a SIGNED hash-chained ledger")
+    prc.add_argument("--from-spine", required=True, help="the engagement slug whose <slug>.spine holds the facts")
+    prc.add_argument("--base-dir", dest="repo_base_dir", default=".vigil-live", help="dir holding <slug>.spine")
+    prc.add_argument("--target-repo", required=True, help="the codebase to remediate (fixes land in a disposable clone)")
+    prc.add_argument("--target-branch", default="", help="clone branch (default: repo default)")
+    prc.add_argument("--apply-edits", action="store_true", help="approve the proposed edits into the clone (deep fix)")
+    prc.add_argument("--approve", action="store_true", help="operator-present approval for the non-destructive gate")
+    prc.add_argument("--fix-attempts", type=int, default=3, help="iterate-until-green budget per finding")
+    prc.add_argument("--dep-cache", default="", help="wheelhouse for the offline REAL test suite (behavior gate)")
+    prc.add_argument("--max-findings", type=int, default=0, help="cap the campaign (0 = all ranked findings)")
+    prc.add_argument("--no-dedupe", action="store_true", help="do NOT dedupe findings by (rule, file)")
+    prc.add_argument("--model", default="", help="coder model override (default: Settings choice)")
+    prc.add_argument("--attest", action="store_true", help="mint a Remediation Attestation per verified fix")
+    prc.add_argument("--attest-key", default="", help="Ed25519 private-key (b64) file that signs attestations + the ledger")
+    prc.add_argument("--attest-key-id", default="owner", help="signer key_id recorded in the attestations + ledger head")
+    prc.set_defaults(func=_cmd_remediate_campaign)
+
     pd = sub.add_parser("detect", help="run the Detection Mirror over log files (defensive oracle plane)")
     pd.add_argument("--access-log", default="", help="a CLF access log (edge/injection/recon oracles)")
     pd.add_argument("--auth-log", default="", help="an auth log (credential oracles)")
