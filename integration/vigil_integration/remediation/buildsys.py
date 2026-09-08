@@ -31,6 +31,11 @@ from dataclasses import dataclass, field
 
 # a conservative basename allowlist so a detected filename can never inject shell metacharacters
 _SAFE_NAME = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
+# a shell-SAFE absolute in-box path: the composed `/bin/sh -c` strings interpolate cache_dir_in_box inside
+# double-quotes, so beyond "must be absolute" it must carry NO shell metacharacters (a hostile path like
+# `/x"; rm -rf / #` would otherwise break out of the quotes). Today the only runtime caller passes the fixed
+# constant `/vigil-depcache`; this gate makes the injection-free property hold even for a future caller.
+_SAFE_ABS_PATH = re.compile(r"^/[A-Za-z0-9._/-]{1,512}$")
 
 
 @dataclass(frozen=True)
@@ -177,6 +182,37 @@ def _js_offline_install(pm: str, cache_in_box: str) -> str:
 
 
 
+def _go_plan(repo: str) -> "BuildPlan | None":
+    """A real `go test ./...` plan for a Go module. If the repo VENDORS its deps (a `vendor/` dir), the suite
+    runs fully OFFLINE from the in-repo vendored tree (`-mod=vendor`); otherwise it needs the module cache
+    (GOMODCACHE) from an offline cache/gated install. No reliable dependency-free floor (gofmt aside), so the
+    floor is empty — the real suite is the gate. FIXED command literals only."""
+    if not _has(repo, "go.mod"):
+        return None
+    vendored = _has(repo, "vendor")
+    return BuildPlan(
+        build_cmd="", test_cmd="go test ./...", install_specs=("go.mod",), deps_files=("go.mod",),
+        needs_network=not vendored, language="go", pkg_manager=("go-vendor" if vendored else "go-mod"),
+        note=("go: REAL `go test ./...` from the in-repo vendor/ tree, fully offline (-mod=vendor)" if vendored
+              else "go: REAL `go test ./...` (needs the module cache GOMODCACHE from an offline cache/gated install)"))
+
+
+def _jvm_plan(repo: str) -> "BuildPlan | None":
+    """A real JVM test plan: Maven (`pom.xml` -> `mvn -o test`, offline from a mounted local repo) or Gradle
+    (`build.gradle[.kts]` -> `gradle --offline test`, offline from a mounted gradle home). No dependency-free
+    floor (JVM compile needs deps), so the floor is empty; the real suite is the gate. FIXED literals only."""
+    if _has(repo, "pom.xml"):
+        return BuildPlan(build_cmd="", test_cmd="mvn -o -q test", install_specs=("pom.xml",),
+                         deps_files=("pom.xml",), needs_network=True, language="jvm", pkg_manager="maven",
+                         note="jvm/maven: REAL `mvn -o test` (offline; needs the local ~/.m2 repo mounted)")
+    if _has(repo, "build.gradle", "build.gradle.kts"):
+        gf = "build.gradle" if _has(repo, "build.gradle") else "build.gradle.kts"
+        return BuildPlan(build_cmd="", test_cmd="gradle --offline test", install_specs=(gf,), deps_files=(gf,),
+                         needs_network=True, language="jvm", pkg_manager="gradle",
+                         note="jvm/gradle: REAL `gradle --offline test` (needs the gradle cache/home mounted)")
+    return None
+
+
 def detect_build_plan(repo: str) -> BuildPlan:
     """Best-effort (build_cmd, test_cmd, install_specs) for ``repo``. The dependency-free ``build_cmd`` is the
     always-runnable floor; ``test_cmd``/``install_specs`` describe the REAL suite the caller runs only once
@@ -226,10 +262,15 @@ def _detect_build_plan_inner(repo: str) -> BuildPlan:
             note="javascript: node --check syntax gate; no runnable test suite detected "
                  "(no lockfile, or no scripts.test / jest|vitest|mocha)")
 
-    # ---- Go (later wave) ----
-    if _has(repo, "go.mod"):
-        return BuildPlan(build_cmd="", test_cmd="", language="go",
-                         note="go: build/test skipped (needs the module cache; a later wave)")
+    # ---- Go (Wave D: real `go test`, vendored=offline, else module cache) ----
+    _gp = _go_plan(repo)
+    if _gp is not None:
+        return _gp
+
+    # ---- JVM (Wave D: real maven/gradle suite, offline from a mounted local repo/cache) ----
+    _jp = _jvm_plan(repo)
+    if _jp is not None:
+        return _jp
 
     return BuildPlan(note="no known build system detected — build/test axis skipped (apply-check only)")
 
@@ -257,7 +298,7 @@ def compose_offline_test_command(plan: BuildPlan, *, cache_dir_in_box: str) -> s
     validated specs + the (caller-controlled, absolute) cache path are interpolated."""
     if not plan.test_cmd:
         return ""
-    if not (cache_dir_in_box or "").startswith("/"):
+    if not _SAFE_ABS_PATH.match(cache_dir_in_box or ""):   # absolute AND shell-safe (no metacharacters)
         return ""
 
     if plan.language == "javascript":
@@ -268,6 +309,22 @@ def compose_offline_test_command(plan: BuildPlan, *, cache_dir_in_box: str) -> s
         if not install or plan.test_cmd not in _JS_TEST_CMDS:   # only an allowlisted runner is interpolated
             return ""
         return f"set -e; {install}; {plan.test_cmd}"
+
+    if plan.language == "go":
+        # FIXED command by mode (deps in-repo when vendored; else from the mounted GOMODCACHE), forced OFFLINE.
+        if plan.pkg_manager == "go-vendor":
+            return "set -e; export GOFLAGS=-mod=vendor GOPROXY=off; go test ./..."
+        if plan.pkg_manager == "go-mod":
+            return f'set -e; export GOMODCACHE="{cache_dir_in_box}" GOPROXY=off GOFLAGS=-mod=mod; go test ./...'
+        return ""
+
+    if plan.language == "jvm":
+        # FIXED command by tool, forced OFFLINE against the mounted local repo / gradle home.
+        if plan.pkg_manager == "maven":
+            return f'set -e; mvn -o -q -Dmaven.repo.local="{cache_dir_in_box}" test'
+        if plan.pkg_manager == "gradle":
+            return f'set -e; gradle --offline --gradle-user-home "{cache_dir_in_box}" test'
+        return ""
 
     if plan.language != "python" or not plan.install_specs:
         return ""
