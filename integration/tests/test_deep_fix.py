@@ -181,3 +181,49 @@ def test_external_noop_diff_is_rejected_never_trusted(tmp_path):
                        proposed_diff=noop)
     # a no-op or malformed agent diff can NEVER read as verified — it is still-vulnerable or build-failed
     assert r.status in ('verify-still-vulnerable', 'build-failed') and r.remediated is False
+
+
+# ---- W1a: the dependency-aware REAL test suite (offline, behavior-preserved oracle) ----
+@_sandbox
+def test_real_test_suite_runs_offline_when_dep_cache_present(tmp_path, monkeypatch):
+    from vigil_integration.live import codefix_runner as CR
+    from vigil_integration.live.sandbox_exec import SandboxOutcome
+    repo = _mkrepo(tmp_path)
+    cache = tmp_path / "wheelhouse"; cache.mkdir()
+    calls = []
+
+    def _fake(cmd, *, workspace, timeout, ro_binds=(), output_cap=None, run=None):
+        calls.append((cmd, tuple(ro_binds)))
+        return SandboxOutcome(exit_code=0, stdout="", stderr="")   # compile floor + real suite both pass
+
+    monkeypatch.setattr(CR, "run_sandboxed", _fake)
+    cfg = CodefixConfig(target_repo=str(repo), base_dir=str(tmp_path / "b"), apply_edits=True, model="x",
+                        build_cmd="python3 -m compileall -q .", test_cmd="python -m pytest -q",
+                        install_specs=("-e", ".", "pytest"), dep_cache_dir=str(cache), plan_language="python")
+    r = autopatch_live(_finding(repo), config=cfg, client=_client(_GOOD),
+                       verify_oracle=codescan.build_code_fix_oracle(REF), verify_before_pr=True, max_fix_attempts=1)
+    assert r.status == "verified-no-pr" and r.remediated is False
+    suite = [c for c in calls if "pytest" in c[0]]
+    assert suite, "the REAL pytest suite must have run"
+    assert '--no-index --find-links="/vigil-depcache"' in suite[0][0]        # OFFLINE install, no network
+    assert suite[0][1] == ((str(cache), "/vigil-depcache"),)                  # wheelhouse mounted read-only
+
+
+@_sandbox
+def test_real_test_suite_failure_blocks_the_fix(tmp_path, monkeypatch):
+    from vigil_integration.live import codefix_runner as CR
+    from vigil_integration.live.sandbox_exec import SandboxOutcome
+    repo = _mkrepo(tmp_path)
+    cache = tmp_path / "wh"; cache.mkdir()
+
+    def _fake(cmd, *, workspace, timeout, ro_binds=(), output_cap=None, run=None):
+        # the compile floor passes; the REAL suite FAILS → a behavior regression MUST block the fix
+        return SandboxOutcome(exit_code=(1 if "pytest" in cmd else 0), stdout="", stderr="a test failed")
+
+    monkeypatch.setattr(CR, "run_sandboxed", _fake)
+    cfg = CodefixConfig(target_repo=str(repo), base_dir=str(tmp_path / "b"), apply_edits=True, model="x",
+                        build_cmd="python3 -m compileall -q .", test_cmd="python -m pytest -q",
+                        install_specs=("pytest",), dep_cache_dir=str(cache), plan_language="python")
+    r = autopatch_live(_finding(repo), config=cfg, client=_client(_GOOD),
+                       verify_oracle=codescan.build_code_fix_oracle(REF), verify_before_pr=True, max_fix_attempts=1)
+    assert r.status == "build-failed" and r.remediated is False   # a suite that fails is NEVER verified
