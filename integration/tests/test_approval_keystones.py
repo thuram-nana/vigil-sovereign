@@ -242,6 +242,65 @@ def test_strix_hook_binds_and_shows_the_real_command(tmp_path):
         _run(hook.on_tool_start(_ctx("exec_command", cmd_b), None, _Tool("exec_command")))
 
 
+def test_strix_approver_is_concurrency_safe(tmp_path, monkeypatch):
+    # REGRESSION (concurrency action-binding bypass): the SDK runs exec tools CONCURRENTLY (each A3
+    # bounded-wait is offloaded to its own worker thread). A SINGLE shared ApprovalBroker holds a mutable
+    # self._current, so concurrent binds clobber one another: with N calls, the LAST bind wins and the other
+    # N-1 calls capture the WRONG action in token_source — most are falsely denied, and the one that
+    # "succeeds" consumes a token the owner signed for a DIFFERENT action (a real action-binding bypass under
+    # concurrency, not merely availability). The fix gives each approve() its OWN broker.
+    #
+    # To make this a DETERMINISTIC guard (not a GIL-timing coin-flip), a Barrier forces the true interleaving
+    # the live executor-offload produces: every thread completes bind() before ANY enters token_source (where
+    # self._current is captured). With the shared broker this fails ~N-1/N; with the per-call fix all N pass.
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+    from vigil_integration.live import approval_broker as _AB
+    from vigil_integration.warden_gate import _build_strix_approver
+
+    monkeypatch.setenv("VIGIL_APPROVAL_WAIT_SECONDS", "20")   # a clobbered call fails FAST, not after 300s
+    base, kp, _authority = _provisioned(tmp_path)
+    root = B.approvals_root(base)
+    approver = _build_strix_approver(base)
+    assert approver is not None
+
+    n = 12
+    barrier = threading.Barrier(n)
+    _orig_ts = _AB.ApprovalBroker.token_source
+
+    def _barriered_token_source(self):
+        # sync at token_source ENTRY: guarantees all N binds have happened before any capture of self._current
+        try:
+            barrier.wait(timeout=15)
+        except threading.BrokenBarrierError:
+            pass
+        return _orig_ts(self)
+
+    monkeypatch.setattr(_AB.ApprovalBroker, "token_source", _barriered_token_source)
+
+    stop = threading.Event()
+
+    def _signer():                                            # in-process owner: sign every pending, fast
+        while not stop.is_set():
+            for p in B.list_pending(root):
+                if p.request_id in B.signed_request_ids(root):
+                    continue
+                act = ApprovalAction(p.tool_name, p.target, p.action_digest)
+                B.write_signed_token(root, p.request_id, _sign(kp, act, p.nonce))
+            stop.wait(0.02)
+
+    sig = threading.Thread(target=_signer, daemon=True); sig.start()
+    try:
+        with ThreadPoolExecutor(max_workers=n) as ex:
+            # DISTINCT actions (distinct args → distinct action_digest → distinct request_id), fired together
+            results = list(ex.map(
+                lambda i: approver("exec_command", "shell", '{"command": "echo %d"}' % i), range(n)))
+    finally:
+        stop.set(); sig.join(timeout=2)
+
+    assert all(results), f"concurrent approvals falsely denied: {results.count(False)}/{n} (broker clobber)"
+
+
 # ---------------------------------------------------------------------------------------------------
 # ENH1 — a FOUND-but-REJECTED token pauses DISTINCTLY (approval_rejected), security unchanged
 # ---------------------------------------------------------------------------------------------------

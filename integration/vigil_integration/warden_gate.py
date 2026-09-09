@@ -597,7 +597,7 @@ def _build_strix_approver(base_dir: str) -> Optional[Callable[[str, str, Any], b
     authority = load_authority(base_dir)
     if authority is None:
         return None
-    broker = ApprovalBroker(approvals_root(base_dir))
+    _approvals_root = approvals_root(base_dir)
     ledger = NonceLedger(Path(base_dir) / "approval-nonces")
 
     def approve(tool_name: str, target: str, args: Any) -> bool:
@@ -605,6 +605,12 @@ def _build_strix_approver(base_dir: str) -> Optional[Callable[[str, str, Any], b
             act = ApprovalAction(tool_name, target, action_digest(tool_name, target, args))
         except Exception:  # noqa: BLE001 — a non-serialisable action can't be bound ⇒ deny (fail-closed)
             return False
+        # PER-CALL broker: the SDK runs exec tools CONCURRENTLY (each bounded-wait on its own worker thread),
+        # and ApprovalBroker holds a mutable ``self._current``. A single shared instance let concurrent binds
+        # clobber one another — call A would then publish/poll for call B's action and be denied (an
+        # intermittent, burst-only false denial). A fresh broker per call isolates each action's bind +
+        # token wait. ``authority`` (read-only) and ``ledger`` (file-backed, single-use) stay shared.
+        broker = ApprovalBroker(_approvals_root)
         broker.bind(act, args_preview=args)
         pend = broker.token_source()  # publishes the pending request + (bounded) polls for a signed token
         if not (isinstance(pend, tuple) and len(pend) == 2):
