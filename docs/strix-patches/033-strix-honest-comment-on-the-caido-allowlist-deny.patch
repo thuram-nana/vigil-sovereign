@@ -1,0 +1,28 @@
+From 8271648d21d1b50569384d842d6e7ed8ae1c5bfc Mon Sep 17 00:00:00 2001
+Subject: [strix-patch 033] strix: honest comment on the caido allowlist/denylist values (red-pen nit)
+X-VIGIL-Commit: 8271648d21d1b50569384d842d6e7ed8ae1c5bfc
+X-VIGIL-Date: 2026-09-08T20:43:22-04:00
+
+diff --git a/vendor/strix/strix/runtime/vigil_upstream.py b/vendor/strix/strix/runtime/vigil_upstream.py
+index f7f8606c..576f8358 100644
+--- a/vendor/strix/strix/runtime/vigil_upstream.py
++++ b/vendor/strix/strix/runtime/vigil_upstream.py
+@@ -46,10 +46,14 @@ def _upstream_mutation_body(host: str, port: int, token: str) -> str:
+     token — the gateway then demands no client credential, and inventing one would fail the handshake.
+     """
+     connection = {"host": host, "port": port, "isTLS": False}
+-    # Caido's CreateUpstreamProxyHttpInput requires BOTH non-null lists (schema drift): allowlist ["*"] forwards
+-    # EVERYTHING to the VIGIL gateway; denylist [] denies nothing at the caido layer — the gateway is the real
+-    # egress enforcement point (its scope allowlist + the never-liftable metadata/RFC1918 floor), so caido must
+-    # not second-guess or filter it.
++    # Caido's CreateUpstreamProxyHttpInput now REQUIRES both non-null lists (schema drift). We send the
++    # widest values — allowlist ["*"], denylist [] — the INTENT being "route everything through the upstream
++    # (the VIGIL gateway), filter nothing here" (corroborated by the live run: traffic flowed and the agent
++    # engaged). Crucially, egress safety does NOT depend on getting this caido semantic right: the sandbox net
++    # is `--internal` (no route out), an nftables backstop drops every non-gateway route, and the gateway
++    # re-checks every resolved IP against a never-liftable metadata/RFC1918 floor. Under any reading these
++    # values fail CLOSED (a wrong reading breaks connectivity, it cannot open a bypass) — the gateway stays
++    # the sole egress enforcement point.
+     variables: dict = {"input": {"enabled": True, "connection": connection, "allowlist": ["*"], "denylist": []}}
+     if token:
+         variables["input"]["auth"] = {"basic": {"username": _UPSTREAM_AUTH_USER, "password": token}}

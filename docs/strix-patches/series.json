@@ -444,10 +444,28 @@
    "subject": "S10-lifecycle: fix P8 collection ERROR \u2014 importorskip the strix runtime chain"
   },
   {
-   "commit": "76e700566e8c16f0d1a558f213f47c928dfdf129",
+   "commit": "edeaeaf2b7f34159fd3b1a5b460d4704bb37c773",
    "file": "030-s6-control-exchange-close-the-medium-scheme-pair.patch",
-   "sha256": "b4eea9b43372fa2919e59818c053e8d82f5f696b18ed1d1a3609ebe0b70adb70",
+   "sha256": "b22e3c3e3f1dce5ad839a97b214bb0e3a83740da73a7e4b65031162c791b7ca8",
    "subject": "S6 control exchange: close the MEDIUM scheme-pairing residual (fail-closed twin scheme)"
+  },
+  {
+   "commit": "b44bf3b3bcf9cadcf63168a6246dadf0f40fbf1e",
+   "file": "031-s6-control-exchange-fix-the-veracity-layer-doc-d.patch",
+   "sha256": "913810ef030d1a7450f7879a42d22df38061857169a967c9f249c24451e6cccc",
+   "subject": "S6 control exchange: fix the veracity-layer doc drift the scheme rework left"
+  },
+  {
+   "commit": "36b8f0773b3cf78df57261cbc56898caba1fc169",
+   "file": "032-strix-fix-caido-upstream-proxy-schema-drift-allo.patch",
+   "sha256": "57e70e967a15c3a28e5cf686dd61aa6545bf386187dc475635c65b466669c2cb",
+   "subject": "strix: fix caido upstream-proxy schema drift (allowlist + denylist now required)"
+  },
+  {
+   "commit": "8271648d21d1b50569384d842d6e7ed8ae1c5bfc",
+   "file": "033-strix-honest-comment-on-the-caido-allowlist-deny.patch",
+   "sha256": "afa692cb64a7ce057d6a2209c8249574b80636c04912ef41620ee45fd25661a1",
+   "subject": "strix: honest comment on the caido allowlist/denylist values (red-pen nit)"
   }
  ],
  "schema": 1,
@@ -563,7 +581,7 @@
   "vendor/strix/strix/runtime/local_dir_staging.py": "4f8bc84226fb42cf816376e1706cecbe72dd633c69bf4a39eb2489f84b7fdabc",
   "vendor/strix/strix/runtime/sandbox_hardening.py": "29f8bdaa6fe7d62249b524a00ac4d5c1edea2f262a1f0aec9dbc01a4c2dfb8a4",
   "vendor/strix/strix/runtime/session_manager.py": "1fe3f419a4b29f4a2f810a9e23cd5a66316dd368adc79e08b1a9a5c1eaea77a0",
-  "vendor/strix/strix/runtime/vigil_upstream.py": "8b83cd8f6fb3f11969e7883ee9fe9f0f86f49c0836de88c2d24fb2d7368cb42d",
+  "vendor/strix/strix/runtime/vigil_upstream.py": "db14fcf90bed15134960ac2702ae5a5a59dffb11422c05c8502c8d61f46e92de",
   "vendor/strix/strix/skills/README.md": "0f9834d74d33d20a1985189a2dc7e090c090cd4ea3111522fdfdc359c7540177",
   "vendor/strix/strix/skills/__init__.py": "9402336b992269e3668a11cd863b177718bd66af9455e003cf07c329bd8a7f0a",
   "vendor/strix/strix/skills/cloud/.gitkeep": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -693,7 +711,7 @@
   "vendor/strix/tests_vigil/test_reasoning_thinking.py": "56365c986fa3bb04ca250e45f7f2b126732a1c0c4b827d224ea44c75d9d515b0",
   "vendor/strix/tests_vigil/test_sandbox_hardening.py": "c5a6cbb4e51c5a86d1c9f30785fa7234af47706015222a9323f420b8a2059be8",
   "vendor/strix/tests_vigil/test_vigil_graph_progress.py": "b468b4ab45c317175af0a267f5692984c570b88a5bcf960f0e9f102706ffb337",
-  "vendor/strix/tests_vigil/test_vigil_upstream_proxy.py": "e3de57c3f4a12ac48f08815597d3c70ee959867bc52b4642470b341052ff55c1",
+  "vendor/strix/tests_vigil/test_vigil_upstream_proxy.py": "5aec4434f994f0cc69b3fc2c6773ed484e2a26450bf6f1dcacfeb27dee63515c",
   "vendor/strix/uv.lock": "ef01a512cf243a9b7084e4724a89c52ef8567e6a144057219e72940280716a26"
  },
  "upstream_commit": "230324d2b80a5a27506f85fc521845d8464b04c0",

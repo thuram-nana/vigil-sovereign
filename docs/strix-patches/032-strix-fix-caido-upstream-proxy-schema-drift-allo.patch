@@ -1,0 +1,38 @@
+From 36b8f0773b3cf78df57261cbc56898caba1fc169 Mon Sep 17 00:00:00 2001
+Subject: [strix-patch 032] strix: fix caido upstream-proxy schema drift (allowlist + denylist now required)
+X-VIGIL-Commit: 36b8f0773b3cf78df57261cbc56898caba1fc169
+X-VIGIL-Date: 2026-09-08T20:28:10-04:00
+
+diff --git a/vendor/strix/strix/runtime/vigil_upstream.py b/vendor/strix/strix/runtime/vigil_upstream.py
+index 14772267..f7f8606c 100644
+--- a/vendor/strix/strix/runtime/vigil_upstream.py
++++ b/vendor/strix/strix/runtime/vigil_upstream.py
+@@ -46,7 +46,11 @@ def _upstream_mutation_body(host: str, port: int, token: str) -> str:
+     token — the gateway then demands no client credential, and inventing one would fail the handshake.
+     """
+     connection = {"host": host, "port": port, "isTLS": False}
+-    variables: dict = {"input": {"enabled": True, "connection": connection}}
++    # Caido's CreateUpstreamProxyHttpInput requires BOTH non-null lists (schema drift): allowlist ["*"] forwards
++    # EVERYTHING to the VIGIL gateway; denylist [] denies nothing at the caido layer — the gateway is the real
++    # egress enforcement point (its scope allowlist + the never-liftable metadata/RFC1918 floor), so caido must
++    # not second-guess or filter it.
++    variables: dict = {"input": {"enabled": True, "connection": connection, "allowlist": ["*"], "denylist": []}}
+     if token:
+         variables["input"]["auth"] = {"basic": {"username": _UPSTREAM_AUTH_USER, "password": token}}
+     return json.dumps({
+diff --git a/vendor/strix/tests_vigil/test_vigil_upstream_proxy.py b/vendor/strix/tests_vigil/test_vigil_upstream_proxy.py
+index afee41f3..79b1ea36 100644
+--- a/vendor/strix/tests_vigil/test_vigil_upstream_proxy.py
++++ b/vendor/strix/tests_vigil/test_vigil_upstream_proxy.py
+@@ -58,6 +58,11 @@ def test_the_mutation_points_caido_at_the_gateway():
+     assert conn == {"host": "172.31.240.2", "port": 48081, "isTLS": False}
+     assert body["variables"]["input"]["enabled"] is True
+     assert "createUpstreamProxyHttp" in body["query"]
++    # Caido's CreateUpstreamProxyHttpInput requires both non-null lists (schema drift). Forward EVERYTHING to
++    # the gateway (allowlist ["*"]) and filter nothing at the caido layer (denylist []) — the gateway is the
++    # real egress enforcement point. Without these, caido rejects the mutation ("field required but not provided").
++    assert body["variables"]["input"]["allowlist"] == ["*"]
++    assert body["variables"]["input"]["denylist"] == []
+ 
+ 
+ def test_no_token_means_no_auth_block_rather_than_an_invented_credential():
