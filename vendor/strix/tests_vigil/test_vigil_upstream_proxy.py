@@ -58,6 +58,11 @@ def test_the_mutation_points_caido_at_the_gateway():
     assert conn == {"host": "172.31.240.2", "port": 48081, "isTLS": False}
     assert body["variables"]["input"]["enabled"] is True
     assert "createUpstreamProxyHttp" in body["query"]
+    # Caido's CreateUpstreamProxyHttpInput requires both non-null lists (schema drift). Forward EVERYTHING to
+    # the gateway (allowlist ["*"]) and filter nothing at the caido layer (denylist []) — the gateway is the
+    # real egress enforcement point. Without these, caido rejects the mutation ("field required but not provided").
+    assert body["variables"]["input"]["allowlist"] == ["*"]
+    assert body["variables"]["input"]["denylist"] == []
 
 
 def test_no_token_means_no_auth_block_rather_than_an_invented_credential():

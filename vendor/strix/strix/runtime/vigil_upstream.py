@@ -46,7 +46,11 @@ def _upstream_mutation_body(host: str, port: int, token: str) -> str:
     token — the gateway then demands no client credential, and inventing one would fail the handshake.
     """
     connection = {"host": host, "port": port, "isTLS": False}
-    variables: dict = {"input": {"enabled": True, "connection": connection}}
+    # Caido's CreateUpstreamProxyHttpInput requires BOTH non-null lists (schema drift): allowlist ["*"] forwards
+    # EVERYTHING to the VIGIL gateway; denylist [] denies nothing at the caido layer — the gateway is the real
+    # egress enforcement point (its scope allowlist + the never-liftable metadata/RFC1918 floor), so caido must
+    # not second-guess or filter it.
+    variables: dict = {"input": {"enabled": True, "connection": connection, "allowlist": ["*"], "denylist": []}}
     if token:
         variables["input"]["auth"] = {"basic": {"username": _UPSTREAM_AUTH_USER, "password": token}}
     return json.dumps({
