@@ -46,10 +46,14 @@ def _upstream_mutation_body(host: str, port: int, token: str) -> str:
     token — the gateway then demands no client credential, and inventing one would fail the handshake.
     """
     connection = {"host": host, "port": port, "isTLS": False}
-    # Caido's CreateUpstreamProxyHttpInput requires BOTH non-null lists (schema drift): allowlist ["*"] forwards
-    # EVERYTHING to the VIGIL gateway; denylist [] denies nothing at the caido layer — the gateway is the real
-    # egress enforcement point (its scope allowlist + the never-liftable metadata/RFC1918 floor), so caido must
-    # not second-guess or filter it.
+    # Caido's CreateUpstreamProxyHttpInput now REQUIRES both non-null lists (schema drift). We send the
+    # widest values — allowlist ["*"], denylist [] — the INTENT being "route everything through the upstream
+    # (the VIGIL gateway), filter nothing here" (corroborated by the live run: traffic flowed and the agent
+    # engaged). Crucially, egress safety does NOT depend on getting this caido semantic right: the sandbox net
+    # is `--internal` (no route out), an nftables backstop drops every non-gateway route, and the gateway
+    # re-checks every resolved IP against a never-liftable metadata/RFC1918 floor. Under any reading these
+    # values fail CLOSED (a wrong reading breaks connectivity, it cannot open a bypass) — the gateway stays
+    # the sole egress enforcement point.
     variables: dict = {"input": {"enabled": True, "connection": connection, "allowlist": ["*"], "denylist": []}}
     if token:
         variables["input"]["auth"] = {"basic": {"username": _UPSTREAM_AUTH_USER, "password": token}}
