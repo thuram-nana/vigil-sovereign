@@ -242,6 +242,46 @@ def test_strix_hook_binds_and_shows_the_real_command(tmp_path):
         _run(hook.on_tool_start(_ctx("exec_command", cmd_b), None, _Tool("exec_command")))
 
 
+def test_strix_approver_is_concurrency_safe(tmp_path, monkeypatch):
+    # REGRESSION: the SDK runs exec tools CONCURRENTLY (each bounded-wait on its own worker thread). The
+    # approver must give each call its OWN broker — a single shared ApprovalBroker holds a mutable
+    # self._current, so concurrent binds clobbered one another and a call would publish/poll for a DIFFERENT
+    # call's action and be falsely denied. With a fresh per-call broker, N concurrent distinct actions each
+    # get signed + approved. (Pre-fix this fails intermittently; post-fix it passes deterministically.)
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+    from vigil_integration.warden_gate import _build_strix_approver
+
+    monkeypatch.setenv("VIGIL_APPROVAL_WAIT_SECONDS", "20")   # a clobbered call fails FAST, not after 300s
+    base, kp, _authority = _provisioned(tmp_path)
+    root = B.approvals_root(base)
+    approver = _build_strix_approver(base)
+    assert approver is not None
+
+    stop = threading.Event()
+
+    def _signer():                                            # in-process owner: sign every pending, fast
+        while not stop.is_set():
+            for p in B.list_pending(root):
+                if p.request_id in B.signed_request_ids(root):
+                    continue
+                act = ApprovalAction(p.tool_name, p.target, p.action_digest)
+                B.write_signed_token(root, p.request_id, _sign(kp, act, p.nonce))
+            stop.wait(0.02)
+
+    sig = threading.Thread(target=_signer, daemon=True); sig.start()
+    try:
+        n = 12
+        with ThreadPoolExecutor(max_workers=n) as ex:
+            # DISTINCT actions (distinct args → distinct action_digest → distinct request_id), fired together
+            results = list(ex.map(
+                lambda i: approver("exec_command", "shell", '{"command": "echo %d"}' % i), range(n)))
+    finally:
+        stop.set(); sig.join(timeout=2)
+
+    assert all(results), f"concurrent approvals falsely denied: {results.count(False)}/{n} (broker clobber)"
+
+
 # ---------------------------------------------------------------------------------------------------
 # ENH1 — a FOUND-but-REJECTED token pauses DISTINCTLY (approval_rejected), security unchanged
 # ---------------------------------------------------------------------------------------------------
