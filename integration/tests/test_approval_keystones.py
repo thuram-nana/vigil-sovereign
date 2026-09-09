@@ -243,13 +243,19 @@ def test_strix_hook_binds_and_shows_the_real_command(tmp_path):
 
 
 def test_strix_approver_is_concurrency_safe(tmp_path, monkeypatch):
-    # REGRESSION: the SDK runs exec tools CONCURRENTLY (each bounded-wait on its own worker thread). The
-    # approver must give each call its OWN broker — a single shared ApprovalBroker holds a mutable
-    # self._current, so concurrent binds clobbered one another and a call would publish/poll for a DIFFERENT
-    # call's action and be falsely denied. With a fresh per-call broker, N concurrent distinct actions each
-    # get signed + approved. (Pre-fix this fails intermittently; post-fix it passes deterministically.)
+    # REGRESSION (concurrency action-binding bypass): the SDK runs exec tools CONCURRENTLY (each A3
+    # bounded-wait is offloaded to its own worker thread). A SINGLE shared ApprovalBroker holds a mutable
+    # self._current, so concurrent binds clobber one another: with N calls, the LAST bind wins and the other
+    # N-1 calls capture the WRONG action in token_source — most are falsely denied, and the one that
+    # "succeeds" consumes a token the owner signed for a DIFFERENT action (a real action-binding bypass under
+    # concurrency, not merely availability). The fix gives each approve() its OWN broker.
+    #
+    # To make this a DETERMINISTIC guard (not a GIL-timing coin-flip), a Barrier forces the true interleaving
+    # the live executor-offload produces: every thread completes bind() before ANY enters token_source (where
+    # self._current is captured). With the shared broker this fails ~N-1/N; with the per-call fix all N pass.
     import threading
     from concurrent.futures import ThreadPoolExecutor
+    from vigil_integration.live import approval_broker as _AB
     from vigil_integration.warden_gate import _build_strix_approver
 
     monkeypatch.setenv("VIGIL_APPROVAL_WAIT_SECONDS", "20")   # a clobbered call fails FAST, not after 300s
@@ -257,6 +263,20 @@ def test_strix_approver_is_concurrency_safe(tmp_path, monkeypatch):
     root = B.approvals_root(base)
     approver = _build_strix_approver(base)
     assert approver is not None
+
+    n = 12
+    barrier = threading.Barrier(n)
+    _orig_ts = _AB.ApprovalBroker.token_source
+
+    def _barriered_token_source(self):
+        # sync at token_source ENTRY: guarantees all N binds have happened before any capture of self._current
+        try:
+            barrier.wait(timeout=15)
+        except threading.BrokenBarrierError:
+            pass
+        return _orig_ts(self)
+
+    monkeypatch.setattr(_AB.ApprovalBroker, "token_source", _barriered_token_source)
 
     stop = threading.Event()
 
@@ -271,7 +291,6 @@ def test_strix_approver_is_concurrency_safe(tmp_path, monkeypatch):
 
     sig = threading.Thread(target=_signer, daemon=True); sig.start()
     try:
-        n = 12
         with ThreadPoolExecutor(max_workers=n) as ex:
             # DISTINCT actions (distinct args → distinct action_digest → distinct request_id), fired together
             results = list(ex.map(
