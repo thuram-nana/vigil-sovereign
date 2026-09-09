@@ -1,6 +1,6 @@
-From 76e700566e8c16f0d1a558f213f47c928dfdf129 Mon Sep 17 00:00:00 2001
+From edeaeaf2b7f34159fd3b1a5b460d4704bb37c773 Mon Sep 17 00:00:00 2001
 Subject: [strix-patch 030] S6 control exchange: close the MEDIUM scheme-pairing residual (fail-closed twin scheme)
-X-VIGIL-Commit: 76e700566e8c16f0d1a558f213f47c928dfdf129
+X-VIGIL-Commit: edeaeaf2b7f34159fd3b1a5b460d4704bb37c773
 X-VIGIL-Date: 2026-08-23T05:49:25-04:00
 
 diff --git a/vendor/strix/strix/report/proof_capture.py b/vendor/strix/strix/report/proof_capture.py
