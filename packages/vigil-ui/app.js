@@ -2101,7 +2101,21 @@
         + (p.summary ? ": " + p.summary : "") + " · member lead (oracle-pending)"; } },
   };
   function kindIcon(kind, p) { const m = KIND_META[kind]; if (!m) return "dot"; return typeof m.icon === "function" ? m.icon(p || {}) : m.icon; }
-  function isFact(p) { return !!(p && p.verified_by_oracle); }
+  // The honest fact test, in order of authority — MUST match p3IsFact (the Findings/Report classifier):
+  //   1. `grounding` (the live veracity-firewall verdict; "fact" ⟺ the oracle re-fired over retained
+  //      evidence) — the strongest signal, and the ONLY one a `framework.v2 scan` report carries;
+  //   2. `verified_by_oracle` (the blackboard/engage provenance flag);
+  //   3. an ACTIVE finding carrying a real oracle kind (never a passive/DOM lead).
+  // Previously this checked verified_by_oracle ONLY, so a scan-report finding graded grounding=="fact"
+  // (verified_by_oracle absent) was mis-tagged LEAD and the Live activity box read "no facts confirmed"
+  // while the Findings/timeline panes correctly showed the FACTs — the two panes disagreed on the same run.
+  function isFact(p) {
+    if (!p) return false;
+    if (typeof p.grounding === "string" && p.grounding) return p.grounding === "fact";
+    if (p.verified_by_oracle != null) return !!p.verified_by_oracle;
+    var ob = p.confirmed_by || p.oracle_kind || "";
+    return p.kind === "active" && !!ob && ob !== "passive" && ob !== "static-lead";
+  }
 
   // Fold a run of consecutive ROUTINE critic verdicts (those about LEADS — see the server's
   // _calibrate_critic) into ONE calm summary row, so the per-lead critic-triple flood cannot bury a
@@ -10525,17 +10539,24 @@
       for (var j = 0; j < PBOX.events.length; j++) {
         if (PBOX.events[j].kind === "finding" && isFact(PBOX.events[j].payload || {})) _facts++;
       }
+      var _ok = (PBOX.run.status === "done" || PBOX.run.status === "completed");
+      var _mark = _ok ? "\u2713" : "\u26a0";   // check only for a real success; warn otherwise
       var _lbl = ({ done: "Done", completed: "Done", error: "Ended with an error",
                     interrupted: "Interrupted", cancelled: "Cancelled" })[PBOX.run.status] || PBOX.run.status;
       // A whole-app / suite run (stream="blackboard") writes its findings to the evidence spine + Findings
-      // screen, NOT this box's progress stream \u2014 so the inline count can read 0 even when the engine
-      // confirmed real vulnerabilities. Direct the operator to Findings instead of a FALSE "no facts
-      // confirmed" (the inline count still shows when the stream did surface facts).
+      // screen, NOT this box's progress stream \u2014 so a SUCCESSFUL run can read 0 here yet have confirmed
+      // real vulnerabilities: send the operator to Findings. But an errored/interrupted/cancelled run minted
+      // nothing here AND did not complete \u2014 never call that "complete" or promise "confirmed
+      // vulnerabilities" (red-pen: an errored, zero-finding run was mislabelled a completed scan with a check).
       if (PBOX.run.stream === "blackboard" && !_facts) {
-        return "\u2713 " + _lbl + " \u2014 whole-app scan complete; open the Findings screen for the "
-             + "confirmed vulnerabilities";
+        if (_ok) {
+          return _mark + " " + _lbl + " \u2014 whole-app scan complete; open the Findings screen for the "
+               + "confirmed vulnerabilities";
+        }
+        return _mark + " " + _lbl + " \u2014 the whole-app run did not complete; no findings were minted "
+             + "(open the run's error / Activity)";
       }
-      return "\u2713 " + _lbl + (_facts ? " \u2014 " + _facts + " fact(s) confirmed"
+      return _mark + " " + _lbl + (_facts ? " \u2014 " + _facts + " fact(s) confirmed"
                                          : " \u2014 no facts confirmed");
     }
     for (var i = PBOX.events.length - 1; i >= 0; i--) {
