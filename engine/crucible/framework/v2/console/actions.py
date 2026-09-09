@@ -2623,10 +2623,20 @@ def launch_assessment(body: dict) -> dict:
     # via the shared, fail-closed helper — loopback-only, never overwrites a real charter, never raises.
     # This unlocks the whole-system suite/autonomous path (New Assessment AND the chat whole-app bridge)
     # for a loopback target, mirroring what the integration engine already does (wiring.ensure_loopback_charter).
+    _charter_root = None   # the root the loopback charter was actually written under — pin the child to it
     if is_loopback:
         try:
             from vigil_integration.live.wiring import ensure_loopback_charter
-            ensure_loopback_charter(slug, ["127.0.0.1"])
+            _wrote = ensure_loopback_charter(slug, ["127.0.0.1"])
+            # ROOT-DIVERGENCE FIX (red-pen: silent charter_missing). The charter WRITER
+            # (vigil_integration.ensure_loopback_charter) and the spawned engage READER (framework
+            # require_charter_signed → CRUCIBLE_ROOT, else cwd-relative) can resolve DIFFERENT roots when
+            # CRUCIBLE_ROOT is unset — so the signed loopback charter lands where the child never looks and a
+            # loopback whole-app run is refused charter_missing. Pin the child's CRUCIBLE_ROOT to the exact
+            # root the charter was just written under (…/targets/<slug>/charter.md → root), so writer and
+            # reader always agree. Loopback-only; derived from our own just-written charter; never widens scope.
+            if _wrote:
+                _charter_root = str(Path(str(_wrote)).resolve().parents[2])
         except Exception:  # noqa: BLE001 — best-effort; the engine's own charter/scope gate still applies
             pass
 
@@ -2652,8 +2662,12 @@ def launch_assessment(body: dict) -> dict:
     # INCONCLUSIVE-COVERAGE surface. Without this env the child cannot locate the run dir, its
     # `<run_dir>/_inconclusive.json` is never written, and this run would render CLEAN over an unassessed
     # surface. With it the framework writes the artifact here and the dossier/proof list consume it.
-    _spawn_background(run_id, rd, cmd, meta, capture_report=False,
-                      env_extra={"VIGIL_PROOF_RUN_DIR": str(rd), "VIGIL_ENGAGEMENT": slug})
+    _engage_env = {"VIGIL_PROOF_RUN_DIR": str(rd), "VIGIL_ENGAGEMENT": slug}
+    if _charter_root:
+        # Pin the child to the SAME root the loopback charter was written under, so its
+        # require_charter_signed reader can't sentinel-walk to a different root and refuse charter_missing.
+        _engage_env["CRUCIBLE_ROOT"] = _charter_root
+    _spawn_background(run_id, rd, cmd, meta, capture_report=False, env_extra=_engage_env)
     # W17-9: echo the agentic fall-through note (a loopback suite/tool that requested the agentic engine
     # but resolved no `vigil`) to the caller — the runtime response names the engine that actually ran.
     return {"run_id": run_id, "status": "running", "mode": mode, "slug": slug, "stream": "blackboard",
@@ -4863,7 +4877,12 @@ def aegis_stop(_body: dict | None = None) -> dict:
     except (OSError, TypeError, ValueError) as e:
         return {"error": f"could not stop pid {pid}: {e}"}
     if cur.get("run_id"):
-        _write_meta(cur["run_id"], **{**cur, "status": "stopped", "finished": time.time()})
+        # `cur` itself carries a "run_id" key, so it must NOT also be splatted as a
+        # kwarg alongside the positional run_id (that raised TypeError: got multiple
+        # values for 'run_id'). Merge status/finished IN, then pop run_id out.
+        _meta = {**cur, "status": "stopped", "finished": time.time()}
+        _rid = _meta.pop("run_id")
+        _write_meta(_rid, **_meta)
     _write_aegis_current({})
     return {"stopped": True, "pid": pid}
 
