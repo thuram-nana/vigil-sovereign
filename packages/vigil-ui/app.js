@@ -10556,6 +10556,15 @@
         return _mark + " " + _lbl + " \u2014 the whole-app run did not complete; no findings were minted "
              + "(open the run's error / Activity)";
       }
+      // A sandbox run (stream="none": a DAA/Strix codebase scan, or the AEGIS gateway) streams no findings
+      // to THIS box \u2014 its results land on another screen \u2014 so "no facts confirmed" here is misleading.
+      // Point the operator at the right screen instead of implying the run found nothing.
+      if (PBOX.run.stream === "none") {
+        var _where = (PBOX.run.mode === "aegis") ? "the Defense screen" : "the Findings screen";
+        return _mark + " " + _lbl + (_ok
+          ? " \u2014 reported in its own sandbox; open " + _where + " for its results"
+          : " \u2014 did not complete (see the run's error / Activity)");
+      }
       return _mark + " " + _lbl + (_facts ? " \u2014 " + _facts + " fact(s) confirmed"
                                          : " \u2014 no facts confirmed");
     }
