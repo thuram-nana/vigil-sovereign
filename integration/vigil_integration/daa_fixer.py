@@ -1,14 +1,14 @@
 """daa_fixer — DETERMINISTIC, key-free fixes for DAA static findings.
 
-For the unambiguous DAA rules (weak hash, yaml.load, eval, subprocess shell=True, TLS verify=False,
-debug=True, DOM innerHTML) the canonical fix is a mechanical, one-line source transform. This module
-produces that fix as a minimal unified diff WITHOUT any LLM — so a codebase fix needs no API key AND is
-free of the model-diff apply fragility (wrong @@ counts / drifting context) that makes a proposed patch
-fail ``git apply``. The diff is generated with :func:`difflib.unified_diff` over the real file content, so
-it always applies cleanly.
+For the mechanical DAA rules (weak hash, yaml.load, eval, subprocess shell=True, TLS verify=False,
+debug=True, DOM innerHTML, and a hard-coded secret assignment) the canonical fix is a one-line source
+transform. This module produces that fix as a minimal unified diff WITHOUT any LLM — so a codebase fix
+needs no API key AND is free of the model-diff apply fragility (wrong / bare ``@@`` hunk headers, drifting
+context) that makes a proposed patch fail ``git apply``. The diff is generated with
+:func:`difflib.unified_diff` over the real file content, so it always applies cleanly.
 
-Rules with NO safe mechanical fix return ``None`` (a hard-coded SECRET needs rotation, not a text edit;
-``pickle``/``exec`` need a redesign) — the caller then falls back to the inline LLM coder, unchanged.
+Rules with no safe mechanical fix return ``None`` (``pickle``/``exec`` need a redesign) — the caller then
+falls back to the inline LLM coder, unchanged.
 
 SAFETY: this only PROPOSES a diff. It is still parsed fail-closed (``parse_unified_diff``), applied only to
 a DISPOSABLE clone through the SAME gated ladder, and verified by re-running the DAA rule. It changes what
@@ -36,30 +36,46 @@ def _sub_if_changed(pattern: str, repl: str, *, flags: int = 0) -> Callable[[str
     return _fix
 
 
-# md5/sha1 -> sha256 (keep any ``hashlib.`` prefix; only the algorithm name changes)
-_LINE_FIX["DAA-WEAK-HASH"] = _sub_if_changed(r"\b(md5|sha1)\b", "sha256")
-# yaml.load(...) -> yaml.safe_load(...)
-_LINE_FIX["DAA-YAML-LOAD"] = _sub_if_changed(r"\byaml\.load\s*\(", "yaml.safe_load(")
-# subprocess shell=True -> shell=False
-_LINE_FIX["DAA-SHELL-TRUE"] = _sub_if_changed(r"shell\s*=\s*True", "shell=False")
-# TLS verify=False -> verify=True
-_LINE_FIX["DAA-TLS-VERIFY-OFF"] = _sub_if_changed(r"verify\s*=\s*False", "verify=True")
-# debug=True -> debug=False (the flag name keeps its original case)
-_LINE_FIX["DAA-DEBUG-TRUE"] = _sub_if_changed(r"(?i)(\bdebug\s*=\s*)True", r"\1False")
-# DOM XSS: element.innerHTML = X -> element.textContent = X
-_LINE_FIX["DAA-MD-INNERHTML"] = _sub_if_changed(r"\.innerHTML(\s*=)", r".textContent\1")
-# eval(...) -> ast.literal_eval(...)  (import is added separately, see _needs_ast)
-_LINE_FIX["DAA-EVAL"] = _sub_if_changed(r"\beval\s*\(", "ast.literal_eval(")
+# NAME = "literal"  ->  NAME = os.environ.get("NAME")   (keeps indentation + any trailing comment)
+_SECRET_ASSIGN = re.compile(r'^(\s*)([A-Za-z_][A-Za-z0-9_]*)(\s*[:=]\s*)(["\']).*?\4\s*(#.*)?$')
 
-# Rules whose fix needs `import ast` present in the module.
-_NEEDS_AST = {"DAA-EVAL"}
+
+def _secret_fix(line: str) -> Optional[str]:
+    m = _SECRET_ASSIGN.match(line)
+    if not m:
+        return None
+    indent, name, assign, _q, comment = m.groups()
+    out = f'{indent}{name}{assign}os.environ.get("{name}")'
+    if comment:
+        out += "  " + comment
+    return out if out != line else None
+
+
+_LINE_FIX["DAA-WEAK-HASH"] = _sub_if_changed(r"\b(md5|sha1)\b", "sha256")
+_LINE_FIX["DAA-YAML-LOAD"] = _sub_if_changed(r"\byaml\.load\s*\(", "yaml.safe_load(")
+_LINE_FIX["DAA-SHELL-TRUE"] = _sub_if_changed(r"shell\s*=\s*True", "shell=False")
+_LINE_FIX["DAA-TLS-VERIFY-OFF"] = _sub_if_changed(r"verify\s*=\s*False", "verify=True")
+_LINE_FIX["DAA-DEBUG-TRUE"] = _sub_if_changed(r"(?i)(\bdebug\s*=\s*)True", r"\1False")
+_LINE_FIX["DAA-MD-INNERHTML"] = _sub_if_changed(r"\.innerHTML(\s*=)", r".textContent\1")
+_LINE_FIX["DAA-EVAL"] = _sub_if_changed(r"\beval\s*\(", "ast.literal_eval(")
+_LINE_FIX["DAA-SECRET"] = _secret_fix
+
+# stdlib import a fix introduces, keyed by a marker the fixed line now contains.
+_IMPORT_FOR = (("ast", "ast.literal_eval"), ("os", "os.environ"))
+
+
+def _is_secret_rule(rule_id: str, bug_class: str) -> bool:
+    """An external (gitleaks-style) secret rule id, or a secret bug class, gets the env-var transform too."""
+    r = rule_id.lower()
+    b = str(bug_class or "").lower()
+    return ("secret" in r or "token" in r or "apikey" in r or "api-key" in r or "-key" in r
+            or "credential" in r or "password" in r or "secret" in b or "798" in b)
 
 
 def _decode_ref(finding: Any) -> tuple[Optional[str], Optional[str], Optional[int]]:
     """Recover (rule_id, rel_path, line) from the finding's DAA ref, robust to how the finding is shaped."""
     ref = str(getattr(finding, "ref", "") or "")
     if not ref:
-        # some spine-rebuilt findings expose the ref as finding_ref / check_id
         ref = str(getattr(finding, "finding_ref", "") or getattr(finding, "check_id", "") or "")
     if not ref:
         return (None, None, None)
@@ -79,7 +95,11 @@ def deterministic_daa_diff(finding: Any, target_repo: str) -> Optional[str]:
             return None
         fixer = _LINE_FIX.get(rule_id)
         if fixer is None:
-            return None                        # SECRET / pickle / exec / unknown → LLM handles it
+            # external secret rule (gitleaks-style, e.g. stripe-access-token) → the env-var transform
+            if _is_secret_rule(rule_id, getattr(finding, "bug_class", "")):
+                fixer = _secret_fix
+            else:
+                return None                    # pickle / exec / unknown → the LLM coder handles it
         root = Path(str(target_repo or "")).resolve()
         src = (root / rel_path).resolve()
         if root not in src.parents and src != root:   # path-escape guard (defence in depth)
@@ -97,10 +117,10 @@ def deterministic_daa_diff(finding: Any, target_repo: str) -> Optional[str]:
             return None                        # the pattern was not on the recorded line — no no-op patch
         new = list(old)
         new[idx] = fixed + nl
-        # add `import ast` once, at the top, if the fix needs it and it is not already imported
-        if rule_id in _NEEDS_AST and not any(re.match(r"\s*import\s+ast\b", ln) for ln in new) \
-                and not any(re.match(r"\s*import\s+.*\bast\b", ln) for ln in new):
-            new.insert(0, "import ast\n")
+        # add any stdlib import the fix introduced, once, at the top
+        for mod, marker in _IMPORT_FOR:
+            if marker in new[idx] and not any(re.match(rf"\s*import\s+.*\b{mod}\b", ln) for ln in new):
+                new.insert(0, f"import {mod}\n")
         if new == old:
             return None
         diff = "".join(difflib.unified_diff(
