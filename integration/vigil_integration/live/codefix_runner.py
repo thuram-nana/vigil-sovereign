@@ -309,12 +309,18 @@ class CodefixSession:
                 fh.write("\n".join(diffs))
         except OSError as exc:
             return _Exec(False, reason=f"could not stage patch file: {exc}")
+        # An LLM-proposed unified diff often has imperfect hunk headers (wrong @@ line counts) or benign
+        # whitespace drift — strict `git apply` rejects those as a "corrupt patch" even when the intent
+        # applies cleanly. `--recount` recomputes each hunk's counts from its body and `--whitespace=nowarn`
+        # tolerates whitespace drift; the patch is still path-validated (parse_unified_diff) and confined to
+        # the disposable clone, so this loosens diff FORMATTING robustness, never the safety envelope.
+        _aflags = ["--recount", "--whitespace=nowarn"]
         try:
-            chk = subprocess_runner([self.config.git_bin, "-C", self.workdir, "apply", "--check", patch_path],
+            chk = subprocess_runner([self.config.git_bin, "-C", self.workdir, "apply", "--check", *_aflags, patch_path],
                                     timeout=self.config.apply_timeout)
             if chk.exit_code != 0:
                 return _Exec(False, reason="patch does not apply cleanly: " + (chk.stderr or "")[:200])
-            ap = subprocess_runner([self.config.git_bin, "-C", self.workdir, "apply", patch_path],
+            ap = subprocess_runner([self.config.git_bin, "-C", self.workdir, "apply", *_aflags, patch_path],
                                    timeout=self.config.apply_timeout)
             if ap.exit_code != 0:
                 return _Exec(False, reason="git apply failed: " + (ap.stderr or "")[:200])
@@ -612,6 +618,19 @@ def autopatch_live(finding: Any, *, config: CodefixConfig, client: Any = None,
     if _external:
         session.propose = lambda _request: _external   # type: ignore[assignment]
         max_fix_attempts = 1
+    else:
+        # DETERMINISTIC-FIRST for DAA static findings: a known mechanical fix (weak-hash, yaml.load, eval,
+        # shell=True, verify=False, debug=True, innerHTML) is emitted as an EXACT unified diff with NO LLM —
+        # key-free and free of the model-diff apply fragility. Rules with no safe mechanical fix return None,
+        # so the inline LLM coder (session.propose) stays in force unchanged.
+        try:
+            from ..daa_fixer import deterministic_daa_diff
+            _det = deterministic_daa_diff(finding, config.target_repo)
+        except Exception:  # noqa: BLE001 — a fixer miss must never break the ladder
+            _det = None
+        if _det:
+            session.propose = lambda _request, _d=_det: _d   # type: ignore[assignment]
+            max_fix_attempts = 1
 
     def approval(_pf: Any) -> PatchApproval:
         if config.apply_edits:

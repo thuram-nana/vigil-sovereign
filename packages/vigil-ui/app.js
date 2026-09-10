@@ -10300,7 +10300,7 @@
   // overlay (bottom-right, below the toast stack) that never covers the workspace.
   var PBOX_KEY = "vigil-process-box";
   var PBOX_CAP = 200;                                   // rows kept in the scrollback ring buffer
-  var PBOX = { es: null, run: null, following: "", events: [], seen: {}, poll: null,
+  var PBOX = { es: null, run: null, following: "", events: [], seen: {}, poll: null, reconciled: false, scanDone: false,
                // S1: the approve/deny/deny-&-redirect interrupt in CHAT — the PBOX follows the run globally,
                // so it surfaces approvals on any screen (chat included) via the SHARED makeApprovalUX.
                approvalMem: { popped: {}, seen: false, modal: null }, pendingApprovals: [],
@@ -10575,7 +10575,44 @@
     return PBOX.run ? (PBOX.run.status || "starting…") : "";
   }
   function pboxIsRunning() { return !!(PBOX.run && PBOX.run.status === "running"); }
+  // Reconcile the PBOX's streamed findings against the run's AUTHORITATIVE report — the SAME /api/report
+  // source the Findings screen and the Live view's maybeReconcile() read. A loopback scan streams each
+  // finding into PBOX.events as a conservative LEAD (pboxProgressToEvent sets no grounding / no
+  // verified_by_oracle), so the box's fact tally would otherwise read 0 ("no facts confirmed") while
+  // Findings/Report show the same findings CONFIRMED. Runs at most once per followed run, ONLY when the run
+  // is terminal, is a progress-stream scan that captures a report, and the report is present. Promotes a
+  // confirmed lead to a fact; never over-claims one the oracle did not prove (p3IsFact reads the graded
+  // verdict, so a demoted finding stays a LEAD).
+  function pboxMaybeReconcile() {
+    var run = PBOX.run;
+    if (!run || PBOX.reconciled) return;
+    if (run.stream !== "progress" || p3RunCapturesNoReport(run)) return;   // nothing to reconcile against
+    var st = run.status;
+    if (!PBOX.scanDone && st !== "done" && st !== "error" && st !== "cancelled" && st !== "interrupted") return;
+    PBOX.reconciled = true;   // attempt once; a not-yet-captured report re-opens the attempt below
+    V.getJSON(OFF("/api/report/" + encodeURIComponent(run.run_id))).then(function (rep) {
+      if (!rep || rep.pending) { PBOX.reconciled = false; return; }   // report not captured yet -> a later poll retries
+      var auth = ((rep.findings) || []).filter(function (f) { return f && f.kind === "active"; });
+      PBOX.events.forEach(function (e) {
+        if (e.kind !== "finding") return;
+        var p = e.payload || {};
+        var pick = -1, exact = -1;
+        for (var i = 0; i < auth.length; i++) {
+          if (auth[i]._used) continue;
+          if (String(auth[i].bug_class || "") !== String(p.bug_class || "")) continue;
+          if (pick < 0) pick = i;
+          var ok = auth[i].confirmed_by || auth[i].oracle_kind || "";
+          if (ok && ok === (p.oracle_kind || "")) { exact = i; break; }
+        }
+        var idx = exact >= 0 ? exact : pick;
+        if (idx >= 0) { auth[idx]._used = true; p.verified_by_oracle = p3IsFact(auth[idx]); e.payload = p; }
+      });
+      pboxUpdateChrome();     // recompute the header fact tally from the reconciled events
+      pboxScheduleRender();   // AND rebuild the feed rows/detail-cards so their badges match the header
+    }).catch(function () { PBOX.reconciled = false; /* report unreachable - keep the honest streamed state */ });
+  }
   function pboxUpdateChrome() {
+    pboxMaybeReconcile();   // once the run is terminal, promote streamed leads to the report-graded truth
     // update just the pill/step/dot without rebuilding the feed (so scroll position is preserved).
     var step = V.$("#pb-step");
     if (step) { step.textContent = pboxStepText() || "waiting…";
@@ -10803,6 +10840,8 @@
     // permanent kill). It comes back as whatever it was (pill if collapsed), never force-expanded.
     if (run && PBOX.ui.dismissed) { PBOX.ui.dismissed = false; pboxSaveUI(); }
     PBOX.run = run; PBOX.following = run ? run.run_id : "";
+    PBOX.reconciled = false;   // a newly-followed run must re-reconcile its own findings vs its report
+    PBOX.scanDone = false;     // ...and re-await its terminal scan.done before the tally is authoritative
     PBOX_AUX.reset();   // S1: re-baseline approvals for the newly-followed run
     pboxOffenseReset(); // S1b: re-baseline OFFENSE approvals too
     if (run && run.stream === "blackboard" && run.slug) {
@@ -10815,6 +10854,10 @@
         // cursor onto the normalised event so a reconnect can't duplicate rows in the ring buffer.
         var norm = pboxProgressToEvent(ev);
         if (norm) { if (ev && ev._seq != null) norm.id = "p" + ev._seq; pboxOnEvent(norm); }
+        // Reconcile the moment the terminal scan.done has STREAMED (all findings are now in PBOX.events),
+        // mirroring the Live view (app.js:3081) — so the tally never depends on the /api/runs status poll
+        // racing the stream close on a partial set. The status-poll path stays a conservative fallback.
+        if (ev && ev.event === "scan.done") { PBOX.scanDone = true; pboxMaybeReconcile(); }
       }, function () {});
     }
     // stream 'none' (strix/aegis): no live spine — the chrome poll keeps its status fresh.
@@ -10827,7 +10870,7 @@
     if (ev.kind && KIND_META[ev.kind]) return { kind: ev.kind, payload: ev.payload || {} };
     if (!ev.event) return null;
     if (ev.event === "scan.phase") return { kind: "observation", payload: { source: "scan", summary: "phase: " + (ev.phase || "") } };
-    if (ev.event === "scan.finding") return { kind: "finding", payload: { bug_class: ev.bug_class, title: (ev.param || "") + " @ " + (ev.endpoint || "") } };
+    if (ev.event === "scan.finding") return { kind: "finding", payload: { bug_class: ev.bug_class, title: (ev.param || "") + " @ " + (ev.endpoint || ""), oracle_kind: ev.confirmed_by } };
     if (ev.event === "scan.done") return { kind: "decision", payload: { question: "scan complete", choice: (ev.findings || 0) + " findings" } };
     // W6c — a codebase (Strix) run's own progress. Normalise into the SAME spine-shaped events the box
     // already renders, so pboxTag/pboxRow need no change:
