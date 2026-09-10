@@ -210,6 +210,11 @@ def reverify_document(doc: dict) -> list[ReverifyResult]:
     """Re-verify a serialized ScanReport (its `active_findings`) or a single
     finding document."""
     findings = doc.get("active_findings")
+    if findings is None and isinstance(doc.get("findings"), list):
+        # Accept VIGIL's own DISPLAY report shape too (its key is `findings`, not `active_findings`) —
+        # re-verify its ACTIVE findings. A display export may omit oracle_context, so such a finding
+        # re-fires as ungrounded (honest), never a false green.
+        findings = [f for f in doc["findings"] if isinstance(f, dict) and f.get("kind") == "active"]
     if isinstance(findings, list):
         return [reverify_finding(f, ref=str(i)) for i, f in enumerate(findings)]
     return [reverify_finding(doc)]
