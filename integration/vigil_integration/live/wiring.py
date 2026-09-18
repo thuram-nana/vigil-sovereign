@@ -180,6 +180,21 @@ def provision_authority(
     )
     signed = sign_authority(doc, {key_id: kp.private_key_b64})   # authority signer = dict[key_id→priv]
     out_path = save_signed_authority(signed)
+    # B3: persist the governance trust root so `framework.v2 engage` (engage._engage_authority_trust_root) and
+    # the console remote-engage gate can LOAD + VERIFY the authority we just signed. Previously the trust root
+    # was only returned in-memory, so a provisioned authority made `engage` REFUSE ("no trust root discoverable").
+    # BOOTSTRAP-ONCE + STABLE-KEY ONLY: never overwrite an existing deployment trust anchor (that would let any
+    # provisioning reset the root of trust), and never persist an anchor for the legacy ephemeral per-run key —
+    # only for a homed/explicit governance key. If a trust root already exists, this key must already be one of
+    # its authorizers, else the authority honestly fails verification downstream (fail-closed, never fail-open).
+    if keypair is not None or base_dir is not None:
+        try:
+            from framework.v2.entitlement.store import load_trust_root as _load_trust_root
+            from framework.v2.entitlement.provision import write_trust_root as _write_trust_root
+            if _load_trust_root() is None:
+                _write_trust_root(trust_root)
+        except Exception:  # noqa: BLE001 — best-effort persist; a missing trust root fails CLOSED at the gate
+            pass
     return Provisioned(
         keypair=kp, trust_root=trust_root,
         signers=[(key_id, kp.private_key_b64)],                  # cert signer = list[(key_id, priv)]

@@ -550,6 +550,33 @@ def _has_charter(slug: str) -> bool:
         return False
 
 
+def _has_verified_authority(slug: str) -> bool:
+    """True iff the offense side holds an owner-signed authority for ``slug`` whose governance THRESHOLD
+    signature verifies against the deployment trust root — the fail-closed pre-flight for a REMOTE engage
+    (R-CRITICAL-1 / B11). This REPLACES the existence-only `_has_charter` gate: a charter file that merely
+    exists (with a plaintext `Signed:` name) no longer authorizes anything. A missing trust root, a missing
+    or unsigned authority, or any verification failure returns False — never raises, never fail-open.
+    Same-plane imports (framework.v2), kept function-local per FATAL-2 import hygiene.
+
+    HONEST SCOPE (do not overclaim): this raises the bar from "write a plaintext `Signed:` name into a
+    charter file" to "produce a valid governance THRESHOLD signature". Its completeness assumes the
+    deployment trust root (.entitlement/trust-root.json) is NOT writable by the same low-privilege actor
+    who can author charters — an actor with arbitrary owner-uid filesystem write can still plant their own
+    trust root + self-signed authority (but such an actor is outside the meaningful threat model: they could
+    equally edit code, the kill-switch, or the keys). Relocate .entitlement to a read-only / HSM-backed mount
+    via CRUCIBLE_ENTITLEMENT_DIR to close even that."""
+    try:
+        from ..entitlement.store import load_trust_root
+        from ..authority.store import load_verified_authority
+        trust_root = load_trust_root()
+        if trust_root is None:
+            return False
+        load_verified_authority(slug, trust_root)   # raises unless the threshold signature verifies
+        return True
+    except Exception:  # noqa: BLE001 — any load/verify failure is a fail-closed refusal
+        return False
+
+
 def _boot_id() -> str:
     """The host boot id (Linux ``/proc/sys/kernel/random/boot_id``), or "" if unavailable. Recorded on a
     run so orphan reconciliation can tell a still-alive pid from a pid RECYCLED across a reboot: after a
@@ -2603,9 +2630,15 @@ def launch_assessment(body: dict) -> dict:
 
     # url / suite / tool on a URL → the gated `engage` (mirrors onto the blackboard via --spine).
     slug = _slugify(body.get("slug") or host, fallback="engagement")
-    if not is_loopback and not _has_charter(slug):
-        return {"error": f"a remote engage needs a signed charter/authority for slug {slug!r} — "
-                         f"provision one first (it carries the signed scope; the console cannot mint it)"}
+    if not is_loopback and not _has_verified_authority(slug):
+        # R-CRITICAL-1 / B11: a remote engage must carry an owner-signed, threshold-VERIFIED authority — not
+        # merely a charter file that EXISTS (the old `_has_charter` check let anyone who could write a
+        # targets/<slug>/charter.md with a plaintext `Signed:` name aim VIGIL at any host). Fail closed.
+        return {"error": f"remote engage for {slug!r} refused (fail-closed): no owner-signed, verifiable "
+                         f"authority against the deployment trust root. Authorize this target first — mint an "
+                         f"owner-signed authority (`vigil provision --slug {slug} --scope <host>`, which now "
+                         f"persists the trust root) or use the UI authorization ceremony. A plaintext charter "
+                         f"file is no longer sufficient."}
 
     # CONTAINMENT (red-pen HIGH): the framework `engage`/`--autonomous` branch mints a FRESH slug whose
     # kill-switch is untripped, so a soft emergency-stop (restricted mode) would NOT contain it — the same

@@ -2493,6 +2493,25 @@
       "ci_job": "SIGIL governor gates (P7 — offense gate + authn)",
       "failure_class": "n-a",
       "default": "on"
+    },
+    {
+      "id": "PHASE0-1",
+      "title": "Remote engage requires an owner-signed, threshold-verified authority",
+      "claim": "A remote (non-loopback) engage is authorized only by an owner-signed EngagementAuthority whose governance threshold signature verifies against the deployment trust root; a charter file that merely exists no longer authorizes anything.",
+      "source": "docs/decisions/phase0-verified-authority-gate.md:15",
+      "enforced_by": {
+        "file": "engine/crucible/framework/v2/console/actions.py",
+        "symbol": "_has_verified_authority"
+      },
+      "proved_by": {
+        "file": "engine/crucible/framework/v2/console/tests/test_launch_assessment.py",
+        "tests": [
+          "test_charter_existence_alone_no_longer_authorizes_remote"
+        ]
+      },
+      "ci_job": "CRUCIBLE core on vigil_core",
+      "failure_class": "n-a",
+      "default": "on"
     }
   ]
 }

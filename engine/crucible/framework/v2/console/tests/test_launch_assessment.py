@@ -52,6 +52,26 @@ def stub_launch(tmp_path, monkeypatch):
     return _cmd
 
 
+def test_charter_existence_alone_no_longer_authorizes_remote(tmp_path, monkeypatch):
+    """R-CRITICAL-1 / B11: a charter file that merely EXISTS (with a plaintext ``Signed:`` name) no longer
+    authorizes a remote engage — only an owner-signed authority whose governance THRESHOLD signature verifies
+    against the deployment trust root does. This locks the fix for the aim-by-text-edit hole: the OLD gate
+    (`_has_charter`, existence-only) passes for a hand-written charter; the NEW gate (`_has_verified_authority`)
+    refuses it, fail-closed, when no verifiable authority exists."""
+    slug = "evil-target"
+    charter = tmp_path / "charter.md"
+    charter.write_text(
+        "## 2. In-scope systems\n\n| host |\n|------|\n| evil.example.com |\n\nSigned: Anyone At All\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(actions.paths, "charter_path", lambda s: charter)
+    monkeypatch.setattr(actions.paths, "authority_path", lambda s: tmp_path / "no-authority.json")
+    # A fresh deployment has no governance trust root → the verified gate is fail-closed regardless of env.
+    monkeypatch.setattr("framework.v2.entitlement.store.load_trust_root", lambda path=None: None)
+    assert actions._has_charter(slug) is True             # the OLD existence check would have authorized it
+    assert actions._has_verified_authority(slug) is False  # the NEW verified gate refuses (fail-closed)
+
+
 def test_loopback_url_routes_to_scan(stub_launch):
     r = actions.launch_assessment({"mode": "url", "target": "http://127.0.0.1:8000/", "scan_mode": "quick"})
     assert r["status"] == "running" and r["stream"] == "progress"
@@ -67,7 +87,7 @@ def test_remote_url_needs_charter_then_routes_to_engage(stub_launch, monkeypatch
     assert "error" in r and "charter" in r["error"].lower()
 
     # with a charter present → the gated engage, mirrored onto the spine via --spine
-    monkeypatch.setattr(actions, "_has_charter", lambda slug: True)
+    monkeypatch.setattr(actions, "_has_verified_authority", lambda slug: True)
     r = actions.launch_assessment({"mode": "url", "target": "https://app.example.com/", "slug": "acme"})
     assert r["stream"] == "blackboard" and r["slug"] == "acme"
     cmd, meta = stub_launch(r["run_id"])
@@ -146,7 +166,7 @@ def test_capability_packs_a_branch_cannot_carry_are_reported_not_dropped(stub_la
 
     # The SAME picks against a non-loopback host really do become flags — proving the note describes a
     # real branch difference rather than being a blanket disclaimer bolted onto every launch.
-    monkeypatch.setattr(actions, "_has_charter", lambda slug: True)
+    monkeypatch.setattr(actions, "_has_verified_authority", lambda slug: True)
     r2 = actions.launch_assessment({"mode": "url", "target": "http://example.com/",
                                     "slug": "loopback", "tools": picks})
     cmd2, _ = stub_launch(r2["run_id"])
@@ -247,7 +267,7 @@ def test_agentic_run_hands_the_child_the_run_dir_for_live_steps(monkeypatch):
 
 def test_agentic_ignored_for_remote_target(stub_launch, graph_env, monkeypatch):
     # remote stays on the offense engage (its signed-charter gate), NEVER the self-scoped vigil engage.
-    monkeypatch.setattr(actions, "_has_charter", lambda slug: True)
+    monkeypatch.setattr(actions, "_has_verified_authority", lambda slug: True)
     r = actions.launch_assessment({"mode": "url", "target": "https://app.example.com/", "slug": "acme",
                                    "session_id": "sess-A", "agentic": True})
     cmd, meta = stub_launch(r["run_id"])
@@ -357,7 +377,7 @@ def test_refuses_cidr_scope_and_unknown_mode_and_empty_target(stub_launch):
 def test_approve_then_run_preserved_no_offense_preauth_no_scope_relax(stub_launch, monkeypatch):
     """The console spawns only the gated CLI; it can neither pre-authorize offense
     (--approve-offense) nor pass a scope (which would relax the charter-signed scope)."""
-    monkeypatch.setattr(actions, "_has_charter", lambda slug: True)
+    monkeypatch.setattr(actions, "_has_verified_authority", lambda slug: True)
     r = actions.launch_assessment({"mode": "suite", "target": "https://app.example.com/", "slug": "acme",
                                    "scope": ["app.example.com", "*.example.com"]})
     cmd, meta = stub_launch(r["run_id"])
