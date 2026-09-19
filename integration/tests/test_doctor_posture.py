@@ -216,8 +216,8 @@ def test_collect_attaches_posture_without_changing_ok(tmp_path, monkeypatch):
     assert report["ok"] is True and report["issues"] == []
     posture = report["posture"]
     assert isinstance(posture, list) and [p["control"] for p in posture] == [
-        "egress-gate", "vault", "key-sealing", "sovereignty", "entitlement", "backups", "charter",
-        "egress-supervisor", "witness", "owner-key-backend",
+        "egress-gate", "vault", "key-sealing", "sovereignty", "entitlement", "entitlement-anchor",
+        "backups", "charter", "egress-supervisor", "witness", "owner-key-backend",
     ]
     # every entry is a JSON-safe {control, state, detail}
     assert all(set(p) == {"control", "state", "detail"} for p in posture)
@@ -234,7 +234,7 @@ def test_posture_probe_that_raises_yields_unknown_not_crash(monkeypatch, tmp_pat
     posture = dmod._collect_posture(tmp_path, {})
     vault = next(p for p in posture if p["control"] == "vault")
     assert vault["state"] == "UNKNOWN" and "RuntimeError" in vault["detail"]
-    assert len(posture) == 10                                 # the other nine still produced
+    assert len(posture) == 11                                 # the other ten still produced
 
 
 # --------------------------------------------------------------------------- FATAL-2 boundary
@@ -257,7 +257,7 @@ def test_doctor_reads_posture_without_importing_sigil_or_framework(tmp_path):
     assert out.returncode == 0, f"probe failed: {out.stderr}"
     res = __import__("json").loads(out.stdout.strip().splitlines()[-1])
     assert res["leaked"] == [], f"doctor co-loaded a forbidden plane: {res['leaked']}"
-    assert res["controls"] == ["egress-gate", "vault", "key-sealing", "sovereignty", "entitlement", "backups", "charter", "egress-supervisor", "witness", "owner-key-backend"]
+    assert res["controls"] == ["egress-gate", "vault", "key-sealing", "sovereignty", "entitlement", "entitlement-anchor", "backups", "charter", "egress-supervisor", "witness", "owner-key-backend"]
 
 
 # --------------------------------------------------------------------------- README-truth (derive, don't drift)
@@ -282,3 +282,26 @@ def test_readme_posture_block_matches_doctor_labels():
     assert readme_labels == doctor_labels, (
         f"README posture block drifted from `vigil doctor`.\n  doctor: {doctor_labels}\n  README: {readme_labels}"
     )
+
+
+# --------------------------------------------------------------------------- entitlement-anchor visibility
+def test_entitlement_anchor_reports_default_in_tree_and_out_of_band(tmp_path, monkeypatch):
+    """The residual (owner trust root under the offense-writable tree) is made VISIBLE: the probe reports
+    DEFAULT-IN-TREE by default and OUT-OF-BAND when CRUCIBLE_ENTITLEMENT_DIR anchors it away. Advisory only."""
+    cruc = tmp_path / "cruc"
+    (cruc / "framework" / "v2").mkdir(parents=True)
+    (cruc / "CLAUDE.md").write_text("# c\n", encoding="utf-8")
+    monkeypatch.setenv("CRUCIBLE_ROOT", str(cruc))
+
+    monkeypatch.delenv("CRUCIBLE_ENTITLEMENT_DIR", raising=False)
+    state, detail = dmod._posture_entitlement_anchor(cruc)
+    assert state == "DEFAULT-IN-TREE" and "out-of-band" in detail.lower()
+    assert "provisioned yet" in detail.lower()   # the "hardened but never provisioned" caveat is surfaced
+
+    monkeypatch.setenv("CRUCIBLE_ENTITLEMENT_DIR", str(tmp_path / "ro-mount" / ".entitlement"))
+    state2, detail2 = dmod._posture_entitlement_anchor(cruc)
+    assert state2 == "OUT-OF-BAND" and "CRUCIBLE_ENTITLEMENT_DIR" in detail2
+
+    # advisory only: it is NOT one of the production-gate REQUIRED controls (never fails the start gate)
+    from vigil_core.doctor import REQUIRED_CONTROLS
+    assert "entitlement-anchor" not in {c for c in REQUIRED_CONTROLS}

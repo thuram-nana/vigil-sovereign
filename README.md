@@ -689,6 +689,7 @@ Security posture (informational — off-by-default controls; does NOT affect the
   .. key-sealing: ABSENT  — no trust-root key files present yet (owner.priv=ABSENT, spine.dek=ABSENT, warden.key=ABSENT)
   .. sovereignty: PERMISSIVE  — dev default — the sovereignty ladder binds but admits cloud LLM egress; set CRUCIBLE_SOVEREIGNTY_TIER (AIR_GAPPED / SOVEREIGN_CLOUD / TRUSTED_CLOUD) to raise it
   .. entitlement: UNGOVERNED  — no trust root at ~/vigil/engine/crucible/framework/v2/.entitlement/trust-root.json — gated capabilities are permitted (logged at WARNING) but NOT enforced
+  .. entitlement-anchor: DEFAULT-IN-TREE  — the trust root uses the default in-tree (offense-writable) location; for a governed deployment anchor it out-of-band via CRUCIBLE_ENTITLEMENT_DIR on a read-only/HSM mount (docs/runbooks/anchor-trust-root-out-of-band.md)
   .. backups:     OFF  — 0/9 systemd timers enabled — backup durability NOT running; need one of vigil-backup/vigil-backup-push + vigil-backup-drill enabled and fired (disabled: vigil-backup.timer, vigil-backup-push.timer, vigil-backup-drill.timer)
   .. charter:     ABSENT  — no active VIGIL_ENGAGEMENT and no chartered engagement under targets/
   .. egress-supervisor: OFF  — the seccomp connect/sendto/sendmsg egress supervisor is not enabled — set VIGIL_EGRESS_GUARD=require, or run under VIGIL_POSTURE=production which forces it on

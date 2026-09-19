@@ -2917,7 +2917,11 @@ def launch_assessment(body: dict) -> dict:
     if _charter_root:
         # Pin the child to the SAME root the loopback charter was written under, so its
         # require_charter_signed reader can't sentinel-walk to a different root and refuse charter_missing.
+        # CRUCIBLE_ROOT_STRICT (#10): make that pin HARD — if the pinned root's CLAUDE.md sentinel is
+        # missing/removed at child startup, the child fails closed rather than silently resolving a FOREIGN
+        # root. Safe here: the charter/authority were just written under this root, so its sentinel is present.
         _engage_env["CRUCIBLE_ROOT"] = _charter_root
+        _engage_env["CRUCIBLE_ROOT_STRICT"] = "1"
     _spawn_background(run_id, rd, cmd, meta, capture_report=False, env_extra=_engage_env)
     # W17-9: echo the agentic fall-through note (a loopback suite/tool that requested the agentic engine
     # but resolved no `vigil`) to the caller — the runtime response names the engine that actually ran.

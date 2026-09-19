@@ -344,6 +344,36 @@ def _posture_entitlement(repo: Path) -> "tuple[str, str]":
                           f"WARNING) but NOT enforced")
 
 
+def _posture_entitlement_anchor(repo: Path) -> "tuple[str, str]":
+    """WHERE the deployment trust root is anchored — the residual (VIGIL-LIMIT owner-anchor) made VISIBLE.
+    The launch gate verifies an authority against the on-disk trust root; if that trust root sits at the
+    DEFAULT in-tree location (offense-writable), a full owner-uid filesystem-write actor could swap both it
+    and a self-signed authority. A hardened deployment anchors it OUT-OF-BAND via CRUCIBLE_ENTITLEMENT_DIR on
+    a read-only / HSM-backed mount. Advisory only (never a gate failure) — it reports the anchor posture so an
+    operator SEES it. Read from disk only; the framework is never imported (FATAL-2)."""
+    override = (os.environ.get("CRUCIBLE_ENTITLEMENT_DIR") or "").strip()
+    d = _entitlement_dir(repo)
+    if d is None:
+        return "UNKNOWN", "could not locate the entitlement dir (no CRUCIBLE_ROOT / CLAUDE.md found)"
+    tr = d / "trust-root.json"
+    try:
+        present = tr.is_file()
+    except OSError:
+        present = False
+    # The "hardened but never provisioned" caveat (red-pen): the refuse-to-replace guard only bites once a
+    # real trust root exists, so a hardened deployment must CLI-provision it before relying on the anchor.
+    caveat = "" if present else (" NOTE: no trust root is provisioned yet — CLI-provision it before relying "
+                                 "on the anchor (the refuse-to-replace guard only bites once one exists).")
+    if override:
+        return "OUT-OF-BAND", (f"CRUCIBLE_ENTITLEMENT_DIR is set ({_display_path(tr)}) — anchored away from the "
+                               f"default in-tree location; use a read-only / HSM-backed mount so an in-tree "
+                               f"filesystem-write actor cannot swap it.{caveat}")
+    return "DEFAULT-IN-TREE", (f"the trust root uses the default in-tree location ({_display_path(tr)}), which "
+                               f"is offense-writable. For a governed / national-agency deployment, anchor it "
+                               f"out-of-band via CRUCIBLE_ENTITLEMENT_DIR on a read-only/HSM mount — see "
+                               f"docs/runbooks/anchor-trust-root-out-of-band.md.{caveat}")
+
+
 def _posture_vault() -> "tuple[str, str]":
     """The sovereign-plane secrets-at-rest control, read WITHOUT importing sigil (FATAL-2): the TPM-sealed
     KEK blobs under SIGIL_HOME/vault (⇒ SEALED, secrets rest as ciphertext) vs the legacy plaintext
@@ -687,6 +717,7 @@ def _collect_posture(repo: Path, services: dict) -> list:
         _entry("key-sealing", _posture_key_sealing),
         _entry("sovereignty", _posture_sovereignty),
         _entry("entitlement", lambda: _posture_entitlement(repo)),
+        _entry("entitlement-anchor", lambda: _posture_entitlement_anchor(repo)),
         _entry("backups", lambda: _posture_backups(repo)),
         _entry("charter", lambda: _posture_charter(repo)),
         _entry("egress-supervisor", _posture_egress_supervisor),

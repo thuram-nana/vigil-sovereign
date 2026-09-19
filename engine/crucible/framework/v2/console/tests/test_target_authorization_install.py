@@ -216,3 +216,20 @@ def test_launch_refuses_a_target_host_outside_the_authorized_scope(env, monkeypa
     # the authorized host does NOT hit the scope refusal (it may proceed / hit later steps, but not THIS gate)
     r2 = actions.launch_assessment({"mode": "url", "target": "https://apme.cm/", "slug": _SLUG})
     assert "covering the target host" not in str(r2.get("error", "")), r2
+
+
+def test_launch_hard_pins_the_child_crucible_root(env, monkeypatch, tmp_path):
+    """red-pen #10: a console-launched remote engage hard-pins the child — it sets CRUCIBLE_ROOT (the root
+    the charter/authority were written under) AND CRUCIBLE_ROOT_STRICT=1, so the child fails closed rather
+    than silently resolving a FOREIGN root if the pinned root's sentinel is missing."""
+    monkeypatch.setattr(actions, "console_dir", lambda: tmp_path / ".console")
+    seen: dict = {}
+
+    def _cap(run_id, rd, cmd, meta, *, capture_report, env_extra=None, env_remove=None):
+        seen["env"] = dict(env_extra or {})
+
+    monkeypatch.setattr(actions, "_spawn_background", _cap)
+    _seed(env["base"])                        # owner-signed bundle for slug apme-cm, scope [apme.cm], pinned
+    r = actions.launch_assessment({"mode": "url", "target": "https://apme.cm/", "slug": _SLUG})
+    assert r.get("status") == "running", r
+    assert seen["env"].get("CRUCIBLE_ROOT") and seen["env"].get("CRUCIBLE_ROOT_STRICT") == "1", seen

@@ -2620,6 +2620,27 @@
       "ci_job": "CRUCIBLE core on vigil_core",
       "failure_class": "n-a",
       "default": "on"
+    },
+    {
+      "id": "PHASE1-5",
+      "title": "Opt-in hard root pin: a sentinel-less CRUCIBLE_ROOT fails closed, not a silent fall-through",
+      "claim": "Under CRUCIBLE_ROOT_STRICT an explicitly-set CRUCIBLE_ROOT whose CLAUDE.md sentinel is missing is a fail-closed error, never a silent fall-through to a different tree — so a pinned child cannot resolve a foreign root for its charter / authority / trust-root. A console-launched engage sets it on the child by default; it is available globally as an opt-in, off by default so dev / pre-init flows are unaffected.",
+      "source": "docs/decisions/phase1-ui-live-external-authorization.md:43",
+      "enforced_by": {
+        "file": "engine/crucible/framework/v2/common/paths.py",
+        "symbol": "crucible_root"
+      },
+      "proved_by": {
+        "file": "engine/crucible/framework/v2/common/tests/test_paths_root_security.py",
+        "tests": [
+          "test_strict_pin_raises_on_sentinel_less_root",
+          "test_strict_pin_returns_root_when_sentinel_present",
+          "test_without_strict_a_sentinel_less_root_still_falls_through"
+        ]
+      },
+      "ci_job": "CRUCIBLE core on vigil_core",
+      "failure_class": "n-a",
+      "default": "on"
     }
   ]
 }

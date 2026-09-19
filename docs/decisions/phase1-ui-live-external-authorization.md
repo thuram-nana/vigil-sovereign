@@ -40,6 +40,12 @@ When an owner-signed engagement authority verifies for a slug, its scope binds E
 so a tool targeting a host outside the signed scope is refused; this is a defense-in-depth ADD over the
 charter check that never relaxes it, and is inert for a charter-only engagement with no signed authority.
 
+<!-- CLAIM:PHASE1-5 -->
+Under CRUCIBLE_ROOT_STRICT an explicitly-set CRUCIBLE_ROOT whose CLAUDE.md sentinel is missing is a
+fail-closed error, never a silent fall-through to a different tree — so a pinned child cannot resolve a
+foreign root for its charter / authority / trust-root. A console-launched engage sets it on the child by
+default; it is available globally as an opt-in, off by default so dev / pre-init flows are unaffected.
+
 Concretely:
 - `vigil_core.authority`: `EngagementAuthority` / `SignedAuthority` / `TargetEnvironment` +
   `authority_signing_bytes` + `sign_engagement_authority` / `verify_engagement_authority`.

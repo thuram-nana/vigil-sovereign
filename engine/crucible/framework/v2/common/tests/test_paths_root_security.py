@@ -68,3 +68,51 @@ def test_crucible_root_env_override_still_honored(
         assert paths.crucible_root() == explicit.resolve()
     finally:
         paths._reset_cache()
+
+
+# --------------------------------------------------------------------------------------------------
+# #10 — opt-in HARD root pin: an explicitly-set CRUCIBLE_ROOT with no sentinel must not silently
+# fall through to a DIFFERENT tree when CRUCIBLE_ROOT_STRICT is on.
+# --------------------------------------------------------------------------------------------------
+
+def test_strict_pin_raises_on_sentinel_less_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from framework.v2.common.errors import CrucibleRootNotFound
+    sentinel_less = tmp_path / "no-sentinel-here"
+    sentinel_less.mkdir()  # exists, but has NO CLAUDE.md
+    monkeypatch.setenv("CRUCIBLE_ROOT", str(sentinel_less))
+    monkeypatch.setenv("CRUCIBLE_ROOT_STRICT", "1")
+    paths._reset_cache()
+    try:
+        with pytest.raises(CrucibleRootNotFound):
+            paths.crucible_root()
+    finally:
+        paths._reset_cache()
+
+
+def test_strict_pin_returns_root_when_sentinel_present(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    root = tmp_path / "good-root"
+    root.mkdir()
+    (root / "CLAUDE.md").write_text("# root\n", encoding="utf-8")
+    monkeypatch.setenv("CRUCIBLE_ROOT", str(root))
+    monkeypatch.setenv("CRUCIBLE_ROOT_STRICT", "1")
+    paths._reset_cache()
+    try:
+        assert paths.crucible_root() == root.resolve()   # sentinel present ⇒ strict is a no-op
+    finally:
+        paths._reset_cache()
+
+
+def test_without_strict_a_sentinel_less_root_still_falls_through(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Default (CRUCIBLE_ROOT_STRICT unset): the historical fall-through is byte-identical — a sentinel-less
+    # CRUCIBLE_ROOT is ignored and the package-location walk resolves the real repo root (no raise).
+    sentinel_less = tmp_path / "still-no-sentinel"
+    sentinel_less.mkdir()
+    monkeypatch.setenv("CRUCIBLE_ROOT", str(sentinel_less))
+    monkeypatch.delenv("CRUCIBLE_ROOT_STRICT", raising=False)
+    monkeypatch.setattr(sys, "argv", ["crucible"])
+    paths._reset_cache()
+    try:
+        root = paths.crucible_root()               # must NOT raise
+        assert (root / "CLAUDE.md").is_file() and root != sentinel_less
+    finally:
+        paths._reset_cache()
