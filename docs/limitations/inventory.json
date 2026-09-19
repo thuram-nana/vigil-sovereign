@@ -339,19 +339,6 @@
       "w16_issue": null
     },
     {
-      "id": "LIMIT-tool-gate-authority-scope-backstop",
-      "title": "The non-HTTP sensor/tool gate enforces charter scope, not the signed-authority scope",
-      "summary": "The HTTP executor's authority gate enforces the owner-signed authority's SCOPE per action; the sensor/tool invoker gate (_gate) enforces only the charter's parse_scope, not the signed authority scope. In practice the charter is materialised from the signed authority (scope entries re-validated at install), so the two agree, but a pre-existing wider charter (never overwritten) could let a non-HTTP host-acting tool reach a host the signed authority does not cover. Defense-in-depth follow-up: run authorize_action against the loaded EngagementAuthority.scope in the tool gate too, so the owner-signed authority is the single scope source for every host-acting op.",
-      "classification": "real-unfinished-code",
-      "severity": "low",
-      "anchor": {"file": "engine/crucible/framework/v2/agents/tools/invoker.py", "symbol": "_gate"},
-      "marker": false,
-      "check": "symbol-exists",
-      "source_doc": "docs/decisions/phase1-ui-live-external-authorization.md",
-      "disposition": "file-into-w16",
-      "w16_issue": null
-    },
-    {
       "id": "LIMIT-child-root-pin-advisory",
       "title": "The engage child's CRUCIBLE_ROOT pin is advisory, not a hard fail-closed pin",
       "summary": "A remote/loopback launch pins the child's CRUCIBLE_ROOT to the tree where the charter/authority were written, so writer==reader. That pin is advisory: crucible_root() honors an explicitly-set CRUCIBLE_ROOT only when its CLAUDE.md sentinel is present, else it silently sentinel-walks to another root. If the pinned root's sentinel were removed between launch and child spawn, the child could resolve a different root. Defense-in-depth follow-up: make an explicitly-set CRUCIBLE_ROOT a HARD pin (raise rather than fall through) in paths.crucible_root.",

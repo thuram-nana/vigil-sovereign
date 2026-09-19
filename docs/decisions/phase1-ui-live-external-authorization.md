@@ -34,6 +34,12 @@ key, whose signature verifies, whose validity window is current, and whose scope
 bundle not tied to the pinned owner, a bad signature, an out-of-window authority, a non-bare-host scope entry,
 a target host outside the scope, or a conflicting pre-existing trust root is refused fail-closed.
 
+<!-- CLAIM:PHASE1-4 -->
+When an owner-signed engagement authority verifies for a slug, its scope binds EVERY host-acting operation
+— the sensor/tool gate enforces the signed-authority scope on the tool target too, not just the HTTP path —
+so a tool targeting a host outside the signed scope is refused; this is a defense-in-depth ADD over the
+charter check that never relaxes it, and is inert for a charter-only engagement with no signed authority.
+
 Concretely:
 - `vigil_core.authority`: `EngagementAuthority` / `SignedAuthority` / `TargetEnvironment` +
   `authority_signing_bytes` + `sign_engagement_authority` / `verify_engagement_authority`.

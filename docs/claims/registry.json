@@ -2577,6 +2577,28 @@
       "ci_job": "CRUCIBLE core on vigil_core",
       "failure_class": "n-a",
       "default": "on"
+    },
+    {
+      "id": "PHASE1-4",
+      "title": "The signed authority's scope binds every host-acting op, not just HTTP",
+      "claim": "When an owner-signed engagement authority verifies for a slug, its scope binds EVERY host-acting operation — the sensor/tool gate enforces the signed-authority scope on the tool target too, not just the HTTP path — so a tool targeting a host outside the signed scope is refused; this is a defense-in-depth ADD over the charter check that never relaxes it, and is inert for a charter-only engagement with no signed authority.",
+      "source": "docs/decisions/phase1-ui-live-external-authorization.md:37",
+      "enforced_by": {
+        "file": "engine/crucible/framework/v2/agents/tools/invoker.py",
+        "symbol": "_authority_scope_gate"
+      },
+      "proved_by": {
+        "file": "engine/crucible/framework/v2/agents/tools/tests/test_authority_scope_gate.py",
+        "tests": [
+          "test_out_of_scope_target_is_refused",
+          "test_in_scope_target_is_allowed",
+          "test_absent_authority_falls_back_to_charter_not_a_false_refusal",
+          "test_skips_when_no_trust_root_pinned"
+        ]
+      },
+      "ci_job": "CRUCIBLE core on vigil_core",
+      "failure_class": "n-a",
+      "default": "on"
     }
   ]
 }
