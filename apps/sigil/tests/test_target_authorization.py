@@ -25,8 +25,10 @@ def _iso(monkeypatch):
     monkeypatch.setenv("SIGIL_HOME", tempfile.mkdtemp())
 
 
-def _bundle_path(slug: str = "apme.cm") -> str:
-    return os.path.join(os.environ["VIGIL_BASE_DIR"], "target-authorizations", f"{slug}.json")
+def _bundle_path(host: str = "apme.cm") -> str:
+    """The on-disk bundle path for a HOST — derives the slug exactly as the ceremony does (apme.cm -> apme-cm)."""
+    from sigil.ui.target_authorization import _slug_for
+    return os.path.join(os.environ["VIGIL_BASE_DIR"], "target-authorizations", f"{_slug_for(host, None)}.json")
 
 
 # --- happy path -----------------------------------------------------------------------------------
@@ -37,9 +39,10 @@ def test_add_target_writes_an_owner_signed_verifiable_authorization():
     from vigil_integration.live.authorization_broker import read_authorization
 
     r = ta.add_target("apme.cm", environment="staging", duration_hours=8.0, note="first gov target")
-    assert r["ok"] and r["slug"] == "apme.cm" and r["scope"] == ["apme.cm"] and r["environment"] == "staging"
+    # slug is the console-canonical form (apme.cm -> apme-cm); scope is the literal HOST.
+    assert r["ok"] and r["slug"] == "apme-cm" and r["scope"] == ["apme.cm"] and r["environment"] == "staging"
 
-    got = read_authorization(os.environ["VIGIL_BASE_DIR"], "apme.cm")
+    got = read_authorization(os.environ["VIGIL_BASE_DIR"], "apme-cm")
     assert got is not None
     ok, reason = verify_engagement_authority(got.signed_authority, got.trust_root)
     assert ok, reason
@@ -49,13 +52,40 @@ def test_add_target_writes_an_owner_signed_verifiable_authorization():
     assert got.signed_authority.document.allow_destructive is False
 
 
+# the KNOWN-PUBLIC field set for the seam bundle, at every level — a STRUCTURAL allowlist (red-pen #16):
+# any key not listed here means private/unexpected material crossed the seam.
+_PUBLIC_SCHEMA = {
+    "": {"schema_version", "kind", "slug", "signed_authority", "trust_root"},
+    "signed_authority": {"document", "signatures"},
+    "signed_authority.document": {"engagement_slug", "environment", "scope", "not_before", "not_after",
+                                  "allow_destructive", "live_destructive_acknowledged", "max_actions",
+                                  "issued_by", "note"},
+    "signed_authority.signatures[]": {"key_id", "signature_b64"},
+    "trust_root": {"schema_version", "threshold", "authorizers"},
+    "trust_root.authorizers[]": {"key_id", "name", "public_key_b64"},
+}
+
+
+def _assert_public_only(node, path=""):
+    """Recursively assert every object key at every level is in the known-public allowlist — stronger than a
+    'priv' substring scan (a renamed/base64'd secret would evade a substring check, not this)."""
+    if isinstance(node, dict):
+        allowed = _PUBLIC_SCHEMA.get(path)
+        assert allowed is not None, f"unexpected object at {path!r}: {sorted(node)}"
+        assert set(node) <= allowed, f"non-public key(s) at {path!r}: {sorted(set(node) - allowed)}"
+        for k, v in node.items():
+            _assert_public_only(v, f"{path}.{k}" if path else k)
+    elif isinstance(node, list):
+        for item in node:
+            _assert_public_only(item, f"{path}[]")
+
+
 def test_seam_bundle_carries_no_private_material():
     from sigil.ui import target_authorization as ta
     ta.add_target("apme.cm")
     raw = open(_bundle_path(), encoding="utf-8").read()
     assert "priv" not in raw.lower(), "private material must never cross the seam"
-    d = json.loads(raw)
-    assert set(d["trust_root"]["authorizers"][0]) == {"key_id", "name", "public_key_b64"}, d
+    _assert_public_only(json.loads(raw))   # structural allowlist: every key at every level is public
 
 
 def test_status_and_list_reflect_the_authorization():
@@ -64,7 +94,7 @@ def test_status_and_list_reflect_the_authorization():
     st = ta.authority_status("apme.cm")
     assert st["present"] and st["bound"] and st["scope"] == ["apme.cm"]
     lst = ta.list_targets()
-    assert any(t["slug"] == "apme.cm" and t["bound"] for t in lst["targets"]), lst
+    assert any(t["slug"] == "apme-cm" and t["bound"] for t in lst["targets"]), lst
 
 
 # --- deliberate refusals --------------------------------------------------------------------------
@@ -96,6 +126,32 @@ def test_refuses_bad_duration():
     assert ta.add_target("apme.cm", duration_hours=10 ** 6)["ok"] is False
 
 
+@pytest.mark.parametrize("ip", ["127.0.0.1", "169.254.169.254", "0.0.0.0", "224.0.0.1", "255.255.255.255"])
+def test_refuses_loopback_linklocal_metadata_ip_literals(ip):
+    """red-pen #14: a 'live external' authorization must refuse loopback / link-local (incl. cloud metadata
+    169.254.169.254) / multicast / reserved / unspecified IP literals, which pass the hostname regex."""
+    from sigil.ui import target_authorization as ta
+    r = ta.add_target(ip)
+    assert not r["ok"], r
+    assert "loopback" in r["error"] or "link-local" in r["error"] or "reserved" in r["error"], r
+
+
+def test_unsafe_explicit_slug_returns_contract_not_raises():
+    """red-pen #13: a slug that sanitizes to empty returns {ok:false}, never an uncaught ValueError."""
+    from sigil.ui import target_authorization as ta
+    for bad in ("..", ".", "///", "..."):
+        r = ta.add_target("apme.cm", slug=bad)
+        assert isinstance(r, dict) and r["ok"] is False, (bad, r)
+
+
+def test_traversal_slug_is_sanitized_not_reflected():
+    """A path-traversal explicit slug is NEUTRALISED to a safe token (dots/slashes -> '-'), never reflected
+    as a path — so it cannot escape the authorizations dir."""
+    from sigil.ui import target_authorization as ta
+    r = ta.add_target("apme.cm", slug="../../etc")
+    assert r["ok"] is True and r["slug"] == "etc" and "/" not in r["slug"] and ".." not in r["slug"], r
+
+
 # --- tamper on the seam is caught by verification (the offense side's guarantee) ------------------
 def test_tampering_the_seam_bundle_scope_fails_verification():
     from sigil.ui import target_authorization as ta
@@ -107,7 +163,7 @@ def test_tampering_the_seam_bundle_scope_fails_verification():
     d = json.loads(open(p, encoding="utf-8").read())
     d["signed_authority"]["document"]["scope"] = ["evil.example"]   # attacker widens the scope on disk
     open(p, "w", encoding="utf-8").write(json.dumps(d))
-    got = read_authorization(os.environ["VIGIL_BASE_DIR"], "apme.cm")
+    got = read_authorization(os.environ["VIGIL_BASE_DIR"], "apme-cm")
     ok, _ = verify_engagement_authority(got.signed_authority, got.trust_root)
     assert not ok, "a tampered on-disk scope must FAIL verification (fail-closed)"
 

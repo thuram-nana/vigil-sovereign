@@ -42,10 +42,33 @@ def test_write_read_round_trip_and_verifies():
     assert got is not None and got.slug == "apme.cm"
     ok, reason = verify_engagement_authority(got.signed_authority, got.trust_root)
     assert ok, reason
-    # only public material on disk
+    # only public material on disk — STRUCTURAL allowlist (every key at every level is public), not a
+    # substring scan (which a renamed/encoded secret would evade).
     d = json.loads(path.read_text(encoding="utf-8"))
     assert d["kind"] == "vigil-target-authorization-v1"
     assert "priv" not in path.read_text(encoding="utf-8").lower()
+    public = {
+        "": {"schema_version", "kind", "slug", "signed_authority", "trust_root"},
+        "signed_authority": {"document", "signatures"},
+        "signed_authority.document": {"engagement_slug", "environment", "scope", "not_before", "not_after",
+                                      "allow_destructive", "live_destructive_acknowledged", "max_actions",
+                                      "issued_by", "note"},
+        "signed_authority.signatures[]": {"key_id", "signature_b64"},
+        "trust_root": {"schema_version", "threshold", "authorizers"},
+        "trust_root.authorizers[]": {"key_id", "name", "public_key_b64"},
+    }
+
+    def _walk(node, p=""):
+        if isinstance(node, dict):
+            assert p in public, f"unexpected object at {p!r}: {sorted(node)}"
+            assert set(node) <= public[p], f"non-public key(s) at {p!r}: {sorted(set(node) - public[p])}"
+            for k, v in node.items():
+                _walk(v, f"{p}.{k}" if p else k)
+        elif isinstance(node, list):
+            for it in node:
+                _walk(it, f"{p}[]")
+
+    _walk(d)
 
 
 def test_list_returns_every_readable_bundle():

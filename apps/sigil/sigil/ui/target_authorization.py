@@ -66,11 +66,15 @@ def _owner_keypair():
 
 
 def _slug_for(host: str, explicit: Optional[str]) -> str:
-    """A path-safe engagement slug: the explicit slug if given, else derived from the host. Keep only
-    alnum + ``-_.`` and lowercase; the offense side uses it as the ``targets/<slug>/`` dir + authority
-    filename, so it must be a safe, stable token."""
+    """A path-safe engagement slug: the explicit slug if given, else derived from the host.
+
+    CRITICAL: this must produce the SAME slug the offense console derives (``console.actions._slugify``),
+    or the seam bundle is written under a slug the console never looks up and the whole UI->launch flow
+    silently breaks. That algorithm is: lowercase, keep alnum + ``-_`` (every other char — notably the dot
+    — becomes ``-``), strip leading/trailing ``-``, cap at 48. So ``apme.cm`` -> ``apme-cm`` on BOTH planes.
+    Kept as a small verbatim copy (the sovereign plane cannot import the offense ``_slugify``)."""
     raw = str(explicit or host or "").strip().lower()
-    return "".join(c for c in raw if c.isalnum() or c in "-_.")[:120]
+    return "".join(c if (c.isalnum() or c in "-_") else "-" for c in raw).strip("-")[:48]
 
 
 def _validate_host(host: str) -> tuple[bool, str]:
@@ -85,6 +89,19 @@ def _validate_host(host: str) -> tuple[bool, str]:
                        "a single literal host")
     if not _HOSTNAME_RE.match(h):
         return False, f"{h!r} is not a valid hostname"
+    # An IPv4 literal passes the hostname regex; refuse the ranges that are never a legitimate LIVE EXTERNAL
+    # target — loopback, link-local (incl. the cloud metadata address 169.254.169.254), multicast, reserved,
+    # unspecified. (RFC-1918 private space is left to twin/staging and is independently blocked by the
+    # never-liftable egress floor at runtime; IPv6 literals are already rejected by the ':' check above.)
+    import ipaddress as _ip
+    try:
+        _addr = _ip.ip_address(h)
+    except ValueError:
+        _addr = None
+    if _addr is not None and (_addr.is_loopback or _addr.is_link_local or _addr.is_multicast
+                              or _addr.is_reserved or _addr.is_unspecified):
+        return False, (f"{h!r} is a loopback / link-local / reserved address (e.g. cloud metadata) — not a "
+                       f"live external target")
     try:
         assert_not_hard_blocked(h)
     except HardBlockError as e:
@@ -156,8 +173,11 @@ def add_target(
         return {"ok": False, "error": f"duration_hours must be in (0, {_MAX_DURATION_HOURS}]"}
 
     s = _slug_for(h, slug)
-    if not s:
-        return {"ok": False, "error": "could not derive a path-safe slug"}
+    # Reject an empty or dot-only slug HERE with the {ok:false} contract — a dot-only value (".", "..") would
+    # otherwise reach the broker and raise ValueError (an uncaught 500 rather than an honest error). The
+    # broker's own _safe_component stays as the defence-in-depth backstop.
+    if not s or all(c == "." for c in s):
+        return {"ok": False, "error": "could not derive a path-safe slug (try an explicit slug)"}
 
     t = now() if callable(now) else (now if now is not None else datetime.now(timezone.utc))
     if not isinstance(t, datetime):
@@ -181,7 +201,10 @@ def add_target(
         threshold=1,
         authorizers=[AuthorizerKey(key_id="owner", name="owner", public_key_b64=kp.public_key_b64)],
     )
-    path = write_authorization(_base_dir(), s, signed, trust_root)
+    try:
+        path = write_authorization(_base_dir(), s, signed, trust_root)
+    except ValueError as e:  # broker path-safety backstop — honor the {ok:false} contract, don't 500
+        return {"ok": False, "error": f"could not write the authorization ({e})"}
     return {
         "ok": True, "action": "target_add", "slug": s, "host": h, "environment": env,
         "scope": [h], "not_before": doc.not_before.isoformat(), "not_after": doc.not_after.isoformat(),

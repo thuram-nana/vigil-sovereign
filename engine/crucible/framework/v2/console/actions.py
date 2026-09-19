@@ -550,28 +550,47 @@ def _has_charter(slug: str) -> bool:
         return False
 
 
-def _has_verified_authority(slug: str) -> bool:
+def _has_verified_authority(slug: str, host: str = "") -> bool:
     """True iff the offense side holds an owner-signed authority for ``slug`` whose governance THRESHOLD
-    signature verifies against the deployment trust root — the fail-closed pre-flight for a REMOTE engage
+    signature verifies against the deployment trust root, is currently in its validity WINDOW, and (when a
+    ``host`` is given) whose SCOPE covers that target host — the fail-closed pre-flight for a REMOTE engage
     (R-CRITICAL-1 / B11). This REPLACES the existence-only `_has_charter` gate: a charter file that merely
     exists (with a plaintext `Signed:` name) no longer authorizes anything. A missing trust root, a missing
-    or unsigned authority, or any verification failure returns False — never raises, never fail-open.
-    Same-plane imports (framework.v2), kept function-local per FATAL-2 import hygiene.
+    or unsigned authority, an out-of-window authority, a target host the authority does not cover, or any
+    verification failure returns False — never raises, never fail-open. Same-plane imports (framework.v2),
+    kept function-local per FATAL-2 import hygiene.
+
+    The ``host`` scope check (red-pen #5) makes the gate bind to the TARGET, not just the slug: an authority
+    for slug X cannot launch a scan of a host its signed scope does not cover. The runtime authority gate also
+    enforces scope per-action; this refuses up-front so no run is spawned for an out-of-scope host.
 
     HONEST SCOPE (do not overclaim): this raises the bar from "write a plaintext `Signed:` name into a
-    charter file" to "produce a valid governance THRESHOLD signature". Its completeness assumes the
-    deployment trust root (.entitlement/trust-root.json) is NOT writable by the same low-privilege actor
-    who can author charters — an actor with arbitrary owner-uid filesystem write can still plant their own
-    trust root + self-signed authority (but such an actor is outside the meaningful threat model: they could
-    equally edit code, the kill-switch, or the keys). Relocate .entitlement to a read-only / HSM-backed mount
-    via CRUCIBLE_ENTITLEMENT_DIR to close even that."""
+    charter file" to "produce a valid governance THRESHOLD signature over the target, in window". The
+    owner-PIN tie (the authority's trust root == the pinned owner key) is enforced at INSTALL time
+    (`_install_target_authorization`), NOT here — this gate verifies the authority against whatever trust root
+    is on disk. Its completeness therefore assumes the deployment trust root (.entitlement/trust-root.json) is
+    NOT writable by the same low-privilege actor who can author charters — an actor with arbitrary owner-uid
+    filesystem write can still plant their own trust root + self-signed authority (outside the meaningful
+    threat model: they could equally edit code, the kill-switch, or the keys). Relocate .entitlement to a
+    read-only / HSM-backed mount via CRUCIBLE_ENTITLEMENT_DIR to close even that."""
     try:
         from ..entitlement.store import load_trust_root
         from ..authority.store import load_verified_authority
         trust_root = load_trust_root()
         if trust_root is None:
             return False
-        load_verified_authority(slug, trust_root)   # raises unless the threshold signature verifies
+        doc = load_verified_authority(slug, trust_root)   # raises unless the threshold signature verifies
+        # Defense-in-depth + honesty (red-pen): reject a verified-but-out-of-window authority at the CONSOLE
+        # gate too — a future (not_before) or expired (not_after) authority does not authorize a launch.
+        import datetime as _dt
+        _now = _dt.datetime.now(_dt.timezone.utc)
+        if not (doc.not_before <= _now < doc.not_after):
+            return False
+        # Bind to the TARGET host, not just the slug: the verified authority's scope must cover it.
+        if host:
+            from ..common import ethics
+            if not ethics.host_matches_scope(host, list(doc.scope)):
+                return False
         return True
     except Exception:  # noqa: BLE001 — any load/verify failure is a fail-closed refusal
         return False
@@ -645,18 +664,29 @@ def _install_target_authorization(slug: str) -> "tuple[str, str]":
         return "", f"authorization signature does not verify: {reason}"
 
     doc = ta.signed_authority.document
-    # (3) slug / scope / window sanity — never install a mismatched or already-expired authorization
+    # (3) slug / scope / window sanity — never install a mismatched, not-yet-valid, or expired authorization
     if doc.engagement_slug != slug or not doc.scope:
         return "", "authorization slug/scope mismatch"
+    # (3b) INDEPENDENTLY re-validate every scope entry as a BARE host (defense-in-depth — do NOT trust the
+    #      other-plane ceremony as the sole barrier). A validly-signed authority whose scope carries a
+    #      markdown/table metacharacter, whitespace, or a scheme/path would otherwise be materialised
+    #      verbatim into the charter's scope table (row injection) or widen what parse_scope reads. Fail closed.
+    for _h in doc.scope:
+        _hh = str(_h).strip()
+        if (not _hh) or _hh in (".", "..") or "://" in _hh or any(c in _hh for c in "|/\\ \t\r\n"):
+            return "", f"authorization scope entry {_h!r} is not a bare host — refused"
     now = _dt.datetime.now(_dt.timezone.utc)
     if now >= doc.not_after:
         return "", "authorization has expired — re-authorize the target"
+    if now < doc.not_before:
+        return "", "authorization is not yet valid (future not_before) — re-authorize with a current window"
 
-    # (4) persist the owner trust root ONCE; refuse to REPLACE a DIFFERING one (no silent trust downgrade)
+    # (4) persist the owner trust root ONCE; refuse to REPLACE a DIFFERING one (no silent trust downgrade).
+    #     A PRESENT-but-UNREADABLE root is a hard conflict (not "absent") — refuse rather than overwrite it.
     try:
         existing = load_trust_root()
-    except Exception:  # noqa: BLE001
-        existing = None
+    except Exception:  # noqa: BLE001 — present-but-broken ⇒ deny (matches entitlement.store semantics)
+        return "", "a deployment trust root is present but unreadable — refusing to replace it"
     if existing is not None:
         if {a.public_key_b64 for a in existing.authorizers} != {pinned}:
             return "", "a different deployment trust root is already provisioned — refusing to replace it"
@@ -2767,15 +2797,16 @@ def launch_assessment(body: dict) -> dict:
         _installed_root, _install_note = _install_target_authorization(slug)
         if _installed_root:
             _charter_root = _installed_root
-    if not is_loopback and not _has_verified_authority(slug):
-        # R-CRITICAL-1 / B11: a remote engage must carry an owner-signed, threshold-VERIFIED authority — not
-        # merely a charter file that EXISTS (the old `_has_charter` check let anyone who could write a
-        # targets/<slug>/charter.md with a plaintext `Signed:` name aim VIGIL at any host). Fail closed.
+    if not is_loopback and not _has_verified_authority(slug, host):
+        # R-CRITICAL-1 / B11 + red-pen #5: a remote engage must carry an owner-signed, threshold-VERIFIED,
+        # in-window authority whose SCOPE covers THIS target host — not merely a charter file that EXISTS (the
+        # old `_has_charter` check let anyone who could write a targets/<slug>/charter.md with a plaintext
+        # `Signed:` name aim VIGIL at any host), and not an authority for a DIFFERENT host. Fail closed.
         return {"error": f"remote engage for {slug!r} refused (fail-closed): "
-                         f"{_install_note or 'no owner-signed, verifiable authority against the deployment trust root'}. "
-                         f"Authorize this target first — use the UI authorization ceremony (add the target, then "
-                         f"owner-sign it; the owner key never leaves the sovereign process), or mint one via "
-                         f"`vigil provision`. A plaintext charter file is no longer sufficient."}
+                         f"{_install_note or 'no owner-signed, verifiable, in-window authority'} covering the "
+                         f"target host {host!r}. Authorize THIS host first — use the UI authorization ceremony "
+                         f"(add the target, then owner-sign it; the owner key never leaves the sovereign "
+                         f"process), or mint one via `vigil provision`. A plaintext charter is not sufficient."}
 
     # CONTAINMENT (red-pen HIGH): the framework `engage`/`--autonomous` branch mints a FRESH slug whose
     # kill-switch is untripped, so a soft emergency-stop (restricted mode) would NOT contain it — the same

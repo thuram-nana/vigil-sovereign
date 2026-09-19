@@ -30,7 +30,9 @@ from vigil_core import (
 from vigil_integration.live.approval_broker import persist_authority
 from vigil_integration.live.authorization_broker import write_authorization
 
-_SLUG = "apme.cm"
+# the console-canonical slug for host apme.cm (console._slugify + ceremony._slug_for both map apme.cm ->
+# apme-cm). The SLUG (an id) and the SCOPE host (apme.cm) are deliberately distinct.
+_SLUG = "apme-cm"
 
 
 @pytest.fixture()
@@ -142,6 +144,55 @@ def test_tampered_on_disk_scope_refuses(env):
     assert actions._has_verified_authority(_SLUG) is False
 
 
+def test_validly_signed_malformed_scope_entry_is_refused(env):
+    """red-pen #8: a VALIDLY owner-signed authority whose scope carries a table-injection / non-bare-host
+    entry must be refused at install (independent scope re-validation), not materialised verbatim into the
+    charter table. The signature is genuine — the defense is content validation, not signature failure."""
+    bad = _doc(host="apme.cm | evil.example")   # a pipe would inject a second charter row / widen parse_scope
+    _seed(env["base"], doc=bad)
+    root, reason = actions._install_target_authorization(_SLUG)
+    assert root == "" and "not a bare host" in reason
+    assert actions._has_verified_authority(_SLUG) is False
+
+
+def test_not_yet_valid_authorization_refuses(env):
+    """red-pen #2/#6: a future-dated (not_before) authority must not install (nor pass the gate)."""
+    ts = datetime.now(timezone.utc)
+    future = _doc(not_before=ts + timedelta(days=30), not_after=ts + timedelta(days=31))
+    _seed(env["base"], doc=future)
+    root, reason = actions._install_target_authorization(_SLUG)
+    assert root == "" and "not yet valid" in reason
+    assert actions._has_verified_authority(_SLUG) is False
+
+
+def test_gate_rejects_a_verified_but_out_of_window_authority(env):
+    """red-pen #1/#15: _has_verified_authority now also checks the validity window. Persist a genuine
+    owner-signed authority + matching trust root DIRECTLY (bypassing install) but expired — the gate must
+    return False even though the signature verifies."""
+    from framework.v2.authority.store import save_signed_authority
+    from framework.v2.entitlement.provision import write_trust_root
+    owner = generate_keypair()
+    ts = datetime.now(timezone.utc)
+    expired = _doc(not_before=ts - timedelta(hours=2), not_after=ts - timedelta(hours=1))
+    signed = sign_engagement_authority(expired, {"owner": owner.private_key_b64})
+    write_trust_root(TrustRoot(threshold=1, authorizers=[
+        AuthorizerKey(key_id="owner", name="owner", public_key_b64=owner.public_key_b64)]))
+    save_signed_authority(signed)
+    assert actions._has_verified_authority(_SLUG) is False
+
+
+def test_malformed_existing_trust_root_is_not_overwritten(env):
+    """red-pen #3: a PRESENT-but-unreadable trust root is a hard conflict, not 'absent' — install must
+    refuse rather than silently overwrite it."""
+    from framework.v2.common import paths
+    tp = paths.trust_root_path()
+    tp.parent.mkdir(parents=True, exist_ok=True)
+    tp.write_text("{ not valid json", encoding="utf-8")
+    _seed(env["base"])
+    root, reason = actions._install_target_authorization(_SLUG)
+    assert root == "" and "unreadable" in reason
+
+
 def test_conflicting_existing_trust_root_is_not_replaced(env):
     from framework.v2.entitlement.provision import write_trust_root
     # a DIFFERENT trust root is already provisioned on this deployment
@@ -151,3 +202,17 @@ def test_conflicting_existing_trust_root_is_not_replaced(env):
     _seed(env["base"])                        # a valid owner-signed bundle + owner pin (a DIFFERENT owner)
     root, reason = actions._install_target_authorization(_SLUG)
     assert root == "" and "different deployment trust root" in reason
+
+
+def test_launch_refuses_a_target_host_outside_the_authorized_scope(env, monkeypatch, tmp_path):
+    """red-pen #5: the console launch gate binds an authority to the SLUG; also confirm the TARGET HOST being
+    scanned is within that authority's scope. An authority for slug apme.cm (scope [apme.cm]) must NOT launch
+    a scan of a different host under the same slug — refused up-front, fail-closed, before any spawn."""
+    monkeypatch.setattr(actions, "console_dir", lambda: tmp_path / ".console")
+    monkeypatch.setattr(actions, "_spawn_background", lambda *a, **k: None)   # never reached on refusal
+    _seed(env["base"])                        # owner-signed bundle for slug apme-cm, scope [apme.cm], pinned
+    r = actions.launch_assessment({"mode": "url", "target": "https://evil.example/", "slug": _SLUG})
+    assert "error" in r and "evil.example" in r["error"] and "covering the target host" in r["error"], r
+    # the authorized host does NOT hit the scope refusal (it may proceed / hit later steps, but not THIS gate)
+    r2 = actions.launch_assessment({"mode": "url", "target": "https://apme.cm/", "slug": _SLUG})
+    assert "covering the target host" not in str(r2.get("error", "")), r2
