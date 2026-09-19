@@ -109,6 +109,11 @@ PERMISSION_BY_ACTION: dict[str, Optional[str]] = {
     "set_cloud_file_secret": "secrets",
     "offense_bind_authority": "offense_authority",
     "offense_approve": "offense_authority", "offense_deny": "offense_authority",
+    # Phase 1: authorizing a LIVE external target is the most dangerous authorization act (it mints the
+    # scoped, signed authority the launch gate trusts) — owner-only, like minting a charter. The read-only
+    # list/status are viewer+ (public-safe: keys + scope + window, no secret).
+    "target_add": "offense_authority",
+    "target_list": "read", "target_authority_status": "read",
     "create_account": "manage_users", "assign_role": "manage_users", "revoke_account": "manage_users",
     "revoke_all_teammates": "manage_users",                            # bulk revoke every non-owner account
     "rotate_bootstrap_token": "manage_users", "revoke_bootstrap_token": "manage_users",   # owner session (1b)
