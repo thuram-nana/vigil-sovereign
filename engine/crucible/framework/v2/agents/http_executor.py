@@ -32,6 +32,7 @@ output is preserved as evidence that the framework chose not to act.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import random
@@ -174,6 +175,104 @@ def parse_posture(slug: str) -> Posture:
 # ---------------------------------------------------------------------------
 
 PromptCallback = Callable[[str, float], bool]
+
+
+# The destructive-confirm question is ONE source of truth (format + inverse parse), so a per-action
+# approval callback that must recover the exact (method, url, body) it is authorizing — engage.py's
+# ``prompt_callback_from_args`` — binds byte-for-byte what ``_run_gates`` is about to issue, and can never
+# drift from the display string. The callback contract stays ``(question: str, timeout: float) -> bool``.
+#
+# A state-changing request can carry a BODY (``gated_fetch`` → ``_capture`` sends ``content=body``). A
+# method+url-only prompt/token would let the owner blind-sign a payload they never saw AND leave two writes
+# to the same (method,url) with different bodies indistinguishable to the signature. So when a body is
+# present the BINDING carries its sha256 (over the exact transmitted bytes) on a fixed-shape FIRST LINE, and
+# a redacted, sanitized, single-line human PREVIEW follows on LATER lines (display-only — NEVER parsed for
+# the binding). The no-body form is byte-identical to the pre-body prompt/token.
+_DESTRUCTIVE_PROMPT_PREFIX = "about to issue "
+_DESTRUCTIVE_PROMPT_SUFFIX = " (classified destructive). proceed?"
+_BODY_PREVIEW_MAX = 512  # cap the human-readable body preview appended to the prompt (display-only)
+
+# STRICT binding grammar for the first-line "middle" (between prefix and suffix): ``METHOD URL`` with an
+# OPTIONAL ``[body-sha256=<64hex>]`` segment. METHOD/URL are bare ``\S+`` (a URL never contains a raw space,
+# so it can never absorb the space-delimited sha segment), and the sha is fixed 64-hex — so a crafted
+# url/body/preview can neither forge nor alter the bound sha, and the mapping (method,url,sha) is injective.
+_DESTRUCTIVE_BINDING_RE = re.compile(r"^(\S+) (\S+)(?: \[body-sha256=([0-9a-f]{64})\])?$")
+
+
+def body_sha256_hex(body: "str | bytes") -> str:
+    """The sha256 (hex) over the EXACT bytes the executor transmits: a ``str`` body is utf-8 encoded exactly
+    as ``_capture`` encodes it before ``client.request(..., content=...)``; ``bytes`` are hashed as-is."""
+    data = body.encode("utf-8") if isinstance(body, str) else body
+    return hashlib.sha256(data).hexdigest()
+
+
+def _redact_body_preview(body: "str | bytes") -> str:
+    """A REDACTED, single-line, length-capped preview of the request body for the human signer. It masks
+    known credential SHAPES — form-encoded ``k=v`` / ``Bearer`` / credential HEADERS (``redact_log_message``)
+    AND JSON ``"secretkey":"value"`` (``redact_json_secrets``) — so a password/token under a known key is not
+    shown or logged in the clear, while NON-secret keys (role, amount, email, …) stay visible for informed
+    consent. This masks KNOWN shapes best-effort, NOT a guarantee every conceivable secret is caught; the
+    preview is only ever shown for owner consent and written to owner-only (0600) records. Every control char
+    / newline is collapsed to a space (so the preview stays on its own later line and the FIRST-line binding
+    is unreachable from here); the result is length-capped."""
+    try:
+        text = body.decode("utf-8", errors="replace") if isinstance(body, (bytes, bytearray)) else str(body)
+        text = redact.redact_log_message(text)     # form-encoded / Bearer / credential-header shapes
+        text = redact.redact_json_secrets(text)    # JSON "secretkey": value shapes (log_message misses these)
+        text = "".join(" " if (ord(c) < 0x20 or ord(c) == 0x7f) else c for c in text)
+        text = " ".join(text.split())  # collapse runs of whitespace
+    except Exception:  # noqa: BLE001 — a preview is advisory; any failure yields an empty preview
+        return ""
+    if len(text) > _BODY_PREVIEW_MAX:
+        text = text[:_BODY_PREVIEW_MAX] + "…(truncated)"
+    return text
+
+
+def format_destructive_prompt(method: str, url: str, *, body_sha256: "str | None" = None,
+                              body_preview: "str | None" = None) -> str:
+    """The exact destructive-confirm question ``_run_gates`` puts to the operator prompt callback. Kept as a
+    named function so its inverse (:func:`parse_destructive_prompt`) can recover the SAME (method, url,
+    body_sha256) an approval callback binds.
+
+    ``body_sha256`` None ⇒ the pre-body form, BYTE-IDENTICAL to before (a GET / no-body write). When present,
+    the BINDING is the fixed-shape FIRST LINE ``about to issue {method} {url} [body-sha256={64hex}]{suffix}``
+    and a display-only redacted ``body_preview`` (never parsed for the binding) is appended on a later line so
+    the owner sees WHAT they authorize. A method is a bare token and a URL carries no raw space, so the
+    binding line is unambiguous.
+
+    OBS-1 (fail-closed): a normal URL contains neither a raw space nor the literal ``[body-sha256=`` marker.
+    If one does, the first-line grammar becomes ambiguous (a crafted no-body URL could otherwise parse as a
+    body request with a spurious sha), so this REFUSES with ValueError — the caller (``_run_gates``) turns it
+    into a clean DENY rather than emitting an unbindable prompt."""
+    if " " in url or "[body-sha256=" in url:
+        raise ValueError("refusing to format a destructive prompt for an unbindable URL "
+                         "(contains a space or the body-sha256 marker)")
+    if body_sha256 is None:
+        return f"{_DESTRUCTIVE_PROMPT_PREFIX}{method} {url}{_DESTRUCTIVE_PROMPT_SUFFIX}"
+    first = f"{_DESTRUCTIVE_PROMPT_PREFIX}{method} {url} [body-sha256={body_sha256}]{_DESTRUCTIVE_PROMPT_SUFFIX}"
+    return f"{first}\nbody: {body_preview or ''}"
+
+
+def parse_destructive_prompt(question: str) -> "tuple[str, str, str | None] | None":
+    """Inverse of :func:`format_destructive_prompt`: recover ``(method, url, body_sha256_or_None)`` from the
+    question's FIRST LINE only (the binding line — the redacted preview on later lines is display-only and is
+    NEVER read for the binding), or ``None`` if that line is not exactly the expected shape.
+
+    The binding is matched with a STRICT grammar: ``METHOD URL`` with an OPTIONAL ``[body-sha256=<64hex>]``.
+    Any drift / malformed input returns ``None`` and the caller (an approval callback) MUST then fail closed
+    to DENY — it never guesses an action to authorize. A crafted url/body/preview cannot forge or alter the
+    bound sha (a URL is ``\\S+`` so it cannot contain the space-delimited sha segment; the preview lives on a
+    later line)."""
+    if not isinstance(question, str):
+        return None
+    first_line = question.split("\n", 1)[0].strip()
+    if not (first_line.startswith(_DESTRUCTIVE_PROMPT_PREFIX) and first_line.endswith(_DESTRUCTIVE_PROMPT_SUFFIX)):
+        return None
+    middle = first_line[len(_DESTRUCTIVE_PROMPT_PREFIX):len(first_line) - len(_DESTRUCTIVE_PROMPT_SUFFIX)]
+    m = _DESTRUCTIVE_BINDING_RE.match(middle)
+    if m is None:
+        return None
+    return m.group(1), m.group(2), m.group(3)  # (method, url, body_sha256 | None)
 
 
 def stdin_prompt_with_timeout(question: str, timeout_seconds: float) -> bool:
@@ -429,7 +528,8 @@ class HttpExecutor:
         return None
 
     def _run_gates(
-        self, method: str, url: str, action_id: str,
+        self, method: str, url: str, action_id: str, *,
+        body: "str | bytes | None" = None,
     ) -> ExecutionOutcome | None:
         """Run the full per-action safety chain and return a refusal outcome if
         any gate denies, else None (the action may proceed to I/O).
@@ -439,6 +539,13 @@ class HttpExecutor:
         deny) -> per-engagement budget -> posture rate-limit. Shared by
         ``execute`` and ``execute_differential`` so NO action path can skip a
         gate — a new confirmation mode cannot become a hole in the safety stack.
+
+        ``body`` is the request body that WILL be transmitted (``gated_fetch`` →
+        ``_capture(..., body)``). When present on a destructive action, the
+        confirm prompt BINDS its sha256 (over the exact transmitted bytes) so the
+        owner sees — and any per-action approval token covers — the payload, not
+        just (method, url). ``body=None`` (the GET / no-body path) is
+        byte-identical to before.
         """
         halt = self._authority_gate(method, url, action_id)
         if halt is not None:
@@ -460,10 +567,31 @@ class HttpExecutor:
             )
 
         if decision.is_destructive:
-            question = (
-                f"about to issue {method} {url} "
-                f"(classified destructive). proceed?"
-            )
+            # OBS-2: the contract is body ∈ {str, bytes, None}. A caller that passed anything else (a dict /
+            # int) must fail CLOSED to a clean DENY, never crash out of gated_fetch with an uncaught TypeError.
+            if body is not None and not isinstance(body, (str, bytes, bytearray)):
+                self._destructive_refusals += 1
+                self._log_event("destructive.prompt_refused", action_id=action_id,
+                                reason=f"body must be str/bytes/None, got {type(body).__name__}")
+                return self._refused(
+                    "destructive action refused: request body is not str/bytes (fail-closed)", status_code=0)
+            try:
+                if body is None:
+                    question = format_destructive_prompt(method, url)  # byte-identical no-body form
+                else:
+                    question = format_destructive_prompt(
+                        method, url,
+                        body_sha256=body_sha256_hex(body),          # over the EXACT bytes _capture transmits
+                        body_preview=_redact_body_preview(body),    # display-only redacted preview (later line)
+                    )
+            except (ValueError, TypeError) as exc:
+                # OBS-1: an unbindable URL (raw space / sha-marker) — or any residual encoding error — is a
+                # clean DENY, never an unbindable prompt or a crash. The reason names no untrusted body bytes.
+                self._destructive_refusals += 1
+                self._log_event("destructive.prompt_refused", action_id=action_id,
+                                reason=f"unbindable destructive request ({type(exc).__name__})")
+                return self._refused(
+                    "destructive action refused: unbindable request (fail-closed)", status_code=0)
             granted = self.prompt_callback(question, self.prompt_timeout_seconds)
             self._log_event(
                 "destructive.prompt", action_id=action_id,
@@ -611,7 +739,9 @@ class HttpExecutor:
         raw_headers = list(getattr(request, "headers", []) or [])
         action_id = self._next_action_id()
 
-        refusal = self._run_gates(method, url, action_id)
+        # Thread the REAL body into the gate: the destructive-confirm binds its sha256 over the exact bytes
+        # ``_capture`` transmits below, so the owner sees — and a per-action token covers — the payload.
+        refusal = self._run_gates(method, url, action_id, body=body)
         if refusal is not None:
             return {"status": 0, "body": "", "headers": [], "latency_ms": 0.0, "refused": refusal.note}
         if self.dry_run:

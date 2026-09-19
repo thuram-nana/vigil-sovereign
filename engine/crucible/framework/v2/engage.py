@@ -32,7 +32,13 @@ from typing import TYPE_CHECKING
 from urllib.parse import urlsplit
 
 from .agents.egress_guard import build_engagement_allowlist
-from .agents.http_executor import HttpExecutor, PromptCallback, parse_posture, stdin_prompt_with_timeout
+from .agents.http_executor import (
+    HttpExecutor,
+    PromptCallback,
+    parse_destructive_prompt,
+    parse_posture,
+    stdin_prompt_with_timeout,
+)
 from .agents.scope_gate import validate_action
 from .authority.killswitch import KillSwitch
 from .phase_ledger import (
@@ -1509,9 +1515,136 @@ def _run_autonomous(args: argparse.Namespace, result: EngagementResult, spine: o
 
 
 def prompt_callback_from_args(args: argparse.Namespace) -> PromptCallback | None:
-    """The operator-confirmation callback the autonomous cycle threads into destructive-confirm.
-    None → the invoker's default-deny (a destructive tool is refused unless explicitly approved)."""
-    return None
+    """The operator-confirmation callback the engage destructive-confirm gate uses for a state-changing
+    (POST/PUT/DELETE/PATCH — or destructive-by-path) HTTP action.
+
+    DEFAULT (fail-closed): ``--approve-mutations`` absent OR no owner approval authority provisioned ⇒ return
+    ``None``. The caller then falls back to its default-deny (``stdin_prompt_with_timeout`` on a non-tty
+    returns False, ``run_autonomous_cycle`` treats None as deny), so a destructive action is DENIED and never
+    issued. GET (non-destructive) never reaches this callback — it is never gated. This None path is the
+    unchanged, safe default.
+
+    APPROVED (opt-in): ``--approve-mutations`` set AND an owner authority is provisioned (its PUBLIC key is
+    on disk at ``<base>/approval-authority.json`` — the offense side is KEYLESS) ⇒ return a callback that, on
+    a destructive action, wires the EXISTING per-action approval machinery (it reimplements NO crypto):
+
+      1. recover the EXACT ``(method, url, body_sha256)`` the executor is about to issue from the
+         destructive-confirm question via :func:`agents.http_executor.parse_destructive_prompt` (the inverse
+         of the one formatter that produced it, read from the binding FIRST line only — a byte-for-byte
+         binding, never a guess); a parse failure ⇒ DENY;
+      2. build ``ApprovalAction(tool_name="engage.http", target=url, action_digest=action_digest(
+         "engage.http", url, {"method": method[, "body_sha256": …]}))`` — a body-carrying write
+         (``gated_fetch`` → ``_capture`` sends ``content=body``) binds the sha256 of the EXACT transmitted
+         bytes, so a token minted for body A can never authorize a different body B on the same (method, url);
+         a no-body / query-param write binds ``{"method": …}`` (params ride in the URL = the target). Either
+         way this binds the EXACT (tool, target, args);
+      3. ``broker.bind(action)`` then ``broker.token_source()`` — publish a public-safe pending request the
+         sovereign signer can see, and BLOCK up to the broker's own poll window (``_DEFAULT_WAIT_SECONDS``,
+         or ``VIGIL_APPROVAL_WAIT_SECONDS``) for a matching owner-signed token;
+      4. ``consume_token(token, action, authority=<pinned owner key>, now, ledger)`` — the SOLE authority:
+         it verifies the owner signature, the pinned key-id, the action-binding (``ApprovalToken.matches``),
+         the validity/dead-man's window, and ATOMICALLY burns the single-use nonce (O_EXCL check-and-burn);
+      5. return ``decision.authorized`` — True only if every check passed.
+
+    A CRUCIBLE deny / tripped kill-switch is refused by ``_run_gates`` BEFORE the destructive prompt, so this
+    callback is never even invoked for one — a token can only ADD a gate to an otherwise-in-envelope write; it
+    can never override a deny. Any error at any step (missing package, unparseable question, non-serialisable
+    args, no/expired/replayed token, broker/burn error, timeout) returns False (DENY): fail-closed throughout.
+
+    FATAL-2 / KEYLESS OFFENSE: the approval machinery is import-clean (``vigil_core`` + stdlib) and holds NO
+    private key — only the owner's PUBLIC authority + owner-signed tokens cross the seam. Its imports are
+    FUNCTION-LOCAL so the engage module never couples to ``vigil_integration`` at import time."""
+    if not getattr(args, "approve_mutations", False):
+        return None  # the flag is the explicit opt-in; without it the fail-closed default stands
+
+    # FATAL-2: the per-action approval primitives are the import-clean, framework-free vigil_core+stdlib
+    # modules (proven by integration/tests/test_two_env_boundary.py). Import them FUNCTION-LOCALLY — the
+    # engage module must not couple framework → vigil_integration at import time. The offense side loads only
+    # the PUBLIC authority + verifies/consumes owner-signed tokens; it imports/holds no private key material.
+    try:
+        import time as _time  # noqa: PLC0415
+        from vigil_integration.live.approval_broker import (  # noqa: PLC0415 (FATAL-2: framework-free, keyless)
+            ApprovalBroker,
+            approvals_root,
+            load_authority,
+        )
+        from vigil_integration.live.approval_token import (  # noqa: PLC0415 (FATAL-2: PUBLIC-key verify only)
+            ApprovalAction,
+            action_digest,
+            consume_token,
+        )
+        from vigil_integration.live.nonce_ledger import NonceLedger  # noqa: PLC0415 (FATAL-2: stdlib-only)
+    except Exception:  # noqa: BLE001 — the approval package unavailable ⇒ keep the fail-closed default (None)
+        return None
+
+    # The shared engagement base dir both planes agree on (``vigil up`` exports VIGIL_BASE_DIR for both);
+    # matches apps/sigil offense_approvals._base_dir + the console. The authority is the owner's PUBLIC key
+    # only (safe to load offense-side); absent/malformed ⇒ None ⇒ the fail-closed default (GET-only) stands.
+    base_dir = os.environ.get("VIGIL_BASE_DIR") or ".vigil-live"
+    authority = load_authority(base_dir)
+    if authority is None:
+        return None  # no owner authority provisioned ⇒ fail-closed default (destructive default-deny)
+
+    # ONE single-use nonce ledger, shared with the engine's approval path (``<base>/approval-nonces``), so a
+    # token's nonce burned by either path can never be replayed on the other. The broker's is_consumed lets
+    # token_source PREFER a live, unspent token over an accumulated spent/expired shadow (consume_token stays
+    # the SOLE burn authority). ``now=_time.time`` is the real clock the token dead-man's-switch is checked on.
+    nonce_dir = os.environ.get("VIGIL_APPROVAL_NONCE_DIR") or str(Path(base_dir) / "approval-nonces")
+    ledger = NonceLedger(nonce_dir)
+    broker = ApprovalBroker(approvals_root(base_dir), now=_time.time, is_consumed=ledger.is_consumed)
+
+    def _mutating_approval(question: str, _timeout: float) -> bool:
+        # (1) recover the EXACT (method, url, body_sha256) the executor is about to issue — the inverse of the
+        # one formatter that produced the question (binding read from the FIRST line only), so the binding is
+        # byte-for-byte, never a guess. A body-carrying write carries its sha256; a no-body write carries None.
+        parsed = parse_destructive_prompt(question)
+        if parsed is None:
+            return False  # cannot identify the exact action ⇒ fail-closed DENY (never authorize a guess)
+        method, url, body_sha256 = parsed
+        # (2) bind the EXACT (tool, target, args-digest). The args-digest carries the method AND — when the
+        # write has a body — its sha256, so a token minted for body A can never authorize a DIFFERENT body B
+        # on the same (method, url). No body (GET / query-param write) ⇒ {"method": …} ⇒ byte-identical digest.
+        try:
+            if body_sha256 is None:
+                args_for_digest: dict = {"method": method}
+                preview: object = {"method": method, "url": url}
+            else:
+                args_for_digest = {"method": method, "body_sha256": body_sha256}
+                # INFORMED CONSENT: the sovereign signer's pending preview is the FULL question — it carries
+                # the method, the URL, the bound body-sha256 AND the redacted human body preview, so the owner
+                # sees exactly the payload they are authorizing before they sign.
+                preview = question
+            digest = action_digest("engage.http", url, args_for_digest)
+            action = ApprovalAction(tool_name="engage.http", target=url, action_digest=digest)
+        except Exception:  # noqa: BLE001 — a non-serialisable/malformed action ⇒ fail-closed DENY
+            return False
+        # (3) publish the public-safe pending request + BLOCK up to the broker's own poll window for a
+        # matching owner-signed token. A broker error ⇒ no token ⇒ DENY.
+        try:
+            broker.bind(action, args_preview=preview)
+            found = broker.token_source()
+        except Exception:  # noqa: BLE001 — a broker/publish/poll error leaves the action DENIED (fail-closed)
+            return False
+        if not (isinstance(found, tuple) and len(found) == 2):
+            return False  # no owner-signed token in the window ⇒ stays denied (never issued)
+        token, tok_action = found
+        # defense-in-depth: the token_source's returned action must be the exact one we bound (the broker
+        # returns it, but a caller-supplied source could differ) — any mismatch never authorizes.
+        if (getattr(tok_action, "tool_name", None) != "engage.http"
+                or getattr(tok_action, "target", None) != url
+                or getattr(tok_action, "action_digest", None) != digest):
+            return False
+        # (4) consume_token is the SOLE authority: signature + pinned key-id + action-binding + window +
+        # ATOMIC single-use burn. Any verify/burn error ⇒ DENY (never fail-open on an infra error).
+        try:
+            decision = consume_token(token, action, authority=authority, now=_time.time(), ledger=ledger)
+        except Exception:  # noqa: BLE001 — any verification/burn error ⇒ fail-closed DENY
+            return False
+        # (5) authorized only if EVERY check passed. This only satisfies the WARDEN human leg for a write the
+        # CRUCIBLE gate already put in-envelope; the FACT is still adjudicated by the deterministic oracle.
+        return bool(getattr(decision, "authorized", False))
+
+    return _mutating_approval
 
 
 def main(argv: list[str]) -> int:
@@ -1527,6 +1660,15 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--request-budget", type=int, default=200)
     parser.add_argument("--max-pages", type=int, default=100)
     parser.add_argument("--max-audit-requests", type=int, default=0)
+    parser.add_argument(
+        "--approve-mutations", action="store_true",
+        help="Allow a state-changing (POST/PUT/DELETE/PATCH, or destructive-by-path) HTTP action to be "
+             "authorized into the run by an OWNER-SIGNED, SINGLE-USE, ACTION-BOUND per-request approval "
+             "token. The binding covers (tool, url, method AND the sha256 of the request body), so the owner "
+             "sees a redacted preview of the body and a token for one payload can never authorize another. "
+             "The owner signs on the sovereign/SIGIL side; the offense side stays keyless. Requires an "
+             "approval authority to be provisioned (its PUBLIC key under $VIGIL_BASE_DIR). WITHOUT this flag "
+             "(the default) a destructive action is fail-closed DENIED; a GET is never gated either way.")
     parser.add_argument("--bandit-file", default=None,
                         help="Persist/warm-start the self-learning check-ordering bandit.")
     parser.add_argument("--profile", choices=ENGAGEMENT_PROFILES, default="surface",
@@ -1865,6 +2007,10 @@ def _engage_body(args: argparse.Namespace, spine: object) -> int:
         result = run_engagement(
             args.slug, args.seed_url,
             spine=spine,
+            # Per-action mutating-proof approval (opt-in via --approve-mutations). None (the default) ⇒
+            # run_engagement falls back to its stdin default-deny, so a destructive action stays fail-closed;
+            # a valid owner-signed single-use token authorizes exactly that one write. GET is never gated.
+            prompt_callback=prompt_callback_from_args(args),
             request_budget=args.request_budget,
             max_pages=args.max_pages,
             max_audit_requests=args.max_audit_requests,
