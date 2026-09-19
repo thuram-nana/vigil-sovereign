@@ -2512,6 +2512,71 @@
       "ci_job": "CRUCIBLE core on vigil_core",
       "failure_class": "n-a",
       "default": "on"
+    },
+    {
+      "id": "PHASE1-1",
+      "title": "One shared engagement-authority definition; the verifier is fail-closed and tamper-evident",
+      "claim": "The engagement-authority schema, its canonical signing bytes, and the owner signer/verifier are ONE definition in vigil_core.authority (re-exported by framework.v2.authority), byte-identical across both planes; the verifier never raises, rejects a duplicate-pubkey quorum collapse, and rejects any tampered authority.",
+      "source": "docs/decisions/phase1-ui-live-external-authorization.md:20",
+      "enforced_by": {
+        "file": "packages/core/vigil_core/vigil_core/authority.py",
+        "symbol": "verify_engagement_authority"
+      },
+      "proved_by": {
+        "file": "packages/core/vigil_core/tests/test_authority.py",
+        "tests": [
+          "test_tamper_after_signing_fails_verification",
+          "test_duplicate_pubkey_trust_root_is_rejected_not_collapsed",
+          "test_malformed_signature_returns_false_not_raises"
+        ]
+      },
+      "ci_job": "vigil_core — shared integrity substrate",
+      "failure_class": "n-a",
+      "default": "on"
+    },
+    {
+      "id": "PHASE1-2",
+      "title": "The cockpit owner-signs a live-target authorization in-process and refuses dangerous inputs",
+      "claim": "The cockpit owner-signs a scoped, time-boxed, GET-only-by-default engagement authorization for a live external target IN-PROCESS (the owner private key is never written or sent — only the public signed bundle crosses the seam), and refuses a categorical-safety-floor host (.gov/.mil/.edu/.int and *.gov.cm-class), a loopback/link-local/metadata IP literal, and a live environment.",
+      "source": "docs/decisions/phase1-ui-live-external-authorization.md:25",
+      "enforced_by": {
+        "file": "apps/sigil/sigil/ui/target_authorization.py",
+        "symbol": "add_target"
+      },
+      "proved_by": {
+        "file": "apps/sigil/tests/test_target_authorization.py",
+        "tests": [
+          "test_add_target_writes_an_owner_signed_verifiable_authorization",
+          "test_refuses_categorical_safety_floor",
+          "test_refuses_loopback_linklocal_metadata_ip_literals",
+          "test_refuses_live_environment"
+        ]
+      },
+      "ci_job": "SIGIL governor gates (P7 — offense gate + authn)",
+      "failure_class": "n-a",
+      "default": "on"
+    },
+    {
+      "id": "PHASE1-3",
+      "title": "A remote engage launches only under an owner-pinned, verified, in-window, in-scope authority",
+      "claim": "A remote engage installs + launches only under an owner-signed authority whose trust root is the pinned owner key, whose signature verifies, whose validity window is current, and whose scope covers the target host; a bundle not tied to the pinned owner, a bad signature, an out-of-window authority, a non-bare-host scope entry, a target host outside the scope, or a conflicting pre-existing trust root is refused fail-closed.",
+      "source": "docs/decisions/phase1-ui-live-external-authorization.md:31",
+      "enforced_by": {
+        "file": "engine/crucible/framework/v2/console/actions.py",
+        "symbol": "_install_target_authorization"
+      },
+      "proved_by": {
+        "file": "engine/crucible/framework/v2/console/tests/test_target_authorization_install.py",
+        "tests": [
+          "test_install_then_verified_authority_gate_passes",
+          "test_bundle_not_signed_by_pinned_owner_refuses",
+          "test_validly_signed_malformed_scope_entry_is_refused",
+          "test_launch_refuses_a_target_host_outside_the_authorized_scope"
+        ]
+      },
+      "ci_job": "CRUCIBLE core on vigil_core",
+      "failure_class": "n-a",
+      "default": "on"
     }
   ]
 }

@@ -324,6 +324,45 @@
       "source_doc": "apps/sigil/sigil/gesture/session.py",
       "disposition": "file-into-w16",
       "w16_issue": null
+    },
+    {
+      "id": "LIMIT-target-authz-owner-anchor-writable",
+      "title": "The target-authorization owner anchor + trust root live under the offense-writable root",
+      "summary": "Phase 1.c ties a UI-authorized target to the PINNED owner key AT INSTALL, and the launch gate verifies the authority against the on-disk trust root. Both the owner-pubkey anchor (the .vigil-live seam) and the persisted .entitlement trust root live under paths a full owner-uid filesystem-write actor could rewrite — such an actor could plant their own trust root + self-signed authority, or swap both the seam bundle and the anchor, and is outside the meaningful threat model (they could equally edit code, the kill-switch, or the keys). The install-time owner-pin raises the bar from 'write a plaintext charter' to 'produce an owner-signed authority whose trust root is the pinned owner key over the target host'. Closing even the full-FS-write case requires anchoring the deployment trust root out-of-band via a read-only / HSM-backed .entitlement mount (CRUCIBLE_ENTITLEMENT_DIR) — a deployment choice, not unfinished code.",
+      "classification": "doc-only",
+      "severity": "low",
+      "anchor": {"file": "engine/crucible/framework/v2/console/actions.py", "symbol": "_install_target_authorization"},
+      "marker": false,
+      "check": "symbol-exists",
+      "source_doc": "docs/decisions/phase1-ui-live-external-authorization.md",
+      "disposition": "file-into-w16",
+      "w16_issue": null
+    },
+    {
+      "id": "LIMIT-tool-gate-authority-scope-backstop",
+      "title": "The non-HTTP sensor/tool gate enforces charter scope, not the signed-authority scope",
+      "summary": "The HTTP executor's authority gate enforces the owner-signed authority's SCOPE per action; the sensor/tool invoker gate (_gate) enforces only the charter's parse_scope, not the signed authority scope. In practice the charter is materialised from the signed authority (scope entries re-validated at install), so the two agree, but a pre-existing wider charter (never overwritten) could let a non-HTTP host-acting tool reach a host the signed authority does not cover. Defense-in-depth follow-up: run authorize_action against the loaded EngagementAuthority.scope in the tool gate too, so the owner-signed authority is the single scope source for every host-acting op.",
+      "classification": "real-unfinished-code",
+      "severity": "low",
+      "anchor": {"file": "engine/crucible/framework/v2/agents/tools/invoker.py", "symbol": "_gate"},
+      "marker": false,
+      "check": "symbol-exists",
+      "source_doc": "docs/decisions/phase1-ui-live-external-authorization.md",
+      "disposition": "file-into-w16",
+      "w16_issue": null
+    },
+    {
+      "id": "LIMIT-child-root-pin-advisory",
+      "title": "The engage child's CRUCIBLE_ROOT pin is advisory, not a hard fail-closed pin",
+      "summary": "A remote/loopback launch pins the child's CRUCIBLE_ROOT to the tree where the charter/authority were written, so writer==reader. That pin is advisory: crucible_root() honors an explicitly-set CRUCIBLE_ROOT only when its CLAUDE.md sentinel is present, else it silently sentinel-walks to another root. If the pinned root's sentinel were removed between launch and child spawn, the child could resolve a different root. Defense-in-depth follow-up: make an explicitly-set CRUCIBLE_ROOT a HARD pin (raise rather than fall through) in paths.crucible_root.",
+      "classification": "real-unfinished-code",
+      "severity": "low",
+      "anchor": {"file": "engine/crucible/framework/v2/common/paths.py", "symbol": "crucible_root"},
+      "marker": false,
+      "check": "symbol-exists",
+      "source_doc": "docs/decisions/phase1-ui-live-external-authorization.md",
+      "disposition": "file-into-w16",
+      "w16_issue": null
     }
   ],
   "honest_limit_sites_note": "The code-scan census. docs/tests/test_limitation_inventory.py scans every non-test product .py for the honest-limit/deferred debt phrases in _DEBT_PHRASES and requires EVERY hit to be either a VIGIL-LIMIT marker line OR a site listed here whose snippet (matched case-insensitively) is a substring of the hit line. kind 'debt' names the limitations id the site belongs to (which must exist); kind 'non-debt' explains why the phrase is not a capability limit (a deliberate design choice, a runtime-state description, or a phrase describing a CHECK's target rather than VIGIL itself). Bidirectional: every snippet here must still match a debt-phrase line in its file, so deleting the prose (or moving the debt) turns CI red.",
