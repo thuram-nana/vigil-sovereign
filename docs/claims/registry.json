@@ -2641,6 +2641,27 @@
       "ci_job": "CRUCIBLE core on vigil_core",
       "failure_class": "n-a",
       "default": "on"
+    },
+    {
+      "id": "PHASE4-1",
+      "title": "AEGIS gateway delivers verdicts to an outbound sink: bounded, browser-safe, env-auth, fail-open",
+      "claim": "The AEGIS gateway can ALSO POST each verdict to an operator-configured outbound sink (webhook / Slack) via a bounded, redirects-disabled sender (http(s) only, hard timeout); the posted body is the SAME browser-safe verdict projection the file sink emits (no oracle-context or internal-only field), the auth header comes from an environment variable (never the argv / process list), and a send failure is FAIL-OPEN — it is swallowed and never reaches the request/data plane.",
+      "source": "docs/decisions/phase4-aegis-verdict-sink.md:15",
+      "enforced_by": {
+        "file": "engine/crucible/framework/v2/aegis/cli.py",
+        "symbol": "_make_webhook_verdict_sink"
+      },
+      "proved_by": {
+        "file": "engine/crucible/framework/v2/aegis/tests/test_gateway_verdict_webhook.py",
+        "tests": [
+          "test_webhook_sink_posts_browser_safe_verdict",
+          "test_auth_header_from_env_not_argv",
+          "test_webhook_sink_is_fail_open"
+        ]
+      },
+      "ci_job": "CRUCIBLE core on vigil_core",
+      "failure_class": "n-a",
+      "default": "on"
     }
   ]
 }

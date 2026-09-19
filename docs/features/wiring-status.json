@@ -1262,6 +1262,18 @@
       },
       "check": "symbol-exists",
       "rationale": "Phase 3 / B10. The scanner ALWAYS identifies itself (correlatable OBSIDIAN UA) and throttles per the charter posture; these OPT-IN controls (env VIGIL_OPERATOR_ID + VIGIL_MIN_REQUEST_INTERVAL_S, threaded by console.actions._operator_traffic_controls and surfaced read-only as launch_assessment's traffic_profile) let the operator tag the UA and set a rate FLOOR that can only TIGHTEN the posture rate (max(posture_floor, operator_min)), never loosen it. Off by default (posture rate + base UA); claim PHASE3-1."
+    },
+    {
+      "id": "aegis.verdict_sink",
+      "name": "AEGIS gateway external verdict sink (P4)",
+      "surface": "subsystem",
+      "status": "OPT-IN",
+      "anchor": {
+        "file": "engine/crucible/framework/v2/aegis/cli.py",
+        "symbol": "_make_webhook_verdict_sink"
+      },
+      "check": "symbol-exists",
+      "rationale": "Phase 4. The gateway always streams verdicts to the UI/stderr; `aegis gateway --verdict-webhook URL [--verdict-sink webhook|slack]` (and console aegis_setup body verdict_webhook/verdict_sink) ADDITIONALLY POSTs each verdict to an operator SIEM/webhook/Slack via the bounded, redirects-disabled report.push.push_via_urllib. Off by default. Browser-safe body (no oracle-context), auth from AEGIS_VERDICT_WEBHOOK_AUTHORIZATION env (not argv), fail-open (never perturbs the data plane); notification only — orthogonal to the AEGIS_RESPOND+kill-switch enforcement gate. Claim PHASE4-1."
     }
   ]
 }

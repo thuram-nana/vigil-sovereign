@@ -33,10 +33,48 @@ def isolated_current(tmp_path, monkeypatch):
     # child argv, and a newline can't smuggle anything — rejected BEFORE any spawn.
     ({"upstream": "http://app:3000", "deployment_secret": "s", "honeypot_paths": ["--verdicts-out=/etc/x"]}, "honeypot path"),
     ({"upstream": "http://app:3000", "deployment_secret": "s", "honeypot_paths": ["/ok\ninject"]}, "honeypot path"),
+    # P4 verdict sink: a non-http(s) URL or a bad sink format is refused BEFORE any spawn.
+    ({"upstream": "http://app:3000", "deployment_secret": "s", "verdict_webhook": "ftp://x/y"}, "verdict_webhook"),
+    ({"upstream": "http://app:3000", "deployment_secret": "s", "verdict_webhook": "http://s\nX"}, "verdict_webhook"),
+    ({"upstream": "http://app:3000", "deployment_secret": "s", "verdict_webhook": "http://sink", "verdict_sink": "evil"}, "verdict_sink"),
 ])
 def test_aegis_setup_refuses_bad_input(isolated_current, body, needle):
     r = actions.aegis_setup(body)
     assert "error" in r and needle in r["error"], (body, r)
+
+
+def test_aegis_setup_threads_the_verdict_webhook_to_the_child(isolated_current, monkeypatch):
+    import importlib.util
+
+    import pytest as _pytest
+    if importlib.util.find_spec("httpx") is None:
+        _pytest.skip("the gateway spawn path needs httpx")
+
+    captured: dict = {}
+
+    class _FakeProc:
+        pid = 4321
+
+    def _fake_popen(cmd, **kw):
+        captured["cmd"] = list(cmd)
+        return _FakeProc()
+
+    monkeypatch.setattr(actions, "run_dir", lambda rid, **kw: isolated_current / rid)
+    monkeypatch.setattr(actions, "console_dir", lambda: isolated_current / ".console")
+    monkeypatch.setattr(actions.subprocess, "Popen", _fake_popen)
+
+    r = actions.aegis_setup({
+        "upstream": "http://127.0.0.1:3000", "deployment_secret": "sekret",
+        "verdict_webhook": "https://siem.example/hook", "verdict_sink": "slack",
+    })
+    assert r.get("status") == "running", r
+    cmd = captured["cmd"]
+    assert "--verdict-webhook" in cmd and "https://siem.example/hook" in cmd
+    assert cmd[cmd.index("--verdict-sink") + 1] == "slack"
+    assert r["verdict_webhook"] == "https://siem.example/hook" and r["verdict_sink"] == "slack"
+    assert "--verdict-webhook" in r["production_command"]
+    # the auth secret is NEVER on the argv (it rides the inherited env)
+    assert "AEGIS_VERDICT_WEBHOOK_AUTHORIZATION" not in " ".join(cmd)
 
 
 def test_aegis_setup_refusals_do_not_import_the_aegis_engine(isolated_current):

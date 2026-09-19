@@ -5073,6 +5073,19 @@ def aegis_setup(body: dict) -> dict:
     for hp in honeypots:
         if not hp.startswith("/") or any(ord(c) < 0x20 for c in hp):
             return {"error": f"honeypot path must start with '/' and contain no control chars: {hp!r}"}
+    # P4: an optional OUTBOUND verdict sink (SIEM / webhook / Slack). The URL is non-secret config; the auth
+    # header, if any, is read by the child from the AEGIS_VERDICT_WEBHOOK_AUTHORIZATION env it inherits —
+    # NEVER passed on the argv / process list. http(s) only (defence-in-depth: also cannot be mistaken for a
+    # flag), single line, bounded.
+    verdict_webhook = str(body.get("verdict_webhook", "")).strip()
+    verdict_sink = str(body.get("verdict_sink", "webhook")).strip() or "webhook"
+    if verdict_webhook:
+        if not verdict_webhook.startswith(("http://", "https://")):
+            return {"error": "verdict_webhook must be a full http(s) URL"}
+        if len(verdict_webhook) > 2048 or any(ord(c) < 0x20 for c in verdict_webhook):
+            return {"error": "verdict_webhook must be a single-line http(s) URL ≤2048 chars"}
+        if verdict_sink not in ("webhook", "slack"):
+            return {"error": "verdict_sink must be 'webhook' or 'slack'"}
     # Parse-check the config fail-closed before spawning (extra='forbid' rejects a malformed field).
     try:
         from ..aegis.models import AegisConfig
@@ -5098,6 +5111,8 @@ def aegis_setup(body: dict) -> dict:
            "--verdicts-out", str(verdicts), "--status-out", str(status_file)]
     for hp in honeypots:
         cmd += ["--honeypot", hp]
+    if verdict_webhook:
+        cmd += ["--verdict-webhook", verdict_webhook, "--verdict-sink", verdict_sink]
     try:
         logf = open(rd / "gateway.log", "ab")  # noqa: SIM115 — held by the persistent child
         proc = subprocess.Popen(cmd, stdout=logf, stderr=subprocess.STDOUT)  # noqa: S603
@@ -5105,7 +5120,9 @@ def aegis_setup(body: dict) -> dict:
         return {"error": f"could not launch the gateway: {type(e).__name__}: {e}"}
     meta = {"run_id": run_id, "kind": "aegis", "upstream": upstream, "host": host, "port": port,
             "mode": mode, "slug": slug, "pid": proc.pid, "status": "running", "started": time.time(),
-            "verdicts": str(verdicts), "status_file": str(status_file)}
+            "verdicts": str(verdicts), "status_file": str(status_file),
+            "verdict_webhook": verdict_webhook or None,
+            "verdict_sink": (verdict_sink if verdict_webhook else None)}
     # `meta` carries "run_id" for _write_aegis_current below, but _write_meta already takes run_id
     # positionally — pass the rest WITHOUT it, or Python raises "got multiple values for argument 'run_id'".
     _write_meta(run_id, **{k: v for k, v in meta.items() if k != "run_id"})
@@ -5115,8 +5132,11 @@ def aegis_setup(body: dict) -> dict:
             "--mode", mode, "--slug", slug, "--secret", "<your-deployment-secret>"]
     for hp in honeypots:
         prod += ["--honeypot", hp]
+    if verdict_webhook:
+        prod += ["--verdict-webhook", verdict_webhook, "--verdict-sink", verdict_sink]
     return {"run_id": run_id, "status": "running", "pid": proc.pid, "bind": f"{host}:{port}",
             "warn_public": host not in _LOOPBACK, "requested_mode": mode,
+            "verdict_webhook": verdict_webhook or None, "verdict_sink": (verdict_sink if verdict_webhook else None),
             "production_command": " ".join(prod)}
 
 
