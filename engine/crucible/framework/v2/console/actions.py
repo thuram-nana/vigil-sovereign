@@ -577,6 +577,133 @@ def _has_verified_authority(slug: str) -> bool:
         return False
 
 
+def _install_target_authorization(slug: str) -> "tuple[str, str]":
+    """Install an owner-signed engagement authorization from the shared seam onto THIS offense root, so a
+    remote engage for ``slug`` can pass :func:`_has_verified_authority`. This is the offense half of the
+    UI-driven live-external spine (Phase 1.c): the sovereign cockpit owner-signs a bundle onto the seam
+    (``target_authorization.add_target``), and this reads it back, VERIFIES it, and materialises the charter
+    + authority + owner trust root the launch gate and the engine's charter/scope reader require.
+
+    Returns ``(installed_root, reason)`` — the crucible root the material was written under (for the child's
+    ``CRUCIBLE_ROOT`` pin) and a status/refusal reason. Fail-CLOSED on every axis (returns ``("", reason)``,
+    never a partial install):
+      * no bundle on the seam;
+      * no PINNED owner key on this deployment — the bundle's trust root must be EXACTLY the owner key the
+        deployment already pinned out-of-band (the offense-approvals bind). This owner-pin tie is what makes
+        the installed root OWNER-tied rather than a free-floating root anyone could plant;
+      * a bundle whose trust root is not that pinned owner key, a bad governance signature, a slug/scope
+        mismatch, or an expired validity window;
+      * a CONFLICTING pre-existing trust root (a *different* one already provisioned) — never a silent
+        downgrade/replace.
+
+    HONEST BOUND (mirrors :func:`_has_verified_authority`): the owner-pubkey anchor and the persisted trust
+    root live under the offense-writable base/root, so an actor with arbitrary owner-uid filesystem write
+    could swap BOTH the bundle and the anchor — outside the meaningful threat model (they could equally edit
+    code, keys, or the kill-switch). Anchor the owner root out-of-band (read-only / HSM mount via
+    ``CRUCIBLE_ENTITLEMENT_DIR``) to close even that. This raises the bar from "write a plaintext charter"
+    to "produce an owner-signed authority whose trust root is the pinned owner key"."""
+    try:
+        import datetime as _dt
+
+        from vigil_core import verify_engagement_authority
+        from vigil_integration.live.authorization_broker import read_authorization
+
+        from ..authority.store import save_signed_authority
+        from ..common import paths
+        from ..entitlement.provision import write_trust_root
+        from ..entitlement.store import load_trust_root
+    except Exception as e:  # noqa: BLE001 — install machinery unavailable ⇒ nothing installed (gate refuses)
+        return "", f"install unavailable ({type(e).__name__})"
+
+    base = os.environ.get("VIGIL_BASE_DIR") or ".vigil-live"
+    try:
+        ta = read_authorization(base, slug)
+    except Exception:  # noqa: BLE001
+        ta = None
+    if ta is None:
+        return "", f"no owner-signed authorization on the seam for {slug!r} (authorize it in the UI first)"
+
+    # (1) OWNER-PIN TIE — the soundness anchor. The bundle's trust root MUST be exactly the owner public key
+    #     the deployment already pinned out-of-band (offense_bind_authority). No pin ⇒ refuse; a bundle
+    #     signed by any other key ⇒ refuse. This closes the "free-floating trust root" gap AT INSTALL TIME.
+    pinned = None
+    try:
+        from vigil_integration.live.approval_broker import load_authority as _load_owner_pin
+        _auth = _load_owner_pin(base)
+        pinned = _auth.owner_public_key_b64 if _auth else None
+    except Exception:  # noqa: BLE001
+        pinned = None
+    if not pinned:
+        return "", ("no pinned owner key on this deployment — bind the owner authority first "
+                    "(offense_bind_authority) so a target authorization can be tied to the owner")
+    if {a.public_key_b64 for a in ta.trust_root.authorizers} != {pinned}:
+        return "", "the authorization's trust root is not (exactly) the pinned owner key — refused"
+
+    # (2) governance signature must verify (independently; store.load_verified_authority re-verifies at the gate)
+    ok, reason = verify_engagement_authority(ta.signed_authority, ta.trust_root)
+    if not ok:
+        return "", f"authorization signature does not verify: {reason}"
+
+    doc = ta.signed_authority.document
+    # (3) slug / scope / window sanity — never install a mismatched or already-expired authorization
+    if doc.engagement_slug != slug or not doc.scope:
+        return "", "authorization slug/scope mismatch"
+    now = _dt.datetime.now(_dt.timezone.utc)
+    if now >= doc.not_after:
+        return "", "authorization has expired — re-authorize the target"
+
+    # (4) persist the owner trust root ONCE; refuse to REPLACE a DIFFERING one (no silent trust downgrade)
+    try:
+        existing = load_trust_root()
+    except Exception:  # noqa: BLE001
+        existing = None
+    if existing is not None:
+        if {a.public_key_b64 for a in existing.authorizers} != {pinned}:
+            return "", "a different deployment trust root is already provisioned — refusing to replace it"
+    else:
+        try:
+            write_trust_root(ta.trust_root)
+        except Exception as e:  # noqa: BLE001
+            return "", f"could not persist the trust root ({type(e).__name__})"
+
+    # (5) persist the signed authority — what _has_verified_authority verifies at launch
+    try:
+        save_signed_authority(ta.signed_authority)
+    except Exception as e:  # noqa: BLE001
+        return "", f"could not persist the authority ({type(e).__name__})"
+
+    # (6) materialise the charter (scope table + a Signed line NAMING the signed authority) if absent — the
+    #     engine's require_charter_signed + parse_scope reader. NEVER overwrite an existing (real) charter.
+    try:
+        cp = paths.charter_path(slug)
+        if not cp.exists():
+            rows = "\n".join(f"| {h} | authorized via owner-signed engagement authority |" for h in doc.scope)
+            charter = (
+                f"# Engagement Charter — {slug}\n\n"
+                "Provisioned from an OWNER-SIGNED engagement authority. The cryptographic authorization is the\n"
+                f"signed authority at `.authority/{slug}.authority.json`, verified against the deployment owner\n"
+                "trust root; this document is the charter form the engine's scope gate reads. Scope, environment\n"
+                f"(`{doc.environment.value}`) and the validity window are bound by that signed authority.\n\n"
+                "## 2. In-scope systems\n\n"
+                "| Host | Notes |\n|------|-------|\n"
+                f"{rows}\n\n"
+                "## 3. Authorization\n\n"
+                f"Signed: `owner (engagement authority — see .authority/{slug}.authority.json)`  "
+                f"Date: `{now.date().isoformat()}`\n"
+                f"Not-before: `{doc.not_before.isoformat()}`  Not-after: `{doc.not_after.isoformat()}`\n"
+            )
+            cp.parent.mkdir(parents=True, exist_ok=True)
+            cp.write_text(charter, encoding="utf-8")
+    except Exception as e:  # noqa: BLE001
+        return "", f"could not write the charter ({type(e).__name__})"
+
+    # the root the child + the gate must agree on (where we just wrote charter/authority/trust-root)
+    try:
+        return str(paths.crucible_root()), "installed"
+    except Exception:  # noqa: BLE001
+        return str(Path(str(paths.charter_path(slug))).resolve().parents[2]), "installed"
+
+
 def _boot_id() -> str:
     """The host boot id (Linux ``/proc/sys/kernel/random/boot_id``), or "" if unavailable. Recorded on a
     run so orphan reconciliation can tell a still-alive pid from a pid RECYCLED across a reboot: after a
@@ -2630,15 +2757,25 @@ def launch_assessment(body: dict) -> dict:
 
     # url / suite / tool on a URL → the gated `engage` (mirrors onto the blackboard via --spine).
     slug = _slugify(body.get("slug") or host, fallback="engagement")
+    _charter_root = None   # the root the charter/authority live under — pin the child to it (writer==reader)
+    _install_note = ""
+    if not is_loopback:
+        # Phase 1.c: install an owner-signed authorization the UI ceremony dropped on the seam, so the gate
+        # below can verify it. Fail-closed inside (owner-pin tie + signature + window); best-effort here —
+        # if nothing installs, the gate refuses with the install's reason. Never installs an external charter
+        # without a verified owner-signed authority.
+        _installed_root, _install_note = _install_target_authorization(slug)
+        if _installed_root:
+            _charter_root = _installed_root
     if not is_loopback and not _has_verified_authority(slug):
         # R-CRITICAL-1 / B11: a remote engage must carry an owner-signed, threshold-VERIFIED authority — not
         # merely a charter file that EXISTS (the old `_has_charter` check let anyone who could write a
         # targets/<slug>/charter.md with a plaintext `Signed:` name aim VIGIL at any host). Fail closed.
-        return {"error": f"remote engage for {slug!r} refused (fail-closed): no owner-signed, verifiable "
-                         f"authority against the deployment trust root. Authorize this target first — mint an "
-                         f"owner-signed authority (`vigil provision --slug {slug} --scope <host>`, which now "
-                         f"persists the trust root) or use the UI authorization ceremony. A plaintext charter "
-                         f"file is no longer sufficient."}
+        return {"error": f"remote engage for {slug!r} refused (fail-closed): "
+                         f"{_install_note or 'no owner-signed, verifiable authority against the deployment trust root'}. "
+                         f"Authorize this target first — use the UI authorization ceremony (add the target, then "
+                         f"owner-sign it; the owner key never leaves the sovereign process), or mint one via "
+                         f"`vigil provision`. A plaintext charter file is no longer sufficient."}
 
     # CONTAINMENT (red-pen HIGH): the framework `engage`/`--autonomous` branch mints a FRESH slug whose
     # kill-switch is untripped, so a soft emergency-stop (restricted mode) would NOT contain it — the same
@@ -2656,7 +2793,7 @@ def launch_assessment(body: dict) -> dict:
     # via the shared, fail-closed helper — loopback-only, never overwrites a real charter, never raises.
     # This unlocks the whole-system suite/autonomous path (New Assessment AND the chat whole-app bridge)
     # for a loopback target, mirroring what the integration engine already does (wiring.ensure_loopback_charter).
-    _charter_root = None   # the root the loopback charter was actually written under — pin the child to it
+    # (`_charter_root` was set above: to the Phase-1.c install root for a remote target, else still None.)
     if is_loopback:
         try:
             from vigil_integration.live.wiring import ensure_loopback_charter
@@ -2670,6 +2807,15 @@ def launch_assessment(body: dict) -> dict:
             # reader always agree. Loopback-only; derived from our own just-written charter; never widens scope.
             if _wrote:
                 _charter_root = str(Path(str(_wrote)).resolve().parents[2])
+        except Exception:  # noqa: BLE001 — best-effort; the engine's own charter/scope gate still applies
+            pass
+    elif _charter_root is None:
+        # REMOTE, but the authority pre-existed (CLI-provisioned, not seam-installed this call): the charter +
+        # authority still live under the console's crucible root, so pin the child there too — the same
+        # root-divergence fix as loopback, so the engine's charter/scope reader can't sentinel-walk elsewhere.
+        try:
+            from ..common import paths as _p
+            _charter_root = str(_p.crucible_root())
         except Exception:  # noqa: BLE001 — best-effort; the engine's own charter/scope gate still applies
             pass
 
