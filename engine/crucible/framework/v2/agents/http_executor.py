@@ -94,6 +94,28 @@ _UA_REALISTIC = (
     "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 )
 
+# B10 — operator-settable controls, read from the environment the engage child inherits, so a run launched
+# from the console/UI can (a) tag the correlatable OBSIDIAN User-Agent with an operator identifier and
+# (b) set a rate FLOOR. Per opsec-discipline "make yourself correlatable" + "throttle": the UA already
+# identifies the scanner; these let the operator add a per-run tag and SLOW a cautious first live run.
+_OPERATOR_ID_ENV = "VIGIL_OPERATOR_ID"
+_MIN_INTERVAL_ENV = "VIGIL_MIN_REQUEST_INTERVAL_S"
+_MAX_MIN_INTERVAL_S = 3600.0   # cap the operator floor at 1h/request — a sane upper bound, not a real rate
+
+
+def _env_min_request_interval() -> float:
+    """The operator's minimum inter-request interval (seconds) from ``VIGIL_MIN_REQUEST_INTERVAL_S``, clamped
+    to ``[0, 3600]``. Absent / invalid => 0.0 (no operator floor; the charter posture's rate profile stands).
+    It can only TIGHTEN the posture floor (see :meth:`_sleep_for_rate_limit`), never loosen it."""
+    raw = (os.environ.get(_MIN_INTERVAL_ENV) or "").strip()
+    if not raw:
+        return 0.0
+    try:
+        v = float(raw)
+    except ValueError:
+        return 0.0
+    return min(_MAX_MIN_INTERVAL_S, max(0.0, v))
+
 
 def _today_iso() -> str:
     return datetime.now(timezone.utc).date().isoformat()
@@ -271,6 +293,7 @@ class HttpExecutor:
     _destructive_refusals: int = 0
     _http_client: httpx.Client | None = None
     _resolved_posture: Posture = "TEST"
+    _operator_min_interval: float = 0.0
 
     def __post_init__(self) -> None:
         # Resolve posture once at construction.
@@ -278,6 +301,12 @@ class HttpExecutor:
             self.posture if self.posture is not None
             else parse_posture(self.engagement_slug)
         )
+        # B10 operator controls, from the env the engage child inherits, when the caller did not set them
+        # explicitly: a correlatable UA tag, and a rate FLOOR that can only make the scan SLOWER than the
+        # charter posture already mandates (never faster). Both default to inert (no tag / posture rate).
+        if self.operator_identifier is None:
+            self.operator_identifier = (os.environ.get(_OPERATOR_ID_ENV) or "").strip() or None
+        self._operator_min_interval = _env_min_request_interval()
         # The off-switch is always present: auto-wire a kill-switch bound
         # to this engagement when the caller did not supply one. This is
         # backward compatible — an absent `.halt` file means not tripped,
@@ -920,6 +949,9 @@ class HttpExecutor:
 
     def _sleep_for_rate_limit(self) -> None:
         floor, jitter_max = _RATE_PROFILES[self._resolved_posture]
+        # An operator-set minimum interval can only TIGHTEN (raise) the floor — never lower it below what the
+        # charter posture mandates — so the control can slow a cautious first live run but never speed one up.
+        floor = max(floor, self._operator_min_interval)
         if self._last_request_at <= 0.0:
             base_wait = 0.0
         else:

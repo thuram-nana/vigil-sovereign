@@ -2476,6 +2476,44 @@ def brain_propose(body: dict) -> dict:
     return {"ok": True, "run_id": run_id, "slug": slug, "engine": "brain-propose", "objective": objective}
 
 
+def _operator_traffic_controls(body: dict, slug: str) -> dict:
+    """B10 — resolve the operator's rate/UA controls for a remote engage. Returns the ENV to hand the engage
+    child (the executor reads it) and a READ-ONLY profile the caller can display.
+
+    The scanner ALREADY identifies itself (the correlatable ``OBSIDIAN/1.0 (authorized owner-test ...)`` UA)
+    and throttles per the charter posture. These controls let the operator (a) append a correlatable TAG to
+    that UA and (b) set a rate FLOOR that can only make the run SLOWER than the posture mandates, never
+    faster. GET-only (destructive/POST needs an approval the headless console cannot grant) and the single-use
+    offense ceiling are engine invariants the console does not relax — shown read-only, not asserted as new."""
+    env: dict = {}
+    op_id = "".join(c for c in str(body.get("operator_id", "")).strip() if 0x20 <= ord(c) < 0x7f)[:64]
+    if op_id:
+        env["VIGIL_OPERATOR_ID"] = op_id
+    try:
+        min_interval = float(body.get("min_request_interval_s", 0) or 0)
+    except (TypeError, ValueError):
+        min_interval = 0.0
+    min_interval = min(3600.0, max(0.0, min_interval))
+    if min_interval > 0:
+        env["VIGIL_MIN_REQUEST_INTERVAL_S"] = str(min_interval)
+
+    profile: dict = {"get_only": True, "single_use_offense_ceiling": True,
+                     "operator_min_request_interval_s": min_interval}
+    try:
+        from ..agents.http_executor import _RATE_PROFILES, parse_posture, user_agent_for
+        posture = parse_posture(slug)
+        floor, jitter = _RATE_PROFILES[posture]
+        profile.update({
+            "posture": posture,
+            "user_agent": user_agent_for(posture, op_id or None),
+            "effective_min_request_interval_s": max(floor, min_interval),   # tighten-only
+            "posture_floor_s": floor, "jitter_max_s": jitter,
+        })
+    except Exception:  # noqa: BLE001 — a resolution error degrades to a minimal, honest profile
+        profile["posture"] = "unknown"
+    return {"env": env, "profile": profile}
+
+
 def launch_assessment(body: dict) -> dict:
     """Route the New-Assessment wizard body to the SAME gated CLI a hand-run engagement uses and
     spawn it. Returns ``{run_id, status, mode, slug, stream}`` or ``{error}`` (a clean, fail-closed
@@ -2872,7 +2910,10 @@ def launch_assessment(body: dict) -> dict:
     # INCONCLUSIVE-COVERAGE surface. Without this env the child cannot locate the run dir, its
     # `<run_dir>/_inconclusive.json` is never written, and this run would render CLEAN over an unassessed
     # surface. With it the framework writes the artifact here and the dossier/proof list consume it.
-    _engage_env = {"VIGIL_PROOF_RUN_DIR": str(rd), "VIGIL_ENGAGEMENT": slug}
+    # B10: operator rate/UA controls — threaded to the engage child as env (the executor reads them) and
+    # surfaced read-only so the caller SEES the traffic profile this run produces (identified UA + rate).
+    _traffic = _operator_traffic_controls(body, slug)
+    _engage_env = {"VIGIL_PROOF_RUN_DIR": str(rd), "VIGIL_ENGAGEMENT": slug, **_traffic["env"]}
     if _charter_root:
         # Pin the child to the SAME root the loopback charter was written under, so its
         # require_charter_signed reader can't sentinel-walk to a different root and refuse charter_missing.
@@ -2882,7 +2923,7 @@ def launch_assessment(body: dict) -> dict:
     # but resolved no `vigil`) to the caller — the runtime response names the engine that actually ran.
     return {"run_id": run_id, "status": "running", "mode": mode, "slug": slug, "stream": "blackboard",
             **({"engine_note": base["engine_note"]} if base.get("engine_note") else {}),
-            "tools_applied": list(tools)}
+            "tools_applied": list(tools), "traffic_profile": _traffic["profile"]}
 
 
 def reverify_run(run_id: str) -> dict:

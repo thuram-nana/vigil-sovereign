@@ -2599,6 +2599,27 @@
       "ci_job": "CRUCIBLE core on vigil_core",
       "failure_class": "n-a",
       "default": "on"
+    },
+    {
+      "id": "PHASE3-1",
+      "title": "Operator rate control can only tighten the posture rate; the UA carries the operator tag",
+      "claim": "A remote engagement's request rate can only be TIGHTENED by an operator-set minimum interval — the effective rate floor is the maximum of the charter posture's floor and the operator's minimum, so the control can slow a run but never make it faster than the posture mandates — and the scanner's correlatable User-Agent carries the operator's identifier tag when one is set.",
+      "source": "docs/decisions/phase3-operator-rate-ua-controls.md:16",
+      "enforced_by": {
+        "file": "engine/crucible/framework/v2/agents/http_executor.py",
+        "symbol": "HttpExecutor._sleep_for_rate_limit"
+      },
+      "proved_by": {
+        "file": "engine/crucible/framework/v2/agents/tests/test_operator_rate_ua.py",
+        "tests": [
+          "test_min_interval_env_tightens_the_rate_floor",
+          "test_operator_min_below_posture_floor_cannot_loosen",
+          "test_operator_id_env_tags_the_correlatable_user_agent"
+        ]
+      },
+      "ci_job": "CRUCIBLE core on vigil_core",
+      "failure_class": "n-a",
+      "default": "on"
     }
   ]
 }
