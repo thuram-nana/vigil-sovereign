@@ -38,6 +38,21 @@ REPO="$(pwd)"
 export VIGIL_ROOT="$REPO"
 export CRUCIBLE_ROOT="$REPO/engine/crucible"
 
+# PINNED headless Chromium for the dynamic DOM-XSS / browser-XSS / SPA passes (scanner.browser +
+# scanner.cdp). Chrome-for-Testing is Google's automation-pinned, exact-VERSION distribution — we pin a
+# specific version and NEVER float to latest, so a run is reproducible and a supply-chain surprise cannot
+# ride in on an unpinned "latest". The download is a static zip from the CfT public bucket (not a
+# fetch-and-execute installer). Bump this pin deliberately; do not templatise it to a range.
+CHROMIUM_CFT_VERSION="128.0.6613.119"
+CHROMIUM_CFT_URL="https://storage.googleapis.com/chrome-for-testing-public/${CHROMIUM_CFT_VERSION}/linux64/chrome-linux64.zip"
+# Supply-chain integrity: the SHA-256 of the pinned linux64 chrome zip. When set, the download is verified
+# against it BEFORE extraction and a mismatch aborts the browser bundle (never the bootstrap). Empty = the
+# hash is not yet pinned (offline build env cannot fetch it): the download is TLS-only-trusted and a loud
+# warning is printed. Fill from CfT `known-good-versions-with-downloads.json` for this exact version — this
+# is a HARD prerequisite before the Wave-2 browser passes are relied upon (a wrong pin only degrades the
+# browser surfaces to INCONCLUSIVE, never a false CLEAN).
+CHROMIUM_CFT_SHA256=""
+
 # --- flags ---
 NO_RUST=0; NO_SERVICES=0; WITH_STRIX=0; DO_SYSTEMD=0; ASSUME_YES=0; WITH_TOOLS=1; PRODUCTION=0
 for arg in "$@"; do
@@ -194,6 +209,94 @@ provision_host_tools() {
   return 0
 }
 
+# --- pinned headless Chromium (dynamic DOM-XSS / browser-XSS / SPA passes) ---------------------
+# Install a PINNED Chrome-for-Testing build for the dynamic browser passes (scanner.browser + scanner.cdp
+# drive it via --headless=new). IDEMPOTENT (an already-vendored pin is a no-op) and OFFLINE-SAFE: if the
+# download is unavailable the step WARNS and CONTINUES — it never aborts bootstrap, because browser_usable()
+# is the real RUNTIME gate (a browserless engage marks the browser surfaces INCONCLUSIVE, never CLEAN). We
+# pin an exact VERSION and never float to latest. The vendored binary is exposed as `chromium` on PATH,
+# which framework.v2.scanner.browser.find_browser() discovers.
+provision_headless_browser() {
+  local VENDOR="$REPO/vendor/chromium/cft-$CHROMIUM_CFT_VERSION"
+  local BIN="$VENDOR/chrome-linux64/chrome"
+  local LINK="$HOME/.local/bin/chromium"
+  mkdir -p "$HOME/.local/bin"
+
+  # Idempotent: an already-vendored pin just gets its symlink refreshed + a smoke, then returns.
+  if [ -x "$BIN" ]; then
+    ln -sfn "$BIN" "$LINK"
+    if "$BIN" --version >/dev/null 2>&1; then ok "headless Chromium present (pinned CfT $CHROMIUM_CFT_VERSION) → $LINK"
+    else warn "vendored Chromium $CHROMIUM_CFT_VERSION did not report --version — the runtime gate (browser_usable) will re-check; browser surfaces stay INCONCLUSIVE if it cannot render."; fi
+    return 0
+  fi
+
+  # Chrome-for-Testing publishes linux64 only. Other arches: skip the pinned fetch (never a faked install);
+  # a system chromium/chrome on PATH still works, else the runtime gate records browser surfaces INCONCLUSIVE.
+  local ARCH; ARCH="$(uname -m 2>/dev/null || echo unknown)"
+  if [ "$(uname -s 2>/dev/null)" != "Linux" ] || [ "$ARCH" != "x86_64" ]; then
+    warn "pinned Chrome-for-Testing is linux64-only; this host is '$(uname -s 2>/dev/null)/$ARCH' — skipping the browser bundle."
+    warn "  the dynamic browser passes will run only if a headless Chromium/Chrome is already on PATH; else those surfaces are recorded INCONCLUSIVE (never CLEAN)."
+    return 0
+  fi
+
+  # One consent gate: --yes ⇒ fetch; interactive ⇒ ask; non-tty w/o --yes ⇒ skip (fail-closed on network).
+  local CONSENT=0
+  if [ "$ASSUME_YES" = 1 ]; then CONSENT=1
+  elif ask "download the pinned headless Chromium (CfT $CHROMIUM_CFT_VERSION, ~150MB) for the dynamic browser passes?"; then CONSENT=1; fi
+  if [ "$CONSENT" != 1 ]; then
+    warn "skipping the headless-Chromium bundle (no consent / non-interactive). Install later with --with-tools --yes,"
+    warn "  or put any headless Chromium on PATH. Until then the browser passes record their surfaces INCONCLUSIVE."
+    return 0
+  fi
+  if ! have curl; then warn "curl not found — cannot fetch the pinned Chromium; browser surfaces stay INCONCLUSIVE until one is on PATH."; return 0; fi
+
+  local TMP; TMP="$(mktemp -d 2>/dev/null || echo /tmp/vigil-cft.$$)"; mkdir -p "$TMP"
+  # Fetch + extract are best-effort/OFFLINE-SAFE: any failure WARNs and returns 0 (never aborts bootstrap).
+  if ! curl -fsSL --retry 2 -o "$TMP/chrome-linux64.zip" "$CHROMIUM_CFT_URL"; then
+    warn "could not download pinned Chromium ($CHROMIUM_CFT_URL) — offline or the pin is unavailable. Continuing; the runtime gate records browser surfaces INCONCLUSIVE (never CLEAN)."
+    rm -rf "$TMP"; return 0
+  fi
+  # Supply-chain integrity gate — verify the download BEFORE extraction. When a SHA-256 is pinned the archive
+  # MUST match it (fail-closed: a mismatch, or no sha256sum to check with, refuses the bundle). Unset ⇒ the
+  # archive is TLS-trusted only and we warn. Refusing only skips the browser bundle; it never aborts bootstrap.
+  if [ -n "$CHROMIUM_CFT_SHA256" ]; then
+    if ! have sha256sum; then
+      warn "sha256sum not found — cannot verify the pinned Chromium hash; refusing the bundle (fail-closed on integrity). Browser surfaces stay INCONCLUSIVE (never CLEAN)."
+      rm -rf "$TMP"; return 0
+    fi
+    if ! printf '%s  %s\n' "$CHROMIUM_CFT_SHA256" "$TMP/chrome-linux64.zip" | sha256sum -c --status; then
+      warn "pinned Chromium SHA-256 MISMATCH (expected $CHROMIUM_CFT_SHA256) — refusing the bundle. Browser surfaces stay INCONCLUSIVE (never CLEAN)."
+      rm -rf "$TMP"; return 0
+    fi
+    ok "pinned Chromium SHA-256 verified"
+  else
+    warn "CHROMIUM_CFT_SHA256 is not pinned — the download is TLS-trusted only (no content-integrity pin). Pin it (CfT known-good-versions-with-downloads.json) before relying on the browser passes (Wave 2)."
+  fi
+  mkdir -p "$VENDOR"
+  # Extract with Python's stdlib zipfile (no unzip dependency), preserving the executable bit on the binary.
+  if ! "$PY" - "$TMP/chrome-linux64.zip" "$VENDOR" <<'PYEOF'
+import sys, zipfile, os, stat
+src, dest = sys.argv[1], sys.argv[2]
+with zipfile.ZipFile(src) as z:
+    z.extractall(dest)
+binp = os.path.join(dest, "chrome-linux64", "chrome")
+if os.path.exists(binp):
+    os.chmod(binp, os.stat(binp).st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+    sys.exit(0)
+sys.exit(1)
+PYEOF
+  then
+    warn "extracting the pinned Chromium failed (corrupt download / unexpected archive layout) — continuing; browser surfaces stay INCONCLUSIVE."
+    rm -rf "$TMP" "$VENDOR"; return 0
+  fi
+  rm -rf "$TMP"
+  if [ ! -x "$BIN" ]; then warn "pinned Chromium extracted but the binary is missing at $BIN — continuing; browser surfaces stay INCONCLUSIVE."; return 0; fi
+  ln -sfn "$BIN" "$LINK"
+  if "$BIN" --version >/dev/null 2>&1; then ok "headless Chromium bundled (pinned CfT $CHROMIUM_CFT_VERSION) → $LINK"
+  else warn "bundled Chromium $CHROMIUM_CFT_VERSION could not report --version here (missing shared libs?) — the runtime gate (browser_usable) will re-check; browser surfaces stay INCONCLUSIVE if it cannot render."; fi
+  return 0
+}
+
 # =============================================================================
 step "1/6 preflight"
 # =============================================================================
@@ -296,6 +399,18 @@ if [ "$WITH_TOOLS" = 1 ]; then
   provision_host_tools || warn "tool provisioning hit an unexpected error — continuing (core install unaffected)."
 else
   warn "--no-tools: skipping offense host-tool install/probe. Install later with: ./bootstrap.sh --with-tools"
+fi
+
+# =============================================================================
+step "2d headless browser (pinned Chromium for the dynamic DOM/browser/SPA passes)"
+# =============================================================================
+# Idempotent + offline-safe: bundle a PINNED Chrome-for-Testing build so the browser-XSS / DOM-XSS / SPA
+# passes can render. A missing download never aborts bootstrap — browser_usable() is the runtime gate, and
+# a browserless engage records those surfaces INCONCLUSIVE (never CLEAN). Shares the --no-tools opt-out.
+if [ "$WITH_TOOLS" = 1 ]; then
+  provision_headless_browser || warn "headless-browser provisioning hit an unexpected error — continuing (core install unaffected)."
+else
+  warn "--no-tools: skipping the pinned headless-Chromium bundle. Install later with: ./bootstrap.sh --with-tools --yes"
 fi
 
 # =============================================================================
