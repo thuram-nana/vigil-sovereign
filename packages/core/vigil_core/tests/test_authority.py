@@ -99,6 +99,33 @@ def test_wrong_owner_key_does_not_verify():
     assert not ok, reason
 
 
+def test_duplicate_pubkey_trust_root_is_rejected_not_collapsed():
+    """A trust root with duplicate authorizer PUBLIC KEYS under distinct key_ids would let a single
+    keyholder satisfy an m-of-n threshold. TrustRoot deliberately permits it (the witness subsystem needs
+    it), so this live-attack-credential verifier rejects it at its OWN layer — like vigil_core.delegation.
+    Reproduces red-pen ADVISORY #1."""
+    kp = generate_keypair()
+    dup = TrustRoot(threshold=2, authorizers=[
+        AuthorizerKey(key_id="a", name="a", public_key_b64=kp.public_key_b64),
+        AuthorizerKey(key_id="b", name="b", public_key_b64=kp.public_key_b64),  # SAME pubkey
+    ])
+    signed = sign_engagement_authority(_doc(), {"a": kp.private_key_b64, "b": kp.private_key_b64})
+    ok, reason = verify_engagement_authority(signed, dup)
+    assert not ok and "duplicate authorizer public keys" in reason, reason
+
+
+def test_malformed_signature_returns_false_not_raises():
+    """Adversary-influenced signature bytes (not valid base64 / wrong length) must be a fail-closed
+    (False, reason), never an uncaught IntegrityError that crashes the caller. Reproduces red-pen
+    ADVISORY #2 — the contract is 'never raises'."""
+    kp, tr = _owner_root()
+    signed = sign_engagement_authority(_doc(), {"owner": kp.private_key_b64})
+    broken = signed.model_copy(update={
+        "signatures": [signed.signatures[0].model_copy(update={"signature_b64": "!!!not-base64!!!"})]})
+    ok, reason = verify_engagement_authority(broken, tr)   # must not raise
+    assert not ok and reason, reason
+
+
 def test_window_validator_refuses_nonpositive_window():
     with pytest.raises(Exception):
         _doc(not_after=_TS)                          # not_after == not_before

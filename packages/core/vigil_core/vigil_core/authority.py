@@ -24,7 +24,7 @@ from typing import Final
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from .canonical import canonical_json
-from .crypto import sign, verify_threshold
+from .crypto import IntegrityError, sign, verify_threshold
 from .models import Signature, TrustRoot
 
 # Domain-separation prefix — distinct from the evidence / entitlement / revocation / proposal /
@@ -108,8 +108,25 @@ def verify_engagement_authority(
     signed: SignedAuthority, trust_root: TrustRoot
 ) -> tuple[bool, str]:
     """Return ``(ok, reason)``. True iff at least the threshold of DISTINCT trust-root authorisers validly
-    signed the authority's canonical form. Verify-only — no private material, safe on either plane."""
-    result = verify_threshold(
-        authority_signing_bytes(signed.document), signed.signatures, trust_root
-    )
+    signed the authority's canonical form. Verify-only — no private material, safe on either plane.
+
+    Fail-CLOSED and contract-honouring: never raises, always returns ``(ok, reason)``. It rejects, at THIS
+    layer, a quorum-collapsing trust root (duplicate authorizer PUBLIC KEYS under distinct key_ids would let
+    fewer real keyholders satisfy m-of-n). ``TrustRoot`` itself deliberately permits duplicate pubkeys — the
+    witness anti-rollback subsystem constructs a degenerate roster on purpose — so the consumer that cannot
+    tolerate a collapsed quorum, an authority for a LIVE external engagement, rejects it here, exactly as the
+    sibling ``delegation`` primitive does. A 1-of-1 owner root is unaffected (a single authorizer cannot
+    duplicate)."""
+    pubkeys = [a.public_key_b64 for a in trust_root.authorizers]
+    if len(set(pubkeys)) != len(pubkeys):
+        return False, "trust root has duplicate authorizer public keys (would collapse the m-of-n quorum)"
+    try:
+        result = verify_threshold(
+            authority_signing_bytes(signed.document), signed.signatures, trust_root
+        )
+    except IntegrityError as e:
+        # Malformed signature bytes, or a weak (low-order / non-canonical) key referenced by a submitted
+        # signature, must be a fail-closed refusal that honours the (ok, reason) contract — never an
+        # uncaught crash in the caller (e.g. framework's store.load_verified_authority / the launch gate).
+        return False, f"authority signature material is malformed or uses a weak key: {e}"
     return result.satisfied, result.reason
