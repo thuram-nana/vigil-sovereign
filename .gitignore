@@ -44,3 +44,8 @@ target/
 /gitleaks-tree.sarif
 /gitleaks-history.sarif
 /semgrep.sarif
+
+# transient live-range / demo-run state — runtime DBs (meridian.sqlite3), pids, logs; never committed
+/range/.target-live/
+/engine/crucible/targets/acme/
+/engine/crucible/targets/loopback/

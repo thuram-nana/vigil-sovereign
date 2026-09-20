@@ -32,7 +32,13 @@ from typing import TYPE_CHECKING
 from urllib.parse import urlsplit
 
 from .agents.egress_guard import build_engagement_allowlist
-from .agents.http_executor import HttpExecutor, PromptCallback, parse_posture, stdin_prompt_with_timeout
+from .agents.http_executor import (
+    HttpExecutor,
+    PromptCallback,
+    parse_destructive_prompt,
+    parse_posture,
+    stdin_prompt_with_timeout,
+)
 from .agents.scope_gate import validate_action
 from .authority.killswitch import KillSwitch
 from .phase_ledger import (
@@ -123,6 +129,155 @@ def _no_send(request: object) -> dict:  # pragma: no cover - chaining never send
     -collected report. If the reasoning ever tries to issue traffic, fail loudly
     rather than silently sending ungated requests."""
     raise RuntimeError("chaining must not issue traffic")
+
+
+# =============================================================================
+# Engagement profiles (slice 0.2) — a PURE, NO-new-oracle, NO-gate-relaxing flag expansion
+# =============================================================================
+# ``--profile {surface,deep,full}`` is a convenience roster selector and NOTHING MORE: it only flips
+# EXISTING ``enable_*`` opt-in flags ON. It adds no oracle, relaxes no safety gate, and fabricates no
+# finding — the operator-spec-gated packs it turns on (e.g. access-control) still run NOTHING without the
+# operator's specs (a documented no-op), so enabling the machinery cannot manufacture a result. The
+# resolved profile + the exact expanded flag set are recorded to a run-dir manifest so the roster is
+# auditable. A profile only ever ADDS flags (union with any explicit --flag), never removes one.
+ENGAGEMENT_PROFILES = ("surface", "deep", "full")
+
+# profile -> the argparse dests it turns ON. Each name is an ``args`` attribute that maps 1:1 to a
+# ``run_engagement`` ``enable_*`` kwarg. Only flags that ALREADY EXIST are expanded; a plan-named pack
+# with no flag yet is DEFERRED (see ``_PROFILE_DEFERRED``), never invented.
+#   surface = today's default roster (flips nothing → unchanged behaviour)
+#   deep    = the FACT-capable opt-in browser passes + the packs whose flags already exist
+#   full    = deep + the operator-spec-gated packs whose flags already exist (access-control)
+_PROFILE_FLAGS: dict[str, tuple[str, ...]] = {
+    "surface": (),
+    "deep": ("domxss", "browser_xss", "sso", "graphql_dos"),
+    "full": ("domxss", "browser_xss", "sso", "graphql_dos", "access_control"),
+}
+
+# Plan-named packs a profile WOULD enable but that have NO ``enable_*`` flag yet (a later wave adds the
+# flag + the pack). The profile expands to NOTHING for these — it never invents a pack — and they are
+# surfaced in the manifest + an operator note so the gap is visible and auditable.
+#   deep names time-based / NoSQL / LDAP / XPath (no dedicated flag or pack exists — error-based SQLi is
+#   the only injection pack in DEFAULT_CHECKS); full additionally names business-logic + race (no flag).
+_PROFILE_DEFERRED: dict[str, tuple[str, ...]] = {
+    "surface": (),
+    "deep": ("time_based_sqli", "nosqli", "ldap", "xpath"),
+    "full": ("time_based_sqli", "nosqli", "ldap", "xpath", "bizlogic", "race"),
+}
+
+# The dest -> run_engagement enable_* kwarg name, for building the auditable roster map. Only the flags a
+# profile can flip need appear here; the manifest records the resolved value of each.
+_PROFILE_FLAG_KWARG: dict[str, str] = {
+    "domxss": "enable_domxss",
+    "browser_xss": "enable_browser_xss",
+    "sso": "enable_sso",
+    "graphql_dos": "enable_graphql_dos",
+    "access_control": "enable_access_control",
+}
+
+
+def resolve_profile(profile: str, args: "argparse.Namespace") -> tuple[list[str], list[str]]:
+    """PURE flag-expansion for ``--profile``. Turn ON (never off — an explicit ``--flag`` always survives)
+    every EXISTING ``args`` dest the profile names, and return ``(enabled_dests, deferred_packs)``.
+
+    ``surface`` flips nothing (the default roster is byte-identical). A plan-named dest that does not exist
+    on ``args`` yet is skipped and reported via ``deferred_packs`` — the profile never invents a pack. No
+    oracle, no gate change; the campaign roster is the only thing that moves."""
+    name = (profile or "surface").lower()
+    enabled: list[str] = []
+    for dest in _PROFILE_FLAGS.get(name, ()):
+        if not hasattr(args, dest):
+            continue   # a plan-named flag not wired yet is DEFERRED (never fabricated)
+        setattr(args, dest, True)
+        enabled.append(dest)
+    return enabled, list(_PROFILE_DEFERRED.get(name, ()))
+
+
+def _profile_deferred_packs(profile: str) -> list[str]:
+    """The plan-named packs a profile names but has no flag for yet (recorded in the run manifest)."""
+    return list(_PROFILE_DEFERRED.get((profile or "surface").lower(), ()))
+
+
+def _record_engagement_profile(run_dir: "str | None", profile: str, flags: dict, deferred: list) -> None:
+    """Record the resolved profile + the exact ``enable_*`` roster + the deferred plan-named packs to
+    ``<run_dir>/_engagement_profile.json`` so the roster is auditable. Run-dir-gated + best-effort: no run
+    dir => nothing written => byte-identical (``make gate`` sets none). Never raises into the engage pass."""
+    try:
+        from . import profile_manifest
+        profile_manifest.write_profile_manifest(run_dir, profile, flags, deferred)
+    except Exception:
+        pass
+
+
+# =============================================================================
+# Runtime browser gate (slice 0.2) — installed != usable; a browserless browser pass is INCONCLUSIVE
+# =============================================================================
+def _headless_browser_usable() -> bool:
+    """True iff the headless browser is usable FOR THE ENGAGE BROWSER PASSES at runtime — meaning BOTH the
+    stdlib render smoke (``scanner.browser.browser_usable`` — the check this slice is specified on) AND the
+    CDP driver those passes actually drive (``scanner.cdp.cdp_available``). A binary on PATH is not proof it
+    can render (``browser_usable``), and the CDP path can fail even when a ``--dump-dom`` render works, so
+    requiring both is what stops a browserless pass being SILENTLY SKIPPED and then read as CLEAN. Cached by
+    the underlying probes; called only when a browser pass is enabled, so the default roster pays nothing."""
+    from .scanner.browser import browser_usable
+    if not browser_usable():
+        return False
+    from .scanner.cdp import cdp_available
+    return cdp_available()
+
+
+def browser_surfaces_if_unusable(
+    *, enable_browser_xss: bool, enable_spa_crawl: bool, usable_check=None
+) -> list[tuple[str, str]]:
+    """The runtime browser gate's DECISION half (no I/O to the run dir). When a browser-dependent pass is
+    enabled but the headless browser is NOT usable at runtime, return the ``(surface, missing_prerequisite)``
+    pairs to record as INCONCLUSIVE + print a clear operator line. Returns ``[]`` when no browser pass is
+    enabled (nothing to gate → byte-identical default path) OR the browser IS usable (the passes then run
+    and confirm/deny per the oracle). ``usable_check`` overrides the real probe (tests inject a fake).
+
+    Only the browser-DRIVEN surfaces are gated — ``enable_domxss`` is a STATIC lead pass (no browser) and is
+    never gated here. No oracle, no gate change: this only prevents a silent skip masquerading as clean."""
+    enabled_surfaces: list[str] = []
+    if enable_browser_xss:
+        enabled_surfaces.append("browser_xss")
+    if enable_spa_crawl:
+        enabled_surfaces.append("spa_crawl")
+    if not enabled_surfaces:
+        return []
+    check = usable_check or _headless_browser_usable
+    try:
+        usable = bool(check())
+    except Exception:          # a probe that itself blows up means the browser is not usable → INCONCLUSIVE
+        usable = False
+    if usable:
+        return []
+    print("  browser gate      : headless browser NOT usable at runtime (installed != usable) — recording "
+          f"{', '.join(enabled_surfaces)} as INCONCLUSIVE (never clean, never a silent skip). Install a "
+          "headless Chromium (bootstrap.sh bundles a pinned one) to assess these surfaces.")
+    return [(s, "headless_browser_unusable") for s in enabled_surfaces]
+
+
+def persist_browser_inconclusive(surfaces: list[tuple[str, str]], *, run_dir: "str | None") -> bool:
+    """The runtime browser gate's PERSIST half. Record the browser INCONCLUSIVE ``surfaces`` to the run-dir
+    ``_inconclusive.json`` artifact via the SAME framework-owned mechanism fusion uses, so the dossier's
+    clean/verdict determination MUST consult the unassessed browser surface and can never round it to CLEAN.
+
+    MERGES with any surfaces already on disk (the fusion pass writes the same artifact) rather than
+    clobbering them, and preserves each existing surface's count. Run-dir-gated + best-effort: no surfaces
+    or no run dir => no write (byte-identical). Returns True iff the artifact was (re)written."""
+    if not surfaces or not run_dir:
+        return False
+    try:
+        from . import inconclusive_manifest as _im
+        combined: list[tuple[str, str]] = []
+        existing = _im.read_manifest(run_dir)
+        for s in existing.get("surfaces", ()):
+            pair = (s.get("sensor", ""), s.get("missing_prerequisite", ""))
+            combined.extend([pair] * max(1, int(s.get("count", 1) or 1)))
+        combined.extend(surfaces)
+        return _im.write_manifest(run_dir, combined)
+    except Exception:
+        return False
 
 
 def _origin(url: str) -> str:
@@ -734,6 +889,7 @@ def run_engagement(
     fuse_sensors: bool = False,
     resume: bool = False,
     run_dir: "str | None" = None,
+    profile: str = "surface",
 ) -> EngagementResult:
     """Run one authorized engagement end to end and return an
     :class:`EngagementResult` — the oracle-confirmed :class:`ScanReport` plus the
@@ -834,6 +990,37 @@ def run_engagement(
     # in-scope host — it cannot pull the browser off to third-party hosts.
     browser_allowed_hosts = {urlsplit(seed_url).hostname} if (enable_browser_xss or enable_spa_crawl) else None
     browser_allowed_hosts = {h for h in (browser_allowed_hosts or set()) if h}
+
+    # Slice 0.2 — the run dir for THIS engage process (explicit thread first, env last resort), used for
+    # both the auditable PROFILE roster and the browser INCONCLUSIVE-coverage artifact. Absent (hand-run
+    # CLI, no console) => nothing is written and the path is byte-identical (``make gate`` sets none).
+    rd = run_dir or _engage_run_dir()
+
+    # Record the resolved engagement PROFILE + the EXACT resolved enable_* roster to a run-dir manifest so
+    # the roster is auditable after the fact. PURE record — it flips no flag and changes no verdict.
+    _record_engagement_profile(rd, profile, {
+        "enable_domxss": enable_domxss,
+        "enable_oob": enable_oob,
+        "enable_browser_xss": enable_browser_xss,
+        "enable_spa_crawl": enable_spa_crawl,
+        "enable_chaining": enable_chaining,
+        "enable_recon": enable_recon,
+        "enable_arsenal": enable_arsenal,
+        "enable_sso": enable_sso,
+        "enable_graphql_dos": enable_graphql_dos,
+        "use_library": use_library,
+        "enable_access_control": enable_access_control,
+        "enable_defender": enable_defender,
+        "fuse_sensors": fuse_sensors,
+    }, _profile_deferred_packs(profile))
+
+    # RUNTIME browser gate: decide it HERE (early — the operator sees the log line up front and the
+    # capability probe caches), but PERSIST it after the fusion phase so it MERGES with (never clobbers)
+    # any _inconclusive.json fusion wrote. installed != usable → a browser pass whose browser cannot render
+    # is recorded INCONCLUSIVE, never CLEAN, never a silent skip. Empty when no browser pass is enabled or
+    # the browser is usable → the passes run and adjudicate per the oracle (byte-identical default path).
+    _browser_inconclusive = browser_surfaces_if_unusable(
+        enable_browser_xss=enable_browser_xss, enable_spa_crawl=enable_spa_crawl)
 
     # The single run-owned world-model: intel recon projects assets onto it, and finding
     # chaining accretes attack facts onto the SAME graph (disjoint id namespaces). Built
@@ -1050,6 +1237,12 @@ def run_engagement(
         except Exception:
             pass
     ledger.run_phase(P_FUSION, _do_fusion, enabled=fuse_sensors)
+
+    # Slice 0.2 — PERSIST the runtime browser gate's INCONCLUSIVE surfaces LAST (after the fusion phase's
+    # own _inconclusive.json write) so a browserless browser-pass run is never rounded to CLEAN and never a
+    # silent skip. Merges with (never clobbers) any fusion surfaces already on disk. No-op when the browser
+    # was usable / no browser pass was enabled (empty list → byte-identical).
+    persist_browser_inconclusive(_browser_inconclusive, run_dir=rd)
 
     # DEFENSIVE / purple-team pass (opt-in ``enable_defender``, default OFF → this phase is
     # skipped and the engagement is byte-identical). It reasons over the confirmed findings to tell
@@ -1322,9 +1515,136 @@ def _run_autonomous(args: argparse.Namespace, result: EngagementResult, spine: o
 
 
 def prompt_callback_from_args(args: argparse.Namespace) -> PromptCallback | None:
-    """The operator-confirmation callback the autonomous cycle threads into destructive-confirm.
-    None → the invoker's default-deny (a destructive tool is refused unless explicitly approved)."""
-    return None
+    """The operator-confirmation callback the engage destructive-confirm gate uses for a state-changing
+    (POST/PUT/DELETE/PATCH — or destructive-by-path) HTTP action.
+
+    DEFAULT (fail-closed): ``--approve-mutations`` absent OR no owner approval authority provisioned ⇒ return
+    ``None``. The caller then falls back to its default-deny (``stdin_prompt_with_timeout`` on a non-tty
+    returns False, ``run_autonomous_cycle`` treats None as deny), so a destructive action is DENIED and never
+    issued. GET (non-destructive) never reaches this callback — it is never gated. This None path is the
+    unchanged, safe default.
+
+    APPROVED (opt-in): ``--approve-mutations`` set AND an owner authority is provisioned (its PUBLIC key is
+    on disk at ``<base>/approval-authority.json`` — the offense side is KEYLESS) ⇒ return a callback that, on
+    a destructive action, wires the EXISTING per-action approval machinery (it reimplements NO crypto):
+
+      1. recover the EXACT ``(method, url, body_sha256)`` the executor is about to issue from the
+         destructive-confirm question via :func:`agents.http_executor.parse_destructive_prompt` (the inverse
+         of the one formatter that produced it, read from the binding FIRST line only — a byte-for-byte
+         binding, never a guess); a parse failure ⇒ DENY;
+      2. build ``ApprovalAction(tool_name="engage.http", target=url, action_digest=action_digest(
+         "engage.http", url, {"method": method[, "body_sha256": …]}))`` — a body-carrying write
+         (``gated_fetch`` → ``_capture`` sends ``content=body``) binds the sha256 of the EXACT transmitted
+         bytes, so a token minted for body A can never authorize a different body B on the same (method, url);
+         a no-body / query-param write binds ``{"method": …}`` (params ride in the URL = the target). Either
+         way this binds the EXACT (tool, target, args);
+      3. ``broker.bind(action)`` then ``broker.token_source()`` — publish a public-safe pending request the
+         sovereign signer can see, and BLOCK up to the broker's own poll window (``_DEFAULT_WAIT_SECONDS``,
+         or ``VIGIL_APPROVAL_WAIT_SECONDS``) for a matching owner-signed token;
+      4. ``consume_token(token, action, authority=<pinned owner key>, now, ledger)`` — the SOLE authority:
+         it verifies the owner signature, the pinned key-id, the action-binding (``ApprovalToken.matches``),
+         the validity/dead-man's window, and ATOMICALLY burns the single-use nonce (O_EXCL check-and-burn);
+      5. return ``decision.authorized`` — True only if every check passed.
+
+    A CRUCIBLE deny / tripped kill-switch is refused by ``_run_gates`` BEFORE the destructive prompt, so this
+    callback is never even invoked for one — a token can only ADD a gate to an otherwise-in-envelope write; it
+    can never override a deny. Any error at any step (missing package, unparseable question, non-serialisable
+    args, no/expired/replayed token, broker/burn error, timeout) returns False (DENY): fail-closed throughout.
+
+    FATAL-2 / KEYLESS OFFENSE: the approval machinery is import-clean (``vigil_core`` + stdlib) and holds NO
+    private key — only the owner's PUBLIC authority + owner-signed tokens cross the seam. Its imports are
+    FUNCTION-LOCAL so the engage module never couples to ``vigil_integration`` at import time."""
+    if not getattr(args, "approve_mutations", False):
+        return None  # the flag is the explicit opt-in; without it the fail-closed default stands
+
+    # FATAL-2: the per-action approval primitives are the import-clean, framework-free vigil_core+stdlib
+    # modules (proven by integration/tests/test_two_env_boundary.py). Import them FUNCTION-LOCALLY — the
+    # engage module must not couple framework → vigil_integration at import time. The offense side loads only
+    # the PUBLIC authority + verifies/consumes owner-signed tokens; it imports/holds no private key material.
+    try:
+        import time as _time  # noqa: PLC0415
+        from vigil_integration.live.approval_broker import (  # noqa: PLC0415 (FATAL-2: framework-free, keyless)
+            ApprovalBroker,
+            approvals_root,
+            load_authority,
+        )
+        from vigil_integration.live.approval_token import (  # noqa: PLC0415 (FATAL-2: PUBLIC-key verify only)
+            ApprovalAction,
+            action_digest,
+            consume_token,
+        )
+        from vigil_integration.live.nonce_ledger import NonceLedger  # noqa: PLC0415 (FATAL-2: stdlib-only)
+    except Exception:  # noqa: BLE001 — the approval package unavailable ⇒ keep the fail-closed default (None)
+        return None
+
+    # The shared engagement base dir both planes agree on (``vigil up`` exports VIGIL_BASE_DIR for both);
+    # matches apps/sigil offense_approvals._base_dir + the console. The authority is the owner's PUBLIC key
+    # only (safe to load offense-side); absent/malformed ⇒ None ⇒ the fail-closed default (GET-only) stands.
+    base_dir = os.environ.get("VIGIL_BASE_DIR") or ".vigil-live"
+    authority = load_authority(base_dir)
+    if authority is None:
+        return None  # no owner authority provisioned ⇒ fail-closed default (destructive default-deny)
+
+    # ONE single-use nonce ledger, shared with the engine's approval path (``<base>/approval-nonces``), so a
+    # token's nonce burned by either path can never be replayed on the other. The broker's is_consumed lets
+    # token_source PREFER a live, unspent token over an accumulated spent/expired shadow (consume_token stays
+    # the SOLE burn authority). ``now=_time.time`` is the real clock the token dead-man's-switch is checked on.
+    nonce_dir = os.environ.get("VIGIL_APPROVAL_NONCE_DIR") or str(Path(base_dir) / "approval-nonces")
+    ledger = NonceLedger(nonce_dir)
+    broker = ApprovalBroker(approvals_root(base_dir), now=_time.time, is_consumed=ledger.is_consumed)
+
+    def _mutating_approval(question: str, _timeout: float) -> bool:
+        # (1) recover the EXACT (method, url, body_sha256) the executor is about to issue — the inverse of the
+        # one formatter that produced the question (binding read from the FIRST line only), so the binding is
+        # byte-for-byte, never a guess. A body-carrying write carries its sha256; a no-body write carries None.
+        parsed = parse_destructive_prompt(question)
+        if parsed is None:
+            return False  # cannot identify the exact action ⇒ fail-closed DENY (never authorize a guess)
+        method, url, body_sha256 = parsed
+        # (2) bind the EXACT (tool, target, args-digest). The args-digest carries the method AND — when the
+        # write has a body — its sha256, so a token minted for body A can never authorize a DIFFERENT body B
+        # on the same (method, url). No body (GET / query-param write) ⇒ {"method": …} ⇒ byte-identical digest.
+        try:
+            if body_sha256 is None:
+                args_for_digest: dict = {"method": method}
+                preview: object = {"method": method, "url": url}
+            else:
+                args_for_digest = {"method": method, "body_sha256": body_sha256}
+                # INFORMED CONSENT: the sovereign signer's pending preview is the FULL question — it carries
+                # the method, the URL, the bound body-sha256 AND the redacted human body preview, so the owner
+                # sees exactly the payload they are authorizing before they sign.
+                preview = question
+            digest = action_digest("engage.http", url, args_for_digest)
+            action = ApprovalAction(tool_name="engage.http", target=url, action_digest=digest)
+        except Exception:  # noqa: BLE001 — a non-serialisable/malformed action ⇒ fail-closed DENY
+            return False
+        # (3) publish the public-safe pending request + BLOCK up to the broker's own poll window for a
+        # matching owner-signed token. A broker error ⇒ no token ⇒ DENY.
+        try:
+            broker.bind(action, args_preview=preview)
+            found = broker.token_source()
+        except Exception:  # noqa: BLE001 — a broker/publish/poll error leaves the action DENIED (fail-closed)
+            return False
+        if not (isinstance(found, tuple) and len(found) == 2):
+            return False  # no owner-signed token in the window ⇒ stays denied (never issued)
+        token, tok_action = found
+        # defense-in-depth: the token_source's returned action must be the exact one we bound (the broker
+        # returns it, but a caller-supplied source could differ) — any mismatch never authorizes.
+        if (getattr(tok_action, "tool_name", None) != "engage.http"
+                or getattr(tok_action, "target", None) != url
+                or getattr(tok_action, "action_digest", None) != digest):
+            return False
+        # (4) consume_token is the SOLE authority: signature + pinned key-id + action-binding + window +
+        # ATOMIC single-use burn. Any verify/burn error ⇒ DENY (never fail-open on an infra error).
+        try:
+            decision = consume_token(token, action, authority=authority, now=_time.time(), ledger=ledger)
+        except Exception:  # noqa: BLE001 — any verification/burn error ⇒ fail-closed DENY
+            return False
+        # (5) authorized only if EVERY check passed. This only satisfies the WARDEN human leg for a write the
+        # CRUCIBLE gate already put in-envelope; the FACT is still adjudicated by the deterministic oracle.
+        return bool(getattr(decision, "authorized", False))
+
+    return _mutating_approval
 
 
 def main(argv: list[str]) -> int:
@@ -1340,8 +1660,26 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--request-budget", type=int, default=200)
     parser.add_argument("--max-pages", type=int, default=100)
     parser.add_argument("--max-audit-requests", type=int, default=0)
+    parser.add_argument(
+        "--approve-mutations", action="store_true",
+        help="Allow a state-changing (POST/PUT/DELETE/PATCH, or destructive-by-path) HTTP action to be "
+             "authorized into the run by an OWNER-SIGNED, SINGLE-USE, ACTION-BOUND per-request approval "
+             "token. The binding covers (tool, url, method AND the sha256 of the request body), so the owner "
+             "sees a redacted preview of the body and a token for one payload can never authorize another. "
+             "The owner signs on the sovereign/SIGIL side; the offense side stays keyless. Requires an "
+             "approval authority to be provisioned (its PUBLIC key under $VIGIL_BASE_DIR). WITHOUT this flag "
+             "(the default) a destructive action is fail-closed DENIED; a GET is never gated either way.")
     parser.add_argument("--bandit-file", default=None,
                         help="Persist/warm-start the self-learning check-ordering bandit.")
+    parser.add_argument("--profile", choices=ENGAGEMENT_PROFILES, default="surface",
+                        help="Engagement ROSTER profile (a PURE flag-expansion; no oracle, no relaxed "
+                             "gate). 'surface' (default) = today's roster, unchanged. 'deep' = also the "
+                             "opt-in browser passes (--domxss/--browser-xss) + --sso + --graphql-dos. "
+                             "'full' = deep + the operator-spec-gated packs whose flags exist "
+                             "(--access-control; still a no-op without --ac-ref, so no finding is "
+                             "fabricated). It only turns EXISTING flags ON (an explicit --flag always "
+                             "wins); plan-named packs with no flag yet are reported deferred. The "
+                             "resolved profile + roster are recorded to <run_dir>/_engagement_profile.json.")
     parser.add_argument("--domxss", action="store_true", help="Also emit static DOM-XSS leads.")
     parser.add_argument("--browser-xss", action="store_true",
                         help="Confirm DOM-XSS by real execution in a headless browser "
@@ -1568,6 +1906,19 @@ def main(argv: list[str]) -> int:
                              "a finding or gates a surface out.")
     args = parser.parse_args(argv)
 
+    # Slice 0.2 — expand the engagement PROFILE into existing enable_* flags (PURE: only turns flags ON;
+    # an explicit --flag always survives; no oracle, no relaxed gate). Record what was flipped + which
+    # plan-named packs have no flag yet, and tell the operator so the deferred roster is visible.
+    args._profile_enabled_flags, args._profile_deferred = resolve_profile(args.profile, args)
+    if args.profile != "surface":
+        _flipped = ", ".join(f"--{d.replace('_', '-')}" for d in args._profile_enabled_flags) or "(none new)"
+        print(f"profile: {args.profile} → enabled {_flipped} "
+              "(flag-expansion only; no oracle added, no gate relaxed).")
+    if args._profile_deferred:
+        print(f"note: profile '{args.profile}' names packs with no enable flag yet (deferred to a later "
+              f"wave): {', '.join(args._profile_deferred)}. The profile enabled only the flags that "
+              "exist — it did not invent these packs.")
+
     # NW-3: auto-enable sensor fusion when the operator has authored a targets/<slug>/fusion.json
     # manifest (opt-in-by-presence), unless --no-fuse-sensors forces it off. Manifest-absent + no
     # flag ⇒ stays False ⇒ byte-identical default path (the benchmark/gate never reaches main()).
@@ -1656,6 +2007,10 @@ def _engage_body(args: argparse.Namespace, spine: object) -> int:
         result = run_engagement(
             args.slug, args.seed_url,
             spine=spine,
+            # Per-action mutating-proof approval (opt-in via --approve-mutations). None (the default) ⇒
+            # run_engagement falls back to its stdin default-deny, so a destructive action stays fail-closed;
+            # a valid owner-signed single-use token authorizes exactly that one write. GET is never gated.
+            prompt_callback=prompt_callback_from_args(args),
             request_budget=args.request_budget,
             max_pages=args.max_pages,
             max_audit_requests=args.max_audit_requests,
@@ -1686,6 +2041,7 @@ def _engage_body(args: argparse.Namespace, spine: object) -> int:
             defender_log_format=args.defender_log_format,
             fuse_sensors=args.fuse_sensors,
             resume=getattr(args, "resume", False),
+            profile=getattr(args, "profile", "surface"),
         )
     except EngagementRefused as e:
         print(f"engagement refused: {e}")
