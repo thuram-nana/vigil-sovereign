@@ -33,6 +33,15 @@ _PRODUCTION_VALUES = frozenset({"production", "prod"})
 LEGACY_OWNER_TOKEN_ENV = "SIGIL_LEGACY_OWNER_TOKEN"
 _FALSY = frozenset({"0", "off", "false", "no", "disabled"})
 
+# The GOVERNED deployment posture (a client / national-agency deployment that still needs external egress).
+# Truthy ``VIGIL_GOVERNED`` disables the legacy fail-open owner token — requiring per-user proof-of-possession
+# auth, exactly like production — WITHOUT arming production's refuse-to-start / loopback-only egress lockdown.
+# So a governed deployment is fail-closed on AUTH and can still run authorized EXTERNAL engagements (the two
+# concerns production bundles are decoupled here). Unset (the default) leaves both facts unchanged, so dev /
+# single-owner-on-host bearer access is never silently broken.
+GOVERNED_ENV = "VIGIL_GOVERNED"
+_TRUTHY = frozenset({"1", "on", "true", "yes", "enabled"})
+
 
 def _env(env: "Optional[Mapping[str, str]]") -> "Mapping[str, str]":
     return os.environ if env is None else env
@@ -52,6 +61,15 @@ def is_production_posture(env: "Optional[Mapping[str, str]]" = None) -> bool:
     return production_posture(env) is not None
 
 
+def is_governed_posture(env: "Optional[Mapping[str, str]]" = None) -> bool:
+    """True IFF the GOVERNED deployment posture is armed (truthy ``VIGIL_GOVERNED``). Governed refuses the
+    legacy fail-open owner token — requiring per-user proof-of-possession auth, the same auth posture
+    production enforces — but WITHOUT production's refuse-to-start / loopback-only egress lockdown, so an
+    authorized external engagement can still run. Default (unset) is False, so it never silently changes
+    an existing deployment's behaviour."""
+    return _env(env).get(GOVERNED_ENV, "").strip().lower() in _TRUTHY
+
+
 def legacy_owner_token_disabled(env: "Optional[Mapping[str, str]]" = None) -> bool:
     """True IFF the operator has EXPLICITLY disabled the legacy shared owner token via a falsy
     ``SIGIL_LEGACY_OWNER_TOKEN``. Default (unset / any non-falsy value) is ENABLED ⇒ ``False``."""
@@ -61,8 +79,13 @@ def legacy_owner_token_disabled(env: "Optional[Mapping[str, str]]" = None) -> bo
 def legacy_owner_token_grants_owner(env: "Optional[Mapping[str, str]]" = None) -> bool:
     """Whether the legacy embedded shared owner token may resolve to the owner principal RIGHT NOW.
 
-    FAIL-CLOSED under the production posture: ``VIGIL_POSTURE=production`` refuses the token unconditionally
-    — per-user proof-of-possession auth is required there (W10-7) — regardless of the toggle. Outside
-    production the operator may still opt out explicitly with ``SIGIL_LEGACY_OWNER_TOKEN=0``. So the token
-    grants owner ONLY when the posture is not production AND the toggle has not been disabled."""
-    return (not is_production_posture(env)) and (not legacy_owner_token_disabled(env))
+    FAIL-CLOSED under production OR governed: ``VIGIL_POSTURE=production`` (W10-7) AND the GOVERNED posture
+    (``VIGIL_GOVERNED`` truthy) both refuse the token unconditionally — per-user proof-of-possession auth is
+    required there — regardless of the toggle. Outside those the operator may still opt out explicitly with
+    ``SIGIL_LEGACY_OWNER_TOKEN=0``. So the token grants owner ONLY when the posture is neither production nor
+    governed AND the toggle has not been disabled."""
+    return (
+        (not is_production_posture(env))
+        and (not is_governed_posture(env))
+        and (not legacy_owner_token_disabled(env))
+    )

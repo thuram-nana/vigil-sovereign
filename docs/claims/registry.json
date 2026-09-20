@@ -2512,6 +2512,25 @@
       "ci_job": "CRUCIBLE core on vigil_core",
       "failure_class": "n-a",
       "default": "on"
+    },
+    {
+      "id": "PHASE0-2",
+      "title": "Governed deployment refuses the fail-open owner token without the egress lockdown",
+      "claim": "A governed deployment (VIGIL_GOVERNED truthy) refuses the legacy fail-open owner token — requiring per-user proof-of-possession auth — without arming production's loopback-only egress lockdown, so an authorized external engagement can still run.",
+      "source": "docs/decisions/phase0-governed-posture.md:23",
+      "enforced_by": {
+        "file": "packages/core/vigil_core/vigil_core/posture.py",
+        "symbol": "legacy_owner_token_grants_owner"
+      },
+      "proved_by": {
+        "file": "packages/core/vigil_core/tests/test_posture.py",
+        "tests": [
+          "test_governed_posture_refuses_the_legacy_owner_token_without_the_egress_lockdown"
+        ]
+      },
+      "ci_job": "vigil_core — shared integrity substrate",
+      "failure_class": "n-a",
+      "default": "on"
     }
   ]
 }

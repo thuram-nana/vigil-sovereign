@@ -118,8 +118,13 @@ def _all_satisfied(monkeypatch, tmp_path) -> pathlib.Path:
     (auth / "acme.authority.json").write_text("{}", encoding="utf-8")
     monkeypatch.setenv("CRUCIBLE_ROOT", str(cruc))
     monkeypatch.setenv("VIGIL_ENGAGEMENT", "acme")
-    # (6) the legacy embedded shared owner token DISABLED — the operator opted into per-user PoP auth
+    # (6) the legacy embedded shared owner token DISABLED — the operator opted into per-user PoP auth.
+    #     Also ensure the GOVERNED posture (the OTHER way this token is disabled) is NOT ambiently set, so
+    #     in these tests the legacy-owner-token condition is controlled SOLELY by SIGIL_LEGACY_OWNER_TOKEN —
+    #     a CI runner exporting VIGIL_GOVERNED=1 must not silently satisfy the condition a flip-helper turns
+    #     off (that would mask a regression in the explicit-opt-out path the production gate requires).
     monkeypatch.setenv("SIGIL_LEGACY_OWNER_TOKEN", "0")
+    monkeypatch.delenv("VIGIL_GOVERNED", raising=False)
     # (7) the seccomp egress supervisor ARMED (W10-8) — enabled AND its binary present. Point
     #     VIGIL_EGRESS_GUARD_BIN at a real executable so guard_binary() resolves it deterministically,
     #     independent of whether the in-repo build exists on this host / CI runner.
@@ -458,3 +463,43 @@ def test_wrap_argv_fails_closed_under_production_when_binary_missing(monkeypatch
     monkeypatch.setenv("VIGIL_POSTURE", "production")
     with pytest.raises(egmod.EgressGuardUnavailable):
         egmod.wrap_argv(argv)
+
+
+# --------------------------------------------------- Phase 0.2 — governed decouples auth from egress lockdown
+
+
+def test_governed_disables_the_legacy_token_without_arming_the_egress_lockdown(monkeypatch):
+    """R-CRITICAL-2 decoupling, pinned at the two integration-plane probes the operator actually reads.
+
+    A GOVERNED deployment (VIGIL_GOVERNED truthy) must close the fail-open owner path — the doctor probe
+    reports the legacy shared owner token DISABLED — WITHOUT arming production's loopback-only egress
+    lockdown, so an authorized external engagement can still run. PRODUCTION is the negative control: it
+    reports the token still ENABLED at the config layer (the gate deliberately requires the EXPLICIT
+    opt-out, defense in depth) *and* it FORCES the egress supervisor on — proving governed != production
+    and that these probes actually read posture rather than returning a constant.
+
+    A writer/reader-in-isolation test on posture alone (test_posture.py) passed green while this
+    integration decoupling was unasserted — this drives the real doctor + egress_guard probes."""
+    # a clean env: neither the explicit opt-out nor any posture is ambiently set.
+    monkeypatch.delenv("SIGIL_LEGACY_OWNER_TOKEN", raising=False)
+    monkeypatch.delenv("VIGIL_POSTURE", raising=False)
+    monkeypatch.delenv("VIGIL_EGRESS_GUARD", raising=False)
+    monkeypatch.delenv("VIGIL_GOVERNED", raising=False)
+
+    # baseline (nothing set): the legacy token is ENABLED (fail-open dev default) and the guard is OFF.
+    assert dmod._posture_legacy_owner_token()[0] == "ENABLED"
+    assert egmod.enabled() is False and egmod.required() is False
+
+    # GOVERNED: the token is refused (auth fail-closed) but the egress lockdown is NOT armed (decoupled).
+    monkeypatch.setenv("VIGIL_GOVERNED", "1")
+    assert dmod._posture_legacy_owner_token()[0] == "DISABLED"
+    assert egmod.enabled() is False, "governed must NOT arm the egress supervisor — external egress stays possible"
+    assert egmod.required() is False
+
+    # NEGATIVE CONTROL — PRODUCTION: the config-layer probe still reports the token ENABLED (the gate wants
+    # the explicit opt-out) AND production FORCES the egress supervisor on. So the two postures are proven
+    # distinct: governed disables the token WITHOUT the lockdown; production couples both.
+    monkeypatch.delenv("VIGIL_GOVERNED", raising=False)
+    monkeypatch.setenv("VIGIL_POSTURE", "production")
+    assert dmod._posture_legacy_owner_token()[0] == "ENABLED"
+    assert egmod.enabled() is True and egmod.required() is True
