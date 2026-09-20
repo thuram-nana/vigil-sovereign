@@ -27,8 +27,12 @@ from vigil_core import (
     AuthorizerKey, EngagementAuthority, TargetEnvironment, TrustRoot, generate_keypair,
     sign_engagement_authority,
 )
-from vigil_integration.live.approval_broker import persist_authority
-from vigil_integration.live.authorization_broker import write_authorization
+# The offense installer imports vigil_integration LAZILY (FATAL-2: the console plane never imports it at
+# module scope). This test needs the broker seams directly to SEED the bundle + owner pin, so skip cleanly in
+# the framework-only CI job ("CRUCIBLE core on vigil_core") where vigil_integration is not installed — the
+# installer can't function there anyway. Mirrors the sibling test_approvals_screen.py pattern.
+persist_authority = pytest.importorskip("vigil_integration.live.approval_broker").persist_authority
+write_authorization = pytest.importorskip("vigil_integration.live.authorization_broker").write_authorization
 
 # the console-canonical slug for host apme.cm (console._slugify + ceremony._slug_for both map apme.cm ->
 # apme-cm). The SLUG (an id) and the SCOPE host (apme.cm) are deliberately distinct.

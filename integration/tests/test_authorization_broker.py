@@ -108,8 +108,15 @@ def test_read_of_absent_bundle_is_none():
 
 def test_broker_imports_no_offense_engine():
     import sys
-    for m in [m for m in list(sys.modules) if m.startswith(("framework", "strix"))]:
-        sys.modules.pop(m, None)
-    from vigil_integration.live import authorization_broker  # noqa: F401
-    assert not any(m == "framework" or m.startswith("framework.") or m == "strix" or m.startswith("strix.")
-                   for m in sys.modules), "the broker dragged the offense engine into the sovereign process"
+    # FINDING-2: snapshot + RESTORE the framework/strix modules we evict. Popping them without restoring
+    # pollutes later tests that depend on the already-imported offense engine (the console launch /
+    # inconclusive tests failed with KeyError 'run_id'/'stream' when run after this one).
+    saved = {m: sys.modules[m] for m in list(sys.modules) if m.startswith(("framework", "strix"))}
+    try:
+        for m in saved:
+            sys.modules.pop(m, None)
+        from vigil_integration.live import authorization_broker  # noqa: F401
+        assert not any(m == "framework" or m.startswith("framework.") or m == "strix" or m.startswith("strix.")
+                       for m in sys.modules), "the broker dragged the offense engine into the sovereign process"
+    finally:
+        sys.modules.update(saved)

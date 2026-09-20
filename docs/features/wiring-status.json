@@ -1249,7 +1249,7 @@
         "symbol": "_install_target_authorization"
       },
       "check": "symbol-exists",
-      "rationale": "Phase 1.c. On a remote launch, reads the seam bundle and installs it ONLY when it is tied to the PINNED owner key, its signature verifies, its window is current, and its scope entries are bare hosts; refuses to downgrade a differing/unreadable trust root. Then the launch gate _has_verified_authority(slug, host) additionally requires the verified authority's scope to cover the target host. Honest bound (docs/limitations): the owner anchor + trust root live under the offense-writable root; anchor .entitlement out-of-band (CRUCIBLE_ENTITLEMENT_DIR read-only/HSM) to close a full-FS-write attacker."
+      "rationale": "Phase 1.c. On a remote launch, reads the seam bundle and installs it ONLY when it is tied to the PINNED owner key, its signature verifies, its window is current, and its scope entries are bare hosts; refuses to downgrade a differing/unreadable trust root. Then the launch gate _has_verified_authority(slug, host) additionally requires the verified authority's scope to cover the target host. Honest bound (docs/limitations): the owner anchor + launch-gate authority root live under the offense-writable root; anchor .authority-root out-of-band (VIGIL_AUTHORITY_ROOT_DIR read-only/HSM) to close a full-FS-write attacker."
     },
     {
       "id": "offense.operator_rate_ua_controls",

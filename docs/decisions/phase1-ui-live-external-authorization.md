@@ -61,8 +61,8 @@ Concretely:
 The owner-PIN tie is enforced at INSTALL time; the launch gate verifies the authority against whatever trust
 root is on disk. Both the gate's and the install's completeness against a *full owner-uid filesystem-write*
 attacker (who could plant their own trust root + self-signed authority, or swap both the seam bundle and the
-owner-pubkey anchor) depend on anchoring the deployment trust root out-of-band — a read-only / HSM-backed
-`.entitlement` mount via `CRUCIBLE_ENTITLEMENT_DIR`. Such an actor is outside the meaningful threat model
+owner-pubkey anchor) depend on anchoring the launch-gate authority root out-of-band — a read-only / HSM-backed
+`.authority-root` mount via `VIGIL_AUTHORITY_ROOT_DIR`. Such an actor is outside the meaningful threat model
 (they could equally edit code, the kill-switch, or the keys). This raises the bar from "write a plaintext
 `Signed:` name into a charter" to "produce an owner-signed authority, over the target host, in window". These
 residuals are recorded in `docs/limitations/inventory.json` and never worded as completeness.

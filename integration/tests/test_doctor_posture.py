@@ -217,7 +217,7 @@ def test_collect_attaches_posture_without_changing_ok(tmp_path, monkeypatch):
     posture = report["posture"]
     assert isinstance(posture, list) and [p["control"] for p in posture] == [
         "egress-gate", "vault", "key-sealing", "sovereignty", "entitlement", "entitlement-anchor",
-        "backups", "charter", "egress-supervisor", "witness", "owner-key-backend",
+        "authority-root-anchor", "backups", "charter", "egress-supervisor", "witness", "owner-key-backend",
     ]
     # every entry is a JSON-safe {control, state, detail}
     assert all(set(p) == {"control", "state", "detail"} for p in posture)
@@ -234,7 +234,7 @@ def test_posture_probe_that_raises_yields_unknown_not_crash(monkeypatch, tmp_pat
     posture = dmod._collect_posture(tmp_path, {})
     vault = next(p for p in posture if p["control"] == "vault")
     assert vault["state"] == "UNKNOWN" and "RuntimeError" in vault["detail"]
-    assert len(posture) == 11                                 # the other ten still produced
+    assert len(posture) == 12                                 # the other eleven still produced
 
 
 # --------------------------------------------------------------------------- FATAL-2 boundary
@@ -257,7 +257,7 @@ def test_doctor_reads_posture_without_importing_sigil_or_framework(tmp_path):
     assert out.returncode == 0, f"probe failed: {out.stderr}"
     res = __import__("json").loads(out.stdout.strip().splitlines()[-1])
     assert res["leaked"] == [], f"doctor co-loaded a forbidden plane: {res['leaked']}"
-    assert res["controls"] == ["egress-gate", "vault", "key-sealing", "sovereignty", "entitlement", "entitlement-anchor", "backups", "charter", "egress-supervisor", "witness", "owner-key-backend"]
+    assert res["controls"] == ["egress-gate", "vault", "key-sealing", "sovereignty", "entitlement", "entitlement-anchor", "authority-root-anchor", "backups", "charter", "egress-supervisor", "witness", "owner-key-backend"]
 
 
 # --------------------------------------------------------------------------- README-truth (derive, don't drift)
@@ -305,3 +305,28 @@ def test_entitlement_anchor_reports_default_in_tree_and_out_of_band(tmp_path, mo
     # advisory only: it is NOT one of the production-gate REQUIRED controls (never fails the start gate)
     from vigil_core.doctor import REQUIRED_CONTROLS
     assert "entitlement-anchor" not in {c for c in REQUIRED_CONTROLS}
+
+
+# --------------------------------------------------------------------------- authority-root-anchor visibility
+def test_authority_root_anchor_reports_default_in_tree_and_out_of_band(tmp_path, monkeypatch):
+    """The remote-engage LAUNCH-GATE authority root (`.authority-root/`, the trust root the launch gate
+    verifies the owner-signed authority against) has its own anchor posture, DISTINCT from entitlement's:
+    DEFAULT-IN-TREE by default, OUT-OF-BAND when VIGIL_AUTHORITY_ROOT_DIR anchors it away. Advisory only."""
+    cruc = tmp_path / "cruc"
+    (cruc / "framework" / "v2").mkdir(parents=True)
+    (cruc / "CLAUDE.md").write_text("# c\n", encoding="utf-8")
+    monkeypatch.setenv("CRUCIBLE_ROOT", str(cruc))
+
+    monkeypatch.delenv("VIGIL_AUTHORITY_ROOT_DIR", raising=False)
+    state, detail = dmod._posture_authority_root_anchor(cruc)
+    assert state == "DEFAULT-IN-TREE" and "out-of-band" in detail.lower()
+    assert ".authority-root" in detail                      # points at the launch-gate root, not .entitlement
+    assert "provisioned yet" in detail.lower()              # the "hardened but never provisioned" caveat
+
+    monkeypatch.setenv("VIGIL_AUTHORITY_ROOT_DIR", str(tmp_path / "ro-mount" / ".authority-root"))
+    state2, detail2 = dmod._posture_authority_root_anchor(cruc)
+    assert state2 == "OUT-OF-BAND" and "VIGIL_AUTHORITY_ROOT_DIR" in detail2
+
+    # advisory only: NOT a production-gate REQUIRED control (never fails the start gate)
+    from vigil_core.doctor import REQUIRED_CONTROLS
+    assert "authority-root-anchor" not in {c for c in REQUIRED_CONTROLS}

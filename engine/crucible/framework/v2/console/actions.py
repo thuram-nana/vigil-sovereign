@@ -622,8 +622,9 @@ def _install_target_authorization(slug: str) -> "tuple[str, str]":
     HONEST BOUND (mirrors :func:`_has_verified_authority`): the owner-pubkey anchor and the persisted trust
     root live under the offense-writable base/root, so an actor with arbitrary owner-uid filesystem write
     could swap BOTH the bundle and the anchor — outside the meaningful threat model (they could equally edit
-    code, keys, or the kill-switch). Anchor the owner root out-of-band (read-only / HSM mount via
-    ``CRUCIBLE_ENTITLEMENT_DIR``) to close even that. This raises the bar from "write a plaintext charter"
+    code, keys, or the kill-switch). Anchor the authority root out-of-band (read-only / HSM mount via
+    ``VIGIL_AUTHORITY_ROOT_DIR`` — this function persists it via ``write_authority_root`` → ``.authority-root/``,
+    NOT the entitlement store) to close even that. This raises the bar from "write a plaintext charter"
     to "produce an owner-signed authority whose trust root is the pinned owner key"."""
     try:
         import datetime as _dt
