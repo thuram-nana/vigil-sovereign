@@ -237,12 +237,17 @@ def _isolate_auth(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, trust_root
 
     apath = tmp_path / "alpha.authority.json"
     trpath = tmp_path / "trust-root.json"
+    arpath = tmp_path / "authority-root.json"
     monkeypatch.setattr(_p, "authority_path", lambda s: apath)
     monkeypatch.setattr(_p, "trust_root_path", lambda: trpath)
+    # Phase 0.1 decouple: the repeater gate reads the authority root via _engage_authority_trust_root,
+    # which now loads the DEDICATED authority-root store (not the entitlement trust root) — provision THERE.
+    monkeypatch.setattr(_p, "authority_root_path", lambda: arpath)
     signer: dict = {}
     if trust_root:
+        from framework.v2.authority.store import write_authority_root
         ak, priv = provision.new_authorizer("a0", "Authoriser 0")
-        provision.write_trust_root(provision.build_trust_root([ak], threshold=1))
+        write_authority_root(provision.build_trust_root([ak], threshold=1))
         signer = {"a0": priv}
     return apath, signer
 

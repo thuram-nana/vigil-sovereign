@@ -58,7 +58,7 @@ def test_discovered_sinks_are_exactly_the_expected_set() -> None:
     """Pin the discovered sinks so a code change that adds/removes an on-disk store is LOUD here, not
     silently absorbed. Derived from the code by AST — this states the value discovery landed on."""
     assert g.discover_sinks() == {
-        "evidence", ".blackboard", ".evidence-keys", ".entitlement", ".authority",
+        "evidence", ".blackboard", ".evidence-keys", ".entitlement", ".authority", ".authority-root",
         ".memory", ".dryrun", ".improve", ".intake-authorizations.txt",
         ".crucible-v2.log", ".planner-state.json",
     }

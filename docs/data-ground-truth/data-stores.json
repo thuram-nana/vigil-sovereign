@@ -67,15 +67,16 @@
     {
       "id": "governance-entitlement",
       "data": "Governance / entitlement material",
-      "location": "`framework/v2/.entitlement/`, `framework/v2/.authority/`",
-      "credentials": "trust roots, signed grants, kill-switch",
+      "location": "`framework/v2/.entitlement/`, `framework/v2/.authority/`, `framework/v2/.authority-root/`",
+      "credentials": "trust roots, signed grants, kill-switch, governance authority root",
       "at_rest": "owner-only, gitignored",
       "mutable": "operator-provisioned",
       "erasure": "out of scope for evidence erasure",
-      "sinks": [".entitlement", ".authority"],
+      "sinks": [".entitlement", ".authority", ".authority-root"],
       "symbols": [
         {"file": "framework/v2/common/paths.py", "symbol": "entitlement_dir"},
         {"file": "framework/v2/common/paths.py", "symbol": "authority_dir"},
+        {"file": "framework/v2/common/paths.py", "symbol": "authority_root_dir"},
         {"file": "framework/v2/common/paths.py", "symbol": "killswitch_path"}
       ]
     }
