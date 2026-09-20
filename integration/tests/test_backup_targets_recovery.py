@@ -346,6 +346,9 @@ def test_entitlement_override_is_excluded_but_authority_still_captured(tmp_path)
     assert not any(r.startswith(f"{_CRUCIBLE_PREFIX}framework/v2/.entitlement/") for r in rels), rels
     # ... but the DestructionAuthority (no override; always in-tree) still IS captured.
     assert f"{_CRUCIBLE_PREFIX}framework/v2/.authority/{SLUG}.authority.json" in rels, rels
+    # ... and the authority TRUST ROOT is likewise EXCLUDED here — this test runs with VIGIL_AUTHORITY_ROOT_DIR
+    # set (autouse isolation), so like the entitlement root it is held off-tree and not packaged (Phase 0.1).
+    assert not any(r.startswith(f"{_CRUCIBLE_PREFIX}framework/v2/.authority-root/") for r in rels), rels
 
 
 # ---------------------------------------------------------------------------------------------------

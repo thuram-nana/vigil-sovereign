@@ -334,6 +334,12 @@ def aegis_mode_path(slug: str) -> Path:
 # Override the directory with VIGIL_AUTHORITY_ROOT_DIR so a deployment can keep
 # the authority root on a read-only / HSM-fronted mount separate from the code
 # tree (mirrors CRUCIBLE_ENTITLEMENT_DIR for the entitlement store). Gitignored.
+# KEEP THIS DIRECTORY DISTINCT FROM CRUCIBLE_ENTITLEMENT_DIR: co-locating them
+# (same dir) lands the authority root at `<dir>/trust-root.json` == the file
+# `_enforcement_active()` watches, re-coupling the two and re-tripping entitlement
+# enforcement — the exact collateral activation this split exists to prevent. The
+# failure is fail-CLOSED (enforcement ON → deny), not a bypass; the defaults
+# (`.entitlement/` vs `.authority-root/`) are already distinct.
 # ---------------------------------------------------------------------------
 
 
