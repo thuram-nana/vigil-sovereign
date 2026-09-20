@@ -712,7 +712,7 @@
   "vendor/strix/tests_vigil/test_sandbox_hardening.py": "c5a6cbb4e51c5a86d1c9f30785fa7234af47706015222a9323f420b8a2059be8",
   "vendor/strix/tests_vigil/test_vigil_graph_progress.py": "b468b4ab45c317175af0a267f5692984c570b88a5bcf960f0e9f102706ffb337",
   "vendor/strix/tests_vigil/test_vigil_upstream_proxy.py": "5aec4434f994f0cc69b3fc2c6773ed484e2a26450bf6f1dcacfeb27dee63515c",
-  "vendor/strix/uv.lock": "ef01a512cf243a9b7084e4724a89c52ef8567e6a144057219e72940280716a26"
+  "vendor/strix/uv.lock": "fb6aac5af3350971e0ac108feebb0fd951c683f39437e9a2d49ef620fc3af8f5"
  },
  "upstream_commit": "230324d2b80a5a27506f85fc521845d8464b04c0",
  "upstream_license": "Apache-2.0",
