@@ -1015,6 +1015,169 @@
         "vigil_owned_live_redrive",
         "response_body_decode"
       ]
+    },
+    {
+      "id": "boolean_sqli.sprt_inference",
+      "check": "BooleanInferenceCheck",
+      "evidence": "VIGIL's OWN gated live re-drive runs a Wald SPRT (SQL string-context true/false clauses) against the in-charter target: each round sends a TRUE-condition clause and the FALSE-condition clause TWICE, and the deterministic boolean_inference oracle re-fires over the retained probe_rounds — per-round signal = (TRUE differs from FALSE) AND (the two FALSE responses agree, a dynamic-page control). The LLM's claimed context is discarded; the FACT is decided by the target's fresh bytes over repeated rounds, so a page that merely changes every request cannot masquerade as a boolean channel.",
+      "fact_capable": true,
+      "clean_capable": false,
+      "preconditions": [
+        "channel_established"
+      ],
+      "limitation": "A boolean-blind SPRT channel scoped to operator-authorized hosts: a fired oracle proves a reproducible SQL boolean differential attributable to the injected clause (not to page noise, which the false_a==false_b control refuses). A non-firing here is INCONCLUSIVE, not CLEAN — it does not distinguish 'no channel' from 'wrong-language clauses' (a SQL clause against a SQL backend correctly refuses yet mints nothing) or an insertion surface not probed. Bounded to the probed query-parameter names and the single canonical clause pair; the runner breaks on the first FACT per class.",
+      "target_fact_capable": true,
+      "target_clean_capable": true,
+      "evidence_surface": "service_response",
+      "implementation_refs": [
+        "engine/crucible/framework/v2/scanner/checks.py:BooleanInferenceCheck",
+        "integration/vigil_integration/live/runtime_redrive.py:runtime_redrive"
+      ],
+      "blocking_work": "A sound boolean_sqli CLEAN needs (1) the SPRT to reach a CONCLUSIVE refute over exhaustive insertion-surface + encoding coverage (path segment, cookie, urlencoded/JSON body params) so absence over one query param is not mistaken for absence of the channel, AND (2) the same response-decode-completeness guarantee open_redirect.body_markup targets so a non-firing rests on bytes VIGIL fully read.",
+      "oracle_version": "boolean_inference",
+      "control_requirements": [
+        "warden_active_recon_gate",
+        "vigil_owned_gated_probe",
+        "vigil_owned_live_redrive",
+        "sprt_dynamic_page_control",
+        "deterministic_boolean_inference_oracle"
+      ]
+    },
+    {
+      "id": "nosqli.sprt_inference",
+      "check": "BooleanInferenceCheck",
+      "evidence": "VIGIL's OWN gated live re-drive runs a Wald SPRT (MongoDB JS-string true/false clauses) against the in-charter target: each round sends a TRUE-condition clause and the FALSE-condition clause TWICE, and the deterministic boolean_inference oracle re-fires over the retained probe_rounds — per-round signal = (TRUE differs from FALSE) AND (the two FALSE responses agree, a dynamic-page control). The LLM's claimed context is discarded; the FACT is decided by the target's fresh bytes over repeated rounds, so a page that merely changes every request cannot masquerade as a boolean channel.",
+      "fact_capable": true,
+      "clean_capable": false,
+      "preconditions": [
+        "channel_established"
+      ],
+      "limitation": "A boolean-blind SPRT channel scoped to operator-authorized hosts: a fired oracle proves a reproducible NoSQL/MongoDB boolean differential attributable to the injected clause (not to page noise, which the false_a==false_b control refuses). A non-firing here is INCONCLUSIVE, not CLEAN — it does not distinguish 'no channel' from 'wrong-language clauses' (a SQL clause against a NoSQL/MongoDB backend correctly refuses yet mints nothing) or an insertion surface not probed. Bounded to the probed query-parameter names and the single canonical clause pair; the runner breaks on the first FACT per class.",
+      "target_fact_capable": true,
+      "target_clean_capable": true,
+      "evidence_surface": "service_response",
+      "implementation_refs": [
+        "engine/crucible/framework/v2/scanner/checks.py:BooleanInferenceCheck",
+        "integration/vigil_integration/live/runtime_redrive.py:runtime_redrive"
+      ],
+      "blocking_work": "A sound nosqli CLEAN needs (1) the SPRT to reach a CONCLUSIVE refute over exhaustive insertion-surface + encoding coverage (path segment, cookie, urlencoded/JSON body params) so absence over one query param is not mistaken for absence of the channel, AND (2) the same response-decode-completeness guarantee open_redirect.body_markup targets so a non-firing rests on bytes VIGIL fully read.",
+      "oracle_version": "boolean_inference",
+      "control_requirements": [
+        "warden_active_recon_gate",
+        "vigil_owned_gated_probe",
+        "vigil_owned_live_redrive",
+        "sprt_dynamic_page_control",
+        "deterministic_boolean_inference_oracle"
+      ]
+    },
+    {
+      "id": "ldap_injection.sprt_inference",
+      "check": "BooleanInferenceCheck",
+      "evidence": "VIGIL's OWN gated live re-drive runs a Wald SPRT (LDAP filter-injection true/false clauses) against the in-charter target: each round sends a TRUE-condition clause and the FALSE-condition clause TWICE, and the deterministic boolean_inference oracle re-fires over the retained probe_rounds — per-round signal = (TRUE differs from FALSE) AND (the two FALSE responses agree, a dynamic-page control). The LLM's claimed context is discarded; the FACT is decided by the target's fresh bytes over repeated rounds, so a page that merely changes every request cannot masquerade as a boolean channel.",
+      "fact_capable": true,
+      "clean_capable": false,
+      "preconditions": [
+        "channel_established"
+      ],
+      "limitation": "A boolean-blind SPRT channel scoped to operator-authorized hosts: a fired oracle proves a reproducible LDAP boolean differential attributable to the injected clause (not to page noise, which the false_a==false_b control refuses). A non-firing here is INCONCLUSIVE, not CLEAN — it does not distinguish 'no channel' from 'wrong-language clauses' (a SQL clause against a LDAP backend correctly refuses yet mints nothing) or an insertion surface not probed. Bounded to the probed query-parameter names and the single canonical clause pair; the runner breaks on the first FACT per class.",
+      "target_fact_capable": true,
+      "target_clean_capable": true,
+      "evidence_surface": "service_response",
+      "implementation_refs": [
+        "engine/crucible/framework/v2/scanner/checks.py:BooleanInferenceCheck",
+        "integration/vigil_integration/live/runtime_redrive.py:runtime_redrive"
+      ],
+      "blocking_work": "A sound ldap_injection CLEAN needs (1) the SPRT to reach a CONCLUSIVE refute over exhaustive insertion-surface + encoding coverage (path segment, cookie, urlencoded/JSON body params) so absence over one query param is not mistaken for absence of the channel, AND (2) the same response-decode-completeness guarantee open_redirect.body_markup targets so a non-firing rests on bytes VIGIL fully read.",
+      "oracle_version": "boolean_inference",
+      "control_requirements": [
+        "warden_active_recon_gate",
+        "vigil_owned_gated_probe",
+        "vigil_owned_live_redrive",
+        "sprt_dynamic_page_control",
+        "deterministic_boolean_inference_oracle"
+      ]
+    },
+    {
+      "id": "xpath_injection.sprt_inference",
+      "check": "BooleanInferenceCheck",
+      "evidence": "VIGIL's OWN gated live re-drive runs a Wald SPRT (XPath boolean true/false clauses) against the in-charter target: each round sends a TRUE-condition clause and the FALSE-condition clause TWICE, and the deterministic boolean_inference oracle re-fires over the retained probe_rounds — per-round signal = (TRUE differs from FALSE) AND (the two FALSE responses agree, a dynamic-page control). The LLM's claimed context is discarded; the FACT is decided by the target's fresh bytes over repeated rounds, so a page that merely changes every request cannot masquerade as a boolean channel.",
+      "fact_capable": true,
+      "clean_capable": false,
+      "preconditions": [
+        "channel_established"
+      ],
+      "limitation": "A boolean-blind SPRT channel scoped to operator-authorized hosts: a fired oracle proves a reproducible XPath boolean differential attributable to the injected clause (not to page noise, which the false_a==false_b control refuses). A non-firing here is INCONCLUSIVE, not CLEAN — it does not distinguish 'no channel' from 'wrong-language clauses' (a SQL clause against a XPath backend correctly refuses yet mints nothing) or an insertion surface not probed. Bounded to the probed query-parameter names and the single canonical clause pair; the runner breaks on the first FACT per class.",
+      "target_fact_capable": true,
+      "target_clean_capable": true,
+      "evidence_surface": "service_response",
+      "implementation_refs": [
+        "engine/crucible/framework/v2/scanner/checks.py:BooleanInferenceCheck",
+        "integration/vigil_integration/live/runtime_redrive.py:runtime_redrive"
+      ],
+      "blocking_work": "A sound xpath_injection CLEAN needs (1) the SPRT to reach a CONCLUSIVE refute over exhaustive insertion-surface + encoding coverage (path segment, cookie, urlencoded/JSON body params) so absence over one query param is not mistaken for absence of the channel, AND (2) the same response-decode-completeness guarantee open_redirect.body_markup targets so a non-firing rests on bytes VIGIL fully read.",
+      "oracle_version": "boolean_inference",
+      "control_requirements": [
+        "warden_active_recon_gate",
+        "vigil_owned_gated_probe",
+        "vigil_owned_live_redrive",
+        "sprt_dynamic_page_control",
+        "deterministic_boolean_inference_oracle"
+      ]
+    },
+    {
+      "id": "time_based_sqli.timing_inference",
+      "check": "TimingCheck",
+      "evidence": "VIGIL's OWN gated live re-drive measures interleaved paired latencies (a benign value vs a DB sleep payload) against the in-charter target; the deterministic timing oracle re-fires over the retained baseline_latencies/treatment_latencies via a one-sided Mann-Whitney U test, a Hodges-Lehmann effect-size floor keyed to the injected delay, and (when supplied) a dose-response scaling — never a fixed threshold. The certificate re-verifies deterministically over the retained samples, so live wall-clock jitter is not non-determinism of the FACT.",
+      "fact_capable": true,
+      "clean_capable": false,
+      "preconditions": [
+        "channel_established"
+      ],
+      "limitation": "A statistical timing channel scoped to operator-authorized hosts: a fired oracle proves the delay-injected requests are stochastically slower by at least the effect-size floor. A non-firing is INCONCLUSIVE, not CLEAN — heavy load, a WAF that drops the sleep, or a non-MySQL backend whose sleep syntax differs all suppress the signal without proving the target is not injectable. Bounded to the probed query-parameter names and the single MySQL-style SLEEP payload; the runner breaks on the first FACT per class.",
+      "target_fact_capable": true,
+      "target_clean_capable": true,
+      "evidence_surface": "service_response",
+      "implementation_refs": [
+        "engine/crucible/framework/v2/scanner/checks.py:TimingCheck",
+        "integration/vigil_integration/live/runtime_redrive.py:runtime_redrive"
+      ],
+      "blocking_work": "A sound time_based_sqli CLEAN needs (1) per-engine sleep payloads (MySQL SLEEP, PG pg_sleep, MSSQL WAITFOR, SQLite) so absence over one dialect is not read as absence of a timing channel, AND (2) a load-robust negative-control regime (the timing oracle's conclusive no-shift result) over exhaustive insertion surfaces before a non-firing may assert absence.",
+      "oracle_version": "timing",
+      "control_requirements": [
+        "warden_active_recon_gate",
+        "vigil_owned_gated_probe",
+        "vigil_owned_live_redrive",
+        "interleaved_paired_latencies",
+        "deterministic_timing_oracle"
+      ]
+    },
+    {
+      "id": "ssti.expression_evaluation",
+      "check": "EvaluationCheck",
+      "evidence": "VIGIL's OWN gated live re-drive injects a per-probe RANDOMISED arithmetic expression ({{a*b}} for a large product derived deterministically from the URL+param) plus a benign control against the in-charter target; the deterministic evaluation oracle re-fires over the retained eval_raw/eval_expected/eval_observed/eval_control and confirms SSTI/EL only when the server COMPUTED the expression — the product present, the raw template text absent, and the product absent from the benign control — never on mere reflection.",
+      "fact_capable": true,
+      "clean_capable": false,
+      "preconditions": [
+        "channel_established",
+        "body_semantically_available"
+      ],
+      "limitation": "Body-derived, POSITIVE-only: a fired oracle proves server-side evaluation of a Jinja2/Twig {{a*b}} form. A reflected-but-unevaluated payload, an HTML-encoded payload, a non-brace engine (${...} EL / <%= %> ERB), or a body VIGIL could not decode all correctly do NOT fire, and a non-firing is INCONCLUSIVE, not CLEAN. Bounded to the probed query-parameter names and the single brace-form expression; the runner breaks on the first FACT per class.",
+      "target_fact_capable": true,
+      "target_clean_capable": true,
+      "evidence_surface": "response_body",
+      "implementation_refs": [
+        "engine/crucible/framework/v2/scanner/checks.py:EvaluationCheck",
+        "integration/vigil_integration/live/runtime_redrive.py:runtime_redrive"
+      ],
+      "blocking_work": "A sound ssti CLEAN needs (1) the response-body decode-completeness guarantee shared with open_redirect.body_markup so a non-firing rests on bytes VIGIL fully read, AND (2) per-engine probe expressions ({{}}/${}/<%= %>/#{}) across exhaustive insertion surfaces so absence over one brace form is not mistaken for absence of any template-evaluation channel.",
+      "oracle_version": "evaluation",
+      "control_requirements": [
+        "warden_active_recon_gate",
+        "vigil_owned_gated_probe",
+        "vigil_owned_live_redrive",
+        "response_body_decode",
+        "computed_evaluation_control"
+      ]
     }
   ]
 }
