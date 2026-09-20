@@ -82,9 +82,11 @@ _AUTHORITY = {"engagement_slug": SLUG, "scope": ["127.0.0.1"], "max_actions": 10
 
 
 def _seed_trust_state(croot):
-    """``framework/v2/.entitlement`` (trust root + signed entitlement + revocation list) and
-    ``framework/v2/.authority`` (the per-slug signed authority + a ``{slug}.halt`` kill-switch) at their
-    DEFAULT in-tree locations — the trust state whose loss on restore is a fail-OPEN posture regression."""
+    """``framework/v2/.entitlement`` (trust root + signed entitlement + revocation list),
+    ``framework/v2/.authority`` (the per-slug signed authority + a ``{slug}.halt`` kill-switch), and
+    ``framework/v2/.authority-root`` (Phase 0.1: the governance authority TrustRoot that VERIFIES the signed
+    authorities) at their DEFAULT in-tree locations — the trust state whose loss on restore is a
+    fail-OPEN/fail-CLOSED posture regression."""
     ent = croot / "framework" / "v2" / ".entitlement"
     ent.mkdir(parents=True)
     (ent / "trust-root.json").write_text(json.dumps(_TRUST_ROOT))
@@ -94,7 +96,10 @@ def _seed_trust_state(croot):
     auth.mkdir(parents=True)
     (auth / f"{SLUG}.authority.json").write_text(json.dumps(_AUTHORITY))
     (auth / f"{SLUG}.halt").write_text("halted by operator\n")
-    return ent, auth
+    auth_root = croot / "framework" / "v2" / ".authority-root"
+    auth_root.mkdir(parents=True)
+    (auth_root / "trust-root.json").write_text(json.dumps(_TRUST_ROOT))
+    return ent, auth, auth_root
 
 
 def _decrypt_body(dest):
@@ -228,7 +233,13 @@ def test_create_refuses_a_leaked_evidence_key(tmp_path):
 # W7-2 (#460): the entitlement TRUST ROOT + the DestructionAuthority are backed up + functionally restored,
 # and a restore MISSING them is detected (the BLOCK: dropping them is a fail-OPEN posture regression).
 # ---------------------------------------------------------------------------------------------------
-def test_trust_state_backed_up_and_functionally_restored(tmp_path):
+def test_trust_state_backed_up_and_functionally_restored(tmp_path, monkeypatch):
+    # This asserts the DEFAULT in-tree capture of the trust-state units, so opt out of the autouse per-test
+    # dir-isolation fixtures (_isolate_entitlement_dir / _isolate_authority_root_dir) — with those env vars set,
+    # _iter_crucible_files treats the roots as "held off-tree" and excludes them (the documented override path,
+    # covered by test_entitlement_override_is_excluded_but_authority_still_captured).
+    monkeypatch.delenv("CRUCIBLE_ENTITLEMENT_DIR", raising=False)
+    monkeypatch.delenv("VIGIL_AUTHORITY_ROOT_DIR", raising=False)
     base = tmp_path / "base"
     _seed_offense_home(base)
     croot = tmp_path / "crucible"
@@ -246,6 +257,8 @@ def test_trust_state_backed_up_and_functionally_restored(tmp_path):
     assert f"{_CRUCIBLE_PREFIX}framework/v2/.entitlement/revocation.json" in rels, rels
     assert f"{_CRUCIBLE_PREFIX}framework/v2/.authority/{SLUG}.authority.json" in rels, rels
     assert f"{_CRUCIBLE_PREFIX}framework/v2/.authority/{SLUG}.halt" in rels, rels
+    # Phase 0.1: the governance authority trust root that VERIFIES the signed authorities is captured too.
+    assert f"{_CRUCIBLE_PREFIX}framework/v2/.authority-root/trust-root.json" in rels, rels
 
     # restore into FRESH dirs and prove the trust root + authority come back and PARSE (functional, not present).
     new_base = tmp_path / "rbase"
@@ -257,13 +270,18 @@ def test_trust_state_backed_up_and_functionally_restored(tmp_path):
     auth = json.loads((new_croot / "framework" / "v2" / ".authority" / f"{SLUG}.authority.json").read_text())
     assert auth["engagement_slug"] == SLUG                               # FUNCTIONAL: the authority loads
     assert (new_croot / "framework" / "v2" / ".authority" / f"{SLUG}.halt").exists()   # kill-switch survives
+    ar = json.loads((new_croot / "framework" / "v2" / ".authority-root" / "trust-root.json").read_text())
+    assert ar["threshold"] == 2 and len(ar["authorizers"]) == 2   # FUNCTIONAL: the authority-root loads (Phase 0.1)
 
 
-def test_dropping_trust_state_breaks_recovery(tmp_path):
+def test_dropping_trust_state_breaks_recovery(tmp_path, monkeypatch):
     """The RED-PEN's exact attack: a backup whose ``.entitlement``/``.authority`` files are dropped (still
     validly signed) restores the spine fine, but the trust root + destruction authority are GONE — a restore
     missing them is DETECTED (the recovered install would come up fail-OPEN, which this test refuses to accept).
     Reverting the #460 capture makes this test fail (the files were never in the backup to begin with)."""
+    # Assert DEFAULT in-tree capture: opt out of the autouse per-test dir-isolation (see the sibling test).
+    monkeypatch.delenv("CRUCIBLE_ENTITLEMENT_DIR", raising=False)
+    monkeypatch.delenv("VIGIL_AUTHORITY_ROOT_DIR", raising=False)
     base = tmp_path / "base"
     _seed_offense_home(base)
     croot = tmp_path / "crucible"
@@ -278,7 +296,8 @@ def test_dropping_trust_state_breaks_recovery(tmp_path):
     # this is the assertion that goes red if #460's capture is reverted).
     trust_rels = [r for r in body["files"]
                   if r.startswith(f"{_CRUCIBLE_PREFIX}framework/v2/.entitlement/")
-                  or r.startswith(f"{_CRUCIBLE_PREFIX}framework/v2/.authority/")]
+                  or r.startswith(f"{_CRUCIBLE_PREFIX}framework/v2/.authority/")
+                  or r.startswith(f"{_CRUCIBLE_PREFIX}framework/v2/.authority-root/")]
     assert trust_rels, "the backup must carry the entitlement/authority trust state before we can drop it"
 
     # drop every entitlement/authority file, then RE-SIGN the manifest with the governance key carried in the
