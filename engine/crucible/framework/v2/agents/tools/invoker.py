@@ -72,6 +72,49 @@ def _as_hosts(value: object) -> tuple:
         return ("<malformed-egress-hosts>",)
 
 
+def _authority_scope_gate(slug: str, target: str, destructive: bool) -> "tuple[str, str] | None":
+    """ENFORCE-IF-PRESENT: when an OWNER-SIGNED engagement authority exists and verifies for this slug (a
+    governed / remote engagement), additionally enforce its scope / validity window / destructive controls
+    on the concrete tool target — so the signed authority binds EVERY host-acting op, not just HTTP.
+
+    This is a defense-in-depth ADD on top of the charter-scope check (gate 3): it can only ADD a refusal for
+    a host the signed authority does not cover; it never RELAXES the charter check. It is purely additive and
+    does NOT itself fail-closed on an ABSENT authority — a charter-only (loopback / dev) engagement legitimately
+    has no signed authority, and the tool gate lacks the executor's explicit ``auto_load_authority`` signal to
+    tell "expected but absent" (an attack) from "charter-only" (legitimate). The fail-closed-on-expected-but-
+    absent duty stays with the launch gate (``_has_verified_authority``, which already refused the launch if a
+    required authority was missing) and ``HttpExecutor._authority_gate``. So an ambient / foreign trust root on
+    disk can never spuriously refuse a charter-only tool op. Returns ``(gate, reason)`` only when an authority
+    that DID verify denies the target; else None. Same-plane (framework.v2) function-local imports."""
+    if str(slug).startswith("<"):
+        return None
+    try:
+        # DECOUPLED STORE (Phase 0.1): the governance AUTHORITY trust root is read from the DEDICATED authority-root
+        # store (load_authority_root → .authority-root/), NOT the entitlement store — the same store the launch gate
+        # (_has_verified_authority) and wiring.provision_authority use. Reading the entitlement trust root here would
+        # miss a provisioned authority (whose root is decoupled), so this scope gate would never enforce.
+        from ...authority.store import load_authority_root, load_verified_authority
+        trust_root = load_authority_root()
+        if trust_root is None:
+            return None
+        authority = load_verified_authority(slug, trust_root)   # raises unless a threshold sig verifies
+    except Exception:  # noqa: BLE001 — no VERIFIED authority for this slug (absent / bad / no trust root /
+        return None    # machinery missing) ⇒ charter-only; the launch gate + HTTP executor are the backstops.
+
+    try:
+        from ...authority.gate import authorize_action
+        from ...authority.models import ActionRequest
+        decision = authorize_action(
+            authority, ActionRequest(target=target, action_kind="generic", destructive=bool(destructive)),
+        )
+    except Exception as e:  # noqa: BLE001 — an authority DID verify but the check itself errored ⇒ fail-closed
+        return ("authority", f"signed-authority check failed (fail-closed): {e}")
+    if not getattr(decision, "allowed", False):
+        return ("authority", getattr(decision, "denial_code", "") or getattr(decision, "reason", "")
+                or "target out of signed-authority scope")
+    return None
+
+
 def _gate(tool: Tool, ctx: ToolContext, *, tier: str, capability: Any,
           destructive: bool, egress_hosts: tuple, target: str) -> tuple[str, str] | None:
     """Run the fail-closed gate chain. Returns ``(gate, reason)`` on the FIRST refusal, or None if
@@ -109,6 +152,15 @@ def _gate(tool: Tool, ctx: ToolContext, *, tier: str, capability: Any,
                 return ("scope", getattr(decision, "refusal_kind", "") or "target out of charter scope")
         except Exception as e:
             return ("scope", f"scope check failed (fail-closed): {e}")
+
+    # 3b. SIGNED-AUTHORITY scope — bind the OWNER-SIGNED engagement authority's scope/window/destructive to
+    #     this concrete target too, mirroring HttpExecutor._authority_gate, so the signed authority is the
+    #     scope authority for EVERY host-acting op, not just HTTP. Fires ONLY when a deployment trust root is
+    #     pinned (a governed/remote engagement); the unsigned/loopback/dev mode (no trust root) is unchanged.
+    if target:
+        refusal = _authority_scope_gate(ctx.slug, target, destructive)
+        if refusal is not None:
+            return refusal
 
     # 4. destructive-confirm — a destructive tool needs explicit operator approval (default-deny).
     if destructive:

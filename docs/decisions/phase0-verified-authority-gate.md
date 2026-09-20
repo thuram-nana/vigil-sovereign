@@ -30,10 +30,10 @@ Concretely:
 ## Honest scope
 
 This raises the bar from "write a plaintext name" to "produce a valid governance threshold signature." It
-assumes the deployment trust root (`.entitlement/trust-root.json`) is not writable by the same low-privilege
-actor who can author charters; an actor with arbitrary owner-uid filesystem write is outside the meaningful
-threat model (they could equally edit code, the kill-switch, or the keys). Relocating `.entitlement` to a
-read-only / HSM-backed mount via `CRUCIBLE_ENTITLEMENT_DIR` closes even that residual.
+assumes the deployment's launch-gate authority root (`.authority-root/trust-root.json`) is not writable by the
+same low-privilege actor who can author charters; an actor with arbitrary owner-uid filesystem write is outside
+the meaningful threat model (they could equally edit code, the kill-switch, or the keys). Relocating
+`.authority-root` to a read-only / HSM-backed mount via `VIGIL_AUTHORITY_ROOT_DIR` closes even that residual.
 
 The loopback path is unchanged (it is exempt by design and auto-charters `127.0.0.1`); the engage layer's own
 runtime authority + scope enforcement (`authority/gate.py`) is unchanged and remains the defense-in-depth

@@ -89,7 +89,7 @@ def test_remote_url_needs_charter_then_routes_to_engage(stub_launch, monkeypatch
     assert "error" in r and "charter" in r["error"].lower()
 
     # with a charter present → the gated engage, mirrored onto the spine via --spine
-    monkeypatch.setattr(actions, "_has_verified_authority", lambda slug: True)
+    monkeypatch.setattr(actions, "_has_verified_authority", lambda slug, host="": True)
     r = actions.launch_assessment({"mode": "url", "target": "https://app.example.com/", "slug": "acme"})
     assert r["stream"] == "blackboard" and r["slug"] == "acme"
     cmd, meta = stub_launch(r["run_id"])
@@ -168,7 +168,7 @@ def test_capability_packs_a_branch_cannot_carry_are_reported_not_dropped(stub_la
 
     # The SAME picks against a non-loopback host really do become flags — proving the note describes a
     # real branch difference rather than being a blanket disclaimer bolted onto every launch.
-    monkeypatch.setattr(actions, "_has_verified_authority", lambda slug: True)
+    monkeypatch.setattr(actions, "_has_verified_authority", lambda slug, host="": True)
     r2 = actions.launch_assessment({"mode": "url", "target": "http://example.com/",
                                     "slug": "loopback", "tools": picks})
     cmd2, _ = stub_launch(r2["run_id"])
@@ -269,7 +269,7 @@ def test_agentic_run_hands_the_child_the_run_dir_for_live_steps(monkeypatch):
 
 def test_agentic_ignored_for_remote_target(stub_launch, graph_env, monkeypatch):
     # remote stays on the offense engage (its signed-charter gate), NEVER the self-scoped vigil engage.
-    monkeypatch.setattr(actions, "_has_verified_authority", lambda slug: True)
+    monkeypatch.setattr(actions, "_has_verified_authority", lambda slug, host="": True)
     r = actions.launch_assessment({"mode": "url", "target": "https://app.example.com/", "slug": "acme",
                                    "session_id": "sess-A", "agentic": True})
     cmd, meta = stub_launch(r["run_id"])
@@ -379,7 +379,7 @@ def test_refuses_cidr_scope_and_unknown_mode_and_empty_target(stub_launch):
 def test_approve_then_run_preserved_no_offense_preauth_no_scope_relax(stub_launch, monkeypatch):
     """The console spawns only the gated CLI; it can neither pre-authorize offense
     (--approve-offense) nor pass a scope (which would relax the charter-signed scope)."""
-    monkeypatch.setattr(actions, "_has_verified_authority", lambda slug: True)
+    monkeypatch.setattr(actions, "_has_verified_authority", lambda slug, host="": True)
     r = actions.launch_assessment({"mode": "suite", "target": "https://app.example.com/", "slug": "acme",
                                    "scope": ["app.example.com", "*.example.com"]})
     cmd, meta = stub_launch(r["run_id"])

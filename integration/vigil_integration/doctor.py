@@ -294,6 +294,19 @@ def _entitlement_dir(repo: Path) -> "Path | None":
     return (root / "framework" / "v2" / ".entitlement") if root is not None else None
 
 
+def _authority_root_dir(repo: Path) -> "Path | None":
+    """Where the remote-engage LAUNCH-GATE authority trust root lives — VIGIL_AUTHORITY_ROOT_DIR override,
+    else `<crucible_root>/framework/v2/.authority-root`. Stdlib mirror of framework...paths.authority_root_dir;
+    no import. DELIBERATELY DISTINCT from the entitlement dir: the launch gate (authority.store.
+    load_authority_root) reads THIS root, while entitlement CAPABILITY enforcement keys on `.entitlement/`.
+    None when the crucible root can't be located and no override is set."""
+    override = os.environ.get("VIGIL_AUTHORITY_ROOT_DIR", "").strip()
+    if override:
+        return Path(override).expanduser()
+    root = _crucible_root(repo)
+    return (root / "framework" / "v2" / ".authority-root") if root is not None else None
+
+
 def _posture_sovereignty() -> "tuple[str, str]":
     """The sovereignty TIER — PERMISSIVE (dev default) admits cloud LLM egress; a raised rung gates it."""
     tier = _resolve_tier()
@@ -342,6 +355,75 @@ def _posture_entitlement(repo: Path) -> "tuple[str, str]":
         return "ACTIVE", f"trust root provisioned ({_display_path(tr)}) — gated capabilities fail closed"
     return "UNGOVERNED", (f"no trust root at {_display_path(tr)} — gated capabilities are permitted (logged at "
                           f"WARNING) but NOT enforced")
+
+
+def _posture_entitlement_anchor(repo: Path) -> "tuple[str, str]":
+    """WHERE the ENTITLEMENT trust root is anchored — the CAPABILITY-ENFORCEMENT root, NOT the launch gate.
+    `.entitlement/trust-root.json` holds the authoriser keys + threshold that `entitlement.policy.
+    _enforcement_active()` keys gated-capability enforcement on (deep_static_analysis / active_recon /
+    exploit_execution); if it sits at the DEFAULT in-tree location (offense-writable), a full owner-uid
+    filesystem-write actor could swap it. A hardened deployment anchors it OUT-OF-BAND via
+    CRUCIBLE_ENTITLEMENT_DIR on a read-only / HSM-backed mount. (The remote-engage LAUNCH gate verifies its
+    authority against a SEPARATE root — see the `authority-root-anchor` posture / VIGIL_AUTHORITY_ROOT_DIR.)
+    Advisory only (never a gate failure) — it reports the anchor posture so an operator SEES it. Read from
+    disk only; the framework is never imported (FATAL-2)."""
+    override = (os.environ.get("CRUCIBLE_ENTITLEMENT_DIR") or "").strip()
+    d = _entitlement_dir(repo)
+    if d is None:
+        return "UNKNOWN", "could not locate the entitlement dir (no CRUCIBLE_ROOT / CLAUDE.md found)"
+    tr = d / "trust-root.json"
+    try:
+        present = tr.is_file()
+    except OSError:
+        present = False
+    # The "hardened but never provisioned" caveat (red-pen): the refuse-to-replace guard only bites once a
+    # real trust root exists, so a hardened deployment must CLI-provision it before relying on the anchor.
+    caveat = "" if present else (" NOTE: no trust root is provisioned yet — CLI-provision it before relying "
+                                 "on the anchor (the refuse-to-replace guard only bites once one exists).")
+    if override:
+        return "OUT-OF-BAND", (f"CRUCIBLE_ENTITLEMENT_DIR is set ({_display_path(tr)}) — the entitlement "
+                               f"capability-enforcement root is anchored away from the default in-tree "
+                               f"location; use a read-only / HSM-backed mount so an in-tree filesystem-write "
+                               f"actor cannot swap it.{caveat}")
+    return "DEFAULT-IN-TREE", (f"the entitlement trust root uses the default in-tree location "
+                               f"({_display_path(tr)}), which is offense-writable. For a governed / "
+                               f"national-agency deployment, anchor it out-of-band via CRUCIBLE_ENTITLEMENT_DIR "
+                               f"on a read-only/HSM mount — see docs/runbooks/anchor-trust-root-out-of-band.md."
+                               f"{caveat}")
+
+
+def _posture_authority_root_anchor(repo: Path) -> "tuple[str, str]":
+    """WHERE the remote-engage LAUNCH-GATE authority root is anchored — the trust root the launch gate
+    verifies an owner-signed EngagementAuthority against (`authority.store.load_authority_root` →
+    `.authority-root/trust-root.json`), NOT the entitlement capability-enforcement root. If it sits at the
+    DEFAULT in-tree location (offense-writable), a full owner-uid filesystem-write actor could swap both it
+    and a self-signed authority. A hardened deployment anchors it OUT-OF-BAND via VIGIL_AUTHORITY_ROOT_DIR on
+    a read-only / HSM-backed mount. Advisory only (never a gate failure) — it reports the anchor posture so an
+    operator SEES it. Read from disk only; the framework is never imported (FATAL-2)."""
+    override = (os.environ.get("VIGIL_AUTHORITY_ROOT_DIR") or "").strip()
+    d = _authority_root_dir(repo)
+    if d is None:
+        return "UNKNOWN", "could not locate the authority-root dir (no CRUCIBLE_ROOT / CLAUDE.md found)"
+    tr = d / "trust-root.json"
+    try:
+        present = tr.is_file()
+    except OSError:
+        present = False
+    # The "hardened but never provisioned" caveat (mirrors entitlement-anchor): the install-time
+    # refuse-to-replace guard only bites once a real authority root exists, so provision it before relying
+    # on the anchor / making the mount read-only.
+    caveat = "" if present else (" NOTE: no authority root is provisioned yet — CLI-provision it before "
+                                 "relying on the anchor (the refuse-to-replace guard only bites once one exists).")
+    if override:
+        return "OUT-OF-BAND", (f"VIGIL_AUTHORITY_ROOT_DIR is set ({_display_path(tr)}) — the launch-gate "
+                               f"authority root is anchored away from the default in-tree location; use a "
+                               f"read-only / HSM-backed mount so an in-tree filesystem-write actor cannot swap "
+                               f"it.{caveat}")
+    return "DEFAULT-IN-TREE", (f"the launch-gate authority root uses the default in-tree location "
+                               f"({_display_path(tr)}), which is offense-writable. For a governed / "
+                               f"national-agency deployment, anchor it out-of-band via VIGIL_AUTHORITY_ROOT_DIR "
+                               f"on a read-only/HSM mount — see docs/runbooks/anchor-trust-root-out-of-band.md."
+                               f"{caveat}")
 
 
 def _posture_vault() -> "tuple[str, str]":
@@ -697,6 +779,8 @@ def _collect_posture(repo: Path, services: dict) -> list:
         _entry("key-sealing", _posture_key_sealing),
         _entry("sovereignty", _posture_sovereignty),
         _entry("entitlement", lambda: _posture_entitlement(repo)),
+        _entry("entitlement-anchor", lambda: _posture_entitlement_anchor(repo)),
+        _entry("authority-root-anchor", lambda: _posture_authority_root_anchor(repo)),
         _entry("backups", lambda: _posture_backups(repo)),
         _entry("charter", lambda: _posture_charter(repo)),
         _entry("egress-supervisor", _posture_egress_supervisor),

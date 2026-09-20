@@ -1,5 +1,12 @@
 """
 authority.models — schemas for engagement authority and action checks.
+
+``EngagementAuthority``, ``SignedAuthority`` and ``TargetEnvironment`` now live in the shared integrity
+core (``vigil_core.authority``) so the SOVEREIGN plane — which never installs ``framework`` (the two-env
+boundary, FATAL-2) — can OWNER-SIGN an authority using ``vigil_core`` alone, and this engine verifies the
+byte-identical form. They are re-exported here unchanged, so every framework caller keeps resolving
+against the SINGLE definition. ``ActionRequest`` / ``AuthorityState`` / ``AuthorizationDecision`` are
+runtime-check types the sovereign side never needs, so they stay local.
 """
 
 from __future__ import annotations
@@ -7,20 +14,10 @@ from __future__ import annotations
 import enum
 from datetime import datetime
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field
 
-from ..entitlement.models import Signature
-
-
-class TargetEnvironment(str, enum.Enum):
-    """Where the engagement's target lives. TWIN is a replica/digital
-    twin (safe to be destructive); STAGING is a non-production deploy;
-    LIVE is real production (destructive actions require a deliberate
-    second acknowledgement)."""
-
-    TWIN = "twin"
-    STAGING = "staging"
-    LIVE = "live"
+# Re-export the shared, owner-signable authority schema (single source of truth: vigil_core.authority).
+from vigil_core.authority import EngagementAuthority, SignedAuthority, TargetEnvironment
 
 
 class AuthorityState(str, enum.Enum):
@@ -44,49 +41,6 @@ class ActionRequest(BaseModel):
     description: str = Field(default="")
 
 
-class EngagementAuthority(BaseModel):
-    """The per-engagement authorization an action is checked against."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    engagement_slug: str = Field(min_length=1)
-    environment: TargetEnvironment
-    scope: list[str] = Field(min_length=1, description="In-scope host patterns.")
-    not_before: datetime
-    not_after: datetime
-    allow_destructive: bool = Field(
-        default=False, description="Destructive actions permitted at all."
-    )
-    live_destructive_acknowledged: bool = Field(
-        default=False,
-        description="Second, explicit acknowledgement required for "
-        "destructive actions against a LIVE environment. allow_destructive "
-        "alone is not enough on LIVE.",
-    )
-    max_actions: int = Field(default=10_000, ge=1, description="Action budget.")
-    issued_by: str = Field(default="", description="Operator who issued this authority.")
-    note: str = Field(default="")
-
-    @model_validator(mode="after")
-    def _check_window(self) -> "EngagementAuthority":
-        if self.not_after <= self.not_before:
-            raise ValueError("not_after must be strictly after not_before")
-        return self
-
-
-class SignedAuthority(BaseModel):
-    """An engagement authority plus governance signatures over its
-    canonical form. Verified against the same TrustRoot the entitlement
-    layer uses. Optional: a deployment may run unsigned authorities at
-    lower assurance, but a high-assurance deployment requires the
-    signature so a tampered scope is detected."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    document: EngagementAuthority
-    signatures: list[Signature] = Field(min_length=1)
-
-
 class AuthorizationDecision(BaseModel):
     """The verdict for one action against the authority + kill-switch."""
 
@@ -102,3 +56,9 @@ class AuthorizationDecision(BaseModel):
         "live_destructive | budget — empty when allowed.",
     )
     checked_at: datetime
+
+
+__all__ = [
+    "TargetEnvironment", "EngagementAuthority", "SignedAuthority",
+    "AuthorityState", "ActionRequest", "AuthorizationDecision",
+]

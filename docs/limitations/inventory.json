@@ -324,6 +324,19 @@
       "source_doc": "apps/sigil/sigil/gesture/session.py",
       "disposition": "file-into-w16",
       "w16_issue": null
+    },
+    {
+      "id": "LIMIT-target-authz-owner-anchor-writable",
+      "title": "The target-authorization owner anchor + trust root live under the offense-writable root",
+      "summary": "Phase 1.c ties a UI-authorized target to the PINNED owner key AT INSTALL, and the launch gate verifies the authority against the on-disk trust root. Both the owner-pubkey anchor (the .vigil-live seam) and the persisted .authority-root trust root live, by default, under paths a full owner-uid filesystem-write actor could rewrite — such an actor could plant their own trust root + self-signed authority, and is outside the meaningful threat model (they could equally edit code, the kill-switch, or the keys). The install-time owner-pin raises the bar from 'write a plaintext charter' to 'produce an owner-signed authority whose trust root is the pinned owner key over the target host'. Closing even the full-FS-write case is a DEPLOYMENT choice (not unfinished code): anchor the launch-gate authority root out-of-band on a read-only / HSM-backed .authority-root mount via VIGIL_AUTHORITY_ROOT_DIR. This is now VISIBLE — `vigil doctor`'s authority-root-anchor posture line reports DEFAULT-IN-TREE vs OUT-OF-BAND — and DOCUMENTED in docs/runbooks/anchor-trust-root-out-of-band.md (incl. the caveat that the trust root must be CLI-provisioned before the mount is made read-only). The hard root pin (CRUCIBLE_ROOT_STRICT, claim PHASE1-5) additionally prevents a sentinel-less root from silently resolving elsewhere.",
+      "classification": "doc-only",
+      "severity": "low",
+      "anchor": {"file": "engine/crucible/framework/v2/console/actions.py", "symbol": "_install_target_authorization"},
+      "marker": false,
+      "check": "symbol-exists",
+      "source_doc": "docs/runbooks/anchor-trust-root-out-of-band.md",
+      "disposition": "file-into-w16",
+      "w16_issue": null
     }
   ],
   "honest_limit_sites_note": "The code-scan census. docs/tests/test_limitation_inventory.py scans every non-test product .py for the honest-limit/deferred debt phrases in _DEBT_PHRASES and requires EVERY hit to be either a VIGIL-LIMIT marker line OR a site listed here whose snippet (matched case-insensitively) is a substring of the hit line. kind 'debt' names the limitations id the site belongs to (which must exist); kind 'non-debt' explains why the phrase is not a capability limit (a deliberate design choice, a runtime-state description, or a phrase describing a CHECK's target rather than VIGIL itself). Bidirectional: every snippet here must still match a debt-phrase line in its file, so deleting the prose (or moving the debt) turns CI red.",
