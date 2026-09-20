@@ -278,6 +278,11 @@ def adapt_scan_export(
         location = str(f.get("location") or "").strip()
         endpoint, insertion = split_location(location)
         confirmed_by = str(f.get("confirmed_by") or "").strip()
+        grounding = str(f.get("grounding") or "").strip()
+        # A DAA STATIC fact re-verifies by RE-RUNNING its rule (`codescan --verify`), not by replaying an
+        # oracle_context from reverifiable.json — which a static scan never writes. Honor the export's own
+        # grounding=="fact" so such a finding is not demoted to a lead for want of a proof-join it never has.
+        static_fact = (grounding == "fact" and confirmed_by.startswith("daa:"))  # DAA facts are kind "finding", not "active"
         evidence = str(f.get("evidence") or "").strip()
         severity, odd = _normalise_severity(f.get("severity"))
         if odd:
@@ -307,10 +312,11 @@ def adapt_scan_export(
                 confidence = pc
 
         joined = oracle_context is not None
+        verified = joined or static_fact
         if kind == "active" and bool(f.get("re_verifiable")):
             if joined:
                 res.proofs_joined += 1
-            else:
+            elif not static_fact:
                 res.proofs_unjoined += 1
 
         # `summary` gets the observation the scan recorded. Where the translation had to give
@@ -323,7 +329,7 @@ def adapt_scan_export(
                 f"Severity as recorded by the scan was \"{odd}\", which is not one of the five "
                 f"standard ratings; it is shown here as Info so that it is not over-stated."
             )
-        if kind == "active" and bool(f.get("re_verifiable")) and not joined:
+        if kind == "active" and bool(f.get("re_verifiable")) and not joined and not static_fact:
             summary_parts.append(
                 "The scan recorded this as confirmed by an automated check, but the saved "
                 "evidence needed to re-prove it was not available when this document was "
@@ -344,11 +350,14 @@ def adapt_scan_export(
             "cvss_base": None,
             "derived_from_hypothesis": None,
             "oracle_context": oracle_context,
-            # True ONLY when a real retained proof was attached, so a finding whose proof is
-            # simply absent reads as unproven rather than as a proof that failed.
-            "verified_by_oracle": joined,
-            "confidence": confidence if joined else None,
-            "oracle_kind": _oracle_kind(confirmed_by) if joined else None,
+            # Carry the scan's OWN grounding so a DAA static fact is graded a fact by the grounding-first
+            # UI/report classifier even without a joined oracle_context.
+            "grounding": grounding,
+            # True when a retained proof was joined, OR the scan recorded a re-runnable static fact
+            # (grounding=="fact") — never for a finding whose proof is simply absent.
+            "verified_by_oracle": verified,
+            "confidence": confidence if verified else None,
+            "oracle_kind": _oracle_kind(confirmed_by) if verified else None,
             "oracle_rationale": "",
         }
         res.findings.append(payload)

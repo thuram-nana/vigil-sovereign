@@ -168,8 +168,31 @@ def _cmd_gateway(args: argparse.Namespace) -> int:
     default ``observe`` is read-only. FAIL-OPEN: any error forwards, never taking the app down."""
     from .gateway import serve_gateway
 
-    config = AegisConfig(deployment_secret=args.secret or _DEMO_SECRET, mode=args.mode,
-                         honeypot_paths=list(args.honeypot or ()),
+    # The sovereign console launches the gateway with its operator config in the ENV (AEGIS_GW_*), never on
+    # the argv, so the deployment secret cannot leak via /proc/<pid>/cmdline. A hand-run gateway still uses
+    # the flags: the env value takes precedence, the flag is the explicit fallback.
+    upstream = os.environ.get("AEGIS_GW_UPSTREAM") or args.upstream
+    if not upstream:
+        sys.stderr.write("aegis gateway: --upstream (or AEGIS_GW_UPSTREAM) is required\n")
+        return 2
+    host = os.environ.get("AEGIS_GW_HOST") or args.host
+    try:
+        port = int(os.environ.get("AEGIS_GW_PORT") or args.port)
+    except (TypeError, ValueError):
+        sys.stderr.write("aegis gateway: AEGIS_GW_PORT must be an integer\n")
+        return 2
+    mode = os.environ.get("AEGIS_GW_MODE") or args.mode
+    slug = os.environ.get("AEGIS_GW_SLUG") or args.slug
+    secret = os.environ.get("AEGIS_GW_SECRET") or args.secret or _DEMO_SECRET
+    honeypots = list(args.honeypot or ())
+    _hp_env = os.environ.get("AEGIS_GW_HONEYPOTS")
+    if _hp_env:
+        honeypots = [h for h in _hp_env.split("\n") if h]
+    verdict_webhook = os.environ.get("AEGIS_GW_VERDICT_WEBHOOK") or args.verdict_webhook
+    verdict_sink = os.environ.get("AEGIS_GW_VERDICT_SINK") or args.verdict_sink
+
+    config = AegisConfig(deployment_secret=secret, mode=mode,
+                         honeypot_paths=honeypots,
                          oob_canary=args.oob_canary)
 
     def _log_verdict(v: object) -> None:
@@ -183,19 +206,19 @@ def _cmd_gateway(args: argparse.Namespace) -> int:
     # `--verdict-webhook` ADDITIONALLY POSTs each verdict to an operator-configured outbound sink (SIEM /
     # webhook / Slack) — fanned out alongside the file/log sink, each isolated + fail-open.
     _local_sink = _make_file_verdict_sink(args.verdicts_out) if args.verdicts_out else _log_verdict
-    _webhook_sink = (_make_webhook_verdict_sink(args.verdict_webhook, args.verdict_sink)
-                     if args.verdict_webhook else None)
+    _webhook_sink = (_make_webhook_verdict_sink(verdict_webhook, verdict_sink)
+                     if verdict_webhook else None)
     on_verdict = _compose_verdict_sinks(_local_sink, _webhook_sink)
-    httpd = serve_gateway(args.upstream, config=config, host=args.host, port=args.port,
-                          slug=args.slug, on_verdict=on_verdict)
+    httpd = serve_gateway(upstream, config=config, host=host, port=port,
+                          slug=slug, on_verdict=on_verdict)
     status_stop = _start_status_writer(httpd, args.status_out) if args.status_out else None
     active = "ENFORCE — blocking PROVEN attacks" if httpd.settings.enforce else "observe — read-only"
-    if args.mode == "enforce" and not httpd.settings.enforce:
+    if mode == "enforce" and not httpd.settings.enforce:
         active += " (downgraded: AEGIS_RESPOND entitlement not available in this governed deployment)"
-    sys.stderr.write(f"AEGIS Gateway  http://{args.host}:{args.port}  ->  {args.upstream}  [{active}]\n")
-    if args.verdict_webhook:
+    sys.stderr.write(f"AEGIS Gateway  http://{host}:{port}  ->  {upstream}  [{active}]\n")
+    if verdict_webhook:
         _authset = "with auth" if os.environ.get("AEGIS_VERDICT_WEBHOOK_AUTHORIZATION") else "no auth header"
-        sys.stderr.write(f"  verdict sink -> {args.verdict_sink} at {args.verdict_webhook} ({_authset}); "
+        sys.stderr.write(f"  verdict sink -> {verdict_sink} at {verdict_webhook} ({_authset}); "
                          f"bounded POST, redirects disabled, fail-open\n")
     if args.oob_canary and httpd.settings.oob_receiver is not None:
         sys.stderr.write(f"  passive OOB belief elevation ON (canary host "
@@ -250,8 +273,9 @@ def main(argv: list[str] | None = None) -> int:
     d.set_defaults(func=_cmd_detect)
 
     g = sub.add_parser("gateway", help="run the inline reverse-proxy provable firewall in front of your app")
-    g.add_argument("--upstream", required=True, metavar="URL",
-                   help="your app's base URL, e.g. http://127.0.0.1:3000 (the gateway forwards here)")
+    g.add_argument("--upstream", default="", metavar="URL",
+                   help="your app's base URL, e.g. http://127.0.0.1:3000 (the gateway forwards here); "
+                        "may also be supplied via AEGIS_GW_UPSTREAM (required by one or the other)")
     g.add_argument("--host", default="127.0.0.1",
                    help="bind host (a real deployment binds a routable interface; default loopback)")
     g.add_argument("--port", type=int, default=8080, help="gateway listen port (default 8080)")

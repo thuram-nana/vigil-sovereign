@@ -2989,8 +2989,12 @@ def replay_document(body: dict) -> dict:
     if not isinstance(doc, dict):
         return {"error": "malformed document: expected a parsed report or finding OBJECT (a JSON dict)"}
     findings = doc.get("active_findings")
+    if findings is None and isinstance(doc.get("findings"), list):
+        # Accept VIGIL's OWN report shape (key `findings`, e.g. from /api/report or the Report screen),
+        # not only the `active_findings` re-verifiable export — re-verify its ACTIVE findings.
+        findings = [f for f in doc["findings"] if isinstance(f, dict) and f.get("kind") == "active"]
     if findings is not None and not isinstance(findings, list):
-        return {"error": "malformed document: `active_findings` must be a list of finding objects"}
+        return {"error": "malformed document: `active_findings`/`findings` must be a list of finding objects"}
     if isinstance(findings, list) and len(findings) > _REPLAY_MAX_FINDINGS:
         return {"error": f"document too large: {len(findings)} findings exceeds the "
                          f"{_REPLAY_MAX_FINDINGS}-finding replay cap"}
@@ -3032,12 +3036,18 @@ def replay_document(body: dict) -> dict:
             "bucket": b,
             "note": getattr(r, "note", ""),
         })
+    _display_report = doc.get("active_findings") is None and isinstance(doc.get("findings"), list)
+    hint = ("This looks like the DISPLAY report — its findings omit the retained oracle_context needed to "
+            "re-fire offline. Re-verify from the run instead: open a finding on the Findings screen and click "
+            "'Re-verify this run (offline)', or paste the run's re-verifiable export (active_findings WITH "
+            "oracle_context)." ) if (_display_report and not buckets["reproduced"]) else ""
     return {
         "total": len(results),
         "reproduced": buckets["reproduced"],
         "contradicted": buckets["contradicted"],
         "ungrounded": buckets["ungrounded"],
         "results": out,
+        "hint": hint,
     }
 
 
@@ -5119,17 +5129,39 @@ def aegis_setup(body: dict) -> dict:
     verdicts = rd / "verdicts.jsonl"
     verdicts.write_text("", encoding="utf-8")
     status_file = rd / "status.json"
+    # HARDENING: the operator/deployment config — upstream, host, port, mode, slug, honeypots, the verdict
+    # webhook, and ESPECIALLY the per-deployment HMAC secret — is handed to the child via its ENV, never the
+    # argv. A process command line is world-readable through /proc/<pid>/cmdline, so a secret placed there
+    # leaks to any local user; the env of a 0700-spawned child does not. The gateway CLI reads AEGIS_GW_*
+    # (with the flags as an explicit fallback for a hand-run gateway). Only constant tokens + VIGIL-generated
+    # output paths remain on the argv, so no operator-tainted value ever reaches the process command line.
     cmd = [sys.executable, "-m", "framework.v2", "aegis", "gateway",
-           "--upstream", upstream, "--host", host, "--port", str(port), "--mode", mode,
-           "--slug", slug, "--secret", secret,
            "--verdicts-out", str(verdicts), "--status-out", str(status_file)]
-    for hp in honeypots:
-        cmd += ["--honeypot", hp]
+    # Anchor the gateway child on THIS running module's tree (…/framework/v2/console/actions.py → parents[3]
+    # holds framework/), the SAME pattern benchmark_run uses: `python -m framework.v2` prepends the console's
+    # launch CWD to sys.path, so a DIFFERENT framework/ package sitting in that CWD (e.g. an older standalone
+    # CRUCIBLE checkout) silently shadows the intended tree; lacking --verdicts-out/--status-out the gateway
+    # then dies at spawn ("unrecognized arguments") and Defense→Start never comes up. Also pin CRUCIBLE_ROOT
+    # to the root the console resolved, so the gateway reads the live observe<->enforce mode file where the
+    # console writes it.
+    _gw_root = Path(__file__).resolve().parents[3]
+    _gw_env = dict(os.environ)
+    _gw_env["CRUCIBLE_ROOT"] = str(paths.crucible_root())
+    _gw_env["AEGIS_GW_UPSTREAM"] = upstream
+    _gw_env["AEGIS_GW_HOST"] = host
+    _gw_env["AEGIS_GW_PORT"] = str(port)
+    _gw_env["AEGIS_GW_MODE"] = mode
+    _gw_env["AEGIS_GW_SLUG"] = slug
+    _gw_env["AEGIS_GW_SECRET"] = secret
+    if honeypots:
+        _gw_env["AEGIS_GW_HONEYPOTS"] = "\n".join(honeypots)
     if verdict_webhook:
-        cmd += ["--verdict-webhook", verdict_webhook, "--verdict-sink", verdict_sink]
+        _gw_env["AEGIS_GW_VERDICT_WEBHOOK"] = verdict_webhook
+        _gw_env["AEGIS_GW_VERDICT_SINK"] = verdict_sink
     try:
         logf = open(rd / "gateway.log", "ab")  # noqa: SIM115 — held by the persistent child
-        proc = subprocess.Popen(cmd, stdout=logf, stderr=subprocess.STDOUT)  # noqa: S603
+        proc = subprocess.Popen(cmd, stdout=logf, stderr=subprocess.STDOUT,  # noqa: S603
+                                cwd=str(_gw_root), env=_gw_env)
     except Exception as e:  # noqa: BLE001
         return {"error": f"could not launch the gateway: {type(e).__name__}: {e}"}
     meta = {"run_id": run_id, "kind": "aegis", "upstream": upstream, "host": host, "port": port,

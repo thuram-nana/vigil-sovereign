@@ -87,3 +87,60 @@ def test_compose_fans_out_and_isolates_failures():
     assert calls == ["ok", "bad", "also"]                    # all ran; the failure was isolated
     assert C._compose_verdict_sinks(_ok) is _ok              # single sink returned as-is
     assert C._compose_verdict_sinks(None, None) is None      # nothing configured -> None
+
+
+def test_gateway_reads_operator_config_from_env_not_argv(monkeypatch):
+    """HARDENING: the sovereign console launches the gateway with its config in AEGIS_GW_* env (never argv,
+    so the deployment secret can't leak via /proc/<pid>/cmdline). The CLI must resolve those from the env,
+    with the flags as the fallback for a hand-run gateway."""
+    import argparse
+
+    captured: dict = {}
+
+    class _Settings:
+        enforce = False
+        oob_receiver = None
+
+        def stop_oob(self):
+            pass
+
+    class _Httpd:
+        settings = _Settings()
+
+        def serve_forever(self):
+            raise KeyboardInterrupt
+
+        def server_close(self):
+            pass
+
+    def _fake_serve(upstream, *, config, host, port, slug, on_verdict):
+        captured.update(upstream=upstream, host=host, port=port, slug=slug,
+                        secret=config.deployment_secret, mode=config.mode)
+        return _Httpd()
+
+    import framework.v2.aegis.gateway as G
+    monkeypatch.setattr(G, "serve_gateway", _fake_serve)
+    for k, v in {"AEGIS_GW_UPSTREAM": "http://10.0.0.5:3000", "AEGIS_GW_HOST": "0.0.0.0",
+                 "AEGIS_GW_PORT": "9090", "AEGIS_GW_SLUG": "prod-gw", "AEGIS_GW_SECRET": "envsecret",
+                 "AEGIS_GW_MODE": "observe"}.items():
+        monkeypatch.setenv(k, v)
+    # argv left at defaults (empty upstream) — the env must supply everything
+    args = argparse.Namespace(upstream="", host="127.0.0.1", port=8080, mode="observe",
+                              slug="aegis-gateway", secret="", honeypot=None, oob_canary=None,
+                              verdicts_out=None, status_out=None, verdict_webhook=None, verdict_sink="webhook")
+    rc = C._cmd_gateway(args)
+    assert rc == 0
+    assert captured["upstream"] == "http://10.0.0.5:3000" and captured["host"] == "0.0.0.0"
+    assert captured["port"] == 9090 and captured["slug"] == "prod-gw"
+    assert captured["secret"] == "envsecret" and captured["mode"] == "observe"
+
+
+def test_gateway_missing_upstream_everywhere_is_refused(monkeypatch):
+    """No --upstream and no AEGIS_GW_UPSTREAM ⇒ a clean rc=2 refusal, not a crash."""
+    import argparse
+    for k in ("AEGIS_GW_UPSTREAM",):
+        monkeypatch.delenv(k, raising=False)
+    args = argparse.Namespace(upstream="", host="127.0.0.1", port=8080, mode="observe",
+                              slug="aegis-gateway", secret="", honeypot=None, oob_canary=None,
+                              verdicts_out=None, status_out=None, verdict_webhook=None, verdict_sink="webhook")
+    assert C._cmd_gateway(args) == 2
