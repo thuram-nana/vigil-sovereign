@@ -6,7 +6,7 @@
 # Building from source therefore requires a Rust toolchain (rustc/cargo) — expected for this repo, which
 # already carries the kernel crate. See [[tool.setuptools-rust.bins]] below.
 [build-system]
-requires = ["setuptools>=84.0.0", "wheel", "setuptools-rust>=1.9"]
+requires = ["setuptools>=84.0.0", "wheel", "setuptools-rust>=1.13.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -41,7 +41,7 @@ dependencies = [
     "numpy>=2.4.6,<3",
     "onnxruntime==1.29.0",
     "pydantic==2.13.4",
-    "PyYAML>=6",                  # structural kubeconfig safety gate (refuse exec/cmd-path plugins)
+    "PyYAML>=6.0.3",                  # structural kubeconfig safety gate (refuse exec/cmd-path plugins)
     "qdrant-client==1.19.0",
 ]
 
@@ -51,7 +51,7 @@ dependencies = [
 voice = ["sounddevice", "faster-whisper", "openwakeword", "piper-tts"]
 secrets = ["keyring"]
 capture = ["mss"]                 # cross-platform screen capture (macOS/Windows backends)
-dev = ["pytest>=9.1.1", "ruff>=0.16.5", "mypy>=2.3.1"]
+dev = ["pytest>=9.1.1", "ruff>=0.16.6", "mypy>=2.3.1"]
 all = ["sounddevice", "faster-whisper", "openwakeword", "piper-tts", "keyring", "mss"]
 
 # The `sigil` console command + `python -m sigil` both resolve to the CLI.
