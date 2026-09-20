@@ -89,9 +89,12 @@ def _authority_scope_gate(slug: str, target: str, destructive: bool) -> "tuple[s
     if str(slug).startswith("<"):
         return None
     try:
-        from ...authority.store import load_verified_authority
-        from ...entitlement.store import load_trust_root
-        trust_root = load_trust_root()
+        # DECOUPLED STORE (Phase 0.1): the governance AUTHORITY trust root is read from the DEDICATED authority-root
+        # store (load_authority_root → .authority-root/), NOT the entitlement store — the same store the launch gate
+        # (_has_verified_authority) and wiring.provision_authority use. Reading the entitlement trust root here would
+        # miss a provisioned authority (whose root is decoupled), so this scope gate would never enforce.
+        from ...authority.store import load_authority_root, load_verified_authority
+        trust_root = load_authority_root()
         if trust_root is None:
             return None
         authority = load_verified_authority(slug, trust_root)   # raises unless a threshold sig verifies

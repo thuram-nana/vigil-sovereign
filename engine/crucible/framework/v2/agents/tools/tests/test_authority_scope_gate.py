@@ -14,8 +14,9 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from framework.v2.agents.tools.invoker import _authority_scope_gate
-from framework.v2.authority.store import save_signed_authority
-from framework.v2.entitlement.provision import write_trust_root
+# DECOUPLED STORE (Phase 0.1): the tool-gate reads the governance AUTHORITY trust root from the DEDICATED
+# authority-root store (write_authority_root → .authority-root/), NOT the entitlement store — provision it there.
+from framework.v2.authority.store import save_signed_authority, write_authority_root
 from vigil_core import (
     AuthorizerKey, EngagementAuthority, TargetEnvironment, TrustRoot, generate_keypair,
     sign_engagement_authority,
@@ -41,7 +42,7 @@ def signed_env(tmp_path, monkeypatch):
     doc = EngagementAuthority(
         engagement_slug=_SLUG, environment=TargetEnvironment.STAGING, scope=["apme.cm"],
         not_before=ts - timedelta(minutes=1), not_after=ts + timedelta(hours=8), issued_by="owner")
-    write_trust_root(TrustRoot(threshold=1, authorizers=[
+    write_authority_root(TrustRoot(threshold=1, authorizers=[
         AuthorizerKey(key_id="owner", name="owner", public_key_b64=owner.public_key_b64)]))
     save_signed_authority(sign_engagement_authority(doc, {"owner": owner.private_key_b64}))
     return owner
@@ -84,7 +85,7 @@ def test_expired_authority_is_refused(tmp_path, monkeypatch):
     expired = EngagementAuthority(
         engagement_slug=_SLUG, environment=TargetEnvironment.STAGING, scope=["apme.cm"],
         not_before=ts - timedelta(hours=2), not_after=ts - timedelta(hours=1), issued_by="owner")
-    write_trust_root(TrustRoot(threshold=1, authorizers=[
+    write_authority_root(TrustRoot(threshold=1, authorizers=[
         AuthorizerKey(key_id="owner", name="owner", public_key_b64=owner.public_key_b64)]))
     save_signed_authority(sign_engagement_authority(expired, {"owner": owner.private_key_b64}))
     r = _authority_scope_gate(_SLUG, "http://apme.cm/", False)
