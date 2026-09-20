@@ -1,30 +1,20 @@
 """
 authority.canonical — deterministic signing bytes for an authority.
 
-Governance authorisers sign an engagement authority so a tampered scope,
-window, or destructive flag is detectable. The canonical form mirrors the
-entitlement layer's: compact, sorted-key UTF-8 JSON with a
-domain-separation prefix distinct from the entitlement, revocation, and
-proposal domains — so an authority signature can never be replayed as any
-other kind of signature.
+Governance authorisers sign an engagement authority so a tampered scope, window, or destructive flag is
+detectable. The canonical form + the signer now live in the shared integrity core
+(``vigil_core.authority``) so the SOVEREIGN plane can produce byte-identical signing input WITHOUT
+importing ``framework`` (the two-env boundary, FATAL-2). This module re-exports them, so every framework
+caller of ``authority_signing_bytes`` keeps resolving against the SINGLE source of truth — the sovereign
+signer and this engine's verifier agree by construction, not by a drift-catching test.
+
+Behaviour is byte-identical to the prior framework-local form: the same domain-separation prefix
+(distinct from the entitlement, revocation, and proposal domains) followed by compact, sorted-key UTF-8
+JSON — so authorities signed before this lift still verify.
 """
 
 from __future__ import annotations
 
-import json
-from typing import Final
+from vigil_core.authority import _AUTHORITY_DOMAIN, authority_signing_bytes
 
-from .models import EngagementAuthority
-
-_AUTHORITY_DOMAIN: Final[bytes] = b"crucible-authority-v1\x00"
-
-
-def authority_signing_bytes(authority: EngagementAuthority) -> bytes:
-    """The exact bytes an authoriser signs / a verifier checks."""
-    body = json.dumps(
-        authority.model_dump(mode="json"),
-        sort_keys=True,
-        separators=(",", ":"),
-        ensure_ascii=False,
-    ).encode("utf-8")
-    return _AUTHORITY_DOMAIN + body
+__all__ = ["authority_signing_bytes", "_AUTHORITY_DOMAIN"]

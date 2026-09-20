@@ -1226,6 +1226,54 @@
       },
       "check": "cli-native-verb",
       "rationale": "W17-7 #541 Tier-B escalation resolve loop (list|approve|resolve): the operator signs an owner approval for an over-cap fireteam member escalation and the offense resolver applies the registry's signed-only resolve() \u2014 owner-key gated; without a signed approval an escalation still auto-rejects at its deadline (fail-closed)."
+    },
+    {
+      "id": "target_authorization.ceremony",
+      "name": "UI target-authorization ceremony (add + owner-sign a live external target)",
+      "surface": "subsystem",
+      "status": "GATED",
+      "anchor": {
+        "file": "apps/sigil/sigil/ui/target_authorization.py",
+        "symbol": "add_target"
+      },
+      "check": "symbol-exists",
+      "rationale": "Phase 1.b. Owner-gated (do_action target_add -> PERMISSION_BY_ACTION offense_authority, owner-only): the cockpit owner-signs a scoped, time-boxed, GET-only-by-default EngagementAuthority IN-PROCESS and writes only the public signed bundle to the .vigil-live seam (the owner private key never leaves the sovereign process). Refuses a categorical-safety-floor host, a loopback/link-local/metadata IP, and a live environment. list/status are read-only."
+    },
+    {
+      "id": "target_authorization.offense_install",
+      "name": "Offense-side install of a UI-authorized live target",
+      "surface": "subsystem",
+      "status": "GATED",
+      "anchor": {
+        "file": "engine/crucible/framework/v2/console/actions.py",
+        "symbol": "_install_target_authorization"
+      },
+      "check": "symbol-exists",
+      "rationale": "Phase 1.c. On a remote launch, reads the seam bundle and installs it ONLY when it is tied to the PINNED owner key, its signature verifies, its window is current, and its scope entries are bare hosts; refuses to downgrade a differing/unreadable trust root. Then the launch gate _has_verified_authority(slug, host) additionally requires the verified authority's scope to cover the target host. Honest bound (docs/limitations): the owner anchor + trust root live under the offense-writable root; anchor .entitlement out-of-band (CRUCIBLE_ENTITLEMENT_DIR read-only/HSM) to close a full-FS-write attacker."
+    },
+    {
+      "id": "offense.operator_rate_ua_controls",
+      "name": "Operator rate / User-Agent controls (B10)",
+      "surface": "subsystem",
+      "status": "OPT-IN",
+      "anchor": {
+        "file": "engine/crucible/framework/v2/agents/http_executor.py",
+        "symbol": "_env_min_request_interval"
+      },
+      "check": "symbol-exists",
+      "rationale": "Phase 3 / B10. The scanner ALWAYS identifies itself (correlatable OBSIDIAN UA) and throttles per the charter posture; these OPT-IN controls (env VIGIL_OPERATOR_ID + VIGIL_MIN_REQUEST_INTERVAL_S, threaded by console.actions._operator_traffic_controls and surfaced read-only as launch_assessment's traffic_profile) let the operator tag the UA and set a rate FLOOR that can only TIGHTEN the posture rate (max(posture_floor, operator_min)), never loosen it. Off by default (posture rate + base UA); claim PHASE3-1."
+    },
+    {
+      "id": "aegis.verdict_sink",
+      "name": "AEGIS gateway external verdict sink (P4)",
+      "surface": "subsystem",
+      "status": "OPT-IN",
+      "anchor": {
+        "file": "engine/crucible/framework/v2/aegis/cli.py",
+        "symbol": "_make_webhook_verdict_sink"
+      },
+      "check": "symbol-exists",
+      "rationale": "Phase 4. The gateway always streams verdicts to the UI/stderr; `aegis gateway --verdict-webhook URL [--verdict-sink webhook|slack]` (and console aegis_setup body verdict_webhook/verdict_sink) ADDITIONALLY POSTs each verdict to an operator SIEM/webhook/Slack via the bounded, redirects-disabled report.push.push_via_urllib. Off by default. Browser-safe body (no oracle-context), auth from AEGIS_VERDICT_WEBHOOK_AUTHORIZATION env (not argv), fail-open (never perturbs the data plane); notification only — orthogonal to the AEGIS_RESPOND+kill-switch enforcement gate. Claim PHASE4-1."
     }
   ]
 }

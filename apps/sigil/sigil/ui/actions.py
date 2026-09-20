@@ -34,10 +34,14 @@ _SESSION_ACTIONS = frozenset({"rotate_bootstrap_token", "revoke_bootstrap_token"
 _COOKIE_SESSION_ACTIONS = frozenset({"revoke_sessions"})
 # Owner passkey (WebAuthn) actions (Slice 1c-iii): enroll/revoke the owner's production passkey credentials.
 _WEBAUTHN_ACTIONS = frozenset({"enroll_webauthn", "revoke_webauthn"})
+# Phase 1 (UI live-external spine): owner-sign an ENGAGEMENT AUTHORIZATION for a live external target. The
+# owner key mints a scoped, time-boxed, signed authority in-process; only the public-safe signed bundle
+# crosses the seam. `target_add` is owner-only (offense_authority); list/status are read-only.
+_TARGET_AUTHZ_ACTIONS = frozenset({"target_add", "target_list", "target_authority_status"})
 ACTIONS = (frozenset({"approve", "deny", "kill", "release", "promote", "revoke",
                       "queue_learn", "start_learn"})
            | _CAP_ACTIONS | _SETTINGS_ACTIONS | _OFFENSE_APPROVAL_ACTIONS | _ACCOUNT_ACTIONS
-           | _SESSION_ACTIONS | _COOKIE_SESSION_ACTIONS | _WEBAUTHN_ACTIONS)
+           | _SESSION_ACTIONS | _COOKIE_SESSION_ACTIONS | _WEBAUTHN_ACTIONS | _TARGET_AUTHZ_ACTIONS)
 
 
 def do_action(action: str, params: dict, *, store: Optional[SpineStore] = None,
@@ -233,6 +237,23 @@ def do_action(action: str, params: dict, *, store: Optional[SpineStore] = None,
         if action == "offense_approve":
             return _oa.sign_pending(str(params.get("request_id", "")), now=_time.time)
         return _oa.deny_pending(str(params.get("request_id", "")))
+
+    if action in _TARGET_AUTHZ_ACTIONS:
+        # Phase 1: owner-sign an engagement authorization for a live external target in-process (target_add
+        # is owner-gated above via PERMISSION_BY_ACTION=offense_authority), or read the seam (list/status).
+        # The owner key is the persisted sovereign identity; only a public-safe signed bundle crosses.
+        from . import target_authorization as _ta
+        if action == "target_add":
+            return _ta.add_target(
+                str(params.get("host", "")),
+                slug=(str(params["slug"]) if params.get("slug") else None),
+                environment=str(params.get("environment", "staging")),
+                duration_hours=params.get("duration_hours", 8.0),
+                note=str(params.get("note", "")),
+            )
+        if action == "target_authority_status":
+            return _ta.authority_status(str(params.get("slug", "")))
+        return _ta.list_targets()
 
     if action in ("approve", "deny"):
         seq = int(params["seq"])

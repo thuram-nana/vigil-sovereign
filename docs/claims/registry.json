@@ -2531,6 +2531,156 @@
       "ci_job": "vigil_core — shared integrity substrate",
       "failure_class": "n-a",
       "default": "on"
+    },
+    {
+      "id": "PHASE1-1",
+      "title": "One shared engagement-authority definition; the verifier is fail-closed and tamper-evident",
+      "claim": "The engagement-authority schema, its canonical signing bytes, and the owner signer/verifier are ONE definition in vigil_core.authority (re-exported by framework.v2.authority), byte-identical across both planes; the verifier never raises, rejects a duplicate-pubkey quorum collapse, and rejects any tampered authority.",
+      "source": "docs/decisions/phase1-ui-live-external-authorization.md:20",
+      "enforced_by": {
+        "file": "packages/core/vigil_core/vigil_core/authority.py",
+        "symbol": "verify_engagement_authority"
+      },
+      "proved_by": {
+        "file": "packages/core/vigil_core/tests/test_authority.py",
+        "tests": [
+          "test_tamper_after_signing_fails_verification",
+          "test_duplicate_pubkey_trust_root_is_rejected_not_collapsed",
+          "test_malformed_signature_returns_false_not_raises"
+        ]
+      },
+      "ci_job": "vigil_core — shared integrity substrate",
+      "failure_class": "n-a",
+      "default": "on"
+    },
+    {
+      "id": "PHASE1-2",
+      "title": "The cockpit owner-signs a live-target authorization in-process and refuses dangerous inputs",
+      "claim": "The cockpit owner-signs a scoped, time-boxed, GET-only-by-default engagement authorization for a live external target IN-PROCESS (the owner private key is never written or sent — only the public signed bundle crosses the seam), and refuses a categorical-safety-floor host (.gov/.mil/.edu/.int and *.gov.cm-class), a loopback/link-local/metadata IP literal, and a live environment.",
+      "source": "docs/decisions/phase1-ui-live-external-authorization.md:25",
+      "enforced_by": {
+        "file": "apps/sigil/sigil/ui/target_authorization.py",
+        "symbol": "add_target"
+      },
+      "proved_by": {
+        "file": "apps/sigil/tests/test_target_authorization.py",
+        "tests": [
+          "test_add_target_writes_an_owner_signed_verifiable_authorization",
+          "test_refuses_categorical_safety_floor",
+          "test_refuses_loopback_linklocal_metadata_ip_literals",
+          "test_refuses_live_environment"
+        ]
+      },
+      "ci_job": "SIGIL governor gates (P7 — offense gate + authn)",
+      "failure_class": "n-a",
+      "default": "on"
+    },
+    {
+      "id": "PHASE1-3",
+      "title": "A remote engage launches only under an owner-pinned, verified, in-window, in-scope authority",
+      "claim": "A remote engage installs + launches only under an owner-signed authority whose trust root is the pinned owner key, whose signature verifies, whose validity window is current, and whose scope covers the target host; a bundle not tied to the pinned owner, a bad signature, an out-of-window authority, a non-bare-host scope entry, a target host outside the scope, or a conflicting pre-existing trust root is refused fail-closed.",
+      "source": "docs/decisions/phase1-ui-live-external-authorization.md:31",
+      "enforced_by": {
+        "file": "engine/crucible/framework/v2/console/actions.py",
+        "symbol": "_install_target_authorization"
+      },
+      "proved_by": {
+        "file": "engine/crucible/framework/v2/console/tests/test_target_authorization_install.py",
+        "tests": [
+          "test_install_then_verified_authority_gate_passes",
+          "test_bundle_not_signed_by_pinned_owner_refuses",
+          "test_validly_signed_malformed_scope_entry_is_refused",
+          "test_launch_refuses_a_target_host_outside_the_authorized_scope"
+        ]
+      },
+      "ci_job": "CRUCIBLE core on vigil_core",
+      "failure_class": "n-a",
+      "default": "on"
+    },
+    {
+      "id": "PHASE1-4",
+      "title": "The signed authority's scope binds every host-acting op, not just HTTP",
+      "claim": "When an owner-signed engagement authority verifies for a slug, its scope binds EVERY host-acting operation — the sensor/tool gate enforces the signed-authority scope on the tool target too, not just the HTTP path — so a tool targeting a host outside the signed scope is refused; this is a defense-in-depth ADD over the charter check that never relaxes it, and is inert for a charter-only engagement with no signed authority.",
+      "source": "docs/decisions/phase1-ui-live-external-authorization.md:37",
+      "enforced_by": {
+        "file": "engine/crucible/framework/v2/agents/tools/invoker.py",
+        "symbol": "_authority_scope_gate"
+      },
+      "proved_by": {
+        "file": "engine/crucible/framework/v2/agents/tools/tests/test_authority_scope_gate.py",
+        "tests": [
+          "test_out_of_scope_target_is_refused",
+          "test_in_scope_target_is_allowed",
+          "test_absent_authority_falls_back_to_charter_not_a_false_refusal",
+          "test_skips_when_no_trust_root_pinned"
+        ]
+      },
+      "ci_job": "CRUCIBLE core on vigil_core",
+      "failure_class": "n-a",
+      "default": "on"
+    },
+    {
+      "id": "PHASE3-1",
+      "title": "Operator rate control can only tighten the posture rate; the UA carries the operator tag",
+      "claim": "A remote engagement's request rate can only be TIGHTENED by an operator-set minimum interval — the effective rate floor is the maximum of the charter posture's floor and the operator's minimum, so the control can slow a run but never make it faster than the posture mandates — and the scanner's correlatable User-Agent carries the operator's identifier tag when one is set.",
+      "source": "docs/decisions/phase3-operator-rate-ua-controls.md:16",
+      "enforced_by": {
+        "file": "engine/crucible/framework/v2/agents/http_executor.py",
+        "symbol": "HttpExecutor._sleep_for_rate_limit"
+      },
+      "proved_by": {
+        "file": "engine/crucible/framework/v2/agents/tests/test_operator_rate_ua.py",
+        "tests": [
+          "test_min_interval_env_tightens_the_rate_floor",
+          "test_operator_min_below_posture_floor_cannot_loosen",
+          "test_operator_id_env_tags_the_correlatable_user_agent"
+        ]
+      },
+      "ci_job": "CRUCIBLE core on vigil_core",
+      "failure_class": "n-a",
+      "default": "on"
+    },
+    {
+      "id": "PHASE1-5",
+      "title": "Opt-in hard root pin: a sentinel-less CRUCIBLE_ROOT fails closed, not a silent fall-through",
+      "claim": "Under CRUCIBLE_ROOT_STRICT an explicitly-set CRUCIBLE_ROOT whose CLAUDE.md sentinel is missing is a fail-closed error, never a silent fall-through to a different tree — so a pinned child cannot resolve a foreign root for its charter / authority / trust-root. A console-launched engage sets it on the child by default; it is available globally as an opt-in, off by default so dev / pre-init flows are unaffected.",
+      "source": "docs/decisions/phase1-ui-live-external-authorization.md:43",
+      "enforced_by": {
+        "file": "engine/crucible/framework/v2/common/paths.py",
+        "symbol": "crucible_root"
+      },
+      "proved_by": {
+        "file": "engine/crucible/framework/v2/common/tests/test_paths_root_security.py",
+        "tests": [
+          "test_strict_pin_raises_on_sentinel_less_root",
+          "test_strict_pin_returns_root_when_sentinel_present",
+          "test_without_strict_a_sentinel_less_root_still_falls_through"
+        ]
+      },
+      "ci_job": "CRUCIBLE core on vigil_core",
+      "failure_class": "n-a",
+      "default": "on"
+    },
+    {
+      "id": "PHASE4-1",
+      "title": "AEGIS gateway delivers verdicts to an outbound sink: bounded, browser-safe, env-auth, fail-open",
+      "claim": "The AEGIS gateway can ALSO POST each verdict to an operator-configured outbound sink (webhook / Slack) via a bounded, redirects-disabled sender (http(s) only, hard timeout); the posted body is the SAME browser-safe verdict projection the file sink emits (no oracle-context or internal-only field), the auth header comes from an environment variable (never the argv / process list), and a send failure is FAIL-OPEN — it is swallowed and never reaches the request/data plane.",
+      "source": "docs/decisions/phase4-aegis-verdict-sink.md:15",
+      "enforced_by": {
+        "file": "engine/crucible/framework/v2/aegis/cli.py",
+        "symbol": "_make_webhook_verdict_sink"
+      },
+      "proved_by": {
+        "file": "engine/crucible/framework/v2/aegis/tests/test_gateway_verdict_webhook.py",
+        "tests": [
+          "test_webhook_sink_posts_browser_safe_verdict",
+          "test_auth_header_from_env_not_argv",
+          "test_webhook_sink_is_fail_open"
+        ]
+      },
+      "ci_job": "CRUCIBLE core on vigil_core",
+      "failure_class": "n-a",
+      "default": "on"
     }
   ]
 }

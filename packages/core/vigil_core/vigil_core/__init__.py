@@ -42,6 +42,10 @@ from .highwater import (
     read_highwater_dict, strict_highwater_enabled, verify_highwater_signature,
 )
 from .models import AuthorizerKey, ChainEntry, Signature, SignedChainHead, TrustRoot
+from .authority import (
+    EngagementAuthority, SignedAuthority, TargetEnvironment, authority_signing_bytes,
+    sign_engagement_authority, verify_engagement_authority,
+)
 from .signed_build_manifest import (
     ALL_STATES as BUILD_INTEGRITY_STATES,
     BUILD_MANIFEST_DOMAIN, BUILD_MANIFEST_SCHEMA, BuildArtifact, BuildIntegrityResult,
@@ -82,6 +86,8 @@ __all__ = [
     "build_manifest", "ensure_operable", "manifest_path", "new_install_id", "read_manifest",
     "verify_manifest", "write_manifest",
     "AuthorizerKey", "ChainEntry", "Signature", "SignedChainHead", "TrustRoot",
+    "EngagementAuthority", "SignedAuthority", "TargetEnvironment", "authority_signing_bytes",
+    "sign_engagement_authority", "verify_engagement_authority",
     "BUILD_INTEGRITY_STATES", "BUILD_MANIFEST_DOMAIN", "BUILD_MANIFEST_SCHEMA", "BuildArtifact",
     "BuildIntegrityResult", "BuildIntegrityState", "BuildManifestError", "BUILD_MANIFEST_FILENAME",
     "SignedBuildManifest", "BUILD_TRUST_ROOT_FILENAME", "build_manifest_from_specs",

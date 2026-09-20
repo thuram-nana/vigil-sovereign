@@ -99,7 +99,7 @@ def test_suite_engage_spawn_threads_run_dir_and_run_is_not_clean(isolate, monkey
 
 def test_remote_url_engage_spawn_threads_run_dir(isolate, monkeypatch):
     tmp_path = isolate
-    monkeypatch.setattr(actions, "_has_verified_authority", lambda slug: True)
+    monkeypatch.setattr(actions, "_has_verified_authority", lambda slug, host="": True)
     seen = _capturing_spawn(monkeypatch)
     r = actions.launch_assessment({"mode": "url", "target": "https://app.example.com/", "slug": "acme"})
     assert r.get("status") == "running", r

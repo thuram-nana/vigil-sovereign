@@ -61,6 +61,58 @@ def _make_file_verdict_sink(path: str):
     return sink
 
 
+def _verdict_slack_text(rec: dict) -> str:
+    return (f"AEGIS verdict: {rec.get('decision', '?')} / {rec.get('attack_class', '?')} "
+            f"(action={rec.get('action', '?')}, confidence={rec.get('confidence', '?')})")
+
+
+def _make_webhook_verdict_sink(url: str, sink: str):
+    """An ``on_verdict`` sink that ALSO POSTs each verdict to the operator's OUTBOUND sink (SIEM / webhook /
+    Slack) via the bounded, redirects-disabled ``report.push.push_via_urllib`` (http(s) only, hard timeout,
+    no redirect-to-internal SSRF; the operator-configured URL is the sole egress). FAIL-OPEN per the gateway
+    doctrine: any send error is swallowed + logged to stderr and NEVER raises into the data plane. The body
+    reuses the SAME browser-safe verdict projection the file sink emits (``_ui_safe_verdict``), so no
+    oracle-context / internal-only field ever leaves the host. An auth header, if any, is read from the
+    ``AEGIS_VERDICT_WEBHOOK_AUTHORIZATION`` env — kept out of argv / the process list."""
+    from ..report.push import push_via_urllib
+
+    authz = (os.environ.get("AEGIS_VERDICT_WEBHOOK_AUTHORIZATION") or "").strip()
+    headers = {"Authorization": authz} if authz else {}
+
+    def sink_fn(v: object) -> None:
+        try:
+            rec = _ui_safe_verdict(v)
+            body = {"text": _verdict_slack_text(rec)} if sink == "slack" \
+                else {"kind": "aegis.verdict", "verdict": rec}
+            push_via_urllib(url, headers, body)
+        except Exception as e:  # noqa: BLE001 — an outbound sink must never take the data plane down
+            try:
+                sys.stderr.write(f"aegis.gateway.verdict_webhook_failed: {type(e).__name__}\n")
+            except Exception:
+                pass
+
+    return sink_fn
+
+
+def _compose_verdict_sinks(*sinks):
+    """Fan a verdict out to every configured sink (file/log AND the outbound webhook), each isolated so one
+    sink's failure never affects another or the data plane. None entries are dropped; returns None if none."""
+    active = [s for s in sinks if s is not None]
+    if not active:
+        return None
+    if len(active) == 1:
+        return active[0]
+
+    def fan(v: object) -> None:
+        for s in active:
+            try:
+                s(v)
+            except Exception:  # noqa: BLE001
+                pass
+
+    return fan
+
+
 def _start_status_writer(httpd: object, path: str, *, interval: float = 2.0) -> threading.Event:
     """A daemon thread snapshotting the gateway's EFFECTIVE mode + per-actor beliefs to ``path`` (0600)
     as JSON, so the loopback console (a SEPARATE process) can render a live Defense status. Reads the
@@ -128,7 +180,12 @@ def _cmd_gateway(args: argparse.Namespace) -> int:
 
     # A live-UI deployment (`--verdicts-out`) streams browser-safe verdicts to a JSONL the loopback
     # console tails; otherwise the classic stderr log. `--status-out` publishes a periodic status snapshot.
-    on_verdict = _make_file_verdict_sink(args.verdicts_out) if args.verdicts_out else _log_verdict
+    # `--verdict-webhook` ADDITIONALLY POSTs each verdict to an operator-configured outbound sink (SIEM /
+    # webhook / Slack) — fanned out alongside the file/log sink, each isolated + fail-open.
+    _local_sink = _make_file_verdict_sink(args.verdicts_out) if args.verdicts_out else _log_verdict
+    _webhook_sink = (_make_webhook_verdict_sink(args.verdict_webhook, args.verdict_sink)
+                     if args.verdict_webhook else None)
+    on_verdict = _compose_verdict_sinks(_local_sink, _webhook_sink)
     httpd = serve_gateway(args.upstream, config=config, host=args.host, port=args.port,
                           slug=args.slug, on_verdict=on_verdict)
     status_stop = _start_status_writer(httpd, args.status_out) if args.status_out else None
@@ -136,6 +193,10 @@ def _cmd_gateway(args: argparse.Namespace) -> int:
     if args.mode == "enforce" and not httpd.settings.enforce:
         active += " (downgraded: AEGIS_RESPOND entitlement not available in this governed deployment)"
     sys.stderr.write(f"AEGIS Gateway  http://{args.host}:{args.port}  ->  {args.upstream}  [{active}]\n")
+    if args.verdict_webhook:
+        _authset = "with auth" if os.environ.get("AEGIS_VERDICT_WEBHOOK_AUTHORIZATION") else "no auth header"
+        sys.stderr.write(f"  verdict sink -> {args.verdict_sink} at {args.verdict_webhook} ({_authset}); "
+                         f"bounded POST, redirects disabled, fail-open\n")
     if args.oob_canary and httpd.settings.oob_receiver is not None:
         sys.stderr.write(f"  passive OOB belief elevation ON (canary host "
                          f"{httpd.settings.oob_correlator.canary_host}) — receiver is LOOPBACK-only; "
@@ -208,6 +269,12 @@ def main(argv: list[str] | None = None) -> int:
     g.add_argument("--status-out", default=None, metavar="PATH",
                    help="periodically snapshot effective mode + per-actor beliefs to PATH (JSON), "
                         "for a live UI status view")
+    g.add_argument("--verdict-webhook", default=None, metavar="URL",
+                   help="ALSO POST each verdict (browser-safe projection) to this outbound sink "
+                        "(SIEM/webhook/Slack). Bounded POST, redirects DISABLED, http(s) only, fail-open. "
+                        "Auth via the AEGIS_VERDICT_WEBHOOK_AUTHORIZATION env (kept out of argv).")
+    g.add_argument("--verdict-sink", choices=("webhook", "slack"), default="webhook",
+                   help="format for --verdict-webhook: 'webhook' (full verdict JSON) or 'slack' (compact text)")
     g.add_argument("--oob-canary", default=None, metavar="URL",
                    help="OPT-IN passive OOB belief elevation: the operator-planted STATIC canary URL "
                         "(a host you control that tunnels back to a loopback receiver AND trips AEGIS's "

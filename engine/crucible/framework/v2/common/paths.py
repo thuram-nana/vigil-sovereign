@@ -49,6 +49,19 @@ def _walk_up_for_sentinel(start: Path) -> Path | None:
     return None
 
 
+_STRICT_ROOT_TRUTHY = frozenset({"1", "on", "true", "yes", "enabled"})
+
+
+def _strict_root_pin() -> bool:
+    """Opt-in HARD root pin (VIGIL-LIMIT #10). When truthy, an EXPLICITLY-set ``CRUCIBLE_ROOT`` whose
+    ``CLAUDE.md`` sentinel is absent is a fail-closed ERROR rather than a silent fall-through to a different
+    tree — so a child pinned to a root cannot sentinel-walk to a FOREIGN root if that root's sentinel is
+    missing/removed. Default (unset) preserves the historical fall-through, so dev / test / pre-init flows
+    that set a not-yet-initialised CRUCIBLE_ROOT are unaffected. ``launch_assessment`` sets this on the engage
+    child alongside the pinned CRUCIBLE_ROOT, so console-launched runs get the hard pin by default."""
+    return (os.environ.get("CRUCIBLE_ROOT_STRICT") or "").strip().lower() in _STRICT_ROOT_TRUTHY
+
+
 @lru_cache(maxsize=1)
 def crucible_root() -> Path:
     env = os.environ.get("CRUCIBLE_ROOT")
@@ -60,6 +73,13 @@ def crucible_root() -> Path:
             p = Path(env).expanduser()
         if (p / _SENTINEL).is_file():
             return p
+        # #10 fail-closed root pin (opt-in): an explicitly-set CRUCIBLE_ROOT with no sentinel must NOT
+        # silently resolve to a different tree when strict mode is on — raise rather than walk away from it.
+        if _strict_root_pin():
+            raise CrucibleRootNotFound(
+                f"CRUCIBLE_ROOT={env!r} is set but has no {_SENTINEL} sentinel, and CRUCIBLE_ROOT_STRICT is "
+                f"on: refusing to fall through to a different tree (fail-closed root pin)."
+            )
 
     candidates: list[Path | None] = []
     # This module's location FIRST: it lives inside the installed package, so its
