@@ -42,12 +42,13 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from types import TracebackType
+from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
 import urllib.error
 import urllib.request
 
-from .oob import OOBHit
+from .oob import OOBHit, sign_oob_receipt
 
 _POLL_PREFIX = "/_poll/"
 # X6 — the poll secret travels in this request HEADER, not the query string, so it never lands
@@ -80,13 +81,22 @@ class _RelayHTTPServer(ThreadingHTTPServer):
 
     daemon_threads = True
 
-    def __init__(self, addr: tuple[str, int], secret: str) -> None:
+    def __init__(self, addr: tuple[str, int], secret: str,
+                 signing_key: "str | None" = None) -> None:
         super().__init__(addr, _RelayHandler)
         self._lock = threading.Lock()
         self._hits: dict[str, list[OOBHit]] = {}
         self._secret = secret
+        # VF-2b: the INDEPENDENT collector's private key (b64), or None. Mirrors oob._OOBHTTPServer.
+        self._signing_key = signing_key
 
     def _record(self, hit: OOBHit) -> None:
+        # VF-2b: sign the receipt AS OBSERVED (over the target-observed receipt core only), exactly as the
+        # loopback receiver does (oob._OOBHTTPServer._record). A verifier checks it against a caller-PINNED
+        # collector pubkey, so a fully-dishonest producer that does not hold the collector key cannot forge a
+        # receipt that verifies — the remote relay now reaches the same VF-2b tier as the loopback receiver.
+        if self._signing_key:
+            hit.collector_sig = sign_oob_receipt(self._signing_key, hit)
         with self._lock:
             self._hits.setdefault(hit.token, []).append(hit)
 
@@ -159,17 +169,26 @@ class RelayServer:
     scanner's egress). ``secret`` gates the poll endpoint. A random secret is
     minted if none is given (read it from :attr:`secret`)."""
 
-    def __init__(self, host: str = "127.0.0.1", port: int = 0, *, secret: str | None = None) -> None:
+    def __init__(self, host: str = "127.0.0.1", port: int = 0, *, secret: str | None = None,
+                 collector_keypair: "Any" = None) -> None:
         self._host = host
         self._port = port
         self.secret = secret or secrets.token_hex(16)
+        # VF-2b: an optional INDEPENDENT collector signing key (a vigil_core KeyPair). When set, every
+        # recorded interaction is signed into a receipt a verifier checks against the PINNED collector pubkey
+        # — the mechanism that survives a fully-dishonest producer. Mirrors OOBReceiver.__init__. Held by the
+        # collector (a party distinct from the producer); this class does not enforce that independence — it is
+        # a deployment assumption, like witness independence.
+        self._collector_priv = getattr(collector_keypair, "private_key_b64", None) if collector_keypair else None
+        self._collector_pub = getattr(collector_keypair, "public_key_b64", None) if collector_keypair else None
         self._server: _RelayHTTPServer | None = None
         self._thread: threading.Thread | None = None
 
     def start(self) -> "RelayServer":
         if self._server is not None:
             return self
-        self._server = _RelayHTTPServer((self._host, self._port), self.secret)
+        self._server = _RelayHTTPServer((self._host, self._port), self.secret,
+                                        signing_key=self._collector_priv)
         self._thread = threading.Thread(target=self._server.serve_forever, name="oob-relay", daemon=True)
         self._thread.start()
         return self
@@ -200,6 +219,13 @@ class RelayServer:
     def base_url(self) -> str:
         return f"http://{self._host}:{self.port}"
 
+    @property
+    def collector_pubkey(self) -> "str | None":
+        """The independent collector's public key (b64) when a signing keypair was given, else None. The
+        operator distributes this OUT-OF-BAND to the scanner (RelayClient pin), and a verifier PINS it to
+        check each hit's receipt (VF-2b)."""
+        return self._collector_pub
+
     def serve_forever(self) -> None:
         """Run the relay in the foreground until interrupted (the CLI path)."""
         self.start()
@@ -227,16 +253,30 @@ class RelayClient:
     error yields an empty list (a transient relay/network fault must never crash
     a scan or fabricate a hit)."""
 
-    def __init__(self, base_url: str, secret: str, *, timeout: float = 5.0) -> None:
+    def __init__(self, base_url: str, secret: str, *, timeout: float = 5.0,
+                 collector_pubkey: "str | None" = None) -> None:
         self._base = base_url.rstrip("/")
         # X6: a REMOTE relay's secret + polled interaction data must travel over TLS. Refuse a
         # non-loopback http:// relay — the poll secret and recorded hits would otherwise cross
         # the network in the clear. A loopback relay (the local test/tunnel model) may use http.
         parts = urlsplit(self._base)
-        if not _is_loopback(parts.hostname or "") and parts.scheme != "https":
+        remote = not _is_loopback(parts.hostname or "")
+        if remote and parts.scheme != "https":
             raise ValueError(
                 f"remote OOB relay {self._base!r} must use https:// — refusing to send the poll "
                 f"secret and interaction data in plaintext to a non-loopback host")
+        # VF-2b FAIL-CLOSED: the collector public key the verifier PINS out-of-band (supplied by the
+        # charter/CLI — NEVER fetched from the relay at poll time, which would let a compromised relay hand
+        # over its own key and defeat the pin). A REMOTE relay MUST carry a non-blank pin: remote OOB is the
+        # VF-2b tier by construction, never a silent drop to VF-2a token-only (which a fully-dishonest producer
+        # can forge). A loopback relay (the local test/tunnel model) may omit it — the token-only tier is
+        # honest there, and the loopback receiver's own minted key covers loopback VF-2b.
+        self._collector_pubkey = str(collector_pubkey).strip() if collector_pubkey else None
+        if remote and not self._collector_pubkey:
+            raise ValueError(
+                f"remote OOB relay {self._base!r} requires an out-of-band collector public key (VF-2b): a "
+                f"remote callback cannot rely on token-equality alone, which a dishonest producer can forge "
+                f"— supply the relay's collector pubkey via the charter/CLI, do not fetch it from the relay")
         self._secret = secret
         self._timeout = timeout
 
@@ -258,6 +298,13 @@ class RelayClient:
     @property
     def base_url(self) -> str:
         return self._base
+
+    @property
+    def collector_pubkey(self) -> "str | None":
+        """The OUT-OF-BAND-pinned collector public key (b64) for this relay, or None on a loopback relay
+        with no pin. The verifier reads THIS (an authority the caller supplied), never a key from the
+        producer-controlled context, to demand a VF-2b collector receipt."""
+        return self._collector_pubkey
 
     # -- OOBReceiver-shaped API ----------------------------------------------
 

@@ -127,6 +127,23 @@ def authorize_action(
                   f"authorized against {authority.environment.value} environment")
 
 
+def authorize_oob_egress(authority: EngagementAuthority, relay_host: str) -> bool:
+    """Authorize OOB relay egress against the authority's DEDICATED ``oob_relay_host`` field.
+
+    This is a SEPARATE gate from :func:`authorize_action`'s general host-scope matcher, on purpose: the OOB
+    collaborator relay is an EGRESS destination the operator hosts, not a scan TARGET, so authorizing it must
+    NOT widen ``authority.scope`` (which would make the relay a first-class attack target and a charter
+    in-scope row). Fail-closed: an authority with no signed ``oob_relay_host``, or a relay host that does not
+    match it EXACTLY, is denied — the scanner may only reach the relay the owner explicitly named. Exact
+    single-host match (no scope patterns, no CIDR); the relay host is a single literal hostname the sovereign
+    ceremony validated with the same hard floor as a scan host."""
+    want = (getattr(authority, "oob_relay_host", "") or "").strip().lower()
+    if not want:
+        return False
+    got = (_host_of(relay_host) or str(relay_host or "").strip()).lower()
+    return bool(got) and got == want
+
+
 _DENIAL_ERRORS: dict[str, type[EthicsViolation]] = {
     "halted": EngagementHalted,
     "expired": AuthorityExpired,

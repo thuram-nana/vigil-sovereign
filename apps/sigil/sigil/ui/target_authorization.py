@@ -130,6 +130,8 @@ def authority_status(slug: str) -> dict:
         "ok": True, "slug": s, "present": True, "bound": bound,
         "scope": list(doc.scope), "environment": doc.environment.value,
         "not_before": doc.not_before.isoformat(), "not_after": doc.not_after.isoformat(),
+        "oob_relay_host": getattr(doc, "oob_relay_host", ""),
+        "oob_collector_pinned": bool(getattr(doc, "oob_collector_pubkey", "")),
     }
 
 
@@ -140,6 +142,8 @@ def add_target(
     environment: str = "staging",
     duration_hours: Any = _DEFAULT_DURATION_HOURS,
     note: str = "",
+    oob_relay_host: str = "",
+    oob_collector_pubkey: str = "",
     now: Optional[Any] = None,
 ) -> dict:
     """Owner-sign an engagement authorization for ``host`` and write the signed bundle to the seam.
@@ -171,6 +175,28 @@ def add_target(
     if not (0 < dur <= _MAX_DURATION_HOURS):
         return {"ok": False, "error": f"duration_hours must be in (0, {_MAX_DURATION_HOURS}]"}
 
+    # VF-2b OOB (Wave 1.2). Both are OPTIONAL and default off. The relay host is validated with the SAME hard
+    # floor as a scan host (bare hostname, no .gov/.mil/.edu/.int, no loopback/link-local/reserved literal),
+    # but it is carried in the DEDICATED oob_relay_host field — NOT appended to scope, so it never becomes a
+    # scan target / charter in-scope row (it is gated separately as an OOB egress). The collector pubkey is
+    # public Ed25519 key material the operator pins out-of-band; validate it LOADS as a canonical public key
+    # so a typo is caught at authorization time rather than silently failing every OOB receipt at verify time.
+    relay = str(oob_relay_host or "").strip().lower()
+    collector = str(oob_collector_pubkey or "").strip()
+    if relay:
+        rok, relay_or_err = _validate_host(relay)
+        if not rok:
+            return {"ok": False, "error": f"oob_relay_host: {relay_or_err}"}
+        relay = relay_or_err
+    if collector:
+        try:
+            from vigil_core.crypto import load_public_key
+            load_public_key(collector)
+        except Exception as e:  # noqa: BLE001 — a malformed pin is a fail-closed authorization error
+            return {"ok": False, "error": f"oob_collector_pubkey is not a valid Ed25519 public key: {e}"}
+    if collector and not relay:
+        return {"ok": False, "error": "oob_collector_pubkey needs an oob_relay_host to pin it against"}
+
     s = _slug_for(h, slug)
     # Reject an empty or dot-only slug HERE with the {ok:false} contract — a dot-only value (".", "..") would
     # otherwise reach the broker and raise ValueError (an uncaught 500 rather than an honest error). The
@@ -193,6 +219,8 @@ def add_target(
         allow_destructive=False,          # GET-only / non-destructive by default; widened deliberately
         issued_by="owner",
         note=str(note or ""),
+        oob_relay_host=relay,             # dedicated field; NOT appended to scope (separate OOB-egress gate)
+        oob_collector_pubkey=collector,   # public pin material only; owner key still signs only here
     )
     kp = _owner_keypair()
     signed = sign_engagement_authority(doc, {"owner": kp.private_key_b64})
@@ -207,6 +235,7 @@ def add_target(
     return {
         "ok": True, "action": "target_add", "slug": s, "host": h, "environment": env,
         "scope": [h], "not_before": doc.not_before.isoformat(), "not_after": doc.not_after.isoformat(),
+        "oob_relay_host": relay, "oob_collector_pinned": bool(collector),
         "signed_path": str(path),
     }
 

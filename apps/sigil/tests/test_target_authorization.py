@@ -59,7 +59,7 @@ _PUBLIC_SCHEMA = {
     "signed_authority": {"document", "signatures"},
     "signed_authority.document": {"engagement_slug", "environment", "scope", "not_before", "not_after",
                                   "allow_destructive", "live_destructive_acknowledged", "max_actions",
-                                  "issued_by", "note"},
+                                  "issued_by", "note", "oob_relay_host", "oob_collector_pubkey"},
     "signed_authority.signatures[]": {"key_id", "signature_b64"},
     "trust_root": {"schema_version", "threshold", "authorizers"},
     "trust_root.authorizers[]": {"key_id", "name", "public_key_b64"},

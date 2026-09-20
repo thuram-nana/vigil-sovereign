@@ -311,6 +311,8 @@ class WebScanCampaign:
         library_entries: list[LibraryEntry] | None = None,
         oob_relay_url: str | None = None,
         oob_relay_secret: str | None = None,
+        oob_collector_pubkey: str | None = None,
+        oob_collector_keypair: "object | None" = None,
         enable_browser_xss: bool = False,
         enable_spa_crawl: bool = False,
         max_browser_targets: int = 15,
@@ -397,6 +399,14 @@ class WebScanCampaign:
         # this only after checking the relay host is on the charter allowlist.
         self.oob_relay_url = oob_relay_url
         self.oob_relay_secret = oob_relay_secret
+        # VF-2b (Wave 1.2) — the OUT-OF-BAND collector public key the verifier PINS for a REMOTE relay,
+        # supplied by the operator via the charter/CLI (NEVER fetched from the relay). A remote relay REQUIRES
+        # it (RelayClient fail-closes without it): remote OOB is the VF-2b tier, never a silent VF-2a drop.
+        self.oob_collector_pubkey = oob_collector_pubkey
+        # VF-2b (Wave 1.2) — an OPTIONAL independent collector KEYPAIR (a vigil_core KeyPair) for the LOOPBACK
+        # receiver, so loopback OOB confirms at the VF-2b tier end-to-end. Default None ⇒ no keypair minted ⇒
+        # VF-2a token-only ⇒ the default/benchmark path is byte-identical (the make-gate invariant).
+        self.oob_collector_keypair = oob_collector_keypair
         # Opt-in dynamic browser passes. A headless browser navigates DIRECTLY
         # (its requests do not flow through the injected gated `send`). On the
         # loopback `scan` path these are scoped to contained targets; on the remote
@@ -1031,10 +1041,18 @@ class WebScanCampaign:
             audited = 0
             seen_hosts: set[str] = set()
             if self.enable_oob and self.oob_relay_url:
-                # Remote collaborator: poll the operator-hosted relay for interactions.
-                oob_cm: object = RelayClient(self.oob_relay_url, self.oob_relay_secret or "")
+                # Remote collaborator: poll the operator-hosted relay for interactions. VF-2b — pass the
+                # OUT-OF-BAND-pinned collector pubkey; a REMOTE relay fail-closes without one (RelayClient),
+                # so a remote OOB FACT can never silently degrade to the forgeable token-only tier.
+                oob_cm: object = RelayClient(self.oob_relay_url, self.oob_relay_secret or "",
+                                             collector_pubkey=self.oob_collector_pubkey)
             elif self.enable_oob:
-                oob_cm = OOBReceiver(advertise_base_url=self.oob_advertise_base_url)
+                # Loopback receiver. VF-2b — when an independent collector keypair is supplied (opt-in), the
+                # receiver signs each hit's receipt and exposes its pubkey, so the verifier (wired from
+                # oob.collector_pubkey in AuditEngine) demands a collector receipt end-to-end. Default None ⇒
+                # token-only ⇒ byte-identical.
+                oob_cm = OOBReceiver(advertise_base_url=self.oob_advertise_base_url,
+                                     collector_keypair=self.oob_collector_keypair)
             else:
                 oob_cm = contextlib.nullcontext(None)
             with oob_cm as oob:

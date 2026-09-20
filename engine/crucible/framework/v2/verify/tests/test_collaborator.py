@@ -77,12 +77,14 @@ def test_poll_secret_is_accepted_via_header_and_legacy_query() -> None:
 def test_relay_client_requires_https_for_remote() -> None:
     # X6: a non-loopback relay must use https — the poll secret + interaction data must not cross
     # the network in the clear. Loopback http and remote https are both fine.
+    # VF-2b (Wave 1.2): a REMOTE relay also requires an out-of-band collector pin; supply one here so this
+    # test stays about the https requirement (the pin fail-closed is covered separately).
     with pytest.raises(ValueError):
-        RelayClient("http://relay.example.com:9000", "s3cret")
-    RelayClient("http://127.0.0.1:9000", "s3cret")               # loopback http OK
+        RelayClient("http://relay.example.com:9000", "s3cret", collector_pubkey="pin")
+    RelayClient("http://127.0.0.1:9000", "s3cret")               # loopback http OK (no pin needed)
     RelayClient("http://127.0.0.2:9000", "s3cret")               # 127.0.0.0/8 loopback OK
     RelayClient("http://[::1]:9000", "s3cret")                   # IPv6 loopback OK
-    RelayClient("https://relay.example.com", "s3cret")           # remote https OK
+    RelayClient("https://relay.example.com", "s3cret", collector_pubkey="pin")  # remote https + pin OK
 
 
 def test_poll_failure_is_safe_empty() -> None:

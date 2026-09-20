@@ -199,7 +199,13 @@ class AuditEngine:
         retain_evidence: bool = False,
     ) -> None:
         self._send = send
-        self.verifier = verifier or OracleVerifier()
+        # VF-2b OUT-OF-BAND pin (GAP A): the OOB collector public key is an AUTHORITY, taken from the OOB
+        # handle the caller wired in (the loopback receiver's own minted key, or a charter/CLI-pinned
+        # remote-relay collector pubkey) — NEVER from the producer-controlled finding context. It rides on
+        # the verifier so the SAME confirm() that adjudicates the OOB finding demands the collector receipt.
+        # None (no keypair minted / no pin) ⇒ VF-2a token-only ⇒ default/benchmark certificates byte-identical.
+        _oob_pin = getattr(oob, "collector_pubkey", None) if oob is not None else None
+        self.verifier = verifier or OracleVerifier(oob_collector_pubkey=_oob_pin)
         self.max_requests = max_requests
         # OPT-IN re-executable-tier evidence retention (Proof-of-Posture). Default OFF: no probe carries
         # `evidence`, so every coverage/posture certificate is byte-identical to before (the make-gate
