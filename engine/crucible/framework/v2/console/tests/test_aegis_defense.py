@@ -57,6 +57,7 @@ def test_aegis_setup_threads_the_verdict_webhook_to_the_child(isolated_current, 
 
     def _fake_popen(cmd, **kw):
         captured["cmd"] = list(cmd)
+        captured["env"] = dict(kw.get("env") or {})
         return _FakeProc()
 
     monkeypatch.setattr(actions, "run_dir", lambda rid, **kw: isolated_current / rid)
@@ -68,13 +69,19 @@ def test_aegis_setup_threads_the_verdict_webhook_to_the_child(isolated_current, 
         "verdict_webhook": "https://siem.example/hook", "verdict_sink": "slack",
     })
     assert r.get("status") == "running", r
-    cmd = captured["cmd"]
-    assert "--verdict-webhook" in cmd and "https://siem.example/hook" in cmd
-    assert cmd[cmd.index("--verdict-sink") + 1] == "slack"
+    cmd = captured["cmd"]; env = captured["env"]
+    # HARDENING: the operator/deployment config — the verdict webhook AND the HMAC secret AND the upstream —
+    # rides the child ENV (AEGIS_GW_*), never the argv, so nothing sensitive can leak via /proc/<pid>/cmdline.
+    assert env.get("AEGIS_GW_VERDICT_WEBHOOK") == "https://siem.example/hook"
+    assert env.get("AEGIS_GW_VERDICT_SINK") == "slack"
+    assert env.get("AEGIS_GW_SECRET") == "sekret"
+    assert env.get("AEGIS_GW_UPSTREAM") == "http://127.0.0.1:3000"
+    # nothing operator-provided is on the argv — no secret, no webhook URL, no upstream can leak there
+    _argv = " ".join(cmd)
+    assert "sekret" not in _argv and "https://siem.example/hook" not in _argv and "127.0.0.1:3000" not in _argv
     assert r["verdict_webhook"] == "https://siem.example/hook" and r["verdict_sink"] == "slack"
     assert "--verdict-webhook" in r["production_command"]
-    # the auth secret is NEVER on the argv (it rides the inherited env)
-    assert "AEGIS_VERDICT_WEBHOOK_AUTHORIZATION" not in " ".join(cmd)
+    assert "AEGIS_VERDICT_WEBHOOK_AUTHORIZATION" not in _argv
 
 
 def test_aegis_setup_refusals_do_not_import_the_aegis_engine(isolated_current):

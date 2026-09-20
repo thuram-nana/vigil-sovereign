@@ -5129,14 +5129,14 @@ def aegis_setup(body: dict) -> dict:
     verdicts = rd / "verdicts.jsonl"
     verdicts.write_text("", encoding="utf-8")
     status_file = rd / "status.json"
+    # HARDENING: the operator/deployment config — upstream, host, port, mode, slug, honeypots, the verdict
+    # webhook, and ESPECIALLY the per-deployment HMAC secret — is handed to the child via its ENV, never the
+    # argv. A process command line is world-readable through /proc/<pid>/cmdline, so a secret placed there
+    # leaks to any local user; the env of a 0700-spawned child does not. The gateway CLI reads AEGIS_GW_*
+    # (with the flags as an explicit fallback for a hand-run gateway). Only constant tokens + VIGIL-generated
+    # output paths remain on the argv, so no operator-tainted value ever reaches the process command line.
     cmd = [sys.executable, "-m", "framework.v2", "aegis", "gateway",
-           "--upstream", upstream, "--host", host, "--port", str(port), "--mode", mode,
-           "--slug", slug, "--secret", secret,
            "--verdicts-out", str(verdicts), "--status-out", str(status_file)]
-    for hp in honeypots:
-        cmd += ["--honeypot", hp]
-    if verdict_webhook:
-        cmd += ["--verdict-webhook", verdict_webhook, "--verdict-sink", verdict_sink]
     # Anchor the gateway child on THIS running module's tree (…/framework/v2/console/actions.py → parents[3]
     # holds framework/), the SAME pattern benchmark_run uses: `python -m framework.v2` prepends the console's
     # launch CWD to sys.path, so a DIFFERENT framework/ package sitting in that CWD (e.g. an older standalone
@@ -5147,6 +5147,17 @@ def aegis_setup(body: dict) -> dict:
     _gw_root = Path(__file__).resolve().parents[3]
     _gw_env = dict(os.environ)
     _gw_env["CRUCIBLE_ROOT"] = str(paths.crucible_root())
+    _gw_env["AEGIS_GW_UPSTREAM"] = upstream
+    _gw_env["AEGIS_GW_HOST"] = host
+    _gw_env["AEGIS_GW_PORT"] = str(port)
+    _gw_env["AEGIS_GW_MODE"] = mode
+    _gw_env["AEGIS_GW_SLUG"] = slug
+    _gw_env["AEGIS_GW_SECRET"] = secret
+    if honeypots:
+        _gw_env["AEGIS_GW_HONEYPOTS"] = "\n".join(honeypots)
+    if verdict_webhook:
+        _gw_env["AEGIS_GW_VERDICT_WEBHOOK"] = verdict_webhook
+        _gw_env["AEGIS_GW_VERDICT_SINK"] = verdict_sink
     try:
         logf = open(rd / "gateway.log", "ab")  # noqa: SIM115 — held by the persistent child
         proc = subprocess.Popen(cmd, stdout=logf, stderr=subprocess.STDOUT,  # noqa: S603
