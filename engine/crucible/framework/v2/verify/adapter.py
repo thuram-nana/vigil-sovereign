@@ -477,13 +477,22 @@ class FindingContext(BaseModel):
         *,
         bug_class: str = "boolean_sqli",
         discriminator: Mapping[str, Any] | None = None,
+        true_payload: str = "",
+        false_payload: str = "",
     ) -> "FindingContext":
         """Aligned per-round responses for the SPRT boolean-inference oracle:
         for each round, the TRUE-clause response and two FALSE-clause responses
         (the second is the dynamic-page control). Rounds are zipped to the
-        shortest of the three lists; nothing is fetched here."""
+        shortest of the three lists; nothing is fetched here.
+
+        ``true_payload``/``false_payload`` are the injected clauses; when supplied
+        they are retained on every round so the offline oracle can strip the
+        reflected payloads from the bodies IDENTICALLY to the live probe (the
+        boolean-blind reflection defense). Defaulting to "" keeps every existing
+        caller byte-identical (an empty payload strips nothing)."""
         rounds = [
-            {"true": _response_to_dict(t), "false_a": _response_to_dict(a), "false_b": _response_to_dict(b)}
+            {"true": _response_to_dict(t), "false_a": _response_to_dict(a), "false_b": _response_to_dict(b),
+             "true_payload": true_payload, "false_payload": false_payload}
             for t, a, b in zip(true_responses, false_a_responses, false_b_responses)
         ]
         return cls(

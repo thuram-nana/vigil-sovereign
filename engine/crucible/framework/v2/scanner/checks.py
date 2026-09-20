@@ -101,7 +101,8 @@ class BooleanInferenceCheck:
     p0: float = 0.1
 
     def probe(self, template: RequestTemplate, point: InsertionPoint, send: Send) -> FindingContext | None:
-        from ..verify.oracles import differential_response_oracle  # local: avoid import cycle at module load
+        # local: avoid import cycle at module load
+        from ..verify.oracles import _strip_reflections, differential_response_oracle
 
         upper = math.log((1.0 - self.beta) / self.alpha)
         lower = math.log(self.beta / (1.0 - self.alpha))
@@ -109,6 +110,7 @@ class BooleanInferenceCheck:
         trues: list[dict] = []
         false_as: list[dict] = []
         false_bs: list[dict] = []
+        payloads = [self.true_clause, self.false_clause]
         for _ in range(self.n_max):
             t = _as_dict(send(template.render(point, self.true_clause)))
             a = _as_dict(send(template.render(point, self.false_clause)))
@@ -116,8 +118,15 @@ class BooleanInferenceCheck:
             trues.append(t)
             false_as.append(a)
             false_bs.append(b)
-            across = differential_response_oracle(a, t).fired
-            within_same = not differential_response_oracle(a, b).fired
+            # Strip the reflected clauses (raw + encoded forms) before the differential so a
+            # PURE input-reflecting endpoint cannot masquerade as a boolean channel — applied
+            # IDENTICALLY here (live) and in boolean_inference_oracle (offline re-verify), which
+            # re-strips from the retained rounds via the true_payload/false_payload we pass below.
+            ts = _strip_reflections(t, payloads)
+            as_ = _strip_reflections(a, payloads)
+            bs = _strip_reflections(b, payloads)
+            across = differential_response_oracle(as_, ts).fired
+            within_same = not differential_response_oracle(as_, bs).fired
             signal = across and within_same
             llr += math.log(self.p1 / self.p0) if signal else math.log((1.0 - self.p1) / (1.0 - self.p0))
             if llr >= upper or llr <= lower:
@@ -125,6 +134,7 @@ class BooleanInferenceCheck:
 
         return FindingContext.from_boolean_probes(
             trues, false_as, false_bs, bug_class=self.bug_class,
+            true_payload=self.true_clause, false_payload=self.false_clause,
         )
 
 

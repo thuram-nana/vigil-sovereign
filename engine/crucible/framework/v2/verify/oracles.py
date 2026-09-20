@@ -20,6 +20,7 @@ import binascii
 import difflib
 import hashlib
 import hmac
+import html
 import ipaddress
 import json
 import math
@@ -29,7 +30,7 @@ from dataclasses import dataclass
 from html.parser import HTMLParser
 from statistics import median
 from typing import Any, Mapping, Sequence
-from urllib.parse import urlsplit
+from urllib.parse import quote as _url_quote, quote_plus as _url_quote_plus, urlsplit
 
 from .models import OracleKind, OracleSignal
 
@@ -518,6 +519,46 @@ def _sprt_decision(
     return decided, llr, n_used, n_signal, upper, lower
 
 
+def _strip_reflections(resp: Any, payloads: Sequence[str]) -> dict:
+    """Return a COPY of an observed-response dict with every occurrence of each
+    injected ``payload`` — and its common encoded forms — removed from ``body``.
+
+    This is the classic boolean-blind *reflection defense*. A pure INPUT-REFLECTING
+    endpoint (one that merely echoes the injected value back into its body, with NO
+    backend boolean evaluation) makes the TRUE-clause and FALSE-clause responses
+    differ ONLY because the two clauses are different strings — not because the
+    backend evaluated them. Computing the SPRT differential over the RAW bodies
+    therefore fires on the reflected payload and mints a false FACT. After removing
+    every reflected payload (raw, ``quote(safe='')``, ``quote_plus``, and
+    ``html.escape`` forms), a pure echo yields IDENTICAL stripped bodies ⇒ the
+    differential does not fire ⇒ INCONCLUSIVE. A real boolean channel's backend
+    content (rows vs empty, an error vs a record) does NOT contain the payload, so
+    it survives stripping untouched ⇒ the differential still fires ⇒ FACT.
+
+    Empty / no payloads ⇒ the body is returned UNCHANGED (a no-op), so every caller
+    that passes no payloads stays byte-identical."""
+    out = dict(resp) if isinstance(resp, Mapping) else {"body": str(resp)}
+    body = out.get("body")
+    if not isinstance(body, str) or not payloads:
+        return out
+    forms: list[str] = []
+    for p in payloads:
+        if not isinstance(p, str) or not p:
+            continue
+        for form in (p, _url_quote(p, safe=""), _url_quote_plus(p), html.escape(p)):
+            if form and form not in forms:
+                forms.append(form)
+    if not forms:
+        return out
+    # Strip longest forms first so an encoded form is not partially eaten by a shorter one.
+    for form in sorted(forms, key=len, reverse=True):
+        body = body.replace(form, "")
+    out["body"] = body
+    if "length" in out:
+        out["length"] = len(body)
+    return out
+
+
 def boolean_inference_oracle(
     probe_rounds: Any,
     *,
@@ -553,8 +594,18 @@ def boolean_inference_oracle(
         for r in (probe_rounds or []):
             if not isinstance(r, Mapping) or "true" not in r or "false_a" not in r or "false_b" not in r:
                 continue
-            across = differential_response_oracle(r["false_a"], r["true"], discriminator).fired
-            within_same = not differential_response_oracle(r["false_a"], r["false_b"], discriminator).fired
+            # Strip the reflected injected clauses (raw + encoded forms) from every
+            # response BEFORE the differential, so a pure input-reflecting endpoint —
+            # whose true/false bodies differ ONLY by the echoed clause — collapses to
+            # identical stripped bodies (INCONCLUSIVE), while a real boolean channel's
+            # backend content survives (FACT). A round with no *_payload keys strips
+            # nothing (a no-op) ⇒ byte-identical to the pre-fix behaviour.
+            payloads = [p for p in (r.get("true_payload"), r.get("false_payload")) if p]
+            true_r = _strip_reflections(r["true"], payloads)
+            false_a = _strip_reflections(r["false_a"], payloads)
+            false_b = _strip_reflections(r["false_b"], payloads)
+            across = differential_response_oracle(false_a, true_r, discriminator).fired
+            within_same = not differential_response_oracle(false_a, false_b, discriminator).fired
             yield bool(across and within_same)
 
     decided, llr, n_used, signals, upper, lower = _sprt_decision(

@@ -285,3 +285,117 @@ def test_ssti_out_of_scope_url_mints_nothing(monkeypatch, tmp_path):
     res = runtime_redrive("http://10.99.99.99/q?id=1", slug="alpha", engagement_slug="alpha",
                           signers=_signers(), claimed_class="ssti")
     assert res.refused and res.n_facts == 0, "an out-of-scope target must be refused before any traffic"
+
+
+# ---------------------------------------------------------------------------------------------------
+# REGRESSION (red-pen BLOCK): a PURE input-reflecting endpoint must NOT mint a boolean-blind FACT.
+#
+# Before the reflection-stripping fix, an endpoint that merely ECHOED the injected value back into its
+# body (NO backend boolean evaluation) made the TRUE-clause and FALSE-clause responses differ ONLY by
+# the reflected clause string — so the SPRT `across` differential fired every round and a signed
+# boolean_sqli/xpath_injection FACT was minted on a page with no injection channel at all. The fix
+# strips every reflected payload (raw + encoded forms) from the bodies BEFORE the differential, applied
+# IDENTICALLY live (checks.py) and offline (boolean_inference_oracle over the retained rounds), so a
+# pure echo collapses to identical stripped bodies ⇒ INCONCLUSIVE, while real backend content survives.
+# ---------------------------------------------------------------------------------------------------
+
+class _ReflectApp(http.server.BaseHTTPRequestHandler):
+    """PURE input reflection: echoes the injected value into MULTIPLE body fields (title, breadcrumb,
+    echo — as a real search page reflects a query term), with NO backend query. The two FALSE responses
+    are byte-identical (the dynamic-page control holds), and true vs false differ ONLY by the reflected
+    clause — the exact false-positive the stripping fix must refuse."""
+    def do_GET(self):  # noqa: N802
+        import json
+        from urllib.parse import parse_qs, urlsplit
+        v = (parse_qs(urlsplit(self.path).query).get("id") or [""])[0]
+        raw = json.dumps({"title": f"Search results for {v}",
+                          "breadcrumb": f"Home / Search / {v}",
+                          "q": v, "echo": v, "results": []}).encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(raw)))
+        self.end_headers(); self.wfile.write(raw)
+
+    def log_message(self, *a):
+        return
+
+
+@pytest.mark.parametrize("cls", ["boolean_sqli", "xpath_injection"])
+def test_pure_input_reflection_mints_no_fact_live(monkeypatch, tmp_path, cls):
+    """LIVE: a pure-echo endpoint must be INCONCLUSIVE, never a FACT or a LEAD — reflection is not a channel."""
+    res = _run(monkeypatch, tmp_path, _ReflectApp, "http://127.0.0.1:{port}/q?id=1", cls)
+    assert res.n_facts == 0, f"{cls}: a pure input-reflecting endpoint must NOT mint a boolean-blind FACT"
+    assert not res.leads, f"{cls}: reflected-only differential is INCONCLUSIVE, not a LEAD"
+    assert res.family_verdict(cls) == "INCONCLUSIVE", f"{cls}: pure reflection != CLEAN and != FACT"
+
+
+@pytest.mark.parametrize("cls", ["boolean_sqli", "xpath_injection"])
+def test_pure_input_reflection_is_inconclusive_offline(monkeypatch, tmp_path, cls):
+    """OFFLINE: capture the SPRT rounds against the pure-echo endpoint exactly as the runner would, then
+    re-adjudicate through the SAME deterministic boolean_inference oracle — it must NOT fire (the retained
+    rounds carry true_payload/false_payload so the offline strip matches the live strip byte-for-byte)."""
+    from framework.v2.scanner.checks import BooleanInferenceCheck
+    from framework.v2.scanner.insertion import HttpRequest, InsertionKind, RequestTemplate
+    from framework.v2.verify.oracles import boolean_inference_oracle
+    from vigil_integration.live.runtime_redrive import _SPRT_CLAUSES
+
+    t, f = _SPRT_CLAUSES[cls]
+    srv = _serve(_ReflectApp); port = srv.server_address[1]
+    try:
+        import urllib.request
+
+        def send(req):
+            r = req  # RequestTemplate.render returns an HttpRequest
+            with urllib.request.urlopen(r.url, timeout=5) as resp:  # noqa: S310  (loopback test fixture)
+                return {"status": resp.status, "body": resp.read().decode("utf-8", "replace")}
+
+        tmpl = RequestTemplate(HttpRequest(method="GET", url=f"http://127.0.0.1:{port}/q?id=1"))
+        point = next(p for p in tmpl.insertion_points(kinds=(InsertionKind.QUERY_VALUE,))
+                     if p.name.lower() == "id")
+        chk = BooleanInferenceCheck(id=f"rt-{cls}", bug_class=cls, true_clause=t, false_clause=f, n_max=12)
+        ctx = chk.probe(tmpl, point, send)
+        assert ctx is not None
+        rounds = ctx.to_verifier_context().get("probe_rounds")
+        assert rounds and all("true_payload" in r and "false_payload" in r for r in rounds), (
+            "retained rounds must carry the payloads so the offline oracle strips identically")
+        signal = boolean_inference_oracle(rounds)
+        assert not signal.fired, (
+            f"{cls}: offline boolean_inference oracle must NOT fire on a pure-reflection capture")
+    finally:
+        srv.shutdown()
+
+
+def test_reflection_strip_is_a_noop_without_payloads_and_defends_only_echo():
+    """Unit guard for the load-bearing helper: (1) NO-payload rounds are byte-identical to the pre-fix
+    behaviour (every non-SPRT caller stays unchanged); (2) a pure-echo round is refused; (3) a REAL
+    backend-content channel (rows vs empty, payload NOT in the body) still fires."""
+    from framework.v2.verify.oracles import _strip_reflections, boolean_inference_oracle
+
+    # (1) no-op: empty payloads leave the body (and length) untouched.
+    r = {"body": "abc' OR '1'='1 xyz", "length": 18}
+    assert _strip_reflections(r, []) == r
+    assert _strip_reflections(r, [""]) == r
+
+    # (1b) a round WITHOUT *_payload keys must produce exactly the pre-fix decision (no-op strip). A pure
+    # echo without retained payloads therefore STILL fires — proving the strip, not some other change, is
+    # what defends the channel, and that legacy/other callers are byte-identical.
+    echo_no_payload = [{"true": {"body": "q=TRUECLAUSE " * 4},
+                        "false_a": {"body": "q=FALSECLAUSE " * 4},
+                        "false_b": {"body": "q=FALSECLAUSE " * 4}} for _ in range(6)]
+    assert boolean_inference_oracle(echo_no_payload).fired, (
+        "no-payload rounds must be byte-identical to pre-fix (strip is additive/opt-in)")
+
+    # (2) same echo, now WITH retained payloads → stripped identical → refused.
+    echo_with_payload = [{**rd, "true_payload": "TRUECLAUSE", "false_payload": "FALSECLAUSE"}
+                         for rd in echo_no_payload]
+    assert not boolean_inference_oracle(echo_with_payload).fired, (
+        "a pure-echo capture with retained payloads must be refused (stripped bodies are identical)")
+
+    # (3) a REAL boolean channel: backend content differs (rows vs empty) and does NOT contain the payload,
+    # so stripping is a no-op on it → the differential still fires → FACT survives the fix.
+    real = [{"true": {"body": "records: " + " ".join(f"row{i}" for i in range(40))},
+             "false_a": {"body": "records: none"},
+             "false_b": {"body": "records: none"},
+             "true_payload": "TRUECLAUSE", "false_payload": "FALSECLAUSE"} for _ in range(6)]
+    assert boolean_inference_oracle(real).fired, (
+        "a real backend-content boolean channel must survive stripping and still mint")
