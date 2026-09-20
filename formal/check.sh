@@ -25,21 +25,21 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # checker. Override the jar entirely with TLA2TOOLS_JAR for offline/air-gapped runs.
 #
 # NOTE: GitHub RELEASE ASSETS are mutable — the tlaplus maintainers re-upload the
-# v1.8.0 tla2tools.jar in place. This has now happened twice, each time correctly
+# v1.8.0 tla2tools.jar in place. This has now happened three times, each time correctly
 # tripping this pin (fail-closed) rather than silently model-checking against a
 # different checker:
 #   * 2026-08-11 -> sha256 ab323b79… (re-verified, pinned)
-#   * 2026-08-21 -> sha256 eabd140a… (re-verified, pinned — CURRENT)
+#   * 2026-08-21 -> sha256 eabd140a… (re-verified, pinned)
+#   * 2026-09-17 -> sha256 9d36716f… (re-verified, pinned — CURRENT)
 # The current bytes were re-verified authentic before re-pinning: fetched over TLS
 # from the official tlaplus/tlaplus v1.8.0 release; a valid JAR whose MANIFEST reads
-# "Implementation-Title: TLA+ Tools / Implementation-Vendor: Microsoft Corp." (build
-# 2026-08-21), containing tlc2/TLC.class + tla2sany; the sha256 is stable across
-# repeated independent fetches; AND functionally confirmed by running THIS script's
-# four faithful specs (all hold) + four mutants (all caught) against them — a tampered
-# jar could not produce the correct TLC counterexamples. If it drifts again the gate
-# fails loudly for a fresh re-verification.
+# "Main-Class: tlc2.TLC / Implementation-Version: 2.0 2026-09-17", containing
+# tlc2/TLC.class (54833 bytes) + tla2sany + pcal; AND functionally confirmed by running
+# THIS script's four faithful specs (all hold) + four mutants (all caught) against it
+# with TLC2 Version 2026.09.17 — a tampered jar could not produce the correct TLC
+# counterexamples. If it drifts again the gate fails loudly for a fresh re-verification.
 TLA_URL="${TLA2TOOLS_URL:-https://github.com/tlaplus/tlaplus/releases/download/v1.8.0/tla2tools.jar}"
-TLA_SHA256="eabd140a70f49eb9305a3bd3f3df944eddf87e5a90d329789085f8953a80533a"
+TLA_SHA256="9d36716ffb5e49d1ba8fae4651eba59f3189887e12eb90e204a42d2e6e993fef"
 CACHE="${TLA2TOOLS_CACHE:-$HERE/.tla2tools.jar}"
 
 resolve_jar() {
