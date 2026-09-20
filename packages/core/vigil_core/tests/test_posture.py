@@ -9,8 +9,10 @@ from __future__ import annotations
 import pytest
 
 from vigil_core.posture import (
+    GOVERNED_ENV,
     LEGACY_OWNER_TOKEN_ENV,
     POSTURE_ENV,
+    is_governed_posture,
     is_production_posture,
     legacy_owner_token_disabled,
     legacy_owner_token_grants_owner,
@@ -56,3 +58,20 @@ def test_grants_owner_is_the_conjunction_not_production_and_not_disabled():
     assert legacy_owner_token_grants_owner({POSTURE_ENV: "production",
                                             LEGACY_OWNER_TOKEN_ENV: "1"}) is False
     assert legacy_owner_token_grants_owner({POSTURE_ENV: "dev"}) is True   # a non-production posture value
+
+
+def test_governed_posture_refuses_the_legacy_owner_token_without_the_egress_lockdown():
+    """Phase 0.2 / R-CRITICAL-2: a GOVERNED deployment (VIGIL_GOVERNED truthy) refuses the fail-open owner
+    token — requiring per-user PoP auth — WITHOUT arming production's loopback-only egress lockdown, so an
+    authorized external engagement can still run. Default (unset) is unchanged, so a dev / single-owner host
+    is never silently locked out."""
+    assert is_governed_posture({}) is False                                  # default: not governed
+    assert is_governed_posture({GOVERNED_ENV: "1"}) is True
+    assert is_governed_posture({GOVERNED_ENV: "true"}) is True
+    assert is_governed_posture({GOVERNED_ENV: "0"}) is False                  # a falsy value ⇒ not governed
+    assert is_governed_posture({GOVERNED_ENV: ""}) is False
+    # governed refuses the token even with the toggle left ON (unconditional, like production)...
+    assert legacy_owner_token_grants_owner({GOVERNED_ENV: "1"}) is False
+    assert legacy_owner_token_grants_owner({GOVERNED_ENV: "1", LEGACY_OWNER_TOKEN_ENV: "1"}) is False
+    # ...but governed does NOT arm the production posture, so external egress is not forced off (decoupled).
+    assert is_production_posture({GOVERNED_ENV: "1"}) is False

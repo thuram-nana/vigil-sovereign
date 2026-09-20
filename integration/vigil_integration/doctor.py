@@ -612,13 +612,23 @@ def _posture_legacy_owner_token() -> "tuple[str, str]":
     (SIGIL_LEGACY_OWNER_TOKEN falsy); ENABLED (the default) otherwise. Read from env only — no import of
     sigil (FATAL-2). Under the PRODUCTION gate it must be DISABLED; the sigil server ALSO refuses the token
     at runtime under VIGIL_POSTURE=production (defense in depth), so the two enforce the same rule."""
-    from vigil_core.posture import LEGACY_OWNER_TOKEN_ENV, legacy_owner_token_disabled
+    # Report DISABLED on the EXPLICIT operator opt-outs — a falsy SIGIL_LEGACY_OWNER_TOKEN OR the GOVERNED
+    # posture — NOT merely because production refuses the token at runtime. The production START gate keys on
+    # this and deliberately requires the explicit opt-out (defense in depth: it will not accept "production
+    # refuses it at runtime" as sufficient, so the config is unambiguous). GOVERNED is an explicit posture the
+    # operator arms, so it satisfies the same requirement while (unlike production) still permitting egress.
+    from vigil_core.posture import (GOVERNED_ENV, LEGACY_OWNER_TOKEN_ENV,
+                                     is_governed_posture, legacy_owner_token_disabled)
     if legacy_owner_token_disabled():
         return "DISABLED", (f"{LEGACY_OWNER_TOKEN_ENV} is set falsy — the legacy shared owner token is "
                             f"refused; per-user proof-of-possession auth is required")
+    if is_governed_posture():
+        return "DISABLED", (f"{GOVERNED_ENV} is set — a governed deployment refuses the legacy shared owner "
+                            f"token (per-user PoP auth required; external egress still permitted, unlike "
+                            f"production)")
     return "ENABLED", (f"{LEGACY_OWNER_TOKEN_ENV} is unset — the legacy embedded shared owner token maps to "
                        f"the owner principal (a fail-open dev convenience); set {LEGACY_OWNER_TOKEN_ENV}=0 "
-                       f"to require per-user PoP auth")
+                       f"or {GOVERNED_ENV}=1 to require per-user PoP auth")
 
 
 def _posture_egress_supervisor() -> "tuple[str, str]":
