@@ -65,13 +65,32 @@ def _safe_component(value: Any) -> str:
     return s
 
 
+def _contained_child(root: Path, filename: str) -> Optional[Path]:
+    """``root/filename`` ONLY if it normalizes to a *direct* child of ``root``; else None.
+
+    Defense-in-depth over :func:`_safe_component` (which already strips ``/``/``\\``/``..``/control chars):
+    a resolved-path containment barrier that also holds if that first sanitizer ever regresses, and that a
+    static path-injection analyzer recognizes as a barrier guard. ``realpath`` normalizes ``..``/symlinks so
+    the ``startswith`` prefix test cannot be fooled by a crafted name; the ``dirname`` equality then rejects
+    any *nested* descendant, so only a single flat filename under ``root`` is ever returned. The returned
+    Path is the un-resolved ``root / filename`` — byte-identical to the pre-barrier shape callers expect."""
+    candidate = root / filename
+    root_real = os.path.realpath(str(root))
+    cand_real = os.path.realpath(str(candidate))
+    if not cand_real.startswith(root_real + os.sep):
+        return None
+    if os.path.dirname(cand_real) != root_real:
+        return None
+    return candidate
+
+
 def authorization_path(base_dir: Any, slug: str) -> Optional[Path]:
     """The bundle path for ``slug`` (``<base>/target-authorizations/<slug>.json``), or None if the slug is
     unsafe as a path component."""
     safe = _safe_component(slug)
     if not safe:
         return None
-    return authorizations_root(base_dir) / f"{safe}.json"
+    return _contained_child(authorizations_root(base_dir), f"{safe}.json")
 
 
 def _atomic_write_json(path: Path, obj: dict) -> None:
@@ -113,7 +132,9 @@ def write_authorization(
     safe = _safe_component(slug)
     if not safe:
         raise ValueError(f"unsafe authorization slug: {slug!r}")
-    path = authorizations_root(base_dir) / f"{safe}.json"
+    path = _contained_child(authorizations_root(base_dir), f"{safe}.json")
+    if path is None:  # containment barrier — unreachable for a _safe_component-clean slug, kept fail-closed
+        raise ValueError(f"unsafe authorization slug (escapes authorizations dir): {slug!r}")
     obj = {
         "schema_version": _SCHEMA_VERSION,
         "kind": _AUTHZ_SCHEMA,

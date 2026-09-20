@@ -90,6 +90,22 @@ def test_unsafe_slug_is_refused_on_write_and_read(bad):
     assert B.read_authorization(base, bad) is None
 
 
+@pytest.mark.parametrize("bad_name", ["../escape.json", "../../etc/passwd", "sub/child.json", "/abs.json"])
+def test_containment_barrier_refuses_escaping_filenames(bad_name):
+    # Defense-in-depth barrier (independent of _safe_component): a filename that normalizes outside the
+    # authorizations dir, or into a nested descendant, is refused even if it reached _contained_child.
+    base = tempfile.mkdtemp()
+    root = B.authorizations_root(base)
+    assert B._contained_child(root, bad_name) is None
+
+
+def test_containment_barrier_allows_a_flat_child():
+    base = tempfile.mkdtemp()
+    root = B.authorizations_root(base)
+    child = B._contained_child(root, "apme-cm.json")
+    assert child is not None and child == root / "apme-cm.json"
+
+
 def test_malformed_or_foreign_file_reads_as_none():
     base = tempfile.mkdtemp()
     root = B.authorizations_root(base)
