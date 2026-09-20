@@ -612,24 +612,29 @@ _CRUCIBLE_RUNS_UNIT = ".console/runs"                 # a whole SUBTREE unit
 # evidence archive (``targets/<slug>/evidence/**``). A restore without it produces an install that has lost
 # every client engagement + its evidence. A whole SUBTREE unit, replaced wholesale like the runs unit.
 _CRUCIBLE_TARGETS_UNIT = "targets"
-# W7-2 (#460): the two TRUST-STATE units a functional recovery needs — dropping either is a fail-OPEN posture
-# regression on restore (a recovered install could not re-establish its entitlement gate or its destruction
-# m-of-n and would run un-gated).
+# W7-2 (#460): the three TRUST-STATE units a functional recovery needs — dropping any is a fail-OPEN/fail-CLOSED
+# posture regression on restore (a recovered install could not re-establish its entitlement gate, its
+# destruction m-of-n, or its authority-verification root).
 #   * the entitlement TRUST ROOT (``framework/v2/.entitlement``): the authoriser public keys + threshold, the
 #     threshold-signed entitlement, and the signed revocation list — all PUBLIC/signed material, no private
 #     keys, so it travels safely under the passphrase seal;
 #   * the DestructionAuthority (``framework/v2/.authority``): the per-slug signed engagement authority (owner-
 #     bound m-of-n scope) AND the ``{slug}.halt`` kill-switch markers.
-# Both are captured + restored the SAME tier as ``targets/`` — whole SUBTREE units, replaced wholesale. Honest
-# scope of the wholesale replace: a ``--force`` restore whose backup lacks a kill-switch that currently exists
-# at the destination drops that ``.halt`` — the force-gate (a present authority unit refuses restore without
-# ``--force``) is what stops that being silent; a fresh-host DR restore has no pre-existing halt to lose.
-# The entitlement dir is captured ONLY at its DEFAULT in-tree location: a ``CRUCIBLE_ENTITLEMENT_DIR`` override
-# deliberately holds the trust root OFF the code tree (a separate secure / read-only / HSM-fronted mount), so
-# it is an EXPLICIT documented exclusion — re-provisioned from that mount (or a re-run of entitlement
-# provisioning) on the new host, never carried in this backup (see :func:`_iter_crucible_files`).
+#   * the governance AUTHORITY trust root (``framework/v2/.authority-root``, Phase 0.1): the TrustRoot that
+#     VERIFIES the signed engagement authorities in ``.authority`` (kept OFF ``.entitlement`` so persisting it
+#     never trips capability enforcement). Dropping it on restore leaves the authority DOCUMENTS unverifiable —
+#     ``_has_verified_authority`` / ``_engage_authority_trust_root`` then fail CLOSED and remote engage refuses.
+# All three are captured + restored the SAME tier as ``targets/`` — whole SUBTREE units, replaced wholesale.
+# Honest scope of the wholesale replace: a ``--force`` restore whose backup lacks a kill-switch that currently
+# exists at the destination drops that ``.halt`` — the force-gate (a present authority unit refuses restore
+# without ``--force``) is what stops that being silent; a fresh-host DR restore has no pre-existing halt to lose.
+# The entitlement + authority-root dirs are captured ONLY at their DEFAULT in-tree locations: a
+# ``CRUCIBLE_ENTITLEMENT_DIR`` / ``VIGIL_AUTHORITY_ROOT_DIR`` override deliberately holds the root OFF the code
+# tree (a separate secure / read-only / HSM-fronted mount), so it is an EXPLICIT documented exclusion —
+# re-provisioned from that mount on the new host, never carried in this backup (see :func:`_iter_crucible_files`).
 _CRUCIBLE_ENTITLEMENT_UNIT = "framework/v2/.entitlement"
 _CRUCIBLE_AUTHORITY_UNIT = "framework/v2/.authority"
+_CRUCIBLE_AUTHORITY_ROOT_UNIT = "framework/v2/.authority-root"
 # sqlite sidecars of the proof-db: swapping in a fresh, self-contained ``store.sqlite`` snapshot MUST drop the
 # OLD db's WAL/SHM/journal at the destination — an orphaned sidecar from the replaced db, applied to the new db
 # on next open, would corrupt it. They are never captured (the snapshot is already consistent + self-contained).
@@ -711,6 +716,8 @@ def _crucible_units_present(croot: Path) -> list[str]:
         present.append(_CRUCIBLE_ENTITLEMENT_UNIT)
     if _dir_is_nonempty(croot / _CRUCIBLE_AUTHORITY_UNIT):
         present.append(_CRUCIBLE_AUTHORITY_UNIT)
+    if _dir_is_nonempty(croot / _CRUCIBLE_AUTHORITY_ROOT_UNIT):
+        present.append(_CRUCIBLE_AUTHORITY_ROOT_UNIT)
     return present
 
 
@@ -731,7 +738,7 @@ def _atomic_swap_crucible_units(staged_croot: Path, dest_croot: Path) -> None:
         for side in _STORE_SQLITE_SIDECARS:               # drop the replaced db's orphaned sidecars
             _drop_path(dest_croot / ".blackboard" / side)
     for subtree in (_CRUCIBLE_RUNS_UNIT, _CRUCIBLE_TARGETS_UNIT, _CRUCIBLE_ENTITLEMENT_UNIT,
-                    _CRUCIBLE_AUTHORITY_UNIT):
+                    _CRUCIBLE_AUTHORITY_UNIT, _CRUCIBLE_AUTHORITY_ROOT_UNIT):
         staged_unit = staged_croot / subtree
         if staged_unit.is_dir():
             _atomic_swap_unit(staged_unit, dest_croot / subtree)
@@ -772,14 +779,16 @@ def _iter_crucible_files(croot: Path):
     evidence bytes, AND any exported self-contained verifiable bundle — the superset needed so a restored FACT
     re-verifies end-to-end); the ``targets/**`` engagement tree (W7-2 — charters, threat models, notes, and
     the per-action HTTP evidence archive), so a restore recovers the client engagements + their evidence;
-    AND (W7-2 #460) the two TRUST-STATE units a functional recovery needs — the entitlement TRUST ROOT
-    (``framework/v2/.entitlement`` — authoriser pubkeys + threshold, the signed entitlement, the revocation
-    list) and the DestructionAuthority (``framework/v2/.authority`` — the per-slug signed authority + the
-    ``{slug}.halt`` kill-switch), so a recovered install can re-establish its entitlement gate and its
-    destruction m-of-n rather than come up fail-OPEN. All are PUBLIC/signed material (no private keys), safe
-    under the passphrase seal. The entitlement unit is captured ONLY at its DEFAULT in-tree location; a
-    ``CRUCIBLE_ENTITLEMENT_DIR`` override holds the trust root off the code tree by design → documented
-    exclusion, re-provisioned from that mount on restore.
+    AND (W7-2 #460 + Phase 0.1) the three TRUST-STATE units a functional recovery needs — the entitlement TRUST
+    ROOT (``framework/v2/.entitlement`` — authoriser pubkeys + threshold, the signed entitlement, the revocation
+    list), the DestructionAuthority (``framework/v2/.authority`` — the per-slug signed authority + the
+    ``{slug}.halt`` kill-switch), and the governance AUTHORITY trust root (``framework/v2/.authority-root`` — the
+    TrustRoot that verifies the signed authorities), so a recovered install can re-establish its entitlement
+    gate, its destruction m-of-n, and its authority verification rather than come up fail-OPEN/fail-CLOSED. All
+    are PUBLIC/signed material (no private keys), safe under the passphrase seal. The entitlement + authority-root
+    units are captured ONLY at their DEFAULT in-tree locations; a ``CRUCIBLE_ENTITLEMENT_DIR`` /
+    ``VIGIL_AUTHORITY_ROOT_DIR`` override holds the root off the code tree by design → documented exclusion,
+    re-provisioned from that mount on restore.
 
     Skips ``*.lock``, the derived ``dossier.zip``, non-regular files/symlinks, AND — the W16-8 rule — anything
     under the crypto-shred EVIDENCE KEYSTORE (:func:`_evidence_keys_dir`): the per-engagement DEKs never travel
@@ -801,6 +810,14 @@ def _iter_crucible_files(croot: Path):
                   "and is EXCLUDED from this backup by design; re-provision it from that mount on the new host")
     else:
         subtrees.append(croot / _CRUCIBLE_ENTITLEMENT_UNIT)
+    # The governance AUTHORITY trust root (Phase 0.1) is captured the same way — and excluded the same way when
+    # ``VIGIL_AUTHORITY_ROOT_DIR`` holds it off the code tree. Dropping it on restore leaves the ``.authority``
+    # documents unverifiable and remote engage fails CLOSED, so it is a TRUST-STATE unit, not optional.
+    if os.environ.get("VIGIL_AUTHORITY_ROOT_DIR"):
+        _log.info("VIGIL_AUTHORITY_ROOT_DIR is set — the authority trust root is held off the crucible tree "
+                  "and is EXCLUDED from this backup by design; re-provision it from that mount on the new host")
+    else:
+        subtrees.append(croot / _CRUCIBLE_AUTHORITY_ROOT_UNIT)
     for subtree in subtrees:
         if not subtree.is_dir():
             continue

@@ -90,6 +90,8 @@ def isolated(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     auth_dir.mkdir()
     ent_dir = tmp_path / ".entitlement"
     ent_dir.mkdir()
+    auth_root_dir = tmp_path / ".authority-root"
+    auth_root_dir.mkdir()
 
     def build(slug: str, host: str) -> Path:
         td = targets_root / slug
@@ -102,6 +104,9 @@ def isolated(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(_paths, "killswitch_path", lambda s: auth_dir / f"{s}.halt")
     monkeypatch.setattr(_paths, "authority_path", lambda s: auth_dir / f"{s}.authority.json")
     monkeypatch.setattr(_paths, "trust_root_path", lambda: ent_dir / "trust-root.json")
+    # Phase 0.1 decouple: the engage/authority gate now reads the authority root from the DEDICATED store,
+    # not the entitlement trust root — isolate it here too so _engage_authority_trust_root finds it.
+    monkeypatch.setattr(_paths, "authority_root_path", lambda: auth_root_dir / "trust-root.json")
     return build
 
 
@@ -133,9 +138,10 @@ def _authority(host: str, *, env=TargetEnvironment.TWIN, allow_destructive=True,
 
 
 def _provision_trust_root():
+    from framework.v2.authority.store import write_authority_root
     ak, priv = provision.new_authorizer("a0", "Authoriser 0")
     tr = provision.build_trust_root([ak], threshold=1)
-    provision.write_trust_root(tr)   # writes to the (monkeypatched) trust_root_path
+    write_authority_root(tr)   # the engage/authority gate reads the DECOUPLED authority-root store (Phase 0.1)
     return tr, {"a0": priv}
 
 
@@ -256,8 +262,9 @@ def test_resolver_pins_trust_root_only_when_authority_provisioned(isolated):
     assert resolved is not None
     assert resolved.threshold == tr.threshold
 
-    # authority provisioned but NO trust root -> refuse (unpinned authority)
-    _paths.trust_root_path().unlink()
+    # authority provisioned but NO trust root -> refuse (unpinned authority). Remove the DECOUPLED
+    # authority root (what the engage gate reads), not the entitlement trust root (Phase 0.1).
+    _paths.authority_root_path().unlink()
     with pytest.raises(EngagementRefused, match="trust root"):
         _engage_authority_trust_root("alpha")
 
