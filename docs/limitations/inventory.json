@@ -337,6 +337,19 @@
       "source_doc": "docs/runbooks/anchor-trust-root-out-of-band.md",
       "disposition": "file-into-w16",
       "w16_issue": null
+    },
+    {
+      "id": "LIMIT-profile-packs-incremental",
+      "title": "The deep/full engagement profile names packs wired incrementally across the FACT-coverage waves",
+      "summary": "Wave 0.2 ships `--profile {surface,deep,full}` as additive-only flag expansion (resolve_profile). The deep/full rosters name packs that have no enable_* flag or pack yet — deep names time-based / NoSQL / LDAP / XPath SQLi, full additionally names business-logic and race; _PROFILE_DEFERRED lists them. resolve_profile expands to NOTHING for a not-yet-wired name (it never invents a pack), and the profile manifest + an operator note surface the gap so it is visible and auditable. The flags + packs are added by later FACT-coverage waves (Wave 1 wires time-based / NoSQL / LDAP / XPath; Wave 4 wires business-logic / race).",
+      "classification": "real-unfinished-code",
+      "severity": "info",
+      "anchor": {"file": "engine/crucible/framework/v2/engage.py", "symbol": "resolve_profile"},
+      "marker": false,
+      "check": "symbol-exists",
+      "source_doc": "docs/capability-matrix/ORACLE-RECIPE.md",
+      "disposition": "file-into-w16",
+      "w16_issue": null
     }
   ],
   "honest_limit_sites_note": "The code-scan census. docs/tests/test_limitation_inventory.py scans every non-test product .py for the honest-limit/deferred debt phrases in _DEBT_PHRASES and requires EVERY hit to be either a VIGIL-LIMIT marker line OR a site listed here whose snippet (matched case-insensitively) is a substring of the hit line. kind 'debt' names the limitations id the site belongs to (which must exist); kind 'non-debt' explains why the phrase is not a capability limit (a deliberate design choice, a runtime-state description, or a phrase describing a CHECK's target rather than VIGIL itself). Bidirectional: every snippet here must still match a debt-phrase line in its file, so deleting the prose (or moving the debt) turns CI red.",
@@ -364,6 +377,7 @@
     {"file": "integration/vigil_integration/attestation/anchor.py", "snippet": "does not yet exist", "kind": "non-debt", "note": "Describes a runtime state (the per-host counter file is absent on first write), not a capability limit."},
     {"file": "tools/backup/transport.py", "snippet": "neither is a stub", "kind": "non-debt", "note": "Explicitly asserts both backup backends are REAL (the opposite of a stub)."},
     {"file": "tools/ha/require_networkpolicy.py", "snippet": "not wired into the kustomization", "kind": "non-debt", "note": "Describes the TARGET condition this HA check detects (a NetworkPolicy the operator did not wire), not a VIGIL capability limit."},
-    {"file": "tools/ha/require_probes.py", "snippet": "not wired to /readyz", "kind": "non-debt", "note": "Describes the TARGET condition this HA check detects (probes the operator did not wire), not a VIGIL capability limit."}
+    {"file": "tools/ha/require_probes.py", "snippet": "not wired to /readyz", "kind": "non-debt", "note": "Describes the TARGET condition this HA check detects (probes the operator did not wire), not a VIGIL capability limit."},
+    {"file": "engine/crucible/framework/v2/engage.py", "snippet": "not wired yet", "kind": "debt", "limit_id": "LIMIT-profile-packs-incremental", "note": "resolve_profile skips a plan-named profile flag that is not wired yet (deferred, never fabricated); the deep/full packs are wired incrementally across the FACT-coverage waves."}
   ]
 }
