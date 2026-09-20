@@ -197,14 +197,18 @@ def _engage_authority_trust_root(slug: str) -> object | None:
     from .common import paths as _paths
     if not _paths.authority_path(slug).is_file():
         return None  # greenfield: no authority provisioned -> kill-switch-only path preserved
-    from .entitlement.store import load_trust_root
-    trust_root = load_trust_root()  # None iff the governance trust root is absent (present-but-
-    # malformed raises EntitlementError, which propagates as a fail-closed refusal, not a silent load)
+    # DECOUPLED STORE (Phase 0.1 fix): the governance AUTHORITY trust root is loaded from the DEDICATED
+    # authority-root store, NOT the entitlement store — so provisioning an authority never trips entitlement
+    # capability enforcement (which keys on `.entitlement/trust-root.json`). This read MUST point at the same
+    # store `wiring.provision_authority` writes, else a provisioned authority is not found here.
+    from .authority.store import load_authority_root
+    trust_root = load_authority_root()  # None iff the authority trust root is absent (present-but-
+    # malformed raises AuthorityError, which propagates as a fail-closed refusal, not a silent load)
     if trust_root is None:
         raise EngagementRefused(
             f"an EngagementAuthority is provisioned for {slug!r} ({_paths.authority_path(slug)}) but "
-            f"no governance trust root is discoverable ({_paths.trust_root_path()}) — refusing to "
-            "apply an UNVERIFIABLE authority on the engage path (W16-2). Provision the trust root, or "
+            f"no governance authority trust root is discoverable ({_paths.authority_root_path()}) — refusing "
+            "to apply an UNVERIFIABLE authority on the engage path (W16-2). Provision the authority root, or "
             "remove the authority document to run greenfield (kill-switch only).")
     return trust_root
 

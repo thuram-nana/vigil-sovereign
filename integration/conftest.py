@@ -142,3 +142,20 @@ def _isolate_entitlement_dir(tmp_path_factory, monkeypatch):
     _entpolicy.reset_policy()
     yield
     _entpolicy.reset_policy()
+
+
+@pytest.fixture(autouse=True)
+def _isolate_authority_root_dir(tmp_path_factory, monkeypatch):
+    """Keep the HOST-LEVEL governance AUTHORITY trust-root store hermetic per test. Phase 0.1's
+    ``provision_authority`` / ``build_engine`` PERSIST the authority trust root; the fix decouples that from the
+    entitlement store into the DEDICATED authority-root store (``framework.v2.authority.store`` ->
+    ``<v2_root>/.authority-root/trust-root.json``, override ``VIGIL_AUTHORITY_ROOT_DIR``). Without this redirect
+    the FIRST provisioning test writes the SHARED in-tree ``.authority-root/trust-root.json``; because the write
+    is BOOTSTRAP-ONCE, a LATER provisioning test then sees the prior test's stale root and its authority (signed
+    with a different key) fails verification — an order-dependent cross-test leak, exactly like the entitlement
+    dir above. Point the dir at a throwaway per test. Note: unlike the entitlement store this NEVER trips a
+    capability gate (that is the whole point of the decouple); the isolation is purely for hermeticity, and it
+    weakens NO gate. Env-only, so it is a harmless no-op in the framework-free (sovereign) leg. A test that needs
+    a specific dir sets ``VIGIL_AUTHORITY_ROOT_DIR`` in its own body (applied after this fixture, so it wins)."""
+    monkeypatch.setenv("VIGIL_AUTHORITY_ROOT_DIR", str(tmp_path_factory.mktemp("authority-root")))
+    yield

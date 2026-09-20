@@ -355,6 +355,10 @@ framework/v2/.improve/
 # Engagement authority + kill-switch state. Operator/runtime state, never
 # committed. The .halt file is the persistent hard stop.
 framework/v2/.authority/
+# Governance AUTHORITY trust root (Phase 0.1). DEDICATED store, decoupled from
+# .entitlement/ so provisioning an authority never trips capability enforcement.
+# Operator/runtime state, never committed.
+framework/v2/.authority-root/
 framework/v2/.console/
 framework/v2/intake/tests/fixtures/*
 # Session 3 regression fixtures from live URK runs ARE tracked.

@@ -316,6 +316,39 @@ def aegis_mode_path(slug: str) -> Path:
 
 
 # ---------------------------------------------------------------------------
+# Governance AUTHORITY trust root (Phase 0.1). DEDICATED store, DECOUPLED from
+# the entitlement dir above.
+#
+# This holds the TrustRoot that verifies a signed EngagementAuthority (the
+# owner-signed, threshold-verified remote-engage authority). It is DELIBERATELY
+# a SEPARATE path from `trust_root_path()` (`.entitlement/trust-root.json`):
+# `entitlement.policy._enforcement_active()` keys capability enforcement on the
+# PRESENCE of a file at `trust_root_path()`, so persisting an authority trust
+# root there would collaterally flip entitlement enforcement ON with no grant
+# minted — denying every gated capability (deep_static_analysis / active_recon /
+# exploit_execution) on a fresh deploy the moment an authority is provisioned.
+# Storing the authority root HERE keeps capability enforcement keyed ONLY on an
+# operator's explicit entitlement provisioning (the `.entitlement/` flow), while
+# the authority gate still finds + verifies its own trust root.
+#
+# Override the directory with VIGIL_AUTHORITY_ROOT_DIR so a deployment can keep
+# the authority root on a read-only / HSM-fronted mount separate from the code
+# tree (mirrors CRUCIBLE_ENTITLEMENT_DIR for the entitlement store). Gitignored.
+# ---------------------------------------------------------------------------
+
+
+def authority_root_dir() -> Path:
+    override = os.environ.get("VIGIL_AUTHORITY_ROOT_DIR")
+    if override:
+        return Path(override).expanduser()
+    return v2_root() / ".authority-root"
+
+
+def authority_root_path() -> Path:
+    return authority_root_dir() / "trust-root.json"
+
+
+# ---------------------------------------------------------------------------
 # Per-target paths
 # ---------------------------------------------------------------------------
 

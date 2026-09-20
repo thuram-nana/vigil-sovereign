@@ -560,15 +560,18 @@ def _has_verified_authority(slug: str) -> bool:
 
     HONEST SCOPE (do not overclaim): this raises the bar from "write a plaintext `Signed:` name into a
     charter file" to "produce a valid governance THRESHOLD signature". Its completeness assumes the
-    deployment trust root (.entitlement/trust-root.json) is NOT writable by the same low-privilege actor
-    who can author charters — an actor with arbitrary owner-uid filesystem write can still plant their own
+    governance authority trust root (.authority-root/trust-root.json) is NOT writable by the same low-privilege
+    actor who can author charters — an actor with arbitrary owner-uid filesystem write can still plant their own
     trust root + self-signed authority (but such an actor is outside the meaningful threat model: they could
-    equally edit code, the kill-switch, or the keys). Relocate .entitlement to a read-only / HSM-backed mount
-    via CRUCIBLE_ENTITLEMENT_DIR to close even that."""
+    equally edit code, the kill-switch, or the keys). Relocate .authority-root to a read-only / HSM-backed mount
+    via VIGIL_AUTHORITY_ROOT_DIR to close even that.
+
+    DECOUPLED STORE (Phase 0.1 fix): the trust root is loaded from the DEDICATED authority-root store, NOT the
+    entitlement store — so provisioning a remote-engage authority never trips entitlement capability enforcement
+    (which keys on `.entitlement/trust-root.json`). This is the same store `wiring.provision_authority` writes."""
     try:
-        from ..entitlement.store import load_trust_root
-        from ..authority.store import load_verified_authority
-        trust_root = load_trust_root()
+        from ..authority.store import load_authority_root, load_verified_authority
+        trust_root = load_authority_root()
         if trust_root is None:
             return False
         load_verified_authority(slug, trust_root)   # raises unless the threshold signature verifies

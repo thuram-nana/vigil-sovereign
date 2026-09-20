@@ -180,20 +180,32 @@ def provision_authority(
     )
     signed = sign_authority(doc, {key_id: kp.private_key_b64})   # authority signer = dict[key_id→priv]
     out_path = save_signed_authority(signed)
-    # B3: persist the governance trust root so `framework.v2 engage` (engage._engage_authority_trust_root) and
-    # the console remote-engage gate can LOAD + VERIFY the authority we just signed. Previously the trust root
+    # B3: persist the governance AUTHORITY trust root so `framework.v2 engage` (engage._engage_authority_trust_root)
+    # and the console remote-engage gate can LOAD + VERIFY the authority we just signed. Previously the trust root
     # was only returned in-memory, so a provisioned authority made `engage` REFUSE ("no trust root discoverable").
-    # BOOTSTRAP-ONCE + STABLE-KEY ONLY: never overwrite an existing deployment trust anchor (that would let any
+    #
+    # DECOUPLED STORE (Phase 0.1 fix): this writes to the DEDICATED authority-root store
+    # (`framework.v2.authority.store.write_authority_root` → `.authority-root/trust-root.json`, override
+    # VIGIL_AUTHORITY_ROOT_DIR), NOT the entitlement store. The entitlement store's `trust_root_path()`
+    # (`.entitlement/trust-root.json`) is what `entitlement.policy._enforcement_active()` keys CAPABILITY
+    # ENFORCEMENT on, so writing the authority root there flipped enforcement ON with no entitlement grant minted —
+    # breaking codescan/deep-fix/recon (deep_static_analysis / active_recon / exploit_execution then DENY) on the
+    # first engage of a fresh deploy. Persisting to a path `entitlement.policy` does NOT watch keeps capability
+    # enforcement keyed ONLY on an operator's EXPLICIT entitlement provisioning. Both read sites load from this
+    # same authority-root store.
+    # BOOTSTRAP-ONCE + STABLE-KEY ONLY: never overwrite an existing deployment authority anchor (that would let any
     # provisioning reset the root of trust), and never persist an anchor for the legacy ephemeral per-run key —
-    # only for a homed/explicit governance key. If a trust root already exists, this key must already be one of
+    # only for a homed/explicit governance key. If an authority root already exists, this key must already be one of
     # its authorizers, else the authority honestly fails verification downstream (fail-closed, never fail-open).
     if keypair is not None or base_dir is not None:
         try:
-            from framework.v2.entitlement.store import load_trust_root as _load_trust_root
-            from framework.v2.entitlement.provision import write_trust_root as _write_trust_root
-            if _load_trust_root() is None:
-                _write_trust_root(trust_root)
-        except Exception:  # noqa: BLE001 — best-effort persist; a missing trust root fails CLOSED at the gate
+            from framework.v2.authority.store import (
+                load_authority_root as _load_authority_root,
+                write_authority_root as _write_authority_root,
+            )
+            if _load_authority_root() is None:
+                _write_authority_root(trust_root)
+        except Exception:  # noqa: BLE001 — best-effort persist; a missing authority root fails CLOSED at the gate
             pass
     return Provisioned(
         keypair=kp, trust_root=trust_root,

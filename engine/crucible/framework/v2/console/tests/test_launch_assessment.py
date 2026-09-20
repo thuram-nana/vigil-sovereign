@@ -66,8 +66,10 @@ def test_charter_existence_alone_no_longer_authorizes_remote(tmp_path, monkeypat
     )
     monkeypatch.setattr(actions.paths, "charter_path", lambda s: charter)
     monkeypatch.setattr(actions.paths, "authority_path", lambda s: tmp_path / "no-authority.json")
-    # A fresh deployment has no governance trust root → the verified gate is fail-closed regardless of env.
-    monkeypatch.setattr("framework.v2.entitlement.store.load_trust_root", lambda path=None: None)
+    # A fresh deployment has no governance AUTHORITY trust root → the verified gate is fail-closed regardless of
+    # env. The authority root lives in the DEDICATED authority-root store (decoupled from the entitlement store,
+    # Phase 0.1), so stub THAT loader — `_has_verified_authority` no longer reads `entitlement.store`.
+    monkeypatch.setattr("framework.v2.authority.store.load_authority_root", lambda path=None: None)
     assert actions._has_charter(slug) is True             # the OLD existence check would have authorized it
     assert actions._has_verified_authority(slug) is False  # the NEW verified gate refuses (fail-closed)
 
