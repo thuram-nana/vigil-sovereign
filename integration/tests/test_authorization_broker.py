@@ -10,6 +10,7 @@ reader's job — so this is transport correctness + safety, not the crypto (that
 from __future__ import annotations
 
 import json
+import os
 import tempfile
 from datetime import datetime, timedelta, timezone
 
@@ -103,7 +104,9 @@ def test_containment_barrier_allows_a_flat_child():
     base = tempfile.mkdtemp()
     root = B.authorizations_root(base)
     child = B._contained_child(root, "apme-cm.json")
-    assert child is not None and child == root / "apme-cm.json"
+    # the barrier returns the realpath-resolved (absolute) child; it is the same file as root/name
+    assert child is not None and child.name == "apme-cm.json"
+    assert os.path.realpath(str(child.parent)) == os.path.realpath(str(root))
 
 
 def test_malformed_or_foreign_file_reads_as_none():

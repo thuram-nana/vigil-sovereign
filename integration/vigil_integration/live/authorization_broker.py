@@ -69,19 +69,27 @@ def _contained_child(root: Path, filename: str) -> Optional[Path]:
     """``root/filename`` ONLY if it normalizes to a *direct* child of ``root``; else None.
 
     Defense-in-depth over :func:`_safe_component` (which already strips ``/``/``\\``/``..``/control chars):
-    a resolved-path containment barrier that also holds if that first sanitizer ever regresses, and that a
-    static path-injection analyzer recognizes as a barrier guard. ``realpath`` normalizes ``..``/symlinks so
-    the ``startswith`` prefix test cannot be fooled by a crafted name; the ``dirname`` equality then rejects
-    any *nested* descendant, so only a single flat filename under ``root`` is ever returned. The returned
-    Path is the un-resolved ``root / filename`` — byte-identical to the pre-barrier shape callers expect."""
-    candidate = root / filename
+    the resolved-path containment barrier CodeQL documents as the ``py/path-injection`` fix, so it clears the
+    analyzer AND holds if that first sanitizer ever regresses. ``realpath`` normalizes ``..``/symlinks so the
+    ``startswith`` prefix test cannot be fooled by a crafted name; the ``dirname`` equality then rejects any
+    *nested* descendant, so only a single flat filename under ``root`` is ever returned. The barrier MUST
+    return the *checked* value (``Path(final)``) — not the pre-check ``root / filename`` — so the guarded
+    path is what flows to every downstream filesystem sink (returning the un-checked copy defeats the
+    dataflow barrier). ``final`` is the realpath-resolved absolute path; every reader recomputes it the same
+    way, so the round-trip stays consistent."""
     root_real = os.path.realpath(str(root))
-    cand_real = os.path.realpath(str(candidate))
-    if not cand_real.startswith(root_real + os.sep):
+    # basename strips any directory component (a recognized path-injection sanitizer; a no-op for a
+    # _safe_component-clean name), then realpath+startswith is CodeQL's documented containment barrier —
+    # both applied to the value that actually flows to the filesystem sink.
+    name = os.path.basename(filename)
+    if name != filename:  # a name carrying a directory component is REFUSED, never silently rewritten
         return None
-    if os.path.dirname(cand_real) != root_real:
+    final = os.path.realpath(os.path.join(root_real, name))
+    if not final.startswith(root_real + os.sep):
         return None
-    return candidate
+    if os.path.dirname(final) != root_real:
+        return None
+    return Path(final)
 
 
 def authorization_path(base_dir: Any, slug: str) -> Optional[Path]:
