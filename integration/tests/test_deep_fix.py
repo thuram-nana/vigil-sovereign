@@ -95,7 +95,8 @@ def test_good_fix_reaches_verified_no_pr(tmp_path):
 def test_broken_fix_is_build_failed_not_verified(tmp_path):
     repo = _mkrepo(tmp_path)
     r = autopatch_live(_finding(repo), config=_cfg(repo, tmp_path), client=_client(_BROKEN),
-                       verify_oracle=codescan.build_code_fix_oracle(REF), verify_before_pr=True, max_fix_attempts=1)
+                       verify_oracle=codescan.build_code_fix_oracle(REF), verify_before_pr=True, max_fix_attempts=1,
+                       prefer_deterministic=False)   # exercise the LLM ladder, not the deterministic fixer
     assert r.status == "build-failed" and r.remediated is False
 
 
@@ -103,7 +104,8 @@ def test_broken_fix_is_build_failed_not_verified(tmp_path):
 def test_noop_fix_is_still_vulnerable_never_verified(tmp_path):
     repo = _mkrepo(tmp_path)
     r = autopatch_live(_finding(repo), config=_cfg(repo, tmp_path), client=_client(_NOOP),
-                       verify_oracle=codescan.build_code_fix_oracle(REF), verify_before_pr=True, max_fix_attempts=1)
+                       verify_oracle=codescan.build_code_fix_oracle(REF), verify_before_pr=True, max_fix_attempts=1,
+                       prefer_deterministic=False)   # exercise the LLM ladder, not the deterministic fixer
     # the no-op builds fine but the finding still fires → NEVER verified/remediated (no false 'fixed')
     assert r.status == "verify-still-vulnerable" and r.remediated is False
 
@@ -120,7 +122,18 @@ def test_iterate_recovers_broken_then_good(tmp_path):
             return type("Msg", (), {"content": [type("B", (), {"text": t, "type": "text"})()]})()
     client = type("C", (), {"messages": _Seq()})()
     r = autopatch_live(_finding(repo), config=_cfg(repo, tmp_path), client=client,
-                       verify_oracle=codescan.build_code_fix_oracle(REF), verify_before_pr=True, max_fix_attempts=3)
+                       verify_oracle=codescan.build_code_fix_oracle(REF), verify_before_pr=True, max_fix_attempts=3,
+                       prefer_deterministic=False)   # drive the LLM [_BROKEN, _GOOD] sequence, not the 1-shot fixer
+    assert r.status == "verified-no-pr" and r.remediated is False
+
+
+@_sandbox
+def test_deterministic_first_fixes_weak_hash_with_no_client(tmp_path):
+    # #800 DETERMINISTIC-FIRST: a DAA-WEAK-HASH finding is fixed by the key-free mechanical diff (md5→sha256)
+    # with NO LLM client at all. The verify oracle still re-fires (earns verified-no-pr, never remediated).
+    repo = _mkrepo(tmp_path)
+    r = autopatch_live(_finding(repo), config=_cfg(repo, tmp_path), client=None,
+                       verify_oracle=codescan.build_code_fix_oracle(REF), verify_before_pr=True, max_fix_attempts=1)
     assert r.status == "verified-no-pr" and r.remediated is False
 
 
@@ -281,5 +294,6 @@ def test_breaker_blocks_a_cheating_fix_that_clears_the_rule(tmp_path):
     # adversarial breaker catches the gaming, so this is verify-cheat-suspected, NOT verified-no-pr.
     repo = _mkrepo(tmp_path)
     r = autopatch_live(_finding(repo), config=_cfg(repo, tmp_path), client=_client(_CHEAT),
-                       verify_oracle=codescan.build_code_fix_oracle(REF), verify_before_pr=True, max_fix_attempts=1)
+                       verify_oracle=codescan.build_code_fix_oracle(REF), verify_before_pr=True, max_fix_attempts=1,
+                       prefer_deterministic=False)   # exercise the LLM ladder + breaker, not the deterministic fixer
     assert r.status == "verify-cheat-suspected" and r.remediated is False

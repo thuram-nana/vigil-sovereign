@@ -593,6 +593,7 @@ def autopatch_live(finding: Any, *, config: CodefixConfig, client: Any = None,
                    max_fix_attempts: int = 1,
                    verify_before_pr: bool = False,
                    proposed_diff: str = "",
+                   prefer_deterministic: bool = True,
                    now: Optional[Callable[[], float]] = None) -> PatchResult:
     """Run the sovereign auto-patch loop against REAL executors: propose (Claude) → clone → apply-in-sandbox
     → (if ``config.pr_enabled`` AND a ``quorum`` passes AND a GitHub token is provisioned) open a gated PR.
@@ -618,11 +619,13 @@ def autopatch_live(finding: Any, *, config: CodefixConfig, client: Any = None,
     if _external:
         session.propose = lambda _request: _external   # type: ignore[assignment]
         max_fix_attempts = 1
-    else:
+    elif prefer_deterministic:
         # DETERMINISTIC-FIRST for DAA static findings: a known mechanical fix (weak-hash, yaml.load, eval,
         # shell=True, verify=False, debug=True, innerHTML) is emitted as an EXACT unified diff with NO LLM —
         # key-free and free of the model-diff apply fragility. Rules with no safe mechanical fix return None,
-        # so the inline LLM coder (session.propose) stays in force unchanged.
+        # so the inline LLM coder (session.propose) stays in force unchanged. A VIGIL-owned exact transform
+        # cannot game the rule, so it needs no anti-gaming breaker (the verify oracle still re-fires); callers
+        # exercising the LLM ladder itself (e.g. the breaker tests) pass prefer_deterministic=False.
         try:
             from ..daa_fixer import deterministic_daa_diff
             _det = deterministic_daa_diff(finding, config.target_repo)
