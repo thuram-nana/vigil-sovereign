@@ -1547,11 +1547,14 @@ def oob_callback_oracle(hits: Any, expected_token: "str | None" = None,
         — the real offline/live path always threads the signed window alongside the pin.
 
     Residual (honest): the SIGNED engagement window CLOSES cross-engagement and gross-stale (e.g. year-1970)
-    replay and cannot be slid. An INTRA-engagement slide by a fully-dishonest producer remains possible — a
-    REAL receipt observed DURING the authorized window, re-presented later within the SAME window — because
-    the mint time is not cryptographically committed into the token (see
-    ``LIMIT-dns-oob-token-cleartext-broadcast``). That residual is BOUNDED to the owner-signed engagement
-    window.
+    replay and cannot be slid — EXCEPT in the narrow corner where the SAME owner-signed collector pin is
+    reused across two engagements whose authorized windows OVERLAP: a receipt observed during the overlap has
+    a signed ``received_at`` that is temporally in-scope for BOTH windows, so it degenerates into the
+    intra-window residual below (it is NOT a stale / out-of-scope replay). An INTRA-engagement slide by a
+    fully-dishonest producer likewise remains possible — a REAL receipt observed DURING the authorized window,
+    re-presented later within the SAME window — because the mint time is not cryptographically committed into
+    the token (see ``LIMIT-dns-oob-token-cleartext-broadcast``). Both residuals are BOUNDED to an owner-signed
+    engagement window; distinct collector pins or non-overlapping windows eliminate the cross-engagement case.
 
     VF-2a legacy window: for a token-only hit that carries NO receipt, when the producer context supplies a
     window (``issued_at`` and/or ``expires_at``) the prior additive check applies over it; both bounds absent
@@ -1634,10 +1637,28 @@ def oob_callback_oracle(hits: Any, expected_token: "str | None" = None,
         # slides issued_at onto a stale receipt cannot move them — a year-1970 / prior-engagement received_at
         # falls outside THIS authority's window and is refused. Intersection ⇒ the signed window always
         # bounds; the advisory TTL can only tighten within it.
-        signed_window = authority_not_before is not None or authority_not_after is not None
-        if authority_not_before is not None:
+        # A receipt-bearing (VF-2b) hit's anti-replay boundary MUST be the OWNER-SIGNED window. Production
+        # always threads BOTH edges together (EngagementAuthority.not_before/not_after are mandatory, with
+        # not_after > not_before), and a direct/self-check call threads NEITHER (advisory-TTL only). A
+        # HALF-threaded window (exactly one edge) would leave the other boundary on the producer-slidable
+        # advisory anchor — neither a clean self-check nor a sound signed window — so refuse it fail-closed
+        # rather than trust a producer-movable edge. Unreachable via verifier_from_authority /
+        # _engage_oob_authority; this closes the hand-constructed corner.
+        nb_set = authority_not_before is not None
+        na_set = authority_not_after is not None
+        if nb_set != na_set:
+            return OracleSignal(
+                kind=OracleKind.OOB_CALLBACK, fired=False, confidence=0.0,
+                evidence=("VF-2b receipt verified but only HALF of the owner-signed engagement window was "
+                          "threaded (one of not_before/not_after) — the other anti-replay boundary would be "
+                          "producer-slidable; fail-closed (a partial signed window is not a sound boundary)"),
+                observed={"hit_count": len(hit_list), "matched": len(verified), "token_verified": True,
+                          "receipt_verified": True, "oob_verdict": "INCOMPLETE_SIGNED_WINDOW",
+                          "signed_window": False})
+        signed_window = nb_set and na_set
+        if nb_set:
             lo = max(lo, float(authority_not_before) - askew)
-        if authority_not_after is not None:
+        if na_set:
             hi = min(hi, float(authority_not_after) + askew)
         window_label = "owner-signed engagement window (∩ advisory TTL)" if signed_window else \
                        "authority-bound TTL window"

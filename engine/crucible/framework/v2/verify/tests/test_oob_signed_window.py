@@ -129,3 +129,37 @@ def test_d_intra_engagement_residual_is_bounded_to_signed_window() -> None:
     f_out = _finding(kp, method="DNS", received_at=outside, issued_at=outside)
     assert not reverify_finding(f_out, verifier=_verifier(kp, method="DNS")).reproduced, \
         "the slide cannot escape the signed engagement window (residual is bounded)"
+
+
+# ------------------------------------------------- (e) half-threaded signed window ⇒ fail-closed (defensive)
+def test_e_half_threaded_signed_window_is_refused() -> None:
+    """Unreachable via verifier_from_authority / _engage_oob_authority (not_before/not_after are mandatory and
+    always threaded together), but a hand-constructed direct oracle call that threads only ONE edge must NOT
+    fall back to the producer-slidable advisory bound on the missing edge. A partial signed window is refused
+    fail-closed (INCOMPLETE_SIGNED_WINDOW) — it is neither a clean self-check (neither edge) nor a sound signed
+    window (both edges)."""
+    from framework.v2.verify.oracles import oob_callback_oracle
+
+    kp = generate_keypair()
+    token = "t" * 32
+    ra = _NOW.timestamp()
+    hit = _signed_hit(kp, method="DNS", token=token, received_at=ra)
+    nb = (_NOW - timedelta(hours=1)).timestamp()
+    na = (_NOW + timedelta(hours=1)).timestamp()
+
+    # Sanity: BOTH edges present, in-window ⇒ fires (the sound signed-window path).
+    both = oob_callback_oracle([hit], expected_token=token, dns_collector_pubkey=kp.public_key_b64,
+                               issued_at=ra, authority_not_before=nb, authority_not_after=na)
+    assert both.fired and both.observed.get("signed_window") is True
+
+    # Only ONE edge present ⇒ fail-closed, regardless of which edge, even with received_at in range.
+    for kw in ({"authority_not_before": nb}, {"authority_not_after": na}):
+        r = oob_callback_oracle([hit], expected_token=token, dns_collector_pubkey=kp.public_key_b64,
+                                issued_at=ra, **kw)
+        assert not r.fired, f"half-threaded window {list(kw)} must be refused"
+        assert r.observed.get("oob_verdict") == "INCOMPLETE_SIGNED_WINDOW"
+
+    # NEITHER edge (a genuine direct/self-check call) ⇒ advisory-TTL only, still fires (unchanged behaviour).
+    neither = oob_callback_oracle([hit], expected_token=token, dns_collector_pubkey=kp.public_key_b64,
+                                  issued_at=ra)
+    assert neither.fired and neither.observed.get("signed_window") is False
