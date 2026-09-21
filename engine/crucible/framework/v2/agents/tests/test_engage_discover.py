@@ -809,3 +809,48 @@ def test_fold_off_report_byte_identical_and_unreachable_from_gate(
     assert "run_autonomous_cycle" not in bench_src
     assert "_fold_discovered_into_report" not in bench_src
     assert "engage_autonomous" not in bench_src
+
+
+# ---------------------------------------------------------------------------
+# #799 — crawl-expand seeds the REAL seed origin (scheme+host+port), not the
+# promoted https://<host>/ (443) root intel/promote defaults a HOST/DOMAIN to.
+# ---------------------------------------------------------------------------
+
+
+def test_crawl_expand_seeds_the_real_seed_origin_not_the_promoted_https_root(
+    isolated_engagement, httpserver: HTTPServer,
+):
+    """#799: intel/promote defaults a HOST/DOMAIN to ``https://<host>/`` (443) — the WRONG origin for an
+    ``http://<ip>:<port>/`` seed. With the REAL seed origin threaded into the cycle, crawl-expand mines
+    the seed the engagement actually targets and discovers its param-bearing surface. CONTROL: with no
+    seed_url and nothing promotable, there is no in-scope root on the right port, so nothing is expanded
+    — the exact shallow-suite failure #799 fixes."""
+    port = httpserver.port
+    isolated_engagement("disco", "127.0.0.1")
+    httpserver.expect_request("/").respond_with_handler(_root_links_to_search)
+    httpserver.expect_request("/search").respond_with_handler(_reflect)
+
+    def _bare_world() -> WorldModel:
+        w = WorldModel()
+        w.add_node(Node(id="attacker:self", kind=NodeKind.PRINCIPAL, attrs={"role": "attacker"},
+                        provenance="obs-1", confidence=1.0, first_seen=0, last_seen=0))
+        return w
+
+    seed = f"http://127.0.0.1:{port}/"
+    out = run_autonomous_cycle(
+        _result(_bare_world(), []), slug="disco", enable_discover=True, enable_crawl_expand=True,
+        discover_send=_loopback_send(), prompt_callback=_deny, seed_url=seed)
+    assert out.endpoints_promoted == 0                  # nothing promotable in the world
+    assert out.endpoints_expanded >= 1, "crawl-expand did not mine the REAL seed origin"
+    assert world_has_expanded(out, f"http://127.0.0.1:{port}/search?q=hello")
+
+    # CONTROL: same bare world, NO seed_url threaded → no root to expand → nothing discovered (the bug).
+    out2 = run_autonomous_cycle(
+        _result(_bare_world(), []), slug="disco", enable_discover=True, enable_crawl_expand=True,
+        discover_send=_loopback_send(), prompt_callback=_deny)   # seed_url omitted
+    assert out2.endpoints_expanded == 0
+
+
+def world_has_expanded(out, url: str) -> bool:
+    """The expanded ENDPOINT node is minted onto the run world-model under a stable id."""
+    return out.engagement.world.has_node(f"endpoint:expand:{url}")

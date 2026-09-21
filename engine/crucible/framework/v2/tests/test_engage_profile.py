@@ -34,7 +34,9 @@ from framework.v2.engage import (
     EngagementRefused,
     browser_surfaces_if_unusable,
     persist_browser_inconclusive,
+    persist_seed_unreachable_inconclusive,
     resolve_profile,
+    seed_unreachable_surface,
 )
 
 
@@ -259,3 +261,38 @@ def test_main_full_adds_access_control(captured_run) -> None:
     assert captured_run["profile"] == "full"
     assert captured_run["enable_access_control"] is True
     assert captured_run["enable_browser_xss"] is True
+
+
+# ---------------------------------------------------------------------------
+# #799 — a dead/wrong-port seed is recorded INCONCLUSIVE (never a clean 1-page run)
+# ---------------------------------------------------------------------------
+
+
+def test_seed_unreachable_surface_names_the_port() -> None:
+    sensor, note = seed_unreachable_surface("http://127.0.0.1:19010/")
+    assert sensor == "seed_reachability"
+    assert "127.0.0.1:19010" in note and "unreachable" in note.lower()
+    # a default-port https seed still names the resolved port
+    _, note2 = seed_unreachable_surface("https://example.test/app")
+    assert "example.test:443" in note2
+
+
+def test_persist_seed_unreachable_records_inconclusive_not_clean(tmp_path: Path) -> None:
+    rd = tmp_path / "run"
+    assert persist_seed_unreachable_inconclusive("http://127.0.0.1:19010/", run_dir=str(rd)) is True
+    doc = im.read_manifest(str(rd))
+    assert doc["coverage_incomplete"] is True and doc["present"] is True
+    assert "seed_reachability" in [s["sensor"] for s in doc["surfaces"]]
+
+
+def test_persist_seed_unreachable_noop_without_run_dir() -> None:
+    assert persist_seed_unreachable_inconclusive("http://127.0.0.1:19010/", run_dir=None) is False
+
+
+def test_persist_seed_unreachable_merges_never_clobbers(tmp_path: Path) -> None:
+    """The seed-unreachable surface must PRESERVE any fusion/browser surface already on disk."""
+    rd = tmp_path / "run"
+    im.write_manifest(str(rd), [("cloud_live", "no aws creds")])
+    assert persist_seed_unreachable_inconclusive("http://127.0.0.1:19010/", run_dir=str(rd)) is True
+    sensors = [s["sensor"] for s in im.read_manifest(str(rd))["surfaces"]]
+    assert "cloud_live" in sensors and "seed_reachability" in sensors
