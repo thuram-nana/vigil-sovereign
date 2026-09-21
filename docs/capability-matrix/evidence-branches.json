@@ -1015,6 +1015,35 @@
         "vigil_owned_live_redrive",
         "response_body_decode"
       ]
+    },
+    {
+      "id": "oob_callback.collector_receipt",
+      "check": "OOBCheck",
+      "evidence": "A blind class (SSRF / OOB-SQLi / blind XXE / deserialization / OS-command / RCE) is proven by an INBOUND out-of-band interaction carrying the finding's per-finding secret token, captured by VIGIL's OWN collaborator (loopback OOBReceiver or the operator-hosted RelayServer). At the VF-2b tier an INDEPENDENT collector signs each hit's receipt over target-observed facts only (token/client_ip/received_at/method/path); the oob_callback oracle re-checks that receipt against a collector public key the verifier PINS OUT-OF-BAND (charter/CLI, never the producer-controlled context), so a fully-dishonest producer that does not hold the collector key cannot forge a firing.",
+      "fact_capable": true,
+      "clean_capable": false,
+      "preconditions": [
+        "channel_established"
+      ],
+      "limitation": "A POSITIVE-only, per-token out-of-band channel. A fired oracle proves the in-charter target executed the callback URL and an independent collector observed a token-matched (VF-2b: receipt-verified) interaction — NOT that a given payload was the sole cause. A non-firing is UNINFORMATIVE by construction: the blind sink may be reachable over a channel the collaborator cannot see (DNS-only interactions are INCONCLUSIVE — the relay is HTTP-only), the target may fetch on a delay past the poll window, or egress may be filtered; so the absence of a callback can NEVER establish the target is not vulnerable. A body the collaborator could not decode is INCONCLUSIVE, never CLEAN. A REMOTE relay is fail-closed to VF-2b (a non-blank out-of-band collector pin is required); only a loopback relay may run token-only (VF-2a), whose honest limit is that it does NOT defeat a fully-dishonest producer. NOT CLEAN-capable.",
+      "target_fact_capable": true,
+      "target_clean_capable": false,
+      "target_downgrade_rationale": "An out-of-band callback is a POSITIVE-only detector whose absence of an interaction is uninformative by construction (unseen channel / delayed fetch / filtered egress / DNS-only). A sound CLEAN for a blind class is a different, coverage-based capability spanning every out-of-band channel plus a reachability and egress model, not this per-token callback branch, so clean-capability is deliberately not a target here.",
+      "evidence_surface": "live_capture",
+      "implementation_refs": [
+        "engine/crucible/framework/v2/verify/oracles.py:oob_callback_oracle",
+        "engine/crucible/framework/v2/verify/oob.py:verify_oob_receipt",
+        "engine/crucible/framework/v2/verify/collaborator.py:RelayServer",
+        "engine/crucible/framework/v2/scanner/checks.py:OOBCheck"
+      ],
+      "oracle_version": "oob_callback",
+      "control_requirements": [
+        "warden_active_recon_gate",
+        "vigil_owned_per_finding_token",
+        "vigil_owned_oob_capture",
+        "independent_collector_receipt_signature",
+        "out_of_band_pinned_collector_pubkey"
+      ]
     }
   ]
 }

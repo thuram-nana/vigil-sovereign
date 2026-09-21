@@ -65,6 +65,23 @@ class EngagementAuthority(BaseModel):
     max_actions: int = Field(default=10_000, ge=1, description="Action budget.")
     issued_by: str = Field(default="", description="Operator who issued this authority.")
     note: str = Field(default="")
+    # VF-2b out-of-band OOB confirmation (Wave 1.2). DEDICATED fields, deliberately NOT in ``scope``:
+    #   * ``oob_relay_host`` is a single bare hostname (the operator-hosted collaborator relay). It is NOT a
+    #     scan TARGET — it is an EGRESS destination gated separately (authority.gate.authorize_oob_egress),
+    #     never by the general host-scope matcher, so authorizing the relay does not widen the scan surface.
+    #   * ``oob_collector_pubkey`` is base64 Ed25519 key material (contains ``+`` / ``/`` / ``=``) — it could
+    #     not survive the offense-side bare-host scope re-validation, and it is an AUTHENTICITY pin, not a
+    #     host. The verifier PINS it out-of-band to demand an independent collector receipt (VF-2b).
+    # Both default to "" so an authority that does not use OOB is unchanged in meaning; adding the fields DOES
+    # change the owner-signed canonical bytes (model_dump includes defaulted fields), so an authority signed
+    # before this schema change re-verifies only after re-signing — expected, and both planes agree by
+    # construction. ``_AUTHORITY_DOMAIN`` is deliberately untouched.
+    oob_relay_host: str = Field(
+        default="", description="Bare hostname of the operator-hosted OOB collaborator relay authorized as an "
+        "OOB egress destination (separate gate; NOT a scan target, NOT in scope).")
+    oob_collector_pubkey: str = Field(
+        default="", description="Base64 Ed25519 public key of the OOB relay's independent collector, pinned "
+        "out-of-band; the verifier checks each OOB receipt against it (VF-2b). Public material only.")
 
     @model_validator(mode="after")
     def _check_window(self) -> "EngagementAuthority":

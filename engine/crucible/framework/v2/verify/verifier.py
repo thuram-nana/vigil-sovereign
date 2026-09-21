@@ -660,8 +660,16 @@ KnownBugClass = Annotated[str, AfterValidator(require_known_bug_class)]
 class OracleVerifier:
     """Runs deterministic oracles to confirm (or refuse) a finding."""
 
-    def __init__(self, high_confidence: float = HIGH_CONFIDENCE) -> None:
+    def __init__(self, high_confidence: float = HIGH_CONFIDENCE,
+                 oob_collector_pubkey: "str | None" = None) -> None:
         self.high_confidence = high_confidence
+        # VF-2b OUT-OF-BAND pin (GAP A): the collector public key the OOB oracle checks each receipt against.
+        # It is an AUTHORITY the caller supplies at construction (the loopback receiver's own minted key, or a
+        # charter/CLI-pinned remote-relay collector pubkey) — NEVER read from the producer-controlled ctx, or
+        # a dishonest producer would supply its own key and void the guarantee. None ⇒ the intentional VF-2a
+        # token-only tier (the default/benchmark path stays byte-identical); a blank string is fail-closed in
+        # the oracle (F4 requested with a bad key), never a silent drop to token-only.
+        self.oob_collector_pubkey = oob_collector_pubkey
 
     def oracles_for(self, bug_class: str) -> tuple[OracleKind, ...]:
         """The oracle kinds that can prove `bug_class`. Unknown classes fall
@@ -806,7 +814,13 @@ class OracleVerifier:
         if kind is OracleKind.OOB_CALLBACK:
             if "oob_hits" in ctx:
                 # VF-2a: pass the retained registered token so the oracle fires only for a token-verified hit.
-                return oracles.oob_callback_oracle(ctx["oob_hits"], ctx.get("oob_token"))
+                # VF-2b (GAP A): the collector pin comes from the verifier's OUT-OF-BAND authority
+                # (self.oob_collector_pubkey), NEVER from ctx (producer-controlled). None keeps the token-only
+                # tier byte-identical; a pinned key demands an independent collector receipt.
+                return oracles.oob_callback_oracle(
+                    ctx["oob_hits"], ctx.get("oob_token"),
+                    collector_pubkey=self.oob_collector_pubkey,
+                )
             return None
         if kind is OracleKind.SERVICE_REACHABILITY:
             if "handshake" in ctx:
