@@ -389,6 +389,19 @@
       "source_doc": "docs/capability-matrix/evidence-branches.json",
       "disposition": "file-into-w16",
       "w16_issue": null
+    },
+    {
+      "id": "LIMIT-dns-oob-token-cleartext-broadcast",
+      "title": "A DNS OOB token is broadcast in cleartext, so token-only (VF-2a) is forgeable within the window",
+      "summary": "A DNS out-of-band correlation token rides as a QNAME label, broadcast in cleartext to every recursive/forwarding resolver on the path and captured by passive-DNS, so token equality alone (VF-2a) does NOT prove the target emitted the lookup — anyone who observes the query can replay the label within the window. This is why a DNS OOB FACT REQUIRES the VF-2b independent-collector receipt (signed by an owner-pinned out-of-band key) AND the authority-bound TTL window; the producer-recorded mint anchor issued_at is itself not committed into the token, so the window is only as trustworthy as that anchor. The receipt + owner-signed duration are what make the FACT sound, not token secrecy. A property of the DNS channel, not unfinished code.",
+      "classification": "doc-only",
+      "severity": "low",
+      "anchor": {"file": "engine/crucible/framework/v2/verify/dns_collector.py", "symbol": "DNSCollector"},
+      "marker": true,
+      "check": "symbol-exists",
+      "source_doc": "docs/DEFERRED-INFRA.md",
+      "disposition": "file-into-w16",
+      "w16_issue": null
     }
   ],
   "honest_limit_sites_note": "The code-scan census. docs/tests/test_limitation_inventory.py scans every non-test product .py for the honest-limit/deferred debt phrases in _DEBT_PHRASES and requires EVERY hit to be either a VIGIL-LIMIT marker line OR a site listed here whose snippet (matched case-insensitively) is a substring of the hit line. kind 'debt' names the limitations id the site belongs to (which must exist); kind 'non-debt' explains why the phrase is not a capability limit (a deliberate design choice, a runtime-state description, or a phrase describing a CHECK's target rather than VIGIL itself). Bidirectional: every snippet here must still match a debt-phrase line in its file, so deleting the prose (or moving the debt) turns CI red.",

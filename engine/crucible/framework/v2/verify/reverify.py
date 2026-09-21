@@ -184,10 +184,33 @@ def _reverify_context_impl(
     )
 
 
-def reverify_finding(finding: dict, *, ref: str | None = None) -> ReverifyResult:
+def verifier_from_authority(authority: Any) -> OracleVerifier:
+    """Build an :class:`OracleVerifier` whose OUT-OF-BAND OOB material (collector pins + the TTL/skew replay
+    policy) is taken from a verified :class:`EngagementAuthority`. This is what threads the receipt-verification
+    pin into OFFLINE re-verify: the pins live in the SIGNED authority (persisted, available offline), NEVER in
+    the producer-controlled finding context. Empty pin strings map to None (no pin for that channel), so a
+    receipt-bearing finding whose channel has no authority pin fails CLOSED in the oracle."""
+    http_pin = (getattr(authority, "oob_collector_pubkey", "") or "").strip() or None
+    dns_pin = (getattr(authority, "oob_dns_collector_pubkey", "") or "").strip() or None
+    ttl = getattr(authority, "oob_ttl_seconds", None)
+    skew = getattr(authority, "oob_skew_seconds", None)
+    return OracleVerifier(
+        oob_collector_pubkey=http_pin,
+        oob_dns_collector_pubkey=dns_pin,
+        oob_ttl_seconds=float(ttl) if ttl is not None else None,
+        oob_skew_seconds=float(skew) if skew is not None else None,
+    )
+
+
+def reverify_finding(finding: dict, *, ref: str | None = None,
+                     verifier: OracleVerifier | None = None) -> ReverifyResult:
     """Re-verify one serialized finding (AuditFinding / ConfirmedFinding-shaped:
     a dict with `bug_class` + `oracle_context`, optionally a claimed
-    `confirmed_by`/`confidence` to check for tampering)."""
+    `confirmed_by`/`confidence` to check for tampering).
+
+    ``verifier`` supplies the OUT-OF-BAND OOB pins (from a signed authority via
+    :func:`verifier_from_authority`); omit it and a receipt-bearing OOB finding fails CLOSED (there is no
+    pinned collector key to re-verify the receipt), never a silent drop to the forgeable token-only tier."""
     bug_class = str(finding.get("bug_class", ""))
     r = ref or str(finding.get("check_id") or finding.get("finding_slug") or bug_class or "finding")
     oc = finding.get("oracle_context")
@@ -202,13 +225,13 @@ def reverify_finding(finding: dict, *, ref: str | None = None) -> ReverifyResult
         oc, bug_class=bug_class,
         claimed_confirmed_by=finding.get("confirmed_by"),
         claimed_confidence=finding.get("confidence"),
-        ref=r,
+        ref=r, verifier=verifier,
     )
 
 
-def reverify_document(doc: dict) -> list[ReverifyResult]:
+def reverify_document(doc: dict, *, verifier: OracleVerifier | None = None) -> list[ReverifyResult]:
     """Re-verify a serialized ScanReport (its `active_findings`) or a single
-    finding document."""
+    finding document. ``verifier`` threads the out-of-band OOB pins (see :func:`reverify_finding`)."""
     findings = doc.get("active_findings")
     if findings is None and isinstance(doc.get("findings"), list):
         # Accept VIGIL's own DISPLAY report shape too (its key is `findings`, not `active_findings`) —
@@ -216,8 +239,8 @@ def reverify_document(doc: dict) -> list[ReverifyResult]:
         # re-fires as ungrounded (honest), never a false green.
         findings = [f for f in doc["findings"] if isinstance(f, dict) and f.get("kind") == "active"]
     if isinstance(findings, list):
-        return [reverify_finding(f, ref=str(i)) for i, f in enumerate(findings)]
-    return [reverify_finding(doc)]
+        return [reverify_finding(f, ref=str(i), verifier=verifier) for i, f in enumerate(findings)]
+    return [reverify_finding(doc, verifier=verifier)]
 
 
 def main(argv: list[str]) -> int:
@@ -226,6 +249,17 @@ def main(argv: list[str]) -> int:
         description="Independently re-verify finding certificates offline (prove-don't-guess).",
     )
     parser.add_argument("path", help="A findings/report JSON file (a ScanReport or a single finding).")
+    parser.add_argument(
+        "--authority", metavar="SLUG", default=None,
+        help="Engagement slug whose SIGNED authority supplies the out-of-band OOB collector pin(s) + TTL "
+             "policy for re-verifying VF-2b receipts. Without it, a receipt-bearing OOB finding fails CLOSED "
+             "(no pinned collector key to verify the receipt — never a silent token-only drop).")
+    parser.add_argument(
+        "--authority-file", metavar="PATH", default=None,
+        help="Path to a signed authority JSON directly (overrides the default store lookup for --authority).")
+    parser.add_argument(
+        "--authority-root", metavar="PATH", default=None,
+        help="Path to the governance trust-root JSON (defaults to the local authority-root store).")
     args = parser.parse_args(argv)
 
     p = Path(args.path)
@@ -238,7 +272,38 @@ def main(argv: list[str]) -> int:
         print(f"error: cannot read {p}: {e}")
         return 2
 
-    results = reverify_document(doc)
+    verifier: OracleVerifier | None = None
+    if args.authority or args.authority_file:
+        # Reconstruct the verifier with the OUT-OF-BAND pins from the SIGNED authority (verified against the
+        # governance trust root). Fail-closed and explicit: a missing/unverifiable authority is an error, not a
+        # silent fall-through to the no-pin path (which would token-only-drop a VF-2b finding).
+        try:
+            from ..authority.store import (
+                AuthorityError, load_authority_root, load_signed_authority, load_verified_authority)
+            from ..authority.signing import verify_authority
+            root_path = Path(args.authority_root) if args.authority_root else None
+            trust_root = load_authority_root(root_path)
+            if trust_root is None:
+                print("error: no governance trust root available to verify the authority "
+                      "(provision one, or pass --authority-root)")
+                return 2
+            afile = Path(args.authority_file) if args.authority_file else None
+            slug = args.authority or (afile.stem if afile else "")
+            if afile is not None:
+                signed = load_signed_authority(slug or "authority", afile)
+                ok, reason = verify_authority(signed, trust_root)
+                if not ok:
+                    print(f"error: authority {afile} failed verification: {reason}")
+                    return 2
+                authority = signed.document
+            else:
+                authority = load_verified_authority(slug, trust_root)
+        except AuthorityError as e:
+            print(f"error: cannot load a verified authority: {e}")
+            return 2
+        verifier = verifier_from_authority(authority)
+
+    results = reverify_document(doc, verifier=verifier)
     ok = 0
     for r in results:
         mark = "OK " if r.ok else "BAD"

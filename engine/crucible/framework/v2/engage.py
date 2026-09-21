@@ -368,6 +368,36 @@ def _engage_authority_trust_root(slug: str) -> object | None:
     return trust_root
 
 
+def _engage_oob_authority(slug: str) -> dict:
+    """The OUT-OF-BAND OOB material (collector pins + owner-signed TTL/skew replay policy) from the SIGNED
+    engagement authority, as WebScanCampaign kwargs. This CONSUMES ``authority.oob_collector_pubkey`` and
+    ``authority.oob_dns_collector_pubkey`` (no longer dead config): they are threaded onto the verifier so a
+    VF-2b HTTP/DNS finding is re-verified against the pinned key with an authority-bound window — NEVER trusted
+    from the producer context. Greenfield (no provisioned/verifiable authority) ⇒ ``{}`` (VF-2a byte-identical
+    path preserved). A provisioned-but-unverifiable authority already fails closed via
+    ``_engage_authority_trust_root``, so this is best-effort over an already-pinned root."""
+    trust_root = _engage_authority_trust_root(slug)
+    if trust_root is None:
+        return {}
+    from .authority.store import AuthorityError, load_verified_authority
+    try:
+        authority = load_verified_authority(slug, trust_root)
+    except AuthorityError:
+        return {}   # unverifiable authority is refused on the traffic path itself; do not pin from it here
+    kwargs: dict = {}
+    http_pin = (authority.oob_collector_pubkey or "").strip()
+    dns_pin = (authority.oob_dns_collector_pubkey or "").strip()
+    if http_pin:
+        kwargs["oob_collector_pubkey"] = http_pin
+    if dns_pin:
+        kwargs["oob_dns_collector_pubkey"] = dns_pin
+    if http_pin or dns_pin:
+        # The owner-signed replay policy only matters once a receipt is being verified.
+        kwargs["oob_ttl_seconds"] = float(authority.oob_ttl_seconds)
+        kwargs["oob_skew_seconds"] = float(authority.oob_skew_seconds)
+    return kwargs
+
+
 def _intel_recon(world: WorldModel, slug: str, seed_url: str, *,
                  fixtures_dir: str | None, max_depth: int) -> object:
     """Best-effort intel recon bound to the run's SHARED world-model. Returns the
@@ -1126,6 +1156,9 @@ def run_engagement(
                 oob_advertise_base_url=oob_advertise_base_url,
                 oob_relay_url=oob_relay_url,
                 oob_relay_secret=oob_relay_secret,
+                # Consume the SIGNED authority's OOB pins + owner-signed TTL/skew (out-of-band, never producer):
+                # a VF-2b HTTP/DNS finding is re-verified against the pinned collector key with a bound window.
+                **_engage_oob_authority(slug),
                 waf_adaptive=waf_adaptive,
                 grammar_fuzz=grammar_fuzz,
                 enable_arsenal=enable_arsenal,

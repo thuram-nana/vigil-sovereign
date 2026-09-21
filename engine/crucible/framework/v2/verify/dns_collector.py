@@ -28,8 +28,16 @@ Boundaries, by construction:
 
   * The recorded ``client_ip`` is the RESOLVER's source IP, NOT the target's — a DNS lookup reaches us via
     the target's recursive resolver, so the resolver (not the target) is the DNS client we see. The unique,
-    per-probe SECRET token is the correlator that ties the observation to the specific VIGIL probe, so the
-    FACT holds regardless of which resolver forwarded it. This is documented in the honest-caveats inventory.
+    per-probe token correlates the observation to a specific VIGIL probe regardless of which resolver forwarded
+    it — but see the cleartext-broadcast caveat below: the token alone is NOT a secret on the wire.
+  * VIGIL-LIMIT:LIMIT-dns-oob-token-cleartext-broadcast — a DNS token is a QNAME LABEL, broadcast in
+    CLEARTEXT to every recursive/forwarding resolver on the path and captured by passive-DNS. So token
+    equality alone (VF-2a) is FORGEABLE within the window by anyone who observes the query: it does NOT prove
+    the target emitted it. This is exactly why a DNS OOB FACT REQUIRES the VF-2b independent-collector receipt
+    (signed by a key the operator pins out-of-band) AND the authority-bound TTL window — the receipt proves
+    OUR collector observed the lookup and the window bounds replay. The producer-recorded mint anchor
+    (``issued_at``) is itself not committed into the token, so the window is only as trustworthy as that
+    anchor; the receipt + owner-signed duration are what make the FACT sound, not the token secrecy.
   * A DNS lookup proves resolution REACHED us — NOT that a full HTTP (or other) connection then completed.
     That is a strictly weaker (but still sound) claim than the HTTP collaborator's completed-fetch proof.
   * Deployment assumption: the base domain must be an operator-OWNED domain whose NS records delegate to this
@@ -59,6 +67,7 @@ _RCODE_NXDOMAIN = 3
 _TYPE_A = 1
 _CLASS_IN = 1
 _MAX_UDP = 512        # classic DNS UDP payload cap; we never exceed it
+_MAX_HITS_PER_TOKEN = 64   # bound per-token hit retention (a registered token's callback label is on the wire)
 
 
 class _DecodeError(ValueError):
@@ -160,9 +169,12 @@ class _DNSHandler(socketserver.BaseRequestHandler):
         except _DecodeError:
             return                         # unparseable → drop silently (a stray/garbage packet)
         token = _extract_token(qname, server._base_labels)
-        if token:
-            # A name UNDER the base domain carrying a token → record it (VF-2b signed in _record). A name
-            # NOT under the base domain yields token=None and is never recorded.
+        if token and server._is_registered(token):
+            # A name UNDER the base domain carrying a REGISTERED per-probe token → record it (VF-2b signed in
+            # _record). Gating on registration bounds the hit registry: an unregistered/arbitrary label under
+            # the base domain (which any internet host can query against our public :53) yields token=None or a
+            # token we never minted, so it is NEVER recorded — closing the unbounded-growth DoS. A name NOT
+            # under the base domain yields token=None and is likewise never recorded.
             server._record(OOBHit(
                 token=token,
                 method="DNS",
@@ -202,6 +214,10 @@ class _DNSUDPServer(socketserver.ThreadingUDPServer):
             self._registered.add(token)
             self._hits.setdefault(token, [])
 
+    def _is_registered(self, token: str) -> bool:
+        with self._lock:
+            return token in self._registered
+
     def _record(self, hit: OOBHit) -> None:
         # VF-2b: sign the receipt AS OBSERVED, over target-observed facts only, EXACTLY as
         # oob._OOBHTTPServer._record — so the identical verify_oob_receipt + oob_callback_oracle confirm a
@@ -209,7 +225,12 @@ class _DNSUDPServer(socketserver.ThreadingUDPServer):
         if self._signing_key:
             hit.collector_sig = sign_oob_receipt(self._signing_key, hit)
         with self._lock:
-            self._hits.setdefault(hit.token, []).append(hit)
+            bucket = self._hits.setdefault(hit.token, [])
+            # Per-token cap: even a REGISTERED token could be flooded (the callback host is a QNAME label
+            # visible on the wire), so bound each bucket. Keep the FIRST hits (the earliest lookup is the
+            # one that proves the target resolved it); drop the overflow rather than grow without bound.
+            if len(bucket) < _MAX_HITS_PER_TOKEN:
+                bucket.append(hit)
 
     def _poll(self, token: str) -> list[OOBHit]:
         with self._lock:

@@ -1469,6 +1469,11 @@ def error_signature_oracle(observed_body: Any, control_body: Any = None) -> Orac
 
 
 _OOB_DEFAULT_SKEW_S: float = 5.0   # clock-skew tolerance applied to BOTH window edges when a window is set
+# Out-of-band fallback TTL DURATION (seconds) for a receipt-bearing hit when the caller threaded no explicit
+# authority TTL (e.g. a loopback self-check with a VIGIL-minted collector, where there is no untrusted
+# producer). It is a FIXED module constant — NEVER read from the producer context — so it can only ever make
+# the window tighter/equal, never producer-widenable. The real deployment threads authority.oob_ttl_seconds.
+_OOB_DEFAULT_TTL_S: float = 300.0
 
 
 def _hit_received_at(hit: Any) -> float:
@@ -1477,10 +1482,27 @@ def _hit_received_at(hit: Any) -> float:
     return float(getattr(hit, "received_at", 0.0) or 0.0)
 
 
+def _hit_collector_sig(hit: Any) -> str:
+    if isinstance(hit, Mapping):
+        return str(hit.get("collector_sig") or "")
+    return str(getattr(hit, "collector_sig", "") or "")
+
+
+def _hit_is_dns(hit: Any) -> bool:
+    if isinstance(hit, Mapping):
+        m = hit.get("method")
+    else:
+        m = getattr(hit, "method", "")
+    return str(m or "").upper() == "DNS"
+
+
 def oob_callback_oracle(hits: Any, expected_token: "str | None" = None,
                         collector_pubkey: "str | None" = None, *,
+                        dns_collector_pubkey: "str | None" = None,
                         issued_at: "float | None" = None, expires_at: "float | None" = None,
-                        skew: "float | None" = None) -> OracleSignal:
+                        skew: "float | None" = None,
+                        authority_ttl: "float | None" = None,
+                        authority_skew: "float | None" = None) -> OracleSignal:
     """Fire when the out-of-band collector logged an inbound interaction that carried the finding's REGISTERED
     per-finding secret token. The token — minted per finding (`oob.register_token`, `secrets.token_hex(16)`)
     and embedded in the callback URL/host the target must actually execute to emit — is what makes a blind-
@@ -1491,25 +1513,33 @@ def oob_callback_oracle(hits: Any, expected_token: "str | None" = None,
     VF-2a (token): a callback that does NOT carry the registered token — or a context with no registered token
     to compare against — is NOT trusted. Fail-closed:
       * no `hits` → not fired; `hits` but NO `expected_token` → not fired; none carry the token → not fired;
-      * ≥1 hit whose token == `expected_token` (constant-time) → fired.
+      * ≥1 hit whose token == `expected_token` (constant-time) AND that carries NO collector receipt → fired
+        at the genuine VF-2a token-only tier (its honest limit: it does NOT defeat a fully-dishonest producer).
 
-    VF-2b (independent collector receipt): pass ``collector_pubkey`` — the collector's public key PINNED
-    OUT-OF-BAND by the verifier (never read from the producer-controlled context) — to demand an F4 proof: a
-    token-matched hit ALSO requires a collector signature that verifies against that pinned key. A fully-
-    dishonest producer who fabricates the whole context cannot forge a receipt that verifies under a pinned key
-    it does not hold → not fired. ``collector_pubkey=None`` intentionally stays at the VF-2a (token-only) tier,
-    whose honest limit is that it does NOT defeat a fully-dishonest producer; an EMPTY/blank ``collector_pubkey``
-    means F4 was requested with a bad key → fail-closed (NOT a silent drop to token-only).
+    VF-2b (independent collector receipt): a token-matched hit that CARRIES a collector signature (the receiver
+    signed it, so VF-2b was INTENDED) MUST have that receipt verify against an OUT-OF-BAND-pinned collector key
+    — ``dns_collector_pubkey`` for a DNS observation (``method == "DNS"``), else ``collector_pubkey`` — pinned
+    by the VERIFIER, never read from the producer-controlled context. Fail-CLOSED, and CRUCIALLY distinct from
+    a silent token-only drop:
+      * receipt present but the applicable pin is None/blank → REFUSE ("no pinned collector key to verify");
+      * receipt present but it does not verify against the pin → REFUSE (SIGNATURE_INVALID);
+      * a fully-dishonest producer cannot forge a receipt that verifies under a pin it does not hold.
+    This closes the offline fail-open where a VF-2b FACT re-verified without a pin dropped to token-only.
 
-    TTL / replay (additive, fail-open-safe): when a mint window is supplied (``issued_at`` and/or
-    ``expires_at``, retained in the context at mint time), a token-matched, signature-valid hit ALSO requires
-    its TARGET-OBSERVED ``received_at`` (the value the VF-2b receipt signs) to fall within
-    ``[issued_at - skew, expires_at + skew]``. A hit OUTSIDE the window does NOT fire and is labelled distinct
-    from VERIFIED — ``EXPIRED`` (received before the window opened; a clock anomaly / pre-issue) or ``REPLAY``
-    (received after the window closed; a stale/replayed callback). ``skew`` defaults to a small clock tolerance
-    applied to both edges. When NO window is supplied (``issued_at is None and expires_at is None`` — every
-    existing caller) the check is skipped and behaviour is BYTE-IDENTICAL. The decision is over RETAINED
-    timestamps only (no wall-clock), so offline re-verify applies the SAME check deterministically."""
+    TTL / replay — REQUIRED and AUTHORITY-BOUND for a receipt-bearing hit: once a receipt verifies, the hit
+    MUST fall inside a replay window anchored at the producer-recorded mint time ``issued_at`` (refused if
+    absent) whose DURATION + skew are taken OUT-OF-BAND (``authority_ttl`` / ``authority_skew``, falling back
+    to fixed module constants — NEVER the producer-supplied ``expires_at`` / ``skew``). The window is
+    recomputed ``[issued_at - askew, issued_at + attl + askew]`` over the receipt's TARGET-OBSERVED
+    ``received_at``, so a producer that WIDENS its ``expires_at`` or inflates its ``skew`` cannot re-confirm a
+    stale/replayed receipt. Outside the window → ``EXPIRED`` (before it opened) / ``REPLAY`` (after it closed).
+    (Residual: ``issued_at`` is producer-recorded and not committed into the token — see
+    ``LIMIT-dns-oob-token-cleartext-broadcast`` — so the window is only as trustworthy as the mint anchor.)
+
+    VF-2a legacy window: for a token-only hit that carries NO receipt, when the producer context supplies a
+    window (``issued_at`` and/or ``expires_at``) the prior additive check applies over it; both bounds absent
+    ⇒ skipped ⇒ BYTE-IDENTICAL to the original windowless behaviour (the default/benchmark path). The decision
+    is over RETAINED timestamps only (no wall-clock), so offline re-verify applies the SAME check."""
     from .oob import verify_oob_receipt   # local import keeps the module import graph acyclic
 
     hit_list = list(hits or [])
@@ -1535,40 +1565,96 @@ def oob_callback_oracle(hits: Any, expected_token: "str | None" = None,
                       f"token — forged/unrelated callback (fail-closed)"),
             observed={"hit_count": len(hit_list), "matched": 0, "token_verified": False})
 
-    receipt_verified = False
-    if collector_pubkey is not None:
-        # VF-2b F4 requested (collector_pubkey passed, even if blank). An EMPTY/blank pin is a caller error, not
-        # "F4 not requested" — fail-closed (symmetric with verify_oob_receipt), never a silent drop to the
-        # token-only tier. Pass collector_pubkey=None to intentionally stay at the VF-2a token-only tier.
-        if not str(collector_pubkey).strip():
+    # Split token-matched hits by whether the collector SIGNED a receipt. A signed hit means VF-2b was
+    # INTENDED — it must be verified against an out-of-band pin or REFUSED (never a silent token-only drop);
+    # an unsigned hit is a genuine VF-2a token-only observation (byte-identical to the original behaviour).
+    receipt_bearing = [h for h in matched if _hit_collector_sig(h)]
+
+    if receipt_bearing:
+        verified: list[Any] = []
+        for h in receipt_bearing:
+            pin = dns_collector_pubkey if _hit_is_dns(h) else collector_pubkey
+            if pin is None or not str(pin).strip():
+                # A receipt is present but no OUT-OF-BAND pinned collector key is available to check it. This
+                # is the offline fail-open the fix closes: REFUSE, do NOT drop to the forgeable token-only tier.
+                chan = "DNS" if _hit_is_dns(h) else "HTTP"
+                return OracleSignal(
+                    kind=OracleKind.OOB_CALLBACK, fired=False, confidence=0.0,
+                    evidence=(f"VF-2b receipt present but no pinned {chan} collector key to verify — fail-closed, "
+                              f"NOT a silent token-only drop"),
+                    observed={"hit_count": len(hit_list), "matched": len(receipt_bearing),
+                              "token_verified": True, "receipt_verified": False,
+                              "oob_verdict": "UNVERIFIABLE_RECEIPT"})
+            if verify_oob_receipt(h, collector_pubkey=pin):
+                verified.append(h)
+        if not verified:
             return OracleSignal(
                 kind=OracleKind.OOB_CALLBACK, fired=False, confidence=0.0,
-                evidence="F4 (collector receipt) requested but the pinned collector key is empty (fail-closed)",
-                observed={"hit_count": len(hit_list), "token_verified": True, "receipt_verified": False})
-        # require an INDEPENDENT collector receipt over a token-matched hit, checked against the caller-PINNED
-        # collector key. Fail-closed: a token match without a verifying receipt does NOT fire.
-        matched = [h for h in matched if verify_oob_receipt(h, collector_pubkey=collector_pubkey)]
-        if not matched:
-            return OracleSignal(
-                kind=OracleKind.OOB_CALLBACK, fired=False, confidence=0.0,
-                evidence=(f"token-matched out-of-band interaction(s) but NONE carried a collector receipt that "
+                evidence=(f"token-matched out-of-band interaction(s) carried a collector receipt but NONE "
                           f"verifies against the pinned collector key — a fully-dishonest producer cannot forge "
                           f"one (fail-closed)"),
                 observed={"hit_count": len(hit_list), "matched": 0, "token_verified": True,
-                          "receipt_verified": False})
-        receipt_verified = True
+                          "receipt_verified": False, "oob_verdict": "SIGNATURE_INVALID"})
 
-    # TTL / replay (additive): only when a mint window was retained on the context. Skipped entirely when
-    # both bounds are None — the default/benchmark path, which stays byte-identical.
+        # TTL / replay window is REQUIRED for a receipt-bearing hit and BOUND to the out-of-band authority
+        # duration + skew (never the producer's expires_at/skew). A missing mint anchor ⇒ refuse.
+        if issued_at is None:
+            return OracleSignal(
+                kind=OracleKind.OOB_CALLBACK, fired=False, confidence=0.0,
+                evidence=("VF-2b receipt verified but the finding carries NO mint anchor (issued_at) to bound "
+                          "its replay window — fail-closed (a receipt without a window is replayable)"),
+                observed={"hit_count": len(hit_list), "matched": len(verified), "token_verified": True,
+                          "receipt_verified": True, "oob_verdict": "WINDOW_MISSING"})
+        attl = _OOB_DEFAULT_TTL_S if authority_ttl is None else float(authority_ttl)
+        askew = _OOB_DEFAULT_SKEW_S if authority_skew is None else float(authority_skew)
+        lo = float(issued_at) - askew
+        hi = float(issued_at) + attl + askew
+        in_window = [h for h in verified if lo <= _hit_received_at(h) <= hi]
+        if not in_window:
+            ra = _hit_received_at(verified[0])
+            verdict = "EXPIRED" if ra < lo else "REPLAY"
+            return OracleSignal(
+                kind=OracleKind.OOB_CALLBACK, fired=False, confidence=0.0,
+                evidence=(f"{len(verified)} VF-2b out-of-band interaction(s) but NONE fell within the "
+                          f"authority-bound TTL window [{lo:.3f}, {hi:.3f}] — observed received_at {ra:.3f} is "
+                          f"outside it → {verdict} (fail-closed, not VERIFIED)"),
+                observed={"hit_count": len(hit_list), "matched": len(verified), "token_verified": True,
+                          "receipt_verified": True, "in_window": 0, "oob_verdict": verdict,
+                          "window": [lo, hi], "observed_received_at": ra})
+        matched = in_window
+        summary = _hit_summary(matched[0])
+        return OracleSignal(
+            kind=OracleKind.OOB_CALLBACK, fired=True, confidence=0.95,
+            evidence=(f"{len(matched)} F4 (token + independent collector receipt) out-of-band interaction(s); "
+                      f"first: {summary}"),
+            observed={"hit_count": len(hit_list), "matched": len(matched), "token_verified": True,
+                      "receipt_verified": True, "oob_verdict": "VERIFIED", "in_window": len(matched),
+                      "first": summary})
+
+    # -- No receipt on any token-matched hit: the genuine VF-2a token-only tier. -----------------------------
+    if collector_pubkey is not None or dns_collector_pubkey is not None:
+        # A pin was requested (F4) but NO token-matched hit carries a receipt — it can never satisfy the
+        # receipt demand, so fail-closed (symmetric with verify_oob_receipt), never a silent token-only fire.
+        both_blank = (collector_pubkey is None or not str(collector_pubkey).strip()) and \
+                     (dns_collector_pubkey is None or not str(dns_collector_pubkey).strip())
+        reason = ("F4 (collector receipt) requested but the pinned collector key is empty (fail-closed)"
+                  if both_blank else
+                  "F4 (collector receipt) requested but NO token-matched hit carried a collector receipt "
+                  "(fail-closed)")
+        return OracleSignal(
+            kind=OracleKind.OOB_CALLBACK, fired=False, confidence=0.0,
+            evidence=reason,
+            observed={"hit_count": len(hit_list), "matched": len(matched), "token_verified": True,
+                      "receipt_verified": False})
+
+    # collector_pubkey is None ⇒ intentional VF-2a token-only tier. Legacy producer window (additive) —
+    # skipped when both bounds are None ⇒ BYTE-IDENTICAL to the original windowless behaviour.
     if issued_at is not None or expires_at is not None:
         sk = _OOB_DEFAULT_SKEW_S if skew is None else float(skew)
         lo = (float(issued_at) - sk) if issued_at is not None else float("-inf")
         hi = (float(expires_at) + sk) if expires_at is not None else float("inf")
         in_window = [h for h in matched if lo <= _hit_received_at(h) <= hi]
         if not in_window:
-            # A token-matched, receipt-valid hit whose observed time is outside the window. Label it by
-            # which edge it violated (deterministic, over retained timestamps): before the window opened
-            # → EXPIRED (clock / pre-issue); after the window closed → REPLAY (stale/replayed callback).
             ra = _hit_received_at(matched[0])
             verdict = "EXPIRED" if ra < lo else "REPLAY"
             return OracleSignal(
@@ -1577,14 +1663,13 @@ def oob_callback_oracle(hits: Any, expected_token: "str | None" = None,
                           f"per-finding TTL window [{lo:.3f}, {hi:.3f}] — observed received_at {ra:.3f} is "
                           f"outside it → {verdict} (fail-closed, not VERIFIED)"),
                 observed={"hit_count": len(hit_list), "matched": len(matched), "token_verified": True,
-                          "receipt_verified": receipt_verified, "in_window": 0, "oob_verdict": verdict,
+                          "receipt_verified": False, "in_window": 0, "oob_verdict": verdict,
                           "window": [lo, hi], "observed_received_at": ra})
         matched = in_window
 
     summary = _hit_summary(matched[0])
-    tier = "F4 (token + independent collector receipt)" if receipt_verified else "token-verified"
     observed: dict[str, Any] = {"hit_count": len(hit_list), "matched": len(matched), "token_verified": True,
-                                "receipt_verified": receipt_verified, "first": summary}
+                                "receipt_verified": False, "first": summary}
     if issued_at is not None or expires_at is not None:
         observed["oob_verdict"] = "VERIFIED"
         observed["in_window"] = len(matched)
@@ -1592,7 +1677,7 @@ def oob_callback_oracle(hits: Any, expected_token: "str | None" = None,
         kind=OracleKind.OOB_CALLBACK,
         fired=True,
         confidence=0.95,
-        evidence=f"{len(matched)} {tier} out-of-band interaction(s); first: {summary}",
+        evidence=f"{len(matched)} token-verified out-of-band interaction(s); first: {summary}",
         observed=observed,
     )
 

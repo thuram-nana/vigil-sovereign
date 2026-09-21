@@ -45,6 +45,21 @@ from framework.v2.verify.verifier import OracleVerifier, _ALL_ORACLES
 _BASE = "oob.op.example"
 
 
+def _authority(*, http_pin: str = "", dns_pin: str = "", ttl: float = 300.0, skew: float = 5.0):
+    """An EngagementAuthority carrying the OUT-OF-BAND OOB pins + owner-signed TTL/skew, for building an
+    offline-reverify verifier (verifier_from_authority) — the material the CLI sources from the SIGNED
+    authority. Not itself signed here; the signed-load CLI path is exercised in test_oob_offline_reverify."""
+    from datetime import datetime, timedelta, timezone
+
+    from vigil_core.authority import EngagementAuthority, TargetEnvironment
+    now = datetime(2026, 6, 1, tzinfo=timezone.utc)
+    return EngagementAuthority(
+        engagement_slug="eng", environment=TargetEnvironment.TWIN, scope=["*.example.com"],
+        not_before=now - timedelta(hours=1), not_after=now + timedelta(hours=1),
+        oob_collector_pubkey=http_pin, oob_dns_collector_pubkey=dns_pin,
+        oob_ttl_seconds=ttl, oob_skew_seconds=skew)
+
+
 # --------------------------------------------------------------------------- raw DNS helpers
 
 
@@ -135,18 +150,24 @@ def test_dns_lookup_mints_a_signed_fact_that_reverifies_offline() -> None:
         assert hit.collector_sig
         assert verify_oob_receipt(hit, collector_pubkey=kp.public_key_b64)
 
-        # the SAME oracle confirms with NO change (VF-2b pin out-of-band), and it re-verifies OFFLINE
-        sig = oob_callback_oracle([hit], token, collector_pubkey=kp.public_key_b64)
+        # the SAME oracle confirms with the DNS pin + a bound window (VF-2b pin out-of-band)
+        sig = oob_callback_oracle([hit], token, dns_collector_pubkey=kp.public_key_b64,
+                                  issued_at=time.time() - 1, authority_ttl=300.0)
         assert sig.fired and sig.confidence >= 0.95
 
-        # offline re-verify from the retained context (serialized dict form of the hit)
-        v = OracleVerifier(oob_collector_pubkey=kp.public_key_b64)
-        finding = {"bug_class": "ssrf", "title": "t", "severity": "High", "surface": "s", "summary": "x"}
+        # offline re-verify from the SERIALIZED finding via the REAL reverify path (NOT a hand-passed live
+        # verifier) — the DNS pin + TTL policy are sourced from a (signed) authority via verifier_from_authority.
         from framework.v2.verify.adapter import FindingContext
+        from framework.v2.verify.reverify import reverify_finding, verifier_from_authority
         ctx = FindingContext.from_oob([hit], bug_class="ssrf", expected_token=token,
                                       issued_at=time.time() - 1, expires_at=time.time() + 300)
-        good = confirm_finding(finding, context=ctx, verifier=v)
-        assert good is not None and good.confirmed_by.value == "oob_callback"
+        finding = {"bug_class": "ssrf", "oracle_context": ctx.model_dump(mode="json"),
+                   "confirmed_by": "oob_callback", "confidence": 0.95}
+        v = verifier_from_authority(_authority(dns_pin=kp.public_key_b64))
+        r = reverify_finding(finding, verifier=v)
+        assert r.reproduced and r.confirmed_by == "oob_callback"
+        # ... and WITHOUT the pin (no authority material) it fails CLOSED, not a token-only drop.
+        assert not reverify_finding(finding).reproduced
 
 
 def test_no_lookup_control_is_inconclusive() -> None:
@@ -170,6 +191,36 @@ def test_name_outside_base_domain_is_ignored() -> None:
         assert coll.poll(token) == []   # refused: not under the configured base domain
 
 
+def test_unregistered_names_under_base_domain_are_not_recorded() -> None:
+    """DoS bound: the public :53 listener records ONLY names whose token was register_dns_token'd. An
+    arbitrary label under the base domain (which any internet host can query) is dropped, so the hit registry
+    cannot grow without bound on unregistered names."""
+    with DNSCollector(_BASE) as coll:
+        # A batch of DISTINCT unregistered labels under the base domain — never minted by us.
+        for i in range(50):
+            _resolve("127.0.0.1", coll.port, f"unregistered{i}{'a' * 20}.{_BASE}")
+        time.sleep(0.2)
+        server = coll._server                              # type: ignore[attr-defined]
+        with server._lock:                                # noqa: SLF001
+            assert server._hits == {}                     # nothing recorded for any unregistered name
+        # A REGISTERED token IS recorded (the gate does not break the real path).
+        token, host = coll.register_dns_token()
+        _resolve("127.0.0.1", coll.port, host)
+        assert _poll_until(coll, token)
+
+
+def test_registered_token_hits_are_capped() -> None:
+    """Even a REGISTERED token's bucket is bounded (its callback label is visible on the wire), so a flood
+    against a known token cannot grow the registry without bound."""
+    from framework.v2.verify.dns_collector import _MAX_HITS_PER_TOKEN
+    with DNSCollector(_BASE) as coll:
+        token, host = coll.register_dns_token()
+        for _ in range(_MAX_HITS_PER_TOKEN + 25):
+            _resolve("127.0.0.1", coll.port, host)
+        time.sleep(0.3)
+        assert len(coll.poll(token)) <= _MAX_HITS_PER_TOKEN
+
+
 def test_probe_via_dnsoobcheck_against_a_resolving_target() -> None:
     """DNS_SSRF_OOB drives a 'target' whose send() resolves the injected callback host — the scanner-side
     integration, end to end, minting a FACT through the check → oracle path."""
@@ -189,10 +240,14 @@ def test_probe_via_dnsoobcheck_against_a_resolving_target() -> None:
         (pt,) = [p for p in tmpl.insertion_points(kinds=(InsertionKind.QUERY_VALUE,)) if p.name == "url"]
         ctx = DNS_SSRF_OOB.probe(tmpl, pt, _send, coll)
         assert ctx is not None
-        v = OracleVerifier(oob_collector_pubkey=kp.public_key_b64)
+        # A DNS observation is re-verified against the DNS pin (method == "DNS"); the HTTP pin does NOT apply.
+        v = OracleVerifier(oob_dns_collector_pubkey=kp.public_key_b64)
         finding = {"bug_class": "ssrf", "title": "t", "severity": "High", "surface": "s", "summary": "x"}
         good = confirm_finding(finding, context=ctx, verifier=v)
         assert good is not None and good.confirmed_by.value == "oob_callback"
+        # the HTTP pin does not verify a DNS receipt → fail-closed (channel-correct pin required)
+        assert confirm_finding(finding, context=ctx,
+                               verifier=OracleVerifier(oob_collector_pubkey=kp.public_key_b64)) is None
 
 
 # --------------------------------------------------------------------------- VF-2b
@@ -204,9 +259,14 @@ def test_vf2b_wrong_or_absent_pin_does_not_fire() -> None:
         token, host = coll.register_dns_token()
         _resolve("127.0.0.1", coll.port, host)
         (hit,) = _poll_until(coll, token)
-        assert oob_callback_oracle([hit], token, collector_pubkey=kp.public_key_b64).fired
-        assert not oob_callback_oracle([hit], token, collector_pubkey=attacker.public_key_b64).fired
-        assert not oob_callback_oracle([hit], token, collector_pubkey="").fired   # blank pin fail-closed
+        win = dict(issued_at=time.time() - 1.0, authority_ttl=300.0)
+        # DNS receipts verify against the DNS pin (method == "DNS"); a bound window is required.
+        assert oob_callback_oracle([hit], token, dns_collector_pubkey=kp.public_key_b64, **win).fired
+        assert not oob_callback_oracle([hit], token, dns_collector_pubkey=attacker.public_key_b64, **win).fired
+        assert not oob_callback_oracle([hit], token, dns_collector_pubkey="", **win).fired   # blank pin fail-closed
+        # A receipt-bearing DNS hit with NO pin at all is FAIL-CLOSED (the offline fail-open fix), never token-only.
+        refused = oob_callback_oracle([hit], token, **win)
+        assert not refused.fired and refused.observed.get("oob_verdict") == "UNVERIFIABLE_RECEIPT"
 
 
 def test_unsigned_dns_collector_is_vf2a_only() -> None:
@@ -216,9 +276,9 @@ def test_unsigned_dns_collector_is_vf2a_only() -> None:
         _resolve("127.0.0.1", coll.port, host)
         (hit,) = _poll_until(coll, token)
         assert hit.collector_sig == ""
-        # token-only fires; demanding a receipt (any pin) fails-closed because there is no signature
+        # No receipt ⇒ genuine VF-2a token-only: token-only fires; demanding a receipt (any pin) fails-closed.
         assert oob_callback_oracle([hit], token).fired
-        assert not oob_callback_oracle([hit], token, collector_pubkey="anything").fired
+        assert not oob_callback_oracle([hit], token, dns_collector_pubkey="anything").fired
 
 
 # --------------------------------------------------------------------------- TTL / replay
@@ -234,11 +294,10 @@ def _signed_hit(kp, token: str, received_at: float) -> OOBHit:
 def test_stale_receipt_after_window_is_replay_not_fired() -> None:
     kp = generate_keypair()
     issued = 1_000_000.0
-    expires = issued + 300.0
-    hit = _signed_hit(kp, "t" * 32, received_at=expires + 3600.0)   # arrived long after the window closed
+    hit = _signed_hit(kp, "t" * 32, received_at=issued + 300.0 + 3600.0)   # long after the authority window
     assert verify_oob_receipt(hit, collector_pubkey=kp.public_key_b64)   # signature is valid
-    sig = oob_callback_oracle([hit], "t" * 32, collector_pubkey=kp.public_key_b64,
-                              issued_at=issued, expires_at=expires)
+    sig = oob_callback_oracle([hit], "t" * 32, dns_collector_pubkey=kp.public_key_b64,
+                              issued_at=issued, authority_ttl=300.0)
     assert not sig.fired
     assert sig.observed["oob_verdict"] == "REPLAY"
 
@@ -246,10 +305,9 @@ def test_stale_receipt_after_window_is_replay_not_fired() -> None:
 def test_receipt_before_window_is_expired_not_fired() -> None:
     kp = generate_keypair()
     issued = 1_000_000.0
-    expires = issued + 300.0
     hit = _signed_hit(kp, "t" * 32, received_at=issued - 3600.0)    # arrived before the window opened
-    sig = oob_callback_oracle([hit], "t" * 32, collector_pubkey=kp.public_key_b64,
-                              issued_at=issued, expires_at=expires)
+    sig = oob_callback_oracle([hit], "t" * 32, dns_collector_pubkey=kp.public_key_b64,
+                              issued_at=issued, authority_ttl=300.0)
     assert not sig.fired
     assert sig.observed["oob_verdict"] == "EXPIRED"
 
@@ -257,49 +315,57 @@ def test_receipt_before_window_is_expired_not_fired() -> None:
 def test_receipt_inside_window_fires() -> None:
     kp = generate_keypair()
     issued = 1_000_000.0
-    expires = issued + 300.0
     hit = _signed_hit(kp, "t" * 32, received_at=issued + 100.0)     # comfortably inside
-    sig = oob_callback_oracle([hit], "t" * 32, collector_pubkey=kp.public_key_b64,
-                              issued_at=issued, expires_at=expires)
+    sig = oob_callback_oracle([hit], "t" * 32, dns_collector_pubkey=kp.public_key_b64,
+                              issued_at=issued, authority_ttl=300.0)
     assert sig.fired and sig.observed["oob_verdict"] == "VERIFIED"
 
 
 def test_skew_tolerance_at_the_edge() -> None:
     kp = generate_keypair()
-    issued, expires = 1_000_000.0, 1_000_300.0
-    # 2s past expiry but within the 5s default skew → still fires
-    hit = _signed_hit(kp, "t" * 32, received_at=expires + 2.0)
-    assert oob_callback_oracle([hit], "t" * 32, collector_pubkey=kp.public_key_b64,
-                               issued_at=issued, expires_at=expires).fired
-    # 10s past expiry, beyond skew → REPLAY
-    hit2 = _signed_hit(kp, "t" * 32, received_at=expires + 10.0)
-    assert not oob_callback_oracle([hit2], "t" * 32, collector_pubkey=kp.public_key_b64,
-                                   issued_at=issued, expires_at=expires).fired
+    issued = 1_000_000.0
+    # authority TTL 300s + default skew 5s → window closes at issued+305. 302s past issue → still fires.
+    hit = _signed_hit(kp, "t" * 32, received_at=issued + 302.0)
+    assert oob_callback_oracle([hit], "t" * 32, dns_collector_pubkey=kp.public_key_b64,
+                               issued_at=issued, authority_ttl=300.0).fired
+    # 310s past issue, beyond skew → REPLAY
+    hit2 = _signed_hit(kp, "t" * 32, received_at=issued + 310.0)
+    assert not oob_callback_oracle([hit2], "t" * 32, dns_collector_pubkey=kp.public_key_b64,
+                                   issued_at=issued, authority_ttl=300.0).fired
 
 
-def test_ttl_replay_reverifies_offline() -> None:
-    """The stale-receipt refusal is deterministic over retained timestamps, so it holds on offline
-    re-verify from the finding context, not just live."""
+def test_producer_widened_window_is_ignored_authority_ttl_wins() -> None:
+    """A dishonest producer that WIDENS its context expires_at / inflates its skew cannot re-confirm a stale
+    receipt: the receipt-bearing path takes the DURATION + skew from the OUT-OF-BAND authority, never the ctx."""
     kp = generate_keypair()
-    issued, expires = 1_000_000.0, 1_000_300.0
-    hit = _signed_hit(kp, "t" * 32, received_at=expires + 3600.0)
-    from framework.v2.verify.adapter import FindingContext
-    ctx = FindingContext.from_oob([hit], bug_class="ssrf", expected_token="t" * 32,
-                                  issued_at=issued, expires_at=expires)
-    v = OracleVerifier(oob_collector_pubkey=kp.public_key_b64)
-    finding = {"bug_class": "ssrf", "title": "t", "severity": "High", "surface": "s", "summary": "x"}
-    assert confirm_finding(finding, context=ctx, verifier=v) is None   # refused offline too
+    issued = 1_000_000.0
+    stale = issued + 100_000.0                       # long past a 300s authority window
+    hit = _signed_hit(kp, "t" * 32, received_at=stale)
+    # Producer supplies a hugely-widened expires_at and skew on the ctx — IGNORED for a receipt-bearing hit.
+    sig = oob_callback_oracle([hit], "t" * 32, dns_collector_pubkey=kp.public_key_b64,
+                              issued_at=issued, expires_at=stale + 1.0, skew=1_000_000.0,
+                              authority_ttl=300.0, authority_skew=5.0)
+    assert not sig.fired and sig.observed["oob_verdict"] == "REPLAY"
+
+
+def test_windowless_receipt_is_failclosed() -> None:
+    """A receipt-bearing hit with the mint window DROPPED (no issued_at) is REFUSED — a receipt without a
+    window is replayable, so it can never confirm."""
+    kp = generate_keypair()
+    hit = _signed_hit(kp, "t" * 32, received_at=time.time())
+    sig = oob_callback_oracle([hit], "t" * 32, dns_collector_pubkey=kp.public_key_b64)  # no window
+    assert not sig.fired and sig.observed["oob_verdict"] == "WINDOW_MISSING"
 
 
 # --------------------------------------------------------------------------- byte-identical default path
 
 
-def test_windowless_path_is_byte_identical() -> None:
-    """No window supplied ⇒ the oracle output is EXACTLY the prior (windowless) shape — no oob_verdict /
-    window keys leak into the observed map, so the make-gate/benchmark path is unchanged."""
-    kp = generate_keypair()
-    hit = _signed_hit(kp, "t" * 32, received_at=time.time())
-    sig = oob_callback_oracle([hit], "t" * 32, collector_pubkey=kp.public_key_b64)
+def test_windowless_vf2a_path_is_byte_identical() -> None:
+    """An UNSIGNED (VF-2a) hit with no window ⇒ the oracle output is EXACTLY the prior (windowless) shape —
+    no oob_verdict / window keys leak into the observed map, so the make-gate/benchmark path is unchanged."""
+    hit = OOBHit(token="t" * 32, method="GET", path="/" + "t" * 32, client_ip="127.0.0.1",
+                 received_at=time.time())                       # NO collector_sig ⇒ genuine VF-2a
+    sig = oob_callback_oracle([hit], "t" * 32)
     assert sig.fired
     assert "oob_verdict" not in sig.observed
     assert "window" not in sig.observed

@@ -264,10 +264,16 @@ class OOBCheck:
 
     wants_oob: ClassVar[bool] = True
 
+    ttl: float = 300.0
+
     def probe(
         self, template: RequestTemplate, point: InsertionPoint, send: Send, oob: OOBReceiver
     ) -> FindingContext | None:
         token, callback_url = oob.register_token()
+        # VF-2b: when the receiver signs receipts (a collector keypair is configured), a receipt-bearing hit
+        # REQUIRES an authority-bound TTL window, so record the mint anchor. When there is NO collector key
+        # (VF-2a token-only), omit it so the windowless path stays byte-identical.
+        issued_at = time.time() if getattr(oob, "collector_pubkey", None) else None
         payload = self.payload_template.format(callback=callback_url)
         try:
             send(template.render(point, payload))
@@ -281,8 +287,13 @@ class OOBCheck:
             time.sleep(self.poll_interval)
             hits = oob.poll(token)
         # VF-2a: retain the REGISTERED per-finding token so the oracle fires only for a callback that carried
-        # it (live AND on offline re-verify) — a fabricated/unrelated hit no longer confirms.
-        return FindingContext.from_oob(hits, bug_class=self.bug_class, expected_token=token)
+        # it (live AND on offline re-verify) — a fabricated/unrelated hit no longer confirms. On the VF-2b
+        # path, also retain the mint anchor (the TTL DURATION is taken out-of-band from the signed authority).
+        return FindingContext.from_oob(
+            hits, bug_class=self.bug_class, expected_token=token,
+            issued_at=issued_at,
+            expires_at=(issued_at + float(self.ttl)) if issued_at is not None else None,
+        )
 
 
 @dataclass(frozen=True)

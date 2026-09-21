@@ -312,6 +312,9 @@ class WebScanCampaign:
         oob_relay_url: str | None = None,
         oob_relay_secret: str | None = None,
         oob_collector_pubkey: str | None = None,
+        oob_dns_collector_pubkey: str | None = None,
+        oob_ttl_seconds: float | None = None,
+        oob_skew_seconds: float | None = None,
         oob_collector_keypair: "object | None" = None,
         enable_browser_xss: bool = False,
         enable_spa_crawl: bool = False,
@@ -403,6 +406,13 @@ class WebScanCampaign:
         # supplied by the operator via the charter/CLI (NEVER fetched from the relay). A remote relay REQUIRES
         # it (RelayClient fail-closes without it): remote OOB is the VF-2b tier, never a silent VF-2a drop.
         self.oob_collector_pubkey = oob_collector_pubkey
+        # DNS OOB (Wave 1 DNS-OOB) — the OUT-OF-BAND DNS collector pin + the owner-signed TTL/skew replay
+        # policy, all sourced from the SIGNED authority and threaded onto the verifier so a DNS (or HTTP) VF-2b
+        # finding is re-verified against the pinned key with an authority-bound window. This is what CONSUMES
+        # authority.oob_dns_collector_pubkey (no longer dead config). None ⇒ byte-identical VF-2a path.
+        self.oob_dns_collector_pubkey = oob_dns_collector_pubkey
+        self.oob_ttl_seconds = oob_ttl_seconds
+        self.oob_skew_seconds = oob_skew_seconds
         # VF-2b (Wave 1.2) — an OPTIONAL independent collector KEYPAIR (a vigil_core KeyPair) for the LOOPBACK
         # receiver, so loopback OOB confirms at the VF-2b tier end-to-end. Default None ⇒ no keypair minted ⇒
         # VF-2a token-only ⇒ the default/benchmark path is byte-identical (the make-gate invariant).
@@ -1061,7 +1071,10 @@ class WebScanCampaign:
                 engine = AuditEngine(
                     self._send, max_requests=self.max_audit_requests, oob=oob,
                     bandit=bandit, bandit_context=self.bandit_context,
-                    waf_adaptive=self.waf_adaptive, retain_evidence=self.retain_evidence)
+                    waf_adaptive=self.waf_adaptive, retain_evidence=self.retain_evidence,
+                    oob_collector_pubkey=self.oob_collector_pubkey,
+                    oob_dns_collector_pubkey=self.oob_dns_collector_pubkey,
+                    oob_ttl_seconds=self.oob_ttl_seconds, oob_skew_seconds=self.oob_skew_seconds)
                 selector = select_checks if self.targeted else None
                 for req in all_requests:
                     # Request-level checks are host/endpoint-level, so run them once

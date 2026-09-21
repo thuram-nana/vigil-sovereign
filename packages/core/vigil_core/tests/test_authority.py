@@ -60,15 +60,19 @@ def test_signing_bytes_are_domain_tagged_and_format_stable():
     assert b.startswith(b"crucible-authority-v1\x00")
     # sorted keys, compact separators, ISO-Z datetimes — the entitlement layer's canonical form.
     assert b"\"environment\":\"staging\"" in b and b"\"not_after\":\"2026-01-02T11:04:05Z\"" in b
-    # VF-2b (Wave 1.2) + DNS-OOB (Wave 1): the FOUR DEDICATED OOB fields (all default "") are part of the
-    # canonical form now — a DELIBERATE, reviewed change. It re-hashes the golden vector (below) and means an
-    # authority signed BEFORE this change re-verifies only after re-signing. _AUTHORITY_DOMAIN is deliberately
-    # unchanged (no domain bump): the schema grew additively, both planes agree by construction, and short-
-    # window authorities re-sign fine. The golden pin still guards against any FURTHER unreviewed drift.
+    # VF-2b (Wave 1.2) + DNS-OOB (Wave 1) + the OOB replay-policy pair (Wave 1 DNS-OOB soundness fix): the
+    # DEDICATED OOB fields (the four pins/domains default "", plus oob_ttl_seconds/oob_skew_seconds — the
+    # owner-signed receipt TTL DURATION + skew) are part of the canonical form now — a DELIBERATE, reviewed
+    # change. It re-hashes the golden vector (below) and means an authority signed BEFORE this change re-verifies
+    # only after re-signing. _AUTHORITY_DOMAIN is deliberately unchanged (no domain bump): the schema grew
+    # additively, both planes agree by construction, and short-window authorities re-sign fine. The TTL/skew
+    # duration bounding a receipt-bearing OOB hit's replay window is OWNER-SIGNED here (out-of-band), so a
+    # producer cannot widen it. The golden pin still guards against any FURTHER unreviewed drift.
     assert b"\"oob_collector_pubkey\":\"\"" in b and b"\"oob_relay_host\":\"\"" in b
     assert b"\"oob_dns_domain\":\"\"" in b and b"\"oob_dns_collector_pubkey\":\"\"" in b
+    assert b"\"oob_ttl_seconds\":300.0" in b and b"\"oob_skew_seconds\":5.0" in b
     assert hashlib.sha256(b).hexdigest() == (
-        "37344664eb4179e5afaeafe32bad3ae6a69f4fff5868f6ad35f24481d2f5fd19"
+        "c22cb3b2b3e7024517f72054acbd3cdb6f167b1fb2a1ae478cb1ef7b1549376e"
     ), "authority canonical form changed — this invalidates every existing signature; bump + migrate"
 
 

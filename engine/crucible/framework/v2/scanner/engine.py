@@ -197,15 +197,31 @@ class AuditEngine:
         bandit_context: str = "default",
         waf_adaptive: bool = False,
         retain_evidence: bool = False,
+        oob_collector_pubkey: "str | None" = None,
+        oob_dns_collector_pubkey: "str | None" = None,
+        oob_ttl_seconds: "float | None" = None,
+        oob_skew_seconds: "float | None" = None,
     ) -> None:
         self._send = send
-        # VF-2b OUT-OF-BAND pin (GAP A): the OOB collector public key is an AUTHORITY, taken from the OOB
-        # handle the caller wired in (the loopback receiver's own minted key, or a charter/CLI-pinned
-        # remote-relay collector pubkey) — NEVER from the producer-controlled finding context. It rides on
-        # the verifier so the SAME confirm() that adjudicates the OOB finding demands the collector receipt.
-        # None (no keypair minted / no pin) ⇒ VF-2a token-only ⇒ default/benchmark certificates byte-identical.
-        _oob_pin = getattr(oob, "collector_pubkey", None) if oob is not None else None
-        self.verifier = verifier or OracleVerifier(oob_collector_pubkey=_oob_pin)
+        # VF-2b OUT-OF-BAND pins: the OOB collector public keys are AUTHORITIES. For a real engagement they are
+        # sourced from the SIGNED authority (``oob_collector_pubkey`` for HTTP receipts,
+        # ``oob_dns_collector_pubkey`` for DNS) and threaded in here — NEVER read from the producer-controlled
+        # finding context. When no authority pin is threaded for the channel VIGIL itself runs in-process
+        # (loopback-owned collector: the self-check / test path), fall back to that collector's own minted key,
+        # which is genuinely independent of the target/producer. The TTL DURATION + skew bounding a receipt's
+        # replay window are likewise owner-signed and passed through to the verifier. None on every channel ⇒
+        # VF-2a token-only for UNSIGNED hits ⇒ default/benchmark certificates byte-identical.
+        _self_key = getattr(oob, "collector_pubkey", None) if oob is not None else None
+        _http_pin = oob_collector_pubkey
+        _dns_pin = oob_dns_collector_pubkey
+        if oob is not None:
+            if hasattr(oob, "register_dns_token"):
+                _dns_pin = _dns_pin or _self_key
+            else:
+                _http_pin = _http_pin or _self_key
+        self.verifier = verifier or OracleVerifier(
+            oob_collector_pubkey=_http_pin, oob_dns_collector_pubkey=_dns_pin,
+            oob_ttl_seconds=oob_ttl_seconds, oob_skew_seconds=oob_skew_seconds)
         self.max_requests = max_requests
         # OPT-IN re-executable-tier evidence retention (Proof-of-Posture). Default OFF: no probe carries
         # `evidence`, so every coverage/posture certificate is byte-identical to before (the make-gate

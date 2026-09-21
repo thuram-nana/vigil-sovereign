@@ -661,15 +661,26 @@ class OracleVerifier:
     """Runs deterministic oracles to confirm (or refuse) a finding."""
 
     def __init__(self, high_confidence: float = HIGH_CONFIDENCE,
-                 oob_collector_pubkey: "str | None" = None) -> None:
+                 oob_collector_pubkey: "str | None" = None, *,
+                 oob_dns_collector_pubkey: "str | None" = None,
+                 oob_ttl_seconds: "float | None" = None,
+                 oob_skew_seconds: "float | None" = None) -> None:
         self.high_confidence = high_confidence
-        # VF-2b OUT-OF-BAND pin (GAP A): the collector public key the OOB oracle checks each receipt against.
-        # It is an AUTHORITY the caller supplies at construction (the loopback receiver's own minted key, or a
-        # charter/CLI-pinned remote-relay collector pubkey) — NEVER read from the producer-controlled ctx, or
-        # a dishonest producer would supply its own key and void the guarantee. None ⇒ the intentional VF-2a
-        # token-only tier (the default/benchmark path stays byte-identical); a blank string is fail-closed in
-        # the oracle (F4 requested with a bad key), never a silent drop to token-only.
+        # VF-2b OUT-OF-BAND pins: the collector public keys the OOB oracle checks each receipt against. These
+        # are AUTHORITIES the caller supplies at construction — for OFFLINE re-verify, sourced from the SIGNED
+        # engagement authority (available offline, never trusted from the producer ctx); on the live path, from
+        # the in-process collector VIGIL itself runs (loopback-owned) or a charter-pinned remote relay. A
+        # receipt-bearing hit re-verified with NO applicable pin fails CLOSED in the oracle (never a silent
+        # token-only drop). ``oob_collector_pubkey`` checks HTTP receipts; ``oob_dns_collector_pubkey`` checks
+        # DNS receipts (method == "DNS"). Both None ⇒ the intentional VF-2a token-only tier for UNSIGNED hits
+        # (the default/benchmark path stays byte-identical).
         self.oob_collector_pubkey = oob_collector_pubkey
+        self.oob_dns_collector_pubkey = oob_dns_collector_pubkey
+        # The OWNER-SIGNED TTL DURATION + skew that bound a receipt-bearing hit's replay window. Taken OUT-OF-
+        # BAND (from the signed authority), never from the producer ctx, so a producer-widened expires_at / huge
+        # producer skew cannot re-confirm a stale receipt. None ⇒ the oracle's fixed default duration/skew.
+        self.oob_ttl_seconds = oob_ttl_seconds
+        self.oob_skew_seconds = oob_skew_seconds
 
     def oracles_for(self, bug_class: str) -> tuple[OracleKind, ...]:
         """The oracle kinds that can prove `bug_class`. Unknown classes fall
@@ -825,8 +836,12 @@ class OracleVerifier:
                 return oracles.oob_callback_oracle(
                     ctx["oob_hits"], ctx.get("oob_token"),
                     collector_pubkey=self.oob_collector_pubkey,
+                    dns_collector_pubkey=self.oob_dns_collector_pubkey,
                     issued_at=ctx.get("oob_issued_at"), expires_at=ctx.get("oob_expires_at"),
                     skew=ctx.get("oob_skew"),
+                    # TTL DURATION + skew for a receipt-bearing hit come from the OUT-OF-BAND authority, NOT
+                    # the producer ctx — a widened ctx expires_at/skew is ignored on the VF-2b path.
+                    authority_ttl=self.oob_ttl_seconds, authority_skew=self.oob_skew_seconds,
                 )
             return None
         if kind is OracleKind.SERVICE_REACHABILITY:
