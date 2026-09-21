@@ -111,6 +111,22 @@ class BooleanInferenceCheck:
         false_as: list[dict] = []
         false_bs: list[dict] = []
         payloads = [self.true_clause, self.false_clause]
+
+        # REFLECTION BASELINE (the load-bearing reflection defense; transform-agnostic).
+        # Send two clause-SHAPED but NON-injecting benign values — same punctuation/quotes, alphanumerics
+        # replaced by constants, so no boolean keyword survives. If the endpoint returns DIFFERENT bodies
+        # for two arbitrary benign inputs it ECHOES the input, so a true/false clause differential CANNOT be
+        # attributed to backend boolean evaluation ⇒ refuse (INCONCLUSIVE, return None: no rounds, no FACT).
+        # This catches ANY echo transform (verbatim, case-folded, decimal/hex HTML entity, JSON-escaped, …)
+        # because it measures WHETHER the endpoint reflects at all, not which encodings were enumerated —
+        # unlike a byte-form strip, whose form list can never be complete. The baseline responses are retained
+        # (via from_boolean_probes) and RE-CHECKED in boolean_inference_oracle, so the defense re-verifies
+        # offline and the veracity firewall can demote a FACT whose stored baseline reflects.
+        refl_a = _as_dict(send(template.render(point, _benign_like(self.true_clause, "z", "7"))))
+        refl_b = _as_dict(send(template.render(point, _benign_like(self.true_clause, "q", "3"))))
+        if differential_response_oracle(refl_a, refl_b).fired:
+            return None
+
         for _ in range(self.n_max):
             t = _as_dict(send(template.render(point, self.true_clause)))
             a = _as_dict(send(template.render(point, self.false_clause)))
@@ -135,6 +151,7 @@ class BooleanInferenceCheck:
         return FindingContext.from_boolean_probes(
             trues, false_as, false_bs, bug_class=self.bug_class,
             true_payload=self.true_clause, false_payload=self.false_clause,
+            reflection_baseline=[refl_a, refl_b],
         )
 
 
@@ -142,6 +159,16 @@ def _as_dict(resp: object) -> dict:
     if isinstance(resp, dict):
         return resp
     return {"body": str(resp)}
+
+
+def _benign_like(clause: str, alpha: str, digit: str) -> str:
+    """A clause-SHAPED but NON-injecting benign value: keep every non-alphanumeric character (quotes,
+    spaces, ``=``, parentheses — the punctuation a reflector keys on) in place, and replace each letter
+    with ``alpha`` and each digit with ``digit``. Deterministic (no rng — the certificate stays
+    reproducible) and boolean-free (``OR``/``AND``/``||`` become constant letters), so it exercises the
+    endpoint's reflection surface without carrying any injection semantics. Two different (alpha,digit)
+    seeds yield two different benign values; if the endpoint echoes input, their bodies differ."""
+    return "".join(alpha if c.isalpha() else (digit if c.isdigit() else c) for c in clause)
 
 
 @dataclass(frozen=True)

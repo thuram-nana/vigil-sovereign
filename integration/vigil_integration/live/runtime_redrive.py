@@ -382,9 +382,12 @@ def runtime_redrive(url: str, *, slug: str, engagement_slug: str, signers: "list
                 if ctx_obj is None:
                     continue
                 context = ctx_obj.to_verifier_context()
-                # SPRT over VIGIL's OWN freshly captured rounds — the retained probe_rounds re-adjudicate
-                # offline via the SAME boolean_inference OracleKind.
-                signal = boolean_inference_oracle(context.get("probe_rounds"))
+                # SPRT over VIGIL's OWN freshly captured rounds — the retained probe_rounds (and the
+                # reflection baseline) re-adjudicate offline via the SAME boolean_inference OracleKind.
+                # Passing reflection_baseline makes the LIVE signal identical to the offline re-verify:
+                # an endpoint that echoes arbitrary benign input is refused (INCONCLUSIVE), never a FACT.
+                signal = boolean_inference_oracle(context.get("probe_rounds"),
+                                                  reflection_baseline=context.get("reflection_baseline"))
                 minted = _admit(context, f"{probe_url}#{point.id}", f"query:{name}",
                                 fired=signal.fired, conclusive=signal.conclusive,
                                 body_unreadable=state["body_unavailable"] > before_bodies)

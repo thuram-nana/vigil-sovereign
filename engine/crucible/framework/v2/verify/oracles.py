@@ -567,6 +567,7 @@ def boolean_inference_oracle(
     p1: float = 0.9,
     p0: float = 0.1,
     discriminator: Mapping[str, Any] | str | None = None,
+    reflection_baseline: Any = None,
 ) -> OracleSignal:
     """Confirm a boolean-blind vulnerability by a Wald SEQUENTIAL PROBABILITY
     RATIO TEST over repeated probes — robust to the nondeterministic backends
@@ -589,7 +590,28 @@ def boolean_inference_oracle(
     log((1-beta)/alpha) confirms; LLR <= log(beta/(1-alpha)) refutes; neither by
     the last round is inconclusive (a non-fire — never a guess). ``probe_rounds``
     is ``[{"true": resp, "false_a": resp, "false_b": resp}, ...]``.
+
+    REFLECTION BASELINE (transform-agnostic reflection defense): ``reflection_baseline`` is a pair of
+    responses to two clause-shaped NON-injecting benign values. If they DIFFER, the endpoint echoes
+    arbitrary input, so the true/false differential cannot be attributed to backend boolean evaluation —
+    the oracle refuses (a non-fire, INCONCLUSIVE) regardless of the rounds. This re-checks OFFLINE the
+    same gate the live probe applied, so the veracity firewall can demote a FACT whose retained baseline
+    reflects (defeating a case-folded / decimal-entity / any-transform echo the strip form-list would miss).
+    Absent/malformed ⇒ skipped (byte-identical for every non-baseline caller).
     """
+    if isinstance(reflection_baseline, Sequence) and not isinstance(reflection_baseline, (str, bytes)) \
+            and len(reflection_baseline) == 2:
+        b0, b1 = reflection_baseline[0], reflection_baseline[1]
+        if isinstance(b0, Mapping) and isinstance(b1, Mapping) \
+                and differential_response_oracle(b0, b1, discriminator).fired:
+            return OracleSignal(
+                kind=OracleKind.BOOLEAN_INFERENCE, fired=False, confidence=0.0,
+                evidence=("refused: the endpoint returned different bodies for two arbitrary benign inputs "
+                          "(reflection baseline fired) — a boolean differential here is input echo, not a "
+                          "backend channel"),
+                observed={"decision": "reflection-refused"},
+            )
+
     def _round_signals():
         for r in (probe_rounds or []):
             if not isinstance(r, Mapping) or "true" not in r or "false_a" not in r or "false_b" not in r:

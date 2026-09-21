@@ -244,6 +244,10 @@ class FindingContext(BaseModel):
 
     # boolean_inference_oracle (SPRT over repeated true/false probes)
     probe_rounds: list[dict[str, Any]] | None = None
+    # boolean-blind REFLECTION BASELINE: two responses to clause-shaped NON-injecting benign values.
+    # If they differ the endpoint echoes arbitrary input ⇒ the boolean differential is not attributable
+    # to the backend ⇒ boolean_inference_oracle refuses (offline re-check of the live reflection gate).
+    reflection_baseline: list[dict[str, Any]] | None = None
 
     # timing_oracle (statistical time-based blind)
     baseline_latencies: list[float] | None = None
@@ -479,6 +483,7 @@ class FindingContext(BaseModel):
         discriminator: Mapping[str, Any] | None = None,
         true_payload: str = "",
         false_payload: str = "",
+        reflection_baseline: Sequence[Any] | None = None,
     ) -> "FindingContext":
         """Aligned per-round responses for the SPRT boolean-inference oracle:
         for each round, the TRUE-clause response and two FALSE-clause responses
@@ -499,6 +504,8 @@ class FindingContext(BaseModel):
             bug_class=bug_class,
             probe_rounds=rounds,
             discriminator=dict(discriminator) if discriminator is not None else None,
+            reflection_baseline=([_response_to_dict(r) for r in reflection_baseline]
+                                 if reflection_baseline is not None else None),
         )
 
     @classmethod
@@ -1749,6 +1756,8 @@ class FindingContext(BaseModel):
                 ctx["discriminator"] = self.discriminator
         if self.probe_rounds is not None:
             ctx["probe_rounds"] = self.probe_rounds
+            if self.reflection_baseline is not None:
+                ctx["reflection_baseline"] = self.reflection_baseline
             if self.discriminator is not None and "discriminator" not in ctx:
                 ctx["discriminator"] = self.discriminator
         if self.baseline_latencies is not None and self.treatment_latencies is not None:

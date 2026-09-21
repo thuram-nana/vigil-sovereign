@@ -330,10 +330,11 @@ def test_pure_input_reflection_mints_no_fact_live(monkeypatch, tmp_path, cls):
 
 
 @pytest.mark.parametrize("cls", ["boolean_sqli", "xpath_injection"])
-def test_pure_input_reflection_is_inconclusive_offline(monkeypatch, tmp_path, cls):
-    """OFFLINE: capture the SPRT rounds against the pure-echo endpoint exactly as the runner would, then
-    re-adjudicate through the SAME deterministic boolean_inference oracle — it must NOT fire (the retained
-    rounds carry true_payload/false_payload so the offline strip matches the live strip byte-for-byte)."""
+def test_pure_input_reflection_refused_at_baseline_live_and_offline(monkeypatch, tmp_path, cls):
+    """The REFLECTION BASELINE refuses a pure-echo endpoint (a) LIVE — BooleanInferenceCheck.probe returns
+    None because two clause-shaped benign values echo differently (no rounds, no FACT); and (b) OFFLINE —
+    boolean_inference_oracle, handed a context whose retained reflection_baseline reflects, refuses even if
+    the rounds LOOK separable, so the veracity firewall can demote a reflector's certificate."""
     from framework.v2.scanner.checks import BooleanInferenceCheck
     from framework.v2.scanner.insertion import HttpRequest, InsertionKind, RequestTemplate
     from framework.v2.verify.oracles import boolean_inference_oracle
@@ -345,24 +346,69 @@ def test_pure_input_reflection_is_inconclusive_offline(monkeypatch, tmp_path, cl
         import urllib.request
 
         def send(req):
-            r = req  # RequestTemplate.render returns an HttpRequest
-            with urllib.request.urlopen(r.url, timeout=5) as resp:  # noqa: S310  (loopback test fixture)
+            with urllib.request.urlopen(req.url, timeout=5) as resp:  # noqa: S310  (loopback test fixture)
                 return {"status": resp.status, "body": resp.read().decode("utf-8", "replace")}
 
         tmpl = RequestTemplate(HttpRequest(method="GET", url=f"http://127.0.0.1:{port}/q?id=1"))
         point = next(p for p in tmpl.insertion_points(kinds=(InsertionKind.QUERY_VALUE,))
                      if p.name.lower() == "id")
         chk = BooleanInferenceCheck(id=f"rt-{cls}", bug_class=cls, true_clause=t, false_clause=f, n_max=12)
-        ctx = chk.probe(tmpl, point, send)
-        assert ctx is not None
-        rounds = ctx.to_verifier_context().get("probe_rounds")
-        assert rounds and all("true_payload" in r and "false_payload" in r for r in rounds), (
-            "retained rounds must carry the payloads so the offline oracle strips identically")
-        signal = boolean_inference_oracle(rounds)
-        assert not signal.fired, (
-            f"{cls}: offline boolean_inference oracle must NOT fire on a pure-reflection capture")
+        assert chk.probe(tmpl, point, send) is None, (
+            f"{cls}: a pure input-reflecting endpoint must be refused at the reflection baseline (probe→None)")
     finally:
         srv.shutdown()
+
+    reflecting_rounds = [{"true": {"body": "T"}, "false_a": {"body": "F"}, "false_b": {"body": "F"}}
+                         for _ in range(12)]
+    sig = boolean_inference_oracle(reflecting_rounds,
+                                   reflection_baseline=[{"body": "benign-one"}, {"body": "benign-two"}])
+    assert not sig.fired and sig.observed.get("decision") == "reflection-refused", (
+        f"{cls}: offline oracle must REFUSE when the retained reflection_baseline echoes arbitrary input")
+
+
+class _CaseFoldReflectApp(http.server.BaseHTTPRequestHandler):
+    """Red-pen BLOCKER 1: a reflector that LOWERCASES the echo (a normalized-search display). The uppercase
+    OR/AND in the clauses become 'or'/'and' — evading a case-sensitive byte-form strip — but the reflection
+    BASELINE still refuses it (two benign values echo differently regardless of case)."""
+    def do_GET(self):  # noqa: N802
+        import json
+        from urllib.parse import parse_qs, urlsplit
+        v = (parse_qs(urlsplit(self.path).query).get("id") or [""])[0].lower()
+        raw = json.dumps({"q": v, "results": []}).encode("utf-8")
+        self.send_response(200); self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(raw))); self.end_headers(); self.wfile.write(raw)
+
+    def log_message(self, *a):
+        return
+
+
+class _DecimalEntityReflectApp(http.server.BaseHTTPRequestHandler):
+    """Red-pen BLOCKER 2: a reflector that HTML-autoescapes the apostrophe to the DECIMAL entity &#39;
+    (Jinja2/MarkupSafe/Django default) — evading html.escape's HEX &#x27; strip form — but the reflection
+    BASELINE still refuses it (the benign values are escaped and echoed the same way, and differ)."""
+    def do_GET(self):  # noqa: N802
+        from urllib.parse import parse_qs, urlsplit
+        v = (parse_qs(urlsplit(self.path).query).get("id") or [""])[0]
+        esc = v.replace("&", "&amp;").replace("'", "&#39;").replace("<", "&lt;").replace(">", "&gt;")
+        raw = (f"<p>{esc}</p>").encode("utf-8")
+        self.send_response(200); self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(raw))); self.end_headers(); self.wfile.write(raw)
+
+    def log_message(self, *a):
+        return
+
+
+@pytest.mark.parametrize("cls", ["boolean_sqli", "xpath_injection"])
+@pytest.mark.parametrize("app", [_CaseFoldReflectApp, _DecimalEntityReflectApp],
+                         ids=["case_fold", "decimal_entity"])
+def test_transform_reflectors_mint_no_fact(monkeypatch, tmp_path, app, cls):
+    """The two red-pen bypasses that defeated the byte-form strip — a CASE-FOLDING reflector and a
+    DECIMAL-HTML-ENTITY reflector — must mint NO FACT. The transform-agnostic reflection baseline closes
+    both, because it measures whether the endpoint echoes ANY benign input, not which encodings were listed."""
+    res = _run(monkeypatch, tmp_path, app, "http://127.0.0.1:{port}/q?id=1", cls)
+    assert res.n_facts == 0, f"{cls}/{app.__name__}: a transform-reflecting endpoint must NOT mint a FACT"
+    assert not res.leads, f"{cls}/{app.__name__}: transform-reflected differential is INCONCLUSIVE, not a LEAD"
+    assert res.family_verdict(cls) == "INCONCLUSIVE", f"{cls}/{app.__name__}: transform reflection != FACT/CLEAN"
 
 
 def test_reflection_strip_is_a_noop_without_payloads_and_defends_only_echo():
