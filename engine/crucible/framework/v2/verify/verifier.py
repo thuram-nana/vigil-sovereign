@@ -817,9 +817,16 @@ class OracleVerifier:
                 # VF-2b (GAP A): the collector pin comes from the verifier's OUT-OF-BAND authority
                 # (self.oob_collector_pubkey), NEVER from ctx (producer-controlled). None keeps the token-only
                 # tier byte-identical; a pinned key demands an independent collector receipt.
+                # TTL / replay (additive): the mint window is RETAINED on the ctx (producer-set at mint
+                # time), so offline re-verify applies the SAME deterministic check over the receipt's
+                # target-observed received_at. Both bounds absent ⇒ windowless ⇒ byte-identical. It is a
+                # fail-open-safe refutation tool: a widened window only makes the TTL check more lenient —
+                # the token + VF-2b receipt still gate firing.
                 return oracles.oob_callback_oracle(
                     ctx["oob_hits"], ctx.get("oob_token"),
                     collector_pubkey=self.oob_collector_pubkey,
+                    issued_at=ctx.get("oob_issued_at"), expires_at=ctx.get("oob_expires_at"),
+                    skew=ctx.get("oob_skew"),
                 )
             return None
         if kind is OracleKind.SERVICE_REACHABILITY:

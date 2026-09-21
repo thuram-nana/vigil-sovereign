@@ -1468,13 +1468,25 @@ def error_signature_oracle(observed_body: Any, control_body: Any = None) -> Orac
 # ---------------------------------------------------------------------------
 
 
+_OOB_DEFAULT_SKEW_S: float = 5.0   # clock-skew tolerance applied to BOTH window edges when a window is set
+
+
+def _hit_received_at(hit: Any) -> float:
+    if isinstance(hit, Mapping):
+        return float(hit.get("received_at") or 0.0)
+    return float(getattr(hit, "received_at", 0.0) or 0.0)
+
+
 def oob_callback_oracle(hits: Any, expected_token: "str | None" = None,
-                        collector_pubkey: "str | None" = None) -> OracleSignal:
-    """Fire when the out-of-band receiver logged an inbound interaction that carried the finding's REGISTERED
+                        collector_pubkey: "str | None" = None, *,
+                        issued_at: "float | None" = None, expires_at: "float | None" = None,
+                        skew: "float | None" = None) -> OracleSignal:
+    """Fire when the out-of-band collector logged an inbound interaction that carried the finding's REGISTERED
     per-finding secret token. The token — minted per finding (`oob.register_token`, `secrets.token_hex(16)`)
-    and embedded in the callback URL the target must actually execute to emit — is what makes a blind-execution
-    callback (SSRF, OOB SQLi, blind XXE, deserialization) close to unforgeable. `hits` is whatever `oob.poll()`
-    returned; `expected_token` is that registered secret (carried on the context as `oob_token`).
+    and embedded in the callback URL/host the target must actually execute to emit — is what makes a blind-
+    execution callback (SSRF, OOB SQLi, blind XXE, deserialization, and a DNS-only lookup via the authoritative
+    DNS collector) close to unforgeable. `hits` is whatever `oob.poll()` returned; `expected_token` is that
+    registered secret (carried on the context as `oob_token`).
 
     VF-2a (token): a callback that does NOT carry the registered token — or a context with no registered token
     to compare against — is NOT trusted. Fail-closed:
@@ -1487,7 +1499,17 @@ def oob_callback_oracle(hits: Any, expected_token: "str | None" = None,
     dishonest producer who fabricates the whole context cannot forge a receipt that verifies under a pinned key
     it does not hold → not fired. ``collector_pubkey=None`` intentionally stays at the VF-2a (token-only) tier,
     whose honest limit is that it does NOT defeat a fully-dishonest producer; an EMPTY/blank ``collector_pubkey``
-    means F4 was requested with a bad key → fail-closed (NOT a silent drop to token-only)."""
+    means F4 was requested with a bad key → fail-closed (NOT a silent drop to token-only).
+
+    TTL / replay (additive, fail-open-safe): when a mint window is supplied (``issued_at`` and/or
+    ``expires_at``, retained in the context at mint time), a token-matched, signature-valid hit ALSO requires
+    its TARGET-OBSERVED ``received_at`` (the value the VF-2b receipt signs) to fall within
+    ``[issued_at - skew, expires_at + skew]``. A hit OUTSIDE the window does NOT fire and is labelled distinct
+    from VERIFIED — ``EXPIRED`` (received before the window opened; a clock anomaly / pre-issue) or ``REPLAY``
+    (received after the window closed; a stale/replayed callback). ``skew`` defaults to a small clock tolerance
+    applied to both edges. When NO window is supplied (``issued_at is None and expires_at is None`` — every
+    existing caller) the check is skipped and behaviour is BYTE-IDENTICAL. The decision is over RETAINED
+    timestamps only (no wall-clock), so offline re-verify applies the SAME check deterministically."""
     from .oob import verify_oob_receipt   # local import keeps the module import graph acyclic
 
     hit_list = list(hits or [])
@@ -1536,15 +1558,42 @@ def oob_callback_oracle(hits: Any, expected_token: "str | None" = None,
                           "receipt_verified": False})
         receipt_verified = True
 
+    # TTL / replay (additive): only when a mint window was retained on the context. Skipped entirely when
+    # both bounds are None — the default/benchmark path, which stays byte-identical.
+    if issued_at is not None or expires_at is not None:
+        sk = _OOB_DEFAULT_SKEW_S if skew is None else float(skew)
+        lo = (float(issued_at) - sk) if issued_at is not None else float("-inf")
+        hi = (float(expires_at) + sk) if expires_at is not None else float("inf")
+        in_window = [h for h in matched if lo <= _hit_received_at(h) <= hi]
+        if not in_window:
+            # A token-matched, receipt-valid hit whose observed time is outside the window. Label it by
+            # which edge it violated (deterministic, over retained timestamps): before the window opened
+            # → EXPIRED (clock / pre-issue); after the window closed → REPLAY (stale/replayed callback).
+            ra = _hit_received_at(matched[0])
+            verdict = "EXPIRED" if ra < lo else "REPLAY"
+            return OracleSignal(
+                kind=OracleKind.OOB_CALLBACK, fired=False, confidence=0.0,
+                evidence=(f"{len(matched)} token-verified out-of-band interaction(s) but NONE fell within the "
+                          f"per-finding TTL window [{lo:.3f}, {hi:.3f}] — observed received_at {ra:.3f} is "
+                          f"outside it → {verdict} (fail-closed, not VERIFIED)"),
+                observed={"hit_count": len(hit_list), "matched": len(matched), "token_verified": True,
+                          "receipt_verified": receipt_verified, "in_window": 0, "oob_verdict": verdict,
+                          "window": [lo, hi], "observed_received_at": ra})
+        matched = in_window
+
     summary = _hit_summary(matched[0])
     tier = "F4 (token + independent collector receipt)" if receipt_verified else "token-verified"
+    observed: dict[str, Any] = {"hit_count": len(hit_list), "matched": len(matched), "token_verified": True,
+                                "receipt_verified": receipt_verified, "first": summary}
+    if issued_at is not None or expires_at is not None:
+        observed["oob_verdict"] = "VERIFIED"
+        observed["in_window"] = len(matched)
     return OracleSignal(
         kind=OracleKind.OOB_CALLBACK,
         fired=True,
         confidence=0.95,
         evidence=f"{len(matched)} {tier} out-of-band interaction(s); first: {summary}",
-        observed={"hit_count": len(hit_list), "matched": len(matched), "token_verified": True,
-                  "receipt_verified": receipt_verified, "first": summary},
+        observed=observed,
     )
 
 

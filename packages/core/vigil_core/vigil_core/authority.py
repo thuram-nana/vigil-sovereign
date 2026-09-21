@@ -82,6 +82,20 @@ class EngagementAuthority(BaseModel):
     oob_collector_pubkey: str = Field(
         default="", description="Base64 Ed25519 public key of the OOB relay's independent collector, pinned "
         "out-of-band; the verifier checks each OOB receipt against it (VF-2b). Public material only.")
+    # DNS out-of-band confirmation (Wave 1 DNS-OOB). DEDICATED fields mirroring the HTTP relay pair above,
+    # deliberately NOT in ``scope``: ``oob_dns_domain`` is the operator-OWNED base domain whose NS records
+    # delegate to the authoritative DNS collector (an OOB channel, never a scan target); ``oob_dns_collector_
+    # pubkey`` is the DNS collector's independent Ed25519 pin (public material only), which — like the HTTP
+    # collector pin — could not survive the bare-host scope re-validation and is an AUTHENTICITY pin, not a
+    # host. Both default "" so a non-DNS-OOB authority is unchanged in meaning; adding them DOES change the
+    # owner-signed canonical bytes (an authority signed before this schema change re-verifies only after
+    # re-signing — expected; both planes agree by construction). ``_AUTHORITY_DOMAIN`` is untouched.
+    oob_dns_domain: str = Field(
+        default="", description="Operator-owned base domain (e.g. oob.op.example) whose NS records delegate to "
+        "the authoritative DNS OOB collector. A DNS OOB channel; NOT a scan target, NOT in scope.")
+    oob_dns_collector_pubkey: str = Field(
+        default="", description="Base64 Ed25519 public key of the DNS OOB collector, pinned out-of-band; the "
+        "verifier checks each DNS receipt against it (VF-2b). Public material only.")
 
     @model_validator(mode="after")
     def _check_window(self) -> "EngagementAuthority":

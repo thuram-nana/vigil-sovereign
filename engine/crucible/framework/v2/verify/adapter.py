@@ -284,6 +284,11 @@ class FindingContext(BaseModel):
     # oob_callback_oracle
     oob_hits: list[Any] | None = None
     oob_token: str | None = None   # VF-2a: the REGISTERED per-finding secret the callback must carry to fire
+    # TTL / replay window (additive; both None ⇒ no check ⇒ byte-identical). Retained at mint time so offline
+    # re-verify applies the SAME deterministic check over the receipt's target-observed received_at.
+    oob_issued_at: float | None = None
+    oob_expires_at: float | None = None
+    oob_skew: float | None = None
 
     # service_reachability_oracle (a real transport handshake reproduced a scanner's "open port")
     handshake: dict[str, Any] | None = None
@@ -519,17 +524,26 @@ class FindingContext(BaseModel):
 
     @classmethod
     def from_oob(
-        cls, hits: Any, *, bug_class: str = "ssrf", expected_token: "str | None" = None
+        cls, hits: Any, *, bug_class: str = "ssrf", expected_token: "str | None" = None,
+        issued_at: "float | None" = None, expires_at: "float | None" = None,
+        skew: "float | None" = None,
     ) -> "FindingContext":
-        """A list of out-of-band interactions (whatever `OOBReceiver.poll`
+        """A list of out-of-band interactions (whatever `OOBReceiver.poll` / `DNSCollector.poll`
         returned) for the oob-callback oracle. An empty list is a valid,
         non-firing negative control. VF-2a: pass ``expected_token`` — the REGISTERED per-finding secret
         (`oob.register_token`) — so the oracle (live AND on offline re-verify) fires only for a hit that
-        carried it. Omitting it yields a context the oracle refuses to confirm (fail-closed)."""
+        carried it. Omitting it yields a context the oracle refuses to confirm (fail-closed).
+
+        TTL / replay (additive): pass ``issued_at`` / ``expires_at`` — the mint window retained here — to
+        additionally require a token-matched hit's target-observed ``received_at`` to fall within
+        ``[issued_at - skew, expires_at + skew]``. Omitting both keeps the exact prior (windowless) behaviour."""
         return cls(
             bug_class=bug_class,
             oob_hits=[_hit_to_dict(h) for h in (hits or [])],
             oob_token=expected_token,
+            oob_issued_at=issued_at,
+            oob_expires_at=expires_at,
+            oob_skew=skew,
         )
 
     @classmethod
@@ -1779,6 +1793,12 @@ class FindingContext(BaseModel):
             ctx["oob_hits"] = self.oob_hits
         if self.oob_token is not None:
             ctx["oob_token"] = self.oob_token   # VF-2a: retained so offline re-verify can check the token
+        if self.oob_issued_at is not None:
+            ctx["oob_issued_at"] = self.oob_issued_at   # retained TTL window (deterministic offline re-verify)
+        if self.oob_expires_at is not None:
+            ctx["oob_expires_at"] = self.oob_expires_at
+        if self.oob_skew is not None:
+            ctx["oob_skew"] = self.oob_skew
         if self.handshake is not None:
             ctx["handshake"] = self.handshake
         if self.anon_get is not None:

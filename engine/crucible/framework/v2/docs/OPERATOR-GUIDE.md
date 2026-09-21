@@ -323,9 +323,24 @@ python3 -m framework.v2 engage acme-2026 https://app.acme.example/ \
 ```
 
 **Scope of OOB:** HTTP callbacks (and anything that resolves to an HTTP fetch of
-the callback URL — most SSRF, JNDI-over-LDAP-referral-to-HTTP, webhook gadgets).
-A **DNS-only** interaction (a `nslookup`/`dig` with no HTTP fetch) needs a
-DNS-capable relay, which is a documented future extension, not silently implied.
+the callback URL — most SSRF, JNDI-over-LDAP-referral-to-HTTP, webhook gadgets),
+**and DNS-only interactions** via the authoritative DNS collector. A target that
+blocks outbound HTTP but whose resolver still forwards DNS is caught by a lookup of
+`<token>.<base-domain>`:
+
+```bash
+# on an operator-OWNED host whose public IP the base domain's NS records delegate to
+sudo python3 -m framework.v2 collaborator serve-dns --domain oob.op.example \
+    --host 0.0.0.0 --port 53 --answer-ip <this-host-public-ip>
+# → collector: <b64 pubkey>   callbacks: <token>.oob.op.example
+```
+
+Pin the printed collector public key at the verifier OUT-OF-BAND (authority
+`oob_dns_collector_pubkey`), and set `oob_dns_domain` to the delegated base domain.
+Honest limits: the recorded client IP is the **resolver's**, not the target's (the
+per-probe secret token is the correlator, so the FACT still holds); a DNS lookup
+proves resolution reached us, not that a full HTTP/other connection completed; and
+it assumes an operator-owned, NS-delegated domain.
 
 ### Without a relay, four always-on checks are inert against a remote target
 

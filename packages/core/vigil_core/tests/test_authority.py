@@ -60,14 +60,15 @@ def test_signing_bytes_are_domain_tagged_and_format_stable():
     assert b.startswith(b"crucible-authority-v1\x00")
     # sorted keys, compact separators, ISO-Z datetimes — the entitlement layer's canonical form.
     assert b"\"environment\":\"staging\"" in b and b"\"not_after\":\"2026-01-02T11:04:05Z\"" in b
-    # VF-2b (Wave 1.2): the two DEDICATED OOB fields (default "") are part of the canonical form now — a
-    # DELIBERATE, reviewed change. It re-hashes the golden vector (below) and means an authority signed
-    # BEFORE this change re-verifies only after re-signing. _AUTHORITY_DOMAIN is deliberately unchanged
-    # (no domain bump): the schema grew additively, both planes agree by construction, and short-window
-    # authorities re-sign fine. The golden pin still guards against any FURTHER unreviewed drift.
+    # VF-2b (Wave 1.2) + DNS-OOB (Wave 1): the FOUR DEDICATED OOB fields (all default "") are part of the
+    # canonical form now — a DELIBERATE, reviewed change. It re-hashes the golden vector (below) and means an
+    # authority signed BEFORE this change re-verifies only after re-signing. _AUTHORITY_DOMAIN is deliberately
+    # unchanged (no domain bump): the schema grew additively, both planes agree by construction, and short-
+    # window authorities re-sign fine. The golden pin still guards against any FURTHER unreviewed drift.
     assert b"\"oob_collector_pubkey\":\"\"" in b and b"\"oob_relay_host\":\"\"" in b
+    assert b"\"oob_dns_domain\":\"\"" in b and b"\"oob_dns_collector_pubkey\":\"\"" in b
     assert hashlib.sha256(b).hexdigest() == (
-        "815ee14787c12559bd29e6710c1cc8743ecbaa9eee068a8f70851f49ea8fb6e8"
+        "37344664eb4179e5afaeafe32bad3ae6a69f4fff5868f6ad35f24481d2f5fd19"
     ), "authority canonical form changed — this invalidates every existing signature; bump + migrate"
 
 
