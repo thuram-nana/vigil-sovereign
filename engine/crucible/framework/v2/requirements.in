@@ -33,7 +33,7 @@
 # See V2-LIMITATIONS.md for what dry-run sacrifices.
 
 pydantic>=2.10,<3
-structlog>=25.0,<26
+structlog>=25.0,<27
 httpx>=0.28,<1
 requests>=2.32,<3
 PyYAML>=6,<7

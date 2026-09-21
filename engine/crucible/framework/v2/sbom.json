@@ -2,10 +2,10 @@
   "$schema": "http://cyclonedx.org/schema/bom-1.5.schema.json",
   "bomFormat": "CycloneDX",
   "specVersion": "1.5",
-  "serialNumber": "urn:uuid:0f50b849-6e6e-5a47-9e5a-27540c6608ec",
+  "serialNumber": "urn:uuid:a4cfb355-15b4-57e8-a9ac-c7ff4d3baa3d",
   "version": 1,
   "metadata": {
-    "timestamp": "2026-09-02T18:44:56Z",
+    "timestamp": "2026-09-21T14:33:30Z",
     "tools": [
       {
         "vendor": "OBSIDIAN / CRUCIBLE",
@@ -2897,17 +2897,17 @@
       "type": "library",
       "bom-ref": "structlog",
       "name": "structlog",
-      "version": "25.5.0",
-      "purl": "pkg:pypi/structlog@25.5.0",
+      "version": "26.1.0",
+      "purl": "pkg:pypi/structlog@26.1.0",
       "scope": "required",
       "hashes": [
         {
           "alg": "SHA-256",
-          "content": "098522a3bebed9153d4570c6d0288abf80a031dfdb2048d59a49e9dc2190fc98"
+          "content": "e081a26d6c373e6d201eca24eede26d8ffab07f88f477822e679183428d3d91e"
         },
         {
           "alg": "SHA-256",
-          "content": "a8453e9b9e636ec59bd9e79bbd4a72f025981b3ba0f5837aebf48f02f37a7f9f"
+          "content": "f63a716cbd1b1291cf7661de7794b455acfa4c43c5bcf1630e6ad5ddc1adb3b7"
         }
       ],
       "properties": [
