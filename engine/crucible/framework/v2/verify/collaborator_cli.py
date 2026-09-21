@@ -63,7 +63,19 @@ def main(argv: list[str]) -> int:
         _scheme = "http" if args.host in ("127.0.0.1", "localhost", "::1") else "https (front with TLS)"
         print("CRUCIBLE OOB relay")
         print(f"  bound     : http://{args.host}:{relay.port}  (serve URL to scanner as: {_scheme})")
-        print(f"  secret    : {relay.secret}")
+        # Hardening: NEVER print the poll secret to stdout — terminal scrollback, CI logs, and
+        # screen-shares would leak it in clear text. If the operator SUPPLIED --secret they already hold
+        # it; otherwise the random secret is written to a 0600 file whose PATH is printed (read that file
+        # for the X-Relay-Key header). The secret value never enters a log stream.
+        import os as _os  # noqa: PLC0415 — local, mirrors the `import json as _json` above
+        if args.secret:
+            print("  secret    : (as supplied via --secret; not echoed)")
+        else:
+            _secret_path = _os.path.abspath(".oob-relay-secret")
+            _fd = _os.open(_secret_path, _os.O_WRONLY | _os.O_CREAT | _os.O_TRUNC, 0o600)
+            with _os.fdopen(_fd, "w", encoding="utf-8") as _sf:
+                _sf.write(relay.secret + "\n")
+            print(f"  secret    : written to {_secret_path} (0600 — read it for X-Relay-Key; never printed)")
         if relay.collector_pubkey:
             # VF-2b: distribute this PUBLIC key out-of-band; the scanner PINS it (charter oob_collector_pubkey
             # / --oob-collector-pubkey) so a compromised relay handing over its own key cannot defeat the pin.
