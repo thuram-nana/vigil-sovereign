@@ -1025,10 +1025,10 @@
       "preconditions": [
         "channel_established"
       ],
-      "limitation": "A POSITIVE-only, per-token out-of-band channel. A fired oracle proves the in-charter target executed the callback URL and an independent collector observed a token-matched (VF-2b: receipt-verified) interaction — NOT that a given payload was the sole cause. A non-firing is UNINFORMATIVE by construction: the blind sink may be reachable over a channel the collaborator cannot see (DNS-only interactions are INCONCLUSIVE — the relay is HTTP-only), the target may fetch on a delay past the poll window, or egress may be filtered; so the absence of a callback can NEVER establish the target is not vulnerable. A body the collaborator could not decode is INCONCLUSIVE, never CLEAN. A REMOTE relay is fail-closed to VF-2b (a non-blank out-of-band collector pin is required); only a loopback relay may run token-only (VF-2a), whose honest limit is that it does NOT defeat a fully-dishonest producer. NOT CLEAN-capable.",
+      "limitation": "A POSITIVE-only, per-token out-of-band channel. A fired oracle proves the in-charter target executed the callback URL and an independent collector observed a token-matched (VF-2b: receipt-verified) interaction — NOT that a given payload was the sole cause. A non-firing is UNINFORMATIVE by construction: the blind sink may be reachable over a channel the collaborator cannot see, the target may fetch on a delay past the poll window, or egress may be filtered; so the absence of a callback can NEVER establish the target is not vulnerable. DNS-only interactions are now CONFIRMABLE via the authoritative DNS collector (oob_callback.dns_collector) — a hardened target that blocks outbound HTTP but whose resolver still forwards DNS is caught by the token-bearing DNS query; the HTTP relay remains HTTP-only. A body the collaborator could not decode is INCONCLUSIVE, never CLEAN. A REMOTE relay is fail-closed to VF-2b (a non-blank out-of-band collector pin is required); only a loopback relay may run token-only (VF-2a), whose honest limit is that it does NOT defeat a fully-dishonest producer. NOT CLEAN-capable.",
       "target_fact_capable": true,
       "target_clean_capable": false,
-      "target_downgrade_rationale": "An out-of-band callback is a POSITIVE-only detector whose absence of an interaction is uninformative by construction (unseen channel / delayed fetch / filtered egress / DNS-only). A sound CLEAN for a blind class is a different, coverage-based capability spanning every out-of-band channel plus a reachability and egress model, not this per-token callback branch, so clean-capability is deliberately not a target here.",
+      "target_downgrade_rationale": "An out-of-band callback is a POSITIVE-only detector whose absence of an interaction is uninformative by construction (unseen channel / delayed fetch / filtered egress). A sound CLEAN for a blind class is a different, coverage-based capability spanning every out-of-band channel plus a reachability and egress model, not this per-token callback branch, so clean-capability is deliberately not a target here.",
       "evidence_surface": "live_capture",
       "implementation_refs": [
         "engine/crucible/framework/v2/verify/oracles.py:oob_callback_oracle",
@@ -1043,6 +1043,38 @@
         "vigil_owned_oob_capture",
         "independent_collector_receipt_signature",
         "out_of_band_pinned_collector_pubkey"
+      ]
+    },
+    {
+      "id": "oob_callback.dns_collector",
+      "check": "DNSOOBCheck",
+      "evidence": "A blind class is proven by an INBOUND DNS lookup of <token>.<base-domain> that a hardened target's recursive resolver forwards to VIGIL's OWN authoritative DNS collector, even when the target's outbound HTTP egress is blocked. The lookup carries the finding's per-finding secret token as its leftmost label(s); the DNS collector records it as an OOBHit (method=DNS) and — at the VF-2b tier — an INDEPENDENT collector signs the receipt over target-observed facts only (token/client_ip/received_at/method/path), reusing the SAME sign_oob_receipt / verify_oob_receipt / oob_callback oracle as the HTTP collaborator with NO oracle change (DNS reuses OracleKind.OOB_CALLBACK). A token TTL window minted with the probe additionally refuses a receipt whose target-observed received_at falls outside it (EXPIRED / REPLAY), deterministically on live and offline re-verify.",
+      "fact_capable": true,
+      "clean_capable": false,
+      "preconditions": [
+        "channel_established",
+        "operator_owned_delegated_domain"
+      ],
+      "limitation": "A POSITIVE-only, per-token DNS channel. HONEST caveats: (1) the recorded client_ip is the RESOLVER's source IP, NOT the target's — a DNS lookup reaches us via the target's recursive resolver, so the unique per-probe secret token (not the source IP) is the correlator that ties the observation to the specific VIGIL probe; the FACT holds regardless of which resolver forwarded it. (2) A DNS lookup proves resolution REACHED us, NOT that a full HTTP (or other) connection then completed — a strictly weaker (but still sound) claim than the HTTP collaborator's completed-fetch proof. (3) Deployment assumption: the base domain must be an operator-OWNED domain whose NS records delegate to this collector's public IP (UDP :53). A non-firing is UNINFORMATIVE (the target may not resolve, may cache, or may use a resolver that does not forward). NOT CLEAN-capable.",
+      "target_fact_capable": true,
+      "target_clean_capable": false,
+      "target_downgrade_rationale": "A DNS callback is a POSITIVE-only detector whose absence is uninformative by construction (no resolution / cached / non-forwarding resolver). Clean-capability for a blind class needs a coverage-based reachability+egress model spanning every channel, not this per-token DNS branch.",
+      "evidence_surface": "live_capture",
+      "implementation_refs": [
+        "engine/crucible/framework/v2/verify/dns_collector.py:DNSCollector",
+        "engine/crucible/framework/v2/verify/oracles.py:oob_callback_oracle",
+        "engine/crucible/framework/v2/verify/oob.py:verify_oob_receipt",
+        "engine/crucible/framework/v2/scanner/checks.py:DNSOOBCheck"
+      ],
+      "oracle_version": "oob_callback",
+      "control_requirements": [
+        "warden_active_recon_gate",
+        "vigil_owned_per_finding_token",
+        "vigil_owned_authoritative_dns_collector",
+        "operator_owned_delegated_base_domain",
+        "independent_collector_receipt_signature",
+        "out_of_band_pinned_collector_pubkey",
+        "token_ttl_replay_window"
       ]
     }
   ]

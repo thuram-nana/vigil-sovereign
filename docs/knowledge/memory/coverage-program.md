@@ -39,7 +39,7 @@ Benchmark expanded to 9 bugs (added path_traversal to eval/benchmark_app.py); CR
 
 GOTCHA: don't run the full v2 suite in the BACKGROUND while also launching Chromium probes / writing files — resource contention flakes ~38 loopback-server + timing tests. Run it alone.
 Library kinds: differential/reflection/oob/timing/evaluation/error_signature/signature/content.
-Remaining future: request-level library only covers `signature`; DNS-only OOB needs a DNS relay; IP-literal browser egress.
+Remaining future: request-level library only covers `signature`; IP-literal browser egress. (DNS-only OOB now covered by the authoritative DNS collector — `verify.dns_collector.DNSCollector`, reusing the `oob_callback` oracle; caveat: resolver-IP not target-IP, correlated by the per-probe secret token.)
 
 **GOTCHA:** adding an `OracleKind` requires updating `scanner/self_improve.py:_skeleton_for`'s per-kind `generic` dict (now `.get()` with a fallback, so it won't KeyError again). Sweep `grep -rl "OracleKind\." framework/v2 | grep -v tests` for exhaustive maps.
 

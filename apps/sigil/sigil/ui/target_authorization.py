@@ -132,6 +132,8 @@ def authority_status(slug: str) -> dict:
         "not_before": doc.not_before.isoformat(), "not_after": doc.not_after.isoformat(),
         "oob_relay_host": getattr(doc, "oob_relay_host", ""),
         "oob_collector_pinned": bool(getattr(doc, "oob_collector_pubkey", "")),
+        "oob_dns_domain": getattr(doc, "oob_dns_domain", ""),
+        "oob_dns_collector_pinned": bool(getattr(doc, "oob_dns_collector_pubkey", "")),
     }
 
 
@@ -144,6 +146,8 @@ def add_target(
     note: str = "",
     oob_relay_host: str = "",
     oob_collector_pubkey: str = "",
+    oob_dns_domain: str = "",
+    oob_dns_collector_pubkey: str = "",
     now: Optional[Any] = None,
 ) -> dict:
     """Owner-sign an engagement authorization for ``host`` and write the signed bundle to the seam.
@@ -197,6 +201,27 @@ def add_target(
     if collector and not relay:
         return {"ok": False, "error": "oob_collector_pubkey needs an oob_relay_host to pin it against"}
 
+    # DNS OOB (Wave 1 DNS-OOB). Same shape as the HTTP relay pair: the base domain is validated with the SAME
+    # hard floor as a scan host (bare hostname, no .gov/.mil/.edu/.int, no loopback/reserved literal) but
+    # carried in the DEDICATED oob_dns_domain field — NOT appended to scope (it is a DNS OOB channel, gated
+    # separately). The DNS collector pubkey is public Ed25519 material pinned out-of-band; validate it LOADS
+    # so a typo is caught at authorization time, not silently at DNS-receipt verify time.
+    dns_domain = str(oob_dns_domain or "").strip().lower()
+    dns_collector = str(oob_dns_collector_pubkey or "").strip()
+    if dns_domain:
+        dok, dns_or_err = _validate_host(dns_domain)
+        if not dok:
+            return {"ok": False, "error": f"oob_dns_domain: {dns_or_err}"}
+        dns_domain = dns_or_err
+    if dns_collector:
+        try:
+            from vigil_core.crypto import load_public_key
+            load_public_key(dns_collector)
+        except Exception as e:  # noqa: BLE001 — a malformed pin is a fail-closed authorization error
+            return {"ok": False, "error": f"oob_dns_collector_pubkey is not a valid Ed25519 public key: {e}"}
+    if dns_collector and not dns_domain:
+        return {"ok": False, "error": "oob_dns_collector_pubkey needs an oob_dns_domain to pin it against"}
+
     s = _slug_for(h, slug)
     # Reject an empty or dot-only slug HERE with the {ok:false} contract — a dot-only value (".", "..") would
     # otherwise reach the broker and raise ValueError (an uncaught 500 rather than an honest error). The
@@ -221,6 +246,8 @@ def add_target(
         note=str(note or ""),
         oob_relay_host=relay,             # dedicated field; NOT appended to scope (separate OOB-egress gate)
         oob_collector_pubkey=collector,   # public pin material only; owner key still signs only here
+        oob_dns_domain=dns_domain,        # dedicated field; NOT appended to scope (DNS OOB channel)
+        oob_dns_collector_pubkey=dns_collector,   # public DNS-collector pin material only
     )
     kp = _owner_keypair()
     signed = sign_engagement_authority(doc, {"owner": kp.private_key_b64})

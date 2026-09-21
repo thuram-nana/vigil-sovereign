@@ -29,8 +29,11 @@ Boundaries, by construction:
     no traffic of its own beyond a 1-byte 200 so the triggering fetch completes.
   * Scope: HTTP (and any protocol that resolves to an HTTP fetch of the callback
     URL — most SSRF, JNDI-over-LDAP-referral-to-HTTP, webhook gadgets). A
-    DNS-only interaction (``nslookup``/``dig`` with no HTTP fetch) needs a
-    DNS-capable relay — documented as a future extension, not silently implied.
+    DNS-only interaction (``nslookup``/``dig`` with no HTTP fetch, or an HTTP-egress-
+    blocked callback whose hostname still resolves) is covered by the SIBLING
+    authoritative DNS collector, :mod:`verify.dns_collector` — it records the
+    token-bearing DNS query the target's resolver forwards and VF-2b-signs it with
+    the SAME receipt machinery, so the identical ``oob_callback`` oracle confirms it.
 """
 
 from __future__ import annotations

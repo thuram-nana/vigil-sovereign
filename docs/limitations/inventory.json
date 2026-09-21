@@ -97,7 +97,10 @@
       "summary": "SEV-SNP / TDX attestation providers exist behind the AttestationProvider interface but every method fails closed with NotImplementedError. The SoftwareAttestationProvider proves integrity + origin, never hardware confidentiality; hardware_backed is always False on that path.",
       "classification": "real-unfinished-code",
       "severity": "info",
-      "anchor": {"file": "engine/crucible/framework/v2/attest/provider.py", "symbol": "_HardwareGatedProvider.attest"},
+      "anchor": {
+        "file": "engine/crucible/framework/v2/attest/provider.py",
+        "symbol": "_HardwareGatedProvider.attest"
+      },
       "marker": true,
       "check": "stub-raises",
       "source_doc": "docs/DEFERRED-INFRA.md",
@@ -110,7 +113,10 @@
       "summary": "SymbolicCrashRepairTier is a full stub behind the BinaryPatchTier interface; SanitizerSilenceTier proves a fix by oracle silence but its output-based synthesize_patch also raises. The narrow strcpy->strncpy source synthesiser is real; an unrecognised class fabricates no patch.",
       "classification": "real-unfinished-code",
       "severity": "info",
-      "anchor": {"file": "engine/crucible/framework/v2/remediation_binary/tier.py", "symbol": "SymbolicCrashRepairTier.synthesize_patch"},
+      "anchor": {
+        "file": "engine/crucible/framework/v2/remediation_binary/tier.py",
+        "symbol": "SymbolicCrashRepairTier.synthesize_patch"
+      },
       "marker": true,
       "check": "stub-raises",
       "source_doc": "docs/DEFERRED-INFRA.md",
@@ -123,7 +129,10 @@
       "summary": "SanitizerSilenceTier.synthesize_patch (the output-based synthesis interface) raises NotImplementedError; the tier's value is proving a fix by oracle silence, not generating it.",
       "classification": "real-unfinished-code",
       "severity": "info",
-      "anchor": {"file": "engine/crucible/framework/v2/remediation_binary/tier.py", "symbol": "SanitizerSilenceTier.synthesize_patch"},
+      "anchor": {
+        "file": "engine/crucible/framework/v2/remediation_binary/tier.py",
+        "symbol": "SanitizerSilenceTier.synthesize_patch"
+      },
       "marker": true,
       "check": "stub-raises",
       "source_doc": "docs/DEFERRED-INFRA.md",
@@ -136,7 +145,10 @@
       "summary": "Neo4jGraphStore is a real client body, but constructing a LIVE store with no injected driver raises NotImplementedError until the neo4j driver package and a running service are provisioned. EmbeddedGraphStore is the working default.",
       "classification": "real-unfinished-code",
       "severity": "low",
-      "anchor": {"file": "engine/crucible/framework/v2/graph/store.py", "symbol": "Neo4jGraphStore.__init__"},
+      "anchor": {
+        "file": "engine/crucible/framework/v2/graph/store.py",
+        "symbol": "Neo4jGraphStore.__init__"
+      },
       "marker": true,
       "check": "stub-raises",
       "source_doc": "docs/DEFERRED-INFRA.md",
@@ -149,7 +161,10 @@
       "summary": "AgentBody formalises the think->propose->gate->execute->learn contract (gate-before-execute is structural) but wires no new runtime. The production Strix-based body is one implementation; a next-gen body is not built.",
       "classification": "real-unfinished-code",
       "severity": "info",
-      "anchor": {"file": "engine/crucible/framework/v2/agent_body/interface.py", "symbol": "AgentBody"},
+      "anchor": {
+        "file": "engine/crucible/framework/v2/agent_body/interface.py",
+        "symbol": "AgentBody"
+      },
       "marker": false,
       "check": "symbol-exists",
       "source_doc": "docs/DEFERRED-INFRA.md",
@@ -162,7 +177,10 @@
       "summary": "The external-tool runner is tool-agnostic and live-proven with nmap, but garak/PyRIT/promptfoo are absent from this environment, so their live-fire is deferred and no garak/PyRIT/promptfoo FACT is minted. A new ToolSpec (+ oracle mapping for a non-reachability signal) is all a new tool needs.",
       "classification": "real-unfinished-code",
       "severity": "medium",
-      "anchor": {"file": "integration/vigil_integration/live/external_tool.py", "symbol": "run_external_tool"},
+      "anchor": {
+        "file": "integration/vigil_integration/live/external_tool.py",
+        "symbol": "run_external_tool"
+      },
       "marker": false,
       "check": "symbol-exists",
       "source_doc": "docs/DEFERRED-INFRA.md",
@@ -175,7 +193,9 @@
       "summary": "The IMDS-capture, IAM-escalation, GCP SA-impersonation and secret-validity branches are proven offline over fixtures; no live cloud FACT has been claimed and none exists in the evidence store. Each branch's limitation string in the evidence-branches registry governs admission, so the deferral is enforced, not merely described. Activation needs an operator-provisioned throwaway lab credential.",
       "classification": "real-unfinished-code",
       "severity": "medium",
-      "anchor": {"file": "docs/capability-matrix/evidence-branches.json"},
+      "anchor": {
+        "file": "docs/capability-matrix/evidence-branches.json"
+      },
       "marker": false,
       "check": "doc-exists",
       "source_doc": "docs/DEFERRED-INFRA.md",
@@ -188,7 +208,10 @@
       "summary": "verify_offline.py re-verifies authenticity + binding + integrity + chain with no VIGIL runtime, but does not re-fire the oracle to re-derive each verdict (that is Step 2, which needs the oracle's code). After Step 1 you still trust the signer's honesty about each verdict until Step 2 removes it.",
       "classification": "real-unfinished-code",
       "severity": "low",
-      "anchor": {"file": "engine/crucible/framework/v2/evidence/audit_package.py", "symbol": "build_audit_package"},
+      "anchor": {
+        "file": "engine/crucible/framework/v2/evidence/audit_package.py",
+        "symbol": "build_audit_package"
+      },
       "marker": false,
       "check": "symbol-exists",
       "source_doc": "docs/DEFERRED-INFRA.md",
@@ -201,7 +224,9 @@
       "summary": "A certificate with an empty engagement_slug can ride a named-engagement bundle without tripping the cross-engagement guard. Defense-in-depth only; it still requires a governance-signed head over the mixed chain. Deferred so uniform legacy empty-slug bundles under a named head keep verifying.",
       "classification": "real-unfinished-code",
       "severity": "low",
-      "anchor": {"file": "engine/crucible/framework/v2/evidence/certify.py"},
+      "anchor": {
+        "file": "engine/crucible/framework/v2/evidence/certify.py"
+      },
       "marker": false,
       "check": "file-exists",
       "source_doc": "docs/DEFERRED-INFRA.md",
@@ -214,7 +239,9 @@
       "summary": "The verifier refuses a bundle with duplicate finding_refs (closing a context-lookup collision), but the producer can still fall back to bug_class, so a legitimately-minted bundle with two same-class findings would be refused (fail-closed). Follow-up: key/emit unique refs at the producer.",
       "classification": "real-unfinished-code",
       "severity": "low",
-      "anchor": {"file": "integration/vigil_integration/proof/bundle.py"},
+      "anchor": {
+        "file": "integration/vigil_integration/proof/bundle.py"
+      },
       "marker": false,
       "check": "file-exists",
       "source_doc": "docs/DEFERRED-INFRA.md",
@@ -227,7 +254,9 @@
       "summary": "Deterministic-scanner recall is MEASURED (M1) on a planted loopback corpus; a genuine field record of finding real bugs on diverse authorized real targets is not manufacturable in a lab and this repo does not claim one exists. State the planted-corpus number and any field record separately; never word an accruing record as completeness.",
       "classification": "doc-only",
       "severity": "info",
-      "anchor": {"file": "docs/H3-FIELD-RECORD-RUNBOOK.md"},
+      "anchor": {
+        "file": "docs/H3-FIELD-RECORD-RUNBOOK.md"
+      },
       "marker": false,
       "check": "doc-exists",
       "source_doc": "docs/DEFERRED-INFRA.md",
@@ -240,7 +269,9 @@
       "summary": "VIGIL prepares a reproducible, offline-verifiable audit package, but it cannot BE the independent third party. That conclusion is the external auditor's to write; it is a property of the world, not unfinished code.",
       "classification": "doc-only",
       "severity": "info",
-      "anchor": {"file": "docs/DEFERRED-INFRA.md"},
+      "anchor": {
+        "file": "docs/DEFERRED-INFRA.md"
+      },
       "marker": false,
       "check": "doc-exists",
       "source_doc": "docs/DEFERRED-INFRA.md",
@@ -253,7 +284,10 @@
       "summary": "Per-engagement crypto-shredding (EvidenceKeyring.seal_text) exists and erasure destroys the DEK, but seal-at-capture is NOT wired into the live executor. Credential excerpts already written to the append-only spine are therefore stored in PLAINTEXT and are not erasable by crypto-shredding (evidence_dir captures ARE sealable/shreddable). Documented in PRIVACY.md 'Honest scope'; wiring is a staged follow-up.",
       "classification": "real-unfinished-code",
       "severity": "high",
-      "anchor": {"file": "engine/crucible/framework/v2/common/crypto_shred.py", "symbol": "EvidenceKeyring.seal_text"},
+      "anchor": {
+        "file": "engine/crucible/framework/v2/common/crypto_shred.py",
+        "symbol": "EvidenceKeyring.seal_text"
+      },
       "marker": false,
       "check": "symbol-exists",
       "source_doc": "docs/PRIVACY.md",
@@ -266,7 +300,9 @@
       "summary": "The cloud, k8s and infra OperationTypes record only that a run happened and their own summary text; they do not yet write a structured findings record or retained proofs the way a web test does (records_findings=False, records_proofs=False). A deploying institution running these gets narrative output, not graded findings.",
       "classification": "real-unfinished-code",
       "severity": "medium",
-      "anchor": {"file": "engine/crucible/framework/v2/report/runinfo.py"},
+      "anchor": {
+        "file": "engine/crucible/framework/v2/report/runinfo.py"
+      },
       "marker": false,
       "check": "file-exists",
       "source_doc": "engine/crucible/framework/v2/report/runinfo.py",
@@ -279,7 +315,10 @@
       "summary": "The vendored kill_run exists but has no VIGIL caller, so a force-remove of the sandbox container is honestly declared UNAVAILABLE in the console rather than shown as a working control. Orphaned containers are reaped at the next launch; the engagement kill-switch (halts the loop) and process-stop (ends the host pid) are the working controls.",
       "classification": "real-unfinished-code",
       "severity": "low",
-      "anchor": {"file": "engine/crucible/framework/v2/console/api.py", "symbol": "_strix_killswitch_state"},
+      "anchor": {
+        "file": "engine/crucible/framework/v2/console/api.py",
+        "symbol": "_strix_killswitch_state"
+      },
       "marker": false,
       "check": "symbol-exists",
       "source_doc": "engine/crucible/framework/v2/console/api.py",
@@ -292,7 +331,9 @@
       "summary": "_KNOWN_FAVICONS holds a handful of illustrative fixture entries so the fingerprint code path is real and deterministically testable; a production build would hash real product favicons from a crawled corpus. Because the table is a stub, favicon matches are scored conservatively and never mint a high-confidence technology fact.",
       "classification": "real-unfinished-code",
       "severity": "low",
-      "anchor": {"file": "engine/crucible/framework/v2/scanner/fingerprint.py"},
+      "anchor": {
+        "file": "engine/crucible/framework/v2/scanner/fingerprint.py"
+      },
       "marker": false,
       "check": "file-exists",
       "source_doc": "engine/crucible/framework/v2/scanner/fingerprint.py",
@@ -305,7 +346,10 @@
       "summary": "SIGIL perception captures the screen via a screenshot tool + OCR (grab_screen); the richer accessibility-tree path (C4) is a documented seam that is not wired, so on headless hosts with no screenshot tool grab_screen returns None rather than falling back to an a11y tree.",
       "classification": "real-unfinished-code",
       "severity": "info",
-      "anchor": {"file": "apps/sigil/sigil/perception/capture.py", "symbol": "grab_screen"},
+      "anchor": {
+        "file": "apps/sigil/sigil/perception/capture.py",
+        "symbol": "grab_screen"
+      },
       "marker": false,
       "check": "symbol-exists",
       "source_doc": "apps/sigil/sigil/perception/capture.py",
@@ -318,7 +362,9 @@
       "summary": "SIGIL's gesture session injects input via a platform backend; the macOS/Windows native path is not wired (and Linux needs ydotool/xdotool). A backend whose available() is False is honestly INERT: it no-ops, and an injection is never recorded/returned as done when it physically did nothing.",
       "classification": "real-unfinished-code",
       "severity": "info",
-      "anchor": {"file": "apps/sigil/sigil/gesture/session.py"},
+      "anchor": {
+        "file": "apps/sigil/sigil/gesture/session.py"
+      },
       "marker": false,
       "check": "file-exists",
       "source_doc": "apps/sigil/sigil/gesture/session.py",
@@ -331,7 +377,10 @@
       "summary": "Phase 1.c ties a UI-authorized target to the PINNED owner key AT INSTALL, and the launch gate verifies the authority against the on-disk trust root. Both the owner-pubkey anchor (the .vigil-live seam) and the persisted .authority-root trust root live, by default, under paths a full owner-uid filesystem-write actor could rewrite — such an actor could plant their own trust root + self-signed authority, and is outside the meaningful threat model (they could equally edit code, the kill-switch, or the keys). The install-time owner-pin raises the bar from 'write a plaintext charter' to 'produce an owner-signed authority whose trust root is the pinned owner key over the target host'. Closing even the full-FS-write case is a DEPLOYMENT choice (not unfinished code): anchor the launch-gate authority root out-of-band on a read-only / HSM-backed .authority-root mount via VIGIL_AUTHORITY_ROOT_DIR. This is now VISIBLE — `vigil doctor`'s authority-root-anchor posture line reports DEFAULT-IN-TREE vs OUT-OF-BAND — and DOCUMENTED in docs/runbooks/anchor-trust-root-out-of-band.md (incl. the caveat that the trust root must be CLI-provisioned before the mount is made read-only). The hard root pin (CRUCIBLE_ROOT_STRICT, claim PHASE1-5) additionally prevents a sentinel-less root from silently resolving elsewhere.",
       "classification": "doc-only",
       "severity": "low",
-      "anchor": {"file": "engine/crucible/framework/v2/console/actions.py", "symbol": "_install_target_authorization"},
+      "anchor": {
+        "file": "engine/crucible/framework/v2/console/actions.py",
+        "symbol": "_install_target_authorization"
+      },
       "marker": false,
       "check": "symbol-exists",
       "source_doc": "docs/runbooks/anchor-trust-root-out-of-band.md",
@@ -344,40 +393,250 @@
       "summary": "Wave 0.2 ships `--profile {surface,deep,full}` as additive-only flag expansion (resolve_profile). The deep/full rosters name packs that have no enable_* flag or pack yet — deep names time-based / NoSQL / LDAP / XPath SQLi, full additionally names business-logic and race; _PROFILE_DEFERRED lists them. resolve_profile expands to NOTHING for a not-yet-wired name (it never invents a pack), and the profile manifest + an operator note surface the gap so it is visible and auditable. The flags + packs are added by later FACT-coverage waves (Wave 1 wires time-based / NoSQL / LDAP / XPath; Wave 4 wires business-logic / race).",
       "classification": "real-unfinished-code",
       "severity": "info",
-      "anchor": {"file": "engine/crucible/framework/v2/engage.py", "symbol": "resolve_profile"},
+      "anchor": {
+        "file": "engine/crucible/framework/v2/engage.py",
+        "symbol": "resolve_profile"
+      },
       "marker": false,
       "check": "symbol-exists",
       "source_doc": "docs/capability-matrix/ORACLE-RECIPE.md",
+      "disposition": "file-into-w16",
+      "w16_issue": null
+    },
+    {
+      "id": "LIMIT-dns-oob-resolver-ip-not-target-ip",
+      "title": "The DNS OOB collector records the RESOLVER's source IP, not the target's",
+      "summary": "A blind DNS callback to <token>.<base-domain> reaches the authoritative DNS collector via the target's RECURSIVE RESOLVER, so the client_ip on the recorded OOBHit is the resolver's, not the target's. This is a property of DNS, not unfinished code. The FACT still holds because the correlator is the UNIQUE per-probe secret token (secrets.token_hex(16)) embedded in the callback host — a DNS query VIGIL did not cause cannot carry it — not the source IP. Documented on the oob_callback.dns_collector evidence branch and in ARCHITECTURE.md / OPERATOR-GUIDE.md.",
+      "classification": "doc-only",
+      "severity": "info",
+      "anchor": {
+        "file": "engine/crucible/framework/v2/verify/dns_collector.py",
+        "symbol": "DNSCollector"
+      },
+      "marker": false,
+      "check": "symbol-exists",
+      "source_doc": "docs/capability-matrix/evidence-branches.json",
+      "disposition": "file-into-w16",
+      "w16_issue": null
+    },
+    {
+      "id": "LIMIT-dns-oob-requires-operator-owned-delegated-domain",
+      "title": "The DNS OOB collector assumes an operator-owned domain whose NS delegate to it",
+      "summary": "The authoritative DNS collector confirms a DNS-only interaction only when the base domain it serves is an operator-OWNED domain whose NS records delegate to the collector's public IP (UDP :53). This is a deployment assumption (own + delegate a domain), a property of the deployment rather than unfinished code; without the delegation, no target resolver forwards <token>.<base-domain> to us. The CLI serve-dns subcommand prints the exact NS-delegation instructions. Documented on the oob_callback.dns_collector evidence branch.",
+      "classification": "doc-only",
+      "severity": "info",
+      "anchor": {
+        "file": "engine/crucible/framework/v2/verify/dns_collector.py",
+        "symbol": "DNSCollector"
+      },
+      "marker": false,
+      "check": "symbol-exists",
+      "source_doc": "docs/capability-matrix/evidence-branches.json",
+      "disposition": "file-into-w16",
+      "w16_issue": null
+    },
+    {
+      "id": "LIMIT-dns-oob-proves-resolution-not-completed-connection",
+      "title": "A DNS lookup proves resolution reached us, not that a full connection completed",
+      "summary": "A fired DNS OOB FACT proves the target's resolver forwarded a token-bearing lookup to the authoritative collector — i.e. resolution reached us — NOT that a full HTTP (or other) connection then completed. This is a strictly weaker (but still sound) claim than the HTTP collaborator's completed-fetch proof, and a property of the DNS channel rather than unfinished code. It is exactly why DNS-only confirmation is valuable against a target that blocks outbound HTTP but still resolves. Documented on the oob_callback.dns_collector evidence branch.",
+      "classification": "doc-only",
+      "severity": "info",
+      "anchor": {
+        "file": "engine/crucible/framework/v2/verify/dns_collector.py",
+        "symbol": "DNSCollector"
+      },
+      "marker": false,
+      "check": "symbol-exists",
+      "source_doc": "docs/capability-matrix/evidence-branches.json",
+      "disposition": "file-into-w16",
+      "w16_issue": null
+    },
+    {
+      "id": "LIMIT-dns-oob-token-cleartext-broadcast",
+      "title": "A DNS OOB token is broadcast in cleartext, so token-only (VF-2a) is forgeable within the window",
+      "summary": "A DNS out-of-band correlation token rides as a QNAME label, broadcast in cleartext to every recursive/forwarding resolver on the path and captured by passive-DNS, so token equality alone (VF-2a) does NOT prove the target emitted the lookup — anyone who observes the query can replay the label within the window. This is why a DNS OOB FACT REQUIRES the VF-2b independent-collector receipt (signed by an owner-pinned out-of-band key). Anti-replay for a receipt-bearing hit is bounded by the OWNER-SIGNED ENGAGEMENT WINDOW: the collector-signed, target-observed received_at must fall inside [not_before, not_after] (± skew) taken from the same signed EngagementAuthority as the pin, never from the producer context — this is NON-FORGEABLE and closes cross-engagement and gross-stale (e.g. year-1970 / prior-engagement) replay, and it cannot be slid because the producer cannot move an owner-signed window. (One precise corner: reusing the SAME owner-signed collector pin across two engagements whose authorized windows OVERLAP admits a receipt observed during the overlap in both — its signed received_at is temporally in-scope for each, so it degenerates into the intra-window residual below rather than a stale/out-of-scope replay; distinct collector pins or non-overlapping windows eliminate this corner.) The producer-recorded mint anchor issued_at is kept only as a best-effort intra-engagement freshness hint (it may narrow the window, never widen it, and is never the sole boundary); because the mint time is not cryptographically committed into the token, this is COARSE anti-replay: NOT tight anti-replay against a fully-dishonest producer WITHIN the window — a real receipt observed during the authorized window, re-presented later within the SAME window, remains indistinguishable. That residual is bounded to the owner-signed engagement window. The receipt + owner-signed window are what make the FACT sound, not token secrecy. A property of the DNS channel plus the uncommitted mint time, not unfinished code.",
+      "classification": "doc-only",
+      "severity": "low",
+      "anchor": {
+        "file": "engine/crucible/framework/v2/verify/dns_collector.py",
+        "symbol": "DNSCollector"
+      },
+      "marker": true,
+      "check": "symbol-exists",
+      "source_doc": "docs/DEFERRED-INFRA.md",
       "disposition": "file-into-w16",
       "w16_issue": null
     }
   ],
   "honest_limit_sites_note": "The code-scan census. docs/tests/test_limitation_inventory.py scans every non-test product .py for the honest-limit/deferred debt phrases in _DEBT_PHRASES and requires EVERY hit to be either a VIGIL-LIMIT marker line OR a site listed here whose snippet (matched case-insensitively) is a substring of the hit line. kind 'debt' names the limitations id the site belongs to (which must exist); kind 'non-debt' explains why the phrase is not a capability limit (a deliberate design choice, a runtime-state description, or a phrase describing a CHECK's target rather than VIGIL itself). Bidirectional: every snippet here must still match a debt-phrase line in its file, so deleting the prose (or moving the debt) turns CI red.",
   "honest_limit_sites": [
-    {"file": "engine/crucible/framework/v2/attest/__init__.py", "snippet": "hardware-gated", "kind": "debt", "limit_id": "LIMIT-attest-tee-hardware", "note": "TEE backends-are-stubs summary in the package docstring."},
-    {"file": "engine/crucible/framework/v2/attest/provider.py", "snippet": "hardware-gated", "kind": "debt", "limit_id": "LIMIT-attest-tee-hardware", "note": "SEV-SNP/TDX hardware-gated stub docstrings, raise message and backend name."},
-    {"file": "engine/crucible/framework/v2/attest/provider.py", "snippet": "those are stubs", "kind": "debt", "limit_id": "LIMIT-attest-tee-hardware", "note": "Module docstring: the TEE backends are honestly-labelled stubs."},
-    {"file": "engine/crucible/framework/v2/attest/provider.py", "snippet": "SEV-SNP/TDX attestation is a stub", "kind": "debt", "limit_id": "LIMIT-attest-tee-hardware", "note": "Continuation of the VIGIL-LIMIT marker docstring for the TEE-hardware limit."},
-    {"file": "engine/crucible/framework/v2/agent_body/__init__.py", "snippet": "research-gated", "kind": "debt", "limit_id": "LIMIT-agent-body-scaffold", "note": "Package docstring: interface-only, research-gated scaffold."},
-    {"file": "engine/crucible/framework/v2/agent_body/interface.py", "snippet": "research-gated", "kind": "debt", "limit_id": "LIMIT-agent-body-scaffold", "note": "Module docstring: SCAFFOLD, research-gated, wires no engine."},
-    {"file": "engine/crucible/framework/v2/agent_body/interface.py", "snippet": "is a scaffold", "kind": "debt", "limit_id": "LIMIT-agent-body-scaffold", "note": "AgentBody is abstract because it is a scaffold."},
-    {"file": "engine/crucible/framework/v2/graph/store.py", "snippet": "deploy-gated", "kind": "debt", "limit_id": "LIMIT-neo4j-deploy-gated", "note": "Neo4jGraphStore live construction is deploy-gated (marker + prose)."},
-    {"file": "engine/crucible/framework/v2/remediation_binary/__init__.py", "snippet": "research-gated", "kind": "debt", "limit_id": "LIMIT-symbolic-crash-repair", "note": "Package docstring: patch synthesis (CRS engine) is a research-gated stub."},
-    {"file": "engine/crucible/framework/v2/remediation_binary/tier.py", "snippet": "research-gated", "kind": "debt", "limit_id": "LIMIT-symbolic-crash-repair", "note": "The research-gated CRS/symbolic-synthesis tier docstrings and raise messages."},
-    {"file": "engine/crucible/framework/v2/common/crypto_shred.py", "snippet": "seal-at-capture is NOT yet wired", "kind": "debt", "limit_id": "LIMIT-spine-seal-at-capture", "note": "Spine credential excerpts stored in plaintext until seal-at-capture is wired."},
-    {"file": "engine/crucible/framework/v2/console/api.py", "snippet": "NOT wired into the VIGIL plane", "kind": "debt", "limit_id": "LIMIT-container-kill-unwired", "note": "container_kill docstring: force-remove has no VIGIL caller."},
-    {"file": "engine/crucible/framework/v2/console/api.py", "snippet": "container-level kill (force-remove the sandbox container) is not wired", "kind": "debt", "limit_id": "LIMIT-container-kill-unwired", "note": "container_kill user-facing note: declared UNAVAILABLE."},
-    {"file": "engine/crucible/framework/v2/report/runinfo.py", "snippet": "does not yet write a structured findings record", "kind": "debt", "limit_id": "LIMIT-posture-no-structured-findings", "note": "cloud/k8s/infra posture assessments record no structured findings/proofs."},
-    {"file": "engine/crucible/framework/v2/scanner/fingerprint.py", "snippet": "the table is a stub", "kind": "debt", "limit_id": "LIMIT-favicon-fingerprint-stub", "note": "favicon fingerprint table is illustrative fixtures; matches scored conservatively."},
-    {"file": "apps/sigil/sigil/perception/capture.py", "snippet": "documented seam, not wired", "kind": "debt", "limit_id": "LIMIT-a11y-capture-unwired", "note": "accessibility-tree capture path not wired on headless hosts."},
-    {"file": "apps/sigil/sigil/gesture/session.py", "snippet": "native path not wired", "kind": "debt", "limit_id": "LIMIT-gesture-native-inject-unwired", "note": "macOS/Windows native input injection path not wired; backend honestly inert."},
-    {"file": "engine/crucible/framework/v2/engage_autonomous.py", "snippet": "deliberately NOT wired here", "kind": "non-debt", "note": "Deliberate architectural choice: the LLM CritiqueAgent is intentionally not wired into this sinks-construction path. Not deferred work."},
-    {"file": "engine/crucible/framework/v2/engage_autonomous.py", "snippet": "does not yet have a confirmed finding", "kind": "non-debt", "note": "Describes the runtime state of a hypothesis node (no confirmed finding yet), not a capability limit."},
-    {"file": "engine/crucible/framework/v2/veracity/firewall.py", "snippet": "note that outlives", "kind": "non-debt", "note": "Meta-prose about keeping the WHERE-THIS-IS-WIRED note current; it is not itself a limit."},
-    {"file": "integration/vigil_integration/attestation/anchor.py", "snippet": "does not yet exist", "kind": "non-debt", "note": "Describes a runtime state (the per-host counter file is absent on first write), not a capability limit."},
-    {"file": "tools/backup/transport.py", "snippet": "neither is a stub", "kind": "non-debt", "note": "Explicitly asserts both backup backends are REAL (the opposite of a stub)."},
-    {"file": "tools/ha/require_networkpolicy.py", "snippet": "not wired into the kustomization", "kind": "non-debt", "note": "Describes the TARGET condition this HA check detects (a NetworkPolicy the operator did not wire), not a VIGIL capability limit."},
-    {"file": "tools/ha/require_probes.py", "snippet": "not wired to /readyz", "kind": "non-debt", "note": "Describes the TARGET condition this HA check detects (probes the operator did not wire), not a VIGIL capability limit."},
-    {"file": "engine/crucible/framework/v2/engage.py", "snippet": "not wired yet", "kind": "debt", "limit_id": "LIMIT-profile-packs-incremental", "note": "resolve_profile skips a plan-named profile flag that is not wired yet (deferred, never fabricated); the deep/full packs are wired incrementally across the FACT-coverage waves."}
+    {
+      "file": "engine/crucible/framework/v2/attest/__init__.py",
+      "snippet": "hardware-gated",
+      "kind": "debt",
+      "limit_id": "LIMIT-attest-tee-hardware",
+      "note": "TEE backends-are-stubs summary in the package docstring."
+    },
+    {
+      "file": "engine/crucible/framework/v2/attest/provider.py",
+      "snippet": "hardware-gated",
+      "kind": "debt",
+      "limit_id": "LIMIT-attest-tee-hardware",
+      "note": "SEV-SNP/TDX hardware-gated stub docstrings, raise message and backend name."
+    },
+    {
+      "file": "engine/crucible/framework/v2/attest/provider.py",
+      "snippet": "those are stubs",
+      "kind": "debt",
+      "limit_id": "LIMIT-attest-tee-hardware",
+      "note": "Module docstring: the TEE backends are honestly-labelled stubs."
+    },
+    {
+      "file": "engine/crucible/framework/v2/attest/provider.py",
+      "snippet": "SEV-SNP/TDX attestation is a stub",
+      "kind": "debt",
+      "limit_id": "LIMIT-attest-tee-hardware",
+      "note": "Continuation of the VIGIL-LIMIT marker docstring for the TEE-hardware limit."
+    },
+    {
+      "file": "engine/crucible/framework/v2/agent_body/__init__.py",
+      "snippet": "research-gated",
+      "kind": "debt",
+      "limit_id": "LIMIT-agent-body-scaffold",
+      "note": "Package docstring: interface-only, research-gated scaffold."
+    },
+    {
+      "file": "engine/crucible/framework/v2/agent_body/interface.py",
+      "snippet": "research-gated",
+      "kind": "debt",
+      "limit_id": "LIMIT-agent-body-scaffold",
+      "note": "Module docstring: SCAFFOLD, research-gated, wires no engine."
+    },
+    {
+      "file": "engine/crucible/framework/v2/agent_body/interface.py",
+      "snippet": "is a scaffold",
+      "kind": "debt",
+      "limit_id": "LIMIT-agent-body-scaffold",
+      "note": "AgentBody is abstract because it is a scaffold."
+    },
+    {
+      "file": "engine/crucible/framework/v2/graph/store.py",
+      "snippet": "deploy-gated",
+      "kind": "debt",
+      "limit_id": "LIMIT-neo4j-deploy-gated",
+      "note": "Neo4jGraphStore live construction is deploy-gated (marker + prose)."
+    },
+    {
+      "file": "engine/crucible/framework/v2/remediation_binary/__init__.py",
+      "snippet": "research-gated",
+      "kind": "debt",
+      "limit_id": "LIMIT-symbolic-crash-repair",
+      "note": "Package docstring: patch synthesis (CRS engine) is a research-gated stub."
+    },
+    {
+      "file": "engine/crucible/framework/v2/remediation_binary/tier.py",
+      "snippet": "research-gated",
+      "kind": "debt",
+      "limit_id": "LIMIT-symbolic-crash-repair",
+      "note": "The research-gated CRS/symbolic-synthesis tier docstrings and raise messages."
+    },
+    {
+      "file": "engine/crucible/framework/v2/common/crypto_shred.py",
+      "snippet": "seal-at-capture is NOT yet wired",
+      "kind": "debt",
+      "limit_id": "LIMIT-spine-seal-at-capture",
+      "note": "Spine credential excerpts stored in plaintext until seal-at-capture is wired."
+    },
+    {
+      "file": "engine/crucible/framework/v2/console/api.py",
+      "snippet": "NOT wired into the VIGIL plane",
+      "kind": "debt",
+      "limit_id": "LIMIT-container-kill-unwired",
+      "note": "container_kill docstring: force-remove has no VIGIL caller."
+    },
+    {
+      "file": "engine/crucible/framework/v2/console/api.py",
+      "snippet": "container-level kill (force-remove the sandbox container) is not wired",
+      "kind": "debt",
+      "limit_id": "LIMIT-container-kill-unwired",
+      "note": "container_kill user-facing note: declared UNAVAILABLE."
+    },
+    {
+      "file": "engine/crucible/framework/v2/report/runinfo.py",
+      "snippet": "does not yet write a structured findings record",
+      "kind": "debt",
+      "limit_id": "LIMIT-posture-no-structured-findings",
+      "note": "cloud/k8s/infra posture assessments record no structured findings/proofs."
+    },
+    {
+      "file": "engine/crucible/framework/v2/scanner/fingerprint.py",
+      "snippet": "the table is a stub",
+      "kind": "debt",
+      "limit_id": "LIMIT-favicon-fingerprint-stub",
+      "note": "favicon fingerprint table is illustrative fixtures; matches scored conservatively."
+    },
+    {
+      "file": "apps/sigil/sigil/perception/capture.py",
+      "snippet": "documented seam, not wired",
+      "kind": "debt",
+      "limit_id": "LIMIT-a11y-capture-unwired",
+      "note": "accessibility-tree capture path not wired on headless hosts."
+    },
+    {
+      "file": "apps/sigil/sigil/gesture/session.py",
+      "snippet": "native path not wired",
+      "kind": "debt",
+      "limit_id": "LIMIT-gesture-native-inject-unwired",
+      "note": "macOS/Windows native input injection path not wired; backend honestly inert."
+    },
+    {
+      "file": "engine/crucible/framework/v2/engage_autonomous.py",
+      "snippet": "deliberately NOT wired here",
+      "kind": "non-debt",
+      "note": "Deliberate architectural choice: the LLM CritiqueAgent is intentionally not wired into this sinks-construction path. Not deferred work."
+    },
+    {
+      "file": "engine/crucible/framework/v2/engage_autonomous.py",
+      "snippet": "does not yet have a confirmed finding",
+      "kind": "non-debt",
+      "note": "Describes the runtime state of a hypothesis node (no confirmed finding yet), not a capability limit."
+    },
+    {
+      "file": "engine/crucible/framework/v2/veracity/firewall.py",
+      "snippet": "note that outlives",
+      "kind": "non-debt",
+      "note": "Meta-prose about keeping the WHERE-THIS-IS-WIRED note current; it is not itself a limit."
+    },
+    {
+      "file": "integration/vigil_integration/attestation/anchor.py",
+      "snippet": "does not yet exist",
+      "kind": "non-debt",
+      "note": "Describes a runtime state (the per-host counter file is absent on first write), not a capability limit."
+    },
+    {
+      "file": "tools/backup/transport.py",
+      "snippet": "neither is a stub",
+      "kind": "non-debt",
+      "note": "Explicitly asserts both backup backends are REAL (the opposite of a stub)."
+    },
+    {
+      "file": "tools/ha/require_networkpolicy.py",
+      "snippet": "not wired into the kustomization",
+      "kind": "non-debt",
+      "note": "Describes the TARGET condition this HA check detects (a NetworkPolicy the operator did not wire), not a VIGIL capability limit."
+    },
+    {
+      "file": "tools/ha/require_probes.py",
+      "snippet": "not wired to /readyz",
+      "kind": "non-debt",
+      "note": "Describes the TARGET condition this HA check detects (probes the operator did not wire), not a VIGIL capability limit."
+    },
+    {
+      "file": "engine/crucible/framework/v2/engage.py",
+      "snippet": "not wired yet",
+      "kind": "debt",
+      "limit_id": "LIMIT-profile-packs-incremental",
+      "note": "resolve_profile skips a plan-named profile flag that is not wired yet (deferred, never fabricated); the deep/full packs are wired incrementally across the FACT-coverage waves."
+    }
   ]
 }

@@ -30,6 +30,7 @@ from .models import (
     VerificationResult,
 )
 from .oob import OOBHit, OOBReceiver, sign_oob_receipt, verify_oob_receipt
+from .dns_collector import DNSCollector
 from .cicd_posture import (
     cicd_posture_context,
     confirm_cicd_posture,
@@ -243,6 +244,7 @@ __all__ = [
     "OOBHit",
     "sign_oob_receipt",
     "verify_oob_receipt",
+    "DNSCollector",
     # verifier
     "OracleVerifier",
     "HIGH_CONFIDENCE",

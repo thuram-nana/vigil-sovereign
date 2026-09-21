@@ -139,7 +139,10 @@ def test_tampered_receipt_core_fails_verification() -> None:
 
 def test_oracle_f4_requires_a_receipt_verifying_against_the_pinned_collector_key() -> None:
     # The end-to-end F4 guarantee: a fully-dishonest producer who fabricates the whole context cannot make the
-    # oracle fire against a collector key PINNED out-of-band that it does not hold.
+    # oracle fire against a collector key PINNED out-of-band that it does not hold. A receipt-bearing hit also
+    # REQUIRES a mint window (bound to the out-of-band authority TTL), so pass one for the positive cases.
+    import time as _time
+
     from vigil_core import generate_keypair
 
     from ..oracles import oob_callback_oracle
@@ -148,23 +151,44 @@ def test_oracle_f4_requires_a_receipt_verifying_against_the_pinned_collector_key
         token, url = oob.register_token()
         _get(url)
         hits = [h.model_dump() for h in oob.poll(token)]
-    # real receipt + real pinned key → F4 fired
-    sig = oob_callback_oracle(hits, token, kp.public_key_b64)
+    win = dict(issued_at=_time.time() - 1.0, authority_ttl=300.0, authority_skew=5.0)
+    # real receipt + real pinned key + a bound window → F4 fired
+    sig = oob_callback_oracle(hits, token, kp.public_key_b64, **win)
     assert sig.fired and sig.observed.get("receipt_verified") is True
+    assert sig.observed.get("oob_verdict") == "VERIFIED"
     # real receipt but WRONG pinned key (producer substituted its own) → not fired
-    assert not oob_callback_oracle(hits, token, attacker.public_key_b64).fired
+    assert not oob_callback_oracle(hits, token, attacker.public_key_b64, **win).fired
     # fabricated hit (right token, made-up receipt, no collector key) vs the real pinned key → not fired
     forged = [{"token": token, "method": "GET", "path": "/" + token, "client_ip": "1.2.3.4",
                "received_at": 1.0, "collector_sig": "AAAA"}]
-    assert not oob_callback_oracle(forged, token, kp.public_key_b64).fired
-    # VF-2a tier still available (no collector pin) — token-only fire, receipt not claimed
-    tier = oob_callback_oracle(hits, token)
+    assert not oob_callback_oracle(forged, token, kp.public_key_b64, **win).fired
+    # CORE FIX: a receipt-bearing hit re-checked with NO pin (collector_pubkey=None) is FAIL-CLOSED, NOT a
+    # silent drop to token-only — the offline fail-open this change closes.
+    refused = oob_callback_oracle(hits, token, **win)
+    assert not refused.fired and refused.observed.get("oob_verdict") == "UNVERIFIABLE_RECEIPT"
+
+
+def test_unsigned_hit_no_pin_is_genuine_vf2a_token_only() -> None:
+    # The other half of the fix: a hit with NO collector receipt IS a genuine VF-2a token-only observation and
+    # fires with no pin (byte-identical) — distinguishing 'no receipt ⇒ VF-2a by design' from
+    # 'receipt present but unverified ⇒ fail-open'.
+    from ..oracles import oob_callback_oracle
+    with OOBReceiver() as oob:                       # no collector keypair → no receipt
+        token, url = oob.register_token()
+        _get(url)
+        hits = [h.model_dump() for h in oob.poll(token)]
+    assert hits and hits[0]["collector_sig"] == ""
+    tier = oob_callback_oracle(hits, token)          # None pin, unsigned hit → VF-2a token-only fire
     assert tier.fired and tier.observed.get("receipt_verified") is False
+    assert "oob_verdict" not in tier.observed        # windowless VF-2a shape unchanged
 
 
 def test_oracle_empty_pinned_key_is_failclosed_not_token_only() -> None:
-    # LOW-1 regression: passing an EMPTY collector pin means F4 was REQUESTED with a bad key → fail-closed,
-    # NOT a silent drop to the token-only tier. (collector_pubkey=None is the intentional VF-2a tier.)
+    # LOW-1 regression: passing an EMPTY collector pin over a receipt-bearing hit means F4 was REQUESTED with a
+    # bad key → fail-closed, NOT a silent drop to the token-only tier. A receipt-bearing hit with NO pin at all
+    # is ALSO fail-closed now (the offline fail-open fix); the token-only tier is reserved for UNSIGNED hits.
+    import time as _time
+
     from vigil_core import generate_keypair
 
     from ..oracles import oob_callback_oracle
@@ -173,7 +197,8 @@ def test_oracle_empty_pinned_key_is_failclosed_not_token_only() -> None:
         token, url = oob.register_token()
         _get(url)
         hits = [h.model_dump() for h in oob.poll(token)]
-    assert not oob_callback_oracle(hits, token, "").fired          # empty pin → fail-closed
-    assert not oob_callback_oracle(hits, token, "   ").fired        # blank pin → fail-closed
-    assert oob_callback_oracle(hits, token, None).fired             # None → intentional VF-2a token-only tier
-    assert oob_callback_oracle(hits, token, kp.public_key_b64).fired  # real pin → F4
+    win = dict(issued_at=_time.time() - 1.0, authority_ttl=300.0, authority_skew=5.0)
+    assert not oob_callback_oracle(hits, token, "", **win).fired    # empty pin → fail-closed
+    assert not oob_callback_oracle(hits, token, "   ", **win).fired  # blank pin → fail-closed
+    assert not oob_callback_oracle(hits, token, None, **win).fired  # receipt present + no pin → fail-closed
+    assert oob_callback_oracle(hits, token, kp.public_key_b64, **win).fired  # real pin + window → F4

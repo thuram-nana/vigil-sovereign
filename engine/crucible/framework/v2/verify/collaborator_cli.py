@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 
 from .collaborator import RelayServer
+from .dns_collector import DNSCollector
 
 
 def main(argv: list[str]) -> int:
@@ -35,6 +36,26 @@ def main(argv: list[str]) -> int:
     serve.add_argument("--no-sign", action="store_true",
                        help="Run the relay WITHOUT a collector key (VF-2a token-only). A remote scanner then "
                             "refuses it (remote OOB requires a VF-2b pin); use only for a loopback/test relay.")
+
+    serve_dns = sub.add_parser("serve-dns", help="Run the authoritative DNS OOB collector until interrupted.")
+    serve_dns.add_argument("--domain", required=True,
+                           help="Operator-OWNED base domain to serve (e.g. oob.op.example). Delegate its NS "
+                                "records to THIS collector's public IP.")
+    serve_dns.add_argument("--host", default="0.0.0.0",
+                           help="Bind address (bind a public interface reachable by internet resolvers).")
+    serve_dns.add_argument("--port", type=int, default=53,
+                           help="UDP port (53 in production; needs root / CAP_NET_BIND_SERVICE).")
+    serve_dns.add_argument("--answer-ip", default="127.0.0.1",
+                           help="A record handed back so the resolver completes (your advertise IP). "
+                                "Pass an empty string to answer NXDOMAIN instead.")
+    serve_dns.add_argument("--collector-keypair-file", default=None,
+                           help="Path to a JSON keypair {\"private_key_b64\":..,\"public_key_b64\":..} for the "
+                                "independent DNS collector (VF-2b), so the pinned public key is STABLE across "
+                                "restarts. Omit to mint a fresh keypair each run. The PUBLIC key is printed for "
+                                "out-of-band distribution; the private key is never printed.")
+    serve_dns.add_argument("--no-sign", action="store_true",
+                           help="Run the DNS collector WITHOUT a collector key (VF-2a token-only). A verifier "
+                                "that pins a DNS collector key will then refuse it; use only for a test setup.")
     args = parser.parse_args(argv)
 
     if args.cmd == "serve":
@@ -87,5 +108,51 @@ def main(argv: list[str]) -> int:
         print(f"              header  X-Relay-Key: <secret>")
         print("  (put this host on the engagement charter allowlist; Ctrl-C to stop)")
         relay.serve_forever()
+        return 0
+
+    if args.cmd == "serve-dns":
+        # VF-2b: an INDEPENDENT DNS collector keypair so every recorded lookup is signed into a receipt the
+        # verifier checks against the PINNED collector pubkey. Mint one by default (or load a stable keypair
+        # file so the pin survives restarts); print only the PUBLIC key, out-of-band. --no-sign drops to VF-2a.
+        import json as _json
+        import os as _os
+        from vigil_core import KeyPair, generate_keypair
+        collector_kp = None
+        if not args.no_sign:
+            if args.collector_keypair_file:
+                with open(args.collector_keypair_file, encoding="utf-8") as fh:
+                    kd = _json.load(fh)
+                collector_kp = KeyPair(public_key_b64=str(kd["public_key_b64"]),
+                                       private_key_b64=str(kd["private_key_b64"]))
+            else:
+                collector_kp = generate_keypair()
+        answer_ip = args.answer_ip if args.answer_ip else None
+        dns = DNSCollector(args.domain, host=args.host, port=args.port, answer_ip=answer_ip,
+                           collector_keypair=collector_kp)
+        dns.start()
+        print("CRUCIBLE authoritative DNS OOB collector")
+        print(f"  domain    : {dns.base_domain}   (delegate its NS records to THIS collector's public IP)")
+        print(f"  bound     : udp://{args.host}:{dns.port}")
+        print(f"  answers   : {'A ' + answer_ip if answer_ip else 'NXDOMAIN'}   (so the resolver completes)")
+        if dns.collector_pubkey:
+            # VF-2b: distribute this PUBLIC key out-of-band; the verifier PINS it (authority oob_dns_collector_
+            # pubkey) so a compromised collector handing over its own key cannot defeat the pin.
+            print(f"  collector : {dns.collector_pubkey}   (VF-2b: pin this at the verifier OUT-OF-BAND)")
+        else:
+            print("  collector : (none — VF-2a token-only; a verifier pinning a DNS collector key will refuse)")
+        print(f"  callbacks : <token>.{dns.base_domain}   (embed as the DNS host in a blind payload)")
+        print("  NS delegation (at your registrar / parent zone):")
+        print(f"      {dns.base_domain}.  IN  NS   ns1.{dns.base_domain}.")
+        print(f"      ns1.{dns.base_domain}.  IN  A   <THIS-COLLECTOR-PUBLIC-IP>")
+        print("  (own the domain; delegate NS to this host; put it on the engagement charter; Ctrl-C to stop)")
+        try:
+            import threading as _t
+            _stop = _t.Event()
+            while not _stop.wait(0.5):
+                pass
+        except KeyboardInterrupt:
+            pass
+        finally:
+            dns.stop()
         return 0
     return 2

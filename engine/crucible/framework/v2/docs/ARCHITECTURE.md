@@ -309,10 +309,18 @@ oracle, so adding coverage cannot add false positives.
   the destructive race engine runs only against explicit operator-supplied targets,
   never a blindly-swept endpoint. Every arsenal finding is still oracle-confirmed.
   `https` origins are skipped by the cleartext raw-socket smuggling/race probes.
-- **OOB is HTTP-only; DNS-only interactions are not covered.** The collaborator
-  relay records HTTP fetches of the callback. A DNS-only interaction (a
-  `nslookup`/`dig` with no HTTP fetch) needs a DNS-capable relay — a documented
-  future extension, not silently implied.
+- **OOB spans HTTP and DNS.** The HTTP collaborator relay records completed HTTP
+  fetches of the callback. A DNS-only interaction (a `nslookup`/`dig`, or an SSRF /
+  XXE / OS-command callback whose HTTP egress is blocked but whose hostname still
+  resolves) is now CONFIRMABLE via the authoritative DNS collector
+  (`verify.dns_collector.DNSCollector`): the target's recursive resolver forwards a
+  lookup of `<token>.<base-domain>` to a nameserver we own, and the token-bearing
+  query is recorded and VF-2b-signed exactly like an HTTP hit — same
+  `oob_callback` oracle, no new OracleKind. Honest limits: the recorded client IP is
+  the RESOLVER's (the unique per-probe secret token is the correlator, so the FACT
+  still holds); a DNS lookup proves resolution reached us, not that a full connection
+  completed; and it assumes an operator-owned domain whose NS delegate to the
+  collector's public IP.
 - **`bug_class` routing has a permissive fallback.** An unrecognised `bug_class`
   falls back to trying every oracle rather than failing; it can still confirm via
   whichever oracle its check fed, but the intent is implicit. New classes should be
