@@ -1320,18 +1320,34 @@ def run_autonomous_cycle(
         # so the suite stayed shallow. Crawl-expand the REAL seed origin FIRST (its own scheme+host+port,
         # threaded from the engage CLI) — never downgrading https→http on a genuine TLS target — then still
         # expand any promoted roots that genuinely differ. Every fetch rides the SAME gated discover_send.
+        from urllib.parse import urlsplit as _urlsplit
         _expand_roots: list[str] = []
+        _seed_host = None
+        _seed_scheme = None
         if seed_url:
             try:
-                from urllib.parse import urlsplit as _urlsplit
                 _sp = _urlsplit(str(seed_url).strip())
+                _seed_host, _seed_scheme = _sp.hostname, _sp.scheme
                 if _sp.scheme in ("http", "https") and _sp.netloc:
                     _expand_roots.append(f"{_sp.scheme}://{_sp.netloc}/")
             except Exception:
                 pass
         for _pid, _root_url in promoted:
-            if _root_url not in _expand_roots:
-                _expand_roots.append(_root_url)
+            if _root_url in _expand_roots:
+                continue
+            # Skip the host-entity MIS-PROMOTION of the seed host itself: intel/promote defaults a bare
+            # host to https://<host>/ (443); when the seed is an http origin on the SAME host, that :443
+            # root is just a dead-port duplicate of the real seed origin already queued above (red-pen
+            # LOW: harmless read-only gated fetch, but pointless). A promoted root for a DIFFERENT host,
+            # or a genuinely non-default real port, is still expanded.
+            try:
+                _rp = _urlsplit(_root_url)
+                if (_seed_host and _rp.hostname == _seed_host and _seed_scheme == "http"
+                        and _rp.scheme == "https" and _rp.port in (None, 443)):
+                    continue
+            except Exception:
+                pass
+            _expand_roots.append(_root_url)
         if enable_crawl_expand and _expand_roots and probe_posture != "discover-queue":
             try:
                 from .intel.expand import expand_endpoint

@@ -851,6 +851,47 @@ def test_crawl_expand_seeds_the_real_seed_origin_not_the_promoted_https_root(
     assert out2.endpoints_expanded == 0
 
 
+def test_crawl_expand_skips_the_mis_promoted_default_443_root_of_the_http_seed(
+    isolated_engagement, httpserver: HTTPServer,
+):
+    """#799 red-pen LOW: intel/promote defaults a bare HOST to ``https://<host>/`` (443). When the seed
+    is an http origin on the SAME host, that :443 root is a dead-port duplicate of the real seed origin
+    already queued first — crawl-expand must SKIP it, not waste a fetch on the wrong (closed) port. The
+    real seed origin is still crawled; a promoted root for a different host / real non-default port would
+    still be expanded (unchanged)."""
+    port = httpserver.port
+    isolated_engagement("disco", "127.0.0.1")
+    httpserver.expect_request("/").respond_with_handler(_root_links_to_search)
+    httpserver.expect_request("/search").respond_with_handler(_reflect)
+
+    fetched: list[str] = []
+    _base = _loopback_send()
+
+    def _recording(req):
+        fetched.append(req.url)
+        return _base(req)
+
+    w = WorldModel()
+    w.add_node(Node(id="attacker:self", kind=NodeKind.PRINCIPAL, attrs={"role": "attacker"},
+                    provenance="obs-1", confidence=1.0, first_seen=0, last_seen=0))
+    # a bare in-scope HOST world node → promote_to_endpoints mints https://127.0.0.1/ (443): the mis-promotion.
+    w.add_node(Node(id="127.0.0.1", kind=NodeKind.HOST, attrs={"host": "127.0.0.1"},
+                    provenance="recon-1", confidence=1.0, first_seen=0, last_seen=0))
+
+    seed = f"http://127.0.0.1:{port}/"
+    out = run_autonomous_cycle(
+        _result(w, []), slug="disco", enable_discover=True, enable_crawl_expand=True,
+        discover_send=_recording, prompt_callback=_deny, seed_url=seed)
+
+    assert out.endpoints_promoted >= 1, "the in-scope HOST was not promoted to an https://<host>/ root"
+    # the REAL seed origin's param surface WAS discovered ...
+    assert world_has_expanded(out, f"http://127.0.0.1:{port}/search?q=hello")
+    # ... and the mis-promoted https://127.0.0.1/ (:443) root of the SAME http-seed host was NEVER fetched.
+    assert not any(u.startswith("https://") or ":443/" in u or u.rstrip("/") == "https://127.0.0.1"
+                   for u in fetched), \
+        f"the mis-promoted :443 root of the http seed host was crawled (should be skipped): {fetched}"
+
+
 def world_has_expanded(out, url: str) -> bool:
     """The expanded ENDPOINT node is minted onto the run world-model under a stable id."""
     return out.engagement.world.has_node(f"endpoint:expand:{url}")
