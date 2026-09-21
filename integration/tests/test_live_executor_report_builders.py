@@ -301,6 +301,23 @@ def test_zaproxy_argv_is_exactly_the_bounded_json_report_invocation():
         "selenium.firefoxBinary", "selenium.chromeBinary"}
 
 
+def test_nuclei_argv_is_exactly_the_bounded_no_egress_invocation():
+    # nuclei is a stdout-JSONL builder, not a report-file one, so it lives beside the three above rather
+    # than among them — but it has the SAME pair of invisible default egresses, and pinning its exact
+    # argv is what makes a future drop of either suppression fail loudly here. `-disable-update-check`
+    # covers the startup phone-home to ProjectDiscovery's update host; `-no-interactsh` covers the
+    # OAST/interactsh registration to a public interaction server (oast.pro) that the update check does
+    # NOT cover — the one the nightly full-table egress guard logs as BLOCKED. Both are the tool's own
+    # defaults, invisible until pinned. The target is rebuilt from the pin, never from caller text.
+    build = ex._BUILDERS["nuclei"]({}, PINNED)
+    assert build.argv == [
+        "nuclei", "-target", URL, "-jsonl", "-no-color",
+        "-disable-update-check",                  # no startup version fetch off the pin
+        "-no-interactsh",                         # no OAST/interactsh registration to oast.pro
+    ]
+    assert build.target == URL
+
+
 # ==================================================================================================
 # 1b. ZAP's plan — the tests that fail if the scan goes back to attacking one node
 # ==================================================================================================

@@ -474,7 +474,12 @@ class NucleiWebSensor:
         # into the engine and was missing it, so a template scan here contacted an outside host on
         # every run — a breach of the no-egress limit that no gate would catch, because it is the
         # tool's own default rather than anything the argv asked for.
-        argv = [binary, "-u", target, "-jsonl", "-silent", "-disable-update-check", *self._extra_args]
+        # `-no-interactsh`: the same latent egress, one layer down — nuclei's OAST/interactsh templates
+        # register with a public interaction server (oast.pro) by default to catch blind/out-of-band
+        # findings, opening an outbound connection `-disable-update-check` does not cover. Suppressed
+        # for the same no-egress reason, on this route as on the executor builder.
+        argv = [binary, "-u", target, "-jsonl", "-silent", "-disable-update-check", "-no-interactsh",
+                *self._extra_args]
         try:
             proc = subprocess.run(  # noqa: S603 - fixed argv, no shell; target is -u's value, guarded above
                 argv, capture_output=True, text=True, timeout=self._timeout_s, check=False)
@@ -529,7 +534,10 @@ class NucleiTemplateSensor:
         # `-disable-update-check`: same no-egress reason as the sensor above — nuclei's default
         # startup update check contacts an outside host, and the template runner is a third route
         # into the engine that must suppress it too.
-        argv = [binary, "-u", target, "-t", str(tpl), "-jsonl", "-silent", "-disable-update-check"]
+        # `-no-interactsh`: and the same OAST/interactsh phone-home to oast.pro that the startup check
+        # does not cover — suppressed here too, so no route into the engine egresses by default.
+        argv = [binary, "-u", target, "-t", str(tpl), "-jsonl", "-silent", "-disable-update-check",
+                "-no-interactsh"]
         try:
             proc = subprocess.run(  # noqa: S603 - fixed argv, no shell; target/templates are flag values, guarded
                 argv, capture_output=True, text=True, timeout=self._timeout_s, check=False)

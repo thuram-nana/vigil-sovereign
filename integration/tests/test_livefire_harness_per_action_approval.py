@@ -183,3 +183,114 @@ def test_reverting_to_the_blanket_wrapper_denies_every_hydra_leg_like_ci(gov):
     for tool, args in _HYDRA_LEGS:
         gate = harness.approve_action_gate(gov.base_gate, tool, args)
         assert _decide(gate, tool, args).allowed is True
+
+
+# ===================================================================================================
+# CAUSE A — a TRANSIENT reset on the clean-control probe self-heals via a bounded re-run, and NEVER
+# weakens the fail-closed control. The nightly full-table job's httpx control probe aims at a closed
+# loopback port; the kernel usually returns ECONNREFUSED (httpx records `{"failed":true}`, which
+# `control_liveness` reads as evidence) but SOMETIMES a RST (Errno 104), on which httpx writes nothing
+# and the row fails closed at tool_drivers_livefire.py:2218-2220. A transient reset should re-run the
+# REAL probe (bounded); a probe that resets on EVERY attempt must still FAIL closed.
+# ===================================================================================================
+
+
+class _FakeReader:
+    """A stand-in for an engine reader: it mints one item per non-empty line that is neither a reset
+    nor a `failed` record, so the vuln leg parses to a signal and every control leg parses to nothing."""
+    symbol = "fake-reader"
+
+    def parse(self, stdout: str) -> list:
+        return [ln for ln in stdout.splitlines()
+                if ln.strip() and "failed" not in ln and "reset" not in ln]
+
+
+def _control_reset_proof():
+    """A minimal one-row proof whose control_liveness matches the real httpx row: the closed-port probe
+    is 'live' iff it recorded a `{"failed":true}` refusal. A reset writes no such record."""
+    return harness.ToolProof(
+        tool="httpx",
+        phase="informational",
+        weakness="a fake weakness, reported iff the reader mints anything",
+        identify=(("-version",), "irrelevant — identify is monkeypatched"),
+        vuln=lambda e: {"target": "http://loopback/"},      # no port -> the target-gone probe is skipped
+        clean=lambda e: {"target": "http://loopback/"},
+        vuln_label=lambda e: "VULN",
+        clean_label=lambda e: "CLEAN",
+        reader=_FakeReader(),
+        signal=lambda items, raw: bool(items),
+        control_liveness=lambda raw: '"failed":true' in raw.replace(" ", ""),
+        liveness_desc="httpx recorded a failed probe for the closed port, so it ran and reached it",
+    )
+
+
+def _install_fake_run_leg(monkeypatch, *, clean_raws):
+    """Replace ``run_leg`` so the VULN leg always returns a parseable hit and the CLEAN leg returns
+    ``clean_raws[attempt]`` (the last value repeats if attempts exceed the list). Records call counts so
+    a test can prove the vuln leg is NEVER re-run by the control-retry path. Also makes the binary
+    'present' and the backoff instant, so the retry runs without spawning anything or blocking."""
+    calls = {"vuln": 0, "clean": 0}
+
+    def fake_run_leg(proof, tool_args, label, gov, seq):
+        leg = harness.Leg(label=label)
+        leg.ran = True
+        leg.exit_code = 0
+        if label == "VULN":
+            calls["vuln"] += 1
+            leg.stdout = leg.raw = "hit"                     # parses to one item -> signal True
+        else:
+            idx = min(calls["clean"], len(clean_raws) - 1)
+            calls["clean"] += 1
+            leg.stdout = leg.raw = clean_raws[idx]
+        return leg
+
+    monkeypatch.setattr(harness, "run_leg", fake_run_leg)
+    monkeypatch.setattr(harness, "identify_binary", lambda tool, spec: (True, "fake binary"))
+    monkeypatch.setattr(harness, "_CONTROL_RESET_BACKOFF_S", 0.0)
+    return calls
+
+
+def test_a_transient_control_reset_self_heals_and_the_row_passes(monkeypatch):
+    # The control probe resets on its FIRST attempt (no `failed:true` record -> liveness unmet), then a
+    # re-run of the REAL probe gets the normal refusal. The row PASSES, and the vuln leg is never re-run.
+    calls = _install_fake_run_leg(
+        monkeypatch, clean_raws=["connection reset by peer", '{"failed":true}'])
+    row = harness.run_row(_control_reset_proof(), object(), None, seq=0)
+
+    assert row.verdict == "PASS", row.failures
+    assert calls["clean"] == 2, "the transient reset was not re-run exactly once"
+    assert calls["vuln"] == 1, "the control-retry path must NEVER re-run the vuln leg"
+    # The retry kept the REAL healed leg — it did not fabricate a record or force liveness.
+    assert row.clean.raw == '{"failed":true}'
+    assert row.clean.signal is False
+
+
+def test_a_control_that_resets_on_every_attempt_still_fails_closed(monkeypatch):
+    # The control probe resets on EVERY attempt: the transient self-heal is bounded and exhausts without
+    # ever satisfying liveness, so the row FAILS CLOSED with the exact 2219-2220 message. The retry never
+    # fabricated a record, never set a signal, never made control_liveness pass.
+    reset = "connection reset by peer (errno 104)"
+    calls = _install_fake_run_leg(monkeypatch, clean_raws=[reset])
+    row = harness.run_row(_control_reset_proof(), object(), None, seq=0)
+
+    assert row.verdict == "FAIL"
+    assert calls["clean"] == harness._CONTROL_RESET_MAX_ATTEMPTS, "the retry is not bounded"
+    assert calls["vuln"] == 1, "the control-retry path must NEVER re-run the vuln leg"
+    # The exact fail-closed control-liveness message from _judge (tool_drivers_livefire.py:2219-2220).
+    assert any("the control run cannot be read as evidence" in f
+               and "did not hold, so its silence proves nothing" in f
+               for f in row.failures), row.failures
+    # The kept leg is the REAL last probe, unchanged — not a fabricated pass.
+    assert row.clean.raw == reset
+    assert row.clean.signal is False
+
+
+def test_a_control_that_fails_liveness_for_a_NON_reset_reason_is_not_retried(monkeypatch):
+    # A control leg that is simply empty (no `failed:true`, and NOT a reset) is a real liveness failure,
+    # not a transient fault. It must FAIL closed WITHOUT any retry — the self-heal is scoped to resets.
+    calls = _install_fake_run_leg(monkeypatch, clean_raws=[""])
+    row = harness.run_row(_control_reset_proof(), object(), None, seq=0)
+
+    assert row.verdict == "FAIL"
+    assert calls["clean"] == 1, "a non-reset liveness failure must not be retried"
+    assert calls["vuln"] == 1

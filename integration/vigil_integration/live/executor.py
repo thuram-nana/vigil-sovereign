@@ -939,7 +939,15 @@ def _build_httpx(tool_args: Any, p: _Pinned) -> "_Build | str | None":
 
 def _build_nuclei(tool_args: Any, p: _Pinned) -> Optional[_Build]:
     url = _pinned_url(p)
-    argv = ["nuclei", "-target", url, "-jsonl", "-no-color", "-disable-update-check"]
+    # `-disable-update-check` suppresses nuclei's startup phone-home to ProjectDiscovery's update host.
+    # `-no-interactsh` suppresses the SECOND, subtler egress route: nuclei's OAST/interactsh templates
+    # register with a public interaction server (oast.pro) to catch blind/out-of-band findings, so a
+    # default run opens an outbound connection the charter's no-egress limit forbids. The egress guard
+    # logs that connection as BLOCKED, which fails the nightly `livefire full table` assert step — but
+    # the real defect is the connection itself, invisible because it is the tool's own default rather
+    # than anything the argv asked for (`-disable-update-check` does not cover it). Long form for
+    # readability. OAST is out of scope for an authorised, correlatable owner-test regardless.
+    argv = ["nuclei", "-target", url, "-jsonl", "-no-color", "-disable-update-check", "-no-interactsh"]
     tags = _safe_csv(_opt(tool_args, "tags"))
     if tags:
         argv += ["-tags", tags]
