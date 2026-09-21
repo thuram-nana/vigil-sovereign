@@ -43,7 +43,7 @@ classifiers = [
 # Kept byte-for-byte in sync with framework/v2/pyproject.toml.
 dependencies = [
   "pydantic>=2.10,<3",
-  "structlog>=25.0,<26",
+  "structlog>=26.1.0,<27",
   "httpx>=0.28,<1",
   "requests>=2.32,<3",
   "PyYAML>=6.0.3,<7",
