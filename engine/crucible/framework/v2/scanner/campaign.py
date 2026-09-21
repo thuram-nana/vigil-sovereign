@@ -315,6 +315,8 @@ class WebScanCampaign:
         oob_dns_collector_pubkey: str | None = None,
         oob_ttl_seconds: float | None = None,
         oob_skew_seconds: float | None = None,
+        oob_not_before: float | None = None,
+        oob_not_after: float | None = None,
         oob_collector_keypair: "object | None" = None,
         enable_browser_xss: bool = False,
         enable_spa_crawl: bool = False,
@@ -413,6 +415,11 @@ class WebScanCampaign:
         self.oob_dns_collector_pubkey = oob_dns_collector_pubkey
         self.oob_ttl_seconds = oob_ttl_seconds
         self.oob_skew_seconds = oob_skew_seconds
+        # The OWNER-SIGNED engagement window (epoch seconds) sourced from the signed authority
+        # (_engage_oob_authority). It is the anti-replay boundary a receipt-bearing OOB hit's target-observed
+        # received_at must fall inside — non-forgeable, never the producer ctx. None ⇒ advisory-TTL-only path.
+        self.oob_not_before = oob_not_before
+        self.oob_not_after = oob_not_after
         # VF-2b (Wave 1.2) — an OPTIONAL independent collector KEYPAIR (a vigil_core KeyPair) for the LOOPBACK
         # receiver, so loopback OOB confirms at the VF-2b tier end-to-end. Default None ⇒ no keypair minted ⇒
         # VF-2a token-only ⇒ the default/benchmark path is byte-identical (the make-gate invariant).
@@ -1074,7 +1081,8 @@ class WebScanCampaign:
                     waf_adaptive=self.waf_adaptive, retain_evidence=self.retain_evidence,
                     oob_collector_pubkey=self.oob_collector_pubkey,
                     oob_dns_collector_pubkey=self.oob_dns_collector_pubkey,
-                    oob_ttl_seconds=self.oob_ttl_seconds, oob_skew_seconds=self.oob_skew_seconds)
+                    oob_ttl_seconds=self.oob_ttl_seconds, oob_skew_seconds=self.oob_skew_seconds,
+                    oob_not_before=self.oob_not_before, oob_not_after=self.oob_not_after)
                 selector = select_checks if self.targeted else None
                 for req in all_requests:
                     # Request-level checks are host/endpoint-level, so run them once

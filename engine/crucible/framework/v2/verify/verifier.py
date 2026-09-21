@@ -664,7 +664,9 @@ class OracleVerifier:
                  oob_collector_pubkey: "str | None" = None, *,
                  oob_dns_collector_pubkey: "str | None" = None,
                  oob_ttl_seconds: "float | None" = None,
-                 oob_skew_seconds: "float | None" = None) -> None:
+                 oob_skew_seconds: "float | None" = None,
+                 oob_not_before: "float | None" = None,
+                 oob_not_after: "float | None" = None) -> None:
         self.high_confidence = high_confidence
         # VF-2b OUT-OF-BAND pins: the collector public keys the OOB oracle checks each receipt against. These
         # are AUTHORITIES the caller supplies at construction — for OFFLINE re-verify, sourced from the SIGNED
@@ -681,6 +683,14 @@ class OracleVerifier:
         # producer skew cannot re-confirm a stale receipt. None ⇒ the oracle's fixed default duration/skew.
         self.oob_ttl_seconds = oob_ttl_seconds
         self.oob_skew_seconds = oob_skew_seconds
+        # The OWNER-SIGNED ENGAGEMENT WINDOW (epoch seconds) that is the ANTI-REPLAY BOUNDARY for a
+        # receipt-bearing OOB hit. Sourced OUT-OF-BAND from the SAME signed EngagementAuthority as the pin +
+        # TTL policy (via verifier_from_authority / the engage path), NEVER from the producer ctx. A receipt
+        # whose TARGET-OBSERVED received_at falls outside [not_before - skew, not_after + skew] is EXPIRED /
+        # REPLAY — this closes the year-1970 / prior-engagement slide a producer-controlled issued_at allowed.
+        # None ⇒ no signed window threaded (direct/self-check call): only the advisory TTL bounds the hit.
+        self.oob_not_before = oob_not_before
+        self.oob_not_after = oob_not_after
 
     def oracles_for(self, bug_class: str) -> tuple[OracleKind, ...]:
         """The oracle kinds that can prove `bug_class`. Unknown classes fall
@@ -842,6 +852,9 @@ class OracleVerifier:
                     # TTL DURATION + skew for a receipt-bearing hit come from the OUT-OF-BAND authority, NOT
                     # the producer ctx — a widened ctx expires_at/skew is ignored on the VF-2b path.
                     authority_ttl=self.oob_ttl_seconds, authority_skew=self.oob_skew_seconds,
+                    # The OWNER-SIGNED ENGAGEMENT WINDOW is the anti-replay boundary for a receipt-bearing
+                    # hit — non-forgeable, from the signed authority, never the producer ctx.
+                    authority_not_before=self.oob_not_before, authority_not_after=self.oob_not_after,
                 )
             return None
         if kind is OracleKind.SERVICE_REACHABILITY:

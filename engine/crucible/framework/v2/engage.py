@@ -395,6 +395,17 @@ def _engage_oob_authority(slug: str) -> dict:
         # The owner-signed replay policy only matters once a receipt is being verified.
         kwargs["oob_ttl_seconds"] = float(authority.oob_ttl_seconds)
         kwargs["oob_skew_seconds"] = float(authority.oob_skew_seconds)
+        # The OWNER-SIGNED ENGAGEMENT WINDOW is the anti-replay boundary for a receipt-bearing OOB hit: a
+        # target-observed received_at outside [not_before, not_after] (± skew) is EXPIRED/REPLAY. Sourced from
+        # the SAME signed authority as the pin — non-forgeable, so a producer cannot slide issued_at to
+        # re-center a stale/prior-engagement receipt onto it.
+        from .verify.reverify import _authority_epoch
+        nb = _authority_epoch(getattr(authority, "not_before", None))
+        na = _authority_epoch(getattr(authority, "not_after", None))
+        if nb is not None:
+            kwargs["oob_not_before"] = nb
+        if na is not None:
+            kwargs["oob_not_after"] = na
     return kwargs
 
 

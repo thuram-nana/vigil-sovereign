@@ -52,7 +52,9 @@ def _authority(*, http_pin: str = "", dns_pin: str = "", ttl: float = 300.0, ske
     from datetime import datetime, timedelta, timezone
 
     from vigil_core.authority import EngagementAuthority, TargetEnvironment
-    now = datetime(2026, 6, 1, tzinfo=timezone.utc)
+    # Bracket the LIVE receipt (the DNS collector stamps received_at = time.time()) so the owner-signed
+    # engagement window — now the receipt-bearing anti-replay boundary — contains a genuine, current hit.
+    now = datetime.now(timezone.utc)
     return EngagementAuthority(
         engagement_slug="eng", environment=TargetEnvironment.TWIN, scope=["*.example.com"],
         not_before=now - timedelta(hours=1), not_after=now + timedelta(hours=1),

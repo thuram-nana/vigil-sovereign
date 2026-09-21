@@ -184,12 +184,27 @@ def _reverify_context_impl(
     )
 
 
+def _authority_epoch(dt: Any) -> "float | None":
+    """An authority datetime bound (``not_before`` / ``not_after``) as epoch seconds, normalising a
+    naive datetime to UTC so it lines up with a receipt's ``time.time()`` ``received_at``. None passes
+    through (no signed bound for that edge)."""
+    if dt is None:
+        return None
+    if getattr(dt, "tzinfo", None) is None:
+        from datetime import timezone
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.timestamp()
+
+
 def verifier_from_authority(authority: Any) -> OracleVerifier:
-    """Build an :class:`OracleVerifier` whose OUT-OF-BAND OOB material (collector pins + the TTL/skew replay
-    policy) is taken from a verified :class:`EngagementAuthority`. This is what threads the receipt-verification
-    pin into OFFLINE re-verify: the pins live in the SIGNED authority (persisted, available offline), NEVER in
-    the producer-controlled finding context. Empty pin strings map to None (no pin for that channel), so a
-    receipt-bearing finding whose channel has no authority pin fails CLOSED in the oracle."""
+    """Build an :class:`OracleVerifier` whose OUT-OF-BAND OOB material (collector pins, the TTL/skew replay
+    policy, and the OWNER-SIGNED ENGAGEMENT WINDOW) is taken from a verified :class:`EngagementAuthority`.
+    This is what threads the receipt-verification pin AND the anti-replay boundary into OFFLINE re-verify:
+    they live in the SIGNED authority (persisted, available offline), NEVER in the producer-controlled
+    finding context. Empty pin strings map to None (no pin for that channel), so a receipt-bearing finding
+    whose channel has no authority pin fails CLOSED in the oracle. ``not_before`` / ``not_after`` become the
+    receipt-bearing hit's anti-replay window: a target-observed ``received_at`` outside it is EXPIRED /
+    REPLAY — the non-forgeable bound a producer cannot slide."""
     http_pin = (getattr(authority, "oob_collector_pubkey", "") or "").strip() or None
     dns_pin = (getattr(authority, "oob_dns_collector_pubkey", "") or "").strip() or None
     ttl = getattr(authority, "oob_ttl_seconds", None)
@@ -199,6 +214,8 @@ def verifier_from_authority(authority: Any) -> OracleVerifier:
         oob_dns_collector_pubkey=dns_pin,
         oob_ttl_seconds=float(ttl) if ttl is not None else None,
         oob_skew_seconds=float(skew) if skew is not None else None,
+        oob_not_before=_authority_epoch(getattr(authority, "not_before", None)),
+        oob_not_after=_authority_epoch(getattr(authority, "not_after", None)),
     )
 
 

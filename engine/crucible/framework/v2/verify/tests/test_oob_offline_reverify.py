@@ -130,9 +130,20 @@ def test_e_producer_widened_window_is_ignored_offline() -> None:
                  expires_at=stale + 1.0, skew=1_000_000.0)
     r = reverify_finding(f, verifier=verifier_from_authority(_authority(dns_pin=kp.public_key_b64)))
     assert not r.reproduced, "a producer-widened window must not re-confirm a stale receipt"
-    # A huge AUTHORITY ttl WOULD admit it (owner's signed choice) — proving the duration is authority-sourced.
+    # A huge AUTHORITY ttl cannot admit it either: the OWNER-SIGNED ENGAGEMENT WINDOW is the outer anti-replay
+    # boundary, and 100_000s past _NOW is outside [not_before, not_after]. (The old behaviour let a huge TTL
+    # slide it in; the fix bounds a receipt-bearing hit to the signed window regardless of TTL.)
     r2 = reverify_finding(f, verifier=verifier_from_authority(_authority(dns_pin=kp.public_key_b64, ttl=1_000_000.0)))
-    assert r2.reproduced
+    assert not r2.reproduced, "the signed engagement window bounds even a huge authority TTL"
+    # The authority TTL IS still the duration SOURCE within the signed window: an in-window receipt a DEFAULT
+    # 300s TTL would reject is admitted once the OWNER widens the signed TTL — proving the duration is
+    # authority-sourced (never producer-sourced), while never exceeding the signed engagement window.
+    inwin = _NOW.timestamp() + 1800.0                       # 30 min: inside the ±1h engagement window
+    g = _finding(kp, method="DNS", received_at=inwin, issued_at=_NOW.timestamp())
+    assert not reverify_finding(
+        g, verifier=verifier_from_authority(_authority(dns_pin=kp.public_key_b64))).reproduced
+    assert reverify_finding(
+        g, verifier=verifier_from_authority(_authority(dns_pin=kp.public_key_b64, ttl=7200.0))).reproduced
 
 
 # ------------------------------------------------------------------ (f) window dropped ⇒ refused

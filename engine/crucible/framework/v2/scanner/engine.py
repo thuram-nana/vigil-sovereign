@@ -201,6 +201,8 @@ class AuditEngine:
         oob_dns_collector_pubkey: "str | None" = None,
         oob_ttl_seconds: "float | None" = None,
         oob_skew_seconds: "float | None" = None,
+        oob_not_before: "float | None" = None,
+        oob_not_after: "float | None" = None,
     ) -> None:
         self._send = send
         # VF-2b OUT-OF-BAND pins: the OOB collector public keys are AUTHORITIES. For a real engagement they are
@@ -221,7 +223,11 @@ class AuditEngine:
                 _http_pin = _http_pin or _self_key
         self.verifier = verifier or OracleVerifier(
             oob_collector_pubkey=_http_pin, oob_dns_collector_pubkey=_dns_pin,
-            oob_ttl_seconds=oob_ttl_seconds, oob_skew_seconds=oob_skew_seconds)
+            oob_ttl_seconds=oob_ttl_seconds, oob_skew_seconds=oob_skew_seconds,
+            # The OWNER-SIGNED engagement window is the anti-replay boundary for a receipt-bearing OOB hit —
+            # threaded here from the signed authority (see WebScanCampaign / _engage_oob_authority), never the
+            # producer ctx. None ⇒ VF-2a token-only / advisory-TTL path unchanged.
+            oob_not_before=oob_not_before, oob_not_after=oob_not_after)
         self.max_requests = max_requests
         # OPT-IN re-executable-tier evidence retention (Proof-of-Posture). Default OFF: no probe carries
         # `evidence`, so every coverage/posture certificate is byte-identical to before (the make-gate
