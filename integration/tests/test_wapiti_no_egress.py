@@ -114,6 +114,13 @@ def test_the_nuclei_builder_suppresses_its_startup_update_check():
     """nuclei phones ProjectDiscovery's update host on startup by default. The builder already passes
     `-disable-update-check`, but nothing pinned it — so it could be dropped and the charter's
     no-egress limit silently re-opened, invisibly, because it is the tool's own default rather than
-    anything the argv asked for. (The sensor's two routes are pinned alongside their own tests.)"""
+    anything the argv asked for. (The sensor's two routes are pinned alongside their own tests.)
+
+    `-no-interactsh` is pinned for the SAME invisible-default-egress reason, one layer down: nuclei's
+    OAST/interactsh templates register with a public interaction server (oast.pro) by default to catch
+    blind/out-of-band findings, opening an outbound connection `-disable-update-check` does not cover.
+    In the nightly full-table job the egress guard logs that connection as BLOCKED and the assert step
+    fails on it — but the defect is the connection itself, and dropping the flag would re-open it."""
     argv = ex._BUILDERS["nuclei"]({}, PINNED).argv
     assert "-disable-update-check" in argv, "nuclei builder would contact an outside host on every run"
+    assert "-no-interactsh" in argv, "nuclei builder would register with oast.pro (OAST) on every run"

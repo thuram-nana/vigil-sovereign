@@ -2052,6 +2052,37 @@ def check_leg_for_leaks(proof: ToolProof, leg: Leg, env: Env) -> None:
                        for n in needles if n in observations or n in leg.record_json)
 
 
+# A CLEAN-CONTROL leg whose liveness cannot be read because the probe was RESET rather than refused is
+# a transient environment fault, not evidence of anything about the driver. The httpx control probe
+# aims at a deliberately-closed loopback port and normally gets ECONNREFUSED, which httpx records as a
+# `{"failed":true}` JSONL line that `control_liveness` reads as "the tool reached its conclusion". But
+# the kernel sometimes answers a connect to a closed port with a RST (ECONNRESET / Errno 104) instead
+# of the refusal, and on that path httpx writes ZERO records — so `control_liveness` returns False and
+# the row fails closed at the `_judge` control-liveness assertion, naming a defect that is not there.
+#
+# The signatures below are the ONLY thing that distinguishes a transient reset (self-heal by re-running
+# the real probe) from a genuine "the control produced no readable evidence" (must still fail closed).
+# Modelled on ``llm_intake.is_transient_llm_error`` — which matches "Connection reset by peer" — but a
+# separate, narrow predicate: this is a subprocess-runner condition on a control leg, not an LLM error,
+# so it does not reuse the LLM retry machinery. Case-insensitive substring match on the leg's raw.
+_CONTROL_TRANSIENT_RESET_SIGNS = ("reset by peer", "errno 104", "connection reset")
+
+# A bounded self-heal for that transient reset: re-run the REAL probe up to this many total control
+# attempts, with this backoff between them. Both are module-level so a test can drive the retry path
+# without blocking the suite (the test sets the backoff to ~0). The retry NEVER fabricates a leg,
+# NEVER sets a signal, NEVER touches `control_liveness`; a control that resets on EVERY attempt — or
+# fails liveness for any NON-reset reason — is kept as-is and still FAILS closed in `_judge`.
+_CONTROL_RESET_MAX_ATTEMPTS = 3
+_CONTROL_RESET_BACKOFF_S = 0.5
+
+
+def _is_transient_control_reset(raw: str) -> bool:
+    """True iff ``raw`` looks like a transient connection RESET on the control probe (worth one bounded
+    re-run), rather than a control that simply produced no readable liveness evidence."""
+    low = (raw or "").lower()
+    return any(sign in low for sign in _CONTROL_TRANSIENT_RESET_SIGNS)
+
+
 def run_row(proof: ToolProof, env: Env, gov: Governance, seq: int) -> Row:
     row = Row(proof=proof)
     say(f"{proof.name} — {proof.weakness}")
@@ -2079,6 +2110,26 @@ def run_row(proof: ToolProof, env: Env, gov: Governance, seq: int) -> Row:
         armed = proof.arm(env, which) if proof.arm else None
         leg = run_leg(proof, tool_args, label_fn(env), gov, seq)
         seq += 1
+        # SELF-HEAL A TRANSIENT CONTROL RESET — and ONLY that. The clean-control probe aims at a
+        # deliberately-closed loopback port; the kernel usually answers with ECONNREFUSED (which the
+        # tool records as readable liveness evidence) but sometimes with a RST (Errno 104), on which
+        # the tool writes nothing and `control_liveness` cannot be satisfied. That is a transient
+        # environment fault, not a driver defect, so the REAL probe is re-run, bounded. This never
+        # weakens fail-closed: it re-attempts only the "clean" leg, only while liveness is unmet AND
+        # the raw carries a transient-reset signature, keeps the LAST leg unchanged, and NEVER
+        # fabricates raw, sets a signal, or touches `control_liveness` — so a control that resets on
+        # every attempt, or fails liveness for any non-reset reason, is left to FAIL in `_judge`.
+        if which == "clean":
+            attempts = 1
+            while (attempts < _CONTROL_RESET_MAX_ATTEMPTS
+                   and not proof.control_liveness(leg.raw)
+                   and _is_transient_control_reset(leg.raw)):
+                info(f"   {YELLOW}the control probe was reset (transient), not refused — re-running "
+                     f"it (attempt {attempts + 1}/{_CONTROL_RESET_MAX_ATTEMPTS}){OFF}")
+                time.sleep(_CONTROL_RESET_BACKOFF_S)
+                leg = run_leg(proof, tool_args, label_fn(env), gov, seq)
+                seq += 1
+                attempts += 1
         if proof.witness:
             try:
                 leg.witness_ok, leg.witness_detail = proof.witness(env, which, armed)

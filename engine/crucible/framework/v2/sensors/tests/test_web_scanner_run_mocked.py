@@ -99,6 +99,10 @@ def test_nuclei_run_packages_jsonl_and_builds_the_fixed_argv(monkeypatch: pytest
     # host on every run — a no-egress breach with no gate to catch it, because it is the tool's own
     # default rather than anything the argv asked for. Pinned so a future edit cannot drop it silently.
     assert "-disable-update-check" in argv, "nuclei web sensor egresses a version check on every run"
+    # And the second, subtler egress on the same route: nuclei's OAST/interactsh templates register
+    # with a public interaction server (oast.pro) by default, which `-disable-update-check` does not
+    # cover. Pinned so a future edit cannot re-open the no-egress breach it left before.
+    assert "-no-interactsh" in argv, "nuclei web sensor egresses an OAST registration on every run"
 
 
 def test_nuclei_run_result_flows_through_normalize_into_leads(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -173,6 +177,8 @@ def test_nuclei_template_run_passes_templates_and_normalizes(
     assert "-t" in argv and argv[argv.index("-t") + 1] == str(templates)   # corpus path as -t's value
     # The third nuclei route into the engine — same startup update check, same no-egress reason.
     assert "-disable-update-check" in argv, "nuclei template runner egresses a version check on every run"
+    # And the same OAST/interactsh registration to oast.pro that the update check does not cover.
+    assert "-no-interactsh" in argv, "nuclei template runner egresses an OAST registration on every run"
     world = WorldModel()
     IntelIngest(world, engagement_slug="alpha").ingest(sensor.normalize(res, ctx, seq=1), seq=1)
     assert world.has_node("endpoint:http://127.0.0.1:9/reflect?q=payload")
