@@ -31,6 +31,52 @@ from ..verify.adapter import FindingContext
 
 _BROWSERS = ("chromium", "chromium-browser", "google-chrome-stable", "google-chrome", "chrome")
 
+# ---------------------------------------------------------------------------
+# One shared headless-launch flag set for EVERY launcher in the scanner.
+#
+# Two jobs, both belonging to every launcher:
+#
+#   1. Headless / sandbox-tolerant operation (`--headless=new`, `--no-sandbox`,
+#      `--disable-gpu`, `--disable-dev-shm-usage`, `--disable-extensions`,
+#      `--no-first-run`).
+#
+#   2. NO phone-home / network discovery. A security tool's browser must not
+#      beacon while a scan runs: the egress guard would flag it, exactly the
+#      doctrine behind the nuclei `-no-interactsh` fix. At startup Chromium reaches
+#      the network for GCM registration, DIAL/MediaRouter device discovery,
+#      component/sync/domain-reliability beacons and safe-browsing lookups; those
+#      are disabled here by flag and by `--disable-features`. On Chromium 150
+#      `--disable-background-networking` ALONE is not sufficient, so the
+#      DIAL/MediaRouter discovery (`MediaRouter,DialMediaRouteProvider`) and the
+#      rest are disabled explicitly.
+#
+# Defined ONCE and imported by scanner.cdp (and used by render_dom below) so the
+# CDP driver and the --dump-dom render carry the IDENTICAL set — the "a class-bug
+# recurs at each unguarded launch site → one shared helper" lesson. None of these
+# flags touch page JS execution, the DOM, or CDP bindings.
+#
+# Launch-site-specific flags are NOT here: `--dump-dom`/`--virtual-time-budget`
+# (render_dom) and `--remote-debugging-port=0` (the CDP driver) are added by each
+# site, and `--user-data-dir` is per-invocation.
+OFFLINE_CHROME_FLAGS: tuple[str, ...] = (
+    "--headless=new",                 # future-proof headless (NOT the deprecated --headless=old)
+    "--no-sandbox",
+    "--disable-gpu",
+    "--disable-dev-shm-usage",
+    "--disable-extensions",
+    "--no-first-run",
+    # --- no phone-home / no network discovery ---
+    "--disable-background-networking",
+    "--disable-features=Translate,OptimizationHints,MediaRouter,DialMediaRouteProvider",
+    "--disable-component-update",
+    "--disable-sync",
+    "--no-pings",
+    "--no-default-browser-check",
+    "--disable-domain-reliability",
+    "--disable-default-apps",
+    "--disable-client-side-phishing-detection",
+)
+
 
 def find_browser() -> str | None:
     """Path to an INSTALLED headless Chromium/Chrome, or None. Installed is not the same as usable — see
@@ -80,13 +126,20 @@ def render_dom(
     # rmtree used to escape as OSError("Directory not empty") — a render helper must never raise at teardown.
     with tempfile.TemporaryDirectory(prefix="crucible-hb-", ignore_cleanup_errors=True) as profile:
         cmd = [
-            exe, "--headless=new", "--dump-dom",
-            "--no-sandbox", "--disable-gpu", "--disable-dev-shm-usage",
-            "--no-first-run", "--no-default-browser-check", "--disable-extensions",
+            exe, *OFFLINE_CHROME_FLAGS, "--dump-dom",
             f"--user-data-dir={profile}",
-            f"--virtual-time-budget={int(virtual_time_ms)}",
-            url,
         ]
+        # `--virtual-time-budget=N` runs scripts/timers for N virtual ms before the
+        # dump. A budget of 0 is degenerate: on Chromium 150 the DOM dump never
+        # fires (the smoke render in browser_usable(), which passes 0, then hangs
+        # until the subprocess timeout — the reason browser_usable() returned False
+        # on a host with a working browser). Omit the flag for a non-positive budget
+        # so those callers get a plain load-then-dump; real callers pass a positive
+        # budget and keep virtual-time behaviour unchanged.
+        vtb = int(virtual_time_ms)
+        if vtb > 0:
+            cmd.append(f"--virtual-time-budget={vtb}")
+        cmd.append(url)
         try:
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)  # noqa: S603 (argv, no shell)
         except (subprocess.TimeoutExpired, OSError):
