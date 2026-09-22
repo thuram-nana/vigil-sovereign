@@ -38,6 +38,7 @@ from framework.v2.verify.models import OracleKind
 # specific enough that its appearance in the attacker's response is unambiguous cross-tenant leakage.
 _VICTIM_SECRET = "SECRET-BOB-INVOICE-#2-total=$9001-acct=bob@example.test"
 _VICTIM_REF = "2"
+_ATTACKER_OWN_REF = "1"   # the attacker's OWN object — the mandatory negative control
 _REF_PARAM = "id"
 
 
@@ -108,7 +109,7 @@ def _run_cross(bug_class: str, vulnerable: bool):
     cfg = AccessControlConfig(
         victim_send=victim_send,
         cross_specs=(CrossAccessSpec(bug_class=bug_class, ref_param=_REF_PARAM, victim_ref=_VICTIM_REF,
-                                     victim_discriminator=_VICTIM_SECRET),),
+                                     victim_discriminator=_VICTIM_SECRET, control_ref=_ATTACKER_OWN_REF),),
     )
     (check,) = build_access_control_checks(cfg, enabled=True)
     template, point = _obj_template()
@@ -195,6 +196,25 @@ def test_mass_assignment_only_runs_on_its_field_point() -> None:
     assert ma.probe(template, name_point, mutate_send) is None   # not the role point -> skipped
 
 
+def test_mass_assignment_write_echo_readback_does_not_confirm() -> None:
+    # Soundness: the readback that proves persistence must be an AUTHORITATIVE-OWNER *view* (a safe GET),
+    # never the WRITE's own echo. A readback_request configured with a mutating method (a write that merely
+    # echoes the injected field back) cannot soundly prove persistence -> probe returns None, nothing mints.
+    mutate_send, read_send = _make_mass_assign_target(vulnerable=True)
+    ma = MassAssignmentCheck(
+        id="ac-mass-assignment", field="role", privileged_value="admin",
+        readback_send=read_send,
+        # a POST 'readback' would be the write echo, not the owner's persisted-state view -> refused
+        readback_request=HttpRequest(method="POST", url="http://target.test/me", headers=[], body="x=1"),
+    )
+    req = HttpRequest(method="POST", url="http://target.test/me",
+                      headers=[("Content-Type", "application/x-www-form-urlencoded")],
+                      body="role=user&name=alice")
+    template = RequestTemplate(req)
+    point = next(p for p in template.insertion_points(kinds=(InsertionKind.BODY_FORM_VALUE,)) if p.name == "role")
+    assert ma.probe(template, point, mutate_send) is None   # write-echo readback -> LEAD, never a FACT
+
+
 # --- integration through the real engine ---------------------------------------------------------
 
 
@@ -203,7 +223,7 @@ def test_seeded_checks_run_through_the_audit_engine() -> None:
     cfg = AccessControlConfig(
         victim_send=victim_send,
         cross_specs=(CrossAccessSpec(bug_class="idor", ref_param=_REF_PARAM, victim_ref=_VICTIM_REF,
-                                     victim_discriminator=_VICTIM_SECRET),),
+                                     victim_discriminator=_VICTIM_SECRET, control_ref=_ATTACKER_OWN_REF),),
     )
     checks = build_access_control_checks(cfg, enabled=True)
     engine = AuditEngine(attacker_send)
@@ -243,7 +263,7 @@ def test_access_control_finding_shapes_the_certify_input() -> None:
     cfg = AccessControlConfig(
         victim_send=victim_send,
         cross_specs=(CrossAccessSpec(bug_class="idor", ref_param=_REF_PARAM, victim_ref=_VICTIM_REF,
-                                     victim_discriminator=_VICTIM_SECRET),),
+                                     victim_discriminator=_VICTIM_SECRET, control_ref=_ATTACKER_OWN_REF),),
     )
     (check,) = build_access_control_checks(cfg, enabled=True)
     template, point = _obj_template()
@@ -281,7 +301,7 @@ def test_shared_boilerplate_does_not_fire_the_discriminator_check() -> None:
     cfg = AccessControlConfig(
         victim_send=victim_send,
         cross_specs=(CrossAccessSpec(bug_class="idor", ref_param=_REF_PARAM, victim_ref=_VICTIM_REF,
-                                     victim_discriminator=_VICTIM_SECRET),),
+                                     victim_discriminator=_VICTIM_SECRET, control_ref=_ATTACKER_OWN_REF),),
     )
     (check,) = build_access_control_checks(cfg, enabled=True)
     template, point = _obj_template()
@@ -326,3 +346,67 @@ def test_control_ref_refutes_a_globally_present_marker() -> None:
     ctx = check.probe(template, point, attacker_send)
     assert ctx is not None
     assert confirm_finding({"bug_class": "idor", "title": "", "severity": "High"}, ctx) is None
+
+
+# --- MANDATORY negative control: the Wave-3.1 red-pen soundness gap (control_ref was OPTIONAL) --------
+
+
+def test_boilerplate_discriminator_in_both_bodies_with_control_does_not_fire() -> None:
+    # (a) The operator HONESTLY BUT WRONGLY supplies a footer/banner string as the "discriminator". It is
+    # present in the victim's authoritative body AND in the attacker's OWN control body (it is global
+    # boilerplate). control_ref IS supplied -> the mandatory negative control refutes it -> NO fire. This
+    # is the exact shared-boilerplate false positive that caused the prior IDOR/BOLA revert.
+    boilerplate = "(c) Acme Inc. — all rights reserved — support@acme.test"
+
+    def victim_send(req: HttpRequest) -> dict:
+        return {"status": 200, "body": f"<main>bob private stuff</main><footer>{boilerplate}</footer>"}
+
+    def attacker_send(req: HttpRequest) -> dict:
+        # both the victim's ref AND the attacker's own ref render the SAME footer boilerplate
+        who = "bob" if _requested_id(req) == _VICTIM_REF else "alice"
+        return {"status": 200, "body": f"<main>{who} own stuff</main><footer>{boilerplate}</footer>"}
+
+    cfg = AccessControlConfig(
+        victim_send=victim_send,
+        cross_specs=(CrossAccessSpec(bug_class="idor", ref_param=_REF_PARAM, victim_ref=_VICTIM_REF,
+                                     victim_discriminator=boilerplate, control_ref=_ATTACKER_OWN_REF),),
+    )
+    (check,) = build_access_control_checks(cfg, enabled=True)
+    template, point = _obj_template()
+    ctx = check.probe(template, point, attacker_send)
+    assert ctx is not None
+    assert confirm_finding({"bug_class": "idor", "title": "", "severity": "High"}, ctx) is None
+
+
+def test_control_ref_omitted_is_a_lead_never_a_fact() -> None:
+    # (b) On a GENUINELY vulnerable target (the attacker's cross-read really reaches the victim-unique
+    # discriminator), OMITTING control_ref must yield NOTHING — a LEAD, never a FACT. Without the negative
+    # control we cannot PROVE the marker is victim-unique rather than global boilerplate, so no false FACT
+    # is constructible in this (previously supported) config. probe() returns None => nothing is minted.
+    attacker_send, victim_send = _make_cross_target(vulnerable=True)
+    cfg = AccessControlConfig(
+        victim_send=victim_send,
+        cross_specs=(CrossAccessSpec(bug_class="idor", ref_param=_REF_PARAM, victim_ref=_VICTIM_REF,
+                                     victim_discriminator=_VICTIM_SECRET),),  # control_ref deliberately omitted
+    )
+    (check,) = build_access_control_checks(cfg, enabled=True)
+    template, point = _obj_template()
+    assert check.probe(template, point, attacker_send) is None    # LEAD, not a FindingContext
+
+
+def test_genuine_victim_unique_discriminator_absent_from_control_fires() -> None:
+    # (c) The honest true-positive: a genuinely victim-unique marker, present in the victim's authoritative
+    # body and reached by the attacker's cross-read, but ABSENT from the attacker's own control object ->
+    # the differential holds -> the achieved-state oracle confirms the FACT.
+    attacker_send, victim_send = _make_cross_target(vulnerable=True)
+    cfg = AccessControlConfig(
+        victim_send=victim_send,
+        cross_specs=(CrossAccessSpec(bug_class="idor", ref_param=_REF_PARAM, victim_ref=_VICTIM_REF,
+                                     victim_discriminator=_VICTIM_SECRET, control_ref=_ATTACKER_OWN_REF),),
+    )
+    (check,) = build_access_control_checks(cfg, enabled=True)
+    template, point = _obj_template()
+    ctx = check.probe(template, point, attacker_send)
+    assert ctx is not None
+    confirmed = confirm_finding({"bug_class": "idor", "title": "", "severity": "High"}, ctx)
+    assert confirmed is not None and confirmed.confirmed_by == OracleKind.ACHIEVED_STATE

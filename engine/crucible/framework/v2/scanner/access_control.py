@@ -29,7 +29,7 @@ numeric id or an admin route is a LEAD, never a fact.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Callable, Iterable
+from typing import Callable, ClassVar, Iterable
 
 from ..verify.adapter import FindingContext
 from .checks import Check, IdorCheck, Send
@@ -58,8 +58,13 @@ class MassAssignmentCheck:
     set, and it PERSISTED. A response that merely echoes the field, or an object that already carried
     the value, fails the predicate (no false positive).
 
-    ``readback_send`` + ``readback_request`` are how the object is re-fetched (typically the ground-
-    truth / owner view). Runs only on the point named ``field``; other points return None."""
+    READBACK IDENTITY (soundness): persistence is confirmed by the AUTHORITATIVE-OWNER *view* of the
+    object, NEVER by the WRITE's own response. The write response is DISCARDED; the before/after are a
+    SEPARATE ``readback_request`` issued via ``readback_send`` (the owner / ground-truth session). That
+    readback MUST be a non-mutating read (GET/HEAD) — a write cannot serve as its own persisted-state
+    proof, so a WRITE response that merely echoes the injected field can never confirm. If the configured
+    ``readback_request`` is itself a mutating method the probe returns None (a LEAD, nothing minted).
+    Runs only on the point named ``field``; other points return None."""
 
     id: str
     field: str
@@ -68,11 +73,20 @@ class MassAssignmentCheck:
     readback_request: HttpRequest
     bug_class: str = "mass_assignment"
 
+    # HTTP methods that are safe to use as a persisted-state readback (they cannot themselves mutate, so
+    # the AFTER read reflects server state, not a write-echo). Anything else is refused.
+    _READBACK_METHODS: ClassVar[frozenset[str]] = frozenset({"GET", "HEAD"})
+
     def probe(self, template: RequestTemplate, point: InsertionPoint, send: Send) -> FindingContext | None:
         if point.name != self.field:
             return None
+        # Enforce the readback identity: the AFTER read must be an authoritative-owner *view* (a safe,
+        # non-mutating request), never the write's own echo. A mutating readback cannot soundly prove
+        # persistence, so fail closed to a LEAD rather than mint off a write-echo.
+        if self.readback_request.method.strip().upper() not in self._READBACK_METHODS:
+            return None
         before = self._read()
-        send(template.render(point, self.privileged_value))   # the mass-assignment attempt
+        send(template.render(point, self.privileged_value))   # the mass-assignment attempt (response DISCARDED)
         after = self._read()
         # A distinctive marker the privileged field would produce in the persisted object.
         marker = f'"{self.field}":"{self.privileged_value}"'
@@ -114,8 +128,10 @@ class CrossAccessSpec:
     contains (an account id / private email / invoice number). It is what makes the confirmation SOUND:
     a fire requires the attacker's cross-read to reach THIS marker, never a whole-body containment that
     false-positives on shared boilerplate. Empty ⇒ the probe cannot soundly fire (a rigorous LEAD).
-    ``control_ref`` (optional) is an attacker-OWNED reference; when set, the marker must be absent from
-    the attacker's own object — the negative control that a global string is not mistaken for unique."""
+    ``control_ref`` is an attacker-OWNED reference and is MANDATORY for a FACT: the marker must be ABSENT
+    from the attacker's own object — the negative control that PROVES a global/boilerplate string is not
+    mistaken for a victim-unique one. Empty ⇒ the probe returns None (a LEAD); 'victim-unique' is enforced
+    by this control differential, never accepted as a bare operator assertion."""
 
     bug_class: str
     ref_param: str
@@ -238,15 +254,17 @@ def parse_cross_spec(raw: str) -> CrossAccessSpec | None:
     :class:`CrossAccessSpec`.
 
     The colon-delimited head is the original grammar (``bug_class:ref_param:victim_ref``); ``victim_ref``
-    may itself contain colons (a URL / UUID) — only the first two colons split. The OPTIONAL pipe-delimited
-    tail carries the victim-UNIQUE discriminator (a per-identity marker only the victim's authoritative
-    record contains) and an OPTIONAL attacker-owned ``control_ref``. ``|`` is used (not another colon) so a
-    colon-bearing ``victim_ref`` is never mistaken for the discriminator.
+    may itself contain colons (a URL / UUID) — only the first two colons split. The pipe-delimited tail
+    carries the victim-UNIQUE discriminator (a per-identity marker only the victim's authoritative record
+    contains) and the attacker-owned ``control_ref``. ``|`` is used (not another colon) so a colon-bearing
+    ``victim_ref`` is never mistaken for the discriminator.
 
-    Backward-compatible: a bare ``bug_class:ref_param:victim_ref`` parses with an empty discriminator — the
-    probe then cannot soundly fire (a rigorous LEAD), which is exactly the fail-closed behaviour that replaces
-    the reverted whole-body false positive. Returns None (caller warns) when the class is not an
-    access-control class or the head shape is wrong."""
+    A FACT requires BOTH the discriminator AND the ``control_ref`` (the mandatory negative control that
+    proves the marker is victim-unique, not shared boilerplate). Backward-compatible parsing: a bare
+    ``bug_class:ref_param:victim_ref`` (or one missing the ``control_ref``) still parses, but the probe then
+    cannot soundly fire — it is a rigorous LEAD, the fail-closed behaviour that replaces the reverted
+    whole-body false positive. Returns None (caller warns) when the class is not an access-control class or
+    the head shape is wrong."""
     head, _, tail = raw.partition("|")
     parts = head.split(":", 2)
     if len(parts) != 3:

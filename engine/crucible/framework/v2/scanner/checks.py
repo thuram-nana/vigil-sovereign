@@ -568,26 +568,32 @@ class IdorCheck:
     SOUNDNESS (this is why bola/idor were once reverted as UNSOUND): a naive
     ``contains(attacker_body, victim_body)`` over the WHOLE body FALSE-POSITIVES on
     shared boilerplate — two identities render the same shell/nav/footer, so the
-    victim's page is trivially a substring of the attacker's. The fix is a
-    victim-UNIQUE discriminator (``victim_discriminator``): a per-identity marker
-    that ONLY the victim's authoritative record contains (an account number, a
-    private email, an invoice id — the operator supplies it; there is no sound way
-    to autodiscover a per-identity secret). The oracle fires ONLY when:
+    victim's page is trivially a substring of the attacker's. Even a victim-UNIQUE
+    discriminator (``victim_discriminator``) is not enough ON ITS OWN: the operator
+    can HONESTLY BUT WRONGLY believe a footer/banner/tenant string is victim-unique
+    when it is really global boilerplate present in EVERY record — including the
+    attacker's own. That mistake reconstructs the exact reverted false positive.
+    So a FACT here requires BOTH the discriminator AND a MANDATORY negative control
+    (``control_ref``, an attacker-OWNED reference): the marker must be ABSENT from
+    the attacker's own legitimate object, which is what actually PROVES the marker
+    is victim-specific rather than a global string. The oracle fires ONLY when:
 
       * the attacker got 200, AND
       * the discriminator genuinely IS in the victim's AUTHORITATIVE body (proving
         the operator handed a real per-identity marker, not a typo), AND
       * the attacker's cross-read REACHED that same discriminator (the achieved
         unauthorized read), AND
-      * (when ``control_ref`` is supplied) the discriminator is ABSENT from the
-        attacker's OWN object — proving the marker is victim-SPECIFIC, not global
+      * the discriminator is ABSENT from the attacker's OWN object (``control_ref``)
+        — the differential that proves the marker is victim-SPECIFIC, not global
         boilerplate the operator mistook for unique.
 
-    Without a discriminator the check CANNOT fire soundly, so it returns None (the
-    class stays a rigorous LEAD, never a false CLEAN and never a false FACT). Runs
-    only on the object-reference point (``ref_param``); other points return None.
-    ``victim_send`` is a send authenticated as the victim (a second AuthSession /
-    the ceremony's second identity riding the same gated executor)."""
+    Without a discriminator OR without ``control_ref`` the check CANNOT fire
+    soundly, so it returns None (the class stays a rigorous LEAD, never a false
+    CLEAN and never a false FACT). 'Victim-unique' is thus ENFORCED by the control
+    differential, never accepted as a bare operator assertion. Runs only on the
+    object-reference point (``ref_param``); other points return None. ``victim_send``
+    is a send authenticated as the victim (a second AuthSession / the ceremony's
+    second identity riding the same gated executor)."""
 
     id: str
     ref_param: str
@@ -597,8 +603,10 @@ class IdorCheck:
     # The per-identity marker that ONLY the victim's authoritative record contains. Empty ⇒ the sound
     # check cannot fire (fail-closed to a non-firing LEAD, never the boilerplate false positive).
     victim_discriminator: str = ""
-    # OPTIONAL attacker-owned reference for the near-zero-FP negative control: the discriminator MUST be
+    # MANDATORY attacker-owned reference for the near-zero-FP negative control: the discriminator MUST be
     # absent when the attacker reads their OWN object, proving the marker is victim-specific not global.
+    # Empty ⇒ the FACT cannot be minted (probe returns None ⇒ a rigorous LEAD), because 'victim-unique'
+    # is only PROVEN by the control differential, never by the operator's assertion.
     control_ref: str = ""
 
     def probe(self, template: RequestTemplate, point: InsertionPoint, send: Send) -> FindingContext | None:
@@ -609,16 +617,27 @@ class IdorCheck:
             # No victim-unique discriminator ⇒ the only sound predicate is unavailable. Do NOT fall back to
             # the whole-body containment (the reverted false positive). Emit nothing: a rigorous LEAD.
             return None
+        control_ref = (self.control_ref or "").strip()
+        if not control_ref:
+            # The negative control is MANDATORY: without an attacker-owned reference we cannot PROVE the
+            # discriminator is victim-unique rather than global boilerplate (the exact shared-boilerplate FP
+            # that caused the prior IDOR/BOLA revert). Fail closed to a non-firing LEAD — never mint here.
+            return None
         victim = self.victim_send(template.render(point, self.victim_ref))
         attacker = send(template.render(point, self.victim_ref))
+        control = send(template.render(point, control_ref))
         victim_body = str(victim.get("body", "")) if isinstance(victim, dict) else str(victim)
         attacker_body = str(attacker.get("body", "")) if isinstance(attacker, dict) else str(attacker)
+        control_body = str(control.get("body", "")) if isinstance(control, dict) else str(control)
         attacker_status = int(attacker.get("status", 0)) if isinstance(attacker, dict) else 0
 
         evidence: dict[str, object] = {
             "attacker_status": attacker_status, "victim_body": victim_body,
-            "attacker_body": attacker_body, "discriminator": disc,
+            "attacker_body": attacker_body, "attacker_own_body": control_body, "discriminator": disc,
         }
+        # The control differential is retained in the oracle_context as three EXPLICIT clauses (not a bare
+        # bool), so offline ``verify`` re-checks presence-in-victim AND presence-in-attacker-cross-read AND
+        # absence-in-control over the retained bodies — the pure achieved-state predicate re-fires exactly.
         clauses: list[dict] = [
             {"eq": [{"var": "attacker_status"}, 200]},
             {"min_len": [{"var": "discriminator"}, 6]},
@@ -626,15 +645,10 @@ class IdorCheck:
             {"contains": [{"var": "victim_body"}, {"var": "discriminator"}]},
             # the attacker's cross-read REACHED the victim-unique marker (the achieved unauthorized read)
             {"contains": [{"var": "attacker_body"}, {"var": "discriminator"}]},
+            # MANDATORY negative control: the marker must NOT appear when the attacker reads their OWN object —
+            # this refutes a globally-present string the operator wrongly believed was victim-unique.
+            {"not": {"contains": [{"var": "attacker_own_body"}, {"var": "discriminator"}]}},
         ]
-        control_ref = (self.control_ref or "").strip()
-        if control_ref:
-            control = send(template.render(point, control_ref))
-            control_body = str(control.get("body", "")) if isinstance(control, dict) else str(control)
-            evidence["attacker_own_body"] = control_body
-            # negative control: the marker must NOT appear when the attacker reads their OWN object — this
-            # refutes a globally-present string the operator wrongly believed was victim-unique.
-            clauses.append({"not": {"contains": [{"var": "attacker_own_body"}, {"var": "discriminator"}]}})
         return FindingContext.from_predicate(evidence, {"all": clauses}, bug_class=self.bug_class)
 
 

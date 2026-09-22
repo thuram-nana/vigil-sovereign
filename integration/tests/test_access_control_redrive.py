@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+from urllib.parse import parse_qs, urlsplit
 
 _ROOT = Path(__file__).resolve().parents[2]
 for _p in (str(_ROOT / "engine" / "crucible"), str(_ROOT / "integration"),
@@ -39,7 +40,13 @@ from vigil_integration.live.wiring import _redrive_branch_for
 from vigil_integration.oracle_adapter import certify_admitted
 
 _VICTIM_SECRET = "SECRET-BOB-INVOICE-#2-total=$9001-acct=bob@example.test"
+_VICTIM_REF = "2"
+_ATTACKER_OWN_REF = "1"   # the attacker's OWN object — the mandatory negative control
 _BRANCH = "idor.cross_identity_read"
+
+
+def _req_id(req: HttpRequest) -> str:
+    return (parse_qs(urlsplit(req.url).query).get("id") or [""])[0]
 
 
 def _signers():
@@ -53,8 +60,12 @@ def _make_cross_target():
         return {"status": 200, "body": _VICTIM_SECRET}
 
     def attacker_send(req: HttpRequest) -> dict:
-        # vulnerable: attacker reaches bob's private record (contains the unique discriminator)
-        return {"status": 200, "body": f"<html><nav>Home</nav>{_VICTIM_SECRET}<footer>Acme</footer></html>"}
+        # vulnerable cross-read of bob's ref (id=2): attacker reaches bob's private record (the unique
+        # discriminator). Reading the attacker's OWN object (id=1, the negative control) returns a benign
+        # body WITHOUT bob's marker — proving the discriminator is victim-specific, not shared boilerplate.
+        if _req_id(req) == _VICTIM_REF:
+            return {"status": 200, "body": f"<html><nav>Home</nav>{_VICTIM_SECRET}<footer>Acme</footer></html>"}
+        return {"status": 200, "body": "<html><nav>Home</nav>alice-own-account-0001<footer>Acme</footer></html>"}
 
     return attacker_send, victim_send
 
@@ -63,8 +74,8 @@ def _confirmed_finding(bug_class: str = "idor") -> dict:
     attacker_send, victim_send = _make_cross_target()
     cfg = AccessControlConfig(
         victim_send=victim_send,
-        cross_specs=(CrossAccessSpec(bug_class=bug_class, ref_param="id", victim_ref="2",
-                                     victim_discriminator=_VICTIM_SECRET),),
+        cross_specs=(CrossAccessSpec(bug_class=bug_class, ref_param="id", victim_ref=_VICTIM_REF,
+                                     victim_discriminator=_VICTIM_SECRET, control_ref=_ATTACKER_OWN_REF),),
     )
     (check,) = build_access_control_checks(cfg, enabled=True)
     tmpl = RequestTemplate(HttpRequest(method="GET", url="http://target.test/obj?id=1"))
