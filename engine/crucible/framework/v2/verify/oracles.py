@@ -1389,6 +1389,86 @@ def dom_execution_oracle(binding_calls: Any, canary: str) -> OracleSignal:
 
 
 # ---------------------------------------------------------------------------
+# 3b. Prototype pollution — Object.prototype was ACHIEVEDLY polluted in a real DOM
+# ---------------------------------------------------------------------------
+
+
+def prototype_pollution_oracle(observed: Any) -> OracleSignal:
+    """Fire when a real headless DOM's ACHIEVED runtime state proves client-side prototype
+    pollution: ``Object.prototype[uniqKey] === uniqVal`` for the unique per-probe key/value a
+    ``__proto__[uniqKey]=uniqVal`` gadget drove in, AND a BENIGN-KEY control (a different key
+    that was NEVER injected) stayed ``undefined``.
+
+    ``observed`` is the binding-reported readback a driver captured after rendering the target
+    page — a mapping ``{polluted_key, polluted_val, expected_val, benign_key,
+    benign_key_undefined}``. The oracle judges the ACHIEVED STATE, never that the payload merely
+    appeared: a page that reflects the key into the DOM but does NOT assign it onto
+    ``Object.prototype`` reports ``polluted_val`` absent/mismatched and does not fire.
+
+    Near-zero-FP by three independent guards:
+      * the key/value are UNIQUE per probe (a fresh random token), so a match cannot be an
+        incidental pre-existing property — they are long enough that an accidental collision is
+        infeasible;
+      * the value must reproduce EXACTLY (``polluted_val == expected_val``) — a truthy-but-
+        different value (a page that sets its own default) does not fire;
+      * the BENIGN-KEY control must be ``undefined`` — if some ambient gadget polluted the
+        prototype independently of this probe, ``benign_key_undefined`` is False and the oracle
+        REFUSES to attribute (an ambient-pollution page does not fire).
+
+    This is the client-side ACHIEVED-STATE FACT (CWE-1321), not a posture check: a fire means
+    VIGIL observed ``Object.prototype`` actually carry the value it drove in."""
+    obs = observed if isinstance(observed, Mapping) else {}
+    key = _coerce_text(obs.get("polluted_key")).strip()
+    expected = _coerce_text(obs.get("expected_val")).strip()
+    got_raw = obs.get("polluted_val")
+    got = _coerce_text(got_raw).strip() if got_raw is not None else ""
+    benign_key = _coerce_text(obs.get("benign_key")).strip()
+    benign_undef = obs.get("benign_key_undefined")
+
+    base = {"polluted_key": key, "benign_key": benign_key}
+
+    # The unique key/value must be non-trivial so an incidental value cannot masquerade as one.
+    if len(key) < 8:
+        return OracleSignal(
+            kind=OracleKind.PROTOTYPE_POLLUTION, fired=False, confidence=0.0,
+            evidence="pollution key too short to be a reliable, unforgeable per-probe marker",
+            observed=base)
+    if len(expected) < 6:
+        return OracleSignal(
+            kind=OracleKind.PROTOTYPE_POLLUTION, fired=False, confidence=0.0,
+            evidence="expected pollution value too short to be a reliable, unforgeable marker",
+            observed=base)
+
+    # The BENIGN-KEY control gates attribution: a different key that was NEVER injected MUST be
+    # undefined. If it is not (ambient pollution, or a page that pollutes every key), refuse —
+    # we cannot attribute the polluted state to THIS probe.
+    if benign_undef is not True:
+        return OracleSignal(
+            kind=OracleKind.PROTOTYPE_POLLUTION, fired=False, confidence=0.0,
+            evidence=("benign-key control was not undefined — cannot attribute the polluted state to this "
+                      "probe (ambient / indiscriminate pollution); refusing"),
+            observed={**base, "benign_key_undefined": benign_undef})
+
+    # The ACHIEVED-STATE test: Object.prototype[key] must reproduce the exact value driven in.
+    if got_raw is None or got != expected:
+        return OracleSignal(
+            kind=OracleKind.PROTOTYPE_POLLUTION, fired=False, confidence=0.0,
+            evidence=("Object.prototype was not polluted to the expected value (the payload may have been "
+                      "reflected without polluting the prototype); did not fire"),
+            observed={**base, "expected_val": expected, "observed_val": got})
+
+    return OracleSignal(
+        kind=OracleKind.PROTOTYPE_POLLUTION,
+        fired=True,
+        confidence=0.96,
+        evidence=(f"Object.prototype.{key} was polluted to {expected!r} in a real DOM "
+                  f"(benign-key control {benign_key!r} stayed undefined)"),
+        observed={"polluted_key": key, "polluted_val": expected, "benign_key": benign_key,
+                  "benign_key_undefined": True},
+    )
+
+
+# ---------------------------------------------------------------------------
 # 4b. Error signature — a datastore/parser error a payload provoked (error-based)
 # ---------------------------------------------------------------------------
 

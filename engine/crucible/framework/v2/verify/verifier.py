@@ -299,6 +299,16 @@ BUG_CLASS_ORACLES: dict[str, tuple[OracleKind, ...]] = {
     "clickjacking": (OracleKind.CLICKJACKING_POSTURE,),
     "csrf": (OracleKind.CSRF_POSTURE,),
     "postmessage": (OracleKind.POSTMESSAGE_POSTURE,),
+    # Wave-2.2 CLIENT-SIDE PROTOTYPE POLLUTION (scanner.proto_pollution, browser-backed, opt-in) — the
+    # ACHIEVED-STATE client-side FACT (CWE-1321), not a posture check. A `__proto__[uniqKey]=uniqVal` gadget
+    # driven across a client source (query/fragment/JSON) that actually POLLUTED Object.prototype in a real
+    # headless DOM, read back via a planted binding and confirmed ONLY when Object.prototype[uniqKey] ===
+    # uniqVal AND a benign-key control stayed undefined (never on the payload merely appearing). Like the
+    # AEGIS / posture rows, this NEW OracleKind is reachable ONLY via this row — NOT in the frozen
+    # _ALL_ORACLES fallback (stays EXACTLY 15) — and fires only when the ctx carries `proto_pollution`,
+    # which no benchmark/scan/engage finding does, so appending it leaves the unknown-class fallback and
+    # `make gate` byte-identical.
+    "prototype_pollution": (OracleKind.PROTOTYPE_POLLUTION,),
 }
 
 # Spelling/format aliases folded onto canonical keys.
@@ -347,6 +357,11 @@ _ALIASES: dict[str, str] = {
     # weaken the class. Second-order/persistent spellings fold onto the canonical `stored_xss` instead.
     "second_order_xss": "stored_xss",
     "persistent_xss": "stored_xss",
+    # Client-side prototype-pollution spellings fold onto the canonical `prototype_pollution` key.
+    "client_side_prototype_pollution": "prototype_pollution",
+    "client_prototype_pollution": "prototype_pollution",
+    "proto_pollution": "prototype_pollution",
+    "prototype_pollution_client": "prototype_pollution",
     "directory_traversal": "path_traversal",
     "information_disclosure": "exposure",
     "sensitive_data_exposure": "sensitive_exposure",
@@ -1053,6 +1068,14 @@ class OracleVerifier:
         if kind is OracleKind.POSTMESSAGE_POSTURE:
             if "postmessage_control" in ctx:
                 return oracles.postmessage_posture_oracle(ctx["postmessage_control"])
+            return None
+        # -- Wave-2.2 client-side prototype pollution — fire ONLY when the ctx carries `proto_pollution`
+        #    (the binding-reported achieved-state readback); no benchmark/scan/engage finding carries it,
+        #    so it is inert on the gate path. Proves the ACHIEVED polluted state, NEVER "the payload
+        #    appeared".
+        if kind is OracleKind.PROTOTYPE_POLLUTION:
+            if "proto_pollution" in ctx:
+                return oracles.prototype_pollution_oracle(ctx["proto_pollution"])
             return None
         return None
 

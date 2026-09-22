@@ -76,6 +76,8 @@ _ORACLE_FNS: dict[OracleKind, tuple[Callable[..., Any], ...]] = {
     OracleKind.CLICKJACKING_POSTURE: (oracles.clickjacking_posture_oracle,),
     OracleKind.CSRF_POSTURE: (oracles.csrf_posture_oracle,),
     OracleKind.POSTMESSAGE_POSTURE: (oracles.postmessage_posture_oracle,),
+    # Wave-2.2 client-side prototype pollution (achieved-state).
+    OracleKind.PROTOTYPE_POLLUTION: (oracles.prototype_pollution_oracle,),
 }
 
 

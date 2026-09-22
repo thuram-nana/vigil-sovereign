@@ -72,6 +72,101 @@ from .validation import CorpusTarget, ExpectedFinding
 _GUESTBOOK: dict[str, str] = {}
 
 # ---------------------------------------------------------------------------
+# Client-side prototype pollution model (Wave 2.2). Two GET pages that both PARSE
+# the URL query, the fragment (location.hash) and a JSON `json=` value into an
+# object and reflect it, but differ in one way:
+#   * /proto      — a VULNERABLE nested-key parser that FOLLOWS `__proto__` /
+#                   `constructor.prototype` segments, so a `__proto__[KEY]=VAL`
+#                   gadget writes onto Object.prototype (the planted bug);
+#   * /proto/safe — the BENIGN TWIN: the SAME shape, but the parser GUARDS the
+#                   dangerous keys, so it reflects the payload (presence) WITHOUT
+#                   polluting Object.prototype (must never fire).
+# Both are DELIBERATELY NOT linked from the index; the default GET-only benchmark
+# crawl never runs their client JS (no browser), so `make gate` stays byte-
+# identical. The FACT / non-fire is exercised only by the deep-profile browser
+# assertion (scanner/tests/test_proto_pollution_browser.py).
+_PROTO_PARSER_JS = r"""
+function toPath(k){ return k.replace(/\]/g,'').replace(/\[/g,'.').split('.').filter(Boolean); }
+function ingest(qs, walkSet, mergeFn){
+  (qs||'').split('&').forEach(function(pair){
+    if(!pair) return;
+    var eq = pair.indexOf('=');
+    var rk = eq<0?pair:pair.slice(0,eq);
+    var rv = eq<0?'':pair.slice(eq+1);
+    var name, value;
+    try { name = decodeURIComponent(rk.replace(/\+/g,' ')); } catch(e){ name = rk; }
+    try { value = decodeURIComponent(rv.replace(/\+/g,' ')); } catch(e){ value = rv; }
+    if (name === 'json'){ try { mergeFn(JSON.parse(value)); } catch(e){} }
+    else { walkSet(toPath(name), value); }
+  });
+}
+function reflect(){
+  var out = document.getElementById('out');
+  if (out) out.textContent = 'source: ' + location.search + ' ' + location.hash;
+}
+"""
+
+# The VULNERABLE parser: walkSet/merge follow every key, INCLUDING __proto__.
+_PROTO_VULN_BODY = (
+    "<h2>Proto</h2><div id=out></div><script>"
+    + _PROTO_PARSER_JS
+    + r"""
+var data = {};
+function walkSet(path, val){
+  var cur = data;
+  for (var i=0;i<path.length-1;i++){
+    var k = path[i];
+    if (!(k in cur)) cur[k] = {};
+    cur = cur[k];              /* VULN: for k==='__proto__' this is Object.prototype */
+  }
+  cur[path[path.length-1]] = val;
+}
+function merge(src){ (function rec(target, s){
+  for (var k in s){
+    var v = s[k];
+    if (v && typeof v === 'object'){ if (!(k in target)) target[k] = {}; rec(target[k], v); }
+    else { target[k] = v; }    /* VULN: rec into target['__proto__'] === Object.prototype */
+  }
+})(data, src); }
+ingest(location.search.replace(/^\?/,''), walkSet, merge);
+ingest(location.hash.replace(/^#/,''), walkSet, merge);
+reflect();
+</script>"""
+)
+
+# The BENIGN TWIN: identical shape, but every write GUARDS the dangerous keys, so the
+# payload is reflected (present) yet Object.prototype is never touched.
+_PROTO_SAFE_BODY = (
+    "<h2>Proto</h2><div id=out></div><script>"
+    + _PROTO_PARSER_JS
+    + r"""
+function bad(k){ return k === '__proto__' || k === 'constructor' || k === 'prototype'; }
+var data = Object.create(null);
+function walkSet(path, val){
+  if (path.some(bad)) return;   /* SAFE: refuse dangerous segments */
+  var cur = data;
+  for (var i=0;i<path.length-1;i++){
+    var k = path[i];
+    if (!(k in cur)) cur[k] = Object.create(null);
+    cur = cur[k];
+  }
+  cur[path[path.length-1]] = val;
+}
+function merge(src){ (function rec(target, s){
+  for (var k in s){
+    if (bad(k)) continue;       /* SAFE: refuse dangerous keys */
+    var v = s[k];
+    if (v && typeof v === 'object'){ if (!(k in target)) target[k] = Object.create(null); rec(target[k], v); }
+    else { target[k] = v; }
+  }
+})(data, src); }
+ingest(location.search.replace(/^\?/,''), walkSet, merge);
+ingest(location.hash.replace(/^#/,''), walkSet, merge);
+reflect();
+</script>"""
+)
+
+# ---------------------------------------------------------------------------
 # The boolean-blind SQLi model (a faithful reuse of the vulnerable matcher from
 # verify.confirmation): user input is string-built into ``name = '<q>'`` and split
 # on `` OR ``, so an `` ' OR '1'='1`` tautology breaks out and selects every row,
@@ -291,6 +386,27 @@ class BenchmarkHandler(BaseHTTPRequestHandler):
         stored = html.escape(_GUESTBOOK.get(author, ""))
         body = f"<h2>Guestbook</h2><div class=comment>{stored}</div>"
         self._respond(200, _page("Guestbook", body))
+
+    # -- client-side prototype pollution (Wave 2.2) ------------------------
+
+    def _proto(self) -> None:
+        # PLANTED BUG (client-side prototype pollution). A vulnerable nested-key parser
+        # merges the URL query, the fragment (location.hash) and a JSON `json=` value
+        # into an object, FOLLOWING `__proto__` / `constructor.prototype` segments — so a
+        # `__proto__[KEY]=VAL` gadget writes onto Object.prototype itself. The value is
+        # ALSO reflected as inert text (presence) — but that is NOT what the oracle judges;
+        # the oracle reads the ACHIEVED Object.prototype state via a planted binding.
+        # Unlinked from the index and reached only by the deep-profile browser assertion,
+        # so the default GET-only benchmark crawl (and `make gate`) never runs its JS.
+        self._respond(200, _page("Proto", _PROTO_VULN_BODY))
+
+    def _proto_safe(self) -> None:
+        # SAFE (prototype-pollution BENIGN TWIN). The SAME shape, but the parser GUARDS the
+        # dangerous keys (`__proto__` / `constructor` / `prototype`), and it still REFLECTS
+        # the raw source text into the DOM (so the payload is PRESENT) — proving the oracle
+        # fires on the ACHIEVED polluted state, never on mere presence. Object.prototype
+        # stays clean, so this must NEVER fire.
+        self._respond(200, _page("Proto", _PROTO_SAFE_BODY))
 
     # -- planted-bug routes ------------------------------------------------
 
@@ -539,6 +655,11 @@ _ROUTES = {
     # benchmark (and `make gate`) never produces a finding here.
     "/guestbook/view": BenchmarkHandler._guestbook_view,
     "/guestbook/safe": BenchmarkHandler._guestbook_safe,
+    # Client-side prototype-pollution pages (Wave 2.2). DELIBERATELY NOT linked from the
+    # index; the default GET-only crawl never runs their client JS (no browser), so the
+    # default corpus + signed baseline stay byte-identical.
+    "/proto": BenchmarkHandler._proto,
+    "/proto/safe": BenchmarkHandler._proto_safe,
 }
 
 # POST surfaces (state-changing writes). Only the stored-XSS write surface A; the

@@ -363,6 +363,21 @@ class OracleKind(str, enum.Enum):
     #     anywhere (no origin validation). A send to a specific origin, or a handler that checks `event.origin`,
     #     does NOT fire (near-zero-FP). A sound static check over the retained source, NEVER a proven exploit.
     POSTMESSAGE_POSTURE = "postmessage_posture"
+    # Wave-2.2 CLIENT-SIDE PROTOTYPE POLLUTION — the ACHIEVED-STATE (not posture) client-side FACT. Unlike the
+    # posture members above (which prove a MISSING/WEAK defense from a retained artifact), this proves a real
+    # achieved exploit: a `__proto__[uniqKey]=uniqVal` gadget driven across a client source (URL query /
+    # fragment / JSON) actually POLLUTED `Object.prototype` in a real headless DOM. Like the AEGIS / posture
+    # members above, this is an ADDITIVE append reachable ONLY via its explicit BUG_CLASS_ORACLES row (keyed
+    # on the `proto_pollution` ctx field NO benchmark/scan/engage finding carries), never via the frozen
+    # unknown-class fallback (verifier._ALL_ORACLES stays EXACTLY 15), so `make gate` stays byte-identical.
+    # PROTOTYPE_POLLUTION fires (0.96) ONLY when the binding-reported readback proves the ACHIEVED polluted
+    # state — `Object.prototype[uniqKey] === uniqVal` (the per-probe key+val are unique so they cannot
+    # pre-exist / collide) AND a BENIGN-KEY control (a different key never injected) stayed `undefined`
+    # (attribution: the pollution is caused by THIS probe, not ambient). The evidence reads as the achieved
+    # state ("Object.prototype.<key> was polluted to <val>"), NOT "a script ran" and NOT "the payload
+    # appeared in the DOM". A page that merely REFLECTS the key without assigning it onto Object.prototype
+    # (the benign twin), a mismatched value, or a benign-key that is NOT undefined (ambient) do NOT fire.
+    PROTOTYPE_POLLUTION = "prototype_pollution"
 
 
 class OracleProbe(BaseModel):

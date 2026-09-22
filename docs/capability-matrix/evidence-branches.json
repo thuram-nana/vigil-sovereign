@@ -1104,6 +1104,34 @@
         "engine/crucible/framework/v2/scanner/stored_xss.py:confirm_stored_xss",
         "engine/crucible/framework/v2/verify/oracles.py:dom_execution_oracle"
       ]
+    },
+    {
+      "id": "prototype_pollution.achieved_state",
+      "check": "confirm_proto_pollution",
+      "evidence": "A __proto__[uniqKey]=uniqVal gadget VIGIL drove across a client source (URL query, fragment, or a JSON value) that actually POLLUTED Object.prototype in a real headless DOM, read back THROUGH a planted Runtime.addBinding channel (__crucible_pp): the readback proves Object.prototype[uniqKey] === uniqVal (the unique per-probe key/value cannot pre-exist) AND a BENIGN-KEY control (a different key never injected) stayed undefined — the ACHIEVED polluted state, not the payload merely appearing in the DOM/JSON.",
+      "fact_capable": true,
+      "clean_capable": false,
+      "preconditions": [
+        "channel_established"
+      ],
+      "limitation": "Coverage-bounded, not soundness-bounded: a fire is unforgeable (the key/value are unique per probe, the readback reads the achieved Object.prototype state, and the benign-key control attributes it to THIS probe), but VIGIL can only confirm pollution across the client sources and gadget syntaxes it actually drives and the pages it crawls. A source/syntax VIGIL never drives, or a page it never renders, stays a LEAD/INCONCLUSIVE — never a false negative and never a CLEAN. A non-firing readback is uninformative (the sink may need a gadget or source not driven here), so this branch may not assert absence.",
+      "target_fact_capable": true,
+      "target_clean_capable": false,
+      "target_downgrade_rationale": "Proving the ABSENCE of any client-side prototype-pollution sink is a coverage-complete capability over every client source, every gadget syntax, and every recursive-merge/nested-key path a page could assemble at runtime, not this per-source achieved-state re-drive's target, so CLEAN-capability is deliberately not pursued on this branch.",
+      "blocking_work": "COVERAGE, not a missing oracle: the PROTOTYPE_POLLUTION oracle and the gated headless-browser readback both exist and mint the FACT today. Raising coverage toward the (unreachable) CLEAN target requires exhaustively enumerating every client source (query/fragment/JSON body/cookie/postMessage) and every gadget syntax across every reachable page and merge path; until that enumeration is complete a source/syntax not driven stays a LEAD, never a CLEAN.",
+      "oracle_version": "prototype_pollution",
+      "control_requirements": [
+        "warden_active_recon_gate",
+        "vigil_owned_unique_probe_key_value",
+        "headless_dom_render_capture",
+        "planted_binding_prototype_readback",
+        "benign_key_attribution_control"
+      ],
+      "evidence_surface": "composite",
+      "implementation_refs": [
+        "engine/crucible/framework/v2/scanner/proto_pollution.py:confirm_proto_pollution",
+        "engine/crucible/framework/v2/verify/oracles.py:prototype_pollution_oracle"
+      ]
     }
   ]
 }
