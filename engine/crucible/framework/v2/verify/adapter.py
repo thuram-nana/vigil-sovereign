@@ -428,6 +428,20 @@ class FindingContext(BaseModel):
     # marker reached the authoritative post-state but is ABSENT from the no-cookie control. No
     # benchmark/scan/engage finding carries `csrf_achieved`, so appending it leaves the gate byte-identical.
     csrf_achieved: dict[str, Any] | None = None
+    # session_fixation_oracle (Wave-3.2 ACHIEVED-STATE FACT — CWE-384, its OWN OracleKind.SESSION_FIXATION).
+    # The retained record scanner.session.SessionFixationCheck captured through the gated send carries the RAW
+    # bytes the oracle re-runs its DIFFERENTIAL over — {sentinel_id, post_auth_id, cookie_name, success_marker,
+    # logged_out_markers, logged_out_statuses, authorized_view (status/body of the fixed-session protected
+    # page), logged_out_ref (status/body of a same-URL NO-COOKIE page)} — never a pre-computed authenticated
+    # bool. The oracle fires ONLY when the VIGIL-fixed pre-auth sentinel id SURVIVED login unrotated
+    # (post_auth_id == sentinel_id) AND the success_marker is PRESENT in the authorized view yet PROVABLY ABSENT
+    # from a SUBSTANTIVE logged-out reference to the same URL (the differential that proves the marker is
+    # access-gated, not a common token / chrome / soft-200 body). A marker present in both, or no substantive
+    # logged-out reference, DOWNGRADES to a LEAD; a rotated id or a server-set-only id (no sentinel shape) does
+    # not fire. No benchmark/scan/engage finding carries session_fixation, so appending it leaves the gate
+    # byte-identical; routes to the dedicated ACHIEVED_STATE-sibling kind via its distinct `session_fixation`
+    # ctx key so oracle_version(ACHIEVED_STATE) is untouched.
+    session_fixation: dict[str, Any] | None = None
     # jwt_forgery_oracle (Workstream-B: a captured JWT is STRUCTURALLY FORGEABLE — judged on the token
     # ALONE, offline, zero traffic). jwt_token is the captured token string; jwt_candidate_keys are the
     # supplied secrets / RSA public keys the HMAC-reproduction proof is tried against (a weak-secret
@@ -1779,6 +1793,35 @@ class FindingContext(BaseModel):
             },
         )
 
+    @classmethod
+    def from_session_fixation(
+        cls,
+        *,
+        sentinel_id: str,
+        post_auth_id: str | None,
+        authenticated_after_login: Any,
+        cookie_name: str = "",
+        bug_class: str = "session_fixation",
+    ) -> "FindingContext":
+        """The retained session-fixation record for the session-fixation oracle (ACHIEVED_STATE, CWE-384).
+
+        ``sentinel_id`` (S0) is the UNIQUE high-entropy id VIGIL chose and set as the session cookie BEFORE
+        running the operator login sequence; ``post_auth_id`` (S1) is the session-cookie value in effect AFTER
+        login; ``authenticated_after_login`` is whether a protected request presenting S1 reached an
+        authenticated state. The oracle confirms session fixation ONLY when S1 == S0 (the client-fixed id
+        SURVIVED login) AND the surviving id authenticates — the achieved fixation state, never that a cookie
+        was merely set. An app that rotates the id (S1 != S0) does not fire (the correct defense)."""
+        return cls(
+            bug_class=bug_class,
+            session_fixation={
+                "sentinel_id": _coerce_text(sentinel_id),
+                "post_auth_id": None if post_auth_id is None else _coerce_text(post_auth_id),
+                "authenticated_after_login": (bool(authenticated_after_login)
+                                              if authenticated_after_login is not None else None),
+                "cookie_name": _coerce_text(cookie_name),
+            },
+        )
+
     # -- AEGIS builders (the defensive dual) -------------------------------
 
     @classmethod
@@ -2008,6 +2051,8 @@ class FindingContext(BaseModel):
             ctx["csp_block_control"] = self.csp_block_control
         if self.csrf_achieved is not None:
             ctx["csrf_achieved"] = self.csrf_achieved
+        if self.session_fixation is not None:
+            ctx["session_fixation"] = self.session_fixation
         if self.jwt_token is not None:
             ctx["jwt_token"] = self.jwt_token
             if self.jwt_candidate_keys is not None:

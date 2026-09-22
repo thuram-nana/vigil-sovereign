@@ -360,6 +360,22 @@ BUG_CLASS_ORACLES: dict[str, tuple[OracleKind, ...]] = {
     # state-changing write is deep-only / gated through the 0.3 per-action approval, sending 0 requests
     # through the default GET benchmark corpus). The generic no-post-state case stays the `csrf` posture-FACT.
     "csrf_achieved": (OracleKind.ACHIEVED_STATE,),
+    # Wave-3.2 SESSION FIXATION (scanner.session.SessionFixationCheck, gated-workflow, opt-in) — the
+    # ACHIEVED-STATE FACT (CWE-384), not a posture check. VIGIL chooses a UNIQUE high-entropy sentinel id S0,
+    # sets it as the session cookie BEFORE authenticating, runs the operator's login sequence through the
+    # gated send, and fires ONLY when the SAME id (post-auth S1 == S0) survived login unrotated AND the
+    # operator success_marker is PRESENT in S0's fixed-session view of the protected URL yet PROVABLY ABSENT
+    # from a SUBSTANTIVE same-URL LOGGED-OUT (no-cookie) reference — a DIFFERENTIAL proving the marker is
+    # access-gated, not a common token / chrome / a benign soft-200 body both views share. A marker present in
+    # BOTH, or no substantive logged-out reference, DOWNGRADES to a LEAD; an app that ROTATES the id at login
+    # (S1 != S0 — the correct defense) does NOT fire; a server-set-only id (no VIGIL sentinel shape) degrades
+    # to a weaker LEAD. Routed to its OWN dedicated OracleKind.SESSION_FIXATION (held OUT of the frozen
+    # _ALL_ORACLES, so the unknown-class fallback stays EXACTLY 15 and oracle_version(ACHIEVED_STATE) is
+    # UNTOUCHED — session fixation carries its own oracle_version), reachable ONLY when the ctx carries the
+    # fresh `session_fixation` key, which no benchmark/scan/engage finding carries — so appending this row
+    # leaves `make gate` byte-identical (session-fixation is gated-workflow / off-by-default and sends 0
+    # requests through the default corpus).
+    "session_fixation": (OracleKind.SESSION_FIXATION,),
 }
 
 # Spelling/format aliases folded onto canonical keys.
@@ -657,6 +673,12 @@ _ALIASES: dict[str, str] = {
     "postmessage_posture": "postmessage",
     "postmessage_wildcard_origin": "postmessage",
     "insecure_postmessage": "postmessage",
+    # Wave-3.2 session-fixation spelling variants fold onto the single canonical class.
+    "session_fixation_attack": "session_fixation",
+    "session_id_fixation": "session_fixation",
+    "session_not_rotated_on_login": "session_fixation",
+    "fixed_session_id": "session_fixation",
+    "pre_auth_session_fixation": "session_fixation",
 }
 
 # G1 (doctrine fix): the unknown-class fallback returned by `oracles_for()` is FROZEN to the
@@ -933,6 +955,16 @@ class OracleVerifier:
             #    NEVER merely that a token is unenforced (the weaker `csrf` posture class).
             if "csrf_achieved" in ctx:
                 return oracles.csrf_achieved_oracle(ctx["csrf_achieved"])
+            return None
+        if kind is OracleKind.SESSION_FIXATION:
+            # Wave-3.2 session fixation (CWE-384) — its OWN dedicated kind (held OUT of the frozen
+            # _ALL_ORACLES, so oracle_version(ACHIEVED_STATE) is untouched and the unknown-class fallback
+            # stays EXACTLY 15). Fires ONLY when the ctx carries the fresh `session_fixation` record: the
+            # RAW bytes (fixed-session view, logged-out reference view, success_marker) the oracle re-runs
+            # its differential over. No benchmark/scan/engage finding carries this key, so it is inert on
+            # the gate path (byte-identical).
+            if "session_fixation" in ctx:
+                return oracles.session_fixation_oracle(ctx["session_fixation"])
             return None
         if kind is OracleKind.SIDE_EFFECT:
             if "marker" in ctx and "observed_sink" in ctx:

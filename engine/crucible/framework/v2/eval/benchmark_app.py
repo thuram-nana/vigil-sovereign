@@ -48,6 +48,7 @@ import contextlib
 import html
 import json
 import re
+import secrets
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Iterator
@@ -70,6 +71,14 @@ from .validation import CorpusTarget, ExpectedFinding
 # dedicated deep-profile assertion (scanner/tests/test_stored_xss.py), which POSTs
 # through the gated write path and renders B in a real browser.
 _GUESTBOOK: dict[str, str] = {}
+
+# Session-fixation store (Wave 3.2). The set of session ids the login flow has BLESSED as authenticated.
+# The VULNERABLE flow blesses the client-fixed id UNCHANGED (fixation); the SAFE twin rotates to a fresh id.
+# Class-level in-process state, exercised only by the deep-profile session-fixation assertion — the default
+# GET-only crawl never POSTs to the login routes, so `make gate` is unaffected.
+_SESSFIX_AUTH: set[str] = set()
+_SESSFIX_COOKIE = "SESSION"
+_SESSFIX_SUCCESS_MARKER = "SESSFIX-AUTHENTICATED"
 
 # ---------------------------------------------------------------------------
 # CSRF-achieved model (Wave 3.3). A cookie-authenticated state-changing endpoint that
@@ -446,6 +455,7 @@ class BenchmarkHandler(BaseHTTPRequestHandler):
         cors_reflect: bool = False,
         csp: str | None = None,
         csp_report_only: bool = False,
+        extra_headers: "list[tuple[str, str]] | None" = None,
     ) -> None:
         self.send_response(status)
         self.send_header("Content-Type", ctype)
@@ -459,6 +469,8 @@ class BenchmarkHandler(BaseHTTPRequestHandler):
         if csp is not None:
             header = "Content-Security-Policy-Report-Only" if csp_report_only else "Content-Security-Policy"
             self.send_header(header, csp)
+        for _hk, _hv in (extra_headers or []):
+            self.send_header(_hk, _hv)
         # PLANTED BUG (CORS) — scoped to the ONE anchor the check probes. CORS is a
         # host-ANCHOR-level check: it sends a hostile Origin against the seed request
         # (`/`) ONLY, so the misconfiguration is planted there and nowhere else. Only
@@ -778,6 +790,54 @@ class BenchmarkHandler(BaseHTTPRequestHandler):
         self._respond(200, _page("CSP", self._csp_reflect_body()),
                       csp=f"script-src 'nonce-{CSP_STATIC_NONCE}' 'unsafe-inline'")
 
+    # -- session fixation (Wave 3.2, gated-workflow) -----------------------
+
+    def _sessfix_cookie(self) -> str:
+        """The value of the SESSION cookie the client presented (last-wins), or ''."""
+        raw = self.headers.get("Cookie", "") or ""
+        val = ""
+        for part in raw.split(";"):
+            k, _, v = part.strip().partition("=")
+            if k == _SESSFIX_COOKIE:
+                val = v
+        return val
+
+    def _sessfix_login(self) -> None:
+        # PLANTED BUG (session fixation). On login the app BLESSES the session id the client already
+        # presented — UNCHANGED — and issues NO new Set-Cookie. An attacker who fixes a victim's session id
+        # before login therefore holds a valid authenticated session afterward (CWE-384). Reached only by the
+        # deep-profile session-fixation assertion (a POST); the default GET-only crawl never touches it, so
+        # `make gate` is unaffected.
+        length = int(self.headers.get("Content-Length", "0") or "0")
+        if length:
+            self.rfile.read(length)   # drain the credentials body (any creds "succeed" for the benchmark)
+        sid = self._sessfix_cookie()
+        if sid:
+            _SESSFIX_AUTH.add(sid)   # the client-fixed id is now an authenticated session — NOT rotated
+        self._respond(200, _page("Login", "<p>Logged in.</p>"))
+
+    def _sessfix_rotate_login(self) -> None:
+        # SAFE (session-fixation BENIGN TWIN). On login the app ROTATES the session id: it mints a FRESH id,
+        # blesses only the NEW id, and Set-Cookies it — the client-fixed pre-auth id is NEVER authenticated.
+        # This is the correct defense, so the session_fixation_oracle must NEVER fire here (post-auth id !=
+        # the VIGIL-fixed id).
+        length = int(self.headers.get("Content-Length", "0") or "0")
+        if length:
+            self.rfile.read(length)
+        new_sid = "rot_" + secrets.token_hex(16)
+        _SESSFIX_AUTH.add(new_sid)
+        self._respond(200, _page("Login", "<p>Logged in.</p>"),
+                      extra_headers=[("Set-Cookie", f"{_SESSFIX_COOKIE}={new_sid}; Path=/; HttpOnly")])
+
+    def _sessfix_account(self) -> None:
+        # Protected page shared by both flows: returns the authenticated success marker ONLY when the
+        # presented SESSION id has been blessed by a login. A non-authenticated id gets a logged-out body.
+        sid = self._sessfix_cookie()
+        if sid and sid in _SESSFIX_AUTH:
+            self._respond(200, _page("Account", f"<h1>{_SESSFIX_SUCCESS_MARKER}</h1><p>Welcome back.</p>"))
+        else:
+            self._respond(200, _page("Account", "<h1>Please log in</h1><p>You are logged out.</p>"))
+
     # -- planted-bug routes ------------------------------------------------
 
     def _index(self) -> None:
@@ -1063,7 +1123,12 @@ _ROUTES = {
     # corpus + signed baseline stay byte-identical.
     "/account": BenchmarkHandler._account,
     "/account/safe": BenchmarkHandler._account_safe,
+    # Session-fixation protected page (Wave 3.2). DELIBERATELY NOT linked from the index and reached only by
+    # the deep-profile gated session-fixation assertion (which first POSTs a login); the default GET-only
+    # crawl only ever sees a logged-out page here, so the default corpus + signed baseline stay byte-identical.
+    "/sessfix/account": BenchmarkHandler._sessfix_account,
 }
+
 
 # POST surfaces (state-changing writes). Only the stored-XSS write surface A; the
 # default GET-only benchmark crawl never issues a POST, so this leaves `make gate`
@@ -1075,6 +1140,10 @@ _POST_ROUTES = {
     # scanner/tests/test_csrf_achieved.py through the cross-site cookie / no-cookie differential.
     "/csrf/transfer": BenchmarkHandler._csrf_transfer,
     "/csrf/transfer-protected": BenchmarkHandler._csrf_transfer_protected,
+    # Session-fixation login flows (Wave 3.2). Only exercised by the deep-profile gated assertion; the
+    # default GET-only benchmark crawl never issues a POST, so this leaves `make gate` byte-identical.
+    "/sessfix/login": BenchmarkHandler._sessfix_login,           # VULNERABLE: keeps the client-fixed id
+    "/sessfix/rotate/login": BenchmarkHandler._sessfix_rotate_login,   # SAFE TWIN: rotates the id at login
 }
 
 
