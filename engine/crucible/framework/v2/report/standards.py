@@ -372,6 +372,18 @@ _STANDARDS: dict[str, ControlMapping] = {
     #      browser-confirmed XSS classes (dom_xss / stored_xss). ----
     "postmessage_exploited": _m("A03:2021", ("CWE-79",), pci=_SDLC_PCI, soc2=_SDLC_SOC2, iso=_SDLC_ISO,
                                 attack=("T1059.007",)),
+    # ---- CSP permissive-policy POSTURE (Wave-2.4; a Security Misconfiguration — the enforced
+    #      Content-Security-Policy's script-src is permissive: CWE-693 Protection Mechanism Failure /
+    #      CWE-1021 Improper Restriction of Rendered UI Layers, OWASP A05:2021 Security Misconfiguration. A
+    #      posture-FACT over the retained header; ATT&CK has no clean technique for a config weakness. ----
+    "csp_posture": _m("A05:2021", ("CWE-693", "CWE-1021"), pci=_SDLC_PCI, soc2=_SDLC_SOC2, iso=_SDLC_ISO,
+                      attack=()),
+    # ---- Achieved CSP BYPASS (Wave-2.4; CWE-79 XSS-family — a script EXECUTED despite an enforced CSP
+    #      whose script-src purported to block it). The browser-confirmed execution dual of csp_posture →
+    #      OWASP A03:2021 (Injection / XSS), the injection SDLC controls, ATT&CK T1059.007, same as the
+    #      other browser-confirmed XSS classes (dom_xss / stored_xss / postmessage_exploited). ----
+    "csp_bypass": _m("A03:2021", ("CWE-79",), pci=_SDLC_PCI, soc2=_SDLC_SOC2, iso=_SDLC_ISO,
+                     attack=("T1059.007",)),
     # ---- LLM / AI application classes (OWASP LLM Top 10; ATT&CK has no clean web technique, ATLAS does) ----
     "prompt_injection": _m(None, ("CWE-1427",), pci=_SDLC_PCI, soc2=_SDLC_SOC2, iso=("A.8.28", "A.8.26"),
                            attack=("AML.T0051",)),

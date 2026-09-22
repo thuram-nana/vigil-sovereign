@@ -114,13 +114,21 @@ _CS_CLASSES = {"clickjacking", "csrf", "postmessage"}
 # finding carries. It proves the ACHIEVED Object.prototype state (CWE-1321), not a posture weakness.
 _W22_KINDS = {OracleKind.PROTOTYPE_POLLUTION}
 _W22_CLASSES = {"prototype_pollution"}
+# Wave 2.4 CSP permissive-policy POSTURE oracle (plan §2.4): SAME frozen-fallback discipline — the NEW
+# OracleKind is kept OUT of _ALL_ORACLES, reachable ONLY via its `csp_posture` BUG_CLASS_ORACLES row keyed
+# on a `csp_control` ctx field no benchmark/scan finding carries. It proves the PARSED permissive weakness
+# of the retained enforced CSP header (CWE-693/CWE-1021), not an achieved exploit. The achieved csp_bypass
+# class reuses DOM_EXECUTION (already frozen) so it adds NO kind and is NOT an excluded class (like
+# postmessage_exploited / stored_xss): its oracle set stays the pre-existing (DOM_EXECUTION, SIDE_EFFECT).
+_W24_KINDS = {OracleKind.CSP_POSTURE}
+_W24_CLASSES = {"csp_posture"}
 # every additive kind that must stay out of the frozen unknown-class fallback.
 _EXCLUDED_KINDS = (_AEGIS_KINDS | _WS3_KINDS | _WSB_KINDS | _NW1_KINDS | _WF1_KINDS
                    | _G2_KINDS | _G3_KINDS | _CICD_KINDS | _MOBILE_KINDS | _EMAIL_KINDS | _IDENTITY_KINDS
                    | _C3_KINDS | _T4_KINDS | _E1_KINDS | _E5_KINDS | _E3_KINDS | _E2_KINDS | _E4T2_KINDS
-                   | _CS_KINDS | _W22_KINDS)
+                   | _CS_KINDS | _W22_KINDS | _W24_KINDS)
 _EXCLUDED_CLASSES = {"prompt_injection", "system_prompt_disclosure", "automated_access",
-                     "credential_stuffing", "sqli_attempt", "command_injection_attempt"} | _WS3_CLASSES | _WSB_CLASSES | _NW1_CLASSES | _WF1_CLASSES | _G2_CLASSES | _G3_CLASSES | _CICD_CLASSES | _MOBILE_CLASSES | _EMAIL_CLASSES | _IDENTITY_CLASSES | _C3_CLASSES | _T4_CLASSES | _E1_CLASSES | _E5_CLASSES | _E3_CLASSES | _E2_CLASSES | _E4T2_CLASSES | _CS_CLASSES | _W22_CLASSES
+                     "credential_stuffing", "sqli_attempt", "command_injection_attempt"} | _WS3_CLASSES | _WSB_CLASSES | _NW1_CLASSES | _WF1_CLASSES | _G2_CLASSES | _G3_CLASSES | _CICD_CLASSES | _MOBILE_CLASSES | _EMAIL_CLASSES | _IDENTITY_CLASSES | _C3_CLASSES | _T4_CLASSES | _E1_CLASSES | _E5_CLASSES | _E3_CLASSES | _E2_CLASSES | _E4T2_CLASSES | _CS_CLASSES | _W22_CLASSES | _W24_CLASSES
 _AEGIS_CLASSES = {"prompt_injection", "system_prompt_disclosure", "automated_access",
                   "credential_stuffing", "sqli_attempt", "command_injection_attempt"}
 _AEGIS_ALIASES = {"jailbreak", "llm_prompt_injection", "indirect_prompt_injection",

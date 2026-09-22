@@ -317,6 +317,13 @@
       "family": "posture",
       "tier": "fixtures",
       "evidence": "Fixtures only"
+    },
+    {
+      "kind": "csp_posture",
+      "name": "CSP permissive-policy posture",
+      "family": "posture",
+      "tier": "fixtures",
+      "evidence": "Fixtures only — a retained-header parse (the effective script-src) that re-derives the permissive weakness offline; the sibling of clickjacking/csrf/postMessage posture"
     }
   ]
 }

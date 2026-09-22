@@ -63,6 +63,10 @@ _ADDITIVE = frozenset({
     # Wave 2.2 client-side PROTOTYPE POLLUTION achieved-state kind (CWE-1321) — additive, reachable ONLY
     # via its `prototype_pollution` row keyed on a `proto_pollution` ctx field; never in the frozen fallback.
     "PROTOTYPE_POLLUTION",
+    # Wave 2.4 CSP permissive-policy POSTURE kind (CWE-693/CWE-1021) — additive, reachable ONLY via its
+    # `csp_posture` row keyed on a `csp_control` ctx field; never in the frozen fallback. (The achieved
+    # csp_bypass class reuses DOM_EXECUTION and adds no kind.)
+    "CSP_POSTURE",
 })
 
 
@@ -86,8 +90,9 @@ def test_every_additive_oraclekind_is_excluded_from_the_fallback():
     # not accounted for here) fails this, forcing an explicit review of the byte-identity impact.
     # (E3 GCP_SA_IMPERSONATION, E2 IAM_ESCALATION_PRIMITIVE and E4-TIER-2 K8S_RBAC_VERB_GRANT landed
     # additively: 35 -> 36 -> 37 -> 38; W16-STD-5 added the 3 client-side posture kinds: 38 -> 41;
-    # Wave 2.2 added PROTOTYPE_POLLUTION (achieved-state, CWE-1321): 41 -> 42.)
-    assert len(OracleKind) == 42
+    # Wave 2.2 added PROTOTYPE_POLLUTION (achieved-state, CWE-1321): 41 -> 42; Wave 2.4 added CSP_POSTURE
+    # (permissive-policy posture, CWE-693/CWE-1021): 42 -> 43.)
+    assert len(OracleKind) == 43
     assert {k.name for k in OracleKind} == _FROZEN_15 | _ADDITIVE
     assert set(V._ALL_ORACLES) == set(OracleKind) - {OracleKind[n] for n in _ADDITIVE}
 

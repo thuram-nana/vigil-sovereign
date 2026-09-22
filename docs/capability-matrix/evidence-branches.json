@@ -1160,6 +1160,60 @@
         "engine/crucible/framework/v2/scanner/postmessage_exploited.py:confirm_postmessage_exploited",
         "engine/crucible/framework/v2/verify/oracles.py:dom_execution_oracle"
       ]
+    },
+    {
+      "id": "csp_posture.header_weakness",
+      "check": "capture_csp_posture",
+      "evidence": "The effective script-src (script-src, else the default-src fallback) of the target's RETAINED, ENFORCED (non-report-only) Content-Security-Policy response header carries a real permissive weakness a browser honors: 'unsafe-inline' with NO neutralizing nonce-/hash- companion (a nonce/hash makes the browser ignore 'unsafe-inline' per CSP3 — VIGIL honors that and does NOT flag it then), a wildcard '*' source, an http:/data: scheme source, or 'unsafe-eval'. The oracle re-parses the retained header offline — no browser — so the FACT is the PARSED policy weakness, re-derivable from the certificate alone.",
+      "fact_capable": true,
+      "clean_capable": false,
+      "preconditions": [
+        "retained_csp_header"
+      ],
+      "limitation": "Bounded to the retained ARTIFACT ('this response's enforced CSP script-src carries weakness X'), never to the whole site: a permissive header on one response does not characterize every route, and the ABSENCE of a firing weakness does not prove the CSP is well-formed (a report-only header, or a policy with no effective script-src, is not judged here and stays a LEAD). A well-formed nonce-based policy correctly does not fire. This is a posture-FACT of the weakness, NOT an achieved exploit — the browser-confirmed execution DESPITE a blocking policy is the strictly-stronger csp_bypass class.",
+      "target_fact_capable": true,
+      "target_clean_capable": false,
+      "target_downgrade_rationale": "Proving a site's CSP is comprehensively well-formed (a CLEAN) is a coverage-complete capability over every response, every directive, and the browser-effective interaction of every source expression, not this per-header parse's target, so CLEAN-capability is deliberately not pursued on this branch (a missing weakness on one retained header is uninformative about the rest of the site).",
+      "blocking_work": "COVERAGE, not a missing oracle: the CSP_POSTURE oracle re-parses the retained enforced header and mints the posture-FACT today. Raising toward the (unreachable) CLEAN target requires enumerating every response's CSP across the site and reasoning over the browser-effective combination of every source expression per directive; until that is complete a non-firing header stays a LEAD, never a CLEAN.",
+      "oracle_version": "csp_posture",
+      "control_requirements": [
+        "retained_enforced_csp_header",
+        "deterministic_csp_posture_oracle",
+        "nonce_hash_neutralization_honored"
+      ],
+      "evidence_surface": "artifact",
+      "implementation_refs": [
+        "engine/crucible/framework/v2/scanner/csp_bypass.py:capture_csp_posture",
+        "engine/crucible/framework/v2/verify/oracles.py:csp_posture_oracle"
+      ]
+    },
+    {
+      "id": "csp_bypass.dom_execution",
+      "check": "confirm_csp_bypass",
+      "evidence": "A unique per-probe canary that ACTUALLY EXECUTED in a real headless DOM — the same canary surfaces in a Runtime.bindingCalled EXECUTION callback to VIGIL's own __crucible_xss binding (Runtime.addBinding) — DESPITE the target response carrying a RETAINED, ENFORCED (non-report-only) Content-Security-Policy whose effective script-src PURPORTED TO BLOCK it (a RESTRICTIVE policy: no unneutralized 'unsafe-inline', no wildcard '*', no http:/data: scheme source). A fire proves a genuine CSP bypass: the policy was restrictive yet the injected script ran. The guard is re-derived offline (dom_execution_csp_bypass_oracle over the retained binding calls + the retained CSP header), so a no-CSP / permissive-CSP / report-only execution can NEVER be relabelled a bypass, and a tampered (permissive) CSP cannot mint the FACT.",
+      "fact_capable": true,
+      "clean_capable": false,
+      "preconditions": [
+        "channel_established"
+      ],
+      "limitation": "Coverage-bounded, not soundness-bounded: a fire is unforgeable (only the driver registers __crucible_xss, the canary is unique per probe, and the guard requires a retained enforced CSP whose script-src purported to block the very execution observed), but VIGIL can only confirm the bypass across the pages it crawls and the injection/gadget shapes it drives. A page/gadget VIGIL never drives stays a LEAD/INCONCLUSIVE — never a false negative and never a CLEAN. Execution under a permissive or absent CSP is plain DOM-XSS (the dom_xss class), and a permissive policy's weakness is the csp_posture class — neither is this achieved-bypass FACT, so this branch may not assert absence. A gadget bypass of a well-formed policy that VIGIL cannot make EXECUTE stays a LEAD.",
+      "target_fact_capable": true,
+      "target_clean_capable": false,
+      "target_downgrade_rationale": "Proving the ABSENCE of any CSP bypass is a coverage-complete capability over every restrictive policy, every gadget/allowlist/JSONP/strict-dynamic path, and every reachable page, not this per-page achieved-execution re-drive's target, so CLEAN-capability is deliberately not pursued on this branch.",
+      "blocking_work": "COVERAGE, not a missing oracle: the DOM_EXECUTION oracle, the csp_purports_to_block guard, and the gated headless-browser delivery all exist and mint the FACT today. Raising toward the (unreachable) CLEAN target requires exhaustively enumerating every restrictive-policy bypass primitive across every reachable page; until then a page/gadget not driven stays a LEAD, never a CLEAN.",
+      "oracle_version": "dom_execution",
+      "control_requirements": [
+        "warden_active_recon_gate",
+        "vigil_owned_unique_execution_canary",
+        "headless_dom_render_capture",
+        "retained_enforced_csp_purporting_to_block",
+        "strict_csp_benign_twin_control"
+      ],
+      "evidence_surface": "composite",
+      "implementation_refs": [
+        "engine/crucible/framework/v2/scanner/csp_bypass.py:confirm_csp_bypass",
+        "engine/crucible/framework/v2/verify/oracles.py:dom_execution_csp_bypass_oracle"
+      ]
     }
   ]
 }

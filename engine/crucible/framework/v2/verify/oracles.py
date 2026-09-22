@@ -4072,6 +4072,200 @@ def postmessage_posture_oracle(observed_control: Any) -> OracleSignal:
 
 
 # ---------------------------------------------------------------------------
+# 3c. Content-Security-Policy — permissive-policy POSTURE + the achieved-bypass guard (Wave 2.4)
+#
+# Two sound CSP claims share the parser below:
+#   * ``csp_posture_oracle`` (OracleKind.CSP_POSTURE) — a posture-FACT over the RETAINED enforced CSP
+#     response HEADER: it fires on a real permissive weakness in the effective ``script-src`` that a
+#     browser would honor. NO browser needed; offline-re-derivable.
+#   * ``csp_purports_to_block`` — the guard the DOM_EXECUTION dispatch arm applies to the ``csp_bypass``
+#     class: True iff the RETAINED enforced CSP's effective script-src is RESTRICTIVE (it purported to
+#     block an arbitrary injected script), so a canary that nonetheless EXECUTED is a genuine BYPASS —
+#     not plain DOM-XSS on a permissive/absent policy.
+#
+# Both parse the CSP the same way (first-occurrence-wins per directive, CSP spec), honor the browser
+# rule that a nonce/hash NEUTRALIZES ``'unsafe-inline'``, and fall back script-src -> default-src for the
+# effective script directive. Pure + deterministic (no wallclock/rng); ReDoS-safe (split-based parse over
+# a length-capped header); never raise.
+# ---------------------------------------------------------------------------
+
+# a source token that NEUTRALIZES 'unsafe-inline' (a nonce or a hash) — per CSP3 the presence of a nonce
+# or hash source causes the browser to IGNORE 'unsafe-inline', so 'unsafe-inline' beside a nonce/hash is
+# NOT a weakness (VIGIL honors that rule, else it would false-flag a hardened nonce policy).
+_CSP_NONCE_HASH_RE = re.compile(r"(?i)^'(?:nonce-|sha256-|sha384-|sha512-)")
+
+
+def _parse_csp(header: Any) -> "dict[str, list[str]]":
+    """Parse a CSP header value into ``{directive_lower: [source_tokens]}``. First occurrence of a
+    directive wins (CSP spec); source tokens are kept verbatim (keyword comparisons lowercase a copy).
+    Length-capped + split-based (ReDoS-safe). Never raises."""
+    directives: dict[str, list[str]] = {}
+    for part in _coerce_text(header)[:8000].split(";"):
+        toks = part.split()
+        if not toks:
+            continue
+        name = toks[0].lower()
+        if name not in directives:
+            directives[name] = toks[1:]
+    return directives
+
+
+def _effective_script_src(directives: "dict[str, list[str]]") -> "list[str] | None":
+    """The effective script-source directive tokens a browser applies to ``<script>`` execution:
+    ``script-src`` if present, else the ``default-src`` fallback, else ``None`` (no script restriction)."""
+    if "script-src" in directives:
+        return directives["script-src"]
+    if "default-src" in directives:
+        return directives["default-src"]
+    return None
+
+
+def _csp_signal(fired: bool, *, evidence: str, observed: dict, conf: float = 0.9) -> OracleSignal:
+    return OracleSignal(kind=OracleKind.CSP_POSTURE, fired=fired,
+                        confidence=(conf if fired else 0.0), evidence=evidence, observed=observed)
+
+
+def csp_posture_oracle(observed_control: Any) -> OracleSignal:
+    """Fire when the RETAINED enforced CSP header's effective ``script-src`` carries a real permissive
+    weakness — a sound parse over the header ALONE, no browser, offline. One rule,
+    ``permissive_script_src``, fires (0.9) when the effective script-src (``script-src`` else the
+    ``default-src`` fallback) of the ENFORCED (non-report-only) policy contains ANY of:
+
+      * ``'unsafe-inline'`` WITHOUT a neutralizing nonce-/hash- companion (a nonce/hash makes the browser
+        IGNORE ``'unsafe-inline'`` — CSP3 — so ``'unsafe-inline'`` beside a nonce/hash is NOT flagged);
+      * a wildcard ``*`` source (any host may serve script);
+      * an ``http:`` or ``data:`` scheme source (any http origin / inline data URI may serve script);
+      * ``'unsafe-eval'`` (``eval``/``Function`` are enabled).
+
+    Proves the PARSED policy weakness (a posture-FACT), NEVER an achieved exploit — the achieved bypass is
+    the strictly-stronger ``csp_bypass`` class (DOM_EXECUTION + the ``csp_purports_to_block`` guard). A
+    well-formed policy (nonce-based, no permissive token), a REPORT-ONLY header (it enforces nothing, so a
+    permissive report-only is not judged here), or a policy with no effective script-src do NOT fire
+    (near-zero-FP). Pure + deterministic; ReDoS-safe; never raises."""
+    if not isinstance(observed_control, Mapping):
+        return _csp_signal(False, evidence="no CSP control evidence", observed={})
+    rule = _coerce_text(observed_control.get("rule")).strip().lower() or "permissive_script_src"
+    if rule != "permissive_script_src":
+        return _csp_signal(False, observed={"rule": rule},
+                           evidence=f"unrecognised/lead-only CSP rule {rule!r} (stays a lead)")
+    url = _coerce_text(observed_control.get("url")).strip()
+    where = f" for {url}" if url else ""
+    if bool(observed_control.get("report_only")):
+        return _csp_signal(
+            False, observed={"rule": rule, "report_only": True},
+            evidence=("the retained CSP is REPORT-ONLY (Content-Security-Policy-Report-Only) — it enforces "
+                      "nothing, so a permissive value here is not an enforced weakness (stays a lead)"))
+    header = _coerce_text(observed_control.get("header"))
+    if not header.strip():
+        return _csp_signal(
+            False, observed={"rule": rule},
+            evidence="no retained enforced CSP header to judge — CSP posture UNOBSERVED (REFUSE)")
+    directives = _parse_csp(header)
+    eff = _effective_script_src(directives)
+    if eff is None:
+        return _csp_signal(
+            False, observed={"rule": rule},
+            evidence=("the retained CSP declares neither script-src nor default-src — no effective "
+                      "script restriction to judge for THIS oracle (stays a lead; a scriptless-CSP "
+                      "weakness is a distinct claim)"))
+    src_dir = "script-src" if "script-src" in directives else "default-src"
+    lower = [t.lower() for t in eff]
+    has_nonce_or_hash = any(_CSP_NONCE_HASH_RE.match(t) for t in eff)
+    # CSP3: 'strict-dynamic' makes conformant browsers IGNORE host-source and scheme-source expressions
+    # ('*', http:, https:, 'self', specific hosts) AND 'unsafe-inline'. Beside 'strict-dynamic' those are
+    # therefore NOT weaknesses — flagging them false-flags the Google/OWASP-canonical hardened policy
+    # (`'nonce-r' 'strict-dynamic' https: http: 'unsafe-inline'`). 'unsafe-eval' is NOT neutralized by
+    # 'strict-dynamic' (eval stays enabled), so it is still flagged.
+    has_strict_dynamic = "'strict-dynamic'" in lower
+    weaknesses: list[str] = []
+    if "'unsafe-inline'" in lower and not has_nonce_or_hash and not has_strict_dynamic:
+        weaknesses.append("'unsafe-inline' with no neutralizing nonce/hash")
+    if "'unsafe-eval'" in lower:
+        weaknesses.append("'unsafe-eval'")
+    if "*" in lower and not has_strict_dynamic:
+        weaknesses.append("wildcard '*' source")
+    if "http:" in lower and not has_strict_dynamic:
+        weaknesses.append("'http:' scheme source")
+    if "data:" in lower and not has_strict_dynamic:
+        weaknesses.append("'data:' scheme source")
+    if not weaknesses:
+        note = (" ('strict-dynamic' present — host/scheme sources and 'unsafe-inline' are ignored by the "
+                "browser per CSP3, not a weakness)" if has_strict_dynamic else
+                (" ('unsafe-inline' is present but NEUTRALIZED by a nonce/hash — not a weakness)"
+                 if ("'unsafe-inline'" in lower and has_nonce_or_hash) else ""))
+        return _csp_signal(
+            False, observed={"rule": rule, "effective_directive": src_dir, "script_src": eff},
+            evidence=(f"the effective {src_dir} carries no permissive weakness — a well-formed policy"
+                      f"{note} (no fire)"))
+    return _csp_signal(
+        True, conf=0.9,
+        evidence=(f"the enforced CSP's effective {src_dir}{where} is permissive: "
+                  + "; ".join(weaknesses)
+                  + " — script execution is not effectively restricted (a real CSP weakness)"),
+        observed={"rule": rule, "url": url or None, "effective_directive": src_dir,
+                  "script_src": eff, "weaknesses": weaknesses})
+
+
+def csp_purports_to_block(observed_control: Any) -> bool:
+    """The achieved-CSP-bypass guard: True iff a RETAINED, ENFORCED (non-report-only) CSP whose effective
+    ``script-src`` is RESTRICTIVE — it purported to block an arbitrary injected script — was present, so a
+    canary that NONETHELESS EXECUTED is a genuine BYPASS. False when the CSP is absent, report-only, has no
+    effective script-src, or is PERMISSIVE (``'unsafe-inline'`` unneutralized, a wildcard ``*``, or an
+    ``http:``/``data:`` scheme source) — under a permissive/absent policy the execution was permitted /
+    unrestricted, so it is plain DOM-XSS, never a bypass. Conservative by design (a permissive policy's
+    gadget bypass stays a LEAD): the FACT mints ONLY when a restrictive policy was defeated. Pure +
+    deterministic; never raises."""
+    if not isinstance(observed_control, Mapping):
+        return False
+    if bool(observed_control.get("report_only")):
+        return False
+    header = _coerce_text(observed_control.get("header"))
+    if not header.strip():
+        return False
+    eff = _effective_script_src(_parse_csp(header))
+    if eff is None:
+        return False
+    lower = [t.lower() for t in eff]
+    has_nonce_or_hash = any(_CSP_NONCE_HASH_RE.match(t) for t in eff)
+    # 'strict-dynamic' (CSP3) makes the browser IGNORE host/scheme sources AND 'unsafe-inline', so a
+    # strict-dynamic policy IS restrictive (it blocks an arbitrary injected script) — a canary that
+    # nonetheless executes under it is a genuine bypass. Do not treat those tokens as permissive then.
+    has_strict_dynamic = "'strict-dynamic'" in lower
+    inline_allowed = ("'unsafe-inline'" in lower) and not has_nonce_or_hash and not has_strict_dynamic
+    permissive = inline_allowed or (not has_strict_dynamic and ("*" in lower or "http:" in lower or "data:" in lower))
+    return not permissive
+
+
+def dom_execution_csp_bypass_oracle(binding_calls: Any, canary: str, csp_control: Any) -> OracleSignal:
+    """The achieved-CSP-bypass adjudication: the DOM_EXECUTION oracle, additionally GUARDED so it fires
+    ONLY when the injected canary EXECUTED (``dom_execution_oracle`` fires) AND the RETAINED enforced CSP
+    purported to block that execution (``csp_purports_to_block``). If execution occurred but the CSP did
+    NOT purport to block (absent / report-only / permissive), it is plain DOM-XSS, NOT a bypass — the
+    signal is returned NON-firing so a no-CSP (or permissive-CSP) execution can never be relabelled a
+    bypass and a tampered (permissive) CSP cannot mint the FACT offline. Reuses OracleKind.DOM_EXECUTION
+    (no new kind). Pure + deterministic; never raises."""
+    sig = dom_execution_oracle(binding_calls, canary)
+    if not sig.fired:
+        return sig
+    if csp_purports_to_block(csp_control):
+        obs = dict(sig.observed)
+        obs["csp_bypassed"] = True
+        return OracleSignal(
+            kind=OracleKind.DOM_EXECUTION, fired=True, confidence=sig.confidence,
+            evidence=(sig.evidence + " — DESPITE a retained enforced CSP whose script-src purported to "
+                      "block it (a genuine CSP bypass, not DOM-XSS on a permissive/absent policy)"),
+            observed=obs)
+    obs = dict(sig.observed)
+    obs["csp_bypassed"] = False
+    return OracleSignal(
+        kind=OracleKind.DOM_EXECUTION, fired=False, confidence=0.0,
+        evidence=("injected script executed, but no retained ENFORCED CSP purported to block it "
+                  "(absent / report-only / permissive script-src) — this is plain DOM-XSS, NOT a CSP "
+                  "bypass (the csp_bypass FACT refuses)"),
+        observed=obs)
+
+
+# ---------------------------------------------------------------------------
 # AEGIS request-side PARSE-PROOF oracles (the inline "provable firewall" gateway).
 #
 # These judge a single DECODED request-parameter value on the REQUEST ALONE (no app response). They

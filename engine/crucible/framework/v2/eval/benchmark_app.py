@@ -221,6 +221,12 @@ window.addEventListener('message', function(ev){
 }, false);
 </script>"""
 
+# The STATIC (reusable-across-responses) script-src nonce the /csp-bypass route reflects — the
+# planted bug. A properly-hardened app mints a FRESH nonce per response; a static one is readable
+# from any response and reflected back in a <script nonce=…>, so it is the achieved-bypass primitive.
+# /csp-wellformed and /csp-neutralized reuse it only as a well-formed nonce-based script-src.
+CSP_STATIC_NONCE = "crucibleStaticNonce2024"
+
 # ---------------------------------------------------------------------------
 # The boolean-blind SQLi model (a faithful reuse of the vulnerable matcher from
 # verify.confirmation): user input is string-built into ``name = '<q>'`` and split
@@ -358,12 +364,21 @@ class BenchmarkHandler(BaseHTTPRequestHandler):
         ctype: str = "text/html; charset=utf-8",
         location: str | None = None,
         cors_reflect: bool = False,
+        csp: str | None = None,
+        csp_report_only: bool = False,
     ) -> None:
         self.send_response(status)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
         if location is not None:
             self.send_header("Location", location)
+        # PLANTED CSP posture / bypass model (Wave 2.4) — emit the exact Content-Security-Policy the
+        # route models. ``csp_report_only`` sends it as Content-Security-Policy-Report-Only (enforces
+        # nothing), so the posture oracle / bypass guard can prove they never mint from a report-only
+        # header. Only the /csp-* routes pass this; every other route emits no CSP header at all.
+        if csp is not None:
+            header = "Content-Security-Policy-Report-Only" if csp_report_only else "Content-Security-Policy"
+            self.send_header(header, csp)
         # PLANTED BUG (CORS) — scoped to the ONE anchor the check probes. CORS is a
         # host-ANCHOR-level check: it sends a hostile Origin against the seed request
         # (`/`) ONLY, so the misconfiguration is planted there and nowhere else. Only
@@ -485,6 +500,68 @@ class BenchmarkHandler(BaseHTTPRequestHandler):
         # the message (the data-leak/posture residual) but never executes it, so it must
         # NEVER fire the DOM-execution oracle.
         self._respond(200, _page("postMessage", _PM_NOEXEC_BODY))
+
+    # -- Content-Security-Policy: achieved bypass + permissive posture (Wave 2.4) --------
+    #
+    # Every /csp-* route REFLECTS the `q` query param VERBATIM into an executable HTML
+    # position; they differ only in the enforced CSP header. All are DELIBERATELY NOT linked
+    # from the index and need a browser (bypass) or a header parse (posture), so the default
+    # GET-only benchmark crawl never runs their JS and `make gate` stays byte-identical. The
+    # FACT / non-fire is exercised only by the deep-profile assertion
+    # (scanner/tests/test_csp_bypass_browser.py).
+
+    def _csp_reflect_body(self) -> str:
+        # reflects q verbatim into the DOM (the injection sink) — the payload the scanner
+        # crafts (a nonce-carrying <script>, or an img/onerror) renders here.
+        return f"<h2>CSP</h2><div id=out>{self._query('q')}</div>"
+
+    def _csp_bypass(self) -> None:
+        # PLANTED BUG (CSP bypass via a STATIC/reusable nonce). The enforced policy is
+        # RESTRICTIVE (no 'unsafe-inline', no wildcard) — it purports to block arbitrary
+        # inline script — BUT the script-src nonce is STATIC across responses, so an attacker
+        # reads it from any response and reflects `<script nonce=CSP_STATIC_NONCE>` back in.
+        # The browser sees a matching nonce and EXECUTES the injected script: a genuine bypass
+        # of a restrictive policy. csp_purports_to_block is True (restrictive), so a fire is a
+        # csp_bypass FACT, not plain DOM-XSS.
+        self._respond(200, _page("CSP", self._csp_reflect_body()),
+                      csp=f"script-src 'self' 'nonce-{CSP_STATIC_NONCE}'")
+
+    def _csp_strict(self) -> None:
+        # SAFE (CSP-bypass BENIGN TWIN / strict policy that BLOCKS). The SAME reflection sink,
+        # but the enforced policy is `script-src 'self'` with NO nonce and NO 'unsafe-inline' —
+        # an injected inline <script> / img-onerror carries no valid nonce, so the browser
+        # BLOCKS it and nothing executes. csp_purports_to_block is True, but executed is False,
+        # so this must NEVER fire the csp_bypass FACT.
+        self._respond(200, _page("CSP", self._csp_reflect_body()),
+                      csp="script-src 'self'")
+
+    def _csp_none(self) -> None:
+        # SAFE (for the csp_bypass class): the SAME reflection sink but NO CSP header at all.
+        # An injected img-onerror EXECUTES — but with no enforced policy purporting to block it,
+        # the guard adjudicates plain DOM-XSS (the dom_xss class), NOT a CSP bypass. This must
+        # NEVER fire the csp_bypass FACT (execution-on-a-page-with-no-CSP is not a bypass).
+        self._respond(200, _page("CSP", self._csp_reflect_body()))
+
+    def _csp_permissive(self) -> None:
+        # PLANTED permissive-CSP header (the csp_posture FACT). The enforced script-src carries
+        # 'unsafe-inline' with NO neutralizing nonce/hash — a real permissive weakness a browser
+        # honors. capture_csp_posture parses the retained header (no browser) and fires the
+        # csp_posture FACT.
+        self._respond(200, _page("CSP", self._csp_reflect_body()),
+                      csp="script-src 'unsafe-inline'; object-src 'none'")
+
+    def _csp_wellformed(self) -> None:
+        # SAFE (csp_posture BENIGN TWIN / well-formed policy). A nonce-based script-src with NO
+        # permissive token — the browser-hardened shape. capture_csp_posture must NOT fire.
+        self._respond(200, _page("CSP", self._csp_reflect_body()),
+                      csp=f"script-src 'nonce-{CSP_STATIC_NONCE}'; object-src 'none'")
+
+    def _csp_neutralized(self) -> None:
+        # SAFE (csp_posture BENIGN TWIN / nonce-neutralized 'unsafe-inline'). 'unsafe-inline'
+        # BESIDE a nonce — the browser IGNORES 'unsafe-inline' per CSP3, so this is NOT a
+        # weakness. capture_csp_posture honors that rule and must NOT fire.
+        self._respond(200, _page("CSP", self._csp_reflect_body()),
+                      csp=f"script-src 'nonce-{CSP_STATIC_NONCE}' 'unsafe-inline'")
 
     # -- planted-bug routes ------------------------------------------------
 
@@ -745,6 +822,18 @@ _ROUTES = {
     "/postmessage": BenchmarkHandler._postmessage,
     "/postmessage/origin-checked": BenchmarkHandler._postmessage_origin_checked,
     "/postmessage/noexec": BenchmarkHandler._postmessage_noexec,
+    # Content-Security-Policy pages (Wave 2.4). DELIBERATELY NOT linked from the index; the
+    # default GET-only crawl never runs their JS (bypass needs a browser) and never parses their
+    # CSP posture, so the default corpus + signed baseline stay byte-identical. /csp-bypass is the
+    # achieved bypass (static-nonce reuse under a restrictive policy); /csp-strict and /csp-none
+    # are its benign twins (strict-blocks / no-CSP-so-plain-DOM-XSS); /csp-permissive is the
+    # posture FACT; /csp-wellformed and /csp-neutralized are the posture benign twins.
+    "/csp-bypass": BenchmarkHandler._csp_bypass,
+    "/csp-strict": BenchmarkHandler._csp_strict,
+    "/csp-none": BenchmarkHandler._csp_none,
+    "/csp-permissive": BenchmarkHandler._csp_permissive,
+    "/csp-wellformed": BenchmarkHandler._csp_wellformed,
+    "/csp-neutralized": BenchmarkHandler._csp_neutralized,
 }
 
 # POST surfaces (state-changing writes). Only the stored-XSS write surface A; the

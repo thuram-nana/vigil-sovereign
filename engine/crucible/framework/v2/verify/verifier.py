@@ -69,7 +69,7 @@ BUG_CLASS_ORACLES: dict[str, tuple[OracleKind, ...]] = {
     "graphql_batching": (OracleKind.ACHIEVED_STATE,),
     "graphql_cost": (OracleKind.ACHIEVED_STATE,),
     "request_smuggling": (OracleKind.DIFFERENTIAL_RESPONSE,),
-    "dom_xss": (OracleKind.DOM_EXECUTION, OracleKind.SIDE_EFFECT),
+    "dom_xss": (OracleKind.DOM_EXECUTION,),
     # Stored / second-order XSS (scanner.stored_xss, browser-backed, opt-in). Confirmed by the SAME
     # DOM_EXECUTION oracle as dom_xss — a payload WRITTEN at surface A that EXECUTES when surface B renders
     # the persisted value, observed via VIGIL's own __crucible_xss binding call carrying a unique per-(A,B,
@@ -78,9 +78,12 @@ BUG_CLASS_ORACLES: dict[str, tuple[OracleKind, ...]] = {
     # off-by-default and sends 0 benchmark requests through the default corpus). This is a REAL row, not the
     # former `stored_xss -> xss` alias: that alias routed stored_xss to REFLECTION_CONTEXT, which cannot
     # prove EXECUTION of a persisted payload; the browser-confirmed FACT this class now mints requires the
-    # execution oracle, so the class maps to it directly. SIDE_EFFECT is retained as the secondary kind for
-    # parity with dom_xss (a rendered-attribute side-effect confirmation).
-    "stored_xss": (OracleKind.DOM_EXECUTION, OracleKind.SIDE_EFFECT),
+    # execution oracle, so the class maps to it directly. DOM_EXECUTION is the SOLE proof — SIDE_EFFECT was
+    # dropped (re-red-pen): a bare marker-in-a-sink (side_effect_oracle, conf 0.90) is not a sound proof of
+    # EXECUTION, and as an alternative confirmer it let a crafted finding mint a stored_xss FACT with no
+    # execution. The honest scanner path never emits marker/observed_sink here, so the removal is inert on
+    # the gate (byte-identical) and closes that bare-marker hole.
+    "stored_xss": (OracleKind.DOM_EXECUTION,),
     "cross_site_websocket_hijacking": (OracleKind.ACHIEVED_STATE,),
     "websocket_injection": (OracleKind.SIDE_EFFECT, OracleKind.DIFFERENTIAL_RESPONSE),
     "request_race": (OracleKind.ACHIEVED_STATE,),
@@ -316,12 +319,35 @@ BUG_CLASS_ORACLES: dict[str, tuple[OracleKind, ...]] = {
     # EXECUTING sink, observed via VIGIL's own __crucible_xss binding call carrying a unique per-probe canary
     # in a real headless DOM (never on the handler merely receiving/echoing the message; a handler that CHECKS
     # event.origin, or routes to a non-executing sink, does not fire — that stays the `postmessage` posture /
-    # data-leak residual). Reuses DOM_EXECUTION (already in the frozen _ALL_ORACLES) + SIDE_EFFECT for parity
-    # with dom_xss/stored_xss, so this row adds NO new OracleKind and `make gate` stays byte-identical
-    # (deep-only / off-by-default; it sends 0 requests through the default GET benchmark corpus). The
+    # data-leak residual). Reuses DOM_EXECUTION (already in the frozen _ALL_ORACLES) as the SOLE proof — no
+    # new OracleKind, so `make gate` stays byte-identical (deep-only / off-by-default; it sends 0 requests
+    # through the default GET benchmark corpus). SIDE_EFFECT was dropped (re-red-pen): a bare marker-in-sink
+    # is not a sound proof of execution and let a crafted finding mint a FACT with no execution. The
     # DOM_EXECUTION dispatch arm already keys on `dom_binding_calls`/`dom_canary`, which no benchmark/default
     # finding carries, so appending this row leaves the unknown-class fallback byte-identical.
-    "postmessage_exploited": (OracleKind.DOM_EXECUTION, OracleKind.SIDE_EFFECT),
+    "postmessage_exploited": (OracleKind.DOM_EXECUTION,),
+    # Wave-2.4 CSP PERMISSIVE-POLICY POSTURE (scanner.csp_bypass:capture_csp_posture / the retained enforced
+    # CSP header, NO browser). The posture-FACT dual of the achieved bypass: the effective script-src of the
+    # enforced (non-report-only) policy carries a real permissive weakness a browser honors — 'unsafe-inline'
+    # with no neutralizing nonce/hash, a wildcard '*', an http:/data: scheme source, or 'unsafe-eval'. Like
+    # the AEGIS / posture rows, this NEW OracleKind is reachable ONLY via this row — NOT in the frozen
+    # _ALL_ORACLES fallback (stays EXACTLY 15) — and fires only when the ctx carries `csp_control`, which no
+    # benchmark/scan/engage finding does, so appending it leaves the unknown-class fallback and `make gate`
+    # byte-identical.
+    "csp_posture": (OracleKind.CSP_POSTURE,),
+    # Wave-2.4 ACHIEVED CSP BYPASS (scanner.csp_bypass, browser-backed, opt-in) — the strictly-stronger dual
+    # of csp_posture. A canary that ACTUALLY EXECUTED in a real headless DOM (the __crucible_xss binding call,
+    # DOM_EXECUTION) DESPITE a RETAINED enforced CSP whose effective script-src PURPORTED TO BLOCK it. Reuses
+    # DOM_EXECUTION as the SOLE proof (SIDE_EFFECT dropped, re-red-pen — a bare marker-in-sink proved neither
+    # execution nor a blocking CSP) — NO new OracleKind — and the DOM_EXECUTION dispatch arm applies the
+    # `csp_purports_to_block` GUARD keyed on the `csp_block_control` ctx field (fail-closed when absent, so a
+    # crafted csp_bypass with no blocking control cannot confirm): if execution occurred with no
+    # enforced/purporting CSP (absent / report-only / permissive) it is plain DOM-XSS and does NOT fire
+    # (the csp_posture class carries the permissive-weakness residual). No
+    # benchmark/scan/default finding carries csp_block_control, so appending this row (deep-only /
+    # off-by-default; 0 requests through the default GET corpus) leaves the fallback + `make gate`
+    # byte-identical.
+    "csp_bypass": (OracleKind.DOM_EXECUTION,),
 }
 
 # Spelling/format aliases folded onto canonical keys.
@@ -385,6 +411,18 @@ _ALIASES: dict[str, str] = {
     "cross_origin_postmessage": "postmessage_exploited",
     "cross_origin_postmessage_xss": "postmessage_exploited",
     "postmessage_code_execution": "postmessage_exploited",
+    # CSP permissive-policy POSTURE spellings fold onto the canonical `csp_posture` key (the retained-header
+    # weakness FACT). DISTINCT from `csp_bypass` (the browser-confirmed achieved-execution dual below): a
+    # misconfiguration / weak-policy claim is the posture oracle, an achieved-bypass claim is DOM_EXECUTION.
+    "content_security_policy": "csp_posture",
+    "csp_weakness": "csp_posture",
+    "csp_misconfiguration": "csp_posture",
+    "csp_unsafe_inline": "csp_posture",
+    "permissive_csp": "csp_posture",
+    # Achieved CSP-bypass spellings fold onto the canonical `csp_bypass` key (execution DESPITE a blocking
+    # CSP) — the browser-confirmed DOM_EXECUTION dual, never the posture oracle.
+    "csp_bypass_xss": "csp_bypass",
+    "content_security_policy_bypass": "csp_bypass",
     "directory_traversal": "path_traversal",
     "information_disclosure": "exposure",
     "sensitive_data_exposure": "sensitive_exposure",
@@ -770,6 +808,15 @@ class OracleVerifier:
         """
         ctx = dict(finding_context or {})
         bug_class = str(ctx.get("bug_class", ""))
+        # Wave-2.4 fail-closed (red-pen MEDIUM): the achieved CSP-bypass class's FACT is "execution DESPITE
+        # a blocking CSP", so it REQUIRES the retained blocking-CSP control. Enforce that at the verifier,
+        # not merely by scanner convention: mark the ctx so the shared DOM_EXECUTION arm REFUSES a
+        # csp_bypass finding whose context lacks csp_block_control (a crafted from_dom_execution context
+        # would otherwise fall through to the unguarded dom_execution_oracle and confirm a bypass with no
+        # blocking policy). Keyed on the finding's OWN declared bug_class, which the attacker cannot avoid
+        # while still claiming a csp_bypass FACT.
+        if normalize_bug_class(bug_class) == "csp_bypass":
+            ctx["_require_csp_block_control"] = True
         kinds = self.oracles_for(bug_class)
 
         signals: list[OracleSignal] = []
@@ -880,7 +927,27 @@ class OracleVerifier:
             return None
         if kind is OracleKind.DOM_EXECUTION:
             if "dom_binding_calls" in ctx and "dom_canary" in ctx:
+                # Wave-2.4 achieved CSP-bypass: when the ctx additionally carries `csp_block_control`
+                # (ONLY the csp_bypass class sets it; no benchmark/scan/default finding does, so this is
+                # inert on the gate path), the execution is a genuine BYPASS only if the retained ENFORCED
+                # CSP purported to block it. A no-CSP / permissive / report-only execution is plain DOM-XSS
+                # and the guarded oracle returns NON-firing — so a no-CSP execution can never be relabelled
+                # a bypass and a tampered (permissive) CSP cannot mint the FACT offline.
+                if "csp_block_control" in ctx:
+                    return oracles.dom_execution_csp_bypass_oracle(
+                        ctx["dom_binding_calls"], ctx["dom_canary"], ctx["csp_block_control"])
+                if ctx.get("_require_csp_block_control"):
+                    # a csp_bypass finding with NO retained blocking-CSP control: fail closed, never fall
+                    # through to plain dom_execution (that would confirm a "bypass" with no blocking policy).
+                    return None
                 return oracles.dom_execution_oracle(ctx["dom_binding_calls"], ctx["dom_canary"])
+            return None
+        # -- Wave-2.4 CSP permissive-policy posture — fire ONLY when the ctx carries `csp_control` (the
+        #    retained enforced CSP header); no benchmark/scan/engage finding carries it, so it is inert on
+        #    the gate path. Proves the PARSED permissive weakness, NEVER an achieved exploit.
+        if kind is OracleKind.CSP_POSTURE:
+            if "csp_control" in ctx:
+                return oracles.csp_posture_oracle(ctx["csp_control"])
             return None
         if kind is OracleKind.SANITIZER_SIGNAL:
             if "process_output" in ctx:

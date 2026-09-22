@@ -1503,6 +1503,17 @@ def _redrive_branch_for(bug_class: str) -> "Optional[str]":
         # channel (browserless, or a handler that checks event.origin / does not execute) keeps the claim
         # a LEAD (the weaker `postmessage` posture class carries the data-leak/non-executing residual).
         "postmessage_exploited": "postmessage_exploited.dom_execution",
+        # Wave 2.4 — achieved CSP-bypass re-drive: a canary VIGIL drove that EXECUTED in a headless DOM
+        # DESPITE a retained enforced CSP whose script-src purported to block it, adjudicated by the
+        # FACT-capable DOM_EXECUTION branch guarded by csp_purports_to_block
+        # (verify/oracles.py:dom_execution_csp_bypass_oracle). A non-fire / no channel (browserless), or an
+        # execution under a permissive/absent CSP (plain DOM-XSS), keeps the claim a LEAD.
+        "csp_bypass": "csp_bypass.dom_execution",
+        # Wave 2.4 — CSP permissive-policy posture-FACT: a parse of the retained enforced CSP header
+        # (no browser), adjudicated by the FACT-capable CSP_POSTURE branch
+        # (verify/oracles.py:csp_posture_oracle). A well-formed / report-only / script-src-less header
+        # keeps the claim a LEAD.
+        "csp_posture": "csp_posture.header_weakness",
     }
     branch = mapping.get(normalize_bug_class(bug_class))
     return branch if branch in branch_ids() else None
