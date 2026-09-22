@@ -1132,6 +1132,34 @@
         "engine/crucible/framework/v2/scanner/proto_pollution.py:confirm_proto_pollution",
         "engine/crucible/framework/v2/verify/oracles.py:prototype_pollution_oracle"
       ]
+    },
+    {
+      "id": "postmessage_exploited.dom_execution",
+      "check": "confirm_postmessage_exploited",
+      "evidence": "A unique per-probe canary gadget that VIGIL postMessage'd from its OWN attacker-origin sender page (a fresh loopback origin, GENUINELY DIFFERENT from the target's — scheme+host+port differ) to the target's onmessage handler, observed EXECUTING inside the target's realm: the same canary surfaces in a Runtime.bindingCalled EXECUTION callback to VIGIL's own __crucible_xss binding (exposed to the cross-origin iframe via Runtime.addBinding) in a real headless DOM. A fire proves the handler did not validate event.origin AND routed the untrusted-origin message to an executing sink — actual JavaScript execution, not the message merely being received/echoed/reflected.",
+      "fact_capable": true,
+      "clean_capable": false,
+      "preconditions": [
+        "channel_established"
+      ],
+      "limitation": "Coverage-bounded, not soundness-bounded: a fire is unforgeable (only the driver registers __crucible_xss, the canary is unique per probe and cannot pre-exist, and the ONLY delivery is cross-origin from VIGIL's own sender on a distinct origin, so the executed message provably came from an untrusted origin), but VIGIL can only confirm the exploit across the handler pages it crawls and the gadget shapes (raw-JS / HTML / javascript:-URI / structured-object) it drives. A handler/sink/gadget-shape VIGIL never drives, or a page it never renders, stays a LEAD/INCONCLUSIVE — never a false negative and never a CLEAN. A non-firing delivery is uninformative (a handler that receives the message but does not execute it, or checks event.origin, is the `postmessage` posture / data-leak residual, not this achieved-exploit class), so this branch may not assert absence.",
+      "target_fact_capable": true,
+      "target_clean_capable": false,
+      "target_downgrade_rationale": "Proving the ABSENCE of any origin-unchecked, execution-routing postMessage handler is a coverage-complete capability over every handler, every message-property a handler could read, and every sink a page could route to at runtime, not this per-handler cross-origin execution re-drive's target, so CLEAN-capability is deliberately not pursued on this branch (the `postmessage` posture class carries the weaker data-leak/non-executing verdict).",
+      "blocking_work": "COVERAGE, not a missing oracle: the DOM_EXECUTION oracle and the gated cross-origin headless-browser delivery both exist and mint the FACT today. Raising coverage toward the (unreachable) CLEAN target requires exhaustively enumerating every registered message handler, every message-property name a handler might read, and every gadget shape across every reachable page; until that enumeration is complete a handler/shape not driven stays a LEAD, never a CLEAN.",
+      "oracle_version": "dom_execution",
+      "control_requirements": [
+        "warden_active_recon_gate",
+        "vigil_owned_cross_origin_sender",
+        "vigil_owned_unique_execution_canary",
+        "headless_dom_render_capture",
+        "origin_checked_benign_twin_control"
+      ],
+      "evidence_surface": "composite",
+      "implementation_refs": [
+        "engine/crucible/framework/v2/scanner/postmessage_exploited.py:confirm_postmessage_exploited",
+        "engine/crucible/framework/v2/verify/oracles.py:dom_execution_oracle"
+      ]
     }
   ]
 }

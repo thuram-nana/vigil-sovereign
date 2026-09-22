@@ -365,6 +365,13 @@ _STANDARDS: dict[str, ControlMapping] = {
     #      prototype-pollution primitive → honest empty. ----
     "prototype_pollution": _m("A08:2021", ("CWE-1321",), pci=_SDLC_PCI, soc2=_SDLC_SOC2, iso=_SDLC_ISO,
                               attack=()),
+    # ---- Cross-origin postMessage ACHIEVED-EXPLOIT (Wave-2.3; CWE-79 XSS-family delivered via postMessage).
+    #      The strictly-stronger EXECUTION dual of the `postmessage` POSTURE class above: an attacker gadget
+    #      delivered from an untrusted origin EXECUTES in the target's DOM → OWASP A03:2021 (Injection / XSS),
+    #      the injection SDLC controls, ATT&CK T1059.007 (client-side JavaScript execution), same as the other
+    #      browser-confirmed XSS classes (dom_xss / stored_xss). ----
+    "postmessage_exploited": _m("A03:2021", ("CWE-79",), pci=_SDLC_PCI, soc2=_SDLC_SOC2, iso=_SDLC_ISO,
+                                attack=("T1059.007",)),
     # ---- LLM / AI application classes (OWASP LLM Top 10; ATT&CK has no clean web technique, ATLAS does) ----
     "prompt_injection": _m(None, ("CWE-1427",), pci=_SDLC_PCI, soc2=_SDLC_SOC2, iso=("A.8.28", "A.8.26"),
                            attack=("AML.T0051",)),

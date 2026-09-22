@@ -167,6 +167,61 @@ reflect();
 )
 
 # ---------------------------------------------------------------------------
+# Cross-origin postMessage achieved-exploit model (Wave 2.3). Three GET pages, each
+# registering a window "message" handler, differing only in how they treat an
+# untrusted-origin message:
+#   * /postmessage         — the VULNERABLE handler: it does NOT check event.origin and
+#                            routes the message to an EXECUTING sink (new Function for a
+#                            code-bearing object, innerHTML for an HTML string). A gadget
+#                            postMessage'd from a DIFFERENT (untrusted) origin executes —
+#                            the planted achieved-exploit.
+#   * /postmessage/origin-checked — the BENIGN TWIN: the SAME executing sinks, but the
+#                            handler first REJECTS any message whose event.origin is not
+#                            its own origin, so a cross-origin sender is dropped (this also
+#                            IS the same-origin-only fixture). Must never fire.
+#   * /postmessage/noexec  — the BENIGN TWIN: accepts ANY origin but routes the message to
+#                            a NON-executing sink (textContent), so it RECEIVES but never
+#                            executes. Must never fire.
+# All three are DELIBERATELY NOT linked from the index; the default GET-only benchmark crawl
+# never runs their client JS (no browser, and delivery needs VIGIL's cross-origin sender),
+# so `make gate` stays byte-identical. The FACT / non-fire is exercised only by the
+# deep-profile browser assertion (scanner/tests/test_postmessage_exploited_browser.py).
+_PM_VULN_BODY = r"""<h2>postMessage</h2><div id=sink></div><script>
+window.addEventListener('message', function(ev){
+  /* VULN: no ev.origin check — an untrusted origin's message is trusted */
+  var d = ev.data;
+  if (d && typeof d === 'object') {
+    if (typeof d.code === 'string') { try { (new Function(d.code))(); } catch(e){} return; }
+    if (typeof d.html === 'string') { document.getElementById('sink').innerHTML = d.html; return; }
+    if (typeof d.url === 'string')  { var a=document.createElement('a'); a.href=d.url; return; }
+  }
+  if (typeof d === 'string') {
+    /* an HTML sink for a string message: an <img onerror> / <svg onload> executes here */
+    document.getElementById('sink').innerHTML = d;
+  }
+}, false);
+</script>"""
+
+_PM_ORIGIN_CHECKED_BODY = r"""<h2>postMessage</h2><div id=sink></div><script>
+window.addEventListener('message', function(ev){
+  /* SAFE: reject any message not from THIS page's own origin (same-origin only) */
+  if (ev.origin !== window.location.origin) { return; }
+  var d = ev.data;
+  if (d && typeof d === 'object' && typeof d.code === 'string') { try { (new Function(d.code))(); } catch(e){} return; }
+  if (typeof d === 'string') { document.getElementById('sink').innerHTML = d; }
+}, false);
+</script>"""
+
+_PM_NOEXEC_BODY = r"""<h2>postMessage</h2><div id=sink></div><script>
+window.addEventListener('message', function(ev){
+  /* SAFE: accepts any origin but routes to a NON-executing sink (textContent) — it
+     RECEIVES the message but never executes it (the data-leak/posture residual). */
+  var d = ev.data;
+  document.getElementById('sink').textContent = (typeof d === 'string') ? d : JSON.stringify(d);
+}, false);
+</script>"""
+
+# ---------------------------------------------------------------------------
 # The boolean-blind SQLi model (a faithful reuse of the vulnerable matcher from
 # verify.confirmation): user input is string-built into ``name = '<q>'`` and split
 # on `` OR ``, so an `` ' OR '1'='1`` tautology breaks out and selects every row,
@@ -407,6 +462,29 @@ class BenchmarkHandler(BaseHTTPRequestHandler):
         # fires on the ACHIEVED polluted state, never on mere presence. Object.prototype
         # stays clean, so this must NEVER fire.
         self._respond(200, _page("Proto", _PROTO_SAFE_BODY))
+
+    # -- cross-origin postMessage achieved-exploit (Wave 2.3) --------------
+
+    def _postmessage(self) -> None:
+        # PLANTED BUG (cross-origin postMessage XSS). The handler does NOT check
+        # event.origin and routes the message to an EXECUTING sink, so a gadget
+        # postMessage'd from VIGIL's own attacker-origin sender (a DIFFERENT origin)
+        # executes. Unlinked from the index and reached only by the deep-profile browser
+        # assertion, so the default GET-only crawl (and `make gate`) never runs its JS.
+        self._respond(200, _page("postMessage", _PM_VULN_BODY))
+
+    def _postmessage_origin_checked(self) -> None:
+        # SAFE (postMessage BENIGN TWIN / same-origin-only). The SAME executing sinks, but
+        # the handler REJECTS any message whose origin is not its own — a cross-origin
+        # sender is dropped, so this must NEVER fire the DOM-execution oracle.
+        self._respond(200, _page("postMessage", _PM_ORIGIN_CHECKED_BODY))
+
+    def _postmessage_noexec(self) -> None:
+        # SAFE (postMessage BENIGN TWIN / receives-but-does-not-execute). Accepts any
+        # origin but routes the message to a NON-executing sink (textContent) — it RECEIVES
+        # the message (the data-leak/posture residual) but never executes it, so it must
+        # NEVER fire the DOM-execution oracle.
+        self._respond(200, _page("postMessage", _PM_NOEXEC_BODY))
 
     # -- planted-bug routes ------------------------------------------------
 
@@ -660,6 +738,13 @@ _ROUTES = {
     # default corpus + signed baseline stay byte-identical.
     "/proto": BenchmarkHandler._proto,
     "/proto/safe": BenchmarkHandler._proto_safe,
+    # Cross-origin postMessage achieved-exploit pages (Wave 2.3). DELIBERATELY NOT linked
+    # from the index; the default GET-only crawl never runs their client JS (no browser, and
+    # a fire needs VIGIL's cross-origin sender), so the default corpus + signed baseline stay
+    # byte-identical.
+    "/postmessage": BenchmarkHandler._postmessage,
+    "/postmessage/origin-checked": BenchmarkHandler._postmessage_origin_checked,
+    "/postmessage/noexec": BenchmarkHandler._postmessage_noexec,
 }
 
 # POST surfaces (state-changing writes). Only the stored-XSS write surface A; the

@@ -1496,6 +1496,13 @@ def _redrive_branch_for(bug_class: str) -> "Optional[str]":
         # by the FACT-capable PROTOTYPE_POLLUTION branch (verify/oracles.py:prototype_pollution_oracle).
         # A non-fire / no channel (browserless) keeps the claim a LEAD.
         "prototype_pollution": "prototype_pollution.achieved_state",
+        # Wave 2.3 — cross-origin postMessage achieved-exploit re-drive: a canary gadget VIGIL
+        # postMessage'd from its OWN attacker-origin sender page (a genuinely different origin) to the
+        # target handler + a headless-browser observation of the gadget EXECUTING, adjudicated by the
+        # FACT-capable DOM_EXECUTION branch (verify/oracles.py:dom_execution_oracle). A non-fire / no
+        # channel (browserless, or a handler that checks event.origin / does not execute) keeps the claim
+        # a LEAD (the weaker `postmessage` posture class carries the data-leak/non-executing residual).
+        "postmessage_exploited": "postmessage_exploited.dom_execution",
     }
     branch = mapping.get(normalize_bug_class(bug_class))
     return branch if branch in branch_ids() else None
