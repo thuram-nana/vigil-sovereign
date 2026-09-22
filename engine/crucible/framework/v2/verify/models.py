@@ -378,6 +378,24 @@ class OracleKind(str, enum.Enum):
     # appeared in the DOM". A page that merely REFLECTS the key without assigning it onto Object.prototype
     # (the benign twin), a mismatched value, or a benign-key that is NOT undefined (ambient) do NOT fire.
     PROTOTYPE_POLLUTION = "prototype_pollution"
+    # Wave-2.4 CSP PERMISSIVE-POLICY POSTURE — the posture-FACT dual of the achieved CSP bypass (which
+    # reuses DOM_EXECUTION and needs a browser). Like the CLICKJACKING_POSTURE / POSTMESSAGE_POSTURE members
+    # above, this proves a MISSING/WEAK defense from a RETAINED artifact alone — here the enforced
+    # Content-Security-Policy response HEADER — offline, ZERO traffic, no browser (the header parse is
+    # offline-re-derivable). Like the AEGIS / posture members above, this is an ADDITIVE append reachable
+    # ONLY via its explicit BUG_CLASS_ORACLES row (keyed on the `csp_control` ctx field NO benchmark/scan/
+    # engage finding carries), never via the frozen unknown-class fallback (verifier._ALL_ORACLES stays
+    # EXACTLY 15), so `make gate` stays byte-identical. CSP_POSTURE fires (0.9) ONLY when the effective
+    # script-src (script-src, else default-src) of the ENFORCED (non-report-only) policy carries a real
+    # permissive weakness a browser would honor: `'unsafe-inline'` WITHOUT a neutralizing nonce-/hash-
+    # companion (a nonce/hash NEUTRALIZES unsafe-inline per the CSP spec — VIGIL honors that and does NOT
+    # flag it then), a wildcard `*` source, an `http:` or `data:` scheme source, or `'unsafe-eval'`. The
+    # evidence reads as the PARSED weakness ("script-src carries 'unsafe-inline' with no nonce/hash"), NOT a
+    # proven achieved exploit. A well-formed (nonce-based, no permissive token) policy, a report-only header,
+    # or a policy with no effective script-src do NOT fire (near-zero-FP). DISTINCT from the passive.py
+    # LEAD-level csp-unsafe-inline check: CSP_POSTURE is the FACT-capable posture oracle over the retained
+    # header, re-derivable offline.
+    CSP_POSTURE = "csp_posture"
 
 
 class OracleProbe(BaseModel):

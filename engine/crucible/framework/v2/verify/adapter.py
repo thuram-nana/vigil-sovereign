@@ -404,6 +404,19 @@ class FindingContext(BaseModel):
     # benchmark/scan/engage finding carries proto_pollution, so appending it leaves the gate byte-identical;
     # routes to the PROTOTYPE_POLLUTION kind via its distinct `proto_pollution` ctx key.
     proto_pollution: dict[str, Any] | None = None
+    # csp_posture_oracle (Wave-2.4 CSP permissive-policy POSTURE-FACT — CWE-693/CWE-1021). The RETAINED
+    # enforced CSP response header + report-only flag: {header, report_only, url, rule}. The oracle re-parses
+    # the effective script-src (script-src else default-src) offline — no browser — and fires ONLY on a real
+    # permissive weakness ('unsafe-inline' with no neutralizing nonce/hash, a wildcard '*', an http:/data:
+    # scheme source, or 'unsafe-eval'). No benchmark/scan/engage finding carries csp_control, so appending it
+    # leaves the gate byte-identical; routes to the CSP_POSTURE kind via its distinct `csp_control` ctx key.
+    csp_control: dict[str, Any] | None = None
+    # the achieved CSP-bypass guard (Wave-2.4). Alongside the DOM_EXECUTION fields (dom_binding_calls/
+    # dom_canary) the `csp_bypass` class also retains {header, report_only} of the ENFORCED CSP the execution
+    # DEFIED, so the DOM_EXECUTION dispatch arm can re-derive OFFLINE that the policy purported to block the
+    # execution (a genuine bypass) — a no-CSP / permissive-CSP / report-only execution is plain DOM-XSS, not a
+    # bypass. No benchmark/scan/default finding carries csp_block_control, so appending it is inert on the gate.
+    csp_block_control: dict[str, Any] | None = None
     # jwt_forgery_oracle (Workstream-B: a captured JWT is STRUCTURALLY FORGEABLE — judged on the token
     # ALONE, offline, zero traffic). jwt_token is the captured token string; jwt_candidate_keys are the
     # supplied secrets / RSA public keys the HMAC-reproduction proof is tried against (a weak-secret
@@ -1123,6 +1136,48 @@ class FindingContext(BaseModel):
         if source not in (None, ""):
             retained["handler_source"] = _coerce_text(source)
         return cls(bug_class=bug_class, postmessage_control=retained)
+
+    @classmethod
+    def from_csp_control(
+        cls, control: Mapping[str, Any], *, bug_class: str = "csp_posture"
+    ) -> "FindingContext":
+        """A RETAINED CSP response header (+ report-only flag) for the CSP posture oracle (Wave-2.4). The
+        oracle re-parses the effective script-src (script-src else default-src) over the retained header
+        ALONE — offline, no browser — and fires only on the actual permissive weakness, so a scanner's
+        say-so is a FACT only by the actual parsed policy. The header is retained verbatim (the oracle
+        re-parses it); ``report_only`` is retained STRICTLY as a bool. JSON-safe + deterministic."""
+        src = dict(control or {}) if isinstance(control, Mapping) else {}
+        retained: dict[str, Any] = {}
+        for k in ("rule", "url", "header"):
+            if src.get(k) not in (None, ""):
+                retained[k] = _coerce_text(src.get(k))
+        if "report_only" in src:
+            retained["report_only"] = bool(src.get("report_only"))
+        return cls(bug_class=bug_class, csp_control=retained)
+
+    @classmethod
+    def from_csp_bypass(
+        cls,
+        binding_calls: Sequence[Any],
+        canary: str,
+        csp_header: str,
+        *,
+        report_only: bool = False,
+        bug_class: str = "csp_bypass",
+    ) -> "FindingContext":
+        """The DOM-execution readback PLUS the retained enforced CSP the execution DEFIED, for the achieved
+        CSP-bypass class (Wave-2.4). Reuses the DOM_EXECUTION oracle (``binding_calls``/``canary`` — the
+        same unforgeable execution signal ``from_dom_execution`` carries) and additionally retains the
+        ENFORCED CSP header so the guarded dispatch can re-derive OFFLINE that the policy's script-src
+        purported to block the execution — a genuine bypass, never a no-CSP/permissive DOM-XSS relabelled.
+        ``report_only`` is retained as a bool (a report-only header enforces nothing, so it can never mint a
+        bypass). JSON-safe + deterministic."""
+        return cls(
+            bug_class=bug_class,
+            dom_binding_calls=[_coerce_text(c) for c in (binding_calls or [])],
+            dom_canary=_coerce_text(canary),
+            csp_block_control={"header": _coerce_text(csp_header), "report_only": bool(report_only)},
+        )
 
     @classmethod
     def from_jwt_token(
@@ -1875,6 +1930,10 @@ class FindingContext(BaseModel):
             ctx["postmessage_control"] = self.postmessage_control
         if self.proto_pollution is not None:
             ctx["proto_pollution"] = self.proto_pollution
+        if self.csp_control is not None:
+            ctx["csp_control"] = self.csp_control
+        if self.csp_block_control is not None:
+            ctx["csp_block_control"] = self.csp_block_control
         if self.jwt_token is not None:
             ctx["jwt_token"] = self.jwt_token
             if self.jwt_candidate_keys is not None:

@@ -78,6 +78,9 @@ _ORACLE_FNS: dict[OracleKind, tuple[Callable[..., Any], ...]] = {
     OracleKind.POSTMESSAGE_POSTURE: (oracles.postmessage_posture_oracle,),
     # Wave-2.2 client-side prototype pollution (achieved-state).
     OracleKind.PROTOTYPE_POLLUTION: (oracles.prototype_pollution_oracle,),
+    # Wave-2.4 CSP permissive-policy posture (retained-header parse; the achieved bypass reuses
+    # DOM_EXECUTION and so needs no _ORACLE_FNS entry of its own).
+    OracleKind.CSP_POSTURE: (oracles.csp_posture_oracle,),
 }
 
 

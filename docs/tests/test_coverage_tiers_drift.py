@@ -54,17 +54,19 @@ def test_both_documents_match_the_generated_block() -> None:
     assert problems == [], "coverage-tiers drift:\n" + "\n".join(problems)
 
 
-def test_the_reconciled_numbers_are_3_2_14_23() -> None:
+def test_the_reconciled_numbers_are_3_2_14_24() -> None:
     """Pin the reconciled truth. It was 3/2/13/20; W16-STD-5 added THREE fixtures-tier client-side
     posture detectors (clickjacking / CSRF / postMessage), so the fixtures column moved 20 -> 23; then
     Wave 2.2 added ONE local-tier achieved-state detector (client-side prototype pollution — a real
-    headless browser reading back Object.prototype), so the loopback column moved 13 -> 14.
+    headless browser reading back Object.prototype), so the loopback column moved 13 -> 14; then Wave 2.4
+    added ONE fixtures-tier posture detector (CSP permissive-policy — a retained-header parse, the sibling
+    of the clickjacking / CSRF / postMessage posture detectors), so the fixtures column moved 23 -> 24.
 
     Derived, not asserted blind — the counts come from the registry-grounded source; this states the
     value that reconciliation landed on so a future edit that changes an honesty number is loud."""
     counts = g.validate()
     assert (counts["external"], counts["own_infrastructure"], counts["local"], counts["fixtures"]) \
-        == (3, 2, 14, 23)
+        == (3, 2, 14, 24)
 
 
 def test_the_inventory_inline_quotable_row_matches_the_source() -> None:
@@ -129,7 +131,7 @@ def test_the_sentence_is_generated_not_hardcoded() -> None:
     moved = next(d for d in src["detectors"] if d["tier"] == "local")
     moved["tier"] = "fixtures"
     sentence = g.render_sentence(src)
-    assert "13 loopback" in sentence and "24 fixtures-only" in sentence   # the counts followed the move (14→13 loopback, 23→24 fixtures)
+    assert "13 loopback" in sentence and "25 fixtures-only" in sentence   # the counts followed the move (14→13 loopback, 24→25 fixtures)
     assert "14 loopback" not in sentence
 
 
@@ -160,7 +162,7 @@ def test_generation_is_real_not_hardcoded() -> None:
     moved = next(d for d in src["detectors"] if d["tier"] == "local")
     moved["tier"] = "fixtures"
     counts = g.validate(src)
-    assert counts["local"] == 13 and counts["fixtures"] == 24     # 14->13 local, 23->24 fixtures, on purpose
+    assert counts["local"] == 13 and counts["fixtures"] == 25     # 14->13 local, 24->25 fixtures, on purpose
     assert "| 13 |" in g.render_block(src)
 
 
