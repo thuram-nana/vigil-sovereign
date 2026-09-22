@@ -32,19 +32,33 @@ def test_fires_when_fixed_id_survives_login_and_authenticates() -> None:
     assert "fixation" in sig.evidence.lower() and _S0 in sig.evidence
 
 
-def test_rotation_at_login_does_not_fire_and_is_a_conclusive_clean() -> None:
-    # S1 != S0 — the app issued a fresh session id at login (the correct defense).
-    sig = session_fixation_oracle(_obs(post_auth_id="rot_" + "00" * 16))
+def test_rotation_with_dead_fixed_id_is_a_conclusive_clean() -> None:
+    # S1 != S0 AND the VIGIL-fixed id S0 no longer authenticates ⇒ the app rotated AND invalidated the
+    # pre-auth id (the correct defense) — a channel-confirmed clean.
+    sig = session_fixation_oracle(_obs(post_auth_id="rot_" + "00" * 16, authenticated_after_login=False))
     assert not sig.fired
-    assert sig.conclusive is True           # a channel-confirmed defense, not an inconclusive
+    assert sig.conclusive is True
+    assert "rotat" in sig.evidence.lower()
+
+
+def test_rotation_but_fixed_id_still_live_is_inconclusive_never_a_false_clean() -> None:
+    # A value rotation ALONE is not proof of defense: an app can rotate the cookie VALUE yet leave the
+    # VIGIL-fixed pre-auth id S0 still valid (a REAL fixation). The oracle must NOT round that to a clean —
+    # and, because a live-S0 rotated record is indistinguishable from a hand-forged rotation, it does not
+    # mint either: it is INCONCLUSIVE (never a false CLEAN, never a false FACT).
+    sig = session_fixation_oracle(_obs(post_auth_id="rot_" + "00" * 16, authenticated_after_login=True))
+    assert not sig.fired
+    assert sig.conclusive is False
     assert "rotat" in sig.evidence.lower()
 
 
 def test_survived_but_not_authenticated_does_not_fire() -> None:
     sig = session_fixation_oracle(_obs(authenticated_after_login=False))
     assert not sig.fired and sig.conclusive is True
+    # None = no positive authenticated-state discriminator was available ⇒ undecidable ⇒ INCONCLUSIVE
+    # (never rounded to a clean, never to a FACT).
     sig2 = session_fixation_oracle(_obs(authenticated_after_login=None))
-    assert not sig2.fired
+    assert not sig2.fired and sig2.conclusive is False
 
 
 def test_server_set_non_sentinel_id_refuses_and_is_inconclusive() -> None:

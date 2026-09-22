@@ -188,13 +188,28 @@ def mint_session_sentinel() -> str:
     return "sfx_" + secrets.token_hex(16)
 
 
-def _is_authenticated(resp: object, login: "LoginSequence") -> bool:
-    """A POSITIVE authenticated-state test over a protected-page response, reusing the operator's login spec:
-    NOT logged-out (status not in ``logged_out_statuses``, no ``logged_out_markers`` in the body) AND, when a
-    ``success_marker`` is supplied, that marker present. Requiring the success marker (when given) keeps the
-    FACT resting on positive evidence that the id is a LIVE authenticated session, not merely a 200."""
+def _is_authenticated(resp: object, login: "LoginSequence") -> bool | None:
+    """A POSITIVE authenticated-state test over a protected-page response, reusing the operator's login spec.
+
+    TRI-STATE — the distinction is load-bearing for soundness:
+
+      * ``True``  — a positive authenticated-state discriminator confirmed a LIVE authenticated session: the
+        ``success_marker`` is present, or (when only ``logged_out_markers`` were supplied) the response is a
+        non-logged-out 2xx/3xx;
+      * ``False`` — a discriminator was available and decisively says NOT authenticated (a logged-out
+        status/marker, or the ``success_marker`` absent);
+      * ``None``  — NO positive authenticated-state discriminator was supplied (NEITHER ``success_marker`` NOR
+        ``logged_out_markers``). There is then nothing that distinguishes a live authenticated page from an
+        unauthenticated login form served at HTTP 200, so we FAIL CLOSED to "unknown" rather than scoring a
+        bare 2xx/3xx as authenticated. The caller must NOT mint a FACT off this (it degrades to INCONCLUSIVE).
+
+    Failing closed here is the fix for the marker-absent degeneration: a bare 200 is not evidence of an
+    authenticated session, and a session-fixation FACT must rest on positive proof the fixed id is LIVE."""
+    # No positive authenticated-state discriminator at all ⇒ cannot decide ⇒ unknown (never True on a status).
+    if login.success_marker is None and not login.logged_out_markers:
+        return None
     if not isinstance(resp, dict):
-        return False
+        return None
     status = int(resp.get("status", 0))
     if status in login.logged_out_statuses:
         return False
@@ -203,6 +218,8 @@ def _is_authenticated(resp: object, login: "LoginSequence") -> bool:
         return False
     if login.success_marker is not None:
         return login.success_marker in body
+    # Only logged_out_markers were supplied (no success_marker): a non-logged-out 2xx/3xx is
+    # positive-by-absence evidence the id reached an authenticated state.
     return 200 <= status < 400
 
 
@@ -218,16 +235,22 @@ def confirm_session_fixation(
 
     VIGIL FIXES a unique high-entropy sentinel id S0 as the ``session_cookie`` value BEFORE authenticating,
     runs the operator's login sequence through the gated ``send`` carrying S0, then observes the session id in
-    effect AFTER login (S1). Finally it presents S1 to a protected page and tests whether it reaches an
-    authenticated state. The returned :class:`FindingContext` routes to the deterministic
-    ``session_fixation_oracle``, which fires ONLY when S1 == S0 (the client-fixed id SURVIVED login) AND S1
-    authenticates — the achieved fixation state.
+    effect AFTER login (S1). Finally — the SOUND positive test — it re-presents the VIGIL-fixed id **S0**
+    (not merely S1) to a protected page and tests whether S0 STILL reaches an authenticated state after login.
+    ``authenticated_after_login`` records that S0 re-probe as a TRI-STATE (``True`` live / ``False`` dead /
+    ``None`` undecidable). The returned :class:`FindingContext` routes to the deterministic
+    ``session_fixation_oracle``, which fires ONLY when the VIGIL-fixed id survived unrotated (S1 == S0) AND
+    S0 still authenticates — the achieved fixation state.
 
-    An app that ROTATES the session id at login (issues a new ``Set-Cookie`` with a different value ⇒ S1 !=
-    S0 — the correct defense) does NOT fire. Returns ``None`` only when no channel was established (a
-    non-dict login response); every other outcome is adjudicated by the oracle (a non-fire is a
-    channel-confirmed clean or an inconclusive, never a false CLEAN). All traffic rides the injected ``send``
-    (the scope/charter/kill-switch-gated executor); nothing here weakens the boundary."""
+    Re-probing S0 directly (rather than trusting S1==S0 as a rotation proxy) is deliberate: an app can rotate
+    the cookie VALUE at login yet leave the pre-auth-fixed id S0 still valid — a REAL fixation a value check
+    would miss. Probing S0 yields ``False`` for a genuinely-defended rotate (S0 is dead → a channel-confirmed
+    CLEAN) and ``True`` for a value-rotation-but-S0-valid app (the oracle refuses to CLEAN that — never a
+    false clean). A positive authenticated-state discriminator (``success_marker`` or ``logged_out_markers``)
+    is REQUIRED to mint: absent it the S0 probe is ``None`` and the oracle returns INCONCLUSIVE, never a FACT
+    and never a CLEAN. Returns ``None`` only when no channel was established (a non-dict login response);
+    every other outcome is adjudicated by the oracle. All traffic rides the injected ``send`` (the
+    scope/charter/kill-switch-gated executor); nothing here weakens the boundary."""
     s0 = sentinel_id or mint_session_sentinel()
 
     # 1. VIGIL fixes the session id to S0 BEFORE auth, then runs the login sequence carrying it.
@@ -247,12 +270,14 @@ def confirm_session_fixation(
     jar.update_from_headers([(str(k), str(v)) for k, v in login_headers_resp])
     s1 = jar.get(session_cookie)
 
-    # 3. Does S1 authenticate a protected request? (positive authenticated-state test)
-    authenticated = False
-    if s1:
-        probe = HttpRequest(method="GET", url=protected_url,
-                            headers=[("Cookie", f"{session_cookie}={s1}")], body=None)
-        authenticated = _is_authenticated(send(probe), login)
+    # 3. SOUND fixation test: does the ORIGINAL VIGIL-fixed id S0 STILL authenticate a protected request
+    #    AFTER login? This is the definition of the achieved fixation state — and, unlike an S1==S0 value
+    #    check, it also exposes a value-rotating app that leaves S0 valid, and yields a genuine CLEAN
+    #    (S0 dead) for a real rotate defense. Tri-state: True live / False dead / None undecidable.
+    authenticated = _is_authenticated(
+        send(HttpRequest(method="GET", url=protected_url,
+                         headers=[("Cookie", f"{session_cookie}={s0}")], body=None)),
+        login)
 
     return FindingContext.from_session_fixation(
         sentinel_id=s0, post_auth_id=s1, authenticated_after_login=authenticated,

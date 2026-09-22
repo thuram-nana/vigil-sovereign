@@ -105,3 +105,48 @@ def test_a_tampered_post_auth_id_no_longer_confirms() -> None:
     d["session_fixation"]["post_auth_id"] = "rot_deadbeefdeadbeefdeadbeefdeadbeef"  # forge a rotation
     tampered = FindingContext.model_validate(d)
     assert not OracleVerifier().confirm(tampered.to_verifier_context()).confirmed
+
+
+def test_no_fact_when_no_positive_auth_discriminator_is_supplied() -> None:
+    # SLICE 3.2 regression (marker-absent degeneration — the path the other tests never exercise): when the
+    # operator omits BOTH success_marker AND logged_out_markers there is no positive authenticated-state
+    # discriminator, so a bare 200 protected page is NOT evidence of an authenticated session. Against a
+    # NON-fixation app that never touches the VIGIL-fixed SESSION cookie (S1 == S0) and serves the protected
+    # URL as a 200 login form, the old code scored 'authenticated' and minted a false CWE-384 FACT. It must
+    # now be INCONCLUSIVE — never confirmed.
+    def non_fixation_send(req: HttpRequest) -> dict:
+        # login: 200, sets NO SESSION cookie (auths via a different mechanism); never overwrites SESSION.
+        # protected page: a 200 login form for the (unauthenticated) fixed id.
+        if req.method == "POST":
+            return {"status": 200, "headers": [], "body": "<html>ok</html>"}
+        return {"status": 200, "headers": [], "body": "<html><h1>Please log in</h1></html>"}
+
+    login = LoginSequence(url="http://app/login", method="POST", body="user=a&password=b")  # NO markers
+    assert login.success_marker is None and login.logged_out_markers == ()
+    ctx = confirm_session_fixation(non_fixation_send, login=login, session_cookie="SESSION",
+                                   protected_url="http://app/account")
+    assert ctx is not None
+    rec = ctx.session_fixation
+    assert rec["post_auth_id"] == rec["sentinel_id"]      # the fixed id was NOT rotated (S1 == S0)
+    assert rec["authenticated_after_login"] is None       # undecidable — no positive discriminator
+    assert not OracleVerifier().confirm(ctx.to_verifier_context()).confirmed   # NO false FACT
+    # the retained record re-verifies to the SAME non-confirmation (a stable, honest INCONCLUSIVE)
+    rebuilt = FindingContext.model_validate(ctx.model_dump())
+    assert not OracleVerifier().confirm(rebuilt.to_verifier_context()).confirmed
+
+
+def test_marker_absent_yields_no_fact_even_against_the_vulnerable_flow() -> None:
+    # Even against the genuinely-vulnerable planted flow, dropping the success_marker removes the positive
+    # authenticated-state discriminator, so VIGIL cannot soundly mint — an honest INCONCLUSIVE (a safe false
+    # negative) beats a FACT it cannot prove. (Compare test_planted_fixation_flow_confirms_a_fact, which
+    # supplies the marker and DOES confirm.)
+    with serve() as base:
+        ctx = confirm_session_fixation(
+            _send,
+            login=LoginSequence(url=f"{base}/sessfix/login", method="POST", body="user=admin&password=admin"),
+            session_cookie="SESSION",
+            protected_url=f"{base}/sessfix/account",
+        )
+    assert ctx is not None
+    assert ctx.session_fixation["authenticated_after_login"] is None
+    assert not OracleVerifier().confirm(ctx.to_verifier_context()).confirmed

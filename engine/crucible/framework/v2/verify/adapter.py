@@ -1807,10 +1807,12 @@ class FindingContext(BaseModel):
 
         ``sentinel_id`` (S0) is the UNIQUE high-entropy id VIGIL chose and set as the session cookie BEFORE
         running the operator login sequence; ``post_auth_id`` (S1) is the session-cookie value in effect AFTER
-        login; ``authenticated_after_login`` is whether a protected request presenting S1 reached an
-        authenticated state. The oracle confirms session fixation ONLY when S1 == S0 (the client-fixed id
-        SURVIVED login) AND the surviving id authenticates — the achieved fixation state, never that a cookie
-        was merely set. An app that rotates the id (S1 != S0) does not fire (the correct defense)."""
+        login; ``authenticated_after_login`` is the TRI-STATE re-probe of whether the VIGIL-fixed id **S0**
+        still reaches an authenticated state after login (``True`` live / ``False`` dead / ``None`` = no
+        positive authenticated-state discriminator was available, so it could not be decided). The oracle
+        confirms session fixation ONLY when S1 == S0 (the fixed id survived unrotated) AND S0 still
+        authenticates — the achieved fixation state, never that a cookie was merely set. A rotated value with a
+        dead S0 is a clean; a rotated-but-live S0, a missing S1, or a ``None`` probe are inconclusive."""
         return cls(
             bug_class=bug_class,
             session_fixation={

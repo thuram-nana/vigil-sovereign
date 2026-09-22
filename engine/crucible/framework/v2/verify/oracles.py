@@ -1485,13 +1485,14 @@ def prototype_pollution_oracle(observed: Any) -> OracleSignal:
 # 3c. Session fixation — a VIGIL-fixed pre-auth session id survives login (achieved-state)
 # ---------------------------------------------------------------------------
 
-# VIGIL per-run session-fixation SENTINEL id shape (scanner.session mints ``sfx_<token_hex>``). Requiring
-# this shape here — not merely a length floor — makes the oracle's STANDALONE re-fire (its certificate)
-# SELF-CONTAINED: a match can ONLY be the high-entropy id VIGIL chose and DROVE IN before authenticating, so
-# the FACT can never be minted from a server-issued session value (which does not carry the marker). This is
-# exactly the guard that distinguishes "the app honoured a client-fixed id" (the fixation weakness) from "the
-# app issued its own id" (a server-set id degrades to a weaker LEAD, never this FACT).
-_SFX_SENTINEL_RE = re.compile(r"^sfx_[0-9a-f]{16,}$")
+# VIGIL per-run session-fixation SENTINEL id shape (scanner.session mints ``sfx_`` + ``token_hex(16)`` = 32
+# lowercase-hex chars ⇒ 128 bits). Requiring this shape here — pinned to the actual 128-bit mint, not a loose
+# 16-hex floor — makes the oracle's STANDALONE re-fire (its certificate) SELF-CONTAINED: a match can ONLY be
+# the high-entropy id VIGIL chose and DROVE IN before authenticating, so the FACT can never be minted from a
+# server-issued session value (which does not carry the marker). This is exactly the guard that distinguishes
+# "the app honoured a client-fixed id" (the fixation weakness) from "the app issued its own id" (a server-set
+# id degrades to a weaker LEAD, never this FACT).
+_SFX_SENTINEL_RE = re.compile(r"^sfx_[0-9a-f]{32,}$")
 
 
 def session_fixation_oracle(observed: Any) -> OracleSignal:
@@ -1504,26 +1505,33 @@ def session_fixation_oracle(observed: Any) -> OracleSignal:
       * ``sentinel_id`` (S0) is the UNIQUE high-entropy id VIGIL chose and set as the session cookie BEFORE
         running the login sequence (the attacker-fixed id);
       * ``post_auth_id`` (S1) is the session-cookie value in effect AFTER the login sequence completed;
-      * ``authenticated_after_login`` is whether a protected request presenting S1 reached an AUTHENTICATED
-        state (a login success marker present / a logged-out marker absent) — i.e. S1 is a live session.
+      * ``authenticated_after_login`` is the TRI-STATE re-probe of whether the VIGIL-fixed id **S0** STILL
+        reaches an AUTHENTICATED state after login (a login success marker present / a logged-out marker
+        absent): ``True`` = S0 is a live authenticated session, ``False`` = S0 is dead, ``None`` = the run had
+        NO positive authenticated-state discriminator (neither ``success_marker`` nor ``logged_out_markers``)
+        so authentication could not be decided — a bare 2xx/3xx is NOT taken as authenticated.
 
     The oracle judges the ACHIEVED STATE, never that a cookie was merely set:
 
       * ``sentinel_id`` MUST match VIGIL's per-run sentinel SHAPE (``sfx_<hex>``) — a SELF-CONTAINED
         soundness guard so the certificate can only be satisfied by the id VIGIL drove in, never a
         server-issued value;
-      * ``post_auth_id == sentinel_id`` — the client-fixed id SURVIVED login (the app did NOT rotate the
-        session id at authentication). An app that ROTATES the id (S1 != S0 — the correct defense) does NOT
-        fire, and that non-fire is a CHANNEL-CONFIRMED clean of the fixation predicate (conclusive);
-      * ``authenticated_after_login is True`` — the surviving id is a genuinely authenticated session, not a
-        stale pre-auth token.
+      * ``post_auth_id == sentinel_id`` — the client-fixed id survived unrotated (the app did NOT rotate the
+        session-cookie VALUE at authentication);
+      * ``authenticated_after_login is True`` — the surviving fixed id is a genuinely authenticated session.
 
-    Conclusive semantics: when the sentinel shape is valid AND ``post_auth_id`` was observed, the login's
-    effect on the session id is a channel-confirmed observation, so a non-fire (rotation, or a surviving id
-    that does not authenticate) is a decisive clean — not an inconclusive non-detection. When the sentinel
-    shape is INVALID or ``post_auth_id`` is missing (the app never honoured the client-set id, or no channel
-    was established), the oracle is NON-conclusive: it refuses to mint AND refuses to clear — a server-set-only
-    id degrades to a weaker LEAD, never a false CLEAN."""
+    Conclusive semantics (never a false CLEAN):
+
+      * shape INVALID, ``post_auth_id`` MISSING, or ``authenticated_after_login is None`` (no discriminator)
+        ⇒ INCONCLUSIVE — refuse to mint AND refuse to clear;
+      * the VIGIL-fixed id survived unrotated but is DEAD (``authenticated_after_login is False``) ⇒ a
+        channel-confirmed CLEAN (conclusive);
+      * the session-cookie VALUE was ROTATED at login (``post_auth_id != sentinel_id``): if S0 is DEAD it is a
+        channel-confirmed CLEAN (the correct defense); but if S0 is STILL LIVE it is NOT a clean — an app can
+        rotate the value yet leave the fixed id valid (a real fixation), and the certificate cannot tell that
+        apart from a hand-forged rotation, so the oracle returns INCONCLUSIVE (never a false CLEAN, never a
+        FACT off a tamperable field);
+      * survived unrotated AND live ⇒ FIRE."""
     obs = observed if isinstance(observed, Mapping) else {}
     sentinel = _coerce_text(obs.get("sentinel_id")).strip()
     post_auth_raw = obs.get("post_auth_id")
@@ -1549,15 +1557,35 @@ def session_fixation_oracle(observed: Any) -> OracleSignal:
             evidence="no post-authentication session id was observed — cannot adjudicate fixation (inconclusive)",
             observed=base)
 
-    # The app ROTATED the session id at login (S1 != S0) — the correct defense. Channel-confirmed clean.
+    # No positive authenticated-state discriminator was available (neither success_marker nor
+    # logged_out_markers), so whether the fixed id is a LIVE session could not be decided — a bare 2xx/3xx is
+    # not evidence of authentication. Refuse to mint AND refuse to clear ⇒ INCONCLUSIVE (never a false CLEAN).
+    if authenticated is None:
+        return OracleSignal(
+            kind=OracleKind.ACHIEVED_STATE, fired=False, confidence=0.0, conclusive=False,
+            evidence=("no positive authenticated-state discriminator was available to decide whether the "
+                      "VIGIL-fixed id is a live session — cannot adjudicate fixation (inconclusive)"),
+            observed=base)
+
+    # The session-cookie VALUE was ROTATED at login (S1 != S0). Rotation ALONE is NOT proof of defense: an app
+    # can rotate the value yet leave the pre-auth-fixed id S0 valid (a real fixation). Only a re-probe showing
+    # S0 is DEAD is a channel-confirmed clean; a still-LIVE S0 under a rotated value is indistinguishable from
+    # a hand-forged rotation in the retained record, so we refuse to clear AND refuse to mint ⇒ INCONCLUSIVE.
     if post_auth != sentinel:
+        if authenticated is True:
+            return OracleSignal(
+                kind=OracleKind.ACHIEVED_STATE, fired=False, confidence=0.0, conclusive=False,
+                evidence=("session-cookie value was ROTATED at login yet the VIGIL-fixed pre-auth id still "
+                          "authenticates — a value rotation does not by itself prove the fixed id was "
+                          "invalidated; cannot conclusively clear (inconclusive)"),
+                observed={**base, "rotated": True, "authenticated_after_login": True})
         return OracleSignal(
             kind=OracleKind.ACHIEVED_STATE, fired=False, confidence=0.0, conclusive=True,
-            evidence=("session id was ROTATED at login (post-auth id differs from the VIGIL-fixed pre-auth "
-                      "id) — the app defends against fixation; did not fire"),
-            observed={**base, "rotated": True})
+            evidence=("session id was ROTATED at login and the VIGIL-fixed pre-auth id no longer authenticates "
+                      "— the app defends against fixation; did not fire"),
+            observed={**base, "rotated": True, "authenticated_after_login": authenticated})
 
-    # The fixed id survived but is not an authenticated session ⇒ no fixation risk. Channel-confirmed clean.
+    # The fixed id survived unrotated but is not an authenticated session ⇒ no fixation risk. Confirmed clean.
     if authenticated is not True:
         return OracleSignal(
             kind=OracleKind.ACHIEVED_STATE, fired=False, confidence=0.0, conclusive=True,
