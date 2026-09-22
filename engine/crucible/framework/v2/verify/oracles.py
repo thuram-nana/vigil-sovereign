@@ -3989,6 +3989,110 @@ def csrf_posture_oracle(observed_control: Any) -> OracleSignal:
                                   "token_present_status": present, "token_absent_status": absent})
 
 
+def _csrf_achieved_signal(fired: bool, *, evidence: str, observed: dict,
+                          conf: float = 0.9) -> OracleSignal:
+    # kind is the FROZEN ACHIEVED_STATE (never a new OracleKind — _ALL_ORACLES stays 15); reachable ONLY
+    # via the `csrf_achieved` BUG_CLASS_ORACLES row keyed on a fresh ctx key. `conclusive` is True ONLY on a
+    # fire: a fire is a decisive, channel-confirmed achieved cross-site state change; a NON-fire is
+    # UNINFORMATIVE here (no channel / a SameSite-protected cookie / an enforced token) — never a CLEAN, so
+    # this branch is positive-only (clean_capable:false), unlike the predicate/achieved_state modes.
+    return OracleSignal(kind=OracleKind.ACHIEVED_STATE, fired=fired,
+                        confidence=(conf if fired else 0.0), conclusive=fired,
+                        evidence=evidence, observed=observed)
+
+
+# a marker VIGIL mints per probe must be long enough that it cannot incidentally pre-exist in an
+# authoritative post-state readback (the runner uses a >=16-hex token; the oracle floors it at 8).
+_CSRF_MARKER_MIN_LEN = 8
+
+
+def csrf_achieved_oracle(observed_control: Any) -> OracleSignal:
+    """Fire on a control-DIFFERENTIAL proving an ACHIEVED cross-site state change — a re-derivation over
+    TWO retained AUTHORITATIVE post-state readbacks, never a scanner's say-so. ONE rule,
+    ``cross_site_state_change``, fires (0.9) ONLY when ALL hold:
+
+      * the method is state-changing (POST/PUT/PATCH/DELETE);
+      * ``cross_origin`` is exactly ``True`` — the state-changing request GENUINELY issued from a
+        cross-origin context (a distinct scheme+host+port), and ``ambient_only`` is exactly ``True`` —
+        it carried ONLY the ambient session cookies VIGIL's OWN authenticated session already held, with
+        NO attacker-supplied anti-CSRF token, custom header, or extra credential;
+      * a VIGIL-chosen UNIQUE per-probe ``marker`` (>= 8 chars, so it cannot pre-exist) appears in the
+        AUTHORITATIVE post-state readback taken AFTER the ambient-cookie cross-site request
+        (``with_cookie_state``);
+      * that SAME marker is ABSENT from the authoritative post-state readback of the NO-COOKIE control
+        (``no_cookie_state``) — the IDENTICAL cross-site request replayed WITHOUT the ambient cookies
+        (the control is issued FIRST, so a marker already present there attributes the change to
+        something other than the cookie and REFUSES).
+
+    A state change reached WITH the ambient cookie but NOT without it proves the write was authorized
+    SOLELY by the ambient session cookie riding cross-site — an achieved CSRF. This DISSOLVES the
+    SameSite objection that got the naive version refused: a ``Lax``/``Strict`` cookie is NOT sent
+    cross-site, so the with-cookie request produces no state change, the marker never appears in
+    ``with_cookie_state``, and the oracle does NOT fire (correct). An enforced anti-CSRF token likewise
+    rejects the token-less cross-site write → no state change → no fire. An endpoint that accepts the
+    write with NO cookie at all (a merely-unauthenticated endpoint, not CSRF) leaves the marker in
+    ``no_cookie_state`` → no fire. A safe method, a request not marked cross-origin / ambient-only, a
+    trivial/short marker, a marker missing from the with-cookie readback, or a marker also present in
+    the no-cookie control all REFUSE. Proves an ACHIEVED cross-site state change, NEVER merely that a
+    synchronizer token is unenforced (the weaker ``csrf`` posture class carries that residual). Pure +
+    deterministic; never raises."""
+    if not isinstance(observed_control, Mapping):
+        return _csrf_achieved_signal(False, evidence="no CSRF achieved-state evidence", observed={})
+    rule = _coerce_text(observed_control.get("rule")).strip().lower() or "cross_site_state_change"
+    if rule != "cross_site_state_change":
+        return _csrf_achieved_signal(
+            False, observed={"rule": rule},
+            evidence=f"unrecognised/lead-only CSRF-achieved rule {rule!r} (stays a lead)")
+    method = _coerce_text(observed_control.get("method")).strip().lower()
+    endpoint = _coerce_text(observed_control.get("endpoint")).strip()
+    where = (f" {method.upper()} {endpoint}").rstrip() if (method or endpoint) else ""
+    if method not in _STATE_CHANGING_METHODS:
+        return _csrf_achieved_signal(
+            False, observed={"rule": rule, "method": method or None},
+            evidence=(f"method {method!r} is not state-changing — an achieved CSRF is not applicable "
+                      "(REFUSE)"))
+    cross_origin = observed_control.get("cross_origin")
+    ambient_only = observed_control.get("ambient_only")
+    if cross_origin is not True or ambient_only is not True:
+        return _csrf_achieved_signal(
+            False, observed={"rule": rule, "cross_origin": cross_origin, "ambient_only": ambient_only},
+            evidence=("the request must be attested cross_origin=True AND ambient_only=True (issued "
+                      "cross-site carrying ONLY the ambient session cookies, no token/header) — the "
+                      "topology is UNRESOLVED (REFUSE)"))
+    marker = _coerce_text(observed_control.get("marker")).strip()
+    if len(marker) < _CSRF_MARKER_MIN_LEN:
+        return _csrf_achieved_signal(
+            False, observed={"rule": rule, "marker_len": len(marker)},
+            evidence=(f"the per-probe marker must be a VIGIL-chosen token of >= {_CSRF_MARKER_MIN_LEN} "
+                      "chars so it cannot pre-exist in the readback (REFUSE)"))
+    with_cookie = _coerce_text(observed_control.get("with_cookie_state"))
+    no_cookie = _coerce_text(observed_control.get("no_cookie_state"))
+    in_with = marker in with_cookie
+    in_no = marker in no_cookie
+    if not in_with:
+        return _csrf_achieved_signal(
+            False, observed={"rule": rule, "marker": marker, "in_with_cookie": in_with,
+                             "in_no_cookie": in_no},
+            evidence=(f"the marker does NOT appear in the authoritative post-state after the ambient-cookie "
+                      f"cross-site request{where} — no cross-site state change was reached (a SameSite "
+                      "cookie not sent cross-site, or an enforced token, would land here — correct non-fire)"))
+    if in_no:
+        return _csrf_achieved_signal(
+            False, observed={"rule": rule, "marker": marker, "in_with_cookie": in_with,
+                             "in_no_cookie": in_no},
+            evidence=("the marker ALSO appears in the NO-COOKIE control's post-state — the state change is "
+                      "NOT attributable to the ambient cookie (a merely-unauthenticated write, not CSRF) "
+                      "(REFUSE)"))
+    return _csrf_achieved_signal(
+        True, conf=0.9,
+        evidence=(f"a VIGIL-chosen unique marker reached the authoritative post-state after a cross-site "
+                  f"state-changing request{where} carrying ONLY the ambient session cookie, and is ABSENT "
+                  "from the no-cookie control's post-state — the write was authorized solely by the ambient "
+                  "cookie riding cross-site (an achieved CSRF)"),
+        observed={"rule": rule, "method": method, "endpoint": endpoint or None, "marker": marker,
+                  "in_with_cookie": in_with, "in_no_cookie": in_no})
+
+
 def _postmessage_signal(fired: bool, *, evidence: str, observed: dict, conf: float = 0.9) -> OracleSignal:
     return OracleSignal(kind=OracleKind.POSTMESSAGE_POSTURE, fired=fired,
                         confidence=(conf if fired else 0.0), evidence=evidence, observed=observed)

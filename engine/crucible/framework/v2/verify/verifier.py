@@ -348,6 +348,18 @@ BUG_CLASS_ORACLES: dict[str, tuple[OracleKind, ...]] = {
     # off-by-default; 0 requests through the default GET corpus) leaves the fallback + `make gate`
     # byte-identical.
     "csp_bypass": (OracleKind.DOM_EXECUTION,),
+    # Wave-3.3 CSRF ACHIEVED (scanner.csrf_achieved, gated-workflow, opt-in) — the strictly-stronger
+    # ACHIEVED-STATE dual of the `csrf` posture class above. A state-changing request issued CROSS-ORIGIN
+    # carrying ONLY the ambient session cookies of VIGIL's OWN authenticated session (no token/header),
+    # confirmed ONLY when a VIGIL-chosen unique marker reached the AUTHORITATIVE post-state WITH the ambient
+    # cookie but is ABSENT from a NO-COOKIE control's post-state — proving the write was authorized solely by
+    # the cookie riding cross-site (dissolving the SameSite objection: a Lax/Strict cookie is not sent
+    # cross-site ⇒ no state change ⇒ no fire). REUSES the frozen ACHIEVED_STATE kind (already in _ALL_ORACLES)
+    # via a fresh `csrf_achieved` ctx key no benchmark/scan/engage finding carries — so this row adds NO new
+    # OracleKind, the unknown-class fallback stays EXACTLY 15, and `make gate` stays byte-identical (the
+    # state-changing write is deep-only / gated through the 0.3 per-action approval, sending 0 requests
+    # through the default GET benchmark corpus). The generic no-post-state case stays the `csrf` posture-FACT.
+    "csrf_achieved": (OracleKind.ACHIEVED_STATE,),
 }
 
 # Spelling/format aliases folded onto canonical keys.
@@ -632,6 +644,13 @@ _ALIASES: dict[str, str] = {
     "csrf_posture": "csrf",
     "csrf_token_missing": "csrf",
     "missing_csrf_token": "csrf",
+    # Wave-3.3 CSRF-achieved spellings — the achieved-state cross-site state change (distinct canonical
+    # `csrf_achieved`, NOT folded onto the `csrf` posture class: an achieved exploit is a strictly stronger
+    # claim than the token-not-enforced posture).
+    "achieved_csrf": "csrf_achieved",
+    "csrf_achieved_state": "csrf_achieved",
+    "cross_site_state_change": "csrf_achieved",
+    "csrf_exploited": "csrf_achieved",
     "post_message": "postmessage",
     "post_message_misconfiguration": "postmessage",
     "postmessage_misconfiguration": "postmessage",
@@ -905,6 +924,15 @@ class OracleVerifier:
                 return oracles.achieved_state_oracle(
                     ctx["expected_state"], ctx["observed_state"]
                 )
+            # -- Wave-3.3 CSRF ACHIEVED — reuses the FROZEN ACHIEVED_STATE kind, but fires ONLY when the ctx
+            #    carries the fresh `csrf_achieved` key (the gated cross-site re-drive's retained control-vs-
+            #    treatment authoritative post-state differential). No benchmark/scan/engage finding carries
+            #    that key, so this branch is inert on the default gate path and `make gate` stays
+            #    byte-identical; an ordinary ACHIEVED_STATE finding (expected_state / predicate) is handled
+            #    by the arms above and never reaches here. Proves the ACHIEVED cross-site state change,
+            #    NEVER merely that a token is unenforced (the weaker `csrf` posture class).
+            if "csrf_achieved" in ctx:
+                return oracles.csrf_achieved_oracle(ctx["csrf_achieved"])
             return None
         if kind is OracleKind.SIDE_EFFECT:
             if "marker" in ctx and "observed_sink" in ctx:

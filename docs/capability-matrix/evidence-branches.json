@@ -1214,6 +1214,36 @@
         "engine/crucible/framework/v2/scanner/csp_bypass.py:confirm_csp_bypass",
         "engine/crucible/framework/v2/verify/oracles.py:dom_execution_csp_bypass_oracle"
       ]
+    },
+    {
+      "id": "csrf_achieved.achieved_state",
+      "check": "confirm_csrf_achieved",
+      "evidence": "A state-changing request (POST/PUT/PATCH/DELETE) VIGIL issued CROSS-ORIGIN (from a distinct scheme+host+port context) carrying ONLY the ambient session cookies its OWN authenticated session already held — no attacker-supplied anti-CSRF token, custom header, or extra credential — that reached an OBSERVABLE post-state change: a VIGIL-chosen unique per-probe marker (>= 8 chars, cannot pre-exist) appears in the AUTHORITATIVE post-state readback taken AFTER the ambient-cookie request AND is ABSENT from the readback of a NO-COOKIE control (the identical cross-site request replayed without the ambient cookies, issued FIRST). A fire proves the write was authorized SOLELY by the ambient session cookie riding cross-site — an achieved CSRF — not merely that a synchronizer token was unenforced (the weaker `csrf` posture class). The state-changing write is authorized by the 0.3 owner-signed per-action approval; the FACT is still adjudicated by the deterministic oracle.",
+      "fact_capable": true,
+      "clean_capable": false,
+      "preconditions": [
+        "channel_established"
+      ],
+      "limitation": "Soundness is total (a fire means the marker reached the authoritative post-state ONLY when the ambient cookie rode cross-site, attributed to THIS probe by the no-cookie control), but the class is gated-workflow: it requires a VIGIL-OWNED authenticated session and an operator-declared observable post-state (a bizlogic readback spec), and the write goes through the 0.3 per-action approval. This DISSOLVES the SameSite objection — a Lax/Strict cookie is not sent cross-site, so no state change is reached, the marker never appears, and the oracle correctly does NOT fire — but it also means a state change VIGIL cannot observe (no readback spec), an endpoint that accepts the write with no cookie at all (merely unauthenticated, not CSRF), or a session VIGIL does not own stays a LEAD/INCONCLUSIVE, never a false negative and never a CLEAN. A non-firing differential is uninformative (a protected endpoint, a not-sent SameSite cookie, or an unmodelled post-state), so this branch may not assert absence; the generic no-post-state case is the weaker `csrf` posture-FACT.",
+      "target_fact_capable": true,
+      "target_clean_capable": false,
+      "target_downgrade_rationale": "Proving the ABSENCE of any cross-site-forgeable state change is a coverage-complete capability over every state-changing endpoint, every ambient-credential shape, and every observable post-state a session could reach, and additionally depends on an operator-declared bizlogic post-state spec per endpoint, not this per-endpoint achieved-state differential's target, so CLEAN-capability is deliberately not pursued on this branch (the `csrf` posture class carries the weaker token-not-enforced verdict).",
+      "blocking_work": "COVERAGE + operator intent, not a missing oracle: the ACHIEVED_STATE oracle (via csrf_achieved_oracle) and the gated cross-site re-drive both exist and mint the FACT today given a VIGIL-owned session + an observable post-state. Raising coverage toward the (unreachable) CLEAN target requires an operator-supplied bizlogic readback spec for every state-changing endpoint plus exhaustive enumeration of every cross-site-reachable write and ambient-credential shape; until then an unmodelled or unobservable state change stays a LEAD, never a CLEAN.",
+      "oracle_version": "achieved_state",
+      "control_requirements": [
+        "warden_active_recon_gate",
+        "vigil_owned_authenticated_session",
+        "gated_per_action_write_approval",
+        "vigil_owned_unique_post_state_marker",
+        "cross_origin_ambient_cookie_only_request",
+        "authoritative_post_state_readback",
+        "no_cookie_control_attribution"
+      ],
+      "evidence_surface": "composite",
+      "implementation_refs": [
+        "engine/crucible/framework/v2/scanner/csrf_achieved.py:confirm_csrf_achieved",
+        "engine/crucible/framework/v2/verify/oracles.py:csrf_achieved_oracle"
+      ]
     }
   ]
 }

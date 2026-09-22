@@ -417,6 +417,14 @@ class FindingContext(BaseModel):
     # execution (a genuine bypass) — a no-CSP / permissive-CSP / report-only execution is plain DOM-XSS, not a
     # bypass. No benchmark/scan/default finding carries csp_block_control, so appending it is inert on the gate.
     csp_block_control: dict[str, Any] | None = None
+    # csrf_achieved_oracle (Wave-3.3 gated-workflow ACHIEVED-STATE FACT — CWE-352). The retained control-vs-
+    # treatment authoritative post-state differential a gated cross-site re-drive captured: {rule, method,
+    # endpoint, cross_origin, ambient_only, marker, with_cookie_state, no_cookie_state}. The oracle (kind
+    # ACHIEVED_STATE, reached via the fresh `csrf_achieved` ctx key) fires ONLY when the VIGIL-chosen unique
+    # marker reached the authoritative post-state WITH the ambient cookie but is ABSENT from the no-cookie
+    # control — an achieved cross-site state change, never "a token is unenforced". No benchmark/scan/engage
+    # finding carries `csrf_achieved`, so appending it leaves the gate byte-identical.
+    csrf_achieved: dict[str, Any] | None = None
     # jwt_forgery_oracle (Workstream-B: a captured JWT is STRUCTURALLY FORGEABLE — judged on the token
     # ALONE, offline, zero traffic). jwt_token is the captured token string; jwt_candidate_keys are the
     # supplied secrets / RSA public keys the HMAC-reproduction proof is tried against (a weak-secret
@@ -1117,6 +1125,42 @@ class FindingContext(BaseModel):
             if isinstance(v, int) and not isinstance(v, bool):
                 retained[k] = v
         return cls(bug_class=bug_class, csrf_control=retained)
+
+    @classmethod
+    def from_csrf_achieved(
+        cls,
+        *,
+        method: str,
+        endpoint: str,
+        marker: str,
+        with_cookie_state: Any,
+        no_cookie_state: Any,
+        cross_origin: bool = True,
+        ambient_only: bool = True,
+        bug_class: str = "csrf_achieved",
+    ) -> "FindingContext":
+        """The RETAINED control-vs-treatment authoritative post-state differential for the CSRF-achieved
+        oracle (Wave-3.3). The gated cross-site re-drive issues the state-changing request FIRST without the
+        ambient cookies (the control) then WITH them (the treatment), each followed by an authoritative
+        post-state readback; ``marker`` is the VIGIL-chosen unique token the write carried. The oracle
+        (kind ACHIEVED_STATE, via the ``csrf_achieved`` ctx key) fires ONLY when the marker appears in
+        ``with_cookie_state`` AND is ABSENT from ``no_cookie_state`` — the write authorized solely by the
+        ambient cookie riding cross-site — and ONLY when the request is attested ``cross_origin`` and
+        ``ambient_only``. The two readbacks are retained verbatim (the oracle re-derives the differential);
+        ``cross_origin``/``ambient_only`` are retained STRICTLY as bools. JSON-safe + deterministic."""
+        return cls(
+            bug_class=bug_class,
+            csrf_achieved={
+                "rule": "cross_site_state_change",
+                "method": _coerce_text(method),
+                "endpoint": _coerce_text(endpoint),
+                "cross_origin": bool(cross_origin),
+                "ambient_only": bool(ambient_only),
+                "marker": _coerce_text(marker),
+                "with_cookie_state": _coerce_text(with_cookie_state),
+                "no_cookie_state": _coerce_text(no_cookie_state),
+            },
+        )
 
     @classmethod
     def from_postmessage_control(
@@ -1934,6 +1978,8 @@ class FindingContext(BaseModel):
             ctx["csp_control"] = self.csp_control
         if self.csp_block_control is not None:
             ctx["csp_block_control"] = self.csp_block_control
+        if self.csrf_achieved is not None:
+            ctx["csrf_achieved"] = self.csrf_achieved
         if self.jwt_token is not None:
             ctx["jwt_token"] = self.jwt_token
             if self.jwt_candidate_keys is not None:
