@@ -186,6 +186,22 @@ def test_csp_bypass_without_block_control_fails_closed() -> None:
     # sanity: the SAME execution as a plain dom_xss finding still confirms (guard is class-scoped)
     plain = {"bug_class": "dom_xss", "dom_binding_calls": calls, "dom_canary": canary}
     assert OracleVerifier().confirm(plain).confirmed
+
+
+def test_side_effect_bare_marker_cannot_confirm_a_browser_execution_class() -> None:
+    """Re-red-pen (systemic): the browser-EXECUTION FACT classes must be provable ONLY by DOM_EXECUTION, not
+    by a bare marker-in-a-sink via SIDE_EFFECT. side_effect_oracle fires on any >=4-char marker present in
+    the sink (conf 0.90); when SIDE_EFFECT was in these classes' oracle sets, a crafted finding carrying only
+    {marker, observed_sink} — no execution, no CSP — minted a false FACT (offline-verifiable). SIDE_EFFECT is
+    dropped from all four; each must now REFUSE the bare-marker context. proto_pollution never carried it."""
+    v = OracleVerifier()
+    for bc in ("csp_bypass", "postmessage_exploited", "stored_xss", "dom_xss"):
+        crafted = {"bug_class": bc, "marker": "cxb_ab12cd34", "observed_sink": "xx cxb_ab12cd34 yy"}
+        assert not v.confirm(crafted).confirmed, f"{bc}: a bare SIDE_EFFECT marker must not confirm an execution class"
+    # spellings that fold onto csp_bypass are likewise refused
+    for alias in ("csp_bypass_xss", "content_security_policy_bypass"):
+        crafted = {"bug_class": alias, "marker": "cxb_ab12cd34", "observed_sink": "xx cxb_ab12cd34 yy"}
+        assert not v.confirm(crafted).confirmed, f"{alias}: bare SIDE_EFFECT marker must not confirm"
     assert not csp_purports_to_block({"header": "", "report_only": False})
     assert not csp_purports_to_block({"header": "frame-ancestors 'none'", "report_only": False})
 

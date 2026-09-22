@@ -29,11 +29,13 @@ def test_rejects_trivial_canary() -> None:
     assert not dom_execution_oracle(["ab"], "ab").fired
 
 
-def test_routes_dom_xss_to_execution_first() -> None:
+def test_dom_xss_is_provable_only_by_execution() -> None:
     kinds = OracleVerifier().oracles_for("dom_xss")
-    assert kinds[0] is OracleKind.DOM_EXECUTION
-    # the static side-effect lead remains as a fallback
-    assert OracleKind.SIDE_EFFECT in kinds
+    assert kinds == (OracleKind.DOM_EXECUTION,)
+    # SIDE_EFFECT was dropped (re-red-pen): as an alternative confirmer, a bare marker-in-a-sink
+    # (side_effect_oracle, conf 0.90) minted a false dom_xss FACT with no execution. Execution via
+    # DOM_EXECUTION is the SOLE proof; the honest scanner path never emitted a side-effect marker here.
+    assert OracleKind.SIDE_EFFECT not in kinds
 
 
 def test_confirms_and_certificate_round_trips() -> None:
