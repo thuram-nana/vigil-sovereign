@@ -1393,6 +1393,10 @@ def dom_execution_oracle(binding_calls: Any, canary: str) -> OracleSignal:
 # ---------------------------------------------------------------------------
 
 
+_PP_KEY_RE = re.compile(r"^cpp_[0-9a-f]{8,}$")   # VIGIL per-probe pollution-KEY canary (scanner.proto_pollution mints cpp_<token_hex>)
+_PP_VAL_RE = re.compile(r"^ppv_[0-9a-f]{8,}$")   # VIGIL per-probe pollution-VALUE canary (ppv_<token_hex>)
+
+
 def prototype_pollution_oracle(observed: Any) -> OracleSignal:
     """Fire when a real headless DOM's ACHIEVED runtime state proves client-side prototype
     pollution: ``Object.prototype[uniqKey] === uniqVal`` for the unique per-probe key/value a
@@ -1406,9 +1410,12 @@ def prototype_pollution_oracle(observed: Any) -> OracleSignal:
     ``Object.prototype`` reports ``polluted_val`` absent/mismatched and does not fire.
 
     Near-zero-FP by three independent guards:
-      * the key/value are UNIQUE per probe (a fresh random token), so a match cannot be an
-        incidental pre-existing property — they are long enough that an accidental collision is
-        infeasible;
+      * the key AND value must match VIGIL's own per-probe canary SHAPE (``cpp_<hex>`` /
+        ``ppv_<hex>``, minted by ``scanner.proto_pollution`` via ``secrets.token_hex``). This is a
+        SELF-CONTAINED guard: the oracle's standalone re-fire (its certificate) can therefore
+        NEVER be satisfied by a pre-existing NAMED prototype property (``toString``,
+        ``hasOwnProperty``, ``constructor``) or any arbitrary key — a match can only be the
+        high-entropy marker VIGIL drove in, so soundness does not depend on the upstream caller;
       * the value must reproduce EXACTLY (``polluted_val == expected_val``) — a truthy-but-
         different value (a page that sets its own default) does not fire;
       * the BENIGN-KEY control must be ``undefined`` — if some ambient gadget polluted the
@@ -1427,16 +1434,22 @@ def prototype_pollution_oracle(observed: Any) -> OracleSignal:
 
     base = {"polluted_key": key, "benign_key": benign_key}
 
-    # The unique key/value must be non-trivial so an incidental value cannot masquerade as one.
-    if len(key) < 8:
+    # SELF-CONTAINED SOUNDNESS: the key/value must match VIGIL's own per-probe canary SHAPE
+    # (scanner.proto_pollution mints ``cpp_<hex>`` / ``ppv_<hex>``). Requiring the shape here — not
+    # merely a length floor — means the oracle's STANDALONE re-fire (its certificate) cannot be
+    # satisfied by a pre-existing NAMED prototype property (``toString``/``hasOwnProperty``/
+    # ``constructor``) or any arbitrary key: a match can ONLY be the high-entropy marker VIGIL drove
+    # in, so soundness never depends on the upstream caller being the sole key source.
+    if not _PP_KEY_RE.match(key):
         return OracleSignal(
             kind=OracleKind.PROTOTYPE_POLLUTION, fired=False, confidence=0.0,
-            evidence="pollution key too short to be a reliable, unforgeable per-probe marker",
+            evidence=("pollution key is not a VIGIL per-probe canary marker (expected cpp_<hex>) — an "
+                      "arbitrary or pre-existing prototype property cannot mint this FACT"),
             observed=base)
-    if len(expected) < 6:
+    if not _PP_VAL_RE.match(expected):
         return OracleSignal(
             kind=OracleKind.PROTOTYPE_POLLUTION, fired=False, confidence=0.0,
-            evidence="expected pollution value too short to be a reliable, unforgeable marker",
+            evidence="expected pollution value is not a VIGIL per-probe canary marker (expected ppv_<hex>)",
             observed=base)
 
     # The BENIGN-KEY control gates attribution: a different key that was NEVER injected MUST be

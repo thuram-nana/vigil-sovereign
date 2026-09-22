@@ -57,6 +57,24 @@ def test_short_or_missing_markers_do_not_fire() -> None:
     assert not prototype_pollution_oracle(None).fired
 
 
+def test_pre_existing_named_prototype_keys_do_not_fire() -> None:
+    """SELF-CONTAINED SOUNDNESS (red-pen MEDIUM): the oracle's STANDALONE re-fire — its certificate —
+    must NOT be satisfiable by a pre-existing NAMED Object.prototype property. A crafted context whose
+    polluted_key is a real prototype member (toString/hasOwnProperty/constructor/__proto__) with a
+    matching value and an undefined benign control must be REFUSED, because the key is not VIGIL's
+    ``cpp_<hex>`` per-probe canary shape. Only the high-entropy marker VIGIL drove in can fire."""
+    for name in ("toString", "hasOwnProperty", "constructor", "__proto__", "isPrototypeOf",
+                 "valueOf", "propertyIsEnumerable"):
+        obs = _obs(polluted_key=name, expected_val=name, polluted_val=name)
+        assert not prototype_pollution_oracle(obs).fired, f"named prototype key {name!r} must not fire"
+    # a non-canary but long/arbitrary key is likewise refused (shape, not mere length)
+    assert not prototype_pollution_oracle(
+        _obs(polluted_key="totallyarbitrarykey123", expected_val="somevalue123",
+             polluted_val="somevalue123")).fired
+    # the genuine VIGIL canary shape still fires (the guard is a shape filter, not a kill-switch)
+    assert prototype_pollution_oracle(_obs()).fired
+
+
 def test_is_deterministic() -> None:
     a = prototype_pollution_oracle(_obs())
     b = prototype_pollution_oracle(_obs())
