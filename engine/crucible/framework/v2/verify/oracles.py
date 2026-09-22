@@ -4171,20 +4171,28 @@ def csp_posture_oracle(observed_control: Any) -> OracleSignal:
     src_dir = "script-src" if "script-src" in directives else "default-src"
     lower = [t.lower() for t in eff]
     has_nonce_or_hash = any(_CSP_NONCE_HASH_RE.match(t) for t in eff)
+    # CSP3: 'strict-dynamic' makes conformant browsers IGNORE host-source and scheme-source expressions
+    # ('*', http:, https:, 'self', specific hosts) AND 'unsafe-inline'. Beside 'strict-dynamic' those are
+    # therefore NOT weaknesses — flagging them false-flags the Google/OWASP-canonical hardened policy
+    # (`'nonce-r' 'strict-dynamic' https: http: 'unsafe-inline'`). 'unsafe-eval' is NOT neutralized by
+    # 'strict-dynamic' (eval stays enabled), so it is still flagged.
+    has_strict_dynamic = "'strict-dynamic'" in lower
     weaknesses: list[str] = []
-    if "'unsafe-inline'" in lower and not has_nonce_or_hash:
+    if "'unsafe-inline'" in lower and not has_nonce_or_hash and not has_strict_dynamic:
         weaknesses.append("'unsafe-inline' with no neutralizing nonce/hash")
     if "'unsafe-eval'" in lower:
         weaknesses.append("'unsafe-eval'")
-    if "*" in lower:
+    if "*" in lower and not has_strict_dynamic:
         weaknesses.append("wildcard '*' source")
-    if "http:" in lower:
+    if "http:" in lower and not has_strict_dynamic:
         weaknesses.append("'http:' scheme source")
-    if "data:" in lower:
+    if "data:" in lower and not has_strict_dynamic:
         weaknesses.append("'data:' scheme source")
     if not weaknesses:
-        note = (" ('unsafe-inline' is present but NEUTRALIZED by a nonce/hash — not a weakness)"
-                if ("'unsafe-inline'" in lower and has_nonce_or_hash) else "")
+        note = (" ('strict-dynamic' present — host/scheme sources and 'unsafe-inline' are ignored by the "
+                "browser per CSP3, not a weakness)" if has_strict_dynamic else
+                (" ('unsafe-inline' is present but NEUTRALIZED by a nonce/hash — not a weakness)"
+                 if ("'unsafe-inline'" in lower and has_nonce_or_hash) else ""))
         return _csp_signal(
             False, observed={"rule": rule, "effective_directive": src_dir, "script_src": eff},
             evidence=(f"the effective {src_dir} carries no permissive weakness — a well-formed policy"
@@ -4219,8 +4227,12 @@ def csp_purports_to_block(observed_control: Any) -> bool:
         return False
     lower = [t.lower() for t in eff]
     has_nonce_or_hash = any(_CSP_NONCE_HASH_RE.match(t) for t in eff)
-    inline_allowed = ("'unsafe-inline'" in lower) and not has_nonce_or_hash
-    permissive = inline_allowed or "*" in lower or "http:" in lower or "data:" in lower
+    # 'strict-dynamic' (CSP3) makes the browser IGNORE host/scheme sources AND 'unsafe-inline', so a
+    # strict-dynamic policy IS restrictive (it blocks an arbitrary injected script) — a canary that
+    # nonetheless executes under it is a genuine bypass. Do not treat those tokens as permissive then.
+    has_strict_dynamic = "'strict-dynamic'" in lower
+    inline_allowed = ("'unsafe-inline'" in lower) and not has_nonce_or_hash and not has_strict_dynamic
+    permissive = inline_allowed or (not has_strict_dynamic and ("*" in lower or "http:" in lower or "data:" in lower))
     return not permissive
 
 

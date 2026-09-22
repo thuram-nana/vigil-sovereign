@@ -802,6 +802,15 @@ class OracleVerifier:
         """
         ctx = dict(finding_context or {})
         bug_class = str(ctx.get("bug_class", ""))
+        # Wave-2.4 fail-closed (red-pen MEDIUM): the achieved CSP-bypass class's FACT is "execution DESPITE
+        # a blocking CSP", so it REQUIRES the retained blocking-CSP control. Enforce that at the verifier,
+        # not merely by scanner convention: mark the ctx so the shared DOM_EXECUTION arm REFUSES a
+        # csp_bypass finding whose context lacks csp_block_control (a crafted from_dom_execution context
+        # would otherwise fall through to the unguarded dom_execution_oracle and confirm a bypass with no
+        # blocking policy). Keyed on the finding's OWN declared bug_class, which the attacker cannot avoid
+        # while still claiming a csp_bypass FACT.
+        if normalize_bug_class(bug_class) == "csp_bypass":
+            ctx["_require_csp_block_control"] = True
         kinds = self.oracles_for(bug_class)
 
         signals: list[OracleSignal] = []
@@ -921,6 +930,10 @@ class OracleVerifier:
                 if "csp_block_control" in ctx:
                     return oracles.dom_execution_csp_bypass_oracle(
                         ctx["dom_binding_calls"], ctx["dom_canary"], ctx["csp_block_control"])
+                if ctx.get("_require_csp_block_control"):
+                    # a csp_bypass finding with NO retained blocking-CSP control: fail closed, never fall
+                    # through to plain dom_execution (that would confirm a "bypass" with no blocking policy).
+                    return None
                 return oracles.dom_execution_oracle(ctx["dom_binding_calls"], ctx["dom_canary"])
             return None
         # -- Wave-2.4 CSP permissive-policy posture — fire ONLY when the ctx carries `csp_control` (the

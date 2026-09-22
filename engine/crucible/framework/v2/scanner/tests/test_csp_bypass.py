@@ -113,6 +113,18 @@ def test_posture_is_silent_on_a_hardened_or_uninformative_policy() -> None:
     assert not _posture("").fired                             # no header -> REFUSE, not fire
 
 
+def test_posture_honors_strict_dynamic_neutralization() -> None:
+    # CSP3: 'strict-dynamic' + a nonce makes the browser IGNORE host/scheme sources AND 'unsafe-inline'.
+    # The Google/OWASP-canonical hardened policy must NOT mint a posture-FACT (red-pen HIGH).
+    assert not _posture("script-src 'nonce-r4nd0m' 'strict-dynamic' https: http: 'unsafe-inline'").fired
+    assert not _posture("script-src 'nonce-r4nd0m' 'strict-dynamic' *").fired
+    assert not _posture("script-src 'strict-dynamic' 'sha256-abc' http: data:").fired
+    # but 'strict-dynamic' does NOT neutralize 'unsafe-eval' (eval stays enabled) — still a weakness
+    assert _posture("script-src 'nonce-r' 'strict-dynamic' 'unsafe-eval'").fired
+    # and a genuinely permissive policy WITHOUT strict-dynamic still fires (no false-negative)
+    assert _posture("script-src * http: 'unsafe-inline'").fired
+
+
 def test_capture_csp_posture_facts_a_permissive_header_and_reverifies() -> None:
     res = capture_csp_posture("http://t/", response_headers=_headers(_PERMISSIVE))
     assert res.is_weak and res.weaknesses
@@ -150,10 +162,30 @@ def test_posture_context_rejects_a_header_tampered_to_well_formed() -> None:
 def test_guard_only_true_for_a_restrictive_enforced_policy() -> None:
     assert csp_purports_to_block({"header": _RESTRICTIVE, "report_only": False})
     assert csp_purports_to_block({"header": _STRICT, "report_only": False})
+    # a strict-dynamic policy IS restrictive (browser ignores the host/scheme/unsafe-inline tokens), so it
+    # purports to block — a canary that executes under it is a genuine bypass (red-pen HIGH consistency).
+    assert csp_purports_to_block(
+        {"header": "script-src 'nonce-x' 'strict-dynamic' https: http: 'unsafe-inline'", "report_only": False})
     # permissive / absent / report-only never purport to block
     assert not csp_purports_to_block({"header": _PERMISSIVE, "report_only": False})
     assert not csp_purports_to_block({"header": "script-src *", "report_only": False})
     assert not csp_purports_to_block({"header": _RESTRICTIVE, "report_only": True})
+
+
+def test_csp_bypass_without_block_control_fails_closed() -> None:
+    """Red-pen MEDIUM: a csp_bypass finding whose context lacks csp_block_control must NOT fall through to
+    the unguarded dom_execution_oracle and confirm a 'bypass' with no blocking policy. The verifier keys
+    the guard on the finding's OWN declared bug_class, so a crafted from_dom_execution context claiming
+    bug_class=csp_bypass is refused (fail-closed), while a legit csp_bypass finding (with the retained
+    blocking CSP) still confirms."""
+    canary = "cxb_" + "ab12cd34"
+    calls = [{"name": "__crucible_xss", "payload": canary}]
+    # crafted: bug_class csp_bypass but a plain dom-execution context (NO csp_block_control)
+    crafted = {"bug_class": "csp_bypass", "dom_binding_calls": calls, "dom_canary": canary}
+    assert not OracleVerifier().confirm(crafted).confirmed, "csp_bypass must fail closed without a blocking CSP"
+    # sanity: the SAME execution as a plain dom_xss finding still confirms (guard is class-scoped)
+    plain = {"bug_class": "dom_xss", "dom_binding_calls": calls, "dom_canary": canary}
+    assert OracleVerifier().confirm(plain).confirmed
     assert not csp_purports_to_block({"header": "", "report_only": False})
     assert not csp_purports_to_block({"header": "frame-ancestors 'none'", "report_only": False})
 
