@@ -2905,7 +2905,33 @@ def launch_assessment(body: dict) -> dict:
     cmd = [sys.executable, "-m", "framework.v2", "engage", slug, target, "--spine",
            "--request-budget", str(_ENGAGE_DEPTH[scan_mode])]
     if mode == "suite":
-        cmd += ["--autonomous"]
+        # #799: a whole-app "suite" run must reach FACT parity with `scan --library` and crawl the REAL
+        # surface, not short-circuit to "1 page / 0 FACTs". Two launcher-level fixes, both load-bearing:
+        #   * --library — turns on the deterministic WebScanCampaign's stack-matched check corpus
+        #     (use_library=True). Without it only DEFAULT_CHECKS fire → few confirmed findings → the
+        #     --autonomous OODA engine (which seeds its goal tree from CONFIRMED findings) has almost
+        #     nothing to expand. This is what carries the injection/exposure FACT classes to parity.
+        #     NOTE: this is the LAUNCHER adding the flag for the suite path only; run_engagement's
+        #     use_library DEFAULT stays False, so the benchmark/scan-gate path is byte-identical.
+        #   * the read-only crawl-expand discovery ladder (--autonomous-discover --autonomous-crawl-expand
+        #     --discover-autotest) — so the engine crawl-expands the REAL seed origin (scheme+host+port),
+        #     mines /sitemap.xml + /openapi.json, and tests the discovered in-scope surfaces. This is
+        #     READ-ONLY GET breadth for an authorized in-scope engagement; every discovered/expanded probe
+        #     still flows through the per-request gate (ex.gated_fetch), and the GET-only NON-DESTRUCTIVE
+        #     default holds — a WRITE/mutating/destructive probe still requires the owner-signed per-action
+        #     approval (default-deny), so no ungated destructive auto-probe is opened.
+        cmd += ["--autonomous", "--library",
+                "--autonomous-discover", "--autonomous-crawl-expand"]
+        # SAFETY (guarantee e / "human on the ACT trigger"): the read-only crawl-expand breadth AND the
+        # discovered-surface probing only RUN under the auto-test posture (Slice-2 is gated on
+        # probe_posture != "discover-queue"). We enable that posture ONLY for a LOOPBACK suite — the
+        # operator's own lab, where a full autonomous GET-breadth assessment is exactly the ask. A REMOTE
+        # suite keeps the SAFE default (discover-queue): promotion/crawl-expand are still WIRED but PARK
+        # their probe candidates for explicit operator approval, so a remote run never silently auto-fires
+        # discovered probes. Every probe in BOTH postures is still fully gated (ex.gated_fetch) and GET-only
+        # non-destructive by default; a WRITE/mutating/destructive probe still needs the owner-signed token.
+        if is_loopback:
+            cmd += ["--discover-autotest"]
         if scan_mode == "deep":
             cmd += ["--autonomous-cycles", "2"]
     # capability packs → their real, already-gated engage flags (single source of truth). Every id is

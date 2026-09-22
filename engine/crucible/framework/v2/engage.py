@@ -280,6 +280,32 @@ def persist_browser_inconclusive(surfaces: list[tuple[str, str]], *, run_dir: "s
         return False
 
 
+def seed_unreachable_surface(seed_url: str) -> tuple[str, str]:
+    """(#799) Build the legible INCONCLUSIVE surface for an unreachable seed: sensor
+    ``seed_reachability`` and a message naming the host:port whose connection came back empty.
+    Pure — no I/O — so the caller can persist it via the shared inconclusive-manifest mechanism."""
+    try:
+        p = urlsplit(seed_url)
+        host = p.hostname or "?"
+        port = p.port or (443 if p.scheme == "https" else 80)
+        where = f"{host}:{port}"
+    except Exception:
+        where = "the seed"
+    return ("seed_reachability",
+            f"seed unreachable at {where} — the first fetch returned an empty body (no live service on "
+            f"that port); the scanned surface could NOT be assessed (not clean).")
+
+
+def persist_seed_unreachable_inconclusive(seed_url: str, *, run_dir: "str | None") -> bool:
+    """(#799) Record a SEED-UNREACHABLE surface to ``<run_dir>/_inconclusive.json`` via the SAME
+    framework-owned, merge-not-clobber mechanism the browser/fusion gates use, so a dead-seed run is
+    never rounded to CLEAN and never a silent skip. Run-dir-gated + best-effort (no run dir → no write,
+    byte-identical). Returns True iff the artifact was (re)written."""
+    if not run_dir:
+        return False
+    return persist_browser_inconclusive([seed_unreachable_surface(seed_url)], run_dir=run_dir)
+
+
 def _origin(url: str) -> str:
     p = urlsplit(url)
     if not p.scheme or not p.netloc:
@@ -1106,6 +1132,13 @@ def run_engagement(
     if _transfer_enabled:
         priors = _transferred   # None on skip/fail — identical to the old value-add degrade
 
+    # #799 — SEED REACHABILITY (honesty). The scope/preflight gate authorises the seed HOST but ignores
+    # the live PORT, so a wrong-port seed sails through preflight and the crawler's first fetch comes back
+    # EMPTY (http_executor returns status 0 on a refused connection) — a dead seed then renders as a CLEAN
+    # 1-page run. Capture the FIRST (seed) fetch's emptiness by OBSERVING the crawler's own seed fetch (no
+    # extra request), and record a legible INCONCLUSIVE surface below so a dead seed stops looking clean.
+    _seed_probe: dict = {"captured": False, "empty": False}
+
     def _do_scan() -> ScanReport:
         """Build the gated executor (+ optional fail-closed arsenal-authz + access-control pack)
         and run the Wave-1 campaign to a ScanReport, always closing the executor. Extracted so a
@@ -1144,6 +1177,26 @@ def run_engagement(
             # caller and the README's egress claim was false for target traffic.
             egress_allowlist=build_engagement_allowlist(slug=slug),
         )
+        # #799 — OBSERVE-ONLY seed recorder around the campaign's gated send: capture whether the FIRST
+        # (seed) fetch came back with an empty body on a dead connection (status 0 / 5xx-gateway). It only
+        # reads the response the crawler already made and returns it unchanged — no new traffic, so the
+        # scan output stays byte-identical; the emptiness flag drives the INCONCLUSIVE surface below.
+        _seed_send = ex.gated_fetch
+
+        def _seed_recording_send(req: object) -> dict:
+            resp = _seed_send(req)
+            if not _seed_probe["captured"]:
+                _seed_probe["captured"] = True
+                try:
+                    _body = resp.get("body", "") if isinstance(resp, dict) else ""
+                    _status = int(resp.get("status", 0) or 0) if isinstance(resp, dict) else 0
+                    _seed_probe["empty"] = (
+                        not (isinstance(_body, str) and _body.strip())
+                        and _status in (0, 502, 503, 504))
+                except Exception:
+                    pass
+            return resp
+
         # Opt-in access-control pack: an explicit config wins; otherwise build one from the CLI
         # refs/victim-headers, wrapping the GATED executor as the victim identity so the second
         # identity's requests still pass the full safety stack. No refs => None (documented no-op).
@@ -1154,7 +1207,7 @@ def run_engagement(
                 ex.gated_fetch, access_control_victim_headers, access_control_refs)
         try:
             return WebScanCampaign(
-                ex.gated_fetch,
+                _seed_recording_send,
                 max_pages=max_pages,
                 max_audit_requests=max_audit_requests,
                 enable_oob=enable_oob,
@@ -1287,6 +1340,12 @@ def run_engagement(
     # silent skip. Merges with (never clobbers) any fusion surfaces already on disk. No-op when the browser
     # was usable / no browser pass was enabled (empty list → byte-identical).
     persist_browser_inconclusive(_browser_inconclusive, run_dir=rd)
+
+    # #799 — SEED-UNREACHABLE honesty: if the seed's first fetch came back empty on a dead connection
+    # (captured observe-only during the scan) AND the crawl consequently saw ~nothing, record a legible
+    # INCONCLUSIVE surface so a wrong-port / dead seed can never masquerade as a clean 1-page run.
+    if _seed_probe.get("empty") and report.pages_crawled <= 1 and not report.active_findings:
+        persist_seed_unreachable_inconclusive(seed_url, run_dir=rd)
 
     # DEFENSIVE / purple-team pass (opt-in ``enable_defender``, default OFF → this phase is
     # skipped and the engagement is byte-identical). It reasons over the confirmed findings to tell
@@ -1510,6 +1569,10 @@ def _run_autonomous(args: argparse.Namespace, result: EngagementResult, spine: o
     try:
         out = run_autonomous_cycle(
             result, slug=args.slug,
+            # #799: thread the REAL seed origin (scheme+host+port the operator gave) so the Slice-2
+            # crawl-expand mines the seed the engagement actually targets — NOT the promoted host-entity
+            # roots, which intel/promote defaults to https://<host>/ (443) and would crawl the wrong port.
+            seed_url=getattr(args, "seed_url", None),
             max_cycles=max(1, int(getattr(args, "autonomous_cycles", 1))),
             request_budget=max(1, int(getattr(args, "autonomous_budget", 8))),
             prompt_callback=prompt_callback_from_args(args),

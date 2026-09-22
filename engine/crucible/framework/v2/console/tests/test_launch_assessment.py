@@ -104,6 +104,30 @@ def test_suite_routes_to_autonomous_engage(stub_launch):
     assert "--autonomous-cycles" in cmd  # deep depth adds a second cycle
 
 
+def test_suite_launch_emits_library_and_readonly_discovery_ladder(stub_launch):
+    """#799: a whole-app suite must reach FACT parity with `scan --library` and crawl the REAL surface.
+    The launcher adds --library (turns on the deterministic library check corpus → the FACT classes) and
+    the read-only crawl-expand discovery ladder (--autonomous-discover / --autonomous-crawl-expand). For a
+    LOOPBACK lab it also enables the auto-test posture (--discover-autotest) that actually RUNS Slice-2
+    breadth; a REMOTE suite must NOT auto-fire discovered probes (human on the ACT trigger)."""
+    r = actions.launch_assessment({"mode": "suite", "target": "http://127.0.0.1:19010/", "scan_mode": "deep"})
+    cmd, _ = stub_launch(r["run_id"])
+    assert "--library" in cmd                       # load-bearing for FACT parity
+    assert "--autonomous-discover" in cmd and "--autonomous-crawl-expand" in cmd
+    assert "--discover-autotest" in cmd             # loopback lab → run the read-only breadth ladder
+
+
+def test_remote_suite_does_not_auto_fire_discovered_probes(stub_launch, monkeypatch):
+    """A REMOTE suite still gets --library + the crawl-expand WIRING, but NOT --discover-autotest: the
+    discovered probes stay parked for explicit operator approval (guarantee e / human-on-trigger)."""
+    monkeypatch.setattr(actions, "_has_verified_authority", lambda slug, host="": True)
+    r = actions.launch_assessment({"mode": "suite", "target": "https://app.example.com/", "slug": "acme",
+                                   "scan_mode": "deep"})
+    cmd, _ = stub_launch(r["run_id"])
+    assert "--library" in cmd and "--autonomous-crawl-expand" in cmd
+    assert "--discover-autotest" not in cmd
+
+
 def test_tool_mode_maps_one_capability_to_its_gated_flag(stub_launch):
     r = actions.launch_assessment({"mode": "tool", "target": "http://127.0.0.1/", "tools": ["recon"]})
     cmd, _ = stub_launch(r["run_id"])

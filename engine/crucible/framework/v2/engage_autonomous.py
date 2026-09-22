@@ -1214,6 +1214,7 @@ def run_autonomous_cycle(
     enable_multi_probe: bool = False,
     probe_posture: str = "auto-test",
     run_dir: "str | None" = None,
+    seed_url: "str | None" = None,
 ) -> AutonomyResult:
     """Run ONE bounded OODA cycle (``max_cycles`` default 1) over an authoritative
     :class:`engage.EngagementResult`. The scan report is NEVER mutated — the cycle only reads the
@@ -1290,6 +1291,7 @@ def run_autonomous_cycle(
     # ENDPOINT node so the probe-leaf seeding below can SEE it. In-scope by construction (the charter
     # predicate the live gate uses); a LEAD (intel:promote provenance), never a fact; deterministic +
     # idempotent. Discover-path only → structurally unreachable from the byte-identical gate.
+    promoted: list = []
     if discover_active:
         try:
             from .intel.promote import promote_to_endpoints
@@ -1311,13 +1313,48 @@ def run_autonomous_cycle(
         # discover-queue posture — which promises ZERO target traffic until the operator approves — must
         # NOT crawl either (review wcqss59lb MEDIUM: honor the posture for ALL target contact, not just
         # the probe). Under discover-queue the promoted roots are parked as probe candidates for approval.
-        if enable_crawl_expand and promoted and probe_posture != "discover-queue":
+        #
+        # #799 — SEED THE REAL ORIGIN, not the mis-promoted root. The host-entity promotion
+        # (intel/promote._url_for) defaults a DOMAIN/HOST to ``https://<host>/`` (port 443), which is the
+        # WRONG origin for an ``http://<ip>:<port>/`` seed: crawling it hits a dead port and mints nothing,
+        # so the suite stayed shallow. Crawl-expand the REAL seed origin FIRST (its own scheme+host+port,
+        # threaded from the engage CLI) — never downgrading https→http on a genuine TLS target — then still
+        # expand any promoted roots that genuinely differ. Every fetch rides the SAME gated discover_send.
+        from urllib.parse import urlsplit as _urlsplit
+        _expand_roots: list[str] = []
+        _seed_host = None
+        _seed_scheme = None
+        if seed_url:
+            try:
+                _sp = _urlsplit(str(seed_url).strip())
+                _seed_host, _seed_scheme = _sp.hostname, _sp.scheme
+                if _sp.scheme in ("http", "https") and _sp.netloc:
+                    _expand_roots.append(f"{_sp.scheme}://{_sp.netloc}/")
+            except Exception:
+                pass
+        for _pid, _root_url in promoted:
+            if _root_url in _expand_roots:
+                continue
+            # Skip the host-entity MIS-PROMOTION of the seed host itself: intel/promote defaults a bare
+            # host to https://<host>/ (443); when the seed is an http origin on the SAME host, that :443
+            # root is just a dead-port duplicate of the real seed origin already queued above (red-pen
+            # LOW: harmless read-only gated fetch, but pointless). A promoted root for a DIFFERENT host,
+            # or a genuinely non-default real port, is still expanded.
+            try:
+                _rp = _urlsplit(_root_url)
+                if (_seed_host and _rp.hostname == _seed_host and _seed_scheme == "http"
+                        and _rp.scheme == "https" and _rp.port in (None, 443)):
+                    continue
+            except Exception:
+                pass
+            _expand_roots.append(_root_url)
+        if enable_crawl_expand and _expand_roots and probe_posture != "discover-queue":
             try:
                 from .intel.expand import expand_endpoint
                 from .worldmodel.models import Node, NodeKind
                 seq = max((n.last_seen for n in world.all_nodes()), default=0) + 1
                 expanded = 0
-                for _pid, root_url in promoted:
+                for root_url in _expand_roots:
                     for durl in expand_endpoint(discover_send, root_url, max_pages=crawl_max_pages):
                         nid = f"endpoint:expand:{durl}"
                         if world.has_node(nid):
