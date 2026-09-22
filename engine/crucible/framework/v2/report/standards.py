@@ -203,6 +203,7 @@ _STANDARDS: dict[str, ControlMapping] = {
     # ---- Cross-site scripting / client-side script execution (A03) ----
     "xss": _m("A03:2021", ("CWE-79",), pci=_SDLC_PCI, soc2=_SDLC_SOC2, iso=_SDLC_ISO, attack=("T1059.007",)),
     "dom_xss": _m("A03:2021", ("CWE-79",), pci=_SDLC_PCI, soc2=_SDLC_SOC2, iso=_SDLC_ISO, attack=("T1059.007",)),
+    "stored_xss": _m("A03:2021", ("CWE-79",), pci=_SDLC_PCI, soc2=_SDLC_SOC2, iso=_SDLC_ISO, attack=("T1059.007",)),
     "websocket_injection": _m("A03:2021", ("CWE-79", "CWE-20"), pci=_SDLC_PCI, soc2=_SDLC_SOC2, iso=_SDLC_ISO,
                               attack=("T1190",)),
     # ---- Broken access control (A01) ----
