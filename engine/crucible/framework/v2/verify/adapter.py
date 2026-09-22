@@ -397,6 +397,13 @@ class FindingContext(BaseModel):
     clickjacking_control: dict[str, Any] | None = None
     csrf_control: dict[str, Any] | None = None
     postmessage_control: dict[str, Any] | None = None
+    # prototype_pollution_oracle (Wave-2.2 client-side ACHIEVED-STATE FACT — CWE-1321). The binding-reported
+    # readback a driver captured after rendering the target page: {polluted_key, polluted_val, expected_val,
+    # benign_key, benign_key_undefined}. The oracle fires ONLY when Object.prototype[uniqKey] === uniqVal AND
+    # the benign-key control stayed undefined — the achieved polluted state, never "the payload appeared". No
+    # benchmark/scan/engage finding carries proto_pollution, so appending it leaves the gate byte-identical;
+    # routes to the PROTOTYPE_POLLUTION kind via its distinct `proto_pollution` ctx key.
+    proto_pollution: dict[str, Any] | None = None
     # jwt_forgery_oracle (Workstream-B: a captured JWT is STRUCTURALLY FORGEABLE — judged on the token
     # ALONE, offline, zero traffic). jwt_token is the captured token string; jwt_candidate_keys are the
     # supplied secrets / RSA public keys the HMAC-reproduction proof is tried against (a weak-secret
@@ -1614,6 +1621,37 @@ class FindingContext(BaseModel):
             dom_canary=_coerce_text(canary),
         )
 
+    @classmethod
+    def from_prototype_pollution(
+        cls,
+        *,
+        polluted_key: str,
+        expected_val: str,
+        benign_key: str,
+        polluted_val: Any,
+        benign_key_undefined: Any,
+        bug_class: str = "prototype_pollution",
+    ) -> "FindingContext":
+        """The binding-reported achieved-state readback for the prototype-pollution oracle.
+
+        ``polluted_key``/``expected_val`` are the UNIQUE per-probe key/value the
+        ``__proto__[uniqKey]=uniqVal`` gadget drove in; ``polluted_val`` is what
+        ``Object.prototype[polluted_key]`` actually held after the page rendered; ``benign_key`` is a
+        different key that was NEVER injected and ``benign_key_undefined`` whether it stayed undefined.
+        The oracle confirms client-side prototype pollution ONLY when ``polluted_val == expected_val``
+        AND ``benign_key_undefined is True`` — the ACHIEVED polluted state, never that the payload merely
+        appeared in the DOM."""
+        return cls(
+            bug_class=bug_class,
+            proto_pollution={
+                "polluted_key": _coerce_text(polluted_key),
+                "expected_val": _coerce_text(expected_val),
+                "polluted_val": None if polluted_val is None else _coerce_text(polluted_val),
+                "benign_key": _coerce_text(benign_key),
+                "benign_key_undefined": bool(benign_key_undefined) if benign_key_undefined is not None else None,
+            },
+        )
+
     # -- AEGIS builders (the defensive dual) -------------------------------
 
     @classmethod
@@ -1835,6 +1873,8 @@ class FindingContext(BaseModel):
             ctx["csrf_control"] = self.csrf_control
         if self.postmessage_control is not None:
             ctx["postmessage_control"] = self.postmessage_control
+        if self.proto_pollution is not None:
+            ctx["proto_pollution"] = self.proto_pollution
         if self.jwt_token is not None:
             ctx["jwt_token"] = self.jwt_token
             if self.jwt_candidate_keys is not None:

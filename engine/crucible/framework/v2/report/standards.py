@@ -359,6 +359,12 @@ _STANDARDS: dict[str, ControlMapping] = {
     "csrf": _m("A01:2021", ("CWE-352",), pci=_AC_PCI, soc2=_AC_SOC2, iso=_AC_ISO, attack=()),
     "postmessage": _m("A05:2021", ("CWE-346", "CWE-940"), pci=_MISCFG_PCI, soc2=_MISCFG_SOC2, iso=_MISCFG_ISO,
                       attack=()),
+    # ---- Client-side prototype pollution (Wave-2.2; CWE-1321). An achieved-state client-side code-integrity
+    #      bug that can escalate to XSS/DoS/logic bypass → OWASP A08:2021 (Software and Data Integrity
+    #      Failures), the injection SDLC controls. ATT&CK has no clean enterprise technique for a client-side
+    #      prototype-pollution primitive → honest empty. ----
+    "prototype_pollution": _m("A08:2021", ("CWE-1321",), pci=_SDLC_PCI, soc2=_SDLC_SOC2, iso=_SDLC_ISO,
+                              attack=()),
     # ---- LLM / AI application classes (OWASP LLM Top 10; ATT&CK has no clean web technique, ATLAS does) ----
     "prompt_injection": _m(None, ("CWE-1427",), pci=_SDLC_PCI, soc2=_SDLC_SOC2, iso=("A.8.28", "A.8.26"),
                            attack=("AML.T0051",)),

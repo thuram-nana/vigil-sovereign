@@ -108,13 +108,19 @@ _E4T2_CLASSES = {"k8s_rbac_privilege_grant"}
 # benchmark/scan finding carries). Each proves a MISSING/WEAK defense, never an achieved-state exploit.
 _CS_KINDS = {OracleKind.CLICKJACKING_POSTURE, OracleKind.CSRF_POSTURE, OracleKind.POSTMESSAGE_POSTURE}
 _CS_CLASSES = {"clickjacking", "csrf", "postmessage"}
+# Wave 2.2 client-side PROTOTYPE POLLUTION achieved-state oracle (plan §2.2): SAME frozen-fallback
+# discipline — the NEW OracleKind is kept OUT of _ALL_ORACLES, reachable ONLY via its
+# `prototype_pollution` BUG_CLASS_ORACLES row keyed on a `proto_pollution` ctx field no benchmark/scan
+# finding carries. It proves the ACHIEVED Object.prototype state (CWE-1321), not a posture weakness.
+_W22_KINDS = {OracleKind.PROTOTYPE_POLLUTION}
+_W22_CLASSES = {"prototype_pollution"}
 # every additive kind that must stay out of the frozen unknown-class fallback.
 _EXCLUDED_KINDS = (_AEGIS_KINDS | _WS3_KINDS | _WSB_KINDS | _NW1_KINDS | _WF1_KINDS
                    | _G2_KINDS | _G3_KINDS | _CICD_KINDS | _MOBILE_KINDS | _EMAIL_KINDS | _IDENTITY_KINDS
                    | _C3_KINDS | _T4_KINDS | _E1_KINDS | _E5_KINDS | _E3_KINDS | _E2_KINDS | _E4T2_KINDS
-                   | _CS_KINDS)
+                   | _CS_KINDS | _W22_KINDS)
 _EXCLUDED_CLASSES = {"prompt_injection", "system_prompt_disclosure", "automated_access",
-                     "credential_stuffing", "sqli_attempt", "command_injection_attempt"} | _WS3_CLASSES | _WSB_CLASSES | _NW1_CLASSES | _WF1_CLASSES | _G2_CLASSES | _G3_CLASSES | _CICD_CLASSES | _MOBILE_CLASSES | _EMAIL_CLASSES | _IDENTITY_CLASSES | _C3_CLASSES | _T4_CLASSES | _E1_CLASSES | _E5_CLASSES | _E3_CLASSES | _E2_CLASSES | _E4T2_CLASSES | _CS_CLASSES
+                     "credential_stuffing", "sqli_attempt", "command_injection_attempt"} | _WS3_CLASSES | _WSB_CLASSES | _NW1_CLASSES | _WF1_CLASSES | _G2_CLASSES | _G3_CLASSES | _CICD_CLASSES | _MOBILE_CLASSES | _EMAIL_CLASSES | _IDENTITY_CLASSES | _C3_CLASSES | _T4_CLASSES | _E1_CLASSES | _E5_CLASSES | _E3_CLASSES | _E2_CLASSES | _E4T2_CLASSES | _CS_CLASSES | _W22_CLASSES
 _AEGIS_CLASSES = {"prompt_injection", "system_prompt_disclosure", "automated_access",
                   "credential_stuffing", "sqli_attempt", "command_injection_attempt"}
 _AEGIS_ALIASES = {"jailbreak", "llm_prompt_injection", "indirect_prompt_injection",

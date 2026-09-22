@@ -109,6 +109,13 @@
       "evidence": "Real local process — a real headless browser driven against a local page; the safely written twin produces nothing"
     },
     {
+      "kind": "prototype_pollution",
+      "name": "Prototype pollution",
+      "family": "core",
+      "tier": "local",
+      "evidence": "Real local process — a real headless browser drives a __proto__ gadget and reads back the achieved Object.prototype state via a CDP binding; the guarded twin produces nothing"
+    },
+    {
       "kind": "service_reachability",
       "name": "Connection handshake",
       "family": "core",

@@ -1104,9 +1104,9 @@ credential.
 |---|---|
 | Outside system — real bytes from a third-party system on the public internet | 3 |
 | Own infrastructure — real bytes from infrastructure the system builds, uses and destroys | 2 |
-| Real local process — real bytes over a real connection or process on the testing machine | 13 |
+| Real local process — real bytes over a real connection or process on the testing machine | 14 |
 | Fixtures only — only ever judged evidence a person wrote by hand | 23 |
-| **Total detector kinds** | **41** |
+| **Total detector kinds** | **42** |
 <!-- END GENERATED coverage-tiers -->
 
 They sum to 41. If the question asked is instead "how many have ever judged bytes from a real network

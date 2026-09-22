@@ -1491,6 +1491,11 @@ def _redrive_branch_for(bug_class: str) -> "Optional[str]":
         # headless-browser render of surface B, adjudicated by the FACT-capable DOM_EXECUTION branch
         # (verify/oracles.py:dom_execution_oracle). A non-fire / no channel keeps the claim a LEAD.
         "stored_xss": "stored_xss.dom_execution",
+        # Wave 2.2 — client-side prototype-pollution re-drive: a __proto__ gadget VIGIL drove across a
+        # client source + a headless-browser readback of the achieved Object.prototype state, adjudicated
+        # by the FACT-capable PROTOTYPE_POLLUTION branch (verify/oracles.py:prototype_pollution_oracle).
+        # A non-fire / no channel (browserless) keeps the claim a LEAD.
+        "prototype_pollution": "prototype_pollution.achieved_state",
     }
     branch = mapping.get(normalize_bug_class(bug_class))
     return branch if branch in branch_ids() else None
