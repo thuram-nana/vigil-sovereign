@@ -309,6 +309,19 @@ BUG_CLASS_ORACLES: dict[str, tuple[OracleKind, ...]] = {
     # which no benchmark/scan/engage finding does, so appending it leaves the unknown-class fallback and
     # `make gate` byte-identical.
     "prototype_pollution": (OracleKind.PROTOTYPE_POLLUTION,),
+    # Wave-2.3 CROSS-ORIGIN postMessage ACHIEVED-EXPLOIT (scanner.postmessage_exploited, browser-backed,
+    # opt-in) — the strictly-stronger EXECUTION dual of the `postmessage` posture class above. A canary
+    # gadget postMessage'd from a GENUINELY DIFFERENT (untrusted) origin — VIGIL's own attacker-origin sender
+    # page on a fresh loopback port, framing the target — that the target's onmessage handler routed to an
+    # EXECUTING sink, observed via VIGIL's own __crucible_xss binding call carrying a unique per-probe canary
+    # in a real headless DOM (never on the handler merely receiving/echoing the message; a handler that CHECKS
+    # event.origin, or routes to a non-executing sink, does not fire — that stays the `postmessage` posture /
+    # data-leak residual). Reuses DOM_EXECUTION (already in the frozen _ALL_ORACLES) + SIDE_EFFECT for parity
+    # with dom_xss/stored_xss, so this row adds NO new OracleKind and `make gate` stays byte-identical
+    # (deep-only / off-by-default; it sends 0 requests through the default GET benchmark corpus). The
+    # DOM_EXECUTION dispatch arm already keys on `dom_binding_calls`/`dom_canary`, which no benchmark/default
+    # finding carries, so appending this row leaves the unknown-class fallback byte-identical.
+    "postmessage_exploited": (OracleKind.DOM_EXECUTION, OracleKind.SIDE_EFFECT),
 }
 
 # Spelling/format aliases folded onto canonical keys.
@@ -362,6 +375,16 @@ _ALIASES: dict[str, str] = {
     "client_prototype_pollution": "prototype_pollution",
     "proto_pollution": "prototype_pollution",
     "prototype_pollution_client": "prototype_pollution",
+    # Cross-origin postMessage ACHIEVED-EXPLOIT spellings fold onto the canonical `postmessage_exploited`
+    # key (the EXECUTION dual). These are DISTINCT from the `postmessage` POSTURE spellings above (which fold
+    # onto the data-leak/non-executing residual): an XSS-via-postMessage or cross-origin-postMessage exploit
+    # is the browser-confirmed execution class, so it must route to DOM_EXECUTION, never POSTMESSAGE_POSTURE.
+    "postmessage_xss": "postmessage_exploited",
+    "post_message_xss": "postmessage_exploited",
+    "postmessage_dom_xss": "postmessage_exploited",
+    "cross_origin_postmessage": "postmessage_exploited",
+    "cross_origin_postmessage_xss": "postmessage_exploited",
+    "postmessage_code_execution": "postmessage_exploited",
     "directory_traversal": "path_traversal",
     "information_disclosure": "exposure",
     "sensitive_data_exposure": "sensitive_exposure",
