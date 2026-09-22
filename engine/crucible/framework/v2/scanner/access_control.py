@@ -107,12 +107,21 @@ class MassAssignmentCheck:
 class CrossAccessSpec:
     """One two-identity cross-access probe: as the attacker, request the object/endpoint reference
     ``victim_ref`` at the point named ``ref_param``; confirm the attacker reached the privileged
-    identity's content. ``bug_class`` labels the class (idor/bola/bfla/broken_access_control/
-    authorization/privilege_escalation) — all confirmed by the same achieved-state cross-read."""
+    identity's PRIVATE content. ``bug_class`` labels the class (idor/bola/bfla/broken_access_control/
+    authorization/privilege_escalation) — all confirmed by the same achieved-state cross-read.
+
+    ``victim_discriminator`` is the per-identity marker that ONLY the victim's authoritative record
+    contains (an account id / private email / invoice number). It is what makes the confirmation SOUND:
+    a fire requires the attacker's cross-read to reach THIS marker, never a whole-body containment that
+    false-positives on shared boilerplate. Empty ⇒ the probe cannot soundly fire (a rigorous LEAD).
+    ``control_ref`` (optional) is an attacker-OWNED reference; when set, the marker must be absent from
+    the attacker's own object — the negative control that a global string is not mistaken for unique."""
 
     bug_class: str
     ref_param: str
     victim_ref: str
+    victim_discriminator: str = ""
+    control_ref: str = ""
 
 
 @dataclass(frozen=True)
@@ -130,13 +139,17 @@ class AccessControlConfig:
     id_prefix: str = "ac"
 
 
-def default_cross_specs(*, ref_param: str = "id", victim_ref: str = "") -> tuple[CrossAccessSpec, ...]:
+def default_cross_specs(
+    *, ref_param: str = "id", victim_ref: str = "", victim_discriminator: str = "", control_ref: str = "",
+) -> tuple[CrossAccessSpec, ...]:
     """A ready-to-edit set covering the six cross-access classes on a single reference point — the
-    operator overrides ``ref_param``/``victim_ref`` per target (and typically supplies distinct
-    references per class). ``victim_ref`` defaults to empty; a blank reference cannot confirm anything
-    (the predicate needs the victim's real content), so this is a template, not an auto-runnable set."""
+    operator overrides ``ref_param``/``victim_ref``/``victim_discriminator`` per target (and typically
+    supplies distinct references per class). ``victim_ref`` / ``victim_discriminator`` default to empty;
+    a blank reference or a blank discriminator cannot confirm anything (the predicate needs the victim's
+    real per-identity marker), so this is a template, not an auto-runnable set."""
     return tuple(
-        CrossAccessSpec(bug_class=bc, ref_param=ref_param, victim_ref=victim_ref)
+        CrossAccessSpec(bug_class=bc, ref_param=ref_param, victim_ref=victim_ref,
+                        victim_discriminator=victim_discriminator, control_ref=control_ref)
         for bc in ("idor", "bola", "bfla", "broken_access_control", "authorization", "privilege_escalation")
     )
 
@@ -161,6 +174,8 @@ def build_access_control_checks(
             victim_ref=spec.victim_ref,
             victim_send=config.victim_send,
             bug_class=spec.bug_class,
+            victim_discriminator=spec.victim_discriminator,
+            control_ref=spec.control_ref,
         ))
     if config.mass_assignment is not None:
         checks.append(config.mass_assignment)
@@ -219,16 +234,34 @@ def parse_victim_header(raw: str) -> tuple[str, str] | None:
 
 
 def parse_cross_spec(raw: str) -> CrossAccessSpec | None:
-    """Parse ``bug_class:ref_param:victim_ref`` into a :class:`CrossAccessSpec`. ``victim_ref``
-    may itself contain colons (a URL / UUID) — only the first two delimiters split. Returns None
-    (caller warns) when the class is not an access-control class or the shape is wrong."""
-    parts = raw.split(":", 2)
+    """Parse ``bug_class:ref_param:victim_ref[|discriminator[|control_ref]]`` into a
+    :class:`CrossAccessSpec`.
+
+    The colon-delimited head is the original grammar (``bug_class:ref_param:victim_ref``); ``victim_ref``
+    may itself contain colons (a URL / UUID) — only the first two colons split. The OPTIONAL pipe-delimited
+    tail carries the victim-UNIQUE discriminator (a per-identity marker only the victim's authoritative
+    record contains) and an OPTIONAL attacker-owned ``control_ref``. ``|`` is used (not another colon) so a
+    colon-bearing ``victim_ref`` is never mistaken for the discriminator.
+
+    Backward-compatible: a bare ``bug_class:ref_param:victim_ref`` parses with an empty discriminator — the
+    probe then cannot soundly fire (a rigorous LEAD), which is exactly the fail-closed behaviour that replaces
+    the reverted whole-body false positive. Returns None (caller warns) when the class is not an
+    access-control class or the head shape is wrong."""
+    head, _, tail = raw.partition("|")
+    parts = head.split(":", 2)
     if len(parts) != 3:
         return None
     bug_class, ref_param, victim_ref = (p.strip() for p in parts)
     if bug_class not in ACCESS_CONTROL_CLASSES or not ref_param:
         return None
-    return CrossAccessSpec(bug_class=bug_class, ref_param=ref_param, victim_ref=victim_ref)
+    discriminator, control_ref = "", ""
+    if tail:
+        tparts = tail.split("|", 1)
+        discriminator = tparts[0].strip()
+        if len(tparts) == 2:
+            control_ref = tparts[1].strip()
+    return CrossAccessSpec(bug_class=bug_class, ref_param=ref_param, victim_ref=victim_ref,
+                           victim_discriminator=discriminator, control_ref=control_ref)
 
 
 def config_from_cli(
@@ -272,3 +305,27 @@ def config_from_cli(
 
     victim_send = victim_send_with_headers(base_send, tuple(headers))
     return AccessControlConfig(victim_send=victim_send, cross_specs=tuple(specs), id_prefix=id_prefix)
+
+
+# ---------------------------------------------------------------------------
+# finding builder — turn a confirmed cross-read / mass-assignment context into
+# the finding dict the admission choke (oracle_adapter.certify_admitted) consumes
+# ---------------------------------------------------------------------------
+
+
+def access_control_finding(
+    ctx: "FindingContext", *, check_id: str, insertion_point: str = ""
+) -> dict:
+    """Wrap a confirmed :class:`~verify.adapter.FindingContext` (from an :class:`IdorCheck` cross-read or a
+    :class:`MassAssignmentCheck` state-change probe) into the finding dict the admission/minting choke reads
+    — ``{check_id, bug_class, insertion_point, oracle_context}``. The retained ``oracle_context`` is the
+    JSON-safe predicate + observed values, so the signed certificate re-verifies offline (the pure
+    achieved-state predicate oracle re-fires over the retained evidence). The runner mints ONLY via
+    ``oracle_adapter.certify_admitted(provenance="live_redrive")`` against the class's registered evidence
+    branch — this helper never mints, it only shapes."""
+    return {
+        "check_id": check_id,
+        "bug_class": ctx.bug_class,
+        "insertion_point": insertion_point,
+        "oracle_context": ctx.to_verifier_context(),
+    }

@@ -24,8 +24,10 @@ from framework.v2.scanner.access_control import (
     AccessControlConfig,
     CrossAccessSpec,
     MassAssignmentCheck,
+    access_control_finding,
     build_access_control_checks,
     default_cross_specs,
+    parse_cross_spec,
 )
 from framework.v2.scanner.engine import AuditEngine
 from framework.v2.scanner.insertion import HttpRequest, InsertionKind, RequestTemplate
@@ -74,7 +76,9 @@ def _obj_template() -> tuple[RequestTemplate, object]:
 
 def test_pack_is_off_by_default() -> None:
     _, victim_send = _make_cross_target(vulnerable=True)
-    cfg = AccessControlConfig(victim_send=victim_send, cross_specs=default_cross_specs(victim_ref=_VICTIM_REF))
+    cfg = AccessControlConfig(
+        victim_send=victim_send,
+        cross_specs=default_cross_specs(victim_ref=_VICTIM_REF, victim_discriminator=_VICTIM_SECRET))
     assert build_access_control_checks(cfg, enabled=False) == ()      # flag off
     assert build_access_control_checks(None, enabled=True) == ()       # no config
     assert build_access_control_checks(cfg) == ()                      # default enabled=False
@@ -88,7 +92,9 @@ def test_enabled_pack_builds_all_seven_classes() -> None:
         readback_request=HttpRequest(method="GET", url="http://target.test/me", headers=[], body=None),
     )
     cfg = AccessControlConfig(
-        victim_send=victim_send, cross_specs=default_cross_specs(victim_ref=_VICTIM_REF), mass_assignment=ma)
+        victim_send=victim_send,
+        cross_specs=default_cross_specs(victim_ref=_VICTIM_REF, victim_discriminator=_VICTIM_SECRET),
+        mass_assignment=ma)
     checks = build_access_control_checks(cfg, enabled=True)
     classes = {c.bug_class for c in checks}
     assert classes == set(ACCESS_CONTROL_CLASSES)                     # all seven seeded
@@ -101,12 +107,14 @@ def _run_cross(bug_class: str, vulnerable: bool):
     attacker_send, victim_send = _make_cross_target(vulnerable)
     cfg = AccessControlConfig(
         victim_send=victim_send,
-        cross_specs=(CrossAccessSpec(bug_class=bug_class, ref_param=_REF_PARAM, victim_ref=_VICTIM_REF),),
+        cross_specs=(CrossAccessSpec(bug_class=bug_class, ref_param=_REF_PARAM, victim_ref=_VICTIM_REF,
+                                     victim_discriminator=_VICTIM_SECRET),),
     )
     (check,) = build_access_control_checks(cfg, enabled=True)
     template, point = _obj_template()
     ctx = check.probe(template, point, attacker_send)
-    assert ctx is not None
+    if ctx is None:
+        return None
     return confirm_finding({"bug_class": bug_class, "title": "", "severity": "High"}, ctx)
 
 
@@ -194,10 +202,127 @@ def test_seeded_checks_run_through_the_audit_engine() -> None:
     attacker_send, victim_send = _make_cross_target(vulnerable=True)
     cfg = AccessControlConfig(
         victim_send=victim_send,
-        cross_specs=(CrossAccessSpec(bug_class="idor", ref_param=_REF_PARAM, victim_ref=_VICTIM_REF),),
+        cross_specs=(CrossAccessSpec(bug_class="idor", ref_param=_REF_PARAM, victim_ref=_VICTIM_REF,
+                                     victim_discriminator=_VICTIM_SECRET),),
     )
     checks = build_access_control_checks(cfg, enabled=True)
     engine = AuditEngine(attacker_send)
     req = HttpRequest(method="GET", url=f"http://target.test/obj?{_REF_PARAM}=1", headers=[], body=None)
     findings = engine.audit(req, checks=checks, insertion_kinds=(InsertionKind.QUERY_VALUE,))
     assert any(f.bug_class == "idor" and f.confirmed_by == OracleKind.ACHIEVED_STATE.value for f in findings)
+
+
+# --- grammar: the ceremony parse of bug_class:ref_param:victim_ref[|discriminator[|control_ref]] --
+
+
+def test_parse_cross_spec_backward_compatible_head() -> None:
+    spec = parse_cross_spec("idor:id:2")
+    assert spec is not None and spec.bug_class == "idor" and spec.ref_param == "id"
+    assert spec.victim_ref == "2" and spec.victim_discriminator == "" and spec.control_ref == ""
+
+
+def test_parse_cross_spec_carries_discriminator_and_control() -> None:
+    spec = parse_cross_spec("bola:doc_id:2|SECRET-BOB-42|1")
+    assert spec is not None and spec.bug_class == "bola" and spec.ref_param == "doc_id"
+    assert spec.victim_ref == "2" and spec.victim_discriminator == "SECRET-BOB-42" and spec.control_ref == "1"
+
+
+def test_parse_cross_spec_victim_ref_keeps_colons_before_the_pipe() -> None:
+    spec = parse_cross_spec("idor:url:https://acme.test/u/2|acct-4021")
+    assert spec is not None and spec.victim_ref == "https://acme.test/u/2"
+    assert spec.victim_discriminator == "acct-4021"
+
+
+def test_parse_cross_spec_rejects_unknown_class_and_bad_shape() -> None:
+    assert parse_cross_spec("not_a_class:id:2|x") is None
+    assert parse_cross_spec("idor:id") is None
+
+
+def test_access_control_finding_shapes_the_certify_input() -> None:
+    attacker_send, victim_send = _make_cross_target(vulnerable=True)
+    cfg = AccessControlConfig(
+        victim_send=victim_send,
+        cross_specs=(CrossAccessSpec(bug_class="idor", ref_param=_REF_PARAM, victim_ref=_VICTIM_REF,
+                                     victim_discriminator=_VICTIM_SECRET),),
+    )
+    (check,) = build_access_control_checks(cfg, enabled=True)
+    template, point = _obj_template()
+    ctx = check.probe(template, point, attacker_send)
+    assert ctx is not None
+    finding = access_control_finding(ctx, check_id="ac:idor:0", insertion_point="query:id")
+    assert finding["bug_class"] == "idor" and finding["check_id"] == "ac:idor:0"
+    assert "oracle_context" in finding and finding["oracle_context"].get("predicate")
+
+
+# --- SOUNDNESS: the victim-unique discriminator (bola/idor were reverted once as UNSOUND) --------
+
+
+def _shared_boilerplate_target():
+    """A page with a large SHARED shell (nav/footer) for BOTH identities, whose only per-identity part
+    is a private line. The victim's authoritative body is thus a proper substring only via its unique
+    line; a naive contains(attacker_body, victim_body) would false-positive on the shell, so this is the
+    exact FP the discriminator must refuse."""
+    shell_head = "<html><head><title>Acme</title></head><body><nav>Home About Contact</nav><main>"
+    shell_tail = "</main><footer>(c) Acme Inc. — all rights reserved — support@acme.test</footer></body></html>"
+
+    def victim_send(req: HttpRequest) -> dict:
+        return {"status": 200, "body": shell_head + f"<p>Balance for {_VICTIM_SECRET}</p>" + shell_tail}
+
+    def attacker_send(req: HttpRequest) -> dict:
+        # The attacker gets 200 with the SAME shell but only THEIR OWN private line — never the victim's.
+        return {"status": 200, "body": shell_head + "<p>Balance for alice-acct-0001</p>" + shell_tail}
+
+    return attacker_send, victim_send
+
+
+def test_shared_boilerplate_does_not_fire_the_discriminator_check() -> None:
+    # Attacker never reaches the victim's unique discriminator, only the shared shell — must NOT fire.
+    attacker_send, victim_send = _shared_boilerplate_target()
+    cfg = AccessControlConfig(
+        victim_send=victim_send,
+        cross_specs=(CrossAccessSpec(bug_class="idor", ref_param=_REF_PARAM, victim_ref=_VICTIM_REF,
+                                     victim_discriminator=_VICTIM_SECRET),),
+    )
+    (check,) = build_access_control_checks(cfg, enabled=True)
+    template, point = _obj_template()
+    ctx = check.probe(template, point, attacker_send)
+    assert ctx is not None
+    assert confirm_finding({"bug_class": "idor", "title": "", "severity": "High"}, ctx) is None
+
+
+def test_no_discriminator_is_a_non_firing_lead_not_a_false_positive() -> None:
+    # Without a victim-unique discriminator the sound check cannot fire — it emits NOTHING (a LEAD),
+    # never the reverted whole-body containment false positive, even on a genuinely vulnerable target.
+    attacker_send, victim_send = _make_cross_target(vulnerable=True)
+    cfg = AccessControlConfig(
+        victim_send=victim_send,
+        cross_specs=(CrossAccessSpec(bug_class="idor", ref_param=_REF_PARAM, victim_ref=_VICTIM_REF),),
+    )
+    (check,) = build_access_control_checks(cfg, enabled=True)
+    template, point = _obj_template()
+    assert check.probe(template, point, attacker_send) is None
+
+
+def test_control_ref_refutes_a_globally_present_marker() -> None:
+    # A marker the operator wrongly believed unique but which is in EVERY record: with the attacker-owned
+    # control_ref set, the negative control refutes it — no fire even though the string is "reached".
+    global_marker = "GLOBAL-TENANT-BANNER-v3"
+
+    def victim_send(req: HttpRequest) -> dict:
+        return {"status": 200, "body": f"acct=bob {global_marker}"}
+
+    def attacker_send(req: HttpRequest) -> dict:
+        rid = _requested_id(req)
+        # every object (victim's ref AND the attacker's own ref 1) carries the global marker
+        return {"status": 200, "body": f"acct={'bob' if rid == _VICTIM_REF else 'alice'} {global_marker}"}
+
+    cfg = AccessControlConfig(
+        victim_send=victim_send,
+        cross_specs=(CrossAccessSpec(bug_class="idor", ref_param=_REF_PARAM, victim_ref=_VICTIM_REF,
+                                     victim_discriminator=global_marker, control_ref="1"),),
+    )
+    (check,) = build_access_control_checks(cfg, enabled=True)
+    template, point = _obj_template()
+    ctx = check.probe(template, point, attacker_send)
+    assert ctx is not None
+    assert confirm_finding({"bug_class": "idor", "title": "", "severity": "High"}, ctx) is None

@@ -287,7 +287,9 @@ def _http_server() -> Iterator[str]:
 
 def test_access_control_flag_confirms_idor_end_to_end() -> None:
     with _http_server() as base:
-        cfg = config_from_cli(loopback_send, ["Cookie: session=bob"], ["idor:id:2"])
+        # The ref now carries the victim-UNIQUE discriminator (Wave 3.1 soundness fix): a fire requires the
+        # attacker's cross-read to reach bob's private marker, never a whole-body containment on boilerplate.
+        cfg = config_from_cli(loopback_send, ["Cookie: session=bob"], [f"idor:id:2|{_SECRET}"])
         report = WebScanCampaign(
             loopback_send, max_pages=5, enable_oob=False,
             enable_access_control=True, access_control_config=cfg,

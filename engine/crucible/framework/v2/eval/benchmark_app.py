@@ -104,6 +104,41 @@ _CSRF_SESSION_COOKIE_VALUE = "owner-authenticated-session"
 _CSRF_TOKEN_VALUE = "bench-csrf-ok"
 
 # ---------------------------------------------------------------------------
+# Two-identity access-control model (Wave 3.1). Object endpoints keyed by ``id``,
+# each account carrying a per-identity UNIQUE discriminator (its private IBAN) that
+# appears ONLY in that account's authoritative record. The sound IdorCheck fires
+# only when an attacker's cross-read REACHES the victim's discriminator — never a
+# whole-body containment over shared boilerplate.
+#   * /account       — the PLANTED IDOR/BOLA: NO object-level authz, so any identity
+#                      (any cookie, or none) reads any id, reaching the victim IBAN;
+#   * /account/safe  — the BENIGN TWIN: object-level authz ENFORCED, a caller reads
+#                      only the account its OWN session cookie owns, so an attacker
+#                      requesting the victim's id gets 403 with NO discriminator and
+#                      the sound check MUST NOT fire.
+# Both are DELIBERATELY NOT linked from the index and never issued by the default
+# GET-only benchmark crawl (a fire needs the operator-supplied SECOND identity +
+# per-identity discriminator), so the default corpus + signed baseline — and
+# `make gate` — stay byte-identical. Exercised only by the two-identity assertion
+# (scanner/tests/test_access_control_benchmark.py).
+_ACCOUNTS: dict[str, tuple[str, str]] = {
+    # id -> (holder, victim-UNIQUE private discriminator)
+    "1": ("alice", "IBAN-ALICE-GB29-NWBK-6016-1331-9268-19"),
+    "2": ("bob", "IBAN-BOB-DE89-VICTIM-UNIQUE-3704-0044-0532-0130-00"),
+}
+# session cookie value -> the account id that session legitimately owns
+_ACCOUNT_SESSIONS: dict[str, str] = {"alice-sess": "1", "bob-sess": "2"}
+
+
+def _account_caller(cookie_header: str) -> str | None:
+    """The account id the caller's ``sess=`` cookie legitimately owns, or None (unauthenticated / unknown)."""
+    for part in (cookie_header or "").split(";"):
+        k, _, v = part.strip().partition("=")
+        if k == "sess":
+            return _ACCOUNT_SESSIONS.get(v.strip())
+    return None
+
+
+# ---------------------------------------------------------------------------
 # Client-side prototype pollution model (Wave 2.2). Two GET pages that both PARSE
 # the URL query, the fragment (location.hash) and a JSON `json=` value into an
 # object and reflect it, but differ in one way:
@@ -562,6 +597,46 @@ class BenchmarkHandler(BaseHTTPRequestHandler):
                 + "".join(f"<li>{html.escape(m)}</li>" for m in _CSRF_APPLIED_PROTECTED) + "</ul>")
         self._respond(200, _page("State", body))
 
+    # -- two-identity access control (Wave 3.1) ----------------------------
+
+    def _account(self) -> None:
+        # PLANTED BUG (IDOR / BOLA / BFLA) — a two-identity object endpoint with NO
+        # object-level authorization: ANY identity (any cookie, or none) reads ANY
+        # account by id, so an attacker reaching the victim's id sees the victim's
+        # UNIQUE private discriminator (its IBAN). This is the exact achieved
+        # cross-tenant read the sound IdorCheck confirms. GET-only. Unlinked from the
+        # index and never crawled by the default GET benchmark, so `make gate` is
+        # byte-identical.
+        acct = self._query("id") or "1"
+        rec = _ACCOUNTS.get(acct)
+        if rec is None:
+            self._respond(404, _page("404", "<h1>No such account</h1>"))
+            return
+        body = (f"<h2>Account {acct}</h2><p>holder={rec[0]}</p>"
+                f"<p>iban={rec[1]}</p><p>Standard Acme Bank statement footer.</p>")
+        self._respond(200, _page("Account", body))
+
+    def _account_safe(self) -> None:
+        # SAFE (IDOR BENIGN TWIN) — the SAME records + the SAME shared boilerplate, but
+        # object-level authz is ENFORCED: a caller reads ONLY the account its own
+        # session cookie owns. An attacker (no / other cookie) requesting the victim's
+        # id gets 403 with NO discriminator, so the sound check never reaches the
+        # victim-unique marker and MUST NOT fire; the victim's OWN session still sees
+        # its authoritative record (the ground truth the cross-read is compared to).
+        acct = self._query("id") or "1"
+        rec = _ACCOUNTS.get(acct)
+        if rec is None:
+            self._respond(404, _page("404", "<h1>No such account</h1>"))
+            return
+        caller = _account_caller(self.headers.get("Cookie", ""))
+        if caller != acct:
+            self._respond(403, _page("403", "<h1>Forbidden</h1>"
+                                     "<p>Standard Acme Bank statement footer.</p>"))
+            return
+        body = (f"<h2>Account {acct}</h2><p>holder={rec[0]}</p>"
+                f"<p>iban={rec[1]}</p><p>Standard Acme Bank statement footer.</p>")
+        self._respond(200, _page("Account", body))
+
     # -- client-side prototype pollution (Wave 2.2) ------------------------
 
     def _proto(self) -> None:
@@ -947,6 +1022,12 @@ _ROUTES = {
     "/csrf/login": BenchmarkHandler._csrf_login,
     "/csrf/state": BenchmarkHandler._csrf_state,
     "/csrf/state-protected": BenchmarkHandler._csrf_state_protected,
+    # Two-identity access-control object endpoints (Wave 3.1). DELIBERATELY NOT linked
+    # from the index; a fire needs the operator-supplied SECOND identity + per-identity
+    # discriminator, which the default GET-only crawl never supplies, so the default
+    # corpus + signed baseline stay byte-identical.
+    "/account": BenchmarkHandler._account,
+    "/account/safe": BenchmarkHandler._account_safe,
 }
 
 # POST surfaces (state-changing writes). Only the stored-XSS write surface A; the
