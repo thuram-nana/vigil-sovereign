@@ -70,6 +70,17 @@ BUG_CLASS_ORACLES: dict[str, tuple[OracleKind, ...]] = {
     "graphql_cost": (OracleKind.ACHIEVED_STATE,),
     "request_smuggling": (OracleKind.DIFFERENTIAL_RESPONSE,),
     "dom_xss": (OracleKind.DOM_EXECUTION, OracleKind.SIDE_EFFECT),
+    # Stored / second-order XSS (scanner.stored_xss, browser-backed, opt-in). Confirmed by the SAME
+    # DOM_EXECUTION oracle as dom_xss — a payload WRITTEN at surface A that EXECUTES when surface B renders
+    # the persisted value, observed via VIGIL's own __crucible_xss binding call carrying a unique per-(A,B,
+    # payload) canary (never mere reflection/echo). Reuses DOM_EXECUTION (already in the frozen _ALL_ORACLES),
+    # so this row adds NO new OracleKind and `make gate` stays byte-identical (stored-XSS is deep-only /
+    # off-by-default and sends 0 benchmark requests through the default corpus). This is a REAL row, not the
+    # former `stored_xss -> xss` alias: that alias routed stored_xss to REFLECTION_CONTEXT, which cannot
+    # prove EXECUTION of a persisted payload; the browser-confirmed FACT this class now mints requires the
+    # execution oracle, so the class maps to it directly. SIDE_EFFECT is retained as the secondary kind for
+    # parity with dom_xss (a rendered-attribute side-effect confirmation).
+    "stored_xss": (OracleKind.DOM_EXECUTION, OracleKind.SIDE_EFFECT),
     "cross_site_websocket_hijacking": (OracleKind.ACHIEVED_STATE,),
     "websocket_injection": (OracleKind.SIDE_EFFECT, OracleKind.DIFFERENTIAL_RESPONSE),
     "request_race": (OracleKind.ACHIEVED_STATE,),
@@ -330,7 +341,12 @@ _ALIASES: dict[str, str] = {
     "server_side_template_injection": "ssti",
     "cross_site_scripting": "xss",
     "reflected_xss": "xss",
-    "stored_xss": "xss",
+    # NOTE: `stored_xss` is NOT aliased to `xss` — it is a first-class BUG_CLASS_ORACLES entry routed to the
+    # DOM_EXECUTION oracle (browser-confirmed execution of a persisted payload). Aliasing it to `xss` would
+    # route it to REFLECTION_CONTEXT, which cannot prove execution of a stored payload and would silently
+    # weaken the class. Second-order/persistent spellings fold onto the canonical `stored_xss` instead.
+    "second_order_xss": "stored_xss",
+    "persistent_xss": "stored_xss",
     "directory_traversal": "path_traversal",
     "information_disclosure": "exposure",
     "sensitive_data_exposure": "sensitive_exposure",

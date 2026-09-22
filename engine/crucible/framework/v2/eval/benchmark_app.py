@@ -56,6 +56,22 @@ from urllib.parse import parse_qs, urlsplit
 from .validation import CorpusTarget, ExpectedFinding
 
 # ---------------------------------------------------------------------------
+# Stored / second-order XSS model (Wave 2.1). A guestbook: a POST to surface A
+# (/guestbook) PERSISTS a comment keyed by author; a GET to render-surface B
+# (/guestbook/view) reflects the persisted comment VERBATIM into an executable
+# HTML position (the planted stored-XSS), while the benign twin B' (/guestbook/
+# safe) renders it HTML-escaped (inert — a textContent-equivalent store that must
+# NEVER fire).
+#
+# These routes are DELIBERATELY NOT linked from the index and the store starts
+# EMPTY, so the DEFAULT GET-only benchmark crawl (which drives `make gate`) never
+# POSTs and never reaches a populated render — the default corpus + signed
+# baseline stay byte-identical. The stored-XSS FACT is exercised only by the
+# dedicated deep-profile assertion (scanner/tests/test_stored_xss.py), which POSTs
+# through the gated write path and renders B in a real browser.
+_GUESTBOOK: dict[str, str] = {}
+
+# ---------------------------------------------------------------------------
 # The boolean-blind SQLi model (a faithful reuse of the vulnerable matcher from
 # verify.confirmation): user input is string-built into ``name = '<q>'`` and split
 # on `` OR ``, so an `` ' OR '1'='1`` tautology breaks out and selects every row,
@@ -226,6 +242,55 @@ class BenchmarkHandler(BaseHTTPRequestHandler):
             self._respond(404, _page("404", "<h1>Not Found</h1>"))
             return
         route(self)
+
+    def do_POST(self) -> None:  # noqa: N802 (stdlib naming)
+        # State-changing surface A (the stored-XSS WRITE). Only exercised by the
+        # deep-profile stored-XSS assertion through the gated write path; the
+        # default GET-only benchmark crawl never reaches it, so `make gate` is
+        # unaffected.
+        path = urlsplit(self.path).path.rstrip("/") or "/"
+        route = _POST_ROUTES.get(path)
+        if route is None:
+            self._respond(404, _page("404", "<h1>Not Found</h1>"))
+            return
+        route(self)
+
+    # -- stored / second-order XSS (Wave 2.1) ------------------------------
+
+    def _guestbook_write(self) -> None:
+        # PLANTED BUG (stored XSS), surface A — the WRITE. Persists the posted
+        # comment VERBATIM keyed by author; the payload executes later when the
+        # vulnerable render surface B (/guestbook/view) renders it. This is a
+        # state-changing POST — in a governed run it routes through the Wave-0.3
+        # per-action approval; the benchmark handler performs the write directly
+        # (the test supplies the gated-write seam).
+        length = int(self.headers.get("Content-Length", "0") or "0")
+        raw = self.rfile.read(length).decode("utf-8", "replace") if length else ""
+        fields = parse_qs(raw, keep_blank_values=True)
+        author = fields.get("name", ["guest"])[0]
+        comment = fields.get("comment", [""])[0]
+        _GUESTBOOK[author] = comment
+        self._respond(201, _page("Posted", "<p>Comment stored.</p>"))
+
+    def _guestbook_view(self) -> None:
+        # PLANTED BUG (stored XSS), render-surface B — reflects the PERSISTED
+        # comment VERBATIM into an executable HTML position. Nothing is echoed from
+        # THIS request (the value comes from the store written at surface A), which
+        # is exactly what makes it second-order.
+        author = self._query("name")
+        stored = _GUESTBOOK.get(author, "")
+        body = f"<h2>Guestbook</h2><div class=comment>{stored}</div>"
+        self._respond(200, _page("Guestbook", body))
+
+    def _guestbook_safe(self) -> None:
+        # SAFE (stored-XSS BENIGN TWIN), render-surface B' — renders the SAME
+        # persisted comment HTML-ESCAPED (a textContent-equivalent store). The
+        # payload appears verbatim as inert TEXT, never as markup, so it can never
+        # execute. This must NEVER fire the DOM-execution oracle.
+        author = self._query("name")
+        stored = html.escape(_GUESTBOOK.get(author, ""))
+        body = f"<h2>Guestbook</h2><div class=comment>{stored}</div>"
+        self._respond(200, _page("Guestbook", body))
 
     # -- planted-bug routes ------------------------------------------------
 
@@ -469,6 +534,18 @@ _ROUTES = {
     "/.git/config": BenchmarkHandler._git_config,
     "/.env": BenchmarkHandler._env,
     "/actuator/env": BenchmarkHandler._actuator_env,
+    # Stored-XSS render surfaces (Wave 2.1). DELIBERATELY NOT linked from the index
+    # and served over an EMPTY store during the default crawl, so the default GET
+    # benchmark (and `make gate`) never produces a finding here.
+    "/guestbook/view": BenchmarkHandler._guestbook_view,
+    "/guestbook/safe": BenchmarkHandler._guestbook_safe,
+}
+
+# POST surfaces (state-changing writes). Only the stored-XSS write surface A; the
+# default GET-only benchmark crawl never issues a POST, so this leaves `make gate`
+# byte-identical.
+_POST_ROUTES = {
+    "/guestbook": BenchmarkHandler._guestbook_write,
 }
 
 

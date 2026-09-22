@@ -1485,7 +1485,13 @@ def _redrive_branch_for(bug_class: str) -> "Optional[str]":
     (fail-closed). FATAL-2: imports are function-local."""
     from framework.v2.verify.verifier import normalize_bug_class  # noqa: PLC0415
     from .verdict import branch_ids  # noqa: PLC0415
-    mapping = {"error_based_sqli": "error_signature.datastore_error"}
+    mapping = {
+        "error_based_sqli": "error_signature.datastore_error",
+        # Wave 2.1 — stored / second-order XSS re-drive: a VIGIL-owned gated write at surface A + a
+        # headless-browser render of surface B, adjudicated by the FACT-capable DOM_EXECUTION branch
+        # (verify/oracles.py:dom_execution_oracle). A non-fire / no channel keeps the claim a LEAD.
+        "stored_xss": "stored_xss.dom_execution",
+    }
     branch = mapping.get(normalize_bug_class(bug_class))
     return branch if branch in branch_ids() else None
 
