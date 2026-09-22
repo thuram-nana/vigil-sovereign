@@ -39,7 +39,7 @@ from urllib.parse import urlsplit
 _LOOPBACK = frozenset({"127.0.0.1", "localhost", "::1", "[::1]"})
 
 from ..common.errors import CrucibleError
-from .browser import find_browser
+from .browser import OFFLINE_CHROME_FLAGS, find_browser
 from .websocket import WSConnection, connect
 
 
@@ -66,17 +66,15 @@ def _cdp_host_allowed(url: str, allowed_hosts) -> bool:
         return bool(_LOOPBACK & allowed)   # only when the scan itself targets loopback
     return host in allowed
 
-# Flags that make Chromium headless, debuggable, and sandbox-tolerant. `port=0`
-# lets the OS assign a port; Chromium writes the chosen one to DevToolsActivePort.
+# Flags that make Chromium headless, debuggable, and sandbox-tolerant. The headless
+# + no-phone-home/no-network-discovery base is the SHARED OFFLINE_CHROME_FLAGS set
+# (defined once in scanner.browser and used by the --dump-dom render too), so the
+# CDP driver and the render carry the identical anti-beacon set — one shared helper,
+# no per-site duplication. `--remote-debugging-port=0` is CDP-specific: port 0 lets
+# the OS assign a port, which Chromium writes to DevToolsActivePort.
 _LAUNCH_FLAGS = (
-    "--headless=new",
+    *OFFLINE_CHROME_FLAGS,
     "--remote-debugging-port=0",
-    "--no-sandbox",
-    "--disable-gpu",
-    "--disable-dev-shm-usage",
-    "--disable-extensions",
-    "--no-first-run",
-    "--disable-background-networking",
 )
 
 
