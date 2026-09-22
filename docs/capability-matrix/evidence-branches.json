@@ -1076,6 +1076,34 @@
         "out_of_band_pinned_collector_pubkey",
         "token_ttl_replay_window"
       ]
+    },
+    {
+      "id": "stored_xss.dom_execution",
+      "check": "confirm_stored_xss",
+      "evidence": "A unique per-(write-surface,render-surface,payload) canary that VIGIL WROTE at surface A via the Wave-0.3 gated per-action-approved POST, observed EXECUTING on render-surface B: the same canary surfaces in a Runtime.bindingCalled EXECUTION callback to VIGIL's own __crucible_xss binding in a real headless DOM (actual JavaScript execution, not reflection/echo).",
+      "fact_capable": true,
+      "clean_capable": false,
+      "preconditions": [
+        "channel_established"
+      ],
+      "limitation": "Coverage-bounded, not soundness-bounded: a fire is unforgeable (only the driver registers __crucible_xss, and the canary cannot pre-exist), but VIGIL can only confirm stored XSS across (A,B) surface pairs it actually crawls and can WRITE at (the write needs the owner-signed per-action approval; a run without an approval authority performs no write and mints nothing). An (A,B) pair VIGIL never crawls, or a write it cannot get approved, stays a LEAD/INCONCLUSIVE — never a false negative and never a CLEAN. A non-firing render is uninformative (the payload may execute on a surface not rendered here), so this branch may not assert absence.",
+      "target_fact_capable": true,
+      "target_clean_capable": false,
+      "target_downgrade_rationale": "Proving the ABSENCE of a stored-XSS sink is a coverage-complete capability over every (write,render) surface pair and every persisted-value render path (a value may execute only on an admin/preview surface VIGIL never reaches, or a sink may be assembled at runtime), not this per-pair execution re-drive's target, so CLEAN-capability is deliberately not pursued on this branch.",
+      "blocking_work": "COVERAGE, not a missing oracle: the DOM_EXECUTION oracle and the gated headless-browser render capture both exist and mint the FACT today. Raising coverage toward the (unreachable) CLEAN target requires exhaustive (write-surface A, render-surface B) pair enumeration across authenticated identities plus a second-identity render pass, so a stored payload that only executes on an admin/preview surface is reached; until that enumeration is complete an un-crawled (A,B) pair stays a LEAD, never a CLEAN.",
+      "oracle_version": "dom_execution",
+      "control_requirements": [
+        "warden_active_recon_gate",
+        "vigil_owned_canary_injection",
+        "gated_mutating_write_approval",
+        "headless_dom_render_capture",
+        "benign_twin_control"
+      ],
+      "evidence_surface": "composite",
+      "implementation_refs": [
+        "engine/crucible/framework/v2/scanner/stored_xss.py:confirm_stored_xss",
+        "engine/crucible/framework/v2/verify/oracles.py:dom_execution_oracle"
+      ]
     }
   ]
 }
