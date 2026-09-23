@@ -430,17 +430,21 @@ class FindingContext(BaseModel):
     csrf_achieved: dict[str, Any] | None = None
     # session_fixation_oracle (Wave-3.2 ACHIEVED-STATE FACT — CWE-384, its OWN OracleKind.SESSION_FIXATION).
     # The retained record scanner.session.SessionFixationCheck captured through the gated send carries the RAW
-    # bytes the oracle re-runs its DIFFERENTIAL over — {sentinel_id, post_auth_id, cookie_name, success_marker,
-    # logged_out_markers, logged_out_statuses, authorized_view (status/body of the fixed-session protected
-    # page), logged_out_ref (status/body of a same-URL NO-COOKIE page)} — never a pre-computed authenticated
-    # bool. The oracle fires ONLY when the VIGIL-fixed pre-auth sentinel id SURVIVED login unrotated
-    # (post_auth_id == sentinel_id) AND the success_marker is PRESENT in the authorized view yet PROVABLY ABSENT
-    # from a SUBSTANTIVE logged-out reference to the same URL (the differential that proves the marker is
-    # access-gated, not a common token / chrome / soft-200 body). A marker present in both, or no substantive
-    # logged-out reference, DOWNGRADES to a LEAD; a rotated id or a server-set-only id (no sentinel shape) does
-    # not fire. No benchmark/scan/engage finding carries session_fixation, so appending it leaves the gate
-    # byte-identical; routes to the dedicated ACHIEVED_STATE-sibling kind via its distinct `session_fixation`
-    # ctx key so oracle_version(ACHIEVED_STATE) is untouched.
+    # bytes the oracle re-runs its PRIVATE-READ DIFFERENTIAL over — {sentinel_id, post_auth_id, cookie_name,
+    # private_discriminator (D, the victim-PRIVATE datum), success_marker (LEGACY, not a minting path),
+    # logged_out_markers, logged_out_statuses, authorized_view (status/body of S0's fixed-session read),
+    # owner_view (the owner's authoritative POSITIVE reference), unauth_ref (a SAME-SHAPE substantive-2xx read
+    # by an OTHER unauthorized identity — the DECISIVE negative reference), logged_out_ref (a same-URL
+    # NO-COOKIE gating baseline)} — never a pre-computed authenticated bool. The oracle fires ONLY when the
+    # VIGIL-fixed pre-auth sentinel id SURVIVED login unrotated (post_auth_id == sentinel_id) AND D is PRESENT
+    # in S0's read AND in the owner's authoritative read yet PROVABLY ABSENT from the SUBSTANTIVE SAME-SHAPE
+    # other-identity reference and a valid no-session baseline (the private-read reduction that proves S0
+    # reached the victim's gated content — a bare success-marker / credential-presence differential proves
+    # nothing and cannot mint). No/invalid/reflected D, a missing positive or same-shape negative reference, D
+    # present in a negative reference, a rotated id, or a server-set-only id (no sentinel shape) do not fire.
+    # No benchmark/scan/engage finding carries session_fixation, so appending it leaves the gate byte-identical;
+    # routes to the dedicated ACHIEVED_STATE-sibling kind via its distinct `session_fixation` ctx key so
+    # oracle_version(ACHIEVED_STATE) is untouched.
     session_fixation: dict[str, Any] | None = None
     # jwt_forgery_oracle (Workstream-B: a captured JWT is STRUCTURALLY FORGEABLE — judged on the token
     # ALONE, offline, zero traffic). jwt_token is the captured token string; jwt_candidate_keys are the
@@ -1800,28 +1804,36 @@ class FindingContext(BaseModel):
         sentinel_id: str,
         post_auth_id: str | None,
         cookie_name: str = "",
+        private_discriminator: str | None = None,
         success_marker: str | None = None,
         logged_out_markers: Any = (),
         logged_out_statuses: Any = (),
         authorized_view: Any = None,
+        owner_view: Any = None,
+        unauth_ref: Any = None,
         logged_out_ref: Any = None,
         bug_class: str = "session_fixation",
     ) -> "FindingContext":
         """The retained session-fixation record for the session-fixation oracle (OracleKind.SESSION_FIXATION,
-        CWE-384). It carries the RAW bytes the oracle re-runs its DIFFERENTIAL over — never a pre-computed
-        authenticated bool.
+        CWE-384). It carries the RAW bytes the oracle re-runs its PRIVATE-READ DIFFERENTIAL over — never a
+        pre-computed authenticated bool, never a bare success-marker differential.
 
         ``sentinel_id`` (S0) is the UNIQUE high-entropy id VIGIL chose and set as the session cookie BEFORE the
         operator login sequence; ``post_auth_id`` (S1) is the session-cookie value in effect AFTER login;
-        ``success_marker`` is the operator's positive authenticated-state discriminator; ``authorized_view`` is
-        ``{status, body}`` of the protected URL fetched carrying the VIGIL-fixed id S0 AFTER login;
-        ``logged_out_ref`` is ``{status, body}`` of the SAME protected URL fetched with NO session cookie (the
-        NEGATIVE reference); ``logged_out_markers`` / ``logged_out_statuses`` are the operator's decisive
-        not-authenticated signals. The oracle fires ONLY when S1 == S0 (the fixed id survived unrotated) AND
-        the success_marker is PRESENT in the authorized view yet PROVABLY ABSENT from a SUBSTANTIVE logged-out
-        reference — the achieved fixation state, never that a cookie was merely set. A marker present in both
-        views, no substantive logged-out reference, a rotated value with a dead S0, a missing S1, or an
-        undecidable differential are LEAD / clean / inconclusive — never a FACT."""
+        ``private_discriminator`` (D) is the operator's genuine victim-PRIVATE datum — the achieved-state
+        proof. ``authorized_view`` is ``{status, body}`` of the protected URL fetched carrying the VIGIL-fixed
+        id S0 AFTER login (S0's read); ``owner_view`` is the SAME URL read authoritatively as the owner/victim
+        (the POSITIVE reference — D must be PRESENT); ``unauth_ref`` is the SAME URL read by an OTHER
+        unauthorized identity (the DECISIVE SAME-SHAPE negative reference — a substantive 2xx from which D must
+        be ABSENT); ``logged_out_ref`` is the SAME URL with NO session cookie (the no-session gating baseline);
+        ``logged_out_markers`` / ``logged_out_statuses`` are the operator's decisive not-authenticated signals;
+        ``success_marker`` is LEGACY and is NOT a minting path (a bare marker differential proves only that a
+        credential changed the response, not that S0 authenticated). The oracle fires ONLY when S1 == S0 (the
+        fixed id survived unrotated) AND D is PRESENT in S0's read AND in the owner's authoritative read yet
+        PROVABLY ABSENT from a SUBSTANTIVE SAME-SHAPE other-identity reference and a valid no-session baseline
+        — the achieved fixation state, never that a cookie was merely set. No/invalid/reflected D, a missing
+        positive or same-shape negative reference, D present in a negative reference, a rotated value with a
+        dead S0, a missing S1, or an undecidable differential are LEAD / clean / inconclusive — never a FACT."""
         def _view(v: Any) -> "dict | None":
             if not isinstance(v, Mapping):
                 return None
@@ -1848,10 +1860,13 @@ class FindingContext(BaseModel):
                 "sentinel_id": _coerce_text(sentinel_id),
                 "post_auth_id": None if post_auth_id is None else _coerce_text(post_auth_id),
                 "cookie_name": _coerce_text(cookie_name),
+                "private_discriminator": None if private_discriminator is None else _coerce_text(private_discriminator),
                 "success_marker": None if success_marker is None else _coerce_text(success_marker),
                 "logged_out_markers": _strs(logged_out_markers),
                 "logged_out_statuses": _ints(logged_out_statuses),
                 "authorized_view": _view(authorized_view),
+                "owner_view": _view(owner_view),
+                "unauth_ref": _view(unauth_ref),
                 "logged_out_ref": _view(logged_out_ref),
             },
         )

@@ -1,40 +1,43 @@
 """
 Session-fixation confirmation (Wave 3.2, gated-workflow) — end-to-end over the in-process benchmark app,
 without a browser: VIGIL fixes a high-entropy sentinel session id BEFORE authenticating, runs the operator
-login sequence through a direct send, captures the fixed-session view AND a same-URL LOGGED-OUT reference,
-and the deterministic ``session_fixation_oracle`` adjudicates by a DIFFERENTIAL over the RAW retained bytes.
+login sequence through a direct send, captures S0's read of the protected URL PLUS a POSITIVE reference (the
+owner's authoritative read), a DECISIVE SAME-SHAPE negative reference (an OTHER unauthorized identity's read)
+and a no-session baseline; the deterministic ``session_fixation_oracle`` adjudicates by the PRIVATE-READ
+REDUCTION over the RAW retained bytes.
 
-ROUND-4 principle: a single response body CANNOT be classified authenticated-vs-benign by content
-heuristics. The operator ``success_marker`` qualifies as an authenticated-state discriminator ONLY when it
-is PRESENT in the fixed-session view of the protected URL AND PROVABLY ABSENT from a SUBSTANTIVE same-URL
-logged-out (no-cookie) reference. A marker present in BOTH views (a common HTML token, page chrome, a benign
-soft-200 body both share) is DISQUALIFIED ⇒ no FACT. No substantive logged-out reference ⇒ a LEAD.
+SIXTH-VARIANT principle (round-5 BLOCK): an achieved authenticated state CANNOT be proven from response
+CONTENT. A ``success_marker`` PRESENT-with-cookie / ABSENT-without proves only that the COOKIE changed the
+response, not that S0 authenticated — a benign app that renders the marker whenever ANY cookie is present
+defeats it. So the marker differential is NO LONGER a minting path. Fixation is confirmed ONLY when a genuine
+victim-PRIVATE discriminator D is PRESENT in S0's read AND in the owner's authoritative read yet PROVABLY
+ABSENT from a SUBSTANTIVE SAME-SHAPE read by an OTHER unauthorized identity (the DECISIVE clause — cosmetic
+chrome shown for any credential appears there too) and a valid no-session baseline.
 
 Proves:
   * a FACT on the PLANTED vulnerable login flow (``/sessfix/login`` keeps the client-fixed id across login,
-    so the fixed id still authenticates ``/sessfix/account`` — marker present in the fixed-session view,
-    absent from the logged-out reference);
-  * SILENCE on the BENIGN TWIN (``/sessfix/rotate/login`` rotates the session id at login — the correct
-    defense — so the fixed id never authenticates);
-  * the ROUND-4 4th-variant is CLOSED: a benign soft-200 (the same body, or a common token like ``<p>`` /
-    ``div``, shared by both the fixed-session and logged-out views) mints NOTHING — live AND under offline
-    re-verification of the retained record;
-  * the oracle NEVER trusts a pre-computed bool — a hand-forged record carrying only ``authenticated_after_
-    login`` (no raw bodies) does not confirm;
-  * the retained ``oracle_context`` re-fires (a re-verifiable certificate) and a tampered post-auth id no
-    longer confirms;
+    so the fixed id becomes the VICTIM's session and reads the victim's PRIVATE datum — present in S0's read
+    and the owner's, absent from the attacker's same-shape read);
+  * SILENCE on the BENIGN TWIN (``/sessfix/rotate/login`` rotates the id at login — the correct defense);
+  * the SIXTH-VARIANT is CLOSED: a benign cookie-varying app (a chrome marker present-with-cookie /
+    absent-without, D not private) mints NOTHING — live AND under offline re-verification;
+  * a reflected-sentinel D (a cookie echo), no private D, or a D present in the same-shape other-identity
+    reference all DOWNGRADE to a LEAD;
+  * the oracle NEVER trusts a pre-computed bool nor a bare success-marker differential;
   * the default GET-only crawl never touches the login POST routes (the fixture is deep-only), so
-    ``make gate`` is unaffected — asserted by the ground-truth manifest test elsewhere.
+    ``make gate`` is unaffected.
 """
 
 from __future__ import annotations
 
 import re
+import urllib.error
 import urllib.request
 
-from framework.v2.eval.benchmark_app import _SESSFIX_SUCCESS_MARKER, serve
+from framework.v2.eval.benchmark_app import _SESSFIX_SUCCESS_MARKER, _sessfix_private, serve
 from framework.v2.scanner.insertion import HttpRequest
 from framework.v2.scanner.session import (
+    CookieJar,
     LoginSequence,
     confirm_session_fixation,
     is_substantive_success,
@@ -46,6 +49,7 @@ from framework.v2.verify.models import OracleKind
 from framework.v2.verify.verifier import OracleVerifier
 
 _SENTINEL_RE = re.compile(r"^sfx_[0-9a-f]{32}$")
+_D = _sessfix_private("admin")   # the victim (admin) PRIVATE datum the private-read differential requires
 
 
 def _send(req: HttpRequest) -> dict:
@@ -67,9 +71,36 @@ def _send(req: HttpRequest) -> dict:
     return {"status": status, "headers": headers, "body": raw}
 
 
-def _login(url_login: str) -> LoginSequence:
-    return LoginSequence(url=url_login, method="POST", body="user=admin&password=admin",
+def _login(url_login: str, user: str = "admin") -> LoginSequence:
+    return LoginSequence(url=url_login, method="POST", body=f"user={user}&password=x",
                          success_marker=_SESSFIX_SUCCESS_MARKER)
+
+
+def _authed_send(base: str, user: str):
+    """A ``send`` authenticated as ``user``: log in via the ROTATE route (a fresh server-issued session bound
+    to that user), capture the SESSION cookie, and carry it on every request. The owner (victim) and the
+    OTHER unauthorized identity are built this way — each reads the protected page as its own identity."""
+    resp = _send(HttpRequest(method="POST", url=f"{base}/sessfix/rotate/login",
+                             headers=[("Content-Type", "application/x-www-form-urlencoded")],
+                             body=f"user={user}&password=x"))
+    jar = CookieJar()
+    jar.update_from_headers([(str(k), str(v)) for k, v in resp["headers"]])
+    sid = jar.get("SESSION")
+
+    def send(req: HttpRequest) -> dict:
+        headers = [(k, v) for k, v in req.headers if k.lower() != "cookie"] + [("Cookie", f"SESSION={sid}")]
+        return _send(req.model_copy(update={"headers": headers}))
+
+    return send
+
+
+def _with_cookie(send, sid: str):
+    """Wrap a benign (non-benchmark) send so every request carries ``SESSION=<sid>`` — used to build the
+    owner / other-identity references for the custom benign-app tests."""
+    def s(req: HttpRequest) -> dict:
+        headers = [(k, v) for k, v in req.headers if k.lower() != "cookie"] + [("Cookie", f"SESSION={sid}")]
+        return send(req.model_copy(update={"headers": headers}))
+    return s
 
 
 def _has_cookie(req: HttpRequest, cookie: str = "SESSION") -> bool:
@@ -93,39 +124,47 @@ def test_mint_sentinel_shape() -> None:
 def test_shared_discriminator_and_substance_guards() -> None:
     # The shared Wave-3 guards (names/semantics must stay identical across the slices) — a marker below 3
     # stripped chars discriminates nothing; a substantive success is a real 2xx with a non-trivial,
-    # non-error body. (The differential itself lives in the oracle; these are the cheap pre-guards.)
+    # non-error body. valid_discriminator ALSO refuses a marker that is a substring of the per-probe nonce.
     assert valid_discriminator("") is False
     assert valid_discriminator("   ") is False
     assert valid_discriminator("ab") is False
     assert valid_discriminator("abc") is True
-    assert valid_discriminator("SESSFIX-AUTHENTICATED") is True
+    assert valid_discriminator(_D) is True
     assert valid_discriminator(None) is False
-    assert is_substantive_success(200, "<h1>SESSFIX-AUTHENTICATED</h1><p>Welcome back.</p>") is True
+    assert valid_discriminator("cafebabe", nonce="sfx_cafebabe0000") is False   # a substring of the nonce
+    assert is_substantive_success(200, f"<h1>{_SESSFIX_SUCCESS_MARKER}</h1><p>{_D}</p>") is True
     assert is_substantive_success(200, "") is False
     assert is_substantive_success(200, "short") is False
     assert is_substantive_success(302, "<h1>plenty of real body content here</h1>") is False
     assert is_substantive_success(200, "Internal Server Error occurred, please retry later") is False
-    # a normal logged-out page is a substantive success too (so it is a usable negative reference).
     assert is_substantive_success(200, "<h1>Please log in</h1><p>You are logged out.</p>") is True
 
 
 def test_planted_fixation_flow_confirms_a_fact() -> None:
     with serve() as base:
+        owner = _authed_send(base, "admin")        # the victim's own authoritative session (POSITIVE ref)
+        other = _authed_send(base, "attacker")     # a DIFFERENT unauthorized identity (SAME-SHAPE negative)
         ctx = confirm_session_fixation(
             _send,
-            login=_login(f"{base}/sessfix/login"),
+            login=_login(f"{base}/sessfix/login", "admin"),
             session_cookie="SESSION",
             protected_url=f"{base}/sessfix/account",
+            private_discriminator=_D,
+            owner_send=owner,
+            unauth_send=other,
         )
     assert ctx is not None and ctx.bug_class == "session_fixation"
     rec = ctx.session_fixation
     assert rec is not None
     assert _SENTINEL_RE.fullmatch(rec["sentinel_id"])
     assert rec["post_auth_id"] == rec["sentinel_id"]     # the fixed id SURVIVED login (no rotation)
-    # the DIFFERENTIAL raw material: marker PRESENT in the fixed-session view, ABSENT from the logged-out ref.
-    assert _SESSFIX_SUCCESS_MARKER in rec["authorized_view"]["body"]
-    assert _SESSFIX_SUCCESS_MARKER not in rec["logged_out_ref"]["body"]
-    assert rec["logged_out_ref"]["body"].strip()          # a substantive negative reference
+    # the PRIVATE-READ differential raw material: D present in S0's read AND the owner's, absent from the
+    # OTHER identity's same-shape read AND the no-session baseline.
+    assert _D in rec["authorized_view"]["body"]
+    assert _D in rec["owner_view"]["body"]
+    assert _D not in rec["unauth_ref"]["body"]
+    assert _SESSFIX_SUCCESS_MARKER in rec["unauth_ref"]["body"]   # chrome IS present for the other identity
+    assert _D not in rec["logged_out_ref"]["body"]
     outcome = OracleVerifier().confirm(ctx.to_verifier_context())
     assert outcome.confirmed
     assert any(s.kind is OracleKind.SESSION_FIXATION and s.fired for s in outcome.signals)
@@ -135,159 +174,140 @@ def test_planted_fixation_flow_confirms_a_fact() -> None:
 
 def test_benign_twin_that_rotates_the_id_never_fires() -> None:
     with serve() as base:
+        owner = _authed_send(base, "admin")
+        other = _authed_send(base, "attacker")
         ctx = confirm_session_fixation(
             _send,
-            login=_login(f"{base}/sessfix/rotate/login"),
+            login=_login(f"{base}/sessfix/rotate/login", "admin"),
             session_cookie="SESSION",
             protected_url=f"{base}/sessfix/account",
+            private_discriminator=_D,
+            owner_send=owner,
+            unauth_send=other,
         )
     assert ctx is not None
     rec = ctx.session_fixation
     assert rec["post_auth_id"] != rec["sentinel_id"]      # the app ROTATED at login (the correct defense)
-    # the fixed id S0 is not blessed ⇒ its view is the logged-out body (no marker) ⇒ rotated + dead ⇒ clean.
-    assert _SESSFIX_SUCCESS_MARKER not in rec["authorized_view"]["body"]
+    # the fixed id S0 is not bound ⇒ its read is the logged-out body (no private datum) ⇒ rotated + dead ⇒ clean.
+    assert _D not in rec["authorized_view"]["body"]
     assert not _confirm(ctx)
     assert not _confirm_offline(ctx)
 
 
 def test_a_tampered_post_auth_id_no_longer_confirms() -> None:
     with serve() as base:
+        owner = _authed_send(base, "admin")
+        other = _authed_send(base, "attacker")
         ctx = confirm_session_fixation(
-            _send,
-            login=_login(f"{base}/sessfix/login"),
-            session_cookie="SESSION",
-            protected_url=f"{base}/sessfix/account",
+            _send, login=_login(f"{base}/sessfix/login", "admin"), session_cookie="SESSION",
+            protected_url=f"{base}/sessfix/account", private_discriminator=_D,
+            owner_send=owner, unauth_send=other,
         )
+    assert _confirm(ctx)   # the untampered record IS a FACT
     d = ctx.model_dump()
     d["session_fixation"]["post_auth_id"] = "rot_deadbeefdeadbeefdeadbeefdeadbeef"  # forge a rotation
     tampered = FindingContext.model_validate(d)
     assert not OracleVerifier().confirm(tampered.to_verifier_context()).confirmed
 
 
-def test_marker_absent_downgrades_to_lead_even_against_the_vulnerable_flow() -> None:
-    # Against the genuinely-vulnerable planted flow, dropping the success_marker removes the positive
-    # authenticated-state discriminator, so the differential is undecidable and VIGIL cannot soundly mint —
-    # an honest LEAD/INCONCLUSIVE beats a FACT it cannot prove.
+def test_no_private_discriminator_downgrades_to_lead_even_against_the_vulnerable_flow() -> None:
+    # Against the genuinely-vulnerable planted flow, WITHOUT a private discriminator D there is no
+    # achieved-state proof (a bare success-marker differential proves only that a credential changed the
+    # response) ⇒ the oracle FAILS CLOSED to a LEAD — an honest downgrade beats a FACT it cannot prove.
     with serve() as base:
+        owner = _authed_send(base, "admin")
+        other = _authed_send(base, "attacker")
         ctx = confirm_session_fixation(
-            _send,
-            login=LoginSequence(url=f"{base}/sessfix/login", method="POST", body="user=admin&password=admin"),
-            session_cookie="SESSION",
-            protected_url=f"{base}/sessfix/account",
+            _send, login=_login(f"{base}/sessfix/login", "admin"), session_cookie="SESSION",
+            protected_url=f"{base}/sessfix/account", owner_send=owner, unauth_send=other,
         )
     assert ctx is not None
-    assert ctx.session_fixation["success_marker"] is None
+    assert ctx.session_fixation["private_discriminator"] is None
+    assert not _confirm(ctx)
+    assert not _confirm_offline(ctx)
+
+
+def test_no_references_supplied_downgrades_to_lead() -> None:
+    # No owner/other-identity references at all (the operator pointed the probe but supplied no positive /
+    # same-shape references) ⇒ the private-read differential is unestablished ⇒ LEAD, never a FACT.
+    with serve() as base:
+        ctx = confirm_session_fixation(
+            _send, login=_login(f"{base}/sessfix/login", "admin"), session_cookie="SESSION",
+            protected_url=f"{base}/sessfix/account", private_discriminator=_D,
+        )
+    assert ctx is not None
+    assert ctx.session_fixation["owner_view"] is None and ctx.session_fixation["unauth_ref"] is None
     assert not _confirm(ctx)
     assert not _confirm_offline(ctx)
 
 
 # ---------------------------------------------------------------------------
-# ROUND-4 core: a benign soft-200 that RESEMBLES success cannot mint — the differential closes it.
+# SIXTH-VARIANT: a benign app whose response merely VARIES by credential presence must NOT mint.
 # ---------------------------------------------------------------------------
 
-def _soft200_send(body_both: str, marker: str = _SESSFIX_SUCCESS_MARKER):
-    """A benign app that never touches the VIGIL-fixed SESSION cookie (login sets NO Set-Cookie ⇒ S1 == S0)
-    and returns the SAME soft-200 ``body_both`` for the protected URL REGARDLESS of the cookie — so the
-    fixed-session view and the logged-out (no-cookie) reference are IDENTICAL. Any operator marker present in
-    that shared body is present in BOTH views ⇒ disqualified ⇒ no FACT."""
+def _cookie_varying_send(marker: str = "WELCOME-BACK-VALUED-USER"):
+    """A BENIGN app: login sets NO Set-Cookie (S1 == S0), and the protected GET renders ``marker`` whenever
+    ANY SESSION cookie is present, omitting it without one ('present-with-cookie / absent-without'), with NO
+    per-identity private content. The exact sixth-variant a marker/credential-presence differential false-fires
+    on — but the chrome marker appears for EVERY identity, so an other-identity same-shape read carries it too."""
     def send(req: HttpRequest) -> dict:
         if req.method == "POST":
             return {"status": 200, "headers": [], "body": "<html>ok, processed</html>"}
-        return {"status": 200, "headers": [], "body": body_both}
+        if _has_cookie(req):
+            return {"status": 200, "headers": [], "body": f"<h1>{marker}</h1><p>Welcome to the portal.</p>"}
+        return {"status": 200, "headers": [], "body": "<h1>Portal</h1><p>Please sign in.</p>"}
     return send
 
 
-def test_soft_200_shared_body_marker_in_both_views_yields_no_fact() -> None:
-    # A benign soft-200 whose body contains the operator success_marker but is returned for BOTH the
-    # fixed-session view and the logged-out reference. The marker is present in BOTH ⇒ NOT access-gated ⇒
-    # the oracle refuses (LEAD), live AND under offline re-verification. This is the exact class that
-    # defeated three prior rounds of content heuristics.
-    body = f"<html><body><h1>{_SESSFIX_SUCCESS_MARKER}</h1><p>Welcome to the portal.</p></body></html>"
-    ctx = confirm_session_fixation(_soft200_send(body), login=LoginSequence(
-        url="http://app/login", method="POST", body="user=a&password=b",
-        success_marker=_SESSFIX_SUCCESS_MARKER), session_cookie="SESSION", protected_url="http://app/account")
+def test_benign_cookie_varying_app_yields_no_fact_live_and_offline() -> None:
+    marker = "WELCOME-BACK-VALUED-USER"
+    benign = _cookie_varying_send(marker)
+    ctx = confirm_session_fixation(
+        benign,
+        login=LoginSequence(url="http://app/login", method="POST", body="user=a&password=b",
+                            success_marker=marker),
+        session_cookie="SESSION", protected_url="http://app/account",
+        private_discriminator=marker,                       # the operator mistakes the chrome for private
+        owner_send=_with_cookie(benign, "owner_sess"),      # any cookie shows the chrome marker
+        unauth_send=_with_cookie(benign, "attacker_sess"),  # SAME-SHAPE read ALSO shows the chrome marker
+    )
     assert ctx is not None
     rec = ctx.session_fixation
-    assert rec["post_auth_id"] == rec["sentinel_id"]      # S1 == S0 (fixed id not rotated)
-    assert _SESSFIX_SUCCESS_MARKER in rec["authorized_view"]["body"]
-    assert _SESSFIX_SUCCESS_MARKER in rec["logged_out_ref"]["body"]   # present in BOTH ⇒ disqualified
-    assert not _confirm(ctx)
-    assert not _confirm_offline(ctx)
+    assert rec["post_auth_id"] == rec["sentinel_id"]                 # S1 == S0 (fixed id not rotated)
+    assert marker in rec["authorized_view"]["body"]                 # present WITH the cookie
+    assert marker not in rec["logged_out_ref"]["body"]              # absent WITHOUT — the old false differential
+    assert marker in rec["unauth_ref"]["body"]                      # but present for the OTHER identity (chrome)
+    assert not _confirm(ctx), "a benign cookie-varying app minted a FACT"
+    assert not _confirm_offline(ctx), "a benign cookie-varying app minted a DURABLE FACT offline"
 
 
-def test_round3_fourth_variant_common_html_token_marker_yields_no_durable_fact() -> None:
-    # THE ROUND-3 4th-variant, CLOSED: a 3-char common HTML token ('<p>' / 'div') that valid_discriminator
-    # admits (>= 3 stripped chars) but which is trivially present in ANY HTML body — including the logged-out
-    # reference. The differential DISQUALIFIES it (present in both views), so no durable CWE-384 FACT is
-    # minted against a logged-out page with S1 == S0 — the precise defect that BLOCKED round 3.
-    for token in ("<p>", "div"):
-        body = "<html><body><div><p>Some page content here for length.</p></div></body></html>"
-        ctx = confirm_session_fixation(_soft200_send(body, marker=token), login=LoginSequence(
-            url="http://app/login", method="POST", body="user=a&password=b", success_marker=token),
-            session_cookie="SESSION", protected_url="http://app/account")
-        assert ctx is not None
-        rec = ctx.session_fixation
-        assert rec["post_auth_id"] == rec["sentinel_id"]  # S1 == S0
-        assert token in rec["authorized_view"]["body"] and token in rec["logged_out_ref"]["body"]
-        assert not _confirm(ctx), f"common token {token!r} minted a FACT against a logged-out soft-200"
-        assert not _confirm_offline(ctx), f"common token {token!r} minted a DURABLE FACT offline"
-
-
-def test_no_substantive_logged_out_reference_downgrades_to_lead() -> None:
-    # The differential cannot be established without a SUBSTANTIVE logged-out reference. Here the no-cookie
-    # view is empty (non-substantive) while the fixed-session view is a real authenticated page — a
-    # fixation-shaped app, but with no negative reference the oracle FAILS CLOSED to a LEAD (never a FACT),
-    # the honest downgrade. (A benchmark-style app that DOES serve a substantive logged-out page FACTs;
-    # test_planted_fixation_flow_confirms_a_fact covers that.)
-    def send(req: HttpRequest) -> dict:
-        if req.method == "POST":
-            return {"status": 200, "headers": [], "body": "<html>ok</html>"}
-        if _has_cookie(req):
-            return {"status": 200, "headers": [],
-                    "body": f"<h1>{_SESSFIX_SUCCESS_MARKER}</h1><p>Welcome back, admin.</p>"}
-        return {"status": 200, "headers": [], "body": ""}   # non-substantive negative reference
-    ctx = confirm_session_fixation(send, login=LoginSequence(
-        url="http://app/login", method="POST", body="user=a&password=b",
-        success_marker=_SESSFIX_SUCCESS_MARKER), session_cookie="SESSION", protected_url="http://app/account")
+def test_no_substantive_same_shape_other_identity_reference_downgrades_to_lead() -> None:
+    # A no-session-ONLY differential (present-with-cookie / absent-without) is defeated by a credential-
+    # presence-varying app, so it can NEVER mint: the DECISIVE same-shape other-identity reference is missing.
+    marker = "WELCOME-BACK-VALUED-USER"
+    benign = _cookie_varying_send(marker)
+    ctx = confirm_session_fixation(
+        benign,
+        login=LoginSequence(url="http://app/login", method="POST", body="user=a&password=b",
+                            success_marker=marker),
+        session_cookie="SESSION", protected_url="http://app/account",
+        private_discriminator=marker, owner_send=_with_cookie(benign, "owner_sess"),
+        # unauth_send omitted → no same-shape negative reference
+    )
     assert ctx is not None
-    rec = ctx.session_fixation
-    assert rec["post_auth_id"] == rec["sentinel_id"]
-    assert _SESSFIX_SUCCESS_MARKER in rec["authorized_view"]["body"]
-    assert not rec["logged_out_ref"]["body"].strip()      # no substantive negative reference
-    assert not _confirm(ctx)                              # LEAD, never a FACT
-    assert not _confirm_offline(ctx)
-
-
-def test_error_body_at_the_protected_page_yields_no_fact() -> None:
-    # The fixed id survives login unrotated (S1 == S0) but the fixed-session read is an ERROR 200 that
-    # COINCIDENTALLY echoes the marker; the logged-out reference is a normal page. The authorized view is not
-    # a substantive success ⇒ undecidable ⇒ LEAD, live and offline.
-    def send(req: HttpRequest) -> dict:
-        if req.method == "POST":
-            return {"status": 200, "headers": [], "body": "<html>ok, logged in</html>"}
-        if _has_cookie(req):
-            return {"status": 200, "headers": [],
-                    "body": f"Internal Server Error rendering {_SESSFIX_SUCCESS_MARKER} account"}
-        return {"status": 200, "headers": [], "body": "<h1>Please log in</h1><p>Logged out.</p>"}
-    ctx = confirm_session_fixation(send, login=LoginSequence(
-        url="http://app/login", method="POST", body="user=a&password=b",
-        success_marker=_SESSFIX_SUCCESS_MARKER), session_cookie="SESSION", protected_url="http://app/account")
-    assert ctx is not None
-    assert ctx.session_fixation["post_auth_id"] == ctx.session_fixation["sentinel_id"]
+    assert ctx.session_fixation["unauth_ref"] is None
     assert not _confirm(ctx)
     assert not _confirm_offline(ctx)
 
 
 # ---------------------------------------------------------------------------
-# ROUND-4 FIFTH-variant: a benign app that ECHOES the session-cookie value into the page body cannot mint —
-# the authorized view is the ONLY leg carrying the VIGIL-fixed sentinel, so a marker DERIVED FROM it is a
-# reflected artifact, not access-gated content. Disqualified ⇒ LEAD (live AND offline).
+# Reflected-sentinel D: a benign app that ECHOES the session cookie into the body cannot mint.
 # ---------------------------------------------------------------------------
 
 def _cookie_echo_send():
-    """A BENIGN app that (a) sets NO Set-Cookie at login (so S1 == S0 — the fixed id survives UNROTATED) and
-    (b) ECHOES the presented SESSION cookie value verbatim into every GET body. It performs NO authentication:
-    the authorized view differs from the logged-out reference ONLY by the reflected VIGIL sentinel."""
+    """A BENIGN app that sets NO Set-Cookie at login (S1 == S0) and ECHOES the presented SESSION cookie value
+    verbatim into every GET body. It performs NO authentication: S0's read differs from a no-cookie read ONLY
+    by the reflected VIGIL sentinel."""
     def send(req: HttpRequest) -> dict:
         if req.method == "POST":
             return {"status": 200, "headers": [], "body": "<html>ok, processed</html>"}
@@ -303,43 +323,29 @@ def _cookie_echo_send():
     return send
 
 
-def test_cookie_echo_benign_app_sentinel_substring_marker_yields_no_fact() -> None:
-    # success_marker='sfx' is a substring of the VIGIL sentinel 'sfx_<hex>'. The cookie-echo makes it present
-    # in the fixed-session view (which carries S0) and absent from the no-cookie reference — a false
-    # differential with ZERO auth. The sentinel-artifact guard downgrades it to a LEAD.
-    ctx = confirm_session_fixation(_cookie_echo_send(), login=LoginSequence(
-        url="http://app/login", method="POST", body="user=a&password=b", success_marker="sfx"),
-        session_cookie="SESSION", protected_url="http://app/account")
-    assert ctx is not None
-    rec = ctx.session_fixation
-    assert rec["post_auth_id"] == rec["sentinel_id"]                       # S1 == S0 (unrotated)
-    assert "sfx" in rec["authorized_view"]["body"]                        # echoed sentinel makes 'sfx' present
-    assert "sfx" not in rec["logged_out_ref"]["body"]                     # absent from the no-cookie reference
-    assert not _confirm(ctx), "sentinel-substring marker minted a FACT off a benign cookie echo"
-    assert not _confirm_offline(ctx), "sentinel-substring marker minted a DURABLE FACT offline"
-
-
-def test_cookie_echo_benign_app_short_hex_tail_collision_yields_no_fact() -> None:
-    # A short hex marker that collides with the fixed sentinel's tail. The sentinel is PINNED so the marker
-    # provably overlaps it; the cookie echo reflects the whole sentinel, so the hex marker is present-with-
-    # cookie / absent-without with ZERO auth ⇒ a LEAD, never a durable FACT.
+def test_cookie_echo_sentinel_substring_discriminator_yields_no_fact() -> None:
+    # A D that is a SUBSTRING of the VIGIL sentinel is a reflected cookie-echo artifact, not private content.
     s0 = "sfx_" + "0123456789abcdef" * 2   # 32 hex chars → valid sentinel shape
-    hex_tail = s0[-8:]                       # an 8-char hex substring of S0
-    ctx = confirm_session_fixation(_cookie_echo_send(), login=LoginSequence(
-        url="http://app/login", method="POST", body="user=a&password=b", success_marker=hex_tail),
-        session_cookie="SESSION", protected_url="http://app/account", sentinel_id=s0)
+    hex_tail = s0[-12:]                      # a 12-char hex substring of S0
+    echo = _cookie_echo_send()
+    ctx = confirm_session_fixation(
+        echo,
+        login=LoginSequence(url="http://app/login", method="POST", body="user=a&password=b"),
+        session_cookie="SESSION", protected_url="http://app/account",
+        private_discriminator=hex_tail, sentinel_id=s0,
+        owner_send=_with_cookie(echo, "owner_sess"), unauth_send=_with_cookie(echo, "attacker_sess"),
+    )
     assert ctx is not None
     rec = ctx.session_fixation
     assert rec["sentinel_id"] == s0 and rec["post_auth_id"] == s0
-    assert hex_tail in rec["authorized_view"]["body"] and hex_tail not in rec["logged_out_ref"]["body"]
-    assert not _confirm(ctx), "hex-tail sentinel collision minted a FACT off a benign cookie echo"
-    assert not _confirm_offline(ctx), "hex-tail sentinel collision minted a DURABLE FACT offline"
+    assert hex_tail in rec["authorized_view"]["body"]           # echoed sentinel makes the substring present
+    assert not _confirm(ctx), "a sentinel-substring D minted a FACT off a benign cookie echo"
+    assert not _confirm_offline(ctx), "a sentinel-substring D minted a DURABLE FACT offline"
 
 
 def test_oracle_ignores_a_bare_authenticated_bool_no_raw_bytes_no_fact() -> None:
-    # DURABLE soundness: the oracle re-derives auth from RAW bytes and NEVER trusts a pre-computed bool. A
-    # hand-forged legacy-shaped record carrying only authenticated_after_login=True (no authorized_view / no
-    # logged_out_ref) cannot construct a FACT — it fails closed to a LEAD.
+    # DURABLE soundness: the oracle re-derives from RAW bytes and NEVER trusts a pre-computed bool. A
+    # hand-forged legacy-shaped record carrying only authenticated_after_login=True cannot construct a FACT.
     s0 = mint_session_sentinel()
     forged = FindingContext.model_validate({
         "bug_class": "session_fixation",

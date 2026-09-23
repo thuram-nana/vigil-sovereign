@@ -288,6 +288,9 @@ def confirm_session_fixation(
     login: LoginSequence,
     session_cookie: str,
     protected_url: str,
+    private_discriminator: str | None = None,
+    owner_send: Send | None = None,
+    unauth_send: Send | None = None,
     sentinel_id: str | None = None,
 ) -> FindingContext | None:
     """Gated-workflow session-fixation probe (CWE-384), built on :class:`LoginSequence` + :class:`CookieJar`.
@@ -295,30 +298,47 @@ def confirm_session_fixation(
     VIGIL FIXES a unique high-entropy sentinel id S0 as the ``session_cookie`` value BEFORE authenticating,
     runs the operator's login sequence through the gated ``send`` carrying S0, observes the session id in
     effect AFTER login (S1), and then re-presents the VIGIL-fixed id **S0** to the protected page — CAPTURING
-    THE RAW RESPONSE. It ALSO captures a LOGGED-OUT NEGATIVE REFERENCE: the SAME protected URL fetched with NO
-    session cookie. The scanner makes NO authentication decision; it hands the RAW bytes (the fixed-session
-    view, the logged-out reference, the operator success_marker + logged-out signals) to the deterministic
-    ``session_fixation_oracle``, which RE-DERIVES — via a DIFFERENTIAL — whether S0 reached an authenticated
-    state, and fires ONLY when the fixed id survived login UNROTATED (S1 == S0) AND the success_marker is
-    PRESENT in S0's fixed-session view yet PROVABLY ABSENT from the SUBSTANTIVE logged-out reference (proving
-    the marker is access-gated, not a common token / chrome / a benign soft-200 body both views share).
+    THE RAW RESPONSE (S0's read). To prove the achieved fixation state SOUNDLY — by a read of a victim-PRIVATE
+    datum, NOT a content/marker heuristic — it ALSO captures:
+
+      * a POSITIVE reference (``owner_send``): the SAME protected URL read authoritatively as the owner/victim
+        (the operator's ``private_discriminator`` D must be PRESENT here — proving D is REAL private content);
+      * a DECISIVE SAME-SHAPE negative reference (``unauth_send``): the SAME URL read by an OTHER unauthorized
+        identity (a substantive same-shape 2xx from which D must be ABSENT — the only reference a benign
+        credential-presence-varying app cannot fool, since cosmetic chrome shown for ANY credential appears
+        here too);
+      * a no-session gating baseline: the SAME URL fetched with NO session cookie.
+
+    The scanner makes NO authentication decision; it hands the RAW bytes (S0's read, the owner/other-identity/
+    no-session references, the private discriminator D, the operator's logged-out signals) to the
+    deterministic ``session_fixation_oracle``, which RE-DERIVES — via the PRIVATE-READ REDUCTION — whether S0
+    reached the victim's private view, and fires ONLY when the fixed id survived login UNROTATED (S1 == S0)
+    AND D is PRESENT in S0's read AND in the owner's read yet PROVABLY ABSENT from the SUBSTANTIVE SAME-SHAPE
+    other-identity reference and the no-session baseline. A bare ``success_marker`` differential is NO LONGER
+    a minting path (six rounds proved a credential-presence differential proves only that the cookie changed
+    the response, not that S0 authenticated); without a private D + the owner and same-shape references the
+    oracle FAILS CLOSED to a LEAD.
 
     Capturing S0's view directly (rather than trusting S1==S0 as a rotation proxy) is deliberate: an app can
     rotate the cookie VALUE at login yet leave the pre-auth-fixed id S0 still valid — a REAL fixation a value
-    check would miss; the oracle's differential exposes it. Capturing a LOGGED-OUT REFERENCE (rather than
-    scoring the fixed-session body alone) is the ROUND-4 soundness fix: a single body cannot be classified
-    authenticated-vs-benign by content heuristics, so the marker is qualified ONLY by its ABSENCE from a
-    same-URL logged-out view. If no substantive logged-out reference is available, the oracle FAILS CLOSED to
-    a LEAD. Returns ``None`` only when no channel was established for the login leg (a non-dict login
-    response); every other outcome is adjudicated by the oracle. All traffic rides the injected ``send`` (the
-    scope/charter/kill-switch-gated executor); nothing here weakens the boundary."""
+    check would miss; the oracle's differential exposes it. Returns ``None`` only when no channel was
+    established for the login leg (a non-dict login response); every other outcome is adjudicated by the
+    oracle. All traffic rides the injected sends (the scope/charter/kill-switch-gated executor); nothing here
+    weakens the boundary."""
     s0 = sentinel_id or mint_session_sentinel()
+    protected_get = HttpRequest(method="GET", url=protected_url, headers=[], body=None)
 
-    # 0. LOGGED-OUT NEGATIVE REFERENCE: fetch the protected URL with NO session cookie — the differential
-    #    base. The oracle qualifies the operator success_marker as an authenticated-state discriminator ONLY
-    #    if it is PROVABLY ABSENT from this SUBSTANTIVE logged-out view of the SAME url, so a common token /
-    #    page chrome / a benign soft-200 body both views share can NEVER mint a spurious CWE-384 FACT.
-    logged_out_resp = send(HttpRequest(method="GET", url=protected_url, headers=[], body=None))
+    # 0. NO-SESSION GATING BASELINE: fetch the protected URL with NO session cookie. D absent from a valid
+    #    (substantive-2xx or genuine-denial) read proves the datum is authorization-gated, not public.
+    logged_out_resp = send(protected_get)
+
+    # 0b. POSITIVE reference (owner/victim) + DECISIVE SAME-SHAPE negative reference (other unauthorized
+    #     identity). D PRESENT in the owner's read proves D is real private content; D ABSENT from the
+    #     other-identity's SUBSTANTIVE SAME-SHAPE read proves it is gated to the victim identity (not chrome
+    #     shown for any credential). Both ride their own authenticated gated send; None when not supplied
+    #     (⇒ the oracle fails closed to a LEAD — the achieved state is unprovable without them).
+    owner_resp = owner_send(protected_get) if owner_send is not None else None
+    unauth_resp = unauth_send(protected_get) if unauth_send is not None else None
 
     # 1. VIGIL fixes the session id to S0 BEFORE auth, then runs the login sequence carrying it.
     login_headers: list[tuple[str, str]] = [("Cookie", f"{session_cookie}={s0}")]
@@ -337,16 +357,19 @@ def confirm_session_fixation(
     jar.update_from_headers([(str(k), str(v)) for k, v in login_headers_resp])
     s1 = jar.get(session_cookie)
 
-    # 3. AUTHORIZED (fixed-session) VIEW: re-present the ORIGINAL VIGIL-fixed id S0 to the protected page
-    #    AFTER login and CAPTURE THE RAW RESPONSE. The oracle re-derives — from these raw bytes vs the
-    #    logged-out reference — whether S0 reached an authenticated state; the scanner scores nothing.
+    # 3. S0's READ: re-present the ORIGINAL VIGIL-fixed id S0 to the protected page AFTER login and CAPTURE
+    #    THE RAW RESPONSE. The oracle re-derives — from these raw bytes vs the owner/other-identity/no-session
+    #    references — whether S0 reached the victim's private view; the scanner scores nothing.
     authorized_resp = send(HttpRequest(method="GET", url=protected_url,
                                        headers=[("Cookie", f"{session_cookie}={s0}")], body=None))
 
     return FindingContext.from_session_fixation(
         sentinel_id=s0, post_auth_id=s1, cookie_name=session_cookie,
+        private_discriminator=private_discriminator,
         success_marker=login.success_marker,
         logged_out_markers=login.logged_out_markers,
         logged_out_statuses=login.logged_out_statuses,
         authorized_view=_sfx_view(authorized_resp),
+        owner_view=_sfx_view(owner_resp) if owner_resp is not None else None,
+        unauth_ref=_sfx_view(unauth_resp) if unauth_resp is not None else None,
         logged_out_ref=_sfx_view(logged_out_resp))

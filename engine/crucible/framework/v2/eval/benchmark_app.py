@@ -76,9 +76,21 @@ _GUESTBOOK: dict[str, str] = {}
 # The VULNERABLE flow blesses the client-fixed id UNCHANGED (fixation); the SAFE twin rotates to a fresh id.
 # Class-level in-process state, exercised only by the deep-profile session-fixation assertion — the default
 # GET-only crawl never POSTs to the login routes, so `make gate` is unaffected.
-_SESSFIX_AUTH: set[str] = set()
+# Maps an authenticated session id -> the username it belongs to (so the protected page renders that user's
+# PER-IDENTITY PRIVATE datum, not a shared banner). The PRIVATE-READ REDUCTION needs per-user private content:
+# the fixed session confirms fixation ONLY by reaching the VICTIM's private datum, absent from an OTHER
+# identity's same-shape read. The chrome ``success_marker`` is shown to EVERY authenticated identity (it is
+# NOT private) — modelling exactly the sixth-variant benign case a marker differential would false-fire on.
+_SESSFIX_SESSIONS: dict[str, str] = {}
 _SESSFIX_COOKIE = "SESSION"
 _SESSFIX_SUCCESS_MARKER = "SESSFIX-AUTHENTICATED"
+
+
+def _sessfix_private(user: str) -> str:
+    """The per-user PRIVATE datum only that user's authenticated read renders — the victim-private
+    discriminator the oracle's private-read differential requires (present in the owner's read, absent from
+    an other-identity's same-shape read)."""
+    return f"PRIVATE-SSN-{user}-4021-7788"
 
 # ---------------------------------------------------------------------------
 # CSRF-achieved model (Wave 3.3). A cookie-authenticated state-changing endpoint that
@@ -802,39 +814,53 @@ class BenchmarkHandler(BaseHTTPRequestHandler):
                 val = v
         return val
 
+    def _sessfix_user(self, body: str) -> str:
+        """The username the login body authenticates (``user=<name>``), defaulting to ``admin`` — so the
+        protected page can render that identity's PRIVATE datum. Any password 'succeeds' for the benchmark."""
+        for part in body.replace("&", ";").split(";"):
+            k, _, v = part.strip().partition("=")
+            if k == "user" and v:
+                return v
+        return "admin"
+
     def _sessfix_login(self) -> None:
         # PLANTED BUG (session fixation). On login the app BLESSES the session id the client already
-        # presented — UNCHANGED — and issues NO new Set-Cookie. An attacker who fixes a victim's session id
-        # before login therefore holds a valid authenticated session afterward (CWE-384). Reached only by the
-        # deep-profile session-fixation assertion (a POST); the default GET-only crawl never touches it, so
-        # `make gate` is unaffected.
+        # presented — UNCHANGED — and issues NO new Set-Cookie, binding it to the authenticating USER. An
+        # attacker who fixes a victim's session id before login therefore holds the VICTIM's authenticated
+        # session afterward and reads the victim's PRIVATE datum (CWE-384). Reached only by the deep-profile
+        # session-fixation assertion (a POST); the default GET-only crawl never touches it, so `make gate` is
+        # unaffected.
         length = int(self.headers.get("Content-Length", "0") or "0")
-        if length:
-            self.rfile.read(length)   # drain the credentials body (any creds "succeed" for the benchmark)
+        body = self.rfile.read(length).decode("utf-8", "replace") if length else ""
         sid = self._sessfix_cookie()
         if sid:
-            _SESSFIX_AUTH.add(sid)   # the client-fixed id is now an authenticated session — NOT rotated
+            _SESSFIX_SESSIONS[sid] = self._sessfix_user(body)   # client-fixed id bound to the user — NOT rotated
         self._respond(200, _page("Login", "<p>Logged in.</p>"))
 
     def _sessfix_rotate_login(self) -> None:
         # SAFE (session-fixation BENIGN TWIN). On login the app ROTATES the session id: it mints a FRESH id,
-        # blesses only the NEW id, and Set-Cookies it — the client-fixed pre-auth id is NEVER authenticated.
-        # This is the correct defense, so the session_fixation_oracle must NEVER fire here (post-auth id !=
-        # the VIGIL-fixed id).
+        # binds only the NEW id to the user, and Set-Cookies it — the client-fixed pre-auth id is NEVER
+        # authenticated. This is the correct defense, so the session_fixation_oracle must NEVER fire here
+        # (post-auth id != the VIGIL-fixed id, and the fixed id never reaches the user's private datum).
         length = int(self.headers.get("Content-Length", "0") or "0")
-        if length:
-            self.rfile.read(length)
+        body = self.rfile.read(length).decode("utf-8", "replace") if length else ""
         new_sid = "rot_" + secrets.token_hex(16)
-        _SESSFIX_AUTH.add(new_sid)
+        _SESSFIX_SESSIONS[new_sid] = self._sessfix_user(body)
         self._respond(200, _page("Login", "<p>Logged in.</p>"),
                       extra_headers=[("Set-Cookie", f"{_SESSFIX_COOKIE}={new_sid}; Path=/; HttpOnly")])
 
     def _sessfix_account(self) -> None:
-        # Protected page shared by both flows: returns the authenticated success marker ONLY when the
-        # presented SESSION id has been blessed by a login. A non-authenticated id gets a logged-out body.
+        # Protected page shared by all identities. The chrome ``success_marker`` is rendered to EVERY
+        # authenticated identity (it is NOT private — the exact benign credential-presence signal a marker
+        # differential would false-fire on); the PER-USER PRIVATE datum is rendered ONLY for the identity the
+        # presented SESSION id belongs to. A non-authenticated id gets a logged-out body. So an OTHER
+        # identity's same-shape read carries the chrome marker but NOT the victim's private datum — the
+        # differential the private-read reduction requires.
         sid = self._sessfix_cookie()
-        if sid and sid in _SESSFIX_AUTH:
-            self._respond(200, _page("Account", f"<h1>{_SESSFIX_SUCCESS_MARKER}</h1><p>Welcome back.</p>"))
+        user = _SESSFIX_SESSIONS.get(sid) if sid else None
+        if user:
+            self._respond(200, _page("Account", f"<h1>{_SESSFIX_SUCCESS_MARKER}</h1><p>Welcome back.</p>"
+                                                 f"<p>{_sessfix_private(user)}</p>"))
         else:
             self._respond(200, _page("Account", "<h1>Please log in</h1><p>You are logged out.</p>"))
 
