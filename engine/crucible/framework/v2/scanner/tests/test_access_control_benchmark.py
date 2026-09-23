@@ -60,12 +60,13 @@ def _cross_spec() -> CrossAccessSpec:
 
 def _probe(base: str, path: str):
     # FOUR identities riding the SAME send: attacker = alice's session (acme), victim/owner = bob's session
-    # (acme, ground truth), nocred = NO cookie (logged-out baseline, round-2), and — round-4 — unauth =
+    # (acme, ground truth), nocred = NO cookie (logged-out baseline, round-2), and — round-5 — unauth =
     # carol's session (a DIFFERENT tenant, an authenticated-but-UNAUTHORIZED principal). /account grants an
-    # intra-tenant cross-read (alice reaches bob's IBAN, the achieved BOLA) but DENIES a cross-tenant read,
-    # so carol's 403 lacks bob's IBAN: clause (c) holds. The IBAN being ABSENT from BOTH the logged-out and
-    # the unauthorized-authenticated baselines proves it is genuinely access-gated PRIVATE data, not a
-    # reflected per-object token — the round-4 fourth-variant FP would appear in carol's read too.
+    # intra-tenant cross-read (alice reaches bob's IBAN, the achieved BOLA); a cross-tenant read renders the
+    # SAME account shell (SAME SHAPE) with the IBAN withheld, so carol's substantive same-shape 200 lacks
+    # bob's IBAN: clause (c) holds. The IBAN being ABSENT from the logged-out baseline AND from carol's
+    # same-shape render proves it is genuinely access-gated PRIVATE data, not a reflected per-object token
+    # (which would appear in carol's same-shape render too).
     attacker_send = _send_factory(cookie="sess=alice-sess")
     victim_send = _send_factory(cookie="sess=bob-sess")
     nocred_send = _send_factory(cookie=None)

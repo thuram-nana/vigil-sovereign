@@ -745,21 +745,26 @@ class IdorCheck:
         NOT proof: its absent marker is VACUOUS, so it fails CLOSED to a LEAD
         (round-3). If a logged-out request reaches the marker, the read was never
         "unauthorized"; it is public content, and must not mint, AND
-      * (round-4, access-gated by a same-ref UNAUTHORIZED-AUTHENTICATED baseline)
-        the discriminator is ABSENT from a read of the SAME ``victim_ref`` by a
-        THIRD identity — an authenticated-but-UNAUTHORIZED principal
-        (``unauth_send``: a second attacker-controlled account that also lacks
-        access to ``victim_ref``) — AND that baseline is a VALID discriminating
-        read (a substantive 2xx that lacks the marker OR a genuine 401/403 denial).
-        This is the DECISIVE anti-reflection proof that content heuristics could
-        not give: a per-object REFLECTED token (a public slug / uuid / display-id
-        echoed into an authenticated 200 soft-deny — no bare-error phrase, not a
-        literal substring of ``victim_ref``) appears in the unauthorized baseline
-        TOO (that principal's soft-deny echoes the same per-object token), so the
-        absent-clause FAILS and the check does NOT fire. ONLY genuinely
-        access-gated PRIVATE content — emitted solely to authorized viewers, so a
-        peer unauthorized-authenticated principal is DENIED it — passes. Absent a
-        supplied ``unauth_send`` the class DOWNGRADES to a LEAD (never a FACT).
+      * (round-4, access-gated by a same-ref UNAUTHORIZED-AUTHENTICATED baseline;
+        round-5 HARDENED to SAME-SHAPE) the discriminator is ABSENT from a read of
+        the SAME ``victim_ref`` by a THIRD identity — an authenticated-but-
+        UNAUTHORIZED principal (``unauth_send``: a second attacker-controlled
+        account that also lacks access to ``victim_ref``) — AND that baseline is a
+        SUBSTANTIVE SAME-SHAPE read: a 2xx that actually RENDERED the same object,
+        the same class as the attacker's (required-substantive) cross-read. This is
+        the DECISIVE anti-reflection proof that content heuristics could not give: a
+        per-object REFLECTED token (a public slug / uuid / display-id echoed into an
+        authenticated 200 soft-deny — no bare-error phrase, not a literal substring
+        of ``victim_ref``) is echoed by ANY same-shape read of that object, so it
+        appears in this baseline TOO, the absent-clause FAILS, and the check does
+        NOT fire. ONLY a datum genuinely access-gated at the object level — PRESENT
+        in the attacker's read yet ABSENT from a peer's SAME-SHAPE read of the same
+        object — passes. A 401/403 DENIAL is NOT a valid clause-(c) control: it
+        never renders the object, so a reflected token is absent from it VACUOUSLY
+        (absent because unrendered, not because private) — accepting it is exactly
+        the round-4 hole a reflected slug rode into a durable false FACT. Absent a
+        supplied ``unauth_send`` — OR when the supplied baseline is a denial / not a
+        substantive same-shape read — the class DOWNGRADES to a LEAD (never a FACT).
 
     Without a discriminator, without ``control_ref``, when the discriminator is
     ref-derived, without a ``nocred_send`` baseline, without an ``unauth_send``
@@ -810,17 +815,18 @@ class IdorCheck:
     # the probe returns None (a rigorous LEAD, never a FACT), because 'unauthorized read' is only PROVEN by
     # the logged-out denial, never asserted.
     nocred_send: Send | None = None
-    # MANDATORY (round-4) same-ref UNAUTHORIZED-AUTHENTICATED baseline: a GET of ``victim_ref`` as a THIRD
-    # identity — an authenticated-but-UNAUTHORIZED principal (a second attacker-controlled account that also
-    # lacks access to victim_ref). The discriminator MUST be ABSENT from it AND the read MUST be a VALID
-    # discriminating baseline (a substantive 2xx that lacks the marker, OR a genuine 401/403 denial; a bare
-    # 5xx/empty/404 read is vacuous and fails closed). This is the DECISIVE anti-reflection proof: a per-object
-    # REFLECTED token (a public slug/uuid/display-id echoed into an authenticated 200 soft-deny that is a
-    # substantive body and not a literal substring of victim_ref — the round-3 fourth-variant FP) appears in
-    # THIS baseline too, so its absent-clause fails and the check does NOT fire; only genuinely access-gated
-    # PRIVATE content (denied to a peer unauthorized principal) passes. None ⇒ the probe returns None (a
-    # rigorous LEAD, never a FACT) — the enforced boundary: no same-ref unauthorized-authenticated baseline,
-    # no achieved-read FACT.
+    # MANDATORY (round-4) same-ref UNAUTHORIZED-AUTHENTICATED baseline, HARDENED to SAME-SHAPE (round-5): a GET
+    # of ``victim_ref`` as a THIRD identity — an authenticated-but-UNAUTHORIZED principal (a second
+    # attacker-controlled account that also lacks access to victim_ref). The discriminator MUST be ABSENT from it
+    # AND the read MUST be a SUBSTANTIVE SAME-SHAPE read: a 2xx that RENDERED the same object (the same class as
+    # the attacker's substantive cross-read). This is the DECISIVE anti-reflection proof: a per-object REFLECTED
+    # token (a public slug/uuid/display-id echoed into an authenticated 200 soft-deny — the round-3 fourth-variant
+    # FP) is echoed by ANY same-shape read of the object, so it appears in THIS baseline too, its absent-clause
+    # fails, and the check does NOT fire; only a datum genuinely access-gated at the object level (present for the
+    # attacker, absent from a peer's same-shape read of the same object) passes. A 401/403 DENIAL is NOT a valid
+    # clause-(c) control — a denial never renders the object, so a reflected token is absent from it VACUOUSLY;
+    # accepting it (as round-4 did) let a reflected slug mint a DURABLE false FACT. None, a denial, or a
+    # non-substantive read ⇒ the probe returns None (a rigorous LEAD, never a FACT) — the enforced boundary.
     unauth_send: Send | None = None
 
     # Safe (non-mutating) methods a cross-read / baseline may use — a read must never mutate.
@@ -898,10 +904,17 @@ class IdorCheck:
             return None
         if not _nocred_baseline_valid(nocred_status, nocred_body):
             return None
-        # ROUND-4: the unauthorized-authenticated baseline must ALSO be a valid discriminating read (a
-        # substantive 2xx OR a genuine 401/403 denial) — a bare 5xx/empty/404 read is vacuous (a reflected
-        # token might be absent merely because the body is empty), so it fails closed to a LEAD.
-        if not _nocred_baseline_valid(unauth_status, unauth_body):
+        # ROUND-4 (HARDENED, round-5): the unauthorized-authenticated baseline is the anti-REFLECTION control,
+        # so it must be a SUBSTANTIVE SAME-SHAPE read — a 2xx that actually RENDERED the same object (the same
+        # class as the attacker's substantive cross-read). A 401/403 denial is NOT a valid clause-(c) control:
+        # a denial that never renders the object cannot exhibit a per-object REFLECTED token, so the token's
+        # absence from it is VACUOUS (absent because the object was not rendered, not because the datum is
+        # private) and a reflected slug/uuid echoed into the attacker's soft-deny would mint a DURABLE false
+        # FACT. Requiring a substantive same-shape 2xx means a reflected per-object token — which any same-shape
+        # read of the object echoes — appears in THIS baseline too, so its absent-clause fails and NOTHING mints;
+        # only a datum PRESENT in the attacker's read yet ABSENT from a peer's same-shape read of the same object
+        # (genuinely access-gated) survives. A denial baseline fails closed to a LEAD (the honest boundary).
+        if not is_substantive_success(unauth_status, unauth_body):
             return None
 
         evidence: dict[str, object] = {
@@ -946,12 +959,17 @@ class IdorCheck:
             _nocred_baseline_valid_clause(),
             {"not": {"contains": [{"var": "nocred_body"}, {"var": "discriminator"}]}},
             # ROUND-4 access-gated by a same-ref UNAUTHORIZED-AUTHENTICATED baseline (clause (c), the DECISIVE
-            # anti-reflection differential): the unauth baseline is a VALID discriminating read (substantive
-            # 2xx OR genuine 401/403 denial) AND the marker is ABSENT from it. A per-object REFLECTED token
-            # echoed into an authenticated soft-deny appears in this baseline too, so its absent-clause fails
-            # and no false FACT is minted; only genuinely access-gated PRIVATE content (denied to a peer
-            # unauthorized principal) survives. Re-derived offline over the RETAINED unauth_status/unauth_body.
-            _baseline_valid_clause("unauth_status", "unauth_body"),
+            # anti-reflection differential — HARDENED round-5): the unauth baseline is a SUBSTANTIVE SAME-SHAPE
+            # read (a 2xx that RENDERED the same object, the same class as the attacker's substantive cross-read)
+            # AND the marker is ABSENT from it. A per-object REFLECTED token echoed into an authenticated soft-deny
+            # appears in this SAME-SHAPE baseline too (any same-shape read of the object echoes it), so its
+            # absent-clause fails and no false FACT is minted; only a datum genuinely access-gated at the object
+            # level — PRESENT in the attacker's read yet ABSENT from a peer's same-shape read of the same object —
+            # survives. A 401/403 DENIAL baseline is NOT accepted here (its absent marker is vacuous — the object
+            # was never rendered), so it is not a valid clause-(c) control and the class fails closed to a LEAD.
+            # Re-derived offline over the RETAINED unauth_status/unauth_body: a durable reflected-token FACT
+            # cannot survive re-verification.
+            *_substantive_success_clauses("unauth_status", "unauth_body"),
             {"not": {"contains": [{"var": "unauth_body"}, {"var": "discriminator"}]}},
         ]
         return FindingContext.from_predicate(evidence, {"all": clauses}, bug_class=self.bug_class)

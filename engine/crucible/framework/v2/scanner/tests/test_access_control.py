@@ -11,14 +11,17 @@ mass_assignment/privilege_escalation) behind an explicit ``enabled`` flag, defau
   * mass-assignment confirms ONLY on a real persisted state change (privileged field present AFTER but
     absent BEFORE), never on a secure app that ignores the field.
   * integration through the real AuditEngine with the seeded checks.
-  * ROUND-4 (3-view differential): a fire requires the datum to be PRESENT in the owner's read AND the
-    attacker's cross-read, PROVABLY ABSENT from a same-ref UNAUTHORIZED-AUTHENTICATED baseline (and from
-    the logged-out baseline) AND from the attacker's own control object. A per-object REFLECTED token
-    echoed into an authenticated soft-deny appears in the unauthorized baseline too => it is a LEAD, not a
-    FACT; absent that baseline the class DOWNGRADES to a LEAD. Only genuinely access-gated PRIVATE data fires.
+  * ROUND-4/5 (SAME-SHAPE 3-view differential): a fire requires the datum to be PRESENT in the owner's read
+    AND the attacker's cross-read, PROVABLY ABSENT from a same-ref UNAUTHORIZED-AUTHENTICATED baseline that
+    is a SUBSTANTIVE SAME-SHAPE read rendering the same object (and ABSENT from the logged-out baseline) AND
+    from the attacker's own control object. A per-object REFLECTED token echoed into an authenticated soft-deny
+    is echoed by ANY same-shape render of the object, so it appears in the unauthorized baseline too => it is a
+    LEAD, not a FACT. A 401/403 DENIAL baseline is NOT a valid clause-(c) control (it never renders the object,
+    so a reflected token is absent from it vacuously — the round-4 hole); round-5 requires a substantive
+    same-shape read or the class DOWNGRADES to a LEAD. Only genuinely access-gated PRIVATE data fires.
 
-The oracle is the sole authority: a 403 / unchanged object / reflected token fails the predicate and is
-never a finding.
+The oracle is the sole authority: a 403 attacker read / unchanged object / reflected token / a denial-only or
+non-substantive unauthorized-authenticated baseline fails the predicate and is never a finding.
 """
 
 from __future__ import annotations
@@ -56,21 +59,32 @@ def _make_cross_target(vulnerable: bool):
     """Return ``(attacker_send, victim_send, nocred_send, unauth_send)`` for a three-identity object
     endpoint. The victim/owner (bob) always sees its own object (ground truth). The attacker (a DIFFERENT
     user) sees it too iff the app has broken object-level authz; a secure app returns 403. The no-credential
-    (logged-out) baseline is ALWAYS denied. The round-4 UNAUTHORIZED-AUTHENTICATED baseline (carol, a THIRD
-    attacker-controlled principal that also lacks access) is ALWAYS DENIED a substantive 200 soft-deny that
-    LACKS the private marker — so a genuine cross-read reaches a datum ABSENT from the same-ref unauthorized
-    view (genuinely access-gated PRIVATE content, not a reflected per-object token)."""
+    (logged-out) baseline is ALWAYS denied. The round-5 UNAUTHORIZED-AUTHENTICATED baseline (carol, a THIRD
+    attacker-controlled principal that also lacks access) reads the SAME ref and gets a SUBSTANTIVE SAME-SHAPE
+    200 that RENDERS the object shell WITHOUT the private marker — so a genuine cross-read reaches a datum
+    ABSENT from the same-ref same-shape view (genuinely access-gated PRIVATE content, not a reflected
+    per-object token, which would appear in carol's same-shape render too)."""
+
+    def _shell(req: HttpRequest, *, private: bool) -> str:
+        # The object shell both bob and carol render for ref 2 (same shape); ``private`` adds the secret.
+        rid = _requested_id(req)
+        if rid != _VICTIM_REF:
+            return f"<html><nav>Home</nav>object {rid}<footer>Acme</footer></html>"
+        secret = f" body={_VICTIM_SECRET}" if private else " body=(restricted to owner)"
+        return f"<html><nav>Home</nav>record #{rid} owner=bob{secret}<footer>Acme</footer></html>"
 
     def victim_send(req: HttpRequest) -> dict:
-        # bob's own session: he legitimately sees object 2.
-        return {"status": 200, "body": _VICTIM_SECRET if _requested_id(req) == _VICTIM_REF else ""}
+        # bob's own session: he legitimately sees object 2 WITH the private body.
+        return {"status": 200, "body": _shell(req, private=True) if _requested_id(req) == _VICTIM_REF else ""}
 
     def attacker_send(req: HttpRequest) -> dict:
         rid = _requested_id(req)
         if rid == _VICTIM_REF and not vulnerable:
             return {"status": 403, "body": "forbidden"}
-        # vulnerable: no object-level check -> alice reads bob's object 2.
-        return {"status": 200, "body": _VICTIM_SECRET if rid == _VICTIM_REF else "alice's own object 1"}
+        # vulnerable: no object-level check -> alice reads bob's object 2 WITH the private body (the BOLA).
+        if rid == _VICTIM_REF:
+            return {"status": 200, "body": _shell(req, private=True)}
+        return {"status": 200, "body": "alice's own object 1"}
 
     def nocred_send(req: HttpRequest) -> dict:
         # logged-out: authentication is required, so the private record is never served (proves the read
@@ -78,10 +92,11 @@ def _make_cross_target(vulnerable: bool):
         return {"status": 403, "body": "forbidden — login required"}
 
     def unauth_send(req: HttpRequest) -> dict:
-        # carol — a THIRD, authenticated-but-UNAUTHORIZED principal — reads the SAME ref but is DENIED bob's
-        # private record: a substantive 200 soft-deny that carries the same shell WITHOUT the marker. Its
-        # ABSENCE here is the round-4 decisive proof the datum is genuinely access-gated, not reflected.
-        return {"status": 200, "body": "<html><nav>Home</nav>this record is not available to you<footer>Acme</footer></html>"}
+        # carol — a THIRD, authenticated-but-UNAUTHORIZED principal — reads the SAME ref and gets a
+        # SUBSTANTIVE SAME-SHAPE 200 that RENDERS the object shell with the private body WITHHELD. The
+        # marker's ABSENCE from this same-shape render is the round-5 decisive proof the datum is genuinely
+        # access-gated, not a reflected per-object token (which would appear in the same-shape render too).
+        return {"status": 200, "body": _shell(req, private=False)}
 
     return attacker_send, victim_send, nocred_send, unauth_send
 
@@ -317,8 +332,10 @@ def _shared_boilerplate_target():
         return {"status": 403, "body": shell_head + "<p>login required</p>" + shell_tail}
 
     def unauth_send(req: HttpRequest) -> dict:
-        # a THIRD unauthorized-authenticated principal also gets the shared shell only (no victim line).
-        return {"status": 403, "body": shell_head + "<p>this record is not available to you</p>" + shell_tail}
+        # a THIRD unauthorized-authenticated principal gets a SUBSTANTIVE SAME-SHAPE 200 with the shared
+        # shell only (no victim line) — the round-5 same-shape baseline. The attacker never reaches the
+        # victim's unique discriminator, so the fire clause fails regardless (this is the shared-shell FP).
+        return {"status": 200, "body": shell_head + "<p>this record is not available to you</p>" + shell_tail}
 
     return attacker_send, victim_send, nocred_send, unauth_send
 
@@ -368,9 +385,10 @@ def test_control_ref_refutes_a_globally_present_marker() -> None:
         return {"status": 403, "body": "forbidden — login required"}
 
     def unauth_send(req: HttpRequest) -> dict:
-        # a THIRD unauthorized-authenticated principal is denied (the global marker is not the point here —
-        # the attacker-owned control_ref is what refutes the mistaken 'unique' marker).
-        return {"status": 403, "body": "you are not permitted to view this record"}
+        # a THIRD unauthorized-authenticated principal gets a SUBSTANTIVE SAME-SHAPE 200 lacking the marker
+        # (the global marker is not the point here — the attacker-owned control_ref is what refutes the
+        # mistaken 'unique' marker: the marker is in the attacker's OWN control object, so clause 7 fails).
+        return {"status": 200, "body": "acct=(masked) — this record's detail is restricted"}
 
     cfg = AccessControlConfig(
         victim_send=victim_send, nocred_send=nocred_send, unauth_send=unauth_send,
@@ -406,9 +424,10 @@ def test_boilerplate_discriminator_in_both_bodies_with_control_does_not_fire() -
         return {"status": 403, "body": "forbidden — login required"}
 
     def unauth_send(req: HttpRequest) -> dict:
-        # the round-4 unauthorized-authenticated baseline is denied — the mandatory control_ref is what
-        # refutes the mistaken 'unique' footer here.
-        return {"status": 403, "body": "you are not permitted to view this record"}
+        # the round-5 unauthorized-authenticated baseline is a SUBSTANTIVE SAME-SHAPE 200 lacking the footer
+        # here — the mandatory control_ref is what refutes the mistaken 'unique' footer (the footer is in the
+        # attacker's OWN control object, so clause 7 fails and nothing mints).
+        return {"status": 200, "body": "<main>record access restricted to owner</main>"}
 
     cfg = AccessControlConfig(
         victim_send=victim_send, nocred_send=nocred_send, unauth_send=unauth_send,

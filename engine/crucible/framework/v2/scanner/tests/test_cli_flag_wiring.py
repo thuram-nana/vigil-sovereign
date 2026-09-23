@@ -274,9 +274,11 @@ class _IdorApp(BaseHTTPRequestHandler):
     valid session (a logged-out request is 403'd, so the content is authorization-GATED, not public), and
     object-level authz is BROKEN WITHIN a tenant — an authenticated session reads any id IN ITS OWN TENANT
     (should be own-object-only), so the attacker (alice, acme) cross-reads bob's object 2 (acme) and reaches
-    its secret. A CROSS-tenant read is correctly denied: carol (globex) is 403'd — the round-4 same-ref
+    its secret. A CROSS-tenant read RENDERS the same object (SAME SHAPE, 200) with the private body WITHHELD:
+    carol (globex) gets a substantive same-shape 200 lacking the secret — the round-5 same-ref
     unauthorized-authenticated baseline that proves the secret is genuinely access-gated PRIVATE data, not a
-    reflected per-object token. The no-credential baseline is also 403'd. The oracle's exact trigger."""
+    reflected per-object token (which would appear in carol's same-shape render too). The no-credential
+    baseline is 403'd. The oracle's exact trigger."""
 
     def log_message(self, *a: object) -> None:
         return
@@ -293,8 +295,9 @@ class _IdorApp(BaseHTTPRequestHandler):
             else:
                 rid = (parse_qs(parsed.query).get("id") or ["1"])[0]
                 if _UTENANTS.get(user) != _OBJ_TENANT.get(rid, "acme"):
-                    # broken WITHIN a tenant, but a CROSS-tenant read is denied — carol's 403 baseline
-                    body, status = b"forbidden - cross-tenant access denied", 403
+                    # broken WITHIN a tenant; a CROSS-tenant read RENDERS the same object (SAME SHAPE) with
+                    # the private body withheld — carol's round-5 same-shape unauthorized-authenticated baseline
+                    body, status = (f"object {rid} owner=bob body=(restricted to owner tenant)".encode(), 200)
                 else:
                     # broken object-level authz: any same-tenant session reads any id in its tenant
                     body, status = (_SECRET.encode() if rid == "2" else b"alice's own object 1"), 200
@@ -322,13 +325,14 @@ def _http_server() -> Iterator[str]:
 
 def test_access_control_flag_confirms_idor_end_to_end() -> None:
     with _http_server() as base:
-        # FOUR distinct identities (Wave 3.1 round-4 soundness): the ATTACKER is the authenticated auditor
+        # FOUR distinct identities (Wave 3.1 round-5 soundness): the ATTACKER is the authenticated auditor
         # session (alice, acme) that drives the campaign; the VICTIM is bob (--ac-victim-header swaps the
         # Cookie); the NO-CREDENTIAL baseline is config's logged-out send (Cookie stripped); and — decisively —
         # the UNAUTHORIZED-AUTHENTICATED baseline is carol (a DIFFERENT tenant, --ac-unauth-header). A fire
         # requires alice's cross-read to reach bob's private marker, that marker to be ABSENT from alice's own
-        # object (id=1) AND from BOTH baselines (logged-out AND carol's cross-tenant 403) — proving the content
-        # is genuinely access-gated PRIVATE data, never a whole-body containment, a reflected token, or public.
+        # object (id=1), from the logged-out baseline, AND from carol's SAME-SHAPE cross-tenant 200 render —
+        # proving the content is genuinely access-gated PRIVATE data, never a whole-body containment, a
+        # reflected per-object token (which would appear in carol's same-shape render too), or public.
         attacker_send = victim_send_with_headers(loopback_send, (("Cookie", "session=alice"),))
         cfg = config_from_cli(loopback_send, ["Cookie: session=bob"], [f"idor:id:2|{_SECRET}|1"],
                               unauth_headers=["Cookie: session=carol"])

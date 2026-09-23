@@ -1859,10 +1859,11 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--ac-unauth-header", action="append", default=None, metavar="NAME: VALUE",
                         help="A header authenticating a THIRD, UNAUTHORIZED principal that also lacks "
                              "access to the victim's object, e.g. 'Cookie: session=CAROL'. Repeatable. "
-                             "The round-4 same-ref unauthorized-authenticated baseline: a cross-read "
+                             "The round-5 same-ref unauthorized-authenticated baseline: a cross-read "
                              "mints a FACT only when the victim's marker is ABSENT from this principal's "
-                             "read of the same ref (a reflected per-object token cannot mint). Without "
-                             "it the access-control pack is LEAD-only.")
+                             "SUBSTANTIVE SAME-SHAPE read of the same ref (a rendered 2xx, not a 401/403 "
+                             "denial — a reflected per-object token appears in a same-shape render too, so "
+                             "it cannot mint). Without it, or with a denial baseline, the pack is LEAD-only.")
     parser.add_argument("--recon", action="store_true",
                         help="Run the Intelligence Engine alongside the scan: resolve an "
                              "asset inventory into the shared world-model and produce a "

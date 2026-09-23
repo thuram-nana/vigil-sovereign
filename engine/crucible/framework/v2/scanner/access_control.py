@@ -141,14 +141,18 @@ class CrossAccessSpec:
     proves nothing), so a non-substantive control fails closed to a LEAD. Empty ⇒ the probe returns None (a
     LEAD); 'victim-unique' is enforced by this SUBSTANTIVE control differential, never accepted as a bare
     operator assertion. A FACT further requires TWO same-ref negative baselines (both on ``AccessControlConfig``):
-    a no-credential (logged-out) baseline (``nocred_send``) AND — decisively — a same-ref
-    UNAUTHORIZED-AUTHENTICATED baseline (``unauth_send``: a THIRD attacker-controlled principal that also lacks
-    access to victim_ref). Each must be a VALID discriminating read (a substantive 2xx lacking the marker OR a
-    genuine 401/403 denial; a bare 5xx/empty baseline is vacuous), and the marker must be ABSENT from BOTH. The
+    a no-credential (logged-out) baseline (``nocred_send``: a valid gating proof — a substantive 2xx OR a genuine
+    401/403 denial) AND — decisively (round-5, SAME-SHAPE) — a same-ref UNAUTHORIZED-AUTHENTICATED baseline
+    (``unauth_send``: a THIRD attacker-controlled principal that also lacks access to victim_ref) that must be a
+    SUBSTANTIVE SAME-SHAPE read — a 2xx that RENDERED the same object, the same class as the attacker's
+    substantive cross-read (NOT a 401/403 denial) — and the marker must be ABSENT from BOTH. The
     unauthorized-authenticated baseline is what defeats the round-3 fourth-variant FP (a per-object reflected
-    token echoed into an authenticated soft-deny appears in that baseline too), so ref-independence is NOT the
-    anti-reflection proof — the 3-view differential (owner-present, attacker-present, unauthorized-absent) is.
-    A config missing either baseline is a rigorous LEAD, never a FACT."""
+    token echoed into an authenticated soft-deny is echoed by ANY same-shape read of the object, so it appears in
+    that baseline too); a DENIAL there never renders the object, so a reflected token is absent from it VACUOUSLY —
+    accepting a denial (as round-4 did) let a reflected slug mint a durable false FACT. Ref-independence is NOT
+    the anti-reflection proof — the SAME-SHAPE 3-view differential (owner-present, attacker-present,
+    peer-same-shape-absent) is. A config missing a baseline, OR whose unauthorized-authenticated baseline is a
+    denial / not a substantive same-shape read, is a rigorous LEAD, never a FACT."""
 
     bug_class: str
     ref_param: str
@@ -175,11 +179,14 @@ class AccessControlConfig:
     # content is authorization-gated rather than public/reflected. None ⇒ the cross-read checks are seeded
     # baseline-less and can only ever produce a LEAD (never a FACT), fail-closed.
     nocred_send: Send | None = None
-    # The same-ref UNAUTHORIZED-AUTHENTICATED baseline send (round-4) — a request authenticated as a THIRD,
-    # attacker-controlled identity that ALSO lacks access to victim_ref. MANDATORY for a cross-read FACT: the
-    # discriminator must be ABSENT from this principal's read of victim_ref, the DECISIVE anti-reflection proof
-    # that the datum is genuinely access-gated PRIVATE content (a per-object reflected token would appear here
-    # too). None ⇒ the cross-read checks DOWNGRADE to a LEAD (never a FACT), the enforced boundary.
+    # The same-ref UNAUTHORIZED-AUTHENTICATED baseline send (round-4, SAME-SHAPE round-5) — a request
+    # authenticated as a THIRD, attacker-controlled identity that ALSO lacks access to victim_ref. MANDATORY for a
+    # cross-read FACT and it must yield a SUBSTANTIVE SAME-SHAPE read (a 2xx that RENDERED the same object, NOT a
+    # 401/403 denial): the discriminator must be ABSENT from this principal's same-shape read of victim_ref, the
+    # DECISIVE anti-reflection proof that the datum is genuinely access-gated PRIVATE content (a per-object
+    # reflected token is echoed by ANY same-shape read of the object, so it would appear here too; a denial never
+    # renders the object, so its absent marker is vacuous). None, a denial, or a non-substantive read ⇒ the
+    # cross-read checks DOWNGRADE to a LEAD (never a FACT), the enforced boundary.
     unauth_send: Send | None = None
 
 

@@ -73,10 +73,14 @@ def _make_cross_target():
         return {"status": 403, "body": "<html><nav>Home</nav>login required<footer>Acme</footer></html>"}
 
     def unauth_send(req: HttpRequest) -> dict:
-        # round-4 same-ref UNAUTHORIZED-AUTHENTICATED baseline: a THIRD attacker-controlled principal that
-        # also lacks access to bob's object is DENIED (a genuine, bodied 403) WITHOUT bob's private marker
-        # (genuinely access-gated content) — the marker's ABSENCE here proves it is not a reflected token.
-        return {"status": 403, "body": "<html><nav>Home</nav>forbidden — not your record<footer>Acme</footer></html>"}
+        # round-5 same-ref UNAUTHORIZED-AUTHENTICATED baseline (SAME-SHAPE): a THIRD attacker-controlled
+        # principal that also lacks access to bob's object gets a SUBSTANTIVE SAME-SHAPE 200 that renders the
+        # same object shell WITHOUT bob's private marker. The marker's ABSENCE from this same-shape render
+        # proves it is genuinely access-gated PRIVATE content, not a reflected per-object token (which would
+        # appear in the same-shape render too). A 403 denial here would be a VACUOUS clause-(c) control (it
+        # never renders the object) and is no longer accepted by round-5.
+        return {"status": 200,
+                "body": "<html><nav>Home</nav>record #2 owner=bob body=(restricted)<footer>Acme</footer></html>"}
 
     return attacker_send, victim_send, nocred_send, unauth_send
 

@@ -19,14 +19,18 @@ offline-re-verifiable FACT — to the two-identity ceremony:
     attacker's OWN control object AND that control read is ITSELF a substantive success (so a 404/403/empty
     control cannot vacuously satisfy the not-contains); it is REF-INDEPENDENT (never a substring of the
     requested ref); it is ABSENT from a no-credential / logged-out baseline of the SAME ref that is a VALID
-    gating proof; and — decisively (round-4) — it is ABSENT from the same-ref UNAUTHORIZED-AUTHENTICATED
-    baseline that is itself a valid discriminating read (a substantive 2xx that lacks it OR a genuine 401/403
-    denial). That last clause is the anti-reflection proof content heuristics could not give: a per-object
-    REFLECTED token echoed into an authenticated soft-deny appears in the unauthorized baseline TOO, so it
-    cannot mint; only genuinely access-gated PRIVATE content (denied to a peer unauthorized principal) fires.
-    This is a GET-only, non-destructive confirmation — NO per-action approval is needed. The reverted
-    whole-body ``contains`` is NOT used: a shared-boilerplate page, a 403, an absent/ref-derived/reflected
-    discriminator, a public body, a NON-substantive (empty/errored/denied) victim/attacker/control read, a
+    gating proof; and — decisively (round-4, HARDENED to SAME-SHAPE round-5) — it is ABSENT from the same-ref
+    UNAUTHORIZED-AUTHENTICATED baseline, which must be a SUBSTANTIVE SAME-SHAPE read: a 2xx that RENDERED the
+    same object (the same class as the attacker's substantive cross-read), NOT a 401/403 denial. That last
+    clause is the anti-reflection proof content heuristics could not give: a per-object REFLECTED token echoed
+    into an authenticated soft-deny is echoed by ANY same-shape read of the object, so it appears in the
+    unauthorized baseline TOO and cannot mint; a 401/403 DENIAL is NOT a valid clause-(c) control (it never
+    renders the object, so a reflected token is absent from it VACUOUSLY — the round-4 hole). Only a datum
+    PRESENT in the attacker's read yet ABSENT from a peer's same-shape read of the same object (genuinely
+    access-gated) fires. This is a GET-only, non-destructive confirmation — NO per-action approval is needed.
+    The reverted whole-body ``contains`` is NOT used: a shared-boilerplate page, a 403 attacker read, an
+    absent/ref-derived/reflected discriminator, a public body, a NON-substantive (empty/errored/denied)
+    victim/attacker/control read, a DENIAL-only or non-substantive unauthorized-authenticated baseline, a
     missing attacker identity, or a MISSING unauthorized-authenticated baseline all keep it a LEAD, never a FACT.
   * ``mass_assignment`` — the persisted state change. The WRITE (a non-GET mutation injecting a privileged
     field) fires ONLY through the 0.3 owner-signed per-action approval, supplied as ``mutating_send``; the
@@ -146,20 +150,24 @@ def access_control_redrive(
     #   * victim  — the owner (victim_headers): the authoritative ground truth;
     #   * attacker — a DIFFERENT authenticated user (attacker_headers): the one whose cross-read must reach
     #     the victim's private marker for a BOLA;
-    #   * unauth  — a THIRD authenticated-but-UNAUTHORIZED principal (unauth_headers, round-4): a second
-    #     attacker-controlled account that ALSO lacks access to victim_ref. The marker's ABSENCE from its
-    #     same-ref read is the DECISIVE anti-reflection proof (a per-object reflected token would appear
-    #     here too). Empty ⇒ the cross-read DOWNGRADES to a LEAD (the enforced boundary);
+    #   * unauth  — a THIRD authenticated-but-UNAUTHORIZED principal (unauth_headers, round-4; SAME-SHAPE
+    #     round-5): a second attacker-controlled account that ALSO lacks access to victim_ref, whose same-ref
+    #     read must be a SUBSTANTIVE SAME-SHAPE 2xx (the same object rendered, NOT a 401/403 denial). The
+    #     marker's ABSENCE from that same-shape render is the DECISIVE anti-reflection proof (a per-object
+    #     reflected token is echoed by any same-shape read, so it would appear here too; a denial never renders
+    #     the object, so its absent marker is vacuous). Empty / a denial ⇒ the cross-read DOWNGRADES to a LEAD;
     #   * nobody  — the anonymous base send (NO headers): the no-credential / logged-out baseline that
     #     PROVES the content is authorization-gated (round-2). If attacker_headers is empty the attacker
     #     collapses onto the anonymous baseline, so the achieved-read predicate cannot fire (a rigorous
     #     LEAD) — you cannot prove a cross-IDENTITY unauthorized read without a distinct attacker identity.
     victim_send = victim_send_with_headers(base_send, tuple(victim_headers))
     attacker_send = victim_send_with_headers(base_send, tuple(attacker_headers))
-    # Round-4: the THIRD, authenticated-but-UNAUTHORIZED principal (a second attacker-controlled account that
-    # also lacks access to victim_ref) rides the SAME gated send via its own swapped headers. Empty ⇒ None ⇒
-    # the cross-read cannot fire (a rigorous LEAD): you cannot prove the datum is access-gated PRIVATE content
-    # (vs a reflected per-object token) without a same-ref unauthorized-authenticated negative reference.
+    # Round-4 (SAME-SHAPE round-5): the THIRD, authenticated-but-UNAUTHORIZED principal (a second
+    # attacker-controlled account that also lacks access to victim_ref) rides the SAME gated send via its own
+    # swapped headers. Its read must be a SUBSTANTIVE SAME-SHAPE 2xx (the same object rendered, NOT a denial) or
+    # the cross-read fails closed to a LEAD. Empty ⇒ None ⇒ the cross-read cannot fire (a rigorous LEAD): you
+    # cannot prove the datum is access-gated PRIVATE content (vs a reflected per-object token) without a
+    # same-ref, same-shape unauthorized-authenticated negative reference.
     unauth_send = victim_send_with_headers(base_send, tuple(unauth_headers)) if unauth_headers else None
     nocred_send = base_send
 

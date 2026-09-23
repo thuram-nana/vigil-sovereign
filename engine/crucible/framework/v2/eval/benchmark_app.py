@@ -114,11 +114,13 @@ _CSRF_TOKEN_VALUE = "bench-csrf-ok"
 #                      authz is BROKEN — an authenticated session reads any account IN
 #                      ITS OWN TENANT (should be own-account-only), so a same-tenant peer
 #                      (alice) cross-reads bob's IBAN (the achieved BOLA); a CROSS-tenant
-#                      read is correctly DENIED (403). A no-credential baseline gets 403
-#                      (no IBAN), and a THIRD, authenticated-but-UNAUTHORIZED principal
-#                      (carol, a different tenant) gets 403 too — the round-4 same-ref
-#                      unauthorized-authenticated baseline that proves the IBAN is
-#                      genuinely access-gated PRIVATE data, not a reflected per-object token;
+#                      read still RENDERS the same account shell (SAME SHAPE) with the IBAN
+#                      WITHHELD. A no-credential baseline gets 403 (no IBAN), and a THIRD,
+#                      authenticated-but-UNAUTHORIZED principal (carol, a different tenant)
+#                      gets that same-shape 200 render WITHOUT the IBAN — the round-5 same-ref
+#                      unauthorized-authenticated baseline that proves the IBAN is genuinely
+#                      access-gated PRIVATE data, not a reflected per-object token (which would
+#                      appear in carol's same-shape render too);
 #   * /account/safe  — the BENIGN TWIN: object-level authz ENFORCED, a caller reads
 #                      only the account its OWN session cookie owns, so an attacker
 #                      requesting the victim's id gets 403 with NO discriminator and
@@ -634,13 +636,16 @@ class BenchmarkHandler(BaseHTTPRequestHandler):
             self._respond(403, _page("403", "<h1>Forbidden</h1>"
                                      "<p>Standard Acme Bank statement footer.</p>"))
             return
-        # BROKEN object-level authz within a tenant, but a CROSS-tenant read is correctly denied: an
-        # authenticated caller reads accounts in its OWN tenant (not only its own account). carol (a
-        # different tenant) is thus DENIED bob's account — the round-4 unauthorized-authenticated baseline.
+        # BROKEN object-level authz within a tenant. A CROSS-tenant read still RENDERS the same account
+        # shell (SAME SHAPE) but WITHHOLDS the private IBAN: carol (a different tenant) gets a substantive
+        # 200 render of bob's account without the IBAN — the round-5 SAME-SHAPE unauthorized-authenticated
+        # baseline. A reflected per-object token would appear in this same-shape render too; the IBAN does
+        # not, proving it is genuinely access-gated PRIVATE data. (A 403 denial here would be a VACUOUS
+        # clause-(c) control — it never renders the object — and is no longer accepted by round-5.)
         if _ACCOUNT_TENANTS.get(caller) != _ACCOUNT_TENANTS.get(acct):
-            self._respond(403, _page("403", "<h1>Forbidden</h1>"
-                                     "<p>cross-tenant access denied</p>"
-                                     "<p>Standard Acme Bank statement footer.</p>"))
+            body = (f"<h2>Account {acct}</h2><p>holder={rec[0]}</p>"
+                    f"<p>iban=(restricted to owner tenant)</p><p>Standard Acme Bank statement footer.</p>")
+            self._respond(200, _page("Account", body))
             return
         body = (f"<h2>Account {acct}</h2><p>holder={rec[0]}</p>"
                 f"<p>iban={rec[1]}</p><p>Standard Acme Bank statement footer.</p>")

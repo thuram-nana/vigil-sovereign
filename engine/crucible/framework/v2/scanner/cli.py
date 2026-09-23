@@ -122,10 +122,12 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--ac-unauth-header", action="append", default=None, metavar="NAME: VALUE",
                         help="A header that authenticates a THIRD, UNAUTHORIZED principal (a second "
                              "attacker-controlled account that also lacks access to the victim's object), "
-                             "e.g. 'Cookie: session=CAROL'. Repeatable. This is the round-4 same-ref "
+                             "e.g. 'Cookie: session=CAROL'. Repeatable. This is the round-5 same-ref "
                              "unauthorized-authenticated baseline: a cross-read mints a FACT only when the "
-                             "victim's private marker is ABSENT from this principal's read of the same ref "
-                             "(so a reflected per-object token cannot mint). Without it the pack is LEAD-only.")
+                             "victim's private marker is ABSENT from this principal's SUBSTANTIVE SAME-SHAPE "
+                             "read of the same ref (a rendered 2xx, not a 401/403 denial — a reflected "
+                             "per-object token appears in a same-shape render too, so it cannot mint). "
+                             "Without it, or with a denial baseline, the pack is LEAD-only.")
     parser.add_argument("--bandit-file", default=None,
                         help="Persist/warm-start the self-learning check-ordering bandit here.")
     parser.add_argument("--bandit-context", default="default",
