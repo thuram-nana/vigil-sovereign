@@ -363,13 +363,20 @@ BUG_CLASS_ORACLES: dict[str, tuple[OracleKind, ...]] = {
     # Wave-3.2 SESSION FIXATION (scanner.session.SessionFixationCheck, gated-workflow, opt-in) — the
     # ACHIEVED-STATE FACT (CWE-384), not a posture check. VIGIL chooses a UNIQUE high-entropy sentinel id S0,
     # sets it as the session cookie BEFORE authenticating, runs the operator's login sequence through the
-    # gated send, and fires ONLY when the SAME id (post-auth S1 == S0) survived login unrotated AND the
-    # operator success_marker is PRESENT in S0's fixed-session view of the protected URL yet PROVABLY ABSENT
-    # from a SUBSTANTIVE same-URL LOGGED-OUT (no-cookie) reference — a DIFFERENTIAL proving the marker is
-    # access-gated, not a common token / chrome / a benign soft-200 body both views share. A marker present in
-    # BOTH, or no substantive logged-out reference, DOWNGRADES to a LEAD; an app that ROTATES the id at login
-    # (S1 != S0 — the correct defense) does NOT fire; a server-set-only id (no VIGIL sentinel shape) degrades
-    # to a weaker LEAD. Routed to its OWN dedicated OracleKind.SESSION_FIXATION (held OUT of the frozen
+    # gated send, and fires ONLY when the SAME id (post-auth S1 == S0) survived login unrotated AND — by the
+    # PRIVATE-READ REDUCTION (the same machinery Wave-3.1 IDOR/BOLA uses; an achieved authenticated state
+    # CANNOT be proven from response content) — S0 achieves a read of a victim-PRIVATE datum D: D is PRESENT in
+    # S0's SUBSTANTIVE read of the protected URL AND in the owner's authoritative (positive) read yet PROVABLY
+    # ABSENT from (a) a SUBSTANTIVE SAME-SHAPE 2xx read by an OTHER unauthorized identity (the DECISIVE clause —
+    # cosmetic chrome shown for ANY credential appears there too) AND (b) a valid no-session gating baseline,
+    # with D a valid non-reflected non-sentinel discriminator (not a substring of / straddling S0 — not a cookie
+    # echo). The differential is re-derived from the RETAINED RAW bytes (never a bool). The bare success_marker /
+    # credential-presence differential is NO LONGER a minting path (it proved only the cookie changed the
+    # response, not that S0 authenticated — an honest LEAD). No / invalid / reflected D, a missing positive or
+    # same-shape negative reference, D present in a negative reference, or no valid no-session baseline
+    # DOWNGRADES to a LEAD; an app that ROTATES the id at login (S1 != S0 — the correct defense) does NOT fire;
+    # a server-set-only id (no VIGIL sentinel shape) degrades to a weaker LEAD. Routed to its OWN dedicated
+    # OracleKind.SESSION_FIXATION (held OUT of the frozen
     # _ALL_ORACLES, so the unknown-class fallback stays EXACTLY 15 and oracle_version(ACHIEVED_STATE) is
     # UNTOUCHED — session fixation carries its own oracle_version), reachable ONLY when the ctx carries the
     # fresh `session_fixation` key, which no benchmark/scan/engage finding carries — so appending this row
