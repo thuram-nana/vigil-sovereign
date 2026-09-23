@@ -67,13 +67,18 @@ def _make_cross_target():
             return {"status": 200, "body": f"<html><nav>Home</nav>{_VICTIM_SECRET}<footer>Acme</footer></html>"}
         return {"status": 200, "body": "<html><nav>Home</nav>alice-own-account-0001<footer>Acme</footer></html>"}
 
-    return attacker_send, victim_send
+    def nocred_send(req: HttpRequest) -> dict:
+        # logged-out baseline: authentication is required, so bob's private record is never served (round-2
+        # authorization-gated proof) — the marker is absent, so the attacker's read WAS unauthorized.
+        return {"status": 403, "body": "<html><nav>Home</nav>login required<footer>Acme</footer></html>"}
+
+    return attacker_send, victim_send, nocred_send
 
 
 def _confirmed_finding(bug_class: str = "idor") -> dict:
-    attacker_send, victim_send = _make_cross_target()
+    attacker_send, victim_send, nocred_send = _make_cross_target()
     cfg = AccessControlConfig(
-        victim_send=victim_send,
+        victim_send=victim_send, nocred_send=nocred_send,
         cross_specs=(CrossAccessSpec(bug_class=bug_class, ref_param="id", victim_ref=_VICTIM_REF,
                                      victim_discriminator=_VICTIM_SECRET, control_ref=_ATTACKER_OWN_REF),),
     )

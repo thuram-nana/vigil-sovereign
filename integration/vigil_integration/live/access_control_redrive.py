@@ -8,12 +8,17 @@ every probe → the existing deterministic oracle judges the FRESH captured byte
 admitted against its declared capability → ``certify_admitted(provenance="live_redrive")`` mints a signed,
 offline-re-verifiable FACT — to the two-identity ceremony:
 
-  * ``idor`` / ``bola`` / ``bfla`` — the two-identity CROSS-READ. A SECOND, owner-signed identity (the victim's
-    Cookie/Authorization) rides the SAME gated send via swapped headers. The runner requests the victim's object
-    as the attacker and fires ONLY when the attacker's cross-read reaches a victim-UNIQUE discriminator (a
-    per-identity marker the operator supplied and that is present in the victim's AUTHORITATIVE body). This is a
-    GET-only, non-destructive confirmation — NO per-action approval is needed. The reverted whole-body
-    ``contains`` is NOT used: a shared-boilerplate page, a 403, or an absent discriminator do not fire.
+  * ``idor`` / ``bola`` / ``bfla`` — the two-identity CROSS-READ, adjudicated over THREE distinct identities on
+    the SAME gated send (swapped headers): the VICTIM/owner (owner-signed victim headers), the ATTACKER (its own
+    ``attacker_headers`` — a DIFFERENT authenticated user), and NOBODY (the anonymous base send). The runner
+    requests the victim's object as the attacker and fires ONLY when ALL hold: the attacker's cross-read reaches
+    a victim-UNIQUE discriminator present in the victim's AUTHORITATIVE body; that discriminator is ABSENT from
+    the attacker's OWN control object; it is REF-INDEPENDENT (never a substring of the requested ref, so a
+    reflected soft-deny cannot mint); and it is ABSENT from a no-credential / logged-out baseline of the SAME
+    ref (proving the content is authorization-GATED, not public/reflected). This is a GET-only, non-destructive
+    confirmation — NO per-action approval is needed. The reverted whole-body ``contains`` is NOT used: a
+    shared-boilerplate page, a 403, an absent/ref-derived discriminator, a public body, or a missing attacker
+    identity all keep it a LEAD, never a FACT.
   * ``mass_assignment`` — the persisted state change. The WRITE (a non-GET mutation injecting a privileged
     field) fires ONLY through the 0.3 owner-signed per-action approval, supplied as ``mutating_send``; the
     before/after readback is the AUTHORITATIVE OWNER view (a gated GET), never the attacker's write echo. Absent
@@ -82,6 +87,7 @@ def access_control_redrive(
     signers: "list[tuple[str, str]]",
     cross_specs: "tuple[Any, ...]" = (),
     victim_headers: "tuple[tuple[str, str], ...]" = (),
+    attacker_headers: "tuple[tuple[str, str], ...]" = (),
     mass_assignment: Any = None,
     mutating_send: Optional[Callable[[Any], dict]] = None,
     timeout: float = 8.0,
@@ -89,14 +95,17 @@ def access_control_redrive(
     """Re-drive the two-identity access-control ceremony against ``url`` and mint a signed FACT ONLY when the
     achieved-state predicate oracle confirms CAUSATION over VIGIL's OWN live capture:
 
-      * a cross-read fires only when the attacker reaches the victim's UNIQUE discriminator (GET-only, no
-        approval); a shared-boilerplate page / 403 / absent discriminator does NOT fire;
+      * a cross-read (GET-only, no approval) fires only when the ATTACKER identity reaches the victim's
+        REF-INDEPENDENT UNIQUE discriminator that is ABSENT from both the attacker's own control object AND a
+        no-credential / logged-out baseline of the same ref; a shared-boilerplate page / 403 / absent or
+        ref-derived discriminator / public (logged-out-readable) body / missing attacker identity does NOT fire;
       * a mass-assignment fires only when a privileged field PERSISTED into the AUTHORITATIVE OWNER readback
         (before absent, after present), and its WRITE happens ONLY through the 0.3-gated ``mutating_send``.
 
-    The victim identity rides the SAME gated send with swapped headers (never a second, looser client). A probe
-    that established no channel is INCONCLUSIVE (never CLEAN). Returns an :class:`AccessControlRedriveResult`.
-    Never raises (a probe error is recorded and what held is returned)."""
+    Three identities ride the SAME gated send via swapped headers (never a second, looser client): the victim
+    (``victim_headers``), the attacker (``attacker_headers`` — a distinct authenticated user), and the anonymous
+    baseline (no headers). A probe that established no channel is INCONCLUSIVE (never CLEAN). Returns an
+    :class:`AccessControlRedriveResult`. Never raises (a probe error is recorded and what held is returned)."""
     from framework.v2.scanner.access_control import (  # noqa: PLC0415
         IdorCheck, access_control_finding, victim_send_with_headers)
     from framework.v2.scanner.insertion import HttpRequest, InsertionKind, RequestTemplate  # noqa: PLC0415
@@ -116,8 +125,18 @@ def access_control_redrive(
         res.notes.append(f"refused before any traffic: {refusal}")
         return res
 
-    attacker_send, state = _gated_web_send(slug, timeout=timeout)
-    victim_send = victim_send_with_headers(attacker_send, tuple(victim_headers))
+    base_send, state = _gated_web_send(slug, timeout=timeout)
+    # Three distinct identities ride the SAME gated executor via swapped headers:
+    #   * victim  — the owner (victim_headers): the authoritative ground truth;
+    #   * attacker — a DIFFERENT authenticated user (attacker_headers): the one whose cross-read must reach
+    #     the victim's private marker for a BOLA;
+    #   * nobody  — the anonymous base send (NO headers): the no-credential / logged-out baseline that
+    #     PROVES the content is authorization-gated (round-2). If attacker_headers is empty the attacker
+    #     collapses onto the anonymous baseline, so the achieved-read predicate cannot fire (a rigorous
+    #     LEAD) — you cannot prove a cross-IDENTITY unauthorized read without a distinct attacker identity.
+    victim_send = victim_send_with_headers(base_send, tuple(victim_headers))
+    attacker_send = victim_send_with_headers(base_send, tuple(attacker_headers))
+    nocred_send = base_send
 
     def _body_unavailable_now() -> int:
         return int(state.get("body_unavailable", 0))
@@ -168,7 +187,8 @@ def access_control_redrive(
             id=f"ac-{bug_class}", ref_param=ref_param, victim_ref=getattr(spec, "victim_ref", ""),
             victim_send=victim_send, bug_class=bug_class,
             victim_discriminator=getattr(spec, "victim_discriminator", ""),
-            control_ref=getattr(spec, "control_ref", ""))
+            control_ref=getattr(spec, "control_ref", ""),
+            nocred_send=nocred_send)
         before = state["channels"]
         body_before = _body_unavailable_now()
         try:

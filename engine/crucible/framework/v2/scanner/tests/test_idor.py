@@ -122,10 +122,12 @@ def _session(base: str, user: str) -> AuthSession:
 def _idor_check(base: str) -> IdorCheck:
     # attacker is the auditor's session (alice); victim is bob, ref = bob's doc "2". The victim-unique
     # discriminator is bob's private secret content (never in alice's own doc), so a fire is the achieved
-    # cross-tenant read of bob's PRIVATE marker — not a whole-body containment on shared boilerplate.
+    # cross-tenant read of bob's PRIVATE marker — not a whole-body containment on shared boilerplate. The
+    # no-credential baseline is the RAW send (no session cookie): the app 401s a logged-out request, proving
+    # the read is authorization-gated (round-2), so alice's cross-read is a genuine UNAUTHORIZED access.
     bob = _session(base, "bob")
     return IdorCheck(id="idor-doc", ref_param="id", victim_ref="2", victim_send=bob.send,
-                     victim_discriminator="bob-medical-record", control_ref="1")
+                     victim_discriminator="bob-medical-record", control_ref="1", nocred_send=_raw_send)
 
 
 def test_idor_confirmed_on_vulnerable_app() -> None:

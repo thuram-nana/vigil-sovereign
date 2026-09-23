@@ -109,8 +109,10 @@ _CSRF_TOKEN_VALUE = "bench-csrf-ok"
 # appears ONLY in that account's authoritative record. The sound IdorCheck fires
 # only when an attacker's cross-read REACHES the victim's discriminator — never a
 # whole-body containment over shared boilerplate.
-#   * /account       — the PLANTED IDOR/BOLA: NO object-level authz, so any identity
-#                      (any cookie, or none) reads any id, reaching the victim IBAN;
+#   * /account       — the PLANTED IDOR/BOLA: authentication REQUIRED (logged-out is
+#                      denied, so the content is authorization-gated) but object-level
+#                      authz is BROKEN — any AUTHENTICATED session reads any id, reaching
+#                      the victim IBAN; a no-credential baseline gets 403 (no IBAN);
 #   * /account/safe  — the BENIGN TWIN: object-level authz ENFORCED, a caller reads
 #                      only the account its OWN session cookie owns, so an attacker
 #                      requesting the victim's id gets 403 with NO discriminator and
@@ -600,18 +602,28 @@ class BenchmarkHandler(BaseHTTPRequestHandler):
     # -- two-identity access control (Wave 3.1) ----------------------------
 
     def _account(self) -> None:
-        # PLANTED BUG (IDOR / BOLA / BFLA) — a two-identity object endpoint with NO
-        # object-level authorization: ANY identity (any cookie, or none) reads ANY
-        # account by id, so an attacker reaching the victim's id sees the victim's
-        # UNIQUE private discriminator (its IBAN). This is the exact achieved
-        # cross-tenant read the sound IdorCheck confirms. GET-only. Unlinked from the
-        # index and never crawled by the default GET benchmark, so `make gate` is
-        # byte-identical.
+        # PLANTED BUG (IDOR / BOLA / BFLA) — a two-identity object endpoint that REQUIRES
+        # authentication (a logged-out caller is denied) but has BROKEN object-level
+        # authorization: ANY *authenticated* session may read ANY account by id, so an
+        # attacker reaching the victim's id sees the victim's UNIQUE private discriminator
+        # (its IBAN). This is the exact achieved cross-tenant read the sound IdorCheck
+        # confirms. Authentication IS required so the content is authorization-GATED (not
+        # public): a no-credential baseline gets 403 with NO discriminator, which the
+        # round-2 sound check needs to PROVE the read was unauthorized rather than public.
+        # GET-only. Unlinked from the index and never crawled by the default GET benchmark,
+        # so `make gate` is byte-identical.
         acct = self._query("id") or "1"
         rec = _ACCOUNTS.get(acct)
         if rec is None:
             self._respond(404, _page("404", "<h1>No such account</h1>"))
             return
+        caller = _account_caller(self.headers.get("Cookie", ""))
+        if caller is None:
+            # Logged-out / unknown session: authentication is required (the content is gated). No IBAN.
+            self._respond(403, _page("403", "<h1>Forbidden</h1>"
+                                     "<p>Standard Acme Bank statement footer.</p>"))
+            return
+        # BROKEN object-level authz: an authenticated caller may read ANY account, not only its own.
         body = (f"<h2>Account {acct}</h2><p>holder={rec[0]}</p>"
                 f"<p>iban={rec[1]}</p><p>Standard Acme Bank statement footer.</p>")
         self._respond(200, _page("Account", body))

@@ -1251,13 +1251,13 @@
     {
       "id": "idor.cross_identity_read",
       "check": "IdorCheck",
-      "evidence": "A two-identity achieved cross-read (Wave 3.1): acting as the attacker VIGIL requested an object owned by a SECOND, owner-signed identity (the victim's Cookie/Authorization riding the SAME gated executor) and the response REACHED a victim-UNIQUE discriminator — a per-identity marker (account id / private email / invoice number) the operator supplied and that is genuinely present in the victim's AUTHORITATIVE body. The achieved-state predicate oracle fires ONLY when the attacker got 200 AND the discriminator is in the victim's authoritative record AND the attacker's cross-read reached that SAME discriminator (AND, when an attacker-owned control_ref is supplied, the marker is ABSENT from the attacker's own object) — the achieved unauthorized read of the victim's private content, GET-only, no state change.",
+      "evidence": "A THREE-identity achieved cross-read (Wave 3.1, round-2): acting as the ATTACKER (a DISTINCT authenticated identity), VIGIL requested an object owned by a SECOND, owner-signed identity (the victim, riding the SAME gated executor) and the response REACHED a victim-UNIQUE discriminator — a REF-INDEPENDENT per-identity PRIVATE token (a private email / invoice number / account secret; NOT the requested object id) the operator supplied and that is genuinely present in the victim's AUTHORITATIVE body. The achieved-state predicate oracle fires ONLY when ALL hold: the attacker got 200; the discriminator is in the victim's authoritative record; the attacker's cross-read reached that SAME discriminator; the discriminator is ABSENT from the attacker's OWN control object (control_ref, mandatory); the discriminator is NOT a substring of the requested victim_ref (ref-independence, so a reflected soft-deny cannot mint); and the discriminator is ABSENT from a NO-CREDENTIAL / logged-out baseline GET of the same ref (proving the content is authorization-GATED, not public/reflected). All re-derived offline over the retained bodies — a reflected id, public content, a 403, shared boilerplate, or a missing attacker/baseline all correctly do NOT fire.",
       "fact_capable": true,
       "clean_capable": false,
       "preconditions": [
         "channel_established"
       ],
-      "limitation": "Soundness-first, coverage-bounded. This replaces the reverted contains(attacker_body, victim_body) over the WHOLE body, which false-positived on shared boilerplate (two identities render the same shell/nav/footer): the fire now requires the attacker to reach a victim-UNIQUE discriminator, so a shared-shell page, a 403, an empty/different response, or an absent discriminator all correctly do NOT fire. NOT CLEAN-capable: a non-firing cross-read cannot prove the ABSENCE of every broken object reference (a different object id, endpoint, or identity pair VIGIL never drove stays a LEAD/INCONCLUSIVE, never a false negative and never a CLEAN). Requires the operator to supply the second identity and the per-identity discriminator — there is no sound way to autodiscover a victim's private marker — so without them the class is a rigorous LEAD, never a false CLEAN.",
+      "limitation": "Soundness-first, coverage-bounded. This replaces the reverted contains(attacker_body, victim_body) over the WHOLE body (false-positived on shared boilerplate) AND closes the round-2 re-red-pen gaps: a discriminator that is the object id itself (reflected in a 200 soft-deny) is refused by ref-independence, and PUBLIC content is refused by the mandatory no-credential baseline (a logged-out request must NOT reach the marker). The fire needs a REF-INDEPENDENT victim-PRIVATE token, an attacker-owned control_ref, and a logged-out baseline; without any of them — or with a ref-derived discriminator, or a baseline that itself reaches the marker — the class is a rigorous LEAD, never a FACT. NOT CLEAN-capable: a non-firing cross-read cannot prove the ABSENCE of every broken object reference (a different object id, endpoint, or identity pair VIGIL never drove stays a LEAD/INCONCLUSIVE, never a false negative and never a CLEAN). There is no sound way to autodiscover a victim's private marker, so the operator must supply the second identity + the ref-independent private discriminator.",
       "target_fact_capable": true,
       "target_clean_capable": false,
       "target_downgrade_rationale": "Proving the ABSENCE of any broken-object-level authorization is a coverage-complete capability over every object reference, every endpoint, and every attacker/victim identity pair an app exposes — a universal negative that a per-object-pair achieved cross-read cannot establish — so CLEAN-capability is deliberately not pursued on this achieved-read branch.",
@@ -1265,7 +1265,9 @@
       "control_requirements": [
         "warden_active_recon_gate",
         "owner_signed_second_identity",
-        "operator_supplied_victim_unique_discriminator",
+        "operator_supplied_ref_independent_private_discriminator",
+        "attacker_owned_control_ref_differential",
+        "no_credential_baseline_authorization_gated",
         "vigil_owned_gated_two_identity_send"
       ],
       "evidence_surface": "composite",
@@ -1284,7 +1286,7 @@
       "preconditions": [
         "channel_established"
       ],
-      "limitation": "Soundness-first, coverage-bounded — see idor.cross_identity_read. The fire requires the attacker to reach a victim-UNIQUE discriminator (never a whole-body containment that false-positives on shared boilerplate), so a 403 / shared shell / absent discriminator do not fire. NOT CLEAN-capable: a non-firing cross-read cannot prove the absence of every broken object-level authorization across every object and identity pair, so an untested pair stays a LEAD/INCONCLUSIVE. Requires the operator's second identity + per-identity discriminator; absent them the class is a rigorous LEAD, never a false CLEAN.",
+      "limitation": "Soundness-first, coverage-bounded — see idor.cross_identity_read (same round-2 predicate). The fire requires the attacker (a distinct authenticated identity) to reach a REF-INDEPENDENT victim-UNIQUE discriminator that is ABSENT from both the attacker's own control object AND a no-credential logged-out baseline, so a 403 / shared shell / absent or ref-derived discriminator / public content do not fire. NOT CLEAN-capable: a non-firing cross-read cannot prove the absence of every broken object-level authorization across every object and identity pair, so an untested pair stays a LEAD/INCONCLUSIVE. Requires the operator's second identity + a ref-independent private discriminator + the logged-out baseline; absent them the class is a rigorous LEAD, never a false CLEAN.",
       "target_fact_capable": true,
       "target_clean_capable": false,
       "target_downgrade_rationale": "Proving the ABSENCE of any broken object-level authorization is a coverage-complete universal negative over every object reference and identity pair, which a per-pair achieved cross-read cannot establish, so CLEAN-capability is deliberately not pursued here.",
@@ -1292,7 +1294,9 @@
       "control_requirements": [
         "warden_active_recon_gate",
         "owner_signed_second_identity",
-        "operator_supplied_victim_unique_discriminator",
+        "operator_supplied_ref_independent_private_discriminator",
+        "attacker_owned_control_ref_differential",
+        "no_credential_baseline_authorization_gated",
         "vigil_owned_gated_two_identity_send"
       ],
       "evidence_surface": "composite",
@@ -1311,7 +1315,7 @@
       "preconditions": [
         "channel_established"
       ],
-      "limitation": "Soundness-first, coverage-bounded — see idor.cross_identity_read. The fire requires the attacker to reach a privilege-UNIQUE discriminator present in the privileged identity's authoritative response, so a 403 / shared boilerplate / absent discriminator do not fire. NOT CLEAN-capable: a non-firing probe cannot prove the absence of every broken function-level authorization across every privileged function, so an untested function stays a LEAD/INCONCLUSIVE. Requires the operator's higher-privileged second identity + the privilege-unique discriminator; absent them the class is a rigorous LEAD, never a false CLEAN.",
+      "limitation": "Soundness-first, coverage-bounded — see idor.cross_identity_read (same round-2 predicate). The fire requires the lower-privileged attacker to reach a REF-INDEPENDENT privilege-UNIQUE discriminator present in the privileged identity's authoritative response and ABSENT from both the attacker's own control response AND a no-credential baseline, so a 403 / shared boilerplate / absent or ref-derived discriminator / publicly-visible marker do not fire. NOT CLEAN-capable: a non-firing probe cannot prove the absence of every broken function-level authorization across every privileged function, so an untested function stays a LEAD/INCONCLUSIVE. Requires the operator's higher-privileged second identity + a ref-independent privilege-unique discriminator + the logged-out baseline; absent them the class is a rigorous LEAD, never a false CLEAN.",
       "target_fact_capable": true,
       "target_clean_capable": false,
       "target_downgrade_rationale": "Proving the ABSENCE of any broken function-level authorization is a coverage-complete universal negative over every privileged function and privilege pair, which a per-function achieved cross-read cannot establish, so CLEAN-capability is deliberately not pursued here.",
@@ -1319,7 +1323,9 @@
       "control_requirements": [
         "warden_active_recon_gate",
         "owner_signed_second_identity",
-        "operator_supplied_victim_unique_discriminator",
+        "operator_supplied_ref_independent_private_discriminator",
+        "attacker_owned_control_ref_differential",
+        "no_credential_baseline_authorization_gated",
         "vigil_owned_gated_two_identity_send"
       ],
       "evidence_surface": "composite",

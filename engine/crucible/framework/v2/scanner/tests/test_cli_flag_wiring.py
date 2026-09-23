@@ -21,6 +21,7 @@ that records the kwargs it was handed.
 from __future__ import annotations
 
 import contextlib
+import re
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Iterator
@@ -32,7 +33,7 @@ from framework.v2 import engage as engage_mod
 from framework.v2.scanner import cli as cli_mod
 from framework.v2.scanner.campaign import ScanReport, WebScanCampaign
 from framework.v2.scanner.cli import loopback_send
-from framework.v2.scanner.access_control import config_from_cli
+from framework.v2.scanner.access_control import config_from_cli, victim_send_with_headers
 from framework.v2.engage import EngagementResult
 
 # (CLI flag, campaign kwarg the flag drives). The pure-boolean opt-in flags — each is
@@ -250,8 +251,11 @@ _SECRET = "SECRET-BOB-INVOICE-total=9001-acct=bob@example.test"
 
 
 class _IdorApp(BaseHTTPRequestHandler):
-    """A broken-object-level-auth app: object 2 (bob's) is readable by anyone, so the
-    attacker cross-reads it — the achieved-state oracle's exact trigger."""
+    """A broken-object-level-auth app that REQUIRES authentication (round-2): /obj is served only to a
+    valid session (a logged-out request is 403'd, so the content is authorization-GATED, not public), but
+    object-level authz is BROKEN — ANY authenticated session reads ANY id, so the authenticated attacker
+    (alice) cross-reads bob's object 2 and reaches its secret. The no-credential baseline gets 403 (no
+    secret), which is what proves the read was UNAUTHORIZED rather than public — the oracle's exact trigger."""
 
     def log_message(self, *a: object) -> None:
         return
@@ -259,13 +263,19 @@ class _IdorApp(BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802
         parsed = urlsplit(self.path)
         if parsed.path == "/":
-            body = b'<html><a href="/obj?id=1">obj</a></html>'
+            body, status = b'<html><a href="/obj?id=1">obj</a></html>', 200
         elif parsed.path == "/obj":
-            rid = (parse_qs(parsed.query).get("id") or ["1"])[0]
-            body = _SECRET.encode() if rid == "2" else b"alice's own object 1"
+            m = re.search(r"session=([^;]+)", self.headers.get("Cookie", ""))
+            user = m.group(1) if m else None
+            if user not in ("alice", "bob"):
+                body, status = b"forbidden - login required", 403   # auth-gated: logged-out is denied
+            else:
+                rid = (parse_qs(parsed.query).get("id") or ["1"])[0]
+                # broken object-level authz: any authenticated session reads any id
+                body, status = (_SECRET.encode() if rid == "2" else b"alice's own object 1"), 200
         else:
-            body = b"not found"
-        self.send_response(200)
+            body, status = b"not found", 404
+        self.send_response(status)
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
@@ -287,13 +297,16 @@ def _http_server() -> Iterator[str]:
 
 def test_access_control_flag_confirms_idor_end_to_end() -> None:
     with _http_server() as base:
-        # The ref carries the victim-UNIQUE discriminator AND the mandatory attacker-owned control_ref
-        # (Wave 3.1 soundness fix): a fire requires the attacker's cross-read to reach bob's private marker
-        # AND that marker to be ABSENT from the attacker's own object (id=1) — never a whole-body
-        # containment on boilerplate, and never a fire on a discriminator that turns out to be global.
+        # Three distinct identities (Wave 3.1 round-2 soundness): the ATTACKER is the authenticated auditor
+        # session (alice) that drives the campaign; the VICTIM is bob (--ac-victim-header swaps the Cookie);
+        # the NO-CREDENTIAL baseline is config's logged-out send (Cookie stripped). A fire requires the
+        # attacker's cross-read to reach bob's REF-INDEPENDENT private marker, that marker to be ABSENT from
+        # the attacker's own object (id=1) AND from the logged-out baseline (proving the content is
+        # authorization-gated, not public) — never a whole-body containment, a reflected id, or public data.
+        attacker_send = victim_send_with_headers(loopback_send, (("Cookie", "session=alice"),))
         cfg = config_from_cli(loopback_send, ["Cookie: session=bob"], [f"idor:id:2|{_SECRET}|1"])
         report = WebScanCampaign(
-            loopback_send, max_pages=5, enable_oob=False,
+            attacker_send, max_pages=5, enable_oob=False,
             enable_access_control=True, access_control_config=cfg,
         ).run(base + "/")
     assert any(f.bug_class == "idor" and f.confirmed_by == "achieved_state"

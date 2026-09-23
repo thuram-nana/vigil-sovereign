@@ -125,13 +125,19 @@ class CrossAccessSpec:
     authorization/privilege_escalation) — all confirmed by the same achieved-state cross-read.
 
     ``victim_discriminator`` is the per-identity marker that ONLY the victim's authoritative record
-    contains (an account id / private email / invoice number). It is what makes the confirmation SOUND:
-    a fire requires the attacker's cross-read to reach THIS marker, never a whole-body containment that
+    contains — and it MUST be a REF-INDEPENDENT victim-PRIVATE token (a private email, an invoice number,
+    an account secret), NOT the requested object id itself. A ref-derived value (the object id, or any
+    substring of ``victim_ref``) is pure REFLECTION: a secured app that echoes the requested id in a 200
+    soft-deny body would otherwise mint a false FACT with ZERO unauthorized read, so the check refuses a
+    discriminator that is a substring of ``victim_ref``. It is what makes the confirmation SOUND: a fire
+    requires the attacker's cross-read to reach THIS marker, never a whole-body containment that
     false-positives on shared boilerplate. Empty ⇒ the probe cannot soundly fire (a rigorous LEAD).
     ``control_ref`` is an attacker-OWNED reference and is MANDATORY for a FACT: the marker must be ABSENT
     from the attacker's own object — the negative control that PROVES a global/boilerplate string is not
     mistaken for a victim-unique one. Empty ⇒ the probe returns None (a LEAD); 'victim-unique' is enforced
-    by this control differential, never accepted as a bare operator assertion."""
+    by this control differential, never accepted as a bare operator assertion. A FACT further requires a
+    no-credential (logged-out) baseline (see ``AccessControlConfig.nocred_send``) proving the content is
+    authorization-gated rather than public/reflected; a baseline-less config is a rigorous LEAD."""
 
     bug_class: str
     ref_param: str
@@ -153,6 +159,11 @@ class AccessControlConfig:
     mass_assignment: MassAssignmentCheck | None = None
     # An id prefix so the seeded checks are traceable back to this pack in a report.
     id_prefix: str = "ac"
+    # The no-credential (logged-out) baseline send — a request that carries NO identity. MANDATORY for a
+    # cross-read FACT: the discriminator must be ABSENT from a logged-out GET of victim_ref, proving the
+    # content is authorization-gated rather than public/reflected. None ⇒ the cross-read checks are seeded
+    # baseline-less and can only ever produce a LEAD (never a FACT), fail-closed.
+    nocred_send: Send | None = None
 
 
 def default_cross_specs(
@@ -192,6 +203,7 @@ def build_access_control_checks(
             bug_class=spec.bug_class,
             victim_discriminator=spec.victim_discriminator,
             control_ref=spec.control_ref,
+            nocred_send=config.nocred_send,
         ))
     if config.mass_assignment is not None:
         checks.append(config.mass_assignment)
@@ -234,6 +246,33 @@ def victim_send_with_headers(base_send: Send, headers: tuple[tuple[str, str], ..
     def _send(req: HttpRequest) -> dict:
         merged = req.model_copy(update={"headers": _merge_victim_headers(list(req.headers), headers)})
         return base_send(merged)
+
+    return _send
+
+
+# Header names that carry identity — stripped to build the no-credential (logged-out) baseline. The
+# operator's own victim-header names are added on top (they are, by definition, the identity headers for
+# THIS target), so the baseline is a genuine logged-out request regardless of the auth scheme used.
+_AUTH_HEADER_NAMES: frozenset[str] = frozenset(
+    {"cookie", "authorization", "x-api-key", "x-auth-token", "x-csrf-token", "x-xsrf-token"})
+
+
+def nocred_send_stripping(base_send: Send, extra_names: tuple[str, ...] = ()) -> Send:
+    """Wrap ``base_send`` so every request it issues has its IDENTITY headers REMOVED — the
+    no-credential / logged-out baseline. Strips the common auth headers plus any ``extra_names`` (the
+    operator's victim-header names, which are the identity headers for this target). This proves the
+    cross-read content is authorization-gated: if the logged-out baseline still reaches the discriminator,
+    the content is public/reflected and the achieved-read predicate correctly does NOT fire.
+
+    Caveat: it can only strip headers present on the RENDERED request; a credential injected INSIDE
+    ``base_send`` (a session that adds a cookie internally) is not visible here, so for such executors the
+    operator should pass a genuinely credential-free base. The redrive runner uses the anonymous gated send
+    directly as its baseline, so the signed-cert path does not rely on this stripping."""
+    strip = _AUTH_HEADER_NAMES | {n.lower() for n in extra_names}
+
+    def _send(req: HttpRequest) -> dict:
+        kept = [(k, v) for k, v in list(req.headers) if k.lower() not in strip]
+        return base_send(req.model_copy(update={"headers": kept}))
 
     return _send
 
@@ -322,7 +361,12 @@ def config_from_cli(
         headers.append(parsed)
 
     victim_send = victim_send_with_headers(base_send, tuple(headers))
-    return AccessControlConfig(victim_send=victim_send, cross_specs=tuple(specs), id_prefix=id_prefix)
+    # The no-credential baseline strips the identity headers (the common auth headers plus the operator's
+    # own victim-header names) so a cross-read FACT is minted only when a logged-out request is DENIED the
+    # discriminator — proving the content is authorization-gated, not public/reflected.
+    nocred_send = nocred_send_stripping(base_send, tuple(name for name, _ in headers))
+    return AccessControlConfig(victim_send=victim_send, cross_specs=tuple(specs),
+                               nocred_send=nocred_send, id_prefix=id_prefix)
 
 
 # ---------------------------------------------------------------------------

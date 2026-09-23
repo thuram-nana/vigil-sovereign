@@ -387,9 +387,13 @@ def _default_campaign(send: Send, *, insertion_kinds: tuple[InsertionKind, ...])
         REFLECTED_XSS,
         # Wave 3.1 soundness: the victim-UNIQUE discriminator (bob's private record content) is what the
         # attacker's cross-read must reach — never a whole-body containment on shared boilerplate. The
-        # attacker's own doc "1" is the negative control (bob's marker must be absent there).
+        # attacker's own doc "1" is the negative control (bob's marker must be absent there). Wave 3.1
+        # round-2: the no-credential baseline is the RAW send (no session cookie) — /document 401s a
+        # logged-out request, so the discriminator is ABSENT from it, PROVING the content is
+        # authorization-gated (not public/reflected) and the attacker's cross-read WAS unauthorized.
         IdorCheck(id="idor-doc", ref_param="docid", victim_ref="2", victim_send=victim_send,
-                  victim_discriminator="bob-confidential-medical-record-X9Y8Z7", control_ref="1"),
+                  victim_discriminator="bob-confidential-medical-record-X9Y8Z7", control_ref="1",
+                  nocred_send=_raw_send),
     )
     return WebScanCampaign(
         send, checks=checks, insertion_kinds=insertion_kinds, enable_oob=False,

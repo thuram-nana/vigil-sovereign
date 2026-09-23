@@ -573,10 +573,8 @@ class IdorCheck:
     can HONESTLY BUT WRONGLY believe a footer/banner/tenant string is victim-unique
     when it is really global boilerplate present in EVERY record — including the
     attacker's own. That mistake reconstructs the exact reverted false positive.
-    So a FACT here requires BOTH the discriminator AND a MANDATORY negative control
-    (``control_ref``, an attacker-OWNED reference): the marker must be ABSENT from
-    the attacker's own legitimate object, which is what actually PROVES the marker
-    is victim-specific rather than a global string. The oracle fires ONLY when:
+    So a FACT here requires the discriminator PLUS three mandatory guards. The oracle
+    fires ONLY when:
 
       * the attacker got 200, AND
       * the discriminator genuinely IS in the victim's AUTHORITATIVE body (proving
@@ -585,15 +583,31 @@ class IdorCheck:
         unauthorized read), AND
       * the discriminator is ABSENT from the attacker's OWN object (``control_ref``)
         — the differential that proves the marker is victim-SPECIFIC, not global
-        boilerplate the operator mistook for unique.
+        boilerplate the operator mistook for unique, AND
+      * (round-2, ref-independence) the discriminator is NOT a substring of the
+        requested ``victim_ref`` — otherwise a "discriminator" that is really the
+        object id itself reduces to pure REFLECTION: a secured app that echoes the
+        requested id in a 200 soft-deny body ("access denied for object 42") would
+        mint a false FACT with ZERO unauthorized read. A ref-derived discriminator
+        is refused, AND
+      * (round-2, authorization-gated) the discriminator is ABSENT from a
+        no-credential / logged-out baseline GET of the SAME ``victim_ref``
+        (``nocred_send``) — proving the content is AUTHORIZATION-GATED, not public
+        or reflected. If a logged-out request reaches the marker too, the read was
+        never "unauthorized"; it is public content, and must not mint.
 
-    Without a discriminator OR without ``control_ref`` the check CANNOT fire
+    Without a discriminator, without ``control_ref``, when the discriminator is
+    ref-derived, OR without a ``nocred_send`` baseline, the check CANNOT fire
     soundly, so it returns None (the class stays a rigorous LEAD, never a false
-    CLEAN and never a false FACT). 'Victim-unique' is thus ENFORCED by the control
-    differential, never accepted as a bare operator assertion. Runs only on the
-    object-reference point (``ref_param``); other points return None. ``victim_send``
-    is a send authenticated as the victim (a second AuthSession / the ceremony's
-    second identity riding the same gated executor)."""
+    CLEAN and never a false FACT). 'Victim-unique' is ENFORCED by the control
+    differential, 'not-reflected' by ref-independence, and 'authorization-gated'
+    by the logged-out baseline — never accepted as a bare operator assertion. GET-only
+    (a cross-read is a non-mutating read; a non-GET/HEAD template returns None). Runs
+    only on the object-reference point (``ref_param``); other points return None.
+    ``victim_send`` is a send authenticated as the victim (a second AuthSession / the
+    ceremony's second identity riding the same gated executor); the ``send`` passed to
+    ``probe`` is the ATTACKER identity (authenticated as a DIFFERENT user), distinct
+    from the credential-free ``nocred_send``."""
 
     id: str
     ref_param: str
@@ -601,13 +615,23 @@ class IdorCheck:
     victim_send: Send
     bug_class: str = "idor"
     # The per-identity marker that ONLY the victim's authoritative record contains. Empty ⇒ the sound
-    # check cannot fire (fail-closed to a non-firing LEAD, never the boilerplate false positive).
+    # check cannot fire (fail-closed to a non-firing LEAD, never the boilerplate false positive). Contract:
+    # a REF-INDEPENDENT victim-PRIVATE token (an account id / private email / invoice number that is NOT the
+    # requested object id), never the object reference itself — a ref-derived value is pure reflection.
     victim_discriminator: str = ""
     # MANDATORY attacker-owned reference for the near-zero-FP negative control: the discriminator MUST be
     # absent when the attacker reads their OWN object, proving the marker is victim-specific not global.
     # Empty ⇒ the FACT cannot be minted (probe returns None ⇒ a rigorous LEAD), because 'victim-unique'
     # is only PROVEN by the control differential, never by the operator's assertion.
     control_ref: str = ""
+    # MANDATORY no-credential (logged-out) baseline send for the round-2 authorization-gated proof: a
+    # same-ref GET issued with NO identity. The discriminator MUST be ABSENT from it — proving the content
+    # is authorization-gated, not public/reflected. None ⇒ baseline-less ⇒ the probe returns None (a
+    # rigorous LEAD, never a FACT), because 'unauthorized read' is only PROVEN by the logged-out denial.
+    nocred_send: Send | None = None
+
+    # Safe (non-mutating) methods a cross-read / baseline may use — a read must never mutate.
+    _READ_METHODS: ClassVar[frozenset[str]] = frozenset({"GET", "HEAD"})
 
     def probe(self, template: RequestTemplate, point: InsertionPoint, send: Send) -> FindingContext | None:
         if point.name != self.ref_param:
@@ -623,21 +647,40 @@ class IdorCheck:
             # discriminator is victim-unique rather than global boilerplate (the exact shared-boilerplate FP
             # that caused the prior IDOR/BOLA revert). Fail closed to a non-firing LEAD — never mint here.
             return None
-        victim = self.victim_send(template.render(point, self.victim_ref))
+        # ROUND-2 (v) ref-independence, config-level guard: a discriminator that is a substring of the
+        # requested victim_ref is REF-DERIVED — its "presence" in the attacker's body can be a pure echo of
+        # the requested id (a soft-deny that reflects the ref), NOT an achieved read. Fail closed to a LEAD.
+        if disc in self.victim_ref:
+            return None
+        # ROUND-2 (iv) authorization-gated, config-level guard: without a no-credential baseline we cannot
+        # PROVE the content is gated (a public/reflected body is not an unauthorized read). Fail closed.
+        nocred_send = self.nocred_send
+        if nocred_send is None:
+            return None
+        victim_req = template.render(point, self.victim_ref)
+        # GET-only: a cross-read (and its baseline) is a non-mutating read; a mutating template cannot serve
+        # as a read-confirmation, so fail closed to a LEAD rather than issue a write under this check.
+        if victim_req.method.strip().upper() not in self._READ_METHODS:
+            return None
+        victim = self.victim_send(victim_req)
         attacker = send(template.render(point, self.victim_ref))
         control = send(template.render(point, control_ref))
+        nocred = nocred_send(template.render(point, self.victim_ref))
         victim_body = str(victim.get("body", "")) if isinstance(victim, dict) else str(victim)
         attacker_body = str(attacker.get("body", "")) if isinstance(attacker, dict) else str(attacker)
         control_body = str(control.get("body", "")) if isinstance(control, dict) else str(control)
+        nocred_body = str(nocred.get("body", "")) if isinstance(nocred, dict) else str(nocred)
         attacker_status = int(attacker.get("status", 0)) if isinstance(attacker, dict) else 0
 
         evidence: dict[str, object] = {
             "attacker_status": attacker_status, "victim_body": victim_body,
-            "attacker_body": attacker_body, "attacker_own_body": control_body, "discriminator": disc,
+            "attacker_body": attacker_body, "attacker_own_body": control_body,
+            "nocred_body": nocred_body, "victim_ref": self.victim_ref, "discriminator": disc,
         }
-        # The control differential is retained in the oracle_context as three EXPLICIT clauses (not a bare
-        # bool), so offline ``verify`` re-checks presence-in-victim AND presence-in-attacker-cross-read AND
-        # absence-in-control over the retained bodies — the pure achieved-state predicate re-fires exactly.
+        # Every guard is retained in the oracle_context as an EXPLICIT clause (not a bare bool), so offline
+        # ``verify`` re-checks presence-in-victim AND presence-in-attacker-cross-read AND absence-in-control
+        # AND ref-independence AND absence-in-logged-out-baseline over the retained evidence — the pure
+        # achieved-state predicate re-fires exactly, and no false FACT survives re-verification.
         clauses: list[dict] = [
             {"eq": [{"var": "attacker_status"}, 200]},
             {"min_len": [{"var": "discriminator"}, 6]},
@@ -648,6 +691,12 @@ class IdorCheck:
             # MANDATORY negative control: the marker must NOT appear when the attacker reads their OWN object —
             # this refutes a globally-present string the operator wrongly believed was victim-unique.
             {"not": {"contains": [{"var": "attacker_own_body"}, {"var": "discriminator"}]}},
+            # ROUND-2 (v) ref-independence: the marker is NOT a substring of the requested ref — so a body
+            # that merely echoes the requested id (a reflected soft-deny) can never satisfy the read clause.
+            {"not": {"contains": [{"var": "victim_ref"}, {"var": "discriminator"}]}},
+            # ROUND-2 (iv) authorization-gated: the marker is ABSENT from the logged-out baseline of the SAME
+            # ref — proving the content is gated (not public/reflected), so the attacker's read WAS unauthorized.
+            {"not": {"contains": [{"var": "nocred_body"}, {"var": "discriminator"}]}},
         ]
         return FindingContext.from_predicate(evidence, {"all": clauses}, bug_class=self.bug_class)
 

@@ -59,10 +59,14 @@ def _cross_spec() -> CrossAccessSpec:
 
 
 def _probe(base: str, path: str):
-    # attacker = alice's session (or any identity); victim = bob's session (rides the same send + cookie)
+    # Three identities riding the SAME send: attacker = alice's authenticated session, victim = bob's
+    # authenticated session (ground truth), nocred = NO cookie (logged-out baseline that proves the read
+    # is authorization-gated, not public — round-2). /account requires auth, so the logged-out baseline is
+    # denied (403, no IBAN) while alice's cross-read reaches bob's IBAN: a genuine BOLA.
     attacker_send = _send_factory(cookie="sess=alice-sess")
     victim_send = _send_factory(cookie="sess=bob-sess")
-    cfg = AccessControlConfig(victim_send=victim_send, cross_specs=(_cross_spec(),))
+    nocred_send = _send_factory(cookie=None)
+    cfg = AccessControlConfig(victim_send=victim_send, nocred_send=nocred_send, cross_specs=(_cross_spec(),))
     (check,) = build_access_control_checks(cfg, enabled=True)
     req = HttpRequest(method="GET", url=f"{base}{path}?id={_ATTACKER_OWN_REF}")
     template = RequestTemplate(req)
