@@ -1506,10 +1506,11 @@ def session_fixation_oracle(observed: Any) -> OracleSignal:
         running the login sequence (the attacker-fixed id);
       * ``post_auth_id`` (S1) is the session-cookie value in effect AFTER the login sequence completed;
       * ``authenticated_after_login`` is the TRI-STATE re-probe of whether the VIGIL-fixed id **S0** STILL
-        reaches an AUTHENTICATED state after login (a login success marker present / a logged-out marker
-        absent): ``True`` = S0 is a live authenticated session, ``False`` = S0 is dead, ``None`` = the run had
-        NO positive authenticated-state discriminator (neither ``success_marker`` nor ``logged_out_markers``)
-        so authentication could not be decided — a bare 2xx/3xx is NOT taken as authenticated.
+        reaches an AUTHENTICATED state after login (the POSITIVE ``success_marker`` present, and no logged-out
+        status/marker overriding it): ``True`` = S0 is a live authenticated session, ``False`` = S0 is dead,
+        ``None`` = the run had NO POSITIVE authenticated-state discriminator (no ``success_marker``;
+        ``logged_out_markers`` is an ABSENCE-only discriminator that cannot PROVE auth) so authentication
+        could not be decided — a bare 2xx/3xx is NOT taken as authenticated.
 
     The oracle judges the ACHIEVED STATE, never that a cookie was merely set:
 
@@ -1557,9 +1558,9 @@ def session_fixation_oracle(observed: Any) -> OracleSignal:
             evidence="no post-authentication session id was observed — cannot adjudicate fixation (inconclusive)",
             observed=base)
 
-    # No positive authenticated-state discriminator was available (neither success_marker nor
-    # logged_out_markers), so whether the fixed id is a LIVE session could not be decided — a bare 2xx/3xx is
-    # not evidence of authentication. Refuse to mint AND refuse to clear ⇒ INCONCLUSIVE (never a false CLEAN).
+    # No POSITIVE authenticated-state discriminator was available (no success_marker; logged_out_markers can
+    # only DISPROVE auth, never prove it), so whether the fixed id is a LIVE session could not be decided — a
+    # bare 2xx/3xx is not evidence of authentication. Refuse to mint AND refuse to clear ⇒ INCONCLUSIVE.
     if authenticated is None:
         return OracleSignal(
             kind=OracleKind.ACHIEVED_STATE, fired=False, confidence=0.0, conclusive=False,

@@ -193,20 +193,24 @@ def _is_authenticated(resp: object, login: "LoginSequence") -> bool | None:
 
     TRI-STATE — the distinction is load-bearing for soundness:
 
-      * ``True``  — a positive authenticated-state discriminator confirmed a LIVE authenticated session: the
-        ``success_marker`` is present, or (when only ``logged_out_markers`` were supplied) the response is a
-        non-logged-out 2xx/3xx;
-      * ``False`` — a discriminator was available and decisively says NOT authenticated (a logged-out
-        status/marker, or the ``success_marker`` absent);
-      * ``None``  — NO positive authenticated-state discriminator was supplied (NEITHER ``success_marker`` NOR
-        ``logged_out_markers``). There is then nothing that distinguishes a live authenticated page from an
-        unauthenticated login form served at HTTP 200, so we FAIL CLOSED to "unknown" rather than scoring a
-        bare 2xx/3xx as authenticated. The caller must NOT mint a FACT off this (it degrades to INCONCLUSIVE).
+      * ``True``  — the POSITIVE discriminator ``success_marker`` is PRESENT (and no logged-out
+        status/marker overrides it): a confirmed LIVE authenticated session;
+      * ``False`` — ``success_marker`` was supplied but the response decisively says NOT authenticated (a
+        logged-out status, a ``logged_out_markers`` hit, or the ``success_marker`` simply absent);
+      * ``None``  — NO POSITIVE discriminator was supplied (``success_marker`` is ``None``, regardless of any
+        ``logged_out_markers``). Authentication then cannot be PROVED: a bare 2xx/3xx does not distinguish a
+        live authenticated page from an unauthenticated login form served at HTTP 200, so we FAIL CLOSED to
+        "unknown". The caller must NOT mint a FACT off this (it degrades to INCONCLUSIVE).
 
-    Failing closed here is the fix for the marker-absent degeneration: a bare 200 is not evidence of an
-    authenticated session, and a session-fixation FACT must rest on positive proof the fixed id is LIVE."""
-    # No positive authenticated-state discriminator at all ⇒ cannot decide ⇒ unknown (never True on a status).
-    if login.success_marker is None and not login.logged_out_markers:
+    Only ``success_marker`` (a POSITIVE marker whose PRESENCE proves the session is live) can score ``True``.
+    ``logged_out_markers`` is an ABSENCE discriminator: its PRESENCE can only DISPROVE authentication (mark
+    ``False``); its ABSENCE proves nothing, so we never treat a non-logged-out 2xx/3xx as authenticated. This
+    is the fix for the positive-by-absence degeneration: a bare 200 is not evidence of an authenticated
+    session, and a session-fixation FACT must rest on positive proof the fixed id is LIVE."""
+    # A POSITIVE discriminator (success_marker) is REQUIRED to PROVE authentication. Without it — even when
+    # logged_out_markers are supplied — nothing distinguishes a live authenticated page from an
+    # unauthenticated 200 login form, so fail closed to "unknown" (never score a bare status as authenticated).
+    if login.success_marker is None:
         return None
     if not isinstance(resp, dict):
         return None
@@ -216,11 +220,8 @@ def _is_authenticated(resp: object, login: "LoginSequence") -> bool | None:
     body = _body(resp)
     if any(m in body for m in login.logged_out_markers):
         return False
-    if login.success_marker is not None:
-        return login.success_marker in body
-    # Only logged_out_markers were supplied (no success_marker): a non-logged-out 2xx/3xx is
-    # positive-by-absence evidence the id reached an authenticated state.
-    return 200 <= status < 400
+    # success_marker PRESENT (and no logged-out signal) ⇒ authenticated; ABSENT ⇒ decisively not.
+    return login.success_marker in body
 
 
 def confirm_session_fixation(
@@ -246,9 +247,11 @@ def confirm_session_fixation(
     the cookie VALUE at login yet leave the pre-auth-fixed id S0 still valid — a REAL fixation a value check
     would miss. Probing S0 yields ``False`` for a genuinely-defended rotate (S0 is dead → a channel-confirmed
     CLEAN) and ``True`` for a value-rotation-but-S0-valid app (the oracle refuses to CLEAN that — never a
-    false clean). A positive authenticated-state discriminator (``success_marker`` or ``logged_out_markers``)
-    is REQUIRED to mint: absent it the S0 probe is ``None`` and the oracle returns INCONCLUSIVE, never a FACT
-    and never a CLEAN. Returns ``None`` only when no channel was established (a non-dict login response);
+    false clean). A POSITIVE authenticated-state discriminator (``success_marker`` — whose PRESENCE proves the
+    session is live; ``logged_out_markers`` is an ABSENCE-only discriminator that can DISPROVE but never
+    prove auth) is REQUIRED to mint: absent a ``success_marker`` the S0 probe is ``None`` and the oracle
+    returns INCONCLUSIVE, never a FACT and never a CLEAN. Returns ``None`` only when no channel was
+    established (a non-dict login response);
     every other outcome is adjudicated by the oracle. All traffic rides the injected ``send`` (the
     scope/charter/kill-switch-gated executor); nothing here weakens the boundary."""
     s0 = sentinel_id or mint_session_sentinel()
