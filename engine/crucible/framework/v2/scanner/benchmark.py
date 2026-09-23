@@ -120,10 +120,16 @@ GROUND_TRUTH = GroundTruth(
 # The deliberately-vulnerable benchmark app (loopback only)
 # ---------------------------------------------------------------------------
 
-# Two tenants keyed by an opaque session cookie. No login flow is needed — the
-# cookie *is* the identity — which keeps the harness deterministic. The IDOR
-# endpoint deliberately omits the owner check.
-_SESSIONS = {"crucible-alice": "alice", "crucible-bob": "bob"}
+# Three identities keyed by an opaque session cookie. No login flow is needed — the
+# cookie *is* the identity — which keeps the harness deterministic. /document has a
+# BROKEN object-level authz (a same-TENANT peer reads another user's doc) but WITHHOLDS
+# the private body on a CROSS-tenant read — so alice (acme) cross-reads bob's (acme) doc
+# and reaches his secret (the BOLA), while carol (globex) gets a SAME-SHAPE 200 render of
+# the same object with the secret withheld: the round-5 same-ref unauthorized-authenticated
+# baseline that proves the secret is genuinely access-gated, not a reflected per-object token.
+_SESSIONS = {"crucible-alice": "alice", "crucible-bob": "bob", "crucible-carol": "carol"}
+# user -> tenant. alice+bob share a tenant (the intra-tenant BOLA); carol is in another.
+_TENANTS = {"alice": "acme", "bob": "acme", "carol": "globex"}
 _DOCS = {
     "1": ("alice", "alice-private-tax-return-A1B2C3"),
     "2": ("bob", "bob-confidential-medical-record-X9Y8Z7"),
@@ -201,9 +207,17 @@ class _BenchmarkApp(BaseHTTPRequestHandler):
             return
 
         if sp.path == "/document":
-            # VULN idor: returns the requested object with NO owner check, so a
-            # logged-in tenant can read another tenant's document. Unknown ids
-            # return a constant, so the SQLi/XSS probes see no differential.
+            # VULN idor/bola: authentication is REQUIRED (a logged-out request is 401'd, so the
+            # content is authorization-gated), and object-level authz is BROKEN — a caller may read
+            # ANY doc IN THEIR OWN TENANT (it should be own-doc-only), so a same-tenant peer (alice)
+            # cross-reads bob's doc and reaches its PRIVATE secret (the achieved BOLA). A CROSS-tenant
+            # read still RENDERS the object (same shape) but WITHHOLDS the private body — so carol (a
+            # different tenant) is the round-5 SAME-SHAPE unauthorized-authenticated baseline: a
+            # substantive 2xx of the same object that lacks bob's secret, proving the secret is genuinely
+            # access-gated PRIVATE data, not a reflected per-object token (a reflected token would appear
+            # in carol's same-shape render too). A DENIAL (403) here would be a VACUOUS clause-(c) control
+            # — it never renders the object — so the app returns the redacted object, not a 403.
+            # Unknown ids return a constant, so the SQLi/XSS probes see no differential.
             user = self._user()
             if user is None:
                 self._reply(401, b"authentication required")
@@ -213,6 +227,10 @@ class _BenchmarkApp(BaseHTTPRequestHandler):
                 self._reply(404, b"no such document")
                 return
             owner, secret = doc
+            if _TENANTS.get(user) != _TENANTS.get(owner):
+                # cross-tenant: same-shape render, private body withheld (the round-5 clause-(c) baseline)
+                self._reply(200, f"document owner={owner} body=(restricted to owner tenant)".encode())
+                return
             self._reply(200, f"document owner={owner} body={secret}".encode())
             return
 
@@ -382,10 +400,30 @@ def _default_campaign(send: Send, *, insertion_kinds: tuple[InsertionKind, ...])
     second identity (the victim's send) which the default check set cannot carry
     on its own, so the harness supplies it here."""
     victim_send = _with_cookie(_raw_send, "session=crucible-bob")
+    # Wave 3.1 round-5: carol is a THIRD, authenticated-but-UNAUTHORIZED identity (a different tenant) whose
+    # cross-tenant read of bob's doc is a SAME-SHAPE substantive 200 that RENDERS the object but WITHHOLDS the
+    # private body — the round-5 same-ref unauthorized-authenticated baseline. Because carol's same-shape render
+    # lacks bob's private discriminator (and a reflected per-object token WOULD appear in it), clause (c) holds
+    # and the genuine intra-tenant BOLA still mints. (A 403 denial here would be a vacuous clause-(c) control —
+    # it never renders the object — and is no longer accepted; see checks.py IdorCheck round-5.)
+    unauth_send = _with_cookie(_raw_send, "session=crucible-carol")
     checks = (
         BOOLEAN_SQLI,
         REFLECTED_XSS,
-        IdorCheck(id="idor-doc", ref_param="docid", victim_ref="2", victim_send=victim_send),
+        # Wave 3.1 soundness: the victim-UNIQUE discriminator (bob's private record content) is what the
+        # attacker's cross-read must reach — never a whole-body containment on shared boilerplate. The
+        # attacker's own doc "1" is the negative control (bob's marker must be absent there, and that
+        # control read is a SUBSTANTIVE 200 so the not-contains is not vacuous — round-3). The no-credential
+        # baseline is the RAW send (no session cookie) — /document 401s a logged-out request (a genuine
+        # authorization-denial, round-2). The round-5 unauthorized-authenticated baseline is carol (a
+        # different-tenant authenticated principal) whose cross-tenant read is a SAME-SHAPE substantive 200
+        # that renders the object with the private body withheld: the discriminator's ABSENCE from that
+        # same-shape render (and from the logged-out baseline) PROVES the content is genuinely access-gated
+        # PRIVATE data (not public, not a reflected per-object token — which would appear in carol's render
+        # too), while alice's same-tenant cross-read reaches bob's secret.
+        IdorCheck(id="idor-doc", ref_param="docid", victim_ref="2", victim_send=victim_send,
+                  victim_discriminator="bob-confidential-medical-record-X9Y8Z7", control_ref="1",
+                  nocred_send=_raw_send, unauth_send=unauth_send),
     )
     return WebScanCampaign(
         send, checks=checks, insertion_kinds=insertion_kinds, enable_oob=False,

@@ -119,6 +119,15 @@ def main(argv: list[str]) -> int:
                         help="A header that authenticates the VICTIM identity (the ground truth a "
                              "cross-read is compared against), e.g. 'Cookie: session=BOB'. Repeatable; "
                              "replaces the attacker's same-named header on the victim probe.")
+    parser.add_argument("--ac-unauth-header", action="append", default=None, metavar="NAME: VALUE",
+                        help="A header that authenticates a THIRD, UNAUTHORIZED principal (a second "
+                             "attacker-controlled account that also lacks access to the victim's object), "
+                             "e.g. 'Cookie: session=CAROL'. Repeatable. This is the round-5 same-ref "
+                             "unauthorized-authenticated baseline: a cross-read mints a FACT only when the "
+                             "victim's private marker is ABSENT from this principal's SUBSTANTIVE SAME-SHAPE "
+                             "read of the same ref (a rendered 2xx, not a 401/403 denial — a reflected "
+                             "per-object token appears in a same-shape render too, so it cannot mint). "
+                             "Without it, or with a denial baseline, the pack is LEAD-only.")
     parser.add_argument("--bandit-file", default=None,
                         help="Persist/warm-start the self-learning check-ordering bandit here.")
     parser.add_argument("--bandit-context", default="default",
@@ -158,6 +167,7 @@ def main(argv: list[str]) -> int:
         from .access_control import config_from_cli
         access_control_config = config_from_cli(
             loopback_send, args.ac_victim_header or (), args.ac_ref or (),
+            unauth_headers=args.ac_unauth_header or (),
             on_warn=lambda m: print(f"warning: {m}"))
         if access_control_config is None:
             print("note: --access-control set but no valid --ac-ref supplied; the access-control "

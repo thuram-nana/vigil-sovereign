@@ -1524,6 +1524,16 @@ def _redrive_branch_for(bug_class: str) -> "Optional[str]":
         # channel / browserless / a SameSite-protected cookie keeps the claim a LEAD (the weaker `csrf`
         # posture class carries the token-not-enforced residual).
         "csrf_achieved": "csrf_achieved.achieved_state",
+        # Wave 3.1 — two-identity access-control achieved-state re-drive (integration/vigil_integration/
+        # live/access_control_redrive.py). idor/bola/bfla are GET-only cross-reads that fire ONLY when the
+        # attacker reaches the victim's owner-signed UNIQUE discriminator (never a whole-body containment);
+        # mass_assignment is a persisted state change whose WRITE rides the 0.3 per-action approval and whose
+        # readback is the authoritative owner view. All adjudicated by the ACHIEVED_STATE predicate oracle.
+        # A non-fire / no channel / no discriminator keeps the claim a LEAD/INCONCLUSIVE (fail-closed).
+        "idor": "idor.cross_identity_read",
+        "bola": "bola.cross_identity_read",
+        "bfla": "bfla.cross_identity_read",
+        "mass_assignment": "mass_assignment.persisted_state_change",
     }
     branch = mapping.get(normalize_bug_class(bug_class))
     return branch if branch in branch_ids() else None
