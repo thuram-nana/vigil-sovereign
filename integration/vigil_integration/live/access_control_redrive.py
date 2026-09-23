@@ -11,14 +11,18 @@ offline-re-verifiable FACT — to the two-identity ceremony:
   * ``idor`` / ``bola`` / ``bfla`` — the two-identity CROSS-READ, adjudicated over THREE distinct identities on
     the SAME gated send (swapped headers): the VICTIM/owner (owner-signed victim headers), the ATTACKER (its own
     ``attacker_headers`` — a DIFFERENT authenticated user), and NOBODY (the anonymous base send). The runner
-    requests the victim's object as the attacker and fires ONLY when ALL hold: the attacker's cross-read reaches
-    a victim-UNIQUE discriminator present in the victim's AUTHORITATIVE body; that discriminator is ABSENT from
-    the attacker's OWN control object; it is REF-INDEPENDENT (never a substring of the requested ref, so a
-    reflected soft-deny cannot mint); and it is ABSENT from a no-credential / logged-out baseline of the SAME
-    ref (proving the content is authorization-GATED, not public/reflected). This is a GET-only, non-destructive
-    confirmation — NO per-action approval is needed. The reverted whole-body ``contains`` is NOT used: a
-    shared-boilerplate page, a 403, an absent/ref-derived discriminator, a public body, or a missing attacker
-    identity all keep it a LEAD, never a FACT.
+    requests the victim's object as the attacker and fires ONLY when ALL hold: the attacker's cross-read is a
+    SUBSTANTIVE SUCCESS (round-3 — a real 2xx body, not empty/error/soft-deny) that reaches a victim-UNIQUE
+    discriminator present in the victim's AUTHORITATIVE (also substantive) body; that discriminator is ABSENT
+    from the attacker's OWN control object AND that control read is ITSELF a substantive success (so a
+    404/403/empty control cannot vacuously satisfy the not-contains); it is REF-INDEPENDENT (never a substring
+    of the requested ref, so a reflected soft-deny cannot mint); and it is ABSENT from a no-credential /
+    logged-out baseline of the SAME ref that is a VALID gating proof — a substantive 2xx that lacks it OR a
+    genuine 401/403 denial (a bare 5xx/empty baseline is vacuous and refused) — proving the content is
+    authorization-GATED, not public/reflected. This is a GET-only, non-destructive confirmation — NO per-action
+    approval is needed. The reverted whole-body ``contains`` is NOT used: a shared-boilerplate page, a 403, an
+    absent/ref-derived discriminator, a public body, a NON-substantive (empty/errored/denied) victim/attacker/
+    control read, or a missing attacker identity all keep it a LEAD, never a FACT.
   * ``mass_assignment`` — the persisted state change. The WRITE (a non-GET mutation injecting a privileged
     field) fires ONLY through the 0.3 owner-signed per-action approval, supplied as ``mutating_send``; the
     before/after readback is the AUTHORITATIVE OWNER view (a gated GET), never the attacker's write echo. Absent
@@ -95,10 +99,13 @@ def access_control_redrive(
     """Re-drive the two-identity access-control ceremony against ``url`` and mint a signed FACT ONLY when the
     achieved-state predicate oracle confirms CAUSATION over VIGIL's OWN live capture:
 
-      * a cross-read (GET-only, no approval) fires only when the ATTACKER identity reaches the victim's
-        REF-INDEPENDENT UNIQUE discriminator that is ABSENT from both the attacker's own control object AND a
-        no-credential / logged-out baseline of the same ref; a shared-boilerplate page / 403 / absent or
-        ref-derived discriminator / public (logged-out-readable) body / missing attacker identity does NOT fire;
+      * a cross-read (GET-only, no approval) fires only when the ATTACKER identity's SUBSTANTIVE cross-read
+        reaches the victim's REF-INDEPENDENT UNIQUE discriminator (present in the victim's substantive record)
+        that is ABSENT from the attacker's own SUBSTANTIVE control object AND from a no-credential / logged-out
+        baseline of the same ref that is a valid gating proof (substantive-2xx-or-401/403); a shared-boilerplate
+        page / 403 / absent or ref-derived discriminator / public (logged-out-readable) body / a non-substantive
+        (empty/errored/denied) victim/attacker/control read / a vacuous 5xx baseline / missing attacker identity
+        does NOT fire;
       * a mass-assignment fires only when a privileged field PERSISTED into the AUTHORITATIVE OWNER readback
         (before absent, after present), and its WRITE happens ONLY through the 0.3-gated ``mutating_send``.
 

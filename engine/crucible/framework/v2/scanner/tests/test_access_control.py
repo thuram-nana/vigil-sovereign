@@ -507,3 +507,168 @@ def test_baseline_less_config_is_a_lead_never_a_fact() -> None:
     (check,) = build_access_control_checks(cfg, enabled=True)
     template, point = _obj_template()
     assert check.probe(template, point, attacker_send) is None
+
+
+# --- ROUND-3: VACUOUS PREDICATE SATISFACTION over a non-substantive control / baseline ------------
+#
+# The red-pen's round-3 gap: the not-contains(attacker_own_body, disc) and not-contains(nocred_body, disc)
+# clauses passed TRIVIALLY when the control / baseline read was a non-substantive body (404 / 403 / empty /
+# bare-error). A GLOBAL/boilerplate discriminator then minted a false 'achieved unauthorized cross-tenant
+# read'. A negative control proves 'absent' ONLY when that read is itself a SUBSTANTIVE SUCCESS; the
+# logged-out baseline is valid ONLY as a substantive 2xx OR a genuine (bodied) 401/403 denial.
+
+
+def test_control_ref_404_makes_a_global_marker_a_lead_not_a_fact() -> None:
+    # (a) round-3. The discriminator is GLOBAL boilerplate — present in EVERY record, INCLUDING the attacker's
+    # own. The attacker's cross-read of the victim ref reaches it (200), but the attacker's OWN control object
+    # (control_ref) 404s. The round-2 predicate would MINT: not-contains(attacker_own_body="no such object",
+    # global) passes VACUOUSLY (a 404 body lacks the marker), so the global string looks victim-unique. The
+    # control read is NON-SUBSTANTIVE, so its absent marker proves nothing => probe() fails closed to a LEAD.
+    global_marker = "GLOBAL-TENANT-BANNER-v3-present-in-every-record"
+
+    def victim_send(req: HttpRequest) -> dict:
+        return {"status": 200, "body": f"<main>bob account</main><footer>{global_marker}</footer>"}
+
+    def attacker_send(req: HttpRequest) -> dict:
+        rid = _requested_id(req)
+        if rid == _VICTIM_REF:
+            # cross-read of bob's object: 200 carrying the (global, mistaken-for-unique) marker
+            return {"status": 200, "body": f"<main>bob account</main><footer>{global_marker}</footer>"}
+        # the attacker's OWN control object 404s — a non-substantive read whose absent marker is VACUOUS
+        return {"status": 404, "body": "no such object"}
+
+    def nocred_send(req: HttpRequest) -> dict:
+        return {"status": 403, "body": "forbidden — login required"}
+
+    cfg = AccessControlConfig(
+        victim_send=victim_send, nocred_send=nocred_send,
+        cross_specs=(CrossAccessSpec(bug_class="idor", ref_param=_REF_PARAM, victim_ref=_VICTIM_REF,
+                                     victim_discriminator=global_marker, control_ref=_ATTACKER_OWN_REF),),
+    )
+    (check,) = build_access_control_checks(cfg, enabled=True)
+    template, point = _obj_template()
+    # A 404 control read cannot prove the marker victim-specific => fail closed to a LEAD, never mint.
+    assert check.probe(template, point, attacker_send) is None
+
+
+def test_control_ref_empty_body_is_a_lead_not_a_fact() -> None:
+    # (a') round-3, the empty-body variant: the attacker's own control read returns 200 but an EMPTY body.
+    # An empty control body trivially lacks any marker, so its not-contains is vacuous — non-substantive
+    # (below the 16-char floor) => probe() fails closed to a LEAD even though the cross-read reached the marker.
+    def victim_send(req: HttpRequest) -> dict:
+        return {"status": 200, "body": _VICTIM_SECRET}
+
+    def attacker_send(req: HttpRequest) -> dict:
+        if _requested_id(req) == _VICTIM_REF:
+            return {"status": 200, "body": _VICTIM_SECRET}
+        return {"status": 200, "body": "   "}   # empty/whitespace control read — non-substantive
+
+    def nocred_send(req: HttpRequest) -> dict:
+        return {"status": 403, "body": "forbidden — login required"}
+
+    cfg = AccessControlConfig(
+        victim_send=victim_send, nocred_send=nocred_send,
+        cross_specs=(CrossAccessSpec(bug_class="idor", ref_param=_REF_PARAM, victim_ref=_VICTIM_REF,
+                                     victim_discriminator=_VICTIM_SECRET, control_ref=_ATTACKER_OWN_REF),),
+    )
+    (check,) = build_access_control_checks(cfg, enabled=True)
+    template, point = _obj_template()
+    assert check.probe(template, point, attacker_send) is None
+
+
+def test_logged_out_baseline_bare_error_or_empty_is_a_lead_not_a_fact() -> None:
+    # (b) round-3. A genuinely victim-UNIQUE discriminator, reached by the attacker, absent from a SUBSTANTIVE
+    # control — every discriminator-specificity clause holds. But the logged-out baseline is a BARE error
+    # (5xx / empty / body-less 403 / 404). not-contains(nocred_body, disc) then passes VACUOUSLY, so the
+    # round-2 predicate would treat the content as authorization-gated when the baseline actually PROVED
+    # NOTHING (the content could be public). Each bare baseline must fail closed to a LEAD, never mint a FACT.
+    def victim_send(req: HttpRequest) -> dict:
+        return {"status": 200, "body": _VICTIM_SECRET}
+
+    def attacker_send(req: HttpRequest) -> dict:
+        rid = _requested_id(req)
+        return {"status": 200, "body": _VICTIM_SECRET if rid == _VICTIM_REF else "alice's own object 1"}
+
+    bare_baselines = (
+        {"status": 500, "body": ""},                       # 5xx bare error
+        {"status": 502, "body": "Bad Gateway"},            # 5xx error (not an auth denial)
+        {"status": 200, "body": ""},                       # empty 200 — not a substantive success
+        {"status": 403, "body": ""},                       # body-less 403 — a bare, vacuous denial
+        {"status": 0, "body": ""},                         # network failure — no response at all
+        {"status": 404, "body": "no such object"},         # 404 — not an authorization denial
+    )
+    for baseline in bare_baselines:
+        def nocred_send(req: HttpRequest, _b=baseline) -> dict:
+            return dict(_b)
+
+        cfg = AccessControlConfig(
+            victim_send=victim_send, nocred_send=nocred_send,
+            cross_specs=(CrossAccessSpec(bug_class="idor", ref_param=_REF_PARAM, victim_ref=_VICTIM_REF,
+                                         victim_discriminator=_VICTIM_SECRET, control_ref=_ATTACKER_OWN_REF),),
+        )
+        (check,) = build_access_control_checks(cfg, enabled=True)
+        template, point = _obj_template()
+        assert check.probe(template, point, attacker_send) is None, f"bare baseline {baseline} minted a FACT"
+
+
+def test_genuine_401_denial_with_a_real_body_still_confirms() -> None:
+    # (b, positive control): a GENUINE 401/403 authorization denial that CARRIES a real deny body IS a valid
+    # gating proof (a logged-out request is refused), so a substantive victim/attacker/control read still
+    # mints the FACT — round-3 must not over-reject genuine denials (the benchmark /account 403 + /document 401).
+    attacker_send, victim_send, _ = _make_cross_target(vulnerable=True)
+
+    def nocred_send(req: HttpRequest) -> dict:
+        return {"status": 401, "body": "authentication required to view this record"}
+
+    cfg = AccessControlConfig(
+        victim_send=victim_send, nocred_send=nocred_send,
+        cross_specs=(CrossAccessSpec(bug_class="idor", ref_param=_REF_PARAM, victim_ref=_VICTIM_REF,
+                                     victim_discriminator=_VICTIM_SECRET, control_ref=_ATTACKER_OWN_REF),),
+    )
+    (check,) = build_access_control_checks(cfg, enabled=True)
+    template, point = _obj_template()
+    ctx = check.probe(template, point, attacker_send)
+    assert ctx is not None
+    confirmed = confirm_finding({"bug_class": "idor", "title": "", "severity": "High"}, ctx)
+    assert confirmed is not None and confirmed.confirmed_by == OracleKind.ACHIEVED_STATE
+
+
+def test_durable_context_with_a_vacuous_control_does_not_reverify_offline() -> None:
+    # (c) THE DURABLE / OFFLINE path. A genuine confirmed context re-fires offline; but a durable
+    # oracle_context DEGRADED to the vacuous case (a non-substantive control / a bare-error baseline) must
+    # NOT re-fire under the pure predicate oracle. This proves the substantiveness floor lives in the RETAINED
+    # PREDICATE (re-derived offline over the retained bodies+statuses), not only in the live probe — so no
+    # false FACT is constructible even from a durable context that re-runs offline.
+    from framework.v2.verify.oracles import predicate_oracle
+
+    attacker_send, victim_send, nocred_send = _make_cross_target(vulnerable=True)
+    cfg = AccessControlConfig(
+        victim_send=victim_send, nocred_send=nocred_send,
+        cross_specs=(CrossAccessSpec(bug_class="idor", ref_param=_REF_PARAM, victim_ref=_VICTIM_REF,
+                                     victim_discriminator=_VICTIM_SECRET, control_ref=_ATTACKER_OWN_REF),),
+    )
+    (check,) = build_access_control_checks(cfg, enabled=True)
+    template, point = _obj_template()
+    ctx = check.probe(template, point, attacker_send)
+    assert ctx is not None
+    context = ctx.to_verifier_context()
+    ev, pred = context["observed_evidence"], context["predicate"]
+
+    # baseline: the genuine, fully-substantive context re-fires offline
+    assert predicate_oracle(ev, pred).fired is True
+
+    # degrade the retained CONTROL to a 404 that vacuously lacks the marker -> offline predicate must NOT fire
+    vac_control = {**ev, "attacker_own_status": 404, "attacker_own_body": "no such object"}
+    assert predicate_oracle(vac_control, pred).fired is False
+
+    # degrade the retained control to an EMPTY 200 body -> non-substantive -> offline predicate must NOT fire
+    empty_control = {**ev, "attacker_own_status": 200, "attacker_own_body": ""}
+    assert predicate_oracle(empty_control, pred).fired is False
+
+    # degrade the retained BASELINE to a 5xx bare error -> not a valid gating proof -> must NOT fire
+    bare_baseline = {**ev, "nocred_status": 500, "nocred_body": ""}
+    assert predicate_oracle(bare_baseline, pred).fired is False
+
+    # degrade the retained ATTACKER cross-read to a non-substantive soft-deny 200 -> must NOT fire
+    soft_deny = {**ev, "attacker_status": 200, "attacker_body": "access denied for this object"}
+    assert predicate_oracle(soft_deny, pred).fired is False

@@ -54,6 +54,135 @@ class Check(Protocol):
     ) -> FindingContext | None: ...
 
 
+# ---------------------------------------------------------------------------
+# Wave 3.1 — SHARED SUBSTANTIVENESS GUARDS (against VACUOUS PREDICATE SATISFACTION)
+# ---------------------------------------------------------------------------
+#
+# A contains / not-contains predicate is EVIDENCE only over a SUBSTANTIVE body. An
+# empty / errored / denied / 404 response makes a ``not-contains`` pass TRIVIALLY —
+# the marker is "absent" only because the body carries nothing, not because the app
+# withheld it. Absence in such a body proves NOTHING, so it can neither satisfy a
+# fire predicate NOR serve as a negative control; the class must fail CLOSED to a
+# rigorous LEAD, never mint a FACT off a vacuous read. These two helpers make every
+# fire-predicate and every negative-control SUBSTANTIVE. (A later commit DRYs them
+# into one shared module; the names and semantics here are the contract — keep them
+# identical across the Wave-3 access-control slices.)
+
+# Multi-word denial / error phrases that mark a 2xx body as a SOFT-deny or soft-error
+# rather than a real record read. A substantive read of a private record never
+# consists of one of these. High precision on purpose: over-rejecting only downgrades
+# a would-be FACT to an honest LEAD — it can NEVER mint a false FACT — so the safe
+# direction is to treat an ambiguous body as non-substantive. Single ambiguous words
+# ("error", "forbidden", "unauthorized") are deliberately EXCLUDED so legitimate
+# record content that merely mentions them stays substantive; only unmistakable
+# denial/error PHRASES count.
+_BARE_ERROR_SIGNATURES: tuple[str, ...] = (
+    "access denied", "access is denied", "permission denied", "not authorized",
+    "you are not authorized", "you do not have permission", "insufficient privileges",
+    "insufficient permission", "authentication required", "authentication failed",
+    "must be logged in", "please log in", "please login", "login required",
+    "not logged in", "internal server error", "service unavailable",
+)
+
+# A body shorter (stripped) than this carries no record content to speak of — an
+# empty / whitespace / one-word body cannot be a substantive success nor prove absence.
+_SUBSTANTIVE_MIN_LEN: int = 16
+
+# A logged-out baseline is a GENUINE authorization denial (which DOES prove the content
+# is gated) at these statuses — as opposed to a bare error (5xx / empty / network / 404)
+# whose absent marker is vacuous. 401/403 are the honest "you must authenticate / you
+# are forbidden" signals; a 404 is treated as non-proof (it can be a transient miss).
+_AUTHORIZATION_DENIAL_STATUSES: tuple[int, ...] = (401, 403)
+
+
+def is_substantive_success(status: object, body: object) -> bool:
+    """True iff a response can serve as EITHER a fire body OR a negative control: a real
+    2xx read with actual content, not an error / deny / empty page.
+
+    Semantics (shared across the Wave-3 access-control slices): ``status`` in ``[200, 300)``
+    AND the stripped body is at least :data:`_SUBSTANTIVE_MIN_LEN` chars AND the body is not a
+    bare error / deny signature. A body that FAILS this cannot satisfy a fire predicate NOR
+    prove ``absent`` for a negative control — absence in an errored / empty / denied body is
+    VACUOUS, so the class fails closed to a LEAD."""
+    try:
+        s = int(status)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return False
+    if not (200 <= s < 300):
+        return False
+    stripped = str(body or "").strip()
+    if len(stripped) < _SUBSTANTIVE_MIN_LEN:
+        return False
+    low = stripped.lower()
+    return not any(sig in low for sig in _BARE_ERROR_SIGNATURES)
+
+
+def valid_discriminator(marker: object) -> bool:
+    """True iff ``marker`` is usable as a per-identity discriminator: present, non-whitespace,
+    and long enough that its presence in a body is not incidental.
+
+    Semantics (shared): ``marker`` is not None AND ``len(marker.strip()) >= 3`` AND not pure
+    whitespace. (IDOR additionally enforces REF-INDEPENDENCE — the marker must not be a
+    substring of the requested ref — as a separate guard, plus a stricter ``>= 6`` length floor
+    in the predicate. Where a per-probe nonce exists a caller must also refuse a marker that
+    overlaps that nonce; IDOR's ``victim_ref`` plays that role.)"""
+    if marker is None:
+        return False
+    return len(str(marker).strip()) >= 3
+
+
+def _substantive_success_clauses(status_var: str, body_var: str) -> list[dict]:
+    """DSL clauses (AND-composed) that RE-DERIVE :func:`is_substantive_success` over the RETAINED
+    raw evidence, so offline predicate re-verification enforces the SAME floor the live probe did —
+    a durable ``oracle_context`` built from a non-substantive body can never re-fire. The predicate
+    DSL's ``min_len`` measures the stored body (which the probe stores STRIPPED), so the length floor
+    matches the Python helper; each denial phrase is an ``icontains`` refusal."""
+    clauses: list[dict] = [
+        {"ge": [{"var": status_var}, 200]},
+        {"not": {"ge": [{"var": status_var}, 300]}},
+        {"min_len": [{"var": body_var}, _SUBSTANTIVE_MIN_LEN]},
+    ]
+    clauses += [{"not": {"icontains": [{"var": body_var}, sig]}} for sig in _BARE_ERROR_SIGNATURES]
+    return clauses
+
+
+# A genuine authorization denial still has to SAY something (a real deny message) to count — a 401/403
+# with an EMPTY / whitespace body is a bare, vacuous baseline whose absent marker proves nothing. This
+# floor is deliberately BELOW a real deny message ("please log in" = 13 chars) so genuine denials pass.
+_DENIAL_BODY_MIN_LEN: int = 3
+
+
+def _nocred_baseline_valid(status: object, body: object) -> bool:
+    """True iff a no-credential / logged-out baseline read is a VALID proof that the content is
+    authorization-gated (not public) — its ``not-contains(marker)`` is meaningful.
+
+    A baseline proves gating when it is EITHER a substantive success (a 2xx body that simply lacks
+    the marker — the record is gated at the record level) OR a GENUINE authorization DENIAL (401 / 403
+    that CARRIES a real deny body — access requires credentials). A bare / empty error (5xx / empty /
+    whitespace / network failure / 404, or a body-less 401/403) proves NOTHING: its absent marker is
+    vacuous, so the baseline is INVALID and the class fails closed to a LEAD. (This is why the
+    benchmark's 401/403 logged-out baseline still permits a FACT while a 5xx / empty baseline does not.)"""
+    try:
+        s = int(status)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return False
+    if is_substantive_success(status, body):
+        return True
+    return s in _AUTHORIZATION_DENIAL_STATUSES and len(str(body or "").strip()) >= _DENIAL_BODY_MIN_LEN
+
+
+def _nocred_baseline_valid_clause() -> dict:
+    """The DSL twin of :func:`_nocred_baseline_valid` (re-derived offline over the retained baseline):
+    a substantive success OR a 401/403 authorization denial carrying a real (non-empty) deny body."""
+    return {"any": [
+        {"all": _substantive_success_clauses("nocred_status", "nocred_body")},
+        {"all": [
+            {"in": [{"var": "nocred_status"}, list(_AUTHORIZATION_DENIAL_STATUSES)]},
+            {"min_len": [{"var": "nocred_body"}, _DENIAL_BODY_MIN_LEN]},
+        ]},
+    ]}
+
+
 @dataclass(frozen=True)
 class DifferentialCheck:
     """Boolean/logic differential: send a benign value and a probe value into the
@@ -573,17 +702,26 @@ class IdorCheck:
     can HONESTLY BUT WRONGLY believe a footer/banner/tenant string is victim-unique
     when it is really global boilerplate present in EVERY record — including the
     attacker's own. That mistake reconstructs the exact reverted false positive.
-    So a FACT here requires the discriminator PLUS three mandatory guards. The oracle
+    So a FACT here requires the discriminator PLUS the mandatory guards. The oracle
     fires ONLY when:
 
-      * the attacker got 200, AND
-      * the discriminator genuinely IS in the victim's AUTHORITATIVE body (proving
-        the operator handed a real per-identity marker, not a typo), AND
+      * (round-3, substantiveness) the attacker's cross-read is a SUBSTANTIVE SUCCESS
+        — a 2xx body with real content, not an empty / errored / soft-deny page —
+        because a ``contains`` / ``not-contains`` over a non-substantive body is
+        VACUOUS (an absent marker proves nothing when the body carries nothing). The
+        old ``attacker_status == 200`` floor is replaced by ``is_substantive_success``,
+        AND
+      * the discriminator genuinely IS in the victim's AUTHORITATIVE body — and that
+        victim read is ITSELF a substantive success (proving the operator handed a real
+        per-identity marker present in a real record, not a typo echoed in an error), AND
       * the attacker's cross-read REACHED that same discriminator (the achieved
         unauthorized read), AND
       * the discriminator is ABSENT from the attacker's OWN object (``control_ref``)
-        — the differential that proves the marker is victim-SPECIFIC, not global
-        boilerplate the operator mistook for unique, AND
+        AND that control read is a SUBSTANTIVE SUCCESS — the differential proves the
+        marker is victim-SPECIFIC only when the attacker's own object was actually READ.
+        If the control 404s / 403s / is empty, its absent marker is VACUOUS (a global
+        boilerplate string would pass the not-contains for free), so a non-substantive
+        control fails CLOSED to a LEAD — never a FACT (round-3), AND
       * (round-2, ref-independence) the discriminator is NOT a substring of the
         requested ``victim_ref`` — otherwise a "discriminator" that is really the
         object id itself reduces to pure REFLECTION: a secured app that echoes the
@@ -592,16 +730,23 @@ class IdorCheck:
         is refused, AND
       * (round-2, authorization-gated) the discriminator is ABSENT from a
         no-credential / logged-out baseline GET of the SAME ``victim_ref``
-        (``nocred_send``) — proving the content is AUTHORIZATION-GATED, not public
-        or reflected. If a logged-out request reaches the marker too, the read was
-        never "unauthorized"; it is public content, and must not mint.
+        (``nocred_send``) AND that baseline is a VALID gating proof — EITHER a
+        substantive 2xx that simply lacks the marker OR a genuine authorization
+        DENIAL (401 / 403). A bare error (5xx / empty / network / 404) baseline is
+        NOT proof: its absent marker is VACUOUS, so it fails CLOSED to a LEAD
+        (round-3). If a logged-out request reaches the marker, the read was never
+        "unauthorized"; it is public content, and must not mint.
 
     Without a discriminator, without ``control_ref``, when the discriminator is
-    ref-derived, OR without a ``nocred_send`` baseline, the check CANNOT fire
-    soundly, so it returns None (the class stays a rigorous LEAD, never a false
-    CLEAN and never a false FACT). 'Victim-unique' is ENFORCED by the control
-    differential, 'not-reflected' by ref-independence, and 'authorization-gated'
-    by the logged-out baseline — never accepted as a bare operator assertion. GET-only
+    ref-derived, without a ``nocred_send`` baseline, OR when ANY of the four reads
+    (victim ground-truth, attacker cross-read, attacker-own control) is not a
+    substantive success / the logged-out baseline is not a valid gating proof, the
+    check CANNOT fire soundly, so it returns None (the class stays a rigorous LEAD,
+    never a false CLEAN and never a false FACT). 'Victim-unique' is ENFORCED by the
+    substantive control differential, 'not-reflected' by ref-independence, and
+    'authorization-gated' by the (substantive-or-denied) logged-out baseline — never
+    accepted as a bare operator assertion, and never satisfied VACUOUSLY over an
+    empty / errored / denied body. GET-only
     (a cross-read is a non-mutating read; a non-GET/HEAD template returns None). Runs
     only on the object-reference point (``ref_param``); other points return None.
     ``victim_send`` is a send authenticated as the victim (a second AuthSession / the
@@ -620,14 +765,19 @@ class IdorCheck:
     # requested object id), never the object reference itself — a ref-derived value is pure reflection.
     victim_discriminator: str = ""
     # MANDATORY attacker-owned reference for the near-zero-FP negative control: the discriminator MUST be
-    # absent when the attacker reads their OWN object, proving the marker is victim-specific not global.
+    # absent when the attacker reads their OWN object, proving the marker is victim-specific not global. That
+    # control read MUST be a SUBSTANTIVE SUCCESS (round-3): a 404/403/empty control makes the not-contains
+    # VACUOUS (a global marker would pass it for free), so a non-substantive control fails closed to a LEAD.
     # Empty ⇒ the FACT cannot be minted (probe returns None ⇒ a rigorous LEAD), because 'victim-unique'
-    # is only PROVEN by the control differential, never by the operator's assertion.
+    # is only PROVEN by the SUBSTANTIVE control differential, never by the operator's assertion.
     control_ref: str = ""
     # MANDATORY no-credential (logged-out) baseline send for the round-2 authorization-gated proof: a
-    # same-ref GET issued with NO identity. The discriminator MUST be ABSENT from it — proving the content
-    # is authorization-gated, not public/reflected. None ⇒ baseline-less ⇒ the probe returns None (a
-    # rigorous LEAD, never a FACT), because 'unauthorized read' is only PROVEN by the logged-out denial.
+    # same-ref GET issued with NO identity. The discriminator MUST be ABSENT from it AND the baseline read
+    # MUST be a VALID gating proof (round-3) — EITHER a substantive 2xx that lacks the marker OR a genuine
+    # 401/403 authorization denial; a bare 5xx/empty/404 baseline is vacuous and fails closed. Absence in a
+    # valid baseline proves the content is authorization-gated, not public/reflected. None ⇒ baseline-less ⇒
+    # the probe returns None (a rigorous LEAD, never a FACT), because 'unauthorized read' is only PROVEN by
+    # the logged-out denial, never asserted.
     nocred_send: Send | None = None
 
     # Safe (non-mutating) methods a cross-read / baseline may use — a read must never mutate.
@@ -637,9 +787,9 @@ class IdorCheck:
         if point.name != self.ref_param:
             return None
         disc = (self.victim_discriminator or "").strip()
-        if not disc:
-            # No victim-unique discriminator ⇒ the only sound predicate is unavailable. Do NOT fall back to
-            # the whole-body containment (the reverted false positive). Emit nothing: a rigorous LEAD.
+        if not valid_discriminator(disc):
+            # No usable victim-unique discriminator ⇒ the only sound predicate is unavailable. Do NOT fall
+            # back to the whole-body containment (the reverted false positive). Emit nothing: a rigorous LEAD.
             return None
         control_ref = (self.control_ref or "").strip()
         if not control_ref:
@@ -666,36 +816,71 @@ class IdorCheck:
         attacker = send(template.render(point, self.victim_ref))
         control = send(template.render(point, control_ref))
         nocred = nocred_send(template.render(point, self.victim_ref))
-        victim_body = str(victim.get("body", "")) if isinstance(victim, dict) else str(victim)
-        attacker_body = str(attacker.get("body", "")) if isinstance(attacker, dict) else str(attacker)
-        control_body = str(control.get("body", "")) if isinstance(control, dict) else str(control)
-        nocred_body = str(nocred.get("body", "")) if isinstance(nocred, dict) else str(nocred)
-        attacker_status = int(attacker.get("status", 0)) if isinstance(attacker, dict) else 0
+
+        def _status(resp: object) -> int:
+            return int(resp.get("status", 0)) if isinstance(resp, dict) else 0
+
+        def _body(resp: object) -> str:
+            # Stored STRIPPED so the predicate's ``min_len`` measures real content (a whitespace-padded body
+            # cannot masquerade as substantive) and the ``contains`` clauses search the same normalized text.
+            return (str(resp.get("body", "")) if isinstance(resp, dict) else str(resp)).strip()
+
+        victim_status, attacker_status = _status(victim), _status(attacker)
+        control_status, nocred_status = _status(control), _status(nocred)
+        victim_body, attacker_body = _body(victim), _body(attacker)
+        control_body, nocred_body = _body(control), _body(nocred)
+
+        # ROUND-3 substantiveness, fail-CLOSED to a LEAD (return None, so the class is NOT falsely marked
+        # CLEAN — a broken read is INCONCLUSIVE, not proof of authorization). A contains / not-contains over a
+        # non-substantive body is VACUOUS: an absent marker proves nothing when the body is empty / errored /
+        # denied. So the fire bodies (victim ground-truth + attacker cross-read) AND the attacker-own negative
+        # control MUST each be a substantive success, and the logged-out baseline MUST be a valid gating proof
+        # (a substantive 2xx OR a genuine 401/403 denial). Any that is not ⇒ no context, a rigorous LEAD.
+        if not is_substantive_success(victim_status, victim_body):
+            return None
+        if not is_substantive_success(attacker_status, attacker_body):
+            return None
+        if not is_substantive_success(control_status, control_body):
+            return None
+        if not _nocred_baseline_valid(nocred_status, nocred_body):
+            return None
 
         evidence: dict[str, object] = {
-            "attacker_status": attacker_status, "victim_body": victim_body,
-            "attacker_body": attacker_body, "attacker_own_body": control_body,
-            "nocred_body": nocred_body, "victim_ref": self.victim_ref, "discriminator": disc,
+            "attacker_status": attacker_status, "victim_status": victim_status,
+            "attacker_own_status": control_status, "nocred_status": nocred_status,
+            "victim_body": victim_body, "attacker_body": attacker_body,
+            "attacker_own_body": control_body, "nocred_body": nocred_body,
+            "victim_ref": self.victim_ref, "discriminator": disc,
         }
         # Every guard is retained in the oracle_context as an EXPLICIT clause (not a bare bool), so offline
-        # ``verify`` re-checks presence-in-victim AND presence-in-attacker-cross-read AND absence-in-control
-        # AND ref-independence AND absence-in-logged-out-baseline over the retained evidence — the pure
-        # achieved-state predicate re-fires exactly, and no false FACT survives re-verification.
+        # ``verify`` re-derives substantiveness AND presence-in-victim AND presence-in-attacker-cross-read AND
+        # absence-in-substantive-control AND ref-independence AND absence-in-(substantive-or-denied)-baseline
+        # over the retained evidence — the pure achieved-state predicate re-fires exactly, and no false FACT
+        # (INCLUDING a durable one built from a non-substantive read) survives re-verification.
         clauses: list[dict] = [
-            {"eq": [{"var": "attacker_status"}, 200]},
             {"min_len": [{"var": "discriminator"}, 6]},
+            # ROUND-3: the attacker cross-read is a SUBSTANTIVE SUCCESS (real 2xx content, not empty/error/deny)
+            *_substantive_success_clauses("attacker_status", "attacker_body"),
+            # ROUND-3: the victim ground-truth read is a SUBSTANTIVE SUCCESS (the marker sits in a real record)
+            *_substantive_success_clauses("victim_status", "victim_body"),
+            # ROUND-3: the attacker-own negative control is a SUBSTANTIVE SUCCESS — only then does its
+            # not-contains PROVE the marker victim-specific (a 404/403/empty control proves nothing).
+            *_substantive_success_clauses("attacker_own_status", "attacker_own_body"),
             # the discriminator genuinely identifies the victim's AUTHORITATIVE record (operator input is real)
             {"contains": [{"var": "victim_body"}, {"var": "discriminator"}]},
             # the attacker's cross-read REACHED the victim-unique marker (the achieved unauthorized read)
             {"contains": [{"var": "attacker_body"}, {"var": "discriminator"}]},
             # MANDATORY negative control: the marker must NOT appear when the attacker reads their OWN object —
-            # this refutes a globally-present string the operator wrongly believed was victim-unique.
+            # this refutes a globally-present string the operator wrongly believed was victim-unique. It is
+            # meaningful ONLY because the control read above is proven substantive.
             {"not": {"contains": [{"var": "attacker_own_body"}, {"var": "discriminator"}]}},
             # ROUND-2 (v) ref-independence: the marker is NOT a substring of the requested ref — so a body
             # that merely echoes the requested id (a reflected soft-deny) can never satisfy the read clause.
             {"not": {"contains": [{"var": "victim_ref"}, {"var": "discriminator"}]}},
-            # ROUND-2 (iv) authorization-gated: the marker is ABSENT from the logged-out baseline of the SAME
-            # ref — proving the content is gated (not public/reflected), so the attacker's read WAS unauthorized.
+            # ROUND-2 (iv) + ROUND-3 authorization-gated: the logged-out baseline is a VALID gating proof
+            # (a substantive 2xx that lacks the marker OR a genuine 401/403 denial — never a vacuous
+            # 5xx/empty/404) AND the marker is ABSENT from it — proving the content is gated, not public.
+            _nocred_baseline_valid_clause(),
             {"not": {"contains": [{"var": "nocred_body"}, {"var": "discriminator"}]}},
         ]
         return FindingContext.from_predicate(evidence, {"all": clauses}, bug_class=self.bug_class)

@@ -19,7 +19,9 @@ This module ships them behind an EXPLICIT OPT-IN, default OFF:
     in ``library_entries/``, and therefore never sends a byte on the benchmark/scan/engage gate path.
   * Every check confirms via the SAME deterministic ACHIEVED-STATE / predicate oracle already in the
     engine — no new oracle, no new confirmation machinery. A 403 / empty / different response fails the
-    predicate and does NOT fire, so a correctly-authorised endpoint is never a false positive.
+    predicate and does NOT fire, so a correctly-authorised endpoint is never a false positive. A negative
+    control proves 'absent' ONLY when that control read is itself a SUBSTANTIVE SUCCESS (round-3): an
+    absent-because-errored/empty/404/403 body proves NOTHING and fails closed to a LEAD, never a FACT.
 
 PROVE-DON'T-GUESS: the oracle decides over the RAW two-identity evidence (the attacker's status+body
 vs. the victim/ground-truth body). The check never asserts the finding itself. The mere presence of a
@@ -134,9 +136,13 @@ class CrossAccessSpec:
     false-positives on shared boilerplate. Empty ⇒ the probe cannot soundly fire (a rigorous LEAD).
     ``control_ref`` is an attacker-OWNED reference and is MANDATORY for a FACT: the marker must be ABSENT
     from the attacker's own object — the negative control that PROVES a global/boilerplate string is not
-    mistaken for a victim-unique one. Empty ⇒ the probe returns None (a LEAD); 'victim-unique' is enforced
-    by this control differential, never accepted as a bare operator assertion. A FACT further requires a
-    no-credential (logged-out) baseline (see ``AccessControlConfig.nocred_send``) proving the content is
+    mistaken for a victim-unique one. That control read (like the victim and attacker cross-read) must be a
+    SUBSTANTIVE SUCCESS (round-3): a 404/403/empty control makes the not-contains VACUOUS (absence-in-an-error
+    proves nothing), so a non-substantive control fails closed to a LEAD. Empty ⇒ the probe returns None (a
+    LEAD); 'victim-unique' is enforced by this SUBSTANTIVE control differential, never accepted as a bare
+    operator assertion. A FACT further requires a no-credential (logged-out) baseline (see
+    ``AccessControlConfig.nocred_send``) that is a VALID gating proof — a substantive 2xx lacking the marker
+    OR a genuine 401/403 denial (a bare 5xx/empty baseline is vacuous) — proving the content is
     authorization-gated rather than public/reflected; a baseline-less config is a rigorous LEAD."""
 
     bug_class: str
