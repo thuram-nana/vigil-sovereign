@@ -279,6 +279,16 @@ _STANDARDS: dict[str, ControlMapping] = {
                             attack=("T1528",)),
     "oidc_idtoken_forgery": _m("A07:2021", ("CWE-347", "CWE-290"), pci=_AUTH_PCI, soc2=_AUTH_SOC2, iso=_AUTH_ISO,
                               attack=("T1606",)),
+    # Wave-3.4 SSO forgery-ACCEPTANCE achieved-state duals (the operator's SP/RP GRANTED ACCESS to a forged
+    # token, proven by a legit-user success-state differential). Same A07 authentication-failure family +
+    # CWE-347 (improper signature verification) as the forgeability/acceptance siblings; T1606 (Forge Web
+    # Credentials), T1606.002 (SAML) for the SAML dual.
+    "jwt_forgery_accepted": _m("A07:2021", ("CWE-347", "CWE-290"), pci=_AUTH_PCI, soc2=_AUTH_SOC2, iso=_AUTH_ISO,
+                               attack=("T1606",)),
+    "oidc_forgery_accepted": _m("A07:2021", ("CWE-347", "CWE-290"), pci=_AUTH_PCI, soc2=_AUTH_SOC2, iso=_AUTH_ISO,
+                                attack=("T1606",)),
+    "saml_forgery_accepted": _m("A07:2021", ("CWE-347", "CWE-290"), pci=_AUTH_PCI, soc2=_AUTH_SOC2, iso=_AUTH_ISO,
+                                attack=("T1606.002",)),
     # ---- Cryptographic failures (A02) ----
     "weak_tls": _m("A02:2021", ("CWE-326", "CWE-327"), pci=_CRYPTO_PCI, soc2=_CRYPTO_SOC2, iso=_CRYPTO_ISO,
                    attack=("T1557",)),

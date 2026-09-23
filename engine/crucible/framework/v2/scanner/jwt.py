@@ -61,9 +61,22 @@ def _segment(obj: dict[str, Any]) -> str:
     return b64url_encode(json.dumps(obj, separators=(",", ":"), sort_keys=True).encode("utf-8"))
 
 
+# Embedded-key header fields (RFC 7515 §4.1.2/§4.1.5-.6): a header that names its own
+# verification key. Refusal #7 keeps the ``alg:none`` forge off the embedded-key path, so
+# these are STRIPPED from the forged header — never inherited from the captured token — so the
+# forge matches its own claim ("no embedded-key field"). An ``alg:none`` token has no signature,
+# so a correct RP fetches no embedded key regardless; this makes the code honour the claim.
+_EMBEDDED_KEY_HEADER_FIELDS = ("jku", "x5u", "jwk", "x5c")
+
+
 def encode_none(header: dict[str, Any], payload: dict[str, Any]) -> str:
-    """A well-formed unsigned token: ``alg:none`` and an empty signature."""
-    h = {**header, "alg": "none"}
+    """A well-formed unsigned token: ``alg:none`` and an empty signature.
+
+    Refusal #7: the forged header carries NO embedded-key field
+    (``jku``/``x5u``/``jwk``/``x5c``) — they are dropped rather than inherited from the
+    captured header, so the forge never even appears to point at an attacker-supplied key."""
+    h = {k: v for k, v in header.items() if k not in _EMBEDDED_KEY_HEADER_FIELDS}
+    h["alg"] = "none"
     return f"{_segment(h)}.{_segment(payload)}."
 
 

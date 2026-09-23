@@ -156,6 +156,27 @@ BUG_CLASS_ORACLES: dict[str, tuple[OracleKind, ...]] = {
     "saml_assertion_tampering": (OracleKind.ACHIEVED_STATE,),
     "oidc_redirect_uri": (OracleKind.ACHIEVED_STATE,),
     "oidc_idtoken_forgery": (OracleKind.ACHIEVED_STATE,),
+    # Wave-3.4 SSO forgery-ACCEPTANCE achieved-state dual (scanner.forgery_acceptance, opt-in +
+    # gated-workflow) — the strictly-SOUNDER re-drive of the acceptance checks above, PROVEN BY AN ACHIEVED
+    # READ OF A VICTIM-PRIVATE DATUM (round-6, reusing the Wave-3.1 IDOR/BOLA private-read differential that
+    # PASSED adversarial review). Each proves the operator's SP/RP actually GRANTED the forged token access to
+    # private content: a victim-PRIVATE discriminator D is (a) PRESENT in the forged response (the achieved
+    # read, carrying a FRESH RANDOM per-probe attacker identity) AND (b) PRESENT in a legitimate-valid-token
+    # POSITIVE reference AND (c) ABSENT from a SUBSTANTIVE SAME-SHAPE invalid-token NEGATIVE control (a
+    # substantive 2xx rendering the same resource — a denial/empty/error/different-shape control is REFUSED,
+    # fail-closed to a LEAD) AND (d) D is a valid, non-reflected discriminator. Root cause accepted after six
+    # rounds: an accepted state cannot be proven from response CONTENT — the round-5 difflib same-shape
+    # SIMILARITY SCORE is a defeatable content heuristic (a benign non-granting app scores ~0.95), so it is
+    # DROPPED as proof (demoted to a weak advisory), as is the deny-phrase denylist. A benign app never leaks a
+    # victim-private datum to an unsigned forge, so it cannot fire clause (a) whatever its chrome/similarity.
+    # Reuse ACHIEVED_STATE via the predicate oracle (from_predicate, same seam as the rows above), so this adds
+    # NO new OracleKind, _ALL_ORACLES stays 15, and `make gate` is byte-identical. Without BOTH the operator
+    # private-datum baseline AND the legit-valid-token positive reference the check MINTS NOTHING (a rigorous
+    # LEAD — the INDEPENDENT offline jwt_forgeable / saml_structural_forgery FACT still stands), never a FACT
+    # and never a false CLEAN. Forge is alg:none only (refusal #7: no jwk/x5c/jku/x5u path).
+    "jwt_forgery_accepted": (OracleKind.ACHIEVED_STATE,),
+    "oidc_forgery_accepted": (OracleKind.ACHIEVED_STATE,),
+    "saml_forgery_accepted": (OracleKind.ACHIEVED_STATE,),
     # credential_stuffing proves a source achieved SPRT-significant successful logins across many
     # UNSEEN (account, source) pairs (ATO), Holm-controlled across identities. A failed-only burst
     # (NAT/CGNAT bulk) yields no SPRT round and stays a LEAD — never confirmed.
@@ -458,6 +479,16 @@ _ALIASES: dict[str, str] = {
     # CSP) — the browser-confirmed DOM_EXECUTION dual, never the posture oracle.
     "csp_bypass_xss": "csp_bypass",
     "content_security_policy_bypass": "csp_bypass",
+    # Wave-3.4 SSO forgery-ACCEPTANCE spellings fold onto the canonical `*_forgery_accepted` keys (the
+    # achieved-state GRANT-differential classes). Distinct from the offline `jwt_forgeable` /
+    # `saml_structural_forgery` classes (structural forgeability) and from the older `oidc_idtoken_forgery`
+    # / `saml_assertion_tampering` acceptance checks.
+    "jwt_forgery_acceptance": "jwt_forgery_accepted",
+    "jwt_forged_token_accepted": "jwt_forgery_accepted",
+    "oidc_forgery_acceptance": "oidc_forgery_accepted",
+    "oidc_idtoken_forgery_accepted": "oidc_forgery_accepted",
+    "saml_forgery_acceptance": "saml_forgery_accepted",
+    "saml_forged_assertion_accepted": "saml_forgery_accepted",
     "directory_traversal": "path_traversal",
     "information_disclosure": "exposure",
     "sensitive_data_exposure": "sensitive_exposure",
