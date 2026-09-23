@@ -67,6 +67,11 @@ _ADDITIVE = frozenset({
     # `csp_posture` row keyed on a `csp_control` ctx field; never in the frozen fallback. (The achieved
     # csp_bypass class reuses DOM_EXECUTION and adds no kind.)
     "CSP_POSTURE",
+    # Wave 3.2 SESSION FIXATION achieved-state kind (CWE-384) — its OWN dedicated kind (so editing its
+    # differential body changes ONLY oracle_version(SESSION_FIXATION), never ACHIEVED_STATE), additive,
+    # reachable ONLY via its `session_fixation` row keyed on a `session_fixation` ctx field; never in the
+    # frozen fallback.
+    "SESSION_FIXATION",
 })
 
 
@@ -86,13 +91,14 @@ def test_every_additive_oraclekind_is_excluded_from_the_fallback():
         member = OracleKind[name]
         assert member not in V._ALL_ORACLES, f"{name} leaked into the frozen fallback"
         assert name not in frozen_names
-    # the enum is exactly the 15 frozen + 27 additive = 42; a new frozen member (or a new additive one
+    # the enum is exactly the 15 frozen + 29 additive = 44; a new frozen member (or a new additive one
     # not accounted for here) fails this, forcing an explicit review of the byte-identity impact.
     # (E3 GCP_SA_IMPERSONATION, E2 IAM_ESCALATION_PRIMITIVE and E4-TIER-2 K8S_RBAC_VERB_GRANT landed
     # additively: 35 -> 36 -> 37 -> 38; W16-STD-5 added the 3 client-side posture kinds: 38 -> 41;
     # Wave 2.2 added PROTOTYPE_POLLUTION (achieved-state, CWE-1321): 41 -> 42; Wave 2.4 added CSP_POSTURE
-    # (permissive-policy posture, CWE-693/CWE-1021): 42 -> 43.)
-    assert len(OracleKind) == 43
+    # (permissive-policy posture, CWE-693/CWE-1021): 42 -> 43; Wave 3.2 added SESSION_FIXATION (achieved-state,
+    # CWE-384, its own dedicated kind so ACHIEVED_STATE's oracle_version is untouched): 43 -> 44.)
+    assert len(OracleKind) == 44
     assert {k.name for k in OracleKind} == _FROZEN_15 | _ADDITIVE
     assert set(V._ALL_ORACLES) == set(OracleKind) - {OracleKind[n] for n in _ADDITIVE}
 

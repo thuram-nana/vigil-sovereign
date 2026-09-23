@@ -1799,28 +1799,60 @@ class FindingContext(BaseModel):
         *,
         sentinel_id: str,
         post_auth_id: str | None,
-        authenticated_after_login: Any,
         cookie_name: str = "",
+        success_marker: str | None = None,
+        logged_out_markers: Any = (),
+        logged_out_statuses: Any = (),
+        authorized_view: Any = None,
+        logged_out_ref: Any = None,
         bug_class: str = "session_fixation",
     ) -> "FindingContext":
-        """The retained session-fixation record for the session-fixation oracle (ACHIEVED_STATE, CWE-384).
+        """The retained session-fixation record for the session-fixation oracle (OracleKind.SESSION_FIXATION,
+        CWE-384). It carries the RAW bytes the oracle re-runs its DIFFERENTIAL over — never a pre-computed
+        authenticated bool.
 
-        ``sentinel_id`` (S0) is the UNIQUE high-entropy id VIGIL chose and set as the session cookie BEFORE
-        running the operator login sequence; ``post_auth_id`` (S1) is the session-cookie value in effect AFTER
-        login; ``authenticated_after_login`` is the TRI-STATE re-probe of whether the VIGIL-fixed id **S0**
-        still reaches an authenticated state after login (``True`` live / ``False`` dead / ``None`` = no
-        positive authenticated-state discriminator was available, so it could not be decided). The oracle
-        confirms session fixation ONLY when S1 == S0 (the fixed id survived unrotated) AND S0 still
-        authenticates — the achieved fixation state, never that a cookie was merely set. A rotated value with a
-        dead S0 is a clean; a rotated-but-live S0, a missing S1, or a ``None`` probe are inconclusive."""
+        ``sentinel_id`` (S0) is the UNIQUE high-entropy id VIGIL chose and set as the session cookie BEFORE the
+        operator login sequence; ``post_auth_id`` (S1) is the session-cookie value in effect AFTER login;
+        ``success_marker`` is the operator's positive authenticated-state discriminator; ``authorized_view`` is
+        ``{status, body}`` of the protected URL fetched carrying the VIGIL-fixed id S0 AFTER login;
+        ``logged_out_ref`` is ``{status, body}`` of the SAME protected URL fetched with NO session cookie (the
+        NEGATIVE reference); ``logged_out_markers`` / ``logged_out_statuses`` are the operator's decisive
+        not-authenticated signals. The oracle fires ONLY when S1 == S0 (the fixed id survived unrotated) AND
+        the success_marker is PRESENT in the authorized view yet PROVABLY ABSENT from a SUBSTANTIVE logged-out
+        reference — the achieved fixation state, never that a cookie was merely set. A marker present in both
+        views, no substantive logged-out reference, a rotated value with a dead S0, a missing S1, or an
+        undecidable differential are LEAD / clean / inconclusive — never a FACT."""
+        def _view(v: Any) -> "dict | None":
+            if not isinstance(v, Mapping):
+                return None
+            return {"status": v.get("status"), "body": _coerce_text(v.get("body"))}
+
+        def _strs(seq: Any) -> "list[str]":
+            if isinstance(seq, (list, tuple, set, frozenset)):
+                return [_coerce_text(x) for x in seq]
+            return []
+
+        def _ints(seq: Any) -> "list[int]":
+            out: list[int] = []
+            if isinstance(seq, (list, tuple, set, frozenset)):
+                for x in seq:
+                    try:
+                        out.append(int(x))
+                    except (TypeError, ValueError):
+                        continue
+            return out
+
         return cls(
             bug_class=bug_class,
             session_fixation={
                 "sentinel_id": _coerce_text(sentinel_id),
                 "post_auth_id": None if post_auth_id is None else _coerce_text(post_auth_id),
-                "authenticated_after_login": (bool(authenticated_after_login)
-                                              if authenticated_after_login is not None else None),
                 "cookie_name": _coerce_text(cookie_name),
+                "success_marker": None if success_marker is None else _coerce_text(success_marker),
+                "logged_out_markers": _strs(logged_out_markers),
+                "logged_out_statuses": _ints(logged_out_statuses),
+                "authorized_view": _view(authorized_view),
+                "logged_out_ref": _view(logged_out_ref),
             },
         )
 

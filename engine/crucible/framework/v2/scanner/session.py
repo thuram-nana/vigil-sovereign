@@ -273,55 +273,13 @@ def valid_discriminator(marker: str | None, *, nonce: str | None = None) -> bool
     return True
 
 
-def _is_authenticated(resp: object, login: "LoginSequence") -> bool | None:
-    """A POSITIVE authenticated-state test over a protected-page response, reusing the operator's login spec.
-
-    TRI-STATE — the distinction is load-bearing for soundness:
-
-      * ``True``  — a VALID (non-vacuous) POSITIVE discriminator ``success_marker`` is PRESENT in a
-        SUBSTANTIVE-SUCCESS body (a real 2xx, >= 16 stripped chars, not an error/deny signature) and no
-        logged-out status/marker overrides it: a confirmed LIVE authenticated session;
-      * ``False`` — a valid ``success_marker`` was supplied and the response DECISIVELY says NOT
-        authenticated (a logged-out status, a ``logged_out_markers`` hit, or the marker absent from an
-        otherwise-substantive success body);
-      * ``None``  — the test could NOT be decided and we FAIL CLOSED to "unknown":
-          - NO VALID POSITIVE discriminator was supplied. ``success_marker`` is ``None``, OR it is VACUOUS
-            (``''`` / whitespace / a 1-2 char fragment that is trivially ``in`` any body) — a vacuous marker
-            is no discriminator at all and must never score ``True``; regardless of any ``logged_out_markers``
-            (an ABSENCE-only discriminator that can never PROVE auth); OR
-          - the authenticated-state read is NOT itself a substantive success (empty / too-short / an
-            error-or-deny 200) — an empty/errored body proves neither a live session NOR a clean.
-        The caller must NOT mint a FACT off ``None`` (it degrades to INCONCLUSIVE).
-
-    Only a VALID ``success_marker`` present in a SUBSTANTIVE SUCCESS can score ``True``. ``logged_out_markers``
-    is an ABSENCE discriminator: its PRESENCE can only DISPROVE authentication; its ABSENCE proves nothing,
-    so a bare/empty/error 2xx is never treated as authenticated. This closes both the positive-by-absence
-    degeneration AND the vacuous-predicate hole: a session-fixation FACT must rest on positive proof — a real
-    marker in a real authenticated page — that the fixed id is LIVE."""
-    # A VALID (non-vacuous) POSITIVE discriminator is REQUIRED to PROVE authentication. A missing marker — OR
-    # a vacuous one (empty/whitespace/too-short, trivially "in" any body) — is no discriminator at all;
-    # nothing then distinguishes a live authenticated page from an unauthenticated 200 login form, so fail
-    # closed to "unknown" (never score a bare/empty status as authenticated).
-    if not valid_discriminator(login.success_marker):
-        return None
-    if not isinstance(resp, dict):
-        return None
-    status = int(resp.get("status", 0))
-    body = _body(resp)
-    # Decisive logged-out signals DISPROVE auth (channel-confirmed not-authenticated), independent of body
-    # substance: an explicit logged-out status (401/403) or an operator-supplied logged_out_marker.
-    if status in login.logged_out_statuses:
-        return False
-    if any(m in body for m in login.logged_out_markers):
-        return False
-    # The authenticated-state read must ITSELF be a substantive success: an empty / too-short / error-or-deny
-    # 200 body cannot PROVE a live authenticated session — and must not be scored a CLEAN either (an
-    # absent-because-errored body proves nothing). Fail closed so the oracle stays INCONCLUSIVE, never a FACT.
-    if not is_substantive_success(status, body):
-        return None
-    # POSITIVE proof: a valid success_marker PRESENT in a substantive success body ⇒ authenticated; ABSENT
-    # from an otherwise-substantive success ⇒ decisively not.
-    return login.success_marker in body
+def _sfx_view(resp: object) -> dict:
+    """The retained ``{status, body}`` of a protected-page response the oracle re-runs its differential over.
+    A non-dict (no channel on that leg) becomes ``{status: None, body: ""}`` — a non-substantive view the
+    oracle treats as undecidable (fails closed to a LEAD), never as a differential reference."""
+    if isinstance(resp, dict):
+        return {"status": resp.get("status"), "body": _body(resp)}
+    return {"status": None, "body": _body(resp)}
 
 
 def confirm_session_fixation(
@@ -335,30 +293,32 @@ def confirm_session_fixation(
     """Gated-workflow session-fixation probe (CWE-384), built on :class:`LoginSequence` + :class:`CookieJar`.
 
     VIGIL FIXES a unique high-entropy sentinel id S0 as the ``session_cookie`` value BEFORE authenticating,
-    runs the operator's login sequence through the gated ``send`` carrying S0, then observes the session id in
-    effect AFTER login (S1). Finally — the SOUND positive test — it re-presents the VIGIL-fixed id **S0**
-    (not merely S1) to a protected page and tests whether S0 STILL reaches an authenticated state after login.
-    ``authenticated_after_login`` records that S0 re-probe as a TRI-STATE (``True`` live / ``False`` dead /
-    ``None`` undecidable). The returned :class:`FindingContext` routes to the deterministic
-    ``session_fixation_oracle``, which fires ONLY when the VIGIL-fixed id survived unrotated (S1 == S0) AND
-    S0 still authenticates — the achieved fixation state.
+    runs the operator's login sequence through the gated ``send`` carrying S0, observes the session id in
+    effect AFTER login (S1), and then re-presents the VIGIL-fixed id **S0** to the protected page — CAPTURING
+    THE RAW RESPONSE. It ALSO captures a LOGGED-OUT NEGATIVE REFERENCE: the SAME protected URL fetched with NO
+    session cookie. The scanner makes NO authentication decision; it hands the RAW bytes (the fixed-session
+    view, the logged-out reference, the operator success_marker + logged-out signals) to the deterministic
+    ``session_fixation_oracle``, which RE-DERIVES — via a DIFFERENTIAL — whether S0 reached an authenticated
+    state, and fires ONLY when the fixed id survived login UNROTATED (S1 == S0) AND the success_marker is
+    PRESENT in S0's fixed-session view yet PROVABLY ABSENT from the SUBSTANTIVE logged-out reference (proving
+    the marker is access-gated, not a common token / chrome / a benign soft-200 body both views share).
 
-    Re-probing S0 directly (rather than trusting S1==S0 as a rotation proxy) is deliberate: an app can rotate
-    the cookie VALUE at login yet leave the pre-auth-fixed id S0 still valid — a REAL fixation a value check
-    would miss. Probing S0 yields ``False`` for a genuinely-defended rotate (S0 is dead → a channel-confirmed
-    CLEAN) and ``True`` for a value-rotation-but-S0-valid app (the oracle refuses to CLEAN that — never a
-    false clean). A VALID POSITIVE authenticated-state discriminator (a NON-VACUOUS ``success_marker`` —
-    present, not pure whitespace, >= 3 stripped chars — whose PRESENCE in a SUBSTANTIVE-SUCCESS body proves
-    the session is live; ``logged_out_markers`` is an ABSENCE-only discriminator that can DISPROVE but never
-    prove auth) is REQUIRED to mint: absent a valid ``success_marker`` — OR when the S0 protected-page read is
-    not itself a substantive success (empty / too-short / an error-or-deny 200) — the S0 probe is ``None`` and
-    the oracle returns INCONCLUSIVE, never a FACT and never a CLEAN. A vacuous marker (``''`` / ``'   '`` / a
-    1-2 char fragment, trivially ``in`` any body) is treated as NO discriminator and can never mint a spurious
-    CWE-384 FACT. Returns ``None`` only when no channel was
-    established (a non-dict login response);
-    every other outcome is adjudicated by the oracle. All traffic rides the injected ``send`` (the
+    Capturing S0's view directly (rather than trusting S1==S0 as a rotation proxy) is deliberate: an app can
+    rotate the cookie VALUE at login yet leave the pre-auth-fixed id S0 still valid — a REAL fixation a value
+    check would miss; the oracle's differential exposes it. Capturing a LOGGED-OUT REFERENCE (rather than
+    scoring the fixed-session body alone) is the ROUND-4 soundness fix: a single body cannot be classified
+    authenticated-vs-benign by content heuristics, so the marker is qualified ONLY by its ABSENCE from a
+    same-URL logged-out view. If no substantive logged-out reference is available, the oracle FAILS CLOSED to
+    a LEAD. Returns ``None`` only when no channel was established for the login leg (a non-dict login
+    response); every other outcome is adjudicated by the oracle. All traffic rides the injected ``send`` (the
     scope/charter/kill-switch-gated executor); nothing here weakens the boundary."""
     s0 = sentinel_id or mint_session_sentinel()
+
+    # 0. LOGGED-OUT NEGATIVE REFERENCE: fetch the protected URL with NO session cookie — the differential
+    #    base. The oracle qualifies the operator success_marker as an authenticated-state discriminator ONLY
+    #    if it is PROVABLY ABSENT from this SUBSTANTIVE logged-out view of the SAME url, so a common token /
+    #    page chrome / a benign soft-200 body both views share can NEVER mint a spurious CWE-384 FACT.
+    logged_out_resp = send(HttpRequest(method="GET", url=protected_url, headers=[], body=None))
 
     # 1. VIGIL fixes the session id to S0 BEFORE auth, then runs the login sequence carrying it.
     login_headers: list[tuple[str, str]] = [("Cookie", f"{session_cookie}={s0}")]
@@ -377,15 +337,16 @@ def confirm_session_fixation(
     jar.update_from_headers([(str(k), str(v)) for k, v in login_headers_resp])
     s1 = jar.get(session_cookie)
 
-    # 3. SOUND fixation test: does the ORIGINAL VIGIL-fixed id S0 STILL authenticate a protected request
-    #    AFTER login? This is the definition of the achieved fixation state — and, unlike an S1==S0 value
-    #    check, it also exposes a value-rotating app that leaves S0 valid, and yields a genuine CLEAN
-    #    (S0 dead) for a real rotate defense. Tri-state: True live / False dead / None undecidable.
-    authenticated = _is_authenticated(
-        send(HttpRequest(method="GET", url=protected_url,
-                         headers=[("Cookie", f"{session_cookie}={s0}")], body=None)),
-        login)
+    # 3. AUTHORIZED (fixed-session) VIEW: re-present the ORIGINAL VIGIL-fixed id S0 to the protected page
+    #    AFTER login and CAPTURE THE RAW RESPONSE. The oracle re-derives — from these raw bytes vs the
+    #    logged-out reference — whether S0 reached an authenticated state; the scanner scores nothing.
+    authorized_resp = send(HttpRequest(method="GET", url=protected_url,
+                                       headers=[("Cookie", f"{session_cookie}={s0}")], body=None))
 
     return FindingContext.from_session_fixation(
-        sentinel_id=s0, post_auth_id=s1, authenticated_after_login=authenticated,
-        cookie_name=session_cookie)
+        sentinel_id=s0, post_auth_id=s1, cookie_name=session_cookie,
+        success_marker=login.success_marker,
+        logged_out_markers=login.logged_out_markers,
+        logged_out_statuses=login.logged_out_statuses,
+        authorized_view=_sfx_view(authorized_resp),
+        logged_out_ref=_sfx_view(logged_out_resp))

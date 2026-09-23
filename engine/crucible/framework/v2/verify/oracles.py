@@ -1482,7 +1482,7 @@ def prototype_pollution_oracle(observed: Any) -> OracleSignal:
 
 
 # ---------------------------------------------------------------------------
-# 3c. Session fixation — a VIGIL-fixed pre-auth session id survives login (achieved-state)
+# 3c. Session fixation — a VIGIL-fixed pre-auth session id survives login (achieved-state, CWE-384)
 # ---------------------------------------------------------------------------
 
 # VIGIL per-run session-fixation SENTINEL id shape (scanner.session mints ``sfx_`` + ``token_hex(16)`` = 32
@@ -1494,118 +1494,246 @@ def prototype_pollution_oracle(observed: Any) -> OracleSignal:
 # id degrades to a weaker LEAD, never this FACT).
 _SFX_SENTINEL_RE = re.compile(r"^sfx_[0-9a-f]{32,}$")
 
+# ROUND-4 SOUNDNESS: a single response body CANNOT be classified authenticated-vs-benign by content
+# heuristics — three rounds of content guards (unique/ref-independent/substance/deny-phrase) were each
+# defeated by a benign soft-200 whose body resembles the authenticated view. The FIX is a DIFFERENTIAL: the
+# operator's ``success_marker`` qualifies as an authenticated-state discriminator ONLY when it is PRESENT in
+# the fixed-session (S0) view of the protected URL AND PROVABLY ABSENT from a SUBSTANTIVE same-URL LOGGED-OUT
+# (no-cookie) reference. A marker present in BOTH views (a common HTML token like ``<p>``/``div``, page
+# chrome, framing, or a soft-200 body both share) is DISQUALIFIED — it proves nothing, so no FACT. The oracle
+# RE-DERIVES this from the RETAINED RAW bytes at every (re-)verification — it never trusts a pre-computed
+# authenticated bool — so a durable re-fire re-runs the same differential offline and a soft-200 can never
+# mint. If no substantive logged-out reference is available to establish the differential, FAIL CLOSED to a
+# LEAD (an honest downgrade, never a false FACT).
+_SFX_MIN_MARKER = 3          # a marker below this is trivially a substring of almost any body
+_SFX_MIN_BODY = 16           # a real page body, not a stub/error token — so marker-ABSENCE is meaningful
+_SFX_MAX_ERROR_BODY = 96     # a short body dominated by a canonical error/deny phrase is an error page
+_SFX_DEFAULT_LOGGED_OUT_STATUSES = frozenset({401, 403})
+_SFX_TAG_RE = re.compile(r"<[^>]+>")
+_SFX_WS_RE = re.compile(r"\s+")
+# A start-anchored error/deny opener: a body that OPENS with one of these is an error/deny page, not a
+# substantive access-gated view — so it can neither prove authentication NOR serve as a differential
+# reference (a marker "absent" from an error page is absent because the page errored, proving nothing).
+_SFX_ERROR_OPENER_RE = re.compile(r"^(errors?\b|forbidden\b|unauthori[sz]ed\b|denied\b|[45]\d\d\b)")
+# Canonical server-error / access-denied phrases. A SHORT body dominated by one of these is an error page
+# even when it does not OPEN with the token (e.g. "Internal Server Error rendering <marker> account") — so a
+# crash that merely echoes the marker string cannot be scored an authenticated view. Deliberately specific
+# (multi-word / status-line shaped) so a real authenticated page that mentions "error" in prose, and a normal
+# logged-out page, are never misclassified.
+_SFX_ERROR_SIGNATURES: tuple[str, ...] = (
+    "internal server error", "500 internal server error",
+    "service unavailable", "service temporarily unavailable", "temporarily unavailable",
+    "bad gateway", "gateway timeout", "bad request",
+    "not found", "page not found", "404 not found", "403 forbidden",
+    "access denied", "access is denied", "access blocked", "request blocked",
+    "an error occurred", "an error has occurred", "an unexpected error", "something went wrong",
+)
+
+
+def _sfx_status_set(statuses: Any) -> "frozenset[int]":
+    out: set[int] = set()
+    if isinstance(statuses, (list, tuple, set, frozenset)):
+        for s in statuses:
+            try:
+                out.add(int(s))
+            except (TypeError, ValueError):
+                continue
+    return frozenset(out) if out else _SFX_DEFAULT_LOGGED_OUT_STATUSES
+
+
+def _sfx_substantive_body(status: Any, body: str) -> bool:
+    """A response usable in the differential — a real 2xx with a non-trivial body that is not itself an
+    error/deny page. A response FAILING this proves NOTHING (it can neither score authenticated NOR serve as
+    a negative reference whose marker-absence is meaningful), so the caller FAILS CLOSED to a LEAD."""
+    try:
+        code = int(status)
+    except (TypeError, ValueError):
+        return False
+    if not (200 <= code < 300):
+        return False
+    raw = body or ""
+    if len(raw.strip()) < _SFX_MIN_BODY:
+        return False
+    text = _SFX_WS_RE.sub(" ", _SFX_TAG_RE.sub(" ", raw)).strip().lower()
+    if not text:
+        return False
+    if _SFX_ERROR_OPENER_RE.match(text):
+        return False
+    if len(text) <= _SFX_MAX_ERROR_BODY and any(sig in text for sig in _SFX_ERROR_SIGNATURES):
+        return False
+    return True
+
+
+def _sfx_marker_authenticated(marker: str, authorized: Any, logged_out_ref: Any,
+                              logged_out_markers: Any, logged_out_statuses: Any) -> "bool | None":
+    """Re-derive, from the RETAINED RAW bytes, whether the VIGIL-fixed id's post-login view of the protected
+    URL is a genuine AUTHENTICATED session — by a DIFFERENTIAL against a same-URL logged-out NEGATIVE
+    reference. Never trusts a bool. TRI-STATE:
+
+      * ``True``  — a valid ``success_marker`` is PRESENT in a SUBSTANTIVE authorized (fixed-session) view AND
+        PROVABLY ABSENT from a SUBSTANTIVE logged-out reference to the SAME URL ⇒ the marker is access-gated,
+        so the fixed id is a live authenticated session;
+      * ``False`` — the authorized view DECISIVELY says NOT authenticated: a logged-out status/marker, or the
+        success_marker ABSENT from an otherwise-substantive authorized success;
+      * ``None``  — undecidable ⇒ FAIL CLOSED to a LEAD: no valid marker; the authorized view is not a
+        substantive success; NO substantive logged-out reference to establish the differential; or the marker
+        is present in BOTH views (a common token / chrome / a soft-200 body both share — DISQUALIFIED)."""
+    m = _coerce_text(marker).strip()
+    if len(m) < _SFX_MIN_MARKER:
+        return None
+    if not isinstance(authorized, Mapping):
+        return None
+    a_status = authorized.get("status")
+    a_body = _coerce_text(authorized.get("body"))
+    # Decisive logged-out signals on the authorized view DISPROVE auth (channel-confirmed not-authenticated),
+    # independent of body substance: an explicit logged-out status or an operator-supplied logged_out_marker.
+    try:
+        a_code = int(a_status)
+    except (TypeError, ValueError):
+        a_code = 0
+    if a_code in _sfx_status_set(logged_out_statuses):
+        return False
+    lo_markers = [t for t in (_coerce_text(x).strip() for x in (logged_out_markers or ())) if t]
+    if any(t in a_body for t in lo_markers):
+        return False
+    # The authorized read must ITSELF be a substantive success — an empty / too-short / error-or-deny 2xx
+    # cannot PROVE a live authenticated session (fail closed to undecidable, never a FACT).
+    if not _sfx_substantive_body(a_status, a_body):
+        return None
+    # POSITIVE: the marker must be PRESENT in the authorized (fixed-session) view. Absent from an otherwise
+    # substantive success ⇒ the fixed id did not reach authenticated content ⇒ decisively not a live session.
+    if m not in a_body:
+        return False
+    # DIFFERENTIAL: the marker qualifies as an AUTHENTICATED-STATE discriminator ONLY if a SUBSTANTIVE
+    # same-URL logged-out reference PROVABLY LACKS it. No such reference ⇒ the differential is unestablished
+    # ⇒ undecidable (LEAD). This is what refuses a benign soft-200 whose body the two views SHARE.
+    if not isinstance(logged_out_ref, Mapping):
+        return None
+    lo_status = logged_out_ref.get("status")
+    lo_body = _coerce_text(logged_out_ref.get("body"))
+    if not _sfx_substantive_body(lo_status, lo_body):
+        return None
+    if m in lo_body:
+        return None   # DISQUALIFIED: present in BOTH views ⇒ not access-gated ⇒ proves no auth (LEAD)
+    return True
+
+
+def _sfx_signal(fired: bool, *, evidence: str, observed: dict, conf: float = 0.92,
+                conclusive: bool = False) -> OracleSignal:
+    # kind is the DEDICATED OracleKind.SESSION_FIXATION (held OUT of the frozen _ALL_ORACLES, so
+    # oracle_version(ACHIEVED_STATE) is untouched and the unknown-class fallback stays EXACTLY 15). A fire is
+    # always decisive; a NON-fire is ``conclusive`` ONLY for a channel-confirmed clean (a rotated+dead or an
+    # unrotated+not-authenticated fixed id) — an undecidable / disqualified-differential / server-set / bare
+    # shape non-fire is a LEAD (conclusive=False), never a CLEAN.
+    return OracleSignal(kind=OracleKind.SESSION_FIXATION, fired=fired,
+                        confidence=(conf if fired else 0.0),
+                        conclusive=(True if fired else conclusive),
+                        evidence=evidence, observed=observed)
+
 
 def session_fixation_oracle(observed: Any) -> OracleSignal:
-    """Fire when a VIGIL-fixed PRE-AUTH session id SURVIVES the operator's login sequence AND still
-    authenticates — the ACHIEVED-STATE proof of session fixation (CWE-384).
+    """Fire when a VIGIL-fixed PRE-AUTH session id SURVIVES the operator's login sequence unrotated AND still
+    authenticates — the ACHIEVED-STATE proof of session fixation (CWE-384), proven by a DIFFERENTIAL against a
+    same-URL logged-out negative reference, re-derived from RAW retained bytes (never a pre-computed bool).
 
     ``observed`` is the retained record ``scanner.session.SessionFixationCheck`` captured through the gated
-    ``send``: ``{sentinel_id, post_auth_id, authenticated_after_login, cookie_name}`` where
+    ``send``:
 
-      * ``sentinel_id`` (S0) is the UNIQUE high-entropy id VIGIL chose and set as the session cookie BEFORE
-        running the login sequence (the attacker-fixed id);
-      * ``post_auth_id`` (S1) is the session-cookie value in effect AFTER the login sequence completed;
-      * ``authenticated_after_login`` is the TRI-STATE re-probe of whether the VIGIL-fixed id **S0** STILL
-        reaches an AUTHENTICATED state after login (the POSITIVE ``success_marker`` present, and no logged-out
-        status/marker overriding it): ``True`` = S0 is a live authenticated session, ``False`` = S0 is dead,
-        ``None`` = the run had NO POSITIVE authenticated-state discriminator (no ``success_marker``;
-        ``logged_out_markers`` is an ABSENCE-only discriminator that cannot PROVE auth) so authentication
-        could not be decided — a bare 2xx/3xx is NOT taken as authenticated.
+      * ``sentinel_id`` (S0) — the UNIQUE high-entropy id VIGIL chose and set as the session cookie BEFORE
+        the login sequence (the attacker-fixed id); MUST match VIGIL's per-run sentinel shape ``sfx_<hex>``;
+      * ``post_auth_id`` (S1) — the session-cookie value in effect AFTER login;
+      * ``success_marker`` — the operator's positive authenticated-state discriminator;
+      * ``authorized_view`` — ``{status, body}`` of the protected URL fetched carrying the VIGIL-fixed id S0
+        AFTER login;
+      * ``logged_out_ref`` — ``{status, body}`` of the SAME protected URL fetched with NO session cookie (the
+        negative reference for the differential);
+      * ``logged_out_markers`` / ``logged_out_statuses`` — the operator's decisive not-authenticated signals.
 
-    The oracle judges the ACHIEVED STATE, never that a cookie was merely set:
+    Adjudication (a bare ``authenticated_after_login`` bool, if present, is IGNORED — the oracle re-derives):
 
-      * ``sentinel_id`` MUST match VIGIL's per-run sentinel SHAPE (``sfx_<hex>``) — a SELF-CONTAINED
-        soundness guard so the certificate can only be satisfied by the id VIGIL drove in, never a
-        server-issued value;
-      * ``post_auth_id == sentinel_id`` — the client-fixed id survived unrotated (the app did NOT rotate the
-        session-cookie VALUE at authentication);
-      * ``authenticated_after_login is True`` — the surviving fixed id is a genuinely authenticated session.
+      * ``sentinel_id`` not the ``sfx_<hex>`` shape ⇒ a server-issued id cannot mint this FACT — LEAD;
+      * ``post_auth_id`` missing ⇒ INCONCLUSIVE;
+      * :func:`_sfx_marker_authenticated` is ``None`` (no valid marker; the authorized view is not a
+        substantive success; NO substantive logged-out reference; or the marker is present in BOTH views — a
+        common token / soft-200 body both share) ⇒ LEAD (never a FACT, never a false CLEAN);
+      * the id was ROTATED at login (``post_auth_id != sentinel_id``): S0 DEAD ⇒ channel-confirmed CLEAN
+        (the correct defense); S0 STILL LIVE ⇒ INCONCLUSIVE (a value rotation alone does not prove S0 was
+        invalidated, and a live-S0 rotated record is indistinguishable from a hand-forged rotation — never a
+        false CLEAN, never a FACT);
+      * survived UNROTATED but S0 not authenticated ⇒ channel-confirmed CLEAN;
+      * survived UNROTATED AND the differential proves S0 authenticated ⇒ FIRE.
 
-    Conclusive semantics (never a false CLEAN):
-
-      * shape INVALID, ``post_auth_id`` MISSING, or ``authenticated_after_login is None`` (no discriminator)
-        ⇒ INCONCLUSIVE — refuse to mint AND refuse to clear;
-      * the VIGIL-fixed id survived unrotated but is DEAD (``authenticated_after_login is False``) ⇒ a
-        channel-confirmed CLEAN (conclusive);
-      * the session-cookie VALUE was ROTATED at login (``post_auth_id != sentinel_id``): if S0 is DEAD it is a
-        channel-confirmed CLEAN (the correct defense); but if S0 is STILL LIVE it is NOT a clean — an app can
-        rotate the value yet leave the fixed id valid (a real fixation), and the certificate cannot tell that
-        apart from a hand-forged rotation, so the oracle returns INCONCLUSIVE (never a false CLEAN, never a
-        FACT off a tamperable field);
-      * survived unrotated AND live ⇒ FIRE."""
+    Pure + deterministic; never raises."""
     obs = observed if isinstance(observed, Mapping) else {}
     sentinel = _coerce_text(obs.get("sentinel_id")).strip()
     post_auth_raw = obs.get("post_auth_id")
     post_auth = _coerce_text(post_auth_raw).strip() if post_auth_raw is not None else ""
-    authenticated = obs.get("authenticated_after_login")
     cookie_name = _coerce_text(obs.get("cookie_name")).strip()
+    marker = _coerce_text(obs.get("success_marker")).strip()
     base = {"cookie_name": cookie_name, "sentinel_id_shape_ok": bool(_SFX_SENTINEL_RE.match(sentinel))}
 
     # SELF-CONTAINED SOUNDNESS: the fixed id must be VIGIL's own per-run sentinel. A server-issued id (which
     # carries no marker) can NEVER satisfy the certificate — so this FACT provably rests on an id VIGIL drove
     # in, and a server-set-only id is NOT rounded to a FACT. Non-conclusive (a weaker LEAD, per the plan).
     if not _SFX_SENTINEL_RE.match(sentinel):
-        return OracleSignal(
-            kind=OracleKind.ACHIEVED_STATE, fired=False, confidence=0.0, conclusive=False,
+        return _sfx_signal(
+            False, observed=base,
             evidence=("fixed session id is not a VIGIL per-run sentinel (expected sfx_<hex>) — a server-issued "
-                      "id cannot mint this FACT; the app did not honour a client-fixed id (degrades to a LEAD)"),
-            observed=base)
+                      "id cannot mint this FACT; the app did not honour a client-fixed id (degrades to a LEAD)"))
 
     # No post-auth id observed ⇒ no channel-confirmed observation of the login's effect ⇒ INCONCLUSIVE.
     if post_auth_raw is None or not post_auth:
-        return OracleSignal(
-            kind=OracleKind.ACHIEVED_STATE, fired=False, confidence=0.0, conclusive=False,
-            evidence="no post-authentication session id was observed — cannot adjudicate fixation (inconclusive)",
-            observed=base)
+        return _sfx_signal(
+            False, observed=base,
+            evidence="no post-authentication session id was observed — cannot adjudicate fixation (inconclusive)")
 
-    # No POSITIVE authenticated-state discriminator was available (no success_marker; logged_out_markers can
-    # only DISPROVE auth, never prove it), so whether the fixed id is a LIVE session could not be decided — a
-    # bare 2xx/3xx is not evidence of authentication. Refuse to mint AND refuse to clear ⇒ INCONCLUSIVE.
-    if authenticated is None:
-        return OracleSignal(
-            kind=OracleKind.ACHIEVED_STATE, fired=False, confidence=0.0, conclusive=False,
-            evidence=("no positive authenticated-state discriminator was available to decide whether the "
-                      "VIGIL-fixed id is a live session — cannot adjudicate fixation (inconclusive)"),
-            observed=base)
+    # RE-DERIVE the achieved authenticated state from RAW retained bytes via the logged-out DIFFERENTIAL —
+    # never a pre-computed bool. None ⇒ undecidable (no valid marker / non-substantive authorized view / no
+    # substantive logged-out reference / marker present in BOTH views) ⇒ LEAD, per the round-4 principle.
+    s0_auth = _sfx_marker_authenticated(marker, obs.get("authorized_view"), obs.get("logged_out_ref"),
+                                        obs.get("logged_out_markers"), obs.get("logged_out_statuses"))
+    if s0_auth is None:
+        return _sfx_signal(
+            False, observed={**base, "marker_len": len(marker)},
+            evidence=("the fixed id's authenticated state could not be proven by a same-URL logged-out "
+                      "DIFFERENTIAL (no valid success marker, a non-substantive authorized view, no "
+                      "substantive logged-out reference, or a marker present in BOTH the fixed-session and "
+                      "logged-out views — a common token / chrome / soft-200 body) — cannot mint (LEAD)"))
 
     # The session-cookie VALUE was ROTATED at login (S1 != S0). Rotation ALONE is NOT proof of defense: an app
-    # can rotate the value yet leave the pre-auth-fixed id S0 valid (a real fixation). Only a re-probe showing
-    # S0 is DEAD is a channel-confirmed clean; a still-LIVE S0 under a rotated value is indistinguishable from
-    # a hand-forged rotation in the retained record, so we refuse to clear AND refuse to mint ⇒ INCONCLUSIVE.
+    # can rotate the value yet leave the pre-auth-fixed id S0 valid (a real fixation). Only a differential
+    # showing S0 is DEAD is a channel-confirmed clean; a still-LIVE S0 under a rotated value is
+    # indistinguishable from a hand-forged rotation in the retained record ⇒ refuse to clear AND to mint.
     if post_auth != sentinel:
-        if authenticated is True:
-            return OracleSignal(
-                kind=OracleKind.ACHIEVED_STATE, fired=False, confidence=0.0, conclusive=False,
+        if s0_auth is True:
+            return _sfx_signal(
+                False, observed={**base, "rotated": True, "s0_authenticated": True},
                 evidence=("session-cookie value was ROTATED at login yet the VIGIL-fixed pre-auth id still "
-                          "authenticates — a value rotation does not by itself prove the fixed id was "
-                          "invalidated; cannot conclusively clear (inconclusive)"),
-                observed={**base, "rotated": True, "authenticated_after_login": True})
-        return OracleSignal(
-            kind=OracleKind.ACHIEVED_STATE, fired=False, confidence=0.0, conclusive=True,
+                          "authenticates (proven by the logged-out differential) — a value rotation does not "
+                          "by itself prove the fixed id was invalidated; cannot conclusively clear (inconclusive)"))
+        return _sfx_signal(
+            False, conclusive=True, observed={**base, "rotated": True, "s0_authenticated": False},
             evidence=("session id was ROTATED at login and the VIGIL-fixed pre-auth id no longer authenticates "
-                      "— the app defends against fixation; did not fire"),
-            observed={**base, "rotated": True, "authenticated_after_login": authenticated})
+                      "— the app defends against fixation; did not fire"))
 
     # The fixed id survived unrotated but is not an authenticated session ⇒ no fixation risk. Confirmed clean.
-    if authenticated is not True:
-        return OracleSignal(
-            kind=OracleKind.ACHIEVED_STATE, fired=False, confidence=0.0, conclusive=True,
-            evidence=("the VIGIL-fixed id survived login but did not authenticate a protected request — not a "
-                      "live fixed session; did not fire"),
-            observed={**base, "authenticated_after_login": authenticated})
+    if s0_auth is not True:
+        return _sfx_signal(
+            False, conclusive=True, observed={**base, "s0_authenticated": False},
+            evidence=("the VIGIL-fixed id survived login unrotated but did not authenticate a protected "
+                      "request (the success marker is absent from its view) — not a live fixed session; did "
+                      "not fire"))
 
-    return OracleSignal(
-        kind=OracleKind.ACHIEVED_STATE,
-        fired=True,
-        confidence=0.92,
-        # A concrete, channel-confirmed achieved state was adjudicated over raw observed ids — decisive.
-        conclusive=True,
+    return _sfx_signal(
+        True, conf=0.92,
         evidence=(f"session fixation: the VIGIL-fixed pre-auth id {sentinel!r} SURVIVED the login sequence "
-                  f"(post-auth id is identical) AND authenticated a protected request — the app adopted an "
-                  f"attacker-fixable session id at authentication"),
-        observed={"sentinel_id": sentinel, "post_auth_id": post_auth,
-                  "authenticated_after_login": True, "cookie_name": cookie_name},
-    )
+                  f"(post-auth id is identical) AND authenticated a protected request — the operator success "
+                  f"marker is PRESENT in its fixed-session view yet PROVABLY ABSENT from a substantive same-URL "
+                  f"logged-out reference (the differential proves the marker is access-gated) — the app adopted "
+                  f"an attacker-fixable session id at authentication"),
+        observed={"sentinel_id": sentinel, "post_auth_id": post_auth, "cookie_name": cookie_name,
+                  "success_marker": marker, "s0_authenticated": True, "differential": "marker_present_"
+                  "in_fixed_session_view_absent_in_logged_out_reference"})
 
 
 # ---------------------------------------------------------------------------

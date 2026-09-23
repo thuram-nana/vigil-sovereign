@@ -396,6 +396,19 @@ class OracleKind(str, enum.Enum):
     # LEAD-level csp-unsafe-inline check: CSP_POSTURE is the FACT-capable posture oracle over the retained
     # header, re-derivable offline.
     CSP_POSTURE = "csp_posture"
+    # Wave-3.2 SESSION FIXATION (CWE-384) — its OWN dedicated achieved-state kind, held OUT of the frozen
+    # _ALL_ORACLES so oracle_version(ACHIEVED_STATE) is UNTOUCHED (session fixation carries its own
+    # oracle_version) and the unknown-class fallback stays EXACTLY 15. Like the AEGIS / posture / achieved
+    # members above, it is an ADDITIVE append reachable ONLY via its explicit BUG_CLASS_ORACLES row (keyed on
+    # the `session_fixation` ctx field NO benchmark/scan/engage finding carries), never via the frozen
+    # fallback, so `make gate` stays byte-identical. SESSION_FIXATION fires (0.92) ONLY when a VIGIL-fixed
+    # per-run sentinel session id (sfx_<hex>) SURVIVED the operator's login UNROTATED (post-auth id == the
+    # fixed id) AND the success_marker is PRESENT in the fixed-session view of the protected URL yet PROVABLY
+    # ABSENT from a SUBSTANTIVE same-URL LOGGED-OUT (no-cookie) reference — a DIFFERENTIAL re-derived from the
+    # RETAINED RAW bytes (never a bool) proving the marker is access-gated, not a common token / chrome / a
+    # benign soft-200 body both views share. A marker present in BOTH, no substantive logged-out reference, a
+    # rotated id, or a server-set-only id do NOT fire (LEAD / channel-confirmed clean).
+    SESSION_FIXATION = "session_fixation"
 
 
 class OracleProbe(BaseModel):

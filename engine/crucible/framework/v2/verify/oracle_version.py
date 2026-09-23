@@ -31,15 +31,13 @@ from .models import OracleKind
 
 # The pure oracle function(s) each kind dispatches to in ``verifier._run``. A kind whose dispatch selects
 # more than one function by context keys (TLS_WEAKNESS → protocol/cipher OR cert-signature; ACHIEVED_STATE
-# → predicate OR expected/observed OR session-fixation) lists ALL of them, so editing ANY body changes the
-# kind's version.
+# → predicate OR expected/observed) lists ALL of them, so editing ANY body changes the kind's version.
 # A test pins ``set(_ORACLE_FNS) == set(OracleKind)`` so a newly-added kind must register here.
 _ORACLE_FNS: dict[OracleKind, tuple[Callable[..., Any], ...]] = {
     OracleKind.DIFFERENTIAL_RESPONSE: (oracles.differential_response_oracle,),
     OracleKind.TIMING: (oracles.timing_oracle,),
     OracleKind.BOOLEAN_INFERENCE: (oracles.boolean_inference_oracle,),
-    OracleKind.ACHIEVED_STATE: (oracles.predicate_oracle, oracles.achieved_state_oracle,
-                                oracles.session_fixation_oracle),
+    OracleKind.ACHIEVED_STATE: (oracles.predicate_oracle, oracles.achieved_state_oracle),
     OracleKind.SIDE_EFFECT: (oracles.side_effect_oracle,),
     OracleKind.REFLECTION_CONTEXT: (oracles.reflection_context_oracle,),
     OracleKind.EVALUATION: (oracles.evaluation_oracle,),
@@ -83,6 +81,9 @@ _ORACLE_FNS: dict[OracleKind, tuple[Callable[..., Any], ...]] = {
     # Wave-2.4 CSP permissive-policy posture (retained-header parse; the achieved bypass reuses
     # DOM_EXECUTION and so needs no _ORACLE_FNS entry of its own).
     OracleKind.CSP_POSTURE: (oracles.csp_posture_oracle,),
+    # Wave-3.2 session fixation (CWE-384) — its OWN dedicated kind so editing its differential body changes
+    # ONLY oracle_version(SESSION_FIXATION), never oracle_version(ACHIEVED_STATE).
+    OracleKind.SESSION_FIXATION: (oracles.session_fixation_oracle,),
 }
 
 
