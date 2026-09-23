@@ -72,6 +72,38 @@ from .validation import CorpusTarget, ExpectedFinding
 _GUESTBOOK: dict[str, str] = {}
 
 # ---------------------------------------------------------------------------
+# CSRF-achieved model (Wave 3.3). A cookie-authenticated state-changing endpoint that
+# authorizes a write on the ambient session cookie ALONE, driven by a REAL headless browser:
+#   * GET  /csrf/login?mode=none|strict — VIGIL's OWN authenticated session: the SERVER sets the
+#                                      ambient session cookie WITH a SameSite attribute a real
+#                                      browser honours. mode=none (default) => SameSite=None;Secure
+#                                      (the VULNERABLE config: the browser SENDS it cross-site);
+#                                      mode=strict => SameSite=Strict (the DEFENDED config: the
+#                                      browser does NOT send it cross-site => must NEVER fire);
+#   * POST /csrf/transfer            — the VULNERABLE endpoint: accepts the write on the ambient
+#                                      session cookie with NO anti-CSRF token and NO Origin check
+#                                      → the planted achieved CSRF (when the cookie is SameSite=None);
+#   * POST /csrf/transfer-protected  — the BENIGN TWIN: the SAME write, but requires a valid
+#                                      anti-CSRF token in addition to the cookie, so a token-less
+#                                      cross-site write is rejected → must NEVER fire;
+#   * GET  /csrf/state[-protected]   — the AUTHORITATIVE post-state readback (an independent GET
+#                                      of the applied markers, NOT an echo of the write request).
+# The state-changing routes are DELIBERATELY NOT linked from the index and are POST-only, and the
+# login/state routes are unlinked, so the default GET-only benchmark crawl (which drives `make gate`)
+# never issues the write and never reaches an applied state — the default corpus + signed baseline
+# stay byte-identical. The FACT / non-fire is exercised only by the dedicated deep-profile browser
+# assertion (scanner/tests/test_csrf_achieved_browser.py), which drives the genuinely cross-site
+# form POST from VIGIL's own different-site attacker page. The unique per-probe markers accumulate
+# across probes (the oracle searches for THIS probe's marker), so no reset is needed.
+_CSRF_APPLIED: list[str] = []
+_CSRF_APPLIED_PROTECTED: list[str] = []
+# The ambient session cookie VIGIL's OWN authenticated session holds (name=value), and the anti-CSRF
+# token the protected twin additionally demands.
+_CSRF_SESSION_COOKIE_NAME = "csrf_session"
+_CSRF_SESSION_COOKIE_VALUE = "owner-authenticated-session"
+_CSRF_TOKEN_VALUE = "bench-csrf-ok"
+
+# ---------------------------------------------------------------------------
 # Client-side prototype pollution model (Wave 2.2). Two GET pages that both PARSE
 # the URL query, the fragment (location.hash) and a JSON `json=` value into an
 # object and reflect it, but differ in one way:
@@ -457,6 +489,79 @@ class BenchmarkHandler(BaseHTTPRequestHandler):
         body = f"<h2>Guestbook</h2><div class=comment>{stored}</div>"
         self._respond(200, _page("Guestbook", body))
 
+    # -- CSRF achieved (Wave 3.3) ------------------------------------------
+
+    def _csrf_post_fields(self) -> "dict[str, list[str]]":
+        length = int(self.headers.get("Content-Length", "0") or "0")
+        raw = self.rfile.read(length).decode("utf-8", "replace") if length else ""
+        return parse_qs(raw, keep_blank_values=True)
+
+    def _csrf_login(self) -> None:
+        # VIGIL's OWN authenticated session. The SERVER sets the ambient session cookie WITH a SameSite
+        # attribute a real browser honours: mode=none (default) is the VULNERABLE config (SameSite=None;
+        # Secure — the browser SENDS it on a cross-site top-level POST); mode=strict is the DEFENDED
+        # config (SameSite=Strict — the browser does NOT send it cross-site, so no CSRF is achievable).
+        # 127.0.0.1/localhost are secure contexts, so Secure cookies are accepted over http loopback.
+        mode = self._query("mode") or "none"
+        attr = "SameSite=Strict" if mode == "strict" else "SameSite=None; Secure"
+        cookie = f"{_CSRF_SESSION_COOKIE_NAME}={_CSRF_SESSION_COOKIE_VALUE}; Path=/; {attr}"
+        body = _page("Login", "<p>authenticated</p>")
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Set-Cookie", cookie)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _csrf_has_session(self) -> bool:
+        # The ambient session cookie is present. A real browser attaches it to a cross-site top-level POST
+        # ONLY when it was set SameSite=None (the vulnerable /csrf/login); a SameSite=Strict cookie is not
+        # sent cross-site, so this returns False on the defended config and the write is rejected.
+        return f"{_CSRF_SESSION_COOKIE_NAME}={_CSRF_SESSION_COOKIE_VALUE}" in (self.headers.get("Cookie", "") or "")
+
+    def _csrf_transfer(self) -> None:
+        # PLANTED BUG (CSRF achieved). The write is authorized on the ambient session cookie ALONE:
+        # no anti-CSRF token, no Origin check. With the cookie the marker is applied to the
+        # authoritative state; without it the write is rejected 403 (so the no-cookie control
+        # reaches no state change). State-changing POST — in a governed run it routes through the
+        # Wave-0.3 per-action approval; the test supplies the gated-write seam.
+        if not self._csrf_has_session():
+            self._respond(403, _page("Forbidden", "<p>no session</p>"))
+            return
+        marker = self._csrf_post_fields().get("marker", [""])[0]
+        if marker:
+            _CSRF_APPLIED.append(marker)
+        self._respond(201, _page("Transferred", "<p>transfer applied</p>"))
+
+    def _csrf_transfer_protected(self) -> None:
+        # SAFE (CSRF BENIGN TWIN). The SAME write, but it ADDITIONALLY requires a valid anti-CSRF
+        # token, so a token-less cross-site write (all VIGIL can send with only the ambient cookie)
+        # is rejected — the marker never reaches the authoritative state and the oracle must NEVER
+        # fire. (A SameSite=Lax cookie would ALSO not be sent cross-site; that twin is covered by the
+        # oracle unit test, since SameSite is a browser behaviour a server cannot enforce.)
+        if not self._csrf_has_session():
+            self._respond(403, _page("Forbidden", "<p>no session</p>"))
+            return
+        fields = self._csrf_post_fields()
+        if fields.get("csrf_token", [""])[0] != _CSRF_TOKEN_VALUE:
+            self._respond(403, _page("Forbidden", "<p>bad or missing anti-CSRF token</p>"))
+            return
+        marker = fields.get("marker", [""])[0]
+        if marker:
+            _CSRF_APPLIED_PROTECTED.append(marker)
+        self._respond(201, _page("Transferred", "<p>transfer applied</p>"))
+
+    def _csrf_state(self) -> None:
+        # AUTHORITATIVE post-state readback — an independent GET of the applied markers, never an echo
+        # of a write request. This is the observable post-state the oracle differential reads.
+        body = "<h2>state</h2><ul>" + "".join(f"<li>{html.escape(m)}</li>" for m in _CSRF_APPLIED) + "</ul>"
+        self._respond(200, _page("State", body))
+
+    def _csrf_state_protected(self) -> None:
+        body = ("<h2>state</h2><ul>"
+                + "".join(f"<li>{html.escape(m)}</li>" for m in _CSRF_APPLIED_PROTECTED) + "</ul>")
+        self._respond(200, _page("State", body))
+
     # -- client-side prototype pollution (Wave 2.2) ------------------------
 
     def _proto(self) -> None:
@@ -834,6 +939,14 @@ _ROUTES = {
     "/csp-permissive": BenchmarkHandler._csp_permissive,
     "/csp-wellformed": BenchmarkHandler._csp_wellformed,
     "/csp-neutralized": BenchmarkHandler._csp_neutralized,
+    # CSRF-achieved authoritative post-state readbacks + VIGIL's session-login (Wave 3.3).
+    # DELIBERATELY NOT linked from the index; the default GET-only crawl reaches these but the
+    # state routes render an EMPTY applied state (no write is ever POSTed by the default crawl)
+    # and the login route only Set-Cookies, so no finding is produced and the default corpus +
+    # signed baseline stay byte-identical.
+    "/csrf/login": BenchmarkHandler._csrf_login,
+    "/csrf/state": BenchmarkHandler._csrf_state,
+    "/csrf/state-protected": BenchmarkHandler._csrf_state_protected,
 }
 
 # POST surfaces (state-changing writes). Only the stored-XSS write surface A; the
@@ -841,6 +954,11 @@ _ROUTES = {
 # byte-identical.
 _POST_ROUTES = {
     "/guestbook": BenchmarkHandler._guestbook_write,
+    # CSRF-achieved state-changing writes (Wave 3.3). The default GET-only benchmark crawl never
+    # issues a POST, so these leave `make gate` byte-identical; exercised only by the deep-profile
+    # scanner/tests/test_csrf_achieved.py through the cross-site cookie / no-cookie differential.
+    "/csrf/transfer": BenchmarkHandler._csrf_transfer,
+    "/csrf/transfer-protected": BenchmarkHandler._csrf_transfer_protected,
 }
 
 

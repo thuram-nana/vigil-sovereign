@@ -1514,6 +1514,16 @@ def _redrive_branch_for(bug_class: str) -> "Optional[str]":
         # (verify/oracles.py:csp_posture_oracle). A well-formed / report-only / script-src-less header
         # keeps the claim a LEAD.
         "csp_posture": "csp_posture.header_weakness",
+        # Wave 3.3 — CSRF achieved re-drive (browser-backed, gated-workflow): a top-level form POST VIGIL
+        # issued from its OWN attacker page on a genuinely different SITE, where a REAL SameSite-honoring
+        # headless browser ACTUALLY attached the ambient session cookie cross-site (write through the 0.3
+        # per-action approval), confirmed by the FACT-capable ACHIEVED_STATE branch
+        # (verify/oracles.py:csrf_achieved_oracle) — which DERIVES cross_origin/ambient_only from the
+        # retained browser evidence — ONLY when a VIGIL-chosen unique marker reached the authoritative
+        # post-state WITH the ambient cookie but is ABSENT from the no-cookie control. A non-fire / no
+        # channel / browserless / a SameSite-protected cookie keeps the claim a LEAD (the weaker `csrf`
+        # posture class carries the token-not-enforced residual).
+        "csrf_achieved": "csrf_achieved.achieved_state",
     }
     branch = mapping.get(normalize_bug_class(bug_class))
     return branch if branch in branch_ids() else None

@@ -3989,6 +3989,239 @@ def csrf_posture_oracle(observed_control: Any) -> OracleSignal:
                                   "token_present_status": present, "token_absent_status": absent})
 
 
+def _csrf_achieved_signal(fired: bool, *, evidence: str, observed: dict,
+                          conf: float = 0.9) -> OracleSignal:
+    # kind is the FROZEN ACHIEVED_STATE (never a new OracleKind — _ALL_ORACLES stays 15); reachable ONLY
+    # via the `csrf_achieved` BUG_CLASS_ORACLES row keyed on a fresh ctx key. `conclusive` is True ONLY on a
+    # fire: a fire is a decisive, channel-confirmed achieved cross-site state change; a NON-fire is
+    # UNINFORMATIVE here (no channel / a SameSite-protected cookie / an enforced token) — never a CLEAN, so
+    # this branch is positive-only (clean_capable:false), unlike the predicate/achieved_state modes.
+    return OracleSignal(kind=OracleKind.ACHIEVED_STATE, fired=fired,
+                        confidence=(conf if fired else 0.0), conclusive=fired,
+                        evidence=evidence, observed=observed)
+
+
+# a marker VIGIL mints per probe must be long enough that it cannot incidentally pre-exist in an
+# authoritative post-state readback (the runner uses a >=16-hex token; the oracle floors it at 8).
+_CSRF_MARKER_MIN_LEN = 8
+
+# Field / header names that indicate an ANTI-CSRF TOKEN (a synchronizer token, double-submit token,
+# or custom guard header). If the OBSERVED cross-site write carried ANY of these, the request was NOT
+# authorized by the ambient session cookie ALONE — it is not the ambient-cookie-only topology this class
+# proves, so ambient_only is derived FALSE and the oracle REFUSES. Substring match on lowercased names;
+# the set errs toward REFUSAL (a false negative / LEAD is safe; a false achieved-CSRF FACT is not).
+_CSRF_TOKEN_INDICATORS = (
+    "csrf", "xsrf", "authenticity_token", "csrfmiddlewaretoken", "requestverificationtoken",
+    "antiforgery", "anti_forgery", "anti-forgery", "_token", "nonce", "verification_token",
+)
+
+
+def _csrf_origin_parts(origin: Any) -> "tuple[str, str] | None":
+    """(scheme, host) of a web origin, lowercased, or None when it is not a parseable http(s) origin.
+    The host is what the SameSite ``site`` boundary is derived from below."""
+    text = _coerce_text(origin).strip()
+    if not text:
+        return None
+    parts = urlsplit(text)
+    scheme = (parts.scheme or "").lower()
+    host = (parts.hostname or "").lower()
+    if scheme not in ("http", "https") or not host:
+        return None
+    return scheme, host
+
+
+def _csrf_registrable(host: str) -> str:
+    """A conservative registrable-site key for ``host``. An IP literal is its own site (the whole IP);
+    a single-label host (``localhost``) is itself; otherwise the last two labels (eTLD+1 heuristic — no
+    PSL, deliberately coarse: it only ever makes the cross-site test STRICTER / more likely to refuse)."""
+    h = (host or "").strip(".").lower()
+    if not h:
+        return ""
+    # IPv4/IPv6 literal → the literal is the site (127.0.0.1 and localhost are DIFFERENT sites).
+    try:
+        ipaddress.ip_address(h)
+        return h
+    except ValueError:
+        pass
+    labels = h.split(".")
+    if len(labels) <= 2:
+        return h
+    return ".".join(labels[-2:])
+
+
+def _csrf_cross_site(initiator: Any, target: Any) -> bool:
+    """Whether ``initiator`` and ``target`` are genuinely CROSS-SITE (schemeful-same-site is False):
+    both parse as http(s) origins, and either the scheme differs or their registrable sites differ.
+    A same-origin / same-site pair (or an unparseable origin) is NOT cross-site — so a same-origin
+    OBSERVATION can never satisfy the topology this class proves."""
+    a = _csrf_origin_parts(initiator)
+    b = _csrf_origin_parts(target)
+    if a is None or b is None:
+        return False
+    if a[1] == b[1]:                       # same host ⇒ same site (ports are NOT part of the site)
+        return False
+    if a[0] != b[0]:                       # schemeful same-site: a scheme mismatch is cross-site
+        return True
+    return _csrf_registrable(a[1]) != _csrf_registrable(b[1])
+
+
+def _csrf_ambient_cookie_attached(observed_control: Mapping, cookie_name: str) -> bool:
+    """Whether the SameSite-honoring browser ACTUALLY attached the ambient session cookie to the
+    cross-site write — the load-bearing SameSite-dissolution evidence, re-derived from the CDP-observed
+    ``associated_cookies`` (each ``{name, blocked_reasons}``) and corroborated by the observed ``Cookie``
+    request header. True ONLY when an entry named ``cookie_name`` has an EMPTY ``blocked_reasons`` list
+    (the browser sent it) AND that name appears in the observed Cookie header. A ``Lax``/``Strict`` cookie
+    carries a ``SameSite*`` blocked reason (or is simply absent) ⇒ False ⇒ the oracle REFUSES."""
+    name = (cookie_name or "").strip()
+    if not name:
+        return False
+    assoc = observed_control.get("associated_cookies")
+    if not isinstance(assoc, Sequence) or isinstance(assoc, (str, bytes)):
+        return False
+    attached = False
+    for entry in assoc:
+        if not isinstance(entry, Mapping):
+            continue
+        if _coerce_text(entry.get("name")).strip() != name:
+            continue
+        reasons = entry.get("blocked_reasons")
+        blocked = bool(reasons) if isinstance(reasons, Sequence) and not isinstance(reasons, (str, bytes)) else bool(_coerce_text(reasons).strip())
+        if not blocked:
+            attached = True
+    # Corroborate against the actual Cookie header the browser sent on the cross-site request.
+    cookie_header = _coerce_text(observed_control.get("observed_cookie_header"))
+    return attached and (f"{name}=" in cookie_header)
+
+
+def _csrf_anti_token_present(observed_control: Mapping) -> bool:
+    """Whether the OBSERVED cross-site write carried an anti-CSRF token in its body fields or request
+    headers (⇒ NOT ambient-cookie-only). Re-derived from the retained observed field / header names."""
+    names: list[str] = []
+    for key in ("observed_request_fields", "observed_request_header_names"):
+        seq = observed_control.get(key)
+        if isinstance(seq, Sequence) and not isinstance(seq, (str, bytes)):
+            names.extend(_coerce_text(n).strip().lower() for n in seq)
+    return any(ind in n for n in names for ind in _CSRF_TOKEN_INDICATORS)
+
+
+def csrf_achieved_oracle(observed_control: Any) -> OracleSignal:
+    """Fire on browser-OBSERVED evidence proving an ACHIEVED cross-site state change — a re-derivation
+    over evidence a real SameSite-honoring headless browser produced, NEVER a scanner's bare-bool say-so.
+    ONE rule, ``cross_site_state_change``, fires (0.9) ONLY when ALL hold:
+
+      * the method is state-changing (POST/PUT/PATCH/DELETE);
+      * ``cross_origin`` is DERIVED, not attested: the retained ``initiator_origin`` (the browser-attested
+        ``Origin`` of the page that issued the write) and ``target_origin`` are genuinely CROSS-SITE
+        (:func:`_csrf_cross_site` — different registrable sites / schemeful-same-site is False). A
+        same-origin observation can never satisfy this;
+      * the ambient session cookie was ACTUALLY ATTACHED cross-site by the browser: the CDP-observed
+        ``associated_cookies`` shows the ``ambient_cookie_name`` cookie with an EMPTY ``blocked_reasons``
+        AND it appears in the observed ``Cookie`` header (:func:`_csrf_ambient_cookie_attached`). This is
+        the SameSite-dissolution proof — a ``Lax``/``Strict`` cookie is NOT sent cross-site (it carries a
+        ``SameSite*`` blocked reason), so this REFUSES against a SameSite-defended target;
+      * ``ambient_only`` is DERIVED, not attested: the observed write carried NO anti-CSRF token in its
+        body fields or request headers (:func:`_csrf_anti_token_present` is False) — the cookie is the
+        sole credential;
+      * a VIGIL-chosen UNIQUE per-probe ``marker`` (>= 8 chars, so it cannot pre-exist) appears in the
+        AUTHORITATIVE post-state readback taken AFTER the ambient-cookie cross-site request
+        (``with_cookie_state``);
+      * that SAME marker is ABSENT from the readback of the NO-COOKIE control (``no_cookie_state``) — the
+        identical cross-site request issued FIRST WITHOUT the ambient cookie, so a marker already present
+        there attributes the change to something other than the cookie and REFUSES.
+
+    A state change reached WITH the browser-attached ambient cookie but NOT without it, from a genuinely
+    cross-site initiator, with no anti-CSRF token, proves the write was authorized SOLELY by the ambient
+    session cookie riding cross-site — an achieved CSRF. This DISSOLVES the SameSite objection that got
+    the naive version refused: against a target defended by ``SameSite=Strict``/``Lax`` ALONE the browser
+    does NOT attach the cookie (``blocked_reasons`` carries ``SameSiteStrict``/``SameSiteLax`` and no state
+    change is reached), so BOTH the attachment check AND the with-cookie readback fail → NO fire (correct).
+    An enforced anti-CSRF token rejects the token-less write (no state change) AND, if VIGIL had supplied
+    one, would trip the anti-token derivation → no fire. An endpoint that accepts the write with NO cookie
+    (merely unauthenticated, not CSRF) leaves the marker in ``no_cookie_state`` → no fire. A urllib /
+    same-origin / bare-bool context that lacks the browser-observed ``associated_cookies`` /
+    ``initiator_origin`` evidence can NEVER fire — the oracle refuses to mint without it. Pure +
+    deterministic; never raises."""
+    if not isinstance(observed_control, Mapping):
+        return _csrf_achieved_signal(False, evidence="no CSRF achieved-state evidence", observed={})
+    rule = _coerce_text(observed_control.get("rule")).strip().lower() or "cross_site_state_change"
+    if rule != "cross_site_state_change":
+        return _csrf_achieved_signal(
+            False, observed={"rule": rule},
+            evidence=f"unrecognised/lead-only CSRF-achieved rule {rule!r} (stays a lead)")
+    method = _coerce_text(observed_control.get("method")).strip().lower()
+    endpoint = _coerce_text(observed_control.get("endpoint")).strip()
+    where = (f" {method.upper()} {endpoint}").rstrip() if (method or endpoint) else ""
+    if method not in _STATE_CHANGING_METHODS:
+        return _csrf_achieved_signal(
+            False, observed={"rule": rule, "method": method or None},
+            evidence=(f"method {method!r} is not state-changing — an achieved CSRF is not applicable "
+                      "(REFUSE)"))
+    # DERIVE cross_origin from the OBSERVED origins (browser-attested Origin vs the target) — never a bool.
+    initiator_origin = _coerce_text(observed_control.get("initiator_origin")).strip()
+    target_origin = _coerce_text(observed_control.get("target_origin")).strip()
+    if not _csrf_cross_site(initiator_origin, target_origin):
+        return _csrf_achieved_signal(
+            False, observed={"rule": rule, "initiator_origin": initiator_origin or None,
+                             "target_origin": target_origin or None},
+            evidence=("the write's OBSERVED initiator origin is not genuinely CROSS-SITE from the target "
+                      "(a same-origin / same-site / unparseable observation, or a bare-bool context with no "
+                      "observed origins) — the cross-origin topology is UNPROVEN (REFUSE)"))
+    # DERIVE the SameSite-dissolution fact from the CDP-observed associated cookies — never a bool. This
+    # is what refuses a SameSite=Strict/Lax target: the browser did not attach the cookie cross-site.
+    ambient_cookie_name = _coerce_text(observed_control.get("ambient_cookie_name")).strip()
+    if not _csrf_ambient_cookie_attached(observed_control, ambient_cookie_name):
+        return _csrf_achieved_signal(
+            False, observed={"rule": rule, "ambient_cookie_name": ambient_cookie_name or None,
+                             "associated_cookies": observed_control.get("associated_cookies")},
+            evidence=("the SameSite-honoring browser did NOT attach the ambient session cookie to the "
+                      "cross-site write (no observed associated-cookie with empty blocked_reasons + a "
+                      "matching Cookie header) — a SameSite=Strict/Lax cookie, or the absence of the "
+                      "browser-observed cookie-attachment evidence, lands here (REFUSE)"))
+    # DERIVE ambient_only from the OBSERVED request — an anti-CSRF token defeats the ambient-cookie-only
+    # topology (and a bare-bool context with no observed request evidence stays safe: no fire above).
+    if _csrf_anti_token_present(observed_control):
+        return _csrf_achieved_signal(
+            False, observed={"rule": rule, "observed_request_fields": observed_control.get("observed_request_fields"),
+                             "observed_request_header_names": observed_control.get("observed_request_header_names")},
+            evidence=("the OBSERVED cross-site write carried an anti-CSRF token (body field or request "
+                      "header) — the write was NOT authorized by the ambient cookie ALONE (REFUSE)"))
+    marker = _coerce_text(observed_control.get("marker")).strip()
+    if len(marker) < _CSRF_MARKER_MIN_LEN:
+        return _csrf_achieved_signal(
+            False, observed={"rule": rule, "marker_len": len(marker)},
+            evidence=(f"the per-probe marker must be a VIGIL-chosen token of >= {_CSRF_MARKER_MIN_LEN} "
+                      "chars so it cannot pre-exist in the readback (REFUSE)"))
+    with_cookie = _coerce_text(observed_control.get("with_cookie_state"))
+    no_cookie = _coerce_text(observed_control.get("no_cookie_state"))
+    in_with = marker in with_cookie
+    in_no = marker in no_cookie
+    if not in_with:
+        return _csrf_achieved_signal(
+            False, observed={"rule": rule, "marker": marker, "in_with_cookie": in_with,
+                             "in_no_cookie": in_no},
+            evidence=(f"the marker does NOT appear in the authoritative post-state after the ambient-cookie "
+                      f"cross-site request{where} — no cross-site state change was reached (a SameSite "
+                      "cookie not sent cross-site, or an enforced token, would land here — correct non-fire)"))
+    if in_no:
+        return _csrf_achieved_signal(
+            False, observed={"rule": rule, "marker": marker, "in_with_cookie": in_with,
+                             "in_no_cookie": in_no},
+            evidence=("the marker ALSO appears in the NO-COOKIE control's post-state — the state change is "
+                      "NOT attributable to the ambient cookie (a merely-unauthenticated write, not CSRF) "
+                      "(REFUSE)"))
+    return _csrf_achieved_signal(
+        True, conf=0.9,
+        evidence=(f"a VIGIL-chosen unique marker reached the authoritative post-state after a cross-site "
+                  f"state-changing request{where}: the browser ATTACHED the ambient session cookie cross-site "
+                  "(observed, no SameSite block), carried NO anti-CSRF token, and the marker is ABSENT from "
+                  "the no-cookie control — the write was authorized solely by the ambient cookie riding "
+                  "cross-site (an achieved CSRF)"),
+        observed={"rule": rule, "method": method, "endpoint": endpoint or None, "marker": marker,
+                  "initiator_origin": initiator_origin, "target_origin": target_origin,
+                  "ambient_cookie_name": ambient_cookie_name, "in_with_cookie": in_with,
+                  "in_no_cookie": in_no})
+
+
 def _postmessage_signal(fired: bool, *, evidence: str, observed: dict, conf: float = 0.9) -> OracleSignal:
     return OracleSignal(kind=OracleKind.POSTMESSAGE_POSTURE, fired=fired,
                         confidence=(conf if fired else 0.0), evidence=evidence, observed=observed)

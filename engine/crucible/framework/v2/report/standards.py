@@ -357,6 +357,12 @@ _STANDARDS: dict[str, ControlMapping] = {
     "clickjacking": _m("A05:2021", ("CWE-1021",), pci=_MISCFG_PCI, soc2=_MISCFG_SOC2, iso=_MISCFG_ISO,
                        attack=()),
     "csrf": _m("A01:2021", ("CWE-352",), pci=_AC_PCI, soc2=_AC_SOC2, iso=_AC_ISO, attack=()),
+    # ---- CSRF ACHIEVED (Wave-3.3; CWE-352). The strictly-stronger ACHIEVED-STATE dual of the `csrf`
+    #      posture class above: a cross-site state change reached WITH only the ambient session cookie but
+    #      NOT without it (not merely a token unenforced) → OWASP A01:2021 (Broken Access Control), the same
+    #      access-control controls. ATT&CK has no clean enterprise technique for a browser-delivered CSRF →
+    #      honest empty. ----
+    "csrf_achieved": _m("A01:2021", ("CWE-352",), pci=_AC_PCI, soc2=_AC_SOC2, iso=_AC_ISO, attack=()),
     "postmessage": _m("A05:2021", ("CWE-346", "CWE-940"), pci=_MISCFG_PCI, soc2=_MISCFG_SOC2, iso=_MISCFG_ISO,
                       attack=()),
     # ---- Client-side prototype pollution (Wave-2.2; CWE-1321). An achieved-state client-side code-integrity
