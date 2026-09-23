@@ -59,14 +59,19 @@ def _cross_spec() -> CrossAccessSpec:
 
 
 def _probe(base: str, path: str):
-    # Three identities riding the SAME send: attacker = alice's authenticated session, victim = bob's
-    # authenticated session (ground truth), nocred = NO cookie (logged-out baseline that proves the read
-    # is authorization-gated, not public — round-2). /account requires auth, so the logged-out baseline is
-    # denied (403, no IBAN) while alice's cross-read reaches bob's IBAN: a genuine BOLA.
+    # FOUR identities riding the SAME send: attacker = alice's session (acme), victim/owner = bob's session
+    # (acme, ground truth), nocred = NO cookie (logged-out baseline, round-2), and — round-4 — unauth =
+    # carol's session (a DIFFERENT tenant, an authenticated-but-UNAUTHORIZED principal). /account grants an
+    # intra-tenant cross-read (alice reaches bob's IBAN, the achieved BOLA) but DENIES a cross-tenant read,
+    # so carol's 403 lacks bob's IBAN: clause (c) holds. The IBAN being ABSENT from BOTH the logged-out and
+    # the unauthorized-authenticated baselines proves it is genuinely access-gated PRIVATE data, not a
+    # reflected per-object token — the round-4 fourth-variant FP would appear in carol's read too.
     attacker_send = _send_factory(cookie="sess=alice-sess")
     victim_send = _send_factory(cookie="sess=bob-sess")
     nocred_send = _send_factory(cookie=None)
-    cfg = AccessControlConfig(victim_send=victim_send, nocred_send=nocred_send, cross_specs=(_cross_spec(),))
+    unauth_send = _send_factory(cookie="sess=carol-sess")
+    cfg = AccessControlConfig(victim_send=victim_send, nocred_send=nocred_send,
+                              unauth_send=unauth_send, cross_specs=(_cross_spec(),))
     (check,) = build_access_control_checks(cfg, enabled=True)
     req = HttpRequest(method="GET", url=f"{base}{path}?id={_ATTACKER_OWN_REF}")
     template = RequestTemplate(req)

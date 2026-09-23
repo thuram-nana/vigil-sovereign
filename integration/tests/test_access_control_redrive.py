@@ -72,13 +72,19 @@ def _make_cross_target():
         # authorization-gated proof) — the marker is absent, so the attacker's read WAS unauthorized.
         return {"status": 403, "body": "<html><nav>Home</nav>login required<footer>Acme</footer></html>"}
 
-    return attacker_send, victim_send, nocred_send
+    def unauth_send(req: HttpRequest) -> dict:
+        # round-4 same-ref UNAUTHORIZED-AUTHENTICATED baseline: a THIRD attacker-controlled principal that
+        # also lacks access to bob's object is DENIED (a genuine, bodied 403) WITHOUT bob's private marker
+        # (genuinely access-gated content) — the marker's ABSENCE here proves it is not a reflected token.
+        return {"status": 403, "body": "<html><nav>Home</nav>forbidden — not your record<footer>Acme</footer></html>"}
+
+    return attacker_send, victim_send, nocred_send, unauth_send
 
 
 def _confirmed_finding(bug_class: str = "idor") -> dict:
-    attacker_send, victim_send, nocred_send = _make_cross_target()
+    attacker_send, victim_send, nocred_send, unauth_send = _make_cross_target()
     cfg = AccessControlConfig(
-        victim_send=victim_send, nocred_send=nocred_send,
+        victim_send=victim_send, nocred_send=nocred_send, unauth_send=unauth_send,
         cross_specs=(CrossAccessSpec(bug_class=bug_class, ref_param="id", victim_ref=_VICTIM_REF,
                                      victim_discriminator=_VICTIM_SECRET, control_ref=_ATTACKER_OWN_REF),),
     )

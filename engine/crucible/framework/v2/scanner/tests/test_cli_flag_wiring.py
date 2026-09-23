@@ -170,13 +170,26 @@ def test_engage_cli_default_maps_flag_off(monkeypatch: pytest.MonkeyPatch, flag:
 def test_scan_access_control_threads_enable_and_config(capture_scan_campaign) -> None:
     rc = cli_mod.main([
         "http://127.0.0.1/", "--access-control",
-        "--ac-ref", "idor:id:42", "--ac-victim-header", "Cookie: session=bob"])
+        "--ac-ref", "idor:id:42", "--ac-victim-header", "Cookie: session=bob",
+        "--ac-unauth-header", "Cookie: session=carol"])
     assert rc == 0
     assert capture_scan_campaign.captured["enable_access_control"] is True
     cfg = capture_scan_campaign.captured["access_control_config"]
     assert cfg is not None
     assert [(s.bug_class, s.ref_param, s.victim_ref) for s in cfg.cross_specs] == [("idor", "id", "42")]
     assert callable(cfg.victim_send)   # victim identity bound from --ac-victim-header
+    assert callable(cfg.unauth_send)   # round-4 unauthorized-authenticated baseline from --ac-unauth-header
+
+
+def test_scan_access_control_without_unauth_header_is_lead_only(capture_scan_campaign) -> None:
+    # No --ac-unauth-header ⇒ the config carries no unauthorized-authenticated baseline ⇒ the pack is
+    # LEAD-only (a cross-read cannot mint a FACT), the enforced round-4 boundary.
+    rc = cli_mod.main([
+        "http://127.0.0.1/", "--access-control",
+        "--ac-ref", "idor:id:42", "--ac-victim-header", "Cookie: session=bob"])
+    assert rc == 0
+    cfg = capture_scan_campaign.captured["access_control_config"]
+    assert cfg is not None and cfg.unauth_send is None
 
 
 def test_scan_access_control_without_refs_is_documented_noop(capture_scan_campaign) -> None:
@@ -250,12 +263,20 @@ def test_engage_cli_notes_access_control_without_refs(
 _SECRET = "SECRET-BOB-INVOICE-total=9001-acct=bob@example.test"
 
 
+# user -> tenant. alice+bob share a tenant (the intra-tenant BOLA); carol is in another.
+_UTENANTS = {"alice": "acme", "bob": "acme", "carol": "globex"}
+# object id -> tenant (its owner's). object 2 is bob's (acme); object 1 is alice's own (acme).
+_OBJ_TENANT = {"1": "acme", "2": "acme"}
+
+
 class _IdorApp(BaseHTTPRequestHandler):
     """A broken-object-level-auth app that REQUIRES authentication (round-2): /obj is served only to a
-    valid session (a logged-out request is 403'd, so the content is authorization-GATED, not public), but
-    object-level authz is BROKEN — ANY authenticated session reads ANY id, so the authenticated attacker
-    (alice) cross-reads bob's object 2 and reaches its secret. The no-credential baseline gets 403 (no
-    secret), which is what proves the read was UNAUTHORIZED rather than public — the oracle's exact trigger."""
+    valid session (a logged-out request is 403'd, so the content is authorization-GATED, not public), and
+    object-level authz is BROKEN WITHIN a tenant — an authenticated session reads any id IN ITS OWN TENANT
+    (should be own-object-only), so the attacker (alice, acme) cross-reads bob's object 2 (acme) and reaches
+    its secret. A CROSS-tenant read is correctly denied: carol (globex) is 403'd — the round-4 same-ref
+    unauthorized-authenticated baseline that proves the secret is genuinely access-gated PRIVATE data, not a
+    reflected per-object token. The no-credential baseline is also 403'd. The oracle's exact trigger."""
 
     def log_message(self, *a: object) -> None:
         return
@@ -267,12 +288,16 @@ class _IdorApp(BaseHTTPRequestHandler):
         elif parsed.path == "/obj":
             m = re.search(r"session=([^;]+)", self.headers.get("Cookie", ""))
             user = m.group(1) if m else None
-            if user not in ("alice", "bob"):
+            if user not in ("alice", "bob", "carol"):
                 body, status = b"forbidden - login required", 403   # auth-gated: logged-out is denied
             else:
                 rid = (parse_qs(parsed.query).get("id") or ["1"])[0]
-                # broken object-level authz: any authenticated session reads any id
-                body, status = (_SECRET.encode() if rid == "2" else b"alice's own object 1"), 200
+                if _UTENANTS.get(user) != _OBJ_TENANT.get(rid, "acme"):
+                    # broken WITHIN a tenant, but a CROSS-tenant read is denied — carol's 403 baseline
+                    body, status = b"forbidden - cross-tenant access denied", 403
+                else:
+                    # broken object-level authz: any same-tenant session reads any id in its tenant
+                    body, status = (_SECRET.encode() if rid == "2" else b"alice's own object 1"), 200
         else:
             body, status = b"not found", 404
         self.send_response(status)
@@ -297,14 +322,16 @@ def _http_server() -> Iterator[str]:
 
 def test_access_control_flag_confirms_idor_end_to_end() -> None:
     with _http_server() as base:
-        # Three distinct identities (Wave 3.1 round-2 soundness): the ATTACKER is the authenticated auditor
-        # session (alice) that drives the campaign; the VICTIM is bob (--ac-victim-header swaps the Cookie);
-        # the NO-CREDENTIAL baseline is config's logged-out send (Cookie stripped). A fire requires the
-        # attacker's cross-read to reach bob's REF-INDEPENDENT private marker, that marker to be ABSENT from
-        # the attacker's own object (id=1) AND from the logged-out baseline (proving the content is
-        # authorization-gated, not public) — never a whole-body containment, a reflected id, or public data.
+        # FOUR distinct identities (Wave 3.1 round-4 soundness): the ATTACKER is the authenticated auditor
+        # session (alice, acme) that drives the campaign; the VICTIM is bob (--ac-victim-header swaps the
+        # Cookie); the NO-CREDENTIAL baseline is config's logged-out send (Cookie stripped); and — decisively —
+        # the UNAUTHORIZED-AUTHENTICATED baseline is carol (a DIFFERENT tenant, --ac-unauth-header). A fire
+        # requires alice's cross-read to reach bob's private marker, that marker to be ABSENT from alice's own
+        # object (id=1) AND from BOTH baselines (logged-out AND carol's cross-tenant 403) — proving the content
+        # is genuinely access-gated PRIVATE data, never a whole-body containment, a reflected token, or public.
         attacker_send = victim_send_with_headers(loopback_send, (("Cookie", "session=alice"),))
-        cfg = config_from_cli(loopback_send, ["Cookie: session=bob"], [f"idor:id:2|{_SECRET}|1"])
+        cfg = config_from_cli(loopback_send, ["Cookie: session=bob"], [f"idor:id:2|{_SECRET}|1"],
+                              unauth_headers=["Cookie: session=carol"])
         report = WebScanCampaign(
             attacker_send, max_pages=5, enable_oob=False,
             enable_access_control=True, access_control_config=cfg,

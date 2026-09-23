@@ -943,6 +943,7 @@ def run_engagement(
     enable_access_control: bool = False,
     access_control_config: "AccessControlConfig | None" = None,
     access_control_victim_headers: "tuple[str, ...]" = (),
+    access_control_unauth_headers: "tuple[str, ...]" = (),
     access_control_refs: "tuple[str, ...]" = (),
     priors: object = None,
     transfer_archetype: str | None = None,
@@ -1204,7 +1205,8 @@ def run_engagement(
         if enable_access_control and ac_config is None and access_control_refs:
             from .scanner.access_control import config_from_cli
             ac_config = config_from_cli(
-                ex.gated_fetch, access_control_victim_headers, access_control_refs)
+                ex.gated_fetch, access_control_victim_headers, access_control_refs,
+                unauth_headers=access_control_unauth_headers)
         try:
             return WebScanCampaign(
                 _seed_recording_send,
@@ -1854,6 +1856,13 @@ def main(argv: list[str]) -> int:
                         help="A header authenticating the VICTIM identity (the ground truth), e.g. "
                              "'Cookie: session=BOB'. Repeatable; replaces the same-named header on "
                              "the victim probe.")
+    parser.add_argument("--ac-unauth-header", action="append", default=None, metavar="NAME: VALUE",
+                        help="A header authenticating a THIRD, UNAUTHORIZED principal that also lacks "
+                             "access to the victim's object, e.g. 'Cookie: session=CAROL'. Repeatable. "
+                             "The round-4 same-ref unauthorized-authenticated baseline: a cross-read "
+                             "mints a FACT only when the victim's marker is ABSENT from this principal's "
+                             "read of the same ref (a reflected per-object token cannot mint). Without "
+                             "it the access-control pack is LEAD-only.")
     parser.add_argument("--recon", action="store_true",
                         help="Run the Intelligence Engine alongside the scan: resolve an "
                              "asset inventory into the shared world-model and produce a "
@@ -2140,6 +2149,7 @@ def _engage_body(args: argparse.Namespace, spine: object) -> int:
             use_library=args.library,
             enable_access_control=args.access_control,
             access_control_victim_headers=tuple(args.ac_victim_header or ()),
+            access_control_unauth_headers=tuple(args.ac_unauth_header or ()),
             access_control_refs=tuple(args.ac_ref or ()),
             enable_defender=args.defender,
             defender_ruleset=args.defender_ruleset,

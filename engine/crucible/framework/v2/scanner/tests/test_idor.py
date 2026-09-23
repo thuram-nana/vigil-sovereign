@@ -1,11 +1,15 @@
 """
-IDOR / BOLA producer — a two-identity, oracle-confirmed unauthorized read.
+IDOR / BOLA producer — a three-identity, oracle-confirmed unauthorized read.
 
-A two-user app serves documents. Acting as alice, the check requests bob's
-document. On the VULNERABLE app the response reveals bob's content (cross-tenant
-read) and the achieved-state oracle confirms it; on the SECURE app the request is
-403'd and nothing is confirmed. Authorization is proven by what was actually
-read, not by a numeric id's presence.
+A three-user app serves documents. alice + bob share a tenant; carol is in another.
+Acting as alice, the check requests bob's document. On the VULNERABLE app object-level
+authz is broken WITHIN a tenant (alice reads bob's doc — the achieved BOLA) but a
+CROSS-tenant read is denied, so carol (a THIRD, authenticated-but-UNAUTHORIZED principal)
+is 403'd — the round-4 same-ref unauthorized-authenticated baseline that proves bob's
+secret is genuinely access-gated PRIVATE content, not a reflected per-object token. On the
+SECURE app alice's request is 403'd and nothing is confirmed. Authorization is proven by
+the 3-view differential (owner-present, attacker-present, unauthorized-absent), not by a
+numeric id's presence.
 """
 
 from __future__ import annotations
@@ -26,7 +30,9 @@ from framework.v2.scanner.session import AuthSession, LoginSequence
 
 # doc id -> (owner, secret content)
 _DOCS = {"1": ("alice", "alice-tax-return"), "2": ("bob", "bob-medical-record")}
-_CREDS = {"alice": "pw-alice", "bob": "pw-bob"}
+_CREDS = {"alice": "pw-alice", "bob": "pw-bob", "carol": "pw-carol"}
+# user -> tenant. alice+bob share a tenant (the intra-tenant BOLA); carol is in another.
+_TENANTS = {"alice": "acme", "bob": "acme", "carol": "globex"}
 
 
 def _make_handler(enforce_owner: bool) -> type[BaseHTTPRequestHandler]:
@@ -70,10 +76,16 @@ def _make_handler(enforce_owner: bool) -> type[BaseHTTPRequestHandler]:
                 self._reply(404, b"no such doc")
                 return
             owner, secret = doc
-            if enforce_owner and owner != user:
-                self._reply(403, b"forbidden")  # secure: object-level authz
+            if enforce_owner:
+                if owner != user:
+                    self._reply(403, b"forbidden")  # secure: strict object-level authz (own-only)
+                    return
+            elif _TENANTS.get(user) != _TENANTS.get(owner):
+                # vulnerable app, but a CROSS-tenant read is still denied — this is carol's 403, the
+                # round-4 unauthorized-authenticated baseline (a distinct body, not a logged-out marker).
+                self._reply(403, b"cross-tenant read blocked")
                 return
-            # vulnerable path (or the owner): returns the object content
+            # vulnerable intra-tenant path (or the owner): returns the object content
             self._reply(200, f"doc {doc_id} owner={owner} secret={secret}".encode())
 
     return _H
@@ -120,14 +132,18 @@ def _session(base: str, user: str) -> AuthSession:
 
 
 def _idor_check(base: str) -> IdorCheck:
-    # attacker is the auditor's session (alice); victim is bob, ref = bob's doc "2". The victim-unique
+    # attacker is the auditor's session (alice); victim/owner is bob, ref = bob's doc "2". The victim-unique
     # discriminator is bob's private secret content (never in alice's own doc), so a fire is the achieved
     # cross-tenant read of bob's PRIVATE marker — not a whole-body containment on shared boilerplate. The
-    # no-credential baseline is the RAW send (no session cookie): the app 401s a logged-out request, proving
-    # the read is authorization-gated (round-2), so alice's cross-read is a genuine UNAUTHORIZED access.
+    # no-credential baseline is the RAW send (no session cookie): the app 401s a logged-out request (round-2).
+    # The round-4 unauthorized-authenticated baseline is carol (a DIFFERENT tenant): her same-ref read is
+    # 403'd, so bob's marker is ABSENT from it — proving the content is genuinely access-gated PRIVATE data,
+    # not a reflected per-object token. Both baselines lacking the marker + alice reaching it => a sound BOLA.
     bob = _session(base, "bob")
+    carol = _session(base, "carol")
     return IdorCheck(id="idor-doc", ref_param="id", victim_ref="2", victim_send=bob.send,
-                     victim_discriminator="bob-medical-record", control_ref="1", nocred_send=_raw_send)
+                     victim_discriminator="bob-medical-record", control_ref="1",
+                     nocred_send=_raw_send, unauth_send=carol.send)
 
 
 def test_idor_confirmed_on_vulnerable_app() -> None:

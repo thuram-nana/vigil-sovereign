@@ -120,10 +120,15 @@ GROUND_TRUTH = GroundTruth(
 # The deliberately-vulnerable benchmark app (loopback only)
 # ---------------------------------------------------------------------------
 
-# Two tenants keyed by an opaque session cookie. No login flow is needed — the
-# cookie *is* the identity — which keeps the harness deterministic. The IDOR
-# endpoint deliberately omits the owner check.
-_SESSIONS = {"crucible-alice": "alice", "crucible-bob": "bob"}
+# Three identities keyed by an opaque session cookie. No login flow is needed — the
+# cookie *is* the identity — which keeps the harness deterministic. /document has a
+# BROKEN object-level authz (a same-TENANT peer reads another user's doc) but correctly
+# denies a CROSS-tenant read — so alice (acme) cross-reads bob's (acme) doc (the BOLA)
+# while carol (globex) is DENIED it: the round-4 same-ref unauthorized-authenticated
+# baseline that proves the secret is genuinely access-gated, not a reflected token.
+_SESSIONS = {"crucible-alice": "alice", "crucible-bob": "bob", "crucible-carol": "carol"}
+# user -> tenant. alice+bob share a tenant (the intra-tenant BOLA); carol is in another.
+_TENANTS = {"alice": "acme", "bob": "acme", "carol": "globex"}
 _DOCS = {
     "1": ("alice", "alice-private-tax-return-A1B2C3"),
     "2": ("bob", "bob-confidential-medical-record-X9Y8Z7"),
@@ -201,9 +206,13 @@ class _BenchmarkApp(BaseHTTPRequestHandler):
             return
 
         if sp.path == "/document":
-            # VULN idor: returns the requested object with NO owner check, so a
-            # logged-in tenant can read another tenant's document. Unknown ids
-            # return a constant, so the SQLi/XSS probes see no differential.
+            # VULN idor/bola: authentication is REQUIRED (a logged-out request is 401'd, so the
+            # content is authorization-gated), and object-level authz is BROKEN — a caller may read
+            # ANY doc IN THEIR OWN TENANT (it should be own-doc-only), so a same-tenant peer (alice)
+            # cross-reads bob's doc and reaches its secret (the achieved BOLA). A CROSS-tenant read is
+            # correctly DENIED (403) — so carol (a different tenant) is the round-4 unauthorized-
+            # authenticated baseline that proves the secret is genuinely access-gated, not reflected.
+            # Unknown ids return a constant, so the SQLi/XSS probes see no differential.
             user = self._user()
             if user is None:
                 self._reply(401, b"authentication required")
@@ -213,6 +222,9 @@ class _BenchmarkApp(BaseHTTPRequestHandler):
                 self._reply(404, b"no such document")
                 return
             owner, secret = doc
+            if _TENANTS.get(user) != _TENANTS.get(owner):
+                self._reply(403, b"forbidden - cross-tenant access denied")
+                return
             self._reply(200, f"document owner={owner} body={secret}".encode())
             return
 
@@ -382,21 +394,26 @@ def _default_campaign(send: Send, *, insertion_kinds: tuple[InsertionKind, ...])
     second identity (the victim's send) which the default check set cannot carry
     on its own, so the harness supplies it here."""
     victim_send = _with_cookie(_raw_send, "session=crucible-bob")
+    # Wave 3.1 round-4: carol is a THIRD, authenticated-but-UNAUTHORIZED identity (a different tenant) who
+    # is DENIED bob's doc — the same-ref unauthorized-authenticated baseline. Because /document echoes no
+    # reflected per-object token, carol's 403 lacks bob's discriminator, so clause (c) holds and the genuine
+    # intra-tenant BOLA still mints; the fourth-variant reflected-token FP would appear in carol's read too.
+    unauth_send = _with_cookie(_raw_send, "session=crucible-carol")
     checks = (
         BOOLEAN_SQLI,
         REFLECTED_XSS,
         # Wave 3.1 soundness: the victim-UNIQUE discriminator (bob's private record content) is what the
         # attacker's cross-read must reach — never a whole-body containment on shared boilerplate. The
         # attacker's own doc "1" is the negative control (bob's marker must be absent there, and that
-        # control read is a SUBSTANTIVE 200 so the not-contains is not vacuous — round-3). Wave 3.1
-        # round-2/round-3: the no-credential baseline is the RAW send (no session cookie) — /document 401s a
-        # logged-out request. That 401 is a GENUINE authorization-denial baseline (a valid gating proof,
-        # NOT a vacuous 5xx/empty), so the discriminator's ABSENCE from it PROVES the content is
-        # authorization-gated (not public/reflected) while the substantive victim read still confirms the
-        # attacker's cross-read WAS unauthorized.
+        # control read is a SUBSTANTIVE 200 so the not-contains is not vacuous — round-3). The no-credential
+        # baseline is the RAW send (no session cookie) — /document 401s a logged-out request (a genuine
+        # authorization-denial, round-2). The round-4 unauthorized-authenticated baseline is carol (a
+        # different-tenant authenticated principal) whose cross-tenant read is 403'd: the discriminator's
+        # ABSENCE from BOTH baselines PROVES the content is genuinely access-gated PRIVATE data (not public,
+        # not a reflected per-object token), while alice's same-tenant cross-read reaches bob's secret.
         IdorCheck(id="idor-doc", ref_param="docid", victim_ref="2", victim_send=victim_send,
                   victim_discriminator="bob-confidential-medical-record-X9Y8Z7", control_ref="1",
-                  nocred_send=_raw_send),
+                  nocred_send=_raw_send, unauth_send=unauth_send),
     )
     return WebScanCampaign(
         send, checks=checks, insertion_kinds=insertion_kinds, enable_oob=False,

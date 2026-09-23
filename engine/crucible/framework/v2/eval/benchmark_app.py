@@ -110,9 +110,15 @@ _CSRF_TOKEN_VALUE = "bench-csrf-ok"
 # only when an attacker's cross-read REACHES the victim's discriminator — never a
 # whole-body containment over shared boilerplate.
 #   * /account       — the PLANTED IDOR/BOLA: authentication REQUIRED (logged-out is
-#                      denied, so the content is authorization-gated) but object-level
-#                      authz is BROKEN — any AUTHENTICATED session reads any id, reaching
-#                      the victim IBAN; a no-credential baseline gets 403 (no IBAN);
+#                      denied, so the content is authorization-gated) and object-level
+#                      authz is BROKEN — an authenticated session reads any account IN
+#                      ITS OWN TENANT (should be own-account-only), so a same-tenant peer
+#                      (alice) cross-reads bob's IBAN (the achieved BOLA); a CROSS-tenant
+#                      read is correctly DENIED (403). A no-credential baseline gets 403
+#                      (no IBAN), and a THIRD, authenticated-but-UNAUTHORIZED principal
+#                      (carol, a different tenant) gets 403 too — the round-4 same-ref
+#                      unauthorized-authenticated baseline that proves the IBAN is
+#                      genuinely access-gated PRIVATE data, not a reflected per-object token;
 #   * /account/safe  — the BENIGN TWIN: object-level authz ENFORCED, a caller reads
 #                      only the account its OWN session cookie owns, so an attacker
 #                      requesting the victim's id gets 403 with NO discriminator and
@@ -127,8 +133,11 @@ _ACCOUNTS: dict[str, tuple[str, str]] = {
     "1": ("alice", "IBAN-ALICE-GB29-NWBK-6016-1331-9268-19"),
     "2": ("bob", "IBAN-BOB-DE89-VICTIM-UNIQUE-3704-0044-0532-0130-00"),
 }
-# session cookie value -> the account id that session legitimately owns
-_ACCOUNT_SESSIONS: dict[str, str] = {"alice-sess": "1", "bob-sess": "2"}
+# session cookie value -> the account id that session legitimately owns. carol owns account 3 (a
+# different tenant); she is a valid authenticated principal but has NO access to alice's/bob's tenant.
+_ACCOUNT_SESSIONS: dict[str, str] = {"alice-sess": "1", "bob-sess": "2", "carol-sess": "3"}
+# account id -> tenant. alice(1)+bob(2) share a tenant (the intra-tenant BOLA); carol(3) is in another.
+_ACCOUNT_TENANTS: dict[str, str] = {"1": "acme", "2": "acme", "3": "globex"}
 
 
 def _account_caller(cookie_header: str) -> str | None:
@@ -602,16 +611,18 @@ class BenchmarkHandler(BaseHTTPRequestHandler):
     # -- two-identity access control (Wave 3.1) ----------------------------
 
     def _account(self) -> None:
-        # PLANTED BUG (IDOR / BOLA / BFLA) — a two-identity object endpoint that REQUIRES
-        # authentication (a logged-out caller is denied) but has BROKEN object-level
-        # authorization: ANY *authenticated* session may read ANY account by id, so an
-        # attacker reaching the victim's id sees the victim's UNIQUE private discriminator
-        # (its IBAN). This is the exact achieved cross-tenant read the sound IdorCheck
-        # confirms. Authentication IS required so the content is authorization-GATED (not
-        # public): a no-credential baseline gets 403 with NO discriminator, which the
-        # round-2 sound check needs to PROVE the read was unauthorized rather than public.
-        # GET-only. Unlinked from the index and never crawled by the default GET benchmark,
-        # so `make gate` is byte-identical.
+        # PLANTED BUG (IDOR / BOLA / BFLA) — a three-identity object endpoint that REQUIRES
+        # authentication (a logged-out caller is denied) with BROKEN object-level authorization:
+        # an authenticated session may read ANY account IN ITS OWN TENANT (it should be
+        # own-account-only), so a same-tenant peer (alice) cross-reads bob's account and sees the
+        # victim's UNIQUE private discriminator (its IBAN) — the achieved intra-tenant BOLA. A
+        # CROSS-tenant read is correctly DENIED (403). Authentication IS required so the content is
+        # authorization-GATED (not public): a no-credential baseline gets 403 with NO discriminator,
+        # and a THIRD, authenticated-but-UNAUTHORIZED principal (carol, a different tenant) ALSO gets
+        # 403 with NO discriminator — the round-4 same-ref unauthorized-authenticated baseline that
+        # proves the IBAN is genuinely access-gated PRIVATE data, not a reflected per-object token.
+        # GET-only. Unlinked from the index and never crawled by the default GET benchmark, so
+        # `make gate` is byte-identical.
         acct = self._query("id") or "1"
         rec = _ACCOUNTS.get(acct)
         if rec is None:
@@ -623,7 +634,14 @@ class BenchmarkHandler(BaseHTTPRequestHandler):
             self._respond(403, _page("403", "<h1>Forbidden</h1>"
                                      "<p>Standard Acme Bank statement footer.</p>"))
             return
-        # BROKEN object-level authz: an authenticated caller may read ANY account, not only its own.
+        # BROKEN object-level authz within a tenant, but a CROSS-tenant read is correctly denied: an
+        # authenticated caller reads accounts in its OWN tenant (not only its own account). carol (a
+        # different tenant) is thus DENIED bob's account — the round-4 unauthorized-authenticated baseline.
+        if _ACCOUNT_TENANTS.get(caller) != _ACCOUNT_TENANTS.get(acct):
+            self._respond(403, _page("403", "<h1>Forbidden</h1>"
+                                     "<p>cross-tenant access denied</p>"
+                                     "<p>Standard Acme Bank statement footer.</p>"))
+            return
         body = (f"<h2>Account {acct}</h2><p>holder={rec[0]}</p>"
                 f"<p>iban={rec[1]}</p><p>Standard Acme Bank statement footer.</p>")
         self._respond(200, _page("Account", body))

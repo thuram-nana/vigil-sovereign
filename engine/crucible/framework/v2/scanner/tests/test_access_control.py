@@ -6,13 +6,19 @@ mass_assignment/privilege_escalation) behind an explicit ``enabled`` flag, defau
 
   * default-OFF: ``build_access_control_checks`` returns () unless enabled AND configured, so the pack
     is gate-neutral (never in DEFAULT_CHECKS / the library).
-  * the two-identity CROSS-READ path fires the achieved-state oracle on a vulnerable target and does
-    NOT fire on a correctly-authorised (403) target — for each of the six cross classes.
+  * the CROSS-READ path fires the achieved-state oracle on a vulnerable target and does NOT fire on a
+    correctly-authorised (403) target — for each of the six cross classes.
   * mass-assignment confirms ONLY on a real persisted state change (privileged field present AFTER but
     absent BEFORE), never on a secure app that ignores the field.
   * integration through the real AuditEngine with the seeded checks.
+  * ROUND-4 (3-view differential): a fire requires the datum to be PRESENT in the owner's read AND the
+    attacker's cross-read, PROVABLY ABSENT from a same-ref UNAUTHORIZED-AUTHENTICATED baseline (and from
+    the logged-out baseline) AND from the attacker's own control object. A per-object REFLECTED token
+    echoed into an authenticated soft-deny appears in the unauthorized baseline too => it is a LEAD, not a
+    FACT; absent that baseline the class DOWNGRADES to a LEAD. Only genuinely access-gated PRIVATE data fires.
 
-The oracle is the sole authority: a 403 / unchanged object fails the predicate and is never a finding.
+The oracle is the sole authority: a 403 / unchanged object / reflected token fails the predicate and is
+never a finding.
 """
 
 from __future__ import annotations
@@ -47,11 +53,13 @@ def _requested_id(req: HttpRequest) -> str:
 
 
 def _make_cross_target(vulnerable: bool):
-    """Return ``(attacker_send, victim_send, nocred_send)`` for a two-identity object endpoint. The victim
-    (authenticated as bob) always sees its own object (ground truth). The attacker (authenticated as a
-    DIFFERENT user) sees it too iff the app has broken object-level authz; a secure app returns 403. The
-    no-credential (logged-out) baseline is ALWAYS denied — the content is authentication-GATED, so a genuine
-    cross-read is the attacker's UNAUTHORIZED access, not public data."""
+    """Return ``(attacker_send, victim_send, nocred_send, unauth_send)`` for a three-identity object
+    endpoint. The victim/owner (bob) always sees its own object (ground truth). The attacker (a DIFFERENT
+    user) sees it too iff the app has broken object-level authz; a secure app returns 403. The no-credential
+    (logged-out) baseline is ALWAYS denied. The round-4 UNAUTHORIZED-AUTHENTICATED baseline (carol, a THIRD
+    attacker-controlled principal that also lacks access) is ALWAYS DENIED a substantive 200 soft-deny that
+    LACKS the private marker — so a genuine cross-read reaches a datum ABSENT from the same-ref unauthorized
+    view (genuinely access-gated PRIVATE content, not a reflected per-object token)."""
 
     def victim_send(req: HttpRequest) -> dict:
         # bob's own session: he legitimately sees object 2.
@@ -69,7 +77,13 @@ def _make_cross_target(vulnerable: bool):
         # is authorization-gated, not public/reflected).
         return {"status": 403, "body": "forbidden — login required"}
 
-    return attacker_send, victim_send, nocred_send
+    def unauth_send(req: HttpRequest) -> dict:
+        # carol — a THIRD, authenticated-but-UNAUTHORIZED principal — reads the SAME ref but is DENIED bob's
+        # private record: a substantive 200 soft-deny that carries the same shell WITHOUT the marker. Its
+        # ABSENCE here is the round-4 decisive proof the datum is genuinely access-gated, not reflected.
+        return {"status": 200, "body": "<html><nav>Home</nav>this record is not available to you<footer>Acme</footer></html>"}
+
+    return attacker_send, victim_send, nocred_send, unauth_send
 
 
 def _obj_template() -> tuple[RequestTemplate, object]:
@@ -83,7 +97,7 @@ def _obj_template() -> tuple[RequestTemplate, object]:
 
 
 def test_pack_is_off_by_default() -> None:
-    _, victim_send, _ = _make_cross_target(vulnerable=True)
+    _, victim_send, _, _ = _make_cross_target(vulnerable=True)
     cfg = AccessControlConfig(
         victim_send=victim_send,
         cross_specs=default_cross_specs(victim_ref=_VICTIM_REF, victim_discriminator=_VICTIM_SECRET))
@@ -93,7 +107,7 @@ def test_pack_is_off_by_default() -> None:
 
 
 def test_enabled_pack_builds_all_seven_classes() -> None:
-    _, victim_send, _ = _make_cross_target(vulnerable=True)
+    _, victim_send, _, _ = _make_cross_target(vulnerable=True)
     ma = MassAssignmentCheck(
         id="ac-ma", field="role", privileged_value="admin",
         readback_send=lambda r: {"status": 200, "body": ""},
@@ -112,9 +126,9 @@ def test_enabled_pack_builds_all_seven_classes() -> None:
 
 
 def _run_cross(bug_class: str, vulnerable: bool):
-    attacker_send, victim_send, nocred_send = _make_cross_target(vulnerable)
+    attacker_send, victim_send, nocred_send, unauth_send = _make_cross_target(vulnerable)
     cfg = AccessControlConfig(
-        victim_send=victim_send, nocred_send=nocred_send,
+        victim_send=victim_send, nocred_send=nocred_send, unauth_send=unauth_send,
         cross_specs=(CrossAccessSpec(bug_class=bug_class, ref_param=_REF_PARAM, victim_ref=_VICTIM_REF,
                                      victim_discriminator=_VICTIM_SECRET, control_ref=_ATTACKER_OWN_REF),),
     )
@@ -226,9 +240,9 @@ def test_mass_assignment_write_echo_readback_does_not_confirm() -> None:
 
 
 def test_seeded_checks_run_through_the_audit_engine() -> None:
-    attacker_send, victim_send, nocred_send = _make_cross_target(vulnerable=True)
+    attacker_send, victim_send, nocred_send, unauth_send = _make_cross_target(vulnerable=True)
     cfg = AccessControlConfig(
-        victim_send=victim_send, nocred_send=nocred_send,
+        victim_send=victim_send, nocred_send=nocred_send, unauth_send=unauth_send,
         cross_specs=(CrossAccessSpec(bug_class="idor", ref_param=_REF_PARAM, victim_ref=_VICTIM_REF,
                                      victim_discriminator=_VICTIM_SECRET, control_ref=_ATTACKER_OWN_REF),),
     )
@@ -266,9 +280,9 @@ def test_parse_cross_spec_rejects_unknown_class_and_bad_shape() -> None:
 
 
 def test_access_control_finding_shapes_the_certify_input() -> None:
-    attacker_send, victim_send, nocred_send = _make_cross_target(vulnerable=True)
+    attacker_send, victim_send, nocred_send, unauth_send = _make_cross_target(vulnerable=True)
     cfg = AccessControlConfig(
-        victim_send=victim_send, nocred_send=nocred_send,
+        victim_send=victim_send, nocred_send=nocred_send, unauth_send=unauth_send,
         cross_specs=(CrossAccessSpec(bug_class="idor", ref_param=_REF_PARAM, victim_ref=_VICTIM_REF,
                                      victim_discriminator=_VICTIM_SECRET, control_ref=_ATTACKER_OWN_REF),),
     )
@@ -302,14 +316,18 @@ def _shared_boilerplate_target():
     def nocred_send(req: HttpRequest) -> dict:
         return {"status": 403, "body": shell_head + "<p>login required</p>" + shell_tail}
 
-    return attacker_send, victim_send, nocred_send
+    def unauth_send(req: HttpRequest) -> dict:
+        # a THIRD unauthorized-authenticated principal also gets the shared shell only (no victim line).
+        return {"status": 403, "body": shell_head + "<p>this record is not available to you</p>" + shell_tail}
+
+    return attacker_send, victim_send, nocred_send, unauth_send
 
 
 def test_shared_boilerplate_does_not_fire_the_discriminator_check() -> None:
     # Attacker never reaches the victim's unique discriminator, only the shared shell — must NOT fire.
-    attacker_send, victim_send, nocred_send = _shared_boilerplate_target()
+    attacker_send, victim_send, nocred_send, unauth_send = _shared_boilerplate_target()
     cfg = AccessControlConfig(
-        victim_send=victim_send, nocred_send=nocred_send,
+        victim_send=victim_send, nocred_send=nocred_send, unauth_send=unauth_send,
         cross_specs=(CrossAccessSpec(bug_class="idor", ref_param=_REF_PARAM, victim_ref=_VICTIM_REF,
                                      victim_discriminator=_VICTIM_SECRET, control_ref=_ATTACKER_OWN_REF),),
     )
@@ -323,9 +341,9 @@ def test_shared_boilerplate_does_not_fire_the_discriminator_check() -> None:
 def test_no_discriminator_is_a_non_firing_lead_not_a_false_positive() -> None:
     # Without a victim-unique discriminator the sound check cannot fire — it emits NOTHING (a LEAD),
     # never the reverted whole-body containment false positive, even on a genuinely vulnerable target.
-    attacker_send, victim_send, nocred_send = _make_cross_target(vulnerable=True)
+    attacker_send, victim_send, nocred_send, unauth_send = _make_cross_target(vulnerable=True)
     cfg = AccessControlConfig(
-        victim_send=victim_send, nocred_send=nocred_send,
+        victim_send=victim_send, nocred_send=nocred_send, unauth_send=unauth_send,
         cross_specs=(CrossAccessSpec(bug_class="idor", ref_param=_REF_PARAM, victim_ref=_VICTIM_REF),),
     )
     (check,) = build_access_control_checks(cfg, enabled=True)
@@ -349,8 +367,13 @@ def test_control_ref_refutes_a_globally_present_marker() -> None:
     def nocred_send(req: HttpRequest) -> dict:
         return {"status": 403, "body": "forbidden — login required"}
 
+    def unauth_send(req: HttpRequest) -> dict:
+        # a THIRD unauthorized-authenticated principal is denied (the global marker is not the point here —
+        # the attacker-owned control_ref is what refutes the mistaken 'unique' marker).
+        return {"status": 403, "body": "you are not permitted to view this record"}
+
     cfg = AccessControlConfig(
-        victim_send=victim_send, nocred_send=nocred_send,
+        victim_send=victim_send, nocred_send=nocred_send, unauth_send=unauth_send,
         cross_specs=(CrossAccessSpec(bug_class="idor", ref_param=_REF_PARAM, victim_ref=_VICTIM_REF,
                                      victim_discriminator=global_marker, control_ref="1"),),
     )
@@ -382,8 +405,13 @@ def test_boilerplate_discriminator_in_both_bodies_with_control_does_not_fire() -
     def nocred_send(req: HttpRequest) -> dict:
         return {"status": 403, "body": "forbidden — login required"}
 
+    def unauth_send(req: HttpRequest) -> dict:
+        # the round-4 unauthorized-authenticated baseline is denied — the mandatory control_ref is what
+        # refutes the mistaken 'unique' footer here.
+        return {"status": 403, "body": "you are not permitted to view this record"}
+
     cfg = AccessControlConfig(
-        victim_send=victim_send, nocred_send=nocred_send,
+        victim_send=victim_send, nocred_send=nocred_send, unauth_send=unauth_send,
         cross_specs=(CrossAccessSpec(bug_class="idor", ref_param=_REF_PARAM, victim_ref=_VICTIM_REF,
                                      victim_discriminator=boilerplate, control_ref=_ATTACKER_OWN_REF),),
     )
@@ -399,9 +427,9 @@ def test_control_ref_omitted_is_a_lead_never_a_fact() -> None:
     # discriminator), OMITTING control_ref must yield NOTHING — a LEAD, never a FACT. Without the negative
     # control we cannot PROVE the marker is victim-unique rather than global boilerplate, so no false FACT
     # is constructible in this (previously supported) config. probe() returns None => nothing is minted.
-    attacker_send, victim_send, nocred_send = _make_cross_target(vulnerable=True)
+    attacker_send, victim_send, nocred_send, unauth_send = _make_cross_target(vulnerable=True)
     cfg = AccessControlConfig(
-        victim_send=victim_send, nocred_send=nocred_send,
+        victim_send=victim_send, nocred_send=nocred_send, unauth_send=unauth_send,
         cross_specs=(CrossAccessSpec(bug_class="idor", ref_param=_REF_PARAM, victim_ref=_VICTIM_REF,
                                      victim_discriminator=_VICTIM_SECRET),),  # control_ref deliberately omitted
     )
@@ -414,9 +442,9 @@ def test_genuine_victim_unique_discriminator_absent_from_control_fires() -> None
     # (c) The honest true-positive: a genuinely victim-unique marker, present in the victim's authoritative
     # body and reached by the attacker's cross-read, but ABSENT from the attacker's own control object ->
     # the differential holds -> the achieved-state oracle confirms the FACT.
-    attacker_send, victim_send, nocred_send = _make_cross_target(vulnerable=True)
+    attacker_send, victim_send, nocred_send, unauth_send = _make_cross_target(vulnerable=True)
     cfg = AccessControlConfig(
-        victim_send=victim_send, nocred_send=nocred_send,
+        victim_send=victim_send, nocred_send=nocred_send, unauth_send=unauth_send,
         cross_specs=(CrossAccessSpec(bug_class="idor", ref_param=_REF_PARAM, victim_ref=_VICTIM_REF,
                                      victim_discriminator=_VICTIM_SECRET, control_ref=_ATTACKER_OWN_REF),),
     )
@@ -450,8 +478,12 @@ def test_reflected_reference_discriminator_is_a_lead_never_a_fact() -> None:
     def nocred_send(req: HttpRequest) -> dict:
         return {"status": 200, "body": f"Access denied for object {reflected_ref}."}
 
+    def unauth_send(req: HttpRequest) -> dict:
+        # the round-4 baseline also reflects the ref; ref-independence refuses the probe BEFORE any read.
+        return {"status": 200, "body": f"Access denied for object {reflected_ref}."}
+
     cfg = AccessControlConfig(
-        victim_send=victim_send, nocred_send=nocred_send,
+        victim_send=victim_send, nocred_send=nocred_send, unauth_send=unauth_send,
         cross_specs=(CrossAccessSpec(bug_class="idor", ref_param=_REF_PARAM, victim_ref=reflected_ref,
                                      victim_discriminator=reflected_ref, control_ref="acct-1"),),
     )
@@ -482,8 +514,13 @@ def test_public_content_reached_by_logged_out_baseline_does_not_fire() -> None:
         # logged-out ALSO reaches the marker -> the content is public, not authorization-gated
         return {"status": 200, "body": f"<p>{public_marker}</p>"}
 
+    def unauth_send(req: HttpRequest) -> dict:
+        # a THIRD authenticated principal ALSO reaches the public marker (public content is readable by
+        # any authenticated user too) -> clause (c) also refuses -> the achieved-read predicate is False.
+        return {"status": 200, "body": f"<p>{public_marker}</p>"}
+
     cfg = AccessControlConfig(
-        victim_send=victim_send, nocred_send=nocred_send,
+        victim_send=victim_send, nocred_send=nocred_send, unauth_send=unauth_send,
         cross_specs=(CrossAccessSpec(bug_class="idor", ref_param=_REF_PARAM, victim_ref=_VICTIM_REF,
                                      victim_discriminator=public_marker, control_ref=_ATTACKER_OWN_REF),),
     )
@@ -498,9 +535,9 @@ def test_baseline_less_config_is_a_lead_never_a_fact() -> None:
     # ROUND-2 (iv), the DOWNGRADE rule: a config that supplies NO no-credential baseline can never mint a
     # FACT — even on a genuinely vulnerable target — because 'unauthorized read' is only PROVEN by the
     # logged-out denial, never asserted. probe() returns None (a rigorous LEAD).
-    attacker_send, victim_send, _ = _make_cross_target(vulnerable=True)
+    attacker_send, victim_send, _, unauth_send = _make_cross_target(vulnerable=True)
     cfg = AccessControlConfig(   # nocred_send deliberately omitted
-        victim_send=victim_send,
+        victim_send=victim_send, unauth_send=unauth_send,
         cross_specs=(CrossAccessSpec(bug_class="idor", ref_param=_REF_PARAM, victim_ref=_VICTIM_REF,
                                      victim_discriminator=_VICTIM_SECRET, control_ref=_ATTACKER_OWN_REF),),
     )
@@ -540,8 +577,11 @@ def test_control_ref_404_makes_a_global_marker_a_lead_not_a_fact() -> None:
     def nocred_send(req: HttpRequest) -> dict:
         return {"status": 403, "body": "forbidden — login required"}
 
+    def unauth_send(req: HttpRequest) -> dict:
+        return {"status": 403, "body": "you are not permitted to view this record"}
+
     cfg = AccessControlConfig(
-        victim_send=victim_send, nocred_send=nocred_send,
+        victim_send=victim_send, nocred_send=nocred_send, unauth_send=unauth_send,
         cross_specs=(CrossAccessSpec(bug_class="idor", ref_param=_REF_PARAM, victim_ref=_VICTIM_REF,
                                      victim_discriminator=global_marker, control_ref=_ATTACKER_OWN_REF),),
     )
@@ -566,8 +606,11 @@ def test_control_ref_empty_body_is_a_lead_not_a_fact() -> None:
     def nocred_send(req: HttpRequest) -> dict:
         return {"status": 403, "body": "forbidden — login required"}
 
+    def unauth_send(req: HttpRequest) -> dict:
+        return {"status": 403, "body": "you are not permitted to view this record"}
+
     cfg = AccessControlConfig(
-        victim_send=victim_send, nocred_send=nocred_send,
+        victim_send=victim_send, nocred_send=nocred_send, unauth_send=unauth_send,
         cross_specs=(CrossAccessSpec(bug_class="idor", ref_param=_REF_PARAM, victim_ref=_VICTIM_REF,
                                      victim_discriminator=_VICTIM_SECRET, control_ref=_ATTACKER_OWN_REF),),
     )
@@ -597,12 +640,15 @@ def test_logged_out_baseline_bare_error_or_empty_is_a_lead_not_a_fact() -> None:
         {"status": 0, "body": ""},                         # network failure — no response at all
         {"status": 404, "body": "no such object"},         # 404 — not an authorization denial
     )
+    def unauth_send(req: HttpRequest) -> dict:  # a valid unauthorized-authenticated baseline (never reached:
+        return {"status": 403, "body": "you are not permitted to view this record"}  # nocred fails first
+
     for baseline in bare_baselines:
         def nocred_send(req: HttpRequest, _b=baseline) -> dict:
             return dict(_b)
 
         cfg = AccessControlConfig(
-            victim_send=victim_send, nocred_send=nocred_send,
+            victim_send=victim_send, nocred_send=nocred_send, unauth_send=unauth_send,
             cross_specs=(CrossAccessSpec(bug_class="idor", ref_param=_REF_PARAM, victim_ref=_VICTIM_REF,
                                          victim_discriminator=_VICTIM_SECRET, control_ref=_ATTACKER_OWN_REF),),
         )
@@ -615,13 +661,13 @@ def test_genuine_401_denial_with_a_real_body_still_confirms() -> None:
     # (b, positive control): a GENUINE 401/403 authorization denial that CARRIES a real deny body IS a valid
     # gating proof (a logged-out request is refused), so a substantive victim/attacker/control read still
     # mints the FACT — round-3 must not over-reject genuine denials (the benchmark /account 403 + /document 401).
-    attacker_send, victim_send, _ = _make_cross_target(vulnerable=True)
+    attacker_send, victim_send, _, unauth_send = _make_cross_target(vulnerable=True)
 
     def nocred_send(req: HttpRequest) -> dict:
         return {"status": 401, "body": "authentication required to view this record"}
 
     cfg = AccessControlConfig(
-        victim_send=victim_send, nocred_send=nocred_send,
+        victim_send=victim_send, nocred_send=nocred_send, unauth_send=unauth_send,
         cross_specs=(CrossAccessSpec(bug_class="idor", ref_param=_REF_PARAM, victim_ref=_VICTIM_REF,
                                      victim_discriminator=_VICTIM_SECRET, control_ref=_ATTACKER_OWN_REF),),
     )
@@ -641,9 +687,9 @@ def test_durable_context_with_a_vacuous_control_does_not_reverify_offline() -> N
     # false FACT is constructible even from a durable context that re-runs offline.
     from framework.v2.verify.oracles import predicate_oracle
 
-    attacker_send, victim_send, nocred_send = _make_cross_target(vulnerable=True)
+    attacker_send, victim_send, nocred_send, unauth_send = _make_cross_target(vulnerable=True)
     cfg = AccessControlConfig(
-        victim_send=victim_send, nocred_send=nocred_send,
+        victim_send=victim_send, nocred_send=nocred_send, unauth_send=unauth_send,
         cross_specs=(CrossAccessSpec(bug_class="idor", ref_param=_REF_PARAM, victim_ref=_VICTIM_REF,
                                      victim_discriminator=_VICTIM_SECRET, control_ref=_ATTACKER_OWN_REF),),
     )
@@ -672,3 +718,139 @@ def test_durable_context_with_a_vacuous_control_does_not_reverify_offline() -> N
     # degrade the retained ATTACKER cross-read to a non-substantive soft-deny 200 -> must NOT fire
     soft_deny = {**ev, "attacker_status": 200, "attacker_body": "access denied for this object"}
     assert predicate_oracle(soft_deny, pred).fired is False
+
+    # ROUND-4 (d): degrade the retained UNAUTHORIZED-AUTHENTICATED baseline so it REACHES the marker (the
+    # reflected/public case) -> clause (c) `not contains(unauth_body, disc)` fails -> offline predicate must
+    # NOT fire. This proves clause (c) lives in the RETAINED predicate, so a durable context built from a
+    # reflected per-object token cannot re-fire offline.
+    reflected_unauth = {**ev, "unauth_status": 200,
+                        "unauth_body": f"<html>soft-deny but echoes {_VICTIM_SECRET}</html>"}
+    assert predicate_oracle(reflected_unauth, pred).fired is False
+
+    # ROUND-4: degrade the retained unauth baseline to a bare 5xx -> not a valid discriminating baseline
+    # (its absent marker is vacuous) -> must NOT fire.
+    bare_unauth = {**ev, "unauth_status": 500, "unauth_body": ""}
+    assert predicate_oracle(bare_unauth, pred).fired is False
+
+
+# --- ROUND-4: the fourth-variant FP — a per-object REFLECTED token in an authenticated soft-deny ------
+#
+# The round-3 fourth variant a content-heuristic guard could NOT catch: a per-object PUBLIC token (a slug /
+# uuid / display-id) echoed into an AUTHENTICATED 200 soft-deny. It carries no bare-error phrase (so it is a
+# SUBSTANTIVE 200 that clears the substance floor) and is NOT a literal substring of victim_ref (so it clears
+# ref-independence). It is present in the owner's read, present in the attacker's soft-deny, absent from the
+# attacker's own (different-object) control, and absent from a LOGGED-OUT 401 (which does not echo the object
+# token) — so EVERY round-3 clause holds and it mints a DURABLE false FACT with ZERO unauthorized read. The
+# round-4 same-ref UNAUTHORIZED-AUTHENTICATED baseline defeats it: that principal's soft-deny echoes the SAME
+# per-object token, so clause (c) `not contains(unauth_body, disc)` fails and the check does NOT fire.
+
+
+def _reflected_per_object_token_target():
+    """The fourth-variant FP fixture. ``token`` is a per-object PUBLIC slug echoed into EVERY authenticated
+    view of object 2 — the owner's, the attacker's soft-deny, AND a third principal's soft-deny — but the
+    attacker READS NOTHING private. It is not a literal substring of the requested ref and carries no
+    bare-error phrase, so it survives every round-3 guard."""
+    token = "brave-otter-42a7c1e9"   # a public per-object slug; NOT a substring of victim_ref "2"
+
+    def victim_send(req: HttpRequest) -> dict:  # the owner's authoritative read carries the slug + private data
+        return {"status": 200, "body": f"<h2>Invoice</h2><p>ref {token}</p><p>{_VICTIM_SECRET}</p>"}
+
+    def attacker_send(req: HttpRequest) -> dict:
+        rid = _requested_id(req)
+        if rid == _VICTIM_REF:
+            # SECURED: a substantive 200 soft-deny that ECHOES the object's public slug but exposes NOTHING
+            # private — no bare-error phrase, so it clears the substance floor and looks like a reached datum.
+            return {"status": 200, "body": f"<h2>Invoice</h2><p>ref {token}</p><p>you may view your own records here</p>"}
+        return {"status": 200, "body": "<h2>Invoice</h2><p>ref self-9f31</p><p>alice own invoice</p>"}
+
+    def nocred_send(req: HttpRequest) -> dict:
+        # logged-out gets a GENERIC 401 that does NOT echo the per-object slug -> the round-3 logged-out
+        # baseline clause passes (slug absent) -> round-3 would MINT. This is the fourth variant.
+        return {"status": 401, "body": "authentication required to view this record"}
+
+    return attacker_send, victim_send, nocred_send, token
+
+
+def test_reflected_per_object_token_present_in_unauth_baseline_is_a_lead_never_a_fact() -> None:
+    # ROUND-4 test (a): the discriminator is the per-object slug (operator-supplied, wrongly believed unique).
+    # Every round-3 clause holds, but the same-ref UNAUTHORIZED-AUTHENTICATED baseline ALSO echoes the slug
+    # (a peer unauthorized principal gets the same per-object soft-deny) -> clause (c) fails -> NO fire.
+    attacker_send, victim_send, nocred_send, token = _reflected_per_object_token_target()
+
+    def unauth_send(req: HttpRequest) -> dict:
+        # a THIRD authenticated-but-UNAUTHORIZED principal reads the SAME ref and gets the SAME per-object
+        # soft-deny that ECHOES the slug — proving the slug is a reflected per-object token, not private data.
+        return {"status": 200, "body": f"<h2>Invoice</h2><p>ref {token}</p><p>you may view your own records here</p>"}
+
+    cfg = AccessControlConfig(
+        victim_send=victim_send, nocred_send=nocred_send, unauth_send=unauth_send,
+        cross_specs=(CrossAccessSpec(bug_class="idor", ref_param=_REF_PARAM, victim_ref=_VICTIM_REF,
+                                     victim_discriminator=token, control_ref=_ATTACKER_OWN_REF),),
+    )
+    (check,) = build_access_control_checks(cfg, enabled=True)
+    template, point = _obj_template()
+    ctx = check.probe(template, point, attacker_send)
+    # ctx IS built (all reads substantive/valid) but the predicate refuses via clause (c) — no false FACT.
+    assert ctx is not None
+    assert confirm_finding({"bug_class": "idor", "title": "", "severity": "High"}, ctx) is None
+    # ...and offline re-verification refuses it too (clause (c) lives in the RETAINED predicate).
+    from framework.v2.verify.oracles import predicate_oracle
+    context = ctx.to_verifier_context()
+    assert predicate_oracle(context["observed_evidence"], context["predicate"]).fired is False
+
+
+def test_genuine_private_datum_absent_from_unauth_baseline_fires() -> None:
+    # ROUND-4 test (b): the honest true-positive. A genuinely PRIVATE datum — present in the owner's read,
+    # reached by the attacker's cross-read, ABSENT from the attacker's own control AND ABSENT from BOTH the
+    # logged-out and the same-ref unauthorized-authenticated baselines (a peer unauthorized principal is
+    # DENIED it) -> the 3-view differential holds -> the achieved-state oracle confirms the FACT.
+    attacker_send, victim_send, nocred_send, unauth_send = _make_cross_target(vulnerable=True)
+    cfg = AccessControlConfig(
+        victim_send=victim_send, nocred_send=nocred_send, unauth_send=unauth_send,
+        cross_specs=(CrossAccessSpec(bug_class="bola", ref_param=_REF_PARAM, victim_ref=_VICTIM_REF,
+                                     victim_discriminator=_VICTIM_SECRET, control_ref=_ATTACKER_OWN_REF),),
+    )
+    (check,) = build_access_control_checks(cfg, enabled=True)
+    template, point = _obj_template()
+    ctx = check.probe(template, point, attacker_send)
+    assert ctx is not None
+    confirmed = confirm_finding({"bug_class": "bola", "title": "", "severity": "High"}, ctx)
+    assert confirmed is not None and confirmed.confirmed_by == OracleKind.ACHIEVED_STATE
+
+
+def test_no_unauth_baseline_is_a_lead_never_a_fact() -> None:
+    # ROUND-4 test (c): the DOWNGRADE rule. A config that supplies NO unauthorized-authenticated baseline can
+    # never mint a FACT — even on a genuinely vulnerable target — because the datum being genuinely
+    # access-gated (vs a reflected per-object token) is only PROVEN by the same-ref unauthorized-authenticated
+    # negative reference, never asserted. probe() returns None (a rigorous LEAD) — the enforced boundary.
+    attacker_send, victim_send, nocred_send, _ = _make_cross_target(vulnerable=True)
+    cfg = AccessControlConfig(   # unauth_send deliberately omitted
+        victim_send=victim_send, nocred_send=nocred_send,
+        cross_specs=(CrossAccessSpec(bug_class="idor", ref_param=_REF_PARAM, victim_ref=_VICTIM_REF,
+                                     victim_discriminator=_VICTIM_SECRET, control_ref=_ATTACKER_OWN_REF),),
+    )
+    (check,) = build_access_control_checks(cfg, enabled=True)
+    template, point = _obj_template()
+    assert check.probe(template, point, attacker_send) is None
+
+
+def test_reflected_token_bare_unauth_baseline_cannot_mint() -> None:
+    # ROUND-4 test (a'): the fourth-variant slug WITH a bare/empty unauthorized-authenticated baseline. A
+    # 5xx/empty unauth read is NOT a valid discriminating baseline (its absent marker is vacuous — the slug
+    # might be absent merely because the body is empty), so the check fails closed to a LEAD. A reflected
+    # token can never mint even by degrading the unauth baseline to a bare error.
+    attacker_send, victim_send, nocred_send, token = _reflected_per_object_token_target()
+
+    for bad in ({"status": 500, "body": ""}, {"status": 200, "body": "   "}, {"status": 0, "body": ""},
+                {"status": 404, "body": "no such object"}, {"status": 403, "body": ""}):
+        def unauth_send(req: HttpRequest, _b=bad) -> dict:
+            return dict(_b)
+
+        cfg = AccessControlConfig(
+            victim_send=victim_send, nocred_send=nocred_send, unauth_send=unauth_send,
+            cross_specs=(CrossAccessSpec(bug_class="idor", ref_param=_REF_PARAM, victim_ref=_VICTIM_REF,
+                                         victim_discriminator=token, control_ref=_ATTACKER_OWN_REF),),
+        )
+        (check,) = build_access_control_checks(cfg, enabled=True)
+        template, point = _obj_template()
+        assert check.probe(template, point, attacker_send) is None, f"bare unauth baseline {bad} minted"

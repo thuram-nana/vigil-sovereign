@@ -140,10 +140,15 @@ class CrossAccessSpec:
     SUBSTANTIVE SUCCESS (round-3): a 404/403/empty control makes the not-contains VACUOUS (absence-in-an-error
     proves nothing), so a non-substantive control fails closed to a LEAD. Empty ⇒ the probe returns None (a
     LEAD); 'victim-unique' is enforced by this SUBSTANTIVE control differential, never accepted as a bare
-    operator assertion. A FACT further requires a no-credential (logged-out) baseline (see
-    ``AccessControlConfig.nocred_send``) that is a VALID gating proof — a substantive 2xx lacking the marker
-    OR a genuine 401/403 denial (a bare 5xx/empty baseline is vacuous) — proving the content is
-    authorization-gated rather than public/reflected; a baseline-less config is a rigorous LEAD."""
+    operator assertion. A FACT further requires TWO same-ref negative baselines (both on ``AccessControlConfig``):
+    a no-credential (logged-out) baseline (``nocred_send``) AND — decisively — a same-ref
+    UNAUTHORIZED-AUTHENTICATED baseline (``unauth_send``: a THIRD attacker-controlled principal that also lacks
+    access to victim_ref). Each must be a VALID discriminating read (a substantive 2xx lacking the marker OR a
+    genuine 401/403 denial; a bare 5xx/empty baseline is vacuous), and the marker must be ABSENT from BOTH. The
+    unauthorized-authenticated baseline is what defeats the round-3 fourth-variant FP (a per-object reflected
+    token echoed into an authenticated soft-deny appears in that baseline too), so ref-independence is NOT the
+    anti-reflection proof — the 3-view differential (owner-present, attacker-present, unauthorized-absent) is.
+    A config missing either baseline is a rigorous LEAD, never a FACT."""
 
     bug_class: str
     ref_param: str
@@ -170,6 +175,12 @@ class AccessControlConfig:
     # content is authorization-gated rather than public/reflected. None ⇒ the cross-read checks are seeded
     # baseline-less and can only ever produce a LEAD (never a FACT), fail-closed.
     nocred_send: Send | None = None
+    # The same-ref UNAUTHORIZED-AUTHENTICATED baseline send (round-4) — a request authenticated as a THIRD,
+    # attacker-controlled identity that ALSO lacks access to victim_ref. MANDATORY for a cross-read FACT: the
+    # discriminator must be ABSENT from this principal's read of victim_ref, the DECISIVE anti-reflection proof
+    # that the datum is genuinely access-gated PRIVATE content (a per-object reflected token would appear here
+    # too). None ⇒ the cross-read checks DOWNGRADE to a LEAD (never a FACT), the enforced boundary.
+    unauth_send: Send | None = None
 
 
 def default_cross_specs(
@@ -210,6 +221,7 @@ def build_access_control_checks(
             victim_discriminator=spec.victim_discriminator,
             control_ref=spec.control_ref,
             nocred_send=config.nocred_send,
+            unauth_send=config.unauth_send,
         ))
     if config.mass_assignment is not None:
         checks.append(config.mass_assignment)
@@ -332,6 +344,7 @@ def config_from_cli(
     victim_headers: Iterable[str],
     refs: Iterable[str],
     *,
+    unauth_headers: Iterable[str] = (),
     id_prefix: str = "ac",
     on_warn: Callable[[str], None] | None = None,
 ) -> AccessControlConfig | None:
@@ -340,9 +353,15 @@ def config_from_cli(
     ``--ac-victim-header``. Returns ``None`` when no valid ``--ac-ref`` was supplied — the pack
     then seeds nothing, so ``--access-control`` alone is a documented no-op the caller can note.
 
-    Every victim request rides the SAME gated ``base_send`` (the second identity is authenticated
-    by swapped headers, not by bypassing the safety stack), and confirmation stays with the
-    achieved-state oracle — this tests the operator's OWN authorization, never a third party."""
+    ``unauth_headers`` (``--ac-unauth-header``) bind a THIRD, attacker-controlled identity that also
+    LACKS access to the victim's object — the round-4 same-ref UNAUTHORIZED-AUTHENTICATED baseline. It
+    is what makes a cross-read FACT sound (the discriminator must be ABSENT from this principal's read
+    of victim_ref, so a per-object reflected token echoed into an authenticated soft-deny cannot mint).
+    Without it the seeded cross-read checks DOWNGRADE to a LEAD (never a FACT) — the enforced boundary.
+
+    Every victim / unauth request rides the SAME gated ``base_send`` (each identity is authenticated by
+    swapped headers, not by bypassing the safety stack), and confirmation stays with the achieved-state
+    oracle — this tests the operator's OWN authorization, never a third party."""
     def _warn(msg: str) -> None:
         if on_warn is not None:
             on_warn(msg)
@@ -366,13 +385,24 @@ def config_from_cli(
             continue
         headers.append(parsed)
 
+    unauth_hdrs: list[tuple[str, str]] = []
+    for raw in unauth_headers:
+        parsed = parse_victim_header(raw)
+        if parsed is None:
+            _warn(f"ignoring malformed --ac-unauth-header {raw!r} (expected 'Name: Value')")
+            continue
+        unauth_hdrs.append(parsed)
+
     victim_send = victim_send_with_headers(base_send, tuple(headers))
     # The no-credential baseline strips the identity headers (the common auth headers plus the operator's
     # own victim-header names) so a cross-read FACT is minted only when a logged-out request is DENIED the
     # discriminator — proving the content is authorization-gated, not public/reflected.
     nocred_send = nocred_send_stripping(base_send, tuple(name for name, _ in headers))
+    # The round-4 same-ref unauthorized-authenticated baseline: a THIRD identity's headers swapped onto the
+    # SAME gated send. None when no --ac-unauth-header was supplied ⇒ the pack seeds LEAD-only checks.
+    unauth_send = victim_send_with_headers(base_send, tuple(unauth_hdrs)) if unauth_hdrs else None
     return AccessControlConfig(victim_send=victim_send, cross_specs=tuple(specs),
-                               nocred_send=nocred_send, id_prefix=id_prefix)
+                               nocred_send=nocred_send, unauth_send=unauth_send, id_prefix=id_prefix)
 
 
 # ---------------------------------------------------------------------------
