@@ -1565,7 +1565,8 @@ def _sfx_substantive_body(status: Any, body: str) -> bool:
 
 
 def _sfx_marker_authenticated(marker: str, authorized: Any, logged_out_ref: Any,
-                              logged_out_markers: Any, logged_out_statuses: Any) -> "bool | None":
+                              logged_out_markers: Any, logged_out_statuses: Any,
+                              *, sentinel_id: str = "") -> "bool | None":
     """Re-derive, from the RETAINED RAW bytes, whether the VIGIL-fixed id's post-login view of the protected
     URL is a genuine AUTHENTICATED session — by a DIFFERENTIAL against a same-URL logged-out NEGATIVE
     reference. Never trusts a bool. TRI-STATE:
@@ -1575,11 +1576,24 @@ def _sfx_marker_authenticated(marker: str, authorized: Any, logged_out_ref: Any,
         so the fixed id is a live authenticated session;
       * ``False`` — the authorized view DECISIVELY says NOT authenticated: a logged-out status/marker, or the
         success_marker ABSENT from an otherwise-substantive authorized success;
-      * ``None``  — undecidable ⇒ FAIL CLOSED to a LEAD: no valid marker; the authorized view is not a
-        substantive success; NO substantive logged-out reference to establish the differential; or the marker
-        is present in BOTH views (a common token / chrome / a soft-200 body both share — DISQUALIFIED)."""
+      * ``None``  — undecidable ⇒ FAIL CLOSED to a LEAD: no valid marker; the marker is a REFLECTED-SENTINEL
+        ARTIFACT (a substring of / straddling the VIGIL-fixed id ``sentinel_id`` — see the guard below); the
+        authorized view is not a substantive success; NO substantive logged-out reference to establish the
+        differential; or the marker is present in BOTH views (a common token / chrome / a soft-200 body both
+        share — DISQUALIFIED)."""
     m = _coerce_text(marker).strip()
     if len(m) < _SFX_MIN_MARKER:
+        return None
+    # SENTINEL-ARTIFACT GUARD (round-4 FIFTH-variant fix — CWE-384). The authorized view is the ONLY leg
+    # carrying ``Cookie: <name>=S0`` (the VIGIL-fixed ``sfx_<hex>`` sentinel), so a BENIGN app that merely
+    # ECHOES the session-cookie value into the page body makes ANY marker DERIVED FROM S0 present-with-cookie /
+    # absent-without with ZERO authentication — a durable, offline-re-firing false differential. A marker that
+    # is a SUBSTRING of the fixed sentinel discriminates VIGIL's OWN injected id, never an authenticated state:
+    # disqualify it outright (⇒ None/LEAD, never a FACT). This mirrors the shared guard
+    # ``scanner.session.valid_discriminator(marker, nonce=S0)`` (``stripped in nonce``): S0 IS the per-probe
+    # nonce — the earlier caller's "session fixation carries no such nonce" premise was exactly the defect.
+    s0 = _coerce_text(sentinel_id).strip()
+    if s0 and m in s0:
         return None
     if not isinstance(authorized, Mapping):
         return None
@@ -1604,6 +1618,15 @@ def _sfx_marker_authenticated(marker: str, authorized: Any, logged_out_ref: Any,
     # substantive success ⇒ the fixed id did not reach authenticated content ⇒ decisively not a live session.
     if m not in a_body:
         return False
+    # STRADDLE GUARD (round-4 FIFTH-variant fix): even a marker that is not WHOLLY a substring of S0 can be a
+    # reflected-sentinel artifact when it OVERLAPS S0 in the echoed body (part-of-S0 + adjacent static text).
+    # Mask EVERY occurrence of the fixed sentinel in the authorized body; if the marker's presence DISAPPEARS,
+    # its presence was explained by the cookie echo — not access-gated content — so it cannot qualify the
+    # differential (⇒ None/LEAD, never a FACT). The NUL placeholder cannot occur in an HTTP body or an
+    # operator marker (a marker containing it already failed the raw ``m not in a_body`` check above), so
+    # masking removes reflection matches WITHOUT forging a spurious one.
+    if s0 and s0 in a_body and m not in a_body.replace(s0, "\x00"):
+        return None
     # DIFFERENTIAL: the marker qualifies as an AUTHENTICATED-STATE discriminator ONLY if a SUBSTANTIVE
     # same-URL logged-out reference PROVABLY LACKS it. No such reference ⇒ the differential is unestablished
     # ⇒ undecidable (LEAD). This is what refuses a benign soft-200 whose body the two views SHARE.
@@ -1653,9 +1676,11 @@ def session_fixation_oracle(observed: Any) -> OracleSignal:
 
       * ``sentinel_id`` not the ``sfx_<hex>`` shape ⇒ a server-issued id cannot mint this FACT — LEAD;
       * ``post_auth_id`` missing ⇒ INCONCLUSIVE;
-      * :func:`_sfx_marker_authenticated` is ``None`` (no valid marker; the authorized view is not a
-        substantive success; NO substantive logged-out reference; or the marker is present in BOTH views — a
-        common token / soft-200 body both share) ⇒ LEAD (never a FACT, never a false CLEAN);
+      * :func:`_sfx_marker_authenticated` is ``None`` (no valid marker; the marker is a REFLECTED-SENTINEL
+        ARTIFACT — a substring of / straddling the VIGIL-fixed id, so a benign cookie-echo makes it present-
+        with-cookie / absent-without with zero auth; the authorized view is not a substantive success; NO
+        substantive logged-out reference; or the marker is present in BOTH views — a common token / soft-200
+        body both share) ⇒ LEAD (never a FACT, never a false CLEAN);
       * the id was ROTATED at login (``post_auth_id != sentinel_id``): S0 DEAD ⇒ channel-confirmed CLEAN
         (the correct defense); S0 STILL LIVE ⇒ INCONCLUSIVE (a value rotation alone does not prove S0 was
         invalidated, and a live-S0 rotated record is indistinguishable from a hand-forged rotation — never a
@@ -1691,14 +1716,17 @@ def session_fixation_oracle(observed: Any) -> OracleSignal:
     # never a pre-computed bool. None ⇒ undecidable (no valid marker / non-substantive authorized view / no
     # substantive logged-out reference / marker present in BOTH views) ⇒ LEAD, per the round-4 principle.
     s0_auth = _sfx_marker_authenticated(marker, obs.get("authorized_view"), obs.get("logged_out_ref"),
-                                        obs.get("logged_out_markers"), obs.get("logged_out_statuses"))
+                                        obs.get("logged_out_markers"), obs.get("logged_out_statuses"),
+                                        sentinel_id=sentinel)
     if s0_auth is None:
         return _sfx_signal(
             False, observed={**base, "marker_len": len(marker)},
             evidence=("the fixed id's authenticated state could not be proven by a same-URL logged-out "
-                      "DIFFERENTIAL (no valid success marker, a non-substantive authorized view, no "
-                      "substantive logged-out reference, or a marker present in BOTH the fixed-session and "
-                      "logged-out views — a common token / chrome / soft-200 body) — cannot mint (LEAD)"))
+                      "DIFFERENTIAL (no valid success marker, a marker that is a substring of / straddles the "
+                      "VIGIL-fixed sentinel — a reflected session-cookie echo, not access-gated content, a "
+                      "non-substantive authorized view, no substantive logged-out reference, or a marker "
+                      "present in BOTH the fixed-session and logged-out views — a common token / chrome / "
+                      "soft-200 body) — cannot mint (LEAD)"))
 
     # The session-cookie VALUE was ROTATED at login (S1 != S0). Rotation ALONE is NOT proof of defense: an app
     # can rotate the value yet leave the pre-auth-fixed id S0 valid (a real fixation). Only a differential

@@ -58,6 +58,39 @@ def test_common_html_token_marker_in_both_views_no_fact() -> None:
         assert not sig.fired and sig.conclusive is False, f"token {token!r} minted a FACT"
 
 
+def test_cookie_echo_sentinel_substring_marker_is_a_lead_not_a_fact() -> None:
+    # ROUND-4 FIFTH-variant: a BENIGN app that echoes the SESSION cookie value into the page body. The
+    # authorized view is the ONLY leg carrying Cookie: SESSION=sfx_<hex>, so a marker that is a SUBSTRING of
+    # the fixed sentinel (here 'sfx', and a short hex tail of S0) is present-with-cookie / absent-without with
+    # ZERO authentication — the exact false differential. It must DOWNGRADE to a LEAD, live AND offline.
+    echo_auth = {"status": 200, "body": f"<html><body><p>Your session token: {_S0}</p><p>home</p></body></html>"}
+    echo_out = {"status": 200, "body": "<html><body><p>Your session token: </p><p>home</p></body></html>"}
+    for artifact in ("sfx", "sfx_", _S0[4:12]):   # 'sfx', the fixed prefix, and an 8-char hex tail of S0
+        sig = session_fixation_oracle(_obs(success_marker=artifact,
+                                           authorized_view=dict(echo_auth), logged_out_ref=dict(echo_out)))
+        assert not sig.fired and sig.conclusive is False, f"sentinel artifact {artifact!r} minted a FACT"
+
+
+def test_cookie_echo_straddling_marker_is_a_lead_not_a_fact() -> None:
+    # Even a marker not WHOLLY a substring of S0 is a reflected-sentinel artifact when it OVERLAPS S0 in the
+    # echoed body (part-of-S0 + adjacent static text). Its presence vanishes once S0 is masked ⇒ disqualified.
+    straddle_auth = {"status": 200, "body": f"<html><body><p>tok {_S0} home</p></body></html>"}
+    straddle_out = {"status": 200, "body": "<html><body><p>tok  home</p></body></html>"}
+    marker = _S0[-4:] + " home"    # a hex tail of S0 + the adjacent static ' home'
+    sig = session_fixation_oracle(_obs(success_marker=marker,
+                                       authorized_view=dict(straddle_auth), logged_out_ref=dict(straddle_out)))
+    assert not sig.fired and sig.conclusive is False
+
+
+def test_genuine_fixation_with_incidental_cookie_echo_still_fires() -> None:
+    # A GENUINE fixation whose page ALSO happens to echo the cookie must STILL fire: the SEMANTIC success
+    # marker is access-gated content that SURVIVES masking every occurrence of the fixed sentinel, so it is
+    # not a reflection artifact. The narrow guard must not suppress a real FACT.
+    echoed_authed = {"status": 200, "body": f"<h1>{_MARK}</h1><p>Welcome back, admin. token={_S0}</p>"}
+    sig = session_fixation_oracle(_obs(authorized_view=dict(echoed_authed)))
+    assert sig.fired and sig.conclusive and sig.kind is OracleKind.SESSION_FIXATION
+
+
 def test_no_substantive_logged_out_reference_is_a_lead() -> None:
     # A fixation-shaped record (marker present in the fixed-session view, S1 == S0) but the logged-out
     # reference is empty / non-substantive ⇒ the differential cannot be established ⇒ LEAD, never a FACT.

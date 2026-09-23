@@ -278,6 +278,64 @@ def test_error_body_at_the_protected_page_yields_no_fact() -> None:
     assert not _confirm_offline(ctx)
 
 
+# ---------------------------------------------------------------------------
+# ROUND-4 FIFTH-variant: a benign app that ECHOES the session-cookie value into the page body cannot mint —
+# the authorized view is the ONLY leg carrying the VIGIL-fixed sentinel, so a marker DERIVED FROM it is a
+# reflected artifact, not access-gated content. Disqualified ⇒ LEAD (live AND offline).
+# ---------------------------------------------------------------------------
+
+def _cookie_echo_send():
+    """A BENIGN app that (a) sets NO Set-Cookie at login (so S1 == S0 — the fixed id survives UNROTATED) and
+    (b) ECHOES the presented SESSION cookie value verbatim into every GET body. It performs NO authentication:
+    the authorized view differs from the logged-out reference ONLY by the reflected VIGIL sentinel."""
+    def send(req: HttpRequest) -> dict:
+        if req.method == "POST":
+            return {"status": 200, "headers": [], "body": "<html>ok, processed</html>"}
+        val = ""
+        for k, v in req.headers:
+            if k.lower() == "cookie":
+                for part in v.split(";"):
+                    kk, _, vv = part.strip().partition("=")
+                    if kk == "SESSION":
+                        val = vv
+        return {"status": 200, "headers": [],
+                "body": f"<html><body><p>Session token: {val}</p><p>Home page content here.</p></body></html>"}
+    return send
+
+
+def test_cookie_echo_benign_app_sentinel_substring_marker_yields_no_fact() -> None:
+    # success_marker='sfx' is a substring of the VIGIL sentinel 'sfx_<hex>'. The cookie-echo makes it present
+    # in the fixed-session view (which carries S0) and absent from the no-cookie reference — a false
+    # differential with ZERO auth. The sentinel-artifact guard downgrades it to a LEAD.
+    ctx = confirm_session_fixation(_cookie_echo_send(), login=LoginSequence(
+        url="http://app/login", method="POST", body="user=a&password=b", success_marker="sfx"),
+        session_cookie="SESSION", protected_url="http://app/account")
+    assert ctx is not None
+    rec = ctx.session_fixation
+    assert rec["post_auth_id"] == rec["sentinel_id"]                       # S1 == S0 (unrotated)
+    assert "sfx" in rec["authorized_view"]["body"]                        # echoed sentinel makes 'sfx' present
+    assert "sfx" not in rec["logged_out_ref"]["body"]                     # absent from the no-cookie reference
+    assert not _confirm(ctx), "sentinel-substring marker minted a FACT off a benign cookie echo"
+    assert not _confirm_offline(ctx), "sentinel-substring marker minted a DURABLE FACT offline"
+
+
+def test_cookie_echo_benign_app_short_hex_tail_collision_yields_no_fact() -> None:
+    # A short hex marker that collides with the fixed sentinel's tail. The sentinel is PINNED so the marker
+    # provably overlaps it; the cookie echo reflects the whole sentinel, so the hex marker is present-with-
+    # cookie / absent-without with ZERO auth ⇒ a LEAD, never a durable FACT.
+    s0 = "sfx_" + "0123456789abcdef" * 2   # 32 hex chars → valid sentinel shape
+    hex_tail = s0[-8:]                       # an 8-char hex substring of S0
+    ctx = confirm_session_fixation(_cookie_echo_send(), login=LoginSequence(
+        url="http://app/login", method="POST", body="user=a&password=b", success_marker=hex_tail),
+        session_cookie="SESSION", protected_url="http://app/account", sentinel_id=s0)
+    assert ctx is not None
+    rec = ctx.session_fixation
+    assert rec["sentinel_id"] == s0 and rec["post_auth_id"] == s0
+    assert hex_tail in rec["authorized_view"]["body"] and hex_tail not in rec["logged_out_ref"]["body"]
+    assert not _confirm(ctx), "hex-tail sentinel collision minted a FACT off a benign cookie echo"
+    assert not _confirm_offline(ctx), "hex-tail sentinel collision minted a DURABLE FACT offline"
+
+
 def test_oracle_ignores_a_bare_authenticated_bool_no_raw_bytes_no_fact() -> None:
     # DURABLE soundness: the oracle re-derives auth from RAW bytes and NEVER trusts a pre-computed bool. A
     # hand-forged legacy-shaped record carrying only authenticated_after_login=True (no authorized_view / no
