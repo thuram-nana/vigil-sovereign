@@ -96,6 +96,57 @@ def test_is_authenticated_tri_state_contract() -> None:
     assert _is_authenticated("not-a-dict", sm) is None
 
 
+def test_vacuous_success_marker_never_scores_authenticated() -> None:
+    # SLICE 3.2 round-3 regression (VACUOUS PREDICATE SATISFACTION): a success_marker that is empty,
+    # pure whitespace, or too short is trivially `in` almost any body — the old `is None` guard let it
+    # through and `marker in body` scored 'authenticated', minting a false CWE-384 FACT. Such a marker is NO
+    # discriminator at all, so _is_authenticated must FAIL CLOSED to None regardless of the body.
+    body_with_everything = {"status": 200, "headers": [],
+                            "body": "<h1>Welcome back, admin</h1><p>SESSFIX-AUTHENTICATED</p>"}
+    for vacuous in ("", "   ", "\t\n ", "a", "ab", " x "):   # '' / whitespace / 1-2 stripped chars
+        sm = LoginSequence(url="http://app/login", success_marker=vacuous)
+        assert _is_authenticated(body_with_everything, sm) is None, f"vacuous marker {vacuous!r} scored auth"
+    # the shared guard states the contract directly.
+    from framework.v2.scanner.session import valid_discriminator
+    assert valid_discriminator("") is False
+    assert valid_discriminator("   ") is False
+    assert valid_discriminator("a") is False
+    assert valid_discriminator("ab") is False
+    assert valid_discriminator("abc") is True                 # >= 3 stripped chars
+    assert valid_discriminator("SESSFIX-AUTHENTICATED") is True
+    assert valid_discriminator(None) is False
+
+
+def test_authenticated_state_requires_a_substantive_success_body() -> None:
+    # SLICE 3.2 round-3 regression: even a VALID marker must not score 'authenticated' off a NON-substantive
+    # read — an empty / too-short / error-or-deny 200. Such a body proves neither a live session NOR a clean,
+    # so _is_authenticated fails closed to None (the oracle then stays INCONCLUSIVE, never a FACT/CLEAN).
+    from framework.v2.scanner.session import is_substantive_success
+    sm = LoginSequence(url="http://app/login", success_marker="SESSFIX-AUTHENTICATED")
+    # empty and too-short bodies ⇒ None even at 200.
+    assert _is_authenticated({"status": 200, "headers": [], "body": ""}, sm) is None
+    assert _is_authenticated({"status": 200, "headers": [], "body": "   "}, sm) is None
+    assert _is_authenticated({"status": 200, "headers": [], "body": "SESSFIX-A"}, sm) is None  # < 16 stripped
+    # an ERROR/DENY 200 that COINCIDENTALLY contains the marker string ⇒ None (not scored authenticated).
+    assert _is_authenticated(
+        {"status": 200, "headers": [],
+         "body": "Internal Server Error while rendering SESSFIX-AUTHENTICATED dashboard"}, sm) is None
+    assert _is_authenticated(
+        {"status": 200, "headers": [],
+         "body": "Error: SESSFIX-AUTHENTICATED page temporarily unavailable"}, sm) is None
+    # a 5xx that echoes the marker ⇒ None (not a 2xx at all).
+    assert _is_authenticated(
+        {"status": 500, "headers": [], "body": "<h1>SESSFIX-AUTHENTICATED</h1><p>server crashed</p>"}, sm) is None
+    # the shared guard contract, directly.
+    assert is_substantive_success(200, "<h1>SESSFIX-AUTHENTICATED</h1><p>Welcome back.</p>") is True
+    assert is_substantive_success(200, "") is False
+    assert is_substantive_success(200, "short") is False
+    assert is_substantive_success(302, "<h1>SESSFIX-AUTHENTICATED</h1> plenty of body here") is False
+    assert is_substantive_success(200, "Internal Server Error occurred, please retry later") is False
+    # a genuine authenticated page AND a normal logged-out page are BOTH substantive successes (no FP).
+    assert is_substantive_success(200, "<h1>Please log in</h1><p>You are logged out.</p>") is True
+
+
 def test_planted_fixation_flow_confirms_a_fact() -> None:
     with serve() as base:
         ctx = confirm_session_fixation(
@@ -203,6 +254,56 @@ def test_logged_out_markers_only_cannot_prove_auth_no_fact() -> None:
     assert not OracleVerifier().confirm(ctx.to_verifier_context()).confirmed   # NO false FACT
     # a logout marker PRESENT would still DISPROVE (return False) — the absence discriminator only ever
     # negates; it can never turn a bare 200 into a proven authenticated session.
+    rebuilt = FindingContext.model_validate(ctx.model_dump())
+    assert not OracleVerifier().confirm(rebuilt.to_verifier_context()).confirmed
+
+
+def test_vacuous_marker_yields_no_fact_even_against_the_vulnerable_flow() -> None:
+    # SLICE 3.2 round-3 regression, END-TO-END + DURABLE: against the GENUINELY-vulnerable planted flow (the
+    # fixed id survives login unrotated, S1 == S0, and the protected page WOULD authenticate), a VACUOUS
+    # success_marker must still mint NOTHING. The old code let '' / whitespace / a 1-char marker satisfy
+    # `marker in body` and minted a false CWE-384 FACT; now the S0 probe records None and the oracle is
+    # INCONCLUSIVE. Critically, the retained record re-verifies OFFLINE to the SAME non-confirmation — there
+    # is no durable certificate that re-fires.
+    for vacuous in ("", "   ", "a"):
+        with serve() as base:
+            ctx = confirm_session_fixation(
+                _send,
+                login=LoginSequence(url=f"{base}/sessfix/login", method="POST",
+                                    body="user=admin&password=admin", success_marker=vacuous),
+                session_cookie="SESSION",
+                protected_url=f"{base}/sessfix/account",
+            )
+        assert ctx is not None
+        rec = ctx.session_fixation
+        assert rec["post_auth_id"] == rec["sentinel_id"]      # the fixed id SURVIVED login (still vulnerable)
+        assert rec["authenticated_after_login"] is None       # vacuous marker ⇒ no positive discriminator
+        assert not OracleVerifier().confirm(ctx.to_verifier_context()).confirmed   # NO false FACT (live)
+        rebuilt = FindingContext.model_validate(ctx.model_dump())
+        assert not OracleVerifier().confirm(rebuilt.to_verifier_context()).confirmed   # NO false FACT (offline)
+
+
+def test_error_body_at_the_protected_page_yields_no_fact() -> None:
+    # SLICE 3.2 round-3 regression, END-TO-END: the fixed id survives login unrotated (S1 == S0) but the
+    # protected-page read is an ERROR 200 that COINCIDENTALLY echoes the success marker. A contains-check
+    # against a non-substantive body proves nothing, so the S0 probe is None ⇒ INCONCLUSIVE, never a FACT and
+    # never a false CLEAN — live and under offline re-verification alike.
+    def erroring_send(req: HttpRequest) -> dict:
+        if req.method == "POST":
+            return {"status": 200, "headers": [], "body": "<html>ok, logged in</html>"}   # no Set-Cookie ⇒ S1==S0
+        # protected GET: a bare error page that happens to contain the marker string.
+        return {"status": 200, "headers": [],
+                "body": f"Internal Server Error rendering {_SESSFIX_SUCCESS_MARKER} account"}
+
+    login = LoginSequence(url="http://app/login", method="POST", body="user=a&password=b",
+                          success_marker=_SESSFIX_SUCCESS_MARKER)
+    ctx = confirm_session_fixation(erroring_send, login=login, session_cookie="SESSION",
+                                   protected_url="http://app/account")
+    assert ctx is not None
+    rec = ctx.session_fixation
+    assert rec["post_auth_id"] == rec["sentinel_id"]          # the fixed id was NOT rotated (S1 == S0)
+    assert rec["authenticated_after_login"] is None           # error body ⇒ not a substantive success
+    assert not OracleVerifier().confirm(ctx.to_verifier_context()).confirmed
     rebuilt = FindingContext.model_validate(ctx.model_dump())
     assert not OracleVerifier().confirm(rebuilt.to_verifier_context()).confirmed
 

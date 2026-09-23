@@ -188,39 +188,139 @@ def mint_session_sentinel() -> str:
     return "sfx_" + secrets.token_hex(16)
 
 
+# ---------------------------------------------------------------------------
+# SHARED GUARDS — Wave-3 vacuous-predicate-satisfaction fix (kept inline here; a later commit DRYs these
+# into one helper module — names/semantics MUST stay identical across the Wave-3 slices).
+# A contains / not-contains check is only meaningful when BOTH the discriminator and the body it is tested
+# against are SUBSTANTIVE. An empty/whitespace/too-short marker is trivially "in" any body, and an
+# empty/error/deny body neither proves a positive predicate nor serves as a negative control.
+# ---------------------------------------------------------------------------
+
+_MIN_SUBSTANTIVE_BODY = 16   # a real page body, not a stub/error token
+_MIN_DISCRIMINATOR = 3       # a marker below this is trivially a substring of almost any body
+
+# Bare error/deny signatures — strings that mark a body as a server-error or access-denied page rather than
+# a substantive authenticated response. Deliberately specific (multi-word / status-line shaped) so a genuine
+# authenticated page that merely mentions the word "error" in prose is NOT misclassified, and a normal
+# logged-out page ("please log in", "you are logged out") is NOT treated as an error either.
+_BARE_ERROR_SIGNATURES: tuple[str, ...] = (
+    "internal server error", "500 internal server error",
+    "service unavailable", "service temporarily unavailable", "temporarily unavailable",
+    "bad gateway", "gateway timeout", "bad request",
+    "not found", "page not found", "404 not found", "403 forbidden",
+    "access denied", "access is denied", "access blocked", "request blocked",
+    "an error occurred", "an error has occurred", "an unexpected error", "something went wrong",
+)
+
+_TAG_RE = re.compile(r"<[^>]+>")
+_WS_RE = re.compile(r"\s+")
+# A start-anchored opener that marks the WHOLE body as an error/deny page (so prose that merely uses the
+# word later is not caught): a leading error/forbidden/unauthorized/denied token, or an HTTP status line.
+_ERROR_OPENER_RE = re.compile(r"^(errors?\b|forbidden\b|unauthori[sz]ed\b|denied\b|[45]\d\d\b)")
+
+
+def _visible_text(body: str) -> str:
+    """The body's visible text: HTML tags dropped, whitespace collapsed, lowercased — used ONLY for
+    error-signature matching (the length guard uses the raw ``body.strip()`` per the shared contract)."""
+    return _WS_RE.sub(" ", _TAG_RE.sub(" ", body)).strip().lower()
+
+
+def _is_bare_error_signature(body: str) -> bool:
+    """True when ``body`` is essentially a server-error or access-denied page rather than a substantive
+    authenticated response. Conservative by design: only a body that OPENS with an error/status token, or a
+    short body dominated by a canonical error/deny phrase, counts — so a real authenticated page that
+    happens to contain "error" in prose, and a normal logged-out page, are never misclassified."""
+    text = _visible_text(body)
+    if not text:
+        return True   # nothing but markup/whitespace — not substantive
+    if _ERROR_OPENER_RE.match(text):
+        return True
+    if len(text) <= 96 and any(sig in text for sig in _BARE_ERROR_SIGNATURES):
+        return True
+    return False
+
+
+def is_substantive_success(status: int, body: str) -> bool:
+    """SHARED GUARD: a response is a SUBSTANTIVE SUCCESS — one that may satisfy a positive fire-predicate OR
+    serve as a negative control — ONLY when it is a real 2xx with a non-trivial body that is not itself an
+    error/deny signature. A response that fails this proves NOTHING: it can neither be scored authenticated
+    NOR clear a control, and the caller must FAIL CLOSED (never a FACT, never a false CLEAN).
+
+        is_substantive_success(status, body) ⇔
+            200 <= status < 300  AND  len(body.strip()) >= 16  AND  not a bare error/deny signature."""
+    if not (200 <= int(status) < 300):
+        return False
+    text = body or ""
+    if len(text.strip()) < _MIN_SUBSTANTIVE_BODY:
+        return False
+    return not _is_bare_error_signature(text)
+
+
+def valid_discriminator(marker: str | None, *, nonce: str | None = None) -> bool:
+    """SHARED GUARD: a discriminator is USABLE as a positive/absence marker ONLY when it is a real,
+    non-trivial string — present, not pure whitespace, and at least ``_MIN_DISCRIMINATOR`` stripped
+    characters. A vacuous marker (``''`` / ``'   '`` / a 1-2 char fragment) is trivially "in" almost any body
+    and so discriminates NOTHING; it must never be allowed to satisfy a contains-predicate. Where a per-probe
+    ``nonce`` exists, the marker must not be a mere substring of it (that would discriminate the nonce, not an
+    authenticated state); session fixation carries no such nonce, so callers here pass none."""
+    if marker is None:
+        return False
+    stripped = marker.strip()
+    if len(stripped) < _MIN_DISCRIMINATOR:
+        return False
+    if nonce and stripped in nonce:
+        return False
+    return True
+
+
 def _is_authenticated(resp: object, login: "LoginSequence") -> bool | None:
     """A POSITIVE authenticated-state test over a protected-page response, reusing the operator's login spec.
 
     TRI-STATE — the distinction is load-bearing for soundness:
 
-      * ``True``  — the POSITIVE discriminator ``success_marker`` is PRESENT (and no logged-out
-        status/marker overrides it): a confirmed LIVE authenticated session;
-      * ``False`` — ``success_marker`` was supplied but the response decisively says NOT authenticated (a
-        logged-out status, a ``logged_out_markers`` hit, or the ``success_marker`` simply absent);
-      * ``None``  — NO POSITIVE discriminator was supplied (``success_marker`` is ``None``, regardless of any
-        ``logged_out_markers``). Authentication then cannot be PROVED: a bare 2xx/3xx does not distinguish a
-        live authenticated page from an unauthenticated login form served at HTTP 200, so we FAIL CLOSED to
-        "unknown". The caller must NOT mint a FACT off this (it degrades to INCONCLUSIVE).
+      * ``True``  — a VALID (non-vacuous) POSITIVE discriminator ``success_marker`` is PRESENT in a
+        SUBSTANTIVE-SUCCESS body (a real 2xx, >= 16 stripped chars, not an error/deny signature) and no
+        logged-out status/marker overrides it: a confirmed LIVE authenticated session;
+      * ``False`` — a valid ``success_marker`` was supplied and the response DECISIVELY says NOT
+        authenticated (a logged-out status, a ``logged_out_markers`` hit, or the marker absent from an
+        otherwise-substantive success body);
+      * ``None``  — the test could NOT be decided and we FAIL CLOSED to "unknown":
+          - NO VALID POSITIVE discriminator was supplied. ``success_marker`` is ``None``, OR it is VACUOUS
+            (``''`` / whitespace / a 1-2 char fragment that is trivially ``in`` any body) — a vacuous marker
+            is no discriminator at all and must never score ``True``; regardless of any ``logged_out_markers``
+            (an ABSENCE-only discriminator that can never PROVE auth); OR
+          - the authenticated-state read is NOT itself a substantive success (empty / too-short / an
+            error-or-deny 200) — an empty/errored body proves neither a live session NOR a clean.
+        The caller must NOT mint a FACT off ``None`` (it degrades to INCONCLUSIVE).
 
-    Only ``success_marker`` (a POSITIVE marker whose PRESENCE proves the session is live) can score ``True``.
-    ``logged_out_markers`` is an ABSENCE discriminator: its PRESENCE can only DISPROVE authentication (mark
-    ``False``); its ABSENCE proves nothing, so we never treat a non-logged-out 2xx/3xx as authenticated. This
-    is the fix for the positive-by-absence degeneration: a bare 200 is not evidence of an authenticated
-    session, and a session-fixation FACT must rest on positive proof the fixed id is LIVE."""
-    # A POSITIVE discriminator (success_marker) is REQUIRED to PROVE authentication. Without it — even when
-    # logged_out_markers are supplied — nothing distinguishes a live authenticated page from an
-    # unauthenticated 200 login form, so fail closed to "unknown" (never score a bare status as authenticated).
-    if login.success_marker is None:
+    Only a VALID ``success_marker`` present in a SUBSTANTIVE SUCCESS can score ``True``. ``logged_out_markers``
+    is an ABSENCE discriminator: its PRESENCE can only DISPROVE authentication; its ABSENCE proves nothing,
+    so a bare/empty/error 2xx is never treated as authenticated. This closes both the positive-by-absence
+    degeneration AND the vacuous-predicate hole: a session-fixation FACT must rest on positive proof — a real
+    marker in a real authenticated page — that the fixed id is LIVE."""
+    # A VALID (non-vacuous) POSITIVE discriminator is REQUIRED to PROVE authentication. A missing marker — OR
+    # a vacuous one (empty/whitespace/too-short, trivially "in" any body) — is no discriminator at all;
+    # nothing then distinguishes a live authenticated page from an unauthenticated 200 login form, so fail
+    # closed to "unknown" (never score a bare/empty status as authenticated).
+    if not valid_discriminator(login.success_marker):
         return None
     if not isinstance(resp, dict):
         return None
     status = int(resp.get("status", 0))
+    body = _body(resp)
+    # Decisive logged-out signals DISPROVE auth (channel-confirmed not-authenticated), independent of body
+    # substance: an explicit logged-out status (401/403) or an operator-supplied logged_out_marker.
     if status in login.logged_out_statuses:
         return False
-    body = _body(resp)
     if any(m in body for m in login.logged_out_markers):
         return False
-    # success_marker PRESENT (and no logged-out signal) ⇒ authenticated; ABSENT ⇒ decisively not.
+    # The authenticated-state read must ITSELF be a substantive success: an empty / too-short / error-or-deny
+    # 200 body cannot PROVE a live authenticated session — and must not be scored a CLEAN either (an
+    # absent-because-errored body proves nothing). Fail closed so the oracle stays INCONCLUSIVE, never a FACT.
+    if not is_substantive_success(status, body):
+        return None
+    # POSITIVE proof: a valid success_marker PRESENT in a substantive success body ⇒ authenticated; ABSENT
+    # from an otherwise-substantive success ⇒ decisively not.
     return login.success_marker in body
 
 
@@ -247,10 +347,14 @@ def confirm_session_fixation(
     the cookie VALUE at login yet leave the pre-auth-fixed id S0 still valid — a REAL fixation a value check
     would miss. Probing S0 yields ``False`` for a genuinely-defended rotate (S0 is dead → a channel-confirmed
     CLEAN) and ``True`` for a value-rotation-but-S0-valid app (the oracle refuses to CLEAN that — never a
-    false clean). A POSITIVE authenticated-state discriminator (``success_marker`` — whose PRESENCE proves the
-    session is live; ``logged_out_markers`` is an ABSENCE-only discriminator that can DISPROVE but never
-    prove auth) is REQUIRED to mint: absent a ``success_marker`` the S0 probe is ``None`` and the oracle
-    returns INCONCLUSIVE, never a FACT and never a CLEAN. Returns ``None`` only when no channel was
+    false clean). A VALID POSITIVE authenticated-state discriminator (a NON-VACUOUS ``success_marker`` —
+    present, not pure whitespace, >= 3 stripped chars — whose PRESENCE in a SUBSTANTIVE-SUCCESS body proves
+    the session is live; ``logged_out_markers`` is an ABSENCE-only discriminator that can DISPROVE but never
+    prove auth) is REQUIRED to mint: absent a valid ``success_marker`` — OR when the S0 protected-page read is
+    not itself a substantive success (empty / too-short / an error-or-deny 200) — the S0 probe is ``None`` and
+    the oracle returns INCONCLUSIVE, never a FACT and never a CLEAN. A vacuous marker (``''`` / ``'   '`` / a
+    1-2 char fragment, trivially ``in`` any body) is treated as NO discriminator and can never mint a spurious
+    CWE-384 FACT. Returns ``None`` only when no channel was
     established (a non-dict login response);
     every other outcome is adjudicated by the oracle. All traffic rides the injected ``send`` (the
     scope/charter/kill-switch-gated executor); nothing here weakens the boundary."""
