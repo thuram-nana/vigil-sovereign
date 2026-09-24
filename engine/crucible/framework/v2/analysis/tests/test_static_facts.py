@@ -31,10 +31,12 @@ from ...verify.reverify import reverify_finding
 _A_PLANTED = "import hashlib\ndef sign(x):\n    return hashlib.md5(x).hexdigest()\n"
 _A_SAFE = "import hashlib\ndef sign(x):\n    return hashlib.sha256(x).hexdigest()\n"
 
-# (b) insecure randomness feeding a GENUINE security sink (a token generator), not merely a security-ish
-# variable name — the PRNG value must FLOW INTO the sink. (A bare `token = random.randint(...)` assignment is
-# a security-ISH NAME only and is a LEAD; see _B_NAME_ONLY below.)
-_B_PLANTED = "import random\ndef mk(pool):\n    return generate_token(random.choice(pool))\n"
+# (b) insecure randomness feeding a GENUINE SECRET-MATERIAL sink — a non-crypto PRNG passed as the `key=` of a
+# RESOLVED crypto-module call (`hmac.new`, provenance resolved via the import, NOT a name pattern). This is the
+# sound positive: the PRNG value IS the key material. (A bare `token = random.randint(...)` assignment is a
+# security-ISH NAME only and is a LEAD; a PRNG in a CONTROL parameter — length/iterations — is a LEAD; see the
+# negative controls below.)
+_B_PLANTED = "import random, hmac\ndef mk(msg):\n    return hmac.new(key=random.randbytes(16), msg=msg).hexdigest()\n"
 _B_SAFE = "import secrets\ndef mk():\n    token = secrets.token_hex(16)\n    return token\n"
 
 # (c) explicitly-disabled security flag literal
@@ -80,6 +82,20 @@ _NEG_CONTROLS = [
     ("insecure-randomness-sink", "import random, logging\ndef log():\n    logging.info('x', token=random.random())\n"),
     # (b) a security-named `salt=` kwarg on an UNRESOLVED builder — no crypto/security provenance to resolve.
     ("insecure-randomness-sink", "import random\ndef b(cfg):\n    return build(cfg, salt=random.random())\n"),
+    # (b) NAME-ONLY FP: `make_key(random.choice(shards))` is a SHARDED CACHE key — `make_key` is an AMBIGUOUS
+    # descriptive constructor that resolves to NOTHING (no crypto-module provenance, DROPPED from the closed
+    # allowlist), so it no longer mints a durable false FACT.
+    ("insecure-randomness-sink", "import random\ndef mk(shards):\n    return make_key(random.choice(shards))\n"),
+    # (b) `new_key` / `create_key` — the same ambiguous generic-constructor class (a dict / DB / partition
+    # key), no provenance to resolve => a LEAD.
+    ("insecure-randomness-sink", "import random\ndef mk():\n    return new_key(random.random())\n"),
+    ("insecure-randomness-sink", "import random\ndef mk():\n    return create_key(random.random())\n"),
+    # (b) CONTROL-PARAMETER FP on a RESOLVED callee: `generate_token` resolves, but `length=` is a CONTROL
+    # parameter — a random token LENGTH is a benign control value, not secret material => a LEAD.
+    ("insecure-randomness-sink", "import random\ndef mk():\n    return generate_token(length=random.randint(8, 16))\n"),
+    # (b) CONTROL-PARAMETER FP on a RESOLVED KDF: `derive_key` resolves, but `iterations=` is a work-factor
+    # CONTROL parameter — a random iteration COUNT is not key material => a LEAD.
+    ("insecure-randomness-sink", "import random\ndef mk(pw, salt):\n    return derive_key(pw, salt, iterations=random.randint(1000, 2000))\n"),
     # (c) verify=False on a NON-security callee (a chart renderer) — does not resolve to an HTTP/TLS API.
     ("insecure-flag-literal", "import chartlib\ndef draw(chart):\n    return chart.render(verify=False)\n"),
     # (c) secure=False on a NON-security callee (a UI widget builder) — not a cookie / request.
@@ -128,14 +144,17 @@ _EXTRA_POSITIVES = [
     # (a) the cryptography library's modes.ECB() constructed into a Cipher(...).
     ("broken-crypto-invocation",
      "from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes\ndef c(k):\n    return Cipher(algorithms.AES(k), modes.ECB())\n"),
-    # (b) a PRNG feeding a security keyword PARAMETER of a RESOLVED security generator (the name `derive_key`
-    # IS the resolved operation — Branch A).
+    # (b) a PRNG feeding a SECRET-MATERIAL keyword parameter (`salt=`) of a RESOLVED descriptive security API
+    # (`derive_key` is a KDF — the name IS the resolved operation). A random salt from a NON-crypto PRNG is the
+    # weakness; the CONTROL parameter `iterations=` on the SAME callee is a LEAD (see the negative controls).
     ("insecure-randomness-sink", "import random\ndef mk(m):\n    return derive_key(m, salt=random.random())\n"),
-    # (b) a PRNG feeding a security keyword PARAMETER of a RESOLVED crypto-module call (`hmac.new` — Branch A).
+    # (b) a PRNG feeding a SECRET-MATERIAL keyword parameter (`key=`) of a RESOLVED crypto-module call
+    # (`hmac.new`, provenance via the import).
     ("insecure-randomness-sink", "import random, hmac\ndef mk(m):\n    return hmac.new(m, key=random.random())\n"),
-    # (b) a PRNG (single-hop alias) feeding a real HMAC key positionally (a resolved crypto call — Branch B).
+    # (b) a PRNG (single-hop alias `k`) feeding the SECRET-MATERIAL `key=` of a resolved crypto call — the
+    # alias source is re-derived within the function.
     ("insecure-randomness-sink",
-     "import random, hmac, hashlib\ndef mk(m):\n    k = str(random.randint(0, 1 << 32)).encode()\n    return hmac.new(k, m, hashlib.sha256).hexdigest()\n"),
+     "import random, hmac, hashlib\ndef mk(m):\n    k = str(random.randint(0, 1 << 32)).encode()\n    return hmac.new(key=k, msg=m, digestmod=hashlib.sha256).hexdigest()\n"),
     # (c) verify=False on a requests Session (base-var resolved).
     ("insecure-flag-literal", "import requests\ndef f(u):\n    s = requests.Session()\n    return s.post(u, verify=False)\n"),
     # (c) TLS verification disabled via ssl.wrap_socket(cert_reqs=ssl.CERT_NONE).

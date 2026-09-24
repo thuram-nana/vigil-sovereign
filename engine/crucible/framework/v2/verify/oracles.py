@@ -3601,33 +3601,58 @@ _INSECURE_RANDOM_FNS = frozenset({
     "random", "randint", "randrange", "choice", "choices", "uniform", "getrandbits",
     "sample", "shuffle", "randbytes", "betavariate", "gauss", "normalvariate",
 })
-# A GENUINE SECURITY SINK for tier (b): the PRNG value must FLOW INTO a call whose RECEIVING CALLEE RESOLVES
-# to a genuine crypto/security API (mirroring tiers a/c, which resolve provenance) — either as a security-
-# material keyword PARAMETER, or as any argument to a resolved security generator/crypto call. A merely
-# security-ISH assignment-TARGET NAME (`token = random.choice(...)`), a security-named kwarg on a NON-
-# security callee (`sorted(items, key=random.random())`, `logging.info('x', token=random.random())`), or a
-# bare/aliased crypto VERB with no crypto-module provenance (`numpy.sign(...)`, `math.copysign as sign`) is
-# NOT a sink — that is the false-positive class, and it stays a LEAD (soundness over recall). Names are
-# matched non-alnum-stripped + lower (`set_password` -> `setpassword`, `iv=` -> `iv`), so spelling variants
-# collapse to one key.
+# A GENUINE SECURITY SINK for tier (b) requires BOTH conditions — mirroring the provenance discipline of
+# tiers (a)/(c), which resolve a callee to a real crypto / HTTP-TLS module before minting:
+#   1. PROVENANCE — the RECEIVING CALLEE must RESOLVE to a genuine crypto/security API (see
+#      ``_callee_resolves_to_security_api``): either its base resolves to an imported crypto MODULE
+#      (`hmac.new`, `cryptography.*`, `Crypto.*`), OR its bare name is in the SMALL CLOSED, UNAMBIGUOUS
+#      allowlist below. A callee that resolves to NOTHING — a container/logger/builder, or an AMBIGUOUS
+#      descriptive constructor (`make_key`/`new_key`/`issue_token`) — is NOT a sink and stays a LEAD.
+#   2. ARGUMENT POSITION — the PRNG value must land in a SECRET-MATERIAL keyword parameter (the key/secret/
+#      token/password/salt/iv/nonce/seed VALUE), NEVER a CONTROL parameter (length/size/count/iterations/
+#      rounds/work-factor/timeout/index). A random token LENGTH or iteration COUNT is a benign control value,
+#      not secret material, so it stays a LEAD.
+# The two residual false-positive classes this closes: (1) NAME-ONLY matching —
+# `make_key(random.choice(shards))` (a sharded CACHE key) resolved PURELY by name and minted a durable false
+# FACT; (2) NO argument discrimination — `generate_token(length=random.randint(8,16))` /
+# `derive_key(pw, salt, iterations=random.randint(...))` fired on a CONTROL parameter. Both are now LEADs
+# (soundness over recall). Positional secret material is deliberately NOT re-derived here (its secret-vs-
+# control role is unresolved without a per-API signature) => LEAD. Names are matched non-alnum-stripped +
+# lower (`set_password` -> `setpassword`, `iv=` -> `iv`), so spelling variants collapse to one key.
 _SECURITY_SINK_PARAMS = frozenset({
-    "key", "secret", "token", "password", "passwd", "pwd", "iv", "salt", "nonce",
+    "key", "secret", "token", "password", "passwd", "pwd", "iv", "salt", "nonce", "seed",
     "privatekey", "signingkey", "secretkey", "apikey", "authkey", "sessionkey", "csrftoken", "otp",
 })
-# DESCRIPTIVE-NAME security generators/consumers — the NAME itself RESOLVES the operation (there is no benign
-# `generate_token` / `derive_key` / `set_password`; the name IS a security operation). A generic crypto VERB
-# (sign / hmac / encrypt / seal / pbkdf2hmac) is deliberately NOT here: a verb only resolves via a crypto-
-# MODULE base (`hmac.new`, `cryptography.*`, `Crypto.*`), never a bare/aliased name — `numpy.sign(...)` and
-# `from math import copysign as sign` are math, not crypto, and stay a LEAD. See
+# CONTROL parameters — a PRNG feeding one of these is a benign CONTROL value (a random token LENGTH, a random
+# iteration COUNT / work factor), NOT secret material. The material-vs-control split is CLOSED and explicit:
+# a PRNG in any of these NEVER mints, even on a fully-resolved crypto/security callee. (No name is in both
+# sets, so this is a legibility + defence-in-depth guard, not a tiebreaker.)
+_CONTROL_PARAMS = frozenset({
+    "length", "len", "size", "count", "n", "num", "iterations", "iters",
+    "rounds", "workfactor", "cost", "timeout", "index", "idx", "keylen", "dklen", "nbytes",
+})
+# DESCRIPTIVE-NAME security generators/consumers — a SMALL CLOSED allowlist where the FULL name is
+# UNAMBIGUOUSLY a security-secret operation with NO benign reading, so it resolves WITHOUT a crypto-module
+# import. Admissibility (kept sound by two rules):
+#   * an INTRINSIC-secret noun (password / secret / api-key / OTP) with an explicit generation / consumption
+#     verb — there is no benign `generate_password` / `set_password` / `generate_secret`; the noun IS a secret;
+#   * an AMBIGUOUS noun (key/token/nonce/salt/iv) ONLY with an explicit security verb — `derive` (a KDF) or
+#     `generate`.
+# DROPPED — the NAME-ONLY false-positive class: GENERIC CONSTRUCTORS (`make_`/`new_`/`create_`/`gen_`/
+# `issue_`/`build_`) over an ambiguous noun — `make_key`/`new_key`/`create_key`/`gen_key` (a cache/dict/sort/
+# DB key), `make_token`/`new_token`/`gen_token`/`issue_token` (a lexer/CSRF/placeholder token),
+# `make_nonce`/`make_salt`/`make_iv`. Each resolves to NOTHING now => a LEAD. A generic crypto VERB
+# (sign/hmac/encrypt/seal/pbkdf2hmac) is likewise NOT here: it resolves ONLY via a crypto-MODULE base
+# (`hmac.new`), never a bare/aliased name (`numpy.sign`, `from math import copysign as sign` are math). See
 # ``_callee_resolves_to_security_api``.
 _SECURITY_GENERATOR_CALLEES = frozenset({
-    "setpassword", "checkpassword", "makepassword", "hashpassword", "generatepassword", "genpassword",
-    "generatetoken", "createtoken", "maketoken", "gentoken", "newtoken", "issuetoken",
-    "generatesecret", "makesecret", "gensecret", "createsecret",
-    "generatekey", "derivekey", "genkey", "makekey", "createkey", "newkey",
-    "generateapikey", "createapikey", "makeapikey",
-    "generateotp", "makeotp", "genotp", "generatenonce", "makenonce",
-    "generatesalt", "makesalt", "generateiv", "makeiv",
+    # password — an intrinsic secret; set/check/verify/hash/generate are explicit security operations.
+    "setpassword", "checkpassword", "verifypassword", "hashpassword", "generatepassword",
+    # secret / api-key / OTP — intrinsic secret nouns with an explicit `generate` verb.
+    "generatesecret", "generateapikey", "generateotp",
+    # ambiguous nouns (key/token/nonce/salt/iv) resolve ONLY with an explicit security verb — `derive` (a KDF)
+    # or `generate`; the generic constructors make_/new_/create_/gen_/issue_/build_ are DROPPED.
+    "derivekey", "generatekey", "generatetoken", "generatenonce", "generatesalt", "generateiv",
 })
 
 
@@ -3681,13 +3706,14 @@ def _callee_resolves_to_security_api(node_func: Any, crypto_locals: "set[str]",
                                      shadows: "set[str]") -> bool:
     """RESOLVE PROVENANCE for tier (b) — mirrors tier (a) ``_base_is_crypto`` and tier (c)
     ``_is_security_relevant_callee``. True iff the callee RESOLVES to a genuine crypto/security API:
-      * a DESCRIPTIVE-NAME security generator/consumer (the name IS the resolved operation —
-        ``generate_token``/``derive_key``/``set_password``), OR
+      * a name in the SMALL CLOSED, UNAMBIGUOUS descriptive allowlist ``_SECURITY_GENERATOR_CALLEES`` (the
+        FULL name IS the resolved operation — ``derive_key``/``generate_token``/``set_password``), OR
       * a call whose BASE resolves to an imported crypto MODULE (``hmac.new``, ``cryptography.*``,
         ``Crypto.*`` — this is the ONLY way a generic crypto verb sign/hmac/encrypt/seal resolves).
-    A generic container / logger / builder / bare or aliased verb (``sorted``, ``max``, ``itertools.groupby``,
-    ``heapq.nlargest``, ``logging.info``, ``numpy.sign``, ``math.copysign as sign``) or any callee with no
-    crypto/security provenance does NOT resolve => a LEAD (soundness over recall)."""
+    A generic container / logger / builder, an AMBIGUOUS descriptive constructor (``make_key``/``new_key``/
+    ``issue_token`` — now DROPPED from the allowlist), or a bare/aliased verb (``sorted``, ``logging.info``,
+    ``numpy.sign``, ``math.copysign as sign``) with no crypto/security provenance does NOT resolve => a LEAD
+    (soundness over recall)."""
     callee_key = re.sub(r"[^a-z0-9]", "", _attr_or_name(node_func).lower())
     if callee_key in _SECURITY_GENERATOR_CALLEES:
         return True
@@ -3696,14 +3722,21 @@ def _callee_resolves_to_security_api(node_func: Any, crypto_locals: "set[str]",
 
 
 def _insecure_randomness_hit(tree: ast.AST) -> "tuple[bool, str]":
-    """RE-DERIVE tier (b): a non-crypto PRNG value FLOWS INTO A GENUINE SECURITY SINK within the SAME
-    function — passed (directly, or via a single-hop alias) into a call whose RECEIVING CALLEE RESOLVES to a
-    crypto/security API (a descriptive-name token/secret/key/IV/salt generator, or a resolved crypto call
-    from an imported crypto module), either as a security-material keyword PARAMETER or as any argument. A
-    PRNG merely ASSIGNED to a security-ISH variable NAME, a security-named kwarg on a NON-security callee
-    (`sorted(..., key=...)`), or a bare/aliased crypto verb with no crypto-module provenance (`numpy.sign`)
-    is NOT a sink — the FP class — and stays a LEAD (soundness over recall). Pure AST; no execution;
-    inter-procedural / whole-program flows are not re-derived here."""
+    """RE-DERIVE tier (b): a non-crypto PRNG value FLOWS INTO A SECRET-MATERIAL SINK within the SAME function.
+    BOTH conditions must hold (mirroring the provenance discipline of tiers a/c):
+      * PROVENANCE — the RECEIVING CALLEE RESOLVES to a crypto/security API (a crypto-module call such as
+        ``hmac.new``, or a name in the SMALL CLOSED unambiguous allowlist such as ``derive_key``). An
+        ambiguous descriptive constructor (``make_key``/``issue_token``) or a generic container/logger
+        resolves to NOTHING => a LEAD.
+      * ARGUMENT POSITION — the PRNG value lands in a SECRET-MATERIAL keyword parameter (key/secret/token/
+        password/salt/iv/nonce/seed), passed directly or via a single-hop alias — NEVER a CONTROL parameter
+        (length/size/count/iterations/rounds/work-factor/timeout/index).
+    A PRNG merely ASSIGNED to a security-ISH variable NAME, a security-named kwarg on a NON-security callee
+    (``sorted(..., key=...)``), a bare/aliased crypto verb with no crypto-module provenance (``numpy.sign``),
+    or a PRNG feeding a CONTROL parameter of a resolved API (``generate_token(length=...)``) is NOT a sink —
+    those are the FP classes — and each stays a LEAD (soundness over recall). Pure AST; no execution;
+    inter-procedural / whole-program flows and POSITIONAL secret material are not re-derived here (LEAD).
+    Returns (fired, detail)."""
     crypto_locals, from_crypto = _collect_crypto_imports(tree)
     shadows = _collect_local_shadows(tree)
     for fn in ast.walk(tree):
@@ -3718,22 +3751,24 @@ def _insecure_randomness_hit(tree: ast.AST) -> "tuple[bool, str]":
         for node in ast.walk(fn):
             if not isinstance(node, ast.Call):
                 continue
-            # The RECEIVING CALLEE must RESOLVE to a genuine crypto/security API; a security-named kwarg or a
-            # security-sounding verb on an UNRESOLVED callee is NOT a sink (that was the FP class -> LEAD).
+            # PROVENANCE: the RECEIVING CALLEE must RESOLVE to a genuine crypto/security API. A security-named
+            # kwarg on an UNRESOLVED callee, an ambiguous descriptive constructor, or a generic
+            # container/logger is NOT a sink (that was the name-only FP class -> LEAD).
             if not _callee_resolves_to_security_api(node.func, crypto_locals, from_crypto, shadows):
                 continue
             callee_short = _attr_or_name(node.func)
-            # (A) a PRNG passed to a security-material KEYWORD parameter of a RESOLVED security API — as a secret.
+            # ARGUMENT POSITION: fire ONLY when the PRNG feeds a SECRET-MATERIAL keyword parameter of the
+            # resolved API — never a CONTROL parameter (length/iterations/...), and never a bare positional
+            # (whose secret-vs-control role is unresolved here -> LEAD, soundness over recall).
             for kw in node.keywords:
-                if kw.arg and re.sub(r"[^a-z0-9]", "", kw.arg.lower()) in _SECURITY_SINK_PARAMS \
-                        and _expr_uses_prng(kw.value, rand_vars):
-                    return True, (f"a non-cryptographic PRNG feeds the security parameter `{kw.arg}=` of the "
-                                  f"resolved security API `{callee_short}(...)` in function `{fn.name}`")
-            # (B) a PRNG flowing as any argument into the RESOLVED security generator/consumer or crypto call.
-            args = list(node.args) + [kw.value for kw in node.keywords]
-            if any(_expr_uses_prng(a, rand_vars) for a in args):
-                return True, (f"a non-cryptographic PRNG flows into the resolved security-sensitive call "
-                              f"`{callee_short}(...)` in function `{fn.name}`")
+                if not kw.arg:
+                    continue   # **kwargs splat — no resolvable parameter name (LEAD).
+                pname = re.sub(r"[^a-z0-9]", "", kw.arg.lower())
+                if pname in _CONTROL_PARAMS:
+                    continue   # a random LENGTH / iteration COUNT is a benign control value, not a secret.
+                if pname in _SECURITY_SINK_PARAMS and _expr_uses_prng(kw.value, rand_vars):
+                    return True, (f"a non-cryptographic PRNG feeds the secret-material parameter `{kw.arg}=` "
+                                  f"of the resolved security API `{callee_short}(...)` in function `{fn.name}`")
     return False, ""
 
 
