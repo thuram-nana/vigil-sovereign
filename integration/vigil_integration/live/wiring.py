@@ -1550,6 +1550,17 @@ def _redrive_branch_for(bug_class: str) -> "Optional[str]":
         # / a missing operator login sequence keeps the claim a LEAD/INCONCLUSIVE (the branch's preconditions
         # fail-close).
         "session_fixation": "session_fixation.session_fixation",
+        # Wave 4.5 — MFA-bypass gated-workflow re-drive: VIGIL reads a post-MFA-gated resource through a
+        # factor-1-ONLY session and adjudicates via the FACT-capable MFA_BYPASS branch
+        # (verify/oracles.py:mfa_bypass_oracle). Fires ONLY under the FAIL-CLOSED three-part operator
+        # attestation (the account is MFA-enrolled, VIGIL presented only factor-1, the resource is genuinely
+        # post-MFA-gated) AND — by the PRIVATE-READ REDUCTION (the same machinery 3.1 / 3.2 use) — a victim-
+        # PRIVATE discriminator D PRESENT in the factor-1-only read AND the post-MFA owner's read yet PROVABLY
+        # ABSENT from a SUBSTANTIVE SAME-SHAPE other-identity reference and a no-session baseline. Without the
+        # attestation / a private D / a reference / D present in a negative reference the claim stays a
+        # LEAD/INCONCLUSIVE (the branch's preconditions fail-close). The factor-2-enforcing benign twin never
+        # fires.
+        "mfa_bypass": "mfa_bypass.mfa_bypass",
         # Wave 3.4 — SSO forgery-ACCEPTANCE achieved-state re-drive: VIGIL synthesises a forged token
         # carrying a fresh random attacker identity, replays it live through the gated send, and admits to the
         # ACHIEVED_STATE private-read branch (verify/oracles.py:predicate_oracle) — which fires ONLY on an

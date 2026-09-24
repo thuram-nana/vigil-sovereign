@@ -1966,6 +1966,88 @@ def _workflow_signal(fired: bool, *, evidence: str, observed: dict, conf: float 
                         evidence=evidence, observed=observed)
 
 
+# ---------------------------------------------------------------------------
+# 4a-ter. MFA BYPASS (Wave-4.5, gated-workflow, opt-in) — CWE-287 / CWE-308, its OWN OracleKind.MFA_BYPASS.
+# ---------------------------------------------------------------------------
+#
+# WHAT THIS PROVES AND WHY IT IS SOUND. A "second-factor bypass" is an ACHIEVED-STATE claim: a session that
+# completed ONLY factor-1 (username+password / a magic link / an SSO first hop) nevertheless reaches a resource
+# the app is supposed to release ONLY after factor-2. Wave-3 proved (six rounds) that an achieved
+# authenticated/accepted state CANNOT be proven from response CONTENT — a marker/substance/shape heuristic is
+# defeated by a benign app whose response merely VARIES by credential presence, AND, worse here, by the KILLER
+# FALSE POSITIVE of an INTENTIONALLY factor-1 page: a page the operator deliberately serves to a
+# password-only session (a public dashboard, a "verify your device" landing page) is byte-for-byte
+# indistinguishable, from the outside, from a page that leaked past MFA. No automatic content check can tell a
+# deliberate factor-1 surface from a bypassed one.
+#
+# THE HONEST RESOLUTION — TWO INDEPENDENT LOCKS, BOTH REQUIRED (exactly the Wave-3.4 forgery-acceptance shape).
+#   LOCK 1 — a FAIL-CLOSED OPERATOR ATTESTATION (the un-auto-verifiable part). The operator must ATTEST three
+#            things, re-asserted from the retained record at EVERY (re-)verification so a tampered/absent
+#            certificate refuses to mint offline:
+#              (a) ``mfa_enrolled_account``        — the account under test genuinely has factor-2 ENROLLED;
+#              (b) ``factor1_only_presented``      — VIGIL's session completed ONLY factor-1 (no OTP/WebAuthn/
+#                                                    push was supplied) — so a fire is a BYPASS, not a login;
+#              (c) ``post_mfa_resource_certified`` — the read resource/datum is genuinely gated BEHIND factor-2
+#                                                    (NOT an intentionally factor-1 page) — the lock that closes
+#                                                    the killer FP.
+#            WITHOUT all three (strict ``is True``) the oracle emits NO fire for ANY input — benign or not — and
+#            the class is a rigorous LEAD. This is the one property no byte check can decide (is this page
+#            supposed to require MFA?), so it moves to an explicit operator attestation, not a defeatable guard.
+#   LOCK 2 — the PRIVATE-READ REDUCTION (the auto-verifiable part; reuses SESSION_FIXATION / Wave-3.1's
+#            ``_sfx_private_read_achieved`` that PASSED adversarial review). WITH the attestation, the achieved
+#            bypass is proven ONLY when a genuine operator-supplied victim-PRIVATE datum D satisfies ALL of:
+#              (a) D PRESENT in the factor-1-only session's SUBSTANTIVE read of the post-MFA resource;
+#              (b) D PRESENT in a fully-authenticated (post-MFA) OWNER's authoritative read (the POSITIVE
+#                  reference — D is REAL private content, not chrome shown for any credential);
+#              (c) D ABSENT from a SUBSTANTIVE SAME-SHAPE 2xx read by an OTHER not-post-MFA identity (the
+#                  DECISIVE clause — cosmetic chrome shown for any credential appears there too) AND ABSENT from
+#                  a valid no-session gating baseline;
+#              (d) D a valid, non-reflected discriminator.
+#            A denial / empty / error / different-shape negative reference is REFUSED (its absent D is vacuous)
+#            ⇒ fail closed to a LEAD. The differential is re-derived from the RETAINED RAW bytes (never a bool).
+#
+# SOUNDNESS. LOCK 1 answers "is this resource supposed to require MFA, and did VIGIL really present only
+# factor-1?"; LOCK 2 answers "did the factor-1-only session ACTUALLY read the victim's private, access-gated
+# datum?". Together they mint a GATED-WORKFLOW FACT; the residual is operator MISCERTIFICATION (attesting a
+# factor-1 page as post-MFA-gated), the identical bound Wave-3.1 / Wave-3.4 were accepted with. The BENIGN TWIN
+# — an app that correctly enforces factor-2 — never fires even WITH the attestation: the factor-1-only read does
+# not carry D (D present only for the post-MFA owner), so the differential is ``False`` ⇒ a channel-confirmed
+# CLEAN, never a FACT. Nothing in the default scan/engage roster supplies the attestation or the private D +
+# references, so the class MINTS NOTHING at runtime (an honest LEAD) and `make gate` stays byte-identical.
+
+
+# The three attestation fields the operator must set (strict ``is True``). Any missing/false/non-bool ⇒ the
+# oracle refuses to mint — the killer FP (an intentionally factor-1 page) can never round to a FACT without (c).
+_MFA_ATTESTATION_FIELDS: tuple[str, ...] = (
+    "mfa_enrolled_account",         # the account under test genuinely has a second factor ENROLLED
+    "factor1_only_presented",       # VIGIL's session completed ONLY factor-1 (no OTP/WebAuthn/push supplied)
+    "post_mfa_resource_certified",  # the read resource/datum is genuinely gated BEHIND factor-2 (closes the FP)
+)
+
+
+def _mfa_attested(attestation: Any) -> bool:
+    """The FAIL-CLOSED operator attestation — a HARD precondition, re-derived from the retained record at every
+    verification. True ONLY when the record carries all three attestation fields set with strict ``is True`` (a
+    truthy non-bool does NOT pass). Absent / partial / false ⇒ the oracle refuses to mint (an honest LEAD): an
+    intentionally factor-1 page is otherwise indistinguishable from a bypass."""
+    if not isinstance(attestation, Mapping):
+        return False
+    return all(attestation.get(f) is True for f in _MFA_ATTESTATION_FIELDS)
+
+
+def _mfa_signal(fired: bool, *, evidence: str, observed: dict, conf: float = 0.92,
+                conclusive: bool = False) -> OracleSignal:
+    # kind is the DEDICATED OracleKind.MFA_BYPASS (held OUT of the frozen _ALL_ORACLES, so
+    # oracle_version(ACHIEVED_STATE) is untouched and the unknown-class fallback stays EXACTLY 15). A fire is
+    # always decisive; a NON-fire is ``conclusive`` ONLY for a channel-confirmed clean (attested AND the
+    # factor-1-only session provably did NOT reach the victim's post-MFA private view — the app enforces
+    # factor-2). An un-attested / undecidable-differential non-fire is a LEAD (conclusive=False), never a CLEAN.
+    return OracleSignal(kind=OracleKind.MFA_BYPASS, fired=fired,
+                        confidence=(conf if fired else 0.0),
+                        conclusive=(True if fired else conclusive),
+                        evidence=evidence, observed=observed)
+
+
 def _workflow_resp_pair(resp: Any) -> dict[str, Any]:
     """Normalise one retained burst response into the ``{status, body}`` the operator's semantic
     success predicate reads. Pure — never fetches anything."""
@@ -2106,6 +2188,102 @@ def workflow_abuse_oracle(observed: Any) -> OracleSignal:
     if mode == "race":
         return _workflow_race(obs, base)
     return _workflow_tamper(obs, base)
+
+
+def mfa_bypass_oracle(observed: Any) -> OracleSignal:
+    """Fire when a session that completed ONLY factor-1 achieves a read of a victim-PRIVATE datum the app gates
+    BEHIND factor-2 — the ACHIEVED-STATE proof of an MFA bypass (CWE-287 improper authentication / CWE-308
+    single-factor-only), under a FAIL-CLOSED operator attestation. An achieved post-MFA state CANNOT be proven
+    from response content, and an intentionally factor-1 page is indistinguishable from a bypass without operator
+    intent, so this oracle requires BOTH the three-part attestation (LOCK 1) AND the PRIVATE-READ REDUCTION
+    (LOCK 2, reusing :func:`_sfx_private_read_achieved`) — re-derived from RAW retained bytes, never a bool.
+
+    ``observed`` is the retained record ``scanner.mfa.MfaBypassCheck`` captured through the gated ``send``:
+
+      * ``operator_attestation`` — ``{mfa_enrolled_account, factor1_only_presented, post_mfa_resource_certified}``
+        (each strict ``is True``): the HARD certification gate;
+      * ``private_discriminator`` (D) — the operator's genuine victim-PRIVATE post-MFA-gated datum;
+      * ``factor1_view``  — ``{status, body}`` of the post-MFA resource read carrying ONLY the factor-1 session;
+      * ``owner_view``    — ``{status, body}`` of the SAME resource read by the fully post-MFA-authenticated
+        owner (the POSITIVE reference: D must be PRESENT);
+      * ``pre_mfa_ref``   — ``{status, body}`` of the SAME resource read by an OTHER not-post-MFA identity (the
+        DECISIVE SAME-SHAPE negative reference: a substantive 2xx from which D must be ABSENT);
+      * ``logged_out_ref``— ``{status, body}`` of the SAME resource with NO session (the no-session baseline);
+      * ``logged_out_markers`` / ``logged_out_statuses`` — the operator's decisive not-authenticated signals.
+
+    Adjudication:
+
+      * attestation NOT fully present (LOCK 1 open) ⇒ NO fire for ANY input — refuse to mint (LEAD); the killer
+        FP of an intentionally factor-1 page can never round to a FACT;
+      * attested, but :func:`_sfx_private_read_achieved` is ``None`` (no / invalid / reflected D; a
+        non-substantive factor-1 read; no substantive owner positive reference or D absent from it; no
+        substantive SAME-SHAPE other-identity reference; no valid no-session baseline; or D present in a negative
+        reference) ⇒ LEAD (never a FACT, never a false CLEAN);
+      * attested, and the factor-1-only session did NOT reach the victim's post-MFA private view (D absent from
+        its otherwise-substantive read, present for the owner) ⇒ the app enforces factor-2 — channel-confirmed
+        CLEAN (the benign twin);
+      * attested, and the factor-1-only session reached the victim's post-MFA private view ⇒ FIRE.
+
+    Pure + deterministic; never raises."""
+    obs = observed if isinstance(observed, Mapping) else {}
+    attested = _mfa_attested(obs.get("operator_attestation"))
+    discriminator = _coerce_text(obs.get("private_discriminator")).strip()
+    base = {"operator_attested": attested}
+
+    # LOCK 1 — the FAIL-CLOSED operator attestation (Wave-3.4 certification-gate shape), re-derived from the
+    # retained record at EVERY verification so a tampered / absent attestation refuses to mint offline. This is
+    # the HARD precondition and it is checked FIRST, so NO input — benign or a bypass — mints without it, and an
+    # intentionally factor-1 page (the killer FP) can never round to a FACT.
+    if not attested:
+        return _mfa_signal(
+            False, observed=base,
+            evidence=("no complete operator MFA attestation (mfa_enrolled_account + factor1_only_presented + "
+                      "post_mfa_resource_certified, each strict True) — refuse to mint (LEAD). An intentionally "
+                      "factor-1 page is indistinguishable from a bypass without the operator certifying the "
+                      "resource is genuinely post-MFA-gated; absent the attestation this class is a rigorous LEAD"))
+
+    # LOCK 2 — RE-DERIVE the achieved post-MFA read from RAW retained bytes via the PRIVATE-READ REDUCTION (the
+    # SAME machinery SESSION_FIXATION / Wave-3.1 IDOR use). No VIGIL cookie sentinel here (a real factor-1
+    # login), so no per-probe sentinel is passed; the (a)-(c) private-read differential is the load-bearing
+    # proof. None ⇒ undecidable (no/invalid/reflected D, non-substantive factor-1 read, missing/failing owner
+    # positive reference, missing/non-substantive-same-shape other-identity reference, missing/invalid
+    # no-session baseline, or D present in a negative reference) ⇒ LEAD.
+    reached = _sfx_private_read_achieved(discriminator, obs.get("factor1_view"), obs.get("owner_view"),
+                                         obs.get("pre_mfa_ref"), obs.get("logged_out_ref"),
+                                         obs.get("logged_out_markers"), obs.get("logged_out_statuses"),
+                                         sentinel_id="")
+    if reached is None:
+        return _mfa_signal(
+            False, observed={**base, "discriminator_len": len(discriminator)},
+            evidence=("attested, but the achieved post-MFA state could not be proven by the PRIVATE-READ "
+                      "differential (no valid victim-private discriminator D; a non-substantive factor-1 read; no "
+                      "substantive post-MFA owner positive reference or D absent from it; no substantive "
+                      "SAME-SHAPE other-identity reference — a denial/empty/error/different-shape is refused; no "
+                      "valid no-session baseline; or D present in a negative reference — chrome/shared/public) — "
+                      "cannot mint (LEAD)"))
+
+    # attested AND the factor-1-only session did NOT reach the victim's post-MFA private view ⇒ the app enforces
+    # factor-2 (the benign twin). D absent from the factor-1-only read yet present for the owner — a
+    # channel-confirmed CLEAN, never a FACT.
+    if reached is not True:
+        return _mfa_signal(
+            False, conclusive=True, observed={**base, "factor1_reached_private": False},
+            evidence=("the factor-1-only session did not reach the victim's post-MFA private view (the private "
+                      "datum D is absent from its read, present for the post-MFA owner) — the app enforces the "
+                      "second factor; did not fire"))
+
+    return _mfa_signal(
+        True, conf=0.92,
+        evidence=("MFA bypass: a session that completed ONLY factor-1 achieved a read of a victim-PRIVATE datum "
+                  "the app gates behind factor-2 — the private discriminator D is PRESENT in the factor-1-only "
+                  "read AND in the fully post-MFA-authenticated owner's read yet PROVABLY ABSENT from a "
+                  "SUBSTANTIVE SAME-SHAPE read by an OTHER not-post-MFA identity and from a no-session baseline "
+                  "(the private-read differential proves the factor-1-only session reached the victim's "
+                  "post-MFA-gated content), under the operator's attestation that the account is MFA-enrolled, "
+                  "only factor-1 was presented, and the resource is genuinely post-MFA-gated"),
+        observed={"operator_attested": True, "factor1_reached_private": True,
+                  "differential": "private_datum_present_in_factor1_only_and_owner_reads_absent_in_same_shape_"
+                  "other_identity_and_no_session_references"})
 
 
 # ---------------------------------------------------------------------------

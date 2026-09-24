@@ -72,6 +72,10 @@ _ADDITIVE = frozenset({
     # reachable ONLY via its `session_fixation` row keyed on a `session_fixation` ctx field; never in the
     # frozen fallback.
     "SESSION_FIXATION",
+    # Wave 4.5 MFA BYPASS achieved-state kind (CWE-287/CWE-308) — its OWN dedicated kind (so editing its
+    # differential body changes ONLY oracle_version(MFA_BYPASS), never ACHIEVED_STATE), additive, reachable
+    # ONLY via its `mfa_bypass` row keyed on a `mfa_bypass` ctx field; never in the frozen fallback.
+    "MFA_BYPASS",
 })
 
 
@@ -97,8 +101,10 @@ def test_every_additive_oraclekind_is_excluded_from_the_fallback():
     # additively: 35 -> 36 -> 37 -> 38; W16-STD-5 added the 3 client-side posture kinds: 38 -> 41;
     # Wave 2.2 added PROTOTYPE_POLLUTION (achieved-state, CWE-1321): 41 -> 42; Wave 2.4 added CSP_POSTURE
     # (permissive-policy posture, CWE-693/CWE-1021): 42 -> 43; Wave 3.2 added SESSION_FIXATION (achieved-state,
-    # CWE-384, its own dedicated kind so ACHIEVED_STATE's oracle_version is untouched): 43 -> 44.)
-    assert len(OracleKind) == 44
+    # CWE-384, its own dedicated kind so ACHIEVED_STATE's oracle_version is untouched): 43 -> 44; Wave 4.5 added
+    # MFA_BYPASS (achieved-state, CWE-287/CWE-308, its own dedicated kind so ACHIEVED_STATE's oracle_version is
+    # untouched): 44 -> 45.)
+    assert len(OracleKind) == 45
     assert {k.name for k in OracleKind} == _FROZEN_15 | _ADDITIVE
     assert set(V._ALL_ORACLES) == set(OracleKind) - {OracleKind[n] for n in _ADDITIVE}
 

@@ -54,7 +54,7 @@ def test_both_documents_match_the_generated_block() -> None:
     assert problems == [], "coverage-tiers drift:\n" + "\n".join(problems)
 
 
-def test_the_reconciled_numbers_are_3_2_15_24() -> None:
+def test_the_reconciled_numbers_are_3_2_16_24() -> None:
     """Pin the reconciled truth. It was 3/2/13/20; W16-STD-5 added THREE fixtures-tier client-side
     posture detectors (clickjacking / CSRF / postMessage), so the fixtures column moved 20 -> 23; then
     Wave 2.2 added ONE local-tier achieved-state detector (client-side prototype pollution — a real
@@ -63,13 +63,16 @@ def test_the_reconciled_numbers_are_3_2_15_24() -> None:
     of the clickjacking / CSRF / postMessage posture detectors), so the fixtures column moved 23 -> 24; then
     Wave 3.2 added ONE local-tier achieved-state detector (session fixation — a real loopback benchmark app
     over a real connection, proven by a PRIVATE-READ REDUCTION that a pre-set session id survived
-    authentication), so the loopback column moved 14 -> 15.
+    authentication), so the loopback column moved 14 -> 15; then Wave 4.5 added ONE local-tier achieved-state
+    detector (MFA bypass — a real loopback benchmark app over a real connection, proven under a fail-closed
+    operator attestation by the same PRIVATE-READ REDUCTION that a factor-1-only session read a
+    post-MFA-gated victim datum), so the loopback column moved 15 -> 16.
 
     Derived, not asserted blind — the counts come from the registry-grounded source; this states the
     value that reconciliation landed on so a future edit that changes an honesty number is loud."""
     counts = g.validate()
     assert (counts["external"], counts["own_infrastructure"], counts["local"], counts["fixtures"]) \
-        == (3, 2, 15, 24)
+        == (3, 2, 16, 24)
 
 
 def test_the_inventory_inline_quotable_row_matches_the_source() -> None:
@@ -134,8 +137,8 @@ def test_the_sentence_is_generated_not_hardcoded() -> None:
     moved = next(d for d in src["detectors"] if d["tier"] == "local")
     moved["tier"] = "fixtures"
     sentence = g.render_sentence(src)
-    assert "14 loopback" in sentence and "25 fixtures-only" in sentence   # the counts followed the move (15→14 loopback, 24→25 fixtures)
-    assert "15 loopback" not in sentence
+    assert "15 loopback" in sentence and "25 fixtures-only" in sentence   # the counts followed the move (16→15 loopback, 24→25 fixtures)
+    assert "16 loopback" not in sentence
 
 
 def test_check_catches_a_drifted_sentence() -> None:
@@ -144,7 +147,7 @@ def test_check_catches_a_drifted_sentence() -> None:
     sentence = g.render_sentence()
     good = f"prefix\n{sentence}\nsuffix"
     assert g._extract_marked(good, Path("synthetic"), g.SENTENCE_BEGIN, g.SENTENCE_END, "s") == sentence
-    tampered = good.replace("15 loopback", "16 loopback")
+    tampered = good.replace("16 loopback", "17 loopback")
     assert g._extract_marked(tampered, Path("synthetic"), g.SENTENCE_BEGIN, g.SENTENCE_END, "s") != sentence
 
 
@@ -165,8 +168,8 @@ def test_generation_is_real_not_hardcoded() -> None:
     moved = next(d for d in src["detectors"] if d["tier"] == "local")
     moved["tier"] = "fixtures"
     counts = g.validate(src)
-    assert counts["local"] == 14 and counts["fixtures"] == 25     # 15->14 local, 24->25 fixtures, on purpose
-    assert "| 14 |" in g.render_block(src)
+    assert counts["local"] == 15 and counts["fixtures"] == 25     # 16->15 local, 24->25 fixtures, on purpose
+    assert "| 15 |" in g.render_block(src)
 
 
 def test_grounding_rejects_a_phantom_detector() -> None:
@@ -198,7 +201,7 @@ def test_check_catches_a_drifted_document_block() -> None:
     block = g.render_block()
     good = f"prefix\n{block}\nsuffix"
     assert g._extract_region(good, Path("synthetic")) == block
-    tampered = good.replace("| 15 |", "| 14 |")
+    tampered = good.replace("| 16 |", "| 15 |")
     assert g._extract_region(tampered, Path("synthetic")) != block
 
 

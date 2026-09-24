@@ -416,6 +416,25 @@ class OracleKind(str, enum.Enum):
     # present in a negative reference, no valid no-session baseline, a rotated id, or a server-set-only id do NOT
     # fire (LEAD / channel-confirmed clean).
     SESSION_FIXATION = "session_fixation"
+    # Wave-4.5 MFA bypass (A4 / CWE-287 improper authentication + CWE-308 single-factor-only) — its OWN
+    # dedicated kind (like SESSION_FIXATION above) so editing its differential body changes ONLY
+    # oracle_version(MFA_BYPASS), never oracle_version(ACHIEVED_STATE). Kept OUT of the frozen _ALL_ORACLES so
+    # oracle_version(ACHIEVED_STATE) is UNTOUCHED and the unknown-class fallback stays EXACTLY 15. Reachable
+    # ONLY via its explicit `mfa_bypass` BUG_CLASS_ORACLES row keyed on the fresh `mfa_bypass` ctx field NO
+    # benchmark/scan/engage finding carries, never the frozen fallback, so `make gate` stays byte-identical.
+    # MFA_BYPASS fires (0.92) ONLY under a FAIL-CLOSED operator attestation (the operator ATTESTS, as a HARD
+    # precondition re-derived at every verification: (a) an MFA-enrolled account, (b) that VIGIL presented
+    # ONLY factor-1 credentials, and (c) that the read resource/datum is genuinely post-MFA-gated — the
+    # attestation is what closes the killer FP of an intentionally factor-1 page) AND — by the SAME PRIVATE-READ
+    # REDUCTION SESSION_FIXATION / Wave-3.1 IDOR use (an achieved authenticated state CANNOT be proven from
+    # response content) — the factor-1-only session achieves a read of a victim-PRIVATE MFA-gated datum D: D is
+    # PRESENT in the factor-1-only read AND in a fully-authenticated (post-MFA) owner's authoritative read yet
+    # PROVABLY ABSENT from (a) a SUBSTANTIVE SAME-SHAPE 2xx read by an OTHER not-post-MFA identity (the DECISIVE
+    # clause) AND (b) a valid no-session gating baseline, with D a valid non-reflected discriminator. The
+    # differential is re-derived from the RETAINED RAW bytes (never a bool, never a bare marker). WITHOUT the
+    # attestation NO fire is emitted for ANY input (an honest LEAD); a benign app that correctly enforces
+    # factor-2 (D absent from the factor-1-only read, present for the owner) is a channel-confirmed CLEAN.
+    MFA_BYPASS = "mfa_bypass"
 
 
 class OracleProbe(BaseModel):
