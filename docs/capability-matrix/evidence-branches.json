@@ -1496,6 +1496,36 @@
         "engine/crucible/framework/v2/scanner/forgery_acceptance.py:SamlForgeryAcceptanceCheck",
         "engine/crucible/framework/v2/verify/oracles.py:predicate_oracle"
       ]
+    },
+    {
+      "id": "ssi.evaluation",
+      "check": "runtime_redrive",
+      "evidence": "A per-probe RANDOM product N1*N2 (unguessable, unable to pre-exist) that VIGIL's own gated re-drive injected as a Server-Side Include directive pair (<!--#set var=X value=\"N1*N2\" --><!--#echo var=X -->) appears in the target's FRESH response body, the raw <!--#...--> directive did NOT survive verbatim (a reflected inert-comment echo is a conclusive clean, not a fire), AND a benign no-directive CONTROL request lacked the product - the ACHIEVED server-side EVALUATION of the include (CWE-97), re-derived offline by verify/oracles.py:ssi_evaluation_oracle over the retained bytes.",
+      "fact_capable": true,
+      "clean_capable": false,
+      "preconditions": [
+        "channel_established",
+        "body_semantically_available"
+      ],
+      "limitation": "Coverage-bounded, not soundness-bounded: a fire is unforgeable (the product is a per-probe random N1*N2 that could not pre-exist, the raw directive provably did not survive, and a benign control attributes the product to THIS probe), but VIGIL can only confirm SSI across the insertion points and directive shapes it actually drives and the pages it crawls. An include reached only from a source/shape VIGIL never drives, or a page it never renders, stays a LEAD/INCONCLUSIVE - never a false negative and never a CLEAN. A page that REFLECTS the directive but does NOT evaluate it is the honest boundary (reflected, not evaluated) and does not fire. The shell <!--#exec cmd=...--> command variant is the SIDE_EFFECT/OOB_CALLBACK path with its own real evidence, not this computed-product branch, so this branch may not assert absence.",
+      "target_fact_capable": true,
+      "target_clean_capable": false,
+      "target_downgrade_rationale": "Proving the ABSENCE of any server-side include evaluation is a coverage-complete capability over every insertion point, every include-directive shape, and every reachable page, not this per-probe computed-product re-drive's target, so CLEAN-capability is deliberately not pursued on this branch.",
+      "blocking_work": "COVERAGE, not a missing oracle: the ssi_evaluation_oracle computed-product proof and the gated live re-drive both exist and mint the FACT today. Raising coverage toward the (unreachable) CLEAN target requires exhaustively enumerating every insertion point (query/path/header/body) and every include-directive shape across every reachable page; until that enumeration is complete a source/shape not driven stays a LEAD, never a CLEAN.",
+      "oracle_version": "evaluation",
+      "control_requirements": [
+        "warden_active_recon_gate",
+        "vigil_owned_gated_probe",
+        "vigil_owned_live_redrive",
+        "vigil_owned_unique_probe_product",
+        "benign_control_attribution",
+        "response_body_decode"
+      ],
+      "evidence_surface": "response_body",
+      "implementation_refs": [
+        "engine/crucible/framework/v2/verify/oracles.py:ssi_evaluation_oracle",
+        "integration/vigil_integration/live/runtime_redrive.py:runtime_redrive"
+      ]
     }
   ]
 }

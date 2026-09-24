@@ -103,6 +103,14 @@ BUG_CLASS_ORACLES: dict[str, tuple[OracleKind, ...]] = {
     "command_injection": (OracleKind.OOB_CALLBACK, OracleKind.SIDE_EFFECT),
     "ssti": (OracleKind.EVALUATION, OracleKind.SIDE_EFFECT, OracleKind.DIFFERENTIAL_RESPONSE),
     "el_injection": (OracleKind.EVALUATION, OracleKind.SIDE_EFFECT),
+    # Wave-4.1 Server-Side Includes (SSI, CWE-97). REUSES the frozen EVALUATION kind exactly like SSTI (adds
+    # NO new OracleKind, so _ALL_ORACLES stays EXACTLY 15 and `make gate` is byte-identical). EVALUATION is
+    # the SOUND minting path — the ssi_evaluation_oracle computed-product proof, reachable via a FRESH ctx
+    # key (`ssi_expected`/`ssi_observed`) no benchmark/scan/engage finding carries by default. SIDE_EFFECT and
+    # OOB_CALLBACK apply ONLY to the command-exec (<!--#exec cmd=…-->) variant with their OWN real evidence
+    # (a unique marker at a sink / a token-verified out-of-band hit), never a bare marker (Wave-2.4 lesson).
+    # All three kinds are pre-existing frozen members, so this row touches neither the fallback nor the enum.
+    "ssi": (OracleKind.EVALUATION, OracleKind.SIDE_EFFECT, OracleKind.OOB_CALLBACK),
     "xss": (OracleKind.REFLECTION_CONTEXT,),
     "path_traversal": (OracleKind.SIDE_EFFECT,),
     "lfi": (OracleKind.SIDE_EFFECT,),
@@ -451,6 +459,11 @@ _ALIASES: dict[str, str] = {
     "os_command_injection": "command_injection",
     "cmdi": "command_injection",
     "server_side_template_injection": "ssti",
+    # Wave-4.1 Server-Side Includes (SSI, CWE-97) — canonical key `ssi`; the common spellings fold onto it.
+    "server_side_includes": "ssi",
+    "server_side_include": "ssi",
+    "ssi_injection": "ssi",
+    "edge_side_includes": "ssi",   # ESI shares the include-directive evaluation model
     "cross_site_scripting": "xss",
     "reflected_xss": "xss",
     # NOTE: `stored_xss` is NOT aliased to `xss` — it is a first-class BUG_CLASS_ORACLES entry routed to the
@@ -1020,6 +1033,15 @@ class OracleVerifier:
                 return oracles.reflection_context_oracle(ctx["marker"], ctx["observed_sink"])
             return None
         if kind is OracleKind.EVALUATION:
+            # Wave-4.1 SSI: a FRESH ctx key (`ssi_expected`/`ssi_observed`) routes the SAME frozen EVALUATION
+            # kind to the SSI-specialised computed-product oracle. No benchmark/scan/engage finding carries
+            # these keys by default, so this sub-arm is inert on the gate path (byte-identical). Checked first
+            # so an SSI finding never falls through to the generic SSTI/EL evaluation oracle.
+            if "ssi_expected" in ctx and "ssi_observed" in ctx:
+                return oracles.ssi_evaluation_oracle(
+                    ctx.get("ssi_raw", ""), ctx["ssi_expected"],
+                    ctx["ssi_observed"], ctx.get("ssi_control"),
+                )
             if "eval_expected" in ctx and "eval_observed" in ctx:
                 return oracles.evaluation_oracle(
                     ctx.get("eval_raw", ""), ctx["eval_expected"],

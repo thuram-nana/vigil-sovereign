@@ -270,6 +270,15 @@ class FindingContext(BaseModel):
     eval_observed: str | None = None
     eval_control: str | None = None
 
+    # ssi_evaluation_oracle (Wave-4.1 Server-Side Includes, CWE-97 — the server EVALUATED an injected SSI
+    # directive). REUSES the frozen EVALUATION kind but routes through a DISTINCT ctx key (`ssi_expected`/
+    # `ssi_observed`) so no benchmark/scan/engage finding carries it and the gate stays byte-identical; the
+    # verifier's EVALUATION arm dispatches these keys to oracles.ssi_evaluation_oracle (computed-product proof).
+    ssi_raw: str | None = None
+    ssi_expected: str | None = None
+    ssi_observed: str | None = None
+    ssi_control: str | None = None
+
     # error_signature_oracle (error-based injection — a datastore/parser error)
     error_observed: str | None = None
     error_control: str | None = None
@@ -1733,6 +1742,28 @@ class FindingContext(BaseModel):
         )
 
     @classmethod
+    def from_ssi(
+        cls,
+        raw_directive: str,
+        expected_result: str,
+        observed_body: Any,
+        *,
+        control_body: Any = None,
+        bug_class: str = "ssi",
+    ) -> "FindingContext":
+        """An injected Server-Side Include DIRECTIVE (``<!--#…-->``), the PER-PROBE random product it
+        computes to, and the response it was observed in (plus an optional benign control), for the
+        SSI evaluation oracle (Wave-4.1, CWE-97). Confirms SSI only when the server EVALUATED the
+        directive — the product present, the raw directive absent — never on an inert-comment echo."""
+        return cls(
+            bug_class=bug_class,
+            ssi_raw=_coerce_text(raw_directive),
+            ssi_expected=_coerce_text(expected_result),
+            ssi_observed=_coerce_text(observed_body),
+            ssi_control=_coerce_text(control_body) if control_body is not None else None,
+        )
+
+    @classmethod
     def from_error_signature(
         cls,
         observed_body: Any,
@@ -2037,6 +2068,13 @@ class FindingContext(BaseModel):
             ctx["eval_observed"] = self.eval_observed
             if self.eval_control is not None:
                 ctx["eval_control"] = self.eval_control
+        if self.ssi_expected is not None and self.ssi_observed is not None:
+            # Wave-4.1 SSI: DISTINCT ctx keys route the frozen EVALUATION kind to ssi_evaluation_oracle.
+            ctx["ssi_raw"] = self.ssi_raw or ""
+            ctx["ssi_expected"] = self.ssi_expected
+            ctx["ssi_observed"] = self.ssi_observed
+            if self.ssi_control is not None:
+                ctx["ssi_control"] = self.ssi_control
         if self.error_observed is not None:
             ctx["error_observed"] = self.error_observed
             if self.error_control is not None:

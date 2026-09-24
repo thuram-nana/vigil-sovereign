@@ -430,6 +430,33 @@ def _eval_template(raw: str) -> str | None:
     return None
 
 
+# The Server-Side Include model (the SSI planted bug, Wave-4.1, CWE-97). A naive include
+# processor EVALUATES an injected ``<!--#set var="X" value="A*B" --><!--#echo var="X" -->``
+# directive pair server-side, computing the arithmetic and emitting only the RESULT — the raw
+# directive is consumed, never reflected. That is exactly what the SSI evaluation oracle demands
+# (product present, raw directive absent), and the fullmatch keeps the sink single-class: only a
+# well-formed set+echo directive pair is ever acted on, so an XSS marker, a SQL tautology, a
+# template expression, a traversal, or a quote all fall through to a constant render and cannot
+# co-fire. (Modelling a custom/legacy include layer that evaluates the arithmetic in a directive
+# value — the EVALUATION path — NOT the shell ``<!--#exec cmd=…-->`` command form.)
+_SSI_SET_ECHO = re.compile(
+    r'<!--#\s*set\s+var="(?P<name>[A-Za-z_][A-Za-z0-9_]*)"\s+'
+    r'value="(?P<a>\d+)\s*\*\s*(?P<b>\d+)"\s*-->'
+    r'\s*<!--#\s*echo\s+var="(?P=name)"\s*-->'
+)
+
+
+def _eval_ssi(raw: str) -> str | None:
+    """The deliberately-flawed SSI processor: if ``raw`` is a bare ``<!--#set var="X"
+    value="A*B" --><!--#echo var="X" -->`` directive pair, COMPUTE ``A*B`` and return the
+    product (server-side include evaluation). Anything else returns None — the caller renders a
+    constant, so a non-directive payload is never reflected and the sink stays single-class SSI."""
+    m = _SSI_SET_ECHO.fullmatch((raw or "").strip())
+    if m:
+        return str(int(m.group("a")) * int(m.group("b")))
+    return None
+
+
 def _page(title: str, body: str) -> bytes:
     return (
         f"<!doctype html><html><head><title>{title}</title></head>"
@@ -1007,6 +1034,33 @@ class BenchmarkHandler(BaseHTTPRequestHandler):
         body = f"<h1>Greeting</h1><p>Hello, {name}.</p><p>{_PRODUCT_FILLER}</p>"
         self._respond(200, _page("Greeting", body))
 
+    def _ssi(self) -> None:
+        # PLANTED BUG (SSI, CWE-97): a naive server-side include processor EVALUATES an injected
+        # ``<!--#set var="X" value="A*B" --><!--#echo var="X" -->`` directive pair server-side,
+        # computing the arithmetic and emitting only the RESULT (the raw directive is consumed, not
+        # echoed), so the SSI evaluation oracle confirms a real evaluation — product present, raw
+        # directive absent. Non-directive input renders a constant "index", so nothing is reflected:
+        # the XSS marker / SQL tautology / SSTI expression / traversal / quote probes all fall through
+        # to the same constant and cannot co-fire. Single-class SSI by construction (DELIBERATELY NOT
+        # linked from the index, so the default GET crawl never reaches it and `make gate` is
+        # byte-identical; exercised only by the gated SSI re-drive, integration/tests/test_ssi_redrive.py).
+        rendered = _eval_ssi(self._query("doc")) or "index"
+        body = f"<h1>Included document</h1><p>{rendered}</p>"
+        self._respond(200, _page("Include", body))
+
+    def _ssi_safe(self) -> None:
+        # SAFE (SSI twin): SSI is DISABLED — a well-formed include directive is echoed VERBATIM into
+        # the body as an INERT HTML comment (never processed). The raw ``<!--#…-->`` survives (the SSI
+        # oracle's rule #3: raw present -> reflected, not evaluated -> conclusive clean) and its
+        # computed product never appears. To avoid being any OTHER sink, only a well-formed set+echo
+        # directive is reflected; every other input renders the constant "index" (so it is never a
+        # reflected-XSS sink), and the filler keeps benign-vs-probe deltas below the differential
+        # thresholds. The false-positive ruler for SSI — a page that reflects but does NOT evaluate.
+        doc = self._query("doc")
+        shown = doc if _SSI_SET_ECHO.fullmatch(doc.strip()) else "index"
+        body = f"<h1>Included document</h1><p>{shown}</p><p>{_PRODUCT_FILLER}</p>"
+        self._respond(200, _page("Include", body))
+
     def _support(self) -> None:
         # SAFE (ordinary benign page): a static page whose single absolute link points
         # at a FIXED, configured host. Its false-positive value is for the PARAM-LEVEL
@@ -1153,6 +1207,13 @@ _ROUTES = {
     # the deep-profile gated session-fixation assertion (which first POSTs a login); the default GET-only
     # crawl only ever sees a logged-out page here, so the default corpus + signed baseline stay byte-identical.
     "/sessfix/account": BenchmarkHandler._sessfix_account,
+    # Server-Side Includes (SSI, CWE-97) pages (Wave 4.1). DELIBERATELY NOT linked from the index; the SSI
+    # sink acts ONLY on a well-formed <!--#set…--><!--#echo…--> directive pair (which the default GET crawl
+    # never sends) and renders a constant otherwise, so the default corpus + signed baseline stay
+    # byte-identical. /ssi is the planted evaluation FACT; /ssi/safe is the benign twin (SSI disabled — the
+    # directive is echoed verbatim as an inert comment). Exercised by integration/tests/test_ssi_redrive.py.
+    "/ssi": BenchmarkHandler._ssi,
+    "/ssi/safe": BenchmarkHandler._ssi_safe,
 }
 
 

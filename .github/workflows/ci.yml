@@ -389,6 +389,7 @@ jobs:
               --ignore=integration/tests/test_engine_runtime_redrive_seam.py \
               --ignore=integration/tests/test_stored_xss_redrive.py \
               --ignore=integration/tests/test_proto_pollution_redrive.py \
+              --ignore=integration/tests/test_ssi_redrive.py \
               --ignore=integration/tests/test_access_control_redrive.py \
               --ignore=integration/tests/test_typed_outcomes.py \
               --ignore=integration/tests/test_engine_live.py \
@@ -489,6 +490,7 @@ jobs:
               integration/tests/test_engine_runtime_redrive_seam.py \
               integration/tests/test_stored_xss_redrive.py \
               integration/tests/test_proto_pollution_redrive.py \
+              integration/tests/test_ssi_redrive.py \
               integration/tests/test_access_control_redrive.py \
               integration/tests/test_release_gate_deceptive_tool.py \
               integration/tests/test_release_gate_false_fact.py \
