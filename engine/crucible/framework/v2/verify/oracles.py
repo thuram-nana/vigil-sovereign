@@ -966,6 +966,92 @@ def evaluation_oracle(
     )
 
 
+# A well-formed Server-Side Include directive: ``<!--#directive ... -->`` (config/echo/set/exec/
+# include/printenv/fsize/flastmod). The ``#`` immediately after the comment open is the SSI marker
+# that separates an include directive from an ordinary HTML comment. Used only to CONFIRM the probe
+# was a genuine SSI directive — the fire still rests on the computed-product differential below.
+_SSI_DIRECTIVE_RE = re.compile(r"<!--#\s*[A-Za-z]+\b[^>]*-->", re.DOTALL)
+
+
+def ssi_evaluation_oracle(
+    raw_directive: str,
+    expected_result: str,
+    observed_body: Any,
+    control_body: Any = None,
+) -> OracleSignal:
+    """Fire when an injected **Server-Side Include (SSI) directive was EVALUATED** by the
+    server — the arithmetic it carries was COMPUTED and its product emitted — not merely
+    reflected (CWE-97: Improper Neutralization of Server-Side Includes).
+
+    The same strict computed-product proof the SSTI/EL :func:`evaluation_oracle` uses,
+    specialised to SSI so it can never be confused with a template-expression evaluation and so
+    a page that merely echoes the directive as an inert HTML comment never fires:
+
+      1. ``raw_directive`` must be a well-formed SSI directive (``<!--#…-->``) — a payload that is
+         not an SSI directive is not an SSI probe and never fires here (keeps the class distinct);
+      2. the ``expected_result`` — the PER-PROBE product ``N1*N2``, unguessable and unable to
+         pre-exist — appears in the response, AND
+      3. the raw directive does NOT survive verbatim: if ``<!--#…-->`` is echoed back unchanged the
+         include was NOT processed (SSI disabled / reflected as an inert comment), which is the
+         honest boundary — reflected, not evaluated — and a CHANNEL-CONFIRMED clean, AND
+      4. when a benign ``control_body`` is supplied, the product does NOT occur in it — so a value
+         that merely happens to be on the page can never be mistaken for an evaluation.
+
+    Use a distinctive per-probe random product (a large ``N1*N2``, never ``7*7``) so the expected
+    value cannot coincidentally appear. A reflected-but-unevaluated directive, an escaped payload,
+    or a benign page all correctly do NOT fire."""
+    raw = (raw_directive or "").strip()
+    expected = (expected_result or "").strip()
+    body = _coerce_text(observed_body)
+
+    if len(expected) < 2:
+        return OracleSignal(
+            kind=OracleKind.EVALUATION, fired=False, confidence=0.0,
+            evidence="expected SSI evaluation result too short to be a reliable marker",
+            observed={"expected": expected})
+
+    if not _SSI_DIRECTIVE_RE.search(raw):
+        # Not a genuine SSI directive — nothing SSI-specific to adjudicate. NON-conclusive: the
+        # probe never carried an include directive, so this says nothing about the target.
+        return OracleSignal(
+            kind=OracleKind.EVALUATION, fired=False, confidence=0.0,
+            evidence=f"payload {raw!r} is not a well-formed SSI directive (<!--#…-->) — not an SSI probe",
+            observed={"raw": raw})
+
+    if expected not in body:
+        return OracleSignal(
+            kind=OracleKind.EVALUATION, fired=False, confidence=0.0,
+            evidence=f"computed product {expected!r} not present; the SSI directive was not evaluated",
+            observed={"expected": expected, "raw_present": raw in body})
+
+    if raw and raw in body:
+        # The literal SSI directive survived verbatim — SSI is disabled and the directive was echoed
+        # as an inert HTML comment. CHANNEL-CONFIRMED NEGATIVE: the directive provably reached the
+        # response sink and was NOT processed (reflected, not evaluated) — the honest boundary, a
+        # decisive "reached-but-not-evaluated" clean, distinct from the "product absent" blind branch.
+        return OracleSignal(
+            kind=OracleKind.EVALUATION, fired=False, confidence=0.0, conclusive=True,
+            evidence=f"SSI directive {raw!r} reflected verbatim as an inert comment — reflected, not evaluated",
+            observed={"expected": expected, "raw_present": True})
+
+    if control_body is not None and expected in _coerce_text(control_body):
+        # The "product" is on the page regardless of the directive — not attributable to evaluation.
+        return OracleSignal(
+            kind=OracleKind.EVALUATION, fired=False, confidence=0.0,
+            evidence=f"product {expected!r} also present in the benign control — not attributable to SSI evaluation",
+            observed={"expected": expected})
+
+    idx = body.find(expected)
+    snippet = body[max(0, idx - 24): idx + len(expected) + 24]
+    return OracleSignal(
+        kind=OracleKind.EVALUATION,
+        fired=True,
+        confidence=0.95,
+        evidence=f"SSI directive {raw!r} evaluated to {expected!r} server-side: ...{snippet}...",
+        observed={"expected": expected, "raw": raw, "snippet": snippet, "ssi": True},
+    )
+
+
 # ---------------------------------------------------------------------------
 # 3d. AEGIS — the DEFENSIVE dual: prove-don't-guess oracles pointed inward at the
 #     operator's OWN app. Same purity contract as every oracle above (pure,

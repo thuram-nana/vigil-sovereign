@@ -1487,6 +1487,11 @@ def _redrive_branch_for(bug_class: str) -> "Optional[str]":
     from .verdict import branch_ids  # noqa: PLC0415
     mapping = {
         "error_based_sqli": "error_signature.datastore_error",
+        # Wave 4.1 — Server-Side Includes (SSI, CWE-97) re-drive: the runner crafts an <!--#set…--><!--#echo…-->
+        # directive pair carrying a per-probe random product, and mints via the FACT-capable EVALUATION branch
+        # (verify/oracles.py:ssi_evaluation_oracle) ONLY when the server EVALUATED it — product present, raw
+        # directive absent, benign control lacking it. A reflected inert-comment echo / no channel keeps it a LEAD.
+        "ssi": "ssi.evaluation",
         # Wave 2.1 — stored / second-order XSS re-drive: a VIGIL-owned gated write at surface A + a
         # headless-browser render of surface B, adjudicated by the FACT-capable DOM_EXECUTION branch
         # (verify/oracles.py:dom_execution_oracle). A non-fire / no channel keeps the claim a LEAD.

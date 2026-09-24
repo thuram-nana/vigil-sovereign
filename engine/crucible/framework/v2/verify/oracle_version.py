@@ -40,7 +40,9 @@ _ORACLE_FNS: dict[OracleKind, tuple[Callable[..., Any], ...]] = {
     OracleKind.ACHIEVED_STATE: (oracles.predicate_oracle, oracles.achieved_state_oracle),
     OracleKind.SIDE_EFFECT: (oracles.side_effect_oracle,),
     OracleKind.REFLECTION_CONTEXT: (oracles.reflection_context_oracle,),
-    OracleKind.EVALUATION: (oracles.evaluation_oracle,),
+    # EVALUATION dispatches by ctx key to the SSTI/EL evaluation oracle OR the SSI-specialised
+    # ssi_evaluation_oracle (Wave-4.1) — both listed so editing EITHER body changes the kind's version.
+    OracleKind.EVALUATION: (oracles.evaluation_oracle, oracles.ssi_evaluation_oracle),
     OracleKind.ERROR_SIGNATURE: (oracles.error_signature_oracle,),
     OracleKind.DOM_EXECUTION: (oracles.dom_execution_oracle,),
     OracleKind.SANITIZER_SIGNAL: (oracles.sanitizer_signal_oracle,),

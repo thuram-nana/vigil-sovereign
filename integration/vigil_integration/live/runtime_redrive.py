@@ -13,6 +13,15 @@ offline-re-verifiable FACT — to three more MERIDIAN-planted classes:
                            HTML position (a tag name / ``<script>`` / an ``on*`` handler), never inert text.
   * ``exposure``         — the ``predicate`` oracle: a distinctive secret signature (``DB_PASSWORD`` /
                            ``propertySources``) at a fixed framework path (``/.env`` / ``/actuator/env``).
+  * ``ssi``              — the ``ssi_evaluation`` oracle (Wave-4.1, CWE-97): a PER-PROBE RANDOM product
+                           ``N1*N2`` injected as a Server-Side Include directive pair
+                           (``<!--#set var=X value="N1*N2" --><!--#echo var=X -->``) that the server
+                           EVALUATED — the product present, the raw directive absent — with a benign
+                           no-directive control that lacked it. The RUNNER crafts the directive; a page
+                           that merely reflects the directive as an inert comment is the honest boundary
+                           (reflected, not evaluated) and does NOT fire. The sound minting path is this
+                           computed-product proof, never a bare marker; the shell ``<!--#exec cmd=…-->``
+                           command variant is a separate SIDE_EFFECT/OOB path, out of this runner's scope.
 
 Unlike ``web_redrive`` (which probes EVERY web class on one URL), this runs ONLY the CLAIMED class, so a
 minted FACT is inherently that class — no sibling cross-attribution. Soundness is inherited unchanged: the
@@ -32,12 +41,13 @@ from typing import Any, Callable, Optional
 # The classes this runner mints as FACTs, each mapped to its ONE registered evidence branch + the oracle
 # whose deterministic decision procedure adjudicates it. Named by value (the framework enums are resolved
 # function-locally, FATAL-2). Kept in lockstep with docs/capability-matrix/evidence-branches.json.
-RUNTIME_FACT_CLASSES = ("path_traversal", "xss", "exposure")
+RUNTIME_FACT_CLASSES = ("path_traversal", "xss", "exposure", "ssi")
 
 _BRANCH_FOR = {
     "path_traversal": "path_traversal.file_signature",
     "xss": "xss.reflected_execution",
     "exposure": "exposure.secret_signature",
+    "ssi": "ssi.evaluation",
 }
 
 # Candidate query-parameter names synthesised for the point-check classes when the proposed URL does not
@@ -48,6 +58,11 @@ _PATH_TRAVERSAL_PARAMS = ("file", "path", "filename", "name", "doc", "document",
                           "download", "read", "include", "view")
 _XSS_PARAMS = ("q", "query", "search", "s", "ref", "name", "keyword", "term", "message", "comment",
                "title", "redirect")
+# Candidate parameter names for the SSI class — where a server-side include tends to be assembled from
+# a request value (a document/template/page name). A CLEAN would be bounded to these names, but this
+# branch is not clean-capable, so the set only bounds where a FACT is SOUGHT, never a claim of absence.
+_SSI_PARAMS = ("doc", "document", "file", "page", "template", "include", "name", "view", "path", "content",
+               "tpl", "fragment")
 _MAX_CANDIDATE_NAMES = 12
 
 # Fixed framework/CMS paths + the distinctive signature each leaks, for the exposure class. Each signature is
@@ -139,11 +154,15 @@ def runtime_redrive(url: str, *, slug: str, engagement_slug: str, signers: "list
     Never raises (a probe error is recorded and what held is returned)."""
     import hashlib  # noqa: PLC0415 — stdlib; deterministic control tokens (no rng, determinism invariant)
 
+    import secrets  # noqa: PLC0415 — per-probe UNPREDICTABLE product so the value cannot pre-exist (not rng
+    #                                  in learning/reward math; the oracle re-fires deterministically offline)
+
     from framework.v2.scanner.checks import (  # noqa: PLC0415
         ContentSignatureCheck, MarkerReflectionCheck, PathProbeCheck)
     from framework.v2.scanner.insertion import HttpRequest, InsertionKind, RequestTemplate  # noqa: PLC0415
+    from framework.v2.verify.adapter import FindingContext  # noqa: PLC0415
     from framework.v2.verify.oracles import (  # noqa: PLC0415
-        predicate_oracle, reflection_context_oracle, side_effect_oracle)
+        predicate_oracle, reflection_context_oracle, side_effect_oracle, ssi_evaluation_oracle)
     from framework.v2.verify.reachability_cloud import _authorize  # noqa: PLC0415 — the URL-shaped gate
     from framework.v2.verify.verifier import normalize_bug_class  # noqa: PLC0415
 
@@ -267,6 +286,55 @@ def runtime_redrive(url: str, *, slug: str, engagement_slug: str, signers: "list
                 _admit(context, f"{probe_url}#{point.id}", f"query:{name}",
                        fired=accepted, conclusive=(signal.conclusive if accepted else False),
                        body_unreadable=state["body_unavailable"] > before_bodies)
+
+        elif bug_class == "ssi":
+            # SSI (CWE-97): the RUNNER crafts a Server-Side Include directive pair carrying a PER-PROBE
+            # RANDOM product; a fire needs the product PRESENT, the raw directive ABSENT (not merely
+            # reflected), AND a benign no-directive control that LACKS the product — the computed-product
+            # evaluation proof (ssi_evaluation_oracle). A page that echoes the directive verbatim as an
+            # inert comment is the honest boundary and does not fire.
+            for name in _candidate_query_names(url, _SSI_PARAMS):
+                probe_url = _url_with_param(url, name)
+                tmpl = RequestTemplate(HttpRequest(method="GET", url=probe_url))
+                point = next((p for p in tmpl.insertion_points(kinds=(InsertionKind.QUERY_VALUE,))
+                              if p.name.lower() == name.lower()), None)
+                if point is None:
+                    continue
+                # CONTROL first: a benign, non-directive value. Its body must NOT carry the (random) product.
+                before, before_bodies = state["channels"], state["body_unavailable"]
+                try:
+                    control = send(tmpl.render(point, f"vigilbenign{nonce}"))
+                except Exception as e:  # noqa: BLE001
+                    res.notes.append(f"ssi control error [{name}]: {type(e).__name__}: {e}")
+                    continue
+                if state["channels"] <= before:
+                    res.inconclusive.append((bug_class, f"{probe_url}#control"))
+                    continue
+                control_body = _body(control)
+                # TREATMENT: a fresh, UNPREDICTABLE product injected as an SSI set+echo directive pair. The
+                # var name is nonce-scoped so the directive is well-formed and self-contained.
+                n1 = secrets.randbelow(90000) + 10000
+                n2 = secrets.randbelow(90000) + 10000
+                product = str(n1 * n2)
+                var = f"vc{nonce}"
+                directive = f'<!--#set var="{var}" value="{n1}*{n2}" --><!--#echo var="{var}" -->'
+                before2, before_bodies2 = state["channels"], state["body_unavailable"]
+                try:
+                    probe = send(tmpl.render(point, directive))
+                except Exception as e:  # noqa: BLE001
+                    res.notes.append(f"ssi probe error [{name}]: {type(e).__name__}: {e}")
+                    continue
+                if state["channels"] <= before2:
+                    res.inconclusive.append((bug_class, f"{probe_url}#{point.id}"))
+                    continue
+                fc = FindingContext.from_ssi(directive, product, _body(probe),
+                                             control_body=control_body, bug_class="ssi")
+                context = fc.to_verifier_context()
+                signal = ssi_evaluation_oracle(context.get("ssi_raw", ""), context.get("ssi_expected", ""),
+                                               context.get("ssi_observed", ""), context.get("ssi_control"))
+                _admit(context, f"{probe_url}#{point.id}", f"query:{name}",
+                       fired=signal.fired, conclusive=signal.conclusive,
+                       body_unreadable=state["body_unavailable"] > before_bodies2)
 
         else:  # exposure — a request-level fixed-path probe with a random-path (soft-404) control
             tmpl = RequestTemplate(HttpRequest(method="GET", url=url))

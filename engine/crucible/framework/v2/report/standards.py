@@ -194,6 +194,10 @@ _STANDARDS: dict[str, ControlMapping] = {
                attack=("T1059", "T1190")),
     "el_injection": _m("A03:2021", ("CWE-917",), pci=_SDLC_PCI, soc2=_SDLC_SOC2, iso=_SDLC_ISO,
                        attack=("T1059", "T1190")),
+    # Wave-4.1 Server-Side Includes (SSI) — CWE-97 (improper neutralization of SSI); an evaluated include
+    # directive is server-side code/command execution, hence A03 Injection + the exec ATT&CK techniques.
+    "ssi": _m("A03:2021", ("CWE-97", "CWE-94"), pci=_SDLC_PCI, soc2=_SDLC_SOC2, iso=_SDLC_ISO,
+              attack=("T1059", "T1190")),
     # ---- Generic time-based blind injection oracle (no sub-class committed) ----
     "time_based": _m("A03:2021", ("CWE-89", "CWE-78"), pci=_SDLC_PCI, soc2=_SDLC_SOC2, iso=_SDLC_ISO,
                      attack=("T1190",)),
