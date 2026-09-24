@@ -1578,8 +1578,8 @@ def _redrive_branch_for(bug_class: str) -> "Optional[str]":
         #   * CROSS-USER reset token — genuine cross-PRINCIPAL exploitation (a token issued to A actually READS
         #     B's PRIVATE datum), the ONLY sound proof of a cross-user reset token: REUSES the Wave-3.1 IDOR/BOLA
         #     achieved_state same-shape private-read differential UNCHANGED via password_reset.cross_user_read.
-        # (Reset-link HOST-POISONING is NOT wired here — it routes to the EXISTING host_header_injection web-fact
-        # re-drive, never duplicated.) A missing private D / reference / VIGIL-owned account, distinct tokens, or
+        # (Reset-link HOST-POISONING reuses the EXISTING host_header_injection web-fact re-drive — routed there,
+        # not duplicated.) A missing private D / reference / VIGIL-owned account, distinct tokens, or
         # too-few samples keep the claim a LEAD/INCONCLUSIVE (the branches' preconditions fail-close).
         "password_reset_reuse": "password_reset.token_reuse",
         "password_reset_collision": "password_reset.deterministic_collision",
