@@ -114,6 +114,27 @@ def _mfa_private(user: str) -> str:
     read)."""
     return f"PRIVATE-MFA-TOKEN-{user}-9207-5531"
 
+
+# Password-reset token-invariant store (Wave 4.3). The VULNERABLE flow issues a DETERMINISTIC counter token
+# (a fixed-width zero-padded decimal — a predictable/adjacent sequence: the deterministic-collision FACT) bound
+# to the user, and NEVER invalidates it on consume (the reuse/non-expiry FACT). The SAFE twin issues a RANDOM
+# single-use token that it deletes on consume. Class-level in-process state, exercised only by the deep-profile
+# gated reset assertion (POST request/consume/login routes + an unlinked account page) — the default GET-only
+# crawl never POSTs and never links these routes, so `make gate` is unaffected.
+_RESET_COUNTER = [1000]                          # the VULNERABLE deterministic token counter
+_RESET_TOKENS: dict[str, str] = {}               # VULNERABLE token -> username (never deleted on consume)
+_RESET_SAFE_TOKENS: dict[str, str] = {}          # SAFE twin token -> username (deleted on consume — single-use)
+_RESET_PASSWORDS: dict[str, str] = {}            # username -> its current password (what a login checks)
+_RESET_SESSIONS: dict[str, str] = {}             # reset session id -> username (for the authenticated read)
+_RESET_COOKIE = "RESET_SESSION"
+
+
+def _reset_private(user: str) -> str:
+    """The per-user PRIVATE datum only that user's authenticated account read renders — the victim-private
+    discriminator the token-reuse private-read differential requires (present in the owner's read, absent from
+    an other-identity's same-shape read)."""
+    return f"RESET-PRIVATE-{user}-9931-2050"
+
 # ---------------------------------------------------------------------------
 # CSRF-achieved model (Wave 3.3). A cookie-authenticated state-changing endpoint that
 # authorizes a write on the ambient session cookie ALONE, driven by a REAL headless browser:
@@ -1080,6 +1101,102 @@ class BenchmarkHandler(BaseHTTPRequestHandler):
         else:
             self._respond(200, _page("Console", "<h1>Please log in</h1><p>You are logged out.</p>"))
 
+    # -- password-reset token invariants (Wave 4.3, gated-workflow) --------
+
+    def _reset_form_field(self, body: str, key: str) -> str:
+        for part in body.replace("&", ";").split(";"):
+            k, _, v = part.strip().partition("=")
+            if k == key and v:
+                return v
+        return ""
+
+    def _reset_cookie(self) -> str:
+        raw = self.headers.get("Cookie", "") or ""
+        val = ""
+        for part in raw.split(";"):
+            k, _, v = part.strip().partition("=")
+            if k == _RESET_COOKIE:
+                val = v
+        return val
+
+    def _reset_read_body(self) -> str:
+        length = int(self.headers.get("Content-Length", "0") or "0")
+        return self.rfile.read(length).decode("utf-8", "replace") if length else ""
+
+    def _reset_request(self) -> None:
+        # PLANTED BUG (weak recovery). The reset token is a DETERMINISTIC, monotonically-increasing counter
+        # (a fixed-width zero-padded decimal): two independent requests return ADJACENT tokens (the
+        # deterministic-collision FACT), and an attacker who triggers a reset for a victim predicts the token.
+        # The token is bound to the user and stored WITHOUT expiry. Reached only by the gated reset assertion.
+        body = self._reset_read_body()
+        user = self._reset_form_field(body, "user") or "admin"
+        _RESET_COUNTER[0] += 1
+        token = f"{_RESET_COUNTER[0]:08d}"
+        _RESET_TOKENS[token] = user
+        self._respond(200, _page("Reset requested", f"<p>reset token: {token}</p>"))
+
+    def _reset_consume(self) -> None:
+        # PLANTED BUG (token reuse / non-expiry). Setting the password from the token does NOT invalidate the
+        # token — it stays valid, so the SAME token can be REPLAYED to set the password AGAIN (CWE-640/613).
+        body = self._reset_read_body()
+        token = self._reset_form_field(body, "token")
+        new_pw = self._reset_form_field(body, "password")
+        user = _RESET_TOKENS.get(token)
+        if user and new_pw:
+            _RESET_PASSWORDS[user] = new_pw     # NOT invalidated — reusable
+            self._respond(200, _page("Reset", "<p>Password updated.</p>"))
+        else:
+            self._respond(200, _page("Reset", "<p>Invalid or expired token.</p>"))
+
+    def _reset_safe_request(self) -> None:
+        # SAFE (collision BENIGN TWIN). A per-request RANDOM single-use token — distinct across requests, so the
+        # deterministic-collision oracle must NEVER fire here.
+        body = self._reset_read_body()
+        user = self._reset_form_field(body, "user") or "admin"
+        token = "rst_" + secrets.token_hex(16)
+        _RESET_SAFE_TOKENS[token] = user
+        self._respond(200, _page("Reset requested", f"<p>reset token: {token}</p>"))
+
+    def _reset_safe_consume(self) -> None:
+        # SAFE (reuse BENIGN TWIN). The token is SINGLE-USE: it is DELETED on consume, so a REPLAY sets nothing
+        # and the replay-set secret can never authenticate — the token-reuse oracle must NEVER fire here.
+        body = self._reset_read_body()
+        token = self._reset_form_field(body, "token")
+        new_pw = self._reset_form_field(body, "password")
+        user = _RESET_SAFE_TOKENS.pop(token, None)   # single-use — consumed exactly once
+        if user and new_pw:
+            _RESET_PASSWORDS[user] = new_pw
+            self._respond(200, _page("Reset", "<p>Password updated.</p>"))
+        else:
+            self._respond(200, _page("Reset", "<p>Invalid or expired token.</p>"))
+
+    def _reset_login(self) -> None:
+        # Authenticate with a username + password: mints a reset session bound to the user ONLY when the
+        # password matches what a reset set. Lets the runner authenticate with the replay-set secret P2 and read
+        # the account (proving the replayed token GENUINELY re-changed the credential).
+        body = self._reset_read_body()
+        user = self._reset_form_field(body, "user")
+        pw = self._reset_form_field(body, "password")
+        if user and pw and _RESET_PASSWORDS.get(user) == pw:
+            sid = "rsid_" + secrets.token_hex(16)
+            _RESET_SESSIONS[sid] = user
+            self._respond(200, _page("Login", "<p>Logged in.</p>"),
+                          extra_headers=[("Set-Cookie", f"{_RESET_COOKIE}={sid}; Path=/; HttpOnly")])
+        else:
+            self._respond(200, _page("Login", "<h1>Please log in</h1><p>You are logged out.</p>"))
+
+    def _reset_account(self) -> None:
+        # Protected account page. The PER-USER PRIVATE datum is rendered ONLY for the identity the presented
+        # reset session belongs to; an OTHER identity's same-shape read carries the chrome but NOT the victim's
+        # private datum — the differential the token-reuse private-read reduction requires.
+        sid = self._reset_cookie()
+        user = _RESET_SESSIONS.get(sid) if sid else None
+        if user:
+            self._respond(200, _page("Account", f"<h1>Account</h1><p>Welcome back.</p>"
+                                                 f"<p>{_reset_private(user)}</p>"))
+        else:
+            self._respond(200, _page("Account", "<h1>Please log in</h1><p>You are logged out.</p>"))
+
     # -- planted-bug routes ------------------------------------------------
 
     def _index(self) -> None:
@@ -1413,6 +1530,10 @@ _ROUTES = {
     # crawl only ever sees a logged-out page here, so the default corpus + signed baseline stay byte-identical.
     "/mfa/bypass/account": BenchmarkHandler._mfa_bypass_account,       # VULNERABLE: releases D to a factor-1 session
     "/mfa/enforced/account": BenchmarkHandler._mfa_enforced_account,   # SAFE TWIN: releases D only post-factor-2
+    # Password-reset protected account page (Wave 4.3). DELIBERATELY NOT linked from the index and reached only
+    # by the deep-profile gated reset assertion (which first POSTs a reset + login); the default GET-only crawl
+    # only ever sees a logged-out page here, so the default corpus + signed baseline stay byte-identical.
+    "/reset/account": BenchmarkHandler._reset_account,
 }
 
 
@@ -1444,6 +1565,14 @@ _POST_ROUTES = {
     # ``factor2`` field. Only exercised by the deep-profile gated assertion; the default GET-only benchmark
     # crawl never issues a POST, so this leaves `make gate` byte-identical.
     "/mfa/login": BenchmarkHandler._mfa_login,
+    # Password-reset token-invariant flows (Wave 4.3). Only exercised by the deep-profile gated reset
+    # assertion; the default GET-only benchmark crawl never issues a POST, so these leave `make gate`
+    # byte-identical.
+    "/reset/request": BenchmarkHandler._reset_request,           # VULNERABLE: deterministic counter token, never expires
+    "/reset/consume": BenchmarkHandler._reset_consume,           # VULNERABLE: token NOT invalidated on use (reusable)
+    "/reset/safe/request": BenchmarkHandler._reset_safe_request,  # SAFE TWIN: random single-use token (no collision)
+    "/reset/safe/consume": BenchmarkHandler._reset_safe_consume,  # SAFE TWIN: single-use, deleted on consume (no reuse)
+    "/reset/login": BenchmarkHandler._reset_login,               # authenticate with the reset-set secret
 }
 
 

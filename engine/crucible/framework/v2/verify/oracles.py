@@ -2453,6 +2453,183 @@ def mfa_bypass_oracle(observed: Any) -> OracleSignal:
 
 
 # ---------------------------------------------------------------------------
+# 4a-bis. Password-reset / account-recovery token invariant (Wave 4.3)
+#   CWE-640 (weak recovery) / CWE-613 (insufficient session expiration) / CWE-330 (insufficiently-random).
+#   FACTs ONLY the invariant-FREE sub-properties (no operator intent needed to know they are wrong):
+#     * token REUSE / NON-EXPIRY — a consumed reset token is REPLAYED and the second submit GENUINELY
+#       succeeds, proven by the PRIVATE-READ REDUCTION (reusing :func:`_sfx_private_read_achieved`, the same
+#       same-shape differential Wave-3.1 IDOR/BOLA and Wave-3.2 session fixation use), never a bare 200;
+#     * deterministic COLLISION — two independent reset requests return BYTE-IDENTICAL tokens, or >=3 an
+#       EXACT arithmetic progression (a truly random token never collides). Predictable-by-ENTROPY is NOT a
+#       FACT here (it stays a probabilistic LEAD elsewhere) — only a deterministic collision fires.
+#   CROSS-USER reset tokens reuse the EXISTING ACHIEVED_STATE IdorCheck differential (bug_class
+#   `password_reset_cross_user`); reset-link HOST-POISONING routes to the EXISTING host_header_injection FACT.
+# ---------------------------------------------------------------------------
+
+_PRT_MIN_TOKEN = 8                  # a reset token below this is too short to reason about a collision soundly
+_PRT_MIN_COLLISION_SAMPLES = 2      # a byte-identical collision needs >=2 independent captures
+_PRT_MIN_ADJACENCY_SAMPLES = 3      # a deterministic arithmetic progression needs >=3 to exclude coincidence
+_PRT_HEX_RE = re.compile(r"^[0-9a-fA-F]+$")
+_PRT_DEC_RE = re.compile(r"^[0-9]+$")
+
+
+def _prt_signal(fired: bool, *, mode: str, evidence: str, observed: dict, conf: float = 0.92,
+                conclusive: bool = False) -> OracleSignal:
+    # kind is the DEDICATED OracleKind.PASSWORD_RESET_INVARIANT (held OUT of the frozen _ALL_ORACLES, so the
+    # unknown-class fallback stays EXACTLY 15 and oracle_version(ACHIEVED_STATE) is untouched). A fire is always
+    # decisive; a NON-fire is ``conclusive`` ONLY for a channel-confirmed clean (a single-use token that
+    # correctly expired; a set of distinct high-entropy tokens) — an undecidable/insufficient-sample non-fire is
+    # a LEAD (conclusive=False), never a false CLEAN.
+    return OracleSignal(kind=OracleKind.PASSWORD_RESET_INVARIANT, fired=fired,
+                        confidence=(conf if fired else 0.0),
+                        conclusive=(True if fired else conclusive),
+                        evidence=evidence, observed={**observed, "mode": mode})
+
+
+def _prt_parse_counter(tok: str) -> "int | None":
+    """A reset token's numeric value if it is a PURE decimal or PURE hex integer, else ``None``. Deterministic;
+    used ONLY to test an EXACT arithmetic progression (the deterministic 'adjacent' collision), never entropy."""
+    t = _coerce_text(tok).strip()
+    if not t:
+        return None
+    if _PRT_DEC_RE.match(t):
+        try:
+            return int(t, 10)
+        except ValueError:
+            return None
+    if _PRT_HEX_RE.match(t):
+        try:
+            return int(t, 16)
+        except ValueError:
+            return None
+    return None
+
+
+def _prt_collision(tokens: Any) -> "tuple[bool | None, dict]":
+    """Deterministic collision adjudication over reset tokens captured from INDEPENDENT requests (in request
+    order). TRI-STATE:
+
+      * ``True``  — >=2 tokens are BYTE-IDENTICAL (a truly random token never repeats across two fresh reset
+        requests), OR >=3 tokens form an EXACT arithmetic progression: every token parses as a fixed-width
+        integer counter and the step between consecutive values is a single constant nonzero delta (a
+        deterministic sequence a random generator produces with probability ~0);
+      * ``False`` — >=2 tokens, all DISTINCT, no identical pair and no exact progression ⇒ proper generation
+        (the benign twin) ⇒ channel-confirmed clean;
+      * ``None``  — fewer than 2 samples, or any sample below the minimum length ⇒ undecidable ⇒ LEAD.
+
+    ENTROPY is never scored here: a set of distinct tokens is CLEAN regardless of their apparent randomness —
+    a low-entropy-but-distinct token stays a probabilistic LEAD in the scanner, never a FACT."""
+    toks = [t for t in (_coerce_text(x).strip() for x in (tokens or [])) if t]
+    if len(toks) < _PRT_MIN_COLLISION_SAMPLES or any(len(t) < _PRT_MIN_TOKEN for t in toks):
+        return None, {"n": len(toks)}
+    # (1) byte-identical collision — the strongest deterministic proof of broken generation.
+    if len(set(toks)) < len(toks):
+        dup = next(t for t in toks if toks.count(t) > 1)
+        return True, {"identical": True, "samples": len(toks), "value_prefix": dup[:16]}
+    # (2) exact deterministic arithmetic progression (>=3 fixed-width integer counters, constant nonzero step).
+    if len(toks) >= _PRT_MIN_ADJACENCY_SAMPLES and len({len(t) for t in toks}) == 1:
+        vals = [_prt_parse_counter(t) for t in toks]
+        if all(v is not None for v in vals):
+            steps = [vals[i + 1] - vals[i] for i in range(len(vals) - 1)]  # type: ignore[operator]
+            if steps and steps[0] != 0 and all(s == steps[0] for s in steps):
+                return True, {"identical": False, "arithmetic": True, "samples": len(toks), "step": steps[0]}
+    return False, {"distinct": len(set(toks)), "samples": len(toks)}
+
+
+def password_reset_invariant_oracle(observed: Any) -> OracleSignal:
+    """Fire on an invariant-FREE password-reset / account-recovery sub-property, proven WITHOUT operator intent
+    over VIGIL's OWN retained raw bytes (never a bool, never a bare marker/entropy heuristic). ``observed`` is
+    the record ``scanner.reset`` captured through the gated send; ``mode`` selects the sub-property:
+
+      * ``token_reuse`` — a reset token that was CONSUMED (set the account password to a first VIGIL secret) is
+        REPLAYED to set a SECOND, unique VIGIL secret; the runner then AUTHENTICATES with that second secret and
+        reads the account. Fires ONLY when the PRIVATE-READ REDUCTION (:func:`_sfx_private_read_achieved`)
+        proves that read reached a victim-PRIVATE datum D — D PRESENT in the replay-authenticated read AND in
+        the owner's authoritative read yet PROVABLY ABSENT from a SUBSTANTIVE SAME-SHAPE unauthorized read and a
+        no-session baseline (so the second submit GENUINELY changed the credential, not merely returned 200). A
+        single-use token that correctly expires (the benign twin) leaves the second secret unset — the
+        replay-authenticated read never reaches D ⇒ channel-confirmed CLEAN. No/invalid/reflected D, a missing
+        positive or same-shape negative reference, D present in a negative reference, or a non-substantive read
+        ⇒ LEAD (never a FACT, never a false CLEAN).
+      * ``token_collision`` — ``tokens`` are reset tokens captured from INDEPENDENT reset requests (in order).
+        Fires ONLY on a DETERMINISTIC collision (:func:`_prt_collision`): >=2 byte-identical tokens or >=3 an
+        exact arithmetic progression. A set of distinct tokens (the benign twin) ⇒ channel-confirmed CLEAN;
+        too few / too-short samples ⇒ LEAD. ENTROPY alone is never a FACT here.
+
+    Pure + deterministic; never raises."""
+    obs = observed if isinstance(observed, Mapping) else {}
+    mode = _coerce_text(obs.get("mode")).strip()
+
+    if mode == "token_reuse":
+        reset_token = _coerce_text(obs.get("reset_token")).strip()
+        discriminator = _coerce_text(obs.get("private_discriminator")).strip()
+        base = {"reset_token_len": len(reset_token), "discriminator_len": len(discriminator)}
+        # RE-DERIVE the achieved changed state from RAW retained bytes via the PRIVATE-READ REDUCTION — the same
+        # same-shape differential Wave-3.1/3.2 use. The consumed-then-replayed token is passed as the sentinel so
+        # its reflected-value / straddle guard masks any echo of the token itself (a reset token must never be
+        # the datum that satisfies the read). None ⇒ undecidable ⇒ LEAD.
+        achieved = _sfx_private_read_achieved(
+            discriminator, obs.get("authorized_view"), obs.get("owner_view"),
+            obs.get("unauth_ref"), obs.get("logged_out_ref"),
+            obs.get("logged_out_markers"), obs.get("logged_out_statuses"),
+            sentinel_id=reset_token)
+        if achieved is None:
+            return _prt_signal(
+                False, mode=mode, observed=base,
+                evidence=("password-reset token-reuse could not be proven by the PRIVATE-READ differential (no "
+                          "valid victim-private datum D; D reflects/straddles the reset token; a non-substantive "
+                          "replay-authenticated read; no substantive owner positive reference or D absent from "
+                          "it; no substantive SAME-SHAPE unauthorized reference; no valid no-session baseline; or "
+                          "D present in a negative reference) — cannot mint (LEAD)"))
+        if achieved is not True:
+            return _prt_signal(
+                False, mode=mode, conclusive=True, observed=base,
+                evidence=("the reset token, once consumed, no longer set a new credential on replay — the "
+                          "replay-set secret does not reach the victim's private view (single-use / expiring "
+                          "token, the correct defense); did not fire"))
+        return _prt_signal(
+            True, mode=mode, conf=0.92, observed={**base, "reset_token": reset_token,
+                                                  "differential": "replay_set_credential_reaches_private_datum_"
+                                                  "absent_in_same_shape_unauthorized_and_no_session_reads"},
+            evidence=("password-reset token REUSE / NON-EXPIRY: a reset token that was already CONSUMED was "
+                      "REPLAYED and the second submit GENUINELY changed the credential — authenticating with the "
+                      "replay-set secret reaches a victim-PRIVATE datum D that is PRESENT in the owner's "
+                      "authoritative read yet PROVABLY ABSENT from a SUBSTANTIVE SAME-SHAPE unauthorized read and "
+                      "a no-session baseline (the private-read reduction proves the changed state, not a bare "
+                      "200) — the recovery token is reusable / does not expire on use"))
+
+    if mode == "token_collision":
+        fired, detail = _prt_collision(obs.get("tokens"))
+        if fired is None:
+            return _prt_signal(
+                False, mode=mode, observed=detail,
+                evidence=("too few / too-short reset-token samples to adjudicate a deterministic collision "
+                          "(need >=2 independent captures of length >= 8) — LEAD, not a FACT"))
+        if fired is False:
+            return _prt_signal(
+                False, mode=mode, conclusive=True, observed=detail,
+                evidence=("the independent reset requests returned DISTINCT tokens with no byte-identical pair "
+                          "and no exact arithmetic progression — proper generation (entropy is not scored here); "
+                          "did not fire"))
+        if detail.get("identical"):
+            return _prt_signal(
+                True, mode=mode, conf=0.95, observed=detail,
+                evidence=("deterministic password-reset token COLLISION: two INDEPENDENT reset requests returned "
+                          "the BYTE-IDENTICAL token — a truly random recovery token never repeats, so the "
+                          "generator is deterministic/broken (an attacker who triggers a reset for a victim "
+                          "predicts the victim's token)"))
+        return _prt_signal(
+            True, mode=mode, conf=0.95, observed=detail,
+            evidence=(f"deterministic password-reset token COLLISION: {detail.get('samples')} independent reset "
+                      f"requests returned tokens forming an EXACT arithmetic progression (constant step "
+                      f"{detail.get('step')!r}) — the recovery token is a predictable counter, not a random value"))
+
+    return _prt_signal(
+        False, mode=(mode or "unknown"), observed={},
+        evidence="unknown/absent password-reset invariant mode — cannot adjudicate (inconclusive)")
+
+
+# ---------------------------------------------------------------------------
 # 4b. Error signature — a datastore/parser error a payload provoked (error-based)
 # ---------------------------------------------------------------------------
 

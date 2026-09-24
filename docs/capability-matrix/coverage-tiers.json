@@ -172,6 +172,13 @@
       "evidence": "Real local process — the loopback benchmark app over a real connection; under a fail-closed operator attestation, a PRIVATE-READ REDUCTION proves a factor-1-only session read a post-MFA-gated victim datum (the factor-2-enforcing twin produces nothing)"
     },
     {
+      "kind": "password_reset_invariant",
+      "name": "Password-reset token invariant",
+      "family": "core",
+      "tier": "local",
+      "evidence": "Real local process — the loopback benchmark app over a real connection; a PRIVATE-READ REDUCTION proves a consumed reset token is reusable, or a deterministic byte-identical/arithmetic token collision (the single-use-expiring and per-user-scoped twins produce nothing)"
+    },
+    {
       "kind": "timing",
       "name": "Statistical timing test",
       "family": "core",

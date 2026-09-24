@@ -435,6 +435,39 @@ class OracleKind(str, enum.Enum):
     # attestation NO fire is emitted for ANY input (an honest LEAD); a benign app that correctly enforces
     # factor-2 (D absent from the factor-1-only read, present for the owner) is a channel-confirmed CLEAN.
     MFA_BYPASS = "mfa_bypass"
+    # Wave-4.3 PASSWORD-RESET / ACCOUNT-RECOVERY TOKEN INVARIANT (CWE-640 weak recovery / CWE-613 insufficient
+    # session expiration / CWE-330 insufficiently-random values) — its OWN dedicated kind, held OUT of the frozen
+    # _ALL_ORACLES so the unknown-class fallback stays EXACTLY 15 and oracle_version(ACHIEVED_STATE) is UNTOUCHED
+    # (this kind carries its own oracle_version). Like the AEGIS / posture / achieved members above, it is an
+    # ADDITIVE append reachable ONLY via its explicit BUG_CLASS_ORACLES rows (`password_reset_reuse` /
+    # `password_reset_collision`, keyed on the `password_reset_invariant` ctx field NO benchmark/scan/engage
+    # finding carries), never via the frozen fallback, so `make gate` stays byte-identical. It fires ONLY on an
+    # invariant-FREE sub-property of the recovery flow, proven WITHOUT operator intent:
+    #   * mode="token_reuse" (0.92) — a reset token, once CONSUMED, is REPLAYED and the second submit GENUINELY
+    #     succeeds: proven by the PRIVATE-READ REDUCTION (the same machinery Wave-3.1 IDOR/BOLA + Wave-3.2 session
+    #     fixation use; an achieved authenticated/changed state CANNOT be proven from response content, only a
+    #     bare 200) — a victim-PRIVATE datum D reached by AUTHENTICATING with the replay-set credential is PRESENT
+    #     in that read AND in the owner's authoritative read yet PROVABLY ABSENT from a SUBSTANTIVE SAME-SHAPE
+    #     unauthorized read and a no-session baseline; a single-use token that correctly expires (the benign twin)
+    #     fires NOTHING (channel-confirmed clean);
+    #   * mode="token_collision" (0.95) — a genuinely-EXPLOITABLE PREDICTABLE COUNTER only: >=3 independent reset
+    #     requests returned tokens forming an EXACT deterministic arithmetic progression (constant nonzero step),
+    #     reproduced from the observed sequence — a truly random token never forms one, so this is a deterministic
+    #     FACT of broken generation, exploitable regardless of identity (observe one token, predict the next). A
+    #     BYTE-IDENTICAL token — whether it repeats for the SAME account LABEL or across DIFFERENT account LABELS —
+    #     is DELIBERATELY NOT a FACT here: account labels are opaque strings never proven to be distinct PRINCIPALS
+    #     (a benign identifier-NORMALIZING generator returns byte-identical tokens for 'alice'/'Alice' = ONE
+    #     principal; a cryptographically-secure DETERMINISTIC generator returns byte-identical tokens for one user
+    #     within a timestamp bucket), so it FAILS CLOSED to a LEAD, never a FACT, never a CLEAN. A set of distinct
+    #     tokens (the benign twin) fires NOTHING (channel-confirmed clean); ENTROPY alone is likewise NOT a FACT.
+    # GENUINE CROSS-PRINCIPAL exploitation of a colliding / reused recovery token is proven ONLY by the EXISTING
+    # ACHIEVED_STATE IdorCheck same-shape private-read differential (bug_class `password_reset_cross_user` — a
+    # token issued to principal A actually READS principal B's PRIVATE datum, present for B, absent from a
+    # substantive same-shape unauthorized read), NEVER by account-label identity here; the reset-link
+    # HOST-POISONING sub-property routes to the EXISTING host_header_injection FACT — neither adds a kind here. The
+    # differential/comparison is re-derived from the RETAINED RAW bytes at every re-verification (never a bool,
+    # never a bare marker/entropy heuristic).
+    PASSWORD_RESET_INVARIANT = "password_reset_invariant"
 
 
 class OracleProbe(BaseModel):

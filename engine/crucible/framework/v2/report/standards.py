@@ -276,6 +276,19 @@ _STANDARDS: dict[str, ControlMapping] = {
     # Accounts) + T1556.006 (Modify Authentication Process: Multi-Factor Authentication).
     "mfa_bypass": _m("A07:2021", ("CWE-287", "CWE-308"), pci=_AUTH_PCI, soc2=_AUTH_SOC2, iso=_AUTH_ISO,
                      attack=("T1078", "T1556.006")),
+    # Password-reset / account-recovery token invariants (Wave-4.3). Weak recovery mechanism (CWE-640) is the
+    # umbrella; reuse/non-expiry adds insufficient session/token expiration (CWE-613), deterministic collision
+    # adds use of insufficiently-random values (CWE-330). ATT&CK T1098 (Account Manipulation) — a reusable /
+    # predictable recovery token lets an attacker take over the recovered account.
+    "password_reset_reuse": _m("A07:2021", ("CWE-640", "CWE-613"), pci=_AUTH_PCI, soc2=_AUTH_SOC2, iso=_AUTH_ISO,
+                               attack=("T1098",)),
+    "password_reset_collision": _m("A07:2021", ("CWE-640", "CWE-330"), pci=_AUTH_PCI, soc2=_AUTH_SOC2,
+                                   iso=_AUTH_ISO, attack=("T1098",)),
+    # Cross-user reset token — the recovery token authorizes an action on ANOTHER account (authorization bypass
+    # through a user-controlled key, CWE-639, atop the weak-recovery umbrella CWE-640). Broken access control
+    # (A01) as well as identity (A07). ATT&CK T1098 (Account Manipulation).
+    "password_reset_cross_user": _m("A01:2021", ("CWE-640", "CWE-639"), pci=_AUTH_PCI, soc2=_AUTH_SOC2,
+                                    iso=_AUTH_ISO, attack=("T1098",)),
     "identity_misconfiguration": _m("A07:2021", ("CWE-308", "CWE-1392"), pci=_AUTH_PCI, soc2=_AUTH_SOC2,
                                     iso=_AUTH_ISO, attack=("T1078",)),
     "saml_signature_wrapping": _m("A07:2021", ("CWE-347", "CWE-290"), pci=_AUTH_PCI, soc2=_AUTH_SOC2, iso=_AUTH_ISO,

@@ -136,13 +136,23 @@ _W32_CLASSES = {"session_fixation"}
 # attestation + the same-shape private-read differential re-derived from raw bytes, not a posture weakness.
 _W45_KINDS = {OracleKind.MFA_BYPASS}
 _W45_CLASSES = {"mfa_bypass"}
+# Wave 4.3 PASSWORD-RESET / ACCOUNT-RECOVERY TOKEN INVARIANT oracle (plan §4.3): SAME frozen-fallback
+# discipline — the NEW OracleKind (its OWN dedicated kind so ACHIEVED_STATE's oracle_version is untouched) is
+# kept OUT of _ALL_ORACLES, reachable ONLY via its `password_reset_reuse` / `password_reset_collision`
+# BUG_CLASS_ORACLES rows keyed on a `password_reset_invariant` ctx field no benchmark/scan finding carries. It
+# proves the invariant-free reset sub-properties (token reuse/non-expiry by a private-read reduction; a
+# deterministic predictable-counter collision) — never a posture weakness. The CROSS-USER reset class reuses
+# ACHIEVED_STATE (so it is NOT a new-kind class and is NOT excluded here); HOST-POISONING folds onto
+# host_header_injection.
+_W43_KINDS = {OracleKind.PASSWORD_RESET_INVARIANT}
+_W43_CLASSES = {"password_reset_reuse", "password_reset_collision"}
 # every additive kind that must stay out of the frozen unknown-class fallback.
 _EXCLUDED_KINDS = (_AEGIS_KINDS | _WS3_KINDS | _WSB_KINDS | _NW1_KINDS | _WF1_KINDS
                    | _G2_KINDS | _G3_KINDS | _CICD_KINDS | _MOBILE_KINDS | _EMAIL_KINDS | _IDENTITY_KINDS
                    | _C3_KINDS | _T4_KINDS | _E1_KINDS | _E5_KINDS | _E3_KINDS | _E2_KINDS | _E4T2_KINDS
-                   | _CS_KINDS | _W22_KINDS | _W24_KINDS | _W32_KINDS | _W45_KINDS)
+                   | _CS_KINDS | _W22_KINDS | _W24_KINDS | _W32_KINDS | _W45_KINDS | _W43_KINDS)
 _EXCLUDED_CLASSES = {"prompt_injection", "system_prompt_disclosure", "automated_access",
-                     "credential_stuffing", "sqli_attempt", "command_injection_attempt"} | _WS3_CLASSES | _WSB_CLASSES | _NW1_CLASSES | _WF1_CLASSES | _G2_CLASSES | _G3_CLASSES | _CICD_CLASSES | _MOBILE_CLASSES | _EMAIL_CLASSES | _IDENTITY_CLASSES | _C3_CLASSES | _T4_CLASSES | _E1_CLASSES | _E5_CLASSES | _E3_CLASSES | _E2_CLASSES | _E4T2_CLASSES | _CS_CLASSES | _W22_CLASSES | _W24_CLASSES | _W32_CLASSES | _W45_CLASSES
+                     "credential_stuffing", "sqli_attempt", "command_injection_attempt"} | _WS3_CLASSES | _WSB_CLASSES | _NW1_CLASSES | _WF1_CLASSES | _G2_CLASSES | _G3_CLASSES | _CICD_CLASSES | _MOBILE_CLASSES | _EMAIL_CLASSES | _IDENTITY_CLASSES | _C3_CLASSES | _T4_CLASSES | _E1_CLASSES | _E5_CLASSES | _E3_CLASSES | _E2_CLASSES | _E4T2_CLASSES | _CS_CLASSES | _W22_CLASSES | _W24_CLASSES | _W32_CLASSES | _W45_CLASSES | _W43_CLASSES
 _AEGIS_CLASSES = {"prompt_injection", "system_prompt_disclosure", "automated_access",
                   "credential_stuffing", "sqli_attempt", "command_injection_attempt"}
 _AEGIS_ALIASES = {"jailbreak", "llm_prompt_injection", "indirect_prompt_injection",
