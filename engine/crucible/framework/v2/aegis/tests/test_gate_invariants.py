@@ -76,6 +76,12 @@ _ADDITIVE = frozenset({
     # differential body changes ONLY oracle_version(MFA_BYPASS), never ACHIEVED_STATE), additive, reachable
     # ONLY via its `mfa_bypass` row keyed on a `mfa_bypass` ctx field; never in the frozen fallback.
     "MFA_BYPASS",
+    # Wave 4.3 PASSWORD-RESET / ACCOUNT-RECOVERY TOKEN INVARIANT kind (CWE-640/613/330) — its OWN dedicated
+    # kind (so editing its reuse/collision body changes ONLY oracle_version(PASSWORD_RESET_INVARIANT), never
+    # ACHIEVED_STATE), additive, reachable ONLY via its `password_reset_reuse` / `password_reset_collision`
+    # rows keyed on a `password_reset_invariant` ctx field; never in the frozen fallback. (The cross-user reset
+    # class reuses ACHIEVED_STATE and adds no kind; host-poisoning folds onto host_header_injection.)
+    "PASSWORD_RESET_INVARIANT",
 })
 
 
@@ -95,7 +101,7 @@ def test_every_additive_oraclekind_is_excluded_from_the_fallback():
         member = OracleKind[name]
         assert member not in V._ALL_ORACLES, f"{name} leaked into the frozen fallback"
         assert name not in frozen_names
-    # the enum is exactly the 15 frozen + 29 additive = 44; a new frozen member (or a new additive one
+    # the enum is exactly the 15 frozen + 31 additive = 46; a new frozen member (or a new additive one
     # not accounted for here) fails this, forcing an explicit review of the byte-identity impact.
     # (E3 GCP_SA_IMPERSONATION, E2 IAM_ESCALATION_PRIMITIVE and E4-TIER-2 K8S_RBAC_VERB_GRANT landed
     # additively: 35 -> 36 -> 37 -> 38; W16-STD-5 added the 3 client-side posture kinds: 38 -> 41;
@@ -103,8 +109,10 @@ def test_every_additive_oraclekind_is_excluded_from_the_fallback():
     # (permissive-policy posture, CWE-693/CWE-1021): 42 -> 43; Wave 3.2 added SESSION_FIXATION (achieved-state,
     # CWE-384, its own dedicated kind so ACHIEVED_STATE's oracle_version is untouched): 43 -> 44; Wave 4.5 added
     # MFA_BYPASS (achieved-state, CWE-287/CWE-308, its own dedicated kind so ACHIEVED_STATE's oracle_version is
-    # untouched): 44 -> 45.)
-    assert len(OracleKind) == 45
+    # untouched): 44 -> 45; Wave 4.3 added PASSWORD_RESET_INVARIANT (token reuse/non-expiry + deterministic
+    # predictable-counter collision, CWE-640/613/330, its own dedicated kind so ACHIEVED_STATE's oracle_version
+    # is untouched): 45 -> 46.)
+    assert len(OracleKind) == 46
     assert {k.name for k in OracleKind} == _FROZEN_15 | _ADDITIVE
     assert set(V._ALL_ORACLES) == set(OracleKind) - {OracleKind[n] for n in _ADDITIVE}
 

@@ -448,6 +448,34 @@ BUG_CLASS_ORACLES: dict[str, tuple[OracleKind, ...]] = {
     # leaves `make gate` byte-identical (MFA-bypass is gated-workflow / off-by-default and sends 0 requests
     # through the default corpus).
     "mfa_bypass": (OracleKind.MFA_BYPASS,),
+    # Wave-4.3 PASSWORD-RESET / ACCOUNT-RECOVERY TOKEN INVARIANT (scanner.reset, gated-workflow, opt-in) —
+    # FACTs ONLY the invariant-FREE sub-properties, proven WITHOUT operator intent:
+    #   * `password_reset_reuse` — a CONSUMED reset token is REPLAYED and the second submit GENUINELY changes
+    #     the credential, proven by the PRIVATE-READ REDUCTION (the SAME same-shape differential Wave-3.1
+    #     IDOR/BOLA + Wave-3.2 session fixation use — an achieved changed state CANNOT be proven from response
+    #     content / a bare 200), never a bare marker; a single-use token that correctly expires does NOT fire;
+    #   * `password_reset_collision` — a genuinely-EXPLOITABLE PREDICTABLE COUNTER only: >=3 tokens from
+    #     independent reset requests forming an EXACT arithmetic progression (a truly random token never forms
+    #     one). A BYTE-IDENTICAL token — same account LABEL or across DIFFERENT account LABELS — is DELIBERATELY
+    #     NOT a FACT here: account labels are opaque strings never proven to be distinct PRINCIPALS (a benign
+    #     identifier-NORMALIZING generator maps 'alice'/'Alice' to ONE principal), so it FAILS CLOSED to a LEAD.
+    #     GENUINE cross-principal exploitation is minted only by `password_reset_cross_user` (the private-read
+    #     differential below). Predictable-by-ENTROPY alone is likewise NOT a FACT (a probabilistic LEAD in the
+    #     scanner).
+    # Both route to the OWN dedicated OracleKind.PASSWORD_RESET_INVARIANT (held OUT of the frozen _ALL_ORACLES,
+    # so the unknown-class fallback stays EXACTLY 15 and oracle_version(ACHIEVED_STATE) is UNTOUCHED — this kind
+    # carries its own oracle_version), reachable ONLY when the ctx carries the fresh `password_reset_invariant`
+    # key, which no benchmark/scan/engage finding carries — so appending these rows leaves `make gate`
+    # byte-identical (the reset checks are gated-workflow / off-by-default and send 0 requests through the
+    # default GET corpus).
+    "password_reset_reuse": (OracleKind.PASSWORD_RESET_INVARIANT,),
+    "password_reset_collision": (OracleKind.PASSWORD_RESET_INVARIANT,),
+    # The CROSS-USER reset-token sub-property REUSES the existing ACHIEVED_STATE IdorCheck same-shape private-
+    # read differential (a victim-PRIVATE datum present via the cross-user token, absent from a substantive
+    # same-shape unauthorized read) — no new kind. Reachable only via its explicit row; no default-corpus
+    # finding carries it, so `make gate` stays byte-identical. (Reset-link HOST-POISONING routes to the EXISTING
+    # host_header_injection FACT via an alias below — never duplicated here.)
+    "password_reset_cross_user": (OracleKind.ACHIEVED_STATE,),
 }
 
 # Spelling/format aliases folded onto canonical keys.
@@ -781,6 +809,30 @@ _ALIASES: dict[str, str] = {
     "mfa_not_enforced": "mfa_bypass",
     "missing_second_factor": "mfa_bypass",
     "otp_bypass": "mfa_bypass",
+    # Wave-4.3 password-reset / account-recovery token-invariant spelling variants fold onto the canonical
+    # sub-property classes.
+    "password_reset_token_reuse": "password_reset_reuse",
+    "reset_token_reuse": "password_reset_reuse",
+    "reset_token_non_expiry": "password_reset_reuse",
+    "password_reset_replay": "password_reset_reuse",
+    "password_reset_token_collision": "password_reset_collision",
+    "reset_token_collision": "password_reset_collision",
+    "deterministic_reset_token": "password_reset_collision",
+    # Predictable-token-by-ENTROPY is NOT a FACT — the collision oracle fires only on a genuinely-exploitable
+    # PREDICTABLE COUNTER (an exact arithmetic progression); a distinct-but-low-entropy token, and a
+    # byte-identical token across account labels, both stay a LEAD. This alias lets an operator-labelled
+    # `predictable_reset_token` finding be routed to the same oracle, which still fails closed to a LEAD unless
+    # an exact-arithmetic collision is captured (genuine cross-principal exploitation routes to
+    # `password_reset_cross_user`, the private-read differential).
+    "predictable_reset_token": "password_reset_collision",
+    "password_reset_cross_account": "password_reset_cross_user",
+    "cross_user_reset_token": "password_reset_cross_user",
+    "reset_token_cross_user": "password_reset_cross_user",
+    # Reset-link HOST-POISONING is NOT a new class — it IS the existing host_header_injection FACT reached via
+    # the reset flow, so its spelling variants fold onto that canonical class (never duplicated).
+    "password_reset_host_poisoning": "host_header_injection",
+    "reset_link_host_injection": "host_header_injection",
+    "reset_link_poisoning": "host_header_injection",
 }
 
 # G1 (doctrine fix): the unknown-class fallback returned by `oracles_for()` is FROZEN to the
@@ -1099,6 +1151,17 @@ class OracleVerifier:
             # so it is inert on the gate path (byte-identical).
             if "mfa_bypass" in ctx:
                 return oracles.mfa_bypass_oracle(ctx["mfa_bypass"])
+            return None
+        if kind is OracleKind.PASSWORD_RESET_INVARIANT:
+            # Wave-4.3 password-reset / account-recovery token invariant (CWE-640/613/330) — its OWN dedicated
+            # kind (held OUT of the frozen _ALL_ORACLES, so oracle_version(ACHIEVED_STATE) is untouched and the
+            # unknown-class fallback stays EXACTLY 15). Fires ONLY when the ctx carries the fresh
+            # `password_reset_invariant` record: the RAW bytes the oracle re-runs its token-reuse PRIVATE-READ
+            # differential (mode="token_reuse") or its deterministic collision comparison (mode="token_collision")
+            # over. No benchmark/scan/engage finding carries this key, so it is inert on the gate path
+            # (byte-identical). The CROSS-USER reset sub-property routes through ACHIEVED_STATE above, not here.
+            if "password_reset_invariant" in ctx:
+                return oracles.password_reset_invariant_oracle(ctx["password_reset_invariant"])
             return None
         if kind is OracleKind.SIDE_EFFECT:
             if "marker" in ctx and "observed_sink" in ctx:

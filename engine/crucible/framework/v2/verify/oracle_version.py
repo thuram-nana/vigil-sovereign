@@ -91,6 +91,10 @@ _ORACLE_FNS: dict[OracleKind, tuple[Callable[..., Any], ...]] = {
     # oracle_version(MFA_BYPASS) and oracle_version(SESSION_FIXATION); editing mfa_bypass_oracle changes ONLY
     # oracle_version(MFA_BYPASS) (session_fixation_oracle does not reference it), never ACHIEVED_STATE.
     OracleKind.MFA_BYPASS: (oracles.mfa_bypass_oracle,),
+    # Wave-4.3 password-reset / account-recovery token invariant (CWE-640/613/330) — its OWN dedicated kind so
+    # editing its reuse/collision body changes ONLY oracle_version(PASSWORD_RESET_INVARIANT), never
+    # oracle_version(ACHIEVED_STATE) (the cross-user reset sub-property reuses ACHIEVED_STATE, adding no fn here).
+    OracleKind.PASSWORD_RESET_INVARIANT: (oracles.password_reset_invariant_oracle,),
 }
 
 

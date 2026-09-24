@@ -2453,6 +2453,303 @@ def mfa_bypass_oracle(observed: Any) -> OracleSignal:
 
 
 # ---------------------------------------------------------------------------
+# 4a-bis. Password-reset / account-recovery token invariant (Wave 4.3)
+#   CWE-640 (weak recovery) / CWE-613 (insufficient session expiration) / CWE-330 (insufficiently-random).
+#   FACTs ONLY the invariant-FREE sub-properties (no operator intent needed to know they are wrong):
+#     * token REUSE / NON-EXPIRY — a consumed reset token is REPLAYED and the second submit GENUINELY
+#       succeeds, proven by the PRIVATE-READ REDUCTION (reusing :func:`_sfx_private_read_achieved`, the same
+#       same-shape differential Wave-3.1 IDOR/BOLA and Wave-3.2 session fixation use), never a bare 200. The
+#       achieved read is BOUND to the REPLAY-set secret P2 (a fresh VIGIL secret DISTINCT from the consumed P1,
+#       and the read explicitly reached WITH P2) — mirroring session fixation's sentinel-binding, so a fire
+#       proves the REPLAY re-changed the credential, never a leftover consume-session or the consumed P1;
+#     * deterministic COLLISION — a genuinely-EXPLOITABLE predicate only: a PREDICTABLE counter (>=3 tokens
+#       forming an EXACT arithmetic progression, reproduced from the observed sequence — observe one token,
+#       predict the next; exploitable regardless of identity). A BYTE-IDENTICAL token — whether it repeats for
+#       the SAME account LABEL or across DIFFERENT account LABELS — is DELIBERATELY NOT a FACT: account labels
+#       are opaque strings never proven to be distinct PRINCIPALS (a benign identifier-NORMALIZING generator
+#       returns byte-identical tokens for 'alice'/'Alice' = ONE principal; a cryptographically-secure
+#       DETERMINISTIC generator returns byte-identical tokens for one user within a timestamp bucket), so it
+#       FAILS CLOSED to a LEAD. Predictable-by-ENTROPY is likewise NOT a FACT (a probabilistic LEAD elsewhere).
+#   GENUINE CROSS-PRINCIPAL exploitation of a colliding / reused recovery token (an achieved cross-account READ)
+#   is proven ONLY by the EXISTING ACHIEVED_STATE IdorCheck same-shape private-read differential (bug_class
+#   `password_reset_cross_user` — a token issued to principal A actually READS principal B's PRIVATE datum),
+#   NEVER by account-label identity here; reset-link HOST-POISONING routes to the EXISTING host_header_injection
+#   FACT.
+# ---------------------------------------------------------------------------
+
+_PRT_MIN_TOKEN = 8                  # a reset token below this is too short to reason about a collision soundly
+_PRT_MIN_SECRET = 8                 # a VIGIL replay/consume secret below this is too short to bind an achieved read
+_PRT_MIN_COLLISION_SAMPLES = 2      # a collision adjudication needs >=2 independent captures
+_PRT_MIN_ADJACENCY_SAMPLES = 3      # a deterministic arithmetic progression needs >=3 to exclude coincidence
+_PRT_HEX_RE = re.compile(r"^[0-9a-fA-F]+$")
+_PRT_DEC_RE = re.compile(r"^[0-9]+$")
+
+
+def _prt_signal(fired: bool, *, mode: str, evidence: str, observed: dict, conf: float = 0.92,
+                conclusive: bool = False) -> OracleSignal:
+    # kind is the DEDICATED OracleKind.PASSWORD_RESET_INVARIANT (held OUT of the frozen _ALL_ORACLES, so the
+    # unknown-class fallback stays EXACTLY 15 and oracle_version(ACHIEVED_STATE) is untouched). A fire is always
+    # decisive; a NON-fire is ``conclusive`` ONLY for a channel-confirmed clean (a single-use token that
+    # correctly expired; a set of distinct high-entropy tokens) — an undecidable/insufficient-sample non-fire is
+    # a LEAD (conclusive=False), never a false CLEAN.
+    return OracleSignal(kind=OracleKind.PASSWORD_RESET_INVARIANT, fired=fired,
+                        confidence=(conf if fired else 0.0),
+                        conclusive=(True if fired else conclusive),
+                        evidence=evidence, observed={**observed, "mode": mode})
+
+
+def _prt_parse_counter(tok: str) -> "int | None":
+    """A reset token's numeric value if it is a PURE decimal or PURE hex integer, else ``None``. Deterministic;
+    used ONLY to test an EXACT arithmetic progression (the deterministic 'adjacent' collision), never entropy."""
+    t = _coerce_text(tok).strip()
+    if not t:
+        return None
+    if _PRT_DEC_RE.match(t):
+        try:
+            return int(t, 10)
+        except ValueError:
+            return None
+    if _PRT_HEX_RE.match(t):
+        try:
+            return int(t, 16)
+        except ValueError:
+            return None
+    return None
+
+
+def _prt_normalize_samples(raw: Any) -> "list[tuple[str, str]]":
+    """Coerce the retained collision captures into ``(token, account)`` pairs, in request order. Accepts the
+    canonical richer form (a list of ``{"token","account"}`` mappings the scanner now records so a CROSS-USER
+    identical token can be proven) OR a flat list of token strings (accounts UNKNOWN — a cross-user identity
+    cannot be established, so a byte-identical pair fails closed to a LEAD, never a FACT)."""
+    out: list[tuple[str, str]] = []
+    for item in (raw or []):
+        if isinstance(item, Mapping):
+            tok = _coerce_text(item.get("token")).strip()
+            acct = _coerce_text(item.get("account")).strip()
+        else:
+            tok, acct = _coerce_text(item).strip(), ""
+        if tok:
+            out.append((tok, acct))
+    return out
+
+
+def _prt_collision(samples: Any) -> "tuple[bool | None, dict]":
+    """Deterministic collision adjudication over reset tokens captured from INDEPENDENT requests (in request
+    order), each carrying the account LABEL it was issued for. The ONLY genuinely-EXPLOITABLE predicate provable
+    from the token bytes ALONE is a PREDICTABLE COUNTER (an exact arithmetic progression). A BYTE-IDENTICAL token
+    — whether it repeats for the SAME account LABEL or across DIFFERENT account LABELS — is DELIBERATELY NOT a
+    FACT here: account labels are opaque strings NEVER proven to be distinct PRINCIPALS. A benign per-user-
+    DETERMINISTIC, identifier-NORMALIZING generator (case-insensitive email/username) returns byte-identical
+    tokens for 'alice' and 'Alice' — ONE principal, not two — so a byte-identical token across labels would mint
+    a FALSE cross-user FACT; and a cryptographically-secure DETERMINISTIC generator (stock Django
+    default_token_generator within a timestamp bucket, a cache-one-token-per-account app) returns byte-identical
+    tokens for one user. Genuine CROSS-PRINCIPAL exploitation is proven ONLY by the EXISTING
+    ``password_reset_cross_user`` private-read differential (a token issued to principal A actually authorizes a
+    read of principal B's PRIVATE datum), never by label identity here. TRI-STATE:
+
+      * ``True``  — a PREDICTABLE counter: >=3 tokens forming an EXACT arithmetic progression (every token parses
+        as a fixed-width integer counter and the step between consecutive values is a single constant nonzero
+        delta, reproduced from the observed sequence). Genuinely exploitable regardless of identity: observe one
+        token, predict the next. This is the ONLY token-shape provable as a FACT from the captures alone;
+      * ``False`` — all tokens DISTINCT with no exact progression ⇒ proper generation ⇒ channel-confirmed clean;
+      * ``None``  — fewer than 2 samples, any sample below the minimum length, OR ANY byte-identical repeat (same
+        OR cross label) with no exact progression ⇒ undecidable ⇒ LEAD, never a FACT, never a CLEAN. A
+        byte-identical repeat across DIFFERENT labels is a LEAD to escalate via the cross-user private-read
+        differential — it is NOT proof of a weak generator on its own.
+
+    ENTROPY is never scored here: a set of distinct tokens is CLEAN regardless of apparent randomness — a
+    low-entropy-but-distinct token stays a probabilistic LEAD in the scanner, never a FACT."""
+    pairs = _prt_normalize_samples(samples)
+    toks = [t for t, _ in pairs]
+    if len(pairs) < _PRT_MIN_COLLISION_SAMPLES or any(len(t) < _PRT_MIN_TOKEN for t in toks):
+        return None, {"n": len(pairs)}
+    # (1) EXACT deterministic arithmetic progression (>=3 fixed-width integer counters, constant nonzero step) —
+    # a PREDICTABLE counter reproduced from the observed sequence. Sound regardless of account label: a
+    # predictable counter is exploitable across principals (observe one token, predict the next). This is the
+    # ONLY token-shape a FACT can rest on from the captures alone.
+    if len(toks) >= _PRT_MIN_ADJACENCY_SAMPLES and len({len(t) for t in toks}) == 1:
+        vals = [_prt_parse_counter(t) for t in toks]
+        if all(v is not None for v in vals):
+            steps = [vals[i + 1] - vals[i] for i in range(len(vals) - 1)]  # type: ignore[operator]
+            if steps and steps[0] != 0 and all(s == steps[0] for s in steps):
+                return True, {"identical": False, "arithmetic": True, "samples": len(toks), "step": steps[0]}
+    # (2) ANY byte-identical repeat — SAME account label OR across DIFFERENT account LABELS — with no exact
+    # progression ⇒ UNDECIDABLE ⇒ LEAD, never a FACT: account labels are never proven to be distinct PRINCIPALS
+    # (a benign identifier-NORMALIZING generator returns byte-identical tokens for 'alice'/'Alice' = ONE
+    # principal), and a deterministic-but-secure generator returns byte-identical tokens for one user. Surface
+    # whether the repeat SPANNED distinct labels (a stronger LEAD to escalate via the cross-user private-read
+    # differential), but NEVER mint here — genuine cross-principal exploitation is proven only by
+    # ``password_reset_cross_user`` (the private-read reduction), never by token identity.
+    if len(set(toks)) < len(toks):
+        by_token: dict[str, set[str]] = {}
+        for tok, acct in pairs:
+            by_token.setdefault(tok, set()).add(acct)
+        cross_label = any(len({a for a in accts if a}) >= 2 for accts in by_token.values())
+        return None, {"identical_lead": True, "cross_label": cross_label, "samples": len(pairs)}
+    # (3) all tokens DISTINCT, no exact progression ⇒ proper generation ⇒ clean.
+    return False, {"distinct": len(set(toks)), "samples": len(pairs)}
+
+
+def _prt_reuse_p2_binding(replay_secret: str, consumed_secret: str, authorized_secret: str,
+                          discriminator: str, authorized_view: Any) -> "str | None":
+    """Bind the achieved token-reuse read to the REPLAY-set secret P2 — mirroring session fixation's
+    sentinel-binding discipline. Returns a LEAD reason string if the binding fails (⇒ the oracle degrades to a
+    LEAD, never a FACT), or ``None`` when the binding holds. The binding is what makes a reuse FACT sound: a
+    single-use / expiring token whose replay set NOTHING could still read the private datum via a leftover
+    session established by the FIRST consume; without this binding that would mint a FALSE reuse FACT. So a fire
+    requires the achieved read to be provably attributable to the REPLAY (P2), not the consume (P1):
+
+      * ``replay_secret`` (P2) present and non-trivial (a fresh VIGIL secret the replay set);
+      * ``consumed_secret`` (P1) present and non-trivial AND DISTINCT from P2 — so a successful authenticated
+        read cannot be attributed to the FIRST consume;
+      * ``authorized_secret`` == ``replay_secret`` — the authenticated read was EXPLICITLY reached WITH P2 (not
+        P1, not a leftover consume-session);
+      * D is not an echo of P2 (a substring of, or present only as part of, the reflected secret) — the
+        reflected-value / straddle guard, mirroring the sentinel echo guard in ``_sfx_private_read_achieved``."""
+    if len(replay_secret) < _PRT_MIN_SECRET:
+        return ("the replay-set secret P2 is absent or too short to bind the achieved read to the replayed "
+                "token — cannot mint (LEAD)")
+    if len(consumed_secret) < _PRT_MIN_SECRET or replay_secret == consumed_secret:
+        return ("the replay-set secret P2 is not a distinct, non-trivial secret from the consumed secret P1 — a "
+                "successful read cannot be attributed to the REPLAY rather than the first consume (LEAD)")
+    if authorized_secret != replay_secret:
+        return ("the authenticated read was NOT reached with the replay-set secret P2 (authorized_secret != "
+                "replay_secret) — the achieved state is not bound to the replayed token (e.g. a leftover "
+                "consume-session or the consumed P1) — cannot mint (LEAD)")
+    if discriminator and discriminator in replay_secret:
+        return ("the private datum D is a substring of the replay-set secret P2 (a credential echo, not "
+                "access-gated content) — cannot mint (LEAD)")
+    a_body = _coerce_text(authorized_view.get("body")) if isinstance(authorized_view, Mapping) else ""
+    if replay_secret and replay_secret in a_body and discriminator and discriminator in a_body \
+            and discriminator not in a_body.replace(replay_secret, "\x00"):
+        return ("the private datum D appears in the replay-authenticated read ONLY as part of the echoed secret "
+                "P2 — a credential echo, not access-gated content — cannot mint (LEAD)")
+    return None
+
+
+def password_reset_invariant_oracle(observed: Any) -> OracleSignal:
+    """Fire on an invariant-FREE password-reset / account-recovery sub-property, proven WITHOUT operator intent
+    over VIGIL's OWN retained raw bytes (never a bool, never a bare marker/entropy heuristic). ``observed`` is
+    the record ``scanner.reset`` captured through the gated send; ``mode`` selects the sub-property:
+
+      * ``token_reuse`` — a reset token that was CONSUMED (set the account password to a first VIGIL secret P1)
+        is REPLAYED to set a SECOND, unique VIGIL secret P2; the runner then AUTHENTICATES with P2 and reads the
+        account. The achieved read is first BOUND to P2 (:func:`_prt_reuse_p2_binding` — P2 present + non-trivial
+        + DISTINCT from P1, the read explicitly reached WITH P2, D not an echo of P2), mirroring session
+        fixation's sentinel-binding so a fire proves the REPLAY re-changed the credential, never a leftover
+        consume-session or the consumed P1. It then fires ONLY when the PRIVATE-READ REDUCTION
+        (:func:`_sfx_private_read_achieved`) proves that read reached a victim-PRIVATE datum D — D PRESENT in the
+        replay-authenticated read AND in the owner's authoritative read yet PROVABLY ABSENT from a SUBSTANTIVE
+        SAME-SHAPE unauthorized read and a no-session baseline (so the second submit GENUINELY changed the
+        credential, not merely returned 200). A single-use token that correctly expires (the benign twin) leaves
+        P2 unset — the replay-authenticated read never reaches D ⇒ channel-confirmed CLEAN. A failed P2-binding
+        (P2 absent/short/equal-to-P1, or the read reached with the WRONG secret), no/invalid/reflected D, a
+        missing positive or same-shape negative reference, D present in a negative reference, or a non-substantive
+        read ⇒ LEAD (never a FACT, never a false CLEAN).
+      * ``token_collision`` — ``samples`` are ``{token, account}`` captures from INDEPENDENT reset requests (in
+        order); a flat ``tokens`` list is accepted with account labels UNKNOWN. Fires ONLY on a genuinely-
+        EXPLOITABLE PREDICTABLE COUNTER (:func:`_prt_collision`): >=3 tokens forming an EXACT arithmetic
+        progression (observe one token, predict the next — exploitable regardless of identity). A BYTE-IDENTICAL
+        token — same account LABEL or across DIFFERENT account LABELS — is DELIBERATELY NOT a FACT: account labels
+        are never proven to be distinct PRINCIPALS (a benign identifier-NORMALIZING generator maps 'alice'/'Alice'
+        to ONE principal; a deterministic-but-secure generator repeats for one user) ⇒ LEAD; genuine cross-
+        principal exploitation is minted only by the ``password_reset_cross_user`` private-read differential. A
+        set of distinct tokens (the benign twin) ⇒ channel-confirmed CLEAN; too few / too-short samples ⇒ LEAD.
+        ENTROPY alone is never a FACT here.
+
+    Pure + deterministic; never raises."""
+    obs = observed if isinstance(observed, Mapping) else {}
+    mode = _coerce_text(obs.get("mode")).strip()
+
+    if mode == "token_reuse":
+        reset_token = _coerce_text(obs.get("reset_token")).strip()
+        discriminator = _coerce_text(obs.get("private_discriminator")).strip()
+        replay_secret = _coerce_text(obs.get("replay_secret")).strip()
+        consumed_secret = _coerce_text(obs.get("consumed_secret")).strip()
+        authorized_secret = _coerce_text(obs.get("authorized_secret")).strip()
+        base = {"reset_token_len": len(reset_token), "discriminator_len": len(discriminator),
+                "replay_secret_bound": False}
+        # P2-BINDING (mirror session fixation's sentinel-binding): the achieved read MUST be attributable to the
+        # REPLAY-set secret P2, not the consumed P1 / a leftover consume-session — else a single-use token whose
+        # replay set nothing could still read D via the first consume and mint a FALSE reuse FACT. Fail ⇒ LEAD.
+        bind_fail = _prt_reuse_p2_binding(replay_secret, consumed_secret, authorized_secret,
+                                          discriminator, obs.get("authorized_view"))
+        if bind_fail is not None:
+            return _prt_signal(False, mode=mode, observed=base, evidence=bind_fail)
+        base["replay_secret_bound"] = True
+        # RE-DERIVE the achieved changed state from RAW retained bytes via the PRIVATE-READ REDUCTION — the same
+        # same-shape differential Wave-3.1/3.2 use. The consumed-then-replayed token is passed as the sentinel so
+        # its reflected-value / straddle guard masks any echo of the token itself (a reset token must never be
+        # the datum that satisfies the read). None ⇒ undecidable ⇒ LEAD.
+        achieved = _sfx_private_read_achieved(
+            discriminator, obs.get("authorized_view"), obs.get("owner_view"),
+            obs.get("unauth_ref"), obs.get("logged_out_ref"),
+            obs.get("logged_out_markers"), obs.get("logged_out_statuses"),
+            sentinel_id=reset_token)
+        if achieved is None:
+            return _prt_signal(
+                False, mode=mode, observed=base,
+                evidence=("password-reset token-reuse could not be proven by the PRIVATE-READ differential (no "
+                          "valid victim-private datum D; D reflects/straddles the reset token; a non-substantive "
+                          "replay-authenticated read; no substantive owner positive reference or D absent from "
+                          "it; no substantive SAME-SHAPE unauthorized reference; no valid no-session baseline; or "
+                          "D present in a negative reference) — cannot mint (LEAD)"))
+        if achieved is not True:
+            return _prt_signal(
+                False, mode=mode, conclusive=True, observed=base,
+                evidence=("the reset token, once consumed, no longer set a new credential on replay — the "
+                          "replay-set secret does not reach the victim's private view (single-use / expiring "
+                          "token, the correct defense); did not fire"))
+        return _prt_signal(
+            True, mode=mode, conf=0.92, observed={**base, "reset_token": reset_token,
+                                                  "differential": "replay_set_credential_reaches_private_datum_"
+                                                  "absent_in_same_shape_unauthorized_and_no_session_reads"},
+            evidence=("password-reset token REUSE / NON-EXPIRY: a reset token that was already CONSUMED was "
+                      "REPLAYED to set a SECOND unique VIGIL secret P2 (distinct from the consumed P1) and the "
+                      "second submit GENUINELY changed the credential — authenticating WITH P2 reaches a "
+                      "victim-PRIVATE datum D that is PRESENT in the owner's authoritative read yet PROVABLY "
+                      "ABSENT from a SUBSTANTIVE SAME-SHAPE unauthorized read and a no-session baseline (the "
+                      "P2-bound private-read reduction proves the REPLAY re-changed the credential, not a bare "
+                      "200 nor a leftover consume-session) — the recovery token is reusable / does not expire"))
+
+    if mode == "token_collision":
+        fired, detail = _prt_collision(obs.get("samples") if obs.get("samples") is not None else obs.get("tokens"))
+        if fired is None:
+            return _prt_signal(
+                False, mode=mode, observed=detail,
+                evidence=("no genuinely-exploitable reset-token collision could be adjudicated from the tokens "
+                          "alone: too few / too-short samples (need >=2 captures of length >= 8), OR a "
+                          "BYTE-IDENTICAL token that repeats — whether for the SAME account LABEL or across "
+                          "DIFFERENT account LABELS. A byte-identical repeat is NOT an exploitable collision here: "
+                          "account labels are never proven to be distinct PRINCIPALS (a benign identifier-"
+                          "NORMALIZING generator returns identical tokens for 'alice'/'Alice' = ONE principal) and "
+                          "a cryptographically-secure DETERMINISTIC generator (e.g. Django default_token_generator "
+                          "within a timestamp bucket, or a cache-one-token-per-account app) returns identical "
+                          "tokens for one user — a LEAD to escalate via the password_reset_cross_user private-read "
+                          "differential, never a FACT here"))
+        if fired is False:
+            return _prt_signal(
+                False, mode=mode, conclusive=True, observed=detail,
+                evidence=("the independent reset requests returned DISTINCT tokens with no exact arithmetic "
+                          "progression — proper generation (entropy is not scored here); did not fire"))
+        # A fire here is EXCLUSIVELY the PREDICTABLE-COUNTER shape (an exact arithmetic progression). The
+        # byte-identical cross-label 'collision' FACT path is RETIRED (⇒ LEAD): account-label identity never
+        # proves distinct PRINCIPALS, so genuine cross-principal exploitation is minted only by the
+        # password_reset_cross_user private-read differential, never from token identity.
+        return _prt_signal(
+            True, mode=mode, conf=0.95, observed=detail,
+            evidence=(f"deterministic password-reset token COLLISION: {detail.get('samples')} independent reset "
+                      f"requests returned tokens forming an EXACT arithmetic progression (constant step "
+                      f"{detail.get('step')!r}) — the recovery token is a predictable counter, not a random value; "
+                      f"observe one token and the victim's is predictable (exploitable regardless of identity)"))
+
+    return _prt_signal(
+        False, mode=(mode or "unknown"), observed={},
+        evidence="unknown/absent password-reset invariant mode — cannot adjudicate (inconclusive)")
+
+
+# ---------------------------------------------------------------------------
 # 4b. Error signature — a datastore/parser error a payload provoked (error-based)
 # ---------------------------------------------------------------------------
 

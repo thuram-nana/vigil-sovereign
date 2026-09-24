@@ -1561,6 +1561,29 @@ def _redrive_branch_for(bug_class: str) -> "Optional[str]":
         # LEAD/INCONCLUSIVE (the branch's preconditions fail-close). The factor-2-enforcing benign twin never
         # fires.
         "mfa_bypass": "mfa_bypass.mfa_bypass",
+        # Wave 4.3 — password-reset / account-recovery token-invariant gated-workflow re-drives. FACT only the
+        # invariant-free sub-properties (no operator intent needed to know they are wrong):
+        #   * token REUSE / NON-EXPIRY — VIGIL consumes a reset token on its OWN test account, REPLAYS it to set
+        #     a second unique secret P2, and mints via the FACT-capable password_reset.token_reuse branch
+        #     (verify/oracles.py:password_reset_invariant_oracle) ONLY when the P2-BOUND PRIVATE-READ REDUCTION
+        #     proves the replay-set secret P2 (distinct from the consumed P1, the read reached WITH P2) reached a
+        #     victim-PRIVATE datum (a single-use / expiring token, or a wrong-secret read, mints NOTHING);
+        #   * deterministic COLLISION — a genuinely-exploitable PREDICTABLE COUNTER only: >=3 exact-arithmetic
+        #     tokens from independent reset requests (observe one, predict the next), via
+        #     password_reset.deterministic_collision. A BYTE-IDENTICAL token — same account LABEL or across
+        #     DIFFERENT account LABELS — is DELIBERATELY NOT a FACT: labels are never proven distinct PRINCIPALS
+        #     (a benign identifier-NORMALIZING generator maps 'alice'/'Alice' to ONE principal; a
+        #     deterministic-but-secure generator, e.g. Django default_token_generator, repeats for one user), so
+        #     it FAILS CLOSED to a LEAD; entropy alone likewise stays a LEAD, never a FACT;
+        #   * CROSS-USER reset token — genuine cross-PRINCIPAL exploitation (a token issued to A actually READS
+        #     B's PRIVATE datum), the ONLY sound proof of a cross-user reset token: REUSES the Wave-3.1 IDOR/BOLA
+        #     achieved_state same-shape private-read differential UNCHANGED via password_reset.cross_user_read.
+        # (Reset-link HOST-POISONING reuses the EXISTING host_header_injection web-fact re-drive — routed there,
+        # not duplicated.) A missing private D / reference / VIGIL-owned account, distinct tokens, or
+        # too-few samples keep the claim a LEAD/INCONCLUSIVE (the branches' preconditions fail-close).
+        "password_reset_reuse": "password_reset.token_reuse",
+        "password_reset_collision": "password_reset.deterministic_collision",
+        "password_reset_cross_user": "password_reset.cross_user_read",
         # Wave 3.4 — SSO forgery-ACCEPTANCE achieved-state re-drive: VIGIL synthesises a forged token
         # carrying a fresh random attacker identity, replays it live through the gated send, and admits to the
         # ACHIEVED_STATE private-read branch (verify/oracles.py:predicate_oracle) — which fires ONLY on an

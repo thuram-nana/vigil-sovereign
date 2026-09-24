@@ -496,6 +496,28 @@ class FindingContext(BaseModel):
     # requests are VIGIL's own on its own socket. No benchmark/scan/engage finding carries `smuggling_desync`,
     # so appending it leaves the gate byte-identical and reuses the frozen kind (oracle_version untouched).
     smuggling_desync: dict[str, Any] | None = None
+    # password_reset_invariant_oracle (Wave-4.3 — CWE-640/613/330, its OWN OracleKind.PASSWORD_RESET_INVARIANT).
+    # The retained record scanner.reset captured through the gated send carries the RAW bytes the oracle re-runs
+    # over. Discriminated by `mode`:
+    #   * mode="token_reuse" — {reset_token, private_discriminator (D), authorized_view (the read after
+    #     AUTHENTICATING with the replay-set secret), owner_view (the owner's authoritative POSITIVE reference),
+    #     unauth_ref (a SUBSTANTIVE SAME-SHAPE unauthorized read — the DECISIVE negative reference), logged_out_ref
+    #     (a no-session baseline), logged_out_markers, logged_out_statuses}. The oracle fires ONLY when the
+    #     PRIVATE-READ REDUCTION proves the replay-set secret reached D (present in the owner's read, absent from
+    #     the same-shape unauthorized read and the no-session baseline) — never a bare 200; a single-use token that
+    #     correctly expires does not fire.
+    #   * mode="token_collision" — {samples/tokens: [...]} captured from INDEPENDENT reset requests (in order).
+    #     Fires ONLY on a genuinely-EXPLOITABLE PREDICTABLE COUNTER (>=3 tokens forming an EXACT arithmetic
+    #     progression — observe one, predict the next). A BYTE-IDENTICAL token — same account LABEL or across
+    #     DIFFERENT account LABELS — is DELIBERATELY NOT a FACT: labels are never proven distinct PRINCIPALS (a
+    #     benign identifier-NORMALIZING generator maps 'alice'/'Alice' to ONE principal) ⇒ LEAD; genuine
+    #     cross-principal exploitation is minted only by password_reset_cross_user (the private-read differential).
+    #     Distinct tokens do not fire; ENTROPY is never scored (a low-entropy-but-distinct token stays a LEAD).
+    # No benchmark/scan/engage finding carries `password_reset_invariant`, so appending it leaves the gate
+    # byte-identical; routes to the dedicated kind via its distinct `password_reset_invariant` ctx key so
+    # oracle_version(ACHIEVED_STATE) is untouched. (The CROSS-USER reset sub-property reuses the ACHIEVED_STATE
+    # predicate/observed_evidence path via an IdorCheck; the HOST-POISONING sub-property reuses host_header_injection.)
+    password_reset_invariant: dict[str, Any] | None = None
     # jwt_forgery_oracle (Workstream-B: a captured JWT is STRUCTURALLY FORGEABLE — judged on the token
     # ALONE, offline, zero traffic). jwt_token is the captured token string; jwt_candidate_keys are the
     # supplied secrets / RSA public keys the HMAC-reproduction proof is tried against (a weak-secret
@@ -2118,6 +2140,119 @@ class FindingContext(BaseModel):
             },
         )
 
+    @classmethod
+    def from_password_reset_reuse(
+        cls,
+        *,
+        reset_token: str,
+        private_discriminator: str | None = None,
+        authorized_view: Any = None,
+        owner_view: Any = None,
+        unauth_ref: Any = None,
+        logged_out_ref: Any = None,
+        logged_out_markers: Any = (),
+        logged_out_statuses: Any = (),
+        consumed_secret: str | None = None,
+        replay_secret: str | None = None,
+        authorized_secret: str | None = None,
+        bug_class: str = "password_reset_reuse",
+    ) -> "FindingContext":
+        """The retained token-REUSE / NON-EXPIRY record for the password-reset oracle
+        (OracleKind.PASSWORD_RESET_INVARIANT, CWE-640/613). It carries the RAW bytes the oracle re-runs its
+        PRIVATE-READ REDUCTION over — never a pre-computed success bool, never a bare 200.
+
+        The runner CONSUMES a reset token (setting the account password to a first unique VIGIL secret P1
+        =``consumed_secret``), then REPLAYS the same token to set a SECOND, unique VIGIL secret P2
+        =``replay_secret``, then AUTHENTICATES with P2 (=``authorized_secret``, the credential the
+        ``authorized_view`` read was reached with) and reads the account. ``authorized_view`` is ``{status,
+        body}`` of that replay-authenticated read; ``owner_view`` is the SAME URL read authoritatively as the
+        owner (the POSITIVE reference — D must be PRESENT); ``unauth_ref`` is the SAME URL read by an OTHER
+        unauthorized identity (the DECISIVE SAME-SHAPE negative reference — a substantive 2xx from which D must be
+        ABSENT); ``logged_out_ref`` is the SAME URL with NO session (the no-session baseline).
+        ``private_discriminator`` (D) is the operator's genuine victim-PRIVATE datum. The oracle first BINDS the
+        achieved read to P2 (P2 present + non-trivial + DISTINCT from P1, and ``authorized_secret`` == P2, D not
+        an echo of P2), then fires ONLY when D is PRESENT in the replay-authenticated read AND the owner's read
+        yet PROVABLY ABSENT from the same-shape unauthorized reference and the no-session baseline (the REPLAY
+        GENUINELY changed the credential). A single-use token that correctly expires leaves P2 unset — the
+        replay-authenticated read never reaches D ⇒ channel-confirmed CLEAN. A failed P2-binding (wrong-secret
+        read, P2==P1, P2 absent), no/invalid/reflected D or a missing/failing reference ⇒ LEAD (never a FACT)."""
+        def _view(v: Any) -> "dict | None":
+            if not isinstance(v, Mapping):
+                return None
+            return {"status": v.get("status"), "body": _coerce_text(v.get("body"))}
+
+        def _strs(seq: Any) -> "list[str]":
+            if isinstance(seq, (list, tuple, set, frozenset)):
+                return [_coerce_text(x) for x in seq]
+            return []
+
+        def _ints(seq: Any) -> "list[int]":
+            out: list[int] = []
+            if isinstance(seq, (list, tuple, set, frozenset)):
+                for x in seq:
+                    try:
+                        out.append(int(x))
+                    except (TypeError, ValueError):
+                        continue
+            return out
+
+        return cls(
+            bug_class=bug_class,
+            password_reset_invariant={
+                "mode": "token_reuse",
+                "reset_token": _coerce_text(reset_token),
+                "private_discriminator": None if private_discriminator is None else _coerce_text(private_discriminator),
+                "authorized_view": _view(authorized_view),
+                "owner_view": _view(owner_view),
+                "unauth_ref": _view(unauth_ref),
+                "logged_out_ref": _view(logged_out_ref),
+                "logged_out_markers": _strs(logged_out_markers),
+                "logged_out_statuses": _ints(logged_out_statuses),
+                # P2-binding fields (mirror session fixation's sentinel-binding): the consumed P1, the replay-set
+                # P2, and the credential the authorized read was actually reached with — so the oracle can prove
+                # the achieved state is attributable to the REPLAY, never the first consume / a leftover session.
+                "consumed_secret": None if consumed_secret is None else _coerce_text(consumed_secret),
+                "replay_secret": None if replay_secret is None else _coerce_text(replay_secret),
+                "authorized_secret": None if authorized_secret is None else _coerce_text(authorized_secret),
+            },
+        )
+
+    @classmethod
+    def from_password_reset_collision(
+        cls,
+        *,
+        samples: Any = None,
+        tokens: Any = None,
+        bug_class: str = "password_reset_collision",
+    ) -> "FindingContext":
+        """The retained deterministic-COLLISION record for the password-reset oracle
+        (OracleKind.PASSWORD_RESET_INVARIANT, CWE-640/330). ``samples`` are the runner's captures from INDEPENDENT
+        reset requests, in request order, each a ``{token, account}`` mapping (the account LABEL the token was
+        issued for — carried so a byte-identical repeat across labels can be surfaced as a stronger LEAD). A flat
+        ``tokens`` list is also accepted (labels UNKNOWN). The oracle fires ONLY on a genuinely-EXPLOITABLE
+        PREDICTABLE COUNTER: >=3 tokens forming an EXACT arithmetic progression. A BYTE-IDENTICAL token — same
+        account LABEL or across DIFFERENT account LABELS — is DELIBERATELY NOT a FACT: account labels are never
+        proven to be distinct PRINCIPALS (a benign identifier-NORMALIZING generator maps 'alice'/'Alice' to ONE
+        principal; a deterministic-but-secure generator repeats for one user) ⇒ LEAD; genuine cross-principal
+        exploitation is minted only by ``password_reset_cross_user`` (the private-read differential). A set of
+        distinct tokens ⇒ channel-confirmed CLEAN; too few / too-short samples ⇒ LEAD. ENTROPY is never scored —
+        a distinct-but-low-entropy token stays a probabilistic LEAD, never a FACT here."""
+        norm: list[dict[str, str]] = []
+        if isinstance(samples, (list, tuple)):
+            for item in samples:
+                if isinstance(item, Mapping):
+                    tok = _coerce_text(item.get("token"))
+                    acct = _coerce_text(item.get("account"))
+                else:
+                    tok, acct = _coerce_text(item), ""
+                norm.append({"token": tok, "account": acct})
+        elif isinstance(tokens, (list, tuple)):
+            norm = [{"token": _coerce_text(x), "account": ""} for x in tokens]
+        return cls(
+            bug_class=bug_class,
+            password_reset_invariant={"mode": "token_collision", "samples": norm},
+        )
+
     # -- AEGIS builders (the defensive dual) -------------------------------
 
     @classmethod
@@ -2362,6 +2497,8 @@ class FindingContext(BaseModel):
             ctx["mfa_bypass"] = self.mfa_bypass
         if self.smuggling_desync is not None:
             ctx["smuggling_desync"] = self.smuggling_desync
+        if self.password_reset_invariant is not None:
+            ctx["password_reset_invariant"] = self.password_reset_invariant
         if self.jwt_token is not None:
             ctx["jwt_token"] = self.jwt_token
             if self.jwt_candidate_keys is not None:
