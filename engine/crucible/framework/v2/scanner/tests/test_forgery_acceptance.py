@@ -1,63 +1,60 @@
 """
-Wave 3.4 — SSO forgery-ACCEPTANCE achieved-state duals (scanner.forgery_acceptance), ROUND 6.
+Wave 3.4 — SSO forgery-ACCEPTANCE achieved-state duals (scanner.forgery_acceptance), ROUND 7 (final).
 
-ROOT CAUSE six rounds proved: an achieved authenticated/accepted state CANNOT be proven from response CONTENT.
-Round 5 gated the grant-differential on a difflib same-shape SIMILARITY SCORE (>= 0.5); the sixth variant
-defeats it — a benign NON-granting app that renders an identity-echoing soft-200 in the site shell scores
-~0.95 similar to its own deny control yet is not a grant, minting a durable/offline false FACT.
+ROOT CAUSE seven rounds proved: an achieved authenticated/accepted state CANNOT be proven from response CONTENT,
+and — the round-7 finding — NO AUTOMATIC guard over the forged token's own claims can win the transform race
+either. In forgery-ACCEPTANCE the impersonated identity is ATTACKER-CHOSEN, so ANY discriminator D that
+correlates with a forged-token claim (email/sub/name/SAML attribute/NameID) can be echoed by a benign,
+NON-granting app in INFINITELY many transformed forms — verbatim, case-normalised, HTML-escaped, URL-encoded,
+unicode-normalised, whitespace-padded, truncated, ... . The round-6 "D-not-derivable-from-the-token" byte guard
+cannot enumerate them, so it is ABANDONED as the soundness mechanism.
 
-THE SOUND REDUCTION round-6 ships (reusing the Wave-3.1 IDOR/BOLA differential that PASSED review): prove the
-achieved state ONLY by an ACHIEVED READ OF A VICTIM-PRIVATE DATUM D. The FORGED token confirms acceptance ONLY
-when a genuine operator-supplied victim-PRIVATE discriminator D is (a) PRESENT in the forged-token read AND
-(b) PRESENT in a legit-VALID-token POSITIVE reference AND (c) ABSENT from a SUBSTANTIVE SAME-SHAPE invalid-token
-NEGATIVE control (a substantive 2xx rendering the same resource — a denial/empty/error/different-shape is
-REFUSED) AND (d) D is a valid, non-reflected discriminator. The difflib similarity SCORE is DROPPED as the
-proof (kept only as a weak advisory); same-shape-ness is established SOUNDLY by the negative control being a
-substantive-2xx rendering of the SAME replayed resource, exactly as Wave-3.1's substantive-2xx peer control.
+THE HONEST RESOLUTION round-7 ships — a FAIL-CLOSED CERTIFICATION GATE (an honest gated bound beats a false
+FACT). The forgery-acceptance oracle emits a confirmed achieved_state ONLY when an EXPLICIT operator
+CERTIFICATION is present (server_side_private_certified=True) attesting that D is a SERVER-SIDE-ONLY private datum
+(NOT present in / derivable from the forged token) with a certified same-shape reference — the SAME
+operator-supplied-genuine-discriminator bound Wave 3.1 was ACCEPTED with, the un-auto-verifiable part moved to an
+explicit attestation. WITHOUT that certification the class is a rigorous LEAD and the oracle MUST NOT emit
+achieved_state for ANY input (benign or not, any transform) — live AND offline (the certification is re-asserted
+in the predicate AST). That single gate closes all transform variants AT ONCE; it does not enumerate transforms.
 
-WHY IT IS SOUND. D must be SERVER-SIDE victim-private content that is ABSENT from the forged token. Chrome the
-operator might mistake for private content is rendered on the substantive same-shape control too, so its
-absence-in-control (clause c) fails.
+WITH the certification, the surviving proof is the Wave-3.1 IDOR/BOLA private-read differential (which PASSED
+review): the FORGED token confirms acceptance when a certified victim-PRIVATE discriminator D is (a) PRESENT in
+the forged-token read AND (b) PRESENT in a legit-VALID-token POSITIVE reference AND (c) ABSENT from a SUBSTANTIVE
+SAME-SHAPE invalid-token NEGATIVE control (a substantive 2xx rendering the same resource — a
+denial/empty/error/different-shape is REFUSED) AND (d) D is a valid, non-reflected discriminator (the sound
+nonce-overlap + request-reflection guards are retained). The difflib similarity SCORE and the round-6
+forged-token-claim guard are BOTH DROPPED as proof (kept only as weak advisories); same-shape-ness is established
+SOUNDLY by the negative control being a substantive-2xx rendering of the SAME replayed resource. The residual is
+operator MISCERTIFICATION (the accepted Wave-3.1 bound).
 
-THE ROUND-6 BLOCK (clause d, forged-token-claim guard). Clause (a) alone is NOT enough: a benign app that REJECTS
-the forge can still ECHO a value it DECODED FROM THE FORGED TOKEN — a JWT ``email``/``name`` claim, a SAML ``mail``
-attribute — on its (non-granting) reject page. That echo is REFLECTION of attacker-controlled token data (the
-attacker owns the ``alg:none`` / NameID-tampered unsigned token), NOT a leak of server-side private content, yet it
-would satisfy clause (a) with D present in the forged read, clause (b) in a positive reference for the same real
-identity, and clause (c) absent from a control that does not echo it — minting a FALSE ``achieved_state`` on
-jwt/oidc/saml (``D=email`` is the canonical example). The fix parses the forged JWT payload / SAML assertion the
-runner minted and REFUSES any D present in / derivable from its own decoded claim values (combined with the
-pre-existing request-reflection guard, and re-derived in the predicate AST so an offline re-verify refuses a
-token-claim-echo certificate). What survives is a SERVER-SIDE, token-ABSENT private datum a benign app cannot
-supply. The class stays a rigorous LEAD (``fact_capable:false``); the sound forge-as-real-victim server-side-
-private-read design is the ``blocking_work``.
-
-HONEST OUTCOME (a LEAD-downgrade). A bad-signature control auto-derived from the legit token is NOT guaranteed
-to be a substantive same-shape deny — a correct app rejects it with a terse 401 — so for the wired input the
-class DOWNGRADES to a LEAD (fact_capable:false + blocking_work). The genuinely-sound sub-case (a substantive
-same-shape control lacking a genuine private D) still mints the FACT; the offline jwt_forgeable /
-saml_structural_forgery FACT is INDEPENDENT and unaffected.
+THE SEPARATE offline forgeability FACT (jwt_forgeable / saml_structural_forgery — proving the token IS forgeable)
+is INDEPENDENT and untouched, and still mints with no live traffic.
 
 The BENCHMARK for this opt-in, gated-workflow class lives here as deterministic injected-``send`` fixtures
 (this class mints nothing on the default GET corpus, so the ``make gate`` is byte-identical). The apps model:
 
   * a FACT app that GRANTS the forge access to the victim-PRIVATE datum AND answers the bad-signature control
-    with a SUBSTANTIVE SAME-SHAPE deny that lacks that datum ⇒ with a genuine private D the oracle mints a FACT;
-  * the SIXTH-VARIANT benign app: a NON-granting app whose forge and control are both substantive soft-200s in
-    the site shell (HIGH shape-similarity) but carry NO private D ⇒ MUST NOT fire (the score is now advisory);
+    with a SUBSTANTIVE SAME-SHAPE deny that lacks that datum ⇒ with the certification AND a genuine private D the
+    oracle mints a FACT; WITHOUT the certification the SAME app mints NOTHING (fail-closed);
+  * a benign NON-granting app whose forge and control are both substantive soft-200s in the site shell (HIGH
+    shape-similarity) but carry NO private D ⇒ MUST NOT fire (the score is only an advisory);
   * a benign app whose forge/control render the same chrome shell, probed with CHROME markers ⇒ MUST NOT fire
     (chrome is present in the substantive control, so it is not access-gated);
-  * twin (a) — a 200 "Login failed … Access denied." page that lacks the private datum ⇒ MUST NOT fire;
+  * a benign app that echoes a DECODED TOKEN CLAIM (in verbatim / case / HTML-escaped / URL-encoded transforms)
+    on its reject page, with NO certification ⇒ MUST NOT fire, live or offline (the fail-closed gate, not a byte
+    guard, is what closes every transform);
+  * twin (a) — a 200 "Access denied." page that lacks the private datum ⇒ MUST NOT fire;
   * twin (b) — an app that GRANTS the datum to EVERYTHING incl. the control (D present in control) ⇒ MUST NOT fire;
   * twin (c) — a hardened app that verifies the signature and REJECTS the forgery ⇒ MUST NOT fire;
   * a GENUINELY vulnerable app whose bad-signature control is a TERSE 401 (not a substantive same-shape read) ⇒
     a LEAD, not a FACT (the honest downgrade).
 
-Plus: no minted context (LEAD) without the private-datum baseline OR without the positive reference; the
-offline re-verify re-fires the retained predicate and every tamper is rejected; the forged marker is a FRESH
-per-probe random nonce (FIX #2); the reflected nonce is excised (FIX #3); the embedded-key path is never taken
-(refusal #7); the classes route to ACHIEVED_STATE and are NOT in the default roster; and the INDEPENDENT
-offline jwt_forgeable / saml_structural_forgery FACTs still mint.
+Plus: no minted context (LEAD) without the private-datum baseline, without the positive reference, OR without the
+certification; the offline re-verify re-fires the retained predicate and every tamper — including stripping the
+certification — is rejected; the forged marker is a FRESH per-probe random nonce (FIX #2); the reflected nonce is
+excised (FIX #3); the embedded-key path is never taken (refusal #7); the classes route to ACHIEVED_STATE and are
+NOT in the default roster; and the INDEPENDENT offline jwt_forgeable / saml_structural_forgery FACTs still mint.
 """
 
 from __future__ import annotations
@@ -156,19 +153,26 @@ def _saml_req() -> HttpRequest:
                        body=urlencode({"SAMLResponse": _SIGNED_SAML_B64}))
 
 
+# The default helpers model the FULLY-CERTIFIED operator gated-workflow: baseline + positive reference + the
+# explicit server_side_private_certified attestation. A test that wants the NO-certification (fail-closed LEAD)
+# case passes ``certified=False`` explicitly. ``certified`` defaults to True here; every other kwarg passes
+# through to the dataclass.
 def _jwt_check(**kw):
     return fa.JwtForgeryAcceptanceCheck(success_markers=kw.pop("markers", _PRIVATE),
-                                        legit_token=kw.pop("legit", _legit_jwt()), **kw)
+                                        legit_token=kw.pop("legit", _legit_jwt()),
+                                        server_side_private_certified=kw.pop("certified", True), **kw)
 
 
 def _oidc_check(**kw):
     return fa.OidcForgeryAcceptanceCheck(success_markers=kw.pop("markers", _PRIVATE),
-                                         legit_token=kw.pop("legit", _legit_jwt()), **kw)
+                                         legit_token=kw.pop("legit", _legit_jwt()),
+                                         server_side_private_certified=kw.pop("certified", True), **kw)
 
 
 def _saml_check(**kw):
     return fa.SamlForgeryAcceptanceCheck(success_markers=kw.pop("markers", _PRIVATE),
-                                         legit_saml=kw.pop("legit", _SIGNED_SAML_B64), **kw)
+                                         legit_saml=kw.pop("legit", _SIGNED_SAML_B64),
+                                         server_side_private_certified=kw.pop("certified", True), **kw)
 
 
 # ---------------------------------------------------------------------------
@@ -452,6 +456,40 @@ def test_saml_forgery_accepted_fires_on_private_read() -> None:
     assert _confirmed(findings, "saml_forgery_accepted")
 
 
+def test_certification_flips_lead_to_fact() -> None:
+    """TASK TEST (b) + (c). The FAIL-CLOSED CERTIFICATION GATE is what turns the SAME vulnerable app + the SAME
+    genuine private D from a LEAD into a FACT. On all three surfaces:
+      * WITHOUT the certification the oracle mints NOTHING (no achieved_state, no context) — a rigorous LEAD;
+      * WITH the certification a genuine server-side D present in the forged read + certified positive reference and
+        absent from a substantive same-shape control mints an achieved_state FACT that re-verifies offline;
+      * offline re-verify REFUSES the same certificate once the certification is stripped (task requirement (c))."""
+    for surface, req, mk, app in (
+        ("jwt", _jwt_req(), dict(markers=_PRIVATE), _jwt_fact_app("authorization")),
+        ("oidc", _oidc_req(), dict(markers=_PRIVATE, location="id_token"), _jwt_fact_app("id_token")),
+        ("saml", _saml_req(), dict(markers=_PRIVATE), _saml_fact_app()),
+    ):
+        mkfn = {"jwt": _jwt_check, "oidc": _oidc_check, "saml": _saml_check}[surface]
+        # WITHOUT certification ⇒ LEAD (no fire, no context) whatever the app leaks.
+        lead = mkfn(certified=False, **mk)
+        assert not _confirmed(_run(req, lead, app), lead.bug_class), f"{surface}: no certification ⇒ LEAD, never a FACT"
+        assert lead.probe(RequestTemplate(req), app) is None, f"{surface}: no certification ⇒ no context built"
+        # WITH certification ⇒ the SAME app + D mints an achieved_state FACT.
+        fact = mkfn(certified=True, **mk)
+        findings = _run(req, fact, app)
+        assert _confirmed(findings, fact.bug_class), f"{surface}: certification + genuine D ⇒ achieved_state FACT"
+        ctx = fact.probe(RequestTemplate(req), app)
+        assert ctx is not None
+        oc = ctx.to_verifier_context()
+        assert oc["observed_evidence"]["server_side_private_certified"] is True
+        assert OracleVerifier().confirm(oc).confirmed, f"{surface}: the certified FACT re-verifies offline"
+        # (c) stripping the certification refuses the certificate offline.
+        oc2 = dict(oc)
+        oc2["observed_evidence"] = {k: v for k, v in oc["observed_evidence"].items()
+                                    if k != "server_side_private_certified"}
+        assert not OracleVerifier().confirm(oc2).confirmed, (
+            f"{surface}: offline re-verify must REFUSE a non-certified context (fail-closed gate)")
+
+
 # ---------------------------------------------------------------------------
 # THE SIXTH VARIANT — a benign identity-echoing soft-200 with HIGH shape-similarity but NO private D ⇒ LEAD
 # ---------------------------------------------------------------------------
@@ -561,6 +599,27 @@ def test_no_private_datum_baseline_mints_nothing() -> None:
                        (fa.SamlForgeryAcceptanceCheck(legit_saml=_SIGNED_SAML_B64), _saml_req())):
         assert _run(req, check, spy) == [], f"{check.bug_class}: no baseline must mint nothing"
     assert sent == [], "with no baseline the check must send NO forged traffic (a rigorous LEAD, not a probe)"
+
+
+def test_missing_certification_downgrades_to_lead_and_sends_no_traffic() -> None:
+    """FAIL-CLOSED: with the baseline AND the positive reference present but NO certification
+    (server_side_private_certified defaults to False), every surface DOWNGRADES to a rigorous LEAD — it mints
+    nothing AND sends no traffic (it does not even probe)."""
+    sent: list = []
+
+    def spy(req: HttpRequest) -> dict:
+        sent.append(req)
+        return {"status": 200, "body": _grant("x")}
+
+    for check, req in (
+        (fa.JwtForgeryAcceptanceCheck(success_markers=_PRIVATE, legit_token=_legit_jwt()), _jwt_req()),
+        (fa.OidcForgeryAcceptanceCheck(success_markers=_PRIVATE, legit_token=_legit_jwt(), location="id_token"), _oidc_req()),
+        (fa.SamlForgeryAcceptanceCheck(success_markers=_PRIVATE, legit_saml=_SIGNED_SAML_B64), _saml_req()),
+    ):
+        assert check.server_side_private_certified is False
+        assert _run(req, check, spy) == [], f"{check.bug_class}: no certification must mint nothing"
+        assert check.probe(RequestTemplate(req), spy) is None
+    assert sent == [], "with no certification the check must send NO forged traffic (a rigorous LEAD, not a probe)"
 
 
 def test_vacuous_discriminators_do_not_fire() -> None:
@@ -685,23 +744,65 @@ def test_offline_reverify_reproduces_and_tamper_is_rejected() -> None:
     # TAMPER 5: replace the substantive same-shape control with a TERSE deny ⇒ clause (c) not substantive ⇒ reject.
     assert not OracleVerifier().confirm(_tamper(control_status=401, control_content="Unauthorized")).confirmed, (
         "a terse / non-substantive control must NOT re-confirm (clause c requires a substantive same-shape read)")
-    # TAMPER 6 (round-6 clause d): inject a discriminator VALUE into the forged token's own decoded claims ⇒ it is
-    # a token-claim echo (attacker-controlled reflection), so clause (8) fails and the certificate is refused.
+    # TAMPER 6 (round-7 FAIL-CLOSED GATE): strip / flip the certification flag ⇒ the predicate's clause (0)
+    # (server_side_private_certified == True) fails, so a non-certified / tampered certificate is REFUSED offline.
+    # This is the single gate that closes every transform variant — the offline re-verify refuses ANY non-certified
+    # context (task requirement (c)).
+    assert oc["observed_evidence"].get("server_side_private_certified") is True, (
+        "the certificate must carry the operator certification flag == True (the fail-closed gate)")
+    assert not OracleVerifier().confirm(_tamper(server_side_private_certified=False)).confirmed, (
+        "a certificate with the certification flipped to False must NOT re-confirm (fail-closed gate)")
+    # deleting the field entirely (a hand-crafted non-certified certificate) is likewise refused.
+    _no_cert = dict(oc)
+    _ev = {k: v for k, v in oc["observed_evidence"].items() if k != "server_side_private_certified"}
+    _no_cert["observed_evidence"] = _ev
+    assert not OracleVerifier().confirm(_no_cert).confirmed, (
+        "a certificate MISSING the certification flag must NOT re-confirm (offline re-verify refuses non-certified)")
+    # TAMPER 7 (advisory demotion): forged_token_claims is now a NON-AUTHORITATIVE advisory — injecting a D into it
+    # does NOT change the verdict (the futile guard is not in the predicate; the certification is the gate).
     assert oc["observed_evidence"].get("forged_token_claims") is not None, (
-        "the certificate must carry the forged token's decoded claim values (clause d)")
-    assert not OracleVerifier().confirm(_tamper(forged_token_claims=" ".join(G) + " echoed from the forged token")).confirmed, (
-        "a D present in the forged token's own claims (a decoded-token-claim echo) must NOT re-confirm (clause d)")
+        "the certificate must still RECORD the forged token's decoded claim values (as an advisory)")
+    assert OracleVerifier().confirm(_tamper(forged_token_claims=" ".join(G) + " echoed from the forged token")).confirmed, (
+        "forged_token_claims is advisory only — a D appearing in it does NOT flip the verdict (no predicate clause)")
 
 
 # ---------------------------------------------------------------------------
-# ROUND-6 BLOCK fix — clause (d) forged-token-claim guard. A benign app that REJECTS the forge but ECHOES a value
+# ROUND-7 FAIL-CLOSED GATE — the forged-token-claim ECHO. A benign app that REJECTS the forge but ECHOES a value
 # it DECODED FROM THE FORGED TOKEN (a JWT email / OIDC name / SAML mail attribute) on its reject page is
-# REFLECTING attacker-controlled token content, NOT leaking a server-side private datum ⇒ MUST NOT mint.
+# REFLECTING attacker-controlled token content, NOT leaking a server-side private datum. The round-6 automatic
+# byte guard tried to catch this but CANNOT: the echo can be in INFINITELY many transforms (case / HTML-escape /
+# URL-encode / ...). The round-7 fix is the FAIL-CLOSED CERTIFICATION GATE: WITHOUT the operator certification the
+# oracle mints NOTHING for ANY of these apps, in ANY transform, live or offline. That single gate closes them all.
 # ---------------------------------------------------------------------------
 
 _CLAIM_EMAIL = "victim-echo@corp.test"   # a JWT email claim the alg:none forge PRESERVES (D = this)
 _CLAIM_NAME = "Victim Q Echo Name"       # an OIDC name claim the forge preserves (email is overridden by the nonce)
 _CLAIM_MAIL = "mailattr-echo@corp.test"  # a SAML mail AttributeValue the NameID-tamper keeps
+
+
+# The transform family the round-6 byte guard cannot enumerate: a benign app can echo a token claim in ANY of
+# these forms. Each maps the raw claim value to what the app echoes AND to the operator's supplied D (they match,
+# so clauses a/b/c would hold — only the missing certification stops the fire).
+def _t_verbatim(s: str) -> str:
+    return s
+
+
+def _t_case(s: str) -> str:
+    return s.upper()
+
+
+def _t_html_escape(s: str) -> str:
+    # a crude HTML-entity escape of a couple of characters — a form the verbatim byte guard never matched.
+    return s.replace("@", "&#64;").replace(".", "&#46;")
+
+
+def _t_url_encode(s: str) -> str:
+    from urllib.parse import quote
+    return quote(s, safe="")
+
+
+_ECHO_TRANSFORMS = (("verbatim", _t_verbatim), ("case", _t_case),
+                    ("html-escape", _t_html_escape), ("url-encode", _t_url_encode))
 
 
 def _rich_jwt() -> str:
@@ -750,17 +851,19 @@ def _decoded_claim(token: "str | None", claim: str) -> str:
     return str(payload.get(claim, ""))
 
 
-def _jwt_claim_echo_app(location: str, claim: str):
-    """A BENIGN NON-granting RP that REJECTS the alg:none forge but ECHOES the token's decoded ``claim`` on a
-    SUBSTANTIVE soft-200 reject page; answers the bad-signature control with a generic substantive deny that does
-    NOT echo it (``_sameshape_deny``); and GRANTS a correctly-signed token (the positive reference, which echoes
-    the real claim). It leaks NO server-side private datum — the ONLY thing carrying D is the echoed token claim,
-    which is attacker-controlled REFLECTION. All of clauses (a)/(b)/(c) are satisfied; ONLY clause (d) (the
-    forged-token-claim guard) stops the fire ⇒ MUST NOT mint (round-6 BLOCK)."""
+def _jwt_claim_echo_app(location: str, claim: str, transform=_t_verbatim):
+    """A BENIGN NON-granting RP that REJECTS the alg:none forge but ECHOES the token's decoded ``claim`` — through
+    ``transform`` — on a SUBSTANTIVE soft-200 reject page; answers the bad-signature control with a generic
+    substantive deny that does NOT echo it (``_sameshape_deny``); and GRANTS a correctly-signed token (the positive
+    reference, which echoes the transformed real claim). It leaks NO server-side private datum — the ONLY thing
+    carrying D is the echoed token claim, which is attacker-controlled REFLECTION. Clauses (a)/(b)/(c) hold with
+    ``D = transform(claim)``; ONLY the missing certification stops the fire ⇒ MUST NOT mint (round-7 fail-closed).
+    The round-6 verbatim byte guard could not catch a non-``verbatim`` transform — that is exactly why it was
+    abandoned; the certification gate closes every transform at once."""
     def send(req: HttpRequest) -> dict:
         token = _jwt_token_of(req, location)
         alg, _sub = _decoded_alg_and_sub(token)
-        val = _decoded_claim(token, claim)
+        val = transform(_decoded_claim(token, claim))
         if alg is None:
             return {"status": 401, "body": "Unauthorized"}
         if alg == "none":
@@ -773,11 +876,12 @@ def _jwt_claim_echo_app(location: str, claim: str):
     return send
 
 
-def _saml_claim_echo_app():
+def _saml_claim_echo_app(transform=_t_verbatim):
     """The SAML dual: a BENIGN SP that REJECTS the NameID-tampered assertion but ECHOES its ``mail`` AttributeValue
-    on a substantive soft-200 reject page; answers the invalidated-signature control with a generic substantive
-    deny that does NOT echo it; and GRANTS a fully-valid assertion. The tampered assertion is un-re-signed, so the
-    echoed mail attribute is attacker-controlled REFLECTION ⇒ clause (d) stops the fire ⇒ MUST NOT mint."""
+    — through ``transform`` — on a substantive soft-200 reject page; answers the invalidated-signature control with
+    a generic substantive deny that does NOT echo it; and GRANTS a fully-valid assertion. The tampered assertion is
+    un-re-signed, so the echoed mail attribute is attacker-controlled REFLECTION ⇒ only the missing certification
+    stops the fire ⇒ MUST NOT mint (round-7 fail-closed)."""
     def send(req: HttpRequest) -> dict:
         kind, nameid, sigval = _saml_parse(req)
         mail = ""
@@ -787,7 +891,7 @@ def _saml_claim_echo_app():
             try:
                 for av in _sso.safe_parse_xml(xml).iter(f"{{{_NS_A}}}AttributeValue"):
                     if av.text:
-                        mail = av.text
+                        mail = transform(av.text)
                         break
             except Exception:
                 pass
@@ -803,43 +907,61 @@ def _saml_claim_echo_app():
     return send
 
 
-def test_decoded_token_claim_echo_does_not_fire() -> None:
-    """THE ROUND-6 BLOCK. On all three surfaces, a benign app that echoes a DECODED TOKEN CLAIM (JWT email /
-    OIDC name / SAML mail attribute) on its reject page — with that claim supplied as the operator's D and present
-    in the forged read AND the positive reference AND absent from a substantive same-shape control — mints NOTHING
-    (a LEAD): the echo is REFLECTION of attacker-controlled token content, refused by clause (d)."""
-    for surface, req, chk, app in (
-        ("jwt", _rich_jwt_req(), _jwt_check(markers=(_CLAIM_EMAIL,), legit=_rich_jwt()),
-         _jwt_claim_echo_app("authorization", "email")),
-        ("oidc", _rich_oidc_req(), _oidc_check(markers=(_CLAIM_NAME,), legit=_rich_jwt(), location="id_token"),
-         _jwt_claim_echo_app("id_token", "name")),
-        ("saml", _rich_saml_req(), _saml_check(markers=(_CLAIM_MAIL,), legit=_SIGNED_SAML_MAIL_B64),
-         _saml_claim_echo_app()),
-    ):
-        assert not _confirmed(_run(req, chk, app), chk.bug_class), (
-            f"{surface}: a decoded-token-claim echo must NOT mint a FACT (clause d)")
-        assert chk.probe(RequestTemplate(req), app) is None, (
-            f"{surface}: a decoded-token-claim echo ⇒ NO context (a rigorous LEAD)")
+def test_decoded_token_claim_echo_without_certification_never_fires_in_any_transform() -> None:
+    """TASK TEST (a) — THE ROUND-7 FAIL-CLOSED GATE. On all three surfaces, and in EACH of the verbatim /
+    case-normalised / HTML-escaped / URL-encoded transforms, a benign app that echoes a DECODED TOKEN CLAIM on its
+    reject page — with the transformed claim supplied as the operator's D so clauses (a)/(b)/(c) are all satisfied
+    — mints NOTHING with NO certification (``certified=False``): the oracle emits NO achieved_state, and the probe
+    returns NO context at all (nothing to re-verify offline). The certification gate closes EVERY transform at
+    once; no byte guard is consulted. This is the case the abandoned round-6 verbatim guard could not have caught
+    for the non-``verbatim`` transforms — and it does not need to, because the fail-closed gate short-circuits it."""
+    for tname, transform in _ECHO_TRANSFORMS:
+        d_jwt = transform(_CLAIM_EMAIL)
+        d_name = transform(_CLAIM_NAME)
+        d_mail = transform(_CLAIM_MAIL)
+        for surface, req, chk, app in (
+            ("jwt", _rich_jwt_req(),
+             _jwt_check(markers=(d_jwt,), legit=_rich_jwt(), certified=False),
+             _jwt_claim_echo_app("authorization", "email", transform)),
+            ("oidc", _rich_oidc_req(),
+             _oidc_check(markers=(d_name,), legit=_rich_jwt(), location="id_token", certified=False),
+             _jwt_claim_echo_app("id_token", "name", transform)),
+            ("saml", _rich_saml_req(),
+             _saml_check(markers=(d_mail,), legit=_SIGNED_SAML_MAIL_B64, certified=False),
+             _saml_claim_echo_app(transform)),
+        ):
+            assert not _confirmed(_run(req, chk, app), chk.bug_class), (
+                f"{surface}/{tname}: a decoded-token-claim echo with NO certification must NOT mint (fail-closed)")
+            assert chk.probe(RequestTemplate(req), app) is None, (
+                f"{surface}/{tname}: NO certification ⇒ NO context built (no achieved_state live or offline)")
 
 
-def test_forged_token_claim_guard_is_the_load_bearing_addition() -> None:
-    """Prove the forged-token-claim guard — not the pre-existing request-reflection guard — is what refuses the
-    token-claim echo: the echoed claim is base64-encoded inside the request token, so it is NOT a substring of the
-    request-reflectable content (the old clause (d) would ADMIT it), while the forged-token-claim guard DROPS it."""
+def test_certification_is_the_load_bearing_gate_not_an_auto_token_claim_guard() -> None:
+    """The soundness now rests on the CERTIFICATION, not on any automatic forged-token-claim byte check. Prove it:
+    (1) ``valid_discriminator`` no longer takes / applies a ``token_claims`` guard — a value equal to a forged
+    token claim is a perfectly valid discriminator (it is the operator's certified concern, not a byte drop); and
+    (2) ``_sound_markers`` keeps a value that equals a token claim (it only drops the nonce-overlapping and the
+    request-reflected). The old round-6 signature ``valid_discriminator(..., token_claims=...)`` is gone."""
+    import inspect
     nonce = "crucible-forged-deadbeefcafebabefeedface0badc0de"
-    reflectable = fa._request_reflectable(_rich_jwt_req())     # URL + headers (the base64 token) + body
-    assert _CLAIM_EMAIL not in reflectable, "the email claim is base64-encoded in the token, not reflected verbatim"
-    assert fa.valid_discriminator(_CLAIM_EMAIL, nonce, reflectable=reflectable) is True, (
-        "the request-reflection guard alone does NOT catch a base64-embedded token claim")
-    assert fa.valid_discriminator(_CLAIM_EMAIL, nonce, token_claims=f"alice\n{_CLAIM_EMAIL}\n{_CLAIM_NAME}") is False, (
-        "clause (d): a value present in the forged token's own decoded claims is refused")
-    # _sound_markers drops the token-claim value up front; a genuine server-side datum survives.
-    kept = fa._sound_markers((_CLAIM_EMAIL, "acct-88213-7741"), nonce, token_claims=f"sub\n{_CLAIM_EMAIL}\nnone")
-    assert kept == ["acct-88213-7741"], "the forged-token-claim value is dropped; the server-side datum survives"
+    # the token-claim guard parameter is REMOVED from valid_discriminator (it was futile).
+    assert "token_claims" not in inspect.signature(fa.valid_discriminator).parameters, (
+        "valid_discriminator must no longer take a token_claims guard — it was abandoned as futile")
+    assert "token_claims" not in inspect.signature(fa._sound_markers).parameters, (
+        "_sound_markers must no longer take a token_claims guard")
+    # a value that IS a forged token claim is a valid discriminator now (soundness moved to the certification).
+    assert fa.valid_discriminator(_CLAIM_EMAIL, nonce, reflectable="GET /x\nnothing-here") is True
+    kept = fa._sound_markers((_CLAIM_EMAIL, "acct-88213-7741"), nonce)
+    assert kept == [_CLAIM_EMAIL, "acct-88213-7741"], (
+        "a token-claim value is NOT dropped up front any more — the certification is the soundness gate")
+    # the sound guards remain: the nonce-overlapping and the request-reflected are still dropped.
+    assert fa._sound_markers(("crucible-forged", "acct-88213-7741"), nonce) == ["acct-88213-7741"]
+    assert fa._sound_markers(("req-echoed", "acct-88213-7741"), nonce,
+                             reflectable="Bearer req-echoed-token") == ["acct-88213-7741"]
 
 
 def test_claim_value_extractors() -> None:
-    """Unit-level proof of the claim-value extractors that seed clause (d)."""
+    """Unit-level proof of the claim-value extractors that seed the ADVISORY forged_token_claims record."""
     # JWT: values (not keys) are collected recursively; None/bool skipped.
     vals = fa._claim_values({"sub": "alice", "email": _CLAIM_EMAIL, "roles": ["admin", "user"],
                              "verified": True, "nested": {"k": "deep-value"}, "nothing": None})
@@ -858,15 +980,20 @@ def test_claim_value_extractors() -> None:
 
 
 def test_server_side_private_datum_still_fires_with_rich_token_claims() -> None:
-    """The guard is PRECISE, not blunt: a genuine SERVER-SIDE private datum (token-ABSENT) still mints the FACT
-    even when the forged token is rich with other claims (email/name). Only token-present values are excluded."""
+    """A certified genuine SERVER-SIDE private datum (token-ABSENT) still mints the FACT even when the forged token
+    is rich with other claims (email/name) — the certification gate does not block a legitimate server-side D. The
+    forged token's decoded claims are still RECORDED as an advisory (forged_token_claims), but they no longer gate
+    the fire and the genuine token-absent D is (as it happens) not among them."""
     findings = _run(_rich_jwt_req(), _jwt_check(markers=_PRIVATE, legit=_rich_jwt()), _jwt_fact_app("authorization"))
     assert _confirmed(findings, "jwt_forgery_accepted"), (
-        "a server-side private datum absent from the forged token still fires despite rich token claims")
+        "a certified server-side private datum absent from the forged token still fires despite rich token claims")
     ctx = _jwt_check(markers=_PRIVATE, legit=_rich_jwt()).probe(RequestTemplate(_rich_jwt_req()), _jwt_fact_app("authorization"))
-    claims = ctx.to_verifier_context()["observed_evidence"]["forged_token_claims"]
+    ev = ctx.to_verifier_context()["observed_evidence"]
+    claims = ev["forged_token_claims"]
     assert _CLAIM_EMAIL in claims and _PRIVATE[0] not in claims, (
-        "the forged token's email claim is recorded, and the surviving server-side D is not one of its claims")
+        "the forged token's email claim is recorded (advisory), and the surviving server-side D is not among them")
+    assert ev["forged_token_claim_verbatim_hits"] == [], (
+        "no derived D verbatim-overlaps the forged token claims here (advisory field present and empty)")
 
 
 # ---------------------------------------------------------------------------
@@ -913,7 +1040,8 @@ def test_forge_is_alg_none_no_embedded_key() -> None:
                 seen.append({"garbage": True})
         return {"status": 200, "body": _grant("x")}
 
-    fa.JwtForgeryAcceptanceCheck(success_markers=_PRIVATE, legit_token=_legit_jwt()).probe(
+    fa.JwtForgeryAcceptanceCheck(success_markers=_PRIVATE, legit_token=_legit_jwt(),
+                                 server_side_private_certified=True).probe(
         RequestTemplate(_jwt_req_with_embedded_key_header()), capture)
     # The alg:none forged header is the one carrying no signature-key material and alg none.
     forged_none = [h for h in seen if "garbage" not in h and h.get("alg") == "none"]
@@ -990,9 +1118,16 @@ def test_the_class_to_branch_map_resolves() -> None:
 
 
 def test_factory_passes_positive_reference() -> None:
-    # A private-datum baseline — the FACT app's same-shape deny control disqualifies chrome, only D is gated.
-    checks = fa.forgery_acceptance_checks(_PRIVATE, legit_token=_legit_jwt(), legit_saml=_SIGNED_SAML_B64)
+    # A private-datum baseline + positive reference + the explicit certification — the FACT app's same-shape deny
+    # control disqualifies chrome, only D is gated.
+    checks = fa.forgery_acceptance_checks(_PRIVATE, legit_token=_legit_jwt(), legit_saml=_SIGNED_SAML_B64,
+                                          server_side_private_certified=True)
     assert _confirmed(_run(_jwt_req(), checks[0], _jwt_fact_app("authorization")), "jwt_forgery_accepted")
+    # WITHOUT the certification the SAME factory inputs mint nothing (fail-closed).
+    uncert = fa.forgery_acceptance_checks(_PRIVATE, legit_token=_legit_jwt(), legit_saml=_SIGNED_SAML_B64)
+    assert all(getattr(c, "server_side_private_certified") is False for c in uncert)
+    assert not _confirmed(_run(_jwt_req(), uncert[0], _jwt_fact_app("authorization")), "jwt_forgery_accepted")
     # empty baseline / no reference ⇒ the factory's checks mint nothing (default roster is byte-identical).
     for c in fa.forgery_acceptance_checks(()):
         assert c.success_markers == ()
+        assert getattr(c, "server_side_private_certified") is False

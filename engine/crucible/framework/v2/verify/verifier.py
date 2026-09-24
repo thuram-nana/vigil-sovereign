@@ -158,22 +158,29 @@ BUG_CLASS_ORACLES: dict[str, tuple[OracleKind, ...]] = {
     "oidc_idtoken_forgery": (OracleKind.ACHIEVED_STATE,),
     # Wave-3.4 SSO forgery-ACCEPTANCE achieved-state dual (scanner.forgery_acceptance, opt-in +
     # gated-workflow) — the strictly-SOUNDER re-drive of the acceptance checks above, PROVEN BY AN ACHIEVED
-    # READ OF A VICTIM-PRIVATE DATUM (round-6, reusing the Wave-3.1 IDOR/BOLA private-read differential that
-    # PASSED adversarial review). Each proves the operator's SP/RP actually GRANTED the forged token access to
-    # private content: a victim-PRIVATE discriminator D is (a) PRESENT in the forged response (the achieved
-    # read, carrying a FRESH RANDOM per-probe attacker identity) AND (b) PRESENT in a legitimate-valid-token
-    # POSITIVE reference AND (c) ABSENT from a SUBSTANTIVE SAME-SHAPE invalid-token NEGATIVE control (a
-    # substantive 2xx rendering the same resource — a denial/empty/error/different-shape control is REFUSED,
-    # fail-closed to a LEAD) AND (d) D is a valid, non-reflected discriminator. Root cause accepted after six
-    # rounds: an accepted state cannot be proven from response CONTENT — the round-5 difflib same-shape
-    # SIMILARITY SCORE is a defeatable content heuristic (a benign non-granting app scores ~0.95), so it is
-    # DROPPED as proof (demoted to a weak advisory), as is the deny-phrase denylist. A benign app never leaks a
-    # victim-private datum to an unsigned forge, so it cannot fire clause (a) whatever its chrome/similarity.
-    # Reuse ACHIEVED_STATE via the predicate oracle (from_predicate, same seam as the rows above), so this adds
-    # NO new OracleKind, _ALL_ORACLES stays 15, and `make gate` is byte-identical. Without BOTH the operator
-    # private-datum baseline AND the legit-valid-token positive reference the check MINTS NOTHING (a rigorous
-    # LEAD — the INDEPENDENT offline jwt_forgeable / saml_structural_forgery FACT still stands), never a FACT
-    # and never a false CLEAN. Forge is alg:none only (refusal #7: no jwk/x5c/jku/x5u path).
+    # READ OF A VICTIM-PRIVATE DATUM (reusing the Wave-3.1 IDOR/BOLA private-read differential that PASSED
+    # adversarial review) GATED behind an explicit operator certification. Each proves the operator's SP/RP
+    # actually GRANTED the forged token access to private content: a victim-PRIVATE discriminator D is (a) PRESENT
+    # in the forged response (the achieved read, carrying a FRESH RANDOM per-probe attacker identity) AND (b)
+    # PRESENT in a legitimate-valid-token POSITIVE reference AND (c) ABSENT from a SUBSTANTIVE SAME-SHAPE
+    # invalid-token NEGATIVE control (a substantive 2xx rendering the same resource — a
+    # denial/empty/error/different-shape control is REFUSED, fail-closed to a LEAD) AND (d) D is a valid,
+    # non-reflected discriminator. Root cause accepted after seven rounds: an accepted state cannot be proven from
+    # response CONTENT, and no AUTOMATIC guard over the forged token's own claims can win the transform race —
+    # the impersonated identity is attacker-chosen, so a token-correlated D can be echoed by a benign non-granting
+    # app in infinitely many transformed forms (case/HTML-escape/URL-encode/unicode/whitespace/truncation/...).
+    # The round-5 difflib SIMILARITY SCORE and the round-6 forged-token-claim guard are therefore BOTH DROPPED as
+    # proof (demoted to weak advisories), as is the deny-phrase denylist. The HONEST RESOLUTION is a FAIL-CLOSED
+    # CERTIFICATION GATE: the oracle emits an achieved_state ONLY when the observed evidence carries the explicit
+    # operator attestation `server_side_private_certified == True` (re-asserted in the predicate AST, so an offline
+    # re-verify refuses any non-certified / tampered certificate). WITHOUT that certification NO achieved_state is
+    # emitted for ANY input — a benign app (INCLUDING one echoing a decoded token claim in ANY transform), a terse
+    # control, a missing D or a missing reference all fail closed to a LEAD; that single gate closes all transform
+    # variants at once. Reuse ACHIEVED_STATE via the predicate oracle (from_predicate, same seam as the rows
+    # above), so this adds NO new OracleKind, _ALL_ORACLES stays 15, and `make gate` is byte-identical. Nothing in
+    # the default roster supplies the baseline, the positive reference, OR the certification, so the check MINTS
+    # NOTHING at runtime (a rigorous LEAD — the INDEPENDENT offline jwt_forgeable / saml_structural_forgery FACT
+    # still stands), never a FACT and never a false CLEAN. Forge is alg:none only (refusal #7: no jwk/x5c/jku/x5u).
     "jwt_forgery_accepted": (OracleKind.ACHIEVED_STATE,),
     "oidc_forgery_accepted": (OracleKind.ACHIEVED_STATE,),
     "saml_forgery_accepted": (OracleKind.ACHIEVED_STATE,),
