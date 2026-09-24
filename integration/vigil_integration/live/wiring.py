@@ -1625,6 +1625,15 @@ def _redrive_branch_for(bug_class: str) -> "Optional[str]":
         # never consulted; a bare mangled-method status does not mint; a shared-pool desync needing a real
         # co-tenant victim, an https origin, or genuine HTTP/2 desync stays a LEAD.
         "request_smuggling": "request_smuggling.differential_desync",
+        # Wave 5.1 — STATIC source-code rule (the SAST bridge). These are ANALYSIS-ORIGIN static-FACT classes:
+        # the certificate is minted by the ENGINE analysis bridge (framework.v2.analysis.static_facts) over a
+        # retained source region the STATIC_RULE oracle re-parses OFFLINE — NOT a live web/runtime re-drive.
+        # The class->branch mapping is registered here so the sovereign admission choke resolves a static-class
+        # finding to its registered FACT-capable branch; no live-target send is performed for these classes.
+        "static_broken_crypto": "static_broken_crypto.broken_primitive_invocation",
+        "static_insecure_randomness": "static_insecure_randomness.prng_into_sink",
+        "static_insecure_flag": "static_insecure_flag.disabled_literal",
+        "static_taint": "static_taint.direct_intraprocedural_flow",
     }
     branch = mapping.get(normalize_bug_class(bug_class))
     return branch if branch in branch_ids() else None

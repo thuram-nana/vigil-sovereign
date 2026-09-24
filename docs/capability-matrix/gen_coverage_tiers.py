@@ -60,8 +60,10 @@ SENTENCE_BEGIN = ("<!-- BEGIN GENERATED coverage-tiers-sentence (source: "
                   "python3 docs/capability-matrix/gen_coverage_tiers.py) -->")
 SENTENCE_END = "<!-- END GENERATED coverage-tiers-sentence -->"
 
-# Canonical render order — strongest evidence first, matching 05-weakness-types.md's prose.
-_ORDER = ("external", "own_infrastructure", "local", "fixtures")
+# Canonical render order — strongest evidence first, matching 05-weakness-types.md's prose. `source` (a
+# static re-parse of retained source-code bytes — Wave-5.1 SAST bridge) sits below `local` (no live process)
+# and above `fixtures` (real retained target source is stronger evidence than hand-written fixtures).
+_ORDER = ("external", "own_infrastructure", "local", "source", "fixtures")
 
 # The short phrasing each tier gets in the generated one-line summary (the "X external, Y own-infra, Z
 # loopback, W fixtures-only" shorthand W16-STD-2(d) asks for). The ``local`` tier is a real LOOPBACK service.
@@ -69,6 +71,7 @@ _SENTENCE_PHRASING = {
     "external": "{n} external (real bytes from a third-party target)",
     "own_infrastructure": "{n} own-infra (real infrastructure the system builds and destroys)",
     "local": "{n} loopback (a real local service over a real socket)",
+    "source": "{n} source (a static re-parse of retained source-code bytes)",
     "fixtures": "{n} fixtures-only (hand-written evidence)",
 }
 

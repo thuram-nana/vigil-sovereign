@@ -476,6 +476,24 @@ BUG_CLASS_ORACLES: dict[str, tuple[OracleKind, ...]] = {
     # finding carries it, so `make gate` stays byte-identical. (Reset-link HOST-POISONING routes to the EXISTING
     # host_header_injection FACT via an alias below — never duplicated here.)
     "password_reset_cross_user": (OracleKind.ACHIEVED_STATE,),
+    # Wave-5.1 STATIC source-code RULE (the SAST bridge). The analysis path (analysis/) emits LEADs whose only
+    # promotion today is a probabilistic LLM reviewer (which cannot mint a FACT); these classes promote a LEAD
+    # to a "static FACT" via the STATIC_RULE oracle, which RE-PARSES the retained source region ITSELF and
+    # re-derives a CODE PROPERTY (never trusting the tool's CWE). Like the AEGIS / posture rows, this NEW
+    # OracleKind is reachable ONLY via these rows — it is NOT in the frozen _ALL_ORACLES fallback (stays
+    # EXACTLY 15) — and fires only when the ctx carries `static_rule`, which no benchmark/scan/engage finding
+    # does. So appending these rows leaves the unknown-class fallback and `make gate` byte-identical. Each class
+    # is honestly scoped to a PROVEN code property, never runtime exploitability:
+    #   * static_broken_crypto — a broken/risky primitive (MD5/SHA1/DES/RC4/Blowfish/ECB) is INVOKED here;
+    #   * static_insecure_randomness — a non-crypto PRNG value flows DIRECTLY into a security sink (same fn);
+    #   * static_insecure_flag — a security flag is EXPLICITLY disabled as a LITERAL (verify=False, secure=False,
+    #     cert_reqs=ssl.CERT_NONE); an ABSENT flag is default-dependent and stays a LEAD (the oracle REFUSES);
+    #   * static_taint — a DIRECT intra-procedural unsanitized source->sink flow in ONE function (the "Firm"
+    #     tier). INTER-PROCEDURAL / possibly-sanitized / whole-program flows stay a LEAD, never a STATIC_RULE FACT.
+    "static_broken_crypto": (OracleKind.STATIC_RULE,),
+    "static_insecure_randomness": (OracleKind.STATIC_RULE,),
+    "static_insecure_flag": (OracleKind.STATIC_RULE,),
+    "static_taint": (OracleKind.STATIC_RULE,),
 }
 
 # Spelling/format aliases folded onto canonical keys.
@@ -833,6 +851,28 @@ _ALIASES: dict[str, str] = {
     "password_reset_host_poisoning": "host_header_injection",
     "reset_link_host_injection": "host_header_injection",
     "reset_link_poisoning": "host_header_injection",
+    # Wave-5.1 STATIC source-code rule spelling variants fold onto the single canonical class each. These are
+    # the SAST-origin static-FACT classes (a code property re-derived over retained source bytes), DISTINCT
+    # from the LIVE/dynamic classes with the same theme: `static_broken_crypto` (a code-property invocation) is
+    # NOT `weak_crypto_artifact` (a parsed X.509 cert) nor `weak_tls` (a live handshake); `static_taint` (an
+    # intra-procedural source->sink code property) is NOT the LIVE `sqli`/`command_injection` response proofs.
+    # Offline source-re-derivation and live/dynamic proofs are distinct and stay distinct classes.
+    "static_weak_crypto": "static_broken_crypto",
+    "broken_crypto_invocation": "static_broken_crypto",
+    "weak_crypto_source": "static_broken_crypto",
+    "static_broken_primitive": "static_broken_crypto",
+    "insecure_randomness": "static_insecure_randomness",
+    "insecure_random": "static_insecure_randomness",
+    "weak_random_source": "static_insecure_randomness",
+    "static_weak_random": "static_insecure_randomness",
+    "insecure_flag": "static_insecure_flag",
+    "insecure_flag_literal": "static_insecure_flag",
+    "disabled_tls_verification": "static_insecure_flag",
+    "static_insecure_default": "static_insecure_flag",
+    "direct_taint": "static_taint",
+    "intraprocedural_taint": "static_taint",
+    "static_source_to_sink": "static_taint",
+    "sast_taint": "static_taint",
 }
 
 # G1 (doctrine fix): the unknown-class fallback returned by `oracles_for()` is FROZEN to the
@@ -1432,6 +1472,14 @@ class OracleVerifier:
         if kind is OracleKind.PROTOTYPE_POLLUTION:
             if "proto_pollution" in ctx:
                 return oracles.prototype_pollution_oracle(ctx["proto_pollution"])
+            return None
+        # -- Wave-5.1 STATIC source-code rule (the SAST bridge) — fire ONLY when the ctx carries `static_rule`
+        #    (the retained source region + closed-vocabulary rule_id); no benchmark/scan/engage finding carries
+        #    it, so it is inert on the gate path. The oracle RE-PARSES the retained source and re-derives a CODE
+        #    PROPERTY, NEVER runtime exploitability; an unparseable/non-Python region REFUSES (never mints).
+        if kind is OracleKind.STATIC_RULE:
+            if "static_rule" in ctx:
+                return oracles.static_rule_oracle(ctx["static_rule"])
             return None
         return None
 

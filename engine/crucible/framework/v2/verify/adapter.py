@@ -216,6 +216,18 @@ def _sink_to_serialisable(sink: Any) -> Any:
     return _coerce_text(sink)
 
 
+# The CLOSED rule_id -> canonical static bug_class map (Wave-5.1 SAST bridge). A rule_id outside this map
+# yields no bug_class in from_code_region and the STATIC_RULE oracle would REFUSE it as out-of-vocabulary —
+# so a static context can never be built under an unknown rule. Module-level (not a class attribute) so
+# pydantic never mistakes it for a model field.
+_STATIC_RULE_BUG_CLASS: "dict[str, str]" = {
+    "broken-crypto-invocation": "static_broken_crypto",
+    "insecure-randomness-sink": "static_insecure_randomness",
+    "insecure-flag-literal": "static_insecure_flag",
+    "direct-taint": "static_taint",
+}
+
+
 # ---------------------------------------------------------------------------
 # FindingContext — the typed carrier of oracle inputs
 # ---------------------------------------------------------------------------
@@ -315,6 +327,13 @@ class FindingContext(BaseModel):
     # BROKEN hash: MD5/SHA1). No benchmark/scan/engage finding carries this, so it leaves the gate
     # byte-identical; routes to the TLS_WEAKNESS kind (a weak-crypto FACT) via a distinct ctx key.
     crypto_artifact: dict[str, Any] | None = None
+
+    # static_rule_oracle (Wave-5.1 SAST bridge — a re-runnable deterministic rule over RETAINED SOURCE-CODE
+    # BYTES that the oracle RE-PARSES itself). No benchmark/scan/engage finding carries this, so it leaves the
+    # gate byte-identical; routes to the STATIC_RULE kind via a distinct `static_rule` ctx key. Carries
+    # {rule_id, source, language, path, line} — the retained region the oracle re-parses to re-derive a CODE
+    # PROPERTY (never runtime exploitability).
+    static_rule: dict[str, Any] | None = None
 
     # AEGIS system_prompt_disclosure_oracle (a planted high-entropy canary appeared VERBATIM
     # in the app's own LLM output). PR1: these carry PLAINTEXT — the reverify contract re-fires
@@ -808,6 +827,46 @@ class FindingContext(BaseModel):
         retained OID name is what the oracle classifies — a pure, re-verifiable string check (a broken
         signature hash MD5/SHA1 is unconditionally weak), like the TLS oracle re-verifies a cipher name."""
         return cls(bug_class=bug_class, crypto_artifact=dict(artifact or {}))
+
+    @classmethod
+    def from_code_region(
+        cls,
+        path: str,
+        line: int,
+        source_bytes: str | bytes,
+        rule_id: str,
+        *,
+        language: str = "python",
+        bug_class: str | None = None,
+    ) -> "FindingContext":
+        """A RETAINED SOURCE-CODE REGION for the static-rule oracle (Wave-5.1 SAST bridge). Turns an
+        AnalysisFinding LEAD's exact source region — ``(path, line, source_bytes, rule_id)`` — into the
+        RETAINED context the STATIC_RULE oracle re-parses OFFLINE to re-derive a CODE PROPERTY. The tool
+        (semgrep/joern/pattern) that produced the LEAD only says WHERE to look; this context carries the raw
+        source bytes VERBATIM so the pure oracle re-parses them itself and never trusts the tool's CWE.
+
+        ``rule_id`` is the CLOSED vocabulary (broken-crypto-invocation / insecure-randomness-sink /
+        insecure-flag-literal / direct-taint); the canonical bug_class is DERIVED from it (a caller-supplied
+        ``bug_class`` overrides only for an alias spelling). The source is coerced to text (JSON-safe), so a
+        confirmed static FACT re-verifies OFFLINE from its certificate — re-run the pure oracle over the
+        retained bytes and get the same verdict; a tamper that removes the property no longer re-fires."""
+        src = source_bytes.decode("utf-8", "replace") if isinstance(source_bytes, bytes) else _coerce_text(source_bytes)
+        rid = _coerce_text(rule_id).strip()
+        bc = bug_class or _STATIC_RULE_BUG_CLASS.get(rid, "")
+        try:
+            ln = int(line)
+        except (TypeError, ValueError):
+            ln = 0
+        return cls(
+            bug_class=bc,
+            static_rule={
+                "rule_id": rid,
+                "source": src,
+                "language": _coerce_text(language).strip().lower() or "python",
+                "path": _coerce_text(path).strip(),
+                "line": ln,
+            },
+        )
 
     @classmethod
     def from_version_advisory(
@@ -2453,6 +2512,8 @@ class FindingContext(BaseModel):
             ctx["tls"] = self.tls
         if self.crypto_artifact is not None:
             ctx["crypto_artifact"] = self.crypto_artifact
+        if self.static_rule is not None:
+            ctx["static_rule"] = self.static_rule
         if self.version_advisory is not None:
             ctx["version_advisory"] = self.version_advisory
         if self.policy is not None:

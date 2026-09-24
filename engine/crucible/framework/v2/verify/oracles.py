@@ -15,6 +15,7 @@ dimensions push confidence up, but no single weak dimension can dominate.
 
 from __future__ import annotations
 
+import ast
 import base64
 import binascii
 import difflib
@@ -3397,6 +3398,363 @@ def weak_crypto_artifact_oracle(observed: Any) -> OracleSignal:
     return OracleSignal(
         kind=OracleKind.TLS_WEAKNESS, fired=False, confidence=0.0,
         evidence=f"signature algorithm {name or oid or '?'} is not a broken hash and the key is not undersized")
+
+
+# ---------------------------------------------------------------------------
+# Static source-code rule — a re-runnable deterministic rule over RETAINED SOURCE-CODE BYTES.
+#
+# The SAST bridge: the analysis path emits LEADs; this oracle promotes ONE to a "static FACT" by RE-PARSING
+# the retained source region ITSELF (Python `ast`) and re-deriving a CODE PROPERTY — never trusting
+# semgrep/joern or the tool's CWE. It is the source-code sibling of weak_crypto_artifact_oracle (which
+# re-derives MD5/SHA1 from a retained artifact). Each FACT is honestly scoped to a PROVEN code property,
+# NEVER "exploitable at runtime". The rule_id vocabulary is CLOSED; a non-Python or unparseable region
+# REFUSES (never mints); a tamper that removes the property no longer re-fires (rejected at re-verify).
+# ---------------------------------------------------------------------------
+
+# The CLOSED rule-id vocabulary — the four SOUND tiers. An unknown rule_id NEVER fires (a lead at most).
+_STATIC_RULE_IDS = frozenset({
+    "broken-crypto-invocation",   # (a) a broken/risky primitive is CONSTRUCTED or CALLED here
+    "insecure-randomness-sink",   # (b) a non-crypto PRNG value flows DIRECTLY into a security sink (same fn)
+    "insecure-flag-literal",      # (c) a security flag is EXPLICITLY disabled as a LITERAL
+    "direct-taint",               # (d) source -> sink in ONE function, no sanitizer between ("Firm" tier)
+})
+
+# (a) BROKEN / risky primitives. Hash: md5/sha1/md4/md2 (collision-forgeable). Cipher: DES/3DES/RC4/Blowfish/
+# IDEA (broken or SWEET32-risky). ECB block mode (deterministic — a broken usage). Case-insensitive by lower().
+_BROKEN_HASH_NAMES = frozenset({"md5", "sha1", "md4", "md2"})
+_BROKEN_CIPHER_NAMES = frozenset({"des", "des3", "tripledes", "arc4", "rc4", "blowfish", "idea"})
+
+
+def _attr_or_name(node: Any) -> str:
+    """The short callee identifier of a Call target: an ``ast.Name`` id or an ``ast.Attribute`` attr; else ''."""
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        return node.attr
+    return ""
+
+
+def _broken_crypto_hit(tree: ast.AST) -> "tuple[bool, str]":
+    """RE-DERIVE tier (a): a broken/risky primitive is invoked in the region. Pure AST walk — no execution,
+    no import. Returns (fired, detail)."""
+    for node in ast.walk(tree):
+        # ECB block mode — a `MODE_ECB` attribute reference (AES.new(k, AES.MODE_ECB)) or `modes.ECB(...)`.
+        if isinstance(node, ast.Attribute) and node.attr == "MODE_ECB":
+            return True, "ECB block mode (MODE_ECB — deterministic, a broken cipher usage)"
+        if isinstance(node, ast.Call):
+            callee = node.func
+            short = _attr_or_name(callee).lower()
+            # md5(...)/sha1(...) or hashlib.md5(...)/.sha1(...)
+            if short in _BROKEN_HASH_NAMES:
+                return True, f"{short.upper()} (a broken hash primitive) invoked"
+            # DES(...)/ARC4(...)/Blowfish(...)/algorithms.TripleDES(...) etc.
+            if short in _BROKEN_CIPHER_NAMES or short.replace("_", "") in _BROKEN_CIPHER_NAMES:
+                return True, f"{short.upper()} (a broken/risky cipher primitive) invoked"
+            # DES.new(...) / ARC4.new(...) / Blowfish.new(...) — a `.new` on a broken cipher module.
+            if short == "new" and isinstance(callee, ast.Attribute):
+                base = _attr_or_name(callee.value).lower()
+                if base in _BROKEN_CIPHER_NAMES or base.replace("_", "") in _BROKEN_CIPHER_NAMES:
+                    return True, f"{base.upper()}.new (a broken/risky cipher primitive) invoked"
+            # hashlib.new("md5") / hashlib.new("sha1") — a `.new` with a broken-hash name constant.
+            if short == "new" and node.args and isinstance(node.args[0], ast.Constant) \
+                    and isinstance(node.args[0].value, str) \
+                    and node.args[0].value.strip().lower().replace("-", "") in _BROKEN_HASH_NAMES:
+                return True, f"hashlib.new({node.args[0].value!r}) (a broken hash primitive) invoked"
+            # modes.ECB(...) — the cryptography-library ECB mode object.
+            if short == "ecb" and isinstance(callee, ast.Attribute) \
+                    and _attr_or_name(callee.value).lower() == "modes":
+                return True, "modes.ECB (ECB block mode — deterministic, a broken cipher usage)"
+    return False, ""
+
+
+# (b) NON-cryptographic PRNG functions — predictable, unfit for a secret/token (CWE-330/CWE-338).
+_INSECURE_RANDOM_FNS = frozenset({
+    "random", "randint", "randrange", "choice", "choices", "uniform", "getrandbits",
+    "sample", "shuffle", "randbytes", "betavariate", "gauss", "normalvariate",
+})
+# A binding whose NAME (lower, non-alnum stripped) contains one of these is a security sink for tier (b).
+_SECURITY_SINK_NAME_TOKENS = (
+    "token", "secret", "password", "passwd", "nonce", "salt", "apikey", "sessionid",
+    "csrf", "otp", "resettoken", "privatekey", "signingkey", "authkey",
+)
+
+
+def _is_insecure_random_call(node: Any) -> bool:
+    """True iff ``node`` is a call to a NON-crypto PRNG (random.random/randint/… or a bare randint(...)).
+    ``random.SystemRandom`` / ``secrets`` / ``os.urandom`` are cryptographic and never match."""
+    if not isinstance(node, ast.Call):
+        return False
+    callee = node.func
+    short = _attr_or_name(callee)
+    if short not in _INSECURE_RANDOM_FNS:
+        return False
+    # Reject the cryptographic SystemRandom(...).random() path: base object named SystemRandom/secrets.
+    if isinstance(callee, ast.Attribute):
+        base = _attr_or_name(callee.value).lower()
+        if base in ("systemrandom", "secrets", "secretsgenerator"):
+            return False
+    return True
+
+
+def _name_is_security_sink(name: str) -> bool:
+    key = re.sub(r"[^a-z0-9]", "", (name or "").lower())
+    return any(tok in key for tok in _SECURITY_SINK_NAME_TOKENS)
+
+
+def _subtree_has(pred: Any, node: Any) -> bool:
+    return any(pred(n) for n in ast.walk(node)) if isinstance(node, ast.AST) else False
+
+
+def _assign_targets(node: Any) -> "list[str]":
+    """The simple target NAMES of an Assign / AnnAssign (Name or Attribute leaf), for sink-name matching."""
+    names: list[str] = []
+    targets = list(getattr(node, "targets", [])) or ([node.target] if getattr(node, "target", None) else [])
+    for t in targets:
+        for n in ast.walk(t):
+            if isinstance(n, ast.Name):
+                names.append(n.id)
+            elif isinstance(n, ast.Attribute):
+                names.append(n.attr)
+    return names
+
+
+def _insecure_randomness_hit(tree: ast.AST) -> "tuple[bool, str]":
+    """RE-DERIVE tier (b): a non-crypto PRNG value flows DIRECTLY into a security-sensitive binding within the
+    SAME function — the direct form (``token = random.random()``) or a single-hop alias (``r = random.random();
+    token = r``). Pure AST; no execution. Inter-procedural / whole-program flows are NOT re-derived here."""
+    for fn in ast.walk(tree):
+        if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        # names bound directly to a non-crypto random call in this function (single-hop alias source).
+        rand_vars: set[str] = set()
+        for node in ast.walk(fn):
+            if isinstance(node, (ast.Assign, ast.AnnAssign)) and node.value is not None \
+                    and _subtree_has(_is_insecure_random_call, node.value):
+                for nm in _assign_targets(node):
+                    rand_vars.add(nm)
+        for node in ast.walk(fn):
+            if not isinstance(node, (ast.Assign, ast.AnnAssign)) or node.value is None:
+                continue
+            targets = _assign_targets(node)
+            if not any(_name_is_security_sink(t) for t in targets):
+                continue
+            sink = next(t for t in targets if _name_is_security_sink(t))
+            # DIRECT: the value subtree itself contains the non-crypto random call.
+            if _subtree_has(_is_insecure_random_call, node.value):
+                return True, (f"a non-cryptographic PRNG feeds the security-sensitive binding "
+                              f"`{sink}` directly in function `{fn.name}`")
+            # SINGLE-HOP alias: the value references a variable bound to a random call in this function.
+            for n in ast.walk(node.value):
+                if isinstance(n, ast.Name) and n.id in rand_vars:
+                    return True, (f"a non-cryptographic PRNG (via `{n.id}`) feeds the security-sensitive "
+                                  f"binding `{sink}` in function `{fn.name}`")
+    return False, ""
+
+
+# (c) Security flags whose EXPLICIT insecure LITERAL is a proven weakness. An ABSENT flag is default-dependent
+# and is NOT a member here (REFUSE — a lead). Each maps to the literal value that disables the protection.
+_INSECURE_FLAG_FALSE = frozenset({"verify", "secure", "check_hostname", "verify_mode", "validate_certs"})
+
+
+def _insecure_flag_hit(tree: ast.AST) -> "tuple[bool, str]":
+    """RE-DERIVE tier (c): a KNOWN security flag is EXPLICITLY set to its insecure LITERAL — ``verify=False`` /
+    ``secure=False`` / ``check_hostname=False`` / ``cert_reqs=ssl.CERT_NONE``. An ABSENT flag never fires."""
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        for kw in node.keywords:
+            if kw.arg is None:
+                continue
+            name = kw.arg
+            val = kw.value
+            if name in _INSECURE_FLAG_FALSE and isinstance(val, ast.Constant) and val.value is False:
+                return True, f"the security flag `{name}` is explicitly set to the insecure literal False"
+            # cert_reqs=ssl.CERT_NONE (TLS certificate verification explicitly disabled).
+            if name == "cert_reqs" and isinstance(val, ast.Attribute) and val.attr == "CERT_NONE":
+                return True, "the TLS flag `cert_reqs` is explicitly set to the insecure literal ssl.CERT_NONE"
+    return False, ""
+
+
+# (d) DIRECT intra-procedural taint. Sources / sinks / sanitizers — a conservative, near-zero-FP set. A
+# sanitizer anywhere in the function REFUSES (fail-closed to a lead).
+_TAINT_SOURCE_ATTRS = frozenset({"args", "form", "values", "cookies", "params", "query", "GET", "POST"})
+_TAINT_SOURCE_FNS = frozenset({"input", "getenv", "get_json"})
+_TAINT_SINK_FNS = frozenset({"system", "popen", "eval", "exec", "call", "run", "Popen", "check_output", "execute"})
+_SANITIZER_FNS = frozenset({
+    "quote", "escape", "clean", "int", "float", "bool", "isdigit", "isalnum", "isnumeric",
+    "sanitize", "validate", "shlex", "sub", "match", "fullmatch", "abspath", "basename",
+})
+
+
+def _is_taint_source(node: Any) -> bool:
+    """True iff ``node`` is a recognised taint SOURCE expression: ``request.args...`` / ``request.form[...]`` /
+    ``input(...)`` / ``os.environ[...]`` / ``os.getenv(...)`` / ``sys.argv[...]``."""
+    # request.<args|form|values|...>...  or  ...GET.get(...)
+    for sub in ast.walk(node) if isinstance(node, ast.AST) else []:
+        if isinstance(sub, ast.Attribute):
+            if sub.attr in _TAINT_SOURCE_ATTRS and isinstance(sub.value, (ast.Name, ast.Attribute)):
+                base = _attr_or_name(sub.value).lower()
+                if base in ("request", "req", "self", "flask", "django"):
+                    return True
+        if isinstance(sub, ast.Call):
+            short = _attr_or_name(sub.func)
+            if short in _TAINT_SOURCE_FNS:
+                return True
+        if isinstance(sub, ast.Attribute) and sub.attr == "argv" and _attr_or_name(sub.value).lower() == "sys":
+            return True
+        if isinstance(sub, ast.Attribute) and sub.attr == "environ" and _attr_or_name(sub.value).lower() == "os":
+            return True
+    return False
+
+
+def _has_sanitizer(fn: ast.AST) -> bool:
+    for node in ast.walk(fn):
+        if isinstance(node, ast.Call) and _attr_or_name(node.func) in _SANITIZER_FNS:
+            return True
+    return False
+
+
+def _shell_true(call: ast.Call) -> bool:
+    return any(kw.arg == "shell" and isinstance(kw.value, ast.Constant) and kw.value.value is True
+               for kw in call.keywords)
+
+
+def _direct_taint_hit(tree: ast.AST) -> "tuple[bool, str]":
+    """RE-DERIVE tier (d): a taint SOURCE reaches a dangerous SINK in ONE function with NO sanitizer between.
+    Conservative + fail-closed: any sanitizer in the function REFUSES; subprocess sinks require shell=True to
+    be command-injection-shaped. Single-hop variable aliasing is followed. Inter-procedural flows stay a lead."""
+    for fn in ast.walk(tree):
+        if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        if _has_sanitizer(fn):
+            continue   # a sanitizer is present — cannot prove the flow is unsanitized (fail-closed to a lead)
+        # variables assigned DIRECTLY from a taint source in this function (single-hop alias).
+        tainted: set[str] = set()
+        for node in ast.walk(fn):
+            if isinstance(node, (ast.Assign, ast.AnnAssign)) and node.value is not None \
+                    and _is_taint_source(node.value):
+                for nm in _assign_targets(node):
+                    tainted.add(nm)
+
+        def _arg_is_tainted(arg: Any) -> bool:
+            if _is_taint_source(arg):
+                return True
+            for n in ast.walk(arg) if isinstance(arg, ast.AST) else []:
+                if isinstance(n, ast.Name) and n.id in tainted:
+                    return True
+            return False
+
+        for node in ast.walk(fn):
+            if not isinstance(node, ast.Call):
+                continue
+            short = _attr_or_name(node.func)
+            if short not in _TAINT_SINK_FNS:
+                continue
+            # subprocess.call/run/Popen/check_output are only command-injection-shaped with shell=True.
+            if short in ("call", "run", "Popen", "check_output") and not _shell_true(node):
+                continue
+            for arg in node.args:
+                if _arg_is_tainted(arg):
+                    return True, (f"a taint source reaches the dangerous sink `{short}(...)` in function "
+                                  f"`{fn.name}` with no sanitizer between (direct intra-procedural flow)")
+            # a tainted keyword argument (e.g. the command= of Popen) also flows.
+            for kw in node.keywords:
+                if kw.arg and _arg_is_tainted(kw.value):
+                    return True, (f"a taint source reaches the dangerous sink `{short}(...)` (keyword "
+                                  f"`{kw.arg}`) in function `{fn.name}` with no sanitizer between")
+    return False, ""
+
+
+# Per-tier calibrated confidence (str -> float, so oracle_version canonicalises it deterministically — a
+# dict of FUNCTIONS would repr with process-specific addresses and hide the helper bodies from the version,
+# so the tier helpers are dispatched BY NAME inside the oracle instead, and each helper's source is captured
+# in the version's transitive closure).
+_STATIC_TIER_CONF: dict[str, float] = {
+    "broken-crypto-invocation": 0.9,
+    "insecure-randomness-sink": 0.85,
+    "insecure-flag-literal": 0.9,
+    "direct-taint": 0.85,
+}
+
+
+def _static_tier_hit(rule_id: str, tree: ast.AST) -> "tuple[bool, str]":
+    """Dispatch a re-parsed AST to the tier helper for ``rule_id`` (each helper referenced BY NAME so its
+    source is captured in ``oracle_version``'s transitive closure)."""
+    if rule_id == "broken-crypto-invocation":
+        return _broken_crypto_hit(tree)
+    if rule_id == "insecure-randomness-sink":
+        return _insecure_randomness_hit(tree)
+    if rule_id == "insecure-flag-literal":
+        return _insecure_flag_hit(tree)
+    if rule_id == "direct-taint":
+        return _direct_taint_hit(tree)
+    return False, ""
+
+
+def static_rule_oracle(observed: Any) -> OracleSignal:
+    """Fire when a CLOSED-vocabulary static rule holds over RETAINED SOURCE-CODE BYTES that the oracle
+    RE-PARSES ITSELF (Python `ast`). The tool (semgrep/joern/pattern) output is only the LEAD saying WHERE to
+    look — this oracle re-derives the CODE PROPERTY from the retained bytes, exactly like
+    ``weak_crypto_artifact_oracle`` re-derives a broken hash from a retained artifact. Each FACT is honestly
+    scoped to the proven CODE PROPERTY, NEVER runtime exploitability.
+
+    ``observed`` is JSON-safe evidence::
+
+        {"rule_id": "broken-crypto-invocation" | "insecure-randomness-sink" |
+                    "insecure-flag-literal" | "direct-taint",
+         "source": "<the retained source region bytes>", "language": "python",
+         "path": "<file>", "line": <int>}
+
+    REFUSES (non-firing) — never asserts — when: the evidence is malformed, the rule_id is out of the closed
+    vocabulary, the language is not Python, or the retained source cannot be re-parsed (a tamper that removes
+    the property no longer re-fires, so the retained proof is rejected at re-verify). Pure + deterministic, so
+    the same verdict re-verifies offline from the retained context. Never raises."""
+    if not isinstance(observed, Mapping):
+        return OracleSignal(kind=OracleKind.STATIC_RULE, fired=False, confidence=0.0,
+                            evidence="no static-rule evidence")
+    rule_id = _coerce_text(observed.get("rule_id")).strip()
+    source = _coerce_text(observed.get("source"))
+    language = _coerce_text(observed.get("language")).strip().lower() or "python"
+    path = _coerce_text(observed.get("path")).strip()
+    try:
+        line = int(observed.get("line"))
+    except (TypeError, ValueError):
+        line = 0
+    where = f"{path}:{line}" if path else "the retained region"
+
+    if rule_id not in _STATIC_RULE_IDS:
+        return OracleSignal(kind=OracleKind.STATIC_RULE, fired=False, confidence=0.0,
+                            evidence=f"rule_id {rule_id!r} is out of the closed static-rule vocabulary")
+    if language not in ("python", "py"):
+        # A sound offline re-parse is implemented for Python only; other languages REFUSE (a lead), never assert.
+        return OracleSignal(
+            kind=OracleKind.STATIC_RULE, fired=False, confidence=0.0,
+            evidence=f"language {language!r} is not re-parseable by this oracle (Python-only) — REFUSE (lead)",
+            observed={"rule_id": rule_id, "language": language, "reason": "unsupported_language"})
+    if not source.strip():
+        return OracleSignal(kind=OracleKind.STATIC_RULE, fired=False, confidence=0.0,
+                            evidence="no retained source bytes to re-parse — REFUSE (lead)")
+    try:
+        tree = ast.parse(source)
+    except (SyntaxError, ValueError):
+        # The retained source cannot be re-parsed (tampered / truncated / not a full statement) — REFUSE.
+        return OracleSignal(
+            kind=OracleKind.STATIC_RULE, fired=False, confidence=0.0,
+            evidence=f"retained source at {where} cannot be re-parsed as Python — REFUSE (never mint)",
+            observed={"rule_id": rule_id, "reason": "unparseable"})
+
+    confidence = _STATIC_TIER_CONF[rule_id]
+    fired, detail = _static_tier_hit(rule_id, tree)
+    if fired:
+        return OracleSignal(
+            kind=OracleKind.STATIC_RULE, fired=True, confidence=confidence,
+            evidence=(f"static rule {rule_id} holds at {where}: {detail} — a re-verifiable CODE PROPERTY over "
+                      f"the retained source, NOT proof of runtime exploitability"),
+            observed={"rule_id": rule_id, "path": path, "line": line, "detail": detail, "language": "python"})
+    return OracleSignal(
+        kind=OracleKind.STATIC_RULE, fired=False, confidence=0.0,
+        evidence=f"static rule {rule_id} does NOT hold over the retained source at {where}",
+        observed={"rule_id": rule_id, "path": path, "line": line})
 
 
 # ---------------------------------------------------------------------------

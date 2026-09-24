@@ -54,7 +54,7 @@ def test_both_documents_match_the_generated_block() -> None:
     assert problems == [], "coverage-tiers drift:\n" + "\n".join(problems)
 
 
-def test_the_reconciled_numbers_are_3_2_17_24() -> None:
+def test_the_reconciled_numbers_are_3_2_17_1_24() -> None:
     """Pin the reconciled truth. It was 3/2/13/20; W16-STD-5 added THREE fixtures-tier client-side
     posture detectors (clickjacking / CSRF / postMessage), so the fixtures column moved 20 -> 23; then
     Wave 2.2 added ONE local-tier achieved-state detector (client-side prototype pollution — a real
@@ -69,23 +69,28 @@ def test_the_reconciled_numbers_are_3_2_17_24() -> None:
     post-MFA-gated victim datum), so the loopback column moved 15 -> 16; then Wave 4.3 added ONE local-tier
     achieved-state detector (password-reset token invariant — a real loopback benchmark app over a real
     connection, proven by a PRIVATE-READ REDUCTION that a consumed reset token is reusable, or a deterministic
-    predictable-counter token collision), so the loopback column moved 16 -> 17.
+    predictable-counter token collision), so the loopback column moved 16 -> 17; then Wave 5.1 added ONE
+    detector in a NEW `source` tier group (the static source-code rule — the SAST bridge re-parses retained
+    source-code bytes and re-derives a CODE PROPERTY, no live process), so a fifth column `source` = 1 joined
+    the census while the others held.
 
     Derived, not asserted blind — the counts come from the registry-grounded source; this states the
     value that reconciliation landed on so a future edit that changes an honesty number is loud."""
     counts = g.validate()
-    assert (counts["external"], counts["own_infrastructure"], counts["local"], counts["fixtures"]) \
-        == (3, 2, 17, 24)
+    assert (counts["external"], counts["own_infrastructure"], counts["local"], counts["source"],
+            counts["fixtures"]) == (3, 2, 17, 1, 24)
 
 
 def test_the_inventory_inline_quotable_row_matches_the_source() -> None:
-    """E-today's PART 8 keeps a one-line quotable ``N / N / N / N``; it must equal the generated counts."""
+    """E-today's PART 8 keeps a one-line quotable ``N / N / N / N / N``; it must equal the generated counts
+    (external / own-infrastructure / local / retained-source / fixtures)."""
     counts = g.validate()
     text = _DOC_E.read_text(encoding="utf-8")
-    m = re.search(r"\*\*(\d+) / (\d+) / (\d+) / (\d+)\*\* \| Detector kinds with external", text)
-    assert m, "the inventory's inline external/own/local/fixture quotable row was not found"
+    m = re.search(r"\*\*(\d+) / (\d+) / (\d+) / (\d+) / (\d+)\*\* \| Detector kinds with external", text)
+    assert m, "the inventory's inline external/own/local/source/fixture quotable row was not found"
     assert tuple(int(x) for x in m.groups()) \
-        == (counts["external"], counts["own_infrastructure"], counts["local"], counts["fixtures"])
+        == (counts["external"], counts["own_infrastructure"], counts["local"], counts["source"],
+            counts["fixtures"])
 
 
 def test_the_stale_number_is_gone_everywhere() -> None:
@@ -118,6 +123,7 @@ def test_the_generated_tier_sentence_matches_the_registry_counts() -> None:
     assert f"{counts['external']} external" in sentence
     assert f"{counts['own_infrastructure']} own-infra" in sentence
     assert f"{counts['local']} loopback" in sentence
+    assert f"{counts['source']} source" in sentence
     assert f"{counts['fixtures']} fixtures-only" in sentence
 
 

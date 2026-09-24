@@ -1748,6 +1748,111 @@
         "integration/vigil_integration/live/smuggling_redrive.py:smuggling_redrive",
         "engine/crucible/framework/v2/verify/oracles.py:smuggling_desync_oracle"
       ]
+    },
+    {
+      "id": "static_broken_crypto.broken_primitive_invocation",
+      "check": "static_rule_verify",
+      "evidence": "the STATIC_RULE oracle re-parsed the RETAINED source region (Python ast) and re-derived that a broken/risky cryptographic primitive is INVOKED here — an MD5/SHA1/MD4/MD2 hash constructor or call, a DES/3DES/RC4/Blowfish/IDEA cipher, or an ECB block mode — a re-verifiable CODE PROPERTY, never a claim of runtime exploitability. The tool (semgrep/joern/pattern) that produced the LEAD only said WHERE to look; the verdict is the oracle's own re-parse of the retained bytes.",
+      "fact_capable": true,
+      "clean_capable": false,
+      "preconditions": [
+        "source_reparseable"
+      ],
+      "limitation": "Bounded to the retained source REGION and the CODE PROPERTY 'a broken/risky primitive is invoked here', NOT a claim the primitive is reachable or exploitable at runtime, and NOT a claim about the whole program. Python-only: a non-Python or unparseable region REFUSES (a LEAD), never asserts. NOT CLEAN-capable: a non-firing over one region cannot prove the absence of broken-crypto use across the codebase. The verdict re-derives OFFLINE from the retained source bytes; a tamper that removes the invocation no longer re-fires.",
+      "target_fact_capable": true,
+      "target_clean_capable": false,
+      "target_downgrade_rationale": "Proving the ABSENCE of any broken-crypto invocation is a whole-program capability (a complete crypto inventory across every module, import alias and dynamic construction), not this single-region static-rule's target, so clean-capability is deliberately not pursued on this branch.",
+      "oracle_version": "static_rule",
+      "control_requirements": [
+        "retained_source_region",
+        "vigil_owned_static_reparse",
+        "closed_rule_vocabulary"
+      ],
+      "evidence_surface": "artifact",
+      "implementation_refs": [
+        "engine/crucible/framework/v2/verify/oracles.py:_broken_crypto_hit",
+        "engine/crucible/framework/v2/verify/oracles.py:static_rule_oracle",
+        "engine/crucible/framework/v2/analysis/static_facts.py:confirm_code_region"
+      ]
+    },
+    {
+      "id": "static_insecure_randomness.prng_into_sink",
+      "check": "static_rule_verify",
+      "evidence": "the STATIC_RULE oracle re-parsed the RETAINED source region (Python ast) and re-derived that a non-cryptographic PRNG value (random.random/randint/choice/getrandbits/...) flows in a DIRECT intra-procedural assignment into a security-sensitive binding (a token/secret/password/nonce/salt/key/otp) in the SAME function — a re-verifiable CODE PROPERTY (the value is predictable), never a claim of runtime exploitability.",
+      "fact_capable": true,
+      "clean_capable": false,
+      "preconditions": [
+        "source_reparseable"
+      ],
+      "limitation": "Bounded to a DIRECT (or single-hop-alias) intra-procedural flow within ONE function; SystemRandom / secrets / os.urandom are cryptographic and never fire. Inter-procedural or possibly-reassigned flows are NOT re-derived here and stay a LEAD. Python-only: a non-Python or unparseable region REFUSES. NOT CLEAN-capable: a non-firing cannot prove no insecure-randomness sink exists elsewhere. Re-derives OFFLINE from the retained bytes; a tamper removing the flow no longer re-fires.",
+      "target_fact_capable": true,
+      "target_clean_capable": false,
+      "target_downgrade_rationale": "Proving the ABSENCE of any insecure-randomness-into-secret flow is a whole-program dataflow capability (inter-procedural, alias- and reassignment-complete), not this single-function direct-flow static-rule's target, so clean-capability is deliberately not pursued on this branch.",
+      "oracle_version": "static_rule",
+      "control_requirements": [
+        "retained_source_region",
+        "vigil_owned_static_reparse",
+        "closed_rule_vocabulary"
+      ],
+      "evidence_surface": "artifact",
+      "implementation_refs": [
+        "engine/crucible/framework/v2/verify/oracles.py:_insecure_randomness_hit",
+        "engine/crucible/framework/v2/verify/oracles.py:static_rule_oracle",
+        "engine/crucible/framework/v2/analysis/static_facts.py:confirm_code_region"
+      ]
+    },
+    {
+      "id": "static_insecure_flag.disabled_literal",
+      "check": "static_rule_verify",
+      "evidence": "the STATIC_RULE oracle re-parsed the RETAINED source region (Python ast) and re-derived that a KNOWN security flag is EXPLICITLY set to its insecure LITERAL — verify=False / secure=False / check_hostname=False / cert_reqs=ssl.CERT_NONE — a re-verifiable CODE PROPERTY, never a claim of runtime exploitability.",
+      "fact_capable": true,
+      "clean_capable": false,
+      "preconditions": [
+        "source_reparseable"
+      ],
+      "limitation": "Bounded to a security flag EXPLICITLY written to its insecure literal in the retained region. An ABSENT flag is default-dependent and REFUSES (a LEAD) — this branch never reasons about defaults. Python-only: a non-Python or unparseable region REFUSES. NOT CLEAN-capable: a non-firing cannot prove no security flag is disabled elsewhere, nor that the effective runtime configuration is safe. Re-derives OFFLINE from the retained bytes; a tamper removing the literal no longer re-fires.",
+      "target_fact_capable": true,
+      "target_clean_capable": false,
+      "target_downgrade_rationale": "Proving the ABSENCE of an insecure-flag literal (and that the effective runtime configuration is safe) is a whole-program + default-resolution capability, not this single-region literal-match static-rule's target, so clean-capability is deliberately not pursued on this branch.",
+      "oracle_version": "static_rule",
+      "control_requirements": [
+        "retained_source_region",
+        "vigil_owned_static_reparse",
+        "closed_rule_vocabulary"
+      ],
+      "evidence_surface": "artifact",
+      "implementation_refs": [
+        "engine/crucible/framework/v2/verify/oracles.py:_insecure_flag_hit",
+        "engine/crucible/framework/v2/verify/oracles.py:static_rule_oracle",
+        "engine/crucible/framework/v2/analysis/static_facts.py:confirm_code_region"
+      ]
+    },
+    {
+      "id": "static_taint.direct_intraprocedural_flow",
+      "check": "static_rule_verify",
+      "evidence": "the STATIC_RULE oracle re-parsed the RETAINED source region (Python ast) and re-derived a DIRECT intra-procedural unsanitized taint flow — a taint SOURCE (request/input/argv/environ) reaches a dangerous SINK (os.system / subprocess shell=True / eval / exec / a string-built cursor.execute) in ONE function with NO sanitizer between — the 'Firm' tier, a re-verifiable CODE PROPERTY, never a claim of runtime exploitability.",
+      "fact_capable": true,
+      "clean_capable": false,
+      "preconditions": [
+        "source_reparseable"
+      ],
+      "limitation": "Bounded to a DIRECT (or single-hop-alias) source->sink flow within ONE function with NO sanitizer present; a sanitizer anywhere in the function REFUSES (fail-closed to a LEAD), and subprocess sinks require shell=True to be command-injection-shaped. INTER-PROCEDURAL / possibly-sanitized / whole-program flows are NOT re-derived here and stay a LEAD — predicting runtime exploitability from static code is not this oracle's job. Python-only: a non-Python or unparseable region REFUSES. NOT CLEAN-capable: a non-firing cannot prove no tainted flow exists. Re-derives OFFLINE from the retained bytes; a tamper removing the flow no longer re-fires.",
+      "target_fact_capable": true,
+      "target_clean_capable": false,
+      "target_downgrade_rationale": "Proving the ABSENCE of a tainted source->sink flow (and that no path is exploitable) is a whole-program inter-procedural taint + reachability capability, not this single-function direct-flow static-rule's target, so clean-capability is deliberately not pursued on this branch.",
+      "oracle_version": "static_rule",
+      "control_requirements": [
+        "retained_source_region",
+        "vigil_owned_static_reparse",
+        "closed_rule_vocabulary",
+        "intraprocedural_sanitizer_check"
+      ],
+      "evidence_surface": "artifact",
+      "implementation_refs": [
+        "engine/crucible/framework/v2/verify/oracles.py:_direct_taint_hit",
+        "engine/crucible/framework/v2/verify/oracles.py:static_rule_oracle",
+        "engine/crucible/framework/v2/analysis/static_facts.py:confirm_code_region"
+      ]
     }
   ]
 }

@@ -468,6 +468,32 @@ class OracleKind(str, enum.Enum):
     # differential/comparison is re-derived from the RETAINED RAW bytes at every re-verification (never a bool,
     # never a bare marker/entropy heuristic).
     PASSWORD_RESET_INVARIANT = "password_reset_invariant"
+    # Wave-5.1 STATIC source-code RULE (the SAST / source-code bridge) — the source-code sibling of the
+    # retained-artifact oracles above (weak_crypto_artifact / posture). The static-analysis path (analysis/)
+    # emits LEADs whose only promotion today is a probabilistic LLM reviewer (which CANNOT mint a FACT). This
+    # kind mints a "static FACT" — a re-runnable, VIGIL-OWNED deterministic rule over RETAINED SOURCE-CODE
+    # BYTES, exactly analogous to how a web oracle re-fires over retained HTTP bytes: the oracle RE-PARSES the
+    # retained source region ITSELF (Python `ast`) and re-derives a CODE PROPERTY, never trusting semgrep/joern
+    # or the tool's CWE/classification (the tool output is only the LEAD saying WHERE to look). Like the AEGIS /
+    # posture members above, it is an ADDITIVE append reachable ONLY via its explicit BUG_CLASS_ORACLES rows
+    # (keyed on the `static_rule` ctx field NO benchmark/scan/engage finding carries), never via the frozen
+    # unknown-class fallback (verifier._ALL_ORACLES stays EXACTLY 15), so `make gate` is byte-identical. The
+    # rule_id vocabulary is CLOSED; each FACT is honestly scoped to a PROVEN CODE PROPERTY, never "exploitable
+    # at runtime". The four SOUND tiers this kind may mint (all Python-`ast`-re-derived; a non-Python or
+    # unparseable region REFUSES — never asserts): (a) `broken-crypto-invocation` — a broken/risky primitive is
+    # CONSTRUCTED or CALLED here (md5/sha1/md4/md2 hash, DES/RC4/Blowfish cipher, or an ECB block mode) — the
+    # claim is "a broken primitive is invoked here", not "exploitable"; (b) `insecure-randomness-sink` — a
+    # non-cryptographic PRNG value (random.random/randint/choice/…) flows in a DIRECT intra-procedural
+    # assignment into a security sink (a token/secret/password/nonce/salt/key/otp binding) in the SAME function;
+    # (c) `insecure-flag-literal` — a security flag is EXPLICITLY disabled as a LITERAL (`verify=False`,
+    # `secure=False`, `ssl.CERT_NONE`, …) — an ABSENT flag is default-dependent and REFUSES (a LEAD); (d)
+    # `direct-taint` (the "Firm" tier) — a taint SOURCE (request/input/argv/environ) reaches a dangerous SINK
+    # (os.system / subprocess(shell=True) / eval / exec / a string-built cursor.execute) in ONE function with NO
+    # sanitizer call between, proven over the re-parsed function AST. INTER-PROCEDURAL / possibly-sanitized /
+    # whole-program flows stay a LEAD (never a STATIC_RULE FACT) — predicting runtime exploitability from static
+    # code is deliberately NOT this oracle's job. A tamper (the retained bytes edited so the property no longer
+    # holds) is rejected at re-verification; if the retained bytes cannot be re-parsed, the oracle REFUSES.
+    STATIC_RULE = "static_rule"
 
 
 class OracleProbe(BaseModel):

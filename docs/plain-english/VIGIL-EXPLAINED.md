@@ -8711,8 +8711,9 @@ credential.
 | Outside system — real bytes from a third-party system on the public internet | 3 |
 | Own infrastructure — real bytes from infrastructure the system builds, uses and destroys | 2 |
 | Real local process — real bytes over a real connection or process on the testing machine | 17 |
+| Retained source code — re-derived from retained source-code bytes by a static re-parse — no live process, no runtime observation | 1 |
 | Fixtures only — only ever judged evidence a person wrote by hand | 24 |
-| **Total detector kinds** | **46** |
+| **Total detector kinds** | **47** |
 <!-- END GENERATED coverage-tiers -->
 
 They sum to 41. If the question asked is instead "how many have ever judged bytes from a real network
