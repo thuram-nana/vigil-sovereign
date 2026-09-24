@@ -49,6 +49,8 @@ import html
 import json
 import re
 import secrets
+import socket
+import socketserver
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -1509,3 +1511,231 @@ def serve() -> Iterator[str]:
         server.shutdown()
         server.server_close()
         thread.join(timeout=5)
+
+
+# ---------------------------------------------------------------------------
+# Wave-4.2 request-smuggling desync fixtures (raw-socket) + two benign twins.
+# ---------------------------------------------------------------------------
+#
+# Request smuggling lives below the HTTP-client abstraction, so its fixture is a RAW-SOCKET
+# server, not a route in the ThreadingHTTPServer above (which cannot desync). These are
+# DELIBERATELY separate context managers, never wired into _ROUTES, and carry NO
+# ExpectedFinding — so the default GET-only benchmark crawl (and `make gate`) never touches
+# them and the signed baseline stays byte-identical. They are driven only by the deep-profile
+# integration test integration/tests/test_smuggling_redrive.py through VIGIL's gated
+# raw-socket re-drive (live/smuggling_redrive.py).
+#
+# _SmugglingHandler is a GENUINE persistent-connection back-end: it parses each request off the
+# socket by its OWN framing and responds to it, so VIGIL's OWN DISTINCT SECOND request gets a
+# REAL second response (not a lexical split of one blob). ``mode`` selects the behaviour:
+#
+#   * "desync"        — the vulnerable back-end. It HONOURS Transfer-Encoding: chunked on a
+#                       CL.TE conflict, so it reads only the terminating ``0`` chunk of the
+#                       first request and the smuggled prefix is LEFT ON THE SOCKET, parsed as
+#                       its OWN next request → its reflect response (echoing the unique canary)
+#                       is served BEFORE VIGIL's genuine follow-up, so VIGIL reads it as its
+#                       own second response. A WELL-FORMED first request leaves no leftover, so
+#                       the follow-up's genuine response ("vigil-follow ok") carries no canary.
+#   * "benign"        — a well-behaved back-end that HONOURS Content-Length (front-end/back-end
+#                       agree), so no prefix is ever left over — the follow-up's response never
+#                       carries the canary, whatever the framing.
+#   * "reflect_error" — the red-pen twin: a benign server that REJECTS the ambiguous conflict
+#                       framing with a 400 whose body ECHOES the offending request (canary and
+#                       all), yet answers the well-formed control cleanly. The echoed canary
+#                       lives ONLY in the FIRST response; VIGIL's GENUINE second (follow-up)
+#                       response is an ordinary "vigil-follow ok" with no canary. It must NEVER
+#                       fire — a lexical split of the first response's bytes would (and did).
+
+_SMUGGLING_REFLECT_RE = re.compile(r"/vigil-reflect\?c=([A-Za-z0-9]+)")
+
+
+def _smuggling_response(status_line: str, body: bytes, *, close: bool = False) -> bytes:
+    conn = b"close" if close else b"keep-alive"
+    return (f"HTTP/1.1 {status_line}\r\nServer: benchmark-smuggling\r\n".encode("latin-1")
+            + b"Content-Length: " + str(len(body)).encode() + b"\r\nConnection: " + conn + b"\r\n\r\n" + body)
+
+
+class _SmugglingHandler(socketserver.BaseRequestHandler):
+    """Per-connection raw-socket back-end that parses requests by their own framing and answers
+    each one. ``mode`` (class attr) selects "desync" / "benign" / "reflect_error"."""
+
+    mode = "desync"
+
+    def handle(self) -> None:   # noqa: D401 - socketserver entry point
+        self.request.settimeout(1.5)
+        buf = bytearray()
+
+        def recv_more() -> bool:
+            try:
+                chunk = self.request.recv(4096)
+            except (socket.timeout, OSError):
+                return False
+            if not chunk:
+                return False
+            buf.extend(chunk)
+            return True
+
+        def need(n: int) -> bool:
+            while len(buf) < n:
+                if not recv_more():
+                    return False
+            return True
+
+        def need_marker(marker: bytes) -> bool:
+            while marker not in buf:
+                if not recv_more():
+                    return False
+            return True
+
+        def read_headers() -> "tuple[str, dict[str, str], bool] | None":
+            if not need_marker(b"\r\n\r\n"):
+                return None
+            head = bytes(buf).split(b"\r\n\r\n", 1)[0]
+            del buf[: len(head) + 4]
+            lines = head.split(b"\r\n")
+            req_line = lines[0].decode("latin-1", "replace")
+            headers: dict[str, str] = {}
+            for ln in lines[1:]:
+                i = ln.find(b":")
+                if i > 0:
+                    headers[ln[:i].strip().lower().decode("latin-1", "replace")] = \
+                        ln[i + 1:].strip().decode("latin-1", "replace")
+            te = headers.get("transfer-encoding", "").lower()
+            conflict = ("chunked" in te) and (headers.get("content-length") is not None)
+            return req_line, headers, conflict
+
+        def consume_chunked() -> None:
+            # Honour Transfer-Encoding: chunked — read to the terminating ``0`` chunk, leaving anything AFTER
+            # it (a smuggled prefix, on a CL.TE conflict) on the socket as the next request.
+            while True:
+                if not need_marker(b"\r\n"):
+                    break
+                line = bytes(buf).split(b"\r\n", 1)[0]
+                del buf[: len(line) + 2]
+                try:
+                    size = int(line.split(b";", 1)[0].strip(), 16)
+                except ValueError:
+                    break
+                if size == 0:
+                    if need(2):
+                        del buf[:2]
+                    break
+                if not need(size + 2):
+                    break
+                del buf[: size + 2]
+
+        def consume_content_length(headers: "dict[str, str]") -> None:
+            cl = headers.get("content-length")
+            n = int(cl) if cl and cl.strip().isdigit() else 0
+            if n and need(n):
+                del buf[:n]
+
+        def drain_request() -> bytes:
+            # Fully drain the CURRENT request's remaining bytes, whatever its framing. VIGIL sends its entire
+            # first request in one burst and then BLOCKS reading the first response before it sends the
+            # follow-up, so reading to a short idle here consumes the whole (CL.TE or TE.CL) first request and
+            # leaves NOTHING buffered — the follow-up is read fresh afterwards. Returns the drained bytes (for
+            # the reflect-on-error echo). No leftover can ever be misparsed as a canary-echoing request.
+            self.request.settimeout(0.3)
+            drained = bytes(buf)
+            buf.clear()
+            try:
+                while len(drained) < 65536:
+                    chunk = self.request.recv(4096)
+                    if not chunk:
+                        break
+                    drained += chunk
+            except (socket.timeout, OSError):
+                pass
+            self.request.settimeout(1.5)
+            return drained
+
+        mode = type(self).mode
+        responded = 0
+        try:
+            while responded < 8:
+                parsed = read_headers()
+                if parsed is None:
+                    break
+                req_line, headers, conflict = parsed
+                path = (req_line.split(" ", 2) + ["", ""])[1]
+
+                if conflict and mode in ("benign", "reflect_error"):
+                    # A safe / anti-smuggling server REJECTS ambiguous CL+TE framing (RFC 7230 §3.3.3). It
+                    # fully drains the offending request (so no smuggled prefix is left to corrupt a later
+                    # request) and keeps the connection open for VIGIL's GENUINE follow-up. "reflect_error"
+                    # additionally ECHOES the request (canary and all) into its 400 page — but that echo lives
+                    # ONLY in this FIRST response; the genuine second (follow-up) response never carries it.
+                    drained = drain_request()
+                    if mode == "reflect_error":
+                        raw_req = req_line.encode("latin-1", "replace") + b"\r\n" + drained
+                        page = b"Malformed request rejected:\n" + raw_req
+                    else:
+                        page = b"ambiguous framing rejected"
+                    self.request.sendall(_smuggling_response("400 Bad Request", page))
+                    responded += 1
+                    continue
+
+                # The vulnerable back-end honours chunked on a conflict (the CL.TE desync): it reads only the
+                # terminating ``0`` chunk and the smuggled prefix is LEFT on the socket, parsed next as its OWN
+                # request. A well-formed request is consumed by its Content-Length.
+                if (mode == "desync") and conflict and ("chunked" in headers.get("transfer-encoding", "").lower()):
+                    consume_chunked()
+                else:
+                    consume_content_length(headers)
+
+                m = _SMUGGLING_REFLECT_RE.search(path)
+                if path.startswith("/vigil-reflect") and m:
+                    # A genuine reflect request. In "desync" mode this is the leftover smuggled prefix parsed
+                    # as its OWN request → echo the canary (served as VIGIL's second response).
+                    resp = _smuggling_response("200 OK", f"reflected c={m.group(1)}".encode("latin-1"))
+                elif path.startswith("/vigil-follow"):
+                    resp = _smuggling_response("200 OK", b"vigil-follow ok", close=True)
+                else:
+                    # /vigil-start (or anything else): an ordinary accepted response with NO canary.
+                    resp = _smuggling_response("200 OK", b"vigil-start accepted")
+                self.request.sendall(resp)
+                responded += 1
+        except OSError:
+            pass
+
+
+class _SmugglingTCPServer(socketserver.ThreadingTCPServer):
+    allow_reuse_address = True
+    daemon_threads = True
+
+
+@contextlib.contextmanager
+def _serve_smuggling(mode: str) -> Iterator[str]:
+    handler = type("_H", (_SmugglingHandler,), {"mode": mode})
+    server = _SmugglingTCPServer(("127.0.0.1", 0), handler)
+    thread = threading.Thread(target=server.serve_forever, name="benchmark-smuggling", daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{server.server_address[1]}/"
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+def serve_smuggling_desync() -> "contextlib.AbstractContextManager[str]":
+    """The PLANTED request-smuggling fixture: a back-end that DESYNCS on a CL.TE framing conflict
+    (honours chunked, leaving the smuggled prefix on the socket) — VIGIL's gated re-drive reads
+    the leftover prefix's canary-echoing reflect response as its OWN second response and must mint
+    a request_smuggling FACT against it."""
+    return _serve_smuggling("desync")
+
+
+def serve_smuggling_benign() -> "contextlib.AbstractContextManager[str]":
+    """The SAFE TWIN: a well-behaved back-end that honours Content-Length and never desyncs — the
+    canary never leaks into VIGIL's genuine second response, so the re-drive must NEVER flag it."""
+    return _serve_smuggling("benign")
+
+
+def serve_smuggling_reflect_error() -> "contextlib.AbstractContextManager[str]":
+    """The RED-PEN TWIN: a benign server that rejects the ambiguous conflict framing with a 400 whose
+    body ECHOES the request (canary and all) but answers the well-formed control cleanly. The canary
+    lives ONLY in the FIRST response; VIGIL's genuine SECOND (follow-up) response carries none — so the
+    re-drive must NEVER fire. (A lexical split of one response's bytes on ``HTTP/1.`` would mis-fire.)"""
+    return _serve_smuggling("reflect_error")

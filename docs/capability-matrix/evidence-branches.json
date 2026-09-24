@@ -1627,6 +1627,37 @@
         "engine/crucible/framework/v2/verify/oracles.py:workflow_abuse_oracle",
         "integration/vigil_integration/live/race_bizlogic_redrive.py:race_bizlogic_redrive"
       ]
+    },
+    {
+      "id": "request_smuggling.differential_desync",
+      "check": "smuggling_redrive",
+      "evidence": "An ACHIEVED HTTP request-smuggling desync (CWE-444) proven by a DIFFERENTIAL SECOND REQUEST on connections VIGIL owns end-to-end — replacing the timing signal audit A12 (#269) capped at a LEAD. VIGIL's gated raw-socket re-drive (live/smuggling_redrive.py) opens ONE authorized connection and sends TWO requests it crafted itself: the FIRST carries a framing conflict (CL.TE / TE.CL / an obfuscated Transfer-Encoding) whose smuggled prefix embeds a UNIQUE, high-entropy per-probe canary (>= 12 alnum chars AND >= 2.5 bits/char, minted by VIGIL), and the SECOND is a normal follow-up. On an IDENTICAL SECOND VIGIL-owned connection it sends the SAME bytes but WELL-FORMED (no conflict) plus the SAME follow-up. The only variable between the two legs is the framing conflict. A fire proves the back-end treated the smuggled prefix as the start of the next request: the unique canary is ECHOED in VIGIL's OWN second-request response on the CONFLICT connection, yet ABSENT from the second-request response on the WELL-FORMED control connection. NO victim is poisoned — both requests, on both connections, are VIGIL's own on VIGIL's own sockets; the corrupted 'next request' is VIGIL's own. The oracle (kind DIFFERENTIAL_RESPONSE, reached via the fresh smuggling_desync ctx key) RE-DERIVES this canary differential from the RETAINED RAW second-request responses at every re-verification — it does not consult latency and does not trust a bare mangled-method status — so a durable re-fire re-runs the same differential offline. A plain 405/400 for an unsupported method is recorded only as corroboration and does not by itself mint. Timing is not part of the decision. Shared-pool desyncs that would need a real co-tenant victim to observe stay a LEAD.",
+      "fact_capable": true,
+      "clean_capable": false,
+      "preconditions": [
+        "channel_established",
+        "conflict_and_control_second_requests_captured",
+        "unique_canary_minted",
+        "raw_socket_action_validated"
+      ],
+      "limitation": "Contract-bounded to the framing-conflict techniques VIGIL probes over a SINGLE authorized cleartext connection it owns end-to-end, with the desync observable on that SAME connection. A fire requires a unique VIGIL per-probe canary (>= 12 alnum chars AND >= 2.5 bits/char, so a substring match is not coincidental) ECHOED in VIGIL's OWN second-request response on the CONFLICT connection AND ABSENT from the identical WELL-FORMED control connection's second response — a channel on BOTH legs is required, and a leg that read no response is INCONCLUSIVE. Timing is not consulted (the A12 latency signal was demoted precisely because a normal origin awaiting an incomplete declared body delays identically); a mangled-method status (405/400/501) is recorded as corroboration only and does not by itself mint. The bound this branch does not cross: a SHARED-POOL desync whose effect only manifests against a real co-tenant victim's connection is not driven here (VIGIL never poisons a third party), so that variant stays a LEAD; an HTTPS origin (the raw-socket probes speak cleartext) and genuine HTTP/2 (h2.CL / h2.TE) desync are out of scope on this branch and escalate to a purpose-built tool. An anti-smuggling front-end that normalises or rejects the conflict never leaks the canary and does not fire; with both legs answering that is a channel-confirmed negative for the probed technique/origin, which downgrades to INCONCLUSIVE (this branch may not assert absence). The raw-socket path is gated through validate_action (protected-domain floor / charter / scope / kill-switch) and DNS-pinned to the validated address before any byte leaves the box.",
+      "target_fact_capable": true,
+      "target_clean_capable": false,
+      "target_downgrade_rationale": "Proving the ABSENCE of request smuggling is a coverage-complete capability over every framing-conflict technique, every front-end/back-end parser pair, HTTP/1 and HTTP/2, and every shared-pool topology a deployment exposes — not this per-technique single-connection achieved-desync re-drive's target, so CLEAN-capability is deliberately not pursued on this branch (a non-firing bounds to the probed technique/origin, never a claim of no smuggling anywhere).",
+      "oracle_version": "differential_response",
+      "control_requirements": [
+        "warden_active_recon_gate",
+        "validate_action_raw_socket_gate",
+        "dns_pinned_single_authorized_connection",
+        "vigil_owned_unique_per_probe_canary",
+        "conflict_leg_second_request_capture",
+        "no_conflict_control_leg_second_request_capture"
+      ],
+      "evidence_surface": "composite",
+      "implementation_refs": [
+        "integration/vigil_integration/live/smuggling_redrive.py:smuggling_redrive",
+        "engine/crucible/framework/v2/verify/oracles.py:smuggling_desync_oracle"
+      ]
     }
   ]
 }

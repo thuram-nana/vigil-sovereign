@@ -484,6 +484,18 @@ class FindingContext(BaseModel):
     # gate byte-identical; routes to the dedicated kind via its distinct `mfa_bypass` ctx key so
     # oracle_version(ACHIEVED_STATE) is untouched.
     mfa_bypass: dict[str, Any] | None = None
+    # smuggling_desync_oracle (Wave-4.2 HTTP request smuggling — CWE-444, retires the A12 timing LEAD). The
+    # retained record the gated raw-socket re-drive (live/smuggling_redrive.py) captured: {canary (a unique
+    # high-entropy per-probe token VIGIL embedded in the smuggled prefix), technique (CL.TE/TE.CL/obfuscated
+    # TE), conflict ({channel,status,reason,body} of VIGIL's OWN second request on the CONFLICT connection),
+    # control ({...} of the SAME second request on an identical NO-CONFLICT connection)}. The oracle (kind
+    # DIFFERENTIAL_RESPONSE, reached via the fresh `smuggling_desync` ctx key) fires ONLY when the unique
+    # canary is ECHOED in the conflict leg's second response AND ABSENT from the no-conflict control's second
+    # response (the back-end treated the smuggled prefix as the start of VIGIL's OWN next request — an
+    # achieved desync), never on timing and never on a bare mangled-method status. NO victim is poisoned: both
+    # requests are VIGIL's own on its own socket. No benchmark/scan/engage finding carries `smuggling_desync`,
+    # so appending it leaves the gate byte-identical and reuses the frozen kind (oracle_version untouched).
+    smuggling_desync: dict[str, Any] | None = None
     # jwt_forgery_oracle (Workstream-B: a captured JWT is STRUCTURALLY FORGEABLE — judged on the token
     # ALONE, offline, zero traffic). jwt_token is the captured token string; jwt_candidate_keys are the
     # supplied secrets / RSA public keys the HMAC-reproduction proof is tried against (a weak-secret
@@ -2063,6 +2075,49 @@ class FindingContext(BaseModel):
             },
         )
 
+    @classmethod
+    def from_smuggling_desync(
+        cls,
+        *,
+        canary: str,
+        technique: str,
+        conflict_second: Any,
+        control_second: Any,
+        bug_class: str = "request_smuggling",
+    ) -> "FindingContext":
+        """The retained record for the smuggling-desync oracle (kind DIFFERENTIAL_RESPONSE, via the fresh
+        ``smuggling_desync`` ctx key; Wave-4.2, CWE-444). It carries the RAW second-request responses the
+        oracle re-runs its UNIQUE-CANARY DIFFERENTIAL over — never a bool, never a latency.
+
+        ``canary`` is the UNIQUE high-entropy per-probe token VIGIL minted and embedded in the smuggled prefix
+        of the FIRST (conflict) request; ``technique`` names the framing conflict (CL.TE / TE.CL / an
+        obfuscated TE). ``conflict_second`` is ``{channel, status, reason, body}`` of VIGIL's OWN SECOND
+        request read on the connection whose first request carried the conflict; ``control_second`` is the
+        SAME second request read on a SECOND VIGIL-owned connection whose first request was the same bytes but
+        WELL-FORMED (no conflict). The oracle fires ONLY when the canary is echoed in the conflict second
+        response and absent from the control second response — the achieved desync, never timing, never a
+        bare mangled-method status. NO victim is poisoned (both requests are VIGIL's own on its own socket)."""
+        def _leg(v: Any) -> "dict":
+            if not isinstance(v, Mapping):
+                return {"channel": False, "status": None, "reason": "", "body": ""}
+            status = v.get("status")
+            try:
+                status = int(status) if status is not None else None
+            except (TypeError, ValueError):
+                status = None
+            return {"channel": bool(v.get("channel", False)), "status": status,
+                    "reason": _coerce_text(v.get("reason")), "body": _coerce_text(v.get("body"))}
+
+        return cls(
+            bug_class=bug_class,
+            smuggling_desync={
+                "canary": _coerce_text(canary),
+                "technique": _coerce_text(technique),
+                "conflict": _leg(conflict_second),
+                "control": _leg(control_second),
+            },
+        )
+
     # -- AEGIS builders (the defensive dual) -------------------------------
 
     @classmethod
@@ -2305,6 +2360,8 @@ class FindingContext(BaseModel):
             ctx["workflow_abuse"] = self.workflow_abuse
         if self.mfa_bypass is not None:
             ctx["mfa_bypass"] = self.mfa_bypass
+        if self.smuggling_desync is not None:
+            ctx["smuggling_desync"] = self.smuggling_desync
         if self.jwt_token is not None:
             ctx["jwt_token"] = self.jwt_token
             if self.jwt_candidate_keys is not None:

@@ -392,6 +392,7 @@ jobs:
               --ignore=integration/tests/test_ssi_redrive.py \
               --ignore=integration/tests/test_access_control_redrive.py \
               --ignore=integration/tests/test_race_bizlogic_redrive.py \
+              --ignore=integration/tests/test_smuggling_redrive.py \
               --ignore=integration/tests/test_typed_outcomes.py \
               --ignore=integration/tests/test_engine_live.py \
               --ignore=integration/tests/test_engine_terminal.py \
@@ -494,6 +495,7 @@ jobs:
               integration/tests/test_ssi_redrive.py \
               integration/tests/test_access_control_redrive.py \
               integration/tests/test_race_bizlogic_redrive.py \
+              integration/tests/test_smuggling_redrive.py \
               integration/tests/test_release_gate_deceptive_tool.py \
               integration/tests/test_release_gate_false_fact.py \
               integration/tests/test_release_gate_offline_replay.py \

@@ -1592,6 +1592,16 @@ def _redrive_branch_for(bug_class: str) -> "Optional[str]":
         # locked resource / correctly-priced flow (the benign twin) ⇒ a channel-confirmed non-fire.
         "request_race": "request_race.limit_overrun",
         "business_logic": "business_logic.price_manipulation",
+        # Wave 4.2 — HTTP request-smuggling RE-PROMOTE (integration/vigil_integration/live/smuggling_redrive.py,
+        # CWE-444). Retires the A12 (#269) TIMING LEAD: the FACT-capable DIFFERENTIAL_RESPONSE branch fires ONLY
+        # when a unique per-probe canary VIGIL embedded in the smuggled prefix of a framing-conflict (CL.TE /
+        # TE.CL) first request is ECHOED in VIGIL's OWN second-request response on that connection AND ABSENT
+        # from an identical WELL-FORMED control connection's second response (verify/oracles.py::
+        # smuggling_desync_oracle). NO victim is poisoned (both requests are VIGIL's own on its own sockets); the
+        # raw-socket burst is re-gated through validate_action + DNS-pin before any byte leaves the box. Timing is
+        # never consulted; a bare mangled-method status does not mint; a shared-pool desync needing a real
+        # co-tenant victim, an https origin, or genuine HTTP/2 desync stays a LEAD.
+        "request_smuggling": "request_smuggling.differential_desync",
     }
     branch = mapping.get(normalize_bug_class(bug_class))
     return branch if branch in branch_ids() else None
