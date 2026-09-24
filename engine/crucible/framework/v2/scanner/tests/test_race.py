@@ -20,14 +20,70 @@ import contextlib
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from typing import Iterator
 
+import pytest
+
+from framework.v2.common import paths as _paths
+from framework.v2.common.errors import SovereigntyViolation
 from framework.v2.scanner.race import (
     RaceResult,
     race_burst,
     race_check,
     raw_race,
 )
+
+# A signed loopback charter for the race tests: the raw-socket burst is now re-gated through
+# validate_action (Wave-4.4), so every burst is authorized against a signed charter naming
+# 127.0.0.1 in scope. This slug is materialised by the ``race_slug`` fixture below.
+_RACE_SLUG = "race-loopback-test"
+
+_LOOPBACK_CHARTER = """\
+# Engagement charter — `{slug}`
+
+**Status:** Final
+
+## 1. Operator attestation
+
+Signed: `tester`     Date: `2026-05-04`
+
+## 2. In-scope systems
+
+| Host / Surface | Notes | Auth |
+|----------------|-------|------|
+| `127.0.0.1` | Loopback race test target | Yes |
+| `localhost` | Loopback race test target | Yes |
+
+## 3. Out of scope
+
+- Anything not listed above.
+
+## 7. Posture
+
+- [x] **TEST**
+- [ ] **AUDIT**
+- [ ] **EMULATE**
+"""
+
+
+@pytest.fixture()
+def race_slug(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> str:
+    """Materialise a signed loopback charter for ``_RACE_SLUG`` and point ``paths`` at it, so
+    the Wave-4.4 raw_race gate (validate_action over 127.0.0.1) authorizes the burst."""
+    targets_root = tmp_path / "targets"
+    td = targets_root / _RACE_SLUG
+    td.mkdir(parents=True)
+    (td / "charter.md").write_text(_LOOPBACK_CHARTER.format(slug=_RACE_SLUG), encoding="utf-8")
+    monkeypatch.setattr(_paths, "target_dir", lambda s: targets_root / s)
+    monkeypatch.setattr(_paths, "charter_path", lambda s: targets_root / s / "charter.md")
+    return _RACE_SLUG
+
+
+def _allow_loopback(url: str) -> bool:
+    """A minimal fail-closed gate for the direct raw_race test: loopback only."""
+    import urllib.parse as _u
+    return (_u.urlsplit(url).hostname or "") in {"127.0.0.1", "localhost", "::1"}
 
 
 # ---------------------------------------------------------------------------
@@ -112,10 +168,10 @@ def _server(state: _CouponState, *, atomic: bool) -> Iterator[str]:
 # ---------------------------------------------------------------------------
 
 
-def test_naive_coupon_is_over_redeemed_and_confirmed() -> None:
+def test_naive_coupon_is_over_redeemed_and_confirmed(race_slug: str) -> None:
     state = _CouponState(window_s=0.10)
     with _server(state, atomic=False) as base_url:
-        confirmed = race_check(base_url, "/redeem", count=8, max_allowed=1)
+        confirmed = race_check(base_url, "/redeem", count=8, max_allowed=1, slug=race_slug)
 
     # Ground truth on the server: the coupon was redeemed more than once.
     assert state.redemptions > 1, "test target failed to exhibit the race"
@@ -132,20 +188,20 @@ def test_naive_coupon_is_over_redeemed_and_confirmed() -> None:
     assert "UNCONFIRMED" in confirmed.title
 
 
-def test_locked_coupon_is_not_flagged() -> None:
+def test_locked_coupon_is_not_flagged(race_slug: str) -> None:
     state = _CouponState(window_s=0.10)
     with _server(state, atomic=True) as base_url:
-        confirmed = race_check(base_url, "/redeem", count=8, max_allowed=1)
+        confirmed = race_check(base_url, "/redeem", count=8, max_allowed=1, slug=race_slug)
 
     # Exactly one request wins against the lock — no over-redemption.
     assert state.redemptions == 1
     assert confirmed is None
 
 
-def test_race_burst_reports_counts_without_confirming() -> None:
+def test_race_burst_reports_counts_without_confirming(race_slug: str) -> None:
     state = _CouponState(window_s=0.10)
     with _server(state, atomic=False) as base_url:
-        result = race_burst(base_url, "/redeem", count=6, max_allowed=1)
+        result = race_burst(base_url, "/redeem", count=6, max_allowed=1, slug=race_slug)
 
     assert isinstance(result, RaceResult)
     assert result.count == 6
@@ -168,7 +224,8 @@ def test_raw_race_last_byte_sync_delivers_all_requests() -> None:
             f"POST /redeem HTTP/1.1\r\nHost: {parts.hostname}:{parts.port}\r\n"
             f"Content-Length: 0\r\nConnection: close\r\n\r\n"
         ).encode("latin-1")
-        outcomes = raw_race(parts.hostname, parts.port, req, 5, timeout=5.0)
+        outcomes = raw_race(parts.hostname, parts.port, req, 5, timeout=5.0,
+                            authorize=_allow_loopback, target_url=base_url + "/redeem")
 
     assert len(outcomes) == 5
     statuses = [s for s, _, _ in outcomes]
@@ -178,7 +235,7 @@ def test_raw_race_last_byte_sync_delivers_all_requests() -> None:
     assert state.redemptions == 1
 
 
-def test_success_predicate_is_honoured() -> None:
+def test_success_predicate_is_honoured(race_slug: str) -> None:
     # A custom predicate keys off the body marker instead of the status code.
     state = _CouponState(window_s=0.10)
     with _server(state, atomic=False) as base_url:
@@ -188,13 +245,14 @@ def test_success_predicate_is_honoured() -> None:
             count=8,
             max_allowed=1,
             success_predicate=lambda status, body: b"redeemed" == body,
+            slug=race_slug,
         )
     assert confirmed is not None
     assert confirmed.bug_class == "request_race"
     assert confirmed.severity == "High"   # A12: a semantic success predicate earns the confirmed claim
 
 
-def test_a12_all_2xx_no_predicate_is_a_lead_not_a_confirmed_race() -> None:
+def test_a12_all_2xx_no_predicate_is_a_lead_not_a_confirmed_race(race_slug: str) -> None:
     # A12: when EVERY concurrent request returns 2xx (no losers) under the DEFAULT any-2xx predicate, the
     # verdict cannot distinguish a real over-consumption from a benignly-idempotent endpoint — it is a LEAD.
     import http.server
@@ -216,10 +274,37 @@ def test_a12_all_2xx_no_predicate_is_a_lead_not_a_confirmed_race() -> None:
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     try:
         base = f"http://127.0.0.1:{srv.server_address[1]}"
-        confirmed = race_check(base, "/redeem", count=6, max_allowed=1)   # naive: no success_predicate
+        confirmed = race_check(base, "/redeem", count=6, max_allowed=1, slug=race_slug)   # naive: no predicate
     finally:
         srv.shutdown()
         srv.server_close()
     assert confirmed is not None                       # the oracle still fires (over-run count > max_allowed)
     assert confirmed.severity == "Low"                 # ...but it is a LEAD, not a High confirmed race
     assert "UNCONFIRMED" in confirmed.title
+
+
+def test_raw_race_refuses_an_unauthorized_burst() -> None:
+    # SECURITY (Wave-4.4): raw_race fails CLOSED when the pre-flight gate denies — a burst at a
+    # host the scope/charter/kill-switch gate rejects raises SovereigntyViolation and NO byte
+    # leaves the box. Here the gate denies a non-loopback target; the socket burst never runs.
+    req = b"POST /redeem HTTP/1.1\r\nHost: evil.example\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+    with pytest.raises(SovereigntyViolation):
+        raw_race("evil.example", 80, req, 4, timeout=1.0,
+                 authorize=_allow_loopback, target_url="http://evil.example/redeem")
+
+
+def test_race_burst_requires_an_authorization_gate() -> None:
+    # A raw-socket burst may NEVER run ungated: with neither slug nor authorize, race_burst
+    # fails closed with a ValueError before any traffic.
+    with pytest.raises(ValueError):
+        race_burst("http://127.0.0.1:1/", "/redeem", count=2, max_allowed=1)
+
+
+def test_gate_denial_blocks_the_burst_before_any_traffic(race_slug: str) -> None:
+    # A tripped/denying gate blocks the burst even against a live loopback target: no redemption
+    # is recorded because the sockets are never opened.
+    state = _CouponState(window_s=0.05)
+    with _server(state, atomic=False) as base_url:
+        with pytest.raises(SovereigntyViolation):
+            race_burst(base_url, "/redeem", count=6, max_allowed=1, authorize=lambda _u: False)
+    assert state.redemptions == 0   # the gate refusal happened BEFORE any byte left the box

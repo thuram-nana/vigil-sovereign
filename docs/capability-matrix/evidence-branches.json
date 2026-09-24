@@ -1526,6 +1526,69 @@
         "engine/crucible/framework/v2/verify/oracles.py:ssi_evaluation_oracle",
         "integration/vigil_integration/live/runtime_redrive.py:runtime_redrive"
       ]
+    },
+    {
+      "id": "request_race.limit_overrun",
+      "check": "workflow_abuse_oracle",
+      "evidence": "A single-packet limit-overrun race (CWE-362), gated-workflow + owner-signed. The RUNNER fires a last-byte-synchronised burst of N should-be-atomic requests through the SAME fail-closed raw-socket gate (scanner.race.raw_race, re-gated through validate_action: scope + charter + kill-switch + never-liftable egress floor + posture, evaluated BEFORE any byte leaves the box) and retains the RAW {status, body} of every connection. The verdict is COUNT-based, NEVER timing: the ACHIEVED_STATE workflow_abuse_oracle RE-EVALUATES the operator's SEMANTIC success predicate (a pure JSON AST declared in the OWNER-SIGNED WorkflowSpec) over EACH retained response to RE-DERIVE the commit count from the raw bytes (never a trusted integer) and fires iff successes > max_allowed. A fire proves the should-be-atomic action committed more times than its invariant permits under a concurrent burst — a TOCTOU double-spend / one-time-token reuse. Two independent gates keep it near-zero-FP: (a) the OWNER-SIGNED WorkflowSpec attestation (owner_signed_spec, an Ed25519 signature the runner verified against the pinned owner key before any state-changing step) — without it the oracle is INCONCLUSIVE, never a FACT; and (b) A12 — WITHOUT a SEMANTIC success predicate a bare any-2xx concurrent-success count does NOT prove over-consumption (a benignly-idempotent endpoint returns 2xx to every request), so the over-count is a LEAD, never a FACT. A correctly-locked resource (successes <= max_allowed under a semantic predicate) is a channel-confirmed non-fire.",
+      "fact_capable": true,
+      "clean_capable": false,
+      "preconditions": [
+        "channel_established",
+        "owner_signed_workflow_spec"
+      ],
+      "limitation": "Contract-bounded and gated-workflow. A fire requires (a) an OWNER-SIGNED WorkflowSpec (owner_signed_spec — the runner's cryptographically-verified attestation; the engine-side oracle cannot verify Ed25519 as it imports no vigil_core, so it fails closed on the attestation and the certificate binds it), and (b) an operator-declared SEMANTIC success predicate proving each commit (e.g. the body carries a unique per-burst redemption token) — WITHOUT it an any-2xx count is a rigorous LEAD, never a FACT (A12: a benignly-idempotent endpoint returns 2xx to every concurrent request, indistinguishable from over-consumption on the response side). The verdict is COUNT-based (successes > max_allowed), re-derived offline by re-evaluating the semantic predicate over the retained raw responses — NEVER timing (max_dispersion_ms is opsec/reporting only and never gates the fire). SOUNDNESS BOUND, honestly stated: the semantic predicate's fidelity is an operator assertion carried in the owner-signed spec (the operator attests that a predicate-passing response is a genuine commit); this is the accepted gated-workflow bound. NOT CLEAN-capable: a non-firing burst cannot prove the ABSENCE of every limit-overrun across every atomic action (an untested action stays INCONCLUSIVE, never a false negative and never a CLEAN). Without an owner-signed spec the class is INCONCLUSIVE; with the spec but no semantic predicate it is a rigorous LEAD; only owner-signed + semantic + over-count mints.",
+      "target_fact_capable": true,
+      "target_clean_capable": false,
+      "target_downgrade_rationale": "Proving the ABSENCE of limit-overrun races is a coverage-complete capability over every should-be-atomic action, every concurrency shape, and every commit path an application exposes, plus the operator intent that declares which actions are atomic and what a real commit looks like — not this per-action gated burst's target — so CLEAN-capability is deliberately not pursued on this achieved-count branch.",
+      "blocking_work": "COVERAGE + OPERATOR INTENT, not a missing oracle: the workflow_abuse_oracle (COUNT-based) and the gated single-packet burst (scanner.race.raw_race, re-gated through validate_action) both exist and mint the FACT today for an owner-signed action with a semantic success predicate whose burst over-runs its max_allowed (end-to-end verified against the racy vs correctly-locked coupon twins). Raising coverage toward the (unreachable) CLEAN target requires enumerating every should-be-atomic action and every commit path across the app AND an operator declaration (in the owner-signed WorkflowSpec) of the atomic actions, their max_allowed, and a semantic success predicate per action; until that enumeration is complete an un-driven action stays a LEAD, never a CLEAN.",
+      "oracle_version": "achieved_state",
+      "control_requirements": [
+        "warden_active_recon_gate",
+        "owner_signed_workflow_spec",
+        "vigil_owned_gated_raw_socket_burst",
+        "scope_charter_killswitch_egress_floor_gate",
+        "operator_semantic_success_predicate",
+        "count_based_over_run_re_derived_from_raw_responses"
+      ],
+      "evidence_surface": "composite",
+      "implementation_refs": [
+        "engine/crucible/framework/v2/scanner/race.py:raw_race",
+        "engine/crucible/framework/v2/verify/oracles.py:workflow_abuse_oracle",
+        "integration/vigil_integration/live/race_bizlogic_redrive.py:race_bizlogic_redrive"
+      ]
+    },
+    {
+      "id": "business_logic.price_manipulation",
+      "check": "workflow_abuse_oracle",
+      "evidence": "A business-logic price/parameter tampering accepted into a dangerous persisted state (CWE-840 / CWE-472), gated-workflow + owner-signed. The RUNNER legitimately walks the target step's prerequisites, then performs the step with the operator-declared tampered overrides (a negative/overflow quantity, a tampered unit price) — the WRITE riding the 0.3 owner-signed per-action approval (mutating_send); absent that approval the write never happens and the class is INCONCLUSIVE, never a false CLEAN — and reads the workflow's own post-state back through the injected read_state. The ACHIEVED_STATE workflow_abuse_oracle evaluates the operator's danger predicate (a pure JSON AST declared in the OWNER-SIGNED WorkflowSpec's TamperProbe) over the observed post-state and fires iff it holds — the tampered value landed in a dangerous persisted state (e.g. a negative quantity that credits the account, a debit turned into a credit). A correctly-priced / validating flow (the benign twin: the server clamps/rejects the value) fails the predicate and does NOT fire (a channel-confirmed non-fire). The owner-signed WorkflowSpec attestation is required — without it the oracle is INCONCLUSIVE, never a FACT.",
+      "fact_capable": true,
+      "clean_capable": false,
+      "preconditions": [
+        "channel_established",
+        "owner_signed_workflow_spec"
+      ],
+      "limitation": "Contract-bounded, gated-workflow, and intent-bounded. A fire requires (a) an OWNER-SIGNED WorkflowSpec (owner_signed_spec — the runner's cryptographically-verified attestation; the certificate binds it), (b) the tampered WRITE riding the 0.3 owner-signed per-action approval (mutating_send) — without it the write never happens (INCONCLUSIVE), and (c) the operator's danger predicate holding over the observed post-state read back through the injected read_state. The verdict is a pure predicate over the observed post-state, NEVER timing. SOUNDNESS BOUND, honestly stated: the danger predicate's fidelity — and that the read_state post-state genuinely reflects the PERSISTED state rather than an echoed input — is an operator assertion carried in the owner-signed spec (the accepted gated-workflow bound, identical in kind to the Wave-3.1 supply-chain-of-references caveat); the benign-twin control (a validating flow whose danger predicate is false) is defense-in-depth against operator error. NOT CLEAN-capable: a non-firing tamper cannot prove the ABSENCE of every price/parameter-validation flaw across every step and every parameter (an untested step/parameter stays INCONCLUSIVE, never a false negative and never a CLEAN). Without an owner-signed spec the class is INCONCLUSIVE; only owner-signed + a danger predicate that holds over the post-state mints.",
+      "target_fact_capable": true,
+      "target_clean_capable": false,
+      "target_downgrade_rationale": "Proving the ABSENCE of business-logic price/parameter manipulation is a coverage-complete capability over every workflow step, every tamperable parameter, and every persisted-state transition an application exposes, plus the operator intent that declares which post-states are dangerous — not this per-probe gated tamper's target — so CLEAN-capability is deliberately not pursued on this achieved-state branch.",
+      "blocking_work": "COVERAGE + OPERATOR INTENT, not a missing oracle: the workflow_abuse_oracle (a predicate over the observed post-state) and the gated tamper re-drive (the WRITE through the 0.3 owner-signed per-action approval + the read_state post-state readback) both exist and mint the FACT today for an owner-signed tamper probe whose danger predicate holds over the post-state (end-to-end verified against the broken vs correctly-guarded workflow twins). Raising coverage toward the (unreachable) CLEAN target requires enumerating every workflow step, every tamperable parameter, and every persisted-state transition across the app AND an operator declaration (in the owner-signed WorkflowSpec's TamperProbe set) of the tampered overrides and the danger predicate per step; until that enumeration is complete an un-driven step/parameter stays a LEAD, never a CLEAN.",
+      "oracle_version": "achieved_state",
+      "control_requirements": [
+        "warden_active_recon_gate",
+        "owner_signed_workflow_spec",
+        "gated_per_action_write_approval",
+        "operator_declared_tamper_overrides",
+        "operator_danger_predicate_over_post_state",
+        "authoritative_post_state_readback",
+        "benign_twin_correctly_priced_control"
+      ],
+      "evidence_surface": "composite",
+      "implementation_refs": [
+        "engine/crucible/framework/v2/scanner/bizlogic.py:probe_tamper",
+        "engine/crucible/framework/v2/verify/oracles.py:workflow_abuse_oracle",
+        "integration/vigil_integration/live/race_bizlogic_redrive.py:race_bizlogic_redrive"
+      ]
     }
   ]
 }

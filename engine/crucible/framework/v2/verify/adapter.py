@@ -455,6 +455,18 @@ class FindingContext(BaseModel):
     # routes to the dedicated ACHIEVED_STATE-sibling kind via its distinct `session_fixation` ctx key so
     # oracle_version(ACHIEVED_STATE) is untouched.
     session_fixation: dict[str, Any] | None = None
+    # workflow_abuse_oracle (Wave-4.4 gated-workflow ACHIEVED-STATE FACT — race limit-overrun CWE-362 /
+    # business-logic price-manipulation CWE-840, reusing the FROZEN ACHIEVED_STATE kind). The retained
+    # record the RUNNER (scanner.race / scanner.bizlogic, or live.race_bizlogic_redrive) captured, carrying
+    # the RAW bytes the oracle re-runs its verdict over — {mode ("race"|"tamper"), owner_signed_spec (the
+    # runner-attested owner-signature-verified fact — the FATAL-2-safe gated-workflow attestation the
+    # certificate binds), and for race: max_allowed + responses (raw {status, body} burst outcomes) +
+    # success_predicate (the operator's SEMANTIC per-response commit predicate the oracle RE-EVALUATES to
+    # re-derive the count — never a trusted integer); for tamper: observed_state + danger (the operator's
+    # danger predicate over the post-state)}. Race is COUNT-based, NEVER timing; a bare any-2xx count is a
+    # LEAD; no owner-signed spec is INCONCLUSIVE. No benchmark/scan/engage finding carries workflow_abuse,
+    # so appending it leaves the gate byte-identical; routes to ACHIEVED_STATE via its distinct ctx key.
+    workflow_abuse: dict[str, Any] | None = None
     # jwt_forgery_oracle (Workstream-B: a captured JWT is STRUCTURALLY FORGEABLE — judged on the token
     # ALONE, offline, zero traffic). jwt_token is the captured token string; jwt_candidate_keys are the
     # supplied secrets / RSA public keys the HMAC-reproduction proof is tried against (a weak-secret
@@ -636,6 +648,64 @@ class FindingContext(BaseModel):
             bug_class=bug_class,
             observed_evidence={str(k): v for k, v in dict(observed_evidence or {}).items()},
             predicate=dict(predicate),
+        )
+
+    @classmethod
+    def from_race_burst(
+        cls,
+        responses: "Sequence[Mapping[str, Any]]",
+        *,
+        max_allowed: int,
+        owner_signed_spec: bool,
+        success_predicate: Mapping[str, Any] | None = None,
+        bug_class: str = "request_race",
+    ) -> "FindingContext":
+        """A single-packet burst's RAW ``{status, body}`` responses plus the operator's SEMANTIC success
+        predicate and ``max_allowed``, for the gated ``workflow_abuse_oracle`` (COUNT-based, never timing).
+        ``owner_signed_spec`` is the runner-attested fact that the owner's Ed25519 signature over the
+        WorkflowSpec AST was verified before the burst; without it the oracle is INCONCLUSIVE. Without a
+        ``success_predicate`` the over-count is a LEAD (an any-2xx count is not proof of over-consumption).
+        The oracle RE-EVALUATES ``success_predicate`` over each retained response, so the count re-derives
+        offline from the raw bytes — never a trusted integer."""
+        return cls(
+            bug_class=bug_class,
+            workflow_abuse={
+                "mode": "race",
+                "owner_signed_spec": bool(owner_signed_spec),
+                "max_allowed": int(max_allowed),
+                # Bodies are coerced to text so the RETAINED context is JSON-safe (the certificate must
+                # serialize) and re-verifies offline byte-for-byte; the semantic predicate reads text.
+                "responses": [
+                    {"status": (r.get("status") if isinstance(r, Mapping) else None),
+                     "body": _coerce_text(r.get("body") if isinstance(r, Mapping) else r)}
+                    for r in (responses or [])
+                ],
+                **({"success_predicate": dict(success_predicate)} if success_predicate else {}),
+            },
+        )
+
+    @classmethod
+    def from_workflow_tamper(
+        cls,
+        observed_state: Mapping[str, Any],
+        danger: Mapping[str, Any],
+        *,
+        owner_signed_spec: bool,
+        bug_class: str = "business_logic",
+    ) -> "FindingContext":
+        """The observed post-state a tampering probe landed in plus the operator's ``danger`` predicate,
+        for the gated ``workflow_abuse_oracle``. ``owner_signed_spec`` is the runner-attested owner-
+        signature-verified fact (INCONCLUSIVE without it). The oracle fires iff ``danger`` holds over the
+        post-state — a validating / correctly-priced flow (the benign twin) fails it (channel-confirmed
+        clean). Both are JSON so the certificate re-verifies offline."""
+        return cls(
+            bug_class=bug_class,
+            workflow_abuse={
+                "mode": "tamper",
+                "owner_signed_spec": bool(owner_signed_spec),
+                "observed_state": {str(k): v for k, v in dict(observed_state or {}).items()},
+                "danger": dict(danger),
+            },
         )
 
     @classmethod
@@ -2140,6 +2210,8 @@ class FindingContext(BaseModel):
             ctx["csrf_achieved"] = self.csrf_achieved
         if self.session_fixation is not None:
             ctx["session_fixation"] = self.session_fixation
+        if self.workflow_abuse is not None:
+            ctx["workflow_abuse"] = self.workflow_abuse
         if self.jwt_token is not None:
             ctx["jwt_token"] = self.jwt_token
             if self.jwt_candidate_keys is not None:

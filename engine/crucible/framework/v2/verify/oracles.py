@@ -1920,6 +1920,195 @@ def session_fixation_oracle(observed: Any) -> OracleSignal:
 
 
 # ---------------------------------------------------------------------------
+# 4a-bis. Workflow abuse — race limit-overrun (COUNT-based) and business-logic /
+#         price-manipulation (a danger predicate over the observed post-state),
+#         BOTH gated behind the OWNER-SIGNED WorkflowSpec (Wave-4.4).
+# ---------------------------------------------------------------------------
+#
+# The WorkflowSpec AST is the operator-declared intent, cryptographically OWNER-SIGNED at the
+# gateway (the 0.3 owner-signed per-action approval / owner-signed workflow.json). That Ed25519
+# verification happens in the RUNNER (integration env, live/race_bizlogic_redrive.py) BEFORE any
+# state-changing step — it CANNOT happen here (FATAL-2: this engine module imports no vigil_core /
+# gateway), so the runner re-asserts the verified fact as ``owner_signed_spec: true`` in the
+# RETAINED record, which the evidence certificate binds (a tampered attestation breaks the cert at
+# re-verify). WITHOUT that attestation the oracle emits NO achieved_state for ANY input —
+# INCONCLUSIVE, never a false CLEAN and never a FACT (mirrors the Wave-3.4 certification gate).
+#
+# RACE (mode="race"): the verdict is COUNT-based, NEVER timing. A should-be-atomic action permitted
+# at most ``max_allowed`` time(s) must not commit more than that no matter how many concurrent
+# requests hit its check-then-act window. The oracle RE-DERIVES the success count from the RETAINED
+# RAW burst responses by RE-EVALUATING the operator-declared SEMANTIC ``success_predicate`` over EACH
+# response (never a trusted bare integer) and fires iff successes > max_allowed. A12: a bare any-2xx
+# count does NOT prove over-CONSUMPTION (a benignly-idempotent endpoint returns 2xx to every
+# concurrent request), so WITHOUT a semantic success_predicate the over-count is a LEAD, never a FACT.
+# successes<=max_allowed over a semantic predicate is a channel-confirmed CLEAN (properly locked).
+#
+# TAMPER (mode="tamper"): price/quantity parameter tampering. The oracle evaluates the operator-
+# declared ``danger`` predicate (a pure JSON AST) over the RETAINED observed post-state and fires iff
+# it holds — the tampered value landed in a dangerous persisted state. A correctly-priced / validating
+# flow (the benign twin) fails the predicate ⇒ channel-confirmed CLEAN. Timing is never consulted.
+
+_WORKFLOW_MODES = ("race", "tamper")
+
+
+def _workflow_signal(fired: bool, *, evidence: str, observed: dict, conf: float = 0.9,
+                     conclusive: bool = False) -> OracleSignal:
+    # kind is the FROZEN ACHIEVED_STATE (already in _ALL_ORACLES — this adds NO new OracleKind and
+    # oracle_version(ACHIEVED_STATE) is byte-identical, mirroring csrf_achieved_oracle): reachable ONLY
+    # via the fresh `workflow_abuse` ctx key no benchmark/scan/engage finding carries. A fire is always
+    # decisive; a NON-fire is ``conclusive`` ONLY for a channel-confirmed CLEAN (a properly-locked
+    # resource with successes<=max_allowed, or a validating flow whose danger predicate is false). A
+    # missing owner attestation / missing semantic predicate / malformed record is a LEAD/INCONCLUSIVE
+    # (conclusive=False) — never a CLEAN: absence of a positive channel is not proof the surface is safe.
+    return OracleSignal(kind=OracleKind.ACHIEVED_STATE, fired=fired,
+                        confidence=(conf if fired else 0.0),
+                        conclusive=(True if fired else conclusive),
+                        evidence=evidence, observed=observed)
+
+
+def _workflow_resp_pair(resp: Any) -> dict[str, Any]:
+    """Normalise one retained burst response into the ``{status, body}`` the operator's semantic
+    success predicate reads. Pure — never fetches anything."""
+    if isinstance(resp, Mapping):
+        return {"status": resp.get("status"), "body": _coerce_text(resp.get("body"))}
+    return {"status": None, "body": _coerce_text(resp)}
+
+
+def _workflow_race(obs: Mapping[str, Any], base: dict) -> OracleSignal:
+    try:
+        max_allowed = int(obs.get("max_allowed"))
+    except (TypeError, ValueError):
+        return _workflow_signal(
+            False, observed=base,
+            evidence="race: max_allowed is missing or not an integer — cannot adjudicate (inconclusive)")
+    if max_allowed < 0:
+        return _workflow_signal(
+            False, observed=base,
+            evidence="race: max_allowed is negative — malformed spec (inconclusive)")
+
+    responses = obs.get("responses")
+    if not isinstance(responses, (list, tuple)) or not responses:
+        return _workflow_signal(
+            False, observed=base,
+            evidence="race: no retained burst responses to re-derive the success count over (inconclusive)")
+
+    predicate = obs.get("success_predicate")
+    if not isinstance(predicate, Mapping) or not predicate:
+        # A12: a bare any-2xx count does not prove a should-be-atomic resource was over-CONSUMED — a
+        # benignly-idempotent endpoint returns 2xx to every concurrent request. Without an operator-
+        # declared SEMANTIC success predicate proving each COMMIT, the over-count is a LEAD, not a FACT.
+        return _workflow_signal(
+            False, observed={**base, "n_responses": len(responses), "semantic_predicate": False},
+            evidence=("race: no SEMANTIC success predicate supplied — an any-2xx concurrent-success count "
+                      "does not prove over-consumption (a benignly-idempotent endpoint returns 2xx to every "
+                      "request); this is a LEAD, not a FACT"))
+
+    # RE-DERIVE the success count from the RAW retained responses by re-evaluating the operator's
+    # semantic predicate over EACH one (never a trusted pre-computed integer). A malformed predicate over
+    # any response ⇒ inconclusive (fail closed, never fabricate a count).
+    successes = 0
+    try:
+        for resp in responses:
+            hit, _ = _eval_predicate(predicate, _workflow_resp_pair(resp))
+            if hit:
+                successes += 1
+    except (ValueError, TypeError) as e:
+        return _workflow_signal(
+            False, observed={**base, "n_responses": len(responses)},
+            evidence=f"race: malformed success predicate ({e}) — cannot re-derive the count (inconclusive)")
+
+    detail = {**base, "n_responses": len(responses), "successes": successes,
+              "max_allowed": max_allowed, "semantic_predicate": True}
+    if successes > max_allowed:
+        return _workflow_signal(
+            True, conf=0.9, observed=detail,
+            evidence=(f"limit-overrun race: a should-be-atomic action committed {successes} time(s) in a "
+                      f"single-packet burst — re-derived from the raw responses by the operator's SEMANTIC "
+                      f"success predicate — exceeding its permitted maximum of {max_allowed}. The check-then-"
+                      f"act window is unguarded (a TOCTOU double-spend / one-time-token reuse race)."))
+    return _workflow_signal(
+        False, conclusive=True, observed=detail,
+        evidence=(f"race: the action committed {successes} time(s) under the burst — within its permitted "
+                  f"maximum of {max_allowed} (re-derived by the semantic success predicate) — the resource "
+                  f"is properly locked; did not fire"))
+
+
+def _workflow_tamper(obs: Mapping[str, Any], base: dict) -> OracleSignal:
+    danger = obs.get("danger")
+    if not isinstance(danger, Mapping) or not danger:
+        return _workflow_signal(
+            False, observed=base,
+            evidence="tamper: no danger predicate supplied — cannot adjudicate the post-state (inconclusive)")
+    observed_state = obs.get("observed_state")
+    if not isinstance(observed_state, Mapping):
+        return _workflow_signal(
+            False, observed=base,
+            evidence="tamper: no observed post-state supplied — cannot adjudicate (inconclusive)")
+    try:
+        fired, evidence = _eval_predicate(danger, dict(observed_state))
+    except (ValueError, TypeError) as e:
+        return _workflow_signal(
+            False, observed=base,
+            evidence=f"tamper: malformed danger predicate ({e}) — cannot adjudicate (inconclusive)")
+    detail = {**base, "danger_eval": evidence, "observed_state": dict(observed_state)}
+    if fired:
+        return _workflow_signal(
+            True, conf=0.9, observed=detail,
+            evidence=(f"price/parameter tampering accepted into a dangerous persisted state: the operator's "
+                      f"danger predicate holds over the observed post-state ({evidence}). Server-side "
+                      f"validation of the price/quantity is missing, so a negative/overflow/tampered value "
+                      f"was driven straight into the persisted order/balance."))
+    return _workflow_signal(
+        False, conclusive=True, observed=detail,
+        evidence=(f"tamper: the danger predicate does NOT hold over the observed post-state ({evidence}) — "
+                  f"the flow validated/clamped the tampered value; did not fire"))
+
+
+def workflow_abuse_oracle(observed: Any) -> OracleSignal:
+    """Fire on a race limit-overrun (COUNT-based) or an accepted price/parameter tampering — BOTH
+    gated behind the OWNER-SIGNED WorkflowSpec attestation (Wave-4.4). ``observed`` is the retained
+    record ``scanner.race`` / ``scanner.bizlogic`` (or ``live.race_bizlogic_redrive``) captured:
+
+      * ``mode`` — ``"race"`` or ``"tamper"``;
+      * ``owner_signed_spec`` — the runner-attested fact that it cryptographically verified the owner's
+        Ed25519 signature over the canonical WorkflowSpec AST BEFORE running any state-changing step
+        (the FATAL-2-safe gated-workflow attestation; the certificate binds it);
+      * RACE: ``max_allowed`` (int), ``responses`` (the raw ``{status, body}`` burst outcomes), and
+        ``success_predicate`` (the operator's SEMANTIC per-response commit predicate — a pure JSON AST);
+      * TAMPER: ``observed_state`` (the retained post-state) and ``danger`` (the operator's danger
+        predicate — a pure JSON AST).
+
+    Adjudication: an unknown mode, a missing owner attestation, or a malformed record ⇒ INCONCLUSIVE;
+    a race with no semantic success predicate ⇒ LEAD (an any-2xx count is not proof of over-consumption);
+    a race whose semantic-predicate-re-derived successes exceed max_allowed ⇒ FIRE, else channel-
+    confirmed CLEAN (properly locked); a tamper whose danger predicate holds over the post-state ⇒ FIRE,
+    else channel-confirmed CLEAN (the flow validated the value). Pure + deterministic; never raises."""
+    obs = observed if isinstance(observed, Mapping) else {}
+    mode = _coerce_text(obs.get("mode")).strip().lower()
+    owner_signed = obs.get("owner_signed_spec") is True
+    base = {"mode": mode, "owner_signed_spec": owner_signed}
+
+    if mode not in _WORKFLOW_MODES:
+        return _workflow_signal(
+            False, observed=base,
+            evidence=(f"unknown workflow-abuse mode {mode!r} (expected one of {_WORKFLOW_MODES}) — "
+                      f"cannot adjudicate (inconclusive)"))
+
+    # FAIL CLOSED behind the owner-signed WorkflowSpec attestation. Without it the WorkflowSpec is not
+    # proven operator intent and the state-changing steps were not owner-approved ⇒ INCONCLUSIVE.
+    if not owner_signed:
+        return _workflow_signal(
+            False, observed=base,
+            evidence=("no OWNER-SIGNED WorkflowSpec attestation (owner_signed_spec != true) — the spec is "
+                      "not proven operator intent and the state-changing steps were not owner-approved; "
+                      "cannot mint (inconclusive, never a FACT)"))
+
+    if mode == "race":
+        return _workflow_race(obs, base)
+    return _workflow_tamper(obs, base)
+
+
+# ---------------------------------------------------------------------------
 # 4b. Error signature — a datastore/parser error a payload provoked (error-based)
 # ---------------------------------------------------------------------------
 

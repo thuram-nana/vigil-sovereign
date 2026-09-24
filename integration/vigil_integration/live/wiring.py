@@ -1570,6 +1570,17 @@ def _redrive_branch_for(bug_class: str) -> "Optional[str]":
         "jwt_forgery_accepted": "jwt_forgery_accepted.grant_differential",
         "oidc_forgery_accepted": "oidc_forgery_accepted.grant_differential",
         "saml_forgery_accepted": "saml_forgery_accepted.grant_differential",
+        # Wave 4.4 — race / business-logic gated-workflow re-drive (integration/vigil_integration/live/
+        # race_bizlogic_redrive.py), BOTH adjudicated by the ACHIEVED_STATE workflow_abuse_oracle behind an
+        # OWNER-SIGNED WorkflowSpec attestation. request_race fires COUNT-based (successes > max_allowed,
+        # re-derived by the operator's SEMANTIC success predicate over the retained raw burst responses —
+        # NEVER timing; a bare any-2xx count is a LEAD); the raw-socket burst is re-gated through
+        # validate_action (scope/charter/kill-switch/never-liftable egress floor) BEFORE any byte. business_logic
+        # fires when the operator's danger predicate holds over the observed post-state, the tampered WRITE
+        # riding the 0.3 owner-signed per-action approval. No owner-signed spec ⇒ INCONCLUSIVE; a correctly-
+        # locked resource / correctly-priced flow (the benign twin) ⇒ a channel-confirmed non-fire.
+        "request_race": "request_race.limit_overrun",
+        "business_logic": "business_logic.price_manipulation",
     }
     branch = mapping.get(normalize_bug_class(bug_class))
     return branch if branch in branch_ids() else None
