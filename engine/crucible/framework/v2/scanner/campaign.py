@@ -857,7 +857,11 @@ class WebScanCampaign:
             if not self._arsenal_host_allowed(target_url):
                 continue
             try:
-                result = race_burst(base, action_path, max_allowed=int(max_allowed))
+                # The RAW-SOCKET burst is re-gated INSIDE raw_race (Wave-4.4): pass the SAME
+                # fail-closed scope/charter/kill-switch/egress gate the host check above used, so
+                # the engine authorizes the burst before any byte leaves the box (defense in depth).
+                result = race_burst(base, action_path, max_allowed=int(max_allowed),
+                                    authorize=self._arsenal_host_allowed)
             except Exception:
                 continue
             if not result.over_run:

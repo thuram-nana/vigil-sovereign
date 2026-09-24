@@ -86,14 +86,24 @@ BUG_CLASS_ORACLES: dict[str, tuple[OracleKind, ...]] = {
     "stored_xss": (OracleKind.DOM_EXECUTION,),
     "cross_site_websocket_hijacking": (OracleKind.ACHIEVED_STATE,),
     "websocket_injection": (OracleKind.SIDE_EFFECT, OracleKind.DIFFERENTIAL_RESPONSE),
+    # request_race — the single-packet limit-overrun race (scanner.race, OPT-IN, gated-workflow). The
+    # verdict is COUNT-based, NEVER timing. Wave-4.4 routes it through the gated workflow_abuse_oracle via
+    # the fresh `workflow_abuse` ctx key (owner-signed WorkflowSpec attestation + the raw burst responses +
+    # the operator's SEMANTIC success predicate the oracle re-evaluates to re-derive the commit count):
+    # successes > max_allowed over a SEMANTIC predicate is a FACT; a bare any-2xx count is a LEAD; no
+    # owner-signed spec is INCONCLUSIVE. The generic predicate/expected-state arms still serve any legacy
+    # `predicate`/`observed_evidence` context. Reuses the FROZEN ACHIEVED_STATE kind (adds NO new
+    # OracleKind, _ALL_ORACLES stays 15) and sends 0 benchmark requests, so `make gate` stays byte-identical.
     "request_race": (OracleKind.ACHIEVED_STATE,),
     # business-logic / workflow abuse (scanner.bizlogic, OPT-IN — needs an operator
     # workflow spec, NOT in DEFAULT_CHECKS): a skipped required step, a sequentially
     # replayed one-time action, or price/qty tampering is a FACT only when the observed
-    # post-state proves the illegitimate state was reached. The predicate/achieved-state
-    # oracle judges the raw post-state — the detector never self-certifies. Additive row:
-    # it routes an opt-in class and sends 0 benchmark requests, so `make gate` stays
-    # byte-identical.
+    # post-state proves the illegitimate state was reached. Wave-4.4 routes the price/parameter-tampering
+    # probe through the gated workflow_abuse_oracle via the fresh `workflow_abuse` ctx key (owner-signed
+    # WorkflowSpec attestation + the observed post-state + the operator's danger predicate); the
+    # step-skip / replay probes still use the generic predicate arm. The oracle judges the raw post-state
+    # — the detector never self-certifies. Additive row: it routes an opt-in class and sends 0 benchmark
+    # requests, so `make gate` stays byte-identical.
     "business_logic": (OracleKind.ACHIEVED_STATE,),
     "ssrf": (OracleKind.OOB_CALLBACK,),
     "xxe": (OracleKind.OOB_CALLBACK, OracleKind.SIDE_EFFECT),
@@ -1013,6 +1023,17 @@ class OracleVerifier:
             #    NEVER merely that a token is unenforced (the weaker `csrf` posture class).
             if "csrf_achieved" in ctx:
                 return oracles.csrf_achieved_oracle(ctx["csrf_achieved"])
+            # -- Wave-4.4 WORKFLOW ABUSE — race limit-overrun (COUNT-based) / business-logic
+            #    price-manipulation (a danger predicate over the observed post-state), BOTH gated behind the
+            #    OWNER-SIGNED WorkflowSpec. Reuses the FROZEN ACHIEVED_STATE kind, fires ONLY when the ctx
+            #    carries the fresh `workflow_abuse` key (the RUNNER's retained record — raw burst responses +
+            #    operator semantic predicate for race, observed post-state + danger predicate for tamper, plus
+            #    the owner-signed attestation). No benchmark/scan/engage finding carries that key, so this
+            #    branch is inert on the default gate path and `make gate` stays byte-identical; an ordinary
+            #    ACHIEVED_STATE finding (expected_state / predicate) is handled by the arms above and never
+            #    reaches here. NEVER fires on timing (race is COUNT-based) or a bare any-2xx count (a LEAD).
+            if "workflow_abuse" in ctx:
+                return oracles.workflow_abuse_oracle(ctx["workflow_abuse"])
             return None
         if kind is OracleKind.SESSION_FIXATION:
             # Wave-3.2 session fixation (CWE-384) — its OWN dedicated kind (held OUT of the frozen

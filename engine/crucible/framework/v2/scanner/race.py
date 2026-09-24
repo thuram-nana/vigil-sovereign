@@ -37,6 +37,7 @@ from typing import Callable
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from ..common.errors import SovereigntyViolation
 from ..verify.adapter import FindingContext
 from ..verify.confirmation import ConfirmedFinding, confirm_finding
 
@@ -44,7 +45,43 @@ from ..verify.confirmation import ConfirmedFinding, confirm_finding
 # take effect?". Default: any 2xx status counts as a success.
 SuccessPredicate = Callable[["int | None", bytes], bool]
 
+# A pre-flight authorization gate over the target URL: returns True iff the RAW-SOCKET
+# burst is authorized to leave the box (scope + charter + kill-switch + never-liftable
+# egress floor + posture). It is fail-closed by contract — a False OR a raised exception
+# means no byte is sent.
+AuthorizeGate = Callable[[str], bool]
+
 _USER_AGENT = "CRUCIBLE-race/1.0 (localhost single-packet race)"
+
+
+def charter_authorize_gate(
+    slug: str, *, posture: str = "TEST", killswitch: "object | None" = None,
+) -> AuthorizeGate:
+    """Build the standing scope/charter/kill-switch/posture authorization gate for a
+    RAW-SOCKET race burst, bound to an engagement ``slug`` — the SAME chain
+    ``agents.http_executor`` runs before every gated fetch, and identical in shape to the
+    ``engage`` runner's ``arsenal_authz``. The kill-switch is checked FIRST (so a tripped
+    switch halts even an in-scope target), then :func:`agents.scope_gate.validate_action`
+    (which itself enforces the never-liftable protected-domain egress floor, the charter
+    signature, and scope). Fail-closed: any error is a refusal, never an allow.
+
+    Imports are FUNCTION-LOCAL to keep ``scanner.race`` importable without pulling the
+    agents/authority stack at module load (and to avoid any import cycle)."""
+    from ..agents.scope_gate import validate_action  # noqa: PLC0415
+    from ..authority import KillSwitch  # noqa: PLC0415
+
+    ks = killswitch if killswitch is not None else KillSwitch(slug)
+
+    def authorize(url: str) -> bool:
+        try:
+            if ks.is_tripped():
+                return False
+            return bool(validate_action(
+                slug=slug, method="POST", target_url=url, posture=posture).allowed)
+        except Exception:
+            return False   # fail closed on any gate error — never assume authorized
+
+    return authorize
 
 
 def _default_success(status: "int | None", body: bytes) -> bool:
@@ -106,6 +143,8 @@ def raw_race(
     count: int,
     *,
     timeout: float = 6.0,
+    authorize: AuthorizeGate,
+    target_url: str,
 ) -> list[tuple["int | None", bytes, float]]:
     """Fire `count` copies of `request_bytes` with minimal dispersion.
 
@@ -117,7 +156,29 @@ def raw_race(
     that failed to connect or produced no parseable response. `elapsed` is
     measured from the barrier release (final-byte send) to full response read,
     so it reflects only the raced portion, not connection setup.
+
+    SECURITY GATE (Wave-4.4): this engine speaks bytes on the wire via RAW SOCKETS, so it
+    BYPASSES ``SovereignHttpxTransport`` and its egress allowlist. Left ungated that is an
+    egress hole — a burst could reach an out-of-scope / kill-switched / protected host with
+    no check. So it is re-gated here, INSIDE the engine (defense in depth, not only at the
+    caller): ``authorize(target_url)`` — the scope/charter/kill-switch/never-liftable egress
+    floor/posture chain (see :func:`charter_authorize_gate`) — is evaluated BEFORE any socket
+    is opened and FAILS CLOSED. A False verdict or a gate error raises
+    :class:`SovereigntyViolation` and NO byte leaves the box; the callers (``race_burst`` /
+    ``scanner.campaign``) supply a ``validate_action``-backed gate.
     """
+    # Fail-closed authorization BEFORE any traffic. A gate error is a refusal, never an allow.
+    try:
+        allowed = bool(authorize(target_url))
+    except Exception as exc:  # noqa: BLE001 — any gate error is a refusal
+        raise SovereigntyViolation(
+            f"race burst refused: authorization gate error for {target_url!r}: "
+            f"{type(exc).__name__}: {exc}") from exc
+    if not allowed:
+        raise SovereigntyViolation(
+            f"race burst refused: {target_url!r} failed the scope/charter/kill-switch/"
+            f"egress-floor gate — raw-socket burst not authorized")
+
     if count < 1:
         return []
     if not request_bytes:
@@ -198,6 +259,23 @@ def _build_request(host: str, port: int, action_path: str, *, body: bytes = b"")
     ).encode("latin-1") + body
 
 
+def _resolve_authorize(
+    authorize: "AuthorizeGate | None", slug: "str | None", posture: str,
+    killswitch: "object | None",
+) -> AuthorizeGate:
+    """The effective pre-flight gate for a burst: an explicit ``authorize`` callable wins
+    (``scanner.campaign`` passes its ``_arsenal_host_allowed``); otherwise one is built from
+    a signed engagement ``slug`` via :func:`charter_authorize_gate`. Neither ⇒ fail closed
+    (a ``ValueError`` — a raw-socket burst may NEVER run without an authorization gate)."""
+    if authorize is not None:
+        return authorize
+    if slug:
+        return charter_authorize_gate(slug, posture=posture, killswitch=killswitch)
+    raise ValueError(
+        "race burst requires an authorization gate: pass slug=<signed engagement> or "
+        "authorize=<scope/charter/kill-switch gate> — a raw-socket burst is never ungated")
+
+
 def race_burst(
     base_url: str,
     action_path: str,
@@ -207,17 +285,30 @@ def race_burst(
     body: bytes = b"",
     success_predicate: SuccessPredicate | None = None,
     timeout: float = 6.0,
+    slug: "str | None" = None,
+    authorize: "AuthorizeGate | None" = None,
+    posture: str = "TEST",
+    killswitch: "object | None" = None,
 ) -> RaceResult:
     """Fire a single-packet burst of `count` requests at `action_path` and count
     the successes. Pure measurement — no oracle, no confirmation; `race_check`
-    layers the confirmation authority on top."""
+    layers the confirmation authority on top.
+
+    The RAW-SOCKET burst is authorized fail-closed BEFORE any byte leaves the box: pass a
+    signed engagement ``slug`` (a ``validate_action``-backed scope/charter/kill-switch/egress
+    gate is built for it) or an explicit ``authorize`` callable (``scanner.campaign`` passes
+    its own gate). Without either the call raises ``ValueError`` — never an ungated burst."""
     predicate = success_predicate or _default_success
     parts = urllib.parse.urlsplit(base_url)
     host = parts.hostname or "127.0.0.1"
     port = parts.port or (80 if parts.scheme != "https" else 443)
+    gate = _resolve_authorize(authorize, slug, posture, killswitch)
+    target_url = urllib.parse.urljoin(
+        base_url if base_url.endswith("/") else base_url + "/", action_path.lstrip("/"))
 
     request_bytes = _build_request(host, port, action_path, body=body)
-    outcomes = raw_race(host, port, request_bytes, count, timeout=timeout)
+    outcomes = raw_race(host, port, request_bytes, count, timeout=timeout,
+                        authorize=gate, target_url=target_url)
 
     statuses = [status for status, _, _ in outcomes]
     successes = sum(1 for status, b, _ in outcomes if predicate(status, b))
@@ -244,6 +335,10 @@ def race_check(
     body: bytes = b"",
     success_predicate: SuccessPredicate | None = None,
     timeout: float = 6.0,
+    slug: "str | None" = None,
+    authorize: "AuthorizeGate | None" = None,
+    posture: str = "TEST",
+    killswitch: "object | None" = None,
 ) -> ConfirmedFinding | None:
     """Race `action_path` and confirm a `request_race` finding iff the action
     overran its atomicity limit.
@@ -268,6 +363,10 @@ def race_check(
         body=body,
         success_predicate=success_predicate,
         timeout=timeout,
+        slug=slug,
+        authorize=authorize,
+        posture=posture,
+        killswitch=killswitch,
     )
 
     if not result.over_run:

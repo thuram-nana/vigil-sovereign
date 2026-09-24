@@ -50,6 +50,7 @@ import json
 import re
 import secrets
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Iterator
 from urllib.parse import parse_qs, urlsplit
@@ -161,6 +162,34 @@ _ACCOUNTS: dict[str, tuple[str, str]] = {
 _ACCOUNT_SESSIONS: dict[str, str] = {"alice-sess": "1", "bob-sess": "2", "carol-sess": "3"}
 # account id -> tenant. alice(1)+bob(2) share a tenant (the intra-tenant BOLA); carol(3) is in another.
 _ACCOUNT_TENANTS: dict[str, str] = {"1": "acme", "2": "acme", "3": "globex"}
+
+
+# ---------------------------------------------------------------------------
+# Race / business-logic price-manipulation fixtures (Wave 4.4). BOTH are gated-workflow +
+# owner-signed classes: the default GET-only benchmark crawl never POSTs to them, so they add
+# 0 scored findings and `make gate` + the signed recall baseline stay byte-identical (they are
+# NOT in benchmark_corpus().expected). Exercised only by the deep gated race/bizlogic assertion
+# (scanner/tests/test_race_bizlogic_benchmark.py) driving the owner-signed re-drive.
+#   * RACE — a single-use coupon. /race/redeem has a NON-atomic check-then-act window (it
+#     over-redeems under a synchronised burst) and echoes the SEMANTIC success marker in the body
+#     of every WIN (a real commit, not a bare 2xx); /race/redeem-locked is the BENIGN TWIN (a lock
+#     closes the window, so exactly one request wins and successes <= max_allowed — no race fire).
+#   * TAMPER — an order cart. /order/add persists whatever qty it is handed (a negative quantity is
+#     a dangerous credit); /order/add-validated is the BENIGN TWIN (rejects a non-positive qty, so
+#     the danger predicate is false — no tamper fire). /order/state is the authoritative post-state
+#     readback (JSON, so the danger predicate reads a typed qty). /race/reset + /order/reset restore
+#     a fresh state between probes.
+_RACE_SUCCESS_MARKER = "COUPON-REDEEMED-OK"   # appears ONLY on a genuine coupon redemption (a real commit)
+_RACE_LOCK = threading.Lock()
+_RACE_STATE: dict[str, object] = {"redeemed": False, "redemptions": 0}
+_ORDER_STATE: dict[str, int] = {"qty": 0}
+
+
+def _to_int(value: str, default: int) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
 
 
 def _account_caller(cookie_header: str) -> str | None:
@@ -660,6 +689,83 @@ class BenchmarkHandler(BaseHTTPRequestHandler):
         body = ("<h2>state</h2><ul>"
                 + "".join(f"<li>{html.escape(m)}</li>" for m in _CSRF_APPLIED_PROTECTED) + "</ul>")
         self._respond(200, _page("State", body))
+
+    # -- Wave 4.4 race / business-logic fixtures ------------------------------------------------
+    def _drain_body(self) -> None:
+        length = int(self.headers.get("Content-Length", "0") or "0")
+        if length:
+            self.rfile.read(length)
+
+    def _post_form(self) -> "dict[str, list[str]]":
+        length = int(self.headers.get("Content-Length", "0") or "0")
+        raw = self.rfile.read(length).decode("utf-8", "replace") if length else ""
+        return parse_qs(raw, keep_blank_values=True)
+
+    def _race_redeem(self) -> None:
+        # PLANTED race bug (CWE-362). A single-use coupon guarded by a NON-atomic read-modify-write:
+        # concurrent requests all read redeemed==False before any writes, so the coupon is redeemed
+        # more than once under a synchronised burst. Every WIN echoes the SEMANTIC success marker (a
+        # real commit — the semantic predicate the oracle re-evaluates keys on it, never a bare 2xx).
+        self._drain_body()
+        if _RACE_STATE["redeemed"]:          # check ...
+            self._respond(409, _page("Coupon", "<p>already redeemed</p>"))
+            return
+        time.sleep(0.10)                     # ... the check-then-act window ...
+        _RACE_STATE["redeemed"] = True       # ... then act (too late to be atomic).
+        _RACE_STATE["redemptions"] = int(_RACE_STATE["redemptions"]) + 1
+        self._respond(200, _page("Coupon", f"<p>{_RACE_SUCCESS_MARKER}</p>"))
+
+    def _race_redeem_locked(self) -> None:
+        # BENIGN TWIN: the same read-modify-write wrapped in a lock — exactly one request wins no
+        # matter the concurrency (successes <= max_allowed), so the count-based oracle NEVER fires.
+        self._drain_body()
+        with _RACE_LOCK:
+            if _RACE_STATE["redeemed"]:
+                self._respond(409, _page("Coupon", "<p>already redeemed</p>"))
+                return
+            time.sleep(0.10)
+            _RACE_STATE["redeemed"] = True
+            _RACE_STATE["redemptions"] = int(_RACE_STATE["redemptions"]) + 1
+            self._respond(200, _page("Coupon", f"<p>{_RACE_SUCCESS_MARKER}</p>"))
+
+    def _race_reset(self) -> None:
+        self._drain_body()
+        _RACE_STATE["redeemed"] = False
+        _RACE_STATE["redemptions"] = 0
+        self._respond(200, _page("Coupon", "<p>reset</p>"))
+
+    def _order_add(self) -> None:
+        # PLANTED bug (business-logic price/parameter tampering, CWE-472/CWE-840). Persists whatever
+        # qty it is handed — a negative quantity is a dangerous credit (no server-side validation).
+        fields = self._post_form()
+        _ORDER_STATE["qty"] = _to_int(fields.get("qty", ["1"])[0], 1)
+        self._respond(200, _page("Order", f"<p>qty={_ORDER_STATE['qty']}</p>"))
+
+    def _order_add_validated(self) -> None:
+        # BENIGN TWIN: the SAME write, but it rejects a non-positive qty, so the operator's danger
+        # predicate (qty == -5) is false over the post-state and the tamper oracle NEVER fires.
+        fields = self._post_form()
+        qty = _to_int(fields.get("qty", ["1"])[0], 1)
+        if qty <= 0:
+            self._respond(400, _page("Order", "<p>quantity must be positive</p>"))
+            return
+        _ORDER_STATE["qty"] = qty
+        self._respond(200, _page("Order", f"<p>qty={qty}</p>"))
+
+    def _order_reset(self) -> None:
+        self._drain_body()
+        _ORDER_STATE["qty"] = 0
+        self._respond(200, _page("Order", "<p>reset</p>"))
+
+    def _order_state(self) -> None:
+        # Authoritative post-state readback — JSON so the danger predicate reads a TYPED qty (never
+        # an echo of a write request). This is the observable post-state the tamper oracle judges.
+        body = json.dumps({"qty": int(_ORDER_STATE["qty"])}).encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
 
     # -- two-identity access control (Wave 3.1) ----------------------------
 
@@ -1214,6 +1320,11 @@ _ROUTES = {
     # directive is echoed verbatim as an inert comment). Exercised by integration/tests/test_ssi_redrive.py.
     "/ssi": BenchmarkHandler._ssi,
     "/ssi/safe": BenchmarkHandler._ssi_safe,
+    # Business-logic price-manipulation authoritative post-state readback (Wave 4.4). DELIBERATELY
+    # NOT linked from the index and never issued by the default GET-only crawl (the tamper fire
+    # needs the operator's owner-signed WorkflowSpec + the 0.3-gated write), so the default corpus +
+    # signed baseline stay byte-identical. Exercised only by the deep gated race/bizlogic assertion.
+    "/order/state": BenchmarkHandler._order_state,
 }
 
 
@@ -1231,6 +1342,16 @@ _POST_ROUTES = {
     # default GET-only benchmark crawl never issues a POST, so this leaves `make gate` byte-identical.
     "/sessfix/login": BenchmarkHandler._sessfix_login,           # VULNERABLE: keeps the client-fixed id
     "/sessfix/rotate/login": BenchmarkHandler._sessfix_rotate_login,   # SAFE TWIN: rotates the id at login
+    # Race / business-logic price-manipulation state-changing writes (Wave 4.4). The default GET-only
+    # benchmark crawl never issues a POST, so these leave `make gate` + the signed baseline byte-identical;
+    # exercised only by the deep gated race/bizlogic assertion (scanner/tests/test_race_bizlogic_benchmark.py)
+    # driving the owner-signed re-drive (the raw-socket burst is itself re-gated through validate_action).
+    "/race/redeem": BenchmarkHandler._race_redeem,               # VULNERABLE: non-atomic, over-redeems
+    "/race/redeem-locked": BenchmarkHandler._race_redeem_locked,  # BENIGN TWIN: locked, exactly one win
+    "/race/reset": BenchmarkHandler._race_reset,
+    "/order/add": BenchmarkHandler._order_add,                   # VULNERABLE: persists a negative qty
+    "/order/add-validated": BenchmarkHandler._order_add_validated,  # BENIGN TWIN: rejects a non-positive qty
+    "/order/reset": BenchmarkHandler._order_reset,
 }
 
 
