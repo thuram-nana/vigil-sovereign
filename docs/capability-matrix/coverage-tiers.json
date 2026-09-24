@@ -165,6 +165,13 @@
       "evidence": "Real local process — the loopback benchmark app over a real connection; a PRIVATE-READ REDUCTION proves a pre-set session id survived authentication (the guarded rotate-on-login twin produces nothing)"
     },
     {
+      "kind": "mfa_bypass",
+      "name": "MFA bypass",
+      "family": "core",
+      "tier": "local",
+      "evidence": "Real local process — the loopback benchmark app over a real connection; under a fail-closed operator attestation, a PRIVATE-READ REDUCTION proves a factor-1-only session read a post-MFA-gated victim datum (the factor-2-enforcing twin produces nothing)"
+    },
+    {
       "kind": "timing",
       "name": "Statistical timing test",
       "family": "core",

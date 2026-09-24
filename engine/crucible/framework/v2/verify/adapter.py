@@ -467,6 +467,23 @@ class FindingContext(BaseModel):
     # LEAD; no owner-signed spec is INCONCLUSIVE. No benchmark/scan/engage finding carries workflow_abuse,
     # so appending it leaves the gate byte-identical; routes to ACHIEVED_STATE via its distinct ctx key.
     workflow_abuse: dict[str, Any] | None = None
+    # mfa_bypass_oracle (Wave-4.5 ACHIEVED-STATE FACT — CWE-287/CWE-308, its OWN OracleKind.MFA_BYPASS). The
+    # retained record scanner.mfa.MfaBypassCheck captured through the gated send carries the RAW bytes the
+    # oracle re-runs its FAIL-CLOSED + PRIVATE-READ adjudication over — {operator_attestation (the three-part
+    # HARD certification gate: mfa_enrolled_account + factor1_only_presented + post_mfa_resource_certified),
+    # private_discriminator (D, the victim-PRIVATE post-MFA-gated datum), factor1_view (status/body of the
+    # factor-1-only session's read of the post-MFA resource), owner_view (the fully post-MFA owner's
+    # authoritative POSITIVE reference), pre_mfa_ref (a SAME-SHAPE substantive-2xx read by an OTHER not-post-MFA
+    # identity — the DECISIVE negative reference), logged_out_ref (a same-URL no-session gating baseline),
+    # logged_out_markers, logged_out_statuses} — never a pre-computed authenticated bool. The oracle fires ONLY
+    # under the complete attestation (LOCK 1) AND when D is PRESENT in the factor-1-only read AND in the
+    # post-MFA owner's read yet PROVABLY ABSENT from the SUBSTANTIVE SAME-SHAPE other-identity reference and a
+    # valid no-session baseline (LOCK 2 — the private-read reduction). WITHOUT the attestation NO fire for ANY
+    # input (a LEAD); a benign app that enforces factor-2 (D absent from the factor-1-only read) is a
+    # channel-confirmed CLEAN. No benchmark/scan/engage finding carries mfa_bypass, so appending it leaves the
+    # gate byte-identical; routes to the dedicated kind via its distinct `mfa_bypass` ctx key so
+    # oracle_version(ACHIEVED_STATE) is untouched.
+    mfa_bypass: dict[str, Any] | None = None
     # jwt_forgery_oracle (Workstream-B: a captured JWT is STRUCTURALLY FORGEABLE — judged on the token
     # ALONE, offline, zero traffic). jwt_token is the captured token string; jwt_candidate_keys are the
     # supplied secrets / RSA public keys the HMAC-reproduction proof is tried against (a weak-secret
@@ -1972,6 +1989,80 @@ class FindingContext(BaseModel):
             },
         )
 
+    @classmethod
+    def from_mfa_bypass(
+        cls,
+        *,
+        mfa_enrolled_account: bool = False,
+        factor1_only_presented: bool = False,
+        post_mfa_resource_certified: bool = False,
+        private_discriminator: str | None = None,
+        factor1_view: Any = None,
+        owner_view: Any = None,
+        pre_mfa_ref: Any = None,
+        logged_out_ref: Any = None,
+        logged_out_markers: Any = (),
+        logged_out_statuses: Any = (),
+        bug_class: str = "mfa_bypass",
+    ) -> "FindingContext":
+        """The retained MFA-bypass record for the MFA-bypass oracle (OracleKind.MFA_BYPASS, CWE-287/CWE-308). It
+        carries the RAW bytes the oracle re-runs its FAIL-CLOSED + PRIVATE-READ adjudication over — never a
+        pre-computed authenticated bool.
+
+        The three operator attestation booleans form the HARD certification gate (each must be strict ``True``):
+        ``mfa_enrolled_account`` (the account has a second factor ENROLLED), ``factor1_only_presented`` (VIGIL's
+        session completed ONLY factor-1 — no OTP/WebAuthn/push), and ``post_mfa_resource_certified`` (the read
+        resource/datum is genuinely gated BEHIND factor-2 — the lock that closes the killer FP of an
+        intentionally factor-1 page). ``private_discriminator`` (D) is the operator's genuine victim-PRIVATE
+        post-MFA-gated datum — the achieved-state proof. ``factor1_view`` is ``{status, body}`` of the post-MFA
+        resource read carrying ONLY the factor-1 session; ``owner_view`` is the SAME resource read by the fully
+        post-MFA-authenticated owner (the POSITIVE reference — D must be PRESENT); ``pre_mfa_ref`` is the SAME
+        resource read by an OTHER not-post-MFA identity (the DECISIVE SAME-SHAPE negative reference — a
+        substantive 2xx from which D must be ABSENT); ``logged_out_ref`` is the SAME resource with NO session
+        (the no-session gating baseline); ``logged_out_markers`` / ``logged_out_statuses`` are the operator's
+        decisive not-authenticated signals. The oracle fires ONLY under the complete attestation AND when D is
+        PRESENT in the factor-1-only read AND in the post-MFA owner's read yet PROVABLY ABSENT from the
+        SUBSTANTIVE SAME-SHAPE other-identity reference and a valid no-session baseline. An incomplete
+        attestation, no/invalid/reflected D, a missing positive or same-shape negative reference, D present in a
+        negative reference, or an undecidable differential are LEAD / clean / inconclusive — never a FACT."""
+        def _view(v: Any) -> "dict | None":
+            if not isinstance(v, Mapping):
+                return None
+            return {"status": v.get("status"), "body": _coerce_text(v.get("body"))}
+
+        def _strs(seq: Any) -> "list[str]":
+            if isinstance(seq, (list, tuple, set, frozenset)):
+                return [_coerce_text(x) for x in seq]
+            return []
+
+        def _ints(seq: Any) -> "list[int]":
+            out: list[int] = []
+            if isinstance(seq, (list, tuple, set, frozenset)):
+                for x in seq:
+                    try:
+                        out.append(int(x))
+                    except (TypeError, ValueError):
+                        continue
+            return out
+
+        return cls(
+            bug_class=bug_class,
+            mfa_bypass={
+                "operator_attestation": {
+                    "mfa_enrolled_account": mfa_enrolled_account is True,
+                    "factor1_only_presented": factor1_only_presented is True,
+                    "post_mfa_resource_certified": post_mfa_resource_certified is True,
+                },
+                "private_discriminator": None if private_discriminator is None else _coerce_text(private_discriminator),
+                "factor1_view": _view(factor1_view),
+                "owner_view": _view(owner_view),
+                "pre_mfa_ref": _view(pre_mfa_ref),
+                "logged_out_ref": _view(logged_out_ref),
+                "logged_out_markers": _strs(logged_out_markers),
+                "logged_out_statuses": _ints(logged_out_statuses),
+            },
+        )
+
     # -- AEGIS builders (the defensive dual) -------------------------------
 
     @classmethod
@@ -2212,6 +2303,8 @@ class FindingContext(BaseModel):
             ctx["session_fixation"] = self.session_fixation
         if self.workflow_abuse is not None:
             ctx["workflow_abuse"] = self.workflow_abuse
+        if self.mfa_bypass is not None:
+            ctx["mfa_bypass"] = self.mfa_bypass
         if self.jwt_token is not None:
             ctx["jwt_token"] = self.jwt_token
             if self.jwt_candidate_keys is not None:

@@ -425,7 +425,7 @@ registry — see W16-STD-2(d) — not maintained by hand, which is why it can no
 prose here had):
 
 <!-- BEGIN GENERATED coverage-tiers-sentence (source: docs/capability-matrix/coverage-tiers.json; regenerate: python3 docs/capability-matrix/gen_coverage_tiers.py) -->
-Of the 44 registered oracle kinds (the ``OracleKind`` detector registry), 3 external (real bytes from a third-party target), 2 own-infra (real infrastructure the system builds and destroys), 15 loopback (a real local service over a real socket), and 24 fixtures-only (hand-written evidence). This split is GENERATED from docs/capability-matrix/coverage-tiers.json (keyed by the OracleKind registry) by docs/capability-matrix/gen_coverage_tiers.py — not maintained by hand — and docs/tests/test_coverage_tiers_drift.py asserts it matches the registry.
+Of the 45 registered oracle kinds (the ``OracleKind`` detector registry), 3 external (real bytes from a third-party target), 2 own-infra (real infrastructure the system builds and destroys), 16 loopback (a real local service over a real socket), and 24 fixtures-only (hand-written evidence). This split is GENERATED from docs/capability-matrix/coverage-tiers.json (keyed by the OracleKind registry) by docs/capability-matrix/gen_coverage_tiers.py — not maintained by hand — and docs/tests/test_coverage_tiers_drift.py asserts it matches the registry.
 <!-- END GENERATED coverage-tiers-sentence -->
 
 The external tier is testasp.vulnweb.com plus the GitHub live-fire; the own-infrastructure tier is the

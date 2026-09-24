@@ -271,6 +271,11 @@ _STANDARDS: dict[str, ControlMapping] = {
     # ATT&CK T1539 (Steal Web Session Cookie) — a fixed/known session id becomes a valid authenticated session.
     "session_fixation": _m("A07:2021", ("CWE-384",), pci=_AUTH_PCI, soc2=_AUTH_SOC2, iso=_AUTH_ISO,
                            attack=("T1539",)),
+    # MFA bypass (Wave-4.5): a factor-1-only session reaches a resource the app gates behind factor-2
+    # (CWE-287 improper authentication + CWE-308 use of single-factor authentication). ATT&CK T1078 (Valid
+    # Accounts) + T1556.006 (Modify Authentication Process: Multi-Factor Authentication).
+    "mfa_bypass": _m("A07:2021", ("CWE-287", "CWE-308"), pci=_AUTH_PCI, soc2=_AUTH_SOC2, iso=_AUTH_ISO,
+                     attack=("T1078", "T1556.006")),
     "identity_misconfiguration": _m("A07:2021", ("CWE-308", "CWE-1392"), pci=_AUTH_PCI, soc2=_AUTH_SOC2,
                                     iso=_AUTH_ISO, attack=("T1078",)),
     "saml_signature_wrapping": _m("A07:2021", ("CWE-347", "CWE-290"), pci=_AUTH_PCI, soc2=_AUTH_SOC2, iso=_AUTH_ISO,

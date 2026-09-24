@@ -86,6 +86,11 @@ _ORACLE_FNS: dict[OracleKind, tuple[Callable[..., Any], ...]] = {
     # Wave-3.2 session fixation (CWE-384) — its OWN dedicated kind so editing its differential body changes
     # ONLY oracle_version(SESSION_FIXATION), never oracle_version(ACHIEVED_STATE).
     OracleKind.SESSION_FIXATION: (oracles.session_fixation_oracle,),
+    # Wave-4.5 MFA bypass (CWE-287/CWE-308) — its OWN dedicated kind. The transitive-closure version machinery
+    # picks up the shared _sfx_private_read_achieved differential it reuses, so editing that helper changes BOTH
+    # oracle_version(MFA_BYPASS) and oracle_version(SESSION_FIXATION); editing mfa_bypass_oracle changes ONLY
+    # oracle_version(MFA_BYPASS) (session_fixation_oracle does not reference it), never ACHIEVED_STATE.
+    OracleKind.MFA_BYPASS: (oracles.mfa_bypass_oracle,),
 }
 
 

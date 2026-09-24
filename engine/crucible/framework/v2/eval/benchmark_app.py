@@ -93,6 +93,25 @@ def _sessfix_private(user: str) -> str:
     an other-identity's same-shape read)."""
     return f"PRIVATE-SSN-{user}-4021-7788"
 
+
+# MFA-BYPASS fixture (Wave-4.5). A session is {user, mfa} — ``mfa`` is whether the SECOND factor completed.
+# The chrome ``success_marker`` is shown to EVERY authenticated identity (factor-1 OR factor-2 — it is NOT
+# private, modelling the intentionally-factor-1 chrome an achieved-state content heuristic false-fires on). The
+# PER-USER PRIVATE datum is post-MFA-gated: the VULNERABLE route releases it to ANY factor-1 session (the bug),
+# the BENIGN TWIN releases it ONLY to a session whose second factor completed. The private-read differential
+# needs per-user private content: the factor-1-only session confirms bypass ONLY by reaching the VICTIM's
+# private datum, absent from an OTHER factor-1 identity's same-shape read.
+_MFA_SESSIONS: dict[str, dict] = {}
+_MFA_COOKIE = "MFASESSION"
+_MFA_SUCCESS_MARKER = "MFA-CONSOLE-DASHBOARD"
+
+
+def _mfa_private(user: str) -> str:
+    """The per-user PRIVATE, post-MFA-gated datum — the victim-private discriminator the oracle's private-read
+    differential requires (present in the post-MFA owner's read, absent from an other-identity's same-shape
+    read)."""
+    return f"PRIVATE-MFA-TOKEN-{user}-9207-5531"
+
 # ---------------------------------------------------------------------------
 # CSRF-achieved model (Wave 3.3). A cookie-authenticated state-changing endpoint that
 # authorizes a write on the ambient session cookie ALONE, driven by a REAL headless browser:
@@ -997,6 +1016,68 @@ class BenchmarkHandler(BaseHTTPRequestHandler):
         else:
             self._respond(200, _page("Account", "<h1>Please log in</h1><p>You are logged out.</p>"))
 
+    # -- MFA-bypass fixture (Wave-4.5) -------------------------------------
+
+    def _mfa_cookie(self) -> str:
+        """The value of the MFASESSION cookie the client presented (last-wins), or ''."""
+        raw = self.headers.get("Cookie", "") or ""
+        val = ""
+        for part in raw.split(";"):
+            k, _, v = part.strip().partition("=")
+            if k == _MFA_COOKIE:
+                val = v
+        return val
+
+    def _mfa_login(self) -> None:
+        # Factor-1 login. Issues a session bound to the authenticating USER and records whether the SECOND
+        # factor completed (``factor2=yes`` ⇒ a full post-MFA session; anything else ⇒ a factor-1-ONLY session).
+        # One route serves both so a re-drive can mint a factor-1-only session AND a post-MFA owner session
+        # against the SAME app. A POST reached only by the deep-profile MFA assertion; the default GET-only
+        # crawl never touches it, so `make gate` is unaffected.
+        length = int(self.headers.get("Content-Length", "0") or "0")
+        body = self.rfile.read(length).decode("utf-8", "replace") if length else ""
+        fields = {}
+        for part in body.replace("&", ";").split(";"):
+            k, _, v = part.strip().partition("=")
+            if k:
+                fields[k] = v
+        user = fields.get("user") or "admin"
+        mfa_done = fields.get("factor2", "") == "yes"
+        token = "mfa_" + secrets.token_hex(16)
+        _MFA_SESSIONS[token] = {"user": user, "mfa": mfa_done}
+        self._respond(200, _page("Login", "<p>Logged in.</p>"),
+                      extra_headers=[("Set-Cookie", f"{_MFA_COOKIE}={token}; Path=/; HttpOnly")])
+
+    def _mfa_bypass_account(self) -> None:
+        # PLANTED BUG (MFA bypass). The post-MFA console releases the per-user PRIVATE datum to ANY
+        # AUTHENTICATED session — including one that completed ONLY factor-1 (``mfa`` False). An attacker who
+        # holds a factor-1-only session therefore reads the victim's post-MFA-gated private datum (CWE-287 /
+        # CWE-308). Reached only by the deep-profile MFA assertion; the default GET-only crawl never touches it.
+        sess = _MFA_SESSIONS.get(self._mfa_cookie())
+        if sess:
+            # BUG: renders the private datum regardless of whether the second factor completed.
+            self._respond(200, _page("Console", f"<h1>{_MFA_SUCCESS_MARKER}</h1><p>Welcome to the console "
+                                                 f"overview.</p><p>{_mfa_private(sess['user'])}</p>"))
+        else:
+            self._respond(200, _page("Console", "<h1>Please log in</h1><p>You are logged out.</p>"))
+
+    def _mfa_enforced_account(self) -> None:
+        # SAFE (MFA-bypass BENIGN TWIN). The post-MFA console renders chrome to ANY authenticated session but
+        # releases the per-user PRIVATE datum ONLY when the SECOND factor completed (``mfa`` True). A
+        # factor-1-only session sees the same chrome but NOT the private datum — the correct defense, so the
+        # mfa_bypass_oracle must NEVER fire here even WITH the operator attestation (the factor-1-only read
+        # lacks D, which is present only for the post-MFA owner).
+        sess = _MFA_SESSIONS.get(self._mfa_cookie())
+        if sess and sess.get("mfa") is True:
+            self._respond(200, _page("Console", f"<h1>{_MFA_SUCCESS_MARKER}</h1><p>Welcome to the console "
+                                                 f"overview.</p><p>{_mfa_private(sess['user'])}</p>"))
+        elif sess:
+            # authenticated with factor-1 only: same chrome, NO private datum (second factor required).
+            self._respond(200, _page("Console", f"<h1>{_MFA_SUCCESS_MARKER}</h1><p>Welcome to the console "
+                                                 f"overview.</p><p>Complete your second factor to view secrets.</p>"))
+        else:
+            self._respond(200, _page("Console", "<h1>Please log in</h1><p>You are logged out.</p>"))
+
     # -- planted-bug routes ------------------------------------------------
 
     def _index(self) -> None:
@@ -1325,6 +1406,11 @@ _ROUTES = {
     # needs the operator's owner-signed WorkflowSpec + the 0.3-gated write), so the default corpus +
     # signed baseline stay byte-identical. Exercised only by the deep gated race/bizlogic assertion.
     "/order/state": BenchmarkHandler._order_state,
+    # MFA-bypass post-MFA console pages (Wave 4.5). DELIBERATELY NOT linked from the index and reached only by
+    # the deep-profile gated MFA-bypass assertion (which first POSTs a factor-1 login); the default GET-only
+    # crawl only ever sees a logged-out page here, so the default corpus + signed baseline stay byte-identical.
+    "/mfa/bypass/account": BenchmarkHandler._mfa_bypass_account,       # VULNERABLE: releases D to a factor-1 session
+    "/mfa/enforced/account": BenchmarkHandler._mfa_enforced_account,   # SAFE TWIN: releases D only post-factor-2
 }
 
 
@@ -1352,6 +1438,10 @@ _POST_ROUTES = {
     "/order/add": BenchmarkHandler._order_add,                   # VULNERABLE: persists a negative qty
     "/order/add-validated": BenchmarkHandler._order_add_validated,  # BENIGN TWIN: rejects a non-positive qty
     "/order/reset": BenchmarkHandler._order_reset,
+    # MFA-bypass factor-1 login (Wave 4.5). Issues a factor-1-only OR a full post-MFA session per the
+    # ``factor2`` field. Only exercised by the deep-profile gated assertion; the default GET-only benchmark
+    # crawl never issues a POST, so this leaves `make gate` byte-identical.
+    "/mfa/login": BenchmarkHandler._mfa_login,
 }
 
 

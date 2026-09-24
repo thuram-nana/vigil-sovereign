@@ -429,6 +429,20 @@ BUG_CLASS_ORACLES: dict[str, tuple[OracleKind, ...]] = {
     # leaves `make gate` byte-identical (session-fixation is gated-workflow / off-by-default and sends 0
     # requests through the default corpus).
     "session_fixation": (OracleKind.SESSION_FIXATION,),
+    # Wave-4.5 MFA bypass (A4 — CWE-287 improper authentication / CWE-308 single-factor-only). Its OWN
+    # dedicated OracleKind.MFA_BYPASS (held OUT of the frozen _ALL_ORACLES, so oracle_version(ACHIEVED_STATE) is
+    # untouched and the unknown-class fallback stays EXACTLY 15). A gated-workflow ACHIEVED-STATE FACT proven by
+    # BOTH a FAIL-CLOSED three-part operator attestation (MFA-enrolled account + factor-1-only presented +
+    # post-MFA resource certified — the lock that closes the killer FP of an intentionally factor-1 page) AND
+    # the PRIVATE-READ REDUCTION (the same Wave-3.1 / SESSION_FIXATION differential, re-derived from raw bytes):
+    # a factor-1-only session reads a victim-PRIVATE datum D PRESENT in a post-MFA owner's read yet PROVABLY
+    # ABSENT from a SUBSTANTIVE SAME-SHAPE read by an OTHER not-post-MFA identity and a no-session baseline.
+    # WITHOUT the attestation NO fire is emitted for ANY input (a rigorous LEAD); a benign app that enforces
+    # factor-2 (D absent from the factor-1-only read) is a channel-confirmed CLEAN. Reachable ONLY when the ctx
+    # carries the fresh `mfa_bypass` key, which no benchmark/scan/engage finding carries — so appending this row
+    # leaves `make gate` byte-identical (MFA-bypass is gated-workflow / off-by-default and sends 0 requests
+    # through the default corpus).
+    "mfa_bypass": (OracleKind.MFA_BYPASS,),
 }
 
 # Spelling/format aliases folded onto canonical keys.
@@ -747,6 +761,14 @@ _ALIASES: dict[str, str] = {
     "session_not_rotated_on_login": "session_fixation",
     "fixed_session_id": "session_fixation",
     "pre_auth_session_fixation": "session_fixation",
+    # Wave-4.5 MFA-bypass spelling variants fold onto the single canonical class.
+    "mfa_bypass_attack": "mfa_bypass",
+    "second_factor_bypass": "mfa_bypass",
+    "2fa_bypass": "mfa_bypass",
+    "two_factor_bypass": "mfa_bypass",
+    "mfa_not_enforced": "mfa_bypass",
+    "missing_second_factor": "mfa_bypass",
+    "otp_bypass": "mfa_bypass",
 }
 
 # G1 (doctrine fix): the unknown-class fallback returned by `oracles_for()` is FROZEN to the
@@ -1044,6 +1066,17 @@ class OracleVerifier:
             # the gate path (byte-identical).
             if "session_fixation" in ctx:
                 return oracles.session_fixation_oracle(ctx["session_fixation"])
+            return None
+        if kind is OracleKind.MFA_BYPASS:
+            # Wave-4.5 MFA bypass (CWE-287/CWE-308) — its OWN dedicated kind (held OUT of the frozen
+            # _ALL_ORACLES, so oracle_version(ACHIEVED_STATE) is untouched and the unknown-class fallback
+            # stays EXACTLY 15). Fires ONLY when the ctx carries the fresh `mfa_bypass` record: the RAW bytes
+            # (the factor-1-only read, the post-MFA owner + other-identity + no-session references, the
+            # victim-private datum D) and the three-part operator attestation the oracle re-derives its
+            # fail-closed + private-read adjudication over. No benchmark/scan/engage finding carries this key,
+            # so it is inert on the gate path (byte-identical).
+            if "mfa_bypass" in ctx:
+                return oracles.mfa_bypass_oracle(ctx["mfa_bypass"])
             return None
         if kind is OracleKind.SIDE_EFFECT:
             if "marker" in ctx and "observed_sink" in ctx:
