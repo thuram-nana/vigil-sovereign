@@ -1778,7 +1778,7 @@
     {
       "id": "static_insecure_randomness.prng_into_sink",
       "check": "static_rule_verify",
-      "evidence": "the STATIC_RULE oracle re-parsed the RETAINED source region (Python ast) and re-derived that a non-cryptographic PRNG value (random.random/randint/choice/getrandbits/...) flows in a DIRECT intra-procedural assignment into a security-sensitive binding (a token/secret/password/nonce/salt/key/otp) in the SAME function — a re-verifiable CODE PROPERTY (the value is predictable), never a claim of runtime exploitability.",
+      "evidence": "the STATIC_RULE oracle re-parsed the RETAINED source region (Python ast) and re-derived that a non-cryptographic PRNG value (random.random/randint/choice/getrandbits/...) flows — directly or via a single-hop alias — into a call whose RECEIVING CALLEE RESOLVES to a genuine crypto/security API in the SAME function: as a security-material keyword parameter (key=/salt=/token=/iv=/nonce=/...) or as an argument to a resolved security generator (generate_token/derive_key/set_password/...) or a crypto call from an imported crypto module (hmac.new/cryptography.*/Crypto.*). A security-named kwarg on a non-security callee (sorted(..., key=random.random()), logging.info(..., token=...)) or a bare/aliased crypto verb with no crypto-module provenance (numpy.sign, math.copysign as sign) does NOT resolve and stays a LEAD. A re-verifiable CODE PROPERTY (the value is predictable), never a claim of runtime exploitability.",
       "fact_capable": true,
       "clean_capable": false,
       "preconditions": [

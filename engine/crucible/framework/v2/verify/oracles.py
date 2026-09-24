@@ -3601,16 +3601,26 @@ _INSECURE_RANDOM_FNS = frozenset({
     "random", "randint", "randrange", "choice", "choices", "uniform", "getrandbits",
     "sample", "shuffle", "randbytes", "betavariate", "gauss", "normalvariate",
 })
-# A GENUINE SECURITY SINK for tier (b): the PRNG value must FLOW INTO one of these — a security-material
-# keyword PARAMETER, a security-material generator/consumer CALLEE, or a resolved crypto call. A merely
-# security-ISH assignment-TARGET NAME (`token = random.choice(...)`) is NOT a sink — that was the false-
-# positive class, and it stays a LEAD. Names are matched non-alnum-stripped + lower (`set_password` ->
-# `setpassword`, `iv=` -> `iv`), so spelling variants collapse to one key.
+# A GENUINE SECURITY SINK for tier (b): the PRNG value must FLOW INTO a call whose RECEIVING CALLEE RESOLVES
+# to a genuine crypto/security API (mirroring tiers a/c, which resolve provenance) — either as a security-
+# material keyword PARAMETER, or as any argument to a resolved security generator/crypto call. A merely
+# security-ISH assignment-TARGET NAME (`token = random.choice(...)`), a security-named kwarg on a NON-
+# security callee (`sorted(items, key=random.random())`, `logging.info('x', token=random.random())`), or a
+# bare/aliased crypto VERB with no crypto-module provenance (`numpy.sign(...)`, `math.copysign as sign`) is
+# NOT a sink — that is the false-positive class, and it stays a LEAD (soundness over recall). Names are
+# matched non-alnum-stripped + lower (`set_password` -> `setpassword`, `iv=` -> `iv`), so spelling variants
+# collapse to one key.
 _SECURITY_SINK_PARAMS = frozenset({
     "key", "secret", "token", "password", "passwd", "pwd", "iv", "salt", "nonce",
     "privatekey", "signingkey", "secretkey", "apikey", "authkey", "sessionkey", "csrftoken", "otp",
 })
-_SECURITY_SINK_CALLEES = frozenset({
+# DESCRIPTIVE-NAME security generators/consumers — the NAME itself RESOLVES the operation (there is no benign
+# `generate_token` / `derive_key` / `set_password`; the name IS a security operation). A generic crypto VERB
+# (sign / hmac / encrypt / seal / pbkdf2hmac) is deliberately NOT here: a verb only resolves via a crypto-
+# MODULE base (`hmac.new`, `cryptography.*`, `Crypto.*`), never a bare/aliased name — `numpy.sign(...)` and
+# `from math import copysign as sign` are math, not crypto, and stay a LEAD. See
+# ``_callee_resolves_to_security_api``.
+_SECURITY_GENERATOR_CALLEES = frozenset({
     "setpassword", "checkpassword", "makepassword", "hashpassword", "generatepassword", "genpassword",
     "generatetoken", "createtoken", "maketoken", "gentoken", "newtoken", "issuetoken",
     "generatesecret", "makesecret", "gensecret", "createsecret",
@@ -3618,7 +3628,6 @@ _SECURITY_SINK_CALLEES = frozenset({
     "generateapikey", "createapikey", "makeapikey",
     "generateotp", "makeotp", "genotp", "generatenonce", "makenonce",
     "generatesalt", "makesalt", "generateiv", "makeiv",
-    "sign", "hmac", "encrypt", "seal", "pbkdf2hmac",
 })
 
 
@@ -3667,12 +3676,34 @@ def _assign_targets(node: Any) -> "list[str]":
     return names
 
 
+def _callee_resolves_to_security_api(node_func: Any, crypto_locals: "set[str]",
+                                     from_crypto: "dict[str, tuple[str, str]]",
+                                     shadows: "set[str]") -> bool:
+    """RESOLVE PROVENANCE for tier (b) — mirrors tier (a) ``_base_is_crypto`` and tier (c)
+    ``_is_security_relevant_callee``. True iff the callee RESOLVES to a genuine crypto/security API:
+      * a DESCRIPTIVE-NAME security generator/consumer (the name IS the resolved operation —
+        ``generate_token``/``derive_key``/``set_password``), OR
+      * a call whose BASE resolves to an imported crypto MODULE (``hmac.new``, ``cryptography.*``,
+        ``Crypto.*`` — this is the ONLY way a generic crypto verb sign/hmac/encrypt/seal resolves).
+    A generic container / logger / builder / bare or aliased verb (``sorted``, ``max``, ``itertools.groupby``,
+    ``heapq.nlargest``, ``logging.info``, ``numpy.sign``, ``math.copysign as sign``) or any callee with no
+    crypto/security provenance does NOT resolve => a LEAD (soundness over recall)."""
+    callee_key = re.sub(r"[^a-z0-9]", "", _attr_or_name(node_func).lower())
+    if callee_key in _SECURITY_GENERATOR_CALLEES:
+        return True
+    parts = _dotted_parts(node_func)
+    return bool(parts) and _base_is_crypto(parts[0], crypto_locals, from_crypto, shadows)
+
+
 def _insecure_randomness_hit(tree: ast.AST) -> "tuple[bool, str]":
     """RE-DERIVE tier (b): a non-crypto PRNG value FLOWS INTO A GENUINE SECURITY SINK within the SAME
-    function — passed (directly, or via a single-hop alias) as an argument to a security-material keyword
-    PARAMETER, a security generator/consumer CALLEE, or a resolved crypto call. A PRNG merely ASSIGNED to a
-    security-ISH variable NAME is NOT a sink (that was the FP class) and stays a LEAD. Pure AST; no
-    execution; inter-procedural / whole-program flows are not re-derived here."""
+    function — passed (directly, or via a single-hop alias) into a call whose RECEIVING CALLEE RESOLVES to a
+    crypto/security API (a descriptive-name token/secret/key/IV/salt generator, or a resolved crypto call
+    from an imported crypto module), either as a security-material keyword PARAMETER or as any argument. A
+    PRNG merely ASSIGNED to a security-ISH variable NAME, a security-named kwarg on a NON-security callee
+    (`sorted(..., key=...)`), or a bare/aliased crypto verb with no crypto-module provenance (`numpy.sign`)
+    is NOT a sink — the FP class — and stays a LEAD (soundness over recall). Pure AST; no execution;
+    inter-procedural / whole-program flows are not re-derived here."""
     crypto_locals, from_crypto = _collect_crypto_imports(tree)
     shadows = _collect_local_shadows(tree)
     for fn in ast.walk(tree):
@@ -3687,22 +3718,22 @@ def _insecure_randomness_hit(tree: ast.AST) -> "tuple[bool, str]":
         for node in ast.walk(fn):
             if not isinstance(node, ast.Call):
                 continue
+            # The RECEIVING CALLEE must RESOLVE to a genuine crypto/security API; a security-named kwarg or a
+            # security-sounding verb on an UNRESOLVED callee is NOT a sink (that was the FP class -> LEAD).
+            if not _callee_resolves_to_security_api(node.func, crypto_locals, from_crypto, shadows):
+                continue
             callee_short = _attr_or_name(node.func)
-            # (A) a PRNG passed to a security-material KEYWORD parameter of ANY call — used AS a secret.
+            # (A) a PRNG passed to a security-material KEYWORD parameter of a RESOLVED security API — as a secret.
             for kw in node.keywords:
                 if kw.arg and re.sub(r"[^a-z0-9]", "", kw.arg.lower()) in _SECURITY_SINK_PARAMS \
                         and _expr_uses_prng(kw.value, rand_vars):
-                    return True, (f"a non-cryptographic PRNG feeds the security parameter `{kw.arg}=` of "
-                                  f"`{callee_short}(...)` in function `{fn.name}`")
-            # (B) a PRNG flowing into a security generator/consumer CALLEE or a resolved crypto call.
-            parts = _dotted_parts(node.func)
-            crypto_call = bool(parts) and _base_is_crypto(parts[0], crypto_locals, from_crypto, shadows)
-            callee_key = re.sub(r"[^a-z0-9]", "", callee_short.lower())
-            if callee_key in _SECURITY_SINK_CALLEES or crypto_call:
-                args = list(node.args) + [kw.value for kw in node.keywords]
-                if any(_expr_uses_prng(a, rand_vars) for a in args):
-                    return True, (f"a non-cryptographic PRNG flows into the security-sensitive call "
-                                  f"`{callee_short}(...)` in function `{fn.name}`")
+                    return True, (f"a non-cryptographic PRNG feeds the security parameter `{kw.arg}=` of the "
+                                  f"resolved security API `{callee_short}(...)` in function `{fn.name}`")
+            # (B) a PRNG flowing as any argument into the RESOLVED security generator/consumer or crypto call.
+            args = list(node.args) + [kw.value for kw in node.keywords]
+            if any(_expr_uses_prng(a, rand_vars) for a in args):
+                return True, (f"a non-cryptographic PRNG flows into the resolved security-sensitive call "
+                              f"`{callee_short}(...)` in function `{fn.name}`")
     return False, ""
 
 

@@ -70,6 +70,16 @@ _NEG_CONTROLS = [
     ("insecure-randomness-sink", "import random\ndef mk(tokens):\n    token = random.choice(tokens)\n    return token\n"),
     # (b) same, a `nonce` name — still a name-only assignment, no security sink.
     ("insecure-randomness-sink", "import random\ndef mk():\n    nonce = random.randint(0, 999999)\n    return nonce\n"),
+    # (b) `key=` is a COMPARISON-key function on sorted/min/max/heapq/itertools/groupby — NOT a crypto key. The
+    # receiving callee does not resolve to a security API, so a PRNG comparison key is a LEAD, never a FACT.
+    ("insecure-randomness-sink", "import random\ndef pick(items, fns):\n    return sorted(items, key=random.choice(fns))\n"),
+    ("insecure-randomness-sink", "import random\ndef shuf(items):\n    return sorted(items, key=lambda x: random.random())\n"),
+    # (b) `numpy.sign(...)` is the MATH sign function — a bare/aliased verb with no crypto-module provenance.
+    ("insecure-randomness-sink", "import numpy as np\nimport random\ndef s():\n    return np.sign(random.random())\n"),
+    # (b) a security-named `token=` kwarg on a LOGGER — `logging.info` does not resolve to a security API.
+    ("insecure-randomness-sink", "import random, logging\ndef log():\n    logging.info('x', token=random.random())\n"),
+    # (b) a security-named `salt=` kwarg on an UNRESOLVED builder — no crypto/security provenance to resolve.
+    ("insecure-randomness-sink", "import random\ndef b(cfg):\n    return build(cfg, salt=random.random())\n"),
     # (c) verify=False on a NON-security callee (a chart renderer) — does not resolve to an HTTP/TLS API.
     ("insecure-flag-literal", "import chartlib\ndef draw(chart):\n    return chart.render(verify=False)\n"),
     # (c) secure=False on a NON-security callee (a UI widget builder) — not a cookie / request.
@@ -118,9 +128,12 @@ _EXTRA_POSITIVES = [
     # (a) the cryptography library's modes.ECB() constructed into a Cipher(...).
     ("broken-crypto-invocation",
      "from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes\ndef c(k):\n    return Cipher(algorithms.AES(k), modes.ECB())\n"),
-    # (b) a PRNG feeding a security keyword PARAMETER of a call.
-    ("insecure-randomness-sink", "import random\ndef mk(m):\n    return derive(m, key=random.random())\n"),
-    # (b) a PRNG (single-hop alias) feeding a real HMAC key (a resolved crypto call).
+    # (b) a PRNG feeding a security keyword PARAMETER of a RESOLVED security generator (the name `derive_key`
+    # IS the resolved operation — Branch A).
+    ("insecure-randomness-sink", "import random\ndef mk(m):\n    return derive_key(m, salt=random.random())\n"),
+    # (b) a PRNG feeding a security keyword PARAMETER of a RESOLVED crypto-module call (`hmac.new` — Branch A).
+    ("insecure-randomness-sink", "import random, hmac\ndef mk(m):\n    return hmac.new(m, key=random.random())\n"),
+    # (b) a PRNG (single-hop alias) feeding a real HMAC key positionally (a resolved crypto call — Branch B).
     ("insecure-randomness-sink",
      "import random, hmac, hashlib\ndef mk(m):\n    k = str(random.randint(0, 1 << 32)).encode()\n    return hmac.new(k, m, hashlib.sha256).hexdigest()\n"),
     # (c) verify=False on a requests Session (base-var resolved).
