@@ -31,8 +31,10 @@ from ...verify.reverify import reverify_finding
 _A_PLANTED = "import hashlib\ndef sign(x):\n    return hashlib.md5(x).hexdigest()\n"
 _A_SAFE = "import hashlib\ndef sign(x):\n    return hashlib.sha256(x).hexdigest()\n"
 
-# (b) insecure randomness feeding a security sink
-_B_PLANTED = "import random\ndef mk():\n    token = random.randint(0, 999999)\n    return token\n"
+# (b) insecure randomness feeding a GENUINE security sink (a token generator), not merely a security-ish
+# variable name — the PRNG value must FLOW INTO the sink. (A bare `token = random.randint(...)` assignment is
+# a security-ISH NAME only and is a LEAD; see _B_NAME_ONLY below.)
+_B_PLANTED = "import random\ndef mk(pool):\n    return generate_token(random.choice(pool))\n"
 _B_SAFE = "import secrets\ndef mk():\n    token = secrets.token_hex(16)\n    return token\n"
 
 # (c) explicitly-disabled security flag literal
@@ -48,6 +50,30 @@ _TIERS = [
     ("insecure-randomness-sink", "static_insecure_randomness", _B_PLANTED, _B_SAFE),
     ("insecure-flag-literal", "static_insecure_flag", _C_PLANTED, _C_SAFE),
     ("direct-taint", "static_taint", _D_PLANTED, _D_SAFE),
+]
+
+# --------------------------------------------------------------------------------------------
+# STRUCTURALLY-BENIGN-BUT-FIRING negative controls — code that a NAME/pattern rule (the tool's own
+# false-positive class) would flag, but which carries NO proven property. Each MUST stay a LEAD: a
+# STATIC_RULE FACT re-derives the property SEMANTICALLY (provenance + genuine use), it does not re-run the
+# tool's syntactic pattern. An honest LEAD beats a false FACT.
+# --------------------------------------------------------------------------------------------
+_NEG_CONTROLS = [
+    # (a) a DEFENSIVE rejection of ECB — a comparison / raise, never a construction. Not "use".
+    ("broken-crypto-invocation",
+     "from Crypto.Cipher import AES\ndef guard(mode):\n    if mode == AES.MODE_ECB:\n        raise ValueError('ECB is banned')\n"),
+    # (a) a bare, IMPORT-FREE md5(...) — no crypto provenance to resolve.
+    ("broken-crypto-invocation", "def sign(x):\n    return md5(x)\n"),
+    # (a) a LOCALLY-SHADOWED md5 — the call resolves to the local def, not hashlib.
+    ("broken-crypto-invocation", "def md5(x):\n    return 0\ndef sign(x):\n    return md5(x)\n"),
+    # (b) a PRNG assigned to a security-ISH variable NAME, with NO flow into a sink (benign lexer / caller).
+    ("insecure-randomness-sink", "import random\ndef mk(tokens):\n    token = random.choice(tokens)\n    return token\n"),
+    # (b) same, a `nonce` name — still a name-only assignment, no security sink.
+    ("insecure-randomness-sink", "import random\ndef mk():\n    nonce = random.randint(0, 999999)\n    return nonce\n"),
+    # (c) verify=False on a NON-security callee (a chart renderer) — does not resolve to an HTTP/TLS API.
+    ("insecure-flag-literal", "import chartlib\ndef draw(chart):\n    return chart.render(verify=False)\n"),
+    # (c) secure=False on a NON-security callee (a UI widget builder) — not a cookie / request.
+    ("insecure-flag-literal", "import ui\ndef draw(widget):\n    return widget.build(secure=False)\n"),
 ]
 
 
@@ -70,6 +96,45 @@ def test_planted_case_mints_and_safe_twin_does_not(rule_id, bug_class, planted, 
     # the safe twin carries no property -> must NOT mint (an honest LEAD, never a false FACT).
     twin = confirm_code_region("app/mod.py", 3, safe, rule_id)
     assert not twin.confirmed, f"{rule_id}: safe twin must NOT mint"
+
+
+@pytest.mark.parametrize("rule_id,src", _NEG_CONTROLS)
+def test_benign_but_pattern_firing_controls_stay_a_lead(rule_id, src) -> None:
+    """The FP surface the old name/pattern rules minted on. A STATIC_RULE FACT must ESTABLISH the property
+    SEMANTICALLY (resolved provenance + genuine use), so each of these MUST stay a LEAD — never a FACT."""
+    lead = confirm_code_region("app/mod.py", 3, src, rule_id)
+    assert not lead.confirmed, f"{rule_id}: a benign-but-pattern-firing control must NOT mint"
+    # ... and it therefore cannot be serialised into a certificate.
+    with pytest.raises(ValueError):
+        static_fact_finding(lead)
+
+
+# Extra GENUINE positives (beyond the one-per-tier corpus) — the semantic fix must not lose real recall.
+_EXTRA_POSITIVES = [
+    # (a) a broken CIPHER resolved from Crypto.Cipher, constructed via .new.
+    ("broken-crypto-invocation", "from Crypto.Cipher import DES\ndef e(k, d):\n    return DES.new(k, DES.MODE_ECB).encrypt(d)\n"),
+    # (a) pycryptodome AES-ECB constructed into a cipher.
+    ("broken-crypto-invocation", "from Crypto.Cipher import AES\ndef e(k, d):\n    return AES.new(k, AES.MODE_ECB).encrypt(d)\n"),
+    # (a) the cryptography library's modes.ECB() constructed into a Cipher(...).
+    ("broken-crypto-invocation",
+     "from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes\ndef c(k):\n    return Cipher(algorithms.AES(k), modes.ECB())\n"),
+    # (b) a PRNG feeding a security keyword PARAMETER of a call.
+    ("insecure-randomness-sink", "import random\ndef mk(m):\n    return derive(m, key=random.random())\n"),
+    # (b) a PRNG (single-hop alias) feeding a real HMAC key (a resolved crypto call).
+    ("insecure-randomness-sink",
+     "import random, hmac, hashlib\ndef mk(m):\n    k = str(random.randint(0, 1 << 32)).encode()\n    return hmac.new(k, m, hashlib.sha256).hexdigest()\n"),
+    # (c) verify=False on a requests Session (base-var resolved).
+    ("insecure-flag-literal", "import requests\ndef f(u):\n    s = requests.Session()\n    return s.post(u, verify=False)\n"),
+    # (c) TLS verification disabled via ssl.wrap_socket(cert_reqs=ssl.CERT_NONE).
+    ("insecure-flag-literal", "import ssl, socket\ndef w(sock):\n    return ssl.wrap_socket(sock, cert_reqs=ssl.CERT_NONE)\n"),
+]
+
+
+@pytest.mark.parametrize("rule_id,src", _EXTRA_POSITIVES)
+def test_extra_genuine_positives_still_mint(rule_id, src) -> None:
+    fact = confirm_code_region("app/mod.py", 3, src, rule_id)
+    assert fact.confirmed, f"{rule_id}: a genuine positive must MINT"
+    assert fact.confirmed_by == "static_rule"
 
 
 def test_bug_class_derived_from_rule_id() -> None:

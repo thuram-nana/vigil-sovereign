@@ -3423,6 +3423,12 @@ _STATIC_RULE_IDS = frozenset({
 # IDEA (broken or SWEET32-risky). ECB block mode (deterministic — a broken usage). Case-insensitive by lower().
 _BROKEN_HASH_NAMES = frozenset({"md5", "sha1", "md4", "md2"})
 _BROKEN_CIPHER_NAMES = frozenset({"des", "des3", "tripledes", "arc4", "rc4", "blowfish", "idea"})
+# PROVENANCE floor for tier (a): a primitive is only "broken crypto in use" when its name RESOLVES (via an
+# import in the retained region) to one of these cryptographic packages. A bare/unimported name that merely
+# LOOKS like md5() has no crypto provenance and is a LEAD (the veracity firewall re-derives the property, it
+# does not re-run the tool's name pattern). `hmac` is included so a PRNG value flowing into `hmac.new(...)`
+# is recognised as a crypto sink in tier (b); it carries no broken-primitive name, so tier (a) is unaffected.
+_CRYPTO_MODULE_ROOTS = frozenset({"hashlib", "hmac", "crypto", "cryptodome", "cryptography"})
 
 
 def _attr_or_name(node: Any) -> str:
@@ -3434,36 +3440,159 @@ def _attr_or_name(node: Any) -> str:
     return ""
 
 
-def _broken_crypto_hit(tree: ast.AST) -> "tuple[bool, str]":
-    """RE-DERIVE tier (a): a broken/risky primitive is invoked in the region. Pure AST walk — no execution,
-    no import. Returns (fired, detail)."""
+def _dotted_parts(node: Any) -> "list[str]":
+    """The dotted identifier chain of a pure Name/Attribute expression, root-first: ``hashlib.md5`` ->
+    ['hashlib', 'md5']; ``Crypto.Cipher.DES.new`` -> ['Crypto', 'Cipher', 'DES', 'new']; a bare ``md5`` ->
+    ['md5']. Returns [] when the base is not a plain Name (a subscript / call / literal in the chain — an
+    UNRESOLVABLE base, so a LEAD)."""
+    parts: list[str] = []
+    cur = node
+    while isinstance(cur, ast.Attribute):
+        parts.append(cur.attr)
+        cur = cur.value
+    if not isinstance(cur, ast.Name):
+        return []
+    parts.append(cur.id)
+    parts.reverse()
+    return parts
+
+
+def _is_crypto_module(dotted: str) -> bool:
+    """True iff a dotted module path's ROOT segment is a cryptographic package (the provenance test)."""
+    return bool(dotted) and dotted.split(".")[0].strip().lower() in _CRYPTO_MODULE_ROOTS
+
+
+def _collect_crypto_imports(tree: ast.AST) -> "tuple[set[str], dict[str, tuple[str, str]]]":
+    """RESOLVE PROVENANCE for tier (a). Returns ``(crypto_module_locals, from_crypto)``:
+      * ``crypto_module_locals`` — local names bound to a CRYPTO MODULE (``import hashlib`` /
+        ``import hashlib as h`` / ``import Crypto.Cipher.DES`` binds the root ``Crypto``).
+      * ``from_crypto`` — ``local -> (module, original)`` for ``from <crypto-module> import X [as local]``.
+    Only crypto-namespace imports are recorded; a name with no crypto provenance is never resolvable to a
+    broken primitive (a LEAD)."""
+    crypto_locals: set[str] = set()
+    from_crypto: dict[str, tuple[str, str]] = {}
     for node in ast.walk(tree):
-        # ECB block mode — a `MODE_ECB` attribute reference (AES.new(k, AES.MODE_ECB)) or `modes.ECB(...)`.
-        if isinstance(node, ast.Attribute) and node.attr == "MODE_ECB":
-            return True, "ECB block mode (MODE_ECB — deterministic, a broken cipher usage)"
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                mod = alias.name or ""
+                if _is_crypto_module(mod):
+                    crypto_locals.add(alias.asname or mod.split(".")[0])
+        elif isinstance(node, ast.ImportFrom):
+            mod = node.module or ""
+            if not mod or not _is_crypto_module(mod):
+                continue   # a bare relative import / non-crypto module — unresolved provenance (LEAD).
+            for alias in node.names:
+                if alias.name != "*":
+                    from_crypto[alias.asname or alias.name] = (mod, alias.name)
+    return crypto_locals, from_crypto
+
+
+def _collect_local_shadows(tree: ast.AST) -> "set[str]":
+    """Names DEFINED locally in the retained region (``def`` / ``async def`` / ``class`` / a simple
+    assignment target). A call to such a name is the LOCAL definition, not an imported primitive, so it is
+    never minted (e.g. a locally-shadowed ``def md5(): ...``)."""
+    shadows: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            shadows.add(node.name)
+        elif isinstance(node, (ast.Assign, ast.AnnAssign)):
+            shadows.update(_assign_targets(node))
+    return shadows
+
+
+def _base_is_crypto(name: str, crypto_locals: "set[str]", from_crypto: "dict[str, tuple[str, str]]",
+                    shadows: "set[str]") -> bool:
+    """A base identifier resolves to a crypto module (import provenance) and is not locally shadowed."""
+    if name in shadows and name not in crypto_locals and name not in from_crypto:
+        return False
+    return name in crypto_locals or name in from_crypto
+
+
+def _broken_crypto_call_detail(node: ast.Call, crypto_locals: "set[str]",
+                               from_crypto: "dict[str, tuple[str, str]]",
+                               shadows: "set[str]") -> "str | None":
+    """A Call RESOLVES to a genuinely-invoked broken primitive (returns a detail) or does not (``None`` ->
+    a LEAD). A bare/unimported name and a locally-shadowed def never mint; the provenance MUST resolve to a
+    crypto module."""
+    parts = _dotted_parts(node.func)
+    if not parts:
+        return None
+    root = parts[0]
+    if len(parts) == 1:
+        # BARE name call: md5(...) — mints ONLY as a from-import of a broken primitive, never unimported.
+        if root in shadows:
+            return None
+        if root in from_crypto:
+            orig = from_crypto[root][1].lower()
+            if orig in _BROKEN_HASH_NAMES:
+                return f"{orig.upper()} (broken hash) imported from {from_crypto[root][0]} and invoked"
+            if orig in _BROKEN_CIPHER_NAMES or orig.replace("_", "") in _BROKEN_CIPHER_NAMES:
+                return f"{orig.upper()} (broken cipher) imported from {from_crypto[root][0]} and invoked"
+        return None   # bare unimported name — provenance unresolved (LEAD).
+    # ATTRIBUTE call: hashlib.md5(...) / DES.new(...) / algorithms.TripleDES(...) / hashlib.new("md5").
+    if not _base_is_crypto(root, crypto_locals, from_crypto, shadows):
+        return None   # base is a local binding or has no crypto provenance (LEAD).
+    if root in crypto_locals:
+        segs = [p.lower() for p in parts[1:]]
+    else:
+        segs = [from_crypto[root][1].lower()] + [p.lower() for p in parts[1:]]
+    # <crypto-module>.new("md5") — a `.new` with a broken-hash NAME constant.
+    if parts[-1] == "new" and node.args and isinstance(node.args[0], ast.Constant) \
+            and isinstance(node.args[0].value, str) \
+            and node.args[0].value.strip().lower().replace("-", "") in _BROKEN_HASH_NAMES:
+        return f"{node.args[0].value.strip().upper()} (broken hash) via .new({node.args[0].value!r})"
+    for seg in segs:
+        if seg in _BROKEN_HASH_NAMES:
+            return f"{seg.upper()} (broken hash) invoked from a resolved crypto module"
+        if seg in _BROKEN_CIPHER_NAMES or seg.replace("_", "") in _BROKEN_CIPHER_NAMES:
+            return f"{seg.upper()} (broken/risky cipher) invoked from a resolved crypto module"
+    return None
+
+
+def _ecb_construction_detail(tree: ast.AST, crypto_locals: "set[str]",
+                             from_crypto: "dict[str, tuple[str, str]]",
+                             shadows: "set[str]") -> "str | None":
+    """ECB is a WEAK MODE, not a primitive: mint ONLY when it is CONSTRUCTED into a cipher (passed as an
+    argument to a ``.new(...)`` / ``Cipher(...)`` call), NEVER when it is merely COMPARED against — a
+    defensive ``if mode == AES.MODE_ECB: raise`` is a REJECTION of ECB, not a use of it."""
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        callee = node.func
+        # (1) pycryptodome: <Cipher>.new(key, <X>.MODE_ECB) — MODE_ECB passed as an argument to a `.new`.
+        if _attr_or_name(callee) == "new" and isinstance(callee, ast.Attribute) \
+                and _base_is_crypto(_attr_or_name(callee.value), crypto_locals, from_crypto, shadows):
+            for arg in node.args:
+                for sub in ast.walk(arg):
+                    if isinstance(sub, ast.Attribute) and sub.attr == "MODE_ECB":
+                        return (f"ECB block mode (MODE_ECB) constructed into a cipher via "
+                                f"`{_attr_or_name(callee.value)}.new(...)` — deterministic, a broken usage")
+        # (2) cryptography: Cipher(algorithms.AES(key), modes.ECB()) — modes.ECB() constructed as an arg.
+        for arg in list(node.args) + [kw.value for kw in node.keywords]:
+            for sub in ast.walk(arg):
+                if isinstance(sub, ast.Call) and isinstance(sub.func, ast.Attribute) \
+                        and sub.func.attr == "ECB" \
+                        and _attr_or_name(sub.func.value).lower() == "modes" \
+                        and _base_is_crypto(_attr_or_name(sub.func.value), crypto_locals, from_crypto, shadows):
+                    return "ECB block mode (modes.ECB) constructed into a Cipher(...) — deterministic, a broken usage"
+    return None
+
+
+def _broken_crypto_hit(tree: ast.AST) -> "tuple[bool, str]":
+    """RE-DERIVE tier (a): a broken/risky crypto primitive is GENUINELY INVOKED/CONSTRUCTED here, with its
+    provenance RESOLVED to a real crypto module. Pure AST — no execution, no import. A bare/unimported name,
+    a locally-shadowed def, or a mere reference / comparison / defensive guard does NOT mint (a LEAD —
+    soundness over recall). Returns (fired, detail)."""
+    crypto_locals, from_crypto = _collect_crypto_imports(tree)
+    shadows = _collect_local_shadows(tree)
+    for node in ast.walk(tree):
         if isinstance(node, ast.Call):
-            callee = node.func
-            short = _attr_or_name(callee).lower()
-            # md5(...)/sha1(...) or hashlib.md5(...)/.sha1(...)
-            if short in _BROKEN_HASH_NAMES:
-                return True, f"{short.upper()} (a broken hash primitive) invoked"
-            # DES(...)/ARC4(...)/Blowfish(...)/algorithms.TripleDES(...) etc.
-            if short in _BROKEN_CIPHER_NAMES or short.replace("_", "") in _BROKEN_CIPHER_NAMES:
-                return True, f"{short.upper()} (a broken/risky cipher primitive) invoked"
-            # DES.new(...) / ARC4.new(...) / Blowfish.new(...) — a `.new` on a broken cipher module.
-            if short == "new" and isinstance(callee, ast.Attribute):
-                base = _attr_or_name(callee.value).lower()
-                if base in _BROKEN_CIPHER_NAMES or base.replace("_", "") in _BROKEN_CIPHER_NAMES:
-                    return True, f"{base.upper()}.new (a broken/risky cipher primitive) invoked"
-            # hashlib.new("md5") / hashlib.new("sha1") — a `.new` with a broken-hash name constant.
-            if short == "new" and node.args and isinstance(node.args[0], ast.Constant) \
-                    and isinstance(node.args[0].value, str) \
-                    and node.args[0].value.strip().lower().replace("-", "") in _BROKEN_HASH_NAMES:
-                return True, f"hashlib.new({node.args[0].value!r}) (a broken hash primitive) invoked"
-            # modes.ECB(...) — the cryptography-library ECB mode object.
-            if short == "ecb" and isinstance(callee, ast.Attribute) \
-                    and _attr_or_name(callee.value).lower() == "modes":
-                return True, "modes.ECB (ECB block mode — deterministic, a broken cipher usage)"
+            detail = _broken_crypto_call_detail(node, crypto_locals, from_crypto, shadows)
+            if detail:
+                return True, detail
+    ecb = _ecb_construction_detail(tree, crypto_locals, from_crypto, shadows)
+    if ecb:
+        return True, ecb
     return False, ""
 
 
@@ -3472,11 +3601,25 @@ _INSECURE_RANDOM_FNS = frozenset({
     "random", "randint", "randrange", "choice", "choices", "uniform", "getrandbits",
     "sample", "shuffle", "randbytes", "betavariate", "gauss", "normalvariate",
 })
-# A binding whose NAME (lower, non-alnum stripped) contains one of these is a security sink for tier (b).
-_SECURITY_SINK_NAME_TOKENS = (
-    "token", "secret", "password", "passwd", "nonce", "salt", "apikey", "sessionid",
-    "csrf", "otp", "resettoken", "privatekey", "signingkey", "authkey",
-)
+# A GENUINE SECURITY SINK for tier (b): the PRNG value must FLOW INTO one of these — a security-material
+# keyword PARAMETER, a security-material generator/consumer CALLEE, or a resolved crypto call. A merely
+# security-ISH assignment-TARGET NAME (`token = random.choice(...)`) is NOT a sink — that was the false-
+# positive class, and it stays a LEAD. Names are matched non-alnum-stripped + lower (`set_password` ->
+# `setpassword`, `iv=` -> `iv`), so spelling variants collapse to one key.
+_SECURITY_SINK_PARAMS = frozenset({
+    "key", "secret", "token", "password", "passwd", "pwd", "iv", "salt", "nonce",
+    "privatekey", "signingkey", "secretkey", "apikey", "authkey", "sessionkey", "csrftoken", "otp",
+})
+_SECURITY_SINK_CALLEES = frozenset({
+    "setpassword", "checkpassword", "makepassword", "hashpassword", "generatepassword", "genpassword",
+    "generatetoken", "createtoken", "maketoken", "gentoken", "newtoken", "issuetoken",
+    "generatesecret", "makesecret", "gensecret", "createsecret",
+    "generatekey", "derivekey", "genkey", "makekey", "createkey", "newkey",
+    "generateapikey", "createapikey", "makeapikey",
+    "generateotp", "makeotp", "genotp", "generatenonce", "makenonce",
+    "generatesalt", "makesalt", "generateiv", "makeiv",
+    "sign", "hmac", "encrypt", "seal", "pbkdf2hmac",
+})
 
 
 def _is_insecure_random_call(node: Any) -> bool:
@@ -3496,9 +3639,15 @@ def _is_insecure_random_call(node: Any) -> bool:
     return True
 
 
-def _name_is_security_sink(name: str) -> bool:
-    key = re.sub(r"[^a-z0-9]", "", (name or "").lower())
-    return any(tok in key for tok in _SECURITY_SINK_NAME_TOKENS)
+def _expr_uses_prng(expr: Any, rand_vars: "set[str]") -> bool:
+    """True iff ``expr`` contains a non-crypto PRNG call directly, or references a single-hop alias bound to
+    one earlier in the same function (``r = random.random(); ... f(r)``)."""
+    if _subtree_has(_is_insecure_random_call, expr):
+        return True
+    for n in ast.walk(expr) if isinstance(expr, ast.AST) else []:
+        if isinstance(n, ast.Name) and n.id in rand_vars:
+            return True
+    return False
 
 
 def _subtree_has(pred: Any, node: Any) -> bool:
@@ -3519,59 +3668,135 @@ def _assign_targets(node: Any) -> "list[str]":
 
 
 def _insecure_randomness_hit(tree: ast.AST) -> "tuple[bool, str]":
-    """RE-DERIVE tier (b): a non-crypto PRNG value flows DIRECTLY into a security-sensitive binding within the
-    SAME function — the direct form (``token = random.random()``) or a single-hop alias (``r = random.random();
-    token = r``). Pure AST; no execution. Inter-procedural / whole-program flows are NOT re-derived here."""
+    """RE-DERIVE tier (b): a non-crypto PRNG value FLOWS INTO A GENUINE SECURITY SINK within the SAME
+    function — passed (directly, or via a single-hop alias) as an argument to a security-material keyword
+    PARAMETER, a security generator/consumer CALLEE, or a resolved crypto call. A PRNG merely ASSIGNED to a
+    security-ISH variable NAME is NOT a sink (that was the FP class) and stays a LEAD. Pure AST; no
+    execution; inter-procedural / whole-program flows are not re-derived here."""
+    crypto_locals, from_crypto = _collect_crypto_imports(tree)
+    shadows = _collect_local_shadows(tree)
     for fn in ast.walk(tree):
         if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
             continue
-        # names bound directly to a non-crypto random call in this function (single-hop alias source).
+        # names bound directly to a non-crypto PRNG call in this function (single-hop alias source).
         rand_vars: set[str] = set()
         for node in ast.walk(fn):
             if isinstance(node, (ast.Assign, ast.AnnAssign)) and node.value is not None \
                     and _subtree_has(_is_insecure_random_call, node.value):
-                for nm in _assign_targets(node):
-                    rand_vars.add(nm)
+                rand_vars.update(_assign_targets(node))
         for node in ast.walk(fn):
-            if not isinstance(node, (ast.Assign, ast.AnnAssign)) or node.value is None:
+            if not isinstance(node, ast.Call):
                 continue
-            targets = _assign_targets(node)
-            if not any(_name_is_security_sink(t) for t in targets):
-                continue
-            sink = next(t for t in targets if _name_is_security_sink(t))
-            # DIRECT: the value subtree itself contains the non-crypto random call.
-            if _subtree_has(_is_insecure_random_call, node.value):
-                return True, (f"a non-cryptographic PRNG feeds the security-sensitive binding "
-                              f"`{sink}` directly in function `{fn.name}`")
-            # SINGLE-HOP alias: the value references a variable bound to a random call in this function.
-            for n in ast.walk(node.value):
-                if isinstance(n, ast.Name) and n.id in rand_vars:
-                    return True, (f"a non-cryptographic PRNG (via `{n.id}`) feeds the security-sensitive "
-                                  f"binding `{sink}` in function `{fn.name}`")
+            callee_short = _attr_or_name(node.func)
+            # (A) a PRNG passed to a security-material KEYWORD parameter of ANY call — used AS a secret.
+            for kw in node.keywords:
+                if kw.arg and re.sub(r"[^a-z0-9]", "", kw.arg.lower()) in _SECURITY_SINK_PARAMS \
+                        and _expr_uses_prng(kw.value, rand_vars):
+                    return True, (f"a non-cryptographic PRNG feeds the security parameter `{kw.arg}=` of "
+                                  f"`{callee_short}(...)` in function `{fn.name}`")
+            # (B) a PRNG flowing into a security generator/consumer CALLEE or a resolved crypto call.
+            parts = _dotted_parts(node.func)
+            crypto_call = bool(parts) and _base_is_crypto(parts[0], crypto_locals, from_crypto, shadows)
+            callee_key = re.sub(r"[^a-z0-9]", "", callee_short.lower())
+            if callee_key in _SECURITY_SINK_CALLEES or crypto_call:
+                args = list(node.args) + [kw.value for kw in node.keywords]
+                if any(_expr_uses_prng(a, rand_vars) for a in args):
+                    return True, (f"a non-cryptographic PRNG flows into the security-sensitive call "
+                                  f"`{callee_short}(...)` in function `{fn.name}`")
     return False, ""
 
 
 # (c) Security flags whose EXPLICIT insecure LITERAL is a proven weakness. An ABSENT flag is default-dependent
 # and is NOT a member here (REFUSE — a lead). Each maps to the literal value that disables the protection.
 _INSECURE_FLAG_FALSE = frozenset({"verify", "secure", "check_hostname", "verify_mode", "validate_certs"})
+# The insecure flag only mints when it is bound to a RESOLVED security-relevant callee — an HTTP request /
+# session on one of these libraries, or a TLS context / wrap. A callee that merely HAPPENS to accept a
+# `verify=` / `secure=` kwarg (`chart.render(verify=False)`, `widget.build(secure=False)`) does NOT resolve
+# to a security API and stays a LEAD.
+_HTTP_TLS_MODULE_ROOTS = frozenset({"requests", "httpx", "urllib", "urllib3", "aiohttp", "ssl"})
+# HTTP session/client CONSTRUCTORS — a var bound to one carries the insecure flag on its request methods.
+_HTTP_SESSION_CTORS = frozenset({"session", "client", "clientsession", "asyncclient"})
+# Security-relevant METHODS/callables on a RESOLVED HTTP/TLS base (requests, TLS wraps, a cookie set).
+_SECURITY_RELEVANT_METHODS = frozenset({
+    "get", "post", "put", "delete", "patch", "head", "options", "request", "send",
+    "session", "client", "clientsession", "asyncclient",
+    "wrapsocket", "createdefaultcontext", "sslcontext", "wrapbio", "setcookie", "createconnection",
+})
+
+
+def _collect_http_tls(tree: ast.AST) -> "tuple[set[str], dict[str, tuple[str, str]], set[str]]":
+    """RESOLVE PROVENANCE for tier (c). Returns ``(http_locals, from_http, session_vars)``: names bound to an
+    HTTP/TLS MODULE, ``from``-imported HTTP/TLS symbols, and variables bound to a RESOLVED HTTP session/client
+    constructor (``s = requests.Session()``)."""
+    http_locals: set[str] = set()
+    from_http: dict[str, tuple[str, str]] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                mod = alias.name or ""
+                if mod.split(".")[0].strip().lower() in _HTTP_TLS_MODULE_ROOTS:
+                    http_locals.add(alias.asname or mod.split(".")[0])
+        elif isinstance(node, ast.ImportFrom):
+            mod = node.module or ""
+            if mod and mod.split(".")[0].strip().lower() in _HTTP_TLS_MODULE_ROOTS:
+                for alias in node.names:
+                    if alias.name != "*":
+                        from_http[alias.asname or alias.name] = (mod, alias.name)
+    session_vars: set[str] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.Assign, ast.AnnAssign)) or not isinstance(node.value, ast.Call):
+            continue
+        ctor = re.sub(r"[^a-z0-9]", "", _attr_or_name(node.value.func).lower())
+        if ctor not in _HTTP_SESSION_CTORS:
+            continue
+        parts = _dotted_parts(node.value.func)
+        base_ok = len(parts) >= 2 and parts[0] in http_locals          # requests.Session()
+        imported_ctor = len(parts) == 1 and parts[0] in from_http      # from requests import Session; Session()
+        if base_ok or imported_ctor:
+            session_vars.update(_assign_targets(node))
+    return http_locals, from_http, session_vars
+
+
+def _is_security_relevant_callee(callee: Any, http_locals: "set[str]",
+                                 from_http: "dict[str, tuple[str, str]]", session_vars: "set[str]") -> bool:
+    """True iff ``callee`` RESOLVES to a security-relevant HTTP/TLS API — a request on a resolved HTTP module
+    or session, a TLS context / wrap, or a cookie set — NOT any callee that merely happens to accept a
+    ``verify=`` / ``secure=`` kwarg (``chart.render`` / ``widget.build`` do not resolve => LEAD)."""
+    if isinstance(callee, ast.Attribute):
+        method = re.sub(r"[^a-z0-9]", "", callee.attr.lower())
+        if _attr_or_name(callee.value) in session_vars:
+            return True
+        parts = _dotted_parts(callee.value)
+        base_is_http = bool(parts) and (parts[0] in http_locals or parts[0] in from_http)
+        return base_is_http and method in _SECURITY_RELEVANT_METHODS
+    if isinstance(callee, ast.Name):
+        return callee.id in from_http and re.sub(r"[^a-z0-9]", "", callee.id.lower()) in _SECURITY_RELEVANT_METHODS
+    return False
 
 
 def _insecure_flag_hit(tree: ast.AST) -> "tuple[bool, str]":
-    """RE-DERIVE tier (c): a KNOWN security flag is EXPLICITLY set to its insecure LITERAL — ``verify=False`` /
-    ``secure=False`` / ``check_hostname=False`` / ``cert_reqs=ssl.CERT_NONE``. An ABSENT flag never fires."""
+    """RE-DERIVE tier (c): a KNOWN security flag is EXPLICITLY set to its insecure LITERAL AND passed to a
+    RESOLVED security-relevant HTTP/TLS callee — ``requests.get(..., verify=False)`` / ``s.post(...,
+    verify=False)`` / ``ssl.wrap_socket(..., cert_reqs=ssl.CERT_NONE)``. An ABSENT flag, or an insecure flag
+    on an UNRESOLVED / non-security callee (``chart.render(verify=False)``), never mints (a LEAD)."""
+    http_locals, from_http, session_vars = _collect_http_tls(tree)
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
             continue
+        hit = ""
         for kw in node.keywords:
             if kw.arg is None:
                 continue
-            name = kw.arg
-            val = kw.value
-            if name in _INSECURE_FLAG_FALSE and isinstance(val, ast.Constant) and val.value is False:
-                return True, f"the security flag `{name}` is explicitly set to the insecure literal False"
-            # cert_reqs=ssl.CERT_NONE (TLS certificate verification explicitly disabled).
-            if name == "cert_reqs" and isinstance(val, ast.Attribute) and val.attr == "CERT_NONE":
-                return True, "the TLS flag `cert_reqs` is explicitly set to the insecure literal ssl.CERT_NONE"
+            if kw.arg in _INSECURE_FLAG_FALSE and isinstance(kw.value, ast.Constant) and kw.value.value is False:
+                hit = f"the security flag `{kw.arg}=False`"
+                break
+            # cert_reqs / verify_mode = ssl.CERT_NONE (TLS certificate verification explicitly disabled).
+            if kw.arg in ("cert_reqs", "verify_mode") and isinstance(kw.value, ast.Attribute) \
+                    and kw.value.attr == "CERT_NONE":
+                hit = f"the TLS flag `{kw.arg}=ssl.CERT_NONE`"
+                break
+        if hit and _is_security_relevant_callee(node.func, http_locals, from_http, session_vars):
+            return True, f"{hit} is explicitly disabled on a resolved security-relevant HTTP/TLS API"
     return False, ""
 
 
