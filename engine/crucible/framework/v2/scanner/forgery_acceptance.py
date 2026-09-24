@@ -33,15 +33,28 @@ state ONLY when a genuine, operator-supplied victim-PRIVATE discriminator ``D`` 
       A denial / empty / error / different-shape negative reference is REFUSED (``is_substantive_success`` fails
       ⇒ fail-closed to a LEAD): its absent marker is VACUOUS (absent because unrendered, not because private);
   (d) ``D`` is a valid discriminator (:func:`valid_discriminator`: non-trivial, not whitespace, not a substring
-      of any VIGIL sentinel / the per-probe nonce, and NOT reflected from the request).
+      of any VIGIL sentinel / the per-probe nonce, NOT reflected from the request, AND NOT present in / derivable
+      from the FORGED TOKEN's own decoded claim VALUES — its ``sub`` / ``email`` / ``name`` / SAML attribute /
+      NameID values). The attacker controls the forged (``alg:none`` / NameID-tampered, unsigned) token, so any
+      token-claim value echoed back is REFLECTION of attacker-supplied data, never an achieved read of server-side
+      private content: ``D`` must be SERVER-SIDE private data about the impersonated identity that is ABSENT from
+      the forged token.
 
-WHY THIS IS SOUND WHERE CONTENT HEURISTICS WERE NOT. ``D`` is a victim-PRIVATE datum, so a benign app — however
-its response varies by credential presence, however much identity-echoing chrome it renders on a soft-200 —
-does NOT LEAK the victim's private datum to a forged (unsigned / unsigned-content) token: the forged read of a
-benign app is a non-granting soft-deny that does not carry ``D``, so clause (a) fails and NOTHING mints. Only a
-genuinely-broken SP/RP that GRANTS the forged token puts the victim-private ``D`` into the forged response.
-Chrome / identity-echo the operator might mistake for private content is caught by clauses (c)+(d): it is
-rendered on the substantive-2xx same-shape invalid-token control too, so its absence-in-control fails.
+WHY THIS IS SOUND — AND WHERE THE PRIOR "A BENIGN APP CANNOT MINT" CLAIM WAS TOO STRONG. Clause (a) ALONE is not
+enough. A benign app that REJECTS the forge can still ECHO a value it DECODED FROM THE FORGED TOKEN — a JWT
+``email``/``name`` claim, a SAML assertion ``mail`` attribute — on its (non-granting) reject page. That echo is
+REFLECTION of attacker-controlled token data, NOT a leak of server-side private content; yet it would put the
+operator's ``D`` into the forged response (clause a), into a legit reference for the same real identity (clause b),
+and leave it absent from a control that does not echo it (clause c) — minting a FALSE ``achieved_state`` on
+jwt/oidc/saml (``D=email`` is the canonical example, a natural config, not misuse). Clause (d) therefore REFUSES
+any ``D`` present in / derivable from the FORGED TOKEN's own decoded claim values — the request-reflection guard
+COMBINED WITH a forged-token-claim guard (the runner parses the JWT payload / SAML assertion it minted and excises
+those values, re-derived in the predicate AST so an offline re-verify enforces the same bound). What survives as
+``D`` is SERVER-SIDE private data about the impersonated identity that is ABSENT from the forged token, so a benign
+non-granting app — however it echoes token claims, however its response varies by credential presence, however
+much chrome it renders — cannot supply it. Chrome / identity-echo the operator might mistake for private content
+is additionally caught by clause (c): it is rendered on the substantive-2xx same-shape invalid-token control too,
+so its absence-in-control fails.
 
 THE DEFEATED HEURISTICS ARE DEMOTED, NOT KEPT AS PROOF. The difflib structural-similarity ratio survives ONLY
 as a weak advisory recorded in the evidence (``same_shape_similarity``); it is NOT an admission gate and does
@@ -58,7 +71,8 @@ with TWO distinct same-status substantive-2xx deny views differing in one chrome
 producer of BOTH the victim-PRIVATE ``D`` (+ the legitimate-valid-token POSITIVE reference) AND a CERTIFIED
 substantive same-shape deny reference captured from the SAME rendering path. Until then the oracle mints a FACT
 only in the genuinely-sound sub-case it can prove (a supplied substantive same-shape control lacking a genuine
-private ``D``), and yields an honest LEAD everywhere else. It NEVER mints a false FACT: a benign app, a terse
+private ``D``), and yields an honest LEAD everywhere else. It NEVER mints a false FACT: a benign app (INCLUDING one
+that echoes a decoded token claim on its reject page — caught by clause (d)'s forged-token-claim guard), a terse
 control, a missing ``D`` or a missing reference all fail closed to a LEAD.
 
 Additional guarantees carried over:
@@ -84,8 +98,9 @@ achieved-acceptance FACT is **capability-not-operating**: the three ``*_forgery_
 declared ``fact_capable: false`` until a gated-workflow producer of a genuine private ``D`` + the positive
 reference + a CERTIFIED substantive same-shape negative reference is wired — see
 ``docs/capability-matrix/evidence-branches.json`` (``blocking_work``). The oracle below is sound for the sub-case
-it fires (a substantive same-shape control lacking a genuine private ``D``), but it is NOT a blanket guarantee: a
-terse / different-shape control, a benign app, or a missing ``D``/reference mints NOTHING rather than a false FACT.
+it fires (a substantive same-shape control lacking a genuine SERVER-SIDE, token-absent private ``D``), but it is
+NOT a blanket guarantee: a terse / different-shape control, a benign app (INCLUDING one that echoes a decoded
+token claim — clause (d)), or a missing ``D``/reference mints NOTHING rather than a false FACT.
 
 Doctrine (constitution §II, §VI), inherited from ``scanner.sso``:
   * **Own integration only.** Every request rides the injected, gated ``send`` (charter / scope / kill-switch
@@ -214,16 +229,22 @@ def _substantive_success_clauses(status_var: str, body_var: str) -> "list[dict]"
     return clauses
 
 
-def valid_discriminator(marker: object, nonce: str = "", reflectable: str = "") -> bool:
+def valid_discriminator(marker: object, nonce: str = "", reflectable: str = "", token_claims: str = "") -> bool:
     """SHARED GUARD (clause (d)). An operator discriminator is a usable candidate victim-PRIVATE datum ``D``
     ONLY when it is a non-trivial, non-vacuous, non-reflected token: not ``None``, ``len(marker.strip()) >=
     _MIN_DISCRIMINATOR``, not pure whitespace, not carrying the excision sentinel, NOT overlapping the per-probe
     ``nonce`` (neither a substring of it nor containing it — else it is satisfiable by PURE REFLECTION of the
-    attacker nonce), and NOT reflected from the request (not a substring of ``reflectable`` — the request's own
+    attacker nonce), NOT reflected from the request (not a substring of ``reflectable`` — the request's own
     echoable content: URL, header values, body — so a value the app merely echoes back from the request can
-    never masquerade as an achieved read of private content; the Wave-3.1 ref-independence analog). Any of these
-    is dropped before it can be admitted to ``D``. (Admission to ``D`` additionally requires present-in-legit
-    AND present-in-forged AND absent-in-control — see :func:`_acceptance_context`.)"""
+    never masquerade as an achieved read of private content; the Wave-3.1 ref-independence analog), AND NOT
+    present in / derivable from the FORGED TOKEN's own decoded claim values (not a substring of ``token_claims``
+    — the concatenated VALUES of the forged JWT payload / SAML assertion the runner minted). The attacker
+    controls the forged (``alg:none`` / NameID-tampered, unsigned) token, so a value the app decoded FROM the
+    forged token and echoed back (e.g. an ``email``/``name`` claim, a SAML ``mail`` attribute) is REFLECTION of
+    attacker-supplied data, NOT an achieved read of server-side private content — this is the round-6 BLOCK fix
+    (a benign app that rejects the forge but echoes a decoded token claim on its reject page). Any of these is
+    dropped before it can be admitted to ``D``. (Admission to ``D`` additionally requires present-in-legit AND
+    present-in-forged AND absent-in-control — see :func:`_acceptance_context`.)"""
     if marker is None:
         return False
     m = str(marker)
@@ -234,6 +255,8 @@ def valid_discriminator(marker: object, nonce: str = "", reflectable: str = "") 
     if nonce and (m in nonce or nonce in m):
         return False
     if reflectable and m in reflectable:
+        return False
+    if token_claims and m in token_claims:
         return False
     return True
 
@@ -297,6 +320,69 @@ def _request_reflectable(req: "HttpRequest") -> str:
     return "\n".join(p for p in parts if p)
 
 
+def _claim_values(*objs: object) -> "list[str]":
+    """Clause (d) — every scalar VALUE reachable in the given decoded token-claims structures (a forged JWT
+    header/payload dict, a list of SAML attribute values), flattened to non-empty stripped strings. KEYS are NOT
+    collected — only VALUES, since the attacker controls the values a broken app might echo back from the forged
+    token. ``None`` and ``bool`` are skipped; dicts, lists, tuples and sets are walked recursively. The result
+    seeds the forged-token-claim reflection guard: any candidate ``D`` present in one of these values is dropped
+    (it would be a REFLECTION of attacker-supplied token content, never an achieved server-side private read)."""
+    out: list[str] = []
+
+    def walk(v: object) -> None:
+        if isinstance(v, dict):
+            for x in v.values():
+                walk(x)
+        elif isinstance(v, (list, tuple, set)):
+            for x in v:
+                walk(x)
+        elif v is None or isinstance(v, bool):
+            return
+        else:
+            s = str(v).strip()
+            if s:
+                out.append(s)
+
+    for o in objs:
+        walk(o)
+    return out
+
+
+def _forged_jwt_claims(forged: str, header: object, forged_payload: object) -> "list[str]":
+    """Clause (d) — the decoded claim VALUES of the FORGED JWT the runner minted. Decode the actual forged token
+    (so the values are exactly what was sent), falling back to the header/payload dicts if the re-decode ever
+    fails. These attacker-controlled values seed the forged-token-claim reflection guard (a ``D`` echoed from any
+    of them is REFLECTION, not an achieved server-side private read)."""
+    try:
+        fh, fp, _ = _jwt.decode(forged)
+        return _claim_values(fh, fp)
+    except Exception:
+        return _claim_values(header, forged_payload)
+
+
+def _saml_claim_values(xml_text: str) -> "list[str]":
+    """Clause (d) — every attacker-controllable text / attribute VALUE in a (forged, un-re-signed) SAML
+    assertion: the tampered ``NameID``, every ``AttributeValue``, and every other element text / tail / XML
+    attribute the attacker set. A NameID-tampered assertion is NOT re-signed, so ALL of its content is
+    attacker-controlled — any of it echoed back by the SP is REFLECTION, not an achieved read of server-side
+    private content. Total / defensive: a parse failure yields no claims (the guard then simply adds nothing
+    rather than raising). Over-collection is SAFE — it can only DOWNGRADE a would-be FACT to a LEAD, never mint
+    one."""
+    try:
+        root = _sso.safe_parse_xml(xml_text)
+    except Exception:
+        return []
+    out: list[str] = []
+    for el in root.iter():
+        for s in (el.text, el.tail):
+            if s and str(s).strip():
+                out.append(str(s).strip())
+        for v in el.attrib.values():
+            if v and str(v).strip():
+                out.append(str(v).strip())
+    return out
+
+
 def _reflected_forged_values(marker: str, forged_values: "tuple[str, ...]") -> "list[str]":
     """The exact strings VIGIL injected that the target may REFLECT: the per-probe nonce and every
     sub/role/email value built from it. Every one embeds the 128-bit random nonce, so excising them from a
@@ -319,18 +405,20 @@ def _excise(body: str, reflected: "list[str]") -> str:
 
 
 def _sound_markers(
-    success_markers: "tuple[str, ...]", marker: str, reflectable: str = ""
+    success_markers: "tuple[str, ...]", marker: str, reflectable: str = "", token_claims: str = ""
 ) -> "list[str]":
     """FIX #3 + clause (d) — the operator discriminators that are SOUND candidate victim-PRIVATE data ``D``,
     i.e. every marker that is a :func:`valid_discriminator` against the per-probe forged ``marker`` (the nonce)
-    AND is not reflected from the request (``reflectable``). This drops, up front and before anything enters
-    ``D`` or the predicate AST, the vacuous (empty / pure-whitespace / ``< _MIN_DISCRIMINATOR`` chars), the
-    nonce-overlapping (a substring of, or containing, the ``crucible-forged-<hex>`` nonce), the request-reflected,
-    and anything carrying the excision sentinel. (Admission to ``D`` further requires present-in-legit AND
+    AND is not reflected from the request (``reflectable``) AND is not present in / derivable from the FORGED
+    TOKEN's own decoded claim values (``token_claims`` — the round-6 fix). This drops, up front and before
+    anything enters ``D`` or the predicate AST, the vacuous (empty / pure-whitespace / ``< _MIN_DISCRIMINATOR``
+    chars), the nonce-overlapping (a substring of, or containing, the ``crucible-forged-<hex>`` nonce), the
+    request-reflected, the forged-token-claim-reflected (an echoed ``email``/``name``/attribute value), and
+    anything carrying the excision sentinel. (Admission to ``D`` further requires present-in-legit AND
     present-in-forged AND absent-in-control.) If every supplied marker is dropped, the caller mints nothing (a
     rigorous LEAD)."""
     return [str(m) for m in success_markers
-            if valid_discriminator(m, nonce=marker, reflectable=reflectable)]
+            if valid_discriminator(m, nonce=marker, reflectable=reflectable, token_claims=token_claims)]
 
 
 def _acceptance_context(
@@ -343,6 +431,7 @@ def _acceptance_context(
     *,
     forged_values: "tuple[str, ...]" = (),
     reflectable: str = "",
+    token_claims: "tuple[str, ...]" = (),
 ) -> "FindingContext | None":
     """Build the ACHIEVED_STATE predicate context proving a forged token achieved a READ OF A VICTIM-PRIVATE
     DATUM, by the private-read differential (a)–(d). This reuses the Wave-3.1 IDOR/BOLA machinery
@@ -360,11 +449,12 @@ def _acceptance_context(
         marker would be VACUOUS (absent because unrendered, not because private).
 
     ``D`` (the victim-private discriminators) is DERIVED here (in Python, mirrored in the AST): every operator
-    ``success_marker`` that is a :func:`valid_discriminator` (nonce-disjoint, non-vacuous, non-reflected) AND
-    present in the NONCE-EXCISED positive-reference body AND present in the NONCE-EXCISED forged body AND absent
-    from the NONCE-EXCISED substantive negative-control body. If no ``D`` survives — or the positive reference,
-    the forged response, OR the negative control is not a substantive success — the caller mints NOTHING (returns
-    ``None`` — a rigorous LEAD, never a false CLEAN).
+    ``success_marker`` that is a :func:`valid_discriminator` (nonce-disjoint, non-vacuous, NOT reflected from the
+    request, AND NOT present in / derivable from the FORGED TOKEN's own decoded claim values — ``token_claims``,
+    the round-6 fix) AND present in the NONCE-EXCISED positive-reference body AND present in the NONCE-EXCISED
+    forged body AND absent from the NONCE-EXCISED substantive negative-control body. If no ``D`` survives — or the
+    positive reference, the forged response, OR the negative control is not a substantive success — the caller
+    mints NOTHING (returns ``None`` — a rigorous LEAD, never a false CLEAN).
 
     The predicate (evaluated by ``verify.oracles.predicate_oracle``, NOT by this code) fires iff ALL hold,
     re-derived over RAW observed values so an offline re-verify enforces the identical gate:
@@ -382,7 +472,11 @@ def _acceptance_context(
       6. every ``D`` is PRESENT in the nonce-excised FORGED body (clause a — the achieved private read: the
          forged identity reached the victim's private content); AND
       7. every ``D`` is ABSENT from the nonce-excised substantive NEGATIVE-control body (clause c — the
-         access-gated absence that proves ``D`` is private, not chrome/boilerplate rendered to any credential).
+         access-gated absence that proves ``D`` is private, not chrome/boilerplate rendered to any credential); AND
+      8. every ``D`` is ABSENT from ``forged_token_claims`` (clause d, round-6) — the concatenated decoded claim
+         VALUES of the FORGED token the runner minted (the JWT payload / SAML assertion). A ``D`` the app merely
+         DECODED FROM the attacker-controlled forged token and echoed back is REFLECTION, not an achieved read of
+         server-side private content; re-derived here so an offline re-verify rejects a token-claim-echo certificate.
 
     NO SIMILARITY SCORE. Round-5 gated clause 7 on a difflib ``_shape_similarity(forged, control) >= 0.5``
     admission score; the sixth variant defeated it (a benign non-granting app scores ~0.95 yet is not a grant).
@@ -395,11 +489,17 @@ def _acceptance_context(
     ``fact_capable: false`` and yields a LEAD until a genuine private ``D`` + a CERTIFIED substantive same-shape
     negative reference are supplied — see ``docs/capability-matrix/evidence-branches.json`` (``blocking_work``).
 
-    The surviving ``D``, the substantive-length thresholds and the exact excised reflected values ride literally
-    in the predicate AST + the observed evidence (alongside the raw and excised bodies, the advisory same-shape
-    similarity score, and the advisory ``forged_deny_signature_hits``), so the finding re-verifies offline
-    byte-for-byte AND the same differential re-fires under offline predicate re-verification."""
-    candidates = _sound_markers(success_markers, marker, reflectable)
+    The surviving ``D``, the substantive-length thresholds, the exact excised reflected values and the FORGED
+    token's decoded claim values (``forged_token_claims``) ride literally in the predicate AST + the observed
+    evidence (alongside the raw and excised bodies, the advisory same-shape similarity score, and the advisory
+    ``forged_deny_signature_hits``), so the finding re-verifies offline byte-for-byte AND the same differential
+    (including clause (d)'s forged-token-claim guard) re-fires under offline predicate re-verification."""
+    # clause (d), round-6: the concatenated decoded claim VALUES of the FORGED token (JWT payload / SAML
+    # assertion the runner minted). Any candidate D present in these is attacker-supplied token content the app
+    # could merely echo back — a REFLECTION, not an achieved server-side private read — so it is dropped up front
+    # (and re-derived in the predicate AST for offline durability). Newline-joined to prevent cross-value bridging.
+    token_claims_blob = "\n".join(str(c) for c in token_claims if str(c).strip())
+    candidates = _sound_markers(success_markers, marker, reflectable, token_claims_blob)
     if not candidates:
         return None
     reflected = _reflected_forged_values(marker, forged_values)
@@ -422,11 +522,13 @@ def _acceptance_context(
         return None
     if not is_substantive_success(_status(control_resp), control_content):
         return None
-    # Derive D: a victim-private discriminator is PRESENT in the positive reference AND PRESENT in the forged
-    # read AND ABSENT from the substantive same-shape negative control. The absent-in-control clause is the
-    # access-gated proof (chrome/boilerplate rendered on the same-shape control is disqualified here); the
-    # present-in-forged clause is the achieved private read. A benign app never leaks a genuine private D into
-    # the forged soft-deny, so it derives no D and mints nothing.
+    # Derive D: a victim-private discriminator that survived clause (d) (candidates already exclude the
+    # request-reflected AND the forged-token-claim-reflected) AND is PRESENT in the positive reference AND PRESENT
+    # in the forged read AND ABSENT from the substantive same-shape negative control. The absent-in-control clause
+    # is the access-gated proof (chrome/boilerplate rendered on the same-shape control is disqualified here); the
+    # present-in-forged clause is the achieved private read. A benign app can only put attacker-controlled token
+    # content (excluded by clause d) or shared chrome (excluded by clause c) into the forged read, so it derives
+    # no server-side-private D and mints nothing.
     grant_discriminators = [
         m for m in candidates
         if m in legit_content and m in forged_content and m not in control_content
@@ -445,7 +547,8 @@ def _acceptance_context(
         "control_content": control_content,          # nonce EXCISED + stripped — the substantive same-shape negative reference (D must be absent)
         "forged_marker": marker,
         "reflected_forged_values": reflected,        # audit: exactly what was excised before the discriminator search
-        "grant_discriminators": grant_discriminators,  # D: valid, non-reflected, present-in-legit, present-in-forged, absent-in-control
+        "forged_token_claims": token_claims_blob,    # clause (d): decoded claim VALUES of the FORGED token — every D must be ABSENT from these
+        "grant_discriminators": grant_discriminators,  # D: valid, non-reflected, non-token-claim, present-in-legit, present-in-forged, absent-in-control
         "forged_deny_signature_hits": _deny_signature_hits(forged_content),  # WEAK ADVISORY only — not a gate
         "min_substantive_len": _MIN_SUBSTANTIVE_BODY,
         # WEAK ADVISORY (round-6, demoted from the round-5 admission gate): the difflib structural similarity of
@@ -474,6 +577,10 @@ def _acceptance_context(
         # (7) clause (c): every D is ABSENT from the substantive NEGATIVE control (D is access-gated private
         # content, not chrome — the load-bearing differential)
         *[{"not": {"contains": [{"var": "control_content"}, g]}} for g in grant_discriminators],
+        # (8) clause (d), round-6: every D is ABSENT from the FORGED token's own decoded claim values (a value the
+        # app decoded from the attacker-controlled forged token and echoed back is REFLECTION, not an achieved
+        # server-side private read). Re-derived offline so a token-claim-echo certificate is rejected on re-verify.
+        *[{"not": {"contains": [{"var": "forged_token_claims"}, g]}} for g in grant_discriminators],
     ]}
     return FindingContext.from_predicate(observed, predicate, bug_class=bug_class)
 
@@ -524,15 +631,18 @@ class JwtForgeryAcceptanceCheck:
     positive reference AND ABSENT from a substantive-2xx same-shape invalid-token control — proven over the RAW
     evidence by the ACHIEVED_STATE predicate oracle, with NO similarity score.
 
-    ``success_markers`` are the operator-supplied CANDIDATE victim-PRIVATE data (a private email, an account
-    number, a private note the authenticated resource renders) — NOT chrome / success banners: only a genuinely
-    private datum survives the differential (chrome is rendered on the substantive same-shape control too and is
-    disqualified). Without BOTH ``success_markers`` and ``legit_token`` it mints nothing (a rigorous LEAD; the
-    offline ``jwt_forgeable`` FACT still stands). Round-6 downgrade: a bad-signature control is typically a terse
-    reject, NOT a substantive same-shape deny, so the wired class is a LEAD (``fact_capable: false``); the FACT
-    fires only when the control is a substantive same-shape read of the same resource lacking a genuine private
-    ``D``. Refusal #7: ``alg:none`` only — the embedded-key (``jwk``/``x5c``/``jku``/``x5u``) forge is never
-    attempted."""
+    ``success_markers`` are the operator-supplied CANDIDATE victim-PRIVATE data (an account number, a private note,
+    a balance the authenticated resource renders SERVER-SIDE) — NOT chrome / success banners AND NOT a value the
+    forged token itself carries: only a genuinely private, TOKEN-ABSENT datum survives the differential. Chrome is
+    rendered on the substantive same-shape control too and is disqualified (clause c); and a value the app DECODED
+    FROM the forged token and echoed back — an ``email``/``name``/``sub`` claim — is REFLECTION of attacker content,
+    disqualified by clause (d)'s forged-token-claim guard (round-6: a benign app that rejects the forge but echoes a
+    decoded claim on its reject page must NOT mint). Without BOTH ``success_markers`` and ``legit_token`` it mints
+    nothing (a rigorous LEAD; the offline ``jwt_forgeable`` FACT still stands). Round-6 downgrade: a bad-signature
+    control is typically a terse reject, NOT a substantive same-shape deny, so the wired class is a LEAD
+    (``fact_capable: false``); the FACT fires only when the control is a substantive same-shape read of the same
+    resource lacking a genuine token-absent private ``D``. Refusal #7: ``alg:none`` only — the embedded-key
+    (``jwk``/``x5c``/``jku``/``x5u``) forge is never attempted."""
 
     id: str = "jwt-forgery-accepted"
     bug_class: str = "jwt_forgery_accepted"
@@ -558,13 +668,15 @@ class JwtForgeryAcceptanceCheck:
         except Exception:
             return None
         marker = _new_marker()
-        forged = _jwt.encode_none(header, {**payload, "sub": marker})   # refusal #7: alg:none only
+        forged_payload = {**payload, "sub": marker}
+        forged = _jwt.encode_none(header, forged_payload)   # refusal #7: alg:none only
         legit_resp = send(_jwt.with_token(req, self.location, self.legit_token))
         forged_resp = send(_jwt.with_token(req, self.location, forged))
         control_resp = send(_jwt.with_token(req, self.location, _corrupt_jwt_signature(self.legit_token)))
         return _acceptance_context(legit_resp, forged_resp, control_resp, marker,
                                    self.success_markers, self.bug_class,
-                                   reflectable=_request_reflectable(req))
+                                   reflectable=_request_reflectable(req),
+                                   token_claims=tuple(_forged_jwt_claims(forged, header, forged_payload)))
 
 
 @dataclass(frozen=True)
@@ -575,7 +687,9 @@ class OidcForgeryAcceptanceCheck:
     (POSITIVE reference) and a well-formed bad-signature control (the SUBSTANTIVE SAME-SHAPE NEGATIVE reference).
     Fires ONLY when a victim-PRIVATE ``D`` is present in the forged read AND the legit positive reference AND
     absent from a substantive-2xx same-shape invalid-token control — NO similarity score. ``success_markers`` are
-    candidate victim-PRIVATE data, not chrome. Without BOTH ``success_markers`` and ``legit_token`` it mints
+    candidate SERVER-SIDE victim-PRIVATE data, NOT chrome and NOT a claim the forged id_token carries: an
+    ``email``/``name`` value the RP decoded from the forged token and echoed back is REFLECTION, disqualified by
+    clause (d)'s forged-token-claim guard (round-6). Without BOTH ``success_markers`` and ``legit_token`` it mints
     nothing. Round-6 downgrade: a bad-signature id_token control is typically a terse reject, not a substantive
     same-shape deny, so the wired class is a LEAD (``fact_capable: false``). Refusal #7: ``alg:none`` only. The
     sibling of :class:`JwtForgeryAcceptanceCheck` for the RP callback surface (an ``id_token`` field or header,
@@ -600,16 +714,20 @@ class OidcForgeryAcceptanceCheck:
             return None
         marker = _new_marker()
         email = f"{marker}@sso-test.invalid"
-        forged = _jwt.encode_none(header, {**payload, "sub": marker, "email": email})
+        forged_payload = {**payload, "sub": marker, "email": email}
+        forged = _jwt.encode_none(header, forged_payload)
         legit_resp = send(_sso._place_jwt(req, self.location, self.legit_token))
         forged_resp = send(_sso._place_jwt(req, self.location, forged))
         control_resp = send(_sso._place_jwt(req, self.location, _corrupt_jwt_signature(self.legit_token)))
         # FIX #3: the email (a derived value that also embeds the nonce) is a reflected forged value too, so
         # it is excised from the searched bodies before the discriminator search — a marker satisfied only by
         # the reflected email suffix (e.g. "sso-test.invalid") cannot mint a FACT either.
+        # Clause (d): the forged id_token's OTHER surviving claims (a captured ``name``/``given_name`` the forge
+        # keeps, ``email`` is overridden with the nonce email) seed the forged-token-claim reflection guard.
         return _acceptance_context(legit_resp, forged_resp, control_resp, marker,
                                    self.success_markers, self.bug_class, forged_values=(email,),
-                                   reflectable=_request_reflectable(req))
+                                   reflectable=_request_reflectable(req),
+                                   token_claims=tuple(_forged_jwt_claims(forged, header, forged_payload)))
 
 
 @dataclass(frozen=True)
@@ -620,12 +738,14 @@ class SamlForgeryAcceptanceCheck:
     Response — the POSITIVE reference) and a well-formed assertion-bearing bad-signature control (the SUBSTANTIVE
     SAME-SHAPE NEGATIVE reference). Fires ONLY when a victim-PRIVATE ``D`` is present in the tampered-assertion
     read AND the legit positive reference AND absent from a substantive-2xx same-shape invalid-signature control
-    — NO similarity score. ``success_markers`` are candidate victim-PRIVATE data, not chrome. Without BOTH
-    ``success_markers`` and ``legit_saml`` it mints nothing (the offline ``saml_structural_forgery`` FACT still
-    stands). A correct SP rejects the tampered assertion (signature mismatch), so it does not fire. Round-6
-    downgrade: an invalidated-signature control the SP rejects with a terse 401/403 is not a substantive
-    same-shape deny, so the wired class is a LEAD (``fact_capable: false``); the FACT needs the SP's own
-    substantive same-shape deny view of the same ACS resource."""
+    — NO similarity score. ``success_markers`` are candidate SERVER-SIDE victim-PRIVATE data, NOT chrome and NOT a
+    value the tampered assertion carries: the tampered assertion is un-re-signed, so any of its NameID / attribute
+    values (e.g. a ``mail`` attribute) the SP decoded and echoed back is REFLECTION, disqualified by clause (d)'s
+    forged-token-claim guard (round-6). Without BOTH ``success_markers`` and ``legit_saml`` it mints nothing (the
+    offline ``saml_structural_forgery`` FACT still stands). A correct SP rejects the tampered assertion (signature
+    mismatch), so it does not fire. Round-6 downgrade: an invalidated-signature control the SP rejects with a terse
+    401/403 is not a substantive same-shape deny, so the wired class is a LEAD (``fact_capable: false``); the FACT
+    needs the SP's own substantive same-shape deny view of the same ACS resource."""
 
     id: str = "saml-forgery-accepted"
     bug_class: str = "saml_forgery_accepted"
@@ -656,9 +776,13 @@ class SamlForgeryAcceptanceCheck:
         legit_resp = send(_sso.with_form_field(req, self.field_name, _sso.encode_saml(legit_xml)))
         forged_resp = send(_sso.with_form_field(req, self.field_name, _sso.encode_saml(tampered)))
         control_resp = send(_sso.with_form_field(req, self.field_name, _sso.encode_saml(control_xml)))
+        # Clause (d): the tampered assertion is UN-re-signed, so ALL of its text/attribute values are
+        # attacker-controlled (the tampered NameID plus every kept AttributeValue — e.g. a ``mail`` attribute).
+        # Any of them echoed back by the SP is REFLECTION, not an achieved server-side private read.
         return _acceptance_context(legit_resp, forged_resp, control_resp, marker,
                                    self.success_markers, self.bug_class,
-                                   reflectable=_request_reflectable(req))
+                                   reflectable=_request_reflectable(req),
+                                   token_claims=tuple(_saml_claim_values(tampered)))
 
 
 def forgery_acceptance_checks(

@@ -15,11 +15,22 @@ REFUSED) AND (d) D is a valid, non-reflected discriminator. The difflib similari
 proof (kept only as a weak advisory); same-shape-ness is established SOUNDLY by the negative control being a
 substantive-2xx rendering of the SAME replayed resource, exactly as Wave-3.1's substantive-2xx peer control.
 
-WHY IT IS SOUND. D is victim-PRIVATE, so a benign app — however its response varies by credential presence,
-however much identity-echoing chrome it renders on a soft-200 — does NOT leak the victim's private datum to a
-forged (unsigned) token: the forged read of a benign app carries no D, so clause (a) fails and NOTHING mints,
-whatever the similarity score. Chrome the operator might mistake for private content is rendered on the
-substantive same-shape control too, so its absence-in-control (clause c) fails.
+WHY IT IS SOUND. D must be SERVER-SIDE victim-private content that is ABSENT from the forged token. Chrome the
+operator might mistake for private content is rendered on the substantive same-shape control too, so its
+absence-in-control (clause c) fails.
+
+THE ROUND-6 BLOCK (clause d, forged-token-claim guard). Clause (a) alone is NOT enough: a benign app that REJECTS
+the forge can still ECHO a value it DECODED FROM THE FORGED TOKEN — a JWT ``email``/``name`` claim, a SAML ``mail``
+attribute — on its (non-granting) reject page. That echo is REFLECTION of attacker-controlled token data (the
+attacker owns the ``alg:none`` / NameID-tampered unsigned token), NOT a leak of server-side private content, yet it
+would satisfy clause (a) with D present in the forged read, clause (b) in a positive reference for the same real
+identity, and clause (c) absent from a control that does not echo it — minting a FALSE ``achieved_state`` on
+jwt/oidc/saml (``D=email`` is the canonical example). The fix parses the forged JWT payload / SAML assertion the
+runner minted and REFUSES any D present in / derivable from its own decoded claim values (combined with the
+pre-existing request-reflection guard, and re-derived in the predicate AST so an offline re-verify refuses a
+token-claim-echo certificate). What survives is a SERVER-SIDE, token-ABSENT private datum a benign app cannot
+supply. The class stays a rigorous LEAD (``fact_capable:false``); the sound forge-as-real-victim server-side-
+private-read design is the ``blocking_work``.
 
 HONEST OUTCOME (a LEAD-downgrade). A bad-signature control auto-derived from the legit token is NOT guaranteed
 to be a substantive same-shape deny — a correct app rejects it with a terse 401 — so for the wired input the
@@ -674,6 +685,188 @@ def test_offline_reverify_reproduces_and_tamper_is_rejected() -> None:
     # TAMPER 5: replace the substantive same-shape control with a TERSE deny ⇒ clause (c) not substantive ⇒ reject.
     assert not OracleVerifier().confirm(_tamper(control_status=401, control_content="Unauthorized")).confirmed, (
         "a terse / non-substantive control must NOT re-confirm (clause c requires a substantive same-shape read)")
+    # TAMPER 6 (round-6 clause d): inject a discriminator VALUE into the forged token's own decoded claims ⇒ it is
+    # a token-claim echo (attacker-controlled reflection), so clause (8) fails and the certificate is refused.
+    assert oc["observed_evidence"].get("forged_token_claims") is not None, (
+        "the certificate must carry the forged token's decoded claim values (clause d)")
+    assert not OracleVerifier().confirm(_tamper(forged_token_claims=" ".join(G) + " echoed from the forged token")).confirmed, (
+        "a D present in the forged token's own claims (a decoded-token-claim echo) must NOT re-confirm (clause d)")
+
+
+# ---------------------------------------------------------------------------
+# ROUND-6 BLOCK fix — clause (d) forged-token-claim guard. A benign app that REJECTS the forge but ECHOES a value
+# it DECODED FROM THE FORGED TOKEN (a JWT email / OIDC name / SAML mail attribute) on its reject page is
+# REFLECTING attacker-controlled token content, NOT leaking a server-side private datum ⇒ MUST NOT mint.
+# ---------------------------------------------------------------------------
+
+_CLAIM_EMAIL = "victim-echo@corp.test"   # a JWT email claim the alg:none forge PRESERVES (D = this)
+_CLAIM_NAME = "Victim Q Echo Name"       # an OIDC name claim the forge preserves (email is overridden by the nonce)
+_CLAIM_MAIL = "mailattr-echo@corp.test"  # a SAML mail AttributeValue the NameID-tamper keeps
+
+
+def _rich_jwt() -> str:
+    # A captured/legit token carrying email + name identity CLAIMS (the same real identity is the positive ref).
+    return _jwt.encode_hs256({"typ": "JWT"}, {"sub": "alice", "email": _CLAIM_EMAIL, "name": _CLAIM_NAME}, _SECRET)
+
+
+def _rich_jwt_req() -> HttpRequest:
+    return HttpRequest(method="GET", url="http://127.0.0.1:9/me", headers=[("Authorization", f"Bearer {_rich_jwt()}")])
+
+
+def _rich_oidc_req() -> HttpRequest:
+    return HttpRequest(method="POST", url="http://127.0.0.1:9/callback",
+                       headers=[("Content-Type", "application/x-www-form-urlencoded")],
+                       body=f"id_token={_rich_jwt()}&state=x")
+
+
+_SIGNED_SAML_MAIL = (
+    f'<samlp:Response xmlns:samlp="{_NS_P}" xmlns:saml="{_NS_A}" xmlns:ds="{_NS_D}" ID="R1" Version="2.0">'
+    "<saml:Issuer>https://idp.example.test</saml:Issuer>"
+    '<samlp:Status><samlp:StatusCode Value="urn:oasis:names:tc:SAML:2.0:status:Success"/></samlp:Status>'
+    '<saml:Assertion ID="A1" Version="2.0">'
+    "<ds:Signature><ds:SignatureValue>alice@example.test</ds:SignatureValue></ds:Signature>"
+    "<saml:Subject><saml:NameID>alice@example.test</saml:NameID></saml:Subject>"
+    '<saml:AttributeStatement><saml:Attribute Name="mail">'
+    f"<saml:AttributeValue>{_CLAIM_MAIL}</saml:AttributeValue></saml:Attribute></saml:AttributeStatement>"
+    '<saml:Conditions NotOnOrAfter="2035-01-01T00:00:00Z"/>'
+    "</saml:Assertion></samlp:Response>"
+)
+_SIGNED_SAML_MAIL_B64 = base64.b64encode(_SIGNED_SAML_MAIL.encode()).decode()
+
+
+def _rich_saml_req() -> HttpRequest:
+    return HttpRequest(method="POST", url="http://127.0.0.1:9/acs",
+                       headers=[("Content-Type", "application/x-www-form-urlencoded")],
+                       body=urlencode({"SAMLResponse": _SIGNED_SAML_MAIL_B64}))
+
+
+def _decoded_claim(token: "str | None", claim: str) -> str:
+    if token is None:
+        return ""
+    try:
+        _, payload, _ = _jwt.decode(token)
+    except Exception:
+        return ""
+    return str(payload.get(claim, ""))
+
+
+def _jwt_claim_echo_app(location: str, claim: str):
+    """A BENIGN NON-granting RP that REJECTS the alg:none forge but ECHOES the token's decoded ``claim`` on a
+    SUBSTANTIVE soft-200 reject page; answers the bad-signature control with a generic substantive deny that does
+    NOT echo it (``_sameshape_deny``); and GRANTS a correctly-signed token (the positive reference, which echoes
+    the real claim). It leaks NO server-side private datum — the ONLY thing carrying D is the echoed token claim,
+    which is attacker-controlled REFLECTION. All of clauses (a)/(b)/(c) are satisfied; ONLY clause (d) (the
+    forged-token-claim guard) stops the fire ⇒ MUST NOT mint (round-6 BLOCK)."""
+    def send(req: HttpRequest) -> dict:
+        token = _jwt_token_of(req, location)
+        alg, _sub = _decoded_alg_and_sub(token)
+        val = _decoded_claim(token, claim)
+        if alg is None:
+            return {"status": 401, "body": "Unauthorized"}
+        if alg == "none":
+            return {"status": 200, "body": (f"<h1>Dashboard</h1><p>Profile lookup for {val} is unavailable here. "
+                                            f"Head to the entry page.</p><nav><a href='/logout'>Sign out</a></nav>")}
+        if _jwt.crack_hs256(token, [_SECRET]) is None:
+            return {"status": 200, "body": _sameshape_deny()}   # bad-sig control: generic substantive deny, NO echo (no D)
+        return {"status": 200, "body": (f"<h1>Dashboard</h1><p>Welcome back. Your profile {val} is confirmed. "
+                                        f"Balance is ready to review.</p><nav><a href='/logout'>Sign out</a></nav>")}
+    return send
+
+
+def _saml_claim_echo_app():
+    """The SAML dual: a BENIGN SP that REJECTS the NameID-tampered assertion but ECHOES its ``mail`` AttributeValue
+    on a substantive soft-200 reject page; answers the invalidated-signature control with a generic substantive
+    deny that does NOT echo it; and GRANTS a fully-valid assertion. The tampered assertion is un-re-signed, so the
+    echoed mail attribute is attacker-controlled REFLECTION ⇒ clause (d) stops the fire ⇒ MUST NOT mint."""
+    def send(req: HttpRequest) -> dict:
+        kind, nameid, sigval = _saml_parse(req)
+        mail = ""
+        raw = _sso.extract_form_field(req, "SAMLResponse")
+        xml = _sso.decode_saml(raw) if raw else ""
+        if xml:
+            try:
+                for av in _sso.safe_parse_xml(xml).iter(f"{{{_NS_A}}}AttributeValue"):
+                    if av.text:
+                        mail = av.text
+                        break
+            except Exception:
+                pass
+        if kind != "assertion":
+            return {"status": 400, "body": "Bad request"}
+        if sigval != "alice@example.test":
+            return {"status": 200, "body": _sameshape_deny()}          # invalidated-sig control: generic deny (no D)
+        if nameid != "alice@example.test":
+            return {"status": 200, "body": (f"<h1>Dashboard</h1><p>Directory entry for {mail} is unavailable. "
+                                            f"Head to the entry page.</p><nav><a href='/logout'>Sign out</a></nav>")}
+        return {"status": 200, "body": (f"<h1>Dashboard</h1><p>Welcome. Directory {mail} confirmed. "
+                                        f"Balance ready.</p><nav><a href='/logout'>Sign out</a></nav>")}
+    return send
+
+
+def test_decoded_token_claim_echo_does_not_fire() -> None:
+    """THE ROUND-6 BLOCK. On all three surfaces, a benign app that echoes a DECODED TOKEN CLAIM (JWT email /
+    OIDC name / SAML mail attribute) on its reject page — with that claim supplied as the operator's D and present
+    in the forged read AND the positive reference AND absent from a substantive same-shape control — mints NOTHING
+    (a LEAD): the echo is REFLECTION of attacker-controlled token content, refused by clause (d)."""
+    for surface, req, chk, app in (
+        ("jwt", _rich_jwt_req(), _jwt_check(markers=(_CLAIM_EMAIL,), legit=_rich_jwt()),
+         _jwt_claim_echo_app("authorization", "email")),
+        ("oidc", _rich_oidc_req(), _oidc_check(markers=(_CLAIM_NAME,), legit=_rich_jwt(), location="id_token"),
+         _jwt_claim_echo_app("id_token", "name")),
+        ("saml", _rich_saml_req(), _saml_check(markers=(_CLAIM_MAIL,), legit=_SIGNED_SAML_MAIL_B64),
+         _saml_claim_echo_app()),
+    ):
+        assert not _confirmed(_run(req, chk, app), chk.bug_class), (
+            f"{surface}: a decoded-token-claim echo must NOT mint a FACT (clause d)")
+        assert chk.probe(RequestTemplate(req), app) is None, (
+            f"{surface}: a decoded-token-claim echo ⇒ NO context (a rigorous LEAD)")
+
+
+def test_forged_token_claim_guard_is_the_load_bearing_addition() -> None:
+    """Prove the forged-token-claim guard — not the pre-existing request-reflection guard — is what refuses the
+    token-claim echo: the echoed claim is base64-encoded inside the request token, so it is NOT a substring of the
+    request-reflectable content (the old clause (d) would ADMIT it), while the forged-token-claim guard DROPS it."""
+    nonce = "crucible-forged-deadbeefcafebabefeedface0badc0de"
+    reflectable = fa._request_reflectable(_rich_jwt_req())     # URL + headers (the base64 token) + body
+    assert _CLAIM_EMAIL not in reflectable, "the email claim is base64-encoded in the token, not reflected verbatim"
+    assert fa.valid_discriminator(_CLAIM_EMAIL, nonce, reflectable=reflectable) is True, (
+        "the request-reflection guard alone does NOT catch a base64-embedded token claim")
+    assert fa.valid_discriminator(_CLAIM_EMAIL, nonce, token_claims=f"alice\n{_CLAIM_EMAIL}\n{_CLAIM_NAME}") is False, (
+        "clause (d): a value present in the forged token's own decoded claims is refused")
+    # _sound_markers drops the token-claim value up front; a genuine server-side datum survives.
+    kept = fa._sound_markers((_CLAIM_EMAIL, "acct-88213-7741"), nonce, token_claims=f"sub\n{_CLAIM_EMAIL}\nnone")
+    assert kept == ["acct-88213-7741"], "the forged-token-claim value is dropped; the server-side datum survives"
+
+
+def test_claim_value_extractors() -> None:
+    """Unit-level proof of the claim-value extractors that seed clause (d)."""
+    # JWT: values (not keys) are collected recursively; None/bool skipped.
+    vals = fa._claim_values({"sub": "alice", "email": _CLAIM_EMAIL, "roles": ["admin", "user"],
+                             "verified": True, "nested": {"k": "deep-value"}, "nothing": None})
+    assert "alice" in vals and _CLAIM_EMAIL in vals and "admin" in vals and "deep-value" in vals
+    assert "sub" not in vals and "True" not in vals and "email" not in vals, "keys and bools are not collected"
+    # the actual forged alg:none token decodes to exactly its claim values.
+    marker = "crucible-forged-abc123"
+    forged = _jwt.encode_none({"typ": "JWT"}, {"sub": marker, "email": _CLAIM_EMAIL})
+    fclaims = fa._forged_jwt_claims(forged, {"typ": "JWT"}, {"sub": marker, "email": _CLAIM_EMAIL})
+    assert _CLAIM_EMAIL in fclaims and marker in fclaims
+    # SAML: the tampered assertion's NameID + AttributeValue + other text/attrs are all attacker-controlled.
+    tampered = _sso.tamper_assertion(_SIGNED_SAML_MAIL, marker)
+    sclaims = fa._saml_claim_values(tampered)
+    assert marker in sclaims and _CLAIM_MAIL in sclaims, "the tampered NameID and kept mail attribute are claim values"
+    assert fa._saml_claim_values("<<<not xml") == [], "a parse failure yields no claims (total/defensive)"
+
+
+def test_server_side_private_datum_still_fires_with_rich_token_claims() -> None:
+    """The guard is PRECISE, not blunt: a genuine SERVER-SIDE private datum (token-ABSENT) still mints the FACT
+    even when the forged token is rich with other claims (email/name). Only token-present values are excluded."""
+    findings = _run(_rich_jwt_req(), _jwt_check(markers=_PRIVATE, legit=_rich_jwt()), _jwt_fact_app("authorization"))
+    assert _confirmed(findings, "jwt_forgery_accepted"), (
+        "a server-side private datum absent from the forged token still fires despite rich token claims")
+    ctx = _jwt_check(markers=_PRIVATE, legit=_rich_jwt()).probe(RequestTemplate(_rich_jwt_req()), _jwt_fact_app("authorization"))
+    claims = ctx.to_verifier_context()["observed_evidence"]["forged_token_claims"]
+    assert _CLAIM_EMAIL in claims and _PRIVATE[0] not in claims, (
+        "the forged token's email claim is recorded, and the surviving server-side D is not one of its claims")
 
 
 # ---------------------------------------------------------------------------
