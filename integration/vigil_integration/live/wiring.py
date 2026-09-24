@@ -1534,6 +1534,17 @@ def _redrive_branch_for(bug_class: str) -> "Optional[str]":
         "bola": "bola.cross_identity_read",
         "bfla": "bfla.cross_identity_read",
         "mass_assignment": "mass_assignment.persisted_state_change",
+        # Wave 3.2 — session-fixation gated-workflow re-drive: VIGIL fixes a unique high-entropy sentinel id
+        # BEFORE authenticating, runs the operator's login sequence through the gated send, and adjudicates
+        # via the FACT-capable SESSION_FIXATION branch (verify/oracles.py:session_fixation_oracle). Fires only
+        # when the fixed id survived login unrotated AND — by the PRIVATE-READ REDUCTION (the same machinery
+        # 3.1 uses) — a victim-PRIVATE discriminator D is PRESENT in the fixed-session read AND the owner's
+        # authoritative read yet PROVABLY ABSENT from a SUBSTANTIVE SAME-SHAPE other-identity reference and a
+        # no-session baseline. A bare success-marker / credential-presence differential no longer mints; no
+        # private D / a missing reference / D present in a negative reference / a rotated or server-set-only id
+        # / a missing operator login sequence keeps the claim a LEAD/INCONCLUSIVE (the branch's preconditions
+        # fail-close).
+        "session_fixation": "session_fixation.session_fixation",
     }
     branch = mapping.get(normalize_bug_class(bug_class))
     return branch if branch in branch_ids() else None

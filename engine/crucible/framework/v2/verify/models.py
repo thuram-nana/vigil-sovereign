@@ -396,6 +396,26 @@ class OracleKind(str, enum.Enum):
     # LEAD-level csp-unsafe-inline check: CSP_POSTURE is the FACT-capable posture oracle over the retained
     # header, re-derivable offline.
     CSP_POSTURE = "csp_posture"
+    # Wave-3.2 SESSION FIXATION (CWE-384) — its OWN dedicated achieved-state kind, held OUT of the frozen
+    # _ALL_ORACLES so oracle_version(ACHIEVED_STATE) is UNTOUCHED (session fixation carries its own
+    # oracle_version) and the unknown-class fallback stays EXACTLY 15. Like the AEGIS / posture / achieved
+    # members above, it is an ADDITIVE append reachable ONLY via its explicit BUG_CLASS_ORACLES row (keyed on
+    # the `session_fixation` ctx field NO benchmark/scan/engage finding carries), never via the frozen
+    # fallback, so `make gate` stays byte-identical. SESSION_FIXATION fires (0.92) ONLY when a VIGIL-fixed
+    # per-run sentinel session id (sfx_<hex>) SURVIVED the operator's login UNROTATED (post-auth id == the
+    # fixed id) AND — by the PRIVATE-READ REDUCTION (the same machinery Wave-3.1 IDOR/BOLA uses; an achieved
+    # authenticated state CANNOT be proven from response content) — the fixed session S0 achieves a read of a
+    # victim-PRIVATE datum D: D is PRESENT in S0's SUBSTANTIVE read of the protected URL AND in the owner's
+    # authoritative (positive) read yet PROVABLY ABSENT from (a) a SUBSTANTIVE SAME-SHAPE 2xx read by an OTHER
+    # unauthorized identity (the DECISIVE clause — cosmetic chrome shown for ANY credential appears there too)
+    # AND (b) a valid no-session gating baseline, with D a valid non-reflected non-sentinel discriminator (not a
+    # substring of / straddling S0 — not a cookie echo). The differential is re-derived from the RETAINED RAW
+    # bytes at every re-verification (never a bool, never a bare success-marker / credential-presence
+    # differential — that LEGACY path proved only the cookie changed the response, not that S0 authenticated, so
+    # it is an honest LEAD). No / invalid / reflected D, a missing positive or same-shape negative reference, D
+    # present in a negative reference, no valid no-session baseline, a rotated id, or a server-set-only id do NOT
+    # fire (LEAD / channel-confirmed clean).
+    SESSION_FIXATION = "session_fixation"
 
 
 class OracleProbe(BaseModel):

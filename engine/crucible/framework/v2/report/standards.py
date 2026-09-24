@@ -263,6 +263,10 @@ _STANDARDS: dict[str, ControlMapping] = {
                         attack=("T1606",)),
     "credential_stuffing": _m("A07:2021", ("CWE-307", "CWE-799"), pci=_AUTH_PCI, soc2=_AUTH_SOC2, iso=_AUTH_ISO,
                              attack=("T1110.004",)),
+    # Session fixation (Wave-3.2): an attacker-fixable session id survives authentication (CWE-384).
+    # ATT&CK T1539 (Steal Web Session Cookie) — a fixed/known session id becomes a valid authenticated session.
+    "session_fixation": _m("A07:2021", ("CWE-384",), pci=_AUTH_PCI, soc2=_AUTH_SOC2, iso=_AUTH_ISO,
+                           attack=("T1539",)),
     "identity_misconfiguration": _m("A07:2021", ("CWE-308", "CWE-1392"), pci=_AUTH_PCI, soc2=_AUTH_SOC2,
                                     iso=_AUTH_ISO, attack=("T1078",)),
     "saml_signature_wrapping": _m("A07:2021", ("CWE-347", "CWE-290"), pci=_AUTH_PCI, soc2=_AUTH_SOC2, iso=_AUTH_ISO,

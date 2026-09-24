@@ -158,6 +158,13 @@
       "evidence": "Real local process — the in-line protective gateway over real local connections"
     },
     {
+      "kind": "session_fixation",
+      "name": "Session fixation",
+      "family": "core",
+      "tier": "local",
+      "evidence": "Real local process — the loopback benchmark app over a real connection; a PRIVATE-READ REDUCTION proves a pre-set session id survived authentication (the guarded rotate-on-login twin produces nothing)"
+    },
+    {
       "kind": "timing",
       "name": "Statistical timing test",
       "family": "core",

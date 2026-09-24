@@ -21,9 +21,11 @@ valid session while the existing engines do the work.
 from __future__ import annotations
 
 import re
+import secrets
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from ..verify.adapter import FindingContext
 from .checks import Send
 from .insertion import HttpRequest
 
@@ -49,6 +51,13 @@ class CookieJar:
                         self._cookies.pop(name, None)  # server expiring the cookie
                     else:
                         self._cookies[name] = value
+
+    def set(self, name: str, value: str) -> None:
+        """Set a cookie name/value directly (a client-chosen cookie, e.g. a VIGIL-fixed session id)."""
+        self._cookies[name] = value
+
+    def get(self, name: str) -> str | None:
+        return self._cookies.get(name)
 
     def header(self) -> str | None:
         if not self._cookies:
@@ -164,3 +173,203 @@ def authenticated_send(send: Send, login: LoginSequence, **kwargs: object) -> Se
     """Convenience: return an authenticated ``send`` ready to hand to a Crawler,
     AuditEngine, or WebScanCampaign."""
     return AuthSession(send, login, **kwargs).send  # type: ignore[arg-type]
+
+
+# ---------------------------------------------------------------------------
+# Session fixation (Wave-3.2, gated-workflow, opt-in) — CWE-384 ACHIEVED_STATE.
+# ---------------------------------------------------------------------------
+
+
+def mint_session_sentinel() -> str:
+    """A UNIQUE, high-entropy session-fixation SENTINEL id VIGIL fixes BEFORE authenticating. The
+    ``sfx_<hex>`` shape is the self-contained soundness marker the ``session_fixation_oracle`` requires: a
+    server-issued session value can never carry it, so a confirmed FACT provably rests on an id VIGIL drove
+    in — never a value the app minted itself."""
+    return "sfx_" + secrets.token_hex(16)
+
+
+# ---------------------------------------------------------------------------
+# SHARED GUARDS — Wave-3 vacuous-predicate-satisfaction fix (kept inline here; a later commit DRYs these
+# into one helper module — names/semantics MUST stay identical across the Wave-3 slices).
+# A contains / not-contains check is only meaningful when BOTH the discriminator and the body it is tested
+# against are SUBSTANTIVE. An empty/whitespace/too-short marker is trivially "in" any body, and an
+# empty/error/deny body neither proves a positive predicate nor serves as a negative control.
+# ---------------------------------------------------------------------------
+
+_MIN_SUBSTANTIVE_BODY = 16   # a real page body, not a stub/error token
+_MIN_DISCRIMINATOR = 3       # a marker below this is trivially a substring of almost any body
+
+# Bare error/deny signatures — strings that mark a body as a server-error or access-denied page rather than
+# a substantive authenticated response. Deliberately specific (multi-word / status-line shaped) so a genuine
+# authenticated page that merely mentions the word "error" in prose is NOT misclassified, and a normal
+# logged-out page ("please log in", "you are logged out") is NOT treated as an error either.
+_BARE_ERROR_SIGNATURES: tuple[str, ...] = (
+    "internal server error", "500 internal server error",
+    "service unavailable", "service temporarily unavailable", "temporarily unavailable",
+    "bad gateway", "gateway timeout", "bad request",
+    "not found", "page not found", "404 not found", "403 forbidden",
+    "access denied", "access is denied", "access blocked", "request blocked",
+    "an error occurred", "an error has occurred", "an unexpected error", "something went wrong",
+)
+
+_TAG_RE = re.compile(r"<[^>]+>")
+_WS_RE = re.compile(r"\s+")
+# A start-anchored opener that marks the WHOLE body as an error/deny page (so prose that merely uses the
+# word later is not caught): a leading error/forbidden/unauthorized/denied token, or an HTTP status line.
+_ERROR_OPENER_RE = re.compile(r"^(errors?\b|forbidden\b|unauthori[sz]ed\b|denied\b|[45]\d\d\b)")
+
+
+def _visible_text(body: str) -> str:
+    """The body's visible text: HTML tags dropped, whitespace collapsed, lowercased — used ONLY for
+    error-signature matching (the length guard uses the raw ``body.strip()`` per the shared contract)."""
+    return _WS_RE.sub(" ", _TAG_RE.sub(" ", body)).strip().lower()
+
+
+def _is_bare_error_signature(body: str) -> bool:
+    """True when ``body`` is essentially a server-error or access-denied page rather than a substantive
+    authenticated response. Conservative by design: only a body that OPENS with an error/status token, or a
+    short body dominated by a canonical error/deny phrase, counts — so a real authenticated page that
+    happens to contain "error" in prose, and a normal logged-out page, are never misclassified."""
+    text = _visible_text(body)
+    if not text:
+        return True   # nothing but markup/whitespace — not substantive
+    if _ERROR_OPENER_RE.match(text):
+        return True
+    if len(text) <= 96 and any(sig in text for sig in _BARE_ERROR_SIGNATURES):
+        return True
+    return False
+
+
+def is_substantive_success(status: int, body: str) -> bool:
+    """SHARED GUARD: a response is a SUBSTANTIVE SUCCESS — one that may satisfy a positive fire-predicate OR
+    serve as a negative control — ONLY when it is a real 2xx with a non-trivial body that is not itself an
+    error/deny signature. A response that fails this proves NOTHING: it can neither be scored authenticated
+    NOR clear a control, and the caller must FAIL CLOSED (never a FACT, never a false CLEAN).
+
+        is_substantive_success(status, body) ⇔
+            200 <= status < 300  AND  len(body.strip()) >= 16  AND  not a bare error/deny signature."""
+    if not (200 <= int(status) < 300):
+        return False
+    text = body or ""
+    if len(text.strip()) < _MIN_SUBSTANTIVE_BODY:
+        return False
+    return not _is_bare_error_signature(text)
+
+
+def valid_discriminator(marker: str | None, *, nonce: str | None = None) -> bool:
+    """SHARED GUARD: a discriminator is USABLE as a positive/absence marker ONLY when it is a real,
+    non-trivial string — present, not pure whitespace, and at least ``_MIN_DISCRIMINATOR`` stripped
+    characters. A vacuous marker (``''`` / ``'   '`` / a 1-2 char fragment) is trivially "in" almost any body
+    and so discriminates NOTHING; it must never be allowed to satisfy a contains-predicate. Where a per-probe
+    ``nonce`` exists, the marker must not be a mere substring of it (that would discriminate the nonce, not an
+    authenticated state); session fixation carries no such nonce, so callers here pass none."""
+    if marker is None:
+        return False
+    stripped = marker.strip()
+    if len(stripped) < _MIN_DISCRIMINATOR:
+        return False
+    if nonce and stripped in nonce:
+        return False
+    return True
+
+
+def _sfx_view(resp: object) -> dict:
+    """The retained ``{status, body}`` of a protected-page response the oracle re-runs its differential over.
+    A non-dict (no channel on that leg) becomes ``{status: None, body: ""}`` — a non-substantive view the
+    oracle treats as undecidable (fails closed to a LEAD), never as a differential reference."""
+    if isinstance(resp, dict):
+        return {"status": resp.get("status"), "body": _body(resp)}
+    return {"status": None, "body": _body(resp)}
+
+
+def confirm_session_fixation(
+    send: Send,
+    *,
+    login: LoginSequence,
+    session_cookie: str,
+    protected_url: str,
+    private_discriminator: str | None = None,
+    owner_send: Send | None = None,
+    unauth_send: Send | None = None,
+    sentinel_id: str | None = None,
+) -> FindingContext | None:
+    """Gated-workflow session-fixation probe (CWE-384), built on :class:`LoginSequence` + :class:`CookieJar`.
+
+    VIGIL FIXES a unique high-entropy sentinel id S0 as the ``session_cookie`` value BEFORE authenticating,
+    runs the operator's login sequence through the gated ``send`` carrying S0, observes the session id in
+    effect AFTER login (S1), and then re-presents the VIGIL-fixed id **S0** to the protected page — CAPTURING
+    THE RAW RESPONSE (S0's read). To prove the achieved fixation state SOUNDLY — by a read of a victim-PRIVATE
+    datum, NOT a content/marker heuristic — it ALSO captures:
+
+      * a POSITIVE reference (``owner_send``): the SAME protected URL read authoritatively as the owner/victim
+        (the operator's ``private_discriminator`` D must be PRESENT here — proving D is REAL private content);
+      * a DECISIVE SAME-SHAPE negative reference (``unauth_send``): the SAME URL read by an OTHER unauthorized
+        identity (a substantive same-shape 2xx from which D must be ABSENT — the only reference a benign
+        credential-presence-varying app cannot fool, since cosmetic chrome shown for ANY credential appears
+        here too);
+      * a no-session gating baseline: the SAME URL fetched with NO session cookie.
+
+    The scanner makes NO authentication decision; it hands the RAW bytes (S0's read, the owner/other-identity/
+    no-session references, the private discriminator D, the operator's logged-out signals) to the
+    deterministic ``session_fixation_oracle``, which RE-DERIVES — via the PRIVATE-READ REDUCTION — whether S0
+    reached the victim's private view, and fires ONLY when the fixed id survived login UNROTATED (S1 == S0)
+    AND D is PRESENT in S0's read AND in the owner's read yet PROVABLY ABSENT from the SUBSTANTIVE SAME-SHAPE
+    other-identity reference and the no-session baseline. A bare ``success_marker`` differential is NO LONGER
+    a minting path (six rounds proved a credential-presence differential proves only that the cookie changed
+    the response, not that S0 authenticated); without a private D + the owner and same-shape references the
+    oracle FAILS CLOSED to a LEAD.
+
+    Capturing S0's view directly (rather than trusting S1==S0 as a rotation proxy) is deliberate: an app can
+    rotate the cookie VALUE at login yet leave the pre-auth-fixed id S0 still valid — a REAL fixation a value
+    check would miss; the oracle's differential exposes it. Returns ``None`` only when no channel was
+    established for the login leg (a non-dict login response); every other outcome is adjudicated by the
+    oracle. All traffic rides the injected sends (the scope/charter/kill-switch-gated executor); nothing here
+    weakens the boundary."""
+    s0 = sentinel_id or mint_session_sentinel()
+    protected_get = HttpRequest(method="GET", url=protected_url, headers=[], body=None)
+
+    # 0. NO-SESSION GATING BASELINE: fetch the protected URL with NO session cookie. D absent from a valid
+    #    (substantive-2xx or genuine-denial) read proves the datum is authorization-gated, not public.
+    logged_out_resp = send(protected_get)
+
+    # 0b. POSITIVE reference (owner/victim) + DECISIVE SAME-SHAPE negative reference (other unauthorized
+    #     identity). D PRESENT in the owner's read proves D is real private content; D ABSENT from the
+    #     other-identity's SUBSTANTIVE SAME-SHAPE read proves it is gated to the victim identity (not chrome
+    #     shown for any credential). Both ride their own authenticated gated send; None when not supplied
+    #     (⇒ the oracle fails closed to a LEAD — the achieved state is unprovable without them).
+    owner_resp = owner_send(protected_get) if owner_send is not None else None
+    unauth_resp = unauth_send(protected_get) if unauth_send is not None else None
+
+    # 1. VIGIL fixes the session id to S0 BEFORE auth, then runs the login sequence carrying it.
+    login_headers: list[tuple[str, str]] = [("Cookie", f"{session_cookie}={s0}")]
+    if login.body is not None:
+        login_headers.append(("Content-Type", login.content_type))
+    login_req = HttpRequest(method=login.method, url=login.url, headers=login_headers, body=login.body)
+    login_resp = send(login_req)
+    if not isinstance(login_resp, dict):
+        return None   # no channel established — INCONCLUSIVE, never a CLEAN
+
+    # 2. Post-auth session id S1: seed a jar with the fixed S0, then apply the login response's Set-Cookie.
+    #    If login re-issued the session cookie (rotation), S1 is the NEW value; otherwise S0 survived.
+    jar = CookieJar()
+    jar.set(session_cookie, s0)
+    login_headers_resp = login_resp.get("headers", []) if isinstance(login_resp, dict) else []
+    jar.update_from_headers([(str(k), str(v)) for k, v in login_headers_resp])
+    s1 = jar.get(session_cookie)
+
+    # 3. S0's READ: re-present the ORIGINAL VIGIL-fixed id S0 to the protected page AFTER login and CAPTURE
+    #    THE RAW RESPONSE. The oracle re-derives — from these raw bytes vs the owner/other-identity/no-session
+    #    references — whether S0 reached the victim's private view; the scanner scores nothing.
+    authorized_resp = send(HttpRequest(method="GET", url=protected_url,
+                                       headers=[("Cookie", f"{session_cookie}={s0}")], body=None))
+
+    return FindingContext.from_session_fixation(
+        sentinel_id=s0, post_auth_id=s1, cookie_name=session_cookie,
+        private_discriminator=private_discriminator,
+        success_marker=login.success_marker,
+        logged_out_markers=login.logged_out_markers,
+        logged_out_statuses=login.logged_out_statuses,
+        authorized_view=_sfx_view(authorized_resp),
+        owner_view=_sfx_view(owner_resp) if owner_resp is not None else None,
+        unauth_ref=_sfx_view(unauth_resp) if unauth_resp is not None else None,
+        logged_out_ref=_sfx_view(logged_out_resp))

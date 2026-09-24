@@ -1482,6 +1482,358 @@ def prototype_pollution_oracle(observed: Any) -> OracleSignal:
 
 
 # ---------------------------------------------------------------------------
+# 3c. Session fixation — a VIGIL-fixed pre-auth session id survives login (achieved-state, CWE-384)
+# ---------------------------------------------------------------------------
+
+# VIGIL per-run session-fixation SENTINEL id shape (scanner.session mints ``sfx_`` + ``token_hex(16)`` = 32
+# lowercase-hex chars ⇒ 128 bits). Requiring this shape here — pinned to the actual 128-bit mint, not a loose
+# 16-hex floor — makes the oracle's STANDALONE re-fire (its certificate) SELF-CONTAINED: a match can ONLY be
+# the high-entropy id VIGIL chose and DROVE IN before authenticating, so the FACT can never be minted from a
+# server-issued session value (which does not carry the marker). This is exactly the guard that distinguishes
+# "the app honoured a client-fixed id" (the fixation weakness) from "the app issued its own id" (a server-set
+# id degrades to a weaker LEAD, never this FACT).
+_SFX_SENTINEL_RE = re.compile(r"^sfx_[0-9a-f]{32,}$")
+
+# SIXTH-VARIANT SOUNDNESS — PRIVATE-READ REDUCTION (round-5 BLOCK, CRITICAL). SIX rounds proved that an
+# achieved authenticated/accepted state CANNOT be proven from response CONTENT: a marker differential
+# (``success_marker`` PRESENT-with-cookie / ABSENT-without) proves only that the COOKIE changed the response,
+# NOT that the VIGIL-fixed id S0 AUTHENTICATED. A benign app that renders the operator ``success_marker``
+# whenever ANY session cookie is present — the marker not derived from the sentinel, so the sentinel-substring
+# guard misses it — defeats every such content/marker heuristic. So the ``success_marker`` differential is NO
+# LONGER a minting path (a bare success-marker record is an honest LEAD).
+#
+# The SOUND reduction (the same machinery Wave-3.1 IDOR/BOLA uses): prove the achieved fixation state ONLY by
+# an ACHIEVED READ OF A VICTIM-PRIVATE DATUM D. The fixed session S0 confirms the achieved state ONLY when a
+# genuine operator-supplied victim-PRIVATE discriminator D satisfies ALL of:
+#   (a) D is PRESENT in S0's SUBSTANTIVE read of the protected/victim resource;
+#   (b) D is PRESENT in a SUBSTANTIVE POSITIVE reference — the owner's authoritative read — proving D is the
+#       REAL private content, not chrome that merely appears whenever a credential is present;
+#   (c) D is ABSENT from a SUBSTANTIVE SAME-SHAPE NEGATIVE reference — an OTHER-unauthorized-identity read
+#       that returns a substantive 2xx RENDERING the same resource — AND ABSENT from a VALID no-session gating
+#       baseline. A denial / empty / error / different-shape negative reference is REFUSED (its absent D is
+#       vacuous) ⇒ fail closed to a LEAD. The other-identity SAME-SHAPE read is the DECISIVE clause: cosmetic
+#       chrome shown for ANY credential appears there too (so D present ⇒ refused), which is exactly why a
+#       no-session-ONLY differential (defeated by a credential-presence-varying app) can NEVER mint;
+#   (d) D is a valid discriminator — non-trivial, not whitespace, not a substring of / straddling the VIGIL
+#       sentinel S0 (the per-probe nonce), i.e. not reflected from the request (a cookie echo).
+# The oracle RE-DERIVES this from the RETAINED RAW bytes at every (re-)verification — it never trusts a
+# pre-computed bool — so a durable re-fire re-runs the same private-read differential offline and a benign
+# credential-presence-varying app can never mint. Without an operator-supplied private D + BOTH references,
+# the achieved state is undecidable ⇒ an honest LEAD (never a false FACT, never a false CLEAN).
+_SFX_MIN_MARKER = 3          # a marker below this is trivially a substring of almost any body
+_SFX_MIN_BODY = 16           # a real page body, not a stub/error token — so marker-ABSENCE is meaningful
+_SFX_MAX_ERROR_BODY = 96     # a short body dominated by a canonical error/deny phrase is an error page
+_SFX_DEFAULT_LOGGED_OUT_STATUSES = frozenset({401, 403})
+_SFX_TAG_RE = re.compile(r"<[^>]+>")
+_SFX_WS_RE = re.compile(r"\s+")
+# A start-anchored error/deny opener: a body that OPENS with one of these is an error/deny page, not a
+# substantive access-gated view — so it can neither prove authentication NOR serve as a differential
+# reference (a marker "absent" from an error page is absent because the page errored, proving nothing).
+_SFX_ERROR_OPENER_RE = re.compile(r"^(errors?\b|forbidden\b|unauthori[sz]ed\b|denied\b|[45]\d\d\b)")
+# Canonical server-error / access-denied phrases. A SHORT body dominated by one of these is an error page
+# even when it does not OPEN with the token (e.g. "Internal Server Error rendering <marker> account") — so a
+# crash that merely echoes the marker string cannot be scored an authenticated view. Deliberately specific
+# (multi-word / status-line shaped) so a real authenticated page that mentions "error" in prose, and a normal
+# logged-out page, are never misclassified.
+_SFX_ERROR_SIGNATURES: tuple[str, ...] = (
+    "internal server error", "500 internal server error",
+    "service unavailable", "service temporarily unavailable", "temporarily unavailable",
+    "bad gateway", "gateway timeout", "bad request",
+    "not found", "page not found", "404 not found", "403 forbidden",
+    "access denied", "access is denied", "access blocked", "request blocked",
+    "an error occurred", "an error has occurred", "an unexpected error", "something went wrong",
+)
+
+
+def _sfx_status_set(statuses: Any) -> "frozenset[int]":
+    out: set[int] = set()
+    if isinstance(statuses, (list, tuple, set, frozenset)):
+        for s in statuses:
+            try:
+                out.add(int(s))
+            except (TypeError, ValueError):
+                continue
+    return frozenset(out) if out else _SFX_DEFAULT_LOGGED_OUT_STATUSES
+
+
+def _sfx_substantive_body(status: Any, body: str) -> bool:
+    """A response usable in the differential — a real 2xx with a non-trivial body that is not itself an
+    error/deny page. A response FAILING this proves NOTHING (it can neither score authenticated NOR serve as
+    a negative reference whose marker-absence is meaningful), so the caller FAILS CLOSED to a LEAD."""
+    try:
+        code = int(status)
+    except (TypeError, ValueError):
+        return False
+    if not (200 <= code < 300):
+        return False
+    raw = body or ""
+    if len(raw.strip()) < _SFX_MIN_BODY:
+        return False
+    text = _SFX_WS_RE.sub(" ", _SFX_TAG_RE.sub(" ", raw)).strip().lower()
+    if not text:
+        return False
+    if _SFX_ERROR_OPENER_RE.match(text):
+        return False
+    if len(text) <= _SFX_MAX_ERROR_BODY and any(sig in text for sig in _SFX_ERROR_SIGNATURES):
+        return False
+    return True
+
+
+# A genuine authorization DENIAL (a no-session baseline can prove the datum is gated by DENYING access) at
+# these statuses — as opposed to a bare error (5xx / empty / network / 404) whose absent D is vacuous. A
+# denial still has to SAY something (a real deny body) to count; the floor is below a real deny message.
+_SFX_DENIAL_STATUSES = frozenset({401, 403})
+_SFX_MIN_DENIAL_BODY = 3
+
+
+def _sfx_nocred_baseline_valid(status: Any, body: str) -> bool:
+    """A no-session (logged-out) gating baseline is a VALID proof the datum is authorization-gated — its
+    ``not-contains(D)`` is meaningful — ONLY when it is EITHER a SUBSTANTIVE 2xx read of the resource (the
+    datum is gated at the record level) OR a GENUINE 401/403 authorization DENIAL carrying a real (non-empty)
+    deny body (access requires credentials). A bare 5xx / empty / 404 / body-less denial proves NOTHING (its
+    absent D is vacuous) ⇒ INVALID, and the caller fails closed to a LEAD."""
+    if _sfx_substantive_body(status, body):
+        return True
+    try:
+        code = int(status)
+    except (TypeError, ValueError):
+        return False
+    return code in _SFX_DENIAL_STATUSES and len(_coerce_text(body).strip()) >= _SFX_MIN_DENIAL_BODY
+
+
+def _sfx_private_read_achieved(discriminator: Any, authorized: Any, owner_view: Any, unauth_ref: Any,
+                               logged_out_ref: Any, logged_out_markers: Any, logged_out_statuses: Any,
+                               *, sentinel_id: str = "") -> "bool | None":
+    """Re-derive, from the RETAINED RAW bytes, whether the VIGIL-fixed id S0's post-login read of the
+    protected/victim resource ACHIEVED a read of a victim-PRIVATE datum ``D`` — the ONLY SOUND proof of the
+    achieved fixation state. An authenticated/accepted state CANNOT be proven from response CONTENT (six
+    rounds proved every marker / same-shape / credential-presence heuristic is defeated by a benign app whose
+    response merely VARIES by credential presence), so this NEVER scores a body and never trusts a bool.
+    TRI-STATE:
+
+      * ``True``  — D is a valid, non-reflected discriminator PRESENT in S0's SUBSTANTIVE read (a), PRESENT in
+        the owner's authoritative SUBSTANTIVE read (b), ABSENT from a SUBSTANTIVE SAME-SHAPE 2xx read by an
+        OTHER unauthorized identity (c, DECISIVE) AND ABSENT from a VALID no-session gating baseline (c) ⇒ S0
+        reached the victim's PRIVATE view ⇒ a live fixed session;
+      * ``False`` — S0 is DECISIVELY not authenticated: a logged-out status / operator logged-out marker on
+        S0's read, OR — with the full differential validated — D ABSENT from S0's otherwise-substantive read
+        (S0 rendered the resource but NOT the victim's private datum, like the unauthorized peer);
+      * ``None``  — undecidable ⇒ FAIL CLOSED to a LEAD: no / invalid D; D reflects / straddles the sentinel
+        (a cookie echo); S0's read is not a substantive success; NO substantive owner (positive) reference or
+        D absent from it (D not proven private); NO substantive SAME-SHAPE other-identity reference (a
+        denial / empty / error / different-shape is REFUSED); NO valid no-session baseline; or D PRESENT in a
+        negative reference (chrome / shared / public — not victim-private)."""
+    s0 = _coerce_text(sentinel_id).strip()
+    d = _coerce_text(discriminator).strip()
+    if not isinstance(authorized, Mapping):
+        return None
+    a_status = authorized.get("status")
+    a_body = _coerce_text(authorized.get("body"))
+    # DECISIVE logged-out signals on S0's read DISPROVE auth (channel-confirmed not-authenticated), no D
+    # needed: an explicit logged-out status or an operator-supplied logged_out_marker.
+    try:
+        a_code = int(a_status)
+    except (TypeError, ValueError):
+        a_code = 0
+    if a_code in _sfx_status_set(logged_out_statuses):
+        return False
+    lo_markers = [t for t in (_coerce_text(x).strip() for x in (logged_out_markers or ())) if t]
+    if any(t in a_body for t in lo_markers):
+        return False
+    # (d) VALID DISCRIMINATOR. D must be non-trivial and must NOT discriminate VIGIL's OWN injected id: the
+    # sentinel S0 is the per-probe nonce, so a D that is a SUBSTRING of it is a reflected cookie echo, not
+    # access-gated content (mirrors scanner.session.valid_discriminator(D, nonce=S0)). ⇒ undecidable.
+    if len(d) < _SFX_MIN_MARKER:
+        return None
+    if s0 and d in s0:
+        return None
+    # S0's read must ITSELF be a SUBSTANTIVE success to carry an achieved private read (empty / too-short /
+    # error-or-deny 2xx proves nothing) ⇒ undecidable.
+    if not _sfx_substantive_body(a_status, a_body):
+        return None
+    # STRADDLE / reflected-sentinel guard: even a D not WHOLLY inside S0 is a cookie-echo artifact when it
+    # OVERLAPS S0 in the echoed body. Mask every occurrence of the fixed sentinel; if D's presence in S0's
+    # body vanishes, its presence was the cookie echo — not access-gated content ⇒ undecidable. (S0's read is
+    # the ONLY leg carrying Cookie: <name>=S0, so this is the reflected-from-request guard for (d).)
+    if s0 and s0 in a_body and d in a_body and d not in a_body.replace(s0, "\x00"):
+        return None
+    # (b) POSITIVE reference — the owner's authoritative read MUST be a substantive success and MUST CONTAIN
+    # D, proving D is the REAL victim-private content (not chrome that appears whenever a credential is
+    # present). No substantive owner read, or D absent from it ⇒ D is not validated as private ⇒ undecidable.
+    if not isinstance(owner_view, Mapping):
+        return None
+    o_body = _coerce_text(owner_view.get("body"))
+    if not _sfx_substantive_body(owner_view.get("status"), o_body):
+        return None
+    if d not in o_body:
+        return None
+    # (c) DECISIVE SAME-SHAPE negative reference — an OTHER unauthorized identity's read of the SAME resource
+    # that MUST be a SUBSTANTIVE SAME-SHAPE 2xx (a real render of the resource, NOT a denial / empty / error /
+    # different shape). D MUST be ABSENT. This is the ONLY reference a benign credential-presence-varying app
+    # cannot fool: cosmetic chrome shown for ANY credential appears here too (D present ⇒ refused); a real
+    # datum gated to the victim identity does not. A non-substantive-same-shape reference is REFUSED (its
+    # absent D is vacuous). NO such reference ⇒ undecidable — a no-session-ONLY differential is defeated by a
+    # credential-presence-varying app, so it can never mint.
+    if not isinstance(unauth_ref, Mapping):
+        return None
+    u_body = _coerce_text(unauth_ref.get("body"))
+    if not _sfx_substantive_body(unauth_ref.get("status"), u_body):
+        return None
+    if d in u_body:
+        return None   # present for another identity ⇒ chrome / shared / not victim-private ⇒ undecidable
+    # (c) no-session GATING baseline — a VALID gating proof (a substantive 2xx that lacks D, or a genuine
+    # 401/403 denial with a real body). D present in a SUBSTANTIVE no-session read ⇒ D is public ⇒ undecidable.
+    if not isinstance(logged_out_ref, Mapping):
+        return None
+    l_status = logged_out_ref.get("status")
+    l_body = _coerce_text(logged_out_ref.get("body"))
+    if not _sfx_nocred_baseline_valid(l_status, l_body):
+        return None
+    if _sfx_substantive_body(l_status, l_body) and d in l_body:
+        return None
+    # The full SAME-SHAPE private-read differential is established and D is a proven victim-PRIVATE
+    # discriminator. POSITIVE achieved read: D present in S0's substantive read ⇒ S0 reached the victim's
+    # private view ⇒ True. D ABSENT from S0's otherwise-substantive read ⇒ S0 rendered the resource but did
+    # NOT reach the private datum (like the unauthorized peer) ⇒ False (channel-confirmed clean).
+    return d in a_body
+
+
+def _sfx_signal(fired: bool, *, evidence: str, observed: dict, conf: float = 0.92,
+                conclusive: bool = False) -> OracleSignal:
+    # kind is the DEDICATED OracleKind.SESSION_FIXATION (held OUT of the frozen _ALL_ORACLES, so
+    # oracle_version(ACHIEVED_STATE) is untouched and the unknown-class fallback stays EXACTLY 15). A fire is
+    # always decisive; a NON-fire is ``conclusive`` ONLY for a channel-confirmed clean (a rotated+dead or an
+    # unrotated+not-authenticated fixed id) — an undecidable / disqualified-differential / server-set / bare
+    # shape non-fire is a LEAD (conclusive=False), never a CLEAN.
+    return OracleSignal(kind=OracleKind.SESSION_FIXATION, fired=fired,
+                        confidence=(conf if fired else 0.0),
+                        conclusive=(True if fired else conclusive),
+                        evidence=evidence, observed=observed)
+
+
+def session_fixation_oracle(observed: Any) -> OracleSignal:
+    """Fire when a VIGIL-fixed PRE-AUTH session id SURVIVES the operator's login sequence unrotated AND
+    achieves a read of a victim-PRIVATE datum — the ACHIEVED-STATE proof of session fixation (CWE-384),
+    proven by the PRIVATE-READ REDUCTION (an achieved authenticated state cannot be proven from response
+    content; see :func:`_sfx_private_read_achieved`), re-derived from RAW retained bytes (never a bool).
+
+    ``observed`` is the retained record ``scanner.session.SessionFixationCheck`` captured through the gated
+    ``send``:
+
+      * ``sentinel_id`` (S0) — the UNIQUE high-entropy id VIGIL chose and set as the session cookie BEFORE
+        the login sequence (the attacker-fixed id); MUST match VIGIL's per-run sentinel shape ``sfx_<hex>``;
+      * ``post_auth_id`` (S1) — the session-cookie value in effect AFTER login;
+      * ``private_discriminator`` (D) — the operator's genuine victim-PRIVATE datum (the achieved-state proof);
+      * ``authorized_view`` — ``{status, body}`` of the protected URL fetched carrying the VIGIL-fixed id S0
+        AFTER login (S0's read);
+      * ``owner_view`` — ``{status, body}`` of the SAME URL read authoritatively as the owner/victim (the
+        POSITIVE reference: D must be PRESENT, proving D is real private content);
+      * ``unauth_ref`` — ``{status, body}`` of the SAME URL read by an OTHER unauthorized identity (the
+        DECISIVE SAME-SHAPE negative reference: a substantive 2xx from which D must be ABSENT);
+      * ``logged_out_ref`` — ``{status, body}`` of the SAME URL with NO session cookie (the no-session gating
+        baseline: D absent from a valid — substantive-2xx-or-genuine-denial — read);
+      * ``logged_out_markers`` / ``logged_out_statuses`` — the operator's decisive not-authenticated signals;
+      * ``success_marker`` — LEGACY; a bare success-marker differential is NO LONGER a minting path (six
+        rounds proved it is defeated by a benign app whose response varies by credential presence), so it is
+        NOT used to prove the achieved state — only ``logged_out_markers`` still drive the not-authenticated
+        determination.
+
+    Adjudication (a bare ``authenticated_after_login`` bool, if present, is IGNORED — the oracle re-derives):
+
+      * ``sentinel_id`` not the ``sfx_<hex>`` shape ⇒ a server-issued id cannot mint this FACT — LEAD;
+      * ``post_auth_id`` missing ⇒ INCONCLUSIVE;
+      * :func:`_sfx_private_read_achieved` is ``None`` (no / invalid / reflected D; a non-substantive S0 read;
+        no substantive owner (positive) reference or D absent from it; no substantive SAME-SHAPE other-identity
+        reference; no valid no-session baseline; or D present in a negative reference) ⇒ LEAD (never a FACT,
+        never a false CLEAN);
+      * the id was ROTATED at login (``post_auth_id != sentinel_id``): S0 DEAD ⇒ channel-confirmed CLEAN
+        (the correct defense); S0 STILL LIVE ⇒ INCONCLUSIVE (a value rotation alone does not prove S0 was
+        invalidated, and a live-S0 rotated record is indistinguishable from a hand-forged rotation — never a
+        false CLEAN, never a FACT);
+      * survived UNROTATED but S0 did not achieve the private read ⇒ channel-confirmed CLEAN;
+      * survived UNROTATED AND the private-read differential proves S0 reached the victim's private view ⇒ FIRE.
+
+    Pure + deterministic; never raises."""
+    obs = observed if isinstance(observed, Mapping) else {}
+    sentinel = _coerce_text(obs.get("sentinel_id")).strip()
+    post_auth_raw = obs.get("post_auth_id")
+    post_auth = _coerce_text(post_auth_raw).strip() if post_auth_raw is not None else ""
+    cookie_name = _coerce_text(obs.get("cookie_name")).strip()
+    discriminator = _coerce_text(obs.get("private_discriminator")).strip()
+    base = {"cookie_name": cookie_name, "sentinel_id_shape_ok": bool(_SFX_SENTINEL_RE.match(sentinel))}
+
+    # SELF-CONTAINED SOUNDNESS: the fixed id must be VIGIL's own per-run sentinel. A server-issued id can NEVER
+    # be the id VIGIL drove in — so this FACT provably rests on an id VIGIL fixed, and a server-set-only id is
+    # NOT rounded to a FACT. Non-conclusive (a weaker LEAD, per the plan).
+    if not _SFX_SENTINEL_RE.match(sentinel):
+        return _sfx_signal(
+            False, observed=base,
+            evidence=("fixed session id is not a VIGIL per-run sentinel (expected sfx_<hex>) — a server-issued "
+                      "id cannot mint this FACT; the app did not honour a client-fixed id (degrades to a LEAD)"))
+
+    # No post-auth id observed ⇒ no channel-confirmed observation of the login's effect ⇒ INCONCLUSIVE.
+    if post_auth_raw is None or not post_auth:
+        return _sfx_signal(
+            False, observed=base,
+            evidence="no post-authentication session id was observed — cannot adjudicate fixation (inconclusive)")
+
+    # RE-DERIVE the achieved state from RAW retained bytes via the PRIVATE-READ REDUCTION — never a bool, never
+    # a bare success-marker differential. None ⇒ undecidable (no/invalid/reflected D, non-substantive S0 read,
+    # missing/failing positive owner reference, missing/non-substantive-same-shape other-identity reference,
+    # missing/invalid no-session baseline, or D present in a negative reference) ⇒ LEAD.
+    s0_auth = _sfx_private_read_achieved(discriminator, obs.get("authorized_view"), obs.get("owner_view"),
+                                         obs.get("unauth_ref"), obs.get("logged_out_ref"),
+                                         obs.get("logged_out_markers"), obs.get("logged_out_statuses"),
+                                         sentinel_id=sentinel)
+    if s0_auth is None:
+        return _sfx_signal(
+            False, observed={**base, "discriminator_len": len(discriminator)},
+            evidence=("the fixed id's achieved state could not be proven by the PRIVATE-READ differential (no "
+                      "valid victim-private discriminator D; D reflects/straddles the VIGIL-fixed sentinel — a "
+                      "cookie echo, not access-gated content; a non-substantive S0 read; no substantive owner "
+                      "positive reference or D absent from it; no substantive SAME-SHAPE other-identity "
+                      "reference — a denial/empty/error/different-shape is refused; no valid no-session "
+                      "baseline; or D present in a negative reference — chrome/shared/public) — cannot mint (LEAD)"))
+
+    # The session-cookie VALUE was ROTATED at login (S1 != S0). Rotation ALONE is NOT proof of defense: an app
+    # can rotate the value yet leave the pre-auth-fixed id S0 valid (a real fixation). Only the differential
+    # showing S0 is DEAD is a channel-confirmed clean; a still-LIVE S0 under a rotated value is
+    # indistinguishable from a hand-forged rotation in the retained record ⇒ refuse to clear AND to mint.
+    if post_auth != sentinel:
+        if s0_auth is True:
+            return _sfx_signal(
+                False, observed={**base, "rotated": True, "s0_authenticated": True},
+                evidence=("session-cookie value was ROTATED at login yet the VIGIL-fixed pre-auth id still "
+                          "reaches the victim's private view (proven by the private-read differential) — a value "
+                          "rotation does not by itself prove the fixed id was invalidated; cannot conclusively "
+                          "clear (inconclusive)"))
+        return _sfx_signal(
+            False, conclusive=True, observed={**base, "rotated": True, "s0_authenticated": False},
+            evidence=("session id was ROTATED at login and the VIGIL-fixed pre-auth id no longer reaches the "
+                      "victim's private view — the app defends against fixation; did not fire"))
+
+    # The fixed id survived unrotated but did not achieve the private read ⇒ no fixation risk. Confirmed clean.
+    if s0_auth is not True:
+        return _sfx_signal(
+            False, conclusive=True, observed={**base, "s0_authenticated": False},
+            evidence=("the VIGIL-fixed id survived login unrotated but did not reach the victim's private view "
+                      "(the private datum D is absent from its read, present for the owner) — not a live fixed "
+                      "session; did not fire"))
+
+    return _sfx_signal(
+        True, conf=0.92,
+        evidence=(f"session fixation: the VIGIL-fixed pre-auth id {sentinel!r} SURVIVED the login sequence "
+                  f"(post-auth id is identical) AND achieved a read of a victim-PRIVATE datum — the private "
+                  f"discriminator D is PRESENT in S0's read AND in the owner's authoritative read yet PROVABLY "
+                  f"ABSENT from a SUBSTANTIVE SAME-SHAPE read by an OTHER unauthorized identity and from a "
+                  f"no-session baseline (the private-read differential proves S0 reached the victim's gated "
+                  f"content) — the app adopted an attacker-fixable session id at authentication"),
+        observed={"sentinel_id": sentinel, "post_auth_id": post_auth, "cookie_name": cookie_name,
+                  "s0_authenticated": True, "differential": "private_datum_present_in_fixed_session_and_owner_"
+                  "reads_absent_in_same_shape_other_identity_and_no_session_references"})
+
+
+# ---------------------------------------------------------------------------
 # 4b. Error signature — a datastore/parser error a payload provoked (error-based)
 # ---------------------------------------------------------------------------
 
