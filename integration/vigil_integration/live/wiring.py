@@ -1545,6 +1545,26 @@ def _redrive_branch_for(bug_class: str) -> "Optional[str]":
         # / a missing operator login sequence keeps the claim a LEAD/INCONCLUSIVE (the branch's preconditions
         # fail-close).
         "session_fixation": "session_fixation.session_fixation",
+        # Wave 3.4 — SSO forgery-ACCEPTANCE achieved-state re-drive: VIGIL synthesises a forged token
+        # carrying a fresh random attacker identity, replays it live through the gated send, and admits to the
+        # ACHIEVED_STATE private-read branch (verify/oracles.py:predicate_oracle) — which fires ONLY on an
+        # ACHIEVED READ OF A VICTIM-PRIVATE DATUM (round-6, the Wave-3.1 differential): a victim-PRIVATE
+        # discriminator D present in the forged response (the achieved read) AND in a legitimate-valid-token
+        # POSITIVE reference AND absent from a SUBSTANTIVE SAME-SHAPE invalid-token NEGATIVE control (a
+        # substantive 2xx rendering the same resource; a denial/empty/error/different-shape is REFUSED). The
+        # round-5 difflib same-shape SIMILARITY SCORE is DROPPED as proof (a defeatable content heuristic —
+        # demoted to advisory), as is the deny-phrase denylist; a benign app never leaks a private datum to an
+        # unsigned forge, so it cannot fire whatever its chrome/similarity. CAPABILITY-NOT-OPERATING today: the
+        # branch is declared fact_capable:false in evidence-branches.json because nothing in the default roster
+        # populates the operator's private-datum baseline OR the legit-valid-token positive reference, and the
+        # auto-derived bad-signature control is typically a terse reject (not a substantive same-shape read), so
+        # admission fails a fired predicate closed to a LEAD until a gated-workflow producer of a genuine private
+        # D + the positive reference + a certified same-shape negative reference is wired (see the branch
+        # blocking_work). No baseline / no positive reference / no substantive same-shape control / no channel
+        # keeps the claim a LEAD. The INDEPENDENT offline jwt_forgeable / saml_structural_forgery FACT stands.
+        "jwt_forgery_accepted": "jwt_forgery_accepted.grant_differential",
+        "oidc_forgery_accepted": "oidc_forgery_accepted.grant_differential",
+        "saml_forgery_accepted": "saml_forgery_accepted.grant_differential",
     }
     branch = mapping.get(normalize_bug_class(bug_class))
     return branch if branch in branch_ids() else None

@@ -156,6 +156,34 @@ BUG_CLASS_ORACLES: dict[str, tuple[OracleKind, ...]] = {
     "saml_assertion_tampering": (OracleKind.ACHIEVED_STATE,),
     "oidc_redirect_uri": (OracleKind.ACHIEVED_STATE,),
     "oidc_idtoken_forgery": (OracleKind.ACHIEVED_STATE,),
+    # Wave-3.4 SSO forgery-ACCEPTANCE achieved-state dual (scanner.forgery_acceptance, opt-in +
+    # gated-workflow) — the strictly-SOUNDER re-drive of the acceptance checks above, PROVEN BY AN ACHIEVED
+    # READ OF A VICTIM-PRIVATE DATUM (reusing the Wave-3.1 IDOR/BOLA private-read differential that PASSED
+    # adversarial review) GATED behind an explicit operator certification. Each proves the operator's SP/RP
+    # actually GRANTED the forged token access to private content: a victim-PRIVATE discriminator D is (a) PRESENT
+    # in the forged response (the achieved read, carrying a FRESH RANDOM per-probe attacker identity) AND (b)
+    # PRESENT in a legitimate-valid-token POSITIVE reference AND (c) ABSENT from a SUBSTANTIVE SAME-SHAPE
+    # invalid-token NEGATIVE control (a substantive 2xx rendering the same resource — a
+    # denial/empty/error/different-shape control is REFUSED, fail-closed to a LEAD) AND (d) D is a valid,
+    # non-reflected discriminator. Root cause accepted after seven rounds: an accepted state cannot be proven from
+    # response CONTENT, and no AUTOMATIC guard over the forged token's own claims can win the transform race —
+    # the impersonated identity is attacker-chosen, so a token-correlated D can be echoed by a benign non-granting
+    # app in infinitely many transformed forms (case/HTML-escape/URL-encode/unicode/whitespace/truncation/...).
+    # The round-5 difflib SIMILARITY SCORE and the round-6 forged-token-claim guard are therefore BOTH DROPPED as
+    # proof (demoted to weak advisories), as is the deny-phrase denylist. The HONEST RESOLUTION is a FAIL-CLOSED
+    # CERTIFICATION GATE: the oracle emits an achieved_state ONLY when the observed evidence carries the explicit
+    # operator attestation `server_side_private_certified == True` (re-asserted in the predicate AST, so an offline
+    # re-verify refuses any non-certified / tampered certificate). WITHOUT that certification NO achieved_state is
+    # emitted for ANY input — a benign app (INCLUDING one echoing a decoded token claim in ANY transform), a terse
+    # control, a missing D or a missing reference all fail closed to a LEAD; that single gate closes all transform
+    # variants at once. Reuse ACHIEVED_STATE via the predicate oracle (from_predicate, same seam as the rows
+    # above), so this adds NO new OracleKind, _ALL_ORACLES stays 15, and `make gate` is byte-identical. Nothing in
+    # the default roster supplies the baseline, the positive reference, OR the certification, so the check MINTS
+    # NOTHING at runtime (a rigorous LEAD — the INDEPENDENT offline jwt_forgeable / saml_structural_forgery FACT
+    # still stands), never a FACT and never a false CLEAN. Forge is alg:none only (refusal #7: no jwk/x5c/jku/x5u).
+    "jwt_forgery_accepted": (OracleKind.ACHIEVED_STATE,),
+    "oidc_forgery_accepted": (OracleKind.ACHIEVED_STATE,),
+    "saml_forgery_accepted": (OracleKind.ACHIEVED_STATE,),
     # credential_stuffing proves a source achieved SPRT-significant successful logins across many
     # UNSEEN (account, source) pairs (ATO), Holm-controlled across identities. A failed-only burst
     # (NAT/CGNAT bulk) yields no SPRT round and stays a LEAD — never confirmed.
@@ -458,6 +486,16 @@ _ALIASES: dict[str, str] = {
     # CSP) — the browser-confirmed DOM_EXECUTION dual, never the posture oracle.
     "csp_bypass_xss": "csp_bypass",
     "content_security_policy_bypass": "csp_bypass",
+    # Wave-3.4 SSO forgery-ACCEPTANCE spellings fold onto the canonical `*_forgery_accepted` keys (the
+    # achieved-state GRANT-differential classes). Distinct from the offline `jwt_forgeable` /
+    # `saml_structural_forgery` classes (structural forgeability) and from the older `oidc_idtoken_forgery`
+    # / `saml_assertion_tampering` acceptance checks.
+    "jwt_forgery_acceptance": "jwt_forgery_accepted",
+    "jwt_forged_token_accepted": "jwt_forgery_accepted",
+    "oidc_forgery_acceptance": "oidc_forgery_accepted",
+    "oidc_idtoken_forgery_accepted": "oidc_forgery_accepted",
+    "saml_forgery_acceptance": "saml_forgery_accepted",
+    "saml_forged_assertion_accepted": "saml_forgery_accepted",
     "directory_traversal": "path_traversal",
     "information_disclosure": "exposure",
     "sensitive_data_exposure": "sensitive_exposure",
