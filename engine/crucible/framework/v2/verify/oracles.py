@@ -300,6 +300,172 @@ def differential_response_oracle(
 
 
 # ---------------------------------------------------------------------------
+# 1a'. HTTP request-smuggling desync — a DIFFERENTIAL SECOND REQUEST on a
+#      VIGIL-CONTROLLED connection (Wave-4.2; retires the A12 timing LEAD).
+# ---------------------------------------------------------------------------
+#
+# Audit A12 (#269) demoted the request_smuggling signal to an UNCONFIRMED LEAD because it
+# rested on TIMING: a CL.TE / TE.CL probe that HUNG longer than a control. Timing alone is
+# a hypothesis, not proof — a normal origin awaiting an incomplete declared body delays
+# identically (see scanner/smuggling.py's A12 note). This oracle replaces the timing
+# discriminator with a DETERMINISTIC DIFFERENTIAL a normal origin cannot produce, over
+# evidence VIGIL captured on connections it owns end-to-end. NO victim is ever poisoned:
+# both the smuggle request and the follow-up second request are VIGIL's OWN, sent on
+# VIGIL's OWN socket, so the "poisoned next request" is VIGIL's own.
+#
+# ``observed`` is the retained record the gated raw-socket re-drive
+# (live/smuggling_redrive.py) captured — never a bool, never a latency:
+#
+#   * ``canary``   — a UNIQUE, high-entropy per-probe token VIGIL minted and embedded in
+#                    the smuggled prefix of the FIRST (conflict) request (>= 12 alnum chars
+#                    AND >= 2.5 bits/char so a substring match cannot be coincidental);
+#   * ``technique``— the framing-conflict technique (CL.TE / TE.CL / an obfuscated TE / …);
+#   * ``conflict`` — ``{channel, status, reason, body}`` of VIGIL's OWN SECOND request read
+#                    on the connection whose FIRST request carried the framing conflict;
+#   * ``control``  — ``{channel, status, reason, body}`` of the SAME second request read on
+#                    a SECOND VIGIL-owned connection whose first request was the SAME bytes
+#                    but WELL-FORMED (no CL/TE conflict). The ONLY variable between the two
+#                    legs is the framing conflict.
+#
+# FIRE (an achieved desync, DIFFERENTIAL_RESPONSE, conf 0.95) iff ALL hold:
+#   * the canary is a valid unique VIGIL token (shape + entropy);
+#   * BOTH legs established a channel (a leg that read no response is INCONCLUSIVE, never a
+#     desync and never a CLEAN);
+#   * the unique canary is ECHOED in the CONFLICT leg's second response — the smuggled
+#     prefix VIGIL embedded in the FIRST request leaked into VIGIL's OWN SECOND request's
+#     response, which is possible only if the back-end treated the prefix as the start of
+#     the next request on the socket (a desync);
+#   * the unique canary is ABSENT from the CONTROL leg's second response — the identical
+#     no-conflict burst is normal, so the echo is ATTRIBUTABLE to the framing conflict and
+#     not to an endpoint that reflects the canary into every response.
+#
+# A plain mangled-method status (405/400/501) is RECORDED as corroboration but is NEVER
+# sufficient on its own (red-pen: require the unique canary echoed) — a benign 405 for an
+# unsupported method must not mint. Timing is not consulted at all. A benign / anti-smuggling
+# front-end that normalises or rejects the conflict never leaks the canary (echo absent from
+# BOTH legs) — no fire; with both channels established that is a channel-confirmed negative
+# for THIS technique/origin (conclusive), which admission maps to INCONCLUSIVE because the
+# branch is not clean_capable (a sound CLEAN of "no smuggling" is coverage-complete over
+# every technique and front-end pair — see the branch's target_downgrade_rationale).
+
+_SMUGGLING_MIN_CANARY_LEN = 12
+_SMUGGLING_MIN_CANARY_ENTROPY = 2.5   # bits/char — a random alnum token clears ~4-6
+_SMUGGLING_CANARY_RE = re.compile(r"^[A-Za-z0-9]{12,}$")
+# Statuses a MANGLED request LINE produces when a leftover prefix prepends to the second
+# request's method (e.g. "GPOSTGET /follow"). Corroboration ONLY — never a minting signal.
+_SMUGGLING_MANGLED_STATUSES = frozenset({400, 405, 501, 502})
+
+
+def _smuggling_signal(fired: bool, *, evidence: str, observed: dict, conf: float = 0.95,
+                      conclusive: bool = False) -> OracleSignal:
+    # Reuses the FROZEN DIFFERENTIAL_RESPONSE kind (already in _ALL_ORACLES) but is reached
+    # ONLY via the verifier's `smuggling_desync` ctx key, which no benchmark/scan/engage
+    # finding carries — so `make gate` stays byte-identical and oracle_version is untouched.
+    # A fire is always decisive; a NON-fire is `conclusive` only for a channel-confirmed
+    # negative (both legs answered, no canary leaked) — an undecidable / low-entropy /
+    # no-channel non-fire is a LEAD/INCONCLUSIVE, never a CLEAN.
+    return OracleSignal(kind=OracleKind.DIFFERENTIAL_RESPONSE, fired=fired,
+                        confidence=(conf if fired else 0.0),
+                        conclusive=(True if fired else conclusive),
+                        evidence=evidence, observed=observed)
+
+
+def _smuggling_leg(leg: Any) -> "dict | None":
+    """Coerce one burst leg's retained record to ``{channel, status, reason, body}`` (pure).
+    ``None`` when the leg is not a mapping (no observation to adjudicate)."""
+    if not isinstance(leg, Mapping):
+        return None
+    status = leg.get("status")
+    try:
+        status = int(status) if status is not None else None
+    except (TypeError, ValueError):
+        status = None
+    return {"channel": bool(leg.get("channel", False)), "status": status,
+            "reason": _coerce_text(leg.get("reason")), "body": _coerce_text(leg.get("body"))}
+
+
+def smuggling_desync_oracle(observed: Any) -> OracleSignal:
+    """Fire when VIGIL's OWN second request on a connection whose first request carried a
+    framing conflict is DETERMINISTICALLY CORRUPTED by a leftover smuggled prefix — proven by
+    a UNIQUE per-probe canary echoed in the conflict leg's second response AND absent from an
+    identical no-conflict control leg's second response. The re-verifiable, timing-free
+    achieved-state proof of HTTP request smuggling (CWE-444). Pure + deterministic; never
+    raises. See the module comment above for the full contract."""
+    obs = observed if isinstance(observed, Mapping) else {}
+    canary = _coerce_text(obs.get("canary")).strip()
+    technique = _coerce_text(obs.get("technique")).strip() or "CL.TE"
+    base = {"technique": technique, "canary_len": len(canary)}
+
+    # 1. The canary must be a UNIQUE, high-entropy VIGIL token, or a substring match could be
+    #    coincidental (a benign body containing the token). A weak/absent canary is a LEAD.
+    if (len(canary) < _SMUGGLING_MIN_CANARY_LEN or not _SMUGGLING_CANARY_RE.match(canary)
+            or _shannon_bits_per_char(canary) < _SMUGGLING_MIN_CANARY_ENTROPY):
+        return _smuggling_signal(
+            False, observed=base,
+            evidence=(f"the per-probe canary must be a unique VIGIL token (>= {_SMUGGLING_MIN_CANARY_LEN} "
+                      "alnum chars AND >= 2.5 bits/char) so a substring match cannot be coincidental — "
+                      "cannot adjudicate a desync (LEAD)"))
+
+    conflict = _smuggling_leg(obs.get("conflict"))
+    control = _smuggling_leg(obs.get("control"))
+    if conflict is None or control is None:
+        return _smuggling_signal(
+            False, observed=base,
+            evidence="the conflict and/or the no-conflict control second-request record is missing — "
+                     "no differential to adjudicate (inconclusive)")
+
+    # 2. BOTH VIGIL-owned second requests must have established a channel — a leg that read no
+    #    response examined nothing (INCONCLUSIVE, never a desync and never a CLEAN).
+    if not conflict["channel"] or not control["channel"]:
+        return _smuggling_signal(
+            False, observed={**base, "conflict_channel": conflict["channel"],
+                             "control_channel": control["channel"]},
+            evidence="a burst leg established no channel (the second request read no response) — "
+                     "cannot adjudicate the desync differential (inconclusive)")
+
+    echo_conflict = canary in conflict["body"]
+    echo_control = canary in control["body"]
+    mangled = conflict["status"] in _SMUGGLING_MANGLED_STATUSES and conflict["status"] != control["status"]
+    detail = {**base, "echo_in_conflict": echo_conflict, "echo_in_control": echo_control,
+              "conflict_status": conflict["status"], "control_status": control["status"],
+              "mangled_method_status": mangled}
+
+    # 3. The canary echoing in the CONTROL leg (identical bytes, WELL-FORMED framing) means the
+    #    endpoint reflects the canary into the second response regardless of the conflict — the
+    #    echo is NOT attributable to a desync. REFUSE (LEAD), never mint.
+    if echo_control:
+        return _smuggling_signal(
+            False, observed=detail,
+            evidence="the unique canary also appears in the NO-CONFLICT control's second response — the "
+                     "echo is not attributable to a framing desync (an endpoint reflecting it regardless) "
+                     "(REFUSE)")
+
+    # 4. No echo in the conflict leg's second response: the back-end did not leak the smuggled
+    #    prefix — no desync on this technique/origin. Both channels answered ⇒ channel-confirmed
+    #    negative (a benign / anti-smuggling front-end that normalises the conflict lands here).
+    if not echo_conflict:
+        return _smuggling_signal(
+            False, conclusive=True, observed=detail,
+            evidence=(f"the {technique} conflict burst's second response did NOT echo the unique canary "
+                      "(and neither did the control) — the origin did not desync this technique; a plain "
+                      f"mangled-method status ({conflict['status']}) alone does not mint; did not fire"))
+
+    # 5. The unique canary leaked into VIGIL's OWN second request's response on the conflict
+    #    socket but NOT on the identical well-formed control socket — the ONLY difference (the
+    #    framing conflict) caused the back-end to treat the smuggled prefix as the start of the
+    #    next request. An achieved desync.
+    return _smuggling_signal(
+        True, conf=0.95, observed=detail,
+        evidence=(f"HTTP request smuggling ({technique}): a UNIQUE per-probe canary embedded in the smuggled "
+                  "prefix of VIGIL's first (conflict) request was ECHOED in VIGIL's OWN second request's "
+                  "response on that socket, yet is ABSENT from an identical no-conflict control second "
+                  "response — the back-end treated the smuggled prefix as the start of the next request "
+                  "(a desync), proven by the differential, not by timing"
+                  + (f"; the second request's method was also mangled (status {conflict['status']})"
+                     if mangled else "")))
+
+
+# ---------------------------------------------------------------------------
 # 1b. Timing — statistical time-based blind (a real hypothesis test)
 # ---------------------------------------------------------------------------
 

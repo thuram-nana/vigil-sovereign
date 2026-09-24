@@ -68,6 +68,11 @@ BUG_CLASS_ORACLES: dict[str, tuple[OracleKind, ...]] = {
     "graphql_alias_overloading": (OracleKind.ACHIEVED_STATE,),
     "graphql_batching": (OracleKind.ACHIEVED_STATE,),
     "graphql_cost": (OracleKind.ACHIEVED_STATE,),
+    # HTTP request smuggling (CWE-444). Confirmed by the DIFFERENTIAL_RESPONSE oracle — but via the Wave-4.2
+    # `smuggling_desync` ctx key (a unique-canary desync differential over VIGIL's OWN second requests on two
+    # connections it owns), NOT the timing latency dimension audit A12 (#269) capped at a LEAD. Reuses the
+    # frozen kind, so _ALL_ORACLES stays 15 and `make gate` is byte-identical. See verify/oracles.py::
+    # smuggling_desync_oracle and the `request_smuggling.differential_desync` evidence branch.
     "request_smuggling": (OracleKind.DIFFERENTIAL_RESPONSE,),
     "dom_xss": (OracleKind.DOM_EXECUTION,),
     # Stored / second-order XSS (scanner.stored_xss, browser-backed, opt-in). Confirmed by the SAME
@@ -533,6 +538,13 @@ _ALIASES: dict[str, str] = {
     "oidc_idtoken_forgery_accepted": "oidc_forgery_accepted",
     "saml_forgery_acceptance": "saml_forgery_accepted",
     "saml_forged_assertion_accepted": "saml_forgery_accepted",
+    # Wave-4.2 HTTP request-smuggling spellings fold onto the canonical `request_smuggling` key (the
+    # DIFFERENTIAL_RESPONSE desync class re-promoted from the A12 timing LEAD). Mirrors the smuggling
+    # spellings prove_driver.py's probabilistic-class set recognises.
+    "http_request_smuggling": "request_smuggling",
+    "http_desync": "request_smuggling",
+    "request_desync": "request_smuggling",
+    "response_smuggling": "request_smuggling",
     "directory_traversal": "path_traversal",
     "information_disclosure": "exposure",
     "sensitive_data_exposure": "sensitive_exposure",
@@ -1005,6 +1017,16 @@ class OracleVerifier:
     def _run(self, kind: OracleKind, ctx: Mapping[str, Any]) -> OracleSignal | None:
         """Run one oracle if its inputs are present; else None (skipped)."""
         if kind is OracleKind.DIFFERENTIAL_RESPONSE:
+            # -- Wave-4.2 HTTP request-smuggling desync (CWE-444, retires the A12 timing LEAD) — REUSES the
+            #    FROZEN DIFFERENTIAL_RESPONSE kind (already in _ALL_ORACLES, so oracle_version is untouched and
+            #    the unknown-class fallback stays EXACTLY 15) but fires ONLY when the ctx carries the fresh
+            #    `smuggling_desync` record: the RAW second-request responses (conflict leg + no-conflict control
+            #    leg) the oracle re-runs its unique-canary differential over. No benchmark/scan/engage finding
+            #    carries this key, so it is inert on the gate path (byte-identical); an ordinary differential
+            #    finding (baseline/mutated) is handled by the arm below and never reaches here. Proves the
+            #    ACHIEVED desync by the canary echo differential, NEVER by timing.
+            if "smuggling_desync" in ctx:
+                return oracles.smuggling_desync_oracle(ctx["smuggling_desync"])
             if "baseline" in ctx and "mutated" in ctx:
                 return oracles.differential_response_oracle(
                     ctx["baseline"], ctx["mutated"], ctx.get("discriminator")
