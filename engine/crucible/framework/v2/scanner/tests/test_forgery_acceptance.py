@@ -62,6 +62,8 @@ from __future__ import annotations
 import base64
 from urllib.parse import urlencode
 
+import pytest
+
 from framework.v2.scanner import forgery_acceptance as fa
 from framework.v2.scanner import jwt as _jwt
 from framework.v2.scanner import sso as _sso
@@ -1111,6 +1113,8 @@ def test_the_class_to_branch_map_resolves() -> None:
     integ = str(root / "integration")
     if integ not in sys.path:
         sys.path.insert(0, integ)
+    # CRUCIBLE-core runs the engine tree without the gateway; wiring imports vigil_gateway, so skip there.
+    pytest.importorskip("vigil_gateway")
     from vigil_integration.live.wiring import _redrive_branch_for
     assert _redrive_branch_for("jwt_forgery_accepted") == "jwt_forgery_accepted.grant_differential"
     assert _redrive_branch_for("oidc_forgery_accepted") == "oidc_forgery_accepted.grant_differential"
@@ -1125,9 +1129,9 @@ def test_factory_passes_positive_reference() -> None:
     assert _confirmed(_run(_jwt_req(), checks[0], _jwt_fact_app("authorization")), "jwt_forgery_accepted")
     # WITHOUT the certification the SAME factory inputs mint nothing (fail-closed).
     uncert = fa.forgery_acceptance_checks(_PRIVATE, legit_token=_legit_jwt(), legit_saml=_SIGNED_SAML_B64)
-    assert all(getattr(c, "server_side_private_certified") is False for c in uncert)
+    assert all(c.server_side_private_certified is False for c in uncert)
     assert not _confirmed(_run(_jwt_req(), uncert[0], _jwt_fact_app("authorization")), "jwt_forgery_accepted")
     # empty baseline / no reference ⇒ the factory's checks mint nothing (default roster is byte-identical).
     for c in fa.forgery_acceptance_checks(()):
         assert c.success_markers == ()
-        assert getattr(c, "server_side_private_certified") is False
+        assert c.server_side_private_certified is False
