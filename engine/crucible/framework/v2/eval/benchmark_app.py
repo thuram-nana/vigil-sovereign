@@ -1159,11 +1159,13 @@ class BenchmarkHandler(BaseHTTPRequestHandler):
         self._respond(200, _page("Reset requested", f"<p>reset token: {token}</p>"))
 
     def _reset_crossuser_request(self) -> None:
-        # PLANTED BUG (CROSS-USER token collision, CWE-640/330). The generator fails to incorporate the user
-        # identity — it returns the SAME token for EVERY account. Two DIFFERENT users therefore receive a
-        # BYTE-IDENTICAL reset token: an attacker who requests a reset for their own account receives the
-        # victim's token too (a real predictability/collision). Reached only by the gated reset assertion.
-        self._reset_read_body()   # drain the request body (the user does not affect the token — that is the bug)
+        # LEAD CONTROL (round-3 soundness fix), CWE-640/330. The generator returns the SAME token for EVERY
+        # account LABEL. From the token bytes ALONE this is INDISTINGUISHABLE from a benign identifier-NORMALIZING
+        # generator that maps 'alice'/'Alice' to ONE principal, so VIGIL CANNOT prove the labels are distinct
+        # PRINCIPALS: a byte-identical token across labels FAILS CLOSED to a LEAD, never a collision FACT. Genuine
+        # cross-principal exploitation must be proven by the password_reset_cross_user private-read differential
+        # (a token that actually READS another principal's private datum). Reached only by the gated reset assertion.
+        self._reset_read_body()   # drain the request body (the user does not affect the token)
         self._respond(200, _page("Reset requested", "<p>reset token: xtok_shared_reset_0001</p>"))
 
     def _reset_deterministic_request(self) -> None:

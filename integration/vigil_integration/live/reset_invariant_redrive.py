@@ -16,11 +16,13 @@ FACTs ONLY the invariant-FREE sub-properties (no operator intent needed to know 
     a substantive same-shape unauthorized read + a no-session baseline (the REPLAY GENUINELY re-changed the
     credential, not a bare 200 nor a leftover consume-session). A single-use / expiring token mints nothing.
   * ``password_reset_collision`` — VIGIL issues independent reset requests across one or more accounts and
-    captures each {token, account} pair in order; the oracle fires ONLY on a genuinely-EXPLOITABLE collision — a
-    CROSS-USER identical token (same token for two DIFFERENT accounts) or a PREDICTABLE counter (>=3 an exact
-    arithmetic progression). Byte-identical tokens for the SAME account (a cryptographically-secure deterministic
-    generator — Django default_token_generator, a cache-one-token app) are a LEAD, not a FACT; distinct tokens
-    mint nothing; ENTROPY is never scored (a distinct-but-weak token stays a LEAD).
+    captures each {token, account} pair in order; the oracle fires ONLY on a genuinely-EXPLOITABLE PREDICTABLE
+    COUNTER — >=3 tokens forming an EXACT arithmetic progression (observe one, predict the next). A BYTE-IDENTICAL
+    token — same account LABEL or across DIFFERENT account LABELS — is a LEAD, not a FACT: account labels are never
+    proven distinct PRINCIPALS (a benign identifier-NORMALIZING generator maps 'alice'/'Alice' to ONE principal; a
+    cryptographically-secure deterministic generator — Django default_token_generator, a cache-one-token app —
+    repeats for one user); genuine cross-principal exploitation is the separate ``password_reset_cross_user``
+    branch below. Distinct tokens mint nothing; ENTROPY is never scored (a distinct-but-weak token stays a LEAD).
   * ``password_reset_cross_user`` — REUSES the Wave-3.1 IdorCheck SAME-SHAPE private-read differential UNCHANGED
     (``scanner.checks.IdorCheck`` → the achieved_state predicate oracle), with the cross-user reset token as the
     attacker's authorization: fires ONLY when a victim-PRIVATE datum reached via the cross-user token is ABSENT

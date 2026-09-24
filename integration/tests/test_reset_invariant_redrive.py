@@ -11,10 +11,12 @@ conclusive non-fire (the single-use / distinct-token benign twins) is CLEAN — 
 non-fire is INCONCLUSIVE/LEAD, never a false CLEAN.
 
 The token-reuse FACT rests on the PRIVATE-READ REDUCTION (the replay-set secret reaches a victim-PRIVATE datum
-absent from a substantive same-shape unauthorized read), reusing the Wave-3.1 machinery; the collision FACT on
-a DETERMINISTIC (byte-identical / exact-arithmetic) collision; the cross-user FACT on the Wave-3.1 IdorCheck
-same-shape cross-read UNCHANGED. A benign single-use/expiring token, a distinct-token generator, and a
-per-user-scoped token never produce a firing context.
+absent from a substantive same-shape unauthorized read), reusing the Wave-3.1 machinery; the collision FACT on a
+DETERMINISTIC PREDICTABLE-COUNTER (exact-arithmetic) collision ONLY — a BYTE-IDENTICAL token across account
+LABELS is a LEAD, never a FACT (labels are never proven distinct principals: the round-3 soundness fix); the
+cross-user FACT (genuine cross-PRINCIPAL exploitation — a token that READS the other's private datum) on the
+Wave-3.1 IdorCheck same-shape cross-read UNCHANGED. A benign single-use/expiring token, a distinct-token
+generator, a per-user-scoped token, and a byte-identical cross-label token never produce a firing FACT.
 """
 
 from __future__ import annotations
@@ -107,8 +109,9 @@ def _collision_ctx(*, deterministic: bool):
         request_reset_token=lambda acct: next(seq, ""), accounts=("collide",), repeats=3)
 
 
-def _cross_user_collision_ctx():
-    # the SAME token is issued to two DIFFERENT accounts (a genuine cross-user collision).
+def _cross_label_collision_ctx():
+    # the SAME token is issued to two DIFFERENT account LABELS — a LEAD (round-3 fix), NOT a FACT: labels are
+    # never proven distinct principals (a case-normalizing generator maps 'alice'/'Alice' to ONE principal).
     return confirm_password_reset_collision(
         request_reset_token=lambda acct: "xtok_shared_reset_0001", accounts=("victim", "attacker"))
 
@@ -198,23 +201,21 @@ def test_collision_admitted_live_redrive_mints_a_signed_fact() -> None:
     assert res.confirmed_by == OracleKind.PASSWORD_RESET_INVARIANT.value
 
 
-def test_cross_user_identical_token_collision_mints_a_signed_fact() -> None:
-    ctx = _cross_user_collision_ctx()
+def test_cross_label_identical_token_collision_is_a_lead_not_a_fact() -> None:
+    # ROUND-3 SOUNDNESS FIX: the SAME token issued to two DIFFERENT account LABELS is NO LONGER a collision FACT.
+    # Labels are opaque strings never proven to be distinct PRINCIPALS (a case-normalizing generator maps
+    # 'alice'/'Alice' to ONE principal), so a byte-identical token across labels FAILS CLOSED to a LEAD — the
+    # oracle context does not confirm. Genuine cross-principal exploitation is the separate cross_user_read branch.
+    ctx = _cross_label_collision_ctx()
     assert ctx is not None
     finding = password_reset_finding(ctx, check_id="reset:password_reset_collision:cu",
                                      insertion_point="reset:collision")
-    assert OracleVerifier().confirm(finding["oracle_context"]).confirmed
-    admitted = admit("password_reset.deterministic_collision", fired=True, conclusive=True,
-                     observed={"channel_established": True})
-    res = certify_admitted(finding, admitted, engagement_slug="alpha", signers=_signers(),
-                           provenance="live_redrive")
-    assert res.is_fact, res.reason
-    assert res.confirmed_by == OracleKind.PASSWORD_RESET_INVARIANT.value
+    assert not OracleVerifier().confirm(finding["oracle_context"]).confirmed   # LEAD, never a signed FACT
 
 
 def test_same_user_byte_identical_token_is_not_a_firing_context() -> None:
-    # BENIGN CONTROL: byte-identical tokens for the SAME account (a deterministic-but-secure generator) are a
-    # LEAD, never a confirmed FACT (the red-pen fix).
+    # BENIGN CONTROL: byte-identical tokens for the SAME account label (a deterministic-but-secure generator) are
+    # a LEAD, never a confirmed FACT.
     ctx = confirm_password_reset_collision(
         request_reset_token=lambda acct: "dtok_same_user_secure_0001", accounts=("only-user",), repeats=3)
     assert ctx is not None

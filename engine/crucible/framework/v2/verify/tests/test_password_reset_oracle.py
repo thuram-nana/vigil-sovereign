@@ -7,9 +7,13 @@ The invariant this file guards (the Wave-3 lesson applied): an achieved CHANGED 
 consumed still re-changes the credential on replay) CANNOT be proven from response CONTENT / a bare 200 — it is
 proven by the SAME PRIVATE-READ REDUCTION Wave-3.1 IDOR/BOLA + Wave-3.2 session fixation use (a victim-PRIVATE
 datum reached by authenticating with the replay-set secret, present in the owner's read yet absent from a
-substantive SAME-SHAPE unauthorized read and a no-session baseline). The deterministic COLLISION FACT is a
-byte-identical / exact-arithmetic collision only; ENTROPY is never scored (a distinct token is CLEAN). A benign
-single-use / expiring token and a distinct-token generator mint NOTHING — live AND under offline re-verify.
+substantive SAME-SHAPE unauthorized read and a no-session baseline). The deterministic COLLISION FACT is an
+EXACT-ARITHMETIC predictable-counter collision ONLY; a BYTE-IDENTICAL token — same account LABEL or across
+DIFFERENT account LABELS — is a LEAD, never a FACT (labels are never proven distinct principals — a
+case-normalizing generator maps 'alice'/'Alice' to ONE principal), and genuine cross-principal exploitation is
+minted only by the password_reset_cross_user private-read differential. ENTROPY is never scored (a distinct token
+is CLEAN). A benign single-use / expiring token and a distinct-token generator mint NOTHING — live AND under
+offline re-verify.
 """
 
 from __future__ import annotations
@@ -139,30 +143,44 @@ def test_reuse_discriminator_echoing_replay_secret_is_a_lead() -> None:
 # deterministic COLLISION
 # ---------------------------------------------------------------------------
 
-def test_collision_cross_user_identical_fires() -> None:
-    # GENUINELY EXPLOITABLE: the SAME token issued to TWO DIFFERENT accounts (an attacker who resets their own
-    # account receives the victim's token) ⇒ a FACT.
+def test_collision_cross_label_identical_is_a_lead_not_a_fact() -> None:
+    # RETIRED FACT PATH (round-3 soundness fix): the SAME token for two DIFFERENT account LABELS is NO LONGER a
+    # FACT. Account labels are opaque strings NEVER proven to be distinct PRINCIPALS — a case-normalizing
+    # generator maps 'victim'/'Victim' to ONE principal — so a byte-identical token across labels FAILS CLOSED to
+    # a LEAD (a stronger LEAD to escalate via the cross-user private-read differential), never a cross-user FACT.
     sig = password_reset_invariant_oracle({"mode": "token_collision", "samples": [
         {"token": "a1b2c3d4e5", "account": "victim"}, {"token": "a1b2c3d4e5", "account": "attacker"}]})
-    assert sig.fired and sig.conclusive and sig.confidence >= 0.9
-    assert sig.observed.get("identical") is True and sig.observed.get("cross_user") is True
+    assert not sig.fired and not sig.conclusive          # LEAD — never a FACT
+    assert sig.observed.get("identical_lead") is True and sig.observed.get("cross_label") is True
+
+
+def test_collision_case_normalizing_generator_alice_Alice_is_a_lead() -> None:
+    # THE round-3 SOUNDNESS CASE: a benign per-user-DETERMINISTIC, identifier-NORMALIZING generator
+    # (case-insensitive email/username) returns the BYTE-IDENTICAL token for 'alice' and 'Alice' — which are the
+    # SAME principal, not two. The old label-collision FACT path would MINT A FALSE cross-user FACT here; the fix
+    # fails closed to a LEAD. Genuine cross-principal exploitation is proven only by the private-read differential.
+    sig = password_reset_invariant_oracle({"mode": "token_collision", "samples": [
+        {"token": "a1b2c3d4e5", "account": "alice"}, {"token": "a1b2c3d4e5", "account": "Alice"}]})
+    assert not sig.fired and not sig.conclusive          # LEAD — never a FACT
+    assert sig.observed.get("identical_lead") is True and sig.observed.get("cross_label") is True
 
 
 def test_collision_same_user_byte_identical_is_a_lead() -> None:
-    # BENIGN CONTROL (the red-pen fix): byte-identical tokens for the SAME account are exactly what a
-    # cryptographically-secure DETERMINISTIC generator (Django default_token_generator within a timestamp
-    # bucket, a cache-one-token-per-account app) returns — NOT an exploitable collision ⇒ LEAD, never a FACT.
+    # BENIGN CONTROL: byte-identical tokens for the SAME account label are exactly what a cryptographically-secure
+    # DETERMINISTIC generator (Django default_token_generator within a timestamp bucket, a cache-one-token-per-
+    # account app) returns — NOT an exploitable collision ⇒ LEAD, never a FACT.
     sig = password_reset_invariant_oracle({"mode": "token_collision", "samples": [
         {"token": "a1b2c3d4e5", "account": "victim"}, {"token": "a1b2c3d4e5", "account": "victim"}]})
     assert not sig.fired and not sig.conclusive
-    assert sig.observed.get("identical_same_account_only") is True
+    assert sig.observed.get("identical_lead") is True and sig.observed.get("cross_label") is False
 
 
 def test_collision_byte_identical_unknown_accounts_is_a_lead() -> None:
-    # A flat token list carries NO account, so a byte-identical pair cannot be proven cross-user ⇒ LEAD
-    # (fails closed): the old byte-identical-alone FACT is downgraded.
+    # A flat token list carries NO account label, so a byte-identical pair cannot even be examined for cross-label
+    # ⇒ LEAD (fails closed): the old byte-identical-alone FACT is downgraded.
     sig = password_reset_invariant_oracle({"mode": "token_collision", "tokens": ["a1b2c3d4e5", "a1b2c3d4e5"]})
     assert not sig.fired and not sig.conclusive
+    assert sig.observed.get("identical_lead") is True and sig.observed.get("cross_label") is False
 
 
 def test_collision_exact_arithmetic_progression_fires() -> None:

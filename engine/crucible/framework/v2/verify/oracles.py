@@ -2462,17 +2462,19 @@ def mfa_bypass_oracle(observed: Any) -> OracleSignal:
 #       achieved read is BOUND to the REPLAY-set secret P2 (a fresh VIGIL secret DISTINCT from the consumed P1,
 #       and the read explicitly reached WITH P2) — mirroring session fixation's sentinel-binding, so a fire
 #       proves the REPLAY re-changed the credential, never a leftover consume-session or the consumed P1;
-#     * deterministic COLLISION — a genuinely-EXPLOITABLE predicate only: either a CROSS-USER identical token
-#       (the SAME reset token issued to two DIFFERENT accounts — an attacker who resets their own account
-#       receives the victim's token), OR a PREDICTABLE counter (>=3 tokens forming an EXACT arithmetic
-#       progression, reproduced from the observed sequence). Byte-identical tokens for the SAME account are NOT
-#       a FACT — a cryptographically-secure DETERMINISTIC generator (stock Django default_token_generator within
-#       a timestamp bucket, or a cache-one-token-per-account app) returns byte-identical tokens for one user;
-#       that is benign, so it degrades to a LEAD. Predictable-by-ENTROPY is likewise NOT a FACT (a probabilistic
-#       LEAD elsewhere).
-#   CROSS-USER reset tokens (an achieved cross-account READ) reuse the EXISTING ACHIEVED_STATE IdorCheck
-#   differential (bug_class `password_reset_cross_user`); reset-link HOST-POISONING routes to the EXISTING
-#   host_header_injection FACT.
+#     * deterministic COLLISION — a genuinely-EXPLOITABLE predicate only: a PREDICTABLE counter (>=3 tokens
+#       forming an EXACT arithmetic progression, reproduced from the observed sequence — observe one token,
+#       predict the next; exploitable regardless of identity). A BYTE-IDENTICAL token — whether it repeats for
+#       the SAME account LABEL or across DIFFERENT account LABELS — is DELIBERATELY NOT a FACT: account labels
+#       are opaque strings never proven to be distinct PRINCIPALS (a benign identifier-NORMALIZING generator
+#       returns byte-identical tokens for 'alice'/'Alice' = ONE principal; a cryptographically-secure
+#       DETERMINISTIC generator returns byte-identical tokens for one user within a timestamp bucket), so it
+#       FAILS CLOSED to a LEAD. Predictable-by-ENTROPY is likewise NOT a FACT (a probabilistic LEAD elsewhere).
+#   GENUINE CROSS-PRINCIPAL exploitation of a colliding / reused recovery token (an achieved cross-account READ)
+#   is proven ONLY by the EXISTING ACHIEVED_STATE IdorCheck same-shape private-read differential (bug_class
+#   `password_reset_cross_user` — a token issued to principal A actually READS principal B's PRIVATE datum),
+#   NEVER by account-label identity here; reset-link HOST-POISONING routes to the EXISTING host_header_injection
+#   FACT.
 # ---------------------------------------------------------------------------
 
 _PRT_MIN_TOKEN = 8                  # a reset token below this is too short to reason about a collision soundly
@@ -2534,21 +2536,27 @@ def _prt_normalize_samples(raw: Any) -> "list[tuple[str, str]]":
 
 def _prt_collision(samples: Any) -> "tuple[bool | None, dict]":
     """Deterministic collision adjudication over reset tokens captured from INDEPENDENT requests (in request
-    order), each carrying the ACCOUNT it was issued for. Only a genuinely-EXPLOITABLE predicate is a FACT.
-    TRI-STATE:
+    order), each carrying the account LABEL it was issued for. The ONLY genuinely-EXPLOITABLE predicate provable
+    from the token bytes ALONE is a PREDICTABLE COUNTER (an exact arithmetic progression). A BYTE-IDENTICAL token
+    — whether it repeats for the SAME account LABEL or across DIFFERENT account LABELS — is DELIBERATELY NOT a
+    FACT here: account labels are opaque strings NEVER proven to be distinct PRINCIPALS. A benign per-user-
+    DETERMINISTIC, identifier-NORMALIZING generator (case-insensitive email/username) returns byte-identical
+    tokens for 'alice' and 'Alice' — ONE principal, not two — so a byte-identical token across labels would mint
+    a FALSE cross-user FACT; and a cryptographically-secure DETERMINISTIC generator (stock Django
+    default_token_generator within a timestamp bucket, a cache-one-token-per-account app) returns byte-identical
+    tokens for one user. Genuine CROSS-PRINCIPAL exploitation is proven ONLY by the EXISTING
+    ``password_reset_cross_user`` private-read differential (a token issued to principal A actually authorizes a
+    read of principal B's PRIVATE datum), never by label identity here. TRI-STATE:
 
-      * ``True``  — a CROSS-USER identical token (the SAME token issued to two DIFFERENT accounts — a real
-        predictability/collision: an attacker who resets their own account receives the victim's token), OR a
-        PREDICTABLE counter (>=3 tokens forming an EXACT arithmetic progression: every token parses as a
-        fixed-width integer counter and the step between consecutive values is a single constant nonzero delta,
-        reproduced from the observed sequence);
-      * ``False`` — all tokens DISTINCT with no cross-user identical pair and no exact progression ⇒ proper
-        generation ⇒ channel-confirmed clean;
-      * ``None``  — fewer than 2 samples, any sample below the minimum length, OR byte-identical tokens for the
-        SAME account only (with no cross-user pair and no progression) ⇒ undecidable ⇒ LEAD. Same-account
-        byte-identical tokens are EXACTLY what a cryptographically-secure DETERMINISTIC generator produces
-        (stock Django default_token_generator within a timestamp bucket, a cache-one-token-per-account app), so
-        their identity is NOT evidence of a weak generator — it is an honest LEAD, never a FACT, never a CLEAN.
+      * ``True``  — a PREDICTABLE counter: >=3 tokens forming an EXACT arithmetic progression (every token parses
+        as a fixed-width integer counter and the step between consecutive values is a single constant nonzero
+        delta, reproduced from the observed sequence). Genuinely exploitable regardless of identity: observe one
+        token, predict the next. This is the ONLY token-shape provable as a FACT from the captures alone;
+      * ``False`` — all tokens DISTINCT with no exact progression ⇒ proper generation ⇒ channel-confirmed clean;
+      * ``None``  — fewer than 2 samples, any sample below the minimum length, OR ANY byte-identical repeat (same
+        OR cross label) with no exact progression ⇒ undecidable ⇒ LEAD, never a FACT, never a CLEAN. A
+        byte-identical repeat across DIFFERENT labels is a LEAD to escalate via the cross-user private-read
+        differential — it is NOT proof of a weak generator on its own.
 
     ENTROPY is never scored here: a set of distinct tokens is CLEAN regardless of apparent randomness — a
     low-entropy-but-distinct token stays a probabilistic LEAD in the scanner, never a FACT."""
@@ -2556,30 +2564,30 @@ def _prt_collision(samples: Any) -> "tuple[bool | None, dict]":
     toks = [t for t, _ in pairs]
     if len(pairs) < _PRT_MIN_COLLISION_SAMPLES or any(len(t) < _PRT_MIN_TOKEN for t in toks):
         return None, {"n": len(pairs)}
-    # (1) CROSS-USER byte-identical collision — the ONLY byte-identical shape that is genuinely exploitable: the
-    # SAME token was issued to two DIFFERENT (known) accounts. Same-account identity is handled as a LEAD below.
-    by_token: dict[str, set[str]] = {}
-    for tok, acct in pairs:
-        by_token.setdefault(tok, set()).add(acct)
-    for tok, accts in by_token.items():
-        known = {a for a in accts if a}
-        if len(known) >= 2:
-            return True, {"identical": True, "cross_user": True, "samples": len(pairs),
-                          "accounts": sorted(known)[:4], "value_prefix": tok[:16]}
-    # (2) EXACT deterministic arithmetic progression (>=3 fixed-width integer counters, constant nonzero step) —
-    # a PREDICTABLE counter reproduced from the observed sequence. Sound regardless of account: a predictable
-    # counter is exploitable across accounts (observe one token, predict the next).
+    # (1) EXACT deterministic arithmetic progression (>=3 fixed-width integer counters, constant nonzero step) —
+    # a PREDICTABLE counter reproduced from the observed sequence. Sound regardless of account label: a
+    # predictable counter is exploitable across principals (observe one token, predict the next). This is the
+    # ONLY token-shape a FACT can rest on from the captures alone.
     if len(toks) >= _PRT_MIN_ADJACENCY_SAMPLES and len({len(t) for t in toks}) == 1:
         vals = [_prt_parse_counter(t) for t in toks]
         if all(v is not None for v in vals):
             steps = [vals[i + 1] - vals[i] for i in range(len(vals) - 1)]  # type: ignore[operator]
             if steps and steps[0] != 0 and all(s == steps[0] for s in steps):
                 return True, {"identical": False, "arithmetic": True, "samples": len(toks), "step": steps[0]}
-    # (3) byte-identical tokens for the SAME account only (no cross-user pair, no progression) ⇒ UNDECIDABLE ⇒
-    # LEAD: a deterministic-but-secure generator returns identical tokens for one user — not a weak generator.
+    # (2) ANY byte-identical repeat — SAME account label OR across DIFFERENT account LABELS — with no exact
+    # progression ⇒ UNDECIDABLE ⇒ LEAD, never a FACT: account labels are never proven to be distinct PRINCIPALS
+    # (a benign identifier-NORMALIZING generator returns byte-identical tokens for 'alice'/'Alice' = ONE
+    # principal), and a deterministic-but-secure generator returns byte-identical tokens for one user. Surface
+    # whether the repeat SPANNED distinct labels (a stronger LEAD to escalate via the cross-user private-read
+    # differential), but NEVER mint here — genuine cross-principal exploitation is proven only by
+    # ``password_reset_cross_user`` (the private-read reduction), never by token identity.
     if len(set(toks)) < len(toks):
-        return None, {"identical_same_account_only": True, "samples": len(pairs)}
-    # (4) all tokens DISTINCT, no cross-user identical pair, no exact progression ⇒ proper generation ⇒ clean.
+        by_token: dict[str, set[str]] = {}
+        for tok, acct in pairs:
+            by_token.setdefault(tok, set()).add(acct)
+        cross_label = any(len({a for a in accts if a}) >= 2 for accts in by_token.values())
+        return None, {"identical_lead": True, "cross_label": cross_label, "samples": len(pairs)}
+    # (3) all tokens DISTINCT, no exact progression ⇒ proper generation ⇒ clean.
     return False, {"distinct": len(set(toks)), "samples": len(pairs)}
 
 
@@ -2640,11 +2648,15 @@ def password_reset_invariant_oracle(observed: Any) -> OracleSignal:
         missing positive or same-shape negative reference, D present in a negative reference, or a non-substantive
         read ⇒ LEAD (never a FACT, never a false CLEAN).
       * ``token_collision`` — ``samples`` are ``{token, account}`` captures from INDEPENDENT reset requests (in
-        order); a flat ``tokens`` list is accepted with accounts UNKNOWN. Fires ONLY on a genuinely-EXPLOITABLE
-        collision (:func:`_prt_collision`): a CROSS-USER identical token (same token for two DIFFERENT accounts)
-        or a PREDICTABLE counter (>=3 an exact arithmetic progression). Byte-identical tokens for the SAME
-        account (a deterministic-but-secure generator) ⇒ LEAD; a set of distinct tokens (the benign twin) ⇒
-        channel-confirmed CLEAN; too few / too-short samples ⇒ LEAD. ENTROPY alone is never a FACT here.
+        order); a flat ``tokens`` list is accepted with account labels UNKNOWN. Fires ONLY on a genuinely-
+        EXPLOITABLE PREDICTABLE COUNTER (:func:`_prt_collision`): >=3 tokens forming an EXACT arithmetic
+        progression (observe one token, predict the next — exploitable regardless of identity). A BYTE-IDENTICAL
+        token — same account LABEL or across DIFFERENT account LABELS — is DELIBERATELY NOT a FACT: account labels
+        are never proven to be distinct PRINCIPALS (a benign identifier-NORMALIZING generator maps 'alice'/'Alice'
+        to ONE principal; a deterministic-but-secure generator repeats for one user) ⇒ LEAD; genuine cross-
+        principal exploitation is minted only by the ``password_reset_cross_user`` private-read differential. A
+        set of distinct tokens (the benign twin) ⇒ channel-confirmed CLEAN; too few / too-short samples ⇒ LEAD.
+        ENTROPY alone is never a FACT here.
 
     Pure + deterministic; never raises."""
     obs = observed if isinstance(observed, Mapping) else {}
@@ -2706,31 +2718,31 @@ def password_reset_invariant_oracle(observed: Any) -> OracleSignal:
         if fired is None:
             return _prt_signal(
                 False, mode=mode, observed=detail,
-                evidence=("no genuinely-exploitable reset-token collision could be adjudicated: too few / "
-                          "too-short samples (need >=2 captures of length >= 8), OR byte-identical tokens for the "
-                          "SAME account only — a cryptographically-secure DETERMINISTIC generator (e.g. Django "
-                          "default_token_generator within a timestamp bucket, or a cache-one-token-per-account "
-                          "app) returns identical tokens for one user; that is NOT an exploitable collision — "
-                          "LEAD, not a FACT"))
+                evidence=("no genuinely-exploitable reset-token collision could be adjudicated from the tokens "
+                          "alone: too few / too-short samples (need >=2 captures of length >= 8), OR a "
+                          "BYTE-IDENTICAL token that repeats — whether for the SAME account LABEL or across "
+                          "DIFFERENT account LABELS. A byte-identical repeat is NOT an exploitable collision here: "
+                          "account labels are never proven to be distinct PRINCIPALS (a benign identifier-"
+                          "NORMALIZING generator returns identical tokens for 'alice'/'Alice' = ONE principal) and "
+                          "a cryptographically-secure DETERMINISTIC generator (e.g. Django default_token_generator "
+                          "within a timestamp bucket, or a cache-one-token-per-account app) returns identical "
+                          "tokens for one user — a LEAD to escalate via the password_reset_cross_user private-read "
+                          "differential, never a FACT here"))
         if fired is False:
             return _prt_signal(
                 False, mode=mode, conclusive=True, observed=detail,
-                evidence=("the independent reset requests returned DISTINCT tokens with no cross-user identical "
-                          "pair and no exact arithmetic progression — proper generation (entropy is not scored "
-                          "here); did not fire"))
-        if detail.get("identical"):
-            return _prt_signal(
-                True, mode=mode, conf=0.95, observed=detail,
-                evidence=("deterministic password-reset token COLLISION (CROSS-USER): the BYTE-IDENTICAL reset "
-                          "token was issued to TWO DIFFERENT accounts — a truly random / per-account recovery "
-                          "token never collides across users, so an attacker who triggers a reset for their OWN "
-                          "account receives the victim's token too (a real predictability/collision, not a "
-                          "same-user deterministic-but-secure token)"))
+                evidence=("the independent reset requests returned DISTINCT tokens with no exact arithmetic "
+                          "progression — proper generation (entropy is not scored here); did not fire"))
+        # A fire here is EXCLUSIVELY the PREDICTABLE-COUNTER shape (an exact arithmetic progression). The
+        # byte-identical cross-label 'collision' FACT path is RETIRED (⇒ LEAD): account-label identity never
+        # proves distinct PRINCIPALS, so genuine cross-principal exploitation is minted only by the
+        # password_reset_cross_user private-read differential, never from token identity.
         return _prt_signal(
             True, mode=mode, conf=0.95, observed=detail,
             evidence=(f"deterministic password-reset token COLLISION: {detail.get('samples')} independent reset "
                       f"requests returned tokens forming an EXACT arithmetic progression (constant step "
-                      f"{detail.get('step')!r}) — the recovery token is a predictable counter, not a random value"))
+                      f"{detail.get('step')!r}) — the recovery token is a predictable counter, not a random value; "
+                      f"observe one token and the victim's is predictable (exploitable regardless of identity)"))
 
     return _prt_signal(
         False, mode=(mode or "unknown"), observed={},

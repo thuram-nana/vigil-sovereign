@@ -23,15 +23,19 @@ Two invariant-FREE sub-properties are FACT-capable here (no operator intent need
 
   * deterministic COLLISION (:func:`confirm_password_reset_collision`) — VIGIL issues independent reset requests
     across one or more accounts and captures each ``{token, account}`` pair in order. A FACT is a genuinely
-    EXPLOITABLE collision only: a CROSS-USER identical token (same token for two DIFFERENT accounts) or a
-    PREDICTABLE counter (>=3 tokens forming an exact arithmetic progression). Byte-identical tokens for the SAME
-    account (a deterministic-but-secure generator — Django default_token_generator within a timestamp bucket, a
-    cache-one-token-per-account app) are NOT a FACT — they degrade to a LEAD. Distinct tokens (the benign twin)
-    mint nothing; ENTROPY is never scored — a distinct-but-weak token stays a probabilistic LEAD, never a FACT.
+    EXPLOITABLE PREDICTABLE COUNTER only: >=3 tokens forming an exact arithmetic progression (observe one,
+    predict the next — exploitable regardless of identity). A BYTE-IDENTICAL token — same account LABEL or across
+    DIFFERENT account LABELS — is DELIBERATELY NOT a FACT: account labels are never proven to be distinct
+    PRINCIPALS (a benign identifier-NORMALIZING generator returns byte-identical tokens for 'alice'/'Alice' = ONE
+    principal; a deterministic-but-secure generator — Django default_token_generator within a timestamp bucket, a
+    cache-one-token-per-account app — repeats for one user), so it degrades to a LEAD. Distinct tokens (the benign
+    twin) mint nothing; ENTROPY is never scored — a distinct-but-weak token stays a probabilistic LEAD, never a FACT.
 
-The CROSS-USER reset-token sub-property REUSES the Wave-3.1 IdorCheck same-shape private-read differential
-(``scanner.checks.IdorCheck`` → the achieved_state predicate oracle) UNCHANGED; the reset-link HOST-POISONING
-sub-property routes to the EXISTING host_header_injection FACT — neither lives here.
+The CROSS-USER reset-token sub-property (genuine cross-PRINCIPAL exploitation) REUSES the Wave-3.1 IdorCheck
+same-shape private-read differential (``scanner.checks.IdorCheck`` → the achieved_state predicate oracle)
+UNCHANGED — a token issued to principal A actually READS principal B's PRIVATE datum, the ONLY sound proof of a
+cross-user reset token (label identity alone never suffices); the reset-link HOST-POISONING sub-property routes
+to the EXISTING host_header_injection FACT — neither lives here.
 
 Nothing here weakens the boundary: every request rides the RUNNER's injected gated send; the credentials and
 the test account are operator-supplied for an authorized target.
@@ -141,18 +145,20 @@ def confirm_password_reset_collision(
     returns the freshly-issued reset token (a string), or a falsy value if none was issued. This requests a
     token for EACH account in ``accounts``, ``repeats`` times, IN ORDER, and captures each ``{token, account}``
     pair. The captures are handed to :func:`~verify.oracles.password_reset_invariant_oracle`, which mints a FACT
-    ONLY on a genuinely-EXPLOITABLE collision:
+    ONLY on a genuinely-EXPLOITABLE PREDICTABLE COUNTER:
 
-      * a CROSS-USER identical token — the SAME token issued to two DIFFERENT accounts (pass >=2 distinct
-        ``accounts``); an attacker who resets their own account then receives the victim's token; OR
-      * a PREDICTABLE counter — >=3 tokens forming an EXACT arithmetic progression (pass >=3 total captures, e.g.
-        ``repeats>=3`` on one account or >=3 accounts).
+      * >=3 tokens forming an EXACT arithmetic progression (pass >=3 total captures, e.g. ``repeats>=3`` on one
+        account or >=3 accounts) — observe one token, predict the next; exploitable regardless of identity.
 
-    Byte-identical tokens for the SAME account (a cryptographically-secure DETERMINISTIC generator — stock Django
-    default_token_generator within a timestamp bucket, a cache-one-token-per-account app) are NOT a FACT — they
-    degrade to a LEAD. DISTINCT tokens (the benign twin) mint nothing; ENTROPY is never scored. Returns ``None``
-    only when fewer than 2 captures were established (no channel / no tokens — INCONCLUSIVE, never a CLEAN);
-    every sufficient sample is adjudicated by the oracle."""
+    A BYTE-IDENTICAL token — whether it repeats for the SAME account LABEL or across DIFFERENT account LABELS — is
+    DELIBERATELY NOT a FACT: account labels are never proven to be distinct PRINCIPALS (a benign identifier-
+    NORMALIZING generator returns byte-identical tokens for 'alice'/'Alice' = ONE principal; a cryptographically-
+    secure DETERMINISTIC generator — stock Django default_token_generator within a timestamp bucket, a
+    cache-one-token-per-account app — repeats for one user), so it degrades to a LEAD; genuine cross-PRINCIPAL
+    exploitation is minted only by the ``password_reset_cross_user`` private-read differential (a token issued to
+    A actually READS B's private datum). DISTINCT tokens (the benign twin) mint nothing; ENTROPY is never scored.
+    Returns ``None`` only when fewer than 2 captures were established (no channel / no tokens — INCONCLUSIVE,
+    never a CLEAN); every sufficient sample is adjudicated by the oracle."""
     if not accounts:
         return None
     reps = max(int(repeats), 1)

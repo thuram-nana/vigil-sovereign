@@ -176,7 +176,7 @@
       "name": "Password-reset token invariant",
       "family": "core",
       "tier": "local",
-      "evidence": "Real local process — the loopback benchmark app over a real connection; a P2-bound PRIVATE-READ REDUCTION proves a consumed reset token is reusable, or a genuinely-exploitable token collision (a cross-user identical token, or a predictable arithmetic counter) — the single-use-expiring, distinct-random, and secure per-user-deterministic (same-user byte-identical => LEAD) twins produce nothing"
+      "evidence": "Real local process — the loopback benchmark app over a real connection; a P2-bound PRIVATE-READ REDUCTION proves a consumed reset token is reusable, a predictable arithmetic-counter token collision, or (via the password_reset_cross_user private-read differential) a token issued to one principal reads another principal's private datum — a byte-identical token across account labels stays a LEAD (labels never prove distinct principals), and the single-use-expiring, distinct-random, and secure deterministic twins produce nothing"
     },
     {
       "kind": "timing",

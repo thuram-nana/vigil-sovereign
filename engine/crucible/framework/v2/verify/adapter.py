@@ -506,9 +506,13 @@ class FindingContext(BaseModel):
     #     PRIVATE-READ REDUCTION proves the replay-set secret reached D (present in the owner's read, absent from
     #     the same-shape unauthorized read and the no-session baseline) — never a bare 200; a single-use token that
     #     correctly expires does not fire.
-    #   * mode="token_collision" — {tokens: [...]} captured from INDEPENDENT reset requests (in order). Fires ONLY
-    #     on a DETERMINISTIC collision (>=2 byte-identical or >=3 an exact arithmetic progression). Distinct tokens
-    #     do not fire; ENTROPY is never scored (a low-entropy-but-distinct token stays a LEAD).
+    #   * mode="token_collision" — {samples/tokens: [...]} captured from INDEPENDENT reset requests (in order).
+    #     Fires ONLY on a genuinely-EXPLOITABLE PREDICTABLE COUNTER (>=3 tokens forming an EXACT arithmetic
+    #     progression — observe one, predict the next). A BYTE-IDENTICAL token — same account LABEL or across
+    #     DIFFERENT account LABELS — is DELIBERATELY NOT a FACT: labels are never proven distinct PRINCIPALS (a
+    #     benign identifier-NORMALIZING generator maps 'alice'/'Alice' to ONE principal) ⇒ LEAD; genuine
+    #     cross-principal exploitation is minted only by password_reset_cross_user (the private-read differential).
+    #     Distinct tokens do not fire; ENTROPY is never scored (a low-entropy-but-distinct token stays a LEAD).
     # No benchmark/scan/engage finding carries `password_reset_invariant`, so appending it leaves the gate
     # byte-identical; routes to the dedicated kind via its distinct `password_reset_invariant` ctx key so
     # oracle_version(ACHIEVED_STATE) is untouched. (The CROSS-USER reset sub-property reuses the ACHIEVED_STATE
@@ -2223,14 +2227,16 @@ class FindingContext(BaseModel):
     ) -> "FindingContext":
         """The retained deterministic-COLLISION record for the password-reset oracle
         (OracleKind.PASSWORD_RESET_INVARIANT, CWE-640/330). ``samples`` are the runner's captures from INDEPENDENT
-        reset requests, in request order, each a ``{token, account}`` mapping (the ACCOUNT the token was issued
-        for — required to prove a CROSS-USER identical token). A flat ``tokens`` list is also accepted for the
-        counter/arithmetic path (accounts UNKNOWN — a byte-identical pair then cannot be proven cross-user and
-        stays a LEAD). The oracle fires ONLY on a genuinely-EXPLOITABLE collision: a CROSS-USER identical token
-        (same token for two DIFFERENT accounts), or >=3 tokens forming an EXACT arithmetic progression (a
-        predictable counter). Byte-identical tokens for the SAME account (a deterministic-but-secure generator) ⇒
-        LEAD; a set of distinct tokens ⇒ channel-confirmed CLEAN; too few / too-short samples ⇒ LEAD. ENTROPY is
-        never scored — a distinct-but-low-entropy token stays a probabilistic LEAD, never a FACT here."""
+        reset requests, in request order, each a ``{token, account}`` mapping (the account LABEL the token was
+        issued for — carried so a byte-identical repeat across labels can be surfaced as a stronger LEAD). A flat
+        ``tokens`` list is also accepted (labels UNKNOWN). The oracle fires ONLY on a genuinely-EXPLOITABLE
+        PREDICTABLE COUNTER: >=3 tokens forming an EXACT arithmetic progression. A BYTE-IDENTICAL token — same
+        account LABEL or across DIFFERENT account LABELS — is DELIBERATELY NOT a FACT: account labels are never
+        proven to be distinct PRINCIPALS (a benign identifier-NORMALIZING generator maps 'alice'/'Alice' to ONE
+        principal; a deterministic-but-secure generator repeats for one user) ⇒ LEAD; genuine cross-principal
+        exploitation is minted only by ``password_reset_cross_user`` (the private-read differential). A set of
+        distinct tokens ⇒ channel-confirmed CLEAN; too few / too-short samples ⇒ LEAD. ENTROPY is never scored —
+        a distinct-but-low-entropy token stays a probabilistic LEAD, never a FACT here."""
         norm: list[dict[str, str]] = []
         if isinstance(samples, (list, tuple)):
             for item in samples:

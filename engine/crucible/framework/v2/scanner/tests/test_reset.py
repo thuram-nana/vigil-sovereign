@@ -157,9 +157,13 @@ def test_planted_deterministic_collision_confirms_a_fact() -> None:
     assert _confirm(ctx)
 
 
-def test_cross_user_identical_token_confirms_a_fact() -> None:
-    # VULNERABLE /reset/crossuser/request fails to bind the token to the user — two DIFFERENT accounts receive
-    # the BYTE-IDENTICAL token (a genuine cross-user collision), the deterministic-collision FACT.
+def test_cross_label_identical_token_is_a_lead_not_a_fact() -> None:
+    # ROUND-3 SOUNDNESS FIX: /reset/crossuser/request returns the BYTE-IDENTICAL token for two DIFFERENT account
+    # LABELS. That is NO LONGER a collision FACT — the labels ("cu-victim43", "cu-attacker43") are opaque strings
+    # never proven to be distinct PRINCIPALS (a case-normalizing generator maps 'alice'/'Alice' to ONE principal),
+    # so a byte-identical token across labels FAILS CLOSED to a LEAD. Genuine cross-principal exploitation is
+    # proven ONLY by the password_reset_cross_user private-read differential (a token that READS the other's datum),
+    # not by token identity.
     with serve() as base:
         ctx = confirm_password_reset_collision(
             request_reset_token=lambda acct: _request_token(base, acct, route="/reset/crossuser/request"),
@@ -167,8 +171,9 @@ def test_cross_user_identical_token_confirms_a_fact() -> None:
     assert ctx is not None
     from framework.v2.verify.oracles import password_reset_invariant_oracle
     sig = password_reset_invariant_oracle(ctx.password_reset_invariant)
-    assert sig.fired and sig.conclusive and sig.observed.get("cross_user") is True
-    assert _confirm(ctx)
+    assert not sig.fired and not sig.conclusive   # cross-label byte-identical ⇒ LEAD, never a FACT
+    assert sig.observed.get("identical_lead") is True and sig.observed.get("cross_label") is True
+    assert not _confirm(ctx)
 
 
 def test_deterministic_secure_same_user_token_is_a_lead_not_a_fact() -> None:
