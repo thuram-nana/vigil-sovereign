@@ -54,8 +54,9 @@ def _post(url: str, body: str) -> dict:
                              headers=[("Content-Type", "application/x-www-form-urlencoded")], body=body))
 
 
-def _request_token(base: str, user: str, *, safe: bool = False) -> str:
-    route = "/reset/safe/request" if safe else "/reset/request"
+def _request_token(base: str, user: str, *, safe: bool = False, route: str = "") -> str:
+    if not route:
+        route = "/reset/safe/request" if safe else "/reset/request"
     resp = _post(f"{base}{route}", f"user={user}")
     m = _TOKEN_RE.search(resp["body"])
     return m.group(1) if m else ""
@@ -142,22 +143,67 @@ def test_single_use_token_is_the_benign_twin_no_reuse_fact() -> None:
 # ---------------------------------------------------------------------------
 
 def test_planted_deterministic_collision_confirms_a_fact() -> None:
+    # VULNERABLE /reset/request is a global monotonic counter — independent requests form an exact arithmetic
+    # progression (a predictable counter), the deterministic-collision FACT.
     with serve() as base:
         ctx = confirm_password_reset_collision(
-            request_reset_token=lambda: _request_token(base, "collide"), samples=3)
+            request_reset_token=lambda acct: _request_token(base, acct), accounts=("collide",), repeats=3)
     assert ctx is not None
     rec = ctx.password_reset_invariant
-    assert rec["mode"] == "token_collision" and len(rec["tokens"]) == 3
+    assert rec["mode"] == "token_collision" and len(rec["samples"]) == 3
     from framework.v2.verify.oracles import password_reset_invariant_oracle
     sig = password_reset_invariant_oracle(rec)
-    assert sig.fired and sig.conclusive
+    assert sig.fired and sig.conclusive and sig.observed.get("arithmetic") is True
     assert _confirm(ctx)
+
+
+def test_cross_user_identical_token_confirms_a_fact() -> None:
+    # VULNERABLE /reset/crossuser/request fails to bind the token to the user — two DIFFERENT accounts receive
+    # the BYTE-IDENTICAL token (a genuine cross-user collision), the deterministic-collision FACT.
+    with serve() as base:
+        ctx = confirm_password_reset_collision(
+            request_reset_token=lambda acct: _request_token(base, acct, route="/reset/crossuser/request"),
+            accounts=("cu-victim43", "cu-attacker43"))
+    assert ctx is not None
+    from framework.v2.verify.oracles import password_reset_invariant_oracle
+    sig = password_reset_invariant_oracle(ctx.password_reset_invariant)
+    assert sig.fired and sig.conclusive and sig.observed.get("cross_user") is True
+    assert _confirm(ctx)
+
+
+def test_deterministic_secure_same_user_token_is_a_lead_not_a_fact() -> None:
+    # BENIGN CONTROL: /reset/deterministic/request is a cryptographically-secure per-user deterministic
+    # generator (byte-identical for the SAME user, distinct across users). Requesting repeatedly for ONE user
+    # returns byte-identical tokens — but same-account identity is NOT an exploitable collision ⇒ a LEAD, never
+    # a FACT (this is exactly the Django default_token_generator / cache-one-token case the red-pen flagged).
+    with serve() as base:
+        ctx = confirm_password_reset_collision(
+            request_reset_token=lambda acct: _request_token(base, acct, route="/reset/deterministic/request"),
+            accounts=("du-same43",), repeats=3)
+    assert ctx is not None
+    from framework.v2.verify.oracles import password_reset_invariant_oracle
+    sig = password_reset_invariant_oracle(ctx.password_reset_invariant)
+    assert not sig.fired and not sig.conclusive   # same-user byte-identical ⇒ LEAD, not a false FACT nor a CLEAN
+    assert not _confirm(ctx)
+
+
+def test_deterministic_secure_distinct_across_users_is_clean() -> None:
+    # The same secure per-user generator across DIFFERENT users returns DISTINCT tokens ⇒ channel-confirmed clean.
+    with serve() as base:
+        ctx = confirm_password_reset_collision(
+            request_reset_token=lambda acct: _request_token(base, acct, route="/reset/deterministic/request"),
+            accounts=("du-a43", "du-b43", "du-c43"))
+    assert ctx is not None
+    from framework.v2.verify.oracles import password_reset_invariant_oracle
+    sig = password_reset_invariant_oracle(ctx.password_reset_invariant)
+    assert not sig.fired and sig.conclusive   # distinct per-user tokens — clean
+    assert not _confirm(ctx)
 
 
 def test_random_token_generator_is_the_benign_twin_no_collision_fact() -> None:
     with serve() as base:
         ctx = confirm_password_reset_collision(
-            request_reset_token=lambda: _request_token(base, "collide", safe=True), samples=3)
+            request_reset_token=lambda acct: _request_token(base, acct, safe=True), accounts=("collide",), repeats=3)
     assert ctx is not None
     from framework.v2.verify.oracles import password_reset_invariant_oracle
     sig = password_reset_invariant_oracle(ctx.password_reset_invariant)

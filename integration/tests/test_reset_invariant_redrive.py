@@ -103,7 +103,14 @@ def _reuse_finding():
 def _collision_ctx(*, deterministic: bool):
     seq = iter((["00001001", "00001002", "00001003"] if deterministic
                 else ["9f3a1c77bd", "2e88d0114a", "c50177ffde"]))
-    return confirm_password_reset_collision(request_reset_token=lambda: next(seq, ""), samples=3)
+    return confirm_password_reset_collision(
+        request_reset_token=lambda acct: next(seq, ""), accounts=("collide",), repeats=3)
+
+
+def _cross_user_collision_ctx():
+    # the SAME token is issued to two DIFFERENT accounts (a genuine cross-user collision).
+    return confirm_password_reset_collision(
+        request_reset_token=lambda acct: "xtok_shared_reset_0001", accounts=("victim", "attacker"))
 
 
 def _collision_finding():
@@ -189,6 +196,29 @@ def test_collision_admitted_live_redrive_mints_a_signed_fact() -> None:
                            provenance="live_redrive")
     assert res.is_fact, res.reason
     assert res.confirmed_by == OracleKind.PASSWORD_RESET_INVARIANT.value
+
+
+def test_cross_user_identical_token_collision_mints_a_signed_fact() -> None:
+    ctx = _cross_user_collision_ctx()
+    assert ctx is not None
+    finding = password_reset_finding(ctx, check_id="reset:password_reset_collision:cu",
+                                     insertion_point="reset:collision")
+    assert OracleVerifier().confirm(finding["oracle_context"]).confirmed
+    admitted = admit("password_reset.deterministic_collision", fired=True, conclusive=True,
+                     observed={"channel_established": True})
+    res = certify_admitted(finding, admitted, engagement_slug="alpha", signers=_signers(),
+                           provenance="live_redrive")
+    assert res.is_fact, res.reason
+    assert res.confirmed_by == OracleKind.PASSWORD_RESET_INVARIANT.value
+
+
+def test_same_user_byte_identical_token_is_not_a_firing_context() -> None:
+    # BENIGN CONTROL: byte-identical tokens for the SAME account (a deterministic-but-secure generator) are a
+    # LEAD, never a confirmed FACT (the red-pen fix).
+    ctx = confirm_password_reset_collision(
+        request_reset_token=lambda acct: "dtok_same_user_secure_0001", accounts=("only-user",), repeats=3)
+    assert ctx is not None
+    assert not OracleVerifier().confirm(ctx.to_verifier_context()).confirmed
 
 
 def test_cross_user_reuses_achieved_state_and_mints() -> None:

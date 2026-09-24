@@ -15,15 +15,19 @@ Two invariant-FREE sub-properties are FACT-capable here (no operator intent need
   * token REUSE / NON-EXPIRY (:func:`confirm_password_reset_reuse`) — VIGIL drives its OWN test account: it
     CONSUMES a reset token (sets the password to a first unique secret P1), REPLAYS the identical token to set
     a SECOND unique secret P2, then AUTHENTICATES with P2 and reads the account. Adjudicated by the PRIVATE-READ
-    REDUCTION (the same machinery Wave-3.1 IDOR/BOLA + Wave-3.2 session fixation use): a fire proves the second
-    submit GENUINELY changed the credential (P2 reaches a victim-PRIVATE datum absent from a same-shape
-    unauthorized read + a no-session baseline), never a bare 200. A single-use / expiring token (the benign
-    twin) leaves P2 unset — the P2 login fails, the datum is absent, and NOTHING mints.
+    REDUCTION (the same machinery Wave-3.1 IDOR/BOLA + Wave-3.2 session fixation use), with the achieved read
+    BOUND to P2 (recorded ``authorized_secret`` == P2, DISTINCT from P1): a fire proves the REPLAY GENUINELY
+    changed the credential (P2 reaches a victim-PRIVATE datum absent from a same-shape unauthorized read + a
+    no-session baseline), never a bare 200 and never a leftover consume-session. A single-use / expiring token
+    (the benign twin) leaves P2 unset — the P2 login fails, the datum is absent, and NOTHING mints.
 
-  * deterministic COLLISION (:func:`confirm_password_reset_collision`) — VIGIL issues N independent reset
-    requests and captures each returned token in order. Adjudicated as a DETERMINISTIC collision (>=2
-    byte-identical or >=3 an exact arithmetic progression). Distinct tokens (the benign twin) mint nothing;
-    ENTROPY is never scored — a distinct-but-weak token stays a probabilistic LEAD, never a FACT.
+  * deterministic COLLISION (:func:`confirm_password_reset_collision`) — VIGIL issues independent reset requests
+    across one or more accounts and captures each ``{token, account}`` pair in order. A FACT is a genuinely
+    EXPLOITABLE collision only: a CROSS-USER identical token (same token for two DIFFERENT accounts) or a
+    PREDICTABLE counter (>=3 tokens forming an exact arithmetic progression). Byte-identical tokens for the SAME
+    account (a deterministic-but-secure generator — Django default_token_generator within a timestamp bucket, a
+    cache-one-token-per-account app) are NOT a FACT — they degrade to a LEAD. Distinct tokens (the benign twin)
+    mint nothing; ENTROPY is never scored — a distinct-but-weak token stays a probabilistic LEAD, never a FACT.
 
 The CROSS-USER reset-token sub-property REUSES the Wave-3.1 IdorCheck same-shape private-read differential
 (``scanner.checks.IdorCheck`` → the achieved_state predicate oracle) UNCHANGED; the reset-link HOST-POISONING
@@ -83,13 +87,16 @@ def confirm_password_reset_reuse(
         negative reference — a substantive 2xx from which D must be ABSENT).
       * ``nocred_read()`` — read the SAME URL with NO session (the no-session gating baseline).
 
-    ``private_discriminator`` (D) is the operator's genuine victim-PRIVATE datum. The captured RAW views are
-    handed to :func:`~verify.oracles.password_reset_invariant_oracle`, which fires ONLY when D is PRESENT in the
-    P2-authenticated read AND the owner's read yet PROVABLY ABSENT from the same-shape unauthorized read and the
-    no-session baseline — proving the replayed token GENUINELY re-changed the credential (not a bare 200). The
-    benign twin (a single-use / expiring token) leaves P2 unset ⇒ the P2 login fails ⇒ D absent ⇒
-    channel-confirmed CLEAN. Returns ``None`` only when the first consume established no channel (a non-dict
-    response); every other outcome is adjudicated by the oracle. The scanner scores nothing."""
+    ``private_discriminator`` (D) is the operator's genuine victim-PRIVATE datum. The captured RAW views — plus
+    the P2-binding fields (the consumed P1, the replay-set P2, and P2 as the credential the authorized read was
+    reached with) — are handed to :func:`~verify.oracles.password_reset_invariant_oracle`, which BINDS the
+    achieved read to P2 (P2 present + non-trivial + DISTINCT from P1, the read reached WITH P2) and then fires
+    ONLY when D is PRESENT in the P2-authenticated read AND the owner's read yet PROVABLY ABSENT from the
+    same-shape unauthorized read and the no-session baseline — proving the REPLAY GENUINELY re-changed the
+    credential (not a bare 200, not a leftover consume-session). The benign twin (a single-use / expiring token)
+    leaves P2 unset ⇒ the P2 login fails ⇒ D absent ⇒ channel-confirmed CLEAN. Returns ``None`` only when the
+    first consume established no channel (a non-dict response); every other outcome is adjudicated by the oracle.
+    The scanner scores nothing."""
     consume_resp = consume(reset_token, first_secret)
     if not isinstance(consume_resp, dict):
         return None   # no channel established on the consume leg — INCONCLUSIVE, never a CLEAN
@@ -98,6 +105,10 @@ def confirm_password_reset_reuse(
     # state is proven only by authenticating with the replay-set secret and reaching the private datum.
     replay(reset_token, second_secret)
 
+    # The authenticated read is reached WITH the replay-set secret P2 (=``second_secret``) — recorded as
+    # ``authorized_secret`` so the oracle can BIND the achieved state to the REPLAY (P2), not the consumed P1 /
+    # a leftover consume-session (mirrors session-fixation's sentinel-binding). A single-use / expiring token
+    # rejects the replay, so a P2 login fails and the datum is absent ⇒ channel-confirmed clean.
     authorized_resp = read_as_secret(second_secret)
     owner_resp = owner_read()
     unauth_resp = unauth_read()
@@ -112,33 +123,48 @@ def confirm_password_reset_reuse(
         logged_out_ref=_view(nocred_resp),
         logged_out_markers=logged_out_markers,
         logged_out_statuses=logged_out_statuses,
+        consumed_secret=first_secret,
+        replay_secret=second_secret,
+        authorized_secret=second_secret,
     )
 
 
 def confirm_password_reset_collision(
     *,
-    request_reset_token: Callable[[], Any],
-    samples: int = 3,
+    request_reset_token: Callable[[str], Any],
+    accounts: "tuple[str, ...]",
+    repeats: int = 1,
 ) -> FindingContext | None:
-    """Deterministic token-COLLISION gated-workflow probe (CWE-640/330).
+    """Deterministic token-COLLISION gated-workflow probe (CWE-640/330), account-aware.
 
-    ``request_reset_token()`` performs ONE reset request through the gated send and returns the freshly-issued
-    reset token (a string), or a falsy value if none was issued. This calls it ``samples`` times (at least 2)
-    IN ORDER and captures the tokens. The captured tokens are handed to
-    :func:`~verify.oracles.password_reset_invariant_oracle`, which fires ONLY on a DETERMINISTIC collision (>=2
-    byte-identical, or >=3 an exact arithmetic progression); DISTINCT tokens (the benign twin) mint nothing.
-    ENTROPY is never scored — a distinct-but-weak token stays a probabilistic LEAD, never a FACT. Returns
-    ``None`` only when fewer than 2 tokens were captured (no channel / no tokens — INCONCLUSIVE, never a CLEAN);
-    every sufficient sample is adjudicated by the oracle (a distinct set is a channel-confirmed clean)."""
-    n = max(int(samples), 2)
-    tokens: list[str] = []
-    for _ in range(n):
-        tok = request_reset_token()
-        if isinstance(tok, str) and tok:
-            tokens.append(tok)
-    if len(tokens) < 2:
+    ``request_reset_token(account)`` performs ONE reset request for ``account`` through the gated send and
+    returns the freshly-issued reset token (a string), or a falsy value if none was issued. This requests a
+    token for EACH account in ``accounts``, ``repeats`` times, IN ORDER, and captures each ``{token, account}``
+    pair. The captures are handed to :func:`~verify.oracles.password_reset_invariant_oracle`, which mints a FACT
+    ONLY on a genuinely-EXPLOITABLE collision:
+
+      * a CROSS-USER identical token — the SAME token issued to two DIFFERENT accounts (pass >=2 distinct
+        ``accounts``); an attacker who resets their own account then receives the victim's token; OR
+      * a PREDICTABLE counter — >=3 tokens forming an EXACT arithmetic progression (pass >=3 total captures, e.g.
+        ``repeats>=3`` on one account or >=3 accounts).
+
+    Byte-identical tokens for the SAME account (a cryptographically-secure DETERMINISTIC generator — stock Django
+    default_token_generator within a timestamp bucket, a cache-one-token-per-account app) are NOT a FACT — they
+    degrade to a LEAD. DISTINCT tokens (the benign twin) mint nothing; ENTROPY is never scored. Returns ``None``
+    only when fewer than 2 captures were established (no channel / no tokens — INCONCLUSIVE, never a CLEAN);
+    every sufficient sample is adjudicated by the oracle."""
+    if not accounts:
+        return None
+    reps = max(int(repeats), 1)
+    samples: list[dict] = []
+    for _ in range(reps):
+        for account in accounts:
+            tok = request_reset_token(account)
+            if isinstance(tok, str) and tok:
+                samples.append({"token": tok, "account": str(account)})
+    if len(samples) < 2:
         return None   # no channel / too few tokens issued — INCONCLUSIVE, never a CLEAN
-    return FindingContext.from_password_reset_collision(tokens=tokens)
+    return FindingContext.from_password_reset_collision(samples=samples)
 
 
 def password_reset_finding(

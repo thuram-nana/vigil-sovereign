@@ -2148,24 +2148,30 @@ class FindingContext(BaseModel):
         logged_out_ref: Any = None,
         logged_out_markers: Any = (),
         logged_out_statuses: Any = (),
+        consumed_secret: str | None = None,
+        replay_secret: str | None = None,
+        authorized_secret: str | None = None,
         bug_class: str = "password_reset_reuse",
     ) -> "FindingContext":
         """The retained token-REUSE / NON-EXPIRY record for the password-reset oracle
         (OracleKind.PASSWORD_RESET_INVARIANT, CWE-640/613). It carries the RAW bytes the oracle re-runs its
         PRIVATE-READ REDUCTION over — never a pre-computed success bool, never a bare 200.
 
-        The runner CONSUMES a reset token (setting the account password to a first unique VIGIL secret), then
-        REPLAYS the same token to set a SECOND, unique VIGIL secret, then AUTHENTICATES with that second secret
-        and reads the account. ``authorized_view`` is ``{status, body}`` of that replay-authenticated read;
-        ``owner_view`` is the SAME URL read authoritatively as the owner (the POSITIVE reference — D must be
-        PRESENT); ``unauth_ref`` is the SAME URL read by an OTHER unauthorized identity (the DECISIVE SAME-SHAPE
-        negative reference — a substantive 2xx from which D must be ABSENT); ``logged_out_ref`` is the SAME URL
-        with NO session (the no-session baseline). ``private_discriminator`` (D) is the operator's genuine
-        victim-PRIVATE datum. The oracle fires ONLY when D is PRESENT in the replay-authenticated read AND the
-        owner's read yet PROVABLY ABSENT from the same-shape unauthorized reference and the no-session baseline
-        (the second submit GENUINELY changed the credential). A single-use token that correctly expires leaves
-        the second secret unset — the replay-authenticated read never reaches D ⇒ channel-confirmed CLEAN.
-        No/invalid/reflected D or a missing/failing reference ⇒ LEAD (never a FACT)."""
+        The runner CONSUMES a reset token (setting the account password to a first unique VIGIL secret P1
+        =``consumed_secret``), then REPLAYS the same token to set a SECOND, unique VIGIL secret P2
+        =``replay_secret``, then AUTHENTICATES with P2 (=``authorized_secret``, the credential the
+        ``authorized_view`` read was reached with) and reads the account. ``authorized_view`` is ``{status,
+        body}`` of that replay-authenticated read; ``owner_view`` is the SAME URL read authoritatively as the
+        owner (the POSITIVE reference — D must be PRESENT); ``unauth_ref`` is the SAME URL read by an OTHER
+        unauthorized identity (the DECISIVE SAME-SHAPE negative reference — a substantive 2xx from which D must be
+        ABSENT); ``logged_out_ref`` is the SAME URL with NO session (the no-session baseline).
+        ``private_discriminator`` (D) is the operator's genuine victim-PRIVATE datum. The oracle first BINDS the
+        achieved read to P2 (P2 present + non-trivial + DISTINCT from P1, and ``authorized_secret`` == P2, D not
+        an echo of P2), then fires ONLY when D is PRESENT in the replay-authenticated read AND the owner's read
+        yet PROVABLY ABSENT from the same-shape unauthorized reference and the no-session baseline (the REPLAY
+        GENUINELY changed the credential). A single-use token that correctly expires leaves P2 unset — the
+        replay-authenticated read never reaches D ⇒ channel-confirmed CLEAN. A failed P2-binding (wrong-secret
+        read, P2==P1, P2 absent), no/invalid/reflected D or a missing/failing reference ⇒ LEAD (never a FACT)."""
         def _view(v: Any) -> "dict | None":
             if not isinstance(v, Mapping):
                 return None
@@ -2198,6 +2204,12 @@ class FindingContext(BaseModel):
                 "logged_out_ref": _view(logged_out_ref),
                 "logged_out_markers": _strs(logged_out_markers),
                 "logged_out_statuses": _ints(logged_out_statuses),
+                # P2-binding fields (mirror session fixation's sentinel-binding): the consumed P1, the replay-set
+                # P2, and the credential the authorized read was actually reached with — so the oracle can prove
+                # the achieved state is attributable to the REPLAY, never the first consume / a leftover session.
+                "consumed_secret": None if consumed_secret is None else _coerce_text(consumed_secret),
+                "replay_secret": None if replay_secret is None else _coerce_text(replay_secret),
+                "authorized_secret": None if authorized_secret is None else _coerce_text(authorized_secret),
             },
         )
 
@@ -2205,20 +2217,34 @@ class FindingContext(BaseModel):
     def from_password_reset_collision(
         cls,
         *,
-        tokens: Any,
+        samples: Any = None,
+        tokens: Any = None,
         bug_class: str = "password_reset_collision",
     ) -> "FindingContext":
         """The retained deterministic-COLLISION record for the password-reset oracle
-        (OracleKind.PASSWORD_RESET_INVARIANT, CWE-640/330). ``tokens`` are the reset tokens the runner captured
-        from INDEPENDENT reset requests, in request order. The oracle fires ONLY on a DETERMINISTIC collision:
-        >=2 byte-identical tokens (a truly random token never repeats), or >=3 tokens forming an EXACT
-        arithmetic progression (a predictable counter). A set of distinct tokens ⇒ channel-confirmed CLEAN; too
-        few / too-short samples ⇒ LEAD. ENTROPY is never scored — a distinct-but-low-entropy token stays a
-        probabilistic LEAD in the scanner, never a FACT here."""
-        toks = [_coerce_text(x) for x in tokens] if isinstance(tokens, (list, tuple)) else []
+        (OracleKind.PASSWORD_RESET_INVARIANT, CWE-640/330). ``samples`` are the runner's captures from INDEPENDENT
+        reset requests, in request order, each a ``{token, account}`` mapping (the ACCOUNT the token was issued
+        for — required to prove a CROSS-USER identical token). A flat ``tokens`` list is also accepted for the
+        counter/arithmetic path (accounts UNKNOWN — a byte-identical pair then cannot be proven cross-user and
+        stays a LEAD). The oracle fires ONLY on a genuinely-EXPLOITABLE collision: a CROSS-USER identical token
+        (same token for two DIFFERENT accounts), or >=3 tokens forming an EXACT arithmetic progression (a
+        predictable counter). Byte-identical tokens for the SAME account (a deterministic-but-secure generator) ⇒
+        LEAD; a set of distinct tokens ⇒ channel-confirmed CLEAN; too few / too-short samples ⇒ LEAD. ENTROPY is
+        never scored — a distinct-but-low-entropy token stays a probabilistic LEAD, never a FACT here."""
+        norm: list[dict[str, str]] = []
+        if isinstance(samples, (list, tuple)):
+            for item in samples:
+                if isinstance(item, Mapping):
+                    tok = _coerce_text(item.get("token"))
+                    acct = _coerce_text(item.get("account"))
+                else:
+                    tok, acct = _coerce_text(item), ""
+                norm.append({"token": tok, "account": acct})
+        elif isinstance(tokens, (list, tuple)):
+            norm = [{"token": _coerce_text(x), "account": ""} for x in tokens]
         return cls(
             bug_class=bug_class,
-            password_reset_invariant={"mode": "token_collision", "tokens": toks},
+            password_reset_invariant={"mode": "token_collision", "samples": norm},
         )
 
     # -- AEGIS builders (the defensive dual) -------------------------------

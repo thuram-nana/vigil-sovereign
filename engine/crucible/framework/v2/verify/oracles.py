@@ -2458,16 +2458,26 @@ def mfa_bypass_oracle(observed: Any) -> OracleSignal:
 #   FACTs ONLY the invariant-FREE sub-properties (no operator intent needed to know they are wrong):
 #     * token REUSE / NON-EXPIRY — a consumed reset token is REPLAYED and the second submit GENUINELY
 #       succeeds, proven by the PRIVATE-READ REDUCTION (reusing :func:`_sfx_private_read_achieved`, the same
-#       same-shape differential Wave-3.1 IDOR/BOLA and Wave-3.2 session fixation use), never a bare 200;
-#     * deterministic COLLISION — two independent reset requests return BYTE-IDENTICAL tokens, or >=3 an
-#       EXACT arithmetic progression (a truly random token never collides). Predictable-by-ENTROPY is NOT a
-#       FACT here (it stays a probabilistic LEAD elsewhere) — only a deterministic collision fires.
-#   CROSS-USER reset tokens reuse the EXISTING ACHIEVED_STATE IdorCheck differential (bug_class
-#   `password_reset_cross_user`); reset-link HOST-POISONING routes to the EXISTING host_header_injection FACT.
+#       same-shape differential Wave-3.1 IDOR/BOLA and Wave-3.2 session fixation use), never a bare 200. The
+#       achieved read is BOUND to the REPLAY-set secret P2 (a fresh VIGIL secret DISTINCT from the consumed P1,
+#       and the read explicitly reached WITH P2) — mirroring session fixation's sentinel-binding, so a fire
+#       proves the REPLAY re-changed the credential, never a leftover consume-session or the consumed P1;
+#     * deterministic COLLISION — a genuinely-EXPLOITABLE predicate only: either a CROSS-USER identical token
+#       (the SAME reset token issued to two DIFFERENT accounts — an attacker who resets their own account
+#       receives the victim's token), OR a PREDICTABLE counter (>=3 tokens forming an EXACT arithmetic
+#       progression, reproduced from the observed sequence). Byte-identical tokens for the SAME account are NOT
+#       a FACT — a cryptographically-secure DETERMINISTIC generator (stock Django default_token_generator within
+#       a timestamp bucket, or a cache-one-token-per-account app) returns byte-identical tokens for one user;
+#       that is benign, so it degrades to a LEAD. Predictable-by-ENTROPY is likewise NOT a FACT (a probabilistic
+#       LEAD elsewhere).
+#   CROSS-USER reset tokens (an achieved cross-account READ) reuse the EXISTING ACHIEVED_STATE IdorCheck
+#   differential (bug_class `password_reset_cross_user`); reset-link HOST-POISONING routes to the EXISTING
+#   host_header_injection FACT.
 # ---------------------------------------------------------------------------
 
 _PRT_MIN_TOKEN = 8                  # a reset token below this is too short to reason about a collision soundly
-_PRT_MIN_COLLISION_SAMPLES = 2      # a byte-identical collision needs >=2 independent captures
+_PRT_MIN_SECRET = 8                 # a VIGIL replay/consume secret below this is too short to bind an achieved read
+_PRT_MIN_COLLISION_SAMPLES = 2      # a collision adjudication needs >=2 independent captures
 _PRT_MIN_ADJACENCY_SAMPLES = 3      # a deterministic arithmetic progression needs >=3 to exclude coincidence
 _PRT_HEX_RE = re.compile(r"^[0-9a-fA-F]+$")
 _PRT_DEC_RE = re.compile(r"^[0-9]+$")
@@ -2505,35 +2515,109 @@ def _prt_parse_counter(tok: str) -> "int | None":
     return None
 
 
-def _prt_collision(tokens: Any) -> "tuple[bool | None, dict]":
+def _prt_normalize_samples(raw: Any) -> "list[tuple[str, str]]":
+    """Coerce the retained collision captures into ``(token, account)`` pairs, in request order. Accepts the
+    canonical richer form (a list of ``{"token","account"}`` mappings the scanner now records so a CROSS-USER
+    identical token can be proven) OR a flat list of token strings (accounts UNKNOWN — a cross-user identity
+    cannot be established, so a byte-identical pair fails closed to a LEAD, never a FACT)."""
+    out: list[tuple[str, str]] = []
+    for item in (raw or []):
+        if isinstance(item, Mapping):
+            tok = _coerce_text(item.get("token")).strip()
+            acct = _coerce_text(item.get("account")).strip()
+        else:
+            tok, acct = _coerce_text(item).strip(), ""
+        if tok:
+            out.append((tok, acct))
+    return out
+
+
+def _prt_collision(samples: Any) -> "tuple[bool | None, dict]":
     """Deterministic collision adjudication over reset tokens captured from INDEPENDENT requests (in request
-    order). TRI-STATE:
+    order), each carrying the ACCOUNT it was issued for. Only a genuinely-EXPLOITABLE predicate is a FACT.
+    TRI-STATE:
 
-      * ``True``  — >=2 tokens are BYTE-IDENTICAL (a truly random token never repeats across two fresh reset
-        requests), OR >=3 tokens form an EXACT arithmetic progression: every token parses as a fixed-width
-        integer counter and the step between consecutive values is a single constant nonzero delta (a
-        deterministic sequence a random generator produces with probability ~0);
-      * ``False`` — >=2 tokens, all DISTINCT, no identical pair and no exact progression ⇒ proper generation
-        (the benign twin) ⇒ channel-confirmed clean;
-      * ``None``  — fewer than 2 samples, or any sample below the minimum length ⇒ undecidable ⇒ LEAD.
+      * ``True``  — a CROSS-USER identical token (the SAME token issued to two DIFFERENT accounts — a real
+        predictability/collision: an attacker who resets their own account receives the victim's token), OR a
+        PREDICTABLE counter (>=3 tokens forming an EXACT arithmetic progression: every token parses as a
+        fixed-width integer counter and the step between consecutive values is a single constant nonzero delta,
+        reproduced from the observed sequence);
+      * ``False`` — all tokens DISTINCT with no cross-user identical pair and no exact progression ⇒ proper
+        generation ⇒ channel-confirmed clean;
+      * ``None``  — fewer than 2 samples, any sample below the minimum length, OR byte-identical tokens for the
+        SAME account only (with no cross-user pair and no progression) ⇒ undecidable ⇒ LEAD. Same-account
+        byte-identical tokens are EXACTLY what a cryptographically-secure DETERMINISTIC generator produces
+        (stock Django default_token_generator within a timestamp bucket, a cache-one-token-per-account app), so
+        their identity is NOT evidence of a weak generator — it is an honest LEAD, never a FACT, never a CLEAN.
 
-    ENTROPY is never scored here: a set of distinct tokens is CLEAN regardless of their apparent randomness —
-    a low-entropy-but-distinct token stays a probabilistic LEAD in the scanner, never a FACT."""
-    toks = [t for t in (_coerce_text(x).strip() for x in (tokens or [])) if t]
-    if len(toks) < _PRT_MIN_COLLISION_SAMPLES or any(len(t) < _PRT_MIN_TOKEN for t in toks):
-        return None, {"n": len(toks)}
-    # (1) byte-identical collision — the strongest deterministic proof of broken generation.
-    if len(set(toks)) < len(toks):
-        dup = next(t for t in toks if toks.count(t) > 1)
-        return True, {"identical": True, "samples": len(toks), "value_prefix": dup[:16]}
-    # (2) exact deterministic arithmetic progression (>=3 fixed-width integer counters, constant nonzero step).
+    ENTROPY is never scored here: a set of distinct tokens is CLEAN regardless of apparent randomness — a
+    low-entropy-but-distinct token stays a probabilistic LEAD in the scanner, never a FACT."""
+    pairs = _prt_normalize_samples(samples)
+    toks = [t for t, _ in pairs]
+    if len(pairs) < _PRT_MIN_COLLISION_SAMPLES or any(len(t) < _PRT_MIN_TOKEN for t in toks):
+        return None, {"n": len(pairs)}
+    # (1) CROSS-USER byte-identical collision — the ONLY byte-identical shape that is genuinely exploitable: the
+    # SAME token was issued to two DIFFERENT (known) accounts. Same-account identity is handled as a LEAD below.
+    by_token: dict[str, set[str]] = {}
+    for tok, acct in pairs:
+        by_token.setdefault(tok, set()).add(acct)
+    for tok, accts in by_token.items():
+        known = {a for a in accts if a}
+        if len(known) >= 2:
+            return True, {"identical": True, "cross_user": True, "samples": len(pairs),
+                          "accounts": sorted(known)[:4], "value_prefix": tok[:16]}
+    # (2) EXACT deterministic arithmetic progression (>=3 fixed-width integer counters, constant nonzero step) —
+    # a PREDICTABLE counter reproduced from the observed sequence. Sound regardless of account: a predictable
+    # counter is exploitable across accounts (observe one token, predict the next).
     if len(toks) >= _PRT_MIN_ADJACENCY_SAMPLES and len({len(t) for t in toks}) == 1:
         vals = [_prt_parse_counter(t) for t in toks]
         if all(v is not None for v in vals):
             steps = [vals[i + 1] - vals[i] for i in range(len(vals) - 1)]  # type: ignore[operator]
             if steps and steps[0] != 0 and all(s == steps[0] for s in steps):
                 return True, {"identical": False, "arithmetic": True, "samples": len(toks), "step": steps[0]}
-    return False, {"distinct": len(set(toks)), "samples": len(toks)}
+    # (3) byte-identical tokens for the SAME account only (no cross-user pair, no progression) ⇒ UNDECIDABLE ⇒
+    # LEAD: a deterministic-but-secure generator returns identical tokens for one user — not a weak generator.
+    if len(set(toks)) < len(toks):
+        return None, {"identical_same_account_only": True, "samples": len(pairs)}
+    # (4) all tokens DISTINCT, no cross-user identical pair, no exact progression ⇒ proper generation ⇒ clean.
+    return False, {"distinct": len(set(toks)), "samples": len(pairs)}
+
+
+def _prt_reuse_p2_binding(replay_secret: str, consumed_secret: str, authorized_secret: str,
+                          discriminator: str, authorized_view: Any) -> "str | None":
+    """Bind the achieved token-reuse read to the REPLAY-set secret P2 — mirroring session fixation's
+    sentinel-binding discipline. Returns a LEAD reason string if the binding fails (⇒ the oracle degrades to a
+    LEAD, never a FACT), or ``None`` when the binding holds. The binding is what makes a reuse FACT sound: a
+    single-use / expiring token whose replay set NOTHING could still read the private datum via a leftover
+    session established by the FIRST consume; without this binding that would mint a FALSE reuse FACT. So a fire
+    requires the achieved read to be provably attributable to the REPLAY (P2), not the consume (P1):
+
+      * ``replay_secret`` (P2) present and non-trivial (a fresh VIGIL secret the replay set);
+      * ``consumed_secret`` (P1) present and non-trivial AND DISTINCT from P2 — so a successful authenticated
+        read cannot be attributed to the FIRST consume;
+      * ``authorized_secret`` == ``replay_secret`` — the authenticated read was EXPLICITLY reached WITH P2 (not
+        P1, not a leftover consume-session);
+      * D is not an echo of P2 (a substring of, or present only as part of, the reflected secret) — the
+        reflected-value / straddle guard, mirroring the sentinel echo guard in ``_sfx_private_read_achieved``."""
+    if len(replay_secret) < _PRT_MIN_SECRET:
+        return ("the replay-set secret P2 is absent or too short to bind the achieved read to the replayed "
+                "token — cannot mint (LEAD)")
+    if len(consumed_secret) < _PRT_MIN_SECRET or replay_secret == consumed_secret:
+        return ("the replay-set secret P2 is not a distinct, non-trivial secret from the consumed secret P1 — a "
+                "successful read cannot be attributed to the REPLAY rather than the first consume (LEAD)")
+    if authorized_secret != replay_secret:
+        return ("the authenticated read was NOT reached with the replay-set secret P2 (authorized_secret != "
+                "replay_secret) — the achieved state is not bound to the replayed token (e.g. a leftover "
+                "consume-session or the consumed P1) — cannot mint (LEAD)")
+    if discriminator and discriminator in replay_secret:
+        return ("the private datum D is a substring of the replay-set secret P2 (a credential echo, not "
+                "access-gated content) — cannot mint (LEAD)")
+    a_body = _coerce_text(authorized_view.get("body")) if isinstance(authorized_view, Mapping) else ""
+    if replay_secret and replay_secret in a_body and discriminator and discriminator in a_body \
+            and discriminator not in a_body.replace(replay_secret, "\x00"):
+        return ("the private datum D appears in the replay-authenticated read ONLY as part of the echoed secret "
+                "P2 — a credential echo, not access-gated content — cannot mint (LEAD)")
+    return None
 
 
 def password_reset_invariant_oracle(observed: Any) -> OracleSignal:
@@ -2541,20 +2625,26 @@ def password_reset_invariant_oracle(observed: Any) -> OracleSignal:
     over VIGIL's OWN retained raw bytes (never a bool, never a bare marker/entropy heuristic). ``observed`` is
     the record ``scanner.reset`` captured through the gated send; ``mode`` selects the sub-property:
 
-      * ``token_reuse`` — a reset token that was CONSUMED (set the account password to a first VIGIL secret) is
-        REPLAYED to set a SECOND, unique VIGIL secret; the runner then AUTHENTICATES with that second secret and
-        reads the account. Fires ONLY when the PRIVATE-READ REDUCTION (:func:`_sfx_private_read_achieved`)
-        proves that read reached a victim-PRIVATE datum D — D PRESENT in the replay-authenticated read AND in
-        the owner's authoritative read yet PROVABLY ABSENT from a SUBSTANTIVE SAME-SHAPE unauthorized read and a
-        no-session baseline (so the second submit GENUINELY changed the credential, not merely returned 200). A
-        single-use token that correctly expires (the benign twin) leaves the second secret unset — the
-        replay-authenticated read never reaches D ⇒ channel-confirmed CLEAN. No/invalid/reflected D, a missing
-        positive or same-shape negative reference, D present in a negative reference, or a non-substantive read
-        ⇒ LEAD (never a FACT, never a false CLEAN).
-      * ``token_collision`` — ``tokens`` are reset tokens captured from INDEPENDENT reset requests (in order).
-        Fires ONLY on a DETERMINISTIC collision (:func:`_prt_collision`): >=2 byte-identical tokens or >=3 an
-        exact arithmetic progression. A set of distinct tokens (the benign twin) ⇒ channel-confirmed CLEAN;
-        too few / too-short samples ⇒ LEAD. ENTROPY alone is never a FACT here.
+      * ``token_reuse`` — a reset token that was CONSUMED (set the account password to a first VIGIL secret P1)
+        is REPLAYED to set a SECOND, unique VIGIL secret P2; the runner then AUTHENTICATES with P2 and reads the
+        account. The achieved read is first BOUND to P2 (:func:`_prt_reuse_p2_binding` — P2 present + non-trivial
+        + DISTINCT from P1, the read explicitly reached WITH P2, D not an echo of P2), mirroring session
+        fixation's sentinel-binding so a fire proves the REPLAY re-changed the credential, never a leftover
+        consume-session or the consumed P1. It then fires ONLY when the PRIVATE-READ REDUCTION
+        (:func:`_sfx_private_read_achieved`) proves that read reached a victim-PRIVATE datum D — D PRESENT in the
+        replay-authenticated read AND in the owner's authoritative read yet PROVABLY ABSENT from a SUBSTANTIVE
+        SAME-SHAPE unauthorized read and a no-session baseline (so the second submit GENUINELY changed the
+        credential, not merely returned 200). A single-use token that correctly expires (the benign twin) leaves
+        P2 unset — the replay-authenticated read never reaches D ⇒ channel-confirmed CLEAN. A failed P2-binding
+        (P2 absent/short/equal-to-P1, or the read reached with the WRONG secret), no/invalid/reflected D, a
+        missing positive or same-shape negative reference, D present in a negative reference, or a non-substantive
+        read ⇒ LEAD (never a FACT, never a false CLEAN).
+      * ``token_collision`` — ``samples`` are ``{token, account}`` captures from INDEPENDENT reset requests (in
+        order); a flat ``tokens`` list is accepted with accounts UNKNOWN. Fires ONLY on a genuinely-EXPLOITABLE
+        collision (:func:`_prt_collision`): a CROSS-USER identical token (same token for two DIFFERENT accounts)
+        or a PREDICTABLE counter (>=3 an exact arithmetic progression). Byte-identical tokens for the SAME
+        account (a deterministic-but-secure generator) ⇒ LEAD; a set of distinct tokens (the benign twin) ⇒
+        channel-confirmed CLEAN; too few / too-short samples ⇒ LEAD. ENTROPY alone is never a FACT here.
 
     Pure + deterministic; never raises."""
     obs = observed if isinstance(observed, Mapping) else {}
@@ -2563,7 +2653,19 @@ def password_reset_invariant_oracle(observed: Any) -> OracleSignal:
     if mode == "token_reuse":
         reset_token = _coerce_text(obs.get("reset_token")).strip()
         discriminator = _coerce_text(obs.get("private_discriminator")).strip()
-        base = {"reset_token_len": len(reset_token), "discriminator_len": len(discriminator)}
+        replay_secret = _coerce_text(obs.get("replay_secret")).strip()
+        consumed_secret = _coerce_text(obs.get("consumed_secret")).strip()
+        authorized_secret = _coerce_text(obs.get("authorized_secret")).strip()
+        base = {"reset_token_len": len(reset_token), "discriminator_len": len(discriminator),
+                "replay_secret_bound": False}
+        # P2-BINDING (mirror session fixation's sentinel-binding): the achieved read MUST be attributable to the
+        # REPLAY-set secret P2, not the consumed P1 / a leftover consume-session — else a single-use token whose
+        # replay set nothing could still read D via the first consume and mint a FALSE reuse FACT. Fail ⇒ LEAD.
+        bind_fail = _prt_reuse_p2_binding(replay_secret, consumed_secret, authorized_secret,
+                                          discriminator, obs.get("authorized_view"))
+        if bind_fail is not None:
+            return _prt_signal(False, mode=mode, observed=base, evidence=bind_fail)
+        base["replay_secret_bound"] = True
         # RE-DERIVE the achieved changed state from RAW retained bytes via the PRIVATE-READ REDUCTION — the same
         # same-shape differential Wave-3.1/3.2 use. The consumed-then-replayed token is passed as the sentinel so
         # its reflected-value / straddle guard masks any echo of the token itself (a reset token must never be
@@ -2592,32 +2694,38 @@ def password_reset_invariant_oracle(observed: Any) -> OracleSignal:
                                                   "differential": "replay_set_credential_reaches_private_datum_"
                                                   "absent_in_same_shape_unauthorized_and_no_session_reads"},
             evidence=("password-reset token REUSE / NON-EXPIRY: a reset token that was already CONSUMED was "
-                      "REPLAYED and the second submit GENUINELY changed the credential — authenticating with the "
-                      "replay-set secret reaches a victim-PRIVATE datum D that is PRESENT in the owner's "
-                      "authoritative read yet PROVABLY ABSENT from a SUBSTANTIVE SAME-SHAPE unauthorized read and "
-                      "a no-session baseline (the private-read reduction proves the changed state, not a bare "
-                      "200) — the recovery token is reusable / does not expire on use"))
+                      "REPLAYED to set a SECOND unique VIGIL secret P2 (distinct from the consumed P1) and the "
+                      "second submit GENUINELY changed the credential — authenticating WITH P2 reaches a "
+                      "victim-PRIVATE datum D that is PRESENT in the owner's authoritative read yet PROVABLY "
+                      "ABSENT from a SUBSTANTIVE SAME-SHAPE unauthorized read and a no-session baseline (the "
+                      "P2-bound private-read reduction proves the REPLAY re-changed the credential, not a bare "
+                      "200 nor a leftover consume-session) — the recovery token is reusable / does not expire"))
 
     if mode == "token_collision":
-        fired, detail = _prt_collision(obs.get("tokens"))
+        fired, detail = _prt_collision(obs.get("samples") if obs.get("samples") is not None else obs.get("tokens"))
         if fired is None:
             return _prt_signal(
                 False, mode=mode, observed=detail,
-                evidence=("too few / too-short reset-token samples to adjudicate a deterministic collision "
-                          "(need >=2 independent captures of length >= 8) — LEAD, not a FACT"))
+                evidence=("no genuinely-exploitable reset-token collision could be adjudicated: too few / "
+                          "too-short samples (need >=2 captures of length >= 8), OR byte-identical tokens for the "
+                          "SAME account only — a cryptographically-secure DETERMINISTIC generator (e.g. Django "
+                          "default_token_generator within a timestamp bucket, or a cache-one-token-per-account "
+                          "app) returns identical tokens for one user; that is NOT an exploitable collision — "
+                          "LEAD, not a FACT"))
         if fired is False:
             return _prt_signal(
                 False, mode=mode, conclusive=True, observed=detail,
-                evidence=("the independent reset requests returned DISTINCT tokens with no byte-identical pair "
-                          "and no exact arithmetic progression — proper generation (entropy is not scored here); "
-                          "did not fire"))
+                evidence=("the independent reset requests returned DISTINCT tokens with no cross-user identical "
+                          "pair and no exact arithmetic progression — proper generation (entropy is not scored "
+                          "here); did not fire"))
         if detail.get("identical"):
             return _prt_signal(
                 True, mode=mode, conf=0.95, observed=detail,
-                evidence=("deterministic password-reset token COLLISION: two INDEPENDENT reset requests returned "
-                          "the BYTE-IDENTICAL token — a truly random recovery token never repeats, so the "
-                          "generator is deterministic/broken (an attacker who triggers a reset for a victim "
-                          "predicts the victim's token)"))
+                evidence=("deterministic password-reset token COLLISION (CROSS-USER): the BYTE-IDENTICAL reset "
+                          "token was issued to TWO DIFFERENT accounts — a truly random / per-account recovery "
+                          "token never collides across users, so an attacker who triggers a reset for their OWN "
+                          "account receives the victim's token too (a real predictability/collision, not a "
+                          "same-user deterministic-but-secure token)"))
         return _prt_signal(
             True, mode=mode, conf=0.95, observed=detail,
             evidence=(f"deterministic password-reset token COLLISION: {detail.get('samples')} independent reset "

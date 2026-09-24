@@ -1564,11 +1564,15 @@ def _redrive_branch_for(bug_class: str) -> "Optional[str]":
         # Wave 4.3 — password-reset / account-recovery token-invariant gated-workflow re-drives. FACT only the
         # invariant-free sub-properties (no operator intent needed to know they are wrong):
         #   * token REUSE / NON-EXPIRY — VIGIL consumes a reset token on its OWN test account, REPLAYS it to set
-        #     a second unique secret, and mints via the FACT-capable password_reset.token_reuse branch
-        #     (verify/oracles.py:password_reset_invariant_oracle) ONLY when the PRIVATE-READ REDUCTION proves the
-        #     replay-set secret reached a victim-PRIVATE datum (a single-use / expiring token mints NOTHING);
-        #   * deterministic COLLISION — >=2 byte-identical or >=3 exact-arithmetic tokens from independent reset
-        #     requests, via password_reset.deterministic_collision (entropy alone stays a LEAD, never a FACT);
+        #     a second unique secret P2, and mints via the FACT-capable password_reset.token_reuse branch
+        #     (verify/oracles.py:password_reset_invariant_oracle) ONLY when the P2-BOUND PRIVATE-READ REDUCTION
+        #     proves the replay-set secret P2 (distinct from the consumed P1, the read reached WITH P2) reached a
+        #     victim-PRIVATE datum (a single-use / expiring token, or a wrong-secret read, mints NOTHING);
+        #   * deterministic COLLISION — a genuinely-exploitable collision: a CROSS-USER identical token (same
+        #     token for two DIFFERENT accounts) or a PREDICTABLE counter (>=3 exact-arithmetic tokens) from
+        #     independent reset requests, via password_reset.deterministic_collision. Byte-identical tokens for
+        #     the SAME account (a deterministic-but-secure generator, e.g. Django default_token_generator) and
+        #     entropy alone stay a LEAD, never a FACT;
         #   * CROSS-USER reset token — REUSES the Wave-3.1 IDOR/BOLA achieved_state same-shape private-read
         #     differential UNCHANGED via password_reset.cross_user_read.
         # (Reset-link HOST-POISONING is NOT wired here — it routes to the EXISTING host_header_injection web-fact

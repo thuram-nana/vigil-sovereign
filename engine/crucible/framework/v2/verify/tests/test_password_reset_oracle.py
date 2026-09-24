@@ -27,6 +27,10 @@ def _authed(extra: str) -> dict:
     return {"status": 200, "body": _CHROME.format(extra=extra)}
 
 
+_P1 = "OBSIDIAN-TEST-consume-secret-1000"
+_P2 = "OBSIDIAN-TEST-replay-secret-2000"
+
+
 def _reuse_record(**over):
     rec = dict(
         reset_token="rt_deadbeefcafebabe0011",
@@ -41,6 +45,11 @@ def _reuse_record(**over):
         logged_out_ref={"status": 403, "body": "login required to view this account page"},
         logged_out_markers=("You are logged out",),
         logged_out_statuses=(401, 403),
+        # P2-binding: the consumed P1, the replay-set P2 (distinct), and P2 as the credential the authorized
+        # read was reached with — so the achieved state is attributable to the REPLAY, not the first consume.
+        consumed_secret=_P1,
+        replay_secret=_P2,
+        authorized_secret=_P2,
     )
     rec.update(over)
     return rec
@@ -95,13 +104,65 @@ def test_reuse_non_substantive_unauth_reference_is_a_lead() -> None:
 
 
 # ---------------------------------------------------------------------------
+# token REUSE — P2-binding (the achieved read must be reached with the REPLAY-set secret, not the consumed P1)
+# ---------------------------------------------------------------------------
+
+def test_reuse_wrong_secret_authorized_view_is_a_lead() -> None:
+    # The authenticated read was reached with the CONSUMED secret P1 (or any secret != the replay-set P2), so a
+    # success cannot be attributed to the REPLAY — a single-use token whose replay set nothing could still read D
+    # via the first consume. The P2-binding refuses this ⇒ LEAD, never a FACT.
+    sig = _reuse_sig(authorized_secret=_P1)
+    assert not sig.fired and not sig.conclusive
+
+
+def test_reuse_replay_secret_equal_to_consumed_is_a_lead() -> None:
+    # P2 == P1 ⇒ a successful read cannot be attributed to the REPLAY rather than the first consume ⇒ LEAD.
+    sig = _reuse_sig(replay_secret=_P1, authorized_secret=_P1)
+    assert not sig.fired and not sig.conclusive
+
+
+def test_reuse_missing_replay_secret_is_a_lead() -> None:
+    # No replay-set secret recorded ⇒ the achieved read cannot be bound to the replayed token ⇒ LEAD.
+    sig = _reuse_sig(replay_secret=None, authorized_secret=None)
+    assert not sig.fired and not sig.conclusive
+
+
+def test_reuse_discriminator_echoing_replay_secret_is_a_lead() -> None:
+    # D that is a substring of the replay-set secret P2 is a credential echo, not access-gated content ⇒ LEAD.
+    secret = "OBSIDIAN-TEST-replay-" + _D + "-tail"
+    sig = _reuse_sig(replay_secret=secret, authorized_secret=secret,
+                     authorized_view=_authed(secret), owner_view=_authed(_D))
+    assert not sig.fired and not sig.conclusive
+
+
+# ---------------------------------------------------------------------------
 # deterministic COLLISION
 # ---------------------------------------------------------------------------
 
-def test_collision_byte_identical_fires() -> None:
-    sig = password_reset_invariant_oracle({"mode": "token_collision", "tokens": ["a1b2c3d4e5", "a1b2c3d4e5"]})
+def test_collision_cross_user_identical_fires() -> None:
+    # GENUINELY EXPLOITABLE: the SAME token issued to TWO DIFFERENT accounts (an attacker who resets their own
+    # account receives the victim's token) ⇒ a FACT.
+    sig = password_reset_invariant_oracle({"mode": "token_collision", "samples": [
+        {"token": "a1b2c3d4e5", "account": "victim"}, {"token": "a1b2c3d4e5", "account": "attacker"}]})
     assert sig.fired and sig.conclusive and sig.confidence >= 0.9
-    assert sig.observed.get("identical") is True
+    assert sig.observed.get("identical") is True and sig.observed.get("cross_user") is True
+
+
+def test_collision_same_user_byte_identical_is_a_lead() -> None:
+    # BENIGN CONTROL (the red-pen fix): byte-identical tokens for the SAME account are exactly what a
+    # cryptographically-secure DETERMINISTIC generator (Django default_token_generator within a timestamp
+    # bucket, a cache-one-token-per-account app) returns — NOT an exploitable collision ⇒ LEAD, never a FACT.
+    sig = password_reset_invariant_oracle({"mode": "token_collision", "samples": [
+        {"token": "a1b2c3d4e5", "account": "victim"}, {"token": "a1b2c3d4e5", "account": "victim"}]})
+    assert not sig.fired and not sig.conclusive
+    assert sig.observed.get("identical_same_account_only") is True
+
+
+def test_collision_byte_identical_unknown_accounts_is_a_lead() -> None:
+    # A flat token list carries NO account, so a byte-identical pair cannot be proven cross-user ⇒ LEAD
+    # (fails closed): the old byte-identical-alone FACT is downgraded.
+    sig = password_reset_invariant_oracle({"mode": "token_collision", "tokens": ["a1b2c3d4e5", "a1b2c3d4e5"]})
+    assert not sig.fired and not sig.conclusive
 
 
 def test_collision_exact_arithmetic_progression_fires() -> None:

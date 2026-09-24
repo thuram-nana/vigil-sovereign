@@ -45,6 +45,7 @@ probe, an exploit, or anything aimed at a third party.
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import html
 import json
 import re
@@ -1157,6 +1158,25 @@ class BenchmarkHandler(BaseHTTPRequestHandler):
         _RESET_SAFE_TOKENS[token] = user
         self._respond(200, _page("Reset requested", f"<p>reset token: {token}</p>"))
 
+    def _reset_crossuser_request(self) -> None:
+        # PLANTED BUG (CROSS-USER token collision, CWE-640/330). The generator fails to incorporate the user
+        # identity — it returns the SAME token for EVERY account. Two DIFFERENT users therefore receive a
+        # BYTE-IDENTICAL reset token: an attacker who requests a reset for their own account receives the
+        # victim's token too (a real predictability/collision). Reached only by the gated reset assertion.
+        self._reset_read_body()   # drain the request body (the user does not affect the token — that is the bug)
+        self._respond(200, _page("Reset requested", "<p>reset token: xtok_shared_reset_0001</p>"))
+
+    def _reset_deterministic_request(self) -> None:
+        # BENIGN CONTROL (collision twin): a cryptographically-secure DETERMINISTIC generator — the token is a
+        # per-user SHA-256 (stable for one user, e.g. within a timestamp bucket, like Django's
+        # default_token_generator or a cache-one-token-per-account app). It is byte-IDENTICAL for the SAME user
+        # (⇒ a same-account LEAD, never a FACT) but DISTINCT and unpredictable ACROSS users, so the oracle must
+        # NEVER mint a collision FACT here.
+        body = self._reset_read_body()
+        user = self._reset_form_field(body, "user") or "admin"
+        token = "dtok_" + hashlib.sha256(f"{user}|reset-salt-v1".encode()).hexdigest()[:24]
+        self._respond(200, _page("Reset requested", f"<p>reset token: {token}</p>"))
+
     def _reset_safe_consume(self) -> None:
         # SAFE (reuse BENIGN TWIN). The token is SINGLE-USE: it is DELETED on consume, so a REPLAY sets nothing
         # and the replay-set secret can never authenticate — the token-reuse oracle must NEVER fire here.
@@ -1570,6 +1590,8 @@ _POST_ROUTES = {
     # byte-identical.
     "/reset/request": BenchmarkHandler._reset_request,           # VULNERABLE: deterministic counter token, never expires
     "/reset/consume": BenchmarkHandler._reset_consume,           # VULNERABLE: token NOT invalidated on use (reusable)
+    "/reset/crossuser/request": BenchmarkHandler._reset_crossuser_request,  # VULNERABLE: SAME token for every user (cross-user collision)
+    "/reset/deterministic/request": BenchmarkHandler._reset_deterministic_request,  # BENIGN CONTROL: secure per-user deterministic token
     "/reset/safe/request": BenchmarkHandler._reset_safe_request,  # SAFE TWIN: random single-use token (no collision)
     "/reset/safe/consume": BenchmarkHandler._reset_safe_consume,  # SAFE TWIN: single-use, deleted on consume (no reuse)
     "/reset/login": BenchmarkHandler._reset_login,               # authenticate with the reset-set secret

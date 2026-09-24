@@ -9,14 +9,18 @@ bytes → one atomic evidence branch is admitted against its declared capability
 FACTs ONLY the invariant-FREE sub-properties (no operator intent needed to know they are wrong):
 
   * ``password_reset_reuse`` — VIGIL drives its OWN test account: it CONSUMES a reset token (sets the password
-    to a first unique secret), REPLAYS the identical token to set a SECOND unique secret, then AUTHENTICATES
-    with the second secret and reads the account. Adjudicated by the ``password_reset_invariant_oracle`` via the
-    PRIVATE-READ REDUCTION — fires ONLY when the replay-set secret reaches a victim-PRIVATE datum present in the
-    owner's read yet absent from a substantive same-shape unauthorized read + a no-session baseline (the second
-    submit GENUINELY re-changed the credential, not a bare 200). A single-use / expiring token mints nothing.
-  * ``password_reset_collision`` — VIGIL issues N independent reset requests and captures each token in order;
-    the oracle fires ONLY on a DETERMINISTIC collision (>=2 byte-identical or >=3 an exact arithmetic
-    progression). Distinct tokens mint nothing; ENTROPY is never scored (a distinct-but-weak token stays a LEAD).
+    to a first unique secret P1), REPLAYS the identical token to set a SECOND unique secret P2, then
+    AUTHENTICATES with P2 and reads the account. Adjudicated by the ``password_reset_invariant_oracle`` via the
+    P2-bound PRIVATE-READ REDUCTION — fires ONLY when the achieved read is bound to P2 (distinct from P1, reached
+    WITH P2) AND the replay-set secret reaches a victim-PRIVATE datum present in the owner's read yet absent from
+    a substantive same-shape unauthorized read + a no-session baseline (the REPLAY GENUINELY re-changed the
+    credential, not a bare 200 nor a leftover consume-session). A single-use / expiring token mints nothing.
+  * ``password_reset_collision`` — VIGIL issues independent reset requests across one or more accounts and
+    captures each {token, account} pair in order; the oracle fires ONLY on a genuinely-EXPLOITABLE collision — a
+    CROSS-USER identical token (same token for two DIFFERENT accounts) or a PREDICTABLE counter (>=3 an exact
+    arithmetic progression). Byte-identical tokens for the SAME account (a cryptographically-secure deterministic
+    generator — Django default_token_generator, a cache-one-token app) are a LEAD, not a FACT; distinct tokens
+    mint nothing; ENTROPY is never scored (a distinct-but-weak token stays a LEAD).
   * ``password_reset_cross_user`` — REUSES the Wave-3.1 IdorCheck SAME-SHAPE private-read differential UNCHANGED
     (``scanner.checks.IdorCheck`` → the achieved_state predicate oracle), with the cross-user reset token as the
     attacker's authorization: fires ONLY when a victim-PRIVATE datum reached via the cross-user token is ABSENT
