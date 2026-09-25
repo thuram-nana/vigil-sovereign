@@ -23,12 +23,14 @@ The contract, mirroring the retained-artifact oracles (``weak_crypto_artifact`` 
     machinery every other confirmed finding uses, and re-verifies OFFLINE by re-running the pure oracle over
     the retained bytes (``python3 -m framework.v2 verify``).
 
-Every static FACT is honestly scoped to the PROVEN CODE PROPERTY (a broken-crypto invocation, an
-insecure-flag literal, or a direct intra-procedural taint — the THREE FACT-capable tiers), NEVER
-"exploitable at runtime". The ``insecure-randomness-sink`` rule_id is a RECOGNISED detection pointer but is
-LEAD-only: the ``STATIC_RULE`` oracle is fail-closed for it and never mints a FACT (a sound FACT needs
-crypto-provenance dataflow — see docs/capability-matrix blocking_work for ``static_insecure_randomness``).
-Inter-procedural / possibly-sanitized / whole-program flows stay a LEAD.
+Every static FACT is honestly scoped to the PROVEN CODE PROPERTY (a broken-crypto invocation or an
+insecure-flag literal — the TWO FACT-capable tiers), NEVER "exploitable at runtime". The
+``insecure-randomness-sink`` AND ``direct-taint`` rule_ids are RECOGNISED detection pointers but are LEAD-only:
+the ``STATIC_RULE`` oracle is fail-closed for BOTH and never mints a FACT (a sound insecure-randomness FACT
+needs crypto-provenance dataflow; a sound direct-taint FACT needs framework-aware, provenance-resolved taint
+SOURCES — a resolved request/input object, not self./req. attributes or name-matched functions — plus a
+resolved sink set; see docs/capability-matrix blocking_work for ``static_insecure_randomness`` /
+``static_taint``). Inter-procedural / possibly-sanitized / whole-program flows stay a LEAD.
 
 This module reads source and reasons about it; it sends no traffic and makes no LLM call.
 """

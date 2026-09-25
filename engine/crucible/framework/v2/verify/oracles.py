@@ -3413,23 +3413,30 @@ def weak_crypto_artifact_oracle(observed: Any) -> OracleSignal:
 
 # The CLOSED rule-id vocabulary. These are the RECOGNISED rule ids the SAST bridge may build a context under;
 # an unknown rule_id NEVER fires (a LEAD at most). Membership here is NOT FACT-capability — see
-# ``_FACT_RULE_IDS``: only the THREE SOUND tiers (a)/(c)/(d) can mint a STATIC_RULE FACT. Tier (b)
-# insecure-randomness is a recognised DETECTION POINTER but is LEAD-only (see ``_LEAD_ONLY_RULE_IDS``): a sound
-# FACT would need real crypto-provenance dataflow (provenance-resolved PRNG source + flow-sensitive dataflow +
-# a resolved secret-material sink — see docs/capability-matrix blocking_work for ``static_insecure_randomness``),
-# which this single-region offline re-parse cannot re-derive, so it is FAIL-CLOSED to a LEAD for ANY input.
+# ``_FACT_RULE_IDS``: only the TWO SOUND tiers (a) broken-crypto and (c) insecure-flag can mint a STATIC_RULE
+# FACT. Tier (b) insecure-randomness AND tier (d) direct-taint are recognised DETECTION POINTERS but are
+# LEAD-only (see ``_LEAD_ONLY_RULE_IDS``): each needs analysis beyond a single-region offline re-parse —
+# insecure-randomness needs crypto-provenance dataflow, and direct-taint needs framework-aware,
+# provenance-resolved taint SOURCE identification (a resolved request/input OBJECT, not self./req. attributes
+# or name-matched functions) plus a resolved sink set — so both are FAIL-CLOSED to a LEAD for ANY input (see
+# docs/capability-matrix blocking_work for ``static_insecure_randomness`` / ``static_taint``).
 _STATIC_RULE_IDS = frozenset({
     "broken-crypto-invocation",   # (a) FACT: a broken/risky primitive is CONSTRUCTED or CALLED here
     "insecure-randomness-sink",   # (b) LEAD-only: a recognised pointer, NEVER a FACT (needs provenance dataflow)
     "insecure-flag-literal",      # (c) FACT: a security flag is EXPLICITLY disabled as a LITERAL
-    "direct-taint",               # (d) FACT: source -> sink in ONE function, no sanitizer between ("Firm" tier)
+    "direct-taint",               # (d) LEAD-only: a recognised pointer, NEVER a FACT (needs sound taint SOURCES)
 })
-# Tier (b) insecure-randomness is RECOGNISED (a detection pointer / LEAD) but structurally CANNOT reach the
-# firing path: ``static_rule_oracle`` hard-guards it to a non-firing LEAD BEFORE any re-parse or tier dispatch,
-# for ANY input. Four red-pen rounds showed a sound AST heuristic keeps admitting a new benign-but-firing
-# shape; an honest LEAD beats a false FACT, so tier (b) is downgraded until the dataflow analysis exists.
-_LEAD_ONLY_RULE_IDS = frozenset({"insecure-randomness-sink"})
-# The FACT-capable subset — the three SOUND tiers a single-region re-parse can re-derive with provenance
+# Tiers (b) insecure-randomness AND (d) direct-taint are RECOGNISED (detection pointers / LEADs) but
+# structurally CANNOT reach the firing path: ``static_rule_oracle`` hard-guards EACH to a non-firing LEAD BEFORE
+# any re-parse or tier dispatch, for ANY input. For tier (b) four red-pen rounds showed a sound AST heuristic
+# keeps admitting a new benign-but-firing shape. For tier (d) the taint SOURCE identification is unsound —
+# self.<attr>/req.<attr> are treated as sources (`cmd=self.params; subprocess.run(cmd, shell=True)` => a false
+# CWE-77 FACT), and input/getenv/get_json match by NAME with no receiver provenance and no local-shadow check —
+# minting durable false FACTs on benign code. An honest LEAD beats a false FACT, so BOTH are downgraded until
+# the framework-aware, provenance-resolved taint-SOURCE analysis exists (a resolved request/input object, not
+# self./req. attributes or name-matched functions) on top of the now-sound inverted flow tracker.
+_LEAD_ONLY_RULE_IDS = frozenset({"insecure-randomness-sink", "direct-taint"})
+# The FACT-capable subset — the two SOUND tiers a single-region re-parse can re-derive with provenance
 # discipline. Only a rule_id in THIS set can ever mint a STATIC_RULE FACT.
 _FACT_RULE_IDS = _STATIC_RULE_IDS - _LEAD_ONLY_RULE_IDS
 
@@ -3773,181 +3780,62 @@ def _insecure_flag_hit(tree: ast.AST) -> "tuple[bool, str]":
     return False, ""
 
 
-# (d) DIRECT intra-procedural taint. Sources / sinks / sanitizers — a conservative, near-zero-FP set. A
-# sanitizer anywhere in the function REFUSES (fail-closed to a lead).
-_TAINT_SOURCE_ATTRS = frozenset({"args", "form", "values", "cookies", "params", "query", "GET", "POST"})
-_TAINT_SOURCE_BASES = frozenset({"request", "req", "self", "flask", "django"})
-_TAINT_SOURCE_FNS = frozenset({"input", "getenv", "get_json"})
-_TAINT_SINK_FNS = frozenset({"system", "popen", "eval", "exec", "call", "run", "Popen", "check_output", "execute"})
-_SANITIZER_FNS = frozenset({
-    "quote", "escape", "clean", "int", "float", "bool", "isdigit", "isalnum", "isnumeric",
-    "sanitize", "validate", "shlex", "sub", "match", "fullmatch", "abspath", "basename",
-})
-# The status a variable's MOST-RECENT straight-line binding confers, shared by tier (d) taint AND tier (c)
-# session resolution. Absent from the binding map means untracked (not tainted, not a session). A
-# ``_TAINT_SOURCE`` var carries taint DIRECTLY (a source access, or a BinOp/f-string over one); a
-# ``_TAINT_ALIAS`` var is ONE alias hop from a source var (both fire at a sink; only a SOURCE propagates a
-# further alias hop — an alias-of-an-alias is a second hop -> conservative kill, never a FACT). An
-# ``_HTTP_SESSION`` var is bound to a RESOLVED HTTP session/client constructor (tier c). The three statuses
-# are DISJOINT: a session var is never treated as tainted, and a taint var is never treated as a session.
-_TAINT_SOURCE = "source"
-_TAINT_ALIAS = "alias"
+# The status a variable's MOST-RECENT straight-line binding confers for tier (c) session resolution. Absent
+# from the binding map means untracked (not a session). An ``_HTTP_SESSION`` var is bound to a RESOLVED HTTP
+# session/client constructor. (Wave-5.1 round-8 DOWNGRADE: the tier-(d) taint SOURCE/ALIAS statuses — and the
+# whole tier-(d) FACT machinery — were removed because direct-taint is now LEAD-only; the shared inverted
+# binding tracker below therefore tracks ONLY the session status the SOUND tier (c) needs.)
 _HTTP_SESSION = "session"
-_TAINT_STATUSES = frozenset({_TAINT_SOURCE, _TAINT_ALIAS})
-
-
-def _is_direct_source_expr(expr: Any) -> bool:
-    """True iff ``expr`` is STRUCTURALLY a DIRECT, unconditional taint-SOURCE access — the value IS a source,
-    not merely a conditional subtree that happens to contain one. Recognises the same vocabulary as before
-    (``request.<args|form|values|...>`` incl. a ``.get(...)`` on it, ``input()/getenv()/get_json()``,
-    ``sys.argv``, ``os.environ``) but NEVER descends into ``IfExp`` / ``BoolOp`` / call arguments, so a value
-    that only conditionally derives from a source is not called a source (soundness over recall)."""
-    if isinstance(expr, ast.Call):
-        if _attr_or_name(expr.func) in _TAINT_SOURCE_FNS:
-            return True                                   # input(...) / getenv(...) / get_json(...)
-        # a method call ON a source object: request.args.get('c') / request.form.getlist('x').
-        return isinstance(expr.func, ast.Attribute) and _is_direct_source_expr(expr.func.value)
-    if isinstance(expr, ast.Subscript):
-        return _is_direct_source_expr(expr.value)         # request.args['c'] / os.environ['X'] / sys.argv[1]
-    if isinstance(expr, ast.Attribute):
-        base = _attr_or_name(expr.value).lower()
-        if expr.attr in _TAINT_SOURCE_ATTRS and isinstance(expr.value, (ast.Name, ast.Attribute)) \
-                and base in _TAINT_SOURCE_BASES:
-            return True                                   # request.args / request.form / ...
-        if expr.attr == "argv" and base == "sys":
-            return True
-        if expr.attr == "environ" and base == "os":
-            return True
-    return False
-
-
-def _expr_is_tainted(expr: Any, bindings: "dict[str, str]") -> bool:
-    """True iff ``expr``'s value is DEFINITELY tainted given the current straight-line binding map: a variable
-    whose binding is a taint SOURCE/ALIAS (a SESSION binding is NOT taint), a direct source access, or a
-    ``BinOp`` / f-string that incorporates a tainted operand (both operands always flow into the result, so
-    this stays sound). An ``IfExp`` / ``BoolOp`` / other-call value is only conditionally tainted, so it is
-    NOT called tainted (conservative — no FACT)."""
-    if isinstance(expr, ast.Name):
-        return bindings.get(expr.id) in _TAINT_STATUSES
-    if _is_direct_source_expr(expr):
-        return True
-    if isinstance(expr, ast.BinOp):
-        return _expr_is_tainted(expr.left, bindings) or _expr_is_tainted(expr.right, bindings)
-    if isinstance(expr, ast.JoinedStr):
-        return any(_expr_is_tainted(v.value, bindings)
-                   for v in expr.values if isinstance(v, ast.FormattedValue))
-    return False
-
-
-def _has_sanitizer(fn: ast.AST) -> bool:
-    for node in ast.walk(fn):
-        if isinstance(node, ast.Call) and _attr_or_name(node.func) in _SANITIZER_FNS:
-            return True
-    return False
-
-
-def _shell_true(call: ast.Call) -> bool:
-    return any(kw.arg == "shell" and isinstance(kw.value, ast.Constant) and kw.value.value is True
-               for kw in call.keywords)
-
-
-def _stmt_sink_calls(stmt: ast.stmt) -> "list[ast.Call]":
-    """The dangerous-SINK Call nodes at an UNCONDITIONAL position of a SIMPLE statement — the expression of an
-    ``Expr``, the value of a ``Return``, or the RHS of an ``Assign`` / ``AnnAssign`` (unwrapping ``await``).
-    A sink buried inside a conditional expression, a comprehension, or a compound statement is NOT returned
-    here — that flow is not straight-line and stays a LEAD (soundness over recall)."""
-    value: Any = None
-    if isinstance(stmt, ast.Expr):
-        value = stmt.value
-    elif isinstance(stmt, ast.Return):
-        value = stmt.value
-    elif isinstance(stmt, ast.Assign):
-        value = stmt.value
-    elif isinstance(stmt, ast.AnnAssign):
-        value = stmt.value
-    if isinstance(value, ast.Await):
-        value = value.value
-    if isinstance(value, ast.Call) and _attr_or_name(value.func) in _TAINT_SINK_FNS:
-        return [value]
-    return []
-
-
-def _sink_call_taint_detail(call: ast.Call, fn_name: str, tainted: "dict[str, str]") -> "str | None":
-    """If ``call`` is a command-injection-shaped sink whose argument is DEFINITELY tainted under the current
-    straight-line binding map, return the evidence detail; else ``None``. subprocess sinks require
-    ``shell=True`` to be command-injection-shaped."""
-    short = _attr_or_name(call.func)
-    if short in ("call", "run", "Popen", "check_output") and not _shell_true(call):
-        return None
-    for arg in call.args:
-        if _expr_is_tainted(arg, tainted):
-            return (f"a taint source reaches the dangerous sink `{short}(...)` in function `{fn_name}` with "
-                    f"no sanitizer or reassignment between (direct straight-line intra-procedural flow)")
-    for kw in call.keywords:
-        if kw.arg and _expr_is_tainted(kw.value, tainted):
-            return (f"a taint source reaches the dangerous sink `{short}(...)` (keyword `{kw.arg}`) in "
-                    f"function `{fn_name}` with no sanitizer or reassignment between")
-    return None
 
 
 def _advance_binding(stmt: ast.stmt, bindings: "dict[str, str]",
                      http_ctx: "tuple[set[str], dict[str, tuple[str, str]]]") -> bool:
-    """Advance the SHARED straight-line binding map past ONE statement. This is the INVERTED core the whole
-    fix turns on: the map advances ONLY through an EXPLICIT CLOSED ALLOWLIST of FULLY-MODELED statement forms,
-    and the DEFAULT for anything else is to END the straight-line region. So no unmodeled form can ever leave
-    a stale binding that mints a false FACT.
+    """Advance the SHARED straight-line binding map past ONE statement, for tier (c) session-variable
+    resolution. This is the INVERTED core the sound tier (c) turns on: the map advances ONLY through an
+    EXPLICIT CLOSED ALLOWLIST of FULLY-MODELED statement forms, and the DEFAULT for anything else is to END the
+    straight-line region. So no unmodeled form can ever leave a stale session binding that mints a false FACT.
 
-    The ONE allowlisted form is a simple ``<Name> = <modeled-expr>`` assignment (a single ``Name`` target)
-    whose RHS the tracker FULLY understands:
+    The allowlisted forms are a simple ``<Name> = <modeled-expr>`` assignment (a single ``Name`` target) whose
+    RHS the tracker FULLY understands:
 
-      * a bare ``Name`` — a copy of another variable: ALIAS a current SOURCE (one hop), else KILL the target
-        (a copy of a non-source / second-hop alias / session value is not tainted and not a session);
-      * a literal ``Constant`` — plainly non-tainted, non-session: KILL the target;
-      * a direct taint SOURCE (``request.args[...]`` / ``input()`` / ``argv`` / ``environ`` / …): SOURCE;
-      * a ``BinOp`` / f-string that provably incorporates a tainted operand: SOURCE;
-      * a RESOLVED HTTP session/client constructor (``requests.Session()``): SESSION (tier c).
+      * a RESOLVED HTTP session/client constructor (``requests.Session()``): SESSION (tier c);
+      * a bare ``Name`` (a copy of another variable) or a literal ``Constant``: KILL the target — plainly not a
+        session, so its binding is dropped while the region continues.
 
     For LITERALLY ANY OTHER statement form — a walrus / ``NamedExpr`` anywhere, ``Import`` / ``ImportFrom``,
     ``AugAssign``, an annotated / tuple / attribute / subscript assignment target, a ``for`` / ``with`` target,
     ``del``, a nested ``def`` / ``class``, ``global`` / ``nonlocal``, any compound / control-flow statement,
     or an assignment whose RHS the tracker does NOT fully model (a non-session call, a subscript / attribute
     read, an ``IfExp`` / ``BoolOp`` / comprehension, …) — return ``False`` to END the straight-line region.
-    From that point the caller treats every construct as a LEAD. Returns ``True`` iff the region continues."""
+    From that point the caller treats every construct as a LEAD. Returns ``True`` iff the region continues.
+
+    (Wave-5.1 round-8: tier (d) direct-taint is now LEAD-only, so the tracker no longer computes taint
+    SOURCE/ALIAS statuses — it tracks ONLY the session status the sound tier (c) needs.)"""
     if not (isinstance(stmt, ast.Assign) and len(stmt.targets) == 1
             and isinstance(stmt.targets[0], ast.Name)):
         return False                                             # any non-'simple Name = ...' form ends it
     name = stmt.targets[0].id
     value = stmt.value
-    if isinstance(value, ast.Name):                             # a bare-Name copy — fully understood
-        if bindings.get(value.id) == _TAINT_SOURCE:
-            bindings[name] = _TAINT_ALIAS                        # one alias hop off a source
-        else:
-            bindings.pop(name, None)                             # copy of a non-source/second-hop/session: KILL
-        return True
-    if isinstance(value, ast.Constant):                        # a literal — plainly non-tainted, non-session
-        bindings.pop(name, None)                                 # KILL
-        return True
-    if _is_direct_source_expr(value):                          # a direct taint source
-        bindings[name] = _TAINT_SOURCE
-        return True
-    if isinstance(value, (ast.BinOp, ast.JoinedStr)) and _expr_is_tainted(value, bindings):
-        bindings[name] = _TAINT_SOURCE                          # a BinOp/f-string over a tainted operand
-        return True
     if isinstance(value, ast.Call) and _is_session_ctor(value, http_ctx):
         bindings[name] = _HTTP_SESSION                          # a resolved HTTP session/client constructor
+        return True
+    if isinstance(value, (ast.Name, ast.Constant)):            # a bare-Name copy or a literal — fully understood
+        bindings.pop(name, None)                                 # plainly not a session: KILL, region continues
         return True
     return False                                                # an RHS the tracker does NOT fully model: END
 
 
 def _walk_straight_line(fn: "ast.FunctionDef | ast.AsyncFunctionDef",
                         http_ctx: "tuple[set[str], dict[str, tuple[str, str]]]"):
-    """The SHARED flow-sensitive straight-line walker, used by BOTH tier (d) direct-taint AND tier (c)
-    session-variable resolution. Yield ``(stmt, bindings)`` for each TOP-LEVEL statement of ``fn.body`` while
-    the straight-line assumption still holds, where ``bindings`` maps a variable to its CURRENT status
-    (``_TAINT_SOURCE`` / ``_TAINT_ALIAS`` / ``_HTTP_SESSION``) AS OF that statement (before it executes). The
-    map advances ONLY through ``_advance_binding``'s closed allowlist; the FIRST statement of any other form
-    ends the region (nothing further is yielded), so from that point every construct the caller checks is a
-    LEAD. The map is shared by reference — a caller must not mutate it."""
+    """The flow-sensitive straight-line walker for tier (c) session-variable resolution. Yield
+    ``(stmt, bindings)`` for each TOP-LEVEL statement of ``fn.body`` while the straight-line assumption still
+    holds, where ``bindings`` maps a variable to its CURRENT status (``_HTTP_SESSION``) AS OF that statement
+    (before it executes). The map advances ONLY through ``_advance_binding``'s closed allowlist; the FIRST
+    statement of any other form ends the region (nothing further is yielded), so from that point every construct
+    the caller checks is a LEAD. The map is shared by reference — a caller must not mutate it.
+
+    (Wave-5.1 round-8: this was shared with tier (d) direct-taint, which is now LEAD-only; the tracker tracks
+    only the session status the sound tier (c) needs.)"""
     bindings: dict[str, str] = {}
     for stmt in fn.body:
         yield stmt, bindings
@@ -3955,66 +3843,28 @@ def _walk_straight_line(fn: "ast.FunctionDef | ast.AsyncFunctionDef",
             return
 
 
-def _straight_line_taint(fn: "ast.FunctionDef | ast.AsyncFunctionDef",
-                         http_ctx: "tuple[set[str], dict[str, tuple[str, str]]]") -> "tuple[bool, str]":
-    """FLOW-SENSITIVE tier (d) for ONE function body via the SHARED straight-line tracker. Fire only on a sink
-    reached in STILL-straight-line code whose argument's CURRENT binding is a taint source (<=1 alias hop),
-    with no sanitizer (checked by the caller). A reassignment-kill (any modeled non-source RHS) removes the
-    taint; ANY unmodeled statement form ends the straight-line region, so every later sink is a LEAD.
-    Returns (True, detail) or (False, '')."""
-    for stmt, bindings in _walk_straight_line(fn, http_ctx):
-        for call in _stmt_sink_calls(stmt):
-            detail = _sink_call_taint_detail(call, fn.name, bindings)
-            if detail:
-                return True, detail
-    return False, ""
-
-
-def _direct_taint_hit(tree: ast.AST) -> "tuple[bool, str]":
-    """RE-DERIVE tier (d): a taint SOURCE reaches a dangerous SINK in ONE function via a DIRECT, straight-line,
-    unsanitized flow — the "Firm" tier. FLOW-SENSITIVE and conservative (soundness over recall): a later
-    reassignment to a non-tainted value KILLS the taint (no FACT), a sanitizer anywhere in the function
-    REFUSES (fail-closed to a LEAD), and ANY statement form the tracker does not fully model between a source
-    and a sink (a branch/loop/try/with, a walrus, an import that rebinds the name, an augmented / tuple /
-    attribute / subscript assignment, a for/with target, a del, a nested def, or an unmodeled RHS) ends the
-    straight-line region and downgrades to a LEAD rather than guessing. Single-hop variable aliasing is
-    followed; subprocess sinks require shell=True to be command-injection-shaped. Inter-procedural flows stay
-    a LEAD."""
-    http_ctx = _collect_http_imports(tree)
-    for fn in ast.walk(tree):
-        if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            continue
-        if _has_sanitizer(fn):
-            continue   # a sanitizer is present — cannot prove the flow is unsanitized (fail-closed to a lead)
-        fired, detail = _straight_line_taint(fn, http_ctx)
-        if fired:
-            return True, detail
-    return False, ""
-
-
 # Per-tier calibrated confidence (str -> float, so oracle_version canonicalises it deterministically — a
 # dict of FUNCTIONS would repr with process-specific addresses and hide the helper bodies from the version,
 # so the tier helpers are dispatched BY NAME inside the oracle instead, and each helper's source is captured
 # in the version's transitive closure).
 # Per-tier calibrated confidence for the FACT-capable tiers ONLY (``_FACT_RULE_IDS``). insecure-randomness-sink
-# is deliberately ABSENT: it is LEAD-only and hard-guarded to a non-firing LEAD before this map is ever indexed.
+# AND direct-taint are deliberately ABSENT: both are LEAD-only and hard-guarded to a non-firing LEAD before this
+# map is ever indexed.
 _STATIC_TIER_CONF: dict[str, float] = {
     "broken-crypto-invocation": 0.9,
     "insecure-flag-literal": 0.9,
-    "direct-taint": 0.85,
 }
 
 
 def _static_tier_hit(rule_id: str, tree: ast.AST) -> "tuple[bool, str]":
     """Dispatch a re-parsed AST to the tier helper for a FACT-capable ``rule_id`` (each helper referenced BY
-    NAME so its source is captured in ``oracle_version``'s transitive closure). insecure-randomness-sink has NO
-    branch here — it is LEAD-only and never reaches this dispatch (fail-closed in ``static_rule_oracle``)."""
+    NAME so its source is captured in ``oracle_version``'s transitive closure). insecure-randomness-sink and
+    direct-taint have NO branch here — both are LEAD-only and never reach this dispatch (fail-closed in
+    ``static_rule_oracle``)."""
     if rule_id == "broken-crypto-invocation":
         return _broken_crypto_hit(tree)
     if rule_id == "insecure-flag-literal":
         return _insecure_flag_hit(tree)
-    if rule_id == "direct-taint":
-        return _direct_taint_hit(tree)
     return False, ""
 
 
@@ -4025,24 +3875,26 @@ def static_rule_oracle(observed: Any) -> OracleSignal:
     ``weak_crypto_artifact_oracle`` re-derives a broken hash from a retained artifact. Each FACT is honestly
     scoped to the proven CODE PROPERTY, NEVER runtime exploitability.
 
-    Only the THREE FACT-capable tiers (``_FACT_RULE_IDS``: broken-crypto-invocation, insecure-flag-literal,
-    direct-taint) can ever mint a STATIC_RULE FACT. ``insecure-randomness-sink`` is a recognised DETECTION
-    POINTER but is LEAD-only (``_LEAD_ONLY_RULE_IDS``) and is FAIL-CLOSED here: it returns a non-firing LEAD for
-    ANY input, before any re-parse or tier dispatch, so it can NEVER become a FACT (a sound version needs
-    crypto-provenance dataflow — see docs/capability-matrix blocking_work for ``static_insecure_randomness``).
+    Only the TWO FACT-capable tiers (``_FACT_RULE_IDS``: broken-crypto-invocation, insecure-flag-literal) can
+    ever mint a STATIC_RULE FACT. ``insecure-randomness-sink`` AND ``direct-taint`` are recognised DETECTION
+    POINTERS but are LEAD-only (``_LEAD_ONLY_RULE_IDS``) and are FAIL-CLOSED here: each returns a non-firing LEAD
+    for ANY input, before any re-parse or tier dispatch, so neither can EVER become a FACT (a sound version of
+    insecure-randomness needs crypto-provenance dataflow; a sound version of direct-taint needs framework-aware,
+    provenance-resolved taint SOURCES — see docs/capability-matrix blocking_work for
+    ``static_insecure_randomness`` / ``static_taint``).
 
     ``observed`` is JSON-safe evidence::
 
-        {"rule_id": "broken-crypto-invocation" | "insecure-flag-literal" | "direct-taint"  (FACT-capable)
-                    | "insecure-randomness-sink"  (recognised but LEAD-only — never mints),
+        {"rule_id": "broken-crypto-invocation" | "insecure-flag-literal"  (FACT-capable)
+                    | "insecure-randomness-sink" | "direct-taint"  (recognised but LEAD-only — never mints),
          "source": "<the retained source region bytes>", "language": "python",
          "path": "<file>", "line": <int>}
 
     REFUSES (non-firing) — never asserts — when: the evidence is malformed, the rule_id is out of the closed
-    vocabulary, the rule_id is LEAD-only (insecure-randomness), the language is not Python, or the retained
-    source cannot be re-parsed (a tamper that removes the property no longer re-fires, so the retained proof is
-    rejected at re-verify). Pure + deterministic, so the same verdict re-verifies offline from the retained
-    context. Never raises."""
+    vocabulary, the rule_id is LEAD-only (insecure-randomness or direct-taint), the language is not Python, or
+    the retained source cannot be re-parsed (a tamper that removes the property no longer re-fires, so the
+    retained proof is rejected at re-verify). Pure + deterministic, so the same verdict re-verifies offline from
+    the retained context. Never raises."""
     if not isinstance(observed, Mapping):
         return OracleSignal(kind=OracleKind.STATIC_RULE, fired=False, confidence=0.0,
                             evidence="no static-rule evidence")
@@ -4060,18 +3912,29 @@ def static_rule_oracle(observed: Any) -> OracleSignal:
         return OracleSignal(kind=OracleKind.STATIC_RULE, fired=False, confidence=0.0,
                             evidence=f"rule_id {rule_id!r} is out of the closed static-rule vocabulary")
     if rule_id in _LEAD_ONLY_RULE_IDS:
-        # FAIL CLOSED: insecure-randomness is a recognised detection pointer but is NOT FACT-capable. A sound
-        # FACT needs crypto-provenance-resolved PRNG sourcing (exclude SystemRandom/secrets/os.urandom by
-        # RESOLUTION, not by name) + FLOW-SENSITIVE dataflow (the value reaching the sink is the PRNG value, not
-        # a later secure reassignment) + a RESOLVED secret-material sink — out of scope for this single-region
-        # offline re-parse. So for ANY input this rule_id returns a non-firing LEAD, BEFORE any parse or tier
-        # dispatch: it can never mint a STATIC_RULE FACT (live or offline). See docs/capability-matrix
-        # blocking_work for ``static_insecure_randomness``.
+        # FAIL CLOSED: a LEAD-only rule_id is a recognised detection pointer but is NOT FACT-capable. A sound
+        # FACT is out of scope for this single-region offline re-parse:
+        #   * insecure-randomness needs crypto-provenance-resolved PRNG sourcing (exclude SystemRandom/secrets/
+        #     os.urandom by RESOLUTION, not by name) + FLOW-SENSITIVE dataflow (the value reaching the sink is
+        #     the PRNG value, not a later secure reassignment) + a RESOLVED secret-material sink;
+        #   * direct-taint needs framework-aware, provenance-resolved taint SOURCE identification (a resolved
+        #     request/input OBJECT across many frameworks — NOT self./req. attributes or name-matched functions
+        #     like input/getenv/get_json with no receiver provenance) + a resolved sink set, on top of the
+        #     now-sound inverted straight-line flow tracker.
+        # So for ANY input a LEAD-only rule_id returns a non-firing LEAD, BEFORE any parse or tier dispatch: it
+        # can never mint a STATIC_RULE FACT (live or offline). See docs/capability-matrix blocking_work for
+        # ``static_insecure_randomness`` / ``static_taint``.
+        _lead_reason = (
+            "insecure randomness: a sound FACT needs crypto-provenance-resolved PRNG sourcing + "
+            "flow-sensitive dataflow + a resolved secret-material sink"
+            if rule_id == "insecure-randomness-sink"
+            else "direct taint: a sound FACT needs framework-aware, provenance-resolved taint SOURCES "
+                 "(a resolved request/input object, not self./req. attributes or name-matched functions) + "
+                 "a resolved sink set")
         return OracleSignal(
             kind=OracleKind.STATIC_RULE, fired=False, confidence=0.0,
-            evidence=(f"rule_id {rule_id!r} is a LEAD-only static-rule class (insecure randomness): a sound FACT "
-                      f"needs crypto-provenance-resolved PRNG sourcing + flow-sensitive dataflow + a resolved "
-                      f"secret-material sink, out of scope for the offline re-parse — REFUSE (never mint), a LEAD"),
+            evidence=(f"rule_id {rule_id!r} is a LEAD-only static-rule class ({_lead_reason}), out of scope for "
+                      f"the offline re-parse — REFUSE (never mint), a LEAD"),
             observed={"rule_id": rule_id, "reason": "lead_only_not_fact_capable"})
     if language not in ("python", "py"):
         # A sound offline re-parse is implemented for Python only; other languages REFUSE (a lead), never assert.

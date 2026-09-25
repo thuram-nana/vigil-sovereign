@@ -335,8 +335,13 @@ _STANDARDS: dict[str, ControlMapping] = {
     #     without Secure) + CWE-16 (configuration).
     "static_insecure_flag": _m("A05:2021", ("CWE-295", "CWE-614", "CWE-16"), pci=_MISCFG_PCI, soc2=_MISCFG_SOC2,
                                iso=_MISCFG_ISO, attack=()),
-    # (d) a DIRECT intra-procedural unsanitized source->sink flow in one function (the "Firm" tier) — A03
-    #     Injection; CWE-20 (improper input validation) + CWE-77 (command injection, the dominant sink shape).
+    # (d) a taint SOURCE reaching a dangerous sink in one function (command injection, the dominant sink shape) —
+    #     A03 Injection; CWE-20 (improper input validation) + CWE-77 (command injection). The class stays
+    #     REGISTERED (a recognised detection pointer, so a LEAD carries these controls), but it is LEAD-only: the
+    #     STATIC_RULE oracle is FAIL-CLOSED for direct-taint and NEVER mints a FACT (a sound FACT needs
+    #     framework-aware, provenance-resolved taint SOURCES — a resolved request/input object, not self./req.
+    #     attributes or name-matched functions — plus a resolved sink set; see docs/capability-matrix
+    #     blocking_work for `static_taint`).
     "static_taint": _m("A03:2021", ("CWE-20", "CWE-77"), pci=_SDLC_PCI, soc2=_SDLC_SOC2, iso=_SDLC_ISO,
                        attack=()),
     # ---- Sensitive-data / information exposure ----

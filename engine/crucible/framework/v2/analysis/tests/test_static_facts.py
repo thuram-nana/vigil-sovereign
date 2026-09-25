@@ -1,14 +1,16 @@
 """
 Wave-5.1 SAST bridge — the static-FACT oracle mints ONLY a proven code property, and re-verifies offline.
 
-Each FACT-capable tier (a broken-crypto invocation, an insecure-flag literal, a direct intra-procedural taint)
-is exercised with a PLANTED positive (the property genuinely holds → MINTS) and its SAFE TWIN (the correct
-primitive / an absent flag / a sanitized flow → must NOT mint). Tier (b) insecure-randomness is LEAD-only: the
-oracle is FAIL-CLOSED for it and never mints a FACT, for ANY input — an honest LEAD beats a false FACT, and a
-sound FACT would need crypto-provenance dataflow that a single-region re-parse cannot do. Soundness is the
-whole point: every twin that does not carry the property must fail to confirm, a tamper of the retained bytes
-must be rejected at re-verification, and a region the oracle cannot re-parse (or a non-Python region) must
-REFUSE rather than assert.
+Each FACT-capable tier (a broken-crypto invocation, an insecure-flag literal — the TWO FACT-capable tiers) is
+exercised with a PLANTED positive (the property genuinely holds → MINTS) and its SAFE TWIN (the correct
+primitive / an absent flag → must NOT mint). Tiers (b) insecure-randomness AND (d) direct-taint are LEAD-only:
+the oracle is FAIL-CLOSED for each and never mints a FACT, for ANY input — an honest LEAD beats a false FACT.
+A sound insecure-randomness FACT would need crypto-provenance dataflow; a sound direct-taint FACT would need
+framework-aware, provenance-resolved taint SOURCES (a resolved request/input object, not self./req. attributes
+or name-matched functions) plus a resolved sink set — neither derivable from a single-region re-parse.
+Soundness is the whole point: every twin that does not carry the property must fail to confirm, a tamper of the
+retained bytes must be rejected at re-verification, and a region the oracle cannot re-parse (or a non-Python
+region) must REFUSE rather than assert.
 """
 
 from __future__ import annotations
@@ -27,7 +29,7 @@ from ...verify import oracles
 from ...verify.reverify import reverify_finding
 
 # --------------------------------------------------------------------------------------------
-# PLANTED (mints) / SAFE TWIN (must not mint) corpus — one pair per sound tier.
+# PLANTED (mints) / SAFE TWIN (must not mint) corpus — one pair per SOUND (FACT-capable) tier.
 # --------------------------------------------------------------------------------------------
 
 # (a) broken-crypto invocation
@@ -59,15 +61,34 @@ _B_FORMER_POSITIVES = [
 _C_PLANTED = "import requests\ndef fetch(u):\n    return requests.get(u, verify=False)\n"
 _C_SAFE = "import requests\ndef fetch(u):\n    return requests.get(u)\n"   # flag ABSENT -> default-dependent -> REFUSE
 
-# (d) direct intra-procedural unsanitized taint
-_D_PLANTED = "import os\ndef run():\n    cmd = request.args.get('c')\n    os.system(cmd)\n"
-_D_SAFE = "import os, shlex\ndef run():\n    cmd = request.args.get('c')\n    os.system(shlex.quote(cmd))\n"
+# (d) direct intra-procedural taint is LEAD-only (Wave-5.1 round-8 DOWNGRADE). The STATIC_RULE oracle is
+# FAIL-CLOSED for direct-taint: it NEVER mints a FACT, for ANY input, live or offline. The taint SOURCE
+# identification was unsound — self.<attr>/req.<attr> were treated as sources (`cmd = self.params;
+# subprocess.run(cmd, shell=True)` minted a false CWE-77 FACT on benign code), and input/getenv/get_json were
+# matched by NAME with no receiver provenance and no local-shadow check. A sound FACT needs framework-aware,
+# provenance-resolved request/input identification across many frameworks, out of scope for a single-region
+# re-parse. So tier (d) is NOT in `_TIERS` (which drives the "planted MINTS" assertion). Every shape below —
+# including the shapes that USED to mint and the red-pen PoCs — is now a LEAD, asserted in
+# `test_direct_taint_is_lead_only_and_never_mints`.
+_D_FORMER_POSITIVES = [
+    # the red-pen PoCs the downgrade is FOR — benign/unsound SOURCE shapes that minted a durable false FACT.
+    # self.<attr> treated as a source (a plain instance attribute, not attacker-controlled input).
+    "import subprocess\nclass C:\n    def run(self):\n        cmd = self.params\n        subprocess.run(cmd, shell=True)\n",
+    # req.<attr> treated as a source with no framework/provenance resolution (`req` is just a parameter name).
+    'import os\ndef run(req):\n    cmd = req.values["c"]\n    os.system(cmd)\n',
+    # get_json matched by NAME with no receiver provenance (any local get_json() would match).
+    'import os\ndef run():\n    cmd = get_json()["c"]\n    os.system(cmd)\n',
+    # the shapes that USED to mint (a genuine source->sink family) — now LEADs, since the SOURCE side is unsound.
+    'import os\ndef run():\n    os.system(request.args["c"])\n',
+    'import os\ndef run():\n    cmd = request.args["c"]\n    os.system(cmd)\n',
+    'import os\ndef run():\n    a = request.args["c"]\n    b = a\n    os.system(b)\n',
+    'import os\ndef run():\n    cmd = "default"\n    cmd = request.args["c"]\n    os.system(cmd)\n',
+]
 
-# Only the THREE FACT-capable tiers drive the "planted MINTS" assertion; tier (b) is LEAD-only (above).
+# Only the TWO FACT-capable tiers drive the "planted MINTS" assertion; tiers (b) and (d) are LEAD-only (above).
 _TIERS = [
     ("broken-crypto-invocation", "static_broken_crypto", _A_PLANTED, _A_SAFE),
     ("insecure-flag-literal", "static_insecure_flag", _C_PLANTED, _C_SAFE),
-    ("direct-taint", "static_taint", _D_PLANTED, _D_SAFE),
 ]
 
 # --------------------------------------------------------------------------------------------
@@ -116,22 +137,18 @@ _NEG_CONTROLS = [
     ("insecure-flag-literal", "import chartlib\ndef draw(chart):\n    return chart.render(verify=False)\n"),
     # (c) secure=False on a NON-security callee (a UI widget builder) — not a cookie / request.
     ("insecure-flag-literal", "import ui\ndef draw(widget):\n    return widget.build(secure=False)\n"),
-    # (d) FLOW-SENSITIVITY — a REASSIGNMENT KILL: the tainted binding is overwritten by a constant BEFORE the
-    # sink, so the value AT the sink is the constant. A flow-INSENSITIVE rule mints a durable FALSE FACT here
-    # ("a taint source reaches the sink" is false); the flow-sensitive rule stays a LEAD. (red-pen HIGH)
+    # (d) direct-taint is LEAD-only: a REASSIGNMENT KILL where the value AT the sink is a constant — a
+    # flow-INSENSITIVE rule would mint a durable FALSE FACT; direct-taint never mints (fail-closed LEAD).
     ("direct-taint", 'import os\ndef run():\n    cmd = request.args["c"]\n    cmd = "ls -la"\n    os.system(cmd)\n'),
-    # (d) reassignment to a non-tainted CALL result (not a constant) also kills — the value at the sink is not
-    # provably the source, so a LEAD.
+    # (d) reassignment to a non-tainted CALL result (not a constant) — the value at the sink is not the source.
     ("direct-taint", 'import os\ndef run():\n    cmd = request.args["c"]\n    cmd = safe_default()\n    os.system(cmd)\n'),
-    # (d) NON-STRAIGHT-LINE — the source binding is inside an `if` branch: a branch could alter the binding, so
-    # we do NOT guess. Conservative LEAD.
+    # (d) NON-STRAIGHT-LINE — the source binding is inside an `if` branch.
     ("direct-taint", 'import os\ndef run():\n    if flag:\n        cmd = request.args["c"]\n    os.system(cmd)\n'),
-    # (d) NON-STRAIGHT-LINE — the source binding is inside a loop. Conservative LEAD.
+    # (d) NON-STRAIGHT-LINE — the source binding is inside a loop.
     ("direct-taint", 'import os\ndef run():\n    for x in xs:\n        cmd = request.args["c"]\n    os.system(cmd)\n'),
-    # (d) SANITIZED flow — a sanitizer between source and sink; fail-closed to a LEAD.
+    # (d) SANITIZED flow — a sanitizer between source and sink.
     ("direct-taint", "import os, shlex\ndef run():\n    cmd = request.args.get('c')\n    os.system(shlex.quote(cmd))\n"),
-    # (d) ALIASING BEYOND ONE HOP — a=source; b=a; c=b; sink(c). Only single-hop aliasing is followed; a
-    # second hop is not proven tainted => conservative LEAD.
+    # (d) ALIASING BEYOND ONE HOP — a=source; b=a; c=b; sink(c).
     ("direct-taint", 'import os\ndef run():\n    a = request.args["c"]\n    b = a\n    c = b\n    os.system(c)\n'),
     # (a) NOISE CARVE-OUT — an EXPLICIT `usedforsecurity=False` is Python's opt-out declaring this md5 is NOT
     # for security (a checksum). No FACT; a genuine md5 WITHOUT the opt-out still fires (see _EXTRA_POSITIVES).
@@ -143,21 +160,21 @@ _NEG_CONTROLS = [
 
 def test_closed_vocabulary_agrees_with_the_oracle() -> None:
     """The bridge's closed rule-id set is the SAME as the oracle's own — they can never drift. All four rule
-    ids are RECOGNISED (a detection pointer at least); only the three in `_FACT_RULE_IDS` are FACT-capable,
-    and insecure-randomness is LEAD-only."""
+    ids are RECOGNISED (a detection pointer at least); only the two in `_FACT_RULE_IDS` are FACT-capable, and
+    insecure-randomness AND direct-taint are LEAD-only."""
     assert STATIC_RULE_IDS == oracles._STATIC_RULE_IDS
     assert STATIC_RULE_IDS == {
         "broken-crypto-invocation", "insecure-randomness-sink",
         "insecure-flag-literal", "direct-taint",
     }
-    # The FACT/LEAD split: insecure-randomness is recognised but never FACT-capable.
-    assert oracles._LEAD_ONLY_RULE_IDS == {"insecure-randomness-sink"}
+    # The FACT/LEAD split: insecure-randomness AND direct-taint are recognised but never FACT-capable.
+    assert oracles._LEAD_ONLY_RULE_IDS == {"insecure-randomness-sink", "direct-taint"}
     assert oracles._FACT_RULE_IDS == {
-        "broken-crypto-invocation", "insecure-flag-literal", "direct-taint",
+        "broken-crypto-invocation", "insecure-flag-literal",
     }
     assert oracles._FACT_RULE_IDS.isdisjoint(oracles._LEAD_ONLY_RULE_IDS)
     assert oracles._FACT_RULE_IDS | oracles._LEAD_ONLY_RULE_IDS == oracles._STATIC_RULE_IDS
-    # the confidence map is keyed by FACT-capable tiers only — insecure-randomness is deliberately absent.
+    # the confidence map is keyed by FACT-capable tiers only — insecure-randomness and direct-taint are absent.
     assert set(oracles._STATIC_TIER_CONF) == oracles._FACT_RULE_IDS
 
 
@@ -241,7 +258,72 @@ def test_insecure_randomness_oracle_is_fail_closed_for_any_input() -> None:
     assert "insecure-randomness-sink" not in oracles._STATIC_TIER_CONF
 
 
-# Extra GENUINE positives (beyond the one-per-tier corpus) — the semantic fix must not lose real recall.
+# --------------------------------------------------------------------------------------------
+# Tier (d) direct-taint is LEAD-only (Wave-5.1 round-8 DOWNGRADE): the STATIC_RULE oracle is FAIL-CLOSED for
+# direct-taint and NEVER mints a FACT, for ANY input, live or offline. The taint SOURCE identification was
+# unsound — self.<attr>/req.<attr> treated as sources, and input/getenv/get_json matched by NAME with no
+# receiver provenance and no local-shadow check — so it minted durable false FACTs on benign code. A sound FACT
+# needs framework-aware, provenance-resolved request/input SOURCES (a resolved request/input object) plus a
+# resolved sink set, on top of the now-sound inverted flow tracker; that is out of scope for a single-region
+# re-parse. An honest LEAD beats a false FACT.
+# --------------------------------------------------------------------------------------------
+
+@pytest.mark.parametrize("src", _D_FORMER_POSITIVES)
+def test_direct_taint_is_lead_only_and_never_mints(src) -> None:
+    """Every direct-taint shape — the red-pen PoCs (self.params / req.values / get_json) AND the shapes that
+    USED to mint (a genuine source->sink and its variable/alias/reassignment family) — is now a LEAD, never a
+    FACT, and cannot be serialised into a certificate."""
+    lead = confirm_code_region("app/mod.py", 3, src, "direct-taint")
+    assert not lead.confirmed, "direct-taint must NOT mint — it is LEAD-only (fail-closed)"
+    assert lead.bug_class == "static_taint", "the class stays registered (a detection pointer)"
+    with pytest.raises(ValueError):
+        static_fact_finding(lead)
+
+
+def test_direct_taint_oracle_is_fail_closed_for_any_input() -> None:
+    """The fail-closed GUARANTEE at the oracle boundary: `static_rule_oracle` returns a NON-firing signal for
+    the direct-taint rule_id on EVERY input — the red-pen unsound-SOURCE PoCs, a genuine source->sink, an
+    unparseable/empty/non-Python region, and a malformed observation. No input can make it assert a FACT."""
+    firing_shaped = [
+        # self.<attr> treated as a source (the red-pen false CWE-77 FACT).
+        {"rule_id": "direct-taint",
+         "source": "import subprocess\nclass C:\n    def run(self):\n        cmd = self.params\n        subprocess.run(cmd, shell=True)\n",
+         "language": "python", "path": "a.py", "line": 1},
+        # req.<attr> with no framework/provenance resolution.
+        {"rule_id": "direct-taint",
+         "source": 'import os\ndef run(req):\n    cmd = req.values["c"]\n    os.system(cmd)\n',
+         "language": "python", "path": "a.py", "line": 1},
+        # get_json matched by NAME with no receiver provenance.
+        {"rule_id": "direct-taint",
+         "source": 'import os\ndef run():\n    cmd = get_json()["c"]\n    os.system(cmd)\n',
+         "language": "python", "path": "a.py", "line": 1},
+        # a genuine source->sink (still LEAD-only — the SOURCE side is unsound across frameworks).
+        {"rule_id": "direct-taint",
+         "source": 'import os\ndef run():\n    os.system(request.args["c"])\n',
+         "language": "python", "path": "a.py", "line": 1},
+    ]
+    edge = [
+        {"rule_id": "direct-taint", "source": "def (:: not python", "language": "python"},
+        {"rule_id": "direct-taint", "source": "", "language": "python"},
+        {"rule_id": "direct-taint", "source": "system(req)", "language": "javascript"},
+        {"rule_id": "direct-taint", "source": "x = 1\n", "language": "python"},
+        {"rule_id": "direct-taint"},   # no source at all
+        "not even a mapping",
+    ]
+    for observed in firing_shaped + edge:
+        sig = oracles.static_rule_oracle(observed)
+        assert sig.kind == oracles.OracleKind.STATIC_RULE
+        assert sig.fired is False, f"direct-taint fired for {observed!r} — it must be fail-closed"
+        assert sig.confidence == 0.0
+    # and the rule_id is registered but explicitly LEAD-only (never in the FACT-capable path).
+    assert "direct-taint" in oracles._STATIC_RULE_IDS
+    assert "direct-taint" in oracles._LEAD_ONLY_RULE_IDS
+    assert "direct-taint" not in oracles._FACT_RULE_IDS
+    assert "direct-taint" not in oracles._STATIC_TIER_CONF
+
+
+# Extra GENUINE positives (beyond the one-per-tier corpus) — the semantic fix must not lose real recall on the
+# FACT-capable tiers (a) and (c). Tiers (b) and (d) are LEAD-only and have NO genuine positive here any more.
 _EXTRA_POSITIVES = [
     # (a) a broken CIPHER resolved from Crypto.Cipher, constructed via .new.
     ("broken-crypto-invocation", "from Crypto.Cipher import DES\ndef e(k, d):\n    return DES.new(k, DES.MODE_ECB).encrypt(d)\n"),
@@ -250,19 +332,13 @@ _EXTRA_POSITIVES = [
     # (a) the cryptography library's modes.ECB() constructed into a Cipher(...).
     ("broken-crypto-invocation",
      "from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes\ndef c(k):\n    return Cipher(algorithms.AES(k), modes.ECB())\n"),
-    # NOTE: tier (b) insecure-randomness has NO genuine positive here any more — it is LEAD-only and never mints
-    # (see `test_insecure_randomness_is_lead_only_and_never_mints`).
+    # NOTE: tiers (b) insecure-randomness and (d) direct-taint have NO genuine positive here any more — both are
+    # LEAD-only and never mint (see `test_insecure_randomness_is_lead_only_and_never_mints` and
+    # `test_direct_taint_is_lead_only_and_never_mints`).
     # (c) verify=False on a requests Session (base-var resolved).
     ("insecure-flag-literal", "import requests\ndef f(u):\n    s = requests.Session()\n    return s.post(u, verify=False)\n"),
     # (c) TLS verification disabled via ssl.wrap_socket(cert_reqs=ssl.CERT_NONE).
     ("insecure-flag-literal", "import ssl, socket\ndef w(sock):\n    return ssl.wrap_socket(sock, cert_reqs=ssl.CERT_NONE)\n"),
-    # (d) DIRECT source -> sink with NO variable at all: request.args['c'] passed straight into os.system. The
-    # genuine positive the flow-sensitive fix must keep minting.
-    ("direct-taint", 'import os\ndef run():\n    os.system(request.args["c"])\n'),
-    # (d) SINGLE-HOP alias: a = source; os.system(a). Still a direct straight-line flow => mints.
-    ("direct-taint", 'import os\ndef run():\n    a = request.args["c"]\n    b = a\n    os.system(b)\n'),
-    # (d) reassignment source->source (a benign var reused, rebound to a taint source) then sink => mints.
-    ("direct-taint", 'import os\ndef run():\n    cmd = "default"\n    cmd = request.args["c"]\n    os.system(cmd)\n'),
     # (a) a genuine md5 WITH usedforsecurity=True is still for security => still mints (the carve-out is False-only).
     ("broken-crypto-invocation", "import hashlib\ndef sign(x):\n    return hashlib.md5(x, usedforsecurity=True).hexdigest()\n"),
 ]
@@ -277,6 +353,7 @@ def test_extra_genuine_positives_still_mint(rule_id, src) -> None:
 
 def test_bug_class_derived_from_rule_id() -> None:
     assert bug_class_for_rule("broken-crypto-invocation") == "static_broken_crypto"
+    # direct-taint stays REGISTERED (a recognised detection pointer) though it is LEAD-only.
     assert bug_class_for_rule("direct-taint") == "static_taint"
     assert bug_class_for_rule("not-a-rule") == ""
 
@@ -331,15 +408,16 @@ def test_static_fact_finding_refuses_to_serialise_a_lead() -> None:
 
 
 # --------------------------------------------------------------------------------------------
-# Tier (d) FLOW-SENSITIVITY (red-pen HIGH). The direct-taint tier is now flow-sensitive on reassignment
-# kills: a taint binding overwritten by a non-tainted value before the sink KILLS the taint (the value AT the
-# sink is the constant), so it must NOT mint. A genuine straight-line source->sink still mints and re-verifies.
+# Tier (d) direct-taint negative controls RETAINED after the round-8 LEAD-only downgrade. These benign shapes
+# — a reassignment kill (the value AT the sink is a constant) and a non-straight-line source binding — were the
+# flow-sensitivity red-pen cases when tier (d) still minted; direct-taint is now fail-closed LEAD-only, so they
+# (like every direct-taint input) must NOT mint. Kept as belt-and-braces that no benign direct-taint shape ever
+# becomes a durable false FACT.
 # --------------------------------------------------------------------------------------------
 
 def test_reassignment_kill_is_a_lead_not_a_durable_false_fact() -> None:
-    """`cmd = request.args["c"]; cmd = "ls -la"; os.system(cmd)` — the value at the sink is a CONSTANT, so the
-    evidence claim 'a taint source reaches the sink' is FALSE. It must stay a LEAD (never a signed FACT that
-    would re-verify offline on benign code)."""
+    """`cmd = request.args["c"]; cmd = "ls -la"; os.system(cmd)` — the value at the sink is a CONSTANT. It must
+    stay a LEAD (never a signed FACT that would re-verify offline on benign code)."""
     src = 'import os\ndef run():\n    cmd = request.args["c"]\n    cmd = "ls -la"\n    os.system(cmd)\n'
     lead = confirm_code_region("app/mod.py", 3, src, "direct-taint")
     assert not lead.confirmed, "a reassignment-killed flow must NOT mint a FACT"
@@ -348,27 +426,13 @@ def test_reassignment_kill_is_a_lead_not_a_durable_false_fact() -> None:
 
 
 def test_non_straight_line_source_to_sink_is_conservative_lead() -> None:
-    """A source bound inside a branch / loop is NOT straight-line: the binding could be altered, so the oracle
-    does NOT guess — it stays a LEAD (soundness over recall)."""
+    """A source bound inside a branch / loop must stay a LEAD."""
     for src in (
         'import os\ndef run():\n    if flag:\n        cmd = request.args["c"]\n    os.system(cmd)\n',
         'import os\ndef run():\n    for x in xs:\n        cmd = request.args["c"]\n    os.system(cmd)\n',
     ):
         lead = confirm_code_region("app/mod.py", 3, src, "direct-taint")
         assert not lead.confirmed, "a non-straight-line source->sink must stay a LEAD"
-
-
-def test_genuine_direct_taint_still_mints_and_reverifies() -> None:
-    """The genuine positive the fix must KEEP: a direct source -> sink with no reassignment/sanitizer mints a
-    FACT and re-verifies OFFLINE over the retained bytes."""
-    src = 'import os\ndef run():\n    os.system(request.args["c"])\n'
-    fact = confirm_code_region("app/mod.py", 3, src, "direct-taint")
-    assert fact.confirmed and fact.confirmed_by == "static_rule"
-    finding = static_fact_finding(fact)
-    cert = build_certificate(finding, engagement_slug="wave5-test")
-    assert cert.bug_class == "static_taint"
-    r = reverify_finding(finding)
-    assert r.ok and r.reproduced
 
 
 # --------------------------------------------------------------------------------------------
@@ -390,59 +454,17 @@ def test_usedforsecurity_false_is_a_lead_but_genuine_md5_still_mints() -> None:
 
 
 # --------------------------------------------------------------------------------------------
-# Tier (d) + tier (c) FLOW-INSENSITIVITY on KILL/REBIND forms (red-pen BLOCK, rounds 5->6->7). The straight-
-# line binding tracker used by BOTH tiers was INVERTED: it advances the binding map ONLY through a closed
-# allowlist of fully-modeled statement forms (a simple `Name = <modeled-expr>` assignment whose RHS is a taint
-# source / a single-hop alias / a resolved Session() ctor / a plainly-non-tainted literal that KILLS the
-# binding). ANY other statement form — a walrus, an import / from-import that rebinds the name, an augmented /
-# tuple / attribute / subscript assignment target, a for / with target, a del, a nested def, or an assignment
-# whose RHS is not fully modeled — ENDS the straight-line region, so from that point every construct is a LEAD.
-# Because the DEFAULT for anything unmodeled is 'bail to LEAD', no unmodeled form can leave a stale binding
-# that mints a false FACT on benign code. Each negative control below is a benign snippet where the value AT
-# the sink is provably NOT the taint source / NOT a session — it MUST be a LEAD, never a durable false FACT.
+# Tier (c) FLOW-INSENSITIVITY on KILL/REBIND forms (red-pen BLOCK, rounds 5->6->7). The straight-line binding
+# tracker used by tier (c) was INVERTED: it advances the binding map ONLY through a closed allowlist of
+# fully-modeled statement forms (a simple `Name = <resolved Session() ctor>` that binds a SESSION, or a
+# plainly-non-session literal / bare-Name copy that KILLS the binding). ANY other statement form — a walrus, an
+# import / from-import that rebinds the name, an augmented / tuple / attribute / subscript assignment target, a
+# for / with target, a del, a nested def, or an assignment whose RHS is not fully modeled — ENDS the straight-
+# line region, so from that point every construct is a LEAD. Because the DEFAULT for anything unmodeled is
+# 'bail to LEAD', no unmodeled form can leave a stale session binding that mints a false FACT on benign code.
+# (Round-8: this SOUND inverted tracker is RETAINED; only the tier-(d) taint machinery layered on it was
+# removed when direct-taint became LEAD-only. This test proves tier (c) still uses the tracker soundly.)
 # --------------------------------------------------------------------------------------------
-
-# (d) direct-taint: a taint SOURCE is bound, then the tracked name is KILLED/REBOUND by an UNMODELED form
-# before the sink. The value at the sink is provably a constant / module / loop-or-context value / deleted /
-# unpacked literal — the evidence claim "a taint source reaches the sink" would be FALSE, so each is a LEAD.
-_D_FLOW_INSENSITIVITY_LEADS = [
-    # walrus / NamedExpr rebinds `cmd` to a constant (round-6 missed NamedExpr entirely -> a durable false FACT).
-    ("walrus-kill",
-     'import os\ndef run():\n    cmd = request.args["c"]\n    (cmd := "safe")\n    os.system(cmd)\n'),
-    # `import cmd` rebinds `cmd` to a module (round-6 treated Import as flow-neutral -> a durable false FACT).
-    ("import-rebind-kill",
-     'import os\ndef run():\n    cmd = request.args["c"]\n    import cmd\n    os.system(cmd)\n'),
-    # `from os import getcwd as cmd` rebinds `cmd` to a function (round-6 treated ImportFrom as flow-neutral).
-    ("from-import-rebind-kill",
-     'import os\ndef run():\n    cmd = request.args["c"]\n    from os import getcwd as cmd\n    os.system(cmd)\n'),
-    # AugAssign is not a modeled form -> the tracker refuses to guess the concatenation is still tainted (LEAD).
-    ("aug-assign",
-     'import os\ndef run():\n    cmd = request.args["c"]\n    cmd += "_suffix"\n    os.system(cmd)\n'),
-    # a `for` target rebinds `cmd` to the loop variable (a non-straight-line, non-modeled binding).
-    ("for-target-rebind",
-     'import os\ndef run():\n    cmd = request.args["c"]\n    for cmd in items:\n        pass\n    os.system(cmd)\n'),
-    # a `with ... as` target rebinds `cmd` to the context manager value.
-    ("with-target-rebind",
-     'import os\ndef run():\n    cmd = request.args["c"]\n    with open("f") as cmd:\n        pass\n    os.system(cmd)\n'),
-    # `del cmd` removes the binding entirely; using it after is a NameError at runtime, never the source.
-    ("del-then-use",
-     'import os\ndef run():\n    cmd = request.args["c"]\n    del cmd\n    os.system(cmd)\n'),
-    # a tuple-unpack target rebinds `cmd` to a literal (a multi-target assignment, not the modeled Name = ...).
-    ("tuple-unpack-rebind",
-     'import os\ndef run():\n    cmd = request.args["c"]\n    cmd, other = "safe", "x"\n    os.system(cmd)\n'),
-]
-
-
-@pytest.mark.parametrize("label,src", _D_FLOW_INSENSITIVITY_LEADS)
-def test_tier_d_kill_and_rebind_forms_are_leads_not_durable_false_facts(label, src) -> None:
-    """Each snippet binds a taint source then KILLS/REBINDS the tracked name via a form the tracker does not
-    model. The value at the sink is provably NOT the source, so it MUST stay a LEAD (never a signed FACT that
-    would re-verify offline on benign code)."""
-    lead = confirm_code_region("app/mod.py", 3, src, "direct-taint")
-    assert not lead.confirmed, f"tier-d {label}: a killed/rebound taint must NOT mint a FACT"
-    with pytest.raises(ValueError):
-        static_fact_finding(lead)
-
 
 # (c) insecure-flag: a session VARIABLE resolved by the cross-statement binding tracker, then REASSIGNED to a
 # non-session before the flagged call. The value at the call is provably not a session, so it is a LEAD.
@@ -450,7 +472,7 @@ _C_SESSION_KILL_LEADS = [
     # `s` rebound to an int — the flow-INSENSITIVE round-6 collector minted a false FACT on this benign code.
     ("session-reassigned-to-int",
      "import requests\ndef f(u):\n    s = requests.Session()\n    s = 123\n    s.get(u, verify=False)\n"),
-    # `s` rebound by an import (the same class of miss the tier-d import-rebind control covers).
+    # `s` rebound by an import (the same class of miss the tier-d import-rebind control covered).
     ("session-import-rebind",
      "import requests\ndef f(u):\n    s = requests.Session()\n    import s\n    s.get(u, verify=False)\n"),
     # `s` rebound to a plainly-non-session literal string.
@@ -470,15 +492,11 @@ def test_tier_c_session_var_reassigned_to_non_session_is_a_lead(label, src) -> N
         static_fact_finding(lead)
 
 
-def test_flow_sensitive_fix_keeps_the_genuine_positives_minting() -> None:
-    """The inverted (soundness-first) tracker keeps every genuine positive the task requires minting: a direct
-    source->sink, a `cmd = source; sink(cmd)`, a single-hop alias (tier d); and a session-var
+def test_the_sound_tier_c_positives_still_mint() -> None:
+    """The inverted (soundness-first) tracker keeps every genuine tier-(c) positive minting: a session-var
     `requests.Session().get(verify=False)`, a call-site-direct `requests.get(verify=False)`, and
-    `ssl.wrap_socket(cert_reqs=CERT_NONE)` (tier c)."""
+    `ssl.wrap_socket(cert_reqs=CERT_NONE)`. (Tier (d) is LEAD-only after round-8 and has no minting positive.)"""
     positives = [
-        ("direct-taint", 'import os\ndef run():\n    os.system(request.args["c"])\n'),
-        ("direct-taint", 'import os\ndef run():\n    cmd = request.args["c"]\n    os.system(cmd)\n'),
-        ("direct-taint", 'import os\ndef run():\n    a = request.args["c"]\n    b = a\n    os.system(b)\n'),
         ("insecure-flag-literal",
          "import requests\ndef f(u):\n    s = requests.Session()\n    return s.get(u, verify=False)\n"),
         ("insecure-flag-literal", "import requests\ndef fetch(u):\n    return requests.get(u, verify=False)\n"),

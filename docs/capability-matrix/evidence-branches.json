@@ -1831,26 +1831,26 @@
     {
       "id": "static_taint.direct_intraprocedural_flow",
       "check": "static_rule_verify",
-      "evidence": "the STATIC_RULE oracle re-parsed the RETAINED source region (Python ast) and re-derived a DIRECT intra-procedural unsanitized taint flow — a taint SOURCE (request/input/argv/environ) reaches a dangerous SINK (os.system / subprocess shell=True / eval / exec / a string-built cursor.execute) in ONE function with NO sanitizer between — the 'Firm' tier, a re-verifiable CODE PROPERTY, never a claim of runtime exploitability.",
-      "fact_capable": true,
+      "evidence": "the STATIC_RULE oracle recognises this as a DETECTION POINTER only — direct-taint is LEAD-only and NEVER mints a FACT. A taint SOURCE (a request/input value) reaching a dangerous SINK (os.system / subprocess shell=True / eval / exec / a string-built cursor.execute) in one function is a real LEAD worth reporting, but a SOUND static FACT is out of scope for a single-region offline re-parse: the taint SOURCE identification is unsound. It treats self.<attr> / req.<attr> as sources (so `cmd = self.params; subprocess.run(cmd, shell=True)` mints a false CWE-77 FACT on benign code), and it matches input/getenv/get_json by NAME with no receiver provenance and no local-shadow check. Sound taint sources need framework-aware, provenance-resolved request/input identification across many frameworks — an open-ended problem beyond this single-region re-parse. Per claim-discipline (an honest LEAD beats a false FACT), the oracle is FAIL-CLOSED for this rule_id: static_rule_oracle returns a non-firing LEAD for ANY input, before any re-parse or tier dispatch, so no input can promote it to a FACT (live or offline).",
+      "fact_capable": false,
       "clean_capable": false,
       "preconditions": [
         "source_reparseable"
       ],
-      "limitation": "Bounded to a DIRECT (or single-hop-alias) source->sink flow within ONE function with NO sanitizer present; a sanitizer anywhere in the function REFUSES (fail-closed to a LEAD), and subprocess sinks require shell=True to be command-injection-shaped. FLOW-SENSITIVE via an INVERTED straight-line binding tracker: the tracker advances the binding map ONLY through a CLOSED ALLOWLIST of fully-modeled statement forms — a simple `Name = <modeled-expr>` assignment whose RHS is a taint source, a single-hop alias of a tracked var, or a plainly-non-tainted literal that KILLS the binding. LITERALLY ANY OTHER statement form between the source and the sink ENDS the straight-line region and makes every later sink a LEAD: a walrus/NamedExpr, an import or from-import that rebinds the name, an augmented / annotated / tuple / attribute / subscript assignment, a for/with target, a del, a nested def/class, global/nonlocal, any branch/loop/try/with, or an assignment whose RHS the tracker does not fully model. Because the DEFAULT for anything unmodeled is bail-to-LEAD, no unmodeled form can leave a stale binding that mints a false FACT (soundness over recall, never a guess). INTER-PROCEDURAL / possibly-sanitized / whole-program flows are NOT re-derived here and stay a LEAD — predicting runtime exploitability from static code is not this oracle's job. Python-only: a non-Python or unparseable region REFUSES. NOT CLEAN-capable: a non-firing cannot prove no tainted flow exists. Re-derives OFFLINE from the retained bytes; a tamper removing the flow no longer re-fires.",
+      "limitation": "LEAD-only: the STATIC_RULE oracle NEVER mints a FACT for direct-taint (fail-closed for ANY input, live and offline), so this branch can neither confirm nor exonerate. A sound FACT is not derivable from a single-region AST re-parse without framework-aware, provenance-resolved taint SOURCE identification — the removed heuristic treated self./req. attributes as sources and name-matched input/getenv/get_json with no receiver provenance, minting durable false FACTs on benign code. NOT FACT-capable and NOT CLEAN-capable: a non-firing proves nothing about whether a tainted source->sink flow exists in the program. The SOUND inverted straight-line binding tracker (round-7) is RETAINED and still powers the tier-(c) insecure-flag session-variable resolution; only the tier-(d) taint SOURCE/SINK machinery on top of it was removed. See blocking_work for the engineering that closes the gap.",
       "target_fact_capable": true,
       "target_clean_capable": false,
       "target_downgrade_rationale": "Proving the ABSENCE of a tainted source->sink flow (and that no path is exploitable) is a whole-program inter-procedural taint + reachability capability, not this single-function direct-flow static-rule's target, so clean-capability is deliberately not pursued on this branch.",
-      "oracle_version": "static_rule",
+      "blocking_work": "Build framework-aware, provenance-resolved taint SOURCES so the property can be re-derived SOUNDLY: (1) identify the taint SOURCE as a RESOLVED request/input OBJECT across the common frameworks (Flask/Django/FastAPI request objects, WSGI/ASGI environ, CLI argv, stdin) by import + binding provenance — NOT by treating self.<attr>/req.<attr> as sources and NOT by name-matching input/getenv/get_json without receiver provenance or a local-shadow check; (2) resolve the dangerous SINK to a real command/eval/query API by signature, not a short-name match; (3) reuse the now-sound inverted straight-line flow tracker (retained for tier c) to prove the source value actually reaches the sink unsanitized. Until this exists the class stays a LEAD; target_fact_capable remains true — this is a BUILD item, not an abandoned capability.",
+      "oracle_version": "",
       "control_requirements": [
         "retained_source_region",
         "vigil_owned_static_reparse",
-        "closed_rule_vocabulary",
-        "intraprocedural_sanitizer_check"
+        "closed_rule_vocabulary"
       ],
       "evidence_surface": "artifact",
       "implementation_refs": [
-        "engine/crucible/framework/v2/verify/oracles.py:_direct_taint_hit",
+        "engine/crucible/framework/v2/verify/oracles.py:_LEAD_ONLY_RULE_IDS",
         "engine/crucible/framework/v2/verify/oracles.py:static_rule_oracle",
         "engine/crucible/framework/v2/analysis/static_facts.py:confirm_code_region"
       ]

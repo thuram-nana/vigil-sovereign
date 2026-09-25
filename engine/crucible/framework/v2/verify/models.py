@@ -479,22 +479,23 @@ class OracleKind(str, enum.Enum):
     # (keyed on the `static_rule` ctx field NO benchmark/scan/engage finding carries), never via the frozen
     # unknown-class fallback (verifier._ALL_ORACLES stays EXACTLY 15), so `make gate` is byte-identical. The
     # rule_id vocabulary is CLOSED; each FACT is honestly scoped to a PROVEN CODE PROPERTY, never "exploitable
-    # at runtime". This kind mints under THREE FACT-capable tiers (all Python-`ast`-re-derived; a non-Python or
+    # at runtime". This kind mints under TWO FACT-capable tiers (both Python-`ast`-re-derived; a non-Python or
     # unparseable region REFUSES — never asserts): (a) `broken-crypto-invocation` — a broken/risky primitive is
     # CONSTRUCTED or CALLED here (md5/sha1/md4/md2 hash, DES/RC4/Blowfish cipher, or an ECB block mode) — the
     # claim is "a broken primitive is invoked here", not "exploitable"; (c) `insecure-flag-literal` — a security
     # flag is EXPLICITLY disabled as a LITERAL (`verify=False`, `secure=False`, `ssl.CERT_NONE`, …) — an ABSENT
-    # flag is default-dependent and REFUSES (a LEAD); (d) `direct-taint` (the "Firm" tier) — a taint SOURCE
-    # (request/input/argv/environ) reaches a dangerous SINK (os.system / subprocess(shell=True) / eval / exec / a
-    # string-built cursor.execute) in ONE function with NO sanitizer call between, proven over the re-parsed
-    # function AST. Tier (b) `insecure-randomness-sink` — a non-cryptographic PRNG value flowing into a security
-    # sink — is a RECOGNISED detection pointer but is LEAD-only (blocking_work): a sound FACT needs real
-    # crypto-provenance dataflow (provenance-resolved PRNG source + flow-sensitive dataflow + a resolved
-    # secret-material sink), which a single-region offline re-parse cannot re-derive, so it is FAIL-CLOSED to a
-    # LEAD for ANY input and NEVER mints a STATIC_RULE FACT (see docs/capability-matrix blocking_work for
-    # `static_insecure_randomness`). INTER-PROCEDURAL / possibly-sanitized / whole-program flows stay a LEAD
-    # (never a STATIC_RULE FACT) — predicting runtime exploitability from static code is deliberately NOT this
-    # oracle's job. A tamper (the retained bytes edited so the property no longer holds) is rejected at
+    # flag is default-dependent and REFUSES (a LEAD). Tiers (b) `insecure-randomness-sink` — a non-cryptographic
+    # PRNG value flowing into a security sink — and (d) `direct-taint` — a taint SOURCE reaching a dangerous SINK
+    # (os.system / subprocess(shell=True) / eval / exec / a string-built cursor.execute) in ONE function — are
+    # RECOGNISED detection pointers but are LEAD-only (blocking_work): a sound FACT for (b) needs crypto-provenance
+    # dataflow (provenance-resolved PRNG source + flow-sensitive dataflow + a resolved secret-material sink), and
+    # a sound FACT for (d) needs framework-aware, provenance-resolved taint SOURCE identification (a resolved
+    # request/input OBJECT, not self./req. attributes or name-matched functions like input/getenv/get_json) plus
+    # a resolved sink set — neither derivable from a single-region offline re-parse, so BOTH are FAIL-CLOSED to a
+    # LEAD for ANY input and NEVER mint a STATIC_RULE FACT (see docs/capability-matrix blocking_work for
+    # `static_insecure_randomness` / `static_taint`). INTER-PROCEDURAL / possibly-sanitized / whole-program flows
+    # stay a LEAD (never a STATIC_RULE FACT) — predicting runtime exploitability from static code is deliberately
+    # NOT this oracle's job. A tamper (the retained bytes edited so the property no longer holds) is rejected at
     # re-verification; if the retained bytes cannot be re-parsed, the oracle REFUSES.
     STATIC_RULE = "static_rule"
 

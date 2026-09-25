@@ -484,15 +484,16 @@ BUG_CLASS_ORACLES: dict[str, tuple[OracleKind, ...]] = {
     # EXACTLY 15) — and fires only when the ctx carries `static_rule`, which no benchmark/scan/engage finding
     # does. So appending these rows leaves the unknown-class fallback and `make gate` byte-identical. Each class
     # is honestly scoped to a PROVEN code property, never runtime exploitability:
-    # THREE tiers are FACT-capable (the oracle re-derives the property with provenance discipline):
+    # TWO tiers are FACT-capable (the oracle re-derives the property with provenance discipline):
     #   * static_broken_crypto — a broken/risky primitive (MD5/SHA1/DES/RC4/Blowfish/ECB) is INVOKED here;
     #   * static_insecure_flag — a security flag is EXPLICITLY disabled as a LITERAL (verify=False, secure=False,
-    #     cert_reqs=ssl.CERT_NONE); an ABSENT flag is default-dependent and stays a LEAD (the oracle REFUSES);
-    #   * static_taint — a DIRECT intra-procedural unsanitized source->sink flow in ONE function (the "Firm"
-    #     tier). INTER-PROCEDURAL / possibly-sanitized / whole-program flows stay a LEAD, never a STATIC_RULE FACT.
-    # static_insecure_randomness stays REGISTERED (a recognised detection pointer — this row routes it to the
-    # STATIC_RULE oracle), but it is LEAD-only: the oracle is FAIL-CLOSED for insecure-randomness and NEVER mints
-    # a FACT (a sound FACT needs crypto-provenance dataflow — see docs/capability-matrix blocking_work).
+    #     cert_reqs=ssl.CERT_NONE); an ABSENT flag is default-dependent and stays a LEAD (the oracle REFUSES).
+    # static_insecure_randomness AND static_taint stay REGISTERED (recognised detection pointers — these rows
+    # route them to the STATIC_RULE oracle), but BOTH are LEAD-only: the oracle is FAIL-CLOSED for them and NEVER
+    # mints a FACT. A sound static_insecure_randomness FACT needs crypto-provenance dataflow; a sound static_taint
+    # FACT needs framework-aware, provenance-resolved taint SOURCES (a resolved request/input object, not
+    # self./req. attributes or name-matched functions) plus a resolved sink set, on top of the now-sound inverted
+    # flow tracker — see docs/capability-matrix blocking_work for `static_insecure_randomness` / `static_taint`.
     "static_broken_crypto": (OracleKind.STATIC_RULE,),
     "static_insecure_randomness": (OracleKind.STATIC_RULE,),
     "static_insecure_flag": (OracleKind.STATIC_RULE,),
