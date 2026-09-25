@@ -233,6 +233,30 @@
       ]
     },
     {
+      "id": "achieved_state.endpoint_liveness",
+      "check": "endpoint_liveness_redrive",
+      "evidence": "VIGIL's OWN plain gated GET of the tool-proposed URL returned a served-resource status (2xx/3xx) AND a known-nonexistent sibling CONTROL under the same origin returned a genuine not-found (>= 400) — so the server distinguishes this URL from a nonexistent path (a live endpoint). The L7 analogue of the TCP tcp_handshake reachability FACT.",
+      "fact_capable": true,
+      "clean_capable": true,
+      "preconditions": [
+        "channel_established"
+      ],
+      "limitation": "Status-derived over VIGIL's OWN two gated GETs (target + known-nonexistent sibling control); independent of body decoding. FACT fires ONLY on a target 2xx/3xx corroborated by a control >= 400, so a soft-404 / blanket-200 / SPA server (which answers the random control 200) mints NO fact but a LEAD. A CLEAN is a channel-confirmed hard not-found (404/410) at the EXACT probed URL and is BOUNDED to that URL only — NEVER an enumeration-completeness claim that no other endpoint exists. A 401/403/405/5xx target is neither served nor absent under a plain GET, so it is INCONCLUSIVE, not a fact or a clean.",
+      "target_fact_capable": true,
+      "target_clean_capable": true,
+      "evidence_surface": "service_response",
+      "implementation_refs": [
+        "integration/vigil_integration/live/web_redrive.py:endpoint_liveness_redrive",
+        "integration/vigil_integration/live/external_tool.py:httpx_url_scan"
+      ],
+      "oracle_version": "achieved_state",
+      "control_requirements": [
+        "warden_active_recon_gate",
+        "vigil_owned_gated_probe",
+        "benign_twin_control"
+      ]
+    },
+    {
       "id": "service_reachability.tcp_handshake",
       "check": "capture_handshake",
       "evidence": "VIGIL's own completed TCP handshake against the proposed host/port",

@@ -59,7 +59,7 @@ _TYPED_BUILDER_TOOLS = frozenset({"ffuf", "httpx", "hydra", "nikto", "nmap", "nu
 # Duplicated (same reason as ``_TYPED_BUILDER_TOOLS``) from the framework-free SSOT
 # ``integration.live.oracle_families.SPEC_BUILDER_TOOLS``; a drift-guard test pins this equal to that source.
 _SPEC_BUILDER_DRIVEN_TOOLS = frozenset({"masscan", "naabu", "nmap", "rustscan", "sslscan",
-                                        "unicornscan", "zmap"})
+                                        "unicornscan", "zmap", "httpx", "ffuf"})
 
 # Globally-recognised tools NOT in the host roster and without a Strix skill doc (net-new curated metadata;
 # empty today — the curated host roster + the maintained skill playbooks already are the recognition list).

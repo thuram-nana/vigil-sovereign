@@ -339,6 +339,18 @@ class ProposedService:
 
 
 @dataclass(frozen=True)
+class ProposedURL:
+    """A URL a WEB-DISCOVERY tool (httpx/ffuf) PROPOSED. ``host`` is PINNED to the scope-authorised target
+    (never a host the tool printed — the scope-safety property the port-scanner parsers also have); ``port``
+    is parsed from the URL for the canonical Observation. The URL is only a LEAD — the FACT is minted solely
+    by VIGIL's OWN gated GET re-drive (live.web_redrive.endpoint_liveness_redrive), never the tool's row."""
+    url: str
+    host: str
+    port: int = 0
+    protocol: str = "tcp"
+
+
+@dataclass(frozen=True)
 class Redrive:
     """One RUNNER-OWNED oracle re-drive for a proposed (host, port): an independent, gated ``capture`` the
     runner performs itself + a ``context`` builder that turns the captured evidence into an oracle_context
@@ -363,6 +375,13 @@ class ToolSpec:
     name: str
     build_argv: Callable[[str], list[str]]
     propose: Callable[[ToolOutcome, str], list[ProposedService]]
+    # WEB-DISCOVERY specs (httpx/ffuf) set this INSTEAD of relying on the ProposedService/handshake path: it
+    # parses the tool output into PROPOSED URLS (host pinned to target), and ``run_external_tool`` re-drives
+    # each through the gated web LIVENESS re-drive (live.web_redrive.endpoint_liveness_redrive → the
+    # achieved_state.endpoint_liveness branch) instead of the TCP handshake. When set, ``propose`` is unused
+    # (a no-op stub) and the ProposedService/redrive fields are ignored — the two paths never mix. None (the
+    # default) ⇒ the existing ProposedService + handshake path, byte-for-byte unchanged for every caller.
+    propose_urls: "Callable[[ToolOutcome, str], list[ProposedURL]] | None" = None
     # The runner-owned re-drives to run for EACH proposed service. Empty ⇒ the runner uses the legacy
     # reachability re-drive (the injectable ``capture`` param + reachable_context + service_reachable), so
     # nmap and every existing caller are byte-for-byte unchanged. A spec that mints a non-reachability FACT
@@ -708,6 +727,104 @@ def nmap_service_scan(*, ports: str = "1-1024", extra_args: Sequence[str] = ()) 
     return ToolSpec("nmap", build, propose, version_argv=lambda: ["nmap", "--version"])
 
 
+# --- HexStrike W2: WEB-DISCOVERY ToolSpecs (httpx / ffuf) — the endpoint-LIVENESS FACT path -----------
+# These are WEB-DISCOVERY proposers: they propose URLs, and ``run_external_tool`` re-drives each through the
+# gated web LIVENESS re-drive (live.web_redrive.endpoint_liveness_redrive → the achieved_state.endpoint_liveness
+# branch), the L7 analogue of the SERVICE_REACHABILITY handshake. The tool's "found URL" bytes are only a LEAD;
+# the FACT is minted solely by VIGIL's OWN plain gated GET (target + a known-nonexistent sibling control). Each
+# parser PINS the host to the already-scope-authorised ``target`` (never a host the tool printed), and every
+# flag is built SERVER-SIDE so no model/brain-supplied flag reaches the tool.
+_URL_SCHEMES = ("http", "https")
+
+
+def _no_service_proposal(outcome: "ToolOutcome", target: str) -> "list[ProposedService]":
+    """A web-discovery spec proposes URLs (``propose_urls``), never ProposedServices — this stub keeps the
+    ToolSpec.propose contract total while the runner takes the ``propose_urls`` path."""
+    return []
+
+
+def _pin_url_host(raw_url: str, target: str) -> "ProposedURL | None":
+    """Turn a tool-proposed URL into a host-PINNED :class:`ProposedURL`, or ``None`` to DROP it.
+
+    Keeps scheme/port/path/query but only when the URL's host equals the scope-authorised ``target`` (the tool
+    was run against it): a redirect-followed / resolved-IP host that differs is DROPPED — never re-pointed onto
+    the target (the scope-safety property the port-scanner parsers also have). A non-http(s) URL is dropped.
+    The gated send re-authorises every URL anyway (defence in depth), so a slipped-through host still refuses.
+    """
+    from urllib.parse import urlsplit  # noqa: PLC0415 — stdlib, function-local
+    try:
+        parts = urlsplit(str(raw_url or "").strip())
+    except Exception:  # noqa: BLE001 — a malformed URL is simply dropped
+        return None
+    host = parts.hostname
+    if parts.scheme not in _URL_SCHEMES or not host:
+        return None
+    tgt = (target or "").strip().strip("[]").lower()
+    if host.strip("[]").lower() != tgt:
+        return None
+    port = parts.port or (443 if parts.scheme == "https" else 80)
+    return ProposedURL(url=str(raw_url).strip(), host=host, port=int(port), protocol="tcp")
+
+
+def httpx_url_scan(*, scheme: str = "http", extra_args: Sequence[str] = ()) -> ToolSpec:
+    """A :class:`ToolSpec` for ProjectDiscovery httpx as a URL PROPOSER. ``build_argv`` emits
+    ``httpx -u <url> -silent -no-color -disable-update-check -json -probe`` (JSONL on stdout, correlatable,
+    no update phone-home); ``propose_urls`` parses each non-``failed`` record's ``url`` (via the shipped
+    ``parse_httpx_export``) into a host-PINNED :class:`ProposedURL`. The runner re-drives each URL with its OWN
+    plain gated GET (endpoint-liveness) — httpx's row is never the FACT authority."""
+    def build(target: str) -> list[str]:
+        url = str(target) if "://" in str(target) else f"{scheme}://{target}/"
+        return ["httpx", "-u", url, "-silent", "-no-color", "-disable-update-check", "-json", "-probe",
+                *list(extra_args)]
+
+    def propose_urls(outcome: ToolOutcome, target: str) -> "list[ProposedURL]":
+        from framework.v2.imports.parsers import parse_httpx_export  # noqa: PLC0415 (FATAL-2: function-local)
+        out: "list[ProposedURL]" = []
+        seen: set[str] = set()
+        for f in parse_httpx_export(outcome.stdout or ""):
+            pu = _pin_url_host(getattr(f, "location", ""), target)
+            if pu is not None and pu.url not in seen:
+                seen.add(pu.url)
+                out.append(pu)
+        return out
+
+    return ToolSpec("httpx", build, _no_service_proposal, propose_urls=propose_urls,
+                    version_argv=lambda: ["httpx", "-version"], danger="recon")
+
+
+# Default content-discovery wordlist (Kali path). Only used to BUILD a valid argv for a real run; the
+# conformance/tests drive a canned backend, and the FACT is VIGIL's own gated GET — never ffuf's bytes.
+_FFUF_DEFAULT_WORDLIST = "/usr/share/wordlists/dirb/common.txt"
+
+
+def ffuf_content_scan(*, wordlist: str = "", extra_args: Sequence[str] = ()) -> ToolSpec:
+    """A :class:`ToolSpec` for ffuf as a content-discovery URL PROPOSER. ``build_argv`` emits
+    ``ffuf -u <base>/FUZZ -w <wordlist> -noninteractive -json`` (JSONL results on stdout, ``input`` values
+    base64 but ``url`` plain — the location the parser reads); ``propose_urls`` parses each result's ``url``
+    (via the shipped ``parse_ffuf_export``) into a host-PINNED :class:`ProposedURL`. The runner re-drives each
+    URL with its OWN plain gated GET (endpoint-liveness) — ffuf's row is never the FACT authority."""
+    wl = wordlist or _FFUF_DEFAULT_WORDLIST
+
+    def build(target: str) -> list[str]:
+        base = str(target) if "://" in str(target) else f"http://{target}/"
+        url = base if "FUZZ" in base else (base.rstrip("/") + "/FUZZ")
+        return ["ffuf", "-u", url, "-w", wl, "-noninteractive", "-json", *list(extra_args)]
+
+    def propose_urls(outcome: ToolOutcome, target: str) -> "list[ProposedURL]":
+        from framework.v2.imports.parsers import parse_ffuf_export  # noqa: PLC0415 (FATAL-2: function-local)
+        out: "list[ProposedURL]" = []
+        seen: set[str] = set()
+        for f in parse_ffuf_export(outcome.stdout or ""):
+            pu = _pin_url_host(getattr(f, "location", ""), target)
+            if pu is not None and pu.url not in seen:
+                seen.add(pu.url)
+                out.append(pu)
+        return out
+
+    return ToolSpec("ffuf", build, _no_service_proposal, propose_urls=propose_urls,
+                    version_argv=lambda: ["ffuf", "-V"], danger="active")
+
+
 # ---------------------------------------------------------------------------
 # Scope gate — refuse an out-of-scope / egress-denied target BEFORE any traffic.
 # ---------------------------------------------------------------------------
@@ -978,6 +1095,62 @@ def _admit_redrive(branch: str, *, fired: bool, conclusive: bool):
                  observed={"channel_established": True, "gate_authorized": True})
 
 
+def _run_web_liveness_tool(
+    spec: "ToolSpec", target: str, outcome: "ToolOutcome", *, tool_errored: bool, tool_version: str,
+    engagement_slug: str, signers: "list[tuple[str, str]]", timeout: float, freshness_ttl_seconds: int,
+) -> "RunnerResult":
+    """The WEB-DISCOVERY runner leg (httpx/ffuf): parse the tool's proposed URLs (host-pinned) and re-drive
+    EACH through the gated web LIVENESS re-drive — the L7 analogue of the per-port handshake. A tool's URL row
+    is only a PROPOSAL; the FACT is minted solely by VIGIL's OWN plain gated GET crossing admit() (the
+    achieved_state.endpoint_liveness branch). Mirrors the ProposedService leg's outcome taxonomy + Observation.
+    Called only when ``spec.propose_urls`` is set; the caller already ran the scope/pre-flight/capability gates.
+    """
+    from ..oracle_adapter import Outcome  # noqa: PLC0415 (FATAL-2: function-local)
+    from .web_redrive import endpoint_liveness_redrive  # noqa: PLC0415 (FATAL-2: web_redrive is offense-neutral)
+
+    proposed = spec.propose_urls(outcome, target)   # list[ProposedURL], host pinned to target (failed dropped)
+    facts: list = []
+    leads: list = []
+    contexts: dict = {}
+    outcomes: list = []
+    if tool_errored:
+        outcomes.append({"check_id": spec.name, "bug_class": "", "outcome": Outcome.ERROR.value})
+    _OUT = {"positive": Outcome.POSITIVE.value, "clean": Outcome.CLEAN.value}
+    seen: set[str] = set()
+    for pu in proposed:
+        if pu.url in seen:
+            continue
+        seen.add(pu.url)
+        # The re-drive owns its OWN per-request gate (kill-switch → single-host → ACTIVE_RECON → charter scope
+        # → http(s)); the URL host is already pinned to the scope-authorised target. slug == engagement_slug.
+        wl = endpoint_liveness_redrive(pu.url, slug=engagement_slug, engagement_slug=engagement_slug,
+                                       signers=signers, timeout=min(timeout, 30.0))
+        item = f"{spec.name}:{pu.url}#endpoint_liveness"
+        outcomes.append({"check_id": item, "bug_class": "endpoint_liveness",
+                         "outcome": _OUT.get(wl.outcome, Outcome.INCONCLUSIVE.value)})
+        if wl.is_fact:
+            facts.append(wl.fact)
+            if wl.context is not None:
+                contexts[wl.fact.finding_ref] = wl.context
+        elif wl.lead is not None:
+            leads.append(wl.lead)
+
+    detail = (f"{spec.name} ran via {outcome.backend}; proposed {len(proposed)} url(s), "
+              f"oracle-confirmed {len(facts)} liveness FACT(s), {len(leads)} lead(s)"
+              + ("; TOOL ERRORED (timeout/spawn)" if tool_errored else ""))
+    artifact_refs = tuple(fr for fr in (getattr(r, "finding_ref", "") for r in (facts + leads)) if fr)
+    error_reason = ""
+    if tool_errored:
+        error_reason = ("tool run timed out (no exit code)" if outcome.timed_out
+                        else (outcome.stderr or "tool failed to run").strip()[:200])
+    from .observation import observe  # noqa: PLC0415
+    observation = observe(spec, target, outcome, proposed, tool_version=tool_version,
+                          outcome_class="errored" if tool_errored else "ran",
+                          artifact_refs=artifact_refs, error_reason=error_reason)
+    return RunnerResult("ran", detail, spec.name, target, outcome, facts, leads, proposed, contexts,
+                        outcomes=outcomes, tool_errored=tool_errored, observation=observation)
+
+
 def run_external_tool(
     spec: ToolSpec,
     target: str,
@@ -1066,16 +1239,25 @@ def run_external_tool(
     # caller never conflates "the tool errored" with "the tool ran and found nothing".
     tool_errored = bool(outcome.timed_out) or (outcome.exit_code is None)
 
+    # Best-effort tool VERSION (criterion 9): run the spec's version_argv ONCE through the SAME gated backend
+    # (no target traffic) and stamp the parsed version into every FACT this run mints. Never fatal.
+    tool_version = _capture_tool_version(spec, backend, timeout)
+
+    # WEB-DISCOVERY spec (httpx/ffuf): the proposals are URLs re-driven through the gated web LIVENESS re-drive
+    # (the L7 analogue of the TCP handshake), NOT the ProposedService/handshake path. Dispatch there and
+    # return — the ProposedService path below is byte-for-byte unchanged for every non-web caller.
+    if spec.propose_urls is not None:
+        return _run_web_liveness_tool(
+            spec, target, outcome, tool_errored=tool_errored, tool_version=tool_version,
+            engagement_slug=engagement_slug, signers=signers, timeout=timeout,
+            freshness_ttl_seconds=freshness_ttl_seconds)
+
     proposed = spec.propose(outcome, target)
     # The re-drives to run per proposed service. Empty spec.redrives ⇒ the legacy reachability re-drive
     # (built from the injectable `capture` param), so nmap + every existing caller are byte-for-byte
     # unchanged. A TLS/etc. spec carries its OWN runner-owned re-drives on the spec.
     redrives = spec.redrives or (Redrive("service_reachable", capture, _reachable_context,
                                          branch="service_reachability.tcp_handshake"),)
-    # Best-effort tool VERSION (criterion 9): run the spec's version_argv ONCE through the SAME gated backend
-    # (no target traffic) and stamp the parsed version into every FACT this run mints. Never fatal — an
-    # absent/failing version_argv just leaves the version "" (dropped from the cert → byte-identical).
-    tool_version = _capture_tool_version(spec, backend, timeout)
     facts: list = []
     leads: list = []
     contexts: dict = {}

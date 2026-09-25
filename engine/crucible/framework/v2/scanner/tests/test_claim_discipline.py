@@ -558,6 +558,9 @@ def test_the_capability_matrix_does_not_outrun_the_branch_registry() -> None:
     # The W1 batch-2 promotion adds zmap/unicornscan as MORE SERVICE_REACHABILITY proposers wired
     # fact_capable=True through the runner (the SAME service_reachability.tcp_handshake branch + oracle), each
     # passing the conformance battery — so the fact set grows without outrunning the registry.
+    # The W2 web-discovery promotion adds httpx/ffuf (oracle_family ACHIEVED_STATE), backed by the new
+    # fact_capable achieved_state.endpoint_liveness branch (VIGIL's own gated GET + a not-found control) — so
+    # "achieved_state" is a fact_capable branch family and the two tools do not outrun the registry.
     fact_families = {b["id"].split(".")[0] for b in branches if b["fact_capable"]}
     for t in matrix["tools"]:
         if t.get("fact_capable"):
@@ -565,7 +568,8 @@ def test_the_capability_matrix_does_not_outrun_the_branch_registry() -> None:
             assert fam in fact_families, (
                 f"{t['name']} is marked fact_capable but its oracle_family {fam!r} has no fact_capable branch "
                 f"in the registry — the matrix outruns the registry")
-    assert fact_tools == {"nmap", "sslscan", "masscan", "rustscan", "naabu", "zmap", "unicornscan"}, (
+    assert fact_tools == {"nmap", "sslscan", "masscan", "rustscan", "naabu", "zmap", "unicornscan",
+                          "httpx", "ffuf"}, (
         f"unexpected fact_capable tool set: {fact_tools}")
 
     httpx = [t for t in matrix["tools"] if t["name"] == "httpx"]

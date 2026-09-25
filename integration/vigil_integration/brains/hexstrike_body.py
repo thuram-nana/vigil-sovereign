@@ -103,6 +103,8 @@ def _spec_for_kind(kind: str, params: "dict | None"):
     FATAL-2: the offense-side ``external_tool`` import is function-local, so importing this module co-loads no
     offense engine into the sovereign env."""
     from ..live.external_tool import (  # noqa: PLC0415
+        ffuf_content_scan,
+        httpx_url_scan,
         masscan_service_scan,
         naabu_service_scan,
         nmap_service_scan,
@@ -114,6 +116,13 @@ def _spec_for_kind(kind: str, params: "dict | None"):
     p = params or {}
     if kind == "sslscan":
         return tls_scan(port=int(p.get("port", 443)))
+    # HexStrike W2 — web-discovery: httpx/ffuf propose URLs the runner re-drives through the gated web
+    # LIVENESS re-drive (achieved_state.endpoint_liveness), the L7 analogue of the port handshake. Only the
+    # typed `scheme`/`wordlist` VALUES are read; every flag is built server-side inside the ToolSpec.
+    if kind == "httpx":
+        return httpx_url_scan(scheme=str(p.get("scheme", "http")))
+    if kind == "ffuf":
+        return ffuf_content_scan(wordlist=str(p.get("wordlist", "") or ""))
     if kind == "nmap":
         return nmap_service_scan(ports=str(p.get("ports", "1-1024")))
     if kind == "masscan":

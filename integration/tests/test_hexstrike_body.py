@@ -439,12 +439,15 @@ def test_h5_batch2_live_fact_through_the_body(tool: str, tmp_path: Path):
 def test_h7_oracle_mapped_set_is_derived_from_the_family_registry():
     """_ORACLE_MAPPED_TOOLS is no longer a literal: it is oracle_mapped_tools(_SPEC_BUILDER_TOOLS), so
     FACT-capability is a property of a tool's family (FACT-capable) AND its having a runner spec builder.
-    The derived set is exactly the seven shipped re-drive tools, and each is in a FACT-capable family."""
+    The derived set is exactly the shipped re-drive tools, and each is in a FACT-capable family: the
+    SERVICE_REACHABILITY port scanners, sslscan (TLS_WEAKNESS), and the W2 web-discovery tools httpx/ffuf
+    (ACHIEVED_STATE endpoint-liveness)."""
     from vigil_integration.brains.hexstrike_body import _ORACLE_MAPPED_TOOLS, _SPEC_BUILDER_TOOLS
     from vigil_integration.live.oracle_families import is_fact_capable_family, oracle_mapped_tools
 
     assert _ORACLE_MAPPED_TOOLS == oracle_mapped_tools(_SPEC_BUILDER_TOOLS)
-    assert _ORACLE_MAPPED_TOOLS == {"nmap", "sslscan", "masscan", "rustscan", "naabu", "zmap", "unicornscan"}
+    assert _ORACLE_MAPPED_TOOLS == {"nmap", "sslscan", "masscan", "rustscan", "naabu", "zmap", "unicornscan",
+                                    "httpx", "ffuf"}
     for tool in _ORACLE_MAPPED_TOOLS:
         assert is_fact_capable_family(tool), f"{tool}: mapped but its family is not FACT-capable"
 

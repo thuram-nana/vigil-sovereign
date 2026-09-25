@@ -49,6 +49,13 @@ BUG_CLASS_ORACLES: dict[str, tuple[OracleKind, ...]] = {
     "mass_assignment": (OracleKind.ACHIEVED_STATE,),
     "privilege_escalation": (OracleKind.ACHIEVED_STATE,),
     "open_redirect": (OracleKind.ACHIEVED_STATE,),
+    # HexStrike W2 — endpoint LIVENESS (the L7 analogue of SERVICE_REACHABILITY). A web-discovery tool
+    # (httpx/ffuf) PROPOSES a URL; VIGIL re-drives it with its OWN plain gated GET plus a known-nonexistent
+    # sibling CONTROL, and the predicate oracle fires only when the target returns a served status (2xx/3xx)
+    # AND the control returns a genuine not-found (>=400) — a soft-404/blanket-200 server suppresses the FACT.
+    # Reuses the FROZEN ACHIEVED_STATE kind (adds NO new OracleKind; _ALL_ORACLES stays 15) and no benchmark
+    # finding carries this class, so `make gate` is byte-identical. See live.web_redrive.endpoint_liveness_redrive.
+    "endpoint_liveness": (OracleKind.ACHIEVED_STATE,),
     "exposure": (OracleKind.ACHIEVED_STATE,),
     "sensitive_exposure": (OracleKind.ACHIEVED_STATE,),
     "security_misconfiguration": (OracleKind.ACHIEVED_STATE,),
