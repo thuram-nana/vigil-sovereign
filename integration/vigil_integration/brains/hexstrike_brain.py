@@ -77,6 +77,7 @@ _TOOL_DANGER: dict[str, ToolDanger] = {
     "gau": ToolDanger.RECON, "waybackurls": ToolDanger.RECON, "subfinder": ToolDanger.RECON,
     "amass": ToolDanger.RECON, "arp-scan": ToolDanger.RECON, "nbtscan": ToolDanger.RECON,
     "rustscan": ToolDanger.RECON, "masscan": ToolDanger.RECON, "naabu": ToolDanger.RECON,
+    "zmap": ToolDanger.RECON, "unicornscan": ToolDanger.RECON,
     "autorecon": ToolDanger.RECON, "paramspider": ToolDanger.RECON,
     # TLS posture (read-only assessment): the runner re-drives its OWN gated handshake and judges a weak
     # protocol/cipher (weak_tls) or a broken-hash cert (weak_crypto_artifact) — never sslscan's rows.

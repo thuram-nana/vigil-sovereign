@@ -91,10 +91,12 @@ def test_the_committed_matrix_is_internally_valid_after_the_backfill():
 
 
 def test_the_backfill_did_not_fake_fact_capability():
-    """The pinned fact_capable set is unchanged — the backfill added LEAD-only/UNAVAILABLE rows, never a new
-    FACT claim (which would require a shipped runner-owned re-drive + the conformance battery)."""
+    """The pinned fact_capable set is exactly the tools with a shipped runner-owned re-drive that PASSED the
+    conformance battery — never a faked claim. The H4 backfill added LEAD-only/UNAVAILABLE rows only; the H5
+    reuse (masscan/rustscan/naabu) and its W1 batch-2 promotion (zmap/unicornscan) each earned their FACT via
+    live.conformance.run_toolspec_conformance over VIGIL's own gated handshake, not by editing this pin."""
     fact = {m.name for m in _manifests() if m.fact_capable}
-    assert fact == {"nmap", "sslscan", "masscan", "rustscan", "naabu"}, (
+    assert fact == {"nmap", "sslscan", "masscan", "rustscan", "naabu", "zmap", "unicornscan"}, (
         f"unexpected fact_capable set after backfill: {fact}"
     )
 
@@ -145,21 +147,24 @@ def test_previously_missing_tools_including_two_adapted_ones_are_now_catalogued(
 # --- the honest bucket counts the sync-check reports (and pins) ---------------------------------------
 
 def test_the_bucket_counts_are_the_measured_honest_numbers():
-    """Report + pin: how the 36 proposable tools classify. 'Adapted' = has a typed argv builder (the only
-    thing the executor can actually spawn); 'BLOCKED' = excluded-with-reason; the rest are UNAVAILABLE with a
-    reason (no argv builder yet). Every proposable tool is accounted for and carries a reason."""
+    """Report + pin: how the 38 proposable tools classify. 'Adapted' = has a typed executor argv builder (the
+    only thing the GOVERNED executor can spawn); 'BLOCKED' = excluded-with-reason; the rest are UNAVAILABLE
+    with a reason (no typed executor builder). NOTE: the SERVICE_REACHABILITY port scanners
+    (masscan/rustscan/naabu and the W1 batch-2 zmap/unicornscan) are driven by a runner-owned ToolSpec builder
+    on the R4 runner path — NOT the governed executor's _BUILDERS — so they sit in the no_builder bucket here
+    even though capability_join renders them EXECUTABLE-if-installed. Every proposable tool carries a reason."""
     proposable = set(_proposable())
     by = _by_name()
     excluded = {n for n in proposable if by[n].excluded}
-    adapted = proposable & set(_BUILDERS)                     # has a typed argv builder
+    adapted = proposable & set(_BUILDERS)                     # has a typed executor argv builder
     adapted_runnable = adapted - excluded                    # would run once installed
-    no_builder = proposable - set(_BUILDERS)                 # UNAVAILABLE: no adapter at all
+    no_builder = proposable - set(_BUILDERS)                 # no typed executor builder (R4-runner tools land here)
 
-    assert len(proposable) == 36, len(proposable)
+    assert len(proposable) == 38, len(proposable)
     assert excluded == {"sqlmap"}, excluded
     assert adapted == {"ffuf", "httpx", "nikto", "nmap", "nuclei", "sqlmap"}, adapted
     assert adapted_runnable == {"ffuf", "httpx", "nikto", "nmap", "nuclei"}, adapted_runnable
-    assert len(no_builder) == 30, len(no_builder)
+    assert len(no_builder) == 32, len(no_builder)
 
     # Every proposable tool is rendered (present + reason) — the anti-silence guarantee, at the data layer.
     assert validate_capability_sync(proposable, _manifests()) == []
