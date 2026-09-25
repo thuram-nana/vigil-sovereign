@@ -3656,10 +3656,11 @@ _SECURITY_RELEVANT_METHODS = frozenset({
 })
 
 
-def _collect_http_tls(tree: ast.AST) -> "tuple[set[str], dict[str, tuple[str, str]], set[str]]":
-    """RESOLVE PROVENANCE for tier (c). Returns ``(http_locals, from_http, session_vars)``: names bound to an
-    HTTP/TLS MODULE, ``from``-imported HTTP/TLS symbols, and variables bound to a RESOLVED HTTP session/client
-    constructor (``s = requests.Session()``)."""
+def _collect_http_imports(tree: ast.AST) -> "tuple[set[str], dict[str, tuple[str, str]]]":
+    """RESOLVE import PROVENANCE for tier (c). Returns ``(http_locals, from_http)``: names bound to an
+    HTTP/TLS MODULE and ``from``-imported HTTP/TLS symbols. Session/client VARIABLES are NOT collected here —
+    they are resolved FLOW-SENSITIVELY by the shared straight-line binding tracker (``_advance_binding``), so
+    a variable that is REASSIGNED to a non-session before its use no longer resolves to a session."""
     http_locals: set[str] = set()
     from_http: dict[str, tuple[str, str]] = {}
     for node in ast.walk(tree):
@@ -3674,30 +3675,47 @@ def _collect_http_tls(tree: ast.AST) -> "tuple[set[str], dict[str, tuple[str, st
                 for alias in node.names:
                     if alias.name != "*":
                         from_http[alias.asname or alias.name] = (mod, alias.name)
-    session_vars: set[str] = set()
-    for node in ast.walk(tree):
-        if not isinstance(node, (ast.Assign, ast.AnnAssign)) or not isinstance(node.value, ast.Call):
-            continue
-        ctor = re.sub(r"[^a-z0-9]", "", _attr_or_name(node.value.func).lower())
-        if ctor not in _HTTP_SESSION_CTORS:
-            continue
-        parts = _dotted_parts(node.value.func)
-        base_ok = len(parts) >= 2 and parts[0] in http_locals          # requests.Session()
-        imported_ctor = len(parts) == 1 and parts[0] in from_http      # from requests import Session; Session()
-        if base_ok or imported_ctor:
-            session_vars.update(_assign_targets(node))
-    return http_locals, from_http, session_vars
+    return http_locals, from_http
 
 
-def _is_security_relevant_callee(callee: Any, http_locals: "set[str]",
-                                 from_http: "dict[str, tuple[str, str]]", session_vars: "set[str]") -> bool:
-    """True iff ``callee`` RESOLVES to a security-relevant HTTP/TLS API — a request on a resolved HTTP module
-    or session, a TLS context / wrap, or a cookie set — NOT any callee that merely happens to accept a
-    ``verify=`` / ``secure=`` kwarg (``chart.render`` / ``widget.build`` do not resolve => LEAD)."""
+def _is_session_ctor(call: ast.Call, http_ctx: "tuple[set[str], dict[str, tuple[str, str]]]") -> bool:
+    """True iff ``call`` constructs an HTTP session/client that RESOLVES to an imported HTTP/TLS module or a
+    from-imported constructor (``requests.Session()`` / ``from requests import Session; Session()``). This is
+    the ONE modeled RHS form the binding tracker maps to a SESSION binding for tier (c)."""
+    http_locals, from_http = http_ctx
+    ctor = re.sub(r"[^a-z0-9]", "", _attr_or_name(call.func).lower())
+    if ctor not in _HTTP_SESSION_CTORS:
+        return False
+    parts = _dotted_parts(call.func)
+    base_ok = len(parts) >= 2 and parts[0] in http_locals          # requests.Session()
+    imported_ctor = len(parts) == 1 and parts[0] in from_http      # from requests import Session; Session()
+    return base_ok or imported_ctor
+
+
+def _insecure_flag_on(call: ast.Call) -> str:
+    """The evidence detail if ``call`` EXPLICITLY sets a known security flag to its insecure LITERAL —
+    ``verify/secure/check_hostname/verify_mode/validate_certs=False`` or ``cert_reqs/verify_mode=
+    ssl.CERT_NONE`` — else ``""``. Purely local to the one call; it decides nothing about the callee."""
+    for kw in call.keywords:
+        if kw.arg is None:
+            continue
+        if kw.arg in _INSECURE_FLAG_FALSE and isinstance(kw.value, ast.Constant) and kw.value.value is False:
+            return f"the security flag `{kw.arg}=False`"
+        # cert_reqs / verify_mode = ssl.CERT_NONE (TLS certificate verification explicitly disabled).
+        if kw.arg in ("cert_reqs", "verify_mode") and isinstance(kw.value, ast.Attribute) \
+                and kw.value.attr == "CERT_NONE":
+            return f"the TLS flag `{kw.arg}=ssl.CERT_NONE`"
+    return ""
+
+
+def _resolves_http_tls_direct(callee: Any, http_locals: "set[str]",
+                              from_http: "dict[str, tuple[str, str]]") -> bool:
+    """True iff ``callee`` resolves to a security-relevant HTTP/TLS API WITHIN THE CALL ITSELF — a request /
+    TLS wrap / cookie set on a RESOLVED HTTP/TLS module or from-imported symbol — needing NO cross-statement
+    variable. A callee that merely happens to accept a ``verify=`` / ``secure=`` kwarg (``chart.render`` /
+    ``widget.build``) does not resolve and stays a LEAD."""
     if isinstance(callee, ast.Attribute):
         method = re.sub(r"[^a-z0-9]", "", callee.attr.lower())
-        if _attr_or_name(callee.value) in session_vars:
-            return True
         parts = _dotted_parts(callee.value)
         base_is_http = bool(parts) and (parts[0] in http_locals or parts[0] in from_http)
         return base_is_http and method in _SECURITY_RELEVANT_METHODS
@@ -3706,29 +3724,52 @@ def _is_security_relevant_callee(callee: Any, http_locals: "set[str]",
     return False
 
 
+def _callee_is_session_method(callee: Any, sessions: "set[str]") -> bool:
+    """True iff ``callee`` is ``<var>.<security-method>`` where ``<var>`` is CURRENTLY a resolved HTTP session
+    in the straight-line binding map (a reassignment of ``<var>`` to a non-session, in ANY form, has already
+    removed it from ``sessions`` => this returns False and the call is a LEAD)."""
+    return (isinstance(callee, ast.Attribute)
+            and _attr_or_name(callee.value) in sessions
+            and re.sub(r"[^a-z0-9]", "", callee.attr.lower()) in _SECURITY_RELEVANT_METHODS)
+
+
 def _insecure_flag_hit(tree: ast.AST) -> "tuple[bool, str]":
-    """RE-DERIVE tier (c): a KNOWN security flag is EXPLICITLY set to its insecure LITERAL AND passed to a
-    RESOLVED security-relevant HTTP/TLS callee — ``requests.get(..., verify=False)`` / ``s.post(...,
-    verify=False)`` / ``ssl.wrap_socket(..., cert_reqs=ssl.CERT_NONE)``. An ABSENT flag, or an insecure flag
-    on an UNRESOLVED / non-security callee (``chart.render(verify=False)``), never mints (a LEAD)."""
-    http_locals, from_http, session_vars = _collect_http_tls(tree)
+    """RE-DERIVE tier (c): a KNOWN security flag is EXPLICITLY set to its insecure LITERAL AND reaches a
+    RESOLVED security-relevant HTTP/TLS callee, under TWO sound resolution paths:
+
+      (1) CALL-SITE-DIRECT — the callee resolves within the call itself from import provenance
+          (``requests.get(..., verify=False)`` / ``ssl.wrap_socket(..., cert_reqs=ssl.CERT_NONE)`` / a
+          from-imported request callable). Flow-INDEPENDENT: it holds no matter what earlier statements did.
+
+      (2) SESSION-VARIABLE — ``s = requests.Session(); s.get(..., verify=False)``. RESOLVED FLOW-SENSITIVELY
+          by the SHARED straight-line binding tracker: ``s`` fires only if it is CURRENTLY a session at the
+          call. A reassignment of ``s`` to a non-session (``s = 123``) — or ANY unmodeled statement form
+          between the constructor and the use — removes/loses the binding, so the call is a LEAD, never a FACT.
+
+    An ABSENT flag, or an insecure flag on an UNRESOLVED / non-security callee (``chart.render(verify=False)``),
+    never mints (a LEAD)."""
+    http_ctx = _collect_http_imports(tree)
+    http_locals, from_http = http_ctx
+    # (1) call-site-direct — flow-independent, resolves purely from imports + the call.
     for node in ast.walk(tree):
-        if not isinstance(node, ast.Call):
+        if isinstance(node, ast.Call):
+            hit = _insecure_flag_on(node)
+            if hit and _resolves_http_tls_direct(node.func, http_locals, from_http):
+                return True, f"{hit} is explicitly disabled on a resolved security-relevant HTTP/TLS API"
+    # (2) session-variable — flow-sensitive via the shared straight-line tracker (soundness over recall).
+    for fn in ast.walk(tree):
+        if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
             continue
-        hit = ""
-        for kw in node.keywords:
-            if kw.arg is None:
+        for stmt, bindings in _walk_straight_line(fn, http_ctx):
+            sessions = {name for name, status in bindings.items() if status == _HTTP_SESSION}
+            if not sessions:
                 continue
-            if kw.arg in _INSECURE_FLAG_FALSE and isinstance(kw.value, ast.Constant) and kw.value.value is False:
-                hit = f"the security flag `{kw.arg}=False`"
-                break
-            # cert_reqs / verify_mode = ssl.CERT_NONE (TLS certificate verification explicitly disabled).
-            if kw.arg in ("cert_reqs", "verify_mode") and isinstance(kw.value, ast.Attribute) \
-                    and kw.value.attr == "CERT_NONE":
-                hit = f"the TLS flag `{kw.arg}=ssl.CERT_NONE`"
-                break
-        if hit and _is_security_relevant_callee(node.func, http_locals, from_http, session_vars):
-            return True, f"{hit} is explicitly disabled on a resolved security-relevant HTTP/TLS API"
+            for call in ast.walk(stmt):
+                if isinstance(call, ast.Call):
+                    hit = _insecure_flag_on(call)
+                    if hit and _callee_is_session_method(call.func, sessions):
+                        return True, (f"{hit} is explicitly disabled on a resolved security-relevant HTTP "
+                                      f"session variable in function `{fn.name}`")
     return False, ""
 
 
@@ -3742,12 +3783,17 @@ _SANITIZER_FNS = frozenset({
     "quote", "escape", "clean", "int", "float", "bool", "isdigit", "isalnum", "isnumeric",
     "sanitize", "validate", "shlex", "sub", "match", "fullmatch", "abspath", "basename",
 })
-# The taint status a variable's MOST-RECENT straight-line binding confers. Absent from the binding map means
-# NOT tainted. A ``_TAINT_SOURCE`` var carries taint DIRECTLY (a source access, or a BinOp/f-string over one);
-# a ``_TAINT_ALIAS`` var is ONE alias hop from a source var. Both fire at a sink; only a SOURCE propagates a
-# further alias hop (an alias-of-an-alias is a second hop -> conservative kill, never a FACT).
+# The status a variable's MOST-RECENT straight-line binding confers, shared by tier (d) taint AND tier (c)
+# session resolution. Absent from the binding map means untracked (not tainted, not a session). A
+# ``_TAINT_SOURCE`` var carries taint DIRECTLY (a source access, or a BinOp/f-string over one); a
+# ``_TAINT_ALIAS`` var is ONE alias hop from a source var (both fire at a sink; only a SOURCE propagates a
+# further alias hop — an alias-of-an-alias is a second hop -> conservative kill, never a FACT). An
+# ``_HTTP_SESSION`` var is bound to a RESOLVED HTTP session/client constructor (tier c). The three statuses
+# are DISJOINT: a session var is never treated as tainted, and a taint var is never treated as a session.
 _TAINT_SOURCE = "source"
 _TAINT_ALIAS = "alias"
+_HTTP_SESSION = "session"
+_TAINT_STATUSES = frozenset({_TAINT_SOURCE, _TAINT_ALIAS})
 
 
 def _is_direct_source_expr(expr: Any) -> bool:
@@ -3775,37 +3821,22 @@ def _is_direct_source_expr(expr: Any) -> bool:
     return False
 
 
-def _expr_is_tainted(expr: Any, tainted: "dict[str, str]") -> bool:
-    """True iff ``expr``'s value is DEFINITELY tainted given the current straight-line binding map: a tainted
-    variable name, a direct source access, or a ``BinOp`` / f-string that incorporates a tainted operand
-    (both operands always flow into the result, so this stays sound). An ``IfExp`` / ``BoolOp`` / other-call
-    value is only conditionally tainted, so it is NOT called tainted (conservative — no FACT)."""
+def _expr_is_tainted(expr: Any, bindings: "dict[str, str]") -> bool:
+    """True iff ``expr``'s value is DEFINITELY tainted given the current straight-line binding map: a variable
+    whose binding is a taint SOURCE/ALIAS (a SESSION binding is NOT taint), a direct source access, or a
+    ``BinOp`` / f-string that incorporates a tainted operand (both operands always flow into the result, so
+    this stays sound). An ``IfExp`` / ``BoolOp`` / other-call value is only conditionally tainted, so it is
+    NOT called tainted (conservative — no FACT)."""
     if isinstance(expr, ast.Name):
-        return expr.id in tainted
+        return bindings.get(expr.id) in _TAINT_STATUSES
     if _is_direct_source_expr(expr):
         return True
     if isinstance(expr, ast.BinOp):
-        return _expr_is_tainted(expr.left, tainted) or _expr_is_tainted(expr.right, tainted)
+        return _expr_is_tainted(expr.left, bindings) or _expr_is_tainted(expr.right, bindings)
     if isinstance(expr, ast.JoinedStr):
-        return any(_expr_is_tainted(v.value, tainted)
+        return any(_expr_is_tainted(v.value, bindings)
                    for v in expr.values if isinstance(v, ast.FormattedValue))
     return False
-
-
-def _binding_status(value: Any, tainted: "dict[str, str]") -> "str | None":
-    """The taint status a straight-line assignment ``target = value`` confers on ``target``: ``_TAINT_SOURCE``
-    when the RHS is a direct source (or a BinOp/f-string over one); ``_TAINT_ALIAS`` when the RHS is a single
-    Name that is currently a SOURCE (one alias hop); ``None`` — which KILLS any prior taint on the target —
-    for a constant, a non-source call, a second-hop alias, or a conditional value."""
-    if isinstance(value, ast.Name):
-        return _TAINT_ALIAS if tainted.get(value.id) == _TAINT_SOURCE else None
-    if _is_direct_source_expr(value):
-        return _TAINT_SOURCE
-    if isinstance(value, ast.BinOp) and _expr_is_tainted(value, tainted):
-        return _TAINT_SOURCE
-    if isinstance(value, ast.JoinedStr) and _expr_is_tainted(value, tainted):
-        return _TAINT_SOURCE
-    return None
 
 
 def _has_sanitizer(fn: ast.AST) -> bool:
@@ -3859,43 +3890,83 @@ def _sink_call_taint_detail(call: ast.Call, fn_name: str, tainted: "dict[str, st
     return None
 
 
-def _straight_line_taint(fn: "ast.FunctionDef | ast.AsyncFunctionDef") -> "tuple[bool, str]":
-    """FLOW-SENSITIVE tier (d) for ONE function body, conservative and bounded. Walk the TOP-LEVEL statements
-    in order, tracking each variable's MOST-RECENT binding taint status. Fire only on a sink reached in
-    STILL-straight-line code whose argument's most-recent binding is a taint source (<=1 alias hop), with no
-    intervening reassignment-kill (the most-recent binding captures that) and no sanitizer (checked by the
-    caller). The FIRST compound / control-flow statement (If/For/While/Try/With/Match, a nested def/class) —
-    or any statement that binds a name non-linearly (AugAssign, a walrus, a tuple/Attribute/Subscript target)
-    — BREAKS the straight-line assumption: bindings can no longer be trusted, so every later sink is a LEAD.
-    Returns (True, detail) or (False, '')."""
-    tainted: dict[str, str] = {}
-    straight = True
-    for stmt in fn.body:
-        if straight:
-            for call in _stmt_sink_calls(stmt):
-                detail = _sink_call_taint_detail(call, fn.name, tainted)
-                if detail:
-                    return True, detail
-        # Update the binding map for a SIMPLE single-Name assignment; anything else breaks straight-line.
-        if isinstance(stmt, ast.Assign) and len(stmt.targets) == 1 and isinstance(stmt.targets[0], ast.Name):
-            name = stmt.targets[0].id
-            status = _binding_status(stmt.value, tainted)
-            if status:
-                tainted[name] = status
-            else:
-                tainted.pop(name, None)      # a non-tainted RHS KILLS any prior taint on this variable.
-        elif isinstance(stmt, ast.AnnAssign) and isinstance(stmt.target, ast.Name) and stmt.value is not None:
-            name = stmt.target.id
-            status = _binding_status(stmt.value, tainted)
-            if status:
-                tainted[name] = status
-            else:
-                tainted.pop(name, None)
-        elif isinstance(stmt, (ast.Expr, ast.Return, ast.Import, ast.ImportFrom, ast.Pass,
-                               ast.Global, ast.Nonlocal)):
-            pass                             # a simple statement that binds no tracked variable — flow intact.
+def _advance_binding(stmt: ast.stmt, bindings: "dict[str, str]",
+                     http_ctx: "tuple[set[str], dict[str, tuple[str, str]]]") -> bool:
+    """Advance the SHARED straight-line binding map past ONE statement. This is the INVERTED core the whole
+    fix turns on: the map advances ONLY through an EXPLICIT CLOSED ALLOWLIST of FULLY-MODELED statement forms,
+    and the DEFAULT for anything else is to END the straight-line region. So no unmodeled form can ever leave
+    a stale binding that mints a false FACT.
+
+    The ONE allowlisted form is a simple ``<Name> = <modeled-expr>`` assignment (a single ``Name`` target)
+    whose RHS the tracker FULLY understands:
+
+      * a bare ``Name`` — a copy of another variable: ALIAS a current SOURCE (one hop), else KILL the target
+        (a copy of a non-source / second-hop alias / session value is not tainted and not a session);
+      * a literal ``Constant`` — plainly non-tainted, non-session: KILL the target;
+      * a direct taint SOURCE (``request.args[...]`` / ``input()`` / ``argv`` / ``environ`` / …): SOURCE;
+      * a ``BinOp`` / f-string that provably incorporates a tainted operand: SOURCE;
+      * a RESOLVED HTTP session/client constructor (``requests.Session()``): SESSION (tier c).
+
+    For LITERALLY ANY OTHER statement form — a walrus / ``NamedExpr`` anywhere, ``Import`` / ``ImportFrom``,
+    ``AugAssign``, an annotated / tuple / attribute / subscript assignment target, a ``for`` / ``with`` target,
+    ``del``, a nested ``def`` / ``class``, ``global`` / ``nonlocal``, any compound / control-flow statement,
+    or an assignment whose RHS the tracker does NOT fully model (a non-session call, a subscript / attribute
+    read, an ``IfExp`` / ``BoolOp`` / comprehension, …) — return ``False`` to END the straight-line region.
+    From that point the caller treats every construct as a LEAD. Returns ``True`` iff the region continues."""
+    if not (isinstance(stmt, ast.Assign) and len(stmt.targets) == 1
+            and isinstance(stmt.targets[0], ast.Name)):
+        return False                                             # any non-'simple Name = ...' form ends it
+    name = stmt.targets[0].id
+    value = stmt.value
+    if isinstance(value, ast.Name):                             # a bare-Name copy — fully understood
+        if bindings.get(value.id) == _TAINT_SOURCE:
+            bindings[name] = _TAINT_ALIAS                        # one alias hop off a source
         else:
-            straight = False                 # compound / non-linear binding — bindings no longer trustworthy.
+            bindings.pop(name, None)                             # copy of a non-source/second-hop/session: KILL
+        return True
+    if isinstance(value, ast.Constant):                        # a literal — plainly non-tainted, non-session
+        bindings.pop(name, None)                                 # KILL
+        return True
+    if _is_direct_source_expr(value):                          # a direct taint source
+        bindings[name] = _TAINT_SOURCE
+        return True
+    if isinstance(value, (ast.BinOp, ast.JoinedStr)) and _expr_is_tainted(value, bindings):
+        bindings[name] = _TAINT_SOURCE                          # a BinOp/f-string over a tainted operand
+        return True
+    if isinstance(value, ast.Call) and _is_session_ctor(value, http_ctx):
+        bindings[name] = _HTTP_SESSION                          # a resolved HTTP session/client constructor
+        return True
+    return False                                                # an RHS the tracker does NOT fully model: END
+
+
+def _walk_straight_line(fn: "ast.FunctionDef | ast.AsyncFunctionDef",
+                        http_ctx: "tuple[set[str], dict[str, tuple[str, str]]]"):
+    """The SHARED flow-sensitive straight-line walker, used by BOTH tier (d) direct-taint AND tier (c)
+    session-variable resolution. Yield ``(stmt, bindings)`` for each TOP-LEVEL statement of ``fn.body`` while
+    the straight-line assumption still holds, where ``bindings`` maps a variable to its CURRENT status
+    (``_TAINT_SOURCE`` / ``_TAINT_ALIAS`` / ``_HTTP_SESSION``) AS OF that statement (before it executes). The
+    map advances ONLY through ``_advance_binding``'s closed allowlist; the FIRST statement of any other form
+    ends the region (nothing further is yielded), so from that point every construct the caller checks is a
+    LEAD. The map is shared by reference — a caller must not mutate it."""
+    bindings: dict[str, str] = {}
+    for stmt in fn.body:
+        yield stmt, bindings
+        if not _advance_binding(stmt, bindings, http_ctx):
+            return
+
+
+def _straight_line_taint(fn: "ast.FunctionDef | ast.AsyncFunctionDef",
+                         http_ctx: "tuple[set[str], dict[str, tuple[str, str]]]") -> "tuple[bool, str]":
+    """FLOW-SENSITIVE tier (d) for ONE function body via the SHARED straight-line tracker. Fire only on a sink
+    reached in STILL-straight-line code whose argument's CURRENT binding is a taint source (<=1 alias hop),
+    with no sanitizer (checked by the caller). A reassignment-kill (any modeled non-source RHS) removes the
+    taint; ANY unmodeled statement form ends the straight-line region, so every later sink is a LEAD.
+    Returns (True, detail) or (False, '')."""
+    for stmt, bindings in _walk_straight_line(fn, http_ctx):
+        for call in _stmt_sink_calls(stmt):
+            detail = _sink_call_taint_detail(call, fn.name, bindings)
+            if detail:
+                return True, detail
     return False, ""
 
 
@@ -3903,15 +3974,19 @@ def _direct_taint_hit(tree: ast.AST) -> "tuple[bool, str]":
     """RE-DERIVE tier (d): a taint SOURCE reaches a dangerous SINK in ONE function via a DIRECT, straight-line,
     unsanitized flow — the "Firm" tier. FLOW-SENSITIVE and conservative (soundness over recall): a later
     reassignment to a non-tainted value KILLS the taint (no FACT), a sanitizer anywhere in the function
-    REFUSES (fail-closed to a LEAD), and any non-straight-line control flow (branch/loop/try/with) between a
-    source and a sink downgrades to a LEAD rather than guessing. Single-hop variable aliasing is followed;
-    subprocess sinks require shell=True to be command-injection-shaped. Inter-procedural flows stay a LEAD."""
+    REFUSES (fail-closed to a LEAD), and ANY statement form the tracker does not fully model between a source
+    and a sink (a branch/loop/try/with, a walrus, an import that rebinds the name, an augmented / tuple /
+    attribute / subscript assignment, a for/with target, a del, a nested def, or an unmodeled RHS) ends the
+    straight-line region and downgrades to a LEAD rather than guessing. Single-hop variable aliasing is
+    followed; subprocess sinks require shell=True to be command-injection-shaped. Inter-procedural flows stay
+    a LEAD."""
+    http_ctx = _collect_http_imports(tree)
     for fn in ast.walk(tree):
         if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
             continue
         if _has_sanitizer(fn):
             continue   # a sanitizer is present — cannot prove the flow is unsanitized (fail-closed to a lead)
-        fired, detail = _straight_line_taint(fn)
+        fired, detail = _straight_line_taint(fn, http_ctx)
         if fired:
             return True, detail
     return False, ""

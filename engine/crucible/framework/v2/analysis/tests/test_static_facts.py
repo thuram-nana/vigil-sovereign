@@ -387,3 +387,107 @@ def test_usedforsecurity_false_is_a_lead_but_genuine_md5_still_mints() -> None:
     genuine = "import hashlib\ndef sign(x):\n    return hashlib.md5(x).hexdigest()\n"
     fact = confirm_code_region("app/mod.py", 3, genuine, "broken-crypto-invocation")
     assert fact.confirmed and fact.bug_class == "static_broken_crypto"
+
+
+# --------------------------------------------------------------------------------------------
+# Tier (d) + tier (c) FLOW-INSENSITIVITY on KILL/REBIND forms (red-pen BLOCK, rounds 5->6->7). The straight-
+# line binding tracker used by BOTH tiers was INVERTED: it advances the binding map ONLY through a closed
+# allowlist of fully-modeled statement forms (a simple `Name = <modeled-expr>` assignment whose RHS is a taint
+# source / a single-hop alias / a resolved Session() ctor / a plainly-non-tainted literal that KILLS the
+# binding). ANY other statement form — a walrus, an import / from-import that rebinds the name, an augmented /
+# tuple / attribute / subscript assignment target, a for / with target, a del, a nested def, or an assignment
+# whose RHS is not fully modeled — ENDS the straight-line region, so from that point every construct is a LEAD.
+# Because the DEFAULT for anything unmodeled is 'bail to LEAD', no unmodeled form can leave a stale binding
+# that mints a false FACT on benign code. Each negative control below is a benign snippet where the value AT
+# the sink is provably NOT the taint source / NOT a session — it MUST be a LEAD, never a durable false FACT.
+# --------------------------------------------------------------------------------------------
+
+# (d) direct-taint: a taint SOURCE is bound, then the tracked name is KILLED/REBOUND by an UNMODELED form
+# before the sink. The value at the sink is provably a constant / module / loop-or-context value / deleted /
+# unpacked literal — the evidence claim "a taint source reaches the sink" would be FALSE, so each is a LEAD.
+_D_FLOW_INSENSITIVITY_LEADS = [
+    # walrus / NamedExpr rebinds `cmd` to a constant (round-6 missed NamedExpr entirely -> a durable false FACT).
+    ("walrus-kill",
+     'import os\ndef run():\n    cmd = request.args["c"]\n    (cmd := "safe")\n    os.system(cmd)\n'),
+    # `import cmd` rebinds `cmd` to a module (round-6 treated Import as flow-neutral -> a durable false FACT).
+    ("import-rebind-kill",
+     'import os\ndef run():\n    cmd = request.args["c"]\n    import cmd\n    os.system(cmd)\n'),
+    # `from os import getcwd as cmd` rebinds `cmd` to a function (round-6 treated ImportFrom as flow-neutral).
+    ("from-import-rebind-kill",
+     'import os\ndef run():\n    cmd = request.args["c"]\n    from os import getcwd as cmd\n    os.system(cmd)\n'),
+    # AugAssign is not a modeled form -> the tracker refuses to guess the concatenation is still tainted (LEAD).
+    ("aug-assign",
+     'import os\ndef run():\n    cmd = request.args["c"]\n    cmd += "_suffix"\n    os.system(cmd)\n'),
+    # a `for` target rebinds `cmd` to the loop variable (a non-straight-line, non-modeled binding).
+    ("for-target-rebind",
+     'import os\ndef run():\n    cmd = request.args["c"]\n    for cmd in items:\n        pass\n    os.system(cmd)\n'),
+    # a `with ... as` target rebinds `cmd` to the context manager value.
+    ("with-target-rebind",
+     'import os\ndef run():\n    cmd = request.args["c"]\n    with open("f") as cmd:\n        pass\n    os.system(cmd)\n'),
+    # `del cmd` removes the binding entirely; using it after is a NameError at runtime, never the source.
+    ("del-then-use",
+     'import os\ndef run():\n    cmd = request.args["c"]\n    del cmd\n    os.system(cmd)\n'),
+    # a tuple-unpack target rebinds `cmd` to a literal (a multi-target assignment, not the modeled Name = ...).
+    ("tuple-unpack-rebind",
+     'import os\ndef run():\n    cmd = request.args["c"]\n    cmd, other = "safe", "x"\n    os.system(cmd)\n'),
+]
+
+
+@pytest.mark.parametrize("label,src", _D_FLOW_INSENSITIVITY_LEADS)
+def test_tier_d_kill_and_rebind_forms_are_leads_not_durable_false_facts(label, src) -> None:
+    """Each snippet binds a taint source then KILLS/REBINDS the tracked name via a form the tracker does not
+    model. The value at the sink is provably NOT the source, so it MUST stay a LEAD (never a signed FACT that
+    would re-verify offline on benign code)."""
+    lead = confirm_code_region("app/mod.py", 3, src, "direct-taint")
+    assert not lead.confirmed, f"tier-d {label}: a killed/rebound taint must NOT mint a FACT"
+    with pytest.raises(ValueError):
+        static_fact_finding(lead)
+
+
+# (c) insecure-flag: a session VARIABLE resolved by the cross-statement binding tracker, then REASSIGNED to a
+# non-session before the flagged call. The value at the call is provably not a session, so it is a LEAD.
+_C_SESSION_KILL_LEADS = [
+    # `s` rebound to an int — the flow-INSENSITIVE round-6 collector minted a false FACT on this benign code.
+    ("session-reassigned-to-int",
+     "import requests\ndef f(u):\n    s = requests.Session()\n    s = 123\n    s.get(u, verify=False)\n"),
+    # `s` rebound by an import (the same class of miss the tier-d import-rebind control covers).
+    ("session-import-rebind",
+     "import requests\ndef f(u):\n    s = requests.Session()\n    import s\n    s.get(u, verify=False)\n"),
+    # `s` rebound to a plainly-non-session literal string.
+    ("session-reassigned-to-str",
+     "import requests\ndef f(u):\n    s = requests.Session()\n    s = 'closed'\n    s.get(u, verify=False)\n"),
+]
+
+
+@pytest.mark.parametrize("label,src", _C_SESSION_KILL_LEADS)
+def test_tier_c_session_var_reassigned_to_non_session_is_a_lead(label, src) -> None:
+    """A session variable REASSIGNED to a non-session before the flagged call is no longer a session at the
+    call. `s.get(..., verify=False)` on the reassigned `s` carries no proven HTTP/TLS property, so it MUST
+    stay a LEAD — the flow-INSENSITIVE session collector minted a false FACT here."""
+    lead = confirm_code_region("app/mod.py", 3, src, "insecure-flag-literal")
+    assert not lead.confirmed, f"tier-c {label}: a reassigned session var must NOT mint a FACT"
+    with pytest.raises(ValueError):
+        static_fact_finding(lead)
+
+
+def test_flow_sensitive_fix_keeps_the_genuine_positives_minting() -> None:
+    """The inverted (soundness-first) tracker keeps every genuine positive the task requires minting: a direct
+    source->sink, a `cmd = source; sink(cmd)`, a single-hop alias (tier d); and a session-var
+    `requests.Session().get(verify=False)`, a call-site-direct `requests.get(verify=False)`, and
+    `ssl.wrap_socket(cert_reqs=CERT_NONE)` (tier c)."""
+    positives = [
+        ("direct-taint", 'import os\ndef run():\n    os.system(request.args["c"])\n'),
+        ("direct-taint", 'import os\ndef run():\n    cmd = request.args["c"]\n    os.system(cmd)\n'),
+        ("direct-taint", 'import os\ndef run():\n    a = request.args["c"]\n    b = a\n    os.system(b)\n'),
+        ("insecure-flag-literal",
+         "import requests\ndef f(u):\n    s = requests.Session()\n    return s.get(u, verify=False)\n"),
+        ("insecure-flag-literal", "import requests\ndef fetch(u):\n    return requests.get(u, verify=False)\n"),
+        ("insecure-flag-literal",
+         "import ssl, socket\ndef w(sock):\n    return ssl.wrap_socket(sock, cert_reqs=ssl.CERT_NONE)\n"),
+    ]
+    for rule_id, src in positives:
+        fact = confirm_code_region("app/mod.py", 3, src, rule_id)
+        assert fact.confirmed and fact.confirmed_by == "static_rule", f"{rule_id}: genuine positive must MINT"
+        # a genuine positive serialises + re-verifies offline over the retained bytes.
+        r = reverify_finding(static_fact_finding(fact))
+        assert r.ok and r.reproduced, f"{rule_id}: the genuine positive must re-verify offline"
