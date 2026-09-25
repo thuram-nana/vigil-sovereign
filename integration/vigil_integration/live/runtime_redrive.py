@@ -65,6 +65,45 @@ _SSI_PARAMS = ("doc", "document", "file", "page", "template", "include", "name",
                "tpl", "fragment")
 _MAX_CANDIDATE_NAMES = 12
 
+# --- W2: three more HTTP-response-derived FACT arms (SSTI / boolean-blind / time-based) ---------------
+# Each is a sibling of :func:`runtime_redrive` (runner-owned gated re-drive → the matching frozen oracle →
+# admit()+certify_admitted(provenance="live_redrive")) but is NOT in ``RUNTIME_FACT_CLASSES``, so the engage
+# ``_redrive_spec`` seam is UNCHANGED — these arms are reached only from the Strix proof-sink dispatch rail
+# (proof/run.py). No new OracleKind: SSTI reuses EVALUATION, boolean reuses BOOLEAN_INFERENCE, timing reuses
+# TIMING (all already frozen in _ALL_ORACLES). The registered evidence branch each admits through:
+_SSTI_BRANCH = "ssti.evaluation"
+_BOOLEAN_BRANCH = "boolean_sqli.sprt_inference"
+_TIMING_BRANCH = "time_based_sqli.timing_inference"
+
+# Where each blind/response-derived arm SEEKS a FACT if the proposed URL carries no usable parameter (mirrors
+# _XSS_PARAMS). A CLEAN would be bounded to these — but these branches are not clean-capable, so the set only
+# bounds where a FACT is sought, never a claim of absence.
+_SSTI_PARAMS = ("q", "query", "search", "name", "input", "data", "msg", "message", "comment", "title",
+                "tpl", "template", "expr", "eval", "page")
+_BOOLEAN_PARAMS = ("id", "q", "query", "search", "name", "user", "uid", "item", "category", "cat", "page",
+                   "sort", "order", "filter")
+_TIMING_PARAMS = ("id", "q", "query", "search", "name", "user", "uid", "item", "category", "sort", "filter")
+
+# The RUNNER-crafted probe payloads. The RUNNER owns these (never a Strix/LLM value), so a FACT rests on
+# VIGIL's OWN injected expression/clause. SSTI: distinctive per-probe products go in ``{n1}``/``{n2}`` (filled
+# per probe with a fresh random pair). Boolean: (true_clause, false_clause) pairs — a true clause that breaks
+# out and evaluates TRUE vs a false one that evaluates FALSE, over the same insertion point. Timing:
+# (benign, low_sleep, high_sleep, low_ms, high_ms) — a benign value vs two SLEEP doses for the dose-response.
+_SSTI_EXPR_TEMPLATES = ("{{{{{n1}*{n2}}}}}", "${{{n1}*{n2}}}", "#{{{n1}*{n2}}}", "{{{n1}*{n2}}}")
+_BOOLEAN_CLAUSE_PAIRS = (
+    ("x' OR '1'='1", "x' OR '1'='2"),        # single-quote string-literal breakout
+    ("1 OR 1=1", "1 OR 1=2"),                # numeric context
+    ('x" OR "1"="1', 'x" OR "1"="2'),        # double-quote string-literal breakout
+)
+# doses in SECONDS for the SLEEP payloads + the injected milliseconds the timing oracle expects.
+_TIMING_LOW_S, _TIMING_HIGH_S = 0.3, 0.6
+_TIMING_SLEEP_TEMPLATES = (
+    "x' OR SLEEP({s})-- -",                  # MySQL string-literal breakout
+    "1 OR SLEEP({s})",                       # MySQL numeric context
+    "x'||pg_sleep({s})--",                   # PostgreSQL
+)
+_STAT_MAX_PARAMS = 4     # blind/statistical arms are expensive — probe at most this many insertion points
+
 # Fixed framework/CMS paths + the distinctive signature each leaks, for the exposure class. Each signature is
 # specific enough that its presence is the proof (the predicate oracle over the response body); a 404 or a
 # signature-less body does not fire (PathProbeCheck returns None on 404 — nothing to adjudicate).
@@ -310,7 +349,7 @@ def runtime_redrive(url: str, *, slug: str, engagement_slug: str, signers: "list
                 if state["channels"] <= before:
                     res.inconclusive.append((bug_class, f"{probe_url}#control"))
                     continue
-                control_body = _body(control)
+                control_body = _body_text(control)
                 # TREATMENT: a fresh, UNPREDICTABLE product injected as an SSI set+echo directive pair. The
                 # var name is nonce-scoped so the directive is well-formed and self-contained.
                 n1 = secrets.randbelow(90000) + 10000
@@ -375,3 +414,290 @@ def runtime_redrive(url: str, *, slug: str, engagement_slug: str, signers: "list
     except Exception as e:  # noqa: BLE001 — a probe error never fabricates a FACT; record + return what held
         res.notes.append(f"runtime_redrive error: {type(e).__name__}: {e}")
     return res
+
+
+# =====================================================================================================
+# W2 — shared machinery + the three new response-derived FACT arms (SSTI / boolean-blind / time-based).
+# =====================================================================================================
+
+
+def _candidate_names_hint(url: str, base_names: "tuple[str, ...]", hint: "str | None",
+                          max_names: int) -> "list[str]":
+    """The candidate query-parameter names to probe: the finding's OWN declared ``hint`` param FIRST (so the
+    endpoint's real parameter is exercised), then the URL's existing params, then the well-known set —
+    de-duped case-insensitively and capped to ``max_names``. Purely lexical (no network)."""
+    names = _candidate_query_names(url, base_names)
+    if hint and hint.strip():
+        h = hint.strip()
+        names = [h] + [n for n in names if n.lower() != h.lower()]
+    return names[:max_names]
+
+
+def _admit_one(res: "RuntimeRedriveResult", *, branch: str, bug_class: str, engagement_slug: str,
+               signers: "list[tuple[str, str]]", context: dict, item: str, surface: str,
+               fired: bool, conclusive: bool, body_unreadable: bool) -> Any:
+    """Admit ONE branch outcome against its declared capability and, on a FACT-capable fire, mint a signed,
+    offline-re-verifiable certificate over VIGIL's OWN reproduced context (provenance=live_redrive). A
+    standalone twin of the ``_admit`` closure in :func:`runtime_redrive`, shared by the three W2 arms so the
+    admission + certification discipline is identical. Returns the ``AdapterResult`` (``.is_fact``)."""
+    from ..oracle_adapter import certify_admitted  # noqa: PLC0415 (FATAL-2: function-local)
+    from .verdict import Verdict, admit, compose  # noqa: PLC0415
+
+    res.surfaces.setdefault(bug_class, set()).add(surface)
+    observed = {"channel_established": True, "body_semantically_available": not body_unreadable,
+                "gate_authorized": True}
+    finding = {"check_id": f"rt:{bug_class}:{item}#{branch}", "bug_class": bug_class,
+               "insertion_point": item, "oracle_context": context}
+    admitted = admit(branch, fired=fired, conclusive=conclusive, observed=observed)
+    res.admissions.append((branch, admitted.verdict.value, admitted.reason))
+    bm = res.branch_verdicts.setdefault(bug_class, {})
+    prior = bm.get(branch)
+    bm[branch] = compose([prior, admitted.verdict.value]).value if prior else admitted.verdict.value
+    r = certify_admitted(finding, admitted, engagement_slug=engagement_slug, signers=signers,
+                         provenance="live_redrive")
+    res.contexts[r.finding_ref] = context
+    if r.is_fact:
+        res.facts.append(r)
+    elif admitted.verdict is Verdict.INCONCLUSIVE:
+        res.inconclusive.append((bug_class, f"{item}#{branch}"))
+    else:
+        res.leads.append(r)
+    return r
+
+
+def _stat_setup(url: str, slug: str, bug_class: str, branch: str, timeout: float):
+    """Shared preamble for the three W2 arms: build the result, verify the branch is REGISTERED (fail-closed),
+    run the URL-shaped charter gate BEFORE any traffic, and open the reviewed gated send. Returns
+    ``(res, send, state)`` on success, or ``(res, None, None)`` when the arm must return early (unregistered
+    branch / gate refusal)."""
+    from framework.v2.verify.reachability_cloud import _authorize  # noqa: PLC0415 — the URL-shaped gate
+    from .verdict import branch_ids  # noqa: PLC0415
+    from .web_redrive import _gated_web_send  # noqa: PLC0415 — the reviewed gated, DNS-pinned, no-proxy send
+
+    res = RuntimeRedriveResult(url=url, bug_class=bug_class)
+    if branch not in branch_ids():
+        res.notes.append(f"branch {branch!r} is not registered — cannot admit (fail-closed)")
+        return res, None, None
+    refusal = _authorize(url, slug)
+    if refusal is not None:
+        res.refused = True
+        res.notes.append(f"refused before any traffic: {refusal}")
+        return res, None, None
+    send, state = _gated_web_send(slug, timeout=timeout)
+    return res, send, state
+
+
+def ssti_redrive(url: str, *, slug: str, engagement_slug: str, signers: "list[tuple[str, str]]",
+                 param: "str | None" = None, timeout: float = 8.0) -> "RuntimeRedriveResult":
+    """Re-drive ``url`` for SERVER-SIDE TEMPLATE / EXPRESSION-LANGUAGE injection and mint a signed FACT ONLY
+    when the deterministic ``evaluation_oracle`` confirms the server EVALUATED a runner-injected expression:
+    a PER-PROBE random product ``N1*N2`` present in the FRESH response body, the raw expression ABSENT
+    (reflected-verbatim ⇒ a conclusive clean, not a fire), and a benign no-expression CONTROL lacking it.
+
+    FP boundary (all → LEAD): a raw expression that survives unevaluated (reflected==sent), a product present
+    in the benign control, and an arithmetic coincidence (guarded by the unique per-probe product + raw-absent
+    check). Never raises."""
+    import secrets  # noqa: PLC0415 — per-probe UNPREDICTABLE product (not learning/reward rng)
+
+    from framework.v2.scanner.insertion import HttpRequest, InsertionKind, RequestTemplate  # noqa: PLC0415
+    from framework.v2.verify.adapter import FindingContext  # noqa: PLC0415
+    from framework.v2.verify.oracles import evaluation_oracle  # noqa: PLC0415
+
+    bug_class = "ssti"
+    res, send, state = _stat_setup(url, slug, bug_class, _SSTI_BRANCH, timeout)
+    if send is None:
+        return res
+    nonce = _sha(url)
+    try:
+        for name in _candidate_names_hint(url, _SSTI_PARAMS, param, _MAX_CANDIDATE_NAMES):
+            probe_url = _url_with_param(url, name)
+            tmpl = RequestTemplate(HttpRequest(method="GET", url=probe_url))
+            point = next((p for p in tmpl.insertion_points(kinds=(InsertionKind.QUERY_VALUE,))
+                          if p.name.lower() == name.lower()), None)
+            if point is None:
+                continue
+            # CONTROL first: a benign, non-expression value. Its body must NOT already carry the product.
+            before = state["channels"]
+            try:
+                control = send(tmpl.render(point, f"vigilbenign{nonce}"))
+            except Exception as e:  # noqa: BLE001
+                res.notes.append(f"ssti control error [{name}]: {type(e).__name__}: {e}")
+                continue
+            if state["channels"] <= before:
+                res.inconclusive.append((bug_class, f"{probe_url}#control"))
+                continue
+            control_body = _body_text(control)
+            fired_here = False
+            for tpl in _SSTI_EXPR_TEMPLATES:
+                n1 = secrets.randbelow(90000) + 10000
+                n2 = secrets.randbelow(90000) + 10000
+                product = str(n1 * n2)
+                payload = tpl.format(n1=n1, n2=n2)
+                before2, before_bodies2 = state["channels"], state["body_unavailable"]
+                try:
+                    probe = send(tmpl.render(point, payload))
+                except Exception as e:  # noqa: BLE001
+                    res.notes.append(f"ssti probe error [{name}]: {type(e).__name__}: {e}")
+                    continue
+                if state["channels"] <= before2:
+                    res.inconclusive.append((bug_class, f"{probe_url}#{point.id}"))
+                    continue
+                fc = FindingContext.from_evaluation(payload, product, _body_text(probe),
+                                                    control_body=control_body, bug_class="ssti")
+                context = fc.to_verifier_context()
+                signal = evaluation_oracle(context.get("eval_raw", ""), context.get("eval_expected", ""),
+                                           context.get("eval_observed", ""), context.get("eval_control"))
+                r = _admit_one(res, branch=_SSTI_BRANCH, bug_class=bug_class,
+                               engagement_slug=engagement_slug, signers=signers, context=context,
+                               item=f"{probe_url}#{point.id}", surface=f"query:{name}",
+                               fired=signal.fired, conclusive=signal.conclusive,
+                               body_unreadable=state["body_unavailable"] > before_bodies2)
+                if r.is_fact:
+                    fired_here = True
+                    break
+            if fired_here:
+                break     # one FACT is decisive for a re-drive — stop (bounded work)
+    except Exception as e:  # noqa: BLE001 — a probe error never fabricates a FACT; record + return what held
+        res.notes.append(f"ssti_redrive error: {type(e).__name__}: {e}")
+    return res
+
+
+def boolean_redrive(url: str, *, slug: str, engagement_slug: str, signers: "list[tuple[str, str]]",
+                    param: "str | None" = None, timeout: float = 8.0, n_max: int = 14) -> "RuntimeRedriveResult":
+    """Re-drive ``url`` for BOOLEAN-BLIND injection and mint a signed FACT ONLY when the deterministic
+    ``boolean_inference_oracle`` reaches its SPRT confirm boundary over N runner-crafted true/false probe
+    PAIRS: within-pair the two FALSE responses must AGREE (a dynamic-page control) while the TRUE clause
+    differs. Reuses the reviewed ``BooleanInferenceCheck`` discipline over VIGIL's OWN gated send.
+
+    FP boundary (all → LEAD): an endpoint whose response varies with ANY input (within-pair differential
+    present ⇒ signal 0 every round ⇒ SPRT refutes), and a single flip without SPRT significance (no boundary
+    reached ⇒ inconclusive). Never raises."""
+    from framework.v2.scanner.checks import BooleanInferenceCheck  # noqa: PLC0415
+    from framework.v2.scanner.insertion import HttpRequest, InsertionKind, RequestTemplate  # noqa: PLC0415
+    from framework.v2.verify.oracles import boolean_inference_oracle  # noqa: PLC0415
+
+    bug_class = "boolean_sqli"
+    res, send, state = _stat_setup(url, slug, bug_class, _BOOLEAN_BRANCH, timeout)
+    if send is None:
+        return res
+    # A targeted re-drive of a KNOWN param probes ONLY that param (mirrors the errsig arm — bounded work on
+    # the expensive SPRT arm); a captureless finding with no declared param falls back to the candidate set.
+    max_params = 1 if param else _STAT_MAX_PARAMS
+    try:
+        for name in _candidate_names_hint(url, _BOOLEAN_PARAMS, param, max_params):
+            probe_url = _url_with_param(url, name)
+            tmpl = RequestTemplate(HttpRequest(method="GET", url=probe_url))
+            point = next((p for p in tmpl.insertion_points(kinds=(InsertionKind.QUERY_VALUE,))
+                          if p.name.lower() == name.lower()), None)
+            if point is None:
+                continue
+            fired_here = False
+            for true_clause, false_clause in _BOOLEAN_CLAUSE_PAIRS:
+                chk = BooleanInferenceCheck(id="boolean-redrive", bug_class="boolean_sqli",
+                                            true_clause=true_clause, false_clause=false_clause, n_max=n_max)
+                before, before_bodies = state["channels"], state["body_unavailable"]
+                try:
+                    fc = chk.probe(tmpl, point, send)
+                except Exception as e:  # noqa: BLE001
+                    res.notes.append(f"boolean probe error [{name}]: {type(e).__name__}: {e}")
+                    continue
+                if state["channels"] <= before or fc is None:
+                    res.inconclusive.append((bug_class, f"{probe_url}#{point.id}"))
+                    continue
+                context = fc.to_verifier_context()
+                signal = boolean_inference_oracle(context.get("probe_rounds"),
+                                                  discriminator=context.get("discriminator"))
+                r = _admit_one(res, branch=_BOOLEAN_BRANCH, bug_class=bug_class,
+                               engagement_slug=engagement_slug, signers=signers, context=context,
+                               item=f"{probe_url}#{point.id}", surface=f"query:{name}",
+                               fired=signal.fired, conclusive=signal.conclusive,
+                               body_unreadable=state["body_unavailable"] > before_bodies)
+                if r.is_fact:
+                    fired_here = True
+                    break
+            if fired_here:
+                break
+    except Exception as e:  # noqa: BLE001 — a probe error never fabricates a FACT; record + return what held
+        res.notes.append(f"boolean_redrive error: {type(e).__name__}: {e}")
+    return res
+
+
+def timing_redrive(url: str, *, slug: str, engagement_slug: str, signers: "list[tuple[str, str]]",
+                   param: "str | None" = None, timeout: float = 8.0, samples: int = 6) -> "RuntimeRedriveResult":
+    """Re-drive ``url`` for TIME-BASED blind injection and mint a signed FACT ONLY when the deterministic
+    ``timing_oracle`` confirms a delay: a Mann-Whitney U rejection, a Hodges-Lehmann median shift clearing the
+    effect-size floor, AND a dose-response that SCALES with the injected delay (a low + a high SLEEP dose).
+    Benign and delay-injecting requests are interleaved (the reviewed ``TimingCheck`` discipline) so drift
+    biases both equally, over VIGIL's OWN gated send.
+
+    FP boundary (all → LEAD): a uniformly slow/loaded endpoint (the test fails to reject / the floor is not
+    cleared), a one-off latency spike (no distribution shift), and a constant offset with no dose-response
+    (the ratio fails to scale). Never raises."""
+    from framework.v2.scanner.checks import TimingCheck  # noqa: PLC0415
+    from framework.v2.scanner.insertion import HttpRequest, InsertionKind, RequestTemplate  # noqa: PLC0415
+    from framework.v2.verify.oracles import timing_oracle  # noqa: PLC0415
+
+    bug_class = "time_based_sqli"
+    res, send, state = _stat_setup(url, slug, bug_class, _TIMING_BRANCH, timeout)
+    if send is None:
+        return res
+    low_ms, high_ms = _TIMING_LOW_S * 1000.0, _TIMING_HIGH_S * 1000.0
+    # A targeted re-drive of a KNOWN param probes ONLY that param (mirrors the errsig arm — bounded work on
+    # the expensive timing arm); a captureless finding with no declared param falls back to the candidate set.
+    max_params = 1 if param else _STAT_MAX_PARAMS
+    try:
+        for name in _candidate_names_hint(url, _TIMING_PARAMS, param, max_params):
+            probe_url = _url_with_param(url, name)
+            tmpl = RequestTemplate(HttpRequest(method="GET", url=probe_url))
+            point = next((p for p in tmpl.insertion_points(kinds=(InsertionKind.QUERY_VALUE,))
+                          if p.name.lower() == name.lower()), None)
+            if point is None:
+                continue
+            fired_here = False
+            for tpl in _TIMING_SLEEP_TEMPLATES:
+                low = tpl.format(s=_TIMING_LOW_S)
+                high = tpl.format(s=_TIMING_HIGH_S)
+                chk = TimingCheck(id="timing-redrive", bug_class="time_based_sqli",
+                                  benign=f"vigilbenign{_sha(name)}", sleep_payload=low, injected_ms=low_ms,
+                                  samples=samples, dose_payload=high, dose_ms=high_ms)
+                before = state["channels"]
+                try:
+                    fc = chk.probe(tmpl, point, send)
+                except Exception as e:  # noqa: BLE001
+                    res.notes.append(f"timing probe error [{name}]: {type(e).__name__}: {e}")
+                    continue
+                if state["channels"] <= before or fc is None:
+                    res.inconclusive.append((bug_class, f"{probe_url}#{point.id}"))
+                    continue
+                context = fc.to_verifier_context()
+                signal = timing_oracle(context.get("baseline_latencies") or [],
+                                       context.get("treatment_latencies") or [],
+                                       injected_ms=context.get("timing_injected_ms"),
+                                       alpha=float(context.get("timing_alpha", 0.01)),
+                                       dose=context.get("timing_dose"))
+                # Timing is service-response (latency) derived, not body-derived — body readability is
+                # irrelevant to this branch, so it never gates the admission.
+                r = _admit_one(res, branch=_TIMING_BRANCH, bug_class=bug_class,
+                               engagement_slug=engagement_slug, signers=signers, context=context,
+                               item=f"{probe_url}#{point.id}", surface=f"query:{name}",
+                               fired=signal.fired, conclusive=signal.conclusive, body_unreadable=False)
+                if r.is_fact:
+                    fired_here = True
+                    break
+            if fired_here:
+                break
+    except Exception as e:  # noqa: BLE001 — a probe error never fabricates a FACT; record + return what held
+        res.notes.append(f"timing_redrive error: {type(e).__name__}: {e}")
+    return res
+
+
+def _sha(s: str) -> str:
+    """A short, deterministic content-address token (no wallclock/rng) — used for benign control markers and
+    per-probe nonces so a re-drive is replayable and the oracle re-fires identically offline."""
+    import hashlib  # noqa: PLC0415 — stdlib
+    return hashlib.sha256(str(s).encode("utf-8")).hexdigest()[:12]
+
+
+def _body_text(resp: Any) -> str:
+    """The response body as text (module-level twin of the ``_body`` closure in :func:`runtime_redrive`)."""
+    return str(resp.get("body", "")) if isinstance(resp, dict) else str(resp)

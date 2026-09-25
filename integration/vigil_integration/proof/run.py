@@ -660,16 +660,272 @@ def _web_redrive_arm(report: dict, wclass: str, *, run_dir: "str | os.PathLike",
                              engagement_slug=engagement_slug)
 
 
+# ======================================================================================================
+# W2 — four more runner-owned re-drive arms over HTTP-response-derived oracles (no browser, no OOB):
+#   reflected xss (reflection_context), ssti (evaluation), boolean_sqli (boolean_inference/SPRT),
+#   time_based_sqli (timing). Each is a runner-owned gated re-drive whose FACT rests ONLY on VIGIL's OWN
+#   crafted probe + its deterministic oracle (the Strix report is never proof). The three statistical/eval
+#   arms live in ``live.runtime_redrive`` (siblings of ``runtime_redrive``); xss reuses the EXISTING
+#   ``runtime_redrive(claimed_class="xss")`` reflection arm. All four persist an offline-re-verifiable entry.
+#
+# CLASS-SET DISJOINTNESS (W1a red-pen note, pinned by test_redrive_arm_class_sets_are_disjoint): each arm's
+# class set + CWE map is PAIRWISE DISJOINT from every other arm's (web / errsig / xss / ssti / boolean /
+# timing), so arm ORDER can never route a report to the wrong arm. The classifiers are PURE/stdlib (no
+# framework import) so they are safe on the import-clean sink path (FATAL-2), mirroring ``_errsig_redrive_class``.
+# ======================================================================================================
+
+# reflected XSS (CWE-79). NOT stored/dom xss (those are DOM_EXECUTION classes, a separate arm).
+_REFLECTION_REDRIVE_CLASSES = frozenset({"xss"})
+_REFLECTION_ALIASES = {"reflected_xss": "xss", "cross_site_scripting": "xss",
+                       "reflected_cross_site_scripting": "xss", "reflected_xss_injection": "xss"}
+_REFLECTION_CWE_TO_CLASS = {"cwe-79": "xss"}
+
+# SSTI / expression-language evaluation.
+_SSTI_REDRIVE_CLASSES = frozenset({"ssti"})
+_SSTI_ALIASES = {"server_side_template_injection": "ssti", "template_injection": "ssti",
+                 "ssti_injection": "ssti"}
+_SSTI_CWE_TO_CLASS = {"cwe-1336": "ssti"}
+
+# Boolean-blind SQLi. Kept to boolean_sqli ALONE: nosqli/ldap/xpath belong to the errsig arm (disjointness),
+# and boolean-blind SQLi shares CWE-89 with error_based_sqli, so this arm carries NO CWE map (a bare CWE-89
+# routes to the errsig arm; a genuinely-boolean finding that leaks no datastore error simply re-drives there
+# and stays a LEAD — the oracle, not the label, decides). Keyed on an EXPLICIT boolean class only.
+_BOOLEAN_REDRIVE_CLASSES = frozenset({"boolean_sqli"})
+_BOOLEAN_ALIASES = {"blind_sqli": "boolean_sqli", "boolean_based_sqli": "boolean_sqli",
+                    "boolean_blind_sqli": "boolean_sqli"}
+_BOOLEAN_CWE_TO_CLASS: "dict[str, str]" = {}
+
+# Time-based blind SQLi. Same CWE-89 collision as boolean → NO CWE map; keyed on an EXPLICIT time-based class.
+_TIMING_REDRIVE_CLASSES = frozenset({"time_based_sqli"})
+_TIMING_ALIASES = {"time_sqli": "time_based_sqli", "time_based_blind_sqli": "time_based_sqli",
+                   "blind_time_sqli": "time_based_sqli", "time_based_blind_sql_injection": "time_based_sqli"}
+_TIMING_CWE_TO_CLASS: "dict[str, str]" = {}
+
+
+def _classify_redrive(report: Any, classes: "frozenset[str]", aliases: "dict[str, str]",
+                      cwe_map: "dict[str, str]") -> "str | None":
+    """Shared PURE classifier for the W2 arms: an EXACT ``bug_class``/``finding_class`` match (or a spelling
+    alias), else a tight CWE allow-list. ``None`` ⇒ this arm does not claim the report. Stdlib only (no
+    framework import) so it is safe on the import-clean sink path (FATAL-2), exactly like
+    ``_errsig_redrive_class``."""
+    if not hasattr(report, "get"):
+        return None
+    for key in ("bug_class", "finding_class"):
+        v = str(report.get(key) or "").strip().lower()
+        if v in classes:
+            return v
+        if v in aliases:
+            return aliases[v]
+    m = re.search(r"cwe-\d+", str(report.get("cwe") or "").strip().lower())
+    if m and m.group(0) in cwe_map:
+        return cwe_map[m.group(0)]
+    return None
+
+
+def _reflection_redrive_class(report: Any) -> "str | None":
+    """The reflected-xss class this report maps to (``"xss"``), or ``None``. SINGLE source of truth
+    (``sink._reflection_redrivable`` delegates here)."""
+    return _classify_redrive(report, _REFLECTION_REDRIVE_CLASSES, _REFLECTION_ALIASES, _REFLECTION_CWE_TO_CLASS)
+
+
+def _ssti_redrive_class(report: Any) -> "str | None":
+    """The SSTI class this report maps to (``"ssti"``), or ``None``. SINGLE source of truth
+    (``sink._ssti_redrivable`` delegates here)."""
+    return _classify_redrive(report, _SSTI_REDRIVE_CLASSES, _SSTI_ALIASES, _SSTI_CWE_TO_CLASS)
+
+
+def _boolean_redrive_class(report: Any) -> "str | None":
+    """The boolean-blind SQLi class this report maps to (``"boolean_sqli"``), or ``None``. SINGLE source of
+    truth (``sink._boolean_redrivable`` delegates here)."""
+    return _classify_redrive(report, _BOOLEAN_REDRIVE_CLASSES, _BOOLEAN_ALIASES, _BOOLEAN_CWE_TO_CLASS)
+
+
+def _timing_redrive_class(report: Any) -> "str | None":
+    """The time-based blind SQLi class this report maps to (``"time_based_sqli"``), or ``None``. SINGLE source
+    of truth (``sink._timing_redrivable`` delegates here)."""
+    return _classify_redrive(report, _TIMING_REDRIVE_CLASSES, _TIMING_ALIASES, _TIMING_CWE_TO_CLASS)
+
+
+class _RuntimeMintResult:
+    """The mint callback's return for a W2 runtime/statistical re-drive arm. The sink reads ONLY ``.is_fact``;
+    ``.result`` (the :class:`live.runtime_redrive.RuntimeRedriveResult`) is retained for the persisted record
+    and for tests (its ``.facts`` carry the signed certs + ``.contexts`` the oracle_contexts that re-verify
+    OFFLINE). Deliberately has NO ``engine_class`` (errsig) / ``reproduced`` (capture) attribute, so a
+    capture-bearing report still takes the executor-capture path (pinned by test)."""
+
+    __slots__ = ("is_fact", "result")
+
+    def __init__(self, *, is_fact: bool, result: Any) -> None:
+        self.is_fact = is_fact
+        self.result = result
+
+
+def _persist_runtime_redrive(run_dir: "str | os.PathLike", report: dict, res: Any) -> None:
+    """Best-effort Proof-Studio record of a W2 runtime re-drive (mirrors ``_persist_web_redrive``). A hiccup
+    here must NEVER un-mint — the signed cert already exists in ``res.facts``."""
+    d = Path(run_dir) / PROOFS_SUBDIR
+    d.mkdir(parents=True, exist_ok=True)
+    ref = str(_finding_from_report(report)["check_id"])
+    rec = {
+        "kind": "runtime_redrive",
+        "finding_ref": ref,
+        "bug_class": str(getattr(res, "bug_class", "") or ""),
+        "url": str(getattr(res, "url", "") or ""),
+        "n_facts": int(getattr(res, "n_facts", 0) or 0),
+        "fact_refs": [getattr(f, "finding_ref", "") for f in getattr(res, "facts", []) or []],
+        "family_verdict": res.family_verdict(str(getattr(res, "bug_class", "") or ""))
+        if hasattr(res, "family_verdict") else "",
+        "refused": bool(getattr(res, "refused", False)),
+        "inconclusive": [list(x) for x in (getattr(res, "inconclusive", []) or [])],
+        "notes": list(getattr(res, "notes", []) or []),
+    }
+    (d / f"runtimeredrive-{hashlib.sha256(ref.encode('utf-8')).hexdigest()[:16]}.json").write_text(
+        json.dumps(rec, indent=2, sort_keys=True), encoding="utf-8")
+
+
+def _persist_runtime_reverifiable(run_dir: "str | os.PathLike", res: Any) -> None:
+    """Append (dedup by check_id) each of a runtime re-drive's signed FACTs to the run's re-verifiable report,
+    storing the SAME JSON-safe ``oracle_context`` the FACT was minted over (from ``res.contexts``) DIRECTLY —
+    the boolean/timing SPRT/latency contexts are not reconstructable via ``context_from_exchanges``, so unlike
+    ``_persist_reverifiable`` this stores the retained context as-is. ``framework.v2 verify`` re-fires it
+    byte-identically (``FindingContext.model_validate`` round-trips the ``to_verifier_context`` shape)."""
+    facts = list(getattr(res, "facts", []) or [])
+    contexts = dict(getattr(res, "contexts", {}) or {})
+    if not facts:
+        return
+    doc = read_reverifiable(run_dir)
+    by_id = {str(f.get("check_id")): f for f in doc["active_findings"] if isinstance(f, dict)}
+    for fact in facts:
+        ref = str(getattr(fact, "finding_ref", "") or "")
+        ctx = contexts.get(ref)
+        if not ref or not ctx:
+            continue
+        entry = {
+            "check_id": ref,
+            "bug_class": str(getattr(fact, "bug_class", "") or getattr(res, "bug_class", "") or ""),
+            # the ORACLE FAMILY this FACT was confirmed on (the remediation re-drive pins to it).
+            "channel": str(getattr(fact, "confirmed_by", "") or ""),
+            "insertion_point": "",
+            "confirmed_by": str(getattr(fact, "confirmed_by", "") or ""),
+            "confidence": float(getattr(fact, "confidence", 0.0) or 0.0),
+            "action_id": "poc-" + hashlib.sha256(ref.encode("utf-8")).hexdigest()[:16],
+            "oracle_context": ctx,
+        }
+        signed = getattr(fact, "signed", None)
+        if signed is not None:
+            try:
+                entry["signed_certificate"] = signed.model_dump(mode="json")
+            except Exception:  # noqa: BLE001 — a non-serializable cert is dropped; reverify re-fires the ctx
+                pass
+        by_id[ref] = entry
+    findings = sorted(by_id.values(), key=lambda f: str(f.get("check_id")))
+    path = _proofs_dir(run_dir) / REVERIFIABLE_NAME
+    path.write_text(json.dumps({"active_findings": findings}, sort_keys=True), encoding="utf-8")
+    try:
+        os.chmod(path, 0o600)
+    except OSError:
+        pass
+
+
+def _finish_runtime_arm(report: dict, res: Any, *, run_dir: "str | os.PathLike") -> "Any | None":
+    """Persist a runtime re-drive result (Proof-Studio record + offline-reverifiable FACTs) and wrap it as a
+    ``_RuntimeMintResult``. Persistence is best-effort: a signed FACT is never un-minted by a persist hiccup."""
+    if res is None:
+        return None
+    try:
+        _persist_runtime_redrive(run_dir, report, res)
+    except Exception:  # noqa: BLE001 — persistence is best-effort
+        pass
+    if int(getattr(res, "n_facts", 0) or 0) > 0:
+        try:
+            _persist_runtime_reverifiable(run_dir, res)
+        except Exception:  # noqa: BLE001
+            pass
+    return _RuntimeMintResult(is_fact=int(getattr(res, "n_facts", 0) or 0) > 0, result=res)
+
+
+def _reflection_redrive(report: dict, cls: str, *, run_dir: "str | os.PathLike",
+                        signers: "list[tuple[str, str]]", engagement_slug: str,
+                        control_fetch: "Optional[Callable[[dict], bytes | None]]" = None) -> "Any | None":
+    """Rail adapter for reflected XSS: re-drive the finding's ``endpoint`` through the EXISTING
+    ``runtime_redrive(claimed_class="xss")`` reflection arm; a FACT is minted ONLY when the reflection_context
+    oracle reports the ``html_tag`` breakout over VIGIL's own gated capture. No control_fetch (the arm crafts
+    its own canary). A missing endpoint / gate refusal / non-fire ⇒ LEAD. Never raises."""
+    url = str((report or {}).get("endpoint") or "").strip()
+    if not url:
+        return None
+    try:
+        from ..live.runtime_redrive import runtime_redrive  # noqa: PLC0415 — pulls framework at CALL time
+        res = runtime_redrive(url, slug=engagement_slug, engagement_slug=engagement_slug, signers=signers,
+                              claimed_class="xss")
+    except Exception as exc:  # noqa: BLE001 — a re-drive we could not RUN → LEAD (never a false CLEAN)
+        _record_degraded(run_dir, REDRIVE_FAILED, "proof.run._reflection_redrive", exc)
+        return None
+    return _finish_runtime_arm(report, res, run_dir=run_dir)
+
+
+def _stat_redrive_arm(report: dict, fn_name: str, where: str, *, run_dir: "str | os.PathLike",
+                      signers: "list[tuple[str, str]]", engagement_slug: str) -> "Any | None":
+    """Shared adapter for the three statistical/eval W2 arms (ssti / boolean / timing): extract
+    {endpoint, param} from the report and drive the named ``live.runtime_redrive`` function with VIGIL's OWN
+    gated probes. A missing endpoint / gate refusal / oracle non-fire ⇒ LEAD. Never raises."""
+    url = str((report or {}).get("endpoint") or "").strip()
+    if not url:
+        return None
+    param = (str((report or {}).get("param") or (report or {}).get("insertion_point") or "").strip()
+             or None)
+    try:
+        from ..live import runtime_redrive as _rr  # noqa: PLC0415 — pulls framework at CALL time (offense)
+        fn = getattr(_rr, fn_name)
+        res = fn(url, slug=engagement_slug, engagement_slug=engagement_slug, signers=signers, param=param)
+    except Exception as exc:  # noqa: BLE001 — a re-drive we could not RUN → LEAD (never a false CLEAN)
+        _record_degraded(run_dir, REDRIVE_FAILED, where, exc)
+        return None
+    return _finish_runtime_arm(report, res, run_dir=run_dir)
+
+
+def _ssti_redrive(report: dict, cls: str, *, run_dir: "str | os.PathLike",
+                  signers: "list[tuple[str, str]]", engagement_slug: str,
+                  control_fetch: "Optional[Callable[[dict], bytes | None]]" = None) -> "Any | None":
+    """Rail adapter for SSTI: mint ONLY when the evaluation oracle confirms the server EVALUATED a
+    runner-injected per-probe product (raw absent, control lacks it)."""
+    return _stat_redrive_arm(report, "ssti_redrive", "proof.run._ssti_redrive",
+                             run_dir=run_dir, signers=signers, engagement_slug=engagement_slug)
+
+
+def _boolean_redrive(report: dict, cls: str, *, run_dir: "str | os.PathLike",
+                     signers: "list[tuple[str, str]]", engagement_slug: str,
+                     control_fetch: "Optional[Callable[[dict], bytes | None]]" = None) -> "Any | None":
+    """Rail adapter for boolean-blind SQLi: mint ONLY when the boolean_inference SPRT confirms over
+    runner-crafted true/false probe pairs with the within-pair dynamic-page control."""
+    return _stat_redrive_arm(report, "boolean_redrive", "proof.run._boolean_redrive",
+                             run_dir=run_dir, signers=signers, engagement_slug=engagement_slug)
+
+
+def _timing_redrive(report: dict, cls: str, *, run_dir: "str | os.PathLike",
+                    signers: "list[tuple[str, str]]", engagement_slug: str,
+                    control_fetch: "Optional[Callable[[dict], bytes | None]]" = None) -> "Any | None":
+    """Rail adapter for time-based blind SQLi: mint ONLY when the timing oracle confirms a delay by
+    Mann-Whitney U + effect-size floor + dose-response over runner-crafted SLEEP probes."""
+    return _stat_redrive_arm(report, "timing_redrive", "proof.run._timing_redrive",
+                             run_dir=run_dir, signers=signers, engagement_slug=engagement_slug)
+
+
 # The GENERIC Strix→re-drive dispatch rail. Each ARM is ``(classify, drive, requires_no_capture)``: the
 # classifier maps a Strix report to the class it can re-drive (or None), and the driver re-sends VIGIL's OWN
 # gated probe and mints ONLY over VIGIL's fresh capture + its oracle (never the Strix report). Arms are tried
 # in order; the FIRST that claims the report owns it. ``requires_no_capture`` keeps a capture-bearing report
 # on the executor-capture mint path below (the web arm intercepts either way — web classes are disjoint from
-# injection classes). Later waves APPEND xss/ssti/timing/OOB arms here — the sink gate + this tuple are the
-# only two edits a new runner-owned re-drive arm needs.
+# injection classes). Every arm's class set is PAIRWISE DISJOINT (test_redrive_arm_class_sets_are_disjoint),
+# so arm ORDER can never route a report to the wrong arm. Adding an arm = append ONE tuple here + one
+# ``or _<x>_redrivable(report)`` clause in sink.py + a classifier + a driver.
 _REDRIVE_ARMS = (
     (_web_redrive_class, _web_redrive_arm, False),
     (_errsig_redrive_class, _strix_errsig_redrive, True),
+    (_reflection_redrive_class, _reflection_redrive, True),
+    (_ssti_redrive_class, _ssti_redrive, True),
+    (_boolean_redrive_class, _boolean_redrive, True),
+    (_timing_redrive_class, _timing_redrive, True),
 )
 
 
