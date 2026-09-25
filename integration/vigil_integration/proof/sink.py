@@ -60,6 +60,47 @@ def _errsig_redrivable(report: Any) -> bool:
         return False
 
 
+def _reflection_redrivable(report: Any) -> bool:
+    """True when this report is a reflected-xss class VIGIL can re-drive for a FACT with its OWN gated canary
+    probe (W2). Delegates to ``run._reflection_redrive_class`` (single source of truth). Fail-closed."""
+    try:
+        from .run import _reflection_redrive_class  # noqa: PLC0415 — function-local: breaks the run⇄sink cycle
+        return _reflection_redrive_class(report) is not None
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _ssti_redrivable(report: Any) -> bool:
+    """True when this report is an SSTI class VIGIL can re-drive for a FACT with its OWN gated expression probe
+    (W2). Delegates to ``run._ssti_redrive_class`` (single source of truth). Fail-closed."""
+    try:
+        from .run import _ssti_redrive_class  # noqa: PLC0415 — function-local: breaks the run⇄sink cycle
+        return _ssti_redrive_class(report) is not None
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _boolean_redrivable(report: Any) -> bool:
+    """True when this report is a boolean-blind SQLi class VIGIL can re-drive for a FACT with its OWN gated
+    true/false probe pairs (W2). Delegates to ``run._boolean_redrive_class`` (single source of truth).
+    Fail-closed."""
+    try:
+        from .run import _boolean_redrive_class  # noqa: PLC0415 — function-local: breaks the run⇄sink cycle
+        return _boolean_redrive_class(report) is not None
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _timing_redrivable(report: Any) -> bool:
+    """True when this report is a time-based blind SQLi class VIGIL can re-drive for a FACT with its OWN gated
+    SLEEP probes (W2). Delegates to ``run._timing_redrive_class`` (single source of truth). Fail-closed."""
+    try:
+        from .run import _timing_redrive_class  # noqa: PLC0415 — function-local: breaks the run⇄sink cycle
+        return _timing_redrive_class(report) is not None
+    except Exception:  # noqa: BLE001
+        return False
+
+
 @dataclass(frozen=True)
 class SinkResult:
     """What the sink decided about one report. ``gate`` is ``"allow"``/``"deny"``; ``minted`` is True only
@@ -150,12 +191,16 @@ class ProofSink:
             minted = False
             # Mint when the report carries an executor capture (error-signature bytes), OR when it is a
             # web-re-drivable class (S7), OR an injection class the W1a error-signature re-drive rail owns
-            # (error_based_sqli / nosqli / ldap_injection / xpath_injection): the latter two reach the mint
-            # WITHOUT a capture because the VIGIL-owned re-drive crafts its OWN gated traffic against the
-            # endpoint. A mint error (or a re-drive that observed nothing / found the target safe) leaves the
-            # finding a LEAD — never propagates.
+            # (error_based_sqli / nosqli / ldap_injection / xpath_injection), OR one of the four W2
+            # HTTP-response-derived re-drive classes (reflected xss / ssti / boolean_sqli / time_based_sqli):
+            # every re-drivable class reaches the mint WITHOUT a capture because the VIGIL-owned re-drive
+            # crafts its OWN gated traffic against the endpoint (the Strix report is never proof). A mint
+            # error (or a re-drive that observed nothing / found the target safe) leaves the finding a
+            # LEAD — never propagates.
             if self._mint is not None and (report.get(CAPTURE_KEY) is not None or _web_redrivable(report)
-                                           or _errsig_redrivable(report)):
+                                           or _errsig_redrivable(report) or _reflection_redrivable(report)
+                                           or _ssti_redrivable(report) or _boolean_redrivable(report)
+                                           or _timing_redrivable(report)):
                 try:
                     result = self._mint(report)
                     minted = bool(getattr(result, "is_fact", False))
