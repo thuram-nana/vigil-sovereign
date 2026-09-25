@@ -177,28 +177,32 @@ def test_the_service_reachability_port_scanners_are_executable_if_installed():
 
 def test_honesty_a_builder_alone_never_manufactures_executable_without_a_confirmed_presence():
     """HONESTY (the raw-socket / sandbox case). Recognising the ToolSpec builder must NOT flip a raw-socket
-    tool (masscan/rustscan) to EXECUTABLE on its own — EXECUTABLE still requires a probe that CONFIRMS the
-    tool is present and usable. A sandbox that denies CAP_NET_RAW (or simply has no such probe) leaves the
-    presence unconfirmed, and the tool stays UNAVAILABLE — never a green it cannot back. The connect()-based
-    FACT re-drive is unaffected (it needs no raw socket; the H5 conformance battery proves it hermetically)."""
-    brain = {"masscan": "recon", "rustscan": "recon"}
-    cat = {"masscan": {"oracle_family": "service_reachability", "fact_capable": True},
-           "rustscan": {"oracle_family": "service_reachability", "fact_capable": True}}
-    bld = {"masscan", "rustscan"}
+    tool (masscan/rustscan/zmap/unicornscan) to EXECUTABLE on its own — EXECUTABLE still requires a probe that
+    CONFIRMS the tool is present and usable. A sandbox that denies CAP_NET_RAW (or simply has no such probe)
+    leaves the presence unconfirmed, and the tool stays UNAVAILABLE — never a green it cannot back. The
+    connect()-based FACT re-drive is unaffected (it needs no raw socket; the conformance battery proves it
+    hermetically)."""
+    # masscan/rustscan send raw SYN packets; zmap/unicornscan (W1 batch 2) need raw-socket root outright —
+    # all four are the sandbox-CAP_NET_RAW case: a spec builder + fact_capable catalogue row must NOT flip
+    # them to EXECUTABLE without a CONFIRMED usable presence.
+    raw_tools = ("masscan", "rustscan", "zmap", "unicornscan")
+    brain = {t: "recon" for t in raw_tools}
+    cat = {t: {"oracle_family": "service_reachability", "fact_capable": True} for t in raw_tools}
+    bld = set(raw_tools)
     # (a) presence NOT probed (installed=None) — e.g. no host-roster entry backs it: UNAVAILABLE, not green.
     unprobed = {r.name: r for r in join(brain_tools=brain, catalogue=cat, builders=bld, installed=None)}
-    for t in ("masscan", "rustscan"):
+    for t in raw_tools:
         assert unprobed[t].status == UNAVAILABLE and "not probed" in unprobed[t].reason
     # (b) probed and reported NOT installed/usable (the sandbox-without-CAP_NET_RAW verdict): UNAVAILABLE.
     denied = {r.name: r for r in join(brain_tools=brain, catalogue=cat, builders=bld,
-                                      installed={"masscan": {"installed": False}, "rustscan": {"installed": False}})}
-    for t in ("masscan", "rustscan"):
+                                      installed={t: {"installed": False} for t in raw_tools})}
+    for t in raw_tools:
         assert denied[t].status == UNAVAILABLE and denied[t].status != EXECUTABLE
 
     # And on THIS host, the real resolve(probe_host=True) never promises them EXECUTABLE — the presence probe
     # (host roster) does not back a raw-socket-capable install, so they surface UNAVAILABLE with a reason.
     from vigil_integration.live.capability_join import resolve
     live = {r.name: r for r in resolve(probe_host=True)}
-    for t in ("masscan", "rustscan"):
+    for t in raw_tools:
         assert live[t].status != EXECUTABLE, f"{t}: presence not backed here ⇒ never a false EXECUTABLE"
         assert live[t].reason, f"{t}: a non-executable row must explain itself"

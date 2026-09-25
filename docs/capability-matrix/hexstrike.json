@@ -71,12 +71,12 @@
       "privileges": "root",
       "network_effect": "scans-target",
       "oracle_family": "SERVICE_REACHABILITY",
-      "fact_capable": false,
+      "fact_capable": true,
       "excluded": false,
       "claim_families": [
         "network-reachability"
       ],
-      "notes": "H5 batch 2 SERVICE_REACHABILITY reuse, LEAD-only by DEFAULT (checkpoint). zmap is a single-port PROPOSER: build_argv is server-side (zmap -p <one port> -q -o - <target>; the port is a strict single-value schema, never model-supplied) and the parser pins the host to the scope-authorised target. VIGIL re-proves the proposed port with its OWN gated capture_handshake and admits to the LEAD-only hexstrike.service_reachability branch (fired -> LEAD). The FACT path (the SAME re-drive on service_reachability.tcp_handshake, as nmap/masscan) ships DEFAULT-OFF/flag-gated (ToolSpec fact_capable=True) and passes the conformance battery. zmap needs raw-socket root."
+      "notes": "H5 batch 2 SERVICE_REACHABILITY reuse (W1 promotion): runner re-drives its OWN gated TCP handshake per proposed port (the SAME service_reachability.tcp_handshake branch as nmap/masscan); the scanner is only a single-port PROPOSER and its output is never the FACT authority. build_argv is server-side (zmap -p <one port> -q -o - <target>; the port is a strict single-value schema, never model-supplied) and the parser pins the host to the scope-authorised target. Wired FACT-capable via the R4 runner (brains.hexstrike_body._spec_for_kind builds zmap_service_scan(fact_capable=True), so the empty-redrive spec routes to the FACT-capable twin) and passes live.conformance.run_toolspec_conformance; no new oracle, no new FACT branch. The default-mode (fact_capable=False) spec still admits to the LEAD-only hexstrike.service_reachability branch. HONESTY: zmap needs raw-socket root, so the presence probe reports it fact-capable-but-proposer-UNAVAILABLE in a sandbox without CAP_NET_RAW (never a false EXECUTABLE); the connect()-based FACT re-drive needs no raw socket and is unaffected."
     },
     {
       "name": "unicornscan",
@@ -86,12 +86,12 @@
       "privileges": "root",
       "network_effect": "scans-target",
       "oracle_family": "SERVICE_REACHABILITY",
-      "fact_capable": false,
+      "fact_capable": true,
       "excluded": false,
       "claim_families": [
         "network-reachability"
       ],
-      "notes": "H5 batch 2 SERVICE_REACHABILITY reuse, LEAD-only by DEFAULT (checkpoint). unicornscan is a port PROPOSER: build_argv is server-side (unicornscan -mT <target>:<ports>; ports are a strict validated schema, never model-supplied) and the parser takes only the bracketed open port, pinning the host to the scope-authorised target. VIGIL re-proves each proposed port with its OWN gated capture_handshake and admits to the LEAD-only hexstrike.service_reachability branch (fired -> LEAD). The FACT path (the SAME re-drive on service_reachability.tcp_handshake, as nmap/masscan) ships DEFAULT-OFF/flag-gated (ToolSpec fact_capable=True) and passes the conformance battery. unicornscan sends raw packets and needs root."
+      "notes": "H5 batch 2 SERVICE_REACHABILITY reuse (W1 promotion): runner re-drives its OWN gated TCP handshake per proposed port (the SAME service_reachability.tcp_handshake branch as nmap/masscan); the scanner is only a port PROPOSER and its output is never the FACT authority. build_argv is server-side (unicornscan -mT <target>:<ports>; ports are a strict validated schema, never model-supplied) and the parser takes only the bracketed open port, pinning the host to the scope-authorised target. Wired FACT-capable via the R4 runner (brains.hexstrike_body._spec_for_kind builds unicornscan_service_scan(fact_capable=True), so the empty-redrive spec routes to the FACT-capable twin) and passes live.conformance.run_toolspec_conformance; no new oracle, no new FACT branch. The default-mode (fact_capable=False) spec still admits to the LEAD-only hexstrike.service_reachability branch. HONESTY: unicornscan sends raw packets and needs root, so the presence probe reports it fact-capable-but-proposer-UNAVAILABLE in a sandbox without CAP_NET_RAW (never a false EXECUTABLE); the connect()-based FACT re-drive needs no raw socket and is unaffected."
     },
     {
       "name": "sslscan",

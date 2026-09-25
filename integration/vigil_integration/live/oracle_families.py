@@ -381,7 +381,8 @@ def fuse(observations: Iterable[ToolObservation]) -> list[FamilyVote]:
 #     run" merely because it is absent from the governed executor's ``_BUILDERS``.
 # Kept in lock-step with ``hexstrike_body._spec_for_kind`` by
 # ``test_oracle_mapped_tools_all_have_a_spec_builder_no_drift`` (every mapped tool must build a spec).
-SPEC_BUILDER_TOOLS: "frozenset[str]" = frozenset({"nmap", "sslscan", "masscan", "rustscan", "naabu"})
+SPEC_BUILDER_TOOLS: "frozenset[str]" = frozenset({"nmap", "sslscan", "masscan", "rustscan", "naabu",
+                                                  "zmap", "unicornscan"})
 
 
 # ---------------------------------------------------------------------------

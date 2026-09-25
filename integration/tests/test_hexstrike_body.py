@@ -34,6 +34,8 @@ from vigil_integration.live.external_tool import (
     ScopeGate,
     masscan_service_scan,
     nmap_service_scan,
+    unicornscan_service_scan,
+    zmap_service_scan,
 )
 from vigil_integration.live.nonce_ledger import NonceLedger
 
@@ -321,15 +323,16 @@ class _CannedBackend:
 
 
 def test_h5_reachability_tools_are_oracle_mapped_and_dispatch_to_the_runner():
-    """masscan/rustscan/naabu are oracle-mapped: with NO runner provisioned they reach the runner dispatch
-    (a DIFFERENT LEAD reason than an unmapped tool), proving the body routes each to its reachability
-    ToolSpec rather than rejecting it as unmapped."""
+    """masscan/rustscan/naabu and the W1 batch-2 zmap/unicornscan are oracle-mapped: with NO runner
+    provisioned they reach the runner dispatch (a DIFFERENT LEAD reason than an unmapped tool), proving the
+    body routes each to its reachability ToolSpec rather than rejecting it as unmapped."""
     from vigil_integration.brains.hexstrike_body import _ORACLE_MAPPED_TOOLS
 
-    for tool in ("masscan", "rustscan", "naabu"):
+    for tool in ("masscan", "rustscan", "naabu", "zmap", "unicornscan"):
         assert tool in _ORACLE_MAPPED_TOOLS
+        params = {"port": 80} if tool == "zmap" else {"ports": "80"}
         body = HexstrikeAgentBody(runner=None)
-        out = body.execute(ProposedAction(kind=tool, target="127.0.0.1", params={"ports": "80"}),
+        out = body.execute(ProposedAction(kind=tool, target="127.0.0.1", params=params),
                            GateDecision(authorized=True))
         assert "runner not provisioned" in out.blocked_reason, f"{tool} did not reach the runner dispatch: {out}"
     # an unmapped tool is still rejected BEFORE dispatch (control)
@@ -391,6 +394,43 @@ def test_h5_live_masscan_fact_through_the_body(tmp_path: Path):
     assert ledger.is_consumed("cap-1"), "the body must burn the single-use capability nonce (H8f gate parity)"
 
 
+@pytest.mark.parametrize("tool", ["zmap", "unicornscan"])
+def test_h5_batch2_live_fact_through_the_body(tool: str, tmp_path: Path):
+    """W1 batch-2 end-to-end through the BODY: a canned zmap/unicornscan proposal of a REAL open loopback
+    port, dispatched by the body via _spec_for_kind to <tool>_service_scan(fact_capable=True), is re-proven
+    by the runner's OWN gated handshake and minted as 1 SERVICE_REACHABILITY FACT — the SAME
+    service_reachability.tcp_handshake branch nmap/masscan use (no new oracle, no new branch). Hermetic (no
+    tool binary needed — the FACT is VIGIL's connect()-based handshake; the tool is only the proposer)."""
+    _charter(tmp_path, "127.0.0.1")
+    srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    srv.bind(("127.0.0.1", 0))
+    srv.listen(8)
+    port = srv.getsockname()[1]
+    if tool == "zmap":
+        spec = zmap_service_scan(port=port, fact_capable=True)
+        stdout = "127.0.0.1\n"                                    # a responding IP line for the scanned port
+    else:
+        spec = unicornscan_service_scan(ports=str(port), fact_capable=True)
+        stdout = f"TCP open  svc[ {port}]  from 127.0.0.1  ttl 64\n"
+    ledger = NonceLedger(tmp_path / "nonces")
+    cap = _capability_for(spec, "127.0.0.1", ledger)
+    deps = RunnerDeps(scope_gate=ScopeGate(scope=StaticScopeSource(["127.0.0.1"]), loopback_allowed_if_scoped=True),
+                      backend=_CannedBackend(stdout),
+                      engagement_slug="alpha", signers=SIGNERS, capability=cap)
+    body = HexstrikeAgentBody(posture="staging", runner=deps)
+    params = {"port": port, "danger": "recon"} if tool == "zmap" else {"ports": str(port), "danger": "recon"}
+    try:
+        action = ProposedAction(kind=tool, target="127.0.0.1", params=params)
+        decision = body.gate(action)
+        assert decision.authorized is True                       # recon + staging => auto-eligible
+        outcome = body.execute(action, decision)
+    finally:
+        srv.close()
+    assert outcome.executed is True and outcome.ok is True, outcome
+    assert outcome.detail.get("n_facts") == 1, f"expected 1 reachability FACT via {tool}, got {outcome.detail}"
+    assert ledger.is_consumed("cap-1"), "the body must burn the single-use capability nonce (H8f gate parity)"
+
+
 # ===================================================================================================
 # H7 — the body integrates BY SHARED ORACLE FAMILY: the FACT-capable set is DERIVED from the family
 # registry (not a flat hand-kept list), and the chain's tools fuse by family into raised-priority LEADs
@@ -399,12 +439,12 @@ def test_h5_live_masscan_fact_through_the_body(tmp_path: Path):
 def test_h7_oracle_mapped_set_is_derived_from_the_family_registry():
     """_ORACLE_MAPPED_TOOLS is no longer a literal: it is oracle_mapped_tools(_SPEC_BUILDER_TOOLS), so
     FACT-capability is a property of a tool's family (FACT-capable) AND its having a runner spec builder.
-    The derived set is exactly the five shipped re-drive tools, and each is in a FACT-capable family."""
+    The derived set is exactly the seven shipped re-drive tools, and each is in a FACT-capable family."""
     from vigil_integration.brains.hexstrike_body import _ORACLE_MAPPED_TOOLS, _SPEC_BUILDER_TOOLS
     from vigil_integration.live.oracle_families import is_fact_capable_family, oracle_mapped_tools
 
     assert _ORACLE_MAPPED_TOOLS == oracle_mapped_tools(_SPEC_BUILDER_TOOLS)
-    assert _ORACLE_MAPPED_TOOLS == {"nmap", "sslscan", "masscan", "rustscan", "naabu"}
+    assert _ORACLE_MAPPED_TOOLS == {"nmap", "sslscan", "masscan", "rustscan", "naabu", "zmap", "unicornscan"}
     for tool in _ORACLE_MAPPED_TOOLS:
         assert is_fact_capable_family(tool), f"{tool}: mapped but its family is not FACT-capable"
 

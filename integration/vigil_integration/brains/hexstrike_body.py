@@ -71,9 +71,11 @@ from ..live.oracle_families import (
 # brain tool name -> the runner-owned oracle-mapped ToolSpec builder. ONLY these can mint a FACT (via the
 # runner's own independent re-drive); every other tool stays a LEAD. Adding a tool = adding a ToolSpec +
 # a runner-owned per-class oracle re-drive — never a body-supplied provenance.
-#   nmap / masscan / rustscan / naabu -> service_reachable  (the SAME gated TCP-handshake re-drive; H5)
+#   nmap / masscan / rustscan / naabu / zmap / unicornscan -> service_reachable (the SAME gated TCP-handshake
+#                                       re-drive; H5 + H5 batch 2 — zmap/unicornscan built fact_capable=True so
+#                                       their empty-redrive spec routes to the FACT-capable branch too)
 #   sslscan                           -> weak_tls + weak_crypto_artifact (gated TLS handshake re-drive; slice 4)
-# The three extra port scanners are the H5 SERVICE_REACHABILITY reuse: they carry NO redrives on their
+# The extra port scanners are the H5 SERVICE_REACHABILITY reuse: they carry NO redrives on their
 # ToolSpec, so the runner re-proves every proposed port with its own gated handshake exactly as it does for
 # nmap — a port scanner's row is only a PROPOSAL, and only VIGIL's independent handshake mints the FACT.
 # The tools with a runner-owned ToolSpec builder in ``_spec_for_kind`` below — the ONLY tools whose FACT can
@@ -106,6 +108,8 @@ def _spec_for_kind(kind: str, params: "dict | None"):
         nmap_service_scan,
         rustscan_service_scan,
         tls_scan,
+        unicornscan_service_scan,
+        zmap_service_scan,
     )
     p = params or {}
     if kind == "sslscan":
@@ -118,6 +122,14 @@ def _spec_for_kind(kind: str, params: "dict | None"):
         return rustscan_service_scan(ports=str(p.get("ports", "1-1024")))
     if kind == "naabu":
         return naabu_service_scan(ports=str(p.get("ports", "1-1024")))
+    # zmap / unicornscan (H5 batch 2): the SAME SERVICE_REACHABILITY reuse. fact_capable=True routes their
+    # (empty-redrive) spec to the runner's default service_reachability.tcp_handshake FACT branch — VIGIL's
+    # OWN gated handshake re-proves every proposed port, exactly as for nmap/masscan; the scanner is only a
+    # proposer, so no new oracle and no new branch. zmap scans one port; unicornscan takes a ports schema.
+    if kind == "zmap":
+        return zmap_service_scan(port=int(p.get("port", 80)), fact_capable=True)
+    if kind == "unicornscan":
+        return unicornscan_service_scan(ports=str(p.get("ports", "1-1024")), fact_capable=True)
     return None
 
 

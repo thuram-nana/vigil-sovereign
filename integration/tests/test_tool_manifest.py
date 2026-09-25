@@ -37,11 +37,13 @@ def test_fact_capable_tools_name_an_oracle_family_and_are_not_excluded():
 
 def test_the_only_fact_capable_tools_are_the_ones_with_a_shipped_re_drive():
     # Anti-overclaim: the matrix must not claim FACT-capability beyond what actually has a runner-owned
-    # re-drive today. nmap + masscan/rustscan/naabu → SERVICE_REACHABILITY (the H5 reuse; all four re-prove
-    # each proposed port with the runner's own gated handshake); sslscan → TLS_WEAKNESS. Growing this set is
-    # deliberate — each addition must PASS live.conformance.run_toolspec_conformance first.
+    # re-drive today. nmap + masscan/rustscan/naabu + zmap/unicornscan (the W1 batch-2 promotion) →
+    # SERVICE_REACHABILITY (the H5 reuse; all six re-prove each proposed port with the runner's own gated
+    # handshake); sslscan → TLS_WEAKNESS. Growing this set is deliberate — each addition must PASS
+    # live.conformance.run_toolspec_conformance first.
     fact = {m.name for m in load_manifests(_MATRIX) if m.fact_capable}
-    assert fact == {"nmap", "sslscan", "masscan", "rustscan", "naabu"}, f"unexpected fact_capable set: {fact}"
+    assert fact == {"nmap", "sslscan", "masscan", "rustscan", "naabu", "zmap", "unicornscan"}, (
+        f"unexpected fact_capable set: {fact}")
 
 
 def test_h5_reachability_reuse_tools_are_present_and_service_reachability_fact_capable():
@@ -177,23 +179,26 @@ def test_the_strix_candidate_families_are_lead_only_in_the_committed_registry():
         assert validate_branch_row(b) == [], f"{bid}: fails the S8-column validator"
 
 
-def test_h5_batch2_reuse_tools_are_present_lead_only_service_reachability():
-    """H5 batch 2: zmap/unicornscan are adapted as MORE network-discovery PROPOSERS that REUSE the existing
-    SERVICE_REACHABILITY family via VIGIL's own re-drive, but ship LEAD-only BY DEFAULT (the checkpoint). Each
-    must be present, NOT fact_capable (the FACT path is flag-gated OFF, so the pinned fact set is unchanged),
-    name the SERVICE_REACHABILITY family, be a non-excluded active-assessment scanner, and carry a reason."""
+def test_h5_batch2_reuse_tools_are_present_service_reachability_fact_capable():
+    """H5 batch 2 (W1 promotion): zmap/unicornscan are adapted as MORE network-discovery PROPOSERS that
+    REUSE the existing SERVICE_REACHABILITY family via VIGIL's own gated handshake re-drive, and are now
+    FACT-capable (wired through brains.hexstrike_body._spec_for_kind with fact_capable=True, passing the
+    conformance battery). Each must be present, fact_capable, name the SERVICE_REACHABILITY family, be a
+    non-excluded active-assessment scanner, and carry a reason in notes. No new oracle / no new branch:
+    the FACT rides the SAME service_reachability.tcp_handshake branch as nmap/masscan."""
     by = {m.name: m for m in load_manifests(_MATRIX)}
     for name in ("zmap", "unicornscan"):
         assert name in by, f"H5 batch-2 tool {name!r} missing from the capability matrix"
         m = by[name]
-        assert m.fact_capable is False, f"{name}: LEAD-only by default (FACT path is flag-gated OFF)"
+        assert m.fact_capable is True, f"{name}: expected fact_capable after the W1 promotion"
         assert m.oracle_family == "SERVICE_REACHABILITY", f"{name}: reuses the SERVICE_REACHABILITY family"
         assert m.excluded is False, f"{name}: a reachability proposer is not excluded"
         assert m.category == "active-assessment", f"{name}: a port scanner actively probes"
-        assert m.notes.strip() and "LEAD-only" in m.notes, f"{name}: must carry a LEAD-only reason"
-    # the pinned fact_capable set is UNCHANGED — the batch added LEAD-only rows, never a new FACT claim
+        assert m.notes.strip(), f"{name}: a fact_capable tool still documents its re-drive in notes"
+    # the pinned fact_capable set now includes the two promoted batch-2 scanners
     fact = {m.name for m in load_manifests(_MATRIX) if m.fact_capable}
-    assert fact == {"nmap", "sslscan", "masscan", "rustscan", "naabu"}, f"fact set changed: {fact}"
+    assert fact == {"nmap", "sslscan", "masscan", "rustscan", "naabu", "zmap", "unicornscan"}, (
+        f"fact set changed: {fact}")
 
 
 def test_h5_batch2_lead_branch_is_registered_lead_only_transport():

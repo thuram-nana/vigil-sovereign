@@ -97,22 +97,22 @@ def test_cli_surface_still_wins_for_tools_that_have_both():
 
 
 def test_r4_spec_builder_tools_are_admitted_as_cli_so_the_two_surfaces_agree():
-    """H4b MEET-UP. masscan/rustscan/naabu/sslscan are driven by a runner-owned ToolSpec builder (the R4
-    runner path), which is a real 'we build + gate the argv' CLI control. They must be ADMITTED here as
-    'cli' — so this tool-profile screen AGREES with ``capability_join`` (which already treats the same set
-    as a builder source and shows them EXECUTABLE-if-installed), instead of the pre-meet-up contradiction
-    where this screen said REFUSED while the brain panel said runnable. sslscan is the sharp case: it is
-    NOT in the host roster and has NO typed executor builder, so ONLY the spec-builder driver recognises +
-    admits it."""
+    """H4b MEET-UP. masscan/rustscan/naabu/sslscan and the W1 batch-2 zmap/unicornscan are driven by a
+    runner-owned ToolSpec builder (the R4 runner path), which is a real 'we build + gate the argv' CLI
+    control. They must be ADMITTED here as 'cli' — so this tool-profile screen AGREES with ``capability_join``
+    (which already treats the same set as a builder source and shows them EXECUTABLE-if-installed), instead of
+    the pre-meet-up contradiction where this screen said REFUSED while the brain panel said runnable. sslscan
+    is the sharp case: it is NOT in the host roster and has NO typed executor builder, so ONLY the spec-builder
+    driver recognises + admits it."""
     got = _by_name(P.build_profiles()["profiles"])
-    for name in ("masscan", "rustscan", "naabu", "sslscan"):
+    for name in ("masscan", "rustscan", "naabu", "sslscan", "zmap", "unicornscan"):
         p = got[name]
         assert p["has_spec_builder"], f"{name}: the R4 ToolSpec-builder flag is not set"
         assert p["control_surface"] == "cli", f"{name}: surface {p['control_surface']!r} != 'cli'"
         assert p["global_recognition"] and p["admitted"] and p["admit_reason"] == "admitted (cli)"
-    # the three port scanners are neither in the host roster nor typed executor builders here — their ONLY
+    # these port scanners are neither in the host roster nor typed executor builders here — their ONLY
     # drive surface is the spec builder, which is exactly what the meet-up recognises.
-    for name in ("masscan", "rustscan", "naabu", "sslscan"):
+    for name in ("masscan", "rustscan", "naabu", "sslscan", "zmap", "unicornscan"):
         assert not got[name]["has_typed_builder"], f"{name}: must not be a governed-executor typed builder"
 
 
