@@ -88,7 +88,7 @@ credential excerpts stored in plaintext until seal-at-capture is wired), **`LIMI
 **`LIMIT-a11y-capture-unwired`** (info — accessibility-tree capture seam) and
 **`LIMIT-gesture-native-inject-unwired`** (info — macOS/Windows native input injection is honestly inert).
 
-## The twelve re-verified-closed items (do not re-work these)
+## The thirteen re-verified-closed items (do not re-work these)
 
 These were named on an older audit list and re-verified against the current tree as **already done**. Each
 is listed with the evidence path the guard asserts exists, so nobody re-works them:
@@ -105,6 +105,7 @@ is listed with the evidence path the guard asserts exists, so nobody re-works th
 10. **`k8s_workload_posture_oracle` wired into the verifier** — `engine/crucible/framework/v2/verify/verifier.py`
 11. **The WARDEN gate on Strix's shell is fail-closed** — `integration/vigil_integration/warden_gate.py`
 12. **Console orphan routes cleaned + guarded** — `engine/crucible/framework/v2/console/tests/test_orphan_route_guard_w17_14.py`
+13. **Request-smuggling capped at a LEAD by audit A12 (#269) — retired, differential-desync re-promoted to a FACT (Wave 4.2)** — `engine/crucible/framework/v2/verify/tests/test_smuggling_desync_oracle.py`
 
 ## What the guard checks (and why it is not advisory)
 

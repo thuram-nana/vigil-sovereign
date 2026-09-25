@@ -48,13 +48,16 @@ SEVERITIES = {"critical", "high", "medium", "low", "info"}
 DISPOSITIONS = {"file-into-w16", "re-verified-closed"}
 CHECKS = {"stub-raises", "symbol-exists", "file-exists", "doc-exists"}
 
-# The twelve re-verified-closed items the AC requires listed by name so nobody re-works them. Pinned here
-# so the inventory cannot silently drop or renumber the census.
+# The re-verified-closed items the AC requires listed by name so nobody re-works them. Pinned here
+# so the inventory cannot silently drop or renumber the census. (The original W15 audit named twelve;
+# Wave 4.2 retired the A12 request-smuggling timing LEAD — differential-desync re-promoted to a FACT —
+# and records it here as the thirteenth, so the retirement is not re-worked.)
 RVC_IDS = {
     "RVC-governance-grant-replay", "RVC-offense-backup-restore", "RVC-use-library-ui-scan",
     "RVC-crash-resume", "RVC-k8s-rbac-livefire", "RVC-console-credential-gate",
     "RVC-per-action-approval-token", "RVC-sandbox-exec-wiring", "RVC-neo4j-client-body",
     "RVC-k8s-workload-oracle-wired", "RVC-warden-strix-fail-closed", "RVC-console-orphan-routes",
+    "RVC-a12-request-smuggling-timing-lead",
 }
 
 # Directories whose sources are NOT scanned for markers (vendored trees; git internals).
@@ -249,11 +252,11 @@ def test_every_limitation_is_disposed():
         assert entry["disposition"] in DISPOSITIONS, entry["id"]
 
 
-def test_twelve_reverified_closed_named_with_real_evidence():
+def test_reverified_closed_named_with_real_evidence():
     data = _load()
     rvc = data["re_verified_closed"]
     got = {e["id"] for e in rvc}
-    assert got == RVC_IDS, (f"the re-verified-closed census must be EXACTLY the twelve named items; "
+    assert got == RVC_IDS, (f"the re-verified-closed census must be EXACTLY the named items; "
                             f"missing={sorted(RVC_IDS - got)} unexpected={sorted(got - RVC_IDS)}")
     problems: list[str] = []
     for e in rvc:

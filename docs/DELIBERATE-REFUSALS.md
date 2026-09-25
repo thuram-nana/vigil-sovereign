@@ -216,6 +216,14 @@ postMessage); XSS already had an oracle, and these complete the row:
 Each proves a POSTURE WEAKNESS (a missing/weak defense), never a proven achieved-state exploit — the
 honest, near-zero-FP claim an oracle FACT requires.
 
+**Where the achieved-state form would legitimately live (deferred, not abandoned).** An achieved-state
+clickjacking / CSRF result is not FP-safe from a single response, but it CAN be made sound as an *operator-
+attested gated workflow* — the same shape as the owner-signed race / workflow specs — where the operator
+declares the intent ("this frame / cross-site submit is NOT permitted") and VIGIL re-derives success over
+the retained bytes. That gated-workflow upgrade is deliberately **deferred to Part-7 (W10)**; until it
+lands, framing-vs-exploit is operator intent, so clickjacking stays a **posture-FACT only** and its
+achieved-state form stays refused rather than shipped as an FP-prone single-response oracle.
+
 **Why it is a strength.** The SAME anti-hallucination discipline as refusal 7: a plausible-looking
 achieved-state oracle that cannot be made near-zero-FP is not shipped as a FACT-emitter; its sound
 posture-weakness dual is. Recorded so a future contributor does not re-add the FP-prone achieved-state
@@ -230,6 +238,77 @@ form.
 - Negative-control regression tests keep the posture oracles SOUND and present:
   `verify/tests/test_client_side_posture.py` (a page/handler/endpoint that HAS the defense is not
   confirmed; one that LACKS it is).
+
+---
+
+## Honest LEADs — classes proven only up to a lead, by design
+
+The eight refusals above are capabilities VIGIL *declines to build*. This section is different: these are
+capabilities VIGIL DOES have, whose SOUND form is an achieved FACT, but which — for a bounded, named reason —
+also have a residual that VIGIL surfaces as a **LEAD** (a belief-raising indicator), never as a FACT. The
+governing rule is the same anti-hallucination discipline: **an oracle only ever emits a FACT; a signal that
+cannot be made near-zero-FP offline is a LEAD, never a demoted FACT.** Each is enforced (fail-closed) in code
+and stated here so the boundary is visible and not re-worked into a false FACT by a well-meaning contributor.
+
+### L1. Clickjacking / CSRF achieved-state — LEAD (posture-FACT is the sound form)
+
+Framing-vs-exploit is **operator intent**: a legitimate app is framed and accepts cross-site submits all the
+time, so a single-response "was framed" / "the request went through" cannot distinguish an exploit from an
+intended embed. VIGIL therefore ships the sound **posture-FACT** dual (refusal 8: `clickjacking_posture_oracle`
+et al. prove the MISSING/WEAK defense from a retained artifact) and holds the achieved-state form at a LEAD.
+**blocking_work:** the operator-attested gated-workflow upgrade (owner-declared intent + re-derived success
+over retained bytes), **deferred to Part-7 (W10)**.
+
+### L2. GraphQL cost-limit-absent — LEAD (the achieved amplification is already a FACT)
+
+The **achieved amplifications ARE FACTs**: an unbounded-depth query that executed, N aliases that all
+resolved, an M-operation batch that ran (`graphql_depth_limit` / `graphql_alias_overloading` /
+`graphql_batching`, each confirmed by the predicate oracle at kind `ACHIEVED_STATE` over the raw amplified
+response — see `_graphql_dos_pass`). But the **absence of a cost limit** (`graphql_cost`) is a *universal
+negative*: a minimal probe being accepted cannot prove "no cost limit exists across every query." An oracle
+proves an **existential** (this amplification happened), never a universal absence, so a bare cost probe stays
+a LEAD. This is not a gap — it is the honest shape of an oracle: the existential amplification is proven, the
+universal absence is not claimed.
+
+### L3. Wave-5 static insecure-randomness + direct-taint — fail-closed LEADs
+
+The Wave-5 `STATIC_RULE` oracle mints a FACT for exactly two tiers (a broken-crypto invocation and an
+insecure-flag literal — proven CODE PROPERTIES). The `insecure-randomness-sink` and `direct-taint` rule_ids
+are RECOGNISED detection pointers but are **LEAD-only, fail-closed**: the oracle never mints a FACT for
+either (`static_insecure_randomness` / `static_taint`). **Why:** a sound insecure-randomness FACT needs
+crypto-provenance dataflow (proving the weak PRNG output reaches a security-sensitive sink), and a sound
+direct-taint FACT needs framework-aware, provenance-resolved taint SOURCES (a resolved request/input object,
+not self./req. attributes or name-matched functions) plus a resolved sink set. Inter-procedural /
+possibly-sanitized / whole-program flows stay a LEAD. **blocking_work:** the provenance-resolved dataflow
+engine (recorded on the capability-matrix `static_insecure_randomness` / `static_taint` branches). Enforced in
+`engine/crucible/framework/v2/analysis/static_facts.py` and guarded by the oracle-version pin.
+
+### L4. Shared-pool / HTTPS / HTTP-2 request-smuggling desync — LEAD (single-connection desync is the FACT)
+
+Wave-4.2 re-promoted request-smuggling to a FACT via a **differential desync** VIGIL owns end-to-end
+(`smuggling_desync_oracle`, kind `DIFFERENTIAL_RESPONSE`, ctx key `differential_desync`; retires the audit-A12
+timing LEAD). The residual that stays a LEAD, stated on the evidence branch: a **shared-pool** desync whose
+effect only manifests against a real co-tenant victim's connection (VIGIL never poisons a third party), an
+**HTTPS** origin (the raw-socket probes speak cleartext), and genuine **HTTP/2** (h2.CL / h2.TE) desync. These
+escalate to a purpose-built tool rather than minting a FACT here.
+
+### L5. Race / limit-overrun without an owner-signed semantic predicate — LEAD
+
+The single-packet race engine mints a FACT only with (a) an **owner-signed WorkflowSpec** and (b) an
+operator-declared **semantic success predicate** re-derived over the retained raw responses (count-based,
+never timing). WITHOUT a semantic predicate, a bare any-2xx concurrent-success count is a rigorous **LEAD** —
+a benignly-idempotent endpoint returns 2xx to every concurrent request, indistinguishable from
+over-consumption on the response side (audit A12). Without an owner-signed spec at all, the class is
+INCONCLUSIVE, never a false CLEAN or FACT.
+
+### The other honestly-deferred profile packs
+
+The `deep` / `full` engagement profile (`resolve_profile`) is pure additive flag-expansion. As of Wave 6 it
+still **defers** the plan-named packs that have no dedicated `enable_*` flag — `deep` names time-based /
+NoSQL / LDAP / XPath SQLi, `full` additionally names business-logic and race — surfacing them in the run
+manifest + an operator note rather than inventing a pack. This is tracked as the honest limitation
+`LIMIT-profile-packs-incremental` (see `docs/limitations/inventory.json`); it is a roster-coverage boundary,
+not an unsound FACT, and is listed here so the deferral is visible alongside the LEADs.
 
 ---
 
