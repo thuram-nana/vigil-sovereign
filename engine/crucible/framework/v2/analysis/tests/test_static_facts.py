@@ -116,6 +116,28 @@ _NEG_CONTROLS = [
     ("insecure-flag-literal", "import chartlib\ndef draw(chart):\n    return chart.render(verify=False)\n"),
     # (c) secure=False on a NON-security callee (a UI widget builder) — not a cookie / request.
     ("insecure-flag-literal", "import ui\ndef draw(widget):\n    return widget.build(secure=False)\n"),
+    # (d) FLOW-SENSITIVITY — a REASSIGNMENT KILL: the tainted binding is overwritten by a constant BEFORE the
+    # sink, so the value AT the sink is the constant. A flow-INSENSITIVE rule mints a durable FALSE FACT here
+    # ("a taint source reaches the sink" is false); the flow-sensitive rule stays a LEAD. (red-pen HIGH)
+    ("direct-taint", 'import os\ndef run():\n    cmd = request.args["c"]\n    cmd = "ls -la"\n    os.system(cmd)\n'),
+    # (d) reassignment to a non-tainted CALL result (not a constant) also kills — the value at the sink is not
+    # provably the source, so a LEAD.
+    ("direct-taint", 'import os\ndef run():\n    cmd = request.args["c"]\n    cmd = safe_default()\n    os.system(cmd)\n'),
+    # (d) NON-STRAIGHT-LINE — the source binding is inside an `if` branch: a branch could alter the binding, so
+    # we do NOT guess. Conservative LEAD.
+    ("direct-taint", 'import os\ndef run():\n    if flag:\n        cmd = request.args["c"]\n    os.system(cmd)\n'),
+    # (d) NON-STRAIGHT-LINE — the source binding is inside a loop. Conservative LEAD.
+    ("direct-taint", 'import os\ndef run():\n    for x in xs:\n        cmd = request.args["c"]\n    os.system(cmd)\n'),
+    # (d) SANITIZED flow — a sanitizer between source and sink; fail-closed to a LEAD.
+    ("direct-taint", "import os, shlex\ndef run():\n    cmd = request.args.get('c')\n    os.system(shlex.quote(cmd))\n"),
+    # (d) ALIASING BEYOND ONE HOP — a=source; b=a; c=b; sink(c). Only single-hop aliasing is followed; a
+    # second hop is not proven tainted => conservative LEAD.
+    ("direct-taint", 'import os\ndef run():\n    a = request.args["c"]\n    b = a\n    c = b\n    os.system(c)\n'),
+    # (a) NOISE CARVE-OUT — an EXPLICIT `usedforsecurity=False` is Python's opt-out declaring this md5 is NOT
+    # for security (a checksum). No FACT; a genuine md5 WITHOUT the opt-out still fires (see _EXTRA_POSITIVES).
+    ("broken-crypto-invocation", "import hashlib\ndef digest(x):\n    return hashlib.md5(x, usedforsecurity=False).hexdigest()\n"),
+    # (a) same carve-out via hashlib.new('md5', ..., usedforsecurity=False).
+    ("broken-crypto-invocation", "import hashlib\ndef digest(x):\n    return hashlib.new('md5', x, usedforsecurity=False).hexdigest()\n"),
 ]
 
 
@@ -234,6 +256,15 @@ _EXTRA_POSITIVES = [
     ("insecure-flag-literal", "import requests\ndef f(u):\n    s = requests.Session()\n    return s.post(u, verify=False)\n"),
     # (c) TLS verification disabled via ssl.wrap_socket(cert_reqs=ssl.CERT_NONE).
     ("insecure-flag-literal", "import ssl, socket\ndef w(sock):\n    return ssl.wrap_socket(sock, cert_reqs=ssl.CERT_NONE)\n"),
+    # (d) DIRECT source -> sink with NO variable at all: request.args['c'] passed straight into os.system. The
+    # genuine positive the flow-sensitive fix must keep minting.
+    ("direct-taint", 'import os\ndef run():\n    os.system(request.args["c"])\n'),
+    # (d) SINGLE-HOP alias: a = source; os.system(a). Still a direct straight-line flow => mints.
+    ("direct-taint", 'import os\ndef run():\n    a = request.args["c"]\n    b = a\n    os.system(b)\n'),
+    # (d) reassignment source->source (a benign var reused, rebound to a taint source) then sink => mints.
+    ("direct-taint", 'import os\ndef run():\n    cmd = "default"\n    cmd = request.args["c"]\n    os.system(cmd)\n'),
+    # (a) a genuine md5 WITH usedforsecurity=True is still for security => still mints (the carve-out is False-only).
+    ("broken-crypto-invocation", "import hashlib\ndef sign(x):\n    return hashlib.md5(x, usedforsecurity=True).hexdigest()\n"),
 ]
 
 
@@ -297,3 +328,62 @@ def test_static_fact_finding_refuses_to_serialise_a_lead() -> None:
     assert not lead.confirmed
     with pytest.raises(ValueError):
         static_fact_finding(lead)
+
+
+# --------------------------------------------------------------------------------------------
+# Tier (d) FLOW-SENSITIVITY (red-pen HIGH). The direct-taint tier is now flow-sensitive on reassignment
+# kills: a taint binding overwritten by a non-tainted value before the sink KILLS the taint (the value AT the
+# sink is the constant), so it must NOT mint. A genuine straight-line source->sink still mints and re-verifies.
+# --------------------------------------------------------------------------------------------
+
+def test_reassignment_kill_is_a_lead_not_a_durable_false_fact() -> None:
+    """`cmd = request.args["c"]; cmd = "ls -la"; os.system(cmd)` — the value at the sink is a CONSTANT, so the
+    evidence claim 'a taint source reaches the sink' is FALSE. It must stay a LEAD (never a signed FACT that
+    would re-verify offline on benign code)."""
+    src = 'import os\ndef run():\n    cmd = request.args["c"]\n    cmd = "ls -la"\n    os.system(cmd)\n'
+    lead = confirm_code_region("app/mod.py", 3, src, "direct-taint")
+    assert not lead.confirmed, "a reassignment-killed flow must NOT mint a FACT"
+    with pytest.raises(ValueError):
+        static_fact_finding(lead)
+
+
+def test_non_straight_line_source_to_sink_is_conservative_lead() -> None:
+    """A source bound inside a branch / loop is NOT straight-line: the binding could be altered, so the oracle
+    does NOT guess — it stays a LEAD (soundness over recall)."""
+    for src in (
+        'import os\ndef run():\n    if flag:\n        cmd = request.args["c"]\n    os.system(cmd)\n',
+        'import os\ndef run():\n    for x in xs:\n        cmd = request.args["c"]\n    os.system(cmd)\n',
+    ):
+        lead = confirm_code_region("app/mod.py", 3, src, "direct-taint")
+        assert not lead.confirmed, "a non-straight-line source->sink must stay a LEAD"
+
+
+def test_genuine_direct_taint_still_mints_and_reverifies() -> None:
+    """The genuine positive the fix must KEEP: a direct source -> sink with no reassignment/sanitizer mints a
+    FACT and re-verifies OFFLINE over the retained bytes."""
+    src = 'import os\ndef run():\n    os.system(request.args["c"])\n'
+    fact = confirm_code_region("app/mod.py", 3, src, "direct-taint")
+    assert fact.confirmed and fact.confirmed_by == "static_rule"
+    finding = static_fact_finding(fact)
+    cert = build_certificate(finding, engagement_slug="wave5-test")
+    assert cert.bug_class == "static_taint"
+    r = reverify_finding(finding)
+    assert r.ok and r.reproduced
+
+
+# --------------------------------------------------------------------------------------------
+# Tier (a) NOISE CARVE-OUT (red-pen LOW). `hashlib.md5(x, usedforsecurity=False)` is Python's explicit
+# opt-out that this md5 is NOT for security (a checksum). It must NOT mint; a genuine md5 without the opt-out
+# still mints.
+# --------------------------------------------------------------------------------------------
+
+def test_usedforsecurity_false_is_a_lead_but_genuine_md5_still_mints() -> None:
+    optout = "import hashlib\ndef digest(x):\n    return hashlib.md5(x, usedforsecurity=False).hexdigest()\n"
+    lead = confirm_code_region("app/mod.py", 3, optout, "broken-crypto-invocation")
+    assert not lead.confirmed, "usedforsecurity=False is the explicit non-security opt-out — must NOT mint"
+    with pytest.raises(ValueError):
+        static_fact_finding(lead)
+    # a genuine md5 WITHOUT the opt-out is still flagged.
+    genuine = "import hashlib\ndef sign(x):\n    return hashlib.md5(x).hexdigest()\n"
+    fact = confirm_code_region("app/mod.py", 3, genuine, "broken-crypto-invocation")
+    assert fact.confirmed and fact.bug_class == "static_broken_crypto"

@@ -3522,12 +3522,27 @@ def _base_is_crypto(name: str, crypto_locals: "set[str]", from_crypto: "dict[str
     return name in crypto_locals or name in from_crypto
 
 
+def _has_usedforsecurity_false(node: ast.Call) -> bool:
+    """True iff the call carries the EXPLICIT ``usedforsecurity=False`` opt-out — Python's hashlib flag
+    declaring this hash is NOT used for security (a checksum / cache key / non-cryptographic digest). It is a
+    keyword-only, hashlib-specific argument; a broken CIPHER never carries it, so the carve-out only ever
+    silences a hash the author has deliberately marked non-security."""
+    return any(kw.arg == "usedforsecurity" and isinstance(kw.value, ast.Constant) and kw.value.value is False
+               for kw in node.keywords)
+
+
 def _broken_crypto_call_detail(node: ast.Call, crypto_locals: "set[str]",
                                from_crypto: "dict[str, tuple[str, str]]",
                                shadows: "set[str]") -> "str | None":
     """A Call RESOLVES to a genuinely-invoked broken primitive (returns a detail) or does not (``None`` ->
     a LEAD). A bare/unimported name and a locally-shadowed def never mint; the provenance MUST resolve to a
     crypto module."""
+    # CARVE-OUT (noise): an EXPLICIT ``usedforsecurity=False`` is Python's opt-out declaring this hash is NOT
+    # for security (e.g. ``hashlib.md5(x, usedforsecurity=False)`` for a checksum). A genuine broken hash
+    # WITHOUT the opt-out still mints; WITH it we REFUSE (a LEAD) — we do not flag a hash the author has
+    # explicitly marked non-security. See the ``static_broken_crypto`` evidence-branch limitation.
+    if _has_usedforsecurity_false(node):
+        return None
     parts = _dotted_parts(node.func)
     if not parts:
         return None
@@ -3595,8 +3610,8 @@ def _ecb_construction_detail(tree: ast.AST, crypto_locals: "set[str]",
 def _broken_crypto_hit(tree: ast.AST) -> "tuple[bool, str]":
     """RE-DERIVE tier (a): a broken/risky crypto primitive is GENUINELY INVOKED/CONSTRUCTED here, with its
     provenance RESOLVED to a real crypto module. Pure AST — no execution, no import. A bare/unimported name,
-    a locally-shadowed def, or a mere reference / comparison / defensive guard does NOT mint (a LEAD —
-    soundness over recall). Returns (fired, detail)."""
+    a locally-shadowed def, a mere reference / comparison / defensive guard, or a hash carrying the explicit
+    ``usedforsecurity=False`` opt-out does NOT mint (a LEAD — soundness over recall). Returns (fired, detail)."""
     crypto_locals, from_crypto = _collect_crypto_imports(tree)
     shadows = _collect_local_shadows(tree)
     for node in ast.walk(tree):
@@ -3720,33 +3735,77 @@ def _insecure_flag_hit(tree: ast.AST) -> "tuple[bool, str]":
 # (d) DIRECT intra-procedural taint. Sources / sinks / sanitizers — a conservative, near-zero-FP set. A
 # sanitizer anywhere in the function REFUSES (fail-closed to a lead).
 _TAINT_SOURCE_ATTRS = frozenset({"args", "form", "values", "cookies", "params", "query", "GET", "POST"})
+_TAINT_SOURCE_BASES = frozenset({"request", "req", "self", "flask", "django"})
 _TAINT_SOURCE_FNS = frozenset({"input", "getenv", "get_json"})
 _TAINT_SINK_FNS = frozenset({"system", "popen", "eval", "exec", "call", "run", "Popen", "check_output", "execute"})
 _SANITIZER_FNS = frozenset({
     "quote", "escape", "clean", "int", "float", "bool", "isdigit", "isalnum", "isnumeric",
     "sanitize", "validate", "shlex", "sub", "match", "fullmatch", "abspath", "basename",
 })
+# The taint status a variable's MOST-RECENT straight-line binding confers. Absent from the binding map means
+# NOT tainted. A ``_TAINT_SOURCE`` var carries taint DIRECTLY (a source access, or a BinOp/f-string over one);
+# a ``_TAINT_ALIAS`` var is ONE alias hop from a source var. Both fire at a sink; only a SOURCE propagates a
+# further alias hop (an alias-of-an-alias is a second hop -> conservative kill, never a FACT).
+_TAINT_SOURCE = "source"
+_TAINT_ALIAS = "alias"
 
 
-def _is_taint_source(node: Any) -> bool:
-    """True iff ``node`` is a recognised taint SOURCE expression: ``request.args...`` / ``request.form[...]`` /
-    ``input(...)`` / ``os.environ[...]`` / ``os.getenv(...)`` / ``sys.argv[...]``."""
-    # request.<args|form|values|...>...  or  ...GET.get(...)
-    for sub in ast.walk(node) if isinstance(node, ast.AST) else []:
-        if isinstance(sub, ast.Attribute):
-            if sub.attr in _TAINT_SOURCE_ATTRS and isinstance(sub.value, (ast.Name, ast.Attribute)):
-                base = _attr_or_name(sub.value).lower()
-                if base in ("request", "req", "self", "flask", "django"):
-                    return True
-        if isinstance(sub, ast.Call):
-            short = _attr_or_name(sub.func)
-            if short in _TAINT_SOURCE_FNS:
-                return True
-        if isinstance(sub, ast.Attribute) and sub.attr == "argv" and _attr_or_name(sub.value).lower() == "sys":
+def _is_direct_source_expr(expr: Any) -> bool:
+    """True iff ``expr`` is STRUCTURALLY a DIRECT, unconditional taint-SOURCE access — the value IS a source,
+    not merely a conditional subtree that happens to contain one. Recognises the same vocabulary as before
+    (``request.<args|form|values|...>`` incl. a ``.get(...)`` on it, ``input()/getenv()/get_json()``,
+    ``sys.argv``, ``os.environ``) but NEVER descends into ``IfExp`` / ``BoolOp`` / call arguments, so a value
+    that only conditionally derives from a source is not called a source (soundness over recall)."""
+    if isinstance(expr, ast.Call):
+        if _attr_or_name(expr.func) in _TAINT_SOURCE_FNS:
+            return True                                   # input(...) / getenv(...) / get_json(...)
+        # a method call ON a source object: request.args.get('c') / request.form.getlist('x').
+        return isinstance(expr.func, ast.Attribute) and _is_direct_source_expr(expr.func.value)
+    if isinstance(expr, ast.Subscript):
+        return _is_direct_source_expr(expr.value)         # request.args['c'] / os.environ['X'] / sys.argv[1]
+    if isinstance(expr, ast.Attribute):
+        base = _attr_or_name(expr.value).lower()
+        if expr.attr in _TAINT_SOURCE_ATTRS and isinstance(expr.value, (ast.Name, ast.Attribute)) \
+                and base in _TAINT_SOURCE_BASES:
+            return True                                   # request.args / request.form / ...
+        if expr.attr == "argv" and base == "sys":
             return True
-        if isinstance(sub, ast.Attribute) and sub.attr == "environ" and _attr_or_name(sub.value).lower() == "os":
+        if expr.attr == "environ" and base == "os":
             return True
     return False
+
+
+def _expr_is_tainted(expr: Any, tainted: "dict[str, str]") -> bool:
+    """True iff ``expr``'s value is DEFINITELY tainted given the current straight-line binding map: a tainted
+    variable name, a direct source access, or a ``BinOp`` / f-string that incorporates a tainted operand
+    (both operands always flow into the result, so this stays sound). An ``IfExp`` / ``BoolOp`` / other-call
+    value is only conditionally tainted, so it is NOT called tainted (conservative — no FACT)."""
+    if isinstance(expr, ast.Name):
+        return expr.id in tainted
+    if _is_direct_source_expr(expr):
+        return True
+    if isinstance(expr, ast.BinOp):
+        return _expr_is_tainted(expr.left, tainted) or _expr_is_tainted(expr.right, tainted)
+    if isinstance(expr, ast.JoinedStr):
+        return any(_expr_is_tainted(v.value, tainted)
+                   for v in expr.values if isinstance(v, ast.FormattedValue))
+    return False
+
+
+def _binding_status(value: Any, tainted: "dict[str, str]") -> "str | None":
+    """The taint status a straight-line assignment ``target = value`` confers on ``target``: ``_TAINT_SOURCE``
+    when the RHS is a direct source (or a BinOp/f-string over one); ``_TAINT_ALIAS`` when the RHS is a single
+    Name that is currently a SOURCE (one alias hop); ``None`` — which KILLS any prior taint on the target —
+    for a constant, a non-source call, a second-hop alias, or a conditional value."""
+    if isinstance(value, ast.Name):
+        return _TAINT_ALIAS if tainted.get(value.id) == _TAINT_SOURCE else None
+    if _is_direct_source_expr(value):
+        return _TAINT_SOURCE
+    if isinstance(value, ast.BinOp) and _expr_is_tainted(value, tainted):
+        return _TAINT_SOURCE
+    if isinstance(value, ast.JoinedStr) and _expr_is_tainted(value, tainted):
+        return _TAINT_SOURCE
+    return None
 
 
 def _has_sanitizer(fn: ast.AST) -> bool:
@@ -3761,49 +3820,100 @@ def _shell_true(call: ast.Call) -> bool:
                for kw in call.keywords)
 
 
+def _stmt_sink_calls(stmt: ast.stmt) -> "list[ast.Call]":
+    """The dangerous-SINK Call nodes at an UNCONDITIONAL position of a SIMPLE statement — the expression of an
+    ``Expr``, the value of a ``Return``, or the RHS of an ``Assign`` / ``AnnAssign`` (unwrapping ``await``).
+    A sink buried inside a conditional expression, a comprehension, or a compound statement is NOT returned
+    here — that flow is not straight-line and stays a LEAD (soundness over recall)."""
+    value: Any = None
+    if isinstance(stmt, ast.Expr):
+        value = stmt.value
+    elif isinstance(stmt, ast.Return):
+        value = stmt.value
+    elif isinstance(stmt, ast.Assign):
+        value = stmt.value
+    elif isinstance(stmt, ast.AnnAssign):
+        value = stmt.value
+    if isinstance(value, ast.Await):
+        value = value.value
+    if isinstance(value, ast.Call) and _attr_or_name(value.func) in _TAINT_SINK_FNS:
+        return [value]
+    return []
+
+
+def _sink_call_taint_detail(call: ast.Call, fn_name: str, tainted: "dict[str, str]") -> "str | None":
+    """If ``call`` is a command-injection-shaped sink whose argument is DEFINITELY tainted under the current
+    straight-line binding map, return the evidence detail; else ``None``. subprocess sinks require
+    ``shell=True`` to be command-injection-shaped."""
+    short = _attr_or_name(call.func)
+    if short in ("call", "run", "Popen", "check_output") and not _shell_true(call):
+        return None
+    for arg in call.args:
+        if _expr_is_tainted(arg, tainted):
+            return (f"a taint source reaches the dangerous sink `{short}(...)` in function `{fn_name}` with "
+                    f"no sanitizer or reassignment between (direct straight-line intra-procedural flow)")
+    for kw in call.keywords:
+        if kw.arg and _expr_is_tainted(kw.value, tainted):
+            return (f"a taint source reaches the dangerous sink `{short}(...)` (keyword `{kw.arg}`) in "
+                    f"function `{fn_name}` with no sanitizer or reassignment between")
+    return None
+
+
+def _straight_line_taint(fn: "ast.FunctionDef | ast.AsyncFunctionDef") -> "tuple[bool, str]":
+    """FLOW-SENSITIVE tier (d) for ONE function body, conservative and bounded. Walk the TOP-LEVEL statements
+    in order, tracking each variable's MOST-RECENT binding taint status. Fire only on a sink reached in
+    STILL-straight-line code whose argument's most-recent binding is a taint source (<=1 alias hop), with no
+    intervening reassignment-kill (the most-recent binding captures that) and no sanitizer (checked by the
+    caller). The FIRST compound / control-flow statement (If/For/While/Try/With/Match, a nested def/class) —
+    or any statement that binds a name non-linearly (AugAssign, a walrus, a tuple/Attribute/Subscript target)
+    — BREAKS the straight-line assumption: bindings can no longer be trusted, so every later sink is a LEAD.
+    Returns (True, detail) or (False, '')."""
+    tainted: dict[str, str] = {}
+    straight = True
+    for stmt in fn.body:
+        if straight:
+            for call in _stmt_sink_calls(stmt):
+                detail = _sink_call_taint_detail(call, fn.name, tainted)
+                if detail:
+                    return True, detail
+        # Update the binding map for a SIMPLE single-Name assignment; anything else breaks straight-line.
+        if isinstance(stmt, ast.Assign) and len(stmt.targets) == 1 and isinstance(stmt.targets[0], ast.Name):
+            name = stmt.targets[0].id
+            status = _binding_status(stmt.value, tainted)
+            if status:
+                tainted[name] = status
+            else:
+                tainted.pop(name, None)      # a non-tainted RHS KILLS any prior taint on this variable.
+        elif isinstance(stmt, ast.AnnAssign) and isinstance(stmt.target, ast.Name) and stmt.value is not None:
+            name = stmt.target.id
+            status = _binding_status(stmt.value, tainted)
+            if status:
+                tainted[name] = status
+            else:
+                tainted.pop(name, None)
+        elif isinstance(stmt, (ast.Expr, ast.Return, ast.Import, ast.ImportFrom, ast.Pass,
+                               ast.Global, ast.Nonlocal)):
+            pass                             # a simple statement that binds no tracked variable — flow intact.
+        else:
+            straight = False                 # compound / non-linear binding — bindings no longer trustworthy.
+    return False, ""
+
+
 def _direct_taint_hit(tree: ast.AST) -> "tuple[bool, str]":
-    """RE-DERIVE tier (d): a taint SOURCE reaches a dangerous SINK in ONE function with NO sanitizer between.
-    Conservative + fail-closed: any sanitizer in the function REFUSES; subprocess sinks require shell=True to
-    be command-injection-shaped. Single-hop variable aliasing is followed. Inter-procedural flows stay a lead."""
+    """RE-DERIVE tier (d): a taint SOURCE reaches a dangerous SINK in ONE function via a DIRECT, straight-line,
+    unsanitized flow — the "Firm" tier. FLOW-SENSITIVE and conservative (soundness over recall): a later
+    reassignment to a non-tainted value KILLS the taint (no FACT), a sanitizer anywhere in the function
+    REFUSES (fail-closed to a LEAD), and any non-straight-line control flow (branch/loop/try/with) between a
+    source and a sink downgrades to a LEAD rather than guessing. Single-hop variable aliasing is followed;
+    subprocess sinks require shell=True to be command-injection-shaped. Inter-procedural flows stay a LEAD."""
     for fn in ast.walk(tree):
         if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
             continue
         if _has_sanitizer(fn):
             continue   # a sanitizer is present — cannot prove the flow is unsanitized (fail-closed to a lead)
-        # variables assigned DIRECTLY from a taint source in this function (single-hop alias).
-        tainted: set[str] = set()
-        for node in ast.walk(fn):
-            if isinstance(node, (ast.Assign, ast.AnnAssign)) and node.value is not None \
-                    and _is_taint_source(node.value):
-                for nm in _assign_targets(node):
-                    tainted.add(nm)
-
-        def _arg_is_tainted(arg: Any) -> bool:
-            if _is_taint_source(arg):
-                return True
-            for n in ast.walk(arg) if isinstance(arg, ast.AST) else []:
-                if isinstance(n, ast.Name) and n.id in tainted:
-                    return True
-            return False
-
-        for node in ast.walk(fn):
-            if not isinstance(node, ast.Call):
-                continue
-            short = _attr_or_name(node.func)
-            if short not in _TAINT_SINK_FNS:
-                continue
-            # subprocess.call/run/Popen/check_output are only command-injection-shaped with shell=True.
-            if short in ("call", "run", "Popen", "check_output") and not _shell_true(node):
-                continue
-            for arg in node.args:
-                if _arg_is_tainted(arg):
-                    return True, (f"a taint source reaches the dangerous sink `{short}(...)` in function "
-                                  f"`{fn.name}` with no sanitizer between (direct intra-procedural flow)")
-            # a tainted keyword argument (e.g. the command= of Popen) also flows.
-            for kw in node.keywords:
-                if kw.arg and _arg_is_tainted(kw.value):
-                    return True, (f"a taint source reaches the dangerous sink `{short}(...)` (keyword "
-                                  f"`{kw.arg}`) in function `{fn.name}` with no sanitizer between")
+        fired, detail = _straight_line_taint(fn)
+        if fired:
+            return True, detail
     return False, ""
 
 
