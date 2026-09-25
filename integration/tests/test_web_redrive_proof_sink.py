@@ -181,12 +181,25 @@ def test_web_class_without_a_capture_reaches_the_mint(monkeypatch, tmp_path):
     assert calls["n"] == 1, "a web-class report with no capture never reached the mint (gate not relaxed)"
 
 
-def test_non_web_class_without_a_capture_still_does_not_reach_the_mint(tmp_path):
-    """Regression on the old gate: a NON-web report with no capture must NOT reach the mint."""
+def test_non_redrivable_class_without_a_capture_still_does_not_reach_the_mint(tmp_path):
+    """Regression on the gate: a report in a class VIGIL cannot re-drive (neither a web class nor a W1a
+    error-signature injection class) with no capture must NOT reach the mint. W1a relaxed the gate for the
+    four injection classes (error_based_sqli / nosqli / ldap_injection / xpath_injection — covered in
+    test_strix_errsig_redrive.py), so the example here is a genuinely non-re-drivable class."""
     calls = {"n": 0}
     sink = ProofSink(quarantine_dir=str(tmp_path / "q"), mint=lambda r: calls.__setitem__("n", calls["n"] + 1))
-    sink({"id": "f6", "bug_class": "error_based_sqli"})   # no capture, not web
-    assert calls["n"] == 0, "a non-web report with no capture reached the mint — the gate over-relaxed"
+    sink({"id": "f6", "bug_class": "rce"})   # no capture, not web, not an errsig-re-drivable injection class
+    assert calls["n"] == 0, "a non-re-drivable report with no capture reached the mint — the gate over-relaxed"
+
+
+def test_errsig_injection_class_without_a_capture_reaches_the_mint(tmp_path):
+    """The W1a gate relaxation: an injection-class report (error_based_sqli) with NO _vigil_capture must reach
+    the mint (the error-signature re-drive rail then re-drives / fail-closes to a LEAD)."""
+    calls = {"n": 0}
+    sink = ProofSink(quarantine_dir=str(tmp_path / "q"), mint=lambda r: calls.__setitem__("n", calls["n"] + 1))
+    sink({"id": "f6b", "bug_class": "error_based_sqli", "param": "q",
+          "endpoint": "http://127.0.0.1/search"})   # no capture, but an errsig-re-drivable class
+    assert calls["n"] == 1, "an injection-class report with no capture never reached the mint (gate not relaxed)"
 
 
 def test_non_web_capture_uses_the_captured_bytes_path_not_web_redrive(monkeypatch, tmp_path):

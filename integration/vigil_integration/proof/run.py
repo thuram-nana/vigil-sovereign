@@ -382,6 +382,316 @@ def _web_redrive_mint(report: dict, wclass: str, *, run_dir: "str | os.PathLike"
     return _WebMintResult(is_fact=(claimed == "FACT"), facts=list(wr.facts), family_verdict=claimed)
 
 
+# ======================================================================================================
+# W1a — the error-signature RE-DRIVE rail (the SOUND primary for a Strix injection finding).
+#
+# Today a Strix finding in an injection class persists only as a LEAD: Route A (``web_redrive``) covers the
+# web classes, and the error-signature CAPTURE path below (``_vigil_capture``) is dormant because nothing
+# attaches a capture. This rail is the runner-owned primary: given a Strix finding carrying {endpoint, param,
+# claimed injection class}, VIGIL re-sends its OWN gated injection probe (the RUNNER crafts the probe — never
+# the Strix/LLM value), fetches a benign CONTROL twin, and mints a signed FACT ONLY when the deterministic
+# ``error_signature_oracle`` FIRES over VIGIL's FRESH bytes WITH the control present. The Strix report is
+# never proof; the wire bytes are. The oracle OVERRIDES the Strix-claimed class with the datastore/parser
+# ENGINE it actually matched (``_ERRSIG_ENGINE_TO_CLASS``), so the certificate names the vulnerability the
+# EVIDENCE proves. Everything else -> LEAD (fail-closed).
+#
+# This is the GENERIC Strix->re-drive DISPATCH RAIL (``_REDRIVE_ARMS`` / ``_dispatch_redrive`` below): later
+# waves plug xss/ssti/timing/OOB arms into the same rail — each a runner-owned re-drive that mints only over
+# VIGIL's own gated capture + its oracle.
+# ======================================================================================================
+
+# The evidence branch this rail admits through (docs/capability-matrix/evidence-branches.json). fact_capable,
+# clean_capable:false (POSITIVE-only — a missing error is uninformative). admit() applies its declared
+# capability; certify_admitted re-fires the oracle over the reproduced context and mints only a FACT.
+_ERRSIG_STRIX_BRANCH = "error_signature.strix_redrive"
+
+# The four injection classes this rail re-drives. The certificate's FINAL class is decided by the oracle's
+# matched engine (``_ERRSIG_ENGINE_TO_CLASS``), NOT by the value here — this only selects a class-appropriate
+# runner probe and gates which findings the rail claims. A wrong claim simply fails to fire -> an honest LEAD.
+_ERRSIG_REDRIVE_CLASSES = ("error_based_sqli", "nosqli", "ldap_injection", "xpath_injection")
+
+# A TIGHT CWE allow-list (never a fuzzy hint) for a report that carries no explicit bug_class/finding_class.
+_ERRSIG_CWE_TO_CLASS = {
+    "cwe-89": "error_based_sqli",   # SQL injection
+    "cwe-943": "nosqli",            # improper neutralization of special elements in data query logic (NoSQL)
+    "cwe-90": "ldap_injection",     # LDAP injection
+    "cwe-91": "xpath_injection",    # XML/XPath injection (XPath)
+}
+
+# Per-class RUNNER-crafted error-provoking probe payloads. The RUNNER owns these — never the Strix/LLM value —
+# so a FACT rests on VIGIL's OWN injected metacharacters. Each is a minimal syntax-breaking token for the
+# datastore/parser the class names; the ``error_signature_oracle`` (not the payload) decides whether an engine
+# error was provoked, and the engine it matches OVERRIDES the claimed class. urlencode carries the metachars.
+_ERRSIG_PROBE_PAYLOADS = {
+    "error_based_sqli": "'\"",       # unbalanced quotes break a SQL string literal
+    "nosqli": "'\"{[",               # break a JSON/BSON query document / operator parse
+    "ldap_injection": "*)(|&",       # unbalanced LDAP filter parens/operators
+    "xpath_injection": "']|//*[",    # break an XPath string/predicate
+}
+
+
+def _errsig_redrive_class(report: Any) -> "str | None":
+    """The injection class this report maps to for the error-signature re-drive rail, or ``None``.
+
+    Conservative by design: an EXACT ``bug_class`` / ``finding_class`` match (plus a few common aliases), else
+    a tight CWE allow-list. ``None`` ⇒ this report is not errsig-re-drivable. This is the SINGLE source of
+    truth (``sink._errsig_redrivable`` delegates here), so the sink gate and the dispatch rail can never
+    disagree. Pure/stdlib (no framework import) so it is safe on the import-clean sink path (FATAL-2)."""
+    if not hasattr(report, "get"):
+        return None
+    _aliases = {
+        "sqli": "error_based_sqli", "sql_injection": "error_based_sqli", "sqli_error": "error_based_sqli",
+        "nosql_injection": "nosqli", "nosql": "nosqli", "mongo_injection": "nosqli",
+        "ldap": "ldap_injection", "ldap_inj": "ldap_injection",
+        "xpath": "xpath_injection", "xpath_inj": "xpath_injection", "xpathi": "xpath_injection",
+    }
+    for key in ("bug_class", "finding_class"):
+        v = str(report.get(key) or "").strip().lower()
+        if v in _ERRSIG_REDRIVE_CLASSES:
+            return v
+        if v in _aliases:
+            return _aliases[v]
+    m = re.search(r"cwe-\d+", str(report.get("cwe") or "").strip().lower())
+    if m and m.group(0) in _ERRSIG_CWE_TO_CLASS:
+        return _ERRSIG_CWE_TO_CLASS[m.group(0)]
+    return None
+
+
+class _ErrsigMintResult:
+    """The rail's return. The sink reads ONLY ``.is_fact``; the rest is retained for the persisted record and
+    for tests (the signed cert + oracle_context that re-verify OFFLINE). ``is_fact`` is True IFF VIGIL's own
+    gated re-drive + the oracle firing over a control twin minted a signed certificate."""
+
+    __slots__ = ("is_fact", "result", "oracle_context", "engine", "engine_class", "claimed_class")
+
+    def __init__(self, *, is_fact: bool, result: Any, oracle_context: "dict | None",
+                 engine: str, engine_class: str, claimed_class: str) -> None:
+        self.is_fact = is_fact
+        self.result = result                 # the AdapterResult (carries .signed on a FACT)
+        self.oracle_context = oracle_context  # the reproduced context the FACT re-verifies over
+        self.engine = engine
+        self.engine_class = engine_class
+        self.claimed_class = claimed_class
+
+
+def _persist_errsig_redrive(run_dir: "str | os.PathLike", report: dict, claimed_class: str,
+                            engine: str, engine_class: str, res: Any) -> None:
+    """Best-effort record of an error-signature re-drive for the Proof-Studio screen. Mirrors the proofs/
+    location of the web record; a hiccup here must NEVER un-mint (the signed cert already exists on ``res``)."""
+    d = Path(run_dir) / PROOFS_SUBDIR
+    d.mkdir(parents=True, exist_ok=True)
+    ref = str(_finding_from_report(report)["check_id"])
+    rec = {
+        "kind": "strix_errsig_redrive",
+        "finding_ref": ref,
+        "claimed_class": claimed_class,          # the Strix-proposed class (NOT what the FACT is minted under)
+        "matched_engine": engine,                # the datastore/parser engine the oracle matched
+        "engine_class": engine_class,            # the ORACLE-AUTHORITATIVE class the certificate names
+        "status": str(getattr(res, "status", "")),
+        "is_fact": bool(getattr(res, "is_fact", False)),
+        "reason": str(getattr(res, "reason", "")),
+        "confirmed_by": str(getattr(res, "confirmed_by", "")),
+        "confidence": float(getattr(res, "confidence", 0.0) or 0.0),
+    }
+    (d / f"strixerrsig-{hashlib.sha256(ref.encode('utf-8')).hexdigest()[:16]}.json").write_text(
+        json.dumps(rec, indent=2, sort_keys=True), encoding="utf-8")
+
+
+def _strix_errsig_redrive(report: dict, eclass: str, *, run_dir: "str | os.PathLike",
+                          signers: "list[tuple[str, str]]", engagement_slug: str,
+                          control_fetch: "Optional[Callable[[dict], bytes | None]]") -> "Any | None":
+    """Re-drive a Strix injection finding with VIGIL's OWN gated probe and mint a signed FACT ONLY when the
+    deterministic ``error_signature_oracle`` fires over VIGIL's fresh bytes WITH a benign control twin present.
+
+    Soundness (the invariants this slice rests on):
+      * The Strix report is NEVER proof. The RUNNER crafts the probe (``_ERRSIG_PROBE_PAYLOADS``); the
+        Strix/LLM ``payload`` is never trusted. Only VIGIL's own gated re-drive + the oracle mint.
+      * The probe goes through the SAME charter-gated, DNS-pinned, proxy-free, bounded transport the web
+        re-drive uses (``web_redrive._gated_web_send``) — no new egress, the never-liftable floor unchanged.
+      * A benign CONTROL twin is REQUIRED (via the ``control_fetch`` seam). Without it the oracle's
+        control-comparison guard is dead code (an always-erroring page would mint), so a control that cannot
+        be captured REFUSES to a LEAD (fail-closed).
+      * The oracle OVERRIDES the Strix-claimed class with the ENGINE it matched (``_ERRSIG_ENGINE_TO_CLASS``);
+        a fired-but-unmapped engine REFUSES (never the producer's claim).
+
+    A missing endpoint/param, a gate refusal / no channel, no control, an oracle non-fire, or an unmapped
+    engine all yield a non-FACT ⇒ the finding stays a LEAD. NEVER raises: any failure drops the mint to a
+    LEAD. FATAL-2: every framework-touching import is function-local (offense-side re-drive path)."""
+    url = str((report or {}).get("endpoint") or "").strip()
+    param = str((report or {}).get("param") or (report or {}).get("insertion_point") or "").strip()
+    payload = _ERRSIG_PROBE_PAYLOADS.get(eclass)
+    if not (url and param and payload):
+        return None    # nothing to re-drive / no runner probe for this class → LEAD
+
+    try:
+        from urllib.parse import urlencode, urlsplit               # stdlib
+        from framework.v2.evidence.poc import CapturedExchange     # lazy — FATAL-2 (offense plane)
+        from framework.v2.scanner.insertion import HttpRequest     # lazy — FATAL-2
+        from framework.v2.verify.oracles import error_signature_oracle  # lazy — FATAL-2
+        from framework.v2.verify.poc_translate import context_from_exchanges  # lazy — FATAL-2
+
+        from ..live.verdict import admit                           # stdlib-only admission (registry-governed)
+        from ..live.web_redrive import _gated_web_send             # pulls framework only at CALL time
+        from ..oracle_adapter import certify_admitted              # lazy framework at call (offense)
+    except Exception as exc:  # noqa: BLE001 — cannot even import the re-drive machinery → LEAD (fail-closed)
+        _record_degraded(run_dir, REDRIVE_FAILED, "proof.run._strix_errsig_redrive.import", exc)
+        return None
+
+    # RUNNER-crafted, DETERMINISTIC probe (a content-address nonce — no wallclock/rng). The injectable param
+    # carries the runner's error-provoking payload; a separate benign nonce param rides alongside (parity with
+    # the LiveHttpAdapter sqli spec live/engine.py builds). The control twin is the SAME endpoint+param with a
+    # benign, metacharacter-free value — so any datastore error is attributable to the payload, not the param.
+    sp = urlsplit(url if "://" in url else "http://" + url)
+    if not sp.hostname:
+        return None
+    base_url = f"{(sp.scheme or 'http')}://{sp.netloc}"
+    endpoint_path = "/" + (sp.path or "/").lstrip("/")
+    nonce = hashlib.sha256(f"{base_url}{endpoint_path}:{param}:{eclass}".encode("utf-8")).hexdigest()[:16]
+    benign = "vfctl" + nonce
+    nonce_param = "rc" if param != "rc" else "rcx"   # never collide with the injectable param
+
+    def _q(value: str) -> str:
+        return urlencode(sorted({param: value, nonce_param: nonce}.items()))
+
+    exploit_url = f"{base_url}{endpoint_path}?{_q(payload)}"
+    control_url = f"{base_url}{endpoint_path}?{_q(benign)}"
+
+    # (1) VIGIL's OWN gated injection probe (charter gate → DNS-pin → empty ProxyHandler → bounded read).
+    try:
+        send, state = _gated_web_send(engagement_slug)
+        resp = send(HttpRequest(method="GET", url=exploit_url))
+    except Exception as exc:  # noqa: BLE001 — a transport/import crash is a re-drive we could not RUN → LEAD
+        _record_degraded(run_dir, REDRIVE_FAILED, "proof.run._strix_errsig_redrive.probe", exc)
+        return None
+    if int(state.get("channels", 0) or 0) <= 0:
+        return None    # gate refusal (out-of-scope / kill-switch) or transport error → NO channel → LEAD
+    observed_body = resp.get("body")
+    if not (isinstance(observed_body, str) and observed_body):
+        return None    # a real channel but no readable body → the oracle cannot fire → LEAD
+
+    # (2) VIGIL-owned benign CONTROL twin via the bootstrap seam. A control that cannot be captured REFUSES to
+    #     a LEAD (fail-closed) — the oracle's control-comparison guard MUST be live.
+    control_body = _fetch_control({**report, "endpoint": control_url}, control_fetch)
+    if not control_body:
+        if control_fetch is not None:
+            record_degradation(run_dir, REDRIVE_FAILED,
+                               where="proof.run._strix_errsig_redrive.control_unavailable",
+                               detail="benign control twin fetch established no channel")
+        return None
+
+    # (3) the deterministic error-signature oracle over VIGIL's FRESH bytes, WITH the control twin.
+    observed_bytes = observed_body.encode("utf-8", errors="replace")
+    sig = error_signature_oracle(observed_bytes, control_body)
+    if not getattr(sig, "fired", False):
+        return None    # no engine error, or the SAME error is in the benign control → not attributable → LEAD
+    engine = str((getattr(sig, "observed", None) or {}).get("engine", ""))
+    engine_class = _ERRSIG_ENGINE_TO_CLASS.get(engine)
+    if not engine_class:
+        # FAIL-CLOSED: fired on a datastore/parser engine we cannot honestly name — REFUSE rather than fall
+        # back to the producer's (launderable) claimed class. Recorded so the run can never read CLEAN over a
+        # fired-but-unlabelable datastore error.
+        record_degradation(run_dir, MINT_FAILED, where="proof.run._strix_errsig_redrive.unmapped_engine",
+                           detail=engine)
+        return None
+
+    # (4) mint through ADMISSION over VIGIL's own capture (provenance=live_redrive). The ENGINE the oracle
+    #     matched is the certificate's class — the Strix-claimed class is OVERRIDDEN at the source, so context,
+    #     certify, and offline reverify are all consistent and no path can rename the class the evidence proves.
+    blobs = {"errsig_obs_resp": observed_bytes, "errsig_ctrl_resp": bytes(control_body)}
+
+    def _resolve(ref: str) -> "bytes | None":
+        return blobs.get(ref)
+
+    ex_dicts = [
+        {"channel": "error_signature", "role": "mutated", "response_bytes_ref": "errsig_obs_resp",
+         "status": resp.get("status")},
+        {"channel": "error_signature", "role": "control", "response_bytes_ref": "errsig_ctrl_resp",
+         "status": None},
+    ]
+    try:
+        exchanges = [CapturedExchange(**d) for d in ex_dicts]
+    except Exception as exc:  # noqa: BLE001 — a malformed capture drops the mint (LEAD), never raises
+        _record_degraded(run_dir, CAPTURE_FAILED, "proof.run._strix_errsig_redrive.capture", exc)
+        return None
+    ctx = context_from_exchanges(exchanges, bug_class=engine_class, resolve=_resolve)
+    if ctx is None:
+        return None
+    oracle_context = ctx.model_dump(mode="json")
+    finding = {
+        "check_id": _finding_from_report(report)["check_id"],
+        "bug_class": engine_class,
+        "insertion_point": param,
+        "oracle_context": oracle_context,
+    }
+    action_id = "poc-" + hashlib.sha256(str(finding["check_id"]).encode("utf-8")).hexdigest()[:16]
+    try:
+        # A fire is decisive; the branch precondition (a real channel) held above. certify_admitted re-fires
+        # the SAME oracle over the reproduced context and mints ONLY a FACT (provenance=live_redrive).
+        admitted = admit(_ERRSIG_STRIX_BRANCH, fired=True, conclusive=True,
+                         observed={"channel_established": True})
+        res = certify_admitted(finding, admitted, engagement_slug=engagement_slug, signers=signers,
+                               provenance="live_redrive")
+    except Exception as exc:  # noqa: BLE001 — an admission/cert error confirms nothing (fail-closed) → LEAD
+        _record_degraded(run_dir, MINT_FAILED, "proof.run._strix_errsig_redrive.mint", exc)
+        return None
+
+    try:
+        _persist_errsig_redrive(run_dir, report, eclass, engine, engine_class, res)
+    except Exception:  # noqa: BLE001 — persistence is best-effort; a signed FACT is never un-minted
+        pass
+    if getattr(res, "is_fact", False):
+        # Retain the re-verifiable material (oracle_context + action_id + signed cert) so the run's dossier
+        # ships the offline-verifiable bundle and `framework.v2 verify` re-fires it byte-identically.
+        try:
+            _persist_reverifiable(run_dir, finding, action_id, exchanges, _resolve, res)
+        except Exception:  # noqa: BLE001
+            pass
+    return _ErrsigMintResult(is_fact=bool(getattr(res, "is_fact", False)), result=res,
+                             oracle_context=oracle_context, engine=engine, engine_class=engine_class,
+                             claimed_class=eclass)
+
+
+def _web_redrive_arm(report: dict, wclass: str, *, run_dir: "str | os.PathLike",
+                     signers: "list[tuple[str, str]]", engagement_slug: str,
+                     control_fetch: "Optional[Callable[[dict], bytes | None]]" = None) -> "Any | None":
+    """Rail adapter for Route A: the web re-drive needs no control_fetch (it injects its own canary), so this
+    thin wrapper gives it the uniform arm signature the dispatch rail calls."""
+    return _web_redrive_mint(report, wclass, run_dir=run_dir, signers=signers,
+                             engagement_slug=engagement_slug)
+
+
+# The GENERIC Strix→re-drive dispatch rail. Each ARM is ``(classify, drive, requires_no_capture)``: the
+# classifier maps a Strix report to the class it can re-drive (or None), and the driver re-sends VIGIL's OWN
+# gated probe and mints ONLY over VIGIL's fresh capture + its oracle (never the Strix report). Arms are tried
+# in order; the FIRST that claims the report owns it. ``requires_no_capture`` keeps a capture-bearing report
+# on the executor-capture mint path below (the web arm intercepts either way — web classes are disjoint from
+# injection classes). Later waves APPEND xss/ssti/timing/OOB arms here — the sink gate + this tuple are the
+# only two edits a new runner-owned re-drive arm needs.
+_REDRIVE_ARMS = (
+    (_web_redrive_class, _web_redrive_arm, False),
+    (_errsig_redrive_class, _strix_errsig_redrive, True),
+)
+
+
+def _dispatch_redrive(report: dict, *, run_dir: "str | os.PathLike", signers: "list[tuple[str, str]]",
+                      engagement_slug: str,
+                      control_fetch: "Optional[Callable[[dict], bytes | None]]") -> "tuple[bool, Any]":
+    """Try each re-drive arm in order. Returns ``(handled, result)``: ``handled=True`` means an arm owned the
+    report (its result — a FACT/None — is authoritative); ``handled=False`` means fall through to the
+    executor-capture mint / LEAD. A capture-bearing report is left for the capture path (``requires_no_capture``)."""
+    if not hasattr(report, "get"):
+        return False, None
+    has_capture = report.get(CAPTURE_KEY) is not None
+    for classify, drive, requires_no_capture in _REDRIVE_ARMS:
+        if requires_no_capture and has_capture:
+            continue
+        cls = classify(report)
+        if cls is not None:
+            return True, drive(report, cls, run_dir=run_dir, signers=signers,
+                               engagement_slug=engagement_slug, control_fetch=control_fetch)
+    return False, None
+
+
 # _benign_twin_url None-reasons (objection-4 honest telemetry): the two distinct causes a twin cannot be
 # derived, so the caller's degradation detail states the TRUE reason rather than always "no host+path".
 _TWIN_NO_HOSTPATH = "no_host_path"              # the observed request yields no derivable host+path at all
@@ -503,14 +813,17 @@ def build_report_mint(
     as that executor's capture — it is NOT re-established by this mint for the executor-supplied control."""
 
     def mint(report: dict) -> Any:
-        # S7: a web-re-drivable finding is verified by traffic VIGIL ITSELF sends — its own gated, crafted
-        # probes against the finding's endpoint — never the producer's recorded bytes. This is the
-        # VIGIL-owned re-drive that lets a Strix web finding reach a FACT. Anything else (incl. the dominant
-        # error_based_sqli captured-bytes class) falls through to the error-signature mint below / stays a LEAD.
-        wclass = _web_redrive_class(report)
-        if wclass is not None:
-            return _web_redrive_mint(report, wclass, run_dir=run_dir, signers=signers,
-                                     engagement_slug=engagement_slug)
+        # The GENERIC Strix→re-drive dispatch rail: a finding VIGIL can re-drive is verified by traffic VIGIL
+        # ITSELF sends — its own gated, crafted probes — never the producer's recorded bytes. Route A is the
+        # web re-drive; W1a adds the error-signature injection re-drive (error_based_sqli / nosqli /
+        # ldap_injection / xpath_injection) for a Strix finding carrying {endpoint, param, class} and NO
+        # capture. A capture-bearing report is left for the executor-capture mint below. Anything an arm does
+        # not claim falls through to that capture path / stays a LEAD.
+        handled, redrive_result = _dispatch_redrive(
+            report, run_dir=run_dir, signers=signers, engagement_slug=engagement_slug,
+            control_fetch=control_fetch)
+        if handled:
+            return redrive_result
 
         from framework.v2.evidence.poc import CapturedExchange     # lazy — FATAL-2
 

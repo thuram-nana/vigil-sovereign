@@ -47,6 +47,19 @@ def _web_redrivable(report: Any) -> bool:
         return False
 
 
+def _errsig_redrivable(report: Any) -> bool:
+    """True when this report maps to an injection class VIGIL can re-drive for a FACT with its OWN gated
+    error-signature probe (error_based_sqli / nosqli / ldap_injection / xpath_injection) — so the mint runs
+    even without an attached ``_vigil_capture`` (the W1a runner-owned re-drive is the SOUND primary for a
+    Strix injection LEAD). Delegates to ``run._errsig_redrive_class`` (the single source of truth), imported
+    function-locally to break the run⇄sink cycle. Fail-closed: any import/lookup error ⇒ not re-drivable."""
+    try:
+        from .run import _errsig_redrive_class  # noqa: PLC0415 — function-local: breaks the run⇄sink cycle
+        return _errsig_redrive_class(report) is not None
+    except Exception:  # noqa: BLE001
+        return False
+
+
 @dataclass(frozen=True)
 class SinkResult:
     """What the sink decided about one report. ``gate`` is ``"allow"``/``"deny"``; ``minted`` is True only
@@ -136,10 +149,13 @@ class ProofSink:
 
             minted = False
             # Mint when the report carries an executor capture (error-signature bytes), OR when it is a
-            # web-re-drivable class (S7): those reach the mint WITHOUT a capture because the VIGIL-owned web
-            # re-drive crafts its OWN gated traffic against the endpoint. A mint error (or a re-drive that
-            # observed nothing / found the target safe) leaves the finding a LEAD — never propagates.
-            if self._mint is not None and (report.get(CAPTURE_KEY) is not None or _web_redrivable(report)):
+            # web-re-drivable class (S7), OR an injection class the W1a error-signature re-drive rail owns
+            # (error_based_sqli / nosqli / ldap_injection / xpath_injection): the latter two reach the mint
+            # WITHOUT a capture because the VIGIL-owned re-drive crafts its OWN gated traffic against the
+            # endpoint. A mint error (or a re-drive that observed nothing / found the target safe) leaves the
+            # finding a LEAD — never propagates.
+            if self._mint is not None and (report.get(CAPTURE_KEY) is not None or _web_redrivable(report)
+                                           or _errsig_redrivable(report)):
                 try:
                     result = self._mint(report)
                     minted = bool(getattr(result, "is_fact", False))
