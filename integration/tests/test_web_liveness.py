@@ -1,17 +1,25 @@
-"""HexStrike W2 — endpoint LIVENESS (the L7 analogue of the TCP tcp_handshake reachability FACT).
+"""HexStrike W2 — endpoint response-DISTINGUISHABILITY (historical id ``achieved_state.endpoint_liveness``;
+the L7 analogue of the TCP tcp_handshake reachability FACT).
 
-A web-discovery tool (httpx / ffuf) PROPOSES a URL; VIGIL re-drives it with its OWN plain gated GET plus a
-known-nonexistent sibling CONTROL, and the EXISTING ACHIEVED_STATE predicate_oracle mints a signed
-``achieved_state.endpoint_liveness`` FACT ONLY when the target returns a served status (2xx/3xx) AND the
-control returns a genuine not-found (>= 400). The proofs are genuinely live: a real loopback HTTP server.
+NARROWED CLAIM (after two red-pen BLOCKs): the FACT asserts EXACTLY that VIGIL's own gated GET served content
+DISTINGUISHABLE from a same-shape, MULTI-SAMPLE-STABLE not-found baseline — never "live endpoint"/"real". A
+web-discovery tool (httpx / ffuf) PROPOSES a URL; VIGIL re-drives it with its OWN plain gated GETs (the target
+resampled + many DISTINCT NARROW-CLASS same-shape not-found controls, each resampled) and the EXISTING
+ACHIEVED_STATE predicate_oracle mints only when the target is a stable 2xx/3xx, every control sample agrees on
+one status+body-hash, and the target differs from that baseline. The proofs are genuinely live: real loopback
+HTTP servers.
 
-Headline properties:
-  * a really-live URL → a signed liveness FACT that re-verifies OFFLINE, and tamper is rejected;
+Headline properties (each FP class below minted a FALSE offline-re-verifiable FACT on some pre-fix HEAD):
+  * a really-distinguishable URL → a signed FACT that re-verifies OFFLINE, and tamper is rejected;
   * a tool-claimed-but-UNREACHABLE URL → a LEAD (deceptive_no_fact — the tool's say-so never confirms);
-  * a SOFT-404 (a server that answers 200 for EVERYTHING) → a LEAD/no-fact (the key red-pen trap);
+  * every soft-404 CLASS is a LEAD: uniform blanket-200, path-echo, numeric-route (RP1), length/shape
+    signature (RP1), HEX-route + UUID-route narrow-class route-miss (RP2 BLOCK-1), and a bounded per-request
+    body space proven over 80 runs (RP2 BLOCK-2, no intermittency);
+  * a special-cased error page is a TRUE-if-modest NARROWED FACT, never a "live endpoint" overclaim (RP2 BLOCK-3);
   * a channel-confirmed hard 404 → a CLEAN bounded to the EXACT probed URL, never an enumeration claim;
-  * httpx + ffuf each PASS the full conformance battery through the REAL gated runner;
-  * the two operator surfaces (capability matrix + the body's oracle-mapped set) AGREE.
+  * a root/directory or ambiguous-class segment FAILS CLOSED to a LEAD;
+  * httpx + ffuf each PASS the full conformance battery through the REAL gated runner; the two operator
+    surfaces (capability matrix + the body's oracle-mapped set) AGREE.
 
 Offense-process test (loads framework.* + vigil_integration.live.*): CI runs it in the offense group.
 """
@@ -186,6 +194,95 @@ class _LengthSignatureApp(http.server.BaseHTTPRequestHandler):
         self.wfile.write(body)
 
 
+_HEX_ROUTE = re.compile(r"^/token/[0-9a-f]+/?$")
+
+
+class _HexRouteSoftApp(http.server.BaseHTTPRequestHandler):
+    """RP2 BLOCK-1 — a HEX-id route: 200 soft-404 ({"token":null}) for ANY well-formed hex token (nothing is
+    live), 404 for a NON-hex segment (route miss). The pre-fix coarse alnum mirror produced non-hex controls
+    that 404'd as route-misses while a nonexistent hex target 200'd -> a false FACT (20/20). A NARROW-CLASS
+    hex control (dead1234-shaped) also matches the route -> 200 == target -> LEAD; an ambiguous all-a-f target
+    (deadbeef) fails closed -> LEAD."""
+
+    def log_message(self, *a):  # noqa: D401
+        pass
+
+    def do_GET(self):  # noqa: N802
+        p = self.path.split("?")[0]
+        body, code = (b'{"token":null}', 200) if _HEX_ROUTE.match(p) else (b'{"error":"not found"}', 404)
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
+_UUID_ROUTE = re.compile(r"^/r/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/?$")
+
+
+class _UuidRouteSoftApp(http.server.BaseHTTPRequestHandler):
+    """RP2 BLOCK-1 — a UUID route: 200 soft-404 ({"obj":null}) for ANY well-formed UUID (nothing is live),
+    404 for a non-UUID segment. Needs a control that preserves the dash STRUCTURE + hex; a coarse alnum control
+    404s as a route miss (false FACT, pre-fix)."""
+
+    def log_message(self, *a):  # noqa: D401
+        pass
+
+    def do_GET(self):  # noqa: N802
+        p = self.path.split("?")[0]
+        body, code = (b'{"obj":null}', 200) if _UUID_ROUTE.match(p) else (b'nf', 404)
+        self.send_response(code)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
+class _BoundedBodySoftApp(http.server.BaseHTTPRequestHandler):
+    """RP2 BLOCK-2 — a soft-404 whose not-found body is one of a SMALL (2-element) set, chosen at RANDOM PER
+    REQUEST. NOTHING is live. With only two controls they collide on one body ~1/2 of the time -> a spurious
+    'stable baseline' the target differs from -> an INTERMITTENT false FACT (pre-fix). Multi-sampling (many
+    distinct controls, each resampled, ALL must agree) fails to find a stable baseline here -> LEAD."""
+
+    def log_message(self, *a):  # noqa: D401
+        pass
+
+    def do_GET(self):  # noqa: N802
+        import random
+        body = random.choice([b'{"m":"A"}', b'{"m":"B"}'])
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
+_NUMERIC_ROUTE_B3 = re.compile(r"^/api/users/(\d+)/?$")
+
+
+class _NumericRouteErrApp(http.server.BaseHTTPRequestHandler):
+    """RP2 BLOCK-3 — a special-cased ERROR: /api/users/0 -> 200 {"error":"invalid id"} while any other numeric
+    id -> 200 {"user":null} (the not-found baseline). Under the NARROWED claim this is a TRUE-if-modest FACT
+    ("served content distinguishable from a same-shape not-found baseline"), NOT a "live endpoint" overclaim —
+    the fix is the claim string, checked by the test."""
+
+    def log_message(self, *a):  # noqa: D401
+        pass
+
+    def do_GET(self):  # noqa: N802
+        m = _NUMERIC_ROUTE_B3.match(self.path.split("?")[0])
+        if m and m.group(1) == "0":
+            body, code = b'{"error":"invalid id"}', 200
+        elif m:
+            body, code = b'{"user":null}', 200
+        else:
+            body, code = b'nf', 404
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
 def _serve(handler):
     srv = http.server.HTTPServer(("127.0.0.1", 0), handler)
     t = threading.Thread(target=srv.serve_forever, daemon=True)
@@ -245,8 +342,11 @@ def test_live_url_mints_a_signed_liveness_fact_that_reverifies_offline(monkeypat
                                        slug="alpha", engagement_slug="alpha", signers=signers)
     finally:
         srv.shutdown()
-    assert wl.is_fact, f"expected a liveness FACT; outcome={wl.outcome} note={wl.note}"
-    assert wl.outcome == "positive" and wl.target_status == 200 and wl.control_statuses == [404, 404]
+    assert wl.is_fact, f"expected a distinguishability FACT; outcome={wl.outcome} note={wl.note}"
+    # control_statuses is the DISTINCT set observed across the multi-sample baseline (all 404 here).
+    assert wl.outcome == "positive" and wl.target_status == 200 and wl.control_statuses == [404]
+    low = wl.note.lower()
+    assert "distinguishable" in low and "not a claim that the endpoint is 'live'" in low  # NARROWED claim
     # the FACT re-verifies OFFLINE from the retained JSON-safe capture — no network, no VIGIL runner
     assert verify_certificate(wl.fact.signed, oracle_context=wl.context, trust_root=tr).ok is True
 
@@ -272,17 +372,24 @@ def test_liveness_fact_is_rejected_when_the_retained_context_is_tampered(monkeyp
     assert verify_certificate(wl.fact.signed, oracle_context=tampered, trust_root=tr).ok is False
 
 
-@pytest.mark.parametrize("app,path,label", [
+# Every soft-404 / phantom CLASS both red-pens raised. Each mints a FALSE offline-re-verifiable FACT on some
+# pre-fix HEAD; each must be a LEAD after the fix. (RP1: uniform, path-echo, numeric-route, length-signature.
+# RP2 BLOCK-1: hex-route, uuid-route. RP2 BLOCK-2: bounded per-request body space.)
+_SOFT_404_CLASSES = [
     (_SoftNotFoundApp, "/anything", "uniform blanket-200"),
     (_PathEchoSoftApp, "/anything", "path-echoing 200"),
-    (_NumericRouteSoftApp, "/api/users/999999999", "numeric-route soft-404 (FP1)"),
-    (_LengthSignatureApp, "/admin", "length/shape-signature 404 (FP2)"),
-])
+    (_NumericRouteSoftApp, "/api/users/999999999", "numeric-route soft-404 (RP1)"),
+    (_LengthSignatureApp, "/admin", "length/shape-signature 404 (RP1)"),
+    (_HexRouteSoftApp, "/token/dead1234", "hex-route soft-404 (RP2 BLOCK-1)"),
+    (_HexRouteSoftApp, "/token/deadbeef", "hex-route ambiguous-class fail-closed (RP2 BLOCK-1)"),
+    (_UuidRouteSoftApp, "/r/550e8400-e29b-41d4-a716-446655440000", "uuid-route soft-404 (RP2 BLOCK-1)"),
+    (_BoundedBodySoftApp, "/admin", "bounded per-request 2-elt body (RP2 BLOCK-2)"),
+]
+
+
+@pytest.mark.parametrize("app,path,label", _SOFT_404_CLASSES)
 def test_soft_404_classes_mint_no_liveness_fact(app, path, label, monkeypatch, tmp_path):
-    """Every soft-404 CLASS the red-pen raised must be a LEAD, never a FACT: the uniform blanket-200, a
-    path-echoing 200, the numeric-route soft-404 (FP1 — a same-shape numeric control also matches the route),
-    and the shape/length-signature 404 (FP2 — a same-length control is treated identically). FP1/FP2 minted a
-    FALSE offline-re-verifiable FACT on the pre-fix status-only + distinctive-token control."""
+    """Every soft-404 / phantom CLASS both red-pens raised must be a LEAD, never a FACT."""
     _grant_active_recon(monkeypatch)
     _charter(tmp_path, "127.0.0.1")
     from vigil_integration.live.web_redrive import endpoint_liveness_redrive
@@ -294,8 +401,54 @@ def test_soft_404_classes_mint_no_liveness_fact(app, path, label, monkeypatch, t
                                        slug="alpha", engagement_slug="alpha", signers=signers)
     finally:
         srv.shutdown()
-    assert not wl.is_fact, f"{label}: must NOT mint a liveness FACT (got {wl.outcome}, {wl.note})"
+    assert not wl.is_fact, f"{label}: must NOT mint a FACT (got {wl.outcome}, {wl.note})"
     assert wl.outcome == "inconclusive" and wl.lead is not None and not wl.lead.is_fact
+
+
+def test_bounded_body_soft_404_is_never_a_fact_over_80_runs(monkeypatch, tmp_path):
+    """RP2 BLOCK-2 intermittency: the per-request 2-element body-space soft-404 minted an INTERMITTENT false
+    FACT (~30% with 2 controls). Multi-sampling must drive it to ZERO — run it 80x and require 0 false FACTs
+    (an intermittent false FACT is still a false FACT)."""
+    _grant_active_recon(monkeypatch)
+    _charter(tmp_path, "127.0.0.1")
+    from vigil_integration.live.web_redrive import endpoint_liveness_redrive
+    signers, _ = _signers_and_trust()
+    srv = _serve(_BoundedBodySoftApp)
+    port = srv.server_address[1]
+    facts = 0
+    try:
+        for _ in range(80):
+            wl = endpoint_liveness_redrive(f"http://127.0.0.1:{port}/admin",
+                                           slug="alpha", engagement_slug="alpha", signers=signers)
+            if wl.is_fact:
+                facts += 1
+    finally:
+        srv.shutdown()
+    assert facts == 0, f"bounded-body soft-404 minted {facts}/80 false FACTs — multi-sampling did not close it"
+
+
+def test_block3_special_cased_error_is_a_true_narrowed_fact_not_an_overclaim(monkeypatch, tmp_path):
+    """RP2 BLOCK-3: /api/users/0 serves a special-cased error DISTINGUISHABLE from the same-shape not-found
+    baseline. Under the NARROWED claim this is a TRUE-if-modest FACT — but the claim must NOT say 'live
+    endpoint' / 'real' / 'exists'. The fix is the claim string; assert it is honest."""
+    _grant_active_recon(monkeypatch)
+    _charter(tmp_path, "127.0.0.1")
+    from framework.v2.evidence.certify import verify_certificate
+    from vigil_integration.live.web_redrive import endpoint_liveness_redrive
+    signers, tr = _signers_and_trust()
+    srv = _serve(_NumericRouteErrApp)
+    port = srv.server_address[1]
+    try:
+        wl = endpoint_liveness_redrive(f"http://127.0.0.1:{port}/api/users/0",
+                                       slug="alpha", engagement_slug="alpha", signers=signers)
+    finally:
+        srv.shutdown()
+    assert wl.is_fact, f"a distinguishable special-cased response is a narrowed FACT; got {wl.outcome} {wl.note}"
+    assert verify_certificate(wl.fact.signed, oracle_context=wl.context, trust_root=tr).ok is True
+    low = wl.note.lower()
+    # the narrowed claim states 'distinguishable' and explicitly DISCLAIMS 'live'/'real' — no overclaim.
+    assert "distinguishable" in low, "the narrowed claim must state 'distinguishable from a not-found baseline'"
+    assert "not a claim that the endpoint is 'live'" in low, "the note must disclaim 'live'/'real'"
 
 
 def test_numeric_route_live_id_still_mints_a_fact(monkeypatch, tmp_path):
@@ -315,7 +468,7 @@ def test_numeric_route_live_id_still_mints_a_fact(monkeypatch, tmp_path):
     finally:
         srv.shutdown()
     assert wl.is_fact, f"a genuinely-live numeric id must mint a FACT; outcome={wl.outcome} note={wl.note}"
-    assert wl.control_statuses == [200, 200]     # same-status baseline; distinguished by the BODY differential
+    assert wl.control_statuses == [200]     # same-status baseline (distinct set); distinguished by the BODY diff
     assert verify_certificate(wl.fact.signed, oracle_context=wl.context, trust_root=tr).ok is True
 
 
@@ -335,7 +488,7 @@ def test_root_url_fails_closed_to_a_lead(monkeypatch, tmp_path):
     finally:
         srv.shutdown()
     assert not wl.is_fact and wl.outcome == "inconclusive"
-    assert "no sound SAME-SHAPE control" in wl.note
+    assert "no sound" in wl.note.lower() and "same-shape control" in wl.note.lower()
 
 
 def test_hard_404_is_a_clean_bounded_to_the_exact_url(monkeypatch, tmp_path):
@@ -412,16 +565,12 @@ def test_web_tool_live_url_mints_a_fact_through_the_runner(tool, canned, monkeyp
 
 
 @pytest.mark.parametrize("tool,canned", [("httpx", _httpx_jsonl), ("ffuf", _ffuf_report)])
-@pytest.mark.parametrize("app,path,label", [
-    (_SoftNotFoundApp, "/admin", "uniform blanket-200"),
-    (_PathEchoSoftApp, "/admin", "path-echoing 200"),
-    (_NumericRouteSoftApp, "/api/users/999999999", "numeric-route soft-404 (FP1)"),
-    (_LengthSignatureApp, "/admin", "length/shape-signature 404 (FP2)"),
-])
+@pytest.mark.parametrize("app,path,label", _SOFT_404_CLASSES)
 def test_web_tool_soft_404_classes_are_a_lead_through_the_runner(tool, canned, app, path, label,
                                                                  monkeypatch, tmp_path):
-    """Every soft-404 CLASS is a LEAD through BOTH the httpx and ffuf runner legs — including FP1 (numeric
-    route) and FP2 (shape/length signature), which minted a FALSE FACT before the same-shape-control fix."""
+    """Every soft-404 / phantom CLASS (both red-pens) is a LEAD through BOTH the httpx and ffuf runner legs —
+    uniform, path-echo, numeric-route, length-signature, hex-route, uuid-route, and bounded-body — each of
+    which minted a FALSE FACT on some pre-fix HEAD."""
     _grant_active_recon(monkeypatch)
     _charter(tmp_path, "127.0.0.1")
     from vigil_integration.live.external_tool import ffuf_content_scan, httpx_url_scan, run_external_tool

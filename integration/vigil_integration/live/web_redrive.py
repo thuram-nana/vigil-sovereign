@@ -40,59 +40,92 @@ WEB_FACT_CLASSES = ("open_redirect", "cors", "host_header_injection", "graphql_i
 LLM_CLAIM_WEB_FACT_CLASSES = tuple(c for c in WEB_FACT_CLASSES if c != "oidc_redirect_uri")
 
 # ---------------------------------------------------------------------------
-# HexStrike W2 — endpoint LIVENESS (the L7 analogue of the TCP tcp_handshake reachability FACT).
+# HexStrike W2 — endpoint response-DISTINGUISHABILITY (the L7 analogue of the TCP tcp_handshake reachability
+# FACT). Historical identifier: ``endpoint_liveness`` / ``achieved_state.endpoint_liveness``.
 #
-# A web-discovery tool (httpx / ffuf / …) PROPOSES a URL; this re-drives it — the RUNNER (never the tool)
-# sends a PLAIN gated GET (no canary) — and the EXISTING ACHIEVED_STATE predicate_oracle judges whether the
-# URL identifies a LIVE endpoint the server distinguishes from nonexistent SAME-SHAPE siblings. Reuses
-# ACHIEVED_STATE (no new OracleKind, so `make gate` stays byte-identical); the FACT is minted only by
-# admit(branch) + certify_admitted(provenance="live_redrive") over VIGIL's OWN gated capture.
+# THE NARROWED CLAIM (after two red-pen BLOCKs). This FACT does NOT claim "a live endpoint" / "a real
+# resource" / "the endpoint exists". It claims EXACTLY: **VIGIL's own gated GET of this URL served content
+# distinguishable from a same-shape, multi-sample-stable not-found baseline (i.e. it is not a soft-404 phantom
+# of that shape).** A special-cased error page, a stub, or any distinguishable-but-not-"live" response is a
+# TRUE statement of that narrowed claim; it is never upgraded to "live".
 #
-# SOUNDNESS (near-zero-FP, the soft-404 firewall — HARDENED after a red-pen BLOCK). A bare 200 cannot
-# distinguish a real resource from a soft-404, and a DISTINCTIVE control token is fingerprintable, so the FACT
-# is proven against TWO controls that are SAME-SHAPE siblings of the target's LAST path segment (same
-# character class, same length, same extension, RANDOMIZED — no fixed literal a signature rule can catch).
-# The FACT fires ONLY when VIGIL's own gated GETs show:
-#   1. the TARGET returns a served-resource status (2xx/3xx);
-#   2. BOTH same-shape controls established a real channel and AGREE on status (a STABLE not-found baseline —
-#      an unstable/varying server yields no baseline → LEAD); AND
-#   3. the target is DISTINGUISHABLE from that stable baseline EITHER by a different status OR — when the
-#      status matches — by a BODY differential: the two controls' bodies are byte-identical (a stable
-#      not-found body) AND the target's body differs from it.
-# This refuses the four soft-404 FP classes at once: a numeric-route soft-404 (a same-shape numeric control
-# ALSO matches the route → same status+body → LEAD); a shape/length-signature block (a same-length control is
-# treated identically → no false 404 → LEAD); a uniform blanket-200 (target==control body → LEAD); and a
-# path-ECHOing soft-404 (the two controls' bodies differ → no stable baseline → LEAD). If the last segment's
-# shape cannot be soundly mirrored (a root/directory URL, or an unusual segment), the FACT FAILS CLOSED to a
-# LEAD rather than mint. The predicate is a pure JSON AST over RAW status codes + RAW body hashes, so the
-# certificate re-verifies OFFLINE exactly like every other predicate_oracle FACT.
+# A web-discovery tool (httpx / ffuf / …) PROPOSES a URL; the RUNNER (never the tool) sends PLAIN gated GETs
+# (no canary) and the EXISTING ACHIEVED_STATE predicate_oracle adjudicates. Reuses ACHIEVED_STATE (no new
+# OracleKind, so `make gate` stays byte-identical); the FACT is minted only by admit(branch) +
+# certify_admitted(provenance="live_redrive") over VIGIL's OWN gated capture.
+#
+# SOUNDNESS (near-zero-FP, the soft-404 firewall — HARDENED twice). Two failure modes were found and closed:
+#   BLOCK-1 (coarse char-class): a control of a WIDER class than the route (e.g. a random alnum control on a
+#     hex/uuid route) 404s as a route-MISS while a well-formed nonexistent target soft-404s 200 → false FACT.
+#     FIXED by a NARROW-CLASS, structure-preserving mirror: the control mirrors the target segment's exact
+#     per-position character class (digits→digits, lower/upper-hex→same-hex, uuid dashes preserved, base64
+#     alphabet preserved, alpha/alnum→same), same length + extension, RANDOMIZED. If the class is AMBIGUOUS
+#     (e.g. all-a–f letters, which is both alpha and hex) or otherwise not confidently mirrorable, it FAILS
+#     CLOSED to a LEAD — never a coarse-bucket guess. A root/directory URL (no last segment) also fails closed.
+#   BLOCK-2 (bounded not-found body space): a soft-404 whose not-found body is one of a SMALL set (random per
+#     request, or per path) let two controls COLLIDE on one body ~1/b of the time → a spurious "stable
+#     baseline" the target differs from → an INTERMITTENT false FACT. FIXED by MULTI-SAMPLE stability: the
+#     baseline is many DISTINCT same-shape controls, EACH resampled, and the target itself resampled; a FACT
+#     requires EVERY control sample to agree on status AND body-hash (a bounded/varying space fails to agree
+#     across many samples → no baseline → LEAD) AND the target to be stable across its resamples.
+#
+# The FACT fires ONLY when VIGIL's own gated GETs show: (1) the target is a served status (2xx/3xx) and is
+# STABLE across its resamples; (2) all control samples reached a channel and AGREE on one status AND one
+# body-hash (a multi-sample-stable not-found baseline); and (3) the target is DISTINGUISHABLE from that
+# baseline by a different status OR a different body-hash. The predicate is a pure JSON AST over RAW status
+# codes + RAW body hashes of every sample, so the certificate re-verifies OFFLINE like every predicate_oracle
+# FACT. The CLEAN direction (a channel-confirmed hard 404/410 at the exact URL, control-independent, bounded
+# to the probed URL) is unchanged.
 ENDPOINT_LIVENESS_BUG_CLASS = "endpoint_liveness"
 ENDPOINT_LIVENESS_BRANCH = "achieved_state.endpoint_liveness"
-# served-resource statuses the TARGET must return (2xx/3xx). 401/403/405/5xx are deliberately NOT "live" here:
+# served-resource statuses the TARGET must return (2xx/3xx). 401/403/405/5xx are deliberately NOT minted here:
 # they are exists-but-gated / error responses that a plain GET cannot soundly separate from a blanket policy,
-# so they stay INCONCLUSIVE rather than mint. A definite hard not-found at the TARGET (404/410) is the
-# channel-confirmed CLEAN case — bounded to the EXACT probed URL, never an enumeration-completeness claim.
+# so they stay INCONCLUSIVE. A definite hard not-found at the TARGET (404/410) is the channel-confirmed CLEAN
+# case — bounded to the EXACT probed URL, never an enumeration-completeness claim.
 _TARGET_ABSENT_STATUSES = frozenset({404, 410})
-_LIVENESS_CONTROLS = 2   # number of same-shape not-found controls used to establish a stable baseline
-# The liveness FACT predicate — a pure AST over RAW values (no rubber-stamp, no new op):
-#   * target is a served resource (2xx/3xx);
-#   * both same-shape controls reached a real channel (status >= 100) and AGREE on status (stable baseline);
-#   * the target is DISTINGUISHABLE from that baseline by a different status, OR (same status) by a stable
-#     control body that the target's body differs from.
-_LIVENESS_PREDICATE = {"all": [
-    {"ge": [{"var": "target_status"}, 200]},
-    {"not": {"ge": [{"var": "target_status"}, 400]}},
-    {"ge": [{"var": "control1_status"}, 100]},
-    {"ge": [{"var": "control2_status"}, 100]},
-    {"eq": [{"var": "control1_status"}, {"var": "control2_status"}]},
-    {"any": [
-        {"not": {"eq": [{"var": "target_status"}, {"var": "control1_status"}]}},
-        {"all": [
-            {"eq": [{"var": "control1_body_sha256"}, {"var": "control2_body_sha256"}]},
-            {"not": {"eq": [{"var": "target_body_sha256"}, {"var": "control1_body_sha256"}]}},
-        ]},
-    ]},
-]}
+# Multi-sample budget (BLOCK-2). DISTINCT same-shape controls dominate robustness against a per-PATH bounded
+# body space; resampling each control + the target dominates robustness against a per-REQUEST varying body.
+# All control samples must agree for a baseline; the per-run false-FACT window on a b-element bounded space is
+# ~ (1/b)^(N_CONTROLS-1), driven to ~0 by the DISTINCT count.
+_LIVENESS_CONTROLS = 10         # DISTINCT same-shape not-found control URLs (dominates per-PATH robustness)
+_LIVENESS_RESAMPLES = 2         # times EACH control is fetched (catches per-REQUEST variance)
+_LIVENESS_TARGET_SAMPLES = 3    # times the TARGET is fetched (its response must be stable across these)
+# The FLOOR of distinct same-shape controls a FACT needs: a short segment / small alphabet (e.g. a single
+# digit) cannot yield the full _LIVENESS_CONTROLS distinct siblings, so the runner uses AS MANY distinct as
+# the mirror space allows, down to this floor; fewer than this ⇒ the baseline is too thin to multi-sample ⇒
+# FAIL CLOSED to a LEAD. The predicate is generated for the ACTUAL sample count and retained per-finding, so a
+# variable count still re-verifies offline against exactly the predicate that was minted.
+_MIN_LIVENESS_CONTROLS = 4
+
+
+def _build_liveness_predicate(n_control_samples: int, n_target_samples: int) -> dict:
+    """Generate the liveness FACT predicate as a pure JSON AST over RAW per-sample values (no rubber-stamp —
+    every decision is an AST op over retained raw statuses + body hashes, so the certificate re-verifies
+    OFFLINE). Fires iff: the target is 2xx/3xx and STABLE across its samples; ALL ``n_control_samples`` control
+    samples reached a channel and AGREE on one status AND one body-hash (a multi-sample-stable not-found
+    baseline); and the target is DISTINGUISHABLE from that baseline by status or body-hash. The AST is
+    generated for the EXACT number of samples the runner captured and retained with the finding, so a
+    variable control count (a short-segment URL yields fewer distinct siblings) still re-verifies offline."""
+    clauses: list = [
+        {"ge": [{"var": "target_0_status"}, 200]},
+        {"not": {"ge": [{"var": "target_0_status"}, 400]}},
+    ]
+    # target STABLE across its resamples (an unstable target — random content — cannot be soundly judged).
+    for j in range(1, n_target_samples):
+        clauses.append({"eq": [{"var": "target_0_status"}, {"var": f"target_{j}_status"}]})
+        clauses.append({"eq": [{"var": "target_0_sha"}, {"var": f"target_{j}_sha"}]})
+    # baseline: control_0 reached a real channel (status >= 100), and EVERY control sample agrees on both
+    # status AND body-hash — a multi-sample-stable not-found baseline (a bounded/varying space fails this).
+    clauses.append({"ge": [{"var": "control_0_status"}, 100]})
+    for i in range(1, n_control_samples):
+        clauses.append({"eq": [{"var": "control_0_status"}, {"var": f"control_{i}_status"}]})
+        clauses.append({"eq": [{"var": "control_0_sha"}, {"var": f"control_{i}_sha"}]})
+    # DISTINGUISHABLE: the (stable) target differs from the (stable) baseline by status or body-hash.
+    clauses.append({"any": [
+        {"not": {"eq": [{"var": "target_0_status"}, {"var": "control_0_status"}]}},
+        {"not": {"eq": [{"var": "target_0_sha"}, {"var": "control_0_sha"}]}},
+    ]})
+    return {"all": clauses}
 
 
 @dataclass
@@ -119,14 +152,49 @@ class WebLivenessResult:
         return self.fact is not None
 
 
-def _same_shape_sibling(seg: str, rand: Any) -> "str | None":
-    """A randomized SAME-SHAPE sibling of the last path segment ``seg``, or ``None`` when its shape cannot be
-    soundly mirrored (fail-closed → the caller degrades to a LEAD). Preserves the CHARACTER CLASS
-    (all-digits → digits; all-letters → letters with the same case pattern; alnum/-/_ → alnum), the LENGTH
-    (same length as the segment stem — never a fixed-length token), and a trailing EXTENSION
-    (``foo.php`` → ``<same-len>.php``). NO fixed literal token, so a signature/length rule cannot fingerprint
-    the control (which is what let the deterministic ``vigil-liveness-<hex>`` token false-FACT). Pure/lexical."""
+def _alnum_class_alphabet(alnum_chars: "set[str]") -> "str | None":
+    """The alphabet of the NARROWEST well-known character class that contains EXACTLY the observed alnum
+    characters, or ``None`` when the class is AMBIGUOUS (BLOCK-1 fail-closed). The candidate classes form a
+    subset lattice (digits ⊂ hex ⊂ alnum; alpha ⊂ alnum; …). A control drawn from the target's narrowest
+    class is ⊆ the route's accepted class (the target is accepted, so its class ⊆ the route's), so the control
+    is route-valid and a 404 on it is a real not-found, not a route-miss. When two INCOMPARABLE minimal classes
+    both fit (e.g. all a–f letters, which is both lower-alpha and lower-hex) the route class is genuinely
+    ambiguous → return None → the caller fails closed to a LEAD rather than guess a wider bucket."""
     import string  # noqa: PLC0415 — stdlib, function-local
+    classes = {
+        "digits": set(string.digits),
+        "lower_hex": set("0123456789abcdef"),
+        "upper_hex": set("0123456789ABCDEF"),
+        "lower_alpha": set(string.ascii_lowercase),
+        "upper_alpha": set(string.ascii_uppercase),
+        "alpha": set(string.ascii_letters),
+        "lower_alnum": set(string.ascii_lowercase + string.digits),
+        "upper_alnum": set(string.ascii_uppercase + string.digits),
+        "alnum": set(string.ascii_letters + string.digits),
+    }
+    containing = {name: s for name, s in classes.items() if alnum_chars and alnum_chars <= s}
+    if not containing:
+        return None
+    # minimal = no OTHER containing class is a strict subset of it. A unique minimum ⇒ that class; otherwise
+    # (0 or ≥2 incomparable minima) the shape is ambiguous ⇒ fail closed.
+    minimal = [name for name, s in containing.items()
+               if not any(other != name and containing[other] < s for other in containing)]
+    if len(minimal) != 1:
+        return None
+    return "".join(sorted(classes[minimal[0]]))
+
+
+def _same_shape_sibling(seg: str, rand: Any) -> "str | None":
+    """A randomized NARROW-CLASS, STRUCTURE-PRESERVING sibling of the last path segment ``seg``, or ``None``
+    when its shape cannot be confidently mirrored (BLOCK-1 fail-closed → the caller degrades to a LEAD).
+
+    Per-position mirror: every NON-alphanumeric character (a ``-`` in a UUID, an ``_``/``+``/``=`` in base64,
+    an internal ``.``) is KEPT IN PLACE so the STRUCTURE is preserved; every alphanumeric position is replaced
+    by a random character from the NARROWEST class the segment's alnum characters fit
+    (:func:`_alnum_class_alphabet`) — hex→hex, uuid→uuid (dashes kept, hex in the hex slots), base64→base64
+    alnum, numeric→numeric, alpha/alnum→same. Preserves LENGTH and a trailing EXTENSION (``foo.php`` →
+    ``<same-len>.php``). Returns ``None`` (fail closed) when there is no alnum position to randomise or the
+    class is ambiguous. Pure/lexical — no network, no fixed literal a signature rule can fingerprint."""
     if not seg:
         return None
     stem, dot, ext = seg.rpartition(".")
@@ -134,35 +202,27 @@ def _same_shape_sibling(seg: str, rand: Any) -> "str | None":
         base, suffix = stem, "." + ext
     else:
         base, suffix = seg, ""
-    n = len(base)
-    if n == 0:
+    if not base:
         return None
-    if base.isdigit():
-        # same-length digits; keep the first digit non-zero when n>1 so the numeric shape (no leading zeros,
-        # a plausible id of the same magnitude) is preserved.
-        first = rand.choice("123456789") if n > 1 else rand.choice(string.digits)
-        token = first + "".join(rand.choice(string.digits) for _ in range(n - 1))
-    elif base.isalpha():
-        if base.isupper():
-            alpha = string.ascii_uppercase
-        elif base.islower():
-            alpha = string.ascii_lowercase
-        else:
-            alpha = string.ascii_letters
-        token = "".join(rand.choice(alpha) for _ in range(n))
-    elif all(c.isalnum() or c in "-_" for c in base):
-        alnum = string.ascii_lowercase + string.digits
-        token = "".join(rand.choice(alnum) for _ in range(n))
-    else:
-        return None   # unusual shape (dots inside, %-encoding, unicode, …) — cannot mirror soundly
-    return token + suffix
+    alnum_positions = [i for i, c in enumerate(base) if c.isalnum()]
+    if not alnum_positions:
+        return None   # nothing to randomise (all separators) — cannot mirror
+    alphabet = _alnum_class_alphabet({base[i] for i in alnum_positions})
+    if alphabet is None:
+        return None   # ambiguous class — fail closed (do not guess a coarse bucket)
+    chars = list(base)
+    for i in alnum_positions:
+        chars[i] = rand.choice(alphabet)
+    return "".join(chars) + suffix
 
 
 def _liveness_control_urls(url: str, n: int = _LIVENESS_CONTROLS) -> "list[str]":
-    """Return ``n`` SAME-SHAPE, randomized, DISTINCT sibling control URLs of ``url`` under the SAME origin
-    (scheme/host/port) and the SAME parent directory — the last path segment mirrored in character class,
-    length and extension (see :func:`_same_shape_sibling`). Returns ``[]`` (fail-closed → LEAD) when there is
-    no mirrorable last segment (a root/directory URL like ``/`` or ``/api/``) or the shape cannot be mirrored.
+    """Return UP TO ``n`` NARROW-CLASS, structure-preserving, randomized, DISTINCT sibling control URLs of
+    ``url`` under the SAME origin (scheme/host/port) and the SAME parent directory — the last path segment
+    mirrored by :func:`_same_shape_sibling`. Best-effort: a short segment / small alphabet (e.g. a single
+    digit, whose mirror space is only 10) yields fewer than ``n``; the caller enforces the
+    :data:`_MIN_LIVENESS_CONTROLS` floor and fails closed below it. Returns ``[]`` when there is no mirrorable
+    last segment (a root/directory URL like ``/`` or ``/api/``) or the shape is ambiguous/un-mirrorable.
     Same host as the target, so each is authorised by the identical charter scope the target GET is (the
     host-pin invariant). Purely lexical over the URL — no network."""
     import secrets  # noqa: PLC0415 — stdlib, function-local
@@ -175,21 +235,23 @@ def _liveness_control_urls(url: str, n: int = _LIVENESS_CONTROLS) -> "list[str]"
     seg = path[slash + 1:] if slash >= 0 else path
     if not seg:
         return []   # a root/directory URL has no last segment to mirror — fail closed to a LEAD
+    if _same_shape_sibling(seg, rand) is None:
+        return []   # shape cannot be mirrored / ambiguous class → fail closed
     urls: "list[str]" = []
     tokens: "set[str]" = {seg}
-    for _ in range(n):
-        chosen = None
-        for _try in range(8):
-            tok = _same_shape_sibling(seg, rand)
-            if tok is None:
-                return []   # shape cannot be mirrored → fail closed
-            if tok not in tokens:
-                chosen = tok
-                break
-        if chosen is None:
-            return []   # could not obtain a DISTINCT same-shape sibling → fail closed
-        tokens.add(chosen)
-        urls.append(urlunsplit((parts.scheme, parts.netloc, parent + chosen, "", "")))
+    # collect as many DISTINCT same-shape siblings as the mirror space allows, up to n. Bounded retries per
+    # slot; when the space is exhausted (many misses in a row) we stop with what we have — the caller enforces
+    # the minimum. All siblings are != the target segment (seeded into ``tokens``).
+    misses = 0
+    while len(urls) < n and misses < 256:
+        tok = _same_shape_sibling(seg, rand)
+        if tok is None:                       # (shape checked above; defensive)
+            break
+        if tok in tokens:
+            misses += 1
+            continue
+        tokens.add(tok)
+        urls.append(urlunsplit((parts.scheme, parts.netloc, parent + tok, "", "")))
     return urls
 
 
@@ -223,14 +285,35 @@ def endpoint_liveness_redrive(url: str, *, slug: str, engagement_slug: str,
         res.note = f"refused before any traffic: {refusal}"
         return res
 
-    send, state = _gated_web_send(slug, timeout=timeout)
+    def _status(resp: "dict | None") -> int:
+        return int((resp or {}).get("status", 0) or 0)
+
+    def _sha(resp: "dict | None") -> str:
+        return str((resp or {}).get("raw_sha256", "") or "")
+
+    send, _state = _gated_web_send(slug, timeout=timeout)
     control_urls = _liveness_control_urls(url)
+    # enforce the multi-sample FLOOR: below _MIN_LIVENESS_CONTROLS distinct same-shape siblings the not-found
+    # baseline is too thin to be trusted, so fail closed (no controls ⇒ the FACT cannot fire; a hard-404 target
+    # can still be a control-independent CLEAN).
+    if len(control_urls) < _MIN_LIVENESS_CONTROLS:
+        control_urls = []
     res.control_urls = list(control_urls)
     try:
-        target = send(HttpRequest(method="GET", url=url))
-        target_channel = state["channels"] > 0
-        controls = ([send(HttpRequest(method="GET", url=c)) for c in control_urls]
-                    if target_channel else [])
+        # TARGET first, resampled T times — its response must be STABLE across resamples (a random-content
+        # target cannot be soundly judged). All sends are total (a refusal/error is a status-0 _EMPTY).
+        target_samples = [send(HttpRequest(method="GET", url=url)) for _ in range(_LIVENESS_TARGET_SAMPLES)]
+        target_statuses = [_status(t) for t in target_samples]
+        target_channel = any(s >= 100 for s in target_statuses)
+        target_all_absent = target_channel and all(s in _TARGET_ABSENT_STATUSES for s in target_statuses)
+        # CONTROLS: each DISTINCT same-shape URL resampled K times (BLOCK-2 multi-sample stability). Skipped
+        # when the target had no channel (deceptive), when no sound same-shape control exists (fail closed),
+        # or when the target is a hard not-found (the CLEAN path is control-independent).
+        control_samples: list = []
+        if target_channel and control_urls and not target_all_absent:
+            for c in control_urls:
+                for _ in range(_LIVENESS_RESAMPLES):
+                    control_samples.append(send(HttpRequest(method="GET", url=c)))
     except Exception as e:  # noqa: BLE001 — a probe error never fabricates a FACT; record + return a lead
         res.outcome = "inconclusive"
         res.note = f"probe error: {type(e).__name__}: {e}"
@@ -239,48 +322,43 @@ def endpoint_liveness_redrive(url: str, *, slug: str, engagement_slug: str,
         return res
 
     if not target_channel:
-        # DECEPTIVE: the tool claimed a live URL, but VIGIL's OWN gated GET reached no channel (transport
-        # error / mid-run gate deny). NOT reproducible ⇒ NO fact (never a CLEAN — no channel means nothing
-        # was examined).
+        # DECEPTIVE: the tool claimed the URL, but VIGIL's OWN gated GET reached no channel (transport error /
+        # mid-run gate deny). NOT reproducible ⇒ NO fact (never a CLEAN — no channel means nothing examined).
         res.outcome = "deceptive_no_fact"
-        res.note = ("VIGIL's own gated GET reached no channel — the tool's live claim is not reproducible "
+        res.note = ("VIGIL's own gated GET reached no channel — the tool's URL claim is not reproducible "
                     "(deceptive_no_fact)")
         res.lead = AdapterResult("lead", res.note, ENDPOINT_LIVENESS_BUG_CLASS, finding_ref,
                                  outcome="inconclusive")
         return res
 
-    def _status(resp: "dict | None") -> int:
-        return int((resp or {}).get("status", 0) or 0)
+    res.target_status = target_statuses[0]
+    res.control_statuses = sorted({_status(s) for s in control_samples})
+    # observed_evidence: EVERY raw sample (status + raw body hash), keyed for the generated predicate AST — no
+    # rubber-stamp, the AST does all the comparing. The predicate is generated for the ACTUAL captured sample
+    # count (short-segment URLs yield fewer distinct siblings, so the count varies) and retained WITH the
+    # finding, so the certificate re-verifies offline against exactly the predicate that was minted. An empty
+    # control set (fail-closed / hard-404 skip) yields a predicate whose control_0 clause references an absent
+    # var ⇒ it cannot fire ⇒ no FACT.
+    observed_evidence: dict = {"target_url": url, "control_urls": list(control_urls)}
+    for j, t in enumerate(target_samples):
+        observed_evidence[f"target_{j}_status"] = _status(t)
+        observed_evidence[f"target_{j}_sha"] = _sha(t)
+    for i, s in enumerate(control_samples):
+        observed_evidence[f"control_{i}_status"] = _status(s)
+        observed_evidence[f"control_{i}_sha"] = _sha(s)
+    context = {"predicate": _build_liveness_predicate(len(control_samples), _LIVENESS_TARGET_SAMPLES),
+               "observed_evidence": observed_evidence}
 
-    def _sha(resp: "dict | None") -> str:
-        return str((resp or {}).get("raw_sha256", "") or "")
-
-    t_status = _status(target)
-    # Pad control observations to a fixed 2 so the predicate always has both variables (a missing/failed
-    # control is status 0, which the predicate's `>= 100` guard treats as "no channel" ⇒ no FACT).
-    c1 = controls[0] if len(controls) >= 1 else None
-    c2 = controls[1] if len(controls) >= 2 else None
-    res.target_status = t_status
-    res.control_statuses = [_status(c1), _status(c2)]
-    observed_evidence = {
-        "target_url": url, "target_status": t_status, "target_body_sha256": _sha(target),
-        "control1_url": control_urls[0] if len(control_urls) >= 1 else "",
-        "control1_status": _status(c1), "control1_body_sha256": _sha(c1),
-        "control2_url": control_urls[1] if len(control_urls) >= 2 else "",
-        "control2_status": _status(c2), "control2_body_sha256": _sha(c2),
-    }
-    context = {"predicate": _LIVENESS_PREDICATE, "observed_evidence": observed_evidence}
-
-    # The ACHIEVED_STATE predicate decides the FIRE over VIGIL's own captures; the runner computes
-    # CONCLUSIVENESS (predicate_oracle is always conclusive, but liveness must distinguish a channel-confirmed
-    # hard-404 CLEAN from a soft-404 / no-sound-control ambiguity). A non-fire is conclusive ONLY when the
-    # target itself returned a definite hard not-found (404/410) — then the exact URL is a channel-confirmed
-    # non-live endpoint (CLEAN, bounded to THIS URL, control-independent). A non-fire where the target served
-    # but the same-shape controls did not corroborate a distinction (soft-404 / blanket / echo / no mirrorable
-    # control) cannot prove live or absent ⇒ INCONCLUSIVE, never CLEAN.
+    # The ACHIEVED_STATE predicate decides the FIRE over VIGIL's own multi-sample captures; the runner computes
+    # CONCLUSIVENESS (predicate_oracle is always conclusive, but this branch must distinguish a channel-
+    # confirmed hard-404 CLEAN from a soft-404 / no-sound-control / unstable ambiguity). A non-fire is
+    # conclusive ONLY when the target was a definite hard not-found (404/410) on EVERY resample — then the exact
+    # URL is a channel-confirmed non-served endpoint (CLEAN, bounded to THIS URL, control-independent). A
+    # non-fire where the target served but the multi-sample same-shape baseline did not corroborate a
+    # distinction (soft-404 / bounded-body / echo / unstable / no mirrorable control) is INCONCLUSIVE.
     signal = _oracle_signal(context)
     fired = signal.fired
-    conclusive = fired or (t_status in _TARGET_ABSENT_STATUSES)
+    conclusive = fired or target_all_absent
     admitted = admit(ENDPOINT_LIVENESS_BRANCH, fired=fired, conclusive=conclusive,
                      observed={"channel_established": True, "gate_authorized": True})
 
@@ -292,23 +370,27 @@ def endpoint_liveness_redrive(url: str, *, slug: str, engagement_slug: str,
         res.fact = r
         res.context = context
         res.outcome = "positive"
-        res.note = (f"live endpoint FACT: target {t_status}; same-shape not-found controls "
-                    f"{res.control_statuses} form a stable baseline the target is distinguishable from")
+        # NARROWED CLAIM (never "live endpoint"): served content distinguishable from a multi-sample-stable
+        # same-shape not-found baseline.
+        res.note = (f"served content DISTINGUISHABLE from a multi-sample-stable same-shape not-found baseline: "
+                    f"target status {res.target_status} over {_LIVENESS_TARGET_SAMPLES} samples vs "
+                    f"{len(control_samples)} control samples across {len(control_urls)} same-shape siblings "
+                    f"(not a soft-404 phantom of that shape). NOT a claim that the endpoint is 'live'/real.")
         return res
     # not a FACT — a labelled lead. classify: CLEAN (channel-confirmed hard-404, bounded to THIS url) vs
-    # INCONCLUSIVE (soft-404 / gated / no-sound-control / ambiguous). certify_admitted stamped r.outcome.
+    # INCONCLUSIVE (soft-404 / bounded-body / no-sound-control / ambiguous). certify_admitted stamped r.outcome.
     res.lead = r
     res.outcome = "clean" if admitted.verdict is Verdict.CLEAN else "inconclusive"
     if admitted.verdict is Verdict.CLEAN:
-        res.note = (f"channel-confirmed hard not-found ({t_status}) at THIS exact URL — CLEAN bounded to the "
-                    f"probed URL only, never a claim that no other endpoint exists")
+        res.note = (f"channel-confirmed hard not-found ({res.target_status}) at THIS exact URL — CLEAN bounded "
+                    f"to the probed URL only, never a claim that no other endpoint exists")
     elif not control_urls:
-        res.note = ("no sound SAME-SHAPE control for this URL (a root/directory URL or an un-mirrorable last "
-                    "segment) — the liveness FACT fails closed to a LEAD")
+        res.note = ("no sound NARROW-CLASS same-shape control for this URL (a root/directory URL or an "
+                    "ambiguous/un-mirrorable last segment) — fails closed to a LEAD")
     else:
-        res.note = (f"no live-endpoint FACT: target {t_status}, same-shape controls {res.control_statuses} — "
-                    f"the server does not distinguish this URL from a nonexistent same-shape sibling "
-                    f"(soft-404 / blanket / path-echo / unstable baseline); a LEAD")
+        res.note = (f"no distinguishable-content FACT: target {res.target_status}, control statuses "
+                    f"{res.control_statuses} — the server does not distinguish this URL from a same-shape "
+                    f"sibling across multi-sampling (soft-404 / bounded-body / echo / unstable baseline); a LEAD")
     return res
 
 
