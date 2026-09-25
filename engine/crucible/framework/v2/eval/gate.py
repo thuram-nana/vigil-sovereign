@@ -189,3 +189,73 @@ def gate(
         warnings=warnings,
         improvements=improvements,
     )
+
+
+def zero_fp_gate(
+    results: dict[str, list[MeasuredBoard]],
+    *,
+    tools: tuple[str, ...] = ("crucible",),
+    min_true_positives: dict[str, int] | None = None,
+) -> GateVerdict:
+    """The program-level CORPUS-WIDE zero-false-positive gate — the assertion that makes
+    "the deep/full roster ships on by default" SAFE.
+
+    Run the WHOLE benchmark corpus (every planted bug AND every benign twin / negative
+    control) under the deep/full profile and hold two invariants for each gated tool on
+    each app:
+
+      * **zero FP anywhere in the corpus** — ``false_positives == 0``. Any finding that
+        does not match a planted bug (i.e. lands on a benign twin / negative control, or
+        is otherwise off-manifest) is a HARD failure. This is the near-zero-FP proof: the
+        wider roster raises no alarm on a clean surface.
+      * **the planted bugs still confirm** — ``true_positives >= min`` (default: the
+        app's full ground truth, ``tp + fn``, so nothing regressed vs. surface). A drop
+        means enabling the wider roster cost coverage.
+
+    Deliberately ASYMMETRIC: a NEW false positive fails CI; MORE true positives never do.
+    Fail-closed: a run that gated ZERO comparisons tested nothing and cannot pass.
+
+    This never launders INCONCLUSIVE into CLEAN: a browser/DOM surface that could not be
+    assessed emits no finding (it is recorded INCONCLUSIVE elsewhere), so it contributes
+    neither a TP nor an FP here — it is simply absent, exactly as an unassessed surface
+    must be."""
+    regressions: list[str] = []
+    warnings: list[str] = []
+    improvements: list[str] = []
+    mins = min_true_positives or {}
+    evaluated = 0
+
+    for app, boards in sorted(results.items()):
+        by_tool = {mb.scoreboard.tool: mb.scoreboard for mb in boards}
+        for tool in tools:
+            sb = by_tool.get(tool)
+            if sb is None:
+                warnings.append(f"{app}/{tool}: expected under the zero-FP profile but did not run")
+                continue
+            evaluated += 1
+            if sb.false_positives != 0:
+                regressions.append(
+                    f"{app}/{tool}: {sb.false_positives} FALSE POSITIVE(S) under the deep/full profile "
+                    f"— the corpus-wide zero-FP invariant broke (a benign twin / negative control was "
+                    f"flagged, or an off-manifest finding was emitted)")
+            floor = mins.get(app, sb.true_positives + sb.false_negatives)
+            if sb.true_positives < floor:
+                regressions.append(
+                    f"{app}/{tool}: true positives {sb.true_positives} < {floor} — the wider deep/full "
+                    f"roster REGRESSED planted-bug coverage")
+            else:
+                improvements.append(
+                    f"{app}/{tool}: tp={sb.true_positives} fp={sb.false_positives} fn={sb.false_negatives} "
+                    f"(zero-FP held under deep/full)")
+
+    if evaluated == 0:
+        regressions.append(
+            "zero-FP gate evaluated 0 targets — nothing was measured under the deep/full profile; "
+            "a gate that tested nothing cannot pass")
+
+    return GateVerdict(
+        passed=not regressions,
+        regressions=regressions,
+        warnings=warnings,
+        improvements=improvements,
+    )

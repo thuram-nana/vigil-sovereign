@@ -53,17 +53,84 @@ from .validation import (
 # CRUCIBLE's stated precision target for this benchmark (the success criterion).
 PRECISION_TARGET = 0.98
 
+# The engagement PROFILES the benchmark can run under, mirroring engage.py's
+# ``--profile {surface,deep,full}`` (engage.py::_PROFILE_FLAGS). ``surface`` is the
+# DEFAULT gate roster (byte-identical to today). ``deep``/``full`` turn ON the same
+# opt-in passes the real profile flips — the browser DOM/stored-XSS passes, the SSO
+# acceptance pass, and the GraphQL amplification pass — so the corpus-wide zero-FP
+# gate exercises exactly the roster that ships "on by default in deep/full". ``full``
+# additionally arms the operator-spec access-control pack (inert without operator
+# refs — it emits NO finding, never a false CLEAN or FACT). The plan-named deferred
+# packs (time-based/NoSQL/LDAP/XPath, bizlogic/race) have NO enable flag yet, so a
+# profile never invents them here either — exactly like engage.py.
+#
+# CRITICAL: this is a PURE roster expansion. It adds NO oracle and relaxes NO gate.
+# ``surface`` is untouched, so ``make gate`` stays byte-identical (11tp/0fp/0fn).
+_PROFILE_ROSTER: dict[str, dict[str, bool]] = {
+    "surface": {},   # today's default — the run() body below applies no override
+    "deep": {"enable_browser_xss": True, "enable_spa_crawl": True,
+             "enable_sso": True, "enable_graphql_dos": True},
+    "full": {"enable_browser_xss": True, "enable_spa_crawl": True,
+             "enable_sso": True, "enable_graphql_dos": True,
+             "enable_access_control": True},
+}
+
+# The XSS subclass family. The browser DOM-execution pass confirms a DOM-XSS at the
+# SAME sink a static reflected-XSS check already found (e.g. the planted /search?q):
+# that is ONE bug corroborated by two oracles, not two bugs. When scoring against a
+# corpus whose vocabulary is the family label ``xss`` (this one), a subclass
+# confirmation at a location already covered by the family is de-duplicated to a
+# single finding — the sanctioned family-collapse the scorer documents. This can
+# NEVER launder a benign-endpoint false positive: a spurious DOM-XSS on any surface
+# NOT already carrying a reflected-XSS has a distinct location, survives the dedup,
+# matches no planted bug, and is counted as an FP (failing the zero-FP gate).
+_XSS_FAMILY = frozenset({"xss", "domxss", "reflectedxss", "storedxss"})
+
+
+def _xss_family_key(bug_class: str) -> str:
+    """Collapse an XSS subclass to the ``xss`` family label; leave every other class
+    (via :func:`eval.models._normalize_class`) unchanged."""
+    from .models import _normalize_class
+
+    n = _normalize_class(bug_class)
+    return "xss" if n in _XSS_FAMILY else n
+
+
+def _collapse_xss_corroboration(findings: list[NormalizedFinding]) -> list[NormalizedFinding]:
+    """De-duplicate a browser DOM-XSS confirmation against a static reflected-XSS at
+    the SAME canonical location (one bug, two oracles), keeping first occurrence.
+    Sound: only findings that share BOTH the XSS family AND the exact location merge,
+    so a spurious XSS on any other surface is preserved (and will fail the gate)."""
+    from .validation import _canon_location
+
+    seen: set[tuple[str, str]] = set()
+    out: list[NormalizedFinding] = []
+    for f in findings:
+        key = (_xss_family_key(f.bug_class), _canon_location(f.location))
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(f)
+    return out
+
 
 class BenchmarkCrucibleAdapter(CrucibleAdapter):
     """CrucibleAdapter tuned for the benchmark: the declarative library on (so the
     exposure/framework checks run), static DOM-XSS on, query-value scope, timing
     checks dropped (irrelevant to the response-visible planted bugs and the
     dominant request cost), OOB off (bounded + fast). Reuses the parent's
-    loopback-only guard and oracle-confirmed :meth:`_normalize`."""
+    loopback-only guard and oracle-confirmed :meth:`_normalize`.
+
+    ``profile`` selects the roster (``surface`` = today's default, byte-identical;
+    ``deep``/``full`` add the opt-in browser/SSO/GraphQL passes the real ``engage
+    --profile`` flips — see :data:`_PROFILE_ROSTER`). Under a non-surface profile the
+    browser DOM-XSS corroboration of an already-found reflected-XSS is scored as one
+    bug (:func:`_collapse_xss_corroboration`)."""
 
     name: str = "crucible"
 
-    def __init__(self, *, use_browser: bool = False, max_pages: int = 25, max_depth: int = 4) -> None:
+    def __init__(self, *, use_browser: bool = False, max_pages: int = 25, max_depth: int = 4,
+                 profile: str = "surface") -> None:
         super().__init__(
             max_pages=max_pages,
             max_depth=max_depth,
@@ -72,6 +139,10 @@ class BenchmarkCrucibleAdapter(CrucibleAdapter):
             insertion_kinds=(InsertionKind.QUERY_VALUE,),
         )
         self._use_browser = use_browser
+        self._profile = (profile or "surface").lower()
+        if self._profile not in _PROFILE_ROSTER:
+            raise HarnessError(
+                f"unknown benchmark profile {profile!r} (choose from {sorted(_PROFILE_ROSTER)})")
 
     def run(self, target: CorpusTarget) -> list[NormalizedFinding]:
         if not _is_loopback(target.base_url):
@@ -81,6 +152,9 @@ class BenchmarkCrucibleAdapter(CrucibleAdapter):
         # The shipped library minus the timing entries: every benchmark bug is
         # response-visible, so a statistical time-based sweep only adds latency.
         entries = [e for e in load_library() if e.oracle.kind != "timing"]
+        # surface = today's exact behaviour; a non-surface profile UNIONS in the
+        # opt-in passes (never removes one) — a pure roster expansion.
+        roster = dict(_PROFILE_ROSTER[self._profile])
         report = WebScanCampaign(
             loopback_send,
             max_pages=self.max_pages,
@@ -90,11 +164,19 @@ class BenchmarkCrucibleAdapter(CrucibleAdapter):
             use_library=True,
             library_entries=entries,
             enable_domxss=True,
-            enable_browser_xss=self._use_browser,
-            enable_spa_crawl=self._use_browser,
+            enable_browser_xss=roster.get("enable_browser_xss", self._use_browser),
+            enable_spa_crawl=roster.get("enable_spa_crawl", self._use_browser),
+            enable_sso=roster.get("enable_sso", False),
+            enable_graphql_dos=roster.get("enable_graphql_dos", False),
+            enable_access_control=roster.get("enable_access_control", False),
             insertion_kinds=self.insertion_kinds,
         ).run(target.base_url)
-        return self._record(report)
+        produced = self._record(report)
+        # surface is byte-identical (no browser pass → no DOM-XSS corroboration to
+        # merge); only a non-surface roster can produce the DOM/reflected double.
+        if self._profile != "surface":
+            produced = _collapse_xss_corroboration(produced)
+        return produced
 
 
 def run_benchmark_measured(
@@ -109,6 +191,16 @@ def run_benchmark_measured(
         if incumbents:
             adapters += [SqlmapAdapter(), WapitiAdapter(), NiktoAdapter()]
         return comparative_report_measured(corpus, adapters)
+
+
+def run_benchmark_profile_measured(profile: str) -> list[MeasuredBoard]:
+    """Stand up the benchmark app and score CRUCIBLE under an engagement ``profile``
+    (``surface``/``deep``/``full``) — the corpus-wide zero-FP proof's data source.
+    CRUCIBLE-only (no incumbents): the property under test is CRUCIBLE's own zero-FP
+    under the wider roster, not a cross-tool comparison."""
+    with serve() as base_url:
+        corpus = benchmark_corpus(base_url)
+        return comparative_report_measured(corpus, [BenchmarkCrucibleAdapter(profile=profile)])
 
 
 def run_benchmark(*, use_browser: bool = False, incumbents: bool = True) -> list[Scoreboard]:
@@ -436,6 +528,30 @@ def _apply_gate(results: dict, args) -> int:
     return 0 if verdict.passed else 1
 
 
+def _run_zero_fp_gate_cli() -> int:
+    """Run the corpus-wide zero-FP gate under the deep AND full profiles and print the
+    verdict. Exit 0 iff EVERY profile holds zero FP and full planted-bug coverage."""
+    from .gate import zero_fp_gate
+    from .validation import render_measured_table
+
+    ok = True
+    for profile in ("deep", "full"):
+        measured = run_benchmark_profile_measured(profile)
+        print(f"\n== corpus zero-FP gate: profile={profile} ==")
+        print(render_measured_table(measured))
+        verdict = zero_fp_gate({"benchmark-app": measured})
+        for w in verdict.warnings:
+            print(f"  warn: {w}")
+        for imp in verdict.improvements:
+            print(f"  ok: {imp}")
+        for r in verdict.regressions:
+            print(f"  REGRESSION: {r}")
+        print(f"  zero-FP gate ({profile}): {'PASS' if verdict.passed else 'FAIL'}")
+        ok = ok and verdict.passed
+    print(f"\ncorpus-wide zero-FP gate: {'PASS' if ok else 'FAIL'}")
+    return 0 if ok else 1
+
+
 def _run_corpus_cli(args) -> int:
     """Run the dockerized multi-app corpus and print each app's accuracy+cost table,
     then the honest skip list. Real apps, real containers, real numbers — or an
@@ -493,6 +609,12 @@ def main(argv: list[str]) -> int:
                         help="Overwrite the baseline with this run's scoreboards (accept the new numbers).")
     parser.add_argument("--baseline", default=None,
                         help="Baseline JSON path (default: the committed in-process benchmark baseline).")
+    parser.add_argument("--zero-fp", action="store_true",
+                        help="Run the corpus-wide ZERO-FALSE-POSITIVE gate: score CRUCIBLE over the "
+                             "whole benchmark corpus under the deep AND full profiles and exit 1 on ANY "
+                             "false positive (a benign twin / negative control flagged) or any drop in "
+                             "planted-bug coverage. The proof that the wider deep/full roster is safe on "
+                             "by default. CRUCIBLE-only; needs no Docker.")
     parser.add_argument("--sign", action="store_true",
                         help="Sign the JSON scorecard (m-of-n Ed25519) → a tamper-evident, "
                              "independently-verifiable artifact + an out-of-band fingerprint pin.")
@@ -504,6 +626,9 @@ def main(argv: list[str]) -> int:
 
     if args.corpus:
         return _run_corpus_cli(args)
+
+    if args.zero_fp:
+        return _run_zero_fp_gate_cli()
 
     measured = run_benchmark_measured(
         use_browser=args.browser, incumbents=not args.no_incumbents)

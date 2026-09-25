@@ -639,6 +639,11 @@ class WebScanCampaign:
                     findings.append(AuditFinding(
                         check_id="browser-xss", bug_class="dom_xss",
                         insertion_point=f"query_value:{param}", param=param,
+                        # Carry the endpoint URL so the finding is LOCATABLE to a page
+                        # (path?param), consistent with _arsenal_finding. Without it the
+                        # finding degrades to a bare param and cannot be tied to the sink
+                        # it fired on — indistinguishable across endpoints sharing a param.
+                        endpoint=req.url,
                         confidence=confirmed.confidence,
                         confirmed_by=kind.value if hasattr(kind, "value") else str(kind),
                         rationale=confirmed.rationale,

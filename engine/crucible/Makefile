@@ -12,10 +12,11 @@
 PY := python3
 V2 := $(PY) -m framework.v2
 
-.PHONY: gate bench bench-corpus gate-corpus baseline test help
+.PHONY: gate gate-zero-fp bench bench-corpus gate-corpus baseline test help
 
 help:
 	@echo "make gate          - regression-gate CRUCIBLE on the in-process benchmark (CI; no Docker)"
+	@echo "make gate-zero-fp  - corpus-wide ZERO-FP gate under the deep+full profiles (CI; no Docker)"
 	@echo "make bench         - run the in-process benchmark, print the table, write the report"
 	@echo "make bench-corpus  - run the dockerized multi-app corpus (needs Docker; skips heavy)"
 	@echo "make gate-corpus   - regression-gate the dockerized corpus against a baseline"
@@ -26,6 +27,13 @@ help:
 # (incumbent tools vary by host and are not a pass/fail signal).
 gate:
 	$(V2) benchmark --gate --no-incumbents
+
+# Program-level corpus-wide zero-false-positive gate: run the whole benchmark corpus
+# under the deep AND full profiles and exit non-zero on ANY false positive (a benign
+# twin / negative control flagged) or any drop in planted-bug coverage. This is the
+# assertion that makes "the wider deep/full roster ships on by default" safe.
+gate-zero-fp:
+	$(V2) benchmark --zero-fp --no-incumbents
 
 # Full public benchmark: CRUCIBLE vs whatever incumbents are installed here.
 bench:
