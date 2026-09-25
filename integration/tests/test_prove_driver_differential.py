@@ -65,8 +65,12 @@ ROWS = R(200, '{"results": [{"id": 1}]}')          # a TRUE-predicate page: a re
 BLOCK = R(403, "<html><body>Request blocked by WAF</body></html>")   # a metachar block page
 
 
-def _round(true, false_a, false_b, baseline) -> dict:
-    return {"true": true, "false_a": false_a, "false_b": false_b, "baseline": baseline}
+def _round(true, false_a, false_b, baseline, false_a_repeat=None) -> dict:
+    # false_a_repeat defaults to a byte-identical repeat of false_a (a STABLE origin). A dynamic /
+    # noisy origin passes an explicit DIFFERING false_a_repeat so the same-request stability control trips.
+    return {"true": true, "false_a": false_a, "false_b": false_b,
+            "false_a_repeat": dict(false_a) if false_a_repeat is None else false_a_repeat,
+            "baseline": baseline}
 
 
 # genuine fix / sanitizing WAF: all four probes indistinguishable and baseline-shaped (SPRT refute, closure holds)
@@ -77,9 +81,11 @@ SIGNAL_ROUND = _round(ROWS, NORMAL, NORMAL, NORMAL)
 NONSIGNAL_ROUND = _round(NORMAL, NORMAL, NORMAL, NORMAL)
 # blocking WAF: the metachar probes get an identical block page; the benign baseline is a normal 200
 BLOCKED_ROUND = _round(BLOCK, BLOCK, BLOCK, NORMAL)
-# structurally-dynamic page: every probe differs in record COUNT (baseline != false_a → closure fails)
+# structurally-dynamic page: every probe differs in record COUNT (baseline != false_a → closure fails),
+# INCLUDING the identical repeat (varies with any input → same-request stability control trips too)
 DYNAMIC_ROUND = _round(R(200, '{"i": [1, 2, 3]}'), R(200, '{"i": [1, 2]}'),
-                       R(200, '{"i": [1, 2, 3, 4]}'), R(200, '{"i": [1]}'))
+                       R(200, '{"i": [1, 2, 3, 4]}'), R(200, '{"i": [1]}'),
+                       false_a_repeat=R(200, '{"i": [1, 2, 3, 4, 5, 6]}'))
 CONFIRM_ROUNDS = [SIGNAL_ROUND, SIGNAL_ROUND, SIGNAL_ROUND]   # retained firing rounds for the positive control
 
 
@@ -103,7 +109,8 @@ def _noisy_vuln_round(n: int) -> dict:
     (across=True → the injection STILL fires) and baseline ≈ false_a structurally (WAF-closure passes). The
     red-pen's reproduced false-REMEDIATED shape — the attribution gate MUST catch it."""
     return _round(true=_noisy(f"t{n}", LEAK), false_a=_noisy(f"a{n}", "[]"),
-                  false_b=_noisy(f"b{n}", "[]"), baseline=_noisy(f"c{n}", "[]"))
+                  false_b=_noisy(f"b{n}", "[]"), baseline=_noisy(f"c{n}", "[]"),
+                  false_a_repeat=_noisy(f"ar{n}", "[]"))   # identical-request repeat also carries fresh noise
 
 
 NOISY_VULN_ROUNDS = [_noisy_vuln_round(0), _noisy_vuln_round(1), _noisy_vuln_round(2)]

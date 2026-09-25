@@ -220,13 +220,16 @@ class DifferentialCheck:
 class BooleanInferenceCheck:
     """Boolean-blind via a sequential probability ratio test (SPRT).
 
-    Each round sends a TRUE-condition clause and the FALSE-condition clause
-    twice (the second FALSE is a dynamic-page control). It runs the SPRT online
-    to stop as soon as the evidence is decisive — few rounds for a clear signal,
-    a bounded ``n_max`` otherwise — then hands every collected round to the
-    boolean-inference oracle, which recomputes the same decision deterministically.
-    Robust to flaky/dynamic backends that make a single true/false comparison
-    false-positive."""
+    Each round sends a TRUE-condition clause and the FALSE-condition clause THREE
+    times: ``false_a`` and ``false_b`` are the different-marker dynamic-page
+    control, and ``false_a_repeat`` is a byte-identical repeat of ``false_a`` — the
+    same-request STABILITY control that refuses a page which varies with any input
+    (an identical request sent twice must return non-differential responses). It
+    runs the SPRT online to stop as soon as the evidence is decisive — few rounds
+    for a clear signal, a bounded ``n_max`` otherwise — then hands every collected
+    round to the boolean-inference oracle, which recomputes the same decision
+    deterministically. Robust to flaky/dynamic backends that make a single
+    true/false comparison false-positive."""
 
     id: str
     bug_class: str
@@ -247,22 +250,29 @@ class BooleanInferenceCheck:
         trues: list[dict] = []
         false_as: list[dict] = []
         false_bs: list[dict] = []
+        false_a_repeats: list[dict] = []
         for _ in range(self.n_max):
             t = _as_dict(send(template.render(point, self.true_clause)))
             a = _as_dict(send(template.render(point, self.false_clause)))
             b = _as_dict(send(template.render(point, self.false_clause)))
+            a2 = _as_dict(send(template.render(point, self.false_clause)))  # identical repeat of false_a
             trues.append(t)
             false_as.append(a)
             false_bs.append(b)
+            false_a_repeats.append(a2)
             across = differential_response_oracle(a, t).fired
             within_same = not differential_response_oracle(a, b).fired
-            signal = across and within_same
+            # SAME-REQUEST STABILITY control: an identical repeat of the false request must be
+            # non-differential — a dynamic page (varies with any input) fails this, so the SPRT
+            # signal is 0 and it refutes (LEAD, no FACT). Mirrors boolean_inference_oracle.
+            stable = not differential_response_oracle(a, a2).fired
+            signal = across and within_same and stable
             llr += math.log(self.p1 / self.p0) if signal else math.log((1.0 - self.p1) / (1.0 - self.p0))
             if llr >= upper or llr <= lower:
                 break  # SPRT reached a decision — stop early
 
         return FindingContext.from_boolean_probes(
-            trues, false_as, false_bs, bug_class=self.bug_class,
+            trues, false_as, false_bs, false_a_repeats, bug_class=self.bug_class,
         )
 
 

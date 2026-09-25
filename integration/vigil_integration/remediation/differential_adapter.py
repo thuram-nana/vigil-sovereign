@@ -3,12 +3,15 @@ DIFFERENTIAL channel (TRUTHENOVATION R1, PR1).
 
 Where :mod:`live_adapter` (``LiveHttpAdapter``) drives the response-side ``error_signature`` channel, this
 adapter drives the boolean-inference channel: per exploit "trial" it builds a **matched-decoy round** from a
-``clause_template`` and gated-fetches four probes through the SAME injectable parameter —
+``clause_template`` and gated-fetches five probes through the SAME injectable parameter —
 
-    baseline   — a benign value carrying the inert challenge marker, NO exploit metacharacters
-    true       — a data-dependent predicate that is TRUE on the live DB, full exploit metacharacters
-    false_a    — the SAME predicate made FALSE, metacharacter-IDENTICAL to ``true``
-    false_b    — the FALSE predicate with a DIFFERENT inert marker (the dynamic-page control twin)
+    baseline       — a benign value carrying the inert challenge marker, NO exploit metacharacters
+    true           — a data-dependent predicate that is TRUE on the live DB, full exploit metacharacters
+    false_a        — the SAME predicate made FALSE, metacharacter-IDENTICAL to ``true``
+    false_b        — the FALSE predicate with a DIFFERENT inert marker (the dynamic-page control twin)
+    false_a_repeat — a byte-IDENTICAL repeat of ``false_a`` (the same-request STABILITY control: a
+                     dynamic origin that varies with any input returns a differing body, so the SPRT
+                     refutes and the attribution gate — never the SPRT alone — settles the verdict)
 
 ``true``/``false_a``/``false_b`` are metacharacter-identical in class (all carry ``'`` / ``AND`` / ``SELECT``
 / ``--``), so a content-inspecting WAF that blocks one blocks all — the matched decoy (DIFFERENTIAL-REMEDIATION
@@ -17,13 +20,13 @@ firing reflects origin data; the run ``challenge`` rides as an **inert freshness
 discriminating predicate (§3 / §6).
 
 The round is assembled into ``TrialObservation.oracle_context`` in the ``boolean_inference_oracle`` round shape
-``{"true": …, "false_a": …, "false_b": …, "baseline": …}``; the driver runs the EXISTING
+``{"true": …, "false_a": …, "false_b": …, "false_a_repeat": …, "baseline": …}``; the driver runs the EXISTING
 ``boolean_inference_oracle`` (SPRT) over the collected rounds and — for REMEDIATED — the EXISTING
 ``differential_response_oracle`` WAF-closure test (``baseline`` vs ``false_a`` on ``status``+``structural``,
 ``expect=same``). This adapter invents no oracle; it arranges probes and computes an informational per-round
 closure signal (the driver recomputes closure authoritatively).
 
-FAIL-CLOSED (§4.4 / §8 case 10): if ANY of the four probes is undelivered or malformed, the WHOLE round is
+FAIL-CLOSED (§4.4 / §8 case 10): if ANY of the five probes is undelivered or malformed, the WHOLE round is
 returned ``valid=False`` with a reason, so the driver fails the run closed rather than letting
 ``boolean_inference_oracle`` silently ``continue`` past a malformed round.
 
@@ -285,16 +288,22 @@ class DifferentialHttpAdapter:
         return self._drive_round(challenge=challenge, trial_index=trial_index, origin=True)
 
     def _drive_round(self, *, challenge: str, trial_index: int, origin: bool) -> TrialObservation:
-        """Build the four matched-decoy probes and gated-fetch each — through the edge, or DIRECT-to-origin when
+        """Build the five matched-decoy probes and gated-fetch each — through the edge, or DIRECT-to-origin when
         ``origin`` — assembling the ``boolean_inference_oracle`` round. FAIL-CLOSED: any probe that is
         undelivered (gate refusal / transport failure / empty status) makes the WHOLE round ``valid=False`` so
         the driver fails the run closed (never a silently-dropped probe)."""
         marker_b = self._marker_b(challenge)
+        false_a_value = self.false_payload_template.replace("{challenge}", challenge)
         probes = {
             "baseline": self._baseline_value(challenge),
             "true": self.true_payload_template.replace("{challenge}", challenge),
-            "false_a": self.false_payload_template.replace("{challenge}", challenge),
+            "false_a": false_a_value,
             "false_b": self.false_payload_template.replace("{challenge}", marker_b),
+            # SAME-REQUEST STABILITY control: a byte-identical repeat of the false_a request. A
+            # dynamic origin (per-request __VIEWSTATE / rotating token) returns a differing body,
+            # so boolean_inference's stability term is 0 → the SPRT refutes and the attribution
+            # gate then decides (across=True ⇒ still vulnerable / INCONCLUSIVE, never a false fix).
+            "false_a_repeat": false_a_value,
         }
         via = "origin" if origin else "edge"
         responses: dict[str, dict] = {}
@@ -308,7 +317,7 @@ class DifferentialHttpAdapter:
                                         detail=f"{via} {name} probe send crashed")
             status = (resp or {}).get("status")
             if status in (0, None):
-                # A gate refusal or transport failure on ANY of the four probes makes the matched decoy
+                # A gate refusal or transport failure on ANY of the five probes makes the matched decoy
                 # uninterpretable — fail the whole round closed (§4.4), never partial. For the ORIGIN leg this
                 # is exactly the "origin unreachable / IP out of charter scope" case → edge-only, residual open.
                 return TrialObservation(reachable=False, valid=False, oracle_context=None,
@@ -327,7 +336,8 @@ class DifferentialHttpAdapter:
 
         round_ctx: dict[str, Any] = {
             "true": responses["true"], "false_a": responses["false_a"],
-            "false_b": responses["false_b"], "baseline": responses["baseline"],
+            "false_b": responses["false_b"], "false_a_repeat": responses["false_a_repeat"],
+            "baseline": responses["baseline"],
         }
         # Informational adapter-side WAF-closure (the DRIVER recomputes it authoritatively over the round).
         from framework.v2.verify.oracles import differential_response_oracle   # lazy — FATAL-2
@@ -338,7 +348,7 @@ class DifferentialHttpAdapter:
         echoed = challenge in responses["baseline"]["body"] or challenge in responses["false_a"]["body"]
         return TrialObservation(reachable=True, valid=True, oracle_context=round_ctx,
                                 freshness_level=Freshness.F1_TARGET_ECHOES, nonce_echoed=echoed,
-                                detail=f"{via} differential round {trial_index}: 4/4 matched-decoy probes delivered")
+                                detail=f"{via} differential round {trial_index}: 5/5 matched-decoy probes delivered")
 
     def _probe_request(self, value: str, challenge: str, *, origin: bool) -> _HttpRequest:
         """The gated request for one probe. EDGE: the target hostname URL, no extra headers. ORIGIN (R2): the

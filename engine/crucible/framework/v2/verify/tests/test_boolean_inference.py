@@ -16,12 +16,15 @@ _MANY = {"status": 200, "body": "id=1\nid=2\nid=3\nid=4\nid=5 (all rows)"}
 _NONE = {"status": 200, "body": "no results"}
 
 
-def _round(true, false_a, false_b) -> dict:
-    return {"true": true, "false_a": false_a, "false_b": false_b}
+def _round(true, false_a, false_b, false_a_repeat=None) -> dict:
+    # false_a_repeat defaults to a byte-identical repeat of false_a (a STABLE page). A dynamic page
+    # passes an explicit, DIFFERING false_a_repeat so the same-request stability control trips.
+    return {"true": true, "false_a": false_a, "false_b": false_b,
+            "false_a_repeat": false_a if false_a_repeat is None else false_a_repeat}
 
 
 def test_clean_signal_confirms_in_few_rounds() -> None:
-    # true clause returns the whole table; false clause is stable "no results"
+    # true clause returns the whole table; false clause is stable "no results" (identical repeat stable)
     rounds = [_round(_MANY, _NONE, _NONE) for _ in range(24)]
     sig = boolean_inference_oracle(rounds)
     assert sig.fired and sig.confidence >= 0.7
@@ -37,19 +40,48 @@ def test_deterministic_non_vuln_is_refuted() -> None:
 
 
 def test_dynamic_page_is_refused_by_the_control() -> None:
-    # every response differs (a per-request nonce), INCLUDING the two false
-    # responses — so the dynamic-page control (false_a == false_b) fails and the
-    # naive "true != false" cannot masquerade as a bug
+    # every response differs (a per-request nonce), INCLUDING the two different-marker false
+    # responses AND the identical repeat — so both dynamic-page controls (false_a == false_b) and
+    # (false_a == false_a_repeat) fail and the naive "true != false" cannot masquerade as a bug
     rounds = [
         _round(
             {"status": 200, "body": f"page nonce={i}a"},
             {"status": 200, "body": f"page nonce={i}b"},
             {"status": 200, "body": f"page nonce={i}c"},
+            false_a_repeat={"status": 200, "body": f"page nonce={i}d"},
         )
         for i in range(24)
     ]
     sig = boolean_inference_oracle(rounds)
     assert not sig.fired
+
+
+def test_stability_control_refuses_a_page_whose_within_pair_coincides() -> None:
+    # THE regression for the false-FACT defect: a page where the two DIFFERENT-marker false
+    # responses happen to agree (within_same passes) — so the OLD (across AND within_same) signal
+    # would fire — but an IDENTICAL false repeat still differs (varies with any input). The
+    # same-request STABILITY control catches exactly this coincidence → refute (LEAD, no FACT).
+    rounds = [
+        _round(
+            _MANY,                                      # true clause differs → across fires
+            {"status": 200, "body": "no results"},      # false_a
+            {"status": 200, "body": "no results"},      # false_b == false_a → within_same passes
+            false_a_repeat={"status": 200, "body": f"no results token={i}"},   # identical repeat DIFFERS
+        )
+        for i in range(24)
+    ]
+    sig = boolean_inference_oracle(rounds)
+    assert not sig.fired
+    assert sig.observed["decision"] == "refute"
+
+
+def test_missing_stability_sample_cannot_confirm_fail_closed() -> None:
+    # BACKWARD-TOLERANCE / fail-closed: an OLD-shape round (no false_a_repeat) can never contribute a
+    # POSITIVE signal, so an old-shape context can only refute — it can never over-confirm a FACT.
+    rounds = [{"true": _MANY, "false_a": _NONE, "false_b": _NONE} for _ in range(24)]
+    sig = boolean_inference_oracle(rounds)
+    assert not sig.fired
+    assert sig.observed["decision"] == "refute"
 
 
 def test_flaky_endpoint_does_not_confirm() -> None:

@@ -857,11 +857,12 @@ def _prove_differential(*, adapter: LiveTargetAdapter, identity: IdentityAttesta
     # decisive refute from here — but a refute is NOT automatically a channel CLOSURE.
     # (3a) ATTRIBUTION (red-pen BLOCK — a reproduced false REMEDIATED over a live-vulnerable NOISY origin, e.g.
     #      an ASP.NET __VIEWSTATE app like the authorized testasp target): boolean_inference's per-round signal is
-    #      (across AND within_same), across = (true != false_a) the boolean channel, within_same = (false_a ≈
-    #      false_b) the dynamic-page control. A refute (signal→p0) arises EITHER from across=False (GENUINE
-    #      closure — the predicate no longer changes the response = fixed) OR from within_same=False (the two
-    #      FALSE responses disagree because of structurally-invisible per-request noise: __VIEWSTATE / rotating
-    #      banner / big reflected token). The second is "too noisy to attribute," NOT a fix — over a still-
+    #      (across AND within_same AND stable), across = (true != false_a) the boolean channel, within_same =
+    #      (false_a ≈ false_b) the different-marker dynamic-page control, stable = (false_a ≈ false_a_repeat) the
+    #      same-request stability control. A refute (signal→p0) arises EITHER from across=False (GENUINE
+    #      closure — the predicate no longer changes the response = fixed) OR from within_same=False / stable=False
+    #      (the FALSE responses / an identical repeat disagree because of structurally-invisible per-request noise:
+    #      __VIEWSTATE / rotating banner / big reflected token). The latter is "too noisy to attribute," NOT a fix — over a still-
     #      vulnerable noisy origin across=True (the injection still fires) yet the SPRT refutes, and the {status,
     #      structural} WAF-closure below is deliberately blind to that lexical noise, so it cannot catch it. A
     #      SOUND REMEDIATED therefore REQUIRES the refute be attributable to CLOSURE: true must be indistinguishable
@@ -1019,12 +1020,12 @@ def _fires(context: dict, bug_class: str, ref: str) -> bool:
 
 def _rounds_truncated(rounds: "list[dict]") -> bool:
     """True if ANY probe body in ANY round was captured at the truncation cap (the executor's ``truncated`` flag
-    on any of ``true``/``false_a``/``false_b``/``baseline``). Closure-attribution over a truncated body is
-    unsound — a boolean leak in the untruncated tail is invisible (red-pen R2 BLOCK)."""
+    on any of ``true``/``false_a``/``false_b``/``false_a_repeat``/``baseline``). Closure-attribution over a
+    truncated body is unsound — a boolean leak in the untruncated tail is invisible (red-pen R2 BLOCK)."""
     for r in rounds or []:
         if not isinstance(r, dict):
             continue
-        for k in ("true", "false_a", "false_b", "baseline"):
+        for k in ("true", "false_a", "false_b", "false_a_repeat", "baseline"):
             probe = r.get(k)
             if isinstance(probe, dict) and probe.get("truncated"):
                 return True

@@ -619,17 +619,22 @@ class FindingContext(BaseModel):
         true_responses: Sequence[Any],
         false_a_responses: Sequence[Any],
         false_b_responses: Sequence[Any],
+        false_a_repeat_responses: Sequence[Any],
         *,
         bug_class: str = "boolean_sqli",
         discriminator: Mapping[str, Any] | None = None,
     ) -> "FindingContext":
-        """Aligned per-round responses for the SPRT boolean-inference oracle:
-        for each round, the TRUE-clause response and two FALSE-clause responses
-        (the second is the dynamic-page control). Rounds are zipped to the
-        shortest of the three lists; nothing is fetched here."""
+        """Aligned per-round responses for the SPRT boolean-inference oracle: for
+        each round, the TRUE-clause response, two FALSE-clause responses (the
+        different-marker dynamic-page control), and an IDENTICAL repeat of the
+        false_a request (the same-request STABILITY control — a dynamic page that
+        varies with any input fails it). Rounds are zipped to the shortest of the
+        four lists; nothing is fetched here."""
         rounds = [
-            {"true": _response_to_dict(t), "false_a": _response_to_dict(a), "false_b": _response_to_dict(b)}
-            for t, a, b in zip(true_responses, false_a_responses, false_b_responses)
+            {"true": _response_to_dict(t), "false_a": _response_to_dict(a),
+             "false_b": _response_to_dict(b), "false_a_repeat": _response_to_dict(a2)}
+            for t, a, b, a2 in zip(true_responses, false_a_responses, false_b_responses,
+                                   false_a_repeat_responses)
         ]
         return cls(
             bug_class=bug_class,

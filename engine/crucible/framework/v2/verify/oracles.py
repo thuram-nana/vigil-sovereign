@@ -699,30 +699,51 @@ def boolean_inference_oracle(
     (caching, load-dependent bodies, per-request tokens) that make a single
     true/false comparison produce Burp-style "Tentative" false positives.
 
-    Each round carries three observed responses: a TRUE-clause response, and two
-    FALSE-clause responses. The per-round Bernoulli signal is
+    Each round carries a TRUE-clause response, two FALSE-clause responses, and a
+    SECOND send of the SAME false-clause request (``false_a_repeat``). The
+    per-round Bernoulli signal is
 
-        (TRUE differs from FALSE)  AND  (the two FALSE responses agree)
+        (TRUE differs from FALSE)          # the boolean channel
+        AND (the two FALSE responses agree)   # different-marker dynamic-page control
+        AND (an IDENTICAL false repeat is stable)   # same-request STABILITY control
 
-    — the first half is the boolean signal; the second is a *dynamic-page
-    control* that a naive repeated-differential lacks. A real injection makes the
+    — the first term is the boolean signal; the second and third are *dynamic-page
+    controls* that a naive repeated-differential lacks. A real injection makes the
     true clause change the response while the false clause stays stable (signal
-    1); a page that simply changes every request trips the control (signal 0), so
-    it cannot masquerade as a bug.
+    1). A page that varies with ANY input fails the STABILITY control — an
+    identical request sent twice returns differing responses — so an independent
+    coincidence that lets the two different-marker false responses agree can no
+    longer masquerade as a bug: the tightest same-shape negative (a byte-identical
+    repeat) must ALSO be non-differential (signal 0), and on a random page it is
+    not, every round, so the SPRT refutes → LEAD (no FACT).
+
+    FAIL-CLOSED / backward-tolerant: a round that carries no ``false_a_repeat``
+    stability sample cannot contribute a POSITIVE signal (it yields signal 0), so
+    an old-shape context can never over-confirm — the worst it can do is refute.
 
     SPRT accumulates the log-likelihood ratio that the signal rate is ``p1``
     (vulnerable) vs ``p0`` (noise) and stops at the first boundary: LLR >=
     log((1-beta)/alpha) confirms; LLR <= log(beta/(1-alpha)) refutes; neither by
     the last round is inconclusive (a non-fire — never a guess). ``probe_rounds``
-    is ``[{"true": resp, "false_a": resp, "false_b": resp}, ...]``.
+    is ``[{"true": resp, "false_a": resp, "false_b": resp, "false_a_repeat": resp}, ...]``.
     """
     def _round_signals():
         for r in (probe_rounds or []):
             if not isinstance(r, Mapping) or "true" not in r or "false_a" not in r or "false_b" not in r:
                 continue
+            # FAIL-CLOSED: no same-request stability sample ⇒ the round cannot be a POSITIVE
+            # signal, so an old-shape (pre-stability) context can never over-confirm — it can
+            # only push the SPRT toward refute. The tightest same-shape negative is required.
+            if "false_a_repeat" not in r:
+                yield False
+                continue
             across = differential_response_oracle(r["false_a"], r["true"], discriminator).fired
             within_same = not differential_response_oracle(r["false_a"], r["false_b"], discriminator).fired
-            yield bool(across and within_same)
+            # SAME-REQUEST STABILITY: a boolean-blind channel requires a page that is stable to
+            # an IDENTICAL repeat. A dynamic page (varies with any input) fails this, so a
+            # coincidental within-pair agreement cannot alone confirm.
+            stable = not differential_response_oracle(r["false_a"], r["false_a_repeat"], discriminator).fired
+            yield bool(across and within_same and stable)
 
     decided, llr, n_used, signals, upper, lower = _sprt_decision(
         _round_signals(), alpha=alpha, beta=beta, p1=p1, p0=p0)
@@ -738,7 +759,8 @@ def boolean_inference_oracle(
             kind=OracleKind.BOOLEAN_INFERENCE, fired=True, confidence=confidence,
             evidence=(
                 f"SPRT confirmed boolean inference in {n_used} round(s): "
-                f"{signals} separable (true!=false, false stable), LLR={llr:.2f} >= {upper:.2f}"
+                f"{signals} separable (true!=false, false pair agree, identical repeat stable), "
+                f"LLR={llr:.2f} >= {upper:.2f}"
             ),
             observed=observed,
         )

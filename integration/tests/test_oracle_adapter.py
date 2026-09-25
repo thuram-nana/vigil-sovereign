@@ -39,7 +39,8 @@ _NONE = {"status": 200, "body": "no results"}
 
 def _firing_context(bug_class="sqli"):
     return {"bug_class": bug_class,
-            "probe_rounds": [{"true": _MANY, "false_a": _NONE, "false_b": _NONE} for _ in range(24)]}
+            "probe_rounds": [{"true": _MANY, "false_a": _NONE, "false_b": _NONE, "false_a_repeat": _NONE}
+                             for _ in range(24)]}
 
 
 def _finding(bug_class="sqli", ctx=None):

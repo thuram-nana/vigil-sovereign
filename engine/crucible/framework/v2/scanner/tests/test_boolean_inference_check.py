@@ -10,6 +10,7 @@ refutes; against a per-request-random target the dynamic-page control refuses it
 from __future__ import annotations
 
 import contextlib
+import secrets
 import threading
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -44,6 +45,22 @@ class _SafeApp(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:  # noqa: N802
         body = b"constant page, injection ignored"
+        self.send_response(200)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
+class _DynamicApp(BaseHTTPRequestHandler):
+    """A PURELY DYNAMIC page: a long per-request random token dominates the body, so ANY two responses
+    (including two byte-identical repeats) diverge. The same-request stability control must refuse it —
+    this is the autonomous-scanner regression for the boolean false-FACT defect."""
+
+    def log_message(self, *a: object) -> None:
+        return
+
+    def do_GET(self) -> None:  # noqa: N802
+        body = (f"<html><body>session {secrets.token_hex(64)} — no results</body></html>").encode()
         self.send_response(200)
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
@@ -98,5 +115,14 @@ def test_sprt_check_confirms_boolean_sqli() -> None:
 
 def test_sprt_check_refutes_non_injectable_target() -> None:
     with _server(_SafeApp) as base:
+        tpl, point = _q_point(base)
+        assert _confirm(_check().probe(tpl, point, _send)) is None
+
+
+def test_sprt_check_refutes_a_dynamic_page_autonomous_path() -> None:
+    # AUTONOMOUS-PATH regression for the boolean false-FACT defect: a purely-dynamic page (varies with any
+    # input) driven through BooleanInferenceCheck → confirm_finding must NOT mint a FACT. The same-request
+    # stability control trips every round → the SPRT refutes → no confirmed finding.
+    with _server(_DynamicApp) as base:
         tpl, point = _q_point(base)
         assert _confirm(_check().probe(tpl, point, _send)) is None
