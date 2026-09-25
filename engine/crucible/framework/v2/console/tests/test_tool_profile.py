@@ -39,7 +39,7 @@ def test_build_profiles_shape_and_summary_are_honest():
     profs = out["profiles"]
     assert profs and all({"name", "admitted", "control_surface", "global_recognition",
                           "admit_reason", "install_hint", "has_skill_doc", "has_typed_builder",
-                          "has_sensor", "has_analyzer", "has_browser_driver"} <= set(p)
+                          "has_spec_builder", "has_sensor", "has_analyzer", "has_browser_driver"} <= set(p)
                          for p in profs)
     s = out["summary"]
     assert s["total"] == len(profs)
@@ -96,6 +96,26 @@ def test_cli_surface_still_wins_for_tools_that_have_both():
         assert p["control_surface"] == "cli"
 
 
+def test_r4_spec_builder_tools_are_admitted_as_cli_so_the_two_surfaces_agree():
+    """H4b MEET-UP. masscan/rustscan/naabu/sslscan are driven by a runner-owned ToolSpec builder (the R4
+    runner path), which is a real 'we build + gate the argv' CLI control. They must be ADMITTED here as
+    'cli' — so this tool-profile screen AGREES with ``capability_join`` (which already treats the same set
+    as a builder source and shows them EXECUTABLE-if-installed), instead of the pre-meet-up contradiction
+    where this screen said REFUSED while the brain panel said runnable. sslscan is the sharp case: it is
+    NOT in the host roster and has NO typed executor builder, so ONLY the spec-builder driver recognises +
+    admits it."""
+    got = _by_name(P.build_profiles()["profiles"])
+    for name in ("masscan", "rustscan", "naabu", "sslscan"):
+        p = got[name]
+        assert p["has_spec_builder"], f"{name}: the R4 ToolSpec-builder flag is not set"
+        assert p["control_surface"] == "cli", f"{name}: surface {p['control_surface']!r} != 'cli'"
+        assert p["global_recognition"] and p["admitted"] and p["admit_reason"] == "admitted (cli)"
+    # the three port scanners are neither in the host roster nor typed executor builders here — their ONLY
+    # drive surface is the spec builder, which is exactly what the meet-up recognises.
+    for name in ("masscan", "rustscan", "naabu", "sslscan"):
+        assert not got[name]["has_typed_builder"], f"{name}: must not be a governed-executor typed builder"
+
+
 def test_admit_gate_unit():
     assert P._admit(False, "cli")[0] is False               # not recognised → refused
     assert "not a globally-recognised" in P._admit(False, "cli")[1]
@@ -137,8 +157,8 @@ def test_installed_roster_tool_with_no_drive_knowledge_is_refused_end_to_end(mon
 
     p = _by_name(P.build_profiles()["profiles"])[fake["name"]]
     assert p["in_host_roster"] and p["installed"] and p["global_recognition"]   # recognised + present …
-    assert not any(p[f] for f in ("has_skill_doc", "has_typed_builder", "has_sensor", "has_analyzer",
-                                  "has_browser_driver"))
+    assert not any(p[f] for f in ("has_skill_doc", "has_typed_builder", "has_spec_builder", "has_sensor",
+                                  "has_analyzer", "has_browser_driver"))
     assert p["control_surface"] == "" and not p["admitted"]                     # … but nothing drives it
     assert "no CLI-usage knowledge" in p["admit_reason"] and p["admit_reason"].startswith("refused:")
 
@@ -160,7 +180,7 @@ def test_a_driver_is_what_flips_the_synthetic_control(monkeypatch):
 def test_no_drive_knowledge_yields_no_surface_and_an_unknown_surface_never_admits():
     """Unit-level mutation control, independent of what happens to be in the roster: nothing set ⇒ no
     surface ⇒ refused; and the surface allowlist is CLOSED, so inventing a label does not buy admission."""
-    assert P._control_surface(has_skill_doc=False, has_typed_builder=False,
+    assert P._control_surface(has_skill_doc=False, has_typed_builder=False, has_spec_builder=False,
                               has_sensor=False, has_analyzer=False, has_browser_driver=False) == ""
     assert P._admit(True, "")[0] is False
     for bogus in ("adapter", "parser", "import", "eval", "CLI", "sensor ", "yes", "true"):
@@ -173,10 +193,11 @@ def test_every_admitted_tool_has_a_real_named_drive_surface():
     """The invariant the whole gate exists to protect: nothing is admitted without a control surface from
     the closed allowlist, and (for every surface this module can mint) without the flag that carries it.
     A future "admit everything" change cannot pass this."""
-    carrier = {"cli": ("has_skill_doc", "has_typed_builder"),
+    carrier = {"cli": ("has_skill_doc", "has_typed_builder", "has_spec_builder"),
                "sensor": ("has_sensor",), "analyzer": ("has_analyzer",),
                "browser": ("has_browser_driver",)}
-    flags = ("has_skill_doc", "has_typed_builder", "has_sensor", "has_analyzer", "has_browser_driver")
+    flags = ("has_skill_doc", "has_typed_builder", "has_spec_builder", "has_sensor", "has_analyzer",
+             "has_browser_driver")
     for p in P.build_profiles()["profiles"]:
         # a surface exists IFF some drive-knowledge does — no surface may be conjured from nothing, and
         # real drive-knowledge may never be silently dropped (the under-reporting this change fixed)
@@ -324,6 +345,21 @@ def test_typed_builder_list_does_not_drift_from_the_live_executor():
     assert keys, "could not extract _BUILDERS keys from the executor source"
     assert set(P._TYPED_BUILDER_TOOLS) == keys, (
         f"typed-builder drift: profile={set(P._TYPED_BUILDER_TOOLS)} executor={keys}")
+
+
+def test_spec_builder_driven_set_does_not_drift_from_oracle_families():
+    # profile._SPEC_BUILDER_DRIVEN_TOOLS duplicates the framework-free SSOT
+    # integration.live.oracle_families.SPEC_BUILDER_TOOLS (the R4 runner ToolSpec builders) to avoid a
+    # backwards crucible→integration import; pin them equal by SOURCE TEXT (no cross-env import) so the
+    # tool-profile screen and capability_join can never disagree about which tools have a runner builder.
+    src = (_repo_root() / "integration/vigil_integration/live/oracle_families.py").read_text(encoding="utf-8")
+    consts = _module_consts(ast.parse(src))
+    assert "SPEC_BUILDER_TOOLS" in consts, "oracle_families.py no longer defines SPEC_BUILDER_TOOLS"
+    names = _strings(consts["SPEC_BUILDER_TOOLS"], consts)
+    assert names, "could not extract SPEC_BUILDER_TOOLS from oracle_families.py"
+    assert set(P._SPEC_BUILDER_DRIVEN_TOOLS) == names, (
+        f"spec-builder-driven drift: profile={set(P._SPEC_BUILDER_DRIVEN_TOOLS)} "
+        f"oracle_families.SPEC_BUILDER_TOOLS={names}")
 
 
 # The sensor modules that touch a host process, each with WHAT it drives. Pinned so that a NEW sensor which

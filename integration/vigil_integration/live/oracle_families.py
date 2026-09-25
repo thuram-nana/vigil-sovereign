@@ -364,6 +364,27 @@ def fuse(observations: Iterable[ToolObservation]) -> list[FamilyVote]:
 
 
 # ---------------------------------------------------------------------------
+# The runner-owned ToolSpec builders — the SINGLE source of truth for "VIGIL can build + drive this
+# tool's argv itself", shared by every registry that needs it.
+# ---------------------------------------------------------------------------
+# These are the tools with a wired runner-owned ToolSpec builder in ``live.external_tool`` (reached via
+# ``brains.hexstrike_body._spec_for_kind``): VIGIL constructs their argv SERVER-SIDE, pins the host to the
+# scope-authorised target, validates the ports schema, gates the spawn, and re-proves each proposal with its
+# OWN oracle re-drive. That is a real, validated, gated argv builder — the STRONG "control via CLI" proof —
+# exactly like the live executor's typed ``_BUILDERS``, only via the R4 runner path instead of the governed
+# executor. Defined HERE (framework-free, FATAL-2-safe, importable in either env) so the two consumers can
+# never drift apart from a duplicated literal:
+#   * ``brains.hexstrike_body`` — derives ``_ORACLE_MAPPED_TOOLS = oracle_mapped_tools(SPEC_BUILDER_TOOLS)``
+#     (a builder + a FACT-capable family ⇒ FACT-capable; the builder alone never mints).
+#   * ``live.capability_join.resolve`` — folds this set into its builder source, so a port scanner that IS
+#     spawnable + FACT-capable via the R4 runner is no longer mis-reported "no typed argv builder / can never
+#     run" merely because it is absent from the governed executor's ``_BUILDERS``.
+# Kept in lock-step with ``hexstrike_body._spec_for_kind`` by
+# ``test_oracle_mapped_tools_all_have_a_spec_builder_no_drift`` (every mapped tool must build a spec).
+SPEC_BUILDER_TOOLS: "frozenset[str]" = frozenset({"nmap", "sslscan", "masscan", "rustscan", "naabu"})
+
+
+# ---------------------------------------------------------------------------
 # Derivation — the body's FACT-capable set is a FAMILY property, not a hand-kept list.
 # ---------------------------------------------------------------------------
 def oracle_mapped_tools(spec_builder_tools: Iterable[str]) -> "frozenset[str]":

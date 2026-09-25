@@ -121,8 +121,20 @@ def capture_handshake(
 ) -> dict:
     """Reproduce a bounded, gated handshake to ``host:port`` and return JSON-safe evidence the oracle
     judges. Fail-closed: a gate refusal or a connect failure returns ``connected: False`` with a
-    reason — never an exception, never a fabricated connection. ``connect`` is injectable for tests."""
+    reason — never an exception, never a fabricated connection. ``connect`` is injectable for tests.
+
+    TCP-ONLY BY CONSTRUCTION (soundness). The connector this performs is a TCP ``connect()`` — the only
+    handshake it can honestly reproduce. A non-TCP ``protocol`` (e.g. a scanner's ``udp``-open row) is
+    REFUSED here, before any socket, returning ``connected: False``: doing the TCP connect and echoing
+    ``protocol='udp'`` would let a udp-open observation mint a TCP-handshake reachability FACT (and worse,
+    read a TCP banner off whatever answers the port), which is exactly the false claim this refusal bars.
+    UDP reachability is a genuine application-layer response, which this bounded TCP probe cannot capture,
+    so it is honestly out of scope rather than silently mislabelled."""
     base = {"connected": False, "host": str(host), "port": port, "protocol": protocol}
+    if str(protocol).strip().lower() != "tcp":
+        return {**base, "error": (
+            f"reachability re-drive is TCP-only; refusing protocol {protocol!r} — a udp-open row never "
+            "mints a TCP-handshake reachability FACT (this bounded connect cannot prove udp reachability)")}
     refusal = _authorize(str(host), port, slug)
     if refusal is not None:
         return {**base, "error": refusal}

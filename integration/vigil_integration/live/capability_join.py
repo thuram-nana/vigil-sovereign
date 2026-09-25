@@ -4,9 +4,13 @@ THE DEFECT. What VIGIL knows about a tool is scattered across five places that s
 
     brains/hexstrike_brain.py::_TOOL_DANGER     35 tools the PLANNER may propose, + danger class
     docs/capability-matrix/hexstrike.json       33 rows of licence/privilege/oracle_family/fact_capable
-    live/executor.py::_BUILDERS                  9 tools with a typed argv builder — the only ones that
-                                                   can actually be spawned; everything else is denied
+    live/executor.py::_BUILDERS                  tools with a typed argv builder on the GOVERNED executor
+                                                   path — spawnable there; everything else is denied
                                                    fail-closed at execute()
+    oracle_families.SPEC_BUILDER_TOOLS           tools with a runner-owned ToolSpec builder on the R4
+                                                   runner path (live/external_tool) — the OTHER validated,
+                                                   gated argv builder VIGIL owns. ``resolve`` unions the two,
+                                                   so a tool spawnable via EITHER path is "adapted"
     framework/v2/tools/registry.py::HOST_TOOLS  16 tools with a LIVE presence/version probe
     live/tool_manifest.py                       the validator over the catalogue's invariants
 
@@ -159,14 +163,29 @@ def resolve(*, probe_host: bool = False) -> list[ToolCapability]:
     ``probe_host`` runs the LIVE presence/version probe, which shells out to ``command -v`` and version
     banners; it is off by default so a caller that only wants the static picture pays nothing. Every
     import here is function-local so importing this module co-loads neither the planner nor the engine.
+
+    THE BUILDER SOURCE IS TWO REGISTRIES, JOINED (H4b — the drift the plan warned about). A tool can be
+    driven by a validated, gated argv builder along EITHER of VIGIL's two execution paths:
+      * the governed executor's typed ``_BUILDERS`` (``live.executor``), and
+      * the R4 runner's ToolSpec builders (``live.external_tool`` via ``hexstrike_body._spec_for_kind``),
+        whose membership is the framework-free ``oracle_families.SPEC_BUILDER_TOOLS``.
+    We UNION them. Reading only ``_BUILDERS`` mis-reported the SERVICE_REACHABILITY port scanners
+    (masscan/rustscan/naabu — already fact_capable, already passing the conformance battery through the R4
+    runner) as "no typed argv builder → can never run", the exact silent-drop this join exists to remove.
+    Sourcing the ToolSpec set from ``oracle_families`` (not the framework-importing ``hexstrike_body``) keeps
+    ``resolve`` framework-free unless ``probe_host`` is set, so the sovereign two-env boundary job is unmoved.
+    NOTE: a builder is NOT fact-capability — ``fact_capable`` still comes only from the catalogue's
+    oracle-mapped gate; a builder only makes the tool EXECUTABLE-if-installed instead of unavailable.
     """
     from ..brains.hexstrike_brain import _TOOL_DANGER
     from .executor import _BUILDERS
+    from .oracle_families import SPEC_BUILDER_TOOLS
 
     brain_tools = {name: getattr(danger, "value", str(danger)) for name, danger in _TOOL_DANGER.items()}
     catalogue = _load_catalogue()
     installed = _probe_installed() if probe_host else None
-    return join(brain_tools=brain_tools, catalogue=catalogue, builders=_BUILDERS, installed=installed)
+    builders = set(_BUILDERS) | set(SPEC_BUILDER_TOOLS)
+    return join(brain_tools=brain_tools, catalogue=catalogue, builders=builders, installed=installed)
 
 
 def _load_catalogue() -> dict[str, dict]:

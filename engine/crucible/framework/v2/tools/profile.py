@@ -7,7 +7,9 @@ that ``tools.registry`` roster keys, the Strix ``skills/tooling/<name>.md`` play
 
   * install + live status + binary + version + install_hint  ← :func:`tools.registry.probe_tools`
   * CLI-usage knowledge ("already knows how to use it")       ← a Strix ``tooling/<name>.md`` skill playbook
-  * a machine-checkable "we can drive its CLI ourselves"      ← a typed argv builder in the live executor
+  * a machine-checkable "we can drive its CLI ourselves"      ← a typed argv builder in the live executor,
+                                                                 OR a runner-owned ToolSpec builder on the R4
+                                                                 runner path (``live.external_tool``)
   * the engine's OWN drivers — the code that already spawns   ← a gated ``sensors`` sensor, an
     the binary as part of an engagement                          ``analysis.analyzers`` analyzer, or the
                                                                  ``scanner.browser`` headless-browser driver
@@ -45,6 +47,18 @@ from .registry import probe_tools
 # a backwards crucible→integration import; a drift-guard test asserts this stays equal to that source.
 _TYPED_BUILDER_TOOLS = frozenset({"ffuf", "httpx", "hydra", "nikto", "nmap", "nuclei",
                                   "sqlmap", "wapiti", "zaproxy"})
+
+# The tools VIGIL drives via a runner-owned ToolSpec builder on the R4 runner path
+# (``integration.live.external_tool``, reached through ``brains.hexstrike_body._spec_for_kind``). Like a
+# typed executor builder this is a "control via CLI" proof — VIGIL constructs + gates the argv ITSELF,
+# server-side — but on the runner path, not the governed executor, so these are deliberately NOT in
+# ``_TYPED_BUILDER_TOOLS`` (the governed executor would fail-close on them). Recognising them here is the
+# tool-profile half of the H4b meet-up: ``integration.live.capability_join`` already folds this same set into
+# its builder source, so the operator's tool-profile screen and the brain-proposal panel AGREE — a port
+# scanner that is spawnable + FACT-capable via the R4 runner is "adapted (cli)", not "nothing drives it".
+# Duplicated (same reason as ``_TYPED_BUILDER_TOOLS``) from the framework-free SSOT
+# ``integration.live.oracle_families.SPEC_BUILDER_TOOLS``; a drift-guard test pins this equal to that source.
+_SPEC_BUILDER_DRIVEN_TOOLS = frozenset({"masscan", "naabu", "nmap", "rustscan", "sslscan"})
 
 # Globally-recognised tools NOT in the host roster and without a Strix skill doc (net-new curated metadata;
 # empty today — the curated host roster + the maintained skill playbooks already are the recognition list).
@@ -129,6 +143,7 @@ class ToolProfile:
     # consciousness signals
     has_skill_doc: bool = False        # a Strix tooling/<name>.md CLI playbook exists ("knows how to use it")
     has_typed_builder: bool = False    # the live executor can build a validated, gated argv for it
+    has_spec_builder: bool = False     # a runner-owned ToolSpec builds a validated, gated argv (R4 runner path)
     has_sensor: bool = False           # a gated sensor resolves + spawns it (sensors/*.py)
     has_analyzer: bool = False         # an analysis backend resolves + spawns it (analysis/analyzers/*.py)
     has_browser_driver: bool = False   # the scanner's headless-browser driver launches it (scanner/browser.py)
@@ -155,15 +170,16 @@ def _skill_tooling_names() -> set:
 
 def _control_surface(*, has_skill_doc: bool, has_typed_builder: bool,
                      has_sensor: bool = False, has_analyzer: bool = False,
-                     has_browser_driver: bool = False) -> str:
+                     has_browser_driver: bool = False, has_spec_builder: bool = False) -> str:
     """How we can drive the tool, reported as the MOST DIRECT surface we have.
 
-    "cli" is unchanged: a CLI playbook (the model knows the CLI) OR a typed argv builder (we build + gate
-    the command). It keeps precedence, so every tool that reported "cli" before still does. Otherwise the
-    engine's own driver is named honestly — a sensor / an analyzer / the headless browser is real control
-    (that code resolves the binary and spawns it), but it is NOT a model reading a playbook, and the
-    screen should say which. Nothing at all ⇒ "" (no way to drive it → refused)."""
-    if has_skill_doc or has_typed_builder:
+    "cli" is unchanged in MEANING: VIGIL can drive the tool's CLI — a CLI playbook (the model knows the CLI),
+    a typed executor argv builder, OR a runner-owned ToolSpec builder (both build + gate the command; the
+    latter on the R4 runner path). It keeps precedence, so every tool that reported "cli" before still does.
+    Otherwise the engine's own driver is named honestly — a sensor / an analyzer / the headless browser is
+    real control (that code resolves the binary and spawns it), but it is NOT a model reading a playbook, and
+    the screen should say which. Nothing at all ⇒ "" (no way to drive it → refused)."""
+    if has_skill_doc or has_typed_builder or has_spec_builder:
         return _SURFACE_CLI
     if has_sensor:
         return _SURFACE_SENSOR
@@ -191,7 +207,8 @@ def build_profiles() -> dict:
     real-data-only, honest-empty. Returns {profiles:[...], summary:{...}}."""
     roster = {t["name"].strip().lower(): t for t in probe_tools().get("tools", [])}
     skill_docs = _skill_tooling_names()
-    names = sorted(set(roster) | skill_docs | set(_TYPED_BUILDER_TOOLS) | set(_EXTRA_RECOGNISED))
+    names = sorted(set(roster) | skill_docs | set(_TYPED_BUILDER_TOOLS)
+                   | set(_SPEC_BUILDER_DRIVEN_TOOLS) | set(_EXTRA_RECOGNISED))
 
     profiles: list[dict] = []
     for name in names:
@@ -199,16 +216,19 @@ def build_profiles() -> dict:
         in_roster = name in roster
         has_skill = name in skill_docs
         has_builder = name in _TYPED_BUILDER_TOOLS
+        has_spec_builder = name in _SPEC_BUILDER_DRIVEN_TOOLS
         has_sensor = name in _SENSOR_DRIVEN_TOOLS
         has_analyzer = name in _ANALYZER_DRIVEN_TOOLS
         has_browser = name in _BROWSER_DRIVEN_TOOLS
         surface = _control_surface(has_skill_doc=has_skill, has_typed_builder=has_builder,
                                    has_sensor=has_sensor, has_analyzer=has_analyzer,
-                                   has_browser_driver=has_browser)
-        # Recognition is left exactly as it was (the curated roster / playbook list). Every engine-driven
-        # tool is already a roster entry, and the drift guards ASSERT that — a driven binary missing from
-        # the roster fails the build rather than quietly widening what counts as "recognised" here.
-        recognised = in_roster or has_skill or name in _EXTRA_RECOGNISED
+                                   has_browser_driver=has_browser, has_spec_builder=has_spec_builder)
+        # Recognition: the curated roster / playbook list, PLUS a runner-owned ToolSpec builder — a tool VIGIL
+        # constructs + gates a validated argv for is in the curated arsenal by construction (it is not an
+        # arbitrary binary; the drift guard pins the set to the committed SSOT). Every OTHER recognition source
+        # is a roster/playbook entry, and the driver drift guards ASSERT a driven binary is in the roster, so
+        # this does not widen "recognised" to anything undriveable.
+        recognised = in_roster or has_skill or has_spec_builder or name in _EXTRA_RECOGNISED
         admitted, reason = _admit(recognised, surface)
         profiles.append(asdict(ToolProfile(
             name=name,
@@ -224,6 +244,7 @@ def build_profiles() -> dict:
             in_host_roster=in_roster,
             has_skill_doc=has_skill,
             has_typed_builder=has_builder,
+            has_spec_builder=has_spec_builder,
             has_sensor=has_sensor,
             has_analyzer=has_analyzer,
             has_browser_driver=has_browser,

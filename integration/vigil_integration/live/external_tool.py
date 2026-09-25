@@ -455,6 +455,13 @@ def masscan_service_scan(*, ports: str = "1-1024", rate: int = 1000) -> ToolSpec
         out: list[ProposedService] = []
         for m in _MASSCAN_OPEN.finditer(outcome.stdout or ""):
             port, proto = int(m.group(1)), m.group(2)
+            # SOUNDNESS (UDP): the runner re-proves every proposed port with a TCP ``capture_handshake``,
+            # so a ``udp``-open row is DROPPED — proposing it would drive a TCP connect the oracle would
+            # mislabel as udp reachability (a udp-open row must never mint a TCP-handshake FACT). masscan's
+            # own reachability re-drive is TCP-only; a real udp service needs an application-layer response
+            # this probe cannot capture.
+            if proto != "tcp":
+                continue
             if 0 < port < 65536 and (port, proto) not in seen:
                 seen.add((port, proto))
                 out.append(ProposedService(host=target, port=port, protocol=proto))
@@ -687,6 +694,12 @@ def nmap_service_scan(*, ports: str = "1-1024", extra_args: Sequence[str] = ()) 
         out: list[ProposedService] = []
         for m in _NMAP_GREPABLE_OPEN.finditer(outcome.stdout or ""):
             port, proto = int(m.group(1)), m.group(2)
+            # SOUNDNESS (UDP): drop a ``udp``-open row — the runner re-proves each proposed port with a TCP
+            # ``capture_handshake``, so proposing a udp port would drive a TCP connect the oracle would
+            # mislabel as udp reachability. A udp-open row must never mint a TCP-handshake FACT; real udp
+            # reachability needs an application-layer response this bounded TCP probe cannot capture.
+            if proto != "tcp":
+                continue
             if 0 < port < 65536 and (port, proto) not in seen:
                 seen.add((port, proto))
                 out.append(ProposedService(host=target, port=port, protocol=proto))

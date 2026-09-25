@@ -167,6 +167,30 @@ def test_capture_handshake_over_a_real_loopback_socket(monkeypatch: pytest.Monke
     assert confirm_reachable(hs).confirmed
 
 
+def test_capture_handshake_refuses_a_non_tcp_protocol_and_never_connects(
+        monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """SOUNDNESS (UDP): the re-drive is a TCP ``connect()``. A ``udp`` (or any non-TCP) protocol is refused
+    BEFORE any socket — even with an injected connector that WOULD 'succeed' and hand back a banner — so a
+    scanner's udp-open row can never mint a TCP-handshake reachability FACT, and can never read a TCP banner
+    off whatever answers the port. The refusal is a clean ``connected: False``, not an exception."""
+    _grant_active_recon(monkeypatch)
+    _charter(tmp_path, "10.0.0.5")
+    called = {"n": 0}
+
+    def _would_succeed(h, p, t, b):
+        called["n"] += 1
+        return ("10.0.0.5:53", "OpenVPN\x00banner")  # a connector that lies that udp 'connected' with a banner
+
+    for proto in ("udp", "UDP", "sctp", "icmp"):
+        hs = capture_handshake("10.0.0.5", 53, slug="alpha", protocol=proto, connect=_would_succeed)
+        assert hs["connected"] is False, f"{proto}: a non-TCP protocol must not report connected"
+        assert "TCP-only" in hs["error"] and proto in hs["error"]
+        assert hs["protocol"] == proto  # echoed for the record, but NOT confirmed
+        # the oracle must not fire over the refusal, so NO FACT can be minted from a udp-open row
+        assert not confirm_reachable(hs).confirmed
+    assert called["n"] == 0, "a non-TCP protocol must be refused BEFORE the connector runs (no socket)"
+
+
 def test_capture_handshake_with_no_slug_is_refused_never_connects(monkeypatch: pytest.MonkeyPatch) -> None:
     _grant_active_recon(monkeypatch)
     called = {"n": 0}
