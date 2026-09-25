@@ -93,7 +93,11 @@ class OracleFamily:
 #     over CLOUD_POSTURE / K8S_POSTURE / VERSION_RANGE, dispatched by artifact type). LEAD-only from the tool.
 #   * secrets — secret scanners. Verifier: VIGIL's controlled secret validation (SECRET_CREDENTIAL_VALIDITY).
 #     LEAD-only from the tool.
-#   * browser — headless browsers / DOM tools. Verifier: DOM achieved-state (DOM_EXECUTION). LEAD-only.
+#   * browser — headless browsers / DOM tools. Verifier: DOM achieved-state (DOM_EXECUTION). FACT-capable via
+#     VIGIL's OWN egress-gated CDP re-drive (dom_execution / prototype_pollution), reached from the proof-sink
+#     dispatch rail + engage re-drive — NOT via a tool spawn, so chromium/playwright are LEAD-only proposers
+#     with no spec builder (excluded from oracle_mapped_tools), exactly like network_discovery's non-port
+#     members.
 #
 # EXCLUDED pure-offense binaries (metasploit, pwntools, angr, hydra, john, …) belong to NO discovery family:
 # family_for() returns None for them. They are not proposers of a verifiable observation, and the manifest's
@@ -170,10 +174,17 @@ FAMILY_REGISTRY: tuple[OracleFamily, ...] = (
     OracleFamily(
         name="browser",
         verifier="DOM_EXECUTION",
-        fact_capable=False,
+        fact_capable=True,
         tools=("chromium", "playwright"),
-        notes="Headless browsers / DOM tools. A LEAD; VIGIL's DOM achieved-state re-drive (JS actually "
-              "executed in a real DOM) is the FACT path.",
+        notes="Headless browsers / DOM tools. FACT-capable via VIGIL's OWN egress-gated headless-Chromium/CDP "
+              "re-drive (JS actually EXECUTED in a real DOM — the dom_execution / prototype_pollution "
+              "achieved-state oracles), reached from the Strix proof-sink dispatch rail "
+              "(proof/run.py:_dom_redrive_mint → live.dom_redrive) and the engage re-drive "
+              "(wiring.py:_redrive_branch_for). chromium/playwright are LEAD-only PROPOSERS in this family: "
+              "they carry NO runner-owned spec builder because VIGIL drives its OWN CDP harness, never the "
+              "tool's argv — so they are excluded from oracle_mapped_tools (a builder is what makes a MEMBER "
+              "mint-eligible, and the family's FACT path here is the CDP re-drive, not a tool spawn). Same "
+              "shape as network_discovery's non-port proposers.",
     ),
 )
 
@@ -395,7 +406,16 @@ def oracle_mapped_tools(spec_builder_tools: Iterable[str]) -> "frozenset[str]":
     automatically FACT-capable), not a flat set edited per tool.
 
     A spec-builder tool whose family is NOT fact-capable, or which is in no family, is deliberately EXCLUDED
-    here: a builder alone does not make a FACT — the family must own a re-drive that crosses admit()."""
+    here: a builder alone does not make a FACT — the family must own a re-drive that crosses admit().
+
+    The CONVERSE also holds and is load-bearing: a member of a FACT-capable family that has NO spec builder is
+    EXCLUDED (it is not in ``spec_builder_tools``). This keeps the invariant honest for the ``browser`` family
+    — FACT-capable via VIGIL's OWN CDP re-drive (dom_execution / prototype_pollution), NOT via a tool spawn —
+    whose members (chromium / playwright) carry no runner-owned argv builder: they never enter this derived
+    set, so a fact_capable MATRIX tool is still only ever one that BOTH has a wired spec builder AND belongs
+    to a fact_capable family. The browser family's FACT path is the proof-sink / engage CDP re-drive, reached
+    without any tool argv — the same "the family owns the verifier, a member joins it" split as
+    network_discovery's non-port proposers."""
     return frozenset(
         t for t in {str(x) for x in spec_builder_tools}
         if is_fact_capable_family(t)

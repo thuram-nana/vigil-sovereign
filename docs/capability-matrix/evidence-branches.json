@@ -788,7 +788,7 @@
       "target_fact_capable": true,
       "target_clean_capable": false,
       "target_downgrade_rationale": "Proving the ABSENCE of a DOM-XSS sink is a coverage-based capability over every rendered path (a runtime-assembled sink never appears literally), not this single-observation re-drive's target, so clean-capability is deliberately not pursued on this branch.",
-      "blocking_work": "FACT requires a VIGIL-OWNED headless-browser re-drive control: render the reported endpoint, inject VIGIL's own canary, and let the deterministic dom_execution oracle (verify/oracles.py:dom_execution_oracle, OracleKind.DOM_EXECUTION) observe the canary executing in a real DOM, with a benign-twin control. The oracle exists; the missing piece is the gated render capture that binds a VIGIL-produced execution trace. Until that capture is wired a Strix DOM-XSS report stays a LEAD.",
+      "blocking_work": "The VIGIL-OWNED headless-browser re-drive control now EXISTS (integration/vigil_integration/live/dom_redrive.py:dom_xss_redrive, reached from the proof-sink dispatch rail): a Strix DOM-XSS report is re-driven through VIGIL's OWN egress-gated CDP capture and, on a genuine execution the deterministic dom_execution oracle (verify/oracles.py:dom_execution_oracle, OracleKind.DOM_EXECUTION) observes, minted on the FACT-capable dom_xss.dom_execution branch. THIS branch stays the raw producer-report LEAD for a report VIGIL cannot re-drive to execution — no reachable endpoint, a reflected-but-inert payload, or a browserless runner keeps it a LEAD, never a FACT.",
       "evidence_surface": "composite",
       "implementation_refs": [
         "integration/vigil_integration/proof/run.py:_finding_from_report",
@@ -1155,7 +1155,38 @@
       "evidence_surface": "composite",
       "implementation_refs": [
         "engine/crucible/framework/v2/scanner/proto_pollution.py:confirm_proto_pollution",
-        "engine/crucible/framework/v2/verify/oracles.py:prototype_pollution_oracle"
+        "engine/crucible/framework/v2/verify/oracles.py:prototype_pollution_oracle",
+        "integration/vigil_integration/live/dom_redrive.py:proto_pollution_redrive",
+        "integration/vigil_integration/proof/run.py:_prototype_pollution_redrive"
+      ]
+    },
+    {
+      "id": "dom_xss.dom_execution",
+      "check": "dom_xss_redrive",
+      "evidence": "A unique per-probe canary that VIGIL drove into the proposed URL/param (query) or the fragment (location.hash) in its OWN egress-gated headless-Chromium/CDP harness, observed EXECUTING in a real DOM: the same canary surfaces in a Runtime.bindingCalled EXECUTION callback to VIGIL's own __crucible_xss binding (Runtime.addBinding, registered only by the driver) — actual JavaScript execution, not reflection or echo. The RUNNER crafts the payload; the Strix report is never proof, and the FACT is re-derived offline by verify/oracles.py:dom_execution_oracle over the retained binding calls.",
+      "fact_capable": true,
+      "clean_capable": false,
+      "preconditions": [
+        "channel_established"
+      ],
+      "limitation": "Coverage-bounded, not soundness-bounded: a fire is unforgeable (only the driver registers __crucible_xss, and the canary is unique per probe and cannot pre-exist), but VIGIL only confirms DOM-XSS across the injection points it drives (the URL fragment plus query parameters) and the gadget shapes it renders. A reflected-but-inert or encoded payload produces no binding call and does not fire (a LEAD, never a false FACT); an injection point / gadget / page VIGIL never drives stays a LEAD/INCONCLUSIVE — never a false negative. A browserless runner (no usable CDP harness) is INCONCLUSIVE, never CLEAN. NOT CLEAN-capable: a non-firing render is uninformative (a runtime-assembled sink never appears literally), so this branch may not assert absence.",
+      "target_fact_capable": true,
+      "target_clean_capable": false,
+      "target_downgrade_rationale": "Proving the ABSENCE of a DOM-XSS sink is a coverage-complete capability over every client source, every gadget shape, and every runtime-assembled sink across every reachable rendered page (a sink built at runtime never appears literally), not this per-probe achieved-execution re-drive's target, so CLEAN-capability is deliberately not pursued on this branch.",
+      "oracle_version": "dom_execution",
+      "control_requirements": [
+        "warden_active_recon_gate",
+        "vigil_owned_unique_execution_canary",
+        "headless_dom_render_capture",
+        "cdp_egress_gate",
+        "unforgeable_execution_binding"
+      ],
+      "evidence_surface": "composite",
+      "implementation_refs": [
+        "integration/vigil_integration/live/dom_redrive.py:dom_xss_redrive",
+        "integration/vigil_integration/proof/run.py:_dom_xss_redrive",
+        "engine/crucible/framework/v2/scanner/browser_xss.py:confirm_dom_xss",
+        "engine/crucible/framework/v2/verify/oracles.py:dom_execution_oracle"
       ]
     },
     {

@@ -670,7 +670,9 @@ def _web_redrive_arm(report: dict, wclass: str, *, run_dir: "str | os.PathLike",
 #
 # CLASS-SET DISJOINTNESS (W1a red-pen note, pinned by test_redrive_arm_class_sets_are_disjoint): each arm's
 # class set + CWE map is PAIRWISE DISJOINT from every other arm's (web / errsig / xss / ssti / boolean /
-# timing), so arm ORDER can never route a report to the wrong arm. The classifiers are PURE/stdlib (no
+# timing / dom_xss / prototype_pollution), so arm ORDER can never route a report to the wrong arm. In
+# particular reflected xss (CWE-79, server-response reflection) and dom_xss (bug_class dom_xss, DOM
+# execution) are kept distinct. The classifiers are PURE/stdlib (no
 # framework import) so they are safe on the import-clean sink path (FATAL-2), mirroring ``_errsig_redrive_class``.
 # ======================================================================================================
 
@@ -722,6 +724,33 @@ def _classify_redrive(report: Any, classes: "frozenset[str]", aliases: "dict[str
     return None
 
 
+# --- W3 (browser-backed) — two DOM ACHIEVED-STATE re-drive arms (dom_xss / prototype_pollution) --------
+# Both reuse EXISTING oracles (no new OracleKind): dom_xss → DOM_EXECUTION, prototype_pollution →
+# PROTOTYPE_POLLUTION. The driver is VIGIL's OWN egress-gated headless-Chromium/CDP harness
+# (live.dom_redrive → scanner.browser_xss / scanner.proto_pollution); the Strix report is never proof.
+#
+# dom_xss (CWE-79-DOM): keyed on the EXPLICIT dom_xss class (+ DOM-specific spelling aliases) ONLY — NO CWE
+# map. Reflected XSS (the ``xss`` arm above) owns CWE-79, and the shared classifier's ``cwe-\d+`` regex
+# cannot distinguish "CWE-79-DOM" from "CWE-79" (it extracts ``cwe-79``), so keying dom_xss on a CWE would
+# either STEAL reflected's CWE-79 (a disjointness violation) or be dead. An empty CWE map keeps dom_xss
+# PAIRWISE DISJOINT from the reflected-xss arm: a bare CWE-79 routes to reflected (server-response
+# reflection), a DOM-XSS is claimed only by its explicit class — and either way the ORACLE (not the label)
+# decides, so a mis-routed report simply fails to fire → LEAD.
+_DOM_XSS_REDRIVE_CLASSES = frozenset({"dom_xss"})
+_DOM_XSS_ALIASES = {"dom_based_xss": "dom_xss", "dom_based_cross_site_scripting": "dom_xss",
+                    "dombased_xss": "dom_xss", "dom_xss_injection": "dom_xss",
+                    "dom_based_xss_injection": "dom_xss"}
+_DOM_XSS_CWE_TO_CLASS: "dict[str, str]" = {}
+
+# prototype_pollution (CWE-1321): explicit class + client-side spelling aliases + the (disjoint) CWE-1321.
+_PROTO_POLLUTION_REDRIVE_CLASSES = frozenset({"prototype_pollution"})
+_PROTO_POLLUTION_ALIASES = {"client_side_prototype_pollution": "prototype_pollution",
+                            "client_prototype_pollution": "prototype_pollution",
+                            "proto_pollution": "prototype_pollution",
+                            "prototype_pollution_client": "prototype_pollution"}
+_PROTO_POLLUTION_CWE_TO_CLASS = {"cwe-1321": "prototype_pollution"}
+
+
 def _reflection_redrive_class(report: Any) -> "str | None":
     """The reflected-xss class this report maps to (``"xss"``), or ``None``. SINGLE source of truth
     (``sink._reflection_redrivable`` delegates here)."""
@@ -744,6 +773,19 @@ def _timing_redrive_class(report: Any) -> "str | None":
     """The time-based blind SQLi class this report maps to (``"time_based_sqli"``), or ``None``. SINGLE source
     of truth (``sink._timing_redrivable`` delegates here)."""
     return _classify_redrive(report, _TIMING_REDRIVE_CLASSES, _TIMING_ALIASES, _TIMING_CWE_TO_CLASS)
+
+
+def _dom_xss_redrive_class(report: Any) -> "str | None":
+    """The DOM-XSS class this report maps to (``"dom_xss"``), or ``None``. SINGLE source of truth
+    (``sink._dom_xss_redrivable`` delegates here)."""
+    return _classify_redrive(report, _DOM_XSS_REDRIVE_CLASSES, _DOM_XSS_ALIASES, _DOM_XSS_CWE_TO_CLASS)
+
+
+def _prototype_pollution_redrive_class(report: Any) -> "str | None":
+    """The prototype-pollution class this report maps to (``"prototype_pollution"``), or ``None``. SINGLE
+    source of truth (``sink._prototype_pollution_redrivable`` delegates here)."""
+    return _classify_redrive(report, _PROTO_POLLUTION_REDRIVE_CLASSES, _PROTO_POLLUTION_ALIASES,
+                             _PROTO_POLLUTION_CWE_TO_CLASS)
 
 
 class _RuntimeMintResult:
@@ -911,6 +953,60 @@ def _timing_redrive(report: dict, cls: str, *, run_dir: "str | os.PathLike",
                              run_dir=run_dir, signers=signers, engagement_slug=engagement_slug)
 
 
+# ======================================================================================================
+# W3 — two BROWSER-BACKED runner-owned re-drive arms over DOM ACHIEVED-STATE oracles (dom_xss /
+#   prototype_pollution). Each drives VIGIL's OWN egress-gated headless-Chromium/CDP harness
+#   (live.dom_redrive → scanner.browser_xss / scanner.proto_pollution), registers the unforgeable
+#   ``__crucible_xss`` / ``__crucible_pp`` binding, captures the achieved-state callback, and mints ONLY when
+#   the deterministic dom_execution / prototype_pollution oracle FIRES over VIGIL's fresh capture (no new
+#   OracleKind — DOM_EXECUTION + PROTOTYPE_POLLUTION are already frozen). The Strix report is never proof.
+#   A browserless runner emits a LEAD (INCONCLUSIVE), never a CLEAN (grounded in scanner.cdp.cdp_available).
+# ======================================================================================================
+
+
+def _dom_redrive_mint(report: dict, fn_name: str, where: str, *, run_dir: "str | os.PathLike",
+                      signers: "list[tuple[str, str]]", engagement_slug: str) -> "Any | None":
+    """Shared adapter for the two W3 browser-backed DOM arms (dom_xss / prototype_pollution): extract
+    {endpoint, param} from the report and drive the named ``live.dom_redrive`` runner — which launches
+    VIGIL's OWN egress-gated headless-Chromium/CDP harness over the Strix-proposed URL/param, registers the
+    ``__crucible_xss`` / ``__crucible_pp`` binding, feeds the dom_execution / prototype_pollution oracle, and
+    mints via admit()+certify_admitted(provenance="live_redrive"). A missing endpoint / gate refusal /
+    browserless env / oracle non-fire ⇒ LEAD (a browserless env is an INCONCLUSIVE LEAD, never CLEAN).
+    FATAL-2: the framework-touching import is function-local. Never raises."""
+    url = str((report or {}).get("endpoint") or "").strip()
+    if not url:
+        return None
+    param = (str((report or {}).get("param") or (report or {}).get("insertion_point") or "").strip()
+             or None)
+    try:
+        from ..live import dom_redrive as _dr  # noqa: PLC0415 — pulls framework at CALL time (offense)
+        fn = getattr(_dr, fn_name)
+        res = fn(url, slug=engagement_slug, engagement_slug=engagement_slug, signers=signers, param=param)
+    except Exception as exc:  # noqa: BLE001 — a re-drive we could not RUN → LEAD (never a false CLEAN)
+        _record_degraded(run_dir, REDRIVE_FAILED, where, exc)
+        return None
+    return _finish_runtime_arm(report, res, run_dir=run_dir)
+
+
+def _dom_xss_redrive(report: dict, cls: str, *, run_dir: "str | os.PathLike",
+                     signers: "list[tuple[str, str]]", engagement_slug: str,
+                     control_fetch: "Optional[Callable[[dict], bytes | None]]" = None) -> "Any | None":
+    """Rail adapter for DOM-XSS: mint ONLY when the dom_execution oracle observes VIGIL's canary EXECUTE in a
+    real headless DOM (a ``__crucible_xss`` binding call) — never on a reflected-but-inert payload."""
+    return _dom_redrive_mint(report, "dom_xss_redrive", "proof.run._dom_xss_redrive",
+                             run_dir=run_dir, signers=signers, engagement_slug=engagement_slug)
+
+
+def _prototype_pollution_redrive(report: dict, cls: str, *, run_dir: "str | os.PathLike",
+                                 signers: "list[tuple[str, str]]", engagement_slug: str,
+                                 control_fetch: "Optional[Callable[[dict], bytes | None]]" = None) -> "Any | None":
+    """Rail adapter for client-side prototype pollution: mint ONLY when the prototype_pollution oracle proves
+    ``Object.prototype[uniqKey] === uniqVal`` (VIGIL's cpp_/ppv_ canary) with the benign-key control
+    undefined — the canary-SHAPE guard means a Strix-supplied readback can never mint."""
+    return _dom_redrive_mint(report, "proto_pollution_redrive", "proof.run._prototype_pollution_redrive",
+                             run_dir=run_dir, signers=signers, engagement_slug=engagement_slug)
+
+
 # The GENERIC Strix→re-drive dispatch rail. Each ARM is ``(classify, drive, requires_no_capture)``: the
 # classifier maps a Strix report to the class it can re-drive (or None), and the driver re-sends VIGIL's OWN
 # gated probe and mints ONLY over VIGIL's fresh capture + its oracle (never the Strix report). Arms are tried
@@ -926,6 +1022,8 @@ _REDRIVE_ARMS = (
     (_ssti_redrive_class, _ssti_redrive, True),
     (_boolean_redrive_class, _boolean_redrive, True),
     (_timing_redrive_class, _timing_redrive, True),
+    (_dom_xss_redrive_class, _dom_xss_redrive, True),
+    (_prototype_pollution_redrive_class, _prototype_pollution_redrive, True),
 )
 
 

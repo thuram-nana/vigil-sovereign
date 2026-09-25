@@ -383,8 +383,10 @@ def test_a_capture_bearing_report_is_not_hijacked_by_a_w2_arm(monkeypatch, tmp_p
 
 def test_redrive_arm_class_sets_are_disjoint():
     """Every re-drive arm's class set AND CWE map is pairwise DISJOINT (web / errsig / xss / ssti / boolean /
-    timing). Even were it violated, no false FACT could result (each arm mints only over its own oracle), but
-    pinning it now that six arms exist keeps arm ORDER from ever routing a report to the wrong arm."""
+    timing / dom_xss / prototype_pollution). Even were it violated, no false FACT could result (each arm mints
+    only over its own oracle), but pinning it now that eight arms exist keeps arm ORDER from ever routing a
+    report to the wrong arm — in particular reflected xss (CWE-79, server-response reflection) vs dom_xss
+    (bug_class dom_xss, DOM execution) stay distinct."""
     from vigil_integration.proof import run
     from vigil_integration.live.web_redrive import WEB_FACT_CLASSES
 
@@ -397,6 +399,11 @@ def test_redrive_arm_class_sets_are_disjoint():
                  | set(run._SSTI_CWE_TO_CLASS.values())),
         "boolean": set(run._BOOLEAN_REDRIVE_CLASSES) | set(run._BOOLEAN_ALIASES.values()),
         "timing": set(run._TIMING_REDRIVE_CLASSES) | set(run._TIMING_ALIASES.values()),
+        "dom_xss": (set(run._DOM_XSS_REDRIVE_CLASSES) | set(run._DOM_XSS_ALIASES.values())
+                    | set(run._DOM_XSS_CWE_TO_CLASS.values())),
+        "prototype_pollution": (set(run._PROTO_POLLUTION_REDRIVE_CLASSES)
+                                | set(run._PROTO_POLLUTION_ALIASES.values())
+                                | set(run._PROTO_POLLUTION_CWE_TO_CLASS.values())),
     }
     cwe_maps = {
         "web": set(run._WEB_CWE_TO_CLASS),
@@ -405,6 +412,8 @@ def test_redrive_arm_class_sets_are_disjoint():
         "ssti": set(run._SSTI_CWE_TO_CLASS),
         "boolean": set(run._BOOLEAN_CWE_TO_CLASS),
         "timing": set(run._TIMING_CWE_TO_CLASS),
+        "dom_xss": set(run._DOM_XSS_CWE_TO_CLASS),
+        "prototype_pollution": set(run._PROTO_POLLUTION_CWE_TO_CLASS),
     }
     names = list(class_sets)
     for i in range(len(names)):
@@ -420,6 +429,14 @@ def test_redrive_arm_class_sets_are_disjoint():
     assert run._ssti_redrive_class({"bug_class": "ssti"}) == "ssti"
     assert run._boolean_redrive_class({"bug_class": "boolean_sqli"}) == "boolean_sqli"
     assert run._timing_redrive_class({"bug_class": "time_based_sqli"}) == "time_based_sqli"
+    assert run._dom_xss_redrive_class({"bug_class": "dom_xss"}) == "dom_xss"
+    assert run._prototype_pollution_redrive_class({"bug_class": "prototype_pollution"}) == "prototype_pollution"
+    assert run._prototype_pollution_redrive_class({"cwe": "CWE-1321"}) == "prototype_pollution"
     # a cross-class report is NOT claimed by a foreign arm (order-independence in practice).
     assert run._boolean_redrive_class({"bug_class": "error_based_sqli"}) is None
     assert run._errsig_redrive_class({"bug_class": "boolean_sqli"}) is None
+    # reflected xss vs dom_xss stay distinct: a bare CWE-79 is reflected's (not dom_xss's); an explicit
+    # dom_xss is NOT claimed by the reflected-xss arm.
+    assert run._dom_xss_redrive_class({"cwe": "CWE-79"}) is None
+    assert run._reflection_redrive_class({"bug_class": "dom_xss"}) is None
+    assert run._dom_xss_redrive_class({"bug_class": "xss"}) is None

@@ -208,8 +208,10 @@ def test_the_redrive_path_is_flag_gated_and_off_by_default():
 
 
 def test_a_lead_only_family_is_never_mint_eligible_even_with_the_flag_on():
-    """A LEAD-only family (scanners, injection, posture, source, secrets, browser) never becomes
-    mint-eligible — the flag cannot promote a family whose verifier VIGIL cannot mint from."""
+    """A LEAD-only family (scanners, injection, posture, source, secrets) never becomes mint-eligible — the
+    flag cannot promote a family whose verifier VIGIL cannot mint from. (The `browser` family is now
+    FACT-capable via VIGIL's OWN CDP re-drive, so it is no longer in this list; its members still carry no
+    spec builder, so they never enter oracle_mapped_tools — see the derivation test below.)"""
     for tool in ("nuclei", "dalfox", "trivy", "gdb"):
         on = route(tool, env={"VIGIL_FAMILY_REDRIVE": "1"})
         assert on.fact_capable_family is False, f"{tool}: its family should be LEAD-only"
@@ -232,6 +234,27 @@ def test_oracle_mapped_derivation_is_a_family_property_not_a_flat_list():
     # the filter is on family fact-capability: only when a tool is BOTH a spec builder AND in a FACT-capable
     # family is it mapped — the two conditions the body composes.
     assert oracle_mapped_tools({"subfinder"}) == {"subfinder"}     # if it HAD a builder, its family qualifies
+
+
+def test_the_browser_family_is_fact_capable_via_the_cdp_redrive_but_its_members_never_map():
+    """W3: the ``browser`` family is FACT-capable — VIGIL owns a runner re-drive that crosses admit() (the
+    dom_execution / prototype_pollution CDP achieved-state re-drive on the proof-sink dispatch rail). But that
+    FACT path is VIGIL's OWN CDP harness, NOT a tool spawn, so chromium/playwright carry no runner-owned spec
+    builder: they are absent from SPEC_BUILDER_TOOLS and therefore never enter the DERIVED
+    oracle_mapped_tools(SPEC_BUILDER_TOOLS) set — the conformance invariant 'a mint-eligible tool has BOTH a
+    wired spec builder AND a fact_capable family' stays honest after the flip."""
+    from vigil_integration.live.oracle_families import (SPEC_BUILDER_TOOLS, is_fact_capable_family,
+                                                        oracle_mapped_tools)
+    browser = of._BY_FAMILY["browser"]
+    assert browser.fact_capable is True, "the browser family must be FACT-capable (its own CDP re-drive)"
+    assert browser.verifier == "DOM_EXECUTION"
+    mapped = oracle_mapped_tools(SPEC_BUILDER_TOOLS)
+    for tool in ("chromium", "playwright"):
+        assert is_fact_capable_family(tool) is True, f"{tool}: its family is FACT-capable"
+        assert tool not in SPEC_BUILDER_TOOLS, f"{tool}: VIGIL drives its OWN CDP harness — no argv spec builder"
+        assert tool not in mapped, (
+            f"{tool}: has no runner-owned spec builder, so despite a fact_capable family it is NOT "
+            f"mint-eligible via the tool path (the FACT path is the CDP re-drive)")
 
 
 # --- negative controls: prove the checks are not vacuous ----------------------------------------------

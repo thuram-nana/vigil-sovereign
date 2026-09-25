@@ -101,6 +101,28 @@ def _timing_redrivable(report: Any) -> bool:
         return False
 
 
+def _dom_xss_redrivable(report: Any) -> bool:
+    """True when this report is a DOM-XSS class VIGIL can re-drive for a FACT in its OWN gated headless-browser
+    harness (W3, dom_execution oracle). Delegates to ``run._dom_xss_redrive_class`` (single source of truth).
+    Fail-closed."""
+    try:
+        from .run import _dom_xss_redrive_class  # noqa: PLC0415 — function-local: breaks the run⇄sink cycle
+        return _dom_xss_redrive_class(report) is not None
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _prototype_pollution_redrivable(report: Any) -> bool:
+    """True when this report is a client-side prototype-pollution class VIGIL can re-drive for a FACT in its
+    OWN gated headless-browser harness (W3, prototype_pollution oracle). Delegates to
+    ``run._prototype_pollution_redrive_class`` (single source of truth). Fail-closed."""
+    try:
+        from .run import _prototype_pollution_redrive_class  # noqa: PLC0415 — function-local: breaks the cycle
+        return _prototype_pollution_redrive_class(report) is not None
+    except Exception:  # noqa: BLE001
+        return False
+
+
 @dataclass(frozen=True)
 class SinkResult:
     """What the sink decided about one report. ``gate`` is ``"allow"``/``"deny"``; ``minted`` is True only
@@ -192,15 +214,17 @@ class ProofSink:
             # Mint when the report carries an executor capture (error-signature bytes), OR when it is a
             # web-re-drivable class (S7), OR an injection class the W1a error-signature re-drive rail owns
             # (error_based_sqli / nosqli / ldap_injection / xpath_injection), OR one of the four W2
-            # HTTP-response-derived re-drive classes (reflected xss / ssti / boolean_sqli / time_based_sqli):
-            # every re-drivable class reaches the mint WITHOUT a capture because the VIGIL-owned re-drive
-            # crafts its OWN gated traffic against the endpoint (the Strix report is never proof). A mint
-            # error (or a re-drive that observed nothing / found the target safe) leaves the finding a
-            # LEAD — never propagates.
+            # HTTP-response-derived re-drive classes (reflected xss / ssti / boolean_sqli / time_based_sqli),
+            # OR one of the two W3 browser-backed DOM classes (dom_xss / prototype_pollution): every
+            # re-drivable class reaches the mint WITHOUT a capture because the VIGIL-owned re-drive crafts its
+            # OWN gated traffic (or drives its OWN gated headless browser) against the endpoint (the Strix
+            # report is never proof). A mint error (or a re-drive that observed nothing / found the target
+            # safe / had no usable browser) leaves the finding a LEAD — never propagates.
             if self._mint is not None and (report.get(CAPTURE_KEY) is not None or _web_redrivable(report)
                                            or _errsig_redrivable(report) or _reflection_redrivable(report)
                                            or _ssti_redrivable(report) or _boolean_redrivable(report)
-                                           or _timing_redrivable(report)):
+                                           or _timing_redrivable(report) or _dom_xss_redrivable(report)
+                                           or _prototype_pollution_redrivable(report)):
                 try:
                     result = self._mint(report)
                     minted = bool(getattr(result, "is_fact", False))
