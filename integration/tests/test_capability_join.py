@@ -140,3 +140,65 @@ def test_negative_control_the_reason_check_would_catch_a_silent_row():
     assert not (silent.status == EXECUTABLE or silent.reason), (
         "the predicate used above cannot distinguish a silent row"
     )
+
+
+# --- H4b: the R4 ToolSpec-builder set is a second builder source (the join defect) ---------------------
+
+def test_resolve_folds_in_the_r4_toolspec_builder_set_so_the_two_registries_cannot_drift():
+    """THE JOIN DEFECT. A tool spawnable via the R4 runner (a ToolSpec builder) but ABSENT from the governed
+    executor's ``_BUILDERS`` used to render UNAVAILABLE 'no typed argv builder' — a false 'can never run'.
+    ``resolve`` now unions ``_BUILDERS`` with ``oracle_families.SPEC_BUILDER_TOOLS``, so every ToolSpec-builder
+    tool is recognised as ADAPTED. Sourcing the set from the framework-free ``oracle_families`` is what keeps
+    the two registries from drifting apart from a duplicated literal."""
+    from vigil_integration.live.capability_join import resolve
+    from vigil_integration.live.oracle_families import SPEC_BUILDER_TOOLS
+
+    rows = {r.name: r for r in resolve()}          # static: no probe → nothing promised runnable
+    for tool in SPEC_BUILDER_TOOLS:
+        assert rows[tool].typed_builder, f"{tool}: a ToolSpec-builder tool must be recognised as adapted"
+        assert "no typed argv builder" not in rows[tool].reason, (
+            f"{tool}: must NOT be reported 'no typed argv builder' — it has a real R4 ToolSpec builder")
+
+
+def test_the_service_reachability_port_scanners_are_executable_if_installed():
+    """masscan/rustscan/naabu now resolve end-to-end: given a confirmed presence they are EXECUTABLE, not
+    stuck UNAVAILABLE. Proven at the pure-join layer (a real probe on this host does not carry them — see the
+    honesty guard below), which is exactly the classification the H5 conformance battery already backs."""
+    brain = {t: "recon" for t in ("masscan", "rustscan", "naabu")}
+    cat = {t: {"oracle_family": "service_reachability", "fact_capable": True}
+           for t in ("masscan", "rustscan", "naabu")}
+    installed = {t: {"installed": True, "version": "x"} for t in ("masscan", "rustscan", "naabu")}
+    rows = {r.name: r for r in join(brain_tools=brain, catalogue=cat,
+                                    builders={"masscan", "rustscan", "naabu"}, installed=installed)}
+    for t in ("masscan", "rustscan", "naabu"):
+        assert rows[t].status == EXECUTABLE and rows[t].runnable, f"{t}: adapted+installed ⇒ EXECUTABLE"
+        assert rows[t].fact_capable, f"{t}: fact_capable comes from the catalogue, unchanged by the builder"
+
+
+def test_honesty_a_builder_alone_never_manufactures_executable_without_a_confirmed_presence():
+    """HONESTY (the raw-socket / sandbox case). Recognising the ToolSpec builder must NOT flip a raw-socket
+    tool (masscan/rustscan) to EXECUTABLE on its own — EXECUTABLE still requires a probe that CONFIRMS the
+    tool is present and usable. A sandbox that denies CAP_NET_RAW (or simply has no such probe) leaves the
+    presence unconfirmed, and the tool stays UNAVAILABLE — never a green it cannot back. The connect()-based
+    FACT re-drive is unaffected (it needs no raw socket; the H5 conformance battery proves it hermetically)."""
+    brain = {"masscan": "recon", "rustscan": "recon"}
+    cat = {"masscan": {"oracle_family": "service_reachability", "fact_capable": True},
+           "rustscan": {"oracle_family": "service_reachability", "fact_capable": True}}
+    bld = {"masscan", "rustscan"}
+    # (a) presence NOT probed (installed=None) — e.g. no host-roster entry backs it: UNAVAILABLE, not green.
+    unprobed = {r.name: r for r in join(brain_tools=brain, catalogue=cat, builders=bld, installed=None)}
+    for t in ("masscan", "rustscan"):
+        assert unprobed[t].status == UNAVAILABLE and "not probed" in unprobed[t].reason
+    # (b) probed and reported NOT installed/usable (the sandbox-without-CAP_NET_RAW verdict): UNAVAILABLE.
+    denied = {r.name: r for r in join(brain_tools=brain, catalogue=cat, builders=bld,
+                                      installed={"masscan": {"installed": False}, "rustscan": {"installed": False}})}
+    for t in ("masscan", "rustscan"):
+        assert denied[t].status == UNAVAILABLE and denied[t].status != EXECUTABLE
+
+    # And on THIS host, the real resolve(probe_host=True) never promises them EXECUTABLE — the presence probe
+    # (host roster) does not back a raw-socket-capable install, so they surface UNAVAILABLE with a reason.
+    from vigil_integration.live.capability_join import resolve
+    live = {r.name: r for r in resolve(probe_host=True)}
+    for t in ("masscan", "rustscan"):
+        assert live[t].status != EXECUTABLE, f"{t}: presence not backed here ⇒ never a false EXECUTABLE"
+        assert live[t].reason, f"{t}: a non-executable row must explain itself"

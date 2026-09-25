@@ -792,11 +792,14 @@ def test_h5_specs_build_server_side_argv_carrying_only_the_authorized_target() -
 def test_h5_specs_parse_open_ports_and_pin_the_host_to_the_authorized_target() -> None:
     # SCOPE SAFETY: the parser pins host to the AUTHORIZED target, never a host the tool printed. Feed each
     # parser output that names a DIFFERENT host — the proposal host must still be the authorized target.
+    # SOUNDNESS (UDP): the ``53/udp`` row is DROPPED — the runner re-proves each proposed port with a TCP
+    # ``capture_handshake``, so proposing a udp port would drive a TCP connect the oracle would mislabel as
+    # udp reachability. A udp-open row must never mint a TCP-handshake FACT (see verify.reachability).
     mo = ToolOutcome(["masscan"], 0,
                      "Discovered open port 22/tcp on 9.9.9.9\nDiscovered open port 443/tcp on 9.9.9.9\n"
                      "Discovered open port 53/udp on 9.9.9.9\nDiscovered open port 22/tcp on 9.9.9.9\n", "", "x")
     got = {(p.host, p.port, p.protocol) for p in masscan_service_scan().propose(mo, "target-host")}
-    assert got == {("target-host", 22, "tcp"), ("target-host", 443, "tcp"), ("target-host", 53, "udp")}
+    assert got == {("target-host", 22, "tcp"), ("target-host", 443, "tcp")}  # 53/udp dropped (soundness)
     ro = ToolOutcome(["rustscan"], 0, "9.9.9.9 -> [22,80, 443]\n", "", "x")
     assert {(p.host, p.port) for p in rustscan_service_scan().propose(ro, "target-host")} == \
         {("target-host", 22), ("target-host", 80), ("target-host", 443)}
@@ -805,6 +808,46 @@ def test_h5_specs_parse_open_ports_and_pin_the_host_to_the_authorized_target() -
         {("target-host", 80), ("target-host", 443), ("target-host", 8080)}
     # a closed/other row proposes nothing
     assert masscan_service_scan().propose(ToolOutcome(["masscan"], 0, "no ports found\n", "", "x"), "t") == []
+
+
+def test_udp_open_rows_are_dropped_by_the_masscan_and_nmap_parsers() -> None:
+    """SOUNDNESS (Fix 0.2): a ``udp``-open row is never turned into a proposal — the runner's reachability
+    re-drive is a TCP ``capture_handshake``, so proposing a udp port would drive a TCP connect the oracle
+    would mislabel as udp reachability. Only the TCP rows survive; a UDP-ONLY output proposes nothing."""
+    m_udp_only = ToolOutcome(["masscan"], 0,
+                             "Discovered open port 53/udp on 9.9.9.9\nDiscovered open port 161/udp on 9.9.9.9\n",
+                             "", "x")
+    assert masscan_service_scan().propose(m_udp_only, "target-host") == [], "no TCP row ⇒ no proposal"
+    m_mixed = ToolOutcome(["masscan"], 0,
+                          "Discovered open port 80/tcp on 9.9.9.9\nDiscovered open port 53/udp on 9.9.9.9\n",
+                          "", "x")
+    assert {(p.port, p.protocol) for p in masscan_service_scan().propose(m_mixed, "t")} == {(80, "tcp")}
+    # nmap grepable: the same drop, in nmap's own ``<port>/open/<proto>`` shape.
+    n_mixed = ToolOutcome(["nmap"], 0,
+                          "Host: 10.0.0.5 ()\tPorts: 22/open/tcp//ssh///, 53/open/udp//domain///\n", "", "x")
+    assert {(p.port, p.protocol) for p in nmap_service_scan().propose(n_mixed, "t")} == {(22, "tcp")}
+
+
+def test_a_udp_open_row_through_the_runner_yields_zero_facts(tmp_path: Path) -> None:
+    """END-TO-END (Fix 0.2): masscan reports a REALLY-OPEN loopback port as ``udp`` open. Even though a TCP
+    service is listening there (so a mislabelled TCP connect WOULD have 'confirmed' it), the udp row is
+    dropped at parse time ⇒ zero proposals ⇒ ZERO facts. A udp-open input mints nothing."""
+    _charter(tmp_path, "127.0.0.1")
+    srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    srv.bind(("127.0.0.1", 0))
+    srv.listen(8)
+    port = srv.getsockname()[1]
+    gate = ScopeGate(scope=StaticScopeSource(["127.0.0.1"]), loopback_allowed_if_scoped=True)
+    backend = _CannedNmapBackend(f"Discovered open port {port}/udp on 127.0.0.1\n")  # udp-labelled open row
+    try:
+        res = run_external_tool(
+            masscan_service_scan(ports=str(port)), "127.0.0.1",
+            scope_gate=gate, backend=backend, engagement_slug="alpha", signers=SIGNERS)
+    finally:
+        srv.close()
+    assert res.status == "ran"
+    assert res.proposed == [], "the udp-open row must not become a proposal"
+    assert res.facts == [] and res.leads == [], "a udp-open row must mint ZERO facts (and no lead)"
 
 
 def test_h5_specs_carry_no_redrives_so_they_reuse_the_legacy_reachability_redrive() -> None:

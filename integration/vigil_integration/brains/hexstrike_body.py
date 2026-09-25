@@ -60,7 +60,13 @@ from .hexstrike_brain import (
 )
 # H7: FACT-capability is a property of the tool's SHARED ORACLE FAMILY, not a per-tool flat set. The family
 # registry is pure stdlib (no framework import), so importing it at module scope is FATAL-2 safe.
-from ..live.oracle_families import ToolObservation, family_for, fuse, oracle_mapped_tools
+from ..live.oracle_families import (
+    SPEC_BUILDER_TOOLS,
+    ToolObservation,
+    family_for,
+    fuse,
+    oracle_mapped_tools,
+)
 
 # brain tool name -> the runner-owned oracle-mapped ToolSpec builder. ONLY these can mint a FACT (via the
 # runner's own independent re-drive); every other tool stays a LEAD. Adding a tool = adding a ToolSpec +
@@ -72,8 +78,10 @@ from ..live.oracle_families import ToolObservation, family_for, fuse, oracle_map
 # nmap — a port scanner's row is only a PROPOSAL, and only VIGIL's independent handshake mints the FACT.
 # The tools with a runner-owned ToolSpec builder in ``_spec_for_kind`` below — the ONLY tools whose FACT can
 # be minted by VIGIL's own gated re-drive. Kept in lock-step with ``_spec_for_kind`` by
-# ``test_oracle_mapped_tools_all_have_a_spec_builder_no_drift``.
-_SPEC_BUILDER_TOOLS = frozenset({"nmap", "sslscan", "masscan", "rustscan", "naabu"})
+# ``test_oracle_mapped_tools_all_have_a_spec_builder_no_drift``. The set itself is now the framework-free
+# SSOT in ``live.oracle_families`` (shared with ``live.capability_join`` so the two registries cannot drift);
+# re-exported here under its historical name for the body's own derivation + tests.
+_SPEC_BUILDER_TOOLS = SPEC_BUILDER_TOOLS
 # H7 — FACT-capability is derived from the SHARED ORACLE FAMILY, not hand-listed per tool: a spec-builder
 # tool mints only if its family owns a re-drive that crosses ``verdict.admit()`` (network-discovery →
 # SERVICE_REACHABILITY for the four port scanners; tls → TLS_WEAKNESS for sslscan). Adding a member to a
