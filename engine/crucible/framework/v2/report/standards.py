@@ -316,6 +316,34 @@ _STANDARDS: dict[str, ControlMapping] = {
                    attack=("T1557",)),
     "weak_crypto_artifact": _m("A02:2021", ("CWE-327",), pci=("4.2.1", "3.6.1"), soc2=_CRYPTO_SOC2, iso=_CRYPTO_ISO,
                               attack=("T1553",)),
+    # ---- Wave-5.1 STATIC source-code rule (the SAST bridge) — code-property FACTs, honestly scoped: each is a
+    # PROVEN property of the source, NOT an observed attacker technique, so the ATT&CK column is empty (no clean
+    # technique for a static code property, per the honesty convention above). ----
+    # (a) a broken/risky primitive is INVOKED here — A02 Cryptographic Failures; CWE-327 (broken algorithm) +
+    #     CWE-328 (weak hash).
+    "static_broken_crypto": _m("A02:2021", ("CWE-327", "CWE-328"), pci=_CRYPTO_PCI, soc2=_CRYPTO_SOC2,
+                               iso=_CRYPTO_ISO, attack=()),
+    # (b) a non-crypto PRNG value flows into a security sink — A02 Cryptographic Failures; CWE-330 (insufficiently
+    #     random values) + CWE-338 (cryptographically weak PRNG). The class stays REGISTERED (a recognised
+    #     detection pointer, so a LEAD carries these controls), but it is LEAD-only: the STATIC_RULE oracle is
+    #     fail-closed for insecure-randomness and NEVER mints a FACT (a sound FACT needs crypto-provenance
+    #     dataflow — see docs/capability-matrix blocking_work for `static_insecure_randomness`).
+    "static_insecure_randomness": _m("A02:2021", ("CWE-330", "CWE-338"), pci=_CRYPTO_PCI, soc2=_CRYPTO_SOC2,
+                                     iso=_CRYPTO_ISO, attack=()),
+    # (c) a security flag is EXPLICITLY disabled as a literal (verify=False / secure=False / CERT_NONE) — A05
+    #     Security Misconfiguration; CWE-295 (improper certificate validation) + CWE-614 (sensitive cookie
+    #     without Secure) + CWE-16 (configuration).
+    "static_insecure_flag": _m("A05:2021", ("CWE-295", "CWE-614", "CWE-16"), pci=_MISCFG_PCI, soc2=_MISCFG_SOC2,
+                               iso=_MISCFG_ISO, attack=()),
+    # (d) a taint SOURCE reaching a dangerous sink in one function (command injection, the dominant sink shape) —
+    #     A03 Injection; CWE-20 (improper input validation) + CWE-77 (command injection). The class stays
+    #     REGISTERED (a recognised detection pointer, so a LEAD carries these controls), but it is LEAD-only: the
+    #     STATIC_RULE oracle is FAIL-CLOSED for direct-taint and NEVER mints a FACT (a sound FACT needs
+    #     framework-aware, provenance-resolved taint SOURCES — a resolved request/input object, not self./req.
+    #     attributes or name-matched functions — plus a resolved sink set; see docs/capability-matrix
+    #     blocking_work for `static_taint`).
+    "static_taint": _m("A03:2021", ("CWE-20", "CWE-77"), pci=_SDLC_PCI, soc2=_SDLC_SOC2, iso=_SDLC_ISO,
+                       attack=()),
     # ---- Sensitive-data / information exposure ----
     "exposure": _m("A01:2021", ("CWE-200",), pci=_CONF_PCI, soc2=_CONF_SOC2, iso=_CONF_ISO, attack=("T1213",)),
     "sensitive_exposure": _m("A02:2021", ("CWE-200", "CWE-359"), pci=_CONF_PCI, soc2=_CONF_SOC2, iso=_CONF_ISO,

@@ -1748,6 +1748,112 @@
         "integration/vigil_integration/live/smuggling_redrive.py:smuggling_redrive",
         "engine/crucible/framework/v2/verify/oracles.py:smuggling_desync_oracle"
       ]
+    },
+    {
+      "id": "static_broken_crypto.broken_primitive_invocation",
+      "check": "static_rule_verify",
+      "evidence": "the STATIC_RULE oracle re-parsed the RETAINED source region (Python ast) and re-derived that a broken/risky cryptographic primitive is INVOKED here — an MD5/SHA1/MD4/MD2 hash constructor or call, a DES/3DES/RC4/Blowfish/IDEA cipher, or an ECB block mode — a re-verifiable CODE PROPERTY, never a claim of runtime exploitability. The tool (semgrep/joern/pattern) that produced the LEAD only said WHERE to look; the verdict is the oracle's own re-parse of the retained bytes.",
+      "fact_capable": true,
+      "clean_capable": false,
+      "preconditions": [
+        "source_reparseable"
+      ],
+      "limitation": "Bounded to the retained source REGION and the CODE PROPERTY 'a broken/risky primitive is invoked here', NOT a claim the primitive is reachable or exploitable at runtime, and NOT a claim about the whole program. Python-only: a non-Python or unparseable region REFUSES (a LEAD), never asserts. NOISE CARVE-OUT: a hashlib hash carrying the EXPLICIT usedforsecurity=False opt-out (Python's declaration that the digest is a checksum, not for security) does NOT mint — it stays a LEAD; a genuine hash without that opt-out still fires. NOT CLEAN-capable: a non-firing over one region cannot prove the absence of broken-crypto use across the codebase. The verdict re-derives OFFLINE from the retained source bytes; a tamper that removes the invocation no longer re-fires.",
+      "target_fact_capable": true,
+      "target_clean_capable": false,
+      "target_downgrade_rationale": "Proving the ABSENCE of any broken-crypto invocation is a whole-program capability (a complete crypto inventory across every module, import alias and dynamic construction), not this single-region static-rule's target, so clean-capability is deliberately not pursued on this branch.",
+      "oracle_version": "static_rule",
+      "control_requirements": [
+        "retained_source_region",
+        "vigil_owned_static_reparse",
+        "closed_rule_vocabulary"
+      ],
+      "evidence_surface": "artifact",
+      "implementation_refs": [
+        "engine/crucible/framework/v2/verify/oracles.py:_broken_crypto_hit",
+        "engine/crucible/framework/v2/verify/oracles.py:static_rule_oracle",
+        "engine/crucible/framework/v2/analysis/static_facts.py:confirm_code_region"
+      ]
+    },
+    {
+      "id": "static_insecure_randomness.prng_into_sink",
+      "check": "static_rule_verify",
+      "evidence": "the STATIC_RULE oracle recognises this as a DETECTION POINTER only — insecure-randomness is LEAD-only and NEVER mints a FACT. A non-cryptographic PRNG value (random.random/randint/choice/getrandbits/randbytes/...) reaching a security sink (a key/secret/token/password/salt/iv/nonce/seed) is a real LEAD worth reporting, but a SOUND static FACT is out of scope for a single-region offline re-parse: four red-pen rounds showed that every AST heuristic (name-based sinks, descriptive builders, control-vs-material argument position, SystemRandom name-exclusion, single-hop alias flow) keeps admitting a new benign-but-firing shape on secure or benign code. Per claim-discipline (an honest LEAD beats a false FACT), the oracle is FAIL-CLOSED for this rule_id: static_rule_oracle returns a non-firing LEAD for ANY input, before any re-parse or tier dispatch, so no input can promote it to a FACT (live or offline).",
+      "fact_capable": false,
+      "clean_capable": false,
+      "preconditions": [
+        "source_reparseable"
+      ],
+      "limitation": "LEAD-only: the STATIC_RULE oracle NEVER mints a FACT for insecure-randomness (fail-closed for ANY input, live and offline), so this branch can neither confirm nor exonerate. A sound FACT is not derivable from a single-region AST re-parse without crypto-provenance dataflow. NOT FACT-capable and NOT CLEAN-capable: a non-firing proves nothing about whether a secret is drawn from a predictable PRNG anywhere in the program. See blocking_work for the engineering that closes the gap.",
+      "target_fact_capable": true,
+      "target_clean_capable": false,
+      "target_downgrade_rationale": "Proving the ABSENCE of any insecure-randomness-into-secret flow is a whole-program dataflow capability (inter-procedural, alias- and reassignment-complete), not this single-function direct-flow static-rule's target, so clean-capability is deliberately not pursued on this branch.",
+      "blocking_work": "Build crypto-provenance dataflow so the property can be re-derived SOUNDLY: (1) resolve the PRNG SOURCE by provenance, not by name — exclude random.SystemRandom / secrets / os.urandom by RESOLUTION (import + call-target resolution), so a secure generator never fires and a name collision never does; (2) FLOW-SENSITIVE dataflow so the value actually reaching the sink is the PRNG value and not a later secure reassignment (kill/gen sets, not a walk-the-subtree heuristic); (3) resolve the SINK to a crypto-API SECRET-MATERIAL parameter by API signature, not a short-name / receiver-agnostic match (generate_* / make_key / derive_key over-resolve today). Until this exists the class stays a LEAD; target_fact_capable remains true — this is a BUILD item, not an abandoned capability.",
+      "oracle_version": "",
+      "control_requirements": [
+        "retained_source_region",
+        "vigil_owned_static_reparse",
+        "closed_rule_vocabulary"
+      ],
+      "evidence_surface": "artifact",
+      "implementation_refs": [
+        "engine/crucible/framework/v2/verify/oracles.py:_LEAD_ONLY_RULE_IDS",
+        "engine/crucible/framework/v2/verify/oracles.py:static_rule_oracle",
+        "engine/crucible/framework/v2/analysis/static_facts.py:confirm_code_region"
+      ]
+    },
+    {
+      "id": "static_insecure_flag.disabled_literal",
+      "check": "static_rule_verify",
+      "evidence": "the STATIC_RULE oracle re-parsed the RETAINED source region (Python ast) and re-derived that a KNOWN security flag is EXPLICITLY set to its insecure LITERAL — verify=False / secure=False / check_hostname=False / cert_reqs=ssl.CERT_NONE — a re-verifiable CODE PROPERTY, never a claim of runtime exploitability.",
+      "fact_capable": true,
+      "clean_capable": false,
+      "preconditions": [
+        "source_reparseable"
+      ],
+      "limitation": "Bounded to a security flag EXPLICITLY written to its insecure literal in the retained region AND reaching a RESOLVED security-relevant HTTP/TLS callee under one of TWO sound resolution paths. (1) CALL-SITE-DIRECT: the callee resolves within the call itself from import provenance (requests.get(..., verify=False) / ssl.wrap_socket(..., cert_reqs=ssl.CERT_NONE) / a from-imported request callable) — flow-independent. (2) SESSION-VARIABLE: s = requests.Session(); s.get(..., verify=False) — resolved FLOW-SENSITIVELY by the SAME inverted straight-line binding tracker tier (d) uses, so `s` fires only if it is CURRENTLY a session at the call; a reassignment of `s` to a non-session (any form: s = 123, an import that rebinds it, or any statement form the tracker does not model) removes/loses the binding and the call is a LEAD, never a FACT. An ABSENT flag is default-dependent and REFUSES (a LEAD) — this branch never reasons about defaults; an insecure flag on an UNRESOLVED / non-security callee (chart.render(verify=False)) never mints. Python-only: a non-Python or unparseable region REFUSES. NOT CLEAN-capable: a non-firing cannot prove no security flag is disabled elsewhere, nor that the effective runtime configuration is safe. Re-derives OFFLINE from the retained bytes; a tamper removing the literal no longer re-fires.",
+      "target_fact_capable": true,
+      "target_clean_capable": false,
+      "target_downgrade_rationale": "Proving the ABSENCE of an insecure-flag literal (and that the effective runtime configuration is safe) is a whole-program + default-resolution capability, not this single-region literal-match static-rule's target, so clean-capability is deliberately not pursued on this branch.",
+      "oracle_version": "static_rule",
+      "control_requirements": [
+        "retained_source_region",
+        "vigil_owned_static_reparse",
+        "closed_rule_vocabulary"
+      ],
+      "evidence_surface": "artifact",
+      "implementation_refs": [
+        "engine/crucible/framework/v2/verify/oracles.py:_insecure_flag_hit",
+        "engine/crucible/framework/v2/verify/oracles.py:static_rule_oracle",
+        "engine/crucible/framework/v2/analysis/static_facts.py:confirm_code_region"
+      ]
+    },
+    {
+      "id": "static_taint.direct_intraprocedural_flow",
+      "check": "static_rule_verify",
+      "evidence": "the STATIC_RULE oracle recognises this as a DETECTION POINTER only — direct-taint is LEAD-only and NEVER mints a FACT. A taint SOURCE (a request/input value) reaching a dangerous SINK (os.system / subprocess shell=True / eval / exec / a string-built cursor.execute) in one function is a real LEAD worth reporting, but a SOUND static FACT is out of scope for a single-region offline re-parse: the taint SOURCE identification is unsound. It treats self.<attr> / req.<attr> as sources (so `cmd = self.params; subprocess.run(cmd, shell=True)` mints a false CWE-77 FACT on benign code), and it matches input/getenv/get_json by NAME with no receiver provenance and no local-shadow check. Sound taint sources need framework-aware, provenance-resolved request/input identification across many frameworks — an open-ended problem beyond this single-region re-parse. Per claim-discipline (an honest LEAD beats a false FACT), the oracle is FAIL-CLOSED for this rule_id: static_rule_oracle returns a non-firing LEAD for ANY input, before any re-parse or tier dispatch, so no input can promote it to a FACT (live or offline).",
+      "fact_capable": false,
+      "clean_capable": false,
+      "preconditions": [
+        "source_reparseable"
+      ],
+      "limitation": "LEAD-only: the STATIC_RULE oracle NEVER mints a FACT for direct-taint (fail-closed for ANY input, live and offline), so this branch can neither confirm nor exonerate. A sound FACT is not derivable from a single-region AST re-parse without framework-aware, provenance-resolved taint SOURCE identification — the removed heuristic treated self./req. attributes as sources and name-matched input/getenv/get_json with no receiver provenance, minting durable false FACTs on benign code. NOT FACT-capable and NOT CLEAN-capable: a non-firing proves nothing about whether a tainted source->sink flow exists in the program. The SOUND inverted straight-line binding tracker (round-7) is RETAINED and still powers the tier-(c) insecure-flag session-variable resolution; only the tier-(d) taint SOURCE/SINK machinery on top of it was removed. See blocking_work for the engineering that closes the gap.",
+      "target_fact_capable": true,
+      "target_clean_capable": false,
+      "target_downgrade_rationale": "Proving the ABSENCE of a tainted source->sink flow (and that no path is exploitable) is a whole-program inter-procedural taint + reachability capability, not this single-function direct-flow static-rule's target, so clean-capability is deliberately not pursued on this branch.",
+      "blocking_work": "Build framework-aware, provenance-resolved taint SOURCES so the property can be re-derived SOUNDLY: (1) identify the taint SOURCE as a RESOLVED request/input OBJECT across the common frameworks (Flask/Django/FastAPI request objects, WSGI/ASGI environ, CLI argv, stdin) by import + binding provenance — NOT by treating self.<attr>/req.<attr> as sources and NOT by name-matching input/getenv/get_json without receiver provenance or a local-shadow check; (2) resolve the dangerous SINK to a real command/eval/query API by signature, not a short-name match; (3) reuse the now-sound inverted straight-line flow tracker (retained for tier c) to prove the source value actually reaches the sink unsanitized. Until this exists the class stays a LEAD; target_fact_capable remains true — this is a BUILD item, not an abandoned capability.",
+      "oracle_version": "",
+      "control_requirements": [
+        "retained_source_region",
+        "vigil_owned_static_reparse",
+        "closed_rule_vocabulary"
+      ],
+      "evidence_surface": "artifact",
+      "implementation_refs": [
+        "engine/crucible/framework/v2/verify/oracles.py:_LEAD_ONLY_RULE_IDS",
+        "engine/crucible/framework/v2/verify/oracles.py:static_rule_oracle",
+        "engine/crucible/framework/v2/analysis/static_facts.py:confirm_code_region"
+      ]
     }
   ]
 }

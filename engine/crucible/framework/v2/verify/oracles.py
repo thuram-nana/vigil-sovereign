@@ -15,6 +15,7 @@ dimensions push confidence up, but no single weak dimension can dominate.
 
 from __future__ import annotations
 
+import ast
 import base64
 import binascii
 import difflib
@@ -3397,6 +3398,574 @@ def weak_crypto_artifact_oracle(observed: Any) -> OracleSignal:
     return OracleSignal(
         kind=OracleKind.TLS_WEAKNESS, fired=False, confidence=0.0,
         evidence=f"signature algorithm {name or oid or '?'} is not a broken hash and the key is not undersized")
+
+
+# ---------------------------------------------------------------------------
+# Static source-code rule — a re-runnable deterministic rule over RETAINED SOURCE-CODE BYTES.
+#
+# The SAST bridge: the analysis path emits LEADs; this oracle promotes ONE to a "static FACT" by RE-PARSING
+# the retained source region ITSELF (Python `ast`) and re-deriving a CODE PROPERTY — never trusting
+# semgrep/joern or the tool's CWE. It is the source-code sibling of weak_crypto_artifact_oracle (which
+# re-derives MD5/SHA1 from a retained artifact). Each FACT is honestly scoped to a PROVEN code property,
+# NEVER "exploitable at runtime". The rule_id vocabulary is CLOSED; a non-Python or unparseable region
+# REFUSES (never mints); a tamper that removes the property no longer re-fires (rejected at re-verify).
+# ---------------------------------------------------------------------------
+
+# The CLOSED rule-id vocabulary. These are the RECOGNISED rule ids the SAST bridge may build a context under;
+# an unknown rule_id NEVER fires (a LEAD at most). Membership here is NOT FACT-capability — see
+# ``_FACT_RULE_IDS``: only the TWO SOUND tiers (a) broken-crypto and (c) insecure-flag can mint a STATIC_RULE
+# FACT. Tier (b) insecure-randomness AND tier (d) direct-taint are recognised DETECTION POINTERS but are
+# LEAD-only (see ``_LEAD_ONLY_RULE_IDS``): each needs analysis beyond a single-region offline re-parse —
+# insecure-randomness needs crypto-provenance dataflow, and direct-taint needs framework-aware,
+# provenance-resolved taint SOURCE identification (a resolved request/input OBJECT, not self./req. attributes
+# or name-matched functions) plus a resolved sink set — so both are FAIL-CLOSED to a LEAD for ANY input (see
+# docs/capability-matrix blocking_work for ``static_insecure_randomness`` / ``static_taint``).
+_STATIC_RULE_IDS = frozenset({
+    "broken-crypto-invocation",   # (a) FACT: a broken/risky primitive is CONSTRUCTED or CALLED here
+    "insecure-randomness-sink",   # (b) LEAD-only: a recognised pointer, NEVER a FACT (needs provenance dataflow)
+    "insecure-flag-literal",      # (c) FACT: a security flag is EXPLICITLY disabled as a LITERAL
+    "direct-taint",               # (d) LEAD-only: a recognised pointer, NEVER a FACT (needs sound taint SOURCES)
+})
+# Tiers (b) insecure-randomness AND (d) direct-taint are RECOGNISED (detection pointers / LEADs) but
+# structurally CANNOT reach the firing path: ``static_rule_oracle`` hard-guards EACH to a non-firing LEAD BEFORE
+# any re-parse or tier dispatch, for ANY input. For tier (b) four red-pen rounds showed a sound AST heuristic
+# keeps admitting a new benign-but-firing shape. For tier (d) the taint SOURCE identification is unsound —
+# self.<attr>/req.<attr> are treated as sources (`cmd=self.params; subprocess.run(cmd, shell=True)` => a false
+# CWE-77 FACT), and input/getenv/get_json match by NAME with no receiver provenance and no local-shadow check —
+# minting durable false FACTs on benign code. An honest LEAD beats a false FACT, so BOTH are downgraded until
+# the framework-aware, provenance-resolved taint-SOURCE analysis exists (a resolved request/input object, not
+# self./req. attributes or name-matched functions) on top of the now-sound inverted flow tracker.
+_LEAD_ONLY_RULE_IDS = frozenset({"insecure-randomness-sink", "direct-taint"})
+# The FACT-capable subset — the two SOUND tiers a single-region re-parse can re-derive with provenance
+# discipline. Only a rule_id in THIS set can ever mint a STATIC_RULE FACT.
+_FACT_RULE_IDS = _STATIC_RULE_IDS - _LEAD_ONLY_RULE_IDS
+
+# (a) BROKEN / risky primitives. Hash: md5/sha1/md4/md2 (collision-forgeable). Cipher: DES/3DES/RC4/Blowfish/
+# IDEA (broken or SWEET32-risky). ECB block mode (deterministic — a broken usage). Case-insensitive by lower().
+_BROKEN_HASH_NAMES = frozenset({"md5", "sha1", "md4", "md2"})
+_BROKEN_CIPHER_NAMES = frozenset({"des", "des3", "tripledes", "arc4", "rc4", "blowfish", "idea"})
+# PROVENANCE floor for tier (a): a primitive is only "broken crypto in use" when its name RESOLVES (via an
+# import in the retained region) to one of these cryptographic packages. A bare/unimported name that merely
+# LOOKS like md5() has no crypto provenance and is a LEAD (the veracity firewall re-derives the property, it
+# does not re-run the tool's name pattern). `hmac` is a cryptographic module and is kept here for provenance
+# resolution; it carries no broken-primitive name, so tier (a) never mints on it.
+_CRYPTO_MODULE_ROOTS = frozenset({"hashlib", "hmac", "crypto", "cryptodome", "cryptography"})
+
+
+def _attr_or_name(node: Any) -> str:
+    """The short callee identifier of a Call target: an ``ast.Name`` id or an ``ast.Attribute`` attr; else ''."""
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        return node.attr
+    return ""
+
+
+def _dotted_parts(node: Any) -> "list[str]":
+    """The dotted identifier chain of a pure Name/Attribute expression, root-first: ``hashlib.md5`` ->
+    ['hashlib', 'md5']; ``Crypto.Cipher.DES.new`` -> ['Crypto', 'Cipher', 'DES', 'new']; a bare ``md5`` ->
+    ['md5']. Returns [] when the base is not a plain Name (a subscript / call / literal in the chain — an
+    UNRESOLVABLE base, so a LEAD)."""
+    parts: list[str] = []
+    cur = node
+    while isinstance(cur, ast.Attribute):
+        parts.append(cur.attr)
+        cur = cur.value
+    if not isinstance(cur, ast.Name):
+        return []
+    parts.append(cur.id)
+    parts.reverse()
+    return parts
+
+
+def _is_crypto_module(dotted: str) -> bool:
+    """True iff a dotted module path's ROOT segment is a cryptographic package (the provenance test)."""
+    return bool(dotted) and dotted.split(".")[0].strip().lower() in _CRYPTO_MODULE_ROOTS
+
+
+def _collect_crypto_imports(tree: ast.AST) -> "tuple[set[str], dict[str, tuple[str, str]]]":
+    """RESOLVE PROVENANCE for tier (a). Returns ``(crypto_module_locals, from_crypto)``:
+      * ``crypto_module_locals`` — local names bound to a CRYPTO MODULE (``import hashlib`` /
+        ``import hashlib as h`` / ``import Crypto.Cipher.DES`` binds the root ``Crypto``).
+      * ``from_crypto`` — ``local -> (module, original)`` for ``from <crypto-module> import X [as local]``.
+    Only crypto-namespace imports are recorded; a name with no crypto provenance is never resolvable to a
+    broken primitive (a LEAD)."""
+    crypto_locals: set[str] = set()
+    from_crypto: dict[str, tuple[str, str]] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                mod = alias.name or ""
+                if _is_crypto_module(mod):
+                    crypto_locals.add(alias.asname or mod.split(".")[0])
+        elif isinstance(node, ast.ImportFrom):
+            mod = node.module or ""
+            if not mod or not _is_crypto_module(mod):
+                continue   # a bare relative import / non-crypto module — unresolved provenance (LEAD).
+            for alias in node.names:
+                if alias.name != "*":
+                    from_crypto[alias.asname or alias.name] = (mod, alias.name)
+    return crypto_locals, from_crypto
+
+
+def _collect_local_shadows(tree: ast.AST) -> "set[str]":
+    """Names DEFINED locally in the retained region (``def`` / ``async def`` / ``class`` / a simple
+    assignment target). A call to such a name is the LOCAL definition, not an imported primitive, so it is
+    never minted (e.g. a locally-shadowed ``def md5(): ...``)."""
+    shadows: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            shadows.add(node.name)
+        elif isinstance(node, (ast.Assign, ast.AnnAssign)):
+            shadows.update(_assign_targets(node))
+    return shadows
+
+
+def _base_is_crypto(name: str, crypto_locals: "set[str]", from_crypto: "dict[str, tuple[str, str]]",
+                    shadows: "set[str]") -> bool:
+    """A base identifier resolves to a crypto module (import provenance) and is not locally shadowed."""
+    if name in shadows and name not in crypto_locals and name not in from_crypto:
+        return False
+    return name in crypto_locals or name in from_crypto
+
+
+def _has_usedforsecurity_false(node: ast.Call) -> bool:
+    """True iff the call carries the EXPLICIT ``usedforsecurity=False`` opt-out — Python's hashlib flag
+    declaring this hash is NOT used for security (a checksum / cache key / non-cryptographic digest). It is a
+    keyword-only, hashlib-specific argument; a broken CIPHER never carries it, so the carve-out only ever
+    silences a hash the author has deliberately marked non-security."""
+    return any(kw.arg == "usedforsecurity" and isinstance(kw.value, ast.Constant) and kw.value.value is False
+               for kw in node.keywords)
+
+
+def _broken_crypto_call_detail(node: ast.Call, crypto_locals: "set[str]",
+                               from_crypto: "dict[str, tuple[str, str]]",
+                               shadows: "set[str]") -> "str | None":
+    """A Call RESOLVES to a genuinely-invoked broken primitive (returns a detail) or does not (``None`` ->
+    a LEAD). A bare/unimported name and a locally-shadowed def never mint; the provenance MUST resolve to a
+    crypto module."""
+    # CARVE-OUT (noise): an EXPLICIT ``usedforsecurity=False`` is Python's opt-out declaring this hash is NOT
+    # for security (e.g. ``hashlib.md5(x, usedforsecurity=False)`` for a checksum). A genuine broken hash
+    # WITHOUT the opt-out still mints; WITH it we REFUSE (a LEAD) — we do not flag a hash the author has
+    # explicitly marked non-security. See the ``static_broken_crypto`` evidence-branch limitation.
+    if _has_usedforsecurity_false(node):
+        return None
+    parts = _dotted_parts(node.func)
+    if not parts:
+        return None
+    root = parts[0]
+    if len(parts) == 1:
+        # BARE name call: md5(...) — mints ONLY as a from-import of a broken primitive, never unimported.
+        if root in shadows:
+            return None
+        if root in from_crypto:
+            orig = from_crypto[root][1].lower()
+            if orig in _BROKEN_HASH_NAMES:
+                return f"{orig.upper()} (broken hash) imported from {from_crypto[root][0]} and invoked"
+            if orig in _BROKEN_CIPHER_NAMES or orig.replace("_", "") in _BROKEN_CIPHER_NAMES:
+                return f"{orig.upper()} (broken cipher) imported from {from_crypto[root][0]} and invoked"
+        return None   # bare unimported name — provenance unresolved (LEAD).
+    # ATTRIBUTE call: hashlib.md5(...) / DES.new(...) / algorithms.TripleDES(...) / hashlib.new("md5").
+    if not _base_is_crypto(root, crypto_locals, from_crypto, shadows):
+        return None   # base is a local binding or has no crypto provenance (LEAD).
+    if root in crypto_locals:
+        segs = [p.lower() for p in parts[1:]]
+    else:
+        segs = [from_crypto[root][1].lower()] + [p.lower() for p in parts[1:]]
+    # <crypto-module>.new("md5") — a `.new` with a broken-hash NAME constant.
+    if parts[-1] == "new" and node.args and isinstance(node.args[0], ast.Constant) \
+            and isinstance(node.args[0].value, str) \
+            and node.args[0].value.strip().lower().replace("-", "") in _BROKEN_HASH_NAMES:
+        return f"{node.args[0].value.strip().upper()} (broken hash) via .new({node.args[0].value!r})"
+    for seg in segs:
+        if seg in _BROKEN_HASH_NAMES:
+            return f"{seg.upper()} (broken hash) invoked from a resolved crypto module"
+        if seg in _BROKEN_CIPHER_NAMES or seg.replace("_", "") in _BROKEN_CIPHER_NAMES:
+            return f"{seg.upper()} (broken/risky cipher) invoked from a resolved crypto module"
+    return None
+
+
+def _ecb_construction_detail(tree: ast.AST, crypto_locals: "set[str]",
+                             from_crypto: "dict[str, tuple[str, str]]",
+                             shadows: "set[str]") -> "str | None":
+    """ECB is a WEAK MODE, not a primitive: mint ONLY when it is CONSTRUCTED into a cipher (passed as an
+    argument to a ``.new(...)`` / ``Cipher(...)`` call), NEVER when it is merely COMPARED against — a
+    defensive ``if mode == AES.MODE_ECB: raise`` is a REJECTION of ECB, not a use of it."""
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        callee = node.func
+        # (1) pycryptodome: <Cipher>.new(key, <X>.MODE_ECB) — MODE_ECB passed as an argument to a `.new`.
+        if _attr_or_name(callee) == "new" and isinstance(callee, ast.Attribute) \
+                and _base_is_crypto(_attr_or_name(callee.value), crypto_locals, from_crypto, shadows):
+            for arg in node.args:
+                for sub in ast.walk(arg):
+                    if isinstance(sub, ast.Attribute) and sub.attr == "MODE_ECB":
+                        return (f"ECB block mode (MODE_ECB) constructed into a cipher via "
+                                f"`{_attr_or_name(callee.value)}.new(...)` — deterministic, a broken usage")
+        # (2) cryptography: Cipher(algorithms.AES(key), modes.ECB()) — modes.ECB() constructed as an arg.
+        for arg in list(node.args) + [kw.value for kw in node.keywords]:
+            for sub in ast.walk(arg):
+                if isinstance(sub, ast.Call) and isinstance(sub.func, ast.Attribute) \
+                        and sub.func.attr == "ECB" \
+                        and _attr_or_name(sub.func.value).lower() == "modes" \
+                        and _base_is_crypto(_attr_or_name(sub.func.value), crypto_locals, from_crypto, shadows):
+                    return "ECB block mode (modes.ECB) constructed into a Cipher(...) — deterministic, a broken usage"
+    return None
+
+
+def _broken_crypto_hit(tree: ast.AST) -> "tuple[bool, str]":
+    """RE-DERIVE tier (a): a broken/risky crypto primitive is GENUINELY INVOKED/CONSTRUCTED here, with its
+    provenance RESOLVED to a real crypto module. Pure AST — no execution, no import. A bare/unimported name,
+    a locally-shadowed def, a mere reference / comparison / defensive guard, or a hash carrying the explicit
+    ``usedforsecurity=False`` opt-out does NOT mint (a LEAD — soundness over recall). Returns (fired, detail)."""
+    crypto_locals, from_crypto = _collect_crypto_imports(tree)
+    shadows = _collect_local_shadows(tree)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call):
+            detail = _broken_crypto_call_detail(node, crypto_locals, from_crypto, shadows)
+            if detail:
+                return True, detail
+    ecb = _ecb_construction_detail(tree, crypto_locals, from_crypto, shadows)
+    if ecb:
+        return True, ecb
+    return False, ""
+
+
+def _assign_targets(node: Any) -> "list[str]":
+    """The simple target NAMES of an Assign / AnnAssign (Name or Attribute leaf), for sink-name matching."""
+    names: list[str] = []
+    targets = list(getattr(node, "targets", [])) or ([node.target] if getattr(node, "target", None) else [])
+    for t in targets:
+        for n in ast.walk(t):
+            if isinstance(n, ast.Name):
+                names.append(n.id)
+            elif isinstance(n, ast.Attribute):
+                names.append(n.attr)
+    return names
+
+
+# (c) Security flags whose EXPLICIT insecure LITERAL is a proven weakness. An ABSENT flag is default-dependent
+# and is NOT a member here (REFUSE — a lead). Each maps to the literal value that disables the protection.
+_INSECURE_FLAG_FALSE = frozenset({"verify", "secure", "check_hostname", "verify_mode", "validate_certs"})
+# The insecure flag only mints when it is bound to a RESOLVED security-relevant callee — an HTTP request /
+# session on one of these libraries, or a TLS context / wrap. A callee that merely HAPPENS to accept a
+# `verify=` / `secure=` kwarg (`chart.render(verify=False)`, `widget.build(secure=False)`) does NOT resolve
+# to a security API and stays a LEAD.
+_HTTP_TLS_MODULE_ROOTS = frozenset({"requests", "httpx", "urllib", "urllib3", "aiohttp", "ssl"})
+# HTTP session/client CONSTRUCTORS — a var bound to one carries the insecure flag on its request methods.
+_HTTP_SESSION_CTORS = frozenset({"session", "client", "clientsession", "asyncclient"})
+# Security-relevant METHODS/callables on a RESOLVED HTTP/TLS base (requests, TLS wraps, a cookie set).
+_SECURITY_RELEVANT_METHODS = frozenset({
+    "get", "post", "put", "delete", "patch", "head", "options", "request", "send",
+    "session", "client", "clientsession", "asyncclient",
+    "wrapsocket", "createdefaultcontext", "sslcontext", "wrapbio", "setcookie", "createconnection",
+})
+
+
+def _collect_http_imports(tree: ast.AST) -> "tuple[set[str], dict[str, tuple[str, str]]]":
+    """RESOLVE import PROVENANCE for tier (c). Returns ``(http_locals, from_http)``: names bound to an
+    HTTP/TLS MODULE and ``from``-imported HTTP/TLS symbols. Session/client VARIABLES are NOT collected here —
+    they are resolved FLOW-SENSITIVELY by the shared straight-line binding tracker (``_advance_binding``), so
+    a variable that is REASSIGNED to a non-session before its use no longer resolves to a session."""
+    http_locals: set[str] = set()
+    from_http: dict[str, tuple[str, str]] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                mod = alias.name or ""
+                if mod.split(".")[0].strip().lower() in _HTTP_TLS_MODULE_ROOTS:
+                    http_locals.add(alias.asname or mod.split(".")[0])
+        elif isinstance(node, ast.ImportFrom):
+            mod = node.module or ""
+            if mod and mod.split(".")[0].strip().lower() in _HTTP_TLS_MODULE_ROOTS:
+                for alias in node.names:
+                    if alias.name != "*":
+                        from_http[alias.asname or alias.name] = (mod, alias.name)
+    return http_locals, from_http
+
+
+def _is_session_ctor(call: ast.Call, http_ctx: "tuple[set[str], dict[str, tuple[str, str]]]") -> bool:
+    """True iff ``call`` constructs an HTTP session/client that RESOLVES to an imported HTTP/TLS module or a
+    from-imported constructor (``requests.Session()`` / ``from requests import Session; Session()``). This is
+    the ONE modeled RHS form the binding tracker maps to a SESSION binding for tier (c)."""
+    http_locals, from_http = http_ctx
+    ctor = re.sub(r"[^a-z0-9]", "", _attr_or_name(call.func).lower())
+    if ctor not in _HTTP_SESSION_CTORS:
+        return False
+    parts = _dotted_parts(call.func)
+    base_ok = len(parts) >= 2 and parts[0] in http_locals          # requests.Session()
+    imported_ctor = len(parts) == 1 and parts[0] in from_http      # from requests import Session; Session()
+    return base_ok or imported_ctor
+
+
+def _insecure_flag_on(call: ast.Call) -> str:
+    """The evidence detail if ``call`` EXPLICITLY sets a known security flag to its insecure LITERAL —
+    ``verify/secure/check_hostname/verify_mode/validate_certs=False`` or ``cert_reqs/verify_mode=
+    ssl.CERT_NONE`` — else ``""``. Purely local to the one call; it decides nothing about the callee."""
+    for kw in call.keywords:
+        if kw.arg is None:
+            continue
+        if kw.arg in _INSECURE_FLAG_FALSE and isinstance(kw.value, ast.Constant) and kw.value.value is False:
+            return f"the security flag `{kw.arg}=False`"
+        # cert_reqs / verify_mode = ssl.CERT_NONE (TLS certificate verification explicitly disabled).
+        if kw.arg in ("cert_reqs", "verify_mode") and isinstance(kw.value, ast.Attribute) \
+                and kw.value.attr == "CERT_NONE":
+            return f"the TLS flag `{kw.arg}=ssl.CERT_NONE`"
+    return ""
+
+
+def _resolves_http_tls_direct(callee: Any, http_locals: "set[str]",
+                              from_http: "dict[str, tuple[str, str]]") -> bool:
+    """True iff ``callee`` resolves to a security-relevant HTTP/TLS API WITHIN THE CALL ITSELF — a request /
+    TLS wrap / cookie set on a RESOLVED HTTP/TLS module or from-imported symbol — needing NO cross-statement
+    variable. A callee that merely happens to accept a ``verify=`` / ``secure=`` kwarg (``chart.render`` /
+    ``widget.build``) does not resolve and stays a LEAD."""
+    if isinstance(callee, ast.Attribute):
+        method = re.sub(r"[^a-z0-9]", "", callee.attr.lower())
+        parts = _dotted_parts(callee.value)
+        base_is_http = bool(parts) and (parts[0] in http_locals or parts[0] in from_http)
+        return base_is_http and method in _SECURITY_RELEVANT_METHODS
+    if isinstance(callee, ast.Name):
+        return callee.id in from_http and re.sub(r"[^a-z0-9]", "", callee.id.lower()) in _SECURITY_RELEVANT_METHODS
+    return False
+
+
+def _callee_is_session_method(callee: Any, sessions: "set[str]") -> bool:
+    """True iff ``callee`` is ``<var>.<security-method>`` where ``<var>`` is CURRENTLY a resolved HTTP session
+    in the straight-line binding map (a reassignment of ``<var>`` to a non-session, in ANY form, has already
+    removed it from ``sessions`` => this returns False and the call is a LEAD)."""
+    return (isinstance(callee, ast.Attribute)
+            and _attr_or_name(callee.value) in sessions
+            and re.sub(r"[^a-z0-9]", "", callee.attr.lower()) in _SECURITY_RELEVANT_METHODS)
+
+
+def _insecure_flag_hit(tree: ast.AST) -> "tuple[bool, str]":
+    """RE-DERIVE tier (c): a KNOWN security flag is EXPLICITLY set to its insecure LITERAL AND reaches a
+    RESOLVED security-relevant HTTP/TLS callee, under TWO sound resolution paths:
+
+      (1) CALL-SITE-DIRECT — the callee resolves within the call itself from import provenance
+          (``requests.get(..., verify=False)`` / ``ssl.wrap_socket(..., cert_reqs=ssl.CERT_NONE)`` / a
+          from-imported request callable). Flow-INDEPENDENT: it holds no matter what earlier statements did.
+
+      (2) SESSION-VARIABLE — ``s = requests.Session(); s.get(..., verify=False)``. RESOLVED FLOW-SENSITIVELY
+          by the SHARED straight-line binding tracker: ``s`` fires only if it is CURRENTLY a session at the
+          call. A reassignment of ``s`` to a non-session (``s = 123``) — or ANY unmodeled statement form
+          between the constructor and the use — removes/loses the binding, so the call is a LEAD, never a FACT.
+
+    An ABSENT flag, or an insecure flag on an UNRESOLVED / non-security callee (``chart.render(verify=False)``),
+    never mints (a LEAD)."""
+    http_ctx = _collect_http_imports(tree)
+    http_locals, from_http = http_ctx
+    # (1) call-site-direct — flow-independent, resolves purely from imports + the call.
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call):
+            hit = _insecure_flag_on(node)
+            if hit and _resolves_http_tls_direct(node.func, http_locals, from_http):
+                return True, f"{hit} is explicitly disabled on a resolved security-relevant HTTP/TLS API"
+    # (2) session-variable — flow-sensitive via the shared straight-line tracker (soundness over recall).
+    for fn in ast.walk(tree):
+        if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        for stmt, bindings in _walk_straight_line(fn, http_ctx):
+            sessions = {name for name, status in bindings.items() if status == _HTTP_SESSION}
+            if not sessions:
+                continue
+            for call in ast.walk(stmt):
+                if isinstance(call, ast.Call):
+                    hit = _insecure_flag_on(call)
+                    if hit and _callee_is_session_method(call.func, sessions):
+                        return True, (f"{hit} is explicitly disabled on a resolved security-relevant HTTP "
+                                      f"session variable in function `{fn.name}`")
+    return False, ""
+
+
+# The status a variable's MOST-RECENT straight-line binding confers for tier (c) session resolution. Absent
+# from the binding map means untracked (not a session). An ``_HTTP_SESSION`` var is bound to a RESOLVED HTTP
+# session/client constructor. (Wave-5.1 round-8 DOWNGRADE: the tier-(d) taint SOURCE/ALIAS statuses — and the
+# whole tier-(d) FACT machinery — were removed because direct-taint is now LEAD-only; the shared inverted
+# binding tracker below therefore tracks ONLY the session status the SOUND tier (c) needs.)
+_HTTP_SESSION = "session"
+
+
+def _advance_binding(stmt: ast.stmt, bindings: "dict[str, str]",
+                     http_ctx: "tuple[set[str], dict[str, tuple[str, str]]]") -> bool:
+    """Advance the SHARED straight-line binding map past ONE statement, for tier (c) session-variable
+    resolution. This is the INVERTED core the sound tier (c) turns on: the map advances ONLY through an
+    EXPLICIT CLOSED ALLOWLIST of FULLY-MODELED statement forms, and the DEFAULT for anything else is to END the
+    straight-line region. So no unmodeled form can ever leave a stale session binding that mints a false FACT.
+
+    The allowlisted forms are a simple ``<Name> = <modeled-expr>`` assignment (a single ``Name`` target) whose
+    RHS the tracker FULLY understands:
+
+      * a RESOLVED HTTP session/client constructor (``requests.Session()``): SESSION (tier c);
+      * a bare ``Name`` (a copy of another variable) or a literal ``Constant``: KILL the target — plainly not a
+        session, so its binding is dropped while the region continues.
+
+    For LITERALLY ANY OTHER statement form — a walrus / ``NamedExpr`` anywhere, ``Import`` / ``ImportFrom``,
+    ``AugAssign``, an annotated / tuple / attribute / subscript assignment target, a ``for`` / ``with`` target,
+    ``del``, a nested ``def`` / ``class``, ``global`` / ``nonlocal``, any compound / control-flow statement,
+    or an assignment whose RHS the tracker does NOT fully model (a non-session call, a subscript / attribute
+    read, an ``IfExp`` / ``BoolOp`` / comprehension, …) — return ``False`` to END the straight-line region.
+    From that point the caller treats every construct as a LEAD. Returns ``True`` iff the region continues.
+
+    (Wave-5.1 round-8: tier (d) direct-taint is now LEAD-only, so the tracker no longer computes taint
+    SOURCE/ALIAS statuses — it tracks ONLY the session status the sound tier (c) needs.)"""
+    if not (isinstance(stmt, ast.Assign) and len(stmt.targets) == 1
+            and isinstance(stmt.targets[0], ast.Name)):
+        return False                                             # any non-'simple Name = ...' form ends it
+    name = stmt.targets[0].id
+    value = stmt.value
+    if isinstance(value, ast.Call) and _is_session_ctor(value, http_ctx):
+        bindings[name] = _HTTP_SESSION                          # a resolved HTTP session/client constructor
+        return True
+    if isinstance(value, (ast.Name, ast.Constant)):            # a bare-Name copy or a literal — fully understood
+        bindings.pop(name, None)                                 # plainly not a session: KILL, region continues
+        return True
+    return False                                                # an RHS the tracker does NOT fully model: END
+
+
+def _walk_straight_line(fn: "ast.FunctionDef | ast.AsyncFunctionDef",
+                        http_ctx: "tuple[set[str], dict[str, tuple[str, str]]]"):
+    """The flow-sensitive straight-line walker for tier (c) session-variable resolution. Yield
+    ``(stmt, bindings)`` for each TOP-LEVEL statement of ``fn.body`` while the straight-line assumption still
+    holds, where ``bindings`` maps a variable to its CURRENT status (``_HTTP_SESSION``) AS OF that statement
+    (before it executes). The map advances ONLY through ``_advance_binding``'s closed allowlist; the FIRST
+    statement of any other form ends the region (nothing further is yielded), so from that point every construct
+    the caller checks is a LEAD. The map is shared by reference — a caller must not mutate it.
+
+    (Wave-5.1 round-8: this was shared with tier (d) direct-taint, which is now LEAD-only; the tracker tracks
+    only the session status the sound tier (c) needs.)"""
+    bindings: dict[str, str] = {}
+    for stmt in fn.body:
+        yield stmt, bindings
+        if not _advance_binding(stmt, bindings, http_ctx):
+            return
+
+
+# Per-tier calibrated confidence (str -> float, so oracle_version canonicalises it deterministically — a
+# dict of FUNCTIONS would repr with process-specific addresses and hide the helper bodies from the version,
+# so the tier helpers are dispatched BY NAME inside the oracle instead, and each helper's source is captured
+# in the version's transitive closure).
+# Per-tier calibrated confidence for the FACT-capable tiers ONLY (``_FACT_RULE_IDS``). insecure-randomness-sink
+# AND direct-taint are deliberately ABSENT: both are LEAD-only and hard-guarded to a non-firing LEAD before this
+# map is ever indexed.
+_STATIC_TIER_CONF: dict[str, float] = {
+    "broken-crypto-invocation": 0.9,
+    "insecure-flag-literal": 0.9,
+}
+
+
+def _static_tier_hit(rule_id: str, tree: ast.AST) -> "tuple[bool, str]":
+    """Dispatch a re-parsed AST to the tier helper for a FACT-capable ``rule_id`` (each helper referenced BY
+    NAME so its source is captured in ``oracle_version``'s transitive closure). insecure-randomness-sink and
+    direct-taint have NO branch here — both are LEAD-only and never reach this dispatch (fail-closed in
+    ``static_rule_oracle``)."""
+    if rule_id == "broken-crypto-invocation":
+        return _broken_crypto_hit(tree)
+    if rule_id == "insecure-flag-literal":
+        return _insecure_flag_hit(tree)
+    return False, ""
+
+
+def static_rule_oracle(observed: Any) -> OracleSignal:
+    """Fire when a CLOSED-vocabulary static rule holds over RETAINED SOURCE-CODE BYTES that the oracle
+    RE-PARSES ITSELF (Python `ast`). The tool (semgrep/joern/pattern) output is only the LEAD saying WHERE to
+    look — this oracle re-derives the CODE PROPERTY from the retained bytes, exactly like
+    ``weak_crypto_artifact_oracle`` re-derives a broken hash from a retained artifact. Each FACT is honestly
+    scoped to the proven CODE PROPERTY, NEVER runtime exploitability.
+
+    Only the TWO FACT-capable tiers (``_FACT_RULE_IDS``: broken-crypto-invocation, insecure-flag-literal) can
+    ever mint a STATIC_RULE FACT. ``insecure-randomness-sink`` AND ``direct-taint`` are recognised DETECTION
+    POINTERS but are LEAD-only (``_LEAD_ONLY_RULE_IDS``) and are FAIL-CLOSED here: each returns a non-firing LEAD
+    for ANY input, before any re-parse or tier dispatch, so neither can EVER become a FACT (a sound version of
+    insecure-randomness needs crypto-provenance dataflow; a sound version of direct-taint needs framework-aware,
+    provenance-resolved taint SOURCES — see docs/capability-matrix blocking_work for
+    ``static_insecure_randomness`` / ``static_taint``).
+
+    ``observed`` is JSON-safe evidence::
+
+        {"rule_id": "broken-crypto-invocation" | "insecure-flag-literal"  (FACT-capable)
+                    | "insecure-randomness-sink" | "direct-taint"  (recognised but LEAD-only — never mints),
+         "source": "<the retained source region bytes>", "language": "python",
+         "path": "<file>", "line": <int>}
+
+    REFUSES (non-firing) — never asserts — when: the evidence is malformed, the rule_id is out of the closed
+    vocabulary, the rule_id is LEAD-only (insecure-randomness or direct-taint), the language is not Python, or
+    the retained source cannot be re-parsed (a tamper that removes the property no longer re-fires, so the
+    retained proof is rejected at re-verify). Pure + deterministic, so the same verdict re-verifies offline from
+    the retained context. Never raises."""
+    if not isinstance(observed, Mapping):
+        return OracleSignal(kind=OracleKind.STATIC_RULE, fired=False, confidence=0.0,
+                            evidence="no static-rule evidence")
+    rule_id = _coerce_text(observed.get("rule_id")).strip()
+    source = _coerce_text(observed.get("source"))
+    language = _coerce_text(observed.get("language")).strip().lower() or "python"
+    path = _coerce_text(observed.get("path")).strip()
+    try:
+        line = int(observed.get("line"))
+    except (TypeError, ValueError):
+        line = 0
+    where = f"{path}:{line}" if path else "the retained region"
+
+    if rule_id not in _STATIC_RULE_IDS:
+        return OracleSignal(kind=OracleKind.STATIC_RULE, fired=False, confidence=0.0,
+                            evidence=f"rule_id {rule_id!r} is out of the closed static-rule vocabulary")
+    if rule_id in _LEAD_ONLY_RULE_IDS:
+        # FAIL CLOSED: a LEAD-only rule_id is a recognised detection pointer but is NOT FACT-capable. A sound
+        # FACT is out of scope for this single-region offline re-parse:
+        #   * insecure-randomness needs crypto-provenance-resolved PRNG sourcing (exclude SystemRandom/secrets/
+        #     os.urandom by RESOLUTION, not by name) + FLOW-SENSITIVE dataflow (the value reaching the sink is
+        #     the PRNG value, not a later secure reassignment) + a RESOLVED secret-material sink;
+        #   * direct-taint needs framework-aware, provenance-resolved taint SOURCE identification (a resolved
+        #     request/input OBJECT across many frameworks — NOT self./req. attributes or name-matched functions
+        #     like input/getenv/get_json with no receiver provenance) + a resolved sink set, on top of the
+        #     now-sound inverted straight-line flow tracker.
+        # So for ANY input a LEAD-only rule_id returns a non-firing LEAD, BEFORE any parse or tier dispatch: it
+        # can never mint a STATIC_RULE FACT (live or offline). See docs/capability-matrix blocking_work for
+        # ``static_insecure_randomness`` / ``static_taint``.
+        _lead_reason = (
+            "insecure randomness: a sound FACT needs crypto-provenance-resolved PRNG sourcing + "
+            "flow-sensitive dataflow + a resolved secret-material sink"
+            if rule_id == "insecure-randomness-sink"
+            else "direct taint: a sound FACT needs framework-aware, provenance-resolved taint SOURCES "
+                 "(a resolved request/input object, not self./req. attributes or name-matched functions) + "
+                 "a resolved sink set")
+        return OracleSignal(
+            kind=OracleKind.STATIC_RULE, fired=False, confidence=0.0,
+            evidence=(f"rule_id {rule_id!r} is a LEAD-only static-rule class ({_lead_reason}), out of scope for "
+                      f"the offline re-parse — REFUSE (never mint), a LEAD"),
+            observed={"rule_id": rule_id, "reason": "lead_only_not_fact_capable"})
+    if language not in ("python", "py"):
+        # A sound offline re-parse is implemented for Python only; other languages REFUSE (a lead), never assert.
+        return OracleSignal(
+            kind=OracleKind.STATIC_RULE, fired=False, confidence=0.0,
+            evidence=f"language {language!r} is not re-parseable by this oracle (Python-only) — REFUSE (lead)",
+            observed={"rule_id": rule_id, "language": language, "reason": "unsupported_language"})
+    if not source.strip():
+        return OracleSignal(kind=OracleKind.STATIC_RULE, fired=False, confidence=0.0,
+                            evidence="no retained source bytes to re-parse — REFUSE (lead)")
+    try:
+        tree = ast.parse(source)
+    except (SyntaxError, ValueError):
+        # The retained source cannot be re-parsed (tampered / truncated / not a full statement) — REFUSE.
+        return OracleSignal(
+            kind=OracleKind.STATIC_RULE, fired=False, confidence=0.0,
+            evidence=f"retained source at {where} cannot be re-parsed as Python — REFUSE (never mint)",
+            observed={"rule_id": rule_id, "reason": "unparseable"})
+
+    confidence = _STATIC_TIER_CONF[rule_id]
+    fired, detail = _static_tier_hit(rule_id, tree)
+    if fired:
+        return OracleSignal(
+            kind=OracleKind.STATIC_RULE, fired=True, confidence=confidence,
+            evidence=(f"static rule {rule_id} holds at {where}: {detail} — a re-verifiable CODE PROPERTY over "
+                      f"the retained source, NOT proof of runtime exploitability"),
+            observed={"rule_id": rule_id, "path": path, "line": line, "detail": detail, "language": "python"})
+    return OracleSignal(
+        kind=OracleKind.STATIC_RULE, fired=False, confidence=0.0,
+        evidence=f"static rule {rule_id} does NOT hold over the retained source at {where}",
+        observed={"rule_id": rule_id, "path": path, "line": line})
 
 
 # ---------------------------------------------------------------------------

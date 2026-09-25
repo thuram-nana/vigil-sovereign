@@ -18,6 +18,11 @@
       "meaning": "Real bytes over a real connection or process on the testing machine."
     },
     {
+      "id": "source",
+      "label": "Retained source code",
+      "meaning": "Re-derived from retained source-code bytes by a static re-parse — no live process, no runtime observation."
+    },
+    {
       "id": "fixtures",
       "label": "Fixtures only",
       "meaning": "Only ever judged evidence a person wrote by hand."
@@ -345,6 +350,13 @@
       "family": "posture",
       "tier": "fixtures",
       "evidence": "Fixtures only — a retained-header parse (the effective script-src) that re-derives the permissive weakness offline; the sibling of clickjacking/csrf/postMessage posture"
+    },
+    {
+      "kind": "static_rule",
+      "name": "Static source-code rule",
+      "family": "source",
+      "tier": "source",
+      "evidence": "Retained source code — the SAST bridge re-parses the retained source region (Python ast) and re-derives a CODE PROPERTY, never runtime exploitability; two tiers are FACT-capable (a broken-crypto invocation or an insecure-flag literal) and insecure-randomness AND direct-taint are recognised detection pointers that stay LEADs (fail-closed, never a FACT — insecure-randomness needs crypto-provenance dataflow; direct-taint needs framework-aware, provenance-resolved taint SOURCES plus a resolved sink set); a non-Python or unparseable region REFUSES"
     }
   ]
 }
