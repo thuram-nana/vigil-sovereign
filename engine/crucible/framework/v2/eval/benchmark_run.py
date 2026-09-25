@@ -58,11 +58,16 @@ PRECISION_TARGET = 0.98
 # DEFAULT gate roster (byte-identical to today). ``deep``/``full`` turn ON the same
 # opt-in passes the real profile flips — the browser DOM/stored-XSS passes, the SSO
 # acceptance pass, and the GraphQL amplification pass — so the corpus-wide zero-FP
-# gate exercises exactly the roster that ships "on by default in deep/full". ``full``
-# additionally arms the operator-spec access-control pack (inert without operator
-# refs — it emits NO finding, never a false CLEAN or FACT). The plan-named deferred
-# packs (time-based/NoSQL/LDAP/XPath, bizlogic/race) have NO enable flag yet, so a
-# profile never invents them here either — exactly like engage.py.
+# gate exercises the roster that ships "on by default in deep/full". It is a
+# CONSERVATIVE SUPERSET, not a byte-for-byte mirror: this benchmark roster also arms
+# the SPA crawler (``enable_spa_crawl``), which engage.py's deep/full does NOT flip
+# (it is absent from _PROFILE_FLAGS). Arming an extra pass only WIDENS the FP surface
+# the zero-FP gate must survive, so the superset can never weaken the proof — it can
+# only make it stricter. ``full`` additionally arms the operator-spec access-control
+# pack (inert without operator refs — it emits NO finding, never a false CLEAN or
+# FACT). The plan-named deferred packs (time-based/NoSQL/LDAP/XPath, bizlogic/race)
+# have NO enable flag yet, so a profile never invents them here either — exactly like
+# engage.py.
 #
 # CRITICAL: this is a PURE roster expansion. It adds NO oracle and relaxes NO gate.
 # ``surface`` is untouched, so ``make gate`` stays byte-identical (11tp/0fp/0fn).
