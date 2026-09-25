@@ -727,6 +727,31 @@
       ]
     },
     {
+      "id": "error_signature.strix_redrive",
+      "check": "strix_errsig_redrive",
+      "evidence": "A Strix finding in an injection class (error_based_sqli / nosqli / ldap_injection / xpath_injection) is a PROPOSAL; VIGIL's runner re-sends its OWN gated, DNS-pinned injection probe against the finding's {endpoint, param} (the RUNNER crafts the probe — the Strix/LLM payload is never trusted) AND fetches a benign CONTROL twin of the same endpoint, then the deterministic error_signature oracle re-fires over VIGIL's FRESH response bytes WITH the control present. The datastore/parser ENGINE the oracle matches OVERRIDES the Strix-claimed class, so the certificate names the vulnerability the evidence proves. The FACT is decided by the wire bytes alone; the Strix report is never proof.",
+      "fact_capable": true,
+      "clean_capable": false,
+      "preconditions": [
+        "channel_established"
+      ],
+      "limitation": "A POSITIVE-only error_signature channel over a runner-owned re-drive plus a benign control twin: a fired oracle proves the in-charter target emitted a datastore/parser-error signature that VIGIL's OWN injection payload provoked and a benign control did NOT (payload-attributable, unlike the single-response datastore_error branch). It is POSITIVE-only: a non-firing is UNINFORMATIVE by construction, because injection can be present over a boolean/time/out-of-band channel this error-signature response cannot see, so absence of an error signature can NEVER establish the target is not injectable. NOT CLEAN-capable.",
+      "target_fact_capable": true,
+      "target_clean_capable": false,
+      "target_downgrade_rationale": "A response-side error-signature re-drive is a POSITIVE-only detector whose absence of a signal is uninformative by construction; a sound CLEAN (injection absent) is a different, coverage-based capability spanning the boolean/time/out-of-band channels and a benign differential control, not this single-response error-signature branch, so clean-capability is deliberately not a target here.",
+      "evidence_surface": "service_response",
+      "implementation_refs": [
+        "integration/vigil_integration/proof/run.py:_strix_errsig_redrive"
+      ],
+      "oracle_version": "error_signature",
+      "control_requirements": [
+        "channel_established_gate",
+        "vigil_owned_live_redrive",
+        "benign_control_twin",
+        "deterministic_error_signature_oracle"
+      ]
+    },
+    {
       "id": "weak_crypto.cert_signature_algorithm",
       "check": "capture_tls_handshake",
       "evidence": "the signature hash algorithm of the leaf certificate the peer presented in VIGIL's own gated TLS handshake, judged by the deterministic weak_crypto_artifact oracle (a broken hash — MD5/SHA-1 — fires); the runner judges the cert it itself retrieved, never the proposer tool's rows.",
