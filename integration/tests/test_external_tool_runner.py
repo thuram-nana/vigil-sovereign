@@ -829,14 +829,39 @@ def test_udp_open_rows_are_dropped_by_the_masscan_and_nmap_parsers() -> None:
 
 
 def test_a_udp_open_row_through_the_runner_yields_zero_facts(tmp_path: Path) -> None:
-    """END-TO-END (Fix 0.2): masscan reports a REALLY-OPEN loopback port as ``udp`` open. Even though a TCP
-    service is listening there (so a mislabelled TCP connect WOULD have 'confirmed' it), the udp row is
-    dropped at parse time ⇒ zero proposals ⇒ ZERO facts. A udp-open input mints nothing."""
+    """END-TO-END (Fix 0.2): masscan reports a REALLY-OPEN loopback port as ``udp`` open, and the listener
+    SENDS A BANNER on accept. The counterfactual is therefore fully armed: had the udp row survived to a
+    re-drive AND had capture_handshake not been TCP-gated, the runner's TCP connect would have read that
+    banner and the oracle — whose ``protocol == "udp" and not banner`` guard is satisfied only WITHOUT a
+    banner — would have fired at 0.97 and minted a (false) 'udp' reachability FACT. Both defences hold: the
+    parser drops the udp row (zero proposals) so the connect is never even attempted ⇒ ZERO facts."""
     _charter(tmp_path, "127.0.0.1")
     srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     srv.bind(("127.0.0.1", 0))
     srv.listen(8)
     port = srv.getsockname()[1]
+
+    stop = threading.Event()
+
+    def _serve_banner() -> None:
+        # Accept any connections and immediately send an application banner, so a mislabelled TCP connect
+        # WOULD read judgeable evidence (the faithful counterfactual). Never asserted on — purely the trap.
+        srv.settimeout(0.5)
+        while not stop.is_set():
+            try:
+                conn, _ = srv.accept()
+            except (socket.timeout, OSError):
+                continue
+            try:
+                conn.sendall(b"SSH-2.0-OpenSSH_9.6 banner\r\n")
+            except OSError:
+                pass
+            finally:
+                conn.close()
+
+    server = threading.Thread(target=_serve_banner, daemon=True)
+    server.start()
     gate = ScopeGate(scope=StaticScopeSource(["127.0.0.1"]), loopback_allowed_if_scoped=True)
     backend = _CannedNmapBackend(f"Discovered open port {port}/udp on 127.0.0.1\n")  # udp-labelled open row
     try:
@@ -844,6 +869,8 @@ def test_a_udp_open_row_through_the_runner_yields_zero_facts(tmp_path: Path) -> 
             masscan_service_scan(ports=str(port)), "127.0.0.1",
             scope_gate=gate, backend=backend, engagement_slug="alpha", signers=SIGNERS)
     finally:
+        stop.set()
+        server.join(timeout=2.0)
         srv.close()
     assert res.status == "ran"
     assert res.proposed == [], "the udp-open row must not become a proposal"
