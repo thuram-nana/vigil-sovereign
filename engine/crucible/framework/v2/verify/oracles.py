@@ -3411,13 +3411,27 @@ def weak_crypto_artifact_oracle(observed: Any) -> OracleSignal:
 # REFUSES (never mints); a tamper that removes the property no longer re-fires (rejected at re-verify).
 # ---------------------------------------------------------------------------
 
-# The CLOSED rule-id vocabulary — the four SOUND tiers. An unknown rule_id NEVER fires (a lead at most).
+# The CLOSED rule-id vocabulary. These are the RECOGNISED rule ids the SAST bridge may build a context under;
+# an unknown rule_id NEVER fires (a LEAD at most). Membership here is NOT FACT-capability — see
+# ``_FACT_RULE_IDS``: only the THREE SOUND tiers (a)/(c)/(d) can mint a STATIC_RULE FACT. Tier (b)
+# insecure-randomness is a recognised DETECTION POINTER but is LEAD-only (see ``_LEAD_ONLY_RULE_IDS``): a sound
+# FACT would need real crypto-provenance dataflow (provenance-resolved PRNG source + flow-sensitive dataflow +
+# a resolved secret-material sink — see docs/capability-matrix blocking_work for ``static_insecure_randomness``),
+# which this single-region offline re-parse cannot re-derive, so it is FAIL-CLOSED to a LEAD for ANY input.
 _STATIC_RULE_IDS = frozenset({
-    "broken-crypto-invocation",   # (a) a broken/risky primitive is CONSTRUCTED or CALLED here
-    "insecure-randomness-sink",   # (b) a non-crypto PRNG value flows DIRECTLY into a security sink (same fn)
-    "insecure-flag-literal",      # (c) a security flag is EXPLICITLY disabled as a LITERAL
-    "direct-taint",               # (d) source -> sink in ONE function, no sanitizer between ("Firm" tier)
+    "broken-crypto-invocation",   # (a) FACT: a broken/risky primitive is CONSTRUCTED or CALLED here
+    "insecure-randomness-sink",   # (b) LEAD-only: a recognised pointer, NEVER a FACT (needs provenance dataflow)
+    "insecure-flag-literal",      # (c) FACT: a security flag is EXPLICITLY disabled as a LITERAL
+    "direct-taint",               # (d) FACT: source -> sink in ONE function, no sanitizer between ("Firm" tier)
 })
+# Tier (b) insecure-randomness is RECOGNISED (a detection pointer / LEAD) but structurally CANNOT reach the
+# firing path: ``static_rule_oracle`` hard-guards it to a non-firing LEAD BEFORE any re-parse or tier dispatch,
+# for ANY input. Four red-pen rounds showed a sound AST heuristic keeps admitting a new benign-but-firing
+# shape; an honest LEAD beats a false FACT, so tier (b) is downgraded until the dataflow analysis exists.
+_LEAD_ONLY_RULE_IDS = frozenset({"insecure-randomness-sink"})
+# The FACT-capable subset — the three SOUND tiers a single-region re-parse can re-derive with provenance
+# discipline. Only a rule_id in THIS set can ever mint a STATIC_RULE FACT.
+_FACT_RULE_IDS = _STATIC_RULE_IDS - _LEAD_ONLY_RULE_IDS
 
 # (a) BROKEN / risky primitives. Hash: md5/sha1/md4/md2 (collision-forgeable). Cipher: DES/3DES/RC4/Blowfish/
 # IDEA (broken or SWEET32-risky). ECB block mode (deterministic — a broken usage). Case-insensitive by lower().
@@ -3426,8 +3440,8 @@ _BROKEN_CIPHER_NAMES = frozenset({"des", "des3", "tripledes", "arc4", "rc4", "bl
 # PROVENANCE floor for tier (a): a primitive is only "broken crypto in use" when its name RESOLVES (via an
 # import in the retained region) to one of these cryptographic packages. A bare/unimported name that merely
 # LOOKS like md5() has no crypto provenance and is a LEAD (the veracity firewall re-derives the property, it
-# does not re-run the tool's name pattern). `hmac` is included so a PRNG value flowing into `hmac.new(...)`
-# is recognised as a crypto sink in tier (b); it carries no broken-primitive name, so tier (a) is unaffected.
+# does not re-run the tool's name pattern). `hmac` is a cryptographic module and is kept here for provenance
+# resolution; it carries no broken-primitive name, so tier (a) never mints on it.
 _CRYPTO_MODULE_ROOTS = frozenset({"hashlib", "hmac", "crypto", "cryptodome", "cryptography"})
 
 
@@ -3596,98 +3610,6 @@ def _broken_crypto_hit(tree: ast.AST) -> "tuple[bool, str]":
     return False, ""
 
 
-# (b) NON-cryptographic PRNG functions — predictable, unfit for a secret/token (CWE-330/CWE-338).
-_INSECURE_RANDOM_FNS = frozenset({
-    "random", "randint", "randrange", "choice", "choices", "uniform", "getrandbits",
-    "sample", "shuffle", "randbytes", "betavariate", "gauss", "normalvariate",
-})
-# A GENUINE SECURITY SINK for tier (b) requires BOTH conditions — mirroring the provenance discipline of
-# tiers (a)/(c), which resolve a callee to a real crypto / HTTP-TLS module before minting:
-#   1. PROVENANCE — the RECEIVING CALLEE must RESOLVE to a genuine crypto/security API (see
-#      ``_callee_resolves_to_security_api``): either its base resolves to an imported crypto MODULE
-#      (`hmac.new`, `cryptography.*`, `Crypto.*`), OR its bare name is in the SMALL CLOSED, UNAMBIGUOUS
-#      allowlist below. A callee that resolves to NOTHING — a container/logger/builder, or an AMBIGUOUS
-#      descriptive constructor (`make_key`/`new_key`/`issue_token`) — is NOT a sink and stays a LEAD.
-#   2. ARGUMENT POSITION — the PRNG value must land in a SECRET-MATERIAL keyword parameter (the key/secret/
-#      token/password/salt/iv/nonce/seed VALUE), NEVER a CONTROL parameter (length/size/count/iterations/
-#      rounds/work-factor/timeout/index). A random token LENGTH or iteration COUNT is a benign control value,
-#      not secret material, so it stays a LEAD.
-# The two residual false-positive classes this closes: (1) NAME-ONLY matching —
-# `make_key(random.choice(shards))` (a sharded CACHE key) resolved PURELY by name and minted a durable false
-# FACT; (2) NO argument discrimination — `generate_token(length=random.randint(8,16))` /
-# `derive_key(pw, salt, iterations=random.randint(...))` fired on a CONTROL parameter. Both are now LEADs
-# (soundness over recall). Positional secret material is deliberately NOT re-derived here (its secret-vs-
-# control role is unresolved without a per-API signature) => LEAD. Names are matched non-alnum-stripped +
-# lower (`set_password` -> `setpassword`, `iv=` -> `iv`), so spelling variants collapse to one key.
-_SECURITY_SINK_PARAMS = frozenset({
-    "key", "secret", "token", "password", "passwd", "pwd", "iv", "salt", "nonce", "seed",
-    "privatekey", "signingkey", "secretkey", "apikey", "authkey", "sessionkey", "csrftoken", "otp",
-})
-# CONTROL parameters — a PRNG feeding one of these is a benign CONTROL value (a random token LENGTH, a random
-# iteration COUNT / work factor), NOT secret material. The material-vs-control split is CLOSED and explicit:
-# a PRNG in any of these NEVER mints, even on a fully-resolved crypto/security callee. (No name is in both
-# sets, so this is a legibility + defence-in-depth guard, not a tiebreaker.)
-_CONTROL_PARAMS = frozenset({
-    "length", "len", "size", "count", "n", "num", "iterations", "iters",
-    "rounds", "workfactor", "cost", "timeout", "index", "idx", "keylen", "dklen", "nbytes",
-})
-# DESCRIPTIVE-NAME security generators/consumers — a SMALL CLOSED allowlist where the FULL name is
-# UNAMBIGUOUSLY a security-secret operation with NO benign reading, so it resolves WITHOUT a crypto-module
-# import. Admissibility (kept sound by two rules):
-#   * an INTRINSIC-secret noun (password / secret / api-key / OTP) with an explicit generation / consumption
-#     verb — there is no benign `generate_password` / `set_password` / `generate_secret`; the noun IS a secret;
-#   * an AMBIGUOUS noun (key/token/nonce/salt/iv) ONLY with an explicit security verb — `derive` (a KDF) or
-#     `generate`.
-# DROPPED — the NAME-ONLY false-positive class: GENERIC CONSTRUCTORS (`make_`/`new_`/`create_`/`gen_`/
-# `issue_`/`build_`) over an ambiguous noun — `make_key`/`new_key`/`create_key`/`gen_key` (a cache/dict/sort/
-# DB key), `make_token`/`new_token`/`gen_token`/`issue_token` (a lexer/CSRF/placeholder token),
-# `make_nonce`/`make_salt`/`make_iv`. Each resolves to NOTHING now => a LEAD. A generic crypto VERB
-# (sign/hmac/encrypt/seal/pbkdf2hmac) is likewise NOT here: it resolves ONLY via a crypto-MODULE base
-# (`hmac.new`), never a bare/aliased name (`numpy.sign`, `from math import copysign as sign` are math). See
-# ``_callee_resolves_to_security_api``.
-_SECURITY_GENERATOR_CALLEES = frozenset({
-    # password — an intrinsic secret; set/check/verify/hash/generate are explicit security operations.
-    "setpassword", "checkpassword", "verifypassword", "hashpassword", "generatepassword",
-    # secret / api-key / OTP — intrinsic secret nouns with an explicit `generate` verb.
-    "generatesecret", "generateapikey", "generateotp",
-    # ambiguous nouns (key/token/nonce/salt/iv) resolve ONLY with an explicit security verb — `derive` (a KDF)
-    # or `generate`; the generic constructors make_/new_/create_/gen_/issue_/build_ are DROPPED.
-    "derivekey", "generatekey", "generatetoken", "generatenonce", "generatesalt", "generateiv",
-})
-
-
-def _is_insecure_random_call(node: Any) -> bool:
-    """True iff ``node`` is a call to a NON-crypto PRNG (random.random/randint/… or a bare randint(...)).
-    ``random.SystemRandom`` / ``secrets`` / ``os.urandom`` are cryptographic and never match."""
-    if not isinstance(node, ast.Call):
-        return False
-    callee = node.func
-    short = _attr_or_name(callee)
-    if short not in _INSECURE_RANDOM_FNS:
-        return False
-    # Reject the cryptographic SystemRandom(...).random() path: base object named SystemRandom/secrets.
-    if isinstance(callee, ast.Attribute):
-        base = _attr_or_name(callee.value).lower()
-        if base in ("systemrandom", "secrets", "secretsgenerator"):
-            return False
-    return True
-
-
-def _expr_uses_prng(expr: Any, rand_vars: "set[str]") -> bool:
-    """True iff ``expr`` contains a non-crypto PRNG call directly, or references a single-hop alias bound to
-    one earlier in the same function (``r = random.random(); ... f(r)``)."""
-    if _subtree_has(_is_insecure_random_call, expr):
-        return True
-    for n in ast.walk(expr) if isinstance(expr, ast.AST) else []:
-        if isinstance(n, ast.Name) and n.id in rand_vars:
-            return True
-    return False
-
-
-def _subtree_has(pred: Any, node: Any) -> bool:
-    return any(pred(n) for n in ast.walk(node)) if isinstance(node, ast.AST) else False
-
-
 def _assign_targets(node: Any) -> "list[str]":
     """The simple target NAMES of an Assign / AnnAssign (Name or Attribute leaf), for sink-name matching."""
     names: list[str] = []
@@ -3699,77 +3621,6 @@ def _assign_targets(node: Any) -> "list[str]":
             elif isinstance(n, ast.Attribute):
                 names.append(n.attr)
     return names
-
-
-def _callee_resolves_to_security_api(node_func: Any, crypto_locals: "set[str]",
-                                     from_crypto: "dict[str, tuple[str, str]]",
-                                     shadows: "set[str]") -> bool:
-    """RESOLVE PROVENANCE for tier (b) — mirrors tier (a) ``_base_is_crypto`` and tier (c)
-    ``_is_security_relevant_callee``. True iff the callee RESOLVES to a genuine crypto/security API:
-      * a name in the SMALL CLOSED, UNAMBIGUOUS descriptive allowlist ``_SECURITY_GENERATOR_CALLEES`` (the
-        FULL name IS the resolved operation — ``derive_key``/``generate_token``/``set_password``), OR
-      * a call whose BASE resolves to an imported crypto MODULE (``hmac.new``, ``cryptography.*``,
-        ``Crypto.*`` — this is the ONLY way a generic crypto verb sign/hmac/encrypt/seal resolves).
-    A generic container / logger / builder, an AMBIGUOUS descriptive constructor (``make_key``/``new_key``/
-    ``issue_token`` — now DROPPED from the allowlist), or a bare/aliased verb (``sorted``, ``logging.info``,
-    ``numpy.sign``, ``math.copysign as sign``) with no crypto/security provenance does NOT resolve => a LEAD
-    (soundness over recall)."""
-    callee_key = re.sub(r"[^a-z0-9]", "", _attr_or_name(node_func).lower())
-    if callee_key in _SECURITY_GENERATOR_CALLEES:
-        return True
-    parts = _dotted_parts(node_func)
-    return bool(parts) and _base_is_crypto(parts[0], crypto_locals, from_crypto, shadows)
-
-
-def _insecure_randomness_hit(tree: ast.AST) -> "tuple[bool, str]":
-    """RE-DERIVE tier (b): a non-crypto PRNG value FLOWS INTO A SECRET-MATERIAL SINK within the SAME function.
-    BOTH conditions must hold (mirroring the provenance discipline of tiers a/c):
-      * PROVENANCE — the RECEIVING CALLEE RESOLVES to a crypto/security API (a crypto-module call such as
-        ``hmac.new``, or a name in the SMALL CLOSED unambiguous allowlist such as ``derive_key``). An
-        ambiguous descriptive constructor (``make_key``/``issue_token``) or a generic container/logger
-        resolves to NOTHING => a LEAD.
-      * ARGUMENT POSITION — the PRNG value lands in a SECRET-MATERIAL keyword parameter (key/secret/token/
-        password/salt/iv/nonce/seed), passed directly or via a single-hop alias — NEVER a CONTROL parameter
-        (length/size/count/iterations/rounds/work-factor/timeout/index).
-    A PRNG merely ASSIGNED to a security-ISH variable NAME, a security-named kwarg on a NON-security callee
-    (``sorted(..., key=...)``), a bare/aliased crypto verb with no crypto-module provenance (``numpy.sign``),
-    or a PRNG feeding a CONTROL parameter of a resolved API (``generate_token(length=...)``) is NOT a sink —
-    those are the FP classes — and each stays a LEAD (soundness over recall). Pure AST; no execution;
-    inter-procedural / whole-program flows and POSITIONAL secret material are not re-derived here (LEAD).
-    Returns (fired, detail)."""
-    crypto_locals, from_crypto = _collect_crypto_imports(tree)
-    shadows = _collect_local_shadows(tree)
-    for fn in ast.walk(tree):
-        if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            continue
-        # names bound directly to a non-crypto PRNG call in this function (single-hop alias source).
-        rand_vars: set[str] = set()
-        for node in ast.walk(fn):
-            if isinstance(node, (ast.Assign, ast.AnnAssign)) and node.value is not None \
-                    and _subtree_has(_is_insecure_random_call, node.value):
-                rand_vars.update(_assign_targets(node))
-        for node in ast.walk(fn):
-            if not isinstance(node, ast.Call):
-                continue
-            # PROVENANCE: the RECEIVING CALLEE must RESOLVE to a genuine crypto/security API. A security-named
-            # kwarg on an UNRESOLVED callee, an ambiguous descriptive constructor, or a generic
-            # container/logger is NOT a sink (that was the name-only FP class -> LEAD).
-            if not _callee_resolves_to_security_api(node.func, crypto_locals, from_crypto, shadows):
-                continue
-            callee_short = _attr_or_name(node.func)
-            # ARGUMENT POSITION: fire ONLY when the PRNG feeds a SECRET-MATERIAL keyword parameter of the
-            # resolved API — never a CONTROL parameter (length/iterations/...), and never a bare positional
-            # (whose secret-vs-control role is unresolved here -> LEAD, soundness over recall).
-            for kw in node.keywords:
-                if not kw.arg:
-                    continue   # **kwargs splat — no resolvable parameter name (LEAD).
-                pname = re.sub(r"[^a-z0-9]", "", kw.arg.lower())
-                if pname in _CONTROL_PARAMS:
-                    continue   # a random LENGTH / iteration COUNT is a benign control value, not a secret.
-                if pname in _SECURITY_SINK_PARAMS and _expr_uses_prng(kw.value, rand_vars):
-                    return True, (f"a non-cryptographic PRNG feeds the secret-material parameter `{kw.arg}=` "
-                                  f"of the resolved security API `{callee_short}(...)` in function `{fn.name}`")
-    return False, ""
 
 
 # (c) Security flags whose EXPLICIT insecure LITERAL is a proven weakness. An ABSENT flag is default-dependent
@@ -3960,21 +3811,21 @@ def _direct_taint_hit(tree: ast.AST) -> "tuple[bool, str]":
 # dict of FUNCTIONS would repr with process-specific addresses and hide the helper bodies from the version,
 # so the tier helpers are dispatched BY NAME inside the oracle instead, and each helper's source is captured
 # in the version's transitive closure).
+# Per-tier calibrated confidence for the FACT-capable tiers ONLY (``_FACT_RULE_IDS``). insecure-randomness-sink
+# is deliberately ABSENT: it is LEAD-only and hard-guarded to a non-firing LEAD before this map is ever indexed.
 _STATIC_TIER_CONF: dict[str, float] = {
     "broken-crypto-invocation": 0.9,
-    "insecure-randomness-sink": 0.85,
     "insecure-flag-literal": 0.9,
     "direct-taint": 0.85,
 }
 
 
 def _static_tier_hit(rule_id: str, tree: ast.AST) -> "tuple[bool, str]":
-    """Dispatch a re-parsed AST to the tier helper for ``rule_id`` (each helper referenced BY NAME so its
-    source is captured in ``oracle_version``'s transitive closure)."""
+    """Dispatch a re-parsed AST to the tier helper for a FACT-capable ``rule_id`` (each helper referenced BY
+    NAME so its source is captured in ``oracle_version``'s transitive closure). insecure-randomness-sink has NO
+    branch here — it is LEAD-only and never reaches this dispatch (fail-closed in ``static_rule_oracle``)."""
     if rule_id == "broken-crypto-invocation":
         return _broken_crypto_hit(tree)
-    if rule_id == "insecure-randomness-sink":
-        return _insecure_randomness_hit(tree)
     if rule_id == "insecure-flag-literal":
         return _insecure_flag_hit(tree)
     if rule_id == "direct-taint":
@@ -3989,17 +3840,24 @@ def static_rule_oracle(observed: Any) -> OracleSignal:
     ``weak_crypto_artifact_oracle`` re-derives a broken hash from a retained artifact. Each FACT is honestly
     scoped to the proven CODE PROPERTY, NEVER runtime exploitability.
 
+    Only the THREE FACT-capable tiers (``_FACT_RULE_IDS``: broken-crypto-invocation, insecure-flag-literal,
+    direct-taint) can ever mint a STATIC_RULE FACT. ``insecure-randomness-sink`` is a recognised DETECTION
+    POINTER but is LEAD-only (``_LEAD_ONLY_RULE_IDS``) and is FAIL-CLOSED here: it returns a non-firing LEAD for
+    ANY input, before any re-parse or tier dispatch, so it can NEVER become a FACT (a sound version needs
+    crypto-provenance dataflow — see docs/capability-matrix blocking_work for ``static_insecure_randomness``).
+
     ``observed`` is JSON-safe evidence::
 
-        {"rule_id": "broken-crypto-invocation" | "insecure-randomness-sink" |
-                    "insecure-flag-literal" | "direct-taint",
+        {"rule_id": "broken-crypto-invocation" | "insecure-flag-literal" | "direct-taint"  (FACT-capable)
+                    | "insecure-randomness-sink"  (recognised but LEAD-only — never mints),
          "source": "<the retained source region bytes>", "language": "python",
          "path": "<file>", "line": <int>}
 
     REFUSES (non-firing) — never asserts — when: the evidence is malformed, the rule_id is out of the closed
-    vocabulary, the language is not Python, or the retained source cannot be re-parsed (a tamper that removes
-    the property no longer re-fires, so the retained proof is rejected at re-verify). Pure + deterministic, so
-    the same verdict re-verifies offline from the retained context. Never raises."""
+    vocabulary, the rule_id is LEAD-only (insecure-randomness), the language is not Python, or the retained
+    source cannot be re-parsed (a tamper that removes the property no longer re-fires, so the retained proof is
+    rejected at re-verify). Pure + deterministic, so the same verdict re-verifies offline from the retained
+    context. Never raises."""
     if not isinstance(observed, Mapping):
         return OracleSignal(kind=OracleKind.STATIC_RULE, fired=False, confidence=0.0,
                             evidence="no static-rule evidence")
@@ -4016,6 +3874,20 @@ def static_rule_oracle(observed: Any) -> OracleSignal:
     if rule_id not in _STATIC_RULE_IDS:
         return OracleSignal(kind=OracleKind.STATIC_RULE, fired=False, confidence=0.0,
                             evidence=f"rule_id {rule_id!r} is out of the closed static-rule vocabulary")
+    if rule_id in _LEAD_ONLY_RULE_IDS:
+        # FAIL CLOSED: insecure-randomness is a recognised detection pointer but is NOT FACT-capable. A sound
+        # FACT needs crypto-provenance-resolved PRNG sourcing (exclude SystemRandom/secrets/os.urandom by
+        # RESOLUTION, not by name) + FLOW-SENSITIVE dataflow (the value reaching the sink is the PRNG value, not
+        # a later secure reassignment) + a RESOLVED secret-material sink — out of scope for this single-region
+        # offline re-parse. So for ANY input this rule_id returns a non-firing LEAD, BEFORE any parse or tier
+        # dispatch: it can never mint a STATIC_RULE FACT (live or offline). See docs/capability-matrix
+        # blocking_work for ``static_insecure_randomness``.
+        return OracleSignal(
+            kind=OracleKind.STATIC_RULE, fired=False, confidence=0.0,
+            evidence=(f"rule_id {rule_id!r} is a LEAD-only static-rule class (insecure randomness): a sound FACT "
+                      f"needs crypto-provenance-resolved PRNG sourcing + flow-sensitive dataflow + a resolved "
+                      f"secret-material sink, out of scope for the offline re-parse — REFUSE (never mint), a LEAD"),
+            observed={"rule_id": rule_id, "reason": "lead_only_not_fact_capable"})
     if language not in ("python", "py"):
         # A sound offline re-parse is implemented for Python only; other languages REFUSE (a lead), never assert.
         return OracleSignal(

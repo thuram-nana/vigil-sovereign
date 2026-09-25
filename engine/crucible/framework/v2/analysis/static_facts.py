@@ -24,8 +24,11 @@ The contract, mirroring the retained-artifact oracles (``weak_crypto_artifact`` 
     the retained bytes (``python3 -m framework.v2 verify``).
 
 Every static FACT is honestly scoped to the PROVEN CODE PROPERTY (a broken-crypto invocation, an
-insecure-randomness sink, an insecure-flag literal, or a direct intra-procedural taint), NEVER "exploitable
-at runtime". Inter-procedural / possibly-sanitized / whole-program flows stay a LEAD.
+insecure-flag literal, or a direct intra-procedural taint — the THREE FACT-capable tiers), NEVER
+"exploitable at runtime". The ``insecure-randomness-sink`` rule_id is a RECOGNISED detection pointer but is
+LEAD-only: the ``STATIC_RULE`` oracle is fail-closed for it and never mints a FACT (a sound FACT needs
+crypto-provenance dataflow — see docs/capability-matrix blocking_work for ``static_insecure_randomness``).
+Inter-procedural / possibly-sanitized / whole-program flows stay a LEAD.
 
 This module reads source and reasons about it; it sends no traffic and makes no LLM call.
 """

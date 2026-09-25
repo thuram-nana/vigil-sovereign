@@ -96,8 +96,9 @@ _ORACLE_FNS: dict[OracleKind, tuple[Callable[..., Any], ...]] = {
     # oracle_version(ACHIEVED_STATE) (the cross-user reset sub-property reuses ACHIEVED_STATE, adding no fn here).
     OracleKind.PASSWORD_RESET_INVARIANT: (oracles.password_reset_invariant_oracle,),
     # Wave-5.1 static source-code rule (the SAST bridge). Only the entry point is listed; the transitive-
-    # closure walker captures the tier dispatch (_static_tier_hit) and every tier helper + constant it
-    # references, so editing ANY tier body (broken-crypto / insecure-randomness / insecure-flag / direct-taint)
+    # closure walker captures the tier dispatch (_static_tier_hit) and every FACT-capable tier helper +
+    # constant it references, plus the insecure-randomness fail-closed LEAD guard, so editing ANY FACT-capable
+    # tier body (broken-crypto / insecure-flag / direct-taint) — or the insecure-randomness fail-closed guard —
     # changes oracle_version(STATIC_RULE) and a certificate minted under the old body is detectably stale.
     OracleKind.STATIC_RULE: (oracles.static_rule_oracle,),
 }

@@ -324,7 +324,10 @@ _STANDARDS: dict[str, ControlMapping] = {
     "static_broken_crypto": _m("A02:2021", ("CWE-327", "CWE-328"), pci=_CRYPTO_PCI, soc2=_CRYPTO_SOC2,
                                iso=_CRYPTO_ISO, attack=()),
     # (b) a non-crypto PRNG value flows into a security sink — A02 Cryptographic Failures; CWE-330 (insufficiently
-    #     random values) + CWE-338 (cryptographically weak PRNG).
+    #     random values) + CWE-338 (cryptographically weak PRNG). The class stays REGISTERED (a recognised
+    #     detection pointer, so a LEAD carries these controls), but it is LEAD-only: the STATIC_RULE oracle is
+    #     fail-closed for insecure-randomness and NEVER mints a FACT (a sound FACT needs crypto-provenance
+    #     dataflow — see docs/capability-matrix blocking_work for `static_insecure_randomness`).
     "static_insecure_randomness": _m("A02:2021", ("CWE-330", "CWE-338"), pci=_CRYPTO_PCI, soc2=_CRYPTO_SOC2,
                                      iso=_CRYPTO_ISO, attack=()),
     # (c) a security flag is EXPLICITLY disabled as a literal (verify=False / secure=False / CERT_NONE) — A05

@@ -356,7 +356,7 @@
       "name": "Static source-code rule",
       "family": "source",
       "tier": "source",
-      "evidence": "Retained source code — the SAST bridge re-parses the retained source region (Python ast) and re-derives a CODE PROPERTY (a broken-crypto invocation, an insecure-randomness sink, an insecure-flag literal, or a direct intra-procedural taint), never runtime exploitability; a non-Python or unparseable region REFUSES"
+      "evidence": "Retained source code — the SAST bridge re-parses the retained source region (Python ast) and re-derives a CODE PROPERTY, never runtime exploitability; three tiers are FACT-capable (a broken-crypto invocation, an insecure-flag literal, or a direct intra-procedural taint) and insecure-randomness is a recognised detection pointer that stays a LEAD (fail-closed, never a FACT — needs crypto-provenance dataflow); a non-Python or unparseable region REFUSES"
     }
   ]
 }

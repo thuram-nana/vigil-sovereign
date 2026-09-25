@@ -1778,17 +1778,18 @@
     {
       "id": "static_insecure_randomness.prng_into_sink",
       "check": "static_rule_verify",
-      "evidence": "the STATIC_RULE oracle re-parsed the RETAINED source region (Python ast) and re-derived that a non-cryptographic PRNG value (random.random/randint/choice/getrandbits/randbytes/...) flows — directly or via a single-hop alias — into a SECRET-MATERIAL KEYWORD PARAMETER of a call whose RECEIVING CALLEE RESOLVES to a genuine crypto/security API in the SAME function. Both conditions are required, mirroring the provenance discipline of the broken-crypto and insecure-flag tiers: (1) PROVENANCE — the callee resolves either because its base is an imported crypto MODULE (hmac.new / cryptography.* / Crypto.*), or because its name is in a SMALL CLOSED, UNAMBIGUOUS allowlist (derive_key / generate_token / generate_secret / set_password / hash_password / ...); (2) ARGUMENT POSITION — the PRNG lands in a SECRET-MATERIAL keyword parameter (key=/secret=/token=/password=/salt=/iv=/nonce=/seed=), NOT a CONTROL parameter (length=/size=/count=/iterations=/rounds=/work_factor=/timeout=/index=), which is a benign control value and stays a LEAD. Each of these stays a LEAD (never a FACT): an AMBIGUOUS descriptive constructor that resolves to NOTHING (make_key(random.choice(shards)) — a sharded cache key — / new_key / create_key / issue_token); a security-named kwarg on a non-security callee (sorted(..., key=random.random()), logging.info(..., token=...)); a bare/aliased crypto verb with no crypto-module provenance (numpy.sign, math.copysign as sign); a random token LENGTH or iteration COUNT (a control parameter of a resolved callee, e.g. generate_token(length=...) / derive_key(pw, salt, iterations=...)); and a POSITIONAL argument (whose secret-vs-control role is unresolved). A re-verifiable CODE PROPERTY (a secret is drawn from a predictable PRNG), never a claim of runtime exploitability.",
-      "fact_capable": true,
+      "evidence": "the STATIC_RULE oracle recognises this as a DETECTION POINTER only — insecure-randomness is LEAD-only and NEVER mints a FACT. A non-cryptographic PRNG value (random.random/randint/choice/getrandbits/randbytes/...) reaching a security sink (a key/secret/token/password/salt/iv/nonce/seed) is a real LEAD worth reporting, but a SOUND static FACT is out of scope for a single-region offline re-parse: four red-pen rounds showed that every AST heuristic (name-based sinks, descriptive builders, control-vs-material argument position, SystemRandom name-exclusion, single-hop alias flow) keeps admitting a new benign-but-firing shape on secure or benign code. Per claim-discipline (an honest LEAD beats a false FACT), the oracle is FAIL-CLOSED for this rule_id: static_rule_oracle returns a non-firing LEAD for ANY input, before any re-parse or tier dispatch, so no input can promote it to a FACT (live or offline).",
+      "fact_capable": false,
       "clean_capable": false,
       "preconditions": [
         "source_reparseable"
       ],
-      "limitation": "Bounded to a DIRECT (or single-hop-alias) intra-procedural flow into a SECRET-MATERIAL KEYWORD parameter of a RESOLVED crypto/security API within ONE function. Positional secret material, control-parameter flows (a random length / iteration count), inter-procedural or possibly-reassigned flows, and any callee that does not resolve (an ambiguous descriptive constructor such as make_key/new_key/issue_token, a generic container/logger/builder) are NOT re-derived here and stay a LEAD (soundness over recall). SystemRandom / secrets / os.urandom are cryptographic and never fire. Python-only: a non-Python or unparseable region REFUSES. NOT CLEAN-capable: a non-firing cannot prove no insecure-randomness sink exists elsewhere. Re-derives OFFLINE from the retained bytes; a tamper removing the flow no longer re-fires.",
+      "limitation": "LEAD-only: the STATIC_RULE oracle NEVER mints a FACT for insecure-randomness (fail-closed for ANY input, live and offline), so this branch can neither confirm nor exonerate. A sound FACT is not derivable from a single-region AST re-parse without crypto-provenance dataflow. NOT FACT-capable and NOT CLEAN-capable: a non-firing proves nothing about whether a secret is drawn from a predictable PRNG anywhere in the program. See blocking_work for the engineering that closes the gap.",
       "target_fact_capable": true,
       "target_clean_capable": false,
       "target_downgrade_rationale": "Proving the ABSENCE of any insecure-randomness-into-secret flow is a whole-program dataflow capability (inter-procedural, alias- and reassignment-complete), not this single-function direct-flow static-rule's target, so clean-capability is deliberately not pursued on this branch.",
-      "oracle_version": "static_rule",
+      "blocking_work": "Build crypto-provenance dataflow so the property can be re-derived SOUNDLY: (1) resolve the PRNG SOURCE by provenance, not by name — exclude random.SystemRandom / secrets / os.urandom by RESOLUTION (import + call-target resolution), so a secure generator never fires and a name collision never does; (2) FLOW-SENSITIVE dataflow so the value actually reaching the sink is the PRNG value and not a later secure reassignment (kill/gen sets, not a walk-the-subtree heuristic); (3) resolve the SINK to a crypto-API SECRET-MATERIAL parameter by API signature, not a short-name / receiver-agnostic match (generate_* / make_key / derive_key over-resolve today). Until this exists the class stays a LEAD; target_fact_capable remains true — this is a BUILD item, not an abandoned capability.",
+      "oracle_version": "",
       "control_requirements": [
         "retained_source_region",
         "vigil_owned_static_reparse",
@@ -1796,7 +1797,7 @@
       ],
       "evidence_surface": "artifact",
       "implementation_refs": [
-        "engine/crucible/framework/v2/verify/oracles.py:_insecure_randomness_hit",
+        "engine/crucible/framework/v2/verify/oracles.py:_LEAD_ONLY_RULE_IDS",
         "engine/crucible/framework/v2/verify/oracles.py:static_rule_oracle",
         "engine/crucible/framework/v2/analysis/static_facts.py:confirm_code_region"
       ]
