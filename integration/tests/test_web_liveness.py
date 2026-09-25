@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import http.server
 import json
+import re
 import threading
 from pathlib import Path
 
@@ -84,16 +85,102 @@ class _CorrectApp(http.server.BaseHTTPRequestHandler):
 
 
 class _SoftNotFoundApp(http.server.BaseHTTPRequestHandler):
-    """The SOFT-404 trap: answers 200 with a 'not found' page for EVERY path — including the random control.
-    A plain GET cannot distinguish a real resource here, so the liveness re-drive must mint NO fact."""
+    """The TRIVIAL soft-404 trap: answers 200 with the SAME 'not found' page for EVERY path (uniform body,
+    no path echo). Target and same-shape controls share status+body, so the re-drive must mint NO fact."""
+
+    def log_message(self, *a):  # noqa: D401
+        pass
+
+    def do_GET(self):  # noqa: N802
+        body = b"<html><body>Sorry, that page was not found.</body></html>"   # UNIFORM — no path echo
+        self.send_response(200)                       # <-- 200 for a nonexistent page: the soft-404 lie
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
+class _PathEchoSoftApp(http.server.BaseHTTPRequestHandler):
+    """A soft-404 that ECHOES the requested path in its 200 body. A single control would look 'different' from
+    the target and false-FACT; the two same-shape controls echo DIFFERENT paths, so no stable baseline forms."""
 
     def log_message(self, *a):  # noqa: D401
         pass
 
     def do_GET(self):  # noqa: N802
         body = f"<html><body>Sorry, page {self.path} was not found.</body></html>".encode("utf-8")
-        self.send_response(200)                       # <-- 200 for a nonexistent page: the soft-404 lie
+        self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
+_NUMERIC_ROUTE = re.compile(r"^/api/users/(\d+)/?$")
+
+
+class _NumericRouteSoftApp(http.server.BaseHTTPRequestHandler):
+    """FP1 — a numeric-ID REST route (Django <int:pk> / Rails /:id(\\d+) / Express :id(\\d+)): 200 for ANY
+    numeric user id (even a nonexistent one — the soft-404 lie {"user": null}), 404 for a non-numeric segment
+    (the route does not match). A DISTINCTIVE non-numeric control 404s while a nonexistent numeric target 200s
+    -> the old status-only predicate false-FACTed. A SAME-SHAPE numeric control also matches the route -> 200
+    {"user": null} == the target's body -> LEAD."""
+
+    def log_message(self, *a):  # noqa: D401
+        pass
+
+    def do_GET(self):  # noqa: N802
+        path = self.path.split("?")[0]
+        if _NUMERIC_ROUTE.match(path):
+            body, code = b'{"user": null}', 200        # nonexistent numeric id STILL 200s (soft-404)
+        else:
+            body, code = b'{"error": "not found"}', 404
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
+class _NumericRouteLiveApp(http.server.BaseHTTPRequestHandler):
+    """The NON-REGRESSION twin of _NumericRouteSoftApp: /api/users/1 is a REAL user (distinct body), every
+    other numeric id is the soft-404 {"user": null}. A same-shape numeric control 200s with {"user": null},
+    but the target /api/users/1 body DIFFERS -> the body differential still mints a FACT for the live id."""
+
+    def log_message(self, *a):  # noqa: D401
+        pass
+
+    def do_GET(self):  # noqa: N802
+        m = _NUMERIC_ROUTE.match(self.path.split("?")[0])
+        if m and m.group(1) == "1":
+            body, code = b'{"user": {"id": 1, "name": "alice"}}', 200
+        elif m:
+            body, code = b'{"user": null}', 200
+        else:
+            body, code = b'{"error": "not found"}', 404
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
+class _LengthSignatureApp(http.server.BaseHTTPRequestHandler):
+    """FP2 — a blanket-200 soft-404 whose ONLY 404 is a WAF/edge rule that blocks any last path segment longer
+    than 20 chars (long/high-entropy = 'suspicious'), equivalently a signature block on a fixed control prefix.
+    The old fixed 39-char `vigil-liveness-<hex>` control was 404'd while the short target 200'd -> false FACT.
+    A SAME-LENGTH control (e.g. 5 chars for /admin) is under the limit -> 200 == target -> LEAD."""
+
+    def log_message(self, *a):  # noqa: D401
+        pass
+
+    def do_GET(self):  # noqa: N802
+        seg = self.path.split("?")[0].rstrip("/").rsplit("/", 1)[-1]
+        if len(seg) > 20:
+            body, code = b"blocked", 404               # the edge/WAF 404s the long/high-entropy segment
+        else:
+            body, code = b"<html>page not found (but 200)</html>", 200   # blanket soft-404 for normal paths
+        self.send_response(code)
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
@@ -159,7 +246,7 @@ def test_live_url_mints_a_signed_liveness_fact_that_reverifies_offline(monkeypat
     finally:
         srv.shutdown()
     assert wl.is_fact, f"expected a liveness FACT; outcome={wl.outcome} note={wl.note}"
-    assert wl.outcome == "positive" and wl.target_status == 200 and wl.control_status == 404
+    assert wl.outcome == "positive" and wl.target_status == 200 and wl.control_statuses == [404, 404]
     # the FACT re-verifies OFFLINE from the retained JSON-safe capture — no network, no VIGIL runner
     assert verify_certificate(wl.fact.signed, oracle_context=wl.context, trust_root=tr).ok is True
 
@@ -178,30 +265,77 @@ def test_liveness_fact_is_rejected_when_the_retained_context_is_tampered(monkeyp
     finally:
         srv.shutdown()
     assert wl.is_fact
-    # flip the control status in the retained context: the server's not-found (404) becomes a soft-404 (200),
+    # flip a control status in the retained context: the server's not-found (404) becomes a soft-404 (200),
     # which would NO LONGER satisfy the predicate — the cert bound the original context, so verify must FAIL.
     tampered = json.loads(json.dumps(wl.context))
-    tampered["observed_evidence"]["control_status"] = 200
+    tampered["observed_evidence"]["control1_status"] = 200
     assert verify_certificate(wl.fact.signed, oracle_context=tampered, trust_root=tr).ok is False
 
 
-def test_soft_404_mints_no_liveness_fact(monkeypatch, tmp_path):
-    """THE red-pen trap: a server that answers 200 for EVERY path. The random control returns 200 too, so the
-    predicate does not fire and NO fact is minted — a LEAD, not a FACT and not a CLEAN."""
+@pytest.mark.parametrize("app,path,label", [
+    (_SoftNotFoundApp, "/anything", "uniform blanket-200"),
+    (_PathEchoSoftApp, "/anything", "path-echoing 200"),
+    (_NumericRouteSoftApp, "/api/users/999999999", "numeric-route soft-404 (FP1)"),
+    (_LengthSignatureApp, "/admin", "length/shape-signature 404 (FP2)"),
+])
+def test_soft_404_classes_mint_no_liveness_fact(app, path, label, monkeypatch, tmp_path):
+    """Every soft-404 CLASS the red-pen raised must be a LEAD, never a FACT: the uniform blanket-200, a
+    path-echoing 200, the numeric-route soft-404 (FP1 — a same-shape numeric control also matches the route),
+    and the shape/length-signature 404 (FP2 — a same-length control is treated identically). FP1/FP2 minted a
+    FALSE offline-re-verifiable FACT on the pre-fix status-only + distinctive-token control."""
     _grant_active_recon(monkeypatch)
     _charter(tmp_path, "127.0.0.1")
     from vigil_integration.live.web_redrive import endpoint_liveness_redrive
     signers, _ = _signers_and_trust()
-    srv = _serve(_SoftNotFoundApp)
+    srv = _serve(app)
     port = srv.server_address[1]
     try:
-        wl = endpoint_liveness_redrive(f"http://127.0.0.1:{port}/anything",
+        wl = endpoint_liveness_redrive(f"http://127.0.0.1:{port}{path}",
                                        slug="alpha", engagement_slug="alpha", signers=signers)
     finally:
         srv.shutdown()
-    assert not wl.is_fact, "a soft-404 (200-for-everything) must NOT mint a liveness FACT"
-    assert wl.outcome == "inconclusive" and wl.target_status == 200 and wl.control_status == 200
-    assert wl.lead is not None and not wl.lead.is_fact
+    assert not wl.is_fact, f"{label}: must NOT mint a liveness FACT (got {wl.outcome}, {wl.note})"
+    assert wl.outcome == "inconclusive" and wl.lead is not None and not wl.lead.is_fact
+
+
+def test_numeric_route_live_id_still_mints_a_fact(monkeypatch, tmp_path):
+    """NON-REGRESSION for the same-shape + body differential: a GENUINELY live numeric id (/api/users/1) is
+    served 200 with a distinct body while a same-shape numeric control 200s with {"user": null}; the body
+    differential distinguishes them, so the live id still mints a FACT that re-verifies OFFLINE."""
+    _grant_active_recon(monkeypatch)
+    _charter(tmp_path, "127.0.0.1")
+    from framework.v2.evidence.certify import verify_certificate
+    from vigil_integration.live.web_redrive import endpoint_liveness_redrive
+    signers, tr = _signers_and_trust()
+    srv = _serve(_NumericRouteLiveApp)
+    port = srv.server_address[1]
+    try:
+        wl = endpoint_liveness_redrive(f"http://127.0.0.1:{port}/api/users/1",
+                                       slug="alpha", engagement_slug="alpha", signers=signers)
+    finally:
+        srv.shutdown()
+    assert wl.is_fact, f"a genuinely-live numeric id must mint a FACT; outcome={wl.outcome} note={wl.note}"
+    assert wl.control_statuses == [200, 200]     # same-status baseline; distinguished by the BODY differential
+    assert verify_certificate(wl.fact.signed, oracle_context=wl.context, trust_root=tr).ok is True
+
+
+def test_root_url_fails_closed_to_a_lead(monkeypatch, tmp_path):
+    """A root/directory URL has no last segment to mirror into a same-shape control, so the liveness FACT
+    FAILS CLOSED to a LEAD rather than mint over an unsound control."""
+    _grant_active_recon(monkeypatch)
+    _charter(tmp_path, "127.0.0.1")
+    from vigil_integration.live.web_redrive import _liveness_control_urls, endpoint_liveness_redrive
+    signers, _ = _signers_and_trust()
+    srv = _serve(_CorrectApp)          # serves 200 at "/"
+    port = srv.server_address[1]
+    assert _liveness_control_urls(f"http://127.0.0.1:{port}/") == [], "root URL must yield no same-shape control"
+    try:
+        wl = endpoint_liveness_redrive(f"http://127.0.0.1:{port}/",
+                                       slug="alpha", engagement_slug="alpha", signers=signers)
+    finally:
+        srv.shutdown()
+    assert not wl.is_fact and wl.outcome == "inconclusive"
+    assert "no sound SAME-SHAPE control" in wl.note
 
 
 def test_hard_404_is_a_clean_bounded_to_the_exact_url(monkeypatch, tmp_path):
@@ -278,14 +412,23 @@ def test_web_tool_live_url_mints_a_fact_through_the_runner(tool, canned, monkeyp
 
 
 @pytest.mark.parametrize("tool,canned", [("httpx", _httpx_jsonl), ("ffuf", _ffuf_report)])
-def test_web_tool_soft_404_is_a_lead_through_the_runner(tool, canned, monkeypatch, tmp_path):
+@pytest.mark.parametrize("app,path,label", [
+    (_SoftNotFoundApp, "/admin", "uniform blanket-200"),
+    (_PathEchoSoftApp, "/admin", "path-echoing 200"),
+    (_NumericRouteSoftApp, "/api/users/999999999", "numeric-route soft-404 (FP1)"),
+    (_LengthSignatureApp, "/admin", "length/shape-signature 404 (FP2)"),
+])
+def test_web_tool_soft_404_classes_are_a_lead_through_the_runner(tool, canned, app, path, label,
+                                                                 monkeypatch, tmp_path):
+    """Every soft-404 CLASS is a LEAD through BOTH the httpx and ffuf runner legs — including FP1 (numeric
+    route) and FP2 (shape/length signature), which minted a FALSE FACT before the same-shape-control fix."""
     _grant_active_recon(monkeypatch)
     _charter(tmp_path, "127.0.0.1")
     from vigil_integration.live.external_tool import ffuf_content_scan, httpx_url_scan, run_external_tool
     signers, _ = _signers_and_trust()
-    srv = _serve(_SoftNotFoundApp)
+    srv = _serve(app)
     port = srv.server_address[1]
-    url = f"http://127.0.0.1:{port}/admin"
+    url = f"http://127.0.0.1:{port}{path}"
     spec = httpx_url_scan() if tool == "httpx" else ffuf_content_scan(wordlist="/tmp/wl.txt")
     try:
         res = run_external_tool(spec, "127.0.0.1", scope_gate=_scope_gate(["127.0.0.1"]),
@@ -295,8 +438,32 @@ def test_web_tool_soft_404_is_a_lead_through_the_runner(tool, canned, monkeypatc
         srv.shutdown()
     assert res.status == "ran"
     assert res.proposed, "the tool must still PROPOSE the URL"
-    assert res.facts == [], "a soft-404 must mint NO liveness FACT (the tool's say-so never confirms)"
+    assert res.facts == [], f"{label} via {tool}: must mint NO liveness FACT (the tool's say-so never confirms)"
     assert any(o.get("outcome") == "inconclusive" for o in res.outcomes)
+
+
+@pytest.mark.parametrize("tool,canned", [("httpx", _httpx_jsonl), ("ffuf", _ffuf_report)])
+def test_web_tool_numeric_route_live_id_still_a_fact_through_the_runner(tool, canned, monkeypatch, tmp_path):
+    """NON-REGRESSION through both runner legs: a genuinely-live numeric id (distinct body vs a same-shape
+    numeric not-found control) still mints one signed liveness FACT."""
+    _grant_active_recon(monkeypatch)
+    _charter(tmp_path, "127.0.0.1")
+    from framework.v2.evidence.certify import verify_certificate
+    from vigil_integration.live.external_tool import ffuf_content_scan, httpx_url_scan, run_external_tool
+    signers, tr = _signers_and_trust()
+    srv = _serve(_NumericRouteLiveApp)
+    port = srv.server_address[1]
+    url = f"http://127.0.0.1:{port}/api/users/1"
+    spec = httpx_url_scan() if tool == "httpx" else ffuf_content_scan(wordlist="/tmp/wl.txt")
+    try:
+        res = run_external_tool(spec, "127.0.0.1", scope_gate=_scope_gate(["127.0.0.1"]),
+                                backend=_CannedBackend(canned(url)), engagement_slug="alpha",
+                                signers=signers, timeout=30.0)
+    finally:
+        srv.shutdown()
+    assert len(res.facts) == 1, f"expected 1 liveness FACT via {tool}; facts={res.facts} leads={res.leads}"
+    fact = res.facts[0]
+    assert verify_certificate(fact.signed, oracle_context=res.contexts[fact.finding_ref], trust_root=tr).ok is True
 
 
 # ===================================================================================================
