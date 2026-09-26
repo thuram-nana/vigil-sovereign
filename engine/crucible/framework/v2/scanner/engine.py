@@ -16,6 +16,7 @@ request budget bounds the sweep so an autonomous run cannot blow up.
 
 from __future__ import annotations
 
+import threading
 from collections.abc import Callable
 from typing import Literal
 
@@ -25,7 +26,7 @@ from ..verify.confirmation import adjudicate_finding, confirmed_from_result
 from ..verify.models import VerificationResult
 from ..verify.oob import OOBReceiver
 from ..verify.verifier import OracleVerifier
-from .checks import DEFAULT_CHECKS, Check, Send
+from .checks import DEFAULT_CHECKS, Check, Send, TimingCheck, interleave_timing_jobs
 from .insertion import HttpRequest, InsertionKind, InsertionPoint, RequestTemplate
 from .learning import ContextualBandit
 
@@ -203,6 +204,7 @@ class AuditEngine:
         oob_skew_seconds: "float | None" = None,
         oob_not_before: "float | None" = None,
         oob_not_after: "float | None" = None,
+        timing_workers: int = 1,
     ) -> None:
         self._send = send
         # VF-2b OUT-OF-BAND pins: the OOB collector public keys are AUTHORITIES. For a real engagement they are
@@ -258,11 +260,42 @@ class AuditEngine:
         # campaign (one engine per campaign); audit()'s return type is unchanged
         # and campaign reads this back after the loop (mirrors requests_sent).
         self.exercised: list[ProbeRecord] = []
+        # W7 (perf) — TIMING INTERLEAVE. A timing probe is ~100% IDLE: it is blocked on the
+        # delay it asked the target to take, not computing. ``timing_workers`` > 1 lets the
+        # idle waits of DIFFERENT insertion points overlap, with each point's own timing
+        # sequence still run SERIALLY in its worker, so every statistical control (the
+        # within-point baseline/treatment interleaving, the sample count, the dose pairing,
+        # the effect-size floor, the first-confirmation short-circuit) is untouched. It is a
+        # per-host concurrency bound on ONE bug-class family, not a general scan-wide one, and
+        # the requests still go through the SAME injected (gated) ``send``. Default 1 =
+        # today's serial sweep, byte-for-byte.
+        #
+        # HONEST LIMIT — what the equivalence does and does NOT cover. What the staging
+        # proves is equivalence of CONTROL FLOW: which checks run, at which points, in which
+        # order, how many requests are sent, and in what order findings and coverage records
+        # come out. It is NOT a claim that the measured LATENCIES are the same numbers —
+        # they are measurements, and putting N probes in flight changes the measurement
+        # environment. The within-point alternation keeps that change UNBIASED (ambient load
+        # lands on the baseline and treatment arms equally), so the exposure is to RECALL,
+        # never to precision: a transient stall landing in a small baseline arm can cost
+        # that point its confirmation; it cannot manufacture one. Measured against a
+        # loopback origin at 12 points x 6 samples/arm: no lost confirmations at workers
+        # 1/4/8/16, an occasional lost point at workers == points, traced to a single ~1s
+        # outlier in a 6-sample baseline arm (the test origin's accept backlog, not this
+        # code). So: keep the bound well below the point count, and treat "how high may an
+        # operator set this, and does the sample count need to rise with it" as OPEN work to
+        # settle before this is exposed as an operator-facing flag.
+        self.timing_workers = max(1, int(timing_workers))
+        # Guards the shared request counter so the budget stays EXACT when timing probes run
+        # concurrently (a bare ``+= 1`` is a read-modify-write, not atomic). A no-op for the
+        # serial path.
+        self._send_lock = threading.Lock()
 
     def _counted_send(self, request: HttpRequest) -> dict:
-        if self.max_requests and self.requests_sent >= self.max_requests:
-            raise BudgetExceeded()
-        self.requests_sent += 1
+        with self._send_lock:
+            if self.max_requests and self.requests_sent >= self.max_requests:
+                raise BudgetExceeded()
+            self.requests_sent += 1
         return self._send(request)
 
     def _record_probe(
@@ -285,6 +318,261 @@ class AuditEngine:
             check_id=check_id, bug_class=bug_class,
             oracle_kinds_run=kinds, verdict=verdict, evidence=evidence,
         ))
+
+    def _probe_and_adjudicate(
+        self, template: RequestTemplate, point: InsertionPoint, check: Check,
+    ) -> "tuple[object, VerificationResult | None, object] | None":
+        """Run ONE check at ONE point and adjudicate it. Returns
+        ``(ctx, result, confirmed)``, or ``None`` when this check contributes nothing
+        (no OOB receiver for a blind check / the probe errored / no evidence and no
+        adaptive fallback) — the three cases the sweep used to express with ``continue``.
+
+        Pure w.r.t. engine state apart from the request counter inside ``_counted_send``
+        and the (immutable-after-construction, therefore thread-safe) ``self.verifier``.
+        That is what makes it callable from a timing worker as well as the serial sweep;
+        the seen-dedup, the bandit reward, the coverage record and the finding emission
+        all stay with the caller, which keeps them in canonical order."""
+        try:
+            if getattr(check, "wants_oob", False):
+                if self.oob is None:
+                    return None  # no receiver -> blind check is skipped, not guessed
+                ctx = check.probe(template, point, self._counted_send, self.oob)
+            else:
+                ctx = check.probe(template, point, self._counted_send)
+        except BudgetExceeded:
+            raise  # budget is a hard stop for the whole audit
+        except Exception:
+            # Isolate a check failure to that check — a scan must be
+            # robust to one probe erroring on a hostile response.
+            return None
+        adaptive = self.waf_adaptive and hasattr(check, "adapt")
+        if ctx is None and not adaptive:
+            return None
+
+        finding_payload = {
+            "bug_class": check.bug_class,
+            "title": f"{check.bug_class} via {point.name}",
+            "severity": "High",
+            "surface": point.id,
+            "summary": f"{check.id} probe fired an oracle at {point.name}",
+        }
+
+        def _adjudicate(c: FindingContext) -> VerificationResult:
+            return adjudicate_finding(finding_payload, c, self.verifier)
+
+        # One oracle pass; the VerificationResult carries BOTH the positive
+        # (confirmed_from_result) and the retained negative (coverage) evidence.
+        result = _adjudicate(ctx) if ctx is not None else None
+        confirmed = (
+            confirmed_from_result(result, finding_payload, self.verifier)
+            if result is not None else None
+        )
+        # WAF-adaptive fallback: the canonical payload did not fire (blocked
+        # or filtered). Synthesize a form that slips past AND fires the SAME
+        # oracle, then confirm that — precision is unchanged (a bypass that
+        # does not fire the oracle is never a finding).
+        if confirmed is None and adaptive:
+            try:
+                actx = check.adapt(template, point, self._counted_send)
+            except BudgetExceeded:
+                raise
+            except Exception:
+                actx = None
+            if actx is not None:
+                ares = _adjudicate(actx)
+                ac = confirmed_from_result(ares, finding_payload, self.verifier)
+                # Record the adaptive adjudication as the probe's outcome
+                # (it superseded the blocked canonical attempt).
+                result, ctx = ares, actx
+                if ac is not None:
+                    confirmed = ac
+        return ctx, result, confirmed
+
+    def _emit(
+        self, *, request: HttpRequest, point: InsertionPoint, check: Check,
+        ctx: object, result: "VerificationResult | None", confirmed: object,
+        findings: list[AuditFinding],
+    ) -> None:
+        """Retain the coverage evidence for a probe that adjudicated over observed data
+        (BEFORE the None-drop discards the negative branch, as it always has) and append
+        the confirmed finding. Called in CANONICAL (point-major, roster-order) order by
+        both sweeps, so ``exercised`` and ``findings`` are ordered identically."""
+        if result is not None:
+            self._record_probe(
+                endpoint=request.url, method=request.method, insertion_point=point.id, param=point.name,
+                check_id=check.id, bug_class=check.bug_class, result=result, ctx=ctx,
+            )
+        if confirmed is None:
+            return
+        kind = confirmed.confirmed_by
+        findings.append(AuditFinding(
+            check_id=check.id,
+            bug_class=check.bug_class,
+            insertion_point=point.id,
+            param=point.name,
+            endpoint=request.url,
+            confidence=confirmed.confidence,
+            confirmed_by=kind.value if hasattr(kind, "value") else str(kind),
+            rationale=confirmed.rationale,
+            oracle_context=_context_dump(ctx),
+        ))
+
+    # -----------------------------------------------------------------------------
+    # W7 (perf) — TIMING INTERLEAVE
+    # -----------------------------------------------------------------------------
+    # A statistical timing probe is the sweep's single largest wall-clock term and it is
+    # ~100% IDLE: 2*samples (or 3*samples with a dose arm) requests per point per entry,
+    # each one blocked on the delay it asked the target to take. Nothing is computed while
+    # it waits. The shipped library carries 13 timing entries, so one insertion point can
+    # sit idle for minutes.
+    #
+    # The optimisation removes IDLE TIME ONLY. It NEVER samples less and NEVER relaxes a
+    # statistical control:
+    #
+    #   * one point's whole timing sequence runs SERIALLY, in roster order, inside one
+    #     worker — so the WITHIN-POINT interleaving of baseline vs treatment (and dose)
+    #     observations, which the Mann-Whitney U shift test and the dose-response ratio
+    #     both rest on, is the same loop in the same order;
+    #   * the sample count, the dose pairs and the effect-size floor are untouched;
+    #   * the "first confirmation of a bug class at this point short-circuits that class's
+    #     remaining entries" rule is preserved, because it is a WITHIN-point rule and the
+    #     point's sequence is still serial — so the request COUNT is unchanged too;
+    #   * coverage records and findings are emitted in CANONICAL (point-major, roster)
+    #     order, reassembled after the concurrent stage, so the retained context sequence
+    #     and the certificate ordering are identical.
+    #
+    # It is applied only when it is provably equivalent (see :meth:`_staged_timing_plan`);
+    # otherwise the sweep is byte-for-byte the serial one.
+
+    def _staged_timing_plan(
+        self, points: "list[InsertionPoint]", checks: "tuple[Check, ...]",
+        selector: "CheckSelector | None",
+    ) -> "list[tuple[InsertionPoint, list[tuple[int, Check]], list[tuple[int, Check]]]] | None":
+        """The point-major plan for the staged sweep, or ``None`` to keep the serial one.
+
+        Returns ``None`` — i.e. changes nothing — unless EVERY precondition for exact
+        equivalence holds:
+
+        * ``timing_workers > 1`` (opt-in);
+        * **no bandit.** The bandit re-ranks each point's checks from rewards earned at
+          EARLIER points, so the roster at point *i+1* depends on outcomes at point *i*.
+          Overlapping points would change that ordering, so the bandit path stays serial;
+        * **no request budget** (``max_requests == 0``). A budget makes the sweep's cut-off
+          depend on the ORDER traffic is emitted in; staging changes that order, so a
+          bounded sweep stays serial and exact;
+        * **at least two points actually carry timing work** — with fewer there is nothing
+          to interleave, so the serial path is kept rather than paying for a pool;
+        * **per point, the deferrable checks share no bug_class with the non-deferrable
+          ones.** This is the one that makes the split sound: the only cross-check coupling
+          in the sweep is the (bug_class, point) seen-dedup, so with disjoint classes the
+          run/skip decision of every check is independent of which STAGE it ran in. A point
+          that violates it (e.g. a timing and an OOB entry sharing
+          ``time_based_command_injection``) keeps ALL of its checks in the serial stage.
+
+        A deferrable check is a :class:`~scanner.checks.TimingCheck` with no out-of-band
+        receiver dependency and no WAF-adaptive fallback — a self-contained latency probe."""
+        if self.timing_workers <= 1 or self.bandit is not None or self.max_requests:
+            return None
+        plan: list[tuple[InsertionPoint, list[tuple[int, Check]], list[tuple[int, Check]]]] = []
+        interleavable = 0
+        for point in points:
+            point_checks = list(selector(point, checks) if selector is not None else checks)
+            slow_idx = {
+                i for i, c in enumerate(point_checks)
+                if isinstance(c, TimingCheck)
+                and not getattr(c, "wants_oob", False)
+                and not hasattr(c, "adapt")
+            }
+            slow = [(i, c) for i, c in enumerate(point_checks) if i in slow_idx]
+            fast = [(i, c) for i, c in enumerate(point_checks) if i not in slow_idx]
+            if slow and ({c.bug_class for _, c in slow} & {c.bug_class for _, c in fast}):
+                # A shared bug_class couples the two stages through the seen-dedup: which
+                # check runs would depend on the staging. Keep this point wholly serial.
+                fast, slow = [(i, c) for i, c in enumerate(point_checks)], []
+            if slow:
+                interleavable += 1
+            plan.append((point, fast, slow))
+        if interleavable < 2:
+            return None
+        return plan
+
+    def _sweep_staged(
+        self, *, template: RequestTemplate, request: HttpRequest,
+        plan: "list[tuple[InsertionPoint, list[tuple[int, Check]], list[tuple[int, Check]]]]",
+        seen: "set[tuple[str, str]]", findings: list[AuditFinding],
+    ) -> None:
+        """Run the sweep in two stages, then emit in canonical order.
+
+        Stage 1 runs every non-deferrable check in today's exact point-major order.
+        Stage 2 runs each point's timing sequence — serially within the point — with at
+        most ``timing_workers`` points in flight. Stage 3 replays the adjudicated outcomes
+        into ``_emit`` in (point, roster-index) order, so ``exercised`` and ``findings``
+        come out exactly as the serial sweep would have ordered them."""
+        outcomes: dict[tuple[int, int], tuple] = {}
+
+        # --- stage 1: the non-deferrable checks, in today's order --------------------
+        for pi, (point, fast, _slow) in enumerate(plan):
+            for ci, check in fast:
+                key = (check.bug_class, point.id)
+                if key in seen:
+                    continue
+                outcome = self._probe_and_adjudicate(template, point, check)
+                if outcome is None:
+                    continue
+                ctx, result, confirmed = outcome
+                if confirmed is not None:
+                    seen.add(key)
+                outcomes[(pi, ci)] = (point, check, ctx, result, confirmed)
+
+        # --- stage 2: the timing sequences, N points in flight -----------------------
+        def _job(pi: int, point: InsertionPoint, slow: "list[tuple[int, Check]]"):
+            def run() -> list[tuple]:
+                # A POINT-LOCAL seen set. Equivalent to the shared one by construction:
+                # the dedup key carries point.id, so no other point's entry can match, and
+                # the disjoint-bug_class precondition means stage 1 put none of these keys
+                # in either.
+                local_seen: set[tuple[str, str]] = set()
+                produced: list[tuple] = []
+                for ci, check in slow:
+                    key = (check.bug_class, point.id)
+                    if key in local_seen:
+                        continue
+                    try:
+                        outcome = self._probe_and_adjudicate(template, point, check)
+                    except BudgetExceeded:
+                        break  # unreachable (a budgeted sweep is never staged); stop this point
+                    except Exception:
+                        continue  # isolate a failure to its check, as the serial sweep does
+                    if outcome is None:
+                        continue
+                    ctx, result, confirmed = outcome
+                    if confirmed is not None:
+                        local_seen.add(key)
+                    produced.append((ci, point, check, ctx, result, confirmed))
+                return produced
+            return run
+
+        jobs = [(pi, point, slow) for pi, (point, _fast, slow) in enumerate(plan) if slow]
+        if jobs:
+            batches = interleave_timing_jobs(
+                [_job(pi, point, slow) for pi, point, slow in jobs], workers=self.timing_workers)
+            for (pi, _point, _slow), produced in zip(jobs, batches):
+                for ci, point, check, ctx, result, confirmed in produced:
+                    if confirmed is not None:
+                        seen.add((check.bug_class, point.id))
+                    outcomes[(pi, ci)] = (point, check, ctx, result, confirmed)
+
+        # --- stage 3: emit in canonical (point-major, roster-index) order ------------
+        for pi, (_point, fast, slow) in enumerate(plan):
+            for ci in sorted(i for i, _c in (*fast, *slow)):
+                record = outcomes.get((pi, ci))
+                if record is None:
+                    continue
+                point, check, ctx, result, confirmed = record
+                self._emit(
+                    request=request, point=point, check=check, ctx=ctx, result=result,
+                    confirmed=confirmed, findings=findings,
+                )
 
     def audit(
         self,
@@ -347,6 +635,16 @@ class AuditEngine:
                         rationale=confirmed.rationale,
                         oracle_context=_context_dump(ctx),
                     ))
+            # W7 (perf) — TIMING INTERLEAVE. When it is provably equivalent to do so, the
+            # timing probes (the sweep's one ~100%-idle bug-class family) are lifted out of
+            # this serial loop and run with N points IN FLIGHT. `_staged_timing_plan`
+            # returns None whenever ANY precondition for exact equivalence fails, and then
+            # the loop below runs exactly as it always has.
+            staged = self._staged_timing_plan(points, checks, selector)
+            if staged is not None:
+                self._sweep_staged(
+                    template=template, request=request, plan=staged, seen=seen, findings=findings)
+                return findings
             for point in points:
                 point_checks = selector(point, checks) if selector is not None else checks
                 if self.bandit is not None:
@@ -359,87 +657,20 @@ class AuditEngine:
                     key = (check.bug_class, point.id)
                     if key in seen:
                         continue
-                    try:
-                        if getattr(check, "wants_oob", False):
-                            if self.oob is None:
-                                continue  # no receiver -> blind check is skipped, not guessed
-                            ctx = check.probe(template, point, self._counted_send, self.oob)
-                        else:
-                            ctx = check.probe(template, point, self._counted_send)
-                    except BudgetExceeded:
-                        raise  # budget is a hard stop for the whole audit
-                    except Exception:
-                        # Isolate a check failure to that check — a scan must be
-                        # robust to one probe erroring on a hostile response.
+                    outcome = self._probe_and_adjudicate(template, point, check)
+                    if outcome is None:
                         continue
-                    adaptive = self.waf_adaptive and hasattr(check, "adapt")
-                    if ctx is None and not adaptive:
-                        continue
-
-                    finding_payload = {
-                        "bug_class": check.bug_class,
-                        "title": f"{check.bug_class} via {point.name}",
-                        "severity": "High",
-                        "surface": point.id,
-                        "summary": f"{check.id} probe fired an oracle at {point.name}",
-                    }
-
-                    def _adjudicate(c: FindingContext) -> VerificationResult:
-                        return adjudicate_finding(finding_payload, c, self.verifier)
-
-                    # One oracle pass; the VerificationResult carries BOTH the positive
-                    # (confirmed_from_result) and the retained negative (coverage) evidence.
-                    result = _adjudicate(ctx) if ctx is not None else None
-                    confirmed = (
-                        confirmed_from_result(result, finding_payload, self.verifier)
-                        if result is not None else None
-                    )
-                    # WAF-adaptive fallback: the canonical payload did not fire (blocked
-                    # or filtered). Synthesize a form that slips past AND fires the SAME
-                    # oracle, then confirm that — precision is unchanged (a bypass that
-                    # does not fire the oracle is never a finding).
-                    if confirmed is None and adaptive:
-                        try:
-                            actx = check.adapt(template, point, self._counted_send)
-                        except BudgetExceeded:
-                            raise
-                        except Exception:
-                            actx = None
-                        if actx is not None:
-                            ares = _adjudicate(actx)
-                            ac = confirmed_from_result(ares, finding_payload, self.verifier)
-                            # Record the adaptive adjudication as the probe's outcome
-                            # (it superseded the blocked canonical attempt).
-                            result, ctx = ares, actx
-                            if ac is not None:
-                                confirmed = ac
+                    ctx, result, confirmed = outcome
                     # reward the bandit on every probe that actually ran: a fired
                     # oracle is a hit, an exhausted probe is a miss.
                     if self.bandit is not None:
                         self.bandit.update(self.bandit_context, check.bug_class, reward=confirmed is not None)
-                    # Retain the coverage evidence for every probe that actually
-                    # adjudicated over observed data (result is not None) — BEFORE the
-                    # None-drop below discards the negative branch as it always has.
-                    if result is not None:
-                        self._record_probe(
-                            endpoint=request.url, method=request.method, insertion_point=point.id, param=point.name,
-                            check_id=check.id, bug_class=check.bug_class, result=result, ctx=ctx,
-                        )
-                    if confirmed is None:
-                        continue
-                    seen.add(key)
-                    kind = confirmed.confirmed_by
-                    findings.append(AuditFinding(
-                        check_id=check.id,
-                        bug_class=check.bug_class,
-                        insertion_point=point.id,
-                        param=point.name,
-                        endpoint=request.url,
-                        confidence=confirmed.confidence,
-                        confirmed_by=kind.value if hasattr(kind, "value") else str(kind),
-                        rationale=confirmed.rationale,
-                        oracle_context=_context_dump(ctx),
-                    ))
+                    if confirmed is not None:
+                        seen.add(key)
+                    self._emit(
+                        request=request, point=point, check=check, ctx=ctx, result=result,
+                        confirmed=confirmed, findings=findings,
+                    )
         except BudgetExceeded:
             pass
         return findings

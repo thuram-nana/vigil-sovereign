@@ -43,6 +43,8 @@ from .checks import (
     PathProbeCheck,
     RequestCheck,
     TimingCheck,
+    TimingObservations,
+    interleave_timing_jobs,
 )
 from .crawler import CrawlResult, Crawler, Page, Scope
 from .engine import AuditEngine, AuditFinding
@@ -169,6 +171,8 @@ __all__ = [
     "CorsActiveCheck",
     "HostHeaderCheck",
     "TimingCheck",
+    "TimingObservations",
+    "interleave_timing_jobs",
     "BooleanInferenceCheck",
     "JwtNoneCheck",
     "JwtForgeryCheck",

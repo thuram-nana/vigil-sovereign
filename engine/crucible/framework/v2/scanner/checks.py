@@ -26,6 +26,8 @@ from __future__ import annotations
 import math
 import re
 import time
+from collections.abc import Sequence
+from concurrent.futures import ThreadPoolExecutor
 from html.parser import HTMLParser
 from dataclasses import dataclass
 from typing import Callable, ClassVar, Protocol, runtime_checkable
@@ -512,6 +514,51 @@ def _as_dict(resp: object) -> dict:
 
 
 @dataclass(frozen=True)
+class TimingObservations:
+    """One insertion point's ORDERED latency observations for one timing check.
+
+    Immutable, and ordered exactly as they were taken: ``baseline[i]`` and
+    ``treatment[i]`` (and ``dose[i]``) are the i-th INTERLEAVED pair/triple. Keeping
+    the observations as a value — separate from the evidence they are later shaped
+    into — is what lets a driver overlap the idle waits of different points while
+    the per-point sequence stays byte-for-byte what the serial path produced."""
+
+    baseline: tuple[float, ...] = ()
+    treatment: tuple[float, ...] = ()
+    dose: tuple[float, ...] = ()
+
+
+def interleave_timing_jobs(jobs: "Sequence[Callable[[], object]]", *, workers: int = 1) -> list:
+    """Run independent per-point timing JOBS with at most ``workers`` IN FLIGHT.
+
+    A timing probe spends ~all of its wall-clock IDLE — blocked on the delay it asked
+    the target to take. This removes that idle time and nothing else:
+
+    * **One job = one insertion point's WHOLE timing sequence, run SERIALLY inside its
+      own worker.** The within-point interleaving of baseline vs treatment samples, the
+      sample count, the dose pairing and the "first confirmation at this point
+      short-circuits the rest of that bug class" rule are therefore untouched — a job is
+      literally the serial code path. Only the idle waits of *different points* overlap.
+    * **Results come back in SUBMISSION ORDER** (``ThreadPoolExecutor.map``), so the
+      caller emits findings and coverage records in exactly the order the serial sweep
+      would have.
+    * ``workers <= 1`` (the default) is exactly the old serial loop — no pool is even
+      created — so every existing caller is byte-identical.
+
+    ``workers`` is the caller's already-bounded per-host concurrency; this helper does
+    not invent one, and jobs are expected to send through the SAME gated transport (the
+    kill-switch / scope / charter / budget / rate gates still run per request)."""
+    jobs = list(jobs)
+    n = len(jobs)
+    w = max(1, int(workers))
+    if w <= 1 or n <= 1:
+        return [job() for job in jobs]
+    with ThreadPoolExecutor(max_workers=min(w, n), thread_name_prefix="crucible-timing") as pool:
+        # map preserves input (submission) order -> the caller's canonical ordering holds.
+        return list(pool.map(lambda job: job(), jobs))
+
+
+@dataclass(frozen=True)
 class TimingCheck:
     """Statistical time-based blind (SQLi / command injection).
 
@@ -533,6 +580,30 @@ class TimingCheck:
     dose_ms: float | None = None
 
     def probe(self, template: RequestTemplate, point: InsertionPoint, send: Send) -> FindingContext | None:
+        """Measure, then adjudicate — the composition of :meth:`collect` and
+        :meth:`context_from`. Byte-identical to the one-shot loop it replaces."""
+        return self.context_from(self.collect(template, point, send))
+
+    # -- the two halves of a probe ------------------------------------------------
+    # W7 (perf): a timing probe is ~100% IDLE — it is waiting on the delay it asked
+    # the target to take. Splitting the SLOW, I/O half (:meth:`collect`) from the
+    # PURE half (:meth:`context_from`) lets a driver overlap the idle waits of
+    # DIFFERENT insertion points (see :func:`interleave_timing_jobs`) WITHOUT
+    # touching the statistical discipline: the loop below — the WITHIN-POINT
+    # interleaving of baseline and treatment (and dose) observations, the sample
+    # count, the dose pairing — is unchanged and always runs serially for one point.
+
+    def collect(
+        self, template: RequestTemplate, point: InsertionPoint, send: Send
+    ) -> "TimingObservations":
+        """Take this point's ``samples`` INTERLEAVED observations, serially.
+
+        The interleaving is the statistical control: benign and delay-injecting
+        requests alternate within the point so any latency drift (load, GC, a
+        congested hop) biases baseline and treatment EQUALLY. The Mann-Whitney U
+        shift test and the dose-response ratio both rest on it, so this loop is
+        never reordered, batched or sampled down — it is the same loop, in the same
+        order, that the serial probe always ran."""
         base: list[float] = []
         treat: list[float] = []
         dose_samples: list[float] = []
@@ -541,7 +612,16 @@ class TimingCheck:
             treat.append(self._time(send, template, point, self.sleep_payload))
             if self.dose_payload is not None:
                 dose_samples.append(self._time(send, template, point, self.dose_payload))
+        return TimingObservations(
+            baseline=tuple(base), treatment=tuple(treat), dose=tuple(dose_samples))
 
+    def context_from(self, observations: "TimingObservations") -> FindingContext | None:
+        """Shape already-measured observations into the oracle's evidence. PURE — no
+        I/O, no clock, no rng — so the retained context is a deterministic function of
+        the observation sequence, and an offline re-verify of it re-fires identically."""
+        base = list(observations.baseline)
+        treat = list(observations.treatment)
+        dose_samples = list(observations.dose)
         dose = None
         if self.dose_payload is not None and self.dose_ms:
             dose = {
