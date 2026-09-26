@@ -457,7 +457,19 @@ def test_tls_scan_toolspec_argv_and_propose():
     spec = tls_scan(port=8443)
     assert spec.name == "tls_scan"
     assert spec.build_argv("example.test") == ["sslscan", "--no-colour", "example.test:8443"]
-    assert len(spec.redrives) == 2 and {r.bug_class for r in spec.redrives} == {"weak_tls", "weak_crypto_artifact"}
+    # WAVE 3 widened the family from 2 re-drives to 6, over 4 distinct bounded handshakes (the baseline
+    # modern-client capture is SHARED by three of them). The bug_class SET is unchanged — every new claim
+    # reuses the existing TLS_WEAKNESS oracle kind rather than adding one — so re-drives sharing a bug_class
+    # are told apart by their ``label``, which discriminates their check_id / finding_ref.
+    assert {r.bug_class for r in spec.redrives} == {"weak_tls", "weak_crypto_artifact"}
+    assert len(spec.redrives) == 6, [(r.bug_class, r.label, r.branch) for r in spec.redrives]
+    assert len({id(r.capture) for r in spec.redrives}) == 4, "the per-endpoint handshake budget drifted"
+    assert {r.branch for r in spec.redrives} == {
+        "tls_weakness.tls_handshake", "weak_crypto.cert_signature_algorithm",
+        "tls_weakness.deprecated_protocol_offer", "tls_weakness.weak_cipher_offer",
+        "tls_weakness.certificate_validity"}
+    assert len({(r.bug_class, r.label) for r in spec.redrives}) == len(spec.redrives), (
+        "two re-drives share a (bug_class, label) and would collide on one check_id")
     # proposes ONLY when the tool actually reached a TLS service
     reached = ToolOutcome(argv=[], exit_code=0, stdout="Connected to 1.2.3.4\n", stderr="",
                           timed_out=False, truncated=False, backend="x")
@@ -547,9 +559,14 @@ def test_loopback_tls_strong_hash_cert_is_inconclusive_not_clean(tmp_path: Path)
         f"a clean_incapable branch (leaf-cert only) leaked a false CLEAN through the runner: {wc}")
     assert any(o["outcome"] == Outcome.INCONCLUSIVE.value for o in wc), (
         f"the conclusive non-fire must be INCONCLUSIVE, not CLEAN/other: {wc}")
-    # and a strong-hash cert mints no weak_crypto FACT
-    assert not any(getattr(f, "confirmed_by", "") == "tls_weakness" for f in res.facts), (
-        "a strong-hash cert must not mint a weak-crypto FACT")
+    # and a strong-hash cert mints no weak_crypto FACT. Keyed on the weak_crypto RE-DRIVE's finding_ref, not
+    # on confirmed_by: several TLS claims share the TLS_WEAKNESS oracle KIND, so confirmed_by cannot say
+    # WHICH claim minted. That distinction became load-bearing with WAVE 3 — this fixture's server uses a
+    # DEFAULT server context whose minimum_version is SSLv3, so it genuinely completes a TLS1.0-only
+    # handshake and the deprecated-protocol branch correctly mints a (different, true) FACT over it.
+    assert not [f for f in res.facts
+                if str(getattr(f, "finding_ref", "")).endswith("#weak_crypto_artifact")], (
+        f"a strong-hash cert must not mint a WEAK-CRYPTO FACT; facts={[f.finding_ref for f in res.facts]}")
 
 
 def test_weak_crypto_branch_keeps_a_conclusive_nonfire_inconclusive_not_clean():

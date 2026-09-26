@@ -302,6 +302,90 @@
       ]
     },
     {
+      "id": "tls_weakness.deprecated_protocol_offer",
+      "check": "capture_version_restricted_handshake",
+      "evidence": "the outcome of a single bounded handshake in which VIGIL offered ONLY one deprecated protocol version (TLS1.0, then TLS1.1) to the scope-gated endpoint: either the negotiated version the endpoint AGREED to, or the alert the endpoint sent back on the established TCP channel. The proposer tool's rows are never read; VIGIL performs the restricted ClientHello itself through the same audited gate as verify.reachability.",
+      "fact_capable": true,
+      "clean_capable": true,
+      "preconditions": [
+        "gate_authorized",
+        "channel_established"
+      ],
+      "limitation": "The FACT is existential and exact: this endpoint completed a handshake at the deprecated version VIGIL offered. The CLEAN is narrower than it sounds and is scoped to the ONE version that probe offered — it holds only when the PEER answered with alert(70) protocol_version on an established channel (RFC 8446 4.1.1 / RFC 5246 7.2.2), which is what makes it a channel-confirmed negative rather than an absence of signal. A timeout, a TCP reset, a refused connect, a DNS failure, an EOF without an alert, a protocol the local OpenSSL build declined to offer, and any other alert (including the ambiguous handshake_failure(40), which a server also sends for no shared cipher) are all INCONCLUSIVE, never CLEAN. A server that refuses the version with a non-conforming alert is therefore under-reported as INCONCLUSIVE, which is the direction this branch chooses to be wrong in. SSLv2/SSLv3 are outside the probe set because modern OpenSSL cannot offer them, so their absence is untested rather than clean.",
+      "target_fact_capable": true,
+      "target_clean_capable": true,
+      "evidence_surface": "tls_handshake",
+      "implementation_refs": [
+        "integration/vigil_integration/live/tls_breadth.py:capture_version_restricted_handshake",
+        "integration/vigil_integration/live/tls_breadth.py:is_conclusive_protocol_refusal",
+        "integration/vigil_integration/live/external_tool.py:_version_offer_context"
+      ],
+      "oracle_version": "tls_weakness",
+      "control_requirements": [
+        "warden_scope_gate",
+        "vigil_owned_tls_handshake",
+        "closed_version_rejection_vocabulary",
+        "channel_established_precondition"
+      ]
+    },
+    {
+      "id": "tls_weakness.weak_cipher_offer",
+      "check": "capture_weak_cipher_handshake",
+      "evidence": "the cipher suite the scope-gated endpoint SELECTED when VIGIL offered only suites drawn from a closed, explicitly enumerated weak-suite vocabulary (no encryption / export-grade / RC4 / single-DES / 3DES / anonymous key exchange). The selected name is checked for membership in the exact offer recorded in that same capture before any context is built, and the deterministic tls_weakness oracle independently classifies it. sslscan's per-cipher rows are never read.",
+      "fact_capable": true,
+      "clean_capable": false,
+      "preconditions": [
+        "gate_authorized",
+        "channel_established"
+      ],
+      "limitation": "Scoped to the suites the LOCAL OpenSSL build can actually put in a ClientHello. Modern OpenSSL has removed RC4, single-DES, 3DES and the export suites from its default provider, so a large part of the vocabulary is not offerable and is therefore UNTESTED rather than absent from the server. Because of that, and because handshake_failure(40) does not say whether the cipher or something else was the obstacle, a refusal here is INCONCLUSIVE: this branch may not assert that an endpoint supports no weak suite. An empty offerable set makes the probe a no-op (SKIPPED), not a negative result.",
+      "target_fact_capable": true,
+      "target_clean_capable": true,
+      "blocking_work": "CLEAN requires (a) an offer channel that can present every suite in the vocabulary regardless of the host OpenSSL provider set - either a vendored legacy-provider build or a VIGIL-owned ClientHello writer that emits raw cipher_suite codepoints rather than relying on SSLContext.set_ciphers - and (b) a per-suite rejection signal specific enough to separate 'no shared cipher' from a version or policy refusal, so that 'every weak suite was offered and every one was refused' becomes a bounded negative over the whole vocabulary instead of an untested gap.",
+      "evidence_surface": "tls_handshake",
+      "implementation_refs": [
+        "integration/vigil_integration/live/tls_breadth.py:capture_weak_cipher_handshake",
+        "integration/vigil_integration/live/tls_breadth.py:negotiated_weak_cipher",
+        "integration/vigil_integration/live/external_tool.py:_weak_cipher_offer_context"
+      ],
+      "oracle_version": "tls_weakness",
+      "control_requirements": [
+        "warden_scope_gate",
+        "vigil_owned_tls_handshake",
+        "closed_weak_cipher_vocabulary",
+        "offer_membership_check"
+      ]
+    },
+    {
+      "id": "tls_weakness.certificate_validity",
+      "check": "classify_certificate_defects",
+      "evidence": "the presented leaf certificate's validity window, subject alternative names and issuer, re-derived from the RETAINED DER bytes VIGIL captured in its own gated handshake, compared against the capture instant RETAINED in that same evidence (captured_at_epoch) rather than a clock read at verify time - so the derivation is pure and re-runnable offline.",
+      "fact_capable": false,
+      "clean_capable": false,
+      "preconditions": [
+        "gate_authorized",
+        "channel_established"
+      ],
+      "limitation": "LEAD-only today. The derivation is deterministic and offline-re-runnable, but no OracleKind adjudicates certificate VALIDITY: tls_weakness_oracle judges the negotiated protocol and cipher, weak_crypto_artifact_oracle judges the signature hash and public-key size, and neither reads a validity window, a SAN or an issuer - so nothing can promote this to a FACT and nothing may clear it. Two further boundaries survive that gap: the capture retains only the LEAF, so self_signed is a structural property (issuer equals subject and the leaf verifies under its own key) rather than a trust-store verdict and a chain-anchored conclusion is out of reach; and captured_at_epoch is the runner's own clock, so any expiry conclusion is scoped to the instant of capture and is not a trusted timestamp.",
+      "target_fact_capable": true,
+      "target_clean_capable": true,
+      "blocking_work": "Promotion needs a deterministic VIGIL-owned certificate-validity oracle plus the one registry row that reaches it: a CERTIFICATE_VALIDITY OracleKind in engine/crucible/framework/v2/verify/models.py, its decision procedure in verify/oracles.py re-deriving the defect set from the retained DER at the retained instant, and an explicit BUG_CLASS_ORACLES row in verify/verifier.py keyed on the fresh certificate_validity context key (kept OUT of the frozen _ALL_ORACLES fallback so the unknown-class fallback stays at fifteen and the benchmark gate stays byte-identical). CLEAN additionally needs the capture to retain and adjudicate the FULL presented chain, so that 'no validity defect' is a bounded negative over the chain rather than over the leaf alone.",
+      "evidence_surface": "tls_handshake",
+      "implementation_refs": [
+        "integration/vigil_integration/live/tls_breadth.py:classify_certificate_defects",
+        "integration/vigil_integration/live/external_tool.py:_certificate_validity_context"
+      ],
+      "oracle_version": "",
+      "control_requirements": [
+        "warden_scope_gate",
+        "vigil_owned_tls_handshake",
+        "retained_leaf_der",
+        "retained_capture_instant",
+        "MISSING: deterministic_certificate_validity_oracle",
+        "MISSING: full_chain_retention"
+      ]
+    },
+    {
       "id": "version_range.manifest_membership",
       "check": "sbom_verify",
       "evidence": "a concrete pinned version parsed by VIGIL falls in a pinned advisory's affected range",

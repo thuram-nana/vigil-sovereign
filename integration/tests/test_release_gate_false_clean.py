@@ -225,7 +225,25 @@ def test_the_negatives_capable_branch_count_is_pinned_and_named():
     names all five surfaces). ``host_header.location_header`` is a REQUEST-LEVEL Host-header surface, probed
     once on the bare template — it does NOT depend on parameter insertion, so it gained nothing here. The
     OIDC check is not driven by the web re-drive at all, so a non-query ``redirect_uri`` stays a NAMED
-    residual. This test guards that honest scope against the registry drifting back to the overclaim."""
+    residual. This test guards that honest scope against the registry drifting back to the overclaim.
+
+    WAVE 3 (HexStrike TLS breadth) raises the pin from 6 to 7 by adding exactly ONE branch,
+    ``tls_weakness.deprecated_protocol_offer``. The reasoning, since this is the most safety-sensitive
+    claim the ladder can make: the negative there is something the PEER SAID, not a signal that was merely
+    absent. VIGIL narrows its own ClientHello to a single deprecated version and the endpoint answers on an
+    ESTABLISHED TCP channel with ``alert(70) protocol_version``, which RFC 8446 4.1.1 requires of a server
+    that will not speak the offered version. That is structurally the same kind of evidence as
+    ``service_reachability.tcp_handshake``'s negative (a connect the transport itself refused), and quite
+    unlike a body-derived non-firing, which cannot separate "the document says nothing" from "we could not
+    read the document". The authority is also narrow in three ways the registry records: it is scoped to the
+    ONE version that probe offered; the decision is a CLOSED singleton reason set
+    (``tls_breadth.VERSION_REJECTION_REASONS``), so a timeout, a reset, a locally-unofferable protocol or the
+    ambiguous ``handshake_failure(40)`` are INCONCLUSIVE; and the branch additionally declares the
+    ``channel_established`` precondition, so admission independently refuses to clear a probe whose channel
+    never came up. WAVE 3's other two branches deliberately did NOT gain absence-authority —
+    ``tls_weakness.weak_cipher_offer`` cannot, because the local OpenSSL build limits which legacy suites can
+    be offered at all (a refusal may mean untested), and ``tls_weakness.certificate_validity`` is LEAD-only
+    because no OracleKind adjudicates certificate validity yet."""
     branches = {b["id"]: b for b in _branches()}
     clean = sorted(bid for bid, b in branches.items() if b.get("clean_capable"))
     expected = sorted([
@@ -235,11 +253,24 @@ def test_the_negatives_capable_branch_count_is_pinned_and_named():
         "oidc_redirect_uri.location_header",
         "service_reachability.tcp_handshake",
         "tls_weakness.tls_handshake",
+        "tls_weakness.deprecated_protocol_offer",
     ])
     assert clean == expected, (
         f"the set of CLEAN-capable branches changed to {clean}; if this is intended, update the pin AND the "
         f"reasoning — a clean-capable branch is one that may assert absence, the most safety-sensitive claim")
-    assert len(clean) == 6, f"expected exactly 6 negatives-capable branches, found {len(clean)}"
+    assert len(clean) == 7, f"expected exactly 7 negatives-capable branches, found {len(clean)}"
+    # WAVE 3's clean-capable addition must keep BOTH guards that justify its absence-authority: the closed
+    # peer-alert reason set, and the channel_established precondition admission evaluates per observation.
+    dep = branches["tls_weakness.deprecated_protocol_offer"]
+    assert "channel_established" in dep.get("preconditions", []), (
+        "the deprecated-protocol branch may only clear over an ESTABLISHED channel")
+    from vigil_integration.live import tls_breadth as _tb
+    assert _tb.VERSION_REJECTION_REASONS == frozenset({"TLSV1_ALERT_PROTOCOL_VERSION"}), (
+        "the clean-capable TLS branch widened its rejection vocabulary — every added reason is a new way "
+        "for a non-version failure to launder into a clean bill of health")
+    for lead_only in ("tls_weakness.weak_cipher_offer", "tls_weakness.certificate_validity"):
+        assert branches[lead_only]["clean_capable"] is False, (
+            f"{lead_only} gained absence-authority it has no bounded negative for")
     # the three redirect HEADER branches must all remain negatives-capable ...
     for header_branch in ("open_redirect.location_header", "host_header.location_header",
                           "oidc_redirect_uri.location_header"):

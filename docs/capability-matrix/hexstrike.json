@@ -104,9 +104,12 @@
       "fact_capable": true,
       "claim_families": [
         "tls-config",
-        "cert-posture"
+        "tls-protocol-version",
+        "tls-cipher-selection",
+        "cert-posture",
+        "cert-validity"
       ],
-      "notes": "runner re-drives its own gated TLS handshake; weak_tls + weak_crypto_artifact FACTs. weak_tls is scoped to what a modern client still negotiates (honest)."
+      "notes": "PROPOSER ONLY: sslscan says where a TLS service is; its per-cipher rows are never evidence. The runner re-drives FOUR of its OWN bounded, scope-gated handshakes per endpoint and deterministic oracles judge those. FACT-capable branches: tls_weakness.tls_handshake (baseline modern-client negotiation), weak_crypto.cert_signature_algorithm (the presented leaf's signature hash), tls_weakness.deprecated_protocol_offer (VIGIL offers ONLY TLS1.0, then ONLY TLS1.1, and the endpoint completes the handshake), and tls_weakness.weak_cipher_offer (VIGIL offers ONLY a closed weak-suite vocabulary and the endpoint SELECTS one). tls_weakness.deprecated_protocol_offer is also CLEAN-capable, and it is one of very few branches that are: the negative is a peer alert(70) protocol_version on an established channel, scoped to the single version that probe offered. A timeout, a reset, a locally-unofferable protocol or any other alert is inconclusive there, not clean. Boundaries: weak_tls on the baseline handshake is scoped to what a modern client still negotiates; the weak-cipher branch is not clean-capable because the local OpenSSL build limits which legacy suites can be offered at all, so a refusal may mean untested; and tls_weakness.certificate_validity (expired / not-yet-valid / hostname mismatch / self-signed, re-derived from the retained leaf DER at the retained capture instant) is lead-only, because no OracleKind adjudicates certificate validity yet."
     },
     {
       "name": "httpx",
