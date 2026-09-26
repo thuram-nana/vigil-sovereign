@@ -31,21 +31,28 @@ _DB_LOCK = threading.Lock()
 from framework.v2.scanner.checks import BooleanInferenceCheck
 
 try:  # pragma: no cover - see the _check() note: this module must stay RUNNABLE against the pre-fix
-    from framework.v2.scanner.checks import BOOLEAN_DISCRIMINATOR   # commits it is the regression for
+    from framework.v2.scanner.checks import (                       # commits it is the regression for
+        BOOLEAN_DISCRIMINATOR, boolean_clause_families)
 except ImportError:  # pragma: no cover
     BOOLEAN_DISCRIMINATOR = {"dimensions": ["status", "length", "lexical"]}
+
+    def boolean_clause_families(rng=None):
+        return ((("x' OR '1'='1", "x' OR 'b'>'a", "x' OR 9>4 AND 'k'<'m", "x' OR 'ab' LIKE 'a%",
+                  "x' OR 'zz'<>'yy", "x' OR 'c' BETWEEN 'a' AND 'z", "x' OR 1 IN (SELECT 1) AND 'a'='a"),
+                 ("x' OR '1'='2", "x' OR 'a'>'b", "x' OR 4>9 AND 'k'<'m", "x' OR 'ab' LIKE 'z%",
+                  "x' OR 'zz'<>'zz", "x' OR 'u' BETWEEN 'a' AND 'z", "x' OR 1 IN (SELECT 2) AND 'a'='a")),)
 from framework.v2.scanner.insertion import HttpRequest, InsertionKind, RequestTemplate
 from framework.v2.verify.confirmation import confirm_finding
 from framework.v2.verify.verifier import OracleVerifier
 
-# The shipped single-quote-breakout family (runtime_redrive._BOOLEAN_CLAUSE_FAMILIES[0]): K_T = K_F = 6
-# clauses per truth value that VARY IN COMPARISON SHAPE — `=`, `>`, a compound, `LIKE`, `<>`, `BETWEEN` —
-# not merely in their literals. See _WafApp below for why the shape, not just the literal, has to vary.
-_TRUE_CLAUSES = ("x' OR '1'='1", "x' OR 'b'>'a", "x' OR 9>4 AND 'k'<'m", "x' OR 'ab' LIKE 'a%",
-                 "x' OR 'zz'<>'yy", "x' OR 'c' BETWEEN 'a' AND 'z")
-_FALSE_CLAUSES = ("x' OR '1'='2", "x' OR 'a'>'b", "x' OR 4>9 AND 'k'<'m", "x' OR 'ab' LIKE 'z%",
-                  "x' OR 'zz'<>'zz", "x' OR 'c' BETWEEN 'x' AND 'z")
-# The LITERAL-ONLY clause set this replaced: every TRUE is `X = X`, every FALSE is `X = Y`.
+# THE SHIPPED single-quote-breakout family, from the one definition the scanner arm actually uses
+# (seeded here only so the tests are reproducible; live runs randomise the literals per run).
+_TRUE_CLAUSES, _FALSE_CLAUSES = boolean_clause_families(random.Random(4242))[0]
+# Every clause of the shipped family MINUS the SQL-evaluated pair — i.e. the purely CONSTANT-FOLDABLE
+# subset. Shape-varied, so a CRS-942130 backreference cannot partition it, but a complete constant
+# FOLDER can. Used as the both-halves control in the folder regression below.
+_FOLDABLE_TRUE, _FOLDABLE_FALSE = _TRUE_CLAUSES[:-1], _FALSE_CLAUSES[:-1]
+# The LITERAL-ONLY clause set this all replaced: every TRUE is `X = X`, every FALSE is `X = Y`.
 _LITERAL_ONLY_TRUE = ("x' OR '1'='1", "x' OR '7'='7", "x' OR 'ab'='ab", "x' OR 'q9'='q9")
 _LITERAL_ONLY_FALSE = ("x' OR '1'='2", "x' OR '7'='8", "x' OR 'ab'='ac", "x' OR 'q9'='q8")
 
@@ -80,6 +87,76 @@ _CRS_942130 = re.compile(
     re.I | re.X)
 
 
+_SQ, _DQ, _NUM = r"'[^']*'", r'"[^"]*"', r"\d+"
+_LIT = f"(?:{_SQ}|{_DQ}|{_NUM})"
+
+
+def _lit_val(tok: str):
+    tok = tok.strip()
+    if len(tok) >= 2 and tok[0] == tok[-1] and tok[0] in "'\"":
+        return tok[1:-1]
+    return int(tok)
+
+
+def _fold_atom(atom: str, shapes: frozenset):
+    """Constant-fold ONE literal-vs-literal comparison: True / False / None (undecidable).
+    ``shapes`` selects which comparison forms this filter understands, so a DELIBERATELY INCOMPLETE
+    filter can be built for the both-halves control."""
+    m = re.fullmatch(rf"\s*({_LIT})\s*(<>|!=|>=|<=|=|>|<)\s*({_LIT})\s*", atom)
+    if m and m.group(2) in shapes:
+        try:
+            a, b = _lit_val(m.group(1)), _lit_val(m.group(3))
+        except ValueError:
+            return None
+        if type(a) is not type(b):
+            return None
+        return {"=": a == b, "<>": a != b, "!=": a != b, ">": a > b,
+                "<": a < b, ">=": a >= b, "<=": a <= b}[m.group(2)]
+    m = re.fullmatch(rf"\s*({_LIT})\s+LIKE\s+({_LIT})\s*", atom, re.I)
+    if m and "LIKE" in shapes:
+        a, pat = str(_lit_val(m.group(1))), str(_lit_val(m.group(2)))
+        rx = "".join(".*" if c == "%" else "." if c == "_" else re.escape(c) for c in pat)
+        return re.fullmatch(rx, a) is not None
+    m = re.fullmatch(rf"\s*({_LIT})\s+BETWEEN\s+({_LIT})\s+AND\s+({_LIT})\s*", atom, re.I)
+    if m and "BETWEEN" in shapes:
+        try:
+            x, lo, hi = (_lit_val(g) for g in m.groups())
+        except ValueError:
+            return None
+        return lo <= x <= hi if type(x) is type(lo) is type(hi) else None
+    return None
+
+
+_ALL_SHAPES = frozenset({"=", "<>", "!=", ">", "<", ">=", "<=", "LIKE", "BETWEEN"})
+
+
+def _folds_true(value: str, shapes: frozenset = _ALL_SHAPES) -> bool:
+    """A CONSTANT-FOLDING request filter — no SQL engine, no DB, no parser generator. Tokenise the value
+    in the three breakout contexts, split the tail on OR/AND, fold every literal-vs-literal comparison,
+    and report whether any top-level disjunct folds TRUE. ~60 lines, and it is *complete* over the
+    foldable shapes, which is exactly why comparison-shape diversity alone does not defeat it."""
+    for wrapped in (value, "'" + value + "'", '"' + value + '"'):
+        expr = re.sub(rf"({_LIT}\s+BETWEEN\s+{_LIT})\s+AND\s+",   # BETWEEN owns its own AND
+                      lambda m: m.group(1) + " \x00 ", wrapped, flags=re.I)
+        for disj in re.split(r"\bOR\b", expr, flags=re.I):
+            conj = [c.replace("\x00", "AND") for c in re.split(r"\bAND\b", disj, flags=re.I)]
+            if conj and all(_fold_atom(c, shapes) is True for c in conj):
+                return True
+    return False
+
+
+def _folding_app(shapes: frozenset = _ALL_SHAPES) -> type:
+    """A STATIC, NON-VULNERABLE page behind the constant folder above."""
+
+    class _App(_WafApp):
+        _shapes = shapes
+
+        def _blocked(self, q: str) -> bool:
+            return _folds_true(q, type(self)._shapes)
+
+    return _App
+
+
 class _WafApp(BaseHTTPRequestHandler):
     """A STATIC, NON-VULNERABLE search page behind that rule. No SQL runs anywhere and the app never
     varies — there is NO boolean channel. But the rule is a function of SURFACE FORM only, and with a
@@ -90,9 +167,12 @@ class _WafApp(BaseHTTPRequestHandler):
     def log_message(self, *a: object) -> None:
         return
 
+    def _blocked(self, q: str) -> bool:
+        return bool(_CRS_942130.search(q))
+
     def do_GET(self) -> None:  # noqa: N802
         q = parse_qs(urlsplit(self.path).query).get("q", [""])[0]
-        blocked = bool(_CRS_942130.search(q))
+        blocked = self._blocked(q)
         body = (b"<html><body><h1>403 Forbidden</h1><p>Blocked by the web application firewall. "
                 b"Reference WAF-942130-SQLI-TAUTOLOGY</p></body></html>" if blocked else
                 b"<html><body><h1>Search</h1><p>No results found.</p><p>Try another term.</p></body></html>")
@@ -241,6 +321,49 @@ def _false_facts(handler: type[BaseHTTPRequestHandler], loops: int, **kw) -> int
     return facts
 
 
+def test_boolean_clause_families() -> None:
+    """Every invariant the shipped clause families must hold, checked over randomised draws against a
+    REAL SQL engine — not against a regex stand-in, because the properties are semantic.
+
+      * SYNTAX + TRUTH: each clause parses in ITS OWN breakout context on sqlite3 and evaluates to the
+        truth value it claims (a quote-breakout clause must end on an UNCLOSED quote so the origin's
+        own trailing quote closes it — the easiest thing to get wrong when editing a shape).
+      * LENGTH-MATCHED index-aligned TRUE[i] / FALSE[i]: a length-correlated set would re-open the hole
+        through the ``length`` dimension, because an endpoint that merely ECHOES the parameter would
+        then separate by truth value.
+      * DISTINCT within and across the two sides (duplicates are not independent draws).
+      * NOT PARTITIONABLE BY A COMPLETE CONSTANT FOLDER: the folder must fail to block at least one
+        TRUE clause, or to leave at least one FALSE clause unblocked. This is what the SQL-evaluated
+        ``IN (SELECT ...)`` pair buys, and it is the property shape diversity alone does NOT give.
+      * RANDOMISED: two draws differ, so the set is not a public constant an operator can paste into an
+        exact-string blocklist."""
+    ctxs = ["SELECT count(*) FROM users WHERE name = '%s'",
+            "SELECT count(*) FROM users WHERE id = %s",
+            'SELECT count(*) FROM users WHERE name = "%s"']
+    db = sqlite3.connect(":memory:")
+    db.execute("CREATE TABLE users(id INTEGER, name TEXT)")
+    db.execute("INSERT INTO users VALUES(7, 'widget')")   # the base value 'x' / 1 matches NOTHING
+    for seed in range(60):
+        families = boolean_clause_families(random.Random(seed))
+        assert len(families) == len(ctxs)
+        for fi, (trues, falses) in enumerate(families):
+            assert len(trues) >= 4 and len(trues) == len(falses)
+            assert len(set(trues)) == len(trues) and len(set(falses)) == len(falses)
+            assert not set(trues) & set(falses)
+            for want, clauses in ((1, trues), (0, falses)):
+                for c in clauses:
+                    got = db.execute(ctxs[fi] % c).fetchone()[0]   # raises on a syntax error
+                    assert bool(got) == bool(want), f"seed {seed} fam {fi}: {c!r} is not {bool(want)}"
+            for t, f in zip(trues, falses):
+                assert len(t) == len(f), f"seed {seed} fam {fi}: {t!r} / {f!r} are not length-matched"
+            blocked_t = [_folds_true(c) for c in trues]
+            blocked_f = [_folds_true(c) for c in falses]
+            assert not (all(blocked_t) and not any(blocked_f)), (
+                f"seed {seed} fam {fi}: a COMPLETE constant folder partitions the family perfectly — "
+                "the SQL-evaluated pair is missing or has become foldable")
+    assert boolean_clause_families() != boolean_clause_families(), "the literals are not randomised"
+
+
 def test_sprt_check_confirms_boolean_sqli() -> None:
     # THE TRUE POSITIVE: an origin that really evaluates the clause. Every varied always-true
     # clause lands on the rows page, every always-false clause on "no results" — a clean
@@ -272,6 +395,39 @@ def test_a_truth_correlated_lexical_waf_does_not_mint_on_a_static_page() -> None
     assert shipped == 0, (
         f"the shipped shape-varied clause set minted {shipped}/20 FALSE boolean_sqli FACTs behind a "
         "purely LEXICAL truth-correlated filter over a static page")
+
+
+def test_a_complete_constant_folder_does_not_mint_on_a_static_page() -> None:
+    """RED-PEN BLOCK-A REGRESSION — shape diversity ALONE is not enough, and claiming it was is the
+    absolute this test replaces.
+
+    A ~60-line CONSTANT-FOLDING filter (still no SQL engine and no DB: tokenise, split on OR/AND, fold
+    every literal-vs-literal comparison, block if any top-level disjunct folds TRUE) is COMPLETE over
+    the foldable shapes, so it partitions a purely-foldable clause set PERFECTLY however many shapes it
+    spans. What defeats it is the SQL-EVALUATED pair — `IN (SELECT ...)`, whose truth needs evaluation,
+    not folding. Whichever way the filter guesses on it the round refutes: block both sides and the
+    FALSE cluster disagrees; block neither and the TRUE cluster does.
+
+    BOTH HALVES are asserted so this cannot pass vacuously: the foldable subset MUST still mint (the
+    filter really does partition it) and the shipped set MUST NOT."""
+    foldable = _false_facts(_folding_app(), 20, trues=_FOLDABLE_TRUE, falses=_FOLDABLE_FALSE)
+    assert foldable == 20, (
+        f"the CONSTANT-FOLDABLE subset minted only {foldable}/20 — the folder fixture no longer "
+        "reproduces the hazard, so the shipped result below proves nothing")
+    shipped = _false_facts(_folding_app(), 20)
+    assert shipped == 0, (
+        f"the shipped clause set minted {shipped}/20 FALSE boolean_sqli FACTs behind a COMPLETE "
+        "constant-folding filter over a static page")
+
+
+def test_every_incomplete_filter_refutes_leave_one_shape_out() -> None:
+    """The mechanism stated precisely: a filter must be COMPLETE over the whole shape set to partition.
+    Blind it to any ONE comparison shape and the TRUE cluster stops agreeing, so the round refutes —
+    which is the same reason a CRS-942130 backreference (equality-only, in effect) refutes."""
+    for blinded in ("=", ">", "<", "LIKE", "BETWEEN", "<>"):
+        shapes = frozenset(_ALL_SHAPES - {blinded})
+        facts = _false_facts(_folding_app(shapes), 5, trues=_FOLDABLE_TRUE, falses=_FOLDABLE_FALSE)
+        assert facts == 0, f"a filter blind to {blinded!r} still minted {facts}/5 on a static page"
 
 
 def test_the_check_pins_the_boolean_discriminator_off_latency() -> None:

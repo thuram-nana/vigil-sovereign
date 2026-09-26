@@ -50,13 +50,22 @@ The signal is the **boolean differential** already computed in `framework/v2/ver
 
   **Two things that bound does not cover** (the oracle docstring is the normative statement):
 
-  1. **A truth-correlated LEXICAL filter.** The bound assumes the clause set carries no SURFACE feature
-     aligned with truth. If every TRUE clause is `X = X` and every FALSE is `X = Y`, a CRS-942130-shape
-     BACKREFERENCE rule — pure regex, no SQL parsing — blocks exactly the TRUE side, and a STATIC
-     non-vulnerable page behind it mints at **rate 1.0**. `K` is **not** a lever (every extra `X = X`
-     matches the same rule); **clause-SHAPE diversity** is: the clauses of one truth value must differ in
-     COMPARISON SHAPE (`=` / `>` / `LIKE` / a compound), so no single surface rule can partition them, and a
-     WAF that catches one shape then breaks within-truth agreement and REFUTES.
+  1. **A truth-correlated REQUEST filter** — an interposer that partitions the probes by a property of the
+     REQUEST that tracks truth value, with no boolean channel behind it. The bound says nothing about this:
+     it is a property of the CLAUSE SET, not of the origin. Measured, in increasing strength:
+     a CRS-942130-shape BACKREFERENCE rule over a literal-only set (`X = X` true, `X = Y` false) mints at
+     **rate 1.0**; any **incomplete** filter **refutes**, because the shipped clauses of one truth value
+     differ in COMPARISON SHAPE so a partial filter blocks only part of the TRUE side and within-truth
+     agreement breaks (0 for CRS-942130 and for every leave-one-shape-out variant); but a **complete**
+     ~60-line CONSTANT FOLDER — still no SQL engine — partitions a purely-foldable set perfectly however
+     many shapes it spans (**500/500**). Shape diversity alone is therefore *not* sufficient, and saying it
+     made the set unpartitionable was an absolute that measurement refuted. What closes it is at least one
+     **SQL-EVALUATED** pair per family (`{d} IN (SELECT {d})` vs `{d} IN (SELECT {other})`) whose truth
+     needs evaluation, not folding: the same complete folder goes to **0**. **Residual (a2), named not
+     closed:** an interposer that genuinely EVALUATES the expression (a WAF with a real SQL parser) can
+     still partition, and no clause set defeats that from the response side — it needs an out-of-band
+     channel. A weaker, separate variant — an exact-string blocklist of the clause set — is mitigated by
+     randomising the literals per run; that does nothing against a filter that generalises.
   2. **A deterministic but ARBITRARY function of the URL** (a per-URL CDN cache over an origin that picked a
      variant at fill time): the byte-identical repeats are cache hits and re-running the same clauses is not
      new evidence, so the bound degrades to `2 * 2**-(K_T+K_F)` (against `~0.5` for a

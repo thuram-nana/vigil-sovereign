@@ -32,7 +32,7 @@ TRUST = TrustRoot(threshold=1, authorizers=[
     AuthorizerKey(key_id="root0", name="root0", public_key_b64=SIGNER.public_key_b64)])
 
 # A genuinely firing boolean-blind SQLi context: the response is a FUNCTION of the injected truth
-# value — every one of 3 distinct always-TRUE clauses returns the whole table, every one of 3 distinct
+# value — every one of K distinct always-TRUE clauses returns the whole table, every one of K distinct
 # always-FALSE clauses returns a stable "no results", and each clause's byte-identical repeat agrees.
 _MANY = {"status": 200, "body": "id=1\nid=2\nid=3\nid=4\nid=5 (all rows)"}
 _NONE = {"status": 200, "body": "no results"}

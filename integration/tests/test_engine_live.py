@@ -49,7 +49,7 @@ from vigil_integration.live.wiring import (  # noqa: E402
 LOOPBACK = "http://127.0.0.1:18080/search?q=1"
 
 # a boolean-SQLi oracle_context that FIRES — the exact TRUTH-VALUE ATTRIBUTION shape the BOOLEAN_INFERENCE
-# oracle re-fires over: every one of 3 distinct always-TRUE clauses lands on one response, every one of 3
+# oracle re-fires over: every one of K distinct always-TRUE clauses lands on one response, every one of K
 # distinct always-FALSE clauses on another, and each clause's byte-identical repeat agrees.
 _MANY = {"status": 200, "body": "id=1\nid=2\nid=3\nid=4\nid=5 (all rows)"}
 _NONE = {"status": 200, "body": "no results"}

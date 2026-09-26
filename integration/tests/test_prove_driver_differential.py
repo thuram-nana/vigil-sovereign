@@ -528,10 +528,14 @@ _REAL_ENG = "boolreal"
 # varying in COMPARISON SHAPE (`=`, `>`, `LIKE`, a compound), not merely in their literals. A set whose
 # truth value tracks one SURFACE feature (e.g. "both operands are the same token") is partitionable by a
 # regex WAF with no SQL engine at all; see the scanner-side lexical-filter regression.
+# ...and at least one SQL-EVALUATED pair whose truth needs EVALUATION, not constant folding: shape
+# diversity alone is partitionable by a complete constant folder with no SQL engine (measured 500/500).
 _TRUE_TEMPLATES = ("1' AND 1=1 -- {challenge}", "1' AND 'b'>'a' -- {challenge}",
-                   "1' AND 'ab' LIKE 'a%' -- {challenge}", "1' AND 9>4 AND 2<5 -- {challenge}")
+                   "1' AND 'ab' LIKE 'a%' -- {challenge}", "1' AND 9>4 AND 2<5 -- {challenge}",
+                   "1' AND 1 IN (SELECT 1) -- {challenge}")
 _FALSE_TEMPLATES = ("1' AND 1=2 -- {challenge}", "1' AND 'a'>'b' -- {challenge}",
-                    "1' AND 'ab' LIKE 'z%' -- {challenge}", "1' AND 4>9 AND 2<5 -- {challenge}")
+                    "1' AND 'ab' LIKE 'z%' -- {challenge}", "1' AND 4>9 AND 2<5 -- {challenge}",
+                    "1' AND 1 IN (SELECT 2) -- {challenge}")
 _REAL_CHARTER = """\
 # Engagement charter — `{slug}`
 

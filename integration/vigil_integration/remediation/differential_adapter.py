@@ -138,12 +138,18 @@ class DifferentialHttpAdapter:
       * ``base_value`` — the benign value the parameter normally carries (the baseline probe; NO metachars).
       * ``true_payload_templates`` / ``false_payload_templates`` — ``K_T >= 2`` DISTINCT always-TRUE and
         ``K_F >= 2`` DISTINCT always-FALSE data-dependent predicate payloads, each carrying the literal
-        ``{challenge}`` inert-marker slot; metacharacter-identical in class. They must VARY IN COMPARISON
-        SHAPE (``=`` / ``>`` / ``LIKE`` / a compound), not merely in their literals: a set whose truth value
-        tracks one SURFACE feature is partitionable by a regex WAF with no SQL engine at all. FOUR per truth
-        value is the hard floor (the oracle's CONFIRM floor — fewer can only ever refute, which on the
-        REMEDIATED branch is the dangerous direction); more distinct clauses is also what lowers the
-        per-URL-caching residual the oracle docstring states.
+        ``{challenge}`` inert-marker slot; metacharacter-identical in class. Two CALLER OBLIGATIONS the
+        constructor cannot check (both undecidable from the template string, like data-dependence itself,
+        and both stated in full as residual (a) on ``boolean_inference_oracle``):
+          * they must VARY IN COMPARISON SHAPE (``=`` / ``>`` / ``LIKE`` / a compound), not merely in
+            their literals — a set whose truth value tracks one SURFACE feature is partitioned by a
+            CRS-942130-shape regex with no SQL engine at all (measured: mints at rate 1.0); and
+          * at least one pair must be SQL-EVALUATED rather than constant-foldable (e.g.
+            ``1 IN (SELECT 1)`` vs ``1 IN (SELECT 2)``) — shape diversity ALONE is partitioned by a
+            complete ~60-line constant folder, also with no SQL engine (measured 500/500).
+        FOUR per truth value is the hard floor (the oracle's CONFIRM floor — fewer can only ever refute,
+        which on the REMEDIATED branch is the dangerous direction); more distinct clauses is also what
+        lowers the per-URL-caching residual the oracle docstring states.
       * ``original_firing_rounds`` — RETAINED confirming ``probe_rounds`` in the same truth-value shape (the
         harness-capability positive control: the SAME boolean oracle still CONFIRMS on the known-vulnerable
         rounds).

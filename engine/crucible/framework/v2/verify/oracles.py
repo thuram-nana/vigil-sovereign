@@ -707,25 +707,29 @@ def _boolean_round_arm(r: Mapping[str, Any], key: str) -> list[Any]:
 #   * MARKER is excluded too: it is a producer-supplied needle, not an observed difference.
 #
 # Enforced HERE rather than at each call site so no caller — and no RETAINED CONTEXT re-executed from an
-# untrusted report — can widen the boolean channel back onto timing.
+# untrusted report — can widen the boolean channel back onto timing, or re-tune its SENSITIVITY: the
+# comparison THRESHOLDS are pinned as well (see _boolean_discriminator), because a threshold fitted to a
+# particular set of retained bytes is its own forgery.
 _BOOLEAN_DIMENSIONS = ("status", "length", "lexical", "structural")
 _BOOLEAN_DEFAULT_DIMENSIONS = ("status", "length", "lexical")
 
 
 def _boolean_discriminator(discriminator: Mapping[str, Any] | str | None) -> dict[str, Any]:
-    """The effective discriminator for every boolean comparison: the caller's thresholds kept, the
-    DIMENSIONS forced into ``_BOOLEAN_DIMENSIONS`` (never latency, never marker) and ``expect`` forced to
-    the plain "differ" reading the truth-value test is defined in terms of."""
+    """The effective discriminator for EVERY boolean comparison — fully protocol-pinned.
+
+    Only the DIMENSIONS may be narrowed by a caller, and only within ``_BOOLEAN_DIMENSIONS``. The
+    THRESHOLDS are pinned too (they are simply dropped): they set SENSITIVITY, and a threshold fitted to
+    a particular set of retained bytes can manufacture "within-cluster same, across-cluster differ" out
+    of noise — the same forgery the SPRT parameters allowed. No live caller passes thresholds (all three
+    pass protocol constants), so pinning costs nothing and removes the seam entirely rather than leaving
+    a comment claiming it is unreachable."""
     if isinstance(discriminator, str):
         disc: dict[str, Any] = {"dimensions": [discriminator]}
     else:
         disc = dict(discriminator or {})
     wanted = [d for d in (disc.get("dimensions") or _BOOLEAN_DEFAULT_DIMENSIONS)
               if d in _BOOLEAN_DIMENSIONS]
-    disc["dimensions"] = wanted or list(_BOOLEAN_DEFAULT_DIMENSIONS)
-    disc["expect"] = "differ"
-    disc.pop("true_marker", None)
-    return disc
+    return {"dimensions": wanted or list(_BOOLEAN_DEFAULT_DIMENSIONS), "expect": "differ"}
 
 
 def boolean_inference_oracle(
@@ -776,30 +780,64 @@ def boolean_inference_oracle(
 
         s  =  SUM over a != b of  p_a**(2*K_T) * p_b**(2*K_F)   <=  2 * 2**-(2*K_T + 2*K_F)
 
-    (maximised by a UNIFORM 2-variant page). At the ``K_T = K_F = 6`` the drivers ship that is
-    ``s <= 2 * 2**-24 = 1.2e-7``; at the oracle's CONFIRM floor (``K_T = K_F = 4``) it is
+    (maximised by a UNIFORM 2-variant page). At the ``K_T = K_F = 7`` the drivers ship that is
+    ``s <= 2 * 2**-28 = 7.5e-9``; at the oracle's CONFIRM floor (``K_T = K_F = 4``) it is
     ``s <= 2 * 2**-16 = 3.1e-5``, still ~3300x below the SPRT's null rate ``p0 = 0.1``. With
     ``alpha = beta = 0.05, p1 = 0.9, p0 = 0.1`` the confirm boundary is two NET signalling
     rounds, so a gambler's-ruin bound puts the per-FINDING false-confirm probability at
-    ``<= s**2 / (1 - 2s)`` — ``~1.4e-14`` at ``K = 6`` — and that bound holds with NO determinism
+    ``<= s**2 / (1 - 2s)`` — ``~5.6e-17`` at ``K = 7`` — and that bound holds with NO determinism
     pre-gate at all. The skew that defeated a 16-sample determinism pre-gate (a dominant variant
     ``p ~ 0.9`` passes ``0.9**16 ~ 19%`` of windows) makes this test STRICTER, not weaker.
 
     TWO THINGS THIS BOUND DOES NOT COVER. Both are real, both are demonstrated, and NEITHER is
     "impossible to observe" — an earlier revision of this docstring said so and was wrong:
 
-      (a) A TRUTH-CORRELATED LEXICAL FILTER. The bound assumes the clause set carries no SURFACE
-          feature aligned with truth. It is easy to violate: if every TRUE clause is ``X = X``
-          and every FALSE clause is ``X = Y``, a ModSecurity-CRS-942130-shape BACKREFERENCE rule
-          — pure regex, no SQL parsing — blocks exactly the TRUE side, and a STATIC
-          non-vulnerable page behind it mints at rate 1.0, not ``s``. ``K`` is NOT a lever here:
-          every extra ``X = X`` matches the same rule. The lever is CLAUSE-SHAPE DIVERSITY —
-          the clauses of one truth value must differ in COMPARISON SHAPE (``=`` / ``>`` /
-          ``LIKE`` / a compound), not merely in their literals, so that no single surface rule
-          can partition them. The drivers ship shape-varied families for exactly this reason
-          (``live/runtime_redrive.py::_BOOLEAN_CLAUSE_FAMILIES``), and a WAF that blocks one
-          shape then breaks WITHIN-TRUTH agreement and REFUTES. A caller that supplies its own
-          clause sets inherits this obligation.
+      (a) A TRUTH-CORRELATED REQUEST FILTER — an interposer that partitions the probes by a
+          property of the REQUEST that happens to track truth value, with no boolean channel
+          behind it at all. The bound above says nothing about this, because it is a property of
+          the CLAUSE SET, not of the page. Three measured points, in increasing strength:
+
+            * A LEXICAL rule. If every TRUE clause is ``X = X`` and every FALSE clause is
+              ``X = Y``, a ModSecurity-CRS-942130-shape BACKREFERENCE rule — pure regex — blocks
+              exactly the TRUE side, and a STATIC non-vulnerable page behind it mints at RATE 1.0
+              (measured 2000/2000). ``K`` is no lever: every extra ``X = X`` matches the same
+              rule.
+            * An INCOMPLETE filter REFUTES. Because the shipped clauses of one truth value differ
+              in COMPARISON SHAPE (``=``, ``>``, a compound, ``LIKE``, ``<>``, ``BETWEEN``), a
+              filter that understands only some of them blocks only part of the TRUE side, the
+              WITHIN-TRUTH cluster stops agreeing, and the round refutes. Measured 0 for the
+              CRS-942130 rule and for equality-only, lexicographic-only, numeric-direction-only,
+              LIKE-prefix-only and generic block-any-OR/quote filters, and 0 in a
+              LEAVE-ONE-SHAPE-OUT sweep for every one of the six foldable shapes blinded.
+            * A COMPLETE filter does NOT refute, and shape diversity alone does not stop it. A
+              ~60-line CONSTANT FOLDER — tokenise, split on OR/AND, fold every literal-vs-literal
+              comparison, block if any top-level disjunct folds TRUE; still no SQL engine and no
+              DB — is complete over the foldable shapes and partitions a purely-foldable set
+              PERFECTLY, however many shapes it spans: measured 200/200 here and 500/500 by the
+              red-pen that found it. Saying shape diversity
+              made the set unpartitionable by "any single surface rule" was an absolute that
+              measurement refuted.
+
+          WHAT CLOSES IT: at least one SQL-EVALUATED clause pair per family whose truth requires
+          EVALUATION rather than folding — the shipped ``{d} IN (SELECT {d})`` vs
+          ``{d} IN (SELECT {other})``. A constant folder cannot decide it, and whichever way it
+          guesses the round refutes: block both sides and the FALSE cluster disagrees, block
+          neither and the TRUE cluster does. Measured: the same complete folder goes from 200/200
+          on the foldable subset to 0/200 on the shipped set — and 0/200 again with the literals
+          randomised per run, as live runs build them.
+
+          RESIDUAL (a2), NAMED NOT CLOSED: an interposer that genuinely EVALUATES the injected
+          expression (a WAF embedding a real SQL parser and evaluator, including subqueries) can
+          still partition the probes by truth value with no database behind it. That is the same
+          shape of limit as (b) — such an interposer IS computing the truth function this oracle
+          reads — and no clause set defeats it from the response side; it needs an out-of-band
+          channel (OOB/DNS, a side effect) to separate. Related and weaker: an EXACT-STRING
+          blocklist of the clause set. The drivers randomise the literals per run so the set is
+          not a public constant, which defeats that variant specifically — it does NOT help
+          against a filter that generalises, and the two mitigations must not be confused.
+
+          A caller supplying its own clause sets inherits both obligations (shape diversity AND a
+          non-foldable pair); see ``scanner.checks.boolean_clause_families``.
 
       (b) A page that is a DETERMINISTIC but ARBITRARY function of the request (a CDN caching
           per exact URL over an origin that picked a variant at fill time, a balancer pinning
@@ -810,9 +848,10 @@ def boolean_inference_oracle(
 
               SUM over a != b of  p_a**K_T * p_b**K_F   <=  2 * 2**-(K_T + K_F)
 
-          = ``4.9e-4`` at ``K = 6``, and the formula is CALIBRATED, not assumed: over the real
-          mint path a uniform 2-variant cached page measures ``5.3e-4`` at ``K = 6``
-          (30k trials) and ``7.9e-3`` at ``K = 4`` against an analytic ``7.8e-3``. (A
+          = ``1.2e-4`` at ``K = 7``, and the formula is CALIBRATED, not assumed: over the real
+          mint path a uniform 2-variant cached page measures ``1.20e-4`` at ``K = 7``
+          (200k trials) against an analytic ``1.22e-4``, and ``7.9e-3`` at ``K = 4`` against an
+          analytic ``7.8e-3``. (A
           single-clause-per-truth-value design — what this test replaced — sits at ``~0.5``.)
           Repetition cannot help against a map that is by definition constant in the request, so
           for THIS case more distinct clauses is the lever. It is not free: every extra clause is
@@ -830,12 +869,14 @@ def boolean_inference_oracle(
          the WHOLE finding hard-refutes (the page is provably non-deterministic).
 
     CALLER OBLIGATION (the oracle sees responses, not requests). The ``K_T``/``K_F`` clauses must
-    genuinely be DISTINCT requests of a FIXED truth value AND must VARY IN COMPARISON SHAPE, not
-    merely in their literals (residual (a) above). The oracle cannot check either from the bytes.
-    The drivers enforce distinctness where the clauses live (``BooleanInferenceCheck`` and
+    genuinely be DISTINCT requests of a FIXED truth value, must VARY IN COMPARISON SHAPE rather
+    than only in their literals, and must include at least one clause a constant folder cannot
+    decide (residual (a) above). The oracle cannot check any of that from the bytes. The drivers
+    enforce distinctness where the clauses live (``BooleanInferenceCheck`` and
     ``DifferentialHttpAdapter`` both refuse a duplicate or a cross-side clause at the call site)
-    and ship shape-varied families; shape diversity itself is a review obligation on the clause
-    sets, pinned by the lexical-filter regression tests.
+    and build their families from ``scanner.checks.boolean_clause_families``; the shape and
+    non-foldability properties are review obligations on the clause sets, pinned by the live
+    CRS-942130, complete-constant-folder and leave-one-shape-out regressions.
 
     WHAT "RE-VERIFIES OFFLINE" DOES AND DOES NOT MEAN. Re-execution over a retained context
     recomputes this whole decision from the retained bytes, so a GROSS edit (a swapped page, a

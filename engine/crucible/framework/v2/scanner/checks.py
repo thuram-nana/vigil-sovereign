@@ -24,6 +24,7 @@ tokens), not weaponized exploits.
 from __future__ import annotations
 
 import math
+import random
 import re
 import time
 from html.parser import HTMLParser
@@ -216,6 +217,105 @@ class DifferentialCheck:
         )
 
 
+# --------------------------------------------------------------------------------------------------
+# TRUTH-VALUE ATTRIBUTION clause families (shared by the scanner arm and its regressions).
+# --------------------------------------------------------------------------------------------------
+# A family is ``(K_T always-TRUE clauses, K_F always-FALSE clauses)`` for ONE injection context. Two
+# properties make the set sound, and BOTH are load-bearing — read this before editing the shapes.
+#
+# 1. COMPARISON-SHAPE DIVERSITY. An early revision varied only the LITERALS, so every TRUE clause was
+#    `X = X` and every FALSE clause `X = Y`. Truth value was then perfectly correlated with the surface
+#    feature "the two operands are the same token" — exactly what a ModSecurity-CRS-942130-shape
+#    BACKREFERENCE rule keys on with no SQL engine anywhere. A STATIC, NON-VULNERABLE page behind that
+#    rule answered 403 to the whole TRUE side and 200 to the whole FALSE side and minted a false FACT on
+#    EVERY attempt (measured 2000/2000). Raising K does not help: every extra `X = X` matches the same
+#    rule. Varying the comparison does: a filter that catches SOME shapes leaves the others alone, so the
+#    TRUE cluster stops agreeing and the round REFUTES. Measured: 0/2000 against CRS-942130, and a
+#    leave-one-shape-out sweep refutes for every single shape blinded.
+#
+# 2. AT LEAST ONE SQL-EVALUATED CLAUSE (the ``IN (SELECT ...)`` pair). Shape diversity alone is NOT
+#    enough, and saying otherwise was a refuted absolute: a ~60-line CONSTANT-FOLDING filter (tokenise,
+#    split on OR/AND, fold each literal-vs-literal comparison for = <> > < LIKE BETWEEN, block if any
+#    top-level disjunct folds TRUE — still no SQL engine and no DB) partitions a purely-foldable set
+#    PERFECTLY and minted 500/500. The last pair is therefore one a constant folder CANNOT decide,
+#    because its truth depends on evaluating a SUBQUERY rather than on folding literals. Whichever way
+#    such a filter guesses, the round refutes: if it blocks both sides the FALSE cluster disagrees; if it
+#    blocks neither, the TRUE cluster disagrees. KEEP AT LEAST ONE non-foldable pair per family.
+#
+# The LITERALS are randomised per call (``rng``) so the clause set is not a public constant an operator
+# can paste into an exact-string blocklist. That mitigates the BLOCKLIST variant only — it does nothing
+# against the folder, which is why (2) exists; the two are separate mitigations for separate attacks.
+#
+# Invariants every shape must preserve (checked by test_boolean_clause_families):
+#   * valid in its own breakout context — a quote-breakout clause must END on an UNCLOSED quote, so the
+#     origin's own trailing quote closes it;
+#   * truth-correct against a real SQL engine (the tests evaluate every clause on sqlite3);
+#   * TRUE[i] LENGTH-MATCHED to FALSE[i]. A length-correlated set would re-open the hole through the
+#     ``length`` dimension: an endpoint that merely ECHOES the parameter would separate by truth value.
+_BOOLEAN_FAMILY_SHAPES = (
+    # --- single-quote string-literal breakout: the origin wraps the value in '...' -------------------
+    (("x' OR '{w}'='{w}",                        "x' OR '{w}'='{w2}"),
+     ("x' OR '{hi}'>'{lo}",                      "x' OR '{lo}'>'{hi}"),
+     ("x' OR {n2}>{n1} AND '{k}'<'{m}",          "x' OR {n1}>{n2} AND '{k}'<'{m}"),
+     ("x' OR '{w}' LIKE '{w0}%",                 "x' OR '{w}' LIKE '{zc}%"),
+     ("x' OR '{u}'<>'{v}",                       "x' OR '{u}'<>'{u}"),
+     ("x' OR '{bm}' BETWEEN '{bl}' AND '{bh}",   "x' OR '{bg}' BETWEEN '{bl}' AND '{bh}"),
+     ("x' OR {d1} IN (SELECT {d1}) AND '{k}'='{k}",
+      "x' OR {d1} IN (SELECT {d2}) AND '{k}'='{k}")),
+    # --- numeric context: the origin interpolates the value bare -------------------------------------
+    (("1 OR {n1}={n1}",                          "1 OR {n1}={n2}"),
+     ("1 OR {n2}>{n1}",                          "1 OR {n1}>{n2}"),
+     ("1 OR {p2}>{p1} AND {q1}<{q2}",            "1 OR {p1}>{p2} AND {q1}<{q2}"),
+     ("1 OR '{w}' LIKE '{w0}%'",                 "1 OR '{w}' LIKE '{zc}%'"),
+     ("1 OR {n1}<>{n2}",                         "1 OR {n1}<>{n1}"),
+     ("1 OR {nm} BETWEEN {nl} AND {nh}",         "1 OR {ng} BETWEEN {nl} AND {nh}"),
+     ("1 OR {d1} IN (SELECT {d1})",              "1 OR {d1} IN (SELECT {d2})")),
+    # --- double-quote string-literal breakout --------------------------------------------------------
+    (('x" OR "{w}"="{w}',                        'x" OR "{w}"="{w2}'),
+     ('x" OR "{hi}">"{lo}',                      'x" OR "{lo}">"{hi}'),
+     ('x" OR {n2}>{n1} AND "{k}"<"{m}',          'x" OR {n1}>{n2} AND "{k}"<"{m}'),
+     ('x" OR "{w}" LIKE "{w0}%',                 'x" OR "{w}" LIKE "{zc}%'),
+     ('x" OR "{u}"<>"{v}',                       'x" OR "{u}"<>"{u}'),
+     ('x" OR "{bm}" BETWEEN "{bl}" AND "{bh}',   'x" OR "{bg}" BETWEEN "{bl}" AND "{bh}'),
+     ('x" OR {d1} IN (SELECT {d1}) AND "{k}"="{k}',
+      'x" OR {d1} IN (SELECT {d2}) AND "{k}"="{k}')),
+)
+
+
+def boolean_clause_families(rng: "random.Random | None" = None) -> tuple:
+    """The shipped ``((trues, falses), ...)`` clause families, with the LITERALS randomised.
+
+    Every literal is drawn at a FIXED WIDTH (letters 1 char, words 2 chars, numbers 2 digits, subquery
+    operands 1 digit) and the TRUE/FALSE templates of a shape are structurally identical, so TRUE[i] and
+    FALSE[i] come out length-matched by construction. Pass a seeded ``rng`` for a reproducible set."""
+    r = rng or random.Random()
+    lets = "abcdefghijklmnopqrstuvwxyz"
+
+    def letters(n: int) -> list[str]:
+        return sorted(r.sample(lets, n))
+
+    # six ordered distinct letters give every shape the orderings it needs without ever running out:
+    #   lo < k < mid < m < hi < bg   =>  hi > lo, k < m, lo <= mid <= hi (BETWEEN true), bg > hi (false)
+    lo, k, mid, m, hi, bg = letters(6)
+    w = "".join(r.choice(lets) for _ in range(2))
+    w2 = w[0] + r.choice([c for c in lets if c != w[1]])
+    zc = r.choice([c for c in lets if c != w[0]])
+    u = "".join(r.choice(lets) for _ in range(2))
+    v = u[0] + r.choice([c for c in lets if c != u[1]])
+    n1, n2 = sorted(r.sample(range(10, 100), 2))
+    p1, p2 = sorted(r.sample(range(10, 100), 2))
+    q1, q2 = sorted(r.sample(range(10, 100), 2))
+    nl, nm, nh, ng = sorted(r.sample(range(10, 100), 4))   # nl < nm < nh < ng, so ng is OUTSIDE [nl, nh]
+    d1, d2 = r.sample(range(1, 10), 2)
+    slots = {"w": w, "w2": w2, "w0": w[0], "zc": zc, "u": u, "v": v, "k": k, "m": m,
+             "lo": lo, "hi": hi, "bm": mid, "bl": lo, "bh": hi, "bg": bg,
+             "n1": n1, "n2": n2, "p1": p1, "p2": p2, "q1": q1, "q2": q2,
+             "nl": nl, "nm": nm, "nh": nh, "ng": ng, "d1": d1, "d2": d2}
+    return tuple(
+        (tuple(t.format(**slots) for t, _ in shapes), tuple(f.format(**slots) for _, f in shapes))
+        for shapes in _BOOLEAN_FAMILY_SHAPES)
+
+
 # The PINNED boolean discriminator. ``differential_response_oracle``'s DEFAULT dimension set includes
 # ``latency``, so a boolean check that passed no discriminator let a FACT rest on TIMING alone over
 # byte-identical bodies — and since the probe order is all-TRUE then all-FALSE, a step-slowdown crossing
@@ -242,7 +342,7 @@ class BooleanInferenceCheck:
     response agrees with every other TRUE response, every FALSE with every FALSE, and the two
     clusters are disjoint. A page whose body is an INDEPENDENT DRAW per request must land ALL
     ``2*K_T`` true-side draws on one variant and ALL ``2*K_F`` false-side draws on another —
-    ``<= 2 * 2**-(2*K_T+2*K_F)`` per round (``1.2e-7`` at the ``K_T = K_F = 6`` the drivers ship;
+    ``<= 2 * 2**-(2*K_T+2*K_F)`` per round (``7.5e-9`` at the ``K_T = K_F = 7`` the drivers ship;
     ``3.1e-5``, still ~3300x below the SPRT's ``p0``, at the oracle's CONFIRM floor of 4).
 
     TWO THINGS THAT BOUND DOES NOT COVER, both real and both documented on the oracle: a
@@ -263,11 +363,13 @@ class BooleanInferenceCheck:
 
     id: str
     bug_class: str
-    # K_T clauses that are all logically TRUE and K_F that are all logically FALSE. They must be
-    # DISTINCT and must vary in COMPARISON SHAPE (``=`` / ``>`` / ``LIKE`` / compound), not merely in
-    # their literals — a clause set whose truth value is aligned with any single SURFACE feature (e.g.
-    # "both literals identical") is partitionable by a regex WAF with no SQL engine anywhere, which
-    # mints on a static page. >= 4 each is the oracle's CONFIRM floor; the drivers ship 6.
+    # K_T clauses that are all logically TRUE and K_F that are all logically FALSE. Build them with
+    # ``boolean_clause_families`` unless you have read what that function's header requires: they must be
+    # DISTINCT, must vary in COMPARISON SHAPE rather than only in their literals, and must include at
+    # least one pair a CONSTANT FOLDER cannot decide. A set that misses either property is partitionable
+    # by an interposer with NO SQL engine at all, which then mints on a STATIC page (measured 2000/2000
+    # for a literal-only set behind a CRS-942130 regex; 500/500 for a purely foldable set behind a
+    # complete constant folder). >= 4 each is the oracle's CONFIRM floor; the drivers ship 7.
     true_clauses: tuple[str, ...]
     false_clauses: tuple[str, ...]
     n_max: int = 24

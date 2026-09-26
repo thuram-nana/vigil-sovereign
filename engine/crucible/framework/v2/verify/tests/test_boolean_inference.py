@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import random
 
-from framework.v2.verify.oracles import boolean_inference_oracle
+from framework.v2.verify.oracles import _boolean_discriminator, boolean_inference_oracle
 
 _MANY = {"status": 200, "body": "id=1\nid=2\nid=3\nid=4\nid=5 (all rows)"}
 _NONE = {"status": 200, "body": "no results"}
@@ -198,15 +198,24 @@ def test_the_deterministic_arbitrary_map_residual_is_real_and_is_disclosed() -> 
         assert overclaim not in doc, f"the oracle docstring re-states a refuted absolute: {overclaim!r}"
 
 
-def test_a_truth_correlated_lexical_filter_is_disclosed() -> None:
-    """The OTHER documented failure mode must stay documented: a clause set whose truth value is
-    aligned with a SURFACE feature is partitionable by a regex with no SQL engine anywhere. The
-    live regression is in the scanner tests (a real CRS-942130-shape rule over a static page);
-    here we only pin that the oracle names the mode and names the right lever."""
+def test_the_request_filter_failure_mode_is_disclosed_without_absolutes() -> None:
+    """The OTHER documented failure mode must stay documented — and must stay documented HONESTLY.
+
+    An earlier revision of this test asserted the docstring contained "CLAUSE-SHAPE DIVERSITY" and
+    "``K`` is NOT a lever here", i.e. it PINNED the very absolute that measurement went on to refute
+    (a complete constant folder partitions a shape-varied but purely-foldable set perfectly). That
+    is the same anti-pattern as the deleted "IRREDUCIBLE" / "only lever" claims, so this test now
+    checks only that the mode is NAMED and that a RESIDUAL is named with it — never that any
+    particular mitigation is sufficient. The live behavioural regressions
+    (``scanner/tests/test_boolean_inference_check.py``: CRS-942130, the complete constant folder,
+    and the leave-one-shape-out sweep) are what actually hold the mechanism."""
     doc = boolean_inference_oracle.__doc__ or ""
-    assert "TRUTH-CORRELATED LEXICAL FILTER" in doc
-    assert "CLAUSE-SHAPE DIVERSITY" in doc
-    assert "``K`` is NOT a lever here" in doc
+    assert "TRUTH-CORRELATED REQUEST FILTER" in doc, "the failure mode is no longer named"
+    assert "RESIDUAL (a2), NAMED NOT CLOSED" in doc, "the residual is no longer named with it"
+    # and no phrasing that asserts a mitigation is complete
+    for absolute in ("no single surface rule", "cannot be partitioned", "is the only lever",
+                     "no clause set can be partitioned"):
+        assert absolute not in doc, f"the docstring re-states an unmeasurable absolute: {absolute!r}"
 
 
 def test_latency_alone_can_never_mint_a_boolean_fact() -> None:
@@ -275,6 +284,13 @@ def test_a_context_supplied_discriminator_cannot_tune_the_boolean_channel() -> N
            "discriminator": {"dimensions": ["lexical"], "lexical_threshold": 0.0}}
     assert not OracleVerifier().confirm(ctx).confirmed, \
         "a context-supplied threshold tuned a sub-threshold difference into a boolean FACT"
+    # ...and the pin is at the ORACLE too, so it holds even when the oracle is called DIRECTLY with a
+    # fitted threshold (the verifier is the only path that drops the discriminator wholesale).
+    sig = boolean_inference_oracle(rounds, false_baseline_samples=_baseline(f),
+                                   discriminator={"dimensions": ["lexical"], "lexical_threshold": 0.0})
+    assert not sig.fired, "a fitted threshold passed straight to the oracle still tuned the channel"
+    assert _boolean_discriminator({"lexical_threshold": 0.0, "length_threshold": 0.0}) == {
+        "dimensions": ["status", "length", "lexical"], "expect": "differ"}
 
 
 def test_forced_pregate_over_generated_rounds_never_mints() -> None:

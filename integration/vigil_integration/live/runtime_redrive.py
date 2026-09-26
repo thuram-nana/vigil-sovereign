@@ -90,43 +90,12 @@ _TIMING_PARAMS = ("id", "q", "query", "search", "name", "user", "uid", "item", "
 # out and evaluates TRUE vs a false one that evaluates FALSE, over the same insertion point. Timing:
 # (benign, low_sleep, high_sleep, low_ms, high_ms) — a benign value vs two SLEEP doses for the dose-response.
 _SSTI_EXPR_TEMPLATES = ("{{{{{n1}*{n2}}}}}", "${{{n1}*{n2}}}", "#{{{n1}*{n2}}}", "{{{n1}*{n2}}}")
-# TRUTH-VALUE ATTRIBUTION clause FAMILIES. Each family is (K_T always-TRUE clauses, K_F always-FALSE clauses)
-# in ONE injection context, and the clauses of a truth value VARY IN COMPARISON SHAPE — `=`, `>`, `LIKE`, a
-# compound — NOT merely in their literals.
-#
-# That is a SOUNDNESS requirement, not style. An earlier revision varied only the literals, so every TRUE
-# clause was `X = X` and every FALSE clause `X = Y`: truth value was perfectly correlated with the surface
-# feature "the two operands are the same token", which is exactly what a ModSecurity-CRS-942130-shape
-# BACKREFERENCE rule keys on with no SQL engine anywhere. A STATIC, NON-VULNERABLE page behind that rule
-# answered 403 to the whole TRUE side and 200 to the whole FALSE side — a perfect 2-cluster split — and minted
-# a false FACT on EVERY attempt (measured 2000/2000 over the real mint path; red-pen 60/60). Raising K does
-# NOT help: every extra `X = X` matches the same rule. Shape diversity does — a lexical rule that catches one
-# shape leaves the others alone, so the TRUE cluster stops agreeing and the round refutes (0/2000 measured on
-# the same page with these families). Keep the shapes varied when editing this.
-#
-# (Breakout shape is held CONSTANT inside a family — mixing `'`/`"`/numeric would cost recall, since a clause
-# that does not parse on the target returns an error page and breaks within-truth agreement. That is a
-# separate concern from varying the COMPARISON, which is what soundness needs.)
-#
-# Each TRUE clause is also LENGTH-MATCHED to its FALSE counterpart (they differ in one character) so an
-# endpoint that merely ECHOES the parameter cannot produce a length signal correlated with the truth value.
-_BOOLEAN_CLAUSE_FAMILIES = (
-    # single-quote string-literal breakout
-    (("x' OR '1'='1", "x' OR 'b'>'a", "x' OR 9>4 AND 'k'<'m", "x' OR 'ab' LIKE 'a%",
-      "x' OR 'zz'<>'yy", "x' OR 'c' BETWEEN 'a' AND 'z"),
-     ("x' OR '1'='2", "x' OR 'a'>'b", "x' OR 4>9 AND 'k'<'m", "x' OR 'ab' LIKE 'z%",
-      "x' OR 'zz'<>'zz", "x' OR 'c' BETWEEN 'x' AND 'z")),
-    # numeric context
-    (("1 OR 1=1", "1 OR 7>3", "1 OR 9>4 AND 2<5", "1 OR 'ab' LIKE 'a%'",
-      "1 OR 8<>6", "1 OR 3 BETWEEN 1 AND 7"),
-     ("1 OR 1=2", "1 OR 3>7", "1 OR 4>9 AND 2<5", "1 OR 'ab' LIKE 'z%'",
-      "1 OR 8<>8", "1 OR 9 BETWEEN 1 AND 7")),
-    # double-quote string-literal breakout
-    (('x" OR "1"="1', 'x" OR "b">"a', 'x" OR 9>4 AND "k"<"m', 'x" OR "ab" LIKE "a%',
-      'x" OR "zz"<>"yy', 'x" OR "c" BETWEEN "a" AND "z'),
-     ('x" OR "1"="2', 'x" OR "a">"b', 'x" OR 4>9 AND "k"<"m', 'x" OR "ab" LIKE "z%',
-      'x" OR "zz"<>"zz', 'x" OR "c" BETWEEN "x" AND "z')),
-)
+# The TRUTH-VALUE ATTRIBUTION clause families live in ONE place — ``framework.v2.scanner.checks.
+# boolean_clause_families`` — next to the check that sends them and the invariants they must satisfy
+# (comparison-shape diversity, at least one SQL-EVALUATED pair a constant folder cannot decide,
+# breakout validity, truth-correctness, index-aligned length matching). They are built PER RUN with
+# randomised literals, so the clause set is not a public constant an operator can paste into an
+# exact-string blocklist. Imported lazily at use (FATAL-2: no framework import at module scope).
 # doses in SECONDS for the SLEEP payloads + the injected milliseconds the timing oracle expects.
 _TIMING_LOW_S, _TIMING_HIGH_S = 0.3, 0.6
 _TIMING_SLEEP_TEMPLATES = (
@@ -137,8 +106,8 @@ _TIMING_SLEEP_TEMPLATES = (
 _STAT_MAX_PARAMS = 4     # blind/statistical arms are expensive — probe at most this many insertion points
 # The BOOLEAN arm is capped tighter than the other statistical arms. Each (param, clause-family) pair is an
 # INDEPENDENT attempt, and independent attempts MULTIPLY the per-attempt residual into a per-URL figure that
-# boolean_redrive's docstring has to state; 2 params x 3 families = 6 attempts puts that at ~0.32% at the
-# shipped K=6 (it was ~9.2% at K=4 over 4 params), and it is also what keeps the (now 24-send) rounds inside
+# boolean_redrive's docstring has to state; 2 params x 3 families = 6 attempts puts that at ~0.073% at the
+# shipped K=7 (it was ~9.2% at K=4 over 4 params), and it is also what keeps the (now 28-send) rounds inside
 # a sane live traffic budget.
 _BOOLEAN_MAX_PARAMS = 2
 # Identical-request sends for the per-PARAM determinism screen, shared across the clause families.
@@ -627,14 +596,14 @@ def boolean_redrive(url: str, *, slug: str, engagement_slug: str, signers: "list
     """Re-drive ``url`` for BOOLEAN-BLIND injection and mint a signed FACT ONLY when the deterministic
     ``boolean_inference_oracle`` reaches its SPRT confirm boundary over N runner-crafted TRUTH-VALUE
     ATTRIBUTION rounds. Reuses the reviewed ``BooleanInferenceCheck`` discipline over VIGIL's OWN gated send:
-    each round sends 6 DISTINCT always-TRUE clauses and 6 DISTINCT always-FALSE clauses (one
-    ``_BOOLEAN_CLAUSE_FAMILIES`` entry, shape-varied — see the constant), each twice byte-identically, and
-    signals only when the response is a FUNCTION of the injected boolean's TRUTH VALUE — one TRUE cluster,
-    one FALSE cluster, disjoint.
+    each round sends 7 DISTINCT always-TRUE clauses and 7 DISTINCT always-FALSE clauses (one
+    ``scanner.checks.boolean_clause_families`` entry — shape-varied, with one SQL-EVALUATED pair, and with
+    the literals randomised per run), each twice byte-identically, and signals only when the response is a
+    FUNCTION of the injected boolean's TRUTH VALUE — one TRUE cluster, one FALSE cluster, disjoint.
 
     FP boundary (all → LEAD): an endpoint whose response varies INDEPENDENTLY of the input — coarse
-    (low-cardinality), SKEWED, or high-entropy — cannot make 12 true-side and 12 false-side draws split
-    cleanly by truth value (``<= 1.2e-7`` per round, vs the SPRT's ``p0 = 0.1``), so it refutes; a single flip
+    (low-cardinality), SKEWED, or high-entropy — cannot make 14 true-side and 14 false-side draws split
+    cleanly by truth value (``<= 7.5e-9`` per round, vs the SPRT's ``p0 = 0.1``), so it refutes; a single flip
     without SPRT significance ⇒ inconclusive. A legitimately noisy-but-vulnerable page is a LEAD (a recall
     cost, the safe direction). Never raises.
 
@@ -642,28 +611,36 @@ def boolean_redrive(url: str, *, slug: str, engagement_slug: str, signers: "list
     and the product is named rather than left implicit). The dominant residual is the oracle's case (b): an
     endpoint that is a DETERMINISTIC but arbitrary function of the URL (a per-URL CDN cache over an origin
     that picked a variant at fill time), where repetition is not new evidence. Measured over the real mint
-    path on a uniform 2-variant cached page: ``5.3e-4`` per attempt at the shipped ``K = 6`` (30k trials;
-    analytic ``2 * 2**-(K_T+K_F)`` = ``4.9e-4``). This arm makes at most ``_BOOLEAN_MAX_PARAMS`` (2) params
-    x 3 families = 6 independent attempts per URL, so the per-URL figure is ``1 - (1 - 5.3e-4)**6`` =
-    ``~3.2e-3`` (0.32%); a TARGETED re-drive of a KNOWN param is 3 attempts => ``~1.6e-3``.
+    path on a uniform 2-variant cached page: ``1.20e-4`` per attempt at the shipped ``K = 7`` (200k trials;
+    analytic ``2 * 2**-(K_T+K_F)`` = ``1.22e-4``). This arm makes at most ``_BOOLEAN_MAX_PARAMS`` (2) params
+    x 3 families = 6 independent attempts per URL, so the per-URL figure is ``1 - (1 - 1.20e-4)**6`` =
+    ``~7.3e-4`` (0.073%); a TARGETED re-drive of a KNOWN param is 3 attempts => ``~3.7e-4``.
 
     That figure is the honest cost of this class, not a claim of safety: it applies ONLY to an endpoint that
-    is input-independent AND frozen per URL. It replaces what the previous revision shipped — K=4 over 4
-    params = 12 attempts x a measured 7.98e-3 = ``~9.2%`` per URL, undisclosed. K was raised 4 -> 6 and the
+    is input-independent AND frozen per URL. It replaces what an earlier revision shipped — K=4 over 4
+    params = 12 attempts x a measured 7.98e-3 = ``~9.2%`` per URL, undisclosed. K was raised 4 -> 7 and the
     attempts halved 12 -> 6; going further trades against recall (every extra clause is another chance a real
-    vulnerable target answers one of them differently and the round refutes).
+    vulnerable target answers one of them differently and the round refutes). The OTHER residual — an
+    interposer that partitions the probes by a request property — is residual (a2) on the oracle; the clause
+    families answer the lexical and constant-folding forms of it and NAME what remains.
 
     TRAFFIC BUDGET (constitution VI — this runs against live authorized production). Per param: ONE shared
     determinism baseline of 8 identical sends (determinism is a property of the ENDPOINT, not of the clause,
-    so it is collected once and reused by all three families) + 24 sends per SPRT round. A deterministic
-    endpoint decides in 2 rounds, so the ordinary cost is ``8 + 3 x 48 = 152`` gated requests per param and
-    ``~304`` per URL at 2 params; the bound is ``8 + 3 x (n_max x 24)`` = 1016/param (2032/URL) in the
-    pathological oscillating case that two same-direction rounds normally prevent."""
-    from framework.v2.scanner.checks import BooleanInferenceCheck  # noqa: PLC0415
+    so it is collected once and reused by all three families) + 28 sends per SPRT round. A deterministic
+    endpoint decides in 2 rounds, so the MEASURED ordinary cost is ``8 + 3 x 56 = 176`` gated requests per
+    param and ``352`` per URL at 2 params; the bound is ``8 + 3 x (n_max x 28)`` = 1184/param (2368/URL) in
+    the pathological oscillating case that two same-direction rounds normally prevent. A NON-deterministic
+    endpoint costs 2 sends total — the shared baseline proves it in two and all three families short-circuit."""
+    from framework.v2.scanner.checks import (  # noqa: PLC0415
+        BooleanInferenceCheck, boolean_clause_families)
     from framework.v2.scanner.insertion import HttpRequest, InsertionKind, RequestTemplate  # noqa: PLC0415
     from framework.v2.verify.oracles import boolean_inference_oracle  # noqa: PLC0415
 
     bug_class = "boolean_sqli"
+    # Randomised ONCE per run: the literals are unpredictable to an exact-string blocklist of the
+    # public clause set. (That mitigates the BLOCKLIST attack only — the constant-folder attack is
+    # answered by the SQL-EVALUATED pair inside each family, a separate mitigation.)
+    families = boolean_clause_families()
     res, send, state = _stat_setup(url, slug, bug_class, _BOOLEAN_BRANCH, timeout)
     if send is None:
         return res
@@ -682,9 +659,9 @@ def boolean_redrive(url: str, *, slug: str, engagement_slug: str, signers: "list
                 continue
             # ONE determinism baseline per PARAM, shared by all three clause families: determinism is a
             # property of the endpoint, not of the clause, so re-sending it per family was 2/3 waste.
-            shared_baseline = _determinism_baseline(tmpl, point, send, _BOOLEAN_CLAUSE_FAMILIES[0][1][0])
+            shared_baseline = _determinism_baseline(tmpl, point, send, families[0][1][0])
             fired_here = False
-            for true_clauses, false_clauses in _BOOLEAN_CLAUSE_FAMILIES:
+            for true_clauses, false_clauses in families:
                 chk = BooleanInferenceCheck(id="boolean-redrive", bug_class="boolean_sqli",
                                             true_clauses=true_clauses, false_clauses=false_clauses,
                                             n_max=n_max, shared_baseline=shared_baseline)
