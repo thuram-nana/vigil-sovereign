@@ -120,13 +120,23 @@ class ScanReport(BaseModel):
     # Endpoints the SPA crawler observed the app call (method + absolute URL) —
     # the fetch/XHR surface a static crawl cannot see.
     discovered_endpoints: list[str] = Field(default_factory=list)
-    # --- opt-in advanced web arsenal (enable_arsenal) — LEADS, never confirmed ---
-    # These are populated only when the arsenal pass ran. Like dom_xss_candidates
-    # they are strictly separated from active_findings: they record reachability /
-    # references, not exploitability. The arsenal's oracle-CONFIRMED findings
-    # (request smuggling, CSWSH, request race) land in active_findings with an
-    # oracle_context certificate like any other confirmed finding — they are NOT
-    # here. Empty on every default (arsenal-off) run.
+    # --- opt-in advanced web arsenal (enable_arsenal) — THESE FIELDS are LEADS ---
+    # These fields are populated only when the arsenal pass ran, and what lands in them
+    # is never confirmed. Like dom_xss_candidates they are strictly separated from
+    # active_findings: they record reachability / references, not exploitability.
+    #
+    # The arsenal is NOT lead-only as a whole: two of its classes can reach
+    # active_findings with a re-verifiable oracle_context, and both are adjudicated over
+    # RAW TARGET BYTES —
+    #   * request_smuggling, ONLY via the canary-echo achieved-desync differential
+    #     (`smuggling_desync` ctx key). The timing signal is a LEAD and lands in
+    #     ``arsenal_leads``; F3 deleted the latency mint that used to promote it to High.
+    #   * cross_site_websocket_hijacking, via ``predicate_oracle`` over the two
+    #     handshakes' raw request/response blocks (F7 retired the literal-vs-literal
+    #     achieved-state stamp that re-confirmed with no target bytes at all).
+    # request_race is LEAD-only here (R3): the campaign has no owner-signed workflow spec
+    # and no semantic success predicate, so an any-2xx over-count is not a FACT.
+    # Empty on every default (arsenal-off) run.
     discovered_paths: list[DiscoveredPath] = Field(default_factory=list)
     js_secrets: list[JsSecret] = Field(default_factory=list)
     # Human-readable capability/reference leads the arsenal surfaced (an offered
@@ -202,38 +212,63 @@ class ScanReport(BaseModel):
             "full_coverage": self.library_checks_run > 0,
         }
 
+    def _adjudicated_classes(self) -> tuple[set[str], set[str]]:
+        """``(classes_with_a_clean_probe, classes_with_a_finding)`` — the ONLY two sets a
+        bounded CLEAN may be built from (F2).
+
+        A class is ADJUDICATED only when a probe of it returned a *verdict* the oracle layer
+        could stand behind. ``engine.probe_verdict`` is the authority for that distinction and
+        its rule is absolute: *"only non-conclusive non-signals -> inconclusive (payload sent,
+        no oracle had a channel to adjudicate — NEVER clean)"*. So this rolls up the per-probe
+        ``verdict`` field, NOT the mere existence of a probe record. A class whose every probe
+        came back ``inconclusive`` (a WAF-fronted or static surface where the payload went out
+        and nothing could be adjudicated) is adjudicated by NOTHING and must never read
+        ``clean``."""
+        clean: set[str] = set()
+        finding: set[str] = {f.bug_class for f in self.active_findings}
+        for p in self.exercised_probes:
+            if p.verdict == "clean":
+                clean.add(p.bug_class)
+            elif p.verdict == "finding":
+                finding.add(p.bug_class)
+        return clean - finding, finding
+
     def verdict_by_class(self) -> dict[str, str]:
         """A per-bug-class verdict that BOUNDS a CLEAN by what the run actually adjudicated.
 
         The whole point of W16-4: the absence of a finding is only a negative for a bug class
-        this run had a check FOR. A default run commits the built-in seed roster
-        (``DEFAULT_CHECKS``, 10 point-check classes); the far larger declarative library
-        (``scanner.library``, 23 classes) runs ONLY under ``--library``. For every class in
-        the union corpus this returns exactly one of:
+        this run had a check FOR *and could adjudicate*. A default run commits the built-in
+        seed roster (``DEFAULT_CHECKS``, 10 point-check classes); the far larger declarative
+        library (``scanner.library``, 23 classes) runs ONLY under ``--library``. For every
+        class in the union corpus this returns exactly one of:
 
-          * ``"finding"``      — a confirmed active finding of that class exists;
-          * ``"clean"``        — the run COMMITTED a check of that class and none fired (a
-                                 real, bounded negative);
-          * ``"inconclusive"`` — the run committed NO check of that class, so a CLEAN cannot
-                                 be claimed for it (e.g. ``nosqli`` / ``ldap_injection`` /
-                                 ``xpath_injection`` on a default, library-off run).
+          * ``"finding"``      — a confirmed active finding of that class exists (or a probe
+                                 of it returned the ``finding`` verdict);
+          * ``"clean"``        — AT LEAST ONE probe of that class returned the ``clean``
+                                 verdict (an oracle proved it had a channel and rendered a
+                                 decisive negative) and none returned ``finding``;
+          * ``"inconclusive"`` — everything else: the run committed no check of that class, no
+                                 probe of it landed, or EVERY probe of it came back
+                                 ``inconclusive`` (payload sent, no oracle had a channel).
 
-        The exercised set is derived from what the run ACTUALLY probed —
-        ``{p.bug_class for p in self.exercised_probes}`` (the per-(surface, point, check) probe
-        records the engine emitted), NOT ``committed_check_classes`` (the plan captured at PLAN
-        time, which lists every committed class whether or not a probe of it ever ran). A class
-        that was committed but never got a probe on the wire is therefore NOT counted exercised,
-        so its absence-of-finding stays ``inconclusive``, never a bounded ``clean``. The corpus
-        is derived from the registry (``_corpus_bug_classes``), never hardcoded, so it tracks
-        the library as it grows."""
+        The verdict is rolled up from the per-probe VERDICTS the engine adjudicated
+        (``ProbeRecord.verdict``, decided by :func:`scanner.engine.probe_verdict`), NOT from
+        the bare set ``{p.bug_class for p in self.exercised_probes}`` and NOT from
+        ``committed_check_classes`` (the plan captured at PLAN time). Both of those weaker
+        rules produce a FALSE CLEAN: the plan-set counts a class no probe ever ran for, and the
+        probe-set counts a class whose every probe was ``inconclusive`` — measured on a
+        WAF-fronted static target, eight classes (blind_xxe, command_injection,
+        deserialization, error_based_sqli, path_traversal, ssrf, ssti, xss) were all-
+        inconclusive and every one of them read ``clean``. The corpus is derived from the
+        registry (``_corpus_bug_classes``), never hardcoded, so it tracks the library as it
+        grows."""
         corpus = _corpus_bug_classes()
-        exercised = {p.bug_class for p in self.exercised_probes}
-        with_findings = {f.bug_class for f in self.active_findings}
+        clean, with_findings = self._adjudicated_classes()
         out: dict[str, str] = {}
-        for c in sorted(corpus | exercised | with_findings):
+        for c in sorted(corpus | clean | with_findings | {p.bug_class for p in self.exercised_probes}):
             if c in with_findings:
                 out[c] = "finding"
-            elif c in exercised:
+            elif c in clean:
                 out[c] = "clean"
             else:
                 out[c] = "inconclusive"
@@ -244,19 +279,20 @@ class ScanReport(BaseModel):
 
         The corpus is the fixed point-check corpus (``_corpus_bug_classes`` — DEFAULT_CHECKS
         ∪ scanner.library), so ``corpus_classes`` is a stable denominator and
-        ``classes_exercised`` + ``classes_inconclusive`` PARTITION it. A corpus class is
-        exercised when the run actually PROBED it (a probe record of that class exists) OR
-        confirmed a finding of it; the rest are inconclusive. A class the plan committed but
-        never probed on the wire is inconclusive, NOT exercised. ``clean_is_corpus_wide`` is
-        True ONLY when nothing is inconclusive — i.e. a CLEAN from this run really does cover
-        the whole shipped corpus. On a default (library-off) run it is False: most classes are
-        inconclusive, so ``no findings`` here is NOT a corpus-wide negative."""
+        ``classes_exercised`` + ``classes_inconclusive`` PARTITION it. ``classes_exercised`` is
+        the ADJUDICATED set — a corpus class belongs to it only when a probe of that class
+        returned a ``clean`` or ``finding`` verdict, or a finding of it was confirmed. A class
+        the plan committed but never probed is inconclusive; so is a class whose every probe
+        came back ``inconclusive`` (F2: counting those made ``clean_is_corpus_wide`` reachable
+        by a run that adjudicated NOTHING). ``clean_is_corpus_wide`` is True ONLY when nothing
+        is inconclusive — i.e. a CLEAN from this run really does cover the whole shipped
+        corpus. On a default (library-off) run it is False: most classes are inconclusive, so
+        ``no findings`` here is NOT a corpus-wide negative."""
         corpus = _corpus_bug_classes()
-        exercised_or_found = {p.bug_class for p in self.exercised_probes} | {
-            f.bug_class for f in self.active_findings
-        }
-        exercised = sorted(c for c in corpus if c in exercised_or_found)
-        inconclusive = sorted(c for c in corpus if c not in exercised_or_found)
+        clean, with_findings = self._adjudicated_classes()
+        adjudicated = clean | with_findings
+        exercised = sorted(c for c in corpus if c in adjudicated)
+        inconclusive = sorted(c for c in corpus if c not in adjudicated)
         return {
             "corpus_classes": len(corpus),
             "classes_exercised": exercised,
@@ -748,11 +784,29 @@ class WebScanCampaign:
 
     def _smuggling_findings(self, origins: list[tuple[str, int, str]]) -> tuple[list[AuditFinding], list[str]]:
         """Probe each authorized origin for HTTP request-smuggling desync and h2c
-        capability. A ``detected`` desync is promoted to an oracle-confirmed
-        AuditFinding (the latency oracle fired on a real hang); an offered h2c
-        upgrade is a capability lead. Every origin clears ``_arsenal_host_allowed``
-        first — an unauthorized host is never touched."""
-        from .smuggling import detect, detect_h2c_upgrade
+        capability. Every origin clears ``_arsenal_host_allowed`` first — an
+        unauthorized host is never touched.
+
+        F3 — request_smuggling is minted from the ACHIEVED-DESYNC differential ONLY.
+        ``smuggling.detect_desync`` captures both legs' RAW second-request responses and
+        the ``smuggling_desync`` ctx key hands them to the canary-echo oracle, which
+        confirms only when a UNIQUE >=12-char per-probe canary is echoed in the conflict
+        leg's second response and ABSENT from the same-bytes well-formed control leg.
+        Timing is never consulted.
+
+        The LATENCY mint this method used to carry is DELETED. It built a
+        ``FindingContext.from_http_responses`` over two LITERAL placeholder bodies with a
+        ``latency``-only discriminator; ``latency`` weighs exactly 0.7 and
+        ``HIGH_CONFIDENCE`` is 0.7, so a bare timing delta landed exactly on the confirm
+        boundary and minted a High FACT whose certificate held NO target bytes. Measured
+        against a single-socket origin with no proxy at all — one that merely honours
+        RFC 7230 §3.3.3 — it produced three High ``request_smuggling`` FACTs at conf
+        0.700. That is verbatim the A12 (#269) defect both ``verify/verifier.py`` and the
+        ``request_smuggling.differential_desync`` branch declare retired, and
+        ``smuggling.detect`` already labels its own timing result honestly (severity Low,
+        "TIMING LEAD", "UNCONFIRMED"). That honest wrapper is now PRESERVED as a lead
+        instead of being discarded and re-minted as a High "desync"."""
+        from .smuggling import detect, detect_desync, detect_h2c_upgrade
         from ..verify.adapter import FindingContext
         from ..verify.confirmation import confirm_finding
 
@@ -761,29 +815,50 @@ class WebScanCampaign:
         for host, port, origin_url in origins:
             if not self._arsenal_host_allowed(origin_url):
                 continue
+            # 1. The ACHIEVED desync — the only path to a request_smuggling FACT.
+            confirmed_here = False
+            try:
+                probes = detect_desync(host, port, authorize=self._arsenal_host_allowed)
+            except Exception:
+                probes = []
+            for p in probes:
+                if not p.adjudicable:
+                    # A leg read no response: honestly INCONCLUSIVE, never a CLEAN and
+                    # never a fabricated leak.
+                    if p.note:
+                        leads.append(f"smuggling {p.technique} @ {origin_url}: not adjudicable — {p.note}")
+                    continue
+                ctx = FindingContext.from_smuggling_desync(
+                    canary=p.canary, technique=p.technique,
+                    conflict_second=p.conflict.model_dump(mode="json"),
+                    control_second=p.control.model_dump(mode="json"))
+                confirmed = confirm_finding(
+                    {"bug_class": "request_smuggling", "title": f"{p.technique} desync",
+                     "severity": "High", "surface": origin_url,
+                     "summary": (f"{p.technique} achieved desync: a unique per-probe canary leaked into "
+                                 f"the next request's response on the conflict connection and is absent "
+                                 f"from the well-formed control")},
+                    ctx)
+                if confirmed is None:
+                    continue
+                findings.append(self._arsenal_finding(
+                    confirmed, check_id=f"smuggling-{p.technique}",
+                    insertion_point=f"request:{p.technique}", param=p.technique,
+                    endpoint=origin_url, oracle_context=ctx.model_dump(mode="json")))
+                confirmed_here = True
+                break   # one confirmed desync proves the origin; stop probing techniques
+            # 2. The TIMING sweep — LEADS only, and skipped once the desync is proven
+            #    (the lead adds nothing to a FACT and costs 12 more raw sends).
+            if confirmed_here:
+                continue
             try:
                 results = detect(host, port)
             except Exception:
                 results = []
             for r in results:
-                if not r.detected:
-                    continue
-                ctx = FindingContext.from_http_responses(
-                    {"status": 200, "body": "control"}, {"status": 200, "body": "control"},
-                    bug_class="request_smuggling",
-                    baseline_latency_ms=r.control_ms, mutated_latency_ms=r.probe_ms,
-                    discriminator={"dimensions": ["latency"], "latency_threshold_ms": 1500.0})
-                confirmed = confirm_finding(
-                    {"bug_class": "request_smuggling", "title": f"{r.technique} desync",
-                     "severity": "High", "surface": origin_url,
-                     "summary": f"{r.technique} timing desync (connection hung on the probe)"},
-                    ctx)
-                if confirmed is None:
-                    continue
-                findings.append(self._arsenal_finding(
-                    confirmed, check_id=f"smuggling-{r.technique}",
-                    insertion_point=f"request:{r.technique}", param=r.technique,
-                    endpoint=origin_url, oracle_context=ctx.model_dump(mode="json")))
+                if r.detected:
+                    leads.append(f"smuggling {r.technique} @ {origin_url}: {r.rationale} — "
+                                 f"UNCONFIRMED timing LEAD, not a desync proof")
             try:
                 if detect_h2c_upgrade(host, port):
                     leads.append(f"h2c-upgrade offered at {origin_url} (escalate to an h2 tool)")
@@ -819,10 +894,18 @@ class WebScanCampaign:
     def _cswsh_findings(self, ws_urls: list[str]) -> list[AuditFinding]:
         """Test each in-scope ws endpoint for Cross-Site WebSocket Hijacking: a
         handshake accepted from a FOREIGN origin (while the trusted origin also
-        succeeds) means Origin is not validated. Oracle-confirmed via achieved-state;
-        each endpoint clears ``_arsenal_host_allowed`` first."""
+        succeeds) means Origin is not validated. Each endpoint clears
+        ``_arsenal_host_allowed`` first.
+
+        F7 — the certificate is the one the CHECK was adjudicated on, and it carries the
+        two handshakes' RAW request/response blocks. This method used to DISCARD the
+        check's context and mint ``from_state({"cross_origin_ws_accepted": True},
+        {"cross_origin_ws_accepted": True})`` instead: BOTH sides literals, so
+        ``achieved_state_oracle(True, True)`` re-confirmed forever — regardless of the
+        target, of whether the endpoint was ever fixed, even of whether it ever existed.
+        A certificate with zero target-derived bytes cannot be re-verified and cannot
+        fail; ``predicate_oracle`` now judges the real bytes instead."""
         from .websocket import CswshCheck
-        from ..verify.adapter import FindingContext
 
         findings: list[AuditFinding] = []
         for ws_url in ws_urls:
@@ -830,33 +913,40 @@ class WebScanCampaign:
             if not self._arsenal_host_allowed(probe_url):
                 continue
             try:
-                confirmed = CswshCheck(url=ws_url).probe()
+                confirmed, ctx = CswshCheck(url=ws_url).probe_with_context()
             except Exception:
                 continue
             if confirmed is None:
                 continue
-            ctx = FindingContext.from_state(
-                {"cross_origin_ws_accepted": True}, {"cross_origin_ws_accepted": True},
-                bug_class="cross_site_websocket_hijacking")
             findings.append(self._arsenal_finding(
                 confirmed, check_id="cswsh", insertion_point=f"websocket:{ws_url}",
                 param=ws_url, endpoint=ws_url, oracle_context=ctx.model_dump(mode="json")))
         return findings
 
-    def _race_findings(self, seed_url: str) -> list[AuditFinding]:
+    def _race_leads(self, seed_url: str) -> list[str]:
         """Fire the single-packet race engine ONLY at operator-supplied
-        ``(action_path, max_allowed)`` targets (never a blindly-swept endpoint). An
-        action that overran its atomicity limit under the burst is promoted to an
-        oracle-confirmed ``request_race`` finding. Each target's origin is host-gated."""
+        ``(action_path, max_allowed)`` targets (never a blindly-swept endpoint) and
+        report an over-run as a LEAD. Each target's origin is host-gated.
+
+        R3 — this used to MINT a High ``request_race`` FACT from
+        ``from_predicate({"successes": result.successes, ...}, {"gt": [...]})``: a
+        producer-computed scalar the oracle could only re-assert, over a DEFAULT any-2xx
+        success rule. ``BUG_CLASS_ORACLES``' own row for ``request_race`` states the
+        standard — "successes > max_allowed over a SEMANTIC predicate is a FACT; a bare
+        any-2xx count is a LEAD; no owner-signed spec is INCONCLUSIVE" — and a campaign
+        target is ``(action_path, max_allowed)`` only: no operator semantic success
+        predicate and no owner-signed WorkflowSpec. So the honest verdict here is a LEAD.
+        Minting the FACT needs the gated ``workflow_abuse`` route
+        (``FindingContext.from_race_burst``), which re-derives the count by re-evaluating
+        the operator's predicate over the RAW retained responses — and ``RaceResult``
+        does not retain bodies, so that is a producer change, not a re-wiring."""
         from .race import race_burst
-        from ..verify.adapter import FindingContext
-        from ..verify.confirmation import confirm_finding
 
         if not self.arsenal_race_targets:
             return []
         sp = urlsplit(seed_url)
         base = f"{sp.scheme}://{sp.netloc}"
-        findings: list[AuditFinding] = []
+        leads: list[str] = []
         for action_path, max_allowed in self.arsenal_race_targets:
             target_url = urljoin(base + "/", action_path.lstrip("/"))
             if not self._arsenal_host_allowed(target_url):
@@ -871,21 +961,12 @@ class WebScanCampaign:
                 continue
             if not result.over_run:
                 continue
-            ctx = FindingContext.from_predicate(
-                {"action": action_path, "successes": result.successes, "max_allowed": int(max_allowed)},
-                {"gt": [{"var": "successes"}, {"var": "max_allowed"}]},
-                bug_class="request_race")
-            confirmed = confirm_finding(
-                {"bug_class": "request_race", "title": f"Limit-overrun race on {action_path}",
-                 "severity": "High", "surface": f"POST {action_path}",
-                 "summary": f"action succeeded {result.successes}x under a burst (limit {max_allowed})"},
-                ctx)
-            if confirmed is None:
-                continue
-            findings.append(self._arsenal_finding(
-                confirmed, check_id="race", insertion_point=f"race:{action_path}",
-                param=action_path, endpoint=target_url, oracle_context=ctx.model_dump(mode="json")))
-        return findings
+            leads.append(
+                f"race {action_path} @ {target_url}: {result.successes} of {result.count} burst requests "
+                f"returned 2xx against a limit of {max_allowed} — an UNCONFIRMED LEAD under the DEFAULT "
+                f"any-2xx success rule; supply an owner-signed workflow spec with a SEMANTIC success "
+                f"predicate to adjudicate a real limit overrun")
+        return leads
 
     def _arsenal_pass(
         self, seed_url: str, crawl, spa_endpoints: list[str],
@@ -904,7 +985,7 @@ class WebScanCampaign:
         leads.extend(smug_leads)
 
         active.extend(self._cswsh_findings(self._ws_candidates(seed_url, crawl, spa_endpoints)))
-        active.extend(self._race_findings(seed_url))
+        leads.extend(self._race_leads(seed_url))
         return active, paths, secrets, leads
 
     # ---------------------------------------------------------------------

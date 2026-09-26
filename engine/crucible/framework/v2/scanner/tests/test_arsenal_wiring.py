@@ -308,16 +308,19 @@ def test_smuggling_gate_blocks_probe_on_unauthorized_host() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_smuggling_desync_confirmed_through_the_arsenal() -> None:
+def test_a_hanging_server_is_a_timing_lead_not_a_smuggling_fact() -> None:
+    """F3 — a server that merely HANGS on the CL+TE probe proves nothing: a conformant
+    origin awaiting an incomplete declared body delays identically. This test used to
+    assert the OPPOSITE (that a hang CONFIRMS a technique), which is exactly the A12 (#269)
+    overclaim the latency mint had reintroduced. The honest output is a LEAD.
+
+    The positive control now lives in ``test_audit_a_soundness`` and needs a REAL
+    canary-echo desync (``eval.benchmark_app.serve_smuggling_desync``)."""
     with _hanging_server(delay=2.0) as port:
         camp = WebScanCampaign(_dummy_send, enable_arsenal=True)  # loopback → allowed
-        findings, _leads = camp._smuggling_findings([("127.0.0.1", port, f"http://127.0.0.1:{port}/")])
-    assert findings, "a hanging desync server should confirm at least one smuggling technique"
-    f = findings[0]
-    assert f.bug_class == "request_smuggling"
-    assert f.confirmed_by  # an oracle kind carried the confirmation
-    assert f.oracle_context is not None  # a retained, re-verifiable certificate
-    assert f.confidence > 0.0
+        findings, leads = camp._smuggling_findings([("127.0.0.1", port, f"http://127.0.0.1:{port}/")])
+    assert findings == [], "timing alone must never mint a request_smuggling FACT"
+    assert any("smuggling" in ln for ln in leads), leads
 
 
 def test_cswsh_confirmed_through_the_arsenal() -> None:
@@ -363,4 +366,7 @@ def test_race_engine_does_not_run_without_explicit_targets() -> None:
     # enable_arsenal alone must not fire the destructive race engine.
     camp = WebScanCampaign(_dummy_send, enable_arsenal=True)
     assert camp.arsenal_race_targets == ()
-    assert camp._race_findings("http://127.0.0.1:8000/") == []
+    # R3: the race path is LEAD-only now (no owner-signed spec, no semantic success
+    # predicate), so there is no _race_findings to call at all.
+    assert not hasattr(camp, "_race_findings")
+    assert camp._race_leads("http://127.0.0.1:8000/") == []

@@ -65,10 +65,27 @@ class GraphQLIntrospectionCheck:
     bug_class: str = "graphql_introspection"
 
     def probe(self, template: RequestTemplate, send: Send) -> FindingContext | None:
+        """F7 — the certificate retains the RAW response body and the ORACLE decides.
+
+        This used to hand ``achieved_state_oracle`` ``{"introspection_enabled": True}`` vs
+        ``{"introspection_enabled": <a Python bool this check had already computed>}``: the
+        oracle could only re-assert the check's own verdict, and the certificate held no
+        target bytes to re-verify or to fail on. The predicate below reads the raw body,
+        keyed on the JSON-SERIALISED keys (``"__schema":``, ``"queryType":`` / ``"types":``)
+        rather than the bare identifiers, so an error that merely ECHOES the rejected query
+        text (``... field "__schema" ...``, ``query{__schema{queryType{name}...``) cannot
+        satisfy it — only an actual schema document under ``data`` can."""
         resp = send(_post_json(template.request, _INTROSPECTION))
-        enabled = _schema_returned(resp)
-        return FindingContext.from_state(
-            {"introspection_enabled": True}, {"introspection_enabled": enabled},
+        return FindingContext.from_predicate(
+            {"response_body": _body_of(resp), "query": _INTROSPECTION},
+            {"all": [
+                {"contains": [{"var": "response_body"}, '"data":']},
+                {"contains": [{"var": "response_body"}, '"__schema":']},
+                {"any": [
+                    {"contains": [{"var": "response_body"}, '"queryType":']},
+                    {"contains": [{"var": "response_body"}, '"types":']},
+                ]},
+            ]},
             bug_class=self.bug_class)
 
 
@@ -82,27 +99,19 @@ class GraphQLSuggestionsCheck:
     bug_class: str = "graphql_suggestions"
 
     def probe(self, template: RequestTemplate, send: Send) -> FindingContext | None:
+        """F7 — same fix as the introspection check: the RAW error body is retained and the
+        oracle re-derives the leak from it, instead of the check computing ``leaks`` in
+        Python and having ``achieved_state_oracle`` rubber-stamp the boolean back."""
         resp = send(_post_json(template.request, _TYPO))
-        body = str(resp.get("body", "")) if isinstance(resp, dict) else ""
-        leaks = "did you mean" in body.lower()
-        return FindingContext.from_state(
-            {"suggestions_enabled": True}, {"suggestions_enabled": leaks},
+        return FindingContext.from_predicate(
+            {"response_body": _body_of(resp), "query": _TYPO},
+            {"icontains": [{"var": "response_body"}, "did you mean"]},
             bug_class=self.bug_class)
 
 
-def _schema_returned(resp: object) -> bool:
-    if not isinstance(resp, dict):
-        return False
-    body = str(resp.get("body", ""))
-    try:
-        doc = json.loads(body)
-    except (ValueError, TypeError):
-        return False
-    data = doc.get("data") if isinstance(doc, dict) else None
-    if not isinstance(data, dict):
-        return False
-    schema = data.get("__schema")
-    return isinstance(schema, dict) and ("queryType" in schema or "types" in schema)
+def _body_of(resp: object) -> str:
+    """The response body as text — the target-DERIVED bytes a certificate retains."""
+    return str(resp.get("body", "")) if isinstance(resp, dict) else ""
 
 
 # ---------------------------------------------------------------------------
