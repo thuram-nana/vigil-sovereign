@@ -85,6 +85,10 @@ class AdapterResult:
     outcome: str = ""      # the typed Outcome value (positive/clean/inconclusive/unsupported/error/skipped).
                            # `status` stays the authoritative FACT-vs-not flag; `outcome` refines the LEAD
                            # bucket into distinct states (criterion 7). Default "" only for legacy callers.
+    note: str = ""         # the check's OWN narrowed claim / demotion reason, in words, for every consumer
+                           # that reads results rather than certificates. A check whose FACT is narrower than
+                           # its bug-class token MUST set this (and bind the same sentence into the
+                           # certificate) — a claim the runner drops is not a disclosure. Default "".
 
     @property
     def is_fact(self) -> bool:
@@ -118,6 +122,7 @@ def certify_admitted(
     tool_version: str = "",
     freshness_ttl_seconds: int = 0,
     binding: "dict | None" = None,
+    report_claims: "list[Any] | None" = None,
 ) -> AdapterResult:
     """Mint a certificate ONLY for a verdict that has already passed admission.
 
@@ -150,7 +155,7 @@ def certify_admitted(
     result = confirm_and_certify(
         finding, engagement_slug=engagement_slug, signers=signers, seq=seq, verifier=verifier,
         provenance=provenance, tool_version=tool_version, freshness_ttl_seconds=freshness_ttl_seconds,
-        binding=binding)
+        binding=binding, report_claims=report_claims)
     if not result.is_fact:
         # Admission said FACT but the deterministic layer refused (unmapped class, LLM provenance, signing
         # failure). The stricter answer wins — admission grants permission, it does not manufacture proof.
@@ -180,6 +185,7 @@ def confirm_and_certify(
     tool_version: str = "",
     freshness_ttl_seconds: int = 0,
     binding: "dict | None" = None,
+    report_claims: "list[Any] | None" = None,
 ) -> AdapterResult:
     """Drive CRUCIBLE's oracle over ``finding['oracle_context']`` and, on a confirmed + oracle-mapped +
     REPRODUCED finding, mint + sign a proof-carrying certificate. ``signers`` = [(key_id, priv_b64)]
@@ -314,7 +320,12 @@ def confirm_and_certify(
         "freshness_ttl_seconds": int(freshness_ttl_seconds or finding.get("freshness_ttl_seconds", 0) or 0),
     }
     d2 = {k: v for k, v in (binding or {}).items() if k in _D2_BINDING_KEYS}
-    cert = build_certificate(enriched, engagement_slug=engagement_slug, seq=seq, **d2)
+    # ``report_claims`` binds the check's OWN claim SENTENCES into the signed certificate (the whole model is
+    # signed, so the text is tamper-evident and travels with the proof). A check whose FACT is NARROWER than
+    # its bug-class token uses this so a consumer receives the narrowing, not just the token — the fix for
+    # "the note never reached the wire". None (the default) ⇒ the certificate serialises byte-identically.
+    cert = build_certificate(enriched, engagement_slug=engagement_slug, seq=seq,
+                             report_claims=list(report_claims) if report_claims else None, **d2)
     signed = sign_certificate(cert, signers)
     return AdapterResult(
         "fact",

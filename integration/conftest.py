@@ -12,6 +12,23 @@ if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
 
+def pytest_configure(config):
+    """Register the ``volume`` marker HERE as well as in integration/pyproject.toml.
+
+    Both registrations are load-bearing, because the two CI legs resolve a DIFFERENT configfile. The
+    sovereign leg runs ``pytest integration/tests`` -> rootdir integration/ -> integration/pyproject.toml
+    is the configfile. The offense leg's argument set spans docs/ and integration/, so its common
+    ancestor — and therefore its rootdir and configfile — is the REPO ROOT, where that table does not
+    exist. Without this hook, ``-m "not volume"`` in the offense leg would still SELECT correctly but
+    would emit PytestUnknownMarkWarning, and the repository's ``--strict-markers`` hygiene would turn it
+    into an error. A conftest at this level is loaded for integration/tests/** under either rootdir.
+    """
+    config.addinivalue_line(
+        "markers",
+        "volume: statistical, high-run-count regression — excluded from the per-PR leg, runs nightly",
+    )
+
+
 # ---------------------------------------------------------------------------------------------------
 # hermetic tool resolution — a unit test of an argv must not depend on what is installed on the box
 # ---------------------------------------------------------------------------------------------------

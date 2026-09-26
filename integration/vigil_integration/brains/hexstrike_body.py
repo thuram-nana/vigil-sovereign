@@ -89,6 +89,17 @@ _SPEC_BUILDER_TOOLS = SPEC_BUILDER_TOOLS
 # SERVICE_REACHABILITY for the four port scanners; tls → TLS_WEAKNESS for sslscan). Adding a member to a
 # FACT-capable family that also gains a spec builder makes it FACT-capable automatically — no edit here.
 _ORACLE_MAPPED_TOOLS = oracle_mapped_tools(_SPEC_BUILDER_TOOLS)
+# W2 DOWNGRADE — LEAD ENRICHERS. Tools that have a runner-owned ToolSpec builder and a runner-owned gated
+# re-drive, but whose re-drive branch is NOT fact_capable, so they can NEVER mint. They are dispatched
+# through the SAME R4 runner as the oracle-mapped tools — same scope gate, same capability token, same
+# pre-flight, same Observation — because the re-drive's retained, offline-re-verifiable capture is genuinely
+# good LEAD evidence (priority + context for a human), and deleting it would throw that away. The FACT choke
+# is `verdict.admit()` over the branch registry, NOT this set: httpx/ffuf re-drives cross admission with
+# ``achieved_state.endpoint_liveness`` declared fact_capable=false, so every result comes back a LEAD.
+_LEAD_ENRICHER_TOOLS: "frozenset[str]" = frozenset({"httpx", "ffuf"})
+# Everything the body may dispatch to the R4 runner at all. Disjoint by construction (asserted in tests): a
+# tool is either oracle-mapped (may mint) or a lead enricher (may not), never both.
+_RUNNER_DISPATCHED_TOOLS = _ORACLE_MAPPED_TOOLS | _LEAD_ENRICHER_TOOLS
 # a provenance/context/authorization key must NEVER originate from the body/brain (red-pen HIGH-3 guard).
 _FORBIDDEN_EXEC_KEYS = frozenset({"provenance", "oracle_context", "_authorized", "authorized"})
 
@@ -103,6 +114,8 @@ def _spec_for_kind(kind: str, params: "dict | None"):
     FATAL-2: the offense-side ``external_tool`` import is function-local, so importing this module co-loads no
     offense engine into the sovereign env."""
     from ..live.external_tool import (  # noqa: PLC0415
+        ffuf_content_scan,
+        httpx_url_scan,
         masscan_service_scan,
         naabu_service_scan,
         nmap_service_scan,
@@ -114,6 +127,14 @@ def _spec_for_kind(kind: str, params: "dict | None"):
     p = params or {}
     if kind == "sslscan":
         return tls_scan(port=int(p.get("port", 443)))
+    # HexStrike W2 — web-discovery LEAD ENRICHERS: httpx/ffuf propose URLs the runner re-drives through the
+    # gated web sibling-differential re-drive (achieved_state.endpoint_liveness). That branch is LEAD-only
+    # PERMANENTLY, so the re-drive attaches its retained, offline-re-verifiable capture and NEVER mints.
+    # Only the typed `scheme`/`wordlist` VALUES are read; every flag is built server-side in the ToolSpec.
+    if kind == "httpx":
+        return httpx_url_scan(scheme=str(p.get("scheme", "http")))
+    if kind == "ffuf":
+        return ffuf_content_scan(wordlist=str(p.get("wordlist", "") or ""))
     if kind == "nmap":
         return nmap_service_scan(ports=str(p.get("ports", "1-1024")))
     if kind == "masscan":
@@ -279,7 +300,7 @@ class HexstrikeAgentBody(AgentBody):
         provenance + signing. A tool with no oracle-mapped ToolSpec, an unprovisioned runner, or a runner
         provisioned WITHOUT a single-use capability token (H8f gate parity), stays a LEAD (honest — never a
         fabricated fact, never a packet on an unspent authorization)."""
-        if action.kind not in _ORACLE_MAPPED_TOOLS:
+        if action.kind not in _RUNNER_DISPATCHED_TOOLS:
             return ActionOutcome(executed=False, ok=False,
                                  blocked_reason=f"{action.kind!r} has no oracle-mapped ToolSpec — stays a LEAD")
         if self._runner is None:
@@ -300,7 +321,7 @@ class HexstrikeAgentBody(AgentBody):
                                  blocked_reason=f"{action.kind!r} params rejected by the ToolSpec schema — "
                                                 f"stays a LEAD: {e}")
         if spec is None:
-            # _ORACLE_MAPPED_TOOLS and _spec_for_kind agreed on membership above; a None here would be an
+            # _RUNNER_DISPATCHED_TOOLS and _spec_for_kind agreed on membership above; a None here would be an
             # internal drift, so refuse to run (fail-closed) rather than fabricate.
             return ActionOutcome(executed=False, ok=False,
                                  blocked_reason=f"{action.kind!r} is oracle-mapped but has no spec builder "
@@ -346,9 +367,26 @@ class HexstrikeAgentBody(AgentBody):
         # just counts — so the engine seam can propagate a body-routed FACT into the run report through the SAME
         # already-confirmed-fact path it uses for fireteam facts. The body still supplies NO provenance; these
         # facts were minted by the RUNNER's own admit()+certify, never by the body/brain.
-        return ActionOutcome(executed=True, ok=bool(facts),
+        # W2 — ``ok`` must be TRUTHFUL PER TOOL CLASS. For an ORACLE-MAPPED tool, "the runner minted a
+        # FACT" is the right success predicate and stays exactly as it was. For a LEAD ENRICHER (httpx/ffuf,
+        # whose re-drive branch is fact_capable=false) ``ok=bool(facts)`` is a CATEGORY ERROR: that path can
+        # NEVER mint, so a fully successful enrichment would report ``executed=True, ok=False`` and any
+        # consumer keying on ``ok`` (the run report, ``learn`` below, a retry loop) would read a healthy run
+        # as a failure. Its honest success predicate is "the tool ran and its gated re-drives completed":
+        # the run was not refused (checked above) and the tool itself did not error. ``ok=True`` here
+        # asserts ONLY that — never that anything was confirmed. ``n_facts`` stays 0 on this path by
+        # construction, and the LEADs carry their own per-item outcome, so nothing reads it as a FACT.
+        lead_enricher = action.kind in _LEAD_ENRICHER_TOOLS
+        tool_errored = bool(getattr(res, "tool_errored", False))
+        ok = (not tool_errored) if lead_enricher else bool(facts)
+        return ActionOutcome(executed=True, ok=ok,
                              detail={"n_facts": len(facts), "n_leads": len(leads),
                                      "reason": getattr(res, "reason", ""), "tool": action.kind,
+                                     # what ``ok`` MEANS for this row, so a consumer never has to infer it:
+                                     # "fact" => ok==(a FACT was minted); "lead_enricher" => ok==(the tool
+                                     # ran and its gated re-drives completed), which implies NO fact.
+                                     "ok_semantics": "lead_enricher" if lead_enricher else "fact",
+                                     "tool_errored": tool_errored,
                                      "facts": facts, "leads": leads,
                                      "contexts": dict(getattr(res, "contexts", {}) or {})})
 

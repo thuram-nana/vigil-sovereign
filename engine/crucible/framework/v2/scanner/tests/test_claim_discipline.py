@@ -565,6 +565,10 @@ def test_the_capability_matrix_does_not_outrun_the_branch_registry() -> None:
             assert fam in fact_families, (
                 f"{t['name']} is marked fact_capable but its oracle_family {fam!r} has no fact_capable branch "
                 f"in the registry — the matrix outruns the registry")
+    # HexStrike W2 does NOT grow this set: httpx/ffuf propose urls and VIGIL re-drives them through the
+    # gated sibling-differential capture, but that branch (achieved_state.endpoint_liveness) is declared
+    # LEAD-only PERMANENTLY after five adversarial rounds, so the re-drive is a LEAD ENRICHER and the two
+    # tools stay fact_capable=false. See docs/capability-matrix/evidence-branches.json.
     assert fact_tools == {"nmap", "sslscan", "masscan", "rustscan", "naabu", "zmap", "unicornscan"}, (
         f"unexpected fact_capable tool set: {fact_tools}")
 

@@ -176,6 +176,16 @@ KNOWN_NONPR_ADVISORY: dict[str, str] = {
         "control and a scaled throughput-floor run — IS required inside 'CRUCIBLE eval + benchmark corpus' "
         "via framework/v2/eval/tests/test_soak_leak.py."
     ),
+    "web-liveness volume regressions (nightly)": (
+        "soak.yml — schedule/workflow_dispatch only; the STATISTICAL half of the HexStrike W2 liveness "
+        "regressions (80-300 live re-drives per class, ~33 minutes) at their full unreduced counts. "
+        "Carried per-PR they took the required 'integration two-env boundary (P5)' job past GitHub's "
+        "45m0s maximum and it was CANCELED, so they never report on a PR and requiring this job would "
+        "block every PR. Its per-PR blocking subset is the low-run WIRING twin of every one of those "
+        "tests, which runs inside the REQUIRED 'integration two-env boundary (P5)' job via "
+        "integration/tests/test_web_liveness.py -m \"not volume\"; that the split cannot silently drop a "
+        "regression is itself proven there by integration/tests/test_ci_volume_tests_run_nightly.py."
+    ),
     "TSan — WARDEN Rust kernel concurrency (scheduled, heavy)": (
         "concurrency-race.yml — schedule/workflow_dispatch only (W11-5 #486). ThreadSanitizer installs a "
         "nightly toolchain + rust-src and rebuilds std with the sanitizer (minutes, network), too heavy for "
