@@ -886,6 +886,35 @@ def _finish_runtime_arm(report: dict, res: Any, *, run_dir: "str | os.PathLike")
     return _RuntimeMintResult(is_fact=int(getattr(res, "n_facts", 0) or 0) > 0, result=res)
 
 
+def _runtime_class_arm(report: dict, claimed_class: str, where: str, *, run_dir: "str | os.PathLike",
+                       signers: "list[tuple[str, str]]", engagement_slug: str) -> "Any | None":
+    """Shared adapter for every arm whose driver is ``live.runtime_redrive.runtime_redrive`` — the ONE runner
+    that owns the ``RUNTIME_FACT_CLASSES`` (``path_traversal`` / ``xss`` / ``exposure`` / ``ssi``). It
+    re-drives the finding's ``endpoint`` with VIGIL's OWN gated probes for the single CLAIMED class and mints
+    only over the matching deterministic oracle's verdict on VIGIL's FRESH capture. The Strix report supplies
+    ONLY the location (``endpoint``); no report byte is ever evidence.
+
+    ``claimed_class`` is the RUNNER's literal, never the report's free text: each caller passes a constant, so
+    a Strix label can only select WHICH arm runs, never what a certificate says. Every class on this helper is
+    CONTROL-BEARING inside ``runtime_redrive`` itself — a benign non-traversal value on the same parameter
+    (path_traversal), a random soft-404 control path (exposure), a benign no-directive request (ssi) — so no
+    arm reached through here can mint on a bare signature match. That is the single guarantee behind the
+    ``lfi``/``ContentSignatureCheck`` soundness flag: the RAW check has no control, this call path always does.
+
+    A missing endpoint / gate refusal / oracle non-fire ⇒ LEAD. Never raises."""
+    url = str((report or {}).get("endpoint") or "").strip()
+    if not url:
+        return None
+    try:
+        from ..live.runtime_redrive import runtime_redrive  # noqa: PLC0415 — pulls framework at CALL time
+        res = runtime_redrive(url, slug=engagement_slug, engagement_slug=engagement_slug, signers=signers,
+                              claimed_class=claimed_class)
+    except Exception as exc:  # noqa: BLE001 — a re-drive we could not RUN → LEAD (never a false CLEAN)
+        _record_degraded(run_dir, REDRIVE_FAILED, where, exc)
+        return None
+    return _finish_runtime_arm(report, res, run_dir=run_dir)
+
+
 def _reflection_redrive(report: dict, cls: str, *, run_dir: "str | os.PathLike",
                         signers: "list[tuple[str, str]]", engagement_slug: str,
                         control_fetch: "Optional[Callable[[dict], bytes | None]]" = None) -> "Any | None":
@@ -893,17 +922,8 @@ def _reflection_redrive(report: dict, cls: str, *, run_dir: "str | os.PathLike",
     ``runtime_redrive(claimed_class="xss")`` reflection arm; a FACT is minted ONLY when the reflection_context
     oracle reports the ``html_tag`` breakout over VIGIL's own gated capture. No control_fetch (the arm crafts
     its own canary). A missing endpoint / gate refusal / non-fire ⇒ LEAD. Never raises."""
-    url = str((report or {}).get("endpoint") or "").strip()
-    if not url:
-        return None
-    try:
-        from ..live.runtime_redrive import runtime_redrive  # noqa: PLC0415 — pulls framework at CALL time
-        res = runtime_redrive(url, slug=engagement_slug, engagement_slug=engagement_slug, signers=signers,
-                              claimed_class="xss")
-    except Exception as exc:  # noqa: BLE001 — a re-drive we could not RUN → LEAD (never a false CLEAN)
-        _record_degraded(run_dir, REDRIVE_FAILED, "proof.run._reflection_redrive", exc)
-        return None
-    return _finish_runtime_arm(report, res, run_dir=run_dir)
+    return _runtime_class_arm(report, "xss", "proof.run._reflection_redrive",
+                              run_dir=run_dir, signers=signers, engagement_slug=engagement_slug)
 
 
 def _stat_redrive_arm(report: dict, fn_name: str, where: str, *, run_dir: "str | os.PathLike",
@@ -1007,6 +1027,124 @@ def _prototype_pollution_redrive(report: dict, cls: str, *, run_dir: "str | os.P
                              run_dir=run_dir, signers=signers, engagement_slug=engagement_slug)
 
 
+# ======================================================================================================
+# W4 — three more runner-owned re-drive arms over the LAST of the ``runtime_redrive`` RUNTIME_FACT_CLASSES
+#   (``xss`` was already wired by the reflection arm above):
+#
+#     path_traversal / lfi  → SIDE_EFFECT      via branch ``path_traversal.file_signature``
+#     exposure              → ACHIEVED_STATE   via branch ``exposure.secret_signature`` (predicate oracle)
+#     ssi                   → EVALUATION       via branch ``ssi.evaluation`` (ssi_evaluation oracle)
+#
+#   No new OracleKind and no new evidence branch: all three branches are already registered and
+#   ``fact_capable: true`` in docs/capability-matrix/evidence-branches.json, and all three were already
+#   reachable from the ENGAGE seam (``live.wiring._redrive_branch_for``) — this slice wires them onto the
+#   STRIX proof rail as well. Each drive is ``_runtime_class_arm(report, "<class>", ...)``, i.e. exactly the
+#   reflection arm's call with a different RUNNER-supplied ``claimed_class``, so the control differential each
+#   class needs is the one already inside ``runtime_redrive`` (see that helper's docstring).
+#
+# CLASS-SET DISJOINTNESS (pinned + extended by test_redrive_arm_class_sets_are_disjoint): none of the CWEs
+# here (22/98 traversal+lfi, 200/538 exposure, 97 ssi) collides with a shipped arm's map, and the ALIAS KEYS
+# are pinned disjoint too — ``ssi`` and ``ssti`` are one character apart and are the one pair where a
+# mis-spelled alias could actually mis-route. The classifiers are PURE/stdlib (no framework import), safe on
+# the import-clean sink path (FATAL-2).
+# ======================================================================================================
+
+# path_traversal (CWE-22) + lfi (CWE-98) — ONE arm, ONE branch.
+#
+# LFI DECISION: ``lfi`` RIDES the path_traversal arm as an alias rather than getting its own
+# ``lfi.file_signature`` branch. Two reasons, both soundness:
+#   (1) CONTROL GUARANTEE. The grounding pass flagged that ``side_effect_oracle`` fires over a NON-UNIQUE
+#       well-known signature and that the RAW ``ContentSignatureCheck`` path carries NO benign control. The
+#       ONE code path in this repo that adds that control is ``runtime_redrive``'s ``path_traversal`` branch
+#       (control request FIRST on the same parameter; if the benign body already carries ``root:x:0:0:`` the
+#       candidate is refused before any payload is judged). Minting ``lfi`` through a SECOND branch would mean
+#       a SECOND probe path that has to re-implement the control — a second place for it to rot. Aliasing
+#       keeps exactly one control-bearing implementation.
+#   (2) HONEST LABEL. The evidence this arm produces is "a target-file content signature appeared under a
+#       traversal payload and was absent from the benign control" — an arbitrary FILE READ. It does NOT
+#       distinguish an ``include()``/``require()`` sink (CWE-98's actual distinguishing property, which
+#       carries code-execution impact) from a ``fopen()``/``sendfile()`` one. Certifying such evidence as
+#       ``lfi`` would upgrade the class on the CLAIMANT'S LABEL alone — the same defect the
+#       ``oidc_redirect_uri`` LLM-claim exclusion exists to prevent. So an LFI-labelled Strix LEAD is
+#       re-driven, and on confirmation is certified as ``path_traversal``: the class the oracle actually
+#       proved. This arm never mints a certificate that says ``lfi``.
+_TRAVERSAL_REDRIVE_CLASSES = frozenset({"path_traversal"})
+_TRAVERSAL_ALIASES = {"directory_traversal": "path_traversal", "relative_path_traversal": "path_traversal",
+                      "path_traversal_injection": "path_traversal", "arbitrary_file_read": "path_traversal",
+                      # CWE-98 spellings — DEMOTED onto path_traversal (see LFI DECISION above).
+                      "lfi": "path_traversal", "local_file_inclusion": "path_traversal",
+                      "file_inclusion": "path_traversal", "file_read": "path_traversal"}
+_TRAVERSAL_CWE_TO_CLASS = {"cwe-22": "path_traversal",   # improper limitation of a pathname ('../')
+                           "cwe-98": "path_traversal"}   # PHP include/require filename control (LFI)
+
+# exposure (CWE-200 / CWE-538) — a value-shaped secret signature at a FIXED path, with a random-path control.
+_EXPOSURE_REDRIVE_CLASSES = frozenset({"exposure"})
+_EXPOSURE_ALIASES = {"information_exposure": "exposure", "information_disclosure": "exposure",
+                     "sensitive_data_exposure": "exposure", "secret_exposure": "exposure",
+                     "exposed_secret": "exposure", "config_exposure": "exposure",
+                     "exposed_configuration": "exposure", "exposed_file": "exposure"}
+_EXPOSURE_CWE_TO_CLASS = {"cwe-200": "exposure",   # exposure of sensitive information to an unauthorized actor
+                          "cwe-538": "exposure"}   # insertion of sensitive information into an externally-accessible file
+
+# ssi — Server-Side Includes (CWE-97). DISTINCT from ``ssti`` (CWE-1336) in class, alias keys and CWE map.
+_SSI_REDRIVE_CLASSES = frozenset({"ssi"})
+_SSI_ALIASES = {"server_side_includes": "ssi", "server_side_include": "ssi", "ssi_injection": "ssi",
+                "edge_side_includes": "ssi", "esi_injection": "ssi"}
+_SSI_CWE_TO_CLASS = {"cwe-97": "ssi"}   # improper neutralization of server-side includes
+
+
+def _traversal_redrive_class(report: Any) -> "str | None":
+    """The path-traversal class this report maps to (always ``"path_traversal"``, including for an ``lfi`` /
+    CWE-98 label — see LFI DECISION above), or ``None``. SINGLE source of truth
+    (``sink._traversal_redrivable`` delegates here)."""
+    return _classify_redrive(report, _TRAVERSAL_REDRIVE_CLASSES, _TRAVERSAL_ALIASES, _TRAVERSAL_CWE_TO_CLASS)
+
+
+def _exposure_redrive_class(report: Any) -> "str | None":
+    """The exposure class this report maps to (``"exposure"``), or ``None``. SINGLE source of truth
+    (``sink._exposure_redrivable`` delegates here)."""
+    return _classify_redrive(report, _EXPOSURE_REDRIVE_CLASSES, _EXPOSURE_ALIASES, _EXPOSURE_CWE_TO_CLASS)
+
+
+def _ssi_redrive_class(report: Any) -> "str | None":
+    """The Server-Side-Includes class this report maps to (``"ssi"``), or ``None`` — NOT ``ssti``, which is a
+    separate arm one character away. SINGLE source of truth (``sink._ssi_redrivable`` delegates here)."""
+    return _classify_redrive(report, _SSI_REDRIVE_CLASSES, _SSI_ALIASES, _SSI_CWE_TO_CLASS)
+
+
+def _traversal_redrive(report: dict, cls: str, *, run_dir: "str | os.PathLike",
+                       signers: "list[tuple[str, str]]", engagement_slug: str,
+                       control_fetch: "Optional[Callable[[dict], bytes | None]]" = None) -> "Any | None":
+    """Rail adapter for path traversal / LFI: mint ONLY when the side_effect oracle sees the target-file
+    content signature (``root:x:0:0:``) under VIGIL's OWN traversal payload AND the benign control request on
+    the SAME parameter did not already carry it — a docs/error page that always prints the signature is
+    refused by that control, and a payload that merely reflects without a read never produces the signature."""
+    return _runtime_class_arm(report, "path_traversal", "proof.run._traversal_redrive",
+                              run_dir=run_dir, signers=signers, engagement_slug=engagement_slug)
+
+
+def _exposure_redrive(report: dict, cls: str, *, run_dir: "str | os.PathLike",
+                      signers: "list[tuple[str, str]]", engagement_slug: str,
+                      control_fetch: "Optional[Callable[[dict], bytes | None]]" = None) -> "Any | None":
+    """Rail adapter for secret/config exposure: mint ONLY when the predicate oracle finds a VALUE-shaped
+    signature (``DB_PASSWORD=`` / ``spring.datasource`` / ``[core]``) at a fixed path AND a random CONTROL
+    path did not serve it — a 200 soft-404 catch-all is refused by that control, and a JS bundle merely
+    NAMING the key does not match a value-shaped signature."""
+    return _runtime_class_arm(report, "exposure", "proof.run._exposure_redrive",
+                              run_dir=run_dir, signers=signers, engagement_slug=engagement_slug)
+
+
+def _ssi_redrive(report: dict, cls: str, *, run_dir: "str | os.PathLike",
+                 signers: "list[tuple[str, str]]", engagement_slug: str,
+                 control_fetch: "Optional[Callable[[dict], bytes | None]]" = None) -> "Any | None":
+    """Rail adapter for Server-Side Includes (CWE-97): mint ONLY when the ssi_evaluation oracle confirms the
+    server COMPUTED the product of a runner-crafted ``<!--#set-->``/``<!--#echo-->`` pair — the per-probe
+    random product present, the RAW directive absent, and a benign no-directive control lacking it. A page
+    that echoes the directive back as an inert comment is the honest boundary and does not fire."""
+    return _runtime_class_arm(report, "ssi", "proof.run._ssi_redrive",
+                              run_dir=run_dir, signers=signers, engagement_slug=engagement_slug)
+
+
 # The GENERIC Strix→re-drive dispatch rail. Each ARM is ``(classify, drive, requires_no_capture)``: the
 # classifier maps a Strix report to the class it can re-drive (or None), and the driver re-sends VIGIL's OWN
 # gated probe and mints ONLY over VIGIL's fresh capture + its oracle (never the Strix report). Arms are tried
@@ -1024,6 +1162,9 @@ _REDRIVE_ARMS = (
     (_timing_redrive_class, _timing_redrive, True),
     (_dom_xss_redrive_class, _dom_xss_redrive, True),
     (_prototype_pollution_redrive_class, _prototype_pollution_redrive, True),
+    (_traversal_redrive_class, _traversal_redrive, True),
+    (_exposure_redrive_class, _exposure_redrive, True),
+    (_ssi_redrive_class, _ssi_redrive, True),
 )
 
 

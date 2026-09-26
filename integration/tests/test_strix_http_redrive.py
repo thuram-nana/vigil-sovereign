@@ -435,11 +435,15 @@ def test_a_capture_bearing_report_is_not_hijacked_by_a_w2_arm(monkeypatch, tmp_p
 # =======================================================================================================
 
 def test_redrive_arm_class_sets_are_disjoint():
-    """Every re-drive arm's class set AND CWE map is pairwise DISJOINT (web / errsig / xss / ssti / boolean /
-    timing / dom_xss / prototype_pollution). Even were it violated, no false FACT could result (each arm mints
-    only over its own oracle), but pinning it now that eight arms exist keeps arm ORDER from ever routing a
-    report to the wrong arm — in particular reflected xss (CWE-79, server-response reflection) vs dom_xss
-    (bug_class dom_xss, DOM execution) stay distinct."""
+    """Every re-drive arm's class set, CWE map AND ALIAS KEYS are pairwise DISJOINT (web / errsig / xss /
+    ssti / boolean / timing / dom_xss / prototype_pollution / traversal / exposure / ssi). Even were it
+    violated, no false FACT could result (each arm mints only over its own oracle), but pinning it now that
+    eleven arms exist keeps arm ORDER from ever routing a report to the wrong arm — in particular reflected
+    xss (CWE-79, server-response reflection) vs dom_xss (bug_class dom_xss, DOM execution), and ssi (CWE-97,
+    include-directive evaluation) vs ssti (CWE-1336, template evaluation), stay distinct.
+
+    W4 adds ALIAS-KEY disjointness on top of the value/CWE checks: ``ssi`` and ``ssti`` are one character
+    apart, so a mis-spelled alias key (not a value) is the realistic mis-routing vector for those two arms."""
     from vigil_integration.proof import run
     from vigil_integration.live.web_redrive import WEB_FACT_CLASSES
 
@@ -457,6 +461,12 @@ def test_redrive_arm_class_sets_are_disjoint():
         "prototype_pollution": (set(run._PROTO_POLLUTION_REDRIVE_CLASSES)
                                 | set(run._PROTO_POLLUTION_ALIASES.values())
                                 | set(run._PROTO_POLLUTION_CWE_TO_CLASS.values())),
+        "traversal": (set(run._TRAVERSAL_REDRIVE_CLASSES) | set(run._TRAVERSAL_ALIASES.values())
+                      | set(run._TRAVERSAL_CWE_TO_CLASS.values())),
+        "exposure": (set(run._EXPOSURE_REDRIVE_CLASSES) | set(run._EXPOSURE_ALIASES.values())
+                     | set(run._EXPOSURE_CWE_TO_CLASS.values())),
+        "ssi": (set(run._SSI_REDRIVE_CLASSES) | set(run._SSI_ALIASES.values())
+                | set(run._SSI_CWE_TO_CLASS.values())),
     }
     cwe_maps = {
         "web": set(run._WEB_CWE_TO_CLASS),
@@ -467,7 +477,37 @@ def test_redrive_arm_class_sets_are_disjoint():
         "timing": set(run._TIMING_CWE_TO_CLASS),
         "dom_xss": set(run._DOM_XSS_CWE_TO_CLASS),
         "prototype_pollution": set(run._PROTO_POLLUTION_CWE_TO_CLASS),
+        "traversal": set(run._TRAVERSAL_CWE_TO_CLASS),
+        "exposure": set(run._EXPOSURE_CWE_TO_CLASS),
+        "ssi": set(run._SSI_CWE_TO_CLASS),
     }
+    # The alias-KEY sets (the spellings a report may carry). A key collision is the one way two arms could
+    # claim the SAME report, and `ssi`/`ssti` are one character apart.
+    alias_keys = {
+        "xss": set(run._REFLECTION_ALIASES),
+        "ssti": set(run._SSTI_ALIASES),
+        "boolean": set(run._BOOLEAN_ALIASES),
+        "timing": set(run._TIMING_ALIASES),
+        "dom_xss": set(run._DOM_XSS_ALIASES),
+        "prototype_pollution": set(run._PROTO_POLLUTION_ALIASES),
+        "traversal": set(run._TRAVERSAL_ALIASES),
+        "exposure": set(run._EXPOSURE_ALIASES),
+        "ssi": set(run._SSI_ALIASES),
+    }
+    # An alias key must also never be another arm's own CLASS name (that would shadow the exact-match branch).
+    for arm, keys in alias_keys.items():
+        for other, classes in class_sets.items():
+            if other == arm:
+                continue
+            shadow = keys & classes
+            assert not shadow, f"arm {arm!r} aliases shadow arm {other!r}'s class(es) {sorted(shadow)}"
+    anames = list(alias_keys)
+    for i in range(len(anames)):
+        for j in range(i + 1, len(anames)):
+            a, b = anames[i], anames[j]
+            overlap = alias_keys[a] & alias_keys[b]
+            assert not overlap, f"arm alias KEYS {a!r} and {b!r} overlap on {sorted(overlap)}"
+
     names = list(class_sets)
     for i in range(len(names)):
         for j in range(i + 1, len(names)):
@@ -493,3 +533,33 @@ def test_redrive_arm_class_sets_are_disjoint():
     assert run._dom_xss_redrive_class({"cwe": "CWE-79"}) is None
     assert run._reflection_redrive_class({"bug_class": "dom_xss"}) is None
     assert run._dom_xss_redrive_class({"bug_class": "xss"}) is None
+
+    # --- W4 arms: traversal (+ the lfi alias), exposure, ssi ------------------------------------------
+    assert run._traversal_redrive_class({"bug_class": "path_traversal"}) == "path_traversal"
+    assert run._traversal_redrive_class({"cwe": "CWE-22"}) == "path_traversal"
+    # LFI DECISION pin: every CWE-98 / lfi spelling is DEMOTED onto path_traversal — the class the
+    # side_effect oracle actually proves. No arm ever returns the string "lfi".
+    assert run._traversal_redrive_class({"bug_class": "lfi"}) == "path_traversal"
+    assert run._traversal_redrive_class({"bug_class": "local_file_inclusion"}) == "path_traversal"
+    assert run._traversal_redrive_class({"cwe": "CWE-98"}) == "path_traversal"
+    assert run._exposure_redrive_class({"bug_class": "exposure"}) == "exposure"
+    assert run._exposure_redrive_class({"cwe": "CWE-538"}) == "exposure"
+    assert run._ssi_redrive_class({"bug_class": "ssi"}) == "ssi"
+    assert run._ssi_redrive_class({"bug_class": "server_side_includes"}) == "ssi"
+    assert run._ssi_redrive_class({"cwe": "CWE-97"}) == "ssi"
+    # ssi vs ssti — the dangerous near-spelling pair — never claim each other, by class OR by CWE.
+    assert run._ssi_redrive_class({"bug_class": "ssti"}) is None
+    assert run._ssi_redrive_class({"bug_class": "server_side_template_injection"}) is None
+    assert run._ssi_redrive_class({"cwe": "CWE-1336"}) is None
+    assert run._ssti_redrive_class({"bug_class": "ssi"}) is None
+    assert run._ssti_redrive_class({"bug_class": "server_side_includes"}) is None
+    assert run._ssti_redrive_class({"cwe": "CWE-97"}) is None
+    # and the W4 arms do not poach the shipped ones (or each other).
+    assert run._traversal_redrive_class({"bug_class": "exposure"}) is None
+    assert run._exposure_redrive_class({"bug_class": "path_traversal"}) is None
+    assert run._errsig_redrive_class({"bug_class": "lfi"}) is None
+    assert run._web_redrive_class({"bug_class": "exposure"}) is None
+
+    # every arm in the SHIPPED dispatch rail is represented above (a new arm cannot skip this pin).
+    assert len(run._REDRIVE_ARMS) == len(class_sets), (
+        "an arm was added to _REDRIVE_ARMS without being added to the disjointness pin")
