@@ -339,6 +339,21 @@ class ProposedService:
 
 
 @dataclass(frozen=True)
+class ProposedURL:
+    """A URL a WEB-DISCOVERY tool (httpx/ffuf) PROPOSED. ``host`` is PINNED to the scope-authorised target
+    (never a host the tool printed — the scope-safety property the port-scanner parsers also have); ``port``
+    is parsed from the URL for the canonical Observation. The URL is only a LEAD, and it STAYS a LEAD: the
+    gated GET re-drive it feeds (live.web_redrive.endpoint_liveness_redrive) runs on the
+    ``achieved_state.endpoint_liveness`` branch, which is declared fact_capable=false AND clean_capable=false
+    PERMANENTLY (W2 downgrade). Nothing on this path mints a FACT — not the tool's row, and not VIGIL's own
+    capture; the re-drive only ENRICHES the lead with a retained, offline-re-verifiable capture."""
+    url: str
+    host: str
+    port: int = 0
+    protocol: str = "tcp"
+
+
+@dataclass(frozen=True)
 class Redrive:
     """One RUNNER-OWNED oracle re-drive for a proposed (host, port): an independent, gated ``capture`` the
     runner performs itself + a ``context`` builder that turns the captured evidence into an oracle_context
@@ -363,6 +378,13 @@ class ToolSpec:
     name: str
     build_argv: Callable[[str], list[str]]
     propose: Callable[[ToolOutcome, str], list[ProposedService]]
+    # WEB-DISCOVERY specs (httpx/ffuf) set this INSTEAD of relying on the ProposedService/handshake path: it
+    # parses the tool output into PROPOSED URLS (host pinned to target), and ``run_external_tool`` re-drives
+    # each through the gated web LIVENESS re-drive (live.web_redrive.endpoint_liveness_redrive → the
+    # achieved_state.endpoint_liveness branch) instead of the TCP handshake. When set, ``propose`` is unused
+    # (a no-op stub) and the ProposedService/redrive fields are ignored — the two paths never mix. None (the
+    # default) ⇒ the existing ProposedService + handshake path, byte-for-byte unchanged for every caller.
+    propose_urls: "Callable[[ToolOutcome, str], list[ProposedURL]] | None" = None
     # The runner-owned re-drives to run for EACH proposed service. Empty ⇒ the runner uses the legacy
     # reachability re-drive (the injectable ``capture`` param + reachable_context + service_reachable), so
     # nmap and every existing caller are byte-for-byte unchanged. A spec that mints a non-reachability FACT
@@ -708,6 +730,248 @@ def nmap_service_scan(*, ports: str = "1-1024", extra_args: Sequence[str] = ()) 
     return ToolSpec("nmap", build, propose, version_argv=lambda: ["nmap", "--version"])
 
 
+# --- HexStrike W2: WEB-DISCOVERY ToolSpecs (httpx / ffuf) — the endpoint-LIVENESS LEAD-ENRICHER path ---
+# These are WEB-DISCOVERY proposers: they propose URLs, and ``run_external_tool`` re-drives each through the
+# gated web LIVENESS re-drive (live.web_redrive.endpoint_liveness_redrive → the achieved_state.endpoint_liveness
+# branch). That branch is LEAD-ONLY, PERMANENTLY (the W2 downgrade): it is declared fact_capable=false AND
+# clean_capable=false, so ``verdict.admit()`` maps a FIRED oracle to a LEAD and a conclusive non-firing to
+# INCONCLUSIVE. NOTHING on this path mints a FACT and nothing on it reports CLEAN. The tool's "found URL"
+# bytes are only a LEAD, and VIGIL's OWN plain gated GETs (the target, resampled, plus the two runner-built
+# sibling cohorts) only ENRICH that lead with a retained, offline-re-verifiable capture.
+# The cohorts are NOT "known-nonexistent sibling controls" — that claim is WITHDRAWN and was measurably
+# FALSE: in the validator classes the siblings' stable answer is the route's REJECT body and the TARGET is
+# the phantom (see the WITHDRAWN CLAIMS list in ``live.web_redrive``). Each parser PINS the host to the
+# already-scope-authorised ``target`` (never a host the tool printed), and every flag is built SERVER-SIDE
+# so no model/brain-supplied flag reaches the tool.
+_URL_SCHEMES = ("http", "https")
+
+
+def _no_service_proposal(outcome: "ToolOutcome", target: str) -> "list[ProposedService]":
+    """A web-discovery spec proposes URLs (``propose_urls``), never ProposedServices — this stub keeps the
+    ToolSpec.propose contract total while the runner takes the ``propose_urls`` path."""
+    return []
+
+
+def _pin_url_host(raw_url: str, target: str) -> "ProposedURL | None":
+    """Turn a tool-proposed URL into a host-PINNED :class:`ProposedURL`, or ``None`` to DROP it.
+
+    Keeps scheme/port/path/query but only when the URL's host equals the scope-authorised ``target`` (the tool
+    was run against it): a redirect-followed / resolved-IP host that differs is DROPPED — never re-pointed onto
+    the target (the scope-safety property the port-scanner parsers also have). A non-http(s) URL is dropped.
+    The gated send re-authorises every URL anyway (defence in depth), so a slipped-through host still refuses.
+    """
+    from urllib.parse import urlsplit  # noqa: PLC0415 — stdlib, function-local
+    try:
+        parts = urlsplit(str(raw_url or "").strip())
+    except Exception:  # noqa: BLE001 — a malformed URL is simply dropped
+        return None
+    host = parts.hostname
+    if parts.scheme not in _URL_SCHEMES or not host:
+        return None
+    tgt = (target or "").strip().strip("[]").lower()
+    if host.strip("[]").lower() != tgt:
+        return None
+    port = parts.port or (443 if parts.scheme == "https" else 80)
+    return ProposedURL(url=str(raw_url).strip(), host=host, port=int(port), protocol="tcp")
+
+
+# --- SAFETY: brain/params-supplied VALUES that reach an argv must be validated BEFORE the argv exists ---
+# (red-pen BLOCK-5, a real scope escape.) ``scheme`` and ``wordlist`` are the only two values the body reads
+# out of a model/brain-supplied ``params`` dict (brains.hexstrike_body._spec_for_kind) and interpolates into
+# the tool's command line. The ScopeGate authorises the HOST STRING (e.g. "127.0.0.1") and the runner then
+# EXECUTES that argv, so a scheme like ``http://attacker.test/x#`` becomes
+# ``httpx -u http://attacker.test/x#://127.0.0.1/`` and a packet reaches an out-of-scope host BEFORE
+# ``_pin_url_host`` can refuse the FACT — the FACT is refused, the TRAFFIC already happened. Both values are
+# therefore validated here, at ToolSpec CONSTRUCTION, so the refusal happens before any argv or any send;
+# ``_spec_for_kind`` turns the ValueError into a blocked LEAD (the documented fail-closed path).
+_URL_SCHEME_ALLOWLIST = frozenset({"http", "https"})
+# A wordlist is a FILE the tool reads. It must be an absolute, non-traversing path under one of these roots
+# (the distro wordlist locations), with no argv-flag prefix and no shell/whitespace metacharacters.
+_WORDLIST_ROOTS = ("/usr/share/wordlists/", "/usr/share/seclists/", "/usr/share/dirb/", "/usr/share/dirbuster/")
+
+
+def _validated_scheme(scheme: str) -> str:
+    """The URL scheme, or ValueError. Exactly ``http``/``https`` — never a value that can carry a second
+    authority, a fragment, a flag or whitespace into the argv (BLOCK-5)."""
+    v = str(scheme or "").strip().lower()
+    if v not in _URL_SCHEME_ALLOWLIST:
+        raise ValueError(f"scheme must be one of {sorted(_URL_SCHEME_ALLOWLIST)} (got {scheme!r}) — a "
+                         f"free-form scheme is interpolated into the tool argv and can redirect the probe "
+                         f"to an out-of-scope host")
+    return v
+
+
+def _validated_wordlist(wordlist: str) -> str:
+    """The wordlist path, or ValueError. Empty ⇒ the shipped default. Otherwise an absolute, non-traversing
+    path under an allow-listed wordlist root, with no flag prefix and no whitespace/metacharacters — it is
+    interpolated into the argv as ``-w <value>`` (BLOCK-5)."""
+    v = str(wordlist or "").strip()
+    if not v:
+        return _FFUF_DEFAULT_WORDLIST
+    if (v.startswith("-") or ".." in v or any(c.isspace() for c in v)
+            or any(c in v for c in "\0\n\r;|&$`<>*?!()[]{}'\"\\")
+            or not any(v.startswith(root) for root in _WORDLIST_ROOTS)):
+        raise ValueError(f"wordlist must be an absolute, non-traversing path under one of "
+                         f"{list(_WORDLIST_ROOTS)} with no flag prefix or shell/whitespace metacharacters "
+                         f"(got {wordlist!r}) — it is interpolated into the tool argv")
+    return v
+
+
+#: httpx flags that would UNDO the correlatable-identity pin. ``-random-agent`` DEFAULTS TRUE in httpx, so
+#: the pin is an explicit ``-H User-Agent: …``; both spellings of the flag would turn the rotation back on.
+_HTTPX_RANDOM_AGENT_FLAGS = frozenset({"-random-agent", "--random-agent"})
+#: httpx's header flag, every spelling. A SECOND ``-H User-Agent: …`` appended AFTER the pin wins (last
+#: header set), which is the positional weakness this rejection closes.
+_HTTPX_HEADER_FLAGS = frozenset({"-H", "-header", "--header", "-headers", "--headers"})
+
+
+def _validated_httpx_extra_args(extra_args: "Sequence[str]") -> "tuple[str, ...]":
+    """Return ``extra_args`` as a tuple, or raise ``ValueError`` — the UA pin made STRUCTURAL.
+
+    ``build_argv`` APPENDS ``extra_args`` AFTER the pinned ``-H User-Agent: …``, so the pin was only
+    POSITIONALLY safe: ``extra_args=("-random-agent",)`` re-enables httpx's identity rotation, and
+    ``extra_args=("-H", "User-Agent: Mozilla/5.0")`` sets a SECOND User-Agent header that wins. Either one
+    silently defeats §VI.4 of the operating constitution (an authorised owner-test must be CORRELATABLE —
+    "you are not evading them"). Nothing reaches ``extra_args`` today (``brains.hexstrike_body._spec_for_kind``
+    passes only ``scheme``/``wordlist``), so this is a CONSTRUCTION-TIME tripwire for a future caller, not a
+    behaviour change: it refuses BEFORE any argv or any packet exists, exactly like the scheme/wordlist
+    schemas. ``_spec_for_kind`` turns the ValueError into a blocked LEAD (the documented fail-closed path).
+    """
+    argv = tuple(str(a) for a in (extra_args or ()))
+    for i, raw in enumerate(argv):
+        tok = raw.strip()
+        # Split FIRST: httpx is built on projectdiscovery/goflags over Go's stdlib ``flag``, where the ONLY
+        # way to pass an explicit value to a BOOLEAN flag is the glued ``-flag=value`` form. So
+        # ``-random-agent=true`` (and ``=1`` / ``=t`` / ``=T`` / ``=TRUE`` — anything ``strconv.ParseBool``
+        # accepts) is a valid spelling of the flag we ban. Matching the WHOLE token missed every one of them;
+        # match the FLAG. ``-H <value>`` (two tokens) and ``-H=<value>`` (glued) likewise carry a header VALUE.
+        flag, sep, glued = tok.partition("=")
+        if flag.lower() in _HTTPX_RANDOM_AGENT_FLAGS:
+            raise ValueError(
+                f"extra_args may not contain {raw!r}: httpx's random-agent rotates the probe identity per "
+                f"request, and this engine pins ONE correlatable User-Agent "
+                f"({_CORRELATABLE_USER_AGENT!r}) so the operator can grep their own logs for this traffic")
+        if flag in _HTTPX_HEADER_FLAGS:
+            value = glued if sep else (argv[i + 1] if i + 1 < len(argv) else "")
+            # Match the header NAME, not a prefix: ``User-Agent : x`` has a non-adjacent colon and would
+            # slip a ``startswith("user-agent:")`` test.
+            if value.split(":", 1)[0].strip().lower() == "user-agent":
+                raise ValueError(
+                    f"extra_args may not set a second User-Agent header ({value.strip()!r}): it is appended "
+                    f"AFTER the pinned -H {_CORRELATABLE_USER_AGENT!r} and would override it. The engine "
+                    f"presents ONE correlatable identity; use the pin, do not shadow it")
+    return argv
+
+
+#: The identity every tool VIGIL drives must present. DUPLICATED deliberately from
+#: ``live.executor._CORRELATABLE_USER_AGENT`` (the R4 runner is framework-free and must not import the
+#: governed executor); ``test_the_r4_httpx_spec_pins_the_correlatable_user_agent`` pins the two equal.
+_CORRELATABLE_USER_AGENT = "OBSIDIAN/1.0 (authorized owner-test)"
+
+
+def httpx_url_scan(*, scheme: str = "http", extra_args: Sequence[str] = ()) -> ToolSpec:
+    """A :class:`ToolSpec` for ProjectDiscovery httpx as a URL PROPOSER. ``build_argv`` emits
+    ``httpx -u <url> -silent -no-color -disable-update-check -H 'User-Agent: …' -json -probe`` (JSONL on
+    stdout, correlatable, no update phone-home); ``propose_urls`` parses each non-``failed`` record's ``url``
+    (via the shipped ``parse_httpx_export``) into a host-PINNED :class:`ProposedURL`. The runner re-drives
+    each URL with its OWN plain gated GET, on a branch that is LEAD-ONLY and mints nothing: httpx's row was
+    never evidence, and the re-drive only enriches the lead.
+
+    ``-H User-Agent: …`` is NOT cosmetic and is NOT optional. httpx's own ``-random-agent`` DEFAULTS TRUE, so
+    without an explicit header EVERY probe leaves under a randomly chosen BROWSER identity — identity
+    rotation, which the operating constitution (§VI.4) forbids outright: an authorised owner-test is meant to
+    be CORRELATABLE so the operator can grep their own logs and find this traffic ("you are not evading
+    them"). The governed executor fixed exactly this defect and documents it at ``live.executor`` around
+    ``_build_httpx``; this R4 spec shipped without the pin, which is the same defect in the other seam. An
+    explicit ``-H`` overrides the random agent, and it is the SAME identity the rest of the engine sends, so
+    a defender sees one actor rather than a crowd of fake browsers. It is a DEFAULT, not a written flag,
+    which is exactly why it was invisible.
+
+    ``scheme`` is validated against {http, https} HERE (BLOCK-5): it is interpolated into the argv, and the
+    scope gate authorises the host STRING, not the argv — so an unvalidated scheme sends a real packet to an
+    out-of-scope authority before any host pin on the parsed result can refuse it. ``extra_args`` is
+    validated HERE too, which is what makes the User-Agent pin STRUCTURAL rather than merely positional: it
+    is appended AFTER the pin, so ``-random-agent`` or a second ``-H User-Agent: …`` would silently win (see
+    :func:`_validated_httpx_extra_args`). Either invalid value raises ValueError (``_spec_for_kind`` turns
+    that into a blocked LEAD) before any argv exists."""
+    scheme = _validated_scheme(scheme)
+    extra_args = _validated_httpx_extra_args(extra_args)
+
+    def build(target: str) -> list[str]:
+        url = str(target) if "://" in str(target) else f"{scheme}://{target}/"
+        return ["httpx", "-u", url, "-silent", "-no-color", "-disable-update-check",
+                "-H", f"User-Agent: {_CORRELATABLE_USER_AGENT}", "-json", "-probe",
+                *list(extra_args)]
+
+    def propose_urls(outcome: ToolOutcome, target: str) -> "list[ProposedURL]":
+        from framework.v2.imports.parsers import parse_httpx_export  # noqa: PLC0415 (FATAL-2: function-local)
+        out: "list[ProposedURL]" = []
+        seen: set[str] = set()
+        for f in parse_httpx_export(outcome.stdout or ""):
+            pu = _pin_url_host(getattr(f, "location", ""), target)
+            if pu is not None and pu.url not in seen:
+                seen.add(pu.url)
+                out.append(pu)
+        return out
+
+    return ToolSpec("httpx", build, _no_service_proposal, propose_urls=propose_urls,
+                    version_argv=lambda: ["httpx", "-version"], danger="recon")
+
+
+# Default content-discovery wordlist (Kali path). Only used to BUILD a valid argv for a real run; the
+# conformance/tests drive a canned backend, and the evidence is VIGIL's own gated GET — never ffuf's bytes
+# (and on this LEAD-ONLY branch that evidence enriches a lead; it never becomes a FACT).
+_FFUF_DEFAULT_WORDLIST = "/usr/share/wordlists/dirb/common.txt"
+#: ffuf's OWN in-tool scan budget, in seconds. ffuf writes its results ONCE, when the job ends, and the
+#: runner kills an over-running subprocess with SIGKILL, which ffuf cannot catch — measured by the governed
+#: executor (see ``live.executor._build_ffuf``): `timeout -s KILL 6` over a 400k-entry wordlist left NO
+#: output at all, so the call returned empty machine-readable output with nothing anywhere to say the scan
+#: had been cut off. `-maxtime` makes ffuf exit CLEANLY with everything found so far. A wordlist big enough
+#: to outlast the runner's wall clock is the normal case for content discovery
+#: (`directory-list-2.3-medium` is ~220k entries), so without this the common ffuf run proposes nothing.
+#: Chosen to fit INSIDE the runner's own :data:`_DEFAULT_TIMEOUT`; a caller who wants a longer scan must
+#: raise BOTH knobs, and the bound is never silently assumed for them.
+_FFUF_MAX_TIME = 90
+
+
+def ffuf_content_scan(*, wordlist: str = "", extra_args: Sequence[str] = ()) -> ToolSpec:
+    """A :class:`ToolSpec` for ffuf as a content-discovery URL PROPOSER. ``build_argv`` emits
+    ``ffuf -u <base>/FUZZ -w <wordlist> -noninteractive -maxtime <n> -json`` (JSONL results on stdout,
+    ``input`` values base64 but ``url`` plain — the location the parser reads); ``propose_urls`` parses each
+    result's ``url`` (via the shipped ``parse_ffuf_export``) into a host-PINNED :class:`ProposedURL`. The
+    runner re-drives each URL with its OWN plain gated GET, on a branch that is LEAD-ONLY and mints nothing:
+    ffuf's row was never evidence, and the re-drive only enriches the lead.
+
+    ``-maxtime`` is soundness, not hygiene: without it a wordlist that outlasts the runner's wall clock is
+    SIGKILLed and the whole run reports nothing, indistinguishably from "ffuf never ran" (see
+    :data:`_FFUF_MAX_TIME`).
+
+    ``wordlist`` is validated HERE (BLOCK-5) against an allow-listed root with no flag prefix and no
+    whitespace/shell metacharacters: it is interpolated into the argv as ``-w <value>``. An invalid value
+    raises ValueError (``_spec_for_kind`` turns that into a blocked LEAD) before any argv exists."""
+    wl = _validated_wordlist(wordlist)
+
+    def build(target: str) -> list[str]:
+        base = str(target) if "://" in str(target) else f"http://{target}/"
+        url = base if "FUZZ" in base else (base.rstrip("/") + "/FUZZ")
+        return ["ffuf", "-u", url, "-w", wl, "-noninteractive", "-maxtime", str(_FFUF_MAX_TIME), "-json",
+                *list(extra_args)]
+
+    def propose_urls(outcome: ToolOutcome, target: str) -> "list[ProposedURL]":
+        from framework.v2.imports.parsers import parse_ffuf_export  # noqa: PLC0415 (FATAL-2: function-local)
+        out: "list[ProposedURL]" = []
+        seen: set[str] = set()
+        for f in parse_ffuf_export(outcome.stdout or ""):
+            pu = _pin_url_host(getattr(f, "location", ""), target)
+            if pu is not None and pu.url not in seen:
+                seen.add(pu.url)
+                out.append(pu)
+        return out
+
+    return ToolSpec("ffuf", build, _no_service_proposal, propose_urls=propose_urls,
+                    version_argv=lambda: ["ffuf", "-V"], danger="active")
+
+
 # ---------------------------------------------------------------------------
 # Scope gate — refuse an out-of-scope / egress-denied target BEFORE any traffic.
 # ---------------------------------------------------------------------------
@@ -803,6 +1067,12 @@ class RunnerResult:
     observation: Any = None                             # the canonical normalized Observation (crit 4):
                                                         # tool identity+version, target, raw-output digest,
                                                         # proposals, outcome_class — one shape per run.
+    truncated_proposals: int = 0                        # OPSEC: proposals the per-run request BUDGET would
+                                                        # not admit, so they were NEVER re-driven. > 0 means
+                                                        # "not examined", never "nothing there".
+    budget_note: str = ""                               # the same truncation in words, for every consumer
+                                                        # that reads text rather than counts (also in
+                                                        # ``reason`` and as a "skipped" outcomes row).
 
     @property
     def refused(self) -> bool:
@@ -978,6 +1248,139 @@ def _admit_redrive(branch: str, *, fired: bool, conclusive: bool):
                  observed={"channel_established": True, "gate_authorized": True})
 
 
+# --- OPSEC: the per-run gated-GET BUDGET for the web-discovery leg (constitution §VI) ------------------
+# "Throttle. Stage. Ask." — and this leg re-drives EVERY url a discovery tool proposed, each re-drive
+# costing up to ``web_redrive.MAX_GATED_GETS_PER_URL`` SERIAL gated GETs with no inter-request delay. An
+# uncapped loop therefore turns one ffuf run that proposed 200 paths into ~12,600 requests at a production
+# target, from one source IP, as fast as the host will answer. That is not a soundness bug, which is why it
+# survived five red-pen rounds looking for false FACTs — it is an availability risk to the OPERATOR'S OWN
+# SYSTEM, and the constitution ranks that as a hard stop, not a nice-to-have.
+#
+# THE BUDGET is the reviewed knob: the maximum gated GETs ONE web-discovery tool run may put on the target.
+# 1000 is roughly a minute of polite serial traffic against a typical web app and fits comfortably inside
+# the benchmark corpus's own 1069-request gate, i.e. it is the same order as a whole engine run. Raising it
+# is a reviewed edit here, never an emergent property of how many rows a wordlist happened to match.
+#
+# PER ENGAGEMENT, stated honestly because a per-RUN cap is not a per-ENGAGEMENT one. This constant bounds
+# ONE ToolSpec run. An engagement that dispatches k web-discovery runs (httpx and ffuf, several hosts,
+# several wordlists) spends up to k x this budget on the web leg, and there is NO cross-run accumulator in
+# the runner today — each ``run_external_tool`` call is independent and stateless by design, which is also
+# how the two-env boundary keeps the runner free of engagement state. So the per-engagement figure is an
+# OPERATOR budget the charter sets and the command log evidences, not a ceiling this code enforces: plan
+# the web leg at <= k x 1000 requests, and if that is too much for the target, lower k (fewer/narrower
+# wordlists, fewer hosts per session) rather than assuming a limit that is not there. Enforcing it needs a
+# deliberate cross-run accumulator; claiming one that does not exist is the kind of unearned assurance this
+# branch was downgraded for.
+_LIVENESS_REQUEST_BUDGET = 1000
+# The CAP is DERIVED from the budget, so the two can never drift: proposals x worst-case-per-url <= budget.
+# Truncation is NEVER silent — the dropped proposals are counted on the result, named in the run detail and
+# carry their own "skipped" outcome row, because a cap a consumer cannot see is indistinguishable from a
+# tool that found nothing (the same argument `-maxtime` makes for ffuf's report).
+def _max_redriven_proposals() -> int:
+    from .web_redrive import MAX_GATED_GETS_PER_URL  # noqa: PLC0415 (FATAL-2: offense-neutral)
+    return max(1, _LIVENESS_REQUEST_BUDGET // max(1, int(MAX_GATED_GETS_PER_URL)))
+
+
+def _run_web_liveness_tool(
+    spec: "ToolSpec", target: str, outcome: "ToolOutcome", *, tool_errored: bool, tool_version: str,
+    engagement_slug: str, signers: "list[tuple[str, str]]", timeout: float, freshness_ttl_seconds: int,
+) -> "RunnerResult":
+    """The WEB-DISCOVERY runner leg (httpx/ffuf): parse the tool's proposed URLs (host-pinned) and re-drive
+    up to :func:`_max_redriven_proposals` of them through the gated web sibling-differential re-drive. A
+    tool's URL row is only a PROPOSAL, and the re-drive's own capture is LEAD evidence — the
+    ``achieved_state.endpoint_liveness`` branch is declared LEAD-only, so ``admit()`` returns a LEAD for a
+    fired oracle and this leg mints nothing. The ``facts``/``contexts`` plumbing below is kept because the
+    admission choke, not this function, is what decides; it must stay correct if a branch is ever promoted.
+    Mirrors the ProposedService leg's outcome taxonomy + Observation. Called only when ``spec.propose_urls``
+    is set; the caller already ran the scope/pre-flight/capability gates.
+    """
+    from ..oracle_adapter import Outcome  # noqa: PLC0415 (FATAL-2: function-local)
+    from .web_redrive import (  # noqa: PLC0415 (FATAL-2: web_redrive is offense-neutral)
+        ENDPOINT_LIVENESS_BUG_CLASS, MAX_GATED_GETS_PER_URL, endpoint_liveness_redrive)
+
+    proposed = spec.propose_urls(outcome, target)   # list[ProposedURL], host pinned to target (failed dropped)
+    facts: list = []
+    leads: list = []
+    contexts: dict = {}
+    outcomes: list = []
+    if tool_errored:
+        outcomes.append({"check_id": spec.name, "bug_class": "", "outcome": Outcome.ERROR.value})
+    # Only "positive" needs a mapping; everything else falls through to INCONCLUSIVE below. There is no
+    # "clean" key ON PURPOSE: ``achieved_state.endpoint_liveness`` is clean_capable=false, the re-drive can
+    # no longer return that outcome, and a dormant mapping is how a withdrawn claim comes back by accident.
+    _OUT = {"positive": Outcome.POSITIVE.value}
+    # OPSEC CAP: de-duplicate FIRST (a duplicate costs nothing and must not consume the budget), then take
+    # at most the derived cap. Everything past it is dropped LOUDLY, never quietly.
+    unique: "list[ProposedURL]" = []
+    dedup: set[str] = set()
+    for pu in proposed:
+        if pu.url not in dedup:
+            dedup.add(pu.url)
+            unique.append(pu)
+    cap = _max_redriven_proposals()
+    redriven, dropped = unique[:cap], unique[cap:]
+    budget_note = ""
+    if dropped:
+        budget_note = (
+            f"OPSEC CAP: {spec.name} proposed {len(unique)} distinct url(s); this run re-drove the first "
+            f"{len(redriven)} and SKIPPED {len(dropped)}. Each re-drive costs up to "
+            f"{MAX_GATED_GETS_PER_URL} serial gated GETs, so the per-run budget of "
+            f"{_LIVENESS_REQUEST_BUDGET} request(s) admits {cap}. The skipped urls were NOT examined — "
+            f"this is a throttle, not a finding of absence; re-run with a narrower wordlist/target or "
+            f"raise the reviewed budget.")
+        outcomes.append({"check_id": f"{spec.name}:opsec_request_budget", "bug_class": "",
+                         "outcome": Outcome.SKIPPED.value, "note": budget_note})
+    for pu in redriven:
+        # The re-drive owns its OWN per-request gate (kill-switch → single-host → ACTIVE_RECON → charter scope
+        # → http(s)); the URL host is already pinned to the scope-authorised target. slug == engagement_slug.
+        wl = endpoint_liveness_redrive(pu.url, slug=engagement_slug, engagement_slug=engagement_slug,
+                                       signers=signers, timeout=min(timeout, 30.0))
+        item = f"{spec.name}:{pu.url}#{ENDPOINT_LIVENESS_BUG_CLASS}"
+        # The re-drive's OWN narrowed claim / demotion reason travels with the row (red-pen BLOCK-3): the
+        # bug-class token alone does not state what was observed, and a note the runner drops is not a
+        # disclosure.
+        outcomes.append({"check_id": item, "bug_class": ENDPOINT_LIVENESS_BUG_CLASS,
+                         "outcome": _OUT.get(wl.outcome, Outcome.INCONCLUSIVE.value),
+                         "note": wl.note})
+        if wl.is_fact:
+            facts.append(wl.fact)
+            if wl.context is not None:
+                contexts[wl.fact.finding_ref] = wl.context
+        elif wl.lead is not None:
+            leads.append(wl.lead)
+            # The LEAD carries its retained, offline-re-verifiable capture too (predicate AST + every raw
+            # per-sample status/body-hash + control_urls + probe_urls). The branch is LEAD-only, so if the
+            # context only rode along with FACTs the whole evidence pipeline would produce nothing an
+            # analyst or an auditor could inspect.
+            if wl.context is not None and getattr(wl.lead, "finding_ref", ""):
+                contexts[wl.lead.finding_ref] = wl.context
+
+    # The detail names the CLASS the runner actually produced. The re-drive's own narrowing sentence is
+    # carried verbatim so an operator reading the runner result sees what was (and was not) established,
+    # and the OPSEC truncation is stated in the same place rather than being inferable only from counts.
+    first_note = next((str(r.note) for r in (facts + leads) if getattr(r, "note", "")), "")
+    detail = (f"{spec.name} ran via {outcome.backend}; proposed {len(proposed)} url(s), re-drove "
+              f"{len(redriven)}, {len(facts)} {ENDPOINT_LIVENESS_BUG_CLASS} FACT(s), {len(leads)} lead(s)"
+              + ("; TOOL ERRORED (timeout/spawn)" if tool_errored else "")
+              + (f" | {budget_note}" if budget_note else "")
+              + (f" | claim: {first_note}" if first_note else ""))
+    artifact_refs = tuple(fr for fr in (getattr(r, "finding_ref", "") for r in (facts + leads)) if fr)
+    error_reason = ""
+    if tool_errored:
+        error_reason = ("tool run timed out (no exit code)" if outcome.timed_out
+                        else (outcome.stderr or "tool failed to run").strip()[:200])
+    from .observation import observe  # noqa: PLC0415
+    # The Observation records EVERY url the tool proposed (not just the re-driven prefix): what the tool
+    # said is a fact about the run, and hiding the truncation from the canonical record is the silent
+    # truncation this cap exists to avoid. ``truncated_proposals`` says how many were not examined.
+    observation = observe(spec, target, outcome, proposed, tool_version=tool_version,
+                          outcome_class="errored" if tool_errored else "ran",
+                          artifact_refs=artifact_refs, error_reason=error_reason)
+    return RunnerResult("ran", detail, spec.name, target, outcome, facts, leads, proposed, contexts,
+                        outcomes=outcomes, tool_errored=tool_errored, observation=observation,
+                        truncated_proposals=len(dropped), budget_note=budget_note)
+
+
 def run_external_tool(
     spec: ToolSpec,
     target: str,
@@ -1066,16 +1469,25 @@ def run_external_tool(
     # caller never conflates "the tool errored" with "the tool ran and found nothing".
     tool_errored = bool(outcome.timed_out) or (outcome.exit_code is None)
 
+    # Best-effort tool VERSION (criterion 9): run the spec's version_argv ONCE through the SAME gated backend
+    # (no target traffic) and stamp the parsed version into every FACT this run mints. Never fatal.
+    tool_version = _capture_tool_version(spec, backend, timeout)
+
+    # WEB-DISCOVERY spec (httpx/ffuf): the proposals are URLs re-driven through the gated web LIVENESS re-drive
+    # (the L7 analogue of the TCP handshake), NOT the ProposedService/handshake path. Dispatch there and
+    # return — the ProposedService path below is byte-for-byte unchanged for every non-web caller.
+    if spec.propose_urls is not None:
+        return _run_web_liveness_tool(
+            spec, target, outcome, tool_errored=tool_errored, tool_version=tool_version,
+            engagement_slug=engagement_slug, signers=signers, timeout=timeout,
+            freshness_ttl_seconds=freshness_ttl_seconds)
+
     proposed = spec.propose(outcome, target)
     # The re-drives to run per proposed service. Empty spec.redrives ⇒ the legacy reachability re-drive
     # (built from the injectable `capture` param), so nmap + every existing caller are byte-for-byte
     # unchanged. A TLS/etc. spec carries its OWN runner-owned re-drives on the spec.
     redrives = spec.redrives or (Redrive("service_reachable", capture, _reachable_context,
                                          branch="service_reachability.tcp_handshake"),)
-    # Best-effort tool VERSION (criterion 9): run the spec's version_argv ONCE through the SAME gated backend
-    # (no target traffic) and stamp the parsed version into every FACT this run mints. Never fatal — an
-    # absent/failing version_argv just leaves the version "" (dropped from the cert → byte-identical).
-    tool_version = _capture_tool_version(spec, backend, timeout)
     facts: list = []
     leads: list = []
     contexts: dict = {}

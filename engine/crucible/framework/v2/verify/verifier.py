@@ -49,6 +49,15 @@ BUG_CLASS_ORACLES: dict[str, tuple[OracleKind, ...]] = {
     "mass_assignment": (OracleKind.ACHIEVED_STATE,),
     "privilege_escalation": (OracleKind.ACHIEVED_STATE,),
     "open_redirect": (OracleKind.ACHIEVED_STATE,),
+    # HexStrike W2 — "sibling_response_differential" is DELIBERATELY ABSENT from this table. It was mapped
+    # to ACHIEVED_STATE on an earlier HEAD; it is not any more, and re-adding it needs a new argument, not a
+    # merge. This table says which decision procedure can PROVE a class, and after five adversarial rounds
+    # (measured false FACTs for NONEXISTENT urls at 11-55% on per-position format routes, 13/100 on a skewed
+    # per-path bounded body space, and 21/40 vs 40/40 discrimination on one route) the honest answer for
+    # this class is NONE. Its evidence branch achieved_state.endpoint_liveness is declared fact_capable=false
+    # in docs/capability-matrix/evidence-branches.json, so verdict.admit() already returns a LEAD; this
+    # absence is the SECOND, independent refusal, so a direct confirm_and_certify() that skipped admission
+    # still cannot mint the class. The class token itself remains in use — on LEADs (see live.web_redrive).
     "exposure": (OracleKind.ACHIEVED_STATE,),
     "sensitive_exposure": (OracleKind.ACHIEVED_STATE,),
     "security_misconfiguration": (OracleKind.ACHIEVED_STATE,),
