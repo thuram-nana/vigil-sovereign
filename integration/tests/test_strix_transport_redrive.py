@@ -426,6 +426,8 @@ def test_an_undersized_certificate_key_mints_a_weak_crypto_fact(monkeypatch, tmp
     signers, tr = _signers_and_trust()
     cert = _make_cert(tmp_path / "short-key.pem", bits=1024)
     with _tls_endpoint(cert) as port:
+        if not _tls_negotiable(port):
+            pytest.skip("this OpenSSL refuses a 1024-bit leaf outright — the weakness is not constructible here")
         mr = _mint(tmp_path, signers)({"id": "tls-shortkey", "bug_class": "weak_crypto_artifact",
                                        "endpoint": f"https://127.0.0.1:{port}/"})
     assert mr is not None and mr.is_fact, f"expected a weak-crypto FACT; got {mr}"
