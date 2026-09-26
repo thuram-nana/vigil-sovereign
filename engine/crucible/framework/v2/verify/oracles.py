@@ -685,6 +685,53 @@ def _sprt_decision(
     return decided, llr, n_used, n_signal, upper, lower
 
 
+def _boolean_round_arm(r: Mapping[str, Any], key: str) -> list[Any]:
+    """One truth-side arm of a boolean probe round as a list (``[]`` when absent/malformed).
+
+    The round shape is ``{"trues": [...], "falses": [...], "true_repeats": [...],
+    "false_repeats": [...]}`` — ``trues``/``falses`` are the responses to K DISTINCT,
+    syntactically-VARIED clauses of one fixed truth value; ``*_repeats`` are their
+    index-aligned BYTE-IDENTICAL repeats."""
+    v = r.get(key)
+    return list(v) if isinstance(v, (list, tuple)) else []
+
+
+# PROTOCOL CONSTANT — the ONLY response dimensions the boolean channel may read.
+#
+#   * LATENCY is excluded BY CONSTRUCTION. ``differential_response_oracle``'s default dimension set
+#     includes ``latency`` (differing at +1000ms), so a caller that passed no discriminator used to let a
+#     boolean_sqli FACT rest on TIMING ALONE over byte-identical bodies — and because the probe order is
+#     all-TRUE then all-FALSE, any step-slowdown crossing that boundary (a tarpit, a connection-pool or
+#     rate-limit transition) lands exactly on the truth partition. Timing evidence belongs to
+#     ``timing_oracle``, which has its own rank-sum + effect-size-floor + dose-response discipline.
+#   * MARKER is excluded too: it is a producer-supplied needle, not an observed difference.
+#
+# Enforced HERE rather than at each call site so no caller — and no RETAINED CONTEXT re-executed from an
+# untrusted report — can widen the boolean channel back onto timing, or re-tune its SENSITIVITY: the
+# comparison THRESHOLDS are pinned as well (see _boolean_discriminator), because a threshold fitted to a
+# particular set of retained bytes is its own forgery.
+_BOOLEAN_DIMENSIONS = ("status", "length", "lexical", "structural")
+_BOOLEAN_DEFAULT_DIMENSIONS = ("status", "length", "lexical")
+
+
+def _boolean_discriminator(discriminator: Mapping[str, Any] | str | None) -> dict[str, Any]:
+    """The effective discriminator for EVERY boolean comparison — fully protocol-pinned.
+
+    Only the DIMENSIONS may be narrowed by a caller, and only within ``_BOOLEAN_DIMENSIONS``. The
+    THRESHOLDS are pinned too (they are simply dropped): they set SENSITIVITY, and a threshold fitted to
+    a particular set of retained bytes can manufacture "within-cluster same, across-cluster differ" out
+    of noise — the same forgery the SPRT parameters allowed. No live caller passes thresholds (all three
+    pass protocol constants), so pinning costs nothing and removes the seam entirely rather than leaving
+    a comment claiming it is unreachable."""
+    if isinstance(discriminator, str):
+        disc: dict[str, Any] = {"dimensions": [discriminator]}
+    else:
+        disc = dict(discriminator or {})
+    wanted = [d for d in (disc.get("dimensions") or _BOOLEAN_DEFAULT_DIMENSIONS)
+              if d in _BOOLEAN_DIMENSIONS]
+    return {"dimensions": wanted or list(_BOOLEAN_DEFAULT_DIMENSIONS), "expect": "differ"}
+
+
 def boolean_inference_oracle(
     probe_rounds: Any,
     *,
@@ -693,36 +740,272 @@ def boolean_inference_oracle(
     p1: float = 0.9,
     p0: float = 0.1,
     discriminator: Mapping[str, Any] | str | None = None,
+    false_baseline_samples: Any = None,
+    min_baseline_samples: int = 6,
+    min_true_clauses: int = 4,
+    min_false_clauses: int = 4,
 ) -> OracleSignal:
-    """Confirm a boolean-blind vulnerability by a Wald SEQUENTIAL PROBABILITY
-    RATIO TEST over repeated probes — robust to the nondeterministic backends
-    (caching, load-dependent bodies, per-request tokens) that make a single
-    true/false comparison produce Burp-style "Tentative" false positives.
+    """Confirm a boolean-blind vulnerability by a Wald SEQUENTIAL PROBABILITY RATIO TEST
+    over repeated probes whose per-round signal is a TRUTH-VALUE ATTRIBUTION test.
 
-    Each round carries three observed responses: a TRUE-clause response, and two
-    FALSE-clause responses. The per-round Bernoulli signal is
+    THE GUARANTEE (and the only one). A ``boolean_sqli`` FACT requires the response to be a
+    deterministic FUNCTION OF THE INJECTED BOOLEAN'S TRUTH VALUE. It is NOT enough that the
+    "true" request and the "false" request came back different: on a page whose body is drawn
+    INDEPENDENTLY of the input (a rotating banner, an A/B bucket, a load-balanced pair of
+    replicas) two draws differ by coincidence, and no amount of determinism *screening* removes
+    that — a sample window that LOOKS deterministic still produces the coincidence inside it.
+    This oracle therefore does not screen for determinism and then trust a single true/false
+    pair; it demands that the response PARTITION BY TRUTH VALUE:
 
-        (TRUE differs from FALSE)  AND  (the two FALSE responses agree)
+      * Each round carries ``K_T >= min_true_clauses`` responses to DISTINCT, syntactically
+        VARIED clauses that are all logically TRUE (``trues``), and ``K_F >=
+        min_false_clauses`` responses to DISTINCT, varied clauses that are all logically
+        FALSE (``falses``) — plus an index-aligned BYTE-IDENTICAL repeat of each
+        (``true_repeats`` / ``false_repeats``).
+      * The round signals 1 only when ALL THREE hold:
+          1. DETERMINISM       — every clause, sent twice byte-identically, does not differ
+                                 (enforced globally as a HARD REFUTE, below).
+          2. WITHIN-TRUTH      — every TRUE-side response agrees with every other TRUE-side
+             AGREEMENT          response (ONE true cluster), and likewise for the FALSE side
+                                 (``differential_response_oracle`` non-fire inside a cluster).
+          3. ACROSS-TRUTH      — every TRUE-side response DIFFERS from every FALSE-side
+             SEPARATION         response (the two clusters are disjoint).
 
-    — the first half is the boolean signal; the second is a *dynamic-page
-    control* that a naive repeated-differential lacks. A real injection makes the
-    true clause change the response while the false clause stays stable (signal
-    1); a page that simply changes every request trips the control (signal 0), so
-    it cannot masquerade as a bug.
+    WHY AN INPUT-INDEPENDENT PAGE CANNOT PASS (the bound, and its exact scope). Say each
+    response is an INDEPENDENT draw from an arbitrary variant distribution ``{p_v}`` — a
+    rotating banner, an A/B bucket, two replicas behind a balancer. Then the ``2*K_T`` true-side
+    and ``2*K_F`` false-side responses are ``2*(K_T+K_F)`` independent draws, and a clean
+    2-cluster split by truth value needs every true-side draw to be the SAME variant ``a``,
+    every false-side draw the same variant ``b``, and ``a != b``:
 
-    SPRT accumulates the log-likelihood ratio that the signal rate is ``p1``
-    (vulnerable) vs ``p0`` (noise) and stops at the first boundary: LLR >=
-    log((1-beta)/alpha) confirms; LLR <= log(beta/(1-alpha)) refutes; neither by
-    the last round is inconclusive (a non-fire — never a guess). ``probe_rounds``
-    is ``[{"true": resp, "false_a": resp, "false_b": resp}, ...]``.
+        s  =  SUM over a != b of  p_a**(2*K_T) * p_b**(2*K_F)   <=  2 * 2**-(2*K_T + 2*K_F)
+
+    (maximised by a UNIFORM 2-variant page). At the ``K_T = K_F = 7`` the drivers ship that is
+    ``s <= 2 * 2**-28 = 7.5e-9``; at the oracle's CONFIRM floor (``K_T = K_F = 4``) it is
+    ``s <= 2 * 2**-16 = 3.1e-5``, still ~3300x below the SPRT's null rate ``p0 = 0.1``. With
+    ``alpha = beta = 0.05, p1 = 0.9, p0 = 0.1`` the confirm boundary is two NET signalling
+    rounds, so a gambler's-ruin bound puts the per-FINDING false-confirm probability at
+    ``<= s**2 / (1 - 2s)`` — ``~5.6e-17`` at ``K = 7`` — and that bound holds with NO determinism
+    pre-gate at all. The skew that defeated a 16-sample determinism pre-gate (a dominant variant
+    ``p ~ 0.9`` passes ``0.9**16 ~ 19%`` of windows) makes this test STRICTER, not weaker.
+
+    TWO THINGS THIS BOUND DOES NOT COVER. Both are real, both are demonstrated, and NEITHER is
+    "impossible to observe" — an earlier revision of this docstring said so and was wrong:
+
+      (a) A TRUTH-CORRELATED REQUEST FILTER — STATUS: OPEN. An interposer that partitions the
+          probes by a property of the REQUEST that happens to track truth value, with no boolean
+          channel behind it at all. The bound above says nothing about this, because it is a
+          property of the CLAUSE SET, not of the page.
+
+          WHY IT IS OPEN, STRUCTURALLY — this is the part to read, not the ladder. The oracle needs
+          clauses whose truth value VIGIL knows A PRIORI: before the request is sent, without
+          touching the target's database. A predicate knowable that way IS A CONSTANT EXPRESSION,
+          and any constant expression the scanner can evaluate offline, a filter in front of a
+          static page can also evaluate offline. So no clause set removes this residual; a clause
+          set only raises the COMPLEXITY of the function the filter has to implement. Every
+          mitigation in this area is therefore a TREADMILL, and the measured ladder below is that
+          treadmill being climbed, one rung per revision.
+
+          THE LADDER, all measured through the REAL mint path against a STATIC, NON-VULNERABLE page
+          (no SQL anywhere, no boolean channel — every FACT is false by construction):
+
+            literal-only set (`X = X` / `X = Y`)   vs CRS-942130 backreference regex   2000/2000
+            shape-varied set                       vs the same CRS-942130 regex             0/2000
+            shape-varied FOLDABLE subset (K=6)     vs a complete ~60-line CONSTANT FOLDER  200/200
+            SHIPPED set (K=7, with `IN (SELECT)`)  vs that same folder                       0/200
+            SHIPPED set                            vs that folder + a THREE-LINE `IN` rule  600/600
+            SHIPPED set, literals randomised       vs folder + a NINE-STRING `IN` blocklist 300/300
+            SHIPPED set                            vs an exact-string blocklist of its TRUEs 200/200
+            SHIPPED set                            vs ANY filter blind to one shape           0 each
+
+          Read the ladder as a whole. Each row that reaches 0 was called a fix; the next row is that
+          fix being cleared by a filter one rule larger. The folder is ~60 lines and contains no SQL
+          engine, no parser generator and no database; the `IN` rule that took the last 0 back to
+          600/600 is three lines, because `LIT IN (SELECT LIT)` over a one-row constant select IS
+          literal equality (sqlite3: `3 IN (SELECT 3)` -> 1, `3 IN (SELECT 5)` -> 0) — `X = X` vs
+          `X = Y` in a costume, with the same separating surface feature. The randomised-literal row
+          is the same lesson: the clause TEMPLATES are public in an open-source repo, so the filter
+          derives its rules from them and only needs nine strings for the one randomised atom —
+          which is why the literals are now a STABLE PUBLIC CONSTANT instead (correlatability and
+          replayability are worth more than a mitigation that measures zero).
+
+          PROVENANCE, so no row is taken for more than it is. Four rows are PINNED by live
+          regressions that re-measure them every CI run at 10-20 trials each
+          (``scanner/tests/test_boolean_inference_check.py``): CRS-942130 both halves, the complete
+          folder, the folder blinded to one shape, and the exact-string blocklist. The 2000-,
+          600- and 300-trial figures are one-off at-scale runs of those same cells, not CI cells.
+          (The 300/300 row was 299/300 as the red-pen first measured it; the one miss was their
+          folder's naive OR-split cutting inside a string literal that happened to contain "or" —
+          a fixture artefact, and the fixture here masks literals before splitting.)
+
+          WHAT THE CLAUSE SET DOES BUY, precisely and no more: a filter must be COMPLETE over the
+          shape set to partition. Blind it to any ONE comparison shape and it blocks only part of
+          the TRUE side, within-truth agreement breaks, and the round REFUTES — measured 0 for the
+          CRS-942130 rule, for equality-only, lexicographic-only, numeric-direction-only,
+          LIKE-prefix-only and generic block-any-OR/quote filters, and 0 in a LEAVE-ONE-SHAPE-OUT
+          sweep for every one of the seven shipped shapes blinded. That is a real property and it
+          is why the common real-world filter refutes. It is NOT sufficiency, and an earlier
+          revision of this docstring that said the set was closed by a "SQL-EVALUATED" pair was
+          wrong: the pair is a seventh comparison shape, no more.
+
+          WHAT AN OPERATOR SHOULD CONCLUDE. A boolean_sqli FACT is sound against a page whose body
+          varies independently of the input (the bound above) and against every INCOMPLETE
+          request-side filter. It is NOT sound against a filter purpose-built to decide this clause
+          set, and such a filter is cheap. Where that matters — a target known to sit behind an
+          aggressive WAF, or a FACT whose whole weight rests on this one oracle — corroborate with a
+          channel that does not live in the response bytes (an OOB/DNS callback, an error-signature
+          or a timing arm), or treat it as a LEAD.
+
+          RESIDUAL (a2) — STATUS: OPEN, and out of reach from the response side. An interposer that
+          genuinely EVALUATES the injected expression (a WAF embedding a real SQL parser and
+          evaluator) can partition the probes by truth value with no database behind it. That is the
+          same shape of limit as (b) — such an interposer IS computing the truth function this
+          oracle reads — and no clause set defeats it from the response side; it needs an
+          out-of-band channel (OOB/DNS, a side effect) to separate. (a) is NOT a special case of
+          (a2) and must not be filed under it: (a) needs no evaluator at all, only a folder.
+
+          A caller supplying its own clause sets inherits the shape-diversity obligation and the
+          same open residual; see ``scanner.checks.boolean_clause_families``.
+
+      (b) A page that is a DETERMINISTIC but ARBITRARY function of the request — STATUS: OPEN,
+          and BOUNDED rather than closed (a CDN caching per exact URL over an origin that picked a
+          variant at fill time, a balancer pinning each URL to a replica). There the byte-identical
+          repeats are cache HITS, not independent draws, and re-running the SAME clauses in a
+          later round returns the SAME bytes — so neither the repeats nor the extra SPRT rounds are
+          new evidence, and the per-FINDING bound degrades to the single-draw one:
+
+              SUM over a != b of  p_a**K_T * p_b**K_F   <=  2 * 2**-(K_T + K_F)
+
+          = ``1.2e-4`` at ``K = 7``, and the formula is CALIBRATED, not assumed: over the real
+          mint path a uniform 2-variant cached page measures ``1.20e-4`` at ``K = 7``
+          (200k trials) against an analytic ``1.22e-4``, and ``7.9e-3`` at ``K = 4`` against an
+          analytic ``7.8e-3``. (A
+          single-clause-per-truth-value design — what this test replaced — sits at ``~0.5``.)
+          Repetition cannot help against a map that is by definition constant in the request, so
+          for THIS case more distinct clauses is the lever — and it is the lever that keeps the
+          seventh shipped clause (the ``IN (SELECT ...)`` pair) in the set now that its original
+          "a folder cannot decide it" justification is retracted: at ``K = 6`` this residual is 4x
+          worse (analytic ``2 * 2**-12`` = ``4.9e-4``). It is not free: every extra clause is
+          another chance that a real vulnerable target answers ONE of them differently and the
+          round refutes, so ``K`` trades this residual against recall. The drivers also BOUND the
+          number of independent attempts per URL and state the resulting per-URL figure (see
+          ``live/runtime_redrive.py::boolean_redrive``).
+
+    THE TWO DETERMINISM MECHANISMS ARE A CHEAP PRE-FILTER, NOT THE SOUNDNESS CORE:
+      1. BASELINE PRE-GATE — ``false_baseline_samples`` is a run of ``>= min_baseline_samples``
+         responses to ONE IDENTICAL false-clause request collected up front; not-all-identical
+         proves non-determinism → REFUSE. A confirm still REQUIRES it to have passed
+         (fail-closed), but it is no longer what makes the oracle sound.
+      2. PER-ROUND HARD REFUTE — if ANY clause's byte-identical repeat differs from the clause,
+         the WHOLE finding hard-refutes (the page is provably non-deterministic).
+
+    CALLER OBLIGATION (the oracle sees responses, not requests). The ``K_T``/``K_F`` clauses must
+    genuinely be DISTINCT requests of a FIXED truth value and must VARY IN COMPARISON SHAPE rather
+    than only in their literals — which buys refutation against every INCOMPLETE request-side
+    filter and nothing beyond it (residual (a) above stays OPEN whatever the caller ships). The
+    oracle cannot check any of that from the bytes. The drivers enforce distinctness where the
+    clauses live (``BooleanInferenceCheck`` and ``DifferentialHttpAdapter`` both refuse a duplicate
+    or a cross-side clause at the call site) and build their families from
+    ``scanner.checks.boolean_clause_families``; the shape property is a review obligation on the
+    clause sets, pinned by the live CRS-942130, constant-folder and leave-one-shape-out
+    regressions — the folder cell PINS the open class (it must keep minting), not a win.
+
+    WHAT "RE-VERIFIES OFFLINE" DOES AND DOES NOT MEAN. Re-execution over a retained context
+    recomputes this whole decision from the retained bytes, so a GROSS edit (a swapped page, a
+    dropped arm, a removed baseline, a truncated clause list) is rejected. It is NOT a byte
+    integrity check: the comparison is deliberately FUZZY (``length`` 5%, ``lexical`` 10%), so a
+    sub-threshold edit inside a retained body — a byte, a word — does not change the verdict.
+    Byte integrity comes from the certificate signature and digest binding, not from this oracle.
+
+    FAIL-CLOSED ON SHAPE. A round that does not carry the multi-clause truth-value arms — an
+    OLD single-clause retained context ``{"true", "false_a", "false_b", "false_a_repeat"}``
+    included — can NEVER be a positive signal: it yields 0 and the SPRT refutes. Old-shape
+    evidence can only refute, never mint.
+
+    RECALL COST (honest, and the safe direction). A legitimately noisy-but-vulnerable page
+    (per-request ``__VIEWSTATE`` / CSRF token / rotating banner), and a vulnerable page whose
+    varied true clauses do not all land on the same response, are REFUSED to a LEAD. That is a
+    documented false-LEAD, never a false FACT.
     """
+    rounds = [r for r in (probe_rounds or []) if isinstance(r, Mapping)]
+
+    def _nondeterministic(reason: str) -> OracleSignal:
+        # A non-deterministic page cannot support boolean inference → LEAD, never a FACT and never a
+        # CLEAN (conclusive=False): the page MIGHT be vulnerable but noisy — refusing it is a recall
+        # cost, not a proof of safety. decision="refute" (fired=False) so a downstream refute-branch
+        # still classifies it as "did not mint", while conclusive=False keeps it out of any CLEAN.
+        return OracleSignal(
+            kind=OracleKind.BOOLEAN_INFERENCE, fired=False, confidence=0.0, conclusive=False,
+            evidence=("boolean inference REFUSED — page is not deterministic to identical input "
+                      f"({reason}); boolean-blind inference is unsound on a non-deterministic page → LEAD"),
+            observed={"decision": "refute", "nondeterministic": True, "reason": reason},
+        )
+
+    # PIN the dimensions (never latency / marker) and force expect="differ" — see _BOOLEAN_DIMENSIONS.
+    disc = _boolean_discriminator(discriminator)
+
+    def _same(a: Any, b: Any) -> bool:
+        """Do two observed responses AGREE? ``differential_response_oracle`` is the authority; an
+        EXACT match short-circuits it (identical bytes + identical status make every dimension
+        non-differing, so the oracle provably cannot fire) — a pure speed path, never a
+        semantic one."""
+        if a == b:
+            return True
+        return not differential_response_oracle(a, b, disc).fired
+
+    # --- PRE-FILTER 1: BASELINE DETERMINISM PRE-GATE ----------------------------------------------
+    baseline = list(false_baseline_samples) if false_baseline_samples is not None else None
+    baseline_deterministic = False
+    if baseline is not None and len(baseline) >= 2:
+        ref = baseline[0]
+        if any(not _same(ref, s) for s in baseline[1:]):
+            return _nondeterministic(
+                f"{len(baseline)} identical-request baseline samples are not all identical")
+        baseline_deterministic = len(baseline) >= min_baseline_samples
+
+    # --- PRE-FILTER 2: HARD REFUTE on any observed non-determinism (a byte-identical repeat that
+    #     came back different). Covers every clause of the new shape AND the legacy false_a pair. ---
+    for r in rounds:
+        pairs = list(zip(_boolean_round_arm(r, "trues"), _boolean_round_arm(r, "true_repeats")))
+        pairs += list(zip(_boolean_round_arm(r, "falses"), _boolean_round_arm(r, "false_repeats")))
+        legacy_rep = r.get("false_a_repeat")
+        if legacy_rep is not None and "false_a" in r:
+            pairs.append((r["false_a"], legacy_rep))
+        for clause_resp, repeat_resp in pairs:
+            if not _same(clause_resp, repeat_resp):
+                return _nondeterministic(
+                    "a byte-identical clause repeat returned a different response in a probe round")
+
+    def _truth_value_attributed(r: Mapping[str, Any]) -> bool:
+        """THE SOUNDNESS CORE — is this round's response a FUNCTION of the injected truth value?
+        One TRUE cluster, one FALSE cluster, and the two disjoint. Short-circuits."""
+        trues = _boolean_round_arm(r, "trues")
+        falses = _boolean_round_arm(r, "falses")
+        t_reps = _boolean_round_arm(r, "true_repeats")
+        f_reps = _boolean_round_arm(r, "false_repeats")
+        # FAIL-CLOSED on shape: too few DISTINCT clauses per truth value, or a missing repeat, and the
+        # round cannot attribute anything → it is not a positive signal (an old-shape round lands here).
+        if (len(trues) < min_true_clauses or len(falses) < min_false_clauses
+                or len(t_reps) != len(trues) or len(f_reps) != len(falses)):
+            return False
+        t_cluster = trues + t_reps
+        f_cluster = falses + f_reps
+        # (2) WITHIN-TRUTH AGREEMENT — all of one truth value land on ONE response.
+        for cluster in (t_cluster, f_cluster):
+            for i in range(len(cluster)):
+                for j in range(i + 1, len(cluster)):
+                    if not _same(cluster[i], cluster[j]):
+                        return False
+        # (3) ACROSS-TRUTH SEPARATION — every TRUE response differs from every FALSE response.
+        for t in t_cluster:
+            for f in f_cluster:
+                if _same(t, f):
+                    return False
+        return True
+
     def _round_signals():
-        for r in (probe_rounds or []):
-            if not isinstance(r, Mapping) or "true" not in r or "false_a" not in r or "false_b" not in r:
-                continue
-            across = differential_response_oracle(r["false_a"], r["true"], discriminator).fired
-            within_same = not differential_response_oracle(r["false_a"], r["false_b"], discriminator).fired
-            yield bool(across and within_same)
+        for r in rounds:
+            yield _truth_value_attributed(r)
 
     decided, llr, n_used, signals, upper, lower = _sprt_decision(
         _round_signals(), alpha=alpha, beta=beta, p1=p1, p0=p0)
@@ -730,15 +1013,43 @@ def boolean_inference_oracle(
     observed = {
         "rounds_used": n_used, "signal_rounds": signals, "llr": llr,
         "upper": upper, "lower": lower, "decision": decided or "inconclusive",
+        "baseline_samples": (len(baseline) if baseline is not None else 0),
+        "baseline_deterministic": baseline_deterministic,
+        "min_true_clauses": min_true_clauses, "min_false_clauses": min_false_clauses,
+        # the ACTUAL clause counts the judged rounds carried (the analytic bound is a function of THESE,
+        # not of the floor) — recorded so an auditor can recompute the bound from the retained evidence.
+        "true_clauses_per_round": sorted({len(_boolean_round_arm(r, "trues")) for r in rounds}),
+        "false_clauses_per_round": sorted({len(_boolean_round_arm(r, "falses")) for r in rounds}),
     }
     if decided == "confirm":
+        # FAIL-CLOSED determinism pre-filter: a FACT also requires the baseline pre-gate to have PASSED
+        # (>= min_baseline_samples identical up-front samples). Belt-and-braces on top of the
+        # truth-value attribution that carries the soundness — a confirm without a determinism proof is
+        # DOWNGRADED to inconclusive (a LEAD, never a FACT).
+        if not baseline_deterministic:
+            observed["decision"] = "inconclusive"
+            observed["confirm_without_baseline_pregate"] = True
+            return OracleSignal(
+                kind=OracleKind.BOOLEAN_INFERENCE, fired=False, confidence=0.0, conclusive=False,
+                evidence=(
+                    f"SPRT reached the confirm boundary in {n_used} round(s) but the baseline "
+                    f"determinism pre-gate did NOT pass ({observed['baseline_samples']} < "
+                    f"{min_baseline_samples} identical up-front samples) — a boolean FACT requires "
+                    "proving the page is deterministic to identical input first → LEAD"),
+                observed=observed,
+            )
         # confidence reflects the controlled type-I error rate of the test
         confidence = min(0.99, 1.0 - alpha)
         return OracleSignal(
             kind=OracleKind.BOOLEAN_INFERENCE, fired=True, confidence=confidence,
             evidence=(
-                f"SPRT confirmed boolean inference in {n_used} round(s): "
-                f"{signals} separable (true!=false, false stable), LLR={llr:.2f} >= {upper:.2f}"
+                f"SPRT confirmed boolean inference in {n_used} round(s): {signals} round(s) in which the "
+                f"response was a FUNCTION of the injected truth value "
+                f"(K_T={observed['true_clauses_per_round']} distinct TRUE clauses all agree, "
+                f"K_F={observed['false_clauses_per_round']} distinct FALSE clauses all agree, each also "
+                f"stable to a byte-identical repeat, and the two clusters disjoint), behind a passed "
+                f"determinism pre-gate ({observed['baseline_samples']} identical baseline samples), "
+                f"LLR={llr:.2f} >= {upper:.2f}"
             ),
             observed=observed,
         )

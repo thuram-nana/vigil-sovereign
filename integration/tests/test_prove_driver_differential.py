@@ -3,8 +3,9 @@
 Two harnesses, both re-firing the REAL framework oracles (SPRT + WAF-closure), so a REMEDIATED verdict is
 earned over the round bytes exactly as it would be over live bytes:
 
-  * a FAKE-driven corpus that hands ``_prove_differential`` matched-decoy round bundles
-    (``{true, false_a, false_b, baseline}``) — covering the verdict-determining §8 cases 1,2,3,4,6,7,10
+  * a FAKE-driven corpus that hands ``_prove_differential`` matched-decoy TRUTH-VALUE ATTRIBUTION round
+    bundles (``{trues, falses, true_repeats, false_repeats, baseline}``) — covering the verdict-determining
+    §8 cases 1,2,3,4,6,7,10
     (`DIFFERENTIAL-REMEDIATION.md`), the freshness-echo/floor guards, and the dual-red-pen regressions below;
   * a REAL ``DifferentialHttpAdapter`` driven end-to-end against a stdlib loopback origin through a genuine
     gated ``HttpExecutor`` (:func:`test_real_adapter_*`) — exercising the actual probe path (URL build,
@@ -25,6 +26,7 @@ Needs framework (the oracles + the retained-control reverify) → PYTHONPATH=int
 """
 from __future__ import annotations
 
+import sqlite3
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlsplit
@@ -65,21 +67,40 @@ ROWS = R(200, '{"results": [{"id": 1}]}')          # a TRUE-predicate page: a re
 BLOCK = R(403, "<html><body>Request blocked by WAF</body></html>")   # a metachar block page
 
 
-def _round(true, false_a, false_b, baseline) -> dict:
-    return {"true": true, "false_a": false_a, "false_b": false_b, "baseline": baseline}
+def _round(trues, falses, baseline, *, true_repeats=None, false_repeats=None) -> dict:
+    """A TRUTH-VALUE ATTRIBUTION round: the responses to K_T distinct always-TRUE clauses, K_F distinct
+    always-FALSE clauses, a byte-identical repeat of each, and the benign baseline. The repeats default to
+    copies (a DETERMINISTIC origin); a dynamic / noisy origin passes DIFFERING repeats so the determinism
+    hard-refute trips."""
+    trues, falses = list(trues), list(falses)
+    return {"trues": trues, "falses": falses,
+            "true_repeats": [dict(r) for r in (trues if true_repeats is None else true_repeats)],
+            "false_repeats": [dict(r) for r in (falses if false_repeats is None else false_repeats)],
+            "baseline": baseline}
 
 
-# genuine fix / sanitizing WAF: all four probes indistinguishable and baseline-shaped (SPRT refute, closure holds)
-SILENT_ROUND = _round(NORMAL, NORMAL, NORMAL, NORMAL)
-# still-vulnerable clean path: true differs from a STABLE false pair (SPRT confirm)
-SIGNAL_ROUND = _round(ROWS, NORMAL, NORMAL, NORMAL)
-# a non-signal round whose baseline == false_a (drives the SPRT toward refute without tripping closure)
-NONSIGNAL_ROUND = _round(NORMAL, NORMAL, NORMAL, NORMAL)
+def _uniform(true, false, baseline, k: int = 4) -> dict:
+    """A DETERMINISTIC origin whose response IS a function of the truth value: every always-true clause lands
+    on ``true``, every always-false clause on ``false``."""
+    return _round([dict(true) for _ in range(k)], [dict(false) for _ in range(k)], baseline)
+
+
+# genuine fix / sanitizing WAF: every probe indistinguishable and baseline-shaped (SPRT refute, closure holds)
+SILENT_ROUND = _uniform(NORMAL, NORMAL, NORMAL)
+# still-vulnerable clean path: the TRUE cluster separates from a stable FALSE cluster (SPRT confirm)
+SIGNAL_ROUND = _uniform(ROWS, NORMAL, NORMAL)
+# a non-signal round whose baseline == the false cluster (drives the SPRT toward refute without tripping closure)
+NONSIGNAL_ROUND = _uniform(NORMAL, NORMAL, NORMAL)
 # blocking WAF: the metachar probes get an identical block page; the benign baseline is a normal 200
-BLOCKED_ROUND = _round(BLOCK, BLOCK, BLOCK, NORMAL)
-# structurally-dynamic page: every probe differs in record COUNT (baseline != false_a → closure fails)
-DYNAMIC_ROUND = _round(R(200, '{"i": [1, 2, 3]}'), R(200, '{"i": [1, 2]}'),
-                       R(200, '{"i": [1, 2, 3, 4]}'), R(200, '{"i": [1]}'))
+BLOCKED_ROUND = _uniform(BLOCK, BLOCK, NORMAL)
+# structurally-dynamic page: EVERY probe differs in record COUNT (baseline != the falses → closure fails),
+# INCLUDING every byte-identical repeat (varies with any input → the determinism hard-refute trips)
+def _ilist(counts) -> list:
+    return [R(200, '{"i": %s}' % list(range(1, c + 1))) for c in counts]
+
+
+DYNAMIC_ROUND = _round(_ilist([3, 5, 7, 15]), _ilist([2, 4, 6, 14]), R(200, '{"i": [1]}'),
+                       true_repeats=_ilist([9, 11, 13, 19]), false_repeats=_ilist([8, 10, 12, 18]))
 CONFIRM_ROUNDS = [SIGNAL_ROUND, SIGNAL_ROUND, SIGNAL_ROUND]   # retained firing rounds for the positive control
 
 
@@ -98,12 +119,16 @@ LEAK = '[{"id": 1, "leak": "admin@corp:HASHLEAK"}]'   # the TRUE-predicate leak 
 
 
 def _noisy_vuln_round(n: int) -> dict:
-    """A STILL-VULNERABLE origin (true leaks the extra row every round) on a page with structurally-invisible
-    per-request VIEWSTATE noise: false_a != false_b (within_same tripped → SPRT refutes) while true != false_a
-    (across=True → the injection STILL fires) and baseline ≈ false_a structurally (WAF-closure passes). The
-    red-pen's reproduced false-REMEDIATED shape — the attribution gate MUST catch it."""
-    return _round(true=_noisy(f"t{n}", LEAK), false_a=_noisy(f"a{n}", "[]"),
-                  false_b=_noisy(f"b{n}", "[]"), baseline=_noisy(f"c{n}", "[]"))
+    """A STILL-VULNERABLE origin (every true clause leaks the extra row) on a page with structurally-invisible
+    per-request VIEWSTATE noise: the within-truth clusters do NOT agree and the byte-identical repeats carry
+    fresh noise (→ the SPRT refutes / hard-refutes) while a true clause still SEPARATES from a false clause
+    (the injection STILL fires) and baseline ≈ the falses structurally (WAF-closure passes). The red-pen's
+    reproduced false-REMEDIATED shape — the attribution gate MUST catch it."""
+    return _round([_noisy(f"t{n}{j}", LEAK) for j in range(4)],
+                  [_noisy(f"a{n}{j}", "[]") for j in range(4)],
+                  _noisy(f"c{n}", "[]"),
+                  true_repeats=[_noisy(f"tr{n}{j}", LEAK) for j in range(4)],
+                  false_repeats=[_noisy(f"ar{n}{j}", "[]") for j in range(4)])
 
 
 NOISY_VULN_ROUNDS = [_noisy_vuln_round(0), _noisy_vuln_round(1), _noisy_vuln_round(2)]
@@ -121,8 +146,7 @@ def _subthreshold_round() -> dict:
     (``SECRET_BIT=1`` vs ``=0``) in a large page → ~99.85% lexically similar, BELOW the fuzzy SPRT thresholds
     (lexical 0.10 / length 0.05) → SPRT refutes, false pair stable, closure passes. An attacker reads the DB
     bit-by-bit with exact comparison. Only a ZERO-tolerance attribution check catches it (red-pen BLOCK-B)."""
-    return _round(true=R(200, _leakpage(1)), false_a=R(200, _leakpage(0)),
-                  false_b=R(200, _leakpage(0)), baseline=R(200, _leakpage(0)))
+    return _uniform(R(200, _leakpage(1)), R(200, _leakpage(0)), R(200, _leakpage(0)))
 
 
 SUBTHRESHOLD_ROUNDS = [_subthreshold_round(), _subthreshold_round(), _subthreshold_round()]
@@ -130,7 +154,7 @@ SUBTHRESHOLD_ROUNDS = [_subthreshold_round(), _subthreshold_round(), _subthresho
 # a 200-STATUS block page: same status as the baseline (so a status-ONLY closure "holds") but structurally
 # different (so the protocol-fixed {status,structural} closure catches it) — the re-check #2 weak-disc probe.
 BLOCK200 = R(200, "<html><body>Request blocked by WAF</body></html>")
-BLOCK200_ROUND = _round(BLOCK200, BLOCK200, BLOCK200, NORMAL)
+BLOCK200_ROUND = _uniform(BLOCK200, BLOCK200, NORMAL)
 
 
 def _RT(body: str) -> dict:                     # a probe body captured at the truncation cap (a prefix only)
@@ -139,7 +163,7 @@ def _RT(body: str) -> dict:                     # a probe body captured at the t
 
 # a round whose observed prefixes are IDENTICAL (would be REMEDIATED in-window) but every body was TRUNCATED —
 # a boolean leak in the untruncated tail would be invisible, so closure cannot be attributed (red-pen R2 BLOCK).
-TRUNCATED_ROUND = _round(_RT("<baseline/>"), _RT("<baseline/>"), _RT("<baseline/>"), _RT("<baseline/>"))
+TRUNCATED_ROUND = _uniform(_RT("<baseline/>"), _RT("<baseline/>"), _RT("<baseline/>"))
 
 
 class FakeDifferentialAdapter:
@@ -170,8 +194,14 @@ class FakeDifferentialAdapter:
         return dict(self._identity)
 
     def run_positive_control(self, *, challenge, auth):
-        ctx = {"bug_class": self.bug_class, "probe_rounds": [dict(r) for r in self._confirm_rounds],
-               "discriminator": dict(BOOL_DISC)}
+        rounds = [dict(r) for r in self._confirm_rounds]
+        # determinism pre-filter derived from the ONE identical request the retained rounds repeat
+        # (falses[0] + its byte-identical repeat) — the positive control clears the same screen a fresh mint
+        # does, and is held to the SAME truth-value attribution bar by the oracle itself.
+        baseline = [r[k][0] for r in rounds for k in ("falses", "false_repeats")
+                    if isinstance(r.get(k), list) and r[k]]
+        ctx = {"bug_class": self.bug_class, "probe_rounds": rounds,
+               "discriminator": dict(BOOL_DISC), "false_baseline_samples": baseline}
         return ControlObservation(reachable=True, channel_alive=True, oracle_context=ctx,
                                   definition_digest="sha256:control")
 
@@ -182,11 +212,14 @@ class FakeDifferentialAdapter:
             return TrialObservation(reachable=True, valid=False, oracle_context=None,
                                     invalid_reason="one matched-decoy probe fetch failed (simulated)")
         spec = self._rounds[trial_index % len(self._rounds)]
-        ctx = {k: dict(v) if isinstance(v, dict) else v for k, v in spec.items()}
-        if self._reflect_challenge and isinstance(ctx.get("true"), dict):
-            # R1-PR2: reflect the fresh challenge in the SIGNAL-BEARING (true) response, as a live app would when
-            # the injected input is echoed — earns F2 (the sink was exercised this run, not a replay).
-            ctx["true"] = {**ctx["true"], "body": f'{ctx["true"].get("body", "")} <!--{challenge}-->'}
+        ctx = {k: (dict(v) if isinstance(v, dict) else [dict(x) for x in v] if isinstance(v, list) else v)
+               for k, v in spec.items()}
+        if self._reflect_challenge:
+            # R1-PR2: reflect the fresh challenge in EVERY SIGNAL-BEARING (true-cluster) response — clause AND
+            # its byte-identical repeat, or the repeat would diverge and hard-refute — as a live app would when
+            # the injected input is echoed. Earns F2 (the sink was exercised this run, not a replay).
+            for arm in ("trues", "true_repeats"):
+                ctx[arm] = [{**t, "body": f'{t.get("body", "")} <!--{challenge}-->'} for t in ctx[arm]]
         return TrialObservation(reachable=True, valid=True, oracle_context=ctx,
                                 freshness_level=Freshness.F1_TARGET_ECHOES, nonce_echoed=self._nonce_echoed)
 
@@ -258,13 +291,19 @@ def test_r1pr2_f2_demanded_reflected_firing_passes_the_floor():
 
 
 def test_r1pr2_static_echo_marker_does_not_earn_f2():
-    # red-pen parity note — the marker must be in the DISCRIMINATING bytes (present in `true`, ABSENT from
-    # `false_a`), the boolean analog of the error-signature "in the matched signature line". A static header
-    # echoed into EVERY probe (marker in both true and false_a) is NOT attributable to the firing → stays F1.
+    # red-pen parity note — the marker must be in the DISCRIMINATING bytes (present in EVERY `trues[i]`,
+    # ABSENT from every `falses[j]`), the boolean analog of the error-signature "in the matched signature
+    # line". A static header echoed into EVERY probe is NOT attributable to the firing → stays F1.
     from vigil_integration.remediation.prove_driver import _challenge_in_firing_differential as _f
-    assert _f("CH", [{"true": {"body": "rows <!--CH-->"}, "false_a": {"body": "base"}}]) is True     # true-only
-    assert _f("CH", [{"true": {"body": "rows <!--CH-->"}, "false_a": {"body": "base <!--CH-->"}}]) is False  # echo
-    assert _f("CH", [{"true": {"body": "rows"}, "false_a": {"body": "base <!--CH-->"}}]) is False     # false-only
+
+    def _r(true_bodies, false_bodies):
+        return {"trues": [{"body": b} for b in true_bodies], "falses": [{"body": b} for b in false_bodies]}
+
+    assert _f("CH", [_r(["rows <!--CH-->"] * 3, ["base"] * 3)]) is True                    # true-cluster only
+    assert _f("CH", [_r(["rows <!--CH-->"] * 3, ["base <!--CH-->"] * 3)]) is False         # static echo
+    assert _f("CH", [_r(["rows"] * 3, ["base <!--CH-->"] * 3)]) is False                   # false-only
+    # one un-marked TRUE clause is enough to drop back to F1 (conservative: EVERY true must carry it)
+    assert _f("CH", [_r(["rows <!--CH-->", "rows <!--CH-->", "rows"], ["base"] * 3)]) is False
 
 
 def test_r1pr2_f2_demanded_unreflected_firing_is_inconclusive():
@@ -364,7 +403,11 @@ def test_verifier_demotes_a_signed_across_true_remediated_cert():
                                                                   _cert_signing_bytes(tampered))}
         ok, reason = verify_prove_certificate(tampered, signer_pubkeys=PUBKEYS)
         assert not ok, f"verifier attested an across=True (still-open) cert: {reason}"
-        assert "attribution re-check" in reason.lower()
+        # the still-open rounds are demoted EITHER by the determinism gate (NOISY_VULN — an identical repeat
+        # diverges, so the rounds do not re-execute to a decisive refute) OR by the zero-tolerance attribution
+        # re-check (SUBTHRESHOLD — a deterministic 1-bit leak: true still separates from false_a). Both demote.
+        r = reason.lower()
+        assert ("attribution re-check" in r) or ("decisive sprt refute" in r) or ("deterministic" in r), reason
 
 
 def test_verifier_ignores_a_weakened_cert_supplied_closure_discriminator():
@@ -405,18 +448,33 @@ def test_degenerate_adapter_clauses_are_rejected_at_construction():
     # trivial refute → a false REMEDIATED over a vulnerable origin). The adapter must REFUSE them at construction.
     common = dict(executor=None, base_url="http://127.0.0.1/", endpoint_path="/", param="q", nonce_param="rc",
                   base_value="1")
+    four_t = ("1' AND 1=1 -- {challenge}", "1' AND 'b'>'a' -- {challenge}",
+              "1' AND 'ab' LIKE 'a%' -- {challenge}", "1' AND 9>4 -- {challenge}")
+    four_f = ("1' AND 1=2 -- {challenge}", "1' AND 'a'>'b' -- {challenge}",
+              "1' AND 'ab' LIKE 'z%' -- {challenge}", "1' AND 4>9 -- {challenge}")
     with pytest.raises(ValueError, match="IDENTICAL"):
-        DifferentialHttpAdapter(**common, true_payload_template="1' AND 1=1 -- {challenge}",
-                                false_payload_template="1' AND 1=1 -- {challenge}")
+        DifferentialHttpAdapter(**common, true_payload_templates=four_t,
+                                false_payload_templates=(four_t[0],) + four_f[1:])
     with pytest.raises(ValueError, match="ONLY in the .challenge. marker"):
         # raw templates DIFFER (challenge inside the predicate vs in the comment) but are equal once the
         # {challenge} marker is stripped → the ONLY difference is the inert nonce, which must not flip the boolean.
-        DifferentialHttpAdapter(**common, true_payload_template="1' AND SUBSTR(x,1,1)='{challenge}' -- z",
-                                false_payload_template="1' AND SUBSTR(x,1,1)='' -- z{challenge}")
-    # a genuinely data-dependent pair is ACCEPTED (the predicate difference is independent of the challenge).
-    ok = DifferentialHttpAdapter(**common,
-                                 true_payload_template="1' AND SUBSTR(@@version,1,1)>'' -- {challenge}",
-                                 false_payload_template="1' AND SUBSTR(@@version,1,1)>'~~~' -- {challenge}")
+        DifferentialHttpAdapter(
+            **common,
+            true_payload_templates=("1' AND SUBSTR(x,1,1)='{challenge}' -- z",) + four_t[1:],
+            false_payload_templates=("1' AND SUBSTR(x,1,1)='' -- z{challenge}",) + four_f[1:])
+    # TRUTH-VALUE ATTRIBUTION floor: below the oracle's CONFIRM floor of 4 distinct clauses per truth value
+    # an adapter could never reach STILL_VULNERABLE (every round is a non-signal), so it would answer
+    # "refute" for a live-vulnerable origin — refused loudly at construction instead.
+    with pytest.raises(ValueError, match="4 DISTINCT"):
+        DifferentialHttpAdapter(**common, true_payload_templates=four_t[:3],
+                                false_payload_templates=four_f)
+    # duplicates are not independent draws either
+    with pytest.raises(ValueError, match="duplicate clauses"):
+        DifferentialHttpAdapter(**common, true_payload_templates=four_t[:3] + (four_t[0],),
+                                false_payload_templates=four_f)
+    # genuinely data-dependent, shape-varied clause SETS are ACCEPTED.
+    ok = DifferentialHttpAdapter(**common, true_payload_templates=_TRUE_TEMPLATES,
+                                 false_payload_templates=_FALSE_TEMPLATES)
     assert ok.bug_class == "boolean_sqli"
 
 
@@ -466,6 +524,21 @@ def test_tampered_differential_rounds_fail_remediated_verification():
 # the q payload), so a FIXED origin returns identical bodies for all four probes (across=False → REMEDIATED); a
 # VULNERABLE origin materialises a row for the TRUE predicate (1=1) only (across=True, false stable → CONFIRM).
 _REAL_ENG = "boolreal"
+# K_T = K_F = 4 DISTINCT clauses per truth value, metacharacter-identical in class and — the point —
+# varying in COMPARISON SHAPE (`=`, `>`, `LIKE`, a compound), not merely in their literals. A set whose
+# truth value tracks one SURFACE feature (e.g. "both operands are the same token") is partitionable by a
+# regex WAF with no SQL engine at all; see the scanner-side lexical-filter regression.
+# The fifth pair is a subquery-membership shape, kept as a fifth SHAPE and nothing more: it shipped
+# under a claim that a constant folder "cannot decide it", and that claim is RETRACTED — over a
+# one-row constant SELECT, `LIT IN (SELECT LIT)` is literal equality, foldable in three lines. Shape
+# diversity buys refutation against every INCOMPLETE filter; a COMPLETE one partitions any such set
+# (measured 600/600 on a static page). That is residual (a) on the oracle, and it is OPEN.
+_TRUE_TEMPLATES = ("1' AND 1=1 -- {challenge}", "1' AND 'b'>'a' -- {challenge}",
+                   "1' AND 'ab' LIKE 'a%' -- {challenge}", "1' AND 9>4 AND 2<5 -- {challenge}",
+                   "1' AND 1 IN (SELECT 1) -- {challenge}")
+_FALSE_TEMPLATES = ("1' AND 1=2 -- {challenge}", "1' AND 'a'>'b' -- {challenge}",
+                    "1' AND 'ab' LIKE 'z%' -- {challenge}", "1' AND 4>9 AND 2<5 -- {challenge}",
+                    "1' AND 1 IN (SELECT 2) -- {challenge}")
 _REAL_CHARTER = """\
 # Engagement charter — `{slug}`
 
@@ -491,6 +564,24 @@ Signed: `tester`     Date: `2026-05-04`
 """
 
 
+_ORIGIN_DB = sqlite3.connect(":memory:", check_same_thread=False)
+_ORIGIN_DB.execute("CREATE TABLE items(id INTEGER, sku TEXT)")
+_ORIGIN_DB.execute("INSERT INTO items VALUES(1, '1')")
+_ORIGIN_DB_LOCK = threading.Lock()
+
+
+def _predicate_is_true(qv: str) -> bool:
+    """A REAL string-concatenated sqlite3 sink, so the origin EVALUATES the injected clause and answers
+    its TRUTH VALUE rather than a payload substring. That is what lets the K_T clauses — which vary in
+    COMPARISON SHAPE, not only in their literals — all land on the same response."""
+    with _ORIGIN_DB_LOCK:
+        try:
+            return bool(_ORIGIN_DB.execute(
+                "SELECT count(*) FROM items WHERE sku = '" + qv + "'").fetchone()[0])
+        except sqlite3.Error:
+            return False
+
+
 class _Origin(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
@@ -502,10 +593,11 @@ class _Origin(BaseHTTPRequestHandler):
         q = parse_qs(urlsplit(self.path).query, keep_blank_values=True)
         qv = (q.get("q") or [""])[0]
         rc = (q.get("rc") or [""])[0]
-        # A still-vulnerable origin executes the TRUE predicate (1=1) → an extra row leaks; the FALSE predicate
-        # (1=2) and the benign baseline do not. A FIXED origin ignores the injection entirely. The response
-        # reflects ONLY the rc nonce (freshness) — NEVER the q payload — mirroring a real app's output channel.
-        leaks = self.server.vulnerable and ("1=1" in qv) and ("1=2" not in qv)
+        # A still-vulnerable origin EVALUATES the injected comparison → a TRUE predicate leaks an extra row;
+        # every FALSE predicate and the benign baseline do not. A FIXED origin ignores the injection entirely.
+        # The response reflects ONLY the rc nonce (freshness) — NEVER the q payload — mirroring a real app's
+        # output channel, so all K_T true clauses land on ONE body and all K_F false clauses on another.
+        leaks = self.server.vulnerable and _predicate_is_true(qv)
         if self.server.big_tail:
             # a >8 KB response whose boolean leak lands in the TAIL (past the 8 KiB capture cap). The rc nonce is
             # in the head (so freshness echoes); the leak marker `z` is past ~9 KB of padding → truncated away.
@@ -550,12 +642,15 @@ def real_gated(tmp_path, monkeypatch):
 
 def _real_adapter(base_url: str) -> DifferentialHttpAdapter:
     from framework.v2.agents import HttpExecutor
-    executor = HttpExecutor(engagement_slug=_REAL_ENG, base_url=base_url, prompt_callback=lambda *_a: False)
+    # request_budget sized for the TRUTH-VALUE ATTRIBUTION round: min_valid_trials * (1 + 2*K_T + 2*K_F)
+    # probes for the EDGE leg and the same again for the R2 origin re-drive, plus the positive control. The
+    # HttpExecutor default (100) is below that at K_T = K_F = 4 — the caller owns this sizing.
+    executor = HttpExecutor(engagement_slug=_REAL_ENG, base_url=base_url, prompt_callback=lambda *_a: False,
+                            request_budget=400)
     return DifferentialHttpAdapter(
         executor=executor, base_url=base_url, endpoint_path="/search", param="q", nonce_param="rc",
-        base_value="1", true_payload_template="1' AND 1=1 -- {challenge}",
-        false_payload_template="1' AND 1=2 -- {challenge}", original_firing_rounds=CONFIRM_ROUNDS,
-        engagement=_REAL_ENG)
+        base_value="1", true_payload_templates=_TRUE_TEMPLATES, false_payload_templates=_FALSE_TEMPLATES,
+        original_firing_rounds=CONFIRM_ROUNDS, engagement=_REAL_ENG)
 
 
 def _run_real(adapter):
@@ -599,12 +694,13 @@ def _real_origin_adapter(edge_url: str, *, origin_ip: str, origin_port: int) -> 
     """A real adapter whose EDGE is ``edge_url`` and whose direct-to-origin re-drive targets ``origin_ip:port``
     with the Host pinned to the loopback (the origin server ignores Host; the scope gate matches the URL host)."""
     from framework.v2.agents import HttpExecutor
-    executor = HttpExecutor(engagement_slug=_REAL_ENG, base_url=edge_url, prompt_callback=lambda *_a: False)
+    executor = HttpExecutor(engagement_slug=_REAL_ENG, base_url=edge_url, prompt_callback=lambda *_a: False,
+                            request_budget=400)
     return DifferentialHttpAdapter(
         executor=executor, base_url=edge_url, endpoint_path="/search", param="q", nonce_param="rc",
-        base_value="1", true_payload_template="1' AND 1=1 -- {challenge}",
-        false_payload_template="1' AND 1=2 -- {challenge}", original_firing_rounds=CONFIRM_ROUNDS,
-        engagement=_REAL_ENG, origin_ip=origin_ip, origin_port=origin_port, origin_host="127.0.0.1")
+        base_value="1", true_payload_templates=_TRUE_TEMPLATES, false_payload_templates=_FALSE_TEMPLATES,
+        original_firing_rounds=CONFIRM_ROUNDS, engagement=_REAL_ENG,
+        origin_ip=origin_ip, origin_port=origin_port, origin_host="127.0.0.1")
 
 
 def test_r2_sanitizing_edge_over_vulnerable_origin_is_demoted(real_gated):

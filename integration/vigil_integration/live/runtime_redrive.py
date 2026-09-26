@@ -86,15 +86,20 @@ _TIMING_PARAMS = ("id", "q", "query", "search", "name", "user", "uid", "item", "
 
 # The RUNNER-crafted probe payloads. The RUNNER owns these (never a Strix/LLM value), so a FACT rests on
 # VIGIL's OWN injected expression/clause. SSTI: distinctive per-probe products go in ``{n1}``/``{n2}`` (filled
-# per probe with a fresh random pair). Boolean: (true_clause, false_clause) pairs — a true clause that breaks
+# per probe with a fresh random pair). Boolean: clause FAMILIES (see below) — a true clause that breaks
 # out and evaluates TRUE vs a false one that evaluates FALSE, over the same insertion point. Timing:
 # (benign, low_sleep, high_sleep, low_ms, high_ms) — a benign value vs two SLEEP doses for the dose-response.
 _SSTI_EXPR_TEMPLATES = ("{{{{{n1}*{n2}}}}}", "${{{n1}*{n2}}}", "#{{{n1}*{n2}}}", "{{{n1}*{n2}}}")
-_BOOLEAN_CLAUSE_PAIRS = (
-    ("x' OR '1'='1", "x' OR '1'='2"),        # single-quote string-literal breakout
-    ("1 OR 1=1", "1 OR 1=2"),                # numeric context
-    ('x" OR "1"="1', 'x" OR "1"="2'),        # double-quote string-literal breakout
-)
+# The TRUTH-VALUE ATTRIBUTION clause families live in ONE place — ``framework.v2.scanner.checks.
+# boolean_clause_families`` — next to the check that sends them and the invariants they must satisfy
+# (comparison-shape diversity, breakout validity, truth-correctness, index-aligned length matching).
+# The set is a STABLE PUBLIC CONSTANT: two calls return the identical clauses, so a run is replayable
+# and the operator can grep their WAF/access logs for exactly these strings (constitution VI.4). A
+# previous revision randomised the literals per run to keep the set out of an exact-string blocklist;
+# that is retracted — measured worthless, and it pointed at a defender's control. What the clause set
+# does NOT do is close the truth-correlated-request-filter residual; that residual is OPEN, and the
+# measured ladder is on ``boolean_inference_oracle`` residual (a). Imported lazily at use (FATAL-2: no
+# framework import at module scope).
 # doses in SECONDS for the SLEEP payloads + the injected milliseconds the timing oracle expects.
 _TIMING_LOW_S, _TIMING_HIGH_S = 0.3, 0.6
 _TIMING_SLEEP_TEMPLATES = (
@@ -103,6 +108,14 @@ _TIMING_SLEEP_TEMPLATES = (
     "x'||pg_sleep({s})--",                   # PostgreSQL
 )
 _STAT_MAX_PARAMS = 4     # blind/statistical arms are expensive — probe at most this many insertion points
+# The BOOLEAN arm is capped tighter than the other statistical arms. Each (param, clause-family) pair is an
+# INDEPENDENT attempt, and independent attempts MULTIPLY the per-attempt residual into a per-URL figure that
+# boolean_redrive's docstring has to state; 2 params x 3 families = 6 attempts puts that at ~0.073% at the
+# shipped K=7 (it was ~9.2% at K=4 over 4 params), and it is also what keeps the (now 28-send) rounds inside
+# a sane live traffic budget.
+_BOOLEAN_MAX_PARAMS = 2
+# Identical-request sends for the per-PARAM determinism screen, shared across the clause families.
+_BOOLEAN_BASELINE_SAMPLES = 8
 
 # Fixed framework/CMS paths + the distinctive signature each leaks, for the exposure class. Each signature is
 # specific enough that its presence is the proof (the predicate oracle over the response body); a 404 or a
@@ -562,27 +575,86 @@ def ssti_redrive(url: str, *, slug: str, engagement_slug: str, signers: "list[tu
     return res
 
 
+def _determinism_baseline(tmpl, point, send, value: str, n: int = _BOOLEAN_BASELINE_SAMPLES) -> tuple:
+    """``n`` responses to ONE BYTE-IDENTICAL request — the boolean oracle's determinism PRE-FILTER, collected
+    ONCE PER PARAM and shared by every clause family (determinism is a property of the endpoint, not of the
+    clause). Short-circuits on the first divergence: a non-deterministic endpoint is proven with two samples
+    and the oracle refuses over them, so there is no reason to spend the other six. Returns ``()`` if a send
+    fails, which makes the check collect its own (fail-safe, never a fabricated baseline)."""
+    from framework.v2.verify.oracles import differential_response_oracle  # noqa: PLC0415
+    from framework.v2.scanner.checks import BOOLEAN_DISCRIMINATOR  # noqa: PLC0415
+    out: list = []
+    try:
+        for _ in range(max(2, n)):
+            r = send(tmpl.render(point, value))
+            out.append(r if isinstance(r, dict) else {"body": str(r)})
+            if differential_response_oracle(out[0], out[-1], BOOLEAN_DISCRIMINATOR).fired:
+                break
+    except Exception:  # noqa: BLE001 — a send failure means "collect it the ordinary way", never a fake
+        return ()
+    return tuple(out)
+
+
 def boolean_redrive(url: str, *, slug: str, engagement_slug: str, signers: "list[tuple[str, str]]",
                     param: "str | None" = None, timeout: float = 8.0, n_max: int = 14) -> "RuntimeRedriveResult":
     """Re-drive ``url`` for BOOLEAN-BLIND injection and mint a signed FACT ONLY when the deterministic
-    ``boolean_inference_oracle`` reaches its SPRT confirm boundary over N runner-crafted true/false probe
-    PAIRS: within-pair the two FALSE responses must AGREE (a dynamic-page control) while the TRUE clause
-    differs. Reuses the reviewed ``BooleanInferenceCheck`` discipline over VIGIL's OWN gated send.
+    ``boolean_inference_oracle`` reaches its SPRT confirm boundary over N runner-crafted TRUTH-VALUE
+    ATTRIBUTION rounds. Reuses the reviewed ``BooleanInferenceCheck`` discipline over VIGIL's OWN gated send:
+    each round sends 7 DISTINCT always-TRUE clauses and 7 DISTINCT always-FALSE clauses (one
+    ``scanner.checks.boolean_clause_families`` entry — shape-varied, a stable public constant), each twice
+    byte-identically, and signals only when the response is a FUNCTION of the injected boolean's TRUTH
+    VALUE — one TRUE cluster, one FALSE cluster, disjoint.
 
-    FP boundary (all → LEAD): an endpoint whose response varies with ANY input (within-pair differential
-    present ⇒ signal 0 every round ⇒ SPRT refutes), and a single flip without SPRT significance (no boundary
-    reached ⇒ inconclusive). Never raises."""
-    from framework.v2.scanner.checks import BooleanInferenceCheck  # noqa: PLC0415
+    FP boundary (all → LEAD): an endpoint whose response varies INDEPENDENTLY of the input — coarse
+    (low-cardinality), SKEWED, or high-entropy — cannot make 14 true-side and 14 false-side draws split
+    cleanly by truth value (``<= 7.5e-9`` per round, vs the SPRT's ``p0 = 0.1``), so it refutes; a single flip
+    without SPRT significance ⇒ inconclusive. A legitimately noisy-but-vulnerable page is a LEAD (a recall
+    cost, the safe direction). Never raises.
+
+    PER-URL EXPOSURE, STATED (independent attempts MULTIPLY a per-attempt residual, so the count is bounded
+    and the product is named rather than left implicit). The dominant residual is the oracle's case (b): an
+    endpoint that is a DETERMINISTIC but arbitrary function of the URL (a per-URL CDN cache over an origin
+    that picked a variant at fill time), where repetition is not new evidence. Measured over the real mint
+    path on a uniform 2-variant cached page: ``1.20e-4`` per attempt at the shipped ``K = 7`` (200k trials;
+    analytic ``2 * 2**-(K_T+K_F)`` = ``1.22e-4``). This arm makes at most ``_BOOLEAN_MAX_PARAMS`` (2) params
+    x 3 families = 6 independent attempts per URL, so the per-URL figure is ``1 - (1 - 1.20e-4)**6`` =
+    ``~7.3e-4`` (0.073%); a TARGETED re-drive of a KNOWN param is 3 attempts => ``~3.7e-4``.
+
+    That figure is the honest cost of this class, not a claim of safety: it applies ONLY to an endpoint that
+    is input-independent AND frozen per URL. It replaces what an earlier revision shipped — K=4 over 4
+    params = 12 attempts x a measured 7.98e-3 = ``~9.2%`` per URL, undisclosed. K was raised 4 -> 7 and the
+    attempts halved 12 -> 6; going further trades against recall (every extra clause is another chance a real
+    vulnerable target answers one of them differently and the round refutes). The OTHER residual — an
+    interposer that partitions the probes by a request property with no boolean channel behind it — is
+    residual (a) on the oracle and it is OPEN: the clause families make every INCOMPLETE filter refute, but a
+    filter COMPLETE over the shape set partitions them (measured 600/600 on a static page), and no clause set
+    can fix that, because a clause whose truth we know a priori is a constant expression a filter can fold
+    too. This arm is not sound against a filter purpose-built for this clause set.
+
+    TRAFFIC BUDGET (constitution VI — this runs against live authorized production). Per param: ONE shared
+    determinism baseline of 8 identical sends (determinism is a property of the ENDPOINT, not of the clause,
+    so it is collected once and reused by all three families) + 28 sends per SPRT round. A deterministic
+    endpoint decides in 2 rounds, so the MEASURED ordinary cost is ``8 + 3 x 56 = 176`` gated requests per
+    param and ``352`` per URL at 2 params; the bound is ``8 + 3 x (n_max x 28)`` = 1184/param (2368/URL) in
+    the pathological oscillating case that two same-direction rounds normally prevent. A NON-deterministic
+    endpoint costs 2 sends total — the shared baseline proves it in two and all three families short-circuit."""
+    from framework.v2.scanner.checks import (  # noqa: PLC0415
+        BooleanInferenceCheck, boolean_clause_families)
     from framework.v2.scanner.insertion import HttpRequest, InsertionKind, RequestTemplate  # noqa: PLC0415
     from framework.v2.verify.oracles import boolean_inference_oracle  # noqa: PLC0415
 
     bug_class = "boolean_sqli"
+    # A STABLE PUBLIC CONSTANT — the same clauses every run, so the operator can correlate them in
+    # their logs and the run is replayable (see the header, and constitution VI.4).
+    families = boolean_clause_families()
     res, send, state = _stat_setup(url, slug, bug_class, _BOOLEAN_BRANCH, timeout)
     if send is None:
         return res
     # A targeted re-drive of a KNOWN param probes ONLY that param (mirrors the errsig arm — bounded work on
-    # the expensive SPRT arm); a captureless finding with no declared param falls back to the candidate set.
-    max_params = 1 if param else _STAT_MAX_PARAMS
+    # the expensive SPRT arm); a captureless finding with no declared param falls back to the candidate set,
+    # capped at _BOOLEAN_MAX_PARAMS so the number of INDEPENDENT attempts per URL (and hence the multiplied
+    # per-URL residual stated in the docstring) stays bounded.
+    max_params = 1 if param else _BOOLEAN_MAX_PARAMS
     try:
         for name in _candidate_names_hint(url, _BOOLEAN_PARAMS, param, max_params):
             probe_url = _url_with_param(url, name)
@@ -591,10 +663,14 @@ def boolean_redrive(url: str, *, slug: str, engagement_slug: str, signers: "list
                           if p.name.lower() == name.lower()), None)
             if point is None:
                 continue
+            # ONE determinism baseline per PARAM, shared by all three clause families: determinism is a
+            # property of the endpoint, not of the clause, so re-sending it per family was 2/3 waste.
+            shared_baseline = _determinism_baseline(tmpl, point, send, families[0][1][0])
             fired_here = False
-            for true_clause, false_clause in _BOOLEAN_CLAUSE_PAIRS:
+            for true_clauses, false_clauses in families:
                 chk = BooleanInferenceCheck(id="boolean-redrive", bug_class="boolean_sqli",
-                                            true_clause=true_clause, false_clause=false_clause, n_max=n_max)
+                                            true_clauses=true_clauses, false_clauses=false_clauses,
+                                            n_max=n_max, shared_baseline=shared_baseline)
                 before, before_bodies = state["channels"], state["body_unavailable"]
                 try:
                     fc = chk.probe(tmpl, point, send)
@@ -605,8 +681,12 @@ def boolean_redrive(url: str, *, slug: str, engagement_slug: str, signers: "list
                     res.inconclusive.append((bug_class, f"{probe_url}#{point.id}"))
                     continue
                 context = fc.to_verifier_context()
+                # The oracle recomputes the TRUTH-VALUE ATTRIBUTION decision over the retained rounds; the
+                # determinism baseline the check collected (identical false-clause sends) rides along as the
+                # cheap pre-filter a confirm additionally requires (fail-closed).
                 signal = boolean_inference_oracle(context.get("probe_rounds"),
-                                                  discriminator=context.get("discriminator"))
+                                                  discriminator=context.get("discriminator"),
+                                                  false_baseline_samples=context.get("false_baseline_samples"))
                 r = _admit_one(res, branch=_BOOLEAN_BRANCH, bug_class=bug_class,
                                engagement_slug=engagement_slug, signers=signers, context=context,
                                item=f"{probe_url}#{point.id}", surface=f"query:{name}",

@@ -62,13 +62,13 @@ _CHALLENGE_DOMAIN = b"vigil-remediation-freshness-challenge-v1\x00"
 _BOOLEAN_INFERENCE = "boolean_inference"
 
 # The ATTRIBUTION discriminator for the REMEDIATED channel-closure check (red-pen BLOCK-B) — ZERO tolerance:
-# ANY deterministic difference between ``true`` and ``false_a`` counts as the channel still OPEN. It is
+# ANY deterministic difference between a TRUE clause and a FALSE clause counts as the channel still OPEN. It is
 # DELIBERATELY distinct from the SPRT's fuzzy ``bool_disc``: the fuzzy thresholds (lexical 0.10 / length 0.05)
 # have a SAFE failure mode in the CONFIRM direction (a sub-threshold channel is a false-negative under-claim),
 # but reusing them to assert CLOSURE flips that into a false ALL-CLEAR — a 1-byte deterministic leak in a large
 # page (~99.85% similar) reads as "closed" while an attacker reads the DB bit-by-bit. To attribute a fix we
-# require true and false_a INDISTINGUISHABLE at zero tolerance. A PROTOCOL constant (never cert-supplied), so a
-# minted and a re-verified cert are judged by the identical rule (mint gate + ``_verify_differential_remediated``).
+# require EVERY true/false clause pair INDISTINGUISHABLE at zero tolerance. A PROTOCOL constant (never
+# cert-supplied), so a minted and a re-verified cert are judged by the identical rule (mint gate + ``_verify_differential_remediated``).
 _ATTRIBUTION_DISC = {"dimensions": ["status", "length", "lexical"],
                      "length_threshold": 0.0, "lexical_threshold": 0.0}
 # The SPRT boolean discriminator and the WAF-closure discriminator are ALSO protocol constants — NEVER
@@ -79,6 +79,31 @@ _ATTRIBUTION_DISC = {"dimensions": ["status", "length", "lexical"],
 # re-execution-independence posture the attribution gate adopts.
 _BOOL_DISC = {"dimensions": ["status", "length", "lexical"]}
 _CLOSURE_DISC = {"dimensions": ["status", "structural"], "expect": "same"}
+# The TRUTH-VALUE ATTRIBUTION round arms the boolean channel now carries (see the oracle's docstring): K_T
+# distinct always-TRUE clauses, K_F distinct always-FALSE clauses, and a byte-identical repeat of each.
+_ROUND_ARMS = ("trues", "falses", "true_repeats", "false_repeats")
+# The boolean oracle's CONFIRM floor: fewer distinct clauses per truth value can refute but never mint, so a
+# round below it is not judgeable here either (it could only ever produce a refute, which on the REMEDIATED
+# branch is the dangerous direction). Mirrors differential_adapter._MIN_CLAUSES_PER_TRUTH_VALUE.
+_MIN_CLAUSES_PER_TRUTH_VALUE = 4
+
+
+def _arm(round_ctx: "dict | None", key: str) -> list:
+    """One truth-side arm of a boolean round as a list (``[]`` when absent/malformed). Pure stdlib —
+    FATAL-2 safe."""
+    if not isinstance(round_ctx, dict):
+        return []
+    v = round_ctx.get(key)
+    return [x for x in v if isinstance(x, dict)] if isinstance(v, (list, tuple)) else []
+
+
+def _identical_request_samples(round_ctx: "dict | None") -> list:
+    """The observations in one round that answer the SAME BYTE-IDENTICAL request — ``falses[0]`` and its
+    repeat — i.e. the only samples that may legitimately feed the oracle's identical-request determinism
+    pre-filter. The other clauses are DIFFERENT requests; pooling them would turn the "baseline" into a
+    cross-request comparison. The pre-filter is a cheap screen: soundness comes from the per-round
+    truth-value attribution the oracle recomputes."""
+    return [arm[0] for arm in (_arm(round_ctx, "falses"), _arm(round_ctx, "false_repeats")) if arm]
 
 
 class State:
@@ -122,7 +147,7 @@ class Reason:
     # sound REMEDIATED because the metachar decoy was blocked/diverted (a blocking payload-discriminating WAF/
     # edge is interposing, DIFFERENTIAL-REMEDIATION §4.3), or the SPRT reached no boundary at all (§4.4 / HIGH-3:
     # absence of evidence is not evidence of a fix — REMEDIATED requires a DECISIVE refute, never a non-decision),
-    # or the refute was UNATTRIBUTABLE — driven by the dynamic-page control tripping (false_a != false_b noise:
+    # or the refute was UNATTRIBUTABLE — driven by within-truth disagreement (per-request noise:
     # __VIEWSTATE / rotating banner / big reflected token) rather than genuine channel closure, so a still-firing
     # injection can hide behind the noise (red-pen: a false REMEDIATED over a live-vulnerable noisy origin).
     INTERPOSER_SUSPECTED = "interposer_suspected_waf_closure_failed"
@@ -226,6 +251,12 @@ def repeat_policy_for(bug_class: str) -> RepeatPolicy:
                             requires_significance=requires_sig,
                             note="non-deterministic / sampled / stochastic / race / unaudited oracle — silence is "
                                  "not a sound negative (fail-closed)")
+    # NOTE for the BOOLEAN DIFFERENTIAL channel: min_valid_trials=3 yields exactly 3 x 2 = 6
+    # identical-request samples for boolean_inference_oracle's determinism pre-filter (falses[0] plus its
+    # byte-identical repeat, per round), which is EXACTLY its min_baseline_samples=6 — zero headroom. Drop
+    # this to 2 and the pre-filter silently stops passing, so a genuinely firing origin can no longer reach
+    # STILL_VULNERABLE (the confirm is downgraded to a LEAD). Raise min_baseline_samples, or feed a real
+    # up-front baseline, before lowering this.
     return RepeatPolicy(canonical, min_valid_trials=3, certifiable_by_silence=True,
                         unique_token_per_trial=("oob_callback" in kinds),
                         note="every oracle is deterministic per-observation over a reliable channel — silence sound")
@@ -311,12 +342,13 @@ def _challenge_in_firing_differential(challenge: str, rounds: "list[dict]") -> b
     challenge marker reflected in the SIGNAL-BEARING (``true``) response of EVERY judged firing round — i.e. did
     the fresh nonce come back through the SAME response channel the boolean signal was measured on THIS run?
 
-    A firing whose true-clause responses all carry the fresh marker was exercised this run (not a replay of stale
-    evidence). To bind the marker to the DISCRIMINATING signal (parity with the error-signature F2, which requires
-    the nonce in the *matched signature line*), it must be reflected in ``true`` and NOT in ``false_a`` on EVERY
-    judged round — i.e. the marker lives in exactly the bytes that make ``true`` differ from ``false_a`` (the
-    boolean signal), not in a static header echoed into every probe (an app that echoes the raw query into all
-    responses does not earn F2 — that reflection is not attributable to the sink's boolean behaviour). Deliberately
+    A firing whose TRUE-cluster responses all carry the fresh marker was exercised this run (not a replay of
+    stale evidence). To bind the marker to the DISCRIMINATING signal (parity with the error-signature F2, which requires
+    the nonce in the *matched signature line*), it must be reflected in EVERY ``trues[i]`` and in NO ``falses[j]``
+    on EVERY judged round — i.e. the marker lives in exactly the bytes that separate the TRUE cluster from the
+    FALSE cluster (the boolean signal), not in a static header echoed into every probe (an app that echoes the raw
+    query into all responses does not earn F2 — that reflection is not attributable to the sink's boolean
+    behaviour). Deliberately
     CONSERVATIVE: a single non-qualifying round caps the run to F1 (a blind boolean channel that never reflects the
     payload stays F1 — the honest floor). Like the error-signature F2 it is NOT byte-unforgeable — a target that
     fabricates a ``true`` response embedding the nonce is indistinguishable on the response channel (the deferred
@@ -327,17 +359,18 @@ def _challenge_in_firing_differential(challenge: str, rounds: "list[dict]") -> b
     if not needle or not rounds:
         return False
     for r in rounds:
-        if not isinstance(r, dict):
+        trues, falses = _arm(r, "trues"), _arm(r, "falses")
+        if not trues or not falses:
             return False
-        true_resp, false_a_resp = r.get("true"), r.get("false_a")
-        true_body = true_resp.get("body") if isinstance(true_resp, dict) else None
-        false_a_body = false_a_resp.get("body") if isinstance(false_a_resp, dict) else ""
-        if not isinstance(true_body, str) or needle not in true_body:
-            return False
-        # the marker must be in the DISCRIMINATING bytes: present in true, absent from false_a (else it is a
-        # static echo not attributable to the firing) — the boolean analog of "in the matched signature line".
-        if isinstance(false_a_body, str) and needle in false_a_body:
-            return False
+        for t in trues:
+            if not isinstance(t.get("body"), str) or needle not in t["body"]:
+                return False
+        # the marker must be in the DISCRIMINATING bytes: present in every TRUE, absent from every FALSE (else
+        # it is a static echo not attributable to the firing) — the boolean analog of "in the matched
+        # signature line".
+        for f in falses:
+            if isinstance(f.get("body"), str) and needle in f["body"]:
+                return False
     return True
 
 
@@ -727,8 +760,8 @@ def _prove_differential(*, adapter: LiveTargetAdapter, identity: IdentityAttesta
                         finding_id: str, challenge: str, auth: EffectiveAuthorization, budget: "AtomicBudget",
                         rp: RepeatPolicy, eff_min_freshness: int, tid_digest: str, identity_samples: list,
                         control: ControlObservation, mk, inconclusive) -> ProveOutcome:
-    """Adjudicate the boolean-blind DIFFERENTIAL channel over FRESH matched-decoy rounds. Reuses the caller's
-    already-run preamble via the injected ``auth`` / ``budget`` / ``control`` / ``mk`` / ``inconclusive`` — it
+    """Adjudicate the boolean-blind DIFFERENTIAL channel over FRESH matched-decoy TRUTH-VALUE ATTRIBUTION
+    rounds. Reuses the caller's already-run preamble via the injected ``auth`` / ``budget`` / ``control`` / ``mk`` / ``inconclusive`` — it
     re-verifies NOTHING the preamble already proved. Oracle authority is preserved: the SPRT decision is the
     EXISTING ``boolean_inference_oracle``'s, the WAF-closure is the EXISTING ``differential_response_oracle``'s;
     this function only sequences the probes and owns the fail-closed obligation.
@@ -791,9 +824,19 @@ def _prove_differential(*, adapter: LiveTargetAdapter, identity: IdentityAttesta
                           trial.invalid_reason or "undelivered/malformed differential round",
                           attempted=attempted)
         ctx = trial.oracle_context
-        if not all(k in ctx for k in ("true", "false_a", "false_b", "baseline")):
+        # TRUTH-VALUE ATTRIBUTION shape (fail-closed): the round must carry >= 2 DISTINCT always-TRUE and
+        # >= 2 DISTINCT always-FALSE clause observations plus an index-aligned byte-identical repeat of each,
+        # and the benign baseline for the WAF-closure test. A round the oracle could not attribute is never
+        # silently judged — it fails the run closed.
+        if "baseline" not in ctx \
+                or any(len(_arm(ctx, a)) < _MIN_CLAUSES_PER_TRUTH_VALUE for a in _ROUND_ARMS) \
+                or len(_arm(ctx, "trues")) != len(_arm(ctx, "true_repeats")) \
+                or len(_arm(ctx, "falses")) != len(_arm(ctx, "false_repeats")):
             return dincon(Reason.ORACLE_CONTEXT_UNREBUILDABLE,
-                          "differential round missing baseline/true/false_a/false_b", attempted=attempted)
+                          f"differential round missing baseline or the truth-value arms "
+                          f"(>= {_MIN_CLAUSES_PER_TRUTH_VALUE} distinct TRUE clauses, "
+                          f">= {_MIN_CLAUSES_PER_TRUTH_VALUE} distinct FALSE clauses, each with a "
+                          "byte-identical repeat)", attempted=attempted)
         # Live-marker reflection control (§4 / LOW-1): the inert challenge marker MUST come back (a
         # query-stripping cache / non-echoing edge serving one body for all probes fails this) — cannot prove
         # the round is fresh this run otherwise.
@@ -808,9 +851,26 @@ def _prove_differential(*, adapter: LiveTargetAdapter, identity: IdentityAttesta
         return dincon(Reason.IDENTITY_CHANGED, "identity changed during the differential trials",
                       attempted=attempted)
 
+    # ---- DETERMINISM PRE-FILTER: the identical-request observations already collected (each round's
+    #      falses[0] and its byte-identical repeat) feed the oracle's cheap determinism screen. It is
+    #      DELIBERATELY no longer what makes the verdict sound — the red-pen showed a derived baseline of
+    #      2*n_rounds samples is itself a coincidence on a coarse/skewed origin. Soundness comes from the
+    #      per-round TRUTH-VALUE ATTRIBUTION the oracle recomputes over the SAME multi-clause rounds a fresh
+    #      mint uses: remediation is now held to the identical 2-cluster bar, not a weaker derived gate. ----
+    false_baseline = [x for r in rounds for x in _identical_request_samples(r)]
     # ---- ORACLE AUTHORITY: the SPRT decision is the EXISTING boolean_inference_oracle's, never ours. ----
-    sig = boolean_inference_oracle(rounds, discriminator=bool_disc)
+    sig = boolean_inference_oracle(rounds, discriminator=bool_disc, false_baseline_samples=false_baseline)
     decision = str((sig.observed or {}).get("decision") or "inconclusive")
+    # DETERMINISM GATE (R1 W6): if the oracle proved the origin is NOT deterministic to identical input
+    # (per-request __VIEWSTATE / rotating token — the baseline or an identical repeat diverged), boolean
+    # inference cannot attribute a channel at all → INCONCLUSIVE / CHANNEL_NOISE_UNATTRIBUTABLE. This is the
+    # SAME safe verdict the attribution gate reached for a noisy origin, now caught earlier and directly —
+    # never a false STILL_VULNERABLE and never a false REMEDIATED over a non-deterministic origin.
+    if (sig.observed or {}).get("nondeterministic"):
+        return dincon(Reason.CHANNEL_NOISE_UNATTRIBUTABLE,
+                      "the origin is NOT deterministic to identical input (per-request noise: __VIEWSTATE / "
+                      "rotating token / coarse dynamic body) — boolean inference cannot attribute a channel; "
+                      "NOT a sound verdict (neither REMEDIATED nor STILL_VULNERABLE)", attempted=attempted)
     # FIRING FRESHNESS (R1-PR2, §5): a differential FIRING (SPRT confirm) earns F2 when the fresh challenge marker
     # is reflected in the SIGNAL-BEARING (true) responses of the judged rounds — the sink's boolean behaviour was
     # exercised THIS run, "as attributable as the boolean_inference oracle's own firing" (not byte-unforgeable).
@@ -822,7 +882,8 @@ def _prove_differential(*, adapter: LiveTargetAdapter, identity: IdentityAttesta
     trial_results = {"attempted": attempted, "valid": len(rounds), "sprt_decision": decision,
                      "signal_rounds": (sig.observed or {}).get("signal_rounds"),
                      "rounds_used": (sig.observed or {}).get("rounds_used")}
-    fresh_ctx = {"bug_class": adapter.bug_class, "probe_rounds": rounds, "discriminator": bool_disc}
+    fresh_ctx = {"bug_class": adapter.bug_class, "probe_rounds": rounds, "discriminator": bool_disc,
+                 "false_baseline_samples": false_baseline}
 
     # ---- FRESHNESS FLOOR (parity with the error-signature path :601-608 + spec §5; red-pen: the differential
     #      branch silently dropped this). A caller that REQUESTS a level ABOVE the policy floor is ENFORCED, not
@@ -857,37 +918,39 @@ def _prove_differential(*, adapter: LiveTargetAdapter, identity: IdentityAttesta
     # decisive refute from here — but a refute is NOT automatically a channel CLOSURE.
     # (3a) ATTRIBUTION (red-pen BLOCK — a reproduced false REMEDIATED over a live-vulnerable NOISY origin, e.g.
     #      an ASP.NET __VIEWSTATE app like the authorized testasp target): boolean_inference's per-round signal is
-    #      (across AND within_same), across = (true != false_a) the boolean channel, within_same = (false_a ≈
-    #      false_b) the dynamic-page control. A refute (signal→p0) arises EITHER from across=False (GENUINE
-    #      closure — the predicate no longer changes the response = fixed) OR from within_same=False (the two
-    #      FALSE responses disagree because of structurally-invisible per-request noise: __VIEWSTATE / rotating
-    #      banner / big reflected token). The second is "too noisy to attribute," NOT a fix — over a still-
-    #      vulnerable noisy origin across=True (the injection still fires) yet the SPRT refutes, and the {status,
-    #      structural} WAF-closure below is deliberately blind to that lexical noise, so it cannot catch it. A
-    #      SOUND REMEDIATED therefore REQUIRES the refute be attributable to CLOSURE: true must be indistinguishable
-    #      from false_a (across=False) on EVERY judged round. If any round still SEPARATES true from false_a, the
-    #      boolean channel is still firing → INCONCLUSIVE, never REMEDIATED. Recomputed here (oracle authority) on
-    #      the SAME lexical-sensitive discriminator the SPRT used.
+    #      TRUTH-VALUE ATTRIBUTION — every TRUE-side response agrees, every FALSE-side response agrees, and the
+    #      two clusters are disjoint. A refute (signal→p0) therefore arises EITHER from the clusters NOT being
+    #      disjoint (GENUINE closure — the predicate no longer changes the response = fixed) OR from within-cluster
+    #      disagreement (structurally-invisible per-request noise: __VIEWSTATE / rotating banner / big reflected
+    #      token made two same-truth-value responses differ). The latter is "too noisy to attribute," NOT a fix —
+    #      over a still-vulnerable noisy origin a true clause still SEPARATES from a false clause (the injection
+    #      still fires) yet the SPRT refutes, and the {status, structural} WAF-closure below is deliberately blind
+    #      to that lexical noise, so it cannot catch it. A SOUND REMEDIATED therefore REQUIRES the refute be
+    #      attributable to CLOSURE: EVERY true clause must be indistinguishable from EVERY false clause on EVERY
+    #      judged round. If any pair still SEPARATES, the boolean channel is still firing → INCONCLUSIVE, never
+    #      REMEDIATED. Recomputed here (oracle authority) at ZERO tolerance (_ATTRIBUTION_DISC).
     if not rounds:   # defense-in-depth: never mint REMEDIATED off zero evidence (all(...) is vacuously True on [])
         return dincon(Reason.INSUFFICIENT_ROUNDS, "no judged rounds — cannot attribute a channel closure",
                       attempted=attempted)
     channel_closed = not any(
-        differential_response_oracle(r.get("false_a"), r.get("true"), _ATTRIBUTION_DISC).fired for r in rounds
+        differential_response_oracle(f, t, _ATTRIBUTION_DISC).fired
+        for r in rounds for f in _arm(r, "falses") for t in _arm(r, "trues")
     )
     if not channel_closed:
         return dincon(Reason.CHANNEL_NOISE_UNATTRIBUTABLE,
                       "SPRT refuted but true still SEPARATES from false at zero tolerance on a judged round "
-                      "(across=True) — either dynamic-page noise (false_a != false_b: __VIEWSTATE / rotating "
+                      "(a true clause separates from a false clause) — either dynamic-page noise (__VIEWSTATE / rotating "
                       "token) OR a SUB-THRESHOLD leak the fuzzy SPRT missed (a 1-byte deterministic bit an "
                       "attacker reads directly); NOT genuine channel closure, so NOT a sound REMEDIATED",
                       attempted=attempted)
 
     # (3b) WAF-CLOSURE test on the JUDGED rounds (oracle authority — RECOMPUTED by differential_response_oracle,
-    #     never trusted from the adapter): every metachar decoy (false_a) must come back baseline-shaped. A
-    #     blocking/diverting WAF blocks false_a → it differs from baseline → closure FAILS → NOT REMEDIATED.
+    #     never trusted from the adapter): every metachar decoy (each falses[j]) must come back baseline-shaped.
+    #     A blocking/diverting WAF blocks it → it differs from baseline → closure FAILS → NOT REMEDIATED.
     closure_holds = all(
-        differential_response_oracle(r.get("baseline"), r.get("false_a"), closure_disc).fired for r in rounds
-    )
+        differential_response_oracle(r.get("baseline"), f, closure_disc).fired
+        for r in rounds for f in _arm(r, "falses")
+    ) and all(_arm(r, "falses") for r in rounds)
     if not closure_holds:
         return dincon(Reason.INTERPOSER_SUSPECTED,
                       "SPRT decisively refuted but a metachar decoy was blocked/diverted (WAF-closure failed) "
@@ -920,14 +983,17 @@ def _prove_differential(*, adapter: LiveTargetAdapter, identity: IdentityAttesta
         if origin_rounds is None:
             origin_redrive, origin_rounds = "unavailable", []     # cannot soundly re-drive → edge-only
         else:
-            osig = boolean_inference_oracle(origin_rounds, discriminator=bool_disc)
+            origin_baseline = [x for r in origin_rounds for x in _identical_request_samples(r)]
+            osig = boolean_inference_oracle(origin_rounds, discriminator=bool_disc,
+                                            false_baseline_samples=origin_baseline)
             odecision = str((osig.observed or {}).get("decision") or "inconclusive")
             origin_open = any(
-                differential_response_oracle(r.get("false_a"), r.get("true"), _ATTRIBUTION_DISC).fired
-                for r in origin_rounds)
+                differential_response_oracle(f, t, _ATTRIBUTION_DISC).fired
+                for r in origin_rounds for f in _arm(r, "falses") for t in _arm(r, "trues"))
             origin_closed = all(
-                differential_response_oracle(r.get("baseline"), r.get("false_a"), closure_disc).fired
-                for r in origin_rounds)
+                differential_response_oracle(r.get("baseline"), f, closure_disc).fired
+                for r in origin_rounds for f in _arm(r, "falses")
+            ) and all(_arm(r, "falses") for r in origin_rounds)
             if (osig.fired and odecision == "confirm") or origin_open:
                 # the injection FIRES when re-driven DIRECTLY at the origin → the edge sanitized / virtual-
                 # patched it → NOT a code fix. Demote (mirrors the safe over-approximation direction, §4.1).
@@ -1018,16 +1084,20 @@ def _fires(context: dict, bug_class: str, ref: str) -> bool:
 
 
 def _rounds_truncated(rounds: "list[dict]") -> bool:
-    """True if ANY probe body in ANY round was captured at the truncation cap (the executor's ``truncated`` flag
-    on any of ``true``/``false_a``/``false_b``/``baseline``). Closure-attribution over a truncated body is
-    unsound — a boolean leak in the untruncated tail is invisible (red-pen R2 BLOCK)."""
+    """True if ANY probe body in ANY round was captured at the truncation cap (the executor's ``truncated``
+    flag on the ``baseline`` or on ANY clause of the truth-value arms, legacy single-clause keys included).
+    Closure-attribution over a truncated body is unsound — a boolean leak in the untruncated tail is
+    invisible (red-pen R2 BLOCK)."""
     for r in rounds or []:
         if not isinstance(r, dict):
             continue
-        for k in ("true", "false_a", "false_b", "baseline"):
+        probes = [p for arm in _ROUND_ARMS for p in _arm(r, arm)]
+        for k in ("baseline", "true", "false_a", "false_b", "false_a_repeat"):
             probe = r.get(k)
-            if isinstance(probe, dict) and probe.get("truncated"):
-                return True
+            if isinstance(probe, dict):
+                probes.append(probe)
+        if any(p.get("truncated") for p in probes):
+            return True
     return False
 
 
@@ -1054,7 +1124,10 @@ def _collect_origin_rounds(adapter, *, challenge: str, auth: EffectiveAuthorizat
         if not getattr(t, "valid", False) or not isinstance(getattr(t, "oracle_context", None), dict):
             return None
         ctx = t.oracle_context
-        if not all(k in ctx for k in ("true", "false_a", "false_b", "baseline")):
+        if "baseline" not in ctx \
+                or any(len(_arm(ctx, a)) < _MIN_CLAUSES_PER_TRUTH_VALUE for a in _ROUND_ARMS) \
+                or len(_arm(ctx, "trues")) != len(_arm(ctx, "true_repeats")) \
+                or len(_arm(ctx, "falses")) != len(_arm(ctx, "false_repeats")):
             return None
         if not getattr(t, "nonce_echoed", False):
             return None
@@ -1222,7 +1295,7 @@ def _verify_differential_remediated(cert: dict) -> tuple[bool, str]:
     already verified by the generic path; here the retained round evidence must itself RE-EXECUTE to the
     decisive verdict — the EXISTING ``boolean_inference_oracle`` must re-refute (``decision == "refute"`` AND
     ``conclusive``) over the judged rounds, AND the EXISTING ``differential_response_oracle`` WAF-closure must
-    re-hold (each ``baseline`` vs ``false_a`` indistinguishable on ``status``+``structural``). Fail-closed, and
+    re-hold (each ``baseline`` vs each ``falses[j]`` indistinguishable on ``status``+``structural``). Fail-closed, and
     honest — it re-checks ONLY what REMEDIATED claims (``origin_reached``), never a stronger clean-code-fix
     property. FATAL-2: the oracle import is function-local."""
     ev = ((cert.get("evidence") or {}).get("differential"))
@@ -1249,19 +1322,31 @@ def _verify_differential_remediated(cert: dict) -> tuple[bool, str]:
     if not (decision == "refute" and sig.conclusive):
         return False, "retained rounds do not re-execute to a DECISIVE SPRT refute"
     for r in rounds:
-        if not (isinstance(r, dict) and "baseline" in r and "false_a" in r and "true" in r):
-            return False, "a judged round is missing baseline/false_a/true for the differential re-check"
+        trues, falses = _arm(r, "trues"), _arm(r, "falses")
+        if not (isinstance(r, dict) and "baseline" in r
+                and len(trues) >= _MIN_CLAUSES_PER_TRUTH_VALUE
+                and len(falses) >= _MIN_CLAUSES_PER_TRUTH_VALUE
+                and len(_arm(r, "true_repeats")) == len(trues)
+                and len(_arm(r, "false_repeats")) == len(falses)):
+            return False, (f"a judged round is missing baseline or the truth-value arms "
+                           f"(>= {_MIN_CLAUSES_PER_TRUTH_VALUE} distinct TRUE and "
+                           f">= {_MIN_CLAUSES_PER_TRUTH_VALUE} distinct FALSE clause observations, each "
+                           "with a byte-identical repeat)")
         # ATTRIBUTION re-check (red-pen BLOCK-A — parity with the mint gate): the refute must be genuine channel
-        # CLOSURE, recomputed INDEPENDENT of the minter at ZERO tolerance (_ATTRIBUTION_DISC). If true still
-        # SEPARATES from false_a on any round the channel is still OPEN (a still-vulnerable noisy / sub-threshold
-        # origin) → DEMOTE. This is what lets the firewall demote a PRE-FIX false-REMEDIATED cert (across=True)
-        # that was validly signed before the mint gate existed — invariant 3 (re-execution can only demote).
-        if differential_response_oracle(r.get("false_a"), r.get("true"), _ATTRIBUTION_DISC).fired:
-            return False, ("attribution re-check FAILED: true still separates from false_a at zero tolerance on "
-                           "a judged round (the boolean channel is still OPEN — dynamic-page noise or a "
-                           "sub-threshold leak) — NOT a genuine channel closure, so NOT a sound REMEDIATED")
-        if not differential_response_oracle(r.get("baseline"), r.get("false_a"), closure_disc).fired:
-            return False, "WAF-closure re-check failed (a metachar decoy diverged from baseline)"
+        # CLOSURE, recomputed INDEPENDENT of the minter at ZERO tolerance (_ATTRIBUTION_DISC). If ANY true still
+        # SEPARATES from ANY false on any round the channel is still OPEN (a still-vulnerable noisy /
+        # sub-threshold origin) → DEMOTE. This is what lets the firewall demote a PRE-FIX false-REMEDIATED cert
+        # (across=True) that was validly signed before the mint gate existed — invariant 3 (re-execution can
+        # only demote).
+        for f in falses:
+            for t in trues:
+                if differential_response_oracle(f, t, _ATTRIBUTION_DISC).fired:
+                    return False, ("attribution re-check FAILED: a true clause still separates from a false "
+                                   "clause at zero tolerance on a judged round (the boolean channel is still "
+                                   "OPEN — dynamic-page noise or a sub-threshold leak) — NOT a genuine channel "
+                                   "closure, so NOT a sound REMEDIATED")
+            if not differential_response_oracle(r.get("baseline"), f, closure_disc).fired:
+                return False, "WAF-closure re-check failed (a metachar decoy diverged from baseline)"
     # TRUNCATION re-check (red-pen R2 BLOCK, mirrors the mint gate): closure cannot be attributed over a body
     # captured at the truncation cap — demote a REMEDIATED cert whose judged rounds are truncated.
     if _rounds_truncated(rounds):
@@ -1281,13 +1366,21 @@ def _verify_differential_remediated(cert: dict) -> tuple[bool, str]:
         if not (str((osig.observed or {}).get("decision") or "") == "refute" and osig.conclusive):
             return False, "origin_confirmed but the origin rounds do not re-execute to a decisive SPRT refute"
         for r in origin_rounds:
-            if not (isinstance(r, dict) and "baseline" in r and "false_a" in r and "true" in r):
-                return False, "an origin round is missing baseline/false_a/true for the origin re-check"
-            if differential_response_oracle(r.get("false_a"), r.get("true"), _ATTRIBUTION_DISC).fired:
-                return False, ("origin_confirmed but the ORIGIN channel is still OPEN (true separates from "
-                               "false_a at zero tolerance, direct-to-origin) — the origin is still vulnerable")
-            if not differential_response_oracle(r.get("baseline"), r.get("false_a"), closure_disc).fired:
-                return False, "origin_confirmed but the origin WAF-closure re-check failed"
+            trues, falses = _arm(r, "trues"), _arm(r, "falses")
+            if not (isinstance(r, dict) and "baseline" in r
+                    and len(trues) >= _MIN_CLAUSES_PER_TRUTH_VALUE
+                    and len(falses) >= _MIN_CLAUSES_PER_TRUTH_VALUE
+                    and len(_arm(r, "true_repeats")) == len(trues)
+                    and len(_arm(r, "false_repeats")) == len(falses)):
+                return False, "an origin round is missing baseline or the truth-value arms for the origin re-check"
+            for f in falses:
+                for t in trues:
+                    if differential_response_oracle(f, t, _ATTRIBUTION_DISC).fired:
+                        return False, ("origin_confirmed but the ORIGIN channel is still OPEN (a true clause "
+                                       "separates from a false clause at zero tolerance, direct-to-origin) — "
+                                       "the origin is still vulnerable")
+                if not differential_response_oracle(r.get("baseline"), f, closure_disc).fired:
+                    return False, "origin_confirmed but the origin WAF-closure re-check failed"
         if _rounds_truncated(origin_rounds):
             return False, ("origin_confirmed but an origin response body was truncated at the capture cap — the "
                            "origin closure cannot be attributed over a bounded observation window")

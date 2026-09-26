@@ -31,15 +31,25 @@ SIGNERS = [("root0", SIGNER.private_key_b64)]
 TRUST = TrustRoot(threshold=1, authorizers=[
     AuthorizerKey(key_id="root0", name="root0", public_key_b64=SIGNER.public_key_b64)])
 
-# A genuinely firing boolean-blind SQLi context: the true clause returns the whole table, the
-# false clause is a stable "no results", with a per-round dynamic-page control (false_a==false_b).
+# A genuinely firing boolean-blind SQLi context: the response is a FUNCTION of the injected truth
+# value — every one of K distinct always-TRUE clauses returns the whole table, every one of K distinct
+# always-FALSE clauses returns a stable "no results", and each clause's byte-identical repeat agrees.
 _MANY = {"status": 200, "body": "id=1\nid=2\nid=3\nid=4\nid=5 (all rows)"}
 _NONE = {"status": 200, "body": "no results"}
 
 
+def _tv_round(true=_MANY, false=_NONE, k=6):
+    """A TRUTH-VALUE ATTRIBUTION round: one TRUE cluster, one FALSE cluster, plus the repeats."""
+    return {"trues": [dict(true) for _ in range(k)], "falses": [dict(false) for _ in range(k)],
+            "true_repeats": [dict(true) for _ in range(k)], "false_repeats": [dict(false) for _ in range(k)]}
+
+
 def _firing_context(bug_class="sqli"):
+    # a genuinely firing boolean-blind context, plus the up-front determinism pre-filter (identical
+    # false-clause repeats, all identical → the page is deterministic to identical input).
     return {"bug_class": bug_class,
-            "probe_rounds": [{"true": _MANY, "false_a": _NONE, "false_b": _NONE} for _ in range(24)]}
+            "probe_rounds": [_tv_round() for _ in range(24)],
+            "false_baseline_samples": [dict(_NONE) for _ in range(16)]}
 
 
 def _finding(bug_class="sqli", ctx=None):
@@ -107,7 +117,7 @@ def test_unknown_class_conclusive_nonfiring_is_unsupported_not_a_false_clean():
     # oracle conclusively did not fire" is false when none is applicable). VIGIL's flagship signed negative is
     # a Certificate of Non-Exploitability, so a false CLEAN is a soundness violation in the headline claim.
     same = {"status": 200, "body": "identical body"}   # byte-identical SPRT arms => conclusive non-firing
-    nonfiring = {"probe_rounds": [{"true": same, "false_a": same, "false_b": same} for _ in range(24)]}
+    nonfiring = {"probe_rounds": [_tv_round(same, same) for _ in range(24)]}
     res = confirm_and_certify(
         {"check_id": "x", "bug_class": "sovereign_rce", "oracle_context": dict(nonfiring)},
         engagement_slug="acme", signers=SIGNERS, provenance="reproduced")
@@ -183,7 +193,7 @@ def test_certify_to_scitt_refuses_a_lead():
     from vigil_integration.oracle_adapter import certify_to_scitt
 
     # a non-firing context (true == false → no inference) yields a lead, which has no signed cert
-    lead_ctx = {"bug_class": "sqli", "probe_rounds": [{"true": _NONE, "false_a": _NONE, "false_b": _NONE}]}
+    lead_ctx = {"bug_class": "sqli", "probe_rounds": [_tv_round(_NONE, _NONE)]}
     res = confirm_and_certify(_finding("sqli", ctx=lead_ctx), engagement_slug="acme", signers=SIGNERS)
     assert res.status == "lead"
     with pytest.raises(ValueError, match="confirmed fact"):

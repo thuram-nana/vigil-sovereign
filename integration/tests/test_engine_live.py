@@ -48,14 +48,24 @@ from vigil_integration.live.wiring import (  # noqa: E402
 
 LOOPBACK = "http://127.0.0.1:18080/search?q=1"
 
-# a boolean-SQLi oracle_context that FIRES (true differs from both falses, falses agree) — the exact
-# shape the BOOLEAN_INFERENCE oracle re-fires over (from the framework's own oracle-adapter fixture).
+# a boolean-SQLi oracle_context that FIRES — the exact TRUTH-VALUE ATTRIBUTION shape the BOOLEAN_INFERENCE
+# oracle re-fires over: every one of K distinct always-TRUE clauses lands on one response, every one of K
+# distinct always-FALSE clauses on another, and each clause's byte-identical repeat agrees.
 _MANY = {"status": 200, "body": "id=1\nid=2\nid=3\nid=4\nid=5 (all rows)"}
 _NONE = {"status": 200, "body": "no results"}
+
+
+def _tv_round(true, false, k=6):
+    return {"trues": [dict(true) for _ in range(k)], "falses": [dict(false) for _ in range(k)],
+            "true_repeats": [dict(true) for _ in range(k)], "false_repeats": [dict(false) for _ in range(k)]}
+
+
 _FIRING_SQLI = {"bug_class": "sqli",
-                "probe_rounds": [{"true": _MANY, "false_a": _NONE, "false_b": _NONE} for _ in range(24)]}
+                "probe_rounds": [_tv_round(_MANY, _NONE) for _ in range(24)],
+                "false_baseline_samples": [dict(_NONE) for _ in range(16)]}  # determinism pre-filter
 _NONFIRING_SQLI = {"bug_class": "sqli",
-                   "probe_rounds": [{"true": _NONE, "false_a": _NONE, "false_b": _NONE} for _ in range(24)]}
+                   "probe_rounds": [_tv_round(_NONE, _NONE) for _ in range(24)],
+                   "false_baseline_samples": [dict(_NONE) for _ in range(16)]}
 
 
 def _echo_runner(argv, *, timeout=0, output_cap=1 << 20):

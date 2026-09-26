@@ -36,18 +36,77 @@ The signal is the **boolean differential** already computed in `framework/v2/ver
 - `differential_response_oracle(baseline, mutated, discriminator)` — quantifies whether two responses differ
   (dimensions `status`/`length`/`lexical`/`structural`/`marker`; `expect: "differ" | "same"`). Note the default
   dimension set does **not** include `structural`; a caller must request dimensions explicitly (see §4).
-- `boolean_inference_oracle(probe_rounds, …)` — per round, the Bernoulli signal is
-  **(TRUE clause differs from FALSE clause) AND (the two FALSE clauses agree)**, accumulated under a Wald
-  **SPRT** that terminates in one of THREE outcomes: `confirm`, `refute`, or `inconclusive` (no boundary
-  reached). The second half of the per-round signal is a genuine per-round *dynamic-page control*.
+- `boolean_inference_oracle(probe_rounds, …)` — per round, the Bernoulli signal is a **TRUTH-VALUE
+  ATTRIBUTION** test over `K_T >= 4` DISTINCT always-TRUE clauses and `K_F >= 4` DISTINCT always-FALSE clauses
+  (each also sent once more, byte-identically): it signals 1 only when **every TRUE-side response agrees with
+  every other, every FALSE-side response agrees with every other, and the two clusters are disjoint** —
+  i.e. the response is a *function of the injected boolean's truth value*. Accumulated under a Wald **SPRT**
+  that terminates in one of THREE outcomes: `confirm`, `refute`, or `inconclusive` (no boundary reached).
+  "The true probe differed from the false probe" is deliberately **not** the signal: on an origin whose body
+  varies INDEPENDENTLY of the input, two draws differ by coincidence, and a determinism *screen* does not
+  remove that (a window that looks deterministic still contains the coincidence). On such an origin the
+  per-round false-signal probability is `SUM_{a != b} p_a**(2*K_T) * p_b**(2*K_F) <= 2 * 2**-(2*K_T+2*K_F)`
+  — `3.1e-5` at the `K_T = K_F = 4` CONFIRM floor, vs the SPRT's null rate `p0 = 0.1`.
+
+  **Two things that bound does not cover** (the oracle docstring is the normative statement):
+
+  1. **A truth-correlated REQUEST filter — STATUS: OPEN.** An interposer that partitions the probes by a
+     property of the REQUEST that tracks truth value, with no boolean channel behind it. The bound says
+     nothing about this: it is a property of the CLAUSE SET, not of the origin. **It is open for a
+     structural reason**, not because the wrong clauses were picked: the oracle needs clauses whose truth
+     value is known *a priori*, without touching the database — and a predicate knowable that way IS A
+     CONSTANT EXPRESSION, which a filter in front of a static page can evaluate offline too. Clause design
+     can only raise the complexity of the function the filter must implement. The measured ladder (real
+     mint path, static non-vulnerable page) is that treadmill:
+
+     | clause set | request-side filter | false FACTs |
+     |---|---|---|
+     | literal-only (`X = X` / `X = Y`) | CRS-942130 backreference regex | **2000/2000** |
+     | shape-varied | the same CRS-942130 regex | 0/2000 |
+     | shape-varied foldable subset (K=6) | complete ~60-line CONSTANT FOLDER | **200/200** |
+     | shipped set (K=7, with `IN (SELECT)`) | that same folder | 0/200 |
+     | shipped set | that folder **+ a three-line `IN` rule** | **600/600** |
+     | shipped set, literals randomised | folder + a nine-string `IN` blocklist | **300/300** |
+     | shipped set | exact-string blocklist of its TRUE clauses | **200/200** |
+     | shipped set | any filter blind to one shape (leave-one-out) | 0 each |
+
+     Each 0 row was once called a fix and the next row is that fix being cleared by a filter one rule
+     larger. In particular the **`IN (SELECT …)` pair does NOT close it**, and the earlier revision of this
+     bullet which said "what closes it is at least one SQL-EVALUATED pair … the same complete folder goes
+     to 0" is **retracted**: over a one-row constant select, `LIT IN (SELECT LIT)` *is* literal equality
+     (`3 IN (SELECT 3)` → 1, `3 IN (SELECT 5)` → 0), so three lines of regex fold it. Randomising the
+     literals is retracted too — the clause templates are public, so the filter derives per-shape rules
+     from them and needs nine strings for the one randomised atom; the set is now a **stable public
+     constant** so the operator can correlate it in their logs (constitution VI.4).
+     Provenance, so no row is taken for more than it is: four rows (CRS-942130 both halves, the complete
+     folder, the folder blinded to one shape, the exact-string blocklist) are re-measured every CI run as
+     live regressions at 10-20 trials; the 2000-, 600- and 300-trial figures are one-off at-scale runs of
+     those same cells.
+     What the clause set *does* buy is exact: a filter must be **COMPLETE** over the shape set, so every
+     partial filter refutes. **What an operator should conclude:** a `boolean_sqli` FACT is sound against an
+     origin whose body varies independently of the input and against every *incomplete* request-side filter,
+     and is **not** sound against a filter purpose-built to decide this clause set — which is cheap to build.
+     Where that matters, corroborate out of the response bytes (OOB/DNS, error-signature, timing) or take
+     the finding as a LEAD. **Residual (a2) — STATUS: OPEN, and out of reach from the response side:** an
+     interposer that genuinely EVALUATES the expression (a WAF with a real SQL parser) can still partition,
+     and no clause set defeats that from the response side — it needs an out-of-band channel. Residual (a)
+     is **not** a special case of (a2): it needs no evaluator, only a folder.
+  2. **A deterministic but ARBITRARY function of the URL** (a per-URL CDN cache over an origin that picked a
+     variant at fill time): the byte-identical repeats are cache hits and re-running the same clauses is not
+     new evidence, so the bound degrades to `2 * 2**-(K_T+K_F)` (against `~0.5` for a
+     single-clause-per-truth-value design). Repetition cannot help against a map that is constant in the
+     request, so for *this* case more distinct clauses is the lever — and the scanner arm additionally bounds
+     the number of independent attempts per URL and states the resulting per-URL figure.
 
 **What an interposer can and cannot forge — precisely (and it is NOT "cannot forge the differential").** Over
-plaintext HTTP the three probes are always *lexically separable* — `true` and `false_a` must differ in bytes to
-carry opposite booleans, and `false_a`/`false_b` differ only in the inert marker. So a **non-executing lexical
-interposer can fabricate a firing** by partitioning the probes on surface form (return X for `true`, Y for both
-`false`s) with zero origin queries. Data-dependence does **not** prevent this (a *constant* tautology is merely
-even easier — a SQL-parsing WAF evaluates it directly). The boolean firing is therefore **not
-interposer-unforgeable**. What data-dependence and the oracle actually buy is bounded and *one-directional*:
+plaintext HTTP the probes are always *lexically separable* — a TRUE clause and a FALSE clause must differ in
+bytes to carry opposite booleans. So a **non-executing lexical interposer can fabricate a firing** by
+partitioning the probes on surface form (return X for anything that parses TRUE, Y for anything that parses
+FALSE) with zero origin queries. Truth-value attribution RAISES that bar — the interposer must now evaluate
+each of the `K_T + K_F` syntactically-varied clauses and partition them correctly by TRUTH VALUE, not by
+surface form — but a SQL-parsing WAF can do exactly that. Data-dependence does **not** prevent it either (a
+*constant* tautology is merely even easier — a SQL-parsing WAF evaluates it directly). The boolean firing is
+therefore **not interposer-unforgeable**. What data-dependence and the oracle actually buy is bounded and *one-directional*:
 
   * a **fabricated firing only ever OVER-REPORTS STILL_VULNERABLE** — the conservative "go investigate" verdict,
     never a false all-clear. Suppressing the signal to force a false REMEDIATED is the separately-disclosed
@@ -63,7 +122,7 @@ the STILL_VULNERABLE direction it is a safe over-approximation, not an unforgeab
 and does **not** defeat a *sanitizing* interposer (§1 a-sanitize), which lets the probe reach the origin as inert
 data.
 
-## 3. The matched-decoy triple (+ baseline), with DATA-DEPENDENT clauses
+## 3. The matched-decoy truth-value round (+ baseline), with DATA-DEPENDENT clauses
 
 Per round, through the **same injectable parameter**, carrying the run `challenge` only as an inert freshness
 marker (never as the discriminating predicate):
@@ -71,11 +130,17 @@ marker (never as the discriminating predicate):
 | probe | clause shape (illustrative) | metachar profile | purpose |
 |---|---|---|---|
 | `baseline` | benign value, NO metacharacters, carries `<c>` | none | the inert-handled / un-WAF'd response shape |
-| `true`  | `… ' AND (SELECT SUBSTR(@@version,1,1))>'' -- <c>` (a predicate TRUE on the live DB) | full exploit metachars | the TRUE clause — **data-dependent** |
-| `false_a` | `… ' AND (SELECT SUBSTR(@@version,1,1))>'~~~' -- <c>` (same predicate, FALSE) | full exploit metachars | a FALSE clause — **data-dependent** |
-| `false_b` | `… ' AND (SELECT SUBSTR(@@version,1,1))>'~~~' -- <c2>` (FALSE, different marker) | full exploit metachars | the dynamic-page control twin |
+| `trues[i]` | `K_T >= 4` DISTINCT predicates, varying in COMPARISON SHAPE, that are all TRUE on the live DB, e.g. `… ' AND (SELECT SUBSTR(@@version,1,1))>'' -- <c>` / `… ' AND 17=17 -- <c>` | full exploit metachars | the TRUE cluster — **data-dependent** |
+| `falses[j]` | `K_F >= 4` DISTINCT predicates, varying in COMPARISON SHAPE, that are all FALSE, e.g. `… ' AND (SELECT SUBSTR(@@version,1,1))>'~~~' -- <c>` / `… ' AND 17=18 -- <c>` | full exploit metachars | the FALSE cluster — **data-dependent** |
+| `true_repeats[i]` / `false_repeats[j]` | a byte-IDENTICAL repeat of each clause above | full exploit metachars | the determinism control (a differing repeat HARD-REFUTES the run) |
 
-`true`/`false_a`/`false_b` are **metacharacter-identical in class** (all carry `'`, `AND`, `SELECT`, `--`), so a
+More than one clause per truth value is the point: a single `true` vs a single `false` is two draws, and two
+draws differ by coincidence on any input-independent origin. Requiring the responses to PARTITION BY TRUTH
+VALUE is what attributes the separation to the injected boolean rather than to chance. The clauses must vary
+in **comparison shape**, not merely in their literals — a set whose truth value tracks one surface feature is
+partitionable by a regex WAF with no SQL engine anywhere (§2).
+
+Every clause is **metacharacter-identical in class** (all carry `'`, `AND`, `SELECT`, `--`), so a
 content-inspecting WAF that blocks one blocks all — the matched decoy. They differ in a **data-dependent
 predicate** the origin's DB must evaluate, so a *genuine* firing reflects origin data. This does **not** stop a
 non-executing interposer from *lexically* fabricating a firing (§2) — but a fabricated firing only over-reports
@@ -95,15 +160,15 @@ scoped **per comparison**:
 
 2. **`decision == "refute"` (DECISIVELY indistinguishable) *and* the metachar probes REACHED THE ORIGIN** →
    **REMEDIATED**. "Reached the origin" is the WAF-closure test:
-   `differential_response_oracle(baseline, false_a, discriminator={dimensions:[status,structural], expect:"same"})`
-   must hold — the metachar-bearing probe is handled like the benign baseline (a normal page), i.e. NOT turned
+   `differential_response_oracle(baseline, falses[j], discriminator={dimensions:[status,structural], expect:"same"})`
+   must hold for EVERY `j` — the metachar-bearing probe is handled like the benign baseline (a normal page), i.e. NOT turned
    into a block page. Responses MUST carry a `status` (else that dimension is silently dropped and the test
    weakens). Because the decoy is metachar-identical to the exploit, a WAF that would block the exploit blocks
-   `false_a` → it differs from `baseline` → this test fails → no REMEDIATED. **The cert records
+   a `falses[j]` → it differs from `baseline` → this test fails → no REMEDIATED. **The cert records
    `origin_reached: true`, meaning ONLY "a baseline-shaped 200 came back for a metachar payload" — it does NOT
    mean the metacharacters reached the sink intact** (a sanitizer defeats that, §7).
 
-3. **`decision == "refute"` *and* the metachar probes were BLOCKED/diverted** (`false_a` differs from
+3. **`decision == "refute"` *and* the metachar probes were BLOCKED/diverted** (a `falses[j]` differs from
    `baseline`) → **INCONCLUSIVE** (`Reason.INTERPOSER_SUSPECTED`, new) — a blocking WAF/edge is interposing.
 
 4. **`decision == "inconclusive"` (SPRT reached no boundary)** → **INCONCLUSIVE** (`Reason.INSUFFICIENT_ROUNDS`)
@@ -132,7 +197,7 @@ A refute-plus-pass over a vulnerable origin arises in **two** ways, and REMEDIAT
    though `across` is True — the injection is still firing** — and the `{status, structural}` closure is blind to
    that lexical noise, so it *passes*. Over a live-leaking origin this minted a **false REMEDIATED** (reproduced).
    This is **not** an interposer at all. **The fix (the ATTRIBUTION gate, §4.2a):** a REMEDIATED-eligible refute
-   must be attributable to genuine channel **closure** — `across` (true vs `false_a`, on the lexical-sensitive
+   must be attributable to genuine channel **closure** — every `trues[i]` vs every `falses[j]` (on the lexical-sensitive
    boolean discriminator) must be **False on every judged round**. If any round still separates true from false,
    the refute was driven by the dynamic-page control tripping, not a fix → **INCONCLUSIVE /
    `CHANNEL_NOISE_UNATTRIBUTABLE`**, never REMEDIATED. A heavily lexically-dynamic page therefore yields
@@ -150,8 +215,8 @@ fresh challenge earns **F2** (the sink's boolean behaviour exercised this run). 
 `error_signature_oracle` and checks the matched *error line*); a boolean firing has no error line, so it capped a
 differential firing to F1. **[R1-PR2 — now DELIVERED]** the boolean analog `_challenge_in_firing_differential`
 credits **F2** to a differential firing iff, on **EVERY judged firing round**, the fresh challenge marker is
-reflected in the signal-bearing **`true`** response **and absent from `false_a`** — i.e. it lives in the
-*discriminating* bytes that make `true` differ from `false_a` (the boolean signal), the analog of the
+reflected in EVERY signal-bearing **`trues[i]`** response **and absent from every `falses[j]`** — i.e. it
+lives in the *discriminating* bytes that separate the TRUE cluster from the FALSE cluster, the analog of the
 error-signature F2's "nonce in the matched signature line". A static header echoed into every probe does **not**
 qualify (that reflection is not attributable to the sink's boolean behaviour). It is deliberately **conservative** (a single non-reflecting round caps
 to F1 — a purely *blind* boolean channel that never reflects the payload stays honestly F1) and, like the
@@ -221,7 +286,7 @@ gated on `decision == "confirm"`), and `origin_reached`/`origin_confirmed` are *
 - **[red-pen — now CLOSED, recorded for provenance] a sub-threshold boolean channel.** A still-exploitable leak
   smaller than the SPRT's *fuzzy* discriminator thresholds (a 1-byte deterministic bit in a large page) once read
   as `across=False` → a false REMEDIATED. **Closed** by the **ATTRIBUTION gate** (§4.2a): channel-closure is
-  attributed with a **zero-tolerance** discriminator (`_ATTRIBUTION_DISC`, any deterministic true≠false_a
+  attributed with a **zero-tolerance** discriminator (`_ATTRIBUTION_DISC`, any deterministic true-clause≠false-clause
   difference → channel OPEN), at **both mint and re-execution** — so a sub-threshold leak now yields INCONCLUSIVE,
   and a signed cert whose retained rounds still separate is **demoted** by the offline verifier (invariant 3).
 
@@ -229,17 +294,17 @@ gated on `decision == "confirm"`), and `origin_reached`/`origin_confirmed` are *
 
 1. **genuine fix** — parameterized origin: data-dependent `true ≈ false`, both match baseline, SPRT `refute` →
    **REMEDIATED**, `origin_reached=true`.
-2. **still vulnerable, clean path** — injectable origin: `true ≠ false`, `false_a ≈ false_b`, SPRT `confirm` →
+2. **still vulnerable, clean path** — injectable origin: the TRUE cluster agrees, the FALSE cluster agrees, the two are disjoint, SPRT `confirm` →
    **STILL_VULNERABLE**.
 3. **blocking payload-discriminating WAF over a vulnerable origin** — 403/block-page for metachar probes,
-   baseline passes → `false_a` differs from baseline → **INCONCLUSIVE** (`INTERPOSER_SUSPECTED`). *The acceptance
+   baseline passes → a `falses[j]` differs from baseline → **INCONCLUSIVE** (`INTERPOSER_SUSPECTED`). *The acceptance
    test for the (a-block) closure.*
 4. **sanitizing WAF over a vulnerable origin** — escapes quotes in-flight → origin inert → refute + closure
    passes → REMEDIATED. Assert the cert carries only `origin_reached` and the (a-sanitize) residual is surfaced
    (NOT a clean-fix claim). *The BLOCK-1 disclosure, pinned as a test so the honesty cannot silently regress.*
 5. **SQL-parsing interposer, constant-clause variant** — assert that a constant-clause construction is forgeable
    (a regression guarding the §3 requirement that clauses be data-dependent).
-6. **dynamic page** — every response differs → `false_a ≠ false_b` trips the per-round control → not a false
+6. **dynamic page** — every response differs → the byte-identical repeats diverge (determinism hard-refute) and the within-truth clusters never agree → not a false
    STILL_VULNERABLE.
 7. **SPRT-inconclusive** — too few/noisy rounds, no boundary → **INCONCLUSIVE** (`INSUFFICIENT_ROUNDS`), never
    REMEDIATED.
@@ -257,7 +322,7 @@ gated on `decision == "confirm"`), and `origin_reached`/`origin_confirmed` are *
 
 1. **This spec (revised)** — reviewed to convergence first.
 2. `DifferentialHttpAdapter` (a second `LiveTargetAdapter`) — builds baseline + data-dependent
-   true/false_a/false_b from a `clause_template` (data-dependent predicate + `{challenge}` inert marker),
+   the `trues`/`falses` clause sets from `true_payload_templates` / `false_payload_templates` (data-dependent predicates + `{challenge}` inert marker),
    gated-fetches them, assembles the `probe_rounds` context, runs the WAF-closure `differential_response_oracle`
    check, and **fail-closes the whole run** on any undelivered/malformed probe. Positive control = retained
    firing rounds; live control observes fresh-marker reflection.

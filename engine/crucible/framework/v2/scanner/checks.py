@@ -216,53 +216,292 @@ class DifferentialCheck:
         )
 
 
+# --------------------------------------------------------------------------------------------------
+# TRUTH-VALUE ATTRIBUTION clause families (shared by the scanner arm and its regressions).
+# --------------------------------------------------------------------------------------------------
+# A family is ``(K_T always-TRUE clauses, K_F always-FALSE clauses)`` for ONE injection context. Read
+# this header before editing a shape: what the set does and does NOT buy has been measured, and the
+# measurements are not what the shapes look like they buy.
+#
+# THE STRUCTURAL FACT, FIRST — because it bounds everything below. Every clause here is one whose
+# truth value VIGIL must know A PRIORI: before the request is sent, without touching the target's
+# database. A predicate knowable that way IS A CONSTANT EXPRESSION, and any constant expression the
+# scanner can evaluate offline, a REQUEST-SIDE FILTER in front of a STATIC page can also evaluate
+# offline. There is therefore NO clause set that removes the truth-correlated-request-filter residual;
+# there is only a set that makes such a filter's job harder. That residual — residual (a) on
+# ``verify.oracles.boolean_inference_oracle`` — IS OPEN. Everything below raises the bar; nothing
+# below closes it, and the measured ladder in that docstring shows each rung being cleared.
+#
+# 1. COMPARISON-SHAPE DIVERSITY — the property with a real, measured mechanism behind it.
+#    An early revision varied only the LITERALS, so every TRUE clause was `X = X` and every FALSE
+#    clause `X = Y`. Truth value was then perfectly correlated with the surface feature "the two
+#    operands are the same token" — exactly what a ModSecurity-CRS-942130-shape BACKREFERENCE rule
+#    keys on with no SQL engine anywhere. A STATIC, NON-VULNERABLE page behind that rule answered 403
+#    to the whole TRUE side and 200 to the whole FALSE side and minted a false FACT on EVERY attempt
+#    (measured 2000/2000). Raising K does not help: every extra `X = X` matches the same rule. Varying
+#    the comparison does, and the mechanism is INCOMPLETENESS: a filter that catches SOME shapes leaves
+#    the others alone, so the TRUE cluster stops agreeing and the round REFUTES. Measured: 0/2000
+#    against CRS-942130, and 0 in a LEAVE-ONE-SHAPE-OUT sweep for every one of the seven shapes
+#    blinded. What that buys is precise and limited: a filter must be COMPLETE over the whole shape
+#    set. It does not have to be a SQL engine to be complete.
+#
+# 2. THE SEVENTH SHAPE (`{d1} IN (SELECT {d1})` vs `{d1} IN (SELECT {d2})`) — KEPT, but NOT for the
+#    reason it was added. It shipped under the claim that its truth "needs EVALUATION rather than
+#    folding", so a constant folder could not decide it. THAT CLAIM IS RETRACTED: over a one-row
+#    constant SELECT, `LIT IN (SELECT LIT)` IS literal equality (sqlite3: `3 IN (SELECT 3)` -> 1,
+#    `3 IN (SELECT 5)` -> 0). It is `X = X` vs `X = Y` in a costume — the separating surface feature is
+#    still "the two operand tokens are identical" — and THREE LINES of regex added to the constant
+#    folder below decide it, after which the folder partitions the SHIPPED set perfectly (measured
+#    600/600 false FACTs through the real mint path on a static page).
+#    WHY IT IS STILL HERE, on its merits and nothing more:
+#      * it is the SEVENTH distinct clause per truth value, and K is the documented lever for the
+#        OTHER residual — the per-URL-cache case (b). At K=7 that residual measures 1.20e-4 per
+#        attempt; at K=6 the analytic figure is 4x worse (`2 * 2**-12` = 4.9e-4). Dropping this pair
+#        would regress the dominant disclosed residual by 4x to save ~16% of the boolean arm's traffic.
+#      * it is one more rule an incomplete filter must implement: a folder complete over the other six
+#        shapes but blind to `IN` refutes (measured 0/200), exactly like every other leave-one-out cell.
+#    HONEST COST, stated because it is real: this is the only shape here that is not portable SQL.
+#    `SELECT <literal>` with no FROM is valid on sqlite/MySQL/PostgreSQL/SQL Server but NOT on Oracle
+#    (which needs `FROM DUAL`), so on an Oracle origin this clause errors, the TRUE cluster stops
+#    agreeing and the whole boolean arm refutes — a RECALL loss (a LEAD, never a false FACT).
+#
+# 3. THE LITERALS ARE FIXED PUBLIC CONSTANTS — deliberately, and this is a REVERSAL. A previous
+#    revision randomised them per run so "the clause set is not a public constant an operator can
+#    paste into an exact-string blocklist". That is dropped, for two reasons.
+#      * NO MEASURED BENEFIT. The shape TEMPLATES are public in this open-source file whatever the
+#        literals are, so a filter derives a per-shape rule from them directly. Measured: a constant
+#        folder plus a NINE-STRING blocklist over the `IN` atom alone (the `d1` slot ranged over only
+#        1..9) partitioned 1500/1500 randomised family draws and minted 300/300 through the real
+#        mint path — randomisation bought nothing against the attack it was sold against.
+#      * IT POINTED THE WRONG WAY. Constitution VI.4 says MAKE YOURSELF CORRELATABLE: the operator
+#        must be able to grep their WAF and access logs and find our traffic. Defeating an operator's
+#        exact-string control is defeating a DEFENDER's control on the operator's own estate, and it
+#        also contradicted this module's own contract that "a run is replayable".
+#    The honest consequence is stated rather than engineered around: a fixed public set IS
+#    blocklistable, and a static page behind an exact-string blocklist of a family's seven TRUE
+#    clauses (21 across the three families) mints at rate 1.0 — measured 200/200 through the real
+#    mint path, and pinned as a live cell. That is residual (a), OPEN either way, and randomising
+#    did not change it: see the ladder on the oracle.
+#
+# Invariants every shape must preserve (checked by test_boolean_clause_families):
+#   * valid in its own breakout context — a quote-breakout clause must END on an UNCLOSED quote, so the
+#     origin's own trailing quote closes it;
+#   * truth-correct against a real SQL engine (the tests evaluate every clause on sqlite3);
+#   * TRUE[i] LENGTH-MATCHED to FALSE[i]. A length-correlated set would re-open the hole through the
+#     ``length`` dimension: an endpoint that merely ECHOES the parameter would separate by truth value;
+#   * STABLE across calls — two calls return the identical set, so a run is replayable and the operator
+#     can correlate it in their logs;
+#   * PARTITIONED by the complete constant folder + the three-line `IN` rule, and NOT partitioned when
+#     that filter is blinded to any one shape. The first half pins the OPEN class honestly; the second
+#     is the incompleteness mechanism of (1).
+_BOOLEAN_FAMILY_SHAPES = (
+    # --- single-quote string-literal breakout: the origin wraps the value in '...' -------------------
+    (("x' OR '{w}'='{w}",                        "x' OR '{w}'='{w2}"),
+     ("x' OR '{hi}'>'{lo}",                      "x' OR '{lo}'>'{hi}"),
+     ("x' OR {n2}>{n1} AND '{k}'<'{m}",          "x' OR {n1}>{n2} AND '{k}'<'{m}"),
+     ("x' OR '{w}' LIKE '{w0}%",                 "x' OR '{w}' LIKE '{zc}%"),
+     ("x' OR '{u}'<>'{v}",                       "x' OR '{u}'<>'{u}"),
+     ("x' OR '{bm}' BETWEEN '{bl}' AND '{bh}",   "x' OR '{bg}' BETWEEN '{bl}' AND '{bh}"),
+     ("x' OR {d1} IN (SELECT {d1}) AND '{k}'='{k}",
+      "x' OR {d1} IN (SELECT {d2}) AND '{k}'='{k}")),
+    # --- numeric context: the origin interpolates the value bare -------------------------------------
+    (("1 OR {n1}={n1}",                          "1 OR {n1}={n2}"),
+     ("1 OR {n2}>{n1}",                          "1 OR {n1}>{n2}"),
+     ("1 OR {p2}>{p1} AND {q1}<{q2}",            "1 OR {p1}>{p2} AND {q1}<{q2}"),
+     ("1 OR '{w}' LIKE '{w0}%'",                 "1 OR '{w}' LIKE '{zc}%'"),
+     ("1 OR {n1}<>{n2}",                         "1 OR {n1}<>{n1}"),
+     ("1 OR {nm} BETWEEN {nl} AND {nh}",         "1 OR {ng} BETWEEN {nl} AND {nh}"),
+     ("1 OR {d1} IN (SELECT {d1})",              "1 OR {d1} IN (SELECT {d2})")),
+    # --- double-quote string-literal breakout --------------------------------------------------------
+    (('x" OR "{w}"="{w}',                        'x" OR "{w}"="{w2}'),
+     ('x" OR "{hi}">"{lo}',                      'x" OR "{lo}">"{hi}'),
+     ('x" OR {n2}>{n1} AND "{k}"<"{m}',          'x" OR {n1}>{n2} AND "{k}"<"{m}'),
+     ('x" OR "{w}" LIKE "{w0}%',                 'x" OR "{w}" LIKE "{zc}%'),
+     ('x" OR "{u}"<>"{v}',                       'x" OR "{u}"<>"{u}'),
+     ('x" OR "{bm}" BETWEEN "{bl}" AND "{bh}',   'x" OR "{bg}" BETWEEN "{bl}" AND "{bh}'),
+     ('x" OR {d1} IN (SELECT {d1}) AND "{k}"="{k}',
+      'x" OR {d1} IN (SELECT {d2}) AND "{k}"="{k}')),
+)
+
+
+# The FIXED, PUBLIC literals. Every one is drawn at a FIXED WIDTH (letters 1 char, words 2 chars,
+# numbers 2 digits, subquery operands 1 digit) and a shape's TRUE/FALSE templates are structurally
+# identical, so TRUE[i] and FALSE[i] are length-matched by construction. The orderings each shape
+# needs:  lo < k < bm < m < hi < bg  =>  hi > lo, k < m, lo <= bm <= hi (BETWEEN true), bg > hi (false).
+# These are CONSTANTS on purpose (header point 3): the operator greps their logs for exactly these
+# strings, and a run is replayable. Randomising them was measured worthless and pointed the wrong way.
+_BOOLEAN_LITERALS = {
+    "w": "mk", "w2": "mn", "w0": "m", "zc": "v", "u": "zr", "v": "zw",
+    "k": "d", "m": "h", "lo": "b", "hi": "p", "bm": "f", "bl": "b", "bh": "p", "bg": "t",
+    "n1": 31, "n2": 64, "p1": 27, "p2": 58, "q1": 42, "q2": 83,
+    "nl": 19, "nm": 35, "nh": 71, "ng": 88, "d1": 3, "d2": 8,
+}
+
+
+def boolean_clause_families() -> tuple:
+    """The shipped ``((trues, falses), ...)`` clause families — a STABLE, PUBLIC constant.
+
+    Two calls return the identical set. That is deliberate (constitution VI.4 "make yourself
+    correlatable", and this module's own contract that a run is replayable): the operator can grep
+    their WAF and access logs for exactly these strings. The literals were randomised per run for one
+    revision, to keep the set out of an operator's exact-string blocklist; that is retracted — it was
+    measured worthless against a filter that derives its rules from the public TEMPLATES (a folder plus
+    a nine-string blocklist over the ``IN`` atom partitioned 1500/1500 randomised draws), and defeating
+    a defender's control on the operator's own estate is not something this scanner should do."""
+    return tuple(
+        (tuple(t.format(**_BOOLEAN_LITERALS) for t, _ in shapes),
+         tuple(f.format(**_BOOLEAN_LITERALS) for _, f in shapes))
+        for shapes in _BOOLEAN_FAMILY_SHAPES)
+
+
+# The PINNED boolean discriminator. ``differential_response_oracle``'s DEFAULT dimension set includes
+# ``latency``, so a boolean check that passed no discriminator let a FACT rest on TIMING alone over
+# byte-identical bodies — and since the probe order is all-TRUE then all-FALSE, a step-slowdown crossing
+# that boundary lands exactly on the truth partition. (The oracle pins this too, so a retained context
+# cannot widen it back; this constant keeps the check's own early-stop reading the same channel.)
+BOOLEAN_DISCRIMINATOR = {"dimensions": ["status", "length", "lexical"]}
+# The oracle will not CONFIRM below this many distinct clauses per truth value (it may still refute).
+_MIN_CLAUSES_PER_TRUTH_VALUE = 4
+
+
 @dataclass(frozen=True)
 class BooleanInferenceCheck:
-    """Boolean-blind via a sequential probability ratio test (SPRT).
+    """Boolean-blind via a sequential probability ratio test (SPRT) whose per-round signal is a
+    TRUTH-VALUE ATTRIBUTION test.
 
-    Each round sends a TRUE-condition clause and the FALSE-condition clause
-    twice (the second FALSE is a dynamic-page control). It runs the SPRT online
-    to stop as soon as the evidence is decisive — few rounds for a clear signal,
-    a bounded ``n_max`` otherwise — then hands every collected round to the
-    boolean-inference oracle, which recomputes the same decision deterministically.
-    Robust to flaky/dynamic backends that make a single true/false comparison
-    false-positive."""
+    A boolean FACT here means one thing: the response is a deterministic FUNCTION OF THE
+    INJECTED BOOLEAN'S TRUTH VALUE. "The true request and the false request came back
+    different" is NOT that claim — on a page whose body is drawn independently of the input
+    (rotating banner, A/B bucket, two replicas behind a balancer) two draws differ by
+    coincidence, and a determinism SCREEN does not remove it: a window that looks deterministic
+    still contains the coincidence. So each round sends ``K_T`` DISTINCT, syntactically VARIED
+    always-TRUE clauses and ``K_F`` distinct always-FALSE clauses (``true_clauses`` /
+    ``false_clauses``), each twice byte-identically, and the round signals only when every TRUE
+    response agrees with every other TRUE response, every FALSE with every FALSE, and the two
+    clusters are disjoint. A page whose body is an INDEPENDENT DRAW per request must land ALL
+    ``2*K_T`` true-side draws on one variant and ALL ``2*K_F`` false-side draws on another —
+    ``<= 2 * 2**-(2*K_T+2*K_F)`` per round (``7.5e-9`` at the ``K_T = K_F = 7`` the drivers ship;
+    ``3.1e-5``, still ~3300x below the SPRT's ``p0``, at the oracle's CONFIRM floor of 4).
+
+    TWO THINGS THAT BOUND DOES NOT COVER, both real and both documented on the oracle as OPEN: a
+    TRUTH-CORRELATED REQUEST FILTER (clause-SHAPE diversity makes every INCOMPLETE one refute, and
+    that is ALL it does — a COMPLETE filter still partitions, and K is no lever at all here; see
+    ``true_clauses`` below) and a page that is a deterministic but ARBITRARY function of the URL
+    (a per-URL CDN cache), where repetition is not new evidence and the bound degrades to
+    ``2 * 2**-(K_T+K_F)``; for THAT one more distinct clauses is the lever, and the drivers also
+    bound the number of independent attempts per URL.
+
+    A cheap BASELINE PRE-GATE runs first (``baseline_samples`` identical sends of
+    ``false_clauses[0]``; not-all-identical ⇒ the oracle refuses without any inference) and each
+    round's byte-identical repeats are a HARD REFUTE — but those are pre-filters, not the
+    soundness core.
+
+    A legitimately noisy-but-vulnerable page, and a vulnerable page whose varied true clauses do
+    not all land on the same response, are refused to a LEAD — a documented recall cost, the safe
+    direction (a false LEAD, never a false FACT)."""
 
     id: str
     bug_class: str
-    true_clause: str
-    false_clause: str
+    # K_T clauses that are all logically TRUE and K_F that are all logically FALSE. Build them with
+    # ``boolean_clause_families`` unless you have read that block's header: the clauses must be DISTINCT
+    # and must vary in COMPARISON SHAPE rather than only in their literals, because a set whose truth
+    # value tracks ONE surface feature is partitioned by an interposer with NO SQL engine at all, which
+    # then mints on a STATIC page (measured 2000/2000 for a literal-only set behind a CRS-942130 regex).
+    # Shape diversity buys INCOMPLETENESS, nothing more: it makes a PARTIAL filter refute. A filter that
+    # is COMPLETE over the shape set still partitions the shipped clauses perfectly — measured 600/600
+    # false FACTs behind a constant folder carrying one rule per shape — and no clause set fixes that,
+    # because a clause whose truth VIGIL knows a priori is a constant expression the filter can fold
+    # too. That is residual (a) on ``boolean_inference_oracle``, and it is OPEN.
+    # >= 4 each is the oracle's CONFIRM floor; the drivers ship 7.
+    true_clauses: tuple[str, ...]
+    false_clauses: tuple[str, ...]
     n_max: int = 24
     alpha: float = 0.05
     beta: float = 0.05
     p1: float = 0.9
     p0: float = 0.1
+    # identical-request sends for the determinism pre-gate. Only a cheap PRE-FILTER now (each round
+    # already carries 2*(K_T+K_F) identical-request pairs as the hard refute), so 8 is plenty — it was
+    # 16 when the gate was load-bearing, and that cost 3x over the three clause families.
+    baseline_samples: int = 8
+    # An ALREADY-COLLECTED determinism baseline (responses to ONE identical request on this endpoint).
+    # Determinism is a property of the ENDPOINT, not of the clause, so a driver probing several clause
+    # families against the same insertion point collects it ONCE and shares it (see boolean_redrive).
+    shared_baseline: tuple = ()
 
     def probe(self, template: RequestTemplate, point: InsertionPoint, send: Send) -> FindingContext | None:
         from ..verify.oracles import differential_response_oracle  # local: avoid import cycle at module load
 
+        trues = tuple(self.true_clauses)
+        falses = tuple(self.false_clauses)
+        if (len(set(trues)) < _MIN_CLAUSES_PER_TRUTH_VALUE
+                or len(set(falses)) < _MIN_CLAUSES_PER_TRUTH_VALUE or set(trues) & set(falses)):
+            # FAIL-CLOSED: too few DISTINCT clauses per truth value cannot attribute a response to a truth
+            # VALUE (one clause is one draw, and a duplicate is not an independent draw — on a page that
+            # caches per URL a duplicate returns the identical cached body and would fake agreement).
+            # A clause appearing on BOTH sides is degenerate too. Emit no rounds — the oracle can only refuse.
+            return FindingContext.from_boolean_probes(
+                true_rounds=[], false_rounds=[], true_repeat_rounds=[], false_repeat_rounds=[],
+                bug_class=self.bug_class, discriminator=BOOLEAN_DISCRIMINATOR)
+
+        def _differs(a: dict, b: dict) -> bool:
+            # the PINNED boolean discriminator — never the oracle's default set, which includes LATENCY
+            # (a boolean FACT must rest on response CONTENT; timing is timing_oracle's job).
+            return differential_response_oracle(a, b, BOOLEAN_DISCRIMINATOR).fired
+
+        # --- DETERMINISM PRE-GATE: responses to ONE IDENTICAL request, all of which must be identical.
+        #     A non-deterministic page (coarse OR high-entropy) fails this and is refused BEFORE any
+        #     inference — short-circuit on the first divergence to bound the traffic. A driver that
+        #     already collected this for the endpoint hands it in via ``shared_baseline`` (no re-sends).
+        baseline: list[dict] = [dict(b) for b in self.shared_baseline]
+        for _ in range(0 if baseline else max(2, self.baseline_samples)):
+            s = _as_dict(send(template.render(point, falses[0])))
+            baseline.append(s)
+            if _differs(baseline[0], s):
+                break  # proven non-deterministic — the oracle will refuse over these samples
+        if len(baseline) >= 2 and _differs(baseline[0], baseline[-1]):
+            # non-deterministic: hand the oracle the baseline (no rounds) so it authoritatively refuses.
+            return FindingContext.from_boolean_probes(
+                true_rounds=[], false_rounds=[], true_repeat_rounds=[], false_repeat_rounds=[],
+                bug_class=self.bug_class, false_baseline_samples=baseline,
+                discriminator=BOOLEAN_DISCRIMINATOR)
+
         upper = math.log((1.0 - self.beta) / self.alpha)
         lower = math.log(self.beta / (1.0 - self.alpha))
         llr = 0.0
-        trues: list[dict] = []
-        false_as: list[dict] = []
-        false_bs: list[dict] = []
+        true_rounds: list[list[dict]] = []
+        false_rounds: list[list[dict]] = []
+        true_repeat_rounds: list[list[dict]] = []
+        false_repeat_rounds: list[list[dict]] = []
         for _ in range(self.n_max):
-            t = _as_dict(send(template.render(point, self.true_clause)))
-            a = _as_dict(send(template.render(point, self.false_clause)))
-            b = _as_dict(send(template.render(point, self.false_clause)))
-            trues.append(t)
-            false_as.append(a)
-            false_bs.append(b)
-            across = differential_response_oracle(a, t).fired
-            within_same = not differential_response_oracle(a, b).fired
-            signal = across and within_same
+            t = [_as_dict(send(template.render(point, c))) for c in trues]
+            t_rep = [_as_dict(send(template.render(point, c))) for c in trues]
+            f = [_as_dict(send(template.render(point, c))) for c in falses]
+            f_rep = [_as_dict(send(template.render(point, c))) for c in falses]
+            true_rounds.append(t)
+            true_repeat_rounds.append(t_rep)
+            false_rounds.append(f)
+            false_repeat_rounds.append(f_rep)
+            # PER-ROUND HARD REFUTE: a byte-identical clause repeat that differs proves the page is
+            # non-deterministic → stop and let the oracle refuse the whole finding.
+            if any(_differs(a, b) for a, b in zip(t, t_rep)) or any(_differs(a, b) for a, b in zip(f, f_rep)):
+                break
+            # TRUTH-VALUE ATTRIBUTION: one TRUE cluster, one FALSE cluster, disjoint. (The oracle
+            # recomputes this authoritatively; this local copy only drives the early SPRT stop.)
+            t_all, f_all = t + t_rep, f + f_rep
+            within = all(not _differs(x, y) for c in (t_all, f_all)
+                         for i, x in enumerate(c) for y in c[i + 1:])
+            across = all(_differs(x, y) for x in t_all for y in f_all)
+            signal = within and across
             llr += math.log(self.p1 / self.p0) if signal else math.log((1.0 - self.p1) / (1.0 - self.p0))
             if llr >= upper or llr <= lower:
                 break  # SPRT reached a decision — stop early
 
         return FindingContext.from_boolean_probes(
-            trues, false_as, false_bs, bug_class=self.bug_class,
+            true_rounds=true_rounds, false_rounds=false_rounds,
+            true_repeat_rounds=true_repeat_rounds, false_repeat_rounds=false_repeat_rounds,
+            bug_class=self.bug_class, false_baseline_samples=baseline,
+            discriminator=BOOLEAN_DISCRIMINATOR,
         )
 
 

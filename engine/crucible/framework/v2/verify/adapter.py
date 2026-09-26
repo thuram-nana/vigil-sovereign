@@ -254,8 +254,15 @@ class FindingContext(BaseModel):
     mutated: dict[str, Any] | None = None
     discriminator: dict[str, Any] | None = None
 
-    # boolean_inference_oracle (SPRT over repeated true/false probes)
+    # boolean_inference_oracle (SPRT over repeated TRUTH-VALUE ATTRIBUTION rounds). Each round is
+    # {"trues": [...], "falses": [...], "true_repeats": [...], "false_repeats": [...]} — the responses
+    # to K_T distinct always-TRUE clauses and K_F distinct always-FALSE clauses plus their
+    # byte-identical repeats. The oracle signals only when the response partitions BY TRUTH VALUE.
     probe_rounds: list[dict[str, Any]] | None = None
+    # boolean_inference_oracle determinism PRE-GATE (a cheap pre-filter, NOT the soundness core): >= min
+    # responses to ONE IDENTICAL false-clause request collected up front. If they are not all identical
+    # the page is non-deterministic and the oracle refuses; a confirm requires it to have passed.
+    false_baseline_samples: list[dict[str, Any]] | None = None
 
     # timing_oracle (statistical time-based blind)
     baseline_latencies: list[float] | None = None
@@ -616,25 +623,46 @@ class FindingContext(BaseModel):
     @classmethod
     def from_boolean_probes(
         cls,
-        true_responses: Sequence[Any],
-        false_a_responses: Sequence[Any],
-        false_b_responses: Sequence[Any],
         *,
+        true_rounds: Sequence[Sequence[Any]],
+        false_rounds: Sequence[Sequence[Any]],
+        true_repeat_rounds: Sequence[Sequence[Any]],
+        false_repeat_rounds: Sequence[Sequence[Any]],
         bug_class: str = "boolean_sqli",
         discriminator: Mapping[str, Any] | None = None,
+        false_baseline_samples: Sequence[Any] | None = None,
     ) -> "FindingContext":
-        """Aligned per-round responses for the SPRT boolean-inference oracle:
-        for each round, the TRUE-clause response and two FALSE-clause responses
-        (the second is the dynamic-page control). Rounds are zipped to the
-        shortest of the three lists; nothing is fetched here."""
+        """Per-round TRUTH-VALUE ATTRIBUTION evidence for the SPRT boolean-inference
+        oracle. Each element of ``true_rounds`` is that round's list of responses to
+        ``K_T`` DISTINCT, syntactically-VARIED clauses that are all logically TRUE;
+        ``false_rounds`` likewise for ``K_F`` distinct always-FALSE clauses.
+        ``true_repeat_rounds`` / ``false_repeat_rounds`` are the index-aligned
+        BYTE-IDENTICAL repeats of each of those clauses (the determinism control).
+
+        The oracle signals a round only when the response is a FUNCTION of the injected
+        boolean's TRUTH VALUE — one TRUE cluster, one FALSE cluster, disjoint — which an
+        input-independent page cannot satisfy. KEYWORD-ONLY on purpose: the old
+        single-clause positional shape (``true``/``false_a``/``false_b``) cannot mint and
+        must fail loudly at the call site rather than silently degrade.
+
+        Rounds are zipped to the shortest of the four lists; nothing is fetched here.
+        ``false_baseline_samples`` is the up-front run of responses to ONE identical
+        false-clause request for the oracle's determinism pre-gate."""
+        def _many(xs: Sequence[Any]) -> list[dict[str, Any]]:
+            return [_response_to_dict(x) for x in xs]
+
         rounds = [
-            {"true": _response_to_dict(t), "false_a": _response_to_dict(a), "false_b": _response_to_dict(b)}
-            for t, a, b in zip(true_responses, false_a_responses, false_b_responses)
+            {"trues": _many(t), "falses": _many(f),
+             "true_repeats": _many(tr), "false_repeats": _many(fr)}
+            for t, f, tr, fr in zip(true_rounds, false_rounds, true_repeat_rounds,
+                                    false_repeat_rounds)
         ]
         return cls(
             bug_class=bug_class,
             probe_rounds=rounds,
             discriminator=dict(discriminator) if discriminator is not None else None,
+            false_baseline_samples=([_response_to_dict(s) for s in false_baseline_samples]
+                                    if false_baseline_samples is not None else None),
         )
 
     @classmethod
@@ -2452,6 +2480,8 @@ class FindingContext(BaseModel):
                 ctx["discriminator"] = self.discriminator
         if self.probe_rounds is not None:
             ctx["probe_rounds"] = self.probe_rounds
+            if self.false_baseline_samples is not None:
+                ctx["false_baseline_samples"] = self.false_baseline_samples
             if self.discriminator is not None and "discriminator" not in ctx:
                 ctx["discriminator"] = self.discriminator
         if self.baseline_latencies is not None and self.treatment_latencies is not None:

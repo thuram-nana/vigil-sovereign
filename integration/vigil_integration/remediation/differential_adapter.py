@@ -2,30 +2,52 @@
 DIFFERENTIAL channel (TRUTHENOVATION R1, PR1).
 
 Where :mod:`live_adapter` (``LiveHttpAdapter``) drives the response-side ``error_signature`` channel, this
-adapter drives the boolean-inference channel: per exploit "trial" it builds a **matched-decoy round** from a
-``clause_template`` and gated-fetches four probes through the SAME injectable parameter —
+adapter drives the boolean-inference channel: per exploit "trial" it builds a **matched-decoy TRUTH-VALUE
+ATTRIBUTION round** and gated-fetches ``1 + 2*K_T + 2*K_F`` probes through the SAME injectable parameter —
 
-    baseline   — a benign value carrying the inert challenge marker, NO exploit metacharacters
-    true       — a data-dependent predicate that is TRUE on the live DB, full exploit metacharacters
-    false_a    — the SAME predicate made FALSE, metacharacter-IDENTICAL to ``true``
-    false_b    — the FALSE predicate with a DIFFERENT inert marker (the dynamic-page control twin)
+    baseline       — a benign value carrying the inert challenge marker, NO exploit metacharacters
+    trues[i]       — K_T DISTINCT, syntactically-VARIED data-dependent predicates that are all TRUE on the
+                     live DB, full exploit metacharacters
+    falses[j]      — K_F DISTINCT, varied predicates that are all FALSE, metacharacter-identical in class
+    *_repeats      — a byte-IDENTICAL repeat of EVERY one of those clauses (the determinism control: an
+                     origin that varies to identical input hard-refutes the whole run)
 
-``true``/``false_a``/``false_b`` are metacharacter-identical in class (all carry ``'`` / ``AND`` / ``SELECT``
-/ ``--``), so a content-inspecting WAF that blocks one blocks all — the matched decoy (DIFFERENTIAL-REMEDIATION
-§3). They differ only in a **data-dependent predicate** the origin's DB must evaluate, so a *genuine* boolean
-firing reflects origin data; the run ``challenge`` rides as an **inert freshness marker only**, NEVER the
+Why more than one clause per truth value: "the true probe came back different from the false probe" is a
+2-sample coincidence on any origin whose body varies INDEPENDENTLY of the input (rotating banner, A/B bucket,
+two replicas), and a determinism SCREEN does not remove it — a window that looks deterministic still contains
+the coincidence. The oracle therefore signals a round only when the response is a **function of the injected
+boolean's TRUTH VALUE**: every TRUE-side response agrees with every other, every FALSE-side response agrees
+with every other, and the two clusters are disjoint. An origin drawing INDEPENDENTLY per request must land
+all ``2*K_T`` true-side draws on one variant and all ``2*K_F`` false-side draws on another —
+``<= 2 * 2**-(2*K_T+2*K_F)`` per round (``3.1e-5`` at the ``K_T = K_F = 4`` floor, vs the SPRT's
+``p0 = 0.1``). The oracle's docstring states the two cases that bound does NOT cover, and BOTH are OPEN: a
+truth-correlated REQUEST filter (clause-SHAPE diversity makes every INCOMPLETE one refute and that is all it
+does — a filter COMPLETE over the shape set still partitions, and K is no lever at all here) and a
+per-URL-CACHING origin (where the repeats are cache hits and the bound degrades to ``2 * 2**-(K_T+K_F)``, and
+more distinct clauses IS the lever).
+
+Every clause is metacharacter-identical in class (all carry ``'`` / ``AND`` / ``SELECT`` / ``--``), so a
+content-inspecting WAF that blocks one blocks all — the matched decoy (DIFFERENTIAL-REMEDIATION §3). They
+differ only in a **data-dependent predicate** the origin's DB must evaluate, so a *genuine* boolean firing
+reflects origin data; the run ``challenge`` rides as an **inert freshness marker only**, NEVER the
 discriminating predicate (§3 / §6).
 
 The round is assembled into ``TrialObservation.oracle_context`` in the ``boolean_inference_oracle`` round shape
-``{"true": …, "false_a": …, "false_b": …, "baseline": …}``; the driver runs the EXISTING
-``boolean_inference_oracle`` (SPRT) over the collected rounds and — for REMEDIATED — the EXISTING
-``differential_response_oracle`` WAF-closure test (``baseline`` vs ``false_a`` on ``status``+``structural``,
-``expect=same``). This adapter invents no oracle; it arranges probes and computes an informational per-round
-closure signal (the driver recomputes closure authoritatively).
+``{"trues": […], "falses": […], "true_repeats": […], "false_repeats": […], "baseline": …}``; the driver runs
+the EXISTING ``boolean_inference_oracle`` (SPRT) over the collected rounds and — for REMEDIATED — the EXISTING
+``differential_response_oracle`` WAF-closure test (``baseline`` vs each ``falses[j]`` on ``status``+
+``structural``, ``expect=same``). This adapter invents no oracle; it arranges probes and computes an
+informational per-round closure signal (the driver recomputes closure authoritatively).
 
-FAIL-CLOSED (§4.4 / §8 case 10): if ANY of the four probes is undelivered or malformed, the WHOLE round is
+FAIL-CLOSED (§4.4 / §8 case 10): if ANY probe of the round is undelivered or malformed, the WHOLE round is
 returned ``valid=False`` with a reason, so the driver fails the run closed rather than letting
 ``boolean_inference_oracle`` silently ``continue`` past a malformed round.
+
+CALLER OBLIGATION — EXECUTOR BUDGET. A round is ``1 + 2*K_T + 2*K_F`` gated fetches (17 at the shipped
+``K_T = K_F = 4``), so a run needs ``min_valid_trials * 17`` for the EDGE leg, the same again when the R2
+direct-to-origin re-drive is configured, plus the positive control. The ``HttpExecutor`` default
+``request_budget`` (100) is BELOW that — size it at construction, or the origin leg fails closed to
+"unavailable" (edge-only REMEDIATED, a-sanitize residual open) rather than silently under-probing.
 
 Invariants mirrored from :mod:`live_adapter`:
   * FATAL-2 — every ``framework.v2`` import is function-local; module scope is stdlib + vigil_core only.
@@ -69,6 +91,28 @@ _CLOSURE_DISCRIMINATOR = {"dimensions": ["status", "structural"], "expect": "sam
 # conservative proxy only over-triggers (→ INCONCLUSIVE, the safe direction), it never misses a flagged truncation.
 _BODY_EXCERPT_CAP = 8 * 1024
 
+# The boolean oracle will not CONFIRM below this many DISTINCT clauses per truth value. Enforced here too:
+# an adapter built below the floor could never reach STILL_VULNERABLE (every round would be a non-signal),
+# so it would silently answer "refute" for a live-vulnerable origin and lean entirely on the attribution
+# gate. Fail loudly at construction instead.
+_MIN_CLAUSES_PER_TRUTH_VALUE = 4
+
+
+def _identical_request_samples(round_ctx: dict) -> list:
+    """The observations in one round that answer the SAME BYTE-IDENTICAL request — ``falses[0]`` and its
+    repeat. These are the only samples that may legitimately feed the oracle's identical-request determinism
+    pre-filter; the OTHER clauses are DIFFERENT requests, so pooling them would make the "baseline" a
+    cross-request comparison and silently over-refuse. The pre-filter is a cheap screen only: soundness comes
+    from the per-round truth-value attribution the oracle recomputes."""
+    if not isinstance(round_ctx, dict):
+        return []
+    out = []
+    for key in ("falses", "false_repeats"):
+        arm = round_ctx.get(key)
+        if isinstance(arm, (list, tuple)) and arm and isinstance(arm[0], dict):
+            out.append(arm[0])
+    return out
+
 
 @dataclass(frozen=True)
 class _HttpRequest:
@@ -94,10 +138,24 @@ class DifferentialHttpAdapter:
         MUST DIFFER from ``param`` (a collision silently overwrites the probe value — refused in
         ``__post_init__``).
       * ``base_value`` — the benign value the parameter normally carries (the baseline probe; NO metachars).
-      * ``true_payload_template`` / ``false_payload_template`` — the data-dependent TRUE / FALSE predicate
-        payloads, each carrying the literal ``{challenge}`` inert-marker slot; metacharacter-identical in class.
-      * ``original_firing_rounds`` — RETAINED confirming ``probe_rounds`` (the harness-capability positive
-        control: the SAME boolean oracle still CONFIRMS on the known-vulnerable rounds).
+      * ``true_payload_templates`` / ``false_payload_templates`` — ``K_T >= 2`` DISTINCT always-TRUE and
+        ``K_F >= 2`` DISTINCT always-FALSE data-dependent predicate payloads, each carrying the literal
+        ``{challenge}`` inert-marker slot; metacharacter-identical in class. One CALLER OBLIGATION the
+        constructor cannot check (undecidable from the template string, like data-dependence itself, and
+        stated in full as residual (a) on ``boolean_inference_oracle``): they must VARY IN COMPARISON
+        SHAPE (``=`` / ``>`` / ``LIKE`` / a compound), not merely in their literals — a set whose truth
+        value tracks one SURFACE feature is partitioned by a CRS-942130-shape regex with no SQL engine at
+        all (measured: mints at rate 1.0). What that buys is refutation against every INCOMPLETE filter
+        and nothing more: residual (a) is OPEN, a filter COMPLETE over the shape set partitions any such
+        set (measured 600/600 on a static page), and an earlier revision of this bullet which required
+        "at least one SQL-EVALUATED pair (``1 IN (SELECT 1)`` vs ``1 IN (SELECT 2)``)" as the closure is
+        RETRACTED — over a one-row constant select that pair is literal equality, foldable in three lines.
+        FOUR per truth value is the hard floor (the oracle's CONFIRM floor — fewer can only ever refute,
+        which on the REMEDIATED branch is the dangerous direction); more distinct clauses is also what
+        lowers the per-URL-caching residual the oracle docstring states.
+      * ``original_firing_rounds`` — RETAINED confirming ``probe_rounds`` in the same truth-value shape (the
+        harness-capability positive control: the SAME boolean oracle still CONFIRMS on the known-vulnerable
+        rounds).
     """
 
     executor: Any
@@ -106,8 +164,8 @@ class DifferentialHttpAdapter:
     param: str
     nonce_param: str
     base_value: str
-    true_payload_template: str
-    false_payload_template: str
+    true_payload_templates: tuple
+    false_payload_templates: tuple
     original_firing_rounds: list = field(default_factory=list)
 
     bug_class: str = "boolean_sqli"
@@ -139,13 +197,34 @@ class DifferentialHttpAdapter:
     def __post_init__(self) -> None:
         self._host = urlsplit(self.base_url).hostname or ""
         self._slug = str(self.engagement or getattr(self.executor, "engagement_slug", "") or "")
+        # normalise to tuples so the recipe digest and the probe order are stable (the dataclass is mutable
+        # only during __post_init__; nothing rewrites these afterwards)
+        self.true_payload_templates = tuple(self.true_payload_templates)
+        self.false_payload_templates = tuple(self.false_payload_templates)
+        # TRUTH-VALUE ATTRIBUTION floor: one clause per truth value is ONE DRAW — it cannot attribute a
+        # response to a truth VALUE, only to a request. Fail closed at construction (the oracle would refuse
+        # such a round anyway; refusing here makes the misuse loud instead of a silent permanent INCONCLUSIVE).
+        for name, tmpls in (("true_payload_templates", self.true_payload_templates),
+                            ("false_payload_templates", self.false_payload_templates)):
+            if len(tmpls) < _MIN_CLAUSES_PER_TRUTH_VALUE:
+                raise ValueError(
+                    f"{name} needs >= {_MIN_CLAUSES_PER_TRUTH_VALUE} DISTINCT clauses of the SAME truth value "
+                    "that VARY IN COMPARISON SHAPE (= / > / LIKE / compound), not merely in their literals — "
+                    "too few draws cannot attribute a response to a TRUTH VALUE (an input-independent origin "
+                    "separates by coincidence), and a set whose truth value tracks one SURFACE feature is "
+                    "partitionable by a regex WAF with no SQL engine at all")
+            if len(set(tmpls)) != len(tmpls):
+                raise ValueError(f"{name} contains duplicate clauses — duplicates are not independent draws, "
+                                 "so they do not raise the attribution bar (spec §3/§8.5)")
         # Each metachar payload MUST carry the {challenge} inert-marker slot, else it silently degrades to a
         # payload that cannot thread the freshness marker — fail-closed at construction (mirrors live_adapter).
-        for name, tmpl in (("true_payload_template", self.true_payload_template),
-                           ("false_payload_template", self.false_payload_template)):
-            if "{challenge}" not in tmpl:
-                raise ValueError(f"{name} must contain the literal '{{challenge}}' inert-marker slot "
-                                 "(the run nonce rides the clause as a marker, never the predicate)")
+        for name, tmpls in (("true_payload_templates", self.true_payload_templates),
+                            ("false_payload_templates", self.false_payload_templates)):
+            for tmpl in tmpls:
+                if "{challenge}" not in tmpl:
+                    raise ValueError(f"{name} entries must each contain the literal '{{challenge}}' "
+                                     "inert-marker slot (the run nonce rides the clause as a marker, never "
+                                     "the predicate)")
         # SYNTACTIC non-degeneracy (spec §3 / §8.5): reject the two TRIVIAL degenerate forms — clauses that are
         # IDENTICAL, or that differ ONLY in the {challenge} marker (which would make the inert nonce FLIP the
         # boolean, forbidden by §3/§6). This is a STRING-level guard ONLY. It does NOT — and cannot — enforce
@@ -156,15 +235,18 @@ class DifferentialHttpAdapter:
         # i.e. they genuinely SEPARATED true from false on the known-vulnerable origin when the finding was
         # confirmed. A caller that pairs degenerate live templates with non-degenerate retained rounds is the
         # disclosed residual (DIFFERENTIAL-REMEDIATION §7), not caught here.
-        if self.true_payload_template == self.false_payload_template:
-            raise ValueError("true_payload_template and false_payload_template are IDENTICAL — the clauses must "
-                             "differ in a data-dependent predicate (a degenerate round cannot separate true from "
-                             "false and would trivially refute → a false REMEDIATED, spec §3/§8.5)")
-        if (self.true_payload_template.replace("{challenge}", "")
-                == self.false_payload_template.replace("{challenge}", "")):
-            raise ValueError("true/false payload templates differ ONLY in the {challenge} marker — the inert "
-                             "freshness nonce must NOT be the discriminating predicate (spec §3/§6); the "
-                             "data-dependent predicate difference must be independent of the challenge")
+        for t in self.true_payload_templates:
+            for f in self.false_payload_templates:
+                if t == f:
+                    raise ValueError("a true and a false payload template are IDENTICAL — the clauses must "
+                                     "differ in a data-dependent predicate (a degenerate round cannot separate "
+                                     "true from false and would trivially refute → a false REMEDIATED, spec "
+                                     "§3/§8.5)")
+                if t.replace("{challenge}", "") == f.replace("{challenge}", ""):
+                    raise ValueError("a true/false payload template pair differs ONLY in the {challenge} "
+                                     "marker — the inert freshness nonce must NOT be the discriminating "
+                                     "predicate (spec §3/§6); the data-dependent predicate difference must be "
+                                     "independent of the challenge")
         # Same collision guard as ``live_adapter``: ``_probe_url`` builds ``{param: value, nonce_param:
         # challenge}``, so a collision drops the BASELINE/TRUE/FALSE value and every probe in a round becomes
         # the SAME request — the run-level challenge is one value for all trials. That is exactly the
@@ -178,8 +260,9 @@ class DifferentialHttpAdapter:
         if not self.original_probe_recipe_digest:
             self.original_probe_recipe_digest = digest_payload({
                 "endpoint_path": self.endpoint_path, "param": self.param, "nonce_param": self.nonce_param,
-                "base_value": self.base_value, "true_payload_template": self.true_payload_template,
-                "false_payload_template": self.false_payload_template, "bug_class": self.bug_class,
+                "base_value": self.base_value,
+                "true_payload_templates": list(self.true_payload_templates),
+                "false_payload_templates": list(self.false_payload_templates), "bug_class": self.bug_class,
                 "channel": _BOOLEAN_INFERENCE_CHANNEL, "method": "GET"})
 
     # ---- identity (mirrors live_adapter's gated-probe + optional TLS-SPKI binding) -----------------
@@ -256,9 +339,14 @@ class DifferentialHttpAdapter:
     def _firing_context(self) -> dict:
         """The RETAINED confirming boolean ``FindingContext`` shape the driver re-fires ``boolean_inference_
         oracle`` over via the ORIGINAL oracle (harness capability). ``probe_rounds`` are the known-vulnerable
-        rounds recorded when the finding was first confirmed."""
-        return {"bug_class": self.bug_class, "probe_rounds": [dict(r) for r in self.original_firing_rounds],
-                "discriminator": dict(_BOOLEAN_DISCRIMINATOR)}
+        TRUTH-VALUE ATTRIBUTION rounds recorded when the finding was first confirmed — the positive control is
+        now held to the SAME 2-cluster bar a fresh mint is, not to a weaker derived-baseline gate.
+        ``false_baseline_samples`` is the determinism pre-filter derived from the ONE identical request the
+        retained rounds repeat (``falses[0]`` + its byte-identical ``false_repeats[0]``)."""
+        rounds = [dict(r) for r in self.original_firing_rounds]
+        baseline = [x for r in rounds for x in _identical_request_samples(r)]
+        return {"bug_class": self.bug_class, "probe_rounds": rounds,
+                "discriminator": dict(_BOOLEAN_DISCRIMINATOR), "false_baseline_samples": baseline}
 
     @property
     def origin_redrive_available(self) -> bool:
@@ -285,17 +373,21 @@ class DifferentialHttpAdapter:
         return self._drive_round(challenge=challenge, trial_index=trial_index, origin=True)
 
     def _drive_round(self, *, challenge: str, trial_index: int, origin: bool) -> TrialObservation:
-        """Build the four matched-decoy probes and gated-fetch each — through the edge, or DIRECT-to-origin when
-        ``origin`` — assembling the ``boolean_inference_oracle`` round. FAIL-CLOSED: any probe that is
-        undelivered (gate refusal / transport failure / empty status) makes the WHOLE round ``valid=False`` so
-        the driver fails the run closed (never a silently-dropped probe)."""
-        marker_b = self._marker_b(challenge)
-        probes = {
-            "baseline": self._baseline_value(challenge),
-            "true": self.true_payload_template.replace("{challenge}", challenge),
-            "false_a": self.false_payload_template.replace("{challenge}", challenge),
-            "false_b": self.false_payload_template.replace("{challenge}", marker_b),
-        }
+        """Build the matched-decoy TRUTH-VALUE ATTRIBUTION probes and gated-fetch each — through the edge, or
+        DIRECT-to-origin when ``origin`` — assembling the ``boolean_inference_oracle`` round: the baseline, the
+        ``K_T`` distinct always-TRUE clauses, the ``K_F`` distinct always-FALSE clauses, and a byte-IDENTICAL
+        repeat of every one of those clauses. FAIL-CLOSED: any probe that is undelivered (gate refusal /
+        transport failure / empty status) makes the WHOLE round ``valid=False`` so the driver fails the run
+        closed (never a silently-dropped probe)."""
+        trues = [t.replace("{challenge}", challenge) for t in self.true_payload_templates]
+        falses = [f.replace("{challenge}", challenge) for f in self.false_payload_templates]
+        probes: dict[str, str] = {"baseline": self._baseline_value(challenge)}
+        for i, v in enumerate(trues):
+            probes[f"true[{i}]"] = v
+            probes[f"true_repeat[{i}]"] = v      # byte-identical repeat — the determinism control
+        for j, v in enumerate(falses):
+            probes[f"false[{j}]"] = v
+            probes[f"false_repeat[{j}]"] = v
         via = "origin" if origin else "edge"
         responses: dict[str, dict] = {}
         for name, value in probes.items():
@@ -308,7 +400,7 @@ class DifferentialHttpAdapter:
                                         detail=f"{via} {name} probe send crashed")
             status = (resp or {}).get("status")
             if status in (0, None):
-                # A gate refusal or transport failure on ANY of the four probes makes the matched decoy
+                # A gate refusal or transport failure on ANY of the five probes makes the matched decoy
                 # uninterpretable — fail the whole round closed (§4.4), never partial. For the ORIGIN leg this
                 # is exactly the "origin unreachable / IP out of charter scope" case → edge-only, residual open.
                 return TrialObservation(reachable=False, valid=False, oracle_context=None,
@@ -326,19 +418,26 @@ class DifferentialHttpAdapter:
             responses[name] = {"status": int(status), "body": body, "truncated": truncated}
 
         round_ctx: dict[str, Any] = {
-            "true": responses["true"], "false_a": responses["false_a"],
-            "false_b": responses["false_b"], "baseline": responses["baseline"],
+            "trues": [responses[f"true[{i}]"] for i in range(len(trues))],
+            "true_repeats": [responses[f"true_repeat[{i}]"] for i in range(len(trues))],
+            "falses": [responses[f"false[{j}]"] for j in range(len(falses))],
+            "false_repeats": [responses[f"false_repeat[{j}]"] for j in range(len(falses))],
+            "baseline": responses["baseline"],
         }
         # Informational adapter-side WAF-closure (the DRIVER recomputes it authoritatively over the round).
         from framework.v2.verify.oracles import differential_response_oracle   # lazy — FATAL-2
-        round_ctx["waf_closed"] = bool(differential_response_oracle(
-            responses["baseline"], responses["false_a"], dict(_CLOSURE_DISCRIMINATOR)).fired)
+        round_ctx["waf_closed"] = all(
+            differential_response_oracle(responses["baseline"], f, dict(_CLOSURE_DISCRIMINATOR)).fired
+            for f in round_ctx["falses"])
         # Live-marker reflection (§4 / LOW-1): the inert challenge marker must come back on the un-WAF'd
         # baseline (a query-stripping cache / non-echoing edge that serves one body for all probes fails this).
-        echoed = challenge in responses["baseline"]["body"] or challenge in responses["false_a"]["body"]
+        echoed = (challenge in responses["baseline"]["body"]
+                  or any(challenge in f["body"] for f in round_ctx["falses"]))
+        n = len(probes)
         return TrialObservation(reachable=True, valid=True, oracle_context=round_ctx,
                                 freshness_level=Freshness.F1_TARGET_ECHOES, nonce_echoed=echoed,
-                                detail=f"{via} differential round {trial_index}: 4/4 matched-decoy probes delivered")
+                                detail=f"{via} differential round {trial_index}: {n}/{n} matched-decoy probes "
+                                       "delivered")
 
     def _probe_request(self, value: str, challenge: str, *, origin: bool) -> _HttpRequest:
         """The gated request for one probe. EDGE: the target hostname URL, no extra headers. ORIGIN (R2): the
@@ -356,12 +455,6 @@ class DifferentialHttpAdapter:
         return _HttpRequest(url=f"http://{netloc}{path}?{query}", method="GET", headers=(("Host", host),))
 
     # ---- helpers -----------------------------------------------------------------------------------
-    @staticmethod
-    def _marker_b(challenge: str) -> str:
-        """A SECOND inert marker for ``false_b``, derived DETERMINISTICALLY from the challenge (no RNG), so
-        ``false_a``/``false_b`` differ ONLY in the inert marker while staying metacharacter-identical."""
-        return f"{challenge}~b"
-
     def _baseline_value(self, challenge: str) -> str:
         """The benign baseline value carrying the inert challenge marker and NO exploit metacharacters."""
         return f"{self.base_value}{challenge}"
@@ -381,8 +474,13 @@ class DifferentialHttpAdapter:
 def _assert_conforms() -> None:
     probe = DifferentialHttpAdapter(
         executor=None, base_url="http://127.0.0.1/", endpoint_path="/", param="q", nonce_param="rc",
-        base_value="1", true_payload_template="1' AND SUBSTR(@@version,1,1)>'' -- {challenge}",
-        false_payload_template="1' AND SUBSTR(@@version,1,1)>'~~~' -- {challenge}")
+        base_value="1",
+        true_payload_templates=("1' AND SUBSTR(@@version,1,1)>'' -- {challenge}",
+                                "1' AND 17=17 -- {challenge}", "1' AND 'b'>'a' -- {challenge}",
+                                "1' AND 'ab' LIKE 'a%' -- {challenge}"),
+        false_payload_templates=("1' AND SUBSTR(@@version,1,1)>'~~~' -- {challenge}",
+                                 "1' AND 17=18 -- {challenge}", "1' AND 'a'>'b' -- {challenge}",
+                                 "1' AND 'ab' LIKE 'z%' -- {challenge}"))
     assert isinstance(probe, LiveTargetAdapter)
 
 

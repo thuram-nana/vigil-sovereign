@@ -21,6 +21,8 @@ from __future__ import annotations
 import http.server
 import json
 import re
+import secrets
+import sqlite3
 import threading
 import time
 from pathlib import Path
@@ -81,6 +83,25 @@ def _report(check_id: str, path: str, port: int, bug_class: str, param: str = "q
 _SLEEP_RE = re.compile(r"(?:pg_)?sleep\(\s*(\d*\.?\d+)\s*\)", re.IGNORECASE)
 _ARITH_RE = re.compile(r"(\d{4,})\s*\*\s*(\d{4,})")
 _HITS = {"n": 0}
+_BOOL_DB = sqlite3.connect(":memory:", check_same_thread=False)
+_BOOL_DB.execute("CREATE TABLE users(id INTEGER, name TEXT)")
+_BOOL_DB.executemany("INSERT INTO users VALUES(?, ?)",
+                     list(enumerate("alice bob carol dave erin frank grace heidi".split())))
+_BOOL_DB_LOCK = threading.Lock()
+
+
+def _bool_rows(value: str) -> int:
+    """``/bool`` is a REAL string-concatenated sqlite3 injection, so the origin EVALUATES the injected
+    clause and answers its TRUTH VALUE — not a hard-coded payload substring. That is what lets the
+    re-drive's SHAPE-VARIED always-true clauses (`=`, `>`, `LIKE`, compound, `<>`, `BETWEEN`) all land on
+    the SAME response and the always-false ones on another: the 2-cluster split the oracle demands. A
+    substring fixture would instead answer the payload STRING, which is the very confusion that let a
+    purely lexical WAF masquerade as a boolean channel."""
+    with _BOOL_DB_LOCK:
+        try:
+            return len(_BOOL_DB.execute("SELECT id, name FROM users WHERE name = '" + value + "'").fetchall())
+        except sqlite3.Error:
+            return -1
 
 
 def _esc(s: str) -> str:
@@ -124,12 +145,22 @@ class _App(http.server.BaseHTTPRequestHandler):
             return self._html("<html><body><p>welcome</p></body></html>")
 
         # ----- boolean-blind SQLi (name = '<value>') -----
-        if path == "/bool":                      # VULNERABLE: OR-tautology selects every row; false selects none
-            true = ("'1'='1" in value) or ("1=1" in value)
+        if path == "/bool":                      # VULNERABLE: a REAL sqlite3 string-concatenation sink
+            n = _bool_rows(value)
+            if n < 0:
+                return self._html("<html><body>query error, please retry</body></html>")
             return self._html("<html><body>alice bob carol dave erin frank grace heidi</body></html>"
-                              if true else "<html><body>no results found for your query</body></html>")
-        if path == "/bool-random":               # DECOY: body changes EVERY request → within-pair control trips
-            return self._html(f"<html><body>token {_HITS['n']} {time.time_ns()} results</body></html>")
+                              if n else "<html><body>no results found for your query</body></html>")
+        if path == "/bool-random":               # DECOY: a purely-dynamic page — a long per-request RANDOM token
+            # dominates the body, so ANY two responses (incl. two identical repeats) diverge lexically well past
+            # the differential threshold → the same-request STABILITY control trips EVERY round → SPRT refutes.
+            return self._html(f"<html><body>session {secrets.token_hex(64)} — no results</body></html>")
+        if path == "/bool-dynamic":              # DECOY (DETERMINISTIC always-varies, no RNG): the body LENGTH
+            # steps by a large fixed amount per request (mod-cycled so it never converges), so a byte-identical
+            # clause repeat comes back different → the determinism hard-refute trips and the within-truth
+            # clusters never agree → 0 false FACTs, DETERMINISTICALLY.
+            pad = "=" * (40 + (_HITS["n"] % 5) * 90)
+            return self._html(f"<html><body>catalogue {pad} listing</body></html>")
         if path == "/bool-static":               # DECOY: identical body for ANY input → no across differential
             return self._html("<html><body>welcome to the catalogue, browse our products</body></html>")
 
@@ -170,8 +201,16 @@ def _run_mint(tmp_path, signers, check_id, path, bug_class, param="q"):
 
 
 def _assert_fact_reverifies(mr, tr, tmp_path):
-    """A minted FACT: signed cert re-verifies OFFLINE over its retained context, a TAMPER is rejected, and the
-    persisted proofs/reverifiable.json re-fires (and fails closed on tamper) via the `framework.v2 verify` CLI."""
+    """A minted FACT: signed cert re-verifies OFFLINE over its retained context, a GROSS TAMPER is rejected,
+    and the persisted proofs/reverifiable.json re-fires (and fails closed on tamper) via the
+    `framework.v2 verify` CLI.
+
+    "Tamper-rejected" here means exactly two things and no more: (1) the certificate SIGNATURE and digest
+    binding reject ANY edit, and (2) re-execution over the retained context rejects a GROSS edit — the
+    evidence of the fire removed, an arm dropped, a page swapped. Re-execution is NOT a byte integrity
+    check: the oracles compare with tolerances (the boolean channel at 5% length / 10% lexical), so a
+    sub-threshold edit inside a retained body does not by itself change a verdict. Byte integrity is the
+    signature's job."""
     from framework.v2.evidence.certify import verify_certificate
     from framework.v2.verify import reverify
 
@@ -209,10 +248,12 @@ def _corrupt_context(oc: dict) -> None:
         oc["eval_observed"] = "<html><body><p>welcome</p></body></html>"
     if "observed_sink" in oc:                    # reflected XSS: neutralise the live element
         oc["observed_sink"] = "<html><body>nothing reflected here</body></html>"
-    if "probe_rounds" in oc:                     # boolean: make every true/false pair identical (no signal)
-        for r in oc["probe_rounds"]:
+    if "probe_rounds" in oc:                     # boolean: collapse the TRUE and FALSE clusters onto one
+        for r in oc["probe_rounds"]:             # response, so the truth-value attribution can no longer split
             if isinstance(r, dict):
-                r["true"] = r["false_a"] = r["false_b"] = {"status": 200, "body": "same"}
+                for arm in ("trues", "falses", "true_repeats", "false_repeats"):
+                    if isinstance(r.get(arm), list):
+                        r[arm] = [{"status": 200, "body": "same"} for _ in r[arm]]
     if "treatment_latencies" in oc:              # timing: flatten the treatment to the baseline (no shift)
         oc["treatment_latencies"] = list(oc.get("baseline_latencies") or [1.0, 1.1, 1.0, 1.2, 1.1, 1.0])
         oc.pop("timing_dose", None)
@@ -294,13 +335,25 @@ def test_boolean_sqli_mints_a_signed_fact_that_reverifies_offline(monkeypatch, t
 
 
 def test_boolean_sqli_dynamic_page_is_refused(monkeypatch, tmp_path):
-    """FP: a page whose response varies with ANY input — the within-pair control trips (the two FALSE responses
-    disagree), so the SPRT signal is 0 every round and it refutes → LEAD."""
+    """FP (randomized endpoint): a page whose response varies with ANY input — a long per-request random token
+    dominates the body, so the same-request STABILITY control (an identical false repeat must be non-differential)
+    trips EVERY round; the SPRT signal is 0 every round and it refutes → LEAD. Was ~40% false-FACT before the fix."""
     _grant_active_recon(monkeypatch)
     _charter(tmp_path, "127.0.0.1")
     signers, _ = _signers_and_trust()
     mr, _ = _run_mint(tmp_path, signers, "bool-rand", "/bool-random", "boolean_sqli")
     assert mr is None or not mr.is_fact, "a dynamic page (varies with any input) must NOT mint a boolean FACT"
+
+
+def test_boolean_sqli_deterministic_dynamic_page_is_refused(monkeypatch, tmp_path):
+    """FP (DETERMINISTIC always-varies endpoint, no RNG): the body length steps by a large fixed amount per
+    request, so every control (across / within_same / stability) sees a differential — signal 0 EVERY round,
+    the SPRT refutes DETERMINISTICALLY. A non-flaky regression that pins the fix without relying on randomness."""
+    _grant_active_recon(monkeypatch)
+    _charter(tmp_path, "127.0.0.1")
+    signers, _ = _signers_and_trust()
+    mr, _ = _run_mint(tmp_path, signers, "bool-dyn", "/bool-dynamic", "boolean_sqli")
+    assert mr is None or not mr.is_fact, "a deterministic always-varies page must NOT mint a boolean FACT"
 
 
 def test_boolean_sqli_static_page_is_refused(monkeypatch, tmp_path):
