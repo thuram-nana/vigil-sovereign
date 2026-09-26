@@ -367,9 +367,26 @@ class HexstrikeAgentBody(AgentBody):
         # just counts — so the engine seam can propagate a body-routed FACT into the run report through the SAME
         # already-confirmed-fact path it uses for fireteam facts. The body still supplies NO provenance; these
         # facts were minted by the RUNNER's own admit()+certify, never by the body/brain.
-        return ActionOutcome(executed=True, ok=bool(facts),
+        # W2 — ``ok`` must be TRUTHFUL PER TOOL CLASS. For an ORACLE-MAPPED tool, "the runner minted a
+        # FACT" is the right success predicate and stays exactly as it was. For a LEAD ENRICHER (httpx/ffuf,
+        # whose re-drive branch is fact_capable=false) ``ok=bool(facts)`` is a CATEGORY ERROR: that path can
+        # NEVER mint, so a fully successful enrichment would report ``executed=True, ok=False`` and any
+        # consumer keying on ``ok`` (the run report, ``learn`` below, a retry loop) would read a healthy run
+        # as a failure. Its honest success predicate is "the tool ran and its gated re-drives completed":
+        # the run was not refused (checked above) and the tool itself did not error. ``ok=True`` here
+        # asserts ONLY that — never that anything was confirmed. ``n_facts`` stays 0 on this path by
+        # construction, and the LEADs carry their own per-item outcome, so nothing reads it as a FACT.
+        lead_enricher = action.kind in _LEAD_ENRICHER_TOOLS
+        tool_errored = bool(getattr(res, "tool_errored", False))
+        ok = (not tool_errored) if lead_enricher else bool(facts)
+        return ActionOutcome(executed=True, ok=ok,
                              detail={"n_facts": len(facts), "n_leads": len(leads),
                                      "reason": getattr(res, "reason", ""), "tool": action.kind,
+                                     # what ``ok`` MEANS for this row, so a consumer never has to infer it:
+                                     # "fact" => ok==(a FACT was minted); "lead_enricher" => ok==(the tool
+                                     # ran and its gated re-drives completed), which implies NO fact.
+                                     "ok_semantics": "lead_enricher" if lead_enricher else "fact",
+                                     "tool_errored": tool_errored,
                                      "facts": facts, "leads": leads,
                                      "contexts": dict(getattr(res, "contexts", {}) or {})})
 

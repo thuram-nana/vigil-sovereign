@@ -278,9 +278,10 @@ _NUMERIC_ROUTE_B3 = re.compile(r"^/api/users/(\d+)/?$")
 
 class _NumericRouteErrApp(http.server.BaseHTTPRequestHandler):
     """RP2 BLOCK-3 — a special-cased ERROR: /api/users/0 -> 200 {"error":"invalid id"} while any other numeric
-    id -> 200 {"user":null} (the not-found baseline). Under the NARROWED claim this is a TRUE-if-modest FACT
-    (its response differs from the stable same-status sibling response and no minimal-edit-distance
-    neighbour returned it), NOT a "live endpoint" overclaim — the fix is the claim string, checked below."""
+    id -> 200 {"user":null} (the sibling cohort's own stable same-status answer). The NARROWED claim is a
+    TRUE-if-modest OBSERVATION here (its response differs from the stable same-status sibling response and
+    no minimal-edit-distance neighbour returned it) — but the branch is LEAD-ONLY, so it mints NOTHING, and
+    it is not a "live endpoint" overclaim either. The fix is the claim string, checked below."""
 
     def log_message(self, *a):  # noqa: D401
         pass
@@ -693,7 +694,7 @@ def _grant_active_recon(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(entitlement, "require_capability", lambda cap: None)
 
 
-# ---- canned tool backends (the tool is only a PROPOSER; VIGIL's own gated GET is the fact authority) ---
+# ---- canned tool backends (the tool is only a PROPOSER; VIGIL's own gated GET is the LEAD enricher) ----
 class _CannedBackend:
     """Returns a fixed stdout for ANY argv — supplies a tool's real-format proposal with no binary present."""
     name = "canned"
@@ -1151,7 +1152,12 @@ def test_rp5_classes_that_ended_the_fact_are_permanent_regressions(factory, path
     from vigil_integration.live.web_redrive import _oracle_signal, endpoint_liveness_redrive
     signers, _ = _signers_and_trust()
     path = pathfn()
-    runs = 40
+    # RUNS=80, NOT 40 (red-pen advisory). The bite assertion is a binomial tail: RP5-B measures a fire-rate
+    # of p~=0.167 and asserts min_fire=4, so at runs=40 P(fired < 4) ~= 8% — a spurious red roughly one CI
+    # run in twelve. At runs=80 the same min_fire=4 gives P ~= 0.3%. min_fire is deliberately NOT lowered:
+    # it is the only thing stopping the zero-FACT assertion from passing vacuously. (RP5-A measured 71/120
+    # ~= 59%, so it is nowhere near its own floor either way.)
+    runs = 80
     facts, fired = 0, 0
     try:
         srv = _serve(factory())
@@ -1723,6 +1729,39 @@ def test_the_r4_httpx_spec_pins_the_correlatable_user_agent():
         assert "random" not in tok.lower(), f"the argv mentions a random identity: {tok!r}"
     # the https spec pins it too (the scheme must not be able to drop the header)
     assert "-H" in httpx_url_scan(scheme="https").build_argv("127.0.0.1")
+
+
+def test_the_httpx_user_agent_pin_is_structural_not_merely_positional():
+    """The UA pin must survive a CALLER, not just the default argv (red-pen advisory A).
+
+    ``build_argv`` APPENDS ``extra_args`` AFTER the pinned ``-H User-Agent: …``, so before this the pin was
+    only POSITIONALLY safe: ``extra_args=("-random-agent",)`` turns httpx's identity rotation back on, and
+    ``extra_args=("-H", "User-Agent: Mozilla/5.0")`` sets a SECOND User-Agent header that WINS. Either one
+    silently defeats constitution §VI.4. Nothing reaches ``extra_args`` on today's brain seam (only
+    ``scheme``/``wordlist`` are threaded), which is exactly why this has to be enforced STRUCTURALLY — at
+    ToolSpec CONSTRUCTION, before any argv or any packet exists — rather than left to the call sites."""
+    import pytest as _pytest
+    from vigil_integration.live.external_tool import _CORRELATABLE_USER_AGENT, httpx_url_scan
+
+    for banned in (("-random-agent",), ("--random-agent",), ("-silent", "-random-agent")):
+        with _pytest.raises(ValueError, match="random-agent"):
+            httpx_url_scan(extra_args=banned)
+    for shadow in (("-H", "User-Agent: Mozilla/5.0"),
+                   ("-header", "user-agent: curl/8"),
+                   ("--header", "  User-Agent: x  "),
+                   ("-H=User-Agent: Mozilla/5.0",),
+                   ("-silent", "-H", "User-Agent: Mozilla/5.0")):
+        with _pytest.raises(ValueError, match="second User-Agent"):
+            httpx_url_scan(extra_args=shadow)
+    # a NON-UA header and other benign flags still build, and the pin is still the ONLY User-Agent.
+    argv = httpx_url_scan(extra_args=("-H", "X-Trace: 1", "-silent")).build_argv("127.0.0.1")
+    uas = [argv[i + 1] for i, t in enumerate(argv[:-1]) if t == "-H"
+           and argv[i + 1].lower().startswith("user-agent:")]
+    assert uas == [f"User-Agent: {_CORRELATABLE_USER_AGENT}"], argv
+    assert "X-Trace: 1" in argv and "-silent" in argv, argv
+    # and the refusal happens at CONSTRUCTION — no ToolSpec, therefore no argv, therefore no packet.
+    with _pytest.raises(ValueError):
+        httpx_url_scan(scheme="https", extra_args=("-random-agent",))
 
 
 def test_the_r4_ffuf_spec_pins_maxtime_so_a_sigkill_cannot_lose_the_report():

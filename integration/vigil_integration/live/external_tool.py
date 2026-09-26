@@ -342,8 +342,11 @@ class ProposedService:
 class ProposedURL:
     """A URL a WEB-DISCOVERY tool (httpx/ffuf) PROPOSED. ``host`` is PINNED to the scope-authorised target
     (never a host the tool printed — the scope-safety property the port-scanner parsers also have); ``port``
-    is parsed from the URL for the canonical Observation. The URL is only a LEAD — the FACT is minted solely
-    by VIGIL's OWN gated GET re-drive (live.web_redrive.endpoint_liveness_redrive), never the tool's row."""
+    is parsed from the URL for the canonical Observation. The URL is only a LEAD, and it STAYS a LEAD: the
+    gated GET re-drive it feeds (live.web_redrive.endpoint_liveness_redrive) runs on the
+    ``achieved_state.endpoint_liveness`` branch, which is declared fact_capable=false AND clean_capable=false
+    PERMANENTLY (W2 downgrade). Nothing on this path mints a FACT — not the tool's row, and not VIGIL's own
+    capture; the re-drive only ENRICHES the lead with a retained, offline-re-verifiable capture."""
     url: str
     host: str
     port: int = 0
@@ -727,13 +730,19 @@ def nmap_service_scan(*, ports: str = "1-1024", extra_args: Sequence[str] = ()) 
     return ToolSpec("nmap", build, propose, version_argv=lambda: ["nmap", "--version"])
 
 
-# --- HexStrike W2: WEB-DISCOVERY ToolSpecs (httpx / ffuf) — the endpoint-LIVENESS FACT path -----------
+# --- HexStrike W2: WEB-DISCOVERY ToolSpecs (httpx / ffuf) — the endpoint-LIVENESS LEAD-ENRICHER path ---
 # These are WEB-DISCOVERY proposers: they propose URLs, and ``run_external_tool`` re-drives each through the
 # gated web LIVENESS re-drive (live.web_redrive.endpoint_liveness_redrive → the achieved_state.endpoint_liveness
-# branch), the L7 analogue of the SERVICE_REACHABILITY handshake. The tool's "found URL" bytes are only a LEAD;
-# the FACT is minted solely by VIGIL's OWN plain gated GET (target + a known-nonexistent sibling control). Each
-# parser PINS the host to the already-scope-authorised ``target`` (never a host the tool printed), and every
-# flag is built SERVER-SIDE so no model/brain-supplied flag reaches the tool.
+# branch). That branch is LEAD-ONLY, PERMANENTLY (the W2 downgrade): it is declared fact_capable=false AND
+# clean_capable=false, so ``verdict.admit()`` maps a FIRED oracle to a LEAD and a conclusive non-firing to
+# INCONCLUSIVE. NOTHING on this path mints a FACT and nothing on it reports CLEAN. The tool's "found URL"
+# bytes are only a LEAD, and VIGIL's OWN plain gated GETs (the target, resampled, plus the two runner-built
+# sibling cohorts) only ENRICH that lead with a retained, offline-re-verifiable capture.
+# The cohorts are NOT "known-nonexistent sibling controls" — that claim is WITHDRAWN and was measurably
+# FALSE: in the validator classes the siblings' stable answer is the route's REJECT body and the TARGET is
+# the phantom (see the WITHDRAWN CLAIMS list in ``live.web_redrive``). Each parser PINS the host to the
+# already-scope-authorised ``target`` (never a host the tool printed), and every flag is built SERVER-SIDE
+# so no model/brain-supplied flag reaches the tool.
 _URL_SCHEMES = ("http", "https")
 
 
@@ -808,6 +817,46 @@ def _validated_wordlist(wordlist: str) -> str:
     return v
 
 
+#: httpx flags that would UNDO the correlatable-identity pin. ``-random-agent`` DEFAULTS TRUE in httpx, so
+#: the pin is an explicit ``-H User-Agent: …``; both spellings of the flag would turn the rotation back on.
+_HTTPX_RANDOM_AGENT_FLAGS = frozenset({"-random-agent", "--random-agent"})
+#: httpx's header flag, every spelling. A SECOND ``-H User-Agent: …`` appended AFTER the pin wins (last
+#: header set), which is the positional weakness this rejection closes.
+_HTTPX_HEADER_FLAGS = frozenset({"-H", "-header", "--header", "-headers", "--headers"})
+
+
+def _validated_httpx_extra_args(extra_args: "Sequence[str]") -> "tuple[str, ...]":
+    """Return ``extra_args`` as a tuple, or raise ``ValueError`` — the UA pin made STRUCTURAL.
+
+    ``build_argv`` APPENDS ``extra_args`` AFTER the pinned ``-H User-Agent: …``, so the pin was only
+    POSITIONALLY safe: ``extra_args=("-random-agent",)`` re-enables httpx's identity rotation, and
+    ``extra_args=("-H", "User-Agent: Mozilla/5.0")`` sets a SECOND User-Agent header that wins. Either one
+    silently defeats §VI.4 of the operating constitution (an authorised owner-test must be CORRELATABLE —
+    "you are not evading them"). Nothing reaches ``extra_args`` today (``brains.hexstrike_body._spec_for_kind``
+    passes only ``scheme``/``wordlist``), so this is a CONSTRUCTION-TIME tripwire for a future caller, not a
+    behaviour change: it refuses BEFORE any argv or any packet exists, exactly like the scheme/wordlist
+    schemas. ``_spec_for_kind`` turns the ValueError into a blocked LEAD (the documented fail-closed path).
+    """
+    argv = tuple(str(a) for a in (extra_args or ()))
+    for i, raw in enumerate(argv):
+        tok = raw.strip()
+        if tok.lower() in _HTTPX_RANDOM_AGENT_FLAGS:
+            raise ValueError(
+                f"extra_args may not contain {raw!r}: httpx's random-agent rotates the probe identity per "
+                f"request, and this engine pins ONE correlatable User-Agent "
+                f"({_CORRELATABLE_USER_AGENT!r}) so the operator can grep their own logs for this traffic")
+        # ``-H <value>`` (two tokens) and ``-H=<value>`` (glued) both carry a header VALUE.
+        flag, sep, glued = tok.partition("=")
+        if flag in _HTTPX_HEADER_FLAGS:
+            value = glued if sep else (argv[i + 1] if i + 1 < len(argv) else "")
+            if value.strip().lower().startswith("user-agent:"):
+                raise ValueError(
+                    f"extra_args may not set a second User-Agent header ({value.strip()!r}): it is appended "
+                    f"AFTER the pinned -H {_CORRELATABLE_USER_AGENT!r} and would override it. The engine "
+                    f"presents ONE correlatable identity; use the pin, do not shadow it")
+    return argv
+
+
 #: The identity every tool VIGIL drives must present. DUPLICATED deliberately from
 #: ``live.executor._CORRELATABLE_USER_AGENT`` (the R4 runner is framework-free and must not import the
 #: governed executor); ``test_the_r4_httpx_spec_pins_the_correlatable_user_agent`` pins the two equal.
@@ -819,7 +868,8 @@ def httpx_url_scan(*, scheme: str = "http", extra_args: Sequence[str] = ()) -> T
     ``httpx -u <url> -silent -no-color -disable-update-check -H 'User-Agent: …' -json -probe`` (JSONL on
     stdout, correlatable, no update phone-home); ``propose_urls`` parses each non-``failed`` record's ``url``
     (via the shipped ``parse_httpx_export``) into a host-PINNED :class:`ProposedURL`. The runner re-drives
-    each URL with its OWN plain gated GET — httpx's row is never the FACT authority.
+    each URL with its OWN plain gated GET, on a branch that is LEAD-ONLY and mints nothing: httpx's row was
+    never evidence, and the re-drive only enriches the lead.
 
     ``-H User-Agent: …`` is NOT cosmetic and is NOT optional. httpx's own ``-random-agent`` DEFAULTS TRUE, so
     without an explicit header EVERY probe leaves under a randomly chosen BROWSER identity — identity
@@ -833,9 +883,13 @@ def httpx_url_scan(*, scheme: str = "http", extra_args: Sequence[str] = ()) -> T
 
     ``scheme`` is validated against {http, https} HERE (BLOCK-5): it is interpolated into the argv, and the
     scope gate authorises the host STRING, not the argv — so an unvalidated scheme sends a real packet to an
-    out-of-scope authority before any FACT-side host pin can refuse it. An invalid value raises ValueError
-    (``_spec_for_kind`` turns that into a blocked LEAD) before any argv exists."""
+    out-of-scope authority before any host pin on the parsed result can refuse it. ``extra_args`` is
+    validated HERE too, which is what makes the User-Agent pin STRUCTURAL rather than merely positional: it
+    is appended AFTER the pin, so ``-random-agent`` or a second ``-H User-Agent: …`` would silently win (see
+    :func:`_validated_httpx_extra_args`). Either invalid value raises ValueError (``_spec_for_kind`` turns
+    that into a blocked LEAD) before any argv exists."""
     scheme = _validated_scheme(scheme)
+    extra_args = _validated_httpx_extra_args(extra_args)
 
     def build(target: str) -> list[str]:
         url = str(target) if "://" in str(target) else f"{scheme}://{target}/"
@@ -859,7 +913,8 @@ def httpx_url_scan(*, scheme: str = "http", extra_args: Sequence[str] = ()) -> T
 
 
 # Default content-discovery wordlist (Kali path). Only used to BUILD a valid argv for a real run; the
-# conformance/tests drive a canned backend, and the FACT is VIGIL's own gated GET — never ffuf's bytes.
+# conformance/tests drive a canned backend, and the evidence is VIGIL's own gated GET — never ffuf's bytes
+# (and on this LEAD-ONLY branch that evidence enriches a lead; it never becomes a FACT).
 _FFUF_DEFAULT_WORDLIST = "/usr/share/wordlists/dirb/common.txt"
 #: ffuf's OWN in-tool scan budget, in seconds. ffuf writes its results ONCE, when the job ends, and the
 #: runner kills an over-running subprocess with SIGKILL, which ffuf cannot catch — measured by the governed
@@ -878,7 +933,8 @@ def ffuf_content_scan(*, wordlist: str = "", extra_args: Sequence[str] = ()) -> 
     ``ffuf -u <base>/FUZZ -w <wordlist> -noninteractive -maxtime <n> -json`` (JSONL results on stdout,
     ``input`` values base64 but ``url`` plain — the location the parser reads); ``propose_urls`` parses each
     result's ``url`` (via the shipped ``parse_ffuf_export``) into a host-PINNED :class:`ProposedURL`. The
-    runner re-drives each URL with its OWN plain gated GET — ffuf's row is never the FACT authority.
+    runner re-drives each URL with its OWN plain gated GET, on a branch that is LEAD-ONLY and mints nothing:
+    ffuf's row was never evidence, and the re-drive only enriches the lead.
 
     ``-maxtime`` is soundness, not hygiene: without it a wordlist that outlasts the runner's wall clock is
     SIGKILLed and the whole run reports nothing, indistinguishably from "ffuf never ran" (see
@@ -1243,7 +1299,10 @@ def _run_web_liveness_tool(
     outcomes: list = []
     if tool_errored:
         outcomes.append({"check_id": spec.name, "bug_class": "", "outcome": Outcome.ERROR.value})
-    _OUT = {"positive": Outcome.POSITIVE.value, "clean": Outcome.CLEAN.value}
+    # Only "positive" needs a mapping; everything else falls through to INCONCLUSIVE below. There is no
+    # "clean" key ON PURPOSE: ``achieved_state.endpoint_liveness`` is clean_capable=false, the re-drive can
+    # no longer return that outcome, and a dormant mapping is how a withdrawn claim comes back by accident.
+    _OUT = {"positive": Outcome.POSITIVE.value}
     # OPSEC CAP: de-duplicate FIRST (a duplicate costs nothing and must not consume the budget), then take
     # at most the derived cap. Everything past it is dropped LOUDLY, never quietly.
     unique: "list[ProposedURL]" = []

@@ -153,7 +153,17 @@ LLM_CLAIM_WEB_FACT_CLASSES = tuple(c for c in WEB_FACT_CLASSES if c != "oidc_red
 #
 # The predicate is a pure JSON AST over RAW status codes + RAW body hashes of every RETAINED sample, so a
 # consumer re-verifies it OFFLINE like every predicate_oracle context — bounded by the retention trust
-# boundary stated above. The CLEAN direction is WITHDRAWN too: a hard 404/410 at the exact URL is
+# boundary stated above. READ THAT AT THE PREDICATE LEVEL ONLY: re-evaluating the AST over the retained
+# samples reproduces the same boolean, and that is the whole of the claim. The SHIPPED verify CLI does NOT
+# reproduce it — ``sibling_response_differential`` is deliberately NOT in ``BUG_CLASS_ORACLES``, so
+# ``python3 -m framework.v2 verify`` REFUSES the class and reports ``reproduced=False`` (measured). That is
+# correct, not a gap: this branch mints no FACT, so there is no certificate for the CLI to re-verify.
+# MEASURED: ``verify.reverify.reverify_context(retained_context, bug_class="sibling_response_differential")``
+# returns ``reproduced=False`` ("retained evidence does NOT re-confirm"), while ``_oracle_signal`` over the
+# SAME retained context still fires — the two are different questions, and only the predicate-level one is
+# claimed here.
+#
+# The CLEAN direction is WITHDRAWN too: a hard 404/410 at the exact URL is
 # control-independent, but on that path the sibling and twin cohorts are NEVER PROBED AT ALL, so a
 # "conclusive non-firing" of a DIFFERENTIAL predicate would assert an absence nothing measured — and a 404
 # is routinely what a server returns for a resource that EXISTS but is not authorised. Both directions are
@@ -166,8 +176,9 @@ ENDPOINT_LIVENESS_BUG_CLASS = "sibling_response_differential"
 ENDPOINT_LIVENESS_BRANCH = "achieved_state.endpoint_liveness"
 # served-resource statuses the TARGET must return (2xx/3xx). 401/403/405/5xx are deliberately NOT minted here:
 # they are exists-but-gated / error responses that a plain GET cannot soundly separate from a blanket policy,
-# so they stay INCONCLUSIVE. A definite hard not-found at the TARGET (404/410) is the channel-confirmed CLEAN
-# case — bounded to the EXACT probed URL, never an enumeration-completeness claim.
+# so they stay INCONCLUSIVE. A definite hard not-found at the TARGET (404/410) short-circuits the control
+# cohorts (nothing to contrast), and it is INCONCLUSIVE too — the CLEAN reading of it is WITHDRAWN (see the
+# module header): on that path neither sibling cohort is probed at all.
 _TARGET_ABSENT_STATUSES = frozenset({404, 410})
 # Multi-sample budget (BLOCK-2/BLOCK-3). DISTINCT same-shape controls dominate robustness against a per-PATH
 # bounded body space AND against a validator whose acceptance rate is p (a control that lands in the target's
@@ -615,7 +626,10 @@ def endpoint_liveness_redrive(url: str, *, slug: str, engagement_slug: str,
     """Re-drive ``url`` with VIGIL's OWN plain gated GETs (no canary) and measure whether the server's
     response to it DIFFERS from its own stable, SAME-BRANCH response to randomized same-shape siblings, with
     no minimal-edit-distance neighbour returning that same response. Returns a :class:`WebLivenessResult`.
-    NEVER raises.
+    NEVER raises on ANY target behaviour (a refusal, a transport error, a hostile or random server are all
+    total, in-band outcomes). The ONE exception is a CONFIGURATION error: if the branch registry is ever
+    mutated to clean_capable=true, ``admit()`` can hand back a CLEAN this branch has withdrawn, and the
+    function raises AssertionError rather than emit it (see the CLEAN arm at the end).
 
     LEAD-ONLY. ``achieved_state.endpoint_liveness`` is declared fact_capable=false AND clean_capable=false
     (see the module header for the five rounds and the measured false-FACT classes), so ``admit()`` returns
@@ -641,8 +655,8 @@ def endpoint_liveness_redrive(url: str, *, slug: str, engagement_slug: str,
     finding_ref = f"web:{ENDPOINT_LIVENESS_BUG_CLASS}:{url}"
 
     # PRE-FLIGHT the gate ONCE: a refused engagement (kill-switch / out-of-scope / no-slug / bad URL) means
-    # VIGIL never observed the target — there is NO channel, so we must NOT mint and must NOT report a
-    # channel-confirmed CLEAN. Return refused with zero adjudication (no traffic).
+    # VIGIL never observed the target — there is NO channel, so nothing is examined and nothing is
+    # asserted in either direction. Return refused with zero adjudication (no traffic).
     refusal = _authorize(url, slug)
     if refusal is not None:
         res.refused = True
@@ -659,8 +673,8 @@ def endpoint_liveness_redrive(url: str, *, slug: str, engagement_slug: str,
     send, _state = _gated_web_send(slug, timeout=timeout)
     control_urls = _liveness_control_urls(url)
     # enforce the multi-sample FLOOR: below _MIN_LIVENESS_CONTROLS distinct same-shape siblings the not-found
-    # baseline is too thin to be trusted, so fail closed (no controls ⇒ the FACT cannot fire; a hard-404 target
-    # can still be a control-independent CLEAN).
+    # baseline is too thin to be trusted, so fail closed (no controls ⇒ the oracle cannot fire; a hard-404
+    # target short-circuits the cohorts and is INCONCLUSIVE, never CLEAN — that reading is WITHDRAWN).
     if len(control_urls) < _MIN_LIVENESS_CONTROLS:
         control_urls = []
     res.control_urls = list(control_urls)
@@ -673,7 +687,7 @@ def endpoint_liveness_redrive(url: str, *, slug: str, engagement_slug: str,
         target_all_absent = target_channel and all(s in _TARGET_ABSENT_STATUSES for s in target_statuses)
         # CONTROLS: each DISTINCT same-shape URL resampled K times (BLOCK-2 multi-sample stability). Skipped
         # when the target had no channel (deceptive), when no sound same-shape control exists (fail closed),
-        # or when the target is a hard not-found (the CLEAN path is control-independent).
+        # or when the target is a hard not-found (control-independent short-circuit; INCONCLUSIVE, not CLEAN).
         control_samples: list = []
         if target_channel and control_urls and not target_all_absent:
             for c in control_urls:
@@ -837,11 +851,21 @@ def endpoint_liveness_redrive(url: str, *, slug: str, engagement_slug: str,
     # is the whole point of keeping the pipeline — the evidence is good, the conclusion was not.
     res.lead = r
     res.context = context
-    res.outcome = "clean" if admitted.verdict is Verdict.CLEAN else "inconclusive"
     if admitted.verdict is Verdict.CLEAN:
-        res.note = (f"channel-confirmed hard not-found ({res.target_status}) at THIS exact URL — CLEAN bounded "
-                    f"to the probed URL only, never a claim that no other endpoint exists")
-    elif fired:
+        # UNREACHABLE BY CONSTRUCTION, and it must STAY unreachable. ``achieved_state.endpoint_liveness`` is
+        # declared clean_capable=false, so ``admit()`` maps a conclusive non-firing to INCONCLUSIVE and can
+        # never hand back CLEAN here. The arm used to carry the PRE-WITHDRAWAL sentence ("channel-confirmed
+        # hard not-found … CLEAN bounded to the probed URL only"); that claim is WITHDRAWN (on the hard-404
+        # path the sibling and twin cohorts are NEVER PROBED, so a "conclusive non-firing" of a DIFFERENTIAL
+        # predicate would assert an absence nothing measured, and a 404 is also what a server returns for a
+        # resource that EXISTS but is not authorised). It is DELETED rather than left dormant: if anyone ever
+        # flips the registry flag, this must fail LOUDLY instead of silently resurrecting an unsound claim.
+        raise AssertionError(
+            f"{ENDPOINT_LIVENESS_BRANCH} is clean_capable=false — admit() returned CLEAN, which this "
+            f"LEAD-ONLY branch must never produce. The CLEAN claim for this branch is WITHDRAWN; it is not "
+            f"re-enabled by flipping a registry flag")
+    res.outcome = "inconclusive"
+    if fired:
         # The differential WAS observed and the oracle DID fire; admission demoted it because the branch is
         # LEAD-only. Saying "no differential" here would be a fresh false statement, so say what happened.
         res.note = (f"{claim_sentence} DEMOTED TO A LEAD: {admitted.reason} — this observation is priority "
