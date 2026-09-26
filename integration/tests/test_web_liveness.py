@@ -38,6 +38,18 @@ Headline properties:
     LEAD-only web-discovery tools.
 
 Offense-process test (loads framework.* + vigil_integration.live.*): CI runs it in the offense group.
+
+WHERE THE VOLUME RUNS. The statistical half of this file — the 80-run and 300-run loops and the per-class
+leg table at its full ``_ADVERSARIAL_LEG_RUNS`` counts — is marked ``@pytest.mark.volume`` and runs
+NIGHTLY (soak.yml, "web-liveness volume regressions (nightly)"), not on every pull request: carried
+per-PR it took the required "integration two-env boundary (P5)" job past GitHub's 45m0s hard maximum and
+the job was CANCELED, which taxed every PR in the repository. NOTHING WAS DROPPED AND NOTHING WAS
+WEAKENED. Every nightly run count is unchanged, every bite assertion is unchanged, and each marked test
+has an unmarked low-run TWIN sharing the same driver function so the class is still driven end-to-end —
+through each runner leg — on every PR. The split is itself enforced:
+``integration/tests/test_ci_volume_tests_run_nightly.py`` fails the build if a volume test is not covered
+by the nightly job or if the per-PR ``-m "not volume"`` exclusion is dropped, and the nightly's
+``assert_volume_tests_ran.py`` step fails it if those tests SKIP instead of running.
 """
 from __future__ import annotations
 
@@ -880,6 +892,7 @@ def test_soft_404_classes_mint_no_liveness_fact(app, path, label, _runs, monkeyp
     assert wl.outcome == "inconclusive" and wl.lead is not None and not wl.lead.is_fact
 
 
+@pytest.mark.volume
 def test_bounded_body_soft_404_is_never_a_fact_over_80_runs(monkeypatch, tmp_path):
     """RP2 BLOCK-2 intermittency: the per-request 2-element body-space soft-404 minted an INTERMITTENT false
     FACT (~30% with 2 controls). Multi-sampling must drive it to ZERO — run it 80x and require 0 false FACTs
@@ -902,17 +915,20 @@ def test_bounded_body_soft_404_is_never_a_fact_over_80_runs(monkeypatch, tmp_pat
     assert facts == 0, f"bounded-body soft-404 minted {facts}/80 false FACTs — multi-sampling did not close it"
 
 
-@pytest.mark.parametrize("app,pathfn,label", [
+_CHECKSUM_ROUTE_CLASSES = [
     (_LuhnHardApp, _make_luhn16, "Luhn hard-404 reject"),
     (_LuhnSoftApp, _make_luhn16, "Luhn distinct-body reject"),
     (_Luhn200RejectApp, _make_luhn16, "Luhn 200 reject INSIDE the branch"),
     (_Base58App, lambda: "3vQB7fMrk9xZa5dCFg2h", "base58"),
     (_Base58_200RejectApp, lambda: "3vQB7fMrk9xZa5dCFg2h", "base58 200 reject INSIDE the branch"),
-])
-def test_checksum_routes_never_mint_a_fact_over_80_runs(app, pathfn, label, monkeypatch, tmp_path):
-    """RP3 intermittency: a checksum/validation route (Luhn ~37%, base58 ~7%) minted an INTERMITTENT false
-    FACT when random controls all validation-rejected (a 404 branch the valid-nonexistent 200 target was
-    'distinguished' from). The SAME-BRANCH baseline must drive it to ZERO — run 80x, require 0 false FACTs."""
+]
+_CHECKSUM_SMOKE_RUNS = 2         # per-PR wiring only; the statistical count is the VOLUME test below
+
+
+def _drive_checksum_route(app, pathfn, runs, monkeypatch, tmp_path) -> int:
+    """Re-drive a checksum/validation route ``runs`` times against a FRESH checksum-VALID but nonexistent
+    id each time, and return how many runs minted a FACT. The 0-FACT bar is identical at every count; only
+    the statistical POWER differs, which is why the same body serves the per-PR smoke and the volume run."""
     _grant_active_recon(monkeypatch)
     _charter(tmp_path, "127.0.0.1")
     from vigil_integration.live.web_redrive import endpoint_liveness_redrive
@@ -922,13 +938,36 @@ def test_checksum_routes_never_mint_a_fact_over_80_runs(app, pathfn, label, monk
     facts = 0
     prefix = "/obj/" if app in (_Base58App, _Base58_200RejectApp) else "/card/"
     try:
-        for _ in range(80):
+        for _ in range(runs):
             wl = endpoint_liveness_redrive(f"http://127.0.0.1:{port}{prefix}{pathfn()}",
                                            slug="alpha", engagement_slug="alpha", signers=signers)
             if wl.is_fact:
                 facts += 1
     finally:
         srv.shutdown()
+    return facts
+
+
+@pytest.mark.parametrize("app,pathfn,label", _CHECKSUM_ROUTE_CLASSES)
+def test_checksum_routes_never_mint_a_fact_smoke(app, pathfn, label, monkeypatch, tmp_path):
+    """PER-PR WIRING half of the RP3 regression. Two runs per class: far too few to bound a ~37% rate —
+    that is the volume test's job and it is NOT weakened — but enough that the class is still driven
+    end-to-end on every PR, so a change that made a checksum route mint OUTRIGHT cannot reach main and
+    wait for the nightly to notice."""
+    facts = _drive_checksum_route(app, pathfn, _CHECKSUM_SMOKE_RUNS, monkeypatch, tmp_path)
+    assert facts == 0, (f"{label} checksum route minted {facts}/{_CHECKSUM_SMOKE_RUNS} false FACTs in the "
+                        f"per-PR smoke — the same-branch baseline is broken outright")
+
+
+@pytest.mark.volume
+@pytest.mark.parametrize("app,pathfn,label", _CHECKSUM_ROUTE_CLASSES)
+def test_checksum_routes_never_mint_a_fact_over_80_runs(app, pathfn, label, monkeypatch, tmp_path):
+    """RP3 intermittency: a checksum/validation route (Luhn ~37%, base58 ~7%) minted an INTERMITTENT false
+    FACT when random controls all validation-rejected (a 404 branch the valid-nonexistent 200 target was
+    'distinguished' from). The SAME-BRANCH baseline must drive it to ZERO — run 80x, require 0 false FACTs.
+
+    VOLUME (nightly). 400 live re-drives; the count is NOT reduced, it simply stopped riding every PR."""
+    facts = _drive_checksum_route(app, pathfn, 80, monkeypatch, tmp_path)
     assert facts == 0, f"{label} checksum route minted {facts}/80 false FACTs — same-branch baseline failed"
 
 
@@ -982,6 +1021,7 @@ def test_validator_aware_controls_satisfy_every_validator_the_target_satisfies()
     assert len(cs) >= _MIN_LIVENESS_CONTROLS and any(not _luhn_valid(seg(u)) for u in cs), cs
 
 
+@pytest.mark.volume
 def test_a_control_unstable_inside_the_targets_own_branch_fails_the_run_closed(monkeypatch, tmp_path):
     """A bounded not-found body space that is stable for MOST siblings and varies for the rest: discarding
     the varying controls would leave a unanimous FLUKE baseline the (nonexistent) target differs from — a
@@ -1086,20 +1126,20 @@ def test_the_predicate_proves_the_partition_and_refuses_a_cherry_picked_one():
     assert predicate_oracle({**ev, "same_branch_controls": 99}, empty).fired is False
 
 
-@pytest.mark.parametrize("factory,path,label", [
+_NO_TWIN_VALIDATOR_CLASSES = [
     (_prefix_validator_app, "/item/ZQabcdefgh", "unknown PREFIX validator"),
     (_suffix_validator_app, "/item/abcdefghQZ", "unknown SUFFIX validator"),
     (_positional_validator_app, "/item/abcdKfghij", "unknown POSITIONAL validator"),
-])
-def test_unknown_in_branch_validator_is_closed_by_the_no_twin_cohort_over_80_runs(
-        factory, path, label, monkeypatch, tmp_path):
-    """RP4 BLOCK-1 — the class the previous round shipped as an "irreducible" residual, minting 39/40 for a
-    NONEXISTENT url. It is not irreducible: the uniform-random cohort maximises INDEPENDENCE from the
-    target, which on a validating route guarantees every control lands in the REJECT set, so the "baseline"
-    is a reject baseline. The MINIMAL-EDIT-DISTANCE cohort does the opposite — each probe differs from the
-    target at exactly ONE position, so it stays inside the validity neighbourhood of a prefix / suffix /
-    positional rule, returns the route's own not-found body, and NO-TWIN kills the FACT. 80 runs, 0 FACTs,
-    and the LEAD must say a twin was found (the right reason, not an accident)."""
+]
+_NO_TWIN_SMOKE_RUNS = 3          # per-PR wiring only; the statistical count is the VOLUME test below
+
+
+def _drive_no_twin_validator(factory, path, runs, monkeypatch, tmp_path) -> tuple[int, int, int]:
+    """Re-drive an unknown-in-branch validator route ``runs`` times against a FRESH server each time.
+
+    Returns ``(facts, twins, searched)``: how many runs minted, how many found a Hamming-1 twin, and how
+    many reached the twin search at all. Shared verbatim by the per-PR smoke and the volume run so the two
+    cannot drift into testing different things."""
     _grant_active_recon(monkeypatch)
     _charter(tmp_path, "127.0.0.1")
     from vigil_integration.live.web_redrive import endpoint_liveness_redrive
@@ -1108,7 +1148,7 @@ def test_unknown_in_branch_validator_is_closed_by_the_no_twin_cohort_over_80_run
     port = srv.server_address[1]
     facts, twins, searched = 0, 0, 0
     try:
-        for _ in range(80):
+        for _ in range(runs):
             wl = endpoint_liveness_redrive(f"http://127.0.0.1:{port}{path}",
                                            slug="alpha", engagement_slug="alpha", signers=signers)
             facts += 1 if wl.is_fact else 0
@@ -1116,6 +1156,37 @@ def test_unknown_in_branch_validator_is_closed_by_the_no_twin_cohort_over_80_run
             searched += 1 if wl.twin_probes else 0
     finally:
         srv.shutdown()
+    return facts, twins, searched
+
+
+@pytest.mark.parametrize("factory,path,label", _NO_TWIN_VALIDATOR_CLASSES)
+def test_unknown_in_branch_validator_is_closed_by_the_no_twin_cohort_smoke(
+        factory, path, label, monkeypatch, tmp_path):
+    """PER-PR WIRING half of RP4 BLOCK-1. Three runs per class. The ``searched >= 40`` power assertion
+    belongs to the volume run and is NOT weakened here; what IS asserted at this count is the property
+    that holds run-for-run — a run that reached the twin search FOUND a twin — so a cohort that stopped
+    being minimal-edit-distance, or a route that stopped being driven at all, goes red on the PR."""
+    facts, twins, searched = _drive_no_twin_validator(factory, path, _NO_TWIN_SMOKE_RUNS,
+                                                      monkeypatch, tmp_path)
+    assert facts == 0, f"{label}: minted {facts}/{_NO_TWIN_SMOKE_RUNS} false FACTs for a NONEXISTENT url"
+    assert twins == searched, (f"{label}: {searched} run(s) searched the neighbourhood but only {twins} "
+                               f"found a twin — the minimal-edit-distance cohort is not closing this class")
+
+
+@pytest.mark.volume
+@pytest.mark.parametrize("factory,path,label", _NO_TWIN_VALIDATOR_CLASSES)
+def test_unknown_in_branch_validator_is_closed_by_the_no_twin_cohort_over_80_runs(
+        factory, path, label, monkeypatch, tmp_path):
+    """RP4 BLOCK-1 — the class the previous round shipped as an "irreducible" residual, minting 39/40 for a
+    NONEXISTENT url. It is not irreducible: the uniform-random cohort maximises INDEPENDENCE from the
+    target, which on a validating route guarantees every control lands in the REJECT set, so the "baseline"
+    is a reject baseline. The MINIMAL-EDIT-DISTANCE cohort does the opposite — each probe differs from the
+    target at exactly ONE position, so it stays inside the validity neighbourhood of a prefix / suffix /
+    positional rule, returns the route's own not-found body, and NO-TWIN kills the FACT. 80 runs, 0 FACTs,
+    and the LEAD must say a twin was found (the right reason, not an accident).
+
+    VOLUME (nightly). 240 live re-drives; the count is NOT reduced, it simply stopped riding every PR."""
+    facts, twins, searched = _drive_no_twin_validator(factory, path, 80, monkeypatch, tmp_path)
     assert facts == 0, f"{label}: minted {facts}/80 false FACTs for a NONEXISTENT url"
     # The RIGHT reason, stated exactly. A run only REACHES the twin search when the baseline cohort itself
     # formed; on a positional rule roughly one run in six instead draws a control the route ACCEPTS, the
@@ -1126,38 +1197,25 @@ def test_unknown_in_branch_validator_is_closed_by_the_no_twin_cohort_over_80_run
                                f"a twin — the minimal-edit-distance cohort is not closing this class")
 
 
-@pytest.mark.parametrize("factory,pathfn,label,min_fire", [
+_RP5_CLASSES = [
     (_format_route_app, lambda: "/o/dashboard1",
      "per-position FORMAT route, 200 reject in-branch (RP5-A)", 8),
     (_skewed_bounded_body_app, _skewed_rare_bucket_path,
      "SKEWED per-path bounded not-found body space (RP5-B)", 4),
-])
-def test_rp5_classes_that_ended_the_fact_are_permanent_regressions(factory, pathfn, label, min_fire,
-                                                                   monkeypatch, tmp_path):
-    """RP5 — THE TWO CLASSES THAT DECIDED THE DOWNGRADE, pinned forever on the DIRECT path.
+]
+_RP5_SMOKE_RUNS = 3              # per-PR wiring only; the bite assertion needs the VOLUME count below
 
-    Both are urls where NOTHING EXISTS, and on the preceding HEAD both minted signed, offline-re-verifying
-    FACTs: the per-position FORMAT route at 11/100, 32/100 and 55/100 (the cohorts draw from a per-SEGMENT
-    UNION alphabet, so a Hamming-1 edit at a digit slot becomes a letter ~74% of the time and no twin is
-    found), and the SKEWED per-PATH bounded body space at 13/100 (multi-sampling does nothing against a
-    space that is stable per path).
 
-    TWO assertions, and the second one is the point. (1) ZERO FACTs — trivially true today because nothing
-    on this branch mints, which is exactly why it must be pinned: it is the assertion a re-promotion would
-    break. (2) The fixture BITES: the deterministic oracle must still FIRE for a nonexistent url on a
-    material fraction of runs. Without (2) this test would keep passing if the fixture silently stopped
-    modelling the class — which is precisely how the RP4 ambiguity fixture passed for the wrong reason."""
+def _drive_rp5_class(factory, pathfn, runs, monkeypatch, tmp_path) -> tuple[int, int]:
+    """Re-drive an RP5 class ``runs`` times on the DIRECT path and return ``(facts, fired)``.
+
+    On EVERY run where the deterministic oracle fired, the LEAD's note must say it was demoted — that
+    assertion is inside the loop and therefore holds at every count, smoke and volume alike."""
     _grant_active_recon(monkeypatch)
     _charter(tmp_path, "127.0.0.1")
     from vigil_integration.live.web_redrive import _oracle_signal, endpoint_liveness_redrive
     signers, _ = _signers_and_trust()
     path = pathfn()
-    # RUNS=80, NOT 40 (red-pen advisory). The bite assertion is a binomial tail: RP5-B measures a fire-rate
-    # of p~=0.167 and asserts min_fire=4, so at runs=40 P(fired < 4) ~= 8% — a spurious red roughly one CI
-    # run in twelve. At runs=80 the same min_fire=4 gives P ~= 0.3%. min_fire is deliberately NOT lowered:
-    # it is the only thing stopping the zero-FACT assertion from passing vacuously. (RP5-A measured 71/120
-    # ~= 59%, so it is nowhere near its own floor either way.)
-    runs = 80
     facts, fired = 0, 0
     try:
         srv = _serve(factory())
@@ -1172,6 +1230,51 @@ def test_rp5_classes_that_ended_the_fact_are_permanent_regressions(factory, path
                 assert "demoted to a lead" in (wl.note or "").lower(), wl.note
     finally:
         srv.shutdown()
+    return facts, fired
+
+
+@pytest.mark.parametrize("factory,pathfn,label,min_fire", _RP5_CLASSES)
+def test_rp5_classes_that_ended_the_fact_still_lead_smoke(factory, pathfn, label, min_fire,
+                                                          monkeypatch, tmp_path):
+    """PER-PR WIRING half of the RP5 regression. Three runs per class: the zero-FACT bar plus the
+    fire-implies-"demoted to a lead" invariant, both of which hold run-for-run.
+
+    The BITE assertion (``fired >= min_fire``) is deliberately absent HERE and deliberately unchanged in
+    the volume test: it is a binomial tail, and RP5-B fires at only p~=0.167, so at 3 runs any floor would
+    either be vacuous or flake. Watering it down to fit a PR runner is exactly the move this file's history
+    forbids, so the full-power version stays nightly and this one covers the wiring only."""
+    facts, _fired = _drive_rp5_class(factory, pathfn, _RP5_SMOKE_RUNS, monkeypatch, tmp_path)
+    assert facts == 0, (f"{label}: minted {facts}/{_RP5_SMOKE_RUNS} FACT(s) for a NONEXISTENT url — the "
+                        f"branch must not mint")
+
+
+@pytest.mark.volume
+@pytest.mark.parametrize("factory,pathfn,label,min_fire", _RP5_CLASSES)
+def test_rp5_classes_that_ended_the_fact_are_permanent_regressions(factory, pathfn, label, min_fire,
+                                                                   monkeypatch, tmp_path):
+    """RP5 — THE TWO CLASSES THAT DECIDED THE DOWNGRADE, pinned forever on the DIRECT path.
+
+    Both are urls where NOTHING EXISTS, and on the preceding HEAD both minted signed, offline-re-verifying
+    FACTs: the per-position FORMAT route at 11/100, 32/100 and 55/100 (the cohorts draw from a per-SEGMENT
+    UNION alphabet, so a Hamming-1 edit at a digit slot becomes a letter ~74% of the time and no twin is
+    found), and the SKEWED per-PATH bounded body space at 13/100 (multi-sampling does nothing against a
+    space that is stable per path).
+
+    TWO assertions, and the second one is the point. (1) ZERO FACTs — trivially true today because nothing
+    on this branch mints, which is exactly why it must be pinned: it is the assertion a re-promotion would
+    break. (2) The fixture BITES: the deterministic oracle must still FIRE for a nonexistent url on a
+    material fraction of runs. Without (2) this test would keep passing if the fixture silently stopped
+    modelling the class — which is precisely how the RP4 ambiguity fixture passed for the wrong reason.
+
+    VOLUME (nightly). The bite assertion is what needs the count, so the count is what moved off the PR
+    path — NOT the assertion."""
+    # RUNS=80, NOT 40 (red-pen advisory). The bite assertion is a binomial tail: RP5-B measures a fire-rate
+    # of p~=0.167 and asserts min_fire=4, so at runs=40 P(fired < 4) ~= 8% — a spurious red roughly one CI
+    # run in twelve. At runs=80 the same min_fire=4 gives P ~= 0.3%. min_fire is deliberately NOT lowered:
+    # it is the only thing stopping the zero-FACT assertion from passing vacuously. (RP5-A measured 71/120
+    # ~= 59%, so it is nowhere near its own floor either way.)
+    runs = 80
+    facts, fired = _drive_rp5_class(factory, pathfn, runs, monkeypatch, tmp_path)
     assert facts == 0, f"{label}: minted {facts}/{runs} FACT(s) for a NONEXISTENT url — the branch must not mint"
     assert fired >= min_fire, (
         f"{label}: the predicate fired on only {fired}/{runs} runs (expected >= {min_fire}). This fixture "
@@ -1497,17 +1600,14 @@ def test_web_tool_live_url_is_a_lead_enricher_through_the_runner(tool, canned, m
     assert res.truncated_proposals == 0 and res.budget_note == ""
 
 
-@pytest.mark.parametrize("tool,canned", [("httpx", _httpx_jsonl), ("ffuf", _ffuf_report)])
-@pytest.mark.parametrize("app,path,label,runs", _SOFT_404_CLASSES)
-def test_web_tool_soft_404_classes_are_a_lead_through_the_runner(tool, canned, app, path, label, runs,
-                                                                 monkeypatch, tmp_path):
-    """Every soft-404 / phantom CLASS of all five rounds is a LEAD through BOTH runner legs — AT VOLUME for
-    the adversarial ones.
+_LEG_SMOKE_RUNS = 1              # per-PR: ONE run of EVERY class through EVERY leg — wiring, not statistics
 
-    Single-shot leg coverage is how a 2.3% class survived round 3 and how the two RP5 classes reached a
-    fifth round: a class that mints 4% of the time passes a one-run test 96% of the time. Each row
-    therefore carries its own run count (``_ADVERSARIAL_LEG_RUNS`` for the rate-based classes), and a FRESH
-    server per run, because several fixtures keep per-server state."""
+
+def _drive_soft_404_class_through_the_leg(tool, canned, app, path, label, runs, monkeypatch, tmp_path):
+    """Drive one soft-404 class through one runner leg ``runs`` times, with a FRESH server per run because
+    several fixtures keep per-server state, and assert the three per-run properties: the tool still
+    PROPOSES the url, nothing MINTS, and the demotion is a TYPED outcome. Every assertion scales with
+    ``runs``, so the per-PR smoke and the volume run assert exactly the same thing at different power."""
     _grant_active_recon(monkeypatch)
     _charter(tmp_path, "127.0.0.1")
     from vigil_integration.live.external_tool import ffuf_content_scan, httpx_url_scan, run_external_tool
@@ -1535,10 +1635,43 @@ def test_web_tool_soft_404_classes_are_a_lead_through_the_runner(tool, canned, a
 
 
 @pytest.mark.parametrize("tool,canned", [("httpx", _httpx_jsonl), ("ffuf", _ffuf_report)])
+@pytest.mark.parametrize("app,path,label,runs", _SOFT_404_CLASSES)
+def test_web_tool_soft_404_classes_are_a_lead_through_the_runner(tool, canned, app, path, label, runs,
+                                                                 monkeypatch, tmp_path):
+    """PER-PR WIRING: every soft-404 / phantom CLASS of all five rounds is driven through BOTH runner legs
+    at least once, on every pull request.
+
+    The row's own ``runs`` count is ignored here and honoured by the VOLUME twin below. What this keeps on
+    the PR path is the thing volume cannot substitute for: that each class is still REACHED through each
+    leg. A class silently dropped from the table, a leg that stopped dispatching, or an outright minting
+    regression turns the PR red; a 4%-rate regression is the nightly's job, by construction."""
+    _drive_soft_404_class_through_the_leg(tool, canned, app, path, label, _LEG_SMOKE_RUNS,
+                                          monkeypatch, tmp_path)
+
+
+@pytest.mark.volume
+@pytest.mark.parametrize("tool,canned", [("httpx", _httpx_jsonl), ("ffuf", _ffuf_report)])
+@pytest.mark.parametrize("app,path,label,runs", _SOFT_404_CLASSES)
+def test_web_tool_soft_404_classes_are_a_lead_through_the_runner_at_volume(tool, canned, app, path, label,
+                                                                           runs, monkeypatch, tmp_path):
+    """Every soft-404 / phantom CLASS of all five rounds is a LEAD through BOTH runner legs — AT VOLUME for
+    the adversarial ones.
+
+    Single-shot leg coverage is how a 2.3% class survived round 3 and how the two RP5 classes reached a
+    fifth round: a class that mints 4% of the time passes a one-run test 96% of the time. Each row
+    therefore carries its own run count (``_ADVERSARIAL_LEG_RUNS`` for the rate-based classes), and a FRESH
+    server per run, because several fixtures keep per-server state.
+
+    VOLUME (nightly). The per-row counts are UNCHANGED — ~400 live tool runs; only WHERE they run moved."""
+    _drive_soft_404_class_through_the_leg(tool, canned, app, path, label, runs, monkeypatch, tmp_path)
+
+
+@pytest.mark.parametrize("tool,canned", [("httpx", _httpx_jsonl), ("ffuf", _ffuf_report)])
 @pytest.mark.parametrize("factory,path,label", [
     (_prefix_validator_app, "/item/ZQabcdefgh", "unknown PREFIX validator, 200 reject in-branch"),
     (_partially_varying_app, "/x/wxyz", "partially-varying not-found space"),
 ])
+@pytest.mark.volume
 def test_rp4_classes_are_a_lead_through_the_runner_legs_over_80_runs(tool, canned, factory, path, label,
                                                                      monkeypatch, tmp_path):
     """RP4 — the two classes that were still minting are exactly the two the runner legs never exercised, so
