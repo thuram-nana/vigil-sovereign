@@ -55,7 +55,7 @@ _MANY = {"status": 200, "body": "id=1\nid=2\nid=3\nid=4\nid=5 (all rows)"}
 _NONE = {"status": 200, "body": "no results"}
 
 
-def _tv_round(true, false, k=3):
+def _tv_round(true, false, k=6):
     return {"trues": [dict(true) for _ in range(k)], "falses": [dict(false) for _ in range(k)],
             "true_repeats": [dict(true) for _ in range(k)], "false_repeats": [dict(false) for _ in range(k)]}
 

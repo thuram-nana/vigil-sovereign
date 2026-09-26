@@ -26,7 +26,7 @@ Needs framework (the oracles + the retained-control reverify) → PYTHONPATH=int
 """
 from __future__ import annotations
 
-import re
+import sqlite3
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlsplit
@@ -79,7 +79,7 @@ def _round(trues, falses, baseline, *, true_repeats=None, false_repeats=None) ->
             "baseline": baseline}
 
 
-def _uniform(true, false, baseline, k: int = 3) -> dict:
+def _uniform(true, false, baseline, k: int = 4) -> dict:
     """A DETERMINISTIC origin whose response IS a function of the truth value: every always-true clause lands
     on ``true``, every always-false clause on ``false``."""
     return _round([dict(true) for _ in range(k)], [dict(false) for _ in range(k)], baseline)
@@ -99,8 +99,8 @@ def _ilist(counts) -> list:
     return [R(200, '{"i": %s}' % list(range(1, c + 1))) for c in counts]
 
 
-DYNAMIC_ROUND = _round(_ilist([3, 5, 7]), _ilist([2, 4, 6]), R(200, '{"i": [1]}'),
-                       true_repeats=_ilist([9, 11, 13]), false_repeats=_ilist([8, 10, 12]))
+DYNAMIC_ROUND = _round(_ilist([3, 5, 7, 15]), _ilist([2, 4, 6, 14]), R(200, '{"i": [1]}'),
+                       true_repeats=_ilist([9, 11, 13, 19]), false_repeats=_ilist([8, 10, 12, 18]))
 CONFIRM_ROUNDS = [SIGNAL_ROUND, SIGNAL_ROUND, SIGNAL_ROUND]   # retained firing rounds for the positive control
 
 
@@ -124,11 +124,11 @@ def _noisy_vuln_round(n: int) -> dict:
     fresh noise (→ the SPRT refutes / hard-refutes) while a true clause still SEPARATES from a false clause
     (the injection STILL fires) and baseline ≈ the falses structurally (WAF-closure passes). The red-pen's
     reproduced false-REMEDIATED shape — the attribution gate MUST catch it."""
-    return _round([_noisy(f"t{n}{j}", LEAK) for j in range(3)],
-                  [_noisy(f"a{n}{j}", "[]") for j in range(3)],
+    return _round([_noisy(f"t{n}{j}", LEAK) for j in range(4)],
+                  [_noisy(f"a{n}{j}", "[]") for j in range(4)],
                   _noisy(f"c{n}", "[]"),
-                  true_repeats=[_noisy(f"tr{n}{j}", LEAK) for j in range(3)],
-                  false_repeats=[_noisy(f"ar{n}{j}", "[]") for j in range(3)])
+                  true_repeats=[_noisy(f"tr{n}{j}", LEAK) for j in range(4)],
+                  false_repeats=[_noisy(f"ar{n}{j}", "[]") for j in range(4)])
 
 
 NOISY_VULN_ROUNDS = [_noisy_vuln_round(0), _noisy_vuln_round(1), _noisy_vuln_round(2)]
@@ -448,33 +448,33 @@ def test_degenerate_adapter_clauses_are_rejected_at_construction():
     # trivial refute → a false REMEDIATED over a vulnerable origin). The adapter must REFUSE them at construction.
     common = dict(executor=None, base_url="http://127.0.0.1/", endpoint_path="/", param="q", nonce_param="rc",
                   base_value="1")
+    four_t = ("1' AND 1=1 -- {challenge}", "1' AND 'b'>'a' -- {challenge}",
+              "1' AND 'ab' LIKE 'a%' -- {challenge}", "1' AND 9>4 -- {challenge}")
+    four_f = ("1' AND 1=2 -- {challenge}", "1' AND 'a'>'b' -- {challenge}",
+              "1' AND 'ab' LIKE 'z%' -- {challenge}", "1' AND 4>9 -- {challenge}")
     with pytest.raises(ValueError, match="IDENTICAL"):
-        DifferentialHttpAdapter(**common,
-                                true_payload_templates=("1' AND 1=1 -- {challenge}", "1' AND 5=5 -- {challenge}"),
-                                false_payload_templates=("1' AND 1=1 -- {challenge}", "1' AND 5=6 -- {challenge}"))
+        DifferentialHttpAdapter(**common, true_payload_templates=four_t,
+                                false_payload_templates=(four_t[0],) + four_f[1:])
     with pytest.raises(ValueError, match="ONLY in the .challenge. marker"):
         # raw templates DIFFER (challenge inside the predicate vs in the comment) but are equal once the
         # {challenge} marker is stripped → the ONLY difference is the inert nonce, which must not flip the boolean.
         DifferentialHttpAdapter(
             **common,
-            true_payload_templates=("1' AND SUBSTR(x,1,1)='{challenge}' -- z", "1' AND 5=5 -- {challenge}"),
-            false_payload_templates=("1' AND SUBSTR(x,1,1)='' -- z{challenge}", "1' AND 5=6 -- {challenge}"))
-    # TRUTH-VALUE ATTRIBUTION floor: a SINGLE clause per truth value is one draw — refused at construction.
-    with pytest.raises(ValueError, match="2 DISTINCT"):
-        DifferentialHttpAdapter(**common,
-                                true_payload_templates=("1' AND 1=1 -- {challenge}",),
-                                false_payload_templates=("1' AND 1=2 -- {challenge}", "1' AND 5=6 -- {challenge}"))
+            true_payload_templates=("1' AND SUBSTR(x,1,1)='{challenge}' -- z",) + four_t[1:],
+            false_payload_templates=("1' AND SUBSTR(x,1,1)='' -- z{challenge}",) + four_f[1:])
+    # TRUTH-VALUE ATTRIBUTION floor: below the oracle's CONFIRM floor of 4 distinct clauses per truth value
+    # an adapter could never reach STILL_VULNERABLE (every round is a non-signal), so it would answer
+    # "refute" for a live-vulnerable origin — refused loudly at construction instead.
+    with pytest.raises(ValueError, match="4 DISTINCT"):
+        DifferentialHttpAdapter(**common, true_payload_templates=four_t[:3],
+                                false_payload_templates=four_f)
     # duplicates are not independent draws either
     with pytest.raises(ValueError, match="duplicate clauses"):
-        DifferentialHttpAdapter(**common,
-                                true_payload_templates=("1' AND 1=1 -- {challenge}", "1' AND 1=1 -- {challenge}"),
-                                false_payload_templates=("1' AND 1=2 -- {challenge}", "1' AND 5=6 -- {challenge}"))
-    # genuinely data-dependent, syntactically-varied clause SETS are ACCEPTED.
-    ok = DifferentialHttpAdapter(
-        **common,
-        true_payload_templates=("1' AND SUBSTR(@@version,1,1)>'' -- {challenge}", "1' AND 17=17 -- {challenge}"),
-        false_payload_templates=("1' AND SUBSTR(@@version,1,1)>'~~~' -- {challenge}",
-                                 "1' AND 17=18 -- {challenge}"))
+        DifferentialHttpAdapter(**common, true_payload_templates=four_t[:3] + (four_t[0],),
+                                false_payload_templates=four_f)
+    # genuinely data-dependent, shape-varied clause SETS are ACCEPTED.
+    ok = DifferentialHttpAdapter(**common, true_payload_templates=_TRUE_TEMPLATES,
+                                 false_payload_templates=_FALSE_TEMPLATES)
     assert ok.bug_class == "boolean_sqli"
 
 
@@ -524,11 +524,14 @@ def test_tampered_differential_rounds_fail_remediated_verification():
 # the q payload), so a FIXED origin returns identical bodies for all four probes (across=False → REMEDIATED); a
 # VULNERABLE origin materialises a row for the TRUE predicate (1=1) only (across=True, false stable → CONFIRM).
 _REAL_ENG = "boolreal"
-# K_T = K_F = 4 DISTINCT, syntactically-VARIED clauses per truth value, all metacharacter-identical in class.
-_TRUE_TEMPLATES = ("1' AND 1=1 -- {challenge}", "1' AND 'zz'='zz' -- {challenge}",
-                   "1' AND 42=42 -- {challenge}", "1' AND 'q9'='q9' -- {challenge}")
-_FALSE_TEMPLATES = ("1' AND 1=2 -- {challenge}", "1' AND 'zz'='yy' -- {challenge}",
-                    "1' AND 42=43 -- {challenge}", "1' AND 'q9'='q8' -- {challenge}")
+# K_T = K_F = 4 DISTINCT clauses per truth value, metacharacter-identical in class and — the point —
+# varying in COMPARISON SHAPE (`=`, `>`, `LIKE`, a compound), not merely in their literals. A set whose
+# truth value tracks one SURFACE feature (e.g. "both operands are the same token") is partitionable by a
+# regex WAF with no SQL engine at all; see the scanner-side lexical-filter regression.
+_TRUE_TEMPLATES = ("1' AND 1=1 -- {challenge}", "1' AND 'b'>'a' -- {challenge}",
+                   "1' AND 'ab' LIKE 'a%' -- {challenge}", "1' AND 9>4 AND 2<5 -- {challenge}")
+_FALSE_TEMPLATES = ("1' AND 1=2 -- {challenge}", "1' AND 'a'>'b' -- {challenge}",
+                    "1' AND 'ab' LIKE 'z%' -- {challenge}", "1' AND 4>9 AND 2<5 -- {challenge}")
 _REAL_CHARTER = """\
 # Engagement charter — `{slug}`
 
@@ -554,15 +557,22 @@ Signed: `tester`     Date: `2026-05-04`
 """
 
 
-_CMP = re.compile(r"(?:OR|AND)\s+(.+?)\s*=\s*(.+?)\s*(?:--.*)?$", re.I)
+_ORIGIN_DB = sqlite3.connect(":memory:", check_same_thread=False)
+_ORIGIN_DB.execute("CREATE TABLE items(id INTEGER, sku TEXT)")
+_ORIGIN_DB.execute("INSERT INTO items VALUES(1, '1')")
+_ORIGIN_DB_LOCK = threading.Lock()
 
 
 def _predicate_is_true(qv: str) -> bool:
-    """A stand-in for the origin's DB evaluating the injected comparison, so the app answers the clause's
-    TRUTH VALUE rather than a hard-coded payload string — what lets K_T syntactically-VARIED always-true
-    clauses all land on the same response."""
-    m = _CMP.search(qv)
-    return bool(m) and m.group(1).strip().strip("'\"") == m.group(2).strip().strip("'\"")
+    """A REAL string-concatenated sqlite3 sink, so the origin EVALUATES the injected clause and answers
+    its TRUTH VALUE rather than a payload substring. That is what lets the K_T clauses — which vary in
+    COMPARISON SHAPE, not only in their literals — all land on the same response."""
+    with _ORIGIN_DB_LOCK:
+        try:
+            return bool(_ORIGIN_DB.execute(
+                "SELECT count(*) FROM items WHERE sku = '" + qv + "'").fetchone()[0])
+        except sqlite3.Error:
+            return False
 
 
 class _Origin(BaseHTTPRequestHandler):

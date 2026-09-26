@@ -15,43 +15,88 @@ import contextlib
 import random
 import re
 import secrets
+import sqlite3
 import threading
+import urllib.error
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Iterator
 from urllib.parse import parse_qs, urlsplit
 
+_DB = sqlite3.connect(":memory:", check_same_thread=False)
+_DB.execute("CREATE TABLE users(id INTEGER, name TEXT)")
+_DB.executemany("INSERT INTO users VALUES(?, ?)", [(i, f"user{i:02d}") for i in range(20)])
+_DB_LOCK = threading.Lock()
+
 from framework.v2.scanner.checks import BooleanInferenceCheck
+
+try:  # pragma: no cover - see the _check() note: this module must stay RUNNABLE against the pre-fix
+    from framework.v2.scanner.checks import BOOLEAN_DISCRIMINATOR   # commits it is the regression for
+except ImportError:  # pragma: no cover
+    BOOLEAN_DISCRIMINATOR = {"dimensions": ["status", "length", "lexical"]}
 from framework.v2.scanner.insertion import HttpRequest, InsertionKind, RequestTemplate
 from framework.v2.verify.confirmation import confirm_finding
 from framework.v2.verify.verifier import OracleVerifier
 
-# K_T = K_F = 4 DISTINCT, syntactically-VARIED clauses per truth value, all in ONE breakout shape.
-_TRUE_CLAUSES = ("x' OR '1'='1", "x' OR '7'='7", "x' OR 'ab'='ab", "x' OR 'q9'='q9")
-_FALSE_CLAUSES = ("x' OR '1'='2", "x' OR '7'='8", "x' OR 'ab'='ac", "x' OR 'q9'='q8")
-
-_CMP = re.compile(r"(?:OR|AND)\s+(.+?)\s*=\s*(.+?)\s*(?:--.*)?$", re.I)
-
-
-def _clause_is_true(q: str) -> bool:
-    """A stand-in for the origin's DB EVALUATING the injected comparison — so the app answers the
-    clause's TRUTH VALUE, not a hard-coded payload string. Any of the varied always-true clauses
-    yields the rows page; any always-false clause yields "no results"."""
-    m = _CMP.search(q)
-    if not m:
-        return False
-    a, b = (x.strip().strip("'\"") for x in m.groups())
-    return a == b
+# The shipped single-quote-breakout family (runtime_redrive._BOOLEAN_CLAUSE_FAMILIES[0]): K_T = K_F = 6
+# clauses per truth value that VARY IN COMPARISON SHAPE — `=`, `>`, a compound, `LIKE`, `<>`, `BETWEEN` —
+# not merely in their literals. See _WafApp below for why the shape, not just the literal, has to vary.
+_TRUE_CLAUSES = ("x' OR '1'='1", "x' OR 'b'>'a", "x' OR 9>4 AND 'k'<'m", "x' OR 'ab' LIKE 'a%",
+                 "x' OR 'zz'<>'yy", "x' OR 'c' BETWEEN 'a' AND 'z")
+_FALSE_CLAUSES = ("x' OR '1'='2", "x' OR 'a'>'b", "x' OR 4>9 AND 'k'<'m", "x' OR 'ab' LIKE 'z%",
+                  "x' OR 'zz'<>'zz", "x' OR 'c' BETWEEN 'x' AND 'z")
+# The LITERAL-ONLY clause set this replaced: every TRUE is `X = X`, every FALSE is `X = Y`.
+_LITERAL_ONLY_TRUE = ("x' OR '1'='1", "x' OR '7'='7", "x' OR 'ab'='ab", "x' OR 'q9'='q9")
+_LITERAL_ONLY_FALSE = ("x' OR '1'='2", "x' OR '7'='8", "x' OR 'ab'='ac", "x' OR 'q9'='q8")
 
 
 class _VulnApp(BaseHTTPRequestHandler):
+    """A REAL string-concatenated SQL injection over sqlite3 — the origin EVALUATES the injected
+    clause, so it answers the clause's TRUTH VALUE and not a hard-coded payload substring. (The
+    previous fixture matched the payload string, which would have made any shape-varied clause set
+    look broken while proving nothing about a real boolean channel.)"""
+
     def log_message(self, *a: object) -> None:
         return
 
     def do_GET(self) -> None:  # noqa: N802
         q = parse_qs(urlsplit(self.path).query).get("q", [""])[0]
-        body = ("id=%d\n" * 20 % tuple(range(20))).encode() if _clause_is_true(q) else b"no results"
+        with _DB_LOCK:
+            try:
+                rows = _DB.execute("SELECT id, name FROM users WHERE name = '" + q + "'").fetchall()
+            except sqlite3.Error:
+                rows = [("err", "err")]
+        body = ("".join(f"id={i} {n}\n" for i, n in rows) or "no results").encode()
         self.send_response(200)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
+# CRS 942130 "SQL Injection Attack: SQL Tautology Detected" — the operative shape is a BACKREFERENCE:
+# a token, a comparison operator, and THE SAME TOKEN again. Purely lexical; no SQL is parsed.
+_CRS_942130 = re.compile(
+    r"""[\s'"`()]*?\b([\d\w]+)\b[\s'"`()]*?(?:=|<=>|R?LIKE|SOUNDS\s+LIKE|REGEXP)[\s'"`()]*?\b\1\b""",
+    re.I | re.X)
+
+
+class _WafApp(BaseHTTPRequestHandler):
+    """A STATIC, NON-VULNERABLE search page behind that rule. No SQL runs anywhere and the app never
+    varies — there is NO boolean channel. But the rule is a function of SURFACE FORM only, and with a
+    LITERAL-ONLY clause set (`X = X` true, `X = Y` false) it is PERFECTLY CORRELATED with truth value,
+    so it hands back a flawless 2-cluster split: 403 for the whole TRUE side, 200 for the whole FALSE
+    side. Raising K does not help — every extra `X = X` matches the same rule."""
+
+    def log_message(self, *a: object) -> None:
+        return
+
+    def do_GET(self) -> None:  # noqa: N802
+        q = parse_qs(urlsplit(self.path).query).get("q", [""])[0]
+        blocked = bool(_CRS_942130.search(q))
+        body = (b"<html><body><h1>403 Forbidden</h1><p>Blocked by the web application firewall. "
+                b"Reference WAF-942130-SQLI-TAUTOLOGY</p></body></html>" if blocked else
+                b"<html><body><h1>Search</h1><p>No results found.</p><p>Try another term.</p></body></html>")
+        self.send_response(403 if blocked else 200)
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
@@ -147,8 +192,13 @@ def _server(handler: type[BaseHTTPRequestHandler]) -> Iterator[str]:
 
 
 def _send(req: HttpRequest) -> dict:
-    with urllib.request.urlopen(req.url, timeout=10) as r:  # noqa: S310 (loopback)
-        return {"status": r.status, "body": r.read().decode("utf-8", "replace")}
+    # tolerant of error statuses: a 403 from a WAF is an OBSERVED RESPONSE the oracle must judge,
+    # not a transport failure (this mirrors the gated executor, which returns the status it got).
+    try:
+        with urllib.request.urlopen(req.url, timeout=10) as r:  # noqa: S310 (loopback)
+            return {"status": r.status, "body": r.read().decode("utf-8", "replace")}
+    except urllib.error.HTTPError as e:
+        return {"status": e.code, "body": e.read().decode("utf-8", "replace")}
 
 
 def _q_point(base: str):
@@ -157,11 +207,11 @@ def _q_point(base: str):
     return tpl, point
 
 
-def _check() -> BooleanInferenceCheck:
+def _check(trues=_TRUE_CLAUSES, falses=_FALSE_CLAUSES) -> BooleanInferenceCheck:
     try:
         return BooleanInferenceCheck(
             id="bool-sqli-sprt", bug_class="boolean_sqli",
-            true_clauses=_TRUE_CLAUSES, false_clauses=_FALSE_CLAUSES,
+            true_clauses=trues, false_clauses=falses,
         )
     except TypeError:  # pragma: no cover - see the note below
         # DELIBERATE pre-fix compatibility shim, and the only reason it exists: the skewed
@@ -171,7 +221,7 @@ def _check() -> BooleanInferenceCheck:
         # constructor. On this tree the multi-clause path above always succeeds.
         return BooleanInferenceCheck(
             id="bool-sqli-sprt", bug_class="boolean_sqli",
-            true_clause=_TRUE_CLAUSES[0], false_clause=_FALSE_CLAUSES[0],
+            true_clause=trues[0], false_clause=falses[0],
         )
 
 
@@ -181,12 +231,12 @@ def _confirm(ctx) -> object:
     )
 
 
-def _false_facts(handler: type[BaseHTTPRequestHandler], loops: int) -> int:
+def _false_facts(handler: type[BaseHTTPRequestHandler], loops: int, **kw) -> int:
     facts = 0
     with _server(handler) as base:
         tpl, point = _q_point(base)
         for _ in range(loops):
-            if _confirm(_check().probe(tpl, point, _send)) is not None:
+            if _confirm(_check(**kw).probe(tpl, point, _send)) is not None:
                 facts += 1
     return facts
 
@@ -200,6 +250,40 @@ def test_sprt_check_confirms_boolean_sqli() -> None:
         confirmed = _confirm(_check().probe(tpl, point, _send))
         assert confirmed is not None
         assert confirmed.confirmed_by.value == "boolean_inference"
+
+
+def test_a_truth_correlated_lexical_waf_does_not_mint_on_a_static_page() -> None:
+    """RED-PEN BLOCK-1 REGRESSION — the decisive one, and the reason the clause SHAPE must vary.
+
+    A STATIC, NON-VULNERABLE page (no SQL anywhere, no boolean channel) behind a CRS-942130-shape
+    BACKREFERENCE rule. With the LITERAL-ONLY clause set the rule partitions the probes perfectly by
+    truth value — 403 to every `X = X`, 200 to every `X = Y` — and the oracle mints a false FACT on
+    essentially every attempt. That failure mode is NOT beaten by raising K (every extra `X = X`
+    matches the same rule); it is beaten by varying the COMPARISON SHAPE, which makes the rule catch
+    only part of the TRUE side and break within-truth agreement.
+
+    Both halves are asserted, so the test cannot pass vacuously: the literal-only set MUST still mint
+    here (the hazard is real) and the shipped shape-varied set MUST NOT."""
+    literal_only = _false_facts(_WafApp, 20, trues=_LITERAL_ONLY_TRUE, falses=_LITERAL_ONLY_FALSE)
+    assert literal_only == 20, (
+        f"the literal-only clause set minted only {literal_only}/20 — the WAF fixture no longer "
+        "reproduces the hazard, so the shape-varied result below proves nothing")
+    shipped = _false_facts(_WafApp, 20)
+    assert shipped == 0, (
+        f"the shipped shape-varied clause set minted {shipped}/20 FALSE boolean_sqli FACTs behind a "
+        "purely LEXICAL truth-correlated filter over a static page")
+
+
+def test_the_check_pins_the_boolean_discriminator_off_latency() -> None:
+    """RED-PEN BLOCK-2 — the retained context must carry the PINNED dimension set. The oracle's own
+    default includes `latency` (differing at +1000ms), which would let a FACT rest on timing over
+    byte-identical bodies; the probe order is all-TRUE then all-FALSE, so any step slowdown crossing
+    that boundary lands exactly on the truth partition."""
+    with _server(_SafeApp) as base:
+        tpl, point = _q_point(base)
+        ctx = _check().probe(tpl, point, _send).to_verifier_context()
+    assert ctx["discriminator"] == BOOLEAN_DISCRIMINATOR
+    assert "latency" not in ctx["discriminator"]["dimensions"]
 
 
 def test_sprt_check_refutes_non_injectable_target() -> None:

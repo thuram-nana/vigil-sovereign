@@ -82,6 +82,10 @@ _CLOSURE_DISC = {"dimensions": ["status", "structural"], "expect": "same"}
 # The TRUTH-VALUE ATTRIBUTION round arms the boolean channel now carries (see the oracle's docstring): K_T
 # distinct always-TRUE clauses, K_F distinct always-FALSE clauses, and a byte-identical repeat of each.
 _ROUND_ARMS = ("trues", "falses", "true_repeats", "false_repeats")
+# The boolean oracle's CONFIRM floor: fewer distinct clauses per truth value can refute but never mint, so a
+# round below it is not judgeable here either (it could only ever produce a refute, which on the REMEDIATED
+# branch is the dangerous direction). Mirrors differential_adapter._MIN_CLAUSES_PER_TRUTH_VALUE.
+_MIN_CLAUSES_PER_TRUTH_VALUE = 4
 
 
 def _arm(round_ctx: "dict | None", key: str) -> list:
@@ -247,6 +251,12 @@ def repeat_policy_for(bug_class: str) -> RepeatPolicy:
                             requires_significance=requires_sig,
                             note="non-deterministic / sampled / stochastic / race / unaudited oracle — silence is "
                                  "not a sound negative (fail-closed)")
+    # NOTE for the BOOLEAN DIFFERENTIAL channel: min_valid_trials=3 yields exactly 3 x 2 = 6
+    # identical-request samples for boolean_inference_oracle's determinism pre-filter (falses[0] plus its
+    # byte-identical repeat, per round), which is EXACTLY its min_baseline_samples=6 — zero headroom. Drop
+    # this to 2 and the pre-filter silently stops passing, so a genuinely firing origin can no longer reach
+    # STILL_VULNERABLE (the confirm is downgraded to a LEAD). Raise min_baseline_samples, or feed a real
+    # up-front baseline, before lowering this.
     return RepeatPolicy(canonical, min_valid_trials=3, certifiable_by_silence=True,
                         unique_token_per_trial=("oob_callback" in kinds),
                         note="every oracle is deterministic per-observation over a reliable channel — silence sound")
@@ -818,13 +828,15 @@ def _prove_differential(*, adapter: LiveTargetAdapter, identity: IdentityAttesta
         # >= 2 DISTINCT always-FALSE clause observations plus an index-aligned byte-identical repeat of each,
         # and the benign baseline for the WAF-closure test. A round the oracle could not attribute is never
         # silently judged — it fails the run closed.
-        if "baseline" not in ctx or any(len(_arm(ctx, a)) < 2 for a in _ROUND_ARMS) or \
-                len(_arm(ctx, "trues")) != len(_arm(ctx, "true_repeats")) or \
-                len(_arm(ctx, "falses")) != len(_arm(ctx, "false_repeats")):
+        if "baseline" not in ctx \
+                or any(len(_arm(ctx, a)) < _MIN_CLAUSES_PER_TRUTH_VALUE for a in _ROUND_ARMS) \
+                or len(_arm(ctx, "trues")) != len(_arm(ctx, "true_repeats")) \
+                or len(_arm(ctx, "falses")) != len(_arm(ctx, "false_repeats")):
             return dincon(Reason.ORACLE_CONTEXT_UNREBUILDABLE,
-                          "differential round missing baseline or the truth-value arms (>= 2 distinct TRUE "
-                          "clauses, >= 2 distinct FALSE clauses, each with a byte-identical repeat)",
-                          attempted=attempted)
+                          f"differential round missing baseline or the truth-value arms "
+                          f"(>= {_MIN_CLAUSES_PER_TRUTH_VALUE} distinct TRUE clauses, "
+                          f">= {_MIN_CLAUSES_PER_TRUTH_VALUE} distinct FALSE clauses, each with a "
+                          "byte-identical repeat)", attempted=attempted)
         # Live-marker reflection control (§4 / LOW-1): the inert challenge marker MUST come back (a
         # query-stripping cache / non-echoing edge serving one body for all probes fails this) — cannot prove
         # the round is fresh this run otherwise.
@@ -1112,9 +1124,10 @@ def _collect_origin_rounds(adapter, *, challenge: str, auth: EffectiveAuthorizat
         if not getattr(t, "valid", False) or not isinstance(getattr(t, "oracle_context", None), dict):
             return None
         ctx = t.oracle_context
-        if "baseline" not in ctx or any(len(_arm(ctx, a)) < 2 for a in _ROUND_ARMS) or \
-                len(_arm(ctx, "trues")) != len(_arm(ctx, "true_repeats")) or \
-                len(_arm(ctx, "falses")) != len(_arm(ctx, "false_repeats")):
+        if "baseline" not in ctx \
+                or any(len(_arm(ctx, a)) < _MIN_CLAUSES_PER_TRUTH_VALUE for a in _ROUND_ARMS) \
+                or len(_arm(ctx, "trues")) != len(_arm(ctx, "true_repeats")) \
+                or len(_arm(ctx, "falses")) != len(_arm(ctx, "false_repeats")):
             return None
         if not getattr(t, "nonce_echoed", False):
             return None
@@ -1310,11 +1323,15 @@ def _verify_differential_remediated(cert: dict) -> tuple[bool, str]:
         return False, "retained rounds do not re-execute to a DECISIVE SPRT refute"
     for r in rounds:
         trues, falses = _arm(r, "trues"), _arm(r, "falses")
-        if not (isinstance(r, dict) and "baseline" in r and len(trues) >= 2 and len(falses) >= 2
+        if not (isinstance(r, dict) and "baseline" in r
+                and len(trues) >= _MIN_CLAUSES_PER_TRUTH_VALUE
+                and len(falses) >= _MIN_CLAUSES_PER_TRUTH_VALUE
                 and len(_arm(r, "true_repeats")) == len(trues)
                 and len(_arm(r, "false_repeats")) == len(falses)):
-            return False, ("a judged round is missing baseline or the truth-value arms (>= 2 distinct TRUE and "
-                           ">= 2 distinct FALSE clause observations, each with a byte-identical repeat)")
+            return False, (f"a judged round is missing baseline or the truth-value arms "
+                           f"(>= {_MIN_CLAUSES_PER_TRUTH_VALUE} distinct TRUE and "
+                           f">= {_MIN_CLAUSES_PER_TRUTH_VALUE} distinct FALSE clause observations, each "
+                           "with a byte-identical repeat)")
         # ATTRIBUTION re-check (red-pen BLOCK-A — parity with the mint gate): the refute must be genuine channel
         # CLOSURE, recomputed INDEPENDENT of the minter at ZERO tolerance (_ATTRIBUTION_DISC). If ANY true still
         # SEPARATES from ANY false on any round the channel is still OPEN (a still-vulnerable noisy /
@@ -1350,7 +1367,9 @@ def _verify_differential_remediated(cert: dict) -> tuple[bool, str]:
             return False, "origin_confirmed but the origin rounds do not re-execute to a decisive SPRT refute"
         for r in origin_rounds:
             trues, falses = _arm(r, "trues"), _arm(r, "falses")
-            if not (isinstance(r, dict) and "baseline" in r and len(trues) >= 2 and len(falses) >= 2
+            if not (isinstance(r, dict) and "baseline" in r
+                    and len(trues) >= _MIN_CLAUSES_PER_TRUTH_VALUE
+                    and len(falses) >= _MIN_CLAUSES_PER_TRUTH_VALUE
                     and len(_arm(r, "true_repeats")) == len(trues)
                     and len(_arm(r, "false_repeats")) == len(falses)):
                 return False, "an origin round is missing baseline or the truth-value arms for the origin re-check"

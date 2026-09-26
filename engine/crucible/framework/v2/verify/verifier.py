@@ -1139,11 +1139,23 @@ class OracleVerifier:
             return None
         if kind is OracleKind.BOOLEAN_INFERENCE:
             if "probe_rounds" in ctx:
+                # The SPRT parameters are PROTOCOL CONSTANTS, never context-supplied. A context used to be
+                # able to pass sprt_alpha/beta/p1/p0; `sprt_p0=1e-9` turns the two-net-signal confirm
+                # boundary into a ONE-signal boundary, so a single coincidentally-separating round out of 24
+                # minted at confidence 0.95. Exposure was the UNTRUSTED-report path
+                # (`framework.v2 verify <report.json>`), not VIGIL's own signed output — closed either way,
+                # the same way the remediation verifier pins its discriminators.
+                #
+                # The DISCRIMINATOR is pinned here for the same reason: the oracle already forces the
+                # comparison DIMENSIONS (never latency, never marker), but a context-supplied
+                # `lexical_threshold` / `length_threshold` still tunes SENSITIVITY, and a threshold fitted to
+                # the retained bytes can manufacture "within-cluster same, across-cluster differ" out of
+                # noise. The boolean channel therefore re-executes under the oracle's PROTOCOL DEFAULTS —
+                # which is exactly what an honest context carries anyway (scanner.checks.
+                # BOOLEAN_DISCRIMINATOR), so nothing legitimate changes.
                 return oracles.boolean_inference_oracle(
                     ctx["probe_rounds"],
-                    discriminator=ctx.get("discriminator"),
                     false_baseline_samples=ctx.get("false_baseline_samples"),
-                    **{k: ctx[f"sprt_{k}"] for k in ("alpha", "beta", "p1", "p0") if f"sprt_{k}" in ctx},
                 )
             return None
         if kind is OracleKind.ACHIEVED_STATE:

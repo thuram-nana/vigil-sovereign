@@ -38,7 +38,7 @@ _MANY = {"status": 200, "body": "id=1\nid=2\nid=3\nid=4\nid=5 (all rows)"}
 _NONE = {"status": 200, "body": "no results"}
 
 
-def _tv_round(true=_MANY, false=_NONE, k=3):
+def _tv_round(true=_MANY, false=_NONE, k=6):
     """A TRUTH-VALUE ATTRIBUTION round: one TRUE cluster, one FALSE cluster, plus the repeats."""
     return {"trues": [dict(true) for _ in range(k)], "falses": [dict(false) for _ in range(k)],
             "true_repeats": [dict(true) for _ in range(k)], "false_repeats": [dict(false) for _ in range(k)]}

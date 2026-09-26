@@ -37,7 +37,7 @@ The signal is the **boolean differential** already computed in `framework/v2/ver
   (dimensions `status`/`length`/`lexical`/`structural`/`marker`; `expect: "differ" | "same"`). Note the default
   dimension set does **not** include `structural`; a caller must request dimensions explicitly (see §4).
 - `boolean_inference_oracle(probe_rounds, …)` — per round, the Bernoulli signal is a **TRUTH-VALUE
-  ATTRIBUTION** test over `K_T >= 2` DISTINCT always-TRUE clauses and `K_F >= 2` DISTINCT always-FALSE clauses
+  ATTRIBUTION** test over `K_T >= 4` DISTINCT always-TRUE clauses and `K_F >= 4` DISTINCT always-FALSE clauses
   (each also sent once more, byte-identically): it signals 1 only when **every TRUE-side response agrees with
   every other, every FALSE-side response agrees with every other, and the two clusters are disjoint** —
   i.e. the response is a *function of the injected boolean's truth value*. Accumulated under a Wald **SPRT**
@@ -46,12 +46,23 @@ The signal is the **boolean differential** already computed in `framework/v2/ver
   varies INDEPENDENTLY of the input, two draws differ by coincidence, and a determinism *screen* does not
   remove that (a window that looks deterministic still contains the coincidence). On such an origin the
   per-round false-signal probability is `SUM_{a != b} p_a**(2*K_T) * p_b**(2*K_F) <= 2 * 2**-(2*K_T+2*K_F)`
-  — `3.1e-5` at the shipped `K_T = K_F = 4`, vs the SPRT's null rate `p0 = 0.1`. The irreducible residual is
-  an origin that is a DETERMINISTIC but arbitrary function of the URL (a per-URL CDN cache over an origin that
-  picked a variant at fill time): there the byte-identical repeats are cache hits and re-running the same
-  clauses is not new evidence, so the bound degrades to `2 * 2**-(K_T+K_F)` = `7.8e-3` (against `~0.5` for a
-  single-clause-per-truth-value design). No response-only test closes that — such an origin *is* a
-  deterministic function of the request — and `K_T`/`K_F` are the only lever, exposed as one.
+  — `3.1e-5` at the `K_T = K_F = 4` CONFIRM floor, vs the SPRT's null rate `p0 = 0.1`.
+
+  **Two things that bound does not cover** (the oracle docstring is the normative statement):
+
+  1. **A truth-correlated LEXICAL filter.** The bound assumes the clause set carries no SURFACE feature
+     aligned with truth. If every TRUE clause is `X = X` and every FALSE is `X = Y`, a CRS-942130-shape
+     BACKREFERENCE rule — pure regex, no SQL parsing — blocks exactly the TRUE side, and a STATIC
+     non-vulnerable page behind it mints at **rate 1.0**. `K` is **not** a lever (every extra `X = X`
+     matches the same rule); **clause-SHAPE diversity** is: the clauses of one truth value must differ in
+     COMPARISON SHAPE (`=` / `>` / `LIKE` / a compound), so no single surface rule can partition them, and a
+     WAF that catches one shape then breaks within-truth agreement and REFUTES.
+  2. **A deterministic but ARBITRARY function of the URL** (a per-URL CDN cache over an origin that picked a
+     variant at fill time): the byte-identical repeats are cache hits and re-running the same clauses is not
+     new evidence, so the bound degrades to `2 * 2**-(K_T+K_F)` (against `~0.5` for a
+     single-clause-per-truth-value design). Repetition cannot help against a map that is constant in the
+     request, so for *this* case more distinct clauses is the lever — and the scanner arm additionally bounds
+     the number of independent attempts per URL and states the resulting per-URL figure.
 
 **What an interposer can and cannot forge — precisely (and it is NOT "cannot forge the differential").** Over
 plaintext HTTP the probes are always *lexically separable* — a TRUE clause and a FALSE clause must differ in
@@ -85,13 +96,15 @@ marker (never as the discriminating predicate):
 | probe | clause shape (illustrative) | metachar profile | purpose |
 |---|---|---|---|
 | `baseline` | benign value, NO metacharacters, carries `<c>` | none | the inert-handled / un-WAF'd response shape |
-| `trues[i]` | `K_T >= 2` DISTINCT, syntactically-VARIED predicates that are all TRUE on the live DB, e.g. `… ' AND (SELECT SUBSTR(@@version,1,1))>'' -- <c>` / `… ' AND 17=17 -- <c>` | full exploit metachars | the TRUE cluster — **data-dependent** |
-| `falses[j]` | `K_F >= 2` DISTINCT, varied predicates that are all FALSE, e.g. `… ' AND (SELECT SUBSTR(@@version,1,1))>'~~~' -- <c>` / `… ' AND 17=18 -- <c>` | full exploit metachars | the FALSE cluster — **data-dependent** |
+| `trues[i]` | `K_T >= 4` DISTINCT predicates, varying in COMPARISON SHAPE, that are all TRUE on the live DB, e.g. `… ' AND (SELECT SUBSTR(@@version,1,1))>'' -- <c>` / `… ' AND 17=17 -- <c>` | full exploit metachars | the TRUE cluster — **data-dependent** |
+| `falses[j]` | `K_F >= 4` DISTINCT predicates, varying in COMPARISON SHAPE, that are all FALSE, e.g. `… ' AND (SELECT SUBSTR(@@version,1,1))>'~~~' -- <c>` / `… ' AND 17=18 -- <c>` | full exploit metachars | the FALSE cluster — **data-dependent** |
 | `true_repeats[i]` / `false_repeats[j]` | a byte-IDENTICAL repeat of each clause above | full exploit metachars | the determinism control (a differing repeat HARD-REFUTES the run) |
 
 More than one clause per truth value is the point: a single `true` vs a single `false` is two draws, and two
 draws differ by coincidence on any input-independent origin. Requiring the responses to PARTITION BY TRUTH
-VALUE is what attributes the separation to the injected boolean rather than to chance.
+VALUE is what attributes the separation to the injected boolean rather than to chance. The clauses must vary
+in **comparison shape**, not merely in their literals — a set whose truth value tracks one surface feature is
+partitionable by a regex WAF with no SQL engine anywhere (§2).
 
 Every clause is **metacharacter-identical in class** (all carry `'`, `AND`, `SELECT`, `--`), so a
 content-inspecting WAF that blocks one blocks all — the matched decoy. They differ in a **data-dependent

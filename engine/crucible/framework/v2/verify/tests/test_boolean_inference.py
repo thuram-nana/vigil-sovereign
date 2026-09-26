@@ -28,7 +28,7 @@ def _round(trues, falses) -> dict:
             "true_repeats": [dict(r) for r in trues], "false_repeats": [dict(r) for r in falses]}
 
 
-def _clean(true=_MANY, false=_NONE, k: int = 4) -> dict:
+def _clean(true=_MANY, false=_NONE, k: int = 6) -> dict:
     """A round from a page that IS a function of the truth value: every true clause -> one
     page, every false clause -> another."""
     return _round([dict(true) for _ in range(k)], [dict(false) for _ in range(k)])
@@ -87,8 +87,8 @@ def test_old_single_clause_context_cannot_confirm_fail_closed() -> None:
 def test_within_truth_disagreement_refuses() -> None:
     # The true clauses do NOT all land on the same response (one of them returns the false page):
     # there is no single TRUE cluster, so the response is not a function of the truth value.
-    rounds = [_round([dict(_MANY), dict(_MANY), dict(_MANY), dict(_NONE)],
-                     [dict(_NONE) for _ in range(4)]) for _ in range(24)]
+    rounds = [_round([dict(_MANY)] * 5 + [dict(_NONE)],
+                     [dict(_NONE) for _ in range(6)]) for _ in range(24)]
     sig = boolean_inference_oracle(rounds, false_baseline_samples=_baseline(_NONE))
     assert not sig.fired
     assert sig.observed["decision"] == "refute"
@@ -111,7 +111,7 @@ def test_skewed_input_independent_page_refuses_with_the_pregate_forced_to_pass()
     # by construction: a SKEWED (dominant variant p=0.9) K=2 input-independent page, handed an
     # all-identical 16-sample baseline so the pre-gate PASSES. Every response — clause and
     # repeat — is an independent draw. A clean 2-cluster split by truth value then requires all
-    # 8 true-side draws to be one variant and all 8 false-side draws the other (<= 2*2**-16),
+    # 12 true-side draws to be one variant and all 12 false-side draws the other (<= 2*2**-24),
     # so the oracle must refuse every seed. This is what a determinism gate alone could not do.
     variants = [{"status": 200, "body": "no results variant A" + "A" * 60},
                 {"status": 200, "body": "no results variant B" + "B" * 60}]
@@ -122,8 +122,8 @@ def test_skewed_input_independent_page_refuses_with_the_pregate_forced_to_pass()
         def draw(_rng=rng):
             return dict(_rng.choices(variants, weights=[0.9, 0.1], k=1)[0])
 
-        rounds = [{"trues": [draw() for _ in range(4)], "true_repeats": [draw() for _ in range(4)],
-                   "falses": [draw() for _ in range(4)], "false_repeats": [draw() for _ in range(4)]}
+        rounds = [{"trues": [draw() for _ in range(6)], "true_repeats": [draw() for _ in range(6)],
+                   "falses": [draw() for _ in range(6)], "false_repeats": [draw() for _ in range(6)]}
                   for _ in range(24)]
         sig = boolean_inference_oracle(rounds, false_baseline_samples=forced_baseline)
         assert not sig.fired, f"skewed input-independent page minted a FALSE FACT at seed {seed}"
@@ -170,24 +170,147 @@ def test_request_count_is_bounded() -> None:
 def test_the_deterministic_arbitrary_map_residual_is_real_and_is_disclosed() -> None:
     """THE HONEST LIMIT, PINNED — not merely asserted in prose.
 
-    A page that is a DETERMINISTIC but ARBITRARY function of the URL (a CDN caching per exact
-    URL over an origin that picked a variant at fill time) can hand back a perfect 2-cluster
-    split with NO boolean channel: the repeats are cache hits, so determinism holds, and every
-    later round returns the same bytes. The oracle DOES confirm here, and that is the residual
-    the docstring discloses — no response-only test closes it, because such a page IS a
-    deterministic function of the request, which is exactly what boolean-blind inference reads.
-    K_T/K_F are the only lever (``<= 2 * 2**-(K_T+K_F)`` that this split happens by chance).
+    A page that is a DETERMINISTIC but ARBITRARY function of the URL (a CDN caching per exact URL
+    over an origin that picked a variant at fill time) can hand back a perfect 2-cluster split
+    with NO boolean channel: the repeats are cache hits, so determinism holds, and every later
+    round returns the same bytes. The oracle DOES confirm here. Repetition cannot help against a
+    map that is constant in the request, so for THIS case more distinct clauses is the lever
+    (``<= 2 * 2**-(K_T+K_F)`` that the split is chance) and the drivers additionally BOUND the
+    number of independent attempts per URL and state the resulting figure.
 
     This test exists so the code and the disclosure cannot drift apart: if someone later claims
     this residual is closed, this test fails and forces the claim to be re-earned or the
-    docstring to be corrected."""
+    docstring corrected."""
     v_a = {"status": 200, "body": "variant A" + "A" * 60}
     v_b = {"status": 200, "body": "variant B" + "B" * 60}
     # the cache froze variant A on every true-clause URL and variant B on every false-clause URL
     sig = boolean_inference_oracle([_clean(v_a, v_b) for _ in range(24)],
                                    false_baseline_samples=_baseline(v_b))
     assert sig.fired, "the disclosed deterministic-arbitrary-map residual is no longer reachable"
-    # and the disclosure lives in the oracle's own docstring, not only in a design note
     doc = boolean_inference_oracle.__doc__ or ""
-    assert "IRREDUCIBLE RESIDUAL" in doc and "caching per exact URL" in doc
-    assert "RAISING ``K_T``/``K_F`` is the only lever" in doc
+    assert "DETERMINISTIC but ARBITRARY function of the request" in doc
+    # ...and the disclosure must NOT be dressed up as unobservable-in-principle. An earlier revision
+    # claimed "no observation of the response can separate" and "RAISING K_T/K_F is the only lever";
+    # both were measurably FALSE (a truth-correlated LEXICAL filter mints at rate 1.0 and is beaten by
+    # clause-SHAPE diversity, not by K). Keep those words out.
+    for overclaim in ("IRREDUCIBLE RESIDUAL", "no observation of the response can separate",
+                      "is the only lever"):
+        assert overclaim not in doc, f"the oracle docstring re-states a refuted absolute: {overclaim!r}"
+
+
+def test_a_truth_correlated_lexical_filter_is_disclosed() -> None:
+    """The OTHER documented failure mode must stay documented: a clause set whose truth value is
+    aligned with a SURFACE feature is partitionable by a regex with no SQL engine anywhere. The
+    live regression is in the scanner tests (a real CRS-942130-shape rule over a static page);
+    here we only pin that the oracle names the mode and names the right lever."""
+    doc = boolean_inference_oracle.__doc__ or ""
+    assert "TRUTH-CORRELATED LEXICAL FILTER" in doc
+    assert "CLAUSE-SHAPE DIVERSITY" in doc
+    assert "``K`` is NOT a lever here" in doc
+
+
+def test_latency_alone_can_never_mint_a_boolean_fact() -> None:
+    """RED-PEN BLOCK-2 — ``differential_response_oracle``'s DEFAULT dimension set includes ``latency``
+    (differing at +1000ms), so a caller passing no discriminator let a boolean_sqli FACT rest on TIMING
+    over BYTE-IDENTICAL bodies. And because the probe order is all-TRUE then all-FALSE, any step
+    slowdown crossing that boundary (a tarpit, a pool or rate-limit transition) lands exactly on the
+    truth partition. The oracle now PINS the dimensions, so this must refute — including when the
+    retained context explicitly asks for latency (an untrusted report cannot widen the channel back)."""
+    same = "the very same page, byte for byte, for every single clause we sent"
+    fast = {"status": 200, "body": same, "latency_ms": 20.0}
+    slow = {"status": 200, "body": same, "latency_ms": 9000.0}   # a 9s step across the truth boundary
+    rounds = [_round([dict(slow) for _ in range(6)], [dict(fast) for _ in range(6)]) for _ in range(24)]
+    for disc in (None, {"dimensions": ["status", "length", "lexical", "latency"]}, {"dimensions": ["latency"]},
+                 "latency"):
+        sig = boolean_inference_oracle(rounds, discriminator=disc,
+                                       false_baseline_samples=_baseline(fast))
+        assert not sig.fired, f"a latency-only split minted a boolean FACT with discriminator={disc!r}"
+        assert sig.observed["decision"] == "refute"
+
+
+def test_the_sprt_parameters_are_not_context_supplied() -> None:
+    """RED-PEN item 6 — a context could pass ``sprt_p0``; ``sprt_p0=1e-9`` converts the two-net-signal
+    confirm boundary into a ONE-signal boundary, so a single coincidentally-separating round out of 24
+    mints at confidence 0.95. The verifier no longer forwards them."""
+    import inspect
+    import re as _re
+
+    from framework.v2.verify.verifier import OracleVerifier
+    # strip comments so the explanatory note about the removal does not satisfy its own test
+    src = "\n".join(_re.sub(r"#.*$", "", ln) for ln in inspect.getsource(OracleVerifier).splitlines())
+    assert "sprt_" not in src, "the verifier forwards context-supplied SPRT parameters again"
+
+    one_signal = [_clean()] + [_clean(_NONE, _NONE) for _ in range(23)]
+    ctx = {"bug_class": "boolean_sqli", "probe_rounds": one_signal,
+           "false_baseline_samples": _baseline(_NONE), "sprt_p0": 1e-9, "sprt_p1": 0.999999}
+    res = OracleVerifier().confirm(ctx)
+    assert not res.confirmed, "a context-supplied sprt_p0 still lowered the confirm bar"
+    # control: the SAME evidence with the honest parameters is a refute, so the assertion is not vacuous
+    assert not OracleVerifier().confirm(
+        {k: v for k, v in ctx.items() if not k.startswith("sprt_")}).confirmed
+
+
+def test_a_context_supplied_discriminator_cannot_tune_the_boolean_channel() -> None:
+    """Companion to the SPRT-parameter pin: the oracle forces the comparison DIMENSIONS, but a
+    context-supplied THRESHOLD still tunes sensitivity, and a threshold fitted to the retained bytes
+    can manufacture "within-cluster same, across-cluster differ" out of noise. The verifier therefore
+    re-executes the boolean channel under protocol defaults."""
+    import inspect
+
+    from framework.v2.verify.verifier import OracleVerifier
+    src = inspect.getsource(OracleVerifier._run_oracle if hasattr(OracleVerifier, "_run_oracle")
+                            else OracleVerifier)
+    i = src.index("BOOLEAN_INFERENCE")
+    assert 'discriminator=ctx' not in src[i:i + 1200], \
+        "the verifier forwards a context-supplied discriminator to the boolean oracle again"
+
+    # a near-miss page: the two clusters differ by well under the honest lexical threshold
+    base = "catalogue listing " + "item " * 200
+    t = {"status": 200, "body": base + "A"}
+    f = {"status": 200, "body": base + "B"}
+    rounds = [_round([dict(t) for _ in range(6)], [dict(f) for _ in range(6)]) for _ in range(24)]
+    ctx = {"bug_class": "boolean_sqli", "probe_rounds": rounds,
+           "false_baseline_samples": _baseline(f),
+           # fitted by the producer to call a 1-byte difference a "divergence"
+           "discriminator": {"dimensions": ["lexical"], "lexical_threshold": 0.0}}
+    assert not OracleVerifier().confirm(ctx).confirmed, \
+        "a context-supplied threshold tuned a sub-threshold difference into a boolean FACT"
+
+
+def test_forced_pregate_over_generated_rounds_never_mints() -> None:
+    """RED-PEN BLOCK-3 — the CORRECTED "pre-gate forced to pass" control, through the REAL mint path.
+
+    The earlier harness drove ``BooleanInferenceCheck.probe`` against an input-independent page and
+    then overwrote ``false_baseline_samples``. But ``probe`` SHORT-CIRCUITS on the first baseline
+    divergence and returns ZERO rounds, so the forced cells handed the oracle an EMPTY round list and
+    measured nothing — the tell was that the forced and honest artefacts had byte-identical request
+    counts. Here the rounds are GENERATED directly from the input-independent model (exactly the
+    responses the check would have collected had the pre-gate passed), the all-identical baseline is
+    attached, and the assertions below FAIL if the evidence is vacuous."""
+    from framework.v2.verify.adapter import FindingContext
+    from framework.v2.verify.confirmation import confirm_finding
+    from framework.v2.verify.verifier import OracleVerifier
+
+    variants = [{"status": 200, "body": "no results variant " + c * 61} for c in "AB"]
+    forced = [dict(variants[0]) for _ in range(16)]
+    facts = 0
+    for seed in range(200):
+        rng = random.Random(0xF0 + seed)
+
+        def draw(_rng=rng):
+            return dict(_rng.choices(variants, weights=[0.9, 0.1], k=1)[0])
+
+        tr = [[draw() for _ in range(6)] for _ in range(24)]
+        trr = [[draw() for _ in range(6)] for _ in range(24)]
+        fr = [[draw() for _ in range(6)] for _ in range(24)]
+        frr = [[draw() for _ in range(6)] for _ in range(24)]
+        ctx = FindingContext.from_boolean_probes(
+            true_rounds=tr, false_rounds=fr, true_repeat_rounds=trr, false_repeat_rounds=frr,
+            bug_class="boolean_sqli", false_baseline_samples=forced).to_verifier_context()
+        # NON-VACUITY: the rounds must actually exist and the pre-gate must actually be satisfiable.
+        assert len(ctx["probe_rounds"]) == 24 and len(ctx["false_baseline_samples"]) == 16
+        assert len(ctx["probe_rounds"][0]["trues"]) == 6
+        if confirm_finding(finding={"bug_class": "boolean_sqli"}, context=ctx,
+                           verifier=OracleVerifier()) is not None:
+            facts += 1
+    assert facts == 0, f"{facts}/200 FALSE FACTs with the determinism pre-gate forced to pass"

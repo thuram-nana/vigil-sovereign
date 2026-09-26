@@ -216,6 +216,16 @@ class DifferentialCheck:
         )
 
 
+# The PINNED boolean discriminator. ``differential_response_oracle``'s DEFAULT dimension set includes
+# ``latency``, so a boolean check that passed no discriminator let a FACT rest on TIMING alone over
+# byte-identical bodies — and since the probe order is all-TRUE then all-FALSE, a step-slowdown crossing
+# that boundary lands exactly on the truth partition. (The oracle pins this too, so a retained context
+# cannot widen it back; this constant keeps the check's own early-stop reading the same channel.)
+BOOLEAN_DISCRIMINATOR = {"dimensions": ["status", "length", "lexical"]}
+# The oracle will not CONFIRM below this many distinct clauses per truth value (it may still refute).
+_MIN_CLAUSES_PER_TRUTH_VALUE = 4
+
+
 @dataclass(frozen=True)
 class BooleanInferenceCheck:
     """Boolean-blind via a sequential probability ratio test (SPRT) whose per-round signal is a
@@ -232,10 +242,15 @@ class BooleanInferenceCheck:
     response agrees with every other TRUE response, every FALSE with every FALSE, and the two
     clusters are disjoint. A page whose body is an INDEPENDENT DRAW per request must land ALL
     ``2*K_T`` true-side draws on one variant and ALL ``2*K_F`` false-side draws on another —
-    ``<= 2 * 2**-(2*K_T+2*K_F)`` per round (``3.1e-5`` at the shipped ``K_T = K_F = 4``, ~3300x
-    below the SPRT's ``p0``). See the oracle's docstring for the irreducible residual (a page
-    that is a deterministic but ARBITRARY function of the URL, e.g. a per-URL CDN cache, where
-    the bound degrades to ``2 * 2**-(K_T+K_F)`` = ``7.8e-3`` and ``K`` is the only lever).
+    ``<= 2 * 2**-(2*K_T+2*K_F)`` per round (``1.2e-7`` at the ``K_T = K_F = 6`` the drivers ship;
+    ``3.1e-5``, still ~3300x below the SPRT's ``p0``, at the oracle's CONFIRM floor of 4).
+
+    TWO THINGS THAT BOUND DOES NOT COVER, both real and both documented on the oracle: a
+    TRUTH-CORRELATED LEXICAL FILTER (beaten by clause-SHAPE diversity, NOT by K — see
+    ``true_clauses`` below) and a page that is a deterministic but ARBITRARY function of the URL
+    (a per-URL CDN cache), where repetition is not new evidence and the bound degrades to
+    ``2 * 2**-(K_T+K_F)``; for THAT one more distinct clauses is the lever, and the drivers also
+    bound the number of independent attempts per URL.
 
     A cheap BASELINE PRE-GATE runs first (``baseline_samples`` identical sends of
     ``false_clauses[0]``; not-all-identical ⇒ the oracle refuses without any inference) and each
@@ -248,8 +263,11 @@ class BooleanInferenceCheck:
 
     id: str
     bug_class: str
-    # K_T distinct, syntactically-VARIED clauses that are all logically TRUE, and K_F that are all
-    # logically FALSE. >= 2 each is the oracle's hard floor; the drivers ship 4.
+    # K_T clauses that are all logically TRUE and K_F that are all logically FALSE. They must be
+    # DISTINCT and must vary in COMPARISON SHAPE (``=`` / ``>`` / ``LIKE`` / compound), not merely in
+    # their literals — a clause set whose truth value is aligned with any single SURFACE feature (e.g.
+    # "both literals identical") is partitionable by a regex WAF with no SQL engine anywhere, which
+    # mints on a static page. >= 4 each is the oracle's CONFIRM floor; the drivers ship 6.
     true_clauses: tuple[str, ...]
     false_clauses: tuple[str, ...]
     n_max: int = 24
@@ -257,30 +275,41 @@ class BooleanInferenceCheck:
     beta: float = 0.05
     p1: float = 0.9
     p0: float = 0.1
-    baseline_samples: int = 16   # identical false-clause sends for the determinism pre-gate
+    # identical-request sends for the determinism pre-gate. Only a cheap PRE-FILTER now (each round
+    # already carries 2*(K_T+K_F) identical-request pairs as the hard refute), so 8 is plenty — it was
+    # 16 when the gate was load-bearing, and that cost 3x over the three clause families.
+    baseline_samples: int = 8
+    # An ALREADY-COLLECTED determinism baseline (responses to ONE identical request on this endpoint).
+    # Determinism is a property of the ENDPOINT, not of the clause, so a driver probing several clause
+    # families against the same insertion point collects it ONCE and shares it (see boolean_redrive).
+    shared_baseline: tuple = ()
 
     def probe(self, template: RequestTemplate, point: InsertionPoint, send: Send) -> FindingContext | None:
         from ..verify.oracles import differential_response_oracle  # local: avoid import cycle at module load
 
         trues = tuple(self.true_clauses)
         falses = tuple(self.false_clauses)
-        if len(set(trues)) < 2 or len(set(falses)) < 2 or set(trues) & set(falses):
-            # FAIL-CLOSED: fewer than two DISTINCT clauses per truth value cannot attribute a response to a
-            # truth VALUE (one clause is one draw, and a duplicate is not an independent draw — on a page
-            # that caches per URL a duplicate returns the identical cached body and would fake agreement).
+        if (len(set(trues)) < _MIN_CLAUSES_PER_TRUTH_VALUE
+                or len(set(falses)) < _MIN_CLAUSES_PER_TRUTH_VALUE or set(trues) & set(falses)):
+            # FAIL-CLOSED: too few DISTINCT clauses per truth value cannot attribute a response to a truth
+            # VALUE (one clause is one draw, and a duplicate is not an independent draw — on a page that
+            # caches per URL a duplicate returns the identical cached body and would fake agreement).
             # A clause appearing on BOTH sides is degenerate too. Emit no rounds — the oracle can only refuse.
             return FindingContext.from_boolean_probes(
                 true_rounds=[], false_rounds=[], true_repeat_rounds=[], false_repeat_rounds=[],
-                bug_class=self.bug_class)
+                bug_class=self.bug_class, discriminator=BOOLEAN_DISCRIMINATOR)
 
         def _differs(a: dict, b: dict) -> bool:
-            return differential_response_oracle(a, b).fired
+            # the PINNED boolean discriminator — never the oracle's default set, which includes LATENCY
+            # (a boolean FACT must rest on response CONTENT; timing is timing_oracle's job).
+            return differential_response_oracle(a, b, BOOLEAN_DISCRIMINATOR).fired
 
-        # --- DETERMINISM PRE-GATE: send ONE identical false-clause request up front and require every
-        #     response identical. A non-deterministic page (coarse OR high-entropy) fails this and is
-        #     refused BEFORE any inference — short-circuit on the first divergence to bound the traffic.
-        baseline: list[dict] = []
-        for _ in range(max(2, self.baseline_samples)):
+        # --- DETERMINISM PRE-GATE: responses to ONE IDENTICAL request, all of which must be identical.
+        #     A non-deterministic page (coarse OR high-entropy) fails this and is refused BEFORE any
+        #     inference — short-circuit on the first divergence to bound the traffic. A driver that
+        #     already collected this for the endpoint hands it in via ``shared_baseline`` (no re-sends).
+        baseline: list[dict] = [dict(b) for b in self.shared_baseline]
+        for _ in range(0 if baseline else max(2, self.baseline_samples)):
             s = _as_dict(send(template.render(point, falses[0])))
             baseline.append(s)
             if _differs(baseline[0], s):
@@ -289,7 +318,8 @@ class BooleanInferenceCheck:
             # non-deterministic: hand the oracle the baseline (no rounds) so it authoritatively refuses.
             return FindingContext.from_boolean_probes(
                 true_rounds=[], false_rounds=[], true_repeat_rounds=[], false_repeat_rounds=[],
-                bug_class=self.bug_class, false_baseline_samples=baseline)
+                bug_class=self.bug_class, false_baseline_samples=baseline,
+                discriminator=BOOLEAN_DISCRIMINATOR)
 
         upper = math.log((1.0 - self.beta) / self.alpha)
         lower = math.log(self.beta / (1.0 - self.alpha))
@@ -326,6 +356,7 @@ class BooleanInferenceCheck:
             true_rounds=true_rounds, false_rounds=false_rounds,
             true_repeat_rounds=true_repeat_rounds, false_repeat_rounds=false_repeat_rounds,
             bug_class=self.bug_class, false_baseline_samples=baseline,
+            discriminator=BOOLEAN_DISCRIMINATOR,
         )
 
 

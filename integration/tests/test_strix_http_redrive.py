@@ -22,6 +22,7 @@ import http.server
 import json
 import re
 import secrets
+import sqlite3
 import threading
 import time
 from pathlib import Path
@@ -82,16 +83,25 @@ def _report(check_id: str, path: str, port: int, bug_class: str, param: str = "q
 _SLEEP_RE = re.compile(r"(?:pg_)?sleep\(\s*(\d*\.?\d+)\s*\)", re.IGNORECASE)
 _ARITH_RE = re.compile(r"(\d{4,})\s*\*\s*(\d{4,})")
 _HITS = {"n": 0}
-_CMP_RE = re.compile(r"(?:OR|AND)\s+(.+?)\s*=\s*(.+?)\s*(?:--.*)?$", re.I)
+_BOOL_DB = sqlite3.connect(":memory:", check_same_thread=False)
+_BOOL_DB.execute("CREATE TABLE users(id INTEGER, name TEXT)")
+_BOOL_DB.executemany("INSERT INTO users VALUES(?, ?)",
+                     list(enumerate("alice bob carol dave erin frank grace heidi".split())))
+_BOOL_DB_LOCK = threading.Lock()
 
 
-def _predicate_is_true(value: str) -> bool:
-    """A stand-in for the origin's DB EVALUATING the injected comparison — so ``/bool`` answers the clause's
-    TRUTH VALUE rather than a hard-coded payload substring. That is what lets the boolean re-drive's K
-    syntactically-VARIED always-true clauses all land on the SAME response (and the always-false ones on
-    another), which is exactly the 2-cluster split the oracle now demands."""
-    m = _CMP_RE.search(value)
-    return bool(m) and m.group(1).strip().strip("'\"") == m.group(2).strip().strip("'\"")
+def _bool_rows(value: str) -> int:
+    """``/bool`` is a REAL string-concatenated sqlite3 injection, so the origin EVALUATES the injected
+    clause and answers its TRUTH VALUE — not a hard-coded payload substring. That is what lets the
+    re-drive's SHAPE-VARIED always-true clauses (`=`, `>`, `LIKE`, compound, `<>`, `BETWEEN`) all land on
+    the SAME response and the always-false ones on another: the 2-cluster split the oracle demands. A
+    substring fixture would instead answer the payload STRING, which is the very confusion that let a
+    purely lexical WAF masquerade as a boolean channel."""
+    with _BOOL_DB_LOCK:
+        try:
+            return len(_BOOL_DB.execute("SELECT id, name FROM users WHERE name = '" + value + "'").fetchall())
+        except sqlite3.Error:
+            return -1
 
 
 def _esc(s: str) -> str:
@@ -135,12 +145,12 @@ class _App(http.server.BaseHTTPRequestHandler):
             return self._html("<html><body><p>welcome</p></body></html>")
 
         # ----- boolean-blind SQLi (name = '<value>') -----
-        if path == "/bool":                      # VULNERABLE: the origin EVALUATES the injected comparison, so
-            # every syntactically-VARIED always-true clause selects every row and every always-false clause none
-            # (what makes the response a FUNCTION of the injected truth value, not of the payload string).
-            true = _predicate_is_true(value)
+        if path == "/bool":                      # VULNERABLE: a REAL sqlite3 string-concatenation sink
+            n = _bool_rows(value)
+            if n < 0:
+                return self._html("<html><body>query error, please retry</body></html>")
             return self._html("<html><body>alice bob carol dave erin frank grace heidi</body></html>"
-                              if true else "<html><body>no results found for your query</body></html>")
+                              if n else "<html><body>no results found for your query</body></html>")
         if path == "/bool-random":               # DECOY: a purely-dynamic page — a long per-request RANDOM token
             # dominates the body, so ANY two responses (incl. two identical repeats) diverge lexically well past
             # the differential threshold → the same-request STABILITY control trips EVERY round → SPRT refutes.
@@ -191,8 +201,16 @@ def _run_mint(tmp_path, signers, check_id, path, bug_class, param="q"):
 
 
 def _assert_fact_reverifies(mr, tr, tmp_path):
-    """A minted FACT: signed cert re-verifies OFFLINE over its retained context, a TAMPER is rejected, and the
-    persisted proofs/reverifiable.json re-fires (and fails closed on tamper) via the `framework.v2 verify` CLI."""
+    """A minted FACT: signed cert re-verifies OFFLINE over its retained context, a GROSS TAMPER is rejected,
+    and the persisted proofs/reverifiable.json re-fires (and fails closed on tamper) via the
+    `framework.v2 verify` CLI.
+
+    "Tamper-rejected" here means exactly two things and no more: (1) the certificate SIGNATURE and digest
+    binding reject ANY edit, and (2) re-execution over the retained context rejects a GROSS edit — the
+    evidence of the fire removed, an arm dropped, a page swapped. Re-execution is NOT a byte integrity
+    check: the oracles compare with tolerances (the boolean channel at 5% length / 10% lexical), so a
+    sub-threshold edit inside a retained body does not by itself change a verdict. Byte integrity is the
+    signature's job."""
     from framework.v2.evidence.certify import verify_certificate
     from framework.v2.verify import reverify
 

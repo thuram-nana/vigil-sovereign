@@ -19,9 +19,10 @@ the coincidence. The oracle therefore signals a round only when the response is 
 boolean's TRUTH VALUE**: every TRUE-side response agrees with every other, every FALSE-side response agrees
 with every other, and the two clusters are disjoint. An origin drawing INDEPENDENTLY per request must land
 all ``2*K_T`` true-side draws on one variant and all ``2*K_F`` false-side draws on another —
-``<= 2 * 2**-(2*K_T+2*K_F)`` per round (``3.1e-5`` at the ``K_T = K_F = 4`` the drivers ship, vs the SPRT's
-``p0 = 0.1``). The oracle's docstring states the irreducible residual (a per-URL-CACHING origin, where the
-repeats are cache hits and the bound degrades to ``2 * 2**-(K_T+K_F)``).
+``<= 2 * 2**-(2*K_T+2*K_F)`` per round (``3.1e-5`` at the ``K_T = K_F = 4`` floor, vs the SPRT's
+``p0 = 0.1``). The oracle's docstring states the two cases that bound does NOT cover: a truth-correlated
+LEXICAL filter (beaten by clause-SHAPE diversity, not by K) and a per-URL-CACHING origin (where the repeats
+are cache hits and the bound degrades to ``2 * 2**-(K_T+K_F)``).
 
 Every clause is metacharacter-identical in class (all carry ``'`` / ``AND`` / ``SELECT`` / ``--``), so a
 content-inspecting WAF that blocks one blocks all — the matched decoy (DIFFERENTIAL-REMEDIATION §3). They
@@ -88,6 +89,12 @@ _CLOSURE_DISCRIMINATOR = {"dimensions": ["status", "structural"], "expect": "sam
 # conservative proxy only over-triggers (→ INCONCLUSIVE, the safe direction), it never misses a flagged truncation.
 _BODY_EXCERPT_CAP = 8 * 1024
 
+# The boolean oracle will not CONFIRM below this many DISTINCT clauses per truth value. Enforced here too:
+# an adapter built below the floor could never reach STILL_VULNERABLE (every round would be a non-signal),
+# so it would silently answer "refute" for a live-vulnerable origin and lean entirely on the attribution
+# gate. Fail loudly at construction instead.
+_MIN_CLAUSES_PER_TRUTH_VALUE = 4
+
 
 def _identical_request_samples(round_ctx: dict) -> list:
     """The observations in one round that answer the SAME BYTE-IDENTICAL request — ``falses[0]`` and its
@@ -131,9 +138,12 @@ class DifferentialHttpAdapter:
       * ``base_value`` — the benign value the parameter normally carries (the baseline probe; NO metachars).
       * ``true_payload_templates`` / ``false_payload_templates`` — ``K_T >= 2`` DISTINCT always-TRUE and
         ``K_F >= 2`` DISTINCT always-FALSE data-dependent predicate payloads, each carrying the literal
-        ``{challenge}`` inert-marker slot; metacharacter-identical in class. Two per truth value is the hard
-        floor (one clause is one draw and cannot attribute a response to a truth VALUE); the drivers ship
-        four, and raising them is the only lever against a per-URL-caching origin (see the oracle docstring).
+        ``{challenge}`` inert-marker slot; metacharacter-identical in class. They must VARY IN COMPARISON
+        SHAPE (``=`` / ``>`` / ``LIKE`` / a compound), not merely in their literals: a set whose truth value
+        tracks one SURFACE feature is partitionable by a regex WAF with no SQL engine at all. FOUR per truth
+        value is the hard floor (the oracle's CONFIRM floor — fewer can only ever refute, which on the
+        REMEDIATED branch is the dangerous direction); more distinct clauses is also what lowers the
+        per-URL-caching residual the oracle docstring states.
       * ``original_firing_rounds`` — RETAINED confirming ``probe_rounds`` in the same truth-value shape (the
         harness-capability positive control: the SAME boolean oracle still CONFIRMS on the known-vulnerable
         rounds).
@@ -187,10 +197,13 @@ class DifferentialHttpAdapter:
         # such a round anyway; refusing here makes the misuse loud instead of a silent permanent INCONCLUSIVE).
         for name, tmpls in (("true_payload_templates", self.true_payload_templates),
                             ("false_payload_templates", self.false_payload_templates)):
-            if len(tmpls) < 2:
-                raise ValueError(f"{name} needs >= 2 DISTINCT, syntactically-varied clauses of the SAME truth "
-                                 "value — a single clause is one draw and cannot attribute a response to a "
-                                 "TRUTH VALUE (an input-independent origin would separate by coincidence)")
+            if len(tmpls) < _MIN_CLAUSES_PER_TRUTH_VALUE:
+                raise ValueError(
+                    f"{name} needs >= {_MIN_CLAUSES_PER_TRUTH_VALUE} DISTINCT clauses of the SAME truth value "
+                    "that VARY IN COMPARISON SHAPE (= / > / LIKE / compound), not merely in their literals — "
+                    "too few draws cannot attribute a response to a TRUTH VALUE (an input-independent origin "
+                    "separates by coincidence), and a set whose truth value tracks one SURFACE feature is "
+                    "partitionable by a regex WAF with no SQL engine at all")
             if len(set(tmpls)) != len(tmpls):
                 raise ValueError(f"{name} contains duplicate clauses — duplicates are not independent draws, "
                                  "so they do not raise the attribution bar (spec §3/§8.5)")
@@ -454,9 +467,11 @@ def _assert_conforms() -> None:
         executor=None, base_url="http://127.0.0.1/", endpoint_path="/", param="q", nonce_param="rc",
         base_value="1",
         true_payload_templates=("1' AND SUBSTR(@@version,1,1)>'' -- {challenge}",
-                                "1' AND 17=17 -- {challenge}"),
+                                "1' AND 17=17 -- {challenge}", "1' AND 'b'>'a' -- {challenge}",
+                                "1' AND 'ab' LIKE 'a%' -- {challenge}"),
         false_payload_templates=("1' AND SUBSTR(@@version,1,1)>'~~~' -- {challenge}",
-                                 "1' AND 17=18 -- {challenge}"))
+                                 "1' AND 17=18 -- {challenge}", "1' AND 'a'>'b' -- {challenge}",
+                                 "1' AND 'ab' LIKE 'z%' -- {challenge}"))
     assert isinstance(probe, LiveTargetAdapter)
 
 
