@@ -279,12 +279,14 @@ class AuditEngine:
         # lands on the baseline and treatment arms equally), so the exposure is to RECALL,
         # never to precision: a transient stall landing in a small baseline arm can cost
         # that point its confirmation; it cannot manufacture one. Measured against a
-        # loopback origin at 12 points x 6 samples/arm: no lost confirmations at workers
-        # 1/4/8/16, an occasional lost point at workers == points, traced to a single ~1s
-        # outlier in a 6-sample baseline arm (the test origin's accept backlog, not this
-        # code). So: keep the bound well below the point count, and treat "how high may an
-        # operator set this, and does the sample count need to rise with it" as OPEN work to
-        # settle before this is exposed as an operator-facing flag.
+        # loopback origin at 12 points x 6 samples/arm: at 4 and 8 points in flight, no lost
+        # confirmations in any run; at 12 in flight it is STOCHASTIC — most runs lose
+        # nothing, some lose one or two points — and every loss traced to a single ~1s
+        # outlier in that point's 6-sample BASELINE arm, i.e. the test origin's accept
+        # backlog, not this code. The trigger is points IN FLIGHT (min(workers, points)),
+        # not the worker number itself. So: keep the bound well below the point count, and
+        # treat "how high may an operator set this, and must the sample count rise with it"
+        # as OPEN work to settle before this becomes an operator-facing flag.
         self.timing_workers = max(1, int(timing_workers))
         # Guards the shared request counter so the budget stays EXACT when timing probes run
         # concurrently (a bare ``+= 1`` is a read-modify-write, not atomic). A no-op for the
