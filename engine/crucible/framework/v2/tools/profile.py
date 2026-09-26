@@ -58,8 +58,11 @@ _TYPED_BUILDER_TOOLS = frozenset({"ffuf", "httpx", "hydra", "nikto", "nmap", "nu
 # scanner that is spawnable + FACT-capable via the R4 runner is "adapted (cli)", not "nothing drives it".
 # Duplicated (same reason as ``_TYPED_BUILDER_TOOLS``) from the framework-free SSOT
 # ``integration.live.oracle_families.SPEC_BUILDER_TOOLS``; a drift-guard test pins this equal to that source.
+# (httpx/ffuf are deliberately absent — see the W2 DOWNGRADE note on the SSOT: they have R4 ToolSpec
+# builders and still run as LEAD enrichers, but their re-drive branch is LEAD-only, so they are not
+# oracle-mapped. Both are already recognised through the governed executor's ``_TYPED_BUILDER_TOOLS``.)
 _SPEC_BUILDER_DRIVEN_TOOLS = frozenset({"masscan", "naabu", "nmap", "rustscan", "sslscan",
-                                        "unicornscan", "zmap", "httpx", "ffuf"})
+                                        "unicornscan", "zmap"})
 
 # Globally-recognised tools NOT in the host roster and without a Strix skill doc (net-new curated metadata;
 # empty today — the curated host roster + the maintained skill playbooks already are the recognition list).

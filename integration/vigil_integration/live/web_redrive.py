@@ -40,112 +40,126 @@ WEB_FACT_CLASSES = ("open_redirect", "cors", "host_header_injection", "graphql_i
 LLM_CLAIM_WEB_FACT_CLASSES = tuple(c for c in WEB_FACT_CLASSES if c != "oidc_redirect_uri")
 
 # ---------------------------------------------------------------------------
-# HexStrike W2 — SIBLING RESPONSE DIFFERENTIAL (the L7 analogue of the TCP tcp_handshake reachability FACT).
+# HexStrike W2 — SIBLING RESPONSE DIFFERENTIAL.  *** LEAD-ONLY, PERMANENTLY. ***
 # Shipped bug-class token: ``sibling_response_differential``. Evidence-branch id (an internal admission key,
-# not a shipped claim): ``achieved_state.endpoint_liveness``.
+# not a shipped claim): ``achieved_state.endpoint_liveness``, declared fact_capable=false AND
+# clean_capable=false in ``docs/capability-matrix/evidence-branches.json`` — so ``verdict.admit()`` maps a
+# FIRED oracle on this branch to a LEAD and a conclusive non-firing to INCONCLUSIVE. The branch REGISTRY,
+# not this module, is the choke: everything below still RUNS, and its capture is attached as LEAD evidence.
 #
-# THE CLAIM (after four red-pen BLOCKs), and it is the WHOLE claim — see :func:`_liveness_claim`, which is
-# the one place it is written and which binds it into the SIGNED certificate:
+# WHY IT IS A LEAD. Five adversarial rounds, and every single one found a NEW class of URL where NOTHING
+# EXISTS and this predicate minted a signed, offline-RE-VERIFYING FACT. Rounds 1-4 are the history further
+# down (each of their fixes is still in the code and still does its job). Round 5 found two more classes:
+#
+#   (A) PER-POSITION FORMAT ROUTES (``^report\d$``, ``^user\d{3}$``, ``^dashboard\d$``). The sibling cohorts
+#       do NOT mirror the target's per-position class. :func:`_alnum_class_alphabet` unions the alnum
+#       characters of the WHOLE segment into ONE class, and BOTH :func:`_same_shape_sibling` and
+#       :func:`_hamming1_probe_urls` draw EVERY alnum position from that single union alphabet; only the
+#       NON-alnum separators are preserved per position. So on a word+digits identifier a Hamming-1 edit at
+#       a DIGIT slot becomes a LETTER about 74% of the time, the route rejects it, no twin is found, and the
+#       FACT mints for a url where nothing exists. MEASURED: 11/100, 32/100 and 55/100 on the direct
+#       re-drive and 29-40/80 through BOTH runner legs, every one re-verifying offline.
+#   (B) SKEWED PER-PATH BOUNDED NOT-FOUND BODY SPACE: 13/100 direct at P(B)=1/20, 9/80 through the httpx
+#       leg, 13/80 through the ffuf leg.
+#
+# DECISIVE. On one route where ``/o/dashboard9`` EXISTS and ``/o/dashboard1`` does NOT, the predicate minted
+# 40/40 for the existing id and 21/40 for the nonexistent one — it barely discriminates. And the honest
+# narrowing (below) already disclaims not-found-ness, phantom-ness, existence AND liveness, so the
+# proposition that survives does not justify a signed FACT at confidence 0.9. Each round's fix narrowed the
+# CLAIM rather than strengthening the EVIDENCE; that is a ratchet, and it stops here.
+#
+# WHAT IS KEPT, AND WHY. The gated GETs, the same-branch baseline, the k=4 multi-sampling, the
+# validator-aware controls and the NO-TWIN minimal-edit-distance cohort ALL still run, and the retained
+# capture — every raw per-sample status and body hash, plus ``control_urls`` and ``probe_urls`` — is
+# attached to the LEAD and re-verifies offline. That is genuinely high-quality lead evidence: it tells a
+# human which siblings and which neighbours were probed and exactly what each returned, which is worth real
+# triage priority. It is simply not a fact about the world, so it never mints.
+#
+# THE CAPTURE'S PROPOSITION — see :func:`_liveness_claim`, the one place it is written:
 #
 #     VIGIL's own gated GET of this URL returned content that DIFFERS from the server's stable same-status
 #     response to N randomized same-shape siblings, and NO minimal-edit-distance sibling returned that same
 #     response.
 #
-# It asserts NOTHING about not-found-ness, phantom-ness, existence or liveness. Two earlier wordings —
-# "distinguishable from a NOT-FOUND baseline" and "not a soft-404 phantom of that shape" — are WITHDRAWN as
-# literally false: in the validator classes below the siblings' stable answer is the route's REJECT body and
-# the target is the phantom, so those sentences asserted the opposite of the truth. The token is renamed off
-# ``endpoint_liveness`` for the same reason: for many consumers the token IS the claim, and a token that
-# reads as liveness at confidence 0.9 is the overclaim this branch exists to avoid.
+# It asserts NOTHING about not-found-ness, phantom-ness, existence or liveness.
+#
+# WITHDRAWN CLAIMS — each was measurably FALSE. Do not reintroduce any of them:
+#   * "distinguishable from a NOT-FOUND baseline" / "not a soft-404 phantom of that shape": in the validator
+#     classes the siblings' stable answer is the route's REJECT body and the TARGET is the phantom.
+#   * "the sibling mirrors the target's EXACT per-position class/structure": FALSE — it is a per-SEGMENT
+#     UNION class (only the non-alnum separators are per-position). See (A) above.
+#   * "the LOCAL-constraint family (prefix / suffix / positional / format rule) is CLOSED ... 0/80 on all
+#     three paths": FALSE — falsified at 11-55% by the FORMAT sub-family. The prefix/suffix/positional
+#     variants measure 0/80 only because their reject rule happens to be satisfied by a union-alphabet
+#     neighbour; a per-position format rule is not.
+#   * "the RESIDUAL is an unknown validator constraining the identifier JOINTLY ACROSS POSITIONS / a
+#     whole-string checksum": this materially UNDERSTATED it. The true condition is "NO Hamming-1 neighbour
+#     OVER THE MIRROR (UNION) ALPHABET is accepted", which also covers ordinary word+digits FORMAT routes.
+#   * "bounded not-found body space (per REQUEST or per PATH) ... measured at 0": FALSE for the SKEWED
+#     per-path variant (13/100 direct, 9/80 httpx, 13/80 ffuf). The per-REQUEST variant does measure 0 at k=4.
+#   * "the AST proves the whole partition ... and cannot be cherry-picked after the fact" and "the
+#     certificate cannot claim a neighbourhood search that did not happen": FALSE. The AST proves relations
+#     only among the samples the runner RETAINED. A runner that retained a subset would emit a predicate
+#     that re-verifies perfectly over what is left. RETENTION COMPLETENESS IS A TRUST BOUNDARY, NOT A PROOF
+#     — the RUNNER is the prover here, exactly as it already was for the baseline cohort, and an offline
+#     verifier re-checks the retained capture, never that the capture is complete.
+#   * "bounded ... raising _LIVENESS_CONTROLS trades traffic for it": measured 40/40 at N=10, 40/40 at
+#     N=160, 15/15 at N=640. More baseline siblings do not mitigate an in-branch reject.
 #
 # A web-discovery tool (httpx / ffuf / …) PROPOSES a URL; the RUNNER (never the tool) sends PLAIN gated GETs
 # (no canary) and the EXISTING ACHIEVED_STATE predicate_oracle adjudicates. Reuses ACHIEVED_STATE (no new
-# OracleKind, so `make gate` stays byte-identical); the FACT is minted only by admit(branch) +
-# certify_admitted(provenance="live_redrive") over VIGIL's OWN gated capture.
+# OracleKind, so `make gate` stays byte-identical). OPSEC: one re-drive costs up to
+# :data:`MAX_GATED_GETS_PER_URL` SERIAL gated GETs, which is why the runner leg caps how many proposed urls
+# it re-drives (``external_tool._LIVENESS_REQUEST_BUDGET``).
 #
-# SOUNDNESS (the soft-404 firewall — HARDENED three times; each fix closed a class that MINTED a false FACT
-# for a NONEXISTENT url on the preceding HEAD):
-#   BLOCK-1 (coarse char-class): a control of a WIDER class than the route (e.g. a random alnum control on a
-#     hex/uuid route) 404s as a route-MISS while a well-formed nonexistent target soft-404s 200 → false FACT.
-#     FIXED by a NARROW-CLASS, structure-preserving mirror: the control mirrors the target segment's exact
-#     per-position character class (digits→digits, lower/upper-hex→same-hex, uuid dashes preserved, base64
-#     alphabet preserved, alpha/alnum→same), same length + extension, RANDOMIZED. If the class is AMBIGUOUS
-#     (e.g. all-a–f letters, which is both alpha and hex) or otherwise not confidently mirrorable, it FAILS
-#     CLOSED to a LEAD — never a coarse-bucket guess. A root/directory URL (no last segment) also fails closed.
-#   BLOCK-2 (bounded not-found body space): a soft-404 whose not-found body is one of a SMALL set (random per
-#     request, or per path) let two controls COLLIDE on one body ~1/b of the time → a spurious "stable
-#     baseline" the target differs from → an INTERMITTENT false FACT. FIXED by MULTI-SAMPLE stability: many
-#     DISTINCT same-shape controls, EACH resampled, and the target itself resampled.
+# THE FIREWALL THAT STILL RUNS (each round's fix closed a class that MINTED a false FACT on the preceding
+# HEAD; all of them still demote, which is what makes the LEAD worth reading):
+#   BLOCK-1 (coarse char-class): a control of a WIDER class than the route (a random alnum control on a
+#     hex/uuid route) 404s as a route-MISS while a well-formed nonexistent target soft-404s 200 → false
+#     FACT. Fixed by a NARROW-CLASS, structure-preserving mirror: every alnum position is drawn from the
+#     narrowest well-known class containing EVERY alnum character of the segment (digits, hex, alpha,
+#     alnum …), with the non-alnum separators, the length and the extension preserved. NOTE the correction
+#     above: that is a per-SEGMENT union class, NOT a per-POSITION class, which is exactly the hole round 5
+#     walked through. An AMBIGUOUS class (all a–f letters: both alpha and hex) fails CLOSED, as does a
+#     root/directory URL with no last segment.
+#   BLOCK-2 (bounded not-found body space): a soft-404 whose not-found body is one of a SMALL set (random
+#     per request, or per path) let two controls COLLIDE on one body ~1/b of the time → a spurious "stable
+#     baseline" → an INTERMITTENT false FACT. Fixed by MULTI-SAMPLE stability: many DISTINCT same-shape
+#     controls, EACH resampled k=4 times, and the target itself resampled; a control that is unstable INSIDE
+#     the target's own branch is AMBIGUOUS and fails the whole run CLOSED. Closed for the per-REQUEST
+#     variant (k=2 → 2/120, k=3 → 0/120, k=4 → 0/120); NOT closed for the SKEWED per-PATH variant (see (B)).
 #   BLOCK-3 (checksum / validation-constrained routes): a route whose acceptance is a SEMANTIC predicate
-#     (a Luhn-valid card id, a base58 id excluding 0/O/I/l, any internal checksum or regex) accepts a
-#     STRICTLY NARROWER set than ANY character class. The lemma the BLOCK-1 fix rested on — "a control from
-#     the target's narrowest class is ⊆ the route's accepted class, so a 404 on it is a real not-found" — is
-#     FALSE for a semantic validator: the random same-class control fails the VALIDATOR, so the route
-#     rejects it (a 404 VALIDATION-REJECT = a DIFFERENT RESPONSE BRANCH) while the checksum-valid-but-
-#     NONEXISTENT target soft-404s 200. The controls then "agree" on the reject and the target "differs" →
-#     a false FACT (measured: Luhn 38/120 ≈ 32%, base58 ≈ 7%).
-#     FIXED in two halves. (a) VALIDATOR-AWARE CONTROLS (the capability half): every control must satisfy
-#     each WELL-KNOWN semantic validator the TARGET satisfies (Luhn on card/IMEI-length digits, the base58
-#     alphabet on mixed-case alnum ids, the UUIDv4 version/variant nibbles), so on those routes the controls
-#     land in the ACCEPTED set, the baseline is the route's TRUE not-found response, and a checksum-valid-
-#     but-nonexistent target is seen to MATCH it ⇒ LEAD (while a genuinely distinguishable id still mints).
-#     Narrowing the control set can only cost controls ⇒ the floor ⇒ fail closed, never a wrong contrast.
-#     (b) the SAME-BRANCH BASELINE (the soundness half, which covers every validator VIGIL does NOT know):
-#     the baseline is built ONLY from controls that took the
-#     TARGET'S OWN RESPONSE BRANCH. Every control is classified by its (status, body-hash) over ALL its
-#     resamples: IN-BRANCH iff every sample carries the TARGET'S EXACT STATUS and one body-hash; OFF-BRANCH
-#     iff NO sample carries the target's status (a validation-reject / route-miss — DISCARDED, never the
-#     contrast); anything else (a control flapping across the branch boundary, or a body that varies WITHIN
-#     the target's own branch) is AMBIGUOUS and FAILS THE WHOLE RUN CLOSED. We NEVER contrast the target
-#     across a response branch. On a Luhn route ~90% of controls validation-reject (off-branch → discarded)
-#     and the ~10% checksum-valid ones return the SAME soft-404 body as the target ⇒ the target does not
-#     differ ⇒ LEAD. On a REAL endpoint the same-shape controls serve the soft-404 body in the target's own
-#     branch and the target's real body differs ⇒ FACT.
+#     (a Luhn-valid card id, a base58 id excluding 0/O/I/l, a UUIDv4 nibble) accepts a STRICTLY NARROWER set
+#     than ANY character class, so a random same-class control lands in the route's VALIDATION-REJECT branch
+#     while the checksum-valid-but-NONEXISTENT target soft-404s 200 (measured: Luhn 38/120 ≈ 32%, base58
+#     ≈ 7%). Fixed in two halves: (a) VALIDATOR-AWARE CONTROLS — every control must satisfy each WELL-KNOWN
+#     validator the TARGET satisfies, so the controls land in the ACCEPTED set; and (b) the SAME-BRANCH
+#     BASELINE — the baseline is built ONLY from controls that took the TARGET'S OWN response branch.
+#     Every control is classified over ALL its resamples: IN-BRANCH iff every sample carries the TARGET'S
+#     EXACT STATUS and one body-hash; OFF-BRANCH iff NO sample carries the target's status (a
+#     validation-reject / route-miss — DISCARDED, never the contrast); anything else is AMBIGUOUS and FAILS
+#     THE WHOLE RUN CLOSED. We NEVER contrast the target across a response branch.
+#   BLOCK-4 (unknown validator, reject INSIDE the target's own status branch): a route that answers 200 with
+#     body V for an id IT considers invalid and 200 with a different body N for a valid-but-nonexistent one.
+#     Every uniformly random sibling is invalid, so the "baseline" is V — a REJECT baseline — and the
+#     target's own not-found body N looks like a differential (measured 39/40 minting for a NONEXISTENT
+#     url). Mitigated by the MINIMAL-EDIT-DISTANCE (NO-TWIN) cohort (:func:`_hamming1_probe_urls`): a
+#     sibling differing at exactly ONE position stays inside the validity neighbourhood of a LOCAL rule
+#     whose accepted set is closed under the UNION alphabet, comes back with the target's own body, and the
+#     no-twin clause kills the FACT (39/40 → 0/40; 0/80 for the prefix, suffix and positional variants on
+#     all three paths). It does NOT cover a per-position FORMAT rule — see (A). The probes are a SEARCH
+#     ONLY: their own cohort, referenced by the AST in NEGATIVE clauses plus a channel check, NEVER counted
+#     toward :data:`_MIN_LIVENESS_CONTROLS`, so the cohort can only turn a FACT into a LEAD.
 #
-#   BLOCK-4/RP4 (unknown validator, reject INSIDE the target's own status branch): a route that answers
-#     200 with body V for an id IT considers invalid and 200 with a different body N for a valid-but-
-#     nonexistent one. Every uniformly random sibling is invalid, so the "baseline" is V — a REJECT
-#     baseline — and the target's own not-found body N looks like a differential. Measured 39/40 minting
-#     for a NONEXISTENT url. The previous round called this irreducible and argued the capture was
-#     identical to a real endpoint's. THAT WAS WRONG, and the error was in the cohort, not the logic: a
-#     uniformly random control MAXIMISES INDEPENDENCE from the target, which on a validating route
-#     guarantees it lands in the reject set. FIXED by the MINIMAL-EDIT-DISTANCE (NO-TWIN) cohort
-#     (:func:`_hamming1_probe_urls`): siblings differing from the target at exactly ONE alnum position stay
-#     inside the validity neighbourhood of any LOCAL rule (prefix / suffix / positional / format), come
-#     back with the target's own body, and the no-twin clause kills the FACT. Measured 39/40 -> 0/40, and
-#     0/80 for the prefix, suffix and positional variants on the direct path and both runner legs, with
-#     every true positive preserved. The probes are a SEARCH ONLY — their own cohort, referenced by the AST
-#     only in NEGATIVE clauses plus a channel check, NEVER counted toward :data:`_MIN_LIVENESS_CONTROLS` —
-#     so the cohort can only turn a FACT into a LEAD.
-#
-# The FACT fires ONLY when VIGIL's own gated GETs show: (1) the target is a served status (2xx/3xx) and is
-# STABLE across its resamples; (2) NO control is ambiguous, and at least :data:`_MIN_LIVENESS_CONTROLS`
-# DISTINCT controls are IN-BRANCH — every sample of each carrying the target's EXACT status and one shared
-# body-hash (the same-branch, multi-sample-stable SIBLING baseline: the route's answer for those
-# identifiers, whatever that answer means); (3) every DISCARDED control is proven OFF-BRANCH (no sample
-# carried the target's status); (4) the target DIFFERS from that baseline BY BODY-HASH; (5) NO probe other
-# than the target — no control sample and no minimal-edit-distance neighbour — returned the target's
-# body-hash, and at least :data:`_MIN_TWIN_PROBES` neighbours reached a channel. All five are CLAUSES OF THE
-# GENERATED PREDICATE over the RAW per-sample statuses and body hashes — including the discard proof and the
-# no-twin rule — so the runner's partition and its neighbourhood search both re-verify OFFLINE and cannot be
-# cherry-picked after the fact.
-#
-# RESIDUAL (what actually remains, stated without the withdrawn irreducibility argument). An UNKNOWN
-# validator that constrains the identifier JOINTLY ACROSS POSITIONS — a whole-string checksum — whose
-# reject also lives inside the target's own status branch. There NO Hamming-1 neighbour is accepted, so no
-# twin exists to find, and a valid-but-nonexistent id can still mint. What it mints is the claim above,
-# which is LITERALLY TRUE of that capture; it simply does not mean the URL names an existing resource,
-# which is exactly why the claim says it asserts nothing about existence. It is NIL for the whole-string
-# checksums VIGIL knows (Luhn / base58 / UUIDv4 — the validator-aware cohort already lands inside their
-# accepted set). Adding baseline siblings does NOT mitigate it (measured 40/40 at N=10, 40/40 at N=160,
-# 15/15 at N=640), so the earlier "raising _LIVENESS_CONTROLS trades traffic for it" framing is withdrawn;
-# the twin cohort's ~20 extra requests is the mitigation that worked.
-#
-# The predicate is a pure JSON AST over RAW status codes + RAW body hashes of every sample, so the
-# certificate re-verifies OFFLINE like every predicate_oracle FACT. The CLEAN direction (a channel-confirmed
-# hard 404/410 at the exact URL, control-independent, bounded to the probed URL) is unchanged.
+# The predicate is a pure JSON AST over RAW status codes + RAW body hashes of every RETAINED sample, so a
+# consumer re-verifies it OFFLINE like every predicate_oracle context — bounded by the retention trust
+# boundary stated above. The CLEAN direction is WITHDRAWN too: a hard 404/410 at the exact URL is
+# control-independent, but on that path the sibling and twin cohorts are NEVER PROBED AT ALL, so a
+# "conclusive non-firing" of a DIFFERENTIAL predicate would assert an absence nothing measured — and a 404
+# is routinely what a server returns for a resource that EXISTS but is not authorised. Both directions are
+# INCONCLUSIVE.
 # The SHIPPED bug-class token. Deliberately NOT "endpoint_liveness" (red-pen BLOCK-3): the token is the
-# ONLY thing many consumers read, and `endpoint_liveness` at confidence 0.9 asserts exactly what this FACT
+# ONLY thing many consumers read, and `endpoint_liveness` at confidence 0.9 asserts exactly what this branch
 # must never assert. The EVIDENCE-BRANCH id (below) keeps its historical spelling — it is an internal
 # admission key, not a shipped claim.
 ENDPOINT_LIVENESS_BUG_CLASS = "sibling_response_differential"
@@ -190,17 +204,30 @@ _MIN_TWIN_PROBES = 4
 # retained samples and stored per-finding, so a variable count still re-verifies offline against exactly the
 # predicate that was minted.
 _MIN_LIVENESS_CONTROLS = 4
+# OPSEC / constitution §VI ("throttle, don't break their production"). The WORST-CASE number of gated GETs
+# ONE call to :func:`endpoint_liveness_redrive` puts on the target: the target resamples + every control
+# resample + the whole twin cohort. They are SERIAL with no inter-request delay, so this is also the burst
+# a single URL costs. DERIVED from the constants above rather than written down, so raising a knob cannot
+# silently multiply the traffic a caller budgeted for. Against the shipped constants: 63 worst case, 43 on
+# a path that does not reach the twin search (the twin cohort is probed only when a run would otherwise
+# have minted). ``external_tool._max_redriven_proposals()`` divides the runner's per-run request BUDGET
+# (``external_tool._LIVENESS_REQUEST_BUDGET``) by this to cap how many tool-proposed URLs one run re-drives.
+MAX_GATED_GETS_PER_URL = (_LIVENESS_TARGET_SAMPLES
+                          + _LIVENESS_CONTROLS * _LIVENESS_RESAMPLES
+                          + _LIVENESS_TWIN_PROBES)
 
 
 def _liveness_claim(url: str, status: int, target_samples: int, same_branch: int, probes: int) -> str:
-    """THE claim sentence — the single source of what this FACT asserts (red-pen BLOCK-4).
+    """THE claim sentence — the single source of what this capture asserts (red-pen BLOCK-4).
 
     Every earlier wording asserted something the capture does not prove. "distinguishable from a NOT-FOUND
     baseline" and "not a soft-404 PHANTOM of that shape" are both FALSE in the classes where the siblings'
     stable answer is the route's REJECT body and the target's answer is its not-found body: there the
-    baseline is a reject baseline and the target IS the phantom. So the sentence now asserts only the two
-    things the raw capture establishes, and says outright that it asserts nothing else. It is bound INTO the
-    signed certificate (a ReportClaim), so a consumer receives the claim, not just a bug-class token."""
+    baseline is a reject baseline and the target IS the phantom. So the sentence asserts only the two things
+    the raw capture establishes, and says outright that it asserts nothing else.
+
+    The branch is LEAD-ONLY (see the module header), so this sentence now travels on the LEAD as its
+    ``note``. It is still computed in exactly ONE place: a narrowing that lives in two places drifts."""
     return (f"VIGIL's own gated GET of {url} returned content that DIFFERS from the server's stable "
             f"same-status response to {same_branch} randomized same-shape siblings (target status {status} "
             f"over {target_samples} samples; every sibling answered in the same status branch with one "
@@ -213,14 +240,22 @@ def _liveness_claim(url: str, status: int, target_samples: int, same_branch: int
 def _build_liveness_predicate(in_branch: "list[list[int]]", off_branch: "list[list[int]]",
                               probes: "list[int]", n_target_samples: int, floor: int,
                               twin_floor: int) -> dict:
-    """Generate the liveness FACT predicate as a pure JSON AST over the RAW per-sample values (no
-    rubber-stamp — every decision is an AST op over retained raw statuses + body hashes, so the certificate
-    re-verifies OFFLINE).
+    """Generate the differential predicate as a pure JSON AST over the RAW per-sample values (no
+    rubber-stamp — every decision is an AST op over retained raw statuses + body hashes, so the retained
+    context re-verifies OFFLINE).
+
+    TRUST BOUNDARY, stated plainly because an earlier version of this docstring denied it: the AST proves
+    relations among the samples the RUNNER RETAINED, and nothing more. It does NOT prove that the retained
+    set is the complete set — a runner that dropped inconvenient samples would emit a predicate that
+    re-verifies perfectly over what is left. The claims "the classification cannot be cherry-picked after
+    the fact" and "the certificate cannot claim a neighbourhood search that did not happen" are therefore
+    WITHDRAWN as false. The RUNNER is the prover; the offline verifier re-checks the capture, never the
+    capture's completeness. This is the SAME boundary the baseline cohort always had — it is disclosed, not
+    newly introduced, and it is one of the reasons this branch is LEAD-only.
 
     ``in_branch`` / ``off_branch`` are the observed_evidence index blocks of the control samples, one block
     per DISTINCT control URL (``[[0,1],[2,3],…]``), as the runner classified them against the TARGET's own
-    response branch. The AST proves the WHOLE partition, so the classification itself re-verifies offline and
-    cannot be cherry-picked after the fact:
+    response branch. The AST re-checks that whole partition over the retained samples:
 
       * the target is SERVED (2xx/3xx) and STABLE across its resamples (status AND body-hash);
       * EVERY sample of EVERY in-branch control carries the TARGET'S EXACT STATUS (branch membership, tied to
@@ -233,8 +268,9 @@ def _build_liveness_predicate(in_branch: "list[list[int]]", off_branch: "list[li
       * NO-TWIN (red-pen BLOCK-1): NO probe other than the target — not one control sample, not one
         minimal-edit-distance neighbour — returned the target's body-hash. A response the target shares with
         any sibling is not a response the target is distinguished by, whatever the baseline says;
-      * every minimal-edit-distance probe REACHED a channel and the retained probe count meets the twin
-        floor, so the certificate cannot claim a neighbourhood search that did not happen;
+      * every RETAINED minimal-edit-distance probe REACHED a channel and the retained probe count meets the
+        twin floor (a floor over the RETAINED probes — see the trust boundary above; it does not establish
+        that no further neighbour was probed and discarded);
       * the target is DISTINGUISHABLE from that baseline BY BODY-HASH (the status is necessarily identical —
         same branch — so body-hash is the only sound differential).
 
@@ -294,11 +330,14 @@ def _build_liveness_predicate(in_branch: "list[list[int]]", off_branch: "list[li
 
 @dataclass
 class WebLivenessResult:
-    """The outcome of ONE endpoint-liveness re-drive of a single URL. ``fact`` is a signed AdapterResult when
-    VIGIL's own gated GETs showed the target DISTINGUISHABLE from a stable SAME-BRANCH baseline built from its
-    same-shape sibling controls (never a "live endpoint" claim); ``context``
-    is the retained oracle_context (predicate + raw statuses + raw body hashes) for OFFLINE re-verify.
-    Otherwise ``lead`` holds a labelled lead (soft-404 / hard-404 CLEAN / unreachable / no-sound-control).
+    """The outcome of ONE sibling-differential re-drive of a single URL.
+
+    ``lead`` holds the labelled LEAD — which, on this LEAD-only branch, is EVERY outcome — and ``context``
+    is the retained oracle_context (predicate AST + raw statuses + raw body hashes + control_urls +
+    probe_urls) for OFFLINE re-verify, carried on the LEAD as well as on a (currently unreachable) FACT.
+    ``note`` carries the narrowing sentence or the demotion reason in words. ``fact`` stays None while
+    ``achieved_state.endpoint_liveness`` is declared fact_capable=false; the field and the plumbing remain
+    because ``verdict.admit()`` — not this dataclass — is the choke that decides.
     ``outcome`` is one of positive|clean|inconclusive|deceptive_no_fact|refused."""
 
     url: str
@@ -356,13 +395,19 @@ def _same_shape_sibling(seg: str, rand: Any) -> "str | None":
     """A randomized NARROW-CLASS, STRUCTURE-PRESERVING sibling of the last path segment ``seg``, or ``None``
     when its shape cannot be confidently mirrored (BLOCK-1 fail-closed → the caller degrades to a LEAD).
 
-    Per-position mirror: every NON-alphanumeric character (a ``-`` in a UUID, an ``_``/``+``/``=`` in base64,
-    an internal ``.``) is KEPT IN PLACE so the STRUCTURE is preserved; every alphanumeric position is replaced
-    by a random character from the NARROWEST class the segment's alnum characters fit
-    (:func:`_alnum_class_alphabet`) — hex→hex, uuid→uuid (dashes kept, hex in the hex slots), base64→base64
-    alnum, numeric→numeric, alpha/alnum→same. Preserves LENGTH and a trailing EXTENSION (``foo.php`` →
-    ``<same-len>.php``). Returns ``None`` (fail closed) when there is no alnum position to randomise or the
-    class is ambiguous. Pure/lexical — no network, no fixed literal a signature rule can fingerprint."""
+    WHAT IS AND IS NOT PER-POSITION — stated exactly, because an earlier version of this docstring claimed
+    more than the code does and that overclaim is what ended the FACT. Every NON-alphanumeric character
+    (a ``-`` in a UUID, an ``_``/``+``/``=`` in base64, an internal ``.``) is KEPT IN PLACE, so the
+    STRUCTURE is per-position. The CHARACTER CLASS is NOT: every alphanumeric position is replaced by a
+    random character from ONE alphabet — the narrowest well-known class containing EVERY alnum character
+    of the WHOLE segment (:func:`_alnum_class_alphabet`), i.e. a per-SEGMENT UNION. So hex→hex, uuid→uuid
+    (dashes kept, hex in the hex slots), numeric→numeric and alpha→alpha all hold, but a MIXED segment
+    like ``dashboard1`` mirrors as lower-ALNUM at every position: a letter slot can become a digit and a
+    digit slot can become a letter. A route with a per-POSITION format rule (``^dashboard\\d$``) therefore
+    rejects most siblings, which is exactly the class the branch was downgraded over (module header, RP5).
+    Preserves LENGTH and a trailing EXTENSION (``foo.php`` → ``<same-len>.php``). Returns ``None`` (fail
+    closed) when there is no alnum position to randomise or the class is ambiguous. Pure/lexical — no
+    network, no fixed literal a signature rule can fingerprint."""
     if not seg:
         return None
     stem, dot, ext = seg.rpartition(".")
@@ -498,14 +543,21 @@ def _hamming1_probe_urls(url: str, n: int = _LIVENESS_TWIN_PROBES) -> "list[str]
     alphanumeric position — the MINIMAL-EDIT-DISTANCE (validity-neighbourhood) cohort of the twin search
     (red-pen BLOCK-1).
 
-    Same origin (scheme/host/port), same parent directory, same length, same extension, same narrow
-    per-position character class as :func:`_same_shape_sibling` — only the mutation rule differs: one
-    position changes, everything else is the TARGET's own bytes. That is deliberate. A uniform random draw
-    over the narrow class is maximally INDEPENDENT of the target, so on a route with a semantic validator it
-    lands in the REJECT set essentially always; a Hamming-1 neighbour stays inside the validity neighbourhood
-    of every validator that is not a whole-string checksum (a prefix/suffix/positional/format rule), so if
-    the target's response is merely the route's not-found answer for ACCEPTED ids, a neighbour will return
-    that same response and expose it as a TWIN.
+    Same origin (scheme/host/port), same parent directory, same length, same extension, and the SAME
+    per-SEGMENT UNION alphabet as :func:`_same_shape_sibling` — only the mutation rule differs: one position
+    changes, everything else is the TARGET's own bytes. That is deliberate. A uniform random draw is
+    maximally INDEPENDENT of the target, so on a route with a semantic validator it lands in the REJECT set
+    essentially always; a Hamming-1 neighbour stays inside the validity neighbourhood of a LOCAL rule whose
+    accepted set is closed under that alphabet, so if the target's response is merely the route's not-found
+    answer for ACCEPTED ids, a neighbour returns that same response and exposes it as a TWIN.
+
+    THE LIMIT, stated exactly (RP5 — this is why the branch is LEAD-only). The edit is drawn from the UNION
+    alphabet, not from the class of THAT position. On a word+digits identifier (``dashboard1`` → lower
+    alnum) an edit at the single digit slot produces a LETTER 26/35 of the time, so a route with a
+    per-POSITION format rule (``^dashboard\\d$``) rejects the neighbour and NO twin is found — for a url
+    where nothing exists. Measured 11/100, 32/100 and 55/100 false FACTs before the downgrade. The true
+    residual condition is therefore "no Hamming-1 neighbour OVER THIS ALPHABET is accepted", which covers
+    ordinary format routes and not merely whole-string checksums.
 
     Positions are visited round-robin in a random order, one new alternative character each pass, so a SHORT
     segment still yields many probes (a 1-digit segment yields 9) and a LONG one covers many positions first.
@@ -560,19 +612,25 @@ def _hamming1_probe_urls(url: str, n: int = _LIVENESS_TWIN_PROBES) -> "list[str]
 
 def endpoint_liveness_redrive(url: str, *, slug: str, engagement_slug: str,
                              signers: "list[tuple[str, str]]", timeout: float = 8.0) -> WebLivenessResult:
-    """Re-drive ``url`` with VIGIL's OWN plain gated GETs (no canary) and mint a signed ACHIEVED_STATE FACT
-    when the server's response to it is DISTINGUISHABLE from its own stable, SAME-BRANCH response to
-    randomized same-shape siblings — never a "live endpoint" claim. The L7 analogue of the TCP handshake
-    reachability FACT. Returns a :class:`WebLivenessResult`. NEVER raises.
+    """Re-drive ``url`` with VIGIL's OWN plain gated GETs (no canary) and measure whether the server's
+    response to it DIFFERS from its own stable, SAME-BRANCH response to randomized same-shape siblings, with
+    no minimal-edit-distance neighbour returning that same response. Returns a :class:`WebLivenessResult`.
+    NEVER raises.
 
-    Order (fail-closed): pre-flight the charter gate ONCE (a refused engagement means VIGIL never observed the
-    target — no channel, so no fact and no CLEAN); GET the target ``_LIVENESS_TARGET_SAMPLES`` times through
-    the gated send; GET up to ``_LIVENESS_CONTROLS`` DISTINCT narrow-class same-shape sibling controls,
-    ``_LIVENESS_RESAMPLES`` times each; classify every control against the TARGET'S OWN response branch
-    (in-branch / off-branch-discarded / ambiguous-fail-closed); run the predicate_oracle over the RAW statuses
-    + RAW body hashes (the AST proves the partition AND the differential); admit through the
-    ``achieved_state.endpoint_liveness`` branch; certify only a FACT admission. The CLEAN direction (a
-    channel-confirmed hard 404/410 at the exact URL) is control-independent and bounded to the probed URL."""
+    LEAD-ONLY. ``achieved_state.endpoint_liveness`` is declared fact_capable=false AND clean_capable=false
+    (see the module header for the five rounds and the measured false-FACT classes), so ``admit()`` returns
+    a LEAD for a fired oracle and INCONCLUSIVE for a conclusive non-firing. This function still performs the
+    WHOLE measurement and retains the whole capture, because the capture is good evidence for a human and
+    re-verifies offline — what it is not is a fact about the world.
+
+    Order (fail-closed): pre-flight the charter gate ONCE (a refused engagement means VIGIL never observed
+    the target — no channel, so nothing is examined and nothing is asserted); GET the target
+    ``_LIVENESS_TARGET_SAMPLES`` times through the gated send; GET up to ``_LIVENESS_CONTROLS`` DISTINCT
+    narrow-class same-shape sibling controls, ``_LIVENESS_RESAMPLES`` times each; classify every control
+    against the TARGET'S OWN response branch (in-branch / off-branch-discarded / ambiguous-fail-closed); on
+    the only path that would otherwise conclude, probe the minimal-edit-distance TWIN cohort; run the
+    predicate_oracle over the RAW statuses + RAW body hashes; admit through the branch. OPSEC: worst case
+    :data:`MAX_GATED_GETS_PER_URL` SERIAL gated GETs for ONE url."""
     from framework.v2.scanner.insertion import HttpRequest  # noqa: PLC0415 (FATAL-2: function-local)
     from framework.v2.verify.reachability_cloud import _authorize  # noqa: PLC0415 — the URL-shaped gate
 
@@ -722,6 +780,12 @@ def endpoint_liveness_redrive(url: str, *, slug: str, engagement_slug: str,
     for k, x in enumerate(probe_samples):
         observed_evidence[f"probe_{k}_status"] = _status(x)
         observed_evidence[f"probe_{k}_sha"] = _sha(x)
+    # Retain WHICH neighbours were probed, alongside their per-sample status/body-hash vars — the control
+    # cohort already retains ``control_urls`` and the twin cohort must be just as auditable. The predicate
+    # AST never reads these (it reads the indexed ``probe_k_*`` vars), so this is purely so a human or an
+    # OFFLINE auditor can see the actual neighbourhood that was searched instead of taking the count on
+    # trust. Aligned index-for-index with the ``probe_k_*`` samples.
+    observed_evidence["probe_urls"] = list(probe_urls[:len(probe_samples)])
     observed_evidence["twin_probes"] = len(probe_samples)
     observed_evidence["same_branch_controls"] = distinct_same_branch
     observed_evidence["same_branch_sample_keys"] = [i for b in in_branch for i in b]
@@ -732,9 +796,12 @@ def endpoint_liveness_redrive(url: str, *, slug: str, engagement_slug: str,
                                                       _LIVENESS_TARGET_SAMPLES, _MIN_LIVENESS_CONTROLS,
                                                       _MIN_TWIN_PROBES),
                "observed_evidence": observed_evidence}
-    # CONCLUSIVENESS: a non-fire is a channel-confirmed CLEAN ONLY when the target was a definite hard not-found
-    # (404/410) on EVERY resample (control-independent, bounded to THIS URL). Everything else non-firing (soft-
-    # 404 / bounded-body / checksum validation-reject / no same-branch baseline / unstable) is INCONCLUSIVE.
+    # CONCLUSIVENESS: what the deterministic layer saw. ``admit()`` then applies the branch's DECLARED
+    # capabilities, and ``achieved_state.endpoint_liveness`` is declared fact_capable=false AND
+    # clean_capable=false — so a FIRED oracle here becomes a LEAD and a conclusive non-firing becomes
+    # INCONCLUSIVE. ``conclusive`` is still computed honestly (a hard 404/410 on every resample IS a
+    # channel-confirmed non-firing) because the registry, not this function, is where the policy lives:
+    # hard-coding the demotion here would hide it from the one place a reviewer reads capabilities.
     fired = _oracle_signal(context).fired if have_baseline else False
     conclusive = fired or target_all_absent
     admitted = admit(ENDPOINT_LIVENESS_BRANCH, fired=fired, conclusive=conclusive,
@@ -742,17 +809,15 @@ def endpoint_liveness_redrive(url: str, *, slug: str, engagement_slug: str,
 
     finding = {"check_id": finding_ref, "bug_class": ENDPOINT_LIVENESS_BUG_CLASS,
                "insertion_point": url, "oracle_context": context}
-    # BIND THE CLAIM INTO THE CERTIFICATE (red-pen BLOCK-3). The sentence the runner computes is the ONLY
-    # place the narrowing lives; a consumer that reads certificates (not WebLivenessResult objects) used to
-    # receive nothing but the class token and a 0.9. The ReportClaim is part of the SIGNED model, so the
-    # governance signature covers the sentence and any edit to it breaks verification. render_as is
-    # "analyst-commentary" by the model's own doctrine: a deterministic gate does no entailment over
-    # English, so the sentence is bound TAMPER-EVIDENT but never re-asserted as a machine-checked fact —
-    # the machine-checked part is the predicate AST the same certificate's digest covers.
+    # The narrowing sentence is computed in ONE place and travels with the result (red-pen BLOCK-3): a
+    # bug-class token alone does not state what was observed, and a note the runner drops is not a
+    # disclosure. ``report_claims`` would bind it into the SIGNED certificate if this branch ever minted;
+    # it does not mint, so the sentence travels on the LEAD's ``note`` instead and the claims list stays
+    # None (``certify_admitted`` refuses to certify a non-FACT admission anyway — the choke is admission).
     claim_sentence = _liveness_claim(url, res.target_status, _LIVENESS_TARGET_SAMPLES,
                                      distinct_same_branch, len(probe_samples))
     claims = None
-    if fired:
+    if fired and admitted.is_fact:
         from framework.v2.evidence.certify import ReportClaim  # noqa: PLC0415 (FATAL-2: function-local)
         claims = [ReportClaim(sentence=claim_sentence, bug_class=ENDPOINT_LIVENESS_BUG_CLASS,
                               render_as="analyst-commentary")]
@@ -766,13 +831,28 @@ def endpoint_liveness_redrive(url: str, *, slug: str, engagement_slug: str,
         # AdapterResult is FROZEN (a minted result is not editable in place); carry the claim by rebuilding.
         res.fact = replace(r, note=claim_sentence)
         return res
-    # not a FACT — a labelled lead. classify: CLEAN (channel-confirmed hard-404, bounded to THIS url) vs
-    # INCONCLUSIVE (soft-404 / bounded-body / no-sound-control / ambiguous). certify_admitted stamped r.outcome.
+    # Not a FACT — a labelled LEAD, which on this branch is EVERY path. The retained capture rides along on
+    # ``res.context`` so the LEAD carries the same offline-re-verifiable evidence a FACT would have: the
+    # predicate AST, every raw per-sample status and body hash, the control urls and the probe urls. That
+    # is the whole point of keeping the pipeline — the evidence is good, the conclusion was not.
     res.lead = r
+    res.context = context
     res.outcome = "clean" if admitted.verdict is Verdict.CLEAN else "inconclusive"
     if admitted.verdict is Verdict.CLEAN:
         res.note = (f"channel-confirmed hard not-found ({res.target_status}) at THIS exact URL — CLEAN bounded "
                     f"to the probed URL only, never a claim that no other endpoint exists")
+    elif fired:
+        # The differential WAS observed and the oracle DID fire; admission demoted it because the branch is
+        # LEAD-only. Saying "no differential" here would be a fresh false statement, so say what happened.
+        res.note = (f"{claim_sentence} DEMOTED TO A LEAD: {admitted.reason} — this observation is priority "
+                    f"and context for a human, not a fact about the world. The retained capture re-verifies "
+                    f"offline; see docs/capability-matrix/evidence-branches.json for the measured classes "
+                    f"that took FACT-capability off this branch.")
+    elif target_all_absent:
+        res.note = (f"hard not-found ({res.target_status}) at THIS exact URL on every resample — "
+                    f"INCONCLUSIVE, not CLEAN: the sibling and twin cohorts are not probed on this path, so "
+                    f"nothing measured the differential this branch is about, and a 404 is also what a "
+                    f"server returns for a resource that EXISTS but is not authorised")
     elif not control_urls:
         res.note = ("no sound NARROW-CLASS same-shape control for this URL (a root/directory URL or an "
                     "ambiguous/un-mirrorable last segment) — fails closed to a LEAD")

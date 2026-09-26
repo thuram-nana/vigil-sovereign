@@ -89,6 +89,17 @@ _SPEC_BUILDER_TOOLS = SPEC_BUILDER_TOOLS
 # SERVICE_REACHABILITY for the four port scanners; tls → TLS_WEAKNESS for sslscan). Adding a member to a
 # FACT-capable family that also gains a spec builder makes it FACT-capable automatically — no edit here.
 _ORACLE_MAPPED_TOOLS = oracle_mapped_tools(_SPEC_BUILDER_TOOLS)
+# W2 DOWNGRADE — LEAD ENRICHERS. Tools that have a runner-owned ToolSpec builder and a runner-owned gated
+# re-drive, but whose re-drive branch is NOT fact_capable, so they can NEVER mint. They are dispatched
+# through the SAME R4 runner as the oracle-mapped tools — same scope gate, same capability token, same
+# pre-flight, same Observation — because the re-drive's retained, offline-re-verifiable capture is genuinely
+# good LEAD evidence (priority + context for a human), and deleting it would throw that away. The FACT choke
+# is `verdict.admit()` over the branch registry, NOT this set: httpx/ffuf re-drives cross admission with
+# ``achieved_state.endpoint_liveness`` declared fact_capable=false, so every result comes back a LEAD.
+_LEAD_ENRICHER_TOOLS: "frozenset[str]" = frozenset({"httpx", "ffuf"})
+# Everything the body may dispatch to the R4 runner at all. Disjoint by construction (asserted in tests): a
+# tool is either oracle-mapped (may mint) or a lead enricher (may not), never both.
+_RUNNER_DISPATCHED_TOOLS = _ORACLE_MAPPED_TOOLS | _LEAD_ENRICHER_TOOLS
 # a provenance/context/authorization key must NEVER originate from the body/brain (red-pen HIGH-3 guard).
 _FORBIDDEN_EXEC_KEYS = frozenset({"provenance", "oracle_context", "_authorized", "authorized"})
 
@@ -116,9 +127,10 @@ def _spec_for_kind(kind: str, params: "dict | None"):
     p = params or {}
     if kind == "sslscan":
         return tls_scan(port=int(p.get("port", 443)))
-    # HexStrike W2 — web-discovery: httpx/ffuf propose URLs the runner re-drives through the gated web
-    # LIVENESS re-drive (achieved_state.endpoint_liveness), the L7 analogue of the port handshake. Only the
-    # typed `scheme`/`wordlist` VALUES are read; every flag is built server-side inside the ToolSpec.
+    # HexStrike W2 — web-discovery LEAD ENRICHERS: httpx/ffuf propose URLs the runner re-drives through the
+    # gated web sibling-differential re-drive (achieved_state.endpoint_liveness). That branch is LEAD-only
+    # PERMANENTLY, so the re-drive attaches its retained, offline-re-verifiable capture and NEVER mints.
+    # Only the typed `scheme`/`wordlist` VALUES are read; every flag is built server-side in the ToolSpec.
     if kind == "httpx":
         return httpx_url_scan(scheme=str(p.get("scheme", "http")))
     if kind == "ffuf":
@@ -288,7 +300,7 @@ class HexstrikeAgentBody(AgentBody):
         provenance + signing. A tool with no oracle-mapped ToolSpec, an unprovisioned runner, or a runner
         provisioned WITHOUT a single-use capability token (H8f gate parity), stays a LEAD (honest — never a
         fabricated fact, never a packet on an unspent authorization)."""
-        if action.kind not in _ORACLE_MAPPED_TOOLS:
+        if action.kind not in _RUNNER_DISPATCHED_TOOLS:
             return ActionOutcome(executed=False, ok=False,
                                  blocked_reason=f"{action.kind!r} has no oracle-mapped ToolSpec — stays a LEAD")
         if self._runner is None:
@@ -309,7 +321,7 @@ class HexstrikeAgentBody(AgentBody):
                                  blocked_reason=f"{action.kind!r} params rejected by the ToolSpec schema — "
                                                 f"stays a LEAD: {e}")
         if spec is None:
-            # _ORACLE_MAPPED_TOOLS and _spec_for_kind agreed on membership above; a None here would be an
+            # _RUNNER_DISPATCHED_TOOLS and _spec_for_kind agreed on membership above; a None here would be an
             # internal drift, so refuse to run (fail-closed) rather than fabricate.
             return ActionOutcome(executed=False, ok=False,
                                  blocked_reason=f"{action.kind!r} is oracle-mapped but has no spec builder "

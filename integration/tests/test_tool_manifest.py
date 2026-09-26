@@ -39,14 +39,14 @@ def test_the_only_fact_capable_tools_are_the_ones_with_a_shipped_re_drive():
     # Anti-overclaim: the matrix must not claim FACT-capability beyond what actually has a runner-owned
     # re-drive today. nmap + masscan/rustscan/naabu + zmap/unicornscan (the W1 batch-2 promotion) →
     # SERVICE_REACHABILITY (the H5 reuse; all six re-prove each proposed port with the runner's own gated
-    # handshake); sslscan → TLS_WEAKNESS; httpx + ffuf (the W2 web-discovery promotion) → ACHIEVED_STATE (the
-    # sibling_response_differential re-drive: VIGIL's own gated GETs of the URL plus TWO runner-built sibling
-    # cohorts — randomized same-shape siblings for the same-status baseline, and minimal-edit-distance
-    # siblings as a twin search; NOT "a not-found control"). Growing this set is deliberate
-    # — each addition must PASS live.conformance.run_toolspec_conformance first.
+    # handshake); sslscan → TLS_WEAKNESS. Growing this set is deliberate — each addition must PASS
+    # live.conformance.run_toolspec_conformance first.
+    # HexStrike W2 does NOT grow this set: httpx/ffuf propose urls and VIGIL re-drives them through the
+    # gated sibling-differential capture, but that branch (achieved_state.endpoint_liveness) is declared
+    # LEAD-only PERMANENTLY after five adversarial rounds, so the re-drive is a LEAD ENRICHER and the two
+    # tools stay fact_capable=false. See docs/capability-matrix/evidence-branches.json.
     fact = {m.name for m in load_manifests(_MATRIX) if m.fact_capable}
-    assert fact == {"nmap", "sslscan", "masscan", "rustscan", "naabu", "zmap", "unicornscan",
-                    "httpx", "ffuf"}, (
+    assert fact == {"nmap", "sslscan", "masscan", "rustscan", "naabu", "zmap", "unicornscan"}, (
         f"unexpected fact_capable set: {fact}")
 
 
@@ -199,10 +199,9 @@ def test_h5_batch2_reuse_tools_are_present_service_reachability_fact_capable():
         assert m.excluded is False, f"{name}: a reachability proposer is not excluded"
         assert m.category == "active-assessment", f"{name}: a port scanner actively probes"
         assert m.notes.strip(), f"{name}: a fact_capable tool still documents its re-drive in notes"
-    # the pinned fact_capable set now includes the two promoted batch-2 scanners + the W2 web-discovery tools
+    # the pinned fact_capable set now includes the two promoted batch-2 scanners
     fact = {m.name for m in load_manifests(_MATRIX) if m.fact_capable}
-    assert fact == {"nmap", "sslscan", "masscan", "rustscan", "naabu", "zmap", "unicornscan",
-                    "httpx", "ffuf"}, (
+    assert fact == {"nmap", "sslscan", "masscan", "rustscan", "naabu", "zmap", "unicornscan"}, (
         f"fact set changed: {fact}")
 
 

@@ -558,11 +558,6 @@ def test_the_capability_matrix_does_not_outrun_the_branch_registry() -> None:
     # The W1 batch-2 promotion adds zmap/unicornscan as MORE SERVICE_REACHABILITY proposers wired
     # fact_capable=True through the runner (the SAME service_reachability.tcp_handshake branch + oracle), each
     # passing the conformance battery — so the fact set grows without outrunning the registry.
-    # The W2 web-discovery promotion adds httpx/ffuf (oracle_family ACHIEVED_STATE), backed by the new
-    # fact_capable achieved_state.endpoint_liveness branch — whose SHIPPED class token is
-    # sibling_response_differential and whose evidence is a same-status sibling baseline plus a
-    # minimal-edit-distance twin search, NOT "a not-found control" — so
-    # "achieved_state" is a fact_capable branch family and the two tools do not outrun the registry.
     fact_families = {b["id"].split(".")[0] for b in branches if b["fact_capable"]}
     for t in matrix["tools"]:
         if t.get("fact_capable"):
@@ -570,8 +565,11 @@ def test_the_capability_matrix_does_not_outrun_the_branch_registry() -> None:
             assert fam in fact_families, (
                 f"{t['name']} is marked fact_capable but its oracle_family {fam!r} has no fact_capable branch "
                 f"in the registry — the matrix outruns the registry")
-    assert fact_tools == {"nmap", "sslscan", "masscan", "rustscan", "naabu", "zmap", "unicornscan",
-                          "httpx", "ffuf"}, (
+    # HexStrike W2 does NOT grow this set: httpx/ffuf propose urls and VIGIL re-drives them through the
+    # gated sibling-differential capture, but that branch (achieved_state.endpoint_liveness) is declared
+    # LEAD-only PERMANENTLY after five adversarial rounds, so the re-drive is a LEAD ENRICHER and the two
+    # tools stay fact_capable=false. See docs/capability-matrix/evidence-branches.json.
+    assert fact_tools == {"nmap", "sslscan", "masscan", "rustscan", "naabu", "zmap", "unicornscan"}, (
         f"unexpected fact_capable tool set: {fact_tools}")
 
     httpx = [t for t in matrix["tools"] if t["name"] == "httpx"]

@@ -49,21 +49,15 @@ BUG_CLASS_ORACLES: dict[str, tuple[OracleKind, ...]] = {
     "mass_assignment": (OracleKind.ACHIEVED_STATE,),
     "privilege_escalation": (OracleKind.ACHIEVED_STATE,),
     "open_redirect": (OracleKind.ACHIEVED_STATE,),
-    # HexStrike W2 — SIBLING RESPONSE DIFFERENTIAL (historical id "endpoint_liveness"; the branch id
-    # achieved_state.endpoint_liveness is unchanged). A web-discovery tool (httpx/ffuf) PROPOSES a URL;
-    # VIGIL re-drives it with its OWN plain gated GETs plus two runner-built sibling cohorts.
-    # WHAT THE PREDICATE ACTUALLY DOES (an earlier version of this comment stated the INVERSE — that it
-    # fires when "the control returns a genuine not-found (>=400)" — which is false and was measured false:
-    # target 200 / anchor 404 does NOT fire; target 200 / anchor 200 does): the baseline is built ONLY from
-    # siblings that answered in the TARGET'S OWN status branch, the target must DIFFER from that baseline by
-    # body-hash, and NO sibling — including a minimal-edit-distance neighbour — may return the target's own
-    # body. A 4xx/5xx sibling is a DIFFERENT branch: it is discarded, never the contrast.
-    # The shipped bug-class token is deliberately NOT "endpoint_liveness": the FACT asserts a response
-    # DIFFERENTIAL across a neighbourhood of identifiers, never that an endpoint is live/real/exists, and a
-    # consumer must not be able to read liveness out of the token alone.
-    # Reuses the FROZEN ACHIEVED_STATE kind (adds NO new OracleKind; _ALL_ORACLES stays 15) and no benchmark
-    # finding carries this class, so `make gate` is byte-identical. See live.web_redrive.
-    "sibling_response_differential": (OracleKind.ACHIEVED_STATE,),
+    # HexStrike W2 — "sibling_response_differential" is DELIBERATELY ABSENT from this table. It was mapped
+    # to ACHIEVED_STATE on an earlier HEAD; it is not any more, and re-adding it needs a new argument, not a
+    # merge. This table says which decision procedure can PROVE a class, and after five adversarial rounds
+    # (measured false FACTs for NONEXISTENT urls at 11-55% on per-position format routes, 13/100 on a skewed
+    # per-path bounded body space, and 21/40 vs 40/40 discrimination on one route) the honest answer for
+    # this class is NONE. Its evidence branch achieved_state.endpoint_liveness is declared fact_capable=false
+    # in docs/capability-matrix/evidence-branches.json, so verdict.admit() already returns a LEAD; this
+    # absence is the SECOND, independent refusal, so a direct confirm_and_certify() that skipped admission
+    # still cannot mint the class. The class token itself remains in use — on LEADs (see live.web_redrive).
     "exposure": (OracleKind.ACHIEVED_STATE,),
     "sensitive_exposure": (OracleKind.ACHIEVED_STATE,),
     "security_misconfiguration": (OracleKind.ACHIEVED_STATE,),

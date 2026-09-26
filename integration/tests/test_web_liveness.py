@@ -1,36 +1,41 @@
-"""HexStrike W2 — endpoint response-DISTINGUISHABILITY (historical id ``achieved_state.endpoint_liveness``;
-the L7 analogue of the TCP tcp_handshake reachability FACT).
+"""HexStrike W2 — SIBLING RESPONSE DIFFERENTIAL (evidence branch ``achieved_state.endpoint_liveness``).
 
-NARROWED CLAIM (after three red-pen BLOCKs): the FACT asserts EXACTLY that VIGIL's own gated GET served
-content DISTINGUISHABLE from the server's own stable, SAME-BRANCH response to randomized same-shape siblings —
-never "live endpoint"/"real"/"exists". A web-discovery tool (httpx / ffuf) PROPOSES a URL; VIGIL re-drives it
-with its OWN plain gated GETs (the target resampled + many DISTINCT NARROW-CLASS same-shape controls, each
-resampled) and the EXISTING ACHIEVED_STATE predicate_oracle mints only when the target is a stable 2xx/3xx, at
-least the floor of controls answered in the TARGET'S OWN response branch with one shared body-hash, every
-DISCARDED control is proven off-branch, no control is ambiguous, and the target's body differs from that
-same-branch baseline. The proofs are genuinely live: real loopback HTTP servers.
+*** LEAD-ONLY, PERMANENTLY. *** Five adversarial rounds, and every one found a NEW class of URL where
+NOTHING EXISTS and this predicate minted a signed, offline-RE-VERIFYING FACT. Round 5 found two more: a
+per-position FORMAT route (``^report\\d$`` / ``^user\\d{3}$`` / ``^dashboard\\d$``) at 11/100, 32/100 and
+55/100 direct plus 29-40/80 through BOTH runner legs, because the sibling cohorts draw every alphanumeric
+position from a per-SEGMENT UNION alphabet rather than mirroring the target's per-position class; and a
+SKEWED per-PATH bounded not-found body space at 13/100 direct, 9/80 httpx, 13/80 ffuf. On one route where
+``/o/dashboard9`` EXISTS and ``/o/dashboard1`` does not it minted 40/40 for the existing id and 21/40 for
+the nonexistent one. The branch is therefore declared fact_capable=false AND clean_capable=false, and
+``verdict.admit()`` is the choke that enforces it.
 
-Headline properties (each FP class below minted a FALSE offline-re-verifiable FACT on some pre-fix HEAD):
-  * a really-distinguishable URL → a signed FACT that re-verifies OFFLINE, and tamper is rejected;
+WHAT IS KEPT: the whole evidence pipeline runs as a LEAD ENRICHER. The gated GETs, the same-branch
+baseline, the k=4 multi-sampling, the validator-aware controls and the NO-TWIN minimal-edit-distance cohort
+all still execute, and their retained capture (predicate AST + every raw per-sample status and body hash +
+``control_urls`` + ``probe_urls``) rides on the LEAD and re-verifies offline. The proofs below are
+genuinely live: real loopback HTTP servers.
+
+Headline properties:
+  * NOTHING mints. A really-distinguishable URL, a soft-404 phantom, a checksum route, a format route and
+    the whole RP1-RP5 class table are all LEADs, and the demotion reason travels in words;
+  * the retained capture is still real evidence: the predicate fires over it offline and a TAMPERED context
+    stops firing, so a LEAD's evidence is falsifiable rather than decorative;
+  * a hard 404/410 is INCONCLUSIVE, not CLEAN — the sibling and twin cohorts are never probed on that path,
+    so nothing measured the differential, and a 404 is also what a server returns for an existing but
+    unauthorised resource;
   * a tool-claimed-but-UNREACHABLE URL → a LEAD (deceptive_no_fact — the tool's say-so never confirms);
-  * every soft-404 CLASS is a LEAD: uniform blanket-200, path-echo, numeric-route (RP1), length/shape
-    signature (RP1), HEX-route + UUID-route narrow-class route-miss (RP2), a bounded per-request body space
-    (RP2), and CHECKSUM/validation routes — Luhn card + base58, with the validation-reject on a hard 404, a
-    distinct-body 404 AND (the worst case) a 200 INSIDE the target's own status branch — closed by the
-    SAME-BRANCH baseline plus VALIDATOR-AWARE controls (RP3), each proven over 80 runs (no intermittency);
-    a strict UNKNOWN validator with < floor in-branch controls fails closed;
-  * an UNKNOWN app-specific validator that rejects INSIDE the target's own status branch — prefix, suffix
-    and positional rules — is CLOSED by the minimal-edit-distance (NO-TWIN) cohort (RP4), 0/80 each; the
-    residual is now only a validator that constrains the identifier JOINTLY ACROSS POSITIONS (a whole-string
-    checksum), where no Hamming-1 neighbour is accepted and so no twin exists to find;
-  * the claim a consumer receives is the claim that was proven: the sentence is bound into the SIGNED
-    certificate and the shipped bug-class token is `sibling_response_differential`, never `endpoint_liveness`;
-  * a hostile brain-supplied `scheme`/`wordlist` is refused before any argv or any send (a scope escape);
-  * a special-cased error page is a TRUE-if-modest NARROWED FACT, never a "live endpoint" overclaim (RP2 BLOCK-3);
-  * a channel-confirmed hard 404 → a CLEAN bounded to the EXACT probed URL, never an enumeration claim;
-  * a root/directory or ambiguous-class segment FAILS CLOSED to a LEAD;
-  * httpx + ffuf each PASS the full conformance battery through the REAL gated runner; the two operator
-    surfaces (capability matrix + the body's oracle-mapped set) AGREE.
+  * every soft-404 / phantom CLASS is a LEAD through the direct re-drive AND through BOTH runner legs, at
+    VOLUME (a 4% class is invisible to single-shot coverage, and volume is what surfaced every round);
+  * the two round-5 classes are permanent regression fixtures, so a future re-promotion cannot forget them;
+  * the shipped bug-class token is ``sibling_response_differential``, never ``endpoint_liveness``;
+  * httpx's R4 argv PINS the correlatable User-Agent (httpx's own ``-random-agent`` defaults TRUE, and
+    identity rotation is forbidden), and ffuf's pins ``-maxtime`` so a SIGKILL cannot lose the report;
+  * the runner CAPS how many proposed urls it re-drives, against a documented per-run request budget, and
+    the truncation is visible in the result — never silent;
+  * a hostile brain-supplied ``scheme``/``wordlist`` is refused before any argv or any send (a scope escape);
+  * the two operator surfaces (capability matrix + the body's oracle-mapped set) AGREE that httpx/ffuf are
+    LEAD-only web-discovery tools.
 
 Offense-process test (loads framework.* + vigil_integration.live.*): CI runs it in the offense group.
 """
@@ -162,9 +167,10 @@ class _NumericRouteSoftApp(http.server.BaseHTTPRequestHandler):
 
 
 class _NumericRouteLiveApp(http.server.BaseHTTPRequestHandler):
-    """The NON-REGRESSION twin of _NumericRouteSoftApp: /api/users/1 is a REAL user (distinct body), every
+    """The TRUE-POSITIVE twin of _NumericRouteSoftApp: /api/users/1 is a REAL user (distinct body), every
     other numeric id is the soft-404 {"user": null}. A same-shape numeric control 200s with {"user": null},
-    but the target /api/users/1 body DIFFERS -> the body differential still mints a FACT for the live id."""
+    but the target /api/users/1 body DIFFERS -> the differential is real and the oracle still fires. It is
+    nonetheless only a LEAD: this fixture now pins the CAPABILITY COST of the downgrade, not a FACT."""
 
     def log_message(self, *a):  # noqa: D401
         pass
@@ -582,6 +588,92 @@ def _partially_varying_app():
     return _App
 
 
+# --- RP5: the two classes that decided the DOWNGRADE. Permanent regression fixtures. -------------------
+_FORMAT_ROUTE = re.compile(r"^/o/dashboard(\d)/?$")
+
+
+def _format_route_app():
+    """RP5 (A) — a PER-POSITION FORMAT route: ``/o/dashboard<digit>``. Answers 200 with a REJECT body for
+    any ``/o/<10-char alnum>`` that does not match the format, and 200 with its own NOT-FOUND body for a
+    format-matching id that does not exist. NOTHING at ``/o/dashboard1`` exists.
+
+    THIS IS THE CLASS THAT ENDED THE FACT. The cohorts do NOT mirror the target's per-position class:
+    ``_alnum_class_alphabet`` unions the whole segment's alnum characters (``dashboard1`` → lower_alnum,
+    36 characters) and BOTH cohorts draw EVERY position from that one alphabet. So an edit at one of the
+    nine LETTER positions always breaks the format, and an edit at the single DIGIT position produces a
+    letter 26/35 of the time — the twin cohort's ~2 passes over that position therefore find no accepted
+    neighbour about 55% of the time, the "baseline" is the route's REJECT body, the target's own not-found
+    body looks like a differential, and a signed FACT was minted for a url where nothing exists.
+    Measured 11/100, 32/100 and 55/100 direct and 29-40/80 through both runner legs before the downgrade.
+    """
+    class _App(http.server.BaseHTTPRequestHandler):
+        def log_message(self, *a):  # noqa: D401
+            pass
+
+        def do_GET(self):  # noqa: N802
+            path = self.path.split("?")[0]
+            if not re.match(r"^/o/[0-9A-Za-z]{10}/?$", path):
+                body, code = b"nf", 404
+            elif _FORMAT_ROUTE.match(path):
+                body, code = b'{"dashboard":null}', 200     # well-formed id, nothing there
+            else:
+                body, code = b'{"error":"bad id"}', 200     # the route's REJECT, INSIDE the 200 branch
+            self.send_response(code)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+    return _App
+
+
+def _skewed_bounded_body_app():
+    """RP5 (B) — a SKEWED, PER-PATH bounded not-found body space. ``/s/<8 lowercase>`` always 200s with one
+    of two not-found bodies, chosen DETERMINISTICALLY per path (so every resample of a given sibling
+    agrees — it is stable IN-BRANCH, never ambiguous) with P(B) = 1/20. NOTHING exists here at all.
+
+    The multi-sampling that closed the per-REQUEST bounded space does nothing against a per-PATH one: the
+    rare bucket is stable, so when the TARGET lands in B and the sibling cohort unanimously lands in A, the
+    predicate sees a perfectly stable same-branch baseline the target "differs" from, and no neighbour
+    returns B either. Measured 13/100 direct, 9/80 httpx, 13/80 ffuf. The target path below is chosen to
+    sit in the rare bucket, which is exactly the situation the class describes."""
+    def _bucket(path: str) -> bytes:
+        import hashlib
+        h = int.from_bytes(hashlib.sha256(path.encode()).digest()[:4], "big")
+        return b'{"m":"B"}' if h % 20 == 0 else b'{"m":"A"}'
+
+    class _App(http.server.BaseHTTPRequestHandler):
+        def log_message(self, *a):  # noqa: D401
+            pass
+
+        def do_GET(self):  # noqa: N802
+            path = self.path.split("?")[0]
+            body = _bucket(path) if re.match(r"^/s/[a-z]{8}/?$", path) else b"nf"
+            self.send_response(200 if body != b"nf" else 404)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+    return _App
+
+
+def _skewed_rare_bucket_path() -> str:
+    """A ``/s/<8 lowercase>`` path the skewed app puts in the RARE bucket (body B) — i.e. the nonexistent
+    url the class mints for. Derived the same way the app derives it, so the fixture cannot drift.
+
+    Every candidate contains letters OUTSIDE a-f, deliberately: an all-a-f segment is BOTH lower-alpha and
+    lower-hex, ``_alnum_class_alphabet`` calls that AMBIGUOUS and the run fails closed before a single
+    control is fetched — the fixture would then pass for the wrong reason (the lesson of the RP4 round)."""
+    import hashlib
+    import itertools
+    for combo in itertools.product("ghijklmnop", repeat=4):
+        seg = "".join(combo) + "wxyz"
+        path = f"/s/{seg}"
+        h = int.from_bytes(hashlib.sha256(path.encode()).digest()[:4], "big")
+        if h % 20 == 0:
+            return path
+    raise AssertionError("no rare-bucket path found")   # pragma: no cover
+
+
 def _handler(app):
     """A table entry is either a handler CLASS or a zero-arg FACTORY that builds a fresh one (needed when
     the fixture keeps per-server state, e.g. the arrival-indexed partially-varying app — a shared class
@@ -635,12 +727,15 @@ def _scope_gate(hosts):
 # ===================================================================================================
 # The direct re-drive proofs (the endpoint_liveness_redrive itself).
 # ===================================================================================================
-def test_live_url_mints_a_signed_liveness_fact_that_reverifies_offline(monkeypatch, tmp_path):
+def test_a_genuinely_distinguishable_url_is_a_lead_not_a_fact(monkeypatch, tmp_path):
+    """THE DOWNGRADE, at the choke. ``/live`` is the branch's BEST case — a real endpoint whose body differs
+    from a stable same-branch sibling baseline with no twin — and it is a LEAD. Nothing on this branch
+    mints, so the loss of the true positive is the DELIBERATE capability cost of the downgrade, and the
+    demotion reason travels in words rather than being inferable from an empty facts list."""
     _grant_active_recon(monkeypatch)
     _charter(tmp_path, "127.0.0.1")
-    from framework.v2.evidence.certify import verify_certificate
     from vigil_integration.live.web_redrive import endpoint_liveness_redrive
-    signers, tr = _signers_and_trust()
+    signers, _ = _signers_and_trust()
     srv = _serve(_SoftLiveApp)          # /live real content; siblings soft-404 200 (the SAME served branch)
     port = srv.server_address[1]
     try:
@@ -648,28 +743,33 @@ def test_live_url_mints_a_signed_liveness_fact_that_reverifies_offline(monkeypat
                                        slug="alpha", engagement_slug="alpha", signers=signers)
     finally:
         srv.shutdown()
-    assert wl.is_fact, f"expected a distinguishability FACT; outcome={wl.outcome} note={wl.note}"
-    # the baseline is the SAME served branch (200 soft-404); the target's real body differs.
-    assert wl.outcome == "positive" and wl.target_status == 200 and wl.control_statuses == [200]
-    assert wl.same_branch_controls >= 4
+    assert not wl.is_fact and wl.fact is None, "the branch is LEAD-only: nothing may mint"
+    assert wl.outcome == "inconclusive" and wl.lead is not None and not wl.lead.is_fact
+    # the measurement still HAPPENED — same-branch baseline, same served branch, twin cohort searched
+    assert wl.target_status == 200 and wl.control_statuses == [200]
+    assert wl.same_branch_controls >= 4 and wl.twin_probes >= 4 and wl.twin_found is False
     low = wl.note.lower()
-    # THE CLAIM (RP4 BLOCK-4): only what the capture proves, and it says outright what it does not prove.
+    # THE NARROWING still travels, verbatim, and so does the demotion reason.
     assert "differs from the server's stable same-status response" in low
     assert "no minimal-edit-distance sibling" in low
     assert "asserts nothing about" in low and "existence or liveness" in low
+    assert "demoted to a lead" in low
     asserted = low.partition("this asserts nothing about")[0]
     for banned in ("not-found baseline", "soft-404", "live endpoint", "is live", "is real"):
         assert banned not in asserted, f"the claim still asserts {banned!r}: {wl.note}"
-    # the FACT re-verifies OFFLINE from the retained JSON-safe capture — no network, no VIGIL runner
-    assert verify_certificate(wl.fact.signed, oracle_context=wl.context, trust_root=tr).ok is True
+    assert wl.lead.note == wl.note, "the demotion reason must reach every consumer of the LEAD"
 
 
-def test_liveness_fact_is_rejected_when_the_retained_context_is_tampered(monkeypatch, tmp_path):
+def test_the_lead_carries_its_retained_capture_and_it_re_verifies_offline(monkeypatch, tmp_path):
+    """The evidence pipeline is KEPT as a LEAD ENRICHER, so the LEAD must carry the same retained,
+    offline-re-verifiable capture a FACT would have: the predicate AST plus every raw per-sample status and
+    body hash, the control urls AND the probe urls. Re-running the deterministic oracle over the retained
+    context (no network, no runner) must reproduce the runner's own signal — otherwise the 'evidence' is
+    decorative."""
     _grant_active_recon(monkeypatch)
     _charter(tmp_path, "127.0.0.1")
-    from framework.v2.evidence.certify import verify_certificate
-    from vigil_integration.live.web_redrive import endpoint_liveness_redrive
-    signers, tr = _signers_and_trust()
+    from vigil_integration.live.web_redrive import _oracle_signal, endpoint_liveness_redrive
+    signers, _ = _signers_and_trust()
     srv = _serve(_SoftLiveApp)
     port = srv.server_address[1]
     try:
@@ -677,46 +777,92 @@ def test_liveness_fact_is_rejected_when_the_retained_context_is_tampered(monkeyp
                                        slug="alpha", engagement_slug="alpha", signers=signers)
     finally:
         srv.shutdown()
-    assert wl.is_fact
-    # flip the target's body-hash to match the baseline in the retained context: it would NO LONGER be
-    # distinguishable — the cert bound the original context, so verify must FAIL.
+    assert wl.context is not None, "a LEAD must still carry its retained capture"
+    ev = wl.context["observed_evidence"]
+    assert ev["target_url"].endswith("/live") and ev["control_urls"] and ev["probe_urls"]
+    assert len(ev["probe_urls"]) == ev["twin_probes"] >= 4
+    for i, u in enumerate(ev["probe_urls"]):
+        assert f"probe_{i}_sha" in ev and f"probe_{i}_status" in ev, "probe_urls must align with the samples"
+        assert u != ev["target_url"], "a twin probe is a NEIGHBOUR, never the target itself"
+    # JSON-safe (it has to survive a certificate / a report / a file) and re-verifiable OFFLINE.
+    ctx = json.loads(json.dumps(wl.context))
+    assert _oracle_signal(ctx).fired is True, "the retained capture must reproduce the runner's own signal"
+
+
+def test_a_tampered_lead_capture_stops_re_verifying(monkeypatch, tmp_path):
+    """The LEAD's evidence is FALSIFIABLE, not decorative: flip the target's body-hash to the baseline's in
+    the retained context and the differential is gone, so the deterministic oracle must stop firing over
+    it. (On a FACT this was the signature check; on a LEAD there is no signature, so the property that
+    matters is that the retained capture is what the conclusion actually rests on.)"""
+    _grant_active_recon(monkeypatch)
+    _charter(tmp_path, "127.0.0.1")
+    from vigil_integration.live.web_redrive import _oracle_signal, endpoint_liveness_redrive
+    signers, _ = _signers_and_trust()
+    srv = _serve(_SoftLiveApp)
+    port = srv.server_address[1]
+    try:
+        wl = endpoint_liveness_redrive(f"http://127.0.0.1:{port}/live",
+                                       slug="alpha", engagement_slug="alpha", signers=signers)
+    finally:
+        srv.shutdown()
+    assert wl.context is not None and _oracle_signal(wl.context).fired is True
     tampered = json.loads(json.dumps(wl.context))
     tampered["observed_evidence"]["target_0_sha"] = tampered["observed_evidence"]["control_0_sha"]
-    assert verify_certificate(wl.fact.signed, oracle_context=tampered, trust_root=tr).ok is False
+    assert _oracle_signal(tampered).fired is False
 
 
-# Every soft-404 / phantom CLASS all three red-pens raised. Each mints a FALSE offline-re-verifiable FACT on
-# some pre-fix HEAD; each must be a LEAD after the fix. (RP1: uniform, path-echo, numeric-route, length-sig.
-# RP2: hex-route, uuid-route, bounded per-request body. RP3: Luhn hard-404, Luhn soft-reject, base58 — the
-# checksum/validation-route class the SAME-BRANCH baseline closes.)
+# Every soft-404 / phantom CLASS the five red-pen rounds raised. Each minted a FALSE offline-re-verifiable
+# FACT on some preceding HEAD; each must be a LEAD. (RP1: uniform, path-echo, numeric-route, length-sig.
+# RP2: hex-route, uuid-route, bounded per-request body. RP3: Luhn hard-404, Luhn soft-reject, base58.
+# RP4: unknown prefix/suffix/positional validator in-branch, partially-varying space. RP5: the per-position
+# FORMAT route and the SKEWED per-path bounded body space — the two that ended the FACT.)
+#
+# The 4th element is LEG_RUNS: how many times the httpx/ffuf leg table runs this class. A DETERMINISTIC
+# class is settled in one run; a PROBABILISTIC one is not, and single-shot coverage is exactly how a 2.3%
+# class shipped through RP3 and how the two RP5 classes reached a fifth round. Volume is what surfaced
+# every block, so the adversarial rows carry it here, in the table the legs are parametrized over.
+_ADVERSARIAL_LEG_RUNS = 20       # rate-based classes: enough to see a ~15% class essentially always
+_CHECKSUM_LEG_RUNS = 4           # off-branch reject classes: rate-based but were 0/80 at the floor already
 _SOFT_404_CLASSES = [
-    (_SoftNotFoundApp, "/anything", "uniform blanket-200"),
-    (_PathEchoSoftApp, "/anything", "path-echoing 200"),
-    (_NumericRouteSoftApp, "/api/users/999999999", "numeric-route soft-404 (RP1)"),
-    (_LengthSignatureApp, "/admin", "length/shape-signature 404 (RP1)"),
-    (_HexRouteSoftApp, "/token/dead1234", "hex-route soft-404 (RP2)"),
-    (_HexRouteSoftApp, "/token/deadbeef", "hex-route ambiguous-class fail-closed (RP2)"),
-    (_UuidRouteSoftApp, "/r/550e8400-e29b-41d4-a716-446655440000", "uuid-route soft-404 (RP2)"),
-    (_BoundedBodySoftApp, "/admin", "bounded per-request 2-elt body (RP2)"),
-    (_LuhnHardApp, "/card/4111111111111111", "Luhn checksum route, hard-404 reject (RP3)"),
-    (_LuhnSoftApp, "/card/4111111111111111", "Luhn checksum route, distinct-body reject (RP3)"),
-    (_Base58App, "/obj/3vQB7fMrk9xZa5dCFg2h", "base58 checksum route (RP3)"),
-    (_Luhn200RejectApp, "/card/4111111111111111", "Luhn route, reject INSIDE the target's branch (RP3)"),
-    (_Base58_200RejectApp, "/obj/3vQB7fMrk9xZa5dCFg2h", "base58 route, reject INSIDE the branch (RP3)"),
-    (_StrictValidatorApp, "/item/005", "strict validator, < floor valid controls (RP3 fail-closed)"),
-    # RP4 — the classes the 3rd round shipped as MINTING. Each is a nonexistent URL; each is now a LEAD.
+    (_SoftNotFoundApp, "/anything", "uniform blanket-200", 1),
+    (_PathEchoSoftApp, "/anything", "path-echoing 200", 1),
+    (_NumericRouteSoftApp, "/api/users/999999999", "numeric-route soft-404 (RP1)", 1),
+    (_LengthSignatureApp, "/admin", "length/shape-signature 404 (RP1)", 1),
+    (_HexRouteSoftApp, "/token/dead1234", "hex-route soft-404 (RP2)", 1),
+    (_HexRouteSoftApp, "/token/deadbeef", "hex-route ambiguous-class fail-closed (RP2)", 1),
+    (_UuidRouteSoftApp, "/r/550e8400-e29b-41d4-a716-446655440000", "uuid-route soft-404 (RP2)", 1),
+    (_BoundedBodySoftApp, "/admin", "bounded per-request 2-elt body (RP2)", _ADVERSARIAL_LEG_RUNS),
+    (_LuhnHardApp, "/card/4111111111111111", "Luhn checksum route, hard-404 reject (RP3)", _CHECKSUM_LEG_RUNS),
+    (_LuhnSoftApp, "/card/4111111111111111", "Luhn checksum route, distinct-body reject (RP3)",
+     _CHECKSUM_LEG_RUNS),
+    (_Base58App, "/obj/3vQB7fMrk9xZa5dCFg2h", "base58 checksum route (RP3)", _CHECKSUM_LEG_RUNS),
+    (_Luhn200RejectApp, "/card/4111111111111111", "Luhn route, reject INSIDE the target's branch (RP3)",
+     _ADVERSARIAL_LEG_RUNS),
+    (_Base58_200RejectApp, "/obj/3vQB7fMrk9xZa5dCFg2h", "base58 route, reject INSIDE the branch (RP3)",
+     _ADVERSARIAL_LEG_RUNS),
+    (_StrictValidatorApp, "/item/005", "strict validator, < floor valid controls (RP3 fail-closed)", 1),
+    # RP4 — the classes the 3rd round shipped as MINTING. Each is a nonexistent URL.
     # They go in THIS table deliberately: it is the table the httpx and ffuf legs are parametrized over,
     # and "the two classes that still mint are exactly the two the runner legs never exercise" was the
     # gap that let them ship.
-    (_prefix_validator_app, "/item/ZQabcdefgh", "unknown PREFIX validator, 200 reject in-branch (RP4)"),
-    (_suffix_validator_app, "/item/abcdefghQZ", "unknown SUFFIX validator, 200 reject in-branch (RP4)"),
-    (_positional_validator_app, "/item/abcdKfghij", "unknown POSITIONAL validator, 200 reject (RP4)"),
-    (_partially_varying_app, "/x/wxyz", "partially-varying not-found space (RP4)"),
+    (_prefix_validator_app, "/item/ZQabcdefgh", "unknown PREFIX validator, 200 reject in-branch (RP4)",
+     _ADVERSARIAL_LEG_RUNS),
+    (_suffix_validator_app, "/item/abcdefghQZ", "unknown SUFFIX validator, 200 reject in-branch (RP4)",
+     _ADVERSARIAL_LEG_RUNS),
+    (_positional_validator_app, "/item/abcdKfghij", "unknown POSITIONAL validator, 200 reject (RP4)",
+     _ADVERSARIAL_LEG_RUNS),
+    (_partially_varying_app, "/x/wxyz", "partially-varying not-found space (RP4)", _ADVERSARIAL_LEG_RUNS),
+    # RP5 — THE TWO CLASSES THAT ENDED THE FACT. They are LEADs trivially now (nothing mints), and they
+    # stay here permanently so a future re-promotion attempt has to walk past them.
+    (_format_route_app, "/o/dashboard1", "per-position FORMAT route, 200 reject in-branch (RP5)",
+     _ADVERSARIAL_LEG_RUNS),
+    (_skewed_bounded_body_app, _skewed_rare_bucket_path(), "SKEWED per-path bounded body space (RP5)",
+     _ADVERSARIAL_LEG_RUNS),
 ]
 
 
-@pytest.mark.parametrize("app,path,label", _SOFT_404_CLASSES)
-def test_soft_404_classes_mint_no_liveness_fact(app, path, label, monkeypatch, tmp_path):
+@pytest.mark.parametrize("app,path,label,_runs", _SOFT_404_CLASSES)
+def test_soft_404_classes_mint_no_liveness_fact(app, path, label, _runs, monkeypatch, tmp_path):
     """Every soft-404 / phantom CLASS both red-pens raised must be a LEAD, never a FACT."""
     _grant_active_recon(monkeypatch)
     _charter(tmp_path, "127.0.0.1")
@@ -865,14 +1011,15 @@ def test_a_control_unstable_inside_the_targets_own_branch_fails_the_run_closed(m
     assert any("ambiguous" in n.lower() for n in notes), notes[:2]
 
 
-def test_the_certificate_binds_same_branch_membership(monkeypatch, tmp_path):
-    """The partition is part of the PROOF: flip a retained in-branch control's status away from the target's
-    and the certificate must FAIL to re-verify (the baseline is no longer in the target's branch)."""
+def test_the_retained_capture_binds_same_branch_membership(monkeypatch, tmp_path):
+    """The partition is part of the retained evidence, not a runner assertion: flip a retained in-branch
+    control's status away from the target's and the predicate must stop firing over the capture (the
+    baseline is no longer in the target's branch). Bounded by the retention trust boundary the module
+    header states — this proves the relations among RETAINED samples, never that they are all of them."""
     _grant_active_recon(monkeypatch)
     _charter(tmp_path, "127.0.0.1")
-    from framework.v2.evidence.certify import verify_certificate
-    from vigil_integration.live.web_redrive import endpoint_liveness_redrive
-    signers, tr = _signers_and_trust()
+    from vigil_integration.live.web_redrive import _oracle_signal, endpoint_liveness_redrive
+    signers, _ = _signers_and_trust()
     srv = _serve(_SoftLiveApp)
     port = srv.server_address[1]
     try:
@@ -880,10 +1027,10 @@ def test_the_certificate_binds_same_branch_membership(monkeypatch, tmp_path):
                                        slug="alpha", engagement_slug="alpha", signers=signers)
     finally:
         srv.shutdown()
-    assert wl.is_fact
+    assert wl.context is not None and _oracle_signal(wl.context).fired is True
     tampered = json.loads(json.dumps(wl.context))
     tampered["observed_evidence"]["control_0_status"] = 404      # pretend the baseline was a 404 reject
-    assert verify_certificate(wl.fact.signed, oracle_context=tampered, trust_root=tr).ok is False
+    assert _oracle_signal(tampered).fired is False
 
 
 def test_the_predicate_proves_the_partition_and_refuses_a_cherry_picked_one():
@@ -978,6 +1125,54 @@ def test_unknown_in_branch_validator_is_closed_by_the_no_twin_cohort_over_80_run
                                f"a twin — the minimal-edit-distance cohort is not closing this class")
 
 
+@pytest.mark.parametrize("factory,pathfn,label,min_fire", [
+    (_format_route_app, lambda: "/o/dashboard1",
+     "per-position FORMAT route, 200 reject in-branch (RP5-A)", 8),
+    (_skewed_bounded_body_app, _skewed_rare_bucket_path,
+     "SKEWED per-path bounded not-found body space (RP5-B)", 4),
+])
+def test_rp5_classes_that_ended_the_fact_are_permanent_regressions(factory, pathfn, label, min_fire,
+                                                                   monkeypatch, tmp_path):
+    """RP5 — THE TWO CLASSES THAT DECIDED THE DOWNGRADE, pinned forever on the DIRECT path.
+
+    Both are urls where NOTHING EXISTS, and on the preceding HEAD both minted signed, offline-re-verifying
+    FACTs: the per-position FORMAT route at 11/100, 32/100 and 55/100 (the cohorts draw from a per-SEGMENT
+    UNION alphabet, so a Hamming-1 edit at a digit slot becomes a letter ~74% of the time and no twin is
+    found), and the SKEWED per-PATH bounded body space at 13/100 (multi-sampling does nothing against a
+    space that is stable per path).
+
+    TWO assertions, and the second one is the point. (1) ZERO FACTs — trivially true today because nothing
+    on this branch mints, which is exactly why it must be pinned: it is the assertion a re-promotion would
+    break. (2) The fixture BITES: the deterministic oracle must still FIRE for a nonexistent url on a
+    material fraction of runs. Without (2) this test would keep passing if the fixture silently stopped
+    modelling the class — which is precisely how the RP4 ambiguity fixture passed for the wrong reason."""
+    _grant_active_recon(monkeypatch)
+    _charter(tmp_path, "127.0.0.1")
+    from vigil_integration.live.web_redrive import _oracle_signal, endpoint_liveness_redrive
+    signers, _ = _signers_and_trust()
+    path = pathfn()
+    runs = 40
+    facts, fired = 0, 0
+    try:
+        srv = _serve(factory())
+        port = srv.server_address[1]
+        for _ in range(runs):
+            wl = endpoint_liveness_redrive(f"http://127.0.0.1:{port}{path}",
+                                           slug="alpha", engagement_slug="alpha", signers=signers)
+            facts += 1 if wl.is_fact else 0
+            if wl.context is not None and _oracle_signal(wl.context).fired:
+                fired += 1
+                # whenever it fires, the LEAD must SAY it was demoted — never "no differential".
+                assert "demoted to a lead" in (wl.note or "").lower(), wl.note
+    finally:
+        srv.shutdown()
+    assert facts == 0, f"{label}: minted {facts}/{runs} FACT(s) for a NONEXISTENT url — the branch must not mint"
+    assert fired >= min_fire, (
+        f"{label}: the predicate fired on only {fired}/{runs} runs (expected >= {min_fire}). This fixture "
+        f"exists to keep a MEASURED false-FACT class reproducible; if it stopped reproducing, the fixture "
+        f"has drifted and the zero-FACT assertion above is passing for the wrong reason")
+
+
 def test_the_twin_cohort_is_a_search_only_and_never_counts_toward_the_control_floor():
     """The Hamming-1 probes must NEVER be mistaken for baseline controls: counting them would let a
     sub-floor run (too few same-branch siblings) be pushed OVER the floor by probes that were never
@@ -1015,13 +1210,12 @@ def test_the_twin_cohort_is_a_search_only_and_never_counts_toward_the_control_fl
 
 
 def test_the_no_twin_rule_is_bound_into_the_offline_predicate(monkeypatch, tmp_path):
-    """NO-TWIN is part of the PROOF, not a runner-side afterthought: rewrite one retained probe's body-hash
-    to the target's in the authenticated context and the certificate must STOP verifying."""
+    """NO-TWIN is part of the retained evidence, not a runner-side afterthought: rewrite one retained
+    probe's body-hash to the target's and the predicate must stop firing over the capture."""
     _grant_active_recon(monkeypatch)
     _charter(tmp_path, "127.0.0.1")
-    from framework.v2.evidence.certify import verify_certificate
-    from vigil_integration.live.web_redrive import endpoint_liveness_redrive
-    signers, tr = _signers_and_trust()
+    from vigil_integration.live.web_redrive import _oracle_signal, endpoint_liveness_redrive
+    signers, _ = _signers_and_trust()
     srv = _serve(_SoftLiveApp)
     port = srv.server_address[1]
     try:
@@ -1029,23 +1223,22 @@ def test_the_no_twin_rule_is_bound_into_the_offline_predicate(monkeypatch, tmp_p
                                        slug="alpha", engagement_slug="alpha", signers=signers)
     finally:
         srv.shutdown()
-    assert wl.is_fact and wl.twin_probes >= 4 and wl.twin_found is False
-    assert verify_certificate(wl.fact.signed, oracle_context=wl.context, trust_root=tr).ok is True
+    assert wl.twin_probes >= 4 and wl.twin_found is False and wl.context is not None
+    assert _oracle_signal(wl.context).fired is True
     tampered = json.loads(json.dumps(wl.context))
     tampered["observed_evidence"]["probe_0_sha"] = tampered["observed_evidence"]["target_0_sha"]
-    assert verify_certificate(wl.fact.signed, oracle_context=tampered, trust_root=tr).ok is False
+    assert _oracle_signal(tampered).fired is False
 
 
-def test_the_claim_travels_in_the_signed_certificate_and_the_token_does_not_overclaim(monkeypatch, tmp_path):
-    """RP4 BLOCK-3 — a note the runner drops is not a disclosure. What a consumer actually receives must
-    carry the narrowing: (1) the bug-class TOKEN is not `endpoint_liveness` (a token that asserts liveness
-    at 0.9 is exactly the overclaim), (2) the claim SENTENCE is bound into the SIGNED certificate and the
-    signature covers it (editing it breaks verification), and (3) the AdapterResult carries it too."""
+def test_the_narrowing_travels_on_the_lead_and_the_token_does_not_overclaim(monkeypatch, tmp_path):
+    """RP4 BLOCK-3 — a note the runner drops is not a disclosure, and that survives the downgrade. What a
+    consumer receives must carry the narrowing: (1) the bug-class TOKEN is not `endpoint_liveness` (a token
+    that reads as liveness is exactly the overclaim), (2) the claim SENTENCE reaches the AdapterResult, and
+    (3) NO certificate is minted at all, because a LEAD has nothing to sign."""
     _grant_active_recon(monkeypatch)
     _charter(tmp_path, "127.0.0.1")
-    from framework.v2.evidence.certify import verify_certificate
     from vigil_integration.live.web_redrive import ENDPOINT_LIVENESS_BUG_CLASS, endpoint_liveness_redrive
-    signers, tr = _signers_and_trust()
+    signers, _ = _signers_and_trust()
     srv = _serve(_SoftLiveApp)
     port = srv.server_address[1]
     try:
@@ -1053,87 +1246,95 @@ def test_the_claim_travels_in_the_signed_certificate_and_the_token_does_not_over
                                        slug="alpha", engagement_slug="alpha", signers=signers)
     finally:
         srv.shutdown()
-    assert wl.is_fact
+    assert not wl.is_fact and wl.lead is not None
     assert ENDPOINT_LIVENESS_BUG_CLASS == "sibling_response_differential"
-    assert wl.fact.bug_class == ENDPOINT_LIVENESS_BUG_CLASS != "endpoint_liveness"
-    cert = wl.fact.signed.certificate
-    assert cert.bug_class == "sibling_response_differential"
-    claims = [c.sentence for c in (cert.report_claims or [])]
-    assert claims, "the certificate carries NO claim — the consumer sees only a token again"
-    claim = claims[0]
+    assert wl.lead.bug_class == ENDPOINT_LIVENESS_BUG_CLASS != "endpoint_liveness"
+    assert getattr(wl.lead, "signed", None) is None, "a LEAD must carry NO signed certificate"
+    claim = wl.note
     # the ASSERTIVE half must not carry any of the falsified phrasings (the DISCLAIMER half is allowed to
     # name them — "asserts nothing about not-found-ness, phantom-ness, existence or liveness" is the point).
     asserted, _, disclaimed = claim.lower().partition("this asserts nothing about")
     assert disclaimed, "the claim must carry its own disclaimer"
     for banned in ("live endpoint", "phantom of", "not-found baseline", "endpoint exists",
                    "is live", "is real", "soft-404"):
-        assert banned not in asserted, f"the bound claim still asserts {banned!r}: {claim}"
+        assert banned not in asserted, f"the narrowing still asserts {banned!r}: {claim}"
     low_claim = claim.lower()
     assert "differs from the server's stable same-status response" in low_claim
     assert "no minimal-edit-distance sibling" in low_claim
     assert "asserts nothing about" in low_claim
-    assert wl.fact.note == claim and wl.note == claim
-    # the signature covers the sentence: flip it and verification fails.
-    assert verify_certificate(wl.fact.signed, oracle_context=wl.context, trust_root=tr).ok is True
-    forged = wl.fact.signed.model_copy(update={"certificate": cert.model_copy(update={"report_claims": [
-        type(cert.report_claims[0])(sentence="this endpoint is live and real",
-                                    bug_class=cert.bug_class, render_as="analyst-commentary")]})})
-    assert verify_certificate(forged, oracle_context=wl.context, trust_root=tr).ok is False
+    assert "demoted to a lead" in low_claim
+    assert wl.lead.note == claim
 
 
-def test_the_unknown_whole_string_checksum_is_the_remaining_residual(monkeypatch, tmp_path):
-    """THE RESIDUAL, rewritten as what it actually is (RP4). The twin search closes every validator whose
-    constraint is LOCAL (prefix / suffix / positional / format): some Hamming-1 neighbour is still accepted
-    and returns the target's own body. What survives is an unknown validator that constrains the identifier
-    JOINTLY ACROSS POSITIONS — a whole-string checksum — so that NO minimal-edit-distance neighbour is
-    accepted and there is no twin to find. This test pins that (a) the class does still mint, honestly, so
-    nobody can claim it is closed; (b) what it mints is the narrowed claim, which is LITERALLY TRUE here
-    (the target's body does differ from the stable sibling response, and no neighbour returned it); and
-    (c) the limitation entry says exactly this and no longer says the class cannot be closed."""
+def test_the_class_has_no_oracle_that_can_prove_it(monkeypatch, tmp_path):
+    """DEFENCE IN DEPTH for the downgrade. Admission is the choke, but the class is ALSO absent from
+    ``verify.verifier.BUG_CLASS_ORACLES``, so a caller that skipped admission and went straight to
+    ``confirm_and_certify`` still cannot mint it. Two independent refusals, because one flipped flag
+    should not be able to resurrect a class five rounds of measurement retired."""
+    from framework.v2.verify.verifier import BUG_CLASS_ORACLES
+    from vigil_integration.live.verdict import Verdict, admit
+    from vigil_integration.live.web_redrive import ENDPOINT_LIVENESS_BRANCH, ENDPOINT_LIVENESS_BUG_CLASS
+
+    assert ENDPOINT_LIVENESS_BUG_CLASS not in BUG_CLASS_ORACLES, (
+        "sibling_response_differential must have NO oracle able to prove it")
+    # ... and the branch itself refuses both directions, whatever the oracle saw.
+    obs = {"channel_established": True, "gate_authorized": True}
+    fired = admit(ENDPOINT_LIVENESS_BRANCH, fired=True, conclusive=True, observed=obs)
+    assert fired.verdict is Verdict.LEAD and "not FACT-capable" in fired.reason
+    clean = admit(ENDPOINT_LIVENESS_BRANCH, fired=False, conclusive=True, observed=obs)
+    assert clean.verdict is Verdict.INCONCLUSIVE, "a hard-404 non-firing may not be reported CLEAN"
+
+
+def test_the_unknown_whole_string_checksum_class_is_a_lead_and_the_docs_state_it_honestly(
+        monkeypatch, tmp_path):
+    """THE FORMER RESIDUAL, kept as a regression. A whole-string checksum route (no Hamming-1 neighbour is
+    accepted, so no twin exists to find) used to MINT for a checksum-valid-but-nonexistent id. It is now a
+    LEAD like everything else — trivially, because nothing mints — and the fixture stays so a future
+    re-promotion attempt has to face it again. The docs half is the load-bearing part: the limitation must
+    carry the CORRECTED residual condition (a neighbourhood over the MIRROR/UNION alphabet, which also
+    covers ordinary word+digits FORMAT routes) and must not carry any of the falsified sentences."""
     _grant_active_recon(monkeypatch)
     _charter(tmp_path, "127.0.0.1")
     from vigil_integration.live.web_redrive import endpoint_liveness_redrive
     signers, _ = _signers_and_trust()
     srv = _serve(_UnknownChecksum200RejectApp)
     port = srv.server_address[1]
-    facts, notes = 0, []
+    facts, fired = 0, 0
     try:
         for _ in range(12):
             wl = endpoint_liveness_redrive(f"http://127.0.0.1:{port}/k/{_make_checksum26()}",
                                            slug="alpha", engagement_slug="alpha", signers=signers)
             facts += 1 if wl.is_fact else 0
-            notes.append(wl.note)
-            if wl.is_fact:
-                low = wl.note.lower()
-                assert "asserts nothing about" in low and "existence or liveness" in low, wl.note
-                assert "no minimal-edit-distance sibling" in low, wl.note
+            # the MEASUREMENT still happens and is still recorded honestly on the LEAD; only the verdict
+            # changed. "demoted to a lead" is the run where the oracle DID fire for a nonexistent url.
+            fired += 1 if "demoted to a lead" in (wl.note or "").lower() else 0
     finally:
         srv.shutdown()
-    assert facts > 0, ("the whole-string-checksum residual did not reproduce — if it is genuinely closed, "
-                       "say so in the docs instead of keeping a residual entry")
-    # the docs must describe THIS class, and must no longer carry the falsified irreducibility sentences.
+    assert facts == 0, f"the branch is LEAD-only but minted {facts}/12 FACT(s) for a NONEXISTENT url"
+    assert fired > 0, ("the whole-string-checksum class did not reproduce at all — this fixture exists to "
+                       "keep the demoted class visible, so a silent change of behaviour must fail here")
+    # the docs must describe the CORRECTED residual and must not carry any falsified sentence.
     root = Path(__file__).resolve().parents[2]
     doc = json.loads((root / "docs" / "capability-matrix" / "evidence-branches.json").read_text())
     entry = next(b for b in doc["branches"] if b["id"] == "achieved_state.endpoint_liveness")
     lim = entry["limitation"]
     low = lim.lower()
-    assert "jointly across positions" in low and "whole-string checksum" in low, lim
-    assert "minimal-edit-distance" in low, lim
+    assert "union" in low and "hamming-1" in low, lim
+    assert "format routes" in low, "the corrected residual must say it covers ordinary FORMAT routes too"
     for falsified in ("cannot be closed by any observation of this kind",
                       "any rule that refused it would also refuse every true positive",
                       "irreducible"):
         assert falsified not in low, f"the limitation still carries the FALSIFIED sentence {falsified!r}"
 
 
-def test_block3_special_cased_error_is_a_true_narrowed_fact_not_an_overclaim(monkeypatch, tmp_path):
+def test_block3_special_cased_error_is_a_lead_carrying_an_honest_narrowing(monkeypatch, tmp_path):
     """RP2 BLOCK-3: /api/users/0 serves a special-cased error DISTINGUISHABLE from the same-shape not-found
-    baseline. Under the NARROWED claim this is a TRUE-if-modest FACT — but the claim must NOT say 'live
-    endpoint' / 'real' / 'exists'. The fix is the claim string; assert it is honest."""
+    baseline. It is now a LEAD — and the narrowing it carries must still NOT say 'live endpoint' / 'real' /
+    'exists'. The claim string discipline outlives the FACT it used to be attached to."""
     _grant_active_recon(monkeypatch)
     _charter(tmp_path, "127.0.0.1")
-    from framework.v2.evidence.certify import verify_certificate
-    from vigil_integration.live.web_redrive import endpoint_liveness_redrive
-    signers, tr = _signers_and_trust()
+    from vigil_integration.live.web_redrive import _oracle_signal, endpoint_liveness_redrive
+    signers, _ = _signers_and_trust()
     srv = _serve(_NumericRouteErrApp)
     port = srv.server_address[1]
     try:
@@ -1141,27 +1342,28 @@ def test_block3_special_cased_error_is_a_true_narrowed_fact_not_an_overclaim(mon
                                        slug="alpha", engagement_slug="alpha", signers=signers)
     finally:
         srv.shutdown()
-    assert wl.is_fact, f"a distinguishable special-cased response is a narrowed FACT; got {wl.outcome} {wl.note}"
-    assert verify_certificate(wl.fact.signed, oracle_context=wl.context, trust_root=tr).ok is True
+    assert not wl.is_fact and wl.lead is not None
+    assert wl.context is not None and _oracle_signal(wl.context).fired is True
     low = wl.note.lower()
-    # the claim states the DIFFERENTIAL and the twin search, and disclaims existence/liveness outright.
+    # the narrowing states the DIFFERENTIAL and the twin search, and disclaims existence/liveness outright.
     assert "differs from the server's stable same-status response" in low, wl.note
     assert "no minimal-edit-distance sibling" in low, wl.note
     assert "asserts nothing about" in low and "existence or liveness" in low, wl.note
+    assert "demoted to a lead" in low, wl.note
     asserted = low.partition("this asserts nothing about")[0]
     for banned in ("not-found baseline", "soft-404", "live endpoint", "is live", "is real"):
         assert banned not in asserted, f"the claim still asserts {banned!r}: {wl.note}"
 
 
-def test_numeric_route_live_id_still_mints_a_fact(monkeypatch, tmp_path):
-    """NON-REGRESSION for the same-shape + body differential: a GENUINELY live numeric id (/api/users/1) is
-    served 200 with a distinct body while a same-shape numeric control 200s with {"user": null}; the body
-    differential distinguishes them, so the live id still mints a FACT that re-verifies OFFLINE."""
+def test_numeric_route_live_id_is_now_a_lead_the_capability_cost_of_the_downgrade(monkeypatch, tmp_path):
+    """THE PRICE, pinned. A GENUINELY live numeric id (/api/users/1) is served 200 with a distinct body
+    while a same-shape numeric control 200s with {"user": null}. The differential is real and the oracle
+    still fires over the retained capture — and it is still only a LEAD. Pinning the lost true positive
+    keeps the cost of the downgrade visible instead of letting it read as 'nothing was lost'."""
     _grant_active_recon(monkeypatch)
     _charter(tmp_path, "127.0.0.1")
-    from framework.v2.evidence.certify import verify_certificate
-    from vigil_integration.live.web_redrive import endpoint_liveness_redrive
-    signers, tr = _signers_and_trust()
+    from vigil_integration.live.web_redrive import _oracle_signal, endpoint_liveness_redrive
+    signers, _ = _signers_and_trust()
     srv = _serve(_NumericRouteLiveApp)
     port = srv.server_address[1]
     try:
@@ -1169,9 +1371,10 @@ def test_numeric_route_live_id_still_mints_a_fact(monkeypatch, tmp_path):
                                        slug="alpha", engagement_slug="alpha", signers=signers)
     finally:
         srv.shutdown()
-    assert wl.is_fact, f"a genuinely-live numeric id must mint a FACT; outcome={wl.outcome} note={wl.note}"
+    assert not wl.is_fact, "the branch is LEAD-only — even a genuine true positive does not mint"
     assert wl.control_statuses == [200]     # same-status baseline (distinct set); distinguished by the BODY diff
-    assert verify_certificate(wl.fact.signed, oracle_context=wl.context, trust_root=tr).ok is True
+    assert wl.context is not None and _oracle_signal(wl.context).fired is True
+    assert "demoted to a lead" in (wl.note or "").lower()
 
 
 def test_root_url_fails_closed_to_a_lead(monkeypatch, tmp_path):
@@ -1193,7 +1396,12 @@ def test_root_url_fails_closed_to_a_lead(monkeypatch, tmp_path):
     assert "no sound" in wl.note.lower() and "same-shape control" in wl.note.lower()
 
 
-def test_hard_404_is_a_clean_bounded_to_the_exact_url(monkeypatch, tmp_path):
+def test_hard_404_is_inconclusive_not_clean(monkeypatch, tmp_path):
+    """THE CLEAN DIRECTION IS WITHDRAWN TOO. A hard 404 at the exact probed URL is control-independent, but
+    on that path the sibling and twin cohorts are NEVER PROBED — the run returns before any control GET —
+    so a 'conclusive non-firing' of a DIFFERENTIAL predicate would assert the absence of something nothing
+    measured. A 404 is also what a server routinely returns for a resource that EXISTS but is not
+    authorised. clean_capable=false, and the note must say WHY rather than silently degrade."""
     _grant_active_recon(monkeypatch)
     _charter(tmp_path, "127.0.0.1")
     from vigil_integration.live.web_redrive import endpoint_liveness_redrive
@@ -1206,8 +1414,17 @@ def test_hard_404_is_a_clean_bounded_to_the_exact_url(monkeypatch, tmp_path):
     finally:
         srv.shutdown()
     assert not wl.is_fact
-    assert wl.outcome == "clean" and wl.target_status == 404
-    assert "bounded to the probed URL" in wl.note and "no other endpoint" in wl.note
+    assert wl.outcome == "inconclusive" and wl.target_status == 404
+    low = wl.note.lower()
+    assert "inconclusive, not clean" in low, wl.note
+    assert "not probed on this path" in low or "are not probed" in low, wl.note
+    assert "not authorised" in low, wl.note
+    # and the branch registry is where the policy lives, not this function
+    root = Path(__file__).resolve().parents[2]
+    doc = json.loads((root / "docs" / "capability-matrix" / "evidence-branches.json").read_text())
+    entry = next(b for b in doc["branches"] if b["id"] == "achieved_state.endpoint_liveness")
+    assert entry["clean_capable"] is False and entry["target_clean_capable"] is False
+    assert len((entry.get("target_downgrade_rationale") or "").strip()) > 40
 
 
 def test_unreachable_url_is_a_lead_deceptive_no_fact(monkeypatch, tmp_path):
@@ -1241,12 +1458,15 @@ def test_out_of_scope_url_is_refused_before_any_traffic(monkeypatch, tmp_path):
 # End-to-end through the R4 gated runner (httpx / ffuf → run_external_tool → the liveness re-drive).
 # ===================================================================================================
 @pytest.mark.parametrize("tool,canned", [("httpx", _httpx_jsonl), ("ffuf", _ffuf_report)])
-def test_web_tool_live_url_mints_a_fact_through_the_runner(tool, canned, monkeypatch, tmp_path):
+def test_web_tool_live_url_is_a_lead_enricher_through_the_runner(tool, canned, monkeypatch, tmp_path):
+    """The LEAD-ENRICHER contract, end to end: the tool proposes, the runner re-drives with its own gated
+    GETs, and what comes back is a LEAD that CARRIES its retained, offline-re-verifiable capture plus the
+    narrowing in words. No FACT, no certificate, and no empty-handed lead either."""
     _grant_active_recon(monkeypatch)
     _charter(tmp_path, "127.0.0.1")
-    from framework.v2.evidence.certify import verify_certificate
     from vigil_integration.live.external_tool import ffuf_content_scan, httpx_url_scan, run_external_tool
-    signers, tr = _signers_and_trust()
+    from vigil_integration.live.web_redrive import _oracle_signal
+    signers, _ = _signers_and_trust()
     srv = _serve(_SoftLiveApp)          # /live real content vs a same-branch (200) soft-404 baseline
     port = srv.server_address[1]
     url = f"http://127.0.0.1:{port}/live"
@@ -1259,38 +1479,53 @@ def test_web_tool_live_url_mints_a_fact_through_the_runner(tool, canned, monkeyp
         srv.shutdown()
     assert res.status == "ran"
     assert any(getattr(p, "url", "") == url for p in res.proposed), f"{tool} did not propose {url}: {res.proposed}"
-    assert len(res.facts) == 1, f"expected 1 liveness FACT via {tool}; facts={res.facts} leads={res.leads}"
-    fact = res.facts[0]
-    assert fact.is_fact and fact.confirmed_by == "achieved_state"
-    ctx = res.contexts[fact.finding_ref]
-    assert verify_certificate(fact.signed, oracle_context=ctx, trust_root=tr).ok is True
+    assert res.facts == [], f"the branch is LEAD-only; {tool} minted {res.facts}"
+    assert len(res.leads) == 1, f"expected 1 enriched LEAD via {tool}; leads={res.leads}"
+    lead = res.leads[0]
+    assert not lead.is_fact and lead.bug_class == "sibling_response_differential"
+    assert "demoted to a lead" in (lead.note or "").lower()
+    # the LEAD's retained capture travels with it and re-verifies offline.
+    ctx = res.contexts[lead.finding_ref]
+    assert ctx["observed_evidence"]["probe_urls"], "the LEAD must carry the probed neighbourhood"
+    assert _oracle_signal(json.loads(json.dumps(ctx))).fired is True
+    assert res.truncated_proposals == 0 and res.budget_note == ""
 
 
 @pytest.mark.parametrize("tool,canned", [("httpx", _httpx_jsonl), ("ffuf", _ffuf_report)])
-@pytest.mark.parametrize("app,path,label", _SOFT_404_CLASSES)
-def test_web_tool_soft_404_classes_are_a_lead_through_the_runner(tool, canned, app, path, label,
+@pytest.mark.parametrize("app,path,label,runs", _SOFT_404_CLASSES)
+def test_web_tool_soft_404_classes_are_a_lead_through_the_runner(tool, canned, app, path, label, runs,
                                                                  monkeypatch, tmp_path):
-    """Every soft-404 / phantom CLASS (both red-pens) is a LEAD through BOTH the httpx and ffuf runner legs —
-    uniform, path-echo, numeric-route, length-signature, hex-route, uuid-route, and bounded-body — each of
-    which minted a FALSE FACT on some pre-fix HEAD."""
+    """Every soft-404 / phantom CLASS of all five rounds is a LEAD through BOTH runner legs — AT VOLUME for
+    the adversarial ones.
+
+    Single-shot leg coverage is how a 2.3% class survived round 3 and how the two RP5 classes reached a
+    fifth round: a class that mints 4% of the time passes a one-run test 96% of the time. Each row
+    therefore carries its own run count (``_ADVERSARIAL_LEG_RUNS`` for the rate-based classes), and a FRESH
+    server per run, because several fixtures keep per-server state."""
     _grant_active_recon(monkeypatch)
     _charter(tmp_path, "127.0.0.1")
     from vigil_integration.live.external_tool import ffuf_content_scan, httpx_url_scan, run_external_tool
     signers, _ = _signers_and_trust()
-    srv = _serve(_handler(app))
-    port = srv.server_address[1]
-    url = f"http://127.0.0.1:{port}{path}"
     spec = httpx_url_scan() if tool == "httpx" else ffuf_content_scan(wordlist="")
-    try:
-        res = run_external_tool(spec, "127.0.0.1", scope_gate=_scope_gate(["127.0.0.1"]),
-                                backend=_CannedBackend(canned(url)), engagement_slug="alpha",
-                                signers=signers, timeout=30.0)
-    finally:
-        srv.shutdown()
-    assert res.status == "ran"
-    assert res.proposed, "the tool must still PROPOSE the URL"
-    assert res.facts == [], f"{label} via {tool}: must mint NO liveness FACT (the tool's say-so never confirms)"
-    assert any(o.get("outcome") == "inconclusive" for o in res.outcomes)
+    facts, proposals, inconclusive = 0, 0, 0
+    for _ in range(runs):
+        srv = _serve(_handler(app))
+        port = srv.server_address[1]
+        url = f"http://127.0.0.1:{port}{path}"
+        try:
+            res = run_external_tool(spec, "127.0.0.1", scope_gate=_scope_gate(["127.0.0.1"]),
+                                    backend=_CannedBackend(canned(url)), engagement_slug="alpha",
+                                    signers=signers, timeout=30.0)
+        finally:
+            srv.shutdown()
+        assert res.status == "ran"
+        facts += len(res.facts)
+        proposals += len(res.proposed)
+        inconclusive += sum(1 for o in res.outcomes if o.get("outcome") == "inconclusive")
+    assert proposals >= runs, "the tool must still PROPOSE the URL on every run"
+    assert facts == 0, (f"{label} via {tool}: minted {facts} FACT(s) over {runs} run(s) for a NONEXISTENT "
+                        f"url — the tool's say-so never confirms and this branch never mints")
+    assert inconclusive >= runs, f"{label} via {tool}: the demotion must be a TYPED outcome on every run"
 
 
 @pytest.mark.parametrize("tool,canned", [("httpx", _httpx_jsonl), ("ffuf", _ffuf_report)])
@@ -1324,14 +1559,15 @@ def test_rp4_classes_are_a_lead_through_the_runner_legs_over_80_runs(tool, canne
 
 
 @pytest.mark.parametrize("tool,canned", [("httpx", _httpx_jsonl), ("ffuf", _ffuf_report)])
-def test_web_tool_numeric_route_live_id_still_a_fact_through_the_runner(tool, canned, monkeypatch, tmp_path):
-    """NON-REGRESSION through both runner legs: a genuinely-live numeric id (distinct body vs a same-shape
-    numeric not-found control) still mints one signed liveness FACT."""
+def test_web_tool_numeric_route_live_id_is_a_lead_through_the_runner(tool, canned, monkeypatch, tmp_path):
+    """THE PRICE, through both runner legs: a genuinely-live numeric id (distinct body vs a same-shape
+    numeric not-found control) is a LEAD. The measurement still runs and its capture still rides on the
+    lead; the branch simply may not mint."""
     _grant_active_recon(monkeypatch)
     _charter(tmp_path, "127.0.0.1")
-    from framework.v2.evidence.certify import verify_certificate
     from vigil_integration.live.external_tool import ffuf_content_scan, httpx_url_scan, run_external_tool
-    signers, tr = _signers_and_trust()
+    from vigil_integration.live.web_redrive import _oracle_signal
+    signers, _ = _signers_and_trust()
     srv = _serve(_NumericRouteLiveApp)
     port = srv.server_address[1]
     url = f"http://127.0.0.1:{port}/api/users/1"
@@ -1342,16 +1578,29 @@ def test_web_tool_numeric_route_live_id_still_a_fact_through_the_runner(tool, ca
                                 signers=signers, timeout=30.0)
     finally:
         srv.shutdown()
-    assert len(res.facts) == 1, f"expected 1 liveness FACT via {tool}; facts={res.facts} leads={res.leads}"
-    fact = res.facts[0]
-    assert verify_certificate(fact.signed, oracle_context=res.contexts[fact.finding_ref], trust_root=tr).ok is True
+    assert res.facts == [], f"the branch is LEAD-only; {tool} minted {res.facts}"
+    assert len(res.leads) == 1, f"expected 1 enriched LEAD via {tool}; leads={res.leads}"
+    lead = res.leads[0]
+    ctx = res.contexts[lead.finding_ref]
+    assert _oracle_signal(ctx).fired is True, "the differential was real — only the VERDICT changed"
+    assert "demoted to a lead" in (lead.note or "").lower()
 
 
 # ===================================================================================================
 # The conformance battery over the REAL gated runner (the gate the matrix requires before fact_capable).
 # ===================================================================================================
 @pytest.mark.parametrize("tool", ["httpx", "ffuf"])
-def test_web_tool_passes_the_full_conformance_battery(tool, monkeypatch, tmp_path):
+def test_the_conformance_battery_fails_the_fact_half_and_passes_every_safety_half(tool, monkeypatch,
+                                                                                  tmp_path):
+    """THE GATE, run honestly. ``run_toolspec_conformance`` is the battery a tool must pass before the
+    matrix may mark it fact_capable, and its FIRST property is ``positive_fact``. A LEAD-only tool cannot
+    satisfy that and must not pretend to: the battery's verdict here is NON-CONFORMANT, and that is the
+    load-bearing reason httpx/ffuf are fact_capable=false in the matrix rather than a flag someone chose.
+
+    Every SAFETY property must still hold, because those are the ones that matter for a tool that ships:
+    the tool still PROPOSES (so the crit-6 firewall is actually exercised), an unreachable proposal yields
+    no fact, a timed-out tool yields a typed ERROR, a tripped kill-switch refuses before traffic, and an
+    out-of-scope target refuses before traffic."""
     _grant_active_recon(monkeypatch)
     _charter(tmp_path, "127.0.0.1")
     from framework.v2.authority import KillSwitch
@@ -1395,8 +1644,15 @@ def test_web_tool_passes_the_full_conformance_battery(tool, monkeypatch, tmp_pat
     finally:
         srv.shutdown()
 
-    assert report.conformant, report.summary() + " | notes: " + "; ".join(report.notes)
-    for prop in REQUIRED_PROPERTIES:
+    # The FACT half fails, by construction and on purpose — that IS the downgrade.
+    assert report.checks.get("positive_fact") is False, (
+        f"{tool}: the battery minted a FACT on a LEAD-only branch: {report.summary()}")
+    assert report.checks.get("positive_verified_offline") is False
+    assert not report.conformant, (
+        f"{tool}: the battery reports CONFORMANT while the branch is LEAD-only — the gate the matrix "
+        f"depends on has stopped gating: {report.summary()}")
+    # Every SAFETY property still holds.
+    for prop in sorted(REQUIRED_PROPERTIES - {"positive_fact", "positive_verified_offline"}):
         assert report.checks.get(prop) is True, f"{tool}: {prop} not satisfied: {report.summary()}"
 
 
@@ -1440,23 +1696,143 @@ def test_a_hostile_scheme_or_wordlist_is_refused_before_any_argv_or_send(monkeyp
 
 
 # ===================================================================================================
-# Two operator surfaces AGREE: the capability matrix and the body's oracle-mapped set both say
-# httpx + ffuf are fact_capable web-discovery tools (ACHIEVED_STATE endpoint-liveness).
+# OPSEC + OFFENSIVE-DRIFT (constitution §VI). These ship even though the branch is only a LEAD: they are
+# about the traffic VIGIL puts on the operator's own production, not about what it concludes.
 # ===================================================================================================
-def test_two_surfaces_agree_httpx_ffuf_are_fact_capable_web_discovery():
-    from vigil_integration.brains.hexstrike_body import _ORACLE_MAPPED_TOOLS, _spec_for_kind
-    from vigil_integration.live.oracle_families import family_for, is_fact_capable_family
+def test_the_r4_httpx_spec_pins_the_correlatable_user_agent():
+    """CONSTITUTION §VI.4 — "Make yourself correlatable ... you are not evading them".
+
+    httpx's own ``-random-agent`` DEFAULTS TRUE, so an argv that does not pin a User-Agent sends every
+    probe under a randomly chosen BROWSER identity. That is identity rotation, which this project forbids
+    outright, and it is invisible precisely because it is a DEFAULT rather than a flag anyone wrote. The
+    governed executor already fixed and documented exactly this defect; the R4 runner spec shipped without
+    it. Pin the header, pin that it is the SAME identity the rest of the engine sends, and pin that no
+    random-agent behaviour can be requested."""
+    from vigil_integration.live.executor import _CORRELATABLE_USER_AGENT as _GOVERNED_UA
+    from vigil_integration.live.external_tool import _CORRELATABLE_USER_AGENT as _R4_UA
+    from vigil_integration.live.external_tool import httpx_url_scan
+
+    assert _R4_UA == _GOVERNED_UA == "OBSIDIAN/1.0 (authorized owner-test)", (
+        "the R4 runner and the governed executor must present ONE identity, not two")
+    argv = httpx_url_scan().build_argv("127.0.0.1")
+    assert "-H" in argv, f"the httpx argv sends no User-Agent header at all: {argv}"
+    assert argv[argv.index("-H") + 1] == f"User-Agent: {_R4_UA}", argv
+    # an explicit -H overrides httpx's random agent; nothing may ask for the random one back.
+    assert "-random-agent" not in argv, argv
+    for tok in argv:
+        assert "random" not in tok.lower(), f"the argv mentions a random identity: {tok!r}"
+    # the https spec pins it too (the scheme must not be able to drop the header)
+    assert "-H" in httpx_url_scan(scheme="https").build_argv("127.0.0.1")
+
+
+def test_the_r4_ffuf_spec_pins_maxtime_so_a_sigkill_cannot_lose_the_report():
+    """ffuf writes its results ONCE, when the job ends, and the runner kills an over-running subprocess
+    with SIGKILL, which ffuf cannot catch — the governed executor measured a 400k-entry wordlist under
+    `timeout -s KILL` producing NO output at all, byte-identical to "ffuf never ran". ``-maxtime`` makes it
+    exit cleanly with what it has. The bound must also fit inside the runner's own default wall clock,
+    otherwise it is decorative."""
+    from vigil_integration.live.external_tool import _DEFAULT_TIMEOUT, _FFUF_MAX_TIME, ffuf_content_scan
+
+    argv = ffuf_content_scan(wordlist="").build_argv("127.0.0.1")
+    assert "-maxtime" in argv, f"ffuf may outrun the wall clock and lose its whole report: {argv}"
+    assert argv[argv.index("-maxtime") + 1] == str(_FFUF_MAX_TIME)
+    assert 0 < _FFUF_MAX_TIME <= _DEFAULT_TIMEOUT, (
+        f"an in-tool budget ({_FFUF_MAX_TIME}s) at or past the runner's wall clock "
+        f"({_DEFAULT_TIMEOUT}s) is decorative — the SIGKILL still wins")
+
+
+def test_the_runner_caps_re_driven_proposals_against_a_documented_request_budget(monkeypatch, tmp_path):
+    """CONSTITUTION §VI.1 — "Don't break their production. Throttle."
+
+    The web leg re-drives EVERY url a discovery tool proposed, each re-drive costing up to
+    MAX_GATED_GETS_PER_URL SERIAL gated GETs with no inter-request delay. Uncapped, one ffuf run that
+    proposed 200 paths is ~12,600 requests at a production target from one source IP as fast as it will
+    answer. Cap the proposals against a reviewed per-run request BUDGET, derive the cap from the budget so
+    the two cannot drift, and make the truncation VISIBLE — a cap a consumer cannot see is
+    indistinguishable from a tool that found nothing."""
+    _grant_active_recon(monkeypatch)
+    _charter(tmp_path, "127.0.0.1")
+    from vigil_integration.live.external_tool import (
+        _LIVENESS_REQUEST_BUDGET, _max_redriven_proposals, ffuf_content_scan, run_external_tool)
+    from vigil_integration.live.web_redrive import MAX_GATED_GETS_PER_URL
+    signers, _ = _signers_and_trust()
+
+    cap = _max_redriven_proposals()
+    assert cap >= 1
+    assert cap * MAX_GATED_GETS_PER_URL <= _LIVENESS_REQUEST_BUDGET, (
+        "the cap must be DERIVED from the budget: proposals x worst-case-per-url must fit inside it")
+
+    srv = _serve(_CorrectApp)                       # every unknown path hard-404s: cheap per re-drive
+    port = srv.server_address[1]
+    n = cap + 7
+    report = json.dumps({"results": [{"input": {"FUZZ": f"p{i:04d}"}, "status": 404,
+                                      "url": f"http://127.0.0.1:{port}/p{i:04d}", "host": "127.0.0.1"}
+                                     for i in range(n)], "config": {}})
+    try:
+        res = run_external_tool(ffuf_content_scan(wordlist=""), "127.0.0.1",
+                                scope_gate=_scope_gate(["127.0.0.1"]),
+                                backend=_CannedBackend(report), engagement_slug="alpha",
+                                signers=signers, timeout=30.0)
+    finally:
+        srv.shutdown()
+    assert len(res.proposed) == n, "every proposal is still RECORDED — the cap throttles, it does not hide"
+    # exactly `cap` urls were re-driven, and the rest were skipped LOUDLY.
+    redriven = [o for o in res.outcomes if "#sibling_response_differential" in str(o.get("check_id", ""))]
+    assert len(redriven) == cap, f"re-drove {len(redriven)} url(s), budget admits {cap}"
+    assert res.truncated_proposals == n - cap
+    assert res.budget_note and "OPSEC CAP" in res.budget_note
+    assert "SKIPPED" in res.budget_note and "NOT examined" in res.budget_note
+    assert res.budget_note in res.reason, "the truncation must be visible in the run's own detail"
+    skipped = [o for o in res.outcomes if o.get("outcome") == "skipped"]
+    assert len(skipped) == 1 and "budget" in skipped[0]["check_id"], res.outcomes
+
+
+# ===================================================================================================
+# Two operator surfaces AGREE: the capability matrix and the body's oracle-mapped set both say
+# httpx + ffuf are LEAD-ONLY web-discovery tools whose re-drive is a LEAD ENRICHER.
+# ===================================================================================================
+def test_two_surfaces_agree_httpx_ffuf_are_lead_only_web_discovery():
+    from vigil_integration.brains.hexstrike_body import (
+        _LEAD_ENRICHER_TOOLS, _ORACLE_MAPPED_TOOLS, _RUNNER_DISPATCHED_TOOLS, _spec_for_kind)
+    from vigil_integration.live.oracle_families import SPEC_BUILDER_TOOLS, family_for
     from vigil_integration.live.tool_manifest import load_manifests
 
     root = Path(__file__).resolve().parents[2]
     matrix = root / "docs" / "capability-matrix" / "hexstrike.json"
     by = {m.name: m for m in load_manifests(str(matrix))}
+    # the two sets are disjoint by construction: a tool may mint, or it may enrich, never both.
+    assert not (_ORACLE_MAPPED_TOOLS & _LEAD_ENRICHER_TOOLS)
     for tool in ("httpx", "ffuf"):
         # surface 1 — the capability matrix
-        assert by[tool].fact_capable, f"{tool}: matrix must mark it fact_capable"
-        assert by[tool].oracle_family.upper() == "ACHIEVED_STATE"
-        # surface 2 — the body's runner-owned oracle-mapped set + family routing
-        assert tool in _ORACLE_MAPPED_TOOLS, f"{tool}: body must treat it as oracle-mapped"
-        assert is_fact_capable_family(tool) and family_for(tool).name == "web_discovery"
+        assert not by[tool].fact_capable, f"{tool}: the matrix must NOT mark it fact_capable"
+        # surface 2 — the body: NOT oracle-mapped, but still DISPATCHED as a lead enricher, and absent
+        # from the SSOT that derives "can mint a FACT".
+        assert tool not in _ORACLE_MAPPED_TOOLS and tool not in SPEC_BUILDER_TOOLS
+        assert tool in _LEAD_ENRICHER_TOOLS and tool in _RUNNER_DISPATCHED_TOOLS
+        assert family_for(tool).name == "web_discovery"
+        # the evidence pipeline is KEPT: the spec still builds and still carries the url re-drive.
         spec = _spec_for_kind(tool, {})
         assert spec is not None and spec.name == tool and spec.propose_urls is not None
+
+
+def test_the_body_still_dispatches_the_lead_enrichers_to_the_gated_runner():
+    """Removing httpx/ffuf from the FACT-mapping SSOT must NOT delete the evidence pipeline: the body's
+    dispatch set is ``_ORACLE_MAPPED_TOOLS | _LEAD_ENRICHER_TOOLS``, so the two tools still reach the R4
+    gated runner (and therefore the gated GETs, both cohorts and the retained capture). Proved by the
+    REASON the body gives: an un-provisioned runner must fail on the RUNNER, not on membership — a
+    "no oracle-mapped ToolSpec" refusal here would mean the pipeline had been silently deleted."""
+    from framework.v2.agent_body.interface import GateDecision, ProposedAction
+    from vigil_integration.brains.hexstrike_body import HexstrikeAgentBody
+
+    body = HexstrikeAgentBody(posture="staging")     # deliberately NO RunnerDeps
+    for tool in ("httpx", "ffuf"):
+        out = body.execute(ProposedAction(kind=tool, target="127.0.0.1", params={"danger": "recon"}),
+                           GateDecision(authorized=True))
+        assert out.executed is False
+        assert "runner not provisioned" in out.blocked_reason, (
+            f"{tool}: the body refused for the WRONG reason ({out.blocked_reason!r}) — the LEAD-ENRICHER "
+            f"dispatch is gone, and the whole evidence pipeline with it")
+    # ... while a tool with neither a mint nor an enricher role is still refused on membership.
+    out = body.execute(ProposedAction(kind="whatweb", target="127.0.0.1", params={"danger": "recon"}),
+                       GateDecision(authorized=True))
+    assert "no oracle-mapped ToolSpec" in out.blocked_reason

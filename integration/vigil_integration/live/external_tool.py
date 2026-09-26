@@ -808,12 +808,28 @@ def _validated_wordlist(wordlist: str) -> str:
     return v
 
 
+#: The identity every tool VIGIL drives must present. DUPLICATED deliberately from
+#: ``live.executor._CORRELATABLE_USER_AGENT`` (the R4 runner is framework-free and must not import the
+#: governed executor); ``test_the_r4_httpx_spec_pins_the_correlatable_user_agent`` pins the two equal.
+_CORRELATABLE_USER_AGENT = "OBSIDIAN/1.0 (authorized owner-test)"
+
+
 def httpx_url_scan(*, scheme: str = "http", extra_args: Sequence[str] = ()) -> ToolSpec:
     """A :class:`ToolSpec` for ProjectDiscovery httpx as a URL PROPOSER. ``build_argv`` emits
-    ``httpx -u <url> -silent -no-color -disable-update-check -json -probe`` (JSONL on stdout, correlatable,
-    no update phone-home); ``propose_urls`` parses each non-``failed`` record's ``url`` (via the shipped
-    ``parse_httpx_export``) into a host-PINNED :class:`ProposedURL`. The runner re-drives each URL with its OWN
-    plain gated GET (endpoint-liveness) — httpx's row is never the FACT authority.
+    ``httpx -u <url> -silent -no-color -disable-update-check -H 'User-Agent: …' -json -probe`` (JSONL on
+    stdout, correlatable, no update phone-home); ``propose_urls`` parses each non-``failed`` record's ``url``
+    (via the shipped ``parse_httpx_export``) into a host-PINNED :class:`ProposedURL`. The runner re-drives
+    each URL with its OWN plain gated GET — httpx's row is never the FACT authority.
+
+    ``-H User-Agent: …`` is NOT cosmetic and is NOT optional. httpx's own ``-random-agent`` DEFAULTS TRUE, so
+    without an explicit header EVERY probe leaves under a randomly chosen BROWSER identity — identity
+    rotation, which the operating constitution (§VI.4) forbids outright: an authorised owner-test is meant to
+    be CORRELATABLE so the operator can grep their own logs and find this traffic ("you are not evading
+    them"). The governed executor fixed exactly this defect and documents it at ``live.executor`` around
+    ``_build_httpx``; this R4 spec shipped without the pin, which is the same defect in the other seam. An
+    explicit ``-H`` overrides the random agent, and it is the SAME identity the rest of the engine sends, so
+    a defender sees one actor rather than a crowd of fake browsers. It is a DEFAULT, not a written flag,
+    which is exactly why it was invisible.
 
     ``scheme`` is validated against {http, https} HERE (BLOCK-5): it is interpolated into the argv, and the
     scope gate authorises the host STRING, not the argv — so an unvalidated scheme sends a real packet to an
@@ -823,7 +839,8 @@ def httpx_url_scan(*, scheme: str = "http", extra_args: Sequence[str] = ()) -> T
 
     def build(target: str) -> list[str]:
         url = str(target) if "://" in str(target) else f"{scheme}://{target}/"
-        return ["httpx", "-u", url, "-silent", "-no-color", "-disable-update-check", "-json", "-probe",
+        return ["httpx", "-u", url, "-silent", "-no-color", "-disable-update-check",
+                "-H", f"User-Agent: {_CORRELATABLE_USER_AGENT}", "-json", "-probe",
                 *list(extra_args)]
 
     def propose_urls(outcome: ToolOutcome, target: str) -> "list[ProposedURL]":
@@ -844,14 +861,28 @@ def httpx_url_scan(*, scheme: str = "http", extra_args: Sequence[str] = ()) -> T
 # Default content-discovery wordlist (Kali path). Only used to BUILD a valid argv for a real run; the
 # conformance/tests drive a canned backend, and the FACT is VIGIL's own gated GET — never ffuf's bytes.
 _FFUF_DEFAULT_WORDLIST = "/usr/share/wordlists/dirb/common.txt"
+#: ffuf's OWN in-tool scan budget, in seconds. ffuf writes its results ONCE, when the job ends, and the
+#: runner kills an over-running subprocess with SIGKILL, which ffuf cannot catch — measured by the governed
+#: executor (see ``live.executor._build_ffuf``): `timeout -s KILL 6` over a 400k-entry wordlist left NO
+#: output at all, so the call returned empty machine-readable output with nothing anywhere to say the scan
+#: had been cut off. `-maxtime` makes ffuf exit CLEANLY with everything found so far. A wordlist big enough
+#: to outlast the runner's wall clock is the normal case for content discovery
+#: (`directory-list-2.3-medium` is ~220k entries), so without this the common ffuf run proposes nothing.
+#: Chosen to fit INSIDE the runner's own :data:`_DEFAULT_TIMEOUT`; a caller who wants a longer scan must
+#: raise BOTH knobs, and the bound is never silently assumed for them.
+_FFUF_MAX_TIME = 90
 
 
 def ffuf_content_scan(*, wordlist: str = "", extra_args: Sequence[str] = ()) -> ToolSpec:
     """A :class:`ToolSpec` for ffuf as a content-discovery URL PROPOSER. ``build_argv`` emits
-    ``ffuf -u <base>/FUZZ -w <wordlist> -noninteractive -json`` (JSONL results on stdout, ``input`` values
-    base64 but ``url`` plain — the location the parser reads); ``propose_urls`` parses each result's ``url``
-    (via the shipped ``parse_ffuf_export``) into a host-PINNED :class:`ProposedURL`. The runner re-drives each
-    URL with its OWN plain gated GET (endpoint-liveness) — ffuf's row is never the FACT authority.
+    ``ffuf -u <base>/FUZZ -w <wordlist> -noninteractive -maxtime <n> -json`` (JSONL results on stdout,
+    ``input`` values base64 but ``url`` plain — the location the parser reads); ``propose_urls`` parses each
+    result's ``url`` (via the shipped ``parse_ffuf_export``) into a host-PINNED :class:`ProposedURL`. The
+    runner re-drives each URL with its OWN plain gated GET — ffuf's row is never the FACT authority.
+
+    ``-maxtime`` is soundness, not hygiene: without it a wordlist that outlasts the runner's wall clock is
+    SIGKILLed and the whole run reports nothing, indistinguishably from "ffuf never ran" (see
+    :data:`_FFUF_MAX_TIME`).
 
     ``wordlist`` is validated HERE (BLOCK-5) against an allow-listed root with no flag prefix and no
     whitespace/shell metacharacters: it is interpolated into the argv as ``-w <value>``. An invalid value
@@ -861,7 +892,8 @@ def ffuf_content_scan(*, wordlist: str = "", extra_args: Sequence[str] = ()) -> 
     def build(target: str) -> list[str]:
         base = str(target) if "://" in str(target) else f"http://{target}/"
         url = base if "FUZZ" in base else (base.rstrip("/") + "/FUZZ")
-        return ["ffuf", "-u", url, "-w", wl, "-noninteractive", "-json", *list(extra_args)]
+        return ["ffuf", "-u", url, "-w", wl, "-noninteractive", "-maxtime", str(_FFUF_MAX_TIME), "-json",
+                *list(extra_args)]
 
     def propose_urls(outcome: ToolOutcome, target: str) -> "list[ProposedURL]":
         from framework.v2.imports.parsers import parse_ffuf_export  # noqa: PLC0415 (FATAL-2: function-local)
@@ -973,6 +1005,12 @@ class RunnerResult:
     observation: Any = None                             # the canonical normalized Observation (crit 4):
                                                         # tool identity+version, target, raw-output digest,
                                                         # proposals, outcome_class — one shape per run.
+    truncated_proposals: int = 0                        # OPSEC: proposals the per-run request BUDGET would
+                                                        # not admit, so they were NEVER re-driven. > 0 means
+                                                        # "not examined", never "nothing there".
+    budget_note: str = ""                               # the same truncation in words, for every consumer
+                                                        # that reads text rather than counts (also in
+                                                        # ``reason`` and as a "skipped" outcomes row).
 
     @property
     def refused(self) -> bool:
@@ -1148,19 +1186,55 @@ def _admit_redrive(branch: str, *, fired: bool, conclusive: bool):
                  observed={"channel_established": True, "gate_authorized": True})
 
 
+# --- OPSEC: the per-run gated-GET BUDGET for the web-discovery leg (constitution §VI) ------------------
+# "Throttle. Stage. Ask." — and this leg re-drives EVERY url a discovery tool proposed, each re-drive
+# costing up to ``web_redrive.MAX_GATED_GETS_PER_URL`` SERIAL gated GETs with no inter-request delay. An
+# uncapped loop therefore turns one ffuf run that proposed 200 paths into ~12,600 requests at a production
+# target, from one source IP, as fast as the host will answer. That is not a soundness bug, which is why it
+# survived five red-pen rounds looking for false FACTs — it is an availability risk to the OPERATOR'S OWN
+# SYSTEM, and the constitution ranks that as a hard stop, not a nice-to-have.
+#
+# THE BUDGET is the reviewed knob: the maximum gated GETs ONE web-discovery tool run may put on the target.
+# 1000 is roughly a minute of polite serial traffic against a typical web app and fits comfortably inside
+# the benchmark corpus's own 1069-request gate, i.e. it is the same order as a whole engine run. Raising it
+# is a reviewed edit here, never an emergent property of how many rows a wordlist happened to match.
+#
+# PER ENGAGEMENT, stated honestly because a per-RUN cap is not a per-ENGAGEMENT one. This constant bounds
+# ONE ToolSpec run. An engagement that dispatches k web-discovery runs (httpx and ffuf, several hosts,
+# several wordlists) spends up to k x this budget on the web leg, and there is NO cross-run accumulator in
+# the runner today — each ``run_external_tool`` call is independent and stateless by design, which is also
+# how the two-env boundary keeps the runner free of engagement state. So the per-engagement figure is an
+# OPERATOR budget the charter sets and the command log evidences, not a ceiling this code enforces: plan
+# the web leg at <= k x 1000 requests, and if that is too much for the target, lower k (fewer/narrower
+# wordlists, fewer hosts per session) rather than assuming a limit that is not there. Enforcing it needs a
+# deliberate cross-run accumulator; claiming one that does not exist is the kind of unearned assurance this
+# branch was downgraded for.
+_LIVENESS_REQUEST_BUDGET = 1000
+# The CAP is DERIVED from the budget, so the two can never drift: proposals x worst-case-per-url <= budget.
+# Truncation is NEVER silent — the dropped proposals are counted on the result, named in the run detail and
+# carry their own "skipped" outcome row, because a cap a consumer cannot see is indistinguishable from a
+# tool that found nothing (the same argument `-maxtime` makes for ffuf's report).
+def _max_redriven_proposals() -> int:
+    from .web_redrive import MAX_GATED_GETS_PER_URL  # noqa: PLC0415 (FATAL-2: offense-neutral)
+    return max(1, _LIVENESS_REQUEST_BUDGET // max(1, int(MAX_GATED_GETS_PER_URL)))
+
+
 def _run_web_liveness_tool(
     spec: "ToolSpec", target: str, outcome: "ToolOutcome", *, tool_errored: bool, tool_version: str,
     engagement_slug: str, signers: "list[tuple[str, str]]", timeout: float, freshness_ttl_seconds: int,
 ) -> "RunnerResult":
     """The WEB-DISCOVERY runner leg (httpx/ffuf): parse the tool's proposed URLs (host-pinned) and re-drive
-    EACH through the gated web LIVENESS re-drive — the L7 analogue of the per-port handshake. A tool's URL row
-    is only a PROPOSAL; the FACT is minted solely by VIGIL's OWN plain gated GET crossing admit() (the
-    achieved_state.endpoint_liveness branch). Mirrors the ProposedService leg's outcome taxonomy + Observation.
-    Called only when ``spec.propose_urls`` is set; the caller already ran the scope/pre-flight/capability gates.
+    up to :func:`_max_redriven_proposals` of them through the gated web sibling-differential re-drive. A
+    tool's URL row is only a PROPOSAL, and the re-drive's own capture is LEAD evidence — the
+    ``achieved_state.endpoint_liveness`` branch is declared LEAD-only, so ``admit()`` returns a LEAD for a
+    fired oracle and this leg mints nothing. The ``facts``/``contexts`` plumbing below is kept because the
+    admission choke, not this function, is what decides; it must stay correct if a branch is ever promoted.
+    Mirrors the ProposedService leg's outcome taxonomy + Observation. Called only when ``spec.propose_urls``
+    is set; the caller already ran the scope/pre-flight/capability gates.
     """
     from ..oracle_adapter import Outcome  # noqa: PLC0415 (FATAL-2: function-local)
     from .web_redrive import (  # noqa: PLC0415 (FATAL-2: web_redrive is offense-neutral)
-        ENDPOINT_LIVENESS_BUG_CLASS, endpoint_liveness_redrive)
+        ENDPOINT_LIVENESS_BUG_CLASS, MAX_GATED_GETS_PER_URL, endpoint_liveness_redrive)
 
     proposed = spec.propose_urls(outcome, target)   # list[ProposedURL], host pinned to target (failed dropped)
     facts: list = []
@@ -1170,19 +1244,36 @@ def _run_web_liveness_tool(
     if tool_errored:
         outcomes.append({"check_id": spec.name, "bug_class": "", "outcome": Outcome.ERROR.value})
     _OUT = {"positive": Outcome.POSITIVE.value, "clean": Outcome.CLEAN.value}
-    seen: set[str] = set()
+    # OPSEC CAP: de-duplicate FIRST (a duplicate costs nothing and must not consume the budget), then take
+    # at most the derived cap. Everything past it is dropped LOUDLY, never quietly.
+    unique: "list[ProposedURL]" = []
+    dedup: set[str] = set()
     for pu in proposed:
-        if pu.url in seen:
-            continue
-        seen.add(pu.url)
+        if pu.url not in dedup:
+            dedup.add(pu.url)
+            unique.append(pu)
+    cap = _max_redriven_proposals()
+    redriven, dropped = unique[:cap], unique[cap:]
+    budget_note = ""
+    if dropped:
+        budget_note = (
+            f"OPSEC CAP: {spec.name} proposed {len(unique)} distinct url(s); this run re-drove the first "
+            f"{len(redriven)} and SKIPPED {len(dropped)}. Each re-drive costs up to "
+            f"{MAX_GATED_GETS_PER_URL} serial gated GETs, so the per-run budget of "
+            f"{_LIVENESS_REQUEST_BUDGET} request(s) admits {cap}. The skipped urls were NOT examined — "
+            f"this is a throttle, not a finding of absence; re-run with a narrower wordlist/target or "
+            f"raise the reviewed budget.")
+        outcomes.append({"check_id": f"{spec.name}:opsec_request_budget", "bug_class": "",
+                         "outcome": Outcome.SKIPPED.value, "note": budget_note})
+    for pu in redriven:
         # The re-drive owns its OWN per-request gate (kill-switch → single-host → ACTIVE_RECON → charter scope
         # → http(s)); the URL host is already pinned to the scope-authorised target. slug == engagement_slug.
         wl = endpoint_liveness_redrive(pu.url, slug=engagement_slug, engagement_slug=engagement_slug,
                                        signers=signers, timeout=min(timeout, 30.0))
         item = f"{spec.name}:{pu.url}#{ENDPOINT_LIVENESS_BUG_CLASS}"
         # The re-drive's OWN narrowed claim / demotion reason travels with the row (red-pen BLOCK-3): the
-        # bug-class token alone does not state what was proven, and a note the runner drops is not a
-        # disclosure. The same sentence is bound into the signed certificate.
+        # bug-class token alone does not state what was observed, and a note the runner drops is not a
+        # disclosure.
         outcomes.append({"check_id": item, "bug_class": ENDPOINT_LIVENESS_BUG_CLASS,
                          "outcome": _OUT.get(wl.outcome, Outcome.INCONCLUSIVE.value),
                          "note": wl.note})
@@ -1192,25 +1283,37 @@ def _run_web_liveness_tool(
                 contexts[wl.fact.finding_ref] = wl.context
         elif wl.lead is not None:
             leads.append(wl.lead)
+            # The LEAD carries its retained, offline-re-verifiable capture too (predicate AST + every raw
+            # per-sample status/body-hash + control_urls + probe_urls). The branch is LEAD-only, so if the
+            # context only rode along with FACTs the whole evidence pipeline would produce nothing an
+            # analyst or an auditor could inspect.
+            if wl.context is not None and getattr(wl.lead, "finding_ref", ""):
+                contexts[wl.lead.finding_ref] = wl.context
 
-    # The detail names the CLASS the runner actually minted and carries the first claim sentence verbatim,
-    # so an operator reading the runner result sees the narrowing rather than a liveness-sounding count.
-    first_claim = next((str(f.note) for f in facts if getattr(f, "note", "")), "")
-    detail = (f"{spec.name} ran via {outcome.backend}; proposed {len(proposed)} url(s), "
-              f"oracle-confirmed {len(facts)} {ENDPOINT_LIVENESS_BUG_CLASS} FACT(s), {len(leads)} lead(s)"
+    # The detail names the CLASS the runner actually produced. The re-drive's own narrowing sentence is
+    # carried verbatim so an operator reading the runner result sees what was (and was not) established,
+    # and the OPSEC truncation is stated in the same place rather than being inferable only from counts.
+    first_note = next((str(r.note) for r in (facts + leads) if getattr(r, "note", "")), "")
+    detail = (f"{spec.name} ran via {outcome.backend}; proposed {len(proposed)} url(s), re-drove "
+              f"{len(redriven)}, {len(facts)} {ENDPOINT_LIVENESS_BUG_CLASS} FACT(s), {len(leads)} lead(s)"
               + ("; TOOL ERRORED (timeout/spawn)" if tool_errored else "")
-              + (f" | claim: {first_claim}" if first_claim else ""))
+              + (f" | {budget_note}" if budget_note else "")
+              + (f" | claim: {first_note}" if first_note else ""))
     artifact_refs = tuple(fr for fr in (getattr(r, "finding_ref", "") for r in (facts + leads)) if fr)
     error_reason = ""
     if tool_errored:
         error_reason = ("tool run timed out (no exit code)" if outcome.timed_out
                         else (outcome.stderr or "tool failed to run").strip()[:200])
     from .observation import observe  # noqa: PLC0415
+    # The Observation records EVERY url the tool proposed (not just the re-driven prefix): what the tool
+    # said is a fact about the run, and hiding the truncation from the canonical record is the silent
+    # truncation this cap exists to avoid. ``truncated_proposals`` says how many were not examined.
     observation = observe(spec, target, outcome, proposed, tool_version=tool_version,
                           outcome_class="errored" if tool_errored else "ran",
                           artifact_refs=artifact_refs, error_reason=error_reason)
     return RunnerResult("ran", detail, spec.name, target, outcome, facts, leads, proposed, contexts,
-                        outcomes=outcomes, tool_errored=tool_errored, observation=observation)
+                        outcomes=outcomes, tool_errored=tool_errored, observation=observation,
+                        truncated_proposals=len(dropped), budget_note=budget_note)
 
 
 def run_external_tool(
