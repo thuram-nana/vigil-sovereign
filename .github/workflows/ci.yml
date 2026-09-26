@@ -396,6 +396,7 @@ jobs:
               --ignore=integration/tests/test_reset_invariant_redrive.py \
               --ignore=integration/tests/test_strix_errsig_redrive.py \
               --ignore=integration/tests/test_strix_http_redrive.py \
+              --ignore=integration/tests/test_strix_dom_redrive.py \
               --ignore=integration/tests/test_typed_outcomes.py \
               --ignore=integration/tests/test_engine_live.py \
               --ignore=integration/tests/test_engine_terminal.py \
@@ -502,6 +503,7 @@ jobs:
               integration/tests/test_reset_invariant_redrive.py \
               integration/tests/test_strix_errsig_redrive.py \
               integration/tests/test_strix_http_redrive.py \
+              integration/tests/test_strix_dom_redrive.py \
               integration/tests/test_release_gate_deceptive_tool.py \
               integration/tests/test_release_gate_false_fact.py \
               integration/tests/test_release_gate_offline_replay.py \
