@@ -177,8 +177,13 @@ class FakeDifferentialAdapter:
         return dict(self._identity)
 
     def run_positive_control(self, *, challenge, auth):
-        ctx = {"bug_class": self.bug_class, "probe_rounds": [dict(r) for r in self._confirm_rounds],
-               "discriminator": dict(BOOL_DISC)}
+        rounds = [dict(r) for r in self._confirm_rounds]
+        # determinism PRE-GATE derived from the retained rounds' identical-request observations, so the
+        # harness-capability re-fire clears the same gate a fresh mint does.
+        baseline = ([r.get("false_a") for r in rounds if isinstance(r.get("false_a"), dict)]
+                    + [r.get("false_a_repeat") for r in rounds if isinstance(r.get("false_a_repeat"), dict)])
+        ctx = {"bug_class": self.bug_class, "probe_rounds": rounds,
+               "discriminator": dict(BOOL_DISC), "false_baseline_samples": baseline}
         return ControlObservation(reachable=True, channel_alive=True, oracle_context=ctx,
                                   definition_digest="sha256:control")
 
@@ -371,7 +376,11 @@ def test_verifier_demotes_a_signed_across_true_remediated_cert():
                                                                   _cert_signing_bytes(tampered))}
         ok, reason = verify_prove_certificate(tampered, signer_pubkeys=PUBKEYS)
         assert not ok, f"verifier attested an across=True (still-open) cert: {reason}"
-        assert "attribution re-check" in reason.lower()
+        # the still-open rounds are demoted EITHER by the determinism gate (NOISY_VULN — an identical repeat
+        # diverges, so the rounds do not re-execute to a decisive refute) OR by the zero-tolerance attribution
+        # re-check (SUBTHRESHOLD — a deterministic 1-bit leak: true still separates from false_a). Both demote.
+        r = reason.lower()
+        assert ("attribution re-check" in r) or ("decisive sprt refute" in r) or ("deterministic" in r), reason
 
 
 def test_verifier_ignores_a_weakened_cert_supplied_closure_discriminator():

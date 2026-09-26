@@ -10,6 +10,7 @@ refutes; against a per-request-random target the dynamic-page control refuses it
 from __future__ import annotations
 
 import contextlib
+import random
 import secrets
 import threading
 import urllib.request
@@ -61,6 +62,28 @@ class _DynamicApp(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:  # noqa: N802
         body = (f"<html><body>session {secrets.token_hex(64)} — no results</body></html>").encode()
+        self.send_response(200)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
+# A COARSE (low-cardinality) dynamic page: the body is one of only K=2 distinct variants chosen at RANDOM,
+# INDEPENDENT of the injected clause. There is NO boolean channel — yet on the pre-fix base AND on the
+# single-identical-repeat commit (59dba95e) its coincidental per-round agreement minted a FALSE boolean_sqli
+# FACT a few percent of the time (the red-pen BLOCK). The determinism PRE-GATE (an up-front run of identical
+# false-clause sends must be all-identical) proves the page non-deterministic and refuses it every time.
+_COARSE_VARIANTS = [b"no results variant A" + b"A" * 60, b"no results variant B" + b"B" * 60]
+
+
+class _CoarseApp(BaseHTTPRequestHandler):
+    _rng = random.Random(1234)
+
+    def log_message(self, *a: object) -> None:
+        return
+
+    def do_GET(self) -> None:  # noqa: N802
+        body = _CoarseApp._rng.choice(_COARSE_VARIANTS)   # 1-of-K at random, independent of the clause
         self.send_response(200)
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
@@ -126,3 +149,18 @@ def test_sprt_check_refutes_a_dynamic_page_autonomous_path() -> None:
     with _server(_DynamicApp) as base:
         tpl, point = _q_point(base)
         assert _confirm(_check().probe(tpl, point, _send)) is None
+
+
+def test_sprt_check_refutes_a_coarse_dynamic_page_looped() -> None:
+    # RED-PEN BLOCK regression (the COARSE class): a page whose body is one of only K=2 distinct variants
+    # chosen INDEPENDENTLY of the input. It has no boolean channel, but on the pre-fix base AND on the
+    # single-identical-repeat commit (59dba95e) its coincidental per-round agreement minted a FALSE FACT a few
+    # percent of the runs — so this loop FAILS on both of those and passes ONLY with the determinism pre-gate.
+    # Driven through the real mint path (BooleanInferenceCheck.probe → confirm_finding → OracleVerifier).
+    facts = 0
+    with _server(_CoarseApp) as base:
+        tpl, point = _q_point(base)
+        for _ in range(150):
+            if _confirm(_check().probe(tpl, point, _send)) is not None:
+                facts += 1
+    assert facts == 0, f"a coarse K=2 input-independent page minted {facts}/150 FALSE boolean_sqli FACTs"

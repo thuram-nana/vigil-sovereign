@@ -259,9 +259,14 @@ class DifferentialHttpAdapter:
     def _firing_context(self) -> dict:
         """The RETAINED confirming boolean ``FindingContext`` shape the driver re-fires ``boolean_inference_
         oracle`` over via the ORIGINAL oracle (harness capability). ``probe_rounds`` are the known-vulnerable
-        rounds recorded when the finding was first confirmed."""
-        return {"bug_class": self.bug_class, "probe_rounds": [dict(r) for r in self.original_firing_rounds],
-                "discriminator": dict(_BOOLEAN_DISCRIMINATOR)}
+        rounds recorded when the finding was first confirmed; ``false_baseline_samples`` is the determinism
+        PRE-GATE derived from those rounds' identical-request observations (false_a + its byte-identical
+        false_a_repeat), so the harness-capability re-fire clears the same determinism gate a fresh mint does."""
+        rounds = [dict(r) for r in self.original_firing_rounds]
+        baseline = ([r.get("false_a") for r in rounds if isinstance(r.get("false_a"), dict)]
+                    + [r.get("false_a_repeat") for r in rounds if isinstance(r.get("false_a_repeat"), dict)])
+        return {"bug_class": self.bug_class, "probe_rounds": rounds,
+                "discriminator": dict(_BOOLEAN_DISCRIMINATOR), "false_baseline_samples": baseline}
 
     @property
     def origin_redrive_available(self) -> bool:

@@ -256,6 +256,10 @@ class FindingContext(BaseModel):
 
     # boolean_inference_oracle (SPRT over repeated true/false probes)
     probe_rounds: list[dict[str, Any]] | None = None
+    # boolean_inference_oracle determinism PRE-GATE: >= min responses to the IDENTICAL false-clause
+    # request collected up front. If they are not all identical the page is non-deterministic and the
+    # oracle refuses; a confirm requires this gate to have passed (fail-closed).
+    false_baseline_samples: list[dict[str, Any]] | None = None
 
     # timing_oracle (statistical time-based blind)
     baseline_latencies: list[float] | None = None
@@ -623,13 +627,16 @@ class FindingContext(BaseModel):
         *,
         bug_class: str = "boolean_sqli",
         discriminator: Mapping[str, Any] | None = None,
+        false_baseline_samples: Sequence[Any] | None = None,
     ) -> "FindingContext":
         """Aligned per-round responses for the SPRT boolean-inference oracle: for
         each round, the TRUE-clause response, two FALSE-clause responses (the
         different-marker dynamic-page control), and an IDENTICAL repeat of the
         false_a request (the same-request STABILITY control — a dynamic page that
         varies with any input fails it). Rounds are zipped to the shortest of the
-        four lists; nothing is fetched here."""
+        four lists; nothing is fetched here. ``false_baseline_samples`` is the
+        up-front run of identical false-clause responses for the oracle's
+        determinism PRE-GATE (a confirm requires it to have passed)."""
         rounds = [
             {"true": _response_to_dict(t), "false_a": _response_to_dict(a),
              "false_b": _response_to_dict(b), "false_a_repeat": _response_to_dict(a2)}
@@ -640,6 +647,8 @@ class FindingContext(BaseModel):
             bug_class=bug_class,
             probe_rounds=rounds,
             discriminator=dict(discriminator) if discriminator is not None else None,
+            false_baseline_samples=([_response_to_dict(s) for s in false_baseline_samples]
+                                    if false_baseline_samples is not None else None),
         )
 
     @classmethod
@@ -2457,6 +2466,8 @@ class FindingContext(BaseModel):
                 ctx["discriminator"] = self.discriminator
         if self.probe_rounds is not None:
             ctx["probe_rounds"] = self.probe_rounds
+            if self.false_baseline_samples is not None:
+                ctx["false_baseline_samples"] = self.false_baseline_samples
             if self.discriminator is not None and "discriminator" not in ctx:
                 ctx["discriminator"] = self.discriminator
         if self.baseline_latencies is not None and self.treatment_latencies is not None:

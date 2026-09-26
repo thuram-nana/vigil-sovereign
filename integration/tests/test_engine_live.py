@@ -54,10 +54,12 @@ _MANY = {"status": 200, "body": "id=1\nid=2\nid=3\nid=4\nid=5 (all rows)"}
 _NONE = {"status": 200, "body": "no results"}
 _FIRING_SQLI = {"bug_class": "sqli",
                 "probe_rounds": [{"true": _MANY, "false_a": _NONE, "false_b": _NONE, "false_a_repeat": _NONE}
-                                 for _ in range(24)]}
+                                 for _ in range(24)],
+                "false_baseline_samples": [dict(_NONE) for _ in range(16)]}  # determinism pre-gate (all identical)
 _NONFIRING_SQLI = {"bug_class": "sqli",
                    "probe_rounds": [{"true": _NONE, "false_a": _NONE, "false_b": _NONE, "false_a_repeat": _NONE}
-                                    for _ in range(24)]}
+                                    for _ in range(24)],
+                   "false_baseline_samples": [dict(_NONE) for _ in range(16)]}
 
 
 def _echo_runner(argv, *, timeout=0, output_cap=1 << 20):

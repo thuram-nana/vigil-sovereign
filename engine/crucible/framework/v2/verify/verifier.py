@@ -1142,6 +1142,7 @@ class OracleVerifier:
                 return oracles.boolean_inference_oracle(
                     ctx["probe_rounds"],
                     discriminator=ctx.get("discriminator"),
+                    false_baseline_samples=ctx.get("false_baseline_samples"),
                     **{k: ctx[f"sprt_{k}"] for k in ("alpha", "beta", "p1", "p0") if f"sprt_{k}" in ctx},
                 )
             return None

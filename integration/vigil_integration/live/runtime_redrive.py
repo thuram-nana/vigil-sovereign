@@ -565,13 +565,16 @@ def ssti_redrive(url: str, *, slug: str, engagement_slug: str, signers: "list[tu
 def boolean_redrive(url: str, *, slug: str, engagement_slug: str, signers: "list[tuple[str, str]]",
                     param: "str | None" = None, timeout: float = 8.0, n_max: int = 14) -> "RuntimeRedriveResult":
     """Re-drive ``url`` for BOOLEAN-BLIND injection and mint a signed FACT ONLY when the deterministic
-    ``boolean_inference_oracle`` reaches its SPRT confirm boundary over N runner-crafted true/false probe
-    PAIRS: within-pair the two FALSE responses must AGREE (a dynamic-page control) while the TRUE clause
-    differs. Reuses the reviewed ``BooleanInferenceCheck`` discipline over VIGIL's OWN gated send.
+    ``boolean_inference_oracle`` clears a HARD DETERMINISM GATE and then reaches its SPRT confirm boundary
+    over N runner-crafted true/false probe rounds. Reuses the reviewed ``BooleanInferenceCheck`` discipline
+    (an up-front baseline of identical false-clause sends + a per-round identical-repeat hard-refute) over
+    VIGIL's OWN gated send: boolean inference is only sound on a page DETERMINISTIC to identical input, so a
+    confirm requires the baseline pre-gate to have PASSED.
 
-    FP boundary (all → LEAD): an endpoint whose response varies with ANY input (within-pair differential
-    present ⇒ signal 0 every round ⇒ SPRT refutes), and a single flip without SPRT significance (no boundary
-    reached ⇒ inconclusive). Never raises."""
+    FP boundary (all → LEAD): an endpoint whose response varies with ANY input — coarse (low-cardinality) OR
+    high-entropy — fails the determinism pre-gate ⇒ refused before any inference; a single flip without SPRT
+    significance ⇒ inconclusive. A legitimately noisy-but-vulnerable page is a LEAD (a recall cost, the safe
+    direction). Never raises."""
     from framework.v2.scanner.checks import BooleanInferenceCheck  # noqa: PLC0415
     from framework.v2.scanner.insertion import HttpRequest, InsertionKind, RequestTemplate  # noqa: PLC0415
     from framework.v2.verify.oracles import boolean_inference_oracle  # noqa: PLC0415
@@ -605,8 +608,11 @@ def boolean_redrive(url: str, *, slug: str, engagement_slug: str, signers: "list
                     res.inconclusive.append((bug_class, f"{probe_url}#{point.id}"))
                     continue
                 context = fc.to_verifier_context()
+                # pass the determinism PRE-GATE baseline the check collected (identical false-clause sends):
+                # the oracle refuses to CONFIRM unless the page is first proven deterministic to identical input.
                 signal = boolean_inference_oracle(context.get("probe_rounds"),
-                                                  discriminator=context.get("discriminator"))
+                                                  discriminator=context.get("discriminator"),
+                                                  false_baseline_samples=context.get("false_baseline_samples"))
                 r = _admit_one(res, branch=_BOOLEAN_BRANCH, bug_class=bug_class,
                                engagement_slug=engagement_slug, signers=signers, context=context,
                                item=f"{probe_url}#{point.id}", surface=f"query:{name}",

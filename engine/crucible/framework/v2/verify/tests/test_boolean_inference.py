@@ -2,10 +2,12 @@
 Wave 5 — the SPRT boolean-inference oracle.
 
 Confirms a boolean-blind bug by a Wald sequential probability ratio test over
-repeated true/false probes, with a per-round dynamic-page control. It confirms a
-clean signal in a few rounds, refuses a deterministic non-vuln, refuses a flaky
-endpoint that differs by chance, and — crucially — refuses a page that simply
-changes every request (the control the naive repeated-differential lacks).
+repeated true/false probes, behind a HARD DETERMINISM GATE (an up-front baseline
+of identical-request sends + a per-round identical-repeat hard-refute). It confirms
+a clean signal on a page proven deterministic, refuses a deterministic non-vuln,
+refuses a flaky endpoint that differs by chance, refuses a page that changes every
+request, and — crucially — refuses a COARSE (low-cardinality) dynamic page whose
+per-round agreement is coincidental, because its baseline is not all-identical.
 """
 
 from __future__ import annotations
@@ -23,12 +25,50 @@ def _round(true, false_a, false_b, false_a_repeat=None) -> dict:
             "false_a_repeat": false_a if false_a_repeat is None else false_a_repeat}
 
 
+def _baseline(resp, n: int = 16) -> list:
+    # a determinism PRE-GATE: n responses to the IDENTICAL false-clause request (all identical on a
+    # deterministic page). A confirm REQUIRES this to have passed (fail-closed).
+    return [dict(resp) for _ in range(n)]
+
+
 def test_clean_signal_confirms_in_few_rounds() -> None:
-    # true clause returns the whole table; false clause is stable "no results" (identical repeat stable)
+    # true clause returns the whole table; false clause is stable "no results" (deterministic page)
     rounds = [_round(_MANY, _NONE, _NONE) for _ in range(24)]
-    sig = boolean_inference_oracle(rounds)
+    sig = boolean_inference_oracle(rounds, false_baseline_samples=_baseline(_NONE))
     assert sig.fired and sig.confidence >= 0.7
     assert sig.observed["rounds_used"] <= 6  # SPRT stops early on a clear signal
+
+
+def test_confirm_requires_the_baseline_determinism_pregate() -> None:
+    # FAIL-CLOSED: even a PERFECT signal (true!=false, false pair agree, identical repeat stable) does
+    # NOT mint a FACT without the up-front baseline determinism pre-gate — boolean inference is unsound
+    # unless the page is first PROVEN deterministic to identical input. This is what makes a direct
+    # coarse-page Monte-Carlo (no baseline supplied) yield 0 FACTs.
+    rounds = [_round(_MANY, _NONE, _NONE) for _ in range(24)]
+    sig = boolean_inference_oracle(rounds)  # no false_baseline_samples
+    assert not sig.fired
+    assert sig.observed["decision"] == "inconclusive"
+
+
+def test_insufficient_baseline_samples_cannot_confirm() -> None:
+    # fewer than the pre-gate floor of identical samples is not enough determinism proof → no FACT.
+    rounds = [_round(_MANY, _NONE, _NONE) for _ in range(24)]
+    sig = boolean_inference_oracle(rounds, false_baseline_samples=_baseline(_NONE, n=3))
+    assert not sig.fired
+
+
+def test_coarse_dynamic_page_baseline_is_refused() -> None:
+    # THE red-pen BLOCK regression (coarse class): a page whose body is one of only K=2 distinct
+    # variants chosen independently of the input. Its up-front baseline of identical-request sends is
+    # NOT all-identical → the determinism pre-gate proves non-determinism → REFUSE, even though the
+    # per-round signal could coincidentally look separable. Was a live false FACT before this gate.
+    v0 = {"status": 200, "body": "no results variant A" + "A" * 50}
+    v1 = {"status": 200, "body": "no results variant B" + "B" * 50}
+    coarse_baseline = [v0, v1, v0, v0, v1, v0, v1, v1, v0, v1, v0, v0, v1, v0, v1, v1]
+    rounds = [_round(_MANY, v0, v0, false_a_repeat=v0) for _ in range(24)]
+    sig = boolean_inference_oracle(rounds, false_baseline_samples=coarse_baseline)
+    assert not sig.fired
+    assert sig.observed.get("nondeterministic") is True
 
 
 def test_deterministic_non_vuln_is_refuted() -> None:

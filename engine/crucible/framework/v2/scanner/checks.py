@@ -218,18 +218,20 @@ class DifferentialCheck:
 
 @dataclass(frozen=True)
 class BooleanInferenceCheck:
-    """Boolean-blind via a sequential probability ratio test (SPRT).
+    """Boolean-blind via a sequential probability ratio test (SPRT) behind a HARD
+    DETERMINISM GATE.
 
-    Each round sends a TRUE-condition clause and the FALSE-condition clause THREE
-    times: ``false_a`` and ``false_b`` are the different-marker dynamic-page
-    control, and ``false_a_repeat`` is a byte-identical repeat of ``false_a`` — the
-    same-request STABILITY control that refuses a page which varies with any input
-    (an identical request sent twice must return non-differential responses). It
-    runs the SPRT online to stop as soon as the evidence is decisive — few rounds
-    for a clear signal, a bounded ``n_max`` otherwise — then hands every collected
-    round to the boolean-inference oracle, which recomputes the same decision
-    deterministically. Robust to flaky/dynamic backends that make a single
-    true/false comparison false-positive."""
+    Boolean-blind inference is only sound on a page that is DETERMINISTIC to
+    identical input. Before any inference the check runs a BASELINE DETERMINISM
+    PRE-GATE: it sends the IDENTICAL false-clause request ``baseline_samples`` times
+    up front; if they are not all identical the page is non-deterministic and the
+    oracle refuses (LEAD) — no SPRT is run. Only a page that survives the pre-gate
+    proceeds to the SPRT, where each round also sends a byte-identical
+    ``false_a_repeat`` (the per-round hard-refute control). The collected baseline +
+    rounds are handed to the boolean-inference oracle, which recomputes the same
+    decision deterministically (a confirm requires the pre-gate to have passed). A
+    legitimately noisy-but-vulnerable page is refused to a LEAD — a recall cost, the
+    safe direction (a false LEAD, never a false FACT)."""
 
     id: str
     bug_class: str
@@ -240,9 +242,24 @@ class BooleanInferenceCheck:
     beta: float = 0.05
     p1: float = 0.9
     p0: float = 0.1
+    baseline_samples: int = 16   # identical false-clause sends for the determinism pre-gate
 
     def probe(self, template: RequestTemplate, point: InsertionPoint, send: Send) -> FindingContext | None:
         from ..verify.oracles import differential_response_oracle  # local: avoid import cycle at module load
+
+        # --- DETERMINISM PRE-GATE: send the IDENTICAL false-clause request up front and require every
+        #     response identical. A non-deterministic page (coarse OR high-entropy) fails this and is
+        #     refused BEFORE any inference — short-circuit on the first divergence to bound the traffic.
+        baseline: list[dict] = []
+        for _ in range(max(2, self.baseline_samples)):
+            s = _as_dict(send(template.render(point, self.false_clause)))
+            baseline.append(s)
+            if differential_response_oracle(baseline[0], s).fired:
+                break  # proven non-deterministic — the oracle will refuse over these samples
+        if len(baseline) >= 2 and differential_response_oracle(baseline[0], baseline[-1]).fired:
+            # non-deterministic: hand the oracle the baseline (no rounds) so it authoritatively refuses.
+            return FindingContext.from_boolean_probes(
+                [], [], [], [], bug_class=self.bug_class, false_baseline_samples=baseline)
 
         upper = math.log((1.0 - self.beta) / self.alpha)
         lower = math.log(self.beta / (1.0 - self.alpha))
@@ -262,17 +279,18 @@ class BooleanInferenceCheck:
             false_a_repeats.append(a2)
             across = differential_response_oracle(a, t).fired
             within_same = not differential_response_oracle(a, b).fired
-            # SAME-REQUEST STABILITY control: an identical repeat of the false request must be
-            # non-differential — a dynamic page (varies with any input) fails this, so the SPRT
-            # signal is 0 and it refutes (LEAD, no FACT). Mirrors boolean_inference_oracle.
-            stable = not differential_response_oracle(a, a2).fired
-            signal = across and within_same and stable
+            # PER-ROUND HARD REFUTE: an identical repeat of the false request that differs proves the
+            # page is non-deterministic → stop and let the oracle refuse the whole finding.
+            if differential_response_oracle(a, a2).fired:
+                break
+            signal = across and within_same
             llr += math.log(self.p1 / self.p0) if signal else math.log((1.0 - self.p1) / (1.0 - self.p0))
             if llr >= upper or llr <= lower:
                 break  # SPRT reached a decision — stop early
 
         return FindingContext.from_boolean_probes(
             trues, false_as, false_bs, false_a_repeats, bug_class=self.bug_class,
+            false_baseline_samples=baseline,
         )
 
 

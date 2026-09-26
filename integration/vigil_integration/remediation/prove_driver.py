@@ -808,9 +808,26 @@ def _prove_differential(*, adapter: LiveTargetAdapter, identity: IdentityAttesta
         return dincon(Reason.IDENTITY_CHANGED, "identity changed during the differential trials",
                       attempted=attempted)
 
+    # ---- DETERMINISM PRE-GATE (R1 W6): the identical-request observations already collected — each round's
+    #      false_a and its byte-identical false_a_repeat — are the determinism baseline the boolean oracle needs
+    #      to prove the origin is DETERMINISTIC to identical input before it may CONFIRM (fail-closed). A
+    #      non-deterministic origin (per-request VIEWSTATE / rotating token) fails it → the oracle refuses
+    #      (→ INCONCLUSIVE, never a false STILL_VULNERABLE and never a false REMEDIATED). ----
+    false_baseline = [r.get("false_a") for r in rounds] + [r.get("false_a_repeat") for r in rounds]
+    false_baseline = [s for s in false_baseline if isinstance(s, dict)]
     # ---- ORACLE AUTHORITY: the SPRT decision is the EXISTING boolean_inference_oracle's, never ours. ----
-    sig = boolean_inference_oracle(rounds, discriminator=bool_disc)
+    sig = boolean_inference_oracle(rounds, discriminator=bool_disc, false_baseline_samples=false_baseline)
     decision = str((sig.observed or {}).get("decision") or "inconclusive")
+    # DETERMINISM GATE (R1 W6): if the oracle proved the origin is NOT deterministic to identical input
+    # (per-request __VIEWSTATE / rotating token — the baseline or an identical repeat diverged), boolean
+    # inference cannot attribute a channel at all → INCONCLUSIVE / CHANNEL_NOISE_UNATTRIBUTABLE. This is the
+    # SAME safe verdict the attribution gate reached for a noisy origin, now caught earlier and directly —
+    # never a false STILL_VULNERABLE and never a false REMEDIATED over a non-deterministic origin.
+    if (sig.observed or {}).get("nondeterministic"):
+        return dincon(Reason.CHANNEL_NOISE_UNATTRIBUTABLE,
+                      "the origin is NOT deterministic to identical input (per-request noise: __VIEWSTATE / "
+                      "rotating token / coarse dynamic body) — boolean inference cannot attribute a channel; "
+                      "NOT a sound verdict (neither REMEDIATED nor STILL_VULNERABLE)", attempted=attempted)
     # FIRING FRESHNESS (R1-PR2, §5): a differential FIRING (SPRT confirm) earns F2 when the fresh challenge marker
     # is reflected in the SIGNAL-BEARING (true) responses of the judged rounds — the sink's boolean behaviour was
     # exercised THIS run, "as attributable as the boolean_inference oracle's own firing" (not byte-unforgeable).
@@ -822,7 +839,8 @@ def _prove_differential(*, adapter: LiveTargetAdapter, identity: IdentityAttesta
     trial_results = {"attempted": attempted, "valid": len(rounds), "sprt_decision": decision,
                      "signal_rounds": (sig.observed or {}).get("signal_rounds"),
                      "rounds_used": (sig.observed or {}).get("rounds_used")}
-    fresh_ctx = {"bug_class": adapter.bug_class, "probe_rounds": rounds, "discriminator": bool_disc}
+    fresh_ctx = {"bug_class": adapter.bug_class, "probe_rounds": rounds, "discriminator": bool_disc,
+                 "false_baseline_samples": false_baseline}
 
     # ---- FRESHNESS FLOOR (parity with the error-signature path :601-608 + spec §5; red-pen: the differential
     #      branch silently dropped this). A caller that REQUESTS a level ABOVE the policy floor is ENFORCED, not
@@ -921,7 +939,11 @@ def _prove_differential(*, adapter: LiveTargetAdapter, identity: IdentityAttesta
         if origin_rounds is None:
             origin_redrive, origin_rounds = "unavailable", []     # cannot soundly re-drive → edge-only
         else:
-            osig = boolean_inference_oracle(origin_rounds, discriminator=bool_disc)
+            origin_baseline = ([r.get("false_a") for r in origin_rounds]
+                               + [r.get("false_a_repeat") for r in origin_rounds])
+            origin_baseline = [s for s in origin_baseline if isinstance(s, dict)]
+            osig = boolean_inference_oracle(origin_rounds, discriminator=bool_disc,
+                                            false_baseline_samples=origin_baseline)
             odecision = str((osig.observed or {}).get("decision") or "inconclusive")
             origin_open = any(
                 differential_response_oracle(r.get("false_a"), r.get("true"), _ATTRIBUTION_DISC).fired
