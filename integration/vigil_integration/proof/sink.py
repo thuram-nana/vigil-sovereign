@@ -123,6 +123,30 @@ def _prototype_pollution_redrivable(report: Any) -> bool:
         return False
 
 
+def _smuggling_redrivable(report: Any) -> bool:
+    """True when this report is an HTTP request-smuggling class VIGIL can re-drive for a FACT with its OWN
+    gated raw-socket canary differential (S2, smuggling_desync oracle). Delegates to
+    ``run._smuggling_redrive_class`` (single source of truth). Fail-closed."""
+    try:
+        from .run import _smuggling_redrive_class  # noqa: PLC0415 — function-local: breaks the run⇄sink cycle
+        return _smuggling_redrive_class(report) is not None
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _transport_redrivable(report: Any) -> bool:
+    """True when this report names a transport class VIGIL can re-drive for a FACT with its OWN gated
+    handshake captures (S2: service_reachable / weak_tls / weak_crypto_artifact). The Strix report supplies
+    only the host:port; VIGIL performs its OWN handshake and admits to the VIGIL-owned branch, so the
+    ``strix.service_reachability`` / ``strix.tls_negotiation`` producer branches stay LEAD-only. Delegates
+    to ``run._transport_redrive_class`` (single source of truth). Fail-closed."""
+    try:
+        from .run import _transport_redrive_class  # noqa: PLC0415 — function-local: breaks the run⇄sink cycle
+        return _transport_redrive_class(report) is not None
+    except Exception:  # noqa: BLE001
+        return False
+
+
 @dataclass(frozen=True)
 class SinkResult:
     """What the sink decided about one report. ``gate`` is ``"allow"``/``"deny"``; ``minted`` is True only
@@ -215,16 +239,20 @@ class ProofSink:
             # web-re-drivable class (S7), OR an injection class the W1a error-signature re-drive rail owns
             # (error_based_sqli / nosqli / ldap_injection / xpath_injection), OR one of the four W2
             # HTTP-response-derived re-drive classes (reflected xss / ssti / boolean_sqli / time_based_sqli),
-            # OR one of the two W3 browser-backed DOM classes (dom_xss / prototype_pollution): every
-            # re-drivable class reaches the mint WITHOUT a capture because the VIGIL-owned re-drive crafts its
-            # OWN gated traffic (or drives its OWN gated headless browser) against the endpoint (the Strix
-            # report is never proof). A mint error (or a re-drive that observed nothing / found the target
-            # safe / had no usable browser) leaves the finding a LEAD — never propagates.
+            # OR one of the two W3 browser-backed DOM classes (dom_xss / prototype_pollution), OR one of the
+            # S2 TRANSPORT-derived classes (request_smuggling / service_reachable / weak_tls /
+            # weak_crypto_artifact): every re-drivable class reaches the mint WITHOUT a capture because the
+            # VIGIL-owned re-drive crafts its OWN gated traffic (or drives its OWN gated headless browser /
+            # its OWN gated handshake) against the endpoint (the Strix report is never proof). A mint error
+            # (or a re-drive that observed nothing / found the target safe / had no usable browser) leaves
+            # the finding a LEAD — never propagates.
             if self._mint is not None and (report.get(CAPTURE_KEY) is not None or _web_redrivable(report)
                                            or _errsig_redrivable(report) or _reflection_redrivable(report)
                                            or _ssti_redrivable(report) or _boolean_redrivable(report)
                                            or _timing_redrivable(report) or _dom_xss_redrivable(report)
-                                           or _prototype_pollution_redrivable(report)):
+                                           or _prototype_pollution_redrivable(report)
+                                           or _smuggling_redrivable(report)
+                                           or _transport_redrivable(report)):
                 try:
                     result = self._mint(report)
                     minted = bool(getattr(result, "is_fact", False))

@@ -788,6 +788,77 @@ def _prototype_pollution_redrive_class(report: Any) -> "str | None":
                              _PROTO_POLLUTION_CWE_TO_CLASS)
 
 
+# ======================================================================================================
+# S2 — TRANSPORT INTAKE: two more runner-owned re-drive arms whose evidence is a TRANSPORT handshake, not
+#   an HTTP response body. Both reuse EXISTING oracles and EXISTING captures (no new OracleKind):
+#
+#     * request_smuggling (CWE-444) → live.smuggling_redrive → smuggling_desync_oracle, admitted to the
+#       FACT-capable ``request_smuggling.differential_desync`` branch. VIGIL's unique canary must be echoed
+#       in ITS OWN second response on the framing-conflict connection AND absent from an identical
+#       well-formed control connection. Timing/hang, a bare mangled-method status, and a shared-pool desync
+#       that would need a real co-tenant victim all fail that differential and stay LEADs.
+#     * service_reachable / weak_tls / weak_crypto_artifact → live.transport_redrive → VIGIL's OWN gated
+#       ``capture_handshake`` / ``capture_tls_handshake``, admitted to the VIGIL-OWNED FACT-capable branches
+#       ``service_reachability.tcp_handshake`` / ``tls_weakness.tls_handshake`` /
+#       ``weak_crypto.cert_signature_algorithm``.
+#
+# THE PRODUCER BRANCHES STAY LEAD-ONLY. ``strix.service_reachability`` and ``strix.tls_negotiation`` are
+# ``fact_capable: false`` BY DESIGN and are NOT touched: the Strix report supplies only the host:port (the
+# "where to look"), VIGIL performs its OWN handshake, and the FACT is admitted to the VIGIL-owned branch.
+# A non-tcp Strix row mints NOTHING (the TCP-only refusal precedes any socket), and an out-of-scope host is
+# refused by the charter/scope gate BEFORE any traffic.
+#
+# Class-set disjointness (extended in test_redrive_arm_class_sets_are_disjoint): neither arm's classes/CWEs
+# collide with any other arm's. CWE-444 is smuggling's alone; CWE-326/327/328 (inadequate encryption
+# strength / broken algorithm / weak hash) belong to no other arm.
+# ======================================================================================================
+
+# request_smuggling (CWE-444) — the DIFFERENTIAL desync, never the retired timing signal.
+_SMUGGLING_REDRIVE_CLASSES = frozenset({"request_smuggling"})
+_SMUGGLING_ALIASES = {"http_request_smuggling": "request_smuggling",
+                      "request_smuggling_desync": "request_smuggling",
+                      "http_desync": "request_smuggling", "desync": "request_smuggling",
+                      "http_request_smuggling_desync": "request_smuggling"}
+_SMUGGLING_CWE_TO_CLASS = {"cwe-444": "request_smuggling"}
+
+# transport intake — ONE arm for the three classes VIGIL re-drives with its OWN gated transport captures.
+# They share an arm because they share a driver (and the two TLS classes share a SINGLE negotiation), and
+# because the class only says WHERE to look: the oracle over VIGIL's own capture decides.
+_TRANSPORT_REDRIVE_CLASSES = frozenset({"service_reachable", "weak_tls", "weak_crypto_artifact"})
+_TRANSPORT_ALIASES = {
+    # reachability spellings
+    "service_reachability": "service_reachable", "service_reachable_tcp": "service_reachable",
+    "open_port": "service_reachable", "port_open": "service_reachable",
+    "exposed_service": "service_reachable", "reachable_service": "service_reachable",
+    # weak TLS protocol/cipher spellings
+    "tls_weakness": "weak_tls", "tls_negotiation": "weak_tls", "weak_tls_configuration": "weak_tls",
+    "weak_ssl_tls": "weak_tls", "ssl_tls_weakness": "weak_tls", "deprecated_tls_version": "weak_tls",
+    # broken-hash certificate spellings
+    "weak_crypto": "weak_crypto_artifact", "weak_certificate_signature": "weak_crypto_artifact",
+    "weak_cert_signature_algorithm": "weak_crypto_artifact",
+}
+_TRANSPORT_CWE_TO_CLASS = {
+    "cwe-326": "weak_tls",              # inadequate encryption strength
+    "cwe-327": "weak_tls",              # broken or risky cryptographic algorithm
+    "cwe-328": "weak_crypto_artifact",  # use of weak hash (the broken-hash certificate signature)
+}
+
+
+def _smuggling_redrive_class(report: Any) -> "str | None":
+    """The request-smuggling class this report maps to (``"request_smuggling"``), or ``None``. SINGLE source
+    of truth (``sink._smuggling_redrivable`` delegates here)."""
+    return _classify_redrive(report, _SMUGGLING_REDRIVE_CLASSES, _SMUGGLING_ALIASES,
+                             _SMUGGLING_CWE_TO_CLASS)
+
+
+def _transport_redrive_class(report: Any) -> "str | None":
+    """The transport class this report maps to (``service_reachable`` / ``weak_tls`` /
+    ``weak_crypto_artifact``), or ``None``. SINGLE source of truth (``sink._transport_redrivable``
+    delegates here)."""
+    return _classify_redrive(report, _TRANSPORT_REDRIVE_CLASSES, _TRANSPORT_ALIASES,
+                             _TRANSPORT_CWE_TO_CLASS)
+
+
 class _RuntimeMintResult:
     """The mint callback's return for a W2 runtime/statistical re-drive arm. The sink reads ONLY ``.is_fact``;
     ``.result`` (the :class:`live.runtime_redrive.RuntimeRedriveResult`) is retained for the persisted record
@@ -1007,6 +1078,53 @@ def _prototype_pollution_redrive(report: dict, cls: str, *, run_dir: "str | os.P
                              run_dir=run_dir, signers=signers, engagement_slug=engagement_slug)
 
 
+def _smuggling_redrive(report: dict, cls: str, *, run_dir: "str | os.PathLike",
+                       signers: "list[tuple[str, str]]", engagement_slug: str,
+                       control_fetch: "Optional[Callable[[dict], bytes | None]]" = None) -> "Any | None":
+    """Rail adapter for HTTP request smuggling (S2): drive VIGIL's OWN gated raw-socket differential
+    (``live.smuggling_redrive``) against the reported origin and mint ONLY when the deterministic
+    ``smuggling_desync_oracle`` confirms an ACHIEVED desync — VIGIL's unique per-probe canary echoed in its
+    OWN second response on the framing-conflict connection AND absent from the identical well-formed control
+    connection. The Strix narrative is never proof: a hang/slow origin, a bare mangled-method status, and a
+    shared-pool desync needing a real co-tenant victim all fail the differential and stay LEADs. A missing
+    endpoint / https origin / gate refusal / non-fire ⇒ LEAD. Never raises."""
+    url = str((report or {}).get("endpoint") or (report or {}).get("target") or "").strip()
+    if not url:
+        return None
+    try:
+        from ..live.smuggling_redrive import smuggling_redrive  # noqa: PLC0415 — pulls framework at CALL time
+        res = smuggling_redrive(url, slug=engagement_slug, engagement_slug=engagement_slug, signers=signers)
+    except Exception as exc:  # noqa: BLE001 — a re-drive we could not RUN → LEAD (never a false CLEAN)
+        _record_degraded(run_dir, REDRIVE_FAILED, "proof.run._smuggling_redrive", exc)
+        return None
+    return _finish_runtime_arm(report, res, run_dir=run_dir)
+
+
+def _transport_redrive(report: dict, cls: str, *, run_dir: "str | os.PathLike",
+                       signers: "list[tuple[str, str]]", engagement_slug: str,
+                       control_fetch: "Optional[Callable[[dict], bytes | None]]" = None) -> "Any | None":
+    """Rail adapter for the transport classes (S2): hand the Strix-reported host:port (and NOTHING else) to
+    ``live.transport_redrive``, which re-authorises it through the charter/scope gate and then performs
+    VIGIL's OWN bounded ``capture_handshake`` / ``capture_tls_handshake``. The FACT is admitted to the
+    VIGIL-owned FACT-capable branch; the ``strix.service_reachability`` / ``strix.tls_negotiation`` producer
+    branches remain LEAD-only. A ``udp`` (non-tcp) row is refused before any socket, an out-of-scope host is
+    refused before any traffic, and a closed port / strong TLS mints nothing. Never raises."""
+    endpoint = str((report or {}).get("endpoint") or (report or {}).get("target") or "").strip()
+    host = str((report or {}).get("host") or (report or {}).get("hostname") or "").strip()
+    if not endpoint and not host:
+        return None
+    protocol = str((report or {}).get("protocol") or "tcp").strip().lower() or "tcp"
+    try:
+        from ..live.transport_redrive import transport_redrive  # noqa: PLC0415 — pulls framework at CALL time
+        res = transport_redrive(endpoint, claimed_class=cls, slug=engagement_slug,
+                                engagement_slug=engagement_slug, signers=signers,
+                                host=host, port=(report or {}).get("port"), protocol=protocol)
+    except Exception as exc:  # noqa: BLE001 — a re-drive we could not RUN → LEAD (never a false CLEAN)
+        _record_degraded(run_dir, REDRIVE_FAILED, "proof.run._transport_redrive", exc)
+        return None
+    return _finish_runtime_arm(report, res, run_dir=run_dir)
+
+
 # The GENERIC Strix→re-drive dispatch rail. Each ARM is ``(classify, drive, requires_no_capture)``: the
 # classifier maps a Strix report to the class it can re-drive (or None), and the driver re-sends VIGIL's OWN
 # gated probe and mints ONLY over VIGIL's fresh capture + its oracle (never the Strix report). Arms are tried
@@ -1024,6 +1142,8 @@ _REDRIVE_ARMS = (
     (_timing_redrive_class, _timing_redrive, True),
     (_dom_xss_redrive_class, _dom_xss_redrive, True),
     (_prototype_pollution_redrive_class, _prototype_pollution_redrive, True),
+    (_smuggling_redrive_class, _smuggling_redrive, True),
+    (_transport_redrive_class, _transport_redrive, True),
 )
 
 

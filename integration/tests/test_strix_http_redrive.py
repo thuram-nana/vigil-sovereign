@@ -436,10 +436,11 @@ def test_a_capture_bearing_report_is_not_hijacked_by_a_w2_arm(monkeypatch, tmp_p
 
 def test_redrive_arm_class_sets_are_disjoint():
     """Every re-drive arm's class set AND CWE map is pairwise DISJOINT (web / errsig / xss / ssti / boolean /
-    timing / dom_xss / prototype_pollution). Even were it violated, no false FACT could result (each arm mints
-    only over its own oracle), but pinning it now that eight arms exist keeps arm ORDER from ever routing a
-    report to the wrong arm — in particular reflected xss (CWE-79, server-response reflection) vs dom_xss
-    (bug_class dom_xss, DOM execution) stay distinct."""
+    timing / dom_xss / prototype_pollution / smuggling / transport). Even were it violated, no false FACT
+    could result (each arm mints only over its own oracle), but pinning it now that TEN arms exist keeps arm
+    ORDER from ever routing a report to the wrong arm — in particular reflected xss (CWE-79, server-response
+    reflection) vs dom_xss (bug_class dom_xss, DOM execution) stay distinct, and the S2 transport arm
+    (CWE-326/327/328) stays distinct from smuggling (CWE-444)."""
     from vigil_integration.proof import run
     from vigil_integration.live.web_redrive import WEB_FACT_CLASSES
 
@@ -457,6 +458,11 @@ def test_redrive_arm_class_sets_are_disjoint():
         "prototype_pollution": (set(run._PROTO_POLLUTION_REDRIVE_CLASSES)
                                 | set(run._PROTO_POLLUTION_ALIASES.values())
                                 | set(run._PROTO_POLLUTION_CWE_TO_CLASS.values())),
+        # S2 transport intake — the two arms whose evidence is a TRANSPORT handshake.
+        "smuggling": (set(run._SMUGGLING_REDRIVE_CLASSES) | set(run._SMUGGLING_ALIASES.values())
+                      | set(run._SMUGGLING_CWE_TO_CLASS.values())),
+        "transport": (set(run._TRANSPORT_REDRIVE_CLASSES) | set(run._TRANSPORT_ALIASES.values())
+                      | set(run._TRANSPORT_CWE_TO_CLASS.values())),
     }
     cwe_maps = {
         "web": set(run._WEB_CWE_TO_CLASS),
@@ -467,6 +473,8 @@ def test_redrive_arm_class_sets_are_disjoint():
         "timing": set(run._TIMING_CWE_TO_CLASS),
         "dom_xss": set(run._DOM_XSS_CWE_TO_CLASS),
         "prototype_pollution": set(run._PROTO_POLLUTION_CWE_TO_CLASS),
+        "smuggling": set(run._SMUGGLING_CWE_TO_CLASS),
+        "transport": set(run._TRANSPORT_CWE_TO_CLASS),
     }
     names = list(class_sets)
     for i in range(len(names)):
@@ -493,3 +501,12 @@ def test_redrive_arm_class_sets_are_disjoint():
     assert run._dom_xss_redrive_class({"cwe": "CWE-79"}) is None
     assert run._reflection_redrive_class({"bug_class": "dom_xss"}) is None
     assert run._dom_xss_redrive_class({"bug_class": "xss"}) is None
+    # S2: each transport arm claims its own classes and no other arm's.
+    assert run._smuggling_redrive_class({"bug_class": "request_smuggling"}) == "request_smuggling"
+    assert run._smuggling_redrive_class({"cwe": "CWE-444"}) == "request_smuggling"
+    assert run._transport_redrive_class({"bug_class": "service_reachable"}) == "service_reachable"
+    assert run._transport_redrive_class({"bug_class": "weak_tls"}) == "weak_tls"
+    assert run._transport_redrive_class({"bug_class": "weak_crypto_artifact"}) == "weak_crypto_artifact"
+    assert run._transport_redrive_class({"bug_class": "request_smuggling"}) is None
+    assert run._smuggling_redrive_class({"bug_class": "weak_tls"}) is None
+    assert run._errsig_redrive_class({"cwe": "CWE-444"}) is None

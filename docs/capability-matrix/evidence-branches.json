@@ -863,14 +863,16 @@
       "preconditions": [
         "channel_established"
       ],
-      "limitation": "LEAD-only: a Strix reachability claim is not VIGIL's own handshake. A FACT is minted only when VIGIL independently completes its OWN TCP handshake against the reported host/port on the already-FACT-capable service_reachability.tcp_handshake branch (operator decision 2: a producer's report is a LEAD until VIGIL independently re-drives it into an already-FACT-capable branch). The binding that hands a Strix-reported endpoint to that gated capture is not wired; this branch may neither confirm nor clear on the producer's say-so.",
+      "limitation": "LEAD-only: a Strix reachability claim is not VIGIL's own handshake. A FACT is minted only when VIGIL independently completes its OWN TCP handshake against the reported host/port on the already-FACT-capable service_reachability.tcp_handshake branch (operator decision 2: a producer's report is a LEAD until VIGIL independently re-drives it into an already-FACT-capable branch). The binding that hands a Strix-reported endpoint to that gated capture is WIRED as of slice S2 (integration/vigil_integration/live/transport_redrive.py, reached from the proof-sink re-drive rail), so a Strix reachability report now drives VIGIL's own handshake and the FACT lands on that VIGIL-owned twin; this producer branch itself may still neither confirm nor clear on the producer's say-so.",
       "target_fact_capable": true,
       "target_clean_capable": false,
       "target_downgrade_rationale": "Clean-capability (a closed-port negative) already belongs to the VIGIL-owned service_reachability.tcp_handshake branch; this producer-report branch is a LEAD proposer into that branch, not itself an absence-prover, so clean-capability is deliberately not pursued here.",
-      "blocking_work": "FACT requires routing the Strix-reported host/port into VIGIL's OWN gated handshake capture (verify/reachability.py:capture_handshake, OracleKind.SERVICE_REACHABILITY) on the existing FACT-capable service_reachability.tcp_handshake branch, under the WARDEN scope gate. The oracle and capture exist; the missing piece is the LEAD-to-re-drive binding. Until that binding is wired a Strix reachability report stays a LEAD.",
+      "blocking_work": "FACT requires routing the Strix-reported host/port into VIGIL's OWN gated handshake capture (verify/reachability.py:capture_handshake, OracleKind.SERVICE_REACHABILITY) on the existing FACT-capable service_reachability.tcp_handshake branch, under the WARDEN scope gate. The oracle, the gated capture AND (slice S2) the LEAD-to-re-drive binding now all exist: integration/vigil_integration/live/transport_redrive.py re-authorises the reported host:port through the charter/scope gate and runs VIGIL's own capture_handshake, and the deterministic oracle's verdict is admitted to service_reachability.tcp_handshake. What remains for THIS producer id is only the admission bookkeeping that would record that same VIGIL-owned capture+oracle verdict under this branch as well; until then the producer report itself stays a LEAD.",
       "evidence_surface": "transport",
       "implementation_refs": [
         "integration/vigil_integration/proof/run.py:_finding_from_report",
+        "integration/vigil_integration/proof/run.py:_transport_redrive",
+        "integration/vigil_integration/live/transport_redrive.py:transport_redrive",
         "engine/crucible/framework/v2/verify/reachability.py:capture_handshake"
       ],
       "oracle_version": "",
@@ -888,14 +890,16 @@
       "preconditions": [
         "channel_established"
       ],
-      "limitation": "LEAD-only: a Strix TLS finding is not VIGIL's own handshake. A FACT is minted only when VIGIL independently negotiates its OWN TLS handshake against the reported host on the already-FACT-capable tls_weakness.tls_handshake branch (operator decision 2: a producer's report is a LEAD until VIGIL independently re-drives it into an already-FACT-capable branch). The binding that hands a Strix-reported endpoint to that gated capture is not wired; this branch may neither confirm nor clear on the producer's say-so.",
+      "limitation": "LEAD-only: a Strix TLS finding is not VIGIL's own handshake. A FACT is minted only when VIGIL independently negotiates its OWN TLS handshake against the reported host on the already-FACT-capable tls_weakness.tls_handshake branch (operator decision 2: a producer's report is a LEAD until VIGIL independently re-drives it into an already-FACT-capable branch). The binding that hands a Strix-reported endpoint to that gated capture is WIRED as of slice S2 (integration/vigil_integration/live/transport_redrive.py, reached from the proof-sink re-drive rail), so a Strix TLS report now drives VIGIL's own negotiation and the FACT lands on that VIGIL-owned twin; this producer branch itself may still neither confirm nor clear on the producer's say-so.",
       "target_fact_capable": true,
       "target_clean_capable": false,
       "target_downgrade_rationale": "Clean-capability belongs to the VIGIL-owned tls_weakness.tls_handshake branch (bounded to what a modern client negotiates); this producer-report branch is a LEAD proposer into that branch, not itself an absence-prover, so clean-capability is deliberately not pursued here.",
-      "blocking_work": "FACT requires routing the Strix-reported host/port into VIGIL's OWN gated TLS handshake capture (verify/tls.py:capture_tls_handshake, OracleKind.TLS_WEAKNESS) on the existing FACT-capable tls_weakness.tls_handshake branch, under the WARDEN scope gate. The oracle and capture exist; the missing piece is the LEAD-to-re-drive binding. Until that binding is wired a Strix TLS report stays a LEAD.",
+      "blocking_work": "FACT requires routing the Strix-reported host/port into VIGIL's OWN gated TLS handshake capture (verify/tls.py:capture_tls_handshake, OracleKind.TLS_WEAKNESS) on the existing FACT-capable tls_weakness.tls_handshake branch, under the WARDEN scope gate. The oracle, the gated capture AND (slice S2) the LEAD-to-re-drive binding now all exist: integration/vigil_integration/live/transport_redrive.py re-authorises the reported host:port through the charter/scope gate and runs VIGIL's own capture_tls_handshake, whose single negotiation is judged for both a weak protocol/cipher (tls_weakness.tls_handshake) and a broken-hash/undersized leaf key (weak_crypto.cert_signature_algorithm). What remains for THIS producer id is only the admission bookkeeping that would record that same VIGIL-owned capture+oracle verdict under this branch as well; until then the producer report itself stays a LEAD.",
       "evidence_surface": "tls_handshake",
       "implementation_refs": [
         "integration/vigil_integration/proof/run.py:_finding_from_report",
+        "integration/vigil_integration/proof/run.py:_transport_redrive",
+        "integration/vigil_integration/live/transport_redrive.py:transport_redrive",
         "engine/crucible/framework/v2/verify/tls.py:capture_tls_handshake"
       ],
       "oracle_version": "",
