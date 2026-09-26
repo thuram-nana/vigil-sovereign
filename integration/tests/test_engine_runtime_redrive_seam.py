@@ -91,6 +91,29 @@ _DECOY_PASSWD = "root:x:0:0:root:/root:/bin/bash\ndaemon:x:1:1:daemon:/usr/sbin:
 _DOTENV = "APP_ENV=production\nDB_PASSWORD=Sup3rSecret-LAB-DECOY-not-real\nJWT_SECRET=lab-decoy\n"
 
 
+_DECOY_DOCROOT = "/srv/app/public/docs"
+_DECOY_FS = {
+    "/etc/passwd": _DECOY_PASSWD,
+    "/srv/app/public/docs/report.pdf": "report contents",
+}
+
+
+def _decoy_read(value: str) -> "str | None":
+    """A GENUINE local-file-inclusion sink: join the value to the docroot, RESOLVE it with POSIX
+    dot-segment semantics, and serve whatever that names. Every encoding of the same path therefore
+    resolves to the same file, and a name that does not exist simply misses.
+
+    This replaces the substring matcher the fixture used to be (``any(t in f for t in ("..", "%2e",
+    "/etc/", "passwd"))``). That shape is not a traversal at all — it answers what the payload MEANS
+    rather than reading anything — so it is exactly the payload-CORRELATED false positive the soundness
+    controls now refuse, and it could no longer stand in for a real read (see
+    integration/tests/test_runtime_redrive_soundness.py)."""
+    import posixpath
+    if not value:
+        return None
+    return _DECOY_FS.get(posixpath.normpath(posixpath.join(_DECOY_DOCROOT, value)))
+
+
 def _esc(s: str) -> str:
     return (s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
              .replace('"', "&quot;").replace("'", "&#x27;"))
@@ -102,11 +125,13 @@ class _VulnApp(http.server.BaseHTTPRequestHandler):
         parts = urlsplit(self.path)
         q = parse_qs(parts.query)
         path = parts.path
-        if path == "/download":                                   # VULNERABLE path traversal
-            f = (q.get("file") or [""])[0]
-            if any(t in f for t in ("..", "%2e", "/etc/", "passwd")):
-                return self._text(_DECOY_PASSWD, "text/plain")
-            return self._text("report contents", "text/plain")
+        if path == "/download":                                   # VULNERABLE path traversal (a REAL read)
+            content = _decoy_read((q.get("file") or [""])[0])
+            if content is not None:
+                return self._text(content, "text/plain")
+            self.send_response(404)
+            self.end_headers()
+            return None
         if path == "/static":                                     # BENIGN: fixed body, no file signature
             return self._text("<html><body>static page</body></html>", "text/html")
         if path == "/search":                                     # VULNERABLE reflected xss (unescaped)

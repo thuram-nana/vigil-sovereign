@@ -53,7 +53,7 @@ Every oracle family has a matching control that a benign target trips instead of
 | Differential / boolean-blind | **SPRT multi-round** — TRUE clause differs from FALSE, and the two FALSE responses agree (a dynamic page trips the "FALSEs agree" guard and cannot masquerade). **Never a single-shot differential.** | `scanner/checks.py::BooleanInferenceCheck` → `boolean_inference_oracle` |
 | Probabilistic timing | **Mann-Whitney U + Hodges-Lehmann effect-size floor + optional dose-response**, benign and probe samples **interleaved** (no fixed threshold). | `scanner/checks.py::TimingCheck` → `timing_oracle` |
 | Reflection / OOB | **Unique per-position / per-payload canary** (high-entropy, minted by VIGIL). The oracle fires only for the registered token. | `MarkerReflectionCheck`; `OOBCheck` + `oob.register_token` → `oob_callback_oracle` |
-| Differential-presence (error / file-content / secret) | **Benign-twin baseline / soft-404 control, sent FIRST.** Refuse the finding if the signature already appears in the control. | `ErrorSignatureCheck.control_body`, `ContentSignatureCheck`, `PathProbeCheck`; shared `web_redrive.py::benign_control_fetch` |
+| Differential-presence (error / file-content / secret) | **Controls sent FIRST, and the signature evaluated on the control BODY** — never inferred from whether a check returned a context, which is a STATUS test (`PathProbeCheck.probe` returns one for any status outside `(0, 404)` and leaves its signature predicate unevaluated). Refuse if the signature appears in a control. For file-content the control must also be **PATH-SHAPED** (a traversal to a nonce filename that cannot exist) and a **second, semantically-different encoding of the same path must reproduce the signature** — otherwise a page whose output merely CORRELATES with what the payload means passes. For a `KEY=` secret the right-hand side must be a **real value** (non-empty, long enough, no template/placeholder/self-referential marker). | `ErrorSignatureCheck.control_body`, `ContentSignatureCheck`; `runtime_redrive.py::_encoding_corroboration`, `runtime_redrive.py::_secret_assignment`, `runtime_redrive.py::_fetch_path`; shared `web_redrive.py::benign_control_fetch` |
 | Achieved DOM execution | The canary must appear in a `Runtime.addBinding` call to a binding **only the driver registers** — an unforgeable planted callback, not incidental reflection. | `dom_execution_oracle`; `scanner/cdp.py`, `scanner/browser_xss.py` |
 | Achieved state (IDOR / mass-assign / race / forgery / smuggling) | A **predicate over the observed post-state** with an explicit control leg that differs in exactly one variable (the ambient cookie, the CL/TE conflict, the second identity, …). | `predicate_oracle`, `achieved_state_oracle` |
 
@@ -123,7 +123,14 @@ the `red-pen` agent (one reviewer never self-certifies near-zero-FP). Standing a
 
 - a reflecting-but-not-evaluating page (SSTI/SSI — the raw-directive-survives guard);
 - a static error banner independent of input (error-signature — the control-body differential);
-- a soft-404 catch-all (exposure / path-probe);
+- a soft-404 catch-all AND a 200-catch-all SPA (exposure / path-probe — the differential is over the
+  control BODY, and a genuine leak behind a catch-all must still MINT: fixing a false positive by
+  refusing everything is not a fix, and a refusal note must never assert an observation not made);
+- a page whose output CORRELATES with what the payload means but reads nothing — a KB/search endpoint
+  whose corpus documents the target file, a benign `403 path rejected` notice that quotes it
+  (file-content — the path-shaped control + the encoding corroboration);
+- a key NAMED rather than leaked — docs prose, a CI template, a JS concatenation, a `.env.example`
+  (secret — the value-shape requirement);
 - a dynamic per-request page (boolean — the SPRT "FALSEs agree" guard);
 - a constant-offset slow proxy (timing — the dose-response requirement);
 - a permissive RP that 200s everything (forgery-acceptance — the `control_status ∈ rejected` clause);

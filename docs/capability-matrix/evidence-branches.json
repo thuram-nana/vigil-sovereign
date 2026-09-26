@@ -991,14 +991,14 @@
     {
       "id": "path_traversal.file_signature",
       "check": "ContentSignatureCheck",
-      "evidence": "a KNOWN-CONTENT file signature (root:x:0:0:) appears under a TRAVERSAL payload but is ABSENT from a benign CONTROL request on the same parameter — the runner's control differential attributes the read to the traversal, not to a page that always prints it",
+      "evidence": "a KNOWN-CONTENT file signature (root:x:0:0:) appears under a TRAVERSAL payload AND reproduces under a semantically-different re-encoding of the SAME path (etc/./passwd, etc/../etc/passwd), while being ABSENT from BOTH a benign non-path control and a PATH-SHAPED control that traverses to a nonce filename which cannot exist — the runner's two-control plus encoding-corroboration differential attributes the read to the traversal, not to a page that always prints the signature and not to one whose output merely CORRELATES with what the payload means",
       "fact_capable": true,
       "clean_capable": false,
       "preconditions": [
         "channel_established",
         "body_semantically_available"
       ],
-      "limitation": "Body-derived, POSITIVE-only, CONTROL-DIFFERENTIAL: the runner (runtime_redrive, not the check alone) first sends a benign file value; a signature already present in that control is refused as non-attributable. A non-firing cannot distinguish 'no traversal' from 'the file is not one we hold a signature for' or an undecodable body. Bounded to the probed query-parameter names and the single canonical ../../../../etc/passwd payload.",
+      "limitation": "Body-derived, POSITIVE-only, CONTROL-DIFFERENTIAL + ENCODING-CORROBORATED: the runner (runtime_redrive, not the check alone) sends TWO controls on the same parameter — a benign non-path value (catching a page that emits the signature regardless of input) and a PATH-SHAPED traversal to a nonce filename that cannot exist (catching a page that emits it for any path-ish input, e.g. a 403 path-rejected notice quoting a sample passwd line, or a KB search keyed on passwd) — and refuses if either reproduces the signature; it then re-sends the SAME path under an alternate encoding and refuses unless the signature reproduces. RESIDUAL, stated: those three requirements are RUNNER-side preconditions checked before minting, so what the certificate RE-EXECUTES offline is the signature's presence in the retained treatment body, not the differential — BUG_CLASS_ORACLES pins path_traversal to SIDE_EFFECT, which takes one (marker, sink) pair and cannot express a negation or a conjunction over several captures. A non-firing cannot distinguish 'no traversal' from 'the file is not one we hold a signature for' or an undecodable body. Bounded to the probed query-parameter names and the canonical ../../../../etc/passwd payload plus its two re-encodings.",
       "target_fact_capable": true,
       "target_clean_capable": true,
       "evidence_surface": "response_body",
@@ -1047,21 +1047,21 @@
     },
     {
       "id": "exposure.secret_signature",
-      "check": "PathProbeCheck",
-      "evidence": "a value-shaped secret/config signature (DB_PASSWORD= / spring.datasource) is present at a fixed framework path (/.env, /actuator/env) AND ABSENT from a random CONTROL path — the runner's soft-404 differential refuses a 200 catch-all that serves the signature everywhere",
+      "check": "runtime_redrive",
+      "evidence": "a secret/config signature (DB_PASSWORD= / spring.datasource / [core]) is present at a fixed framework path (/.env, /actuator/env, /.git/config), ABSENT from the BODY of a random CONTROL path, corroborated by strings a genuine artifact of that kind also carries, and — for a KEY= signature — carrying a right-hand side that is a real value rather than a template/placeholder/self-referential expression; the whole conjunction is a JSON predicate AST the OFFLINE verifier re-executes, not a runner assertion",
       "fact_capable": true,
       "clean_capable": false,
       "preconditions": [
         "channel_established",
         "body_semantically_available"
       ],
-      "limitation": "Body-derived, POSITIVE-only, CONTROL-DIFFERENTIAL: the runner (runtime_redrive) refuses the finding when a definitely-nonexistent control path also returns the signature (a 200 soft-404 / SPA catch-all), and the signature is value-shaped so a JS bundle naming the KEY does not match. A non-firing cannot distinguish 'not exposed' from 'exposed under a path/signature not probed' or an undecodable body. Bounded to the fixed probe-path + signature set.",
+      "limitation": "Body-derived, POSITIVE-only, CONTROL-DIFFERENTIAL, FULLY RE-EXECUTABLE: the runner (runtime_redrive) fetches BOTH the random control path and the fixed probe path itself and composes a predicate over both bodies — it does NOT infer the differential from whether PathProbeCheck returned a context, which was a STATUS test that left the signature predicate unevaluated, refused genuine leaks behind any origin that does not 404 unknown paths, and wrote an unobserved soft-404 claim into the audit trail. A KEY= signature additionally needs a right-hand side that is non-empty, at least 6 characters, and free of template/placeholder markers, so documentation prose, a CI template, a JS concatenation of the key with an env lookup, and a shipped .env.example do not match. RESIDUAL: the value-shape blacklist trades recall for precision — a genuinely leaked credential containing a space, a quote or a $ is refused to a LEAD; and a page that reproduces a full actuator/git-config artifact verbatim as documentation at that exact path would still satisfy the conjunction. A non-firing cannot distinguish 'not exposed' from 'exposed under a path/signature not probed' or an undecodable body. Bounded to the fixed probe-path + signature set.",
       "target_fact_capable": true,
       "target_clean_capable": true,
       "evidence_surface": "response_body",
       "implementation_refs": [
-        "engine/crucible/framework/v2/scanner/checks.py:PathProbeCheck",
-        "integration/vigil_integration/live/runtime_redrive.py:runtime_redrive"
+        "integration/vigil_integration/live/runtime_redrive.py:runtime_redrive",
+        "integration/vigil_integration/live/runtime_redrive.py:_secret_assignment"
       ],
       "blocking_work": "A sound exposure CLEAN needs (1) the response-body decode-completeness guarantee shared with open_redirect.body_markup, AND (2) an exhaustive, maintained probe-path + signature corpus so absence over the current fixed set is not mistaken for absence of any framework/secret exposure.",
       "oracle_version": "achieved_state",
