@@ -113,6 +113,21 @@ def _script_raw(v: str) -> str:
     return f"<html><body><script>var q = '{v}';</script></body></html>"
 
 
+def _script_bslash_raw(v: str) -> str:
+    """The server that escapes the QUOTE but not the BACKSLASH — the context the
+    ``\\';…//`` statement-break payload is actually designed for.
+
+    The plain ``_script_raw`` splice is NOT vulnerable to that payload, and that is
+    a fact, not an opinion: node evaluates ``var q = '\\';vigMARKER//';`` to the
+    STRING ``';vigMARKER//`` — no injection. The entry used to "confirm" against
+    ``_script_raw`` only because the reflection oracle fired on mere PRESENCE of the
+    marker inside a ``<script>`` (audit F4), so that fixture was modelling an UNSOUND
+    detection. Here the input's ``'`` is escaped to ``\\'``, so the payload's leading
+    backslash pairs with it, the literal closes, and the marker lands at CODE
+    position — which node confirms executes."""
+    return _script_raw(v.replace("'", "\\'"))
+
+
 # encoded twins (same context, value HTML-entity-encoded)
 def _text_enc(v: str) -> str:
     return _text_raw(_enc(v))
@@ -236,7 +251,9 @@ CASES: list[tuple[str, Render, Render | None]] = [
     ("m2-xss-jsurl-href", _href_raw, None),
     # JS string inside an existing <script> (needs JS-encoding, NOT entity)
     ("m2-xss-script-string-break", _script_raw, None),
-    ("m2-xss-script-string-stmt", _script_raw, None),
+    # statement-break: needs the quote-escaping (backslash-unescaping) server — see
+    # _script_bslash_raw. Against the verbatim splice this payload does NOT break out.
+    ("m2-xss-script-string-stmt", _script_bslash_raw, None),
 ]
 
 _CASE_IDS = [c[0] for c in CASES]
@@ -407,3 +424,75 @@ def test_no_entry_confirms_on_plain_encoded_text(entry_id: str) -> None:
     assert _confirm(check, _plain_encoded_text) is None, (
         f"{entry_id} fired on a plain HTML-encoded text reflection"
     )
+
+
+# ---------------------------------------------------------------------------
+# PRECISION (audit F4/R5): the oracle must NOT confirm where the page escaped
+# correctly — the two shapes that used to mint a High xss FACT.
+# ---------------------------------------------------------------------------
+
+
+def _json_script_safe(v: str) -> str:
+    """Django ``json_script`` / Rails ``json_escape``: JSON-encode, then escape the
+    markup metacharacters as ``\\uXXXX`` so nothing in the value can terminate the
+    element or the literal. The canonical CORRECT way to hand a value to JS."""
+    import json as _json
+
+    lit = (_json.dumps(v).replace("<", "\\u003c").replace(">", "\\u003e")
+           .replace("&", "\\u0026").replace("/", "\\/"))
+    return ("<html><body><div id=app></div>"
+            f"<script>window.__BOOTSTRAP__ = {{\"query\": {lit}}};</script></body></html>")
+
+
+def _quot_escaped_handler(v: str) -> str:
+    """A handler the PAGE composed, with the value correctly ``&quot;``-escaped into
+    it. HTML attribute values are entity-decoded unconditionally, so the marker
+    reaches the ``on*`` value as DATA — it did not break out."""
+    return f'<html><body><button onclick="search(&quot;{_enc(v)}&quot;)">go</button></body></html>'
+
+
+def _json_data_block(v: str) -> str:
+    """A ``type="application/json"`` block: the browser never executes it."""
+    return f'<html><body><script type="application/json">{{"q": "{v}"}}</script></body></html>'
+
+
+def _noscript_container(v: str) -> str:
+    """Raw-text container: ``<xMARKER>`` here is inert text, not a live element."""
+    return f"<html><body><noscript>{v}</noscript></body></html>"
+
+
+_ALL_BUT_CONTAINER_BREAKERS = (
+    "m2-xss-tag-svg-onload", "m2-xss-tag-img-onerror", "m2-xss-script-string-break",
+    "m2-xss-attr-dq-onmouseover", "m2-xss-jsurl-href",
+)
+
+@pytest.mark.parametrize(
+    "render, entries, why",
+    [
+        (_json_script_safe, _ALL_BUT_CONTAINER_BREAKERS + ("m2-xss-tag-textarea-newtag",),
+         "json_script JS-string escaping"),
+        (_quot_escaped_handler, _ALL_BUT_CONTAINER_BREAKERS + ("m2-xss-tag-textarea-newtag",),
+         "&quot;-escaped page-composed handler"),
+        (_json_data_block, _ALL_BUT_CONTAINER_BREAKERS + ("m2-xss-tag-textarea-newtag",),
+         "non-executable application/json script"),
+        # NOTE the entry set here EXCLUDES m2-xss-tag-textarea-newtag on purpose: its
+        # payload OPENS with `</textarea></noscript>`, so it genuinely escapes the
+        # container and SHOULD still confirm — see the companion assertion below.
+        (_noscript_container, _ALL_BUT_CONTAINER_BREAKERS, "raw-text <noscript> container"),
+    ],
+    ids=["json_script", "quot_escaped_handler", "json_data_block", "noscript"],
+)
+def test_correctly_escaped_pages_never_confirm_xss(
+    render: Render, entries: tuple[str, ...], why: str
+) -> None:
+    for entry_id in entries:
+        confirmed = _confirm(compile_entry(_by_id(entry_id)), render)
+        assert confirmed is None, f"{entry_id} minted a FACT against {why}"
+
+
+def test_container_escaping_payload_still_confirms_out_of_noscript() -> None:
+    # the precision fix must not cost a real detection: a payload that CLOSES the
+    # raw-text container genuinely reaches live markup and must still confirm.
+    confirmed = _confirm(compile_entry(_by_id("m2-xss-tag-textarea-newtag")), _noscript_container)
+    assert confirmed is not None
+    assert confirmed.confirmed_by is OracleKind.REFLECTION_CONTEXT

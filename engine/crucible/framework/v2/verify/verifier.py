@@ -26,6 +26,75 @@ HIGH_CONFIDENCE = 0.7
 
 
 # ---------------------------------------------------------------------------
+# PROTOCOL discriminators for the DIFFERENTIAL_RESPONSE arm (audit F8)
+# ---------------------------------------------------------------------------
+#
+# The boolean arm already pins its SPRT parameters and its discriminator because a
+# context-supplied one tunes SENSITIVITY and a threshold fitted to the retained bytes
+# manufactures a signal out of noise. The differential arm did NOT: it passed
+# ``ctx["discriminator"]`` straight through — dimensions, thresholds, ``true_marker``
+# and ``expect`` included.
+#
+# MEASURED on 838e0b42: a hand-edited report carrying two BYTE-IDENTICAL responses
+# (same status, same body, same latency_ms) plus
+# ``discriminator={"dimensions":["latency"],"latency_threshold_ms":0}`` re-verified as a
+# CONFIRMED ``differential_response`` FACT at 0.700 — "re-verified 1/1 certificate(s)
+# reproduced and matched their claims". A FACT out of no evidence. ``expect:"same"`` is
+# the same hole with the sign flipped (byte-identical responses fire the "same" arm), and
+# a one-character ``true_marker`` is a third.
+#
+# So the verifier now chooses the WHOLE discriminator itself, from these constants,
+# keyed on the finding's own declared bug_class. Nothing about the comparison comes from
+# the producer any more: not the dimensions, not the thresholds, not ``expect``, not
+# ``true_marker``. These mirror what every honest in-repo producer already passes
+# (scanner.checks.BOOLEAN_DISCRIMINATOR / ReflectionDifferentialCheck /
+# verify.confirmation / agents.http_executor all send exactly the content set), so
+# nothing legitimate changes and `make gate` is byte-identical — the ONLY discriminator
+# observed on the whole gate path is the content one below.
+#
+# Thresholds are spelled out rather than left to the oracle's defaults so a later change
+# to an oracle default cannot silently loosen what the AUTHORITY re-verifies with.
+
+# Content differential: the default for every class that reaches this oracle. Latency is
+# deliberately ABSENT — a latency delta is a TIMING claim and the engine has a dedicated,
+# statistically-sound TIMING oracle for it (paired samples, alpha, dose-response).
+_DIFFERENTIAL_CONTENT_DISCRIMINATOR: dict[str, Any] = {
+    "dimensions": ["status", "length", "lexical"],
+    "length_threshold": 0.05,
+    "lexical_threshold": 0.10,
+    "expect": "differ",
+}
+
+# The ONE class whose evidence is legitimately a latency delta: the legacy A12
+# request-smuggling TIMING probe (scanner/smuggling.py, scanner/campaign.py), which is
+# reported as an explicitly-UNCONFIRMED Low LEAD, never a desync FACT (the sound desync
+# proof is the Wave-4.2 canary differential, routed above via `smuggling_desync`). The
+# threshold is PINNED to the probe's protocol constant, so the F8 edit — byte-identical
+# responses with `latency_threshold_ms: 0` — cannot fire here either.
+_DIFFERENTIAL_TIMING_THRESHOLD_MS = 1500.0
+_DIFFERENTIAL_TIMING_DISCRIMINATOR: dict[str, Any] = {
+    "dimensions": ["latency"],
+    "latency_threshold_ms": _DIFFERENTIAL_TIMING_THRESHOLD_MS,
+    "expect": "differ",
+}
+
+_DIFFERENTIAL_PROTOCOL_DISCRIMINATORS: dict[str, dict[str, Any]] = {
+    "request_smuggling": _DIFFERENTIAL_TIMING_DISCRIMINATOR,
+}
+
+
+def differential_protocol_discriminator(bug_class: str) -> dict[str, Any]:
+    """The discriminator the AUTHORITY re-executes a differential with. Never the
+    producer's. Pure lookup — safe to call from a test or an offline re-verify.
+
+    Returns a DEEP-ENOUGH copy (the ``dimensions`` list is rebuilt), so a caller that
+    mutates what it is handed cannot edit the protocol for the next finding."""
+    pinned = _DIFFERENTIAL_PROTOCOL_DISCRIMINATORS.get(
+        normalize_bug_class(bug_class), _DIFFERENTIAL_CONTENT_DISCRIMINATOR)
+    return {**pinned, "dimensions": list(pinned["dimensions"])}
+
+
+# ---------------------------------------------------------------------------
 # bug_class -> which oracle(s) can prove it
 # ---------------------------------------------------------------------------
 
@@ -1124,8 +1193,16 @@ class OracleVerifier:
             if "smuggling_desync" in ctx:
                 return oracles.smuggling_desync_oracle(ctx["smuggling_desync"])
             if "baseline" in ctx and "mutated" in ctx:
+                # AUDIT F8 — the discriminator is a PROTOCOL CONSTANT, never context-supplied.
+                # See _DIFFERENTIAL_PROTOCOL_DISCRIMINATORS above: a producer-supplied
+                # `{"dimensions":["latency"],"latency_threshold_ms":0}` (or `expect:"same"`,
+                # or a one-character `true_marker`) turned two BYTE-IDENTICAL retained
+                # responses into a confirmed FACT at 0.700 on the untrusted-report
+                # `framework.v2 verify` path. The producer's declared discriminator is kept
+                # in the retained context for audit; it no longer governs the re-execution.
                 return oracles.differential_response_oracle(
-                    ctx["baseline"], ctx["mutated"], ctx.get("discriminator")
+                    ctx["baseline"], ctx["mutated"],
+                    differential_protocol_discriminator(str(ctx.get("bug_class", ""))),
                 )
             return None
         if kind is OracleKind.TIMING:

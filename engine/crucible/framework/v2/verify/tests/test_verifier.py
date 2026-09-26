@@ -7,6 +7,7 @@ from ..oob import OOBReceiver
 from ..verifier import (
     BUG_CLASS_ORACLES,
     OracleVerifier,
+    differential_protocol_discriminator,
     normalize_bug_class,
 )
 
@@ -203,3 +204,100 @@ def test_custom_threshold_is_respected() -> None:
     # A traceback fires ~0.65; a lenient verifier accepts it, the default won't.
     assert OracleVerifier(high_confidence=0.6).confirm(ctx).confirmed
     assert not OracleVerifier().confirm(ctx).confirmed
+
+
+# ---------------------------------------------------------------------------
+# AUDIT F8 — the differential discriminator is a PROTOCOL CONSTANT, never the
+# producer's. A hand-edited report used to mint a FACT out of two BYTE-IDENTICAL
+# responses by shipping its own discriminator.
+# ---------------------------------------------------------------------------
+
+_IDENTICAL = {"status": 200, "body": "<html><body>identical</body></html>", "latency_ms": 10.0}
+
+
+def _hostile(bug_class: str, discriminator: dict) -> dict:
+    """The exact audited shape: two BYTE-IDENTICAL retained responses (same status,
+    same body, same latency) plus an attacker-chosen discriminator."""
+    return {"bug_class": bug_class, "baseline": dict(_IDENTICAL), "mutated": dict(_IDENTICAL),
+            "discriminator": discriminator}
+
+
+def test_byte_identical_responses_never_confirm_whatever_the_discriminator() -> None:
+    # Each of these re-verified as a CONFIRMED differential_response FACT on 838e0b42.
+    hostile_discriminators = [
+        {"dimensions": ["latency"], "latency_threshold_ms": 0},          # the measured F8 repro
+        {"dimensions": ["latency"], "latency_threshold_ms": -1},
+        {"dimensions": ["status", "length", "lexical"], "expect": "same"},  # sign-flipped
+        {"dimensions": ["marker"], "true_marker": "l"},                  # 1-char marker
+        {"dimensions": ["length", "lexical"], "length_threshold": -1.0,
+         "lexical_threshold": -1.0},                                     # negative thresholds
+    ]
+    for disc in hostile_discriminators:
+        for bug_class in ("boolean_sqli", "nosqli", "sqli", "auth_bypass", "request_smuggling"):
+            result = OracleVerifier().confirm(_hostile(bug_class, disc))
+            assert not result.confirmed, f"{bug_class} minted a FACT from identical bytes via {disc}"
+            for sig in result.signals:
+                if sig.kind is OracleKind.DIFFERENTIAL_RESPONSE:
+                    assert not sig.fired, f"{bug_class}/{disc}: differential fired on identical bytes"
+
+
+def test_genuine_differential_still_confirms() -> None:
+    # the mutation control: real divergence in the retained bytes still re-confirms,
+    # so the F8 negative above is not vacuous.
+    result = OracleVerifier().confirm({
+        "bug_class": "nosqli",
+        "baseline": {"status": 200, "body": "<html><body>no results</body></html>", "latency_ms": 10.0},
+        "mutated": {"status": 200,
+                    "body": "<html><body><ul><li>alice</li><li>bob</li><li>carol</li></ul></body></html>",
+                    "latency_ms": 11.0},
+    })
+    assert result.confirmed
+    assert result.confirming_signals[0].kind is OracleKind.DIFFERENTIAL_RESPONSE
+
+
+def test_producer_discriminator_cannot_widen_or_narrow_the_comparison() -> None:
+    # a REAL divergence judged under a producer discriminator that tries to hide it
+    # (e.g. an impossible length threshold) must STILL confirm: the producer does not
+    # get to choose the rule in either direction.
+    real = {
+        "bug_class": "nosqli",
+        "baseline": {"status": 200, "body": "no results", "latency_ms": 10.0},
+        "mutated": {"status": 500, "body": "SQL syntax error near '", "latency_ms": 10.0},
+    }
+    assert OracleVerifier().confirm(real).confirmed
+    muted = dict(real, discriminator={"dimensions": ["latency"], "latency_threshold_ms": 10_000_000})
+    assert OracleVerifier().confirm(muted).confirmed
+
+
+def test_protocol_discriminator_table_is_closed_and_latency_free_by_default() -> None:
+    generic = differential_protocol_discriminator("nosqli")
+    assert generic["dimensions"] == ["status", "length", "lexical"]
+    assert "latency" not in generic["dimensions"]
+    assert generic["expect"] == "differ"
+    assert "true_marker" not in generic
+    # the one legitimate latency consumer keeps its dimension but NOT a tunable threshold
+    smuggling = differential_protocol_discriminator("request_smuggling")
+    assert smuggling["dimensions"] == ["latency"]
+    assert smuggling["latency_threshold_ms"] == 1500.0
+    # and the accessor hands out a COPY — a caller cannot mutate the protocol
+    generic["dimensions"].append("latency")
+    assert "latency" not in differential_protocol_discriminator("nosqli")["dimensions"]
+
+
+def test_differential_oracle_default_dimensions_exclude_latency() -> None:
+    # AUDIT R6: latency's weight is exactly HIGH_CONFIDENCE, so a default-dimension
+    # caller inherited a latency-only confirm path over otherwise identical responses.
+    from .. import oracles
+
+    sig = oracles.differential_response_oracle(
+        {"status": 200, "body": "same", "latency_ms": 10.0},
+        {"status": 200, "body": "same", "latency_ms": 5_000.0},
+    )
+    assert not sig.fired, sig.evidence
+    # explicit opt-in still works, for the A12 smuggling timing LEAD probe
+    explicit = oracles.differential_response_oracle(
+        {"status": 200, "body": "same", "latency_ms": 10.0},
+        {"status": 200, "body": "same", "latency_ms": 5_000.0},
+        {"dimensions": ["latency"], "latency_threshold_ms": 1500.0},
+    )
+    assert explicit.fired

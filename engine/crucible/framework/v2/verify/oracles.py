@@ -193,6 +193,11 @@ def _noisy_or(weights: list[float]) -> float:
 # ---------------------------------------------------------------------------
 
 
+# The DEFAULT comparison dimensions when a caller supplies no discriminator. See the
+# AUDIT R6 note inside the oracle: ``latency`` is deliberately excluded.
+_DEFAULT_DIFFERENTIAL_DIMENSIONS = frozenset({"status", "length", "lexical", "marker"})
+
+
 def differential_response_oracle(
     baseline: Any,
     mutated: Any,
@@ -206,7 +211,9 @@ def differential_response_oracle(
     blind bug a latency delta over threshold is the signal.
 
     discriminator (all optional):
-      dimensions          : subset of {status,length,lexical,latency,marker}
+      dimensions          : subset of {status,length,lexical,structural,latency,marker}
+                            (default: status,length,lexical,marker — ``latency`` must be
+                            asked for EXPLICITLY; see the AUDIT R6 note below)
       length_threshold    : min fractional length change to count (default 0.05)
       lexical_threshold   : min 1-similarity to count (default 0.10)
       latency_threshold_ms: min added latency to count (default 1000)
@@ -221,7 +228,19 @@ def differential_response_oracle(
     b = _normalize_response(baseline)
     m = _normalize_response(mutated)
 
-    wanted = set(disc.get("dimensions") or {"status", "length", "lexical", "latency", "marker"})
+    # AUDIT R6 — ``latency`` is NOT in the DEFAULT set. Its weight is 0.7, which is
+    # EXACTLY the verifier's HIGH_CONFIDENCE floor, so every caller that omitted a
+    # discriminator inherited a latency-ONLY confirm path: a single timing delta over
+    # two otherwise identical responses minted a FACT. That is a TIMING claim, and the
+    # engine has a dedicated statistically-sound oracle for it (``timing_oracle``:
+    # paired samples, alpha, dose-response). The fix is to remove the dimension from
+    # the DEFAULT rather than to shave its weight to 0.69 — a weight just under the
+    # floor still lets latency push a marginal second dimension over the line through
+    # the noisy-OR, and it would say "timing is weak evidence" when the honest
+    # statement is "timing is not part of this oracle's default proof at all".
+    # Callers that genuinely mean timing (the A12 request-smuggling LEAD probe) still
+    # ask for it EXPLICITLY, with their own threshold, and are unaffected.
+    wanted = set(disc.get("dimensions") or _DEFAULT_DIFFERENTIAL_DIMENSIONS)
     length_thr = float(disc.get("length_threshold", 0.05))
     lexical_thr = float(disc.get("lexical_threshold", 0.10))
     latency_thr = float(disc.get("latency_threshold_ms", 1000.0))
@@ -1264,65 +1283,250 @@ def side_effect_oracle(marker: str, observed_sink: Any) -> OracleSignal:
 # ---------------------------------------------------------------------------
 # 3b. Reflection context — a marker reached an EXECUTABLE HTML/JS position
 # ---------------------------------------------------------------------------
+#
+# AUDIT F4/R5 (soundness). This oracle used to fire on mere PRESENCE of the marker
+# inside a ``<script>`` element or inside any ``on*`` attribute value. Both are
+# unsound, and both were measured minting a High/FACT ``xss`` on a CORRECTLY
+# ESCAPED page:
+#
+#   * F4 — the canonical safe pattern (Django ``json_script`` / Rails
+#     ``json_escape``: JSON-encode, then escape ``< > & /`` as ``\uXXXX``) puts the
+#     value inside a JS STRING LITERAL from which it provably cannot escape. The
+#     old rule read "marker is inside <script>" as "executable JS context" and
+#     minted ``xss | High | fact | reflection_context | 0.90``.
+#   * R5 — ``convert_charrefs=True`` (and HTML attribute-value decoding, which is
+#     unconditional) means a CORRECTLY ``&quot;``-escaped handler
+#     ``onclick="search(&quot;…marker…&quot;)"`` arrives as a marker inside an
+#     ``on*`` value. The old rule fired on that too.
+#
+# The honest question is not "where did the marker land" but "did the payload
+# BREAK OUT — did it create the executable position, rather than being carried
+# INTO one as data the page itself escaped". This module now answers that:
+#
+#   html_tag     the marker is (part of) a TAG NAME → the payload created an
+#                element. Unchanged, and still the strongest signal.
+#   js_attribute the marker is the ENTIRE value of an event-handler attribute
+#                (or the entire body of a ``javascript:`` URL) → the attacker
+#                supplied the whole handler. A marker merely EMBEDDED in a larger
+#                handler expression the page composed (the R5 shape) is the page's
+#                own handler with the value escaped into it — a NON-FIRING advisory.
+#   script       the marker sits at CODE position inside an EXECUTABLE ``<script>``
+#                — outside every string literal, template literal and comment (the
+#                ``_js_code_position`` lexer), and in a script the browser actually
+#                runs (``type`` absent or a JS MIME; ``application/json`` and
+#                friends are data blocks). A marker inside a string literal — the
+#                F4 shape — is a NON-FIRING advisory.
+#
+# Everything the oracle cannot PROVE broke out is reported as a non-firing,
+# NON-CONCLUSIVE advisory: not a FACT, and not a clean bill of health either
+# (a JS-string reflection may still be breakable through an escaping bug this
+# oracle cannot see — that needs the DOM_EXECUTION oracle, which proves execution).
+#
+# SCOPE, stated once and repeated in every evidence string: REFLECTION_CONTEXT
+# proves a reflection reached a LIVE / EXECUTABLE POSITION. It does NOT prove
+# EXECUTION. Nothing it emits may be worded as proven execution.
+
+
+# Elements whose children the HTML spec does NOT parse as live markup (raw-text,
+# escapable-raw-text and "not rendered when scripting is enabled" containers).
+# ``HTMLParser`` only knows the CDATA rule for <script>/<style>, so it happily
+# reports ``<xMARKER>`` inside a page's own <textarea>/<noscript> as a start tag —
+# it is inert text in a real browser. A marker there is an advisory, never a FACT.
+_INERT_TEXT_CONTAINERS = frozenset({
+    "noscript", "noembed", "noframes", "textarea", "title", "template",
+    "iframe", "xmp", "plaintext", "style",
+})
+
+# ``type`` values a browser EXECUTES as a classic script or a module. Anything else
+# (application/json — what Django's json_script actually emits — text/template,
+# text/x-handlebars, …) is an inert DATA block.
+_EXECUTABLE_SCRIPT_TYPES = frozenset({
+    "", "module", "text/javascript", "application/javascript", "text/ecmascript",
+    "application/ecmascript", "text/jscript", "application/x-javascript",
+})
+
+
+def _js_code_position(script_text: str, idx: int) -> bool:
+    """True iff offset ``idx`` of ``script_text`` is at CODE position — NOT inside a
+    string literal, template literal, or comment.
+
+    A deliberately small, pure, stdlib-only lexer. Regex literals are NOT modelled:
+    treating ``/`` as division means an apostrophe inside a regex flips the lexer
+    into "in a string" and it stays there, i.e. every misparse biases toward
+    NOT-code → NOT-firing. The failure direction is a missed detection, never a
+    manufactured FACT."""
+    state: str | None = None   # None | "'" | '"' | "`" | "//" | "/*"
+    i, n = 0, len(script_text)
+    stop = min(idx, n)
+    while i < stop:
+        c = script_text[i]
+        if state is None:
+            if c in ("'", '"', "`"):
+                state = c
+            elif c == "/" and i + 1 < n and script_text[i + 1] in ("/", "*"):
+                state = "//" if script_text[i + 1] == "/" else "/*"
+                i += 1
+        elif state in ("'", '"', "`"):
+            if c == "\\":
+                i += 1
+            elif c == state:
+                state = None
+        elif state == "//":
+            if c in ("\n", "\r"):
+                state = None
+        elif state == "/*":
+            if c == "*" and i + 1 < n and script_text[i + 1] == "/":
+                state = None
+                i += 1
+        i += 1
+    return state is None
 
 
 class _ReflectionScanner(HTMLParser):
-    """Locate a marker's parse context with stdlib HTML parsing. Fires internal
-    state when the marker became (part of) a tag name, landed inside a
-    ``<script>``, or sits in an event-handler / ``javascript:`` attribute value.
-    ``convert_charrefs=True`` means an HTML-encoded payload arrives as inert TEXT
-    (not a tag), so it is correctly judged non-executable."""
+    """Locate a marker's parse context with stdlib HTML parsing, and decide whether
+    the payload PROVABLY BROKE OUT into that position (see the module note above).
+
+    ``context`` is set only for a proven breakout (``html_tag`` / ``js_attribute:…``
+    / ``script``). ``advisory`` records the strongest NON-proving observation — the
+    marker was seen in/near an executable position but as escaped DATA the page put
+    there, which is not a breakout."""
 
     def __init__(self, marker_lower: str) -> None:
         super().__init__(convert_charrefs=True)
         self._ml = marker_lower
         self._in_script = False
+        self._script_executable = False
+        self._inert_depth = 0
         self.context: str | None = None
         self.detail: str = ""
+        self.advisory: str | None = None
+        self.advisory_detail: str = ""
+
+    # -- advisory bookkeeping ------------------------------------------------
+
+    def _note(self, kind: str, detail: str = "") -> None:
+        if self.advisory is None:
+            self.advisory, self.advisory_detail = kind, detail
+
+    # -- parser callbacks ----------------------------------------------------
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        t = tag.lower()
+        if t == "script":
+            stype = ""
+            for name, val in attrs:
+                if name.lower() == "type":
+                    stype = (val or "").strip().lower().split(";")[0].strip()
+            self._in_script = True
+            self._script_executable = stype in _EXECUTABLE_SCRIPT_TYPES
+        if t in _INERT_TEXT_CONTAINERS:
+            self._inert_depth += 1
         if self.context is not None:
             return
-        if self._ml in tag.lower():
-            self.context, self.detail = "html_tag", tag
+
+        inert = self._inert_depth > 0
+        if self._ml in t:
+            if inert:
+                self._note("inert_text_container", t)
+            else:
+                self.context, self.detail = "html_tag", tag
             return
-        if tag.lower() == "script":
-            self._in_script = True
         for name, val in attrs:
-            v = (val or "").lower()
-            if self._ml not in v:
+            v = val or ""
+            if self._ml not in v.lower():
                 continue
             a = name.lower()
-            if a.startswith("on") or (a in ("href", "src", "action", "formaction")
-                                      and v.lstrip().startswith("javascript:")):
+            stripped = v.strip()
+            is_handler = a.startswith("on")
+            is_js_url = (a in ("href", "src", "action", "formaction")
+                         and stripped.lower().startswith("javascript:"))
+            if not (is_handler or is_js_url):
+                continue
+            if inert:
+                self._note("inert_text_container", name)
+                continue
+            # SOUND BREAKOUT (R5): the attacker must own the WHOLE executable value.
+            # A marker embedded inside a larger expression the PAGE composed
+            # (``onclick="search(&quot;…marker…&quot;)"``) is the page's own handler
+            # with the value correctly escaped into it — it did not break out.
+            body = stripped
+            if is_js_url:
+                body = stripped[len("javascript:"):].strip()
+            if body.lower() == self._ml:
                 self.context, self.detail = f"js_attribute:{name}", name
                 return
+            self._note("js_attribute_data", name)
 
     def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         self.handle_starttag(tag, attrs)
+        # a self-closing form opens nothing, so undo the container/script bookkeeping
+        t = tag.lower()
+        if t == "script":
+            self._in_script = False
+            self._script_executable = False
+        if t in _INERT_TEXT_CONTAINERS:
+            self._inert_depth = max(0, self._inert_depth - 1)
 
     def handle_endtag(self, tag: str) -> None:
-        if tag.lower() == "script":
+        t = tag.lower()
+        if t == "script":
             self._in_script = False
+            self._script_executable = False
+        if t in _INERT_TEXT_CONTAINERS:
+            self._inert_depth = max(0, self._inert_depth - 1)
 
     def handle_data(self, data: str) -> None:
-        if self.context is None and self._in_script and self._ml in data.lower():
-            self.context = "script"
+        if self.context is not None or not self._in_script:
+            return
+        low = data.lower()
+        idx = low.find(self._ml)
+        if idx < 0:
+            return
+        if not self._script_executable:
+            # <script type="application/json"> and friends: a DATA block the browser
+            # never executes. Django's json_script emits exactly this.
+            self._note("script_data_block")
+            return
+        if _js_code_position(data, idx):
+            self.context, self.detail = "script", "script"
+        else:
+            # F4: inside a string literal / template literal / comment — the value
+            # cannot terminate the element or the literal, so no breakout is proven.
+            self._note("script_string_literal")
 
 
 def reflection_context_oracle(marker: str, observed_sink: Any) -> OracleSignal:
-    """Fire only when a reflected marker lands in an EXECUTABLE position — the
-    payload broke out of its context into live markup or script — not merely when
-    the marker substring is present.
+    """Fire only when the reflected marker PROVABLY BROKE OUT into a live,
+    executable position — never merely because the marker substring is present
+    somewhere executable-looking.
 
     Substring-presence (what ``side_effect_oracle`` and most DAST use for XSS)
     over-reports: a marker reflected inside an HTML-encoded attribute, a comment,
-    or plain text is inert. Here the response is PARSED (stdlib, no third-party
-    dependency), and a signal fires only if the marker became (part of) a tag
-    name (the payload created an element), landed inside a ``<script>``, or sits
-    in an event-handler / ``javascript:`` attribute. An encoded or text-only
-    reflection does not fire — materially fewer false positives than substring
-    XSS detection."""
+    or plain text is inert. So does "the marker is somewhere inside a ``<script>``"
+    or "somewhere inside an ``on*`` value" — the audited F4/R5 false positives,
+    which a CORRECTLY escaped page (Django ``json_script``, a ``&quot;``-escaped
+    handler) reproduces on demand. The response is PARSED (stdlib, no third-party
+    dependency) and a signal fires ONLY for a proven breakout:
+
+      * ``html_tag``     — the marker is (part of) a TAG NAME: the payload created
+        an element (0.95);
+      * ``js_attribute`` — the marker is the ENTIRE value of an event-handler
+        attribute, or the entire body of a ``javascript:`` URL: the attacker owns
+        the whole handler (0.90);
+      * ``script``       — the marker sits at CODE position (outside every string
+        literal, template literal and comment) inside a script the browser actually
+        EXECUTES (``type`` absent or a JS MIME) (0.90).
+
+    Anything weaker — a marker inside a JS string literal, inside a handler
+    expression the page composed, inside a ``type="application/json"`` data block,
+    or inside a raw-text container (``<noscript>``/``<textarea>``/…) — is returned
+    as a NON-FIRING, NON-CONCLUSIVE advisory: not a FACT, and not a clean bill of
+    health either. A fully encoded / text-only reflection is the one decisive
+    negative (``conclusive=True``).
+
+    SCOPE: this oracle proves a reflection reached a LIVE / EXECUTABLE POSITION.
+    It does NOT prove EXECUTION — that is the DOM_EXECUTION oracle's claim, and no
+    evidence string here may be read as one."""
     marker = (marker or "").strip()
     body = observed_sink if isinstance(observed_sink, str) else _searchable(observed_sink)
     if len(marker) < 4:
@@ -1345,18 +1549,56 @@ def reflection_context_oracle(marker: str, observed_sink: Any) -> OracleSignal:
     if scanner.context == "html_tag":
         return OracleSignal(
             kind=OracleKind.REFLECTION_CONTEXT, fired=True, confidence=0.95,
-            evidence=f"marker created a live element <{scanner.detail}> — executable HTML injection",
+            evidence=(f"marker became the TAG NAME of a live element <{scanner.detail}> — the payload "
+                      f"broke out into markup (injection into an executable position PROVEN; this "
+                      f"oracle does not prove execution)"),
             observed={"marker": marker, "context": "html_tag", "tag": scanner.detail})
     if scanner.context == "script":
         return OracleSignal(
             kind=OracleKind.REFLECTION_CONTEXT, fired=True, confidence=0.9,
-            evidence="marker reflected inside a <script> block — executable JS context",
+            evidence=("marker sits at CODE position inside an executable <script> — outside every string "
+                      "literal, template literal and comment, so the payload broke out of the data "
+                      "position (injection into an executable position PROVEN; this oracle does not "
+                      "prove execution)"),
             observed={"marker": marker, "context": "script"})
     if scanner.context and scanner.context.startswith("js_attribute"):
         return OracleSignal(
             kind=OracleKind.REFLECTION_CONTEXT, fired=True, confidence=0.9,
-            evidence=f"marker in executable attribute {scanner.detail!r} — event/JS URL context",
+            evidence=(f"marker is the ENTIRE value of executable attribute {scanner.detail!r} — the "
+                      f"attacker supplied the whole handler / javascript: URL body (injection into an "
+                      f"executable position PROVEN; this oracle does not prove execution)"),
             observed={"marker": marker, "context": scanner.context})
+
+    if scanner.advisory is not None:
+        # AUDIT F4/R5 — NON-FIRING ADVISORY. The marker was seen in or beside an
+        # executable position, but as DATA the page itself placed there; no breakout
+        # is proven. NOT conclusive either: an escaping bug this parse cannot see
+        # could still make it executable, so the honest verdict is "unresolved —
+        # escalate to the execution oracle", never "clean" and never a FACT.
+        _ADVISORY_EVIDENCE = {
+            "script_string_literal":
+                "marker is inside a JS STRING LITERAL / template literal / comment in an executable "
+                "<script> — it cannot terminate the literal or the element from this parse, so NO "
+                "breakout is proven (the Django json_script / Rails json_escape shape). ADVISORY ONLY",
+            "script_data_block":
+                "marker is inside a <script> the browser does NOT execute (type is a data MIME such as "
+                "application/json) — NO breakout is proven. ADVISORY ONLY",
+            "js_attribute_data":
+                f"marker is EMBEDDED IN a larger expression in attribute {scanner.advisory_detail!r} that "
+                "the PAGE composed (e.g. a correctly &quot;-escaped handler argument) — the attacker does "
+                "not own the value, so NO breakout is proven. ADVISORY ONLY",
+            "inert_text_container":
+                f"marker reached {scanner.advisory_detail!r} inside a raw-text container "
+                "(<noscript>/<textarea>/<title>/<template>/…) whose content a browser does not parse as "
+                "live markup — NO breakout is proven. ADVISORY ONLY",
+        }
+        return OracleSignal(
+            kind=OracleKind.REFLECTION_CONTEXT, fired=False, confidence=0.0,
+            conclusive=False,
+            evidence=_ADVISORY_EVIDENCE.get(
+                scanner.advisory, "marker in a non-proving position. ADVISORY ONLY"),
+            observed={"marker": marker, "context": scanner.advisory,
+                      "detail": scanner.advisory_detail, "advisory": True})
 
     return OracleSignal(
         kind=OracleKind.REFLECTION_CONTEXT, fired=False, confidence=0.0,

@@ -415,7 +415,7 @@ def _oracle_summaries() -> dict[Any, str]:
         OracleKind.SANITIZER_SIGNAL: "An ASAN/UBSAN/panic/traceback appeared in process output.",
         OracleKind.TIMING: "A statistical time-based signal separated treatment from baseline latencies.",
         OracleKind.BOOLEAN_INFERENCE: "An SPRT over repeated true/false probes reached a decision.",
-        OracleKind.REFLECTION_CONTEXT: "A marker reached an executable HTML/JS context.",
+        OracleKind.REFLECTION_CONTEXT: "A marker PROVABLY BROKE OUT into a live HTML/JS position (a tag name, a whole event-handler/javascript: value, or code position in an executable <script>). Position, not execution.",
         OracleKind.EVALUATION: "The server evaluated an injected expression (SSTI/EL).",
         OracleKind.ERROR_SIGNATURE: "A datastore/parser error signature a payload provoked (error-based).",
         OracleKind.DOM_EXECUTION: "Injected JS actually executed in a real DOM (DOM-XSS).",

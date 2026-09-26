@@ -3,12 +3,18 @@ Wave 6 — structural (AST) differential + HTML-context reflection.
 
 The structural diff is invariant to token noise (nonces, CSRF tokens, timestamps)
 but sensitive to real change (an added record / DOM node). The reflection-context
-oracle fires only when a marker reaches an EXECUTABLE position (a live tag, a
-<script>, an event/JS attribute), not when it is HTML-encoded or sits in text —
-materially fewer false positives than substring XSS detection.
+oracle fires only on a PROVEN BREAKOUT — the marker became a tag name, owns a
+whole event-handler / javascript: value, or sits at CODE position inside an
+executable <script>. Mere presence inside a <script> or inside an on* value is
+NOT a breakout (audit F4/R5: a correctly json_script-escaped page and a correctly
+&quot;-escaped handler both reproduced a High xss FACT under the old rule); those
+are non-firing, NON-CONCLUSIVE advisories now. And in every case the claim is
+"reached a live/executable POSITION", never "executed".
 """
 
 from __future__ import annotations
+
+import json
 
 import html as _html
 
@@ -77,16 +83,88 @@ def test_marker_creating_a_tag_fires() -> None:
     assert sig.fired and sig.observed["context"] == "html_tag"
 
 
-def test_marker_inside_script_fires() -> None:
-    body = f"<html><script>var x = '{_MARKER}';</script></html>"
+def test_marker_at_code_position_in_script_fires() -> None:
+    # the payload broke OUT of the string literal: `''-MARKER-''` leaves the marker
+    # at CODE position, so this is a proven breakout.
+    body = f"<html><script>var x = ''-{_MARKER}-'';</script></html>"
     sig = reflection_context_oracle(_MARKER, body)
     assert sig.fired and sig.observed["context"] == "script"
 
 
-def test_marker_in_event_handler_fires() -> None:
-    body = f'<div onclick="doThing(\'{_MARKER}\')">x</div>'
+def test_marker_inside_a_js_string_literal_does_not_fire() -> None:
+    # AUDIT F4. The old rule fired on mere PRESENCE inside <script> and called it an
+    # "executable JS context" — so a CORRECTLY escaped page minted a High xss FACT.
+    # A marker confined to a string literal is DATA; no breakout is proven.
+    body = f"<html><script>var x = '{_MARKER}';</script></html>"
+    sig = reflection_context_oracle(_MARKER, body)
+    assert not sig.fired
+    assert sig.observed["context"] == "script_string_literal"
+    # ... and it is NOT a clean bill of health either: an escaping bug this parse
+    # cannot see could still make it executable, so the advisory is NON-conclusive.
+    assert not sig.conclusive
+
+
+def test_json_script_escaped_page_does_not_fire() -> None:
+    # AUDIT F4, the measured repro: Django json_script / Rails json_escape —
+    # JSON-encode then \uXXXX-escape < > & / so the value cannot terminate the
+    # element or the literal. This page is SAFE and must never mint an xss FACT.
+    raw = f"\"'><x{_MARKER}>"
+    lit = (json.dumps(raw).replace("<", "\\u003c").replace(">", "\\u003e")
+           .replace("&", "\\u0026").replace("/", "\\/"))
+    body = ("<html><body><script>window.__BOOTSTRAP__ = "
+            f"{{\"query\": {lit}, \"results\": []}};</script></body></html>")
+    sig = reflection_context_oracle(_MARKER, body)
+    assert not sig.fired, sig.evidence
+
+
+def test_marker_in_a_non_executable_script_type_does_not_fire() -> None:
+    # <script type="application/json"> is a DATA block the browser never runs.
+    body = f'<script type="application/json">{{"q": {_MARKER}}}</script>'
+    sig = reflection_context_oracle(_MARKER, body)
+    assert not sig.fired and sig.observed["context"] == "script_data_block"
+
+
+def test_marker_owning_a_whole_event_handler_fires() -> None:
+    # the attacker supplied the ENTIRE handler body — a proven breakout.
+    body = f"<div><svg onload={_MARKER}></div>"
     sig = reflection_context_oracle(_MARKER, body)
     assert sig.fired and "js_attribute" in sig.observed["context"]
+
+
+def test_marker_embedded_in_a_page_composed_handler_does_not_fire() -> None:
+    # AUDIT R5. HTML attribute values are entity-decoded unconditionally, so a
+    # CORRECTLY &quot;-escaped handler argument arrives as a marker inside an on*
+    # value. The page composed that handler; the attacker does not own the value.
+    body = f'<div onclick="doThing(&quot;{_MARKER}&quot;)">x</div>'
+    sig = reflection_context_oracle(_MARKER, body)
+    assert not sig.fired
+    assert sig.observed["context"] == "js_attribute_data"
+    assert not sig.conclusive
+
+
+def test_marker_in_a_raw_text_container_does_not_fire() -> None:
+    # <noscript>/<textarea>/... content is not parsed as live markup by a browser,
+    # though HTMLParser happily reports the inner start tag.
+    body = f"<html><body><noscript>\"'><x{_MARKER}></noscript></body></html>"
+    sig = reflection_context_oracle(_MARKER, body)
+    assert not sig.fired and sig.observed["context"] == "inert_text_container"
+
+
+def test_no_reflection_context_evidence_claims_execution() -> None:
+    # The claim this oracle is allowed to make is "reached a live/executable
+    # POSITION", never "executed". Guard the certificate wording.
+    bodies = [
+        f"<html>x\"'><x{_MARKER}></html>",                     # html_tag
+        f"<div><svg onload={_MARKER}></div>",                  # js_attribute
+        f"<script>var x = ''-{_MARKER}-'';</script>",          # script code position
+        f"<script>var x = '{_MARKER}';</script>",              # advisory
+        f"<p>{_MARKER}</p>",                                   # inert
+    ]
+    for body in bodies:
+        sig = reflection_context_oracle(_MARKER, body)
+        low = sig.evidence.lower()
+        assert "executed" not in low and "execution proven" not in low, sig.evidence
+        assert "proven execution" not in low, sig.evidence
 
 
 def test_html_encoded_marker_does_not_fire() -> None:
