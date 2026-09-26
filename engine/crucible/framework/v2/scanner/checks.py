@@ -218,25 +218,40 @@ class DifferentialCheck:
 
 @dataclass(frozen=True)
 class BooleanInferenceCheck:
-    """Boolean-blind via a sequential probability ratio test (SPRT) behind a HARD
-    DETERMINISM GATE.
+    """Boolean-blind via a sequential probability ratio test (SPRT) whose per-round signal is a
+    TRUTH-VALUE ATTRIBUTION test.
 
-    Boolean-blind inference is only sound on a page that is DETERMINISTIC to
-    identical input. Before any inference the check runs a BASELINE DETERMINISM
-    PRE-GATE: it sends the IDENTICAL false-clause request ``baseline_samples`` times
-    up front; if they are not all identical the page is non-deterministic and the
-    oracle refuses (LEAD) — no SPRT is run. Only a page that survives the pre-gate
-    proceeds to the SPRT, where each round also sends a byte-identical
-    ``false_a_repeat`` (the per-round hard-refute control). The collected baseline +
-    rounds are handed to the boolean-inference oracle, which recomputes the same
-    decision deterministically (a confirm requires the pre-gate to have passed). A
-    legitimately noisy-but-vulnerable page is refused to a LEAD — a recall cost, the
-    safe direction (a false LEAD, never a false FACT)."""
+    A boolean FACT here means one thing: the response is a deterministic FUNCTION OF THE
+    INJECTED BOOLEAN'S TRUTH VALUE. "The true request and the false request came back
+    different" is NOT that claim — on a page whose body is drawn independently of the input
+    (rotating banner, A/B bucket, two replicas behind a balancer) two draws differ by
+    coincidence, and a determinism SCREEN does not remove it: a window that looks deterministic
+    still contains the coincidence. So each round sends ``K_T`` DISTINCT, syntactically VARIED
+    always-TRUE clauses and ``K_F`` distinct always-FALSE clauses (``true_clauses`` /
+    ``false_clauses``), each twice byte-identically, and the round signals only when every TRUE
+    response agrees with every other TRUE response, every FALSE with every FALSE, and the two
+    clusters are disjoint. A page whose body is an INDEPENDENT DRAW per request must land ALL
+    ``2*K_T`` true-side draws on one variant and ALL ``2*K_F`` false-side draws on another —
+    ``<= 2 * 2**-(2*K_T+2*K_F)`` per round (``3.1e-5`` at the shipped ``K_T = K_F = 4``, ~3300x
+    below the SPRT's ``p0``). See the oracle's docstring for the irreducible residual (a page
+    that is a deterministic but ARBITRARY function of the URL, e.g. a per-URL CDN cache, where
+    the bound degrades to ``2 * 2**-(K_T+K_F)`` = ``7.8e-3`` and ``K`` is the only lever).
+
+    A cheap BASELINE PRE-GATE runs first (``baseline_samples`` identical sends of
+    ``false_clauses[0]``; not-all-identical ⇒ the oracle refuses without any inference) and each
+    round's byte-identical repeats are a HARD REFUTE — but those are pre-filters, not the
+    soundness core.
+
+    A legitimately noisy-but-vulnerable page, and a vulnerable page whose varied true clauses do
+    not all land on the same response, are refused to a LEAD — a documented recall cost, the safe
+    direction (a false LEAD, never a false FACT)."""
 
     id: str
     bug_class: str
-    true_clause: str
-    false_clause: str
+    # K_T distinct, syntactically-VARIED clauses that are all logically TRUE, and K_F that are all
+    # logically FALSE. >= 2 each is the oracle's hard floor; the drivers ship 4.
+    true_clauses: tuple[str, ...]
+    false_clauses: tuple[str, ...]
     n_max: int = 24
     alpha: float = 0.05
     beta: float = 0.05
@@ -247,50 +262,70 @@ class BooleanInferenceCheck:
     def probe(self, template: RequestTemplate, point: InsertionPoint, send: Send) -> FindingContext | None:
         from ..verify.oracles import differential_response_oracle  # local: avoid import cycle at module load
 
-        # --- DETERMINISM PRE-GATE: send the IDENTICAL false-clause request up front and require every
+        trues = tuple(self.true_clauses)
+        falses = tuple(self.false_clauses)
+        if len(set(trues)) < 2 or len(set(falses)) < 2 or set(trues) & set(falses):
+            # FAIL-CLOSED: fewer than two DISTINCT clauses per truth value cannot attribute a response to a
+            # truth VALUE (one clause is one draw, and a duplicate is not an independent draw — on a page
+            # that caches per URL a duplicate returns the identical cached body and would fake agreement).
+            # A clause appearing on BOTH sides is degenerate too. Emit no rounds — the oracle can only refuse.
+            return FindingContext.from_boolean_probes(
+                true_rounds=[], false_rounds=[], true_repeat_rounds=[], false_repeat_rounds=[],
+                bug_class=self.bug_class)
+
+        def _differs(a: dict, b: dict) -> bool:
+            return differential_response_oracle(a, b).fired
+
+        # --- DETERMINISM PRE-GATE: send ONE identical false-clause request up front and require every
         #     response identical. A non-deterministic page (coarse OR high-entropy) fails this and is
         #     refused BEFORE any inference — short-circuit on the first divergence to bound the traffic.
         baseline: list[dict] = []
         for _ in range(max(2, self.baseline_samples)):
-            s = _as_dict(send(template.render(point, self.false_clause)))
+            s = _as_dict(send(template.render(point, falses[0])))
             baseline.append(s)
-            if differential_response_oracle(baseline[0], s).fired:
+            if _differs(baseline[0], s):
                 break  # proven non-deterministic — the oracle will refuse over these samples
-        if len(baseline) >= 2 and differential_response_oracle(baseline[0], baseline[-1]).fired:
+        if len(baseline) >= 2 and _differs(baseline[0], baseline[-1]):
             # non-deterministic: hand the oracle the baseline (no rounds) so it authoritatively refuses.
             return FindingContext.from_boolean_probes(
-                [], [], [], [], bug_class=self.bug_class, false_baseline_samples=baseline)
+                true_rounds=[], false_rounds=[], true_repeat_rounds=[], false_repeat_rounds=[],
+                bug_class=self.bug_class, false_baseline_samples=baseline)
 
         upper = math.log((1.0 - self.beta) / self.alpha)
         lower = math.log(self.beta / (1.0 - self.alpha))
         llr = 0.0
-        trues: list[dict] = []
-        false_as: list[dict] = []
-        false_bs: list[dict] = []
-        false_a_repeats: list[dict] = []
+        true_rounds: list[list[dict]] = []
+        false_rounds: list[list[dict]] = []
+        true_repeat_rounds: list[list[dict]] = []
+        false_repeat_rounds: list[list[dict]] = []
         for _ in range(self.n_max):
-            t = _as_dict(send(template.render(point, self.true_clause)))
-            a = _as_dict(send(template.render(point, self.false_clause)))
-            b = _as_dict(send(template.render(point, self.false_clause)))
-            a2 = _as_dict(send(template.render(point, self.false_clause)))  # identical repeat of false_a
-            trues.append(t)
-            false_as.append(a)
-            false_bs.append(b)
-            false_a_repeats.append(a2)
-            across = differential_response_oracle(a, t).fired
-            within_same = not differential_response_oracle(a, b).fired
-            # PER-ROUND HARD REFUTE: an identical repeat of the false request that differs proves the
-            # page is non-deterministic → stop and let the oracle refuse the whole finding.
-            if differential_response_oracle(a, a2).fired:
+            t = [_as_dict(send(template.render(point, c))) for c in trues]
+            t_rep = [_as_dict(send(template.render(point, c))) for c in trues]
+            f = [_as_dict(send(template.render(point, c))) for c in falses]
+            f_rep = [_as_dict(send(template.render(point, c))) for c in falses]
+            true_rounds.append(t)
+            true_repeat_rounds.append(t_rep)
+            false_rounds.append(f)
+            false_repeat_rounds.append(f_rep)
+            # PER-ROUND HARD REFUTE: a byte-identical clause repeat that differs proves the page is
+            # non-deterministic → stop and let the oracle refuse the whole finding.
+            if any(_differs(a, b) for a, b in zip(t, t_rep)) or any(_differs(a, b) for a, b in zip(f, f_rep)):
                 break
-            signal = across and within_same
+            # TRUTH-VALUE ATTRIBUTION: one TRUE cluster, one FALSE cluster, disjoint. (The oracle
+            # recomputes this authoritatively; this local copy only drives the early SPRT stop.)
+            t_all, f_all = t + t_rep, f + f_rep
+            within = all(not _differs(x, y) for c in (t_all, f_all)
+                         for i, x in enumerate(c) for y in c[i + 1:])
+            across = all(_differs(x, y) for x in t_all for y in f_all)
+            signal = within and across
             llr += math.log(self.p1 / self.p0) if signal else math.log((1.0 - self.p1) / (1.0 - self.p0))
             if llr >= upper or llr <= lower:
                 break  # SPRT reached a decision — stop early
 
         return FindingContext.from_boolean_probes(
-            trues, false_as, false_bs, false_a_repeats, bug_class=self.bug_class,
-            false_baseline_samples=baseline,
+            true_rounds=true_rounds, false_rounds=false_rounds,
+            true_repeat_rounds=true_repeat_rounds, false_repeat_rounds=false_repeat_rounds,
+            bug_class=self.bug_class, false_baseline_samples=baseline,
         )
 
 

@@ -685,6 +685,17 @@ def _sprt_decision(
     return decided, llr, n_used, n_signal, upper, lower
 
 
+def _boolean_round_arm(r: Mapping[str, Any], key: str) -> list[Any]:
+    """One truth-side arm of a boolean probe round as a list (``[]`` when absent/malformed).
+
+    The round shape is ``{"trues": [...], "falses": [...], "true_repeats": [...],
+    "false_repeats": [...]}`` — ``trues``/``falses`` are the responses to K DISTINCT,
+    syntactically-VARIED clauses of one fixed truth value; ``*_repeats`` are their
+    index-aligned BYTE-IDENTICAL repeats."""
+    v = r.get(key)
+    return list(v) if isinstance(v, (list, tuple)) else []
+
+
 def boolean_inference_oracle(
     probe_rounds: Any,
     *,
@@ -695,44 +706,96 @@ def boolean_inference_oracle(
     discriminator: Mapping[str, Any] | str | None = None,
     false_baseline_samples: Any = None,
     min_baseline_samples: int = 6,
+    min_true_clauses: int = 2,
+    min_false_clauses: int = 2,
 ) -> OracleSignal:
-    """Confirm a boolean-blind vulnerability by a Wald SEQUENTIAL PROBABILITY
-    RATIO TEST over repeated probes — behind a HARD DETERMINISM GATE.
+    """Confirm a boolean-blind vulnerability by a Wald SEQUENTIAL PROBABILITY RATIO TEST
+    over repeated probes whose per-round signal is a TRUTH-VALUE ATTRIBUTION test.
 
-    Boolean-blind inference is *only sound on a page that is DETERMINISTIC to
-    identical input*: the whole method reads the true/false clause off the
-    RESPONSE, so a page that returns different bytes for the SAME request carries
-    no readable boolean channel and MUST be refused. Non-determinism is therefore a
-    HARD DISQUALIFIER here, not one more probabilistic factor — a single
-    identical-repeat "stability" sample is itself a 2-sample coincidence that a
-    coarse (low-cardinality) dynamic page passes ~1/K of the time. This oracle uses
-    two determinism gates instead:
+    THE GUARANTEE (and the only one). A ``boolean_sqli`` FACT requires the response to be a
+    deterministic FUNCTION OF THE INJECTED BOOLEAN'S TRUTH VALUE. It is NOT enough that the
+    "true" request and the "false" request came back different: on a page whose body is drawn
+    INDEPENDENTLY of the input (a rotating banner, an A/B bucket, a load-balanced pair of
+    replicas) two draws differ by coincidence, and no amount of determinism *screening* removes
+    that — a sample window that LOOKS deterministic still produces the coincidence inside it.
+    This oracle therefore does not screen for determinism and then trust a single true/false
+    pair; it demands that the response PARTITION BY TRUTH VALUE:
 
-      1. BASELINE DETERMINISM PRE-GATE — ``false_baseline_samples`` is a run of
-         ``>= min_baseline_samples`` responses to the IDENTICAL false-clause
-         request, collected up front. If they are not ALL identical (any
-         differential fires among them) the page is proven non-deterministic →
-         REFUSE (LEAD). A confirm REQUIRES this gate to have passed (fail-closed:
-         no / too-few baseline samples ⇒ cannot mint a FACT).
-      2. PER-ROUND HARD REFUTE — each round still carries ``false_a_repeat`` (a
-         byte-identical repeat of ``false_a``); if ANY round's repeat differs from
-         ``false_a`` the whole finding HARD-REFUTES (not merely signal 0 for that
-         round) — the page is non-deterministic.
+      * Each round carries ``K_T >= min_true_clauses`` responses to DISTINCT, syntactically
+        VARIED clauses that are all logically TRUE (``trues``), and ``K_F >=
+        min_false_clauses`` responses to DISTINCT, varied clauses that are all logically
+        FALSE (``falses``) — plus an index-aligned BYTE-IDENTICAL repeat of each
+        (``true_repeats`` / ``false_repeats``).
+      * The round signals 1 only when ALL THREE hold:
+          1. DETERMINISM       — every clause, sent twice byte-identically, does not differ
+                                 (enforced globally as a HARD REFUTE, below).
+          2. WITHIN-TRUTH      — every TRUE-side response agrees with every other TRUE-side
+             AGREEMENT          response (ONE true cluster), and likewise for the FALSE side
+                                 (``differential_response_oracle`` non-fire inside a cluster).
+          3. ACROSS-TRUTH      — every TRUE-side response DIFFERS from every FALSE-side
+             SEPARATION         response (the two clusters are disjoint).
 
-    On a deterministic page both gates pass and the SPRT runs its usual per-round
-    Bernoulli signal ``(TRUE differs from FALSE) AND (the two different-marker
-    FALSE responses agree)``, accumulating the log-likelihood ratio that the signal
-    rate is ``p1`` (vulnerable) vs ``p0`` (noise): LLR >= log((1-beta)/alpha)
-    confirms; LLR <= log(beta/(1-alpha)) refutes; neither is inconclusive.
+    WHY AN INPUT-INDEPENDENT PAGE CANNOT PASS (the bound, and its exact scope). Say each
+    response is an INDEPENDENT draw from an arbitrary variant distribution ``{p_v}`` — a
+    rotating banner, an A/B bucket, two replicas behind a balancer. Then the ``2*K_T`` true-side
+    and ``2*K_F`` false-side responses are ``2*(K_T+K_F)`` independent draws, and a clean
+    2-cluster split by truth value needs every true-side draw to be the SAME variant ``a``,
+    every false-side draw the same variant ``b``, and ``a != b``:
 
-    A legitimately noisy-but-vulnerable page (per-request __VIEWSTATE / CSRF token /
-    rotating banner) is REFUSED to a LEAD — a documented RECALL cost, and the safe
-    direction (a false LEAD, never a false FACT). ``probe_rounds`` is
-    ``[{"true": r, "false_a": r, "false_b": r, "false_a_repeat": r}, ...]`` and
-    ``false_baseline_samples`` is ``[r, r, ...]`` (identical false-clause repeats).
+        s  =  SUM over a != b of  p_a**(2*K_T) * p_b**(2*K_F)   <=  2 * 2**-(2*K_T + 2*K_F)
+
+    (maximised by a UNIFORM 2-variant page). At the ``K_T = K_F = 4`` the drivers ship that is
+    ``s <= 2 * 2**-16 = 3.1e-5`` — ~3300x BELOW the SPRT's null rate ``p0 = 0.1``; at the
+    oracle's hard floor (``K_T = K_F = 2``) it is ``s <= 2 * 2**-8 = 7.8e-3``, still ~13x below
+    ``p0``. With ``alpha = beta = 0.05, p1 = 0.9, p0 = 0.1`` the confirm boundary is two NET
+    signalling rounds, so a gambler's-ruin bound puts the per-FINDING false-confirm probability
+    at ``<= s**2 / (1 - 2s)`` — ``~9.3e-10`` at ``K_T = K_F = 4`` — and that bound holds with NO
+    determinism pre-gate at all. The skew that defeated a 16-sample determinism pre-gate (a
+    dominant variant ``p ~ 0.9`` passes ``0.9**16 ~ 19%`` of windows) makes this test STRICTER,
+    not weaker: ``s`` collapses to ``2 * 0.9**8 * 0.1**8 ~ 8.6e-9``.
+
+    THE IRREDUCIBLE RESIDUAL — a page that is a DETERMINISTIC but ARBITRARY function of the
+    request (a CDN caching per exact URL over an origin that picked a variant at fill time, a
+    load balancer pinning each URL to a replica). There the byte-identical repeats are cache
+    hits, not independent draws, and re-running the SAME clauses in a later round returns the
+    SAME bytes — so neither the repeats nor the extra SPRT rounds are new evidence, and the
+    per-FINDING bound degrades to the single-draw one:
+
+        SUM over a != b of  p_a**K_T * p_b**K_F   <=  2 * 2**-(K_T + K_F)
+
+    = ``7.8e-3`` at ``K_T = K_F = 4`` (against ``~0.5`` for a single-clause-per-truth-value
+    design, which is what this test replaced). This is NOT a gap that a cleverer response-only
+    test closes: such a page IS a deterministic function of the request, which is precisely what
+    boolean-blind inference reads, so no observation of the response can separate "the sink
+    evaluates the injected boolean" from "this arbitrary map happens to split these ``K_T + K_F``
+    URLs by truth value". RAISING ``K_T``/``K_F`` is the only lever, and it is exposed as one.
+
+    THE TWO DETERMINISM MECHANISMS ARE A CHEAP PRE-FILTER, NOT THE SOUNDNESS CORE:
+      1. BASELINE PRE-GATE — ``false_baseline_samples`` is a run of ``>= min_baseline_samples``
+         responses to ONE IDENTICAL false-clause request collected up front; not-all-identical
+         proves non-determinism → REFUSE. A confirm still REQUIRES it to have passed
+         (fail-closed), but it is no longer what makes the oracle sound.
+      2. PER-ROUND HARD REFUTE — if ANY clause's byte-identical repeat differs from the clause,
+         the WHOLE finding hard-refutes (the page is provably non-deterministic).
+
+    CALLER OBLIGATION (the oracle sees responses, not requests). The ``K_T``/``K_F`` clauses must
+    genuinely be DISTINCT requests of a FIXED truth value; the oracle cannot check that from the
+    bytes. The drivers enforce it where the clauses live (``BooleanInferenceCheck`` and
+    ``DifferentialHttpAdapter`` both refuse a duplicate or a cross-side clause at the call site) —
+    duplicates are not independent draws, and on a per-URL-caching page they would return the
+    identical cached body and fake within-truth agreement.
+
+    FAIL-CLOSED ON SHAPE. A round that does not carry the multi-clause truth-value arms — an
+    OLD single-clause retained context ``{"true", "false_a", "false_b", "false_a_repeat"}``
+    included — can NEVER be a positive signal: it yields 0 and the SPRT refutes. Old-shape
+    evidence can only refute, never mint.
+
+    RECALL COST (honest, and the safe direction). A legitimately noisy-but-vulnerable page
+    (per-request ``__VIEWSTATE`` / CSRF token / rotating banner), and a vulnerable page whose
+    varied true clauses do not all land on the same response, are REFUSED to a LEAD. That is a
+    documented false-LEAD, never a false FACT.
     """
-    rounds = [r for r in (probe_rounds or [])
-              if isinstance(r, Mapping) and "true" in r and "false_a" in r and "false_b" in r]
+    rounds = [r for r in (probe_rounds or []) if isinstance(r, Mapping)]
 
     def _nondeterministic(reason: str) -> OracleSignal:
         # A non-deterministic page cannot support boolean inference → LEAD, never a FACT and never a
@@ -746,34 +809,73 @@ def boolean_inference_oracle(
             observed={"decision": "refute", "nondeterministic": True, "reason": reason},
         )
 
-    # --- MECHANISM 1: BASELINE DETERMINISM PRE-GATE -----------------------------------------------
+    # ``expect="same"`` inverts differential_response_oracle, so the exact-match speed path below is
+    # only valid for the plain (default) "differ" reading the boolean channel uses.
+    _plain_differ_expect = not (isinstance(discriminator, Mapping)
+                                and discriminator.get("expect", "differ") != "differ")
+
+    def _same(a: Any, b: Any) -> bool:
+        """Do two observed responses AGREE? ``differential_response_oracle`` is the authority; an
+        EXACT match short-circuits it (identical bytes + identical status make every dimension
+        non-differing, so the oracle provably cannot fire) — a pure speed path, never a
+        semantic one."""
+        if _plain_differ_expect and a == b:
+            return True
+        return not differential_response_oracle(a, b, discriminator).fired
+
+    # --- PRE-FILTER 1: BASELINE DETERMINISM PRE-GATE ----------------------------------------------
     baseline = list(false_baseline_samples) if false_baseline_samples is not None else None
     baseline_deterministic = False
     if baseline is not None and len(baseline) >= 2:
         ref = baseline[0]
-        if any(differential_response_oracle(ref, s, discriminator).fired for s in baseline[1:]):
+        if any(not _same(ref, s) for s in baseline[1:]):
             return _nondeterministic(
                 f"{len(baseline)} identical-request baseline samples are not all identical")
         baseline_deterministic = len(baseline) >= min_baseline_samples
 
-    # --- MECHANISM 2: PER-ROUND HARD REFUTE on any observed non-determinism ------------------------
+    # --- PRE-FILTER 2: HARD REFUTE on any observed non-determinism (a byte-identical repeat that
+    #     came back different). Covers every clause of the new shape AND the legacy false_a pair. ---
     for r in rounds:
-        rep = r.get("false_a_repeat")
-        if rep is not None and differential_response_oracle(r["false_a"], rep, discriminator).fired:
-            return _nondeterministic(
-                "an identical false-clause repeat returned a different response in a probe round")
+        pairs = list(zip(_boolean_round_arm(r, "trues"), _boolean_round_arm(r, "true_repeats")))
+        pairs += list(zip(_boolean_round_arm(r, "falses"), _boolean_round_arm(r, "false_repeats")))
+        legacy_rep = r.get("false_a_repeat")
+        if legacy_rep is not None and "false_a" in r:
+            pairs.append((r["false_a"], legacy_rep))
+        for clause_resp, repeat_resp in pairs:
+            if not _same(clause_resp, repeat_resp):
+                return _nondeterministic(
+                    "a byte-identical clause repeat returned a different response in a probe round")
+
+    def _truth_value_attributed(r: Mapping[str, Any]) -> bool:
+        """THE SOUNDNESS CORE — is this round's response a FUNCTION of the injected truth value?
+        One TRUE cluster, one FALSE cluster, and the two disjoint. Short-circuits."""
+        trues = _boolean_round_arm(r, "trues")
+        falses = _boolean_round_arm(r, "falses")
+        t_reps = _boolean_round_arm(r, "true_repeats")
+        f_reps = _boolean_round_arm(r, "false_repeats")
+        # FAIL-CLOSED on shape: too few DISTINCT clauses per truth value, or a missing repeat, and the
+        # round cannot attribute anything → it is not a positive signal (an old-shape round lands here).
+        if (len(trues) < min_true_clauses or len(falses) < min_false_clauses
+                or len(t_reps) != len(trues) or len(f_reps) != len(falses)):
+            return False
+        t_cluster = trues + t_reps
+        f_cluster = falses + f_reps
+        # (2) WITHIN-TRUTH AGREEMENT — all of one truth value land on ONE response.
+        for cluster in (t_cluster, f_cluster):
+            for i in range(len(cluster)):
+                for j in range(i + 1, len(cluster)):
+                    if not _same(cluster[i], cluster[j]):
+                        return False
+        # (3) ACROSS-TRUTH SEPARATION — every TRUE response differs from every FALSE response.
+        for t in t_cluster:
+            for f in f_cluster:
+                if _same(t, f):
+                    return False
+        return True
 
     def _round_signals():
         for r in rounds:
-            # FAIL-CLOSED: no same-request stability sample ⇒ the round cannot be a POSITIVE signal.
-            if "false_a_repeat" not in r:
-                yield False
-                continue
-            across = differential_response_oracle(r["false_a"], r["true"], discriminator).fired
-            within_same = not differential_response_oracle(r["false_a"], r["false_b"], discriminator).fired
-            # stability is already enforced by the mechanism-2 hard refute above (every surviving
-            # round has an identical repeat), so it need not re-enter the per-round signal here.
-            yield bool(across and within_same)
+            yield _truth_value_attributed(r)
 
     decided, llr, n_used, signals, upper, lower = _sprt_decision(
         _round_signals(), alpha=alpha, beta=beta, p1=p1, p0=p0)
@@ -783,12 +885,17 @@ def boolean_inference_oracle(
         "upper": upper, "lower": lower, "decision": decided or "inconclusive",
         "baseline_samples": (len(baseline) if baseline is not None else 0),
         "baseline_deterministic": baseline_deterministic,
+        "min_true_clauses": min_true_clauses, "min_false_clauses": min_false_clauses,
+        # the ACTUAL clause counts the judged rounds carried (the analytic bound is a function of THESE,
+        # not of the floor) — recorded so an auditor can recompute the bound from the retained evidence.
+        "true_clauses_per_round": sorted({len(_boolean_round_arm(r, "trues")) for r in rounds}),
+        "false_clauses_per_round": sorted({len(_boolean_round_arm(r, "falses")) for r in rounds}),
     }
     if decided == "confirm":
-        # FAIL-CLOSED determinism gate: a FACT requires the baseline pre-gate to have PASSED
-        # (>= min_baseline_samples identical up-front samples). Without it a coarse dynamic page's
-        # coincidental per-round agreement could still reach the SPRT confirm boundary, so a confirm
-        # without a determinism proof is DOWNGRADED to inconclusive (a LEAD, never a FACT).
+        # FAIL-CLOSED determinism pre-filter: a FACT also requires the baseline pre-gate to have PASSED
+        # (>= min_baseline_samples identical up-front samples). Belt-and-braces on top of the
+        # truth-value attribution that carries the soundness — a confirm without a determinism proof is
+        # DOWNGRADED to inconclusive (a LEAD, never a FACT).
         if not baseline_deterministic:
             observed["decision"] = "inconclusive"
             observed["confirm_without_baseline_pregate"] = True
@@ -806,9 +913,12 @@ def boolean_inference_oracle(
         return OracleSignal(
             kind=OracleKind.BOOLEAN_INFERENCE, fired=True, confidence=confidence,
             evidence=(
-                f"SPRT confirmed boolean inference in {n_used} round(s): "
-                f"{signals} separable (true!=false, false pair agree) behind a passed determinism "
-                f"pre-gate ({observed['baseline_samples']} identical baseline samples), "
+                f"SPRT confirmed boolean inference in {n_used} round(s): {signals} round(s) in which the "
+                f"response was a FUNCTION of the injected truth value "
+                f"(K_T={observed['true_clauses_per_round']} distinct TRUE clauses all agree, "
+                f"K_F={observed['false_clauses_per_round']} distinct FALSE clauses all agree, each also "
+                f"stable to a byte-identical repeat, and the two clusters disjoint), behind a passed "
+                f"determinism pre-gate ({observed['baseline_samples']} identical baseline samples), "
                 f"LLR={llr:.2f} >= {upper:.2f}"
             ),
             observed=observed,

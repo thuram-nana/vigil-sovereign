@@ -747,8 +747,9 @@ def test_both_live_adapters_refuse_a_param_nonce_collision_at_construction(monke
     with pytest.raises(ValueError, match="MUST differ"):
         DifferentialHttpAdapter(
             executor=None, base_url="http://127.0.0.1/", endpoint_path="/search", param="rc",
-            nonce_param="rc", base_value="1", true_payload_template="1 AND 1=1 -- {challenge}",
-            false_payload_template="1 AND 1=2 -- {challenge}")
+            nonce_param="rc", base_value="1",
+            true_payload_templates=("1 AND 1=1 -- {challenge}", "1 AND 9=9 -- {challenge}"),
+            false_payload_templates=("1 AND 1=2 -- {challenge}", "1 AND 9=8 -- {challenge}"))
     # ...and the legitimate, non-colliding construction is untouched.
     ok = LiveHttpAdapter(executor=None, base_url="http://127.0.0.1/", endpoint_path="/search", param="q",
                          payload="x' OR '1'='1", nonce_param="rc",

@@ -86,14 +86,27 @@ _TIMING_PARAMS = ("id", "q", "query", "search", "name", "user", "uid", "item", "
 
 # The RUNNER-crafted probe payloads. The RUNNER owns these (never a Strix/LLM value), so a FACT rests on
 # VIGIL's OWN injected expression/clause. SSTI: distinctive per-probe products go in ``{n1}``/``{n2}`` (filled
-# per probe with a fresh random pair). Boolean: (true_clause, false_clause) pairs — a true clause that breaks
+# per probe with a fresh random pair). Boolean: clause FAMILIES (see below) — a true clause that breaks
 # out and evaluates TRUE vs a false one that evaluates FALSE, over the same insertion point. Timing:
 # (benign, low_sleep, high_sleep, low_ms, high_ms) — a benign value vs two SLEEP doses for the dose-response.
 _SSTI_EXPR_TEMPLATES = ("{{{{{n1}*{n2}}}}}", "${{{n1}*{n2}}}", "#{{{n1}*{n2}}}", "{{{n1}*{n2}}}")
-_BOOLEAN_CLAUSE_PAIRS = (
-    ("x' OR '1'='1", "x' OR '1'='2"),        # single-quote string-literal breakout
-    ("1 OR 1=1", "1 OR 1=2"),                # numeric context
-    ('x" OR "1"="1', 'x" OR "1"="2'),        # double-quote string-literal breakout
+# TRUTH-VALUE ATTRIBUTION clause FAMILIES. Each family is (K_T always-TRUE clauses, K_F always-FALSE clauses)
+# in ONE injection context: syntactically VARIED (different literals ⇒ DISTINCT requests) but with a FIXED truth
+# value, so a page whose body is drawn independently of the input cannot make the responses partition BY TRUTH
+# VALUE. The variation stays inside one breakout shape so that if one clause parses on the target they all do
+# (a family that mixes breakouts would cost recall, not soundness), and each TRUE clause is LENGTH-MATCHED to
+# its FALSE counterpart (they differ in one character) so an endpoint that merely ECHOES the parameter cannot
+# produce a length signal that correlates with the truth value — it refutes (a recall cost), never separates.
+_BOOLEAN_CLAUSE_FAMILIES = (
+    # single-quote string-literal breakout
+    (("x' OR '1'='1", "x' OR '7'='7", "x' OR 'ab'='ab", "x' OR 'q9'='q9"),
+     ("x' OR '1'='2", "x' OR '7'='8", "x' OR 'ab'='ac", "x' OR 'q9'='q8")),
+    # numeric context
+    (("1 OR 1=1", "1 OR 7=7", "1 OR 23=23", "1 OR 58=58"),
+     ("1 OR 1=2", "1 OR 7=8", "1 OR 23=24", "1 OR 58=59")),
+    # double-quote string-literal breakout
+    (('x" OR "1"="1', 'x" OR "7"="7', 'x" OR "ab"="ab', 'x" OR "q9"="q9'),
+     ('x" OR "1"="2', 'x" OR "7"="8', 'x" OR "ab"="ac', 'x" OR "q9"="q8')),
 )
 # doses in SECONDS for the SLEEP payloads + the injected milliseconds the timing oracle expects.
 _TIMING_LOW_S, _TIMING_HIGH_S = 0.3, 0.6
@@ -565,16 +578,18 @@ def ssti_redrive(url: str, *, slug: str, engagement_slug: str, signers: "list[tu
 def boolean_redrive(url: str, *, slug: str, engagement_slug: str, signers: "list[tuple[str, str]]",
                     param: "str | None" = None, timeout: float = 8.0, n_max: int = 14) -> "RuntimeRedriveResult":
     """Re-drive ``url`` for BOOLEAN-BLIND injection and mint a signed FACT ONLY when the deterministic
-    ``boolean_inference_oracle`` clears a HARD DETERMINISM GATE and then reaches its SPRT confirm boundary
-    over N runner-crafted true/false probe rounds. Reuses the reviewed ``BooleanInferenceCheck`` discipline
-    (an up-front baseline of identical false-clause sends + a per-round identical-repeat hard-refute) over
-    VIGIL's OWN gated send: boolean inference is only sound on a page DETERMINISTIC to identical input, so a
-    confirm requires the baseline pre-gate to have PASSED.
+    ``boolean_inference_oracle`` reaches its SPRT confirm boundary over N runner-crafted TRUTH-VALUE
+    ATTRIBUTION rounds. Reuses the reviewed ``BooleanInferenceCheck`` discipline over VIGIL's OWN gated send:
+    each round sends 4 DISTINCT always-TRUE clauses and 4 DISTINCT always-FALSE clauses (one
+    ``_BOOLEAN_CLAUSE_FAMILIES`` entry), each twice byte-identically, and signals only when the response is a
+    FUNCTION of the injected boolean's TRUTH VALUE — one TRUE cluster, one FALSE cluster, disjoint.
 
-    FP boundary (all → LEAD): an endpoint whose response varies with ANY input — coarse (low-cardinality) OR
-    high-entropy — fails the determinism pre-gate ⇒ refused before any inference; a single flip without SPRT
-    significance ⇒ inconclusive. A legitimately noisy-but-vulnerable page is a LEAD (a recall cost, the safe
-    direction). Never raises."""
+    FP boundary (all → LEAD): an endpoint whose response varies INDEPENDENTLY of the input — coarse
+    (low-cardinality), SKEWED, or high-entropy — cannot make 8 true-side and 8 false-side draws split cleanly
+    by truth value (``<= 3.1e-5`` per round, vs the SPRT's ``p0 = 0.1``), so it refutes; a single flip without
+    SPRT significance ⇒ inconclusive. A legitimately noisy-but-vulnerable page is a LEAD (a recall cost, the
+    safe direction). The oracle docstring states the irreducible residual (a per-URL-caching endpoint). Never
+    raises."""
     from framework.v2.scanner.checks import BooleanInferenceCheck  # noqa: PLC0415
     from framework.v2.scanner.insertion import HttpRequest, InsertionKind, RequestTemplate  # noqa: PLC0415
     from framework.v2.verify.oracles import boolean_inference_oracle  # noqa: PLC0415
@@ -595,9 +610,10 @@ def boolean_redrive(url: str, *, slug: str, engagement_slug: str, signers: "list
             if point is None:
                 continue
             fired_here = False
-            for true_clause, false_clause in _BOOLEAN_CLAUSE_PAIRS:
+            for true_clauses, false_clauses in _BOOLEAN_CLAUSE_FAMILIES:
                 chk = BooleanInferenceCheck(id="boolean-redrive", bug_class="boolean_sqli",
-                                            true_clause=true_clause, false_clause=false_clause, n_max=n_max)
+                                            true_clauses=true_clauses, false_clauses=false_clauses,
+                                            n_max=n_max)
                 before, before_bodies = state["channels"], state["body_unavailable"]
                 try:
                     fc = chk.probe(tmpl, point, send)
@@ -608,8 +624,9 @@ def boolean_redrive(url: str, *, slug: str, engagement_slug: str, signers: "list
                     res.inconclusive.append((bug_class, f"{probe_url}#{point.id}"))
                     continue
                 context = fc.to_verifier_context()
-                # pass the determinism PRE-GATE baseline the check collected (identical false-clause sends):
-                # the oracle refuses to CONFIRM unless the page is first proven deterministic to identical input.
+                # The oracle recomputes the TRUTH-VALUE ATTRIBUTION decision over the retained rounds; the
+                # determinism baseline the check collected (identical false-clause sends) rides along as the
+                # cheap pre-filter a confirm additionally requires (fail-closed).
                 signal = boolean_inference_oracle(context.get("probe_rounds"),
                                                   discriminator=context.get("discriminator"),
                                                   false_baseline_samples=context.get("false_baseline_samples"))

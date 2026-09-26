@@ -82,6 +82,16 @@ def _report(check_id: str, path: str, port: int, bug_class: str, param: str = "q
 _SLEEP_RE = re.compile(r"(?:pg_)?sleep\(\s*(\d*\.?\d+)\s*\)", re.IGNORECASE)
 _ARITH_RE = re.compile(r"(\d{4,})\s*\*\s*(\d{4,})")
 _HITS = {"n": 0}
+_CMP_RE = re.compile(r"(?:OR|AND)\s+(.+?)\s*=\s*(.+?)\s*(?:--.*)?$", re.I)
+
+
+def _predicate_is_true(value: str) -> bool:
+    """A stand-in for the origin's DB EVALUATING the injected comparison — so ``/bool`` answers the clause's
+    TRUTH VALUE rather than a hard-coded payload substring. That is what lets the boolean re-drive's K
+    syntactically-VARIED always-true clauses all land on the SAME response (and the always-false ones on
+    another), which is exactly the 2-cluster split the oracle now demands."""
+    m = _CMP_RE.search(value)
+    return bool(m) and m.group(1).strip().strip("'\"") == m.group(2).strip().strip("'\"")
 
 
 def _esc(s: str) -> str:
@@ -125,8 +135,10 @@ class _App(http.server.BaseHTTPRequestHandler):
             return self._html("<html><body><p>welcome</p></body></html>")
 
         # ----- boolean-blind SQLi (name = '<value>') -----
-        if path == "/bool":                      # VULNERABLE: OR-tautology selects every row; false selects none
-            true = ("'1'='1" in value) or ("1=1" in value)
+        if path == "/bool":                      # VULNERABLE: the origin EVALUATES the injected comparison, so
+            # every syntactically-VARIED always-true clause selects every row and every always-false clause none
+            # (what makes the response a FUNCTION of the injected truth value, not of the payload string).
+            true = _predicate_is_true(value)
             return self._html("<html><body>alice bob carol dave erin frank grace heidi</body></html>"
                               if true else "<html><body>no results found for your query</body></html>")
         if path == "/bool-random":               # DECOY: a purely-dynamic page — a long per-request RANDOM token
@@ -134,9 +146,9 @@ class _App(http.server.BaseHTTPRequestHandler):
             # the differential threshold → the same-request STABILITY control trips EVERY round → SPRT refutes.
             return self._html(f"<html><body>session {secrets.token_hex(64)} — no results</body></html>")
         if path == "/bool-dynamic":              # DECOY (DETERMINISTIC always-varies, no RNG): the body LENGTH
-            # steps by a large fixed amount per request (mod-cycled so it never converges). Any 4 consecutive
-            # requests in a round have 4 distinct lengths → every control (across/within_same/stable) sees a
-            # differential → signal 0 EVERY round → the SPRT refutes DETERMINISTICALLY (0 false FACTs, always).
+            # steps by a large fixed amount per request (mod-cycled so it never converges), so a byte-identical
+            # clause repeat comes back different → the determinism hard-refute trips and the within-truth
+            # clusters never agree → 0 false FACTs, DETERMINISTICALLY.
             pad = "=" * (40 + (_HITS["n"] % 5) * 90)
             return self._html(f"<html><body>catalogue {pad} listing</body></html>")
         if path == "/bool-static":               # DECOY: identical body for ANY input → no across differential
@@ -218,12 +230,12 @@ def _corrupt_context(oc: dict) -> None:
         oc["eval_observed"] = "<html><body><p>welcome</p></body></html>"
     if "observed_sink" in oc:                    # reflected XSS: neutralise the live element
         oc["observed_sink"] = "<html><body>nothing reflected here</body></html>"
-    if "probe_rounds" in oc:                     # boolean: make every true/false pair identical (no signal)
-        for r in oc["probe_rounds"]:
+    if "probe_rounds" in oc:                     # boolean: collapse the TRUE and FALSE clusters onto one
+        for r in oc["probe_rounds"]:             # response, so the truth-value attribution can no longer split
             if isinstance(r, dict):
-                r["true"] = r["false_a"] = r["false_b"] = {"status": 200, "body": "same"}
-                if "false_a_repeat" in r:
-                    r["false_a_repeat"] = {"status": 200, "body": "same"}
+                for arm in ("trues", "falses", "true_repeats", "false_repeats"):
+                    if isinstance(r.get(arm), list):
+                        r[arm] = [{"status": 200, "body": "same"} for _ in r[arm]]
     if "treatment_latencies" in oc:              # timing: flatten the treatment to the baseline (no shift)
         oc["treatment_latencies"] = list(oc.get("baseline_latencies") or [1.0, 1.1, 1.0, 1.2, 1.1, 1.0])
         oc.pop("timing_dose", None)
