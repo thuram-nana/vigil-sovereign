@@ -49,13 +49,21 @@ BUG_CLASS_ORACLES: dict[str, tuple[OracleKind, ...]] = {
     "mass_assignment": (OracleKind.ACHIEVED_STATE,),
     "privilege_escalation": (OracleKind.ACHIEVED_STATE,),
     "open_redirect": (OracleKind.ACHIEVED_STATE,),
-    # HexStrike W2 — endpoint LIVENESS (the L7 analogue of SERVICE_REACHABILITY). A web-discovery tool
-    # (httpx/ffuf) PROPOSES a URL; VIGIL re-drives it with its OWN plain gated GET plus a known-nonexistent
-    # sibling CONTROL, and the predicate oracle fires only when the target returns a served status (2xx/3xx)
-    # AND the control returns a genuine not-found (>=400) — a soft-404/blanket-200 server suppresses the FACT.
+    # HexStrike W2 — SIBLING RESPONSE DIFFERENTIAL (historical id "endpoint_liveness"; the branch id
+    # achieved_state.endpoint_liveness is unchanged). A web-discovery tool (httpx/ffuf) PROPOSES a URL;
+    # VIGIL re-drives it with its OWN plain gated GETs plus two runner-built sibling cohorts.
+    # WHAT THE PREDICATE ACTUALLY DOES (an earlier version of this comment stated the INVERSE — that it
+    # fires when "the control returns a genuine not-found (>=400)" — which is false and was measured false:
+    # target 200 / anchor 404 does NOT fire; target 200 / anchor 200 does): the baseline is built ONLY from
+    # siblings that answered in the TARGET'S OWN status branch, the target must DIFFER from that baseline by
+    # body-hash, and NO sibling — including a minimal-edit-distance neighbour — may return the target's own
+    # body. A 4xx/5xx sibling is a DIFFERENT branch: it is discarded, never the contrast.
+    # The shipped bug-class token is deliberately NOT "endpoint_liveness": the FACT asserts a response
+    # DIFFERENTIAL across a neighbourhood of identifiers, never that an endpoint is live/real/exists, and a
+    # consumer must not be able to read liveness out of the token alone.
     # Reuses the FROZEN ACHIEVED_STATE kind (adds NO new OracleKind; _ALL_ORACLES stays 15) and no benchmark
-    # finding carries this class, so `make gate` is byte-identical. See live.web_redrive.endpoint_liveness_redrive.
-    "endpoint_liveness": (OracleKind.ACHIEVED_STATE,),
+    # finding carries this class, so `make gate` is byte-identical. See live.web_redrive.
+    "sibling_response_differential": (OracleKind.ACHIEVED_STATE,),
     "exposure": (OracleKind.ACHIEVED_STATE,),
     "sensitive_exposure": (OracleKind.ACHIEVED_STATE,),
     "security_misconfiguration": (OracleKind.ACHIEVED_STATE,),

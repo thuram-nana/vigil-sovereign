@@ -21,7 +21,7 @@ FATAL-2: framework + urllib imports are FUNCTION-LOCAL; importing this module co
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 # the web classes this wave mints as FACTs (each has a definite, exploitable-condition ACHIEVED_STATE predicate).
@@ -40,14 +40,23 @@ WEB_FACT_CLASSES = ("open_redirect", "cors", "host_header_injection", "graphql_i
 LLM_CLAIM_WEB_FACT_CLASSES = tuple(c for c in WEB_FACT_CLASSES if c != "oidc_redirect_uri")
 
 # ---------------------------------------------------------------------------
-# HexStrike W2 — endpoint response-DISTINGUISHABILITY (the L7 analogue of the TCP tcp_handshake reachability
-# FACT). Historical identifier: ``endpoint_liveness`` / ``achieved_state.endpoint_liveness``.
+# HexStrike W2 — SIBLING RESPONSE DIFFERENTIAL (the L7 analogue of the TCP tcp_handshake reachability FACT).
+# Shipped bug-class token: ``sibling_response_differential``. Evidence-branch id (an internal admission key,
+# not a shipped claim): ``achieved_state.endpoint_liveness``.
 #
-# THE NARROWED CLAIM (after three red-pen BLOCKs). This FACT does NOT claim "a live endpoint" / "a real
-# resource" / "the endpoint exists". It claims EXACTLY: **VIGIL's own gated GET of this URL served content
-# distinguishable from the server's own stable, SAME-BRANCH response to many randomized same-shape siblings
-# (i.e. it is not a soft-404 phantom of that shape).** A special-cased error page, a stub, or any
-# distinguishable-but-not-"live" response is a TRUE statement of that narrowed claim; never upgraded to "live".
+# THE CLAIM (after four red-pen BLOCKs), and it is the WHOLE claim — see :func:`_liveness_claim`, which is
+# the one place it is written and which binds it into the SIGNED certificate:
+#
+#     VIGIL's own gated GET of this URL returned content that DIFFERS from the server's stable same-status
+#     response to N randomized same-shape siblings, and NO minimal-edit-distance sibling returned that same
+#     response.
+#
+# It asserts NOTHING about not-found-ness, phantom-ness, existence or liveness. Two earlier wordings —
+# "distinguishable from a NOT-FOUND baseline" and "not a soft-404 phantom of that shape" — are WITHDRAWN as
+# literally false: in the validator classes below the siblings' stable answer is the route's REJECT body and
+# the target is the phantom, so those sentences asserted the opposite of the truth. The token is renamed off
+# ``endpoint_liveness`` for the same reason: for many consumers the token IS the claim, and a token that
+# reads as liveness at confidence 0.9 is the overclaim this branch exists to avoid.
 #
 # A web-discovery tool (httpx / ffuf / …) PROPOSES a URL; the RUNNER (never the tool) sends PLAIN gated GETs
 # (no canary) and the EXISTING ACHIEVED_STATE predicate_oracle adjudicates. Reuses ACHIEVED_STATE (no new
@@ -82,7 +91,7 @@ LLM_CLAIM_WEB_FACT_CLASSES = tuple(c for c in WEB_FACT_CLASSES if c != "oidc_red
 #     but-nonexistent target is seen to MATCH it ⇒ LEAD (while a genuinely distinguishable id still mints).
 #     Narrowing the control set can only cost controls ⇒ the floor ⇒ fail closed, never a wrong contrast.
 #     (b) the SAME-BRANCH BASELINE (the soundness half, which covers every validator VIGIL does NOT know):
-#     the not-found baseline is built ONLY from controls that took the
+#     the baseline is built ONLY from controls that took the
 #     TARGET'S OWN RESPONSE BRANCH. Every control is classified by its (status, body-hash) over ALL its
 #     resamples: IN-BRANCH iff every sample carries the TARGET'S EXACT STATUS and one body-hash; OFF-BRANCH
 #     iff NO sample carries the target's status (a validation-reject / route-miss — DISCARDED, never the
@@ -93,33 +102,53 @@ LLM_CLAIM_WEB_FACT_CLASSES = tuple(c for c in WEB_FACT_CLASSES if c != "oidc_red
 #     differ ⇒ LEAD. On a REAL endpoint the same-shape controls serve the soft-404 body in the target's own
 #     branch and the target's real body differs ⇒ FACT.
 #
+#   BLOCK-4/RP4 (unknown validator, reject INSIDE the target's own status branch): a route that answers
+#     200 with body V for an id IT considers invalid and 200 with a different body N for a valid-but-
+#     nonexistent one. Every uniformly random sibling is invalid, so the "baseline" is V — a REJECT
+#     baseline — and the target's own not-found body N looks like a differential. Measured 39/40 minting
+#     for a NONEXISTENT url. The previous round called this irreducible and argued the capture was
+#     identical to a real endpoint's. THAT WAS WRONG, and the error was in the cohort, not the logic: a
+#     uniformly random control MAXIMISES INDEPENDENCE from the target, which on a validating route
+#     guarantees it lands in the reject set. FIXED by the MINIMAL-EDIT-DISTANCE (NO-TWIN) cohort
+#     (:func:`_hamming1_probe_urls`): siblings differing from the target at exactly ONE alnum position stay
+#     inside the validity neighbourhood of any LOCAL rule (prefix / suffix / positional / format), come
+#     back with the target's own body, and the no-twin clause kills the FACT. Measured 39/40 -> 0/40, and
+#     0/80 for the prefix, suffix and positional variants on the direct path and both runner legs, with
+#     every true positive preserved. The probes are a SEARCH ONLY — their own cohort, referenced by the AST
+#     only in NEGATIVE clauses plus a channel check, NEVER counted toward :data:`_MIN_LIVENESS_CONTROLS` —
+#     so the cohort can only turn a FACT into a LEAD.
+#
 # The FACT fires ONLY when VIGIL's own gated GETs show: (1) the target is a served status (2xx/3xx) and is
 # STABLE across its resamples; (2) NO control is ambiguous, and at least :data:`_MIN_LIVENESS_CONTROLS`
 # DISTINCT controls are IN-BRANCH — every sample of each carrying the target's EXACT status and one shared
-# body-hash (the same-branch, multi-sample-stable not-found baseline); (3) every DISCARDED control is proven
-# OFF-BRANCH (no sample carried the target's status); and (4) the target is DISTINGUISHABLE from that
-# baseline BY BODY-HASH. All four are CLAUSES OF THE GENERATED PREDICATE over the RAW per-sample statuses and
-# body hashes — including the discard proof, so the runner's in/off-branch partition itself re-verifies
-# OFFLINE and cannot be cherry-picked after the fact.
+# body-hash (the same-branch, multi-sample-stable SIBLING baseline: the route's answer for those
+# identifiers, whatever that answer means); (3) every DISCARDED control is proven OFF-BRANCH (no sample
+# carried the target's status); (4) the target DIFFERS from that baseline BY BODY-HASH; (5) NO probe other
+# than the target — no control sample and no minimal-edit-distance neighbour — returned the target's
+# body-hash, and at least :data:`_MIN_TWIN_PROBES` neighbours reached a channel. All five are CLAUSES OF THE
+# GENERATED PREDICATE over the RAW per-sample statuses and body hashes — including the discard proof and the
+# no-twin rule — so the runner's partition and its neighbourhood search both re-verify OFFLINE and cannot be
+# cherry-picked after the fact.
 #
-# RESIDUAL (honest, and IRREDUCIBLE for a black-box same-class method). If a validator rejects INSIDE the
-# target's own status branch — a route that answers 200 with body V for an invalid id and 200 with a
-# DIFFERENT body N for a valid-but-nonexistent one — then the same-branch controls (mostly invalid) form a
-# stable baseline V that the nonexistent target (N) differs from, and the mint is a false phantom. It cannot
-# be closed by any observation of this kind: that response profile is BYTE-IDENTICAL to the legitimate case
-# this FACT exists for (a real endpoint on a server whose same-shape siblings all soft-404 with one uniform
-# body). The FACT is therefore worded as exactly what the capture proves — "distinguishable from the stable
-# same-branch sibling baseline" — and the branch's limitation entry names this class. It shrinks as
-# (1-p)^N_CONTROLS in the validator's acceptance rate p (any in-branch control that lands on the target's own
-# body breaks the baseline's unanimity ⇒ LEAD), so raising :data:`_LIVENESS_CONTROLS` trades traffic for it,
-# and it is NIL for the validators :func:`_known_validators` knows (there the controls are drawn from the
-# accepted set, so the baseline IS the route's not-found response). It bites only for an app-specific
-# validator VIGIL cannot know whose reject is 2xx AND differs from its not-found body.
+# RESIDUAL (what actually remains, stated without the withdrawn irreducibility argument). An UNKNOWN
+# validator that constrains the identifier JOINTLY ACROSS POSITIONS — a whole-string checksum — whose
+# reject also lives inside the target's own status branch. There NO Hamming-1 neighbour is accepted, so no
+# twin exists to find, and a valid-but-nonexistent id can still mint. What it mints is the claim above,
+# which is LITERALLY TRUE of that capture; it simply does not mean the URL names an existing resource,
+# which is exactly why the claim says it asserts nothing about existence. It is NIL for the whole-string
+# checksums VIGIL knows (Luhn / base58 / UUIDv4 — the validator-aware cohort already lands inside their
+# accepted set). Adding baseline siblings does NOT mitigate it (measured 40/40 at N=10, 40/40 at N=160,
+# 15/15 at N=640), so the earlier "raising _LIVENESS_CONTROLS trades traffic for it" framing is withdrawn;
+# the twin cohort's ~20 extra requests is the mitigation that worked.
 #
 # The predicate is a pure JSON AST over RAW status codes + RAW body hashes of every sample, so the
 # certificate re-verifies OFFLINE like every predicate_oracle FACT. The CLEAN direction (a channel-confirmed
 # hard 404/410 at the exact URL, control-independent, bounded to the probed URL) is unchanged.
-ENDPOINT_LIVENESS_BUG_CLASS = "endpoint_liveness"
+# The SHIPPED bug-class token. Deliberately NOT "endpoint_liveness" (red-pen BLOCK-3): the token is the
+# ONLY thing many consumers read, and `endpoint_liveness` at confidence 0.9 asserts exactly what this FACT
+# must never assert. The EVIDENCE-BRANCH id (below) keeps its historical spelling — it is an internal
+# admission key, not a shipped claim.
+ENDPOINT_LIVENESS_BUG_CLASS = "sibling_response_differential"
 ENDPOINT_LIVENESS_BRANCH = "achieved_state.endpoint_liveness"
 # served-resource statuses the TARGET must return (2xx/3xx). 401/403/405/5xx are deliberately NOT minted here:
 # they are exists-but-gated / error responses that a plain GET cannot soundly separate from a blanket policy,
@@ -133,8 +162,27 @@ _TARGET_ABSENT_STATUSES = frozenset({404, 410})
 # is now AMBIGUOUS (fail the run closed) rather than a droppable control, so a b-element bounded space cannot
 # manufacture a "stable" baseline out of the samples that happened to agree.
 _LIVENESS_CONTROLS = 10         # DISTINCT same-shape not-found control URLs (dominates per-PATH robustness)
-_LIVENESS_RESAMPLES = 2         # times EACH control is fetched (catches per-REQUEST variance)
+# times EACH control is fetched. THE BOUND (red-pen BLOCK-2): against a server whose not-found body is drawn
+# per REQUEST from a b-element space, one control is MISCLASSIFIED as in-branch-stable (all k samples happen
+# to coincide) with probability exactly b * (1/b)^k = b^(1-k). At k=2 that is 1/2 for b=2 — which is why the
+# partially-varying class still minted 7/300 — at k=4 it is 1/8, and a run additionally needs EVERY varying
+# control to be misclassified AND to land on the same value as the deterministic ones AND no twin probe to
+# return the target's body. Measured over the shipped cohort: k=2 -> 2/120, k=3 -> 0/120, k=4 -> 0/120.
+_LIVENESS_RESAMPLES = 4
 _LIVENESS_TARGET_SAMPLES = 3    # times the TARGET is fetched (its response must be stable across these)
+# TWIN SEARCH (red-pen BLOCK-1) — the MINIMAL-EDIT-DISTANCE cohort. The main cohort maximises INDEPENDENCE
+# from the target (uniform random over the narrow class), which is exactly wrong when an unknown validator
+# exists: every uniform draw lands in the route's REJECT set, so the "baseline" is a reject baseline. These
+# probes do the opposite — each differs from the TARGET at exactly ONE alnum position (same narrow class,
+# same origin, same parent directory, same lexical construction, same gated send), so they stay inside the
+# validity neighbourhood of whatever the route accepts. ONE sample each: distinct paths buy more twin-finding
+# power than repeat samples of the same path.
+_LIVENESS_TWIN_PROBES = 20
+# A FACT must have actually SEARCHED the neighbourhood: below this many channel-reaching probes the twin
+# search is too thin to license the "no minimal-edit-distance sibling returned the same response" half of the
+# claim ⇒ FAIL CLOSED. Always satisfiable when a control cohort exists (the narrowest class has >= 10
+# characters, so a single alnum position already yields >= 9 distinct neighbours).
+_MIN_TWIN_PROBES = 4
 # The FLOOR of distinct IN-BRANCH controls a FACT needs. Two things make the count vary: a short segment /
 # small alphabet (e.g. a single digit) cannot yield the full _LIVENESS_CONTROLS distinct siblings, and a
 # validating route sends most siblings OFF-BRANCH (discarded). Fewer than this floor in the TARGET'S OWN
@@ -144,8 +192,27 @@ _LIVENESS_TARGET_SAMPLES = 3    # times the TARGET is fetched (its response must
 _MIN_LIVENESS_CONTROLS = 4
 
 
+def _liveness_claim(url: str, status: int, target_samples: int, same_branch: int, probes: int) -> str:
+    """THE claim sentence — the single source of what this FACT asserts (red-pen BLOCK-4).
+
+    Every earlier wording asserted something the capture does not prove. "distinguishable from a NOT-FOUND
+    baseline" and "not a soft-404 PHANTOM of that shape" are both FALSE in the classes where the siblings'
+    stable answer is the route's REJECT body and the target's answer is its not-found body: there the
+    baseline is a reject baseline and the target IS the phantom. So the sentence now asserts only the two
+    things the raw capture establishes, and says outright that it asserts nothing else. It is bound INTO the
+    signed certificate (a ReportClaim), so a consumer receives the claim, not just a bug-class token."""
+    return (f"VIGIL's own gated GET of {url} returned content that DIFFERS from the server's stable "
+            f"same-status response to {same_branch} randomized same-shape siblings (target status {status} "
+            f"over {target_samples} samples; every sibling answered in the same status branch with one "
+            f"shared body-hash), and NO minimal-edit-distance sibling — {probes} probed, each differing from "
+            f"the target at exactly one position — returned that same response. This asserts NOTHING about "
+            f"not-found-ness, phantom-ness, existence or liveness of the URL: it is a statement about how "
+            f"this server's responses differ across a neighbourhood of identifiers, nothing more.")
+
+
 def _build_liveness_predicate(in_branch: "list[list[int]]", off_branch: "list[list[int]]",
-                              n_target_samples: int, floor: int) -> dict:
+                              probes: "list[int]", n_target_samples: int, floor: int,
+                              twin_floor: int) -> dict:
     """Generate the liveness FACT predicate as a pure JSON AST over the RAW per-sample values (no
     rubber-stamp — every decision is an AST op over retained raw statuses + body hashes, so the certificate
     re-verifies OFFLINE).
@@ -163,6 +230,11 @@ def _build_liveness_predicate(in_branch: "list[list[int]]", off_branch: "list[li
         on every resample (so a control that merely FLAPPED across the branch boundary cannot be discarded:
         the runner classifies it AMBIGUOUS and fails the run closed);
       * the retained same-branch count meets the floor;
+      * NO-TWIN (red-pen BLOCK-1): NO probe other than the target — not one control sample, not one
+        minimal-edit-distance neighbour — returned the target's body-hash. A response the target shares with
+        any sibling is not a response the target is distinguished by, whatever the baseline says;
+      * every minimal-edit-distance probe REACHED a channel and the retained probe count meets the twin
+        floor, so the certificate cannot claim a neighbourhood search that did not happen;
       * the target is DISTINGUISHABLE from that baseline BY BODY-HASH (the status is necessarily identical —
         same branch — so body-hash is the only sound differential).
 
@@ -200,7 +272,22 @@ def _build_liveness_predicate(in_branch: "list[list[int]]", off_branch: "list[li
     # the evidence and the AST re-checks — the per-sample clauses above are the actual proof; this makes the
     # policy floor itself visible and re-checkable in the offline certificate.)
     clauses.append({"ge": [{"var": "same_branch_controls"}, floor]})
-    # (5) DISTINGUISHABLE BY BODY within that same branch (the status is identical by construction).
+    # (5) NO-TWIN over the MINIMAL-EDIT-DISTANCE cohort: each neighbour reached a channel and did NOT return
+    # the target's body. This is the clause that closes the unknown-validator class — on a prefix / suffix /
+    # positional / format rule the neighbours stay ACCEPTED, so if the target's body is merely the route's
+    # not-found answer a neighbour returns it too and the FACT dies here.
+    for k in probes:
+        clauses.append({"ge": [{"var": f"probe_{k}_status"}, 100]})
+        clauses.append({"not": {"eq": [{"var": f"probe_{k}_sha"}, {"var": "target_0_sha"}]}})
+    clauses.append({"ge": [{"var": "twin_probes"}, twin_floor]})
+    # (6) NO-TWIN over the CONTROL cohort as well — redundant with (2)+(7) for an in-branch control, but the
+    # rule "no probe other than the target returned the target's response" is then literally in the AST,
+    # and it binds the off-branch controls too (a reject body that equals the target's body is not a
+    # differential, whatever its status).
+    for block in list(in_branch) + list(off_branch):
+        for k in block:
+            clauses.append({"not": {"eq": [{"var": f"control_{k}_sha"}, {"var": "target_0_sha"}]}})
+    # (7) DISTINGUISHABLE BY BODY within that same branch (the status is identical by construction).
     clauses.append({"not": {"eq": [{"var": "target_0_sha"}, {"var": f"control_{anchor}_sha"}]}})
     return {"all": clauses}
 
@@ -223,6 +310,8 @@ class WebLivenessResult:
     target_status: int = 0
     control_statuses: list = field(default_factory=list)
     same_branch_controls: int = 0   # DISTINCT controls that took the target's OWN served branch (the baseline)
+    twin_probes: int = 0            # MINIMAL-EDIT-DISTANCE neighbours actually probed (the twin search)
+    twin_found: bool = False        # a neighbour returned the TARGET's own body-hash ⇒ never a FACT
     note: str = ""
     refused: bool = False
 
@@ -404,6 +493,71 @@ def _liveness_control_urls(url: str, n: int = _LIVENESS_CONTROLS) -> "list[str]"
     return urls
 
 
+def _hamming1_probe_urls(url: str, n: int = _LIVENESS_TWIN_PROBES) -> "list[str]":
+    """Up to ``n`` DISTINCT sibling URLs whose last path segment differs from the TARGET's at EXACTLY ONE
+    alphanumeric position — the MINIMAL-EDIT-DISTANCE (validity-neighbourhood) cohort of the twin search
+    (red-pen BLOCK-1).
+
+    Same origin (scheme/host/port), same parent directory, same length, same extension, same narrow
+    per-position character class as :func:`_same_shape_sibling` — only the mutation rule differs: one
+    position changes, everything else is the TARGET's own bytes. That is deliberate. A uniform random draw
+    over the narrow class is maximally INDEPENDENT of the target, so on a route with a semantic validator it
+    lands in the REJECT set essentially always; a Hamming-1 neighbour stays inside the validity neighbourhood
+    of every validator that is not a whole-string checksum (a prefix/suffix/positional/format rule), so if
+    the target's response is merely the route's not-found answer for ACCEPTED ids, a neighbour will return
+    that same response and expose it as a TWIN.
+
+    Positions are visited round-robin in a random order, one new alternative character each pass, so a SHORT
+    segment still yields many probes (a 1-digit segment yields 9) and a LONG one covers many positions first.
+    No validator filter is applied: an invalid neighbour simply cannot be a twin, and filtering would empty
+    the cohort exactly where it is cheapest to run. Returns ``[]`` when the shape is not mirrorable (the
+    caller then fails closed). Purely lexical — no network."""
+    import secrets  # noqa: PLC0415 — stdlib, function-local
+    from urllib.parse import urlsplit, urlunsplit  # noqa: PLC0415 — stdlib, function-local
+    rand = secrets.SystemRandom()
+    parts = urlsplit(url)
+    path = parts.path or "/"
+    slash = path.rfind("/")
+    parent = path[: slash + 1] if slash >= 0 else "/"
+    seg = path[slash + 1:] if slash >= 0 else path
+    if not seg:
+        return []
+    stem, dot, ext = seg.rpartition(".")
+    if dot and stem and 1 <= len(ext) <= 8 and ext.isalnum():
+        base, suffix = stem, "." + ext
+    else:
+        base, suffix = seg, ""
+    if not base:
+        return []
+    positions = [i for i, c in enumerate(base) if c.isalnum()]
+    if not positions:
+        return []
+    alphabet = _alnum_class_alphabet({base[i] for i in positions})
+    if alphabet is None:
+        return []   # ambiguous class — the same fail-closed rule the control cohort uses
+    order = list(positions)
+    rand.shuffle(order)
+    used: "dict[int, set]" = {i: set() for i in positions}
+    tokens: "list[str]" = []
+    while len(tokens) < n:
+        progressed = False
+        for i in order:
+            if len(tokens) >= n:
+                break
+            choices = [c for c in alphabet if c != base[i] and c not in used[i]]
+            if not choices:
+                continue
+            c = rand.choice(choices)
+            used[i].add(c)
+            chars = list(base)
+            chars[i] = c
+            tokens.append("".join(chars) + suffix)
+            progressed = True
+        if not progressed:
+            break   # the whole neighbourhood is exhausted
+    return [urlunsplit((parts.scheme, parts.netloc, parent + t, "", "")) for t in tokens]
+
+
 def endpoint_liveness_redrive(url: str, *, slug: str, engagement_slug: str,
                              signers: "list[tuple[str, str]]", timeout: float = 8.0) -> WebLivenessResult:
     """Re-drive ``url`` with VIGIL's OWN plain gated GETs (no canary) and mint a signed ACHIEVED_STATE FACT
@@ -426,7 +580,7 @@ def endpoint_liveness_redrive(url: str, *, slug: str, engagement_slug: str,
     from .verdict import Verdict, admit  # noqa: PLC0415
 
     res = WebLivenessResult(url=url)
-    finding_ref = f"web:endpoint_liveness:{url}"
+    finding_ref = f"web:{ENDPOINT_LIVENESS_BUG_CLASS}:{url}"
 
     # PRE-FLIGHT the gate ONCE: a refused engagement (kill-switch / out-of-scope / no-slug / bad URL) means
     # VIGIL never observed the target — there is NO channel, so we must NOT mint and must NOT report a
@@ -497,7 +651,7 @@ def endpoint_liveness_redrive(url: str, *, slug: str, engagement_slug: str,
         observed_evidence[f"control_{i}_status"] = _status(s)
         observed_evidence[f"control_{i}_sha"] = _sha(s)
 
-    # SAME-BRANCH BASELINE (the BLOCK-3 fix). The not-found baseline must be built ONLY from controls that
+    # SAME-BRANCH BASELINE (the RP3 fix). The sibling baseline must be built ONLY from controls that
     # took the TARGET's OWN response branch. Classify each DISTINCT control by ALL of its resamples:
     #   IN-BRANCH  — every sample carries the TARGET'S EXACT STATUS and they share ONE body-hash;
     #   OFF-BRANCH — NO sample carries the target's status (a validation-reject / route-miss) ⇒ DISCARDED;
@@ -537,15 +691,46 @@ def endpoint_liveness_redrive(url: str, *, slug: str, engagement_slug: str,
 
     # A FACT requires: the target SERVED + stable, NO ambiguous control, and at least the floor of DISTINCT
     # IN-BRANCH controls. A checksum route (random controls validation-reject off-branch), a hard-404 server
-    # (no served baseline), or a varying body space (ambiguous) all FAIL CLOSED here. The predicate then does
-    # the adjudicating over the raw samples.
+    # (no served baseline), or a varying body space (ambiguous) all FAIL CLOSED here.
     have_baseline = target_served and ambiguous == 0 and distinct_same_branch >= _MIN_LIVENESS_CONTROLS
+    baseline_sha = _sha(control_samples[in_branch[0][0]]) if in_branch else None
+    target_sha = _sha(target_samples[0])
+    # TWIN SEARCH (red-pen BLOCK-1). Run it ONLY when the run is otherwise about to mint — it can only turn a
+    # FACT into a LEAD, so on every other path it is pure traffic. Each MINIMAL-EDIT-DISTANCE neighbour is
+    # fetched ONCE through the SAME gated send, and if ANY of them returns the TARGET's body-hash the
+    # target's response is not its own ⇒ LEAD. The probes are a TWIN SEARCH ONLY: they are kept in their own
+    # list and NEVER counted toward _MIN_LIVENESS_CONTROLS, so they cannot push a sub-floor run over the
+    # floor — the cohort is strictly restrictive by construction.
+    provisional = (have_baseline and baseline_unanimous and baseline_sha is not None
+                   and target_sha != baseline_sha)
+    probe_urls: "list[str]" = []
+    probe_samples: list = []
+    twin_found = False
+    if provisional:
+        try:
+            probe_urls = _hamming1_probe_urls(url)
+            probe_samples = [send(HttpRequest(method="GET", url=u)) for u in probe_urls]
+        except Exception as e:  # noqa: BLE001 — a probe error never mints; it fails the twin search closed
+            res.outcome = "inconclusive"
+            res.note = f"twin-search probe error: {type(e).__name__}: {e}"
+            res.lead = AdapterResult("lead", res.note, ENDPOINT_LIVENESS_BUG_CLASS, finding_ref,
+                                     outcome="inconclusive")
+            return res
+        twin_found = any(_sha(x) == target_sha for x in probe_samples)
+    res.twin_probes = len(probe_samples)
+    res.twin_found = twin_found
+    for k, x in enumerate(probe_samples):
+        observed_evidence[f"probe_{k}_status"] = _status(x)
+        observed_evidence[f"probe_{k}_sha"] = _sha(x)
+    observed_evidence["twin_probes"] = len(probe_samples)
     observed_evidence["same_branch_controls"] = distinct_same_branch
     observed_evidence["same_branch_sample_keys"] = [i for b in in_branch for i in b]
     observed_evidence["off_branch_sample_keys"] = [i for b in off_branch for i in b]
     observed_evidence["ambiguous_controls"] = ambiguous
-    context = {"predicate": _build_liveness_predicate(in_branch, off_branch, _LIVENESS_TARGET_SAMPLES,
-                                                      _MIN_LIVENESS_CONTROLS),
+    have_baseline = (provisional and not twin_found and len(probe_samples) >= _MIN_TWIN_PROBES)
+    context = {"predicate": _build_liveness_predicate(in_branch, off_branch, list(range(len(probe_samples))),
+                                                      _LIVENESS_TARGET_SAMPLES, _MIN_LIVENESS_CONTROLS,
+                                                      _MIN_TWIN_PROBES),
                "observed_evidence": observed_evidence}
     # CONCLUSIVENESS: a non-fire is a channel-confirmed CLEAN ONLY when the target was a definite hard not-found
     # (404/410) on EVERY resample (control-independent, bounded to THIS URL). Everything else non-firing (soft-
@@ -557,24 +742,29 @@ def endpoint_liveness_redrive(url: str, *, slug: str, engagement_slug: str,
 
     finding = {"check_id": finding_ref, "bug_class": ENDPOINT_LIVENESS_BUG_CLASS,
                "insertion_point": url, "oracle_context": context}
+    # BIND THE CLAIM INTO THE CERTIFICATE (red-pen BLOCK-3). The sentence the runner computes is the ONLY
+    # place the narrowing lives; a consumer that reads certificates (not WebLivenessResult objects) used to
+    # receive nothing but the class token and a 0.9. The ReportClaim is part of the SIGNED model, so the
+    # governance signature covers the sentence and any edit to it breaks verification. render_as is
+    # "analyst-commentary" by the model's own doctrine: a deterministic gate does no entailment over
+    # English, so the sentence is bound TAMPER-EVIDENT but never re-asserted as a machine-checked fact —
+    # the machine-checked part is the predicate AST the same certificate's digest covers.
+    claim_sentence = _liveness_claim(url, res.target_status, _LIVENESS_TARGET_SAMPLES,
+                                     distinct_same_branch, len(probe_samples))
+    claims = None
+    if fired:
+        from framework.v2.evidence.certify import ReportClaim  # noqa: PLC0415 (FATAL-2: function-local)
+        claims = [ReportClaim(sentence=claim_sentence, bug_class=ENDPOINT_LIVENESS_BUG_CLASS,
+                              render_as="analyst-commentary")]
     r = certify_admitted(finding, admitted, engagement_slug=engagement_slug, signers=signers,
-                         provenance="live_redrive")
+                         provenance="live_redrive", report_claims=claims)
     if r.is_fact:
         res.fact = r
         res.context = context
         res.outcome = "positive"
-        # NARROWED CLAIM (never "live endpoint"): served content distinguishable from the server's own
-        # stable, SAME-BRANCH response to randomized same-shape siblings. The residual is named in the note
-        # itself — the FACT never claims more than the capture proves.
-        res.note = (f"served content DISTINGUISHABLE from a multi-sample-stable, SAME-BRANCH not-found "
-                    f"baseline: target status {res.target_status} over {_LIVENESS_TARGET_SAMPLES} samples vs "
-                    f"{distinct_same_branch} same-shape siblings that ALL answered in the target's OWN "
-                    f"response branch (same status, one shared body-hash) while the target's body differs — "
-                    f"not a soft-404 phantom of that shape; {len(off_branch)} off-branch controls "
-                    f"(validation-reject / route-miss) were DISCARDED, never contrasted against. NOT a claim "
-                    f"that the endpoint is 'live'/real/exists. Residual: if this route rejects invalid ids "
-                    f"INSIDE the same status branch with a body distinct from its not-found body, that "
-                    f"baseline is a reject baseline (indistinguishable from this capture).")
+        res.note = claim_sentence
+        # AdapterResult is FROZEN (a minted result is not editable in place); carry the claim by rebuilding.
+        res.fact = replace(r, note=claim_sentence)
         return res
     # not a FACT — a labelled lead. classify: CLEAN (channel-confirmed hard-404, bounded to THIS url) vs
     # INCONCLUSIVE (soft-404 / bounded-body / no-sound-control / ambiguous). certify_admitted stamped r.outcome.
@@ -592,21 +782,31 @@ def endpoint_liveness_redrive(url: str, *, slug: str, engagement_slug: str,
     elif ambiguous:
         res.note = (f"{ambiguous} of {len(control_urls)} same-shape controls took an AMBIGUOUS response "
                     f"branch (their samples disagree on status, or the body VARIES inside the target's own "
-                    f"branch) — a nondeterministic route yields no sound not-found baseline, and dropping "
-                    f"such a control is how a bounded body space manufactures a false baseline; fail closed")
+                    f"branch across {_LIVENESS_RESAMPLES} resamples) — a nondeterministic route yields no "
+                    f"sound baseline, and dropping such a control is how a bounded body space manufactures "
+                    f"a false one; fail closed")
     elif distinct_same_branch < _MIN_LIVENESS_CONTROLS:
-        res.note = (f"no SAME-BRANCH not-found baseline: only {distinct_same_branch} of {len(control_urls)} "
-                    f"same-shape controls answered in the target's OWN response branch (the rest "
-                    f"validation-rejected / route-missed into a DIFFERENT branch) — below the floor of "
-                    f"{_MIN_LIVENESS_CONTROLS}, and we never contrast the target across response branches "
-                    f"(the checksum/validation-route class); a LEAD")
+        res.note = (f"no SAME-BRANCH baseline: only {distinct_same_branch} of {len(control_urls)} same-shape "
+                    f"controls answered in the target's OWN response branch (the rest validation-rejected / "
+                    f"route-missed into a DIFFERENT branch) — below the floor of {_MIN_LIVENESS_CONTROLS}, "
+                    f"and we never contrast the target across response branches; a LEAD")
     elif not baseline_unanimous:
         res.note = (f"the {distinct_same_branch} same-branch controls do NOT agree on one body-hash (a "
-                    f"per-path / bounded not-found body space) — no stable baseline; a LEAD")
+                    f"per-path / bounded body space) — no stable baseline; a LEAD")
+    elif twin_found:
+        res.note = (f"TWIN FOUND: of {len(probe_samples)} minimal-edit-distance siblings (each differing "
+                    f"from the target at exactly ONE position), at least one returned the TARGET'S OWN "
+                    f"body — so that response is the route's answer for a whole neighbourhood of "
+                    f"identifiers, not something this URL is distinguished by; a LEAD")
+    elif provisional and len(probe_samples) < _MIN_TWIN_PROBES:
+        res.note = (f"only {len(probe_samples)} minimal-edit-distance probes reached a channel (floor "
+                    f"{_MIN_TWIN_PROBES}) — the validity neighbourhood was not searched, so the no-twin "
+                    f"half of the claim is unproven; fail closed to a LEAD")
     else:
-        res.note = (f"no distinguishable-content FACT: target {res.target_status}, {distinct_same_branch} "
-                    f"same-branch controls — the target's body MATCHES the same-branch not-found baseline "
-                    f"(a soft-404 phantom of that shape); a LEAD")
+        res.note = (f"no differential: target {res.target_status}, {distinct_same_branch} same-branch "
+                    f"controls — the target's body is IDENTICAL to the same-branch sibling baseline; a LEAD")
+    if res.lead is not None:
+        res.lead = replace(res.lead, note=res.note)   # the demotion reason reaches every consumer
     return res
 
 

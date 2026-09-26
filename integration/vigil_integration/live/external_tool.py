@@ -766,12 +766,61 @@ def _pin_url_host(raw_url: str, target: str) -> "ProposedURL | None":
     return ProposedURL(url=str(raw_url).strip(), host=host, port=int(port), protocol="tcp")
 
 
+# --- SAFETY: brain/params-supplied VALUES that reach an argv must be validated BEFORE the argv exists ---
+# (red-pen BLOCK-5, a real scope escape.) ``scheme`` and ``wordlist`` are the only two values the body reads
+# out of a model/brain-supplied ``params`` dict (brains.hexstrike_body._spec_for_kind) and interpolates into
+# the tool's command line. The ScopeGate authorises the HOST STRING (e.g. "127.0.0.1") and the runner then
+# EXECUTES that argv, so a scheme like ``http://attacker.test/x#`` becomes
+# ``httpx -u http://attacker.test/x#://127.0.0.1/`` and a packet reaches an out-of-scope host BEFORE
+# ``_pin_url_host`` can refuse the FACT — the FACT is refused, the TRAFFIC already happened. Both values are
+# therefore validated here, at ToolSpec CONSTRUCTION, so the refusal happens before any argv or any send;
+# ``_spec_for_kind`` turns the ValueError into a blocked LEAD (the documented fail-closed path).
+_URL_SCHEME_ALLOWLIST = frozenset({"http", "https"})
+# A wordlist is a FILE the tool reads. It must be an absolute, non-traversing path under one of these roots
+# (the distro wordlist locations), with no argv-flag prefix and no shell/whitespace metacharacters.
+_WORDLIST_ROOTS = ("/usr/share/wordlists/", "/usr/share/seclists/", "/usr/share/dirb/", "/usr/share/dirbuster/")
+
+
+def _validated_scheme(scheme: str) -> str:
+    """The URL scheme, or ValueError. Exactly ``http``/``https`` — never a value that can carry a second
+    authority, a fragment, a flag or whitespace into the argv (BLOCK-5)."""
+    v = str(scheme or "").strip().lower()
+    if v not in _URL_SCHEME_ALLOWLIST:
+        raise ValueError(f"scheme must be one of {sorted(_URL_SCHEME_ALLOWLIST)} (got {scheme!r}) — a "
+                         f"free-form scheme is interpolated into the tool argv and can redirect the probe "
+                         f"to an out-of-scope host")
+    return v
+
+
+def _validated_wordlist(wordlist: str) -> str:
+    """The wordlist path, or ValueError. Empty ⇒ the shipped default. Otherwise an absolute, non-traversing
+    path under an allow-listed wordlist root, with no flag prefix and no whitespace/metacharacters — it is
+    interpolated into the argv as ``-w <value>`` (BLOCK-5)."""
+    v = str(wordlist or "").strip()
+    if not v:
+        return _FFUF_DEFAULT_WORDLIST
+    if (v.startswith("-") or ".." in v or any(c.isspace() for c in v)
+            or any(c in v for c in "\0\n\r;|&$`<>*?!()[]{}'\"\\")
+            or not any(v.startswith(root) for root in _WORDLIST_ROOTS)):
+        raise ValueError(f"wordlist must be an absolute, non-traversing path under one of "
+                         f"{list(_WORDLIST_ROOTS)} with no flag prefix or shell/whitespace metacharacters "
+                         f"(got {wordlist!r}) — it is interpolated into the tool argv")
+    return v
+
+
 def httpx_url_scan(*, scheme: str = "http", extra_args: Sequence[str] = ()) -> ToolSpec:
     """A :class:`ToolSpec` for ProjectDiscovery httpx as a URL PROPOSER. ``build_argv`` emits
     ``httpx -u <url> -silent -no-color -disable-update-check -json -probe`` (JSONL on stdout, correlatable,
     no update phone-home); ``propose_urls`` parses each non-``failed`` record's ``url`` (via the shipped
     ``parse_httpx_export``) into a host-PINNED :class:`ProposedURL`. The runner re-drives each URL with its OWN
-    plain gated GET (endpoint-liveness) — httpx's row is never the FACT authority."""
+    plain gated GET (endpoint-liveness) — httpx's row is never the FACT authority.
+
+    ``scheme`` is validated against {http, https} HERE (BLOCK-5): it is interpolated into the argv, and the
+    scope gate authorises the host STRING, not the argv — so an unvalidated scheme sends a real packet to an
+    out-of-scope authority before any FACT-side host pin can refuse it. An invalid value raises ValueError
+    (``_spec_for_kind`` turns that into a blocked LEAD) before any argv exists."""
+    scheme = _validated_scheme(scheme)
+
     def build(target: str) -> list[str]:
         url = str(target) if "://" in str(target) else f"{scheme}://{target}/"
         return ["httpx", "-u", url, "-silent", "-no-color", "-disable-update-check", "-json", "-probe",
@@ -802,8 +851,12 @@ def ffuf_content_scan(*, wordlist: str = "", extra_args: Sequence[str] = ()) -> 
     ``ffuf -u <base>/FUZZ -w <wordlist> -noninteractive -json`` (JSONL results on stdout, ``input`` values
     base64 but ``url`` plain — the location the parser reads); ``propose_urls`` parses each result's ``url``
     (via the shipped ``parse_ffuf_export``) into a host-PINNED :class:`ProposedURL`. The runner re-drives each
-    URL with its OWN plain gated GET (endpoint-liveness) — ffuf's row is never the FACT authority."""
-    wl = wordlist or _FFUF_DEFAULT_WORDLIST
+    URL with its OWN plain gated GET (endpoint-liveness) — ffuf's row is never the FACT authority.
+
+    ``wordlist`` is validated HERE (BLOCK-5) against an allow-listed root with no flag prefix and no
+    whitespace/shell metacharacters: it is interpolated into the argv as ``-w <value>``. An invalid value
+    raises ValueError (``_spec_for_kind`` turns that into a blocked LEAD) before any argv exists."""
+    wl = _validated_wordlist(wordlist)
 
     def build(target: str) -> list[str]:
         base = str(target) if "://" in str(target) else f"http://{target}/"
@@ -1106,7 +1159,8 @@ def _run_web_liveness_tool(
     Called only when ``spec.propose_urls`` is set; the caller already ran the scope/pre-flight/capability gates.
     """
     from ..oracle_adapter import Outcome  # noqa: PLC0415 (FATAL-2: function-local)
-    from .web_redrive import endpoint_liveness_redrive  # noqa: PLC0415 (FATAL-2: web_redrive is offense-neutral)
+    from .web_redrive import (  # noqa: PLC0415 (FATAL-2: web_redrive is offense-neutral)
+        ENDPOINT_LIVENESS_BUG_CLASS, endpoint_liveness_redrive)
 
     proposed = spec.propose_urls(outcome, target)   # list[ProposedURL], host pinned to target (failed dropped)
     facts: list = []
@@ -1125,9 +1179,13 @@ def _run_web_liveness_tool(
         # → http(s)); the URL host is already pinned to the scope-authorised target. slug == engagement_slug.
         wl = endpoint_liveness_redrive(pu.url, slug=engagement_slug, engagement_slug=engagement_slug,
                                        signers=signers, timeout=min(timeout, 30.0))
-        item = f"{spec.name}:{pu.url}#endpoint_liveness"
-        outcomes.append({"check_id": item, "bug_class": "endpoint_liveness",
-                         "outcome": _OUT.get(wl.outcome, Outcome.INCONCLUSIVE.value)})
+        item = f"{spec.name}:{pu.url}#{ENDPOINT_LIVENESS_BUG_CLASS}"
+        # The re-drive's OWN narrowed claim / demotion reason travels with the row (red-pen BLOCK-3): the
+        # bug-class token alone does not state what was proven, and a note the runner drops is not a
+        # disclosure. The same sentence is bound into the signed certificate.
+        outcomes.append({"check_id": item, "bug_class": ENDPOINT_LIVENESS_BUG_CLASS,
+                         "outcome": _OUT.get(wl.outcome, Outcome.INCONCLUSIVE.value),
+                         "note": wl.note})
         if wl.is_fact:
             facts.append(wl.fact)
             if wl.context is not None:
@@ -1135,9 +1193,13 @@ def _run_web_liveness_tool(
         elif wl.lead is not None:
             leads.append(wl.lead)
 
+    # The detail names the CLASS the runner actually minted and carries the first claim sentence verbatim,
+    # so an operator reading the runner result sees the narrowing rather than a liveness-sounding count.
+    first_claim = next((str(f.note) for f in facts if getattr(f, "note", "")), "")
     detail = (f"{spec.name} ran via {outcome.backend}; proposed {len(proposed)} url(s), "
-              f"oracle-confirmed {len(facts)} liveness FACT(s), {len(leads)} lead(s)"
-              + ("; TOOL ERRORED (timeout/spawn)" if tool_errored else ""))
+              f"oracle-confirmed {len(facts)} {ENDPOINT_LIVENESS_BUG_CLASS} FACT(s), {len(leads)} lead(s)"
+              + ("; TOOL ERRORED (timeout/spawn)" if tool_errored else "")
+              + (f" | claim: {first_claim}" if first_claim else ""))
     artifact_refs = tuple(fr for fr in (getattr(r, "finding_ref", "") for r in (facts + leads)) if fr)
     error_reason = ""
     if tool_errored:

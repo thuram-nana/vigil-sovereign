@@ -559,7 +559,9 @@ def test_the_capability_matrix_does_not_outrun_the_branch_registry() -> None:
     # fact_capable=True through the runner (the SAME service_reachability.tcp_handshake branch + oracle), each
     # passing the conformance battery — so the fact set grows without outrunning the registry.
     # The W2 web-discovery promotion adds httpx/ffuf (oracle_family ACHIEVED_STATE), backed by the new
-    # fact_capable achieved_state.endpoint_liveness branch (VIGIL's own gated GET + a not-found control) — so
+    # fact_capable achieved_state.endpoint_liveness branch — whose SHIPPED class token is
+    # sibling_response_differential and whose evidence is a same-status sibling baseline plus a
+    # minimal-edit-distance twin search, NOT "a not-found control" — so
     # "achieved_state" is a fact_capable branch family and the two tools do not outrun the registry.
     fact_families = {b["id"].split(".")[0] for b in branches if b["fact_capable"]}
     for t in matrix["tools"]:

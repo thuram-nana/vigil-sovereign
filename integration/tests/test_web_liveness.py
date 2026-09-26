@@ -19,9 +19,13 @@ Headline properties (each FP class below minted a FALSE offline-re-verifiable FA
     distinct-body 404 AND (the worst case) a 200 INSIDE the target's own status branch — closed by the
     SAME-BRANCH baseline plus VALIDATOR-AWARE controls (RP3), each proven over 80 runs (no intermittency);
     a strict UNKNOWN validator with < floor in-branch controls fails closed;
-  * the one class that CANNOT be closed by any same-class observation — an UNKNOWN app-specific validator
-    that rejects INSIDE the target's own status branch — is pinned as the branch's documented residual, with
-    the proof of its irreducibility (it is byte-identical to the legitimate case this FACT exists for);
+  * an UNKNOWN app-specific validator that rejects INSIDE the target's own status branch — prefix, suffix
+    and positional rules — is CLOSED by the minimal-edit-distance (NO-TWIN) cohort (RP4), 0/80 each; the
+    residual is now only a validator that constrains the identifier JOINTLY ACROSS POSITIONS (a whole-string
+    checksum), where no Hamming-1 neighbour is accepted and so no twin exists to find;
+  * the claim a consumer receives is the claim that was proven: the sentence is bound into the SIGNED
+    certificate and the shipped bug-class token is `sibling_response_differential`, never `endpoint_liveness`;
+  * a hostile brain-supplied `scheme`/`wordlist` is refused before any argv or any send (a scope escape);
   * a special-cased error page is a TRUE-if-modest NARROWED FACT, never a "live endpoint" overclaim (RP2 BLOCK-3);
   * a channel-confirmed hard 404 → a CLEAN bounded to the EXACT probed URL, never an enumeration claim;
   * a root/directory or ambiguous-class segment FAILS CLOSED to a LEAD;
@@ -269,8 +273,8 @@ _NUMERIC_ROUTE_B3 = re.compile(r"^/api/users/(\d+)/?$")
 class _NumericRouteErrApp(http.server.BaseHTTPRequestHandler):
     """RP2 BLOCK-3 — a special-cased ERROR: /api/users/0 -> 200 {"error":"invalid id"} while any other numeric
     id -> 200 {"user":null} (the not-found baseline). Under the NARROWED claim this is a TRUE-if-modest FACT
-    ("served content distinguishable from a same-shape not-found baseline"), NOT a "live endpoint" overclaim —
-    the fix is the claim string, checked by the test."""
+    (its response differs from the stable same-status sibling response and no minimal-edit-distance
+    neighbour returned it), NOT a "live endpoint" overclaim — the fix is the claim string, checked below."""
 
     def log_message(self, *a):  # noqa: D401
         pass
@@ -441,28 +445,79 @@ class _Base58_200RejectApp(http.server.BaseHTTPRequestHandler):
         self.wfile.write(body)
 
 
-class _UnknownValidator200RejectApp(http.server.BaseHTTPRequestHandler):
-    """RP3 RESIDUAL (documented, IRREDUCIBLE). An APP-SPECIFIC validator VIGIL cannot know — an id must start
-    with "ZQ" — whose reject lives INSIDE the target's own status branch: /item/<10 alnum> -> 200
-    {"item":null} when it starts with ZQ (the true not-found body), else 200 {"error":"bad"}.
+def _unknown_validator_app(accepts):
+    """RP3/RP4 — an APP-SPECIFIC validator VIGIL cannot know, whose REJECT lives INSIDE the target's own
+    status branch: /item/<10 alnum> answers 200 {"item":null} when ``accepts(id)`` (the route's TRUE
+    not-found body for an id it considers well-formed) and 200 {"error":"bad"} when it does not.
 
-    No same-class observation can separate this from _SoftLiveApp (a REAL endpoint whose same-shape siblings
-    all soft-404 with one uniform body): in BOTH, ten same-shape controls answer 200 with one shared body and
-    the target answers 200 with a different one. The captures are byte-identical in structure, so any rule
-    that LEADs here also LEADs on the legitimate case the FACT exists for. The honest handling is therefore
-    (a) mint only the narrowed claim the capture actually proves, (b) name this residual in the FACT note
-    itself, and (c) pin it in the branch's limitations — all asserted by the residual test below."""
+    This is the class the 3rd round called irreducible. It is NOT: a uniform random control maximises
+    INDEPENDENCE from the target, so it always lands in the reject set — but a MINIMAL-EDIT-DISTANCE
+    neighbour stays inside the validity neighbourhood of a prefix / suffix / positional rule, comes back
+    with the target's OWN body, and the NO-TWIN rule kills the FACT."""
+    class _App(http.server.BaseHTTPRequestHandler):
+        def log_message(self, *a):  # noqa: D401
+            pass
+
+        def do_GET(self):  # noqa: N802
+            m = re.match(r"^/item/([0-9A-Za-z]{10})/?$", self.path.split("?")[0])
+            if not m:
+                body, code = b"nf", 404
+            else:
+                body, code = ((b'{"item":null}', 200) if accepts(m.group(1))
+                              else (b'{"error":"bad"}', 200))
+            self.send_response(code)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+    return _App
+
+
+def _prefix_validator_app():
+    return _unknown_validator_app(lambda s: s.startswith("ZQ"))
+
+
+def _suffix_validator_app():
+    return _unknown_validator_app(lambda s: s.endswith("QZ"))
+
+
+def _positional_validator_app():
+    return _unknown_validator_app(lambda s: s[4] == "K")
+
+
+def _checksum26(s: str) -> bool:
+    return sum(ord(c) - 97 for c in s) % 26 == 0
+
+
+def _make_checksum26() -> str:
+    import random
+    import string
+    while True:
+        cand = "".join(random.choice(string.ascii_lowercase) for _ in range(10))
+        if _checksum26(cand):
+            return cand
+
+
+class _UnknownChecksum200RejectApp(http.server.BaseHTTPRequestHandler):
+    """THE RESIDUAL, rewritten as what it actually is (RP4). An unknown WHOLE-STRING CHECKSUM — here
+    sum(ord(c)-97) % 26 == 0 over 10 lowercase letters — whose reject lives INSIDE the target's own status
+    branch: valid ⇒ 200 {"k":null} (the route's not-found body), invalid ⇒ 200 {"error":"bad"}.
+
+    Why the twin search cannot reach it: the constraint couples ALL positions, so changing any ONE character
+    shifts the sum by a non-zero value mod 26 and the neighbour is always rejected. No minimal-edit-distance
+    sibling is accepted, so none can return the target's body, so no twin exists to find. The prefix /
+    suffix / positional validators above are all closed; only a joint-across-positions checksum VIGIL does
+    not know survives, and only while it is not one of the well-known ones (_known_validators)."""
 
     def log_message(self, *a):  # noqa: D401
         pass
 
     def do_GET(self):  # noqa: N802
-        m = re.match(r"^/item/([0-9A-Za-z]{10})/?$", self.path.split("?")[0])
+        m = re.match(r"^/k/([a-z]{10})/?$", self.path.split("?")[0])
         if not m:
             body, code = b"nf", 404
         else:
-            body, code = ((b'{"item":null}', 200) if m.group(1).startswith("ZQ")
-                          else (b'{"error":"bad"}', 200))
+            body, code = ((b'{"k":null}', 200) if _checksum26(m.group(1)) else (b'{"error":"bad"}', 200))
         self.send_response(code)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
@@ -525,6 +580,13 @@ def _partially_varying_app():
             self.wfile.write(body)
 
     return _App
+
+
+def _handler(app):
+    """A table entry is either a handler CLASS or a zero-arg FACTORY that builds a fresh one (needed when
+    the fixture keeps per-server state, e.g. the arrival-indexed partially-varying app — a shared class
+    would leak its state across runs and change what the fixture models)."""
+    return app() if (not isinstance(app, type)) else app
 
 
 def _serve(handler):
@@ -591,8 +653,13 @@ def test_live_url_mints_a_signed_liveness_fact_that_reverifies_offline(monkeypat
     assert wl.outcome == "positive" and wl.target_status == 200 and wl.control_statuses == [200]
     assert wl.same_branch_controls >= 4
     low = wl.note.lower()
-    assert "distinguishable" in low and "not a claim that the endpoint is 'live'" in low  # NARROWED claim
-    assert "same-branch" in low
+    # THE CLAIM (RP4 BLOCK-4): only what the capture proves, and it says outright what it does not prove.
+    assert "differs from the server's stable same-status response" in low
+    assert "no minimal-edit-distance sibling" in low
+    assert "asserts nothing about" in low and "existence or liveness" in low
+    asserted = low.partition("this asserts nothing about")[0]
+    for banned in ("not-found baseline", "soft-404", "live endpoint", "is live", "is real"):
+        assert banned not in asserted, f"the claim still asserts {banned!r}: {wl.note}"
     # the FACT re-verifies OFFLINE from the retained JSON-safe capture — no network, no VIGIL runner
     assert verify_certificate(wl.fact.signed, oracle_context=wl.context, trust_root=tr).ok is True
 
@@ -637,6 +704,14 @@ _SOFT_404_CLASSES = [
     (_Luhn200RejectApp, "/card/4111111111111111", "Luhn route, reject INSIDE the target's branch (RP3)"),
     (_Base58_200RejectApp, "/obj/3vQB7fMrk9xZa5dCFg2h", "base58 route, reject INSIDE the branch (RP3)"),
     (_StrictValidatorApp, "/item/005", "strict validator, < floor valid controls (RP3 fail-closed)"),
+    # RP4 — the classes the 3rd round shipped as MINTING. Each is a nonexistent URL; each is now a LEAD.
+    # They go in THIS table deliberately: it is the table the httpx and ffuf legs are parametrized over,
+    # and "the two classes that still mint are exactly the two the runner legs never exercise" was the
+    # gap that let them ship.
+    (_prefix_validator_app, "/item/ZQabcdefgh", "unknown PREFIX validator, 200 reject in-branch (RP4)"),
+    (_suffix_validator_app, "/item/abcdefghQZ", "unknown SUFFIX validator, 200 reject in-branch (RP4)"),
+    (_positional_validator_app, "/item/abcdKfghij", "unknown POSITIONAL validator, 200 reject (RP4)"),
+    (_partially_varying_app, "/x/wxyz", "partially-varying not-found space (RP4)"),
 ]
 
 
@@ -647,7 +722,7 @@ def test_soft_404_classes_mint_no_liveness_fact(app, path, label, monkeypatch, t
     _charter(tmp_path, "127.0.0.1")
     from vigil_integration.live.web_redrive import endpoint_liveness_redrive
     signers, _ = _signers_and_trust()
-    srv = _serve(app)
+    srv = _serve(_handler(app))
     port = srv.server_address[1]
     try:
         wl = endpoint_liveness_redrive(f"http://127.0.0.1:{port}{path}",
@@ -737,7 +812,7 @@ def test_checksum_route_leads_for_the_RIGHT_reason_target_matches_the_true_not_f
         assert wl.same_branch_controls >= _MIN_LIVENESS_CONTROLS, (
             f"{app.__name__}: validator-aware controls must land IN the route's accepted set "
             f"(got {wl.same_branch_controls} in-branch) — the route was only refused by the floor")
-        assert "matches the same-branch not-found baseline" in wl.note.lower(), wl.note
+        assert "identical to the same-branch sibling baseline" in wl.note.lower(), wl.note
 
 
 def test_validator_aware_controls_satisfy_every_validator_the_target_satisfies():
@@ -764,13 +839,19 @@ def test_a_control_unstable_inside_the_targets_own_branch_fails_the_run_closed(m
     """A bounded not-found body space that is stable for MOST siblings and varies for the rest: discarding
     the varying controls would leave a unanimous FLUKE baseline the (nonexistent) target differs from — a
     false FACT. An unstable control inside the target's own status branch is AMBIGUOUS and fails the whole
-    run closed. 20 runs, 0 FACTs."""
+    run closed.
+
+    300 RUNS, not 20 (RP4 BLOCK-2). At _LIVENESS_RESAMPLES=2 this class still minted 7/300 = 2.3% — and a
+    20-iteration test passes ~62% of the time against a 2.3% rate, which is why it shipped green twice. The
+    per-control misclassification bound is b^(1-k) (b=2, k=2 ⇒ 1/2; k=4 ⇒ 1/8), and a false FACT needs
+    EVERY varying control misclassified AND landing on the deterministic value AND no twin probe returning
+    the target's body."""
     _grant_active_recon(monkeypatch)
     _charter(tmp_path, "127.0.0.1")
     from vigil_integration.live.web_redrive import endpoint_liveness_redrive
     signers, _ = _signers_and_trust()
     facts, notes = 0, []
-    for _ in range(20):
+    for _ in range(300):
         srv = _serve(_partially_varying_app())
         port = srv.server_address[1]
         try:
@@ -780,7 +861,7 @@ def test_a_control_unstable_inside_the_targets_own_branch_fails_the_run_closed(m
             srv.shutdown()
         facts += 1 if wl.is_fact else 0
         notes.append(wl.note)
-    assert facts == 0, f"a fluke baseline from unstable controls minted {facts}/20 false FACTs: {notes[:2]}"
+    assert facts == 0, f"a fluke baseline from unstable controls minted {facts}/300 false FACTs: {notes[:2]}"
     assert any("ambiguous" in n.lower() for n in notes), notes[:2]
 
 
@@ -811,7 +892,8 @@ def test_the_predicate_proves_the_partition_and_refuses_a_cherry_picked_one():
     the target's status does not; (c) an in-branch control whose body differs from the anchor does not;
     (d) a partition with no in-branch control does not (the anchor var is absent)."""
     from framework.v2.verify.oracles import predicate_oracle
-    from vigil_integration.live.web_redrive import _MIN_LIVENESS_CONTROLS, _build_liveness_predicate
+    from vigil_integration.live.web_redrive import (_MIN_LIVENESS_CONTROLS, _MIN_TWIN_PROBES,
+                                                    _build_liveness_predicate)
 
     n_in = _MIN_LIVENESS_CONTROLS
     in_blocks = [[2 * k, 2 * k + 1] for k in range(n_in)]
@@ -823,8 +905,23 @@ def test_the_predicate_proves_the_partition_and_refuses_a_cherry_picked_one():
             ev[f"control_{k}_status"], ev[f"control_{k}_sha"] = 200, "NOTFOUND"
     for k in off_blocks[0]:
         ev[f"control_{k}_status"], ev[f"control_{k}_sha"] = 404, "REJECT"
-    pred = _build_liveness_predicate(in_blocks, off_blocks, 3, _MIN_LIVENESS_CONTROLS)
+    n_probes = _MIN_TWIN_PROBES
+    probes = list(range(n_probes))
+    for k in probes:
+        ev[f"probe_{k}_status"], ev[f"probe_{k}_sha"] = 200, f"NEIGHBOUR{k}"
+    ev["twin_probes"] = n_probes
+    pred = _build_liveness_predicate(in_blocks, off_blocks, probes, 3, _MIN_LIVENESS_CONTROLS,
+                                     _MIN_TWIN_PROBES)
     assert predicate_oracle(ev, pred).fired is True                      # (a)
+
+    twin = dict(ev)                                                      # (a2) NO-TWIN: one neighbour came
+    twin["probe_0_sha"] = ev["target_0_sha"]                             #      back with the target's body
+    assert predicate_oracle(twin, pred).fired is False
+    dead = dict(ev)                                                      # (a3) a neighbour never answered
+    dead["probe_1_status"] = 0
+    assert predicate_oracle(dead, pred).fired is False
+    thin = dict(ev, twin_probes=_MIN_TWIN_PROBES - 1)                     # (a4) neighbourhood not searched
+    assert predicate_oracle(thin, pred).fired is False
 
     cherry = dict(ev)                                                    # (b) the "discarded" control was
     for k in off_blocks[0]:                                              #     really IN the target's branch
@@ -835,50 +932,197 @@ def test_the_predicate_proves_the_partition_and_refuses_a_cherry_picked_one():
     disagree[f"control_{in_blocks[-1][0]}_sha"] = "OTHER"
     assert predicate_oracle(disagree, pred).fired is False
 
-    empty = _build_liveness_predicate([], off_blocks, 3, _MIN_LIVENESS_CONTROLS)   # (d)
+    empty = _build_liveness_predicate([], off_blocks, probes, 3, _MIN_LIVENESS_CONTROLS,
+                                      _MIN_TWIN_PROBES)                  # (d)
     assert predicate_oracle({**ev, "same_branch_controls": 0}, empty).fired is False
     assert predicate_oracle({**ev, "same_branch_controls": 99}, empty).fired is False
 
 
-def test_unknown_in_branch_validation_reject_is_the_documented_irreducible_residual(monkeypatch, tmp_path):
-    """THE RESIDUAL, pinned honestly rather than hidden. An APP-SPECIFIC validator VIGIL cannot know, whose
-    reject lives INSIDE the target's own status branch, produces a capture that is structurally IDENTICAL to
-    the legitimate case this FACT exists for (a real endpoint whose same-shape siblings all soft-404 with one
-    uniform body): same in-branch count, same off-branch count, target distinguishable by body. No rule over
-    same-class observations can LEAD on one without LEADing on the other, so the honest handling is (1) the
-    FACT states only the narrowed claim the capture proves and never 'live'/'real'/'exists', (2) the note
-    names the residual, and (3) the branch's limitations record it. All three are asserted here."""
+@pytest.mark.parametrize("factory,path,label", [
+    (_prefix_validator_app, "/item/ZQabcdefgh", "unknown PREFIX validator"),
+    (_suffix_validator_app, "/item/abcdefghQZ", "unknown SUFFIX validator"),
+    (_positional_validator_app, "/item/abcdKfghij", "unknown POSITIONAL validator"),
+])
+def test_unknown_in_branch_validator_is_closed_by_the_no_twin_cohort_over_80_runs(
+        factory, path, label, monkeypatch, tmp_path):
+    """RP4 BLOCK-1 — the class the previous round shipped as an "irreducible" residual, minting 39/40 for a
+    NONEXISTENT url. It is not irreducible: the uniform-random cohort maximises INDEPENDENCE from the
+    target, which on a validating route guarantees every control lands in the REJECT set, so the "baseline"
+    is a reject baseline. The MINIMAL-EDIT-DISTANCE cohort does the opposite — each probe differs from the
+    target at exactly ONE position, so it stays inside the validity neighbourhood of a prefix / suffix /
+    positional rule, returns the route's own not-found body, and NO-TWIN kills the FACT. 80 runs, 0 FACTs,
+    and the LEAD must say a twin was found (the right reason, not an accident)."""
     _grant_active_recon(monkeypatch)
     _charter(tmp_path, "127.0.0.1")
     from vigil_integration.live.web_redrive import endpoint_liveness_redrive
     signers, _ = _signers_and_trust()
+    srv = _serve(factory())
+    port = srv.server_address[1]
+    facts, twins, searched = 0, 0, 0
+    try:
+        for _ in range(80):
+            wl = endpoint_liveness_redrive(f"http://127.0.0.1:{port}{path}",
+                                           slug="alpha", engagement_slug="alpha", signers=signers)
+            facts += 1 if wl.is_fact else 0
+            twins += 1 if wl.twin_found else 0
+            searched += 1 if wl.twin_probes else 0
+    finally:
+        srv.shutdown()
+    assert facts == 0, f"{label}: minted {facts}/80 false FACTs for a NONEXISTENT url"
+    # The RIGHT reason, stated exactly. A run only REACHES the twin search when the baseline cohort itself
+    # formed; on a positional rule roughly one run in six instead draws a control the route ACCEPTS, the
+    # baseline is then not unanimous and the run LEADs earlier. EVERY run that did reach the search must
+    # have found a twin — that is the cohort doing the work, and it is what makes this class 0, not luck.
+    assert searched >= 40, f"{label}: only {searched}/80 runs reached the twin search"
+    assert twins == searched, (f"{label}: {searched} runs searched the neighbourhood but only {twins} found "
+                               f"a twin — the minimal-edit-distance cohort is not closing this class")
 
-    def _drive(app, path):
-        srv = _serve(app)
-        port = srv.server_address[1]
-        try:
-            return endpoint_liveness_redrive(f"http://127.0.0.1:{port}{path}",
-                                             slug="alpha", engagement_slug="alpha", signers=signers)
-        finally:
-            srv.shutdown()
 
-    residual = _drive(_UnknownValidator200RejectApp, "/item/ZQabcdefgh")
-    legit = _drive(_SoftLiveApp, "/live")
-    # (0) the two captures are structurally the same observation — the irreducibility itself.
-    assert legit.is_fact and legit.same_branch_controls == residual.same_branch_controls
-    if residual.is_fact:
-        low = residual.note.lower()
-        # (1) never an existence claim ...
-        assert "not a claim that the endpoint is 'live'/real/exists" in low, residual.note
-        # (2) ... and the residual is named in the FACT's own note.
-        assert "residual:" in low and "same status branch" in low, residual.note
-    # (3) the branch's limitation entry records the class.
+def test_the_twin_cohort_is_a_search_only_and_never_counts_toward_the_control_floor():
+    """The Hamming-1 probes must NEVER be mistaken for baseline controls: counting them would let a
+    sub-floor run (too few same-branch siblings) be pushed OVER the floor by probes that were never
+    classified into a branch at all. Assert the two cohorts are built by different functions, that the
+    predicate's floor clause reads the CONTROL count only, and that a probe index can only ever appear in a
+    NEGATIVE (no-twin) clause."""
+    import json as _json
+    from vigil_integration.live.web_redrive import (_MIN_LIVENESS_CONTROLS, _MIN_TWIN_PROBES,
+                                                    _build_liveness_predicate, _hamming1_probe_urls,
+                                                    _liveness_control_urls)
+    url = "http://h/item/ZQabcdefgh"
+    controls, probes = _liveness_control_urls(url), _hamming1_probe_urls(url)
+    assert len(controls) >= _MIN_LIVENESS_CONTROLS and len(probes) >= _MIN_TWIN_PROBES
+    assert not (set(controls) & set(probes)), "the two cohorts must be distinct URL sets"
+    pred = _build_liveness_predicate([[0, 1], [2, 3]], [[4, 5]], [0, 1, 2], 3,
+                                     _MIN_LIVENESS_CONTROLS, _MIN_TWIN_PROBES)
+    blob = _json.dumps(pred)
+    assert '"same_branch_controls"' in blob and '"twin_probes"' in blob
+    # A probe may appear POSITIVELY only as a channel check (ge status 100); every probe BODY-HASH
+    # reference must sit inside a NOT(eq(...)), i.e. it can only ever REFUSE a fact, never support one.
+    for clause in pred["all"]:
+        txt = _json.dumps(clause)
+        if "probe_" not in txt:
+            continue
+        if "not" in clause:
+            assert "_sha" in txt, clause            # the no-twin refusal
+        else:
+            assert clause.get("ge", [None, None])[1] == 100 and "_status" in txt, clause
+    # and the CONTROL floor is read off the CONTROL count — the probe count has its own, separate clause,
+    # so no number of probes can ever satisfy the baseline floor.
+    ge_by_var = {c["ge"][0]["var"]: c["ge"][1] for c in pred["all"]
+                 if "ge" in c and isinstance(c["ge"][0], dict) and "var" in c["ge"][0]}
+    assert ge_by_var.get("same_branch_controls") == _MIN_LIVENESS_CONTROLS
+    assert ge_by_var.get("twin_probes") == _MIN_TWIN_PROBES
+
+
+def test_the_no_twin_rule_is_bound_into_the_offline_predicate(monkeypatch, tmp_path):
+    """NO-TWIN is part of the PROOF, not a runner-side afterthought: rewrite one retained probe's body-hash
+    to the target's in the authenticated context and the certificate must STOP verifying."""
+    _grant_active_recon(monkeypatch)
+    _charter(tmp_path, "127.0.0.1")
+    from framework.v2.evidence.certify import verify_certificate
+    from vigil_integration.live.web_redrive import endpoint_liveness_redrive
+    signers, tr = _signers_and_trust()
+    srv = _serve(_SoftLiveApp)
+    port = srv.server_address[1]
+    try:
+        wl = endpoint_liveness_redrive(f"http://127.0.0.1:{port}/live",
+                                       slug="alpha", engagement_slug="alpha", signers=signers)
+    finally:
+        srv.shutdown()
+    assert wl.is_fact and wl.twin_probes >= 4 and wl.twin_found is False
+    assert verify_certificate(wl.fact.signed, oracle_context=wl.context, trust_root=tr).ok is True
+    tampered = json.loads(json.dumps(wl.context))
+    tampered["observed_evidence"]["probe_0_sha"] = tampered["observed_evidence"]["target_0_sha"]
+    assert verify_certificate(wl.fact.signed, oracle_context=tampered, trust_root=tr).ok is False
+
+
+def test_the_claim_travels_in_the_signed_certificate_and_the_token_does_not_overclaim(monkeypatch, tmp_path):
+    """RP4 BLOCK-3 — a note the runner drops is not a disclosure. What a consumer actually receives must
+    carry the narrowing: (1) the bug-class TOKEN is not `endpoint_liveness` (a token that asserts liveness
+    at 0.9 is exactly the overclaim), (2) the claim SENTENCE is bound into the SIGNED certificate and the
+    signature covers it (editing it breaks verification), and (3) the AdapterResult carries it too."""
+    _grant_active_recon(monkeypatch)
+    _charter(tmp_path, "127.0.0.1")
+    from framework.v2.evidence.certify import verify_certificate
+    from vigil_integration.live.web_redrive import ENDPOINT_LIVENESS_BUG_CLASS, endpoint_liveness_redrive
+    signers, tr = _signers_and_trust()
+    srv = _serve(_SoftLiveApp)
+    port = srv.server_address[1]
+    try:
+        wl = endpoint_liveness_redrive(f"http://127.0.0.1:{port}/live",
+                                       slug="alpha", engagement_slug="alpha", signers=signers)
+    finally:
+        srv.shutdown()
+    assert wl.is_fact
+    assert ENDPOINT_LIVENESS_BUG_CLASS == "sibling_response_differential"
+    assert wl.fact.bug_class == ENDPOINT_LIVENESS_BUG_CLASS != "endpoint_liveness"
+    cert = wl.fact.signed.certificate
+    assert cert.bug_class == "sibling_response_differential"
+    claims = [c.sentence for c in (cert.report_claims or [])]
+    assert claims, "the certificate carries NO claim — the consumer sees only a token again"
+    claim = claims[0]
+    # the ASSERTIVE half must not carry any of the falsified phrasings (the DISCLAIMER half is allowed to
+    # name them — "asserts nothing about not-found-ness, phantom-ness, existence or liveness" is the point).
+    asserted, _, disclaimed = claim.lower().partition("this asserts nothing about")
+    assert disclaimed, "the claim must carry its own disclaimer"
+    for banned in ("live endpoint", "phantom of", "not-found baseline", "endpoint exists",
+                   "is live", "is real", "soft-404"):
+        assert banned not in asserted, f"the bound claim still asserts {banned!r}: {claim}"
+    low_claim = claim.lower()
+    assert "differs from the server's stable same-status response" in low_claim
+    assert "no minimal-edit-distance sibling" in low_claim
+    assert "asserts nothing about" in low_claim
+    assert wl.fact.note == claim and wl.note == claim
+    # the signature covers the sentence: flip it and verification fails.
+    assert verify_certificate(wl.fact.signed, oracle_context=wl.context, trust_root=tr).ok is True
+    forged = wl.fact.signed.model_copy(update={"certificate": cert.model_copy(update={"report_claims": [
+        type(cert.report_claims[0])(sentence="this endpoint is live and real",
+                                    bug_class=cert.bug_class, render_as="analyst-commentary")]})})
+    assert verify_certificate(forged, oracle_context=wl.context, trust_root=tr).ok is False
+
+
+def test_the_unknown_whole_string_checksum_is_the_remaining_residual(monkeypatch, tmp_path):
+    """THE RESIDUAL, rewritten as what it actually is (RP4). The twin search closes every validator whose
+    constraint is LOCAL (prefix / suffix / positional / format): some Hamming-1 neighbour is still accepted
+    and returns the target's own body. What survives is an unknown validator that constrains the identifier
+    JOINTLY ACROSS POSITIONS — a whole-string checksum — so that NO minimal-edit-distance neighbour is
+    accepted and there is no twin to find. This test pins that (a) the class does still mint, honestly, so
+    nobody can claim it is closed; (b) what it mints is the narrowed claim, which is LITERALLY TRUE here
+    (the target's body does differ from the stable sibling response, and no neighbour returned it); and
+    (c) the limitation entry says exactly this and no longer says the class cannot be closed."""
+    _grant_active_recon(monkeypatch)
+    _charter(tmp_path, "127.0.0.1")
+    from vigil_integration.live.web_redrive import endpoint_liveness_redrive
+    signers, _ = _signers_and_trust()
+    srv = _serve(_UnknownChecksum200RejectApp)
+    port = srv.server_address[1]
+    facts, notes = 0, []
+    try:
+        for _ in range(12):
+            wl = endpoint_liveness_redrive(f"http://127.0.0.1:{port}/k/{_make_checksum26()}",
+                                           slug="alpha", engagement_slug="alpha", signers=signers)
+            facts += 1 if wl.is_fact else 0
+            notes.append(wl.note)
+            if wl.is_fact:
+                low = wl.note.lower()
+                assert "asserts nothing about" in low and "existence or liveness" in low, wl.note
+                assert "no minimal-edit-distance sibling" in low, wl.note
+    finally:
+        srv.shutdown()
+    assert facts > 0, ("the whole-string-checksum residual did not reproduce — if it is genuinely closed, "
+                       "say so in the docs instead of keeping a residual entry")
+    # the docs must describe THIS class, and must no longer carry the falsified irreducibility sentences.
     root = Path(__file__).resolve().parents[2]
     doc = json.loads((root / "docs" / "capability-matrix" / "evidence-branches.json").read_text())
     entry = next(b for b in doc["branches"] if b["id"] == "achieved_state.endpoint_liveness")
-    lim = entry["limitation"].lower()
-    assert "residual" in lim and "app-specific" in lim and "same status branch" in lim, entry["limitation"]
-    assert "irreducible" in lim, entry["limitation"]
+    lim = entry["limitation"]
+    low = lim.lower()
+    assert "jointly across positions" in low and "whole-string checksum" in low, lim
+    assert "minimal-edit-distance" in low, lim
+    for falsified in ("cannot be closed by any observation of this kind",
+                      "any rule that refused it would also refuse every true positive",
+                      "irreducible"):
+        assert falsified not in low, f"the limitation still carries the FALSIFIED sentence {falsified!r}"
 
 
 def test_block3_special_cased_error_is_a_true_narrowed_fact_not_an_overclaim(monkeypatch, tmp_path):
@@ -900,9 +1144,13 @@ def test_block3_special_cased_error_is_a_true_narrowed_fact_not_an_overclaim(mon
     assert wl.is_fact, f"a distinguishable special-cased response is a narrowed FACT; got {wl.outcome} {wl.note}"
     assert verify_certificate(wl.fact.signed, oracle_context=wl.context, trust_root=tr).ok is True
     low = wl.note.lower()
-    # the narrowed claim states 'distinguishable' and explicitly DISCLAIMS 'live'/'real' — no overclaim.
-    assert "distinguishable" in low, "the narrowed claim must state 'distinguishable from a not-found baseline'"
-    assert "not a claim that the endpoint is 'live'" in low, "the note must disclaim 'live'/'real'"
+    # the claim states the DIFFERENTIAL and the twin search, and disclaims existence/liveness outright.
+    assert "differs from the server's stable same-status response" in low, wl.note
+    assert "no minimal-edit-distance sibling" in low, wl.note
+    assert "asserts nothing about" in low and "existence or liveness" in low, wl.note
+    asserted = low.partition("this asserts nothing about")[0]
+    for banned in ("not-found baseline", "soft-404", "live endpoint", "is live", "is real"):
+        assert banned not in asserted, f"the claim still asserts {banned!r}: {wl.note}"
 
 
 def test_numeric_route_live_id_still_mints_a_fact(monkeypatch, tmp_path):
@@ -1002,7 +1250,7 @@ def test_web_tool_live_url_mints_a_fact_through_the_runner(tool, canned, monkeyp
     srv = _serve(_SoftLiveApp)          # /live real content vs a same-branch (200) soft-404 baseline
     port = srv.server_address[1]
     url = f"http://127.0.0.1:{port}/live"
-    spec = httpx_url_scan() if tool == "httpx" else ffuf_content_scan(wordlist="/tmp/wl.txt")
+    spec = httpx_url_scan() if tool == "httpx" else ffuf_content_scan(wordlist="")
     try:
         res = run_external_tool(spec, "127.0.0.1", scope_gate=_scope_gate(["127.0.0.1"]),
                                 backend=_CannedBackend(canned(url)), engagement_slug="alpha",
@@ -1029,10 +1277,10 @@ def test_web_tool_soft_404_classes_are_a_lead_through_the_runner(tool, canned, a
     _charter(tmp_path, "127.0.0.1")
     from vigil_integration.live.external_tool import ffuf_content_scan, httpx_url_scan, run_external_tool
     signers, _ = _signers_and_trust()
-    srv = _serve(app)
+    srv = _serve(_handler(app))
     port = srv.server_address[1]
     url = f"http://127.0.0.1:{port}{path}"
-    spec = httpx_url_scan() if tool == "httpx" else ffuf_content_scan(wordlist="/tmp/wl.txt")
+    spec = httpx_url_scan() if tool == "httpx" else ffuf_content_scan(wordlist="")
     try:
         res = run_external_tool(spec, "127.0.0.1", scope_gate=_scope_gate(["127.0.0.1"]),
                                 backend=_CannedBackend(canned(url)), engagement_slug="alpha",
@@ -1043,6 +1291,36 @@ def test_web_tool_soft_404_classes_are_a_lead_through_the_runner(tool, canned, a
     assert res.proposed, "the tool must still PROPOSE the URL"
     assert res.facts == [], f"{label} via {tool}: must mint NO liveness FACT (the tool's say-so never confirms)"
     assert any(o.get("outcome") == "inconclusive" for o in res.outcomes)
+
+
+@pytest.mark.parametrize("tool,canned", [("httpx", _httpx_jsonl), ("ffuf", _ffuf_report)])
+@pytest.mark.parametrize("factory,path,label", [
+    (_prefix_validator_app, "/item/ZQabcdefgh", "unknown PREFIX validator, 200 reject in-branch"),
+    (_partially_varying_app, "/x/wxyz", "partially-varying not-found space"),
+])
+def test_rp4_classes_are_a_lead_through_the_runner_legs_over_80_runs(tool, canned, factory, path, label,
+                                                                     monkeypatch, tmp_path):
+    """RP4 — the two classes that were still minting are exactly the two the runner legs never exercised, so
+    prove them THROUGH the legs, and at volume: single-shot leg coverage would have missed a 2.3% rate.
+    80 runs per class per leg, 0 FACTs."""
+    _grant_active_recon(monkeypatch)
+    _charter(tmp_path, "127.0.0.1")
+    from vigil_integration.live.external_tool import ffuf_content_scan, httpx_url_scan, run_external_tool
+    signers, _ = _signers_and_trust()
+    spec = httpx_url_scan() if tool == "httpx" else ffuf_content_scan(wordlist="")
+    facts = 0
+    for _ in range(80):
+        srv = _serve(factory())          # a FRESH server each run: the fixture's state is per-server
+        port = srv.server_address[1]
+        url = f"http://127.0.0.1:{port}{path}"
+        try:
+            res = run_external_tool(spec, "127.0.0.1", scope_gate=_scope_gate(["127.0.0.1"]),
+                                    backend=_CannedBackend(canned(url)), engagement_slug="alpha",
+                                    signers=signers, timeout=30.0)
+        finally:
+            srv.shutdown()
+        facts += len(res.facts)
+    assert facts == 0, f"{label} via {tool}: minted {facts} FACT(s) over 80 runs for a NONEXISTENT url"
 
 
 @pytest.mark.parametrize("tool,canned", [("httpx", _httpx_jsonl), ("ffuf", _ffuf_report)])
@@ -1057,7 +1335,7 @@ def test_web_tool_numeric_route_live_id_still_a_fact_through_the_runner(tool, ca
     srv = _serve(_NumericRouteLiveApp)
     port = srv.server_address[1]
     url = f"http://127.0.0.1:{port}/api/users/1"
-    spec = httpx_url_scan() if tool == "httpx" else ffuf_content_scan(wordlist="/tmp/wl.txt")
+    spec = httpx_url_scan() if tool == "httpx" else ffuf_content_scan(wordlist="")
     try:
         res = run_external_tool(spec, "127.0.0.1", scope_gate=_scope_gate(["127.0.0.1"]),
                                 backend=_CannedBackend(canned(url)), engagement_slug="alpha",
@@ -1097,7 +1375,7 @@ def test_web_tool_passes_the_full_conformance_battery(tool, monkeypatch, tmp_pat
         pos_backend = _CannedBackend(_httpx_jsonl(live_url))
         dec_backend = _CannedBackend(_httpx_jsonl(dead_url))
     else:
-        spec = ffuf_content_scan(wordlist="/tmp/wl.txt")
+        spec = ffuf_content_scan(wordlist="")
         pos_backend = _CannedBackend(_ffuf_report(live_url))
         dec_backend = _CannedBackend(_ffuf_report(dead_url))
 
@@ -1120,6 +1398,45 @@ def test_web_tool_passes_the_full_conformance_battery(tool, monkeypatch, tmp_pat
     assert report.conformant, report.summary() + " | notes: " + "; ".join(report.notes)
     for prop in REQUIRED_PROPERTIES:
         assert report.checks.get(prop) is True, f"{tool}: {prop} not satisfied: {report.summary()}"
+
+
+# ===================================================================================================
+# SAFETY (RP4 BLOCK-5): a brain/params-supplied VALUE must never reach an argv unvalidated.
+# ===================================================================================================
+def test_a_hostile_scheme_or_wordlist_is_refused_before_any_argv_or_send(monkeypatch, tmp_path):
+    """The ScopeGate authorises the HOST STRING and the runner then EXECUTES the argv, so a scheme that
+    carries its own authority — ``http://attacker.test/x#`` — put a packet on an OUT-OF-SCOPE host before
+    the FACT-side host pin could refuse anything: ``httpx -u http://attacker.test/x#://127.0.0.1/``. The
+    same argv seam takes ``wordlist``. Both must be refused at ToolSpec construction, BEFORE any argv
+    exists and therefore before any send, and the brain path must turn that refusal into a blocked LEAD."""
+    from vigil_integration.brains.hexstrike_body import _spec_for_kind
+    from vigil_integration.live.external_tool import ffuf_content_scan, httpx_url_scan
+
+    hostile_schemes = ["http://attacker.test/x#", "https://evil", "file", "javascript",
+                       "http\nx", "http://127.0.0.1@evil.test", "ht tp", ""]
+    for bad in hostile_schemes:
+        with pytest.raises(ValueError):
+            httpx_url_scan(scheme=bad)
+        with pytest.raises(ValueError):          # ... and through the brain seam the body actually uses
+            _spec_for_kind("httpx", {"scheme": bad})
+    hostile_wordlists = ["/etc/passwd", "-u", "--help", "/usr/share/wordlists/../../etc/shadow",
+                         "/usr/share/wordlists/a b.txt", "/usr/share/wordlists/x;id", "relative.txt",
+                         "/usr/share/wordlists/$(id)"]
+    for bad in hostile_wordlists:
+        with pytest.raises(ValueError):
+            ffuf_content_scan(wordlist=bad)
+        with pytest.raises(ValueError):
+            _spec_for_kind("ffuf", {"wordlist": bad})
+    # the legitimate values still build, and the argv they build has exactly ONE authority — the target.
+    argv = httpx_url_scan(scheme="https").build_argv("127.0.0.1")
+    assert argv[argv.index("-u") + 1] == "https://127.0.0.1/"
+    assert sum(tok.count("://") for tok in argv) == 1
+    argv = ffuf_content_scan(wordlist="/usr/share/wordlists/dirb/common.txt").build_argv("127.0.0.1")
+    assert argv[argv.index("-u") + 1] == "http://127.0.0.1/FUZZ"
+    assert argv[argv.index("-w") + 1] == "/usr/share/wordlists/dirb/common.txt"
+    assert sum(tok.count("://") for tok in argv) == 1
+    # and the default (no params at all) is still buildable through the brain seam.
+    assert _spec_for_kind("httpx", {}) is not None and _spec_for_kind("ffuf", {}) is not None
 
 
 # ===================================================================================================

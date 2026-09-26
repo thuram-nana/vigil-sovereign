@@ -95,8 +95,9 @@ def test_the_backfill_did_not_fake_fact_capability():
     conformance battery — never a faked claim. The H4 backfill added LEAD-only/UNAVAILABLE rows only; the H5
     reuse (masscan/rustscan/naabu) and its W1 batch-2 promotion (zmap/unicornscan) each earned their FACT via
     live.conformance.run_toolspec_conformance over VIGIL's own gated handshake, and the W2 web-discovery
-    promotion (httpx/ffuf) earned theirs via the endpoint-liveness re-drive (VIGIL's own gated GET + a
-    not-found control), not by editing this pin."""
+    promotion (httpx/ffuf) earned theirs via the sibling_response_differential re-drive (VIGIL's own gated
+    GETs plus a same-status sibling baseline and a minimal-edit-distance twin search — NOT "a not-found
+    control"), not by editing this pin."""
     fact = {m.name for m in _manifests() if m.fact_capable}
     assert fact == {"nmap", "sslscan", "masscan", "rustscan", "naabu", "zmap", "unicornscan",
                     "httpx", "ffuf"}, (
@@ -143,12 +144,13 @@ def test_previously_missing_tools_including_two_adapted_ones_are_now_catalogued(
     }
     assert backfilled <= catalogued, f"still missing: {sorted(backfilled - catalogued)}"
     # nikto stays adapted-but-LEAD-only (a scanner report is a lead). ffuf was promoted in W2: it keeps its
-    # typed argv builder AND is now fact_capable via the runner-owned endpoint-liveness re-drive (VIGIL's own
-    # gated GET + a not-found control) — a builder alone still does not mint; the re-drive does.
+    # typed argv builder AND is now fact_capable via the runner-owned sibling_response_differential re-drive
+    # (VIGIL's own gated GETs + a same-status sibling baseline + a minimal-edit-distance twin search) — a
+    # builder alone still does not mint; the re-drive does.
     for adapted in ("ffuf", "nikto"):
         assert adapted in _BUILDERS, f"{adapted} was expected to have a typed argv builder"
     assert not _by_name()["nikto"].fact_capable, "nikto: a scanner report stays LEAD-only"
-    assert _by_name()["ffuf"].fact_capable, "ffuf: W2-promoted to fact_capable via the endpoint-liveness re-drive"
+    assert _by_name()["ffuf"].fact_capable, "ffuf: W2-promoted via the sibling-response-differential re-drive"
 
 
 # --- the honest bucket counts the sync-check reports (and pins) ---------------------------------------

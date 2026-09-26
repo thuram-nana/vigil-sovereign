@@ -40,7 +40,9 @@ def test_the_only_fact_capable_tools_are_the_ones_with_a_shipped_re_drive():
     # re-drive today. nmap + masscan/rustscan/naabu + zmap/unicornscan (the W1 batch-2 promotion) →
     # SERVICE_REACHABILITY (the H5 reuse; all six re-prove each proposed port with the runner's own gated
     # handshake); sslscan → TLS_WEAKNESS; httpx + ffuf (the W2 web-discovery promotion) → ACHIEVED_STATE (the
-    # endpoint-liveness re-drive: VIGIL's own gated GET + a not-found control). Growing this set is deliberate
+    # sibling_response_differential re-drive: VIGIL's own gated GETs of the URL plus TWO runner-built sibling
+    # cohorts — randomized same-shape siblings for the same-status baseline, and minimal-edit-distance
+    # siblings as a twin search; NOT "a not-found control"). Growing this set is deliberate
     # — each addition must PASS live.conformance.run_toolspec_conformance first.
     fact = {m.name for m in load_manifests(_MATRIX) if m.fact_capable}
     assert fact == {"nmap", "sslscan", "masscan", "rustscan", "naabu", "zmap", "unicornscan",
