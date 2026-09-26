@@ -92,10 +92,14 @@ _TIMING_PARAMS = ("id", "q", "query", "search", "name", "user", "uid", "item", "
 _SSTI_EXPR_TEMPLATES = ("{{{{{n1}*{n2}}}}}", "${{{n1}*{n2}}}", "#{{{n1}*{n2}}}", "{{{n1}*{n2}}}")
 # The TRUTH-VALUE ATTRIBUTION clause families live in ONE place — ``framework.v2.scanner.checks.
 # boolean_clause_families`` — next to the check that sends them and the invariants they must satisfy
-# (comparison-shape diversity, at least one SQL-EVALUATED pair a constant folder cannot decide,
-# breakout validity, truth-correctness, index-aligned length matching). They are built PER RUN with
-# randomised literals, so the clause set is not a public constant an operator can paste into an
-# exact-string blocklist. Imported lazily at use (FATAL-2: no framework import at module scope).
+# (comparison-shape diversity, breakout validity, truth-correctness, index-aligned length matching).
+# The set is a STABLE PUBLIC CONSTANT: two calls return the identical clauses, so a run is replayable
+# and the operator can grep their WAF/access logs for exactly these strings (constitution VI.4). A
+# previous revision randomised the literals per run to keep the set out of an exact-string blocklist;
+# that is retracted — measured worthless, and it pointed at a defender's control. What the clause set
+# does NOT do is close the truth-correlated-request-filter residual; that residual is OPEN, and the
+# measured ladder is on ``boolean_inference_oracle`` residual (a). Imported lazily at use (FATAL-2: no
+# framework import at module scope).
 # doses in SECONDS for the SLEEP payloads + the injected milliseconds the timing oracle expects.
 _TIMING_LOW_S, _TIMING_HIGH_S = 0.3, 0.6
 _TIMING_SLEEP_TEMPLATES = (
@@ -597,9 +601,9 @@ def boolean_redrive(url: str, *, slug: str, engagement_slug: str, signers: "list
     ``boolean_inference_oracle`` reaches its SPRT confirm boundary over N runner-crafted TRUTH-VALUE
     ATTRIBUTION rounds. Reuses the reviewed ``BooleanInferenceCheck`` discipline over VIGIL's OWN gated send:
     each round sends 7 DISTINCT always-TRUE clauses and 7 DISTINCT always-FALSE clauses (one
-    ``scanner.checks.boolean_clause_families`` entry — shape-varied, with one SQL-EVALUATED pair, and with
-    the literals randomised per run), each twice byte-identically, and signals only when the response is a
-    FUNCTION of the injected boolean's TRUTH VALUE — one TRUE cluster, one FALSE cluster, disjoint.
+    ``scanner.checks.boolean_clause_families`` entry — shape-varied, a stable public constant), each twice
+    byte-identically, and signals only when the response is a FUNCTION of the injected boolean's TRUTH
+    VALUE — one TRUE cluster, one FALSE cluster, disjoint.
 
     FP boundary (all → LEAD): an endpoint whose response varies INDEPENDENTLY of the input — coarse
     (low-cardinality), SKEWED, or high-entropy — cannot make 14 true-side and 14 false-side draws split
@@ -621,8 +625,11 @@ def boolean_redrive(url: str, *, slug: str, engagement_slug: str, signers: "list
     params = 12 attempts x a measured 7.98e-3 = ``~9.2%`` per URL, undisclosed. K was raised 4 -> 7 and the
     attempts halved 12 -> 6; going further trades against recall (every extra clause is another chance a real
     vulnerable target answers one of them differently and the round refutes). The OTHER residual — an
-    interposer that partitions the probes by a request property — is residual (a2) on the oracle; the clause
-    families answer the lexical and constant-folding forms of it and NAME what remains.
+    interposer that partitions the probes by a request property with no boolean channel behind it — is
+    residual (a) on the oracle and it is OPEN: the clause families make every INCOMPLETE filter refute, but a
+    filter COMPLETE over the shape set partitions them (measured 600/600 on a static page), and no clause set
+    can fix that, because a clause whose truth we know a priori is a constant expression a filter can fold
+    too. This arm is not sound against a filter purpose-built for this clause set.
 
     TRAFFIC BUDGET (constitution VI — this runs against live authorized production). Per param: ONE shared
     determinism baseline of 8 identical sends (determinism is a property of the ENDPOINT, not of the clause,
@@ -637,9 +644,8 @@ def boolean_redrive(url: str, *, slug: str, engagement_slug: str, signers: "list
     from framework.v2.verify.oracles import boolean_inference_oracle  # noqa: PLC0415
 
     bug_class = "boolean_sqli"
-    # Randomised ONCE per run: the literals are unpredictable to an exact-string blocklist of the
-    # public clause set. (That mitigates the BLOCKLIST attack only — the constant-folder attack is
-    # answered by the SQL-EVALUATED pair inside each family, a separate mitigation.)
+    # A STABLE PUBLIC CONSTANT — the same clauses every run, so the operator can correlate them in
+    # their logs and the run is replayable (see the header, and constitution VI.4).
     families = boolean_clause_families()
     res, send, state = _stat_setup(url, slug, bug_class, _BOOLEAN_BRANCH, timeout)
     if send is None:

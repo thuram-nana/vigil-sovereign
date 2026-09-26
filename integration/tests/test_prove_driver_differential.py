@@ -528,8 +528,11 @@ _REAL_ENG = "boolreal"
 # varying in COMPARISON SHAPE (`=`, `>`, `LIKE`, a compound), not merely in their literals. A set whose
 # truth value tracks one SURFACE feature (e.g. "both operands are the same token") is partitionable by a
 # regex WAF with no SQL engine at all; see the scanner-side lexical-filter regression.
-# ...and at least one SQL-EVALUATED pair whose truth needs EVALUATION, not constant folding: shape
-# diversity alone is partitionable by a complete constant folder with no SQL engine (measured 500/500).
+# The fifth pair is a subquery-membership shape, kept as a fifth SHAPE and nothing more: it shipped
+# under a claim that a constant folder "cannot decide it", and that claim is RETRACTED — over a
+# one-row constant SELECT, `LIT IN (SELECT LIT)` is literal equality, foldable in three lines. Shape
+# diversity buys refutation against every INCOMPLETE filter; a COMPLETE one partitions any such set
+# (measured 600/600 on a static page). That is residual (a) on the oracle, and it is OPEN.
 _TRUE_TEMPLATES = ("1' AND 1=1 -- {challenge}", "1' AND 'b'>'a' -- {challenge}",
                    "1' AND 'ab' LIKE 'a%' -- {challenge}", "1' AND 9>4 AND 2<5 -- {challenge}",
                    "1' AND 1 IN (SELECT 1) -- {challenge}")

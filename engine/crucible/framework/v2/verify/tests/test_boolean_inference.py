@@ -15,7 +15,17 @@ from __future__ import annotations
 
 import random
 
-from framework.v2.verify.oracles import _boolean_discriminator, boolean_inference_oracle
+from framework.v2.verify.oracles import boolean_inference_oracle
+
+try:  # pragma: no cover — this module is the FALSIFICATION leg for this fix, so it must stay
+    from framework.v2.verify.oracles import _boolean_discriminator   # COLLECTABLE against the
+except ImportError:  # pragma: no cover                              # pre-fix commits it indicts
+    # a97e982e / 59dba95e / 70c6b95a have no discriminator pin at all. Importing the private symbol
+    # at module scope made the whole module fail COLLECTION there — which kills the leg, because a
+    # test that cannot run cannot fail for the right reason. The pin's absence is asserted inside
+    # the one test that needs it instead, so the skewed / forced-pre-gate cells still run and still
+    # fail on those commits for the reason this fix exists.
+    _boolean_discriminator = None
 
 _MANY = {"status": 200, "body": "id=1\nid=2\nid=3\nid=4\nid=5 (all rows)"}
 _NONE = {"status": 200, "body": "no results"}
@@ -188,34 +198,63 @@ def test_the_deterministic_arbitrary_map_residual_is_real_and_is_disclosed() -> 
                                    false_baseline_samples=_baseline(v_b))
     assert sig.fired, "the disclosed deterministic-arbitrary-map residual is no longer reachable"
     doc = boolean_inference_oracle.__doc__ or ""
-    assert "DETERMINISTIC but ARBITRARY function of the request" in doc
+    assert "DETERMINISTIC but ARBITRARY function of the request — STATUS: OPEN" in doc, \
+        "residual (b) is no longer named, or no longer carries its explicit OPEN status token"
     # ...and the disclosure must NOT be dressed up as unobservable-in-principle. An earlier revision
     # claimed "no observation of the response can separate" and "RAISING K_T/K_F is the only lever";
     # both were measurably FALSE (a truth-correlated LEXICAL filter mints at rate 1.0 and is beaten by
-    # clause-SHAPE diversity, not by K). Keep those words out.
+    # clause-SHAPE diversity, not by K). Keep those words out. This list, like the one in the residual
+    # (a) test below, is a declared HEURISTIC tripwire over phrasings that have actually shipped here —
+    # the STATUS token above and this test's own behavioural half are the mechanism.
     for overclaim in ("IRREDUCIBLE RESIDUAL", "no observation of the response can separate",
                       "is the only lever"):
         assert overclaim not in doc, f"the oracle docstring re-states a refuted absolute: {overclaim!r}"
 
 
-def test_the_request_filter_failure_mode_is_disclosed_without_absolutes() -> None:
-    """The OTHER documented failure mode must stay documented — and must stay documented HONESTLY.
+def test_the_request_filter_residual_is_disclosed_as_open_with_its_measured_ladder() -> None:
+    """THE CLAIM-DISCIPLINE CHECK — and it is deliberately a MECHANISM now, not a wordlist.
 
-    An earlier revision of this test asserted the docstring contained "CLAUSE-SHAPE DIVERSITY" and
-    "``K`` is NOT a lever here", i.e. it PINNED the very absolute that measurement went on to refute
-    (a complete constant folder partitions a shape-varied but purely-foldable set perfectly). That
-    is the same anti-pattern as the deleted "IRREDUCIBLE" / "only lever" claims, so this test now
-    checks only that the mode is NAMED and that a RESIDUAL is named with it — never that any
-    particular mitigation is sufficient. The live behavioural regressions
-    (``scanner/tests/test_boolean_inference_check.py``: CRS-942130, the complete constant folder,
-    and the leave-one-shape-out sweep) are what actually hold the mechanism."""
+    What this replaces, and why. The previous version was a four-string DENYLIST ("no single surface
+    rule", "cannot be partitioned", "is the only lever", "no clause set can be partitioned"). It
+    failed on its first outing: the very next revision shipped four NEW absolutes — "WHAT CLOSES IT",
+    "A constant folder cannot decide it", "CLOSED, not merely disclosed", "the same complete folder
+    goes to 0" — every one phrased outside the list, every one green in CI. A denylist over prose
+    cannot hold this property. Two things can, and both are used:
+
+      1. A STATUS TOKEN per named residual (asserted here). Every residual in the docstring is
+         labelled ``STATUS: OPEN``. A future closure claim must then either FLIP the token — which
+         this test catches — or contradict it a few lines below it, which is a visible,
+         self-contradicting diff for a reviewer rather than a sentence that reads fine alone.
+      2. The LIVE behavioural regressions in ``scanner/tests/test_boolean_inference_check.py``, which
+         MEASURE the residual through the real mint path and fail if it stops reproducing. Those are
+         the real protection; the prose is checked here only so code and disclosure cannot drift.
+
+    The last assertion is an explicitly-declared HEURISTIC tripwire over closure phrasings that have
+    actually shipped in this file before. It is NOT a guarantee that no absolute can be written — no
+    string check can be — and it must not be relied on as one."""
     doc = boolean_inference_oracle.__doc__ or ""
-    assert "TRUTH-CORRELATED REQUEST FILTER" in doc, "the failure mode is no longer named"
-    assert "RESIDUAL (a2), NAMED NOT CLOSED" in doc, "the residual is no longer named with it"
-    # and no phrasing that asserts a mitigation is complete
+    # the mode is NAMED, and named as OPEN, with a machine-readable token
+    assert "(a) A TRUTH-CORRELATED REQUEST FILTER — STATUS: OPEN" in doc, \
+        "residual (a) is no longer named, or no longer carries its explicit OPEN status token"
+    assert "RESIDUAL (a2) — STATUS: OPEN" in doc, "residual (a2) lost its explicit OPEN status token"
+    assert "STATUS: CLOSED" not in doc, \
+        "a residual has been marked CLOSED — re-earn it with a measurement, or restore the token"
+    # the STRUCTURAL reason it is open, and the ladder that shows it being climbed, must both survive:
+    # without them a reader takes the next mitigation for a fix, which is how this went wrong twice.
+    assert "TREADMILL" in doc and "IS A CONSTANT EXPRESSION" in doc, \
+        "the structural reason residual (a) is open (a priori truth => constant expression) is gone"
+    assert "600/600" in doc and "2000/2000" in doc, "the measured ladder has been trimmed"
+    # (a) must not be quietly filed under (a2): (a) needs no SQL evaluator, only a constant folder.
+    assert "(a) is NOT a special case of" in doc, \
+        "the docstring no longer keeps residual (a) distinct from the out-of-reach (a2)"
+    # HEURISTIC tripwire — declared as such. Catches a repeat of a phrasing that has shipped here.
     for absolute in ("no single surface rule", "cannot be partitioned", "is the only lever",
-                     "no clause set can be partitioned"):
-        assert absolute not in doc, f"the docstring re-states an unmeasurable absolute: {absolute!r}"
+                     "no clause set can be partitioned", "WHAT CLOSES IT", "CLOSED, not merely",
+                     "a constant folder cannot decide", "A constant folder cannot decide"):
+        assert absolute not in doc, (
+            f"the docstring re-states a closure absolute this file has shipped before: {absolute!r}. "
+            "This list is a HEURISTIC tripwire, not a guarantee — the STATUS tokens above and the "
+            "live regressions in scanner/tests/test_boolean_inference_check.py are the mechanism.")
 
 
 def test_latency_alone_can_never_mint_a_boolean_fact() -> None:
@@ -289,6 +328,8 @@ def test_a_context_supplied_discriminator_cannot_tune_the_boolean_channel() -> N
     sig = boolean_inference_oracle(rounds, false_baseline_samples=_baseline(f),
                                    discriminator={"dimensions": ["lexical"], "lexical_threshold": 0.0})
     assert not sig.fired, "a fitted threshold passed straight to the oracle still tuned the channel"
+    assert _boolean_discriminator is not None, \
+        "the oracle does not pin the boolean discriminator at all (pre-fix tree)"
     assert _boolean_discriminator({"lexical_threshold": 0.0, "length_threshold": 0.0}) == {
         "dimensions": ["status", "length", "lexical"], "expect": "differ"}
 

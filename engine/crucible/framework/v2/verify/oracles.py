@@ -792,59 +792,87 @@ def boolean_inference_oracle(
     TWO THINGS THIS BOUND DOES NOT COVER. Both are real, both are demonstrated, and NEITHER is
     "impossible to observe" — an earlier revision of this docstring said so and was wrong:
 
-      (a) A TRUTH-CORRELATED REQUEST FILTER — an interposer that partitions the probes by a
-          property of the REQUEST that happens to track truth value, with no boolean channel
-          behind it at all. The bound above says nothing about this, because it is a property of
-          the CLAUSE SET, not of the page. Three measured points, in increasing strength:
+      (a) A TRUTH-CORRELATED REQUEST FILTER — STATUS: OPEN. An interposer that partitions the
+          probes by a property of the REQUEST that happens to track truth value, with no boolean
+          channel behind it at all. The bound above says nothing about this, because it is a
+          property of the CLAUSE SET, not of the page.
 
-            * A LEXICAL rule. If every TRUE clause is ``X = X`` and every FALSE clause is
-              ``X = Y``, a ModSecurity-CRS-942130-shape BACKREFERENCE rule — pure regex — blocks
-              exactly the TRUE side, and a STATIC non-vulnerable page behind it mints at RATE 1.0
-              (measured 2000/2000). ``K`` is no lever: every extra ``X = X`` matches the same
-              rule.
-            * An INCOMPLETE filter REFUTES. Because the shipped clauses of one truth value differ
-              in COMPARISON SHAPE (``=``, ``>``, a compound, ``LIKE``, ``<>``, ``BETWEEN``), a
-              filter that understands only some of them blocks only part of the TRUE side, the
-              WITHIN-TRUTH cluster stops agreeing, and the round refutes. Measured 0 for the
-              CRS-942130 rule and for equality-only, lexicographic-only, numeric-direction-only,
-              LIKE-prefix-only and generic block-any-OR/quote filters, and 0 in a
-              LEAVE-ONE-SHAPE-OUT sweep for every one of the six foldable shapes blinded.
-            * A COMPLETE filter does NOT refute, and shape diversity alone does not stop it. A
-              ~60-line CONSTANT FOLDER — tokenise, split on OR/AND, fold every literal-vs-literal
-              comparison, block if any top-level disjunct folds TRUE; still no SQL engine and no
-              DB — is complete over the foldable shapes and partitions a purely-foldable set
-              PERFECTLY, however many shapes it spans: measured 200/200 here and 500/500 by the
-              red-pen that found it. Saying shape diversity
-              made the set unpartitionable by "any single surface rule" was an absolute that
-              measurement refuted.
+          WHY IT IS OPEN, STRUCTURALLY — this is the part to read, not the ladder. The oracle needs
+          clauses whose truth value VIGIL knows A PRIORI: before the request is sent, without
+          touching the target's database. A predicate knowable that way IS A CONSTANT EXPRESSION,
+          and any constant expression the scanner can evaluate offline, a filter in front of a
+          static page can also evaluate offline. So no clause set removes this residual; a clause
+          set only raises the COMPLEXITY of the function the filter has to implement. Every
+          mitigation in this area is therefore a TREADMILL, and the measured ladder below is that
+          treadmill being climbed, one rung per revision.
 
-          WHAT CLOSES IT: at least one SQL-EVALUATED clause pair per family whose truth requires
-          EVALUATION rather than folding — the shipped ``{d} IN (SELECT {d})`` vs
-          ``{d} IN (SELECT {other})``. A constant folder cannot decide it, and whichever way it
-          guesses the round refutes: block both sides and the FALSE cluster disagrees, block
-          neither and the TRUE cluster does. Measured: the same complete folder goes from 200/200
-          on the foldable subset to 0/200 on the shipped set — and 0/200 again with the literals
-          randomised per run, as live runs build them.
+          THE LADDER, all measured through the REAL mint path against a STATIC, NON-VULNERABLE page
+          (no SQL anywhere, no boolean channel — every FACT is false by construction):
 
-          RESIDUAL (a2), NAMED NOT CLOSED: an interposer that genuinely EVALUATES the injected
-          expression (a WAF embedding a real SQL parser and evaluator, including subqueries) can
-          still partition the probes by truth value with no database behind it. That is the same
-          shape of limit as (b) — such an interposer IS computing the truth function this oracle
-          reads — and no clause set defeats it from the response side; it needs an out-of-band
-          channel (OOB/DNS, a side effect) to separate. Related and weaker: an EXACT-STRING
-          blocklist of the clause set. The drivers randomise the literals per run so the set is
-          not a public constant, which defeats that variant specifically — it does NOT help
-          against a filter that generalises, and the two mitigations must not be confused.
+            literal-only set (`X = X` / `X = Y`)   vs CRS-942130 backreference regex   2000/2000
+            shape-varied set                       vs the same CRS-942130 regex             0/2000
+            shape-varied FOLDABLE subset (K=6)     vs a complete ~60-line CONSTANT FOLDER  200/200
+            SHIPPED set (K=7, with `IN (SELECT)`)  vs that same folder                       0/200
+            SHIPPED set                            vs that folder + a THREE-LINE `IN` rule  600/600
+            SHIPPED set, literals randomised       vs folder + a NINE-STRING `IN` blocklist 300/300
+            SHIPPED set                            vs an exact-string blocklist of its TRUEs 200/200
+            SHIPPED set                            vs ANY filter blind to one shape           0 each
 
-          A caller supplying its own clause sets inherits both obligations (shape diversity AND a
-          non-foldable pair); see ``scanner.checks.boolean_clause_families``.
+          Read the ladder as a whole. Each row that reaches 0 was called a fix; the next row is that
+          fix being cleared by a filter one rule larger. The folder is ~60 lines and contains no SQL
+          engine, no parser generator and no database; the `IN` rule that took the last 0 back to
+          600/600 is three lines, because `LIT IN (SELECT LIT)` over a one-row constant select IS
+          literal equality (sqlite3: `3 IN (SELECT 3)` -> 1, `3 IN (SELECT 5)` -> 0) — `X = X` vs
+          `X = Y` in a costume, with the same separating surface feature. The randomised-literal row
+          is the same lesson: the clause TEMPLATES are public in an open-source repo, so the filter
+          derives its rules from them and only needs nine strings for the one randomised atom —
+          which is why the literals are now a STABLE PUBLIC CONSTANT instead (correlatability and
+          replayability are worth more than a mitigation that measures zero).
 
-      (b) A page that is a DETERMINISTIC but ARBITRARY function of the request (a CDN caching
-          per exact URL over an origin that picked a variant at fill time, a balancer pinning
-          each URL to a replica). There the byte-identical repeats are cache HITS, not
-          independent draws, and re-running the SAME clauses in a later round returns the SAME
-          bytes — so neither the repeats nor the extra SPRT rounds are new evidence, and the
-          per-FINDING bound degrades to the single-draw one:
+          PROVENANCE, so no row is taken for more than it is. Four rows are PINNED by live
+          regressions that re-measure them every CI run at 10-20 trials each
+          (``scanner/tests/test_boolean_inference_check.py``): CRS-942130 both halves, the complete
+          folder, the folder blinded to one shape, and the exact-string blocklist. The 2000-,
+          600- and 300-trial figures are one-off at-scale runs of those same cells, not CI cells.
+          (The 300/300 row was 299/300 as the red-pen first measured it; the one miss was their
+          folder's naive OR-split cutting inside a string literal that happened to contain "or" —
+          a fixture artefact, and the fixture here masks literals before splitting.)
+
+          WHAT THE CLAUSE SET DOES BUY, precisely and no more: a filter must be COMPLETE over the
+          shape set to partition. Blind it to any ONE comparison shape and it blocks only part of
+          the TRUE side, within-truth agreement breaks, and the round REFUTES — measured 0 for the
+          CRS-942130 rule, for equality-only, lexicographic-only, numeric-direction-only,
+          LIKE-prefix-only and generic block-any-OR/quote filters, and 0 in a LEAVE-ONE-SHAPE-OUT
+          sweep for every one of the seven shipped shapes blinded. That is a real property and it
+          is why the common real-world filter refutes. It is NOT sufficiency, and an earlier
+          revision of this docstring that said the set was closed by a "SQL-EVALUATED" pair was
+          wrong: the pair is a seventh comparison shape, no more.
+
+          WHAT AN OPERATOR SHOULD CONCLUDE. A boolean_sqli FACT is sound against a page whose body
+          varies independently of the input (the bound above) and against every INCOMPLETE
+          request-side filter. It is NOT sound against a filter purpose-built to decide this clause
+          set, and such a filter is cheap. Where that matters — a target known to sit behind an
+          aggressive WAF, or a FACT whose whole weight rests on this one oracle — corroborate with a
+          channel that does not live in the response bytes (an OOB/DNS callback, an error-signature
+          or a timing arm), or treat it as a LEAD.
+
+          RESIDUAL (a2) — STATUS: OPEN, and out of reach from the response side. An interposer that
+          genuinely EVALUATES the injected expression (a WAF embedding a real SQL parser and
+          evaluator) can partition the probes by truth value with no database behind it. That is the
+          same shape of limit as (b) — such an interposer IS computing the truth function this
+          oracle reads — and no clause set defeats it from the response side; it needs an
+          out-of-band channel (OOB/DNS, a side effect) to separate. (a) is NOT a special case of
+          (a2) and must not be filed under it: (a) needs no evaluator at all, only a folder.
+
+          A caller supplying its own clause sets inherits the shape-diversity obligation and the
+          same open residual; see ``scanner.checks.boolean_clause_families``.
+
+      (b) A page that is a DETERMINISTIC but ARBITRARY function of the request — STATUS: OPEN,
+          and BOUNDED rather than closed (a CDN caching per exact URL over an origin that picked a
+          variant at fill time, a balancer pinning each URL to a replica). There the byte-identical
+          repeats are cache HITS, not independent draws, and re-running the SAME clauses in a
+          later round returns the SAME bytes — so neither the repeats nor the extra SPRT rounds are
+          new evidence, and the per-FINDING bound degrades to the single-draw one:
 
               SUM over a != b of  p_a**K_T * p_b**K_F   <=  2 * 2**-(K_T + K_F)
 
@@ -854,7 +882,10 @@ def boolean_inference_oracle(
           analytic ``7.8e-3``. (A
           single-clause-per-truth-value design — what this test replaced — sits at ``~0.5``.)
           Repetition cannot help against a map that is by definition constant in the request, so
-          for THIS case more distinct clauses is the lever. It is not free: every extra clause is
+          for THIS case more distinct clauses is the lever — and it is the lever that keeps the
+          seventh shipped clause (the ``IN (SELECT ...)`` pair) in the set now that its original
+          "a folder cannot decide it" justification is retracted: at ``K = 6`` this residual is 4x
+          worse (analytic ``2 * 2**-12`` = ``4.9e-4``). It is not free: every extra clause is
           another chance that a real vulnerable target answers ONE of them differently and the
           round refutes, so ``K`` trades this residual against recall. The drivers also BOUND the
           number of independent attempts per URL and state the resulting per-URL figure (see
@@ -869,14 +900,15 @@ def boolean_inference_oracle(
          the WHOLE finding hard-refutes (the page is provably non-deterministic).
 
     CALLER OBLIGATION (the oracle sees responses, not requests). The ``K_T``/``K_F`` clauses must
-    genuinely be DISTINCT requests of a FIXED truth value, must VARY IN COMPARISON SHAPE rather
-    than only in their literals, and must include at least one clause a constant folder cannot
-    decide (residual (a) above). The oracle cannot check any of that from the bytes. The drivers
-    enforce distinctness where the clauses live (``BooleanInferenceCheck`` and
-    ``DifferentialHttpAdapter`` both refuse a duplicate or a cross-side clause at the call site)
-    and build their families from ``scanner.checks.boolean_clause_families``; the shape and
-    non-foldability properties are review obligations on the clause sets, pinned by the live
-    CRS-942130, complete-constant-folder and leave-one-shape-out regressions.
+    genuinely be DISTINCT requests of a FIXED truth value and must VARY IN COMPARISON SHAPE rather
+    than only in their literals — which buys refutation against every INCOMPLETE request-side
+    filter and nothing beyond it (residual (a) above stays OPEN whatever the caller ships). The
+    oracle cannot check any of that from the bytes. The drivers enforce distinctness where the
+    clauses live (``BooleanInferenceCheck`` and ``DifferentialHttpAdapter`` both refuse a duplicate
+    or a cross-side clause at the call site) and build their families from
+    ``scanner.checks.boolean_clause_families``; the shape property is a review obligation on the
+    clause sets, pinned by the live CRS-942130, constant-folder and leave-one-shape-out
+    regressions — the folder cell PINS the open class (it must keep minting), not a win.
 
     WHAT "RE-VERIFIES OFFLINE" DOES AND DOES NOT MEAN. Re-execution over a retained context
     recomputes this whole decision from the retained bytes, so a GROSS edit (a swapped page, a

@@ -20,9 +20,11 @@ boolean's TRUTH VALUE**: every TRUE-side response agrees with every other, every
 with every other, and the two clusters are disjoint. An origin drawing INDEPENDENTLY per request must land
 all ``2*K_T`` true-side draws on one variant and all ``2*K_F`` false-side draws on another —
 ``<= 2 * 2**-(2*K_T+2*K_F)`` per round (``3.1e-5`` at the ``K_T = K_F = 4`` floor, vs the SPRT's
-``p0 = 0.1``). The oracle's docstring states the two cases that bound does NOT cover: a truth-correlated
-LEXICAL filter (beaten by clause-SHAPE diversity, not by K) and a per-URL-CACHING origin (where the repeats
-are cache hits and the bound degrades to ``2 * 2**-(K_T+K_F)``).
+``p0 = 0.1``). The oracle's docstring states the two cases that bound does NOT cover, and BOTH are OPEN: a
+truth-correlated REQUEST filter (clause-SHAPE diversity makes every INCOMPLETE one refute and that is all it
+does — a filter COMPLETE over the shape set still partitions, and K is no lever at all here) and a
+per-URL-CACHING origin (where the repeats are cache hits and the bound degrades to ``2 * 2**-(K_T+K_F)``, and
+more distinct clauses IS the lever).
 
 Every clause is metacharacter-identical in class (all carry ``'`` / ``AND`` / ``SELECT`` / ``--``), so a
 content-inspecting WAF that blocks one blocks all — the matched decoy (DIFFERENTIAL-REMEDIATION §3). They
@@ -138,15 +140,16 @@ class DifferentialHttpAdapter:
       * ``base_value`` — the benign value the parameter normally carries (the baseline probe; NO metachars).
       * ``true_payload_templates`` / ``false_payload_templates`` — ``K_T >= 2`` DISTINCT always-TRUE and
         ``K_F >= 2`` DISTINCT always-FALSE data-dependent predicate payloads, each carrying the literal
-        ``{challenge}`` inert-marker slot; metacharacter-identical in class. Two CALLER OBLIGATIONS the
-        constructor cannot check (both undecidable from the template string, like data-dependence itself,
-        and both stated in full as residual (a) on ``boolean_inference_oracle``):
-          * they must VARY IN COMPARISON SHAPE (``=`` / ``>`` / ``LIKE`` / a compound), not merely in
-            their literals — a set whose truth value tracks one SURFACE feature is partitioned by a
-            CRS-942130-shape regex with no SQL engine at all (measured: mints at rate 1.0); and
-          * at least one pair must be SQL-EVALUATED rather than constant-foldable (e.g.
-            ``1 IN (SELECT 1)`` vs ``1 IN (SELECT 2)``) — shape diversity ALONE is partitioned by a
-            complete ~60-line constant folder, also with no SQL engine (measured 500/500).
+        ``{challenge}`` inert-marker slot; metacharacter-identical in class. One CALLER OBLIGATION the
+        constructor cannot check (undecidable from the template string, like data-dependence itself, and
+        stated in full as residual (a) on ``boolean_inference_oracle``): they must VARY IN COMPARISON
+        SHAPE (``=`` / ``>`` / ``LIKE`` / a compound), not merely in their literals — a set whose truth
+        value tracks one SURFACE feature is partitioned by a CRS-942130-shape regex with no SQL engine at
+        all (measured: mints at rate 1.0). What that buys is refutation against every INCOMPLETE filter
+        and nothing more: residual (a) is OPEN, a filter COMPLETE over the shape set partitions any such
+        set (measured 600/600 on a static page), and an earlier revision of this bullet which required
+        "at least one SQL-EVALUATED pair (``1 IN (SELECT 1)`` vs ``1 IN (SELECT 2)``)" as the closure is
+        RETRACTED — over a one-row constant select that pair is literal equality, foldable in three lines.
         FOUR per truth value is the hard floor (the oracle's CONFIRM floor — fewer can only ever refute,
         which on the REMEDIATED branch is the dangerous direction); more distinct clauses is also what
         lowers the per-URL-caching residual the oracle docstring states.

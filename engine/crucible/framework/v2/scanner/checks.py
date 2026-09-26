@@ -24,7 +24,6 @@ tokens), not weaponized exploits.
 from __future__ import annotations
 
 import math
-import random
 import re
 import time
 from html.parser import HTMLParser
@@ -220,38 +219,81 @@ class DifferentialCheck:
 # --------------------------------------------------------------------------------------------------
 # TRUTH-VALUE ATTRIBUTION clause families (shared by the scanner arm and its regressions).
 # --------------------------------------------------------------------------------------------------
-# A family is ``(K_T always-TRUE clauses, K_F always-FALSE clauses)`` for ONE injection context. Two
-# properties make the set sound, and BOTH are load-bearing — read this before editing the shapes.
+# A family is ``(K_T always-TRUE clauses, K_F always-FALSE clauses)`` for ONE injection context. Read
+# this header before editing a shape: what the set does and does NOT buy has been measured, and the
+# measurements are not what the shapes look like they buy.
 #
-# 1. COMPARISON-SHAPE DIVERSITY. An early revision varied only the LITERALS, so every TRUE clause was
-#    `X = X` and every FALSE clause `X = Y`. Truth value was then perfectly correlated with the surface
-#    feature "the two operands are the same token" — exactly what a ModSecurity-CRS-942130-shape
-#    BACKREFERENCE rule keys on with no SQL engine anywhere. A STATIC, NON-VULNERABLE page behind that
-#    rule answered 403 to the whole TRUE side and 200 to the whole FALSE side and minted a false FACT on
-#    EVERY attempt (measured 2000/2000). Raising K does not help: every extra `X = X` matches the same
-#    rule. Varying the comparison does: a filter that catches SOME shapes leaves the others alone, so the
-#    TRUE cluster stops agreeing and the round REFUTES. Measured: 0/2000 against CRS-942130, and a
-#    leave-one-shape-out sweep refutes for every single shape blinded.
+# THE STRUCTURAL FACT, FIRST — because it bounds everything below. Every clause here is one whose
+# truth value VIGIL must know A PRIORI: before the request is sent, without touching the target's
+# database. A predicate knowable that way IS A CONSTANT EXPRESSION, and any constant expression the
+# scanner can evaluate offline, a REQUEST-SIDE FILTER in front of a STATIC page can also evaluate
+# offline. There is therefore NO clause set that removes the truth-correlated-request-filter residual;
+# there is only a set that makes such a filter's job harder. That residual — residual (a) on
+# ``verify.oracles.boolean_inference_oracle`` — IS OPEN. Everything below raises the bar; nothing
+# below closes it, and the measured ladder in that docstring shows each rung being cleared.
 #
-# 2. AT LEAST ONE SQL-EVALUATED CLAUSE (the ``IN (SELECT ...)`` pair). Shape diversity alone is NOT
-#    enough, and saying otherwise was a refuted absolute: a ~60-line CONSTANT-FOLDING filter (tokenise,
-#    split on OR/AND, fold each literal-vs-literal comparison for = <> > < LIKE BETWEEN, block if any
-#    top-level disjunct folds TRUE — still no SQL engine and no DB) partitions a purely-foldable set
-#    PERFECTLY and minted 500/500. The last pair is therefore one a constant folder CANNOT decide,
-#    because its truth depends on evaluating a SUBQUERY rather than on folding literals. Whichever way
-#    such a filter guesses, the round refutes: if it blocks both sides the FALSE cluster disagrees; if it
-#    blocks neither, the TRUE cluster disagrees. KEEP AT LEAST ONE non-foldable pair per family.
+# 1. COMPARISON-SHAPE DIVERSITY — the property with a real, measured mechanism behind it.
+#    An early revision varied only the LITERALS, so every TRUE clause was `X = X` and every FALSE
+#    clause `X = Y`. Truth value was then perfectly correlated with the surface feature "the two
+#    operands are the same token" — exactly what a ModSecurity-CRS-942130-shape BACKREFERENCE rule
+#    keys on with no SQL engine anywhere. A STATIC, NON-VULNERABLE page behind that rule answered 403
+#    to the whole TRUE side and 200 to the whole FALSE side and minted a false FACT on EVERY attempt
+#    (measured 2000/2000). Raising K does not help: every extra `X = X` matches the same rule. Varying
+#    the comparison does, and the mechanism is INCOMPLETENESS: a filter that catches SOME shapes leaves
+#    the others alone, so the TRUE cluster stops agreeing and the round REFUTES. Measured: 0/2000
+#    against CRS-942130, and 0 in a LEAVE-ONE-SHAPE-OUT sweep for every one of the seven shapes
+#    blinded. What that buys is precise and limited: a filter must be COMPLETE over the whole shape
+#    set. It does not have to be a SQL engine to be complete.
 #
-# The LITERALS are randomised per call (``rng``) so the clause set is not a public constant an operator
-# can paste into an exact-string blocklist. That mitigates the BLOCKLIST variant only — it does nothing
-# against the folder, which is why (2) exists; the two are separate mitigations for separate attacks.
+# 2. THE SEVENTH SHAPE (`{d1} IN (SELECT {d1})` vs `{d1} IN (SELECT {d2})`) — KEPT, but NOT for the
+#    reason it was added. It shipped under the claim that its truth "needs EVALUATION rather than
+#    folding", so a constant folder could not decide it. THAT CLAIM IS RETRACTED: over a one-row
+#    constant SELECT, `LIT IN (SELECT LIT)` IS literal equality (sqlite3: `3 IN (SELECT 3)` -> 1,
+#    `3 IN (SELECT 5)` -> 0). It is `X = X` vs `X = Y` in a costume — the separating surface feature is
+#    still "the two operand tokens are identical" — and THREE LINES of regex added to the constant
+#    folder below decide it, after which the folder partitions the SHIPPED set perfectly (measured
+#    600/600 false FACTs through the real mint path on a static page).
+#    WHY IT IS STILL HERE, on its merits and nothing more:
+#      * it is the SEVENTH distinct clause per truth value, and K is the documented lever for the
+#        OTHER residual — the per-URL-cache case (b). At K=7 that residual measures 1.20e-4 per
+#        attempt; at K=6 the analytic figure is 4x worse (`2 * 2**-12` = 4.9e-4). Dropping this pair
+#        would regress the dominant disclosed residual by 4x to save ~16% of the boolean arm's traffic.
+#      * it is one more rule an incomplete filter must implement: a folder complete over the other six
+#        shapes but blind to `IN` refutes (measured 0/200), exactly like every other leave-one-out cell.
+#    HONEST COST, stated because it is real: this is the only shape here that is not portable SQL.
+#    `SELECT <literal>` with no FROM is valid on sqlite/MySQL/PostgreSQL/SQL Server but NOT on Oracle
+#    (which needs `FROM DUAL`), so on an Oracle origin this clause errors, the TRUE cluster stops
+#    agreeing and the whole boolean arm refutes — a RECALL loss (a LEAD, never a false FACT).
+#
+# 3. THE LITERALS ARE FIXED PUBLIC CONSTANTS — deliberately, and this is a REVERSAL. A previous
+#    revision randomised them per run so "the clause set is not a public constant an operator can
+#    paste into an exact-string blocklist". That is dropped, for two reasons.
+#      * NO MEASURED BENEFIT. The shape TEMPLATES are public in this open-source file whatever the
+#        literals are, so a filter derives a per-shape rule from them directly. Measured: a constant
+#        folder plus a NINE-STRING blocklist over the `IN` atom alone (the `d1` slot ranged over only
+#        1..9) partitioned 1500/1500 randomised family draws and minted 300/300 through the real
+#        mint path — randomisation bought nothing against the attack it was sold against.
+#      * IT POINTED THE WRONG WAY. Constitution VI.4 says MAKE YOURSELF CORRELATABLE: the operator
+#        must be able to grep their WAF and access logs and find our traffic. Defeating an operator's
+#        exact-string control is defeating a DEFENDER's control on the operator's own estate, and it
+#        also contradicted this module's own contract that "a run is replayable".
+#    The honest consequence is stated rather than engineered around: a fixed public set IS
+#    blocklistable, and a static page behind an exact-string blocklist of a family's seven TRUE
+#    clauses (21 across the three families) mints at rate 1.0 — measured 200/200 through the real
+#    mint path, and pinned as a live cell. That is residual (a), OPEN either way, and randomising
+#    did not change it: see the ladder on the oracle.
 #
 # Invariants every shape must preserve (checked by test_boolean_clause_families):
 #   * valid in its own breakout context — a quote-breakout clause must END on an UNCLOSED quote, so the
 #     origin's own trailing quote closes it;
 #   * truth-correct against a real SQL engine (the tests evaluate every clause on sqlite3);
 #   * TRUE[i] LENGTH-MATCHED to FALSE[i]. A length-correlated set would re-open the hole through the
-#     ``length`` dimension: an endpoint that merely ECHOES the parameter would separate by truth value.
+#     ``length`` dimension: an endpoint that merely ECHOES the parameter would separate by truth value;
+#   * STABLE across calls — two calls return the identical set, so a run is replayable and the operator
+#     can correlate it in their logs;
+#   * PARTITIONED by the complete constant folder + the three-line `IN` rule, and NOT partitioned when
+#     that filter is blinded to any one shape. The first half pins the OPEN class honestly; the second
+#     is the incompleteness mechanism of (1).
 _BOOLEAN_FAMILY_SHAPES = (
     # --- single-quote string-literal breakout: the origin wraps the value in '...' -------------------
     (("x' OR '{w}'='{w}",                        "x' OR '{w}'='{w2}"),
@@ -282,37 +324,33 @@ _BOOLEAN_FAMILY_SHAPES = (
 )
 
 
-def boolean_clause_families(rng: "random.Random | None" = None) -> tuple:
-    """The shipped ``((trues, falses), ...)`` clause families, with the LITERALS randomised.
+# The FIXED, PUBLIC literals. Every one is drawn at a FIXED WIDTH (letters 1 char, words 2 chars,
+# numbers 2 digits, subquery operands 1 digit) and a shape's TRUE/FALSE templates are structurally
+# identical, so TRUE[i] and FALSE[i] are length-matched by construction. The orderings each shape
+# needs:  lo < k < bm < m < hi < bg  =>  hi > lo, k < m, lo <= bm <= hi (BETWEEN true), bg > hi (false).
+# These are CONSTANTS on purpose (header point 3): the operator greps their logs for exactly these
+# strings, and a run is replayable. Randomising them was measured worthless and pointed the wrong way.
+_BOOLEAN_LITERALS = {
+    "w": "mk", "w2": "mn", "w0": "m", "zc": "v", "u": "zr", "v": "zw",
+    "k": "d", "m": "h", "lo": "b", "hi": "p", "bm": "f", "bl": "b", "bh": "p", "bg": "t",
+    "n1": 31, "n2": 64, "p1": 27, "p2": 58, "q1": 42, "q2": 83,
+    "nl": 19, "nm": 35, "nh": 71, "ng": 88, "d1": 3, "d2": 8,
+}
 
-    Every literal is drawn at a FIXED WIDTH (letters 1 char, words 2 chars, numbers 2 digits, subquery
-    operands 1 digit) and the TRUE/FALSE templates of a shape are structurally identical, so TRUE[i] and
-    FALSE[i] come out length-matched by construction. Pass a seeded ``rng`` for a reproducible set."""
-    r = rng or random.Random()
-    lets = "abcdefghijklmnopqrstuvwxyz"
 
-    def letters(n: int) -> list[str]:
-        return sorted(r.sample(lets, n))
+def boolean_clause_families() -> tuple:
+    """The shipped ``((trues, falses), ...)`` clause families — a STABLE, PUBLIC constant.
 
-    # six ordered distinct letters give every shape the orderings it needs without ever running out:
-    #   lo < k < mid < m < hi < bg   =>  hi > lo, k < m, lo <= mid <= hi (BETWEEN true), bg > hi (false)
-    lo, k, mid, m, hi, bg = letters(6)
-    w = "".join(r.choice(lets) for _ in range(2))
-    w2 = w[0] + r.choice([c for c in lets if c != w[1]])
-    zc = r.choice([c for c in lets if c != w[0]])
-    u = "".join(r.choice(lets) for _ in range(2))
-    v = u[0] + r.choice([c for c in lets if c != u[1]])
-    n1, n2 = sorted(r.sample(range(10, 100), 2))
-    p1, p2 = sorted(r.sample(range(10, 100), 2))
-    q1, q2 = sorted(r.sample(range(10, 100), 2))
-    nl, nm, nh, ng = sorted(r.sample(range(10, 100), 4))   # nl < nm < nh < ng, so ng is OUTSIDE [nl, nh]
-    d1, d2 = r.sample(range(1, 10), 2)
-    slots = {"w": w, "w2": w2, "w0": w[0], "zc": zc, "u": u, "v": v, "k": k, "m": m,
-             "lo": lo, "hi": hi, "bm": mid, "bl": lo, "bh": hi, "bg": bg,
-             "n1": n1, "n2": n2, "p1": p1, "p2": p2, "q1": q1, "q2": q2,
-             "nl": nl, "nm": nm, "nh": nh, "ng": ng, "d1": d1, "d2": d2}
+    Two calls return the identical set. That is deliberate (constitution VI.4 "make yourself
+    correlatable", and this module's own contract that a run is replayable): the operator can grep
+    their WAF and access logs for exactly these strings. The literals were randomised per run for one
+    revision, to keep the set out of an operator's exact-string blocklist; that is retracted — it was
+    measured worthless against a filter that derives its rules from the public TEMPLATES (a folder plus
+    a nine-string blocklist over the ``IN`` atom partitioned 1500/1500 randomised draws), and defeating
+    a defender's control on the operator's own estate is not something this scanner should do."""
     return tuple(
-        (tuple(t.format(**slots) for t, _ in shapes), tuple(f.format(**slots) for _, f in shapes))
+        (tuple(t.format(**_BOOLEAN_LITERALS) for t, _ in shapes),
+         tuple(f.format(**_BOOLEAN_LITERALS) for _, f in shapes))
         for shapes in _BOOLEAN_FAMILY_SHAPES)
 
 
@@ -345,8 +383,9 @@ class BooleanInferenceCheck:
     ``<= 2 * 2**-(2*K_T+2*K_F)`` per round (``7.5e-9`` at the ``K_T = K_F = 7`` the drivers ship;
     ``3.1e-5``, still ~3300x below the SPRT's ``p0``, at the oracle's CONFIRM floor of 4).
 
-    TWO THINGS THAT BOUND DOES NOT COVER, both real and both documented on the oracle: a
-    TRUTH-CORRELATED LEXICAL FILTER (beaten by clause-SHAPE diversity, NOT by K — see
+    TWO THINGS THAT BOUND DOES NOT COVER, both real and both documented on the oracle as OPEN: a
+    TRUTH-CORRELATED REQUEST FILTER (clause-SHAPE diversity makes every INCOMPLETE one refute, and
+    that is ALL it does — a COMPLETE filter still partitions, and K is no lever at all here; see
     ``true_clauses`` below) and a page that is a deterministic but ARBITRARY function of the URL
     (a per-URL CDN cache), where repetition is not new evidence and the bound degrades to
     ``2 * 2**-(K_T+K_F)``; for THAT one more distinct clauses is the lever, and the drivers also
@@ -364,12 +403,16 @@ class BooleanInferenceCheck:
     id: str
     bug_class: str
     # K_T clauses that are all logically TRUE and K_F that are all logically FALSE. Build them with
-    # ``boolean_clause_families`` unless you have read what that function's header requires: they must be
-    # DISTINCT, must vary in COMPARISON SHAPE rather than only in their literals, and must include at
-    # least one pair a CONSTANT FOLDER cannot decide. A set that misses either property is partitionable
-    # by an interposer with NO SQL engine at all, which then mints on a STATIC page (measured 2000/2000
-    # for a literal-only set behind a CRS-942130 regex; 500/500 for a purely foldable set behind a
-    # complete constant folder). >= 4 each is the oracle's CONFIRM floor; the drivers ship 7.
+    # ``boolean_clause_families`` unless you have read that block's header: the clauses must be DISTINCT
+    # and must vary in COMPARISON SHAPE rather than only in their literals, because a set whose truth
+    # value tracks ONE surface feature is partitioned by an interposer with NO SQL engine at all, which
+    # then mints on a STATIC page (measured 2000/2000 for a literal-only set behind a CRS-942130 regex).
+    # Shape diversity buys INCOMPLETENESS, nothing more: it makes a PARTIAL filter refute. A filter that
+    # is COMPLETE over the shape set still partitions the shipped clauses perfectly — measured 600/600
+    # false FACTs behind a constant folder carrying one rule per shape — and no clause set fixes that,
+    # because a clause whose truth VIGIL knows a priori is a constant expression the filter can fold
+    # too. That is residual (a) on ``boolean_inference_oracle``, and it is OPEN.
+    # >= 4 each is the oracle's CONFIRM floor; the drivers ship 7.
     true_clauses: tuple[str, ...]
     false_clauses: tuple[str, ...]
     n_max: int = 24

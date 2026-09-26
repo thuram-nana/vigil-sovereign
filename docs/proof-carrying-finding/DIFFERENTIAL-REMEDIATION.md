@@ -50,22 +50,47 @@ The signal is the **boolean differential** already computed in `framework/v2/ver
 
   **Two things that bound does not cover** (the oracle docstring is the normative statement):
 
-  1. **A truth-correlated REQUEST filter** — an interposer that partitions the probes by a property of the
-     REQUEST that tracks truth value, with no boolean channel behind it. The bound says nothing about this:
-     it is a property of the CLAUSE SET, not of the origin. Measured, in increasing strength:
-     a CRS-942130-shape BACKREFERENCE rule over a literal-only set (`X = X` true, `X = Y` false) mints at
-     **rate 1.0**; any **incomplete** filter **refutes**, because the shipped clauses of one truth value
-     differ in COMPARISON SHAPE so a partial filter blocks only part of the TRUE side and within-truth
-     agreement breaks (0 for CRS-942130 and for every leave-one-shape-out variant); but a **complete**
-     ~60-line CONSTANT FOLDER — still no SQL engine — partitions a purely-foldable set perfectly however
-     many shapes it spans (**500/500**). Shape diversity alone is therefore *not* sufficient, and saying it
-     made the set unpartitionable was an absolute that measurement refuted. What closes it is at least one
-     **SQL-EVALUATED** pair per family (`{d} IN (SELECT {d})` vs `{d} IN (SELECT {other})`) whose truth
-     needs evaluation, not folding: the same complete folder goes to **0**. **Residual (a2), named not
-     closed:** an interposer that genuinely EVALUATES the expression (a WAF with a real SQL parser) can
-     still partition, and no clause set defeats that from the response side — it needs an out-of-band
-     channel. A weaker, separate variant — an exact-string blocklist of the clause set — is mitigated by
-     randomising the literals per run; that does nothing against a filter that generalises.
+  1. **A truth-correlated REQUEST filter — STATUS: OPEN.** An interposer that partitions the probes by a
+     property of the REQUEST that tracks truth value, with no boolean channel behind it. The bound says
+     nothing about this: it is a property of the CLAUSE SET, not of the origin. **It is open for a
+     structural reason**, not because the wrong clauses were picked: the oracle needs clauses whose truth
+     value is known *a priori*, without touching the database — and a predicate knowable that way IS A
+     CONSTANT EXPRESSION, which a filter in front of a static page can evaluate offline too. Clause design
+     can only raise the complexity of the function the filter must implement. The measured ladder (real
+     mint path, static non-vulnerable page) is that treadmill:
+
+     | clause set | request-side filter | false FACTs |
+     |---|---|---|
+     | literal-only (`X = X` / `X = Y`) | CRS-942130 backreference regex | **2000/2000** |
+     | shape-varied | the same CRS-942130 regex | 0/2000 |
+     | shape-varied foldable subset (K=6) | complete ~60-line CONSTANT FOLDER | **200/200** |
+     | shipped set (K=7, with `IN (SELECT)`) | that same folder | 0/200 |
+     | shipped set | that folder **+ a three-line `IN` rule** | **600/600** |
+     | shipped set, literals randomised | folder + a nine-string `IN` blocklist | **300/300** |
+     | shipped set | exact-string blocklist of its TRUE clauses | **200/200** |
+     | shipped set | any filter blind to one shape (leave-one-out) | 0 each |
+
+     Each 0 row was once called a fix and the next row is that fix being cleared by a filter one rule
+     larger. In particular the **`IN (SELECT …)` pair does NOT close it**, and the earlier revision of this
+     bullet which said "what closes it is at least one SQL-EVALUATED pair … the same complete folder goes
+     to 0" is **retracted**: over a one-row constant select, `LIT IN (SELECT LIT)` *is* literal equality
+     (`3 IN (SELECT 3)` → 1, `3 IN (SELECT 5)` → 0), so three lines of regex fold it. Randomising the
+     literals is retracted too — the clause templates are public, so the filter derives per-shape rules
+     from them and needs nine strings for the one randomised atom; the set is now a **stable public
+     constant** so the operator can correlate it in their logs (constitution VI.4).
+     Provenance, so no row is taken for more than it is: four rows (CRS-942130 both halves, the complete
+     folder, the folder blinded to one shape, the exact-string blocklist) are re-measured every CI run as
+     live regressions at 10-20 trials; the 2000-, 600- and 300-trial figures are one-off at-scale runs of
+     those same cells.
+     What the clause set *does* buy is exact: a filter must be **COMPLETE** over the shape set, so every
+     partial filter refutes. **What an operator should conclude:** a `boolean_sqli` FACT is sound against an
+     origin whose body varies independently of the input and against every *incomplete* request-side filter,
+     and is **not** sound against a filter purpose-built to decide this clause set — which is cheap to build.
+     Where that matters, corroborate out of the response bytes (OOB/DNS, error-signature, timing) or take
+     the finding as a LEAD. **Residual (a2) — STATUS: OPEN, and out of reach from the response side:** an
+     interposer that genuinely EVALUATES the expression (a WAF with a real SQL parser) can still partition,
+     and no clause set defeats that from the response side — it needs an out-of-band channel. Residual (a)
+     is **not** a special case of (a2): it needs no evaluator, only a folder.
   2. **A deterministic but ARBITRARY function of the URL** (a per-URL CDN cache over an origin that picked a
      variant at fill time): the byte-identical repeats are cache hits and re-running the same clauses is not
      new evidence, so the bound degrades to `2 * 2**-(K_T+K_F)` (against `~0.5` for a
