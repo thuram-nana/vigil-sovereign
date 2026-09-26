@@ -111,7 +111,10 @@ LLM_CLAIM_WEB_FACT_CLASSES = tuple(c for c in WEB_FACT_CLASSES if c != "oidc_red
 # body). The FACT is therefore worded as exactly what the capture proves — "distinguishable from the stable
 # same-branch sibling baseline" — and the branch's limitation entry names this class. It shrinks as
 # (1-p)^N_CONTROLS in the validator's acceptance rate p (any in-branch control that lands on the target's own
-# body breaks the baseline's unanimity ⇒ LEAD), so raising :data:`_LIVENESS_CONTROLS` trades traffic for it.
+# body breaks the baseline's unanimity ⇒ LEAD), so raising :data:`_LIVENESS_CONTROLS` trades traffic for it,
+# and it is NIL for the validators :func:`_known_validators` knows (there the controls are drawn from the
+# accepted set, so the baseline IS the route's not-found response). It bites only for an app-specific
+# validator VIGIL cannot know whose reject is 2xx AND differs from its not-found body.
 #
 # The predicate is a pure JSON AST over RAW status codes + RAW body hashes of every sample, so the
 # certificate re-verifies OFFLINE like every predicate_oracle FACT. The CLEAN direction (a channel-confirmed

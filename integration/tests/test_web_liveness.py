@@ -499,7 +499,9 @@ def _partially_varying_app():
     like a unanimous baseline (A) that the stable target (B) "differs" from -> a FALSE FACT for a nonexistent
     URL. The rule must be that a control which is unstable INSIDE the target's own status branch is AMBIGUOUS
     and fails the whole run closed. Arrival-indexed (not random) so the mix is deterministic: every 3rd
-    distinct path varies."""
+    distinct path varies. The target segment is 'wxyz' — deliberately NOT all-a-f, whose class is
+    AMBIGUOUS (both lower-alpha and lower-hex) and would fail closed before a single control was even
+    fetched, making the test pass for the wrong reason."""
     state: dict = {}
 
     class _App(http.server.BaseHTTPRequestHandler):
@@ -510,7 +512,7 @@ def _partially_varying_app():
             import random
             path = self.path.split("?")[0]
             idx = state.setdefault(path, len(state))
-            if path == "/x/abcd":
+            if path == "/x/wxyz":
                 body = b'{"m":"B"}'                                   # the (nonexistent) TARGET: stable
             elif idx % 3 == 0:
                 body = random.choice([b'{"m":"A"}', b'{"m":"B"}'])    # a VARYING control
@@ -772,7 +774,7 @@ def test_a_control_unstable_inside_the_targets_own_branch_fails_the_run_closed(m
         srv = _serve(_partially_varying_app())
         port = srv.server_address[1]
         try:
-            wl = endpoint_liveness_redrive(f"http://127.0.0.1:{port}/x/abcd",
+            wl = endpoint_liveness_redrive(f"http://127.0.0.1:{port}/x/wxyz",
                                            slug="alpha", engagement_slug="alpha", signers=signers)
         finally:
             srv.shutdown()
