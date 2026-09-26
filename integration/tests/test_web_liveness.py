@@ -1743,13 +1743,24 @@ def test_the_httpx_user_agent_pin_is_structural_not_merely_positional():
     import pytest as _pytest
     from vigil_integration.live.external_tool import _CORRELATABLE_USER_AGENT, httpx_url_scan
 
-    for banned in (("-random-agent",), ("--random-agent",), ("-silent", "-random-agent")):
+    # NOTE the GLUED forms are not optional extras: httpx rides projectdiscovery/goflags over Go's stdlib
+    # ``flag``, where ``-flag=value`` is the ONLY way to pass an explicit value to a BOOLEAN flag. So
+    # ``-random-agent=true`` is the CANONICAL explicit spelling, and ``strconv.ParseBool`` also takes
+    # 1/t/T/TRUE/True. A whole-token match caught none of them (red-pen BLOCK-2) -- the first revision of
+    # this very test remembered the glued form for the header flag and forgot it for this one.
+    for banned in (("-random-agent",), ("--random-agent",), ("-silent", "-random-agent"),
+                   ("-RANDOM-AGENT",),
+                   ("-random-agent=true",), ("-random-agent=1",), ("-random-agent=t",),
+                   ("-random-agent=T",), ("-random-agent=TRUE",), ("--random-agent=true",),
+                   ("-silent", "-random-agent=true")):
         with _pytest.raises(ValueError, match="random-agent"):
             httpx_url_scan(extra_args=banned)
     for shadow in (("-H", "User-Agent: Mozilla/5.0"),
                    ("-header", "user-agent: curl/8"),
                    ("--header", "  User-Agent: x  "),
                    ("-H=User-Agent: Mozilla/5.0",),
+                   ("-H", "User-Agent : Mozilla/5.0"),
+                   ("-H", "USER-AGENT:Mozilla/5.0"),
                    ("-silent", "-H", "User-Agent: Mozilla/5.0")):
         with _pytest.raises(ValueError, match="second User-Agent"):
             httpx_url_scan(extra_args=shadow)

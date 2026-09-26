@@ -840,16 +840,22 @@ def _validated_httpx_extra_args(extra_args: "Sequence[str]") -> "tuple[str, ...]
     argv = tuple(str(a) for a in (extra_args or ()))
     for i, raw in enumerate(argv):
         tok = raw.strip()
-        if tok.lower() in _HTTPX_RANDOM_AGENT_FLAGS:
+        # Split FIRST: httpx is built on projectdiscovery/goflags over Go's stdlib ``flag``, where the ONLY
+        # way to pass an explicit value to a BOOLEAN flag is the glued ``-flag=value`` form. So
+        # ``-random-agent=true`` (and ``=1`` / ``=t`` / ``=T`` / ``=TRUE`` — anything ``strconv.ParseBool``
+        # accepts) is a valid spelling of the flag we ban. Matching the WHOLE token missed every one of them;
+        # match the FLAG. ``-H <value>`` (two tokens) and ``-H=<value>`` (glued) likewise carry a header VALUE.
+        flag, sep, glued = tok.partition("=")
+        if flag.lower() in _HTTPX_RANDOM_AGENT_FLAGS:
             raise ValueError(
                 f"extra_args may not contain {raw!r}: httpx's random-agent rotates the probe identity per "
                 f"request, and this engine pins ONE correlatable User-Agent "
                 f"({_CORRELATABLE_USER_AGENT!r}) so the operator can grep their own logs for this traffic")
-        # ``-H <value>`` (two tokens) and ``-H=<value>`` (glued) both carry a header VALUE.
-        flag, sep, glued = tok.partition("=")
         if flag in _HTTPX_HEADER_FLAGS:
             value = glued if sep else (argv[i + 1] if i + 1 < len(argv) else "")
-            if value.strip().lower().startswith("user-agent:"):
+            # Match the header NAME, not a prefix: ``User-Agent : x`` has a non-adjacent colon and would
+            # slip a ``startswith("user-agent:")`` test.
+            if value.split(":", 1)[0].strip().lower() == "user-agent":
                 raise ValueError(
                     f"extra_args may not set a second User-Agent header ({value.strip()!r}): it is appended "
                     f"AFTER the pinned -H {_CORRELATABLE_USER_AGENT!r} and would override it. The engine "
