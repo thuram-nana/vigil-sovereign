@@ -43,18 +43,19 @@ LLM_CLAIM_WEB_FACT_CLASSES = tuple(c for c in WEB_FACT_CLASSES if c != "oidc_red
 # HexStrike W2 — endpoint response-DISTINGUISHABILITY (the L7 analogue of the TCP tcp_handshake reachability
 # FACT). Historical identifier: ``endpoint_liveness`` / ``achieved_state.endpoint_liveness``.
 #
-# THE NARROWED CLAIM (after two red-pen BLOCKs). This FACT does NOT claim "a live endpoint" / "a real
+# THE NARROWED CLAIM (after three red-pen BLOCKs). This FACT does NOT claim "a live endpoint" / "a real
 # resource" / "the endpoint exists". It claims EXACTLY: **VIGIL's own gated GET of this URL served content
-# distinguishable from a same-shape, multi-sample-stable not-found baseline (i.e. it is not a soft-404 phantom
-# of that shape).** A special-cased error page, a stub, or any distinguishable-but-not-"live" response is a
-# TRUE statement of that narrowed claim; it is never upgraded to "live".
+# distinguishable from the server's own stable, SAME-BRANCH response to many randomized same-shape siblings
+# (i.e. it is not a soft-404 phantom of that shape).** A special-cased error page, a stub, or any
+# distinguishable-but-not-"live" response is a TRUE statement of that narrowed claim; never upgraded to "live".
 #
 # A web-discovery tool (httpx / ffuf / …) PROPOSES a URL; the RUNNER (never the tool) sends PLAIN gated GETs
 # (no canary) and the EXISTING ACHIEVED_STATE predicate_oracle adjudicates. Reuses ACHIEVED_STATE (no new
 # OracleKind, so `make gate` stays byte-identical); the FACT is minted only by admit(branch) +
 # certify_admitted(provenance="live_redrive") over VIGIL's OWN gated capture.
 #
-# SOUNDNESS (near-zero-FP, the soft-404 firewall — HARDENED twice). Two failure modes were found and closed:
+# SOUNDNESS (the soft-404 firewall — HARDENED three times; each fix closed a class that MINTED a false FACT
+# for a NONEXISTENT url on the preceding HEAD):
 #   BLOCK-1 (coarse char-class): a control of a WIDER class than the route (e.g. a random alnum control on a
 #     hex/uuid route) 404s as a route-MISS while a well-formed nonexistent target soft-404s 200 → false FACT.
 #     FIXED by a NARROW-CLASS, structure-preserving mirror: the control mirrors the target segment's exact
@@ -64,18 +65,57 @@ LLM_CLAIM_WEB_FACT_CLASSES = tuple(c for c in WEB_FACT_CLASSES if c != "oidc_red
 #     CLOSED to a LEAD — never a coarse-bucket guess. A root/directory URL (no last segment) also fails closed.
 #   BLOCK-2 (bounded not-found body space): a soft-404 whose not-found body is one of a SMALL set (random per
 #     request, or per path) let two controls COLLIDE on one body ~1/b of the time → a spurious "stable
-#     baseline" the target differs from → an INTERMITTENT false FACT. FIXED by MULTI-SAMPLE stability: the
-#     baseline is many DISTINCT same-shape controls, EACH resampled, and the target itself resampled; a FACT
-#     requires EVERY control sample to agree on status AND body-hash (a bounded/varying space fails to agree
-#     across many samples → no baseline → LEAD) AND the target to be stable across its resamples.
+#     baseline" the target differs from → an INTERMITTENT false FACT. FIXED by MULTI-SAMPLE stability: many
+#     DISTINCT same-shape controls, EACH resampled, and the target itself resampled.
+#   BLOCK-3 (checksum / validation-constrained routes): a route whose acceptance is a SEMANTIC predicate
+#     (a Luhn-valid card id, a base58 id excluding 0/O/I/l, any internal checksum or regex) accepts a
+#     STRICTLY NARROWER set than ANY character class. The lemma the BLOCK-1 fix rested on — "a control from
+#     the target's narrowest class is ⊆ the route's accepted class, so a 404 on it is a real not-found" — is
+#     FALSE for a semantic validator: the random same-class control fails the VALIDATOR, so the route
+#     rejects it (a 404 VALIDATION-REJECT = a DIFFERENT RESPONSE BRANCH) while the checksum-valid-but-
+#     NONEXISTENT target soft-404s 200. The controls then "agree" on the reject and the target "differs" →
+#     a false FACT (measured: Luhn 38/120 ≈ 32%, base58 ≈ 7%).
+#     FIXED in two halves. (a) VALIDATOR-AWARE CONTROLS (the capability half): every control must satisfy
+#     each WELL-KNOWN semantic validator the TARGET satisfies (Luhn on card/IMEI-length digits, the base58
+#     alphabet on mixed-case alnum ids, the UUIDv4 version/variant nibbles), so on those routes the controls
+#     land in the ACCEPTED set, the baseline is the route's TRUE not-found response, and a checksum-valid-
+#     but-nonexistent target is seen to MATCH it ⇒ LEAD (while a genuinely distinguishable id still mints).
+#     Narrowing the control set can only cost controls ⇒ the floor ⇒ fail closed, never a wrong contrast.
+#     (b) the SAME-BRANCH BASELINE (the soundness half, which covers every validator VIGIL does NOT know):
+#     the not-found baseline is built ONLY from controls that took the
+#     TARGET'S OWN RESPONSE BRANCH. Every control is classified by its (status, body-hash) over ALL its
+#     resamples: IN-BRANCH iff every sample carries the TARGET'S EXACT STATUS and one body-hash; OFF-BRANCH
+#     iff NO sample carries the target's status (a validation-reject / route-miss — DISCARDED, never the
+#     contrast); anything else (a control flapping across the branch boundary, or a body that varies WITHIN
+#     the target's own branch) is AMBIGUOUS and FAILS THE WHOLE RUN CLOSED. We NEVER contrast the target
+#     across a response branch. On a Luhn route ~90% of controls validation-reject (off-branch → discarded)
+#     and the ~10% checksum-valid ones return the SAME soft-404 body as the target ⇒ the target does not
+#     differ ⇒ LEAD. On a REAL endpoint the same-shape controls serve the soft-404 body in the target's own
+#     branch and the target's real body differs ⇒ FACT.
 #
 # The FACT fires ONLY when VIGIL's own gated GETs show: (1) the target is a served status (2xx/3xx) and is
-# STABLE across its resamples; (2) all control samples reached a channel and AGREE on one status AND one
-# body-hash (a multi-sample-stable not-found baseline); and (3) the target is DISTINGUISHABLE from that
-# baseline by a different status OR a different body-hash. The predicate is a pure JSON AST over RAW status
-# codes + RAW body hashes of every sample, so the certificate re-verifies OFFLINE like every predicate_oracle
-# FACT. The CLEAN direction (a channel-confirmed hard 404/410 at the exact URL, control-independent, bounded
-# to the probed URL) is unchanged.
+# STABLE across its resamples; (2) NO control is ambiguous, and at least :data:`_MIN_LIVENESS_CONTROLS`
+# DISTINCT controls are IN-BRANCH — every sample of each carrying the target's EXACT status and one shared
+# body-hash (the same-branch, multi-sample-stable not-found baseline); (3) every DISCARDED control is proven
+# OFF-BRANCH (no sample carried the target's status); and (4) the target is DISTINGUISHABLE from that
+# baseline BY BODY-HASH. All four are CLAUSES OF THE GENERATED PREDICATE over the RAW per-sample statuses and
+# body hashes — including the discard proof, so the runner's in/off-branch partition itself re-verifies
+# OFFLINE and cannot be cherry-picked after the fact.
+#
+# RESIDUAL (honest, and IRREDUCIBLE for a black-box same-class method). If a validator rejects INSIDE the
+# target's own status branch — a route that answers 200 with body V for an invalid id and 200 with a
+# DIFFERENT body N for a valid-but-nonexistent one — then the same-branch controls (mostly invalid) form a
+# stable baseline V that the nonexistent target (N) differs from, and the mint is a false phantom. It cannot
+# be closed by any observation of this kind: that response profile is BYTE-IDENTICAL to the legitimate case
+# this FACT exists for (a real endpoint on a server whose same-shape siblings all soft-404 with one uniform
+# body). The FACT is therefore worded as exactly what the capture proves — "distinguishable from the stable
+# same-branch sibling baseline" — and the branch's limitation entry names this class. It shrinks as
+# (1-p)^N_CONTROLS in the validator's acceptance rate p (any in-branch control that lands on the target's own
+# body breaks the baseline's unanimity ⇒ LEAD), so raising :data:`_LIVENESS_CONTROLS` trades traffic for it.
+#
+# The predicate is a pure JSON AST over RAW status codes + RAW body hashes of every sample, so the
+# certificate re-verifies OFFLINE like every predicate_oracle FACT. The CLEAN direction (a channel-confirmed
+# hard 404/410 at the exact URL, control-independent, bounded to the probed URL) is unchanged.
 ENDPOINT_LIVENESS_BUG_CLASS = "endpoint_liveness"
 ENDPOINT_LIVENESS_BRANCH = "achieved_state.endpoint_liveness"
 # served-resource statuses the TARGET must return (2xx/3xx). 401/403/405/5xx are deliberately NOT minted here:
@@ -83,55 +123,90 @@ ENDPOINT_LIVENESS_BRANCH = "achieved_state.endpoint_liveness"
 # so they stay INCONCLUSIVE. A definite hard not-found at the TARGET (404/410) is the channel-confirmed CLEAN
 # case — bounded to the EXACT probed URL, never an enumeration-completeness claim.
 _TARGET_ABSENT_STATUSES = frozenset({404, 410})
-# Multi-sample budget (BLOCK-2). DISTINCT same-shape controls dominate robustness against a per-PATH bounded
-# body space; resampling each control + the target dominates robustness against a per-REQUEST varying body.
-# All control samples must agree for a baseline; the per-run false-FACT window on a b-element bounded space is
-# ~ (1/b)^(N_CONTROLS-1), driven to ~0 by the DISTINCT count.
+# Multi-sample budget (BLOCK-2/BLOCK-3). DISTINCT same-shape controls dominate robustness against a per-PATH
+# bounded body space AND against a validator whose acceptance rate is p (a control that lands in the target's
+# own branch with the target's own body breaks the baseline's unanimity ⇒ LEAD, so the residual shrinks as
+# (1-p)^_LIVENESS_CONTROLS); resampling each control + the target catches a per-REQUEST varying body — which
+# is now AMBIGUOUS (fail the run closed) rather than a droppable control, so a b-element bounded space cannot
+# manufacture a "stable" baseline out of the samples that happened to agree.
 _LIVENESS_CONTROLS = 10         # DISTINCT same-shape not-found control URLs (dominates per-PATH robustness)
 _LIVENESS_RESAMPLES = 2         # times EACH control is fetched (catches per-REQUEST variance)
 _LIVENESS_TARGET_SAMPLES = 3    # times the TARGET is fetched (its response must be stable across these)
-# The FLOOR of distinct same-shape controls a FACT needs: a short segment / small alphabet (e.g. a single
-# digit) cannot yield the full _LIVENESS_CONTROLS distinct siblings, so the runner uses AS MANY distinct as
-# the mirror space allows, down to this floor; fewer than this ⇒ the baseline is too thin to multi-sample ⇒
-# FAIL CLOSED to a LEAD. The predicate is generated for the ACTUAL sample count and retained per-finding, so a
-# variable count still re-verifies offline against exactly the predicate that was minted.
+# The FLOOR of distinct IN-BRANCH controls a FACT needs. Two things make the count vary: a short segment /
+# small alphabet (e.g. a single digit) cannot yield the full _LIVENESS_CONTROLS distinct siblings, and a
+# validating route sends most siblings OFF-BRANCH (discarded). Fewer than this floor in the TARGET'S OWN
+# branch ⇒ the baseline is too thin ⇒ FAIL CLOSED to a LEAD. The predicate is generated for the ACTUAL
+# retained samples and stored per-finding, so a variable count still re-verifies offline against exactly the
+# predicate that was minted.
 _MIN_LIVENESS_CONTROLS = 4
 
 
-def _build_liveness_predicate(n_control_samples: int, n_target_samples: int) -> dict:
-    """Generate the liveness FACT predicate as a pure JSON AST over RAW per-sample values (no rubber-stamp —
-    every decision is an AST op over retained raw statuses + body hashes, so the certificate re-verifies
-    OFFLINE). Fires iff: the target is 2xx/3xx and STABLE across its samples; ALL ``n_control_samples`` control
-    samples reached a channel and AGREE on one status AND one body-hash (a multi-sample-stable not-found
-    baseline); and the target is DISTINGUISHABLE from that baseline by status or body-hash. The AST is
-    generated for the EXACT number of samples the runner captured and retained with the finding, so a
-    variable control count (a short-segment URL yields fewer distinct siblings) still re-verifies offline."""
+def _build_liveness_predicate(in_branch: "list[list[int]]", off_branch: "list[list[int]]",
+                              n_target_samples: int, floor: int) -> dict:
+    """Generate the liveness FACT predicate as a pure JSON AST over the RAW per-sample values (no
+    rubber-stamp — every decision is an AST op over retained raw statuses + body hashes, so the certificate
+    re-verifies OFFLINE).
+
+    ``in_branch`` / ``off_branch`` are the observed_evidence index blocks of the control samples, one block
+    per DISTINCT control URL (``[[0,1],[2,3],…]``), as the runner classified them against the TARGET's own
+    response branch. The AST proves the WHOLE partition, so the classification itself re-verifies offline and
+    cannot be cherry-picked after the fact:
+
+      * the target is SERVED (2xx/3xx) and STABLE across its resamples (status AND body-hash);
+      * EVERY sample of EVERY in-branch control carries the TARGET'S EXACT STATUS (branch membership, tied to
+        the target — never a 4xx/5xx validation-reject the target would be falsely "distinguished" from) AND
+        the anchor's body-hash (per-control stability + unanimity of the baseline in one sweep);
+      * EVERY sample of EVERY discarded control is proven OFF-BRANCH — its status differs from the target's
+        on every resample (so a control that merely FLAPPED across the branch boundary cannot be discarded:
+        the runner classifies it AMBIGUOUS and fails the run closed);
+      * the retained same-branch count meets the floor;
+      * the target is DISTINGUISHABLE from that baseline BY BODY-HASH (the status is necessarily identical —
+        same branch — so body-hash is the only sound differential).
+
+    A missing var resolves to ``None``: the ``ge``/``eq``-to-target clauses then fail, so a predicate that
+    references an absent sample (an empty control set, a truncated capture) CANNOT fire. Generated for the
+    EXACT samples retained with the finding, so a variable control count still re-verifies offline."""
     clauses: list = [
+        # (1) the target SERVED content (2xx/3xx) ...
         {"ge": [{"var": "target_0_status"}, 200]},
         {"not": {"ge": [{"var": "target_0_status"}, 400]}},
     ]
-    # target STABLE across its resamples (an unstable target — random content — cannot be soundly judged).
+    # ... and was STABLE across its resamples (an unstable target — random content — cannot be soundly judged).
     for j in range(1, n_target_samples):
         clauses.append({"eq": [{"var": "target_0_status"}, {"var": f"target_{j}_status"}]})
         clauses.append({"eq": [{"var": "target_0_sha"}, {"var": f"target_{j}_sha"}]})
-    # baseline: control_0 reached a real channel (status >= 100), and EVERY control sample agrees on both
-    # status AND body-hash — a multi-sample-stable not-found baseline (a bounded/varying space fails this).
-    clauses.append({"ge": [{"var": "control_0_status"}, 100]})
-    for i in range(1, n_control_samples):
-        clauses.append({"eq": [{"var": "control_0_status"}, {"var": f"control_{i}_status"}]})
-        clauses.append({"eq": [{"var": "control_0_sha"}, {"var": f"control_{i}_sha"}]})
-    # DISTINGUISHABLE: the (stable) target differs from the (stable) baseline by status or body-hash.
-    clauses.append({"any": [
-        {"not": {"eq": [{"var": "target_0_status"}, {"var": "control_0_status"}]}},
-        {"not": {"eq": [{"var": "target_0_sha"}, {"var": "control_0_sha"}]}},
-    ]})
+    # (2) the SAME-BRANCH baseline: every sample of every in-branch control carries the TARGET'S status and
+    # the anchor's body-hash. The anchor's own status clause ties the whole baseline into the target's branch.
+    anchor = in_branch[0][0] if in_branch else -1
+    # the anchor sample must EXIST and be a served status — an absent var resolves to None and ``ge`` is
+    # None-guarded, so a predicate generated with NO in-branch control can never fire (belt-and-braces: this
+    # does not depend on the runner-supplied count in clause (4)).
+    clauses.append({"ge": [{"var": f"control_{anchor}_status"}, 200]})
+    clauses.append({"not": {"ge": [{"var": f"control_{anchor}_status"}, 400]}})
+    for block in in_branch:
+        for k in block:
+            clauses.append({"eq": [{"var": f"control_{k}_status"}, {"var": "target_0_status"}]})
+            clauses.append({"eq": [{"var": f"control_{k}_sha"}, {"var": f"control_{anchor}_sha"}]})
+    # (3) the DISCARD PROOF: every sample of every discarded control took a DIFFERENT branch (its status is
+    # not the target's). A validation-reject / route-miss is never the contrast, and a flapping control
+    # cannot be silently dropped.
+    for block in off_branch:
+        for k in block:
+            clauses.append({"not": {"eq": [{"var": f"control_{k}_status"}, {"var": "target_0_status"}]}})
+    # (4) the retained same-branch DISTINCT-control count meets the floor. (A count the runner retains with
+    # the evidence and the AST re-checks — the per-sample clauses above are the actual proof; this makes the
+    # policy floor itself visible and re-checkable in the offline certificate.)
+    clauses.append({"ge": [{"var": "same_branch_controls"}, floor]})
+    # (5) DISTINGUISHABLE BY BODY within that same branch (the status is identical by construction).
+    clauses.append({"not": {"eq": [{"var": "target_0_sha"}, {"var": f"control_{anchor}_sha"}]}})
     return {"all": clauses}
 
 
 @dataclass
 class WebLivenessResult:
     """The outcome of ONE endpoint-liveness re-drive of a single URL. ``fact`` is a signed AdapterResult when
-    VIGIL's own gated GETs proved a live endpoint distinct from its SAME-SHAPE not-found controls; ``context``
+    VIGIL's own gated GETs showed the target DISTINGUISHABLE from a stable SAME-BRANCH baseline built from its
+    same-shape sibling controls (never a "live endpoint" claim); ``context``
     is the retained oracle_context (predicate + raw statuses + raw body hashes) for OFFLINE re-verify.
     Otherwise ``lead`` holds a labelled lead (soft-404 / hard-404 CLEAN / unreachable / no-sound-control).
     ``outcome`` is one of positive|clean|inconclusive|deceptive_no_fact|refused."""
@@ -144,6 +219,7 @@ class WebLivenessResult:
     outcome: str = ""
     target_status: int = 0
     control_statuses: list = field(default_factory=list)
+    same_branch_controls: int = 0   # DISTINCT controls that took the target's OWN served branch (the baseline)
     note: str = ""
     refused: bool = False
 
@@ -216,11 +292,79 @@ def _same_shape_sibling(seg: str, rand: Any) -> "str | None":
     return "".join(chars) + suffix
 
 
+def _luhn_valid(s: str) -> bool:
+    """The Luhn (mod-10) check over an all-digit string — the checksum on card / IMEI style identifiers."""
+    if not s.isdigit():
+        return False
+    total = 0
+    for i, ch in enumerate(reversed(s)):
+        d = ord(ch) - 48
+        if i % 2 == 1:
+            d *= 2
+            if d > 9:
+                d -= 9
+        total += d
+    return total % 10 == 0
+
+
+_BASE58_ALPHABET = frozenset("123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz")   # no 0 O I l
+
+
+def _base58_valid(s: str) -> bool:
+    return bool(s) and all(c in _BASE58_ALPHABET for c in s)
+
+
+def _uuid_v4_valid(s: str) -> bool:
+    """A version-4 / RFC-4122-variant UUID: the version nibble is ``4`` and the variant nibble is 8|9|a|b."""
+    import re  # noqa: PLC0415 — stdlib, function-local
+    return bool(re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}",
+                             s, re.IGNORECASE))
+
+
+def _known_validators(seg: str) -> list:
+    """The WELL-KNOWN SEMANTIC validators the TARGET segment itself satisfies (BLOCK-3, the capability half
+    of the fix).
+
+    A route whose acceptance is a semantic predicate (a Luhn checksum, the base58 alphabet, a UUID version /
+    variant nibble) accepts a STRICTLY NARROWER set than any character class, so a purely character-class
+    control mostly lands in the route's VALIDATION-REJECT branch. The same-branch baseline keeps that from
+    becoming a false FACT (the rejects are discarded and the run fails closed below the floor) — but it also
+    means such a route can never be adjudicated. So the control generator additionally REQUIRES every control
+    to satisfy each well-known validator the TARGET satisfies: the controls then land in the route's ACCEPTED
+    set by construction, the baseline is the route's TRUE not-found response, and the checksum-valid-but-
+    nonexistent target is correctly seen to MATCH it (⇒ LEAD) while a genuinely distinguishable id still
+    mints. Applying a validator can only NARROW the control set (a narrower set is still inside the target's
+    character class), so the worst case is fewer distinct controls ⇒ the floor ⇒ FAIL CLOSED — never a wrong
+    contrast. Validators are applied only where they are MEANINGFUL, never inferred from a coincidence:
+    Luhn only on card/IMEI-length all-digit segments, base58 only on mixed-case alphanumeric segments long
+    enough for the 0/O/I/l exclusion to be a real signal, UUIDv4 only on a literal v4 UUID. An APP-SPECIFIC
+    validator VIGIL does not know stays covered by the same-branch fail-closed path (and is the branch's
+    documented residual)."""
+    vs: list = []
+    if seg.isdigit() and 12 <= len(seg) <= 19 and _luhn_valid(seg):
+        vs.append(_luhn_valid)
+    if (len(seg) >= 8 and seg.isalnum() and any(c.islower() for c in seg) and any(c.isupper() for c in seg)
+            and _base58_valid(seg)):
+        vs.append(_base58_valid)
+    if _uuid_v4_valid(seg):
+        vs.append(_uuid_v4_valid)
+    return vs
+
+
+# Bounded attempt budget for drawing DISTINCT, validator-satisfying controls (rejection sampling: a Luhn-16
+# draw is accepted ~10% of the time, a base58-filtered 20-char alnum draw ~26%). Exhausting it simply yields
+# FEWER controls, which the _MIN_LIVENESS_CONTROLS floor then fails closed on.
+_CONTROL_ATTEMPT_BUDGET = 4096
+
+
 def _liveness_control_urls(url: str, n: int = _LIVENESS_CONTROLS) -> "list[str]":
     """Return UP TO ``n`` NARROW-CLASS, structure-preserving, randomized, DISTINCT sibling control URLs of
     ``url`` under the SAME origin (scheme/host/port) and the SAME parent directory — the last path segment
-    mirrored by :func:`_same_shape_sibling`. Best-effort: a short segment / small alphabet (e.g. a single
-    digit, whose mirror space is only 10) yields fewer than ``n``; the caller enforces the
+    mirrored by :func:`_same_shape_sibling` and additionally required to satisfy every well-known SEMANTIC
+    validator the target segment satisfies (:func:`_known_validators`: Luhn / base58 / UUIDv4), so that a
+    checksum-constrained route accepts the controls instead of validation-rejecting them. Best-effort: a
+    short segment / small alphabet (e.g. a single digit, whose mirror space is only 10), or a validator that
+    exhausts the attempt budget, yields fewer than ``n``; the caller enforces the
     :data:`_MIN_LIVENESS_CONTROLS` floor and fails closed below it. Returns ``[]`` when there is no mirrorable
     last segment (a root/directory URL like ``/`` or ``/api/``) or the shape is ambiguous/un-mirrorable.
     Same host as the target, so each is authorised by the identical charter scope the target GET is (the
@@ -239,16 +383,18 @@ def _liveness_control_urls(url: str, n: int = _LIVENESS_CONTROLS) -> "list[str]"
         return []   # shape cannot be mirrored / ambiguous class → fail closed
     urls: "list[str]" = []
     tokens: "set[str]" = {seg}
-    # collect as many DISTINCT same-shape siblings as the mirror space allows, up to n. Bounded retries per
-    # slot; when the space is exhausted (many misses in a row) we stop with what we have — the caller enforces
-    # the minimum. All siblings are != the target segment (seeded into ``tokens``).
-    misses = 0
-    while len(urls) < n and misses < 256:
+    # collect as many DISTINCT same-shape siblings as the mirror space allows, up to n, each satisfying every
+    # WELL-KNOWN SEMANTIC validator the target satisfies (rejection sampling under a bounded attempt budget).
+    # When the space/budget is exhausted we stop with what we have — the caller enforces the floor. All
+    # siblings are != the target segment (seeded into ``tokens``).
+    validators = _known_validators(seg)
+    attempts = 0
+    while len(urls) < n and attempts < _CONTROL_ATTEMPT_BUDGET:
+        attempts += 1
         tok = _same_shape_sibling(seg, rand)
         if tok is None:                       # (shape checked above; defensive)
             break
-        if tok in tokens:
-            misses += 1
+        if tok in tokens or any(not v(tok) for v in validators):
             continue
         tokens.add(tok)
         urls.append(urlunsplit((parts.scheme, parts.netloc, parent + tok, "", "")))
@@ -257,13 +403,17 @@ def _liveness_control_urls(url: str, n: int = _LIVENESS_CONTROLS) -> "list[str]"
 
 def endpoint_liveness_redrive(url: str, *, slug: str, engagement_slug: str,
                              signers: "list[tuple[str, str]]", timeout: float = 8.0) -> WebLivenessResult:
-    """Re-drive ``url`` with VIGIL's OWN plain gated GET (no canary) and mint a signed ACHIEVED_STATE FACT
-    when the URL is a LIVE endpoint the server distinguishes from nonexistent SAME-SHAPE siblings. The L7
-    analogue of the TCP handshake reachability FACT. Returns a :class:`WebLivenessResult`. NEVER raises.
+    """Re-drive ``url`` with VIGIL's OWN plain gated GETs (no canary) and mint a signed ACHIEVED_STATE FACT
+    when the server's response to it is DISTINGUISHABLE from its own stable, SAME-BRANCH response to
+    randomized same-shape siblings — never a "live endpoint" claim. The L7 analogue of the TCP handshake
+    reachability FACT. Returns a :class:`WebLivenessResult`. NEVER raises.
 
     Order (fail-closed): pre-flight the charter gate ONCE (a refused engagement means VIGIL never observed the
-    target — no channel, so no fact and no CLEAN); GET the target through the gated send; GET two SAME-SHAPE
-    not-found controls; run the predicate_oracle over the RAW statuses + RAW body hashes; admit through the
+    target — no channel, so no fact and no CLEAN); GET the target ``_LIVENESS_TARGET_SAMPLES`` times through
+    the gated send; GET up to ``_LIVENESS_CONTROLS`` DISTINCT narrow-class same-shape sibling controls,
+    ``_LIVENESS_RESAMPLES`` times each; classify every control against the TARGET'S OWN response branch
+    (in-branch / off-branch-discarded / ambiguous-fail-closed); run the predicate_oracle over the RAW statuses
+    + RAW body hashes (the AST proves the partition AND the differential); admit through the
     ``achieved_state.endpoint_liveness`` branch; certify only a FACT admission. The CLEAN direction (a
     channel-confirmed hard 404/410 at the exact URL) is control-independent and bounded to the probed URL."""
     from framework.v2.scanner.insertion import HttpRequest  # noqa: PLC0415 (FATAL-2: function-local)
@@ -334,11 +484,8 @@ def endpoint_liveness_redrive(url: str, *, slug: str, engagement_slug: str,
     res.target_status = target_statuses[0]
     res.control_statuses = sorted({_status(s) for s in control_samples})
     # observed_evidence: EVERY raw sample (status + raw body hash), keyed for the generated predicate AST — no
-    # rubber-stamp, the AST does all the comparing. The predicate is generated for the ACTUAL captured sample
-    # count (short-segment URLs yield fewer distinct siblings, so the count varies) and retained WITH the
-    # finding, so the certificate re-verifies offline against exactly the predicate that was minted. An empty
-    # control set (fail-closed / hard-404 skip) yields a predicate whose control_0 clause references an absent
-    # var ⇒ it cannot fire ⇒ no FACT.
+    # rubber-stamp, the AST does all the comparing. The predicate references only the SAME-BRANCH subset (below)
+    # and is retained WITH the finding, so the certificate re-verifies offline against exactly what was minted.
     observed_evidence: dict = {"target_url": url, "control_urls": list(control_urls)}
     for j, t in enumerate(target_samples):
         observed_evidence[f"target_{j}_status"] = _status(t)
@@ -346,18 +493,61 @@ def endpoint_liveness_redrive(url: str, *, slug: str, engagement_slug: str,
     for i, s in enumerate(control_samples):
         observed_evidence[f"control_{i}_status"] = _status(s)
         observed_evidence[f"control_{i}_sha"] = _sha(s)
-    context = {"predicate": _build_liveness_predicate(len(control_samples), _LIVENESS_TARGET_SAMPLES),
-               "observed_evidence": observed_evidence}
 
-    # The ACHIEVED_STATE predicate decides the FIRE over VIGIL's own multi-sample captures; the runner computes
-    # CONCLUSIVENESS (predicate_oracle is always conclusive, but this branch must distinguish a channel-
-    # confirmed hard-404 CLEAN from a soft-404 / no-sound-control / unstable ambiguity). A non-fire is
-    # conclusive ONLY when the target was a definite hard not-found (404/410) on EVERY resample — then the exact
-    # URL is a channel-confirmed non-served endpoint (CLEAN, bounded to THIS URL, control-independent). A
-    # non-fire where the target served but the multi-sample same-shape baseline did not corroborate a
-    # distinction (soft-404 / bounded-body / echo / unstable / no mirrorable control) is INCONCLUSIVE.
-    signal = _oracle_signal(context)
-    fired = signal.fired
+    # SAME-BRANCH BASELINE (the BLOCK-3 fix). The not-found baseline must be built ONLY from controls that
+    # took the TARGET's OWN response branch. Classify each DISTINCT control by ALL of its resamples:
+    #   IN-BRANCH  — every sample carries the TARGET'S EXACT STATUS and they share ONE body-hash;
+    #   OFF-BRANCH — NO sample carries the target's status (a validation-reject / route-miss) ⇒ DISCARDED;
+    #   AMBIGUOUS  — anything else: a control that FLAPPED across the branch boundary, or whose body VARIES
+    #                inside the target's own branch (the bounded/per-request body space of BLOCK-2). One
+    #                ambiguous control FAILS THE WHOLE RUN CLOSED: a nondeterministic route yields no sound
+    #                baseline, and silently dropping such a control is exactly how a bounded body space
+    #                manufactures a spurious "stable" baseline.
+    # An off-branch control is NEVER the contrast the target is "distinguished" from — we do not contrast
+    # across response branches. The AST proves this partition (membership AND the discard), so it re-verifies
+    # offline; the runner only selects, it never adjudicates.
+    target_stable = len({(_status(t), _sha(t)) for t in target_samples}) == 1
+    target_status = target_statuses[0]
+    target_served = target_stable and 200 <= target_status < 400
+    in_branch: "list[list[int]]" = []
+    off_branch: "list[list[int]]" = []
+    ambiguous = 0
+    for c_idx in range(len(control_urls)):
+        block = [i for i in range(c_idx * _LIVENESS_RESAMPLES, (c_idx + 1) * _LIVENESS_RESAMPLES)
+                 if i < len(control_samples)]
+        if not block:
+            continue
+        samples = [control_samples[i] for i in block]
+        statuses = {_status(x) for x in samples}
+        shas = {_sha(x) for x in samples}
+        if statuses == {target_status} and len(shas) == 1:
+            in_branch.append(block)
+        elif target_status not in statuses:
+            off_branch.append(block)
+        else:
+            ambiguous += 1
+    distinct_same_branch = len(in_branch)
+    res.same_branch_controls = distinct_same_branch
+    # the baseline must also be UNANIMOUS across the in-branch controls (a per-PATH not-found space gives each
+    # sibling its own body ⇒ no baseline). The predicate enforces it; computed here only to label the LEAD.
+    baseline_unanimous = len({_sha(control_samples[b[0]]) for b in in_branch}) <= 1
+
+    # A FACT requires: the target SERVED + stable, NO ambiguous control, and at least the floor of DISTINCT
+    # IN-BRANCH controls. A checksum route (random controls validation-reject off-branch), a hard-404 server
+    # (no served baseline), or a varying body space (ambiguous) all FAIL CLOSED here. The predicate then does
+    # the adjudicating over the raw samples.
+    have_baseline = target_served and ambiguous == 0 and distinct_same_branch >= _MIN_LIVENESS_CONTROLS
+    observed_evidence["same_branch_controls"] = distinct_same_branch
+    observed_evidence["same_branch_sample_keys"] = [i for b in in_branch for i in b]
+    observed_evidence["off_branch_sample_keys"] = [i for b in off_branch for i in b]
+    observed_evidence["ambiguous_controls"] = ambiguous
+    context = {"predicate": _build_liveness_predicate(in_branch, off_branch, _LIVENESS_TARGET_SAMPLES,
+                                                      _MIN_LIVENESS_CONTROLS),
+               "observed_evidence": observed_evidence}
+    # CONCLUSIVENESS: a non-fire is a channel-confirmed CLEAN ONLY when the target was a definite hard not-found
+    # (404/410) on EVERY resample (control-independent, bounded to THIS URL). Everything else non-firing (soft-
+    # 404 / bounded-body / checksum validation-reject / no same-branch baseline / unstable) is INCONCLUSIVE.
+    fired = _oracle_signal(context).fired if have_baseline else False
     conclusive = fired or target_all_absent
     admitted = admit(ENDPOINT_LIVENESS_BRANCH, fired=fired, conclusive=conclusive,
                      observed={"channel_established": True, "gate_authorized": True})
@@ -370,12 +560,18 @@ def endpoint_liveness_redrive(url: str, *, slug: str, engagement_slug: str,
         res.fact = r
         res.context = context
         res.outcome = "positive"
-        # NARROWED CLAIM (never "live endpoint"): served content distinguishable from a multi-sample-stable
-        # same-shape not-found baseline.
-        res.note = (f"served content DISTINGUISHABLE from a multi-sample-stable same-shape not-found baseline: "
-                    f"target status {res.target_status} over {_LIVENESS_TARGET_SAMPLES} samples vs "
-                    f"{len(control_samples)} control samples across {len(control_urls)} same-shape siblings "
-                    f"(not a soft-404 phantom of that shape). NOT a claim that the endpoint is 'live'/real.")
+        # NARROWED CLAIM (never "live endpoint"): served content distinguishable from the server's own
+        # stable, SAME-BRANCH response to randomized same-shape siblings. The residual is named in the note
+        # itself — the FACT never claims more than the capture proves.
+        res.note = (f"served content DISTINGUISHABLE from a multi-sample-stable, SAME-BRANCH not-found "
+                    f"baseline: target status {res.target_status} over {_LIVENESS_TARGET_SAMPLES} samples vs "
+                    f"{distinct_same_branch} same-shape siblings that ALL answered in the target's OWN "
+                    f"response branch (same status, one shared body-hash) while the target's body differs — "
+                    f"not a soft-404 phantom of that shape; {len(off_branch)} off-branch controls "
+                    f"(validation-reject / route-miss) were DISCARDED, never contrasted against. NOT a claim "
+                    f"that the endpoint is 'live'/real/exists. Residual: if this route rejects invalid ids "
+                    f"INSIDE the same status branch with a body distinct from its not-found body, that "
+                    f"baseline is a reject baseline (indistinguishable from this capture).")
         return res
     # not a FACT — a labelled lead. classify: CLEAN (channel-confirmed hard-404, bounded to THIS url) vs
     # INCONCLUSIVE (soft-404 / bounded-body / no-sound-control / ambiguous). certify_admitted stamped r.outcome.
@@ -387,10 +583,27 @@ def endpoint_liveness_redrive(url: str, *, slug: str, engagement_slug: str,
     elif not control_urls:
         res.note = ("no sound NARROW-CLASS same-shape control for this URL (a root/directory URL or an "
                     "ambiguous/un-mirrorable last segment) — fails closed to a LEAD")
+    elif not target_served:
+        res.note = (f"the target is not a STABLE served (2xx/3xx) response (status {res.target_status}, "
+                    f"stable={target_stable}) — nothing sound to distinguish; a LEAD")
+    elif ambiguous:
+        res.note = (f"{ambiguous} of {len(control_urls)} same-shape controls took an AMBIGUOUS response "
+                    f"branch (their samples disagree on status, or the body VARIES inside the target's own "
+                    f"branch) — a nondeterministic route yields no sound not-found baseline, and dropping "
+                    f"such a control is how a bounded body space manufactures a false baseline; fail closed")
+    elif distinct_same_branch < _MIN_LIVENESS_CONTROLS:
+        res.note = (f"no SAME-BRANCH not-found baseline: only {distinct_same_branch} of {len(control_urls)} "
+                    f"same-shape controls answered in the target's OWN response branch (the rest "
+                    f"validation-rejected / route-missed into a DIFFERENT branch) — below the floor of "
+                    f"{_MIN_LIVENESS_CONTROLS}, and we never contrast the target across response branches "
+                    f"(the checksum/validation-route class); a LEAD")
+    elif not baseline_unanimous:
+        res.note = (f"the {distinct_same_branch} same-branch controls do NOT agree on one body-hash (a "
+                    f"per-path / bounded not-found body space) — no stable baseline; a LEAD")
     else:
-        res.note = (f"no distinguishable-content FACT: target {res.target_status}, control statuses "
-                    f"{res.control_statuses} — the server does not distinguish this URL from a same-shape "
-                    f"sibling across multi-sampling (soft-404 / bounded-body / echo / unstable baseline); a LEAD")
+        res.note = (f"no distinguishable-content FACT: target {res.target_status}, {distinct_same_branch} "
+                    f"same-branch controls — the target's body MATCHES the same-branch not-found baseline "
+                    f"(a soft-404 phantom of that shape); a LEAD")
     return res
 
 
