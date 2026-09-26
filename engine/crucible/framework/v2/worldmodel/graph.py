@@ -25,10 +25,50 @@ Upsert semantics (add_node / add_edge) are the load-bearing behaviour:
 
 All sequence numbers are caller-supplied monotonic ints; the graph never
 reads a wallclock, so every operation is deterministic and replayable.
+
+ORDER INDEXES (performance, #828). Every read that promises "deterministic
+order" used to re-`sorted()` the whole node dict / adjacency dict on EVERY
+call — `all_nodes`, `nodes_of_kind`, `all_edges`, `edges_of_kind`, `neighbors`.
+Those sorts exist ONLY to pin the order, never to compute anything, so keeping
+the same order in a MAINTAINED index is behaviour-preserving by construction:
+the iteration order is `sorted(...)` of exactly the same key set, it is simply
+not re-paid per call.
+
+    _node_ids      sorted list of every node id          -> all_nodes
+    _kind_ids      kind value -> sorted list of node ids -> nodes_of_kind
+    _out_dsts      src -> sorted list of dsts            -> neighbors / all_edges
+    _in_srcs       dst -> sorted list of srcs            -> neighbors(incoming=True)
+    _kind_pairs    edge-kind value -> sorted (src,dst)   -> edges_of_kind
+    _out[s][d] / _in[d][s] are themselves held in sorted-kind-key order (see
+    `_put_kind`), so the innermost `sorted()` is gone too.
+
+A bucket is APPENDED to on write and NORMALISED (``list.sort()``) on the first
+read after a write that landed out of order — never with ``insort``, whose O(n)
+memmove per insert would make graph construction quadratic and reintroduce
+exactly the class of blow-up this index exists to remove. Keys usually arrive
+ascending (ids are generated in order), in which case the bucket is never dirty
+and the sort never runs at all. Because the normalisation is literally
+``list.sort()`` over the same key set, the order a reader sees is ``sorted(...)``
+— identical to the pre-index code — and the worst case (mutate, read, mutate,
+read) is one sort per read, i.e. exactly the pre-index cost, never worse.
+
+What the index DOES cost unconditionally is per-WRITE bookkeeping: one list
+append plus one comparison per node / per new adjacency key. Measured, that is
+17–26% slower graph CONSTRUCTION against 1.5x–250x faster reads (and ~15x on
+the repeated list-then-scan shape `knowledge/operators` pays), so the trade is
+worth it for any graph read more than once — which is every graph the engine
+builds. It is not free, and this comment says so rather than implying it is.
+
+The indexes are keys only — never Node/Edge objects — so an upsert that
+replaces a stored object cannot leave them stale. `_assert_index_consistent`
+re-derives every index from `_nodes`/`_out`/`_in`, and additionally asserts the
+lazy contract (a bucket NOT flagged dirty is already sorted); the test-suite
+calls it as the invariant the fast readers are allowed to assume.
 """
 
 from __future__ import annotations
 
+from bisect import bisect_left
 from collections import deque
 from collections.abc import Iterable, Iterator
 
@@ -48,6 +88,9 @@ from .models import (
 # asserted confidence — so a hallucinated fact cannot enter the graph at high belief.
 # Default mode leaves belief untouched (only the grounding tag is recorded).
 _UNGROUNDED_BELIEF_FLOOR = 0.2
+
+# The single dirty-slot key for the whole-graph `_node_ids` bucket.
+_NODE_IDS = "\0node-ids"
 
 
 class WorldModelError(CrucibleError):
@@ -126,6 +169,74 @@ def _update_belief(alpha: float, beta: float, confidence: float) -> tuple[float,
     return (alpha + _BELIEF_WEIGHT * confidence, beta + _BELIEF_WEIGHT * (1.0 - confidence))
 
 
+def _put_kind(bucket: dict[str, Edge], kv: str, edge: Edge) -> None:
+    """Store ``edge`` under kind-key ``kv`` in an adjacency bucket, KEEPING the
+    bucket's iteration order equal to ``sorted(bucket)``.
+
+    Python dicts iterate in insertion order, so a bucket that is only ever
+    appended to in ascending key order iterates sorted for free. The rare
+    out-of-order insert re-orders in place (these buckets hold at most one
+    entry per EdgeKind and in practice one or two), which is what lets
+    ``neighbors`` / ``all_edges`` drop their innermost ``sorted()`` call
+    without changing a single element's position.
+
+    Re-assigning an existing key keeps its position, exactly as the previous
+    ``bucket[kv] = stored`` did."""
+    if kv in bucket:
+        bucket[kv] = edge
+        return
+    bucket[kv] = edge
+    if len(bucket) > 1:
+        keys = list(bucket)
+        if keys[-1] < keys[-2]:          # the new key landed out of order
+            ordered = sorted(bucket.items())
+            bucket.clear()
+            bucket.update(ordered)
+
+
+def _append_key(seq: list, key: object, dirty: set, slot: object) -> None:
+    """Append ``key`` to an index bucket, flagging it dirty only if the append
+    broke sortedness. Ascending keys (the normal case) cost one list append and
+    never schedule a sort."""
+    seq.append(key)
+    if len(seq) > 1 and key < seq[-2]:
+        dirty.add(slot)
+
+
+def _normalize(seq: list, dirty: set, slot: object) -> list:
+    """Return ``seq`` in sorted order, sorting in place iff it is flagged dirty.
+    This is the ONLY place a bucket's order is established, and it is a plain
+    ``list.sort()`` over the same key set — so every reader sees exactly the
+    ``sorted(...)`` order the pre-index code computed."""
+    if slot in dirty:
+        seq.sort()
+        dirty.discard(slot)
+    return seq
+
+
+def _discard_sorted(seq: list | None, value: object) -> None:
+    """Remove ``value`` from a SORTED list, if present (O(log n) + memmove).
+    Callers must `_normalize` first — removal is rare (only `remove_node`), so
+    paying a normalising sort there is cheaper than a linear scan everywhere."""
+    if not seq:
+        return
+    i = bisect_left(seq, value)
+    if i < len(seq) and seq[i] == value:
+        del seq[i]
+
+
+def _kind_key(kind: object) -> object:
+    """The dict key a NodeKind indexes under.
+
+    ``NodeKind`` is a ``str`` enum, so ``node.kind == "host"`` is True while
+    ``hash(NodeKind.HOST) != hash("host")`` (``Enum.__hash__`` hashes the
+    *name*). Normalising both sides onto ``.value`` therefore reproduces the
+    old ``n.kind == kind`` test exactly for a member OR its bare value, and
+    still misses (empty result) for anything that is neither — which is what
+    the old comprehension did too."""
+    return getattr(kind, "value", kind)
+
+
 class WorldModel:
     """A typed attack-graph. Construct empty, then accrete facts."""
 
@@ -138,6 +249,21 @@ class WorldModel:
         # provenance) is seeded at a low belief floor. Default False = belief unchanged;
         # only the provenance grounding tag is recorded on every write.
         self._strict_grounding = strict_grounding
+        # --- order indexes (see the module docstring). Keys only, never objects,
+        # so an upsert that replaces a stored Node/Edge cannot stale them. Each is
+        # held in exactly the order the corresponding reader used to re-sort into.
+        self._node_ids: list[str] = []                       # sorted node ids
+        self._kind_ids: dict[object, list[str]] = {}         # kind value -> sorted node ids
+        self._out_dsts: dict[str, list[str]] = {}            # src -> sorted dsts
+        self._in_srcs: dict[str, list[str]] = {}             # dst -> sorted srcs
+        self._kind_pairs: dict[str, list[tuple[str, str]]] = {}  # edge kind -> sorted (src,dst)
+        # Buckets whose last append landed out of order and therefore owe a sort
+        # before their next read. `_NODE_IDS` is the single slot for `_node_ids`.
+        self._dirty_nodes: set[object] = set()
+        self._dirty_kinds: set[object] = set()
+        self._dirty_out: set[str] = set()
+        self._dirty_in: set[str] = set()
+        self._dirty_pairs: set[str] = set()
 
     def _grounded_seed_confidence(self, confidence: float, grounding: str) -> float:
         if self._strict_grounding and grounding == GROUNDING_UNGROUNDED:
@@ -166,6 +292,11 @@ class WorldModel:
             self._nodes[node.id] = stored
             self._out.setdefault(node.id, {})
             self._in.setdefault(node.id, {})
+            self._out_dsts.setdefault(node.id, [])
+            self._in_srcs.setdefault(node.id, [])
+            _append_key(self._node_ids, node.id, self._dirty_nodes, _NODE_IDS)
+            kk = _kind_key(node.kind)
+            _append_key(self._kind_ids.setdefault(kk, []), node.id, self._dirty_kinds, kk)
             return stored
         if existing.kind != node.kind:
             raise WorldModelError(
@@ -211,23 +342,61 @@ class WorldModel:
         node existed. Additive/opt-in — used by bounded producers (e.g. AEGIS's per-actor
         windowing) to evict an aged-out actor so the graph does not grow without bound; nothing
         in the batch engagement path calls it, so existing behaviour is unchanged."""
-        if node_id not in self._nodes:
+        node = self._nodes.get(node_id)
+        if node is None:
             return False
+        # Outgoing first, then incoming — the second snapshot is taken AFTER the
+        # first loop has mutated `_in[node_id]`, so a self-loop is dropped once
+        # (this ordering is the pre-index behaviour, kept verbatim).
         for dst in list(self._out.get(node_id, {})):
+            for kv in self._out[node_id][dst]:
+                self._drop_pair(kv, node_id, dst)
             self._in.get(dst, {}).pop(node_id, None)
+            _discard_sorted(_normalize(self._in_srcs.get(dst) or [], self._dirty_in, dst),
+                            node_id)
         for src in list(self._in.get(node_id, {})):
+            for kv in self._in[node_id][src]:
+                self._drop_pair(kv, src, node_id)
             self._out.get(src, {}).pop(node_id, None)
+            _discard_sorted(_normalize(self._out_dsts.get(src) or [], self._dirty_out, src),
+                            node_id)
         self._out.pop(node_id, None)
         self._in.pop(node_id, None)
+        self._out_dsts.pop(node_id, None)
+        self._in_srcs.pop(node_id, None)
+        self._dirty_out.discard(node_id)
+        self._dirty_in.discard(node_id)
+        _discard_sorted(_normalize(self._node_ids, self._dirty_nodes, _NODE_IDS), node_id)
+        kk = _kind_key(node.kind)
+        bucket = self._kind_ids.get(kk)
+        if bucket is not None:
+            _discard_sorted(_normalize(bucket, self._dirty_kinds, kk), node_id)
         self._nodes.pop(node_id, None)
         return True
 
+    def _drop_pair(self, kv: str, src: str, dst: str) -> None:
+        """Drop one (src, dst) from the per-edge-kind index (edge removal path)."""
+        pairs = self._kind_pairs.get(kv)
+        if pairs:
+            _discard_sorted(_normalize(pairs, self._dirty_pairs, kv), (src, dst))
+
     def nodes_of_kind(self, kind: NodeKind) -> list[Node]:
-        """All nodes of a kind, in deterministic (id-sorted) order."""
-        return [n for _, n in sorted(self._nodes.items()) if n.kind == kind]
+        """All nodes of a kind, in deterministic (id-sorted) order.
+
+        Served from the maintained per-kind bucket: the bucket holds exactly the
+        ids the old ``n.kind == kind`` filter kept, in the same sorted order, so
+        the returned list is element-for-element what the full re-sort produced —
+        at O(|kind|) instead of O(|V| log|V|) per call."""
+        kk = _kind_key(kind)
+        ids = self._kind_ids.get(kk)
+        if not ids:
+            return []
+        nodes = self._nodes
+        return [nodes[i] for i in _normalize(ids, self._dirty_kinds, kk)]
 
     def all_nodes(self) -> list[Node]:
-        return [self._nodes[k] for k in sorted(self._nodes)]
+        nodes = self._nodes
+        return [nodes[k] for k in _normalize(self._node_ids, self._dirty_nodes, _NODE_IDS)]
 
     # -- edges --------------------------------------------------------------
 
@@ -268,30 +437,58 @@ class WorldModel:
             a, b = _seed_belief(self._grounded_seed_confidence(edge.confidence, g),
                                 edge.alpha, edge.beta)
             stored = edge.model_copy(update={"alpha": a, "beta": b, "grounding": g})
-        self._out.setdefault(edge.src, {}).setdefault(edge.dst, {})[kv] = stored
-        self._in.setdefault(edge.dst, {}).setdefault(edge.src, {})[kv] = stored
+        out_adj = self._out.setdefault(edge.src, {})
+        if edge.dst not in out_adj:
+            out_adj[edge.dst] = {}
+            _append_key(self._out_dsts.setdefault(edge.src, []), edge.dst,
+                        self._dirty_out, edge.src)
+        in_adj = self._in.setdefault(edge.dst, {})
+        if edge.src not in in_adj:
+            in_adj[edge.src] = {}
+            _append_key(self._in_srcs.setdefault(edge.dst, []), edge.src,
+                        self._dirty_in, edge.dst)
+        if existing is None:
+            _append_key(self._kind_pairs.setdefault(kv, []), (edge.src, edge.dst),
+                        self._dirty_pairs, kv)
+        _put_kind(out_adj[edge.dst], kv, stored)
+        _put_kind(in_adj[edge.src], kv, stored)
         return stored
 
     def get_edge(self, src: str, dst: str, kind: EdgeKind) -> Edge | None:
         return self._out.get(src, {}).get(dst, {}).get(kind.value)
 
     def edges_of_kind(self, kind: EdgeKind) -> list[Edge]:
-        """All edges of a kind, in deterministic (src, dst)-sorted order."""
-        out: list[Edge] = []
-        for src in sorted(self._out):
-            for dst in sorted(self._out[src]):
-                edge = self._out[src][dst].get(kind.value)
-                if edge is not None:
-                    out.append(edge)
-        return out
+        """All edges of a kind, in deterministic (src, dst)-sorted order.
+
+        The per-kind index holds the (src, dst) pairs sorted, and tuple order IS
+        the old nested "sorted srcs, then sorted dsts" order — so this returns
+        the identical list in O(|kind|) rather than O(|V| log|V| + |E| log|E|)."""
+        kv = kind.value
+        pairs = self._kind_pairs.get(kv)
+        if not pairs:
+            return []
+        out_adj = self._out
+        return [out_adj[s][d][kv] for s, d in _normalize(pairs, self._dirty_pairs, kv)]
 
     def all_edges(self) -> list[Edge]:
-        """Every edge, in deterministic (src, dst, kind)-sorted order."""
+        """Every edge, in deterministic (src, dst, kind)-sorted order.
+
+        `_node_ids` is the sorted key set of `_out` (every node gets an `_out`
+        entry on insert and loses it on removal), `_out_dsts[src]` is its sorted
+        dst list, and each innermost bucket is held in sorted-kind order — so
+        this walks the same three levels in the same order with no sort at all."""
         out: list[Edge] = []
-        for src in sorted(self._out):
-            for dst in sorted(self._out[src]):
-                for kv in sorted(self._out[src][dst]):
-                    out.append(self._out[src][dst][kv])
+        out_adj = self._out
+        dsts = self._out_dsts
+        dirty = self._dirty_out
+        if dirty:                      # normalise every owed adjacency bucket once
+            for src in dirty:
+                dsts[src].sort()
+            dirty.clear()
+        for src in _normalize(self._node_ids, self._dirty_nodes, _NODE_IDS):
+            adj = out_adj[src]
+            for dst in dsts[src]:
+                out.extend(adj[dst].values())
         return out
 
     # -- traversal ----------------------------------------------------------
@@ -307,13 +504,20 @@ class WorldModel:
         optionally filtered to a set of edge kinds. Deterministic order.
         Unknown node -> empty list (traversal is total, not partial)."""
         allowed = {k.value for k in edge_kinds} if edge_kinds is not None else None
-        adj = self._in if incoming else self._out
-        buckets = adj.get(node_id, {})
+        if incoming:
+            adj, order, dirty = self._in, self._in_srcs, self._dirty_in
+        else:
+            adj, order, dirty = self._out, self._out_dsts, self._dirty_out
+        buckets = adj.get(node_id)
+        if not buckets:
+            return []
         out: list[Edge] = []
-        for other in sorted(buckets):
-            for kv in sorted(buckets[other]):
-                if allowed is None or kv in allowed:
-                    out.append(buckets[other][kv])
+        for other in _normalize(order[node_id], dirty, node_id):
+            bucket = buckets[other]
+            if allowed is None:
+                out.extend(bucket.values())
+            else:
+                out.extend(e for kv, e in bucket.items() if kv in allowed)
         return out
 
     def reachable(
@@ -367,3 +571,67 @@ class WorldModel:
             for dsts in self._out.values()
             for kinds in dsts.values()
         )
+
+    # -- index invariant ----------------------------------------------------
+
+    def _assert_index_consistent(self) -> None:
+        """Re-derive every order index from `_nodes` / `_out` / `_in` and assert
+        it matches. This is the contract the fast readers are allowed to assume —
+        it is NOT called on the hot path; the test-suite calls it after mutation
+        sequences so a future index bug is caught at the source rather than as a
+        mysterious ordering change downstream."""
+        # the lazy contract first: a bucket NOT flagged dirty must already be sorted
+        if _NODE_IDS not in self._dirty_nodes:
+            assert self._node_ids == sorted(self._node_ids), "clean node index is unsorted"
+        for kk, ids in self._kind_ids.items():
+            if kk not in self._dirty_kinds:
+                assert ids == sorted(ids), f"clean kind index unsorted for {kk!r}"
+        for src, lst in self._out_dsts.items():
+            if src not in self._dirty_out:
+                assert lst == sorted(lst), f"clean out index unsorted for {src!r}"
+        for dst, lst in self._in_srcs.items():
+            if dst not in self._dirty_in:
+                assert lst == sorted(lst), f"clean in index unsorted for {dst!r}"
+        for kv, pairs in self._kind_pairs.items():
+            if kv not in self._dirty_pairs:
+                assert pairs == sorted(pairs), f"clean edge-kind index unsorted for {kv!r}"
+        # dirty slots may not name a bucket that no longer exists
+        assert self._dirty_out <= set(self._out_dsts), "stale dirty out slot"
+        assert self._dirty_in <= set(self._in_srcs), "stale dirty in slot"
+        # then the content itself (normalising as a reader would)
+        _normalize(self._node_ids, self._dirty_nodes, _NODE_IDS)
+        for kk in list(self._kind_ids):
+            _normalize(self._kind_ids[kk], self._dirty_kinds, kk)
+        for src in list(self._out_dsts):
+            _normalize(self._out_dsts[src], self._dirty_out, src)
+        for dst in list(self._in_srcs):
+            _normalize(self._in_srcs[dst], self._dirty_in, dst)
+        for kv in list(self._kind_pairs):
+            _normalize(self._kind_pairs[kv], self._dirty_pairs, kv)
+        assert self._node_ids == sorted(self._nodes), "node id index drifted"
+        assert sorted(self._out) == self._node_ids, "_out key set != node id index"
+        assert sorted(self._in) == self._node_ids, "_in key set != node id index"
+        want_kinds: dict[object, list[str]] = {}
+        for nid, node in self._nodes.items():
+            want_kinds.setdefault(_kind_key(node.kind), []).append(nid)
+        for key, ids in want_kinds.items():
+            assert self._kind_ids.get(key) == sorted(ids), f"kind index drifted for {key!r}"
+        for key, ids in self._kind_ids.items():
+            assert ids == sorted(want_kinds.get(key, [])), f"stale kind index for {key!r}"
+        for src, adj in self._out.items():
+            assert self._out_dsts.get(src) == sorted(adj), f"out index drifted for {src!r}"
+            for dst, bucket in adj.items():
+                assert list(bucket) == sorted(bucket), f"out bucket unsorted {src!r}->{dst!r}"
+        for dst, adj in self._in.items():
+            assert self._in_srcs.get(dst) == sorted(adj), f"in index drifted for {dst!r}"
+            for src, bucket in adj.items():
+                assert list(bucket) == sorted(bucket), f"in bucket unsorted {src!r}<-{dst!r}"
+        want_pairs: dict[str, list[tuple[str, str]]] = {}
+        for src, adj in self._out.items():
+            for dst, bucket in adj.items():
+                for kv in bucket:
+                    want_pairs.setdefault(kv, []).append((src, dst))
+        for kv, pairs in want_pairs.items():
+            assert self._kind_pairs.get(kv) == sorted(pairs), f"edge-kind index drifted for {kv!r}"
+        for kv, pairs in self._kind_pairs.items():
+            assert pairs == sorted(want_pairs.get(kv, [])), f"stale edge-kind index for {kv!r}"
