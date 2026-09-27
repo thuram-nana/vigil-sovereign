@@ -71,7 +71,9 @@ speedup here is over a different answer:
 
     bench_graph --sizes 1000,10000 --repeat 5 --compare-rev 838e0b42
 
-    CONSTRUCTION     +18% (N=1k) .. +29% (N=10k) SLOWER than pre-index
+    CONSTRUCTION     ~+18% (N=1k) .. ~+32% (N=10k) SLOWER than pre-index
+                     (this host; the N=10k figure reads +29%..+32% across
+                     methods and runs — take the high end)
 
 So the envelope is ~1.1x at the floor to ~60x at the ceiling, and it is the
 whole-collection readers (`nodes_of_kind`, `edges_of_kind`) that carry it,
@@ -85,13 +87,13 @@ Two earlier claims here are WITHDRAWN, not restated:
     ~60x.
   * "~15x on the repeated list-then-scan shape `knowledge/operators` pays". The
     real consumer is `saturate()`, and `bench_graph --mode operators
-    --compare-rev 838e0b42` measures 1.01x–1.06x across repeated runs at
-    N=200 and N=800 — i.e. no measurable win on that shape at all. A previous
-    revision replaced the withdrawn 15x with "3.5x–4.5x" in the same breath;
-    that figure
-    came from a hand-rolled loop that called `nodes_of_kind` per node rather
-    than from `saturate`, was never committed, and is withdrawn too. The lesson
-    is in the rule this file now follows: every number here comes from a
+    --compare-rev 838e0b42` measures ~1.0x–1.1x across repeated runs at N=200 and
+    N=800 (mostly 1.01x–1.07x, occasionally noisier on a loaded host) — i.e. no
+    meaningful win on that shape at all. A previous revision replaced the
+    withdrawn 15x with "3.5x–4.5x" in the same breath; that figure came from a
+    hand-rolled loop that called `nodes_of_kind` per node rather than from
+    `saturate`, was never committed, and is withdrawn too. The lesson is in the
+    rule this file now follows: every number here comes from a
     committed harness or from a command printed beside it.
 
 Memory is the third axis, and an earlier revision omitted it while claiming to
@@ -183,12 +185,14 @@ Scope, stated honestly, because a lock invites more faith than it earns:
     engine's own scan path parallel (see `docs/SCALE.md` — the scan is serial
     BY DESIGN, and that is unchanged).
   * It is a LEAF lock and must stay one: nothing executed while it is held may
-    call back out. That is why `nodes_of_kind` evaluates `_kind_key(kind)` and
-    `neighbors` drains its `edge_kinds` iterable BEFORE taking it — both are
-    caller-supplied and could in principle run arbitrary code (a `.value`
-    property, a generator). No shipped call site does either; the hoist costs
-    nothing and keeps the "leaf" claim true by construction rather than by
-    audit.
+    call back out. All four readers that take a caller-supplied `kind` or
+    `edge_kinds` — `nodes_of_kind`, `edges_of_kind`, `neighbors`, `reachable` —
+    evaluate `.value` / drain the iterable BEFORE taking the lock, so a foreign
+    object's `.value` property or a generator argument cannot run under it. No
+    shipped call site passes anything but an enum member or a materialised list,
+    so the hoist costs nothing today; it keeps the "leaf" claim true by
+    construction, and `test_caller_controlled_code_never_runs_under_the_index_lock`
+    probes all four and fails if any evaluation moves back under the lock.
   * It is NOT free on reads, and the earlier "1.0x–1.15x" here was too kind.
     `bench_graph --compare-rev 8d8d8c30` measures locked/unlocked at 1.01x
     (all_edges), 1.01–1.03x (all_nodes), 1.01–1.05x (edges_of_kind), 1.04–1.16x
@@ -196,9 +200,11 @@ Scope, stated honestly, because a lock invites more faith than it earns:
     precisely because it is the CHEAPEST reader — it does the least work per
     call, so a fixed acquire/release is the largest share of it. The index's
     own win over pre-index (the table above) dwarfs this in every case.
-  * On writes the lock costs ~3–4% (construction, locked/unlocked, same
-    command), which is the small part of the +18%/+29% construction cost; the
-    index bookkeeping is the rest.
+  * On writes the lock's own share is a few percent — it reads between ~1% and
+    ~6% across runs on this (loaded) host, i.e. at or under the measurement
+    noise floor, so treat it as "a few percent, bounded above by ~6%" rather
+    than a point estimate. It is the small part of the +18%..+32% construction
+    cost; the index bookkeeping is the rest.
   * It also closes a PRE-EXISTING race the index did not introduce, described
     two paragraphs up. The locked graph is therefore strictly safer than the
     pre-index graph, not merely restored to it — in two distinct ways: the
@@ -667,8 +673,10 @@ class WorldModel:
         The per-kind index holds the (src, dst) pairs sorted, and tuple order IS
         the old nested "sorted srcs, then sorted dsts" order — so this returns
         the identical list in O(|kind|) rather than O(|V| log|V| + |E| log|E|)."""
+        # `kind.value` is caller-controlled (a `.value` property on a foreign
+        # object could run code); read it BEFORE the lock, like `nodes_of_kind`.
+        kv = kind.value
         with self._lock:
-            kv = kind.value
             pairs = self._kind_pairs.get(kv)
             if not pairs:
                 return []
@@ -748,10 +756,13 @@ class WorldModel:
         given kinds (any kind when None). Excludes `src` itself unless a
         cycle returns to it. Unknown `src` -> empty set. BFS; each node
         visited once, so cycles terminate."""
+        # Drain the caller's iterable BEFORE the lock — it may be a generator,
+        # and running caller code under the lock is how a leaf lock stops being
+        # one. Same reason `neighbors` does it here.
+        allowed = {k.value for k in edge_kinds} if edge_kinds is not None else None
         with self._lock:
             if src not in self._nodes:
                 return set()
-            allowed = {k.value for k in edge_kinds} if edge_kinds is not None else None
             # `src` enters `seen` only if a cycle routes back to it; that
             # signal is intentionally preserved.
             seen: set[str] = set()
@@ -807,8 +818,15 @@ class WorldModel:
         path), but "no current caller" is not a reason to drop a capability a
         class already had.
 
-        The snapshot is taken UNDER the lock, so a copy cannot catch the index
-        mid-mutation and come out torn."""
+        The lock guards only the shallow `__dict__.copy()` here; the deep
+        traversal of `_nodes`/`_out`/`_in` happens AFTER release, in the
+        deepcopy/pickle machinery that consumes this state. So a deepcopy racing
+        a concurrent writer can still raise `RuntimeError: dictionary changed
+        size during iteration` — which is EXACTLY what the pre-index revision
+        (838e0b42) does under the same race, measured identically. This restores
+        base parity, no more: it fails LOUDLY (never a silently torn copy), and
+        callers that copy a graph while another thread mutates it must serialise
+        that themselves, as they had to at base."""
         with self._lock:
             state = self.__dict__.copy()
         del state["_lock"]

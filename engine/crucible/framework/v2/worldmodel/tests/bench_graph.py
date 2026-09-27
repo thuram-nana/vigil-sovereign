@@ -37,7 +37,6 @@ from __future__ import annotations
 import argparse
 import contextlib
 import gc
-import importlib
 import os
 import subprocess
 import sys
@@ -97,7 +96,6 @@ def ref_neighbors(w, node_id: str, *, incoming: bool = False) -> list[Edge]:
 # Loading an old revision's WorldModel, for the cross-revision claims
 # ---------------------------------------------------------------------------
 
-_PKG_DIR = Path(__file__).resolve().parent.parent
 _REL = "engine/crucible/framework/v2/worldmodel/graph.py"
 
 
@@ -105,30 +103,35 @@ _REL = "engine/crucible/framework/v2/worldmodel/graph.py"
 def revision_world_model(rev: str):
     """Yield the `WorldModel` class from `graph.py` AT GIT REVISION `rev`.
 
-    The extracted module is written INTO the package directory under a private
-    name, because `graph.py` uses package-relative imports (`from .models
-    import ...`) that only resolve there. It is removed again on the way out.
+    NO FILE IS WRITTEN. `graph.py` uses package-relative imports (`from .models
+    import ...`), which resolve off the module's `__package__`, so the extracted
+    source is exec'd into an in-memory module whose `__package__` is set to
+    `framework.v2.worldmodel`. An earlier version wrote the source into the
+    package directory, which meant a SIGKILL mid-run could strand a syntactically
+    valid copy of an OLD `graph.py` inside the shipped package where `git add -A`
+    would sweep it in — this cannot happen now, because there is nothing on disk
+    to strand. `encoding='utf-8'` is explicit because `graph.py` contains
+    non-ASCII (‖ — →) and the harness must not depend on the host locale.
     Only ever used by this benchmark, never at runtime."""
+    import types
+
     repo = Path(__file__).resolve()
     while repo != repo.parent and not (repo / ".git").exists():
         repo = repo.parent
     src = subprocess.run(["git", "-C", str(repo), "show", f"{rev}:{_REL}"],
-                         capture_output=True, text=True, check=True).stdout
+                         capture_output=True, text=True, encoding="utf-8",
+                         check=True).stdout
     mod_name = f"_bench_rev_{abs(hash(rev)) % 10**8}"
-    path = _PKG_DIR / f"{mod_name}.py"
-    path.write_text(src)
+    qualified = f"framework.v2.worldmodel.{mod_name}"
+    mod = types.ModuleType(qualified)
+    mod.__package__ = "framework.v2.worldmodel"   # makes `from .models import` resolve
+    mod.__file__ = f"<git:{rev}:{_REL}>"
+    sys.modules[qualified] = mod
     try:
-        mod = importlib.import_module(f"framework.v2.worldmodel.{mod_name}")
+        exec(compile(src, mod.__file__, "exec"), mod.__dict__)
         yield mod.WorldModel
     finally:
-        sys.modules.pop(f"framework.v2.worldmodel.{mod_name}", None)
-        with contextlib.suppress(OSError):
-            path.unlink()
-        pyc = _PKG_DIR / "__pycache__"
-        if pyc.is_dir():
-            for f in pyc.glob(f"{mod_name}.*"):
-                with contextlib.suppress(OSError):
-                    f.unlink()
+        sys.modules.pop(qualified, None)
 
 
 # ---------------------------------------------------------------------------
@@ -146,24 +149,43 @@ def _edge(src: str, dst: str, kind: EdgeKind) -> Edge:
 
 
 def build(n: int, order: str = "asc", cls=None):
-    """n nodes round-robin over every NodeKind, 3 out-edges each round-robin
-    over every EdgeKind.
+    """n nodes round-robin over every NodeKind, out-edges round-robin over every
+    EdgeKind.
 
-    order="asc"  — ids ASCEND. The common real case (ids are generated in
-                   order) and the one the lazy index is tuned for: almost
-                   nothing ever goes dirty, so reads never pay a sort.
-    order="desc" — ids DESCEND. Every append breaks sortedness, so every bucket
-                   is dirty and the first read after each write pays a full
-                   `list.sort()`. This is the worst case, and it is the one the
-                   docstring's "never worse than pre-index" bound is about."""
+    order="asc"  — ids ASCEND, and each source's destinations are appended in
+                   ascending order. The common real case (ids are generated in
+                   order) and the one the lazy index is tuned for: almost nothing
+                   ever goes dirty, so reads never pay a sort.
+    order="desc" — ids DESCEND (nodes and sources). Every NODE-index and
+                   per-source append breaks sortedness. Note this still leaves
+                   the OUT-index (`_out_dsts`) essentially clean, because each
+                   source's 3 dsts still arrive ascending — see `dstdesc`.
+    order="dstdesc" — ids ascend, but each source fans out to a block of
+                   destinations appended in DESCENDING id order, so every
+                   `_out_dsts[src]` bucket goes dirty. This is the fixture that
+                   actually exercises the lazy sort on the OUT path that
+                   `all_edges`/`neighbors` read — the path the CONCURRENCY
+                   section is about — which neither `asc` nor `desc` did.
+    Every case's `dirty_profile` is printed with the sweep, so which paths a run
+    exercised is never left to inference. The docstring's "never worse than
+    pre-index" bound is about `desc`+`dstdesc` together (every index dirty)."""
     W = cls or WorldModel
     w = W()
-    rng = range(n) if order == "asc" else range(n - 1, -1, -1)
+    rng = range(n) if order != "desc" else range(n - 1, -1, -1)
     for i in rng:
         w.add_node(_node(f"n{i:07d}", _NK[i % len(_NK)]))
-    for i in rng:
-        for j in (1, 2, 3):
-            w.add_edge(_edge(f"n{i:07d}", f"n{(i * 7 + j) % n:07d}", _EK[(i + j) % len(_EK)]))
+    if order == "dstdesc":
+        # fan each source out to a block of dsts appended HIGH id first, so the
+        # out bucket is unsorted-on-append and owes a sort on the next read
+        for i in rng:
+            for off in (53, 29, 11, 3):
+                w.add_edge(_edge(f"n{i:07d}", f"n{(i + off) % n:07d}",
+                                 _EK[(i + off) % len(_EK)]))
+    else:
+        for i in rng:
+            for j in (1, 2, 3):
+                w.add_edge(_edge(f"n{i:07d}", f"n{(i * 7 + j) % n:07d}",
+                                 _EK[(i + j) % len(_EK)]))
     return w
 
 

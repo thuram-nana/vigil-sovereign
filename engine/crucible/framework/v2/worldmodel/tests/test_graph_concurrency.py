@@ -468,11 +468,15 @@ def test_the_graph_survives_deepcopy_and_pickle_despite_the_lock() -> None:
 
 
 def test_caller_controlled_code_never_runs_under_the_index_lock() -> None:
-    """The lock is a LEAF lock: nothing under it may call back out. Two entry
-    points take caller-controlled objects, so both evaluate them BEFORE
-    acquiring — `nodes_of_kind` reads `kind.value`, `neighbors` drains
-    `edge_kinds`. Every shipped call site passes a plain enum member and a
-    literal list, so this is defence against a future caller, not a live bug."""
+    """The lock is a LEAF lock: nothing under it may call back out. ALL FOUR
+    readers that take a caller-supplied `kind` or `edge_kinds` must evaluate it
+    BEFORE acquiring — `nodes_of_kind`/`edges_of_kind` read `kind.value`,
+    `neighbors`/`reachable` drain `edge_kinds`. A reviewer caught that
+    `edges_of_kind` and `reachable` still evaluated theirs UNDER the lock after
+    the first two were hoisted, so this test now probes every one; it fails if
+    any evaluation moves back under the lock. Every shipped call site passes a
+    plain enum member and a materialised list, so this is defence against a
+    future caller, not a live bug."""
     w = WorldModel()
     w.add_node(_node("a", NodeKind.HOST))
     w.add_edge(_edge("a", "a"))
@@ -485,19 +489,33 @@ def test_caller_controlled_code_never_runs_under_the_index_lock() -> None:
         return w._lock._is_owned()
 
     class _SpyKind:
+        """A foreign `kind` whose `.value` records whether the lock is held when
+        it is read. Its value ("host"/"reachable_from") lands in a real bucket,
+        so the read is not short-circuited before `.value` is touched."""
+
+        def __init__(self, value: str):
+            self._value = value
+
         @property
         def value(self):
             held.append(_lock_is_held())
-            return "host"
+            return self._value
 
-    w.nodes_of_kind(_SpyKind())
-    assert held == [False], "nodes_of_kind evaluated kind.value under the lock"
+    def _spy_kinds(kind):
+        def gen():
+            held.append(_lock_is_held())
+            yield kind
+        return gen()
 
-    held.clear()
+    # .value readers: kind must match a populated bucket so `.value` is reached
+    for reader, spy in (("nodes_of_kind", _SpyKind("host")),
+                        ("edges_of_kind", _SpyKind("reachable_from"))):
+        held.clear()
+        getattr(w, reader)(spy)
+        assert held == [False], f"{reader} evaluated kind.value under the lock"
 
-    def _spy_kinds():
-        held.append(_lock_is_held())
-        yield EdgeKind.REACHABLE_FROM
-
-    w.neighbors("a", _spy_kinds())
-    assert held == [False], "neighbors consumed the caller's iterable under the lock"
+    # iterable-draining readers
+    for reader in ("neighbors", "reachable"):
+        held.clear()
+        getattr(w, reader)("a", _spy_kinds(EdgeKind.REACHABLE_FROM))
+        assert held == [False], f"{reader} consumed the caller's iterable under the lock"
