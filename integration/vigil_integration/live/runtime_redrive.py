@@ -244,9 +244,14 @@ _TRAVERSAL_PATH_CONTROL = "../../../../etc/passwd.vigilctl{nonce}"
 _TRAVERSAL_CONST_CONTROL = "vigilctl{nonce}.txt"
 
 # FAIL-CLOSED OBSERVATION RULE. A response is an ANSWER ABOUT THE PATH only when VIGIL actually READ A
-# DOCUMENT: the channel was established, the status is 2xx, AND the body was SEMANTICALLY AVAILABLE
+# DOCUMENT: the channel was established, the status is 2xx, the body was SEMANTICALLY AVAILABLE
 # (completely decompressed, strictly decoded, not truncated — ``body_decode``'s own guarantee, the same one
-# the MAIN arm already consults through ``state["body_unavailable"]``). Everything else is COULD-NOT-OBSERVE.
+# the MAIN arm already consults through ``state["body_unavailable"]``), AND the decoded body is NOT EMPTY.
+# Everything else is COULD-NOT-OBSERVE. The empty-body clause is not pedantry: an empty 2xx is what a WAF
+# or an edge worker typically returns when it drops a dot-segment payload, and "nothing came back" is not
+# evidence that the read failed to reproduce. This rule governs the CORROBORATION leg only; the CONTROL leg
+# (:func:`_observed_signature`) deliberately ACCEPTS an empty body, because it asks a different question —
+# see the two docstrings before changing either.
 #
 # The previous rule was an enumerated ALLOW-LIST of "throttle" statuses ({0, 408, 425, 429} plus >=500) and
 # it never consulted the decode provenance at all. Measured against a GENUINE normpath+read LFI, the
@@ -261,9 +266,27 @@ _ANSWER_STATUS_MIN, _ANSWER_STATUS_MAX = 200, 299
 
 
 def _read_a_document(resp: Any, state: dict, body_unavailable_before: int) -> bool:
-    """Whether ``resp`` is a response VIGIL may reason about the BODY of: a 2xx whose body was semantically
-    available. Consults BOTH the per-response ``body_semantically_available`` flag and the send-state
-    counter the main arm uses, so a capture that reports neither is refused (fail-closed). Pure."""
+    """Whether ``resp`` is a response VIGIL may reason about the BODY of — for the CORROBORATION leg: a
+    2xx whose body was semantically available AND NOT EMPTY. Consults BOTH the per-response
+    ``body_semantically_available`` flag and the send-state counter the main arm uses, so a capture that
+    reports neither is refused (fail-closed). Pure.
+
+    THE TWO LEGS ASK DIFFERENT QUESTIONS, WHICH IS WHY THEY TREAT AN EMPTY BODY DIFFERENTLY. Do not
+    "fix" the inconsistency by collapsing this into :func:`_observed_signature`; the tests
+    ``test_b2_a_genuine_read_whose_reencodings_are_not_answers_is_inconclusive[empty-200]`` and
+    ``test_b2_the_control_leg_still_accepts_an_empty_body`` pin both directions and one of them will go
+    red.
+
+      * THIS leg asks "did the same READ reproduce under a semantically-equivalent re-encoding of the
+        same path?". An empty 2xx is NOT evidence that the read failed to reproduce; it is evidence that
+        NOTHING CAME BACK — which is the same category error as scoring a WAF 403 or an undecodable body
+        as "signature absent". An empty body therefore routes to COULD-NOT-OBSERVE here. (It is also the
+        shape a WAF or an edge worker most often returns when it drops a dot-segment payload.)
+      * :func:`_observed_signature`, the CONTROL leg, asks "does this origin emit the signature
+        REGARDLESS OF INPUT?". An empty body genuinely answers that: no, it does not — there are no bytes
+        for the signature to be in. Its ``raw_len == 0`` acceptance is correct and deliberate, and
+        without it every ordinary bare 404 control (no ``Content-Type``, no body) would make the arm
+        INCONCLUSIVE before the treatment was ever sent."""
     if not isinstance(resp, dict):
         return False
     try:
@@ -274,6 +297,8 @@ def _read_a_document(resp: Any, state: dict, body_unavailable_before: int) -> bo
         return False
     if not bool(resp.get("body_semantically_available", False)):
         return False
+    if not str(resp.get("body", "") or ""):
+        return False           # nothing came back → nothing was observed about the path
     return state["body_unavailable"] <= body_unavailable_before
 
 
@@ -290,7 +315,13 @@ def _observed_signature(resp: Any, state: dict, body_unavailable_before: int,
     An EMPTY body (``raw_len == 0``) is a sound observation of ABSENCE whatever the charset situation:
     there are no bytes for the signature to be in. That matters because the ordinary 404 a control gets
     back carries no ``Content-Type`` at all, and treating it as unobservable would make every such origin
-    INCONCLUSIVE before the treatment was ever sent. Pure."""
+    INCONCLUSIVE before the treatment was ever sent.
+
+    DELIBERATE ASYMMETRY WITH :func:`_read_a_document`, which REFUSES an empty body. That is not an
+    oversight to be tidied away: the corroboration leg asks "did the READ reproduce?", where an empty
+    response is a NON-OBSERVATION, while this leg asks "does the origin emit the signature regardless of
+    input?", where an empty response is a real and sufficient NO. Collapsing the two rules breaks one of
+    them, and each direction is pinned by its own control. Pure."""
     if not isinstance(resp, dict):
         return None
     available = (bool(resp.get("body_semantically_available", False))

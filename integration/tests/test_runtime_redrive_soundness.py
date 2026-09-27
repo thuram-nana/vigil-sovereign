@@ -837,6 +837,12 @@ _PLAIN = [("Content-Type", "text/plain; charset=utf-8")]
 _B2_UNOBSERVABLE = [
     ("403-waf-block", 403, b"Forbidden by WAF rule 930110 (path traversal)\n", _PLAIN),
     ("302-redirect", 302, b"", [("Location", "/download?file=report.pdf")]),
+    # An EMPTY 2xx decodes cleanly to "" and so satisfies every OTHER clause of the rule. It is still a
+    # NON-OBSERVATION: it is not evidence that the read failed to reproduce, it is evidence that nothing
+    # came back — and it is what a WAF or an edge worker typically returns when it drops a dot-segment
+    # payload. The corroboration leg therefore requires a NON-EMPTY decoded body; the CONTROL leg does
+    # not (see test_b2_the_control_leg_still_accepts_an_empty_body).
+    ("empty-200", 200, b"", _PLAIN),
     ("brotli-undecodable", 200, b"\x1b\x2e\x00\xf8\x25\x71\x6e\x6f\x74\x62\x72", _PLAIN
      + [("Content-Encoding", "br")]),
     ("concatenated-gzip", 200,
@@ -872,6 +878,61 @@ def test_b2_a_genuine_read_whose_reencodings_are_not_answers_is_inconclusive(mon
             f"an observation VIGIL never made was persisted into the audit trail: {note!r}")
     assert res.n_facts == 0 and not res.leads
     assert res.family_verdict("path_traversal") == "INCONCLUSIVE"
+
+
+class _EmptyControlLfi(http.server.BaseHTTPRequestHandler):
+    """A GENUINE join+resolve+read LFI whose MISSES are the ordinary bare 404: no ``Content-Type``, no
+    body at all. Both controls therefore come back EMPTY and with an undeclared charset — the single most
+    common shape on the real web."""
+
+    def do_GET(self):  # noqa: N802
+        parts = urlsplit(self.path)
+        q = parse_qs(parts.query, keep_blank_values=True)
+        content = None
+        for v in (x for vs in q.values() for x in vs):
+            if not v:
+                continue
+            content = _FS.get(posixpath.normpath(posixpath.join(_DOCROOT, v)))
+            if content is not None:
+                break
+        if content is None:
+            self.send_response(404)                 # no Content-Type, no Content-Length, NO BODY
+            self.end_headers()
+            return
+        raw = content.encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain; charset=utf-8")
+        self.send_header("Content-Length", str(len(raw)))
+        self.end_headers()
+        self.wfile.write(raw)
+
+    def log_message(self, *a):
+        return
+
+
+def test_b2_the_control_leg_still_accepts_an_empty_body(monkeypatch, tmp_path):
+    """THE OTHER DIRECTION OF THE ASYMMETRY, pinned so a later edit cannot collapse the two rules.
+
+    The two legs ask different questions. The CONTROL leg asks "does this origin emit the signature
+    REGARDLESS OF INPUT?" — and an empty body answers that: no, it does not. The CORROBORATION leg asks
+    "did the READ reproduce?" — and an empty body answers nothing (see the ``empty-200`` case above).
+
+    Here BOTH controls come back as the ordinary bare 404 (no Content-Type, no body), which is the most
+    common miss shape on the web. If someone "tidies" ``_observed_signature`` into ``_read_a_document``,
+    both controls become unobservable, the arm stops before the treatment is ever sent, and this genuine
+    arbitrary-file read silently becomes INCONCLUSIVE on every ordinary origin."""
+    res = _rr(monkeypatch, tmp_path, _EmptyControlLfi,
+              "http://127.0.0.1:{port}/download?file=report.pdf", "path_traversal")
+    assert res.surfaces.get("path_traversal"), "the arm examined no surface — it was stubbed out"
+    assert not [n for n in res.notes if n.startswith("path_traversal: control COULD NOT BE OBSERVED")], (
+        f"an EMPTY control body was scored as unobservable — the control leg's raw_len==0 acceptance was "
+        f"removed, and every ordinary bare-404 origin now dies before the treatment: {res.notes!r}")
+    assert any(n.startswith("path_traversal: signature reproduced under the alternate encoding")
+               for n in res.notes), (
+        f"the arm never got past the controls to the treatment; notes={res.notes!r}")
+    assert res.n_facts == 0, "path_traversal is fact_capable:false"
+    assert len(res.leads) == 1 and res.family_verdict("path_traversal") == "LEAD", (
+        f"the genuine read must still reach exactly one LEAD, got {len(res.leads)}")
 
 
 def test_b2_positive_control_a_readable_2xx_still_refutes_a_literal_keyed_page(monkeypatch, tmp_path):
