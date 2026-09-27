@@ -389,13 +389,14 @@ class HttpExecutor:
     # Internal mutable state.
     _requests_made: int = 0
     _last_request_at: float = 0.0
-    # W7 (perf) — CONCURRENCY SAFETY. The scanner may now run a bounded number of
-    # timing probes in flight through this ONE executor, so the shared counters, the
-    # action-id minter and the rate-limit anchor are guarded. The lock is held only for
-    # bookkeeping arithmetic — never across the network I/O and never across the
-    # rate-limit sleep — so the idle waits still overlap. Nothing about the serial path
-    # changes: with one caller the lock is uncontended, `_reserved` is always 0, and the
-    # rate anchor still ends up at the previous request's COMPLETION.
+    # W7 (perf) — CONCURRENCY SAFETY (DEFENSIVE). The timing path is SERIAL today
+    # (the staged concurrent sweep was removed — see the note above the serial timing
+    # loop in engine.py), but this ONE executor is shared, so the mutable counters, the
+    # action-id minter and the rate-limit anchor are guarded to stay correct should a
+    # caller ever be run concurrently. The lock is held only for bookkeeping arithmetic
+    # — never across the network I/O and never across the rate-limit sleep. Nothing about
+    # the serial path changes: with one caller the lock is uncontended, `_reserved` is
+    # always 0, and the rate anchor still ends up at the previous request's COMPLETION.
     _lock: threading.RLock = field(default_factory=threading.RLock, repr=False, compare=False)
     # Requests admitted by the gate but not yet counted into `_requests_made` (i.e. in
     # flight). Counted against the budget so N concurrent callers can never overshoot it.
@@ -814,9 +815,10 @@ class HttpExecutor:
 
         # Thread the REAL body into the gate: the destructive-confirm binds its sha256 over the exact bytes
         # ``_capture`` transmits below, so the owner sees — and a per-action token covers — the payload.
-        # W7: this is the scanner's send, so it may be called CONCURRENTLY (the timing
-        # interleave). Claim the budget slot atomically with the gate and hold it for the
-        # whole time the request is on the wire, so a sibling's gate counts it.
+        # W7 (DEFENSIVE): the timing path is serial today, but this executor is shared
+        # and written to stay correct under a concurrent caller. Claim the budget slot
+        # atomically with the gate and hold it for the whole time the request is on the
+        # wire, so a concurrent caller's gate counts it and cannot overshoot the budget.
         refusal = self._run_gates(method, url, action_id, body=body, reserve=True)
         if refusal is not None:
             return {"status": 0, "body": "", "headers": [], "latency_ms": 0.0, "refused": refusal.note}
@@ -1164,7 +1166,7 @@ class HttpExecutor:
           already on disk and overwrite a captured exchange. A random per-instance nonce
           separates instances and runs without any shared state;
         * **a monotonic sequence** under the lock, for two actions of the SAME executor in
-          the same millisecond (concurrent timing probes produce these routinely).
+          the same millisecond (any concurrent caller of a shared executor can produce these).
 
         Lexicographic order still follows time, and the id stays filesystem-safe."""
         with self._lock:
