@@ -41,6 +41,7 @@ from framework.v2.verify.confirmation import confirm_finding
 from framework.v2.verify.models import OracleKind
 from framework.v2.verify.verifier import (
     BUG_CLASS_ORACLES,
+    DIFFERENTIAL_LEAD_ONLY_CLASSES,
     OracleVerifier,
     normalize_bug_class,
 )
@@ -164,12 +165,20 @@ def test_every_m2_inj_bug_class_is_routed() -> None:
 
 
 def test_routed_oracle_matches_the_compiled_check_evidence() -> None:
-    # the oracle kind the compiled check produces evidence for must be in the
-    # routed tuple, else confirmation is structurally impossible
+    # the oracle kind the compiled check produces evidence for must be in the routed tuple, else
+    # confirmation is structurally impossible — EXCEPT for the truth-value-attribution classes,
+    # where confirmation being structurally impossible is the POINT: a bare differential has no
+    # attribution step and minted FACTs against targets with no database, so those entries are
+    # deliberately LEAD-only (verify.verifier.DIFFERENTIAL_LEAD_ONLY_CLASSES).
     for e in _m2_entries():
-        oracles = BUG_CLASS_ORACLES[normalize_bug_class(e.bug_class)]
+        canonical = normalize_bug_class(e.bug_class)
+        oracles = BUG_CLASS_ORACLES[canonical]
         if e.oracle.kind == "differential":
-            assert OracleKind.DIFFERENTIAL_RESPONSE in oracles, e.id
+            assert canonical in DIFFERENTIAL_LEAD_ONLY_CLASSES, (
+                f"{e.id}: a differential entry on a class that is NOT lead-only — either the class "
+                f"belongs in DIFFERENTIAL_LEAD_ONLY_CLASSES or the entry needs a real oracle"
+            )
+            assert OracleKind.DIFFERENTIAL_RESPONSE not in oracles, e.id
         elif e.oracle.kind == "oob":
             assert OracleKind.OOB_CALLBACK in oracles, e.id
 
@@ -308,16 +317,30 @@ _REPRESENTATIVES = [
 ]
 
 
+# LEAD-ONLY NOW. A bare benign-vs-payload differential can no longer CONFIRM a
+# truth-value-attribution class (verify.verifier.DIFFERENTIAL_LEAD_ONLY_CLASSES): it has no
+# attribution step — its control is a DIFFERENT STRING, not a same-shape negative — so it cannot
+# separate "the injected boolean changed the query" from "the app treated two strings differently",
+# and it minted High FACTs at rate 1.0 against a STATIC page behind a CRS-942130 WAF rule and
+# against an app doing strict input validation, neither with a database. Note this fixture is
+# ITSELF a payload-SHAPE matcher (it keys on injection MARKERS in the payload) — precisely what a WAF rule
+# is, which is why a differential cannot tell the two apart. So the assertion is now: the entry
+# drives real traffic and produces a LEAD, and NOTHING is confirmed on either side. Sound boolean
+# detection is the SPRT BooleanInferenceCheck (see scanner/tests/test_attribution_soundness.py and
+# the sqlite-backed scanner.benchmark).
 @pytest.mark.parametrize("entry_id", _REPRESENTATIVES)
-def test_differential_confirms_on_vuln_and_not_on_safe(entry_id: str) -> None:
+def test_differential_is_lead_only_on_vuln_and_safe(entry_id: str) -> None:
     check = compile_entry(_by_id(entry_id))
     assert isinstance(check, DifferentialCheck)
 
     with _server(_DivergingApp) as base:
         tpl, point = _q_point(base)
-        confirmed = _confirm(check, tpl, point)
-    assert confirmed is not None, f"{entry_id} did not confirm on the vulnerable fixture"
-    assert confirmed.confirmed_by is OracleKind.DIFFERENTIAL_RESPONSE
+        ctx = check.probe(tpl, point, _send)
+        # the probe DID run over real traffic and DID observe a divergence — that is the LEAD
+        assert ctx is not None and ctx.baseline != ctx.mutated
+        assert _confirm(check, tpl, point) is None, (
+            f"{entry_id} minted a FACT from a bare differential"
+        )
 
     with _server(_ConstantApp) as base:
         tpl, point = _q_point(base)

@@ -1229,11 +1229,23 @@ def _searchable(sink: Any) -> str:
     return _coerce_text(sink)
 
 
-def side_effect_oracle(marker: str, observed_sink: Any) -> OracleSignal:
+def side_effect_oracle(marker: str, observed_sink: Any, control_sink: Any = None) -> OracleSignal:
     """Fire when a unique, attacker-chosen marker appears somewhere it should
     not — a reflected/stored XSS canary in rendered output, an SSTI evaluation
     result, a log line, a filesystem read. The marker must be non-trivial
-    (>= 4 chars) so we do not confirm on incidental substrings."""
+    (>= 4 chars) so we do not confirm on incidental substrings.
+
+    ``control_sink`` (OPTIONAL — absent ⇒ every existing caller is byte-identical) is the sink
+    observed under a BENIGN control on the same insertion point. When it is supplied and ALREADY
+    CONTAINS the marker, the marker's presence under the payload is NOT attributable to the payload
+    and the oracle REFUSES. That is the offline-re-derivable half of the fix for a measured defect:
+    a marker that is not attacker-UNIQUE (a KNOWN-CONTENT file signature such as ``root:x:0:0:``)
+    is present in an ordinary security knowledge-base page that merely documents it, and bare
+    substring presence minted four ``path_traversal`` FACTs against a site with ZERO file I/O.
+    Producers that hold a control must retain it here so re-verification re-derives the refusal
+    rather than re-confirming the same unattributed substring.
+
+    Pure: it decides from the two retained sinks alone and sends nothing."""
     marker = (marker or "").strip()
     haystack = _searchable(observed_sink)
 
@@ -1242,6 +1254,13 @@ def side_effect_oracle(marker: str, observed_sink: Any) -> OracleSignal:
             kind=OracleKind.SIDE_EFFECT, fired=False, confidence=0.0,
             evidence="marker too short to be a reliable canary",
             observed={"marker": marker})
+
+    if control_sink is not None and marker in _searchable(control_sink):
+        return OracleSignal(
+            kind=OracleKind.SIDE_EFFECT, fired=False, confidence=0.0,
+            evidence=(f"marker {marker!r} is ALREADY PRESENT in the benign control response — its "
+                      "presence under the payload is not attributable to the payload"),
+            observed={"marker": marker, "present_in_control": True})
 
     idx = haystack.find(marker)
     if idx < 0:

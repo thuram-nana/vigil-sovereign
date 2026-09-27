@@ -9,21 +9,35 @@ as authoritative; until a producer actually *populates* it from real traffic,
 the oracle only ever fired in isolation. This executor closes that gap:
 
     hypothesis (localhost surface)
-        -> send a benign BASELINE request and a boolean PROBE request
-        -> capture both real responses
-        -> FindingContext.from_http_responses(baseline, mutated)
+        -> run the TRUTH-VALUE ATTRIBUTION protocol (distinct, shape-varied
+           always-true and always-false clauses, each sent twice byte-identically,
+           preceded by an identical-request determinism pre-gate)
+        -> capture every real response
+        -> FindingContext.from_boolean_probes(...)
         -> ExecutionOutcome(success=True, finding=..., oracle_context=<serialized>)
 
 The exploit-agent then posts the Finding with that `oracle_context`, and the
-critique-agent confirms it ONLY if the differential oracle fires — never on an
-LLM's say-so.
+critique-agent confirms it ONLY if the SPRT boolean-inference oracle fires —
+never on an LLM's say-so.
+
+It used to capture ONE benign response and ONE tautology response and hand that
+pair to the differential oracle. That inference has NO ATTRIBUTION STEP — it
+cannot separate "the injected boolean changed the query" from "the app treated
+two strings differently" — and it confirmed at rate 1.0 against a static page
+behind a WAF tautology rule and against an app doing strict input validation,
+neither of which has a database. DIFFERENTIAL_RESPONSE is no longer an
+acceptable confirmer for any truth-value class (`verify.verifier.
+DIFFERENTIAL_LEAD_ONLY_CLASSES`), so this producer collects the evidence the
+sound oracle can actually adjudicate.
 
 Boundary (DEFENSIVE / VERIFICATION only — see AUTONOMY-CHARTER.md §4):
 
   * It refuses any non-loopback host. Test targets are localhost, operator-owned,
     and consented. It does not touch live or third-party systems.
-  * It sends exactly two GETs (a baseline and a probe) using the query values it
-    was configured with; it mints no other payloads and runs no exploit logic.
+  * It sends only GETs of the PUBLIC, FIXED boolean clause set (`scanner.checks.
+    boolean_clause_families`) into the one configured parameter — an identical-request
+    determinism pre-gate plus `rounds` x 4 x K clause sends. It mints no other payloads,
+    extracts no data, and runs no exploit logic.
   * It DECIDES nothing. It reports observations; the oracle is the authority.
 """
 
@@ -36,10 +50,9 @@ from dataclasses import dataclass
 from .executor_proto import ExecutionOutcome
 from .models import FindingPayload, HypothesisPayload, PlanPayload
 
-# Reuse the canonical benign/tautology query values so this executor and the
-# verify-layer self-check speak the same differential dialect.
-from ..verify.confirmation import _BENIGN_QUERY, _TAUTOLOGY_QUERY
-from ..verify.adapter import FindingContext
+# Reuse the verify layer's single collection path so this executor and the
+# verify-layer self-check speak the same SOUND dialect (truth-value attribution).
+from ..verify.confirmation import boolean_probe_context
 
 _LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1", "[::1]"})
 _USER_AGENT = "CRUCIBLE-verify/1.0 (localhost oracle probe)"
@@ -52,15 +65,14 @@ class OracleProbeExecutor:
 
     `base_url` is the loopback origin of the operator-owned test target (e.g.
     ``http://127.0.0.1:54321``). `path`/`param` locate the injectable surface;
-    `baseline_value` vs `probe_value` are the benign and boolean-probe query
-    values whose response differential the oracle judges.
+    `rounds` is how many truth-value-attribution rounds to collect before the SPRT
+    is handed the evidence.
     """
 
     base_url: str
     path: str = "/search"
     param: str = "q"
-    baseline_value: str = _BENIGN_QUERY
-    probe_value: str = _TAUTOLOGY_QUERY
+    rounds: int = 3
     bug_class: str = "boolean_sqli"
     timeout: float = 5.0
 
@@ -78,20 +90,15 @@ class OracleProbeExecutor:
             )
 
         try:
-            baseline = self._get(self.baseline_value)
-            mutated = self._get(self.probe_value)
+            context = boolean_probe_context(
+                self._get, rounds=self.rounds, bug_class=self.bug_class)
         except Exception as e:  # network/URL error — report, never crash the loop
             return ExecutionOutcome(
                 success=False,
                 note=f"OracleProbeExecutor probe error: {type(e).__name__}: {e}",
             )
-
-        context = FindingContext.from_http_responses(
-            baseline,
-            mutated,
-            bug_class=self.bug_class,
-            discriminator={"dimensions": ["status", "length", "lexical"]},
-        )
+        last = (context.probe_rounds or [{}])[-1]
+        witness = ((last.get("trues") or [{}])[-1]) if isinstance(last, dict) else {}
 
         surface = f"GET {self.path}?{self.param}="
         finding = FindingPayload(
@@ -101,21 +108,21 @@ class OracleProbeExecutor:
             bug_class=self.bug_class,
             surface=surface,
             summary=(
-                "A baseline vs. boolean-probe request pair was captured from the "
-                "loopback target; the differential oracle adjudicates whether the "
-                "responses diverge enough to confirm."
+                "Distinct, shape-varied always-true and always-false clauses were driven into "
+                "the loopback target, each twice byte-identically; the SPRT boolean-inference "
+                "oracle adjudicates whether the response PARTITIONS BY TRUTH VALUE."
             ),
         )
 
         # success=True means "a candidate worth adjudicating was produced" — it
-        # is NOT a confirmation. The oracle (via critique-agent) is the gate:
-        # a non-firing differential (e.g. against a safe target) will refute it.
+        # is NOT a confirmation. The oracle (via critique-agent) is the gate: a
+        # non-partitioning response set (e.g. against a safe target) will refute it.
         return ExecutionOutcome(
             success=True,
-            status_code=int(mutated.get("status", 0)),
-            body_excerpt=str(mutated.get("body", ""))[:300],
+            status_code=int(witness.get("status", 0) or 0),
+            body_excerpt=str(witness.get("body", ""))[:300],
             note=(
-                "OracleProbeExecutor: baseline vs probe captured on loopback; "
+                "OracleProbeExecutor: truth-value-attribution rounds captured on loopback; "
                 "oracle_context attached for deterministic adjudication"
             ),
             finding=finding,

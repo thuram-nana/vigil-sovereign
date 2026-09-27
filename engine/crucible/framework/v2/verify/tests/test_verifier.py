@@ -75,13 +75,20 @@ def test_confirm_idor_via_achieved_state() -> None:
     assert "CONFIRMED" in result.rationale
 
 
-def test_confirm_boolean_sqli_via_differential() -> None:
+def test_bare_differential_cannot_confirm_boolean_sqli() -> None:
+    # This used to assert the opposite. A benign-vs-payload differential has NO ATTRIBUTION STEP: it
+    # cannot separate "the injected boolean changed the query" from "the app treated two strings
+    # differently", so it minted High boolean_sqli FACTs (0.87-0.95, offline-re-verifiable) against a
+    # STATIC page behind a CRS-942130 WAF rule and against an app doing strict input validation —
+    # both with no database at all. DIFFERENTIAL_RESPONSE is no longer an acceptable confirmer for
+    # any truth-value-attribution class; BOOLEAN_INFERENCE (the SPRT truth-value partition) is.
     result = OracleVerifier().confirm({
         "bug_class": "boolean_sqli",
         "baseline": {"status": 200, "body": "No results found."},
         "mutated": {"status": 200, "body": "admin superuser row " * 20},
     })
-    assert result.confirmed
+    assert not result.confirmed
+    assert "boolean_inference" in result.rationale
 
 
 def test_confirm_xss_via_reflection_context() -> None:

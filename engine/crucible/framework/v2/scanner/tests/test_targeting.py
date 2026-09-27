@@ -57,14 +57,21 @@ def test_unhinted_point_falls_back_to_full_set() -> None:
 
 
 class _SqliOnId(BaseHTTPRequestHandler):
+    """A REAL path traversal on `file`. It used to be a boolean-SQLi differential on `id` keyed on
+    the payload SHAPE ("'1'='1" in i) — the same thing a WAF tautology rule does, which is why a
+    bare differential cannot tell the two apart and is LEAD-only now
+    (verify.verifier.DIFFERENTIAL_LEAD_ONLY_CLASSES). The property under test — targeting sends
+    FEWER requests and still keeps the finding — needs a class the default set genuinely confirms
+    at a HINTED parameter name, and `file` -> path_traversal is exactly that."""
+
     def log_message(self, *a: object) -> None:
         return
 
     def do_GET(self) -> None:  # noqa: N802
         p = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
-        i = p.get("id", [""])[0]
-        rows = "\n".join(f"r{n}" for n in range(9)) if ("'1'='1" in i or "1=1" in i) else "none"
-        body = f"id[{i}]:{rows}".encode()  # note: does NOT reflect other params richly
+        name = p.get("file", [""])[0]
+        body = (b"root:x:0:0:root:/root:/bin/bash\ndaemon:x:1:1:daemon:/usr/sbin:/usr/sbin/nologin"
+                if "etc/passwd" in name else b"ordinary document")  # does NOT reflect the param
         self.send_response(200)
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
@@ -103,16 +110,16 @@ def _raw(req: HttpRequest) -> dict:
 
 def test_targeting_cuts_requests_but_keeps_the_finding() -> None:
     with _server() as base:
-        req = HttpRequest(method="GET", url=f"{base}/q?id=1")
+        req = HttpRequest(method="GET", url=f"{base}/q?file=readme.txt")
 
-        # untargeted: every check runs on the id point
+        # untargeted: every check runs on the file point
         s_all, all_calls = _send_counting(_raw)
         found_all = AuditEngine(s_all).audit(req, insertion_kinds=(InsertionKind.QUERY_VALUE,))
 
-        # targeted: id -> {idor, boolean_sqli} only
+        # targeted: file -> {path_traversal} only
         s_tg, tg_calls = _send_counting(_raw)
         found_tg = AuditEngine(s_tg).audit(
             req, insertion_kinds=(InsertionKind.QUERY_VALUE,), selector=select_checks)
 
-        assert any(f.bug_class == "boolean_sqli" for f in found_tg), "targeting lost the SQLi"
+        assert any(f.bug_class == "path_traversal" for f in found_tg), "targeting lost the traversal"
         assert tg_calls["n"] < all_calls["n"], "targeting did not reduce request volume"

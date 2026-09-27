@@ -494,37 +494,37 @@ def test_nuclei_import_is_tier1_but_still_scope_gated(monkeypatch: pytest.Monkey
 
 
 def _local_differential_context(handler):
-    """A REAL differential FindingContext gathered by hitting a local demo target — the independent,
-    first-party evidence CRUCIBLE would collect when re-probing a lead (NOT the tool's say-so)."""
-    from framework.v2.verify.adapter import FindingContext
-    from framework.v2.verify.confirmation import _http_get, _local_server
+    """A REAL FindingContext gathered by hitting a local demo target — the independent, first-party
+    evidence CRUCIBLE would collect when re-probing a lead (NOT the tool's say-so).
+
+    It collects the SOUND boolean evidence (truth-value-attribution rounds the SPRT oracle judges),
+    not a lone benign-vs-tautology differential: that pair has no attribution step and confirmed at
+    rate 1.0 against a static page behind a WAF rule and against strict input validation, neither
+    with a database (verify.verifier.DIFFERENTIAL_LEAD_ONLY_CLASSES)."""
+    from framework.v2.verify.confirmation import _http_get, _local_server, boolean_probe_context
 
     with _local_server(handler) as base:
-        baseline = _http_get(base, "obsidian-no-such-name")
-        mutated = _http_get(base, "x' OR '1'='1")
-    return FindingContext.from_http_responses(
-        baseline, mutated, bug_class="boolean_sqli",
-        discriminator={"dimensions": ["status", "length", "lexical"]})
+        return boolean_probe_context(lambda v: _http_get(base, v))
 
 
 def test_confirm_web_lead_promotes_with_independent_evidence() -> None:
     from framework.v2.verify.confirmation import DifferentialDemoHandler
     from framework.v2.verify.models import OracleKind
 
-    lead = WebLead(tool="nuclei", bug_class="sqli", bug_class_raw="sql-injection",
+    lead = WebLead(tool="nuclei", bug_class="boolean_sqli", bug_class_raw="sql-injection",
                    location="/search?q=", target=TARGET, severity="high")
     ctx = _local_differential_context(DifferentialDemoHandler)
     confirmed = confirm_web_lead(lead, ctx)
     assert confirmed is not None and confirmed.confirmed is True
-    assert confirmed.confirmed_by is OracleKind.DIFFERENTIAL_RESPONSE   # an oracle FIRED, not the tool
+    assert confirmed.confirmed_by is OracleKind.BOOLEAN_INFERENCE   # an oracle FIRED, not the tool
 
 
 def test_confirm_web_lead_none_against_safe_target() -> None:
     from framework.v2.verify.confirmation import SafeDemoHandler
 
-    lead = WebLead(tool="nuclei", bug_class="sqli", bug_class_raw="sql-injection",
+    lead = WebLead(tool="nuclei", bug_class="boolean_sqli", bug_class_raw="sql-injection",
                    location="/search?q=", target=TARGET, severity="high")
-    # the same lead, re-probed against a NON-injectable twin: no differential, nothing fires.
+    # the same lead, re-probed against a NON-injectable twin: no truth-value partition, nothing fires.
     assert confirm_web_lead(lead, _local_differential_context(SafeDemoHandler)) is None
 
 
