@@ -17,16 +17,29 @@ THE FOUR CLAIMS, and what each one honestly is:
      EXISTING ``tls_weakness_oracle`` fires on it (``_DEPRECATED_TLS_VERSIONS``). Existential: the server
      really agreed, and the retained evidence re-verifies offline.
 
-  2. DEPRECATED PROTOCOL REFUSED (CLEAN — a CHANNEL-CONFIRMED NEGATIVE). VIGIL offers ONLY TLS1.0, the
-     PEER answers on the established TCP channel with a ``protocol_version(70)`` alert, AND the peer is
-     shown to be a genuine TLS service by a handshake it COMPLETED at a different version in the same run
-     (the :func:`peer_tls_session_witness` stamp). This is one of the very few genuinely CLEAN-capable
-     cases in the product: the negative is something the peer SAID, and the thing that said it is a
-     demonstrated TLS endpoint rather than anything that can emit seven bytes.
-     :func:`is_conclusive_protocol_refusal` is the CLOSED, deterministic predicate that decides it, and it
-     is deliberately narrow — see its docstring. A timeout, a TCP reset, a DNS failure, a refused connect,
-     a locally-unsupported protocol, ANY other alert (including the ambiguous ``handshake_failure(40)``),
-     and a peer VIGIL never completed a single TLS session with are all INCONCLUSIVE. Never CLEAN.
+  2. DEPRECATED PROTOCOL REFUSED — **INCONCLUSIVE, ALWAYS. NOT A CLEAN.** VIGIL offers ONLY TLS1.0 and the
+     PEER answers on the established TCP channel with a ``protocol_version(70)`` alert. That is a real
+     statement by a real peer, and it is still not enough to clear the ENDPOINT, because **the refusal and
+     any corroborating handshake are on two DIFFERENT TCP CONNECTIONS, and nothing in the evidence binds
+     them to the same peer.** An L4 fan-out — a Kubernetes Service with several pods, an haproxy/nginx TCP
+     pool, an L4 VIP, a DNS A-record pool mid-rollout — answers one connection from a backend whose
+     minimum is TLS1.1 and the next from a backend that speaks TLS1.0; VIGIL would then hold a genuine
+     ``alert(70)`` beside a genuine completed session while the endpoint as a whole accepts TLS1.0. It
+     does not even look wrong: ``minimum_version=TLSv1.1`` is a legal configuration, so "refused at 1.0,
+     completed at 1.1" is internally consistent and undetectable as self-contradiction. The limit is
+     IRREDUCIBLE with what TLS hands the refused leg: the completed leg retains ``spki_sha256``, but a
+     refusing peer sends the alert IN PLACE OF the ServerHello and presents no certificate, no server
+     random and no session id — there is nothing on that side to bind against. Re-probing k times would
+     only make the claim probabilistic, which the oracle doctrine forbids. So the registry declares this
+     branch ``clean_capable: false``, a refusal is admitted INCONCLUSIVE, and the row's ``blocking_work``
+     names what a sound CLEAN would actually require.
+     THE GUARDS BELOW ARE KEPT AND STILL RUN. :func:`is_conclusive_protocol_refusal` remains the CLOSED,
+     deterministic predicate and :func:`peer_tls_session_witness` still stamps the peer-session witness
+     that closed the bare-``alert(70)``-emitter hole. Every sub-condition is mutation-defended, and they
+     are the right guards if this class is ever revived at a stronger capability; they simply no longer
+     reach CLEAN. A timeout, a TCP reset, a DNS failure, a refused connect, a locally-unsupported
+     protocol, ANY other alert (including the ambiguous ``handshake_failure(40)``), and a peer VIGIL never
+     completed a single TLS session with were already INCONCLUSIVE and remain so.
 
   3. WEAK CIPHER NEGOTIATED (FACT). VIGIL offers ONLY suites drawn from :data:`WEAK_CIPHER_OFFER` — a
      CLOSED, explicit vocabulary of named suites, never a pattern over suite names — and the endpoint
@@ -105,6 +118,13 @@ DEPRECATED_VERSION_PROBES: "tuple[tuple[str, str], ...]" = (
 #: weak) contains ``ECDH`` and ``AES128-SHA``, both of which also occur in authenticated suites, and
 #: ``ECDHE-ECDSA-RC4-SHA`` (weak) and ``ECDHE-ECDSA-AES128-GCM-SHA256`` (strong) differ only after the
 #: shared key-exchange prefix.
+#:
+#: THAT ARGUMENT IS NOW DEFENDED BY A TEST, not only by this comment. A review found that replacing the
+#: exact set membership in :func:`negotiated_weak_cipher` with a bidirectional substring rule left the
+#: whole suite green — the collisions were asserted as string facts but never fed through the function.
+#: ``test_tls_breadth.py::test_a_substring_rule_would_score_a_suite_the_endpoint_was_never_offered`` is
+#: the kill fixture: an endpoint that selects ``AES128-SHA`` from an offer of ``AECDH-AES128-SHA`` scores
+#: ``""`` under membership and ``"AES128-SHA"`` under a substring rule.
 WEAK_CIPHER_OFFER: "tuple[str, ...]" = (
     # no encryption at all
     "NULL-MD5", "NULL-SHA", "NULL-SHA256",
@@ -141,8 +161,9 @@ WEAK_CIPHER_OFFER: "tuple[str, ...]" = (
 #:   * ``WRONG_VERSION_NUMBER`` / ``UNSUPPORTED_PROTOCOL`` — these fire when the port is not speaking TLS at
 #:     all (plain HTTP answering on 443 produces ``WRONG_VERSION_NUMBER``). Admitting them would report
 #:     "this endpoint refuses TLS1.0" for an endpoint that refuses TLS entirely.
-#: The cost of this narrowness is UNDER-claiming CLEAN against non-conforming servers. That is the correct
-#: direction to be wrong in.
+#: The cost of this narrowness is UNDER-claiming the refusal against non-conforming servers. That is the
+#: correct direction to be wrong in. (Since the branch is no longer CLEAN-capable the practical cost is
+#: nil today: both a matched and an unmatched reason reach the operator as INCONCLUSIVE.)
 VERSION_REJECTION_REASONS: "frozenset[str]" = frozenset({"TLSV1_ALERT_PROTOCOL_VERSION"})
 
 #: Reasons that mean the LOCAL OpenSSL build would not or could not offer the requested protocol. A
@@ -156,11 +177,14 @@ LOCAL_VERSION_UNSUPPORTED_REASONS: "frozenset[str]" = frozenset({
 FAILURE_GATE_REFUSED = "gate_refused"              # the audited gate refused; no packet left      -> INCONCLUSIVE
 FAILURE_LOCAL_UNSUPPORTED = "local_unsupported"    # our own stack could not make the offer        -> INCONCLUSIVE
 FAILURE_TRANSPORT = "transport_error"              # DNS / connect / reset / timeout / EOF         -> INCONCLUSIVE
-FAILURE_VERSION_REJECTED = "protocol_version_rejected"   # peer alert(70) on an open channel       -> CLEAN
+FAILURE_VERSION_REJECTED = "protocol_version_rejected"   # peer alert(70) on an open channel  -> INCONCLUSIVE
 FAILURE_TLS_OTHER = "tls_error_other"              # some other TLS alert or SSL error             -> INCONCLUSIVE
 
-#: Every failure class except :data:`FAILURE_VERSION_REJECTED` is inconclusive. Spelled out as a set rather
-#: than ``!= FAILURE_VERSION_REJECTED`` so adding a class cannot accidentally inherit CLEAN authority.
+#: Every failure class except :data:`FAILURE_VERSION_REJECTED` is inconclusive AT THE PREDICATE. (The
+#: BRANCH is ``clean_capable: false``, so today FAILURE_VERSION_REJECTED is admitted INCONCLUSIVE too —
+#: this set is the predicate-level distinction, kept because it is the one the guard exists to draw.)
+#: Spelled out as a set rather than ``!= FAILURE_VERSION_REJECTED`` so adding a class cannot accidentally
+#: inherit whatever authority this predicate carries.
 INCONCLUSIVE_FAILURE_CLASSES: "frozenset[str]" = frozenset({
     FAILURE_GATE_REFUSED, FAILURE_LOCAL_UNSUPPORTED, FAILURE_TRANSPORT, FAILURE_TLS_OTHER,
 })
@@ -366,9 +390,9 @@ def capture_version_restricted_handshake(
     """Offer ONLY ``version_label`` and capture what happened (claims 1 and 2).
 
     A completed handshake means the endpoint agreed to the deprecated version — the FACT. A
-    ``protocol_version`` alert means it refused — a CANDIDATE for the CLEAN, which additionally requires
-    the peer-TLS-session witness :func:`peer_tls_session_witness` stamps from the run's OTHER captures;
-    see :func:`is_conclusive_protocol_refusal`. Anything else is inconclusive."""
+    ``protocol_version`` alert means the peer that answered THIS connection refused, which is
+    INCONCLUSIVE, not a CLEAN: see :func:`is_conclusive_protocol_refusal` and the module docstring,
+    claim 2. Anything else is inconclusive too."""
     return _capture(host, port, slug=slug, timeout=timeout,
                     min_version_name=version_attr, max_version_name=version_attr, ciphers=None,
                     offered={"probe": "deprecated_protocol_offer",
@@ -438,8 +462,10 @@ def capture_weak_cipher_handshake(
 # ---------------------------------------------------------------------------
 #: The key under which a version probe's retained evidence carries its PEER-TLS-SESSION WITNESS: proof,
 #: drawn from ANOTHER capture of the SAME endpoint in the SAME run, that VIGIL completed a full TLS
-#: handshake with this peer at some other version. Retained IN the evidence (not consulted at decision
-#: time) so the CLEAN stays reproducible offline from the retained capture alone.
+#: handshake with this (host, port) at some other version — ON ANOTHER CONNECTION, which is exactly why
+#: it does not make the branch CLEAN-capable (see :func:`is_conclusive_protocol_refusal`). Retained IN the
+#: evidence (not consulted at decision time) so the predicate stays a pure function of one dict and
+#: re-derives offline from the retained capture alone.
 PEER_SESSION_KEY = "peer_tls_session"
 
 #: The shape stamped when no capture in the run completed a session with the peer.
@@ -450,11 +476,16 @@ def peer_tls_session_witness(own: Any, siblings: "tuple[dict, ...]" = ()) -> dic
     """Return ``own`` with a :data:`PEER_SESSION_KEY` witness stamped from ``siblings`` — the other
     captures this run made against the SAME (host, port).
 
-    WHY THIS EXISTS. ``alert(70) protocol_version`` is seven bytes. A peer that emits nothing else is not
-    a TLS service, and a CLEAN over it would say "this endpoint does not accept TLS1.0" about a host VIGIL
-    never completed a single TLS session with — precisely the laundering ``channel_established`` is
-    supposed to prevent but cannot, since a bare TCP accept satisfies it. The witness is the missing half:
-    the peer must have COMPLETED a handshake, at a different version, in the same run.
+    WHY THIS EXISTS. ``alert(70) protocol_version`` is seven bytes. A thing that emits nothing else is not
+    a TLS service, and treating its alert as conclusive would say "this endpoint does not accept TLS1.0"
+    about a host VIGIL never completed a single TLS session with — precisely the laundering
+    ``channel_established`` is supposed to prevent but cannot, since a bare TCP accept satisfies it. The
+    witness is that missing half: something at this (host, port) must have COMPLETED a handshake, at a
+    different version, in the same run.
+
+    WHAT IT IS NOT. It does not, and cannot, show that the SAME PEER answered both connections, so it is
+    not enough to support a CLEAN — the branch is ``clean_capable: false`` for exactly that reason. It is
+    retained and enforced as the narrower guard it really is.
 
     Pure and deterministic: it reads only the dicts handed to it (no clock, no network), scans ``siblings``
     in the order the runner captured them and takes the FIRST completed session whose host and port match
@@ -485,7 +516,18 @@ def peer_tls_session_witness(own: Any, siblings: "tuple[dict, ...]" = ()) -> dic
 
 
 def is_conclusive_protocol_refusal(evidence: Any) -> bool:
-    """THE CLEAN PREDICATE for claim 2, and the single most attackable decision in this slice.
+    """The CONCLUSIVENESS predicate for claim 2 — the single most attackable decision in this slice, and
+    NO LONGER A CLEAN PREDICATE.
+
+    **A True here does NOT produce a CLEAN.** ``tls_weakness.deprecated_protocol_offer`` is declared
+    ``clean_capable: false``, so ``verdict.admit`` maps a conclusive non-fire on this branch to
+    INCONCLUSIVE. The reason is stated at length in the module docstring (claim 2) and in the registry
+    row: this predicate reads ONE capture, but the peer-session witness it requires was obtained on a
+    DIFFERENT TCP connection, and no retained material binds the two connections to one peer — an L4 pool
+    that refuses TLS1.0 on one connection and accepts it on the next satisfies every condition below
+    while the endpoint does accept TLS1.0. The predicate is kept, exercised and mutation-defended because
+    it is the correct guard for this class and would be needed again if a sound CLEAN ever became
+    reachable; it is not, today, an absence-authority.
 
     True iff ALL of the following hold over the RETAINED capture:
 
@@ -499,19 +541,20 @@ def is_conclusive_protocol_refusal(evidence: Any) -> bool:
       * the failure class is EXACTLY :data:`FAILURE_VERSION_REJECTED`, i.e. the peer sent
         ``alert(70) protocol_version``;
       * the recorded ``ssl_reason`` is itself in the closed :data:`VERSION_REJECTION_REASONS`, so a
-        hand-edited ``failure_class`` alone cannot manufacture a CLEAN;
+        hand-edited ``failure_class`` alone cannot manufacture a conclusive refusal;
       * AND the retained :data:`PEER_SESSION_KEY` witness shows VIGIL COMPLETED a TLS handshake with this
-        same peer, in this same run, at a DIFFERENT version. Without it the "endpoint" need not be a TLS
-        service at all: a socket that answers every ClientHello with the same seven-byte
-        ``alert(70)`` record satisfies every other condition here, and reporting CLEAN over it would
-        assert the absence of a vulnerability on a host VIGIL never spoke TLS to. The witness also may not
-        name the version being refused — a session at the very version we claim was refused would be a
-        contradiction, not a corroboration.
+        (host, port), in this same run, at a DIFFERENT version. Without it the thing answering need not be
+        a TLS service at all: a socket that answers every ClientHello with the same seven-byte
+        ``alert(70)`` record satisfies every other condition here. The witness also may not name the
+        version being refused — a session at the very version we claim was refused would be a
+        contradiction, not a corroboration. NOTE WHAT THE WITNESS DOES AND DOES NOT ESTABLISH: it shows
+        that SOMETHING at this (host, port) spoke TLS, on ANOTHER connection. It does not show that the
+        same peer answered both, and cannot — see this function's opening paragraph.
 
     Every other shape — a timeout, a reset, a refused connect, a DNS failure, an EOF, a locally-unsupported
     protocol, an ambiguous ``handshake_failure(40)``, a gate refusal, or a peer VIGIL never completed a TLS
-    session with — returns False and the branch is admitted INCONCLUSIVE. That is the laundering this
-    predicate exists to prevent: an absence of signal must never be sold as a clean bill of health."""
+    session with — returns False. Both a False and a True reach the operator as INCONCLUSIVE today; the
+    distinction is kept because it is the one the guard exists to draw."""
     if not isinstance(evidence, dict):
         return False
     if evidence.get("connected") is True:

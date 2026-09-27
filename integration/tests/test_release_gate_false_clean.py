@@ -227,25 +227,41 @@ def test_the_negatives_capable_branch_count_is_pinned_and_named():
     OIDC check is not driven by the web re-drive at all, so a non-query ``redirect_uri`` stays a NAMED
     residual. This test guards that honest scope against the registry drifting back to the overclaim.
 
-    WAVE 3 (HexStrike TLS breadth) raises the pin from 6 to 7 by adding exactly ONE branch,
-    ``tls_weakness.deprecated_protocol_offer``. The reasoning, since this is the most safety-sensitive
-    claim the ladder can make: the negative there is something the PEER SAID, not a signal that was merely
-    absent. VIGIL narrows its own ClientHello to a single deprecated version and the endpoint answers on an
-    ESTABLISHED TCP channel with ``alert(70) protocol_version``, which RFC 8446 4.1.1 requires of a server
-    that will not speak the offered version. That is structurally the same kind of evidence as
-    ``service_reachability.tcp_handshake``'s negative (a connect the transport itself refused), and quite
-    unlike a body-derived non-firing, which cannot separate "the document says nothing" from "we could not
-    read the document". The authority is also narrow in three ways the registry records: it is scoped to the
-    ONE version that probe offered; the decision is a CLOSED singleton reason set
-    (``tls_breadth.VERSION_REJECTION_REASONS``), so a timeout, a reset, a locally-unofferable protocol or the
-    ambiguous ``handshake_failure(40)`` are INCONCLUSIVE; and the branch additionally declares the
-    ``channel_established`` precondition, so admission independently refuses to clear a probe whose channel
-    never came up. WAVE 3's other two branches deliberately did NOT gain absence-authority —
-    ``tls_weakness.weak_cipher_offer`` cannot, because the local OpenSSL build limits which legacy suites can
-    be offered at all (a refusal may mean untested), and ``tls_weakness.certificate_validity`` is NOT WIRED
-    at all (``wired: false``) — no OracleKind adjudicates certificate validity, so no re-drive admits to it
-    and it produces nothing; a branch that could only ever report INCONCLUSIVE under a reason that was not
-    the real one was removed rather than left standing."""
+    WAVE 3 (HexStrike TLS breadth) ADDED NO CLEAN-CAPABLE BRANCH. The pin stays at 6.
+
+    It briefly did. ``tls_weakness.deprecated_protocol_offer`` shipped as the 7th, on this argument: the
+    negative is something the PEER SAID, not a signal that was merely absent — VIGIL narrows its own
+    ClientHello to a single deprecated version and the endpoint answers on an ESTABLISHED TCP channel with
+    ``alert(70) protocol_version``, which RFC 8446 4.1.1 requires of a server that will not speak the
+    offered version.
+
+    THAT ARGUMENT WAS WRONG, and the error is worth keeping written down because it is subtle and it is the
+    kind this board exists to catch. "The peer said it" is true of ONE CONNECTION. The conclusion rests on a
+    PAIR: the refusal, and a separate handshake VIGIL COMPLETED at another version to show the thing
+    answering is a TLS service at all. Those are two different TCP connections, and NOTHING IN THE RETAINED
+    EVIDENCE BINDS THEM TO THE SAME PEER. An ordinary L4 fan-out breaks it — a Kubernetes Service with more
+    than one pod, an haproxy/nginx TCP pool, an L4 VIP, a DNS A-record pool mid-rollout: one connection is
+    answered by a backend whose minimum is TLS1.1 (a genuine alert(70)) and the next by a backend that
+    speaks TLS1.0, so VIGIL holds a real refusal beside a real completed session and clears a version the
+    endpoint DOES accept. It is not detectable as self-contradiction, because ``minimum_version=TLSv1.1`` is
+    a legal configuration. A red-pen reproduced it end to end through the real runner, the real gate and a
+    real two-backend round-robin listener; that listener is now a permanent negative control in
+    ``test_tls_breadth.py``. The limit is irreducible with what TLS gives the refused leg: the completed leg
+    retains ``spki_sha256``, but a refusing peer sends the alert IN PLACE OF the ServerHello and presents no
+    certificate to bind against, and re-probing k times would only make the claim probabilistic, which the
+    oracle doctrine forbids. So the branch is ``clean_capable: false`` and a refusal is INCONCLUSIVE; the
+    registry row's ``blocking_work`` names what a sound CLEAN would need.
+
+    Note what is NOT the reason: the guards were all sound and all held. The closed singleton reason set
+    (``tls_breadth.VERSION_REJECTION_REASONS``), the ``channel_established`` precondition and the
+    peer-TLS-session witness are all still enforced and still tested — they are asserted below, because the
+    branch keeps them and they are the right guards if a sound CLEAN ever becomes reachable. What failed was
+    the INFERENCE from a sound per-connection observation to a claim about an endpoint.
+
+    WAVE 3's other two branches never had absence-authority — ``tls_weakness.weak_cipher_offer`` cannot,
+    because the local OpenSSL build limits which legacy suites can be offered at all (a refusal may mean
+    untested), and ``tls_weakness.certificate_validity`` is NOT WIRED at all (``wired: false``) — no
+    OracleKind adjudicates certificate validity, so no re-drive admits to it and it produces nothing."""
     branches = {b["id"]: b for b in _branches()}
     clean = sorted(bid for bid, b in branches.items() if b.get("clean_capable"))
     expected = sorted([
@@ -255,26 +271,50 @@ def test_the_negatives_capable_branch_count_is_pinned_and_named():
         "oidc_redirect_uri.location_header",
         "service_reachability.tcp_handshake",
         "tls_weakness.tls_handshake",
-        "tls_weakness.deprecated_protocol_offer",
     ])
     assert clean == expected, (
         f"the set of CLEAN-capable branches changed to {clean}; if this is intended, update the pin AND the "
         f"reasoning — a clean-capable branch is one that may assert absence, the most safety-sensitive claim")
-    assert len(clean) == 7, f"expected exactly 7 negatives-capable branches, found {len(clean)}"
-    # WAVE 3's clean-capable addition must keep BOTH guards that justify its absence-authority: the closed
-    # peer-alert reason set, and the channel_established precondition admission evaluates per observation.
+    assert len(clean) == 6, f"expected exactly 6 negatives-capable branches, found {len(clean)}"
+
+    # POSITIVE assertions about the DEMOTION, so it cannot be silently undone. Not "it is absent from the
+    # list above" — that would also pass if the row disappeared entirely.
     dep = branches["tls_weakness.deprecated_protocol_offer"]
+    assert dep["clean_capable"] is False, (
+        "tls_weakness.deprecated_protocol_offer regained absence-authority. It may not have it: the "
+        "corroborating handshake and the refusal are on two different TCP connections and nothing binds "
+        "them to the same peer. Re-read this test's docstring before touching the registry row.")
+    assert dep["fact_capable"] is True, "the demotion must not have cost the branch its FACT capability"
+    assert dep["target_clean_capable"] is True and (dep.get("blocking_work") or "").strip(), (
+        "a demoted capability keeps its TARGET and must name the engineering that would close the gap "
+        "(claim discipline: meet up, never soften the claim)")
+    for must_say in ("connection", "peer"):
+        assert must_say in dep["blocking_work"].lower(), (
+            f"blocking_work must name the cross-{must_say} binding that a sound CLEAN would need")
+    assert "MISSING: cross_connection_peer_identity_binding" in dep["control_requirements"], (
+        "the missing control that caps this branch must be named in control_requirements")
+
+    # The guards that were NOT the problem are KEPT, and stay asserted: the closed peer-alert reason set
+    # and the channel_established precondition. They keep a bare non-TLS alert(70) emitter out of the
+    # conclusive path and are the right guards if a sound CLEAN ever becomes reachable.
     assert "channel_established" in dep.get("preconditions", []), (
-        "the deprecated-protocol branch may only clear over an ESTABLISHED channel")
+        "the deprecated-protocol branch dropped its established-channel precondition")
     from vigil_integration.live import tls_breadth as _tb
     assert _tb.VERSION_REJECTION_REASONS == frozenset({"TLSV1_ALERT_PROTOCOL_VERSION"}), (
-        "the clean-capable TLS branch widened its rejection vocabulary — every added reason is a new way "
-        "for a non-version failure to launder into a clean bill of health")
+        "the TLS refusal vocabulary widened — every added reason is a new way for a non-version failure "
+        "to be recorded as a version refusal")
+
     for not_clean_capable in ("tls_weakness.weak_cipher_offer", "tls_weakness.certificate_validity"):
         assert branches[not_clean_capable]["clean_capable"] is False, (
             f"{not_clean_capable} gained absence-authority it has no bounded negative for")
     assert branches["tls_weakness.certificate_validity"].get("wired") is False, (
         "the certificate-validity row must keep saying that nothing drives it")
+    # RESIDUAL, named not fixed: `wired` is documentation — verdict.admit() never reads it. What actually
+    # caps an accidental future wiring is fact_capable:false/clean_capable:false, plus the assertion in
+    # test_external_tool_runner.py that no re-drive admits to this branch. The registry row says so.
+    assert "wired` flag is DOCUMENTATION, NOT ENFORCEMENT" in branches[
+        "tls_weakness.certificate_validity"]["limitation"], (
+        "the certificate-validity row must keep admitting that `wired` is not enforced at runtime")
     # the three redirect HEADER branches must all remain negatives-capable ...
     for header_branch in ("open_redirect.location_header", "host_header.location_header",
                           "oidc_redirect_uri.location_header"):
