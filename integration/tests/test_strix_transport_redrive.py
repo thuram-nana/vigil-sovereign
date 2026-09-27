@@ -951,7 +951,7 @@ def test_an_ip_literal_scoped_rfc1918_staging_host_still_works(monkeypatch, tmp_
     assert _floor_refusals(res) == [], res.egress_checked
     assert res.egress_checked and res.egress_checked[0][0] == _RFC1918, "the floor must still have RUN"
     # ...and the SCOPE-over-addresses step ran too, and said WHY it authorised this address.
-    assert res.scope_checked == [(_RFC1918, True,
+    assert res.scope_checked == [(_RFC1918, True, "attested",
                                   f"{_RFC1918} is written as an IP-literal row of the signed charter "
                                   f"scope")], res.scope_checked
     assert res.pinned_address == _RFC1918, "the connect must be pinned to the validated literal"
@@ -1170,6 +1170,243 @@ def test_a_charter_scoped_rfc1918_origin_reaches_the_smuggling_burst(monkeypatch
 
 # ---- the helper's own contract (so a future site cannot get it subtly wrong) -----------------------------
 
+# ---- R2-B1: a charter address is ONE address, however it is legally spelled -----------------------------
+#
+# The literal set and ``_row_addresses`` kept the RAW spelling while the address under test came from
+# ``getaddrinfo`` (or straight from an IP-literal target the caller typed). Measured on the unfixed code:
+# NINE of these ten legal spellings of a charter's OWN only scope row REFUSED that row's own target — and
+# the split was diagnostic, because the denylist FLOOR allowed every one of them (``_coerce_allowed``
+# canonicalises) while the scope predicate refused. Two halves of the same check disagreeing about the
+# same row. It matters because the whole IP-literal rule is justified by "breaks no operator workflow on
+# record", and this is a way it breaks one — absent from the record only because no charter here uses IPv6.
+
+_IPV6_SPELLINGS = [
+    ("compressed row / expanded target",   "::1",                                     "0:0:0:0:0:0:0:1"),
+    ("bracketed row / bare target",        "[::1]",                                   "::1"),
+    ("expanded row / compressed target",   "0:0:0:0:0:0:0:1",                         "::1"),
+    ("lower row / UPPER+zeros target",     "2606:2800:220:1:248:1893:25c8:1946",
+                                           "2606:2800:0220:0001:0248:1893:25C8:1946"),
+    ("leading-zeros row / compressed",     "2606:2800:0220:0001:0248:1893:25c8:1946",
+                                           "2606:2800:220:1:248:1893:25c8:1946"),
+    ("bracketed UPPER row / lower target", "[2606:2800:220:1:248:1893:25C8:1946]",
+                                           "2606:2800:220:1:248:1893:25c8:1946"),
+    ("ULA compressed / expanded",          "fd12:3456::1",      "fd12:3456:0000:0000:0000:0000:0000:1"),
+    ("ULA expanded / compressed",          "fd12:3456:0:0:0:0:0:1",                   "fd12:3456::1"),
+    ("ULA UPPER / lower",                  "FD12:3456::1",                            "fd12:3456::1"),
+    ("ULA UPPER+zeros / compressed",       "FD12:3456:0000:0000:0000:0000:0000:0001", "fd12:3456::1"),
+]
+
+
+@pytest.mark.parametrize("label,row,target", _IPV6_SPELLINGS,
+                         ids=[c[0] for c in _IPV6_SPELLINGS])
+def test_a_legal_ipv6_spelling_of_the_charters_own_row_authorises_its_own_target(tmp_path, label, row,
+                                                                                 target):
+    """``ethics.host_matches_scope`` documents that ``fe80::1``, ``fe80:0:0:0:0:0:0:1`` and ``[fe80::1]``
+    are the SAME host. The scope-over-addresses predicate must agree, or a charter refuses its own
+    target. Asserted POSITIVELY: the floor ran and allowed, and the scope step ran and ATTESTED."""
+    from vigil_integration.live.egress_floor import charter_address_authorizer, pin_egress
+    import ipaddress as _ip
+    assert _ip.ip_address(row.strip("[]")) == _ip.ip_address(target.strip("[]")), "the case is malformed"
+    _charter_hosts(tmp_path, row)
+
+    pin = pin_egress(target, 443, slug="alpha",
+                     address_authorized=charter_address_authorizer("alpha", target))
+
+    assert pin.floor_ran and not [a for a, d, _w in pin.checked if d], pin.checked
+    assert pin.scope_over_addresses == "enforced", pin.scope_over_addresses
+    assert pin.scope_checked and pin.scope_checked[0][1] is True, pin.scope_checked
+    assert pin.scope_checked[0][2] == "attested", pin.scope_checked
+    assert pin.allowed and pin.pinned == target, pin.refused_reason
+
+
+def test_canonicalising_does_not_make_a_DIFFERENT_ipv6_address_match(tmp_path):
+    """The over-correction control for the fix above: canonicalisation must equate SPELLINGS, never
+    ADDRESSES. A neighbouring ULA address is still unattributable."""
+    from vigil_integration.live.egress_floor import charter_address_authorizer, pin_egress
+    _charter_hosts(tmp_path, "fd12:3456::1")
+
+    pin = pin_egress("fd12:3456:0:0:0:0:0:2", 443, slug="alpha",
+                     address_authorized=charter_address_authorizer("alpha", "fd12:3456:0:0:0:0:0:2"))
+
+    assert not pin.allowed and pin.pinned == ""
+    # the FLOOR refuses it first (a ULA the charter does not name cannot lift the private tier) — which
+    # is itself the B1 rule working on a canonicalised literal set.
+    assert [a for a, d, _w in pin.checked if d] == ["fd12:3456:0:0:0:0:0:2"], pin.checked
+    assert "not in the charter-authorized allowlist" in pin.refused_reason, pin.refused_reason
+    assert pin.scope_over_addresses == "not reached", pin.scope_over_addresses
+
+
+def test_a_hostname_row_resolving_to_a_noncanonical_ipv6_is_still_name_derived(monkeypatch, tmp_path):
+    """The same canonicalisation on the OTHER side: ``_row_addresses`` holds what the resolver said for a
+    NAME row, and the target's own answer may be spelled differently. Branch 2b must still match."""
+    from vigil_integration.live.egress_floor import charter_address_authorizer, pin_egress
+    _charter_hosts(tmp_path, "v6.corp.example")
+    real = socket.getaddrinfo
+    seq = {"n": 0}
+
+    def _gai(host, port, *a, **kw):
+        if str(host) != "v6.corp.example":
+            return real(host, port, *a, **kw)
+        seq["n"] += 1
+        # the TARGET resolution and the SCOPE-ROW resolution spell the same address differently
+        addr = "2606:2800:220:1:248:1893:25C8:1946" if seq["n"] == 1 else \
+               "2606:2800:0220:0001:0248:1893:25c8:1946"
+        return [(socket.AF_INET6, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", (addr, int(port or 0), 0, 0))]
+
+    monkeypatch.setattr(socket, "getaddrinfo", _gai)
+
+    pin = pin_egress("v6.corp.example", 443, slug="alpha",
+                     address_authorized=charter_address_authorizer("alpha", "v6.corp.example"))
+
+    assert pin.allowed, pin.refused_reason
+    assert pin.scope_checked[0][1] is True and pin.scope_checked[0][2] == "name_derived", pin.scope_checked
+
+
+def test_the_exhaustive_branch_still_refuses_an_extra_address_when_the_charter_spells_ipv6_differently(
+        monkeypatch, tmp_path):
+    """The OTHER half of the canonicalisation, and the soundness-relevant one. Branch 2a ("the charter
+    states this host's addresses explicitly, so that statement is exhaustive") computes
+    ``literals & _row_addresses(row)``. If either side kept a raw spelling, that intersection MISSES and
+    branch 2a silently degrades to branch 2b — i.e. the extra address is AUTHORIZED instead of refused.
+    Here the charter writes the address expanded and the resolver answers it compressed."""
+    from vigil_integration.live.egress_floor import charter_address_authorizer, pin_egress
+    _EXPANDED = "2606:2800:0220:0001:0248:1893:25c8:1946"
+    _COMPRESSED = "2606:2800:220:1:248:1893:25c8:1946"
+    _EXTRA = "2001:4860:4860::8888"                      # a public, floor-passing, out-of-scope address
+    _charter_hosts(tmp_path, "shop.example.test", _EXPANDED)
+    real = socket.getaddrinfo
+
+    def _gai(host, port, *a, **kw):
+        if str(host) != "shop.example.test":
+            return real(host, port, *a, **kw)
+        return [(socket.AF_INET6, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", (x, int(port or 0), 0, 0))
+                for x in (_COMPRESSED, _EXTRA)]
+
+    monkeypatch.setattr(socket, "getaddrinfo", _gai)
+
+    pin = pin_egress("shop.example.test", 443, slug="alpha",
+                     address_authorized=charter_address_authorizer("alpha", "shop.example.test"))
+
+    # the FLOOR allows both (globally routable), so only the scope step can refuse
+    assert pin.floor_ran and [d for _a, d, _w in pin.checked] == [False, False], pin.checked
+    assert [(ok, t) for _a, ok, t, _w in pin.scope_checked] == [
+        (True, "attested"), (False, "not_stated")], pin.scope_checked
+    assert not pin.allowed and pin.pinned == ""
+
+
+def test_an_ip_literal_row_authorises_a_wildcard_matched_host_because_literals_are_charter_wide(
+        monkeypatch, tmp_path):
+    """N1. Branch 3's docstring used to say a wildcard row means "no address can be attributed to the
+    charter". Falsifiable as written: ``literals`` is CHARTER-WIDE and branch 1 fires BEFORE any row
+    matching, so with ``[10.20.30.40, *.corp.example]`` the host ``dc.corp.example`` -> ``10.20.30.40``
+    IS authorized — the operator attested to that address somewhere in this charter, and the denylist's
+    own lift works the same way. The docstring was corrected to say so; this pins the behaviour it
+    describes, so the two cannot drift apart again."""
+    from vigil_integration.live.egress_floor import charter_address_authorizer, pin_egress
+    _charter_hosts(tmp_path, "10.20.30.40", "*.corp.example")
+    _fake_dns(monkeypatch, {"dc.corp.example": "10.20.30.40"})
+
+    pin = pin_egress("dc.corp.example", 445, slug="alpha",
+                     address_authorized=charter_address_authorizer("alpha", "dc.corp.example"))
+
+    assert pin.allowed and pin.pinned == "10.20.30.40", pin.refused_reason
+    assert pin.scope_checked == [("10.20.30.40", True, "attested",
+                                  "10.20.30.40 is written as an IP-literal row of the signed charter "
+                                  "scope")], pin.scope_checked
+    # ...and the same wildcard scope WITHOUT that literal row refuses, which is branch 3 proper.
+    _charter_hosts(tmp_path, "*.corp.example")
+    from vigil_integration.live import egress_floor
+    egress_floor._SCOPE_CACHE.clear()
+    bare = pin_egress("dc.corp.example", 445, slug="alpha",
+                      address_authorized=charter_address_authorizer("alpha", "dc.corp.example"))
+    assert not bare.allowed, bare.pinned
+
+
+def test_a_floor_refusal_on_a_wired_site_reads_not_reached_not_not_requested(monkeypatch, tmp_path):
+    """N3. ``scope_over_addresses`` said "not requested" both when NO predicate was passed and when one
+    was passed but the floor short-circuited first, so a refusal record could not distinguish a wired
+    site from an unwired one — while ``EgressPin``'s docstring sells this as the field you read to assert
+    the step ran. Three states now."""
+    from vigil_integration.live.egress_floor import charter_address_authorizer, pin_egress
+    _charter_hosts(tmp_path, "imds.corp.example")
+    _fake_dns(monkeypatch, {"imds.corp.example": _IMDS})
+
+    unwired = pin_egress("imds.corp.example", 80, slug="alpha")
+    wired = pin_egress("imds.corp.example", 80, slug="alpha",
+                       address_authorized=charter_address_authorizer("alpha", "imds.corp.example"))
+
+    assert not unwired.allowed and not wired.allowed
+    assert [a for a, d, _w in wired.checked if d] == [_IMDS], wired.checked   # the FLOOR refused both
+    assert unwired.scope_over_addresses == "not requested", unwired.scope_over_addresses
+    assert wired.scope_over_addresses == "not reached", wired.scope_over_addresses
+    assert wired.scope_checked == [] and not wired.scope_ran
+
+
+def test_a_write_landing_between_the_cache_stamp_and_the_parse_makes_the_cache_COLD_not_stale(tmp_path,
+                                                                                               monkeypatch):
+    """R2-B2 / C5. The cache key is stamped at the TOP of ``charter_scope_entries``, but the value comes
+    from ``CharterScopeSource.hosts()``, which performs its OWN read. A write landing in that window was
+    cached under the PREVIOUS stamp — and after reverting the file to its exact earlier bytes with
+    ``os.utime`` restoring ``mtime_ns``, the cache kept serving a scope the charter never had:
+
+        stamp(A) = (…318829887, 211) ca114f5b722c
+        value cached under stamp(A): ['10.20.30.99']      # a re-sign landed inside the window
+        <file reverted to A byte-for-byte, mtime_ns + size restored>
+        charter FILE says 10.20.30.40; cache returned:    ['10.20.30.99']   -> STALE
+
+    ``charter_scope_entries`` now RE-STAMPS after the parse and caches ONLY when the two stamps agree, so
+    the window makes the cache go COLD (a re-read next call), never stale."""
+    import os
+
+    from vigil_integration.live import egress_floor
+    egress_floor._SCOPE_CACHE.clear()
+    _charter_hosts(tmp_path, "10.20.30.40")
+    cp = tmp_path / "alpha" / "charter.md"
+    byte_a, stat_a = cp.read_bytes(), cp.stat()
+
+    # Land the interfering write INSIDE the window: hosts() re-reads the file, so patch the class to
+    # rewrite the charter immediately before it parses.
+    from vigil_gateway.scope_source import CharterScopeSource
+    real_hosts = CharterScopeSource.hosts
+    once = {"done": False}
+
+    def _hosts_with_a_write_in_the_window(self):
+        if not once["done"]:                          # interfere on the FIRST parse only
+            once["done"] = True
+            _charter_hosts(tmp_path, "10.20.30.99")   # the re-sign that lands mid-window
+        return real_hosts(self)
+
+    # NB: do NOT monkeypatch.undo() here — it would also undo the autouse ``_isolate`` charter_path
+    # patch and point the next read at the real target root.
+    monkeypatch.setattr(CharterScopeSource, "hosts", _hosts_with_a_write_in_the_window)
+    raced = egress_floor.charter_scope_entries("alpha")
+    assert raced[0] == ("10.20.30.99",), raced      # the value returned is the freshly parsed one
+
+    # revert byte-for-byte AND restore mtime_ns + size, exactly as the red-pen did
+    cp.write_bytes(byte_a)
+    os.utime(cp, ns=(stat_a.st_atime_ns, stat_a.st_mtime_ns))
+    assert cp.read_bytes() == byte_a and cp.stat().st_mtime_ns == stat_a.st_mtime_ns
+
+    after = egress_floor.charter_scope_entries("alpha")
+    assert after[0] == ("10.20.30.40",), (
+        f"the cache served a scope the charter never had: file says 10.20.30.40, cache returned {after[0]}")
+    assert after[1] == frozenset({"10.20.30.40"}), after[1]
+
+
+def test_the_charter_cache_still_HITS_when_nothing_writes_during_the_parse(tmp_path):
+    """The over-correction control for the fix above: the C5 guard must not disable the cache. With no
+    interfering write the two stamps agree, the entry is stored, and a second call is served from it —
+    which is the whole 14.0x DNS / 15 s saving (B7)."""
+    from vigil_integration.live import egress_floor
+    egress_floor._SCOPE_CACHE.clear()
+    _charter_hosts(tmp_path, "10.20.30.40")
+
+    first = egress_floor.charter_scope_entries("alpha")
+    assert len(egress_floor._SCOPE_CACHE) == 1, "a quiet parse must CACHE"
+    second = egress_floor.charter_scope_entries("alpha")
+    assert second is first, "the second call must be served from the cache, not re-parsed"
+
+
 def test_the_charter_relative_dns_pin_is_removed_and_cannot_be_revived_by_accident(monkeypatch):
     """RESIDUAL — make the footgun unusable. ``dns_pin.resolve_and_validate`` is a charter-RELATIVE pin
     with a name that reads like the safe thing: it required every resolved address to satisfy the
@@ -1273,8 +1510,8 @@ def test_the_scope_step_refuses_an_extra_address_the_floor_allows(monkeypatch, t
                                                                       (_OFF_SCOPE, False)], pin.checked
     # POSITIVE: the scope step RAN, authorised the attested address, and refused the other.
     assert pin.scope_ran and pin.scope_over_addresses == "enforced"
-    assert [(a, ok) for a, ok, _w in pin.scope_checked] == [(_PUBLIC, True),
-                                                            (_OFF_SCOPE, False)], pin.scope_checked
+    assert [(a, ok, t) for a, ok, t, _w in pin.scope_checked] == [
+        (_PUBLIC, True, "attested"), (_OFF_SCOPE, False, "not_stated")], pin.scope_checked
     assert not pin.allowed and pin.pinned == ""
     assert _OFF_SCOPE in pin.refused_reason and "exhaustive" in pin.refused_reason, pin.refused_reason
 
@@ -1293,7 +1530,8 @@ def test_the_transport_site_runs_the_scope_step_and_never_dials_the_extra_addres
     assert calls == [], f"an out-of-scope co-resident address must attempt NO connection; got {calls}"
     assert res.refused is True and res.n_facts == 0
     assert _floor_refusals(res) == [], f"the FLOOR allowed both; the SCOPE step must be the refuser: {res.egress_checked}"
-    assert [(a, ok) for a, ok, _w in res.scope_checked] == [(_PUBLIC, True), (_OFF_SCOPE, False)], res.scope_checked
+    assert [(a, ok, t) for a, ok, t, _w in res.scope_checked] == [
+        (_PUBLIC, True, "attested"), (_OFF_SCOPE, False, "not_stated")], res.scope_checked
     assert res.pinned_address == ""
 
 
@@ -1309,9 +1547,10 @@ def test_a_wildcard_only_scope_names_no_address_so_the_scope_step_refuses(monkey
                      address_authorized=charter_address_authorizer("alpha", "app.corp.example"))
 
     assert pin.floor_ran and pin.checked == [(_PUBLIC, False, "allowed")], pin.checked
-    assert pin.scope_checked == [(_PUBLIC, False, pin.scope_checked[0][2])], pin.scope_checked
+    assert pin.scope_checked == [(_PUBLIC, False, "unattributable",
+                                  pin.scope_checked[0][3])], pin.scope_checked
     assert not pin.allowed and pin.pinned == ""
-    assert "attributable to no row" in pin.scope_checked[0][2], pin.scope_checked
+    assert "attributable to no row" in pin.scope_checked[0][3], pin.scope_checked
 
 
 def test_a_hostname_only_charter_is_authorized_on_every_site(monkeypatch, tmp_path):
@@ -1330,9 +1569,9 @@ def test_a_hostname_only_charter_is_authorized_on_every_site(monkeypatch, tmp_pa
                      address_authorized=charter_address_authorizer("alpha", "testasp.example.test"))
 
     assert pin.allowed and pin.pinned == _PUBLIC, pin.refused_reason
-    assert pin.scope_ran and pin.scope_checked[0][:2] == (_PUBLIC, True)
-    assert "name-derived" in pin.scope_checked[0][2], pin.scope_checked
-    assert "no address-level attestation" in pin.scope_checked[0][2], pin.scope_checked
+    assert pin.scope_ran and pin.scope_checked[0][:3] == (_PUBLIC, True, "name_derived"), pin.scope_checked
+    assert "name-derived" in pin.scope_checked[0][3], pin.scope_checked
+    assert "no address-level attestation" in pin.scope_checked[0][3], pin.scope_checked
 
 
 def test_the_smuggling_site_accepts_the_same_hostname_only_charter(monkeypatch, tmp_path):

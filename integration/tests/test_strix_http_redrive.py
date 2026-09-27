@@ -522,18 +522,39 @@ def test_redrive_arm_class_sets_are_disjoint():
     assert {"smuggling", "transport"} <= set(alias_keys), (
         f"the S2 transport arms must be alias-key pinned; covered arms: {sorted(alias_keys)}")
 
-    # ...and NO alias map may exist in proof.run that no arm above claims. This is the check that kills
-    # MA2 regardless of what the new map is CALLED: it reads the classifier CALL SITES out of the source,
-    # so an alias map wired into ``_classify_redrive`` but missing from ``_ALIAS_ATTR`` fails here even
-    # though its name matches no convention.
+    # ...and NO alias map may exist in proof.run that no arm above claims. This reads the classifier CALL
+    # SITES out of the source, so an alias map wired into ``_classify_redrive`` but missing from
+    # ``_ALIAS_ATTR`` fails here whatever it is named.
+    #
+    # It must look at KEYWORD arguments too. The first version inspected only ``node.args[2]``, so
+    # mutation MA2c walked straight past it: ``_classify_redrive(report, CLASSES, aliases=_NEWARM_MAP,
+    # cwe_map=...)`` with ``"newarm": None`` in _ALIAS_ATTR wired an alias map carrying the shadowing key
+    # "timing" and this test PASSED. And an argument that is not a plain Name (an inline dict, an
+    # attribute, a ``**kwargs`` splat) is not something this test can attribute to an arm, so it is
+    # collected as UNRESOLVABLE and fails loudly rather than being skipped — the silent-skip family, not
+    # just the one instance.
     import ast
     import inspect
-    _wired = {
-        node.args[2].id
-        for node in ast.walk(ast.parse(inspect.getsource(run)))
-        if isinstance(node, ast.Call) and getattr(node.func, "id", "") == "_classify_redrive"
-        and len(node.args) >= 3 and isinstance(node.args[2], ast.Name)
-    }
+    _ALIAS_PARAM = "aliases"
+    _wired: set = set()
+    _unresolvable: list = []
+    for _node in ast.walk(ast.parse(inspect.getsource(run))):
+        if not (isinstance(_node, ast.Call) and getattr(_node.func, "id", "") == "_classify_redrive"):
+            continue
+        _cands = [_node.args[2]] if len(_node.args) >= 3 else []
+        _cands += [kw.value for kw in _node.keywords if kw.arg == _ALIAS_PARAM]
+        if not _cands or any(kw.arg is None for kw in _node.keywords):
+            # no positional 3rd arg and no aliases= keyword (a default or a **splat supplied it)
+            _unresolvable.append(ast.dump(_node)[:160])
+            continue
+        for _c in _cands:
+            if isinstance(_c, ast.Name):
+                _wired.add(_c.id)
+            else:
+                _unresolvable.append(ast.dump(_c)[:160])
+    assert not _unresolvable, (
+        "a _classify_redrive call site passes its alias map in a form this pin cannot attribute to an "
+        f"arm, so its keys would go un-collision-checked: {_unresolvable}")
     _claimed = {attr for attr in _ALIAS_ATTR.values() if attr}
     assert _wired <= _claimed, (
         f"alias map(s) {sorted(_wired - _claimed)} are wired into proof.run._classify_redrive but no arm "

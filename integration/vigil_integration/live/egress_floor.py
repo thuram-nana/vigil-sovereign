@@ -48,8 +48,10 @@ WHAT IT ENFORCES, in order, before any byte leaves the box:
   3. SCOPE OVER ADDRESSES — re-ask the charter about every resolved address, not just about the name the
      caller was given (:func:`charter_address_authorizer`). The floor above allows ANY globally-routable
      address, so without this step a multi-A answer carrying one in-scope and one out-of-scope public
-     address would connect. ``EgressPin.scope_over_addresses`` records whether this step ran, so a test
-     asserts the guard RAN rather than inferring it from the absence of a connection.
+     address would connect. ``EgressPin.scope_over_addresses`` records which of THREE states the step
+     ended in (``"not requested"`` / ``"not reached"`` / ``"enforced"``), so a test asserts the guard RAN
+     rather than inferring it from the absence of a connection — and a refusal record distinguishes a
+     site that never wired the predicate from one that did and was short-circuited by the floor.
   4. PIN: return the validated address so the caller connects to THAT literal, closing the DNS
      rebinding / short-TTL / poisoned-resolver / multi-A window a re-resolve at connect time reopens.
 
@@ -108,11 +110,27 @@ class EgressPin:
     allowed_ips: "tuple[str, ...]" = ()                     # the charter IP-LITERAL lift set consulted
     pinned: str = ""                                        # the validated address the connect must use
     refused_reason: str = ""
-    #: The POSITIVE audit trail of step 3 (scope over ADDRESSES) — one ``(address, authorized, reason)``
-    #: row per address the scope predicate adjudicated. Empty iff the step did not run.
-    scope_checked: "list[tuple[str, bool, str]]" = field(default_factory=list)
-    #: ``"not requested"`` (no predicate was passed — the caller gets name-scope + the floor ONLY),
-    #: or ``"enforced"`` once the predicate has adjudicated at least one address.
+    #: The POSITIVE audit trail of step 3 (scope over ADDRESSES) — one
+    #: ``(address, authorized, term, reason)`` row per address the scope predicate adjudicated, where
+    #: ``address`` is the RAW spelling the resolver returned (the canonical form it was compared as is
+    #: named in ``reason``). ``term`` is the MACHINE-READABLE verdict, so a consumer never has to
+    #: substring-match prose to tell an operator-attested address from a DNS-asserted one:
+    #:   ``"attested"``       — an IP-LITERAL row of the signed charter names this address (authorized)
+    #:   ``"name_derived"``   — it came from the charter's own resolution of a NAME row it authorises;
+    #:                          no address-level attestation exists (authorized, and strictly weaker)
+    #:   ``"not_stated"``     — the charter states this host's addresses and this is not one (refused)
+    #:   ``"unattributable"`` — no charter row names it, e.g. a wildcard-only scope (refused)
+    #:   ``"no_scope"``       — the charter authorises nothing at all (refused)
+    #:   ``"error"``          — the predicate itself raised (refused, fail-closed)
+    #:   ``"unspecified"``    — a caller-supplied predicate that answers only ``bool``/``(bool, reason)``
+    #: Empty iff the step did not run.
+    scope_checked: "list[tuple[str, bool, str, str]]" = field(default_factory=list)
+    #: Which of THREE states step 3 ended in — a refusal record must distinguish a site that never wired
+    #: the predicate from one that did and never got there:
+    #:   ``"not requested"`` — no predicate was passed; this caller gets name-scope + the floor ONLY
+    #:   ``"not reached"``   — a predicate WAS wired, but an earlier step (empty/unresolvable host, a
+    #:                         missing denylist, or a FLOOR refusal) short-circuited before it ran
+    #:   ``"enforced"``      — the predicate adjudicated at least one address
     scope_over_addresses: str = "not requested"
 
     @property
@@ -163,17 +181,35 @@ _CACHE_MAX = 32
 
 
 def _charter_stamp(slug: str) -> tuple:
-    """A cache key that changes whenever the charter FILE changes: ``(slug, mtime_ns, size, sha256)``.
+    """A cache key over the charter FILE AS IT IS RIGHT NOW: ``(slug, mtime_ns, size, sha256)``.
 
     The brief's key is (slug, charter mtime) — enough to preserve the mid-engagement RE-SIGN detection
     that reading the charter on every request was there to give. The CONTENT HASH is added on top
-    because mtime granularity is filesystem-dependent and two writes inside one tick would otherwise
-    serve a stale scope; hashing a few KB costs ~20 us against the ~14 ms/req this cache removes.
-    Everything the cached values depend on — the scope table AND the ``Signed:`` line
-    ``require_charter_signed`` checks — lives in these bytes, so the hash is a COMPLETE key.
+    because mtime granularity is filesystem-dependent; it is load-bearing, not belt-and-braces — a
+    red-pen forged IDENTICAL ``mtime_ns`` AND identical size with different bytes and the hash caught
+    it. Everything the cached values depend on — the scope table AND the ``Signed:`` line
+    ``require_charter_signed`` reads — lives in these bytes.
 
-    Fail-safe: when the charter cannot be read the stamp is unique per call, so the cache simply never
-    hits (it can go cold, never stale) and every caller re-reads and fails closed on its own."""
+    WHAT THIS KEY DOES *NOT* GIVE YOU (corrected; the previous wording claimed a COMPLETE key and a
+    cache that could "never" go stale, and both were false as written). A stamp describes the file at
+    the instant it is taken, and the VALUE it keys is produced by a SEPARATE read inside
+    ``CharterScopeSource.hosts()``. A write that lands between the two is a real staleness window, and
+    a red-pen demonstrated it (C5): a re-sign to ``10.20.30.99`` landing inside that window was cached
+    under the PREVIOUS stamp, and after reverting the file to its exact earlier bytes with ``os.utime``
+    restoring ``mtime_ns``, the cache kept serving a scope the charter never had. :func:`charter_scope_entries`
+    now RE-STAMPS after the parse and caches ONLY when the two stamps agree, so that window makes the
+    cache go COLD, never stale.
+
+    The residual it does not close, stated rather than papered over: a writer that changes the file and
+    restores byte-identical content WITH ``mtime_ns`` restored *entirely inside* the sub-millisecond
+    parse window would produce two equal stamps around a parse that saw the intermediate bytes. Closing
+    that needs the parser to read from a buffer this module owns, which would mean re-implementing
+    ``ethics.parse_scope`` + ``is_charter_signed`` — the duplication the gateway deliberately refuses
+    (``scope_source``: "The gateway does NOT reinvent scope parsing"). It is strictly harder to hit than
+    C5, which is itself already a timed sub-millisecond write plus a later exact-bytes revert.
+
+    Fail-safe: when the charter cannot be read at all the stamp is unique per call, so the cache simply
+    never hits and every caller re-reads and fails closed on its own."""
     try:
         from framework.v2.common import paths  # type: ignore  # noqa: PLC0415 — FATAL-2, function-local
         cp = Path(paths.charter_path(str(slug or "")))
@@ -189,6 +225,29 @@ def _put(cache: dict, key: tuple, value):
         cache.clear()
     cache[key] = value
     return value
+
+
+def _scope_rows(raw: "Iterable[Any]") -> "tuple[list[str], set[str], bool]":
+    """Classify the signed charter's raw scope rows into ``(entries, canonical ip literals, wildcard?)``.
+    Pure and stdlib-only, so both the cached and the uncached (C5 race) paths compute it identically."""
+    entries: list[str] = []
+    literals: set[str] = set()
+    wildcard = False
+    for row in raw:
+        entry = str(row or "").strip().strip("`").rstrip(".")
+        if not entry or entry.lower() in {"n/a", "none"}:
+            continue
+        entries.append(entry)
+        if entry.startswith("*."):
+            wildcard = True
+            continue
+        try:
+            # CANONICAL, not raw: a charter may legally write ``[::1]`` or ``0:0:0:0:0:0:0:1`` and must
+            # authorise the same address however the resolver (or the operator) spells it back (R2-B1).
+            literals.add(str(ipaddress.ip_address(_normalise(entry))))
+        except ValueError:
+            continue
+    return entries, literals, wildcard
 
 
 def charter_scope_entries(slug: str) -> "tuple[tuple[str, ...], frozenset[str], bool]":
@@ -216,22 +275,15 @@ def charter_scope_entries(slug: str) -> "tuple[tuple[str, ...], frozenset[str], 
         raw = list(CharterScopeSource(str(slug or "")).hosts())
     except Exception:  # noqa: BLE001 — an unreadable/unsigned charter authorises nothing
         return ((), frozenset(), False)
-    entries: list[str] = []
-    literals: set[str] = set()
-    wildcard = False
-    for row in raw:
-        entry = str(row or "").strip().strip("`").rstrip(".")
-        if not entry or entry.lower() in {"n/a", "none"}:
-            continue
-        entries.append(entry)
-        if entry.startswith("*."):
-            wildcard = True
-            continue
-        try:
-            ipaddress.ip_address(_normalise(entry))
-        except ValueError:
-            continue
-        literals.add(_normalise(entry))
+    # C5: ``hosts()`` performs its OWN read of the file, so the bytes it parsed are not provably the
+    # bytes ``key`` was stamped from — a write landing in that window was cached under the PREVIOUS
+    # stamp and outlived a revert to the earlier bytes. RE-STAMP now: if the file is unchanged across
+    # the parse, the parse saw these bytes and the key is sound; if it moved, we return the fresh value
+    # but DO NOT cache it, so the next call re-reads. The window makes the cache COLD, never stale.
+    if _charter_stamp(slug) != key:
+        entries, literals, wildcard = _scope_rows(raw)
+        return (tuple(entries), frozenset(literals), wildcard)
+    entries, literals, wildcard = _scope_rows(raw)
     return _put(_SCOPE_CACHE, key, (tuple(entries), frozenset(literals), wildcard))
 
 
@@ -252,13 +304,30 @@ def charter_allowed_ips(slug: str) -> "frozenset[str]":
     charter-authorized one.
 
     A NAME therefore gets name-scope plus the floor; only an IP LITERAL written into the signed,
-    operator-attested charter gets the private/loopback lift. Measured before committing to this rule:
-    across the 59 charters under all three target roots on this box (73 scope entries), exactly ONE
-    hostname entry resolves into RFC1918/loopback — ``localhost`` in ``targets/meridian/charter.md``,
-    whose charter ALSO lists the ``127.0.0.1`` literal, so its loopback lift survives. Zero RFC1918
-    hostname entries anywhere. The rule breaks no operator workflow on record; an operator who needs a
-    private host reachable writes its address, which is what "exactly-charter-authorized IP" always
-    claimed to mean.
+    operator-attested charter gets the private/loopback lift.
+
+    MEASURED before committing to this rule, with the denominator stated so it cannot be read two ways.
+    POPULATION: the glob ``targets/*/charter.md`` (one level, not recursive) under each of the three
+    target roots on this box — the worktree, ``CRUCIBLE_ROOT`` and the PENTEST-main tree. That is 59
+    charter files carrying 73 scope rows out of ``ethics.parse_scope``; 56 of the 59
+    parse to a non-empty scope (the other 3 use the older free-form "Target hosts" heading, which parses
+    EMPTY and therefore authorises nothing). This module's placeholder filter (blank rows and exact
+    ``n/a``/``none`` rows) drops none of those 73 here, so the pre-filter and post-filter counts are the
+    same number — an earlier note's 59/73 and a reviewer's wider 62/84 are the same conclusion counted
+    over slightly different globs, and the classification below is what the decision actually rests on.
+    Of the 73 rows: 50 are IP literals and every single one is ``127.0.0.1`` (no charter on record writes
+    a private or a public literal at all), 4 are wildcards, 19 are hostnames. Exactly ONE hostname row
+    resolves into RFC1918/loopback — ``localhost`` in ``targets/meridian/charter.md``, whose charter ALSO
+    lists the ``127.0.0.1`` literal, so its loopback lift survives (only ``::1`` loses it, and ``::1`` is
+    a scope row nowhere). ZERO RFC1918 hostname rows, and ZERO RFC1918 literal rows.
+
+    RE-CHECKED over a population 16x larger: ALL 977 ``charter.md`` files anywhere under ``/home/kali``
+    (1835 scope rows, 548 of them parsing to a non-empty scope) — 83 IP-literal rows, every one
+    ``127.0.0.1``; 319 wildcards; 1433 hostnames; ZERO RFC1918 literal rows; ZERO RFC1918 hostname rows;
+    and 15 private-resolving hostname rows which are 15 copies of the SAME single distinct entry,
+    ``localhost`` in duplicated meridian charters. The conclusion holds at both scales. The rule breaks
+    no operator workflow on record; an operator who needs a private host reachable writes its address,
+    which is what "exactly-charter-authorized IP" always claimed to mean.
 
     Fail-closed: any error (no charter, unsigned charter, no gateway) yields the EMPTY set, which can
     only make the floor stricter, never looser."""
@@ -288,14 +357,24 @@ def _row_addresses(row: str, resolver: Callable[..., Any], slug: str) -> "frozen
 
     Cached per (charter bytes, row, resolver) so a 1069-request re-drive resolves the scope entry ONCE,
     not 1069 times (B7). Fail-closed: a row that will not resolve contributes nothing."""
-    key = _charter_stamp(slug) + (_normalise(row).lower(), resolver)
+    key = _charter_stamp(slug) + (_canon(row).lower(), resolver)
     hit = _NAMED_CACHE.get(key)
     if hit is not None:
         return hit
     entry = _normalise(row)
     try:
-        ipaddress.ip_address(entry)
-        return _put(_NAMED_CACHE, key, frozenset({entry}))
+        # An IP-literal row resolves to ITSELF — in CANONICAL form, for consistency with ``literals``
+        # and with the resolved branch below.
+        #
+        # HONEST NOTE, because a control was written for this and killed NOTHING: this branch is
+        # UNREACHABLE on today's call graph, so unlike the other three canonicalisation sites it is
+        # defence in depth, not a pinned property. ``_authorized`` consults ``_row_addresses`` only
+        # AFTER branch 1 has missed, and branch 1 tests the CHARTER-WIDE canonical ``literals`` set —
+        # which already contains every IP-literal row — so an IP-literal row can only be reached here
+        # for an address branch 1 did not match, while ``_row_matches_host`` only routes a target to
+        # this row when the target IS that address. Mutating it back to the raw spelling kills 0 of 88
+        # tests; that zero is recorded rather than dressed up as coverage.
+        return _put(_NAMED_CACHE, key, frozenset({str(ipaddress.ip_address(entry))}))
     except ValueError:
         pass
     out: set[str] = set()
@@ -311,7 +390,7 @@ def _row_addresses(row: str, resolver: Callable[..., Any], slug: str) -> "frozen
     for info in infos or ():
         sockaddr = info[4] if len(info) >= 5 else None
         if sockaddr and sockaddr[0]:
-            out.add(_normalise(sockaddr[0]))
+            out.add(_canon(sockaddr[0]))
     return _put(_NAMED_CACHE, key, frozenset(out))
 
 
@@ -343,11 +422,20 @@ def charter_address_authorizer(slug: str, host: str = "", *,
               guards for it are the floor above and the all-or-nothing TOCTOU refusal in
               :func:`pin_egress` (the target is resolved first, the charter second; divergent answers
               refuse).
-      3. Otherwise → REFUSED. In practice that is the WILDCARD-ONLY case: ``*.corp.example`` authorises
-         a NAME PATTERN and names no address at all, so no address can be attributed to the charter.
-         This is a deliberate tightening on the transport/race sites (the two predicate sites already
-         refused it, as a side-effect of asking a string gate about an IP literal); the operator's
-         remedy is to write the concrete host, or its address, into the signed charter.
+      3. Otherwise → REFUSED, term ``"unattributable"``. In practice that is the WILDCARD-ONLY case:
+         ``*.corp.example`` authorises a NAME PATTERN and names no address, so a host covered ONLY by a
+         wildcard has no row to attribute an address to. Read branch 1 first, though: ``literals`` is
+         CHARTER-WIDE and branch 1 fires BEFORE any row matching, so a charter of
+         ``[10.20.30.40, *.corp.example]`` DOES authorise ``dc.corp.example`` -> ``10.20.30.40`` — the
+         operator attested to that address somewhere in this charter, and which row carried it is not
+         something this predicate (or the denylist's own lift, which works the same way) distinguishes.
+         So the honest statement is "no address is attributable to a WILDCARD ROW", not "no address is
+         attributable to the charter". That ordering is deliberate and pinned: mutating branch 1 to be
+         row-scoped instead of charter-wide kills 6 tests (measured).
+         Refusing the genuinely unattributable case is a deliberate tightening on the transport/race
+         sites (the two predicate sites already refused it, as a side-effect of asking a string gate
+         about an IP literal); the operator's remedy is to write the concrete host, or its address,
+         into the signed charter.
 
     THE ASYMMETRY THIS ALSO CLOSES. The per-site predicates it replaces re-asked
     ``reachability_cloud._authorize`` — and so ``ethics.host_matches_scope`` — about the resolved IP
@@ -357,19 +445,38 @@ def charter_address_authorizer(slug: str, host: str = "", *,
     refused while ``transport`` / ``race`` allowed it. Branch 2b keeps them working; branch 2a keeps the
     out-of-scope-extra-address refusal they really did have.
 
-    Returns ``(authorized, reason)`` so :func:`pin_egress` records a POSITIVE audit row per address.
+    Returns ``(authorized, term, reason)``. The TERM is machine-readable — ``"attested"`` for branch 1,
+    ``"name_derived"`` for 2b, ``"not_stated"`` for 2a, ``"unattributable"`` for 3, ``"no_scope"`` for an
+    empty charter — so a consumer distinguishes an operator-attested address from a DNS-asserted one
+    without substring-matching prose. :func:`pin_egress` records it in ``EgressPin.scope_checked``.
+
+    HOW OLD CAN A BRANCH-2b VERDICT BE. ``_row_addresses`` caches a scope row's resolution for the
+    lifetime of the CHARTER BYTES (the cache key is the charter stamp + the row + the resolver, and DNS
+    is deliberately NOT in it — that is the whole B7 saving). So within one run a 2b verdict can be
+    computed from an answer taken arbitrarily earlier, while ``pin_egress`` resolves the TARGET fresh
+    every request. The skew is directionally fail-closed — when a row's real answer moves, the new
+    target address is no longer in the cached set and the predicate REFUSES (measured: a row moved to
+    ``198.51.100.9`` and the predicate refused the new address) — but it is skew, and a 2b "authorized"
+    means "in the charter's view of this name as of the last resolution in this run", not "right now".
+
     Fail-closed: no charter, or a charter with no scope, authorises no address at all."""
     resolve = resolver or socket.getaddrinfo
     entries, literals, _wild = charter_scope_entries(slug)
     target = _normalise(host)
 
-    def _authorized(address: str) -> "tuple[bool, str]":
-        addr = _normalise(address)
+    def _authorized(address: str) -> "tuple[bool, str, str]":
+        # CANONICAL on both sides. A charter may legally write ``[::1]`` or ``0:0:0:0:0:0:0:1``, and the
+        # address arrives either from ``getaddrinfo`` or straight from an IP-literal target the caller
+        # typed; comparing spellings as strings refused 9 of 10 legal IPv6 spellings of the charter's own
+        # row (R2-B1). ``literals`` and ``_row_addresses`` are canonical too.
+        addr = _canon(address)
+        also = f" (canonical form of {_normalise(address)!r})" if addr != _normalise(address) else ""
         if not entries:
-            return False, ("the signed charter authorises no scope entry at all, so it names no address "
-                           "(fail-closed)")
+            return False, "no_scope", ("the signed charter authorises no scope entry at all, so it names "
+                                       "no address (fail-closed)")
         if addr in literals:
-            return True, f"{addr} is written as an IP-literal row of the signed charter scope"
+            return True, "attested", (f"{addr} is written as an IP-literal row of the signed charter "
+                                      f"scope{also}")
         rows = [e for e in entries if not e.startswith("*.") and _row_matches_host(e, target)]
         for row in rows:
             row_addrs = _row_addresses(row, resolve, slug)
@@ -377,14 +484,15 @@ def charter_address_authorizer(slug: str, host: str = "", *,
                 continue
             stated = literals & row_addrs
             if stated:
-                return False, (
-                    f"the signed charter states {row!r}'s address(es) explicitly as "
-                    f"{sorted(stated)!r}, so that statement is exhaustive for this host and {addr} — "
-                    f"also in the answer — is NOT authorized")
-            return True, (f"{addr} is name-derived: the signed charter authorises the name {row!r} and "
-                          f"this address is in that name's own resolution (no address-level attestation)")
-        return False, (
-            f"{addr} is attributable to no row of the signed charter scope {list(entries)!r} — a "
+                return False, "not_stated", (
+                    f"the signed charter states {row!r}'s address(es) explicitly as {sorted(stated)!r}, "
+                    f"so that statement is exhaustive for this host and {addr}{also} — also in the "
+                    f"answer — is NOT authorized")
+            return True, "name_derived", (
+                f"{addr} is name-derived: the signed charter authorises the name {row!r} and this "
+                f"address is in that name's own resolution (no address-level attestation){also}")
+        return False, "unattributable", (
+            f"{addr}{also} is attributable to no row of the signed charter scope {list(entries)!r} — a "
             f"wildcard row authorises a NAME PATTERN and names no address, so write the concrete host "
             f"(or its IP literal) to authorise it")
 
@@ -394,6 +502,26 @@ def charter_address_authorizer(slug: str, host: str = "", *,
 def _normalise(address: Any) -> str:
     """A bare address string: brackets stripped, IPv6 zone id (``fe80::1%eth0``) dropped."""
     return str(address or "").strip().strip("[]").split("%")[0]
+
+
+def _canon(address: Any) -> str:
+    """The CANONICAL text form of an IP address; any non-address string comes back merely normalised.
+
+    ``[::1]``, ``0:0:0:0:0:0:0:1``, ``::1`` and ``0000:0000:0000:0000:0000:0000:0000:0001`` are ONE
+    address with four legal spellings, and ``ethics.host_matches_scope`` documents exactly that promise
+    for scope entries. Comparing the spellings as STRINGS therefore answers the wrong question.
+
+    This was a real defect, not a hypothetical: the charter literal set and ``_row_addresses`` both kept
+    the RAW spelling while the address under test came from ``getaddrinfo`` (or from an IP-literal target
+    the caller typed), so 9 of 10 legal IPv6 spellings of a charter's OWN only scope row REFUSED that
+    row's own target — with the denylist floor ALLOWING it, because ``denylist._coerce_allowed``
+    canonicalises and this module did not. The two halves of the same check disagreed about the same
+    row. Every comparison against a charter address now goes through here."""
+    raw = _normalise(address)
+    try:
+        return str(ipaddress.ip_address(raw))
+    except ValueError:
+        return raw
 
 
 def _resolve(host: str, port: int, resolver: Callable[..., Any]) -> "list[str]":
@@ -437,6 +565,12 @@ def pin_egress(host: str, port: Any = 0, *, slug: str = "",
     except (TypeError, ValueError):
         port_i = 0
     pin = EgressPin(host=_normalise(host), port=port_i)
+    if address_authorized is not None:
+        # N3: a predicate is WIRED. Until it actually adjudicates an address the honest state is
+        # "not reached", never "not requested" — otherwise every FLOOR refusal (which short-circuits
+        # before step 3) reads identically on a wired site and an unwired one, and this field is sold
+        # as the one a reviewer reads to tell them apart.
+        pin.scope_over_addresses = "not reached"
     if not pin.host:
         pin.refused_reason = "empty target host (fail-closed)"
         return pin
@@ -481,18 +615,25 @@ def pin_egress(host: str, port: Any = 0, *, slug: str = "",
             try:
                 verdict = address_authorized(address)
             except Exception as exc:  # noqa: BLE001 — a predicate that errored refuses
-                pin.scope_checked.append((address, False, f"{type(exc).__name__}: {exc}"))
+                pin.scope_checked.append((address, False, "error", f"{type(exc).__name__}: {exc}"))
                 pin.scope_over_addresses = "enforced"
                 pin.refused_reason = (f"scope re-check errored for {address} (fail-closed): "
                                       f"{type(exc).__name__}: {exc}")
                 return pin
-            # A predicate may answer ``bool`` (the historic shape) or ``(bool, reason)``; the reason is
-            # what makes ``scope_checked`` a POSITIVE audit trail rather than a silent boolean.
+            # A predicate may answer ``bool`` (the historic shape), ``(bool, reason)``, or the full
+            # ``(bool, term, reason)`` :func:`charter_address_authorizer` returns. The TERM is what lets
+            # a consumer distinguish an operator-attested address from a DNS-asserted one without
+            # substring-matching prose; a predicate that supplies none is recorded "unspecified" rather
+            # than guessed at.
             if isinstance(verdict, tuple):
-                ok, why = bool(verdict[0]), str(verdict[1] if len(verdict) > 1 else "")
+                ok = bool(verdict[0])
+                if len(verdict) >= 3:
+                    term, why = str(verdict[1]), str(verdict[2])
+                else:
+                    term, why = "unspecified", str(verdict[1] if len(verdict) > 1 else "")
             else:
-                ok, why = bool(verdict), ""
-            pin.scope_checked.append((address, ok, why))
+                ok, term, why = bool(verdict), "unspecified", ""
+            pin.scope_checked.append((address, ok, term, why))
             pin.scope_over_addresses = "enforced"
             if not ok:
                 pin.refused_reason = (
