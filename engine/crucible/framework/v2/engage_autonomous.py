@@ -1087,10 +1087,20 @@ def _finding_payload(f: object) -> dict:
         conf = None if conf is None else min(1.0, max(0.0, float(conf)))
     except (TypeError, ValueError):
         conf = None
+    # audit-A red-pen — a SECOND live copy of the B4 spine-relabelling defect. This builder
+    # hardcoded a synthesized "<bug_class> at <param>" title at severity High, which RELABELS an
+    # UNCONFIRMED producer claim onto the IMMUTABLE spine exactly as ``engage._spine_finding_payload``
+    # once did (the CSWSH no-cookies branch — "… possible CSWSH — UNCONFIRMED", Medium — was rewritten
+    # to a confirmed High). Mirror that sibling's EXACT derivation: preserve the finding's OWN
+    # ``title``/``severity`` when present, synthesizing only when the finding (a built-in point check)
+    # carries none. The two builders MUST produce byte-identical title+severity for the same finding.
+    title = str(getattr(f, "title", "") or "")
+    param = str(getattr(f, "param", "") or "")
+    severity = str(getattr(f, "severity", "") or "")
     return {
         "finding_slug": (f"{bug_class}:{getattr(f, 'insertion_point', '')}"[:120]) or bug_class or "finding",
-        "title": (f"{bug_class} at {getattr(f, 'param', '')}".strip() or bug_class or "finding"),
-        "severity": "High",
+        "title": (f"{title} at {param}" if title else f"{bug_class} confirmed at {param}"),
+        "severity": (severity or "High"),
         "bug_class": bug_class or "unknown",
         "surface": str(surface),
         "summary": str(getattr(f, "rationale", "") or f"{bug_class} finding"),

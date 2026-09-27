@@ -258,6 +258,27 @@ def test_no_channel_records_why() -> None:
     assert "not an HTTP status line" in reader.last_error
 
 
+def test_content_length_isdigit_but_not_ascii_digit_is_refused_without_raising() -> None:
+    """audit-A red-pen BLOCK-B — the ``_DIGITS`` guard covering the gap between ``str.isdigit()``
+    and RFC 9112 §6.3's 1*DIGIT (ASCII only).
+
+    ``0xB2`` (superscript-two "²") is ``str.isdigit() == True`` but ``int("²")`` raises
+    ``ValueError``. Without the guard, ``_read_head`` would accept it and ``_read_body``'s
+    ``int(cl)`` would raise, ESCAPING ``read_response`` (an unframed crash, not an honest
+    INCONCLUSIVE). The guard matches the value against ``^[0-9]+$``, refuses it as unrecoverable,
+    poisons the connection, and ``read_response`` returns NO CHANNEL — no exception escapes.
+
+    This test KILLS the mutant that deletes the ``_DIGITS`` guard: with the guard gone, the
+    ``int(cl)`` below raises ``ValueError`` out of ``read_response`` and the test errors."""
+    wire = b"HTTP/1.1 200 OK\r\nContent-Length: \xb2\r\n\r\nAA"
+    with _served([wire], timeout=0.6) as s:
+        reader = RawResponseReader(s)
+        rec = reader.read_response()          # must NOT raise
+    assert rec["channel"] is False and rec["status"] is None and rec["body"] == ""
+    assert "Content-Length is unrecoverable" in reader.last_error, reader.last_error
+    assert "²" in reader.last_error
+
+
 def test_budget_bounds_the_read() -> None:
     """The budget bounds the read AND the bounded read is honest about being partial.
 

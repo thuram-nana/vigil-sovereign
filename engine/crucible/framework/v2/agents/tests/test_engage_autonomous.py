@@ -996,3 +996,64 @@ def test_reachability_recheck_is_deterministic(isolated_engagement):
                 out.reachability_applied)
 
     assert run() == run(), "the gated reachability re-check is not deterministic"
+
+
+# ---------------------------------------------------------------------------
+# audit-A red-pen — the spine-mirror builder must NOT relabel an UNCONFIRMED finding.
+#
+# ``engage_autonomous._finding_payload`` is the SECOND live copy of the B4 relabelling defect that
+# ``engage._spine_finding_payload`` already retired: it hardcoded a synthesized "<bug_class> at
+# <param>" title at severity High, so a hedged producer claim (the CSWSH no-cookies branch —
+# "… possible CSWSH — UNCONFIRMED", Medium) was rewritten to a confirmed High onto the IMMUTABLE
+# spine. Both builders must now derive title+severity byte-identically from the finding's own claim.
+# Reachable unconditionally under ``--autonomous`` (engage -> _mirror_findings_to_spine ->
+# _finding_payload, and the discovery send at _record_discovered).
+# ---------------------------------------------------------------------------
+
+def _cswsh_unconfirmed_finding() -> AuditFinding:
+    """The scanner.websocket no-cookies branch: a foreign-Origin handshake accepted with no victim
+    session — an explicitly UNCONFIRMED Medium LEAD, NOT a confirmed hijack."""
+    return AuditFinding(
+        check_id="cross_site_websocket_hijacking",
+        bug_class="cross_site_websocket_hijacking",
+        insertion_point="ws:ws://t.invalid/socket",
+        param="ws://t.invalid/socket",
+        endpoint="ws://t.invalid/socket",
+        confidence=0.5, confirmed_by="predicate_oracle",
+        rationale="foreign-Origin WS handshake accepted; no cookies supplied -> LEAD",
+        title="Cross-origin WebSocket handshake accepted (possible CSWSH — UNCONFIRMED)",
+        severity="Medium",
+        oracle_context={"bug_class": "cross_site_websocket_hijacking"},
+    )
+
+
+def test_spine_mirror_builders_agree_and_never_relabel_an_unconfirmed_finding():
+    f = _cswsh_unconfirmed_finding()
+
+    auto = auto_mod._finding_payload(f)
+    # ``admitted`` steers only critique_status/verified_by_oracle, never title/severity.
+    mirror = engage_mod._spine_finding_payload(f, None)
+
+    # (1) the two builders serialise the SAME finding byte-identically on title + severity.
+    assert auto["title"] == mirror["title"], (auto["title"], mirror["title"])
+    assert auto["severity"] == mirror["severity"], (auto["severity"], mirror["severity"])
+
+    # (2) neither promotes Medium -> High, and neither drops the honest UNCONFIRMED hedge.
+    assert auto["severity"] == "Medium"
+    assert mirror["severity"] == "Medium"
+    assert "UNCONFIRMED" in auto["title"]
+    assert "UNCONFIRMED" in mirror["title"]
+    # the old defect's exact relabelled title must NOT reappear.
+    assert auto["title"] != "cross_site_websocket_hijacking at ws://t.invalid/socket"
+
+
+def test_spine_mirror_builders_leave_a_confirmed_builtin_check_unchanged():
+    # A built-in point check sets NEITHER title NOR severity -> both builders synthesize the SAME
+    # "<bug_class> confirmed at <param>" title at the class-table High. This confirmed finding is
+    # legitimately High and must stay High through both builders.
+    f = _finding("boolean_sqli", "https://t.invalid/x", 0.99)
+    auto = auto_mod._finding_payload(f)
+    mirror = engage_mod._spine_finding_payload(f, None)
+
+    assert auto["title"] == mirror["title"] == "boolean_sqli confirmed at boolean_sqli"
+    assert auto["severity"] == mirror["severity"] == "High"
