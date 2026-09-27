@@ -139,8 +139,9 @@ Adapters live in `eval/adapters.py` + `eval/adapters_ext.py`.
 The self-contained labelled app has **11 planted bugs** (reflected XSS, boolean-blind
 SQLi, error-based SQLi, open redirect, path traversal, SSTI, host-header injection,
 CORS-with-credentials, and three exposures: `.git/config`, `.env`, Spring
-`/actuator/env`) plus **5 safe controls** (`/profile`, `/api/health`, `/download`,
-`/greeting`, `/support`) that must never be flagged. From the committed
+`/actuator/env`) plus **6 safe controls** (`/users/safe`, `/profile`, `/api/health`,
+`/download`, `/greeting`, `/support`) that must never be flagged — `/users/safe` is the
+parameterised twin of the boolean-SQLi endpoint. From the committed
 `benchmark-comparative.json` (this host — sqlmap 1.10.6, Wapiti 3.2.10, Nikto 2.6.0):
 
 | tool | tp | fp | fn | precision | recall | f1 | time_s | requests | rss_mb |
@@ -149,6 +150,21 @@ CORS-with-credentials, and three exposures: `.git/config`, `.env`, Spring
 | sqlmap | 0 | 0 | 11 | 0.000 | 0.000 | 0.000 | ~1 | n/r | ~103 |
 | wapiti | 2 | **7** | 9 | 0.222 | 0.182 | 0.200 | ~12–16 | n/r | ~48 |
 | nikto | 0 | **8** | 11 | 0.000 | 0.000 | 0.000 | ~9 | n/r | n/r |
+
+> **Re-baseline note.** The signed snapshot above is the run that produced it and is
+> left byte-intact. Its corpus modelled boolean-blind SQLi at `/users?name` with two
+> REGEXES that only understand literal equality: of the seven syntactically-varied
+> always-TRUE/always-FALSE clause shapes a sound detector sends, 1 of 7 partitioned it,
+> so the only detector it rewarded was the bare benign-vs-payload differential — the one
+> measured minting `boolean_sqli` at rate 1.0 against targets with **no database**.
+> `/users?name` is now a real sqlite3 engine with a concatenated `WHERE` clause (**7 of 7**
+> shapes partition), the gate scores it with the sound SPRT `BooleanInferenceCheck`, and
+> `/users/safe` is the parameterised twin that must never fire (**0 of 7**). Accuracy did
+> not move — the current gate row is still **11 / 0 / 0**, and the signed
+> `recall-accuracy-core.json` still reproduces byte-identically — but the request budget
+> was deliberately re-baselined **1069 -> 1544** (+114 twin surface, -320 dropped library
+> boolean differentials, +682 SPRT). `test_gate_invariants.py` carries the line-by-line
+> accounting.
 
 Read the **fp column**, not the tp column: it is the unambiguous one. CRUCIBLE's 0
 is the differentiator. The recall/precision of incumbents is depressed partly by

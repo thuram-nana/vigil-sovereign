@@ -31,6 +31,12 @@ import subprocess
 from pathlib import Path
 
 from ..scanner.campaign import WebScanCampaign
+from ..scanner.checks import (
+    BOOLEAN_SQLI,
+    DEFAULT_CHECKS,
+    BooleanInferenceCheck,
+    boolean_clause_families,
+)
 from ..scanner.cli import loopback_send
 from ..scanner.insertion import InsertionKind
 from ..scanner.library import load_library
@@ -52,6 +58,63 @@ from .validation import (
 
 # CRUCIBLE's stated precision target for this benchmark (the success criterion).
 PRECISION_TARGET = 0.98
+
+# ---------------------------------------------------------------------------
+# The gate profile's SOUND boolean detector.
+# ---------------------------------------------------------------------------
+#
+# The corpus is the invariant every other slice is measured against, so it must be
+# scored by a detector whose FACT means what it says. A bare benign-vs-payload
+# DifferentialCheck ("one benign string came back different from one payload string")
+# is not that: it has no truth-value ATTRIBUTION step, and it was measured minting High
+# ``boolean_sqli`` at rate 1.0 against a STATIC page behind a WAF tautology rule and
+# against strict input validation — on targets with NO DATABASE. Scoring the corpus with
+# it meant the gate certified that an UNSOUND oracle still fires.
+#
+# ``BooleanInferenceCheck`` is the sound one: an SPRT whose per-round signal is a
+# truth-value attribution test over ``_BOOLEAN_FAMILY`` — seven DISTINCT, syntactically
+# VARIED always-TRUE clauses and their seven length-matched always-FALSE twins, each sent
+# twice byte-identically. It signals only when every TRUE response agrees with every other
+# TRUE response, every FALSE with every FALSE, and the two clusters are disjoint. Family 0
+# is the single-quote string-literal breakout — the context the planted ``/users?name``
+# sink actually has (``... WHERE name = '<value>'``).
+#
+# ``_GATE_CHECKS`` is DEFAULT_CHECKS with the bare ``BOOLEAN_SQLI`` differential swapped
+# out for it, and ``_sound_library`` additionally drops the library's 21 differential
+# ``boolean_sqli`` entries, which are the same unsound shape in declarative form. Without
+# that second half the swap is cosmetic: a library differential would confirm at the same
+# location and the scorer would dedupe it into the same single TP, so the gate would still
+# pass with the sound detector silent.
+#
+# Scope: this changes WHICH DETECTOR SCORES THE CORPUS. It adds no oracle, defines no new
+# OracleKind, relaxes no gate, and touches no other class's roster — every non-boolean
+# entry, built-in and declarative, is passed through untouched.
+_BOOLEAN_FAMILY: tuple[tuple[str, ...], tuple[str, ...]] = boolean_clause_families()[0]
+
+BOOLEAN_SQLI_SOUND = BooleanInferenceCheck(
+    id="boolean-sqli-sprt",
+    bug_class="boolean_sqli",
+    true_clauses=_BOOLEAN_FAMILY[0],
+    false_clauses=_BOOLEAN_FAMILY[1],
+    # The corpus endpoints are deterministic, so the SPRT crosses a boundary in two
+    # rounds; 6 bounds the traffic on a surface that never signals without pre-empting
+    # a decision on one that does (the default 24 would only add refuted rounds).
+    n_max=6,
+)
+
+_GATE_CHECKS: tuple = tuple(
+    BOOLEAN_SQLI_SOUND if c is BOOLEAN_SQLI else c for c in DEFAULT_CHECKS
+)
+
+
+def _sound_library(entries: list) -> list:
+    """Drop the declarative ``boolean_sqli`` DIFFERENTIAL entries — the same unsound
+    single-shot shape as ``BOOLEAN_SQLI``, of which the shipped library carries 21.
+    Every other entry (including every other class's differential) is untouched."""
+    return [
+        e for e in entries
+        if not (e.bug_class == "boolean_sqli" and e.oracle.kind == "differential")
+    ]
 
 # The engagement PROFILES the benchmark can run under, mirroring engage.py's
 # ``--profile {surface,deep,full}`` (engage.py::_PROFILE_FLAGS). ``surface`` is the
@@ -155,8 +218,10 @@ class BenchmarkCrucibleAdapter(CrucibleAdapter):
                 f"BenchmarkCrucibleAdapter is loopback-only; refusing {target.base_url!r}."
             )
         # The shipped library minus the timing entries: every benchmark bug is
-        # response-visible, so a statistical time-based sweep only adds latency.
-        entries = [e for e in load_library() if e.oracle.kind != "timing"]
+        # response-visible, so a statistical time-based sweep only adds latency. The
+        # unsound boolean differentials come out too — the SPRT check below is the one
+        # detector allowed to decide the corpus's boolean_sqli column.
+        entries = _sound_library([e for e in load_library() if e.oracle.kind != "timing"])
         # surface = today's exact behaviour; a non-surface profile UNIONS in the
         # opt-in passes (never removes one) — a pure roster expansion.
         roster = dict(_PROFILE_ROSTER[self._profile])
@@ -168,6 +233,7 @@ class BenchmarkCrucibleAdapter(CrucibleAdapter):
             enable_oob=False,
             use_library=True,
             library_entries=entries,
+            checks=_GATE_CHECKS,
             enable_domxss=True,
             enable_browser_xss=roster.get("enable_browser_xss", self._use_browser),
             enable_spa_crawl=roster.get("enable_spa_crawl", self._use_browser),
@@ -247,8 +313,11 @@ def write_report(
     lines.append("(reflected XSS, boolean-blind SQLi, error-based SQLi, open redirect,")
     lines.append("path traversal, SSTI, host-header injection, CORS-with-credentials, and")
     lines.append("three exposures: `.git/config`, `.env`, and Spring `/actuator/env`) plus")
-    lines.append("five SAFE endpoints (`/profile`, `/api/health`, `/download`, `/greeting`,")
-    lines.append("`/support`) that must never be flagged. Because the")
+    lines.append("six SAFE endpoints (`/users/safe`, `/profile`, `/api/health`, `/download`,")
+    lines.append("`/greeting`, `/support`) that must never be flagged — `/users/safe` is the")
+    lines.append("PARAMETERISED twin of the boolean-SQLi endpoint (same engine, same table,")
+    lines.append("bound parameter), so it is the negative control that gives the boolean")
+    lines.append("FACT its meaning. Because the")
     lines.append("ground truth is complete, anything a tool reports off-manifest is a")
     lines.append("false positive **by construction** — that is what makes the FP column honest.")
     lines.append("")
@@ -363,7 +432,7 @@ def write_json_report(measured: list[MeasuredBoard], path: str | Path) -> Path:
     p = Path(path).expanduser()
     doc = {
         "tool": "CRUCIBLE",
-        "corpus": "in-process benchmark app (11 planted bugs, 5 safe controls)",
+        "corpus": "in-process benchmark app (11 planted bugs, 6 safe controls)",
         "matcher": "(normalized bug_class family, path+parameter); greedy 1-1; "
                    "off-manifest detections are false positives by construction",
         "incumbent_versions": _incumbent_versions(),

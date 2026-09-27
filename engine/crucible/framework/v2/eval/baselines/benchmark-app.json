@@ -1,5 +1,5 @@
 {
-  "label": "in-process benchmark app (11 planted bugs, 5 safe controls)",
+  "label": "in-process benchmark app (11 planted bugs, 6 safe controls)",
   "scores": {
     "benchmark-app": {
       "crucible": {

@@ -13,9 +13,43 @@ byte-identical. Two things must never move without a deliberate, reviewed change
      name-pinned twin that survives even if the enum or the arithmetic is refactored.)
 
   2. The in-process benchmark tally is byte-identical: crucible tp=11, fp=0, fn=0, precision=recall=
-     f1=1.0, 1069 requests, 11 findings reported — the exact row `make gate` prints and gates on.
+     f1=1.0, 1544 requests, 11 findings reported — the exact row `make gate` prints and gates on.
      (TRUTHENOVATION-M1 #213 deliberately broadened the corpus 9->11 bugs — adding SSTI + host-header —
      and re-baselined the gate; the frozen row moved 9/853/9 -> 11/1069/11 with it.)
+
+     The COST half of that row was re-baselined a second time, 1069 -> 1544, deliberately. The
+     ACCURACY half did NOT move: 11/0/0 held through the change, and the signed
+     ``eval/baselines/recall-accuracy-core.json`` still reproduces BYTE-IDENTICALLY (sha256
+     01c1728c…) and still verifies against its pinned trust root — nothing signed was re-signed,
+     because the request count is deliberately NOT in the signed accuracy bytes.
+
+     WHY the cost moved. The corpus used to model boolean-blind SQLi at ``/users?name`` with two
+     REGEXES over a `` OR ``-split string, which only understand LITERAL EQUALITY. Measured against
+     the seven syntactically-varied always-TRUE/always-FALSE clause shapes a SOUND detector sends
+     (``scanner.checks.boolean_clause_families``), exactly 1 of 7 partitioned the fixture and the
+     other six collapsed onto the same 118-byte body. The only detector that fixture rewarded was
+     the bare benign-vs-payload DIFFERENTIAL — the one separately measured minting High
+     ``boolean_sqli`` at rate 1.0 against a static page behind a WAF tautology rule, on targets with
+     NO DATABASE. So this row had been certifying that an UNSOUND oracle still fires. ``/users?name``
+     is now a real sqlite3 engine with a concatenated WHERE clause (7 of 7 shapes partition), the
+     gate scores it with the sound SPRT ``BooleanInferenceCheck``, and ``/users/safe`` is the
+     parameterised twin that must never fire (0 of 7).
+
+     The +475 reported (+476 counted) is accounted for line by line, so a real regression is still
+     distinguishable from this re-baseline:
+       +114  the NEW ``/users/safe`` twin becomes an 11th param surface, audited like the other
+             safe controls (82 base + 32 library-boolean sends).
+       -320  the 21 declarative library ``boolean_sqli`` DIFFERENTIAL entries are dropped from the
+             gate roster: -32 on each of the 10 non-vulnerable param surfaces (on ``/users`` they
+             already short-circuited at the first confirm, so 0 there).
+       +682  the bare 2-send ``DifferentialCheck`` is replaced by the SPRT on all 11 param
+             surfaces: +62 each = 8 determinism pre-gate sends + 2 SPRT rounds x 28 byte-identical
+             probes (64), less the 2 sends the differential used.
+       -----
+       +476  counted; the reported ``requests_sent`` is +475 because it excludes one discovery
+             fetch per surface and the corpus gained exactly one surface.
+     The new sqlite3 fixture itself costs ZERO extra requests (``/users`` sat at 82 sends both
+     before and after, with the detector held fixed).
 
 Colocated with ``test_gate_byte_identical.py`` under ``aegis/tests/`` so ``make test`` collects it.
 """
@@ -163,5 +197,5 @@ def test_benchmark_tally_is_byte_identical(crucible_measured):
 
 def test_benchmark_cost_row_is_byte_identical(crucible_measured):
     m = crucible_measured.metrics
-    assert m.requests_sent == 1069, f"request budget drifted: {m.requests_sent} (gate requires 1069)"
+    assert m.requests_sent == 1544, f"request budget drifted: {m.requests_sent} (gate requires 1544)"
     assert m.findings_reported == 11, f"findings reported drifted: {m.findings_reported} (gate requires 11)"

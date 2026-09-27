@@ -11,8 +11,10 @@ SPREAD of real, distinct, deterministic web bugs, each at a known location, plus
 Design rules that make the numbers trustworthy:
 
   * **Every planted bug is real.** The XSS reflects an attacker payload verbatim
-    into executable HTML; the boolean SQLi dumps every row for a tautology and
-    none for a benign term; the error-based SQLi echoes a real MySQL parser error
+    into executable HTML; the boolean SQLi concatenates the parameter into a REAL
+    sqlite3 ``WHERE`` clause, so an always-true clause of ANY comparison shape dumps
+    every row and its length-matched always-false twin dumps none; the error-based
+    SQLi echoes a real MySQL parser error
     on a quote; the open redirect reflects a parameter into a 302 ``Location``;
     the CORS endpoint reflects a hostile ``Origin`` with credentials; ``.git/config``,
     ``.env`` and the Spring ``/actuator/env`` leak their signature secrets.
@@ -24,7 +26,9 @@ Design rules that make the numbers trustworthy:
     pure XSS sink), and the error page embeds its DB error inside a large static
     body so the boolean differential stays below threshold.
   * **The SAFE endpoints take input and handle it correctly** — a parameterised
-    profile lookup, a constant health endpoint, an allow-listed download, an
+    TWIN of the boolean-SQLi endpoint (same engine and table, bound parameter), a
+    parameterised profile lookup, a constant health endpoint, an allow-listed
+    download, an
     auto-escaping template, and an ordinary benign page — so a tool that flags them
     is measurably wrong. They are the false-positive ruler for the param-level
     checks. The two HOST-level classes (CORS, host-header) are anchored on the seed
@@ -52,6 +56,7 @@ import re
 import secrets
 import socket
 import socketserver
+import sqlite3
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -401,10 +406,31 @@ window.addEventListener('message', function(ev){
 CSP_STATIC_NONCE = "crucibleStaticNonce2024"
 
 # ---------------------------------------------------------------------------
-# The boolean-blind SQLi model (a faithful reuse of the vulnerable matcher from
-# verify.confirmation): user input is string-built into ``name = '<q>'`` and split
-# on `` OR ``, so an `` ' OR '1'='1`` tautology breaks out and selects every row,
-# while any benign term selects none. This is a REAL, observable differential.
+# The boolean-blind SQLi model: a REAL sqlite3 engine behind a WHERE clause that
+# is built by STRING CONCATENATION, so the planted bug is a genuine boolean-
+# inference channel, not a stand-in for one.
+#
+# This used to be two regexes (``name = '(.*)'`` and ``'(.*)'\s*=\s*'(.*)'``)
+# over a `` OR ``-split string. That modelled the vulnerability WRONGLY, and the
+# error was load-bearing: the regexes only understand LITERAL EQUALITY, so of the
+# seven syntactically-varied always-TRUE / always-FALSE clause shapes a SOUND
+# boolean detector sends (``=``, ``>``, a compound ``AND``, ``LIKE``, ``<>``,
+# ``BETWEEN``, ``IN (SELECT …)`` — see ``scanner.checks.boolean_clause_families``)
+# exactly ONE partitioned the fixture; the other six collapsed onto the same
+# 118-byte "no results" body. That is not a database — it is the same shape a
+# ModSecurity CRS-942130 tautology rule in front of a STATIC page presents, and
+# the only detector it rewards is the bare benign-vs-payload DIFFERENTIAL, which
+# is exactly the detector measured to mint High ``boolean_sqli`` at rate 1.0
+# against targets with NO DATABASE. The fixture was certifying an unsound oracle.
+#
+# A real engine removes the artifact: every comparison a SQL engine understands
+# now partitions the response, so ANY sound clause family confirms, and no
+# shape-matching interposer can imitate it.
+#
+# The DB is built per request in a fresh ``:memory:`` connection — deterministic,
+# offline, dependency-free (sqlite3 is stdlib), thread-safe under
+# ``ThreadingHTTPServer`` (no connection is shared across threads), and stateless
+# (nothing a probe does can carry into the next request).
 # ---------------------------------------------------------------------------
 
 _ROWS: tuple[dict[str, object], ...] = (
@@ -413,32 +439,77 @@ _ROWS: tuple[dict[str, object], ...] = (
     {"id": 3, "name": "carol", "role": "user", "email": "carol@corp.example"},
 )
 
-_CLAUSE_NAME = re.compile(r"name = '(.*)'")
-_CLAUSE_TAUTOLOGY = re.compile(r"'(.*)'\s*=\s*'(.*)'")
+_USERS_DDL = "CREATE TABLE users (id INTEGER, name TEXT, role TEXT, email TEXT)"
 
 
-def _clause_true(clause: str, name: str) -> bool:
-    m = _CLAUSE_NAME.fullmatch(clause)
-    if m:
-        return name == m.group(1)
-    m = _CLAUSE_TAUTOLOGY.fullmatch(clause)
-    if m:
-        return m.group(1) == m.group(2)
-    return False
+def _users_db() -> sqlite3.Connection:
+    """A fresh in-memory ``users`` table holding exactly :data:`_ROWS`."""
+    con = sqlite3.connect(":memory:")
+    con.execute(_USERS_DDL)
+    con.executemany(
+        "INSERT INTO users VALUES (?,?,?,?)",
+        [(r["id"], r["name"], r["role"], r["email"]) for r in _ROWS],
+    )
+    return con
+
+
+def _rows(cursor_rows: list[tuple]) -> list[dict[str, object]]:
+    return [{"id": i, "name": n, "role": ro, "email": e} for i, n, ro, e in cursor_rows]
+
+
+# The vulnerable statement. The value is concatenated into a PARENTHESISED predicate,
+# and the parenthesis is load-bearing for the corpus's "every planted bug is
+# SINGLE-CLASS" rule (module docstring) — the same deliberate single-classing that keeps
+# /search reflecting only markup-shaped input and buries /product's DB error in a large
+# static page.
+#
+# A parenthesised predicate is an ordinary way to write this statement, and it leaves the
+# endpoint genuinely injectable: every clause that closes its own quote and does NOT
+# comment out the rest of the statement — which is every shape a sound boolean detector
+# sends (``=``, ``>``, a compound ``AND``, ``LIKE``, ``<>``, ``BETWEEN``,
+# ``IN (SELECT …)``) — evaluates inside the parentheses and partitions the response.
+# What it does not admit is a COMMENT-TERMINATED payload (``' OR '1'='1'-- -``,
+# ``admin'--``): ``--`` swallows the closing ``)`` as well, so the statement is a syntax
+# error, zero rows come back, and the endpoint reads as exactly ONE class (boolean-blind
+# SQLi) instead of ALSO tripping the declarative SQL-auth-bypass probes at the same
+# location. An attacker who wanted the comment form here would simply write
+# ``') OR 1=1-- -``; nothing about the bug is weaker — only its label at this location is
+# unambiguous, which is what an honest manifest needs.
+#
+# ORDER BY pins the row order, so every always-TRUE clause returns a BYTE-IDENTICAL body:
+# the agreement half of the truth-value attribution test the SPRT runs.
+_USERS_SELECT_VULN = "SELECT id, name, role, email FROM users WHERE (name = '{q}') ORDER BY id"
+_USERS_SELECT_SAFE = "SELECT id, name, role, email FROM users WHERE (name = ?) ORDER BY id"
 
 
 def _vulnerable_match(q: str) -> list[dict[str, object]]:
-    """Deliberately flawed: builds ``name = '<q>'`` by concatenation, so a
-    `` ' OR '1'='1`` clause is an always-true tautology that returns every row."""
-    stmt = "name = '" + q + "'"
-    clauses = [c.strip() for c in stmt.split(" OR ")]
-    return [row for row in _ROWS if any(_clause_true(c, row["name"]) for c in clauses)]
+    """PLANTED BUG. ``q`` is CONCATENATED into the WHERE clause and handed to a real SQL
+    engine, so the result set — and hence the response — is a function of the injected
+    expression's TRUTH VALUE for every comparison shape SQL understands. That is a
+    genuine boolean-inference channel: no payload-shape matcher can imitate it, because
+    an always-TRUE clause and its length-matched always-FALSE twin are the SAME shape and
+    differ only in truth value. A syntax error returns no rows and is never rendered, so
+    this endpoint cannot also read as error-based SQLi."""
+    con = _users_db()
+    try:
+        return _rows(con.execute(_USERS_SELECT_VULN.replace("{q}", q)).fetchall())
+    except sqlite3.Error:
+        return []
+    finally:
+        con.close()
 
 
 def _safe_match(q: str) -> list[dict[str, object]]:
-    """The parameterised twin: ``q`` is bound as a literal value, never structure,
-    so no tautology can widen the result set (the SAFE control)."""
-    return [row for row in _ROWS if row["name"] == q]
+    """The PARAMETERISED twin over the SAME engine, the SAME table and the SAME statement
+    shape: ``q`` is BOUND as a value, never structure, so no clause of any shape can widen
+    the result set. Every always-TRUE and every always-FALSE probe lands on the identical
+    "No results found." body, so the boolean channel does not exist here. This is the
+    negative control that makes the planted bug's confirmation mean something."""
+    con = _users_db()
+    try:
+        return _rows(con.execute(_USERS_SELECT_SAFE, (q,)).fetchall())
+    finally:
+        con.close()
 
 
 # ---------------------------------------------------------------------------
@@ -1232,6 +1303,7 @@ class BenchmarkHandler(BaseHTTPRequestHandler):
                 ("/redirect?url=/", "Continue"),
                 ("/file?name=manual.txt", "Docs"),
                 ("/render?name=guest", "Dashboard"),
+                ("/users/safe?name=guest", "User lookup (safe twin)"),
                 ("/profile?name=guest", "Profile (safe)"),
                 ("/api/health?check=all", "Health (safe)"),
                 ("/download?file=manual.pdf", "Download (safe)"),
@@ -1274,10 +1346,11 @@ class BenchmarkHandler(BaseHTTPRequestHandler):
             body = f"<h2>Search</h2><p>Showing results for the term <b>widgets</b>.</p>"
         self._respond(200, _page("Search", body))
 
-    def _users(self) -> None:
-        # PLANTED BUG (boolean-blind SQLi): a tautology dumps every row, a benign
-        # term dumps none — an observable status/length/lexical differential.
-        rows = _vulnerable_match(self._query("name"))
+    @staticmethod
+    def _users_body(rows: list[dict[str, object]]) -> bytes:
+        """The ONE rendering both /users and /users/safe use, so the vulnerable
+        route and its parameterised twin are byte-identical surfaces that differ in
+        exactly one thing: whether the WHERE clause is concatenated or bound."""
         if not rows:
             body = "<h2>User lookup</h2><p>No results found.</p>"
         else:
@@ -1286,7 +1359,19 @@ class BenchmarkHandler(BaseHTTPRequestHandler):
                 for r in rows
             )
             body = f"<h2>User lookup</h2><ul>{items}</ul>"
-        self._respond(200, _page("Users", body))
+        return _page("Users", body)
+
+    def _users(self) -> None:
+        # PLANTED BUG (boolean-blind SQLi): the `name` value is CONCATENATED into a
+        # real sqlite3 WHERE clause (_vulnerable_match), so the row set — and hence
+        # the response — is a function of the injected expression's TRUTH VALUE for
+        # every comparison shape SQL understands. An always-TRUE clause of ANY shape
+        # dumps every row; its length-matched always-FALSE twin dumps none. That is
+        # what makes this a sound boolean-inference channel rather than a payload-
+        # shape stand-in, and it is what BooleanInferenceCheck's SPRT attributes.
+        # Input is never reflected and a syntax error is swallowed, so no XSS /
+        # error-based / reflection check can co-fire: still single-class by design.
+        self._respond(200, self._users_body(_vulnerable_match(self._query("name"))))
 
     def _product(self) -> None:
         # PLANTED BUG (error-based SQLi): a quote/backtick provokes a real MySQL
@@ -1331,6 +1416,17 @@ class BenchmarkHandler(BaseHTTPRequestHandler):
             r = rows[0]
             body = f"<h2>Profile</h2><p>Role: {r['role']}. Member in good standing.</p>"
         self._respond(200, _page("Profile", body))
+
+    def _users_safe(self) -> None:
+        # SAFE TWIN of /users — the SAME sqlite3 engine, the SAME table, the SAME
+        # rendering, differing in exactly one thing: the value is BOUND as a
+        # parameter (`WHERE name = ?`) instead of concatenated. No clause of any
+        # shape can alter the query's structure, so every always-TRUE and every
+        # always-FALSE probe lands on the identical "No results found." body and the
+        # truth-value partition does not exist. This is the negative control that
+        # makes the planted bug's confirmation mean something: a detector that fires
+        # on /users but not here is reading the INJECTION, not the payload's shape.
+        self._respond(200, self._users_body(_safe_match(self._query("name"))))
 
     def _health(self) -> None:
         # SAFE: constant response, input ignored.
@@ -1479,6 +1575,7 @@ _ROUTES = {
     "/product": BenchmarkHandler._product,
     "/redirect": BenchmarkHandler._redirect,
     "/render": BenchmarkHandler._render,
+    "/users/safe": BenchmarkHandler._users_safe,
     "/profile": BenchmarkHandler._profile,
     "/api/health": BenchmarkHandler._health,
     "/download": BenchmarkHandler._download,
@@ -1614,9 +1711,14 @@ def benchmark_corpus(base_url: str) -> CorpusTarget:
     two host/endpoint-level classes (CORS, exposures) as the ``request:<check-id>``
     token CRUCIBLE emits for a request-level finding.
 
-    Eleven planted bugs; the five SAFE endpoints (``/profile``, ``/api/health``,
-    ``/download``, ``/greeting``, ``/support``) are intentionally absent — anything a
-    tool reports on them is a false positive by construction."""
+    Eleven planted bugs; the six SAFE endpoints (``/users/safe``, ``/profile``,
+    ``/api/health``, ``/download``, ``/greeting``, ``/support``) are intentionally
+    absent — anything a tool reports on them is a false positive by construction.
+
+    ``/users/safe`` is the parameterised twin of the planted boolean-SQLi at
+    ``/users?name``: same engine, same table, same rendering, bound parameter. It is
+    the negative control the boolean FACT is measured against — a detector that fires
+    there is reading a payload's SHAPE rather than an injection."""
     expected = [
         ExpectedFinding(bug_class="xss", location="/search?q"),
         ExpectedFinding(bug_class="boolean_sqli", location="/users?name"),
@@ -1638,9 +1740,11 @@ def benchmark_corpus(base_url: str) -> CorpusTarget:
             "Self-contained labelled benchmark: reflected XSS, boolean-blind SQLi, "
             "error-based SQLi, open redirect, path traversal, SSTI (server-side "
             "template evaluation), host-header injection, CORS-with-credentials, and "
-            "three exposures (.git/config, .env, Spring /actuator/env), plus five SAFE "
-            "controls (/profile, /api/health, /download, /greeting, /support) that "
-            "must not be flagged."
+            "three exposures (.git/config, .env, Spring /actuator/env), plus six SAFE "
+            "controls (/users/safe, /profile, /api/health, /download, /greeting, "
+            "/support) that must not be flagged. /users/safe is the PARAMETERISED "
+            "twin of the boolean-SQLi endpoint — same sqlite3 engine, same table, "
+            "same rendering, bound parameter instead of a concatenated one."
         ),
     )
 
