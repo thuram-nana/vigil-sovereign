@@ -508,6 +508,7 @@ jobs:
               integration/tests/test_web_redrive_proof_sink.py \
               integration/tests/test_engine_web_redrive_seam.py \
               integration/tests/test_engine_runtime_redrive_seam.py \
+              integration/tests/test_runtime_redrive_soundness.py \
               integration/tests/test_stored_xss_redrive.py \
               integration/tests/test_proto_pollution_redrive.py \
               integration/tests/test_ssi_redrive.py \
