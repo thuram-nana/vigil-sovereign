@@ -78,3 +78,74 @@ def test_certificate_stamps_and_signs_the_version(monkeypatch, tmp_path):
     from framework.v2.evidence.canonical import canonical_json
     cert0 = build_certificate({"check_id": "f0", "oracle_context": {}})
     assert cert0.oracle_version == "" and b"oracle_version" not in canonical_json(cert0.model_dump(mode="json"))
+
+
+# ---------------------------------------------------------------------------
+# AUDIT — THE CLASS HOLE in the reachable-source closure.
+#
+# `_reachable_source_blob` promises "every module-level helper FUNCTION, CLASS and
+# constant reachable from `fns` ... the entry function alone no longer hides a
+# changed procedure". Before this slice the walk followed only
+# `types.FunctionType`, so `reflection_context_oracle` -> `_ReflectionScanner`
+# stopped dead at the class. MEASURED at 9bc3e632: mutating `_js_scan`,
+# `_ReflectionScanner.handle_data`, `_ReflectionScanner.handle_starttag`,
+# `_EVENT_HANDLER_ATTRIBUTES` or `_INERT_TEXT_CONTAINERS` left
+# `oracle_version(reflection_context)` BYTE-IDENTICAL, while editing one prose
+# string in the entry function's own body changed it. The version tracked the
+# PROSE and missed the PROCEDURE — the exact inversion the identity exists to
+# prevent, and it would have let every fix in this slice ship invisibly.
+# ---------------------------------------------------------------------------
+
+
+def _reflection_version() -> str:
+    oracle_version.cache_clear()
+    try:
+        return oracle_version(OracleKind.REFLECTION_CONTEXT)
+    finally:
+        oracle_version.cache_clear()
+
+
+def test_a_class_based_decision_procedure_is_inside_the_version_closure(monkeypatch):
+    """The scanner CLASS's own source must be in the blob."""
+    from framework.v2.verify import oracles
+
+    blob = ov._reachable_source_blob(ov._ORACLE_FNS[OracleKind.REFLECTION_CONTEXT]).decode()
+    assert "class _ReflectionScanner" in blob, "the scanner class is invisible to the version"
+    assert "def handle_data" in blob, "the scanner's decision method is invisible to the version"
+    assert "def _js_scan" in blob, "the JS lexer, reached only via the class, is invisible"
+    for const in ("_EVENT_HANDLER_ATTRIBUTES", "_INERT_TEXT_CONTAINERS", "_JS_MIME_ESSENCES"):
+        assert f"{const}=" in blob, f"{const} is invisible to the version"
+        assert getattr(oracles, const), f"{const} is empty — the assertion above would be vacuous"
+
+
+def test_editing_a_class_method_changes_the_version(monkeypatch):
+    """The behavioural half: a change to the class's decision method must move the
+    version. Asserted by swapping the class for a mutated subclass, so it holds
+    without touching the file on disk."""
+    from framework.v2.verify import oracles
+
+    before = _reflection_version()
+
+    class _Mutated(oracles._ReflectionScanner):          # noqa: SLF001 - pinning the closure
+        def handle_data(self, data: str) -> None:        # a DIFFERENT decision procedure
+            return None
+
+    monkeypatch.setattr(oracles, "_ReflectionScanner", _Mutated)
+    after = _reflection_version()
+    assert after != before, (
+        "swapping the scanner class for one with a different handle_data left "
+        "oracle_version(reflection_context) unchanged — the class hole is back")
+
+
+def test_editing_a_class_reached_constant_changes_the_version(monkeypatch):
+    """A validation constant reached ONLY through the class must move the version.
+    `_EVENT_HANDLER_ATTRIBUTES` is referenced from `_ReflectionScanner.handle_starttag`
+    and from nowhere else in the closure."""
+    from framework.v2.verify import oracles
+
+    before = _reflection_version()
+    monkeypatch.setattr(oracles, "_EVENT_HANDLER_ATTRIBUTES",
+                        frozenset(oracles._EVENT_HANDLER_ATTRIBUTES) | {"onsomethingnew"})
+    assert _reflection_version() != before, (
+        "editing the closed handler set left the version unchanged — a changed "
+        "decision procedure would ship under an unchanged id@version")

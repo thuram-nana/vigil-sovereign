@@ -457,14 +457,35 @@ def _json_data_block(v: str) -> str:
 
 
 def _noscript_container(v: str) -> str:
-    """Raw-text container: ``<xMARKER>`` here is inert text, not a live element."""
+    """Raw-text container: ``<xMARKER>`` here is inert text, not a live element.
+
+    With scripting enabled the HTML LS gives a ``noscript`` start tag the GENERIC
+    RAW TEXT element parsing algorithm, so even a nested ``<script>`` is text.
+    Chromium 150, measured: executes nothing from inside here."""
     return f"<html><body><noscript>{v}</noscript></body></html>"
 
+
+def _template_container(v: str) -> str:
+    """AUDIT-B8. ``<template>`` was in ``_INERT_TEXT_CONTAINERS`` but had NO
+    parametrisation, so nothing exercised it. Its contents are parsed into an inert
+    ``DocumentFragment``: scripts there never run. Chromium 150, measured:
+    ``<template><script>…</script></template>`` executes nothing."""
+    return f"<html><body><template>{v}</template></body></html>"
+
+
+# AUDIT-B8 — this tuple used to OMIT the entire `script-element-injection` family,
+# which is precisely the three entries whose payloads reach `handle_data` and so
+# the only three that could reproduce B1. Emptying `_INERT_TEXT_CONTAINERS` killed
+# only two tests, both on the tag/attribute path. They are named explicitly here so
+# the omission cannot silently recur.
+_SCRIPT_ELEMENT_INJECTION = (
+    "m2-xss-script-close-reopen", "m2-xss-script-title-close", "m2-xss-script-svg-nested",
+)
 
 _ALL_BUT_CONTAINER_BREAKERS = (
     "m2-xss-tag-svg-onload", "m2-xss-tag-img-onerror", "m2-xss-script-string-break",
     "m2-xss-attr-dq-onmouseover", "m2-xss-jsurl-href",
-)
+) + _SCRIPT_ELEMENT_INJECTION
 
 @pytest.mark.parametrize(
     "render, entries, why",
@@ -473,14 +494,24 @@ _ALL_BUT_CONTAINER_BREAKERS = (
          "json_script JS-string escaping"),
         (_quot_escaped_handler, _ALL_BUT_CONTAINER_BREAKERS + ("m2-xss-tag-textarea-newtag",),
          "&quot;-escaped page-composed handler"),
-        (_json_data_block, _ALL_BUT_CONTAINER_BREAKERS + ("m2-xss-tag-textarea-newtag",),
+        # AUDIT-B8: `m2-xss-script-close-reopen` is EXCLUDED here on purpose. Its
+        # payload OPENS with `</script>`, which terminates a script element's raw
+        # text WHATEVER its `type` is, so the `<script>` it then opens is a LIVE one
+        # and the escape is REAL. Chromium 150, measured: it EXECUTES. See the
+        # companion assertion below. The other two script-element entries do NOT
+        # escape (`</title>` and `<svg>` are not script-data terminators) and are
+        # measured inert, so they stay in the set.
+        (_json_data_block,
+         tuple(e for e in _ALL_BUT_CONTAINER_BREAKERS if e != "m2-xss-script-close-reopen")
+         + ("m2-xss-tag-textarea-newtag",),
          "non-executable application/json script"),
         # NOTE the entry set here EXCLUDES m2-xss-tag-textarea-newtag on purpose: its
         # payload OPENS with `</textarea></noscript>`, so it genuinely escapes the
         # container and SHOULD still confirm — see the companion assertion below.
         (_noscript_container, _ALL_BUT_CONTAINER_BREAKERS, "raw-text <noscript> container"),
+        (_template_container, _ALL_BUT_CONTAINER_BREAKERS, "inert <template> container"),
     ],
-    ids=["json_script", "quot_escaped_handler", "json_data_block", "noscript"],
+    ids=["json_script", "quot_escaped_handler", "json_data_block", "noscript", "template"],
 )
 def test_correctly_escaped_pages_never_confirm_xss(
     render: Render, entries: tuple[str, ...], why: str
@@ -490,11 +521,45 @@ def test_correctly_escaped_pages_never_confirm_xss(
         assert confirmed is None, f"{entry_id} minted a FACT against {why}"
 
 
+@pytest.mark.parametrize("render, container",
+                         [(_noscript_container, "noscript"), (_template_container, "template")],
+                         ids=["noscript", "template"])
+@pytest.mark.parametrize("entry_id", _SCRIPT_ELEMENT_INJECTION)
+def test_B1_script_element_injection_into_an_inert_container_mints_nothing(
+    entry_id: str, render: Render, container: str
+) -> None:
+    """AUDIT-B1, asserted END-TO-END through the shipped payload library, the live
+    loopback fixture and the real `confirm_finding` authority — not just the oracle.
+
+    These SIX combinations (3 shipped entries x 2 containers) all minted
+    `bug_class=xss severity=High confidence=0.9` before the fix. CHROMIUM 150,
+    measured on the same rendered bytes: 0 of 6 execute anything."""
+    confirmed = _confirm(compile_entry(_by_id(entry_id)), render)
+    assert confirmed is None, (
+        f"{entry_id} minted a High/0.9 xss FACT inside <{container}>, "
+        "which Chromium does not execute")
+
+
+def test_a_script_close_payload_still_escapes_a_json_data_block() -> None:
+    """The B1/B2 precision work must not cost the REAL escape. `</script>`
+    terminates a script element's raw text regardless of its `type`, so
+    `</script><script>…</script>` genuinely reopens a LIVE script out of a
+    `type="application/json"` block. Chromium 150, measured: EXECUTES."""
+    confirmed = _confirm(compile_entry(_by_id("m2-xss-script-close-reopen")), _json_data_block)
+    assert confirmed is not None, "lost a real escape out of a data block"
+    assert confirmed.confirmed_by is OracleKind.REFLECTION_CONTEXT
+    assert _reflection_context(confirmed) == "script"
+
+
 def test_container_escaping_payload_still_confirms_out_of_noscript() -> None:
     # the precision fix must not cost a real detection: a payload that CLOSES the
     # raw-text container genuinely reaches live markup and must still confirm.
+    # (No SHIPPED entry closes `</template>`, so the template escape is asserted
+    # directly against the oracle in
+    # verify/tests/test_structural_and_context.py::
+    # test_B1_a_payload_that_CLOSES_the_container_still_fires.)
     confirmed = _confirm(compile_entry(_by_id("m2-xss-tag-textarea-newtag")), _noscript_container)
-    assert confirmed is not None
+    assert confirmed is not None, "the <noscript> escape lost a real detection"
     assert confirmed.confirmed_by is OracleKind.REFLECTION_CONTEXT
 
 

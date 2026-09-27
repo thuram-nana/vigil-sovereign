@@ -16,6 +16,25 @@ Pure + deterministic: the hash is a stable function of the oracle source, identi
 machines holding the same source. Uses the SOURCE (not bytecode) so it is portable across Python versions —
 the reference implementation ships with source. If the source is unavailable (a frozen/zipped deployment),
 the version is the empty string and a PCF verifier reports it cannot confirm the version rather than guessing.
+
+SCOPE OF "the oracle body", STATED EXPLICITLY (AUDIT-B6). ``inspect.getsource`` returns COMMENTS AND
+DOCSTRINGS as well as code, and this module deliberately keeps them in the hash. That is defensible here
+and not an accident: across these oracles a comment or a docstring routinely IS the specification of the
+decision procedure — the precision rules, the measured false-positive shapes, the reason a set is closed.
+An edit that changes what the procedure is understood to decide should be visible to a re-verifier even
+when the AST is untouched. The direct consequence, which an operator must be told rather than left to
+discover: a DOCSTRING-ONLY edit bumps ``oracle_version`` and makes every certificate of that kind report
+"oracle version mismatch" at ``evidence/pcf.py:216``. That happened in this very slice to
+``side_effect``, whose AST body hash is byte-identical (``e099244d2b399297``) at 838e0b42, 1ccd18a5,
+9bc3e632 and here — only its prose changed.
+
+That is only acceptable while the version is ACTUALLY DETERMINISTIC. It was not: three kinds
+(``command_injection_breakout``, ``nosql_injection_breakout``, ``secret_credential_validity``) produced a
+different version per process — see ``_canon`` and ``oracles._CMD_ALT`` — which turned that loud,
+designed ``pcf.py:216`` failure into unreadable noise and made a genuine docstring bump indistinguishable
+from a hash-seed artefact. Both defects are fixed, and
+``evidence/tests/test_evidence_hardening.py::test_B6_oracle_version_is_deterministic_across_processes``
+holds the line across REAL subprocesses at differing ``PYTHONHASHSEED`` values, over every kind.
 """
 
 from __future__ import annotations
@@ -121,7 +140,35 @@ class _SourceUnavailable(Exception):
 def _canon(obj: Any) -> str:
     """A canonical, hash-stable repr of a module-level constant — ORDER-INDEPENDENT for sets/frozensets/
     dicts so the version does not depend on PYTHONHASHSEED (the version must be identical across processes
-    and machines). Falls back to ``repr`` for scalars, compiled regexes, ip_address objects, etc."""
+    and machines). Falls back to ``repr`` for scalars, compiled regexes, ip_address objects, etc.
+
+    AUDIT-B6 — ``repr`` MUST NOT BE THE FALLBACK FOR A CALLABLE. ``_is_hashable_constant`` excludes a
+    top-level callable, but a callable nested INSIDE a constant container was still reached and
+    ``repr``-ed: ``oracles._SECRET_RECOGNIZERS`` holds lambdas, so this recursed to
+    ``repr(<function <lambda> at 0x7f65…>)`` and hashed a HEAP ADDRESS. Measured:
+    ``oracle_version(secret_credential_validity)`` differed in all TEN of ten separate processes, across
+    five pinned ``PYTHONHASHSEED`` values — so every certificate of that kind was permanently
+    "oracle_version CHANGED since mint" and could never verify fully-sound. That falsifies CRUCIBLE
+    invariant 6 (determinism) for the version identity, and it turns the loud ``pcf.py:216`` failure into
+    unreadable noise.
+
+    A callable is therefore named STABLY. For a function defined in ``verify.oracles`` the name carries
+    its SOURCE, so the version still changes when the callable's behaviour changes (a lambda in a dict
+    literal yields its defining line, which is what distinguishes the sibling lambdas of one recognizer
+    row). For anything else — a builtin, a C function, a class used as a factory — only the stable
+    ``module.qualname`` is used, because embedding third-party source would make this version track
+    library versions instead of this engine's decision procedure."""
+    if callable(obj):
+        mod = getattr(obj, "__module__", None) or "?"
+        name = (getattr(obj, "__qualname__", None) or getattr(obj, "__name__", None)
+                or type(obj).__name__)
+        src = ""
+        if mod == oracles.__name__ and (inspect.isfunction(obj) or inspect.ismethod(obj)):
+            try:
+                src = "|" + inspect.getsource(obj).strip()
+            except (OSError, TypeError):
+                src = "|<source-unavailable>"
+        return f"<callable {mod}.{name}{src}>"
     if isinstance(obj, (set, frozenset)):
         return "{" + ",".join(sorted(_canon(x) for x in obj)) + "}"
     if isinstance(obj, dict):
@@ -141,10 +188,24 @@ def _is_hashable_constant(val: Any) -> bool:
 
 def _reachable_source_blob(fns: tuple[Callable[..., Any], ...]) -> bytes:
     """The canonical source of the TRANSITIVE closure the oracle's decision procedure actually depends on
-    (audit B2): every module-level helper FUNCTION and constant reachable from ``fns`` via global-name
-    references (including names used inside nested comprehensions/closures). So editing a helper body OR a
-    validation constant (an IP set, a regex, a path marker) changes the version — the entry function alone
-    no longer hides a changed procedure. Raises ``_SourceUnavailable`` if any function's source is missing."""
+    (audit B2): every module-level helper FUNCTION, CLASS and constant reachable from ``fns`` via
+    global-name references (including names used inside nested comprehensions/closures). So editing a
+    helper body OR a validation constant (an IP set, a regex, a path marker) changes the version — the
+    entry function alone no longer hides a changed procedure. Raises ``_SourceUnavailable`` if any
+    function's source is missing.
+
+    AUDIT (this slice) — THE CLASS HOLE. That promise was FALSE whenever the decision procedure lives
+    behind a CLASS, which is the common case for the HTML/JS parsing oracles. The walk followed only
+    ``types.FunctionType``, so ``reflection_context_oracle`` -> ``_ReflectionScanner`` stopped dead at the
+    class: the scanner's ``handle_data`` / ``handle_starttag`` bodies, the ``_js_scan`` lexer they call,
+    and every constant those reach (``_EVENT_HANDLER_ATTRIBUTES``, ``_INERT_TEXT_CONTAINERS``,
+    ``_JS_MIME_ESSENCES``) were ALL INVISIBLE to the version. Measured: mutating any of them left
+    ``oracle_version(reflection_context)`` byte-identical, while mutating one string in the entry
+    function's own body changed it — so the version tracked the prose and missed the procedure, which is
+    the exact inversion the identity exists to prevent. A class is now visited: its source is captured and
+    the walk continues through its methods (and their nested code objects), so the constants and helpers
+    they reference join the closure. Per CLAIM DISCIPLINE this is built up to meet the claim rather than
+    the claim softened to meet it."""
     module_ns = vars(oracles)
     module_name = oracles.__name__
     seen_fns: set[int] = set()
@@ -166,6 +227,18 @@ def _reachable_source_blob(fns: tuple[Callable[..., Any], ...]) -> bytes:
                     stack.append(const)
         return names
 
+    def _own(val: Any) -> bool:
+        return getattr(val, "__module__", None) == module_name
+
+    def _follow(name: str, val: Any) -> None:
+        if isinstance(val, types.FunctionType) and _own(val):
+            visit(val)
+        elif isinstance(val, type) and _own(val):
+            visit_class(val)
+        elif name not in seen_consts and _is_hashable_constant(val):
+            seen_consts.add(name)
+            const_reprs.append(f"{name}={_canon(val)}")
+
     def visit(fn: Callable[..., Any]) -> None:
         if id(fn) in seen_fns:
             return
@@ -178,11 +251,29 @@ def _reachable_source_blob(fns: tuple[Callable[..., Any], ...]) -> bytes:
             val = module_ns.get(name)
             if val is None:
                 continue
-            if isinstance(val, types.FunctionType) and getattr(val, "__module__", None) == module_name:
-                visit(val)
-            elif name not in seen_consts and _is_hashable_constant(val):
-                seen_consts.add(name)
-                const_reprs.append(f"{name}={_canon(val)}")
+            _follow(name, val)
+
+    def visit_class(cls: type) -> None:
+        """AUDIT — a class defined in this module IS part of the decision procedure (``_ReflectionScanner``
+        is the whole HTML/JS context decision). Capture its source and keep walking through its own
+        methods, so the helpers and constants they reference join the closure instead of being invisible."""
+        if id(cls) in seen_fns:
+            return
+        seen_fns.add(id(cls))
+        try:
+            func_srcs.append(inspect.getsource(cls))
+        except (OSError, TypeError) as exc:
+            raise _SourceUnavailable() from exc
+        for attr in sorted(vars(cls)):
+            member = vars(cls)[attr]
+            member = getattr(member, "__func__", member)          # classmethod / staticmethod
+            if not isinstance(member, types.FunctionType):
+                continue
+            for name in _names(member):
+                val = module_ns.get(name)
+                if val is None:
+                    continue
+                _follow(name, val)
 
     for fn in fns:
         visit(fn)

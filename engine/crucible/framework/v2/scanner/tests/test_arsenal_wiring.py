@@ -31,6 +31,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Iterator
 from urllib.parse import parse_qs, urlsplit
 
+import pytest
+
 from framework.v2.scanner.campaign import WebScanCampaign
 
 _AWS_KEY = "AKIAIOSFODNN7EXAMPLE"
@@ -344,6 +346,53 @@ def test_a_hanging_server_confirms_no_smuggling_through_the_arsenal() -> None:
     assert findings == [], (
         f"the arsenal promoted a timing hang to a confirmed desync FACT: "
         f"{[f.model_dump() for f in findings]}")
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="AUDIT-B5, OPEN: `SmugglingResult.lead` has NO production consumer. "
+           "`campaign.py::_smuggling_findings` does `if not r.detected: continue`, and "
+           "`detected` is now ALWAYS False, so a hang that used to surface as a "
+           "Low/UNCONFIRMED AuditFinding now surfaces as NOTHING on the scan/engage "
+           "path. That is demotion to SILENCE, not demotion to a lead, and the "
+           "smuggling module docstring says otherwise. The fix is one line in "
+           "scanner/campaign.py, which belongs to a SIBLING SLICE (/home/kali/fx-a) "
+           "and must not be edited from here: insert, immediately after "
+           "`for r in results:` (campaign.py:768), "
+           "`if r.lead: leads.append(f\"smuggling {r.technique} @ {origin_url}: probe hung "
+           "{r.probe_ms:.0f}ms vs control {r.control_ms:.0f}ms - UNCONFIRMED timing lead\")` "
+           "- exactly the shape campaign.py:958-959 already uses for graphql-dos. "
+           "This test is written to PASS the moment that lands; it is strict, so it "
+           "will fail loudly if the gap is closed and the xfail is left behind.")
+def test_B5_a_smuggling_hang_reaches_the_campaign_as_a_LEAD() -> None:
+    """AUDIT-B5 — assert the CAMPAIGN-level behaviour, not `detect()` in isolation.
+
+    The companion test above proves the arsenal does not promote a hang to a FACT.
+    That is only half the claim. The other half — that the hang still reaches a
+    human as a LEAD — was never asserted anywhere, and it is FALSE. Measured against
+    this repo's own `_hanging_server(delay=2.0)`:
+
+        direct detect()          -> lead=True for CL.TE, TE.CL, TE.CL-dupe
+        camp._smuggling_findings -> findings: []   leads: []
+
+    A test that only calls `detect()` directly cannot see that, which is precisely
+    how the gap shipped."""
+    from framework.v2.scanner.smuggling import detect
+
+    with _hanging_server(delay=2.0) as port:
+        camp = WebScanCampaign(_dummy_send, enable_arsenal=True)  # loopback -> allowed
+        findings, leads = camp._smuggling_findings(
+            [("127.0.0.1", port, f"http://127.0.0.1:{port}/")])
+        # non-vacuity control: the peer really does hang, so an empty `leads` is a
+        # wiring gap and not a fixture that failed to reproduce.
+        probes = detect("127.0.0.1", port, timeout=5.0, delay_threshold_ms=1200.0)
+    hung = [r.technique for r in probes if r.lead]
+    assert hung, f"fixture did not hang: {[r.model_dump() for r in probes]}"
+    assert findings == [], "a timing hang must still never be a FACT"
+    assert leads, (
+        f"the hang was demoted to SILENCE, not to a lead: detect() reported {hung} "
+        f"but the campaign surfaced no lead")
+    assert any("smuggling" in lead_text for lead_text in leads), leads
 
 
 def test_cswsh_confirmed_through_the_arsenal() -> None:

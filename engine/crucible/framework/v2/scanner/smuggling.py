@@ -22,6 +22,20 @@ The verifier refuses a ``baseline``/``mutated`` pair for ``request_smuggling``
 outright (``verify/verifier.py::_DIFFERENTIAL_BASELINE_REFUSED``), so nothing
 downstream can re-confirm this probe by any other route either.
 
+AUDIT-B5 — HONEST WIRING STATUS OF ``lead``; READ THIS BEFORE TRUSTING IT.
+``detect()`` does set ``lead=True`` on a hang, but **no production code reads it**
+(``grep -rn "[.]lead\\b"`` over ``scanner/`` finds only tests, plus the unrelated
+graphql-dos result at ``campaign.py:958``). ``campaign.py::_smuggling_findings``
+skips every result with ``if not r.detected: continue``, and ``detected`` is now
+ALWAYS False — so on the scan/engage path a hang that previously surfaced as a
+Low/UNCONFIRMED ``AuditFinding`` today surfaces as **NOTHING**. That is demotion to
+SILENCE, not demotion to a lead, and the paragraph above must not be read as
+claiming otherwise. It is a real, OPEN gap, tracked by the strict-xfail
+``test_B5_a_smuggling_hang_reaches_the_campaign_as_a_LEAD``
+(``scanner/tests/test_arsenal_wiring.py``), whose ``reason`` carries the exact
+one-line fix. That line lives in ``scanner/campaign.py``, which belongs to a
+sibling slice and is deliberately not edited from here.
+
 The base CL.TE / TE.CL pair only catches parsers that disagree on the *presence*
 of both headers. Real front-ends are stricter than that, so the desync usually
 hides behind an OBFUSCATED ``Transfer-Encoding`` header that one parser honours and

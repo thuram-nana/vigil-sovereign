@@ -300,6 +300,21 @@ def test_an_on_prefixed_non_handler_never_fires(attr: str) -> None:
     body = f'<html><body><div {attr}="{_MARKER}">x</div></body></html>'
     sig = reflection_context_oracle(_MARKER, body)
     assert not sig.fired, f"{attr}: fired on a non-handler attribute — {sig.evidence}"
+    assert sig.confidence == 0.0
+
+
+@pytest.mark.parametrize("attr", ["on-click", "on", "data-onclick", "title", "class"])
+def test_a_non_on_shaped_attribute_is_still_a_CONCLUSIVE_clean(attr: str) -> None:
+    """AUDIT-B4 guard-rail. The B4 fix must not swallow the decisive negative: an
+    attribute that is NOT ``on``-shaped (hyphenated, the bare ``on``, a ``data-*``
+    or an ordinary attribute) cannot possibly be an unmodelled event handler, so a
+    marker landing in it stays a CHANNEL-CONFIRMED CLEAN (``conclusive=True``, ctx
+    ``inert``). Without this assertion B4's fix could quietly turn every reflection
+    into ``inconclusive`` and nothing would notice."""
+    body = f'<html><body><div {attr}="{_MARKER}">x</div></body></html>'
+    sig = reflection_context_oracle(_MARKER, body)
+    assert not sig.fired
+    assert sig.conclusive is True, f"{attr}: lost the decisive negative"
     assert sig.observed["context"] == "inert"
 
 
@@ -334,3 +349,253 @@ def test_a_javascript_url_src_is_unaffected_by_the_script_src_rule() -> None:
     body = f'<html><body><a href="javascript:{_MARKER}">go</a></body></html>'
     sig = reflection_context_oracle(_MARKER, body)
     assert sig.fired and sig.observed["context"] == "js_attribute:href"
+
+
+# ---------------------------------------------------------------------------
+# AUDIT B1-B4 — the four defects a RED-PEN reproduced against a REAL headless
+# Chromium (`/usr/bin/chromium --headless --dump-dom`, Chromium 150) used as
+# ground truth for "does this actually execute".
+#
+# The measurement method, so it is reproducible: every probe page's injected code
+# runs `document.documentElement.setAttribute('data-gt', ['OBSIDIAN','EXEC'].join('-'))`,
+# so the sentinel string is COMPUTED at runtime and never appears in the page
+# source — a `--dump-dom` grep therefore cannot be fooled by the source bytes.
+# Each assertion below names what Chromium did.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("container", ["noscript", "template"])
+def test_B1_a_script_nested_in_an_inert_container_never_fires(container: str) -> None:
+    """AUDIT-B1 (CRITICAL). `_inert_depth` was maintained but READ ONLY in
+    `handle_starttag`; `handle_data` never consulted it. Python's `HTMLParser` has
+    RCDATA handling for textarea/title/iframe/xmp — so those were ACCIDENTALLY safe
+    — but NOT for `<noscript>` (with scripting enabled the HTML LS gives its start
+    tag the generic RAW TEXT algorithm) or `<template>` (contents live in an inert
+    `DocumentFragment`), so a nested `<script>` was reported LIVE.
+
+    CHROMIUM (measured): `<noscript><script>…</script></noscript>` and the
+    `<template>` twin execute NOTHING. ORACLE BEFORE: fired=True conf=0.90
+    ctx=script (a High/0.9 xss FACT). ORACLE NOW: non-firing, NON-CONCLUSIVE."""
+    body = (f"<html><body><{container}><script>{_MARKER}();</script>"
+            f"</{container}></body></html>")
+    sig = reflection_context_oracle(_MARKER, body)
+    assert not sig.fired, f"<{container}> minted a FACT Chromium does not execute"
+    assert sig.confidence == 0.0
+    assert sig.observed["context"] == "inert_text_container"
+    assert sig.observed["detail"] == container, "the advisory must NAME the container"
+    assert sig.conclusive is False, "an inert container is an advisory, not a clean"
+
+
+def test_B1_the_guard_does_not_cost_the_live_script_detection() -> None:
+    """Positive control for B1: the SAME script OUTSIDE any inert container is a
+    real breakout and must still mint (Chromium: EXECUTES). If the `_inert_depth`
+    guard were widened to swallow this, this dies."""
+    body = f"<html><body><script>{_MARKER}();</script></body></html>"
+    sig = reflection_context_oracle(_MARKER, body)
+    assert sig.fired and sig.confidence == 0.9
+    assert sig.observed["context"] == "script"
+
+
+@pytest.mark.parametrize("container", ["noscript", "template"])
+def test_B1_a_payload_that_CLOSES_the_container_still_fires(container: str) -> None:
+    """The B1 guard must not cost the escape case: a payload that closes the inert
+    container genuinely reaches live markup (Chromium 150, measured: EXECUTES) and
+    must still fire. Without this the fix could be "made to pass" by treating every
+    container as permanently inert."""
+    body = (f"<html><body><{container}></{container}><script>{_MARKER}();</script>"
+            "</body></html>")
+    sig = reflection_context_oracle(_MARKER, body)
+    assert sig.fired, f"closing <{container}> must restore the live verdict"
+    assert sig.observed["context"] == "script"
+
+
+@pytest.mark.parametrize("container", ["noscript", "template"])
+def test_B1_an_UNMATCHED_end_tag_does_not_cancel_the_container(container: str) -> None:
+    """AUDIT-B1, second order. The first cut of the depth bookkeeping did a plain
+    `self._inert_depth -= 1` on any inert-container end tag, so the SHIPPED payload
+    `</title><script>{marker}</script>` cancelled an enclosing `<noscript>` that was
+    never opened as a title — and the marker was reported live again. A browser
+    IGNORES an unmatched end tag. Chromium 150, measured: executes nothing."""
+    body = (f"<html><body><{container}></title><script>{_MARKER}();</script>"
+            f"</{container}></body></html>")
+    sig = reflection_context_oracle(_MARKER, body)
+    assert not sig.fired, f"an unmatched </title> cancelled <{container}>"
+    assert sig.observed["context"] == "inert_text_container"
+
+
+# (type attribute source, chromium EXECUTES?) — every row MEASURED in Chromium 150.
+_B2_TYPES = [
+    ("",                                   True,  "attribute absent"),
+    ('type=""',                            True,  "raw empty string -> classic"),
+    ('type="text/javascript"',             True,  "essence match"),
+    ('type="TEXT/JAVASCRIPT"',             True,  "essence match is case-insensitive"),
+    ('type=" text/javascript "',           True,  "essence match strips whitespace"),
+    ('type="application/javascript"',      True,  "essence match"),
+    ('type="text/livescript"',             True,  "essence match (legacy, still runs)"),
+    ('type="module"',                      True,  "module"),
+    ('type="MODULE"',                      True,  "module is case-insensitive"),
+    ('type="module" nomodule',             True,  "nomodule is IGNORED for modules"),
+    ('type="text/javascript; charset=utf-8"', False, "a parameter breaks the essence"),
+    ('type="text/javascript;charset=utf-8"',  False, "a parameter breaks the essence"),
+    ('type="text/javascript;"',            False, "a trailing ; breaks the essence"),
+    ('type=" module "',                    False, "module is matched UNSTRIPPED"),
+    ('type=" "',                           False, "whitespace-only is NOT the empty string"),
+    ('type="\t"',                          False, "whitespace-only is NOT the empty string"),
+    ('type="application/json"',            False, "data block"),
+    ('type="importmap"',                   False, "importmap is not executed as script"),
+    ('type="speculationrules"',            False, "not executed as script"),
+    ('type="text/javascript1.6"',          False, "not a JS MIME essence"),
+    ("nomodule",                           False, "nomodule on a CLASSIC script"),
+    ('nomodule="false"',                   False, "nomodule is a BOOLEAN attribute"),
+    ("NOMODULE",                           False, "attribute names are case-insensitive"),
+]
+
+
+@pytest.mark.parametrize("attrs, executes, why", _B2_TYPES,
+                         ids=[r[0] or "no-type" for r in _B2_TYPES])
+def test_B2_script_type_executability_matches_chromium(
+    attrs: str, executes: bool, why: str
+) -> None:
+    """AUDIT-B2 (CRITICAL). `_EXECUTABLE_SCRIPT_TYPES` was broader than any browser
+    in three ways, each reproduced against Chromium 150:
+
+      * `.split(";")[0]` made the test a PATTERN. The HTML LS requires a JavaScript
+        MIME type ESSENCE match (whatwg/html#3699, Chrome 69+), and a parameter
+        makes the element NON-executing. `type="text/javascript; charset=utf-8"`
+        and `type="text/javascript;charset=utf-8"` both fired at 0.90; CHROMIUM
+        RUNS NEITHER. That contradicted the file's own principle twelve lines below
+        the set: "So membership, never a pattern."
+      * `nomodule` was never checked. "Prepare the script element" returns early for
+        a classic script bearing it. `<script nomodule>` fired; CHROMIUM DOES NOT
+        RUN IT. This is the real-world legacy-fallback pattern.
+      * `type=" "` stripped to `""` and was admitted by the `""` member, but the LS
+        empty-string rule is about the RAW attribute value. CHROMIUM: `type=""`
+        executes, `type=" "` does not.
+
+    Each row here is an INDEPENDENT measurement; the `executes=True` rows are the
+    positive controls that die if the fix is over-tightened."""
+    body = f"<html><body><script {attrs}>{_MARKER}();</script></body></html>"
+    sig = reflection_context_oracle(_MARKER, body)
+    assert sig.fired is executes, (
+        f"<script {attrs}>: oracle fired={sig.fired} but Chromium executes={executes} ({why})")
+    if executes:
+        assert sig.confidence == 0.9 and sig.observed["context"] == "script"
+    else:
+        assert sig.confidence == 0.0
+        assert sig.conclusive is False, "a non-executing script is an advisory, not a clean"
+        assert sig.observed["context"] in ("script_data_block", "script_nomodule_ignored")
+
+
+def test_B2_nomodule_has_its_own_named_advisory() -> None:
+    """The `nomodule` rule must be DISTINGUISHABLE in the evidence, not folded into
+    the generic data-block message — an operator reading it has to know why."""
+    body = f"<html><body><script nomodule>{_MARKER}();</script></body></html>"
+    sig = reflection_context_oracle(_MARKER, body)
+    assert sig.observed["context"] == "script_nomodule_ignored"
+    assert "nomodule" in sig.evidence
+
+
+def test_B3_a_marker_inside_a_hashbang_comment_never_fires() -> None:
+    """AUDIT-B3. `#!` at offset 0 is a HashbangComment covering the whole first line
+    (ECMA-262 § Hashbang Comments; `node -e` agrees). The lexer had no `#!` state,
+    found no ambiguity, and reported CODE POSITION.
+
+    CHROMIUM (measured): a page whose entire payload sits on the hashbang line
+    executes NOTHING. ORACLE BEFORE: fired=True conf=0.90 ctx=script."""
+    body = f"<html><body><script>#! {_MARKER}()\n</script></body></html>"
+    sig = reflection_context_oracle(_MARKER, body)
+    assert not sig.fired, "a hashbang-commented marker minted a FACT"
+    assert sig.confidence == 0.0
+    assert sig.conclusive is False
+
+
+def test_B3_a_marker_AFTER_the_hashbang_line_still_fires() -> None:
+    """B3 is MODELLED, not merely refused — so the hashbang costs no capability.
+    CHROMIUM: the second line EXECUTES, and the oracle must still say so."""
+    body = f"<html><body><script>#!/usr/bin/env node\n{_MARKER}();\n</script></body></html>"
+    sig = reflection_context_oracle(_MARKER, body)
+    assert sig.fired, "modelling the hashbang must not swallow the next line"
+    assert sig.observed["context"] == "script"
+
+
+def test_B3_a_hashbang_inside_a_string_literal_costs_nothing() -> None:
+    """The legacy hashbang-routing shape `var r = "#!/users"` is in STRING state, so
+    neither B3 rule is reached. CHROMIUM: the following statement EXECUTES."""
+    body = (f'<html><body><script>var r = "#!/users"; {_MARKER}();</script>'
+            "</body></html>")
+    sig = reflection_context_oracle(_MARKER, body)
+    assert sig.fired and sig.observed["context"] == "script"
+
+
+def test_B3_a_misplaced_hashbang_fails_closed() -> None:
+    """`#!` away from offset 0 is a SyntaxError — the script never parses, so NOTHING
+    runs and "code position" is not a claim this lexer may make.
+    CHROMIUM (measured): executes nothing."""
+    body = f"<html><body><script>var a=1;\n#! x\n{_MARKER}();</script></body></html>"
+    sig = reflection_context_oracle(_MARKER, body)
+    assert not sig.fired
+    assert sig.observed["context"] == "script_lexer_ambiguous"
+    assert sig.observed["detail"] == "hashbang"
+    assert sig.conclusive is False
+
+
+# Real, Chromium-executed handler content attributes that the closed set was
+# missing. Found by enumerating every `on[a-z]+` IDL attribute on
+# Element/HTMLElement/HTMLBodyElement/HTMLMediaElement/SVGElement/Document/window
+# in Chromium 150, then confirming for EACH that a CONTENT attribute compiles into
+# a handler AND that dispatching the event runs the attacker-supplied body.
+_B4_RECOVERED = ["oncommand", "oncontentvisibilityautostatechange", "onmousewheel",
+                 "onscrollsnapchange", "onscrollsnapchanging"]
+
+
+@pytest.mark.parametrize("attr", _B4_RECOVERED)
+def test_B4_a_measured_real_handler_the_closed_set_was_missing_now_fires(attr: str) -> None:
+    """AUDIT-B4 (REGRESSION). CHROMIUM (measured, end-to-end): setting each of these
+    as a content attribute and dispatching its event RUNS the attacker's body. They
+    were absent from the 131-member set, so the oracle returned
+    `fired=False conclusive=True ctx=inert` and `probe_verdict` certified the probe
+    CLEAN — a true positive turned into a channel-confirmed clean."""
+    body = f'<html><body><div {attr}="{_MARKER}">x</div></body></html>'
+    sig = reflection_context_oracle(_MARKER, body)
+    assert sig.fired, f"{attr} is a Chromium-executed handler and must mint"
+    assert sig.observed["context"] == f"js_attribute:{attr}"
+
+
+def test_B4_a_closed_set_MISS_is_an_advisory_and_never_a_clean() -> None:
+    """AUDIT-B4, the SYSTEMIC half — and the point of the whole item.
+
+    The comment on `_EVENT_HANDLER_ATTRIBUTES` promises "a handler that is missing
+    from it is a MISSED detection (a non-firing advisory) — recoverable". It was
+    NOT: a non-member never called `_note(...)`, so the scan fell through to the
+    terminal `conclusive=True` branch with the evidence "marker reflected but NOT in
+    an executable context (encoded/inert)". A missed detection is acceptable; a
+    FALSE CLEAN is not.
+
+    Adding the five measured handlers above does not fix this — the NEXT handler the
+    web platform ships would reproduce it. So any `on`-SHAPED non-member is routed
+    to a non-conclusive advisory. `onfuturethinghere` stands in for that next
+    handler (Chromium, measured: it does NOT execute today — which is exactly why
+    the oracle must not FIRE on it either)."""
+    body = f'<html><body><div onfuturethinghere="{_MARKER}">x</div></body></html>'
+    sig = reflection_context_oracle(_MARKER, body)
+    assert not sig.fired, "an unmodelled shape must never mint a FACT"
+    assert sig.conclusive is False, "a closed-set MISS must NOT be a conclusive clean"
+    assert sig.observed["context"] == "unmodelled_handler_shape"
+    assert sig.observed["detail"] == "onfuturethinghere"
+
+
+def test_B4_the_miss_advisory_makes_the_probe_INCONCLUSIVE_not_clean() -> None:
+    """The B4 defect only bites through `probe_verdict`, so assert it THERE: a
+    closed-set miss must produce `inconclusive`, and a genuine inert reflection must
+    still produce `clean` (the control that dies if B4's fix is over-applied)."""
+    from framework.v2.scanner.engine import probe_verdict
+    from framework.v2.verify.models import VerificationResult
+
+    def verdict(attr: str) -> str:
+        sig = reflection_context_oracle(
+            _MARKER, f'<html><body><div {attr}="{_MARKER}">x</div></body></html>')
+        return probe_verdict(VerificationResult(confirmed=sig.fired, signals=[sig]))[0]
+
+    assert verdict("onfuturethinghere") == "inconclusive", "a closed-set miss was certified CLEAN"
+    assert verdict("title") == "clean", "the decisive negative was lost"
+    assert verdict("onclick") == "finding"
