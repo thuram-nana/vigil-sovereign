@@ -44,9 +44,12 @@ import pytest
 
 from framework.v2.scanner.checks import (
     BOOLEAN_SQLI,
+    BOOLEAN_SQLI_SPRT,
+    DEFAULT_CHECKS,
     PATH_TRAVERSAL,
     BooleanInferenceCheck,
     ContentSignatureCheck,
+    DifferentialCheck,
     boolean_clause_families,
 )
 from framework.v2.scanner.cli import loopback_send
@@ -211,6 +214,32 @@ def _serve(handler: type[BaseHTTPRequestHandler]) -> Iterator[str]:
         th.join(timeout=5)
 
 
+_MIN_CLAUSES = 7   # the shipped K_T / K_F per truth value
+
+
+def _assert_detector_really_ran(finding) -> None:
+    """A confirm is only meaningful if the SOUND detector actually produced the evidence. Assert
+    POSITIVELY, from the finding's own retained certificate, that it did: non-empty SPRT rounds,
+    each carrying the full K_T always-TRUE and K_F always-FALSE clause sets AND their
+    byte-identical determinism repeats, the determinism pre-gate samples, and only then the
+    verdict. Without this a test could pass because some OTHER oracle fired, or because the rounds
+    were empty and the oracle refused for the wrong reason."""
+    ctx = finding.oracle_context
+    assert isinstance(ctx, dict), "no retained certificate"
+    rounds = ctx.get("probe_rounds")
+    assert rounds, "the SPRT detector produced NO rounds — it did not run"
+    for i, rnd in enumerate(rounds):
+        for key in ("trues", "falses", "true_repeats", "false_repeats"):
+            assert len(rnd.get(key) or []) >= _MIN_CLAUSES, (
+                f"round {i} carries {len(rnd.get(key) or [])} {key}, expected >= {_MIN_CLAUSES}")
+    assert len(ctx.get("false_baseline_samples") or []) >= 6, (
+        "the determinism PRE-GATE samples are missing — a boolean confirm requires proving the "
+        "page is deterministic to identical input first")
+    assert ctx.get("baseline") is None and ctx.get("mutated") is None, (
+        "a boolean FACT must not rest on a bare benign-vs-payload differential")
+    assert finding.confirmed_by == OracleKind.BOOLEAN_INFERENCE.value
+
+
 def _audit(url: str, checks: tuple) -> list:
     """Run the REAL default audit engine — the same path a `framework.v2 scan` takes — and return
     the oracle-CONFIRMED findings. Nothing is stubbed: a finding here is a minted FACT."""
@@ -353,3 +382,47 @@ def test_control_costs_a_request_only_when_the_signature_is_present() -> None:
     assert len(sent) == 1
     # the non-firing probe is still RETAINED as coverage (an exercised, oracle-cleared surface)
     assert ctx is not None and ctx.observed_sink is not None
+
+
+# --------------------------------------------------------------------------------------------
+# The PRODUCER half: demoting the differential without wiring the sound detector into the default
+# roster would have been a pure capability removal on the path an operator actually runs.
+# --------------------------------------------------------------------------------------------
+
+
+def test_default_checks_carry_a_sound_boolean_producer_and_no_lead_only_differential() -> None:
+    """DEFAULT_CHECKS must contain a producer whose evidence the class's oracle can act on. A
+    DifferentialCheck for a lead-only class produces a context NOTHING can confirm, so it is dead
+    traffic; a BooleanInferenceCheck for boolean_sqli is the producer BOOLEAN_INFERENCE needs."""
+    sprt = [c for c in DEFAULT_CHECKS
+            if isinstance(c, BooleanInferenceCheck) and c.bug_class == "boolean_sqli"]
+    assert sprt, "DEFAULT_CHECKS has no sound producer for boolean_sqli"
+    assert len(sprt[0].true_clauses) >= _MIN_CLAUSES
+    assert len(sprt[0].false_clauses) >= _MIN_CLAUSES
+    assert not set(sprt[0].true_clauses) & set(sprt[0].false_clauses)
+    dead = [c for c in DEFAULT_CHECKS
+            if isinstance(c, DifferentialCheck) and c.bug_class in DIFFERENTIAL_LEAD_ONLY_CLASSES]
+    assert dead == [], f"dead differential(s) left in the default roster: {[c.id for c in dead]}"
+
+
+def test_default_roster_confirms_a_genuine_boolean_channel() -> None:
+    """The recall the demotion would otherwise have cost: a REAL sqlite3-backed boolean channel is
+    confirmed by the DEFAULT roster, via BOOLEAN_INFERENCE, with the detector proven to have run."""
+    with _serve(_GenuineBooleanSqli) as base:
+        findings = _audit(f"{base}/users?q=guest", DEFAULT_CHECKS)
+    boolean = [f for f in findings if f.bug_class == "boolean_sqli"]
+    assert boolean, "the default roster lost the TRUE positive along with the false one"
+    _assert_detector_really_ran(boolean[0])
+
+
+def test_default_roster_mints_no_boolean_fact_on_the_waf_static_page() -> None:
+    """The soundness side, through the WHOLE default roster rather than the boolean check alone."""
+    with _serve(_WafStatic) as base:
+        findings = _audit(f"{base}/search?q=hello", DEFAULT_CHECKS)
+    assert [f for f in findings if f.bug_class == "boolean_sqli"] == []
+
+
+def test_default_roster_mints_no_boolean_fact_on_strict_input_validation() -> None:
+    with _serve(_StrictValidation) as base:
+        findings = _audit(f"{base}/search?q=hello", DEFAULT_CHECKS)
+    assert [f for f in findings if f.bug_class == "boolean_sqli"] == []

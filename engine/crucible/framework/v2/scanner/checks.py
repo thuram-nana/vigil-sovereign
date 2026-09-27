@@ -1784,10 +1784,51 @@ def _emitted_url_hosts(body: str) -> list[str]:
 # class is a payload+shape declaration, not new confirmation machinery.
 # ---------------------------------------------------------------------------
 
+# LEAD-ONLY. Retained as a named symbol because the declarative library compiles the same shape
+# (21 `boolean_sqli` entries) and other rosters still reference it, but it is NOT in DEFAULT_CHECKS
+# any more: it cannot confirm `boolean_sqli` from any roster
+# (``verify.verifier.DIFFERENTIAL_LEAD_ONLY_CLASSES``), so leaving it in the default sweep spent two
+# requests per insertion point to produce evidence no oracle can act on. BOOLEAN_SQLI_SPRT below
+# replaces it.
 BOOLEAN_SQLI = DifferentialCheck(
     id="boolean-sqli", bug_class="boolean_sqli",
     benign="crucible-benign-term",
     probe_payload="x' OR '1'='1",
+)
+
+# The DEFAULT path's SOUND boolean detector — the producer half of the fix that made
+# `boolean_sqli` BOOLEAN_INFERENCE-only. Removing DIFFERENTIAL_RESPONSE from that row without this
+# would have been a pure capability removal: `DEFAULT_CHECKS` would have carried no producer of a
+# confirming oracle context for the class at all, so the default scan an operator actually runs
+# would have lost the TRUE positive along with the false one. (Measured: with the row removed and
+# this check absent, `eval.validation`'s labelled fixture scored 1/2 recall.)
+#
+# WHAT IT COSTS, stated rather than discovered later: one insertion point costs the determinism
+# PRE-GATE (8 identical sends) plus 4 x K_T per SPRT round (7 always-TRUE clauses, 7 always-FALSE,
+# each sent TWICE byte-identically = 28). The SPRT reaches a boundary in TWO rounds either way at
+# p1=0.9 / p0=0.1, so a decided surface costs 8 + 56 = 64 requests against the 2 the differential
+# spent: +62 per insertion point. That is the price of an attribution step, and it is why this
+# check is a SINGLE clause family rather than all three.
+#
+# COVERAGE, honestly: family 0 is the SINGLE-QUOTE string-literal breakout (`... WHERE x = '<v>'`),
+# the same injection context the retired differential's `x' OR '1'='1` payload targeted. The
+# numeric and double-quote families (`boolean_clause_families()[1]` and `[2]`) are NOT run here —
+# at +62 each they would triple the default sweep's cost. The differential appeared to cover them
+# only because it fired on ANY response difference, including differences that were not an
+# injection at all; a narrower detector that is right is not a regression against one that was
+# wide and wrong, but the gap is real and named: the gated `live/runtime_redrive.py::boolean_redrive`
+# drives all three families, and widening the default path needs a request-budget decision.
+#
+# n_max=6 (not the dataclass default of 24) bounds the worst case on a surface whose clusters keep
+# flapping: 8 + 6*28 = 176 requests instead of 680, without pre-empting a decision on a surface
+# that actually signals (two rounds).
+_BOOLEAN_SQLI_FAMILY: "tuple[tuple[str, ...], tuple[str, ...]]" = boolean_clause_families()[0]
+
+BOOLEAN_SQLI_SPRT = BooleanInferenceCheck(
+    id="boolean-sqli-sprt", bug_class="boolean_sqli",
+    true_clauses=_BOOLEAN_SQLI_FAMILY[0],
+    false_clauses=_BOOLEAN_SQLI_FAMILY[1],
+    n_max=6,
 )
 
 REFLECTED_XSS = MarkerReflectionCheck(
@@ -1886,7 +1927,7 @@ DNS_RCE_OOB = DNSOOBCheck(
 OPEN_REDIRECT = OpenRedirectCheck()
 
 DEFAULT_CHECKS: tuple[Check, ...] = (
-    BOOLEAN_SQLI,
+    BOOLEAN_SQLI_SPRT,
     REFLECTED_XSS,
     SSTI_EVAL_BRACES,
     SSTI_EVAL_DOLLAR,
@@ -1899,7 +1940,13 @@ DEFAULT_CHECKS: tuple[Check, ...] = (
     DESERIALIZATION_OOB,
 )
 """A ready-to-run seed set. Every check maps to a bug_class the verifier already
-routes to an oracle, so it confirms end-to-end. The OOB checks (`wants_oob`) run
+routes to an oracle, AND produces a context that oracle can actually act on — the second half is
+not automatic: when `boolean_sqli` became BOOLEAN_INFERENCE-only, the bare `BOOLEAN_SQLI`
+differential that used to sit first here stopped being able to confirm anything, so it was replaced
+by `BOOLEAN_SQLI_SPRT` rather than left in as dead traffic. `nosqli`, `auth_bypass`,
+`ldap_injection` and `xpath_injection` have never had an entry here; see the module docs and
+docs/capability-matrix/evidence-branches.json for which of them still have a FACT-capable producer
+on the opt-in `--library` path and which do not. The OOB checks (`wants_oob`) run
 only when the engine has an OOBReceiver — without one they are skipped, never
 guessed. Extend by declaring more DifferentialCheck / MarkerReflectionCheck /
 OOBCheck entries — no new oracle needed."""
