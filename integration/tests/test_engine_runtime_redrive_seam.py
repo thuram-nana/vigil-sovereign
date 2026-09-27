@@ -192,16 +192,47 @@ def _fact(monkeypatch, tmp_path, url: str, bug_class: str, handler=_VulnApp):
 
 # -- positives --------------------------------------------------------------------------------------
 
-def test_live_path_traversal_never_mints_a_fact(monkeypatch, tmp_path):
-    """path_traversal is LEAD-ONLY. Even a GENUINE read of /etc/passwd may not mint through this seam:
-    ``path_traversal.file_signature`` is registered ``fact_capable: false`` because every guard the arm has
-    varies only the SHAPE OF THE INPUT, and eight benign origins that read nothing satisfied all of them.
-    See integration/tests/test_runtime_redrive_soundness.py (D5)."""
+class _CountingVulnApp(_VulnApp):
+    """``_VulnApp`` that records how many requests actually reached the origin, so the seam test can tell
+    "the arm ran and refused to certify" from "the arm was never dispatched"."""
+
+    hits = 0
+
+    def do_GET(self):  # noqa: N802
+        type(self).hits += 1
+        return super().do_GET()
+
+
+def test_live_path_traversal_is_DRIVEN_and_never_mints_a_fact(monkeypatch, tmp_path):
+    """path_traversal is LEAD-ONLY, and the seam must DRIVE it anyway.
+
+    Two claims, both asserted against BEHAVIOUR rather than against a constant:
+
+      1. Even a GENUINE read of /etc/passwd may not mint through this seam —
+         ``path_traversal.file_signature`` is registered ``fact_capable: false`` because every guard the
+         arm has varies only the SHAPE OF THE INPUT, and eight benign origins that read nothing satisfied
+         all of them (see integration/tests/test_runtime_redrive_soundness.py, D5).
+      2. The arm is nevertheless DISPATCHED, so the operator's LEAD has a VIGIL-owned gated capture behind
+         it. A previous revision gated the seam on ``RUNTIME_FACT_CLASSES`` and returned before driving:
+         zero requests reached the origin, no admitted verdict was recorded, and the lead was sourced
+         entirely from the LLM's assertion — while the module comment and the registry ``limitation`` both
+         said "the arm is still driven (it is real evidence for a human)". This test previously started a
+         server that was never contacted, so it would have passed against a dead port; it now counts the
+         requests.
+    """
     from vigil_integration.live.runtime_redrive import RUNTIME_FACT_CLASSES, RUNTIME_REDRIVE_CLASSES
     assert "path_traversal" not in RUNTIME_FACT_CLASSES
     assert "path_traversal" in RUNTIME_REDRIVE_CLASSES, "the class is demoted, not removed"
-    ref = _fact(monkeypatch, tmp_path, "http://127.0.0.1:{port}/download?file=report.pdf", "path_traversal")
+    _CountingVulnApp.hits = 0
+    ref = _fact(monkeypatch, tmp_path, "http://127.0.0.1:{port}/download?file=report.pdf",
+                "path_traversal", handler=_CountingVulnApp)
     assert ref is None, "a traversal claim may only be confirmed to a LEAD, never to a signed FACT"
+    # 2 controls + the treatment + the first alternate encoding (which corroborates and short-circuits)
+    # on the first candidate parameter.
+    assert _CountingVulnApp.hits >= 4, (
+        f"the seam did not DRIVE the lead-only arm — only {_CountingVulnApp.hits} request(s) reached the "
+        f"origin, so there is no VIGIL-owned capture behind the operator's lead and the registry's "
+        f"'the arm is still driven' is false")
 
 
 def test_live_reflected_xss_mints_a_fact(monkeypatch, tmp_path):

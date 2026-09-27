@@ -367,7 +367,7 @@ def test_a1d_a_throttled_genuine_read_is_inconclusive_not_a_refutation(monkeypat
 
         def reply(self, path, values):
             type(self).seen += 1
-            if type(self).seen > 2:                     # control + treatment, then the limiter engages
+            if type(self).seen > 3:                     # 2 controls + treatment, then the limiter engages
                 return 429, "rate limit exceeded"
             for v in values:
                 if not v:
@@ -662,3 +662,456 @@ def test_refusal_notes_are_not_duplicated_per_candidate_parameter(monkeypatch, t
     res = _rr(monkeypatch, tmp_path, _BlockedApp, "http://127.0.0.1:{port}/doc?file=a.txt",
               "path_traversal")
     assert len(res.notes) == len(set(res.notes)), f"duplicate notes in the audit trail: {res.notes!r}"
+
+
+# ===================================================================================================
+# B1 — a Unicode off-by-N minted a signed, offline-re-verifying FALSE `exposure` FACT
+# ===================================================================================================
+#
+# ``_secret_assignment`` searched the LOWERCASED body and then SLICED THE ORIGINAL one. ``str.lower()`` is
+# a per-codepoint map whose image is 1..3 codepoints, and U+0130 (``İ``, the Turkish dotted capital I)
+# lowercases to TWO characters — so every ``İ`` before the signature shifted the slice by one and the
+# extractor returned an arbitrary window. Through the real gated arm, a ``/.env`` carrying NO credential at
+# all minted a signed FACT whose ``secret_value`` was ``'B_PASSWORD=documented_here'`` and which re-verified
+# OFFLINE (rc=0, 1/1 reproduced). On the non-minting side the same bug returned a TRUNCATED real credential
+# on the ACCEPT branch (``why=""``), violating D7 and the two tests written to pin it.
+
+_ENV_TURKISH_NO_SECRET = ("#" + "İ" * 8 + " dagitim notlari (deployment notes)\n"
+                          "DB_PASSWORD=\n"
+                          "notes:DB_PASSWORD=documented_here\n")
+_ENV_TURKISH_REAL = ("# İstanbul region — production\n"
+                     "DB_HOST=db.internal\n"
+                     "DB_PASSWORD=Pr0dKey-Real-Value-9x\n")
+
+
+def test_b1_str_lower_is_not_length_preserving_but_the_arm_s_fold_is():
+    """The root cause, enumerated rather than asserted from memory. Exactly one codepoint in all of Unicode
+    makes ``str.lower()`` change length — U+0130 — and :func:`_lower_aligned` is length-preserving for
+    every one of the 0x110000 codepoints, which is the property every offset in ``_secret_assignment``
+    depends on. Re-introduce ``hay.lower()`` anywhere in that function and the live controls below fail;
+    weaken the fold and this one does."""
+    from vigil_integration.live.runtime_redrive import _lower_aligned
+
+    expanding = [i for i in range(0x110000) if len(chr(i).lower()) != 1]
+    assert expanding == [0x130], (
+        f"the set of codepoints whose lower() is not length-1 changed: {[hex(i) for i in expanding]}")
+    assert len("İ".lower()) == 2, "U+0130 must still be the expanding case this guard is about"
+    bad = [hex(i) for i in range(0x110000) if len(_lower_aligned(chr(i))) != 1]
+    assert not bad, f"_lower_aligned is NOT length-preserving at {bad[:8]}"
+    assert _lower_aligned("İstanbul") == "istanbul"
+    assert _lower_aligned("ABC") == "abc"
+
+
+@pytest.mark.parametrize("prefix", ["", "# İ region\n", "#" + "İ" * 40 + "\n", "Kİİ=1\n"])
+def test_b1_a_dotted_capital_i_never_shifts_the_extracted_value(prefix):
+    """The hermetic half: whatever precedes it, the extracted value is the WHOLE right-hand side. Under the
+    offset bug ``"# İ region\\nDB_PASSWORD=Pr0dKey-Real-Value-9x\\n"`` returned ``'r0dKey-Real-Value-9x'``
+    — a TRUNCATED secret, on the ACCEPT branch, which is exactly what D7 forbids."""
+    from vigil_integration.live.runtime_redrive import _secret_assignment
+    body = f"{prefix}DB_PASSWORD=Pr0dKey-Real-Value-9x\n"
+    assignment, value, why = _secret_assignment(body, "DB_PASSWORD=")
+    assert why == "", f"a real credential was refused: {why!r}"
+    assert value == "Pr0dKey-Real-Value-9x", f"the certificate would carry a shifted/truncated value: {value!r}"
+    assert assignment == "DB_PASSWORD=Pr0dKey-Real-Value-9x"
+    assert assignment in body, "the assignment must be a verbatim substring of the captured body"
+
+
+@pytest.mark.parametrize("body", [
+    "notes:DB_PASSWORD=documented_here\n",            # prose naming the key
+    "OLD_DB_PASSWORD=Real-Value-Here\n",              # a LONGER key that ends with the signature
+    "# DB_PASSWORD=your-value-goes-here\n",           # a commented example
+    "path=/etc/DB_PASSWORD=Real-Value-Here\n",        # the key inside a path
+])
+def test_b1_a_signature_that_does_not_begin_an_assignment_is_the_key_being_named(body):
+    """The second half of the PoC: with the offset fixed, the ``/.env`` still had to be refused, because
+    its only line-start ``DB_PASSWORD=`` is EMPTY and the other occurrence is a prose line. In .env /
+    shell-export grammar an assignment BEGINS A LINE (optionally after whitespace, optionally after
+    ``export``); anything else is the key being NAMED."""
+    from vigil_integration.live.runtime_redrive import _secret_assignment
+    assignment, value, why = _secret_assignment(body, "DB_PASSWORD=")
+    assert not assignment and why, f"expected a refusal for {body!r}, got {assignment!r}"
+    assert "DB_PASSWORD" not in why, "a refusal note must not quote the candidate"
+
+
+@pytest.mark.parametrize("body", [
+    "DB_PASSWORD=S3cr3t-Real-Prod-Key\n",             # first line
+    "APP_ENV=production\nDB_PASSWORD=S3cr3t-Real-Prod-Key\n",
+    "export DB_PASSWORD=S3cr3t-Real-Prod-Key\n",      # shell export form
+    "   DB_PASSWORD=S3cr3t-Real-Prod-Key\n",          # indented
+])
+def test_b1_the_anchor_still_accepts_every_real_assignment_form(body):
+    """The recall half of the anchor rule: it must not cost a single ordinary ``.env`` shape."""
+    from vigil_integration.live.runtime_redrive import _secret_assignment
+    assignment, value, why = _secret_assignment(body, "DB_PASSWORD=")
+    assert why == "" and value == "S3cr3t-Real-Prod-Key", (why, value)
+
+
+def test_b1_an_env_with_no_credential_behind_a_dotted_capital_i_mints_nothing(monkeypatch, tmp_path):
+    """THE NEGATIVE CONTROL, end to end through the real gated arm. This exact body minted a signed
+    certificate whose ``secret_value`` was ``'B_PASSWORD=documented_here'`` and which passed
+    ``framework.v2 verify`` with rc=0. It must now be REFUSED, with the arm demonstrably having run."""
+    res = _rr(monkeypatch, tmp_path, _env_app(_ENV_TURKISH_NO_SECRET, catch_all=False),
+              "http://127.0.0.1:{port}/", "exposure")
+    _assert_ran_and_refused(res, "exposure", "exposure: value-shape refused")
+    for ctx in res.contexts.values():
+        blob = repr(ctx)
+        assert "B_PASSWORD=documented" not in blob and "documented_here" not in blob, (
+            f"a mis-extracted window reached the evidence: {blob[:300]}")
+
+
+def test_b1_a_real_credential_behind_a_dotted_capital_i_still_mints_unshifted(monkeypatch, tmp_path):
+    """THE POSITIVE CONTROL. Fixing the off-by-N by refusing every body containing an ``İ`` would be the
+    cheap non-fix; a genuine leak behind one must still mint, and the certified value must be the WHOLE
+    credential, byte for byte."""
+    res = _rr(monkeypatch, tmp_path, _env_app(_ENV_TURKISH_REAL, catch_all=False),
+              "http://127.0.0.1:{port}/", "exposure")
+    assert res.n_facts == 1, f"a real .env leak behind an 'İ' must still mint; notes={res.notes!r}"
+    assert res.family_verdict("exposure") == "FACT"
+    ctx = res.contexts[res.facts[0].finding_ref]
+    ev = ctx.get("observed_evidence", {})
+    assert ev.get("secret_value") == "Pr0dKey-Real-Value-9x", (
+        f"the certificate carries a shifted/truncated value: {ev.get('secret_value')!r}")
+    assert ev.get("secret_assignment") == "DB_PASSWORD=Pr0dKey-Real-Value-9x"
+    assert ev["secret_assignment"] in ev["body"], "the assignment must occur verbatim in the retained body"
+
+
+# ===================================================================================================
+# B2 — could-not-observe must be FAIL-CLOSED, not an enumerated list of "throttle" statuses
+# ===================================================================================================
+#
+# ``_encoding_corroboration`` scored an answer as an OBSERVATION whenever its status was outside
+# {0, 408, 425, 429} ∪ [500, ...) — and it never consulted ``body_semantically_available`` at all. Measured
+# against a GENUINE normpath+read LFI, that concluded a REFUTATION (and persisted "sent, answered, and
+# OBSERVED not to carry it ... so it tracks the literal payload rather than the path") at 403 — the
+# canonical WAF block — and at 401 / 302 / 451 / 404 / a Brotli body / two concatenated gzip members.
+# VIGIL had observed nothing, and a real arbitrary-file read behind a WAF that flags dot-segment
+# obfuscation but not the plain payload was written up as a correlation and dropped.
+
+
+def _lfi_with_staged_alternates(alt_status: int, alt_raw: bytes, alt_headers):
+    """A GENUINE local-file-inclusion origin (join + POSIX resolve + read) that answers the two CONTROLS
+    and the TREATMENT normally and then serves ``alt_status``/``alt_raw``/``alt_headers`` — i.e. exactly
+    the alternate-ENCODING re-sends get the WAF/CDN answer under test."""
+
+    class _H(http.server.BaseHTTPRequestHandler):
+        n = 0
+
+        def do_GET(self):  # noqa: N802
+            parts = urlsplit(self.path)
+            q = parse_qs(parts.query, keep_blank_values=True)
+            values = [v for vs in q.values() for v in vs]
+            type(self).n += 1
+            if type(self).n > 3:                   # 2 controls + the treatment, then the re-encodings
+                self.send_response(alt_status)
+                for k, v in alt_headers:
+                    self.send_header(k, v)
+                self.send_header("Content-Length", str(len(alt_raw)))
+                self.end_headers()
+                if alt_raw:
+                    self.wfile.write(alt_raw)
+                return
+            content = None
+            for v in values:
+                if not v:
+                    continue
+                content = _FS.get(posixpath.normpath(posixpath.join(_DOCROOT, v)))
+                if content is not None:
+                    break
+            status, text = (200, content) if content is not None else (404, "document not found")
+            raw = text.encode("utf-8")
+            self.send_response(status)
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.send_header("Content-Length", str(len(raw)))
+            self.end_headers()
+            self.wfile.write(raw)
+
+        def log_message(self, *a):
+            return
+
+    _H.n = 0
+    return _H
+
+
+_PLAIN = [("Content-Type", "text/plain; charset=utf-8")]
+
+_B2_UNOBSERVABLE = [
+    ("403-waf-block", 403, b"Forbidden by WAF rule 930110 (path traversal)\n", _PLAIN),
+    ("302-redirect", 302, b"", [("Location", "/download?file=report.pdf")]),
+    ("brotli-undecodable", 200, b"\x1b\x2e\x00\xf8\x25\x71\x6e\x6f\x74\x62\x72", _PLAIN
+     + [("Content-Encoding", "br")]),
+    ("concatenated-gzip", 200,
+     __import__("gzip").compress(b"root:x:0:0:root:/root:/bin/bash\n") + __import__("gzip").compress(b""),
+     _PLAIN + [("Content-Encoding", "gzip")]),
+    ("401-auth", 401, b"Unauthorized\n", _PLAIN),
+    ("451-legal", 451, b"Unavailable For Legal Reasons\n", _PLAIN),
+    ("404-not-found", 404, b"Not Found\n", _PLAIN),
+    ("429-rate-limit", 429, b"slow down\n", _PLAIN),
+    ("503-unavailable", 503, b"unavailable\n", _PLAIN),
+]
+
+
+@pytest.mark.parametrize("label,status,raw,headers", _B2_UNOBSERVABLE,
+                         ids=[c[0] for c in _B2_UNOBSERVABLE])
+def test_b2_a_genuine_read_whose_reencodings_are_not_answers_is_inconclusive(monkeypatch, tmp_path,
+                                                                             label, status, raw, headers):
+    """A REAL arbitrary-file read whose alternate-encoding re-sends come back as something that is not a
+    document VIGIL read. VIGIL must conclude NOTHING — never that the signature "tracks the literal
+    payload". Collapse the rule back to an enumerated status list, or stop consulting the decode
+    provenance, and the 403 / 302 / brotli / concatenated-gzip cases here see the fabricated claim."""
+    res = _rr(monkeypatch, tmp_path, _lfi_with_staged_alternates(status, raw, headers),
+              "http://127.0.0.1:{port}/download?file=report.pdf", "path_traversal")
+    # POSITIVE: the arm RAN — it examined the surface and got far enough to fire the oracle and reach the
+    # corroboration leg (a stubbed arm has no surface and no note).
+    assert res.surfaces.get("path_traversal"), "the arm examined no surface — it was stubbed out"
+    assert any(n.startswith("path_traversal: encoding corroboration COULD NOT BE OBSERVED")
+               for n in res.notes), f"expected a could-not-observe note; notes={res.notes!r}"
+    for note in res.notes:
+        assert "tracks the literal payload" not in note, (
+            f"an unobservable re-encoding was reported as a refutation: {note!r}")
+        assert "OBSERVED not to carry" not in note, (
+            f"an observation VIGIL never made was persisted into the audit trail: {note!r}")
+    assert res.n_facts == 0 and not res.leads
+    assert res.family_verdict("path_traversal") == "INCONCLUSIVE"
+
+
+def test_b2_positive_control_a_readable_2xx_still_refutes_a_literal_keyed_page(monkeypatch, tmp_path):
+    """The other direction: FAIL-CLOSED must not mean "never refute anything". When the re-encodings come
+    back as a 2xx whose body VIGIL completely decoded and which genuinely LACKS the signature, that IS an
+    observation and the refutation stands — otherwise a literal-payload-keyed page would become a LEAD."""
+    res = _rr(monkeypatch, tmp_path,
+              _lfi_with_staged_alternates(200, b"document served\n", _PLAIN),
+              "http://127.0.0.1:{port}/download?file=report.pdf", "path_traversal")
+    _assert_ran_and_refused(res, "path_traversal", "path_traversal: encoding-corroboration refused")
+    assert not res.leads, "a refused surface must not produce a verdict record"
+    assert any("body decoded" in n for n in res.notes), (
+        f"the refutation must record that VIGIL actually decoded the body; notes={res.notes!r}")
+
+
+# ===================================================================================================
+# B3 — the benign NON-path ("constant emission") control is NOT dominated; here is the counterexample
+# ===================================================================================================
+#
+# A previous revision DELETED it, on a mutation matrix ("removing it failed ZERO tests") plus the
+# analytical claim that "any origin that emits the signature under the canonical traversal treatment also
+# emits it under the path-shaped control unless it is basename/suffix-keyed". Both were overclaims: the
+# mutation matrix measured the TEST SUITE, not the shape space, and the analytical claim has a
+# counterexample that is neither basename- nor suffix-keyed.
+
+_EXT_ALLOWED = frozenset({".txt", ".pdf", ".md", ".csv", ".png"})
+_EXT_HELP = ("File not served.\nExample of a system record this server will never expose:\n"
+             + _PASSWD.splitlines()[0] + "\n")
+
+
+def _ext_allowlist_reply(values: "list[str]") -> "tuple[int, str]":
+    """An EXTENSION-ALLOWLIST static server, as a pure function so the redundancy claim can be tested
+    directly. A known extension (or no extension at all) gets the boilerplate help page, which quotes a
+    sample passwd line as such pages do; an UNKNOWN extension gets a clean 403 with no sample. It reads
+    nothing, ever, and it keys on neither the basename nor a suffix of the requested name."""
+    for v in values:
+        if not v:
+            continue
+        base = v.rsplit("/", 1)[-1]
+        if "." in base and ("." + base.rsplit(".", 1)[-1]) not in _EXT_ALLOWED:
+            return 403, "File type not permitted.\n"      # NO sample line
+    return 200, _EXT_HELP
+
+
+class _ExtAllowlistApp(_Base):
+    def reply(self, path, values):
+        return _ext_allowlist_reply(values)
+
+
+def test_b3_the_two_controls_are_not_redundant_the_deleted_one_uniquely_refuses(monkeypatch, tmp_path):
+    """The counterexample, measured on the pure endpoint logic: the SURVIVING path-shaped control MISSES
+    this origin (``…/etc/passwd.vigilctlN`` is an unknown extension → the clean 403), the treatment FIRES
+    (``…/etc/passwd`` has no extension → the help page), and only the RESTORED constant-emission control
+    (``vigilctlN.txt`` — a known extension → the help page) refuses it. Delete it again and the arm emits
+    a false LEAD against a correctly-defended server."""
+    sig = _PASSWD.splitlines()[0]
+    path_shaped = _ext_allowlist_reply(["../../../../etc/passwd.vigilctlabc123"])[1]
+    constant = _ext_allowlist_reply(["vigilctlabc123.txt"])[1]
+    treatment = _ext_allowlist_reply(["../../../../etc/passwd"])[1]
+    assert sig not in path_shaped, "the path-shaped control would already catch this — no counterexample"
+    assert sig in constant, "the constant-emission control must be the one that sees the signature"
+    assert sig in treatment, "the treatment must fire, or there is nothing to refuse"
+
+
+def test_b3_extension_allowlist_origin_is_refused_by_the_constant_emission_control(monkeypatch, tmp_path):
+    """The same counterexample end to end through the real gated arm: it must produce NO lead and NO
+    certificate, and the refusal note must name the control that actually caught it."""
+    res = _rr(monkeypatch, tmp_path, _ExtAllowlistApp, "http://127.0.0.1:{port}/doc?file=a.txt",
+              "path_traversal")
+    _assert_ran_and_refused(res, "path_traversal", "path_traversal: control-differential refused")
+    assert not res.leads, (
+        f"a false LEAD against a correctly-defended server: {[l.finding_ref for l in res.leads]}")
+    assert any("constant-emission" in n for n in res.notes), (
+        f"the constant-emission control is the one that refuses this shape; notes={res.notes!r}")
+
+
+def test_b3_both_controls_are_actually_sent_on_every_probed_parameter(monkeypatch, tmp_path):
+    """Structural: the arm must SEND both controls, not merely define them. A benign origin that answers
+    everything with a fixed page is probed with exactly two control values before the treatment."""
+    seen: "list[str]" = []
+
+    class _Recorder(_Base):
+        def reply(self, path, values):
+            seen.extend(v for v in values if v)
+            return 200, "document served"
+
+    res = _rr(monkeypatch, tmp_path, _Recorder, "http://127.0.0.1:{port}/doc?file=a.txt", "path_traversal")
+    assert res.surfaces.get("path_traversal"), "the arm examined no surface — it was stubbed out"
+    assert any(v.startswith("../../../../etc/passwd.vigilctl") for v in seen), (
+        f"the PATH-SHAPED control was never sent: {seen!r}")
+    assert any(v.startswith("vigilctl") and v.endswith(".txt") for v in seen), (
+        f"the CONSTANT-EMISSION control was never sent: {seen!r}")
+    assert res.n_facts == 0 and not res.leads
+
+
+# ===================================================================================================
+# N4 — the bounded-work break must fire on the ADMITTED verdict, not on `signal.fired`
+# ===================================================================================================
+
+def test_n4_an_inconclusive_admission_does_not_end_the_candidate_parameter_walk(monkeypatch, tmp_path):
+    """A fired oracle over a body that was NOT semantically available admits INCONCLUSIVE — no record is
+    produced at all — and breaking there ended the whole walk on the first unreadable response, losing
+    every remaining insertion point.
+
+    The origin: a real join+resolve+read LFI behind a caching tier that serves the CANONICAL payload's
+    response uncompressed and over the read bound (so the capture is TRUNCATED: the signature is in the
+    prefix VIGIL holds, but the document is incomplete) while the re-encoded variants come back from a
+    small cached entry. The first candidate parameter therefore fires-but-admits-INCONCLUSIVE; the second
+    is an ordinary read and must still be reached."""
+    big = _PASSWD + ("A" * 2_100_000)
+
+    class _TruncatingLfi(http.server.BaseHTTPRequestHandler):
+        """Only the FIRST candidate parameter (``file``) is served from the oversized cache entry; every
+        other parameter is an ordinary read. So parameter 1 fires-but-admits-INCONCLUSIVE and parameter 2
+        must still be reached."""
+
+        def do_GET(self):  # noqa: N802
+            parts = urlsplit(self.path)
+            status, text = 404, "document not found"
+            for key, vals in parse_qs(parts.query, keep_blank_values=True).items():
+                for v in vals:
+                    if not v:
+                        continue
+                    content = _FS.get(posixpath.normpath(posixpath.join(_DOCROOT, v)))
+                    if content is None:
+                        continue
+                    oversized = key.lower() == "file" and v == "../../../../etc/passwd"
+                    status, text = 200, (big if oversized else content)
+                    break
+                if status == 200:
+                    break
+            raw = text.encode("utf-8")
+            self.send_response(status)
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.send_header("Content-Length", str(len(raw)))
+            self.end_headers()
+            self.wfile.write(raw)
+
+        def log_message(self, *a):
+            return
+
+    res = _rr(monkeypatch, tmp_path, _TruncatingLfi, "http://127.0.0.1:{port}/download", "path_traversal")
+    surfaces = res.surfaces.get("path_traversal") or set()
+    assert len(surfaces) >= 2, (
+        f"the walk stopped at the first INCONCLUSIVE admission — only {sorted(surfaces)} was examined")
+    verdicts = [v for _b, v, _r in res.admissions]
+    assert "INCONCLUSIVE" in verdicts, (
+        f"the fixture did not produce the fired-but-unreadable admission it exists for: {res.admissions!r}")
+    assert verdicts.count("INCONCLUSIVE") >= 1 and len(verdicts) >= 2, (
+        f"the arm admitted only once, so the walk did not continue: {res.admissions!r}")
+    assert res.n_facts == 0, "path_traversal is fact_capable:false"
+    assert len(res.leads) == 1, (
+        f"the walk must still reach a readable parameter and record exactly ONE lead, got "
+        f"{[l.finding_ref for l in res.leads]}")
+
+
+# ===================================================================================================
+# B4 — the registry must not contradict the behaviour: scope the demotion honestly
+# ===================================================================================================
+#
+# `fact_capable:false` is enforced at exactly ONE place — `live/verdict.py::admit`, the only reader of the
+# registry — so it binds runtime_redrive, wiring and the Strix rail and NOTHING else. The core engine never
+# imports the integration layer, and measured per route on the same commit: `framework.v2 scan` emits
+# grounding:"fact"/High/0.90 for 11/11 benign origins via scanner/checks.py:ContentSignatureCheck,
+# `framework.v2 verify` re-verifies them ok=True, and aegis/inspect.py:547 / scanner/library.py:404 return
+# decision='confirmed' / action='block' on legitimate traffic. That route is PRE-EXISTING and other-owned;
+# what this slice must not do is leave the registry naming an implementation that mints at rate 1.0 beside
+# a column saying it cannot.
+
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+_BRANCH_REGISTRY = _REPO_ROOT / "docs" / "capability-matrix" / "evidence-branches.json"
+
+
+def _traversal_row() -> dict:
+    from vigil_integration.live.tool_manifest import load_branch_registry
+    return {b["id"]: b for b in load_branch_registry(_BRANCH_REGISTRY)}["path_traversal.file_signature"]
+
+
+def test_b4_the_row_no_longer_names_an_implementation_that_still_mints():
+    row = _traversal_row()
+    assert row["fact_capable"] is False
+    for ref in row["implementation_refs"]:
+        assert "scanner/checks.py" not in ref, (
+            f"the row declares fact_capable:false while naming {ref!r}, whose scan route still mints at "
+            f"rate 1.0 — registry and behaviour must not contradict each other")
+    assert any("runtime_redrive.py:runtime_redrive" in r for r in row["implementation_refs"]), (
+        "the row must still name the implementation the demotion DOES bind")
+    assert row["check"] != "ContentSignatureCheck", (
+        "the `check` column named the core check too; this row describes the runtime_redrive arm")
+
+
+def test_b4_the_open_core_route_is_recorded_as_a_missing_control_requirement():
+    row = _traversal_row()
+    missing = [c for c in row["control_requirements"] if c.startswith("MISSING:")]
+    assert any("second_refusal" in c for c in missing), (
+        f"the open core route must be an explicit MISSING: control requirement, got {missing!r}")
+
+
+def test_b4_both_the_registry_and_the_module_scope_the_demotion_to_the_admission_layer():
+    row = _traversal_row()
+    lim = row["limitation"]
+    for token in ("verdict.py:admit", "framework.v2 scan", "framework.v2 verify",
+                  "aegis/inspect.py:547", "scanner/library.py:404"):
+        assert token in lim, f"the registry limitation does not name the open route {token!r}"
+    src = (_REPO_ROOT / "integration" / "vigil_integration" / "live" / "runtime_redrive.py").read_text(
+        encoding="utf-8")
+    assert "SCOPE OF THE path_traversal DEMOTION" in src, (
+        "the module docstring must state the scope too — the registry is not the only thing a reader reads")
+    for token in ("aegis/inspect.py:547", "scanner/library.py:404", "framework.v2 scan"):
+        assert token in src, f"the module docstring does not name the open route {token!r}"
+
+
+def test_b4_the_follow_up_names_the_exact_rows_and_file_lines_to_change():
+    """The hand-off must be actionable without re-deriving it: the owning slice needs the exact
+    BUG_CLASS_ORACLES rows, the file, and the lines."""
+    bw = _traversal_row()["blocking_work"]
+    assert "verify/verifier.py" in bw and "139-140" in bw, bw[-400:]
+    assert "BUG_CLASS_ORACLES['path_traversal']" in bw and "BUG_CLASS_ORACLES['lfi']" in bw, bw[-400:]
+    assert "SIDE_EFFECT" in bw
+    assert "384" in bw and "401" in bw, "the precedent (postmessage_exploited / csp_bypass) must be cited"
+    # …and the claim about the precedent must still be true of the file it cites.
+    verifier = (_REPO_ROOT / "engine" / "crucible" / "framework" / "v2" / "verify" / "verifier.py").read_text(
+        encoding="utf-8")
+    assert '"path_traversal": (OracleKind.SIDE_EFFECT,)' in verifier or \
+           "'path_traversal': (OracleKind.SIDE_EFFECT,)" in verifier, (
+        "the follow-up describes a BUG_CLASS_ORACLES row that no longer exists — either it landed (delete "
+        "the MISSING: requirement and re-open fact_capable deliberately) or the description drifted")
+
+
+def test_b4_the_registry_limitation_matches_what_the_seam_actually_does():
+    """BLOCK-5: the registry says the arm 'is still driven'. That sentence is only true if the engage seam
+    dispatches the lead-only classes, so assert the code path rather than the prose."""
+    import inspect
+
+    from vigil_integration.live import wiring
+    from vigil_integration.live.runtime_redrive import RUNTIME_LEAD_CLASSES, RUNTIME_REDRIVE_CLASSES
+
+    src = inspect.getsource(wiring._live_runtime_redrive_fact)
+    assert "RUNTIME_REDRIVE_CLASSES" in src and "not in RUNTIME_REDRIVE_CLASSES" in src, (
+        "the engage seam gates on the FACT-capable set, so the lead-only classes are never driven and the "
+        "registry's 'the arm is still driven' is false on the operator's primary route")
+    assert set(RUNTIME_LEAD_CLASSES) <= set(RUNTIME_REDRIVE_CLASSES)
+    assert "still driven" in _traversal_row()["limitation"]

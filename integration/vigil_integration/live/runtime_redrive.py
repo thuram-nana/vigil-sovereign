@@ -8,11 +8,13 @@ against its declared capability → ``certify_admitted(provenance="live_redrive"
 offline-re-verifiable FACT — to three more MERIDIAN-planted classes:
 
   * ``path_traversal``   — **LEAD-ONLY** (see ``RUNTIME_LEAD_CLASSES``). The ``side_effect`` oracle over a
-                           KNOWN file-content signature (``root:x:0:0:``) still runs behind a PATH-SHAPED
-                           unreadable control and an alternate-ENCODING corroboration, but those guards test
-                           only the SHAPE OF THE INPUT, never the relationship between the response and the
-                           file — so eight benign origins that read nothing satisfied them. The branch is
-                           registered ``fact_capable: false`` and the arm produces LEADs, never FACTs.
+                           KNOWN file-content signature (``root:x:0:0:``) still runs behind TWO unreadable
+                           controls (a PATH-SHAPED traversal to a nonce filename, and a benign NON-path
+                           "constant emission" value) and an alternate-ENCODING corroboration, but those
+                           guards test only the SHAPE OF THE INPUT, never the relationship between the
+                           response and the file — so eight benign origins that read nothing satisfied them.
+                           The branch is registered ``fact_capable: false`` and the arm produces LEADs,
+                           never FACTs.
   * ``xss`` (reflected)  — the ``reflection_context`` oracle: a unique canary that reaches an EXECUTABLE
                            HTML position (a tag name / ``<script>`` / an ``on*`` handler), never inert text.
   * ``exposure``         — the ``predicate`` oracle over a JSON AST that the RUNNER composes and the
@@ -31,12 +33,43 @@ offline-re-verifiable FACT — to three more MERIDIAN-planted classes:
                            computed-product proof, never a bare marker; the shell ``<!--#exec cmd=…-->``
                            command variant is a separate SIDE_EFFECT/OOB path, out of this runner's scope.
 
+SCOPE OF THE path_traversal DEMOTION — stated here because it is NARROWER than "VIGIL will not certify a
+traversal". The demotion is enforced at exactly ONE place: ``live.verdict.admit``, which reads the
+``fact_capable`` column of ``docs/capability-matrix/evidence-branches.json``. It therefore binds this
+runner, ``live.wiring`` and the Strix proof rail — every route that admits through ``verdict.admit``.
+It does NOT bind the CORE ENGINE. Measured per route on this same commit:
+
+  * ``python3 -m framework.v2 scan``  — 11/11 benign origins that read NO file still produce
+    ``grounding:"fact"``, High, 0.90 via ``scanner/checks.py:ContentSignatureCheck``;
+  * ``python3 -m framework.v2 verify`` — re-verifies those ``ok=True`` (a hand-written report passes too);
+  * ``aegis/inspect.py:547`` and ``scanner/library.py:404`` — the same uncontrolled path, and in the
+    DEFENSIVE product that is ``decision='confirmed'`` / ``action='block'`` on legitimate traffic.
+
+That core route is PRE-EXISTING and owned by another slice; nothing here changed it. What IS this slice's
+responsibility is not to let the registry contradict the behaviour, so the ``path_traversal.file_signature``
+row no longer names ``scanner/checks.py:ContentSignatureCheck`` in its ``implementation_refs`` (it describes
+THIS runner), and it carries an explicit ``MISSING:`` control requirement for the open route. THE SECOND,
+INDEPENDENT REFUSAL IS STILL MISSING. The precedent the row follows is ``verify/verifier.py:52-58``: "its
+evidence branch is declared fact_capable=false … this absence is the SECOND, independent refusal, so a
+direct confirm_and_certify() that skipped admission still cannot mint the class." For that to hold here,
+``verify/verifier.py:139-140`` must drop SIDE_EFFECT for the two rows
+
+    BUG_CLASS_ORACLES["path_traversal"] = (OracleKind.SIDE_EFFECT,)    # verify/verifier.py:139
+    BUG_CLASS_ORACLES["lfi"]            = (OracleKind.SIDE_EFFECT,)    # verify/verifier.py:140
+
+exactly as ``:384``/``:401`` already did for ``postmessage_exploited`` and ``csp_bypass``. That file is
+owned by another agent and is deliberately untouched here; until it lands, the scan/verify/AEGIS routes
+remain open and this module may not be read as closing them.
+
 Unlike ``web_redrive`` (which probes EVERY web class on one URL), this runs ONLY the CLAIMED class, so a
 minted FACT is inherently that class — no sibling cross-attribution. Soundness is inherited unchanged: the
 gated send refuses out-of-scope / kill-switched traffic before any byte is sent; a probe that established no
 channel is INCONCLUSIVE, never CLEAN ("found nothing ≠ CLEAN"); a body VIGIL could not decode is likewise
 INCONCLUSIVE; and the oracle over the target's FRESH bytes — never the LLM's claimed context — decides. All
-three branches are response-body/service-response derived and therefore NOT clean-capable.
+three branches are response-body/service-response derived and therefore NOT clean-capable. The
+undecodable-body rule holds on EVERY leg, including the traversal arm's controls and its alternate-encoding
+re-sends (:func:`_read_a_document`) — those legs previously read only ``status``/``body`` and so scored a
+Brotli body, two concatenated gzip members and a WAF 403 as "observed, signature absent".
 
 FATAL-2: every framework-touching import is FUNCTION-LOCAL — importing this module co-loads no offense engine.
 """
@@ -55,6 +88,14 @@ RUNTIME_FACT_CLASSES = ("xss", "exposure", "ssi")
 # registered branch declares ``fact_capable: false``, so ``verdict.admit`` demotes even a fired oracle to a
 # LEAD. Kept here (rather than deleted) because the probe is genuinely useful evidence for a human — it is
 # the CLAIM "VIGIL proved a file was read" that the evidence does not support.
+#
+# "STILL PROBES THEM END TO END" IS LOAD-BEARING, AND IT IS TRUE ON THE OPERATOR'S PRIMARY ROUTE. An earlier
+# revision of this slice made it false: ``wiring._live_runtime_redrive_fact`` gated on RUNTIME_FACT_CLASSES
+# and returned ``None`` BEFORE driving, so on the governed engage route the arm sent ZERO requests and
+# recorded NO admitted verdict — the operator's lead was then sourced entirely from the LLM's assertion
+# with no VIGIL-owned capture behind it, while this comment and the registry ``limitation`` both said the
+# arm was driven. The seam now gates on RUNTIME_REDRIVE_CLASSES and drives the lead-only classes too; the
+# FACT check downstream (``family_verdict == "FACT"``) is what still makes minting impossible.
 #
 # WHY path_traversal is here. A red-pen drove EIGHT benign origins that read no file through the shipped
 # arm and every one of them minted a signed FACT that re-verified offline (rate 1.0): five that canonicalise
@@ -170,28 +211,97 @@ _BOOLEAN_BASELINE_SAMPLES = 8
 # These are LEAD-QUALITY filters, not a proof of a read (the branch is ``fact_capable: false`` — see
 # ``RUNTIME_LEAD_CLASSES``). They test the SHAPE OF THE INPUT only, so an endpoint that CANONICALISES the
 # requested name before deciding (a hardening-advisory KB, a canonicalising deny-list/WAF) reproduces the
-# signature under every encoding, and an endpoint keyed on the BASENAME or a SUFFIX defeats the control
-# below because the control is built by APPENDING to the target name.
+# signature under every encoding, and an endpoint keyed on the BASENAME or a SUFFIX defeats the PATH-SHAPED
+# control below because that control is built by APPENDING to the target name.
 _TRAVERSAL_PAYLOAD = "../../../../etc/passwd"
 _TRAVERSAL_ALT_PAYLOADS = (
     "../../../../etc/./passwd",          # dot-segment identity  (etc/./passwd  -> etc/passwd)
     "../../../../etc/../etc/passwd",     # up-then-down identity (etc/../etc/passwd -> etc/passwd)
 )
-# The PATH-SHAPED control: a traversal to a nonce filename that CANNOT exist, deliberately built as a
-# sibling of the real target so it is maximally correlated with it lexically while retrieving nothing.
-# A page that answers ANY path-ish input with the signature (a 403 "path rejected" notice quoting a sample
-# passwd line; a search hit keyed on "passwd") reproduces the signature HERE and is filtered out.
+# TWO controls, both sent BEFORE the treatment on the same parameter, because they ask DIFFERENT questions.
 #
-# The older benign non-path control (``vigilctl<nonce>.txt``, "constant emission") has been DELETED. A
-# mutation matrix measured it as DOMINATED: removing it failed ZERO tests, and analytically any origin that
-# emits the signature under the canonical traversal treatment also emits it under this path-shaped control
-# unless it is basename/suffix-keyed — which NEITHER control catches. It cost one extra live request per
-# candidate parameter (12 per re-drive) for no discrimination. The previous claim here, that "the two
-# together are strictly stronger than either alone", was false and is retracted.
+#   1. The PATH-SHAPED control — a traversal to a nonce filename that CANNOT exist, deliberately built as a
+#      sibling of the real target so it is maximally correlated with it lexically while retrieving nothing.
+#      It catches a page that answers ANY path-ish input with the signature (a 403 "path rejected" notice
+#      quoting a sample passwd line; a search hit keyed on "passwd").
+#   2. The BENIGN NON-PATH control ("constant emission") — a value that is not path-shaped at all and names
+#      nothing that exists anywhere. It catches a page that prints the signature regardless of input.
+#
+# A RETRACTION IS ITSELF RETRACTED. A previous revision DELETED control 2, claiming a mutation matrix had
+# measured it DOMINATED ("removing it failed ZERO tests") and that the earlier claim "the two together are
+# strictly stronger than either alone" was false. That was the overclaim: the mutation matrix measured the
+# TEST SUITE, not the shape space. A red-pen built the counterexample — an EXTENSION-ALLOWLIST static server
+# (known or absent extension => a boilerplate help page that quotes a sample passwd line; unknown extension
+# => a clean 403 with no sample), which is neither basename- nor suffix-keyed:
+#     control 2  ``vigilctl<nonce>.txt``                    signature PRESENT -> REFUSES (correctly)
+#     control 1  ``../../../../etc/passwd.vigilctl<nonce>`` signature ABSENT  -> MISSES
+#     treatment  ``../../../../etc/passwd``                 signature PRESENT -> fires
+# With control 2 deleted the arm emitted a false LEAD against a correctly-defended server. The two ARE
+# strictly stronger than either alone. Control 2 is RESTORED and the counterexample is pinned as a permanent
+# control (test_runtime_redrive_soundness.py::test_b3_extension_allowlist_...). Cost: one extra live request
+# per candidate parameter, and the bounded-work break means a constant-emitting origin costs exactly one.
 _TRAVERSAL_PATH_CONTROL = "../../../../etc/passwd.vigilctl{nonce}"
-# Statuses under which an alternate-encoding re-send is NOT an answer about the path (the rate limiter or
-# the WAF is talking). 5xx is handled alongside these by a range test.
-_NON_ANSWER_STATUSES = frozenset({0, 408, 425, 429})
+_TRAVERSAL_CONST_CONTROL = "vigilctl{nonce}.txt"
+
+# FAIL-CLOSED OBSERVATION RULE. A response is an ANSWER ABOUT THE PATH only when VIGIL actually READ A
+# DOCUMENT: the channel was established, the status is 2xx, AND the body was SEMANTICALLY AVAILABLE
+# (completely decompressed, strictly decoded, not truncated — ``body_decode``'s own guarantee, the same one
+# the MAIN arm already consults through ``state["body_unavailable"]``). Everything else is COULD-NOT-OBSERVE.
+#
+# The previous rule was an enumerated ALLOW-LIST of "throttle" statuses ({0, 408, 425, 429} plus >=500) and
+# it never consulted the decode provenance at all. Measured against a GENUINE normpath+read LFI, the
+# alternate-encoding leg concluded a REFUTATION at: 403 (the canonical WAF block), 401, 302, 451, 404, an
+# empty 200, a ``Content-Encoding: br`` body, and two CONCATENATED gzip members (a real proxy artifact).
+# Each of those persisted the sentence "every semantically-equivalent re-encoding ... was sent, answered,
+# and OBSERVED not to carry it ... so it tracks the literal payload rather than the path" into the audit
+# trail, and silently discarded a real arbitrary-file read. VIGIL had observed nothing. An enumerated
+# deny-list cannot be right here: the question is not "which statuses are a throttle" but "did VIGIL read
+# the document this path names", and only a 2xx with a decoded body answers it.
+_ANSWER_STATUS_MIN, _ANSWER_STATUS_MAX = 200, 299
+
+
+def _read_a_document(resp: Any, state: dict, body_unavailable_before: int) -> bool:
+    """Whether ``resp`` is a response VIGIL may reason about the BODY of: a 2xx whose body was semantically
+    available. Consults BOTH the per-response ``body_semantically_available`` flag and the send-state
+    counter the main arm uses, so a capture that reports neither is refused (fail-closed). Pure."""
+    if not isinstance(resp, dict):
+        return False
+    try:
+        status = int(resp.get("status", 0) or 0)
+    except Exception:  # noqa: BLE001 — a malformed status is not an observation
+        return False
+    if not (_ANSWER_STATUS_MIN <= status <= _ANSWER_STATUS_MAX):
+        return False
+    if not bool(resp.get("body_semantically_available", False)):
+        return False
+    return state["body_unavailable"] <= body_unavailable_before
+
+
+def _observed_signature(resp: Any, state: dict, body_unavailable_before: int,
+                        signature: str) -> "Optional[bool]":
+    """Whether ``signature`` was OBSERVED PRESENT (``True``) or OBSERVED ABSENT (``False``) in this
+    response's BODY, or ``None`` when VIGIL read no document and therefore observed NEITHER.
+
+    Used for the CONTROL leg, where — unlike the alternate-encoding leg — the STATUS is irrelevant: a 403
+    "path rejected" notice whose decoded body quotes a sample passwd line is a perfectly good control
+    refusal, and demanding a 2xx there would silently stop refusing the correctly-defended origins the
+    control exists for. What is NOT acceptable is concluding ABSENCE from bytes VIGIL never decoded.
+
+    An EMPTY body (``raw_len == 0``) is a sound observation of ABSENCE whatever the charset situation:
+    there are no bytes for the signature to be in. That matters because the ordinary 404 a control gets
+    back carries no ``Content-Type`` at all, and treating it as unobservable would make every such origin
+    INCONCLUSIVE before the treatment was ever sent. Pure."""
+    if not isinstance(resp, dict):
+        return None
+    available = (bool(resp.get("body_semantically_available", False))
+                 and state["body_unavailable"] <= body_unavailable_before)
+    if available:
+        return signature in str(resp.get("body", ""))
+    try:
+        raw_len = int(resp.get("raw_len", -1))
+    except Exception:  # noqa: BLE001 — an unparseable length is not an observation
+        raw_len = -1
+    return False if raw_len == 0 else None
 
 # --- D3: what makes a secret signature VALUE-SHAPED --------------------------------------------------
 # A bare ``DB_PASSWORD=`` proves nothing: documentation prose (``<code>DB_PASSWORD=</code>``), a CI template
@@ -308,6 +418,38 @@ def _fetch_path(tmpl: Any, send: Callable, probe_path: str, method: str = "GET")
     return send(req.model_copy(update={"method": method, "url": target, "body": ""}))
 
 
+def _lower_aligned(s: str) -> str:
+    """A LENGTH-PRESERVING lowercase: ``_lower_aligned(s)[i]`` is the fold of ``s[i]``, so an index found in
+    the folded text is a VALID INDEX INTO ``s``.
+
+    ``str.lower()`` is NOT length-preserving, and indexing one string while slicing the other is a real,
+    exploitable defect rather than a theoretical one. ``lower()`` is a per-codepoint map whose image is one
+    or more codepoints, and U+0130 (``İ``, the LATIN CAPITAL LETTER I WITH DOT ABOVE — the Turkish dotted
+    capital I) maps to TWO: ``i`` + U+0307 COMBINING DOT ABOVE. A red-pen enumerated all 0x110000 codepoints
+    and found it is the only one, but this helper does not depend on that: it is length-preserving BY
+    CONSTRUCTION.
+
+    What the desynchronisation did. :func:`_secret_assignment` searched the LOWERCASED body and then sliced
+    the ORIGINAL body with the index that search returned, so every ``İ`` before the signature shifted the
+    slice by one character. A ``/.env`` containing NO credential at all —
+
+        ``#İİİİİİİİ dagitim notlari`` / ``DB_PASSWORD=`` (EMPTY) / ``notes:DB_PASSWORD=documented_here``
+
+    — minted a signed, offline-re-verifying ``exposure`` FACT (rc=0, 1/1 reproduced) whose ``secret_value``
+    was ``'B_PASSWORD=documented_here'``: an arbitrary window, not a secret. The EMPTY assignment is the
+    exact template shape the value-shape test exists to refuse. On the non-minting side the same offset bug
+    put a TRUNCATED credential on the ACCEPT branch (``why=""``) — ``# İ region`` + a real
+    ``DB_PASSWORD=Pr0dKey-Real-Value-9x`` returned ``'r0dKey-Real-Value-9x'`` — violating D7 and both of the
+    tests written to pin it.
+
+    The fast path is sound because ``lower()`` never contracts (no codepoint maps to the empty string), so
+    equal total lengths can only mean every codepoint mapped to exactly one."""
+    low = s.lower()
+    if len(low) == len(s):
+        return low
+    return "".join((c.lower() or c)[0] for c in s)
+
+
 def _secret_assignment(body: str, signature: str) -> "tuple[str, str, str]":
     """The first ``<signature><value>`` occurrence in ``body`` whose right-hand side is a REAL value.
 
@@ -324,13 +466,37 @@ def _secret_assignment(body: str, signature: str) -> "tuple[str, str, str]":
     hay, needle = str(body or ""), str(signature or "")
     if not needle:
         return "", "", "no signature is configured for this probe"
-    low_hay, low_needle = hay.lower(), needle.lower()
+    # INDEX AND SLICE THE SAME STRING. ``low_hay`` is a LENGTH-PRESERVING fold of ``hay`` (see
+    # :func:`_lower_aligned`), so every index this function derives from ``low_hay`` — ``i``, ``j``, and
+    # the ``rest``/``start``/``stop`` offsets computed from them — is a valid index into ``hay`` itself.
+    # Using ``hay.lower()`` here desynchronised the two by one character per U+0130 and minted a signed
+    # FACT out of a ``.env`` that carried no credential.
+    low_hay, low_needle = _lower_aligned(hay), _lower_aligned(needle)
+    if len(low_hay) != len(hay) or len(low_needle) != len(needle):   # pragma: no cover - fold is total
+        # The alignment invariant, enforced rather than asserted (an ``assert`` vanishes under -O, and this
+        # is the one property every offset below depends on). Fail closed: no extraction, no certificate.
+        return "", "", "the captured body could not be case-folded without changing its length"
     i = low_hay.find(low_needle)
     if i < 0:
         return "", "", f"{signature!r} is not present in the body"
     why = "its right-hand side carries no value"
     while i >= 0:
         j = i + len(needle)                      # first character of the right-hand side
+        # THE OCCURRENCE MUST BE AN ASSIGNMENT, not a mention. In .env / shell-export grammar an assignment
+        # BEGINS A LINE (optionally after whitespace, optionally after ``export``). Anything else —
+        # ``notes:DB_PASSWORD=documented_here``, ``OLD_DB_PASSWORD=...``, a path or a JSON string that
+        # happens to contain the key, a commented ``# DB_PASSWORD=<yours>`` — is the key being NAMED, which
+        # is precisely what the value shape exists to refuse; without this, a ``/.env`` whose only
+        # ``DB_PASSWORD=`` at a line start is EMPTY (the template shape) still minted off a prose line
+        # further down. RECALL COST, disclosed in the branch ``limitation``: a commented-out but genuine
+        # credential, and an assignment embedded in a longer key, are refused to a LEAD.
+        line_start = hay.rfind("\n", 0, i) + 1
+        if hay[line_start:i].strip() not in ("", "export"):
+            why = ("the signature does not begin an assignment — it occurs inside other text on its line "
+                   "(prose, a comment, a longer key, a path or a JSON string), which is the key being "
+                   "NAMED rather than assigned")
+            i = low_hay.find(low_needle, j)
+            continue
         rest = hay[j:]
         start = stop = -1
         if rest[:1] in ('"', "'"):
@@ -387,9 +553,20 @@ def _secret_value_predicates(signature: str) -> "list[dict]":
     RE-EXECUTES the shape test instead of trusting that the runner ran it. Every clause binds back to
     ``body``: the assignment must be a literal substring of the captured body, it must carry the signature,
     the value must be part of the assignment, be long enough, and contain none of the template/placeholder
-    markers. (Residual: the extraction OFFSET is the runner's; the verifier re-checks that the extracted
-    text really occurs in the retained body and satisfies every shape rule, which is what makes a
-    substituted value fail the conjunction rather than ride through it.)"""
+    markers.
+
+    NAMED RESIDUAL — the AST does NOT re-derive the extraction, and a previous revision of this docstring
+    claimed it did ("which is what makes a substituted value fail the conjunction rather than ride through
+    it"). That claim is RETRACTED; it was measured false. The conjunction tests only the SELF-CONSISTENCY
+    of the triple ``(secret_assignment, secret_value, body)``: any window of the retained body that happens
+    to contain the signature and satisfy the shape rules satisfies it. It therefore catches a value
+    SUBSTITUTED for one that is not in the body (``test_secret_value_predicate_is_a_pure_json_ast``
+    pins that), but it CANNOT catch a runner-side extraction bug that returns the wrong window of the REAL
+    body — the U+0130 off-by-N did exactly that and the resulting certificate re-verified offline, rc=0.
+    Closing it needs a predicate operation that re-derives "the FIRST occurrence of ``signature`` whose
+    right-hand side qualifies" from ``body`` alone, i.e. a new op in ``framework/v2/verify/oracles.py``
+    (owned by another slice). Until that exists, the extraction OFFSET is the runner's, and the defence
+    against an offset bug is :func:`_lower_aligned` plus its controls, not the certificate."""
     return [
         {"contains": [{"var": "body"}, {"var": "secret_assignment"}]},
         {"icontains": [{"var": "secret_assignment"}, signature]},
@@ -414,19 +591,26 @@ def _encoding_corroboration(send: Callable, tmpl: Any, point: Any, signature: st
     Returns ``(payload, "", True)`` on corroboration, and otherwise ``(None, why, observed)`` where
     ``observed`` says whether VIGIL actually MADE the observation it would be reasoning from:
 
-      * ``observed=True``  — every alternate encoding was sent, answered on a live channel, and its body
-        genuinely LACKED the signature. That is a REFUTATION: the caller may conclude the signature tracks
-        the literal payload rather than the path.
-      * ``observed=False`` — at least one alternate encoding produced no channel or a transport error, so
-        "no re-encoding reproduced it" was never established. That is COULD-NOT-OBSERVE, and the caller
-        must treat it as INCONCLUSIVE. Reporting it as a refutation is how a real arbitrary-file-read
-        behind a WAF or a rate limiter was silently lost while the audit trail asserted a correlation
-        nobody measured.
+      * ``observed=True``  — every alternate encoding was sent, VIGIL READ THE DOCUMENT it answered with
+        (a 2xx with a semantically-available body, see :func:`_read_a_document`), and that body genuinely
+        LACKED the signature. That is a REFUTATION: the caller may conclude the signature tracks the
+        literal payload rather than the path.
+      * ``observed=False`` — at least one alternate encoding produced no channel, a transport error, a
+        status that is not a 2xx, or a body VIGIL could not decode, so "no re-encoding reproduced it" was
+        never established. That is COULD-NOT-OBSERVE, and the caller must treat it as INCONCLUSIVE.
+
+    The rule is FAIL-CLOSED (``_ANSWER_STATUS_MIN``/``_ANSWER_STATUS_MAX`` + the decode provenance) rather
+    than an enumerated list of "throttle" statuses. The enumerated version concluded a REFUTATION at 403 —
+    the canonical WAF block — and at 401/302/451/404/empty-200/undecodable, each time persisting a sentence
+    claiming VIGIL had OBSERVED the re-encoding not to carry the signature, and each time silently
+    discarding a real arbitrary-file read behind a WAF that flags dot-segment obfuscation but not the plain
+    payload. The same fail-closed rule governs the CORROBORATION direction: a signature seen in a body
+    VIGIL could not decode is not an observation either, so it does not corroborate.
     """
     tried: "list[str]" = []
     unobservable = False
     for alt in _TRAVERSAL_ALT_PAYLOADS:
-        before = state["channels"]
+        before, before_bodies = state["channels"], state["body_unavailable"]
         try:
             resp = send(tmpl.render(point, alt))
         except Exception as e:  # noqa: BLE001 — a transport error is not corroboration, and not a refutation
@@ -438,19 +622,27 @@ def _encoding_corroboration(send: Callable, tmpl: Any, point: Any, signature: st
             tried.append(f"{alt}: no channel (no observation)")
             unobservable = True
             continue
-        body = str(resp.get("body", "")) if isinstance(resp, dict) else str(resp)
-        if signature in body:
-            return alt, "", True
         status = int(resp.get("status", 0) or 0) if isinstance(resp, dict) else 0
-        if status in _NON_ANSWER_STATUSES or status >= 500:
-            # The origin answered, but it did not answer the QUESTION: a 429/503 is the rate limiter or the
-            # WAF talking, not the endpoint's verdict on this path. Counting it as "the signature was
-            # absent" is what turned a throttled real arbitrary-file read into a fabricated correlation
-            # claim.
-            tried.append(f"{alt}: status {status} (throttled/blocked — no observation)")
+        if not _read_a_document(resp, state, before_bodies):
+            # The origin put bytes on the wire, but VIGIL did not READ THE DOCUMENT this path names: a
+            # non-2xx (a WAF 403, a 401, a redirect whose body was never fetched, a 404, a rate-limit 429,
+            # a 5xx) or a body it could not completely decompress and strictly decode (br/zstd, two
+            # concatenated gzip members, an undeclared charset, a truncated read). Counting that as "the
+            # signature was absent" is what manufactured a correlation claim out of a measurement nobody
+            # took and threw away real arbitrary-file reads behind ordinary CDN/WAF infrastructure.
+            why = ""
+            if isinstance(resp, dict):
+                why = str(resp.get("body_unavailable_reason", "") or "")
+            detail = f"status {status}" + (f"; body not readable: {why}" if why else
+                                           ("; body not readable" if _ANSWER_STATUS_MIN <= status
+                                            <= _ANSWER_STATUS_MAX else ""))
+            tried.append(f"{alt}: {detail} (not an answer about the path — no observation)")
             unobservable = True
             continue
-        tried.append(f"{alt}: observed (status {status}), signature absent")
+        body = str(resp.get("body", ""))
+        if signature in body:
+            return alt, "", True
+        tried.append(f"{alt}: observed (status {status}, body decoded), signature absent")
     if not tried:
         return None, "no alternate encoding was attempted", False
     return None, "; ".join(tried), not unobservable
@@ -463,15 +655,18 @@ def runtime_redrive(url: str, *, slug: str, engagement_slug: str, signers: "list
     over VIGIL's OWN live capture:
 
       * path_traversal — **LEAD-ONLY; this arm mints NOTHING** (``RUNTIME_LEAD_CLASSES``; the branch is
-        registered ``fact_capable: false``, so ``admit`` demotes even a fired oracle). It is still driven,
-        and it still applies its two LEAD-QUALITY filters: ONE control on the same parameter — a PATH-SHAPED
-        traversal to a nonce filename that cannot exist — must come back WITHOUT the signature, and a
+        registered ``fact_capable: false``, so ``admit`` demotes even a fired oracle). It is still driven —
+        including from the governed engage seam — and it still applies its LEAD-QUALITY filters: TWO
+        controls on the same parameter must each come back WITHOUT the signature (a PATH-SHAPED traversal
+        to a nonce filename that cannot exist, and a benign NON-path "constant emission" value), and a
         SECOND, semantically-different encoding of the same path (``etc/./passwd`` /
-        ``etc/../etc/passwd``) must REPRODUCE it. (The older benign non-path "constant emission" control was
-        measured dominated by the path-shaped one and DELETED — see ``_TRAVERSAL_PATH_CONTROL``.) Neither
-        filter proves a READ: both vary only the SHAPE OF THE INPUT, so an endpoint that CANONICALISES the
-        requested name, or keys on its BASENAME or a SUFFIX, satisfies both while reading nothing — eight
-        such benign origins did, at rate 1.0.
+        ``etc/../etc/passwd``) must REPRODUCE it. Every one of those legs is adjudicated FAIL-CLOSED: only
+        a 2xx whose body VIGIL completely decoded counts as an observation (:func:`_read_a_document`).
+        None of it proves a READ: all three vary only the SHAPE OF THE INPUT, so an endpoint that
+        CANONICALISES the requested name, or keys on its BASENAME or a SUFFIX, satisfies them all while
+        reading nothing — eight such benign origins did, at rate 1.0. And the demotion binds only the
+        ``verdict.admit`` layer: see SCOPE OF THE path_traversal DEMOTION in the module docstring — the
+        ``framework.v2 scan`` / ``verify`` / AEGIS routes over the same check remain open.
       * xss (reflected) — the reflection oracle must report the ``html_tag`` context (the canary became a live
         element); mere presence inside a ``<script>`` string literal or a ``<noscript>`` block is NOT accepted.
       * exposure — the runner fetches BOTH a random control path and the fixed probe path, and hands the
@@ -484,7 +679,7 @@ def runtime_redrive(url: str, *, slug: str, engagement_slug: str, signers: "list
     A probe that established no channel is INCONCLUSIVE (never CLEAN). Returns a :class:`RuntimeRedriveResult`.
     Never raises (a probe error is recorded and what held is returned).
 
-    RESIDUAL, named rather than papered over: for path_traversal the path-shaped control and the encoding
+    RESIDUAL, named rather than papered over: for path_traversal the two controls and the encoding
     corroboration are RUNNER-side preconditions checked before admission — ``BUG_CLASS_ORACLES`` pins the
     class to a single-capture ``side_effect`` row that takes one (marker, sink) pair and can express neither
     a negation nor a conjunction, so neither filter re-executes offline. That is the SECOND of the two
@@ -562,11 +757,17 @@ def runtime_redrive(url: str, *, slug: str, engagement_slug: str, signers: "list
             sig = "root:x:0:0:"
             chk = ContentSignatureCheck(id="path-traversal", bug_class="path_traversal",
                                         payload=_TRAVERSAL_PAYLOAD, signature=sig)
-            # ONE control: PATH-SHAPED — a traversal to a nonce filename that cannot exist, which catches a
-            # page that answers ANY path-ish input with the signature (a 403 "path rejected" notice quoting
-            # a sample line; a KB search whose corpus documents it). The second, "constant-emission"
-            # control was measured dominated and deleted (see _TRAVERSAL_PATH_CONTROL).
-            control_value = _TRAVERSAL_PATH_CONTROL.format(nonce=nonce)
+            # TWO controls on the same parameter, both sent BEFORE the treatment, because they refuse
+            # DIFFERENT shapes (see _TRAVERSAL_PATH_CONTROL / _TRAVERSAL_CONST_CONTROL for the measured
+            # counterexample that put the second one back):
+            #   path-shaped        — a traversal to a nonce filename that cannot exist: refuses a page that
+            #                        answers ANY path-ish input with the signature (a 403 "path rejected"
+            #                        notice quoting a sample line; a KB search whose corpus documents it);
+            #   constant-emission  — a benign NON-path value naming nothing: refuses a page that prints the
+            #                        signature regardless of input, including an extension-allowlist server
+            #                        whose help page quotes it and which the path-shaped control MISSES.
+            controls = (("path-shaped", _TRAVERSAL_PATH_CONTROL.format(nonce=nonce)),
+                        ("constant-emission", _TRAVERSAL_CONST_CONTROL.format(nonce=nonce)))
             for name in _candidate_query_names(url, _PATH_TRAVERSAL_PARAMS):
                 probe_url = _url_with_param(url, name)
                 tmpl = RequestTemplate(HttpRequest(method="GET", url=probe_url))
@@ -578,26 +779,54 @@ def runtime_redrive(url: str, *, slug: str, engagement_slug: str, signers: "list
                 # Record the surface as EXAMINED even when a control refuses below, so a runner-side
                 # refusal is attributable in the audit trail (and is distinguishable from not probing).
                 res.surfaces.setdefault(bug_class, set()).add(surface)
-                before = state["channels"]
-                try:
-                    control = send(tmpl.render(point, control_value))
-                except Exception as e:  # noqa: BLE001
-                    _note(res, f"path_traversal control error [{name}/path-shaped]: "
-                               f"{type(e).__name__}: {e}")
-                    continue
-                if state["channels"] <= before:
-                    res.inconclusive.append((bug_class, f"{probe_url}#control:path-shaped"))
-                    continue
-                if sig in _body(control):
-                    _note(res,
-                          f"path_traversal: control-differential refused [{surface}] — the path-shaped "
-                          f"control value (a traversal to a nonce filename that cannot exist) reproduced "
-                          f"the file signature, so its presence is not attributable to a file read "
-                          f"{_NOT_ADMITTED}")
-                    # BOUNDED WORK: this origin answers a path-ish value with the signature, so the same
-                    # refusal would repeat verbatim on every remaining candidate parameter (measured: 12
-                    # identical notes, 60 live requests). Stop here.
+                # ``None`` = every control passed; "stop" = refused or unobservable (bounded work);
+                # "skip" = this parameter could not be controlled, try the next one.
+                outcome = None
+                for label, control_value in controls:
+                    before, before_bodies_ctl = state["channels"], state["body_unavailable"]
+                    try:
+                        control = send(tmpl.render(point, control_value))
+                    except Exception as e:  # noqa: BLE001
+                        _note(res, f"path_traversal control error [{name}/{label}]: "
+                                   f"{type(e).__name__}: {e}")
+                        outcome = "skip"
+                        break
+                    if state["channels"] <= before:
+                        res.inconclusive.append((bug_class, f"{probe_url}#control:{label}"))
+                        outcome = "skip"
+                        break
+                    seen = _observed_signature(control, state, before_bodies_ctl, sig)
+                    if seen is None:
+                        # The SAME fail-closed rule the alternate-encoding leg uses: "the control did not
+                        # carry the signature" is a claim about a document, so it may only be made about
+                        # bytes VIGIL actually decoded (or about an empty body, which provably carries
+                        # nothing). An undecodable control body is not a clean control; treating it as one
+                        # would let the treatment through on a differential that was never measured.
+                        res.inconclusive.append((bug_class, f"{probe_url}#control:{label}"))
+                        reason = str(control.get("body_unavailable_reason", "")
+                                     if isinstance(control, dict) else "")
+                        status_ctl = int(control.get("status", 0) or 0) if isinstance(control, dict) else 0
+                        _note(res,
+                              f"path_traversal: control COULD NOT BE OBSERVED [{surface}/{label}] — the "
+                              f"control request was answered (status {status_ctl}) but VIGIL could not "
+                              f"decode its body" + (f" ({reason})" if reason else "") + ", so the "
+                              f"differential was never measured and nothing is concluded → INCONCLUSIVE")
+                        outcome = "stop"
+                        break
+                    if seen:
+                        _note(res,
+                              f"path_traversal: control-differential refused [{surface}/{label}] — the "
+                              f"{label} control value reproduced the file signature, so its presence is "
+                              f"not attributable to a file read {_NOT_ADMITTED}")
+                        # BOUNDED WORK: this origin answers this control shape with the signature, so the
+                        # same refusal would repeat verbatim on every remaining candidate parameter
+                        # (measured: 12 identical notes, 60 live requests). Stop here.
+                        outcome = "stop"
+                        break
+                if outcome == "stop":
                     break
+                if outcome == "skip":
+                    continue
                 # TREATMENT: the canonical traversal payload.
                 before2, before_bodies = state["channels"], state["body_unavailable"]
                 ctx_obj = chk.probe(tmpl, point, send)
@@ -606,6 +835,11 @@ def runtime_redrive(url: str, *, slug: str, engagement_slug: str, signers: "list
                     continue
                 if ctx_obj is None:
                     continue
+                # The TREATMENT's OWN decode provenance, read HERE — before the corroboration re-sends.
+                # Reading it after them (``state["body_unavailable"] > before_bodies`` at the admit call)
+                # attributed an undecodable ALTERNATE ENCODING to the treatment and turned an otherwise
+                # admissible verdict INCONCLUSIVE for the wrong reason.
+                treatment_unreadable = state["body_unavailable"] > before_bodies
                 context = ctx_obj.to_verifier_context()
                 signal = side_effect_oracle(context.get("marker", ""), context.get("observed_sink", ""))
                 if signal.fired:
@@ -626,7 +860,8 @@ def runtime_redrive(url: str, *, slug: str, engagement_slug: str, signers: "list
                               f"path_traversal: encoding corroboration COULD NOT BE OBSERVED [{surface}] — "
                               f"the signature appeared under {_TRAVERSAL_PAYLOAD!r}, but at least one "
                               f"re-encoding of the same path was NOT OBSERVABLE — no channel, a transport "
-                              f"error, or a throttle/block status that is not an answer about the path "
+                              f"error, a status that is not a 2xx (a WAF 403, a 401, a redirect, a 404, a "
+                              f"rate-limit or a 5xx), or a body VIGIL could not completely decode "
                               f"({why}); no observation was made either way, so nothing is concluded "
                               f"→ INCONCLUSIVE")
                         break     # bounded work: the channel is degraded, stop probing this endpoint
@@ -646,12 +881,18 @@ def runtime_redrive(url: str, *, slug: str, engagement_slug: str, signers: "list
                                f"fact_capable:false) → LEAD")
                 _admit(context, f"{probe_url}#{point.id}", surface,
                        fired=signal.fired, conclusive=signal.conclusive,
-                       body_unreadable=state["body_unavailable"] > before_bodies)
-                if signal.fired:
-                    # One admitted FIRE is decisive for a re-drive — stop (bounded work, ONE verdict record
+                       body_unreadable=treatment_unreadable)
+                if signal.fired and res.admissions and res.admissions[-1][1] != "INCONCLUSIVE":
+                    # One ADMITTED fire is decisive for a re-drive — stop (bounded work, ONE verdict record
                     # per bug). Previously this broke only on ``is_fact``; now that the branch is LEAD-only
                     # that condition is never true, and without this the arm would emit one signed LEAD per
                     # candidate parameter (the D4 duplicate-certificate defect, re-introduced by demotion).
+                    #
+                    # It must break on the ADMITTED verdict, not on ``signal.fired`` alone. A fired oracle
+                    # over a body that was not semantically available (a truncated read: the signature sits
+                    # in the prefix VIGIL holds, but the document is incomplete) admits INCONCLUSIVE — no
+                    # record is produced at all — and breaking there ended the whole candidate-parameter
+                    # walk on the FIRST unreadable response, losing every remaining insertion point.
                     break
 
         elif bug_class == "xss":
