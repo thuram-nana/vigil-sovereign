@@ -1707,7 +1707,7 @@ def _build_oracle(
         if web_ref:
             return web_ref
 
-        # T2 — RUNTIME RE-DRIVE (path_traversal / reflected xss / exposure): route through the runner-owned
+        # T2 — RUNTIME RE-DRIVE (path_traversal / reflected xss / exposure / ssi): route through the runner-owned
         # runtime_redrive engine (gated send → the matching deterministic oracle → per-branch admit →
         # certify_admitted provenance="live_redrive"). A non-confirmation stays a LEAD below (fail-closed).
         runtime_ref = _live_runtime_redrive_fact(prov, info, redrive)
@@ -1933,12 +1933,21 @@ def _live_runtime_redrive_fact(prov: Provisioned, info: dict, redrive: Optional[
         return None
     try:
         from framework.v2.verify.verifier import normalize_bug_class  # noqa: PLC0415
-        from .runtime_redrive import RUNTIME_FACT_CLASSES, runtime_redrive  # noqa: PLC0415 (framework at CALL)
+        from .runtime_redrive import RUNTIME_REDRIVE_CLASSES, runtime_redrive  # noqa: PLC0415 (framework at CALL)
     except Exception:  # noqa: BLE001 — module unavailable ⇒ cannot re-drive → LEAD (fail-closed)
         return None
     claimed = normalize_bug_class(str(redrive.get("bug_class") or info.get("bug_class") or ""))
-    if claimed not in RUNTIME_FACT_CLASSES:
+    if claimed not in RUNTIME_REDRIVE_CLASSES:
         return None    # not a runtime-redrive class → nothing for this seam to confirm → LEAD
+    # The gate is the DISPATCH set, deliberately including the LEAD-ONLY classes (``RUNTIME_LEAD_CLASSES``,
+    # today path_traversal). An earlier revision gated on ``RUNTIME_FACT_CLASSES`` and returned here BEFORE
+    # driving, on the argument that a fact_capable:false branch could only ever return None. That is true
+    # of the RETURN VALUE and false of everything else: on the operator's PRIMARY route the arm then sent
+    # ZERO requests, recorded NO admitted verdict, and produced NO VIGIL-owned capture, so the operator's
+    # lead was sourced entirely from the LLM's assertion — while the module comment and the registry
+    # ``limitation`` both said "the arm is still driven (it is real evidence for a human)". Driving it is
+    # what makes those two sentences true. Minting is still impossible: the branch is fact_capable:false,
+    # so ``admit`` demotes the fired oracle, ``family_verdict`` is LEAD, and the check below returns None.
     try:
         rr = runtime_redrive(url, slug=prov.slug, engagement_slug=prov.slug, signers=prov.signers,
                              claimed_class=claimed)
