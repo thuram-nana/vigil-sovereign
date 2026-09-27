@@ -445,13 +445,6 @@ class WebScanCampaign:
         # so the fixed DEFAULT_CHECKS path is unchanged. `library_entries` lets a
         # caller inject a check set; None loads the shipped library from disk.
         self.use_library = use_library
-        # W7 (perf) — NO timing-interleave knob here, deliberately. `AuditEngine` can run
-        # the timing sweep with N insertion points in flight, but `_staged_timing_plan`
-        # refuses to stage whenever a bandit is present and `_resolve_bandit` below ALWAYS
-        # produces one, so a campaign-level `timing_workers` would be inert: it would
-        # advertise an operator blast-radius control that cannot change a single request.
-        # Shipping the knob without the capability is the overclaim; the knob returns when
-        # the bandit/ordering coupling is resolved.
         self._library_entries = library_entries
         # Opt-in advanced web arsenal (default OFF → the default scan is byte-for-byte
         # unchanged). When on, an ADDITIVE post-audit pass runs the built-but-unwired

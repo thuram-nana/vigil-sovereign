@@ -1,33 +1,46 @@
 """
-W7 (performance) — the gated transport stays SAFE when the scanner has N probes in flight.
+The gated transport stays SAFE when several callers share ONE ``HttpExecutor``.
 
-The timing interleave (``AuditEngine(timing_workers=N)``) overlaps the idle waits of
-different insertion points, and every one of those requests goes through the SAME
-``HttpExecutor.gated_fetch``. Concurrency must therefore buy wall-clock WITHOUT buying
-extra traffic or a higher request rate — the two things §VI of the constitution forbids.
-These tests pin exactly that:
+``HttpExecutor`` is a shared object: ``engage`` builds two of them, the repeater and the
+MCP server each build their own, and the scanner's injected ``send`` IS
+``gated_fetch``. Its budget counter, its rate anchor, its lazily-built httpx client and
+its action-id minter are all mutable state behind that one entry point, so concurrency
+must buy wall-clock WITHOUT buying extra traffic, a higher request rate, or a collided
+evidence directory — the things §VI of the constitution forbids.
+
+(These guards were written for a concurrent timing sweep in the scanner. That sweep was
+measured and REMOVED — see the note in ``AuditEngine.audit``. The guards stay: they are
+correct, they are cheap and uncontended on the serial path, they are the difference
+between a shared executor being safe and being a silent budget/rate hole, and they will
+matter again under free-threaded CPython. Every one of them is pinned by a test below
+that fails deterministically when the guard is deleted.)
+
+What is pinned here:
 
   * the posture's minimum inter-request interval is honoured START-to-START, measured at
     the ORIGIN, so N concurrent callers are spaced by the floor instead of bursting
     through one stale anchor (:func:`test_rate_floor_is_honoured_with_concurrent_callers`);
   * the serial path's spacing semantics are unchanged — still measured from the previous
-    request's COMPLETION (:func:`test_serial_spacing_is_unchanged`);
+    request's COMPLETION (:func:`test_serial_spacing_is_unchanged`) — and a dry run, which
+    puts nothing on the wire, pays no floor at all
+    (:func:`test_a_dry_run_does_not_pay_the_rate_floor`);
   * the per-engagement request budget is a hard cap even with requests in flight that have
     not yet been tallied (:func:`test_budget_is_never_overshot_under_concurrency`), and a
     reservation is NEVER leaked, whatever happens after it is taken
     (:func:`test_a_refusal_after_the_reservation_does_not_leak_a_budget_slot`);
   * the counter bookkeeping really is inside the mutual-exclusion region
-    (:func:`test_mark_request_done_runs_under_the_executor_lock`) — an unguarded
-    read-modify-write drifts the budget and can move the rate anchor BACKWARDS;
+    (:func:`test_mark_request_done_runs_under_the_executor_lock`,
+    :func:`test_engine_send_counter_runs_under_its_lock`) — an unguarded read-modify-write
+    drifts the budget and can move the rate anchor BACKWARDS;
   * evidence directories stay distinct across mints, across two executors in one process
-    and across a restart, and the id stays a usable wall-clock timestamp
-    (:func:`test_action_ids_are_unique`,
-    :func:`test_action_ids_do_not_collide_across_executors`,
+    IN THE SAME MILLISECOND, and across a restart, and the id stays a usable wall-clock
+    timestamp (:func:`test_action_ids_are_unique`,
+    :func:`test_action_ids_do_not_collide_in_the_same_millisecond`,
     :func:`test_action_id_tracks_the_wall_clock`).
 
 **The origin matters.** ``pytest_httpserver`` serialises the requests it accepts, so a
 concurrency assertion made against it measures the FIXTURE, not the executor: the
-rate-floor test below passed unchanged with the whole W7 anchor reservation removed. The
+rate-floor test below passed unchanged with the whole anchor reservation removed. The
 rate tests therefore run against a threaded loopback origin that genuinely accepts in
 parallel and timestamps each request as it arrives.
 """
@@ -333,19 +346,35 @@ def test_action_ids_are_unique():
     assert all("/" not in i and "\\" not in i and ".." not in i for i in ids)  # path-safe
 
 
-def test_action_ids_do_not_collide_across_executors():
+def test_action_ids_do_not_collide_in_the_same_millisecond():
     """Within-executor uniqueness is NOT the collision class that bites.
 
     ``engage`` builds two HttpExecutors in one process, and a restarted process starts
-    minting from the clock again — so an id derived only from a per-executor counter
-    lands on evidence directories another executor (or a previous run) already wrote, and
-    ``_evidence_dir`` overwrites the captured exchange. Two independent instances must
-    never produce the same id."""
+    minting from the clock again — so an id derived only from the clock plus a
+    per-executor counter lands on evidence directories another executor (or a previous
+    run) already wrote, and ``_evidence_dir`` overwrites the captured exchange.
+
+    The case has to be the SAME MILLISECOND. An earlier version of this test minted 3000
+    ids per executor spanning many milliseconds, so the timestamp component alone
+    separated them and it passed with the per-executor nonce deleted — it named the right
+    collision class and then tested a different one. Measured with the nonce stripped:
+    50/50 trials collide. With it: 0/50."""
     a, b = _proto(), _proto()
-    ids_a = {a._next_action_id() for _ in range(3000)}
-    ids_b = {b._next_action_id() for _ in range(3000)}
-    assert len(ids_a) == len(ids_b) == 3000
-    assert not (ids_a & ids_b), "two executors in one process minted the same action id"
+    by_ms_a: dict[str, set[str]] = {}
+    by_ms_b: dict[str, set[str]] = {}
+    for _ in range(40):  # back-to-back, so the two executors land on shared milliseconds
+        for ex, table in ((a, by_ms_a), (b, by_ms_b)):
+            got = ex._next_action_id()
+            table.setdefault(got.split("-")[1], set()).add(got)
+
+    shared_ms = set(by_ms_a) & set(by_ms_b)
+    assert shared_ms, (
+        "both executors never minted inside the same millisecond, so this run did not "
+        "exercise the collision class at all")
+    for ms in sorted(shared_ms):
+        assert not (by_ms_a[ms] & by_ms_b[ms]), (
+            f"two executors minted the same action id inside millisecond {ms}: "
+            f"{sorted(by_ms_a[ms] & by_ms_b[ms])}")
 
 
 def test_action_id_tracks_the_wall_clock():
@@ -361,6 +390,15 @@ def test_action_id_tracks_the_wall_clock():
         f"the action-id clock ran {max(stamps) - now_ms} ms ahead of real time")
     assert min(stamps) >= now_ms - 60_000
     assert stamps == sorted(stamps)  # still monotone, so ids still sort by time
+
+
+# KNOWN, UNFIXED, and deliberately not tested: both the nonce and `_action_seq` are
+# captured at INSTANCE CONSTRUCTION, so a pre-forking server — or any `os.fork` after an
+# executor is built — hands parent and child byte-identical id streams, and the two would
+# overwrite each other's evidence directories. No pre-forking deployment exists today (a
+# grep for os.fork / fork() outside tests finds nothing). Closing it is cheap when one
+# appears: put `os.getpid()` in the id, or re-mint `_id_nonce` from
+# `os.register_at_fork(after_in_child=...)`.
 
 
 # ---------------------------------------------------------------------------

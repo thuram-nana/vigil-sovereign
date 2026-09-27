@@ -26,8 +26,6 @@ from __future__ import annotations
 import math
 import re
 import time
-from collections.abc import Sequence
-from concurrent.futures import ThreadPoolExecutor
 from html.parser import HTMLParser
 from dataclasses import dataclass
 from typing import Callable, ClassVar, Protocol, runtime_checkable
@@ -518,59 +516,14 @@ class TimingObservations:
     """One insertion point's ORDERED latency observations for one timing check.
 
     Immutable, and ordered exactly as they were taken: ``baseline[i]`` and
-    ``treatment[i]`` (and ``dose[i]``) are the i-th INTERLEAVED pair/triple. Keeping
-    the observations as a value — separate from the evidence they are later shaped
-    into — is what lets a driver overlap the idle waits of different points while the
-    per-point SEQUENCE (the same loop, the same order, the same count) is the one the
-    serial path runs. The VALUES are measurements and a concurrent driver changes the
-    measurement environment, so they are not the serial path's numbers — see
-    :func:`interleave_timing_jobs`."""
+    ``treatment[i]`` (and ``dose[i]``) are the i-th INTERLEAVED pair/triple. Keeping the
+    observations as a value — separate from the evidence they are later shaped into —
+    keeps :meth:`TimingCheck.collect` (all of the I/O, none of the judgement) apart from
+    :meth:`TimingCheck.context_from` (pure, deterministic, offline-re-runnable)."""
 
     baseline: tuple[float, ...] = ()
     treatment: tuple[float, ...] = ()
     dose: tuple[float, ...] = ()
-
-
-def interleave_timing_jobs(jobs: "Sequence[Callable[[], object]]", *, workers: int = 1) -> list:
-    """Run independent per-point timing JOBS with at most ``workers`` IN FLIGHT.
-
-    A timing probe spends ~all of its wall-clock IDLE — blocked on the delay it asked
-    the target to take. This removes that idle time and nothing else:
-
-    * **One job = one insertion point's WHOLE timing sequence, run SERIALLY inside its
-      own worker.** The within-point interleaving of baseline vs treatment samples, the
-      sample count, the dose pairing and the "first confirmation at this point
-      short-circuits the rest of that bug class" rule are therefore untouched — a job is
-      literally the serial code path. Only the idle waits of *different points* overlap.
-    * **Results come back in SUBMISSION ORDER** (``ThreadPoolExecutor.map``), so the
-      caller emits findings and coverage records in exactly the order the serial sweep
-      would have.
-    * ``workers <= 1`` (the default) is exactly the old serial loop — no pool is even
-      created — so every existing caller is byte-identical.
-
-    **What this helper does NOT make safe — read before using its verdicts.** The jobs
-    run concurrently but their ARMS do not: every job alternates base, treat, base,
-    treat …, so at any instant all workers are in the SAME half-cycle. N jobs PHASE-LOCK
-    and the origin serves N cheap requests during the baseline window and N expensive
-    ones during the treatment window. Any payload-DEPENDENT service-time asymmetry is
-    amplified ~N-fold by self-inflicted queueing, and the timing oracle's rank-sum test
-    is ONE-SIDED, so a zero-mean bimodal perturbation still raises the false-positive
-    rate — a measured 10/60 confirmations on an origin with NO conditional delay at all.
-    A verdict produced under this helper is therefore a CANDIDATE, never a fact: the
-    caller must re-measure a flagged point serially, with nothing else in flight, before
-    anything mints (see ``AuditEngine._sweep_staged`` stage 2b).
-
-    ``workers`` is the caller's already-bounded per-host concurrency; this helper does
-    not invent one, and jobs are expected to send through the SAME gated transport (the
-    kill-switch / scope / charter / budget / rate gates still run per request)."""
-    jobs = list(jobs)
-    n = len(jobs)
-    w = max(1, int(workers))
-    if w <= 1 or n <= 1:
-        return [job() for job in jobs]
-    with ThreadPoolExecutor(max_workers=min(w, n), thread_name_prefix="crucible-timing") as pool:
-        # map preserves input (submission) order -> the caller's canonical ordering holds.
-        return list(pool.map(lambda job: job(), jobs))
 
 
 @dataclass(frozen=True)
@@ -596,26 +549,21 @@ class TimingCheck:
 
     def probe(self, template: RequestTemplate, point: InsertionPoint, send: Send) -> FindingContext | None:
         """Measure, then adjudicate — the composition of :meth:`collect` and
-        :meth:`context_from`. Byte-identical to the one-shot loop it replaces (a
-        refactor; it says nothing about running two of these at once)."""
+        :meth:`context_from`. Byte-identical to the one-shot loop it replaces."""
         return self.context_from(self.collect(template, point, send))
 
     # -- the two halves of a probe ------------------------------------------------
-    # W7 (perf): a timing probe is ~100% IDLE — it is waiting on the delay it asked
-    # the target to take. Splitting the SLOW, I/O half (:meth:`collect`) from the
-    # PURE half (:meth:`context_from`) lets a driver overlap the idle waits of
-    # DIFFERENT insertion points (see :func:`interleave_timing_jobs`) without changing
-    # the CODE of the statistical control: the loop below — the WITHIN-POINT
-    # interleaving of baseline and treatment (and dose) observations, the sample
-    # count, the dose pairing — is unchanged and always runs serially for one point.
+    # The SLOW, I/O half (:meth:`collect`) is split from the PURE half
+    # (:meth:`context_from`) so the evidence a certificate re-runs offline is a
+    # deterministic function of an observation SEQUENCE — no clock, no rng, no network
+    # in the half that decides anything.
     #
-    # That is NOT the same as saying the resulting NUMBERS are trustworthy under
-    # concurrency. The alternation below phase-locks across overlapping points (all of
-    # them are in the same half-cycle at any instant), which amplifies any payload-
-    # dependent service-time asymmetry into the one-sided oracle and can manufacture a
-    # shift. A concurrent driver must treat its verdicts as CANDIDATES and re-measure
-    # serially before minting — see :func:`interleave_timing_jobs` and
-    # ``AuditEngine._sweep_staged``.
+    # The split once also served a concurrent driver that overlapped the idle waits of
+    # DIFFERENT insertion points. That driver was measured and REMOVED: this alternation
+    # phase-locks across overlapping points, which both manufactures shifts and loses
+    # real ones over any capacity-bounded origin. See the note in
+    # ``AuditEngine.audit``'s sweep before considering it again. This loop is serial,
+    # per point, and that is not an implementation detail.
 
     def collect(
         self, template: RequestTemplate, point: InsertionPoint, send: Send

@@ -26,7 +26,7 @@ from ..verify.confirmation import adjudicate_finding, confirmed_from_result
 from ..verify.models import VerificationResult
 from ..verify.oob import OOBReceiver
 from ..verify.verifier import OracleVerifier
-from .checks import DEFAULT_CHECKS, Check, Send, TimingCheck, interleave_timing_jobs
+from .checks import DEFAULT_CHECKS, Check, Send
 from .insertion import HttpRequest, InsertionKind, InsertionPoint, RequestTemplate
 from .learning import ContextualBandit
 
@@ -204,7 +204,6 @@ class AuditEngine:
         oob_skew_seconds: "float | None" = None,
         oob_not_before: "float | None" = None,
         oob_not_after: "float | None" = None,
-        timing_workers: int = 1,
     ) -> None:
         self._send = send
         # VF-2b OUT-OF-BAND pins: the OOB collector public keys are AUTHORITIES. For a real engagement they are
@@ -260,67 +259,12 @@ class AuditEngine:
         # campaign (one engine per campaign); audit()'s return type is unchanged
         # and campaign reads this back after the loop (mirrors requests_sent).
         self.exercised: list[ProbeRecord] = []
-        # W7 (perf) — TIMING INTERLEAVE: CONCURRENCY FOR SEARCH, SERIAL FOR PROOF.
-        # A timing probe is ~100% IDLE: it is blocked on the delay it asked the target to
-        # take, not computing. ``timing_workers`` > 1 lets the idle waits of DIFFERENT
-        # insertion points overlap. The requests still go through the SAME injected (gated)
-        # ``send``. Default 1 = today's serial sweep, byte-for-byte.
-        #
-        # WHY A CONCURRENT MEASUREMENT MAY NOT BE TRUSTED ON ITS OWN — the arms are not
-        # concurrent WITH EACH OTHER. ``TimingCheck.collect`` emits base, treat, base,
-        # treat …, so at any instant every worker is in the SAME half-cycle: N workers
-        # PHASE-LOCK, and the origin serves N cheap requests during the baseline window and
-        # N expensive ones during the treatment window. Any payload-DEPENDENT service-time
-        # asymmetry — a longer or quoted value costs more to parse, regex-scan, log or error
-        # out on; a WAF rule; a LIKE query; a stack trace on the error path — is therefore
-        # amplified by SELF-INFLICTED QUEUEING roughly N-fold, and the oracle's rank-sum
-        # test is ONE-SIDED, so it records only the positive mode of what is a bimodal
-        # perturbation. Measured on an origin with NO conditional sleep of any kind (service
-        # time 10ms + 10ms*len(value) behind a bounded pool: a 60 ms SERIAL asymmetry, far
-        # under the floor), 12 points, samples=8, injected_ms=1000 ⇒ a 500 ms effect floor:
-        # workers=1 confirmed 0/60, workers=12 confirmed 10/60 and workers=24 confirmed
-        # 10/60 — the SAME points every repetition, with observed shifts up to 720 ms. A
-        # phase-locked concurrent alternation can MANUFACTURE a timing FACT. This is a
-        # precision failure, not merely a recall one, and it is what the earlier version of
-        # this comment got wrong.
-        #
-        # SO THE CONCURRENT PASS NEVER MINTS. It is a SEARCH: every point it flags is
-        # re-measured SERIALLY, with nothing else in flight, and ONLY that serial
-        # re-measurement may confirm (:meth:`_sweep_staged`, stage 2b). Same shape as the
-        # rest of the product — the fast path yields a lead, a controlled re-execution
-        # yields the fact. The wall-clock win survives because the overwhelming majority of
-        # points are negative and are discarded by the cheap pass. Re-measured on the SAME
-        # payload-asymmetric origin: 0/60 at workers = 1, 12 and 24.
-        #
-        # The cost is honest and bounded: a FLAGGED point spends its timing sequence twice.
-        # On a surface where every point is a real bug that gives the whole win back (12
-        # points, all vulnerable: 11.8s serial vs 12.8s at 12 workers, 192 -> 384
-        # requests); on the surface a sweep actually meets — many points, few bugs — it is
-        # a ~Nx win on the search and one extra sequence per finding.
-        #
-        # WHAT REMAINS EXPOSED IS RECALL. A point whose real delay is drowned by the
-        # concurrent pass's own load is discarded before it is ever re-measured, so a high
-        # ``timing_workers`` can COST a confirmation. Measured against a genuinely
-        # concurrent origin (asyncio, backlog 512, a true conditional 120 ms delay, 12
-        # points, samples=8, 5 repetitions): 60/60 confirmed at workers = 1, 4, 8, 12 and
-        # 24 — no loss at any width. That is one origin shape, not a bound: keep the worker
-        # count well below the point count.
-        #
-        # NOT WIRED TO A PRODUCT ENTRY POINT. Every product path builds its engine through
-        # ``WebScanCampaign``, which always supplies a ContextualBandit, and a bandit refuses
-        # the staging (:meth:`_staged_timing_plan`) because it re-ranks each point's roster
-        # from rewards earned at EARLIER points. Wiring this needs that coupling resolved
-        # first, so ``WebScanCampaign`` deliberately carries no knob for it: this is an
-        # engine-level capability with tests, not an operator-facing flag.
-        self.timing_workers = max(1, int(timing_workers))
-        # How many insertion points the CONCURRENT search pass flagged and stage 2b then
-        # re-measured serially. 0 on the serial path. It is the observable that says the
-        # proof step actually ran — a test (or an operator) can tell "nothing was flagged"
-        # apart from "something was flagged and the serial re-measure cleared it".
-        self.timing_remeasured = 0
-        # Guards the shared request counter so the budget stays EXACT when timing probes run
-        # concurrently (a bare ``+= 1`` is a read-modify-write, not atomic). A no-op for the
-        # serial path.
+        # Guards the check-then-spend on the shared request counter (a bare ``+= 1`` is a
+        # read-modify-write, not atomic), so K concurrent senders can never each spend the
+        # same last slot of ``max_requests``. No in-tree caller drives the sweep
+        # concurrently today — the staged timing driver that did was removed — so this is
+        # DEFENSIVE: the engine's ``send`` is an injected callable a caller may share, and
+        # the guard is uncontended and free on the serial path.
         self._send_lock = threading.Lock()
 
     def _counted_send(self, request: HttpRequest) -> dict:
@@ -449,230 +393,6 @@ class AuditEngine:
             oracle_context=_context_dump(ctx),
         ))
 
-    # -----------------------------------------------------------------------------
-    # W7 (perf) — TIMING INTERLEAVE
-    # -----------------------------------------------------------------------------
-    # A statistical timing probe is the sweep's single largest wall-clock term and it is
-    # ~100% IDLE: 2*samples (or 3*samples with a dose arm) requests per point per entry,
-    # each one blocked on the delay it asked the target to take. Nothing is computed while
-    # it waits. The shipped library carries 13 timing entries, so one insertion point can
-    # sit idle for minutes.
-    #
-    # The optimisation removes IDLE TIME. It never samples less, never relaxes a
-    # statistical control, and never lets a CONCURRENT measurement mint a fact:
-    #
-    #   * one point's whole timing sequence runs SERIALLY, in roster order, inside one
-    #     worker — so the WITHIN-POINT interleaving of baseline vs treatment (and dose)
-    #     observations, which the Mann-Whitney U shift test and the dose-response ratio
-    #     both rest on, is the same loop in the same order;
-    #   * the sample count, the dose pairs and the effect-size floor are untouched;
-    #   * the "first confirmation of a bug class at this point short-circuits that class's
-    #     remaining entries" rule is preserved, because it is a WITHIN-point rule and the
-    #     point's sequence is still serial;
-    #   * but a CONCURRENT measurement is only ever a CANDIDATE. Concurrent arms phase-lock
-    #     (see the ``timing_workers`` note in ``__init__``), which amplifies any
-    #     payload-dependent service-time asymmetry ~N-fold into a one-sided test and can
-    #     MANUFACTURE a confirmation. So every point the concurrent pass flags is
-    #     re-measured SERIALLY, with nothing else in flight, and only that serial
-    #     re-measurement may confirm. A flagged point therefore spends its timing sequence
-    #     TWICE; a refuted point spends it exactly once, so the request count is unchanged
-    #     for the overwhelming majority of points and bounded by 2x for the rest;
-    #   * coverage records and findings are emitted in CANONICAL (point-major, roster)
-    #     order, reassembled after the concurrent stage, so the retained context sequence
-    #     and the certificate ordering are identical.
-    #
-    # It is applied only when the preconditions in :meth:`_staged_timing_plan` hold;
-    # otherwise the sweep is byte-for-byte the serial one.
-
-    def _staged_timing_plan(
-        self, points: "list[InsertionPoint]", checks: "tuple[Check, ...]",
-        selector: "CheckSelector | None",
-    ) -> "list[tuple[InsertionPoint, list[tuple[int, Check]], list[tuple[int, Check]]]] | None":
-        """The point-major plan for the staged sweep, or ``None`` to keep the serial one.
-
-        Returns ``None`` — i.e. changes nothing — unless EVERY precondition below holds.
-        What they buy is equivalence of CONTROL FLOW — which checks run, at which points,
-        which findings and coverage records come out, and in what order — NOT identity of
-        the measured latencies (see stage 2b of :meth:`_sweep_staged`: a concurrent
-        measurement is a candidate, a serial one is the proof) and NOT identity of the
-        request count at a FLAGGED point, which is re-measured and so spends its timing
-        sequence twice.
-
-        * ``timing_workers > 1`` (opt-in);
-        * **no bandit.** The bandit re-ranks each point's checks from rewards earned at
-          EARLIER points, so the roster at point *i+1* depends on outcomes at point *i*.
-          Overlapping points would change that ordering — and the bandit's own final
-          state — so the bandit path stays serial. This is also exactly why the staged
-          sweep is unreachable from any product entry point today: ``WebScanCampaign``
-          always resolves a bandit. Resolving that coupling is the blocking work for
-          wiring an operator flag;
-        * **no request budget** (``max_requests == 0``). A budget makes the sweep's cut-off
-          depend on the ORDER traffic is emitted in; staging changes that order, so a
-          bounded sweep stays serial and exact;
-        * **at least two points actually carry timing work** — with fewer there is nothing
-          to interleave, so the serial path is kept rather than paying for a pool;
-        * **per point, the deferrable checks share no bug_class with the non-deferrable
-          ones.** This is the one that makes the split sound: the only cross-check coupling
-          in the sweep is the (bug_class, point) seen-dedup, so with disjoint classes the
-          run/skip decision of every check is independent of which STAGE it ran in. A point
-          that violates it (e.g. a timing and an OOB entry sharing
-          ``time_based_command_injection``) keeps ALL of its checks in the serial stage.
-
-        A deferrable check is a :class:`~scanner.checks.TimingCheck` with no out-of-band
-        receiver dependency and no WAF-adaptive fallback — a self-contained latency probe."""
-        if self.timing_workers <= 1 or self.bandit is not None or self.max_requests:
-            return None
-        plan: list[tuple[InsertionPoint, list[tuple[int, Check]], list[tuple[int, Check]]]] = []
-        interleavable = 0
-        for point in points:
-            point_checks = list(selector(point, checks) if selector is not None else checks)
-            slow_idx = {
-                i for i, c in enumerate(point_checks)
-                if isinstance(c, TimingCheck)
-                and not getattr(c, "wants_oob", False)
-                and not hasattr(c, "adapt")
-            }
-            slow = [(i, c) for i, c in enumerate(point_checks) if i in slow_idx]
-            fast = [(i, c) for i, c in enumerate(point_checks) if i not in slow_idx]
-            if slow and ({c.bug_class for _, c in slow} & {c.bug_class for _, c in fast}):
-                # A shared bug_class couples the two stages through the seen-dedup: which
-                # check runs would depend on the staging. Keep this point wholly serial.
-                fast, slow = [(i, c) for i, c in enumerate(point_checks)], []
-            if slow:
-                interleavable += 1
-            plan.append((point, fast, slow))
-        if interleavable < 2:
-            return None
-        return plan
-
-    def _sweep_staged(
-        self, *, template: RequestTemplate, request: HttpRequest,
-        plan: "list[tuple[InsertionPoint, list[tuple[int, Check]], list[tuple[int, Check]]]]",
-        seen: "set[tuple[str, str]]", findings: list[AuditFinding],
-    ) -> None:
-        """Run the sweep in stages — concurrency for SEARCH, serial for PROOF — then emit
-        in canonical order.
-
-        Stage 1 runs every non-deferrable check in today's exact point-major order.
-        Stage 2 runs each point's timing sequence — serially within the point — with at
-        most ``timing_workers`` points in flight. Its verdicts are CANDIDATES only:
-        concurrent arms phase-lock, which can manufacture a shift out of a payload-
-        dependent service-time asymmetry (see ``timing_workers`` in ``__init__``).
-        Stage 2b therefore re-runs the WHOLE timing sequence of every point stage 2
-        flagged — one point at a time, with the pool drained, i.e. the literal serial
-        loop — and that serial run REPLACES the concurrent one for that point. Only it
-        may confirm. Stage 3 replays the adjudicated outcomes into ``_emit`` in
-        (point, roster-index) order, so ``exercised`` and ``findings`` come out exactly
-        as the serial sweep would have ordered them."""
-        outcomes: dict[tuple[int, int], tuple] = {}
-
-        # --- stage 1: the non-deferrable checks, in today's order --------------------
-        # A BudgetExceeded here would otherwise unwind past stage 3 and DISCARD every
-        # outcome already adjudicated — findings and coverage both. Unreachable today (a
-        # budgeted sweep is never staged, see `_staged_timing_plan`), but stage 2 already
-        # guards it and an unguarded stage 1 is a silent-coverage-loss trap for whoever
-        # relaxes that precondition. Stop the sweep, keep what was adjudicated, emit it.
-        budget_hit = False
-        for pi, (point, fast, _slow) in enumerate(plan):
-            if budget_hit:
-                break
-            for ci, check in fast:
-                key = (check.bug_class, point.id)
-                if key in seen:
-                    continue
-                try:
-                    outcome = self._probe_and_adjudicate(template, point, check)
-                except BudgetExceeded:
-                    budget_hit = True
-                    break
-                if outcome is None:
-                    continue
-                ctx, result, confirmed = outcome
-                if confirmed is not None:
-                    seen.add(key)
-                outcomes[(pi, ci)] = (point, check, ctx, result, confirmed)
-
-        # --- stage 2: the timing sequences, N points in flight -----------------------
-        def _job(pi: int, point: InsertionPoint, slow: "list[tuple[int, Check]]"):
-            def run() -> list[tuple]:
-                # A POINT-LOCAL seen set. Equivalent to the shared one by construction:
-                # the dedup key carries point.id, so no other point's entry can match, and
-                # the disjoint-bug_class precondition means stage 1 put none of these keys
-                # in either.
-                local_seen: set[tuple[str, str]] = set()
-                produced: list[tuple] = []
-                for ci, check in slow:
-                    key = (check.bug_class, point.id)
-                    if key in local_seen:
-                        continue
-                    # NOT wrapped in a bare ``except Exception``. The serial sweep does not
-                    # swallow here either: ``_probe_and_adjudicate`` isolates a failing
-                    # ``check.probe``/``check.adapt`` internally, but a raising ORACLE
-                    # (adjudicate_finding / confirmed_from_result) PROPAGATES out of the
-                    # serial loop. Swallowing it here would return a "clean" sweep with zero
-                    # findings AND zero coverage records — silent coverage loss (§V,
-                    # invariant 2) dressed as a pass. A worker's exception surfaces through
-                    # ``ThreadPoolExecutor.map`` when its result is consumed, so the staged
-                    # path raises exactly where the serial one does.
-                    try:
-                        outcome = self._probe_and_adjudicate(template, point, check)
-                    except BudgetExceeded:
-                        break  # unreachable (a budgeted sweep is never staged); stop this point
-                    if outcome is None:
-                        continue
-                    ctx, result, confirmed = outcome
-                    if confirmed is not None:
-                        local_seen.add(key)
-                    produced.append((ci, point, check, ctx, result, confirmed))
-                return produced
-            return run
-
-        jobs = [(pi, point, slow) for pi, (point, _fast, slow) in enumerate(plan) if slow]
-        if jobs and not budget_hit:
-            batches = interleave_timing_jobs(
-                [_job(pi, point, slow) for pi, point, slow in jobs], workers=self.timing_workers)
-            # --- stage 2b: SERIAL RE-MEASUREMENT of every flagged point --------------
-            # The concurrent pass is a SEARCH. Its arms phase-lock (all workers are in the
-            # same half of the base/treat alternation at any instant), so a payload-
-            # dependent service-time asymmetry is amplified ~N-fold by self-inflicted
-            # queueing and walks through the one-sided oracle's effect floor: it can
-            # MANUFACTURE a confirmation. A point it did NOT flag keeps its concurrent
-            # outcome — that is a refutation, whose exposure is recall, not precision. A
-            # point it DID flag is thrown away and re-measured by the literal serial loop,
-            # one point at a time, with the pool already drained (the ``with`` block in
-            # ``interleave_timing_jobs`` has exited, so no worker is still on the wire).
-            # Only that serial measurement reaches ``seen``/``_emit``, so every timing FACT
-            # rests on a phase-lock-free measurement.
-            candidates: list[tuple[int, InsertionPoint, list[tuple[int, Check]]]] = []
-            for (pi, point, slow), produced in zip(jobs, batches):
-                if any(row[5] is not None for row in produced):
-                    candidates.append((pi, point, slow))
-                    continue
-                for ci, pt, check, ctx, result, confirmed in produced:
-                    outcomes[(pi, ci)] = (pt, check, ctx, result, confirmed)
-            self.timing_remeasured += len(candidates)
-            for pi, point, slow in candidates:
-                try:
-                    reproved = _job(pi, point, slow)()
-                except BudgetExceeded:  # pragma: no cover - a budgeted sweep is never staged
-                    break
-                for ci, pt, check, ctx, result, confirmed in reproved:
-                    if confirmed is not None:
-                        seen.add((check.bug_class, pt.id))
-                    outcomes[(pi, ci)] = (pt, check, ctx, result, confirmed)
-
-        # --- stage 3: emit in canonical (point-major, roster-index) order ------------
-        for pi, (_point, fast, slow) in enumerate(plan):
-            for ci in sorted(i for i, _c in (*fast, *slow)):
-                record = outcomes.get((pi, ci))
-                if record is None:
-                    continue
-                point, check, ctx, result, confirmed = record
-                self._emit(
-                    request=request, point=point, check=check, ctx=ctx, result=result,
-                    confirmed=confirmed, findings=findings,
-                )
-
     def audit(
         self,
         request: HttpRequest,
@@ -734,16 +454,42 @@ class AuditEngine:
                         rationale=confirmed.rationale,
                         oracle_context=_context_dump(ctx),
                     ))
-            # W7 (perf) — TIMING INTERLEAVE. When it is provably equivalent to do so, the
-            # timing probes (the sweep's one ~100%-idle bug-class family) are lifted out of
-            # this serial loop and run with N points IN FLIGHT. `_staged_timing_plan`
-            # returns None whenever ANY precondition for exact equivalence fails, and then
-            # the loop below runs exactly as it always has.
-            staged = self._staged_timing_plan(points, checks, selector)
-            if staged is not None:
-                self._sweep_staged(
-                    template=template, request=request, plan=staged, seen=seen, findings=findings)
-                return findings
+            # W7 — DO NOT re-attempt a concurrent A/B timing sweep here. It was built,
+            # measured and REMOVED; the note is the whole finding, so nobody pays for it
+            # twice.
+            #
+            # A timing probe alternates base, treat, base, treat …, so overlapping N
+            # points puts every worker in the SAME half-cycle: they PHASE-LOCK. Over a
+            # CAPACITY-BOUNDED origin — a worker pool, a DB pool, PHP-FPM children, a GIL,
+            # i.e. every real web app — that self-inflicted queueing makes the origin serve
+            # N cheap requests during the baseline window and N expensive ones during the
+            # treatment window, and the observed shift QUANTISES into integer multiples of
+            # ~2x the delay. Measured on a true +300 ms channel the concurrent pass
+            # reported anywhere from -3120 ms to +3745 ms.
+            #
+            # Both halves of the trade fail, and they fail on the same precondition:
+            #   * PRECISION — the oracle's rank-sum test is ONE-SIDED, so it records only
+            #     the positive mode. An origin whose service time merely scales with the
+            #     payload's LENGTH (no conditional delay at all) manufactured confirmed
+            #     timing FACTs at 10/60 point-runs. Re-measuring every FLAGGED point
+            #     serially does fix this branch.
+            #   * RECALL — and this one cannot be fixed the same way, because a point that
+            #     is NOT flagged is never re-measured. 33-67% of real conditional delays
+            #     were lost across 2/3/4/8/12/24 workers; 50% lost at 2 workers over 12
+            #     points (the smallest possible opt-in is the WORST case), and 50% lost at
+            #     the shipped 3 s / injected_ms=3000 regime. Worse than silent: a lost
+            #     point still emits a ProbeRecord with verdict ``clean``, which this module
+            #     defines as exercised-and-provably-clean — a fact-strength negative
+            #     certifying a vulnerable surface. A two-sided |shift| >= floor guard
+            #     recovers 22 of 26 but then re-measures 92% of all points; negative-only
+            #     recovers 20 of 26. The bimodality is the entire distribution, not a tail.
+            #   * AND THERE IS NO WIN TO TRADE. At capacity 1 the concurrent sweep ran
+            #     33-66% SLOWER than serial (the origin serialises anyway, then flagged
+            #     points pay a second sequence); at capacity 8 it was still 17% slower. The
+            #     ~10x speedup only ever appeared on an UNBOUNDED origin — which is exactly
+            #     the shape where there is no queueing and therefore no defect to begin
+            #     with. The feature helps only where it is harmless and harms only where it
+            #     is useless.
             for point in points:
                 point_checks = selector(point, checks) if selector is not None else checks
                 if self.bandit is not None:
