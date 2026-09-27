@@ -304,8 +304,7 @@ class AuditEngine:
         adaptive fallback) — the three cases the sweep used to express with ``continue``.
 
         Pure w.r.t. engine state apart from the request counter inside ``_counted_send``
-        and the (immutable-after-construction, therefore thread-safe) ``self.verifier``.
-        That is what makes it callable from a timing worker as well as the serial sweep;
+        and the (immutable-after-construction, therefore thread-safe) ``self.verifier``:
         the seen-dedup, the bandit reward, the coverage record and the finding emission
         all stay with the caller, which keeps them in canonical order."""
         try:
@@ -371,8 +370,8 @@ class AuditEngine:
     ) -> None:
         """Retain the coverage evidence for a probe that adjudicated over observed data
         (BEFORE the None-drop discards the negative branch, as it always has) and append
-        the confirmed finding. Called in CANONICAL (point-major, roster-order) order by
-        both sweeps, so ``exercised`` and ``findings`` are ordered identically."""
+        the confirmed finding. Called in CANONICAL (point-major, roster-order) order, so
+        ``exercised`` and ``findings`` are ordered identically."""
         if result is not None:
             self._record_probe(
                 endpoint=request.url, method=request.method, insertion_point=point.id, param=point.name,
