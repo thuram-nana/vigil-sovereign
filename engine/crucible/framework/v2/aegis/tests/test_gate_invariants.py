@@ -64,6 +64,22 @@ byte-identical. Two things must never move without a deliberate, reviewed change
      surfaces, 13 at 11, 15 at 13 — so a counted delta and a reported delta differ by exactly the
      number of surfaces added, and nothing else.
 
+     WHERE THE SOUND DETECTOR LIVES, and why this file no longer names a gate-only roster. The
+     benchmark used to build its own ``_GATE_CHECKS`` that swapped a local ``BooleanInferenceCheck``
+     in for the bare ``BOOLEAN_SQLI`` differential. That override is gone: ``DEFAULT_CHECKS`` now
+     carries ``scanner.checks.BOOLEAN_SQLI_SPRT``, parameter-identical to the local copy (same id,
+     same family-0 clause sets, same ``n_max=6``), so the comprehension had become an element-wise
+     IDENTITY map and the local check a duplicate. The gate now runs the SAME roster an operator's
+     default scan runs, which is the stronger property — the corpus can no longer certify a
+     detector that ships to nobody. The row did not move across that collapse: 11/0/0 at 1831,
+     measured twice on each side.
+
+     HONEST BOUND on what the default boolean detector covers: clause FAMILY 0 only (the
+     single-quote string-literal breakout). The numeric and double-quote families cost +62
+     requests per insertion point each and are not on the default path; the gated
+     ``live/runtime_redrive.py::boolean_redrive`` drives all three. Recorded in
+     docs/capability-matrix/evidence-branches.json as a limitation, not left implicit.
+
      WHY THE TWO NEW CONTROLS EXIST. A review BLOCKed the stage-1 slice: reverting its ENTIRE
      detector content still passed the gate, so the gate was not actually pinning the soundness the
      slice was for. ``/users/safe`` could not close that, because it refutes only a detector that

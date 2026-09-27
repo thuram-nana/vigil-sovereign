@@ -31,12 +31,6 @@ import subprocess
 from pathlib import Path
 
 from ..scanner.campaign import WebScanCampaign
-from ..scanner.checks import (
-    BOOLEAN_SQLI,
-    DEFAULT_CHECKS,
-    BooleanInferenceCheck,
-    boolean_clause_families,
-)
 from ..scanner.cli import loopback_send
 from ..scanner.insertion import InsertionKind
 from ..scanner.library import load_library
@@ -60,62 +54,39 @@ from .validation import (
 PRECISION_TARGET = 0.98
 
 # ---------------------------------------------------------------------------
-# The gate profile's SOUND boolean detector.
+# The gate profile's boolean roster — now just the DEFAULT one.
 # ---------------------------------------------------------------------------
 #
-# The corpus is the invariant every other slice is measured against, so it must be
-# scored by a detector whose FACT means what it says. A bare benign-vs-payload
-# DifferentialCheck ("one benign string came back different from one payload string")
-# is not that: it has no truth-value ATTRIBUTION step, and it was measured minting High
-# ``boolean_sqli`` at rate 1.0 against a STATIC page behind a WAF tautology rule and
-# against strict input validation — on targets with NO DATABASE. Scoring the corpus with
-# it meant the gate certified that an UNSOUND oracle still fires.
+# HISTORY, because the absence of an override here is a deliberate decision and not an
+# oversight. The corpus is the invariant every other slice is measured against, so it must be
+# scored by a detector whose FACT means what it says. A bare benign-vs-payload DifferentialCheck
+# ("one benign string came back different from one payload string") is not that: it has no
+# truth-value ATTRIBUTION step, and it was measured minting High ``boolean_sqli`` at rate 1.0
+# against a STATIC page behind a WAF tautology rule and against strict input validation — on
+# targets with NO DATABASE. ``DEFAULT_CHECKS`` carried that differential, so this module used to
+# build a ``_GATE_CHECKS`` roster that swapped in its own ``BooleanInferenceCheck``.
 #
-# ``BooleanInferenceCheck`` is the sound one: an SPRT whose per-round signal is a
-# truth-value attribution test over ``_BOOLEAN_FAMILY`` — seven DISTINCT, syntactically
-# VARIED always-TRUE clauses and their seven length-matched always-FALSE twins, each sent
-# twice byte-identically. It signals only when every TRUE response agrees with every other
-# TRUE response, every FALSE with every FALSE, and the two clusters are disjoint. Family 0
-# is the single-quote string-literal breakout — the context the planted ``/users?name``
-# sink actually has (``... WHERE name = '<value>'``).
+# That override is GONE, because the fix landed where it belongs instead:
+#   * ``verify.verifier.DIFFERENTIAL_LEAD_ONLY_CLASSES`` removes DIFFERENTIAL_RESPONSE from the
+#     truth-value-attribution rows, so a bare differential cannot confirm ``boolean_sqli`` from
+#     ANY roster, and re-adding it raises at import time; and
+#   * ``scanner.checks.DEFAULT_CHECKS`` now carries ``BOOLEAN_SQLI_SPRT`` — a
+#     ``BooleanInferenceCheck`` over clause family 0 at ``n_max=6``, PARAMETER-IDENTICAL to the
+#     copy this module used to define (same id ``boolean-sqli-sprt``, same clause sets, same
+#     bound; asserted field-by-field).
+# With the swap target absent from ``DEFAULT_CHECKS``, the comprehension that built
+# ``_GATE_CHECKS`` had become an element-wise IDENTITY map, and the local check a duplicate. Both
+# are deleted rather than left as a dead indirection a future reader would mistake for a live
+# guard. The campaign's ``checks`` parameter already defaults to ``DEFAULT_CHECKS``, so the gate
+# now runs the SAME roster an operator's default scan runs — which is the stronger property: the
+# corpus can no longer certify a detector that ships to nobody. Measured across the change: the
+# gate row is byte-identical at 11/0/0 and 1831 requests.
 #
-# ``_GATE_CHECKS`` is DEFAULT_CHECKS with the bare ``BOOLEAN_SQLI`` differential swapped
-# out for it, and ``_drop_boolean_differentials`` additionally removes the library's 21
-# declarative ``boolean_sqli`` differential entries — the same shape in declarative form.
+# DO NOT reinstate a local override to "make the gate safe". The guard is the authority; a roster
+# override here would only hide a regression in the roster operators actually get.
 #
-# WHAT THAT SECOND HALF IS AND IS NOT. When this slice was written it was load-bearing for
-# SOUNDNESS: without it a library differential would confirm at the same location and the
-# scorer would dedupe it into the same single TP, so the gate would have passed with the
-# sound detector silent. It is no longer the thing holding soundness up. The tree now
-# carries ``verify.verifier.DIFFERENTIAL_LEAD_ONLY_CLASSES`` = {boolean_sqli, auth_bypass,
-# nosqli, ldap_injection, xpath_injection}, which removes DIFFERENTIAL_RESPONSE from those
-# rows of BUG_CLASS_ORACLES and raises at IMPORT TIME if anyone adds it back. A bare
-# differential can no longer confirm any of those classes anywhere, from any roster. So
-# the drop here is now a COST measure (it saves 320 requests) plus defence in depth, and
-# the function is named for what it DOES rather than for what it used to imply: the name
-# ``_sound_library`` invited a reader of ``entries = _sound_library(...)`` to conclude the
-# whole roster was sound, when it only ever filtered ONE class out of the five that share
-# the condemned shape. The authority closes the other four.
-#
-# Scope: this changes WHICH DETECTOR SCORES THE CORPUS. It adds no oracle, defines no new
-# OracleKind, relaxes no gate, and touches no other class's roster — every non-boolean
-# entry, built-in and declarative, is passed through untouched.
-_BOOLEAN_FAMILY: tuple[tuple[str, ...], tuple[str, ...]] = boolean_clause_families()[0]
-
-BOOLEAN_SQLI_SOUND = BooleanInferenceCheck(
-    id="boolean-sqli-sprt",
-    bug_class="boolean_sqli",
-    true_clauses=_BOOLEAN_FAMILY[0],
-    false_clauses=_BOOLEAN_FAMILY[1],
-    # The corpus endpoints are deterministic, so the SPRT crosses a boundary in two
-    # rounds; 6 bounds the traffic on a surface that never signals without pre-empting
-    # a decision on one that does (the default 24 would only add refuted rounds).
-    n_max=6,
-)
-
-_GATE_CHECKS: tuple = tuple(
-    BOOLEAN_SQLI_SOUND if c is BOOLEAN_SQLI else c for c in DEFAULT_CHECKS
-)
+# What REMAINS below is the one filter that is still doing work, and it is a COST measure, not a
+# soundness one — see its docstring.
 
 
 def _drop_boolean_differentials(entries: list) -> list:
@@ -123,7 +94,9 @@ def _drop_boolean_differentials(entries: list) -> list:
     library carries 21. Every other entry — including every other class's differential —
     is passed through untouched, so this does NOT make the roster sound and must not be
     read as doing so; ``DIFFERENTIAL_LEAD_ONLY_CLASSES`` in ``verify.verifier`` is what
-    makes a bare differential unable to confirm this class (and four siblings) at all."""
+    makes a bare differential unable to confirm this class (and four siblings) at all.
+    Because they cannot confirm, sending them is dead traffic: this is worth 320 requests
+    on the corpus (-32 on each of the 10 non-vulnerable param surfaces) and nothing else."""
     return [
         e for e in entries
         if not (e.bug_class == "boolean_sqli" and e.oracle.kind == "differential")
@@ -232,11 +205,11 @@ class BenchmarkCrucibleAdapter(CrucibleAdapter):
             )
         # The shipped library minus the timing entries: every benchmark bug is
         # response-visible, so a statistical time-based sweep only adds latency. The 21
-        # declarative boolean differentials come out too — the SPRT check below is the one
-        # detector that decides the corpus's boolean_sqli column. NOTE for anyone editing
-        # this line: the two filters COMPOSE and neither subsumes the other. Dropping
-        # either one silently re-admits its entries and the gate still passes 11/0/0 —
-        # only the cost row notices.
+        # declarative boolean differentials come out too: they CANNOT confirm (the class is
+        # BOOLEAN_INFERENCE-only at the authority), so sending them is 320 requests of dead
+        # traffic. NOTE for anyone editing this line: the two filters COMPOSE and neither
+        # subsumes the other. Dropping either one silently re-admits its entries and the gate
+        # still passes 11/0/0 — only the cost row notices.
         entries = _drop_boolean_differentials(
             [e for e in load_library() if e.oracle.kind != "timing"])
         # surface = today's exact behaviour; a non-surface profile UNIONS in the
@@ -250,7 +223,6 @@ class BenchmarkCrucibleAdapter(CrucibleAdapter):
             enable_oob=False,
             use_library=True,
             library_entries=entries,
-            checks=_GATE_CHECKS,
             enable_domxss=True,
             enable_browser_xss=roster.get("enable_browser_xss", self._use_browser),
             enable_spa_crawl=roster.get("enable_spa_crawl", self._use_browser),

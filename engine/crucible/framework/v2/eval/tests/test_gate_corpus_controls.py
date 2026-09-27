@@ -46,8 +46,11 @@ import urllib.request
 import pytest
 
 from framework.v2.eval.benchmark_app import benchmark_corpus, serve
-from framework.v2.eval.benchmark_run import BOOLEAN_SQLI_SOUND
-from framework.v2.scanner.checks import BOOLEAN_DISCRIMINATOR, boolean_clause_families
+from framework.v2.scanner.checks import (
+    BOOLEAN_DISCRIMINATOR,
+    BOOLEAN_SQLI_SPRT,
+    boolean_clause_families,
+)
 from framework.v2.scanner.cli import loopback_send
 from framework.v2.scanner.insertion import HttpRequest, InsertionKind, RequestTemplate
 from framework.v2.verify.confirmation import confirm_finding
@@ -90,9 +93,14 @@ def _as_dict(resp) -> dict:
 
 
 def _sprt(base: str, path: str, param: str):
-    """Run the GATE'S OWN sound detector and return (context, confirmed-or-None)."""
+    """Run the SHIPPED sound detector and return (context, confirmed-or-None).
+
+    This is ``scanner.checks.BOOLEAN_SQLI_SPRT`` — the check that sits in ``DEFAULT_CHECKS``
+    and therefore the one an operator's default scan actually runs. It is deliberately NOT a
+    benchmark-local copy: a corpus that scored itself with a private detector could certify
+    something that ships to nobody."""
     tpl, point = _point(base, path, param)
-    ctx = BOOLEAN_SQLI_SOUND.probe(tpl, point, loopback_send)
+    ctx = BOOLEAN_SQLI_SPRT.probe(tpl, point, loopback_send)
     got = confirm_finding(finding={"bug_class": "boolean_sqli"}, context=ctx,
                           verifier=OracleVerifier())
     return ctx, got

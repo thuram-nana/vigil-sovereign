@@ -159,7 +159,9 @@ flagged — `/users/safe` is the parameterised twin of the boolean-SQLi endpoint
 > so the only detector it rewarded was the bare benign-vs-payload differential — the one
 > measured minting `boolean_sqli` at rate 1.0 against targets with **no database**.
 > `/users?name` is now a real sqlite3 engine with a concatenated `WHERE` clause (**7 of 7**
-> shapes partition), the gate scores it with the sound SPRT `BooleanInferenceCheck`, and
+> shapes partition), the gate scores it with the sound SPRT `BooleanInferenceCheck` — which is
+> now `DEFAULT_CHECKS`' own `BOOLEAN_SQLI_SPRT`, the detector an operator's default scan runs,
+> not a benchmark-local copy — and
 > `/users/safe` is the parameterised twin that must never fire (**0 of 7**).
 >
 > The corpus additionally ships two **discriminating** no-database controls, because the
@@ -178,6 +180,23 @@ flagged — `/users/safe` is the parameterised twin of the boolean-SQLi endpoint
 > file-signature check's new benign control, spent only where it fires) and +288 (the two
 > discriminating controls, 144 sends each). `test_gate_invariants.py` carries the
 > line-by-line accounting and the offset rule that relates counted to reported requests.
+>
+> **What the sound detector costs, and what it covers.** An attribution step is not free:
+> the SPRT spends a determinism pre-gate (8 identical sends) plus 4x7 = 28 probes per round and
+> decides in two rounds, so **+62 requests per insertion point** against the 2 the differential
+> spent. On a 6-query-param endpoint that is **66 -> 438 requests (6.6x)**; `--targeted` only
+> reaches 349. The gate's own `time_s` went 11.55 -> 30.04. Coverage is **clause family 0 only**
+> (single-quote string-literal breakout) — the numeric and double-quote families cost +62 each
+> and are not on the default path; the gated `boolean_redrive` drives all three. Both facts are
+> recorded in `docs/capability-matrix/evidence-branches.json` rather than left implicit.
+>
+> **Per-class outcome of making the truth-value classes BOOLEAN_INFERENCE-only** (measured, not
+> inferred): `boolean_sqli` **fixed** — the default path has a sound producer again.
+> `ldap_injection` / `xpath_injection` **no loss** — their error-signature entries were driven
+> end-to-end through `compile_entry` -> `ErrorSignatureCheck.probe` -> `confirm_finding` and
+> confirm. `nosqli` loses its scanner-roster capability but keeps its gated Strix
+> `error_signature.strix_redrive`. **`auth_bypass` has no detector on any path** — and no
+> evidence branch has ever claimed one, so nothing in the capability matrix overclaims.
 >
 > **Stale unsigned renderings, named rather than silently left.** Two files in this
 > directory still say "five SAFE endpoints" and quote 1069: `benchmark-scoreboard.md`
