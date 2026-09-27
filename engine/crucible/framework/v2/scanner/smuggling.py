@@ -6,9 +6,21 @@ on the wire — a request carrying both ``Content-Length`` and ``Transfer-Encodi
 so a front-end and back-end disagree on where it ends. This module drops to raw
 sockets to send those bytes and times the response: when the two parsers disagree,
 the back-end waits for a chunk that never comes and the connection HANGS, so a
-CL.TE / TE.CL probe returns far slower than a control request. That timing delta,
-confirmed by the differential oracle's latency dimension and gated by an absolute
-threshold (so jitter cannot false-positive), is the signal.
+CL.TE / TE.CL probe returns far slower than a control request.
+
+RED-PEN / A12 RESOLUTION — that timing delta is an UNCONFIRMED LEAD and nothing
+more, and this module now says so structurally. ``detect()`` no longer calls
+``confirm_finding``: a hang cannot distinguish a desynced back-end from an
+RFC 7230 §3.3.3-compliant origin patiently awaiting the rest of an incomplete
+declared body, so no oracle can soundly adjudicate it and ``detected=True`` was
+never a fact. Every result is therefore ``detected=False``, ``confidence=0.0``,
+and carries ``lead=True`` when the probe hung past ``delay_threshold_ms``. The
+SOUND desync proof lives elsewhere: ``verify/oracles.py::smuggling_desync_oracle``
+re-runs a unique-canary differential over VIGIL's OWN second requests on two
+connections it owns, reached through the ``smuggling_desync`` oracle-context key.
+The verifier refuses a ``baseline``/``mutated`` pair for ``request_smuggling``
+outright (``verify/verifier.py::_DIFFERENTIAL_BASELINE_REFUSED``), so nothing
+downstream can re-confirm this probe by any other route either.
 
 The base CL.TE / TE.CL pair only catches parsers that disagree on the *presence*
 of both headers. Real front-ends are stricter than that, so the desync usually
@@ -19,8 +31,9 @@ distinct technique here (``TE.CL-space``, ``TE.CL-tab``, ``TE.CL-dupe``, …), p
 two framing-disagreement classes that need no CL/TE pair at all: ``CL.0`` (the
 back-end ignores a body the front-end forwarded) and ``TE.TE`` (two conflicting
 Transfer-Encoding headers). Every one of them is confirmed the SAME way — a timing
-delta past ``delay_threshold_ms`` AND the latency oracle firing — because a
-false smuggling report is dangerous: we never claim a smuggle without the hang.
+delta past ``delay_threshold_ms`` — and every one of them is reported the SAME
+way, as an explicitly unconfirmed LEAD, because a false smuggling report is
+dangerous and timing is not proof.
 
 HTTP/2 note: genuine h2/h2c request smuggling (h2.CL, h2.TE, CRLF-in-header,
 :path splitting) needs HPACK and HTTP/2 frame encoding, which the standard library
@@ -40,9 +53,6 @@ from typing import Callable
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from ..verify.confirmation import confirm_finding
-from ..verify.adapter import FindingContext
-
 
 class SmugglingResult(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -52,10 +62,25 @@ class SmugglingResult(BaseModel):
         "variant (TE.CL-space/-tab/-dupe/-xchunked/-fold/-vtab/-formfeed), "
         "CL.0, or TE.TE."
     )
-    detected: bool
+    detected: bool = Field(
+        default=False,
+        description="ALWAYS False. A CONFIRMED desync, which this TIMING probe "
+        "cannot establish — see the module docstring. Retained so downstream "
+        "consumers that promote a `detected` result keep compiling and keep "
+        "promoting nothing from timing alone.",
+    )
+    lead: bool = Field(
+        default=False,
+        description="The probe hung past `delay_threshold_ms` relative to the "
+        "control: an UNCONFIRMED hypothesis worth a human look, never a fact.",
+    )
     control_ms: float
     probe_ms: float
-    confidence: float = 0.0
+    confidence: float = Field(
+        default=0.0,
+        description="ALWAYS 0.0. No oracle adjudicates a timing hang, so there is "
+        "no confirmed confidence to report.",
+    )
     rationale: str = ""
 
 
@@ -273,57 +298,41 @@ def detect(
     suite (CL.TE, TE.CL, the obfuscated TE variants, CL.0 and TE.TE — see
     ``_TECHNIQUES``). Returns one result per technique, reported in that order.
 
-    ``detected`` is True for a technique only when its probe is slower than the
-    control by ``delay_threshold_ms`` AND the differential oracle's latency signal
-    fires — the exact same two-part gate the original CL.TE/TE.CL probes used, so
-    an obfuscation variant can no more false-positive than the base pair could. We
-    never claim a smuggle without the timing hang.
+    ``lead`` is True for a technique when its probe is slower than the control by
+    ``delay_threshold_ms``. ``detected`` is ALWAYS False and ``confidence`` ALWAYS
+    0.0: see the module docstring — a hang is not a desync proof, no oracle is
+    consulted, and this function mints nothing.
 
-    Note ``delay_threshold_ms`` is wired straight into the oracle's latency
-    threshold, so the parameter governs BOTH halves of the gate. (For any
-    ``delay_threshold_ms`` >= the oracle's old 1000 ms default this is behaviour-
-    identical to before — the parameter was already the binding constraint there;
-    it merely lets a caller probe with a lower, faster threshold when the network
-    path is quiet, e.g. loopback.)"""
+    ``delay_threshold_ms`` is the one knob, and it governs only the raw delta gate
+    (a lower, faster threshold is reasonable on a quiet path such as loopback).
+    Lowering it produces MORE leads for a human to triage; it can never produce a
+    confirmed finding, because there is no confirmation on this path."""
     control_ms, _ = raw_send(host, port, _control(host), timeout=timeout)
     results: list[SmugglingResult] = []
     for technique, builder in _TECHNIQUES:
         probe_ms, _ = raw_send(host, port, builder(host), timeout=timeout)
         delta = probe_ms - control_ms
 
-        ctx = FindingContext.from_http_responses(
-            {"status": 200, "body": "control"},
-            {"status": 200, "body": "control"},   # identical content: latency is the only signal
-            bug_class="request_smuggling",
-            baseline_latency_ms=control_ms,
-            mutated_latency_ms=probe_ms,
-            # The latency oracle's threshold tracks delay_threshold_ms so the one
-            # knob governs both the raw delta gate and the oracle's firing.
-            discriminator={"dimensions": ["latency"], "latency_threshold_ms": delay_threshold_ms},
-        )
-        # A12: the latency oracle confirms a TIMING ANOMALY, not request smuggling. Timing alone is a LEAD —
-        # a normal origin awaiting an incomplete declared body produces the same delay — so this is reported
-        # as a low-severity, explicitly-UNCONFIRMED hypothesis, never a "High desync" confirmed exploit.
-        confirmed = confirm_finding(
-            {"bug_class": "request_smuggling",
-             "title": f"{technique} timing anomaly (possible desync — UNCONFIRMED)",
-             "severity": "Low", "surface": technique,
-             "summary": (f"{technique} probe delayed vs the control — a TIMING LEAD, not proof of smuggling. "
-                         f"A normal origin waiting for an incomplete declared body produces the same delay; "
-                         f"manual confirmation over a real desync is required before this is an exploit.")},
-            ctx,
-        )
-        detected = delta >= delay_threshold_ms and confirmed is not None
+        hung = delta >= delay_threshold_ms
         results.append(SmugglingResult(
             technique=technique,
-            detected=detected,
+            # NEVER confirmed from timing. See the module docstring: the A12 probe no
+            # longer calls the oracle at all, because there is no sound adjudication
+            # for it to make.
+            detected=False,
+            lead=hung,
             control_ms=round(control_ms, 1),
             probe_ms=round(probe_ms, 1),
-            confidence=confirmed.confidence if confirmed else 0.0,
+            confidence=0.0,
             rationale=(
-                f"{technique} probe hung {delta:.0f}ms beyond the control — a TIMING LEAD (timing alone does "
-                f"not prove smuggling; a server awaiting an incomplete body delays identically)"
-                if detected else f"no significant delay ({delta:.0f}ms)"
+                f"{technique} probe hung {delta:.0f}ms beyond the control "
+                f"(threshold {delay_threshold_ms:.0f}ms) — an UNCONFIRMED TIMING LEAD. A hang cannot "
+                f"distinguish a desynced back-end from an RFC 7230 \u00a73.3.3-compliant origin awaiting the "
+                f"rest of an incomplete declared body, so this is never a desync FACT; the sound proof is "
+                f"the unique-canary desync differential (verify/oracles.py::smuggling_desync_oracle)."
+                if hung else
+                f"{technique} probe returned within {delta:.0f}ms of the control "
+                f"(threshold {delay_threshold_ms:.0f}ms) — no timing lead"
             ),
         ))
     return results

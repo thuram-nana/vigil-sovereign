@@ -7,10 +7,13 @@ Two properties matter and are tested here:
     unchanged: the arsenal lead lists stay empty and no arsenal-only bug class ever
     reaches active_findings. This is what keeps `make gate` byte-identical.
   * ADDITIVE + GATED + ORACLE-ANCHORED — with the flag ON the modules run: content /
-    JS discovery surface LEADS (never confirmed), request smuggling and CSWSH confirm
-    through their oracles (with a re-verifiable certificate), a benign server yields no
-    smuggling false positive, and the raw-socket modules refuse an unauthorized host
-    (fail-closed).
+    JS discovery surface LEADS (never confirmed), CSWSH confirms through its oracle
+    (with a re-verifiable certificate), the request-smuggling TIMING probe confirms
+    NOTHING — A12/RED-PEN: a hang cannot distinguish a desynced back-end from an
+    RFC 7230 §3.3.3-compliant origin awaiting the rest of an incomplete declared
+    body, so scanner/smuggling.py no longer calls an oracle at all — a benign server
+    yields no smuggling false positive, and the raw-socket modules refuse an
+    unauthorized host (fail-closed).
 
 All traffic is loopback. The smuggling and WS servers are raw-socket fixtures (the
 same shapes scanner.smuggling / scanner.websocket are unit-tested against).
@@ -304,20 +307,43 @@ def test_smuggling_gate_blocks_probe_on_unauthorized_host() -> None:
 
 
 # ---------------------------------------------------------------------------
-# positive, oracle-confirmed arsenal findings (with a re-verifiable certificate)
+# what the arsenal promotes, and what it refuses: an oracle-confirmed CSWSH finding
+# (with a re-verifiable certificate) vs. a smuggling timing hang, which is a LEAD
+# only and reaches active_findings never
 # ---------------------------------------------------------------------------
 
 
-def test_smuggling_desync_confirmed_through_the_arsenal() -> None:
+def test_a_hanging_server_confirms_no_smuggling_through_the_arsenal() -> None:
+    """A12/RED-PEN — this test used to assert the OPPOSITE: that a hanging server
+    "confirms at least one smuggling technique". It does not, and it never soundly
+    could. A hang cannot distinguish a desynced back-end from an RFC 7230 §3.3.3
+    compliant origin patiently awaiting the rest of an incomplete declared body, so
+    ``scanner.smuggling.detect`` no longer calls ``confirm_finding``: every result is
+    ``detected=False`` / ``confidence=0.0`` and carries ``lead=True`` instead. The
+    arsenal therefore promotes NOTHING from this probe.
+
+    The assertion is NOT vacuous: the same fixture is probed directly below and MUST
+    raise a timing lead, so what is proven is that the arsenal declines a genuinely
+    hanging peer — not that the fixture failed to hang.
+
+    The SOUND desync proof is elsewhere and is unaffected: the unique-canary
+    differential (``verify/oracles.py::smuggling_desync_oracle``, driven by the gated
+    ``live/smuggling_redrive.py`` re-drive over VIGIL's own second requests on two
+    connections it owns)."""
+    from framework.v2.scanner.smuggling import detect
+
     with _hanging_server(delay=2.0) as port:
         camp = WebScanCampaign(_dummy_send, enable_arsenal=True)  # loopback → allowed
         findings, _leads = camp._smuggling_findings([("127.0.0.1", port, f"http://127.0.0.1:{port}/")])
-    assert findings, "a hanging desync server should confirm at least one smuggling technique"
-    f = findings[0]
-    assert f.bug_class == "request_smuggling"
-    assert f.confirmed_by  # an oracle kind carried the confirmation
-    assert f.oracle_context is not None  # a retained, re-verifiable certificate
-    assert f.confidence > 0.0
+        # the non-vacuity control: this peer really does hang the probe
+        probes = detect("127.0.0.1", port, timeout=5.0, delay_threshold_ms=1200.0)
+    assert any(r.lead for r in probes), (
+        f"fixture did not hang, so the refusal below proves nothing: "
+        f"{[r.model_dump() for r in probes]}")
+    assert all(not r.detected and r.confidence == 0.0 for r in probes)
+    assert findings == [], (
+        f"the arsenal promoted a timing hang to a confirmed desync FACT: "
+        f"{[f.model_dump() for f in findings]}")
 
 
 def test_cswsh_confirmed_through_the_arsenal() -> None:

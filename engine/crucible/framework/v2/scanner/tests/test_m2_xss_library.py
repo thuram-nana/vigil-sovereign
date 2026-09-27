@@ -496,3 +496,83 @@ def test_container_escaping_payload_still_confirms_out_of_noscript() -> None:
     confirmed = _confirm(compile_entry(_by_id("m2-xss-tag-textarea-newtag")), _noscript_container)
     assert confirmed is not None
     assert confirmed.confirmed_by is OracleKind.REFLECTION_CONTEXT
+
+
+# ---------------------------------------------------------------------------
+# RED-PEN B1 (END-TO-END) — the lexer desync, through confirm_finding +
+# OracleVerifier, against a live loopback page.
+#
+# `_json_script_safe` above is the canonical CORRECT defence and the suite already
+# asserts it never confirms. Add ONE benign regex literal containing an apostrophe
+# — `/(\w+)'s\b/g`, the sort of thing a real page carries to render possessives —
+# and the whole assertion collapsed: MEASURED on 1ccd18a5, 4 of the 17 m2 entries
+# minted a High xss FACT at conf 0.90 through the full authority, certificate
+# evidence reading "injection into an executable position PROVEN". It was not
+# proven. The apostrophe opened a phantom string state and the opening quote of the
+# JSON literal closed it, putting the escaped value at apparent code position.
+# ---------------------------------------------------------------------------
+
+
+def _json_script_safe_with_regex(v: str) -> str:
+    """`_json_script_safe` plus ONE benign possessive-matching regex ahead of it.
+    The page is exactly as SAFE as its twin: nothing in the value can terminate the
+    element or the literal."""
+    import json as _json
+
+    lit = (_json.dumps(v).replace("<", "\\u003c").replace(">", "\\u003e")
+           .replace("&", "\\u0026").replace("/", "\\/"))
+    return ("<html><body><div id=app></div>"
+            "<script>var POSSESSIVE = /(\\w+)'s\\b/g;\n"
+            f"window.__BOOTSTRAP__ = {{\"query\": {lit}}};</script></body></html>")
+
+
+@pytest.mark.parametrize("entry_id", _CASE_IDS)
+def test_json_script_plus_a_benign_regex_never_confirms_xss(entry_id: str) -> None:
+    confirmed = _confirm(compile_entry(_by_id(entry_id)), _json_script_safe_with_regex)
+    assert confirmed is None, (
+        f"{entry_id} minted a {getattr(confirmed, 'severity', '?')} FACT at "
+        f"{getattr(confirmed, 'confidence', 0):.2f} against a correctly json_script-escaped "
+        f"page that merely contains a regex literal"
+    )
+
+
+def _src_bearing_script(v: str) -> str:
+    return f'<html><body><script src="/app.js">var q = {v};</script></body></html>'
+
+
+# This payload OPENS with `</script>`, so it genuinely TERMINATES the element and
+# the `<script>` it then opens is a real, live, src-less element — it must still
+# confirm (see the companion assertion below).
+#
+# `m2-xss-script-title-close` and `m2-xss-script-svg-nested` deliberately do NOT
+# belong here: their `<script>` tag sits INSIDE the outer element's raw text, which
+# a browser does not parse as markup, and the outer element ignores that text
+# because it bears `src`. Both of them DID confirm before the B2 fix.
+_SCRIPT_ELEMENT_ESCAPERS = ("m2-xss-script-close-reopen",)
+
+
+@pytest.mark.parametrize(
+    "entry_id", [e for e in _CASE_IDS if e not in _SCRIPT_ELEMENT_ESCAPERS])
+def test_a_src_bearing_script_never_confirms_xss_end_to_end(entry_id: str) -> None:
+    """RED-PEN B2 end-to-end: a `<script src=...>` never evaluates its child text, so
+    a reflection CONFINED to that child text cannot be an xss FACT however it lands."""
+    confirmed = _confirm(compile_entry(_by_id(entry_id)), _src_bearing_script)
+    assert confirmed is None, f"{entry_id} minted a FACT inside a src-bearing <script>"
+
+
+@pytest.mark.parametrize("entry_id", _SCRIPT_ELEMENT_ESCAPERS)
+def test_a_payload_that_leaves_the_src_bearing_script_still_confirms(entry_id: str) -> None:
+    """The mutation control for the `src` rule: it must not cost a real detection. A
+    payload that CLOSES the element reaches live markup outside it and still mints."""
+    confirmed = _confirm(compile_entry(_by_id(entry_id)), _src_bearing_script)
+    assert confirmed is not None, f"{entry_id} stopped confirming after the src fix"
+    assert confirmed.confirmed_by is OracleKind.REFLECTION_CONTEXT
+
+
+def test_the_raw_script_splice_still_confirms_end_to_end() -> None:
+    """The mutation control for both B1 and B2 at the end-to-end layer: the SAME
+    entry that the two negatives above must refuse still mints against a genuinely
+    vulnerable raw splice, so neither negative is vacuous."""
+    confirmed = _confirm(compile_entry(_by_id("m2-xss-script-string-break")), _script_raw)
+    assert confirmed is not None
+    assert confirmed.confirmed_by is OracleKind.REFLECTION_CONTEXT

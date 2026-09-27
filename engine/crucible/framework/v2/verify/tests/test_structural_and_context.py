@@ -16,6 +16,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 import html as _html
 
 from framework.v2.verify.oracles import (
@@ -188,3 +190,147 @@ def test_marker_in_inert_attribute_does_not_fire() -> None:
 
 def test_marker_absent_does_not_fire() -> None:
     assert not reflection_context_oracle(_MARKER, "<html>nothing here</html>").fired
+
+
+# ---------------------------------------------------------------------------
+# RED-PEN B1 — the JS lexer manufactured FACTs.
+#
+# The old `_js_code_position` docstring claimed: "Regex literals are NOT modelled:
+# every misparse biases toward NOT-code -> NOT-firing. The failure direction is a
+# missed detection, never a manufactured FACT." REFUTED. With no regex-literal
+# state, an apostrophe inside a regex literal opens a PHANTOM string state, and the
+# OPENING quote of the next REAL string CLOSES it — leaving that real string's
+# contents at apparent code position. One quote of desync.
+#
+# Each page below was MEASURED on 1ccd18a5 as fired=True, conf=0.90,
+# conclusive=True, context="script"; node v22 `vm.runInNewContext` executes nothing
+# in any of them. They must now be non-firing, NON-CONCLUSIVE advisories.
+# ---------------------------------------------------------------------------
+
+_LEXER_AMBIGUITY_PAGES: dict[str, str] = {
+    # a regex literal whose BODY is the marker: `/MARKER/i` is data, not code
+    "regex_flag_suffix":
+        f"<html><body><script>var re = /{_MARKER}/i; if (re.test(q)) hl(q);"
+        "</script></body></html>",
+    # the one-quote desync: the apostrophe in /it's/ opens a phantom string that the
+    # opening quote of 'MARKER' then closes
+    "regex_apostrophe":
+        f"<html><body><script>var re = /it's/; var q = '{_MARKER}';</script></body></html>",
+    # the same desync with a double quote inside a character class
+    "regex_double_quote":
+        f'<html><body><script>var re = /["]/; var q = "{_MARKER}";</script></body></html>',
+    # Annex B SingleLineHTMLOpenComment: `<!--` starts a line comment in a classic script
+    "annexb_open_comment":
+        f"<html><body><script><!-- var q = {_MARKER}\n//--></script></body></html>",
+    # Annex B HTMLCloseComment
+    "annexb_close_comment":
+        f"<html><body><script>\n--> {_MARKER}\n</script></body></html>",
+    # a template substitution whose body contains a nested backtick: the same
+    # one-quote desync through a construct the lexer does not model
+    "template_substitution":
+        "<html><body><script>var t = `${'`'}`; var q = '" + _MARKER
+        + "';</script></body></html>",
+}
+
+
+@pytest.mark.parametrize("name", sorted(_LEXER_AMBIGUITY_PAGES))
+def test_lexer_ambiguity_never_mints_a_script_fact(name: str) -> None:
+    sig = reflection_context_oracle(_MARKER, _LEXER_AMBIGUITY_PAGES[name])
+    assert not sig.fired, f"{name}: manufactured a FACT — {sig.evidence}"
+    assert sig.confidence == 0.0
+    # a downgrade, not a clean bill of health: INCONCLUSIVE is recoverable,
+    # a manufactured FACT is not.
+    assert not sig.conclusive, f"{name}: claimed a decisive verdict it cannot support"
+    assert sig.observed["context"] == "script_lexer_ambiguous", sig.observed
+    assert "FAILS CLOSED" in sig.evidence
+
+
+def test_unambiguous_script_code_position_still_fires() -> None:
+    """The mutation control for the fail-closed downgrade: a script whose text holds
+    NO regex candidate, NO Annex B comment and NO template substitution before the
+    marker is still adjudicated, and a real breakout still mints."""
+    body = f"<html><body><script>var x = ''-{_MARKER}-'';</script></body></html>"
+    sig = reflection_context_oracle(_MARKER, body)
+    assert sig.fired and sig.observed["context"] == "script"
+    # ... and a string literal in the same unambiguous script is still a clean advisory
+    safe = f"<html><body><script>var x = '{_MARKER}';</script></body></html>"
+    assert reflection_context_oracle(_MARKER, safe).observed["context"] == "script_string_literal"
+
+
+def test_a_division_before_the_marker_costs_the_detection_by_design() -> None:
+    """The stated COST of failing closed. A `/` at apparent code position is a regex
+    literal or a division and this lexer cannot tell which, so a genuine breakout
+    downstream of ANY such slash is downgraded to an advisory. That is a missed
+    detection — recoverable, and the trade this fix deliberately makes."""
+    body = f"<html><body><script>var r = a / b; var x = ''-{_MARKER}-'';</script></body></html>"
+    sig = reflection_context_oracle(_MARKER, body)
+    assert not sig.fired
+    assert sig.observed["context"] == "script_lexer_ambiguous"
+    assert sig.observed["detail"] == "regex_literal"
+    assert not sig.conclusive       # the finding stays OPEN, it is not closed as clean
+
+
+def test_split_script_text_is_ambiguity_not_a_breakout() -> None:
+    """A continuation data chunk starts mid-token, so "code position" is unknowable
+    from it. Fail closed rather than restart the lexer in a known-wrong state."""
+    from framework.v2.verify.oracles import _ReflectionScanner
+
+    # HTMLParser buffers CDATA until it sees `</script`, so a plain two-`feed()`
+    # split is re-joined into one chunk; the callbacks are driven directly to
+    # exercise the guard for the case where it does not.
+    scanner = _ReflectionScanner(_MARKER.lower())
+    scanner.handle_starttag("script", [])
+    scanner.handle_data("var q = '")
+    scanner.handle_data(f"{_MARKER}';")
+    scanner.handle_endtag("script")
+    assert scanner.context is None
+    assert scanner.advisory == "script_lexer_ambiguous"
+    assert scanner.advisory_detail == "split_script_text"
+
+
+# ---------------------------------------------------------------------------
+# RED-PEN B2 — two more false-FACT generators.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("attr", ["on-click", "once", "online", "only", "onyx", "on"])
+def test_an_on_prefixed_non_handler_never_fires(attr: str) -> None:
+    """`is_handler = a.startswith("on")` is not a test for anything a browser runs.
+    MEASURED firing at conf 0.90 on `on-click`, `once` and `online` — none is an HTML
+    event-handler content attribute and no browser executes any of them."""
+    body = f'<html><body><div {attr}="{_MARKER}">x</div></body></html>'
+    sig = reflection_context_oracle(_MARKER, body)
+    assert not sig.fired, f"{attr}: fired on a non-handler attribute — {sig.evidence}"
+    assert sig.observed["context"] == "inert"
+
+
+@pytest.mark.parametrize("attr", ["onclick", "onerror", "onload", "onmouseover",
+                                  "ontoggle", "onfocus", "onpointerdown", "ononline"])
+def test_real_event_handler_attributes_still_fire(attr: str) -> None:
+    """The mutation control for the closed set: the handlers that ARE handlers, and
+    whose whole value the attacker owns, must still mint."""
+    body = f"<html><body><div {attr}={_MARKER}>x</div></body></html>"
+    sig = reflection_context_oracle(_MARKER, body)
+    assert sig.fired, f"{attr}: a real event handler stopped firing"
+    assert sig.observed["context"] == f"js_attribute:{attr}"
+
+
+def test_a_src_bearing_script_never_fires_on_its_child_text() -> None:
+    """Per the HTML spec a `<script src=...>` IGNORES its child text — the element's
+    inline content is never evaluated. MEASURED firing at conf 0.90 before the fix."""
+    body = f'<html><body><script src="/app.js">{_MARKER}();</script></body></html>'
+    sig = reflection_context_oracle(_MARKER, body)
+    assert not sig.fired, sig.evidence
+    assert sig.observed["context"] == "script_src_ignored_body"
+    assert not sig.conclusive
+    # the identical script WITHOUT src is a real breakout and must still fire
+    live = f"<html><body><script>{_MARKER}();</script></body></html>"
+    assert reflection_context_oracle(_MARKER, live).observed["context"] == "script"
+
+
+def test_a_javascript_url_src_is_unaffected_by_the_script_src_rule() -> None:
+    """The `src` rule is about a <script> element's CHILD TEXT. A `javascript:` URL in
+    an `src` attribute of any element is still an executable value the attacker can
+    own, and must still fire."""
+    body = f'<html><body><a href="javascript:{_MARKER}">go</a></body></html>'
+    sig = reflection_context_oracle(_MARKER, body)
+    assert sig.fired and sig.observed["context"] == "js_attribute:href"
