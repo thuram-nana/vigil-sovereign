@@ -122,12 +122,15 @@ def _gated_web_send(slug: str, *, timeout: float = 8.0):
     from urllib.parse import urlsplit
 
     from .body_decode import MAX_RAW_BYTES, decode_body
-    from .dns_pin import pinned_handlers, resolve_and_validate
+    from .dns_pin import pinned_handlers
+    from .egress_floor import pin_egress   # the SHARED never-liftable floor (same helper as the S2 arms)
 
     def _address_authorized(address: str) -> bool:
         """Re-ask the SAME gate about the resolved address. Reusing the charter decision (rather than a
         second, looser rule) is what keeps the pin honest: an address the gate would refuse as a target is
-        refused as a destination."""
+        refused as a destination. NOTE this is CHARTER-relative and therefore not sufficient on its own —
+        ``ethics.host_matches_scope`` is pure string matching, so a charter that lists a metadata/link-local
+        address satisfies it. ``pin_egress`` runs the charter-INDEPENDENT egress floor underneath it."""
         scheme = "https" if str(address).count(":") > 1 else "http"   # bracket IPv6 for the URL form
         literal = f"[{address}]" if str(address).count(":") > 1 else address
         return _authorize(f"http://{literal}/", slug) is None
@@ -156,12 +159,14 @@ def _gated_web_send(slug: str, *, timeout: float = 8.0):
         # DNS time-of-check/time-of-use: the gate authorized a NAME, but urllib would resolve that name
         # again at connect time, so nothing binds the authorization to the endpoint actually reached
         # (rebinding, a short TTL, a poisoned resolver, or a multi-A record with one address out of scope).
-        # Resolve once, require EVERY address to satisfy the same charter scope the gate used, then PIN the
-        # connection to the validated address while still presenting the original hostname for TLS/Host.
+        # Resolve once, run the NEVER-LIFTABLE egress floor over every resolved address, require EVERY
+        # address to satisfy the same charter scope the gate used, then PIN the connection to the validated
+        # address while still presenting the original hostname for TLS/Host.
         parts = urlsplit(req.url)
         target_host = parts.hostname or ""
         target_port = parts.port or (443 if parts.scheme == "https" else 80)
-        resolution = resolve_and_validate(target_host, target_port, _address_authorized)
+        resolution = pin_egress(target_host, target_port, slug=slug,
+                                address_authorized=_address_authorized)
         if not resolution.allowed:
             state["no_channel"] += 1
             refused = dict(_EMPTY)

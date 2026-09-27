@@ -20,14 +20,35 @@ NO victim is ever poisoned: both requests, on both connections, are VIGIL's OWN 
 "poisoned next request" is VIGIL's own. Shared-pool desyncs that would need a real co-tenant victim to observe
 stay a LEAD (not driven here).
 
+WHAT THE DIFFERENTIAL ESTABLISHES, AND WHAT IT DOES NOT. A fire is sound as a CONFLICT-ATTRIBUTABLE LEAK OF
+PRIOR-REQUEST BYTES ACROSS A RESPONSE BOUNDARY — the framing conflict is the only variable between the legs,
+so it caused the echo. It does NOT discriminate the MECHANISM. A WAF-style origin that REJECTS the ambiguous
+framing (say a 400) and then, on that same connection, emits a diagnostic quoting the offending request bytes
+produces exactly the same canary differential as a genuine back-end desync. Both are real HTTP request-framing
+defects and neither observation is fabricated, but a reader must not take a fire as proof that the back-end
+consumed the smuggled prefix as a request. Separating the two needs a probe whose smuggled prefix has an
+observable side effect DISTINCT from being quoted back (e.g. a distinct method/path whose response STATUS
+LINE — not body — could only come from the back-end serving it); that discriminator is not built here, so the
+branch's registry ``evidence``/``limitation`` state the narrower claim. NOTE: the oracle's own evidence STRING
+(``verify/oracles.py:smuggling_desync_oracle``) still phrases the fire as "the back-end treated the smuggled
+prefix as the start of the next request"; that file is owned elsewhere and is the residual for this gap.
+
 CONCRETE SECURITY REQUIREMENT (audit re-gate). Request smuggling needs EXACT bytes on the wire, so it drops to
 a raw socket below :class:`SovereignHttpxTransport`. A raw socket that skipped the sovereign transport would
 be an egress hole, so :func:`_gated_raw_burst` re-gates every burst through ``agents.scope_gate.validate_action``
 (the protected-domain floor / charter / scope / posture chain) AND the URL-shaped ``reachability_cloud._authorize``
-gate (kill-switch → single-host → ACTIVE_RECON → charter scope), THEN DNS-pins the connection to the validated
-address (``dns_pin.resolve_and_validate``) and connects the raw socket to that PINNED IP — so no byte leaves the
-box for an out-of-scope / kill-switched / rebinding destination. A refusal means VIGIL never observed the
-target: no channel, never a false CLEAN.
+gate (kill-switch → single-host → ACTIVE_RECON → charter scope), THEN runs the NEVER-LIFTABLE egress floor over
+every resolved address and pins the connection to the validated literal (``egress_floor.pin_egress``, the ONE
+shared helper this and ``transport_redrive`` both use) — so no byte leaves the box for an out-of-scope /
+kill-switched / rebinding destination, nor for a metadata/link-local address a charter listing tried to
+authorise. A refusal means VIGIL never observed the target: no channel, never a false CLEAN.
+
+WHY THE FLOOR IS SEPARATE FROM THE CHARTER GATE. Both gates above bottom out in ``ethics.host_matches_scope``,
+which is pure string matching — it resolves nothing and classifies no address. The pin was therefore
+CHARTER-relative, not FLOOR-relative: a charter listing ``169.254.169.254`` satisfied the string match and two
+raw connects reached cloud instance metadata. ``vigil_gateway.denylist`` declares that tier charter-INDEPENDENT
+("denied even if an operator lists them"), and ``egress_floor`` is where that declaration is now enforced on
+this path.
 
 FATAL-2: every framework-touching import is FUNCTION-LOCAL — importing this module co-loads no offense engine.
 """
@@ -262,7 +283,7 @@ def _gated_raw_burst(origin_url: str, first_payload: bytes, follow_up: bytes, *,
     from framework.v2.agents.scope_gate import validate_action  # noqa: PLC0415 — the ScopeDecision gate
     from framework.v2.verify.reachability_cloud import _authorize  # noqa: PLC0415 — URL-shaped active-recon gate
 
-    from .dns_pin import resolve_and_validate  # noqa: PLC0415
+    from .egress_floor import pin_egress  # noqa: PLC0415 — the SHARED never-liftable floor + connect-pin
 
     empty = {"channel": False, "status": None, "reason": "", "body": ""}
 
@@ -285,16 +306,21 @@ def _gated_raw_burst(origin_url: str, first_payload: bytes, follow_up: bytes, *,
     host = sp.hostname or ""
     port = sp.port or (443 if sp.scheme == "https" else 80)
 
-    # 3. DNS-pin: resolve ONCE, require EVERY address to satisfy the SAME gate, and connect the raw socket to
-    #    the validated address — closing the rebinding / short-TTL / poisoned-resolver window a raw connect
-    #    would otherwise reopen (the sovereign transport pins for httpx; we pin the raw socket the same way).
+    # 3. EGRESS FLOOR + DNS-pin (the ONE shared helper, ``live.egress_floor.pin_egress``): resolve ONCE, run
+    #    the NEVER-LIFTABLE gateway denylist over EVERY resolved address, re-ask the SAME charter gate about
+    #    each of them, and connect the raw socket to the validated literal. The charter re-check alone was
+    #    NOT enough: it bottoms out in ``ethics.host_matches_scope``, pure string matching, so a charter that
+    #    LISTS ``169.254.169.254`` (an injected or mistaken scope row) authorised two raw connects straight at
+    #    cloud instance metadata — the exact case ``vigil_gateway.denylist`` declares charter-independent.
+    #    The floor runs FIRST and is not liftable by any scope listing; the charter predicate is kept on top
+    #    of it, unchanged, so scope remains necessary as well as insufficient.
     def _addr_authorized(address: str) -> bool:
         literal = f"[{address}]" if str(address).count(":") > 1 else address
         return _authorize(f"http://{literal}/", slug) is None
 
-    resolution = resolve_and_validate(host, port, _addr_authorized)
+    resolution = pin_egress(host, port, slug=slug, address_authorized=_addr_authorized)
     if not resolution.allowed:
-        return dict(empty), f"dns-pin refused: {resolution.refused_reason}"
+        return dict(empty), f"egress-floor/dns-pin refused: {resolution.refused_reason}"
 
     try:
         s = socket.create_connection((resolution.pinned, port), timeout=timeout)
@@ -367,7 +393,8 @@ def smuggling_redrive(url: str, *, slug: str, engagement_slug: str, signers: "li
         conflict_leg, why_c = _gated_raw_burst(origin_url, _conflict_first(technique, host, canary), follow_up,
                                                slug=slug, posture=posture, timeout=timeout)
         if why_c and not conflict_leg["channel"]:
-            if why_c.startswith(("validate_action refused", "reachability gate refused", "dns-pin refused")):
+            if why_c.startswith(("validate_action refused", "reachability gate refused",
+                                 "egress-floor/dns-pin refused")):
                 res.refused = True
             res.inconclusive.append((technique, f"conflict leg: {why_c}"))
             res.notes.append(f"{technique} conflict leg not observed: {why_c}")

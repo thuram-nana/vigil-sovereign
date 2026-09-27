@@ -393,6 +393,37 @@ def _tls_negotiable(port: int) -> bool:
         return False
 
 
+def _cert_der(certfile: str) -> bytes:
+    """The leaf DER of a PEM bundle written by :func:`_make_cert` — the same bytes a real peer presents."""
+    from cryptography import x509
+    from cryptography.hazmat.primitives import serialization
+
+    pem = Path(certfile).read_bytes()
+    return x509.load_pem_x509_certificate(pem).public_bytes(serialization.Encoding.DER)
+
+
+def _force_negotiation(monkeypatch: pytest.MonkeyPatch, *, version: str, cipher: str, bits: int,
+                       certfile: str) -> None:
+    """Make the PINNED TLS connector return a specific negotiation, so the positive coverage below is
+    UNCONDITIONAL.
+
+    Why this exists: both weak-TLS positives used to sit behind ``pytest.skip`` gated on whether the HOST's
+    OpenSSL would still negotiate the weakness. On this machine it does (0 skips), but a stricter CI
+    OpenSSL would SILENTLY delete the only positive coverage for ``weak_tls`` and ``weak_crypto_artifact``
+    and the suite would still go green. The substituted value is ONLY the four bytes-on-the-wire facts a
+    handshake yields; every layer that decides anything — the gate chain, the never-liftable egress floor,
+    the connect-pin, ``capture_tls_handshake``, the context builders, the deterministic oracle, ``admit``,
+    the signing and the offline re-verification — is the real one, unchanged."""
+    from vigil_integration.live import egress_floor
+
+    der = _cert_der(certfile)
+
+    def _synthetic(address, host, port, timeout):
+        return version, cipher, bits, der
+
+    monkeypatch.setattr(egress_floor, "_tls_socket_connect", _synthetic)
+
+
 def test_a_deprecated_tls_protocol_mints_a_tls_weakness_fact(monkeypatch, tmp_path):
     """A REAL TLS 1.0 loopback endpoint: VIGIL negotiates it ITSELF and the deterministic tls_weakness oracle
     fires over VIGIL's OWN retained negotiation, minting on ``tls_weakness.tls_handshake``."""
@@ -402,7 +433,10 @@ def test_a_deprecated_tls_protocol_mints_a_tls_weakness_fact(monkeypatch, tmp_pa
     cert = _make_cert(tmp_path / "strong-key.pem", bits=2048)
     with _tls_endpoint(cert, version=ssl.TLSVersion.TLSv1) as port:
         if not _tls_negotiable(port):
-            pytest.skip("this OpenSSL refuses TLSv1.0 outright — the weakness is not constructible here")
+            # A stricter OpenSSL cannot SPEAK TLS 1.0, so the endpoint cannot be planted for real. The
+            # coverage stays UNCONDITIONAL: the same admission path is driven with the negotiation itself
+            # substituted (see _force_negotiation) rather than skipped away.
+            _force_negotiation(monkeypatch, version="TLSv1", cipher="AES128-SHA", bits=128, certfile=cert)
         mr = _mint(tmp_path, signers)({"id": "tls-weak", "bug_class": "weak_tls",
                                        "endpoint": f"https://127.0.0.1:{port}/"})
     assert mr is not None and mr.is_fact, f"expected a TLS_WEAKNESS FACT; got {mr}"
@@ -427,7 +461,10 @@ def test_an_undersized_certificate_key_mints_a_weak_crypto_fact(monkeypatch, tmp
     cert = _make_cert(tmp_path / "short-key.pem", bits=1024)
     with _tls_endpoint(cert) as port:
         if not _tls_negotiable(port):
-            pytest.skip("this OpenSSL refuses a 1024-bit leaf outright — the weakness is not constructible here")
+            # As above: a build that refuses a 1024-bit leaf outright cannot host the weakness, so the
+            # negotiation is substituted and the rest of the admission path runs for real.
+            _force_negotiation(monkeypatch, version="TLSv1.3", cipher="TLS_AES_256_GCM_SHA384", bits=256,
+                               certfile=cert)
         mr = _mint(tmp_path, signers)({"id": "tls-shortkey", "bug_class": "weak_crypto_artifact",
                                        "endpoint": f"https://127.0.0.1:{port}/"})
     assert mr is not None and mr.is_fact, f"expected a weak-crypto FACT; got {mr}"
@@ -436,6 +473,52 @@ def test_an_undersized_certificate_key_mints_a_weak_crypto_fact(monkeypatch, tmp
     fact = res.facts[0]
     firing = {a[0] for a in res.admissions if a[1] == "FACT"}
     assert firing == {"weak_crypto.cert_signature_algorithm"}, res.admissions
+    _assert_reverifies_and_rejects_tamper(fact, res.contexts[fact.finding_ref], tr, tmp_path)
+
+
+def test_the_two_weak_tls_positives_have_openssl_independent_coverage(monkeypatch, tmp_path):
+    """FINDING-7's standing guarantee. The two positives above prefer a REAL planted weak endpoint, but a
+    stricter OpenSSL cannot host one; this control drives the SAME admission path with the negotiation
+    substituted, so ``weak_tls`` and ``weak_crypto_artifact`` keep a positive control on EVERY build. It
+    also exercises the substitution helper itself, which on a permissive host the two tests above never
+    reach. Only the four handshake facts are synthetic; the gate chain, the egress floor, the pin, the
+    oracle, admission, signing and the OFFLINE re-verification are all the real ones."""
+    _grant_active_recon(monkeypatch)
+    _charter(tmp_path, "127.0.0.1")
+    signers, tr = _signers_and_trust()
+
+    weak_proto_cert = _make_cert(tmp_path / "uncond-strong-key.pem", bits=2048)
+    with _tls_endpoint(weak_proto_cert) as port:
+        _force_negotiation(monkeypatch, version="TLSv1", cipher="AES128-SHA", bits=128,
+                           certfile=weak_proto_cert)
+        mr = _mint(tmp_path, signers)({"id": "uncond-tls-weak", "bug_class": "weak_tls",
+                                       "endpoint": f"https://127.0.0.1:{port}/"})
+    assert mr is not None and mr.is_fact, mr
+    res = mr.result
+    assert {a[0] for a in res.admissions if a[1] == "FACT"} == {"tls_weakness.tls_handshake"}, res.admissions
+    fact = res.facts[0]
+    _assert_reverifies_and_rejects_tamper(fact, res.contexts[fact.finding_ref], tr, tmp_path)
+
+
+def test_the_weak_crypto_positive_has_openssl_independent_coverage(monkeypatch, tmp_path):
+    """The twin of the above for the leaf-certificate branch: a modern protocol carrying an undersized
+    1024-bit leaf, admitted on ``weak_crypto.cert_signature_algorithm`` on any OpenSSL."""
+    _grant_active_recon(monkeypatch)
+    _charter(tmp_path, "127.0.0.1")
+    signers, tr = _signers_and_trust()
+
+    short_cert = _make_cert(tmp_path / "uncond-short-key.pem", bits=1024)
+    strong_cert = _make_cert(tmp_path / "uncond-host.pem", bits=2048)
+    with _tls_endpoint(strong_cert) as port:
+        _force_negotiation(monkeypatch, version="TLSv1.3", cipher="TLS_AES_256_GCM_SHA384", bits=256,
+                           certfile=short_cert)
+        mr = _mint(tmp_path, signers)({"id": "uncond-tls-shortkey", "bug_class": "weak_crypto_artifact",
+                                       "endpoint": f"https://127.0.0.1:{port}/"})
+    assert mr is not None and mr.is_fact, mr
+    res = mr.result
+    assert {a[0] for a in res.admissions if a[1] == "FACT"} == {"weak_crypto.cert_signature_algorithm"}, \
+        res.admissions
+    fact = res.facts[0]
     _assert_reverifies_and_rejects_tamper(fact, res.contexts[fact.finding_ref], tr, tmp_path)
 
 
@@ -453,7 +536,13 @@ def test_a_strong_tls_endpoint_mints_nothing(monkeypatch, tmp_path):
     assert mr is not None and not mr.is_fact and mr.result.n_facts == 0, mr.result.admissions
     verdicts = {a[0]: a[1] for a in mr.result.admissions}
     assert verdicts.get("weak_crypto.cert_signature_algorithm") == Verdict.INCONCLUSIVE.value
-    assert verdicts.get("tls_weakness.tls_handshake") in (Verdict.CLEAN.value, Verdict.INCONCLUSIVE.value)
+    # PINNED to the MEASURED verdict, not to a disjunction. ``tls_weakness.tls_handshake`` is registered
+    # clean_capable, but the oracle's no-weakness return is built WITHOUT conclusive=True, so probe_verdict
+    # can never say "clean" and admit() can only reach INCONCLUSIVE (see that branch's blocking_work). The
+    # old ``in (CLEAN, INCONCLUSIVE)`` could not fail either way — it would have waved through a newly
+    # emitted FALSE clean exactly as readily as the honest INCONCLUSIVE. When the conclusive-negative work
+    # lands, THIS is the assertion that must be deliberately updated.
+    assert verdicts.get("tls_weakness.tls_handshake") == Verdict.INCONCLUSIVE.value, mr.result.admissions
 
 
 def test_a_dead_tls_port_mints_nothing(monkeypatch, tmp_path):
@@ -665,3 +754,432 @@ def test_the_smuggling_arm_is_refused_without_a_signed_charter(monkeypatch, tmp_
                                        "endpoint": url})
     assert mr is not None and not mr.is_fact
     assert mr.result.refused is True and mr.result.n_facts == 0
+
+
+# =======================================================================================================
+# THE NEVER-LIFTABLE EGRESS FLOOR (live/egress_floor.py) — the BLOCK-1 / BLOCK-1b controls.
+#
+# Both re-drive arms used to compose only string-matching gates (agents.scope_gate.validate_action +
+# verify.reachability._authorize, which bottom out in ethics.host_matches_scope). Nothing resolved at gate
+# time, so an in-scope NAME that resolved to 169.254.169.254 CONNECTED AND MINTED A SIGNED FACT, and a
+# charter that directly LISTED the literal connected too — the exact case the gateway denylist declares
+# impossible ("denied even if an operator lists them"). One shared helper now closes it at every site.
+#
+# EVERY control below asserts POSITIVELY that the floor RAN and REFUSED (the (address, denied, reason) row
+# it records), never merely that nothing came back. Deleting the guard turns each of these red.
+# =======================================================================================================
+
+_IMDS = "169.254.169.254"
+_IMDS_V4MAPPED = "::ffff:169.254.169.254"
+_RFC1918 = "10.11.12.13"
+
+
+def _charter_hosts(tmp_path: Path, *hosts: str, slug: str = "alpha") -> None:
+    """A signed charter whose scope table lists EVERY given host (``_charter`` handles only one)."""
+    d = tmp_path / slug
+    d.mkdir(parents=True, exist_ok=True)
+    rows = "".join(f"| `{h}` | Host | Yes |\n" for h in hosts)
+    (d / "charter.md").write_text(
+        f"# Engagement charter — `{slug}`\n\n**Status:** Final\n\n## 1. Operator attestation\n\n"
+        f"Signed: `tester`     Date: `2026-09-26`\n\n## 2. In-scope systems\n\n"
+        f"| Host | Notes | Auth |\n|---|---|---|\n{rows}\n"
+        f"## 7. Posture\n\n- [x] **TEST**\n", encoding="utf-8")
+
+
+def _fake_dns(monkeypatch: pytest.MonkeyPatch, mapping: "dict[str, str]") -> None:
+    """Make the named hosts resolve to the given addresses; everything else resolves for real."""
+    real = socket.getaddrinfo
+
+    def _gai(host, port, *a, **kw):
+        addr = mapping.get(str(host))
+        if addr is None:
+            return real(host, port, *a, **kw)
+        family = socket.AF_INET6 if ":" in addr else socket.AF_INET
+        sockaddr = (addr, int(port or 0), 0, 0) if family is socket.AF_INET6 else (addr, int(port or 0))
+        return [(family, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", sockaddr)]
+
+    monkeypatch.setattr(socket, "getaddrinfo", _gai)
+
+
+def _count_every_connector(monkeypatch: pytest.MonkeyPatch) -> list:
+    """Record EVERY connector this slice can reach: the engine's TCP and TLS defaults AND the pinned
+    connectors' own primitives, plus the raw ``socket.create_connection`` the smuggling burst uses. A
+    control that asserts an EMPTY list is therefore asserting that no path opened a socket, not just that
+    one particular path did not."""
+    from framework.v2.verify import reachability
+    from framework.v2.verify import tls as tls_mod
+
+    from vigil_integration.live import egress_floor
+
+    calls: list = []
+
+    def _tcp(host, port, timeout, read_banner):
+        calls.append((host, port))
+        raise OSError("the test connector must not be reached")
+
+    def _tls(host, port, timeout):
+        calls.append((host, port))
+        raise OSError("the test connector must not be reached")
+
+    def _pinned_tls(address, host, port, timeout):
+        calls.append((address, port))
+        raise OSError("the test connector must not be reached")
+
+    def _raw(address, timeout=None, *a, **kw):
+        calls.append(tuple(address))
+        raise OSError("the test connector must not be reached")
+
+    monkeypatch.setattr(reachability, "_socket_connect", _tcp)
+    monkeypatch.setattr(tls_mod, "_tls_connect", _tls)
+    monkeypatch.setattr(egress_floor, "_tls_socket_connect", _pinned_tls)
+    monkeypatch.setattr(socket, "create_connection", _raw)
+    return calls
+
+
+def _floor_refusals(res) -> list:
+    """The (address, reason) pairs the floor DENIED on this result — the positive proof it ran."""
+    return [(a, why) for a, denied, why in (getattr(res, "egress_checked", None) or []) if denied]
+
+
+def _drive_transport(tmp_path, signers, host, *, port=80, cls="service_reachable"):
+    from vigil_integration.live.transport_redrive import transport_redrive
+    return transport_redrive("", claimed_class=cls, slug="alpha", engagement_slug="alpha",
+                             signers=signers, host=host, port=port, protocol="tcp", timeout=1.0)
+
+
+# ---- transport arm ------------------------------------------------------------------------------------
+
+def test_an_in_scope_name_resolving_to_cloud_metadata_is_refused_with_no_connector_call(monkeypatch,
+                                                                                        tmp_path):
+    """BLOCK-1. ``imds.corp.example`` is squarely in the signed charter scope, so BOTH string gates pass.
+    It resolves to the cloud instance-metadata address, which no charter may authorise."""
+    _grant_active_recon(monkeypatch)
+    _charter_hosts(tmp_path, "imds.corp.example")
+    _fake_dns(monkeypatch, {"imds.corp.example": _IMDS})
+    calls = _count_every_connector(monkeypatch)
+    signers, _tr = _signers_and_trust()
+
+    res = _drive_transport(tmp_path, signers, "imds.corp.example")
+
+    assert calls == [], f"a metadata destination must attempt NO connection; got {calls}"
+    assert res.n_facts == 0 and not res.admissions
+    assert res.refused is True
+    denied = _floor_refusals(res)
+    assert denied and denied[0][0] == _IMDS, f"the floor must have adjudicated {_IMDS}; got {res.egress_checked}"
+    assert "always-denied range" in denied[0][1]
+    assert res.pinned_address == "", "a refused target must never be pinned"
+
+
+def test_a_charter_that_directly_lists_a_tier1_floor_address_is_still_refused(monkeypatch, tmp_path):
+    """The denylist's own contract: 'A charter can NOT re-enable these; they are denied even if an operator
+    lists them.' A scope row naming the metadata address is far likelier an injection or a mistake than a
+    real intent, so the string gates passing is exactly why the floor exists."""
+    _grant_active_recon(monkeypatch)
+    _charter_hosts(tmp_path, _IMDS)
+    calls = _count_every_connector(monkeypatch)
+    signers, _tr = _signers_and_trust()
+
+    res = _drive_transport(tmp_path, signers, _IMDS)
+
+    assert calls == [], f"a charter listing cannot lift the floor; got {calls}"
+    assert res.refused is True and res.n_facts == 0
+    denied = _floor_refusals(res)
+    assert denied and denied[0][0] == _IMDS, res.egress_checked
+    # and the lift set really did contain the listed address — the floor refused DESPITE being asked to allow it
+    from vigil_integration.live.egress_floor import charter_allowed_ips
+    assert _IMDS in charter_allowed_ips("alpha"), "the charter really did authorise this IP; the floor overrode it"
+
+
+def test_an_ipv4_mapped_ipv6_spelling_of_the_metadata_address_is_refused(monkeypatch, tmp_path):
+    """``::ffff:169.254.169.254`` is the same destination wearing a v6 costume. The denylist unwraps embedded
+    IPv4; this proves the helper hands it the address in a form where that unwrap happens."""
+    _grant_active_recon(monkeypatch)
+    _charter_hosts(tmp_path, "v6imds.corp.example")
+    _fake_dns(monkeypatch, {"v6imds.corp.example": _IMDS_V4MAPPED})
+    calls = _count_every_connector(monkeypatch)
+    signers, _tr = _signers_and_trust()
+
+    res = _drive_transport(tmp_path, signers, "v6imds.corp.example")
+
+    assert calls == [], f"an IPv4-mapped metadata address must attempt NO connection; got {calls}"
+    assert res.refused is True and res.n_facts == 0
+    denied = _floor_refusals(res)
+    assert denied, res.egress_checked
+    assert denied[0][0] == _IMDS_V4MAPPED
+    assert _IMDS in denied[0][1], f"the unwrapped v4 address must be named in the refusal: {denied[0][1]}"
+
+
+def test_a_wildcard_scoped_name_resolving_into_rfc1918_is_refused(monkeypatch, tmp_path):
+    """The split-horizon / rebinding shape. ``*.corp.example`` is a legitimate wildcard scope, and
+    ``app.corp.example`` matches it, so both string gates pass — but a wildcard names no host to resolve, so
+    nothing in the charter authorises the private address it lands on. The target's OWN resolved IP is never
+    self-added to the lift set (that is precisely what would let a wildcard scope reach 10.x)."""
+    _grant_active_recon(monkeypatch)
+    _charter_hosts(tmp_path, "*.corp.example")
+    _fake_dns(monkeypatch, {"app.corp.example": _RFC1918})
+    calls = _count_every_connector(monkeypatch)
+    signers, _tr = _signers_and_trust()
+
+    res = _drive_transport(tmp_path, signers, "app.corp.example")
+
+    assert calls == [], f"an unauthorised private destination must attempt NO connection; got {calls}"
+    assert res.refused is True and res.n_facts == 0
+    denied = _floor_refusals(res)
+    assert denied and denied[0][0] == _RFC1918, res.egress_checked
+    assert "not in the charter-authorized allowlist" in denied[0][1]
+
+
+def test_a_charter_scoped_rfc1918_staging_host_still_works(monkeypatch, tmp_path):
+    """The other half of the contract: over-correcting into a dead path is also a defect. An EXACT scope
+    entry that resolves to an RFC1918 address puts that address in the charter-authorized lift set, so the
+    private tier lifts for it — while the metadata floor above stays unliftable."""
+    _grant_active_recon(monkeypatch)
+    _charter_hosts(tmp_path, "staging.corp.example")
+    _fake_dns(monkeypatch, {"staging.corp.example": _RFC1918})
+    calls = _count_every_connector(monkeypatch)
+    signers, _tr = _signers_and_trust()
+
+    res = _drive_transport(tmp_path, signers, "staging.corp.example")
+
+    assert res.refused is False, res.notes
+    assert _floor_refusals(res) == [], res.egress_checked
+    assert res.egress_checked and res.egress_checked[0][0] == _RFC1918, "the floor must still have RUN"
+    assert res.pinned_address == _RFC1918, "the connect must be pinned to the validated literal"
+    assert calls == [(_RFC1918, 80)], f"the capture must dial the PINNED literal exactly once; got {calls}"
+
+
+def test_an_authorized_loopback_target_still_mints(monkeypatch, tmp_path):
+    """Loopback engagements are a heavily-used legitimate mode. The floor hard-denies loopback by DEFAULT;
+    this path opts in via the denylist's own ``loopback_allowed_if_scoped``, which still requires the exact
+    loopback IP to be charter-authorized. A real FACT over a real open port proves the path is not dead."""
+    _grant_active_recon(monkeypatch)
+    _charter(tmp_path, "127.0.0.1")
+    signers, _tr = _signers_and_trust()
+    with _open_tcp_port() as port:
+        res = _drive_transport(tmp_path, signers, "127.0.0.1", port=port)
+    assert res.refused is False, res.notes
+    assert res.n_facts == 1, res.admissions
+    assert _floor_refusals(res) == [], res.egress_checked
+    assert res.egress_checked == [("127.0.0.1", False, "allowed (127.0.0.1 is a charter-authorized "
+                                                       "loopback target)")], res.egress_checked
+    assert res.pinned_address == "127.0.0.1"
+
+
+def test_an_unscoped_loopback_address_is_still_refused_by_the_floor(monkeypatch, tmp_path):
+    """The loopback opt-in is not a blanket exception: the EXACT address must be in the charter-authorized
+    set. Under a WILDCARD scope there is no concrete host to resolve into that set, so a matching name that
+    lands on loopback is refused — loopback lifts for an operator who NAMED the target, not for anything
+    whose string matches."""
+    _grant_active_recon(monkeypatch)
+    _charter_hosts(tmp_path, "*.corp.example")
+    _fake_dns(monkeypatch, {"lo.corp.example": "127.0.0.2"})
+    calls = _count_every_connector(monkeypatch)
+    signers, _tr = _signers_and_trust()
+
+    res = _drive_transport(tmp_path, signers, "lo.corp.example")
+
+    assert calls == [], calls
+    assert res.refused is True and res.n_facts == 0
+    denied = _floor_refusals(res)
+    assert denied and denied[0][0] == "127.0.0.2" and "loopback" in denied[0][1], res.egress_checked
+
+
+def test_the_tls_leg_is_pinned_and_floor_gated_too(monkeypatch, tmp_path):
+    """The TLS arm shares the chain: the metadata name is refused with no handshake, and an authorized
+    private host is dialled at the PINNED literal with the original hostname kept for SNI."""
+    _grant_active_recon(monkeypatch)
+    _charter_hosts(tmp_path, "imds.corp.example", "staging.corp.example")
+    _fake_dns(monkeypatch, {"imds.corp.example": _IMDS, "staging.corp.example": _RFC1918})
+    calls = _count_every_connector(monkeypatch)
+    signers, _tr = _signers_and_trust()
+
+    bad = _drive_transport(tmp_path, signers, "imds.corp.example", port=443, cls="weak_tls")
+    assert calls == [], f"a metadata TLS target must attempt NO handshake; got {calls}"
+    assert bad.refused is True and bad.n_facts == 0
+    assert [a for a, _w in _floor_refusals(bad)] == [_IMDS]
+
+    ok = _drive_transport(tmp_path, signers, "staging.corp.example", port=443, cls="weak_tls")
+    assert ok.refused is False, ok.notes
+    assert ok.pinned_address == _RFC1918
+    assert calls == [(_RFC1918, 443)], f"the TLS capture must dial the PINNED literal; got {calls}"
+
+
+def test_the_pinned_tls_connector_keeps_the_hostname_for_sni(monkeypatch):
+    """Pinning the transport must not silently change WHICH certificate the peer selects: the address is
+    substituted, the SNI name is not."""
+    from vigil_integration.live import egress_floor
+    seen: list = []
+    monkeypatch.setattr(egress_floor, "_tls_socket_connect",
+                        lambda address, host, port, timeout: seen.append((address, host, port)) or
+                        ("TLSv1.3", "X", 256, None))
+    egress_floor.pinned_tls_connector("10.0.0.9")("www.example.test", 443, 2.0)
+    assert seen == [("10.0.0.9", "www.example.test", 443)]
+
+
+# ---- the same battery on the smuggling site (BLOCK-1b: ONE shared helper, both sites) -------------------
+
+def _drive_smuggling(signers, url: str):
+    from vigil_integration.live.smuggling_redrive import smuggling_redrive
+    return smuggling_redrive(url, slug="alpha", engagement_slug="alpha", signers=signers, timeout=1.0)
+
+
+@pytest.mark.parametrize("label,scope_hosts,dns,target,expect_addr,expect_reason", [
+    ("in-scope name -> IMDS", ("imds.corp.example",), {"imds.corp.example": _IMDS},
+     "imds.corp.example", _IMDS, "always-denied range"),
+    ("charter LISTS the IMDS literal", (_IMDS,), {}, _IMDS, _IMDS, "always-denied range"),
+    ("IPv4-mapped IPv6 IMDS", ("v6imds.corp.example",), {"v6imds.corp.example": _IMDS_V4MAPPED},
+     "v6imds.corp.example", _IMDS_V4MAPPED, "always-denied range"),
+    ("wildcard scope -> RFC1918", ("*.corp.example",), {"app.corp.example": _RFC1918},
+     "app.corp.example", _RFC1918, "not in the charter-authorized allowlist"),
+])
+def test_the_smuggling_site_enforces_the_same_floor(monkeypatch, tmp_path, label, scope_hosts, dns,
+                                                    target, expect_addr, expect_reason):
+    """BLOCK-1b. ``smuggling_redrive`` DID DNS-pin — but charter-relatively, re-asking the same string gate
+    about the resolved address, so a charter listing the metadata literal opened TWO raw connects to it.
+    It now goes through the SAME ``egress_floor.pin_egress`` as the transport arm.
+
+    The reason assertion is deliberately the FLOOR's own wording, not the generic pin wording: on three of
+    these four the runner's charter-relative predicate would ALSO refuse, so a control that accepted any
+    refusal would still pass with the floor deleted. The floor runs FIRST, so its wording is what a working
+    guard produces."""
+    _grant_active_recon(monkeypatch)
+    _charter_hosts(tmp_path, *scope_hosts)
+    if dns:
+        _fake_dns(monkeypatch, dns)
+    calls = _count_every_connector(monkeypatch)
+    signers, _tr = _signers_and_trust()
+
+    res = _drive_smuggling(signers, f"http://{target}/")
+
+    assert calls == [], f"[{label}] no raw socket may be opened; got {calls}"
+    assert res.refused is True and res.n_facts == 0, res.notes
+    # POSITIVE proof the FLOOR is what refused (not some earlier accident): every leg's reason names it.
+    reasons = [why for _t, why in res.inconclusive]
+    assert reasons, res.notes
+    assert all(r.startswith("conflict leg: egress-floor/dns-pin refused: egress floor refused")
+               for r in reasons), reasons
+    assert all(expect_addr in r and expect_reason in r for r in reasons), reasons
+
+
+def test_the_smuggling_site_still_drives_an_authorized_loopback_origin(monkeypatch, tmp_path):
+    """The over-correction control for the smuggling site: the planted desync fixture on loopback must still
+    mint, so the floor did not turn a working mode into a dead path."""
+    from framework.v2.eval.benchmark_app import serve_smuggling_desync
+    _grant_active_recon(monkeypatch)
+    _charter(tmp_path, "127.0.0.1")
+    signers, _tr = _signers_and_trust()
+    with serve_smuggling_desync() as url:
+        res = _drive_smuggling(signers, url)
+    assert res.refused is False and res.n_facts == 1, (res.notes, res.admissions)
+
+
+def test_a_charter_scoped_rfc1918_origin_reaches_the_smuggling_burst(monkeypatch, tmp_path):
+    """A charter-authorized RFC1918 staging origin must still reach the burst. On THIS site the charter
+    names the address itself — the runner's own ``_addr_authorized`` predicate re-asks the string-matching
+    charter gate about the RESOLVED address, so only an IP-literal (or an IP-literal scope row) satisfies
+    it; that predicate is unchanged and is kept ON TOP of the floor. The floor then lifts the private tier
+    because the exact IP is charter-authorized, and the raw socket is dialled at the pinned literal."""
+    _grant_active_recon(monkeypatch)
+    _charter_hosts(tmp_path, _RFC1918)
+    calls = _count_every_connector(monkeypatch)
+    signers, _tr = _signers_and_trust()
+
+    res = _drive_smuggling(signers, f"http://{_RFC1918}:8080/")
+
+    # Not refused by any gate: the floor and the scope predicate both passed and a connect was attempted at
+    # the PINNED literal (the connector raises, so no traffic actually leaves this test host).
+    assert res.refused is False, res.notes
+    assert calls and all(c == (_RFC1918, 8080) for c in calls), calls
+    from vigil_integration.live.egress_floor import charter_allowed_ips, pin_egress
+    assert _RFC1918 in charter_allowed_ips("alpha")
+    pin = pin_egress(_RFC1918, 8080, slug="alpha")
+    assert pin.allowed and pin.pinned == _RFC1918 and pin.checked == [(_RFC1918, False, "allowed")]
+
+
+# ---- the helper's own contract (so a future site cannot get it subtly wrong) -----------------------------
+
+def test_pin_egress_fails_closed_when_the_gateway_denylist_is_unavailable(monkeypatch):
+    """No conscience ⇒ no authorization. A missing denylist must never degrade to an unguarded connect."""
+    from vigil_integration.live import egress_floor
+
+    def _boom():
+        raise ImportError("no vigil_gateway here")
+
+    monkeypatch.setattr(egress_floor, "_denylist", _boom)
+    pin = egress_floor.pin_egress("127.0.0.1", 80, slug="alpha")
+    assert not pin.allowed and not pin.floor_ran
+    assert "not importable" in pin.refused_reason
+
+
+def test_pin_egress_refuses_a_mixed_answer_where_only_one_address_is_denied(monkeypatch):
+    """All-or-nothing: connecting to the one good address would leave the bad one reachable on a retry."""
+    from vigil_integration.live import egress_floor
+    monkeypatch.setattr(socket, "getaddrinfo", lambda h, p, *a, **kw: [
+        (socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", ("93.184.216.34", 80)),
+        (socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", (_IMDS, 80)),
+    ])
+    pin = egress_floor.pin_egress("multi.example", 80, allowed_ips=())
+    assert not pin.allowed and pin.pinned == ""
+    assert [a for a, d, _w in pin.checked if d] == [_IMDS]
+
+
+# =======================================================================================================
+# The lower-severity red-pen findings, each with a control that fails if the fix is reverted.
+# =======================================================================================================
+
+def test_the_persisted_record_stamps_the_PROVEN_class_not_the_claimed_one(monkeypatch, tmp_path):
+    """FINDING-5. One TLS handshake is judged for TWO classes, so a ``weak_tls``-CLAIMED report can prove
+    only ``weak_crypto_artifact``. The Proof-Studio record used to stamp the CLAIM, producing
+    ``{"bug_class": "weak_tls", "n_facts": 1}`` — a weakness no oracle fired on. S2 is the first arm where
+    claimed and proven can differ, so this is where it must be pinned."""
+    _grant_active_recon(monkeypatch)
+    _charter(tmp_path, "127.0.0.1")
+    signers, _tr = _signers_and_trust()
+    short_cert = _make_cert(tmp_path / "claimvsproven-short.pem", bits=1024)
+    host_cert = _make_cert(tmp_path / "claimvsproven-host.pem", bits=2048)
+    with _tls_endpoint(host_cert) as port:
+        # a MODERN protocol (so weak_tls does NOT fire) presenting an undersized leaf (so weak_crypto does)
+        _force_negotiation(monkeypatch, version="TLSv1.3", cipher="TLS_AES_256_GCM_SHA384", bits=256,
+                           certfile=short_cert)
+        mr = _mint(tmp_path, signers)({"id": "claim-vs-proven", "bug_class": "weak_tls",
+                                       "endpoint": f"https://127.0.0.1:{port}/"})
+    assert mr is not None and mr.is_fact, mr
+    fired = {a[0] for a in mr.result.admissions if a[1] == "FACT"}
+    assert fired == {"weak_crypto.cert_signature_algorithm"}, mr.result.admissions
+
+    records = [json.loads(p.read_text(encoding="utf-8"))
+               for p in sorted((tmp_path / "proofs").glob("runtimeredrive-*.json"))]
+    assert len(records) == 1, records
+    rec = records[0]
+    assert rec["n_facts"] == 1
+    assert rec["bug_class"] == "weak_crypto_artifact", rec
+    assert rec["claimed_bug_class"] == "weak_tls", rec
+    assert rec["proven_bug_classes"] == ["weak_crypto_artifact"], rec
+
+
+def test_the_smuggling_branch_does_not_claim_a_mechanism_the_differential_cannot_show():
+    """FINDING-3. A WAF-style origin that REJECTS the ambiguous framing but echoes the offending request
+    bytes in a connection-scoped diagnostic on the SECOND response produces exactly the same canary
+    differential as a genuine back-end desync. The fire is sound as a conflict-attributable leak, but the
+    branch may not assert the MECHANISM it cannot discriminate."""
+    b = _branch("request_smuggling.differential_desync")
+    text = f"{b['evidence']}\n{b['limitation']}"
+    assert "CONFLICT-ATTRIBUTABLE LEAK OF PRIOR-REQUEST BYTES" in b["evidence"], b["evidence"]
+    assert "MECHANISM IS NOT DISCRIMINATED" in b["limitation"], b["limitation"]
+    # the mechanism may appear ONLY as a named, non-discriminated possibility — never as what a fire proves
+    assert "A fire proves the back-end treated the smuggled prefix" not in text
+    assert "conflict-leg-only echo" in text
+
+
+@pytest.mark.parametrize("branch_id", ["service_reachability.tcp_handshake", "tls_weakness.tls_handshake"])
+def test_the_clean_capable_transport_branches_name_the_work_that_makes_clean_reachable(branch_id):
+    """FINDING-4 / CLAIM-DISCIPLINE. Both branches are registered ``clean_capable: true``, but the oracles
+    build their non-firing signals WITHOUT ``conclusive=True``, so ``probe_verdict`` can never return clean
+    and ``admit`` can only reach INCONCLUSIVE — the runner is strictly weaker than the row reads. The claim
+    is NOT softened (meet-up, not downgrade); the concrete engineering that closes the gap is named."""
+    b = _branch(branch_id)
+    assert b["clean_capable"] is True and b["target_clean_capable"] is True
+    work = (b.get("blocking_work") or "").strip()
+    assert len(work) > 40, f"{branch_id}: the unreachable-CLEAN gap must name its blocking_work"
+    assert "conclusive=True" in work, work
+    assert "INCONCLUSIVE" in work, work

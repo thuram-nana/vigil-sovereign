@@ -435,12 +435,17 @@ def test_a_capture_bearing_report_is_not_hijacked_by_a_w2_arm(monkeypatch, tmp_p
 # =======================================================================================================
 
 def test_redrive_arm_class_sets_are_disjoint():
-    """Every re-drive arm's class set AND CWE map is pairwise DISJOINT (web / errsig / xss / ssti / boolean /
-    timing / dom_xss / prototype_pollution / smuggling / transport). Even were it violated, no false FACT
-    could result (each arm mints only over its own oracle), but pinning it now that TEN arms exist keeps arm
-    ORDER from ever routing a report to the wrong arm — in particular reflected xss (CWE-79, server-response
-    reflection) vs dom_xss (bug_class dom_xss, DOM execution) stay distinct, and the S2 transport arm
-    (CWE-326/327/328) stays distinct from smuggling (CWE-444)."""
+    """Every re-drive arm's class set, CWE map AND ALIAS KEYS are pairwise DISJOINT (web / errsig / xss /
+    ssti / boolean / timing / dom_xss / prototype_pollution / smuggling / transport). Even were it violated,
+    no false FACT could result (each arm mints only over its own oracle), but pinning it now that TEN arms
+    exist keeps arm ORDER from ever routing a report to the wrong arm — in particular reflected xss (CWE-79,
+    server-response reflection) vs dom_xss (bug_class dom_xss, DOM execution) stay distinct, and the S2
+    transport arm (CWE-326/327/328) stays distinct from smuggling (CWE-444).
+
+    The alias-KEY check is DERIVED from the arm names rather than hand-listed. Sibling slices add arms in
+    parallel, and a hand-written alias dict is precisely what silently omits the arms the OTHER slice added
+    once the two are merged; deriving it means whichever ``class_sets`` survives the merge brings its arms'
+    alias maps with it, and the explicit assertion below fails loudly rather than quietly covering less."""
     from vigil_integration.proof import run
     from vigil_integration.live.web_redrive import WEB_FACT_CLASSES
 
@@ -476,6 +481,35 @@ def test_redrive_arm_class_sets_are_disjoint():
         "smuggling": set(run._SMUGGLING_CWE_TO_CLASS),
         "transport": set(run._TRANSPORT_CWE_TO_CLASS),
     }
+    # The alias-KEY sets (the spellings a report may carry). A key collision is the one way two arms could
+    # claim the SAME report, and an alias key that is another arm's CLASS name shadows that arm's exact-match
+    # branch. DERIVED from the arm names in ``class_sets`` rather than written out: a hand-written dict is
+    # exactly how a new arm gets silently left out of this pin when two slices add arms in parallel, so each
+    # arm's ``run._<ARM>_ALIASES`` is picked up automatically and an arm with no alias map contributes
+    # nothing. The assertion below then states, explicitly, which arms MUST be covered.
+    _ALIAS_ATTR_OVERRIDE = {"xss": "_REFLECTION_ALIASES", "prototype_pollution": "_PROTO_POLLUTION_ALIASES"}
+    alias_keys = {}
+    for arm in class_sets:
+        aliases = getattr(run, _ALIAS_ATTR_OVERRIDE.get(arm, f"_{arm.upper()}_ALIASES"), None)
+        if aliases is not None:
+            alias_keys[arm] = set(aliases)
+    assert {"smuggling", "transport"} <= set(alias_keys), (
+        f"the S2 transport arms must be alias-key pinned; covered arms: {sorted(alias_keys)}")
+
+    # An alias key must never be another arm's own CLASS name (that would shadow the exact-match branch).
+    for arm, keys in alias_keys.items():
+        for other, classes in class_sets.items():
+            if other == arm:
+                continue
+            shadow = keys & classes
+            assert not shadow, f"arm {arm!r} aliases shadow arm {other!r}'s class(es) {sorted(shadow)}"
+    anames = list(alias_keys)
+    for i in range(len(anames)):
+        for j in range(i + 1, len(anames)):
+            a, b = anames[i], anames[j]
+            overlap = alias_keys[a] & alias_keys[b]
+            assert not overlap, f"arm alias KEYS {a!r} and {b!r} overlap on {sorted(overlap)}"
+
     names = list(class_sets)
     for i in range(len(names)):
         for j in range(i + 1, len(names)):

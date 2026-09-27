@@ -17,11 +17,29 @@ missing piece is the LEAD-to-re-drive binding":
 
 GATE ORDER (each step fail-closed, and NOTHING is sent until all of them pass):
 
-    protected-domain floor + signed charter + scope + posture (``agents.scope_gate.validate_action``)
-      ->  kill-switch -> single-host -> ACTIVE_RECON entitlement -> charter scope
-          (``verify.reachability._authorize``, the SAME audited active-connect gate the capture re-runs
-          internally, called here FIRST so a refusal is an unambiguous ``refused`` with no traffic)
-      ->  the capture's own bounded connect
+    1. protocol must be ``tcp`` (see UDP SOUNDNESS below) — refused before any gate and any socket;
+    2. protected-domain floor + signed charter + scope + posture (``agents.scope_gate.validate_action``);
+    3. kill-switch -> single-host -> ACTIVE_RECON entitlement -> charter scope
+       (``verify.reachability._authorize``, the SAME audited active-connect gate the capture re-runs
+       internally, called here FIRST so a refusal is an unambiguous ``refused`` with no traffic);
+    4. THE NEVER-LIFTABLE EGRESS FLOOR + CONNECT-PIN (``live.egress_floor.pin_egress``). Steps 2 and 3 are
+       BOTH pure string matching — ``ethics.host_matches_scope`` resolves nothing and classifies no
+       address — so on their own they authorise a name, or a charter-LISTED literal, that is the cloud
+       instance-metadata address. Step 4 resolves the target and runs
+       ``vigil_gateway.denylist.is_egress_denied`` over EVERY resolved address (metadata/link-local/
+       reserved never liftable by any charter; loopback and RFC1918 liftable only for an exactly
+       charter-authorized IP), then PINS the capture's connector to the validated literal so the address
+       checked is the address dialled;
+    5. the capture's own bounded connect, to that pinned address.
+
+WHAT THIS CHAIN DOES NOT ENFORCE — stated so the list above is not read as a complete security story.
+It authorises a DESTINATION, not a payload: nothing here bounds what is sent beyond the captures' own
+construction (a TCP connect plus a bounded banner read; a TLS ClientHello). There is NO WARDEN in this
+path — the proof sink installs this runner directly (``proof/bootstrap.py``) and no WARDEN wrapper exists
+between them. It does not rate-limit, and it does not re-check the destination DURING a capture: the pin
+closes the resolve-then-connect window, but a kill-switch tripped mid-capture is caught only by the
+capture's own internal re-check. Certificate validation is deliberately OFF in the TLS capture (a posture
+probe, not a trust check), so the evidence binds the pinned ADDRESS, not a verified peer identity.
 
 A refusal means VIGIL never observed the target: no capture, no admission, no FACT, and — critically —
 never a CLEAN either (a refusal is not a negative observation).
@@ -80,6 +98,12 @@ class TransportRedriveResult:
     contexts: dict = field(default_factory=dict)       # finding_ref -> oracle_context (offline re-verify)
     refused: bool = False                              # a gate refused BEFORE any traffic
     notes: list = field(default_factory=list)
+    # The POSITIVE audit trail for the never-liftable egress floor (``live.egress_floor``): one
+    # ``(address, denied, reason)`` row per resolved address the floor adjudicated, and the validated
+    # literal the capture was pinned to. A caller/test proves the guard RAN from these, rather than
+    # inferring it from the absence of a connection.
+    egress_checked: list = field(default_factory=list)
+    pinned_address: str = ""
 
     @property
     def n_facts(self) -> int:
@@ -127,9 +151,10 @@ def _host_port(endpoint: str, host: str, port: Any, *, default_port: "int | None
 
 
 def _gate_refusal(host: str, port: int, *, slug: str, protocol: str, scheme: str,
-                  posture: str) -> "str | None":
-    """Re-authorise this exact host:port BEFORE any byte leaves the box. Returns a refusal reason, or
-    ``None`` to proceed.
+                  posture: str) -> "tuple[str | None, Any]":
+    """Re-authorise this exact host:port BEFORE any byte leaves the box. Returns
+    ``(refusal_reason_or_None, EgressPin_or_None)``; the pin carries the validated address the capture
+    must dial and the per-address audit trail proving the floor ran.
 
       0. protocol must be ``tcp`` — the captures reproduce a TCP (and, above it, a TLS) handshake and
          nothing else. A ``udp`` row is refused HERE, before the gate chain and before any socket.
@@ -139,28 +164,41 @@ def _gate_refusal(host: str, port: int, *, slug: str, protocol: str, scheme: str
          internally (kill-switch -> single-host -> ACTIVE_RECON entitlement -> charter scope). Calling it
          here FIRST makes a refusal an unambiguous pre-traffic ``refused`` rather than a ``connected: False``
          that would otherwise be indistinguishable from a closed port (and so from a CLEAN).
+      3. ``live.egress_floor.pin_egress`` — the NEVER-LIFTABLE egress floor. Steps 1 and 2 both bottom out
+         in ``ethics.host_matches_scope``, which is pure string matching: no DNS, no IP classification, no
+         denylist. Without this step an in-scope NAME that resolves to ``169.254.169.254`` — and, worse, a
+         charter that directly LISTS that literal, the exact case the gateway denylist declares impossible
+         — would connect. This resolves the target, adjudicates EVERY resolved address against
+         ``vigil_gateway.denylist.is_egress_denied``, and pins the connect to the validated literal.
 
     Fail-closed: any error in a gate is itself a refusal. FATAL-2: imports are function-local."""
     if str(protocol or "").strip().lower() != "tcp":
-        return (f"transport re-drive is TCP-only; refusing protocol {protocol!r} — a non-tcp row never "
-                "drives a TCP handshake (and so never mints a reachability/TLS FACT)")
+        return ((f"transport re-drive is TCP-only; refusing protocol {protocol!r} — a non-tcp row never "
+                 "drives a TCP handshake (and so never mints a reachability/TLS FACT)"), None)
     target_url = f"{scheme}://{host}:{int(port)}/"
     try:
         from framework.v2.agents.scope_gate import validate_action  # noqa: PLC0415
         decision = validate_action(slug=slug, method="GET", target_url=target_url,
                                    posture=posture)  # type: ignore[arg-type]
     except Exception as exc:  # noqa: BLE001 — a gate error fails closed
-        return f"scope-gate error (fail-closed): {type(exc).__name__}: {exc}"
+        return f"scope-gate error (fail-closed): {type(exc).__name__}: {exc}", None
     if not decision.allowed:
-        return f"validate_action refused ({decision.refusal_kind}): {decision.reason}"
+        return f"validate_action refused ({decision.refusal_kind}): {decision.reason}", None
     try:
         from framework.v2.verify.reachability import _authorize as _reach_authorize  # noqa: PLC0415
         refusal = _reach_authorize(host, int(port), slug)
     except Exception as exc:  # noqa: BLE001 — fail closed
-        return f"active-connect gate error (fail-closed): {type(exc).__name__}: {exc}"
+        return f"active-connect gate error (fail-closed): {type(exc).__name__}: {exc}", None
     if refusal is not None:
-        return f"active-connect gate refused: {refusal}"
-    return None
+        return f"active-connect gate refused: {refusal}", None
+    try:
+        from .egress_floor import pin_egress  # noqa: PLC0415 — stdlib + the gateway denylist (no framework)
+        pin = pin_egress(host, int(port), slug=slug)
+    except Exception as exc:  # noqa: BLE001 — a floor we could not RUN is a refusal, never a free pass
+        return f"egress-floor error (fail-closed): {type(exc).__name__}: {exc}", None
+    if not pin.allowed:
+        return pin.refused_reason, pin
+    return None, pin
 
 
 # A ``connected: False`` capture is a CHANNEL-CONFIRMED NEGATIVE (a closed port / a failed handshake) ONLY
@@ -278,8 +316,11 @@ def transport_redrive(endpoint: str = "", *, claimed_class: str, slug: str, enga
         return res
 
     # --- the gate chain: NOTHING is sent until every check passes ------------------------------------
-    refusal = _gate_refusal(target_host, int(target_port), slug=slug, protocol=res.protocol,
-                            scheme=scheme, posture=posture)
+    refusal, pin = _gate_refusal(target_host, int(target_port), slug=slug, protocol=res.protocol,
+                                 scheme=scheme, posture=posture)
+    if pin is not None:
+        res.egress_checked = list(pin.checked)
+        res.pinned_address = pin.pinned
     if refusal is not None:
         res.refused = True
         res.notes.append(f"refused before any traffic: {refusal}")
@@ -287,14 +328,20 @@ def transport_redrive(endpoint: str = "", *, claimed_class: str, slug: str, enga
         return res
 
     # --- ONE VIGIL-owned capture, judged for every branch this class covers ---------------------------
+    # The connector is PINNED to the address the floor validated, so the capture dials the literal that was
+    # checked rather than re-resolving the name (the rebinding / short-TTL / multi-A window).
+    from .egress_floor import pinned_tcp_connector, pinned_tls_connector  # noqa: PLC0415 — no framework
     try:
         if is_tls:
             from framework.v2.verify import capture_tls_handshake  # noqa: PLC0415 — offense-side only
-            kwargs = {"slug": slug} if timeout is None else {"slug": slug, "timeout": timeout}
+            kwargs = {"slug": slug, "connect": pinned_tls_connector(pin.pinned)}
+            if timeout is not None:
+                kwargs["timeout"] = timeout
             capture = capture_tls_handshake(target_host, int(target_port), **kwargs)
         else:
             from framework.v2.verify import capture_handshake  # noqa: PLC0415 — offense-side only
-            kwargs = {"slug": slug, "protocol": res.protocol}
+            kwargs = {"slug": slug, "protocol": res.protocol,
+                      "connect": pinned_tcp_connector(pin.pinned)}
             if timeout is not None:
                 kwargs["timeout"] = timeout
             capture = capture_handshake(target_host, int(target_port), **kwargs)

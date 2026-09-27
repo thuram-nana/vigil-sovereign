@@ -875,19 +875,36 @@ class _RuntimeMintResult:
 
 def _persist_runtime_redrive(run_dir: "str | os.PathLike", report: dict, res: Any) -> None:
     """Best-effort Proof-Studio record of a W2 runtime re-drive (mirrors ``_persist_web_redrive``). A hiccup
-    here must NEVER un-mint — the signed cert already exists in ``res.facts``."""
+    here must NEVER un-mint — the signed cert already exists in ``res.facts``.
+
+    ``bug_class`` records the class that was PROVEN, not the class that was CLAIMED. Until S2 the two were
+    always the same, so stamping ``res.bug_class`` (the claim the re-drive was asked to look for) was
+    harmless. The transport arm broke that: ONE TLS handshake is judged for a weak protocol/cipher AND for a
+    weak leaf certificate, so a ``weak_tls``-claimed report can mint only ``weak_crypto_artifact`` — and the
+    record would have read ``{"bug_class": "weak_tls", "n_facts": 1}``, asserting a weakness no oracle fired
+    on. The claim is kept alongside, under its own key, so the audit trail loses nothing."""
     d = Path(run_dir) / PROOFS_SUBDIR
     d.mkdir(parents=True, exist_ok=True)
     ref = str(_finding_from_report(report)["check_id"])
+    claimed = str(getattr(res, "bug_class", "") or "")
+    proven = sorted({str(getattr(f, "bug_class", "") or "")
+                     for f in (getattr(res, "facts", []) or []) if getattr(f, "bug_class", "")})
+    if not proven:                       # nothing was proven — the record can only name what was looked for
+        stamped = claimed
+    elif claimed in proven:              # the claim is among what fired — it IS a proven class
+        stamped = claimed
+    else:                                # claimed != proven: stamp what the oracle actually confirmed
+        stamped = proven[0]
     rec = {
         "kind": "runtime_redrive",
         "finding_ref": ref,
-        "bug_class": str(getattr(res, "bug_class", "") or ""),
+        "bug_class": stamped,
+        "claimed_bug_class": claimed,
+        "proven_bug_classes": proven,
         "url": str(getattr(res, "url", "") or ""),
         "n_facts": int(getattr(res, "n_facts", 0) or 0),
         "fact_refs": [getattr(f, "finding_ref", "") for f in getattr(res, "facts", []) or []],
-        "family_verdict": res.family_verdict(str(getattr(res, "bug_class", "") or ""))
-        if hasattr(res, "family_verdict") else "",
+        "family_verdict": res.family_verdict(claimed) if hasattr(res, "family_verdict") else "",
         "refused": bool(getattr(res, "refused", False)),
         "inconclusive": [list(x) for x in (getattr(res, "inconclusive", []) or [])],
         "notes": list(getattr(res, "notes", []) or []),
