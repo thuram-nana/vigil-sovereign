@@ -39,14 +39,49 @@ holds the line across REAL subprocesses at differing ``PYTHONHASHSEED`` values, 
 
 from __future__ import annotations
 
+import ast
+import functools
 import hashlib
+import importlib
+import importlib.util
 import inspect
+import sys
+import textwrap
 import types
 from functools import lru_cache
 from typing import Any, Callable
 
 from . import oracles
 from .models import OracleKind
+
+# The repository's own top-level package. A callable / class / constant whose ``__module__`` is this package
+# (or a submodule of it) is an IN-REPO "sibling": its SOURCE is bound into the version, so a change to its
+# body is detectable at re-verification. Anything else is genuinely third-party — named only
+# (``module.qualname``), never sourced — so the version tracks THIS engine's decision procedure and not a
+# library's release. Derived from the oracles module's own dotted name so it needs no hard-coded literal.
+_REPO_TOP = oracles.__name__.split(".", 1)[0]
+
+
+def _in_repo_modname(modname: Any) -> bool:
+    """True iff ``modname`` names the repo's own top package or a submodule of it (an in-repo sibling)."""
+    return isinstance(modname, str) and (modname == _REPO_TOP or modname.startswith(_REPO_TOP + "."))
+
+
+def _in_repo_obj(obj: Any) -> bool:
+    """Is ``obj`` an in-repo callable/class/constant? Unwraps ``functools.partial`` chains (whose own
+    ``__module__`` is ``functools``, which would hide an in-repo target), and for an instance-callable falls
+    back to the module its TYPE is defined in — so a partial over an in-repo function, an in-repo bound
+    method, and an instance of an in-repo callable class are all recognised as in-repo rather than
+    mis-classed third-party."""
+    depth = 0
+    while isinstance(obj, functools.partial) and depth < 64:
+        obj = obj.func
+        depth += 1
+    if _in_repo_modname(getattr(obj, "__module__", None)):
+        return True
+    if not isinstance(obj, (types.FunctionType, type)):
+        return _in_repo_modname(getattr(type(obj), "__module__", None))
+    return False
 
 # The pure oracle function(s) each kind dispatches to in ``verifier._run``. A kind whose dispatch selects
 # more than one function by context keys (TLS_WEAKNESS → protocol/cipher OR cert-signature; ACHIEVED_STATE
@@ -137,6 +172,18 @@ class _SourceUnavailable(Exception):
     """A reachable function's source could not be read (a frozen/zipped deployment)."""
 
 
+class _UnclassifiableInRepoCallable(Exception):
+    """The reachable-source walk reached an IN-REPO callable it cannot classify and cannot resolve to source
+    — one that is neither a plain ``types.FunctionType`` nor a class: a ``functools.partial``, a
+    bound/inherited method, or an instance with ``__call__``. Its decision procedure cannot be sourced from a
+    module-global reference, so the version would silently omit it and a changed procedure would ship under an
+    unchanged id@version. This is raised as a FAIL-CLOSED build error — deliberately NOT the stale-safe ``""``
+    of ``_SourceUnavailable`` (which ``oracle_version`` swallows). The omission must be fixed at the source
+    (register the callable, or expose the underlying in-repo function), not hidden behind a stale-safe hash.
+    NOTE: genuinely third-party callables reached the same way are NOT an error — they are named-only by
+    design (see ``_canon``), because binding a library's source would make the version track that library."""
+
+
 def _canon(obj: Any) -> str:
     """A canonical, hash-stable repr of a module-level constant — ORDER-INDEPENDENT for sets/frozensets/
     dicts so the version does not depend on PYTHONHASHSEED (the version must be identical across processes
@@ -152,10 +199,12 @@ def _canon(obj: Any) -> str:
     invariant 6 (determinism) for the version identity, and it turns the loud ``pcf.py:216`` failure into
     unreadable noise.
 
-    A callable is therefore named STABLY. For a function defined in ``verify.oracles`` the name carries
-    its SOURCE, so the version still changes when the callable's behaviour changes (a lambda in a dict
-    literal yields its defining line, which is what distinguishes the sibling lambdas of one recognizer
-    row). For anything else — a builtin, a C function, a class used as a factory — only the stable
+    A callable is therefore named STABLY. For an IN-REPO function/method (defined anywhere in this repo's
+    own package, not only ``verify.oracles``) the name carries its SOURCE, so the version still changes when
+    the callable's behaviour changes (a lambda in a dict literal yields its defining line, which is what
+    distinguishes the sibling lambdas of one recognizer row) — and an in-repo sibling nested in a constant
+    is never reduced to a name-only token that could hide a changed body. For anything else — a builtin, a C
+    function, a genuinely third-party callable, a class used as a factory — only the stable
     ``module.qualname`` is used, because embedding third-party source would make this version track
     library versions instead of this engine's decision procedure."""
     if callable(obj):
@@ -163,7 +212,7 @@ def _canon(obj: Any) -> str:
         name = (getattr(obj, "__qualname__", None) or getattr(obj, "__name__", None)
                 or type(obj).__name__)
         src = ""
-        if mod == oracles.__name__ and (inspect.isfunction(obj) or inspect.ismethod(obj)):
+        if _in_repo_modname(mod) and (inspect.isfunction(obj) or inspect.ismethod(obj)):
             try:
                 src = "|" + inspect.getsource(obj).strip()
             except (OSError, TypeError):
@@ -188,26 +237,46 @@ def _is_hashable_constant(val: Any) -> bool:
 
 def _reachable_source_blob(fns: tuple[Callable[..., Any], ...]) -> bytes:
     """The canonical source of the TRANSITIVE closure the oracle's decision procedure actually depends on
-    (audit B2): every module-level helper FUNCTION, CLASS and constant reachable from ``fns`` via
-    global-name references (including names used inside nested comprehensions/closures). So editing a
-    helper body OR a validation constant (an IP set, a regex, a path marker) changes the version — the
-    entry function alone no longer hides a changed procedure. Raises ``_SourceUnavailable`` if any
-    function's source is missing.
+    (audit B2). Starting from ``fns`` the walk captures, and follows into, every IN-REPO helper it reaches:
 
-    AUDIT (this slice) — THE CLASS HOLE. That promise was FALSE whenever the decision procedure lives
-    behind a CLASS, which is the common case for the HTML/JS parsing oracles. The walk followed only
-    ``types.FunctionType``, so ``reflection_context_oracle`` -> ``_ReflectionScanner`` stopped dead at the
-    class: the scanner's ``handle_data`` / ``handle_starttag`` bodies, the ``_js_scan`` lexer they call,
-    and every constant those reach (``_EVENT_HANDLER_ATTRIBUTES``, ``_INERT_TEXT_CONTAINERS``,
-    ``_JS_MIME_ESSENCES``) were ALL INVISIBLE to the version. Measured: mutating any of them left
-    ``oracle_version(reflection_context)`` byte-identical, while mutating one string in the entry
-    function's own body changed it — so the version tracked the prose and missed the procedure, which is
-    the exact inversion the identity exists to prevent. A class is now visited: its source is captured and
-    the walk continues through its methods (and their nested code objects), so the constants and helpers
-    they reference join the closure. Per CLAIM DISCIPLINE this is built up to meet the claim rather than
-    the claim softened to meet it."""
-    module_ns = vars(oracles)
-    module_name = oracles.__name__
+      * a module-global FUNCTION or CLASS defined in the SAME module as the function referencing it (walked
+        via its ``co_names``, including names used inside nested comprehensions/closures), and
+      * an in-repo helper pulled in by an ``import`` statement INSIDE a walked function's body — the LOCAL
+        imports that keep the module graph acyclic (``from .oob import verify_oob_receipt``,
+        ``from .version import version_in_affected``, ``from ..scanner.sso import ...``). These are followed
+        into their OWN defining module (their ``co_names`` resolve against THEIR globals, transitively).
+
+    plus every module-level constant (an IP set, a regex, a path marker) reachable the same way. So editing
+    a helper body — even one that lives behind a class, or in a sibling module reached only by a local
+    import — OR a validation constant changes the version; the entry function alone no longer hides a
+    changed procedure.
+
+    EXACTLY WHAT IS AND IS NOT COVERED (stated so no re-verifier is surprised):
+      * IN-REPO functions/classes reached via a same-module global reference, or via a local in-repo import
+        inside a walked body → their SOURCE is bound (covered, transitively).
+      * IN-REPO constants reached either way → their canonical value is bound (covered).
+      * A cross-module in-repo function/class reached only by a MODULE-GLOBAL name (e.g. ``OracleKind`` /
+        ``OracleSignal`` imported at module top) is deliberately NOT walked into here — it belongs to the
+        model layer, not the decision procedure, and following it would balloon every version identically;
+        it is neither sourced nor named (unchanged from prior behaviour, so existing versions stay stable).
+      * GENUINELY THIRD-PARTY callables (``urllib``'s ``urlsplit``, a ``typing`` alias, a C function) are
+        left alone — never sourced (a library's version is out of scope) and, reached via a module-global,
+        skipped rather than name-bound, so they do not perturb an oracle's version.
+      * An IN-REPO callable that is neither a plain function nor a class — a ``functools.partial``, a
+        bound/inherited method, or an instance with ``__call__`` — reached via a module-global reference
+        CANNOT be sourced this way. Rather than silently skip it (the old behaviour, which would let its
+        changed procedure ship under an unchanged version) the walk FAILS CLOSED and raises
+        ``_UnclassifiableInRepoCallable``. None are live today; if one is introduced the build breaks until
+        it is handled explicitly. Raises ``_SourceUnavailable`` if any reachable function's source is missing.
+
+    AUDIT (prior slice) — THE CLASS HOLE, now closed: ``reflection_context_oracle`` -> ``_ReflectionScanner``
+    used to stop dead at the class (its ``handle_data``/``handle_starttag`` bodies, the ``_js_scan`` lexer,
+    and ``_EVENT_HANDLER_ATTRIBUTES`` / ``_INERT_TEXT_CONTAINERS`` / ``_JS_MIME_ESSENCES`` were invisible).
+    A class is now visited and its methods walked. AUDIT (this slice) — THE CROSS-MODULE / LOCAL-IMPORT
+    HOLE: the walk followed only same-module ``types.FunctionType``, so ``verify_oob_receipt`` (OOB_CALLBACK),
+    ``version_in_affected`` (VERSION_RANGE) and the ``scanner.sso`` parse/tree helpers (SAML_STRUCTURAL_FORGERY)
+    — each reached ONLY by a local import and each the actual decision procedure — were INVISIBLE: mutating
+    them left the version byte-identical. Both holes are built up to meet the claim, per CLAIM DISCIPLINE."""
     seen_fns: set[int] = set()
     seen_consts: set[str] = set()
     func_srcs: list[str] = []
@@ -227,17 +296,125 @@ def _reachable_source_blob(fns: tuple[Callable[..., Any], ...]) -> bytes:
                     stack.append(const)
         return names
 
-    def _own(val: Any) -> bool:
-        return getattr(val, "__module__", None) == module_name
-
-    def _follow(name: str, val: Any) -> None:
-        if isinstance(val, types.FunctionType) and _own(val):
-            visit(val)
-        elif isinstance(val, type) and _own(val):
-            visit_class(val)
-        elif name not in seen_consts and _is_hashable_constant(val):
+    def _record_const(name: str, val: Any) -> None:
+        if name not in seen_consts:
             seen_consts.add(name)
             const_reprs.append(f"{name}={_canon(val)}")
+
+    def _follow_global(name: str, val: Any, own_module: str | None) -> None:
+        """Follow a MODULE-GLOBAL name reference found in a walked function's ``co_names``. Functions and
+        classes are walked into ONLY when defined in ``own_module`` (the module of the referencing function),
+        which keeps a cross-module model type like ``OracleKind`` out and leaves existing versions stable. A
+        constant is recorded. A callable that is neither a plain function nor a class fails closed if in-repo,
+        and is otherwise (genuinely third-party) skipped."""
+        if isinstance(val, types.FunctionType):
+            if getattr(val, "__module__", None) == own_module:
+                visit(val)
+        elif isinstance(val, type):
+            if getattr(val, "__module__", None) == own_module:
+                visit_class(val)
+        elif _is_hashable_constant(val):
+            _record_const(name, val)
+        elif callable(val):
+            if _in_repo_obj(val):
+                raise _UnclassifiableInRepoCallable(
+                    f"in-repo callable {name!r} ({val!r}, module "
+                    f"{getattr(val, '__module__', None)!r}) is neither a plain function nor a class "
+                    f"(functools.partial / bound method / instance-callable); its source cannot be bound "
+                    f"into the oracle version from a module-global reference. Register it explicitly or "
+                    f"expose the underlying in-repo function rather than let a changed procedure ship "
+                    f"under an unchanged id@version.")
+            # else: genuinely third-party (urllib / typing / a C function) — skipped, unchanged behaviour.
+        # else: a module or other non-callable non-const — nothing to bind.
+
+    def _follow_local_import(name: str, obj: Any) -> None:
+        """Follow an object EXPLICITLY imported by a statement inside a walked function body. Unlike a
+        module-global reference this is an explicit dependency of the decision procedure, so an in-repo
+        function/class is walked into regardless of which module defines it (continuing in ITS own module).
+        A constant is recorded. An in-repo callable that is neither a plain function nor a class fails
+        closed; a third-party import contributes nothing and is ignored."""
+        if isinstance(obj, types.FunctionType) and _in_repo_obj(obj):
+            visit(obj)
+        elif isinstance(obj, type) and _in_repo_obj(obj):
+            visit_class(obj)
+        elif _is_hashable_constant(obj):
+            if _in_repo_obj(obj) or not callable(obj):
+                _record_const(name, obj)
+        elif callable(obj) and _in_repo_obj(obj):
+            raise _UnclassifiableInRepoCallable(
+                f"in-repo callable {name!r} ({obj!r}) imported locally is neither a plain function nor a "
+                f"class; its source cannot be bound into the oracle version. Expose the underlying in-repo "
+                f"function rather than let a changed procedure ship under an unchanged id@version.")
+        # else: a third-party import / module — nothing to bind.
+
+    def _local_in_repo_imports(fn: Callable[..., Any]):
+        """Yield ``(bound_name, object)`` for every IN-REPO object brought in by an ``import`` statement
+        inside ``fn``'s own body (module-level imports are not in ``fn``'s source and so are not seen here —
+        which is why a top-level ``from .models import OracleKind`` is not followed). Third-party imports are
+        never even imported: the module name is resolved first and skipped unless it is in-repo, so a
+        ``from lxml import etree`` guard costs nothing and pulls in no optional dependency."""
+        try:
+            src = inspect.getsource(fn)
+        except (OSError, TypeError):
+            return
+        try:
+            tree = ast.parse(textwrap.dedent(src))
+        except SyntaxError:
+            return
+        modname = getattr(fn, "__module__", None)
+        mod = sys.modules.get(modname) if modname else None
+        pkg = getattr(mod, "__package__", None)
+        if not pkg and modname and "." in modname:
+            pkg = modname.rsplit(".", 1)[0]
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom):
+                rel = "." * node.level + (node.module or "")
+                try:
+                    absmod = importlib.util.resolve_name(rel, pkg) if node.level else (node.module or "")
+                except (ImportError, ValueError):
+                    continue
+                if not _in_repo_modname(absmod):
+                    continue   # third-party (lxml/signxml/...) — never imported
+                try:
+                    imported = importlib.import_module(absmod)
+                except Exception:
+                    continue
+                for alias in node.names:
+                    if alias.name == "*":
+                        continue
+                    obj = getattr(imported, alias.name, None)
+                    if obj is not None:
+                        yield (alias.asname or alias.name, obj)
+            elif isinstance(node, ast.Import):
+                for alias in node.names:
+                    if not _in_repo_modname(alias.name):
+                        continue
+                    try:
+                        imported = importlib.import_module(alias.name)
+                    except Exception:
+                        continue
+                    yield (alias.asname or alias.name.split(".", 1)[0], imported)
+
+    def _module_ns(own_module: str | None) -> dict[str, Any]:
+        """The DEFINING module's globals for a walked function. Deliberately NOT ``fn.__globals__``: a
+        compiler-generated method (a ``@dataclass`` ``__init__`` / ``__eq__``) carries a SYNTHETIC globals
+        dict from the ``dataclasses`` module, so resolving its ``co_names`` there would bind
+        ``MISSING=<dataclasses._MISSING_TYPE object at 0x…>`` — a HEAP ADDRESS — into the version, breaking
+        determinism. Keying on ``__module__`` resolves such a method's names against ITS class's real module
+        (where those internal names are absent and simply skipped), matching the pre-slice behaviour, while
+        still giving a genuine cross-module helper its own module's namespace."""
+        mod = sys.modules.get(own_module) if own_module else None
+        return vars(mod) if mod is not None else {}
+
+    def _walk_body(fn: Callable[..., Any], own_module: str | None) -> None:
+        g = _module_ns(own_module)
+        for name in _names(fn):
+            val = g.get(name)
+            if val is None:
+                continue
+            _follow_global(name, val, own_module)
+        for bound_name, obj in _local_in_repo_imports(fn):
+            _follow_local_import(bound_name, obj)
 
     def visit(fn: Callable[..., Any]) -> None:
         if id(fn) in seen_fns:
@@ -247,16 +424,13 @@ def _reachable_source_blob(fns: tuple[Callable[..., Any], ...]) -> bytes:
             func_srcs.append(inspect.getsource(fn))
         except (OSError, TypeError) as exc:
             raise _SourceUnavailable() from exc
-        for name in _names(fn):
-            val = module_ns.get(name)
-            if val is None:
-                continue
-            _follow(name, val)
+        _walk_body(fn, getattr(fn, "__module__", None))
 
     def visit_class(cls: type) -> None:
-        """AUDIT — a class defined in this module IS part of the decision procedure (``_ReflectionScanner``
-        is the whole HTML/JS context decision). Capture its source and keep walking through its own
-        methods, so the helpers and constants they reference join the closure instead of being invisible."""
+        """A class defined in-repo IS part of the decision procedure (``_ReflectionScanner`` is the whole
+        HTML/JS context decision, and ``scanner.sso.XxeBlocked`` gates the SAML parse). Capture its source
+        and keep walking through its own methods — resolving THEIR names against the class's OWN module — so
+        the helpers and constants they reference join the closure instead of being invisible."""
         if id(cls) in seen_fns:
             return
         seen_fns.add(id(cls))
@@ -264,16 +438,13 @@ def _reachable_source_blob(fns: tuple[Callable[..., Any], ...]) -> bytes:
             func_srcs.append(inspect.getsource(cls))
         except (OSError, TypeError) as exc:
             raise _SourceUnavailable() from exc
+        own_module = getattr(cls, "__module__", None)
         for attr in sorted(vars(cls)):
             member = vars(cls)[attr]
             member = getattr(member, "__func__", member)          # classmethod / staticmethod
             if not isinstance(member, types.FunctionType):
                 continue
-            for name in _names(member):
-                val = module_ns.get(name)
-                if val is None:
-                    continue
-                _follow(name, val)
+            _walk_body(member, own_module)
 
     for fn in fns:
         visit(fn)

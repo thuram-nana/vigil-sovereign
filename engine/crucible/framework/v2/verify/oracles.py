@@ -1765,9 +1765,14 @@ class _ReflectionScanner(HTMLParser):
             raw_type: str | None = None
             has_src = False
             has_nomodule = False
+            # HTML DUPLICATE-ATTRIBUTE FIRST-WINS: the tokenizer keeps the FIRST occurrence of an attribute
+            # name and DISCARDS every later one, so `<script type="application/json" type="text/javascript">`
+            # is a DATA block to Chromium — the FIRST `type` (a JSON essence) wins, not the executable one.
+            # Take the first `type` only (`raw_type is None` == "not yet seen"). `has_src` / `has_nomodule`
+            # are presence flags, so which duplicate wins does not change them.
             for name, val in attrs:
                 lname = name.lower()
-                if lname == "type":
+                if lname == "type" and raw_type is None:
                     raw_type = val if val is not None else ""
                 elif lname == "src":
                     has_src = True
@@ -1792,11 +1797,22 @@ class _ReflectionScanner(HTMLParser):
             else:
                 self.context, self.detail = "html_tag", tag
             return
+        # HTML DUPLICATE-ATTRIBUTE FIRST-WINS (the same tokenizer rule as the <script> `type` above): once an
+        # attribute NAME has been seen on this tag the tokenizer discards every later occurrence, so it never
+        # reaches Chromium. `<div onclick="void 0" onclick="MARKER">` runs `void 0` (the FIRST onclick) and
+        # `<a href="#" href="javascript:MARKER">` navigates `#` (the FIRST href) — the marker in the SECOND
+        # occurrence is inert. The name is recorded on first sight, BEFORE the marker filter, so a duplicate
+        # is dropped even when the first occurrence carried no marker; refusing it kills FACTs Chromium would
+        # never execute.
+        seen_attr_names: set[str] = set()
         for name, val in attrs:
+            a = name.lower()
+            if a in seen_attr_names:
+                continue
+            seen_attr_names.add(a)
             v = val or ""
             if self._ml not in v.lower():
                 continue
-            a = name.lower()
             stripped = v.strip()
             # RED-PEN B2: membership of the CLOSED event-handler set, never an
             # `on` prefix (`on-click` / `once` / `online` are not handlers).

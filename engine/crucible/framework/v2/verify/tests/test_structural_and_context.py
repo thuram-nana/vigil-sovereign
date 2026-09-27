@@ -126,6 +126,50 @@ def test_marker_in_a_non_executable_script_type_does_not_fire() -> None:
     assert not sig.fired and sig.observed["context"] == "script_data_block"
 
 
+# ---------------------------------------------------------------------------
+# HTML DUPLICATE-ATTRIBUTE FIRST-WINS. The WHATWG tokenizer keeps the FIRST occurrence of an attribute name
+# and DISCARDS every later duplicate, so Chromium never sees the second value. The oracle used to let the
+# LAST occurrence win, manufacturing FACTs the browser never executes. These three are the measured
+# Chromium-vs-oracle rows, added as NON-FIRING controls; the positive twins below prove the fix breaks
+# nothing when the executable value is the FIRST (or only) occurrence.
+# ---------------------------------------------------------------------------
+
+
+def test_duplicate_onclick_first_wins_does_not_fire() -> None:
+    # Chromium runs `void 0` (the FIRST onclick) and never the marker in the second — inert.
+    body = f'<div onclick="void 0" onclick="{_MARKER}">x</div>'
+    sig = reflection_context_oracle(_MARKER, body)
+    assert not sig.fired, sig.evidence
+
+
+def test_duplicate_href_first_wins_does_not_fire() -> None:
+    # Chromium navigates `#` (the FIRST href); the javascript: URL in the second href is discarded.
+    body = f'<a href="#" href="javascript:{_MARKER}">x</a>'
+    sig = reflection_context_oracle(_MARKER, body)
+    assert not sig.fired, sig.evidence
+
+
+def test_duplicate_script_type_first_wins_is_a_data_block() -> None:
+    # First `type` (application/json) wins → an inert DATA block; the executable second type is discarded.
+    body = f'<script type="application/json" type="text/javascript">{_MARKER}</script>'
+    sig = reflection_context_oracle(_MARKER, body)
+    assert not sig.fired and sig.observed["context"] == "script_data_block", sig.evidence
+
+
+def test_first_occurrence_onclick_still_fires_when_it_owns_the_value() -> None:
+    # The fix is first-wins, not "any duplicate kills it": marker in the FIRST onclick still fires.
+    body = f'<div onclick="{_MARKER}" onclick="void 0">x</div>'
+    sig = reflection_context_oracle(_MARKER, body)
+    assert sig.fired and sig.observed["context"] == "js_attribute:onclick", sig.evidence
+
+
+def test_first_occurrence_script_type_executable_still_fires() -> None:
+    # First `type` is executable → the marker at code position still fires (the later type is ignored).
+    body = f'<script type="text/javascript" type="application/json">{_MARKER}</script>'
+    sig = reflection_context_oracle(_MARKER, body)
+    assert sig.fired and sig.observed["context"] == "script", sig.evidence
+
+
 def test_marker_owning_a_whole_event_handler_fires() -> None:
     # the attacker supplied the ENTIRE handler body — a proven breakout.
     body = f"<div><svg onload={_MARKER}></div>"
