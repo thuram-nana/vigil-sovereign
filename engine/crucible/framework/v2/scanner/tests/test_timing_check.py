@@ -17,7 +17,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Iterator
 from urllib.parse import parse_qs, urlsplit
 
-from framework.v2.scanner.checks import TimingCheck
+from framework.v2.scanner.checks import TimingCheck, TimingObservations
 from framework.v2.scanner.insertion import HttpRequest, InsertionKind, RequestTemplate
 from framework.v2.verify.confirmation import confirm_finding
 from framework.v2.verify.verifier import OracleVerifier
@@ -96,3 +96,27 @@ def test_timing_check_does_not_fire_without_conditional_delay() -> None:
             finding={"bug_class": "time_based_sqli"}, context=ctx, verifier=OracleVerifier(),
         )
         assert confirmed is None
+
+
+def test_collect_and_context_compose_to_the_old_probe() -> None:
+    """The collect/context split is a refactor, not a behaviour change: the PURE half
+    turns an observation sequence into exactly the evidence the one-shot probe built.
+
+    This is what makes an offline re-verify of a retained timing certificate meaningful —
+    ``context_from`` touches no clock, no network and no rng, so re-running it over the
+    retained samples re-fires the oracle identically."""
+    check = TimingCheck(
+        id="t", bug_class="time_based_sqli", benign="1", sleep_payload="1 SLEEP",
+        injected_ms=1000.0, samples=3, dose_payload="1 SLEEP2", dose_ms=2000.0,
+    )
+    obs = TimingObservations(baseline=(1.0, 2.0, 3.0), treatment=(11.0, 12.0, 13.0),
+                             dose=(21.0, 22.0, 23.0))
+    ctx = check.context_from(obs)
+    assert ctx is not None
+    assert ctx.baseline_latencies == [1.0, 2.0, 3.0]
+    assert ctx.treatment_latencies == [11.0, 12.0, 13.0]
+    assert ctx.timing_injected_ms == 1000.0
+    assert ctx.timing_dose == {
+        "low_ms": 1000.0, "low_samples": [11.0, 12.0, 13.0],
+        "high_ms": 2000.0, "high_samples": [21.0, 22.0, 23.0],
+    }

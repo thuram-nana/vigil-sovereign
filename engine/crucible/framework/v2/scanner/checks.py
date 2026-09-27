@@ -512,6 +512,21 @@ def _as_dict(resp: object) -> dict:
 
 
 @dataclass(frozen=True)
+class TimingObservations:
+    """One insertion point's ORDERED latency observations for one timing check.
+
+    Immutable, and ordered exactly as they were taken: ``baseline[i]`` and
+    ``treatment[i]`` (and ``dose[i]``) are the i-th INTERLEAVED pair/triple. Keeping the
+    observations as a value — separate from the evidence they are later shaped into —
+    keeps :meth:`TimingCheck.collect` (all of the I/O, none of the judgement) apart from
+    :meth:`TimingCheck.context_from` (pure, deterministic, offline-re-runnable)."""
+
+    baseline: tuple[float, ...] = ()
+    treatment: tuple[float, ...] = ()
+    dose: tuple[float, ...] = ()
+
+
+@dataclass(frozen=True)
 class TimingCheck:
     """Statistical time-based blind (SQLi / command injection).
 
@@ -533,6 +548,34 @@ class TimingCheck:
     dose_ms: float | None = None
 
     def probe(self, template: RequestTemplate, point: InsertionPoint, send: Send) -> FindingContext | None:
+        """Measure, then adjudicate — the composition of :meth:`collect` and
+        :meth:`context_from`. Byte-identical to the one-shot loop it replaces."""
+        return self.context_from(self.collect(template, point, send))
+
+    # -- the two halves of a probe ------------------------------------------------
+    # The SLOW, I/O half (:meth:`collect`) is split from the PURE half
+    # (:meth:`context_from`) so the evidence a certificate re-runs offline is a
+    # deterministic function of an observation SEQUENCE — no clock, no rng, no network
+    # in the half that decides anything.
+    #
+    # The split once also served a concurrent driver that overlapped the idle waits of
+    # DIFFERENT insertion points. That driver was measured and REMOVED: this alternation
+    # phase-locks across overlapping points, which both manufactures shifts and loses
+    # real ones over any capacity-bounded origin. See the note in
+    # ``AuditEngine.audit``'s sweep before considering it again. This loop is serial,
+    # per point, and that is not an implementation detail.
+
+    def collect(
+        self, template: RequestTemplate, point: InsertionPoint, send: Send
+    ) -> "TimingObservations":
+        """Take this point's ``samples`` INTERLEAVED observations, serially.
+
+        The interleaving is the statistical control: benign and delay-injecting
+        requests alternate within the point so any latency drift (load, GC, a
+        congested hop) biases baseline and treatment EQUALLY. The Mann-Whitney U
+        shift test and the dose-response ratio both rest on it, so this loop is
+        never reordered, batched or sampled down — it is the same loop, in the same
+        order, that the serial probe always ran."""
         base: list[float] = []
         treat: list[float] = []
         dose_samples: list[float] = []
@@ -541,7 +584,16 @@ class TimingCheck:
             treat.append(self._time(send, template, point, self.sleep_payload))
             if self.dose_payload is not None:
                 dose_samples.append(self._time(send, template, point, self.dose_payload))
+        return TimingObservations(
+            baseline=tuple(base), treatment=tuple(treat), dose=tuple(dose_samples))
 
+    def context_from(self, observations: "TimingObservations") -> FindingContext | None:
+        """Shape already-measured observations into the oracle's evidence. PURE — no
+        I/O, no clock, no rng — so the retained context is a deterministic function of
+        the observation sequence, and an offline re-verify of it re-fires identically."""
+        base = list(observations.baseline)
+        treat = list(observations.treatment)
+        dose_samples = list(observations.dose)
         dose = None
         if self.dose_payload is not None and self.dose_ms:
             dose = {
