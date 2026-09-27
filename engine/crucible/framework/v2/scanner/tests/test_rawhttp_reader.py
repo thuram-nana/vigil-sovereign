@@ -47,6 +47,7 @@ from typing import Callable, Iterator
 
 import pytest
 
+from framework.v2.scanner import rawhttp as rawhttp_mod
 from framework.v2.scanner.rawhttp import RawResponseReader
 from framework.v2.scanner.smuggling import _RawResponseReader as DesyncLegReader
 
@@ -277,6 +278,37 @@ def test_content_length_isdigit_but_not_ascii_digit_is_refused_without_raising()
     assert rec["channel"] is False and rec["status"] is None and rec["body"] == ""
     assert "Content-Length is unrecoverable" in reader.last_error, reader.last_error
     assert "²" in reader.last_error
+
+
+def test_content_length_nd_category_digit_is_rejected_by_the_ascii_only_guard() -> None:
+    """audit-A round-4 cheap hardening — KILL the ``_DIGITS`` regex-substitution mutant
+    ``^[0-9]+$`` -> ``^\\d+$`` that the ``²`` crash test alone SURVIVES.
+
+    ``²`` (superscript-two, category No) is rejected by BOTH ``[0-9]`` and Python's ``\\d``
+    (``\\d`` matches only category Nd), so the ``²`` test cannot tell the two patterns apart. An
+    Arabic-Indic ``٥`` (U+0665, category Nd) is the discriminator: ``\\d`` ACCEPTS it while
+    ``[0-9]`` rejects it — and ``int("٥")`` SUCCEEDS (== 5), so the crash-based ``²`` test misses
+    it too.
+
+    The socket path can never deliver this discriminator: ``_read_head`` decodes header bytes as
+    latin-1 (rawhttp.py:301), and within the latin-1 range the ONLY Nd chars are ASCII 0-9 — so on
+    the wire ``[0-9]`` and ``\\d`` are EQUIVALENT (a ``٥`` UTF-8 wire decodes to ``Ù¥`` and is
+    refused by both). The mutant is therefore killable only by exercising the shipped guard
+    predicate directly with a genuine Nd digit — the load-bearing assertion below. Under the
+    ``^\\d+$`` mutant ``_DIGITS.match("٥")`` matches, so ``... is None`` FAILS and the mutant dies.
+    rawhttp.py is NOT modified; the shipped ``^[0-9]+$`` already rejects both ``²`` and ``٥``."""
+    nd = "٥"                                   # Arabic-Indic five, category Nd
+    assert int(nd) == 5                             # int() SUCCEEDS -> no crash test covers it
+    # THE mutant-kill: the shipped ASCII-only guard rejects a Nd-category digit; ``^\d+$`` would
+    # accept it. With the mutant applied this assertion fails.
+    assert rawhttp_mod._DIGITS.match(nd) is None
+    # end-to-end, a ٥-bearing Content-Length is still refused (decoded latin-1 -> 'Ù¥'), never crashing:
+    wire = b"HTTP/1.1 200 OK\r\nContent-Length: " + nd.encode("utf-8") + b"\r\n\r\nAAAAA"
+    with _served([wire], timeout=0.6) as s:
+        reader = RawResponseReader(s)
+        rec = reader.read_response()                # must NOT raise
+    assert rec["channel"] is False and rec["status"] is None
+    assert "Content-Length is unrecoverable" in reader.last_error, reader.last_error
 
 
 def test_budget_bounds_the_read() -> None:

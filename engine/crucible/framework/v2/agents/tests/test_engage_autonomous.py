@@ -486,9 +486,12 @@ def test_planner_is_driven_advisory_agents_run_in_loop(tmp_path: Path):
         verdicts = bb.read(engagement="alpha", kinds=["critic_verdict"])
         assert verdicts and all(
             v.payload["verdict"] in ("endorse", "object", "abstain") for v in verdicts)
-        # the mirrored findings are never PROMOTED by a critic (critique_status stays 'pending').
+        # the mirrored findings carry their LIVE grounding verdict, never a laundered console FACT
+        # (audit-A round-4): a synthetic result ran no grounding pass, so each mirrors as a lead —
+        # 'llm_advisory' / verified_by_oracle False — and a critic never promotes it to 'confirmed'.
         fevents = bb.read(engagement="alpha", kinds=["finding"])
-        assert fevents and all(f.payload["critique_status"] == "pending" for f in fevents)
+        assert fevents and all(f.payload["critique_status"] == "llm_advisory" for f in fevents)
+        assert all(f.payload["verified_by_oracle"] is False for f in fevents)
     finally:
         bb.close()
 
@@ -1057,3 +1060,80 @@ def test_spine_mirror_builders_leave_a_confirmed_builtin_check_unchanged():
 
     assert auto["title"] == mirror["title"] == "boolean_sqli confirmed at boolean_sqli"
     assert auto["severity"] == mirror["severity"] == "High"
+
+
+# ---------------------------------------------------------------------------
+# audit-A round-4 red-pen — the autonomous mirror derives fact-strength from the
+# LIVE grounding verdict, never from certificate PRESENCE (the twin of
+# test_engage.py::test_spine_finding_mirror_never_claims_confirmed_without_a_live_verdict).
+# ---------------------------------------------------------------------------
+class _Verdict:
+    """A minimal live-grounding verdict stub: only ``is_fact`` is read by the mirror."""
+    def __init__(self, is_fact: bool) -> None:
+        self.is_fact = is_fact
+
+
+class _CaptureSink:
+    """Best-effort spine sink stub that records the finding payloads it is handed."""
+    def __init__(self) -> None:
+        self.payloads: list[dict] = []
+        self._n = 0
+
+    def finding_event(self, payload: dict, *, parent_id=None):
+        self.payloads.append(payload)
+        self._n += 1
+        return self._n
+
+
+def test_autonomous_finding_mirror_never_claims_confirmed_without_a_live_verdict():
+    # THE round-4 BLOCK: a certificate is PRESENT (oracle_context set) but there is NO live grounding
+    # verdict (admitted=None — e.g. the finding was firewall-DEMOTED, so its verdict is not a fact).
+    # The mirror must NOT launder certificate-presence into a console FACT.
+    f = _finding("boolean_sqli", "https://t.invalid/x", 0.99)
+    assert f.oracle_context is not None                      # a certificate IS present...
+    p = auto_mod._finding_payload(f)                         # ...but NO live grounding verdict
+    assert p["verified_by_oracle"] is False
+    assert p["critique_status"] == "llm_advisory"
+    assert p["oracle_context"] is not None                   # retained so downstream can re-verify
+
+
+def test_autonomous_finding_mirror_demoted_verdict_is_a_lead_not_a_fact():
+    # A firewall-DEMOTED finding (still in active_findings, but admitted.is_fact is False) mirrors
+    # as a lead — exactly the traced defect path the round-4 red-pen BLOCKed.
+    f = _finding("boolean_sqli", "https://t.invalid/x", 0.99)
+    p = auto_mod._finding_payload(f, _Verdict(False))
+    assert p["verified_by_oracle"] is False
+    assert p["critique_status"] == "llm_advisory"
+
+
+def test_autonomous_finding_mirror_confirms_only_on_a_live_fact_verdict():
+    f = _finding("boolean_sqli", "https://t.invalid/x", 0.99)
+    p = auto_mod._finding_payload(f, _Verdict(True))
+    assert p["verified_by_oracle"] is True
+    assert p["critique_status"] == "confirmed"
+
+
+def test_mirror_findings_to_spine_pairs_the_grounding_verdict_by_index():
+    # Two findings, a per-index grounding list [fact, lead]: the first mirrors as a FACT, the second
+    # as a lead. This is the same index-pairing engage.py uses over result.grounding.
+    f0 = _finding("boolean_sqli", "https://t.invalid/a", 0.99)
+    f1 = _finding("reflected_xss", "https://t.invalid/b", 0.99)
+    sink = _CaptureSink()
+    n = auto_mod._mirror_findings_to_spine(sink, [f0, f1], [_Verdict(True), _Verdict(False)])
+    assert n == 2
+    assert sink.payloads[0]["verified_by_oracle"] is True
+    assert sink.payloads[0]["critique_status"] == "confirmed"
+    assert sink.payloads[1]["verified_by_oracle"] is False
+    assert sink.payloads[1]["critique_status"] == "llm_advisory"
+
+
+def test_mirror_findings_to_spine_without_grounding_is_all_leads():
+    # No grounding list at all (default None) → every finding mirrors conservatively as a lead,
+    # never a laundered FACT from certificate presence alone.
+    f0 = _finding("boolean_sqli", "https://t.invalid/a", 0.99)
+    f1 = _finding("reflected_xss", "https://t.invalid/b", 0.99)
+    sink = _CaptureSink()
+    n = auto_mod._mirror_findings_to_spine(sink, [f0, f1])
+    assert n == 2
+    assert all(p["verified_by_oracle"] is False for p in sink.payloads)
+    assert all(p["critique_status"] == "llm_advisory" for p in sink.payloads)
