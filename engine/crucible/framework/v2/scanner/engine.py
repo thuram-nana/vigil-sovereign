@@ -19,7 +19,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_serializer
 
 from ..verify.confirmation import adjudicate_finding, confirmed_from_result
 from ..verify.models import VerificationResult
@@ -91,9 +91,25 @@ class AuditFinding(BaseModel):
     confirmed_by: str = Field(description="The oracle kind that fired.")
     rationale: str = ""
     # The CLAIM the producer actually made, carried verbatim so the report cannot invent a
-    # different one (B4). Both default to "" — the built-in point checks do not set them and
-    # every existing certificate/export is byte-identical — and ``report.build_report`` falls
-    # back to its own title/severity table exactly as before when they are empty. They exist
+    # different one (B4). Both default to "" — the built-in point checks do not set them —
+    # and ``report.build_report`` falls back to its own title/severity table exactly as
+    # before when they are empty.
+    #
+    # Audit-A red-pen BLOCK-6: the earlier wording here said "every existing certificate/
+    # export is byte-identical", and that was MEASURED WRONG. The certificate really was
+    # byte-identical (``oracle_context`` is untouched, and so are ``to_sarif``/``to_html``),
+    # but ``ScanReport.model_dump_json`` — i.e. the ``--reverifiable-out`` artifact that
+    # ``framework.v2 verify`` re-runs — MOVED: every finding row gained ``"title": ""`` and
+    # ``"severity": ""``. A moved re-verification input is a moved input. The fix follows the
+    # precedent six lines above the writer at ``cli.py:203-207``, where a new default-``None``
+    # field was explicitly excluded to preserve exactly this artifact: the serializer below
+    # OMITS a producer claim that was never made, so a report whose producers set neither
+    # field serializes byte-identically to 838e0b42, while a producer that DID hedge still
+    # carries its hedge. (The rendered JSON report gained a top-level ``arsenal_leads`` key
+    # deliberately — see ``report.build_report`` — so a demotion is not a disappearance; that
+    # one is an intended change to a human/CI report, not to the re-verification input.)
+    #
+    # They exist
     # because the arsenal adapter used to DISCARD the producer's title and severity: an
     # explicitly UNCONFIRMED Medium LEAD (the CSWSH no-cookies branch) was then rendered
     # "<bug_class> confirmed at <param>" at the class's table severity, which turns an honest
@@ -108,6 +124,19 @@ class AuditFinding(BaseModel):
     # evidence that lets this finding be re-verified offline (the certificate the
     # Wave-3 re-verifier re-runs the pure oracle over). None only for legacy paths.
     oracle_context: dict | None = None
+
+    @model_serializer(mode="wrap")
+    def _omit_unmade_producer_claim(self, handler):  # type: ignore[no-untyped-def]
+        """Serialize ``title``/``severity`` only when the producer actually set them (B4 /
+        BLOCK-6 byte-identity). A claim that was never made is not a field with an empty
+        value — it is an absent field, exactly as it was before B4 added these. Round-trips:
+        both default to ``""`` on load."""
+        data = handler(self)
+        if isinstance(data, dict):
+            for key in ("title", "severity"):
+                if key in data and not data[key]:
+                    del data[key]
+        return data
 
 
 class ProbeRecord(BaseModel):

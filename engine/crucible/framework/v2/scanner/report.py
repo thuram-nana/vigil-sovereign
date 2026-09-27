@@ -324,6 +324,11 @@ def to_json(report: ScanReport, *, attack_paths: list | None = None,
     )
 
 
+# The SARIF rule id every arsenal LEAD is reported under. A lead is never a finding, so it
+# gets its own rule (never a bug-class rule) and is always emitted at level `note`.
+_ARSENAL_LEAD_RULE = "arsenal-lead"
+
+
 def to_sarif(report: ScanReport, *, grounding: list | None = None,
              strict_evidence: bool = False) -> str:
     """SARIF 2.1.0 — one rule per bug class, one result per finding.
@@ -363,6 +368,38 @@ def to_sarif(report: ScanReport, *, grounding: list | None = None,
                 "grounding": f.get("grounding", "unclassified"),
             },
         })
+    # B4 / audit-A red-pen BLOCK-5 — DEMOTION IS NOT DISAPPEARANCE. The arsenal LEAD channel
+    # (request_smuggling's single-connection canary differential, request_race's over-count,
+    # h2c, mined ws:// endpoints) reached `to_json` only. An operator who renders SARIF saw
+    # ZERO results for a class that WAS probed — indistinguishable from a class that was never
+    # looked at, which is verbatim the failure the `arsenal_leads` comment in `build_report`
+    # names. Leads are emitted as SARIF results at level `note` (NEVER `warning`/`error`: a
+    # lead is not a finding and must not enter a severity gate) under one dedicated rule, with
+    # the producer's verbatim lead text — which is what carries the `blocking_work` the class
+    # is demoted behind. With no leads nothing is added, so a lead-free export is byte-identical.
+    leads = list(doc.get("arsenal_leads") or [])
+    if leads:
+        rules[_ARSENAL_LEAD_RULE] = {
+            "id": _ARSENAL_LEAD_RULE,
+            "name": _ARSENAL_LEAD_RULE,
+            "shortDescription": {"text": "Unconfirmed arsenal lead — the class WAS probed; "
+                                         "no oracle confirmed it"},
+            "helpUri": "",
+            "properties": {"cwe": [], "remediation": (
+                "Not a finding and not a clean: read the lead text for what was observed and "
+                "for the authorised work (blocking_work) that would turn it into a fact.")},
+        }
+        for lead in leads:
+            results.append({
+                "ruleId": _ARSENAL_LEAD_RULE,
+                "level": "note",
+                "message": {"text": f"UNCONFIRMED LEAD (not a finding): {lead}"},
+                "locations": [{"physicalLocation": {"artifactLocation": {"uri": doc["target"]}}}],
+                "properties": {
+                    "kind": "lead", "confidence": 0.0, "confirmedBy": "",
+                    "reVerifiable": False, "grounding": "unconfirmed_lead",
+                },
+            })
     sarif = sarif_document(rules.values(), results)
     return json.dumps(sarif, indent=2, ensure_ascii=False)
 
@@ -390,6 +427,12 @@ def to_html(report: ScanReport, *, grounding: list | None = None,
              f"{len(_cvd['classes_inconclusive'])} classes INCONCLUSIVE "
              f"(e.g. {', '.join(_cvd['classes_inconclusive'][:3])})"
     )
+    # BLOCK-5: a class the arsenal PROBED but can only report as a LEAD sits outside the
+    # point-check corpus denominator, so it appeared in neither half of the verdict.
+    _outside = list(_cvd.get("classes_probed_outside_corpus") or [])
+    if _outside:
+        _cov_note += (f". Also PROBED outside the point-check corpus, LEAD-only (no fact, no "
+                      f"clean): {', '.join(_outside)} — see Unconfirmed leads below")
     e = html.escape
     rows = "".join(
         f"<tr><td>{e(sev)}</td><td>{n}</td></tr>"
@@ -410,6 +453,19 @@ def to_html(report: ScanReport, *, grounding: list | None = None,
             f"<p><b>Remediation:</b> {e(f['remediation']) or '&mdash;'}</p>"
             f"<p class=refs><b>Refs:</b> {refs}</p></div>"
         )
+    # BLOCK-5 — the same demotion-is-not-disappearance rule for the human document.
+    _leads = list(doc.get("arsenal_leads") or [])
+    leads_section = ""
+    if _leads:
+        items = "".join(f"<li>{e(ld)}</li>" for ld in _leads)
+        leads_section = (
+            "<h2>Unconfirmed leads (probed, NOT findings)</h2>"
+            "<p class=sub>These classes WERE exercised. Every line below is an UNCONFIRMED "
+            "LEAD: no oracle confirmed it, so it carries no severity and is deliberately "
+            "absent from the summary above. Where a lead names <code>blocking_work</code>, "
+            "that is the authorised step still needed to turn the observation into a fact.</p>"
+            f'<ul class=leads style="line-height:1.6">{items}</ul>'
+        )
     return f"""<!doctype html><html><head><meta charset=utf-8>
 <title>CRUCIBLE report — {e(doc['target'])}</title><style>
 body{{font:14px/1.5 system-ui,sans-serif;margin:2rem;color:#111;max-width:60rem}}
@@ -425,7 +481,7 @@ code{{background:#f5f5f5;padding:.1rem .3rem;border-radius:3px}}
 <h2>Severity summary</h2><table><tr><th>Severity</th><th>Count</th></tr>{rows}</table>
 <p class=sub>{_footer_note(s)}</p>
 <h2>Findings</h2>{''.join(cards) or '<p>No findings.</p>'}
-</body></html>"""
+{leads_section}</body></html>"""
 
 
 def _footer_note(summary: dict) -> str:
@@ -491,9 +547,16 @@ def coverage_line(report: ScanReport) -> str:
     # The BOUNDED verdict — keyed on whether any corpus class is inconclusive, NOT merely on
     # whether the library contributed checks. A fingerprint-scoped --library run that still
     # left a class unexercised is honestly NOT corpus-wide.
+    # BLOCK-5: LEAD-only, request-level classes the run DID probe are outside the point-check
+    # denominator; say so on the operator's line rather than letting a demotion vanish.
+    outside = list(bounds.get("classes_probed_outside_corpus") or [])
+    tail = (f". Also PROBED outside the point-check corpus, LEAD-only (no fact, no clean): "
+            f"{', '.join(outside)}" if outside else "")
     if bounds["clean_is_corpus_wide"]:
-        return f"{ran}. VERDICT: adjudicated {exercised}/{corpus} point-check bug classes — a CLEAN is corpus-wide"
+        return (f"{ran}. VERDICT: adjudicated {exercised}/{corpus} point-check bug classes — "
+                f"a CLEAN is corpus-wide{tail}")
     sample = ", ".join(inconc[:3])
     more = f", +{len(inconc) - 3} more" if len(inconc) > 3 else ""
     return (f"{ran}. VERDICT BOUNDED: adjudicated {exercised}/{corpus} point-check bug classes; "
-            f"a CLEAN here is NOT corpus-wide — {len(inconc)} classes INCONCLUSIVE ({sample}{more})")
+            f"a CLEAN here is NOT corpus-wide — {len(inconc)} classes INCONCLUSIVE ({sample}{more})"
+            f"{tail}")

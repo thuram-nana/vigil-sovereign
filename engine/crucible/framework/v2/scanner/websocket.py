@@ -368,9 +368,24 @@ class CswshCheck:
                 # headers merely CONTAIN the substring "HTTP/1.1 101 Switching Protocols" (and
                 # the computed accept value) satisfied them — measured, BASE 0 findings vs
                 # HEAD 1 finding at conf 0.9. ``*_status_line`` is by construction the
-                # response's FIRST line, so a match inside it is anchored; the companion
-                # ``contains`` clause pins that line to the retained block, so editing the
-                # status line alone out of a certificate breaks re-verification.
+                # response's FIRST line AT PRODUCTION TIME; the companion ``contains`` clause
+                # pins that line to the retained block, so editing the status line alone out
+                # of a certificate breaks re-verification.
+                #
+                # Audit-A red-pen (B3 offline residual) — "a match inside it is anchored" is
+                # true only at PRODUCTION time, NOT at re-verification. Re-execution reads
+                # ``trusted_status_line`` as a plain string, so a HAND-EDITED certificate
+                # carrying ``"HTTP/1.1 403 Forbidden  http/1.1 101"`` (consistently mirrored
+                # into ``trusted_response``) re-verifies ``ok`` — measured. It is unreachable
+                # live because the producer gate above reads the status line's OWN token via
+                # ``_status_of`` and refuses anything that is not a real 101; this is exactly
+                # the limit ``Handshake``'s N1 note states, and binding a certificate to a
+                # real exchange is the signing layer's job, never re-execution's. That gate
+                # is therefore load-bearing, and
+                # ``test_block4_cswsh_producer_refusal_is_load_bearing`` pins a LIVE origin
+                # (a 403 whose verbose reason phrase itself contains "HTTP/1.1 101 Switching
+                # Protocols", echoing VIGIL's own accept key) on which EVERY clause below
+                # holds and only the producer refuses.
                 {"icontains": [{"var": "trusted_status_line"}, "http/1.1 101"]},
                 {"contains": [{"var": "trusted_response"}, {"var": "trusted_status_line"}]},
                 {"contains": [{"var": "trusted_response"}, {"var": "trusted_accept_key"}]},

@@ -50,6 +50,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Iterator
 from urllib.parse import unquote_plus, urlsplit
 
+import pytest
+
 from framework.v2.eval.benchmark_app import (
     serve_smuggling_benign, serve_smuggling_desync, serve_smuggling_reflect_error,
 )
@@ -636,8 +638,15 @@ class _AnyOriginWSServer(threading.Thread):
                     key = v.decode().strip()
         accept = base64.b64encode(hashlib.sha1((key + _GUID).encode()).digest()).decode()
         with contextlib.suppress(OSError):
+            # B3 (audit-A red-pen BLOCK-3): the 101 header block AND a WebSocket DATA FRAME
+            # go out in ONE sendall, so a single ``recv`` really does deliver both. Without
+            # this the fixture sent nothing after CRLFCRLF, ``_header_block`` was a no-op on
+            # every byte pattern it ever saw, and the test asserting the block is bounded
+            # passed identically with the trimming removed (measured: 0 tests killed).
+            # ``0x81 0x0a`` is a final text frame with a 10-byte payload, "fake-frame".
             conn.sendall(b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n"
-                         b"Connection: Upgrade\r\nSec-WebSocket-Accept: " + accept.encode() + b"\r\n\r\n")
+                         b"Connection: Upgrade\r\nSec-WebSocket-Accept: " + accept.encode()
+                         + b"\r\n\r\n" + b"\x81\x0afake-frame")
         with contextlib.suppress(OSError):
             conn.close()
 
@@ -806,13 +815,21 @@ def test_b3_a_403_that_echoes_the_101_status_line_is_not_a_cswsh() -> None:
 
 def test_b3_retained_response_is_bounded_to_the_header_block() -> None:
     """``_read_headers`` returns whatever ``recv`` delivered, so body/frame bytes could ride
-    into the block the predicate searches. What is RETAINED must be the headers only."""
+    into the block the predicate searches. What is RETAINED must be the headers only.
+
+    Audit-A red-pen BLOCK-3: this control used to be VACUOUS. ``_AnyOriginWSServer`` never
+    sent anything after CRLFCRLF, so ``count("\r\n\r\n") == 1`` and ``endswith`` held with
+    ``_header_block`` reduced to ``return resp`` — 0 tests killed. The fixture now writes the
+    101 headers AND a WebSocket text frame in a SINGLE ``sendall``, so one ``recv`` delivers
+    both and the trimming is the only thing that keeps the frame out of the retained block."""
     with _ws_server() as port:
         from framework.v2.scanner.websocket import handshake
         _conn, hs = handshake(f"ws://127.0.0.1:{port}/live", origin="http://x.test")
     assert hs.response.endswith("\r\n\r\n"), repr(hs.response[-16:])
     assert hs.response.count("\r\n\r\n") == 1
     assert hs.status_line == "HTTP/1.1 101 Switching Protocols"
+    # the load-bearing clause: the frame that arrived in the SAME read must NOT be retained
+    assert "fake-frame" not in hs.response, repr(hs.response[-32:])
 
 
 def test_b4_an_unconfirmed_lead_is_never_rendered_as_confirmed() -> None:
@@ -943,6 +960,438 @@ def test_r3_race_over_run_is_a_lead_not_a_fact() -> None:
     assert not hasattr(camp, "_race_findings"), "the FACT-minting race path must be gone"
     assert any("UNCONFIRMED LEAD" in ln for ln in leads), leads
     assert all(isinstance(ln, str) for ln in leads)
+
+
+# ===========================================================================================
+# BLOCK-1 / BLOCK-2 — GraphQL introspection: a POPULATED schema, or nothing
+# ===========================================================================================
+
+#: Bodies that disclose ZERO schema. Each one was MEASURED to mint a signed
+#: ``ACHIEVED_STATE`` FACT at conf 0.9 that re-verified offline against the substring-only
+#: form of the check — on a check that is in ``DEFAULT_REQUEST_CHECKS``, i.e. on every scan.
+_NO_SCHEMA_BODIES: "dict[str, str]" = {
+    # the field-auth denial that preserves the __schema SHAPE; `[]` IS an open bracket, which
+    # is what defeated the "a real object or list" clause
+    "field_auth_denial": '{"data": {"__schema": {"queryType": null, "types": []}}, '
+                         '"errors": [{"message": "Introspection is disabled on this endpoint."}]}',
+    "empty_query_type": '{"data":{"__schema":{"queryType":{},"types":null}}}',
+    "empty_types_list": '{"data":{"__schema":{"types":[]}}}',
+    "null_data_with_errors": '{"data":null,"errors":[{"message":"GraphQL introspection is not '
+                             'allowed by Apollo Server, but the query contained __schema"}]}',
+    "apollo_introspection_disabled": '{"errors":[{"message":"GraphQL introspection is not allowed '
+                                     'by Apollo Server, but the query contained __schema or '
+                                     '__type. To enable introspection, pass introspection: true"}]}',
+    # residual 3, same root cause: a NON-JSON page that merely QUOTES a sample response
+    "waf_page_quoting_a_sample": '<html><body><h1>Request blocked</h1><p>Your request resembled '
+                                 'an introspection query such as {"data":{"__schema":'
+                                 '{"queryType":{"name":"Query"},"types":[{"name":"User"}]}}} '
+                                 'and was refused by the WAF.</p></body></html>',
+}
+
+#: The positive control: a real, populated schema. If THIS stops firing the check is dead and
+#: every negative control above is vacuous.
+_POPULATED_SCHEMA = json.dumps(
+    {"data": {"__schema": {"queryType": {"name": "Query"},
+                           "types": [{"name": "User"}, {"name": "Query"}]}}})
+
+
+def _introspection_ctx(body: str):
+    """Run the shipped check against a canned response body and return its context."""
+    from framework.v2.scanner.graphql import GraphQLIntrospectionCheck
+    from framework.v2.scanner.insertion import HttpRequest, RequestTemplate
+
+    def _send(_req: object) -> dict:
+        return {"status": 200, "headers": [("Content-Type", "application/json")], "body": body}
+
+    tmpl = RequestTemplate(HttpRequest(method="POST", url="http://127.0.0.1:1/graphql"))
+    return GraphQLIntrospectionCheck().probe(tmpl, _send)
+
+
+@pytest.mark.parametrize("name", sorted(_NO_SCHEMA_BODIES))
+def test_block1_a_body_that_discloses_no_schema_is_never_introspection_enabled(name: str) -> None:
+    """BLOCK-1 (CRITICAL). ``GraphQLIntrospectionCheck`` is in ``DEFAULT_REQUEST_CHECKS``
+    (``campaign.py``), so it runs on EVERY scan. Three unrelated substring matches over the
+    whole body confirmed "introspection enabled" against endpoints that disclosed nothing at
+    all — including one whose only body is an explicit "Introspection is disabled" denial.
+
+    The decision is now a full JSON parse plus a POPULATED-``data.__schema`` test. Each body
+    below is asserted POSITIVELY: the probe still ran and still retained the target's raw
+    bytes (so this is a refusal, not a missing check), the oracle did not fire, and the
+    retained certificate does NOT re-verify."""
+    from framework.v2.verify.confirmation import confirm_finding
+
+    body = _NO_SCHEMA_BODIES[name]
+    ctx = _introspection_ctx(body)
+    assert ctx is not None, "the probe must still produce a certificate for the refusal"
+    doc = ctx.model_dump(mode="json")
+    # the raw target bytes really were retained — the control is not passing because the
+    # check silently stopped looking at the response
+    assert doc["observed_evidence"]["response_body"] == body
+    assert doc["observed_evidence"]["disclosed_schema_name"] == "", doc["observed_evidence"]
+    assert confirm_finding({"bug_class": "graphql_introspection"}, ctx) is None
+    assert not reverify_context(doc, bug_class="graphql_introspection").ok
+
+
+def test_block1_a_populated_schema_still_confirms_and_re_verifies() -> None:
+    """The positive control the six negatives are only meaningful against."""
+    from framework.v2.verify.confirmation import confirm_finding
+
+    ctx = _introspection_ctx(_POPULATED_SCHEMA)
+    assert ctx is not None
+    doc = ctx.model_dump(mode="json")
+    assert doc["observed_evidence"]["disclosed_schema_name"] == "Query"
+    confirmed = confirm_finding({"bug_class": "graphql_introspection"}, ctx)
+    assert confirmed is not None and confirmed.confidence >= 0.7
+    assert reverify_context(doc, bug_class="graphql_introspection").ok
+    # and the name the oracle is anchored on really is pinned to the retained bytes
+    tampered = json.loads(json.dumps(doc))
+    tampered["observed_evidence"]["response_body"] = '{"data":{"__schema":{"types":[]}}}'
+    assert not reverify_context(tampered, bug_class="graphql_introspection").ok
+
+
+class _IntrospectionDisabledApp(BaseHTTPRequestHandler):
+    """A LIVE loopback GraphQL endpoint whose ONLY body is the field-auth denial — the exact
+    origin the red-pen measured the false FACT against, end to end."""
+
+    protocol_version = "HTTP/1.1"
+
+    def log_message(self, *a: object) -> None:
+        return
+
+    def do_POST(self) -> None:  # noqa: N802
+        n = int(self.headers.get("Content-Length") or 0)
+        self.rfile.read(n)
+        body = _NO_SCHEMA_BODIES["field_auth_denial"].encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_GET(self) -> None:  # noqa: N802
+        self.send_response(200)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+
+def test_block1_end_to_end_against_a_live_introspection_disabled_origin() -> None:
+    """The red-pen's own measurement, as a regression test: a real socket, the real gated
+    ``loopback_send``, the real check — and no FACT."""
+    from framework.v2.scanner.graphql import GraphQLIntrospectionCheck
+    from framework.v2.scanner.insertion import HttpRequest, RequestTemplate
+    from framework.v2.verify.confirmation import confirm_finding
+
+    with _http_server(_IntrospectionDisabledApp) as base:
+        tmpl = RequestTemplate(HttpRequest(method="POST", url=base + "/graphql"))
+        ctx = GraphQLIntrospectionCheck().probe(tmpl, loopback_send)
+
+    assert ctx is not None
+    assert "Introspection is disabled" in ctx.model_dump(mode="json")["observed_evidence"]["response_body"]
+    assert confirm_finding({"bug_class": "graphql_introspection"}, ctx) is None
+    assert not reverify_context(ctx.model_dump(mode="json"), bug_class="graphql_introspection").ok
+
+
+# ===========================================================================================
+# BLOCK-4 — the two producer-side guards that killed zero tests
+# ===========================================================================================
+
+def test_block4_adjudicable_refuses_a_leg_that_read_no_real_status() -> None:
+    """``DesyncProbe.adjudicable`` ships a nine-line docstring calling itself "the
+    producer-side belt-and-braces, because the differential must never be computed over
+    bytes that are not a response" — and ``return True`` killed ZERO tests.
+
+    The shape it guards is the one the pre-fix reader produced: ``channel=True`` with
+    ``status=None``, from surplus bytes (a benign echo of VIGIL's FIRST request, canary and
+    all) that were never a response. The shared reader now refuses that shape at the
+    transport, so this guard can only be pinned at the model — which is precisely what
+    "belt-and-braces" means, and precisely why it needs its own control."""
+    from framework.v2.scanner.smuggling import DesyncLeg, DesyncProbe
+
+    canary = "crsmug" + "00112233445566778899aa"
+    echoed = f"rejected: GET /vigil-reflect?c={canary}"
+
+    # POSITIVE control — two real responses, canary only on the conflict leg
+    good = DesyncProbe(technique="CL.TE", canary=canary,
+                       conflict=DesyncLeg(channel=True, status=200, body=echoed),
+                       control=DesyncLeg(channel=True, status=200, body="ok"))
+    assert good.adjudicable is True
+    assert good.canary_echo_differential is True
+
+    # NEGATIVE control — the conflict leg's "response" has no status line at all
+    statusless = DesyncProbe(technique="CL.TE", canary=canary,
+                             conflict=DesyncLeg(channel=True, status=None, body=echoed),
+                             control=DesyncLeg(channel=True, status=200, body="ok"))
+    assert statusless.adjudicable is False, (
+        "a blob with no status line is not a response — the differential must not be "
+        "computed over it")
+    assert statusless.canary_echo_differential is False
+
+    # and the same on the CONTROL leg, so the guard is not one-sided
+    control_statusless = DesyncProbe(technique="TE.CL", canary=canary,
+                                     conflict=DesyncLeg(channel=True, status=200, body=echoed),
+                                     control=DesyncLeg(channel=True, status=None, body="ok"))
+    assert control_statusless.adjudicable is False
+    assert control_statusless.canary_echo_differential is False
+
+
+class _ReasonPhraseDecoyWSServer(threading.Thread):
+    """B3's REACHABLE decoy: the endpoint REFUSES the foreign Origin, but says so in a
+    verbose reason phrase that itself contains ``HTTP/1.1 101 Switching Protocols`` — and it
+    echoes back the very ``Sec-WebSocket-Accept`` value VIGIL computed for this handshake.
+
+    ``_status_of`` reads the status line's own token and gets 403, so the producer refuses.
+    The PREDICATE, however, only asks whether "http/1.1 101" appears INSIDE the status line —
+    and here it does. So this is the shape where the producer-side refusal is the only thing
+    standing between a 403 and a conf-0.9 CSWSH finding."""
+
+    def __init__(self) -> None:
+        super().__init__(daemon=True)
+        self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self.sock.bind(("127.0.0.1", 0))
+        self.sock.listen(16)
+        self.port = self.sock.getsockname()[1]
+        self._stop = False
+
+    def run(self) -> None:
+        self.sock.settimeout(0.3)
+        while not self._stop:
+            try:
+                conn, _ = self.sock.accept()
+            except socket.timeout:
+                continue
+            except OSError:
+                break
+            threading.Thread(target=self._serve, args=(conn,), daemon=True).start()
+
+    @staticmethod
+    def _serve(conn: socket.socket) -> None:
+        import base64
+        import hashlib
+        conn.settimeout(2.0)
+        data = b""
+        with contextlib.suppress(OSError, socket.timeout):
+            while b"\r\n\r\n" not in data:
+                chunk = conn.recv(4096)
+                if not chunk:
+                    break
+                data += chunk
+        key = ""
+        for line in data.split(b"\r\n")[1:]:
+            if b":" in line:
+                k, _, v = line.partition(b":")
+                if k.decode().strip().lower() == "sec-websocket-key":
+                    key = v.decode().strip()
+        accept = base64.b64encode(hashlib.sha1((key + _GUID).encode()).digest()).decode()
+        with contextlib.suppress(OSError):
+            conn.sendall(
+                b"HTTP/1.1 403 Forbidden - expected HTTP/1.1 101 Switching Protocols\r\n"
+                b"Sec-WebSocket-Accept: " + accept.encode() + b"\r\n"
+                b"Content-Length: 0\r\n\r\n")
+        with contextlib.suppress(OSError):
+            conn.close()
+
+    def stop(self) -> None:
+        self._stop = True
+        with contextlib.suppress(OSError):
+            self.sock.close()
+
+
+def test_block4_cswsh_producer_refusal_is_load_bearing() -> None:
+    """B3's producer-side refusal (``if not (legit_hs.accepted and evil_hs.accepted)``) is a
+    named deliverable and killed ZERO tests. Against ``_Echo403WSServer`` it is genuinely
+    redundant with the status-line clause; this origin is the case where it is NOT.
+
+    Everything the predicate checks holds here — the status line CONTAINS "http/1.1 101", the
+    status line is contained in the retained block, and the retained block carries VIGIL's own
+    accept key — yet the endpoint answered 403 and refused the handshake. Only the producer's
+    ``_status_of``-anchored verdict separates the two."""
+    from framework.v2.scanner.websocket import CswshCheck, handshake
+    from framework.v2.verify.oracles import predicate_oracle
+
+    srv = _ReasonPhraseDecoyWSServer()
+    srv.start()
+    try:
+        ws_url = f"ws://127.0.0.1:{srv.port}/live"
+        _conn, hs = handshake(ws_url, origin="https://crucible-evil-origin.test")
+        camp = WebScanCampaign(_dummy_send, enable_arsenal=True)
+        findings = camp._cswsh_findings([ws_url])
+        confirmed, ctx = CswshCheck(url=ws_url).probe_with_context()
+    finally:
+        srv.stop()
+
+    # the decoy really is a REFUSAL that the predicate's clauses cannot tell from an accept
+    assert hs.status == 403 and hs.accepted is False, (hs.status, hs.accepted)
+    assert "http/1.1 101" in hs.status_line.lower(), hs.status_line
+    assert hs.status_line in hs.response and hs.accept_key and hs.accept_key in hs.response
+    # ... so the predicate ALONE, over those very bytes, WOULD have fired
+    would_fire = predicate_oracle(
+        {"trusted_request": "Origin: http://127.0.0.1", "trusted_origin_header": "Origin: http://127.0.0.1",
+         "trusted_response": hs.response, "trusted_status_line": hs.status_line,
+         "trusted_accept_key": hs.accept_key,
+         "evil_request": "Origin: https://crucible-evil-origin.test",
+         "evil_origin_header": "Origin: https://crucible-evil-origin.test",
+         "evil_response": hs.response, "evil_status_line": hs.status_line,
+         "evil_accept_key": hs.accept_key},
+        {"all": [
+            {"icontains": [{"var": "trusted_request"}, {"var": "trusted_origin_header"}]},
+            {"icontains": [{"var": "trusted_status_line"}, "http/1.1 101"]},
+            {"contains": [{"var": "trusted_response"}, {"var": "trusted_status_line"}]},
+            {"contains": [{"var": "trusted_response"}, {"var": "trusted_accept_key"}]},
+            {"icontains": [{"var": "evil_request"}, {"var": "evil_origin_header"}]},
+            {"icontains": [{"var": "evil_status_line"}, "http/1.1 101"]},
+            {"contains": [{"var": "evil_response"}, {"var": "evil_status_line"}]},
+            {"contains": [{"var": "evil_response"}, {"var": "evil_accept_key"}]},
+        ]})
+    assert would_fire.fired is True, (
+        "this control has gone vacuous: the predicate no longer accepts the decoy, so the "
+        "producer refusal it exists to pin is redundant again")
+    # ... and the PRODUCER refuses anyway, so nothing is reported and nothing re-verifies
+    assert findings == [], findings
+    assert confirmed is None
+    assert not reverify_context(ctx.model_dump(mode="json"),
+                                bug_class="cross_site_websocket_hijacking").ok
+
+
+# ===========================================================================================
+# BLOCK-5 — a demotion must not be a disappearance on ANY render path
+# ===========================================================================================
+
+def _demoted_report() -> ScanReport:
+    """A report in exactly the shape a real ``_StockEchoOrigin`` scan produces: the class was
+    PROBED (two probe records, verdict inconclusive), nothing was confirmed, and the finding
+    lives only in the LEAD channel."""
+    lead = (
+        "smuggling CL.TE @ http://127.0.0.1:9/: the unique per-probe canary was echoed in "
+        "VIGIL's OWN second response on the CONFLICT connection and is ABSENT from the "
+        "identical well-formed control — an UNCONFIRMED LEAD, NOT a CWE-444 fact. Proving "
+        "CWE-444 needs the corruption observed on a connection VIGIL did NOT pipeline the "
+        "prefix onto, which requires explicit operator authorisation (blocking_work on "
+        "request_smuggling.differential_desync)")
+    probes = [
+        ProbeRecord(endpoint="http://127.0.0.1:9/", method="POST",
+                    insertion_point=f"request:{t}", param=t,
+                    check_id=f"smuggling-{t}", bug_class="request_smuggling",
+                    verdict="inconclusive")
+        for t in ("CL.TE", "TE.CL")
+    ]
+    return ScanReport(target="http://127.0.0.1:9/", arsenal_leads=[lead],
+                      exercised_probes=probes)
+
+
+def test_block5_a_demoted_lead_reaches_sarif_html_and_the_coverage_verdict() -> None:
+    """B4 wired the LEAD channel into ONE render path. Measured against ``_StockEchoOrigin``,
+    ``to_sarif`` produced 0 results, ``to_html`` never mentioned the class, and
+    ``coverage_verdict`` listed it in neither half — so an operator who renders HTML or SARIF
+    saw NOTHING: not the lead, not the blocking work, not even that the class was probed.
+    A false FACT converted into a silent gap is not a fix."""
+    from framework.v2.scanner.report import coverage_line, to_html, to_sarif
+
+    report = _demoted_report()
+    lead = report.arsenal_leads[0]
+
+    # 1. the machine JSON (already wired by B4) still carries it
+    doc = build_report(report)
+    assert doc["arsenal_leads"] == [lead]
+
+    # 2. the coverage verdict now NAMES the probed-but-lead-only class
+    cvd = doc["coverage_verdict"]
+    assert cvd["classes_probed_outside_corpus"] == ["request_smuggling"], cvd
+    assert "request_smuggling" not in cvd["classes_exercised"]
+    assert "request_smuggling" not in cvd["classes_inconclusive"]
+    assert "request_smuggling" in coverage_line(report)
+
+    # 3. SARIF — a result exists, it is a NOTE (never a finding level), and it carries the
+    #    producer's verbatim text including the blocking work
+    sarif = json.loads(to_sarif(report))
+    results = sarif["runs"][0]["results"]
+    lead_results = [r for r in results if r["ruleId"] == "arsenal-lead"]
+    assert len(lead_results) == 1, results
+    r = lead_results[0]
+    assert r["level"] == "note", r
+    assert r["message"]["text"] == f"UNCONFIRMED LEAD (not a finding): {lead}"
+    assert "blocking_work on request_smuggling.differential_desync" in r["message"]["text"]
+    assert r["properties"]["kind"] == "lead" and r["properties"]["reVerifiable"] is False
+    assert [x["level"] for x in results] == ["note"], "a lead must never be warning/error"
+    assert any(rule["id"] == "arsenal-lead" for rule in sarif["runs"][0]["tool"]["driver"]["rules"])
+
+    # 4. HTML — the human document says the class was probed, shows the lead, and frames it
+    html_doc = to_html(report)
+    assert "Unconfirmed leads (probed, NOT findings)" in html_doc
+    assert "request_smuggling" in html_doc
+    assert "blocking_work on request_smuggling.differential_desync" in html_doc
+    assert "UNCONFIRMED LEAD" in html_doc
+    assert "PROBED outside the point-check corpus, LEAD-only" in html_doc
+    # ... and it is NOT counted as a finding anywhere
+    assert "<h2>Findings</h2><p>No findings.</p>" in html_doc
+    assert doc["summary"]["by_severity"] == {}
+
+
+def test_block5_a_lead_free_report_renders_exactly_as_before() -> None:
+    """The negative control for the above: with no leads, no lead section, no lead result,
+    no extra coverage key — the byte-identity the BLOCK-6 measurement depends on."""
+    from framework.v2.scanner.report import to_html, to_sarif
+
+    report = ScanReport(target="http://127.0.0.1:9/")
+    doc = build_report(report)
+    assert doc["arsenal_leads"] == []
+    assert "classes_probed_outside_corpus" not in doc["coverage_verdict"]
+    assert json.loads(to_sarif(report))["runs"][0]["results"] == []
+    assert "Unconfirmed leads" not in to_html(report)
+
+
+def test_block6_a_producer_claim_that_was_never_made_is_not_serialized() -> None:
+    """BLOCK-6. ``AuditFinding.title``/``severity`` (added by B4) made every finding row in
+    ``--reverifiable-out`` gain ``"title": "", "severity": ""`` — a MOVED re-verification
+    input, measured sha256 3b0c2d1e… -> bcc93b41…. The same precedent as ``cli.py:203-207``
+    applies: a field the producer never set is not serialized at all. A producer that DID
+    hedge still carries its hedge."""
+    plain = AuditFinding(check_id="boolean-sqli", bug_class="boolean_sqli",
+                         insertion_point="query:id", param="id", confidence=0.95,
+                         confirmed_by="BOOLEAN_INFERENCE")
+    hedged = AuditFinding(check_id="cswsh", bug_class="cross_site_websocket_hijacking",
+                          insertion_point="request:ws", param="ws", confidence=0.9,
+                          confirmed_by="ACHIEVED_STATE",
+                          title="Cross-origin WS handshake accepted — UNCONFIRMED",
+                          severity="Medium")
+    assert "title" not in json.loads(plain.model_dump_json())
+    assert "severity" not in json.loads(plain.model_dump_json())
+    assert json.loads(hedged.model_dump_json())["title"].endswith("UNCONFIRMED")
+    assert json.loads(hedged.model_dump_json())["severity"] == "Medium"
+    # round-trips: an absent claim loads back as the empty default
+    assert AuditFinding.model_validate(json.loads(plain.model_dump_json())).title == ""
+    # and the whole-report dump the CLI writes is free of the empty keys
+    dumped = ScanReport(target="http://x/", active_findings=[plain]).model_dump_json(
+        indent=2, exclude={"exercised_probes": {"__all__": {"evidence"}}})
+    assert '"title"' not in dumped and '"severity"' not in dumped
+
+
+def test_block5_the_spine_mirror_does_not_relabel_a_hedged_lead_confirmed() -> None:
+    """The third surface B4 missed: ``engage._spine_finding_payload`` hardcoded
+    ``"title": f"{bug_class} confirmed at {param}"`` and ``"severity": "High"``, so the
+    CSWSH no-cookies branch's explicit "… UNCONFIRMED" Medium was written onto the
+    IMMUTABLE event spine as a confirmed High — the same relabelling B4 retired in
+    ``build_report``, on the one stream that cannot be re-rendered."""
+    from framework.v2.engage import _spine_finding_payload
+
+    hedged = AuditFinding(
+        check_id="cswsh", bug_class="cross_site_websocket_hijacking",
+        insertion_point="request:ws", param="ws://127.0.0.1/live", confidence=0.9,
+        confirmed_by="ACHIEVED_STATE",
+        title="Cross-origin WebSocket handshake accepted — possible CSWSH — UNCONFIRMED",
+        severity="Medium")
+    out = _spine_finding_payload(hedged, None)
+    assert "UNCONFIRMED" in out["title"], out["title"]
+    assert "confirmed at" not in out["title"], out["title"]
+    assert out["severity"] == "Medium", out
+    assert out["verified_by_oracle"] is False and out["critique_status"] == "llm_advisory"
+
+    # the built-in point checks set neither field, so their mirror is unchanged
+    plain = AuditFinding(check_id="boolean-sqli", bug_class="boolean_sqli",
+                         insertion_point="query:id", param="id", confidence=0.95,
+                         confirmed_by="BOOLEAN_INFERENCE")
+    assert _spine_finding_payload(plain, None)["title"] == "boolean_sqli confirmed at id"
+    assert _spine_finding_payload(plain, None)["severity"] == "High"
 
 
 if __name__ == "__main__":       # pragma: no cover - manual measurement helper

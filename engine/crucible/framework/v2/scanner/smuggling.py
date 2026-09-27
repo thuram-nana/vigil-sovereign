@@ -485,9 +485,16 @@ class _RawResponseReader(RawResponseReader):
     The ~110-line body that used to live here was DUPLICATED verbatim in
     ``vigil_integration.live.smuggling_redrive`` and carried three framing defects in both
     copies (a 1xx interim returned as a complete response; an under-declared Content-Length
-    turning the surplus into "response 2"; unconsumed chunked trailers). One shared helper
-    now owns the framing — see ``scanner.rawhttp`` for the measured defects it fixes and
-    ``scanner.tests.test_rawhttp_reader`` for the unit tests and the drift guard."""
+    turning the surplus into "response 2"; unconsumed chunked trailers). ``scanner.rawhttp``
+    now owns the framing for THIS path — see it for the measured defects it fixes and
+    ``scanner.tests.test_rawhttp_reader`` for the unit tests and the drift guard.
+
+    Audit-A red-pen BLOCK-7a: that last sentence used to read as though the migration were
+    complete on every path. It is not. ``vigil_integration/live/smuggling_redrive.py:119``
+    STILL DEFINES its own ``class _RawResponseReader`` with the pre-fix framing; that file is
+    owned by a concurrent change and is not edited here. The drift guard's ``_PENDING`` /
+    ``_PENDING_DIVERGENT`` allowlist is the authority on that outstanding copy and fires the
+    day it is migrated."""
 
     def read_response(self) -> DesyncLeg:      # type: ignore[override]
         return DesyncLeg(**super().read_response())

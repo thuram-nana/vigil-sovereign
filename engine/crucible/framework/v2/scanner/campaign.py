@@ -292,18 +292,36 @@ class ScanReport(BaseModel):
         by a run that adjudicated NOTHING). ``clean_is_corpus_wide`` is True ONLY when nothing
         is inconclusive — i.e. a CLEAN from this run really does cover the whole shipped
         corpus. On a default (library-off) run it is False: most classes are inconclusive, so
-        ``no findings`` here is NOT a corpus-wide negative."""
+        ``no findings`` here is NOT a corpus-wide negative.
+
+        ``classes_probed_outside_corpus`` (present only when non-empty) names the classes the
+        run DID probe that the point-check denominator cannot represent — the arsenal's
+        LEAD-only, request-level classes. Without it, a demoted class is invisible here."""
         corpus = _corpus_bug_classes()
         clean, with_findings = self._adjudicated_classes()
         adjudicated = clean | with_findings
         exercised = sorted(c for c in corpus if c in adjudicated)
         inconclusive = sorted(c for c in corpus if c not in adjudicated)
-        return {
+        out: dict[str, object] = {
             "corpus_classes": len(corpus),
             "classes_exercised": exercised,
             "classes_inconclusive": inconclusive,
             "clean_is_corpus_wide": not inconclusive,
         }
+        # Audit-A red-pen BLOCK-5 — DEMOTION IS NOT DISAPPEARANCE. The arsenal's LEAD-only
+        # classes (``request_smuggling``'s single-connection canary differential,
+        # ``request_race``'s over-count) are REQUEST-level, so they sit outside the
+        # point-check denominator above by construction — and because they can never return
+        # ``clean``/``finding``, they were in NEITHER half of the verdict. An operator reading
+        # `coverage_verdict` therefore could not tell "probed, reported as a LEAD" from "never
+        # looked at". Disclosed as its own set, so the partition invariant of
+        # exercised+inconclusive over the corpus is untouched, and emitted ONLY when non-empty
+        # so every existing lead-free export stays byte-identical.
+        outside = sorted({pr.bug_class for pr in self.exercised_probes}
+                         - set(corpus) - adjudicated)
+        if outside:
+            out["classes_probed_outside_corpus"] = outside
+        return out
 
 
 def _corpus_bug_classes() -> frozenset[str]:

@@ -14,6 +14,24 @@ Every case below is a measured defect or the behaviour that must not regress:
   negative chunk     — ``int(b"-5", 16)`` is ``-5``, not a ValueError.
   truncated body     — a Content-Length the peer never satisfies is not a response.
 
+Audit-A red-pen BLOCK-7 added five more MEASURED shapes, four of which produced a read #2
+with ``channel=True, status=200`` whose body carried the canary — a second response
+manufactured out of the FIRST response's leftover bytes:
+
+  duplicate CL       — differing Content-Lengths were last-wins; RFC 9112 §6.3 requires
+                       treating them as an UNRECOVERABLE error.
+  204/304 + a body   — a bodyless status left the declared bytes buffered for read #2.
+  101 + bytes        — after 101 the connection has left HTTP/1.1 entirely.
+  lenient chunk size — ``+5`` / ``0x5`` / ``1_0`` parse for ``int(tok, 16)`` and for no HTTP
+                       parser; that divergence IS a desync primitive.
+  budget-truncated   — a close-delimited body cut off by the read budget came back as a
+                       COMPLETE response, contradicting the reader's own correction #5.
+
+The FIFTH shape is NOT fixed and is pinned as a stated limitation by
+``test_the_narrowed_limit_of_the_status_line_rule_is_stated_honestly``: surplus that IS a
+well-formed status line (an error page quoting a whole ``HTTP/1.1 200 OK`` block under a
+short Content-Length) is still returned as read #2.
+
 ``test_the_raw_response_reader_is_not_duplicated`` is the DRIFT GUARD: it fails both if a
 new copy of the reader appears and when the one documented pending copy is migrated (at
 which point its allowlist entry must be deleted).
@@ -103,6 +121,10 @@ def _shared(s: socket.socket) -> RawResponseReader:
 _OK = b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nhi"
 #: a benign origin's 400 page that ECHOES the offending request, canary and all
 _ECHO_400 = b"rejected: GET /vigil-reflect?c=" + _CANARY.encode() + b" xx"
+#: a COMPLETE, well-formed 200 block carrying the canary, used as the bytes that must NOT
+#: be re-framed as a second response when a first response wrongly leaves them buffered.
+_QUOTED_200 = (b"HTTP/1.1 200 OK\r\nContent-Length: " + str(len(_CANARY)).encode()
+               + b"\r\n\r\n" + _CANARY.encode())
 
 CASES: "dict[str, tuple[list[bytes], int, bool]]" = {
     # name: (wire bytes, how many reads, keep the socket open)
@@ -126,6 +148,29 @@ CASES: "dict[str, tuple[list[bytes], int, bool]]" = {
     "junk_not_a_status_line": ([b"garbage: yes\r\nmore: junk\r\n\r\npayload"], 1, True),
     "bogus_status_code": ([b"HTTP/1.1 999 Nope\r\nContent-Length: 0\r\n\r\n"], 1, True),
     "truncated_cl": ([b"HTTP/1.1 200 OK\r\nContent-Length: 1000000\r\n\r\nshort"], 1, False),
+    # --- audit-A red-pen BLOCK-7b: five wire shapes MEASURED to fabricate a read #2 that
+    # carried a canary out of the FIRST response's bytes. Four are refused below; the fifth
+    # (an under-declared CL whose surplus IS a well-formed status line) is the documented,
+    # narrowed limit of correction #2 and is pinned as such by `_ECHOED_BLOCK_IS_READ_TWO`.
+    "conflicting_duplicate_cl": ([b"HTTP/1.1 200 OK\r\nContent-Length: "
+                                  + str(7 + len(_QUOTED_200)).encode()
+                                  + b"\r\nContent-Length: 7\r\n\r\nrefused"
+                                  + _QUOTED_200], 2, True),
+    "no_content_204_with_a_body": ([b"HTTP/1.1 204 No Content\r\nContent-Length: "
+                                    + str(len(_QUOTED_200)).encode() + b"\r\n\r\n"
+                                    + _QUOTED_200], 2, True),
+    "not_modified_304_with_a_body": ([b"HTTP/1.1 304 Not Modified\r\nContent-Length: "
+                                      + str(len(_QUOTED_200)).encode() + b"\r\n\r\n"
+                                      + _QUOTED_200], 2, True),
+    "upgraded_101_then_bytes": ([b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: h2c\r\n\r\n"
+                                 + _QUOTED_200], 2, True),
+    # `int(tok, 16)` accepts these; RFC 9112 §7.1 chunk-size does not.
+    "plus_chunk_size": ([b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n"
+                         b"+5\r\nAAAAA\r\n0\r\n\r\n"], 1, True),
+    "hex_prefix_chunk_size": ([b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n"
+                               b"0x5\r\nAAAAA\r\n0\r\n\r\n"], 1, True),
+    "underscore_chunk_size": ([b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n"
+                               b"1_0\r\n" + b"A" * 16 + b"\r\n0\r\n\r\n"], 1, True),
 }
 
 EXPECTED: "dict[str, list[tuple]]" = {
@@ -144,6 +189,18 @@ EXPECTED: "dict[str, list[tuple]]" = {
     "junk_not_a_status_line": [(False, None, "")],
     "bogus_status_code": [(False, None, "")],
     "truncated_cl": [(False, None, "")],
+    # the framing is unrecoverable (RFC 9112 §6.3), so the response is refused outright and
+    # the connection is poisoned — the quoted 200 never becomes a response
+    "conflicting_duplicate_cl": [(False, None, ""), (False, None, "")],
+    # a 204/304 carries no body: the declared bytes are NOT this response's, and the
+    # connection's framing is unrecoverable, so read #2 is NO CHANNEL
+    "no_content_204_with_a_body": [(True, 204, ""), (False, None, "")],
+    "not_modified_304_with_a_body": [(True, 304, ""), (False, None, "")],
+    # after 101 the connection has left HTTP/1.1: the trailing bytes are protocol data
+    "upgraded_101_then_bytes": [(True, 101, ""), (False, None, "")],
+    "plus_chunk_size": [(False, None, "")],
+    "hex_prefix_chunk_size": [(False, None, "")],
+    "underscore_chunk_size": [(False, None, "")],
 }
 
 
@@ -156,11 +213,41 @@ def test_reader_frames_each_case(name: str) -> None:
 
 def test_a_benign_first_response_echo_never_becomes_the_second_response() -> None:
     """The whole point, stated as one assertion: on every case where a benign origin echoes
-    VIGIL's first request (canary and all), the canary must NOT appear in read #2."""
-    for name in ("interim_100_continue", "under_declared_cl", "chunked_trailers"):
+    VIGIL's first request (canary and all), the canary must NOT appear in read #2.
+
+    Audit-A red-pen BLOCK-7b added the last four. Each was MEASURED to hand back a read #2
+    with ``channel=True, status=200`` whose body carried the canary — a second response
+    manufactured entirely out of the FIRST response's leftover bytes."""
+    refused = {"conflicting_duplicate_cl", "no_content_204_with_a_body",
+               "not_modified_304_with_a_body", "upgraded_101_then_bytes"}
+    for name in ("interim_100_continue", "under_declared_cl", "chunked_trailers", *sorted(refused)):
         chunks, n, close = CASES[name]
         got = _read(_shared, chunks, max(n, 2), close=close, timeout=0.6)
         assert _CANARY not in got[1][2], f"{name}: the canary leaked into the second response"
+        if name in refused:
+            # these four leave the connection unframeable, so read #2 is an honest
+            # INCONCLUSIVE rather than a genuinely pipelined response
+            assert got[1][0] is False, f"{name}: read #2 must establish no channel, got {got[1]!r}"
+
+
+def test_the_narrowed_limit_of_the_status_line_rule_is_stated_honestly() -> None:
+    """BLOCK-7b, the ONE shape that is NOT refused, pinned so the module docstring cannot
+    drift back into claiming it is.
+
+    Correction #2 bounds surplus that is NOT a status line. Surplus that IS one — an origin
+    whose error page quotes a complete ``HTTP/1.1 200 OK`` block, under a Content-Length
+    that stops before it — is still returned as read #2, because nothing on the wire
+    separates that from a genuinely pipelined response. It is not a live false LEAD today
+    (``smuggling._desync_leg`` runs the control leg over the same origin shape, so a reader
+    artefact affecting both legs cancels), but it IS the trap for the named cross-connection
+    follow-up, where the two legs are no longer same-shape. Asserted POSITIVELY so the
+    limitation is visible, not merely absent."""
+    wire = [b"HTTP/1.1 400 Bad Request\r\nContent-Length: 7\r\n\r\nrefused" + _QUOTED_200]
+    got = _read(_shared, wire, 2, close=True, timeout=0.6)
+    assert got[0] == (True, 400, "refused")
+    assert got[1] == (True, 200, _CANARY), (
+        "if this now refuses, the reader gained the sent-request watermark the docstring "
+        "names as follow-up — delete this test and the 'exact limit' paragraph with it")
 
 
 def test_no_channel_records_why() -> None:
@@ -172,10 +259,27 @@ def test_no_channel_records_why() -> None:
 
 
 def test_budget_bounds_the_read() -> None:
+    """The budget bounds the read AND the bounded read is honest about being partial.
+
+    Audit-A red-pen (ALSO): this used to assert ``channel is True`` with the partial body,
+    which contradicted documented correction #5 ("a truncated body is NOT a complete
+    response") — the deviation was real and the test pinned the deviation. A close-delimited
+    body is complete only when the PEER closed; cut off by the read budget (or a socket
+    timeout) it is truncated exactly like a short Content-Length or a clipped chunked body,
+    and all three framings now agree on NO CHANNEL."""
     with _served([b"HTTP/1.1 200 OK\r\n\r\n" + b"A" * 200000], timeout=0.6) as s:
         reader = RawResponseReader(s, budget=4096)
         rec = reader.read_response()
-    assert rec["channel"] is True and len(rec["body"]) <= 4096
+    assert rec["channel"] is False and rec["body"] == ""
+    assert "truncated" in reader.last_error, reader.last_error
+
+
+def test_a_close_delimited_body_the_peer_finished_is_still_a_response() -> None:
+    """The negative control for the test above: the budget rule must not turn every
+    close-delimited response into an INCONCLUSIVE."""
+    with _served([b"HTTP/1.1 200 OK\r\n\r\nbody runs to close"], timeout=0.6) as s:
+        rec = RawResponseReader(s, budget=4096).read_response()
+    assert rec["channel"] is True and rec["body"] == "body runs to close"
 
 
 def test_desync_leg_view_matches_the_shared_reader() -> None:
@@ -207,6 +311,12 @@ _PENDING_DIVERGENT = {
     "interim_100_continue", "under_declared_cl", "chunked_trailers",
     "negative_chunk_size", "huge_chunk_size", "truncated_cl",
     "junk_not_a_status_line", "bogus_status_code",
+    # audit-A red-pen BLOCK-7b — the pending copy fabricates a read #2 on all four of these
+    # (measured: channel=True, status=200, canary in body) and shares the `int(tok, 16)`
+    # chunk-size leniency.
+    "conflicting_duplicate_cl", "no_content_204_with_a_body",
+    "not_modified_304_with_a_body", "upgraded_101_then_bytes",
+    "plus_chunk_size", "hex_prefix_chunk_size", "underscore_chunk_size",
 }
 
 
