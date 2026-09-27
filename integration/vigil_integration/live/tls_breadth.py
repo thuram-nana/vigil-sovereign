@@ -293,6 +293,16 @@ def _restricted_connect(
     try:
         raw.settimeout(timeout)
         try:
+            # codeql[py/insecure-protocol] -- DELIBERATE: offering the deprecated version IS the
+            # measurement. This probe exists to find out whether a TARGET still accepts TLS1.0/1.1,
+            # which cannot be determined without offering them. The weakness is asserted about the
+            # peer, never accepted by us: the context is built fresh per call and used for exactly
+            # one handshake; check_hostname=False / verify_mode=CERT_NONE because we are measuring
+            # the peer, not trusting it; @SECLEVEL=0 relaxes what WE OFFER and grants the target
+            # nothing; and no request, credential or payload is ever sent -- the socket is read for
+            # version/cipher/peercert and closed in the finally below. Suppressed narrowly, on this
+            # sink only, for this rule only: the rule is correct in general and this is the one
+            # place in the product where a weak offer is the point.
             tls = ctx.wrap_socket(raw, server_hostname=bare)
         except Exception as e:  # noqa: BLE001 — the handshake itself failed; classify WHY
             klass, reason = _classify_ssl_error(e)
