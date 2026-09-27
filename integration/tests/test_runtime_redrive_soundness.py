@@ -1227,4 +1227,3 @@ def test_the_value_shape_refusal_note_never_out_claims_its_reason():
             f"not support it")
     assert "does not evidence a leaked value" in note, (
         "the note must state only what follows from `why` for every value of `why`")
-
