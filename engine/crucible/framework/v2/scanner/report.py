@@ -222,8 +222,13 @@ def build_report(report: ScanReport, *, attack_paths: list | None = None,
             continue
         findings.append(ReportFinding(
             kind="active", bug_class=f.bug_class,
-            title=f"{f.bug_class} confirmed at {f.param}",
-            severity=sev, confidence=f"{f.confidence:.2f}",
+            # B4: a producer that stated its own claim keeps it. The old unconditional
+            # "<bug_class> confirmed at <param>" + table severity overwrote every hedge —
+            # an explicitly UNCONFIRMED Medium LEAD was shown to the operator as a confirmed
+            # High, which is the difference between demoting a claim and relabelling it.
+            title=(f"{f.title} at {f.param}" if f.title
+                   else f"{f.bug_class} confirmed at {f.param}"),
+            severity=(f.severity or sev), confidence=f"{f.confidence:.2f}",
             location=f"{report.target}  [{f.insertion_point}]",
             confirmed_by=f.confirmed_by, evidence=f.rationale,
             remediation=rem, references=refs,
@@ -298,6 +303,12 @@ def build_report(report: ScanReport, *, attack_paths: list | None = None,
         "coverage_verdict": report.coverage_bounds(),
         "fingerprint": sorted(report.fingerprint.tokens) if report.fingerprint else [],
         "discovered_endpoints": list(report.discovered_endpoints),
+        # The opt-in arsenal's LEAD channel, surfaced so a demotion is not a disappearance
+        # (B4). ``request_smuggling`` (F3 timing + B1 single-connection differential) and
+        # ``request_race`` (R3) are LEAD-only, and a LEAD the document never prints is
+        # indistinguishable to the operator from a class that was never probed. These are
+        # strings, explicitly NOT findings, and they never enter `findings`/`by_severity`.
+        "arsenal_leads": list(report.arsenal_leads),
         "findings": [f.__dict__ for f in findings],
         "attack_paths": _serialize_attack_paths(attack_paths),
     }

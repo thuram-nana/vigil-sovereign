@@ -74,7 +74,20 @@ class GraphQLIntrospectionCheck:
         keyed on the JSON-SERIALISED keys (``"__schema":``, ``"queryType":`` / ``"types":``)
         rather than the bare identifiers, so an error that merely ECHOES the rejected query
         text (``... field "__schema" ...``, ``query{__schema{queryType{name}...``) cannot
-        satisfy it — only an actual schema document under ``data`` can."""
+        satisfy it — only an actual schema document under ``data`` can.
+
+        Audit-A red-pen (attack 3, minor): the three clauses are three UNRELATED substring
+        matches over the whole body, not a parse, so a FIELD-AUTH DENIAL that preserves the
+        ``__schema`` SHAPE while returning nothing —
+        ``{"data":{"__schema":{"queryType":null,"types":null}},"errors":[…]}`` — satisfied
+        all three and confirmed "introspection enabled" against an endpoint that disclosed
+        no schema at all. The third clause now requires the key to be followed by an OPEN
+        BRACE / OPEN BRACKET (a real object or list), which ``null`` cannot be, in both the
+        compact and the space-after-colon JSON spellings. This is a tightening of a substring
+        rule and not a parse: the honest residual is that a body which merely CONTAINS the
+        text ``"queryType":{`` outside a ``data`` object still passes, so a full JSON parse
+        of the response (and a check that ``data.__schema`` is a populated object) remains
+        the sound form of this clause."""
         resp = send(_post_json(template.request, _INTROSPECTION))
         return FindingContext.from_predicate(
             {"response_body": _body_of(resp), "query": _INTROSPECTION},
@@ -82,8 +95,10 @@ class GraphQLIntrospectionCheck:
                 {"contains": [{"var": "response_body"}, '"data":']},
                 {"contains": [{"var": "response_body"}, '"__schema":']},
                 {"any": [
-                    {"contains": [{"var": "response_body"}, '"queryType":']},
-                    {"contains": [{"var": "response_body"}, '"types":']},
+                    {"contains": [{"var": "response_body"}, '"queryType":{']},
+                    {"contains": [{"var": "response_body"}, '"queryType": {']},
+                    {"contains": [{"var": "response_body"}, '"types":[']},
+                    {"contains": [{"var": "response_body"}, '"types": [']},
                 ]},
             ]},
             bug_class=self.bug_class)

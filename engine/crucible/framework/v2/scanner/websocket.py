@@ -135,16 +135,29 @@ class WSConnection:
 class Handshake:
     """The RAW bytes of ONE handshake attempt — what a CSWSH certificate must retain.
 
-    ``response`` is the target's verbatim response header block (F7: the only
-    target-DERIVED evidence in the exchange); ``request`` is the exact block VIGIL sent,
-    so the certificate states which ``Origin`` was actually offered. ``accept_key`` is the
-    RFC 6455 ``Sec-WebSocket-Accept`` value VIGIL computed from its OWN per-handshake
-    nonce — a response carrying it is cryptographically bound to THIS exchange, so an
-    oracle re-run over the retained bytes cannot be satisfied by an edited transcript."""
+    ``response`` is the target's verbatim response HEADER BLOCK — bounded at the
+    terminating CRLFCRLF (B3: ``_read_headers`` returns whatever ``recv`` happened to
+    deliver, which can include body/frame bytes, and those bytes must not be searched for
+    the handshake's markers). ``status_line`` is that block's FIRST line, so a predicate can
+    be anchored to the status line instead of matching "http/1.1 101" anywhere in the block.
+    ``request`` is the exact block VIGIL sent, so the certificate states which ``Origin`` was
+    actually offered. ``accept_key`` is the RFC 6455 ``Sec-WebSocket-Accept`` value VIGIL
+    computed from its OWN per-handshake nonce.
+
+    N1 — what the accept key does and does NOT buy. It binds the response to the nonce VIGIL
+    chose for THIS handshake, so a SINGLE-FIELD edit of the retained transcript (swap the
+    response, keep the key) breaks re-verification. It does NOT bind provenance: re-executing
+    an oracle over retained bytes can only ask whether those bytes satisfy the predicate, so
+    a CONSISTENTLY rewritten transcript — or a wholly fabricated one, with a key and a
+    response computed together — re-verifies ``ok`` even though no target was ever contacted.
+    MEASURED, both ways. Binding a certificate to a real exchange is the job of the
+    signing / evidence-certificate layer (the signed spine and the DSSE/receipt chain), never
+    of re-execution."""
 
     request: str = ""
     response: str = ""
     status: int | None = None
+    status_line: str = ""
     accept_key: str = ""
     accepted: bool = False
     error: str = ""
@@ -197,10 +210,16 @@ def handshake(
         return None, Handshake(request=sent, accept_key=expected_accept,
                                error=f"{type(exc).__name__}: {exc}")
 
+    head = _header_block(resp)
     record = Handshake(
-        request=sent, response=resp.decode("latin-1", "replace"),
-        status=_status_of(resp) or None, accept_key=expected_accept,
-        accepted=(_status_of(resp) == 101 and expected_accept.encode() in resp),
+        request=sent, response=head.decode("latin-1", "replace"),
+        status=_status_of(head) or None,
+        status_line=_status_line(head),
+        accept_key=expected_accept,
+        # The producer's verdict is ALREADY status-line anchored (``_status_of`` reads the
+        # status line's own token, not the block). B3: the CSWSH predicate used to throw this
+        # away and re-derive the verdict with an unanchored substring match.
+        accepted=(_status_of(head) == 101 and expected_accept.encode() in head),
     )
     if not record.accepted:
         with _suppress():
@@ -241,9 +260,39 @@ def _status_of(resp: bytes) -> int:
         return 0
 
 
+def _header_block(resp: bytes) -> bytes:
+    """Only the response's HEADER BLOCK, through the terminating CRLFCRLF.
+
+    B3 — ``_read_headers`` stops once it has SEEN the terminator but returns the whole recv
+    buffer, so body / already-arrived WebSocket frame bytes ride along. Anything retained as
+    "the response" is later searched for handshake markers, so it must be the headers and
+    nothing else."""
+    i = resp.find(b"\r\n\r\n")
+    return resp if i < 0 else resp[: i + 4]
+
+
+def _status_line(resp: bytes) -> str:
+    """The response's FIRST line, verbatim — the only place a status may be read from."""
+    return resp.split(b"\r\n", 1)[0].decode("latin-1", "replace").strip()
+
+
 # ---------------------------------------------------------------------------
 # checks
 # ---------------------------------------------------------------------------
+
+
+def _refused_ctx(bug_class: str, url: str, legit: Handshake, evil: Handshake) -> "FindingContext":
+    """The certificate for a CSWSH probe the PRODUCER refused: the two status lines it read,
+    with a predicate that is FALSE by construction. It exists so the refusal is still
+    re-verifiable evidence (and so ``probe_with_context`` always returns a context)."""
+    return FindingContext.from_predicate(
+        {"url": url, "refused": "the handshake pair is not two status-line-anchored 101s",
+         "trusted_status_line": legit.status_line, "trusted_accepted": legit.accepted,
+         "evil_status_line": evil.status_line, "evil_accepted": evil.accepted},
+        {"all": [{"eq": [{"var": "trusted_accepted"}, True]},
+                 {"eq": [{"var": "evil_accepted"}, True]}]},
+        bug_class=bug_class,
+    )
 
 
 @dataclass(frozen=True)
@@ -288,6 +337,12 @@ class CswshCheck:
         evil, evil_hs = handshake(self.url, origin=self.evil_origin, cookies=self.cookies or None)
         with _closing(evil):
             pass
+        # B3 — the PRODUCER's verdict is status-line anchored (``_status_of`` reads the
+        # status line's own token). Refuse before building a certificate when either
+        # handshake was not actually a 101 carrying VIGIL's own accept key. This can only
+        # DEMOTE: the oracle below still has to agree over the retained bytes.
+        if not (legit_hs.accepted and evil_hs.accepted):
+            return None, _refused_ctx(self.bug_class, self.url, legit_hs, evil_hs)
         ctx = FindingContext.from_predicate(
             {
                 "url": self.url,
@@ -297,21 +352,35 @@ class CswshCheck:
                 "evil_origin_header": f"Origin: {self.evil_origin}",
                 "trusted_request": legit_hs.request,
                 "trusted_response": legit_hs.response,
+                "trusted_status_line": legit_hs.status_line,
                 "trusted_accept_key": legit_hs.accept_key,
                 "evil_request": evil_hs.request,
                 "evil_response": evil_hs.response,
+                "evil_status_line": evil_hs.status_line,
                 "evil_accept_key": evil_hs.accept_key,
             },
             {"all": [
                 # The endpoint really is a live, working WebSocket for the trusted origin ...
                 {"icontains": [{"var": "trusted_request"}, {"var": "trusted_origin_header"}]},
-                {"icontains": [{"var": "trusted_response"}, "http/1.1 101"]},
+                # ... and it said so ON THE STATUS LINE. B3: these two clauses used to read
+                # ``{"icontains": [{"var": "trusted_response"}, "http/1.1 101"]}`` over the
+                # WHOLE retained block, so a server answering ``HTTP/1.1 403 Forbidden`` whose
+                # headers merely CONTAIN the substring "HTTP/1.1 101 Switching Protocols" (and
+                # the computed accept value) satisfied them — measured, BASE 0 findings vs
+                # HEAD 1 finding at conf 0.9. ``*_status_line`` is by construction the
+                # response's FIRST line, so a match inside it is anchored; the companion
+                # ``contains`` clause pins that line to the retained block, so editing the
+                # status line alone out of a certificate breaks re-verification.
+                {"icontains": [{"var": "trusted_status_line"}, "http/1.1 101"]},
+                {"contains": [{"var": "trusted_response"}, {"var": "trusted_status_line"}]},
                 {"contains": [{"var": "trusted_response"}, {"var": "trusted_accept_key"}]},
                 # ... and it ALSO switched protocols for a request that offered a FOREIGN
                 # Origin, so Origin is not validated. The accept key binds each response to
-                # VIGIL's own nonce for THAT handshake — an edited transcript cannot satisfy it.
+                # VIGIL's own nonce for THAT handshake, so a SINGLE-FIELD edit of the retained
+                # transcript fails (it cannot bind provenance — see ``Handshake``'s N1 note).
                 {"icontains": [{"var": "evil_request"}, {"var": "evil_origin_header"}]},
-                {"icontains": [{"var": "evil_response"}, "http/1.1 101"]},
+                {"icontains": [{"var": "evil_status_line"}, "http/1.1 101"]},
+                {"contains": [{"var": "evil_response"}, {"var": "evil_status_line"}]},
                 {"contains": [{"var": "evil_response"}, {"var": "evil_accept_key"}]},
             ]},
             bug_class=self.bug_class,

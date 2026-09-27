@@ -125,17 +125,22 @@ class ScanReport(BaseModel):
     # is never confirmed. Like dom_xss_candidates they are strictly separated from
     # active_findings: they record reachability / references, not exploitability.
     #
-    # The arsenal is NOT lead-only as a whole: two of its classes can reach
-    # active_findings with a re-verifiable oracle_context, and both are adjudicated over
-    # RAW TARGET BYTES —
-    #   * request_smuggling, ONLY via the canary-echo achieved-desync differential
-    #     (`smuggling_desync` ctx key). The timing signal is a LEAD and lands in
-    #     ``arsenal_leads``; F3 deleted the latency mint that used to promote it to High.
-    #   * cross_site_websocket_hijacking, via ``predicate_oracle`` over the two
-    #     handshakes' raw request/response blocks (F7 retired the literal-vs-literal
-    #     achieved-state stamp that re-confirmed with no target bytes at all).
-    # request_race is LEAD-only here (R3): the campaign has no owner-signed workflow spec
-    # and no semantic success predicate, so an any-2xx over-count is not a FACT.
+    # Exactly ONE arsenal class can reach active_findings with a re-verifiable
+    # oracle_context, adjudicated over RAW TARGET BYTES:
+    #   * cross_site_websocket_hijacking, via ``predicate_oracle`` over the two handshakes'
+    #     raw request/response blocks (F7 retired the literal-vs-literal achieved-state stamp
+    #     that re-confirmed with no target bytes at all; B3 anchored the 101 clause to the
+    #     STATUS LINE so a 403 whose headers echo "HTTP/1.1 101" no longer fires). Without
+    #     the victim's cookies it carries its own honest Medium/UNCONFIRMED title, which B4
+    #     makes the report actually SHOW instead of relabelling "…confirmed at…".
+    # The other two arsenal classes are LEAD-only:
+    #   * request_smuggling — the timing signal is a LEAD (F3 deleted the latency mint) AND
+    #     the single-connection canary differential is a LEAD (B1): it is observed on the one
+    #     connection VIGIL pipelined the prefix onto, so it cannot separate a real
+    #     front-end/back-end desync from a benign origin that honours TE over CL and
+    #     pipelines. The cross-connection FACT is named blocking_work on the evidence branch.
+    #   * request_race (R3) — the campaign has no owner-signed workflow spec and no semantic
+    #     success predicate, so an any-2xx over-count is not a FACT.
     # Empty on every default (arsenal-off) run.
     discovered_paths: list[DiscoveredPath] = Field(default_factory=list)
     js_secrets: list[JsSecret] = Field(default_factory=list)
@@ -712,7 +717,15 @@ class WebScanCampaign:
                          param: str, endpoint: str, oracle_context: dict | None) -> AuditFinding:
         """Adapt an oracle-confirmed arsenal result into the same AuditFinding shape
         the built-in checks emit, retaining the serialized FindingContext as the
-        re-verifiable certificate."""
+        re-verifiable certificate.
+
+        B4 — the producer's own ``title`` and ``severity`` are CARRIED THROUGH, not discarded.
+        They used to be dropped here, and ``report.build_report`` then re-labelled every entry
+        ``"{bug_class} confirmed at {param}"`` with a severity from its fallback table. That
+        made an honest hedge cosmetic: the CSWSH no-cookies branch says "Cross-origin
+        WebSocket handshake accepted (possible CSWSH — UNCONFIRMED)" at Medium, and the
+        operator was shown "cross_site_websocket_hijacking confirmed at ws://…" at High. A
+        LEAD that renders as a confirmed High is not a demotion, it is a relabelling."""
         kind = confirmed.confirmed_by
         return AuditFinding(
             check_id=check_id, bug_class=confirmed.bug_class,
@@ -720,6 +733,8 @@ class WebScanCampaign:
             confidence=confirmed.confidence,
             confirmed_by=kind.value if hasattr(kind, "value") else str(kind),
             rationale=confirmed.rationale,
+            title=confirmed.title or "",
+            severity=confirmed.severity or "",
             oracle_context=oracle_context,
         )
 
@@ -782,89 +797,116 @@ class WebScanCampaign:
                 break
         return origins
 
-    def _smuggling_findings(self, origins: list[tuple[str, int, str]]) -> tuple[list[AuditFinding], list[str]]:
+    def _smuggling_leads(
+        self, origins: list[tuple[str, int, str]],
+    ) -> tuple[list[str], list[ProbeRecord]]:
         """Probe each authorized origin for HTTP request-smuggling desync and h2c
-        capability. Every origin clears ``_arsenal_host_allowed`` first — an
-        unauthorized host is never touched.
+        capability and report what it finds as LEADS. Every origin clears
+        ``_arsenal_host_allowed`` first — an unauthorized host is never touched.
 
-        F3 — request_smuggling is minted from the ACHIEVED-DESYNC differential ONLY.
-        ``smuggling.detect_desync`` captures both legs' RAW second-request responses and
-        the ``smuggling_desync`` ctx key hands them to the canary-echo oracle, which
-        confirms only when a UNIQUE >=12-char per-probe canary is echoed in the conflict
-        leg's second response and ABSENT from the same-bytes well-formed control leg.
-        Timing is never consulted.
+        Returns ``(leads, probe_records)``. It returns NO findings: on this path
+        ``request_smuggling`` is not FACT-capable, for two separate reasons.
 
-        The LATENCY mint this method used to carry is DELETED. It built a
-        ``FindingContext.from_http_responses`` over two LITERAL placeholder bodies with a
-        ``latency``-only discriminator; ``latency`` weighs exactly 0.7 and
-        ``HIGH_CONFIDENCE`` is 0.7, so a bare timing delta landed exactly on the confirm
-        boundary and minted a High FACT whose certificate held NO target bytes. Measured
-        against a single-socket origin with no proxy at all — one that merely honours
-        RFC 7230 §3.3.3 — it produced three High ``request_smuggling`` FACTs at conf
-        0.700. That is verbatim the A12 (#269) defect both ``verify/verifier.py`` and the
-        ``request_smuggling.differential_desync`` branch declare retired, and
-        ``smuggling.detect`` already labels its own timing result honestly (severity Low,
-        "TIMING LEAD", "UNCONFIRMED"). That honest wrapper is now PRESERVED as a lead
-        instead of being discarded and re-minted as a High "desync"."""
+        F3 — the LATENCY mint is DELETED. It built a ``FindingContext.from_http_responses``
+        over two LITERAL placeholder bodies with a ``latency``-only discriminator; ``latency``
+        weighs exactly 0.7 and ``HIGH_CONFIDENCE`` is 0.7, so a bare timing delta landed
+        exactly on the confirm boundary and minted a High FACT whose certificate held NO
+        target bytes. Measured against a single-socket origin with no proxy at all — one that
+        merely honours RFC 7230 §3.3.3 — it produced three High ``request_smuggling`` FACTs at
+        conf 0.700. That is verbatim the A12 (#269) defect ``verify/verifier.py`` declares
+        retired, and ``smuggling.detect`` already labels its own timing result honestly
+        (severity Low, "TIMING LEAD", "UNCONFIRMED").
+
+        B1 — the single-connection CANARY DIFFERENTIAL is also a LEAD. It replaced the timing
+        mint with a High ``differential_response`` FACT at conf 0.95, and that is an overclaim
+        of the same family: CWE-444 is TWO PARSERS DISAGREEING, and this differential is
+        observed on the ONE connection VIGIL itself pipelined the smuggled prefix onto, so the
+        "smuggled" request is VIGIL's own request to itself. Measured: a BENIGN single origin
+        with no proxy — TE preferred over CL (RFC 9112 §6.1 permits it), ordinary keep-alive
+        pipelining, and a stock path-echoing 404 (the Apache httpd / Express / Tomcat default)
+        — mints ``severity High, confidence 0.95, confirmed_by differential_response`` and
+        re-verifies ``ok``; and the decisive control, TWO ORDINARY PIPELINED REQUESTS with no
+        framing conflict anywhere, produces the IDENTICAL canary echo. The shipped positive
+        fixture ``eval.benchmark_app.serve_smuggling_desync`` has the same single-server shape,
+        so the oracle cannot distinguish it from that benign origin either.
+
+        A sound CWE-444 proof needs the corruption observed on a connection VIGIL did NOT
+        pipeline the prefix onto. The obvious upgrade (poison connection A, observe on
+        connection B) is sound only when the front-end pools connections — and VIGIL cannot
+        know whether that pool is shared with real users, so a queued prefix could land in
+        front of a third party's request. That is a live victim the ROE forbids, so it needs
+        explicit operator authorisation: it is registered as ``blocking_work`` on the
+        ``request_smuggling.differential_desync`` evidence branch, NOT quietly abandoned.
+
+        N3 — every adjudicable probe now emits a :class:`ProbeRecord` so the class reaches
+        ``exercised_probes`` and the W16-4 coverage machinery learns the class was probed.
+        The verdict is ``inconclusive``, never ``clean``, even for the oracle's step-4
+        CONCLUSIVE negative: the evidence branch declares ``clean_capable: false`` and bounds
+        a non-firing "to the probed technique/origin, never a claim of no smuggling anywhere"
+        (two cleartext techniques on one origin says nothing about HTTPS, HTTP/2, the other
+        obfuscation variants or a shared-pool topology). Recording that as a class-wide CLEAN
+        would be the F2 false-CLEAN defect reintroduced on the arsenal path."""
         from .smuggling import detect, detect_desync, detect_h2c_upgrade
-        from ..verify.adapter import FindingContext
-        from ..verify.confirmation import confirm_finding
 
-        findings: list[AuditFinding] = []
         leads: list[str] = []
+        probes_seen: list[ProbeRecord] = []
         for host, port, origin_url in origins:
             if not self._arsenal_host_allowed(origin_url):
                 continue
-            # 1. The ACHIEVED desync — the only path to a request_smuggling FACT.
-            confirmed_here = False
+            # 1. The single-connection canary differential — an UNCONFIRMED LEAD (B1).
+            echoed_here = False
             try:
                 probes = detect_desync(host, port, authorize=self._arsenal_host_allowed)
             except Exception:
                 probes = []
             for p in probes:
+                probes_seen.append(ProbeRecord(
+                    endpoint=origin_url, method="POST",
+                    insertion_point=f"request:{p.technique}", param=p.technique,
+                    check_id=f"smuggling-{p.technique}", bug_class="request_smuggling",
+                    verdict="inconclusive"))
                 if not p.adjudicable:
-                    # A leg read no response: honestly INCONCLUSIVE, never a CLEAN and
-                    # never a fabricated leak.
+                    # A leg read no complete response: honestly INCONCLUSIVE, never a CLEAN
+                    # and never a fabricated leak.
                     if p.note:
                         leads.append(f"smuggling {p.technique} @ {origin_url}: not adjudicable — {p.note}")
                     continue
-                ctx = FindingContext.from_smuggling_desync(
-                    canary=p.canary, technique=p.technique,
-                    conflict_second=p.conflict.model_dump(mode="json"),
-                    control_second=p.control.model_dump(mode="json"))
-                confirmed = confirm_finding(
-                    {"bug_class": "request_smuggling", "title": f"{p.technique} desync",
-                     "severity": "High", "surface": origin_url,
-                     "summary": (f"{p.technique} achieved desync: a unique per-probe canary leaked into "
-                                 f"the next request's response on the conflict connection and is absent "
-                                 f"from the well-formed control")},
-                    ctx)
-                if confirmed is None:
+                if not p.canary_echo_differential:
+                    leads.append(
+                        f"smuggling {p.technique} @ {origin_url}: both legs answered and the unique "
+                        f"per-probe canary was NOT echoed — no desync observed for THIS technique on "
+                        f"THIS cleartext origin (not a claim that the origin is free of smuggling)")
                     continue
-                findings.append(self._arsenal_finding(
-                    confirmed, check_id=f"smuggling-{p.technique}",
-                    insertion_point=f"request:{p.technique}", param=p.technique,
-                    endpoint=origin_url, oracle_context=ctx.model_dump(mode="json")))
-                confirmed_here = True
-                break   # one confirmed desync proves the origin; stop probing techniques
-            # 2. The TIMING sweep — LEADS only, and skipped once the desync is proven
-            #    (the lead adds nothing to a FACT and costs 12 more raw sends).
-            if confirmed_here:
-                continue
-            try:
-                results = detect(host, port)
-            except Exception:
-                results = []
-            for r in results:
-                if r.detected:
-                    leads.append(f"smuggling {r.technique} @ {origin_url}: {r.rationale} — "
-                                 f"UNCONFIRMED timing LEAD, not a desync proof")
+                leads.append(
+                    f"smuggling {p.technique} @ {origin_url}: the unique per-probe canary was echoed in "
+                    f"VIGIL's OWN second response on the CONFLICT connection and is ABSENT from the "
+                    f"identical well-formed control — an UNCONFIRMED LEAD, NOT a CWE-444 fact. The "
+                    f"differential is observed on the one connection VIGIL pipelined the prefix onto, so "
+                    f"it cannot distinguish a real front-end/back-end desync from a single benign origin "
+                    f"that honours Transfer-Encoding over Content-Length (RFC 9112 §6.1) and pipelines "
+                    f"the remainder — a stock path-echoing 404 reproduces it exactly. Proving CWE-444 "
+                    f"needs the corruption observed on a connection VIGIL did NOT pipeline the prefix "
+                    f"onto, which risks a third-party victim and so requires explicit operator "
+                    f"authorisation (blocking_work on request_smuggling.differential_desync)")
+                echoed_here = True
+            # 2. The TIMING sweep — LEADS only, and skipped once the (stronger, byte-derived)
+            #    canary LEAD exists: a timing hang adds nothing to it and costs 12 more raw
+            #    sends against the operator's origin.
+            if not echoed_here:
+                try:
+                    results = detect(host, port)
+                except Exception:
+                    results = []
+                for r in results:
+                    if r.detected:
+                        leads.append(f"smuggling {r.technique} @ {origin_url}: {r.rationale} — "
+                                     f"UNCONFIRMED timing LEAD, not a desync proof")
             try:
                 if detect_h2c_upgrade(host, port):
                     leads.append(f"h2c-upgrade offered at {origin_url} (escalate to an h2 tool)")
             except Exception:
                 pass
-        return findings, leads
+        return leads, probes_seen
 
     def _ws_candidates(self, seed_url: str, crawl, spa_endpoints: list[str]) -> list[str]:
         """In-scope ws:// / wss:// endpoints to test for CSWSH: mined from crawled
@@ -970,23 +1012,24 @@ class WebScanCampaign:
 
     def _arsenal_pass(
         self, seed_url: str, crawl, spa_endpoints: list[str],
-    ) -> tuple[list[AuditFinding], list[DiscoveredPath], list[JsSecret], list[str]]:
-        """Run the opt-in arsenal and return (confirmed findings, discovered-path
-        leads, JS-secret leads, misc leads). Each sub-pass is best-effort and gated;
-        a failure in one never sinks the scan. Oracle-confirmed findings flow back
-        into active_findings; everything else is a clearly-separated lead."""
+    ) -> tuple[list[AuditFinding], list[DiscoveredPath], list[JsSecret], list[str], list[ProbeRecord]]:
+        """Run the opt-in arsenal and return (confirmed findings, discovered-path leads,
+        JS-secret leads, misc leads, probe records). Each sub-pass is best-effort and gated;
+        a failure in one never sinks the scan. Oracle-confirmed findings flow back into
+        active_findings; everything else is a clearly-separated lead. ``request_smuggling``
+        (F3 + B1) and ``request_race`` (R3) are LEAD-only here; the probe records (N3) let
+        the W16-4 coverage machinery see that the class was probed at all."""
         active: list[AuditFinding] = []
         leads: list[str] = []
         paths, secrets, disc_leads = self._discovery_leads(seed_url, crawl)
         leads.extend(disc_leads)
 
-        smug_findings, smug_leads = self._smuggling_findings(self._http_origins(seed_url, crawl))
-        active.extend(smug_findings)
+        smug_leads, smug_probes = self._smuggling_leads(self._http_origins(seed_url, crawl))
         leads.extend(smug_leads)
 
         active.extend(self._cswsh_findings(self._ws_candidates(seed_url, crawl, spa_endpoints)))
         leads.extend(self._race_leads(seed_url))
-        return active, paths, secrets, leads
+        return active, paths, secrets, leads, smug_probes
 
     # ---------------------------------------------------------------------
     # opt-in GraphQL DoS/abuse pass (enable_graphql_dos) — additive, gated,
@@ -1227,9 +1270,15 @@ class WebScanCampaign:
             js_secrets: list[JsSecret] = []
             arsenal_leads: list[str] = []
             if self.enable_arsenal:
-                a_findings, discovered_paths, js_secrets, arsenal_leads = self._arsenal_pass(
-                    seed_url, crawl, spa_endpoints)
+                (a_findings, discovered_paths, js_secrets, arsenal_leads,
+                 arsenal_probes) = self._arsenal_pass(seed_url, crawl, spa_endpoints)
                 active.extend(a_findings)
+                # N3: the arsenal's own probe records join the coverage evidence, stable-sorted
+                # with the engine's so two scans stay byte-identical.
+                exercised_probes = sorted(
+                    list(exercised_probes) + arsenal_probes,
+                    key=lambda p: (p.endpoint, p.insertion_point, p.check_id, p.bug_class),
+                )
 
             # Opt-in GraphQL DoS/abuse pass (default OFF → skipped, run byte-identical).
             # Additive: confirmed amplifications join active_findings; honest leads

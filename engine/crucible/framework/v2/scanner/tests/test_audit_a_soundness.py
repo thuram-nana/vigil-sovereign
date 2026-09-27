@@ -13,6 +13,22 @@ Every test here FAILS on 838e0b42. Each one pins a MEASURED defect, not a style 
     ``HIGH_CONFIDENCE`` is 0.7, so a timing delta alone landed on the confirm boundary
     with NO target bytes in the certificate. Measured against a single-socket origin with
     NO proxy that merely honours RFC 7230 §3.3.3: three High FACTs at conf 0.700.
+  * B1 (the audit-A RED-PEN on the F3 fix) — the canary DIFFERENTIAL that replaced the
+    latency mint is ALSO not a CWE-444 fact: it is observed on the ONE connection VIGIL
+    itself pipelined the smuggled prefix onto, so it measures one parser, not two parsers
+    disagreeing. A benign single origin with no proxy (TE over CL per RFC 9112 §6.1,
+    keep-alive pipelining, a stock path-echoing 404) minted High/0.95, and two ORDINARY
+    pipelined requests with no framing conflict produce the identical canary echo.
+    ``request_smuggling`` is LEAD-only; the cross-connection FACT is named blocking_work.
+  * B2 — the raw response reader mis-framed a 1xx interim, an under-declared
+    Content-Length and a chunked trailer block, each of which turns a benign echo of the
+    FIRST request into the reply to VIGIL's SECOND. See ``test_rawhttp_reader``.
+  * B3 — the CSWSH predicate matched ``"http/1.1 101"`` and the accept key ANYWHERE in the
+    retained block: a server answering 403 whose headers echo those strings was reported
+    hijackable (BASE 0 findings -> HEAD 1). It is anchored to the STATUS LINE now.
+  * B4 — ``_arsenal_finding`` discarded the producer's title/severity and the report
+    re-labelled every entry "<bug_class> confirmed at <param>", so an explicitly
+    UNCONFIRMED Medium LEAD rendered as a confirmed High.
   * F7 — the CSWSH certificate was ``from_state({"cross_origin_ws_accepted": True},
     {"cross_origin_ws_accepted": True})``: BOTH sides literals, so it re-confirmed forever
     regardless of the target, the fix state, or whether the endpoint ever existed.
@@ -205,17 +221,34 @@ def test_f2_waf_static_target_does_not_report_a_false_clean() -> None:
 
 
 # ===========================================================================
-# F3 — request_smuggling is minted from the canary differential, never latency
+# F3 + B1 — request_smuggling is a LEAD on every campaign path
 # ===========================================================================
+#
+# F3 deleted the LATENCY mint. B1 (the audit-A red-pen) then falsified the canary
+# DIFFERENTIAL that replaced it: it is observed on the ONE connection VIGIL itself
+# pipelined the smuggled prefix onto, so it measures ONE parser ("does this origin honour
+# TE over CL and pipeline the remainder"), not two parsers disagreeing across a trust
+# boundary, which is what CWE-444 is. The three origins below are the measurement:
+#
+#   _Rfc7230Origin        — single hop, TE over CL, PIPELINES, but does NOT echo the path.
+#                           No canary comes back at all.
+#   _StockEchoOrigin      — the same, plus a STOCK path-echoing 404 (the Apache httpd /
+#                           Express / Tomcat default). The full differential holds against
+#                           a server where a desync is not even possible.
+#   _InterimContinueOrigin— the shipped reflect-error red-pen twin PLUS one unsolicited
+#                           `100 Continue`, which used to defeat the reader's framing.
+#
+# Every one of them must produce a LEAD and never a finding, and each test asserts
+# POSITIVELY that the producer ran, captured the differential, and refused to mint.
 
 
-class _Rfc7230Origin(threading.Thread):
-    """A SINGLE ORIGIN — no front-end, no proxy, no CDN, so NO desync is even possible —
-    that honours RFC 7230 §3.3.3 rule 3: when Transfer-Encoding is present, Content-Length
-    is IGNORED and the body is read as chunked to the terminating zero-chunk. That is what
-    nginx, Go net/http, Node and Tomcat all do. One socket, one parser, nothing for two
-    parsers to disagree about — yet it HANGS on the CL+TE probes, which is exactly why
-    timing is a LEAD and not a proof."""
+class _LoopingOrigin(threading.Thread):
+    """Base for the single-hop negative controls: accept, serve requests IN A LOOP on the
+    same connection, and honour Transfer-Encoding over Content-Length."""
+
+    #: subclasses answer a request path with a full response
+    def respond(self, path: str) -> bytes:                # pragma: no cover - overridden
+        raise NotImplementedError
 
     def __init__(self) -> None:
         super().__init__(daemon=True)
@@ -238,45 +271,55 @@ class _Rfc7230Origin(threading.Thread):
             threading.Thread(target=self._serve, args=(conn,), daemon=True).start()
 
     @staticmethod
-    def _serve(conn: socket.socket) -> None:
-        page = b"<html><body><h1>Hello world</h1></body></html>"
-        resp = (b"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n"
-                b"Content-Length: " + str(len(page)).encode() + b"\r\n\r\n" + page)
+    def page(body: bytes, status: bytes = b"200 OK") -> bytes:
+        return (b"HTTP/1.1 " + status + b"\r\nContent-Type: text/html\r\nContent-Length: "
+                + str(len(body)).encode() + b"\r\nConnection: keep-alive\r\n\r\n" + body)
+
+    def _serve(self, conn: socket.socket) -> None:
         try:
-            conn.settimeout(8.0)
+            conn.settimeout(2.0)
             f = conn.makefile("rb")
-            if not f.readline():
-                return
-            headers: dict[bytes, bytes] = {}
-            while True:
-                ln = f.readline()
-                if not ln or ln in (b"\r\n", b"\n"):
-                    break
-                if b":" in ln:
-                    k, v = ln.split(b":", 1)
-                    headers[k.strip().lower()] = v.strip()
-            if b"chunked" in headers.get(b"transfer-encoding", b"").lower():
-                while True:                       # TE wins, CL ignored
-                    sz = f.readline()
-                    if not sz:
-                        return                    # peer went away mid-body
-                    try:
-                        n = int(sz.strip().split(b";")[0], 16)
-                    except ValueError:
-                        return
-                    if n == 0:
-                        f.readline()
+            # THE LOOP. The pre-B1 fixture handled exactly ONE request and closed, so it
+            # never reached the keep-alive pipelining path — which is the path that fires.
+            for _ in range(8):
+                request_line = f.readline()
+                if not request_line:
+                    return
+                path = (request_line.decode("latin-1", "replace").split(" ") + ["", ""])[1]
+                headers: dict[bytes, bytes] = {}
+                while True:
+                    ln = f.readline()
+                    if not ln or ln in (b"\r\n", b"\n"):
                         break
-                    f.read(n)
-                    f.readline()
-            elif b"content-length" in headers:
-                f.read(int(headers[b"content-length"]))
-            conn.sendall(resp)
+                    if b":" in ln:
+                        k, v = ln.split(b":", 1)
+                        headers[k.strip().lower()] = v.strip()
+                self.before_body(conn, headers)
+                if b"chunked" in headers.get(b"transfer-encoding", b"").lower():
+                    while True:                       # TE wins, CL ignored (RFC 9112 6.1)
+                        sz = f.readline()
+                        if not sz:
+                            return
+                        try:
+                            n = int(sz.strip().split(b";")[0], 16)
+                        except ValueError:
+                            return
+                        if n == 0:
+                            f.readline()
+                            break
+                        f.read(n)
+                        f.readline()
+                elif b"content-length" in headers:
+                    f.read(int(headers[b"content-length"]))
+                conn.sendall(self.respond(path))
         except Exception:      # noqa: BLE001 — a fixture, not a product path
             pass
         finally:
             with contextlib.suppress(OSError):
                 conn.close()
+
+    def before_body(self, conn: socket.socket, headers: "dict[bytes, bytes]") -> None:
+        return None
 
     def stop(self) -> None:
         self._stop = True
@@ -284,9 +327,116 @@ class _Rfc7230Origin(threading.Thread):
             self.sock.close()
 
 
+class _Rfc7230Origin(_LoopingOrigin):
+    """A SINGLE ORIGIN — no front-end, no proxy, no CDN, so NO desync is even possible —
+    that honours RFC 9112 §6.1 / RFC 7230 §3.3.3 rule 3: when Transfer-Encoding is present,
+    Content-Length is IGNORED and the body is read as chunked to the terminating zero-chunk.
+    It then serves the NEXT pipelined request on the same connection, like any keep-alive
+    server. One socket, one parser, nothing for two parsers to disagree about — yet it HANGS
+    on the CL+TE probes, which is why timing is a LEAD and not a proof.
+
+    (The pre-B1 version of this fixture claimed nginx / Go net/http / Node / Tomcat behave
+    this way. They do not: those servers REJECT a request carrying both Content-Length and
+    Transfer-Encoding outright, which is the RFC's recommended handling. The servers that
+    behave like this fixture are precisely the lax ones that FIRE under pipelining — which
+    is the point. It also handled exactly ONE request and closed, so it never reached the
+    pipelining path at all.)
+
+    It returns a FIXED page, so no canary is ever echoed: this is the control that isolates
+    the path echo as the thing that makes the differential hold."""
+
+    def respond(self, path: str) -> bytes:
+        return self.page(b"<html><body><h1>Hello world</h1></body></html>")
+
+
+class _StockEchoOrigin(_LoopingOrigin):
+    """The same benign single hop, with the STOCK 404 page every mainstream server ships —
+    Apache httpd's "The requested URL <path> was not found on this server", Express's
+    "Cannot GET <path>", Tomcat's "The requested resource [<path>] is not available". They
+    all ECHO THE REQUESTED PATH, which is all it takes: VIGIL's smuggled prefix is a GET to
+    ``/vigil-reflect?c=<canary>``, so the pipelined 404 for it carries the canary."""
+
+    def respond(self, path: str) -> bytes:
+        if path.startswith("/vigil-start") or path.startswith("/vigil-follow"):
+            return self.page(b"ok")
+        return self.page(
+            b"<!DOCTYPE HTML><html><head><title>404 Not Found</title></head><body>"
+            b"<h1>Not Found</h1><p>The requested URL " + path.encode("latin-1", "replace")
+            + b" was not found on this server.</p></body></html>", status=b"404 Not Found")
+
+
+class _InterimContinueOrigin(_LoopingOrigin):
+    """The shipped red-pen twin (``serve_smuggling_reflect_error``: a 400 whose page echoes
+    the offending request, canary and all) PLUS one unsolicited ``HTTP/1.1 100 Continue``
+    for any bodied request — which servers and load balancers really do send.
+
+    The 1xx is the B2 defect: the reader returned the interim as a COMPLETE response, so the
+    FINAL 400 (carrying the echoed canary) became "response 2" and the documented defence
+    ("that echo lives in the FIRST response") collapsed. A 1xx is INTERIM (RFC 9112 §15)."""
+
+    def before_body(self, conn: socket.socket, headers: "dict[bytes, bytes]") -> None:
+        if b"content-length" in headers or b"transfer-encoding" in headers:
+            with contextlib.suppress(OSError):
+                conn.sendall(b"HTTP/1.1 100 Continue\r\n\r\n")
+
+    def _serve(self, conn: socket.socket) -> None:
+        # This origin rejects the ambiguous framing outright (the SAFE behaviour) with a 400
+        # that echoes the request, so it cannot use the base loop's TE-over-CL body handling.
+        try:
+            conn.settimeout(2.0)
+            f = conn.makefile("rb")
+            for _ in range(8):
+                request_line = f.readline()
+                if not request_line:
+                    return
+                path = (request_line.decode("latin-1", "replace").split(" ") + ["", ""])[1]
+                head = bytearray(request_line)
+                headers: dict[bytes, bytes] = {}
+                while True:
+                    ln = f.readline()
+                    if not ln or ln in (b"\r\n", b"\n"):
+                        break
+                    head.extend(ln)
+                    if b":" in ln:
+                        k, v = ln.split(b":", 1)
+                        headers[k.strip().lower()] = v.strip()
+                self.before_body(conn, headers)
+                conflict = (b"transfer-encoding" in headers and b"content-length" in headers)
+                if conflict:
+                    rest = f.read1(65536) if hasattr(f, "read1") else b""
+                    conn.sendall(self.page(b"Malformed request rejected:\n" + bytes(head)
+                                           + b"\r\n" + rest, status=b"400 Bad Request"))
+                    continue
+                if b"chunked" in headers.get(b"transfer-encoding", b"").lower():
+                    while True:
+                        sz = f.readline()
+                        if not sz:
+                            return
+                        try:
+                            n = int(sz.strip().split(b";")[0], 16)
+                        except ValueError:
+                            return
+                        if n == 0:
+                            f.readline()
+                            break
+                        f.read(n)
+                        f.readline()
+                elif b"content-length" in headers:
+                    f.read(int(headers[b"content-length"]))
+                conn.sendall(self.respond(path))
+        except Exception:      # noqa: BLE001 — a fixture
+            pass
+        finally:
+            with contextlib.suppress(OSError):
+                conn.close()
+
+    def respond(self, path: str) -> bytes:
+        return self.page(b"ok")
+
+
 @contextlib.contextmanager
-def _rfc7230_origin() -> Iterator[int]:
-    srv = _Rfc7230Origin()
+def _origin(cls) -> Iterator[int]:
+    srv = cls()
     srv.start()
     try:
         yield srv.port
@@ -294,70 +444,147 @@ def _rfc7230_origin() -> Iterator[int]:
         srv.stop()
 
 
-def test_f3_rfc7230_compliant_origin_mints_no_smuggling_fact() -> None:
-    """The measured false positive: a conformant single-socket origin with no proxy at all.
-    It HANGS on the CL+TE probes (it is waiting for a chunk that never comes), so the old
-    latency mint produced High ``request_smuggling`` FACTs at conf 0.700 against a target
-    where a desync is not even possible. A LEAD is fine; a FACT is not."""
-    with _rfc7230_origin() as port:
-        camp = WebScanCampaign(_dummy_send, enable_arsenal=True)   # loopback -> allowed
-        findings, leads = camp._smuggling_findings(
-            [("127.0.0.1", port, f"http://127.0.0.1:{port}/")])
+def _smuggling_run(port: int) -> "tuple[list[str], list]":
+    camp = WebScanCampaign(_dummy_send, enable_arsenal=True)   # loopback -> allowed
+    return camp._smuggling_leads([("127.0.0.1", port, f"http://127.0.0.1:{port}/")])
 
-    assert [f for f in findings if f.bug_class == "request_smuggling"] == [], (
-        "a conformant RFC 7230 origin with no proxy minted a request_smuggling FACT")
-    assert findings == []
-    # the honest timing signal is preserved, as a LEAD that says so
-    assert any("UNCONFIRMED timing LEAD" in ln or "not adjudicable" in ln for ln in leads), leads
+
+def _assert_no_smuggling_fact(port: int) -> list[str]:
+    """Every smuggling negative control asserts the SAME positive facts: the producer really
+    ran (a probe record exists for the class), it really adjudicated the differential, the
+    lead says UNCONFIRMED in so many words, and NOTHING was minted anywhere. Asserting only
+    "no finding appeared" would pass if the probe never ran at all."""
+    leads, probes = _smuggling_run(port)
+    assert probes, "the desync producer did not run at all — the control would be vacuous"
+    assert {p.bug_class for p in probes} == {"request_smuggling"}
+    assert all(p.verdict == "inconclusive" for p in probes), [p.verdict for p in probes]
+    smug = [ln for ln in leads if ln.startswith("smuggling ")]
+    assert smug, f"the producer ran but reported nothing: {leads}"
+    # the class never reaches active_findings through the arsenal pass
+    assert not hasattr(WebScanCampaign, "_smuggling_findings"), (
+        "the FACT-minting smuggling path must be gone")
+    return smug
+
+
+def test_f3_rfc7230_compliant_origin_mints_no_smuggling_fact() -> None:
+    """The measured false positive: a conformant single-socket origin with no proxy at all,
+    now ACTUALLY LOOPING so it reaches the keep-alive pipelining path. It HANGS on the CL+TE
+    probes (waiting for a chunk that never comes), so the old latency mint produced High
+    ``request_smuggling`` FACTs at conf 0.700 where a desync is not even possible."""
+    with _origin(_Rfc7230Origin) as port:
+        smug = _assert_no_smuggling_fact(port)
+    assert any("UNCONFIRMED" in ln or "not adjudicable" in ln or "NOT echoed" in ln
+               for ln in smug), smug
+
+
+def test_b1_stock_404_pipelining_origin_mints_no_smuggling_fact() -> None:
+    """THE B1 FALSE POSITIVE. One benign origin, no proxy, no second parser: TE preferred
+    over CL (RFC 9112 §6.1 permits it), keep-alive pipelining, and the stock path-echoing
+    404 that Apache httpd, Express and Tomcat all ship. On ff0c90db this minted
+    ``severity High, confidence 0.95, confirmed_by differential_response`` and its
+    certificate re-verified ``ok``.
+
+    The full differential DOES hold here — that is the point. It must be reported as a LEAD
+    that names why, not as a CWE-444 fact."""
+    with _origin(_StockEchoOrigin) as port:
+        leads, probes = _smuggling_run(port)
+    assert probes and all(p.verdict == "inconclusive" for p in probes)
+    echoed = [ln for ln in leads if "canary was echoed" in ln]
+    assert echoed, (
+        "the differential did NOT hold against the stock-404 pipelining origin — the B1 "
+        f"regression test has gone vacuous and would pass for the wrong reason: {leads}")
+    for ln in echoed:
+        assert "UNCONFIRMED LEAD" in ln and "NOT a CWE-444 fact" in ln, ln
+        assert "blocking_work" in ln, ln
+
+
+def test_b1_plain_pipelining_reproduces_the_whole_differential() -> None:
+    """THE DECISIVE MEASUREMENT. Against that same origin, TWO ORDINARY PIPELINED REQUESTS
+    with NO framing conflict anywhere produce the IDENTICAL canary echo. So the differential
+    cannot be attributed to a framing disagreement between two parsers: it detects "does
+    this origin honour keep-alive pipelining and echo the path", which one parser does on
+    its own. This is the test that makes the demotion a measurement rather than an opinion."""
+    canary = "crsmugdeadbeefcafe0011223344"
+    with _origin(_StockEchoOrigin) as port:
+        s = socket.create_connection(("127.0.0.1", port), timeout=3)
+        s.settimeout(3)
+        try:
+            s.sendall(
+                (f"GET /vigil-start HTTP/1.1\r\nHost: h\r\nConnection: keep-alive\r\n\r\n"
+                 f"GET /vigil-reflect?c={canary} HTTP/1.1\r\nHost: h\r\n"
+                 f"Connection: close\r\n\r\n").encode())
+            data = b""
+            while len(data) < 65536:
+                chunk = s.recv(65536)
+                if not chunk:
+                    break
+                data += chunk
+        finally:
+            with contextlib.suppress(OSError):
+                s.close()
+    assert canary in data.decode("latin-1", "replace"), (
+        "plain pipelining did not echo the canary — the control is vacuous")
+    assert data.count(b"HTTP/1.1 ") >= 2, data[:200]
+
+
+def test_b2_interim_continue_origin_mints_no_smuggling_fact() -> None:
+    """The B2 end-to-end: the shipped reflect-error red-pen twin plus ONE unsolicited
+    ``100 Continue``. Before the shared reader treated a 1xx as INTERIM, the final 400 —
+    which echoes the offending request, canary and all — was attributed to VIGIL's follow-up
+    on BOTH techniques, defeating the documented "that echo lives in the FIRST response"
+    defence."""
+    with _origin(_InterimContinueOrigin) as port:
+        leads, probes = _smuggling_run(port)
+    assert probes, "the desync producer did not run"
+    assert not any("canary was echoed" in ln for ln in leads), (
+        "the 100-Continue origin still produces a canary-echo differential — the interim "
+        f"response is being mis-framed as the reply to VIGIL's second request: {leads}")
 
 
 def _port_of(url: str) -> int:
     return urlsplit(url).port or 80
 
 
-def test_f3_genuine_canary_echo_desync_still_confirms() -> None:
-    """The positive control: a back-end that REALLY desyncs (it honours chunked on a CL.TE
-    conflict, leaving the smuggled prefix on the socket) must still mint a High FACT — and
-    the certificate must carry the raw second-request bodies, re-verify offline, and FAIL
-    when a retained byte is altered."""
+def test_f3_canary_echo_desync_is_a_lead_not_a_fact() -> None:
+    """The shipped POSITIVE fixture. It is a single ``ThreadingTCPServer`` with no front-end,
+    so it has the SAME single-hop shape as the benign origin above and the oracle cannot
+    distinguish them — which is exactly why this must be a LEAD too. The producer must still
+    capture the whole differential (the machinery is kept, not deleted); only the CLAIM is
+    demoted."""
     with serve_smuggling_desync() as origin:
-        port = _port_of(origin)
-        camp = WebScanCampaign(_dummy_send, enable_arsenal=True)
-        findings, _leads = camp._smuggling_findings([("127.0.0.1", port, f"http://127.0.0.1:{port}/")])
+        leads, probes = _smuggling_run(_port_of(origin))
 
-    assert findings, "a genuinely desyncing back-end must still confirm"
-    f = findings[0]
-    assert f.bug_class == "request_smuggling"
-    assert f.confidence >= 0.9      # the canary oracle's confidence, not the 0.700 latency boundary
-
-    ctx = f.oracle_context
-    assert ctx is not None
-    rec = ctx["smuggling_desync"]
-    # RAW target bytes, not a placeholder and not a latency
-    assert rec["canary"] and rec["canary"] in rec["conflict"]["body"]
-    assert rec["canary"] not in rec["control"]["body"]
-    assert "latency" not in json.dumps(ctx)
-
-    assert reverify_context(ctx, bug_class="request_smuggling").ok
-
-    tampered = json.loads(json.dumps(ctx))
-    tampered["smuggling_desync"]["conflict"]["body"] = "reflected c=not-the-canary"
-    assert not reverify_context(tampered, bug_class="request_smuggling").ok, (
-        "an altered conflict-leg body must break the re-verification")
+    assert probes and {p.bug_class for p in probes} == {"request_smuggling"}
+    echoed = [ln for ln in leads if "canary was echoed" in ln]
+    assert echoed, f"the canary machinery must still capture the differential: {leads}"
+    for ln in echoed:
+        assert "UNCONFIRMED LEAD" in ln and "NOT a CWE-444 fact" in ln, ln
 
 
 def test_f3_safe_twins_do_not_fire() -> None:
     """Negative controls from the shipped corpus: a back-end that REJECTS the ambiguous
     framing, and the red-pen twin whose 400 page ECHOES the offending request (canary and
-    all) while answering the well-formed control cleanly. Neither may mint."""
+    all) while answering the well-formed control cleanly. Neither may produce an echo
+    differential at all."""
     for serve in (serve_smuggling_benign, serve_smuggling_reflect_error):
         with serve() as origin:
-            port = _port_of(origin)
-            camp = WebScanCampaign(_dummy_send, enable_arsenal=True)
-            findings, _leads = camp._smuggling_findings(
-                [("127.0.0.1", port, f"http://127.0.0.1:{port}/")])
-        assert findings == [], f"{serve.__name__} produced a smuggling finding"
+            leads, probes = _smuggling_run(_port_of(origin))
+        assert probes, f"{serve.__name__}: the producer did not run"
+        assert not any("canary was echoed" in ln for ln in leads), (
+            f"{serve.__name__} produced a canary-echo differential: {leads}")
 
+
+def test_n3_a_probed_smuggling_class_reaches_the_coverage_evidence() -> None:
+    """N3 — a probed class must reach ``exercised_probes`` so the W16-4 coverage machinery
+    can see it was probed. It is recorded ``inconclusive``, never ``clean``, even for the
+    oracle's step-4 CONCLUSIVE negative: the evidence branch declares ``clean_capable:
+    false`` and bounds a non-firing to the probed technique/origin, so a class-wide CLEAN
+    from two cleartext techniques on one origin would be the F2 false-CLEAN reintroduced."""
+    with _origin(_Rfc7230Origin) as port:
+        _leads, probes = _smuggling_run(port)
+    report = ScanReport(target="http://127.0.0.1/", exercised_probes=probes)
+    assert report.verdict_by_class()["request_smuggling"] == "inconclusive"
+    assert "request_smuggling" not in report._adjudicated_classes()[0]
 
 # ===========================================================================
 # F7 — a certificate must contain target-derived bytes and must be falsifiable
@@ -466,6 +693,162 @@ def test_f7_cswsh_certificate_carries_raw_bytes_and_fails_on_tamper() -> None:
         assert not reverify_context(tampered, bug_class="cross_site_websocket_hijacking").ok, (
             f"editing {field} out of the certificate must break the re-verification")
 
+
+
+class _Echo403WSServer(threading.Thread):
+    """B3's negative control: a server that REFUSES the foreign Origin with
+    ``HTTP/1.1 403 Forbidden`` — but whose response HEADERS contain the substring
+    ``HTTP/1.1 101 Switching Protocols`` and the correctly computed
+    ``Sec-WebSocket-Accept`` value (a diagnostic "here is the upgrade I would have sent"
+    header; echoing the rejected exchange back is an ordinary thing for a gateway to do).
+
+    Measured on ff0c90db: BASE 838e0b42 = 0 findings, HEAD = 1 ``cross_site_websocket_
+    hijacking`` at conf 0.9. The predicate matched ``"http/1.1 101"`` and the accept key
+    ANYWHERE in the retained block instead of on the STATUS LINE, and the retained block was
+    whatever ``recv`` delivered. A refusing server must never be reported as hijackable."""
+
+    def __init__(self) -> None:
+        super().__init__(daemon=True)
+        self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self.sock.bind(("127.0.0.1", 0))
+        self.sock.listen(16)
+        self.port = self.sock.getsockname()[1]
+        self.foreign_seen = 0
+        self._stop = False
+
+    def run(self) -> None:
+        self.sock.settimeout(0.3)
+        while not self._stop:
+            try:
+                conn, _ = self.sock.accept()
+            except socket.timeout:
+                continue
+            except OSError:
+                break
+            threading.Thread(target=self._serve, args=(conn,), daemon=True).start()
+
+    def _serve(self, conn: socket.socket) -> None:
+        import base64
+        import hashlib
+        conn.settimeout(2.0)
+        data = b""
+        with contextlib.suppress(OSError, socket.timeout):
+            while b"\r\n\r\n" not in data:
+                chunk = conn.recv(4096)
+                if not chunk:
+                    break
+                data += chunk
+        key = origin = ""
+        for line in data.split(b"\r\n")[1:]:
+            if b":" in line:
+                k, _, v = line.partition(b":")
+                name = k.decode("latin-1", "replace").strip().lower()
+                if name == "sec-websocket-key":
+                    key = v.decode("latin-1", "replace").strip()
+                elif name == "origin":
+                    origin = v.decode("latin-1", "replace").strip()
+        accept = base64.b64encode(hashlib.sha1((key + _GUID).encode()).digest()).decode()
+        if "crucible-evil-origin" in origin:
+            self.foreign_seen += 1
+            body = b"cross-origin upgrade refused"
+            with contextlib.suppress(OSError):
+                conn.sendall(
+                    b"HTTP/1.1 403 Forbidden\r\n"
+                    b"X-Rejected-Upgrade: HTTP/1.1 101 Switching Protocols\r\n"
+                    b"X-Would-Have-Been-Accept: " + accept.encode() + b"\r\n"
+                    b"Content-Length: " + str(len(body)).encode() + b"\r\n\r\n" + body)
+        else:
+            with contextlib.suppress(OSError):
+                conn.sendall(b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n"
+                             b"Connection: Upgrade\r\nSec-WebSocket-Accept: "
+                             + accept.encode() + b"\r\n\r\n")
+        with contextlib.suppress(OSError):
+            conn.close()
+
+    def stop(self) -> None:
+        self._stop = True
+        with contextlib.suppress(OSError):
+            self.sock.close()
+
+
+def test_b3_a_403_that_echoes_the_101_status_line_is_not_a_cswsh() -> None:
+    """The F7 regression this slice introduced, pinned. Asserts POSITIVELY that the probe
+    really ran against the refusing endpoint (the server counts the foreign handshake it
+    rejected) and that the producer's own status-line-anchored verdict says NOT accepted —
+    not merely that no finding appeared."""
+    srv = _Echo403WSServer()
+    srv.start()
+    try:
+        ws_url = f"ws://127.0.0.1:{srv.port}/live"
+        from framework.v2.scanner.websocket import CswshCheck, handshake
+        _conn, evil_hs = handshake(ws_url, origin="https://crucible-evil-origin.test")
+        camp = WebScanCampaign(_dummy_send, enable_arsenal=True)
+        findings = camp._cswsh_findings([ws_url])
+        confirmed, ctx = CswshCheck(url=ws_url).probe_with_context()
+    finally:
+        srv.stop()
+
+    # the probe really happened and the server really refused the foreign origin
+    assert srv.foreign_seen >= 2, srv.foreign_seen
+    assert evil_hs.status == 403 and evil_hs.status_line.startswith("HTTP/1.1 403")
+    # ... and the RAW bytes really do carry both decoys, so the control is not vacuous
+    assert "HTTP/1.1 101 Switching Protocols" in evil_hs.response
+    assert evil_hs.accept_key and evil_hs.accept_key in evil_hs.response
+    # the producer's own anchored verdict, which the predicate used to throw away
+    assert evil_hs.accepted is False
+    # nothing is reported, and the refusal still carries a re-verifiable certificate
+    assert findings == [], findings
+    assert confirmed is None
+    assert not reverify_context(ctx.model_dump(mode="json"),
+                                bug_class="cross_site_websocket_hijacking").ok
+
+
+def test_b3_retained_response_is_bounded_to_the_header_block() -> None:
+    """``_read_headers`` returns whatever ``recv`` delivered, so body/frame bytes could ride
+    into the block the predicate searches. What is RETAINED must be the headers only."""
+    with _ws_server() as port:
+        from framework.v2.scanner.websocket import handshake
+        _conn, hs = handshake(f"ws://127.0.0.1:{port}/live", origin="http://x.test")
+    assert hs.response.endswith("\r\n\r\n"), repr(hs.response[-16:])
+    assert hs.response.count("\r\n\r\n") == 1
+    assert hs.status_line == "HTTP/1.1 101 Switching Protocols"
+
+
+def test_b4_an_unconfirmed_lead_is_never_rendered_as_confirmed() -> None:
+    """B4 — the campaign supplies NO victim cookies, so ``CswshCheck`` takes its explicitly
+    UNCONFIRMED Medium branch ("… possible CSWSH — UNCONFIRMED", "an authenticated hijack is
+    NOT proven"). ``_arsenal_finding`` used to DISCARD that title and severity and
+    ``build_report`` re-labelled the entry ``"cross_site_websocket_hijacking confirmed at
+    ws://…"`` at the class's table severity — so the hedge was cosmetic and this slice's own
+    F3/R3 demotions would have rendered the same way."""
+    with _ws_server() as port:
+        ws_url = f"ws://127.0.0.1:{port}/live"
+        camp = WebScanCampaign(_dummy_send, enable_arsenal=True)
+        findings = camp._cswsh_findings([ws_url])
+
+    assert findings, "an any-origin WS server must still be reported"
+    f = findings[0]
+    # the producer's own claim survives the adapter
+    assert "UNCONFIRMED" in f.title and f.severity == "Medium", (f.title, f.severity)
+
+    doc = build_report(ScanReport(target=ws_url, active_findings=findings))
+    entry = next(x for x in doc["findings"] if x["bug_class"] == "cross_site_websocket_hijacking")
+    assert "UNCONFIRMED" in entry["title"], entry["title"]
+    assert "confirmed at" not in entry["title"], entry["title"]
+    assert entry["severity"] == "Medium", entry
+    assert doc["summary"]["by_severity"].get("High", 0) == 0, doc["summary"]
+
+
+def test_b4_arsenal_leads_reach_the_rendered_document() -> None:
+    """A demotion that the document never prints is indistinguishable, to the operator, from
+    a class that was never probed. The LEAD channel must be exported."""
+    report = ScanReport(target="http://127.0.0.1/",
+                        arsenal_leads=["smuggling CL.TE @ http://127.0.0.1/: … UNCONFIRMED LEAD"])
+    doc = build_report(report)
+    assert doc["arsenal_leads"] == report.arsenal_leads
+    assert doc["findings"] == []
+    json.loads(json.dumps(doc))
 
 class _GraphQLApp(BaseHTTPRequestHandler):
     """A GraphQL endpoint with introspection ENABLED and field suggestions ON."""

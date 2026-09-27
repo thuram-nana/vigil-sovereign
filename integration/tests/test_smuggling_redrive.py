@@ -3,19 +3,34 @@ HTTP request smuggling — STD-WIRING (Wave 4.2): admission -> certify_admitted 
 tamper reject, over the registered ``request_smuggling.differential_desync`` DIFFERENTIAL_RESPONSE branch,
 PLUS the gated raw-socket re-drive driven end-to-end against the planted desync fixture and its benign twin.
 
-This retires audit A12 (#269): request_smuggling is no longer a TIMING LEAD. It is minted ONLY through the
-admission choke (``verdict.admit`` -> the FACT-capable ``request_smuggling.differential_desync`` branch ->
-``oracle_adapter.certify_admitted(provenance="live_redrive")``), the offline ``framework.v2 verify`` path
-re-fires the retained ``oracle_context``, and a tampered value is rejected. An LLM-provenanced context is
-demoted to a LEAD (audit G4). A conclusive non-fire is INCONCLUSIVE, never CLEAN.
+Audit A12 (#269) retired the TIMING mint, and the audit-A red-pen (B1) then demoted its Wave-4.2
+replacement as well: ``request_smuggling`` mints NO FACT on this path. The branch is registered
+``fact_capable: false`` and declares the precondition
+``second_parser_observation_on_an_unpipelined_connection``, which a single-connection capture can
+never satisfy, so ``verdict.admit`` returns INCONCLUSIVE and ``certify_admitted`` hands back a
+labelled lead carrying the admission reason. The wiring below still has to hold END TO END — the
+oracle fires over the retained bytes, the re-drive runs gated against the planted fixture, the
+offline ``framework.v2 verify`` path re-fires the retained ``oracle_context``, a tampered value is
+rejected, an LLM-provenanced context is a LEAD (audit G4), and a conclusive non-fire is
+INCONCLUSIVE and never CLEAN. Only the MINT is gone.
 
-The differential is what makes it sound (timing was demoted precisely because a normal origin awaiting an
-incomplete declared body delays identically): a UNIQUE per-probe canary VIGIL embeds in the smuggled prefix
-must be ECHOED in VIGIL's OWN second-request response on the CONFLICT connection AND ABSENT from an identical
-WELL-FORMED control connection's second response. The benign twin (a well-behaved / anti-smuggling back-end)
-never leaks the canary, so it must NEVER be flagged. The raw-socket path is re-gated through
-``validate_action`` + DNS-pin before any byte leaves the box (a raw socket bypassing the sovereign transport
-would be an egress hole).
+WHY (measured, ``engine/crucible/framework/v2/scanner/tests/test_audit_a_soundness.py``): CWE-444 is
+TWO PARSERS DISAGREEING across a trust boundary, and this differential is observed on the ONE
+connection VIGIL itself pipelined the smuggled prefix onto — so the "smuggled" request is VIGIL's own
+request to itself. A benign single origin with no proxy at all (Transfer-Encoding preferred over
+Content-Length, which RFC 9112 6.1 permits, plus ordinary keep-alive pipelining and a stock
+path-echoing 404) reproduces the whole differential, and ``serve_smuggling_desync`` is itself a single
+``ThreadingTCPServer`` with no front-end, so the oracle cannot tell the two topologies apart. The
+canary differential is sound for what it adjudicates — the unique per-probe canary really is echoed in
+VIGIL's OWN second-request response on the CONFLICT connection and ABSENT from the identical
+WELL-FORMED control leg — but what that establishes is one parser's behaviour. The cross-connection
+FACT is named ``blocking_work`` on the evidence branch (it needs an operator-authorised
+co-tenant-affecting probe mode, a cross-connection producer + oracle, and a genuinely two-hop positive
+control in the corpus).
+
+The benign twin (a well-behaved / anti-smuggling back-end) never leaks the canary, so it must NEVER be
+flagged. The raw-socket path is re-gated through ``validate_action`` + DNS-pin before any byte leaves
+the box (a raw socket bypassing the sovereign transport would be an egress hole).
 """
 
 from __future__ import annotations
@@ -75,19 +90,27 @@ def test_the_branch_is_registered_and_the_class_maps_to_it() -> None:
     assert _redrive_branch_for("http_request_smuggling") == _BRANCH
 
 
-def test_admitted_live_redrive_mints_a_signed_fact() -> None:
+def test_admission_refuses_the_single_connection_differential() -> None:
+    """B1 — the ORACLE is unchanged and still fires over the retained bytes (the unique canary
+    really is echoed only on the conflict leg), but ADMISSION refuses to mint: the branch is no
+    longer ``fact_capable`` and it declares the precondition
+    ``second_parser_observation_on_an_unpipelined_connection``, which a capture taken on the one
+    connection VIGIL pipelined the prefix onto can never satisfy. The demotion is therefore
+    enforced at the choke point, not by softening the oracle — and it is auditable, because
+    ``certify_admitted`` carries the admission reason into the lead it returns."""
     ctx = _confirmed_ctx()
-    assert OracleVerifier().confirm(ctx).confirmed
+    assert OracleVerifier().confirm(ctx).confirmed, "the deterministic oracle is unchanged"
     admitted = admit(_BRANCH, fired=True, conclusive=True,
                      observed={"channel_established": True,
                                "conflict_and_control_second_requests_captured": True,
                                "unique_canary_minted": True, "raw_socket_action_validated": True})
-    assert admitted.verdict is Verdict.FACT
+    assert admitted.verdict is Verdict.INCONCLUSIVE, admitted
+    assert "second_parser_observation_on_an_unpipelined_connection" in admitted.reason, admitted.reason
     res = certify_admitted(_finding(ctx), admitted, engagement_slug="alpha",
                            signers=_signers(), provenance="live_redrive")
-    assert res.is_fact, res.reason
-    assert res.confirmed_by == OracleKind.DIFFERENTIAL_RESPONSE.value
-    assert res.signed is not None
+    assert not res.is_fact, res.reason
+    assert res.signed is None, "a demoted admission must never carry a signature"
+    assert "second_parser_observation_on_an_unpipelined_connection" in res.reason, res.reason
 
 
 def test_llm_provenanced_context_is_demoted_to_a_lead() -> None:
@@ -151,17 +174,24 @@ def _charter(tmp_path, host, slug="alpha"):
         f"## 7. Posture\n\n- [x] **TEST**\n", encoding="utf-8")
 
 
-def test_live_redrive_mints_a_fact_against_the_desync_fixture(tmp_path, monkeypatch) -> None:
+def test_live_redrive_against_the_desync_fixture_mints_no_fact(tmp_path, monkeypatch) -> None:
+    """The gated raw-socket re-drive still RUNS end-to-end against the planted fixture and still
+    captures the differential — and mints NOTHING (B1). ``serve_smuggling_desync`` is a single
+    ``ThreadingTCPServer`` with no front-end, so it has the same shape as the benign TE-over-CL
+    pipelining origin in ``scanner/tests/test_audit_a_soundness.py`` and the oracle cannot tell
+    the two apart. The capture is retained and adjudicated INCONCLUSIVE — never a FACT, and (this
+    branch may not assert absence) never a CLEAN either."""
     from framework.v2.eval.benchmark_app import serve_smuggling_desync
     _isolate(tmp_path, monkeypatch)
     _charter(tmp_path, "127.0.0.1")
     with serve_smuggling_desync() as url:
         res = smuggling_redrive(url, slug="alpha", engagement_slug="alpha", signers=_signers(), timeout=4.0)
     assert not res.refused, res.notes
-    assert res.n_facts == 1, f"expected a desync FACT; notes={res.notes} admissions={res.admissions}"
-    fact = res.facts[0]
-    assert fact.is_fact and fact.confirmed_by == OracleKind.DIFFERENTIAL_RESPONSE.value
-    assert fact.signed is not None
+    assert res.n_facts == 0, f"the single-connection differential must not mint: {res.admissions}"
+    assert res.admissions, "the re-drive must still have run and been adjudicated"
+    assert all(v == "INCONCLUSIVE" for _b, v, _r in res.admissions), res.admissions
+    assert all("second_parser_observation_on_an_unpipelined_connection" in r
+               for _b, _v, r in res.admissions), res.admissions
 
 
 def test_live_redrive_never_flags_the_benign_twin(tmp_path, monkeypatch) -> None:

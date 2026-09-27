@@ -299,12 +299,13 @@ def test_smuggling_gate_blocks_probe_on_unauthorized_host() -> None:
     # no finding is produced — the raw socket is never opened for an unauthorized host.
     with _hanging_server(delay=2.0) as port:
         camp = WebScanCampaign(_dummy_send, enable_arsenal=True, arsenal_authz=lambda url: False)
-        findings, leads = camp._smuggling_findings([("127.0.0.1", port, f"http://127.0.0.1:{port}/")])
-    assert findings == [] and leads == []
+        leads, probes = camp._smuggling_leads([("127.0.0.1", port, f"http://127.0.0.1:{port}/")])
+    assert leads == [] and probes == []
 
 
 # ---------------------------------------------------------------------------
-# positive, oracle-confirmed arsenal findings (with a re-verifiable certificate)
+# arsenal outputs: CSWSH is the one oracle-confirmed class (with a re-verifiable
+# certificate); smuggling and race are LEAD-only (F3+B1, R3)
 # ---------------------------------------------------------------------------
 
 
@@ -314,12 +315,15 @@ def test_a_hanging_server_is_a_timing_lead_not_a_smuggling_fact() -> None:
     assert the OPPOSITE (that a hang CONFIRMS a technique), which is exactly the A12 (#269)
     overclaim the latency mint had reintroduced. The honest output is a LEAD.
 
-    The positive control now lives in ``test_audit_a_soundness`` and needs a REAL
-    canary-echo desync (``eval.benchmark_app.serve_smuggling_desync``)."""
+    B1 went further: the canary DIFFERENTIAL that replaced the timing mint is a LEAD too
+    (it is observed on the one connection VIGIL pipelined the prefix onto), so
+    ``_smuggling_leads`` returns leads + probe records and NO findings at all — see
+    ``test_audit_a_soundness`` for the measurement."""
     with _hanging_server(delay=2.0) as port:
         camp = WebScanCampaign(_dummy_send, enable_arsenal=True)  # loopback → allowed
-        findings, leads = camp._smuggling_findings([("127.0.0.1", port, f"http://127.0.0.1:{port}/")])
-    assert findings == [], "timing alone must never mint a request_smuggling FACT"
+        leads, probes = camp._smuggling_leads([("127.0.0.1", port, f"http://127.0.0.1:{port}/")])
+    assert not hasattr(camp, "_smuggling_findings"), "the FACT-minting smuggling path must be gone"
+    assert probes and all(p.bug_class == "request_smuggling" for p in probes)
     assert any("smuggling" in ln for ln in leads), leads
 
 

@@ -283,14 +283,30 @@ possibly-sanitized / whole-program flows stay a LEAD. **blocking_work:** the pro
 engine (recorded on the capability-matrix `static_insecure_randomness` / `static_taint` branches). Enforced in
 `engine/crucible/framework/v2/analysis/static_facts.py` and guarded by the oracle-version pin.
 
-### L4. Shared-pool / HTTPS / HTTP-2 request-smuggling desync — LEAD (single-connection desync is the FACT)
+### L4. Request-smuggling desync — LEAD, including the single-connection canary differential
 
-Wave-4.2 re-promoted request-smuggling to a FACT via a **differential desync** VIGIL owns end-to-end
-(`smuggling_desync_oracle`, kind `DIFFERENTIAL_RESPONSE`, ctx key `differential_desync`; retires the audit-A12
-timing LEAD). The residual that stays a LEAD, stated on the evidence branch: a **shared-pool** desync whose
-effect only manifests against a real co-tenant victim's connection (VIGIL never poisons a third party), an
-**HTTPS** origin (the raw-socket probes speak cleartext), and genuine **HTTP/2** (h2.CL / h2.TE) desync. These
-escalate to a purpose-built tool rather than minting a FACT here.
+Request smuggling mints **no FACT**. Two separate signals, both demoted:
+
+* **Timing** (audit A12, #269) — a normal origin awaiting an incomplete declared body hangs exactly like a
+  desynced one. The latency mint is deleted.
+* **The single-connection canary differential** (audit-A red-pen B1) — Wave-4.2 replaced the timing mint with
+  a `DIFFERENTIAL_RESPONSE` FACT at conf 0.95 (`smuggling_desync_oracle`, ctx key `smuggling_desync`), and
+  that is an overclaim of the same family. CWE-444 is **two parsers disagreeing** across a trust boundary;
+  this differential is observed on the **one connection VIGIL itself pipelined the smuggled prefix onto**, so
+  the "smuggled" request is VIGIL's own request to itself. Measured: a benign single origin with **no proxy**
+  — Transfer-Encoding preferred over Content-Length (RFC 9112 §6.1 permits it), ordinary keep-alive
+  pipelining, and a **stock path-echoing 404** (the Apache httpd / Express / Tomcat default) — reproduces the
+  whole differential, and **two ordinary pipelined requests with no framing conflict anywhere** produce the
+  identical canary echo. The shipped positive fixture is a single `ThreadingTCPServer`, so it has the same
+  shape and the oracle cannot tell it from the benign origin.
+
+**blocking_work** (on the `request_smuggling.differential_desync` branch): observe the corruption on a
+connection VIGIL did **not** pipeline the prefix onto — which is sound only against a **pooling** front-end
+and risks a real co-tenant victim, so it needs an operator-authorised co-tenant-affecting probe mode, a
+cross-connection producer + oracle, and a genuinely two-hop positive control in the corpus.
+
+Also still LEAD for independent reasons: an **HTTPS** origin (the raw-socket probes speak cleartext) and
+genuine **HTTP/2** (h2.CL / h2.TE) desync, which escalate to a purpose-built tool.
 
 ### L5. Race / limit-overrun without an owner-signed semantic predicate — LEAD
 

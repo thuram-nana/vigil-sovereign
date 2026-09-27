@@ -90,6 +90,20 @@ class AuditFinding(BaseModel):
     confidence: float = Field(ge=0.0, le=1.0)
     confirmed_by: str = Field(description="The oracle kind that fired.")
     rationale: str = ""
+    # The CLAIM the producer actually made, carried verbatim so the report cannot invent a
+    # different one (B4). Both default to "" — the built-in point checks do not set them and
+    # every existing certificate/export is byte-identical — and ``report.build_report`` falls
+    # back to its own title/severity table exactly as before when they are empty. They exist
+    # because the arsenal adapter used to DISCARD the producer's title and severity: an
+    # explicitly UNCONFIRMED Medium LEAD (the CSWSH no-cookies branch) was then rendered
+    # "<bug_class> confirmed at <param>" at the class's table severity, which turns an honest
+    # hedge into a confirmed High. A producer that hedges must have that hedge SHOWN.
+    title: str = Field(default="", description=(
+        "The producer's own finding title, verbatim. Empty for the built-in point checks, "
+        "which let the report derive one."))
+    severity: str = Field(default="", description=(
+        "The producer's own severity, verbatim. Empty for the built-in point checks, which "
+        "let the report take the class's table severity."))
     # The serialized verify.FindingContext the oracle adjudicated — the retained
     # evidence that lets this finding be re-verified offline (the certificate the
     # Wave-3 re-verifier re-runs the pure oracle over). None only for legacy paths.
