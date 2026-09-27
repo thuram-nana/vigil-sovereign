@@ -7,11 +7,12 @@ existing deterministic oracle judges the FRESH captured bytes → one atomic evi
 against its declared capability → ``certify_admitted(provenance="live_redrive")`` mints a signed,
 offline-re-verifiable FACT — to three more MERIDIAN-planted classes:
 
-  * ``path_traversal``   — the ``side_effect`` oracle over a KNOWN file-content signature (``root:x:0:0:``),
-                           ATTRIBUTED to a read by three runner-owned requirements the oracle itself cannot
-                           express: a benign non-path control and a PATH-SHAPED but unreadable control must
-                           both lack the signature, and a second, semantically-different ENCODING of the
-                           same path must reproduce it. Presence alone is payload CORRELATION, not a read.
+  * ``path_traversal``   — **LEAD-ONLY** (see ``RUNTIME_LEAD_CLASSES``). The ``side_effect`` oracle over a
+                           KNOWN file-content signature (``root:x:0:0:``) still runs behind a PATH-SHAPED
+                           unreadable control and an alternate-ENCODING corroboration, but those guards test
+                           only the SHAPE OF THE INPUT, never the relationship between the response and the
+                           file — so eight benign origins that read nothing satisfied them. The branch is
+                           registered ``fact_capable: false`` and the arm produces LEADs, never FACTs.
   * ``xss`` (reflected)  — the ``reflection_context`` oracle: a unique canary that reaches an EXECUTABLE
                            HTML position (a tag name / ``<script>`` / an ``on*`` handler), never inert text.
   * ``exposure``         — the ``predicate`` oracle over a JSON AST that the RUNNER composes and the
@@ -48,7 +49,44 @@ from typing import Any, Callable, Optional
 # The classes this runner mints as FACTs, each mapped to its ONE registered evidence branch + the oracle
 # whose deterministic decision procedure adjudicates it. Named by value (the framework enums are resolved
 # function-locally, FATAL-2). Kept in lockstep with docs/capability-matrix/evidence-branches.json.
-RUNTIME_FACT_CLASSES = ("path_traversal", "xss", "exposure", "ssi")
+RUNTIME_FACT_CLASSES = ("xss", "exposure", "ssi")
+
+# LEAD-ONLY classes: the runner still probes them end to end and records an admitted verdict, but their
+# registered branch declares ``fact_capable: false``, so ``verdict.admit`` demotes even a fired oracle to a
+# LEAD. Kept here (rather than deleted) because the probe is genuinely useful evidence for a human — it is
+# the CLAIM "VIGIL proved a file was read" that the evidence does not support.
+#
+# WHY path_traversal is here. A red-pen drove EIGHT benign origins that read no file through the shipped
+# arm and every one of them minted a signed FACT that re-verified offline (rate 1.0): five that canonicalise
+# the requested name before deciding (a hardening-advisory KB, canonicalise-then-basename, a canonicalising
+# deny-list 403, a case-insensitive variant, a canonical-prefix deny KB) and THREE with no normaliser at all
+# (``v.endswith("passwd")``; an anchored WAF regex ``(?:\.\./)+.*passwd\Z`` whose 403 quotes a sample line;
+# ``v.rsplit("/", 1)[-1] == "passwd"``). Neither guard can be patched into soundness:
+#   * the PATH-SHAPED control works by APPENDING a nonce suffix, which mutates exactly the token real
+#     matchers key on (basename / suffix), so a suffix-keyed matcher answers the control with a miss and
+#     the treatment with the signature — indistinguishable from a read;
+#   * both alternate ENCODINGS canonicalise to the same path, so any endpoint that canonicalises before
+#     deciding corroborates by construction.
+# Decisively: the soundness suite's own true-positive fixture ``_LfiApp`` and the worst false positive are
+# THE SAME PROGRAM with a different dict value. Neither guard tests the relationship between the RESPONSE
+# and the FILE; both test only the SHAPE OF THE INPUT, and a read cannot be proven by varying input shape.
+#
+# Precedent: verify/verifier.py:384 and :401 already dropped SIDE_EFFECT for ``postmessage_exploited`` and
+# ``csp_bypass`` — "a bare marker-in-sink is not a sound proof of execution and let a crafted finding mint a
+# FACT with no execution." This is the same predicate over a different sink.
+#
+# DIRECTION FOR THE FUTURE SLICE (deliberately NOT built here): the sound shape is a CONTENT-relationship
+# test, modelled on the ``ssi`` arm — which survived every attack precisely because its evidence is a
+# per-probe UNGUESSABLE PRODUCT the server must COMPUTE. Candidates: multi-file corroboration (a second,
+# different system file whose format VIGIL can validate independently — a canonical-path KB will have an
+# article for ``passwd`` but cannot produce a well-formed second file), a size/entropy relation between the
+# response and the file VIGIL asked for, or a per-probe unpredictable target whose content VIGIL already
+# knows. Each also needs a multi-capture oracle row; see the branch's ``blocking_work``.
+RUNTIME_LEAD_CLASSES = ("path_traversal",)
+
+# Every class this runner will DISPATCH. A FACT-capable class can reach a signed FACT; a lead-only class
+# runs the identical pipeline and stops at a LEAD.
+RUNTIME_REDRIVE_CLASSES = RUNTIME_FACT_CLASSES + RUNTIME_LEAD_CLASSES
 
 _BRANCH_FOR = {
     "path_traversal": "path_traversal.file_signature",
@@ -74,7 +112,7 @@ _MAX_CANDIDATE_NAMES = 12
 
 # --- W2: three more HTTP-response-derived FACT arms (SSTI / boolean-blind / time-based) ---------------
 # Each is a sibling of :func:`runtime_redrive` (runner-owned gated re-drive → the matching frozen oracle →
-# admit()+certify_admitted(provenance="live_redrive")) but is NOT in ``RUNTIME_FACT_CLASSES``, so the engage
+# admit()+certify_admitted(provenance="live_redrive")) but is NOT in ``RUNTIME_REDRIVE_CLASSES``, so the engage
 # ``_redrive_spec`` seam is UNCHANGED — these arms are reached only from the Strix proof-sink dispatch rail
 # (proof/run.py). No new OracleKind: SSTI reuses EVALUATION, boolean reuses BOOLEAN_INFERENCE, timing reuses
 # TIMING (all already frozen in _ALL_ORACLES). The registered evidence branch each admits through:
@@ -124,12 +162,16 @@ _BOOLEAN_MAX_PARAMS = 2
 # Identical-request sends for the per-PARAM determinism screen, shared across the clause families.
 _BOOLEAN_BASELINE_SAMPLES = 8
 
-# --- D1: attributing a file-content signature to a READ, not to payload CORRELATION ------------------
+# --- D1: what the traversal arm's LEAD-quality guards do, and what they provably do NOT do -----------
 # The canonical traversal payload, plus SEMANTICALLY-IDENTICAL re-encodings of the SAME path. POSIX
 # dot-segment resolution makes every one of them name /etc/passwd, so a genuine file read reproduces the
-# signature under all of them; an endpoint whose output merely CORRELATES with the literal payload string
-# (a KB/search page whose corpus documents "etc/passwd", a 403 that quotes a sample passwd line) does not.
-# A FACT therefore requires the canonical payload AND at least one alternate encoding to carry it.
+# signature under all of them; an endpoint keyed on the LITERAL payload string does not.
+#
+# These are LEAD-QUALITY filters, not a proof of a read (the branch is ``fact_capable: false`` — see
+# ``RUNTIME_LEAD_CLASSES``). They test the SHAPE OF THE INPUT only, so an endpoint that CANONICALISES the
+# requested name before deciding (a hardening-advisory KB, a canonicalising deny-list/WAF) reproduces the
+# signature under every encoding, and an endpoint keyed on the BASENAME or a SUFFIX defeats the control
+# below because the control is built by APPENDING to the target name.
 _TRAVERSAL_PAYLOAD = "../../../../etc/passwd"
 _TRAVERSAL_ALT_PAYLOADS = (
     "../../../../etc/./passwd",          # dot-segment identity  (etc/./passwd  -> etc/passwd)
@@ -138,10 +180,18 @@ _TRAVERSAL_ALT_PAYLOADS = (
 # The PATH-SHAPED control: a traversal to a nonce filename that CANNOT exist, deliberately built as a
 # sibling of the real target so it is maximally correlated with it lexically while retrieving nothing.
 # A page that answers ANY path-ish input with the signature (a 403 "path rejected" notice quoting a sample
-# passwd line; a search hit keyed on "passwd") reproduces the signature HERE and is refused. The older
-# non-path control (``vigilctl<nonce>.txt``) is KEPT alongside it: it catches CONSTANT emission, which is a
-# different failure mode, and the two together are strictly stronger than either alone.
+# passwd line; a search hit keyed on "passwd") reproduces the signature HERE and is filtered out.
+#
+# The older benign non-path control (``vigilctl<nonce>.txt``, "constant emission") has been DELETED. A
+# mutation matrix measured it as DOMINATED: removing it failed ZERO tests, and analytically any origin that
+# emits the signature under the canonical traversal treatment also emits it under this path-shaped control
+# unless it is basename/suffix-keyed — which NEITHER control catches. It cost one extra live request per
+# candidate parameter (12 per re-drive) for no discrimination. The previous claim here, that "the two
+# together are strictly stronger than either alone", was false and is retracted.
 _TRAVERSAL_PATH_CONTROL = "../../../../etc/passwd.vigilctl{nonce}"
+# Statuses under which an alternate-encoding re-send is NOT an answer about the path (the rate limiter or
+# the WAF is talking). 5xx is handled alongside these by a range test.
+_NON_ANSWER_STATUSES = frozenset({0, 408, 425, 429})
 
 # --- D3: what makes a secret signature VALUE-SHAPED --------------------------------------------------
 # A bare ``DB_PASSWORD=`` proves nothing: documentation prose (``<code>DB_PASSWORD=</code>``), a CI template
@@ -169,6 +219,20 @@ _EXPOSURE_PROBES = (
     ("/actuator/env", "spring.datasource", ("propertySources", '"value"'), False),
     ("/.git/config", "[core]", ("repositoryformatversion",), False),
 )
+
+
+# Every runner-side REFUSAL note used to end "→ LEAD". Measured against a refusing origin: leads=0 and
+# family_verdict='INCONCLUSIVE' — no AdapterResult is created on any refusal path, because a refusal happens
+# BEFORE admit(). The note promised a record that does not exist, so it says what actually happened.
+_NOT_ADMITTED = "→ refused before admission (no verdict record is created for this surface)"
+
+
+def _note(res: "RuntimeRedriveResult", msg: str) -> None:
+    """Append ``msg`` to the audit trail ONCE. A re-drive walks up to 12 candidate parameter names against
+    the same origin, so an origin-level refusal used to be written 12 times verbatim; the duplicates carry
+    no information and bury the distinct notes."""
+    if msg not in res.notes:
+        res.notes.append(msg)
 
 
 @dataclass
@@ -278,8 +342,16 @@ def _secret_assignment(body: str, signature: str) -> "tuple[str, str, str]":
                 why = ("its right-hand side opens a quote that never closes on that line — a string "
                        "concatenation naming the key, not an assignment")
         else:
+            # An UNQUOTED right-hand side runs to the END OF THE LINE. Nothing else terminates it: in .env
+            # semantics ``;`` is not a delimiter at all, ``&`` is a query-string separator, and ``#`` only
+            # starts a comment when it is whitespace-preceded (and a value containing a space is refused
+            # below anyway). Cutting on those three TRUNCATED real credentials: it turned
+            # ``DB_PASSWORD=abc;defghij`` into a 3-character value and then refused it with "its
+            # right-hand side is only 3 character(s) long" — an unobserved claim, since the runner's own
+            # cut made it 3 — and, worse, it put a TRUNCATED secret ("django-insecure-8k", "Tr0ub4dor")
+            # into a signed certificate as the evidence. A certificate must never carry a truncated value.
             cut = len(rest)
-            for ch in ("\r", "\n", "&", "#", ";"):
+            for ch in ("\r", "\n"):
                 k = rest.find(ch)
                 if 0 <= k < cut:
                     cut = k
@@ -293,8 +365,14 @@ def _secret_assignment(body: str, signature: str) -> "tuple[str, str, str]":
                 why = (f"its right-hand side is only {len(value)} character(s) long — below the "
                        f"{_SECRET_VALUE_MIN_LEN}-character floor for a credential")
             elif forbidden is not None:
-                why = (f"its right-hand side is a template/placeholder rather than a value "
-                       f"(it contains {forbidden!r})")
+                # HONEST wording: this token set is how a template interpolation, a JS concatenation and a
+                # shipped placeholder are told apart from a value, and it is deliberately over-broad — a
+                # GENUINE credential containing it is refused too. See the branch's measured recall figure
+                # in evidence-branches.json (exposure.secret_signature.limitation).
+                why = (f"its right-hand side contains {forbidden!r}, which this arm's value shape does not "
+                       f"accept — the marker set that separates a template interpolation, a JS "
+                       f"concatenation and a shipped placeholder from a real value also refuses a genuine "
+                       f"credential that happens to contain one of those characters")
             else:
                 vstart = hay.find(value, start, stop + 1)
                 if vstart >= 0:
@@ -324,32 +402,58 @@ def _secret_value_predicates(signature: str) -> "list[dict]":
 
 def _encoding_corroboration(send: Callable, tmpl: Any, point: Any, signature: str, state: dict,
                             res: "RuntimeRedriveResult", bug_class: str,
-                            probe_url: str) -> "tuple[Optional[str], str]":
+                            probe_url: str) -> "tuple[Optional[str], str, bool]":
     """Re-send the SAME path under a semantically-equivalent alternate ENCODING and report the first one
     that reproduces ``signature``.
 
-    This is the requirement the single-control design was missing. A filesystem resolves ``etc/passwd``,
-    ``etc/./passwd`` and ``etc/../etc/passwd`` to the same file, so a genuine read answers all three
-    identically; an endpoint whose output merely CORRELATES with the literal payload (a KB article retrieved
-    because the query matched its text, a 403 that echoes back what it blocked) does not survive the
-    rewrite. Returns ``(payload, "")`` on corroboration, or ``(None, why)``."""
+    A filesystem resolves ``etc/passwd``, ``etc/./passwd`` and ``etc/../etc/passwd`` to the same file, so a
+    genuine read answers all three identically; an endpoint keyed on the LITERAL payload does not survive
+    the rewrite. (An endpoint that CANONICALISES before deciding DOES survive it — which is why this is a
+    lead-quality filter and not a proof; see ``RUNTIME_LEAD_CLASSES``.)
+
+    Returns ``(payload, "", True)`` on corroboration, and otherwise ``(None, why, observed)`` where
+    ``observed`` says whether VIGIL actually MADE the observation it would be reasoning from:
+
+      * ``observed=True``  — every alternate encoding was sent, answered on a live channel, and its body
+        genuinely LACKED the signature. That is a REFUTATION: the caller may conclude the signature tracks
+        the literal payload rather than the path.
+      * ``observed=False`` — at least one alternate encoding produced no channel or a transport error, so
+        "no re-encoding reproduced it" was never established. That is COULD-NOT-OBSERVE, and the caller
+        must treat it as INCONCLUSIVE. Reporting it as a refutation is how a real arbitrary-file-read
+        behind a WAF or a rate limiter was silently lost while the audit trail asserted a correlation
+        nobody measured.
+    """
     tried: "list[str]" = []
+    unobservable = False
     for alt in _TRAVERSAL_ALT_PAYLOADS:
         before = state["channels"]
         try:
             resp = send(tmpl.render(point, alt))
         except Exception as e:  # noqa: BLE001 — a transport error is not corroboration, and not a refutation
-            tried.append(f"{alt}: {type(e).__name__}")
+            tried.append(f"{alt}: {type(e).__name__} (no observation)")
+            unobservable = True
             continue
         if state["channels"] <= before:
             res.inconclusive.append((bug_class, f"{probe_url}#alt-encoding"))
-            tried.append(f"{alt}: no channel")
+            tried.append(f"{alt}: no channel (no observation)")
+            unobservable = True
             continue
         body = str(resp.get("body", "")) if isinstance(resp, dict) else str(resp)
         if signature in body:
-            return alt, ""
-        tried.append(f"{alt}: signature absent")
-    return None, "; ".join(tried) if tried else "no alternate encoding was attempted"
+            return alt, "", True
+        status = int(resp.get("status", 0) or 0) if isinstance(resp, dict) else 0
+        if status in _NON_ANSWER_STATUSES or status >= 500:
+            # The origin answered, but it did not answer the QUESTION: a 429/503 is the rate limiter or the
+            # WAF talking, not the endpoint's verdict on this path. Counting it as "the signature was
+            # absent" is what turned a throttled real arbitrary-file read into a fabricated correlation
+            # claim.
+            tried.append(f"{alt}: status {status} (throttled/blocked — no observation)")
+            unobservable = True
+            continue
+        tried.append(f"{alt}: observed (status {status}), signature absent")
+    if not tried:
+        return None, "no alternate encoding was attempted", False
+    return None, "; ".join(tried), not unobservable
 
 
 def runtime_redrive(url: str, *, slug: str, engagement_slug: str, signers: "list[tuple[str, str]]",
@@ -358,13 +462,16 @@ def runtime_redrive(url: str, *, slug: str, engagement_slug: str, signers: "list
     deterministic oracle, and mint a signed FACT ONLY when the oracle confirms CAUSATION (not mere presence)
     over VIGIL's OWN live capture:
 
-      * path_traversal — the signature must be ATTRIBUTABLE to a READ. TWO controls on the same parameter
-        must both come back without it — a benign non-path value (catching a page that emits the signature
-        regardless of input) AND a PATH-SHAPED traversal to a nonce filename that cannot exist (catching a
-        page that answers any path-ish input with it: a 403 "path rejected" notice quoting a sample passwd
-        line, a KB search keyed on "passwd") — and a SECOND, semantically-different encoding of the same
-        path (``etc/./passwd`` / ``etc/../etc/passwd``) must REPRODUCE it. A real read satisfies all three;
-        an endpoint whose output merely CORRELATES with what the payload means satisfies at most the first.
+      * path_traversal — **LEAD-ONLY; this arm mints NOTHING** (``RUNTIME_LEAD_CLASSES``; the branch is
+        registered ``fact_capable: false``, so ``admit`` demotes even a fired oracle). It is still driven,
+        and it still applies its two LEAD-QUALITY filters: ONE control on the same parameter — a PATH-SHAPED
+        traversal to a nonce filename that cannot exist — must come back WITHOUT the signature, and a
+        SECOND, semantically-different encoding of the same path (``etc/./passwd`` /
+        ``etc/../etc/passwd``) must REPRODUCE it. (The older benign non-path "constant emission" control was
+        measured dominated by the path-shaped one and DELETED — see ``_TRAVERSAL_PATH_CONTROL``.) Neither
+        filter proves a READ: both vary only the SHAPE OF THE INPUT, so an endpoint that CANONICALISES the
+        requested name, or keys on its BASENAME or a SUFFIX, satisfies both while reading nothing — eight
+        such benign origins did, at rate 1.0.
       * xss (reflected) — the reflection oracle must report the ``html_tag`` context (the canary became a live
         element); mere presence inside a ``<script>`` string literal or a ``<noscript>`` block is NOT accepted.
       * exposure — the runner fetches BOTH a random control path and the fixed probe path, and hands the
@@ -377,11 +484,13 @@ def runtime_redrive(url: str, *, slug: str, engagement_slug: str, signers: "list
     A probe that established no channel is INCONCLUSIVE (never CLEAN). Returns a :class:`RuntimeRedriveResult`.
     Never raises (a probe error is recorded and what held is returned).
 
-    RESIDUAL, named rather than papered over: for path_traversal the two controls and the encoding
-    corroboration are RUNNER-side preconditions checked before minting — the ``side_effect`` oracle this
-    branch is registered against takes one (marker, sink) pair, so what re-executes offline is the signature's
-    presence in the retained treatment body, not the differential. (``exposure`` does not share this residual:
-    its predicate AST carries the control body and the value shape, so the whole decision re-executes.)"""
+    RESIDUAL, named rather than papered over: for path_traversal the path-shaped control and the encoding
+    corroboration are RUNNER-side preconditions checked before admission — ``BUG_CLASS_ORACLES`` pins the
+    class to a single-capture ``side_effect`` row that takes one (marker, sink) pair and can express neither
+    a negation nor a conjunction, so neither filter re-executes offline. That is the SECOND of the two
+    prerequisites in the branch's ``blocking_work``; the first is a guard that discriminates a READ from a
+    canonical-path LOOKUP. (``exposure`` does not share this residual: its predicate AST carries the control
+    body and the value shape, so the whole decision re-executes.)"""
     import hashlib  # noqa: PLC0415 — stdlib; deterministic control tokens (no rng, determinism invariant)
 
     import secrets  # noqa: PLC0415 — per-probe UNPREDICTABLE product so the value cannot pre-exist (not rng
@@ -405,7 +514,7 @@ def runtime_redrive(url: str, *, slug: str, engagement_slug: str, signers: "list
 
     bug_class = normalize_bug_class(claimed_class)
     res = RuntimeRedriveResult(url=url, bug_class=bug_class)
-    if bug_class not in RUNTIME_FACT_CLASSES:
+    if bug_class not in RUNTIME_REDRIVE_CLASSES:
         res.notes.append(f"{bug_class!r} is not a runtime-redrive class")
         return res
     branch = _BRANCH_FOR[bug_class]
@@ -453,15 +562,11 @@ def runtime_redrive(url: str, *, slug: str, engagement_slug: str, signers: "list
             sig = "root:x:0:0:"
             chk = ContentSignatureCheck(id="path-traversal", bug_class="path_traversal",
                                         payload=_TRAVERSAL_PAYLOAD, signature=sig)
-            # TWO controls, testing two DIFFERENT ways a signature can be present without a file read:
-            #   constant-emission — a page that prints it whatever the input is (a docs page);
-            #   path-shaped       — a page that prints it for ANY path-ish input (a 403 "path rejected"
-            #                       notice quoting a sample line; a KB search whose corpus documents it).
-            # The path-shaped control resolves to a file that cannot exist, so a genuine read answers it
-            # with a miss. The previous single control was NOT path-shaped and retrieved nothing anywhere,
-            # which is exactly why a payload-correlated endpoint walked straight past it.
-            controls = (("constant-emission", f"vigilctl{nonce}.txt"),
-                        ("path-shaped", _TRAVERSAL_PATH_CONTROL.format(nonce=nonce)))
+            # ONE control: PATH-SHAPED — a traversal to a nonce filename that cannot exist, which catches a
+            # page that answers ANY path-ish input with the signature (a 403 "path rejected" notice quoting
+            # a sample line; a KB search whose corpus documents it). The second, "constant-emission"
+            # control was measured dominated and deleted (see _TRAVERSAL_PATH_CONTROL).
+            control_value = _TRAVERSAL_PATH_CONTROL.format(nonce=nonce)
             for name in _candidate_query_names(url, _PATH_TRAVERSAL_PARAMS):
                 probe_url = _url_with_param(url, name)
                 tmpl = RequestTemplate(HttpRequest(method="GET", url=probe_url))
@@ -473,29 +578,26 @@ def runtime_redrive(url: str, *, slug: str, engagement_slug: str, signers: "list
                 # Record the surface as EXAMINED even when a control refuses below, so a runner-side
                 # refusal is attributable in the audit trail (and is distinguishable from not probing).
                 res.surfaces.setdefault(bug_class, set()).add(surface)
-                refused = False
-                for label, control_value in controls:
-                    before = state["channels"]
-                    try:
-                        control = send(tmpl.render(point, control_value))
-                    except Exception as e:  # noqa: BLE001
-                        res.notes.append(f"path_traversal control error [{name}/{label}]: "
-                                         f"{type(e).__name__}: {e}")
-                        refused = True
-                        break
-                    if state["channels"] <= before:
-                        res.inconclusive.append((bug_class, f"{probe_url}#control:{label}"))
-                        refused = True
-                        break
-                    if sig in _body(control):
-                        res.notes.append(
-                            f"path_traversal: control-differential refused [{surface}] — the {label} "
-                            f"control value reproduced the file signature, so its presence is not "
-                            f"attributable to a file read → LEAD")
-                        refused = True
-                        break
-                if refused:
+                before = state["channels"]
+                try:
+                    control = send(tmpl.render(point, control_value))
+                except Exception as e:  # noqa: BLE001
+                    _note(res, f"path_traversal control error [{name}/path-shaped]: "
+                               f"{type(e).__name__}: {e}")
                     continue
+                if state["channels"] <= before:
+                    res.inconclusive.append((bug_class, f"{probe_url}#control:path-shaped"))
+                    continue
+                if sig in _body(control):
+                    _note(res,
+                          f"path_traversal: control-differential refused [{surface}] — the path-shaped "
+                          f"control value (a traversal to a nonce filename that cannot exist) reproduced "
+                          f"the file signature, so its presence is not attributable to a file read "
+                          f"{_NOT_ADMITTED}")
+                    # BOUNDED WORK: this origin answers a path-ish value with the signature, so the same
+                    # refusal would repeat verbatim on every remaining candidate parameter (measured: 12
+                    # identical notes, 60 live requests). Stop here.
+                    break
                 # TREATMENT: the canonical traversal payload.
                 before2, before_bodies = state["channels"], state["body_unavailable"]
                 ctx_obj = chk.probe(tmpl, point, send)
@@ -509,24 +611,48 @@ def runtime_redrive(url: str, *, slug: str, engagement_slug: str, signers: "list
                 if signal.fired:
                     # ENCODING CORROBORATION: the same path, written differently. A filesystem resolves
                     # ``etc/./passwd`` and ``etc/../etc/passwd`` to the same inode; a page keyed on the
-                    # literal payload string does not, so it fails here even though its single-payload
-                    # response looked identical to a read.
-                    alt, why = _encoding_corroboration(send, tmpl, point, sig, state, res, bug_class,
-                                                       probe_url)
+                    # LITERAL payload string does not. (A page that CANONICALISES does, which is why this
+                    # is a lead-quality filter, not a proof of a read.)
+                    alt, why, observed = _encoding_corroboration(send, tmpl, point, sig, state, res,
+                                                                 bug_class, probe_url)
+                    if alt is None and not observed:
+                        # COULD NOT OBSERVE — a transport error or a lost channel on a re-encoding (a WAF,
+                        # a rate limiter, a dropped keep-alive). VIGIL made no observation either way, so
+                        # it concludes nothing: reporting this as "it correlates with the payload" asserted
+                        # a measurement that was never taken AND silently discarded real arbitrary-file
+                        # reads on every throttled target.
+                        res.inconclusive.append((bug_class, f"{probe_url}#{point.id}"))
+                        _note(res,
+                              f"path_traversal: encoding corroboration COULD NOT BE OBSERVED [{surface}] — "
+                              f"the signature appeared under {_TRAVERSAL_PAYLOAD!r}, but at least one "
+                              f"re-encoding of the same path was NOT OBSERVABLE — no channel, a transport "
+                              f"error, or a throttle/block status that is not an answer about the path "
+                              f"({why}); no observation was made either way, so nothing is concluded "
+                              f"→ INCONCLUSIVE")
+                        break     # bounded work: the channel is degraded, stop probing this endpoint
                     if alt is None:
-                        res.notes.append(
-                            f"path_traversal: encoding-corroboration refused [{surface}] — the signature "
-                            f"appeared under {_TRAVERSAL_PAYLOAD!r} but no semantically-equivalent "
-                            f"re-encoding of the same path reproduced it ({why}), so it correlates with "
-                            f"the payload rather than with a read → LEAD")
-                        continue
-                    res.notes.append(f"path_traversal: read corroborated [{surface}] — the signature "
-                                     f"reproduced under the alternate encoding {alt!r}")
-                r = _admit(context, f"{probe_url}#{point.id}", surface,
-                           fired=signal.fired, conclusive=signal.conclusive,
-                           body_unreadable=state["body_unavailable"] > before_bodies)
-                if getattr(r, "is_fact", False):
-                    break     # one FACT is decisive for a re-drive — stop (bounded work, ONE cert per bug)
+                        _note(res,
+                              f"path_traversal: encoding-corroboration refused [{surface}] — the signature "
+                              f"appeared under {_TRAVERSAL_PAYLOAD!r} but every semantically-equivalent "
+                              f"re-encoding of the same path was sent, answered, and OBSERVED not to carry "
+                              f"it ({why}), so it tracks the literal payload rather than the path "
+                              f"{_NOT_ADMITTED}")
+                        break     # bounded work: the origin is keyed on the literal payload, not the path
+                    _note(res, f"path_traversal: signature reproduced under the alternate encoding {alt!r} "
+                               f"[{surface}] — consistent with a read, but NOT a proof of one: an endpoint "
+                               f"that CANONICALISES the requested name answers every encoding identically, "
+                               f"and one keyed on the BASENAME or a SUFFIX also answers the path-shaped "
+                               f"control with a miss (branch path_traversal.file_signature is "
+                               f"fact_capable:false) → LEAD")
+                _admit(context, f"{probe_url}#{point.id}", surface,
+                       fired=signal.fired, conclusive=signal.conclusive,
+                       body_unreadable=state["body_unavailable"] > before_bodies)
+                if signal.fired:
+                    # One admitted FIRE is decisive for a re-drive — stop (bounded work, ONE verdict record
+                    # per bug). Previously this broke only on ``is_fact``; now that the branch is LEAD-only
+                    # that condition is never true, and without this the arm would emit one signed LEAD per
+                    # candidate parameter (the D4 duplicate-certificate defect, re-introduced by demotion).
+                    break
 
         elif bug_class == "xss":
             chk = MarkerReflectionCheck(id="reflected-xss", bug_class="xss",
@@ -646,11 +772,11 @@ def runtime_redrive(url: str, *, slug: str, engagement_slug: str, signers: "list
                 res.surfaces.setdefault(bug_class, set()).add(surface)
                 # CONTROL DIFFERENTIAL, evaluated by the RUNNER over the control BODY.
                 if signature.lower() in control_body.lower():
-                    res.notes.append(
-                        f"exposure: control-differential refused [{probe_path}] — the signature "
-                        f"{signature!r} was OBSERVED in the body of the random control path {rand_path!r} "
-                        f"(status {control_status}), so it is served regardless of path (soft-404 / "
-                        f"catch-all) and is not path-specific → LEAD")
+                    _note(res,
+                          f"exposure: control-differential refused [{probe_path}] — the signature "
+                          f"{signature!r} was OBSERVED in the body of the random control path "
+                          f"{rand_path!r} (status {control_status}), so it is served regardless of path "
+                          f"(soft-404 / catch-all) and is not path-specific {_NOT_ADMITTED}")
                     continue
                 before, before_bodies = state["channels"], state["body_unavailable"]
                 try:
@@ -664,6 +790,15 @@ def runtime_redrive(url: str, *, slug: str, engagement_slug: str, signers: "list
                 status, body = int(resp.get("status", 0) or 0), _body(resp)
                 if status in (0, 404):
                     continue      # not present — nothing to adjudicate (never a CLEAN either)
+                if signature.lower() not in body.lower():
+                    # THE SIGNATURE IS SIMPLY NOT THERE. Nothing to adjudicate and — decisively — nothing
+                    # to SAY. Without this check the arm fell through to the value-shape branch below and
+                    # composed a sentence out of a branch that had not executed: against a benign 200
+                    # catch-all SPA with no secret anywhere it wrote "the signature 'DB_PASSWORD=' is
+                    # present but 'DB_PASSWORD=' is not present in the body", asserting two unmade
+                    # observations, contradicting itself inside one sentence, and persisting that into the
+                    # audit trail. Presence is CHECKED before it is CLAIMED.
+                    continue
                 observed = {"status": status, "body": body, "probe_path": probe_path,
                             "control_status": control_status, "control_body": control_body,
                             "control_path": rand_path}
@@ -673,13 +808,15 @@ def runtime_redrive(url: str, *, slug: str, engagement_slug: str, signers: "list
                 ]
                 preds += [{"icontains": [{"var": "body"}, c]} for c in corroborators]
                 if value_shaped:
+                    # The signature's presence in ``body`` was OBSERVED above, so "is present but ..." is
+                    # a claim the runner has already measured.
                     assignment, value, why = _secret_assignment(body, signature)
                     if not assignment:
-                        res.notes.append(
-                            f"exposure: value-shape refused [{probe_path}] — the signature {signature!r} "
-                            f"is present but {why}, so it is a key being NAMED (documentation, a CI "
-                            f"template, a bundled string, a shipped placeholder) rather than a leaked "
-                            f"value → LEAD")
+                        _note(res,
+                              f"exposure: value-shape refused [{probe_path}] — the signature "
+                              f"{signature!r} is present in the body but {why}, so what was observed is a "
+                              f"key being NAMED (documentation, a CI template, a bundled string, a "
+                              f"shipped placeholder) rather than a leaked value {_NOT_ADMITTED}")
                         continue
                     observed["secret_assignment"] = assignment
                     observed["secret_value"] = value

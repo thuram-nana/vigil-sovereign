@@ -20,6 +20,25 @@ measured, and the control this file pins for each:
     CI template, a JS bundle and a ``.env.example`` all minted.
   * **D4 — duplicate certificates**: the traversal/ssi arms did not ``break`` on the first FACT, so ONE bug
     produced one certificate per candidate parameter (measured: 12).
+  * **D5 — the D1 fix did not hold, and could not.** A second red-pen drove EIGHT benign origins that read
+    no file through the "fixed" arm and every one minted a signed FACT at rate 1.0: five that CANONICALISE
+    the requested name before deciding (so every alternate encoding corroborates by construction) and three
+    with no normaliser at all (``endswith("passwd")``, an anchored WAF regex, a raw-basename match — all of
+    which the PATH-SHAPED control misses, because that control is built by APPENDING a suffix and so mutates
+    exactly the token they key on). Neither guard tests the relationship between the RESPONSE and the FILE;
+    both test only the SHAPE OF THE INPUT. ``path_traversal.file_signature`` is therefore registered
+    ``fact_capable: false`` and the arm is LEAD-only. The controls below are kept as LEAD-QUALITY filters
+    and each is pinned by a fixture that fails if it is removed.
+  * **D6 — a transport failure reported as proof of correlation.** ``_encoding_corroboration`` returned
+    ``(None, why)`` for a lost channel / transport error identically to "signature absent", and the caller
+    then wrote "so it correlates with the payload rather than with a read" — an unobserved claim that also
+    silently discarded a REAL arbitrary-file read on every throttled or WAF'd target. It now returns
+    COULD-NOT-OBSERVE distinctly from REFUTED, and could-not-observe is INCONCLUSIVE.
+  * **D7 — the exposure value-shape truncated real credentials.** The unquoted right-hand side was cut at
+    ``&``/``#``/``;``, none of which delimits a value in ``.env`` semantics. ``DB_PASSWORD=abc;defghij`` was
+    cut to ``abc`` and then refused with "its right-hand side is only 3 character(s) long" (an unobserved
+    claim — the runner's own cut made it 3), and a Django ``SECRET_KEY`` was minted into a signed
+    certificate as the TRUNCATED value ``django-insecure-8k``.
 
 Every control here drives a REAL loopback origin through the REAL gated send, and asserts POSITIVELY that
 the arm RAN and REFUSED (the examined surface + the specific refusal note), never merely that the result is
@@ -109,31 +128,59 @@ class _Base(http.server.BaseHTTPRequestHandler):
         return
 
 
-def _strip_leading_dots(v: str) -> str:
-    """A realistic 'clean the user-supplied path prefix' normalisation: strip LEADING ``./`` / ``../``
-    segments only. Interior dot-segments survive, exactly as a literal-keyed search would leave them."""
-    out = v
-    while True:
-        if out.startswith("../"):
-            out = out[3:]
-        elif out.startswith("./"):
-            out = out[2:]
-        else:
-            return out
+_KB_DOCROOT = "/srv/app/public/docs"
+_KB_ADVISORY = {"/etc/passwd": _KB_ARTICLE}
 
 
 class _KbSearchApp(_Base):
-    """A1 — a READ-ONLY documentation/KB search endpoint. It never touches the filesystem; it matches the
-    (prefix-normalised) query LITERALLY against its corpus, and its corpus contains an /etc/passwd hardening
-    article that quotes ``root:x:0:0:root:/root:/bin/bash``. The output therefore CORRELATES with what the
-    traversal payload MEANS, with no file read at all."""
+    """A1 — a READ-ONLY hardening-advisory endpoint that CANONICALISES before deciding. It never touches
+    the filesystem: it resolves the requested name with ``posixpath.normpath`` (the textbook-correct thing
+    to do before comparing against anything) and, when the canonical result names a known sensitive system
+    path, serves the KB advisory for it — which quotes ``root:x:0:0:root:/root:/bin/bash``, as hardening
+    documentation does.
+
+    The normaliser here is REAL ``posixpath.normpath``. It used to be ``_strip_leading_dots`` — a
+    prefix-only strip, the one normalisation in the corpus WEAKER than normpath, i.e. exactly the shape
+    chosen to avoid the failure mode. With a real normaliser this benign origin satisfies BOTH surviving
+    guards (the path-shaped control misses; every alternate encoding canonicalises to the same path and so
+    corroborates), which is why the branch is LEAD-only. See
+    :func:`test_a1_canonicalising_advisory_satisfies_every_guard_and_still_mints_nothing`."""
 
     def reply(self, path, values):
         for v in values:
-            term = _strip_leading_dots(v)
-            if len(term) >= 4 and term.lower() in _KB_ARTICLE.lower():
-                return 200, f"1 result\n\n{_KB_ARTICLE}"
+            if not v:
+                continue
+            canon = posixpath.normpath(posixpath.join(_KB_DOCROOT, v))
+            article = _KB_ADVISORY.get(canon)
+            if article is not None:
+                return 200, f"1 result\n\n{article}"
         return 200, "0 results"
+
+
+class _SuffixMatcherApp(_Base):
+    """A benign matcher with NO normalisation at all: it keys on the SUFFIX of the raw value. The
+    path-shaped control is built by APPENDING ``.vigilctl<nonce>`` to the target name, so it changes exactly
+    the token this endpoint reads — the control misses, the treatment hits, and both alternate encodings
+    still end in ``passwd``. Nothing is ever read."""
+
+    def reply(self, path, values):
+        for v in values:
+            if v.endswith("passwd"):
+                return 200, ("Blocked. Requests for account databases are refused.\n"
+                             f"A stock line looks like {_PASSWD.splitlines()[0]}\n")
+        return 200, "document served"
+
+
+class _ExactLiteralApp(_Base):
+    """A matcher keyed on the EXACT literal payload string. The canonical payload reproduces the signature;
+    neither re-encoding does. This is the one shape the encoding-corroboration guard genuinely refutes, and
+    it is what pins that guard (delete ``_encoding_corroboration`` and this control fails)."""
+
+    def reply(self, path, values):
+        for v in values:
+            if v == "../../../../etc/passwd":
+                return 200, _PASSWD
+        return 200, "document served"
 
 
 class _BlockedApp(_Base):
@@ -239,11 +286,108 @@ def _assert_ran_and_refused(res, bug_class: str, note_prefix: str) -> None:
 # D1 — path_traversal: payload CORRELATION is not a file READ
 # ===================================================================================================
 
-def test_a1_payload_correlated_kb_search_is_a_lead(monkeypatch, tmp_path):
-    """A read-only KB/search page whose corpus documents /etc/passwd answers the traversal payload with an
-    article that quotes root:x:0:0:. No file was read: the second ENCODING must not reproduce it."""
+def test_the_traversal_branch_is_registered_lead_only():
+    """D5, at the source: the arm is dispatched but the branch may not mint. This is the guard that every
+    benign-origin control below actually depends on, so it is asserted directly — flipping
+    ``fact_capable`` back to true in the registry fails HERE first, with the reason."""
+    from vigil_integration.live.runtime_redrive import (
+        RUNTIME_FACT_CLASSES, RUNTIME_LEAD_CLASSES, RUNTIME_REDRIVE_CLASSES)
+    from vigil_integration.live.tool_manifest import load_branch_registry
+    from vigil_integration.live.verdict import admit
+
+    assert "path_traversal" not in RUNTIME_FACT_CLASSES
+    assert "path_traversal" in RUNTIME_LEAD_CLASSES
+    assert "path_traversal" in RUNTIME_REDRIVE_CLASSES, "the arm must still be DRIVEN, only demoted"
+
+    reg = {b["id"]: b for b in load_branch_registry(
+        Path(__file__).resolve().parents[2] / "docs" / "capability-matrix" / "evidence-branches.json")}
+    row = reg["path_traversal.file_signature"]
+    assert row["fact_capable"] is False
+    assert len(row["blocking_work"]) > 40
+    low = row["blocking_work"].lower()
+    assert "canonical" in low, "blocking_work must name the read-vs-canonical-lookup discriminator"
+    assert "negation" in low and "conjunction" in low, (
+        "blocking_work must name the multi-capture oracle row that can express a negation + conjunction")
+
+    # A FIRED oracle over this branch is demoted by admission itself, not by the arm's own bookkeeping.
+    verdict = admit("path_traversal.file_signature", fired=True, conclusive=True,
+                    observed={"channel_established": True, "body_semantically_available": True,
+                              "gate_authorized": True})
+    assert verdict.verdict.value == "LEAD"
+
+
+def test_a1_canonicalising_advisory_satisfies_every_guard_and_still_mints_nothing(monkeypatch, tmp_path):
+    """D5 in test form — the justification for the demotion.
+
+    A benign hardening-advisory KB that CANONICALISES the requested name reads no file, yet it satisfies
+    BOTH surviving guards: the path-shaped control (a nonce filename) misses, and every alternate encoding
+    canonicalises to the same path and so reproduces the signature. The arm therefore runs to completion
+    and CORROBORATES — and still mints nothing, because the branch is not FACT-capable. Revert the
+    demotion and this becomes a signed false FACT again."""
     res = _rr(monkeypatch, tmp_path, _KbSearchApp, "http://127.0.0.1:{port}/kb?q=seed", "path_traversal")
+    from vigil_integration.live.runtime_redrive import RuntimeRedriveResult
+    assert isinstance(res, RuntimeRedriveResult)
+    assert res.surfaces.get("path_traversal"), "the arm examined no surface — it was stubbed out"
+    assert any(n.startswith("path_traversal: signature reproduced under the alternate encoding")
+               for n in res.notes), (
+        f"the guards must have been SATISFIED by this benign origin (that is the point); notes={res.notes!r}")
+    assert res.n_facts == 0, (
+        f"a canonicalising KB that reads nothing minted a FACT: {[f.finding_ref for f in res.facts]}")
+    assert res.family_verdict("path_traversal") == "LEAD"
+    assert len(res.leads) == 1, f"exactly one LEAD record, got {len(res.leads)}"
+    assert "not FACT-capable" in (res.leads[0].reason or ""), res.leads[0].reason
+
+
+def test_a1b_suffix_matcher_with_no_normaliser_mints_nothing(monkeypatch, tmp_path):
+    """The other half of D5: no normaliser at all. ``v.endswith("passwd")`` defeats the path-shaped control
+    (which APPENDS a suffix) and both re-encodings still end in ``passwd``."""
+    res = _rr(monkeypatch, tmp_path, _SuffixMatcherApp, "http://127.0.0.1:{port}/doc?file=report.pdf",
+              "path_traversal")
+    assert res.n_facts == 0, [f.finding_ref for f in res.facts]
+    assert res.family_verdict("path_traversal") == "LEAD"
+
+
+def test_a1c_exact_literal_matcher_is_refuted_by_the_encoding_guard(monkeypatch, tmp_path):
+    """PINS ``_encoding_corroboration``. An endpoint keyed on the EXACT literal payload reproduces the
+    signature under the canonical payload and under NEITHER re-encoding, so the guard refutes it and the
+    arm never reaches admission. Delete the guard and this refusal disappears."""
+    res = _rr(monkeypatch, tmp_path, _ExactLiteralApp, "http://127.0.0.1:{port}/doc?file=report.pdf",
+              "path_traversal")
     _assert_ran_and_refused(res, "path_traversal", "path_traversal: encoding-corroboration refused")
+    assert not res.leads, "a refused surface must not produce a verdict record"
+
+
+def test_a1d_a_throttled_genuine_read_is_inconclusive_not_a_refutation(monkeypatch, tmp_path):
+    """D6, PINS the COULD-NOT-OBSERVE branch. A REAL normpath+read LFI whose origin starts answering 429
+    after the treatment request: the re-encodings are not answers about the path, so VIGIL concludes
+    NOTHING. Collapse could-not-observe back into "signature absent" and this test sees the fabricated
+    "it correlates with the payload" claim instead."""
+    class _ThrottledLfi(_Base):
+        seen = 0
+
+        def reply(self, path, values):
+            type(self).seen += 1
+            if type(self).seen > 2:                     # control + treatment, then the limiter engages
+                return 429, "rate limit exceeded"
+            for v in values:
+                if not v:
+                    continue
+                content = _FS.get(posixpath.normpath(posixpath.join(_DOCROOT, v)))
+                if content is not None:
+                    return 200, content
+            return 404, "document not found"
+
+    _ThrottledLfi.seen = 0
+    res = _rr(monkeypatch, tmp_path, _ThrottledLfi, "http://127.0.0.1:{port}/download?file=report.pdf",
+              "path_traversal")
+    assert res.surfaces.get("path_traversal"), "the arm examined no surface — it was stubbed out"
+    assert any(n.startswith("path_traversal: encoding corroboration COULD NOT BE OBSERVED")
+               for n in res.notes), f"expected a could-not-observe note; notes={res.notes!r}"
+    for note in res.notes:
+        assert "correlates with the payload" not in note, (
+            f"a transport failure was reported as proof of correlation: {note!r}")
+    assert res.n_facts == 0 and not res.leads
+    assert res.family_verdict("path_traversal") == "INCONCLUSIVE"
 
 
 def test_a2_benign_403_path_rejected_page_is_a_lead(monkeypatch, tmp_path):
@@ -254,7 +398,10 @@ def test_a2_benign_403_path_rejected_page_is_a_lead(monkeypatch, tmp_path):
 
 
 def test_a3_constant_emission_docs_page_is_a_lead(monkeypatch, tmp_path):
-    """The already-shipped control still holds: a page that prints the signature regardless of input."""
+    """A page that prints the signature regardless of input. The dedicated "constant-emission" control was
+    DELETED as dominated (mutation: removing it failed zero tests); the PATH-SHAPED control catches this
+    shape too, which is the measurement that justified the deletion — so this control now pins the
+    path-shaped control instead, and fails if THAT is removed."""
     class _DocsApp(_Base):
         def reply(self, path, values):
             return 200, f"Docs: an etc/passwd line looks like {_PASSWD.splitlines()[0]}"
@@ -278,42 +425,52 @@ def test_a_substring_matcher_that_never_reads_is_a_lead(monkeypatch, tmp_path):
     _assert_ran_and_refused(res, "path_traversal", "path_traversal: control-differential refused")
 
 
-def test_a_real_traversal_still_mints_exactly_one_certificate(monkeypatch, tmp_path):
-    """The false-negative half + D4: a genuine read mints, and ONE bug is ONE certificate.
+def test_a_real_traversal_produces_exactly_one_lead_and_no_certificate(monkeypatch, tmp_path):
+    """The false-negative half + D4 + D5 together.
 
-    The URL carries no parameter, so the arm walks all 12 candidate names and the sink answers every one
-    of them — the exact shape that produced 12 certificates for one bug before the ``break``."""
+    A GENUINE read still runs the whole pipeline, still fires the oracle, and still produces exactly ONE
+    verdict record — but that record is a LEAD, because VIGIL cannot tell this program apart from the
+    benign canonicalising origin in ``test_a1_...`` (they differ only by a dict value). The URL carries no
+    parameter, so the arm walks the candidate names and the sink answers every one of them — the exact
+    shape that produced 12 records for one bug before the ``break``.
+
+    This is the honest statement of the capability: a real traversal is DETECTED and REPORTED, it is not
+    CERTIFIED."""
     res = _rr(monkeypatch, tmp_path, _LfiApp, "http://127.0.0.1:{port}/download", "path_traversal")
-    assert res.n_facts == 1, (
-        f"a genuine traversal must mint exactly ONE signed FACT, got {res.n_facts} "
-        f"({[f.finding_ref for f in res.facts]})")
-    assert res.family_verdict("path_traversal") == "FACT"
+    assert res.n_facts == 0, (
+        f"path_traversal is registered fact_capable:false — no certificate may be minted, got "
+        f"{[f.finding_ref for f in res.facts]}")
+    assert len(res.leads) == 1, (
+        f"a genuine traversal must produce exactly ONE lead record, got {len(res.leads)} "
+        f"({[l.finding_ref for l in res.leads]})")
+    assert res.family_verdict("path_traversal") == "LEAD"
+    assert getattr(res.leads[0], "signed", None) is None, (
+        "a LEAD must carry no signed certificate — a demoted verdict that still signs is the defect")
+    assert any(n.startswith("path_traversal: signature reproduced under the alternate encoding")
+               for n in res.notes), res.notes
 
 
-def test_a_real_traversal_fact_reverifies_offline(monkeypatch, tmp_path):
-    from framework.v2.evidence.certify import verify_certificate
-    from vigil_core import AuthorizerKey, TrustRoot, generate_keypair
-    kp = generate_keypair()
-    tr = TrustRoot(threshold=1, authorizers=[
-        AuthorizerKey(key_id="gov0", name="gov0", public_key_b64=kp.public_key_b64)])
-    _grant_active_recon(monkeypatch)
-    _charter(tmp_path, "127.0.0.1")
-    from vigil_integration.live.runtime_redrive import runtime_redrive
-    srv = _serve(_LfiApp)
-    port = srv.server_address[1]
-    try:
-        res = runtime_redrive(f"http://127.0.0.1:{port}/download?file=report.pdf", slug="alpha",
-                              engagement_slug="alpha", signers=[("gov0", kp.private_key_b64)],
-                              claimed_class="path_traversal")
-    finally:
-        srv.shutdown()
-    assert res.n_facts == 1
-    fact = res.facts[0]
-    ctx = res.contexts[fact.finding_ref]
-    assert verify_certificate(fact.signed, oracle_context=ctx, trust_root=tr).ok is True
-    tampered = dict(ctx)
-    tampered["observed_sink"] = "document not found"
-    assert verify_certificate(fact.signed, oracle_context=tampered, trust_root=tr).ok is False
+def test_a_real_traversal_and_a_benign_canonicalising_kb_are_indistinguishable(monkeypatch, tmp_path):
+    """The measurement behind the demotion, asserted as a property rather than described in a comment.
+
+    ``_LfiApp`` (a real join+normpath+read) and ``_KbSearchApp`` (a canonicalising advisory that reads
+    nothing) are the SAME PROGRAM with a different dict value, and the arm's guards — which vary only the
+    SHAPE OF THE INPUT — produce the SAME outcome for both. If a future slice adds a guard that really
+    discriminates a read from a canonical-path lookup, this test fails, and that is the signal to re-open
+    ``fact_capable``."""
+    real = _rr(monkeypatch, tmp_path, _LfiApp, "http://127.0.0.1:{port}/doc?file=report.pdf",
+               "path_traversal")
+    benign = _rr(monkeypatch, tmp_path, _KbSearchApp, "http://127.0.0.1:{port}/doc?file=report.pdf",
+                 "path_traversal")
+
+    def shape(r):
+        return (r.n_facts, len(r.leads), r.family_verdict("path_traversal"),
+                tuple(sorted(n.split(" [")[0] for n in r.notes)))
+
+    assert shape(real) == shape(benign), (
+        f"the guards DO discriminate a read from a canonical-path lookup — re-open the demotion.\n"
+        f"  real   = {shape(real)}\n  benign = {shape(benign)}")
+    assert real.n_facts == 0 and benign.n_facts == 0
 
 
 # ===================================================================================================
@@ -362,6 +519,7 @@ def test_a_true_catch_all_that_serves_the_signature_everywhere_is_a_lead(monkeyp
 @pytest.mark.parametrize("body,accepted", [
     ("APP_ENV=production\nDB_PASSWORD=S3cr3t-Real-Prod-Key\n", True),   # a real unquoted value
     ('DB_PASSWORD="Quoted-Real-Value"\n', True),                        # a real quoted value
+    ("DB_PASSWORD=abc;defghij\nNEXT=1\n", True),                        # D7: ';' is NOT an .env delimiter
     ("<p>Set <code>DB_PASSWORD=</code> in your env</p>", False),        # docs prose
     ("DB_PASSWORD=${{ secrets.DB_PASSWORD }}\n", False),                # CI template
     ('cfg.env="DB_PASSWORD="+process.env.DB_PASSWORD;', False),         # JS concatenation
@@ -416,3 +574,91 @@ def test_no_unobserved_soft_404_note_is_ever_written(monkeypatch, tmp_path):
     for note in res.notes:
         if note.startswith("exposure: control-differential refused"):
             pytest.fail(f"an UNOBSERVED soft-404 claim was written into the audit trail: {note!r}")
+
+
+# ===================================================================================================
+# D7 — the value shape must never TRUNCATE, and never carry a truncated value into a certificate
+# ===================================================================================================
+
+@pytest.mark.parametrize("value", [
+    "abc;defghij",                                     # ';' is not a delimiter in .env
+    "django-insecure-8k#l2@v3q_w5zr7tn1m4be6y",        # '#' mid-value is not a comment
+    "aaaa&bbbbbbbb",                                   # '&' is a query separator, not an .env one
+])
+def test_an_unquoted_value_is_never_cut_at_an_env_non_delimiter(value):
+    """D7: the extracted value must be the WHOLE right-hand side. Either the arm accepts it verbatim, or
+    it refuses it — but it must never quietly shorten it, because a shortened value both produces a
+    fabricated "only N character(s) long" refusal and, when it survives, lands in a SIGNED certificate as
+    the evidence."""
+    from vigil_integration.live.runtime_redrive import _secret_assignment
+    assignment, extracted, why = _secret_assignment(f"APP_ENV=production\nDB_PASSWORD={value}\nNEXT=1\n",
+                                                    "DB_PASSWORD=")
+    if assignment:
+        assert extracted == value, f"the certificate would carry a TRUNCATED secret: {extracted!r}"
+    else:
+        assert "character(s) long" not in why, (
+            f"a truncated value produced a length refusal that is not about the real value: {why!r}")
+
+
+def test_a_refused_value_never_reaches_a_certificate(monkeypatch, tmp_path):
+    """The end-to-end half of D7: a value the shape refuses must produce NO certificate at all — not a
+    certificate over a shortened prefix of it."""
+    leaked = "django-insecure-8k#l2@v(3q_w!5z)r7t+n%1m^4b"
+    res = _rr(monkeypatch, tmp_path,
+              _env_app(f"APP_ENV=production\nDB_PASSWORD={leaked}\n", catch_all=False),
+              "http://127.0.0.1:{port}/", "exposure")
+    _assert_ran_and_refused(res, "exposure", "exposure: value-shape refused")
+    for ctx in res.contexts.values():
+        blob = repr(ctx)
+        assert "django-insecure" not in blob, f"a truncated secret reached the evidence: {blob[:200]}"
+
+
+# ===================================================================================================
+# B3 — a note may never assert an observation the branch that wrote it did not make
+# ===================================================================================================
+
+class _SafeSpaNoSecrets(_Base):
+    """A perfectly SAFE modern SPA: it 200s EVERY path with the app shell. There is no /.env, no
+    /actuator/env, no /.git/config, and no secret signature ANYWHERE in any body it serves."""
+
+    def reply(self, path, values):
+        return 200, _SPA_SHELL
+
+
+def test_a_benign_spa_with_no_secret_writes_no_note_at_all(monkeypatch, tmp_path):
+    """The reintroduced D2 defect, pinned. ``_secret_assignment`` was called WITHOUT first checking the
+    signature was in the body, so against this origin the arm wrote:
+
+        "the signature 'DB_PASSWORD=' is present but 'DB_PASSWORD=' is not present in the body"
+
+    — two unmade observations contradicting each other inside one sentence, persisted into the audit
+    trail. Presence is now CHECKED before it is CLAIMED, so there is nothing to say and nothing is said."""
+    res = _rr(monkeypatch, tmp_path, _SafeSpaNoSecrets, "http://127.0.0.1:{port}/", "exposure")
+    assert res.surfaces.get("exposure"), "the arm examined no exposure surface — it was stubbed out"
+    assert res.n_facts == 0 and not res.leads
+    for note in res.notes:
+        assert not ("is present" in note and "is not present" in note), (
+            f"a note asserted an observation the branch that wrote it never made: {note!r}")
+    assert not [n for n in res.notes if n.startswith("exposure: value-shape refused")], (
+        f"a value-shape refusal was written for a body that never carried the signature: {res.notes!r}")
+
+
+def test_every_refusal_note_promises_only_what_the_result_contains(monkeypatch, tmp_path):
+    """Non-blocking (1): refusal notes used to end "→ LEAD" while no ``AdapterResult`` was created on any
+    refusal path (measured leads=0, family_verdict='INCONCLUSIVE'). A note may not promise a record that
+    does not exist."""
+    res = _rr(monkeypatch, tmp_path, _ExactLiteralApp, "http://127.0.0.1:{port}/doc?file=report.pdf",
+              "path_traversal")
+    refusals = [n for n in res.notes if "refused" in n]
+    assert refusals, f"expected at least one refusal note; notes={res.notes!r}"
+    for note in refusals:
+        if note.rstrip().endswith("→ LEAD"):
+            assert res.leads, f"the note promises a LEAD record but none exists: {note!r}"
+
+
+def test_refusal_notes_are_not_duplicated_per_candidate_parameter(monkeypatch, tmp_path):
+    """Non-blocking (2): one endpoint used to emit the identical refusal note 12 times (once per candidate
+    parameter name)."""
+    res = _rr(monkeypatch, tmp_path, _BlockedApp, "http://127.0.0.1:{port}/doc?file=a.txt",
+              "path_traversal")
+    assert len(res.notes) == len(set(res.notes)), f"duplicate notes in the audit trail: {res.notes!r}"

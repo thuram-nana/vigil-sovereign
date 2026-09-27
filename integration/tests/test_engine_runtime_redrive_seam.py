@@ -1,6 +1,7 @@
 """Wave 2 — the ENGAGE oracle seam confirms the RESPONSE-DERIVED classes via ``live.runtime_redrive``.
 
-path_traversal (side_effect over a KNOWN file-content signature), reflected xss (reflection_context — the
+path_traversal (side_effect over a KNOWN file-content signature — LEAD-ONLY, it may not mint: see
+test_runtime_redrive_soundness.py D5), reflected xss (reflection_context — the
 canary reaches an EXECUTABLE HTML position), and exposure (predicate over a secret signature at a fixed
 framework path) now mint signed FACTs from the autonomous chat/engage re-drive. This pins:
 
@@ -191,9 +192,16 @@ def _fact(monkeypatch, tmp_path, url: str, bug_class: str, handler=_VulnApp):
 
 # -- positives --------------------------------------------------------------------------------------
 
-def test_live_path_traversal_mints_a_fact(monkeypatch, tmp_path):
+def test_live_path_traversal_never_mints_a_fact(monkeypatch, tmp_path):
+    """path_traversal is LEAD-ONLY. Even a GENUINE read of /etc/passwd may not mint through this seam:
+    ``path_traversal.file_signature`` is registered ``fact_capable: false`` because every guard the arm has
+    varies only the SHAPE OF THE INPUT, and eight benign origins that read nothing satisfied all of them.
+    See integration/tests/test_runtime_redrive_soundness.py (D5)."""
+    from vigil_integration.live.runtime_redrive import RUNTIME_FACT_CLASSES, RUNTIME_REDRIVE_CLASSES
+    assert "path_traversal" not in RUNTIME_FACT_CLASSES
+    assert "path_traversal" in RUNTIME_REDRIVE_CLASSES, "the class is demoted, not removed"
     ref = _fact(monkeypatch, tmp_path, "http://127.0.0.1:{port}/download?file=report.pdf", "path_traversal")
-    assert ref, "a live traversal that reads /etc/passwd must mint a signed FACT"
+    assert ref is None, "a traversal claim may only be confirmed to a LEAD, never to a signed FACT"
 
 
 def test_live_reflected_xss_mints_a_fact(monkeypatch, tmp_path):

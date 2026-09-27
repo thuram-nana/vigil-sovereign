@@ -53,7 +53,7 @@ Every oracle family has a matching control that a benign target trips instead of
 | Differential / boolean-blind | **SPRT multi-round** — TRUE clause differs from FALSE, and the two FALSE responses agree (a dynamic page trips the "FALSEs agree" guard and cannot masquerade). **Never a single-shot differential.** | `scanner/checks.py::BooleanInferenceCheck` → `boolean_inference_oracle` |
 | Probabilistic timing | **Mann-Whitney U + Hodges-Lehmann effect-size floor + optional dose-response**, benign and probe samples **interleaved** (no fixed threshold). | `scanner/checks.py::TimingCheck` → `timing_oracle` |
 | Reflection / OOB | **Unique per-position / per-payload canary** (high-entropy, minted by VIGIL). The oracle fires only for the registered token. | `MarkerReflectionCheck`; `OOBCheck` + `oob.register_token` → `oob_callback_oracle` |
-| Differential-presence (error / file-content / secret) | **Controls sent FIRST, and the signature evaluated on the control BODY** — never inferred from whether a check returned a context, which is a STATUS test (`PathProbeCheck.probe` returns one for any status outside `(0, 404)` and leaves its signature predicate unevaluated). Refuse if the signature appears in a control. For file-content the control must also be **PATH-SHAPED** (a traversal to a nonce filename that cannot exist) and a **second, semantically-different encoding of the same path must reproduce the signature** — otherwise a page whose output merely CORRELATES with what the payload means passes. For a `KEY=` secret the right-hand side must be a **real value** (non-empty, long enough, no template/placeholder/self-referential marker). | `ErrorSignatureCheck.control_body`, `ContentSignatureCheck`; `runtime_redrive.py::_encoding_corroboration`, `runtime_redrive.py::_secret_assignment`, `runtime_redrive.py::_fetch_path`; shared `web_redrive.py::benign_control_fetch` |
+| Differential-presence (error / file-content / secret) | **Controls sent FIRST, and the signature evaluated on the control BODY** — never inferred from whether a check returned a context, which is a STATUS test (`PathProbeCheck.probe` returns one for any status outside `(0, 404)` and leaves its signature predicate unevaluated). Refuse if the signature appears in a control. For file-content those same requirements — a **PATH-SHAPED** control (a traversal to a nonce filename that cannot exist) plus a **second, semantically-different encoding of the same path that reproduces the signature** — are LEAD-QUALITY filters and are **NOT sufficient for a FACT**: they vary only the SHAPE OF THE INPUT, so an endpoint that CANONICALISES the requested name before deciding corroborates under every encoding, and one keyed on the BASENAME or a SUFFIX answers the path-shaped control with a miss because that control is built by APPENDING to the target name. Eight benign origins that read no file satisfied all of them at rate 1.0, which is why `path_traversal.file_signature` is registered `fact_capable: false`. A file-content FACT needs a **CONTENT-relationship** test (multi-file corroboration, a size/entropy relation, or a per-probe unpredictable target whose content VIGIL already knows) plus a multi-capture oracle row that can express a negation and a conjunction — see that branch's `blocking_work`. For a `KEY=` secret the right-hand side must be a **real value** (non-empty, long enough, no template/placeholder/self-referential marker). | `ErrorSignatureCheck.control_body`, `ContentSignatureCheck`; `runtime_redrive.py::_encoding_corroboration`, `runtime_redrive.py::_secret_assignment`, `runtime_redrive.py::_fetch_path`; shared `web_redrive.py::benign_control_fetch` |
 | Achieved DOM execution | The canary must appear in a `Runtime.addBinding` call to a binding **only the driver registers** — an unforgeable planted callback, not incidental reflection. | `dom_execution_oracle`; `scanner/cdp.py`, `scanner/browser_xss.py` |
 | Achieved state (IDOR / mass-assign / race / forgery / smuggling) | A **predicate over the observed post-state** with an explicit control leg that differs in exactly one variable (the ambient cookie, the CL/TE conflict, the second identity, …). | `predicate_oracle`, `achieved_state_oracle` |
 
@@ -127,8 +127,12 @@ the `red-pen` agent (one reviewer never self-certifies near-zero-FP). Standing a
   control BODY, and a genuine leak behind a catch-all must still MINT: fixing a false positive by
   refusing everything is not a fix, and a refusal note must never assert an observation not made);
 - a page whose output CORRELATES with what the payload means but reads nothing — a KB/search endpoint
-  whose corpus documents the target file, a benign `403 path rejected` notice that quotes it
-  (file-content — the path-shaped control + the encoding corroboration);
+  whose corpus documents the target file, a benign `403 path rejected` notice that quotes it. **The
+  file-content arm does NOT refuse this class**; it only demotes it. A LITERAL-keyed page is refused by the
+  encoding corroboration and a page that answers any path-ish input is refused by the path-shaped control,
+  but a CANONICALISING page (advisory KB, canonicalising deny-list/WAF) and a BASENAME/SUFFIX-keyed matcher
+  satisfy every guard — hence `fact_capable: false` on `path_traversal.file_signature`. Construct both and
+  assert they mint NOTHING;
 - a key NAMED rather than leaked — docs prose, a CI template, a JS concatenation, a `.env.example`
   (secret — the value-shape requirement);
 - a dynamic per-request page (boolean — the SPRT "FALSEs agree" guard);
@@ -157,6 +161,21 @@ These are recorded so no future slice "closes" them by fabricating a FACT:
 - **Absence as CLEAN off a positive-only detector** (error-signature classes: nosqli/ldap/xpath) — a missing
   error is uninformative (the bug can live on a boolean/time/OOB channel this response cannot see), so those
   branches stay `clean_capable: false` with an explicit `target_downgrade_rationale`.
+- **A file-content signature as proof of a READ** (`path_traversal.file_signature`) — demoted to
+  `fact_capable: false`. Named residual FP class: any endpoint keyed on the **canonical path**, the
+  **basename** or a **suffix** of the requested name — a canonicalising hardening-advisory KB, a
+  canonicalising deny-list or WAF whose 403 quotes a sample line, `v.endswith("passwd")`, an anchored WAF
+  regex, `v.rsplit("/",1)[-1] == "passwd"`. Eight such benign origins minted signed FACTs at rate 1.0. The
+  arm's guards vary only the SHAPE OF THE INPUT, and a read cannot be proven by varying input shape; the
+  true-positive fixture and the worst false positive are the same program with a different dict value. A
+  FACT here needs a CONTENT-relationship test plus a multi-capture oracle row (see the branch's
+  `blocking_work`). Precedent: `verify/verifier.py:384`/`:401` dropped SIDE_EFFECT for
+  `postmessage_exploited` and `csp_bypass` on the same predicate.
+- **A `KEY=` signature's *value* recall** (`exposure.secret_signature`) — the value shape is a character
+  blacklist, so it refuses **55% (12/22)** of a realistic leaked-credential corpus to a LEAD: every
+  `$`-prefixed password hash at 0%, standard base64 at 51.8%, anything with a space, a quote, `+`, `(`,
+  `)`, `,` or the substring `example`. These are false negatives, never false positives, and the measured
+  numbers live in that branch's `limitation`.
 
 A sound CLEAN requires all of: (i) the channel established, (ii) evidence semantically available for the
 surface, (iii) a *conclusive* refuting oracle signal, (iv) `clean_capable: true`, and (v) an honest coverage

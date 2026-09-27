@@ -1707,7 +1707,7 @@ def _build_oracle(
         if web_ref:
             return web_ref
 
-        # T2 — RUNTIME RE-DRIVE (path_traversal / reflected xss / exposure): route through the runner-owned
+        # T2 — RUNTIME RE-DRIVE (reflected xss / exposure / ssi): route through the runner-owned
         # runtime_redrive engine (gated send → the matching deterministic oracle → per-branch admit →
         # certify_admitted provenance="live_redrive"). A non-confirmation stays a LEAD below (fail-closed).
         runtime_ref = _live_runtime_redrive_fact(prov, info, redrive)
@@ -1938,7 +1938,12 @@ def _live_runtime_redrive_fact(prov: Provisioned, info: dict, redrive: Optional[
         return None
     claimed = normalize_bug_class(str(redrive.get("bug_class") or info.get("bug_class") or ""))
     if claimed not in RUNTIME_FACT_CLASSES:
-        return None    # not a runtime-redrive class → nothing for this seam to confirm → LEAD
+        # Not a FACT-capable runtime class → nothing this seam could confirm → the claim stays a LEAD.
+        # This deliberately covers the LEAD-ONLY classes too (``RUNTIME_LEAD_CLASSES``, today
+        # path_traversal): their branch is registered ``fact_capable: false``, so driving them here could
+        # only ever return None after spending live requests the operator did not buy (constitution §VI.1).
+        # The arm itself is unchanged and still probes when called directly or from the proof-sink rail.
+        return None
     try:
         rr = runtime_redrive(url, slug=prov.slug, engagement_slug=prov.slug, signers=prov.signers,
                              claimed_class=claimed)
