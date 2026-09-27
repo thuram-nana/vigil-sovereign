@@ -32,6 +32,14 @@ collected and SKIPPED). It therefore runs in exactly one CI job: the offense leg
 two-env boundary (P5)" job, where it is listed explicitly in ``.github/workflows/ci.yml``. That listing is
 not optional — ``test_ci_framework_tests_run_in_offense_leg.py`` fails the build if a file like this one is
 missing from it, precisely so a suite cannot go green by never running.
+
+WHETHER THIS BOX CAN OFFER TLS1.0 AT ALL is a property of its OpenSSL, not of the product, and it decides
+which path the two FACT positives take. See "THE DEPRECATED-PROTOCOL OFFER MODE" below: the mode is
+MEASURED at import, named in the pytest warnings summary and in every assertion it affects, and it is
+never a skip. The one ``pytest.skip`` left in this file (``_weak_offerable_or_skip``, for a build that can
+offer none of the closed weak-cipher vocabulary) is itself backstopped by
+``test_the_two_fact_classes_keep_positive_coverage_whatever_this_host_can_offer``, which reddens rather
+than skips if either FACT class ends a run with no positive.
 """
 from __future__ import annotations
 
@@ -40,6 +48,7 @@ import datetime
 import socket
 import ssl
 import threading
+import warnings
 from pathlib import Path
 
 import pytest
@@ -433,6 +442,213 @@ def _facts(res, label):
 
 
 # ===================================================================================================
+# THE DEPRECATED-PROTOCOL OFFER MODE — measured on THIS box, named in the output, never a silent skip.
+#
+# A deprecated-protocol FACT requires VIGIL to put a TLS1.0-only (then TLS1.1-only) ClientHello ON THE
+# WIRE. Whether it can is a property of the BOX, not of the product. OpenSSL screens every candidate
+# version through ``ssl_security(SSL_SECOP_VERSION)`` while it builds the ClientHello version table, and
+# on a modern build that check removes BOTH TLS1.0 and TLS1.1 at security level >= 1. So on any host
+# whose openssl.cnf carries the stock Debian/Ubuntu ``CipherString = DEFAULT:@SECLEVEL=2`` the handshake
+# aborts with ``SSL_R_NO_PROTOCOLS_AVAILABLE`` AFTER the TCP channel is up and BEFORE a TLS byte is sent.
+# ``_classify_ssl_error`` calls that ``local_unsupported``, which is exactly right — it is a gap in VIGIL,
+# not a statement by the peer — so every version probe returns INCONCLUSIVE and mints nothing.
+#
+# MEASURED, not read off a version string: the probe below stands up a TLS1.0-1.2 loopback server and
+# drives ``tls_breadth._restricted_connect`` — the PRODUCT's own client-context builder — against it.
+#
+# THE SHIPPED PROBE PASSES ``ciphers=None``, so unlike the weak-cipher probe it never lowers the security
+# level of its own offer, and on such a host it is INERT. That is a REAL product residual and it is NOT
+# fixed here; this block only stops the TEST SUITE from going dark about it.
+#
+# An earlier revision handled the same problem with ``pytest.skip``. The review's FINDING-7 blocked that:
+# a stricter host OpenSSL would then silently delete ALL positive coverage of two FACT classes, and a
+# skipped proof is the same colour as a passing one. THE SKIPS ARE GONE AND MUST STAY GONE. What replaces
+# them is a mode, applied at the product's own connector seam:
+#
+#   native             the shipped offer works as-is. NOTHING is patched.
+#   seclevel0-relaxed  the shipped offer is refused by OUR OWN stack, but succeeds once the security level
+#                      of VIGIL's own ClientHello is dropped to 0 — precisely what the weak-cipher probe
+#                      already does, and what the module docstring means by "@SECLEVEL=0 relaxes what WE
+#                      OFFER and grants the target nothing". EXACTLY ONE knob moves. The peer's bytes,
+#                      OpenSSL's classification of them, the audited gate, the retained evidence shape,
+#                      the oracle, admission, the signed certificate and its offline re-verification are
+#                      all real and unchanged, so every peer-behaviour control keeps its full value.
+#   fabricated         this host cannot offer the version at ANY security level. The connector then runs a
+#                      REAL, gated handshake to the SAME peer and substitutes ONE of the four handshake
+#                      facts it returns — the negotiated VERSION. Cipher, key bits and leaf DER are the
+#                      ones actually negotiated with that peer.
+#                      WHAT A FABRICATED RUN DOES NOT COVER, stated plainly: that OpenSSL can negotiate
+#                      TLS1.0 with the peer at all, and therefore nothing about the peer. It is not
+#                      evidence about any endpoint and no such run happens outside this file.
+#                      WHAT IT DOES COVER: the audited gate (``capture_tls_handshake`` authorises and then
+#                      invokes the connector, so ``gate_authorized`` is genuinely earned), the evidence
+#                      assembly in ``_capture``, the ``_version_offer_context`` builder, the REAL
+#                      ``tls_weakness_oracle`` firing on the negotiated version, admission under the
+#                      branch's declared capability, the minted certificate, its OFFLINE re-verification
+#                      against the retained context, and that a TAMPERED context fails that verification.
+#
+# Both the real-endpoint path and the fabricated path are reachable and TESTED on every host:
+# ``test_the_deprecated_protocol_fact_is_minted_with_the_handshake_version_substituted`` forces the
+# fabricated mode unconditionally, and
+# ``test_the_two_fact_classes_keep_positive_coverage_whatever_this_host_can_offer`` is the neither-ran
+# guard — it mints BOTH FACT classes in one run and fails loudly, naming the mode and the host OpenSSL's
+# own refusal reason, if the deprecated-protocol class produced nothing.
+# ===================================================================================================
+_OFFER_NATIVE = "native"
+_OFFER_SECLEVEL0 = "seclevel0-relaxed"
+_OFFER_FABRICATED = "fabricated-version-fact"
+
+#: version_attr -> wire label, taken from the product's own probe list so the two cannot drift.
+_DEPRECATED_OFFER_LABELS = dict(tb.DEPRECATED_VERSION_PROBES)
+
+#: The product's own connector, captured BEFORE any monkeypatch, so every mode below delegates to the
+#: real thing rather than reimplementing it.
+_REAL_RESTRICTED_CONNECT = tb._restricted_connect
+
+#: The relaxation. ``_restricted_connect`` appends ``:@SECLEVEL=0`` to whatever cipher string it is given,
+#: so "ALL" here means "the suites this build has, at security level 0" — the widest legal offer.
+_RELAXED_OFFER = "ALL"
+
+
+def _try_deprecated_offer(port: int, ciphers: "str | None") -> "tuple[bool, str]":
+    """One TLS1.0-only handshake to a loopback TLS1.0 server through the PRODUCT's own connector."""
+    box: dict = {}
+    try:
+        version, _cipher, _bits, _der = _REAL_RESTRICTED_CONNECT(
+            "127.0.0.1", port, 5.0, min_version_name="TLSv1", max_version_name="TLSv1",
+            ciphers=ciphers, box=box)
+    except Exception as e:  # noqa: BLE001 — the refusal IS the measurement
+        return False, (f"{box.get('failure_class') or 'error'} / "
+                       f"{box.get('ssl_reason') or type(e).__name__}")
+    return version == "TLSv1", f"negotiated {version!r}"
+
+
+def _measure_deprecated_offer() -> dict:
+    """Can THIS box put a TLS1.0-only ClientHello on the wire, as shipped and/or at security level 0?"""
+    out = {"native": False, "relaxed": False, "native_why": "not measured",
+           "relaxed_why": "not measured", "openssl": ssl.OPENSSL_VERSION}
+    try:
+        cert, key = _leaf()
+        cpem, kpem = _pem(cert, key)
+        srv = _TLSServer(cpem, kpem, min_version=ssl.TLSVersion.TLSv1,
+                         max_version=ssl.TLSVersion.TLSv1_2)
+    except Exception as e:  # noqa: BLE001 — a box that cannot even stand the server up is "fabricated"
+        out["native_why"] = out["relaxed_why"] = f"fixture server unavailable: {type(e).__name__}: {e}"
+        return out
+    try:
+        out["native"], out["native_why"] = _try_deprecated_offer(srv.port, None)
+        out["relaxed"], out["relaxed_why"] = _try_deprecated_offer(srv.port, _RELAXED_OFFER)
+    finally:
+        srv.close()
+    return out
+
+
+_OFFER_PROBE = _measure_deprecated_offer()
+OFFER_MODE = (_OFFER_NATIVE if _OFFER_PROBE["native"]
+              else _OFFER_SECLEVEL0 if _OFFER_PROBE["relaxed"]
+              else _OFFER_FABRICATED)
+
+#: Appended to every assertion whose outcome depends on the mode, so a failure diagnoses itself.
+_MODE_NOTE = (f"[deprecated-protocol offer mode={OFFER_MODE}; {_OFFER_PROBE['openssl']}; "
+              f"as shipped: {_OFFER_PROBE['native_why']}; at SECLEVEL=0: {_OFFER_PROBE['relaxed_why']}]")
+
+# Reported through the warnings summary, which pytest prints in the default (and the CI) output, so the
+# log always says which mode ran rather than leaving it to be inferred from a failure.
+warnings.warn(f"test_tls_breadth {_MODE_NOTE}", stacklevel=2)
+
+
+def _seclevel0_restricted_connect(host, port, timeout, *, min_version_name, max_version_name,
+                                  ciphers, box):
+    """MODE seclevel0-relaxed. The product's OWN connect, with exactly one thing changed: the security
+    level of VIGIL's own ClientHello. Everything the test then observes — the peer's alert, OpenSSL's
+    classification of it, the retained capture, the verdict — is real."""
+    return _REAL_RESTRICTED_CONNECT(
+        host, port, timeout, min_version_name=min_version_name, max_version_name=max_version_name,
+        ciphers=_RELAXED_OFFER if ciphers is None else ciphers, box=box)
+
+
+def _fabricated_restricted_connect(host, port, timeout, *, min_version_name, max_version_name,
+                                   ciphers, box):
+    """MODE fabricated. A REAL gated handshake to the same peer with the version restriction lifted, with
+    ONE of the four returned handshake facts substituted — the negotiated version. The other three
+    (cipher, key bits, leaf DER) and the socket, the gate and the retained shape are the real ones.
+    A probe that is not a deprecated-version probe is passed straight through UNTOUCHED, so a negative
+    control can never be turned into a positive by this shim."""
+    label = _DEPRECATED_OFFER_LABELS.get(min_version_name or "")
+    if label is None or ciphers is not None:
+        return _REAL_RESTRICTED_CONNECT(
+            host, port, timeout, min_version_name=min_version_name,
+            max_version_name=max_version_name, ciphers=ciphers, box=box)
+    version, cipher, bits, der = _REAL_RESTRICTED_CONNECT(
+        host, port, timeout, min_version_name=None, max_version_name=None, ciphers=None, box=box)
+    box["substituted_from_version"] = version
+    return label, cipher, bits, der
+
+
+@pytest.fixture
+def offer_mode(monkeypatch):
+    """Put this host into the strongest mode that still measures the PEER, and return its name.
+
+    NEVER fabricates: the tests that take this fixture are peer-behaviour controls (a refusal, a silent
+    host, a bare alert(70) emitter, an L4 pool), and fabricating a version for them would simulate the
+    very thing they exist to observe. On a host that cannot offer the version at all they FAIL, with
+    ``_MODE_NOTE`` in the message; ``test_this_host_can_put_a_deprecated_clienthello_on_the_wire`` states
+    that precondition once, loudly, in one place."""
+    if OFFER_MODE == _OFFER_SECLEVEL0:
+        monkeypatch.setattr(tb, "_restricted_connect", _seclevel0_restricted_connect)
+    return OFFER_MODE
+
+
+@pytest.fixture
+def best_offer_mode(monkeypatch):
+    """:func:`offer_mode` plus the last-resort fabrication, for the POSITIVES — the two FACT classes keep
+    positive coverage on every host, whatever its OpenSSL will offer."""
+    if OFFER_MODE == _OFFER_SECLEVEL0:
+        monkeypatch.setattr(tb, "_restricted_connect", _seclevel0_restricted_connect)
+    elif OFFER_MODE == _OFFER_FABRICATED:
+        monkeypatch.setattr(tb, "_restricted_connect", _fabricated_restricted_connect)
+    return OFFER_MODE
+
+
+@pytest.fixture
+def forced_fabricated_offer(monkeypatch):
+    """Force MODE fabricated whatever this host can do, so the substituted path is exercised EVERYWHERE
+    and cannot rot into a branch that only a strict-OpenSSL CI runner ever takes."""
+    monkeypatch.setattr(tb, "_restricted_connect", _fabricated_restricted_connect)
+    return _OFFER_FABRICATED
+
+
+def test_this_host_can_put_a_deprecated_clienthello_on_the_wire():
+    """THE PEER-BEHAVIOUR CONTROLS' PRECONDITION, asserted once instead of six times.
+
+    ``native`` and ``seclevel0-relaxed`` both measure a real peer; ``fabricated`` does not, and on a host
+    that only reaches ``fabricated`` the refusal / silent-host / bare-alert(70) / round-robin-pool controls
+    below cannot run against real bytes. That is a coverage loss, so it is RED and named here rather than
+    skipped or quietly degraded. The two FACT classes keep their positive coverage regardless — see
+    ``test_the_two_fact_classes_keep_positive_coverage_whatever_this_host_can_offer``."""
+    assert OFFER_MODE in (_OFFER_NATIVE, _OFFER_SECLEVEL0), (
+        "this host's OpenSSL will not put a TLS1.0 ClientHello on the wire at ANY security level, so the "
+        "peer-behaviour controls in sections 2-3 cannot observe a real peer. Fix the BOX (an openssl.cnf "
+        "that permits TLS1.0 for this process) or accept a named coverage loss — do NOT add a skip. "
+        + _MODE_NOTE)
+    assert _OFFER_PROBE["relaxed"] is True, (
+        "the SECLEVEL=0 relaxation no longer reaches TLS1.0 on a host where the shipped offer does — the "
+        "fallback mode is broken and would not save a stricter CI runner. " + _MODE_NOTE)
+
+
+def test_the_offer_mode_measurement_is_coherent_and_named():
+    """The mode is DERIVED from the measurement and cannot be set by hand, and it is always reported."""
+    assert OFFER_MODE in (_OFFER_NATIVE, _OFFER_SECLEVEL0, _OFFER_FABRICATED)
+    assert (OFFER_MODE == _OFFER_NATIVE) is bool(_OFFER_PROBE["native"])
+    assert (OFFER_MODE == _OFFER_FABRICATED) is not bool(
+        _OFFER_PROBE["native"] or _OFFER_PROBE["relaxed"])
+    assert _OFFER_PROBE["openssl"] in _MODE_NOTE and OFFER_MODE in _MODE_NOTE
+    # native implies relaxed: dropping the security level can only widen what we are willing to offer
+    if _OFFER_PROBE["native"]:
+        assert _OFFER_PROBE["relaxed"] is True, _MODE_NOTE
+
+
+# ===================================================================================================
 # 0. STRUCTURE — the budget, the registry, and the closed vocabularies.
 # ===================================================================================================
 def test_the_handshake_budget_is_structural_not_a_comment():
@@ -794,7 +1010,8 @@ def test_admission_turns_the_predicate_into_the_verdict_at_the_choke():
 # ===================================================================================================
 # 2. CLAIM 1 + 2 — deprecated protocol accepted (FACT) / refused (INCONCLUSIVE, never CLEAN), live.
 # ===================================================================================================
-def test_a_tls10_accepting_server_mints_a_deprecated_protocol_fact_that_reverifies_offline(tmp_path):
+def test_a_tls10_accepting_server_mints_a_deprecated_protocol_fact_that_reverifies_offline(
+        tmp_path, best_offer_mode):
     from framework.v2.evidence.certify import verify_certificate
 
     cert, key = _leaf(sans=[x509.IPAddress(__import__("ipaddress").ip_address("127.0.0.1"))])
@@ -809,7 +1026,7 @@ def test_a_tls10_accepting_server_mints_a_deprecated_protocol_fact_that_reverifi
     facts = _facts(res, "offer_tls1_0")
     assert facts, (
         "a server that completed a TLS1.0-only handshake minted no deprecated-protocol FACT; "
-        f"outcomes={res.outcomes}")
+        f"outcomes={res.outcomes} {_MODE_NOTE}")
     fact = facts[0]
     ctx = res.contexts[fact.finding_ref]
     assert ctx["tls"]["tls_version"] == "TLSv1"
@@ -817,10 +1034,108 @@ def test_a_tls10_accepting_server_mints_a_deprecated_protocol_fact_that_reverifi
     assert verify_certificate(fact.signed, oracle_context=ctx, trust_root=TRUST).ok is True, (
         "the deprecated-protocol FACT did not re-verify offline")
     # TLS1.1 was offered separately and also accepted by this server
-    assert _facts(res, "offer_tls1_1"), "the TLS1.1-only probe minted nothing against a TLS1.0-1.2 server"
+    assert _facts(res, "offer_tls1_1"), (
+        f"the TLS1.1-only probe minted nothing against a TLS1.0-1.2 server {_MODE_NOTE}")
 
 
-def test_a_tampered_deprecated_protocol_capture_fails_offline_reverification(tmp_path):
+def test_the_deprecated_protocol_fact_is_minted_with_the_handshake_version_substituted(
+        tmp_path, forced_fabricated_offer):
+    """THE SUBSTITUTED PATH, FORCED — run on EVERY host, not only on one whose OpenSSL refuses TLS1.0.
+
+    This is the mode that keeps the deprecated-protocol FACT class covered when the box will not put the
+    ClientHello on the wire (see the offer-mode block above for exactly how CI's OpenSSL refuses). The
+    connector performs a REAL gated handshake to the SAME loopback server and substitutes ONE of its four
+    returned facts — the negotiated version. So this test proves the ADMISSION PATH, and says plainly
+    what it does not prove.
+
+    WHAT IS REAL HERE: the audited gate (``gate_authorized`` is earned inside ``capture_tls_handshake``,
+    which authorises before it calls the connector), the TCP channel, the presented leaf, the negotiated
+    cipher, the evidence assembly, ``_version_offer_context``, the ``tls_weakness_oracle`` fire, admission
+    under ``tls_weakness.deprecated_protocol_offer``, the signed certificate, its OFFLINE re-verification
+    against the retained context, and the tamper check.
+
+    WHAT IS NOT: that OpenSSL can negotiate TLS1.0 with this peer. Nothing here is evidence about any
+    endpoint, and no substituted capture exists outside this file — pinned below by asserting the
+    product's own connector is restored and by
+    ``test_the_shipped_connector_is_the_one_the_product_uses``."""
+    from framework.v2.evidence.certify import verify_certificate
+
+    cert, key = _leaf()
+    cpem, kpem = _pem(cert, key)
+    # a server pinned to EXACTLY TLS1.2 — so "TLSv1" in the evidence is unambiguously the SUBSTITUTED
+    # fact (this test cannot pass by accidentally negotiating a real TLS1.0 session), and the strong
+    # suite list really governs the negotiation, so the cipher assertion below is not vacuous.
+    srv = _TLSServer(cpem, kpem, min_version=ssl.TLSVersion.TLSv1_2, max_version=ssl.TLSVersion.TLSv1_2,
+                     ciphers=_STRONG_SUITES, seclevel0=False)
+    try:
+        res = _run(srv.port, tmp_path)
+    finally:
+        srv.close()
+
+    assert res.status == "ran"
+    facts = _facts(res, "offer_tls1_0")
+    assert facts, (
+        "THE SUBSTITUTED PATH DID NOT ENGAGE — the admission path ran with the four handshake facts "
+        f"substituted and still produced no FACT; outcomes={res.outcomes}")
+    fact = facts[0]
+    ctx = res.contexts[fact.finding_ref]
+    tls = ctx["tls"]
+    # the gate really authorised, the channel really came up, and the other three handshake facts are
+    # the ones this peer really produced
+    assert tls["gate_authorized"] is True and tls["tcp_established"] is True
+    assert tls["connected"] is True and tls["tls_version"] == "TLSv1"
+    assert tls["offered_only_version"] == "TLSv1"
+    assert tls["cipher"] in _STRONG_SUITES.split(":"), (
+        f"the NEGOTIATED cipher must be the real one this peer chose, not a substituted one: {tls!r}")
+    assert tls["cert_der_b64"] == _der_b64(cert), "the retained leaf must be the one the peer presented"
+    assert verify_certificate(fact.signed, oracle_context=ctx, trust_root=TRUST).ok is True, (
+        "the substituted-capture FACT did not re-verify offline — the admission path is not intact")
+    tampered = {**ctx, "tls": {**tls, "tls_version": "TLSv1.3"}}
+    assert verify_certificate(fact.signed, oracle_context=tampered, trust_root=TRUST).ok is False, (
+        "a TAMPERED substituted capture re-verified")
+    assert _facts(res, "offer_tls1_1"), "the TLS1.1 re-drive did not reach admission under substitution"
+
+
+def test_the_two_fact_classes_keep_positive_coverage_whatever_this_host_can_offer(
+        tmp_path, best_offer_mode):
+    """THE NEITHER-RAN GUARD. Self-contained and order-independent: one gated run against one server that
+    is both TLS1.0-capable and weak-cipher-capable, asserting that BOTH FACT classes minted.
+
+    The shape this exists to kill is "the positive quietly produced nothing": before this, a stricter host
+    OpenSSL made the deprecated-protocol positive assert over an empty list, and the only signal was a
+    bare ``assert []``. Here the failure names the mode and the host OpenSSL's own refusal reason."""
+    offerable = tb.offerable_weak_ciphers()
+    cert, key = _leaf()
+    cpem, kpem = _pem(cert, key)
+    srv = _TLSServer(cpem, kpem, min_version=ssl.TLSVersion.TLSv1, max_version=ssl.TLSVersion.TLSv1_2,
+                     ciphers=":".join([*offerable, "AES128-SHA"]))
+    try:
+        res = _run(srv.port, tmp_path)
+    finally:
+        srv.close()
+
+    assert res.status == "ran" and res.proposed, f"the server was never proposed; {res.detail}"
+    assert _facts(res, "offer_tls1_0"), (
+        "NEITHER the real-endpoint path NOR the substituted path minted a deprecated-protocol FACT, so "
+        "that FACT class has NO positive coverage in this run. Do not add a skip — find out why. "
+        f"outcomes={res.outcomes} {_MODE_NOTE}")
+    assert offerable, (
+        "this OpenSSL can offer none of the closed weak-cipher vocabulary, so the weak-cipher FACT class "
+        f"has no positive coverage in this run {_MODE_NOTE}")
+    assert _facts(res, "offer_weak_ciphers"), (
+        "the weak-cipher FACT class produced nothing against a server that offers the very suites VIGIL "
+        f"offered; outcomes={res.outcomes} {_MODE_NOTE}")
+
+
+def test_the_shipped_connector_is_the_one_the_product_uses():
+    """No mode shim outlives the fixture that installed it: at rest ``tls_breadth._restricted_connect`` is
+    the product's own function, so nothing in this file can leak a relaxed or substituted offer into
+    another test or into the product."""
+    assert tb._restricted_connect is _REAL_RESTRICTED_CONNECT
+    assert _REAL_RESTRICTED_CONNECT.__module__ == "vigil_integration.live.tls_breadth"
+
+
+def test_a_tampered_deprecated_protocol_capture_fails_offline_reverification(tmp_path, best_offer_mode):
     """The certificate binds the retained context. Rewriting the negotiated version to a modern one both
     breaks the digest AND stops the oracle firing, so the tampered record does not re-verify."""
     from framework.v2.evidence.certify import verify_certificate
@@ -832,14 +1147,19 @@ def test_a_tampered_deprecated_protocol_capture_fails_offline_reverification(tmp
         res = _run(srv.port, tmp_path)
     finally:
         srv.close()
-    fact = _facts(res, "offer_tls1_0")[0]
+    facts = _facts(res, "offer_tls1_0")
+    assert facts, (
+        "the TLS1.0 probe minted nothing, so there is no capture to tamper with and this test cannot "
+        f"report what it is for; outcomes={res.outcomes} {_MODE_NOTE}")
+    fact = facts[0]
     good = res.contexts[fact.finding_ref]
     tampered = {**good, "tls": {**good["tls"], "tls_version": "TLSv1.3"}}
     assert verify_certificate(fact.signed, oracle_context=tampered, trust_root=TRUST).ok is False, (
         "a TAMPERED retained capture re-verified — the certificate does not bind its evidence")
 
 
-def test_a_tls12_only_server_does_not_mint_tls10_accepted_and_is_inconclusive_not_clean(tmp_path):
+def test_a_tls12_only_server_does_not_mint_tls10_accepted_and_is_inconclusive_not_clean(
+        tmp_path, offer_mode):
     """THE same-shape negative control for claim 1 — and the pin that even the BEST case for claim 2 is
     INCONCLUSIVE.
 
@@ -873,7 +1193,8 @@ def test_a_tls12_only_server_does_not_mint_tls10_accepted_and_is_inconclusive_no
         retained = res.contexts[outs[0]["check_id"]]["tls"]
         assert retained["tcp_established"] is True and retained["gate_authorized"] is True
         assert retained["failure_class"] == tb.FAILURE_VERSION_REJECTED, (
-            f"precondition of this test: the peer must have sent alert(70); got {retained!r}")
+            f"precondition of this test: the peer must have sent alert(70); got {retained!r} "
+            f"{_MODE_NOTE}")
         assert tb.is_conclusive_protocol_refusal(retained) is True, (
             "precondition of this test: this is the BEST case — the predicate is satisfied in full")
         # ... and it is STILL not a clean bill of health.
@@ -882,7 +1203,7 @@ def test_a_tls12_only_server_does_not_mint_tls10_accepted_and_is_inconclusive_no
             f"refused and the peer that completed the TLS1.2 session are different connections; got {outs}")
 
 
-def test_the_refusal_predicate_is_reproducible_offline_from_the_retained_capture(tmp_path):
+def test_the_refusal_predicate_is_reproducible_offline_from_the_retained_capture(tmp_path, offer_mode):
     """The conclusiveness predicate re-runs over the RETAINED capture and gives the same answer — no clock,
     no network, no live handle, no siblings. That purity is why the witness is STAMPED INTO the evidence
     rather than consulted at decision time, and it is the property the guard keeps even though the branch
@@ -901,9 +1222,12 @@ def test_the_refusal_predicate_is_reproducible_offline_from_the_retained_capture
     finally:
         srv.close()
     refs = [o["check_id"] for o in _outcomes(res, "offer_tls1_0")]
+    assert refs, f"the TLS1.0 probe produced no outcome to re-run the predicate over {_MODE_NOTE}"
     ctx = res.contexts[refs[0]]
     retained = ctx["tls"]
-    assert tb.is_conclusive_protocol_refusal(retained) is True
+    assert tb.is_conclusive_protocol_refusal(retained) is True, (
+        f"precondition of this test: the retained capture must be a real peer refusal; got {retained!r} "
+        f"{_MODE_NOTE}")
     assert retained["ssl_reason"] == "TLSV1_ALERT_PROTOCOL_VERSION"
     assert retained["tcp_established"] is True and retained["gate_authorized"] is True
     # the peer-TLS-session witness must be RETAINED, not recomputed: that is what keeps the CLEAN a pure
@@ -921,7 +1245,7 @@ def test_the_refusal_predicate_is_reproducible_offline_from_the_retained_capture
 # ===================================================================================================
 # 3. THE LAUNDERING PIN — a host that times out or resets is INCONCLUSIVE, never CLEAN.
 # ===================================================================================================
-def test_a_round_robin_tls_pool_would_have_been_falsely_cleared(tmp_path):
+def test_a_round_robin_tls_pool_would_have_been_falsely_cleared(tmp_path, offer_mode):
     """THE PERMANENT NEGATIVE CONTROL FOR THE WITHDRAWN CLEAN, and the reason it was withdrawn.
 
     One listening socket, two real OpenSSL backends, alternating per connection: A speaks TLS1.0-1.2, B is
@@ -960,7 +1284,9 @@ def test_a_round_robin_tls_pool_would_have_been_falsely_cleared(tmp_path):
     # (2) NON-VACUITY: the run really reached the dangerous state — a genuine peer alert(70) PLUS a
     #     genuine completed-session witness, i.e. the full predicate is satisfied over one retained dict.
     assert retained["gate_authorized"] is True and retained["tcp_established"] is True
-    assert retained["failure_class"] == tb.FAILURE_VERSION_REJECTED
+    assert retained["failure_class"] == tb.FAILURE_VERSION_REJECTED, (
+        f"precondition of this control: a pool member must have sent alert(70); got {retained!r} "
+        f"{_MODE_NOTE}")
     assert retained["ssl_reason"] == "TLSV1_ALERT_PROTOCOL_VERSION"
     witness = retained[tb.PEER_SESSION_KEY]
     assert witness["completed"] is True and witness["tls_version"] not in ("", "TLSv1"), witness
@@ -982,7 +1308,7 @@ def test_a_round_robin_tls_pool_would_have_been_falsely_cleared(tmp_path):
     assert not leaked, f"a clean-labelled lead escaped for the pool: {[l.finding_ref for l in leaked]}"
 
 
-def test_a_black_hole_host_is_inconclusive_never_clean(tmp_path):
+def test_a_black_hole_host_is_inconclusive_never_clean(tmp_path, offer_mode):
     """A host that accepts the TCP connection and then says nothing is the single most dangerous shape: the
     channel IS established, so the ``channel_established`` precondition alone would not save us. Only the
     failure-class predicate does. This must be INCONCLUSIVE."""
@@ -997,7 +1323,8 @@ def test_a_black_hole_host_is_inconclusive_never_clean(tmp_path):
     assert ev["connected"] is False
     assert ev["tcp_established"] is True, "precondition of this test: the channel really came up"
     assert ev["failure_class"] == tb.FAILURE_TRANSPORT, (
-        f"a silent host was classified {ev['failure_class']!r} — only a peer alert(70) may be a refusal")
+        f"a silent host was classified {ev['failure_class']!r} — only a peer alert(70) may be a refusal "
+        f"{_MODE_NOTE}")
     assert tb.is_conclusive_protocol_refusal(ev) is False, "A TIMEOUT LAUNDERED INTO A CLEAN"
 
     from vigil_integration.live import verdict as V
@@ -1023,7 +1350,7 @@ def test_a_reset_host_is_inconclusive_never_clean(tmp_path):
                    observed=_tls_probe_observed(ev)).verdict is V.Verdict.INCONCLUSIVE
 
 
-def test_a_bare_alert70_emitter_is_never_clean(tmp_path):
+def test_a_bare_alert70_emitter_is_never_clean(tmp_path, offer_mode):
     """MEDIUM (five-lens review): a socket that is not a TLS service, but answers every ClientHello with
     the same seven-byte ``alert(70)`` record, satisfied every condition the predicate had before the
     witness existed. The channel is established and the peer really sent the alert — so this test FIRST
@@ -1047,7 +1374,7 @@ def test_a_bare_alert70_emitter_is_never_clean(tmp_path):
     assert ev["gate_authorized"] is True and ev["tcp_established"] is True
     assert ev["failure_class"] == tb.FAILURE_VERSION_REJECTED, (
         f"precondition of this test: OpenSSL must classify the bare record as a peer alert(70); "
-        f"got {ev['failure_class']!r} / {ev.get('ssl_reason')!r}")
+        f"got {ev['failure_class']!r} / {ev.get('ssl_reason')!r} {_MODE_NOTE}")
     assert ev["ssl_reason"] == "TLSV1_ALERT_PROTOCOL_VERSION"
 
     # ... and it is STILL not clean, because nothing ever completed a TLS session with this peer.
@@ -1066,7 +1393,7 @@ def test_a_bare_alert70_emitter_is_never_clean(tmp_path):
         tb.peer_tls_session_witness(ev, (session,))) is True
 
 
-def test_a_bare_alert70_emitter_is_never_clean_end_to_end(tmp_path):
+def test_a_bare_alert70_emitter_is_never_clean_end_to_end(tmp_path, offer_mode):
     """The same pin driven through the WHOLE gated runner: no FACT and no CLEAN anywhere against a peer
     VIGIL never completed a TLS session with.
 
@@ -1087,7 +1414,8 @@ def test_a_bare_alert70_emitter_is_never_clean_end_to_end(tmp_path):
     retained = res.contexts[outs[0]["check_id"]]["tls"]
     assert retained["tcp_established"] is True and retained["gate_authorized"] is True
     assert retained["failure_class"] == tb.FAILURE_VERSION_REJECTED, (
-        f"precondition: OpenSSL must read the bare record as a peer alert(70); got {retained!r}")
+        f"precondition: OpenSSL must read the bare record as a peer alert(70); got {retained!r} "
+        f"{_MODE_NOTE}")
     assert retained[tb.PEER_SESSION_KEY]["completed"] is False, (
         "the witness must be the thing that is absent — otherwise this test is not about the witness")
     assert tb.is_conclusive_protocol_refusal(retained) is False, (
