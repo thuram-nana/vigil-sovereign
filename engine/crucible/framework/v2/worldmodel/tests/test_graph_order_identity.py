@@ -368,3 +368,81 @@ def test_nodes_of_kind_misses_a_non_kind_exactly_as_the_old_filter_did() -> None
     assert w.nodes_of_kind(NodeKind.DATASTORE) == []
     assert [n.id for n in w.nodes_of_kind("host")] == ["a"]
     assert [n.id for n in w.nodes_of_kind(NodeKind.HOST)] == ["a"]
+
+
+def test_nodes_of_kind_degenerate_arguments_match_the_old_filter() -> None:
+    """The arguments `_kind_key` has to survive that no caller actually passes.
+    `nodes_of_kind` is annotated `kind: NodeKind`, but it is a plain lookup with
+    no validation, so Python will happily hand it anything — and the contract
+    this slice signed up to is that the index returns EXACTLY what the old
+    `n.kind == kind` comprehension returned."""
+    w = WorldModel()
+    w.add_node(_node("a", NodeKind.HOST))
+    w.add_node(_node("b", NodeKind.SERVICE))
+    w.add_node(_node("c", NodeKind.HOST))
+
+    # None — `getattr(None, "value", None)` is None, which is not a bucket key.
+    assert w.nodes_of_kind(None) == _ref_nodes_of_kind(w, None) == []
+    # An EdgeKind. Its `.value` is a real string, so this exercises the path
+    # where `_kind_key` succeeds and the LOOKUP is what must miss.
+    for ek in (EdgeKind.REACHABLE_FROM, EdgeKind.OWNS, EdgeKind.HOSTS):
+        assert w.nodes_of_kind(ek) == _ref_nodes_of_kind(w, ek) == []
+    # An EdgeKind whose value COLLIDES with a NodeKind value, if the two enums
+    # ever share a spelling — pinned as a loop so a future rename cannot make
+    # this silently stop testing anything.
+    node_values = {k.value for k in NodeKind}
+    for ek in EdgeKind:
+        if ek.value in node_values:
+            assert w.nodes_of_kind(ek) == _ref_nodes_of_kind(w, ek)
+    # Empty string / an int / a bare object: neither a member nor a value.
+    for junk in ("", 0, 1, object()):
+        assert w.nodes_of_kind(junk) == _ref_nodes_of_kind(w, junk) == []
+
+
+def test_nodes_of_kind_diverges_only_for_a_foreign_object_with_a_matching_value() -> None:
+    """The ONE measured behaviour change from the old `n.kind == kind` filter,
+    recorded rather than hidden.
+
+    `_kind_key` normalises its argument onto `.value`, so a foreign object that
+    merely HAS `.value == "host"` now selects the host bucket, where the old
+    comprehension compared `NodeKind.HOST == that_object` and got False. This is
+    a widening, not a narrowing: nothing that used to be returned stops being
+    returned, and the returned nodes are genuinely of that kind.
+
+    It is theoretical — every call site in the tree passes a `NodeKind` member
+    (or, in the tests, its bare string value) — but it was untested, and an
+    untested known divergence is how a real one gets in later."""
+    w = WorldModel()
+    w.add_node(_node("a", NodeKind.HOST))
+    w.add_node(_node("b", NodeKind.SERVICE))
+    w.add_node(_node("c", NodeKind.HOST))
+
+    class _Foreign:
+        value = "host"
+
+    foreign = _Foreign()
+    assert _ref_nodes_of_kind(w, foreign) == []                 # the OLD answer
+    assert [n.id for n in w.nodes_of_kind(foreign)] == ["a", "c"]  # the NEW answer
+    # ...and it is the same list object-for-object as the member lookup, i.e. the
+    # divergence is "one more way to spell HOST", never a different result.
+    assert [id(n) for n in w.nodes_of_kind(foreign)] == \
+           [id(n) for n in w.nodes_of_kind(NodeKind.HOST)]
+    # A foreign object whose `.value` matches NOTHING still misses, like before.
+    class _ForeignMiss:
+        value = "no-such-kind"
+    assert w.nodes_of_kind(_ForeignMiss()) == _ref_nodes_of_kind(w, _ForeignMiss()) == []
+
+
+def test_str_enum_members_and_their_values_share_one_bucket() -> None:
+    """The fact `_kind_key`'s docstring rests on, pinned as a test so the
+    docstring cannot drift back to the false claim it used to make (that
+    `Enum.__hash__` hashes the name, so a member and its value differ).
+
+    On CPython >= 3.11 a mixin enum inherits the MIXIN's `__hash__`, so
+    `NodeKind.HOST` and `"host"` already collide in one dict. `_kind_key` is
+    kept anyway — that collision is an implementation detail of the str mixin,
+    not a language guarantee — but the justification must be the true one."""
+    assert NodeKind.__hash__ is str.__hash__
+    assert hash(NodeKind.HOST) == hash("host")
+    assert {NodeKind.HOST: 1}.get("host") == 1
+    assert {"host": 1}.get(NodeKind.HOST) == 1
