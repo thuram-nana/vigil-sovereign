@@ -32,6 +32,7 @@ import ssl
 import sys
 import threading
 import time
+from urllib.parse import urlsplit
 from pathlib import Path
 
 import pytest
@@ -929,12 +930,17 @@ def test_a_wildcard_scoped_name_resolving_into_rfc1918_is_refused(monkeypatch, t
     assert "not in the charter-authorized allowlist" in denied[0][1]
 
 
-def test_a_charter_scoped_rfc1918_staging_host_still_works(monkeypatch, tmp_path):
-    """The other half of the contract: over-correcting into a dead path is also a defect. An EXACT scope
-    entry that resolves to an RFC1918 address puts that address in the charter-authorized lift set, so the
-    private tier lifts for it — while the metadata floor above stays unliftable."""
+def test_an_ip_literal_scoped_rfc1918_staging_host_still_works(monkeypatch, tmp_path):
+    """The other half of the contract: over-correcting into a dead path is also a defect. A charter that
+    WRITES the private address (alongside the name, which the string gates need) puts that address in the
+    lift set, so the private tier lifts for it — while the metadata floor above stays unliftable.
+
+    Writing the ADDRESS is what authorises it. The negative control immediately below is the same test
+    with the IP-literal row removed, and it must REFUSE: an operator's signed attestation to a NAME is
+    not an attestation to whatever a resolver says that name is, milliseconds before the target's own
+    query, on the same resolver."""
     _grant_active_recon(monkeypatch)
-    _charter_hosts(tmp_path, "staging.corp.example")
+    _charter_hosts(tmp_path, "staging.corp.example", _RFC1918)
     _fake_dns(monkeypatch, {"staging.corp.example": _RFC1918})
     calls = _count_every_connector(monkeypatch)
     signers, _tr = _signers_and_trust()
@@ -944,8 +950,74 @@ def test_a_charter_scoped_rfc1918_staging_host_still_works(monkeypatch, tmp_path
     assert res.refused is False, res.notes
     assert _floor_refusals(res) == [], res.egress_checked
     assert res.egress_checked and res.egress_checked[0][0] == _RFC1918, "the floor must still have RUN"
+    # ...and the SCOPE-over-addresses step ran too, and said WHY it authorised this address.
+    assert res.scope_checked == [(_RFC1918, True,
+                                  f"{_RFC1918} is written as an IP-literal row of the signed charter "
+                                  f"scope")], res.scope_checked
     assert res.pinned_address == _RFC1918, "the connect must be pinned to the validated literal"
     assert calls == [(_RFC1918, 80)], f"the capture must dial the PINNED literal exactly once; got {calls}"
+
+
+def test_an_exact_scoped_name_moved_to_an_unintended_rfc1918_address_is_refused(monkeypatch, tmp_path):
+    """B1 NEGATIVE CONTROL — the one the suite lacked, and the reason the private-tier lift was rewritten.
+
+    The old lift set was ``CharterScopeSource.resolved_allowed_ips()``: every non-wildcard scope entry
+    RESOLVED AT REQUEST TIME. When the target IS the scope entry — the common case for an exact-hostname
+    scope — both sides of "the private tier lifts only for an exactly-charter-authorized IP" were the
+    SAME QUERY on the SAME resolver, so the rule collapsed into "lifts for whatever the resolver just
+    said". A split-horizon view or a poisoned resolver moved ``staging.example.com`` to an internal host
+    and the arm dialled it, minting a signed ``service_reachable`` FACT about a machine nobody
+    authorized. The lift set is now the charter's IP LITERALS, which no resolver can rewrite.
+
+    This is the SAME charter as the positive above with the IP-literal row removed — the difference that
+    must decide it."""
+    _grant_active_recon(monkeypatch)
+    _charter_hosts(tmp_path, "staging.corp.example")            # the NAME only — no address attested
+    _fake_dns(monkeypatch, {"staging.corp.example": _RFC1918})
+    calls = _count_every_connector(monkeypatch)
+    signers, _tr = _signers_and_trust()
+
+    res = _drive_transport(tmp_path, signers, "staging.corp.example")
+
+    assert calls == [], f"a name-only scope may not lift the private tier; got {calls}"
+    assert res.refused is True and res.n_facts == 0
+    denied = _floor_refusals(res)
+    assert denied and denied[0][0] == _RFC1918, res.egress_checked
+    assert "not in the charter-authorized allowlist" in denied[0][1], denied
+    assert res.pinned_address == ""
+    # POSITIVE: the charter really did list the NAME (both string gates passed) and the lift set really
+    # is empty — so it is the literal-only rule, not an accident of scope, that refused.
+    from vigil_integration.live.egress_floor import charter_allowed_ips, charter_scope_entries
+    assert charter_scope_entries("alpha")[0] == ("staging.corp.example",)
+    assert charter_allowed_ips("alpha") == frozenset()
+
+
+def test_an_exact_scoped_dual_homed_name_cannot_lift_the_private_tier_for_itself(monkeypatch, tmp_path):
+    """The same defect with NO resolver compromise at all. An exactly-scoped name with an ordinary
+    dual-homed / round-robin record — one internal address, one public — put BOTH into the old
+    request-time lift set, and ``pin.addresses[0]`` then dialled the internal one. All-or-nothing plus an
+    IP-literal lift set refuses the pair outright."""
+    _grant_active_recon(monkeypatch)
+    _charter_hosts(tmp_path, "dual.corp.example")
+    real = socket.getaddrinfo
+
+    def _multi(host, port, *a, **kw):
+        if str(host) != "dual.corp.example":
+            return real(host, port, *a, **kw)
+        return [(socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", (addr, int(port or 0)))
+                for addr in ("10.0.0.5", "93.184.216.34")]
+
+    monkeypatch.setattr(socket, "getaddrinfo", _multi)
+    calls = _count_every_connector(monkeypatch)
+    signers, _tr = _signers_and_trust()
+
+    res = _drive_transport(tmp_path, signers, "dual.corp.example")
+
+    assert calls == [], f"the internal half of a dual-homed answer must never be dialled; got {calls}"
+    assert res.refused is True and res.n_facts == 0
+    denied = _floor_refusals(res)
+    assert denied and denied[0][0] == "10.0.0.5", res.egress_checked
+    assert "not in the charter-authorized allowlist" in denied[0][1], denied
 
 
 def test_an_authorized_loopback_target_still_mints(monkeypatch, tmp_path):
@@ -988,7 +1060,7 @@ def test_the_tls_leg_is_pinned_and_floor_gated_too(monkeypatch, tmp_path):
     """The TLS arm shares the chain: the metadata name is refused with no handshake, and an authorized
     private host is dialled at the PINNED literal with the original hostname kept for SNI."""
     _grant_active_recon(monkeypatch)
-    _charter_hosts(tmp_path, "imds.corp.example", "staging.corp.example")
+    _charter_hosts(tmp_path, "imds.corp.example", "staging.corp.example", _RFC1918)
     _fake_dns(monkeypatch, {"imds.corp.example": _IMDS, "staging.corp.example": _RFC1918})
     calls = _count_every_connector(monkeypatch)
     signers, _tr = _signers_and_trust()
@@ -1098,6 +1170,42 @@ def test_a_charter_scoped_rfc1918_origin_reaches_the_smuggling_burst(monkeypatch
 
 # ---- the helper's own contract (so a future site cannot get it subtly wrong) -----------------------------
 
+def test_the_charter_relative_dns_pin_is_removed_and_cannot_be_revived_by_accident(monkeypatch):
+    """RESIDUAL — make the footgun unusable. ``dns_pin.resolve_and_validate`` is a charter-RELATIVE pin
+    with a name that reads like the safe thing: it required every resolved address to satisfy the
+    caller's own predicate and never consulted the L3/L4 floor, so a charter listing 169.254.169.254
+    satisfied it and it pinned the connection at cloud instance metadata. It is now called by nothing,
+    which is exactly when the next author imports it for a new resolve-then-connect site — how this
+    class-bug reached four sites. It must RAISE, and point at the replacement.
+
+    ``pinned_handlers`` is NOT removed: ``web_redrive`` uses it to dial the address ``pin_egress``
+    validated, so this control also pins that it stays."""
+    import socket as _socket
+
+    from vigil_integration.live import dns_pin
+    dialled: list = []
+    monkeypatch.setattr(_socket, "getaddrinfo",
+                        lambda *a, **kw: dialled.append(a) or [
+                            (_socket.AF_INET, _socket.SOCK_STREAM, _socket.IPPROTO_TCP, "",
+                             (_IMDS, 80))])
+
+    with pytest.raises(RuntimeError) as exc:
+        dns_pin.resolve_and_validate(_IMDS, 80, lambda _a: True)
+
+    assert dialled == [], "the removed pin must not even resolve"
+    assert "pin_egress" in str(exc.value), exc.value
+    assert "egress floor" in str(exc.value), exc.value
+    assert callable(dns_pin.pinned_handlers), "the PIN half is still used by web_redrive"
+    # and nothing in the shipped tree calls it any more.
+    import subprocess
+    hits = subprocess.run(
+        ["grep", "-rn", "resolve_and_validate", "--include=*.py",
+         str(_ROOT / "integration" / "vigil_integration"), str(_ROOT / "engine")],
+        capture_output=True, text=True).stdout.splitlines()
+    offenders = [h for h in hits if "dns_pin.py" not in h and "egress_floor.py" not in h]
+    assert offenders == [], f"a live caller of the removed charter-relative pin reappeared: {offenders}"
+
+
 def test_pin_egress_fails_closed_when_the_gateway_denylist_is_unavailable(monkeypatch):
     """No conscience ⇒ no authorization. A missing denylist must never degrade to an unguarded connect."""
     from vigil_integration.live import egress_floor
@@ -1121,6 +1229,225 @@ def test_pin_egress_refuses_a_mixed_answer_where_only_one_address_is_denied(monk
     pin = egress_floor.pin_egress("multi.example", 80, allowed_ips=())
     assert not pin.allowed and pin.pinned == ""
     assert [a for a, d, _w in pin.checked if d] == [_IMDS]
+
+
+# ---- SCOPE OVER ADDRESSES (step 3) — the step mutation M8 proved was COMPLETELY UNTESTED ---------------
+#
+# ``if False and address_authorized is not None:`` in ``pin_egress`` killed 105 passed / 2 skipped and
+# ZERO tests. The floor cannot substitute for it: ``is_egress_denied`` allows ANY globally-routable
+# address, so on a call site that passes no predicate the property the shared docstring advertises —
+# "every resolved address must be in scope" — is simply absent. Two of the four sites (transport, race)
+# passed no predicate at all. Each control below asserts POSITIVELY that the floor RAN AND ALLOWED the
+# address, and that the SCOPE step is what refused; deleting either step fails them.
+
+_PUBLIC = "93.184.216.34"
+_OFF_SCOPE = "8.8.8.8"
+
+
+def _multi_a(monkeypatch, name: str, *addrs: str) -> None:
+    real = socket.getaddrinfo
+
+    def _gai(host, port, *a, **kw):
+        if str(host) != name:
+            return real(host, port, *a, **kw)
+        return [(socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", (x, int(port or 0)))
+                for x in addrs]
+
+    monkeypatch.setattr(socket, "getaddrinfo", _gai)
+
+
+def test_the_scope_step_refuses_an_extra_address_the_floor_allows(monkeypatch, tmp_path):
+    """M8's killer, at the helper. The charter states ``shop.example.com``'s address explicitly
+    (``93.184.216.34``), and the name answers with a SECOND, globally-routable, out-of-scope address.
+    Both clear the floor — ``is_egress_denied`` only ever asks "is this globally routable" of a public
+    address — so ONLY the scope step can refuse, and it must."""
+    from vigil_integration.live.egress_floor import charter_address_authorizer, pin_egress
+    _charter_hosts(tmp_path, "shop.example.com", _PUBLIC)
+    _multi_a(monkeypatch, "shop.example.com", _PUBLIC, _OFF_SCOPE)
+
+    pin = pin_egress("shop.example.com", 443, slug="alpha",
+                     address_authorized=charter_address_authorizer("alpha", "shop.example.com"))
+
+    # POSITIVE: the floor RAN over both addresses and ALLOWED both — it is not what refused.
+    assert pin.floor_ran and [(a, d) for a, d, _w in pin.checked] == [(_PUBLIC, False),
+                                                                      (_OFF_SCOPE, False)], pin.checked
+    # POSITIVE: the scope step RAN, authorised the attested address, and refused the other.
+    assert pin.scope_ran and pin.scope_over_addresses == "enforced"
+    assert [(a, ok) for a, ok, _w in pin.scope_checked] == [(_PUBLIC, True),
+                                                            (_OFF_SCOPE, False)], pin.scope_checked
+    assert not pin.allowed and pin.pinned == ""
+    assert _OFF_SCOPE in pin.refused_reason and "exhaustive" in pin.refused_reason, pin.refused_reason
+
+
+def test_the_transport_site_runs_the_scope_step_and_never_dials_the_extra_address(monkeypatch, tmp_path):
+    """M8's killer AT A SITE, not only at the helper: ``transport_redrive`` passed NO predicate, so this
+    exact answer was pinned and dialled there while the smuggling/web sites refused it."""
+    _grant_active_recon(monkeypatch)
+    _charter_hosts(tmp_path, "shop.example.com", _PUBLIC)
+    _multi_a(monkeypatch, "shop.example.com", _PUBLIC, _OFF_SCOPE)
+    calls = _count_every_connector(monkeypatch)
+    signers, _tr = _signers_and_trust()
+
+    res = _drive_transport(tmp_path, signers, "shop.example.com", port=443)
+
+    assert calls == [], f"an out-of-scope co-resident address must attempt NO connection; got {calls}"
+    assert res.refused is True and res.n_facts == 0
+    assert _floor_refusals(res) == [], f"the FLOOR allowed both; the SCOPE step must be the refuser: {res.egress_checked}"
+    assert [(a, ok) for a, ok, _w in res.scope_checked] == [(_PUBLIC, True), (_OFF_SCOPE, False)], res.scope_checked
+    assert res.pinned_address == ""
+
+
+def test_a_wildcard_only_scope_names_no_address_so_the_scope_step_refuses(monkeypatch, tmp_path):
+    """A wildcard row authorises a NAME PATTERN and names no address at all, so no address is
+    attributable to the charter. The address here is PUBLIC, so the floor allows it — this is a scope
+    refusal or nothing. (The RFC1918 sibling above is refused one layer earlier, by the floor.)"""
+    from vigil_integration.live.egress_floor import charter_address_authorizer, pin_egress
+    _charter_hosts(tmp_path, "*.corp.example")
+    _fake_dns(monkeypatch, {"app.corp.example": _PUBLIC})
+
+    pin = pin_egress("app.corp.example", 443, slug="alpha",
+                     address_authorized=charter_address_authorizer("alpha", "app.corp.example"))
+
+    assert pin.floor_ran and pin.checked == [(_PUBLIC, False, "allowed")], pin.checked
+    assert pin.scope_checked == [(_PUBLIC, False, pin.scope_checked[0][2])], pin.scope_checked
+    assert not pin.allowed and pin.pinned == ""
+    assert "attributable to no row" in pin.scope_checked[0][2], pin.scope_checked
+
+
+def test_a_hostname_only_charter_is_authorized_on_every_site(monkeypatch, tmp_path):
+    """THE ASYMMETRY, closed. ``web_redrive`` / ``smuggling_redrive`` re-asked the string gate about the
+    resolved IP LITERAL — a question only an IP-literal charter row can satisfy — so they refused a
+    HOSTNAME-ONLY charter outright, while ``transport`` / ``race`` (no predicate) allowed it. Verified
+    against the shipped ``targets/testasp/charter.md`` shape: one hostname row, nothing else.
+
+    The shared predicate authorises it as NAME-DERIVED and says so in the audit row, so the certificate
+    reader can see exactly how much was proven: the charter attested to the NAME, not to the address."""
+    from vigil_integration.live.egress_floor import charter_address_authorizer, pin_egress
+    _charter_hosts(tmp_path, "testasp.example.test")
+    _fake_dns(monkeypatch, {"testasp.example.test": _PUBLIC})
+
+    pin = pin_egress("testasp.example.test", 80, slug="alpha",
+                     address_authorized=charter_address_authorizer("alpha", "testasp.example.test"))
+
+    assert pin.allowed and pin.pinned == _PUBLIC, pin.refused_reason
+    assert pin.scope_ran and pin.scope_checked[0][:2] == (_PUBLIC, True)
+    assert "name-derived" in pin.scope_checked[0][2], pin.scope_checked
+    assert "no address-level attestation" in pin.scope_checked[0][2], pin.scope_checked
+
+
+def test_the_smuggling_site_accepts_the_same_hostname_only_charter(monkeypatch, tmp_path):
+    """The other half of the asymmetry, at the site that used to refuse it. A connect is ATTEMPTED at the
+    pinned literal (the recording connector raises, so nothing leaves this host) — the point is that no
+    gate refused first."""
+    _grant_active_recon(monkeypatch)
+    _charter_hosts(tmp_path, "testasp.example.test")
+    _fake_dns(monkeypatch, {"testasp.example.test": _PUBLIC})
+    calls = _count_every_connector(monkeypatch)
+    signers, _tr = _signers_and_trust()
+
+    res = _drive_smuggling(signers, "http://testasp.example.test/")
+
+    assert res.refused is False, res.notes
+    assert calls and all(c == (_PUBLIC, 80) for c in calls), calls
+
+
+# ---- the two REMEDIATION-VALIDATION sites: no floor at all before this slice ---------------------------
+#
+# ``remediation/live_adapter.py`` and ``remediation/differential_adapter.py`` both called
+# ``capture_tls_handshake(host, port, slug=...)`` with no pin, no denylist and no scope-over-addresses.
+# With a charter listing 169.254.169.254 the socket fired: SOCKET ATTEMPTS = [('169.254.169.254', 443)].
+# These run on an operator-triggered RE-TEST after a fix — the moment nobody is watching the wire.
+
+@pytest.mark.parametrize("module_name, cls_name", [
+    ("vigil_integration.remediation.live_adapter", "LiveHttpAdapter"),
+    ("vigil_integration.remediation.differential_adapter", "DifferentialHttpAdapter"),
+])
+def test_a_remediation_adapter_tls_sample_is_floor_gated_and_pinned(monkeypatch, tmp_path,
+                                                                    module_name, cls_name):
+    """The charter LISTS the metadata address, so every string gate in ``capture_tls_handshake``'s own
+    chain says yes. The floor must refuse before a socket exists, and the refusal must RAISE (a gate
+    refusal is a "cannot test", never a silently weaker host-only identity pin)."""
+    import importlib
+    mod = importlib.import_module(module_name)
+    assert hasattr(mod, cls_name), f"{module_name} lost {cls_name}"
+    _grant_active_recon(monkeypatch)
+    _charter(tmp_path, _IMDS)
+    calls = _count_every_connector(monkeypatch)
+
+    # Drive the bound method directly with a minimal stand-in: the site under test is the TLS sample,
+    # not the executor plumbing above it.
+    class _Probe:
+        _host = _IMDS
+        _slug = "alpha"
+        _observed_tls_spki = mod.__dict__[cls_name]._observed_tls_spki
+        _looks_like_transport_failure = staticmethod(
+            mod.__dict__[cls_name]._looks_like_transport_failure)
+
+    split = urlsplit(f"https://{_IMDS}:443/")
+    with pytest.raises(RuntimeError) as exc:
+        _Probe()._observed_tls_spki(split)
+
+    assert calls == [], f"the metadata address must attempt NO handshake; got {calls}"
+    assert "egress floor" in str(exc.value), exc.value
+    assert "always-denied range" in str(exc.value), exc.value
+
+
+# ---- the two EXTERNAL-TOOL captures: the floor ran, but the CONNECT was not pinned --------------------
+
+def test_the_external_tool_captures_dial_the_pinned_literal_not_the_name(monkeypatch, tmp_path):
+    """B2b. ``ScopeGate.authorize`` resolved and adjudicated the addresses BEFORE the tool launched, then
+    ``_default_capture`` / ``_tls_capture`` handed the NAME to the capture, so the OS re-resolved it at
+    connect time — the rebinding window the pin exists to close. Measured on the unfixed code: the gate
+    authorised 93.184.216.34, the capture dialled the name, and the next resolution returned
+    169.254.169.254.
+
+    Here the resolver flips to the metadata address after the FIRST answer. The pinned capture must dial
+    the literal it validated, and the UNPINNED shape (the old call, exercised alongside) must not be what
+    ships."""
+    from vigil_integration.live import external_tool
+    _grant_active_recon(monkeypatch)
+    _charter_hosts(tmp_path, "rebind.example.test", _PUBLIC)
+    answers = {"n": 0}
+    real = socket.getaddrinfo
+
+    def _flipping(host, port=None, *a, **kw):
+        if str(host) != "rebind.example.test":
+            return real(host, port, *a, **kw)
+        answers["n"] += 1
+        addr = _PUBLIC if answers["n"] <= 1 else _IMDS     # every answer AFTER the pin is the floor case
+        return [(socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", (addr, int(port or 0)))]
+
+    monkeypatch.setattr(socket, "getaddrinfo", _flipping)
+    calls = _count_every_connector(monkeypatch)
+
+    cap = external_tool._default_capture("rebind.example.test", 80, slug="alpha", protocol="tcp")
+
+    assert calls == [(_PUBLIC, 80)], (
+        f"the capture must dial the address the floor VALIDATED, never re-resolve the name; got {calls}")
+    assert cap["connected"] is False   # the recording connector raises; the point is WHICH address
+
+    # ...and the TLS twin is pinned the same way. The resolver has already flipped, so the pin itself now
+    # lands on the metadata address and the floor refuses it BEFORE any handshake — also the right answer.
+    calls.clear()
+    tls = external_tool._tls_capture("rebind.example.test", 443, slug="alpha")
+    assert calls == [], f"a flipped resolver must not produce a handshake; got {calls}"
+    assert "always-denied range" in str(tls.get("error") or ""), tls
+
+
+def test_a_udp_row_still_never_reaches_the_floor_or_a_socket(monkeypatch, tmp_path):
+    """Over-correction control for the added pin in ``_default_capture``: the TCP-only guard must still
+    run FIRST, so a udp-open row is refused by the capture's own soundness check and the floor is never
+    even consulted (a udp row must not become a resolve-and-adjudicate)."""
+    from vigil_integration.live import external_tool
+    _grant_active_recon(monkeypatch)
+    _charter_hosts(tmp_path, "svc.example.test", _PUBLIC)
+    _fake_dns(monkeypatch, {"svc.example.test": _PUBLIC})
+    calls = _count_every_connector(monkeypatch)
+
+    cap = external_tool._default_capture("svc.example.test", 53, slug="alpha", protocol="udp")
+
+    assert calls == []
+    assert cap["connected"] is False and "TCP-only" in str(cap.get("error") or ""), cap
 
 
 # =======================================================================================================

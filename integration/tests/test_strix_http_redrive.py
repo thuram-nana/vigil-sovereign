@@ -483,18 +483,62 @@ def test_redrive_arm_class_sets_are_disjoint():
     }
     # The alias-KEY sets (the spellings a report may carry). A key collision is the one way two arms could
     # claim the SAME report, and an alias key that is another arm's CLASS name shadows that arm's exact-match
-    # branch. DERIVED from the arm names in ``class_sets`` rather than written out: a hand-written dict is
-    # exactly how a new arm gets silently left out of this pin when two slices add arms in parallel, so each
-    # arm's ``run._<ARM>_ALIASES`` is picked up automatically and an arm with no alias map contributes
-    # nothing. The assertion below then states, explicitly, which arms MUST be covered.
-    _ALIAS_ATTR_OVERRIDE = {"xss": "_REFLECTION_ALIASES", "prototype_pollution": "_PROTO_POLLUTION_ALIASES"}
+    # branch.
+    #
+    # The previous version DERIVED these by ``getattr(run, f"_{arm.upper()}_ALIASES", None)`` and dropped
+    # any arm that came back None. That is a silent skip: mutation MA2 added a third arm whose alias map
+    # was named ``_NEWARM_ALIAS_TABLE`` and carried the alias key "timing" — a direct shadow of another
+    # arm's class name — and this test PASSED, because the derived lookup missed the map entirely. The
+    # only guard was the hand-written ``{"smuggling","transport"}`` assertion, i.e. exactly the
+    # hand-written list the old comment condemned.
+    #
+    # So: every arm in ``class_sets`` MUST declare where its alias map lives (or declare, explicitly,
+    # that it has none), and the declaration is checked BOTH ways — an undeclared arm and a stale
+    # declaration both fail loudly.
+    _ALIAS_ATTR = {
+        "web": None,                  # the web arm routes by class/CWE only — no alias spellings
+        "errsig": None,               # likewise
+        "xss": "_REFLECTION_ALIASES",
+        "ssti": "_SSTI_ALIASES",
+        "boolean": "_BOOLEAN_ALIASES",
+        "timing": "_TIMING_ALIASES",
+        "dom_xss": "_DOM_XSS_ALIASES",
+        "prototype_pollution": "_PROTO_POLLUTION_ALIASES",
+        "smuggling": "_SMUGGLING_ALIASES",
+        "transport": "_TRANSPORT_ALIASES",
+    }
+    assert set(_ALIAS_ATTR) == set(class_sets), (
+        "every arm in class_sets must declare its alias map here (use None for an arm that genuinely "
+        f"has none): undeclared arms {sorted(set(class_sets) - set(_ALIAS_ATTR))}, "
+        f"stale declarations {sorted(set(_ALIAS_ATTR) - set(class_sets))}")
     alias_keys = {}
-    for arm in class_sets:
-        aliases = getattr(run, _ALIAS_ATTR_OVERRIDE.get(arm, f"_{arm.upper()}_ALIASES"), None)
-        if aliases is not None:
-            alias_keys[arm] = set(aliases)
+    for arm, attr in _ALIAS_ATTR.items():
+        if attr is None:
+            continue
+        assert hasattr(run, attr), (
+            f"arm {arm!r} declares its alias map as proof.run.{attr}, which does not exist — an arm's "
+            "spellings must never be silently dropped from the collision check")
+        alias_keys[arm] = set(getattr(run, attr))
     assert {"smuggling", "transport"} <= set(alias_keys), (
         f"the S2 transport arms must be alias-key pinned; covered arms: {sorted(alias_keys)}")
+
+    # ...and NO alias map may exist in proof.run that no arm above claims. This is the check that kills
+    # MA2 regardless of what the new map is CALLED: it reads the classifier CALL SITES out of the source,
+    # so an alias map wired into ``_classify_redrive`` but missing from ``_ALIAS_ATTR`` fails here even
+    # though its name matches no convention.
+    import ast
+    import inspect
+    _wired = {
+        node.args[2].id
+        for node in ast.walk(ast.parse(inspect.getsource(run)))
+        if isinstance(node, ast.Call) and getattr(node.func, "id", "") == "_classify_redrive"
+        and len(node.args) >= 3 and isinstance(node.args[2], ast.Name)
+    }
+    _claimed = {attr for attr in _ALIAS_ATTR.values() if attr}
+    assert _wired <= _claimed, (
+        f"alias map(s) {sorted(_wired - _claimed)} are wired into proof.run._classify_redrive but no arm "
+        "in this pin claims them, so their keys are never collision-checked — add the arm to class_sets "
+        "and declare its map in _ALIAS_ATTR")
 
     # An alias key must never be another arm's own CLASS name (that would shadow the exact-match branch).
     for arm, keys in alias_keys.items():

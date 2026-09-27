@@ -229,7 +229,8 @@ def race_bizlogic_redrive(
     # -- the RACE bursts (request_race) — the RUNNER fires the gated raw-socket burst -----------------
     from urllib.parse import urlsplit, urljoin  # noqa: PLC0415
 
-    from .egress_floor import pin_egress  # noqa: PLC0415 — the SHARED never-liftable floor + connect-pin
+    # noqa: PLC0415 — the SHARED never-liftable floor + connect-pin + scope-over-addresses predicate
+    from .egress_floor import charter_address_authorizer, pin_egress
 
     sp = urlsplit(base_url)
     host = sp.hostname or "127.0.0.1"
@@ -239,7 +240,12 @@ def race_bizlogic_redrive(
     # that is the cloud metadata address. Run the ONE shared never-liftable floor over every resolved address
     # HERE, before any burst, and hand ``raw_race`` the VALIDATED LITERAL to dial while ``_build_request``
     # keeps the original hostname in the Host header.
-    race_pin = pin_egress(host, port, slug=slug) if race_targets else None
+    # ``address_authorized`` is the SAME shared predicate the other three re-drive sites use: the floor
+    # allows any globally-routable address, so without it an out-of-scope second A record on an in-scope
+    # name would be burst at. ``pin.scope_over_addresses`` records that the step ran.
+    race_pin = (pin_egress(host, port, slug=slug,
+                           address_authorized=charter_address_authorizer(slug, host))
+                if race_targets else None)
     if race_pin is not None and not race_pin.allowed:
         # The floor refused the ORIGIN, so no burst may be fired at all. Every declared race target is
         # recorded INCONCLUSIVE (VIGIL never observed it) — never a clean, never a FACT. ``res.refused`` is

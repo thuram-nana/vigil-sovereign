@@ -283,7 +283,8 @@ def _gated_raw_burst(origin_url: str, first_payload: bytes, follow_up: bytes, *,
     from framework.v2.agents.scope_gate import validate_action  # noqa: PLC0415 — the ScopeDecision gate
     from framework.v2.verify.reachability_cloud import _authorize  # noqa: PLC0415 — URL-shaped active-recon gate
 
-    from .egress_floor import pin_egress  # noqa: PLC0415 — the SHARED never-liftable floor + connect-pin
+    # noqa: PLC0415 — the SHARED never-liftable floor + connect-pin + scope-over-addresses predicate
+    from .egress_floor import charter_address_authorizer, pin_egress
 
     empty = {"channel": False, "status": None, "reason": "", "body": ""}
 
@@ -314,11 +315,13 @@ def _gated_raw_burst(origin_url: str, first_payload: bytes, follow_up: bytes, *,
     #    cloud instance metadata — the exact case ``vigil_gateway.denylist`` declares charter-independent.
     #    The floor runs FIRST and is not liftable by any scope listing; the charter predicate is kept on top
     #    of it, unchanged, so scope remains necessary as well as insufficient.
-    def _addr_authorized(address: str) -> bool:
-        literal = f"[{address}]" if str(address).count(":") > 1 else address
-        return _authorize(f"http://{literal}/", slug) is None
-
-    resolution = pin_egress(host, port, slug=slug, address_authorized=_addr_authorized)
+    # The predicate is the SHARED ``charter_address_authorizer``, not a local one. The local one asked
+    # ``_authorize`` (and so ``ethics.host_matches_scope``) about the IP LITERAL, a string question only
+    # an IP-literal charter row can satisfy — which made this site refuse a HOSTNAME-ONLY charter such
+    # as the shipped ``targets/testasp/charter.md`` while the transport/race sites allowed it. The
+    # kill-switch / entitlement half of ``_authorize`` already ran above, per request.
+    resolution = pin_egress(host, port, slug=slug,
+                            address_authorized=charter_address_authorizer(slug, host))
     if not resolution.allowed:
         return dict(empty), f"egress-floor/dns-pin refused: {resolution.refused_reason}"
 

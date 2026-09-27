@@ -123,17 +123,27 @@ def _gated_web_send(slug: str, *, timeout: float = 8.0):
 
     from .body_decode import MAX_RAW_BYTES, decode_body
     from .dns_pin import pinned_handlers
-    from .egress_floor import pin_egress   # the SHARED never-liftable floor (same helper as the S2 arms)
+    # the SHARED never-liftable floor + the ONE scope-over-addresses predicate (same as the S2 arms)
+    from .egress_floor import charter_address_authorizer, pin_egress
 
-    def _address_authorized(address: str) -> bool:
-        """Re-ask the SAME gate about the resolved address. Reusing the charter decision (rather than a
-        second, looser rule) is what keeps the pin honest: an address the gate would refuse as a target is
-        refused as a destination. NOTE this is CHARTER-relative and therefore not sufficient on its own —
-        ``ethics.host_matches_scope`` is pure string matching, so a charter that lists a metadata/link-local
-        address satisfies it. ``pin_egress`` runs the charter-INDEPENDENT egress floor underneath it."""
-        scheme = "https" if str(address).count(":") > 1 else "http"   # bracket IPv6 for the URL form
-        literal = f"[{address}]" if str(address).count(":") > 1 else address
-        return _authorize(f"http://{literal}/", slug) is None
+    # SCOPE OVER ADDRESSES. Built ONCE per re-drive, not once per request: it reads the signed charter,
+    # and ``send`` runs ~1000 times in a gate run (B7). The previous local predicate re-asked
+    # ``_authorize`` — and so ``ethics.host_matches_scope`` — about the resolved IP LITERAL. That string
+    # question can only be satisfied by an IP-literal charter row, so this site refused every
+    # HOSTNAME-ONLY charter outright (verified against the shipped ``targets/testasp/charter.md``, scope
+    # ``testasp.vulnweb.com``) while the transport/race sites allowed it. The shared predicate keeps the
+    # honest half of that check — the charter must NAME the address — without the dead path, and the
+    # charter-INDEPENDENT egress floor still runs underneath it inside ``pin_egress``. The kill-switch /
+    # entitlement half of ``_authorize`` still runs per request at the top of ``send``.
+    _authorizers: "dict[str, Any]" = {}
+
+    def _address_authorized_for(target: str):
+        """The shared predicate, memoised per target HOST (it reads the signed charter, and ``send``
+        runs ~1000 times in a gate run — B7)."""
+        hit = _authorizers.get(target)
+        if hit is None:
+            hit = _authorizers[target] = charter_address_authorizer(slug, target)
+        return hit
 
     _EMPTY = {"status": 0, "body": "", "headers": [], "latency_ms": 0.0,
               "body_semantically_available": False, "body_unavailable_reason": "no channel"}
@@ -166,7 +176,7 @@ def _gated_web_send(slug: str, *, timeout: float = 8.0):
         target_host = parts.hostname or ""
         target_port = parts.port or (443 if parts.scheme == "https" else 80)
         resolution = pin_egress(target_host, target_port, slug=slug,
-                                address_authorized=_address_authorized)
+                                address_authorized=_address_authorized_for(target_host))
         if not resolution.allowed:
             state["no_channel"] += 1
             refused = dict(_EMPTY)

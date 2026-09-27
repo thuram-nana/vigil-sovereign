@@ -103,6 +103,10 @@ class TransportRedriveResult:
     # literal the capture was pinned to. A caller/test proves the guard RAN from these, rather than
     # inferring it from the absence of a connection.
     egress_checked: list = field(default_factory=list)
+    # The POSITIVE audit trail for SCOPE OVER ADDRESSES: one ``(address, authorized, reason)`` row per
+    # address the charter predicate adjudicated. Empty iff that step did not run — which is exactly the
+    # gap a mutation of the predicate used to leave invisible.
+    scope_checked: list = field(default_factory=list)
     pinned_address: str = ""
 
     @property
@@ -192,8 +196,14 @@ def _gate_refusal(host: str, port: int, *, slug: str, protocol: str, scheme: str
     if refusal is not None:
         return f"active-connect gate refused: {refusal}", None
     try:
-        from .egress_floor import pin_egress  # noqa: PLC0415 — stdlib + the gateway denylist (no framework)
-        pin = pin_egress(host, int(port), slug=slug)
+        # noqa: PLC0415 — stdlib + the gateway denylist (no framework)
+        from .egress_floor import charter_address_authorizer, pin_egress
+        # SCOPE OVER ADDRESSES. Steps 1 and 2 above authorise a NAME; the floor below allows any
+        # globally-routable ADDRESS. Without the predicate an out-of-scope second A record (8.8.8.8 on
+        # an in-scope name) was allowed HERE while the smuggling/web sites refused it — the shared
+        # docstring advertised the property this site did not have. One predicate, all four sites.
+        pin = pin_egress(host, int(port), slug=slug,
+                         address_authorized=charter_address_authorizer(slug, host))
     except Exception as exc:  # noqa: BLE001 — a floor we could not RUN is a refusal, never a free pass
         return f"egress-floor error (fail-closed): {type(exc).__name__}: {exc}", None
     if not pin.allowed:
@@ -320,6 +330,7 @@ def transport_redrive(endpoint: str = "", *, claimed_class: str, slug: str, enga
                                  scheme=scheme, posture=posture)
     if pin is not None:
         res.egress_checked = list(pin.checked)
+        res.scope_checked = list(pin.scope_checked)
         res.pinned_address = pin.pinned
     if refusal is not None:
         res.refused = True

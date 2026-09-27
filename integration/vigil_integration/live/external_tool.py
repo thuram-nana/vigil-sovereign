@@ -628,7 +628,19 @@ def unicornscan_service_scan(*, ports: str = "1-1024", fact_capable: bool = Fals
 
 def _tls_capture(host: str, port: int, *, slug: str, protocol: str = "tcp") -> dict:
     from framework.v2.verify import capture_tls_handshake  # offense-side only (FATAL-2: function-local)
-    return capture_tls_handshake(host, int(port), slug=slug)
+    from .egress_floor import charter_address_authorizer, pin_egress, pinned_tls_connector
+
+    # PIN THE CONNECT. ``ScopeGate.authorize`` resolved and adjudicated the addresses BEFORE the tool
+    # launched, but this capture was handed the NAME, so the OS re-resolved it at connect time — the
+    # rebinding / short-TTL / poisoned-resolver window the pin exists to close (measured: the gate
+    # authorised 93.184.216.34, the capture dialled the name, the next resolution returned
+    # 169.254.169.254). Resolve once HERE and dial the validated literal; SNI keeps the hostname.
+    pin = pin_egress(host, int(port), slug=slug,
+                     address_authorized=charter_address_authorizer(slug, host))
+    if not pin.allowed:
+        return {"connected": False, "host": str(host), "port": port, "error": pin.refused_reason}
+    return capture_tls_handshake(host, int(port), slug=slug,
+                                 connect=pinned_tls_connector(pin.pinned))
 
 
 def _weak_tls_context(handshake: dict) -> "dict | None":
@@ -813,7 +825,21 @@ def _default_capture(host: str, port: int, *, slug: str, protocol: str) -> dict:
     """Reproduce a bounded, gated handshake with CRUCIBLE's active-recon capture (function-local
     framework import — FATAL-2). The oracle judges THIS retained connect evidence, not the tool's row."""
     from framework.v2.verify import capture_handshake  # offense-side only
-    return capture_handshake(host, port, slug=slug, protocol=protocol)
+    from .egress_floor import charter_address_authorizer, pin_egress, pinned_tcp_connector
+
+    # PIN THE CONNECT — same reason as ``_tls_capture`` above: the pre-launch ``ScopeGate.authorize``
+    # adjudicated ADDRESSES, this capture was given the NAME, and the OS re-resolved it at connect time.
+    # ``capture_handshake``'s own TCP-only guard still runs first (a udp row never reaches a socket), so
+    # the floor is only consulted for a connect that would really have happened.
+    if str(protocol).strip().lower() != "tcp":
+        return capture_handshake(host, port, slug=slug, protocol=protocol)
+    pin = pin_egress(host, int(port), slug=slug,
+                     address_authorized=charter_address_authorizer(slug, host))
+    if not pin.allowed:
+        return {"connected": False, "host": str(host), "port": port, "protocol": protocol,
+                "error": pin.refused_reason}
+    return capture_handshake(host, port, slug=slug, protocol=protocol,
+                             connect=pinned_tcp_connector(pin.pinned))
 
 
 def _preflight_gate_refusal(engagement_slug: str) -> "str | None":
