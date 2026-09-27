@@ -26,7 +26,10 @@ Design rules that make the numbers trustworthy:
     pure XSS sink), and the error page embeds its DB error inside a large static
     body so the boolean differential stays below threshold.
   * **The SAFE endpoints take input and handle it correctly** — a parameterised
-    TWIN of the boolean-SQLi endpoint (same engine and table, bound parameter), a
+    TWIN of the boolean-SQLi endpoint (same engine and table, bound parameter), two
+    DISCRIMINATING no-database controls (a tautology WAF rule and strict input
+    validation, each over a static page, on which a bare differential sees a channel
+    and a sound detector must refuse), a
     parameterised profile lookup, a constant health endpoint, an allow-listed
     download, an
     auto-escaping template, and an ordinary benign page — so a tool that flags them
@@ -440,6 +443,20 @@ _ROWS: tuple[dict[str, object], ...] = (
 )
 
 _USERS_DDL = "CREATE TABLE users (id INTEGER, name TEXT, role TEXT, email TEXT)"
+
+# --- the two DISCRIMINATING CONTROLS' filters (see _locations / _lookup) --------------
+# A ModSecurity-CRS-942130-shaped "SQL tautology" rule. It keys on payload SHAPE — the
+# thing a sound detector must NOT be readable from — and it is deliberately COMPLETE
+# over the shipped clause families, so BOTH truth clusters are blocked identically.
+_CRS_942130 = re.compile(
+    r"""(?ix)
+    (?: \bOR\b | \bAND\b ) \s*
+    (?: '[^']*' | "[^"]*" | \d+ ) \s*
+    (?: = | <> | != | < | > | \bLIKE\b | \bBETWEEN\b | \bIN\b )
+    """
+)
+# Textbook strict input validation: an allow-list, rejecting TRUE and FALSE clauses alike.
+_STRICT_TERM = re.compile(r"[A-Za-z0-9 _-]{0,64}")
 
 
 def _users_db() -> sqlite3.Connection:
@@ -1304,6 +1321,8 @@ class BenchmarkHandler(BaseHTTPRequestHandler):
                 ("/file?name=manual.txt", "Docs"),
                 ("/render?name=guest", "Dashboard"),
                 ("/users/safe?name=guest", "User lookup (safe twin)"),
+                ("/locations?city=lisbon", "Locations (safe, WAF control)"),
+                ("/lookup?term=widget", "Lookup (safe, validation control)"),
                 ("/profile?name=guest", "Profile (safe)"),
                 ("/api/health?check=all", "Health (safe)"),
                 ("/download?file=manual.pdf", "Download (safe)"),
@@ -1425,8 +1444,65 @@ class BenchmarkHandler(BaseHTTPRequestHandler):
         # always-FALSE probe lands on the identical "No results found." body and the
         # truth-value partition does not exist. This is the negative control that
         # makes the planted bug's confirmation mean something: a detector that fires
-        # on /users but not here is reading the INJECTION, not the payload's shape.
+        # HERE is reading a payload's SHAPE, so this endpoint refutes that detector.
+        #
+        # It does NOT prove the converse, and the corpus must not imply it. Firing on
+        # /users but not here is exactly what the bare, UNSOUND DifferentialCheck does
+        # (measured: it confirms on /users, returns None here) — and that check is
+        # definitionally a payload-shape reader; it was reproduced minting on a
+        # WAF-tautology static page AND on a strict-input-validation static page,
+        # neither with a database. Discriminating a shape-reader from an
+        # injection-reader needs a surface where the SHAPE is present and the
+        # INJECTION is not: that is /locations?city and /lookup?term below.
         self._respond(200, self._users_body(_safe_match(self._query("name"))))
+
+    def _locations(self) -> None:
+        # DISCRIMINATING CONTROL 1 — a ModSecurity-CRS-942130-shaped TAUTOLOGY RULE in
+        # front of a STATIC page. There is NO DATABASE here and NO query of any kind:
+        # the body is a constant that does not depend on `city` at all. The only thing
+        # the input can change is whether the WAF blocks it.
+        #
+        # This is the surface that separates a SHAPE reader from an INJECTION reader,
+        # which /users/safe cannot do. A bare benign-vs-payload differential HAS NO
+        # ATTRIBUTION STEP, so it reads 200-static vs 403-blocked as a boolean channel
+        # and mints — measured at rate 1.0 against exactly this shape, on a target with
+        # no database (audit C; see verify.verifier.DIFFERENTIAL_LEAD_ONLY_CLASSES).
+        # The SOUND SPRT must REFUSE: the rule keys on payload SHAPE, and every clause
+        # in a sound family — TRUE and FALSE alike — carries the same tautology shape,
+        # so both truth clusters land on the SAME 403 and never partition.
+        #
+        # OFF-MANIFEST by construction: anything reported here is a false positive.
+        city = self._query("city")
+        if _CRS_942130.search(city):
+            self._respond(403, _page(
+                "Blocked", "<h2>Request blocked</h2><p>Your request was rejected by the "
+                           "web application firewall (rule 942130).</p>"))
+            return
+        self._respond(200, _page(
+            "Locations", "<h2>Locations</h2><p>We operate from three sites: Lisbon, "
+                         "Tallinn and Osaka. Opening hours are 09:00-17:00 local time.</p>"))
+
+    def _lookup(self) -> None:
+        # DISCRIMINATING CONTROL 2 — TEXTBOOK STRICT INPUT VALIDATION in front of a
+        # STATIC page. Again NO DATABASE and no query: `term` is validated and then
+        # THROWN AWAY. The body is constant.
+        #
+        # This is the more damning of the two, because here the DEFENCE IS THE TRIGGER:
+        # the app is doing the correct thing, and a differential reads its 400 as
+        # evidence of the very injection the validation prevents (measured at 0.87 on
+        # 3/3 runs). A sound SPRT refuses for the same reason as above — the allow-list
+        # rejects TRUE and FALSE clauses identically, so the clusters never separate.
+        #
+        # OFF-MANIFEST by construction: anything reported here is a false positive.
+        term = self._query("term")
+        if not _STRICT_TERM.fullmatch(term):
+            self._respond(400, _page(
+                "Bad request", "<h2>Invalid input</h2><p>The search term may contain only "
+                               "letters, digits, spaces, underscores and hyphens.</p>"))
+            return
+        self._respond(200, _page(
+            "Lookup", "<h2>Lookup</h2><p>Reference data is refreshed nightly. Use the "
+                      "catalogue number printed on your invoice.</p>"))
 
     def _health(self) -> None:
         # SAFE: constant response, input ignored.
@@ -1576,6 +1652,8 @@ _ROUTES = {
     "/redirect": BenchmarkHandler._redirect,
     "/render": BenchmarkHandler._render,
     "/users/safe": BenchmarkHandler._users_safe,
+    "/locations": BenchmarkHandler._locations,
+    "/lookup": BenchmarkHandler._lookup,
     "/profile": BenchmarkHandler._profile,
     "/api/health": BenchmarkHandler._health,
     "/download": BenchmarkHandler._download,
@@ -1711,14 +1789,26 @@ def benchmark_corpus(base_url: str) -> CorpusTarget:
     two host/endpoint-level classes (CORS, exposures) as the ``request:<check-id>``
     token CRUCIBLE emits for a request-level finding.
 
-    Eleven planted bugs; the six SAFE endpoints (``/users/safe``, ``/profile``,
-    ``/api/health``, ``/download``, ``/greeting``, ``/support``) are intentionally
-    absent — anything a tool reports on them is a false positive by construction.
+    Eleven planted bugs; the eight SAFE endpoints (``/users/safe``, ``/locations``,
+    ``/lookup``, ``/profile``, ``/api/health``, ``/download``, ``/greeting``,
+    ``/support``) are intentionally absent — anything a tool reports on them is a false
+    positive by construction.
 
-    ``/users/safe`` is the parameterised twin of the planted boolean-SQLi at
-    ``/users?name``: same engine, same table, same rendering, bound parameter. It is
-    the negative control the boolean FACT is measured against — a detector that fires
-    there is reading a payload's SHAPE rather than an injection."""
+    THREE of them are the boolean-SQLi negative controls, and they do different jobs:
+
+      * ``/users/safe`` — the parameterised twin of the planted boolean-SQLi at
+        ``/users?name``: same engine, same table, same rendering, bound parameter. A
+        detector that fires THERE is reading a payload's SHAPE rather than an injection.
+        It does not prove the converse: a shape reader does not fire there either.
+      * ``/locations?city`` — a CRS-942130-shaped SQL-tautology WAF rule in front of a
+        STATIC page with NO DATABASE.
+      * ``/lookup?term`` — textbook STRICT INPUT VALIDATION in front of a STATIC page
+        with NO DATABASE, where the DEFENCE IS THE TRIGGER.
+
+    The last two are the DISCRIMINATING controls: the payload SHAPE is present and the
+    INJECTION is not, so a bare benign-vs-payload differential sees a channel on both
+    (measured) while a sound truth-value-attribution detector must refuse. They are what
+    make the ``fp`` column able to catch an unsound boolean detector at all."""
     expected = [
         ExpectedFinding(bug_class="xss", location="/search?q"),
         ExpectedFinding(bug_class="boolean_sqli", location="/users?name"),
@@ -1740,11 +1830,15 @@ def benchmark_corpus(base_url: str) -> CorpusTarget:
             "Self-contained labelled benchmark: reflected XSS, boolean-blind SQLi, "
             "error-based SQLi, open redirect, path traversal, SSTI (server-side "
             "template evaluation), host-header injection, CORS-with-credentials, and "
-            "three exposures (.git/config, .env, Spring /actuator/env), plus six SAFE "
-            "controls (/users/safe, /profile, /api/health, /download, /greeting, "
-            "/support) that must not be flagged. /users/safe is the PARAMETERISED "
-            "twin of the boolean-SQLi endpoint — same sqlite3 engine, same table, "
-            "same rendering, bound parameter instead of a concatenated one."
+            "three exposures (.git/config, .env, Spring /actuator/env), plus eight SAFE "
+            "controls (/users/safe, /locations, /lookup, /profile, /api/health, "
+            "/download, /greeting, /support) that must not be flagged. Three of those "
+            "are the boolean-SQLi negative controls: /users/safe is the PARAMETERISED "
+            "twin of the boolean-SQLi endpoint (same sqlite3 engine, same table, same "
+            "rendering, bound parameter), while /locations (a CRS-942130 tautology WAF "
+            "rule) and /lookup (strict input validation) are STATIC pages with NO "
+            "DATABASE on which a bare differential sees a channel and a sound "
+            "truth-value-attribution detector must refuse."
         ),
     )
 

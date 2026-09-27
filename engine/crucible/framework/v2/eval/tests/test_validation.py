@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import sqlite3
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Iterator
@@ -53,9 +54,34 @@ import pytest
 # ---------------------------------------------------------------------------
 
 
-def _looks_sqli(value: str) -> bool:
-    low = value.lower()
-    return "'='" in value or " or " in low
+_ITEMS_DDL = "CREATE TABLE items (id INTEGER, label TEXT)"
+_ITEMS_SELECT = "SELECT id, label FROM items WHERE (label = \'{q}\') ORDER BY id"
+
+
+def _items_match(value: str) -> list[tuple[int, str]]:
+    """PLANTED BUG: ``value`` is CONCATENATED into a real sqlite3 WHERE clause, so the
+    row set is a function of the injected expression's TRUTH VALUE for every comparison
+    shape SQL understands — not of the payload's SHAPE.
+
+    This used to be ``_looks_sqli``: ``"\'=\'" in value or " or " in value.lower()``. That is a
+    payload-shape MATCHER with no SQL engine, and it modelled the vulnerability wrongly in a
+    way that mattered. Every clause a sound boolean detector sends — always-TRUE *and*
+    always-FALSE alike — contains `` OR ``, so the matcher returned the 40-row page for BOTH
+    truth values and NO truth-value partition existed. The only detector it rewarded was a bare
+    benign-vs-payload differential, which is exactly the detector
+    ``verify.verifier.DIFFERENTIAL_LEAD_ONLY_CLASSES`` now refuses to let confirm this class,
+    because it was measured minting against a WAF block page and against strict input
+    validation on targets with no database. A real engine removes the artifact."""
+    con = sqlite3.connect(":memory:")
+    try:
+        con.execute(_ITEMS_DDL)
+        con.executemany("INSERT INTO items VALUES (?,?)",
+                        [(i, f"record #{i}") for i in range(40)])
+        return con.execute(_ITEMS_SELECT.replace("{q}", value)).fetchall()
+    except sqlite3.Error:
+        return []
+    finally:
+        con.close()
 
 
 class _VulnApp(BaseHTTPRequestHandler):
@@ -64,9 +90,11 @@ class _VulnApp(BaseHTTPRequestHandler):
       * ``/reflect?q=`` echoes ``q`` UNESCAPED when it carries markup ('<') —
         reflected XSS. The XSS canary reflects; the SQLi/benign probes (no '<')
         hit a constant branch, so nothing else fires here.
-      * ``/items?filter=`` returns a large row set on a tautology and a tiny one
-        otherwise — a boolean-blind SQLi differential. ``filter`` is never
-        reflected, so the XSS check cannot fire here.
+      * ``/items?filter=`` concatenates ``filter`` into a REAL sqlite3 ``WHERE`` clause,
+        so an always-true clause of ANY comparison shape returns every row and its
+        length-matched always-false twin returns none — a genuine boolean-inference
+        channel. ``filter`` is never reflected and a syntax error yields no rows, so
+        neither the XSS check nor an error-based check can fire here.
     """
 
     def log_message(self, *args: object) -> None:  # silence the access log
@@ -93,9 +121,9 @@ class _VulnApp(BaseHTTPRequestHandler):
             return
 
         if sp.path == "/items":
-            filt = params.get("filter", [""])[0]
-            if _looks_sqli(filt):
-                rows = "\n".join(f"row {i}: record #{i}" for i in range(40))
+            matched = _items_match(params.get("filter", [""])[0])
+            if matched:
+                rows = "\n".join(f"row {i}: {label}" for i, label in matched)
                 self._reply(200, f"items:\n{rows}")
             else:
                 self._reply(200, "items:\nno results")
