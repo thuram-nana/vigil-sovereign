@@ -1084,11 +1084,20 @@ def runtime_redrive(url: str, *, slug: str, engagement_slug: str, signers: "list
                     # a claim the runner has already measured.
                     assignment, value, why = _secret_assignment(body, signature)
                     if not assignment:
+                        # THE WRAPPER MAY NOT OUT-CLAIM ``why``. It used to append "so what was
+                        # observed is a key being NAMED (documentation, a CI template, a bundled string,
+                        # a shipped placeholder)" to EVERY refusal reason — an INFERENCE, and a false one
+                        # whenever the reason is narrower than that: on a CR-terminated .env carrying a
+                        # genuine credential the anchor refuses because the prefix on its line is
+                        # non-blank, which is not evidence of documentation or a template. ``why`` is
+                        # already hedged precisely; the tail now states only what follows from it for
+                        # EVERY value of ``why`` (an empty right-hand side IS still an assignment, so
+                        # "this is not an assignment" would be the same error in the other direction).
+                        # Same class as D2 — do not let an unobserved claim back in through a wrapper.
                         _note(res,
                               f"exposure: value-shape refused [{probe_path}] — the signature "
-                              f"{signature!r} is present in the body but {why}, so what was observed is a "
-                              f"key being NAMED (documentation, a CI template, a bundled string, a "
-                              f"shipped placeholder) rather than a leaked value {_NOT_ADMITTED}")
+                              f"{signature!r} is present in the body but {why}, so this occurrence does "
+                              f"not evidence a leaked value {_NOT_ADMITTED}")
                         continue
                     observed["secret_assignment"] = assignment
                     observed["secret_value"] = value

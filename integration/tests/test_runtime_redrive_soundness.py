@@ -1176,3 +1176,55 @@ def test_b4_the_registry_limitation_matches_what_the_seam_actually_does():
         "registry's 'the arm is still driven' is false on the operator's primary route")
     assert set(RUNTIME_LEAD_CLASSES) <= set(RUNTIME_REDRIVE_CLASSES)
     assert "still driven" in _traversal_row()["limitation"]
+
+
+@pytest.mark.parametrize("label,body,accepted", [
+    ("lf",     "APP_ENV=prod\nDB_PASSWORD=S3cr3t-Real-Prod-Key\n",        True),
+    ("crlf",   "APP_ENV=prod\r\nDB_PASSWORD=S3cr3t-Real-Prod-Key\r\n",    True),
+    ("cr-only", "APP_ENV=prod\rDB_PASSWORD=S3cr3t-Real-Prod-Key\r",       False),
+    ("stray-u-feff", "APP_ENV=prod\n﻿DB_PASSWORD=S3cr3t-Real-Prod-Key\n", False),
+])
+def test_b1_the_disclosed_line_terminator_false_refuses_stay_disclosed(label, body, accepted):
+    """PINS A DISCLOSED LIMITATION, not a desired behaviour.
+
+    The assignment anchor finds the line start with ``rfind("\\n")`` only and rejects a prefix that
+    ``str.strip()`` leaves non-blank, so two shapes are measured FALSE REFUSES of a genuine credential:
+    a CR-ONLY body (classic-Mac / some exporters) presents as a single line, and a stray U+FEFF before a
+    line-start key is not stripped. Both are recorded in exposure.secret_signature's ``limitation``.
+
+    A real UTF-8 byte-order mark does NOT reach here — ``body_decode`` selects ``utf-8-sig`` and strips
+    it — so only a genuine mid-document U+FEFF triggers the second case.
+
+    IF YOU FIX EITHER, update that ``limitation`` in the SAME commit and flip the expectation here. The
+    point of this control is that a measured claim in the registry cannot rot silently, which is exactly
+    the failure NB-1 caught one paragraph further down the same row."""
+    from vigil_integration.live.runtime_redrive import _secret_assignment
+    assignment, value, why = _secret_assignment(body, "DB_PASSWORD=")
+    if accepted:
+        assert why == "" and value == "S3cr3t-Real-Prod-Key", (label, why, value)
+    else:
+        assert not assignment and "does not begin an assignment" in why, (label, why)
+
+
+_NOT_ADMITTED_SENTINEL = "{_NOT_ADMITTED}"
+
+
+def test_the_value_shape_refusal_note_never_out_claims_its_reason():
+    """NB-3, as a property over EVERY refusal reason the extractor can produce. The note wrapper used to
+    append "so what was observed is a key being NAMED (documentation, a CI template, a bundled string, a
+    shipped placeholder)" to all of them — an inference, false whenever the reason is narrower (a
+    CR-terminated .env with a real credential is refused for a non-blank line prefix, which is not
+    evidence of documentation). Same class as D2."""
+    src = (_REPO_ROOT / "integration" / "vigil_integration" / "live" / "runtime_redrive.py").read_text(
+        encoding="utf-8")
+    import re
+    note = src[src.index('f"exposure: value-shape refused'):]
+    note = note[:note.index(_NOT_ADMITTED_SENTINEL)]
+    note = re.sub(r'"\s*\n\s*f"', "", note)      # join the adjacent f-string fragments
+    for inference in ("key being NAMED (", "documentation, a CI template", "shipped placeholder"):
+        assert inference not in note, (
+            f"the refusal note asserts {inference!r} for every value of `why`, including reasons that do "
+            f"not support it")
+    assert "does not evidence a leaked value" in note, (
+        "the note must state only what follows from `why` for every value of `why`")
+

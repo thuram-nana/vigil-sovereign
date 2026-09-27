@@ -181,7 +181,7 @@ These are recorded so no future slice "closes" them by fabricating a FACT:
   `postmessage_exploited` and `csp_bypass` on the same predicate.
   **SCOPE — the demotion binds ONE layer.** `fact_capable:false` is enforced only by `live/verdict.py::admit`,
   the sole reader of this registry, so it binds `live/runtime_redrive.py`, `live/wiring.py` and the Strix
-  proof rail. The CORE ENGINE never imports the integration layer, and measured on the same commit
+  proof rail. The CORE ENGINE has no PRODUCTION import of the integration layer (measured: five such imports under `scanner/`/`verify/`, all five in `scanner/tests/`), and measured on the same commit
   `framework.v2 scan` still emits `grounding:"fact"`/High/0.90 for 11/11 benign origins via
   `scanner/checks.py::ContentSignatureCheck`, `framework.v2 verify` re-verifies them `ok=True`,
   and `aegis/inspect.py:547` / `scanner/library.py:404` return `decision='confirmed'` / `action='block'`
