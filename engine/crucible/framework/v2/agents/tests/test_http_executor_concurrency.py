@@ -7,25 +7,41 @@ different insertion points, and every one of those requests goes through the SAM
 extra traffic or a higher request rate — the two things §VI of the constitution forbids.
 These tests pin exactly that:
 
-  * the posture's minimum inter-request interval is honoured START-to-START, so N
-    concurrent callers are spaced by the floor instead of bursting through one stale
-    anchor (:func:`test_rate_floor_is_honoured_with_concurrent_callers`);
+  * the posture's minimum inter-request interval is honoured START-to-START, measured at
+    the ORIGIN, so N concurrent callers are spaced by the floor instead of bursting
+    through one stale anchor (:func:`test_rate_floor_is_honoured_with_concurrent_callers`);
   * the serial path's spacing semantics are unchanged — still measured from the previous
     request's COMPLETION (:func:`test_serial_spacing_is_unchanged`);
   * the per-engagement request budget is a hard cap even with requests in flight that have
-    not yet been tallied (:func:`test_budget_is_never_overshot_under_concurrency`);
-  * counters stay exact and evidence directories stay distinct
-    (:func:`test_counters_are_exact_under_concurrency`,
-    :func:`test_action_ids_are_unique`).
+    not yet been tallied (:func:`test_budget_is_never_overshot_under_concurrency`), and a
+    reservation is NEVER leaked, whatever happens after it is taken
+    (:func:`test_a_refusal_after_the_reservation_does_not_leak_a_budget_slot`);
+  * the counter bookkeeping really is inside the mutual-exclusion region
+    (:func:`test_mark_request_done_runs_under_the_executor_lock`) — an unguarded
+    read-modify-write drifts the budget and can move the rate anchor BACKWARDS;
+  * evidence directories stay distinct across mints, across two executors in one process
+    and across a restart, and the id stays a usable wall-clock timestamp
+    (:func:`test_action_ids_are_unique`,
+    :func:`test_action_ids_do_not_collide_across_executors`,
+    :func:`test_action_id_tracks_the_wall_clock`).
+
+**The origin matters.** ``pytest_httpserver`` serialises the requests it accepts, so a
+concurrency assertion made against it measures the FIXTURE, not the executor: the
+rate-floor test below passed unchanged with the whole W7 anchor reservation removed. The
+rate tests therefore run against a threaded loopback origin that genuinely accepts in
+parallel and timestamps each request as it arrives.
 """
 
 from __future__ import annotations
 
+import contextlib
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from typing import Iterator
 
 import pytest
 from pytest_httpserver import HTTPServer
@@ -80,6 +96,58 @@ class _Req:
     body: str | None = None
 
 
+class _ConcurrentOrigin(BaseHTTPRequestHandler):
+    """A loopback origin that really does serve in parallel, and records WIRE ARRIVAL.
+
+    ``ThreadingHTTPServer`` hands each accepted connection to its own thread, so N gated
+    fetches overlap here exactly as they would against a real app — which is the whole
+    premise of the interleave, and the thing ``pytest_httpserver`` cannot exhibit."""
+
+    arrivals: list[float] = []
+    _lock = threading.Lock()
+    delay: float = 0.0
+
+    def log_message(self, *a: object) -> None:
+        return
+
+    def do_GET(self) -> None:  # noqa: N802
+        with _ConcurrentOrigin._lock:
+            _ConcurrentOrigin.arrivals.append(time.monotonic())
+        if _ConcurrentOrigin.delay:
+            time.sleep(_ConcurrentOrigin.delay)
+        body = b"ok"
+        self.send_response(200)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
+@contextlib.contextmanager
+def _concurrent_origin(delay: float = 0.0) -> Iterator[str]:
+    _ConcurrentOrigin.arrivals = []
+    _ConcurrentOrigin.delay = delay
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), _ConcurrentOrigin)
+    srv.daemon_threads = True
+    srv.request_queue_size = 128
+    th = threading.Thread(target=srv.serve_forever, daemon=True)
+    th.start()
+    try:
+        yield f"http://127.0.0.1:{srv.server_address[1]}"
+    finally:
+        srv.shutdown()
+        srv.server_close()
+        th.join(timeout=5)
+
+
+def _executor_at(base_url: str, **kwargs) -> HttpExecutor:
+    return HttpExecutor(
+        engagement_slug="alpha",
+        base_url=base_url,
+        prompt_callback=lambda _q, _t: False,
+        **kwargs,
+    )
+
+
 def _executor(httpserver: HTTPServer, **kwargs) -> HttpExecutor:
     return HttpExecutor(
         engagement_slug="alpha",
@@ -94,65 +162,95 @@ def _executor(httpserver: HTTPServer, **kwargs) -> HttpExecutor:
 # ---------------------------------------------------------------------------
 
 
-def test_rate_floor_is_honoured_with_concurrent_callers(isolated_engagement, httpserver: HTTPServer):
-    """N concurrent gated fetches must still leave >= the posture floor between request
-    STARTS. Before the W7 lock each caller read the same stale completion anchor and they
-    all fired at once — N x the authorized rate. The floor is the rate limit; overlapping
-    the *waits* is allowed, exceeding the *rate* is not."""
+def test_rate_floor_is_honoured_with_concurrent_callers(isolated_engagement):
+    """N concurrent gated fetches must still leave >= the posture floor between the
+    requests ARRIVING AT THE ORIGIN.
+
+    Two things this has to get right, both of which an earlier version got wrong:
+
+    * the origin must genuinely accept in parallel. Against ``pytest_httpserver`` the
+      observed "gaps" were the fixture handler's own ``time.sleep(0.25)``, serialised by
+      the fixture — that version passed unchanged at base AND with the whole W7 anchor
+      reservation removed, i.e. it measured nothing;
+    * the arrival timestamps must come from the WIRE, not from the caller. The
+      reservation anchors gate EXIT, and anything expensive between gate exit and the
+      socket (building the shared httpx client, once) compresses the first inter-arrival
+      gap — measured at 0.137s against a 0.2s floor before the client was warmed ahead
+      of the spacing window.
+
+    Removing the reservation gives ``gaps=[0,0,0,0,0]``: a full 6x burst past the
+    authorized rate. That is the §VI hole the lock closes."""
     isolated_engagement("alpha", "127.0.0.1")
-    starts: list[float] = []
-    lock = threading.Lock()
-
-    def handler(_request) -> Response:
-        with lock:
-            starts.append(time.monotonic())
-        time.sleep(0.25)  # a slow endpoint: this is the idle time the interleave overlaps
-        return Response("ok", status=200)
-
-    httpserver.expect_request("/probe").respond_with_handler(handler)
-    ex = _executor(httpserver, request_budget=100)
     floor = _RATE_PROFILES["TEST"][0]
     assert floor > 0, "the TEST posture must declare a real rate floor for this test to bite"
-
     n = 6
-    try:
-        with ThreadPoolExecutor(max_workers=n) as pool:
-            list(pool.map(
-                lambda i: ex.gated_fetch(_Req(url=f"http://127.0.0.1:{httpserver.port}/probe?i={i}")),
-                range(n)))
-    finally:
-        ex.close()
+    body_delay = 0.25  # a slow endpoint: the idle time the interleave exists to overlap
 
-    assert len(starts) == n
-    starts.sort()
-    gaps = [b - a for a, b in zip(starts, starts[1:])]
+    with _concurrent_origin(delay=body_delay) as base:
+        ex = _executor_at(base + "/", request_budget=100)
+        try:
+            t0 = time.monotonic()
+            with ThreadPoolExecutor(max_workers=n) as pool:
+                list(pool.map(lambda i: ex.gated_fetch(_Req(url=f"{base}/probe?i={i}")), range(n)))
+            elapsed = time.monotonic() - t0
+        finally:
+            ex.close()
+        arrivals = sorted(_ConcurrentOrigin.arrivals)
+
+    assert len(arrivals) == n
+    gaps = [b - a for a, b in zip(arrivals, arrivals[1:])]
     # A small tolerance for scheduling slop; the defect this guards produced gaps of ~0.
     assert min(gaps) >= floor * 0.85, f"rate floor {floor}s breached: gaps={gaps}"
     # …and the requests really did overlap, otherwise the test proves nothing about
-    # concurrency: 6 serial 0.25s responses plus 6 x 0.2s spacing could not fit in this.
-    assert starts[-1] - starts[0] < n * (floor + 0.25) * 0.9
+    # concurrency: 6 SERIAL 0.25s responses each followed by a 0.2s completion-anchored
+    # floor could not fit in this.
+    assert elapsed < n * (floor + body_delay) * 0.9, (
+        f"no overlap: {elapsed:.2f}s is the serial cost, not the interleaved one")
 
 
-def test_serial_spacing_is_unchanged(isolated_engagement, httpserver: HTTPServer):
+def test_serial_spacing_is_unchanged(isolated_engagement):
     """The serial path still spaces from the previous request's COMPLETION — the
     start-instant reservation added for concurrency is superseded by the completion
     timestamp, so a single-threaded run behaves exactly as before."""
     isolated_engagement("alpha", "127.0.0.1")
     body_delay = 0.15
-    httpserver.expect_request("/probe").respond_with_handler(
-        lambda _r: (time.sleep(body_delay), Response("ok", status=200))[1])
-    ex = _executor(httpserver, request_budget=10)
     floor = _RATE_PROFILES["TEST"][0]
-    try:
-        t0 = time.monotonic()
-        for i in range(3):
-            ex.gated_fetch(_Req(url=f"http://127.0.0.1:{httpserver.port}/probe?i={i}"))
-        elapsed = time.monotonic() - t0
-    finally:
-        ex.close()
+    with _concurrent_origin(delay=body_delay) as base:
+        ex = _executor_at(base + "/", request_budget=10)
+        try:
+            t0 = time.monotonic()
+            for i in range(3):
+                ex.gated_fetch(_Req(url=f"{base}/probe?i={i}"))
+            elapsed = time.monotonic() - t0
+        finally:
+            ex.close()
     # 3 requests: 3 x body_delay of I/O plus 2 completion-anchored floors between them.
     lower = 3 * body_delay + 2 * floor
     assert elapsed >= lower * 0.9, f"serial spacing loosened: {elapsed:.3f}s < {lower:.3f}s"
+
+
+def test_a_dry_run_does_not_pay_the_rate_floor(isolated_engagement):
+    """A dry run puts nothing on the wire, so it must not be spaced by the posture floor.
+
+    This is not cosmetic: the start-instant reservation, applied unconditionally, made
+    every dry-run action wait the full floor — 100 actions went from ~0.0s to ~20s — and
+    ``dry_run`` is threaded from real operator paths (repeater.Repeater, its tool,
+    mcp.server, engage_fusion), all defaulting False. The anchor tracks bytes on the wire;
+    a dry run writes none."""
+    isolated_engagement("alpha", "127.0.0.1")
+    ex = _executor_at("http://127.0.0.1:1/", request_budget=1000, dry_run=True)
+    floor = _RATE_PROFILES["TEST"][0]
+    try:
+        t0 = time.monotonic()
+        for i in range(8):
+            out = ex.gated_fetch(_Req(url=f"http://127.0.0.1:1/probe?i={i}"))
+            assert not out.get("refused")
+        elapsed = time.monotonic() - t0
+    finally:
+        ex.close()
+    assert ex.stats()["requests_made"] == 8      # still budgeted, still tallied
+    assert elapsed < floor, (
+        f"a dry run paid the rate floor: {elapsed:.3f}s for 8 actions (floor {floor}s each)")
 
 
 # ---------------------------------------------------------------------------
@@ -192,8 +290,11 @@ def test_budget_is_never_overshot_under_concurrency(isolated_engagement, httpser
 
 
 def test_counters_are_exact_under_concurrency(isolated_engagement, httpserver: HTTPServer):
-    """``requests_made`` is a plain ``+= 1`` read-modify-write; under threads it must be
-    guarded or the budget silently drifts. Every issued request is tallied exactly once."""
+    """Every issued request is tallied exactly once and every in-flight reservation comes
+    back. (The read-modify-write race this protects against is not reliably observable
+    under the GIL, so the guard itself is pinned deterministically by
+    :func:`test_mark_request_done_runs_under_the_executor_lock`; this is the end-to-end
+    accounting check.)"""
     isolated_engagement("alpha", "127.0.0.1")
     httpserver.expect_request("/probe").respond_with_data("ok", status=200)
     n = 24
@@ -209,10 +310,14 @@ def test_counters_are_exact_under_concurrency(isolated_engagement, httpserver: H
     assert ex._reserved == 0, "every in-flight reservation must be released"
 
 
+def _proto() -> HttpExecutor:
+    return HttpExecutor(engagement_slug="<proto>", base_url="http://127.0.0.1:1", dry_run=True)
+
+
 def test_action_ids_are_unique():
     """Two actions in the same millisecond must not share an evidence directory — which
     concurrent probes (and fast loopback traffic) produce routinely."""
-    ex = HttpExecutor(engagement_slug="<proto>", base_url="http://127.0.0.1:1", dry_run=True)
+    ex = _proto()
     ids: list[str] = []
     lock = threading.Lock()
 
@@ -224,4 +329,111 @@ def test_action_ids_are_unique():
     with ThreadPoolExecutor(max_workers=8) as pool:
         list(pool.map(mint, range(500)))
     assert len(set(ids)) == len(ids)
-    assert all(i.startswith("H-") and len(i) == 11 for i in ids)
+    assert all(i.startswith("H-") for i in ids)
+    assert all("/" not in i and "\\" not in i and ".." not in i for i in ids)  # path-safe
+
+
+def test_action_ids_do_not_collide_across_executors():
+    """Within-executor uniqueness is NOT the collision class that bites.
+
+    ``engage`` builds two HttpExecutors in one process, and a restarted process starts
+    minting from the clock again — so an id derived only from a per-executor counter
+    lands on evidence directories another executor (or a previous run) already wrote, and
+    ``_evidence_dir`` overwrites the captured exchange. Two independent instances must
+    never produce the same id."""
+    a, b = _proto(), _proto()
+    ids_a = {a._next_action_id() for _ in range(3000)}
+    ids_b = {b._next_action_id() for _ in range(3000)}
+    assert len(ids_a) == len(ids_b) == 3000
+    assert not (ids_a & ids_b), "two executors in one process minted the same action id"
+
+
+def test_action_id_tracks_the_wall_clock():
+    """The id must stay a TIMESTAMP. §VI.4 asks the operator to grep their own logs and
+    find our traffic by it, so the minter may not advance a counter past the clock to buy
+    uniqueness: 20,000 mints in ~20 ms once left such a counter 20 SECONDS in the future,
+    at which point the id names no real instant at all."""
+    ex = _proto()
+    ids = [ex._next_action_id() for _ in range(20000)]
+    now_ms = int(time.time() * 1000)
+    stamps = [int(i.split("-")[1]) for i in ids]
+    assert max(stamps) <= now_ms + 50, (
+        f"the action-id clock ran {max(stamps) - now_ms} ms ahead of real time")
+    assert min(stamps) >= now_ms - 60_000
+    assert stamps == sorted(stamps)  # still monotone, so ids still sort by time
+
+
+# ---------------------------------------------------------------------------
+# the guards themselves — each of these fails if its guard is deleted
+# ---------------------------------------------------------------------------
+
+
+def test_mark_request_done_runs_under_the_executor_lock():
+    """``_mark_request_done`` must do its bookkeeping inside the mutual-exclusion region.
+
+    Unguarded, ``self._requests_made += 1`` is a read-modify-write that silently drifts
+    the budget, and ``self._last_request_at = max(self._last_request_at, time.time())``
+    can LOSE an update and move the anchor BACKWARDS — which lets the next request fire
+    before the floor. Both are invisible in a plain concurrency assertion under the GIL,
+    so this pins the guard directly and deterministically: holding the executor's lock
+    from outside must block every marker."""
+    ex = _proto()
+    markers = [threading.Thread(target=ex._mark_request_done) for _ in range(32)]
+    with ex._lock:
+        for t in markers:
+            t.start()
+        time.sleep(0.1)
+        assert ex.stats()["requests_made"] == 0, (
+            "a marker tallied while the executor lock was held — the bookkeeping is "
+            "outside the critical section")
+    for t in markers:
+        t.join(timeout=5)
+    assert ex.stats()["requests_made"] == 32
+
+
+def test_a_refusal_after_the_reservation_does_not_leak_a_budget_slot(isolated_engagement):
+    """A budget reservation that is taken and never released permanently shrinks the
+    engagement: ten leaks turn a budget of ten into zero real requests — a silent
+    self-DoS. The reservation is the last thing the gate chain does, and everything after
+    it is wrapped so a refusal OR an exception releases it first. This pins that: make the
+    only post-reservation step blow up, and the slot must still come back."""
+    isolated_engagement("alpha", "127.0.0.1")
+    ex = _executor_at("http://127.0.0.1:1/", request_budget=10)
+    boom = {"n": 0}
+
+    def _explode() -> None:
+        boom["n"] += 1
+        raise RuntimeError("rate limiter exploded")
+
+    ex._sleep_for_rate_limit = _explode  # type: ignore[method-assign]
+    try:
+        for _ in range(10):
+            with pytest.raises(RuntimeError, match="rate limiter exploded"):
+                ex.gated_fetch(_Req(url="http://127.0.0.1:1/probe"))
+            assert ex._reserved == 0, "a post-reservation failure leaked a budget slot"
+    finally:
+        ex.close()
+    assert boom["n"] == 10
+    # the budget was never spent, so the next action is still admitted by the budget gate.
+    assert ex.stats()["requests_made"] == 0
+
+
+def test_engine_send_counter_runs_under_its_lock():
+    """``AuditEngine._counted_send`` checks the scan budget and spends it; unguarded, K
+    concurrent timing probes can each spend the same last slot. Same shape as above:
+    holding the engine's send lock from outside must block every sender."""
+    from framework.v2.scanner.engine import AuditEngine
+    from framework.v2.scanner.insertion import HttpRequest
+
+    engine = AuditEngine(lambda _r: {"status": 200, "body": ""})
+    req = HttpRequest(method="GET", url="http://127.0.0.1:1/x")
+    senders = [threading.Thread(target=engine._counted_send, args=(req,)) for _ in range(16)]
+    with engine._send_lock:
+        for t in senders:
+            t.start()
+        time.sleep(0.1)
+        assert engine.requests_sent == 0, (
+            "a probe spent the scan budget while the engine send lock was held")
+    for t in senders:
+        t.join(timeout=5)
+    assert engine.requests_sent == 16

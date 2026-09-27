@@ -336,7 +336,6 @@ class WebScanCampaign:
         enable_access_control: bool = False,
         access_control_config: AccessControlConfig | None = None,
         retain_evidence: bool = False,
-        timing_workers: int = 1,
     ) -> None:
         self._send = send
         self.scope = scope
@@ -446,13 +445,13 @@ class WebScanCampaign:
         # so the fixed DEFAULT_CHECKS path is unchanged. `library_entries` lets a
         # caller inject a check set; None loads the shipped library from disk.
         self.use_library = use_library
-        # W7 (perf) — how many INSERTION POINTS may have a timing probe in flight at once.
-        # A timing probe is ~100% idle (blocked on the delay it induced), so overlapping
-        # points removes wall-clock without sampling less: each point's own baseline/
-        # treatment interleaving still runs serially in its worker. 1 = the serial sweep.
-        # Requests still go through the SAME gated `send`, so kill-switch / scope / charter
-        # / budget / rate all still run per request; the operator caps blast radius here.
-        self.timing_workers = max(1, int(timing_workers))
+        # W7 (perf) — NO timing-interleave knob here, deliberately. `AuditEngine` can run
+        # the timing sweep with N insertion points in flight, but `_staged_timing_plan`
+        # refuses to stage whenever a bandit is present and `_resolve_bandit` below ALWAYS
+        # produces one, so a campaign-level `timing_workers` would be inert: it would
+        # advertise an operator blast-radius control that cannot change a single request.
+        # Shipping the knob without the capability is the overclaim; the knob returns when
+        # the bandit/ordering coupling is resolved.
         self._library_entries = library_entries
         # Opt-in advanced web arsenal (default OFF → the default scan is byte-for-byte
         # unchanged). When on, an ADDITIVE post-audit pass runs the built-but-unwired
@@ -1099,8 +1098,7 @@ class WebScanCampaign:
                     oob_collector_pubkey=self.oob_collector_pubkey,
                     oob_dns_collector_pubkey=self.oob_dns_collector_pubkey,
                     oob_ttl_seconds=self.oob_ttl_seconds, oob_skew_seconds=self.oob_skew_seconds,
-                    oob_not_before=self.oob_not_before, oob_not_after=self.oob_not_after,
-                    timing_workers=self.timing_workers)
+                    oob_not_before=self.oob_not_before, oob_not_after=self.oob_not_after)
                 selector = select_checks if self.targeted else None
                 for req in all_requests:
                     # Request-level checks are host/endpoint-level, so run them once

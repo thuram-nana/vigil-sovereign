@@ -520,8 +520,11 @@ class TimingObservations:
     Immutable, and ordered exactly as they were taken: ``baseline[i]`` and
     ``treatment[i]`` (and ``dose[i]``) are the i-th INTERLEAVED pair/triple. Keeping
     the observations as a value — separate from the evidence they are later shaped
-    into — is what lets a driver overlap the idle waits of different points while
-    the per-point sequence stays byte-for-byte what the serial path produced."""
+    into — is what lets a driver overlap the idle waits of different points while the
+    per-point SEQUENCE (the same loop, the same order, the same count) is the one the
+    serial path runs. The VALUES are measurements and a concurrent driver changes the
+    measurement environment, so they are not the serial path's numbers — see
+    :func:`interleave_timing_jobs`."""
 
     baseline: tuple[float, ...] = ()
     treatment: tuple[float, ...] = ()
@@ -544,6 +547,18 @@ def interleave_timing_jobs(jobs: "Sequence[Callable[[], object]]", *, workers: i
       would have.
     * ``workers <= 1`` (the default) is exactly the old serial loop — no pool is even
       created — so every existing caller is byte-identical.
+
+    **What this helper does NOT make safe — read before using its verdicts.** The jobs
+    run concurrently but their ARMS do not: every job alternates base, treat, base,
+    treat …, so at any instant all workers are in the SAME half-cycle. N jobs PHASE-LOCK
+    and the origin serves N cheap requests during the baseline window and N expensive
+    ones during the treatment window. Any payload-DEPENDENT service-time asymmetry is
+    amplified ~N-fold by self-inflicted queueing, and the timing oracle's rank-sum test
+    is ONE-SIDED, so a zero-mean bimodal perturbation still raises the false-positive
+    rate — a measured 10/60 confirmations on an origin with NO conditional delay at all.
+    A verdict produced under this helper is therefore a CANDIDATE, never a fact: the
+    caller must re-measure a flagged point serially, with nothing else in flight, before
+    anything mints (see ``AuditEngine._sweep_staged`` stage 2b).
 
     ``workers`` is the caller's already-bounded per-host concurrency; this helper does
     not invent one, and jobs are expected to send through the SAME gated transport (the
@@ -581,17 +596,26 @@ class TimingCheck:
 
     def probe(self, template: RequestTemplate, point: InsertionPoint, send: Send) -> FindingContext | None:
         """Measure, then adjudicate — the composition of :meth:`collect` and
-        :meth:`context_from`. Byte-identical to the one-shot loop it replaces."""
+        :meth:`context_from`. Byte-identical to the one-shot loop it replaces (a
+        refactor; it says nothing about running two of these at once)."""
         return self.context_from(self.collect(template, point, send))
 
     # -- the two halves of a probe ------------------------------------------------
     # W7 (perf): a timing probe is ~100% IDLE — it is waiting on the delay it asked
     # the target to take. Splitting the SLOW, I/O half (:meth:`collect`) from the
     # PURE half (:meth:`context_from`) lets a driver overlap the idle waits of
-    # DIFFERENT insertion points (see :func:`interleave_timing_jobs`) WITHOUT
-    # touching the statistical discipline: the loop below — the WITHIN-POINT
+    # DIFFERENT insertion points (see :func:`interleave_timing_jobs`) without changing
+    # the CODE of the statistical control: the loop below — the WITHIN-POINT
     # interleaving of baseline and treatment (and dose) observations, the sample
     # count, the dose pairing — is unchanged and always runs serially for one point.
+    #
+    # That is NOT the same as saying the resulting NUMBERS are trustworthy under
+    # concurrency. The alternation below phase-locks across overlapping points (all of
+    # them are in the same half-cycle at any instant), which amplifies any payload-
+    # dependent service-time asymmetry into the one-sided oracle and can manufacture a
+    # shift. A concurrent driver must treat its verdicts as CANDIDATES and re-measure
+    # serially before minting — see :func:`interleave_timing_jobs` and
+    # ``AuditEngine._sweep_staged``.
 
     def collect(
         self, template: RequestTemplate, point: InsertionPoint, send: Send
