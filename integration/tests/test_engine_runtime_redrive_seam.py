@@ -1,6 +1,7 @@
 """Wave 2 — the ENGAGE oracle seam confirms the RESPONSE-DERIVED classes via ``live.runtime_redrive``.
 
-path_traversal (side_effect over a KNOWN file-content signature), reflected xss (reflection_context — the
+path_traversal (side_effect over a KNOWN file-content signature — LEAD-ONLY, it may not mint: see
+test_runtime_redrive_soundness.py D5), reflected xss (reflection_context — the
 canary reaches an EXECUTABLE HTML position), and exposure (predicate over a secret signature at a fixed
 framework path) now mint signed FACTs from the autonomous chat/engage re-drive. This pins:
 
@@ -91,6 +92,29 @@ _DECOY_PASSWD = "root:x:0:0:root:/root:/bin/bash\ndaemon:x:1:1:daemon:/usr/sbin:
 _DOTENV = "APP_ENV=production\nDB_PASSWORD=Sup3rSecret-LAB-DECOY-not-real\nJWT_SECRET=lab-decoy\n"
 
 
+_DECOY_DOCROOT = "/srv/app/public/docs"
+_DECOY_FS = {
+    "/etc/passwd": _DECOY_PASSWD,
+    "/srv/app/public/docs/report.pdf": "report contents",
+}
+
+
+def _decoy_read(value: str) -> "str | None":
+    """A GENUINE local-file-inclusion sink: join the value to the docroot, RESOLVE it with POSIX
+    dot-segment semantics, and serve whatever that names. Every encoding of the same path therefore
+    resolves to the same file, and a name that does not exist simply misses.
+
+    This replaces the substring matcher the fixture used to be (``any(t in f for t in ("..", "%2e",
+    "/etc/", "passwd"))``). That shape is not a traversal at all — it answers what the payload MEANS
+    rather than reading anything — so it is exactly the payload-CORRELATED false positive the soundness
+    controls now refuse, and it could no longer stand in for a real read (see
+    integration/tests/test_runtime_redrive_soundness.py)."""
+    import posixpath
+    if not value:
+        return None
+    return _DECOY_FS.get(posixpath.normpath(posixpath.join(_DECOY_DOCROOT, value)))
+
+
 def _esc(s: str) -> str:
     return (s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
              .replace('"', "&quot;").replace("'", "&#x27;"))
@@ -102,11 +126,13 @@ class _VulnApp(http.server.BaseHTTPRequestHandler):
         parts = urlsplit(self.path)
         q = parse_qs(parts.query)
         path = parts.path
-        if path == "/download":                                   # VULNERABLE path traversal
-            f = (q.get("file") or [""])[0]
-            if any(t in f for t in ("..", "%2e", "/etc/", "passwd")):
-                return self._text(_DECOY_PASSWD, "text/plain")
-            return self._text("report contents", "text/plain")
+        if path == "/download":                                   # VULNERABLE path traversal (a REAL read)
+            content = _decoy_read((q.get("file") or [""])[0])
+            if content is not None:
+                return self._text(content, "text/plain")
+            self.send_response(404)
+            self.end_headers()
+            return None
         if path == "/static":                                     # BENIGN: fixed body, no file signature
             return self._text("<html><body>static page</body></html>", "text/html")
         if path == "/search":                                     # VULNERABLE reflected xss (unescaped)
@@ -166,9 +192,47 @@ def _fact(monkeypatch, tmp_path, url: str, bug_class: str, handler=_VulnApp):
 
 # -- positives --------------------------------------------------------------------------------------
 
-def test_live_path_traversal_mints_a_fact(monkeypatch, tmp_path):
-    ref = _fact(monkeypatch, tmp_path, "http://127.0.0.1:{port}/download?file=report.pdf", "path_traversal")
-    assert ref, "a live traversal that reads /etc/passwd must mint a signed FACT"
+class _CountingVulnApp(_VulnApp):
+    """``_VulnApp`` that records how many requests actually reached the origin, so the seam test can tell
+    "the arm ran and refused to certify" from "the arm was never dispatched"."""
+
+    hits = 0
+
+    def do_GET(self):  # noqa: N802
+        type(self).hits += 1
+        return super().do_GET()
+
+
+def test_live_path_traversal_is_DRIVEN_and_never_mints_a_fact(monkeypatch, tmp_path):
+    """path_traversal is LEAD-ONLY, and the seam must DRIVE it anyway.
+
+    Two claims, both asserted against BEHAVIOUR rather than against a constant:
+
+      1. Even a GENUINE read of /etc/passwd may not mint through this seam —
+         ``path_traversal.file_signature`` is registered ``fact_capable: false`` because every guard the
+         arm has varies only the SHAPE OF THE INPUT, and eight benign origins that read nothing satisfied
+         all of them (see integration/tests/test_runtime_redrive_soundness.py, D5).
+      2. The arm is nevertheless DISPATCHED, so the operator's LEAD has a VIGIL-owned gated capture behind
+         it. A previous revision gated the seam on ``RUNTIME_FACT_CLASSES`` and returned before driving:
+         zero requests reached the origin, no admitted verdict was recorded, and the lead was sourced
+         entirely from the LLM's assertion — while the module comment and the registry ``limitation`` both
+         said "the arm is still driven (it is real evidence for a human)". This test previously started a
+         server that was never contacted, so it would have passed against a dead port; it now counts the
+         requests.
+    """
+    from vigil_integration.live.runtime_redrive import RUNTIME_FACT_CLASSES, RUNTIME_REDRIVE_CLASSES
+    assert "path_traversal" not in RUNTIME_FACT_CLASSES
+    assert "path_traversal" in RUNTIME_REDRIVE_CLASSES, "the class is demoted, not removed"
+    _CountingVulnApp.hits = 0
+    ref = _fact(monkeypatch, tmp_path, "http://127.0.0.1:{port}/download?file=report.pdf",
+                "path_traversal", handler=_CountingVulnApp)
+    assert ref is None, "a traversal claim may only be confirmed to a LEAD, never to a signed FACT"
+    # 2 controls + the treatment + the first alternate encoding (which corroborates and short-circuits)
+    # on the first candidate parameter.
+    assert _CountingVulnApp.hits >= 4, (
+        f"the seam did not DRIVE the lead-only arm — only {_CountingVulnApp.hits} request(s) reached the "
+        f"origin, so there is no VIGIL-owned capture behind the operator's lead and the registry's "
+        f"'the arm is still driven' is false")
 
 
 def test_live_reflected_xss_mints_a_fact(monkeypatch, tmp_path):

@@ -20,6 +20,21 @@ name: soak
 # to 127.0.0.1 (framework/v2/eval/soak.py::serve_soak). `python3 -m framework.v2.eval.soak --sustained`
 # exits non-zero — turning this job red — if the documented throughput floor is breached, a memory leak
 # is detected across the run, or the scan fingerprint diverges across iterations.
+#
+# ── SECOND JOB: web-liveness-volume ───────────────────────────────────────────────────────────────
+# Same shape, same reason, a different suite. The HexStrike W2 liveness regressions are STATISTICAL: a
+# false-FACT class that fires 2.3% of the time is invisible to a one-run test (it passes ~62% of a
+# 20-iteration test), so the regressions that ended the endpoint_liveness FACT are asserted over 80-300
+# live loopback re-drives each. Those loops are ~25 minutes; carried on the per-PR "integration two-env
+# boundary (P5)" job they pushed it past GitHub's 45m0s hard maximum and it was CANCELED
+# (run 36270471752, 45m23s) — taxing every future PR in the repository.
+#
+# So the same honest split applies. The per-PR leg keeps every CORRECTNESS and SAFETY property plus a
+# low-run WIRING twin of each statistical test (`-m "not volume"` in ci.yml); THIS job runs the
+# statistical half nightly at its FULL, UNREDUCED counts (`-m volume`). Nothing is dropped and nothing
+# is watered down: integration/tests/test_ci_volume_tests_run_nightly.py fails the build if a
+# volume-marked test is not covered here, and the step below fails this job if the volume tests SKIP
+# rather than run — a skipped proof and a passing proof are the same colour on a dashboard.
 
 on:
   schedule:
@@ -82,3 +97,44 @@ jobs:
           # a determinism divergence, which fails this job.
           python3 -m framework.v2.eval.soak --sustained \
             --iterations "${ITER}" --min-duration-s "${DURATION}" ${floor_arg}
+
+  web-liveness-volume:
+    name: web-liveness volume regressions (nightly)
+    runs-on: ubuntu-latest
+    # ~400 tool-leg runs + ~1100 direct re-drives against loopback servers. Measured ~33 min locally;
+    # generous headroom, and it blocks no PR.
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.13"
+
+      - name: install the offense-leg deps (identical to the required P5 job)
+        run: |
+          # Byte-for-byte the install the "integration two-env boundary (P5)" job does, so the nightly
+          # exercises the SAME tree the per-PR leg does: runtime from the committed HASH LOCK, vigil_core
+          # editable --no-deps, pytest from the pinned CI toolchain lock.
+          pip install --require-hashes -r engine/crucible/framework/v2/requirements.lock.txt
+          pip install -e packages/core/vigil_core --no-deps
+          pip install --require-hashes -r infra/supply-chain/ci-tooling.lock.txt
+
+      - name: run the VOLUME statistical regressions (full, unreduced run counts)
+        run: |
+          set -euo pipefail
+          # The offense env, identical to ci.yml's offense leg: `framework` (engine/crucible) and
+          # `vigil_gateway` (gateway) must both be importable or every test in the file importorskips —
+          # which is exactly what the assertion step below refuses to let pass silently.
+          # --strict-markers: a typo'd marker is an ERROR here, never a silently-empty selection.
+          PYTHONPATH=integration:engine/crucible:gateway python -m pytest \
+            integration/tests/test_web_liveness.py \
+            -m volume -q -rs --strict-markers -p no:cacheprovider \
+            --junit-xml="${RUNNER_TEMP:-/tmp}/volume-junit.xml"
+
+      - name: the VOLUME regressions MUST have actually executed (a skipped proof fails this job)
+        # `pytest -m volume` exits 0 when every test importorskips, and 0 when the marker selects
+        # nothing after a rename — both would leave this nightly green having proved nothing, the same
+        # "skipped proof == passing proof" hole assert_boundary_proof_ran.py closes for the P5 job. This
+        # reads the JUnit report and fails on zero collected, on any skip, and on a count that has
+        # fallen below the floor the script pins.
+        run: python .github/scripts/assert_volume_tests_ran.py "${RUNNER_TEMP:-/tmp}/volume-junit.xml"
