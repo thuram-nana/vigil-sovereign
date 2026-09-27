@@ -499,6 +499,7 @@ jobs:
               integration/tests/test_fuzz_corpus_replay.py \
               integration/tests/test_oracle_adapter.py \
               integration/tests/test_external_tool_runner.py \
+              integration/tests/test_tls_breadth.py \
               integration/tests/test_authority_root_decouple.py \
               integration/tests/test_executor_capability_boundary.py \
               integration/tests/test_conformance.py \
@@ -508,6 +509,7 @@ jobs:
               integration/tests/test_web_redrive_proof_sink.py \
               integration/tests/test_engine_web_redrive_seam.py \
               integration/tests/test_engine_runtime_redrive_seam.py \
+              integration/tests/test_runtime_redrive_soundness.py \
               integration/tests/test_stored_xss_redrive.py \
               integration/tests/test_proto_pollution_redrive.py \
               integration/tests/test_ssi_redrive.py \
