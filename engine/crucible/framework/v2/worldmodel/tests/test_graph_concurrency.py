@@ -12,21 +12,25 @@ fell out of that for free:
 
 The order indexes broke all three, because a READ now MUTATES (the lazy
 `list.sort()` plus the dirty-flag clear) and because the readers walk live Python
-lists and dicts instead of taking a C-level snapshot. Measured on the unlocked
-index (CPython 3.13.14):
+lists and dicts instead of taking a C-level snapshot. The three failure modes:
 
   1. read ‖ read   — two `all_edges()` iterate the shared `_dirty_out` set while
-     one of them clears it: `RuntimeError: Set changed size during iteration`,
-     120/120 trials at `switchinterval=1e-6`, and reachable at the DEFAULT 0.005
-     once the dirty loop (4.27 ms at 6,000 buckets) outruns the 5 ms GIL quantum.
+     one of them clears it: `RuntimeError: Set changed size during iteration`.
+     No writer needed.
   2. read ‖ write  — a reader returns an UNSORTED list; worse, when `_normalize`
      clears the dirty flag over a bucket an append left unsorted, the wrong order
-     is PERMANENT and SILENT (4/30 trials), and a later `remove_node` then
-     bisects an unsorted list, fails to prune, and the next `all_nodes()` raises.
+     is PERMANENT and SILENT, and a later `remove_node` then bisects an unsorted
+     list, fails to prune, and the next `all_nodes()` raises.
   3. write ‖ write/evict — `_discard_sorted`'s `bisect_left` + `del seq[i]` races
      `_append_key`'s `append`, `_node_ids` desyncs from `_nodes`, and
-     `all_nodes()` raises `KeyError` (9/12 trials at 1e-6; 1/12 at the DEFAULT
-     0.005, i.e. a crash on stock interpreter settings).
+     `all_nodes()` raises `KeyError`.
+
+Failure RATES are deliberately not quoted here, because they are host- and
+harness-dependent and an earlier revision of this docstring quoted three that
+did not reproduce. They belong to a harness, and the harness is committed:
+`race_graph.py`, which measures a chosen git revision so a number about the
+UNLOCKED index stays re-derivable. See `graph.py`'s CONCURRENCY section for the
+figures and the exact command.
 
 None of that is theoretical. `aegis.middleware.AegisWSGIMiddleware` holds ONE
 `Aegis` — hence one `ActorGraph.world` — and calls `observe()` on EVERY request,
@@ -35,10 +39,27 @@ is the same shape at the raw HTTP boundary. `aegis.integrate` then calls
 `world.all_nodes()` on the verdict-projection path, which is where mode 3 lands
 as a hard crash in the defensive data plane.
 
-`WorldModel._lock` (one re-entrant lock, taken by every method that touches an
-index) closes all three. These tests FAIL against the unlocked index and pass
-deterministically with it — a lock either holds or it does not, so there is no
-flake window to tune.
+WHAT EACH TEST PINS. read‖read is defended TWICE — by the lock, and by
+`all_edges` iterating a `tuple(dirty)` snapshot instead of the live set. A
+single combined test therefore pinned NEITHER: a reviewer showed it passes with
+the lock removed and passes with the snapshot reverted, failing only when both
+go. So it is split, and the suite now kills each single-point mutation.
+Measured with each defence mutated away in turn (the mutation matrix, over the
+8 tests in this file):
+
+    mutation                          tests failed
+    none (shipped)                    0
+    lock -> no-op CM                  4   (incl. the three write tests)
+    tuple(dirty) -> live-set loop     1   (read_read_holds_on_the_snapshot_alone)
+    both                              6
+    the real 8d8d8c30 module          7   (the 8th is the positive control,
+                                           which PASSES by reproducing the bug)
+
+`test_read_read_positive_control_fires_with_neither_defence` is the anti-
+greenwash guard: it asserts the defect DOES reproduce once both defences are
+gone, so the three passing read‖read tests cannot be passing merely because the
+scenario never races. It skips, loudly, rather than failing if this host will
+not interleave.
 """
 
 from __future__ import annotations
@@ -47,7 +68,9 @@ import sys
 import threading
 from contextlib import contextmanager
 
-from ..graph import WorldModel
+import pytest
+
+from ..graph import _NODE_IDS, WorldModel, _normalize
 from ..models import Edge, EdgeKind, Node, NodeKind
 
 # Racing bytecode-level windows needs the interpreter to switch threads often.
@@ -133,21 +156,62 @@ def _redirty(w: WorldModel) -> None:
                          EdgeKind.OWNS))
 
 
+class _NoLock:
+    """A lock-shaped no-op, for mutating ONE defence away at a time."""
+
+    __slots__ = ()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_a):
+        return False
+
+
+@contextmanager
+def _without_the_snapshot():
+    """Revert `all_edges`'s dirty loop to the pre-fix body — iterate the LIVE
+    `_dirty_out` set and bulk-`clear()` it — while leaving the lock in place."""
+    original = WorldModel.all_edges
+
+    def all_edges_live_set(self):
+        out = []
+        out_adj, dsts, dirty = self._out, self._out_dsts, self._dirty_out
+        with self._lock:
+            if dirty:
+                for src in dirty:                 # <- the reverted line
+                    dsts[src].sort()
+                dirty.clear()
+            for src in _normalize(self._node_ids, self._dirty_nodes, _NODE_IDS):
+                adj = out_adj[src]
+                for dst in dsts[src]:
+                    out.extend(adj[dst].values())
+        return out
+
+    WorldModel.all_edges = all_edges_live_set
+    try:
+        yield
+    finally:
+        WorldModel.all_edges = original
+
+
+def _read_read_round(w: WorldModel) -> tuple[list[str], list[list[int]]]:
+    _redirty(w)
+    results: list[list[int]] = []
+
+    def read() -> None:
+        results.append([id(e) for e in w.all_edges()])
+
+    return _run_together([read] * _READERS), results
+
+
 def test_two_pure_readers_never_raise_and_never_disagree() -> None:
     """No writer at all: `_READERS` threads call `all_edges()` at once, on a graph
-    whose every out bucket owes a sort. Unlocked this raises `RuntimeError: Set
-    changed size during iteration` in 120/120 trials and completes only ~16% of
-    the reads; locked, every reader returns the identical edge sequence."""
+    whose every out bucket owes a sort. The shipped code must be clean."""
     with _fast_switching():
         w = _fanout_graph()
         for round_index in range(_READ_ROUNDS):
-            _redirty(w)
-            results: list[list[int]] = []
-
-            def read() -> None:
-                results.append([id(e) for e in w.all_edges()])
-
-            failures = _run_together([read] * _READERS)
+            failures, results = _read_read_round(w)
             assert not failures, (
                 f"round {round_index}: concurrent pure readers raised {failures[:3]}")
             assert len(results) == _READERS
@@ -156,6 +220,62 @@ def test_two_pure_readers_never_raise_and_never_disagree() -> None:
             # and against the serial answer taken once everything is quiesced
             assert [id(e) for e in w.all_edges()] == results[0]
         w._assert_index_consistent()
+
+
+def test_read_read_holds_on_the_lock_alone() -> None:
+    """SNAPSHOT REVERTED, lock intact. Pins that the lock by itself is
+    sufficient for read‖read — i.e. the `tuple(dirty)` snapshot is belt, not
+    braces."""
+    with _fast_switching(), _without_the_snapshot():
+        w = _fanout_graph()
+        for round_index in range(_READ_ROUNDS):
+            failures, results = _read_read_round(w)
+            assert not failures, (
+                f"round {round_index}: lock alone did NOT contain read‖read: "
+                f"{failures[:3]}")
+            assert all(r == results[0] for r in results)
+
+
+def test_read_read_holds_on_the_snapshot_alone() -> None:
+    """LOCK REMOVED, snapshot intact. Pins that the `tuple(dirty)` snapshot by
+    itself is sufficient for read‖read — which is why it is kept even though
+    the lock already covers this path."""
+    with _fast_switching():
+        w = _fanout_graph()
+        w._lock = _NoLock()
+        for round_index in range(_READ_ROUNDS):
+            failures, results = _read_read_round(w)
+            assert not failures, (
+                f"round {round_index}: snapshot alone did NOT contain read‖read: "
+                f"{failures[:3]}")
+            assert all(r == results[0] for r in results)
+
+
+def test_read_read_positive_control_fires_with_neither_defence() -> None:
+    """ANTI-GREENWASH. Both defences removed, so the original defect must
+    reproduce. Without this, the three tests above could all be passing because
+    the scenario never actually races, and nobody would know.
+
+    Skips rather than fails if the race will not fire on this host: an
+    interpreter that refuses to interleave here is not a defect in this code,
+    and a positive control that cannot fire must say so out loud rather than
+    masquerade as a pass."""
+    with _fast_switching(), _without_the_snapshot():
+        for _ in range(_READ_ROUNDS * 2):
+            w = _fanout_graph()
+            w._lock = _NoLock()
+            failures, _ = _read_read_round(w)
+            if failures:
+                assert any("Set changed size during iteration" in f
+                           or "disagree" in f for f in failures), (
+                    f"positive control fired, but not with the expected defect: "
+                    f"{failures[:3]}")
+                return
+    pytest.skip("read‖read did not reproduce on this host even with BOTH "
+                "defences removed — the positive control cannot vouch for the "
+                "three tests above here; re-run "
+                "`python3 -m framework.v2.worldmodel.tests.race_graph "
+                "--mode readread --rev 8d8d8c30` to see the defect directly")
 
 
 # --------------------------------------------------------------------------
@@ -311,3 +431,73 @@ def test_the_world_model_carries_its_own_index_lock() -> None:
     with a._lock:
         with a._lock:                                      # re-entrant, no deadlock
             assert a.all_nodes() == []
+
+
+def test_the_graph_survives_deepcopy_and_pickle_despite_the_lock() -> None:
+    """C1: holding a `threading.RLock` as an attribute silently broke
+    `copy.deepcopy` and `pickle` — both work at the pre-index (838e0b42) and
+    unlocked-index (8d8d8c30) revisions and raised `TypeError: cannot pickle
+    '_thread.RLock' object` here until `__getstate__`/`__setstate__` were added.
+
+    No shipped caller deepcopies or pickles a `WorldModel` (`store.to_dict` /
+    `from_dict` is the supported snapshot path), so this was latent rather than
+    live — which is exactly why it needs a test rather than a reader noticing."""
+    import copy
+    import pickle
+
+    w = WorldModel()
+    for i in (3, 1, 2):                                # out of order -> dirty
+        w.add_node(_node(f"n{i}", NodeKind.HOST if i % 2 else NodeKind.SERVICE))
+    w.add_edge(_edge("n3", "n1"))
+    w.add_edge(_edge("n1", "n2", EdgeKind.OWNS))
+    expected_nodes = [n.id for n in w.all_nodes()]
+    expected_edges = [(e.src, e.dst, e.kind.value) for e in w.all_edges()]
+
+    for label, clone in (("deepcopy", copy.deepcopy(w)),
+                         ("pickle", pickle.loads(pickle.dumps(w)))):
+        assert [n.id for n in clone.all_nodes()] == expected_nodes, label
+        assert [(e.src, e.dst, e.kind.value) for e in clone.all_edges()] == \
+            expected_edges, label
+        clone._assert_index_consistent()
+        # the copy gets its OWN lock: sharing one would serialise two unrelated
+        # graphs against each other, and a deepcopy that aliased it would be worse
+        assert clone._lock is not w._lock, label
+        # and the copy is independent
+        clone.add_node(_node("n9"))
+        assert "n9" not in w._nodes, label
+
+
+def test_caller_controlled_code_never_runs_under_the_index_lock() -> None:
+    """The lock is a LEAF lock: nothing under it may call back out. Two entry
+    points take caller-controlled objects, so both evaluate them BEFORE
+    acquiring — `nodes_of_kind` reads `kind.value`, `neighbors` drains
+    `edge_kinds`. Every shipped call site passes a plain enum member and a
+    literal list, so this is defence against a future caller, not a live bug."""
+    w = WorldModel()
+    w.add_node(_node("a", NodeKind.HOST))
+    w.add_edge(_edge("a", "a"))
+
+    held: list[bool] = []
+
+    def _lock_is_held() -> bool:
+        # RLock has no public "is held"; acquire(False) from THIS thread always
+        # succeeds on a re-entrant lock, so probe the internal recursion count.
+        return w._lock._is_owned()
+
+    class _SpyKind:
+        @property
+        def value(self):
+            held.append(_lock_is_held())
+            return "host"
+
+    w.nodes_of_kind(_SpyKind())
+    assert held == [False], "nodes_of_kind evaluated kind.value under the lock"
+
+    held.clear()
+
+    def _spy_kinds():
+        held.append(_lock_is_held())
+        yield EdgeKind.REACHABLE_FROM
+
+    w.neighbors("a", _spy_kinds())
+    assert held == [False], "neighbors consumed the caller's iterable under the lock"

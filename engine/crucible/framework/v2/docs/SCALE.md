@@ -40,7 +40,7 @@ Two facts the numbers show:
   1,000-node graph and +4.10 MB at 10,000 nodes (`python3 -m framework.v2.worldmodel.tests.bench_graph
   --heap`). At the graph sizes a campaign of this shape builds, that is below the rounding of the
   whole-process numbers above, which is why the table did not move; it is stated here so the cost is
-  recorded rather than inferred. The indexes buy 1.1x–73x on the deterministic readers in exchange.
+  recorded rather than inferred. The indexes buy 1.1x-60x on the deterministic readers in exchange.
 
 ## Where the single-host design caps (by construction)
 

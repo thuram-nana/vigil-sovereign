@@ -59,55 +59,92 @@ uncontended lock acquire/release per call (see CONCURRENCY below). Measured by
 each indexed reader returns the pre-index result BEFORE timing it, so no
 speedup here is over a different answer:
 
-    reader            speedup over the pre-index body (N = 1k / 5k / 20k,
-                      band across repeated sweeps, so it is reproducible
-                      rather than one lucky run)
-    nodes_of_kind      ~42x .. ~73x
-    edges_of_kind      ~36x .. ~55x
-    all_edges          ~2.1x ..  ~2.9x
-    all_nodes          ~1.3x ..  ~1.6x
-    neighbors          ~1.0x ..  ~1.1x
-    ---------------------------------------------------------------
-    CONSTRUCTION      17% .. 28% SLOWER than pre-index
+    bench_graph --sizes 1000,10000 --order asc,desc --repeat 3 --heap
 
-So the honest envelope is ~1x at the floor to ~73x at the ceiling, and it is
-the whole-collection readers (`nodes_of_kind`, `edges_of_kind`) that carry it,
+    reader          speedup over the pre-index body   (asc and desc fixtures,
+                                                       N = 1k and 10k)
+    nodes_of_kind     46x .. 60x
+    edges_of_kind     43x .. 57x
+    all_edges        2.2x .. 2.9x
+    all_nodes        1.5x .. 1.6x
+    neighbors        1.1x .. 1.1x
+
+    bench_graph --sizes 1000,10000 --repeat 5 --compare-rev 838e0b42
+
+    CONSTRUCTION     +18% (N=1k) .. +29% (N=10k) SLOWER than pre-index
+
+So the envelope is ~1.1x at the floor to ~60x at the ceiling, and it is the
+whole-collection readers (`nodes_of_kind`, `edges_of_kind`) that carry it,
 because those are the ones that used to sort every node or every edge to return
-a slice of them. An earlier revision of this comment claimed "1.5x–250x", and
-"~15x on the repeated list-then-scan shape `knowledge/operators` pays". No
-harness reproducing either number was ever committed and neither reproduces
-here (the operators shape measures 3.5x–4.5x on this host), so both are
-WITHDRAWN rather than restated. The trade is still plainly worth it for any
-graph read more than once — which is every graph the engine builds — but on
-the numbers above, not on inflated ones.
+a slice of them. The high-ratio readers vary by tens of percent run to run; re-
+run the command for your own host rather than trusting the last digit.
+
+Two earlier claims here are WITHDRAWN, not restated:
+
+  * "1.5x–250x faster reads". Nothing reproduces 250x; the ceiling measures
+    ~60x.
+  * "~15x on the repeated list-then-scan shape `knowledge/operators` pays". The
+    real consumer is `saturate()`, and `bench_graph --mode operators
+    --compare-rev 838e0b42` measures 1.01x–1.06x across repeated runs at
+    N=200 and N=800 — i.e. no measurable win on that shape at all. A previous
+    revision replaced the withdrawn 15x with "3.5x–4.5x" in the same breath;
+    that figure
+    came from a hand-rolled loop that called `nodes_of_kind` per node rather
+    than from `saturate`, was never committed, and is withdrawn too. The lesson
+    is in the rule this file now follows: every number here comes from a
+    committed harness or from a command printed beside it.
 
 Memory is the third axis, and an earlier revision omitted it while claiming to
-state the cost in full. The key-only indexes add +4.8% heap at N=1,000
-(8.83 -> 9.25 MB) and +4.7% at N=10,000 (88.09 -> 92.19 MB), measured with
-`tracemalloc` over the graph alone (`bench_graph.py --heap`). The lock adds 96
-bytes per WorldModel. `docs/SCALE.md` reports whole-process campaign figures of
-97–102 MB, against which this is a sub-rounding contribution; it is noted there
-too rather than left to be inferred.
+state the cost in full. `bench_graph --heap` reports 9.25 MB at N=1,000 and
+92.19 MB at N=10,000, against 8.83 / 88.09 MB pre-index — so the key-only
+indexes cost about +4.8% / +4.7%. Read `heap()`'s docstring before quoting the
+absolute number: it is allocation during build plus one full read, not the
+graph's resident size, so it is an upper bound; the revision-to-revision delta
+is the meaningful part. The lock adds 96 bytes per WorldModel. `docs/SCALE.md`
+reports whole-process campaign figures of 97–102 MB, against which this is a
+sub-rounding contribution; it is noted there too rather than left to be
+inferred.
 
 CONCURRENCY. Pre-index, every reader was a pure function of `_nodes`/`_out`/
 `_in` and every ordering step was ONE `sorted(...)` C call, so two readers could
 not interfere and no writer could make a reader raise. The index broke both:
 a READ now MUTATES (the lazy `list.sort()` plus the dirty-flag clear), and the
 readers walk live lists and dicts instead of taking a C-level snapshot.
-Measured on CPython 3.13.14 against the UNLOCKED index:
+
+Failure rates below come from `tests/race_graph.py`, which is committed and
+which takes `--rev`, so a number about the UNLOCKED index stays re-derivable
+now that the tree is locked:
+
+    race_graph --rev 8d8d8c30 --trials 15      # the unlocked index
+    race_graph              --trials 15        # the current tree
+
+                        switchinterval  0.005      1e-6
+    read ‖ read (7,500 dirty buckets)   15/15      15/15
+    read ‖ write                         0/15      15/15
+    write ‖ write, AEGIS shape            1/15      15/15
+    write ‖ write, writes-only control    1/15      15/15
+    ...and every one of those eight cells is 0/15 on the current tree.
 
   * read ‖ read — two `all_edges()` iterating the shared `_dirty_out` set while
-    one of them cleared it: `RuntimeError: Set changed size during iteration`,
-    120/120 trials at `switchinterval=1e-6`, and 12/12 at the interpreter's
-    DEFAULT 0.005 once the graph carries ~7,500 dirty buckets. NO writer needed.
+    one of them cleared it: `RuntimeError: Set changed size during iteration`.
+    NO writer needed. Reachability at the DEFAULT interval is HOST-DEPENDENT and
+    must not be quoted as a bucket count: a second reader has to be scheduled
+    INSIDE the dirty loop, so the loop must outrun the 5 ms GIL quantum.
+    `race_graph --mode dirtyloop` times it — on this host it crosses 5 ms
+    between 3,000 (3.65 ms, 0/15) and 7,500 buckets (6.63 ms, 15/15); a reviewer
+    on a faster machine measured 4.84 ms at 7,500 (still under, 0/15) and
+    14.74 ms at 20,000 (fires). Same rule, different crossover. An earlier
+    revision of this comment asserted "~7,500 buckets" as if it were portable.
   * read ‖ write — `_normalize` sorted and THEN cleared the flag, so an append
     landing between the two left a bucket unsorted with a CLEAN flag. A reader
-    returned out-of-order results with no exception (16/30 trials at the DEFAULT
-    interval, 30/30 at 1e-6), and because the flag was clear the wrong order was
-    PERMANENT — every later read stayed wrong, and a subsequent `remove_node`
-    then bisected an unsorted list and escalated it to a `KeyError`.
+    returned out-of-order results with NO exception, and because the flag was
+    clear the wrong order was PERMANENT — every later read stayed wrong, and a
+    subsequent `remove_node` then bisected an unsorted list and escalated it to
+    a `KeyError`. Note the 0/15 at the default interval: this one needs a fast
+    switch interval to reproduce on demand, which makes it rarer in production
+    and worse, not better — it is the silent mode.
   * write ‖ write/evict — `_discard_sorted`'s `bisect_left` + `del seq[i]` raced
-    `_append_key`'s `append`, `_node_ids` drifted from `_nodes` (71 ids against
+    `_append_key`'s `append`, `_node_ids` drifted from `_nodes` (75 ids against
     64 nodes, measured), and the next `all_nodes()` raised `KeyError`.
 
 That last one shipped. `aegis.middleware.AegisWSGIMiddleware` holds ONE `Aegis`
@@ -115,10 +152,17 @@ That last one shipped. `aegis.middleware.AegisWSGIMiddleware` holds ONE `Aegis`
 EVERY request with no lock of its own, from a multi-threaded WSGI server;
 `aegis.detect_http` is the same shape at the raw HTTP boundary, and
 `aegis.integrate` reads `world.all_nodes()` on the verdict-projection path.
-Driven through the real `ActorGraph` at `max_actors=64` (so the bounded window
-evicts), 4 threads x 300 observations, the unlocked index failed 12/12 trials
-at 1e-6 and 2/12 at the DEFAULT switch interval — a crash in the defensive data
-plane on stock interpreter settings.
+`race_graph --mode aegis` drives exactly that through the real `ActorGraph` at
+`max_actors=64` (so the bounded window evicts), 4 threads x 300 observations:
+1/15 at the DEFAULT switch interval, i.e. a crash in the defensive data plane
+on stock interpreter settings.
+
+`--mode aegis-control` is the same run with the concurrent read removed, and it
+matters: the PRE-INDEX `all_nodes` is `[self._nodes[k] for k in
+sorted(self._nodes)]`, and while `sorted()` is atomic the COMPREHENSION is not,
+so a concurrent `remove_node` could already `KeyError` it. That race predates
+this slice. With the read removed, the surviving 1/15 and 15/15 are the index
+desyncing under write‖write — the defect this slice actually introduced.
 
 The fix is `_lock`: ONE `threading.RLock` per WorldModel, held by every method
 that touches an index — INCLUDING the readers, because a read normalises.
@@ -138,15 +182,33 @@ Scope, stated honestly, because a lock invites more faith than it earns:
   * It does not make this a general concurrent graph, and it does not make the
     engine's own scan path parallel (see `docs/SCALE.md` — the scan is serial
     BY DESIGN, and that is unchanged).
-  * It costs 1.0x–1.15x on the read benchmarks above, i.e. the read wins are
-    kept; the uncontended acquire/release is noise beside the sorts it removes.
-  * It also closes a PRE-EXISTING race the index did not introduce: base's own
-    `all_nodes` is `[self._nodes[k] for k in sorted(self._nodes)]`, and while
-    `sorted()` is atomic the COMPREHENSION is not, so a concurrent
-    `remove_node` could already make it `KeyError` (measured 12/12 at 1e-6 on
-    the AEGIS shape). Under the lock that is 0/12. The locked graph is
-    therefore strictly safer than the pre-index graph, not merely restored to
-    it.
+  * It is a LEAF lock and must stay one: nothing executed while it is held may
+    call back out. That is why `nodes_of_kind` evaluates `_kind_key(kind)` and
+    `neighbors` drains its `edge_kinds` iterable BEFORE taking it — both are
+    caller-supplied and could in principle run arbitrary code (a `.value`
+    property, a generator). No shipped call site does either; the hoist costs
+    nothing and keeps the "leaf" claim true by construction rather than by
+    audit.
+  * It is NOT free on reads, and the earlier "1.0x–1.15x" here was too kind.
+    `bench_graph --compare-rev 8d8d8c30` measures locked/unlocked at 1.01x
+    (all_edges), 1.01–1.03x (all_nodes), 1.01–1.05x (edges_of_kind), 1.04–1.16x
+    (nodes_of_kind) and 1.25–1.28x (`neighbors`). `neighbors` is the worst case
+    precisely because it is the CHEAPEST reader — it does the least work per
+    call, so a fixed acquire/release is the largest share of it. The index's
+    own win over pre-index (the table above) dwarfs this in every case.
+  * On writes the lock costs ~3–4% (construction, locked/unlocked, same
+    command), which is the small part of the +18%/+29% construction cost; the
+    index bookkeeping is the rest.
+  * It also closes a PRE-EXISTING race the index did not introduce, described
+    two paragraphs up. The locked graph is therefore strictly safer than the
+    pre-index graph, not merely restored to it — in two distinct ways: the
+    pre-index code fails on the CONCURRENT-READER shape with in-flight errors
+    but an intact graph, while the unlocked index fails WRITES-ONLY with
+    permanent state corruption.
+  * `copy.deepcopy` and `pickle` would have broken outright — an `RLock` is not
+    picklable — so `__getstate__`/`__setstate__` drop and recreate it. See
+    those methods; this was a silent capability regression on a public model
+    class, caught in review, not by a test, and there is now a test.
 
 The indexes are keys only — never Node/Edge objects — so an upsert that
 replaces a stored object cannot leave them stale. `_assert_index_consistent`
@@ -521,8 +583,13 @@ class WorldModel:
         ids the old ``n.kind == kind`` filter kept, in the same sorted order, so
         the returned list is element-for-element what the full re-sort produced —
         at O(|kind|) instead of O(|V| log|V|) per call."""
+        # `_kind_key` reads `kind.value` — a caller-supplied attribute, and on a
+        # foreign object potentially a property with arbitrary code behind it.
+        # Evaluate it BEFORE taking the lock: nothing the caller controls should
+        # run while this graph is held. Same reason the dict lookup below is the
+        # first thing inside, not the `.value` read.
+        kk = _kind_key(kind)
         with self._lock:
-            kk = _kind_key(kind)
             ids = self._kind_ids.get(kk)
             if not ids:
                 return []
@@ -650,8 +717,12 @@ class WorldModel:
         """Outgoing edges from `node_id` (or incoming when incoming=True),
         optionally filtered to a set of edge kinds. Deterministic order.
         Unknown node -> empty list (traversal is total, not partial)."""
+        # Drain the caller's iterable BEFORE taking the lock — it may be a
+        # generator, and running caller code under the lock is how a leaf lock
+        # stops being a leaf lock. (See CONCURRENCY: `_lock` is safe precisely
+        # because nothing under it can call back out.)
+        allowed = {k.value for k in edge_kinds} if edge_kinds is not None else None
         with self._lock:
-            allowed = {k.value for k in edge_kinds} if edge_kinds is not None else None
             if incoming:
                 adj, order, dirty = self._in, self._in_srcs, self._dirty_in
             else:
@@ -721,6 +792,34 @@ class WorldModel:
                 for dsts in self._out.values()
                 for kinds in dsts.values()
             )
+
+    # -- copy / pickle ------------------------------------------------------
+
+    def __getstate__(self) -> dict:
+        """Snapshot WITHOUT the lock, so `copy.deepcopy` and `pickle` keep
+        working.
+
+        A `threading.RLock` is not picklable, so merely holding one as an
+        attribute silently broke both on a public model class — they work at
+        both the pre-index and the unlocked-index revisions, and a reviewer
+        caught the regression here. No shipped caller deepcopies or pickles a
+        `WorldModel` (`store.to_dict`/`from_dict` is the supported snapshot
+        path), but "no current caller" is not a reason to drop a capability a
+        class already had.
+
+        The snapshot is taken UNDER the lock, so a copy cannot catch the index
+        mid-mutation and come out torn."""
+        with self._lock:
+            state = self.__dict__.copy()
+        del state["_lock"]
+        return state
+
+    def __setstate__(self, state: dict) -> None:
+        """Restore, giving the new object its OWN fresh lock. A copy must never
+        share a lock with its original: they are independent graphs, and sharing
+        would serialise them against each other for nothing."""
+        self.__dict__.update(state)
+        self._lock = threading.RLock()
 
     # -- index invariant ----------------------------------------------------
 
