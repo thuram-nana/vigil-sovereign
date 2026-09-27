@@ -293,7 +293,11 @@ def _restricted_connect(
     try:
         raw.settimeout(timeout)
         try:
-            # codeql[py/insecure-protocol] -- DELIBERATE: offering the deprecated version IS the
+            # py/insecure-protocol (CodeQL, HIGH) fires here and the alert is DISMISSED as
+            # "won't fix" with this rationale, NOT suppressed inline -- an inline
+            # `# codeql[...]` comment was tried and does NOT work for this analysis, so do not
+            # add one back believing it does anything.
+            # DELIBERATE: offering the deprecated version IS the
             # measurement. This probe exists to find out whether a TARGET still accepts TLS1.0/1.1,
             # which cannot be determined without offering them. The weakness is asserted about the
             # peer, never accepted by us: the context is built fresh per call and used for exactly
