@@ -271,8 +271,18 @@ def _restricted_connect(
     ctx.check_hostname = False
     ctx.verify_mode = ssl.CERT_NONE
     try:
-        if ciphers is not None:
-            ctx.set_ciphers(ciphers + _SECLEVEL0)
+        # ``@SECLEVEL=0`` relaxes what WE OFFER and grants the target nothing (see the module docstring). It
+        # is applied on BOTH probe paths: the weak-cipher probe passes an explicit ``ciphers`` string, and
+        # the version probes pass ``ciphers is None`` and so offer the WIDEST legal set (``ALL``) at the
+        # relaxed level. WHY THE VERSION PATH NEEDS IT: OpenSSL screens every candidate version through
+        # ``ssl_security(SSL_SECOP_VERSION)`` while it builds the ClientHello version table, and on a stock
+        # build that screen removes TLS1.0 AND TLS1.1 at the default security level (>=1, e.g. the Debian/
+        # Ubuntu ``CipherString = DEFAULT:@SECLEVEL=2``). Without this relaxation the deprecated-version
+        # probe aborts with ``NO_PROTOCOLS_AVAILABLE`` (classified ``local_unsupported``) AFTER the TCP
+        # channel is up and BEFORE a byte is sent, so the capability was inert on every stock-OpenSSL host —
+        # it could put a deprecated ClientHello on the wire only on a permissively-configured box. Offering
+        # ``ALL`` here isolates the VERSION as the single variable the probe measures.
+        ctx.set_ciphers((ciphers if ciphers is not None else "ALL") + _SECLEVEL0)
         if min_version_name is not None:
             ctx.minimum_version = getattr(ssl.TLSVersion, min_version_name)
         if max_version_name is not None:
