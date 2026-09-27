@@ -919,6 +919,9 @@ def run_engagement(
     *,
     request_budget: int = 200,
     max_pages: int = 100,
+    # 0 == UNBOUNDED, deliberately (see WebScanCampaign.__init__): an early-stopping cap that reports a
+    # clean-looking result is the false-clean failure this refuses. A cap an operator sets is honoured
+    # safely because DEFAULT_CHECKS runs cost-ascending, so cheap checks are never starved by the SPRT.
     max_audit_requests: int = 0,
     bandit_path: str | None = None,
     enable_domxss: bool = False,
