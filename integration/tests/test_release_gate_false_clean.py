@@ -242,8 +242,10 @@ def test_the_negatives_capable_branch_count_is_pinned_and_named():
     ``channel_established`` precondition, so admission independently refuses to clear a probe whose channel
     never came up. WAVE 3's other two branches deliberately did NOT gain absence-authority —
     ``tls_weakness.weak_cipher_offer`` cannot, because the local OpenSSL build limits which legacy suites can
-    be offered at all (a refusal may mean untested), and ``tls_weakness.certificate_validity`` is LEAD-only
-    because no OracleKind adjudicates certificate validity yet."""
+    be offered at all (a refusal may mean untested), and ``tls_weakness.certificate_validity`` is NOT WIRED
+    at all (``wired: false``) — no OracleKind adjudicates certificate validity, so no re-drive admits to it
+    and it produces nothing; a branch that could only ever report INCONCLUSIVE under a reason that was not
+    the real one was removed rather than left standing."""
     branches = {b["id"]: b for b in _branches()}
     clean = sorted(bid for bid, b in branches.items() if b.get("clean_capable"))
     expected = sorted([
@@ -268,9 +270,11 @@ def test_the_negatives_capable_branch_count_is_pinned_and_named():
     assert _tb.VERSION_REJECTION_REASONS == frozenset({"TLSV1_ALERT_PROTOCOL_VERSION"}), (
         "the clean-capable TLS branch widened its rejection vocabulary — every added reason is a new way "
         "for a non-version failure to launder into a clean bill of health")
-    for lead_only in ("tls_weakness.weak_cipher_offer", "tls_weakness.certificate_validity"):
-        assert branches[lead_only]["clean_capable"] is False, (
-            f"{lead_only} gained absence-authority it has no bounded negative for")
+    for not_clean_capable in ("tls_weakness.weak_cipher_offer", "tls_weakness.certificate_validity"):
+        assert branches[not_clean_capable]["clean_capable"] is False, (
+            f"{not_clean_capable} gained absence-authority it has no bounded negative for")
+    assert branches["tls_weakness.certificate_validity"].get("wired") is False, (
+        "the certificate-validity row must keep saying that nothing drives it")
     # the three redirect HEADER branches must all remain negatives-capable ...
     for header_branch in ("open_redirect.location_header", "host_header.location_header",
                           "oidc_redirect_uri.location_header"):

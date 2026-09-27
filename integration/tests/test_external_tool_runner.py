@@ -457,17 +457,20 @@ def test_tls_scan_toolspec_argv_and_propose():
     spec = tls_scan(port=8443)
     assert spec.name == "tls_scan"
     assert spec.build_argv("example.test") == ["sslscan", "--no-colour", "example.test:8443"]
-    # WAVE 3 widened the family from 2 re-drives to 6, over 4 distinct bounded handshakes (the baseline
-    # modern-client capture is SHARED by three of them). The bug_class SET is unchanged — every new claim
+    # WAVE 3 widened the family from 2 re-drives to 5, over 4 distinct bounded handshakes (the baseline
+    # modern-client capture is SHARED by two of them). The bug_class SET is unchanged — every new claim
     # reuses the existing TLS_WEAKNESS oracle kind rather than adding one — so re-drives sharing a bug_class
     # are told apart by their ``label``, which discriminates their check_id / finding_ref.
     assert {r.bug_class for r in spec.redrives} == {"weak_tls", "weak_crypto_artifact"}
-    assert len(spec.redrives) == 6, [(r.bug_class, r.label, r.branch) for r in spec.redrives]
+    assert len(spec.redrives) == 5, [(r.bug_class, r.label, r.branch) for r in spec.redrives]
     assert len({id(r.capture) for r in spec.redrives}) == 4, "the per-endpoint handshake budget drifted"
     assert {r.branch for r in spec.redrives} == {
         "tls_weakness.tls_handshake", "weak_crypto.cert_signature_algorithm",
-        "tls_weakness.deprecated_protocol_offer", "tls_weakness.weak_cipher_offer",
-        "tls_weakness.certificate_validity"}
+        "tls_weakness.deprecated_protocol_offer", "tls_weakness.weak_cipher_offer"}
+    # tls_weakness.certificate_validity is DELIBERATELY absent: no OracleKind adjudicates certificate
+    # validity, so a re-drive there could only ever admit INCONCLUSIVE while reporting a reason that was
+    # not the real one. The registry row carries wired:false; see test_tls_breadth.py.
+    assert "tls_weakness.certificate_validity" not in {r.branch for r in spec.redrives}
     assert len({(r.bug_class, r.label) for r in spec.redrives}) == len(spec.redrives), (
         "two re-drives share a (bug_class, label) and would collide on one check_id")
     # proposes ONLY when the tool actually reached a TLS service
@@ -507,9 +510,18 @@ def test_loopback_tls_broken_hash_cert_mints_a_weak_crypto_fact(tmp_path: Path, 
 
     assert res.status == "ran"
     assert any(p.port == srv.port for p in res.proposed)
-    # the weak_crypto_artifact oracle CONFIRMED the SHA-1 cert the runner itself retrieved → a signed FACT
-    crypto_facts = [f for f in res.facts if f.confirmed_by == "tls_weakness"]
-    assert crypto_facts, f"expected a TLS_WEAKNESS FACT over the SHA-1 cert; facts={res.facts} leads={res.leads}"
+    # the weak_crypto_artifact oracle CONFIRMED the SHA-1 cert the runner itself retrieved → a signed FACT.
+    # Keyed on the weak_crypto RE-DRIVE's finding_ref, NOT on confirmed_by: since WAVE 3 several TLS claims
+    # share the TLS_WEAKNESS oracle KIND, and this fixture's default-context server genuinely completes a
+    # TLS1.0-only handshake, so `confirmed_by == "tls_weakness"` is also satisfied by the (true, but
+    # entirely different) deprecated-protocol FACT. Keyed that way the test survived the weak-crypto oracle
+    # being stubbed out — it asserted nothing about the claim it is named for.
+    crypto_facts = [f for f in res.facts
+                    if str(getattr(f, "finding_ref", "")).endswith("#weak_crypto_artifact")]
+    assert crypto_facts, (
+        f"expected a WEAK-CRYPTO FACT over the SHA-1 cert; "
+        f"facts={[getattr(f, 'finding_ref', '') for f in res.facts]} leads={res.leads}")
+    assert crypto_facts[0].confirmed_by == "tls_weakness", "the weak-crypto claim is a TLS_WEAKNESS kind"
     fact = crypto_facts[0]
     oracle_context = res.contexts[fact.finding_ref]
     ver = verify_certificate(fact.signed, oracle_context=oracle_context, trust_root=TRUST)

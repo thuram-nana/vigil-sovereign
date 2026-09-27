@@ -7,16 +7,24 @@ evidence. For each claim there is a positive fixture that MUST mint and a same-s
   * a TLS1.0-accepting server mints "deprecated protocol accepted"; a TLS1.2/1.3-only server does NOT, and
     instead admits the CHANNEL-CONFIRMED CLEAN;
   * a NULL-cipher server mints "weak cipher negotiated"; a strong-cipher-only server does NOT;
-  * an expired / not-yet-valid / mismatched / self-signed leaf is classified; a CA-issued, in-date,
-    IP-matching leaf is not;
+  * an expired / not-yet-valid / mismatched / self-signed leaf is classified by the (UNWIRED) claim-4
+    derivation; a CA-issued, in-date, IP-matching leaf is not;
   * a host that TIMES OUT or resets is INCONCLUSIVE and NEVER CLEAN — the laundering bug this slice is most
     exposed to, pinned by name in ``test_a_black_hole_host_is_inconclusive_never_clean`` and
-    ``test_a_reset_host_is_inconclusive_never_clean``.
+    ``test_a_reset_host_is_inconclusive_never_clean``;
+  * a socket that is NOT a TLS service but replies to every ClientHello with the same seven-byte
+    ``alert(70) protocol_version`` record is INCONCLUSIVE and NEVER CLEAN — pinned in
+    ``test_a_bare_alert70_emitter_is_never_clean`` and ``..._end_to_end``. ``channel_established`` alone
+    does not exclude it; the peer-TLS-session witness does.
 
 Each positive is additionally re-verified OFFLINE from its certificate, and a TAMPERED retained capture is
 shown to FAIL that re-verification.
 
-Offense-process test (loads ``framework.*``): CI runs it in the offense group (see ci.yml).
+Offense-process test (imports ``framework.*`` behind an ``importorskip``, so in the SOVEREIGN leg it is
+collected and SKIPPED). It therefore runs in exactly one CI job: the offense leg of the "integration
+two-env boundary (P5)" job, where it is listed explicitly in ``.github/workflows/ci.yml``. That listing is
+not optional — ``test_ci_framework_tests_run_in_offense_leg.py`` fails the build if a file like this one is
+missing from it, precisely so a suite cannot go green by never running.
 """
 from __future__ import annotations
 
@@ -220,6 +228,63 @@ class _BlackHole:
             pass
 
 
+class _BareAlert70Emitter:
+    """NOT A TLS SERVICE. It accepts the TCP connection and writes ONE well-formed seven-byte TLS record —
+    ``alert(fatal, protocol_version(70))`` — to whatever connects, then closes. It never completes a
+    handshake, at any version, ever.
+
+    This is the shape the CLEAN predicate is most exposed to, and the one ``channel_established`` cannot
+    exclude: the channel really is established and the peer really did send ``alert(70)``, so every
+    condition except the peer-TLS-session witness is satisfied. Clearing it would mean asserting "this
+    endpoint does not accept TLS1.0" about a host VIGIL never spoke TLS to."""
+
+    #: content_type=21 (alert) | legacy_record_version 0x0303 | length 2 | level=2 (fatal) | desc=70
+    RECORD = bytes([0x15, 0x03, 0x03, 0x00, 0x02, 0x02, 0x46])
+
+    def __init__(self):
+        self._sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self._sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self._sock.bind(("127.0.0.1", 0))
+        self._sock.listen(16)
+        self.port = self._sock.getsockname()[1]
+        self.served = 0
+        self._stop = False
+        threading.Thread(target=self._serve, daemon=True).start()
+
+    def _serve(self):
+        while not self._stop:
+            try:
+                self._sock.settimeout(0.4)
+                raw, _ = self._sock.accept()
+            except (TimeoutError, socket.timeout, OSError):
+                continue
+            self.served += 1
+            threading.Thread(target=self._handle, args=(raw,), daemon=True).start()
+
+    def _handle(self, raw):
+        try:
+            raw.settimeout(2.0)
+            try:
+                raw.recv(4096)          # swallow the ClientHello, whatever it offered
+            except OSError:
+                pass
+            raw.sendall(self.RECORD)
+        except OSError:
+            pass
+        finally:
+            try:
+                raw.close()
+            except OSError:
+                pass
+
+    def close(self):
+        self._stop = True
+        try:
+            self._sock.close()
+        except OSError:
+            pass
+
+
 def _closed_port() -> int:
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     s.bind(("127.0.0.1", 0))
@@ -270,10 +335,59 @@ def test_the_handshake_budget_is_structural_not_a_comment():
     distinct = {id(r.capture) for r in spec.redrives}
     assert len(distinct) == tb.TLS_HANDSHAKE_BUDGET_PER_ENDPOINT == 4, (
         f"{len(distinct)} distinct captures != declared budget {tb.TLS_HANDSHAKE_BUDGET_PER_ENDPOINT}")
+    assert len(spec.redrives) == 5, [(r.bug_class, r.label, r.branch) for r in spec.redrives]
     # and every re-drive that shares a bug_class carries a discriminating label, so no two overwrite each
     # other's retained context
     keys = [(r.bug_class, r.label) for r in spec.redrives]
     assert len(set(keys)) == len(keys), f"two re-drives collide on (bug_class, label): {keys}"
+
+
+def test_the_certificate_validity_branch_is_not_wired_and_says_so():
+    """CLAIM 4 IS NOT WIRED, and this is the pin that keeps the code and the registry saying the same thing.
+
+    A re-drive WAS wired to ``tls_weakness.certificate_validity`` and was removed. It could not work: the
+    branch's only route to a non-INCONCLUSIVE verdict is ``fired=True`` (it is not clean-capable), and no
+    ``OracleKind`` dispatches on the ``certificate_validity`` context key, so the oracle can never fire.
+    A branch that always returns INCONCLUSIVE while naming a reason that is not the real one is worse than
+    an absent branch. Asserted three ways so re-adding a dead branch reddens CI:
+      (a) no re-drive on the shipped ToolSpec admits to it;
+      (b) the registry row declares ``wired: false`` and says NOT WIRED in its limitation;
+      (c) the mechanism is still true — a context under that key draws no oracle signal.
+    """
+    import json
+    from vigil_integration.live.external_tool import _oracle_signal
+
+    spec = tls_scan(port=443)
+    assert _CERT_BRANCH not in {r.branch for r in spec.redrives}, (
+        "a re-drive admits to the certificate-validity branch again; it can only emit INCONCLUSIVE with a "
+        "reason that is not the real one — wire a real oracle first (see the row's blocking_work)")
+    assert not any(r.label == "cert_validity" for r in spec.redrives)
+
+    row = {b["id"]: b for b in json.loads(
+        Path(__file__).resolve().parents[2].joinpath(
+            "docs/capability-matrix/evidence-branches.json").read_text(encoding="utf-8"))["branches"]
+    }[_CERT_BRANCH]
+    assert row.get("wired") is False, "the registry must declare this branch unwired"
+    assert "not wired" in row["limitation"].lower()
+    assert row["fact_capable"] is False and row["clean_capable"] is False
+
+    # (c) the mechanism: even a fully-populated certificate_validity context draws NO oracle signal, which
+    # is exactly why a re-drive there is dead. Non-vacuous — the same call shape over the branch that IS
+    # wired does produce a signal.
+    cert, _ = _leaf(not_before_days=-40, not_after_days=-10)
+    record = tb.classify_certificate_defects(_cert_evidence(cert))
+    assert record and record["defects"], "precondition of this test: the derivation found real defects"
+    dead = {"check_id": "x", "bug_class": "weak_tls", "insertion_point": "h:443",
+            "oracle_context": {"bug_class": "weak_tls", "certificate_validity": record}}
+    assert _oracle_signal(dead) == (False, False), (
+        "an OracleKind now adjudicates certificate validity — WIRE the branch and delete this pin")
+    live = {"check_id": "y", "bug_class": "weak_tls", "insertion_point": "h:443",
+            "oracle_context": {"bug_class": "weak_tls",
+                               "tls": {"connected": True, "host": "h", "tls_version": "TLSv1",
+                                       "cipher": "AES128-SHA"}}}
+    assert _oracle_signal(live)[0] is True, (
+        "control: the TLS oracle does fire over a context it DOES dispatch on, so the (False, False) above "
+        "is the certificate_validity key drawing no oracle, not a broken call shape")
 
 
 def test_the_three_new_branches_are_registered_with_the_capability_they_actually_have():
@@ -294,15 +408,37 @@ def test_the_three_new_branches_are_registered_with_the_capability_they_actually
 
     cv = branches[_CERT_BRANCH]
     assert cv["fact_capable"] is False and cv["clean_capable"] is False, (
-        "certificate validity is LEAD-only: no OracleKind adjudicates it")
-    assert cv["oracle_version"] == "", "a LEAD-only branch names no oracle"
-    assert "lead-only" in cv["limitation"].lower()
+        "certificate validity is not adjudicated by any OracleKind")
+    assert cv["oracle_version"] == "", "an unadjudicated branch names no oracle"
+    assert cv.get("wired") is False and "not wired" in cv["limitation"].lower(), (
+        "the certificate-validity row must say plainly that nothing drives it")
+    assert all(c.startswith("MISSING:") for c in cv["control_requirements"]), (
+        f"an unwired branch may not claim satisfied controls: {cv['control_requirements']}")
+
+
+def test_the_weak_cipher_vocabulary_size_is_pinned():
+    """29 named suites. Pinned so a silent widening of what VIGIL is willing to OFFER is a reviewed edit,
+    and so any prose stating the count can be checked against the data."""
+    assert len(tb.WEAK_CIPHER_OFFER) == 29, f"the closed vocabulary is now {len(tb.WEAK_CIPHER_OFFER)}"
+    assert len(set(tb.WEAK_CIPHER_OFFER)) == len(tb.WEAK_CIPHER_OFFER), "duplicate suite in the vocabulary"
 
 
 def test_the_weak_cipher_vocabulary_is_a_closed_list_not_a_pattern():
-    """Membership, never a pattern. A modern AEAD suite whose NAME contains a weak token as a substring
-    (``TLS_AES_128_GCM_SHA256`` contains ``AES``; ``ECDHE-ECDSA-AES128-GCM-SHA256`` contains ``DES`` inside
-    ``ECDSA``) is not in the offer and is never reported as negotiated-weak."""
+    """Membership, never a pattern — because weak and strong OpenSSL suite names share long substrings, so
+    any name rule is a hand-approximation waiting to be wrong in one direction or the other.
+
+    Two REAL collisions, checked here rather than asserted in prose: ``AECDH-AES128-SHA`` is weak (ANONYMOUS
+    key exchange, no server authentication) yet contains both ``ECDH`` and ``AES128-SHA``, each of which
+    also occurs in authenticated suites; and ``ECDHE-ECDSA-RC4-SHA`` (weak) and
+    ``ECDHE-ECDSA-AES128-GCM-SHA256`` (strong) are identical up to the shared key-exchange prefix. A
+    membership test on a fixed list is immune to both."""
+    # the collisions are real, not rhetorical
+    assert "ECDH" in "AECDH-AES128-SHA" and "AES128-SHA" in "AECDH-AES128-SHA"
+    assert "AECDH-AES128-SHA" in tb.WEAK_CIPHER_OFFER
+    assert "ECDHE-RSA-AES128-SHA" not in tb.WEAK_CIPHER_OFFER
+    shared = "ECDHE-ECDSA-"
+    assert "ECDHE-ECDSA-RC4-SHA" in tb.WEAK_CIPHER_OFFER
+    assert "ECDHE-ECDSA-AES128-GCM-SHA256".startswith(shared) and "ECDHE-ECDSA-RC4-SHA".startswith(shared)
     assert "TLS_AES_128_GCM_SHA256" not in tb.WEAK_CIPHER_OFFER
     assert "ECDHE-ECDSA-AES128-GCM-SHA256" not in tb.WEAK_CIPHER_OFFER
     strong = {"connected": True, "cipher": "ECDHE-ECDSA-AES128-GCM-SHA256",
@@ -317,15 +453,35 @@ def test_the_weak_cipher_vocabulary_is_a_closed_list_not_a_pattern():
         "a suite VIGIL did not offer in THIS capture must not be scored")
 
 
-def test_offerable_weak_ciphers_is_a_subset_of_the_closed_vocabulary_and_sends_nothing():
+def test_offerable_weak_ciphers_is_a_subset_of_the_closed_vocabulary_and_sends_nothing(tmp_path, monkeypatch):
+    """The zero-offerable path: nothing was tested, and the evidence must say that WITHOUT sending a packet
+    and WITHOUT skipping the audited gate.
+
+    The gate matters even here. Asserting ``gate_authorized: False`` unconditionally (as a draft did) would
+    report a gate refusal that never happened and make "the gate said no" indistinguishable from "we were
+    authorised and had nothing to offer". So the no-op is routed through ``capture_tls_handshake`` with a
+    connector that raises before touching a socket — proven below by making ``socket.create_connection``
+    fatal for the duration."""
+    import socket as _socket
     offerable = tb.offerable_weak_ciphers()
     assert set(offerable) <= set(tb.WEAK_CIPHER_OFFER)
-    # an empty offer means NOTHING was tested — the capture must say so rather than imply a negative
+
+    _charter(tmp_path)
+    monkeypatch.setattr(_socket, "create_connection",
+                        lambda *a, **k: pytest.fail("the zero-offerable path opened a socket"))
     empty = tb.capture_weak_cipher_handshake("127.0.0.1", 1, slug="alpha", offer=())
     assert empty["connected"] is False
     assert empty["failure_class"] == tb.FAILURE_LOCAL_UNSUPPORTED
     assert empty["offered_ciphers"] == []
     assert empty["tcp_established"] is False
+    assert empty["gate_authorized"] is True, (
+        "the in-charter no-op must record that the GATE authorised it — otherwise a local capability gap "
+        "is reported as a gate refusal")
+
+    # and the same no-op OUTSIDE the charter is a gate refusal, not a local gap: the two are distinguished
+    out_of_scope = tb.capture_weak_cipher_handshake("10.99.99.99", 1, slug="alpha", offer=())
+    assert out_of_scope["gate_authorized"] is False
+    assert out_of_scope["failure_class"] == tb.FAILURE_GATE_REFUSED
 
 
 # ===================================================================================================
@@ -334,7 +490,9 @@ def test_offerable_weak_ciphers_is_a_subset_of_the_closed_vocabulary_and_sends_n
 def _refusal(**over):
     ev = {"connected": False, "host": "h", "port": 443, "gate_authorized": True, "tcp_established": True,
           "offered_only_version": "TLSv1", "failure_class": tb.FAILURE_VERSION_REJECTED,
-          "ssl_reason": "TLSV1_ALERT_PROTOCOL_VERSION"}
+          "ssl_reason": "TLSV1_ALERT_PROTOCOL_VERSION",
+          tb.PEER_SESSION_KEY: {"completed": True, "tls_version": "TLSv1.2",
+                                "cipher": "ECDHE-RSA-AES128-GCM-SHA256", "probe": "baseline_handshake"}}
     ev.update(over)
     return ev
 
@@ -342,6 +500,29 @@ def _refusal(**over):
 def test_only_a_peer_protocol_version_alert_on_an_open_channel_is_conclusive():
     assert tb.is_conclusive_protocol_refusal(_refusal()) is True
     assert tb.is_conclusive_protocol_refusal(_refusal(offered_only_version="TLSv1.1")) is True
+
+
+def test_the_peer_session_witness_is_derived_only_from_a_completed_same_endpoint_handshake():
+    """The witness itself, as a pure function. It must not be satisfiable by a sibling that failed, by a
+    sibling for a DIFFERENT endpoint, or by the probe itself."""
+    own = {"connected": False, "host": "h", "port": 443, "probe": "deprecated_protocol_offer"}
+    failed = {"connected": False, "host": "h", "port": 443}
+    other_host = {"connected": True, "host": "elsewhere", "port": 443, "tls_version": "TLSv1.2"}
+    other_port = {"connected": True, "host": "h", "port": 8443, "tls_version": "TLSv1.2"}
+    good = {"connected": True, "host": "h", "port": 443, "tls_version": "TLSv1.2", "cipher": "X"}
+
+    assert tb.peer_tls_session_witness(own, ())[tb.PEER_SESSION_KEY]["completed"] is False
+    assert tb.peer_tls_session_witness(
+        own, (failed, other_host, other_port))[tb.PEER_SESSION_KEY]["completed"] is False, (
+        "a failed / different-endpoint sibling witnessed a TLS session")
+    got = tb.peer_tls_session_witness(own, (failed, good))[tb.PEER_SESSION_KEY]
+    assert got["completed"] is True and got["tls_version"] == "TLSv1.2"
+    # a probe may not witness for itself
+    self_only = {"connected": True, "host": "h", "port": 443, "tls_version": "TLSv1.2"}
+    assert tb.peer_tls_session_witness(
+        self_only, (self_only,))[tb.PEER_SESSION_KEY]["completed"] is False
+    # and the function does not mutate its input
+    assert tb.PEER_SESSION_KEY not in own
 
 
 @pytest.mark.parametrize("over,why", [
@@ -359,6 +540,16 @@ def test_only_a_peer_protocol_version_alert_on_an_open_channel_is_conclusive():
     ({"ssl_reason": ""}, "no recorded peer reason"),
     ({"offered_only_version": "TLSv1.2"}, "we did not narrow the offer to a DEPRECATED version"),
     ({"offered_only_version": ""}, "no restricted offer was recorded"),
+    # --- the peer-TLS-session witness: without it, `channel_established` does not constrain what its
+    # name promises, and a CLEAN would be asserted about a host VIGIL never spoke TLS to.
+    ({tb.PEER_SESSION_KEY: None}, "no witness at all — the peer was never shown to be a TLS service"),
+    ({tb.PEER_SESSION_KEY: {"completed": False, "tls_version": "", "cipher": "", "probe": ""}},
+     "no capture in the run completed a TLS session with this peer"),
+    ({tb.PEER_SESSION_KEY: {"completed": True, "tls_version": "", "cipher": "", "probe": "x"}},
+     "a 'completed' witness naming no version proves nothing"),
+    ({tb.PEER_SESSION_KEY: {"completed": True, "tls_version": "TLSv1", "cipher": "", "probe": "x"}},
+     "a session at the VERY version we report as refused is a contradiction, not a corroboration"),
+    ({tb.PEER_SESSION_KEY: "yes"}, "a non-dict witness is not a witness"),
 ])
 def test_every_other_shape_is_inconclusive_never_clean(over, why):
     assert tb.is_conclusive_protocol_refusal(_refusal(**over)) is False, why
@@ -398,7 +589,10 @@ def test_admission_turns_the_predicate_into_the_verdict_at_the_choke():
     # the weak-cipher branch may NEVER clear, whatever conclusiveness is claimed
     assert V.admit(_WEAK_CIPHER_BRANCH, fired=False, conclusive=True,
                    observed=ok).verdict is V.Verdict.INCONCLUSIVE
-    # the certificate-validity branch may neither mint nor clear
+    # the certificate-validity ROW may neither mint nor clear. Nothing admits to it (the branch is
+    # unwired — see test_the_certificate_validity_branch_is_not_wired_and_says_so); these two lines pin
+    # the registry declaration itself, so if it is ever wired it starts from a capability nobody can
+    # accidentally raise.
     assert V.admit(_CERT_BRANCH, fired=True, conclusive=True, observed=ok).verdict is V.Verdict.LEAD
     assert V.admit(_CERT_BRANCH, fired=False, conclusive=True, observed=ok).verdict is V.Verdict.INCONCLUSIVE
 
@@ -495,9 +689,16 @@ def test_the_clean_is_reproducible_offline_from_the_retained_capture(tmp_path):
     assert tb.is_conclusive_protocol_refusal(retained) is True
     assert retained["ssl_reason"] == "TLSV1_ALERT_PROTOCOL_VERSION"
     assert retained["tcp_established"] is True and retained["gate_authorized"] is True
+    # the peer-TLS-session witness must be RETAINED, not recomputed: that is what keeps the CLEAN a pure
+    # function of this one dict and therefore reproducible with no siblings, no network and no clock.
+    witness = retained[tb.PEER_SESSION_KEY]
+    assert witness["completed"] is True and witness["tls_version"] not in ("", "TLSv1"), witness
     # and a tamper of the retained reason removes the CLEAN
     assert tb.is_conclusive_protocol_refusal(
         {**retained, "ssl_reason": "SSLV3_ALERT_HANDSHAKE_FAILURE"}) is False
+    # ... as does a tamper that removes the witness
+    assert tb.is_conclusive_protocol_refusal(
+        {**retained, tb.PEER_SESSION_KEY: dict(witness, completed=False)}) is False
 
 
 # ===================================================================================================
@@ -542,6 +743,61 @@ def test_a_reset_host_is_inconclusive_never_clean(tmp_path):
     from vigil_integration.live.external_tool import _tls_probe_observed
     assert V.admit(_DEPRECATED_BRANCH, fired=False, conclusive=True,
                    observed=_tls_probe_observed(ev)).verdict is V.Verdict.INCONCLUSIVE
+
+
+def test_a_bare_alert70_emitter_is_never_clean(tmp_path):
+    """MEDIUM (five-lens review): a socket that is not a TLS service, but answers every ClientHello with
+    the same seven-byte ``alert(70)`` record, satisfied every condition the CLEAN predicate used to have.
+    The channel is established and the peer really sent the alert — so this test FIRST proves it reaches
+    that exact state (non-vacuity), and only then that the verdict is still INCONCLUSIVE."""
+    _charter(tmp_path)
+    emitter = _BareAlert70Emitter()
+    try:
+        ev = tb.capture_version_restricted_handshake(
+            "127.0.0.1", emitter.port, slug="alpha", version_attr="TLSv1", version_label="TLSv1",
+            timeout=3.0)
+    finally:
+        emitter.close()
+
+    # NON-VACUITY: the dangerous state really was reached — every pre-witness condition holds.
+    assert emitter.served >= 1, "precondition of this test: the emitter was actually contacted"
+    assert ev["connected"] is False
+    assert ev["gate_authorized"] is True and ev["tcp_established"] is True
+    assert ev["failure_class"] == tb.FAILURE_VERSION_REJECTED, (
+        f"precondition of this test: OpenSSL must classify the bare record as a peer alert(70); "
+        f"got {ev['failure_class']!r} / {ev.get('ssl_reason')!r}")
+    assert ev["ssl_reason"] == "TLSV1_ALERT_PROTOCOL_VERSION"
+
+    # ... and it is STILL not clean, because nothing ever completed a TLS session with this peer.
+    stamped = tb.peer_tls_session_witness(ev, (ev,))
+    assert stamped[tb.PEER_SESSION_KEY]["completed"] is False
+    assert tb.is_conclusive_protocol_refusal(stamped) is False, (
+        "A NON-TLS ALERT EMITTER LAUNDERED INTO A CLEAN")
+
+    # the control: the SAME evidence with a genuine completed session beside it IS clean — so the
+    # INCONCLUSIVE above is the witness doing work, not the predicate having become unsatisfiable.
+    session = {"connected": True, "host": ev["host"], "port": ev["port"], "tls_version": "TLSv1.2",
+               "cipher": "ECDHE-RSA-AES128-GCM-SHA256", "probe": "baseline_handshake"}
+    assert tb.is_conclusive_protocol_refusal(
+        tb.peer_tls_session_witness(ev, (session,))) is True
+
+
+def test_a_bare_alert70_emitter_is_never_clean_end_to_end(tmp_path):
+    """The same pin driven through the WHOLE gated runner: no FACT and, above all, NO CLEAN outcome
+    anywhere against a peer VIGIL never completed a TLS session with."""
+    emitter = _BareAlert70Emitter()
+    try:
+        res = _run(emitter.port, tmp_path, timeout=20.0)
+    finally:
+        emitter.close()
+
+    assert res.status == "ran"
+    assert emitter.served >= 1, "precondition: the runner really probed the emitter"
+    outs = _outcomes(res, "offer_tls1_0") + _outcomes(res, "offer_tls1_1")
+    assert outs, f"the version probes produced no outcome at all; outcomes={res.outcomes}"
+    cleans = [o for o in res.outcomes if o["outcome"] == Outcome.CLEAN.value]
+    assert not cleans, f"a non-TLS alert emitter was CLEARED: {cleans}"
+    assert res.facts == [], f"a non-TLS alert emitter minted FACTs: {[f.finding_ref for f in res.facts]}"
 
 
 def test_a_closed_port_run_produces_no_clean_and_no_fact_anywhere(tmp_path):
@@ -641,8 +897,15 @@ def test_a_strong_cipher_only_server_mints_no_weak_cipher_fact_and_no_clean(tmp_
     finally:
         srv.close()
 
-    assert not _facts(res, "offer_weak_ciphers"), "a strong-cipher-only server minted a weak-cipher FACT"
+    # NON-VACUITY FIRST: the probe must really have run against a really-reachable server, or "no FACT"
+    # would be satisfied by the test never reaching the server at all.
+    assert res.status == "ran" and res.proposed, f"the server was never proposed; {res.detail}"
+    assert _facts(res, "offer_tls1_0") == [] and _outcomes(res, "offer_tls1_0"), (
+        "control: the version probes ran against this same endpoint")
     outs = _outcomes(res, "offer_weak_ciphers")
+    assert outs, f"the weak-cipher probe produced no outcome at all; outcomes={res.outcomes}"
+
+    assert not _facts(res, "offer_weak_ciphers"), "a strong-cipher-only server minted a weak-cipher FACT"
     assert all(o["outcome"] != Outcome.CLEAN.value for o in outs), (
         f"the weak-cipher branch leaked a CLEAN on a refusal: {outs}")
     assert all(o["outcome"] == Outcome.SKIPPED.value for o in outs), (
@@ -650,7 +913,9 @@ def test_a_strong_cipher_only_server_mints_no_weak_cipher_fact_and_no_clean(tmp_
 
 
 # ===================================================================================================
-# 5. CLAIM 4 — certificate defects re-derived from the RETAINED DER at the RETAINED instant.
+# 5. CLAIM 4 — BUILT, TESTED, NOT WIRED. The derivation below is pure and re-runnable; nothing in the
+#    product drives it (see test_the_certificate_validity_branch_is_not_wired_and_says_so above, and
+#    test_no_live_capture_retains_a_wallclock_instant below, which pins WHY it is inert on live evidence).
 # ===================================================================================================
 def _cert_evidence(cert, *, host="127.0.0.1", at_epoch=None):
     return {"connected": True, "host": host, "port": 443, "cert_der_b64": _der_b64(cert),
@@ -721,15 +986,16 @@ def test_self_signed_needs_issuer_equals_subject_AND_a_self_verifying_signature(
 
 
 def test_a_valid_in_date_hostname_matching_ca_issued_cert_reports_no_defect():
-    """THE same-shape negative control for claim 4: a clean certificate must produce an EMPTY defect list,
-    and the runner's context builder must therefore produce no lead at all."""
+    """THE same-shape negative control for the claim-4 derivation: a clean certificate must produce an
+    EMPTY defect list. Paired with the expired/mismatched/self-signed positives above, so "no defects" is
+    a discrimination and not a function that never reports anything."""
     import ipaddress
-    from vigil_integration.live.external_tool import _certificate_validity_context
     ca = _ca()
     good, _ = _leaf(sans=[x509.IPAddress(ipaddress.ip_address("127.0.0.1"))], issuer=ca)
-    ev = _cert_evidence(good)
-    assert tb.classify_certificate_defects(ev)["defects"] == []
-    assert _certificate_validity_context(ev) is None, "a defect-free certificate produced a lead"
+    assert tb.classify_certificate_defects(_cert_evidence(good))["defects"] == []
+    bad, _ = _leaf(cn="other.example", not_before_days=-40, not_after_days=-10)
+    assert tb.classify_certificate_defects(_cert_evidence(bad))["defects"] != [], (
+        "control: the same call shape over a defective leaf DOES report defects")
 
 
 def test_missing_or_unparseable_inputs_judge_nothing_rather_than_clearing():
@@ -741,30 +1007,97 @@ def test_missing_or_unparseable_inputs_judge_nothing_rather_than_clearing():
         {"cert_der_b64": base64.b64encode(b"not a certificate").decode(), "captured_at_epoch": 1}) is None
 
 
-def test_the_certificate_validity_branch_can_neither_mint_nor_clear_end_to_end(tmp_path):
-    """LEAD-only, proven through the whole runner against a server presenting an EXPIRED, mismatched,
-    self-signed leaf — the strongest possible input. It must still produce no FACT and no CLEAN."""
+def test_the_certificate_validity_derivation_is_inert_against_live_evidence(tmp_path):
+    """THE honest end-to-end statement of claim 4, driven through the whole runner against the strongest
+    possible input — a server presenting an EXPIRED, hostname-MISMATCHED, SELF-SIGNED leaf.
+
+    The previous version of this test was vacuous: every substantive assertion sat behind
+    ``if ref in res.contexts:`` and one of them was ``record["at_epoch"] == record["at_epoch"]``, so it
+    passed whether or not the path under test ran at all. This one asserts POSITIVELY, in both directions:
+
+      1. the runner really captured that certificate (non-vacuity — the defects are derivable from the DER
+         the runner itself retained, which is the whole value of the derivation), AND
+      2. NOTHING in the run adjudicates it: no ``cert_validity`` outcome exists at all, because the branch
+         is unwired; and the live capture retains no ``captured_at_epoch``, so handing that same capture to
+         the derivation returns ``None`` rather than a verdict.
+    """
     cert, key = _leaf(cn="wrong.example", sans=[x509.DNSName("wrong.example")],
                       not_before_days=-40, not_after_days=-10)
     cpem, kpem = _pem(cert, key)
     srv = _TLSServer(cpem, kpem, min_version=ssl.TLSVersion.TLSv1_2, max_version=ssl.TLSVersion.TLSv1_3,
-                     seclevel0=False)
+                     ciphers=_STRONG_SUITES, seclevel0=False)
     try:
         res = _run(srv.port, tmp_path)
     finally:
         srv.close()
 
-    outs = _outcomes(res, "cert_validity")
-    assert outs, f"the certificate-validity re-drive produced no outcome; outcomes={res.outcomes}"
-    assert not _facts(res, "cert_validity"), "a LEAD-only branch minted a FACT"
-    assert all(o["outcome"] != Outcome.CLEAN.value for o in outs), f"a LEAD-only branch cleared: {outs}"
-    # the classification IS retained for the operator even though it cannot be promoted
-    ref = outs[0]["check_id"]
-    if ref in res.contexts:
-        record = res.contexts[ref]["certificate_validity"]
-        assert "expired" in record["defects"] and "hostname_mismatch" in record["defects"]
-        assert "self_signed" in record["defects"]
-        assert record["at_epoch"] == record["at_epoch"] and record["at_epoch"] > 0
+    assert res.status == "ran" and res.proposed
+    # (1) NON-VACUITY: the runner's OWN baseline capture really retained this defective leaf. Reached via
+    # the weak_crypto re-drive's retained context, which is built from the same shared baseline handshake.
+    live_der = _der_b64(cert)
+    retained_leaf = [c["tls"]["cert_der_b64"] for c in res.contexts.values()
+                     if isinstance(c, dict) and isinstance(c.get("tls"), dict)
+                     and c["tls"].get("cert_der_b64")]
+    assert live_der in retained_leaf, (
+        f"the runner's own captures did not retain this defective leaf at all; outcomes={res.outcomes}")
+    # the derivation DOES find every defect when it is given an instant to compare against
+    record = tb.classify_certificate_defects(
+        {"connected": True, "host": "127.0.0.1", "port": srv.port, "cert_der_b64": live_der,
+         "captured_at_epoch": int(_now().timestamp())})
+    assert record is not None
+    assert {"expired", "hostname_mismatch", "self_signed"} <= set(record["defects"]), record
+
+    # (2a) NOTHING adjudicates it: the branch is unwired, so there is no cert_validity outcome to inspect.
+    assert _outcomes(res, "cert_validity") == [], (
+        "a cert_validity outcome exists again — the dead branch was re-wired; see "
+        "test_the_certificate_validity_branch_is_not_wired_and_says_so")
+    assert all(_CERT_BRANCH not in str(o.get("check_id", "")) for o in res.outcomes)
+
+    # (2b) and it is inert on live evidence, because no live capture retains a comparison instant.
+    for probe_label in ("offer_tls1_0", "offer_tls1_1", "offer_weak_ciphers"):
+        for out in _outcomes(res, probe_label):
+            ctx = res.contexts.get(out["check_id"])
+            if isinstance(ctx, dict) and isinstance(ctx.get("tls"), dict):
+                assert tb.classify_certificate_defects(ctx["tls"]) is None, (
+                    "a live capture now carries a comparison instant — if that is deliberate, it is a "
+                    "certificate-invalidating change for that branch and must be declared")
+
+
+def test_no_live_capture_retains_a_wallclock_instant(tmp_path):
+    """HIGH (five-lens review): a draft stamped ``captured_at_epoch`` / ``capture_time_source`` into the
+    SHARED baseline capture, which is the signed oracle context of two ALREADY-SHIPPED branches
+    (``tls_weakness.tls_handshake`` and ``weak_crypto.cert_signature_algorithm``) — so every certificate
+    ever issued for them would have changed digest, for a consumer that turned out to be structurally
+    dead. No capture stamps it now. This pins that, over EVERY capture the TLS spec performs."""
+    from framework.v2.verify import capture_tls_handshake
+    from vigil_integration.live.external_tool import _tls_capture
+    _charter(tmp_path)
+    cert, key = _leaf()
+    cpem, kpem = _pem(cert, key)
+    srv = _TLSServer(cpem, kpem, min_version=ssl.TLSVersion.TLSv1, max_version=ssl.TLSVersion.TLSv1_3)
+    try:
+        baseline = _tls_capture("127.0.0.1", srv.port, slug="alpha")
+        direct = capture_tls_handshake("127.0.0.1", srv.port, slug="alpha")
+        others = [
+            tb.capture_version_restricted_handshake("127.0.0.1", srv.port, slug="alpha",
+                                                    version_attr="TLSv1", version_label="TLSv1"),
+            tb.capture_weak_cipher_handshake("127.0.0.1", srv.port, slug="alpha"),
+            tb.capture_weak_cipher_handshake("127.0.0.1", srv.port, slug="alpha", offer=()),
+        ]
+    finally:
+        srv.close()
+
+    assert baseline.get("connected") is True, "precondition: the baseline handshake really completed"
+    for cap in [baseline, *others]:
+        assert "captured_at_epoch" not in cap, f"a runner wallclock is back in signed evidence: {cap}"
+        assert "capture_time_source" not in cap, cap
+    # the SHARED baseline capture's evidence SHAPE is exactly what verify.tls returns — WAVE 3 added no
+    # field to it, so the two branches it feeds keep the oracle context (and so the certificate digest)
+    # they shipped with.
+    assert set(baseline) == set(direct), (
+        f"_tls_capture added {sorted(set(baseline) - set(direct))} to a SHIPPED branch's signed context")
+    assert tb.PEER_SESSION_KEY not in baseline, (
+        "the shared baseline capture was enriched; its two shipped branches' digests must not move")
 
 
 # ===================================================================================================
@@ -834,7 +1167,10 @@ def test_every_wave3_capture_goes_through_capture_tls_handshake(monkeypatch):
     monkeypatch.setattr(fv, "capture_tls_handshake", fake)
     tb.capture_version_restricted_handshake("127.0.0.1", 8443, slug="alpha", version_attr="TLSv1")
     tb.capture_weak_cipher_handshake("127.0.0.1", 8443, slug="alpha")
-    assert len(calls) == 2 and {c[2] for c in calls} == {"alpha"}, (
+    # ... INCLUDING the zero-offerable no-op, which used to return a hand-built dict without ever
+    # consulting the gate, while the module docstring claimed every capture went through it.
+    tb.capture_weak_cipher_handshake("127.0.0.1", 8443, slug="alpha", offer=())
+    assert len(calls) == 3 and {c[2] for c in calls} == {"alpha"}, (
         f"a WAVE-3 capture bypassed the audited gate; calls={calls}")
 
 

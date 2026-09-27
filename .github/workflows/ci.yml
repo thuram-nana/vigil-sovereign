@@ -486,6 +486,7 @@ jobs:
               integration/tests/test_fuzz_corpus_replay.py \
               integration/tests/test_oracle_adapter.py \
               integration/tests/test_external_tool_runner.py \
+              integration/tests/test_tls_breadth.py \
               integration/tests/test_authority_root_decouple.py \
               integration/tests/test_executor_capability_boundary.py \
               integration/tests/test_conformance.py \

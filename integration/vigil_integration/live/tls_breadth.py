@@ -17,13 +17,16 @@ THE FOUR CLAIMS, and what each one honestly is:
      EXISTING ``tls_weakness_oracle`` fires on it (``_DEPRECATED_TLS_VERSIONS``). Existential: the server
      really agreed, and the retained evidence re-verifies offline.
 
-  2. DEPRECATED PROTOCOL REFUSED (CLEAN — a CHANNEL-CONFIRMED NEGATIVE). VIGIL offers ONLY TLS1.0 and the
-     PEER answers on the established TCP channel with a ``protocol_version(70)`` alert. This is one of the
-     very few genuinely CLEAN-capable cases in the product: the negative is something the peer SAID, not an
-     absence of signal. :func:`is_conclusive_protocol_refusal` is the CLOSED, deterministic predicate that
-     decides it, and it is deliberately narrow — see its docstring. A timeout, a TCP reset, a DNS failure,
-     a refused connect, a locally-unsupported protocol, or ANY other alert (including the ambiguous
-     ``handshake_failure(40)``) is INCONCLUSIVE. Never CLEAN.
+  2. DEPRECATED PROTOCOL REFUSED (CLEAN — a CHANNEL-CONFIRMED NEGATIVE). VIGIL offers ONLY TLS1.0, the
+     PEER answers on the established TCP channel with a ``protocol_version(70)`` alert, AND the peer is
+     shown to be a genuine TLS service by a handshake it COMPLETED at a different version in the same run
+     (the :func:`peer_tls_session_witness` stamp). This is one of the very few genuinely CLEAN-capable
+     cases in the product: the negative is something the peer SAID, and the thing that said it is a
+     demonstrated TLS endpoint rather than anything that can emit seven bytes.
+     :func:`is_conclusive_protocol_refusal` is the CLOSED, deterministic predicate that decides it, and it
+     is deliberately narrow — see its docstring. A timeout, a TCP reset, a DNS failure, a refused connect,
+     a locally-unsupported protocol, ANY other alert (including the ambiguous ``handshake_failure(40)``),
+     and a peer VIGIL never completed a single TLS session with are all INCONCLUSIVE. Never CLEAN.
 
   3. WEAK CIPHER NEGOTIATED (FACT). VIGIL offers ONLY suites drawn from :data:`WEAK_CIPHER_OFFER` — a
      CLOSED, explicit vocabulary of named suites, never a pattern over suite names — and the endpoint
@@ -32,34 +35,45 @@ THE FOUR CLAIMS, and what each one honestly is:
      name. A refusal is NOT clean here (see the branch's ``blocking_work``): the local OpenSSL build limits
      which legacy suites can be offered at all, so "refused" may mean "never tested".
 
-  4. CERTIFICATE DEFECTS over the retained chain (LEAD-only TODAY). :func:`classify_certificate_defects`
-     re-derives expiry / not-yet-valid / hostname mismatch / self-signed from the RETAINED leaf DER, so the
-     derivation is pure and re-runnable offline. It is LEAD-only because NO ``OracleKind`` in
-     ``verify/models.py`` adjudicates certificate VALIDITY — ``tls_weakness_oracle`` judges the negotiated
-     protocol/cipher and ``weak_crypto_artifact_oracle`` judges the signature hash and key size; neither
-     reads a validity window, a SAN, or an issuer. The gap is named in the branch's ``blocking_work``.
+  4. CERTIFICATE DEFECTS over the retained leaf — BUILT, TESTED, **NOT WIRED**.
+     :func:`classify_certificate_defects` re-derives expiry / not-yet-valid / hostname mismatch /
+     self-signed from a RETAINED leaf DER at a RETAINED instant, so the derivation is pure and re-runnable
+     offline. NOTHING IN THE PRODUCT DRIVES IT TODAY: no re-drive on ``external_tool._TLS_REDRIVES`` admits
+     to ``tls_weakness.certificate_validity``, and no live capture in this module retains the
+     ``captured_at_epoch`` the classifier requires, so against live evidence it returns ``None``.
+     The reason is that no ``OracleKind`` adjudicates certificate VALIDITY — ``tls_weakness_oracle`` judges
+     the negotiated protocol/cipher, ``weak_crypto_artifact_oracle`` judges the signature hash and key
+     size; neither reads a validity window, a SAN or an issuer. A re-drive wired to that branch could
+     therefore never emit anything but INCONCLUSIVE, so it was REMOVED rather than left to report a verdict
+     with an untrue reason. The registry row keeps ``wired: false`` and names the work in
+     ``blocking_work``; :func:`classify_certificate_defects` stays as the reviewed, tested derivation that
+     wiring will use. See ``test_tls_breadth.py`` §5.
 
-DETERMINISTIC EXPIRY. A validity comparison needs an instant. Taking it from a wall clock at verify time
-would make offline re-verification non-deterministic (the same retained evidence would flip verdict as the
-clock moves past ``notAfter``). So the instant is RETAINED IN THE EVIDENCE at capture
-(``captured_at_epoch``, stamped by the runner when it performed the handshake) and the classifier reads it
-from there and nowhere else. The claim it supports is therefore scoped: "at the instant VIGIL captured this
-handshake, the presented leaf was outside its validity window" — bound into the certificate context digest,
-so a tamper that moves the instant breaks verification rather than silently re-deciding.
+DETERMINISTIC EXPIRY (the property the unwired claim-4 derivation preserves). A validity comparison needs
+an instant. Taking it from a wall clock at verify time would make offline re-verification
+non-deterministic — the same retained evidence would flip verdict as the clock moves past ``notAfter``. So
+:func:`classify_certificate_defects` reads ``evidence["captured_at_epoch"]`` and NEVER a clock, and returns
+``None`` when the evidence carries no instant. Deliberately, no capture path here stamps that field: a
+runner wallclock is an untrusted, non-reproducible value, and putting one inside signed evidence NO CLAIM
+CONSUMES would be nondeterminism for nothing. Wiring claim 4 means re-introducing the retention at the
+capture that feeds it, and saying so as a certificate-invalidating change for that branch.
 
 HANDSHAKE BUDGET. :data:`TLS_HANDSHAKE_BUDGET_PER_ENDPOINT` handshakes per (host, port), enforced
 structurally: ``run_external_tool`` memoises one capture per DISTINCT capture callable per proposed service
 (``id(rd.capture)``), and ``external_tool._TLS_REDRIVES`` carries exactly that many distinct callables. No
 retries, no per-suite enumeration loop, no UA/version rotation (Constitution VI.4 — VIGIL stays
-correlatable).
+correlatable). COST: the budget is also the worst-case STALL. Against an unresponsive in-scope host each of
+the four handshakes burns its own full ``_DEFAULT_TIMEOUT``, so one endpoint can hold a ``tls_scan`` run for
+~4x the single-probe timeout (~20s at the default 5s) where the pre-WAVE-3 spec held it for ~5s. That is a
+throughput cost on a wide sweep, not a correctness one; shrink ``timeout`` rather than the budget if it
+bites.
 
 FATAL-2: every ``framework`` import is FUNCTION-LOCAL; module import pulls in stdlib only.
 """
 
 from __future__ import annotations
 
-import time
-from typing import Any, Callable, Optional
+from typing import Any, Optional
 
 # ---------------------------------------------------------------------------
 # Budget + closed vocabularies. Each of these is a DATA declaration a reviewer can read in one screen;
@@ -80,12 +94,17 @@ DEPRECATED_VERSION_PROBES: "tuple[tuple[str, str], ...]" = (
     ("TLSv1_1", "TLSv1.1"),
 )
 
-#: THE CLOSED WEAK-CIPHER VOCABULARY. An explicit list of OpenSSL suite NAMES, each one a construction with
-#: a published practical break (no encryption / export-grade / RC4 keystream / 56- or 64-bit block /
+#: THE CLOSED WEAK-CIPHER VOCABULARY — **29** named suites (pinned by
+#: ``test_tls_breadth.py::test_the_weak_cipher_vocabulary_size_is_pinned``; on the OpenSSL this repo builds
+#: against, 11 of them are actually offerable — see :func:`offerable_weak_ciphers`). Each is a construction
+#: with a published practical break (no encryption / export-grade / RC4 keystream / 56- or 64-bit block /
 #: unauthenticated key exchange). VIGIL offers exactly these and nothing else; a suite absent from this
 #: tuple is not offered and therefore never tested. This is a membership test on a fixed list — deciding
 #: "is this suite weak?" by pattern-matching its name is precisely the hand-approximation this program
-#: forbids, because ``TLS_AES_128_GCM_SHA256`` and ``ADH-AES128-SHA`` differ by a prefix.
+#: forbids, because weak and strong suite names share long substrings: ``AECDH-AES128-SHA`` (anonymous, so
+#: weak) contains ``ECDH`` and ``AES128-SHA``, both of which also occur in authenticated suites, and
+#: ``ECDHE-ECDSA-RC4-SHA`` (weak) and ``ECDHE-ECDSA-AES128-GCM-SHA256`` (strong) differ only after the
+#: shared key-exchange prefix.
 WEAK_CIPHER_OFFER: "tuple[str, ...]" = (
     # no encryption at all
     "NULL-MD5", "NULL-SHA", "NULL-SHA256",
@@ -274,6 +293,11 @@ def _restricted_connect(
     return version, name, (int(bits) if isinstance(bits, int) else None), cert_der
 
 
+class _NothingOfferable(Exception):
+    """Raised by the no-op connector on the zero-offerable path, INSIDE the gate, so that path produces the
+    same ``connected: False`` evidence shape as every other capture without opening a socket."""
+
+
 def _capture(
     host: str,
     port: int,
@@ -284,26 +308,39 @@ def _capture(
     max_version_name: "str | None",
     ciphers: "str | None",
     offered: dict,
-    now: "Callable[[], int] | None" = None,
+    no_offer_reason: str = "",
 ) -> dict:
     """Run one restricted handshake through ``verify.tls.capture_tls_handshake`` (THE gate) and return its
-    JSON-safe evidence enriched with (a) what VIGIL OFFERED, (b) the structured failure classification, and
-    (c) the retained capture instant. Never raises: a gate refusal, a local gap and a peer refusal all come
-    back as ``connected: False`` evidence carrying a ``failure_class``."""
+    JSON-safe evidence enriched with (a) what VIGIL OFFERED and (b) the structured failure classification.
+    Never raises: a gate refusal, a local gap and a peer refusal all come back as ``connected: False``
+    evidence carrying a ``failure_class``.
+
+    ``no_offer_reason`` is the ZERO-OFFERABLE path: VIGIL has nothing it can legally put in the
+    ClientHello. It still goes through ``capture_tls_handshake``, because the gate's answer is itself the
+    thing that must not be assumed — the injected connector records that the gate LET IT RUN and then
+    raises without touching a socket, so the evidence distinguishes "the gate refused" (``gate_refused``,
+    ``gate_authorized: False``) from "we were authorised and had nothing to offer"
+    (``local_unsupported``, ``gate_authorized: True``). No packet is sent on either path.
+
+    NO CAPTURE INSTANT IS STAMPED. See the module docstring: the only consumer of a retained instant is the
+    UNWIRED claim-4 derivation, and an untrusted runner wallclock inside signed evidence that no claim reads
+    is nondeterminism bought for nothing."""
     from framework.v2.verify import capture_tls_handshake  # noqa: PLC0415 (FATAL-2: function-local)
 
     box: dict = {}
 
     def connector(h: str, p: int, t: float):
+        if no_offer_reason:
+            box["connector_invoked"] = True
+            box["failure_class"] = FAILURE_LOCAL_UNSUPPORTED
+            box["failure_detail"] = no_offer_reason[:200]
+            raise _NothingOfferable(no_offer_reason)
         return _restricted_connect(h, p, t, min_version_name=min_version_name,
                                    max_version_name=max_version_name, ciphers=ciphers, box=box)
 
     base = capture_tls_handshake(str(host), int(port), slug=slug, timeout=timeout, connect=connector)
-    stamp = int((now or (lambda: int(time.time())))())
     out = dict(base)
     out.update(offered)
-    out["captured_at_epoch"] = stamp
-    out["capture_time_source"] = "runner_clock"
     out["gate_authorized"] = bool(box.get("connector_invoked", False))
     out["tcp_established"] = bool(box.get("tcp_established", False))
     if out.get("connected") is True:
@@ -325,19 +362,24 @@ def capture_version_restricted_handshake(
     version_attr: str = "TLSv1",
     version_label: str = "TLSv1",
     timeout: float = _DEFAULT_TIMEOUT,
-    now: "Callable[[], int] | None" = None,
 ) -> dict:
     """Offer ONLY ``version_label`` and capture what happened (claims 1 and 2).
 
     A completed handshake means the endpoint agreed to the deprecated version — the FACT. A
-    ``protocol_version`` alert means it refused — the CLEAN, subject to
-    :func:`is_conclusive_protocol_refusal`. Anything else is inconclusive."""
+    ``protocol_version`` alert means it refused — a CANDIDATE for the CLEAN, which additionally requires
+    the peer-TLS-session witness :func:`peer_tls_session_witness` stamps from the run's OTHER captures;
+    see :func:`is_conclusive_protocol_refusal`. Anything else is inconclusive."""
     return _capture(host, port, slug=slug, timeout=timeout,
                     min_version_name=version_attr, max_version_name=version_attr, ciphers=None,
                     offered={"probe": "deprecated_protocol_offer",
                              "offered_only_version": version_label,
-                             "offered_ciphers": []},
-                    now=now)
+                             "offered_ciphers": []})
+
+
+#: The ONE protocol version the weak-cipher probe negotiates at, pinned top AND bottom. See
+#: :func:`capture_weak_cipher_handshake` for why both ends matter.
+WEAK_CIPHER_PROBE_VERSION_ATTR = "TLSv1_2"
+WEAK_CIPHER_PROBE_VERSION_LABEL = "TLSv1.2"
 
 
 def capture_weak_cipher_handshake(
@@ -347,40 +389,101 @@ def capture_weak_cipher_handshake(
     slug: str = "",
     timeout: float = _DEFAULT_TIMEOUT,
     offer: "tuple[str, ...]" = WEAK_CIPHER_OFFER,
-    now: "Callable[[], int] | None" = None,
 ) -> dict:
-    """Offer ONLY the locally-offerable subset of the closed weak-cipher vocabulary and capture what the
-    endpoint SELECTED (claim 3).
+    """Offer ONLY the locally-offerable subset of the closed weak-cipher vocabulary, at EXACTLY TLS1.2, and
+    capture what the endpoint SELECTED (claim 3).
 
-    When the local build can offer none of them the capture returns ``connected: False`` with
-    ``failure_class = local_unsupported`` and an EMPTY ``offered_ciphers`` — nothing was tested, so the
-    re-drive is skipped rather than scored."""
+    When the local build can offer none of them the capture still goes THROUGH THE GATE (with a connector
+    that opens no socket) and returns ``connected: False`` with ``failure_class = local_unsupported`` and
+    an EMPTY ``offered_ciphers`` — nothing was tested, so the re-drive is skipped rather than scored.
+
+    THE VERSION IS PINNED AT BOTH ENDS, and the two ends are pinned for different reasons.
+
+    * MAXIMUM TLS1.2, so the restricted offer actually governs. ``set_ciphers`` controls the TLS<=1.2 suite
+      list ONLY — TLS1.3's five suites travel in a separate list an OpenSSL client always offers — so
+      without the cap a TLS1.3-preferring server would negotiate an AEAD suite outside the recorded offer,
+      the membership check would (correctly) decline to score it, and the weak-suite question would
+      silently go untested.
+    * MINIMUM TLS1.2, so the ORACLE'S FIRE IS ATTRIBUTABLE TO THE CIPHER. ``tls_weakness_oracle`` fires on
+      a deprecated VERSION before it ever looks at the suite, so against a TLS1.0/TLS1.1-max endpoint this
+      branch's FACT would have been adjudicated by the version predicate while being reported as a
+      weak-CIPHER finding — a true statement about the endpoint filed under the wrong claim. Pinning the
+      floor at TLS1.2 (a version the oracle does not treat as deprecated) means any fire here is the
+      cipher. The cost is honest and bounded: a <=TLS1.1-max endpoint is now NOT weak-cipher tested by this
+      branch (the probe gets a version refusal and the re-drive is SKIPPED, never CLEAN — the branch is not
+      clean-capable), and that endpoint's real problem is already the FACT claim 1 mints over it.
+
+    Nothing else is lost by capping: every suite in the closed vocabulary is a TLS<=1.2 construction, and
+    TLS1.3's suite set contains none of them."""
     offerable = offerable_weak_ciphers(offer)
+    common = {"probe": "weak_cipher_offer", "offered_only_version": WEAK_CIPHER_PROBE_VERSION_LABEL,
+              "offered_min_version": WEAK_CIPHER_PROBE_VERSION_LABEL,
+              "offered_max_version": WEAK_CIPHER_PROBE_VERSION_LABEL}
     if not offerable:
-        return {"connected": False, "host": str(host), "port": int(port),
-                "probe": "weak_cipher_offer", "offered_only_version": "",
-                "offered_ciphers": [], "captured_at_epoch": int((now or (lambda: int(time.time())))()),
-                "capture_time_source": "runner_clock", "gate_authorized": False,
-                "tcp_established": False, "failure_class": FAILURE_LOCAL_UNSUPPORTED,
-                "failure_detail": "this OpenSSL build can offer none of the closed weak-cipher vocabulary"}
-    # Cap the offer at TLS1.2. ``set_ciphers`` governs the TLS<=1.2 suite list ONLY — TLS1.3's five suites are
-    # negotiated through a separate list an OpenSSL client always offers — so without this cap a TLS1.3-
-    # preferring server would negotiate an AEAD suite outside the recorded offer, the membership check would
-    # (correctly) decline to score it, and the weak-suite question would silently go untested. Capping makes
-    # the restricted offer actually govern the negotiation. Nothing is lost: every suite in the closed
-    # vocabulary is a TLS<=1.2 construction, and TLS1.3's suite set contains none of them.
+        return _capture(host, port, slug=slug, timeout=timeout,
+                        min_version_name=None, max_version_name=None, ciphers=None,
+                        offered={**common, "offered_ciphers": []},
+                        no_offer_reason=("this OpenSSL build can offer none of the closed weak-cipher "
+                                         "vocabulary"))
     return _capture(host, port, slug=slug, timeout=timeout,
-                    min_version_name=None, max_version_name="TLSv1_2", ciphers=":".join(offerable),
-                    offered={"probe": "weak_cipher_offer", "offered_only_version": "",
-                             "offered_max_version": "TLSv1.2",
-                             "offered_ciphers": list(offerable)},
-                    now=now)
+                    min_version_name=WEAK_CIPHER_PROBE_VERSION_ATTR,
+                    max_version_name=WEAK_CIPHER_PROBE_VERSION_ATTR,
+                    ciphers=":".join(offerable),
+                    offered={**common, "offered_ciphers": list(offerable)})
 
 
 # ---------------------------------------------------------------------------
 # The deterministic predicates. Pure functions over RETAINED evidence: an offline verifier re-runs them and
 # gets the same answer, because they read nothing but the dict they are handed.
 # ---------------------------------------------------------------------------
+#: The key under which a version probe's retained evidence carries its PEER-TLS-SESSION WITNESS: proof,
+#: drawn from ANOTHER capture of the SAME endpoint in the SAME run, that VIGIL completed a full TLS
+#: handshake with this peer at some other version. Retained IN the evidence (not consulted at decision
+#: time) so the CLEAN stays reproducible offline from the retained capture alone.
+PEER_SESSION_KEY = "peer_tls_session"
+
+#: The shape stamped when no capture in the run completed a session with the peer.
+_NO_PEER_SESSION: "dict[str, Any]" = {"completed": False, "tls_version": "", "cipher": "", "probe": ""}
+
+
+def peer_tls_session_witness(own: Any, siblings: "tuple[dict, ...]" = ()) -> dict:
+    """Return ``own`` with a :data:`PEER_SESSION_KEY` witness stamped from ``siblings`` — the other
+    captures this run made against the SAME (host, port).
+
+    WHY THIS EXISTS. ``alert(70) protocol_version`` is seven bytes. A peer that emits nothing else is not
+    a TLS service, and a CLEAN over it would say "this endpoint does not accept TLS1.0" about a host VIGIL
+    never completed a single TLS session with — precisely the laundering ``channel_established`` is
+    supposed to prevent but cannot, since a bare TCP accept satisfies it. The witness is the missing half:
+    the peer must have COMPLETED a handshake, at a different version, in the same run.
+
+    Pure and deterministic: it reads only the dicts handed to it (no clock, no network), scans ``siblings``
+    in the order the runner captured them and takes the FIRST completed session whose host and port match
+    ``own``. Skips ``own`` itself — a probe cannot witness for itself."""
+    base = dict(own) if isinstance(own, dict) else {}
+    found = None
+    for sib in siblings:
+        if not isinstance(sib, dict) or sib is own:
+            continue
+        if sib.get("connected") is not True:
+            continue
+        version = str(sib.get("tls_version") or "")
+        if not version:
+            continue
+        if str(sib.get("host") or "") != str(base.get("host") or ""):
+            continue
+        try:
+            same_port = int(sib.get("port")) == int(base.get("port"))
+        except (TypeError, ValueError):
+            same_port = False
+        if not same_port:
+            continue
+        found = {"completed": True, "tls_version": version, "cipher": str(sib.get("cipher") or ""),
+                 "probe": str(sib.get("probe") or "baseline_handshake")}
+        break
+    base[PEER_SESSION_KEY] = found or dict(_NO_PEER_SESSION)
+    return base
+
+
 def is_conclusive_protocol_refusal(evidence: Any) -> bool:
     """THE CLEAN PREDICATE for claim 2, and the single most attackable decision in this slice.
 
@@ -395,13 +498,20 @@ def is_conclusive_protocol_refusal(evidence: Any) -> bool:
         about that version;
       * the failure class is EXACTLY :data:`FAILURE_VERSION_REJECTED`, i.e. the peer sent
         ``alert(70) protocol_version``;
-      * and the recorded ``ssl_reason`` is itself in the closed :data:`VERSION_REJECTION_REASONS`, so a
-        hand-edited ``failure_class`` alone cannot manufacture a CLEAN.
+      * the recorded ``ssl_reason`` is itself in the closed :data:`VERSION_REJECTION_REASONS`, so a
+        hand-edited ``failure_class`` alone cannot manufacture a CLEAN;
+      * AND the retained :data:`PEER_SESSION_KEY` witness shows VIGIL COMPLETED a TLS handshake with this
+        same peer, in this same run, at a DIFFERENT version. Without it the "endpoint" need not be a TLS
+        service at all: a socket that answers every ClientHello with the same seven-byte
+        ``alert(70)`` record satisfies every other condition here, and reporting CLEAN over it would
+        assert the absence of a vulnerability on a host VIGIL never spoke TLS to. The witness also may not
+        name the version being refused — a session at the very version we claim was refused would be a
+        contradiction, not a corroboration.
 
     Every other shape — a timeout, a reset, a refused connect, a DNS failure, an EOF, a locally-unsupported
-    protocol, an ambiguous ``handshake_failure(40)``, or a gate refusal — returns False and the branch is
-    admitted INCONCLUSIVE. That is the laundering this predicate exists to prevent: an absence of signal
-    must never be sold as a clean bill of health."""
+    protocol, an ambiguous ``handshake_failure(40)``, a gate refusal, or a peer VIGIL never completed a TLS
+    session with — returns False and the branch is admitted INCONCLUSIVE. That is the laundering this
+    predicate exists to prevent: an absence of signal must never be sold as a clean bill of health."""
     if not isinstance(evidence, dict):
         return False
     if evidence.get("connected") is True:
@@ -410,11 +520,18 @@ def is_conclusive_protocol_refusal(evidence: Any) -> bool:
         return False
     if not bool(evidence.get("tcp_established")):
         return False
-    if str(evidence.get("offered_only_version") or "") not in {lbl for _, lbl in DEPRECATED_VERSION_PROBES}:
+    offered_version = str(evidence.get("offered_only_version") or "")
+    if offered_version not in {lbl for _, lbl in DEPRECATED_VERSION_PROBES}:
         return False
     if str(evidence.get("failure_class") or "") != FAILURE_VERSION_REJECTED:
         return False
-    return str(evidence.get("ssl_reason") or "") in VERSION_REJECTION_REASONS
+    if str(evidence.get("ssl_reason") or "") not in VERSION_REJECTION_REASONS:
+        return False
+    witness = evidence.get(PEER_SESSION_KEY)
+    if not isinstance(witness, dict) or witness.get("completed") is not True:
+        return False
+    witnessed_version = str(witness.get("tls_version") or "")
+    return bool(witnessed_version) and witnessed_version != offered_version
 
 
 def negotiated_weak_cipher(evidence: Any) -> str:
@@ -434,7 +551,10 @@ def negotiated_weak_cipher(evidence: Any) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Claim 4 — certificate defects re-derived from the RETAINED DER at the RETAINED instant.
+# Claim 4 — certificate defects re-derived from a RETAINED DER at a RETAINED instant.
+# BUILT AND TESTED, **NOT WIRED**: no re-drive admits to ``tls_weakness.certificate_validity`` and no
+# capture above retains ``captured_at_epoch``, so over live evidence classify_certificate_defects()
+# returns None. See the module docstring, claim 4, and the registry row's ``wired: false``.
 # ---------------------------------------------------------------------------
 #: The closed defect vocabulary. A defect absent from this tuple is not reported.
 CERTIFICATE_DEFECTS: "tuple[str, ...]" = ("expired", "not_yet_valid", "hostname_mismatch", "self_signed")
@@ -501,16 +621,24 @@ def _identity_matches(cert, host: str) -> "tuple[bool, list[str]]":
 def classify_certificate_defects(evidence: Any) -> "Optional[dict]":
     """Re-derive the presented leaf's validity defects from the RETAINED DER, at the RETAINED instant.
 
+    **NOT WIRED.** Nothing in the product calls this on live evidence: the cert-validity re-drive was
+    removed (it could only ever emit INCONCLUSIVE, because no ``OracleKind`` adjudicates certificate
+    validity), and no capture in this module stamps ``captured_at_epoch``, so a live capture handed here
+    returns ``None``. It is kept as the reviewed, tested derivation a future wiring uses; the work that
+    wiring needs is named in the registry row's ``blocking_work``.
+
     Returns ``None`` when there is nothing to judge (no capture, no retained certificate, no retained
     instant, or unparseable DER) — an absent input is never a clean certificate. Otherwise returns a
     JSON-safe record carrying the comparison instant, the validity window, the presented identities and the
     ``defects`` list drawn from the closed :data:`CERTIFICATE_DEFECTS` vocabulary.
 
-    DETERMINISM. ``at_epoch`` comes from ``evidence["captured_at_epoch"]`` — the instant the runner recorded
-    when it performed the handshake — and NEVER from a clock read here. Re-running this function over the
-    same retained evidence therefore yields the same verdict in a year's time, which is what makes an
-    offline re-verification meaningful. The corresponding honesty cost is stated on the branch: the instant
-    is the RUNNER's clock, not a trusted timestamp, so the claim is scoped to "at the instant of capture".
+    DETERMINISM. ``at_epoch`` comes from ``evidence["captured_at_epoch"]`` and NEVER from a clock read
+    here. Re-running this function over the same retained evidence therefore yields the same verdict in a
+    year's time, which is what makes an offline re-verification meaningful. The corresponding honesty cost
+    a wiring must state: such an instant would be the RUNNER's clock, not a trusted timestamp, so the
+    claim would be scoped to "at the instant of capture" — and adding the field to a capture that already
+    ships changes that branch's signed context digest, which is a deliberate certificate-invalidating
+    change, never a silent one.
 
     ``self_signed`` is derived structurally (issuer == subject AND the leaf verifies under its own public
     key), not from trust-store lookup: VIGIL's capture deliberately runs with validation off, so it retains

@@ -374,6 +374,17 @@ class Redrive:
     # refusal) MUST supply this, so a probe whose TCP channel never came up fails the ``channel_established``
     # precondition AT ADMISSION — a second, independent guard against a transport failure being admitted CLEAN.
     observed: "Callable[[dict], dict] | None" = None
+    # OPTIONAL cross-capture enrichment of THIS re-drive's OWN retained capture, run after every capture
+    # for the proposed service exists and before any judging: ``witness(own_capture, all_captures)`` returns
+    # the capture dict the re-drive is then judged over. ``None`` (DEFAULT) leaves the capture exactly as the
+    # capture callable returned it, so every pre-existing re-drive is byte-for-byte unchanged — and in
+    # particular the SHARED baseline TLS capture, whose two branches have shipped signed certificates, is
+    # never enriched. It exists because one claim's soundness depends on a SIBLING capture: a
+    # ``protocol_version(70)`` alert is only a CLEAN if the peer is a real TLS service, which is shown by a
+    # handshake VIGIL COMPLETED with it at another version in the same run. Stamping that witness into the
+    # retained evidence (rather than passing siblings to the predicate) keeps the conclusiveness predicate a
+    # pure function of ONE dict, so the CLEAN re-derives offline from the retained capture alone.
+    witness: "Callable[[dict, tuple[dict, ...]], dict] | None" = None
     # OPTIONAL discriminator appended to this re-drive's ``check_id`` (and therefore its ``finding_ref`` and
     # its key in ``RunnerResult.contexts``). Empty (DEFAULT) leaves every pre-existing check_id
     # byte-identical. It is REQUIRED whenever two re-drives on the same spec share a ``bug_class``, which
@@ -652,17 +663,16 @@ def unicornscan_service_scan(*, ports: str = "1-1024", fact_capable: bool = Fals
 # as reachability) and judges THAT with the pure tls/weak-crypto oracles — never sslscan's output rows.
 
 def _tls_capture(host: str, port: int, *, slug: str, protocol: str = "tcp") -> dict:
+    # DELIBERATELY UNCHANGED BY WAVE 3, byte for byte. This is the SHARED BASELINE capture behind two
+    # branches that have already shipped signed certificates (tls_weakness.tls_handshake and
+    # weak_crypto.cert_signature_algorithm). Anything added here lands inside their signed oracle context,
+    # so every certificate ever issued for them changes digest. A WAVE-3 draft stamped an untrusted runner
+    # wallclock (captured_at_epoch / capture_time_source) here for a claim-4 consumer that turned out to be
+    # structurally dead; the consumer is gone and so is the stamp. If a future claim genuinely needs an
+    # instant retained on THIS capture, that is a deliberate certificate-invalidating change to two shipped
+    # branches and must be called one.
     from framework.v2.verify import capture_tls_handshake  # offense-side only (FATAL-2: function-local)
-    out = dict(capture_tls_handshake(host, int(port), slug=slug))
-    # WAVE 3: retain the capture INSTANT inside the evidence. Any claim that compares a certificate's
-    # validity window against "now" must compare against a RETAINED instant, or the same retained evidence
-    # would re-verify to a different verdict once the clock passes notAfter. Stamped here (the runner
-    # performed the handshake) and read by tls_breadth.classify_certificate_defects, never by a clock at
-    # verify time. It is the RUNNER's clock, not a trusted timestamp — the claim it supports is scoped to
-    # "at the instant of capture" and is bound into the certificate's context digest.
-    out.setdefault("captured_at_epoch", int(time.time()))
-    out.setdefault("capture_time_source", "runner_clock")
-    return out
+    return dict(capture_tls_handshake(host, int(port), slug=slug))
 
 
 # --- WAVE 3 breadth: three MORE runner-owned captures, each a single bounded handshake with a RESTRICTED
@@ -736,21 +746,6 @@ def _weak_cipher_offer_context(handshake: dict) -> "dict | None":
     return weak_tls_context(handshake)
 
 
-def _certificate_validity_context(handshake: dict) -> "dict | None":
-    """The LEAD-only context for claim 4. Carries the deterministic re-derivation of the presented leaf's
-    validity defects under a FRESH ``certificate_validity`` key that NO ``OracleKind`` dispatches on — so the
-    TLS_WEAKNESS dispatch returns no signal and this can never fire. That is deliberate and honest: no oracle
-    in ``verify/models.py`` adjudicates certificate VALIDITY today (``tls_weakness_oracle`` reads the
-    negotiated protocol/cipher; ``weak_crypto_artifact_oracle`` reads the signature hash and key size), so
-    the branch is registered LEAD-only and the gap is named in its ``blocking_work``. The classification IS
-    retained in the context, so the operator sees it and the FACT lands the day the oracle row exists."""
-    from .tls_breadth import classify_certificate_defects
-    record = classify_certificate_defects(handshake)
-    if record is None or not record.get("defects"):
-        return None
-    return {"bug_class": "weak_tls", "certificate_validity": record}
-
-
 def _tls_probe_observed(handshake: dict) -> dict:
     """The per-observation facts admission evaluates a WAVE-3 branch's preconditions against — read off the
     capture itself rather than asserted. ``gate_authorized`` is True only when the audited gate actually let
@@ -762,39 +757,49 @@ def _tls_probe_observed(handshake: dict) -> dict:
             "channel_established": bool(h.get("tcp_established"))}
 
 
-def _never_conclusive(_handshake: dict) -> bool:
-    """Claim 4's conclusiveness predicate: a non-fire over the LEAD-only certificate-validity branch is
-    NEVER a channel-confirmed negative. Belt-and-braces beside ``clean_capable: false`` on the branch."""
-    return False
-
-
 def _is_protocol_refusal(handshake: dict) -> bool:
     from .tls_breadth import is_conclusive_protocol_refusal
     return is_conclusive_protocol_refusal(handshake)
 
 
-# The FIRST THREE re-drives SHARE the one ``_tls_capture`` function object, so the runner negotiates ONE
-# baseline handshake and judges it for a weak protocol/cipher, a broken-hash cert and (LEAD-only) the
-# presented leaf's validity. The WAVE-3 version/cipher probes each need their OWN restricted ClientHello, so
-# each carries its own capture callable. DISTINCT capture callables here == handshakes per endpoint:
-# 4 == tls_breadth.TLS_HANDSHAKE_BUDGET_PER_ENDPOINT (pinned by test_tls_breadth.py).
+def _stamp_peer_tls_session(own: dict, siblings: "tuple[dict, ...]") -> dict:
+    """Enrich a version probe's OWN retained capture with the PEER-TLS-SESSION witness drawn from the
+    other captures this run made against the SAME endpoint (see
+    ``tls_breadth.peer_tls_session_witness``). Stamped INTO the retained evidence rather than consulted at
+    decision time, so ``is_conclusive_protocol_refusal`` stays a pure function of one dict and the CLEAN
+    stays reproducible offline from the retained capture alone. The baseline ``_tls_capture`` dict is NOT
+    touched — the two branches it feeds have shipped certificates whose digests must not move."""
+    from .tls_breadth import peer_tls_session_witness
+    return peer_tls_session_witness(own, siblings)
+
+
+# The FIRST TWO re-drives SHARE the one ``_tls_capture`` function object, so the runner negotiates ONE
+# baseline handshake and judges it for a weak protocol/cipher and a broken-hash cert. The WAVE-3
+# version/cipher probes each need their OWN restricted ClientHello, so each carries its own capture
+# callable. DISTINCT capture callables here == handshakes per endpoint:
+# 4 == tls_breadth.TLS_HANDSHAKE_BUDGET_PER_ENDPOINT (pinned by test_tls_breadth.py). That budget is also
+# the worst-case per-endpoint STALL against an unresponsive host — see the budget note in tls_breadth.
 _TLS_REDRIVES: "tuple[Redrive, ...]" = (
     Redrive("weak_tls", _tls_capture, _weak_tls_context, branch="tls_weakness.tls_handshake"),
     Redrive("weak_crypto_artifact", _tls_capture, _weak_crypto_context,
             branch="weak_crypto.cert_signature_algorithm"),
-    # CLAIM 4 — certificate defects over the RETAINED leaf DER at the RETAINED instant. LEAD-only.
-    Redrive("weak_tls", _tls_capture, _certificate_validity_context,
-            branch="tls_weakness.certificate_validity",
-            conclusive=_never_conclusive, observed=_tls_probe_observed, label="cert_validity"),
+    # CLAIM 4 — certificate validity is NOT WIRED. tls_breadth.classify_certificate_defects exists and is
+    # tested, but no OracleKind adjudicates certificate VALIDITY, so a re-drive on
+    # tls_weakness.certificate_validity could never admit anything but INCONCLUSIVE. It would have reported
+    # a verdict with a reason that was not the real one, which is worse than an absent branch, so it is
+    # absent. The registry row carries wired:false and names the work in blocking_work.
     # CLAIMS 1 + 2 — offer ONLY TLS1.0, then ONLY TLS1.1. A completed handshake is an existential FACT
     # (the oracle fires on the negotiated deprecated version); a peer protocol_version(70) alert is the
-    # CHANNEL-CONFIRMED CLEAN; everything else is INCONCLUSIVE.
+    # CHANNEL-CONFIRMED CLEAN, but ONLY once the peer-TLS-session witness proves the peer is a real TLS
+    # service (``witness=`` below); everything else is INCONCLUSIVE.
     Redrive("weak_tls", _tls10_capture, _version_offer_context,
             branch="tls_weakness.deprecated_protocol_offer",
-            conclusive=_is_protocol_refusal, observed=_tls_probe_observed, label="offer_tls1_0"),
+            conclusive=_is_protocol_refusal, observed=_tls_probe_observed,
+            witness=_stamp_peer_tls_session, label="offer_tls1_0"),
     Redrive("weak_tls", _tls11_capture, _version_offer_context,
             branch="tls_weakness.deprecated_protocol_offer",
-            conclusive=_is_protocol_refusal, observed=_tls_probe_observed, label="offer_tls1_1"),
+            conclusive=_is_protocol_refusal, observed=_tls_probe_observed,
+            witness=_stamp_peer_tls_session, label="offer_tls1_1"),
     # CLAIM 3 — offer ONLY the closed weak-cipher vocabulary. A SELECTION is a FACT; a refusal is NOT clean
     # (the local build limits what can be offered at all), so the branch is clean_capable:false.
     Redrive("weak_tls", _weak_cipher_capture, _weak_cipher_offer_context,
@@ -809,20 +814,26 @@ def tls_scan(*, port: int = 443, extra_args: Sequence[str] = ()) -> ToolSpec:
     OWN gated handshake and the deterministic oracle judges the NEGOTIATED (protocol, cipher) and the
     PRESENTED cert.
 
-    WAVE 3 breadth — the spec now carries SIX runner-owned re-drives over FOUR bounded handshakes
+    WAVE 3 breadth — the spec now carries FIVE runner-owned re-drives over FOUR bounded handshakes
     (``tls_breadth.TLS_HANDSHAKE_BUDGET_PER_ENDPOINT``), and each claim is registered at the capability it
     honestly has:
 
-      * ``tls_weakness.tls_handshake`` — the baseline modern-client handshake (unchanged).
-      * ``weak_crypto.cert_signature_algorithm`` — the presented leaf's signature hash (unchanged).
+      * ``tls_weakness.tls_handshake`` — the baseline modern-client handshake (unchanged, and its retained
+        evidence is byte-identical to the pre-WAVE-3 shape, so its issued certificates still verify).
+      * ``weak_crypto.cert_signature_algorithm`` — the presented leaf's signature hash (unchanged, same).
       * ``tls_weakness.deprecated_protocol_offer`` — VIGIL offers ONLY TLS1.0, then ONLY TLS1.1. A completed
-        handshake is an existential FACT; a peer ``protocol_version(70)`` alert is one of the product's few
-        genuine CLEANs (a channel-confirmed negative); a timeout / reset / ambiguous alert is INCONCLUSIVE.
-      * ``tls_weakness.weak_cipher_offer`` — VIGIL offers ONLY a closed weak-suite vocabulary and the
-        endpoint SELECTS one: a FACT. NOT clean-capable (the local OpenSSL build limits what can be offered).
-      * ``tls_weakness.certificate_validity`` — expiry / not-yet-valid / hostname mismatch / self-signed,
-        re-derived from the RETAINED leaf DER at the RETAINED capture instant. LEAD-only: no OracleKind
-        adjudicates certificate validity yet (see the branch's blocking_work).
+        handshake is an existential FACT; a peer ``protocol_version(70)`` alert on an established channel,
+        FROM A PEER VIGIL COMPLETED A TLS SESSION WITH AT ANOTHER VERSION IN THE SAME RUN, is one of the
+        product's few genuine CLEANs; a timeout / reset / ambiguous alert / a peer that never completed a
+        session is INCONCLUSIVE.
+      * ``tls_weakness.weak_cipher_offer`` — VIGIL offers ONLY a closed weak-suite vocabulary, at exactly
+        TLS1.2 so the oracle's fire is attributable to the CIPHER and not to a deprecated version, and the
+        endpoint SELECTS one: a FACT. NOT clean-capable (the local OpenSSL build limits what can be
+        offered).
+      * ``tls_weakness.certificate_validity`` — **NOT WIRED**, and deliberately so. The derivation exists
+        and is tested (``tls_breadth.classify_certificate_defects``), but no ``OracleKind`` adjudicates
+        certificate validity, so a re-drive there could only ever admit INCONCLUSIVE while reporting a
+        reason that was not the real one. The registry row carries ``wired: false`` + ``blocking_work``.
 
     HONEST SCOPE: the baseline capture uses a standard client, so ``weak_tls`` fires there only on a weakness
     a modern client still negotiates; the version/cipher probes widen that by restricting what VIGIL OFFERS.
@@ -1254,6 +1265,20 @@ def run_external_tool(
             cap_key = id(rd.capture)
             if cap_key not in captured:
                 captured[cap_key] = rd.capture(svc.host, svc.port, slug=engagement_slug, protocol=svc.protocol)
+        # Same captures, same order, same count as before — only hoisted out of the judging loop so a
+        # re-drive whose soundness depends on a SIBLING capture can see one. A re-drive that declares
+        # ``witness`` then enriches ITS OWN retained capture from the full set (computed once, before any
+        # enrichment, so the result does not depend on re-drive order). No ``witness`` => untouched.
+        siblings = tuple(captured.values())
+        enriched: set = set()
+        for rd in redrives:
+            cap_key = id(rd.capture)
+            if rd.witness is None or cap_key in enriched:
+                continue
+            enriched.add(cap_key)
+            captured[cap_key] = rd.witness(captured[cap_key], siblings)
+        for rd in redrives:
+            cap_key = id(rd.capture)
             item = f"{spec.name}:{svc.host}:{svc.port}/{svc.protocol}#{rd.bug_class}"
             if rd.label:
                 # Distinguish re-drives that share a bug_class (WAVE 3 TLS). Empty label ⇒ unchanged.
