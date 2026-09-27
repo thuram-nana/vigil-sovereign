@@ -350,11 +350,24 @@ class AuditEngine:
             for point in points:
                 point_checks = selector(point, checks) if selector is not None else checks
                 if self.bandit is not None:
-                    # order effort by learned value (posterior mean); ties keep
-                    # the original order. Never drops a check — coverage intact.
-                    order = {bc: i for i, bc in enumerate(
-                        self.bandit.rank(self.bandit_context, [c.bug_class for c in point_checks]))}
-                    point_checks = sorted(point_checks, key=lambda c: order.get(c.bug_class, len(order)))
+                    # Order effort by LEARNED VALUE (posterior mean), best first; break ties by the
+                    # check's EXISTING position in ``point_checks`` — which is cost-ascending
+                    # (scanner.checks.DEFAULT_CHECKS) — NOT by ``bandit.rank``'s alphabetical arm-id
+                    # tie-break. That tie-break was silently adversarial: on a fresh/uniform bandit
+                    # every posterior is equal, so it fell through to sorting bug_class names, which
+                    # floated the 64-request boolean SPRT (``boolean_sqli``) to the FRONT and the
+                    # 1-request reflection check (``xss``) to the BACK. Under a request budget the
+                    # boolean probe then ate the whole cap on the first parameter or two before a
+                    # cheap high-yield check ever ran (measured: soak cap=160 -> 0 findings; the same
+                    # scan finds the planted XSS once the tie-break is cost-ascending). Learning is
+                    # unchanged — a check with a higher learned hit-rate still runs earlier; only the
+                    # TIE-break changed, from arm-id to cost. Never drops a check — coverage intact.
+                    base_pos = {id(c): i for i, c in enumerate(point_checks)}
+                    point_checks = sorted(
+                        point_checks,
+                        key=lambda c: (-self.bandit.expected_value(self.bandit_context, c.bug_class),
+                                       base_pos[id(c)]),
+                    )
                 for check in point_checks:
                     key = (check.bug_class, point.id)
                     if key in seen:

@@ -1926,18 +1926,36 @@ DNS_RCE_OOB = DNSOOBCheck(
 # prioritises redirect-ish params.
 OPEN_REDIRECT = OpenRedirectCheck()
 
+# ORDER IS COST-ASCENDING, and it is load-bearing under a request budget. `AuditEngine.audit`
+# iterates checks in THIS order at each insertion point and stops when `max_audit_requests` is hit,
+# so a check that runs early cannot be starved by one that runs late. Measured per insertion point on
+# a non-firing page: the single-request response-visible checks (reflected-XSS, path-traversal,
+# open-redirect) and the blind OOB checks (1 request each, and skipped entirely without an
+# OOBReceiver) cost 1; the evaluation/error checks cost 2; the boolean SPRT costs 64 (an 8-send
+# determinism pre-gate + two SPRT rounds of 28 byte-identical probes). Putting the 64-request boolean
+# check FIRST meant a bounded scan spent its whole budget probing the first parameter or two for
+# boolean SQLi before a 1-request reflection check ever reached a reflecting endpoint (measured: soak
+# cap=160 audited 2 endpoints, 0 findings). Cheap, high-yield, self-contained checks therefore run
+# first and the expensive boolean SPRT runs LAST. With the default unbounded budget every check runs
+# at every point regardless of order, so this reorder cannot change WHAT is found — only, under a cap,
+# HOW MUCH is reached before the budget runs out. A new check inserts at its cost tier (ties keep
+# prior relative order); anything comparably expensive to the SPRT belongs beside it, at the end.
 DEFAULT_CHECKS: tuple[Check, ...] = (
-    BOOLEAN_SQLI_SPRT,
+    # -- 1 request/point: response-visible, self-contained ------------------------------------------
     REFLECTED_XSS,
-    SSTI_EVAL_BRACES,
-    SSTI_EVAL_DOLLAR,
     PATH_TRAVERSAL,
-    ERROR_BASED,
     OPEN_REDIRECT,
+    # -- 1 request/point: blind OOB (self-skips without an OOBReceiver) ------------------------------
     SSRF_OOB,
     XXE_OOB,
     RCE_OOB,
     DESERIALIZATION_OOB,
+    # -- 2 requests/point: a benign control plus the probe ------------------------------------------
+    SSTI_EVAL_BRACES,
+    SSTI_EVAL_DOLLAR,
+    ERROR_BASED,
+    # -- 64 requests/point: the boolean SPRT (determinism pre-gate + truth-value-attribution rounds) -
+    BOOLEAN_SQLI_SPRT,
 )
 """A ready-to-run seed set. Every check maps to a bug_class the verifier already
 routes to an oracle, AND produces a context that oracle can actually act on — the second half is
