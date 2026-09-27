@@ -51,9 +51,20 @@ def cert(report):
 def test_planted_class_is_a_finding_in_the_cert(cert):
     findings = {(r["class"], r["verdict"]) for r in cert["probes"] if r["verdict"] == "finding"}
     classes = {c for c, _ in findings}
-    # boolean_sqli is planted at /users?name in the benchmark corpus.
-    assert "boolean_sqli" in classes, classes
+    # path_traversal is planted at /file?name in the benchmark corpus and is confirmed by a real,
+    # ATTRIBUTED proof (the file-content signature appears under the traversal and is absent from a
+    # benign control on the same parameter).
+    assert "path_traversal" in classes, classes
     assert cert["summary"]["n_finding"] >= 1
+    # boolean_sqli is ALSO planted (at /users?name) and the surface IS reached and probed — but the
+    # default profile carries no SOUND boolean detector, so it is honestly NOT a "finding" here. The
+    # bare differential that used to report it confirmed on a WAF block page and on strict input
+    # validation against targets with no database (verifier.DIFFERENTIAL_LEAD_ONLY_CLASSES), so it
+    # is a LEAD now. The sound detector is the SPRT BooleanInferenceCheck (live/runtime_redrive.py::
+    # boolean_redrive), which is not in DEFAULT_CHECKS on request-budget grounds — a RECALL gap that
+    # is stated rather than papered over.
+    assert "boolean_sqli" not in classes, classes
+    assert "boolean_sqli" in {r["class"] for r in cert["probes"]}, "the surface must still be probed"
     # every finding row names the oracle kind(s) that ran.
     for r in cert["probes"]:
         if r["verdict"] == "finding":

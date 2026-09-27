@@ -53,9 +53,21 @@ def _stub_urk(decision: str):
     return _fake
 
 
+
+# This test is specifically about the DIFFERENTIAL oracle's GRADED confidence — a stronger
+# divergence must score higher — so it needs a class whose row still routes to
+# DIFFERENTIAL_RESPONSE. `ssti` is used for no other reason: the truth-value-attribution classes
+# (boolean_sqli / auth_bypass / nosqli / ldap_injection / xpath_injection) cannot be confirmed by a
+# bare differential any more. That inference has no attribution step — its control is a DIFFERENT
+# STRING, not a same-shape negative — and it minted High FACTs at rate 1.0 against a static page
+# behind a WAF tautology rule and against strict input validation, on targets with no database.
+# See verify.verifier.DIFFERENTIAL_LEAD_ONLY_CLASSES.
+_GRADED_CLASS = "ssti"
+
+
 def _ctx(mutated: dict) -> dict:
     return FindingContext.from_http_responses(
-        _BASE, mutated, bug_class="boolean_sqli",
+        _BASE, mutated, bug_class=_GRADED_CLASS,
         discriminator={"dimensions": ["status", "length", "lexical"]},
     ).model_dump()
 
@@ -63,7 +75,7 @@ def _ctx(mutated: dict) -> dict:
 def _finding(slug: str, ctx: dict | None) -> FindingPayload:
     return FindingPayload(
         finding_slug=slug, title=f"finding {slug}", severity="High",
-        bug_class="boolean_sqli", surface="GET /search?q=",
+        bug_class=_GRADED_CLASS, surface="GET /search?q=",
         summary="calibration test finding", oracle_context=ctx,
     )
 

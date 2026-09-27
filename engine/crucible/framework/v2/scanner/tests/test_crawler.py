@@ -129,15 +129,23 @@ def test_crawl_runs_passive_checks_per_response() -> None:
 
 
 def test_full_loop_crawl_then_scan_then_confirm() -> None:
-    # The zero-manual pipeline: crawl finds /search?q=, the audit engine fuzzes
-    # its insertion points, the oracle confirms the boolean-SQLi — end to end.
+    # The zero-manual pipeline: crawl finds /search?q=, the audit engine fuzzes its insertion
+    # points, the oracle confirms the reflected XSS — end to end.
+    #
+    # It used to assert the boolean-SQLi differential here. This fixture's /search keys on the
+    # payload SHAPE ("'1'='1" in q), exactly like a WAF tautology rule in front of a static page,
+    # and a bare benign-vs-payload differential cannot tell those apart — it minted FACTs against
+    # targets with no database (verify.verifier.DIFFERENTIAL_LEAD_ONLY_CLASSES), so it is a LEAD
+    # now. The pipeline property is asserted on a proof that actually attributes: the
+    # reflection-context oracle requires the canary to reach an EXECUTABLE position.
     with _site() as base:
         crawl = Crawler(_send).crawl(base + "/")
         engine = AuditEngine(_send)
         confirmed = []
         for req in crawl.requests:
             confirmed += engine.audit(req, insertion_kinds=(InsertionKind.QUERY_VALUE,))
-        sqli = [f for f in confirmed if f.bug_class == "boolean_sqli"]
-        assert sqli, "crawl->scan->confirm did not surface the SQLi on /search?q="
-        assert sqli[0].confirmed_by == "differential_response"
-        assert sqli[0].param == "q"
+        xss = [f for f in confirmed if f.bug_class == "xss"]
+        assert xss, "crawl->scan->confirm did not surface the reflected XSS on /search?q="
+        assert xss[0].confirmed_by == "reflection_context"
+        assert xss[0].param == "q"
+        assert not [f for f in confirmed if f.bug_class == "boolean_sqli"]

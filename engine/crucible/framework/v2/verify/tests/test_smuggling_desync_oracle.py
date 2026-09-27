@@ -118,9 +118,12 @@ def test_reuses_frozen_differential_response_kind_gate_byte_identical() -> None:
     # No NEW OracleKind: reuse DIFFERENTIAL_RESPONSE (already in the frozen fallback, which stays EXACTLY 15).
     assert len(_ALL_ORACLES) == 15
     assert OracleKind.DIFFERENTIAL_RESPONSE in _ALL_ORACLES
-    # the ordinary baseline/mutated differential still works on the SAME kind/arm (not shadowed by the new key)
+    # the ordinary baseline/mutated differential still works on the SAME kind/arm (not shadowed by
+    # the new key). The carrier class is `ssti` only because it is a class whose row still lists
+    # DIFFERENTIAL_RESPONSE: the boolean/auth truth-value classes no longer do
+    # (verifier.DIFFERENTIAL_LEAD_ONLY_CLASSES). What is under test is the ARM, not the class.
     v = OracleVerifier()
-    out = v.confirm({"bug_class": "boolean_sqli",
+    out = v.confirm({"bug_class": "ssti",
                      "baseline": {"status": 200, "body": "no rows"},
                      "mutated": {"status": 200, "body": "row1 row2 row3 row4 row5 admin secret dump"}})
     assert any(s.kind is OracleKind.DIFFERENTIAL_RESPONSE for s in out.signals)

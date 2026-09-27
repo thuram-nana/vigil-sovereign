@@ -4,7 +4,7 @@ localhost target, confirmed by the deterministic oracle layer.
 
 This is the autonomous scan the whole package exists for, proven against traffic
 (no fixtures): a purpose-built loopback target is vulnerable on the `q` query
-parameter (boolean-SQLi differential + reflects its input) and ignores a `safe`
+parameter (it reflects its input verbatim into the document) and ignores a `safe`
 parameter. The engine, given only the request, must (1) confirm findings on `q`
 via a fired oracle, and (2) confirm NOTHING on `safe` — the prove-don't-guess
 contract, now driven across a live insertion sweep instead of one hardcoded probe.
@@ -95,13 +95,20 @@ def test_engine_confirms_vulnerable_param_and_not_the_safe_one() -> None:
         assert "q" in params, "the vulnerable q parameter was not found"
         assert "safe" not in params, "the safe parameter was falsely flagged"
 
-        # the boolean-SQLi differential is confirmed on q by a fired oracle
-        sqli = [f for f in findings if f.bug_class == "boolean_sqli" and f.param == "q"]
-        assert sqli, "boolean-SQLi on q not oracle-confirmed"
-        f = sqli[0]
-        assert f.confirmed_by == "differential_response"
+        # the reflected XSS is confirmed on q by a fired oracle. It used to assert the boolean-SQLi
+        # differential; this fixture keys on the payload SHAPE ("'1'='1" in q) — the same thing a WAF
+        # tautology rule in front of a static page does — and a bare benign-vs-payload differential
+        # cannot tell the two apart, so it is LEAD-only now
+        # (verify.verifier.DIFFERENTIAL_LEAD_ONLY_CLASSES). The engine property under test — confirm
+        # on the vulnerable param, confirm NOTHING on the safe one — is asserted on the
+        # reflection-context oracle, which requires the canary to reach an EXECUTABLE position.
+        xss = [f for f in findings if f.bug_class == "xss" and f.param == "q"]
+        assert xss, "reflected XSS on q not oracle-confirmed"
+        f = xss[0]
+        assert f.confirmed_by == "reflection_context"
         assert 0.0 < f.confidence <= 1.0
         assert f.insertion_point.startswith("query_value:")
+        assert not [x for x in findings if x.bug_class == "boolean_sqli"]
 
 
 def test_engine_confirms_nothing_on_a_safe_target() -> None:

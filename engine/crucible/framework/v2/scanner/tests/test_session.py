@@ -131,7 +131,7 @@ def test_login_captures_session_and_authenticated_access_works() -> None:
         assert resp["status"] == 200 and "account" in resp["body"]
 
 
-def test_sqli_behind_login_found_only_when_authenticated() -> None:
+def test_bug_behind_login_found_only_when_authenticated() -> None:
     with _server() as (base, _srv):
         req = HttpRequest(method="GET", url=f"{base}/account?filter=x")
 
@@ -139,11 +139,17 @@ def test_sqli_behind_login_found_only_when_authenticated() -> None:
         unauth = AuditEngine(_raw_send).audit(req, insertion_kinds=(InsertionKind.QUERY_VALUE,))
         assert unauth == [], "found a finding without authenticating (impossible here)"
 
-        # authenticated: the boolean-SQLi differential fires
+        # authenticated: the reflected XSS on `filter` is oracle-confirmed. (It used to assert the
+        # boolean-SQLi differential here; a bare benign-vs-payload differential has no attribution step and minted High FACTs at
+    # rate 1.0 against a WAF block page and against strict input validation on targets with no
+    # database, so it is LEAD-only now (verify.verifier.DIFFERENTIAL_LEAD_ONLY_CLASSES).
+        # The property under test — a bug behind a login is reachable only once authenticated — is
+        # unchanged, and the reflection-context oracle is a proof that actually attributes: the
+        # canary must reach an EXECUTABLE position, not merely appear.)
         auth = AuthSession(_raw_send, _login(base))
         findings = AuditEngine(auth.send).audit(req, insertion_kinds=(InsertionKind.QUERY_VALUE,))
-        sqli = [f for f in findings if f.bug_class == "boolean_sqli" and f.param == "filter"]
-        assert sqli and sqli[0].confirmed_by == "differential_response"
+        xss = [f for f in findings if f.bug_class == "xss" and f.param == "filter"]
+        assert xss and xss[0].confirmed_by == "reflection_context"
 
 
 def test_reauth_on_session_expiry() -> None:

@@ -352,17 +352,31 @@ def test_fixture_detector_agrees_with_every_boolean_probe() -> None:
         assert not _looks_like_tautology(e.oracle.benign), e.id
 
 
+# LEAD-ONLY NOW. A bare benign-vs-payload differential can no longer CONFIRM a
+# truth-value-attribution class (verify.verifier.DIFFERENTIAL_LEAD_ONLY_CLASSES): it has no
+# attribution step — its control is a DIFFERENT STRING, not a same-shape negative — so it cannot
+# separate "the injected boolean changed the query" from "the app treated two strings differently",
+# and it minted High FACTs at rate 1.0 against a STATIC page behind a CRS-942130 WAF rule and
+# against an app doing strict input validation, neither with a database. Note this fixture is
+# ITSELF a payload-SHAPE matcher (it strips quotes and looks for `1=1`) — precisely what a WAF rule
+# is, which is why a differential cannot tell the two apart. So the assertion is now: the entry
+# drives real traffic and produces a LEAD, and NOTHING is confirmed on either side. Sound boolean
+# detection is the SPRT BooleanInferenceCheck (see scanner/tests/test_attribution_soundness.py and
+# the sqlite-backed scanner.benchmark).
 @pytest.mark.parametrize("entry_id", _BOOLEAN_IDS)
-def test_boolean_entry_confirms_on_vuln_and_not_on_safe(entry_id: str) -> None:
+def test_boolean_entry_is_lead_only_on_vuln_and_safe(entry_id: str) -> None:
     check = compile_entry(_by_id()[entry_id])
     assert isinstance(check, DifferentialCheck)
 
     with _server(_SqliVulnApp) as base:
         tpl, point = _q_point(base)
-        confirmed = _confirm(check, tpl, point)
-    assert confirmed is not None, f"{entry_id} failed to confirm on the vuln fixture"
-    assert confirmed.confirmed_by.value == "differential_response"
-    assert confirmed.bug_class == "boolean_sqli"
+        ctx = check.probe(tpl, point, _send)
+        # the probe DID run over real traffic and DID observe a divergence — that is the LEAD
+        assert ctx is not None and ctx.baseline and ctx.mutated
+        assert ctx.baseline != ctx.mutated, f"{entry_id} observed no divergence at all"
+        assert _confirm(check, tpl, point) is None, (
+            f"{entry_id} minted a boolean_sqli FACT from a bare differential"
+        )
 
     with _server(_SqliSafeApp) as base:
         tpl, point = _q_point(base)
@@ -371,12 +385,10 @@ def test_boolean_entry_confirms_on_vuln_and_not_on_safe(entry_id: str) -> None:
         )
 
 
-def test_a_representative_boolean_entry_confirms() -> None:
+def test_a_representative_boolean_entry_is_a_lead_not_a_fact() -> None:
     # an explicit single-entry smoke check (independent of the parametrisation)
-    # mirroring test_library.py's differential confirmation.
+    # mirroring test_library.py's differential entry.
     check = compile_entry(_by_id()["m2-sqli-mysql-boolean-squote"])
     with _server(_SqliVulnApp) as base:
         tpl, point = _q_point(base)
-        confirmed = _confirm(check, tpl, point)
-    assert confirmed is not None
-    assert confirmed.confirmed_by.value == "differential_response"
+        assert _confirm(check, tpl, point) is None

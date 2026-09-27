@@ -194,13 +194,41 @@ def _nocred_baseline_valid_clause() -> dict:
 
 @dataclass(frozen=True)
 class DifferentialCheck:
-    """Boolean/logic differential: send a benign value and a probe value into the
-    same point and let the differential oracle judge whether the responses
-    diverge (boolean-blind SQLi/NoSQLi, auth-logic, filter bypass).
+    """Boolean/logic differential: send a benign value and a probe value into the same point and
+    let the differential oracle judge whether the responses diverge (boolean-blind SQLi/NoSQLi,
+    auth-logic, filter bypass).
 
-    The point's own base value is NOT used as the baseline — a fresh benign value
-    is, so the comparison is payload-vs-payload and the base is left untouched as
-    a control the engine can re-check."""
+    **LEAD-PRODUCING ONLY. This check cannot mint a FACT for any truth-value-attribution class**
+    (``boolean_sqli`` / ``auth_bypass`` / ``nosqli`` / ``ldap_injection`` / ``xpath_injection``) —
+    ``verify.verifier.DIFFERENTIAL_LEAD_ONLY_CLASSES`` removed DIFFERENTIAL_RESPONSE from those rows
+    and enforces the removal at import time. Its two responses are still SENT and still RETAINED as
+    coverage evidence (an exercised, oracle-cleared surface), and they remain a legitimate *lead* —
+    they are simply no longer a proof.
+
+    WHY, precisely. The claim a boolean class makes is "the response is a FUNCTION OF THE INJECTED
+    BOOLEAN'S TRUTH VALUE". This check has NO ATTRIBUTION STEP: its control is a DIFFERENT STRING,
+    not a same-shape negative, so nothing in it separates "the injected boolean changed the query"
+    from "the app treated two different strings differently". Any single dimension differing fires
+    (``status`` alone weighs 0.6; noisy-OR with ``lexical`` reaches 0.87–0.96), so the loudest
+    trigger is a DEFENCE:
+
+      * a STATIC page with NO DATABASE behind a ModSecurity-CRS-942130 tautology rule (200 -> 403
+        plus a different error page) minted ``boolean_sqli`` at 0.95, ``grounding: fact``, and the
+        offline ``framework.v2 verify`` RE-CONFIRMED the certificate;
+      * an app doing TEXTBOOK STRICT INPUT VALIDATION (``[A-Za-z0-9 _-]{0,64}``, else 400) minted it
+        at 0.87 on 3/3 runs;
+      * a benign echo with NO status change correctly did not fire — the defence was the trigger.
+
+    The SOUND replacement already exists and is the only confirming path:
+    :class:`BooleanInferenceCheck` (SPRT over ``K_T``/``K_F`` distinct, shape-VARIED always-true and
+    always-false clauses, each sent twice byte-identically), driven by
+    ``live/runtime_redrive.py::boolean_redrive``. It is not in :data:`DEFAULT_CHECKS` because it
+    costs ~64 requests per (point, clause family); the honest consequence is a RECALL cost on the
+    default profile — a LEAD instead of a FACT — which is the safe direction.
+
+    The point's own base value is NOT used as the baseline — a fresh benign value is, so the
+    comparison is payload-vs-payload and the base is left untouched as a control the engine can
+    re-check."""
 
     id: str
     bug_class: str
@@ -1269,47 +1297,104 @@ class ErrorSignatureCheck:
 
 @dataclass(frozen=True)
 class ContentSignatureCheck:
-    """File read / local file inclusion by KNOWN-CONTENT signature.
+    """File read / local file inclusion by KNOWN-CONTENT signature, ATTRIBUTED BY A BENIGN CONTROL.
 
-    Injects a payload (e.g. a traversal ``../../../../etc/passwd``) into the
-    insertion point and confirms via the side-effect oracle ONLY when a
-    distinctive signature of the *target file's content* (``root:x:0:0:``, a
-    ``[extensions]`` INI section, ``<web-app``) appears in the response — proof the
-    file was actually READ, not merely that the path was reflected. The signature
-    is specific enough that its presence is the proof; a reflected-but-not-read
-    payload does not fire (the current marker-reflection path-traversal check only
-    proved reflection, which is not a file read)."""
+    Injects a payload (e.g. a traversal ``../../../../etc/passwd``) into the insertion point and
+    confirms via the side-effect oracle ONLY when a distinctive signature of the *target file's
+    content* (``root:x:0:0:``, a ``[extensions]`` INI section, ``<web-app``) appears in the response
+    AND is ABSENT from a benign CONTROL request on the SAME insertion point — proof the file was
+    actually READ, and that the read is attributable to the payload rather than to a page that
+    prints the signature whatever you send. A reflected-but-not-read payload does not fire (the
+    former marker-reflection path-traversal check only proved reflection, which is not a file read).
+
+    THE CONTROL IS THE FIX FOR A MEASURED DEFECT (audit C, rate 1.0, DEFAULT path). Without it the
+    check was ONE request with NO baseline and the oracle was pure substring presence at 0.90, so an
+    ordinary security KNOWLEDGE-BASE site — a static dict of articles, ZERO file I/O — whose
+    path-traversal article legitimately contains ``root:x:0:0:root:/root:/bin/bash`` minted FOUR High
+    ``path_traversal`` FACTs. The control existed only in ONE CONSUMER
+    (``live/runtime_redrive.py::runtime_redrive``) while the ``path_traversal.file_signature``
+    evidence branch ADVERTISED the control differential and named this check as its implementation
+    ref. The guard now lives in the CHECK — the branch's named authority — so every consumer
+    (the scanner engine, the library LFI entries, the re-drive) inherits it, and it is RETAINED in
+    the evidence (``control_sink``) so ``side_effect_oracle`` re-derives the same refusal offline.
+
+    COST: the control costs ONE extra request, and only on a probe that would otherwise FIRE — the
+    payload goes first and the control is sent only when the signature is actually present, so a
+    non-firing surface is exactly as cheap as before. FAIL-CLOSED: if the control request errors or
+    returns nothing readable there is no attribution, so the check refuses (a LEAD, never a FACT)."""
 
     id: str
     bug_class: str
     payload: str
     signature: str
+    # A benign, NON-traversal, file-shaped value. Fixed and public on purpose: a run must be
+    # replayable and the operator must be able to grep their logs for our traffic (constitution VI.4).
+    control_value: str = "crucible-benign-control.txt"
+
+    @staticmethod
+    def _body(resp: object) -> str:
+        return resp.get("body", "") if isinstance(resp, dict) else str(resp)
+
+    def _control_body(self, template: RequestTemplate, point: InsertionPoint, send: Send) -> str | None:
+        """The benign CONTROL response body, or ``None`` when no control could be observed
+        (fail-closed: no control, no attribution, no FACT)."""
+        try:
+            resp = send(template.render(point, self.control_value))
+        except Exception:
+            return None
+        if resp is None:
+            return None
+        return self._body(resp)
+
+    def _attributed(self, body: str, template: RequestTemplate, point: InsertionPoint,
+                    send: Send) -> FindingContext | None:
+        """Adjudicate one payload response. Returns the confirming context only when the signature
+        is present under the payload AND absent from the benign control; returns a NON-firing
+        context (retained coverage) when the signature never appeared; refuses with ``None`` when the
+        control already carries the signature or could not be observed."""
+        if self.signature not in body:
+            # Nothing to attribute — hand the oracle the observed sink so the probe is retained as an
+            # EXERCISED, oracle-cleared surface exactly as before. No control request is spent.
+            return FindingContext.from_side_effect(self.signature, body, bug_class=self.bug_class)
+        control = self._control_body(template, point, send)
+        if control is None or self.signature in control:
+            # The page prints the signature regardless of input (a docs/KB/paste page), or no control
+            # could be read. Either way the presence is NOT attributable to a file read → LEAD.
+            return None
+        return FindingContext.from_side_effect(
+            self.signature, body, bug_class=self.bug_class, control_sink=control,
+        )
 
     def probe(self, template: RequestTemplate, point: InsertionPoint, send: Send) -> FindingContext | None:
         resp = send(template.render(point, self.payload))
-        body = resp.get("body", "") if isinstance(resp, dict) else str(resp)
-        return FindingContext.from_side_effect(self.signature, body, bug_class=self.bug_class)
+        return self._attributed(self._body(resp), template, point, send)
 
     def adapt(self, template: RequestTemplate, point: InsertionPoint, send: Send) -> FindingContext | None:
         """WAF-adaptive fallback (opt-in): when a traversal payload is filtered,
         synthesize a form that gets past the filter AND still returns the target
         file's content signature. The sink proxy is the signature's presence — proof
         the file was read, not merely that the path reflected — so the confirmation
-        bar is identical to the normal path."""
+        bar is identical to the normal path, INCLUDING the benign-control differential:
+        the control is checked FIRST here, so a page that always prints the signature
+        never funds a bypass search."""
         from .waf_evasion import adaptive_bypass
+
+        control = self._control_body(template, point, send)
+        if control is None or self.signature in control:
+            return None
 
         def send_form(form: str) -> dict:
             return send(template.render(point, form))
 
         def sink_present(resp: dict) -> bool:
-            body = resp.get("body", "") if isinstance(resp, dict) else str(resp)
-            return self.signature in body
+            return self.signature in self._body(resp)
 
         res = adaptive_bypass(self.payload, send_form, sink_present)
         if res is None:
             return None
-        body = res.response.get("body", "") if isinstance(res.response, dict) else str(res.response)
-        return FindingContext.from_side_effect(self.signature, body, bug_class=self.bug_class)
+        return FindingContext.from_side_effect(
+            self.signature, self._body(res.response), bug_class=self.bug_class, control_sink=control,
+        )
 
 
 @dataclass(frozen=True)

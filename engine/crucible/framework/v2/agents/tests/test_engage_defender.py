@@ -127,19 +127,25 @@ def test_defender_efficacy_over_operator_sigma_maps_attack(
 ):
     isolated_engagement("alpha", "127.0.0.1")
     _serve(httpserver)
+    # The rule covers BOTH the injection payload shape and the XSS one. The fixture's confirmed
+    # finding is the reflected XSS: the boolean-SQLi differential that used to be confirmed here is
+    # LEAD-only now — a bare benign-vs-payload differential has no attribution step and minted High
+    # FACTs against targets with no database (verify.verifier.DIFFERENTIAL_LEAD_ONLY_CLASSES).
     sigma_dir = tmp_path / "sigma"
     sigma_dir.mkdir()
-    (sigma_dir / "sqli.yml").write_text(
-        "title: SQLi\nid: R-SQLI\ndetection:\n  selection:\n"
+    (sigma_dir / "webattack.yml").write_text(
+        "title: Web attack payloads\nid: R-WEB\ndetection:\n  selection:\n"
         "    cs_uri_query|contains:\n      - \"OR 1=1\"\n      - \"UNION SELECT\"\n"
-        "  condition: selection\ntags: [attack.t1190]\nlevel: high\n", encoding="utf-8")
+        "      - \"<script>\"\n"
+        "  condition: selection\ntags: [attack.t1190, attack.t1059.007]\nlevel: high\n",
+        encoding="utf-8")
 
     result = _run("alpha", httpserver.port, enable_defender=True, defender_sigma_dir=str(sigma_dir))
     eff = result.defense.efficacy
     assert eff is not None
-    # the confirmed SQL-injection action is caught by the operator's rule, mapped to ATT&CK T1190
+    # the confirmed action is caught by the operator's rule and mapped to its ATT&CK techniques
     assert eff.detected_count >= 1
-    assert "T1190" in eff.techniques_covered
+    assert {"T1190", "T1059.007"} & set(eff.techniques_covered)
 
 
 def test_defender_ingests_offline_log(isolated_engagement, httpserver: HTTPServer, tmp_path: Path):

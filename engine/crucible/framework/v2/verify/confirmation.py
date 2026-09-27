@@ -19,12 +19,16 @@ Two pieces:
 
   `confirm_against_local_target(app=DifferentialDemoHandler) -> ConfirmedFinding | None`
       The reproducible proof. It stands up a deliberately-vulnerable stdlib
-      HTTP app on 127.0.0.1:0, sends a benign baseline request and a boolean
-      probe request, feeds the two REAL responses through the differential
-      oracle via the adapter, and returns a genuinely oracle-confirmed
-      finding. Point it at `SafeDemoHandler` (a parameterised, non-injectable
-      twin) and it returns `None` — the negative control that proves the
-      authority does not rubber-stamp.
+      HTTP app on 127.0.0.1:0 — backed by a REAL sqlite3 engine with the query
+      string-concatenated, so it is injectable the way a real app is — runs the
+      TRUTH-VALUE ATTRIBUTION protocol against it (distinct, shape-varied
+      always-true and always-false clauses, each sent twice byte-identically,
+      over an SPRT), and returns a genuinely oracle-confirmed finding. Point it
+      at `SafeDemoHandler` (the same engine with the value BOUND) and it returns
+      `None` — the negative control that proves the authority does not
+      rubber-stamp. It deliberately does NOT use a bare benign-vs-payload
+      differential: that has no attribution step and confirmed against targets
+      with no database at all (see `verifier.DIFFERENTIAL_LEAD_ONLY_CLASSES`).
 
 Everything is localhost-only and deterministic: the oracle verdict rests on
 response *content* (status/length/lexical), never on wallclock timing.
@@ -33,12 +37,12 @@ response *content* (status/length/lexical), never on wallclock timing.
 from __future__ import annotations
 
 import contextlib
-import re
+import sqlite3
 import threading
 import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import Any, Iterator, Mapping
+from typing import Any, Callable, Iterator, Mapping
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -209,14 +213,14 @@ _ROWS: tuple[dict[str, Any], ...] = (
     {"id": 3, "name": "carol", "role": "user"},
 )
 
+# The single benign/tautology pair. These are the BARE-DIFFERENTIAL probe values still used by
+# agents.oracle_probe_executor; they are NOT what confirm_against_local_target uses any more, because
+# one benign string vs one payload string cannot attribute a response to a truth value
+# (verifier.DIFFERENTIAL_LEAD_ONLY_CLASSES) — that pair is a LEAD, never a boolean FACT.
 _BENIGN_QUERY = "obsidian-no-such-name"
 _TAUTOLOGY_QUERY = "x' OR '1'='1"
 
 _USER_AGENT = "CRUCIBLE-verify/1.0 (localhost oracle self-check)"
-
-_CLAUSE_NAME = re.compile(r"name = '(.*)'")
-_CLAUSE_TAUTOLOGY = re.compile(r"'(.*)'\s*=\s*'(.*)'")
-
 
 def _query_param(path: str, key: str) -> str:
     qs = urllib.parse.urlsplit(path).query
@@ -224,28 +228,44 @@ def _query_param(path: str, key: str) -> str:
     return values[0]
 
 
-def _clause_true(clause: str, name: str) -> bool:
-    m = _CLAUSE_NAME.fullmatch(clause)
-    if m:
-        return name == m.group(1)
-    m = _CLAUSE_TAUTOLOGY.fullmatch(clause)
-    if m:
-        return m.group(1) == m.group(2)
-    return False
+def _fresh_db() -> "sqlite3.Connection":
+    con = sqlite3.connect(":memory:")
+    con.execute("CREATE TABLE users (id INTEGER, name TEXT, role TEXT)")
+    con.executemany("INSERT INTO users VALUES (?,?,?)",
+                    [(r["id"], r["name"], r["role"]) for r in _ROWS])
+    return con
 
 
 def _vulnerable_match(q: str) -> list[dict[str, Any]]:
-    """Deliberately flawed: builds `name = '<q>'` by string concatenation, so an
-    `' OR '1'='1` breaks out and the OR-tautology selects every row."""
-    stmt = "name = '" + q + "'"
-    clauses = [c.strip() for c in stmt.split(" OR ")]
-    return [row for row in _ROWS if any(_clause_true(c, row["name"]) for c in clauses)]
+    """Deliberately flawed: builds ``name = '<q>'`` by string concatenation and hands it to a REAL
+    SQL ENGINE, so an ``' OR '1'='1`` breaks out and the OR-tautology selects every row.
+
+    It used to be a two-regex stand-in that only understood literal equality (``'a'='b'``). That
+    made the demo target detectable ONLY by a bare benign-vs-payload differential: the SOUND
+    detector varies COMPARISON SHAPE on purpose (``>``, ``LIKE``, ``<>``, ``BETWEEN``,
+    ``IN (SELECT …)``, a compound ``AND``), and against the regex stub every one of those shapes
+    evaluated FALSE on BOTH the true and the false clause, so the truth-value partition vanished and
+    the SPRT refuted a genuinely injectable app. A real engine removes that artifact: this target is
+    now injectable in the way a real one is, for every shape."""
+    con = _fresh_db()
+    try:
+        rows = con.execute("SELECT id, name, role FROM users WHERE name = '" + q + "'").fetchall()
+    except sqlite3.Error:
+        rows = []
+    finally:
+        con.close()
+    return [{"id": r[0], "name": r[1], "role": r[2]} for r in rows]
 
 
 def _safe_match(q: str) -> list[dict[str, Any]]:
-    """The parameterised twin: `q` is a literal value, never structure. No
-    input can change which rows are selected beyond an exact name match."""
-    return [row for row in _ROWS if row["name"] == q]
+    """The parameterised twin: ``q`` is BOUND as a value by the same real engine, never structure.
+    No input can change which rows are selected beyond an exact name match."""
+    con = _fresh_db()
+    try:
+        rows = con.execute("SELECT id, name, role FROM users WHERE name = ?", (q,)).fetchall()
+    finally:
+        con.close()
+    return [{"id": r[0], "name": r[1], "role": r[2]} for r in rows]
 
 
 def _render(rows: list[dict[str, Any]]) -> bytes:
@@ -311,42 +331,83 @@ def _http_get(base_url: str, query: str) -> dict[str, Any]:
         return {"status": resp.status, "body": body}
 
 
+def boolean_probe_context(
+    fetch: "Callable[[str], dict[str, Any]]",
+    *,
+    rounds: int = 3,
+    bug_class: str = "boolean_sqli",
+    baseline_samples: int = 8,
+) -> FindingContext:
+    """Collect the TRUTH-VALUE ATTRIBUTION evidence the SPRT boolean oracle judges, over any
+    ``fetch(value) -> {"status":…, "body":…}`` the caller supplies. THE single collection path
+    shared by the verify-layer self-check and the agent probe executor, so both speak the sound
+    dialect rather than the bare benign-vs-payload differential (which has no attribution step and
+    confirmed against targets with no database — ``verifier.DIFFERENTIAL_LEAD_ONLY_CLASSES``).
+
+    Per round it sends ``K_T`` DISTINCT always-TRUE clauses and ``K_F`` distinct always-FALSE
+    clauses of VARIED COMPARISON SHAPE, each TWICE byte-identically (the per-clause determinism
+    control), preceded by ``baseline_samples`` identical requests (the oracle's determinism
+    PRE-GATE, whose floor is 6). Sends nothing else and decides nothing — the oracle is the
+    authority, and it refuses unless the responses PARTITION BY TRUTH VALUE."""
+    # function-local: the clause families are the SCANNER's public constant and verify/ is the lower
+    # layer — importing it at module scope would invert the dependency (and cycle through adapter).
+    from ..scanner.checks import BOOLEAN_DISCRIMINATOR, boolean_clause_families  # noqa: PLC0415
+
+    trues, falses = boolean_clause_families()[0]
+    samples = [fetch(falses[0]) for _ in range(max(6, baseline_samples))]
+    true_rounds, false_rounds, true_repeats, false_repeats = [], [], [], []
+    for _ in range(max(1, rounds)):
+        true_rounds.append([fetch(c) for c in trues])
+        true_repeats.append([fetch(c) for c in trues])
+        false_rounds.append([fetch(c) for c in falses])
+        false_repeats.append([fetch(c) for c in falses])
+    return FindingContext.from_boolean_probes(
+        true_rounds=true_rounds, false_rounds=false_rounds,
+        true_repeat_rounds=true_repeats, false_repeat_rounds=false_repeats,
+        bug_class=bug_class, discriminator=BOOLEAN_DISCRIMINATOR,
+        false_baseline_samples=samples,
+    )
+
+
 def confirm_against_local_target(
     app: type[BaseHTTPRequestHandler] = DifferentialDemoHandler,
     *,
-    baseline_query: str = _BENIGN_QUERY,
-    probe_query: str = _TAUTOLOGY_QUERY,
+    rounds: int = 3,
     verifier: OracleVerifier | None = None,
 ) -> ConfirmedFinding | None:
     """Drive a REAL local target through the confirmation authority.
 
-    Stands up `app` on loopback, sends a benign baseline and a boolean probe,
-    feeds the two real responses through the differential oracle, and returns
-    the oracle-confirmed finding (or `None` if nothing fired — e.g. against
-    `SafeDemoHandler`). This is the reproducible artifact proving a real target
-    drives a real confirmed finding via a fired signal, not an LLM opinion.
+    Stands up ``app`` on loopback, runs the TRUTH-VALUE ATTRIBUTION protocol against it, and returns
+    the oracle-confirmed finding (or ``None`` if nothing fired — e.g. against ``SafeDemoHandler``,
+    the parameterised twin). This is the reproducible artifact proving a real target drives a real
+    confirmed finding via a fired signal, not an LLM opinion.
 
-    The comparison uses only content dimensions (status/length/lexical), so the
-    verdict is deterministic and independent of machine timing."""
+    IT NO LONGER USES A BARE DIFFERENTIAL, and that is the point. Sending ONE benign string and ONE
+    tautology and asking whether the two responses differ has NO ATTRIBUTION STEP: it cannot separate
+    "the injected boolean changed the query" from "the app treated two strings differently", so it
+    confirmed against a static page behind a WAF tautology rule and against an app doing strict input
+    validation — targets with no database at all (measured, rate 1.0). DIFFERENTIAL_RESPONSE is
+    therefore no longer an acceptable confirmer for ``boolean_sqli``
+    (``verifier.DIFFERENTIAL_LEAD_ONLY_CLASSES``).
+
+    What runs instead is the SOUND protocol the SPRT oracle judges: per round, ``K_T`` DISTINCT
+    always-TRUE clauses and ``K_F`` distinct always-FALSE clauses of VARIED COMPARISON SHAPE, each
+    sent TWICE byte-identically. The oracle signals a round only when every TRUE response agrees with
+    every other TRUE, every FALSE with every FALSE, and the two clusters are disjoint — i.e. the
+    response is a FUNCTION OF THE INJECTED BOOLEAN'S TRUTH VALUE. A 403/400 keyed on payload SHAPE
+    cannot produce that split. The verdict rests on response CONTENT only, never on wallclock timing,
+    so it stays deterministic."""
     with _local_server(app) as base_url:
-        baseline = _http_get(base_url, baseline_query)
-        mutated = _http_get(base_url, probe_query)
-
-    context = FindingContext.from_http_responses(
-        baseline,
-        mutated,
-        bug_class="boolean_sqli",
-        discriminator={"dimensions": ["status", "length", "lexical"]},
-    )
+        context = boolean_probe_context(lambda v: _http_get(base_url, v), rounds=rounds)
     finding = {
         "title": "Boolean-based blind SQL injection in /search",
         "bug_class": "boolean_sqli",
         "severity": "High",
         "surface": "GET /search?q=",
         "summary": (
-            "User input is string-built into a WHERE clause; a boolean "
-            "tautology returns every row while a benign term returns none, "
-            "yielding an observable response differential."
+            "User input is string-built into a WHERE clause, so the response partitions BY THE "
+            "TRUTH VALUE of an injected boolean across distinct, shape-varied always-true and "
+            "always-false clauses — an SPRT-confirmed boolean inference channel."
         ),
     }
     return confirm_finding(finding, context, verifier=verifier)

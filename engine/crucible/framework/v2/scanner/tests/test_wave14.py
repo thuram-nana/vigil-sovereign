@@ -23,8 +23,8 @@ from framework.v2.verify import OracleKind
 
 def _proposal(pid: str) -> CapabilityProposal:
     return CapabilityProposal(
-        id=pid, gap_id=f"gap-{pid}", bug_class="boolean_sqli",
-        oracle_kind=OracleKind.DIFFERENTIAL_RESPONSE,
+        id=pid, gap_id=f"gap-{pid}", bug_class="xss",
+        oracle_kind=OracleKind.REFLECTION_CONTEXT,
         insertion_point_strategy="query_value", payload_family="synth",
         payload_template_skeleton="benign vs tautology", rationale="fills a coverage gap",
     )
@@ -65,24 +65,26 @@ def _point():
 
 
 def _vuln_send(req: HttpRequest) -> dict:
+    # reflects the parameter VERBATIM into the document, so a break-out canary lands in an
+    # EXECUTABLE position and the reflection-context oracle confirms — a real bug.
     q = parse_qs(urlsplit(req.url).query).get("q", [""])[0]
-    body = "row\n" * 40 if ("'1'='1" in q or "1=1" in q) else "none"
-    return {"status": 200, "body": body}
+    return {"status": 200, "body": f"<html><body><p>results for {q}</p></body></html>"}
 
 
 def _safe_send(req: HttpRequest) -> dict:
     return {"status": 200, "body": "constant page, injection ignored"}
 
 
-def _dynamic_send(req: HttpRequest) -> dict:
-    # NON-vulnerable but dynamic: every distinct input yields a distinct body, so
-    # a naive differential would false-confirm — the eval gate must catch it
+def _mislabelled_safe_send(req: HttpRequest) -> dict:
+    # A twin the operator CALLED safe that in fact reflects verbatim too: the synthesized check
+    # cannot tell it from the vulnerable one, so eval must go RED rather than approving a check
+    # whose "negative control" it also fires on.
     q = parse_qs(urlsplit(req.url).query).get("q", [""])[0]
-    return {"status": 200, "body": f"page for {q} " + "x" * (len(q) * 25)}
+    return {"status": 200, "body": f"<html><body><p>page for {q}</p></body></html>"}
 
 
 def test_synthesized_check_passes_eval_on_real_bug_and_is_approved() -> None:
-    check = synthesize_check("boolean_sqli")
+    check = synthesize_check("xss")
     assert check is not None
     request, point = _point()
     ev = evaluate_check(check, request=request, point=point,
@@ -95,12 +97,12 @@ def test_synthesized_check_passes_eval_on_real_bug_and_is_approved() -> None:
 
 
 def test_eval_gate_rejects_a_check_that_false_confirms() -> None:
-    # evaluate the SAME synthesized check but with a dynamic (non-vulnerable) twin
-    # standing in for "safe": it false-confirms there, so eval is red
-    check = synthesize_check("boolean_sqli")
+    # evaluate the SAME synthesized check against a twin the operator labelled "safe" but which
+    # behaves identically: it false-confirms there, so eval is red
+    check = synthesize_check("xss")
     request, point = _point()
     ev = evaluate_check(check, request=request, point=point,
-                        vuln_send=_vuln_send, safe_send=_dynamic_send)
+                        vuln_send=_vuln_send, safe_send=_mislabelled_safe_send)
     assert ev.confirmed_on_vuln and ev.confirmed_on_safe
     assert not ev.eval_green
 
@@ -112,3 +114,12 @@ def test_synthesis_declines_classes_needing_target_specific_specs() -> None:
     # CORS (achieved-state predicate) and SSRF (OOB) are not auto-synthesizable
     assert synthesize_check("cors") is None
     assert synthesize_check("ssrf") is None
+
+
+def test_synthesis_declines_the_truth_value_attribution_classes() -> None:
+    # A sound boolean/auth check is an SPRT over a clause FAMILY, which cannot be derived from a
+    # class name; the synthesizer used to answer that need with a bare benign-vs-payload
+    # differential, which has no attribution step and minted High FACTs against targets with no
+    # database (verify.verifier.DIFFERENTIAL_LEAD_ONLY_CLASSES). It declines instead.
+    for bc in ("boolean_sqli", "auth_bypass", "nosqli", "ldap_injection", "xpath_injection"):
+        assert synthesize_check(bc) is None, bc

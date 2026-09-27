@@ -282,6 +282,12 @@ class FindingContext(BaseModel):
     # side_effect_oracle
     marker: str | None = None
     observed_sink: Any | None = None
+    # The sink observed under a BENIGN control on the SAME insertion point (optional). When present
+    # and it ALREADY carries the marker, side_effect_oracle refuses: the marker's presence under the
+    # payload is not attributable to the payload (a docs/KB page that merely PRINTS a known-content
+    # file signature). Retained so the refusal is re-derived OFFLINE, not only at mint time. Absent on
+    # every producer that has no control, so the gate stays byte-identical.
+    observed_sink_control: Any | None = None
 
     # evaluation_oracle (SSTI/EL — the server evaluated an injected expression)
     eval_raw: str | None = None
@@ -1918,13 +1924,22 @@ class FindingContext(BaseModel):
         observed_sink: Any,
         *,
         bug_class: str = "xss",
+        control_sink: Any = None,
     ) -> "FindingContext":
         """A unique canary marker plus the sink it was observed in, for the
-        side-effect oracle (XSS/SSTI/path-traversal/error-based)."""
+        side-effect oracle (XSS/SSTI/path-traversal/error-based).
+
+        ``control_sink`` is the OPTIONAL sink observed under a BENIGN control on the same insertion
+        point. Retaining it makes the attribution re-derivable OFFLINE: ``side_effect_oracle``
+        refuses when the marker is already present in the control (see that oracle). Omitting it is
+        byte-identical to before."""
         return cls(
             bug_class=bug_class,
             marker=_coerce_text(marker),
             observed_sink=_sink_to_serialisable(observed_sink),
+            observed_sink_control=(
+                _sink_to_serialisable(control_sink) if control_sink is not None else None
+            ),
         )
 
     @classmethod
@@ -2502,6 +2517,8 @@ class FindingContext(BaseModel):
         if self.marker is not None and self.observed_sink is not None:
             ctx["marker"] = self.marker
             ctx["observed_sink"] = self.observed_sink
+            if self.observed_sink_control is not None:
+                ctx["observed_sink_control"] = self.observed_sink_control
         if self.eval_expected is not None and self.eval_observed is not None:
             ctx["eval_raw"] = self.eval_raw or ""
             ctx["eval_expected"] = self.eval_expected
