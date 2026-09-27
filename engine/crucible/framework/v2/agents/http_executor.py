@@ -683,11 +683,14 @@ class HttpExecutor:
                     pass
             # Rate limit (posture-aware).
             self._sleep_for_rate_limit()
+            # `admitted` is set and the caller is handed the slot in the same breath, on
+            # purpose: there is nowhere left to slip a refusing gate in between. A new
+            # gate goes ABOVE this pair, where the `finally` covers it.
             admitted = True
+            return None
         finally:
             if reserve and not admitted:
                 self._release_slot()
-        return None
 
     def execute(
         self,
