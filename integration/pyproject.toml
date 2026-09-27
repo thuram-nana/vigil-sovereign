@@ -25,6 +25,18 @@ allow-direct-references = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# `volume` — a STATISTICAL regression: the same property as its per-PR twin, asserted over enough live
+# runs to bound a low-rate class (80-300 re-drives). Those loops are minutes each, so they are excluded
+# from the per-PR offense leg (`-m "not volume"` in .github/workflows/ci.yml) and run NIGHTLY in
+# soak.yml's "web-liveness volume regressions (nightly)" job. Nothing is dropped: every marked test has
+# an unmarked, low-run twin that keeps the WIRING covered on every PR, and
+# integration/tests/test_ci_volume_tests_run_nightly.py FAILS the build if a volume test is not covered
+# by the nightly job. Registered here AND in integration/conftest.py's pytest_configure, because the
+# offense leg's rootdir is the REPO ROOT (its arg set spans docs/ and integration/), so this file is not
+# the active configfile there and only the conftest registration reaches it.
+markers = [
+    "volume: statistical, high-run-count regression — excluded from the per-PR leg, runs nightly",
+]
 
 # ── quality gates (W2-2 #419) ──────────────────────────────────────────────────────────────────────
 # ruff + mypy over the package source, its conftest AND its tests (tests LINTED, not excluded). Rule set
