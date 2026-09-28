@@ -21,6 +21,7 @@ import binascii
 import difflib
 import hashlib
 import hmac
+import html
 import ipaddress
 import json
 import math
@@ -30,7 +31,7 @@ from dataclasses import dataclass
 from html.parser import HTMLParser
 from statistics import median
 from typing import Any, Mapping, Sequence
-from urllib.parse import urlsplit
+from urllib.parse import quote, urlsplit
 
 from .models import OracleKind, OracleSignal
 
@@ -732,6 +733,65 @@ def _boolean_discriminator(discriminator: Mapping[str, Any] | str | None) -> dic
     return {"dimensions": wanted or list(_BOOLEAN_DEFAULT_DIMENSIONS), "expect": "differ"}
 
 
+# --------------------------------------------------------------------------------------------------
+# REFLECTED-VALUE / DYNAMICITY REMOVAL — the sqlmap-style mask that makes truth-value attribution
+# hold on a page that REFLECTS the injected clause back into its body.
+# --------------------------------------------------------------------------------------------------
+# A boolean channel is real whenever the ROW-BEARING part of the response is a function of the
+# injected boolean's truth value. But many real endpoints ALSO echo the raw parameter into the page
+# (a search box: ``<h1>Results for: {q}</h1>``). Because every DISTINCT always-TRUE clause is a
+# different string, each reflects a different-length, different-lexical fragment, so the K_T true-side
+# responses no longer AGREE with each other and the oracle (correctly, on the raw bytes) refuses —
+# a RECALL loss on a genuinely vulnerable target.
+#
+# The fix is to remove, from EACH response, every occurrence of the exact clause that PRODUCED that
+# response — in its raw form, its HTML-escaped forms, and its URL-encoded forms — BEFORE the pinned
+# discriminator compares two bodies. After removal the reflected fragment (identical in shape, only
+# the injected string differs) is gone from every response, so what remains is the part the SERVER
+# chose: two TRUE responses become byte-equal iff the row-bearing part agrees, and a TRUE response
+# differs from a FALSE one iff the row-bearing part differs. On a reflect-ONLY page with no boolean
+# channel behind it, removing the reflection leaves the SAME residual body on both sides, so the
+# clusters are NOT disjoint and the oracle still REFUSES — masking manufactures no channel.
+#
+# SOUNDNESS BOUNDARY. Only the EXACT known-injected clause strings are removed; nothing heuristic.
+# A truth-correlated substring the SERVER produced (row text, an error signature) is never touched,
+# because it is not one of the injected clause values. The transformation is a PURE, DETERMINISTIC
+# function of (retained clause, retained response) — no I/O, clock, or rng — so offline re-verify
+# over the retained ``clause`` reproduces it byte-for-byte.
+def _boolean_reflection_forms(clause: str) -> tuple[str, ...]:
+    """Every encoding of ``clause`` that could appear reflected in a response body: the RAW clause,
+    both HTML-escaped forms (quotes escaped and not), and both URL-encoded forms. Deduplicated and
+    ordered LONGEST-first so a shorter encoding can never bite a substring of a longer one."""
+    if not clause:
+        return ()
+    forms = {
+        clause,
+        html.escape(clause, quote=True),
+        html.escape(clause, quote=False),
+        quote(clause, safe=""),
+        quote(clause),
+    }
+    return tuple(sorted((f for f in forms if f), key=len, reverse=True))
+
+
+def _mask_boolean_reflection(resp: Any) -> Any:
+    """Return ``resp`` with every occurrence of ITS OWN retained injected ``clause`` (raw /
+    HTML-escaped / URL-encoded) stripped from the body. A response carrying no ``clause`` is returned
+    UNCHANGED (an old context, or an arm that never reflected), so the behaviour on a non-reflecting
+    target — and on every pre-existing retained context — is byte-for-byte what it was."""
+    if not isinstance(resp, Mapping):
+        return resp
+    clause = resp.get("clause")
+    if not clause:
+        return resp
+    body = _coerce_text(resp.get("body", resp.get("text", resp.get("content", ""))))
+    for form in _boolean_reflection_forms(str(clause)):
+        body = body.replace(form, "")
+    out = dict(resp)
+    out["body"] = body
+    return out
+
+
 def boolean_inference_oracle(
     probe_rounds: Any,
     *,
@@ -948,10 +1008,18 @@ def boolean_inference_oracle(
         """Do two observed responses AGREE? ``differential_response_oracle`` is the authority; an
         EXACT match short-circuits it (identical bytes + identical status make every dimension
         non-differing, so the oracle provably cannot fire) — a pure speed path, never a
-        semantic one."""
+        semantic one.
+
+        Before the discriminator compares them, each response has ITS OWN reflected injected clause
+        removed (``_mask_boolean_reflection``): on a page that echoes the distinct clause back into
+        its body, two same-truth-value responses only DIFFER in that reflection, so masking is what
+        lets a genuine channel behind a reflection attribute. It never manufactures one — a reflect-
+        only page masks to the SAME residual on both sides and stays indistinguishable. A response
+        with no retained ``clause`` masks to itself, so a non-reflecting target is unchanged."""
         if a == b:
             return True
-        return not differential_response_oracle(a, b, disc).fired
+        return not differential_response_oracle(
+            _mask_boolean_reflection(a), _mask_boolean_reflection(b), disc).fired
 
     # --- PRE-FILTER 1: BASELINE DETERMINISM PRE-GATE ----------------------------------------------
     baseline = list(false_baseline_samples) if false_baseline_samples is not None else None

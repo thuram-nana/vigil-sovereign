@@ -139,6 +139,77 @@ def test_skewed_input_independent_page_refuses_with_the_pregate_forced_to_pass()
         assert not sig.fired, f"skewed input-independent page minted a FALSE FACT at seed {seed}"
 
 
+# ---- reflected-value / dynamicity removal (the mask that repairs recall behind an echo) ----------
+_REFLECT_TRUE = ("x' OR '1'='1", "x' OR 'ab'='ab", "x' OR 9>4 AND 'k'<'m", "x' OR 'zz'<>'yy")
+_REFLECT_FALSE = ("x' OR '1'='2", "x' OR 'ab'='ac", "x' OR 4>9 AND 'k'<'m", "x' OR 'zz'<>'zz")
+
+
+def _reflect_resp(clause: str, *, rows: bool) -> dict:
+    """A response that ECHOES its own injected clause into the body (a search box), with a row-bearing
+    part present iff ``rows``. It carries the retained ``clause`` the oracle masks by. Every distinct
+    clause reflects a different-length fragment, so the RAW true-side responses disagree — masking is
+    what lets a real channel (rows-vs-none) attribute."""
+    tail = "<li>1:apple</li><li>2:banana</li>" if rows else ""
+    return {"status": 200, "body": f"<h1>Results for: {clause}</h1><ul>{tail}</ul>", "clause": clause}
+
+
+def _reflect_round(*, channel: bool) -> dict:
+    # a real channel: TRUE clauses return rows, FALSE clauses do not. A reflect-ONLY page: NEITHER
+    # side returns rows, so the ONLY difference between the two sides is the echoed clause itself.
+    trues = [_reflect_resp(c, rows=channel) for c in _REFLECT_TRUE]
+    falses = [_reflect_resp(c, rows=False) for c in _REFLECT_FALSE]
+    return {"trues": trues, "falses": falses,
+            "true_repeats": [dict(r) for r in trues], "false_repeats": [dict(r) for r in falses]}
+
+
+def _strip_clause(rounds):
+    return [{k: [{kk: vv for kk, vv in d.items() if kk != "clause"} for d in v]
+             for k, v in r.items()} for r in rounds]
+
+
+def test_masking_confirms_a_real_channel_behind_a_reflection() -> None:
+    # RAW bytes disagree within the true cluster (each clause echoes a different string), so without
+    # masking the oracle refuses — the recall regression. With the retained clause masked out, only
+    # the row-bearing part remains and the channel attributes → CONFIRM.
+    rounds = [_reflect_round(channel=True) for _ in range(24)]
+    baseline = [_reflect_resp(_REFLECT_FALSE[0], rows=False) for _ in range(16)]
+    sig = boolean_inference_oracle(rounds, false_baseline_samples=baseline)
+    assert sig.fired, "a real channel behind a reflected echo did not confirm after masking"
+    # control: strip the retained clause and the SAME evidence must refuse — proving the MASK, not the
+    # row content alone, does the work (the reflection is back and within-truth agreement breaks).
+    sig_raw = boolean_inference_oracle(
+        _strip_clause(rounds),
+        false_baseline_samples=[{k: v for k, v in b.items() if k != "clause"} for b in baseline])
+    assert not sig_raw.fired, "without the retained clause the reflected page still confirmed"
+
+
+def test_masking_does_not_manufacture_a_channel_on_a_reflect_only_page() -> None:
+    # THE SOUNDNESS GUARANTEE at the oracle level: a reflect-ONLY page (row part constant, independent
+    # of truth value) masks to the SAME residual body on both sides, so the clusters are not disjoint
+    # and the oracle REFUSES. Masking removes only the known-injected echo, never a server substring.
+    rounds = [_reflect_round(channel=False) for _ in range(24)]
+    baseline = [_reflect_resp(_REFLECT_FALSE[0], rows=False) for _ in range(16)]
+    sig = boolean_inference_oracle(rounds, false_baseline_samples=baseline)
+    assert not sig.fired, "masking a reflect-only page manufactured a boolean channel that is not there"
+    assert sig.observed["decision"] == "refute"
+
+
+def test_masking_only_strips_the_exact_injected_clause_not_correlated_server_text() -> None:
+    # A truth-correlated substring the SERVER produced must survive masking. The row part carries the
+    # token "MATCHED" for TRUE and nothing for FALSE; that token is NOT an injected clause string, so
+    # masking leaves it and the channel it represents still attributes → the FACT mints.
+    def _resp(clause, tv):
+        tail = "<li>MATCHED row</li>" if tv else ""
+        return {"status": 200, "body": f"<h1>Results for: {clause}</h1><ul>{tail}</ul>", "clause": clause}
+    rounds = [{"trues": [_resp(c, True) for c in _REFLECT_TRUE],
+               "falses": [_resp(c, False) for c in _REFLECT_FALSE],
+               "true_repeats": [_resp(c, True) for c in _REFLECT_TRUE],
+               "false_repeats": [_resp(c, False) for c in _REFLECT_FALSE]} for _ in range(24)]
+    baseline = [_resp(_REFLECT_FALSE[0], False) for _ in range(16)]
+    sig = boolean_inference_oracle(rounds, false_baseline_samples=baseline)
+    assert sig.fired, "masking over-stripped a server-produced truth-correlated substring"
+
+
 def test_deterministic_non_vuln_is_refuted() -> None:
     # the clause is treated as literal data: true and false give the same response
     sig = boolean_inference_oracle([_clean(_NONE, _NONE) for _ in range(24)],

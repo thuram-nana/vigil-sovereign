@@ -458,7 +458,8 @@ class BooleanInferenceCheck:
     shared_baseline: tuple = ()
 
     def probe(self, template: RequestTemplate, point: InsertionPoint, send: Send) -> FindingContext | None:
-        from ..verify.oracles import differential_response_oracle  # local: avoid import cycle at module load
+        # local: avoid import cycle at module load
+        from ..verify.oracles import _mask_boolean_reflection, differential_response_oracle
 
         trues = tuple(self.true_clauses)
         falses = tuple(self.false_clauses)
@@ -470,20 +471,33 @@ class BooleanInferenceCheck:
             # A clause appearing on BOTH sides is degenerate too. Emit no rounds — the oracle can only refuse.
             return FindingContext.from_boolean_probes(
                 true_rounds=[], false_rounds=[], true_repeat_rounds=[], false_repeat_rounds=[],
-                bug_class=self.bug_class, discriminator=BOOLEAN_DISCRIMINATOR)
+                bug_class=self.bug_class, discriminator=BOOLEAN_DISCRIMINATOR,
+                true_clauses=trues, false_clauses=falses)
+
+        def _tag(resp: dict, clause: str) -> dict:
+            # Pair each response with the injected clause that produced it, so BOTH the live early-stop
+            # below and the authoritative offline oracle strip that clause's own reflection before
+            # comparing (see verify.oracles._mask_boolean_reflection). New dict — never mutate send()'s.
+            return {**resp, "clause": clause}
 
         def _differs(a: dict, b: dict) -> bool:
             # the PINNED boolean discriminator — never the oracle's default set, which includes LATENCY
-            # (a boolean FACT must rest on response CONTENT; timing is timing_oracle's job).
-            return differential_response_oracle(a, b, BOOLEAN_DISCRIMINATOR).fired
+            # (a boolean FACT must rest on response CONTENT; timing is timing_oracle's job). Each side
+            # has its OWN reflected clause removed first, so this mirrors the offline oracle EXACTLY —
+            # both mask, so the live SPRT and the authoritative verdict cannot diverge on a reflecting
+            # target. A response without a clause masks to itself (a non-reflecting target is unchanged).
+            return differential_response_oracle(
+                _mask_boolean_reflection(a), _mask_boolean_reflection(b), BOOLEAN_DISCRIMINATOR).fired
 
         # --- DETERMINISM PRE-GATE: responses to ONE IDENTICAL request, all of which must be identical.
         #     A non-deterministic page (coarse OR high-entropy) fails this and is refused BEFORE any
         #     inference — short-circuit on the first divergence to bound the traffic. A driver that
         #     already collected this for the endpoint hands it in via ``shared_baseline`` (no re-sends).
-        baseline: list[dict] = [dict(b) for b in self.shared_baseline]
+        # The baseline re-sends ONE identical false clause (falses[0]); tag every sample with it so
+        # masking is identical across the samples and the determinism verdict is unchanged by it.
+        baseline: list[dict] = [_tag(dict(b), falses[0]) for b in self.shared_baseline]
         for _ in range(0 if baseline else max(2, self.baseline_samples)):
-            s = _as_dict(send(template.render(point, falses[0])))
+            s = _tag(_as_dict(send(template.render(point, falses[0]))), falses[0])
             baseline.append(s)
             if _differs(baseline[0], s):
                 break  # proven non-deterministic — the oracle will refuse over these samples
@@ -492,7 +506,7 @@ class BooleanInferenceCheck:
             return FindingContext.from_boolean_probes(
                 true_rounds=[], false_rounds=[], true_repeat_rounds=[], false_repeat_rounds=[],
                 bug_class=self.bug_class, false_baseline_samples=baseline,
-                discriminator=BOOLEAN_DISCRIMINATOR)
+                discriminator=BOOLEAN_DISCRIMINATOR, true_clauses=trues, false_clauses=falses)
 
         upper = math.log((1.0 - self.beta) / self.alpha)
         lower = math.log(self.beta / (1.0 - self.alpha))
@@ -502,10 +516,10 @@ class BooleanInferenceCheck:
         true_repeat_rounds: list[list[dict]] = []
         false_repeat_rounds: list[list[dict]] = []
         for _ in range(self.n_max):
-            t = [_as_dict(send(template.render(point, c))) for c in trues]
-            t_rep = [_as_dict(send(template.render(point, c))) for c in trues]
-            f = [_as_dict(send(template.render(point, c))) for c in falses]
-            f_rep = [_as_dict(send(template.render(point, c))) for c in falses]
+            t = [_tag(_as_dict(send(template.render(point, c))), c) for c in trues]
+            t_rep = [_tag(_as_dict(send(template.render(point, c))), c) for c in trues]
+            f = [_tag(_as_dict(send(template.render(point, c))), c) for c in falses]
+            f_rep = [_tag(_as_dict(send(template.render(point, c))), c) for c in falses]
             true_rounds.append(t)
             true_repeat_rounds.append(t_rep)
             false_rounds.append(f)
@@ -529,7 +543,7 @@ class BooleanInferenceCheck:
             true_rounds=true_rounds, false_rounds=false_rounds,
             true_repeat_rounds=true_repeat_rounds, false_repeat_rounds=false_repeat_rounds,
             bug_class=self.bug_class, false_baseline_samples=baseline,
-            discriminator=BOOLEAN_DISCRIMINATOR,
+            discriminator=BOOLEAN_DISCRIMINATOR, true_clauses=trues, false_clauses=falses,
         )
 
 
