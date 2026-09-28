@@ -133,7 +133,12 @@ def test_empty_oracle_version_reported_unconfirmed_not_a_pass():
 
 def test_oracle_version_verification_is_deterministic():
     """Re-running verification over the same version-skewed cert yields an IDENTICAL result (tier, status, both
-    version strings, serialized fields) — FATAL-2 determinism."""
+    version strings, serialized fields) — FATAL-2 determinism.
+
+    NOTE (AUDIT-B6): this asserts determinism of the VERIFICATION, in one process. It cannot and does not
+    catch a non-deterministic ``oracle_version`` itself — both calls sit behind the same ``@lru_cache`` and
+    would return the same wrong value. The cross-PROCESS assertion that does catch it is
+    ``test_B6_oracle_version_is_deterministic_across_processes`` below."""
     tr, signers = _trust_root()
     f, ctx = _finding()
     cert = build_certificate(f, engagement_slug="acme", seq=0)
@@ -297,3 +302,65 @@ def test_tool_version_and_freshness_signed_and_absent_is_byte_identical():
     assert verify_certificate(signed, oracle_context=ctx, trust_root=tr).ok is True
     tampered = signed.model_copy(update={"certificate": stamped.model_copy(update={"tool_version": "evil"})})
     assert verify_certificate(tampered, oracle_context=ctx, trust_root=tr).authentic is False
+
+
+# ---------------------------------------------------------------------------
+# AUDIT-B6 — oracle_version determinism ACROSS PROCESSES.
+#
+# The in-process test above is structurally incapable of catching a
+# non-deterministic version identity, and two real defects hid behind exactly that
+# blind spot for every one of the 47 kinds:
+#
+#   * `oracles._CMD_ALT` and `oracles._NOSQL_OP_ALT` were built by iterating a SET,
+#     baking PYTHONHASHSEED into the compiled pattern string that `_canon` hashes.
+#     Measured: FIVE distinct hashes for `command_injection_breakout` and for
+#     `nosql_injection_breakout` across PYTHONHASHSEED 0/1/2/42/12345.
+#   * `oracles._SECRET_RECOGNIZERS` holds LAMBDAS and `_canon` fell through to
+#     `repr(<function <lambda> at 0x…>)` — a HEAP ADDRESS. Measured:
+#     `secret_credential_validity` differed in ALL TEN of ten processes, including
+#     between two runs at the SAME pinned seed. Every certificate of that kind was
+#     therefore permanently "oracle_version CHANGED since mint" and could never
+#     verify fully-sound.
+#
+# This test spawns REAL subprocesses at DIFFERENT PYTHONHASHSEEDs and compares all
+# 47 kinds. It is the only shape that can fail on either defect.
+# ---------------------------------------------------------------------------
+
+_VERSION_DUMP = (
+    "import json;"
+    "from framework.v2.verify.models import OracleKind;"
+    "from framework.v2.verify.oracle_version import oracle_version;"
+    "print(json.dumps({k.value: oracle_version(k) for k in OracleKind}, sort_keys=True))"
+)
+
+
+def test_B6_oracle_version_is_deterministic_across_processes():
+    """CRUCIBLE invariant 6, for the VERSION IDENTITY, asserted where it can fail."""
+    import json as _json
+    import os as _os
+    import subprocess as _subprocess
+    import sys as _sys
+
+    def dump(seed: str) -> dict[str, str]:
+        env = dict(_os.environ, PYTHONHASHSEED=seed)
+        r = _subprocess.run([_sys.executable, "-c", _VERSION_DUMP],
+                            capture_output=True, text=True, env=env, timeout=300)
+        assert r.returncode == 0, r.stderr[-3000:]
+        return _json.loads(r.stdout)
+
+    # two runs at the SAME seed (catches a heap address) + different seeds (catches
+    # set-iteration order baked into a pattern string).
+    runs = {f"seed={s} run={r}": dump(s) for s in ("0", "1", "12345") for r in ("a", "b")}
+    kinds = sorted(next(iter(runs.values())))
+    assert len(kinds) >= 47, f"expected every OracleKind, got {len(kinds)}"
+
+    drift = {k: sorted({d[k] for d in runs.values()}) for k in kinds
+             if len({d[k] for d in runs.values()}) > 1}
+    assert not drift, (
+        "oracle_version is NOT deterministic across processes — every certificate of "
+        f"these kinds is permanently 'version CHANGED since mint': "
+        + ", ".join(f"{k} ({len(v)} distinct)" for k, v in drift.items()))
+
+    # non-vacuity: the subprocess really did compute real versions, not empty strings
+    first = next(iter(runs.values()))
+    assert all(first[k].startswith("sha256:") for k in kinds), first

@@ -24,6 +24,100 @@ from .models import OracleKind, OracleSignal, VerificationResult
 # A fired signal must reach this confidence to confirm a finding.
 HIGH_CONFIDENCE = 0.7
 
+# RED-PEN B3b — the significance level the TIMING arm re-executes at. A PROTOCOL
+# CONSTANT, exactly like the boolean arm's SPRT parameters: never `ctx["timing_alpha"]`.
+_TIMING_PROTOCOL_ALPHA = 0.01
+
+
+# ---------------------------------------------------------------------------
+# PROTOCOL discriminators for the DIFFERENTIAL_RESPONSE arm (audit F8)
+# ---------------------------------------------------------------------------
+#
+# The boolean arm already pins its SPRT parameters and its discriminator because a
+# context-supplied one tunes SENSITIVITY and a threshold fitted to the retained bytes
+# manufactures a signal out of noise. The differential arm did NOT: it passed
+# ``ctx["discriminator"]`` straight through — dimensions, thresholds, ``true_marker``
+# and ``expect`` included.
+#
+# MEASURED on 838e0b42: a hand-edited report carrying two BYTE-IDENTICAL responses
+# (same status, same body, same latency_ms) plus
+# ``discriminator={"dimensions":["latency"],"latency_threshold_ms":0}`` re-verified as a
+# CONFIRMED ``differential_response`` FACT at 0.700 — "re-verified 1/1 certificate(s)
+# reproduced and matched their claims". A FACT out of no evidence. ``expect:"same"`` is
+# the same hole with the sign flipped (byte-identical responses fire the "same" arm), and
+# a one-character ``true_marker`` is a third.
+#
+# So the verifier now chooses the WHOLE discriminator itself, from these constants,
+# keyed on the finding's own declared bug_class. Nothing about the comparison comes from
+# the producer any more: not the dimensions, not the thresholds, not ``expect``, not
+# ``true_marker``. These mirror what every honest in-repo producer already passes
+# (scanner.checks.BOOLEAN_DISCRIMINATOR / ReflectionDifferentialCheck /
+# verify.confirmation / agents.http_executor all send exactly the content set), so
+# nothing legitimate changes and `make gate` is byte-identical — the ONLY discriminator
+# observed on the whole gate path is the content one below.
+#
+# Thresholds are spelled out rather than left to the oracle's defaults so a later change
+# to an oracle default cannot silently loosen what the AUTHORITY re-verifies with.
+
+# Content differential: the default for every class that reaches this oracle. Latency is
+# deliberately ABSENT — a latency delta is a TIMING claim and the engine has a dedicated,
+# statistically-sound TIMING oracle for it (paired samples, alpha, dose-response).
+_DIFFERENTIAL_CONTENT_DISCRIMINATOR: dict[str, Any] = {
+    "dimensions": ["status", "length", "lexical"],
+    "length_threshold": 0.05,
+    "lexical_threshold": 0.10,
+    "expect": "differ",
+}
+
+# RED-PEN B3 — the table is DELIBERATELY EMPTY, and the `request_smuggling` row that
+# used to live here is GONE.
+#
+# That row keyed a LATENCY discriminator on `normalize_bug_class(ctx["bug_class"])` — a
+# field the producer of the UNTRUSTED report also writes. So the pin was bypassable
+# through the very field it keyed on. MEASURED on 1ccd18a5: two BYTE-IDENTICAL response
+# bodies plus a FABRICATED `latency_ms: 9999.0`, under any of the five spellings
+# `request_smuggling` / `http_request_smuggling` / `http_desync` / `request_desync` /
+# `response_smuggling`, re-verified as a CONFIRMED `request_smuggling` FACT at 0.700 —
+# with no canary, no desync, no second connection. "Byte-identical" was a property of
+# the F8 demo, never a constraint the code enforced.
+#
+# A producer-side demotion does NOT close this: `framework.v2 verify` re-executes
+# whatever ctx a hand-edited report carries. The TABLE had to lose the row, and the
+# DIFFERENTIAL arm now REFUSES `baseline`/`mutated` for that class outright (see
+# `_DIFFERENTIAL_BASELINE_REFUSED` and `_run`). The ONLY differential evidence that can
+# confirm a desync is the `smuggling_desync` unique-canary record over VIGIL's OWN
+# second requests on two connections it owns.
+#
+# The mechanism is kept (empty) so a future class that genuinely needs a non-content
+# protocol discriminator has one place to declare it — under review, never inferred.
+_DIFFERENTIAL_PROTOCOL_DISCRIMINATORS: dict[str, dict[str, Any]] = {}
+
+# Canonical bug classes for which a `baseline`/`mutated` pair is NOT admissible evidence
+# at all. A LATENCY delta cannot distinguish a desynced back-end from an RFC 7230 §3.3.3
+# compliant origin patiently awaiting the rest of an incomplete declared body, and a
+# CONTENT differential between two arbitrary producer-supplied bodies proves nothing
+# about framing. Refusing here (a skipped oracle → INCONCLUSIVE) is the fail-closed
+# direction: the class keeps its sound `smuggling_desync` path.
+_DIFFERENTIAL_BASELINE_REFUSED: frozenset[str] = frozenset({"request_smuggling"})
+
+
+def differential_protocol_discriminator(bug_class: str) -> dict[str, Any]:
+    """The discriminator the AUTHORITY re-executes a differential with. Never the
+    producer's. Pure lookup — safe to call from a test or an offline re-verify.
+
+    Returns a DEEP-ENOUGH copy (the ``dimensions`` list is rebuilt), so a caller that
+    mutates what it is handed cannot edit the protocol for the next finding."""
+    pinned = _DIFFERENTIAL_PROTOCOL_DISCRIMINATORS.get(
+        normalize_bug_class(bug_class), _DIFFERENTIAL_CONTENT_DISCRIMINATOR)
+    return {**pinned, "dimensions": list(pinned["dimensions"])}
+
+
+def differential_baseline_admissible(bug_class: str) -> bool:
+    """False for a class whose desync/framing claim a `baseline`/`mutated` pair cannot
+    support (RED-PEN B3). Pure lookup — safe to call from a test or an offline
+    re-verify."""
+    return normalize_bug_class(bug_class) not in _DIFFERENTIAL_BASELINE_REFUSED
+
 
 # ---------------------------------------------------------------------------
 # bug_class -> which oracle(s) can prove it
@@ -1133,16 +1227,49 @@ class OracleVerifier:
             if "smuggling_desync" in ctx:
                 return oracles.smuggling_desync_oracle(ctx["smuggling_desync"])
             if "baseline" in ctx and "mutated" in ctx:
+                # RED-PEN B3 — some classes cannot be proven by a baseline/mutated pair AT ALL.
+                # Refuse rather than re-execute under any discriminator (a skipped oracle, so the
+                # finding is INCONCLUSIVE, never confirmed). This is checked BEFORE the
+                # discriminator lookup precisely because the discriminator used to be keyed on
+                # the same producer-written `bug_class` that selected it.
+                if not differential_baseline_admissible(str(ctx.get("bug_class", ""))):
+                    return None
+                # AUDIT F8 — the discriminator is a PROTOCOL CONSTANT, never context-supplied.
+                # See _DIFFERENTIAL_PROTOCOL_DISCRIMINATORS above: a producer-supplied
+                # `{"dimensions":["latency"],"latency_threshold_ms":0}` (or `expect:"same"`,
+                # or a one-character `true_marker`) turned two BYTE-IDENTICAL retained
+                # responses into a confirmed FACT at 0.700 on the untrusted-report
+                # `framework.v2 verify` path. The producer's declared discriminator is kept
+                # in the retained context for audit; it no longer governs the re-execution.
                 return oracles.differential_response_oracle(
-                    ctx["baseline"], ctx["mutated"], ctx.get("discriminator")
+                    ctx["baseline"], ctx["mutated"],
+                    differential_protocol_discriminator(str(ctx.get("bug_class", ""))),
                 )
             return None
         if kind is OracleKind.TIMING:
             if "baseline_latencies" in ctx and "treatment_latencies" in ctx:
+                # RED-PEN B3b — the TIMING arm was entirely UNPINNED: `timing_alpha`,
+                # `timing_injected_ms` and `timing_dose` came straight out of the untrusted
+                # ctx, exactly the hole the boolean arm below already closed for SPRT.
+                # MEASURED on 1ccd18a5 over `time_based_sqli` / `time_based` /
+                # `time_based_command_injection`, samples [100..104] vs [105..109] (a 5 ms
+                # shift — ordinary jitter):
+                #   defaults                     -> NOT confirmed ("median shift 5ms < floor 250ms")
+                #   + `timing_injected_ms: 1.0`  -> CONFIRMED (the floor became 0 ms)
+                #   + `timing_alpha: 0.5`        -> CONFIRMED (a p of 0.028-0.072 accepted)
+                # `alpha` is now the PROTOCOL CONSTANT below and the ctx value is ignored
+                # outright. `timing_injected_ms` is still read, because the honest producer
+                # (scanner.checks.TimingCheck) declares the delay it asked for and that makes
+                # the test STRICTER for a big sleep — but the oracle now clamps it so it can
+                # only ever RAISE the effect floor, never lower it (oracles._TIMING_MAX_ALPHA
+                # / the `max(absolute_floor_ms, ...)` ratchet). `timing_dose` is likewise still
+                # read, because it is DEMOTE-ONLY: it can only set `dose_ok=False` and refuse a
+                # fire, so dropping it would strictly WEAKEN the verifier. Both properties are
+                # asserted in verify/tests/test_verifier.py.
                 return oracles.timing_oracle(
                     ctx["baseline_latencies"], ctx["treatment_latencies"],
                     injected_ms=ctx.get("timing_injected_ms"),
-                    alpha=float(ctx.get("timing_alpha", 0.01)),
+                    alpha=_TIMING_PROTOCOL_ALPHA,
                     dose=ctx.get("timing_dose"),
                 )
             return None
