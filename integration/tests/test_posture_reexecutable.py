@@ -154,10 +154,17 @@ def _bundle_verify_cmd(res: dict) -> list[str]:
 # ---- 3. FORGE-A-FALSE-NEGATIVE: re-execution refuses a tampered CLOSED claim ---------------------
 
 def _find_reexec_clean_probe(cert: dict) -> dict:
+    # The forge below tampers open_redirect-specific fields (location_host / canary_host / status),
+    # so select an OPEN_REDIRECT clean re-executable probe specifically. Selecting "the first clean
+    # re-executable probe of any class" is fragile: a scanner-roster reorder or a new re-executable
+    # class (e.g. graphql_introspection at "/") can float a different class first, and the
+    # open_redirect forge would then not fire that probe's predicate — the test would spuriously pass
+    # the tamper. Bind the probe class to the forge.
     for probe in cert["coverage"]["probes"]:
-        if probe.get("verdict") == "clean" and C._probe_reexec_evidence(probe) is not None:
+        if (probe.get("verdict") == "clean" and probe.get("class") == "open_redirect"
+                and C._probe_reexec_evidence(probe) is not None):
             return probe
-    raise AssertionError("no re-executable clean probe found")
+    raise AssertionError("no re-executable clean open_redirect probe found")
 
 
 def test_forged_negative_is_refused_in_tree_and_standalone(tmp_path):

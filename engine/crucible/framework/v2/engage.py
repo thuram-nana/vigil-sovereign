@@ -618,8 +618,15 @@ def _spine_finding_payload(f, admitted) -> dict:
     is_fact = bool(getattr(admitted, "is_fact", False))
     return {
         "finding_slug": (f"{f.bug_class}:{f.insertion_point}"[:120]) or f.bug_class,
-        "title": f"{f.bug_class} confirmed at {f.param}",
-        "severity": "High",
+        # B4 / audit-A red-pen BLOCK-5 — a producer that HEDGED keeps its hedge here too.
+        # This mirror hardcoded "<bug_class> confirmed at <param>" at severity High, which is
+        # the exact relabelling B4 retired in `scanner.report.build_report`: the CSWSH
+        # no-cookies branch ("… possible CSWSH — UNCONFIRMED", Medium) was written onto the
+        # IMMUTABLE event spine as a confirmed High. Same fallback shape as build_report, so
+        # a built-in point check (which sets neither field) serialises byte-identically.
+        "title": (f"{f.title} at {f.param}" if f.title
+                  else f"{f.bug_class} confirmed at {f.param}"),
+        "severity": (f.severity or "High"),
         "bug_class": f.bug_class,
         "surface": f.insertion_point,
         "summary": f.rationale or f"{f.bug_class} at {f.param}",
