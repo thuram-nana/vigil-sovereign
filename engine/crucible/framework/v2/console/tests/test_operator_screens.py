@@ -19,10 +19,10 @@ def _reverifiable_report() -> dict:
     ctx = FindingContext.from_http_responses(
         {"status": 200, "body": "No results."},
         {"status": 200, "body": "id=1 alice user\nid=2 bob admin"},
-        bug_class="boolean_sqli", discriminator={"dimensions": ["status", "length", "lexical"]})
-    c = confirm_finding(finding={"bug_class": "boolean_sqli"}, context=ctx)
+        bug_class="error_based_sqli", discriminator={"dimensions": ["status", "length", "lexical"]})
+    c = confirm_finding(finding={"bug_class": "error_based_sqli"}, context=ctx)
     return {"target": "https://app/", "active_findings": [{
-        "check_id": "boolean-sqli", "bug_class": "boolean_sqli", "insertion_point": "query", "param": "q",
+        "check_id": "error-based-sqli", "bug_class": "error_based_sqli", "insertion_point": "query", "param": "q",
         "confirmed_by": c.confirmed_by.value, "confidence": c.confidence,
         "oracle_context": ctx.model_dump(mode="json")}]}
 
@@ -48,7 +48,7 @@ def test_evidence_reverifies_certificates(tmp_path, monkeypatch) -> None:
     d = api.evidence("run-1")
     assert d["total"] == 1 and d["reproduced"] == 1
     f = d["findings"][0]
-    assert f["has_certificate"] and f["reproduced"] and f["sound"] and f["bug_class"] == "boolean_sqli"
+    assert f["has_certificate"] and f["reproduced"] and f["sound"] and f["bug_class"] == "error_based_sqli"
 
 
 def test_evidence_flags_a_tampered_certificate(tmp_path, monkeypatch) -> None:

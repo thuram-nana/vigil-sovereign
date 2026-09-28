@@ -86,7 +86,7 @@ def test_the_join_attaches_retained_proofs_so_findings_grade_as_facts() -> None:
     graded = grade_findings(res.findings)
     facts = [g for g in graded if g.grade == GRADE_FACT]
     assert len(facts) == 2, "both retained proofs must RE-FIRE at report time"
-    assert {g.finding.bug_class for g in facts} == {"boolean_sqli", "xss"}
+    assert {g.finding.bug_class for g in facts} == {"error_based_sqli", "xss"}
     # a fact carries the provenance the grader only populates on a real re-fire
     for g in facts:
         assert g.oracle_kind and g.certificate_digest and g.confidence is not None
@@ -105,7 +105,7 @@ def test_without_the_reverifiable_document_nothing_is_falsely_demoted() -> None:
         "verified_by_oracle must stay False, or the grader reports these as proofs that failed "
         "re-verification rather than as proofs that were never present")
 
-    active = next(f for f in res.findings if f["bug_class"] == "boolean_sqli")
+    active = next(f for f in res.findings if f["bug_class"] == "error_based_sqli")
     assert "not available when this document was produced" in active["summary"]
     assert any("no saved evidence available" in n for n in res.notes)
 

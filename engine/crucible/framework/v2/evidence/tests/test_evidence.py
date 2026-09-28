@@ -39,15 +39,15 @@ _DIVERGENT = {"status": 200,
 
 def _ctx(mutated: dict) -> FindingContext:
     return FindingContext.from_http_responses(
-        _BASE, mutated, bug_class="boolean_sqli",
+        _BASE, mutated, bug_class="error_based_sqli",
         discriminator={"dimensions": ["status", "length", "lexical"]})
 
 
-def _finding(mutated: dict, *, ref: str = "boolean-sqli") -> dict:
+def _finding(mutated: dict, *, ref: str = "error-based-sqli") -> dict:
     ctx = _ctx(mutated)
-    confirmed = confirm_finding(finding={"bug_class": "boolean_sqli"}, context=ctx)
+    confirmed = confirm_finding(finding={"bug_class": "error_based_sqli"}, context=ctx)
     return {
-        "check_id": ref, "bug_class": "boolean_sqli",
+        "check_id": ref, "bug_class": "error_based_sqli",
         "confirmed_by": confirmed.confirmed_by.value if confirmed else "differential_response",
         "confidence": confirmed.confidence if confirmed else 0.9,
         "oracle_context": ctx.model_dump(mode="json"),
@@ -223,12 +223,12 @@ def test_verify_bundle_detects_a_suppressed_certificate() -> None:
     tr, signers = _trust_root(2, 3)
     # DISTINCT finding_refs — a bundle must not reuse a ref (the per-ref context lookup would collide; the
     # verifier now refuses a duplicate-ref bundle). Two distinct refs each get their own context entry.
-    fs = [_finding(_DIVERGENT, ref="boolean-sqli-a"), _finding(_DIVERGENT, ref="boolean-sqli-b")]
+    fs = [_finding(_DIVERGENT, ref="error-based-sqli-a"), _finding(_DIVERGENT, ref="error-based-sqli-b")]
     certs = [sign_certificate(build_certificate(fs[0], seq=0), signers[:2]),
              sign_certificate(build_certificate(fs[1], seq=1), signers[:2])]
     chain = build_chain([c.certificate.cert_digest for c in certs])
     head = sign_head(chain, engagement_slug="acme", signers=signers[:2])
-    contexts = {"boolean-sqli-a": fs[0]["oracle_context"], "boolean-sqli-b": fs[1]["oracle_context"]}
+    contexts = {"error-based-sqli-a": fs[0]["oracle_context"], "error-based-sqli-b": fs[1]["oracle_context"]}
 
     full = verify_bundle(certs, chain, head, contexts=contexts, trust_root=tr)
     assert full.ok and full.cert_set_bound
@@ -243,7 +243,7 @@ def test_verify_bundle_rejects_rollback_below_highwater() -> None:
     certs = [sign_certificate(build_certificate(_finding(_DIVERGENT), seq=0), signers[:2])]
     chain = build_chain([c.certificate.cert_digest for c in certs])
     head = sign_head(chain, engagement_slug="acme", signers=signers[:2])
-    contexts = {"boolean-sqli": _finding(_DIVERGENT)["oracle_context"]}
+    contexts = {"error-based-sqli": _finding(_DIVERGENT)["oracle_context"]}
     r = verify_bundle(certs, chain, head, contexts=contexts, trust_root=tr, prev_highwater=99)
     assert not r.chain_ok and not r.ok and "rollback" in r.chain_note.lower()
 

@@ -155,9 +155,11 @@ def _bundle_verify_cmd(res: dict) -> list[str]:
 
 def _find_reexec_clean_probe(cert: dict) -> dict:
     for probe in cert["coverage"]["probes"]:
-        if probe.get("verdict") == "clean" and C._probe_reexec_evidence(probe) is not None:
+        if (probe.get("class") == "open_redirect"
+                and probe.get("verdict") == "clean"
+                and C._probe_reexec_evidence(probe) is not None):
             return probe
-    raise AssertionError("no re-executable clean probe found")
+    raise AssertionError("no re-executable clean open_redirect probe found")
 
 
 def test_forged_negative_is_refused_in_tree_and_standalone(tmp_path):

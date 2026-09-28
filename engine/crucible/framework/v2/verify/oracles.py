@@ -31,7 +31,7 @@ from dataclasses import dataclass
 from html.parser import HTMLParser
 from statistics import median
 from typing import Any, Mapping, Sequence
-from urllib.parse import quote, urlsplit
+from urllib.parse import quote as _urlquote, urlsplit
 
 from .models import OracleKind, OracleSignal
 
@@ -829,8 +829,8 @@ def _boolean_reflection_forms(clause: str) -> tuple[str, ...]:
         clause,
         html.escape(clause, quote=True),
         html.escape(clause, quote=False),
-        quote(clause, safe=""),
-        quote(clause),
+        _urlquote(clause, safe=""),
+        _urlquote(clause),
     }
     return tuple(sorted((f for f in forms if f), key=len, reverse=True))
 

@@ -86,7 +86,7 @@ def test_sarif_shape_is_2_1_0() -> None:
     assert driver["name"] == "CRUCIBLE"
     # one rule per bug class; one result per finding.
     rule_ids = {r["id"] for r in driver["rules"]}
-    assert {"boolean_sqli", "idor"} <= rule_ids
+    assert {"error_based_sqli", "idor"} <= rule_ids
     assert len(run["results"]) == 3
     for res in run["results"]:
         assert res["ruleId"] and res["level"] in ("error", "warning", "note")

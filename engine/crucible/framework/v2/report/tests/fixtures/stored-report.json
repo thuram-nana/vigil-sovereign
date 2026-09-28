@@ -24,13 +24,13 @@
   "findings": [
     {
       "kind": "active",
-      "bug_class": "boolean_sqli",
-      "title": "boolean_sqli confirmed at q",
+      "bug_class": "error_based_sqli",
+      "title": "error_based_sqli confirmed at q",
       "severity": "High",
       "confidence": "0.76",
       "location": "http://127.0.0.1:18080/search?q=test  [query_value:0]",
       "confirmed_by": "differential_response",
-      "evidence": "CONFIRMED boolean_sqli — 1 oracle(s) fired at high confidence: differential_response@0.76: responses diverge on length (51 vs 91 bytes (43.96%)), lexical (similarity 43.66%)",
+      "evidence": "CONFIRMED error_based_sqli — 1 oracle(s) fired at high confidence: differential_response@0.76: responses diverge on length (51 vs 91 bytes (43.96%)), lexical (similarity 43.66%)",
       "remediation": "Use parameterised queries / prepared statements so user input is bound as a value and can never alter query structure. Never build SQL by string concatenation; apply least-privilege DB accounts as defence in depth.",
       "references": [
         "CWE-89",
