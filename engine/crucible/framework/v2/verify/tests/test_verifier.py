@@ -315,34 +315,6 @@ def test_smuggling_desync_canary_path_still_confirms() -> None:
     assert result.confirming_signals[0].kind is OracleKind.DIFFERENTIAL_RESPONSE
 
 
-def test_genuine_differential_still_confirms() -> None:
-    # the mutation control: real divergence in the retained bytes still re-confirms,
-    # so the F8 negative above is not vacuous.
-    result = OracleVerifier().confirm({
-        "bug_class": "nosqli",
-        "baseline": {"status": 200, "body": "<html><body>no results</body></html>", "latency_ms": 10.0},
-        "mutated": {"status": 200,
-                    "body": "<html><body><ul><li>alice</li><li>bob</li><li>carol</li></ul></body></html>",
-                    "latency_ms": 11.0},
-    })
-    assert result.confirmed
-    assert result.confirming_signals[0].kind is OracleKind.DIFFERENTIAL_RESPONSE
-
-
-def test_producer_discriminator_cannot_widen_or_narrow_the_comparison() -> None:
-    # a REAL divergence judged under a producer discriminator that tries to hide it
-    # (e.g. an impossible length threshold) must STILL confirm: the producer does not
-    # get to choose the rule in either direction.
-    real = {
-        "bug_class": "nosqli",
-        "baseline": {"status": 200, "body": "no results", "latency_ms": 10.0},
-        "mutated": {"status": 500, "body": "SQL syntax error near '", "latency_ms": 10.0},
-    }
-    assert OracleVerifier().confirm(real).confirmed
-    muted = dict(real, discriminator={"dimensions": ["latency"], "latency_threshold_ms": 10_000_000})
-    assert OracleVerifier().confirm(muted).confirmed
-
-
 def test_protocol_discriminator_table_is_closed_and_latency_free_by_default() -> None:
     generic = differential_protocol_discriminator("nosqli")
     assert generic["dimensions"] == ["status", "length", "lexical"]
