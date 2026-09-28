@@ -16,9 +16,13 @@ from __future__ import annotations
 
 from ..adapter import FindingContext
 from ..confirmation import (
+    _BENIGN_QUERY,
+    _TAUTOLOGY_QUERY,
     ConfirmedFinding,
     DifferentialDemoHandler,
     SafeDemoHandler,
+    _http_get,
+    _local_server,
     confirm_against_local_target,
     confirm_finding,
 )
@@ -38,8 +42,12 @@ def test_local_target_drives_real_confirmed_finding() -> None:
     assert confirmed.confirmed is True
     assert confirmed.bug_class == "boolean_sqli"
 
-    # The confirmation was carried by an oracle that actually fired.
-    assert confirmed.confirmed_by is OracleKind.DIFFERENTIAL_RESPONSE
+    # The confirmation was carried by an oracle that actually fired — and it is the SOUND one.
+    # A bare benign-vs-payload DIFFERENTIAL_RESPONSE is no longer an acceptable confirmer for any
+    # truth-value-attribution class (verifier.DIFFERENTIAL_LEAD_ONLY_CLASSES): it has no attribution
+    # step and confirmed against a WAF block page and against strict input validation on targets
+    # with no database. This proof now rests on the SPRT truth-value partition.
+    assert confirmed.confirmed_by is OracleKind.BOOLEAN_INFERENCE
     assert confirmed.confidence >= HIGH_CONFIDENCE
 
     # A fired signal is retained as machine evidence.
@@ -74,14 +82,19 @@ def test_negative_control_local_target_does_not_confirm() -> None:
     assert result is None
 
 
-def test_probe_that_matches_baseline_does_not_confirm() -> None:
-    # Even against the vulnerable app, two benign (identical) requests produce
-    # no differential — confirmation requires a real signal, not a request.
-    result = confirm_against_local_target(
-        baseline_query="obsidian-no-such-name",
-        probe_query="obsidian-no-such-name",
-    )
-    assert result is None
+def test_a_bare_benign_vs_tautology_differential_cannot_confirm_the_vulnerable_app() -> None:
+    # The SAME genuinely-injectable target, judged the OLD way: one benign string, one tautology,
+    # "did the responses differ?". That inference is refused now whatever it observes — it cannot
+    # attribute the difference to the injected boolean, which is exactly how it minted FACTs on
+    # targets with no database. Recall is preserved by the SPRT path above, not by this one.
+    with _local_server(DifferentialDemoHandler) as base_url:
+        baseline = _http_get(base_url, _BENIGN_QUERY)
+        mutated = _http_get(base_url, _TAUTOLOGY_QUERY)
+    assert baseline["body"] != mutated["body"], "the differential really does diverge here"
+    ctx = FindingContext.from_http_responses(
+        baseline, mutated, bug_class="boolean_sqli",
+        discriminator={"dimensions": ["status", "length", "lexical"]})
+    assert confirm_finding({"bug_class": "boolean_sqli"}, ctx) is None
 
 
 # ---------------------------------------------------------------------------
@@ -112,15 +125,17 @@ def test_confirm_finding_promotes_on_real_state_signal() -> None:
 
 
 def test_confirm_finding_fills_bug_class_from_finding() -> None:
-    # Context carries no bug_class; the finding supplies it.
-    ctx = FindingContext(
-        baseline={"status": 200, "body": "No results found."},
-        mutated={"status": 200, "body": "admin superuser row " * 20},
+    # Context carries no bug_class; the finding supplies it. (The carrier class is `idor` because a
+    # bare differential can no longer confirm a boolean class at all — see
+    # verifier.DIFFERENTIAL_LEAD_ONLY_CLASSES; what is under test here is the bug_class fill-in.)
+    ctx = FindingContext.from_state(
+        {"owner": "victim", "readable": True},
+        {"owner": "victim", "readable": True, "id": 42},
     )
     ctx.bug_class = ""
-    confirmed = confirm_finding({"bug_class": "boolean_sqli"}, ctx)
+    confirmed = confirm_finding({"bug_class": "idor"}, ctx)
     assert confirmed is not None
-    assert confirmed.bug_class == "boolean_sqli"
+    assert confirmed.bug_class == "idor"
 
 
 def test_confirm_finding_accepts_raw_context_mapping() -> None:

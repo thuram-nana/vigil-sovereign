@@ -33,10 +33,10 @@ _DIVERGENT = {"status": 200, "body": "id=1 name=alice role=user\nid=2 name=bob r
 
 def _finding(mutated=_DIVERGENT) -> dict:
     ctx = FindingContext.from_http_responses(
-        _BASE, mutated, bug_class="boolean_sqli",
+        _BASE, mutated, bug_class="error_based_sqli",
         discriminator={"dimensions": ["status", "length", "lexical"]})
-    c = confirm_finding(finding={"bug_class": "boolean_sqli"}, context=ctx)
-    return {"check_id": "boolean-sqli", "bug_class": "boolean_sqli",
+    c = confirm_finding(finding={"bug_class": "error_based_sqli"}, context=ctx)
+    return {"check_id": "error-based-sqli", "bug_class": "error_based_sqli",
             "confirmed_by": c.confirmed_by.value if c else "differential_response",
             "confidence": c.confidence if c else 0.9, "oracle_context": ctx.model_dump(mode="json")}
 
@@ -51,13 +51,13 @@ def _trust_root(threshold=2, n=3):
 
 def _path() -> AttackPath:
     return AttackPath(steps=[
-        ChainedConclusion(src="attacker", edge="reaches", dst="endpoint:q", technique="boolean_sqli"),
+        ChainedConclusion(src="attacker", edge="reaches", dst="endpoint:q", technique="error_based_sqli"),
         ChainedConclusion(src="endpoint:q", edge="pivots_to", dst="crown:db", technique="exfil"),
     ])
 
 
 def _ctx_map(f: dict) -> dict:
-    return {"boolean-sqli": f["oracle_context"]}
+    return {"error-based-sqli": f["oracle_context"]}
 
 
 # ---- a path backed by a verified finding cert verifies -----------------------

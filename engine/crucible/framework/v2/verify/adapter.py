@@ -282,6 +282,12 @@ class FindingContext(BaseModel):
     # side_effect_oracle
     marker: str | None = None
     observed_sink: Any | None = None
+    # The sink observed under a BENIGN control on the SAME insertion point (optional). When present
+    # and it ALREADY carries the marker, side_effect_oracle refuses: the marker's presence under the
+    # payload is not attributable to the payload (a docs/KB page that merely PRINTS a known-content
+    # file signature). Retained so the refusal is re-derived OFFLINE, not only at mint time. Absent on
+    # every producer that has no control, so the gate stays byte-identical.
+    observed_sink_control: Any | None = None
 
     # evaluation_oracle (SSTI/EL — the server evaluated an injected expression)
     eval_raw: str | None = None
@@ -631,6 +637,8 @@ class FindingContext(BaseModel):
         bug_class: str = "boolean_sqli",
         discriminator: Mapping[str, Any] | None = None,
         false_baseline_samples: Sequence[Any] | None = None,
+        true_clauses: Sequence[str] | None = None,
+        false_clauses: Sequence[str] | None = None,
     ) -> "FindingContext":
         """Per-round TRUTH-VALUE ATTRIBUTION evidence for the SPRT boolean-inference
         oracle. Each element of ``true_rounds`` is that round's list of responses to
@@ -645,24 +653,49 @@ class FindingContext(BaseModel):
         single-clause positional shape (``true``/``false_a``/``false_b``) cannot mint and
         must fail loudly at the call site rather than silently degrade.
 
+        ``true_clauses`` / ``false_clauses`` are the injected clause STRINGS, index-aligned
+        to each round's ``trues`` / ``falses`` (and their repeats) — retained so the oracle
+        can strip each response's OWN reflected clause offline (``_mask_boolean_reflection``)
+        before comparing bodies. Without them a target that ECHOES the distinct clause back
+        into its body defeats within-cluster agreement and the FACT is lost. Each is a
+        stable public constant of the check, so retaining it keeps the context deterministic
+        and JSON-serialisable; omitting them retains the old, unmasked shape (a non-reflecting
+        target is unaffected either way). The baseline samples carry ``false_clauses[0]`` —
+        the one identical false clause the pre-gate re-sends — so their masking is identical
+        across the samples and the determinism check is unchanged.
+
         Rounds are zipped to the shortest of the four lists; nothing is fetched here.
         ``false_baseline_samples`` is the up-front run of responses to ONE identical
         false-clause request for the oracle's determinism pre-gate."""
-        def _many(xs: Sequence[Any]) -> list[dict[str, Any]]:
-            return [_response_to_dict(x) for x in xs]
+        def _arm(xs: Sequence[Any], clauses: Sequence[str] | None) -> list[dict[str, Any]]:
+            out: list[dict[str, Any]] = []
+            for i, x in enumerate(xs):
+                d = _response_to_dict(x)
+                if clauses is not None and i < len(clauses):
+                    d["clause"] = str(clauses[i])
+                out.append(d)
+            return out
 
         rounds = [
-            {"trues": _many(t), "falses": _many(f),
-             "true_repeats": _many(tr), "false_repeats": _many(fr)}
+            {"trues": _arm(t, true_clauses), "falses": _arm(f, false_clauses),
+             "true_repeats": _arm(tr, true_clauses), "false_repeats": _arm(fr, false_clauses)}
             for t, f, tr, fr in zip(true_rounds, false_rounds, true_repeat_rounds,
                                     false_repeat_rounds)
         ]
+        baseline: list[dict[str, Any]] | None = None
+        if false_baseline_samples is not None:
+            baseline_clause = (str(false_clauses[0]) if false_clauses else None)
+            baseline = []
+            for s in false_baseline_samples:
+                d = _response_to_dict(s)
+                if baseline_clause is not None:
+                    d["clause"] = baseline_clause
+                baseline.append(d)
         return cls(
             bug_class=bug_class,
             probe_rounds=rounds,
             discriminator=dict(discriminator) if discriminator is not None else None,
-            false_baseline_samples=([_response_to_dict(s) for s in false_baseline_samples]
-                                    if false_baseline_samples is not None else None),
+            false_baseline_samples=baseline,
         )
 
     @classmethod
@@ -1918,13 +1951,22 @@ class FindingContext(BaseModel):
         observed_sink: Any,
         *,
         bug_class: str = "xss",
+        control_sink: Any = None,
     ) -> "FindingContext":
         """A unique canary marker plus the sink it was observed in, for the
-        side-effect oracle (XSS/SSTI/path-traversal/error-based)."""
+        side-effect oracle (XSS/SSTI/path-traversal/error-based).
+
+        ``control_sink`` is the OPTIONAL sink observed under a BENIGN control on the same insertion
+        point. Retaining it makes the attribution re-derivable OFFLINE: ``side_effect_oracle``
+        refuses when the marker is already present in the control (see that oracle). Omitting it is
+        byte-identical to before."""
         return cls(
             bug_class=bug_class,
             marker=_coerce_text(marker),
             observed_sink=_sink_to_serialisable(observed_sink),
+            observed_sink_control=(
+                _sink_to_serialisable(control_sink) if control_sink is not None else None
+            ),
         )
 
     @classmethod
@@ -2502,6 +2544,8 @@ class FindingContext(BaseModel):
         if self.marker is not None and self.observed_sink is not None:
             ctx["marker"] = self.marker
             ctx["observed_sink"] = self.observed_sink
+            if self.observed_sink_control is not None:
+                ctx["observed_sink_control"] = self.observed_sink_control
         if self.eval_expected is not None and self.eval_observed is not None:
             ctx["eval_raw"] = self.eval_raw or ""
             ctx["eval_expected"] = self.eval_expected

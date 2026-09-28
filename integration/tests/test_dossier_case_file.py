@@ -331,10 +331,15 @@ def test_a_finding_separates_the_general_category_from_what_was_proved(tmp_path:
     assert "**What was established on this system.**" in findings
     assert "**What this does NOT prove.**" in findings
     assert "no data was extracted, no account was taken over" in findings
-    # the category is named in the engine's own vocabulary so it can be cross-referenced
-    assert "**Category:** `boolean_sqli`" in findings
+    # the category is named in the engine's own vocabulary so it can be cross-referenced.
+    # (The stored fixture's SQLi FACT was migrated boolean_sqli -> error_based_sqli in 421fd7d2:
+    # the bare differential is now LEAD-only for the truth-value-attribution classes, so the
+    # canonical oracle-confirmed FACT fixture is error_based_sqli, which still confirms via
+    # DIFFERENTIAL_RESPONSE. Both are Database injection (SQL injection), so the readable title below
+    # is unchanged; only the engine-vocabulary category name tracks the fixture.)
+    assert "**Category:** `error_based_sqli`" in findings
     # ... and the engine's own recorded title is preserved alongside the readable one
-    assert "boolean_sqli confirmed at q" in findings
+    assert "error_based_sqli confirmed at q" in findings
     assert "Database injection (SQL injection) in the 'q' parameter" in findings
 
 

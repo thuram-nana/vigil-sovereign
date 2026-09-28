@@ -123,23 +123,52 @@ def differential_baseline_admissible(bug_class: str) -> bool:
 # bug_class -> which oracle(s) can prove it
 # ---------------------------------------------------------------------------
 
+# TRUTH-VALUE-ATTRIBUTION classes — the classes whose whole claim is "the response is a FUNCTION OF THE
+# INJECTED BOOLEAN'S TRUTH VALUE". None of them may be confirmed by DIFFERENTIAL_RESPONSE, ever. A bare
+# differential compares the response to ONE benign string with the response to ONE payload string; it has
+# NO attribution step, so it cannot separate "the injected boolean changed the query" from "the app treated
+# two different strings differently". MEASURED (audit C — rate 1.0, DEFAULT path, and offline
+# `framework.v2 verify` RE-CONFIRMING the certificate): a STATIC page with NO DATABASE behind a
+# ModSecurity-CRS-942130 tautology rule (200 -> 403 plus a different error page) minted `boolean_sqli` at
+# 0.95, and an app doing TEXTBOOK STRICT INPUT VALIDATION (`q` must match `[A-Za-z0-9 _-]{0,64}`, else 400)
+# minted it at 0.87 on 3/3 runs — i.e. THE DEFENCE WAS THE TRIGGER, while a benign echo with no status
+# change correctly did not fire. Same defect class as the CRS-942130 hole already closed on the SPRT
+# oracle; the differential arm survived it because the scanner's boolean check was believed "insulated".
+#
+# The SOUND path for every class below is BOOLEAN_INFERENCE (verify.oracles.boolean_inference_oracle):
+# K_T distinct always-TRUE and K_F distinct always-FALSE clauses of VARIED COMPARISON SHAPE, each sent
+# twice byte-identically, judged by an SPRT — the response must PARTITION BY TRUTH VALUE, which a 403/400
+# keyed on payload SHAPE cannot do. `auth_bypass` keeps only ACHIEVED_STATE: a bypass is proven by the
+# state it reaches, never by two responses differing.
+#
+# The set is ENFORCED against the table at import time (the guard right after BUG_CLASS_ORACLES), so a row
+# cannot silently grow the differential arm back. The branch registry
+# (docs/capability-matrix/evidence-branches.json) already agreed: it registers `boolean_sqli.sprt_inference`
+# and NO differential-confirmed boolean branch — a differential boolean FACT was never a registered
+# evidence branch in the first place.
+DIFFERENTIAL_LEAD_ONLY_CLASSES: frozenset[str] = frozenset({
+    "boolean_sqli", "auth_bypass", "nosqli", "ldap_injection", "xpath_injection",
+})
+
 # Canonical bug classes to the ordered oracle kinds that can confirm them.
 BUG_CLASS_ORACLES: dict[str, tuple[OracleKind, ...]] = {
-    "boolean_sqli": (OracleKind.BOOLEAN_INFERENCE, OracleKind.DIFFERENTIAL_RESPONSE),
+    # DIFFERENTIAL_RESPONSE deliberately ABSENT from every row below that names a
+    # DIFFERENTIAL_LEAD_ONLY_CLASSES member — a bare benign-vs-payload differential is a LEAD there.
+    "boolean_sqli": (OracleKind.BOOLEAN_INFERENCE,),
     "time_based_sqli": (OracleKind.TIMING, OracleKind.DIFFERENTIAL_RESPONSE),
     "time_based_command_injection": (OracleKind.TIMING, OracleKind.OOB_CALLBACK),
     "time_based": (OracleKind.TIMING,),
     "error_based_sqli": (OracleKind.ERROR_SIGNATURE, OracleKind.SIDE_EFFECT, OracleKind.DIFFERENTIAL_RESPONSE),
     "sqli": (OracleKind.ERROR_SIGNATURE, OracleKind.BOOLEAN_INFERENCE, OracleKind.DIFFERENTIAL_RESPONSE, OracleKind.OOB_CALLBACK, OracleKind.SIDE_EFFECT),
-    "nosqli": (OracleKind.BOOLEAN_INFERENCE, OracleKind.DIFFERENTIAL_RESPONSE, OracleKind.ERROR_SIGNATURE),
-    "ldap_injection": (OracleKind.BOOLEAN_INFERENCE, OracleKind.DIFFERENTIAL_RESPONSE, OracleKind.ERROR_SIGNATURE),
-    "xpath_injection": (OracleKind.BOOLEAN_INFERENCE, OracleKind.DIFFERENTIAL_RESPONSE, OracleKind.ERROR_SIGNATURE),
+    "nosqli": (OracleKind.BOOLEAN_INFERENCE, OracleKind.ERROR_SIGNATURE),
+    "ldap_injection": (OracleKind.BOOLEAN_INFERENCE, OracleKind.ERROR_SIGNATURE),
+    "xpath_injection": (OracleKind.BOOLEAN_INFERENCE, OracleKind.ERROR_SIGNATURE),
     "idor": (OracleKind.ACHIEVED_STATE,),
     "bola": (OracleKind.ACHIEVED_STATE,),
     "bfla": (OracleKind.ACHIEVED_STATE,),
     "broken_access_control": (OracleKind.ACHIEVED_STATE,),
     "authorization": (OracleKind.ACHIEVED_STATE,),
-    "auth_bypass": (OracleKind.ACHIEVED_STATE, OracleKind.DIFFERENTIAL_RESPONSE),
+    "auth_bypass": (OracleKind.ACHIEVED_STATE,),
     "mass_assignment": (OracleKind.ACHIEVED_STATE,),
     "privilege_escalation": (OracleKind.ACHIEVED_STATE,),
     "open_redirect": (OracleKind.ACHIEVED_STATE,),
@@ -602,6 +631,24 @@ BUG_CLASS_ORACLES: dict[str, tuple[OracleKind, ...]] = {
     "static_insecure_flag": (OracleKind.STATIC_RULE,),
     "static_taint": (OracleKind.STATIC_RULE,),
 }
+
+# STRUCTURAL ENFORCEMENT of DIFFERENTIAL_LEAD_ONLY_CLASSES. Import fails loudly if anyone re-adds
+# DIFFERENTIAL_RESPONSE to a truth-value-attribution row — an unsound boolean/auth FACT cannot be
+# re-introduced by a one-line edit to the table above. (A plain `assert` would vanish under `-O`;
+# this must hold under every interpreter flag.)
+_readded = sorted(
+    c for c in DIFFERENTIAL_LEAD_ONLY_CLASSES
+    if OracleKind.DIFFERENTIAL_RESPONSE in BUG_CLASS_ORACLES.get(c, ())
+)
+if _readded:  # pragma: no cover — a guard, not a branch anything should reach
+    raise RuntimeError(
+        "verify.verifier: DIFFERENTIAL_RESPONSE re-added to truth-value-attribution class(es) "
+        f"{_readded}. A bare benign-vs-payload differential has NO attribution step: it confirms on a "
+        "WAF block page and on strict input validation against a target with no database (audit C, "
+        "measured rate 1.0). These classes confirm via BOOLEAN_INFERENCE (or ACHIEVED_STATE for "
+        "auth_bypass) only; a differential is a LEAD."
+    )
+del _readded
 
 # Spelling/format aliases folded onto canonical keys.
 _ALIASES: dict[str, str] = {
@@ -1358,7 +1405,11 @@ class OracleVerifier:
             return None
         if kind is OracleKind.SIDE_EFFECT:
             if "marker" in ctx and "observed_sink" in ctx:
-                return oracles.side_effect_oracle(ctx["marker"], ctx["observed_sink"])
+                # `observed_sink_control` (optional) is the benign-control sink. When it is retained
+                # and ALREADY carries the marker, the oracle refuses — the marker's presence under the
+                # payload is not attributable to the payload. Absent ⇒ byte-identical to before.
+                return oracles.side_effect_oracle(
+                    ctx["marker"], ctx["observed_sink"], ctx.get("observed_sink_control"))
             return None
         if kind is OracleKind.REFLECTION_CONTEXT:
             if "marker" in ctx and "observed_sink" in ctx:

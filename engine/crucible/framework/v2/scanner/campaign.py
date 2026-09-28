@@ -358,6 +358,10 @@ class WebScanCampaign:
         insertion_kinds: tuple[InsertionKind, ...] | None = None,
         max_pages: int = 100,
         max_depth: int = 6,
+        # 0 == UNBOUNDED, deliberately. A cap that stops a scan early and then reports a clean-looking
+        # result is the false-clean failure this whole layer refuses, so the default never truncates.
+        # When an operator DOES set a cap, DEFAULT_CHECKS is ordered cost-ascending (see scanner.checks)
+        # so the 64-request boolean SPRT cannot starve the 1-request cheap checks before they run.
         max_audit_requests: int = 0,
         enable_oob: bool = True,
         targeted: bool = False,

@@ -53,6 +53,55 @@ from .validation import (
 # CRUCIBLE's stated precision target for this benchmark (the success criterion).
 PRECISION_TARGET = 0.98
 
+# ---------------------------------------------------------------------------
+# The gate profile's boolean roster — now just the DEFAULT one.
+# ---------------------------------------------------------------------------
+#
+# HISTORY, because the absence of an override here is a deliberate decision and not an
+# oversight. The corpus is the invariant every other slice is measured against, so it must be
+# scored by a detector whose FACT means what it says. A bare benign-vs-payload DifferentialCheck
+# ("one benign string came back different from one payload string") is not that: it has no
+# truth-value ATTRIBUTION step, and it was measured minting High ``boolean_sqli`` at rate 1.0
+# against a STATIC page behind a WAF tautology rule and against strict input validation — on
+# targets with NO DATABASE. ``DEFAULT_CHECKS`` carried that differential, so this module used to
+# build a ``_GATE_CHECKS`` roster that swapped in its own ``BooleanInferenceCheck``.
+#
+# That override is GONE, because the fix landed where it belongs instead:
+#   * ``verify.verifier.DIFFERENTIAL_LEAD_ONLY_CLASSES`` removes DIFFERENTIAL_RESPONSE from the
+#     truth-value-attribution rows, so a bare differential cannot confirm ``boolean_sqli`` from
+#     ANY roster, and re-adding it raises at import time; and
+#   * ``scanner.checks.DEFAULT_CHECKS`` now carries ``BOOLEAN_SQLI_SPRT`` — a
+#     ``BooleanInferenceCheck`` over clause family 0 at ``n_max=6``, PARAMETER-IDENTICAL to the
+#     copy this module used to define (same id ``boolean-sqli-sprt``, same clause sets, same
+#     bound; asserted field-by-field).
+# With the swap target absent from ``DEFAULT_CHECKS``, the comprehension that built
+# ``_GATE_CHECKS`` had become an element-wise IDENTITY map, and the local check a duplicate. Both
+# are deleted rather than left as a dead indirection a future reader would mistake for a live
+# guard. The campaign's ``checks`` parameter already defaults to ``DEFAULT_CHECKS``, so the gate
+# now runs the SAME roster an operator's default scan runs — which is the stronger property: the
+# corpus can no longer certify a detector that ships to nobody. Measured across the change: the
+# gate row is byte-identical at 11/0/0 and 1831 requests.
+#
+# DO NOT reinstate a local override to "make the gate safe". The guard is the authority; a roster
+# override here would only hide a regression in the roster operators actually get.
+#
+# What REMAINS below is the one filter that is still doing work, and it is a COST measure, not a
+# soundness one — see its docstring.
+
+
+def _drop_boolean_differentials(entries: list) -> list:
+    """Drop the declarative ``boolean_sqli`` DIFFERENTIAL entries, of which the shipped
+    library carries 21. Every other entry — including every other class's differential —
+    is passed through untouched, so this does NOT make the roster sound and must not be
+    read as doing so; ``DIFFERENTIAL_LEAD_ONLY_CLASSES`` in ``verify.verifier`` is what
+    makes a bare differential unable to confirm this class (and four siblings) at all.
+    Because they cannot confirm, sending them is dead traffic: this is worth 320 requests
+    on the corpus (-32 on each of the 10 non-vulnerable param surfaces) and nothing else."""
+    return [
+        e for e in entries
+        if not (e.bug_class == "boolean_sqli" and e.oracle.kind == "differential")
+    ]
+
 # The engagement PROFILES the benchmark can run under, mirroring engage.py's
 # ``--profile {surface,deep,full}`` (engage.py::_PROFILE_FLAGS). ``surface`` is the
 # DEFAULT gate roster (byte-identical to today). ``deep``/``full`` turn ON the same
@@ -155,8 +204,14 @@ class BenchmarkCrucibleAdapter(CrucibleAdapter):
                 f"BenchmarkCrucibleAdapter is loopback-only; refusing {target.base_url!r}."
             )
         # The shipped library minus the timing entries: every benchmark bug is
-        # response-visible, so a statistical time-based sweep only adds latency.
-        entries = [e for e in load_library() if e.oracle.kind != "timing"]
+        # response-visible, so a statistical time-based sweep only adds latency. The 21
+        # declarative boolean differentials come out too: they CANNOT confirm (the class is
+        # BOOLEAN_INFERENCE-only at the authority), so sending them is 320 requests of dead
+        # traffic. NOTE for anyone editing this line: the two filters COMPOSE and neither
+        # subsumes the other. Dropping either one silently re-admits its entries and the gate
+        # still passes 11/0/0 — only the cost row notices.
+        entries = _drop_boolean_differentials(
+            [e for e in load_library() if e.oracle.kind != "timing"])
         # surface = today's exact behaviour; a non-surface profile UNIONS in the
         # opt-in passes (never removes one) — a pure roster expansion.
         roster = dict(_PROFILE_ROSTER[self._profile])
@@ -247,8 +302,14 @@ def write_report(
     lines.append("(reflected XSS, boolean-blind SQLi, error-based SQLi, open redirect,")
     lines.append("path traversal, SSTI, host-header injection, CORS-with-credentials, and")
     lines.append("three exposures: `.git/config`, `.env`, and Spring `/actuator/env`) plus")
-    lines.append("five SAFE endpoints (`/profile`, `/api/health`, `/download`, `/greeting`,")
-    lines.append("`/support`) that must never be flagged. Because the")
+    lines.append("eight SAFE endpoints (`/users/safe`, `/locations`, `/lookup`, `/profile`,")
+    lines.append("`/api/health`, `/download`, `/greeting`, `/support`) that must never be")
+    lines.append("flagged. Three are the boolean-SQLi negative controls: `/users/safe` is the")
+    lines.append("PARAMETERISED twin of the boolean-SQLi endpoint (same engine, same table,")
+    lines.append("bound parameter); `/locations` (a CRS-942130 tautology WAF rule) and")
+    lines.append("`/lookup` (strict input validation) are STATIC pages with NO DATABASE on")
+    lines.append("which a bare differential sees a channel and a sound detector must refuse.")
+    lines.append("Because the")
     lines.append("ground truth is complete, anything a tool reports off-manifest is a")
     lines.append("false positive **by construction** — that is what makes the FP column honest.")
     lines.append("")
@@ -363,7 +424,7 @@ def write_json_report(measured: list[MeasuredBoard], path: str | Path) -> Path:
     p = Path(path).expanduser()
     doc = {
         "tool": "CRUCIBLE",
-        "corpus": "in-process benchmark app (11 planted bugs, 5 safe controls)",
+        "corpus": "in-process benchmark app (11 planted bugs, 8 safe controls)",
         "matcher": "(normalized bug_class family, path+parameter); greedy 1-1; "
                    "off-manifest detections are false positives by construction",
         "incumbent_versions": _incumbent_versions(),

@@ -78,13 +78,20 @@ def test_confirm_idor_via_achieved_state() -> None:
     assert "CONFIRMED" in result.rationale
 
 
-def test_confirm_boolean_sqli_via_differential() -> None:
+def test_bare_differential_cannot_confirm_boolean_sqli() -> None:
+    # This used to assert the opposite. A benign-vs-payload differential has NO ATTRIBUTION STEP: it
+    # cannot separate "the injected boolean changed the query" from "the app treated two strings
+    # differently", so it minted High boolean_sqli FACTs (0.87-0.95, offline-re-verifiable) against a
+    # STATIC page behind a CRS-942130 WAF rule and against an app doing strict input validation —
+    # both with no database at all. DIFFERENTIAL_RESPONSE is no longer an acceptable confirmer for
+    # any truth-value-attribution class; BOOLEAN_INFERENCE (the SPRT truth-value partition) is.
     result = OracleVerifier().confirm({
         "bug_class": "boolean_sqli",
         "baseline": {"status": 200, "body": "No results found."},
         "mutated": {"status": 200, "body": "admin superuser row " * 20},
     })
-    assert result.confirmed
+    assert not result.confirmed
+    assert "boolean_inference" in result.rationale
 
 
 def test_confirm_xss_via_reflection_context() -> None:
@@ -306,34 +313,6 @@ def test_smuggling_desync_canary_path_still_confirms() -> None:
     })
     assert result.confirmed, result.rationale
     assert result.confirming_signals[0].kind is OracleKind.DIFFERENTIAL_RESPONSE
-
-
-def test_genuine_differential_still_confirms() -> None:
-    # the mutation control: real divergence in the retained bytes still re-confirms,
-    # so the F8 negative above is not vacuous.
-    result = OracleVerifier().confirm({
-        "bug_class": "nosqli",
-        "baseline": {"status": 200, "body": "<html><body>no results</body></html>", "latency_ms": 10.0},
-        "mutated": {"status": 200,
-                    "body": "<html><body><ul><li>alice</li><li>bob</li><li>carol</li></ul></body></html>",
-                    "latency_ms": 11.0},
-    })
-    assert result.confirmed
-    assert result.confirming_signals[0].kind is OracleKind.DIFFERENTIAL_RESPONSE
-
-
-def test_producer_discriminator_cannot_widen_or_narrow_the_comparison() -> None:
-    # a REAL divergence judged under a producer discriminator that tries to hide it
-    # (e.g. an impossible length threshold) must STILL confirm: the producer does not
-    # get to choose the rule in either direction.
-    real = {
-        "bug_class": "nosqli",
-        "baseline": {"status": 200, "body": "no results", "latency_ms": 10.0},
-        "mutated": {"status": 500, "body": "SQL syntax error near '", "latency_ms": 10.0},
-    }
-    assert OracleVerifier().confirm(real).confirmed
-    muted = dict(real, discriminator={"dimensions": ["latency"], "latency_threshold_ms": 10_000_000})
-    assert OracleVerifier().confirm(muted).confirmed
 
 
 def test_protocol_discriminator_table_is_closed_and_latency_free_by_default() -> None:

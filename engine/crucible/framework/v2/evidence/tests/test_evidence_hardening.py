@@ -42,12 +42,12 @@ def _trust_root(threshold=2, n=3):
     return tr, signers
 
 
-def _finding(ref="boolean-sqli", engagement="acme"):
+def _finding(ref="error-based-sqli", engagement="acme"):
     ctx = FindingContext.from_http_responses(
-        _BASE, _DIVERGENT, bug_class="boolean_sqli",
+        _BASE, _DIVERGENT, bug_class="error_based_sqli",
         discriminator={"dimensions": ["status", "length", "lexical"]})
-    c = confirm_finding(finding={"bug_class": "boolean_sqli"}, context=ctx)
-    return {"check_id": ref, "bug_class": "boolean_sqli",
+    c = confirm_finding(finding={"bug_class": "error_based_sqli"}, context=ctx)
+    return {"check_id": ref, "bug_class": "error_based_sqli",
             "confirmed_by": c.confirmed_by.value if c else "differential_response",
             "confidence": c.confidence if c else 0.9,
             "oracle_context": ctx.model_dump(mode="json")}, ctx.model_dump(mode="json")
@@ -61,13 +61,13 @@ def test_unsigned_head_bundle_is_not_ok_even_with_signed_certs():
     cert = sign_certificate(build_certificate(f, engagement_slug="acme", seq=0), signers[:2])
     chain = build_chain([cert.certificate.cert_digest])
     # head=None: an internally-consistent UNSIGNED chain must NOT pass — the exact hole the review found.
-    r = verify_bundle([cert], chain, None, contexts={"boolean-sqli": ctx}, trust_root=tr)
+    r = verify_bundle([cert], chain, None, contexts={"error-based-sqli": ctx}, trust_root=tr)
     assert r.chain_ok is True          # the unsigned chain is internally consistent...
     assert r.head_anchored is False    # ...but it is NOT anchored by a governance-signed head
     assert r.ok is False               # so the bundle is NOT sound
     # the same bundle WITH a valid signed head verifies
     head = sign_head(chain, engagement_slug="acme", signers=signers[:2])
-    r2 = verify_bundle([cert], chain, head, contexts={"boolean-sqli": ctx}, trust_root=tr)
+    r2 = verify_bundle([cert], chain, head, contexts={"error-based-sqli": ctx}, trust_root=tr)
     assert r2.head_anchored is True and r2.ok is True
 
 
@@ -163,7 +163,7 @@ def test_version_skewed_bundle_is_crypto_ok_but_not_fully_sound():
     signed = sign_certificate(forged, signers[:2])
     chain = build_chain([signed.certificate.cert_digest])
     head = sign_head(chain, engagement_slug="acme", signers=signers[:2])
-    b = verify_bundle([signed], chain, head, contexts={"boolean-sqli": ctx}, trust_root=tr)
+    b = verify_bundle([signed], chain, head, contexts={"error-based-sqli": ctx}, trust_root=tr)
     assert b.ok is True and b.fully_sound is False
     assert b.certificate_results[0].tier is VerificationTier.SOUND_ORACLE_VERSION_CHANGED
 
@@ -230,7 +230,7 @@ def test_unknown_schema_version_fails_closed():
 # ============ #6 — render_as is a closed label set ================================================
 
 def test_render_as_rejects_unknown_label():
-    ReportClaim(sentence="x", bug_class="boolean_sqli", render_as="fact")               # ok
+    ReportClaim(sentence="x", bug_class="error_based_sqli", render_as="fact")               # ok
     ReportClaim(sentence="x", render_as="analyst-commentary")                            # ok
     for bad in ("verified", "machine-fact", "FACT", ""):
         with pytest.raises(ValidationError):

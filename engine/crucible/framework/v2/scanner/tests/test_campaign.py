@@ -93,9 +93,19 @@ def test_campaign_one_call_crawls_scans_confirms_and_consolidates() -> None:
         assert report.pages_crawled >= 4  # index + search + about + items
         assert report.requests_discovered >= 4
 
-        # active: the boolean-SQLi on /search?q= is oracle-confirmed
-        sqli = [f for f in report.active_findings if f.bug_class == "boolean_sqli"]
-        assert sqli and sqli[0].confirmed_by == "differential_response" and sqli[0].param == "q"
+        # active: the reflected XSS on /search?q= is oracle-confirmed
+        # NOTE on the class asserted here. This fixture's /search keys on the payload SHAPE
+        # ("'1'='1" in q) — the same thing a WAF tautology rule in front of a static page does — and
+        # the old assertion was that a bare benign-vs-payload DIFFERENTIAL confirmed boolean_sqli on
+        # it. That inference has no attribution step and minted FACTs against targets with no
+        # database (verify.verifier.DIFFERENTIAL_LEAD_ONLY_CLASSES), so it is a LEAD now. The
+        # pipeline property under test — crawl -> audit -> ORACLE-CONFIRM -> consolidate — is
+        # asserted on the reflected XSS, whose reflection-context oracle requires the canary to
+        # reach an EXECUTABLE position. A SOUNDLY-detected boolean channel is covered by
+        # scanner/tests/test_attribution_soundness.py and by the (sqlite-backed) scanner benchmark.
+        xss = [f for f in report.active_findings if f.bug_class == "xss"]
+        assert xss and xss[0].confirmed_by == "reflection_context" and xss[0].param == "q"
+        assert not [f for f in report.active_findings if f.bug_class == "boolean_sqli"]
 
         # passive: missing security headers surfaced across the crawl
         pids = {f.check_id for f in report.passive_findings}
@@ -118,9 +128,10 @@ def test_campaign_report_populates_worldmodel_for_the_planner() -> None:
         # every finding EVIDENCES an endpoint — the chain the planner reasons over
         ev = world.edges_of_kind(EdgeKind.EVIDENCES)
         assert ev and all(e.confidence > 0 for e in ev)
-        # the SQLi finding node records its oracle provenance
-        assert any(n.attrs.get("bug_class") == "boolean_sqli"
-                   and n.attrs.get("confirmed_by") == "differential_response"
+        # the finding node records its oracle provenance (see the note in the test above on why
+        # this is the reflected XSS and not the shape-matched boolean_sqli)
+        assert any(n.attrs.get("bug_class") == "xss"
+                   and n.attrs.get("confirmed_by") == "reflection_context"
                    for n in findings)
 
 

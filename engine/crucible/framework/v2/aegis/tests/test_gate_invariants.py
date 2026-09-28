@@ -13,9 +13,83 @@ byte-identical. Two things must never move without a deliberate, reviewed change
      name-pinned twin that survives even if the enum or the arithmetic is refactored.)
 
   2. The in-process benchmark tally is byte-identical: crucible tp=11, fp=0, fn=0, precision=recall=
-     f1=1.0, 1069 requests, 11 findings reported — the exact row `make gate` prints and gates on.
+     f1=1.0, 1831 requests, 11 findings reported — the exact row `make gate` prints and gates on.
      (TRUTHENOVATION-M1 #213 deliberately broadened the corpus 9->11 bugs — adding SSTI + host-header —
      and re-baselined the gate; the frozen row moved 9/853/9 -> 11/1069/11 with it.)
+
+     The COST half of that row was re-baselined again, 1069 -> 1544 -> 1831, deliberately. The
+     ACCURACY half did NOT move: 11/0/0 held through the change, and the signed
+     ``eval/baselines/recall-accuracy-core.json`` still reproduces BYTE-IDENTICALLY (sha256
+     01c1728c…) and still verifies against its pinned trust root — nothing signed was re-signed,
+     because the request count is deliberately NOT in the signed accuracy bytes.
+
+     WHY the cost moved. The corpus used to model boolean-blind SQLi at ``/users?name`` with two
+     REGEXES over a `` OR ``-split string, which only understand LITERAL EQUALITY. Measured against
+     the seven syntactically-varied always-TRUE/always-FALSE clause shapes a SOUND detector sends
+     (``scanner.checks.boolean_clause_families``), exactly 1 of 7 partitioned the fixture and the
+     other six collapsed onto the same 118-byte body. The only detector that fixture rewarded was
+     the bare benign-vs-payload DIFFERENTIAL — the one separately measured minting High
+     ``boolean_sqli`` at rate 1.0 against a static page behind a WAF tautology rule, on targets with
+     NO DATABASE. So this row had been certifying that an UNSOUND oracle still fires. ``/users?name``
+     is now a real sqlite3 engine with a concatenated WHERE clause (7 of 7 shapes partition), the
+     gate scores it with the sound SPRT ``BooleanInferenceCheck``, and ``/users/safe`` is the
+     parameterised twin that must never fire (0 of 7).
+
+     STAGE 1 (this slice alone, 1069 -> 1544, +475 reported / +476 counted):
+       +114  the NEW ``/users/safe`` twin becomes an 11th param surface, audited like the other
+             safe controls (82 base + 32 library-boolean sends).
+       -320  the 21 declarative library ``boolean_sqli`` DIFFERENTIAL entries are dropped from the
+             gate roster: -32 on each of the 10 non-vulnerable param surfaces (on ``/users`` they
+             already short-circuited at the first confirm, so 0 there).
+       +682  the bare 2-send ``DifferentialCheck`` is replaced by the SPRT on all 11 param
+             surfaces: +62 each = 8 determinism pre-gate sends + 2 SPRT rounds x 28 byte-identical
+             probes (64), less the 2 sends the differential used.
+       -----
+       +476  counted; reported is +475 (see the offset rule below).
+     The new sqlite3 fixture itself costs ZERO extra requests (``/users`` sat at 82 sends both
+     before and after, with the detector held fixed).
+
+     STAGE 2 (1544 -> 1831, +287 reported / +289 counted), two independent causes:
+         +1  ``fix/audit-c-checks`` gives the file-signature check a BENIGN CONTROL request, spent
+             only on a probe that would otherwise FIRE. The corpus fires it at exactly one place,
+             so ``/file`` goes 139 -> 140 and nothing else moves.
+       +288  the two DISCRIMINATING negative controls become the 12th and 13th param surfaces:
+             ``/locations?city`` (a CRS-942130 tautology WAF rule over a static page) and
+             ``/lookup?term`` (strict input validation over a static page), 144 sends each — the
+             same per-surface cost as every other param surface in the corpus.
+       -----
+       +289  counted; reported is +287.
+     THE OFFSET RULE, which holds at every stage: ``requests_sent`` runs 1 below the counted total
+     per param SURFACE (it excludes one discovery fetch each). 12 counted-vs-reported at 10
+     surfaces, 13 at 11, 15 at 13 — so a counted delta and a reported delta differ by exactly the
+     number of surfaces added, and nothing else.
+
+     WHERE THE SOUND DETECTOR LIVES, and why this file no longer names a gate-only roster. The
+     benchmark used to build its own ``_GATE_CHECKS`` that swapped a local ``BooleanInferenceCheck``
+     in for the bare ``BOOLEAN_SQLI`` differential. That override is gone: ``DEFAULT_CHECKS`` now
+     carries ``scanner.checks.BOOLEAN_SQLI_SPRT``, parameter-identical to the local copy (same id,
+     same family-0 clause sets, same ``n_max=6``), so the comprehension had become an element-wise
+     IDENTITY map and the local check a duplicate. The gate now runs the SAME roster an operator's
+     default scan runs, which is the stronger property — the corpus can no longer certify a
+     detector that ships to nobody. The row did not move across that collapse: 11/0/0 at 1831,
+     measured twice on each side.
+
+     HONEST BOUND on what the default boolean detector covers: clause FAMILY 0 only (the
+     single-quote string-literal breakout). The numeric and double-quote families cost +62
+     requests per insertion point each and are not on the default path; the gated
+     ``live/runtime_redrive.py::boolean_redrive`` drives all three. Recorded in
+     docs/capability-matrix/evidence-branches.json as a limitation, not left implicit.
+
+     WHY THE TWO NEW CONTROLS EXIST. A review BLOCKed the stage-1 slice: reverting its ENTIRE
+     detector content still passed the gate, so the gate was not actually pinning the soundness the
+     slice was for. ``/users/safe`` could not close that, because it refutes only a detector that
+     fires ON IT and a payload-SHAPE reader does not (measured: the bare ``DifferentialCheck``
+     confirms on ``/users`` and returns None on ``/users/safe``). ``/locations`` and ``/lookup`` are
+     surfaces where the SHAPE is present and the INJECTION is not, so a bare differential SEES a
+     channel (measured, both) and a sound detector must REFUSE (measured, both). Their assertions
+     live in ``eval/tests/test_gate_corpus_controls.py`` and are POSITIVE about the refusal — the
+     SPRT must be shown to have run full 7-TRUE/7-FALSE rounds and THEN declined, because "no
+     finding" is also what a 404 or a disconnected route produces.
 
 Colocated with ``test_gate_byte_identical.py`` under ``aegis/tests/`` so ``make test`` collects it.
 """
@@ -163,5 +237,5 @@ def test_benchmark_tally_is_byte_identical(crucible_measured):
 
 def test_benchmark_cost_row_is_byte_identical(crucible_measured):
     m = crucible_measured.metrics
-    assert m.requests_sent == 1069, f"request budget drifted: {m.requests_sent} (gate requires 1069)"
+    assert m.requests_sent == 1831, f"request budget drifted: {m.requests_sent} (gate requires 1831)"
     assert m.findings_reported == 11, f"findings reported drifted: {m.findings_reported} (gate requires 11)"

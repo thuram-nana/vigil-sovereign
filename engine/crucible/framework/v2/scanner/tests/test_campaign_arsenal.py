@@ -96,15 +96,21 @@ def test_arsenal_confirms_multiple_oracle_kinds_including_request_level() -> Non
         kinds = {f.confirmed_by for f in report.active_findings}
         # the request-level CORS check fired (its evidence: reflected evil origin)
         assert "cors" in classes, classes
-        # at least three DISTINCT oracle kinds confirmed something
-        assert len(kinds) >= 3, kinds
+        # at least two DISTINCT oracle kinds confirmed something. This was three while a bare
+        # benign-vs-payload differential could confirm boolean_sqli on this fixture; it cannot any
+        # more — that inference has no attribution step and minted FACTs against targets with no
+        # database (verify.verifier.DIFFERENTIAL_LEAD_ONLY_CLASSES), so DIFFERENTIAL_RESPONSE drops
+        # out of the set here. The property under test — several INDEPENDENT oracle routes confirm
+        # in one campaign, including a request-level one — still holds.
+        assert len(kinds) >= 2, kinds
+        assert "differential_response" not in kinds, kinds
         # the bandit learned from real outcomes: a class that landed a confirmed
         # hit has alpha>1 (a reward folded in). alpha = mean*(observations+2),
         # recovered from the public posterior view.
         def _alpha(arm: str) -> float:
             return bandit.expected_value("default", arm) * (bandit.observations("default", arm) + 2.0)
-        assert any(_alpha(c) > 1.0 for c in ("xss", "boolean_sqli")), \
-            {c: (_alpha(c), bandit.observations("default", c)) for c in ("xss", "boolean_sqli")}
+        assert any(_alpha(c) > 1.0 for c in ("xss", "cors")), \
+            {c: (_alpha(c), bandit.observations("default", c)) for c in ("xss", "cors")}
 
 
 def test_bandit_persists_and_warm_starts(tmp_path) -> None:

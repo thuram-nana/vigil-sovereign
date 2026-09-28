@@ -71,32 +71,31 @@ def _stub_urk(decision: str, *, objections: list[str] | None = None):
     return _fake
 
 
+
+# ATTRIBUTED evidence. The confirmable fixture below is a path_traversal FILE-CONTENT signature with
+# its benign CONTROL retained: the signature is present under the payload and ABSENT from the
+# control, so the read is attributable. It used to be a boolean_sqli benign-vs-payload differential,
+# which is LEAD-only now — that inference has no attribution step and minted High FACTs at rate 1.0
+# against a static page behind a WAF tautology rule and against strict input validation, on targets
+# with no database. See verify.verifier.DIFFERENTIAL_LEAD_ONLY_CLASSES.
+_SIGNATURE = "root:x:0:0:"
+_READ_SINK = "root:x:0:0:root:/root:/bin/bash\ndaemon:x:1:1:daemon:/usr/sbin:/usr/sbin/nologin"
+_CONTROL_SINK = "<p>ordinary document</p>"
+
+
 def _firing_context() -> dict:
-    """A boolean-SQLi differential that fires: benign term returns no rows, the
-    tautology returns every row — a large status/length/lexical delta."""
-    return FindingContext.from_http_responses(
-        {"status": 200, "body": "No results found."},
-        {
-            "status": 200,
-            "body": (
-                "id=1 name=alice role=user\n"
-                "id=2 name=bob role=admin\n"
-                "id=3 name=carol role=user"
-            ),
-        },
-        bug_class="boolean_sqli",
-        discriminator={"dimensions": ["status", "length", "lexical"]},
-    ).model_dump()
+    """A path_traversal file-content signature that fires: the signature is present under the
+    traversal payload and ABSENT from the benign control, so the read is attributable."""
+    return FindingContext.from_side_effect(
+        _SIGNATURE, _READ_SINK, bug_class="path_traversal",
+        control_sink=_CONTROL_SINK).model_dump()
 
 
 def _non_firing_context() -> dict:
-    """Identical baseline and mutated responses — no differential, oracle silent."""
-    same = {"status": 200, "body": "No results found."}
-    return FindingContext.from_http_responses(
-        same, dict(same),
-        bug_class="boolean_sqli",
-        discriminator={"dimensions": ["status", "length", "lexical"]},
-    ).model_dump()
+    """The signature is ALREADY in the benign control, so nothing is attributable — oracle silent."""
+    return FindingContext.from_side_effect(
+        _SIGNATURE, _READ_SINK, bug_class="path_traversal",
+        control_sink=_READ_SINK).model_dump()
 
 
 def _post_finding(bb: Blackboard, payload: FindingPayload) -> int:
@@ -132,7 +131,7 @@ def test_oracle_fires_overrides_objecting_llm(
         finding_slug="001-boolean-sqli",
         title="Boolean-based blind SQL injection in /search",
         severity="High",
-        bug_class="boolean_sqli",
+        bug_class="path_traversal",
         surface="GET /search?q=",
         summary="Tautology returns every row; benign term returns none.",
         oracle_context=_firing_context(),
@@ -170,7 +169,7 @@ def test_oracle_silent_vetoes_confirming_llm(
         finding_slug="002-no-differential",
         title="Claimed SQLi with no observable differential",
         severity="High",
-        bug_class="boolean_sqli",
+        bug_class="path_traversal",
         surface="GET /search?q=",
         summary="LLM says exploitable, but baseline and mutated are identical.",
         oracle_context=_non_firing_context(),

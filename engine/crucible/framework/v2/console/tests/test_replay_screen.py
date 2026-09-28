@@ -23,17 +23,17 @@ _DIVERGENT = {
 
 def _ctx(mutated: dict) -> FindingContext:
     return FindingContext.from_http_responses(
-        _BASE, mutated, bug_class="boolean_sqli",
+        _BASE, mutated, bug_class="error_based_sqli",
         discriminator={"dimensions": ["status", "length", "lexical"]},
     )
 
 
 def _finding_from(ctx: FindingContext) -> dict:
-    confirmed = confirm_finding(finding={"bug_class": "boolean_sqli"}, context=ctx)
+    confirmed = confirm_finding(finding={"bug_class": "error_based_sqli"}, context=ctx)
     assert confirmed is not None
     return {
-        "check_id": "boolean-sqli",
-        "bug_class": "boolean_sqli",
+        "check_id": "error-based-sqli",
+        "bug_class": "error_based_sqli",
         "confirmed_by": confirmed.confirmed_by.value,
         "confidence": confirmed.confidence,
         "oracle_context": ctx.model_dump(mode="json"),

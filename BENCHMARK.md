@@ -38,8 +38,14 @@ true recall `< 1.0` — never hide it. "Zero FP" never means "found everything".
 The self-contained labelled app plants **11 bugs** (reflected XSS, boolean-blind SQLi,
 error-based SQLi, open redirect, path traversal, SSTI, host-header injection,
 CORS-with-credentials, and three exposures: `.git/config`, `.env`, Spring
-`/actuator/env`) and ships **5 safe controls** (`/profile`, `/api/health`,
-`/download`, `/greeting`, `/support`) that must never be flagged.
+`/actuator/env`) and ships **8 safe controls** (`/users/safe`, `/locations`,
+`/lookup`, `/profile`, `/api/health`, `/download`, `/greeting`, `/support`) that must
+never be flagged. Three are the boolean-SQLi negative controls: `/users/safe` is the
+parameterised twin — same sqlite3 engine, same table, bound parameter — while
+`/locations` (a CRS-942130 tautology WAF rule) and `/lookup` (strict input validation)
+are STATIC pages with **no database** on which a bare differential sees a channel and
+a sound truth-value-attribution detector must refuse. Those two are what make the
+`fp` column able to catch an unsound boolean detector at all.
 
 Signed source: [`engine/crucible/framework/v2/docs/benchmark-comparative.json`](engine/crucible/framework/v2/docs/benchmark-comparative.json)
 (+`.sig.json` +`.fingerprint.txt`).
@@ -242,7 +248,7 @@ the private key.
 ## 6. Honest scope — what ran here, what is operator-run
 
 **Ran here (real numbers above):** the single **in-process labelled loopback app**
-(11 planted bugs, 5 safe controls). Because its ground truth is complete, the FP
+(11 planted bugs, 8 safe controls). Because its ground truth is complete, the FP
 column is honest by construction, and the head-to-head, M1 and M2 numbers are all from
 actual runs on this host.
 

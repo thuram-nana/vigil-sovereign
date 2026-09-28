@@ -27,11 +27,11 @@ _DIVERGENT = {"status": 200, "body": "id=1 name=alice role=user\nid=2 name=bob r
 
 def _ctx(mutated) -> dict:
     return FindingContext.from_http_responses(
-        _BASE, mutated, bug_class="boolean_sqli",
+        _BASE, mutated, bug_class="error_based_sqli",
         discriminator={"dimensions": ["status", "length", "lexical"]}).model_dump(mode="json")
 
 
-def _confirmed_payload(slug, *, bug_class="boolean_sqli", oracle_context=None) -> dict:
+def _confirmed_payload(slug, *, bug_class="error_based_sqli", oracle_context=None) -> dict:
     """A finding recorded (by the scan/critique path) as oracle-confirmed."""
     return FindingPayload(
         finding_slug=slug, title=f"finding {slug}", severity="High",
@@ -84,7 +84,7 @@ def test_finding_whose_proof_no_longer_refires_is_demoted(bb: Blackboard) -> Non
 
 
 def test_relabelled_bug_class_is_demoted(bb: Blackboard) -> None:
-    # the finding claims 'rce' but its oracle_context only proves boolean_sqli — the
+    # the finding claims 'rce' but its oracle_context only proves error_based_sqli — the
     # P3 class binding refuses it, so the report will not assert an RCE fact.
     bb.post(engagement=_SLUG, kind="finding", agent_name="exploit",
             payload=_confirmed_payload("003", bug_class="rce", oracle_context=_ctx(_DIVERGENT)))

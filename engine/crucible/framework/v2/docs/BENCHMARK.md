@@ -139,8 +139,10 @@ Adapters live in `eval/adapters.py` + `eval/adapters_ext.py`.
 The self-contained labelled app has **11 planted bugs** (reflected XSS, boolean-blind
 SQLi, error-based SQLi, open redirect, path traversal, SSTI, host-header injection,
 CORS-with-credentials, and three exposures: `.git/config`, `.env`, Spring
-`/actuator/env`) plus **5 safe controls** (`/profile`, `/api/health`, `/download`,
-`/greeting`, `/support`) that must never be flagged. From the committed
+`/actuator/env`) plus **8 safe controls** (`/users/safe`, `/locations`, `/lookup`,
+`/profile`, `/api/health`, `/download`, `/greeting`, `/support`) that must never be
+flagged — `/users/safe` is the parameterised twin of the boolean-SQLi endpoint, and
+`/locations` + `/lookup` are the discriminating no-database controls. From the committed
 `benchmark-comparative.json` (this host — sqlmap 1.10.6, Wapiti 3.2.10, Nikto 2.6.0):
 
 | tool | tp | fp | fn | precision | recall | f1 | time_s | requests | rss_mb |
@@ -149,6 +151,66 @@ CORS-with-credentials, and three exposures: `.git/config`, `.env`, Spring
 | sqlmap | 0 | 0 | 11 | 0.000 | 0.000 | 0.000 | ~1 | n/r | ~103 |
 | wapiti | 2 | **7** | 9 | 0.222 | 0.182 | 0.200 | ~12–16 | n/r | ~48 |
 | nikto | 0 | **8** | 11 | 0.000 | 0.000 | 0.000 | ~9 | n/r | n/r |
+
+> **Re-baseline note.** The signed snapshot above is the run that produced it and is
+> left byte-intact. Its corpus modelled boolean-blind SQLi at `/users?name` with two
+> REGEXES that only understand literal equality: of the seven syntactically-varied
+> always-TRUE/always-FALSE clause shapes a sound detector sends, 1 of 7 partitioned it,
+> so the only detector it rewarded was the bare benign-vs-payload differential — the one
+> measured minting `boolean_sqli` at rate 1.0 against targets with **no database**.
+> `/users?name` is now a real sqlite3 engine with a concatenated `WHERE` clause (**7 of 7**
+> shapes partition), the gate scores it with the sound SPRT `BooleanInferenceCheck` — which is
+> now `DEFAULT_CHECKS`' own `BOOLEAN_SQLI_SPRT`, the detector an operator's default scan runs,
+> not a benchmark-local copy — and
+> `/users/safe` is the parameterised twin that must never fire (**0 of 7**).
+>
+> The corpus additionally ships two **discriminating** no-database controls, because the
+> parameterised twin alone could not pin the soundness this change exists for: a
+> payload-SHAPE reader does not fire on the twin either, so reverting the whole detector
+> still passed the gate. `/locations?city` (a CRS-942130 tautology WAF rule over a static
+> page) and `/lookup?term` (strict input validation over a static page) are surfaces where
+> the shape is present and the injection is not — a bare differential **sees a channel on
+> both** (measured) while the sound detector **refuses on both** (measured). Reverting the
+> detector content now fails the gate: `10 tp / 0 fp / 1 fn`, recall 0.909.
+>
+> Accuracy never moved — the current gate row is still **11 / 0 / 0**, and the signed
+> `recall-accuracy-core.json` still reproduces byte-identically — but the request budget
+> was deliberately re-baselined **1069 -> 1544 -> 1831**: stage 1 was +114 twin surface,
+> -320 dropped library boolean differentials, +682 SPRT; stage 2 was +1 (the
+> file-signature check's new benign control, spent only where it fires) and +288 (the two
+> discriminating controls, 144 sends each). `test_gate_invariants.py` carries the
+> line-by-line accounting and the offset rule that relates counted to reported requests.
+>
+> **What the sound detector costs, and what it covers.** An attribution step is not free:
+> the SPRT spends a determinism pre-gate (8 identical sends) plus 4x7 = 28 probes per round and
+> decides in two rounds, so **+62 requests per insertion point** against the 2 the differential
+> spent. On a 6-query-param endpoint that is **66 -> 438 requests (6.6x)**; `--targeted` only
+> reaches 349. The gate's own `time_s` went 11.55 -> 30.04. Coverage is **clause family 0 only**
+> (single-quote string-literal breakout) — the numeric and double-quote families cost +62 each
+> and are not on the default path; the gated `boolean_redrive` drives all three. Both facts are
+> recorded in `docs/capability-matrix/evidence-branches.json` rather than left implicit.
+>
+> **Per-class outcome of making the truth-value classes BOOLEAN_INFERENCE-only** (measured, not
+> inferred): `boolean_sqli` **fixed** — the default path has a sound producer again.
+> `ldap_injection` / `xpath_injection` **no loss** — their error-signature entries were driven
+> end-to-end through `compile_entry` -> `ErrorSignatureCheck.probe` -> `confirm_finding` and
+> confirm. `nosqli` loses its scanner-roster capability but keeps its gated Strix
+> `error_signature.strix_redrive`. **`auth_bypass` has no detector on any path** — and no
+> evidence branch has ever claimed one, so nothing in the capability matrix overclaims.
+>
+> **Stale unsigned renderings, named rather than silently left.** Two files in this
+> directory still say "five SAFE endpoints" and quote 1069: `benchmark-scoreboard.md`
+> (lines 8, 56) and `benchmark-comparative.md` (lines 8, 59). Neither carries a
+> `.sig.json` — they are markdown renderings of the signed JSON runs beside them, and
+> they are left byte-intact for the same reason the signed JSON is: they are records of
+> the run that produced them, and `write_report` regenerates them with corrected prose on
+> the next run. Also stale and deliberately untouched: `docs/benchmark-results.json` and
+> `benchmark-comparative.json` (+ their `.sig.json`/`.fingerprint.txt`, which cannot be
+> re-signed here), `console/tests/test_benchmark_action.py:46` (a hand-written fake input,
+> not a derived value), `docs/plain-english/_inventory/B-screens-and-ui.md:663`,
+> `knowledge/claude-memory/vigil-truthenovation-program.md:121`, and the narrative
+> `docs/plain-english/` set (`01-what-this-is.md:1170`, `04-leads-and-facts.md:1328`,
+> `09-the-screens.md:1346,1360`, `VIGIL-EXPLAINED.md:1626,7292,17011,17025`).
 
 Read the **fp column**, not the tp column: it is the unambiguous one. CRUCIBLE's 0
 is the differentiator. The recall/precision of incumbents is depressed partly by

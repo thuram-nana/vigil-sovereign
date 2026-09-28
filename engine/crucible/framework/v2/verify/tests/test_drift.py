@@ -16,35 +16,48 @@ from framework.v2.verify import drift
 from framework.v2.verify.adapter import FindingContext
 from framework.v2.verify.confirmation import confirm_finding
 
-_BASE = {"status": 200, "body": "No results found."}
-_DIVERGENT = {
-    "status": 200,
-    "body": "id=1 name=alice role=user\nid=2 name=bob role=admin\nid=3 name=carol role=user",
-}
+# The DIFFERENTIAL_RESPONSE certificate these tests re-verify is the SOUND one: a Wave-4.2
+# request-smuggling DESYNC (a UNIQUE high-entropy canary echoed in VIGIL's own second response on
+# the conflict leg and ABSENT from the identical no-conflict control leg). It used to be a
+# `boolean_sqli` benign-vs-payload differential, which is no longer confirmable at all: a bare
+# differential has no attribution step, so it minted FACTs on a WAF block page and on strict input
+# validation against targets with no database (see verify.verifier.DIFFERENTIAL_LEAD_ONLY_CLASSES).
+# The plumbing under test is unchanged — a real DIFFERENTIAL_RESPONSE certificate, tamperable to a
+# non-firing twin — it is now anchored to evidence that actually proves something.
+_CANARY = "vgLK7tQ2mXb9Zp4WdR"
+_BUG_CLASS = "request_smuggling"
+_CHECK_ID = "smuggling-CL.TE"
 
 
-def _ctx(mutated: dict) -> FindingContext:
-    return FindingContext.from_http_responses(
-        _BASE, mutated, bug_class="boolean_sqli",
-        discriminator={"dimensions": ["status", "length", "lexical"]},
+def _desync_ctx(*, genuine: bool = True) -> FindingContext:
+    """A re-verifiable desync certificate. ``genuine=False`` drops the canary from the conflict
+    leg, so the oracle does NOT re-fire (the tampered / would-be-fabricated twin)."""
+    return FindingContext.from_smuggling_desync(
+        canary=_CANARY, technique="CL.TE",
+        conflict_second={"channel": True, "status": 400,
+                         "body": (f"HTTP/1.1 400 Bad Request: unrecognised method GET /{_CANARY}"
+                                  if genuine else "HTTP/1.1 200 OK ordinary second response")},
+        control_second={"channel": True, "status": 200,
+                        "body": "HTTP/1.1 200 OK ordinary second response"},
+        bug_class=_BUG_CLASS,
     )
 
 
 def _finding(endpoint: str, param: str, *, genuine: bool = True) -> dict:
-    """An AuditFinding-shaped dict with a re-verifiable certificate. ``genuine`` False swaps in
-    a non-divergent context so the oracle does NOT re-fire (a would-be fabricated fact)."""
-    ctx = _ctx(_DIVERGENT)
-    confirmed = confirm_finding(finding={"bug_class": "boolean_sqli"}, context=ctx)
+    """An AuditFinding-shaped dict with a re-verifiable certificate. ``genuine`` False swaps in a
+    canary-free context so the oracle does NOT re-fire (a would-be fabricated fact)."""
+    ctx = _desync_ctx()
+    confirmed = confirm_finding(finding={"bug_class": _BUG_CLASS}, context=ctx)
     assert confirmed is not None
     return {
-        "check_id": "boolean-sqli",
-        "bug_class": "boolean_sqli",
+        "check_id": _CHECK_ID,
+        "bug_class": _BUG_CLASS,
         "insertion_point": f"query:{param}",
         "param": param,
         "endpoint": endpoint,
         "confirmed_by": confirmed.confirmed_by.value,
         "confidence": confirmed.confidence,
-        "oracle_context": (ctx if genuine else _ctx(dict(_BASE))).model_dump(mode="json"),
+        "oracle_context": (ctx if genuine else _desync_ctx(genuine=False)).model_dump(mode="json"),
     }
 
 
@@ -98,7 +111,7 @@ def test_confirmed_fact_ids_only_reconfirming_certs() -> None:
     ids = drift.confirmed_fact_ids(doc)
     assert len(ids) == 1
     only = json.loads(next(iter(ids)))
-    assert only["endpoint"] == "http://t/a" and only["bug_class"] == "boolean_sqli"
+    assert only["endpoint"] == "http://t/a" and only["bug_class"] == _BUG_CLASS
 
 
 def test_confirmed_fact_ids_total_on_bad_doc() -> None:

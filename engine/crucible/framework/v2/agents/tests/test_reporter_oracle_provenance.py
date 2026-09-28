@@ -49,7 +49,7 @@ def _firing_ctx() -> dict:
     return FindingContext.from_http_responses(
         {"status": 200, "body": "No results found."},
         {"status": 200, "body": "id=1 name=alice role=user\nid=2 name=bob role=admin"},
-        bug_class="boolean_sqli",
+        bug_class="error_based_sqli",
         discriminator={"dimensions": ["status", "length", "lexical"]},
     ).model_dump()
 
@@ -57,7 +57,7 @@ def _firing_ctx() -> dict:
 def _finding(slug: str, ctx: dict | None) -> FindingPayload:
     return FindingPayload(
         finding_slug=slug, title=f"finding {slug}", severity="High",
-        bug_class="boolean_sqli", surface="GET /search?q=",
+        bug_class="error_based_sqli", surface="GET /search?q=",
         summary="reporter provenance finding", oracle_context=ctx,
     )
 

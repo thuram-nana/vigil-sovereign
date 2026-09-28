@@ -16,18 +16,40 @@ from framework.v2.agents.models import FindingPayload
 from framework.v2.agents.spine_sink import SpineSink
 from framework.v2.verify.adapter import FindingContext
 
-_BASE = {"status": 200, "body": "No results found."}
-_DIVERGENT = {"status": 200, "body": "id=1 alice user\nid=2 bob admin"}
+
+# ATTRIBUTED evidence. The confirmable fixture below is a path_traversal FILE-CONTENT signature with
+# its benign CONTROL retained: the signature is present under the payload and ABSENT from the
+# control, so the read is attributable. It used to be a boolean_sqli benign-vs-payload differential,
+# which is LEAD-only now — that inference has no attribution step (its control is a DIFFERENT
+# STRING, not a same-shape negative) and minted High FACTs at rate 1.0 against a static page behind
+# a WAF tautology rule and against strict input validation, on targets with no database. See
+# verify.verifier.DIFFERENTIAL_LEAD_ONLY_CLASSES. Nothing under test here changes — only the
+# evidence it is anchored to.
+_SIGNATURE = "root:x:0:0:"
+_READ_SINK = "root:x:0:0:root:/root:/bin/bash\ndaemon:x:1:1:daemon:/usr/sbin:/usr/sbin/nologin"
+_CONTROL_SINK = "<p>ordinary document</p>"
+_PT = "path_traversal"
 
 
-def _ctx(mutated=_DIVERGENT) -> dict:
-    return FindingContext.from_http_responses(
-        _BASE, mutated, bug_class="boolean_sqli",
-        discriminator={"dimensions": ["status", "length", "lexical"]}).model_dump(mode="json")
+def _pt_ctx(*, firing: bool = True) -> "FindingContext":
+    """A path_traversal side-effect context. ``firing=False`` puts the signature in the CONTROL too,
+    so it is not attributable and the oracle stays silent."""
+    return FindingContext.from_side_effect(
+        _SIGNATURE, _READ_SINK, bug_class=_PT,
+        control_sink=_READ_SINK if not firing else _CONTROL_SINK)
+
+
+_BASE = _READ_SINK          # the NON-attributable control value (signature already present)
+_DIVERGENT = _CONTROL_SINK  # the genuine control: the signature is ABSENT from it
+
+
+def _ctx(mutated=_CONTROL_SINK) -> dict:
+    return FindingContext.from_side_effect(
+        _SIGNATURE, _READ_SINK, bug_class=_PT, control_sink=mutated).model_dump(mode="json")
 
 
 def _finding(**kw) -> FindingPayload:
-    base = dict(finding_slug="1", title="t", severity="High", bug_class="boolean_sqli",
+    base = dict(finding_slug="1", title="t", severity="High", bug_class="path_traversal",
                 surface="q", summary="s", verified_by_oracle=True, oracle_kind="differential_response",
                 confidence=0.87, oracle_context=_ctx())
     base.update(kw)
