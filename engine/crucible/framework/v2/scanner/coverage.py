@@ -124,9 +124,13 @@ def _diverging_dimensions(observed: object) -> list[str]:
 
 
 def _reflection_context(observed: object) -> str:
-    """The normalized reflection context (``html_tag`` / ``script`` /
-    ``js_attribute`` / ``inert`` / ``absent``). The specific tag / attribute
-    detail is deliberately dropped so the bucket vocabulary stays bounded."""
+    """The normalized reflection context — a firing one (``html_tag`` / ``script`` /
+    ``js_attribute``), a NON-firing advisory (``script_string_literal`` /
+    ``script_data_block`` / ``js_attribute_data`` / ``inert_text_container`` /
+    ``script_src_ignored_body`` / ``script_lexer_ambiguous`` /
+    ``script_nomodule_ignored`` / ``unmodelled_handler_shape``), ``inert``, or
+    ``absent``. The specific tag / attribute detail is deliberately dropped so the
+    bucket vocabulary stays bounded."""
     if not isinstance(observed, dict):
         return "absent"
     ctx = observed.get("context")

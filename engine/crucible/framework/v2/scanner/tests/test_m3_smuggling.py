@@ -7,15 +7,17 @@ past a threshold AND the latency oracle fires. These tests stand up a raw TCP
 server that HANGS (sleeps) when it sees a specific obfuscation marker in the raw
 request bytes and answers immediately otherwise — the minimal simulation of a
 front-end/back-end that desync on exactly one obfuscation. We assert the matching
-technique is ``detected`` and that a benign server (which never hangs) produces
-no detection at all (no false positive). A separate pair of fixed-response
+technique raises an UNCONFIRMED ``lead`` and that a benign server (which never
+hangs) raises no lead at all (no false positive). Nothing here is ever
+``detected``: see scanner/smuggling.py's module docstring — a hang is not proof of
+a desync, so the A12 timing probe mints nothing and asserting ``detected`` would
+be vacuous. A separate pair of fixed-response
 servers exercises ``detect_h2c_upgrade``: one advertises the h2c upgrade, one
 does not.
 
 Timings are kept small — the delaying server sleeps ~0.35 s and the detector is
-called with a low ``delay_threshold_ms`` (which now also drives the oracle's
-latency threshold), so the suite stays fast while still exercising the full
-two-part confirmation gate.
+called with a low ``delay_threshold_ms``, so the suite stays fast while still
+exercising the full obfuscation matrix.
 
 Python 3.13 note: the connection handler is named ``_serve_conn`` (NOT
 ``_handle``) so it cannot shadow ``threading.Thread`` internals — same gotcha the
@@ -205,37 +207,79 @@ def test_marker_uniqueness_is_maintained() -> None:
 
 
 @pytest.mark.parametrize("technique", list(_MARKERS.keys()))
-def test_obfuscation_variant_detected(technique: str) -> None:
+def test_obfuscation_variant_produces_an_unconfirmed_lead(technique: str) -> None:
     """A server that hangs only on ``technique``'s obfuscation marker makes the
-    detector flag exactly that technique (with confirmed confidence), and NO
-    other technique — no false positive on the ones that did not hang."""
+    prober raise an UNCONFIRMED LEAD for exactly that technique, and for NO other —
+    the obfuscation-coverage signal this suite exists for.
+
+    A12/RED-PEN: what is asserted is a LEAD, never a detection. ``detected`` is
+    False and ``confidence`` is 0.0 for EVERY result, hung or not, because a hang
+    cannot distinguish a desynced back-end from an RFC 7230 §3.3.3-compliant origin
+    awaiting the rest of an incomplete declared body."""
     marker = _MARKERS[technique]
     with _server(marker=marker, delay=_DELAY_S) as port:
         results = detect("127.0.0.1", port, timeout=5.0, delay_threshold_ms=_THRESHOLD_MS)
     by = {r.technique: r for r in results}
 
     hit = by[technique]
-    assert hit.detected, f"{technique} not detected: {hit.model_dump()}"
-    assert hit.confidence > 0.0
+    assert hit.lead, f"{technique} raised no lead: {hit.model_dump()}"
     assert hit.probe_ms - hit.control_ms >= _THRESHOLD_MS
+    assert "UNCONFIRMED TIMING LEAD" in hit.rationale, hit.rationale
+
+    # nothing on this path is ever a confirmed desync
+    assert all(not r.detected for r in results), (
+        f"a timing probe claimed a CONFIRMED desync: "
+        f"{[r.model_dump() for r in results if r.detected]}"
+    )
+    assert all(r.confidence == 0.0 for r in results)
 
     others = [r for name, r in by.items() if name != technique]
-    assert all(not r.detected for r in others), (
-        f"false positive on non-hanging techniques while probing {technique}: "
-        f"{[r.model_dump() for r in others if r.detected]}"
+    assert all(not r.lead for r in others), (
+        f"false lead on non-hanging techniques while probing {technique}: "
+        f"{[r.model_dump() for r in others if r.lead]}"
     )
 
 
 def test_no_false_positive_on_benign_server() -> None:
-    """A server that never hangs (no marker) yields no detection for ANY
-    technique — the whole suite stays clean against a non-desyncing peer."""
+    """A server that never hangs (no marker) yields NO LEAD and no detection for ANY
+    technique — the whole suite stays clean against a non-desyncing peer.
+
+    RED-PEN: this twin used to pass VACUOUSLY. Once the A12 probe stopped calling the
+    oracle, ``detected`` became a constant False and asserting it proved nothing. The
+    binding assertion is now on ``lead`` — the field the positive arm above asserts —
+    so both arms of the suite test the same, non-trivial property."""
     with _server(marker=None, delay=0.0) as port:
         results = detect("127.0.0.1", port, timeout=5.0, delay_threshold_ms=_THRESHOLD_MS)
     assert results, "detect() returned no results"
-    assert all(not r.detected for r in results), (
-        f"false positive on a benign server: "
-        f"{[r.model_dump() for r in results if r.detected]}"
+    assert all(not r.lead for r in results), (
+        f"false lead on a benign server: "
+        f"{[r.model_dump() for r in results if r.lead]}"
     )
+    assert all(not r.detected for r in results)
+    assert all("no timing lead" in r.rationale for r in results), (
+        f"a non-hanging probe was described as a delay: {[r.rationale for r in results]}"
+    )
+
+
+def test_rationale_does_not_misattribute_a_real_delay() -> None:
+    """RED-PEN: ``SmugglingResult.rationale`` used to read "no significant delay
+    (350ms)" when the delay WAS 350 ms, i.e. 200 ms OVER the caller's 150 ms
+    threshold, and the only reason nothing fired was the oracle refusing. The string
+    misattributed the cause. A delay past the threshold must now always be described
+    as a lead, and the negative string must quote the threshold it was measured
+    against."""
+    technique = "TE.TE"
+    with _server(marker=_MARKERS[technique], delay=_DELAY_S) as port:
+        results = detect("127.0.0.1", port, timeout=5.0, delay_threshold_ms=_THRESHOLD_MS)
+    hit = next(r for r in results if r.technique == technique)
+    delta = hit.probe_ms - hit.control_ms
+    assert delta >= _THRESHOLD_MS, hit.model_dump()
+    assert "no significant delay" not in hit.rationale, hit.rationale
+    assert "UNCONFIRMED TIMING LEAD" in hit.rationale, hit.rationale
+    # and the benign string names the threshold, so "within Nms" is never read as
+    # "the oracle refused"
+    clean = next(r for r in results if not r.lead)
+    assert f"threshold {_THRESHOLD_MS:.0f}ms" in clean.rationale, clean.rationale
 
 
 def test_detect_reports_the_full_technique_suite() -> None:

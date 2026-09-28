@@ -7,10 +7,13 @@ Two properties matter and are tested here:
     unchanged: the arsenal lead lists stay empty and no arsenal-only bug class ever
     reaches active_findings. This is what keeps `make gate` byte-identical.
   * ADDITIVE + GATED + ORACLE-ANCHORED — with the flag ON the modules run: content /
-    JS discovery surface LEADS (never confirmed), request smuggling and CSWSH confirm
-    through their oracles (with a re-verifiable certificate), a benign server yields no
-    smuggling false positive, and the raw-socket modules refuse an unauthorized host
-    (fail-closed).
+    JS discovery surface LEADS (never confirmed), CSWSH confirms through its oracle
+    (with a re-verifiable certificate), the request-smuggling TIMING probe confirms
+    NOTHING — A12/RED-PEN: a hang cannot distinguish a desynced back-end from an
+    RFC 7230 §3.3.3-compliant origin awaiting the rest of an incomplete declared
+    body, so scanner/smuggling.py no longer calls an oracle at all — a benign server
+    yields no smuggling false positive, and the raw-socket modules refuse an
+    unauthorized host (fail-closed).
 
 All traffic is loopback. The smuggling and WS servers are raw-socket fixtures (the
 same shapes scanner.smuggling / scanner.websocket are unit-tested against).
@@ -27,6 +30,8 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Iterator
 from urllib.parse import parse_qs, urlsplit
+
+import pytest
 
 from framework.v2.scanner.campaign import WebScanCampaign
 

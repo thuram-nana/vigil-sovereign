@@ -113,6 +113,21 @@ def _script_raw(v: str) -> str:
     return f"<html><body><script>var q = '{v}';</script></body></html>"
 
 
+def _script_bslash_raw(v: str) -> str:
+    """The server that escapes the QUOTE but not the BACKSLASH — the context the
+    ``\\';…//`` statement-break payload is actually designed for.
+
+    The plain ``_script_raw`` splice is NOT vulnerable to that payload, and that is
+    a fact, not an opinion: node evaluates ``var q = '\\';vigMARKER//';`` to the
+    STRING ``';vigMARKER//`` — no injection. The entry used to "confirm" against
+    ``_script_raw`` only because the reflection oracle fired on mere PRESENCE of the
+    marker inside a ``<script>`` (audit F4), so that fixture was modelling an UNSOUND
+    detection. Here the input's ``'`` is escaped to ``\\'``, so the payload's leading
+    backslash pairs with it, the literal closes, and the marker lands at CODE
+    position — which node confirms executes."""
+    return _script_raw(v.replace("'", "\\'"))
+
+
 # encoded twins (same context, value HTML-entity-encoded)
 def _text_enc(v: str) -> str:
     return _text_raw(_enc(v))
@@ -236,7 +251,9 @@ CASES: list[tuple[str, Render, Render | None]] = [
     ("m2-xss-jsurl-href", _href_raw, None),
     # JS string inside an existing <script> (needs JS-encoding, NOT entity)
     ("m2-xss-script-string-break", _script_raw, None),
-    ("m2-xss-script-string-stmt", _script_raw, None),
+    # statement-break: needs the quote-escaping (backslash-unescaping) server — see
+    # _script_bslash_raw. Against the verbatim splice this payload does NOT break out.
+    ("m2-xss-script-string-stmt", _script_bslash_raw, None),
 ]
 
 _CASE_IDS = [c[0] for c in CASES]
@@ -407,3 +424,220 @@ def test_no_entry_confirms_on_plain_encoded_text(entry_id: str) -> None:
     assert _confirm(check, _plain_encoded_text) is None, (
         f"{entry_id} fired on a plain HTML-encoded text reflection"
     )
+
+
+# ---------------------------------------------------------------------------
+# PRECISION (audit F4/R5): the oracle must NOT confirm where the page escaped
+# correctly — the two shapes that used to mint a High xss FACT.
+# ---------------------------------------------------------------------------
+
+
+def _json_script_safe(v: str) -> str:
+    """Django ``json_script`` / Rails ``json_escape``: JSON-encode, then escape the
+    markup metacharacters as ``\\uXXXX`` so nothing in the value can terminate the
+    element or the literal. The canonical CORRECT way to hand a value to JS."""
+    import json as _json
+
+    lit = (_json.dumps(v).replace("<", "\\u003c").replace(">", "\\u003e")
+           .replace("&", "\\u0026").replace("/", "\\/"))
+    return ("<html><body><div id=app></div>"
+            f"<script>window.__BOOTSTRAP__ = {{\"query\": {lit}}};</script></body></html>")
+
+
+def _quot_escaped_handler(v: str) -> str:
+    """A handler the PAGE composed, with the value correctly ``&quot;``-escaped into
+    it. HTML attribute values are entity-decoded unconditionally, so the marker
+    reaches the ``on*`` value as DATA — it did not break out."""
+    return f'<html><body><button onclick="search(&quot;{_enc(v)}&quot;)">go</button></body></html>'
+
+
+def _json_data_block(v: str) -> str:
+    """A ``type="application/json"`` block: the browser never executes it."""
+    return f'<html><body><script type="application/json">{{"q": "{v}"}}</script></body></html>'
+
+
+def _noscript_container(v: str) -> str:
+    """Raw-text container: ``<xMARKER>`` here is inert text, not a live element.
+
+    With scripting enabled the HTML LS gives a ``noscript`` start tag the GENERIC
+    RAW TEXT element parsing algorithm, so even a nested ``<script>`` is text.
+    Chromium 150, measured: executes nothing from inside here."""
+    return f"<html><body><noscript>{v}</noscript></body></html>"
+
+
+def _template_container(v: str) -> str:
+    """AUDIT-B8. ``<template>`` was in ``_INERT_TEXT_CONTAINERS`` but had NO
+    parametrisation, so nothing exercised it. Its contents are parsed into an inert
+    ``DocumentFragment``: scripts there never run. Chromium 150, measured:
+    ``<template><script>…</script></template>`` executes nothing."""
+    return f"<html><body><template>{v}</template></body></html>"
+
+
+# AUDIT-B8 — this tuple used to OMIT the entire `script-element-injection` family,
+# which is precisely the three entries whose payloads reach `handle_data` and so
+# the only three that could reproduce B1. Emptying `_INERT_TEXT_CONTAINERS` killed
+# only two tests, both on the tag/attribute path. They are named explicitly here so
+# the omission cannot silently recur.
+_SCRIPT_ELEMENT_INJECTION = (
+    "m2-xss-script-close-reopen", "m2-xss-script-title-close", "m2-xss-script-svg-nested",
+)
+
+_ALL_BUT_CONTAINER_BREAKERS = (
+    "m2-xss-tag-svg-onload", "m2-xss-tag-img-onerror", "m2-xss-script-string-break",
+    "m2-xss-attr-dq-onmouseover", "m2-xss-jsurl-href",
+) + _SCRIPT_ELEMENT_INJECTION
+
+@pytest.mark.parametrize(
+    "render, entries, why",
+    [
+        (_json_script_safe, _ALL_BUT_CONTAINER_BREAKERS + ("m2-xss-tag-textarea-newtag",),
+         "json_script JS-string escaping"),
+        (_quot_escaped_handler, _ALL_BUT_CONTAINER_BREAKERS + ("m2-xss-tag-textarea-newtag",),
+         "&quot;-escaped page-composed handler"),
+        # AUDIT-B8: `m2-xss-script-close-reopen` is EXCLUDED here on purpose. Its
+        # payload OPENS with `</script>`, which terminates a script element's raw
+        # text WHATEVER its `type` is, so the `<script>` it then opens is a LIVE one
+        # and the escape is REAL. Chromium 150, measured: it EXECUTES. See the
+        # companion assertion below. The other two script-element entries do NOT
+        # escape (`</title>` and `<svg>` are not script-data terminators) and are
+        # measured inert, so they stay in the set.
+        (_json_data_block,
+         tuple(e for e in _ALL_BUT_CONTAINER_BREAKERS if e != "m2-xss-script-close-reopen")
+         + ("m2-xss-tag-textarea-newtag",),
+         "non-executable application/json script"),
+        # NOTE the entry set here EXCLUDES m2-xss-tag-textarea-newtag on purpose: its
+        # payload OPENS with `</textarea></noscript>`, so it genuinely escapes the
+        # container and SHOULD still confirm — see the companion assertion below.
+        (_noscript_container, _ALL_BUT_CONTAINER_BREAKERS, "raw-text <noscript> container"),
+        (_template_container, _ALL_BUT_CONTAINER_BREAKERS, "inert <template> container"),
+    ],
+    ids=["json_script", "quot_escaped_handler", "json_data_block", "noscript", "template"],
+)
+def test_correctly_escaped_pages_never_confirm_xss(
+    render: Render, entries: tuple[str, ...], why: str
+) -> None:
+    for entry_id in entries:
+        confirmed = _confirm(compile_entry(_by_id(entry_id)), render)
+        assert confirmed is None, f"{entry_id} minted a FACT against {why}"
+
+
+@pytest.mark.parametrize("render, container",
+                         [(_noscript_container, "noscript"), (_template_container, "template")],
+                         ids=["noscript", "template"])
+@pytest.mark.parametrize("entry_id", _SCRIPT_ELEMENT_INJECTION)
+def test_B1_script_element_injection_into_an_inert_container_mints_nothing(
+    entry_id: str, render: Render, container: str
+) -> None:
+    """AUDIT-B1, asserted END-TO-END through the shipped payload library, the live
+    loopback fixture and the real `confirm_finding` authority — not just the oracle.
+
+    These SIX combinations (3 shipped entries x 2 containers) all minted
+    `bug_class=xss severity=High confidence=0.9` before the fix. CHROMIUM 150,
+    measured on the same rendered bytes: 0 of 6 execute anything."""
+    confirmed = _confirm(compile_entry(_by_id(entry_id)), render)
+    assert confirmed is None, (
+        f"{entry_id} minted a High/0.9 xss FACT inside <{container}>, "
+        "which Chromium does not execute")
+
+
+def test_a_script_close_payload_still_escapes_a_json_data_block() -> None:
+    """The B1/B2 precision work must not cost the REAL escape. `</script>`
+    terminates a script element's raw text regardless of its `type`, so
+    `</script><script>…</script>` genuinely reopens a LIVE script out of a
+    `type="application/json"` block. Chromium 150, measured: EXECUTES."""
+    confirmed = _confirm(compile_entry(_by_id("m2-xss-script-close-reopen")), _json_data_block)
+    assert confirmed is not None, "lost a real escape out of a data block"
+    assert confirmed.confirmed_by is OracleKind.REFLECTION_CONTEXT
+    assert _reflection_context(confirmed) == "script"
+
+
+def test_container_escaping_payload_still_confirms_out_of_noscript() -> None:
+    # the precision fix must not cost a real detection: a payload that CLOSES the
+    # raw-text container genuinely reaches live markup and must still confirm.
+    # (No SHIPPED entry closes `</template>`, so the template escape is asserted
+    # directly against the oracle in
+    # verify/tests/test_structural_and_context.py::
+    # test_B1_a_payload_that_CLOSES_the_container_still_fires.)
+    confirmed = _confirm(compile_entry(_by_id("m2-xss-tag-textarea-newtag")), _noscript_container)
+    assert confirmed is not None, "the <noscript> escape lost a real detection"
+    assert confirmed.confirmed_by is OracleKind.REFLECTION_CONTEXT
+
+
+# ---------------------------------------------------------------------------
+# RED-PEN B1 (END-TO-END) — the lexer desync, through confirm_finding +
+# OracleVerifier, against a live loopback page.
+#
+# `_json_script_safe` above is the canonical CORRECT defence and the suite already
+# asserts it never confirms. Add ONE benign regex literal containing an apostrophe
+# — `/(\w+)'s\b/g`, the sort of thing a real page carries to render possessives —
+# and the whole assertion collapsed: MEASURED on 1ccd18a5, 4 of the 17 m2 entries
+# minted a High xss FACT at conf 0.90 through the full authority, certificate
+# evidence reading "injection into an executable position PROVEN". It was not
+# proven. The apostrophe opened a phantom string state and the opening quote of the
+# JSON literal closed it, putting the escaped value at apparent code position.
+# ---------------------------------------------------------------------------
+
+
+def _json_script_safe_with_regex(v: str) -> str:
+    """`_json_script_safe` plus ONE benign possessive-matching regex ahead of it.
+    The page is exactly as SAFE as its twin: nothing in the value can terminate the
+    element or the literal."""
+    import json as _json
+
+    lit = (_json.dumps(v).replace("<", "\\u003c").replace(">", "\\u003e")
+           .replace("&", "\\u0026").replace("/", "\\/"))
+    return ("<html><body><div id=app></div>"
+            "<script>var POSSESSIVE = /(\\w+)'s\\b/g;\n"
+            f"window.__BOOTSTRAP__ = {{\"query\": {lit}}};</script></body></html>")
+
+
+@pytest.mark.parametrize("entry_id", _CASE_IDS)
+def test_json_script_plus_a_benign_regex_never_confirms_xss(entry_id: str) -> None:
+    confirmed = _confirm(compile_entry(_by_id(entry_id)), _json_script_safe_with_regex)
+    assert confirmed is None, (
+        f"{entry_id} minted a {getattr(confirmed, 'severity', '?')} FACT at "
+        f"{getattr(confirmed, 'confidence', 0):.2f} against a correctly json_script-escaped "
+        f"page that merely contains a regex literal"
+    )
+
+
+def _src_bearing_script(v: str) -> str:
+    return f'<html><body><script src="/app.js">var q = {v};</script></body></html>'
+
+
+# This payload OPENS with `</script>`, so it genuinely TERMINATES the element and
+# the `<script>` it then opens is a real, live, src-less element — it must still
+# confirm (see the companion assertion below).
+#
+# `m2-xss-script-title-close` and `m2-xss-script-svg-nested` deliberately do NOT
+# belong here: their `<script>` tag sits INSIDE the outer element's raw text, which
+# a browser does not parse as markup, and the outer element ignores that text
+# because it bears `src`. Both of them DID confirm before the B2 fix.
+_SCRIPT_ELEMENT_ESCAPERS = ("m2-xss-script-close-reopen",)
+
+
+@pytest.mark.parametrize(
+    "entry_id", [e for e in _CASE_IDS if e not in _SCRIPT_ELEMENT_ESCAPERS])
+def test_a_src_bearing_script_never_confirms_xss_end_to_end(entry_id: str) -> None:
+    """RED-PEN B2 end-to-end: a `<script src=...>` never evaluates its child text, so
+    a reflection CONFINED to that child text cannot be an xss FACT however it lands."""
+    confirmed = _confirm(compile_entry(_by_id(entry_id)), _src_bearing_script)
+    assert confirmed is None, f"{entry_id} minted a FACT inside a src-bearing <script>"
+
+
+@pytest.mark.parametrize("entry_id", _SCRIPT_ELEMENT_ESCAPERS)
+def test_a_payload_that_leaves_the_src_bearing_script_still_confirms(entry_id: str) -> None:
+    """The mutation control for the `src` rule: it must not cost a real detection. A
+    payload that CLOSES the element reaches live markup outside it and still mints."""
+    confirmed = _confirm(compile_entry(_by_id(entry_id)), _src_bearing_script)
+    assert confirmed is not None, f"{entry_id} stopped confirming after the src fix"
+    assert confirmed.confirmed_by is OracleKind.REFLECTION_CONTEXT
+
+
+def test_the_raw_script_splice_still_confirms_end_to_end() -> None:
+    """The mutation control for both B1 and B2 at the end-to-end layer: the SAME
+    entry that the two negatives above must refuse still mints against a genuinely
+    vulnerable raw splice, so neither negative is vacuous."""
+    confirmed = _confirm(compile_entry(_by_id("m2-xss-script-string-break")), _script_raw)
+    assert confirmed is not None
+    assert confirmed.confirmed_by is OracleKind.REFLECTION_CONTEXT

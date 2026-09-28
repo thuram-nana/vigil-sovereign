@@ -84,20 +84,23 @@ def test_raw_send_reaches_a_server() -> None:
         assert b"200 OK" in data and elapsed >= 0
 
 
-def test_smuggling_timing_desync_detected() -> None:
+def test_smuggling_timing_hang_raises_an_unconfirmed_lead() -> None:
     with _server(delay=2.0) as port:
         results = detect("127.0.0.1", port, timeout=5.0, delay_threshold_ms=1200.0)
-        hits = [r for r in results if r.detected]
-        assert hits, f"desync not detected: {[r.model_dump() for r in results]}"
+        hits = [r for r in results if r.lead]
+        assert hits, f"no lead raised on a hanging server: {[r.model_dump() for r in results]}"
         assert hits[0].probe_ms - hits[0].control_ms >= 1200.0
-        assert hits[0].confidence > 0.0
-        # A12: a timing delta is a LEAD, not a confirmed desync (a normal origin awaiting an incomplete body
-        # delays identically) — the rationale must say so, never claim a confirmed "High desync".
-        assert "TIMING LEAD" in hits[0].rationale
+        # A12/RED-PEN: a timing delta is a LEAD, never a confirmed desync (a normal origin awaiting an
+        # incomplete declared body delays identically). No oracle is consulted, so there is no confidence
+        # and nothing is ever `detected`.
+        assert "UNCONFIRMED TIMING LEAD" in hits[0].rationale
+        assert all(not r.detected and r.confidence == 0.0 for r in results), \
+            f"a timing probe claimed a confirmed desync: {[r.model_dump() for r in results if r.detected]}"
 
 
 def test_no_false_positive_on_fast_server() -> None:
     with _server(delay=0.0) as port:
         results = detect("127.0.0.1", port, timeout=5.0, delay_threshold_ms=1200.0)
-        assert all(not r.detected for r in results), \
-            f"false positive on a non-desyncing server: {[r.model_dump() for r in results]}"
+        assert all(not r.lead for r in results), \
+            f"false lead on a non-desyncing server: {[r.model_dump() for r in results]}"
+        assert all(not r.detected for r in results)
