@@ -41,6 +41,10 @@ def test_the_only_fact_capable_tools_are_the_ones_with_a_shipped_re_drive():
     # SERVICE_REACHABILITY (the H5 reuse; all six re-prove each proposed port with the runner's own gated
     # handshake); sslscan → TLS_WEAKNESS. Growing this set is deliberate — each addition must PASS
     # live.conformance.run_toolspec_conformance first.
+    # HexStrike W2 does NOT grow this set: httpx/ffuf propose urls and VIGIL re-drives them through the
+    # gated sibling-differential capture, but that branch (achieved_state.endpoint_liveness) is declared
+    # LEAD-only PERMANENTLY after five adversarial rounds, so the re-drive is a LEAD ENRICHER and the two
+    # tools stay fact_capable=false. See docs/capability-matrix/evidence-branches.json.
     fact = {m.name for m in load_manifests(_MATRIX) if m.fact_capable}
     assert fact == {"nmap", "sslscan", "masscan", "rustscan", "naabu", "zmap", "unicornscan"}, (
         f"unexpected fact_capable set: {fact}")

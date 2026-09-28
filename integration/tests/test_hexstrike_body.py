@@ -8,10 +8,13 @@ through the R4 runner against a loopback listener — no mocks.
 """
 from __future__ import annotations
 
+import http.server
+import json
 import shutil
 import socket
 import subprocess
 import sys
+import threading
 from pathlib import Path
 
 import pytest
@@ -432,6 +435,98 @@ def test_h5_batch2_live_fact_through_the_body(tool: str, tmp_path: Path):
 
 
 # ===================================================================================================
+# W2 — ``ok`` is TRUTHFUL PER TOOL CLASS (red-pen advisory D)
+# ===================================================================================================
+class _LiveItemApp(http.server.BaseHTTPRequestHandler):
+    """/item/ZQabcdefgh has real content; every same-shape sibling gets the route's own stable 200
+    not-found body. The differential is REAL, so the deterministic oracle fires — and admission still
+    demotes it, because the branch is LEAD-only. Exactly the shape of a successful enrichment."""
+
+    def log_message(self, *a):  # noqa: D401
+        pass
+
+    def do_GET(self):  # noqa: N802
+        body = (b'{"item":"ZQabcdefgh","owner":"acme","qty":7}'
+                if self.path.split("?")[0] == "/item/ZQabcdefgh" else b'{"item":null}')
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
+def test_a_successful_lead_enricher_run_reports_ok_true_without_implying_a_fact(tmp_path: Path):
+    """``ok=bool(facts)`` is the right success predicate for an ORACLE-MAPPED tool and a CATEGORY ERROR
+    for a LEAD ENRICHER. httpx/ffuf re-drive on ``achieved_state.endpoint_liveness``, which is
+    fact_capable=false PERMANENTLY, so a FULLY SUCCESSFUL run (tool ran, gated GETs completed, both
+    sibling cohorts probed, capture retained, LEAD emitted) minted zero facts and used to come back
+    ``executed=True, ok=False`` — a consumer keying on ``ok`` (the run report, ``learn``, a retry loop)
+    read a healthy enrichment as a failure.
+
+    Pin the fixed semantics AND the honesty bound: ok is True, ``ok_semantics`` says WHY (so nobody has to
+    infer it), ``n_facts`` is 0 and ``facts`` is empty — the truthful ok never implies a FACT."""
+    _charter(tmp_path, "127.0.0.1")
+    from vigil_integration.live.external_tool import httpx_url_scan
+
+    srv = http.server.HTTPServer(("127.0.0.1", 0), _LiveItemApp)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    port = srv.server_address[1]
+    url = f"http://127.0.0.1:{port}/item/ZQabcdefgh"
+    ledger = NonceLedger(tmp_path / "nonces")
+    cap = _capability_for(httpx_url_scan(scheme="http"), "127.0.0.1", ledger)
+    deps = RunnerDeps(scope_gate=ScopeGate(scope=StaticScopeSource(["127.0.0.1"]), loopback_allowed_if_scoped=True),
+                      backend=_CannedBackend(
+                          json.dumps({"url": url, "input": url, "status_code": 200, "failed": False}) + "\n"),
+                      engagement_slug="alpha", signers=SIGNERS, capability=cap, timeout=30.0)
+    body = HexstrikeAgentBody(posture="staging", runner=deps)
+    try:
+        action = ProposedAction(kind="httpx", target="127.0.0.1", params={"danger": "recon"})
+        decision = body.gate(action)
+        assert decision.authorized is True                       # recon + staging => auto-eligible
+        outcome = body.execute(action, decision)
+    finally:
+        srv.shutdown()
+    assert outcome.executed is True, outcome
+    assert outcome.ok is True, (
+        f"a successful LEAD-ENRICHER run reported ok=False — a consumer keying on ok reads this healthy "
+        f"enrichment as a failure: {outcome.detail}")
+    assert outcome.detail.get("ok_semantics") == "lead_enricher", outcome.detail
+    assert outcome.detail.get("tool_errored") is False, outcome.detail
+    # ...and ok=True still implies NOTHING about a FACT. This branch mints none, and must not look like it.
+    assert outcome.detail.get("n_facts") == 0 and not outcome.detail.get("facts"), outcome.detail
+    assert outcome.detail.get("n_leads", 0) >= 1, f"the enrichment produced no LEAD at all: {outcome.detail}"
+    assert "demoted to a lead" in (outcome.detail["leads"][0].note or "").lower(), outcome.detail["leads"]
+    assert ledger.is_consumed("cap-1"), "the body must burn the single-use capability nonce (H8f gate parity)"
+
+
+def test_the_fact_based_ok_semantics_are_unchanged_for_oracle_mapped_tools(tmp_path: Path):
+    """The other half of advisory D: the lead-enricher fix must NOT loosen ``ok`` for a tool that CAN
+    mint. For an oracle-mapped tool ``ok`` still means "the runner minted a FACT" — a canned proposal of a
+    CLOSED port re-driven by VIGIL's own handshake finds nothing, so ok stays False even though the tool
+    itself ran perfectly. That asymmetry is the point: only the branch that can never mint gets the
+    execution-based predicate."""
+    _charter(tmp_path, "127.0.0.1")
+    tmp = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    tmp.bind(("127.0.0.1", 0))
+    closed_port = tmp.getsockname()[1]
+    tmp.close()                                                   # nothing is listening on this port now
+    ledger = NonceLedger(tmp_path / "nonces")
+    spec = masscan_service_scan(ports=str(closed_port), rate=1000)
+    cap = _capability_for(spec, "127.0.0.1", ledger)
+    deps = RunnerDeps(scope_gate=ScopeGate(scope=StaticScopeSource(["127.0.0.1"]), loopback_allowed_if_scoped=True),
+                      backend=_CannedBackend(f"Discovered open port {closed_port}/tcp on 127.0.0.1\n"),
+                      engagement_slug="alpha", signers=SIGNERS, capability=cap)
+    body = HexstrikeAgentBody(posture="staging", runner=deps)
+    action = ProposedAction(kind="masscan", target="127.0.0.1",
+                            params={"ports": str(closed_port), "danger": "recon"})
+    outcome = body.execute(action, body.gate(action))
+    assert outcome.executed is True, outcome
+    assert outcome.detail.get("ok_semantics") == "fact", outcome.detail
+    assert outcome.detail.get("n_facts") == 0, outcome.detail
+    assert outcome.ok is False, f"an oracle-mapped tool that minted nothing must stay ok=False: {outcome.detail}"
+
+
+# ===================================================================================================
 # H7 — the body integrates BY SHARED ORACLE FAMILY: the FACT-capable set is DERIVED from the family
 # registry (not a flat hand-kept list), and the chain's tools fuse by family into raised-priority LEADs
 # that can NEVER become a FACT.
@@ -443,6 +538,9 @@ def test_h7_oracle_mapped_set_is_derived_from_the_family_registry():
     from vigil_integration.brains.hexstrike_body import _ORACLE_MAPPED_TOOLS, _SPEC_BUILDER_TOOLS
     from vigil_integration.live.oracle_families import is_fact_capable_family, oracle_mapped_tools
 
+    # httpx/ffuf are NOT here: they have R4 ToolSpec builders and still run the gated web re-drive, but
+    # as LEAD ENRICHERS (hexstrike_body._LEAD_ENRICHER_TOOLS) — their branch is LEAD-only, so they are
+    # absent from SPEC_BUILDER_TOOLS and therefore cannot be oracle-mapped. A builder is not a mint.
     assert _ORACLE_MAPPED_TOOLS == oracle_mapped_tools(_SPEC_BUILDER_TOOLS)
     assert _ORACLE_MAPPED_TOOLS == {"nmap", "sslscan", "masscan", "rustscan", "naabu", "zmap", "unicornscan"}
     for tool in _ORACLE_MAPPED_TOOLS:

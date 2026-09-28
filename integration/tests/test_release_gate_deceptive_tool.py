@@ -246,7 +246,16 @@ def _selfsigned(sha: str):
 
 
 class _TLSServer:
-    """A minimal threaded loopback TLS server that completes handshakes presenting the given cert."""
+    """A minimal threaded loopback TLS server that completes handshakes presenting the given cert.
+
+    The protocol floor AND the cipher list are set EXPLICITLY, because Python's default
+    ``PROTOCOL_TLS_SERVER`` context is not a strong endpoint on this OpenSSL build: its
+    ``minimum_version`` is SSLv3 (so it really does complete a TLS1.0-only handshake) and its suite list
+    really does contain ANONYMOUS key exchange (ADH / AECDH, no server authentication at all). Since WAVE 3
+    the runner probes both of those directly, and would correctly mint TRUE FACTs over them. A fixture named
+    "a STRONG endpoint" therefore has to be strong in the PROTOCOL and CIPHER dimensions too, not only in its
+    certificate's signature hash — otherwise the deception test would be asserting "no FACT" against an
+    endpoint that genuinely has two."""
 
     def __init__(self, cert_pem: bytes, key_pem: bytes):
         import ssl
@@ -258,6 +267,8 @@ class _TLSServer:
         kf.write_bytes(key_pem)
         self._ssl = ssl
         self._ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        self._ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+        self._ctx.set_ciphers("ECDHE-RSA-AES256-GCM-SHA384:ECDHE-RSA-AES128-GCM-SHA256")
         self._ctx.load_cert_chain(str(cf), str(kf))
         self._sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self._sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)

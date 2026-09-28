@@ -37,8 +37,10 @@ import json
 import os
 import random
 import re
+import secrets
 import select
 import sys
+import threading
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -387,6 +389,23 @@ class HttpExecutor:
     # Internal mutable state.
     _requests_made: int = 0
     _last_request_at: float = 0.0
+    # W7 (perf) — CONCURRENCY SAFETY (DEFENSIVE). The timing path is SERIAL today
+    # (the staged concurrent sweep was removed — see the note above the serial timing
+    # loop in engine.py), but this ONE executor is shared, so the mutable counters, the
+    # action-id minter and the rate-limit anchor are guarded to stay correct should a
+    # caller ever be run concurrently. The lock is held only for bookkeeping arithmetic
+    # — never across the network I/O and never across the rate-limit sleep. Nothing about
+    # the serial path changes: with one caller the lock is uncontended, `_reserved` is
+    # always 0, and the rate anchor still ends up at the previous request's COMPLETION.
+    _lock: threading.RLock = field(default_factory=threading.RLock, repr=False, compare=False)
+    # Requests admitted by the gate but not yet counted into `_requests_made` (i.e. in
+    # flight). Counted against the budget so N concurrent callers can never overshoot it.
+    _reserved: int = 0
+    # Per-action-id sequence. See `_next_action_id`: the id is wall-clock ms + a
+    # per-EXECUTOR nonce + this counter, so it never drifts off the clock and never
+    # collides with a sibling executor's ids or with a previous process's.
+    _action_seq: int = 0
+    _id_nonce: str = field(default_factory=lambda: secrets.token_hex(3), repr=False, compare=False)
     _scope_violations: int = 0
     _budget_refusals: int = 0
     _destructive_refusals: int = 0
@@ -529,7 +548,7 @@ class HttpExecutor:
 
     def _run_gates(
         self, method: str, url: str, action_id: str, *,
-        body: "str | bytes | None" = None,
+        body: "str | bytes | None" = None, reserve: bool = False,
     ) -> ExecutionOutcome | None:
         """Run the full per-action safety chain and return a refusal outcome if
         any gate denies, else None (the action may proceed to I/O).
@@ -546,6 +565,21 @@ class HttpExecutor:
         owner sees — and any per-action approval token covers — the payload, not
         just (method, url). ``body=None`` (the GET / no-body path) is
         byte-identical to before.
+
+        ``reserve`` (W7) makes the budget check ATOMIC with claiming the slot: the
+        caller may have CONCURRENT siblings, and a plain check-then-spend lets K of
+        them each spend the same last request. When set, passing the budget gate also
+        takes an in-flight reservation that the caller MUST release with
+        :meth:`_release_slot` once the request is done. Default False keeps every
+        serial caller byte-identical (``_reserved`` never leaves 0).
+
+        **Reservation-leak invariant.** A reservation that is taken and never released
+        permanently shrinks the budget — 10 leaks turn a budget of 10 into zero real
+        requests, i.e. a silent self-DoS of the engagement. The reservation is therefore
+        the LAST thing the chain does, and everything after it is wrapped so that a
+        refusal OR an exception releases it before this method returns. Do not add a gate
+        below the reservation that can return a refusal without going through
+        ``_admitted``; see :func:`test_no_refusing_gate_may_follow_the_budget_reservation`.
         """
         halt = self._authority_gate(method, url, action_id)
         if halt is not None:
@@ -604,7 +638,16 @@ class HttpExecutor:
                     status_code=0,
                 )
 
-        if self._requests_made >= self.request_budget:
+        # Per-engagement budget. Counted against tallied requests PLUS the ones already
+        # admitted and still in flight, and — under `reserve` — the check and the claim
+        # happen together under the lock, so K concurrent callers can never each spend the
+        # same last slot. `_reserved` is 0 on every serial path, so this is the check it
+        # always was.
+        with self._lock:
+            over_budget = (self._requests_made + self._reserved) >= self.request_budget
+            if not over_budget and reserve:
+                self._reserved += 1
+        if over_budget:
             self._budget_refusals += 1
             self._log_event(
                 "budget.exhausted", action_id=action_id,
@@ -615,9 +658,40 @@ class HttpExecutor:
                 status_code=0,
             )
 
-        # Rate limit (posture-aware).
-        self._sleep_for_rate_limit()
-        return None
+        # ---- BELOW HERE THE BUDGET SLOT IS CLAIMED ----------------------------------
+        # Anything that can refuse or raise from this point must release it first, or the
+        # budget shrinks by one per leak. `admitted` is set ONLY on the path that hands the
+        # caller the slot; every other exit releases.
+        admitted = False
+        try:
+            # Warm the shared client BEFORE the spacing window opens. Building it (TLS
+            # context, transport, the sovereign egress transport) is a one-off cost paid by
+            # whichever caller reaches it first; paid INSIDE the window it would push that
+            # caller's bytes out well after its reserved start instant and compress the
+            # first inter-arrival gap below the posture floor — measured at 0.137s against
+            # a 0.2s floor. Warming here makes gate-exit the moment the request is handed
+            # to the socket, which is what the floor is spacing.
+            #
+            # Residual, stated honestly: over a real network the TCP/TLS handshake still
+            # sits between gate exit and the target seeing the request. The guarantee is
+            # therefore one request ADMITTED TO THE NETWORK per floor — the right unit for
+            # "do not exceed the authorized rate from this box" — not one request parsed by
+            # the target per floor.
+            if not self.dry_run:
+                try:
+                    self._client()
+                except Exception:  # noqa: BLE001 - surfaces again at issue time, as before
+                    pass
+            # Rate limit (posture-aware).
+            self._sleep_for_rate_limit()
+            # `admitted` is set and the caller is handed the slot in the same breath, on
+            # purpose: there is nowhere left to slip a refusing gate in between. A new
+            # gate goes ABOVE this pair, where the `finally` covers it.
+            admitted = True
+            return None
+        finally:
+            if reserve and not admitted:
+                self._release_slot()
 
     def execute(
         self,
@@ -632,7 +706,7 @@ class HttpExecutor:
             return refusal
 
         if self.dry_run:
-            self._requests_made += 1
+            self._mark_request_done(anchor=False)  # guarded tally; no wire, so no anchor
             self._log_event(
                 "dry_run.skipped", action_id=action_id, method=method, url=url,
             )
@@ -679,7 +753,7 @@ class HttpExecutor:
             if refusal is not None:
                 return refusal  # a gate denied one probe -> the whole finding is refused
             if self.dry_run:
-                self._requests_made += 1
+                self._mark_request_done(anchor=False)  # guarded tally; no wire, so no anchor
                 self._log_event("dry_run.skipped", action_id=action_id, method=method, url=url)
                 return ExecutionOutcome(
                     success=False,
@@ -741,18 +815,25 @@ class HttpExecutor:
 
         # Thread the REAL body into the gate: the destructive-confirm binds its sha256 over the exact bytes
         # ``_capture`` transmits below, so the owner sees — and a per-action token covers — the payload.
-        refusal = self._run_gates(method, url, action_id, body=body)
+        # W7 (DEFENSIVE): the timing path is serial today, but this executor is shared
+        # and written to stay correct under a concurrent caller. Claim the budget slot
+        # atomically with the gate and hold it for the whole time the request is on the
+        # wire, so a concurrent caller's gate counts it and cannot overshoot the budget.
+        refusal = self._run_gates(method, url, action_id, body=body, reserve=True)
         if refusal is not None:
             return {"status": 0, "body": "", "headers": [], "latency_ms": 0.0, "refused": refusal.note}
-        if self.dry_run:
-            self._requests_made += 1
-            self._log_event("dry_run.skipped", action_id=action_id, method=method, url=url)
-            return {"status": 0, "body": "", "headers": [], "latency_ms": 0.0}
+        try:
+            if self.dry_run:
+                self._mark_request_done(anchor=False)  # a dry run puts nothing on the wire
+                self._log_event("dry_run.skipped", action_id=action_id, method=method, url=url)
+                return {"status": 0, "body": "", "headers": [], "latency_ms": 0.0}
 
-        headers = {str(k): str(v) for k, v in raw_headers}
-        headers.setdefault("User-Agent", user_agent_for(self._resolved_posture, self.operator_identifier))
-        headers.setdefault("Accept", "*/*")
-        resp, refusal = self._capture(method, url, action_id, headers, body)
+            headers = {str(k): str(v) for k, v in raw_headers}
+            headers.setdefault("User-Agent", user_agent_for(self._resolved_posture, self.operator_identifier))
+            headers.setdefault("Accept", "*/*")
+            resp, refusal = self._capture(method, url, action_id, headers, body)
+        finally:
+            self._release_slot()
         if refusal is not None:
             return {"status": 0, "body": "", "headers": [], "latency_ms": 0.0, "refused": refusal.note}
         return resp  # type: ignore[return-value]
@@ -816,7 +897,11 @@ class HttpExecutor:
     # ---------------- HTTP issuance ----------------
 
     def _client(self) -> httpx.Client:
-        if self._http_client is None:
+        # Guarded so concurrent callers cannot each build (and leak) a client. httpx.Client
+        # is itself thread-safe once constructed.
+        with self._lock:
+            if self._http_client is not None:
+                return self._http_client
             kwargs: dict[str, object] = dict(
                 timeout=self.timeout_seconds,
                 follow_redirects=False,  # capture redirect chain manually
@@ -828,7 +913,7 @@ class HttpExecutor:
                 # hosts before any bytes leave the host.
                 kwargs["transport"] = SovereignHttpxTransport(self.egress_allowlist)
             self._http_client = httpx.Client(**kwargs)  # type: ignore[arg-type]
-        return self._http_client
+            return self._http_client
 
     def _issue(
         self, *, action_id: str, method: str, url: str,
@@ -884,8 +969,7 @@ class HttpExecutor:
             )
             return self._refused(f"egress guard: {exc}", status_code=0)
         except httpx.HTTPError as exc:
-            self._requests_made += 1
-            self._last_request_at = time.time()
+            self._mark_request_done()
             self._log_event(
                 "http.error", action_id=action_id, method=method, url=url,
                 error=f"{type(exc).__name__}: {exc}",
@@ -898,8 +982,7 @@ class HttpExecutor:
 
         assert response is not None  # for type-checker; loop guarantees one
 
-        self._requests_made += 1
-        self._last_request_at = time.time()
+        self._mark_request_done()
 
         body_bytes = response.content
         body_excerpt = body_bytes[:_BODY_EXCERPT_BYTES].decode(
@@ -1013,8 +1096,7 @@ class HttpExecutor:
                             error=str(exc), redirect_chain=redirect_chain)
             return None, self._refused(f"egress guard: {exc}", status_code=0)
         except httpx.HTTPError as exc:
-            self._requests_made += 1
-            self._last_request_at = time.time()
+            self._mark_request_done()
             self._log_event("http.error", action_id=action_id, method=method, url=url,
                             error=f"{type(exc).__name__}: {exc}")
             return None, ExecutionOutcome(
@@ -1022,8 +1104,7 @@ class HttpExecutor:
                 note=f"http_executor: {type(exc).__name__}: {exc}")
 
         assert response is not None
-        self._requests_made += 1
-        self._last_request_at = time.time()
+        self._mark_request_done()
 
         body_bytes = response.content
         body_excerpt = body_bytes[:_BODY_EXCERPT_BYTES].decode("utf-8", errors="replace")
@@ -1070,7 +1151,28 @@ class HttpExecutor:
         )
 
     def _next_action_id(self) -> str:
-        return f"H-{int(time.time() * 1000) % 1_000_000_000:09d}"
+        """A unique action id — and therefore a unique evidence directory — per action.
+
+        ``H-<epoch ms>-<per-executor nonce>-<sequence>``. Three components, each closing a
+        distinct collision class:
+
+        * **the wall-clock millisecond** is the real one, ALWAYS. An earlier form forced a
+          shared counter to advance past the clock instead, which drifts: 20,000 mints in
+          23 ms left it 20 SECONDS ahead of real time, so the id stopped being a timestamp
+          at all — and §VI.4 asks the operator to grep their logs by it;
+        * **a per-executor nonce**, minted once per instance. Within-executor uniqueness is
+          not the class of bug here: `engage` builds TWO executors in one process, and a
+          restarted process re-mints from the clock, so both used to collide with ids
+          already on disk and overwrite a captured exchange. A random per-instance nonce
+          separates instances and runs without any shared state;
+        * **a monotonic sequence** under the lock, for two actions of the SAME executor in
+          the same millisecond (any concurrent caller of a shared executor can produce these).
+
+        Lexicographic order still follows time, and the id stays filesystem-safe."""
+        with self._lock:
+            self._action_seq += 1
+            seq = self._action_seq
+        return f"H-{int(time.time() * 1000):013d}-{self._id_nonce}-{seq:06d}"
 
     def _evidence_dir(self, action_id: str) -> Path:
         # Routes through paths.evidence_dir so an --ephemeral/ZDR session re-roots the
@@ -1078,19 +1180,66 @@ class HttpExecutor:
         return paths.evidence_dir(self.engagement_slug, action_id)
 
     def _sleep_for_rate_limit(self) -> None:
-        floor, jitter_max = _RATE_PROFILES[self._resolved_posture]
-        # An operator-set minimum interval can only TIGHTEN (raise) the floor — never lower it below what the
-        # charter posture mandates — so the control can slow a cautious first live run but never speed one up.
-        floor = max(floor, self._operator_min_interval)
-        if self._last_request_at <= 0.0:
-            base_wait = 0.0
-        else:
-            elapsed = time.time() - self._last_request_at
-            base_wait = max(0.0, floor - elapsed)
-        jitter = random.uniform(0.0, jitter_max) if jitter_max > 0 else 0.0
-        total = base_wait + jitter
+        """Hold the posture's minimum inter-request interval.
+
+        The arithmetic runs under the lock and RESERVES this request's start instant by
+        advancing the anchor (monotonically) to it, so N concurrent callers are spaced by
+        the SAME floor instead of all reading one stale anchor and bursting — the
+        posture rate limit is never exceeded, however many probes are in flight. The
+        sleep itself is OUTSIDE the lock, so waiting does not serialise the callers.
+
+        The serial path is unchanged: the start-reservation is immediately superseded by
+        the COMPLETION timestamp `_mark_request_done` writes, so the next request is still
+        spaced from the previous one's completion exactly as before."""
+        with self._lock:
+            floor, jitter_max = _RATE_PROFILES[self._resolved_posture]
+            # An operator-set minimum interval can only TIGHTEN (raise) the floor — never lower it below what the
+            # charter posture mandates — so the control can slow a cautious first live run but never speed one up.
+            floor = max(floor, self._operator_min_interval)
+            if self._last_request_at <= 0.0:
+                base_wait = 0.0
+            else:
+                elapsed = time.time() - self._last_request_at
+                base_wait = max(0.0, floor - elapsed)
+            jitter = random.uniform(0.0, jitter_max) if jitter_max > 0 else 0.0
+            total = base_wait + jitter
+            # Reserve THIS request's start instant (monotonically) — including the very
+            # first one, so a cold start cannot let N concurrent callers fire at once.
+            #
+            # NOT in a dry run. The anchor tracks BYTES ON THE WIRE, and a dry run puts
+            # none there: at base `_last_request_at` stayed 0 for a whole dry run, so
+            # `base_wait` was always 0. Reserving here would make every dry-run action pay
+            # the full posture floor — a ~0.8s-per-100-actions regression on
+            # `execute` / `execute_differential` / `gated_fetch` alike, and `dry_run` IS
+            # threaded from real operator paths (repeater.Repeater, repeater's tool,
+            # mcp.server, engage_fusion), all defaulting False. Rate-limiting a request
+            # that is never sent buys no safety.
+            if not self.dry_run:
+                self._last_request_at = max(self._last_request_at, time.time() + total)
         if total > 0:
             time.sleep(total)
+
+    def _mark_request_done(self, *, anchor: bool = True) -> None:
+        """Tally one issued request and re-anchor the rate limiter at its COMPLETION.
+
+        Atomic (a bare ``+= 1`` is a read-modify-write) and MONOTONIC: the anchor only ever
+        moves forward, so a late completion can never drag it backwards behind a start
+        another caller already reserved — which would have let the next request fire early.
+
+        ``anchor=False`` tallies WITHOUT touching the rate anchor: the dry-run paths spend
+        a budget slot but put nothing on the wire, so they must not space the next real
+        request (that is what they did at base, with a bare ``+= 1``)."""
+        with self._lock:
+            self._requests_made += 1
+            if anchor:
+                self._last_request_at = max(self._last_request_at, time.time())
+
+    def _release_slot(self) -> None:
+        """Release the in-flight reservation ``_run_gates(reserve=True)`` took. Always
+        paired with it in a ``finally``, so a refusal or an exception on the I/O path
+        cannot leak a slot and silently shrink the budget."""
+        with self._lock:
+            self._reserved = max(0, self._reserved - 1)
 
     def _log_event(self, kind: str, **fields: object) -> None:
         try:

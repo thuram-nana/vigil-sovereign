@@ -472,6 +472,22 @@
       "source_doc": "docs/DEFERRED-INFRA.md",
       "disposition": "file-into-w16",
       "w16_issue": null
+    },
+    {
+      "id": "LIMIT-tls-certificate-validity-unwired",
+      "title": "TLS certificate-validity classification is built and tested but deliberately not wired",
+      "summary": "tls_breadth.classify_certificate_defects derives expired / not-yet-valid / hostname-mismatch / self-signed from the retained leaf, deterministically and offline against a retained capture instant. Nothing in the product calls it on live evidence: the cert-validity re-drive was removed from _TLS_REDRIVES and no capture stamps captured_at_epoch, so it returns None on anything the runner produces. The evidence branch tls_weakness.certificate_validity is registered wired:false, fact_capable:false, clean_capable:false with all four control_requirements prefixed MISSING:, so an accidental future wiring is capped at LEAD. Wiring it needs an OracleKind plus a decision procedure and a BUG_CLASS_ORACLES row, a capture that retains the instant (adding it to the shared _tls_capture would be a certificate-invalidating change for two shipped branches, so a dedicated capture is preferable), and a re-drive whose observed= facts the capture actually stamps.",
+      "classification": "real-unfinished-code",
+      "severity": "low",
+      "anchor": {
+        "file": "integration/vigil_integration/live/tls_breadth.py",
+        "symbol": "classify_certificate_defects"
+      },
+      "marker": false,
+      "check": "symbol-exists",
+      "source_doc": "docs/DEFERRED-INFRA.md",
+      "disposition": "file-into-w16",
+      "w16_issue": null
     }
   ],
   "honest_limit_sites_note": "The code-scan census. docs/tests/test_limitation_inventory.py scans every non-test product .py for the honest-limit/deferred debt phrases in _DEBT_PHRASES and requires EVERY hit to be either a VIGIL-LIMIT marker line OR a site listed here whose snippet (matched case-insensitively) is a substring of the hit line. kind 'debt' names the limitations id the site belongs to (which must exist); kind 'non-debt' explains why the phrase is not a capability limit (a deliberate design choice, a runtime-state description, or a phrase describing a CHECK's target rather than VIGIL itself). Bidirectional: every snippet here must still match a debt-phrase line in its file, so deleting the prose (or moving the debt) turns CI red.",
@@ -643,6 +659,41 @@
       "kind": "debt",
       "limit_id": "LIMIT-profile-packs-incremental",
       "note": "resolve_profile skips a plan-named profile flag that is not wired yet (deferred, never fabricated); the deep/full packs are wired incrementally across the FACT-coverage waves."
+    },
+    {
+      "file": "integration/vigil_integration/live/external_tool.py",
+      "snippet": "certificate validity is NOT WIRED",
+      "kind": "debt",
+      "limit_id": "LIMIT-tls-certificate-validity-unwired",
+      "note": "Runner-side comment on the removed cert-validity re-drive: the derivation exists but no Redrive admits to it."
+    },
+    {
+      "file": "integration/vigil_integration/live/external_tool.py",
+      "snippet": "and deliberately so. The derivation exists",
+      "kind": "debt",
+      "limit_id": "LIMIT-tls-certificate-validity-unwired",
+      "note": "ToolSpec docstring: names tls_weakness.certificate_validity as NOT WIRED among the tls_scan branches."
+    },
+    {
+      "file": "integration/vigil_integration/live/tls_breadth.py",
+      "snippet": "BUILT, TESTED, **NOT WIRED**",
+      "kind": "debt",
+      "limit_id": "LIMIT-tls-certificate-validity-unwired",
+      "note": "Module docstring, claim 4 of 4: certificate defects are derived but not on any live path."
+    },
+    {
+      "file": "integration/vigil_integration/live/tls_breadth.py",
+      "snippet": "BUILT AND TESTED, **NOT WIRED**",
+      "kind": "debt",
+      "limit_id": "LIMIT-tls-certificate-validity-unwired",
+      "note": "Guard comment above the derivation: no re-drive admits to the branch and no capture stamps the instant."
+    },
+    {
+      "file": "integration/vigil_integration/live/tls_breadth.py",
+      "snippet": "Nothing in the product calls this on live evidence",
+      "kind": "debt",
+      "limit_id": "LIMIT-tls-certificate-validity-unwired",
+      "note": "classify_certificate_defects docstring: states the inertness and what wiring it would require."
     }
   ]
 }
