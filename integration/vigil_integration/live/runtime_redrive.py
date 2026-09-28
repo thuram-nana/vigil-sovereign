@@ -726,7 +726,7 @@ def runtime_redrive(url: str, *, slug: str, engagement_slug: str, signers: "list
     # (0, 404) and never evaluates the signature predicate, so it cannot express the exposure arm's
     # control differential. The runner fetches both paths itself (see _fetch_path) and composes the
     # predicate the oracle judges.
-    from framework.v2.scanner.checks import ContentSignatureCheck, MarkerReflectionCheck  # noqa: PLC0415
+    from framework.v2.scanner.checks import MarkerReflectionCheck  # noqa: PLC0415
     from framework.v2.scanner.insertion import HttpRequest, InsertionKind, RequestTemplate  # noqa: PLC0415
     from framework.v2.verify.adapter import FindingContext  # noqa: PLC0415
     from framework.v2.verify.oracles import (  # noqa: PLC0415
@@ -786,8 +786,6 @@ def runtime_redrive(url: str, *, slug: str, engagement_slug: str, signers: "list
     try:
         if bug_class == "path_traversal":
             sig = "root:x:0:0:"
-            chk = ContentSignatureCheck(id="path-traversal", bug_class="path_traversal",
-                                        payload=_TRAVERSAL_PAYLOAD, signature=sig)
             # TWO controls on the same parameter, both sent BEFORE the treatment, because they refuse
             # DIFFERENT shapes (see _TRAVERSAL_PATH_CONTROL / _TRAVERSAL_CONST_CONTROL for the measured
             # counterexample that put the second one back):
@@ -858,19 +856,30 @@ def runtime_redrive(url: str, *, slug: str, engagement_slug: str, signers: "list
                     break
                 if outcome == "skip":
                     continue
-                # TREATMENT: the canonical traversal payload.
+                # TREATMENT: the canonical traversal payload, sent DIRECTLY (not via
+                # ContentSignatureCheck.probe) so that ``treatment_unreadable`` measures the TREATMENT's
+                # OWN decode provenance and nothing else. ContentSignatureCheck.probe now spends its own
+                # benign control whenever the signature is present (36fd3cf8, "a file signature needs a
+                # control"); on an ordinary origin that control legitimately reads a bare-404/empty body,
+                # which increments ``state["body_unavailable"]``. Folding that (empty, sound) control miss
+                # into this treatment window made ``treatment_unreadable`` true and demoted a GENUINE
+                # arbitrary-file read from LEAD to INCONCLUSIVE. This arm supplies its OWN two controls
+                # above and runs the 2-arg side_effect_oracle itself, so it never used chk's control_sink —
+                # this reproduces exactly the single-request probe the arm was written against
+                # (``from_side_effect`` over the treatment body, no control_sink), and leaves
+                # ContentSignatureCheck's control intact for every other consumer (the scanner engine and
+                # the library LFI entries).
                 before2, before_bodies = state["channels"], state["body_unavailable"]
-                ctx_obj = chk.probe(tmpl, point, send)
+                treatment = send(tmpl.render(point, _TRAVERSAL_PAYLOAD))
                 if state["channels"] <= before2:
                     res.inconclusive.append((bug_class, f"{probe_url}#{point.id}"))
-                    continue
-                if ctx_obj is None:
                     continue
                 # The TREATMENT's OWN decode provenance, read HERE — before the corroboration re-sends.
                 # Reading it after them (``state["body_unavailable"] > before_bodies`` at the admit call)
                 # attributed an undecodable ALTERNATE ENCODING to the treatment and turned an otherwise
                 # admissible verdict INCONCLUSIVE for the wrong reason.
                 treatment_unreadable = state["body_unavailable"] > before_bodies
+                ctx_obj = FindingContext.from_side_effect(sig, _body(treatment), bug_class=bug_class)
                 context = ctx_obj.to_verifier_context()
                 signal = side_effect_oracle(context.get("marker", ""), context.get("observed_sink", ""))
                 if signal.fired:
