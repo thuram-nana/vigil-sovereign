@@ -862,10 +862,14 @@ def _drive_probe(target: str, registry: Any, ctx: Any, sink: Any) -> Any:
 
 def _record_discovered(out: "AutonomyResult", sink: Any, dumps: list, emitted: set) -> int:
     """Record probe-minted NEW findings on the AutonomyResult and mirror each to the spine as a
-    finding event. A discovered finding carries its retained ``oracle_context`` (the oracle fired
-    over evidence a real target produced), so the report grader renders it a FACT — honest, because a
-    deterministic oracle DID confirm it. Deduped by (bug_class, insertion_point, endpoint) so a
-    re-probed surface never double-counts. Best-effort/total. Returns the count newly recorded."""
+    finding event. A discovered finding carries its retained ``oracle_context``, so once it is FOLDED
+    into ``active_findings`` and re-grounded by the veracity firewall the authoritative report grader
+    can render it a fact. But on the SPINE it is mirrored with NO live grounding verdict yet
+    (``_finding_payload(f)`` → ``admitted=None``), so it lands as a lead (``verified_by_oracle=False``
+    / ``llm_advisory``) — never a laundered console FACT from certificate PRESENCE alone; a re-verify
+    cycle later supplies the live verdict that can promote it. Deduped by (bug_class, insertion_point,
+    endpoint) so a re-probed surface never double-counts. Best-effort/total. Returns the count newly
+    recorded."""
     n = 0
     try:
         from .scanner.engine import AuditFinding
@@ -1073,12 +1077,18 @@ def _world_seq(world: "WorldModel | None") -> int:
 # ---------------------------------------------------------------------------
 
 
-def _finding_payload(f: object) -> dict:
-    """A FindingPayload-shaped mirror of a confirmed AuditFinding — enough for the wired critic
-    panel to review it in-loop. It mirrors an ALREADY oracle-confirmed fact (telemetry); it does
-    NOT re-confirm one. Provenance is honest: ``verified_by_oracle`` tracks the presence of the
-    retained ``oracle_context``, and ``critique_status`` stays ``pending`` (the critics advise; a
-    verdict never promotes)."""
+def _finding_payload(f: object, admitted: object = None) -> dict:
+    """A FindingPayload-shaped mirror of an AuditFinding, tagged with its LIVE grounding verdict —
+    the exact twin of ``engage._spine_finding_payload``. Oracle authority preserved:
+    ``critique_status='confirmed'`` / ``verified_by_oracle=True`` ONLY when the finding re-grounds
+    as a fact under LIVE re-execution (``admitted.is_fact``). When the grounding verdict is
+    unavailable (``admitted is None`` — the finding was demoted by the firewall, or the pass could
+    not assess it, or the caller has no live verdict) it mirrors conservatively as ``llm_advisory``
+    / not-verified — it NEVER asserts confirmation from the mere PRESENCE of a certificate (that
+    would launder an un-re-verified finding onto the immutable stream). The ``oracle_context`` is
+    retained so downstream can re-verify. This matches ``scanner.report._grounding_label``
+    (``admitted is None → not fact``). Telemetry over the authoritative result; it neither promotes
+    nor demotes — the live grounding verdict is the sole authority it reads."""
     bug_class = str(getattr(f, "bug_class", "") or "")
     surface = _finding_surface(f) or str(getattr(f, "param", "") or "") or "(surface)"
     oc = getattr(f, "oracle_context", None)
@@ -1087,32 +1097,52 @@ def _finding_payload(f: object) -> dict:
         conf = None if conf is None else min(1.0, max(0.0, float(conf)))
     except (TypeError, ValueError):
         conf = None
+    # audit-A red-pen — a SECOND live copy of the B4 spine-relabelling defect. This builder
+    # hardcoded a synthesized "<bug_class> at <param>" title at severity High, which RELABELS an
+    # UNCONFIRMED producer claim onto the IMMUTABLE spine exactly as ``engage._spine_finding_payload``
+    # once did (the CSWSH no-cookies branch — "… possible CSWSH — UNCONFIRMED", Medium — was rewritten
+    # to a confirmed High). Mirror that sibling's EXACT derivation: preserve the finding's OWN
+    # ``title``/``severity`` when present, synthesizing only when the finding (a built-in point check)
+    # carries none. The two builders MUST produce byte-identical title+severity for the same finding.
+    title = str(getattr(f, "title", "") or "")
+    param = str(getattr(f, "param", "") or "")
+    severity = str(getattr(f, "severity", "") or "")
+    # audit-A round-4 red-pen BLOCK — fact-strength comes from the LIVE re-grounding verdict, never
+    # from certificate PRESENCE. Mirror ``engage._spine_finding_payload`` exactly: ``admitted is None``
+    # (demoted / un-assessed / no live verdict) → not-verified / llm_advisory, so a firewall-refused
+    # finding is never laundered onto the immutable spine as a console FACT.
+    is_fact = bool(getattr(admitted, "is_fact", False))
     return {
         "finding_slug": (f"{bug_class}:{getattr(f, 'insertion_point', '')}"[:120]) or bug_class or "finding",
-        "title": (f"{bug_class} at {getattr(f, 'param', '')}".strip() or bug_class or "finding"),
-        "severity": "High",
+        "title": (f"{title} at {param}" if title else f"{bug_class} confirmed at {param}"),
+        "severity": (severity or "High"),
         "bug_class": bug_class or "unknown",
         "surface": str(surface),
         "summary": str(getattr(f, "rationale", "") or f"{bug_class} finding"),
-        "critique_status": "pending",
+        "critique_status": "confirmed" if is_fact else "llm_advisory",
         "oracle_context": oc,
-        "verified_by_oracle": bool(oc),
+        "verified_by_oracle": is_fact,
         "confidence": conf,
         "oracle_kind": (str(getattr(f, "confirmed_by", "") or "") or None),
         "oracle_rationale": str(getattr(f, "rationale", "") or ""),
     }
 
 
-def _mirror_findings_to_spine(sink: Any, findings: list) -> int:
-    """Mirror the ALREADY oracle-confirmed findings onto the spine as ``finding`` events so the
-    wired critic panel has material to review IN-LOOP. Telemetry over authoritative facts — it
-    neither promotes nor demotes; the critics only advise over them. Best-effort. Returns count."""
+def _mirror_findings_to_spine(sink: Any, findings: list, grounding: list | None = None) -> int:
+    """Mirror the findings onto the spine as ``finding`` events, EACH tagged with its LIVE grounding
+    verdict, so the wired critic panel has material to review IN-LOOP. Index-paired with ``grounding``
+    exactly like ``engage.py`` pairs ``result.grounding`` with ``report.active_findings`` (a demoted
+    finding stays in ``active_findings`` but its ``admitted`` verdict is not-a-fact, so it mirrors as
+    a lead — never a laundered console FACT). Telemetry over the authoritative result — it neither
+    promotes nor demotes; the live verdict is the sole authority. Best-effort. Returns count."""
     if sink is None:
         return 0
+    grounding = grounding or []
     n = 0
-    for f in findings:
+    for i, f in enumerate(findings):
+        g = grounding[i] if i < len(grounding) else None
         try:
-            if sink.finding_event(_finding_payload(f)) is not None:
+            if sink.finding_event(_finding_payload(f, g)) is not None:
                 n += 1
         except Exception:
             pass
@@ -1449,10 +1479,12 @@ def run_autonomous_cycle(
     out.advice_reweighted += _reprioritise(tree, baselines, advice=advice, meta_caution=meta_caution,
                                            smt_infeasible=smt_infeasible)
 
-    # DRIVE (setup) — mirror the ALREADY oracle-confirmed findings onto the spine so the wired
-    # advisory critic panel has material to review when the Coordinator ticks in-loop. This is
-    # telemetry over authoritative facts; it neither promotes nor demotes any finding.
-    _mirror_findings_to_spine(sink, findings)
+    # DRIVE (setup) — mirror the findings onto the spine so the wired advisory critic panel has
+    # material to review when the Coordinator ticks in-loop. Each finding carries its LIVE grounding
+    # verdict (``result.grounding``, index-aligned with ``report.active_findings`` — the same list
+    # ``findings`` is derived from), so a firewall-DEMOTED finding mirrors as a lead, never a
+    # laundered console FACT. Telemetry over the authoritative result; it neither promotes nor demotes.
+    _mirror_findings_to_spine(sink, findings, getattr(result, "grounding", None))
 
     cycles = max(1, int(max_cycles))
     for c in range(1, cycles + 1):

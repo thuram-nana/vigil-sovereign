@@ -131,19 +131,54 @@ class WSConnection:
         return opcode, payload
 
 
-def connect(
+@dataclass(frozen=True)
+class Handshake:
+    """The RAW bytes of ONE handshake attempt — what a CSWSH certificate must retain.
+
+    ``response`` is the target's verbatim response HEADER BLOCK — bounded at the
+    terminating CRLFCRLF (B3: ``_read_headers`` returns whatever ``recv`` happened to
+    deliver, which can include body/frame bytes, and those bytes must not be searched for
+    the handshake's markers). ``status_line`` is that block's FIRST line, so a predicate can
+    be anchored to the status line instead of matching "http/1.1 101" anywhere in the block.
+    ``request`` is the exact block VIGIL sent, so the certificate states which ``Origin`` was
+    actually offered. ``accept_key`` is the RFC 6455 ``Sec-WebSocket-Accept`` value VIGIL
+    computed from its OWN per-handshake nonce.
+
+    N1 — what the accept key does and does NOT buy. It binds the response to the nonce VIGIL
+    chose for THIS handshake, so a SINGLE-FIELD edit of the retained transcript (swap the
+    response, keep the key) breaks re-verification. It does NOT bind provenance: re-executing
+    an oracle over retained bytes can only ask whether those bytes satisfy the predicate, so
+    a CONSISTENTLY rewritten transcript — or a wholly fabricated one, with a key and a
+    response computed together — re-verifies ``ok`` even though no target was ever contacted.
+    MEASURED, both ways. Binding a certificate to a real exchange is the job of the
+    signing / evidence-certificate layer (the signed spine and the DSSE/receipt chain), never
+    of re-execution."""
+
+    request: str = ""
+    response: str = ""
+    status: int | None = None
+    status_line: str = ""
+    accept_key: str = ""
+    accepted: bool = False
+    error: str = ""
+
+
+def handshake(
     url: str,
     *,
     origin: str | None = None,
     cookies: str | None = None,
     extra_headers: list[tuple[str, str]] | None = None,
     timeout: float = 5.0,
-) -> WSConnection | None:
-    """Perform the RFC 6455 handshake and return a WSConnection, or None if the
-    server refused the upgrade (any non-101 status). ``origin``/``cookies`` model
-    a browser-originated connection for CSWSH testing."""
+) -> tuple["WSConnection | None", Handshake]:
+    """Perform the RFC 6455 handshake and return ``(connection_or_None, raw_record)``.
+
+    The connection half is exactly :func:`connect`'s contract; the second half RETAINS
+    the raw bytes of the exchange so a check can hand real target bytes to an oracle
+    instead of its own boolean."""
     tls, host, port, path = _parse_ws_url(url)
     key = base64.b64encode(os.urandom(16)).decode("ascii")
+    expected_accept = _accept_key(key)
     lines = [
         f"GET {path} HTTP/1.1",
         f"Host: {host}:{port}",
@@ -159,6 +194,7 @@ def connect(
     for k, v in extra_headers or []:
         lines.append(f"{k}: {v}")
     request = ("\r\n".join(lines) + "\r\n\r\n").encode("ascii")
+    sent = request.decode("latin-1", "replace")
 
     try:
         sock: socket.socket = socket.create_connection((host, port), timeout=timeout)
@@ -170,15 +206,41 @@ def connect(
         sock.sendall(request)
         sock.settimeout(timeout)
         resp = _read_headers(sock)
-    except (OSError, WSError):
-        return None
+    except (OSError, WSError) as exc:
+        return None, Handshake(request=sent, accept_key=expected_accept,
+                               error=f"{type(exc).__name__}: {exc}")
 
-    status = _status_of(resp)
-    if status != 101 or _accept_key(key).encode() not in resp:
+    head = _header_block(resp)
+    record = Handshake(
+        request=sent, response=head.decode("latin-1", "replace"),
+        status=_status_of(head) or None,
+        status_line=_status_line(head),
+        accept_key=expected_accept,
+        # The producer's verdict is ALREADY status-line anchored (``_status_of`` reads the
+        # status line's own token, not the block). B3: the CSWSH predicate used to throw this
+        # away and re-derive the verdict with an unanchored substring match.
+        accepted=(_status_of(head) == 101 and expected_accept.encode() in head),
+    )
+    if not record.accepted:
         with _suppress():
             sock.close()
-        return None
-    return WSConnection(sock, host, path)
+        return None, record
+    return WSConnection(sock, host, path), record
+
+
+def connect(
+    url: str,
+    *,
+    origin: str | None = None,
+    cookies: str | None = None,
+    extra_headers: list[tuple[str, str]] | None = None,
+    timeout: float = 5.0,
+) -> WSConnection | None:
+    """Perform the RFC 6455 handshake and return a WSConnection, or None if the
+    server refused the upgrade (any non-101 status). ``origin``/``cookies`` model
+    a browser-originated connection for CSWSH testing."""
+    return handshake(url, origin=origin, cookies=cookies,
+                     extra_headers=extra_headers, timeout=timeout)[0]
 
 
 def _read_headers(sock: socket.socket) -> bytes:
@@ -198,9 +260,39 @@ def _status_of(resp: bytes) -> int:
         return 0
 
 
+def _header_block(resp: bytes) -> bytes:
+    """Only the response's HEADER BLOCK, through the terminating CRLFCRLF.
+
+    B3 — ``_read_headers`` stops once it has SEEN the terminator but returns the whole recv
+    buffer, so body / already-arrived WebSocket frame bytes ride along. Anything retained as
+    "the response" is later searched for handshake markers, so it must be the headers and
+    nothing else."""
+    i = resp.find(b"\r\n\r\n")
+    return resp if i < 0 else resp[: i + 4]
+
+
+def _status_line(resp: bytes) -> str:
+    """The response's FIRST line, verbatim — the only place a status may be read from."""
+    return resp.split(b"\r\n", 1)[0].decode("latin-1", "replace").strip()
+
+
 # ---------------------------------------------------------------------------
 # checks
 # ---------------------------------------------------------------------------
+
+
+def _refused_ctx(bug_class: str, url: str, legit: Handshake, evil: Handshake) -> "FindingContext":
+    """The certificate for a CSWSH probe the PRODUCER refused: the two status lines it read,
+    with a predicate that is FALSE by construction. It exists so the refusal is still
+    re-verifiable evidence (and so ``probe_with_context`` always returns a context)."""
+    return FindingContext.from_predicate(
+        {"url": url, "refused": "the handshake pair is not two status-line-anchored 101s",
+         "trusted_status_line": legit.status_line, "trusted_accepted": legit.accepted,
+         "evil_status_line": evil.status_line, "evil_accepted": evil.accepted},
+        {"all": [{"eq": [{"var": "trusted_accepted"}, True]},
+                 {"eq": [{"var": "evil_accepted"}, True]}]},
+        bug_class=bug_class,
+    )
 
 
 @dataclass(frozen=True)
@@ -221,18 +313,91 @@ class CswshCheck:
     trusted_origin: str | None = None  # defaults to the target's own origin
 
     def probe(self) -> ConfirmedFinding | None:
+        return self.probe_with_context()[0]
+
+    def probe_with_context(self) -> "tuple[ConfirmedFinding | None, FindingContext]":
+        """The probe plus the RAW-BYTES certificate it was adjudicated on (F7).
+
+        The old context was ``from_state({"cross_origin_ws_accepted": True}, {...: hijackable})``
+        — this check's own boolean handed back to ``achieved_state_oracle`` to be re-asserted,
+        the "achieved-state rubber-stamp" ``predicate_oracle``'s docstring exists to retire.
+        (In ``scanner.campaign`` it was worse still: BOTH sides were the literal ``True``, so
+        the certificate re-confirmed forever regardless of the target, the fix state, or
+        whether the endpoint ever existed.) Now the certificate carries the two handshakes'
+        RAW request/response blocks and the ORACLE decides, over those bytes, whether the
+        dangerous condition holds: both handshakes returned ``HTTP/1.1 101`` carrying the
+        ``Sec-WebSocket-Accept`` value derived from VIGIL's own per-handshake nonce, and the
+        foreign-``Origin`` request really did offer the foreign origin. Tampering with any
+        retained byte breaks the accept-key binding and the offline re-verification FAILS."""
         tls, host, port, _ = _parse_ws_url(self.url)
         trusted = self.trusted_origin or f"{'https' if tls else 'http'}://{host}:{port}"
-        legit = connect(self.url, origin=trusted, cookies=self.cookies or None)
+        legit, legit_hs = handshake(self.url, origin=trusted, cookies=self.cookies or None)
         with _closing(legit):
-            legit_ok = legit is not None
-        evil = connect(self.url, origin=self.evil_origin, cookies=self.cookies or None)
+            pass
+        evil, evil_hs = handshake(self.url, origin=self.evil_origin, cookies=self.cookies or None)
         with _closing(evil):
-            evil_ok = evil is not None
-        hijackable = legit_ok and evil_ok  # works legitimately AND ignores origin
-        ctx = FindingContext.from_state(
-            {"cross_origin_ws_accepted": True},
-            {"cross_origin_ws_accepted": hijackable},
+            pass
+        # B3 — the PRODUCER's verdict is status-line anchored (``_status_of`` reads the
+        # status line's own token). Refuse before building a certificate when either
+        # handshake was not actually a 101 carrying VIGIL's own accept key. This can only
+        # DEMOTE: the oracle below still has to agree over the retained bytes.
+        if not (legit_hs.accepted and evil_hs.accepted):
+            return None, _refused_ctx(self.bug_class, self.url, legit_hs, evil_hs)
+        ctx = FindingContext.from_predicate(
+            {
+                "url": self.url,
+                "trusted_origin": trusted,
+                "evil_origin": self.evil_origin,
+                "trusted_origin_header": f"Origin: {trusted}",
+                "evil_origin_header": f"Origin: {self.evil_origin}",
+                "trusted_request": legit_hs.request,
+                "trusted_response": legit_hs.response,
+                "trusted_status_line": legit_hs.status_line,
+                "trusted_accept_key": legit_hs.accept_key,
+                "evil_request": evil_hs.request,
+                "evil_response": evil_hs.response,
+                "evil_status_line": evil_hs.status_line,
+                "evil_accept_key": evil_hs.accept_key,
+            },
+            {"all": [
+                # The endpoint really is a live, working WebSocket for the trusted origin ...
+                {"icontains": [{"var": "trusted_request"}, {"var": "trusted_origin_header"}]},
+                # ... and it said so ON THE STATUS LINE. B3: these two clauses used to read
+                # ``{"icontains": [{"var": "trusted_response"}, "http/1.1 101"]}`` over the
+                # WHOLE retained block, so a server answering ``HTTP/1.1 403 Forbidden`` whose
+                # headers merely CONTAIN the substring "HTTP/1.1 101 Switching Protocols" (and
+                # the computed accept value) satisfied them — measured, BASE 0 findings vs
+                # HEAD 1 finding at conf 0.9. ``*_status_line`` is by construction the
+                # response's FIRST line AT PRODUCTION TIME; the companion ``contains`` clause
+                # pins that line to the retained block, so editing the status line alone out
+                # of a certificate breaks re-verification.
+                #
+                # Audit-A red-pen (B3 offline residual) — "a match inside it is anchored" is
+                # true only at PRODUCTION time, NOT at re-verification. Re-execution reads
+                # ``trusted_status_line`` as a plain string, so a HAND-EDITED certificate
+                # carrying ``"HTTP/1.1 403 Forbidden  http/1.1 101"`` (consistently mirrored
+                # into ``trusted_response``) re-verifies ``ok`` — measured. It is unreachable
+                # live because the producer gate above reads the status line's OWN token via
+                # ``_status_of`` and refuses anything that is not a real 101; this is exactly
+                # the limit ``Handshake``'s N1 note states, and binding a certificate to a
+                # real exchange is the signing layer's job, never re-execution's. That gate
+                # is therefore load-bearing, and
+                # ``test_block4_cswsh_producer_refusal_is_load_bearing`` pins a LIVE origin
+                # (a 403 whose verbose reason phrase itself contains "HTTP/1.1 101 Switching
+                # Protocols", echoing VIGIL's own accept key) on which EVERY clause below
+                # holds and only the producer refuses.
+                {"icontains": [{"var": "trusted_status_line"}, "http/1.1 101"]},
+                {"contains": [{"var": "trusted_response"}, {"var": "trusted_status_line"}]},
+                {"contains": [{"var": "trusted_response"}, {"var": "trusted_accept_key"}]},
+                # ... and it ALSO switched protocols for a request that offered a FOREIGN
+                # Origin, so Origin is not validated. The accept key binds each response to
+                # VIGIL's own nonce for THAT handshake, so a SINGLE-FIELD edit of the retained
+                # transcript fails (it cannot bind provenance — see ``Handshake``'s N1 note).
+                {"icontains": [{"var": "evil_request"}, {"var": "evil_origin_header"}]},
+                {"icontains": [{"var": "evil_status_line"}, "http/1.1 101"]},
+                {"contains": [{"var": "evil_response"}, {"var": "evil_status_line"}]},
+                {"contains": [{"var": "evil_response"}, {"var": "evil_accept_key"}]},
+            ]},
             bug_class=self.bug_class,
         )
         # A12: an authenticated HIJACK requires the victim's SESSION (cookies). Without cookies the probe
@@ -256,7 +421,7 @@ class CswshCheck:
                             f"so an authenticated hijack is NOT proven; supply the victim's cookies to confirm "
                             f"a real cross-site WebSocket hijack."),
             }
-        return confirm_finding(finding, ctx)
+        return confirm_finding(finding, ctx), ctx
 
 
 @dataclass(frozen=True)

@@ -55,20 +55,114 @@ def _post_json(req: HttpRequest, body: str) -> HttpRequest:
     return req.model_copy(update={"method": "POST", "headers": headers, "body": body})
 
 
+def _disclosed_schema_name(body: str) -> str:
+    """The FIRST schema element name the target actually disclosed under
+    ``data.__schema``, or ``""`` when the response disclosed no schema at all.
+
+    Audit-A red-pen (BLOCK-1, CRITICAL). The previous form of this decision was three
+    UNRELATED substring matches over the whole body — ``"data":``, ``"__schema":`` and an
+    open brace/bracket after ``"queryType":`` / ``"types":``. Measured end-to-end against a
+    loopback origin, four bodies that disclose **zero** schema minted a signed
+    ``ACHIEVED_STATE`` FACT at conf 0.9 that re-verified offline:
+
+      * ``{"data":{"__schema":{"queryType":null,"types":[]}},"errors":[{"message":
+        "Introspection is disabled on this endpoint."}]}``  — a field-auth denial that
+        preserves the SHAPE. ``[]`` *is* an open bracket, so the tightened clause that
+        claimed to require "a real object or list" accepted it.
+      * ``{"data":{"__schema":{"queryType":{},"types":null}}}`` — ditto with ``{}``.
+      * ``{"data":{"__schema":{"types":[]}}}``.
+      * a **non-JSON WAF page** whose prose QUOTES a sample introspection response
+        (the previously-disclosed residual 3 — same root cause).
+
+    This is the sound form the old docstring only wrote down: a full ``json.loads`` of the
+    response, then a check that ``data`` is an object, ``data.__schema`` is an object, and
+    that object is actually POPULATED — ``queryType.name`` is a non-empty string, or
+    ``types`` holds at least one element with a non-empty ``name``. Anything else (a parse
+    failure, a list, ``data: null``, an errors-only Apollo body, an empty or null
+    ``__schema`` member) disclosed nothing and returns ``""``.
+
+    The returned name is a value lifted VERBATIM out of the target's own bytes, so the
+    oracle below can pin it back to the retained body (see :meth:`GraphQLIntrospectionCheck.probe`).
+    """
+    doc = _parse_body({"body": body})
+    if not isinstance(doc, dict):
+        return ""
+    data = doc.get("data")
+    if not isinstance(data, dict):
+        return ""
+    schema = data.get("__schema")
+    if not isinstance(schema, dict) or not schema:
+        return ""
+    qt = schema.get("queryType")
+    if isinstance(qt, dict):
+        name = qt.get("name")
+        if isinstance(name, str) and name.strip():
+            return name.strip()
+    types = schema.get("types")
+    if isinstance(types, list):
+        for t in types:
+            if isinstance(t, dict):
+                name = t.get("name")
+                if isinstance(name, str) and name.strip():
+                    return name.strip()
+    return ""
+
+
 @dataclass(frozen=True)
 class GraphQLIntrospectionCheck:
     """Confirm introspection is enabled: POST the introspection query and check
-    the response actually returns a schema (``__schema`` / ``queryType`` / a
-    ``types`` list under ``data``) — not just a 200."""
+    the response actually returns a POPULATED schema under ``data.__schema`` —
+    not just a 200, not a ``__schema``-shaped denial, and not a page that merely
+    quotes one."""
 
     id: str = "graphql-introspection"
     bug_class: str = "graphql_introspection"
 
     def probe(self, template: RequestTemplate, send: Send) -> FindingContext | None:
+        """F7 — the certificate retains the RAW response body and the ORACLE decides.
+
+        This used to hand ``achieved_state_oracle`` ``{"introspection_enabled": True}`` vs
+        ``{"introspection_enabled": <a Python bool this check had already computed>}``: the
+        oracle could only re-assert the check's own verdict, and the certificate held no
+        target bytes to re-verify or to fail on.
+
+        Audit-A red-pen BLOCK-1 (CRITICAL — a LIVE false FACT on a DEFAULT-ON check; this
+        check is in ``campaign.DEFAULT_REQUEST_CHECKS`` so it runs on every scan). The
+        substring-only form confirmed "introspection enabled" against four bodies that
+        disclosed zero schema; :func:`_disclosed_schema_name` documents each one, measured.
+        The decision is now a FULL JSON PARSE with a POPULATED-``data.__schema`` test, and
+        the value it yields — a schema element name lifted verbatim from the target's own
+        bytes — is what the predicate is anchored on:
+
+          * ``"data"`` / ``"__schema"`` must still appear in the retained raw body
+            (structural anchors, whitespace-independent);
+          * ``disclosed_schema_name`` must be NON-EMPTY (``min_len``) — this is the clause
+            the parse drives, and it is ``""`` for every non-disclosing body, so a refusal
+            is a certificate whose predicate is FALSE BY CONSTRUCTION rather than a missing
+            certificate (the refusal is still re-verifiable evidence);
+          * and that name must be ``contains``-pinned back INTO the retained body, so it
+            cannot be an invention detached from the bytes.
+
+        HONEST RESIDUAL (oracle side). ``verify.oracles._eval_predicate`` has no JSON op —
+        ``all/any/not, eq/ieq, contains/icontains, in, min_len, gt/ge`` only — so the
+        re-verification of a certificate re-evaluates the parse's RESULT pinned to the body
+        rather than re-running the parse. Live this can only DEMOTE (the producer refuses
+        before a firing certificate exists, exactly like the B3 CSWSH producer gate); but a
+        HAND-EDITED certificate that sets ``disclosed_schema_name`` to some other substring
+        of a non-disclosing body would re-verify. Closing that needs a ``json_populated``
+        predicate op in ``verify/oracles.py:_eval_predicate`` (~line 1100) — out of this
+        slice's edit scope; named as follow-up."""
         resp = send(_post_json(template.request, _INTROSPECTION))
-        enabled = _schema_returned(resp)
-        return FindingContext.from_state(
-            {"introspection_enabled": True}, {"introspection_enabled": enabled},
+        body = _body_of(resp)
+        return FindingContext.from_predicate(
+            {"response_body": body, "query": _INTROSPECTION,
+             "disclosed_schema_name": _disclosed_schema_name(body)},
+            {"all": [
+                {"contains": [{"var": "response_body"}, '"data"']},
+                {"contains": [{"var": "response_body"}, '"__schema"']},
+                {"min_len": [{"var": "disclosed_schema_name"}, 1]},
+                {"contains": [{"var": "response_body"}, {"var": "disclosed_schema_name"}]},
+            ]},
             bug_class=self.bug_class)
 
 
@@ -82,27 +176,19 @@ class GraphQLSuggestionsCheck:
     bug_class: str = "graphql_suggestions"
 
     def probe(self, template: RequestTemplate, send: Send) -> FindingContext | None:
+        """F7 — same fix as the introspection check: the RAW error body is retained and the
+        oracle re-derives the leak from it, instead of the check computing ``leaks`` in
+        Python and having ``achieved_state_oracle`` rubber-stamp the boolean back."""
         resp = send(_post_json(template.request, _TYPO))
-        body = str(resp.get("body", "")) if isinstance(resp, dict) else ""
-        leaks = "did you mean" in body.lower()
-        return FindingContext.from_state(
-            {"suggestions_enabled": True}, {"suggestions_enabled": leaks},
+        return FindingContext.from_predicate(
+            {"response_body": _body_of(resp), "query": _TYPO},
+            {"icontains": [{"var": "response_body"}, "did you mean"]},
             bug_class=self.bug_class)
 
 
-def _schema_returned(resp: object) -> bool:
-    if not isinstance(resp, dict):
-        return False
-    body = str(resp.get("body", ""))
-    try:
-        doc = json.loads(body)
-    except (ValueError, TypeError):
-        return False
-    data = doc.get("data") if isinstance(doc, dict) else None
-    if not isinstance(data, dict):
-        return False
-    schema = data.get("__schema")
-    return isinstance(schema, dict) and ("queryType" in schema or "types" in schema)
+def _body_of(resp: object) -> str:
+    """The response body as text — the target-DERIVED bytes a certificate retains."""
+    return str(resp.get("body", "")) if isinstance(resp, dict) else ""
 
 
 # ---------------------------------------------------------------------------

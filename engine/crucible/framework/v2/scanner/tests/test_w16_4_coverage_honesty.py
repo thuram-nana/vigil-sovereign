@@ -245,18 +245,39 @@ def test_default_run_clean_is_not_corpus_wide() -> None:
     # a probe, so it is honestly inconclusive, NOT clean; that is the #509 fix).
     seed_classes = {c.bug_class for c in DEFAULT_CHECKS}
     assert set(cb["classes_exercised"]) <= seed_classes
-    # the exercised-corpus set is derived from probes that ACTUALLY ran (∩ the point corpus),
-    # not from the committed plan — the #509 crux.
-    assert set(cb["classes_exercised"]) == (
-        {p.bug_class for p in report.exercised_probes} & _corpus_bug_classes()
+    # the exercised-corpus set is derived from probes that ACTUALLY ran AND were ADJUDICATED
+    # (∩ the point corpus): not from the committed plan (the #509 crux) and not from the bare
+    # SET of probed classes (the audit-A F2 crux — a class whose every probe came back
+    # `inconclusive` adjudicated nothing and must not count as exercised).
+    adjudicated = (
+        {p.bug_class for p in report.exercised_probes if p.verdict in ("clean", "finding")}
+        | {f.bug_class for f in report.active_findings}
     )
+    assert set(cb["classes_exercised"]) == (adjudicated & _corpus_bug_classes())
+    # ... and the F2 gate is NOT vacuous on this fixture: it really does probe corpus classes
+    # nothing could adjudicate (error_based_sqli / path_traversal / ssti against a plain echo
+    # with no database and no template engine). Every one of those is inconclusive here; under
+    # the old bare-probe-set rule every one of them read `clean`.
+    probed = {p.bug_class for p in report.exercised_probes} & _corpus_bug_classes()
+    all_inconclusive = probed - adjudicated
+    assert all_inconclusive, "fixture no longer probes an unadjudicable class — F2 check vacuous"
+    for c in sorted(all_inconclusive):
+        assert report.verdict_by_class()[c] == "inconclusive"
+        assert c in cb["classes_inconclusive"]
     for c in ("nosqli", "ldap_injection", "xpath_injection", "el_injection"):
         assert report.verdict_by_class()[c] == "inconclusive"
 
 
 def test_library_run_shrinks_the_inconclusive_set() -> None:
-    """--library over a fingerprintable target exercises the library-only classes, so the
-    inconclusive set becomes a STRICT subset of the default run's."""
+    """--library over a fingerprintable target ADJUDICATES classes the default run could not,
+    so the inconclusive set becomes a STRICT subset of the default run's.
+
+    Audit-A F2 sharpened what "shrinks" means. Running a library check is not by itself an
+    adjudication: ``ldap_injection`` / ``xpath_injection`` get probes under --library, but this
+    fixture is a plain echo with no LDAP directory and no XPath engine, so no oracle has a
+    channel and every one of those probes is ``inconclusive``. Calling that a bounded CLEAN
+    would be a false negative about a class the run proved nothing about, so they stay
+    inconclusive; the shrink comes from the classes the library really did adjudicate."""
     with _server(_WpApp) as base:
         default = _run(base, use_library=False)
         lib = _run(base, use_library=True)
@@ -264,9 +285,17 @@ def test_library_run_shrinks_the_inconclusive_set() -> None:
     d_inc = set(default.coverage_bounds()["classes_inconclusive"])
     l_inc = set(lib.coverage_bounds()["classes_inconclusive"])
     assert l_inc < d_inc, "the library must adjudicate classes the default run could not"
-    for c in ("nosqli", "ldap_injection", "xpath_injection"):
+    # nosqli IS adjudicated by the library over this fixture (it lands as a finding) — the
+    # default run's inconclusive was a real coverage gap.
+    assert default.verdict_by_class()["nosqli"] == "inconclusive"
+    assert lib.verdict_by_class()["nosqli"] != "inconclusive"
+    # ldap_injection / xpath_injection are PROBED by the library and adjudicated by nothing,
+    # so they stay honestly inconclusive rather than becoming a false clean (F2).
+    for c in ("ldap_injection", "xpath_injection"):
         assert default.verdict_by_class()[c] == "inconclusive"
-        assert lib.verdict_by_class()[c] != "inconclusive"
+        verdicts = {p.verdict for p in lib.exercised_probes if p.bug_class == c}
+        assert verdicts == {"inconclusive"}, f"{c} probe verdicts changed: {verdicts}"
+        assert lib.verdict_by_class()[c] == "inconclusive"
 
 
 def _probe(bug_class: str, *, verdict: str = "clean", point: str = "query:q") -> ProbeRecord:
