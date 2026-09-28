@@ -184,7 +184,60 @@ class _UnclassifiableInRepoCallable(Exception):
     design (see ``_canon``), because binding a library's source would make the version track that library."""
 
 
-def _canon(obj: Any) -> str:
+def _referenced_names(fn: Callable[..., Any]) -> set[str]:
+    """Every global NAME a function/lambda references, walked transitively through nested code objects
+    (comprehensions, inner closures) so a name used only inside a nested scope is still seen. The single
+    ``co_names`` walker shared by the reachable-source closure (``_reachable_source_blob._walk_body``) and by
+    ``_canon``'s constant binding (``_canon_referenced_consts``)."""
+    code = getattr(fn, "__code__", None)
+    if code is None:
+        return set()
+    names: set[str] = set()
+    stack = [code]
+    while stack:
+        c = stack.pop()
+        names.update(c.co_names)
+        for const in c.co_consts:
+            if isinstance(const, types.CodeType):
+                stack.append(const)
+    return names
+
+
+def _canon_referenced_consts(fn: Callable[..., Any], _seen: frozenset[int]) -> str:
+    """The module-level CONSTANTS an in-repo lambda/function references, canonicalised and appended so their
+    VALUES enter the version. When such a callable is nested inside a constant container (``_canon`` recurses
+    into the container and SOURCE-binds the callable), only its SOURCE TEXT was captured — the constants it
+    calls appear only by NAME in that text, so mutating one changed the decision but left the version
+    byte-identical (AUDIT-B: the ``_SECRET_*`` regexes the ``_SECRET_RECOGNIZERS`` lambdas match against).
+
+    Each name in the callable's ``co_names`` is resolved against its DEFINING module
+    (``sys.modules[fn.__module__]`` — the same rule ``_walk_body`` uses for a walked function, NOT
+    ``fn.__globals__``, which for a compiler-generated method would bind ``dataclasses`` internals by heap
+    address), and only a module-level CONSTANT (``_is_hashable_constant``) is bound, by its canonical value.
+    A name that resolves to a module, a function, a class or any other callable is deliberately NOT bound
+    here: a function reached from a lambda is either genuinely third-party (out of scope — binding its source
+    would track a library) or already covered by the source-text / closure walk, so binding it would only
+    duplicate the closure or perturb the version with a library. Determinism is preserved — names are sorted
+    and a regex binds by its canonical PATTERN (``_canon`` → ``repr``), never by object identity — and
+    ``_seen`` (function ids) breaks any reference cycle so mutual/self references terminate."""
+    if id(fn) in _seen:
+        return ""
+    seen = _seen | {id(fn)}
+    modname = getattr(fn, "__module__", None)
+    mod = sys.modules.get(modname) if modname else None
+    if mod is None:
+        return ""
+    g = vars(mod)
+    parts: list[str] = []
+    for nm in sorted(_referenced_names(fn)):
+        val = g.get(nm)
+        if val is None or not _is_hashable_constant(val):
+            continue
+        parts.append(f"{nm}={_canon(val, seen)}")
+    return ("|consts:" + ",".join(parts)) if parts else ""
+
+
+def _canon(obj: Any, _seen: frozenset[int] = frozenset()) -> str:
     """A canonical, hash-stable repr of a module-level constant — ORDER-INDEPENDENT for sets/frozensets/
     dicts so the version does not depend on PYTHONHASHSEED (the version must be identical across processes
     and machines). Falls back to ``repr`` for scalars, compiled regexes, ip_address objects, etc.
@@ -206,25 +259,39 @@ def _canon(obj: Any) -> str:
     is never reduced to a name-only token that could hide a changed body. For anything else — a builtin, a C
     function, a genuinely third-party callable, a class used as a factory — only the stable
     ``module.qualname`` is used, because embedding third-party source would make this version track
-    library versions instead of this engine's decision procedure."""
+    library versions instead of this engine's decision procedure.
+
+    AUDIT-B (this slice) — CONSTANTS REACHED ONLY INSIDE A SOURCE-BOUND LAMBDA/NESTED FUNCTION are now
+    covered. Source-binding a callable captured only its TEXT, so a module-level constant it *calls* (the
+    ``_SECRET_*`` regexes referenced solely inside the ``_SECRET_RECOGNIZERS`` lambdas) entered the version by
+    NAME only — mutating ``_SECRET_AWS_KEY_ID_RE`` flipped a decision yet left
+    ``oracle_version(SECRET_CREDENTIAL_VALIDITY)`` byte-identical. When an IN-REPO function/lambda is
+    source-bound here, ``_canon_referenced_consts`` now also binds the module-level constants it references
+    (resolved against the callable's DEFINING module), by canonical value — so that hole is closed while
+    genuinely third-party names are still left untouched and determinism is preserved."""
     if callable(obj):
         mod = getattr(obj, "__module__", None) or "?"
         name = (getattr(obj, "__qualname__", None) or getattr(obj, "__name__", None)
                 or type(obj).__name__)
         src = ""
+        deps = ""
         if _in_repo_modname(mod) and (inspect.isfunction(obj) or inspect.ismethod(obj)):
             try:
                 src = "|" + inspect.getsource(obj).strip()
             except (OSError, TypeError):
                 src = "|<source-unavailable>"
-        return f"<callable {mod}.{name}{src}>"
+            # ALSO bind the module-level constants this in-repo callable references — otherwise a constant
+            # used only inside a lambda nested in a container (a `_SECRET_*` regex) enters the version by
+            # name only and a changed pattern ships under an unchanged id@version.
+            deps = _canon_referenced_consts(obj, _seen)
+        return f"<callable {mod}.{name}{src}{deps}>"
     if isinstance(obj, (set, frozenset)):
-        return "{" + ",".join(sorted(_canon(x) for x in obj)) + "}"
+        return "{" + ",".join(sorted(_canon(x, _seen) for x in obj)) + "}"
     if isinstance(obj, dict):
-        return "{" + ",".join(f"{_canon(k)}:{_canon(v)}"
+        return "{" + ",".join(f"{_canon(k, _seen)}:{_canon(v, _seen)}"
                               for k, v in sorted(obj.items(), key=lambda kv: repr(kv[0]))) + "}"
     if isinstance(obj, (list, tuple)):
-        return "[" + ",".join(_canon(x) for x in obj) + "]"
+        return "[" + ",".join(_canon(x, _seen) for x in obj) + "]"
     return repr(obj)
 
 
@@ -255,6 +322,12 @@ def _reachable_source_blob(fns: tuple[Callable[..., Any], ...]) -> bytes:
       * IN-REPO functions/classes reached via a same-module global reference, or via a local in-repo import
         inside a walked body → their SOURCE is bound (covered, transitively).
       * IN-REPO constants reached either way → their canonical value is bound (covered).
+      * A module-level CONSTANT reached ONLY inside a SOURCE-BOUND in-repo lambda/nested function — i.e. a
+        callable ``_canon`` source-binds because it lives INSIDE a constant container this walk recorded
+        (the ``_SECRET_*`` regexes referenced solely inside the ``_SECRET_RECOGNIZERS`` lambdas) → its
+        canonical VALUE is now bound too (covered, via ``_canon_referenced_consts``), resolved against the
+        callable's DEFINING module. Editing such a regex now changes the version; before this slice it did
+        not, so the changed decision procedure shipped under an unchanged id@version.
       * A cross-module in-repo function/class reached only by a MODULE-GLOBAL name (e.g. ``OracleKind`` /
         ``OracleSignal`` imported at module top) is deliberately NOT walked into here — it belongs to the
         model layer, not the decision procedure, and following it would balloon every version identically;
@@ -281,20 +354,6 @@ def _reachable_source_blob(fns: tuple[Callable[..., Any], ...]) -> bytes:
     seen_consts: set[str] = set()
     func_srcs: list[str] = []
     const_reprs: list[str] = []
-
-    def _names(fn: Callable[..., Any]) -> set[str]:
-        code = getattr(fn, "__code__", None)
-        if code is None:
-            return set()
-        names: set[str] = set()
-        stack = [code]
-        while stack:
-            c = stack.pop()
-            names.update(c.co_names)
-            for const in c.co_consts:
-                if isinstance(const, types.CodeType):
-                    stack.append(const)
-        return names
 
     def _record_const(name: str, val: Any) -> None:
         if name not in seen_consts:
@@ -408,7 +467,7 @@ def _reachable_source_blob(fns: tuple[Callable[..., Any], ...]) -> bytes:
 
     def _walk_body(fn: Callable[..., Any], own_module: str | None) -> None:
         g = _module_ns(own_module)
-        for name in _names(fn):
+        for name in _referenced_names(fn):
             val = g.get(name)
             if val is None:
                 continue

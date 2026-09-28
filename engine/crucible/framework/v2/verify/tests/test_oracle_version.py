@@ -307,3 +307,96 @@ def test_newly_covered_versions_are_identical_across_processes():
     b = _versions_in_subprocess("12345")
     assert a == b and all(v.startswith("sha256:") for v in a.values()), (
         f"the cross-module closure is non-deterministic across interpreters: {a} != {b}")
+
+
+# ---------------------------------------------------------------------------
+# AUDIT-B (this slice) — THE CONSTANT-INSIDE-A-SOURCE-BOUND-LAMBDA HOLE.
+#
+# `exposed_secret_validity_oracle` (SECRET_CREDENTIAL_VALIDITY) references the
+# container `oracles._SECRET_RECOGNIZERS`, which holds LAMBDAS. `_canon` recurses
+# the dict and SOURCE-binds each lambda's TEXT, but it did NOT walk the lambda's
+# `co_names`, so the five `_SECRET_*` regexes those lambdas call — referenced ONLY
+# inside the lambdas — never had their VALUES bound. MEASURED at 47fde0fe: mutating
+# `_SECRET_AWS_KEY_ID_RE` from `^(AKIA|ASIA)[0-9A-Z]{16}$` to add `AGPA|AIDA` flipped
+# a decision (identifier `AGPAABCDEFGHIJKLMNOP` REJECT->ACCEPT) yet left
+# `oracle_version(SECRET_CREDENTIAL_VALIDITY)` byte-identical at sha256:d6c35e10….
+# `_SECRET_AWS_STS_HOST_RE` is the anti-laundering confirming-host allow-list — a
+# security-relevant gate. `_canon_referenced_consts` now binds those constants by
+# their canonical PATTERN (not object identity), closing the hole deterministically.
+# ---------------------------------------------------------------------------
+
+
+def _secret_version_in_subprocess(hashseed: str = "0") -> str:
+    """oracle_version(SECRET_CREDENTIAL_VALIDITY) computed in a FRESH interpreter. A subprocess is REQUIRED
+    for the on-disk mutation test: `_canon` binds the LIVE compiled-regex object by `repr`, so editing the
+    pattern text in oracles.py does NOT rebuild the already-imported pattern object in this process — only a
+    re-import (a new interpreter) reflects the change. It also pins the pattern binding as deterministic."""
+    code = ("from framework.v2.verify.oracle_version import oracle_version as v;"
+            "print(v('secret_credential_validity'))")
+    env = dict(os.environ, PYTHONHASHSEED=hashseed)
+    out = subprocess.check_output([sys.executable, "-c", code], env=env, text=True)
+    return out.strip().splitlines()[-1]
+
+
+def test_recognizer_lambda_regexes_are_inside_the_version_closure():
+    """Structural half: all five `_SECRET_*` regexes — referenced ONLY inside the `_SECRET_RECOGNIZERS`
+    lambdas — must have their canonical PATTERN in the blob, and NOT by heap address (the old
+    `repr(<... at 0x…>)` determinism leak)."""
+    from framework.v2.verify import oracles
+
+    blob = ov._reachable_source_blob(_ORACLE_FNS[OracleKind.SECRET_CREDENTIAL_VALIDITY]).decode()
+    for name in ("_SECRET_AWS_KEY_ID_RE", "_SECRET_GITHUB_PREFIX_RE", "_SECRET_GITLAB_PREFIX_RE",
+                 "_SECRET_SLACK_PREFIX_RE", "_SECRET_AWS_STS_HOST_RE"):
+        rx = getattr(oracles, name)
+        assert rx.pattern, f"{name} is empty — the assertion below would be vacuous"
+        assert repr(rx) in blob, (
+            f"{name}'s canonical pattern (referenced only inside a recognizer lambda) is invisible to "
+            f"oracle_version(SECRET_CREDENTIAL_VALIDITY) — the AUDIT-B hole")
+    assert " at 0x" not in blob, "a heap address leaked into the version blob — determinism is broken"
+
+
+# Each mutation: (label, a marker string UNIQUE in oracles.py, a length-changed mutated form). The AWS
+# key-id regex literal is itself unique; the STS host PATTERN is shared with `_IMDS_AWS_CONFIRM_HOST_RE`, so
+# its marker is the full assignment line. Both edits stay on one line.
+_SECRET_REGEX_MUTATIONS = [
+    ("_SECRET_AWS_KEY_ID_RE (the AWS AccessKeyId identifier shape)",
+     r'r"^(AKIA|ASIA)[0-9A-Z]{16}$"',
+     r'r"^(AKIA|ASIA|AGPA|AIDA)[0-9A-Z]{16}$"'),
+    ("_SECRET_AWS_STS_HOST_RE (the anti-laundering confirming-host allow-list)",
+     r'_SECRET_AWS_STS_HOST_RE = re.compile(r"^sts(\.[a-z0-9-]+)?\.amazonaws\.com$")',
+     r'_SECRET_AWS_STS_HOST_RE = re.compile(r"^sts(\.[a-z0-9-]+)?\.amazonaws\.com$|^attacker\.example$")'),
+]
+
+
+@pytest.mark.parametrize("label,marker,mut", _SECRET_REGEX_MUTATIONS)
+def test_mutating_a_recognizer_lambda_regex_ON_DISK_changes_the_version(label, marker, mut):
+    """Behavioural half: editing one of the `_SECRET_*` regexes — referenced ONLY inside a recognizer lambda
+    — ON DISK must move the version. Computed in a FRESH subprocess (the live regex object is bound by repr,
+    so an in-process edit would not be seen); original bytes restored in a finally."""
+    from framework.v2.verify import oracles
+
+    path = Path(oracles.__file__)
+    original = path.read_bytes()
+    text = original.decode()
+    assert text.count(marker) == 1, f"marker for {label} not unique in oracles.py (count={text.count(marker)})"
+    baseline = _secret_version_in_subprocess("0")
+    assert baseline.startswith("sha256:")
+    try:
+        path.write_text(text.replace(marker, mut, 1))
+        mutated = _secret_version_in_subprocess("0")
+        assert mutated != baseline, (
+            f"mutating {label} left oracle_version(SECRET_CREDENTIAL_VALIDITY) byte-identical — a constant "
+            f"referenced only inside a recognizer lambda is invisible to the version (the AUDIT-B hole)")
+    finally:
+        path.write_bytes(original)
+    assert _secret_version_in_subprocess("0") == baseline, (
+        "version did not restore after oracles.py was restored")
+
+
+def test_secret_recognizer_version_is_identical_across_processes():
+    """Determinism: the recognizer-lambda constant binding must be byte-identical across interpreters at
+    different PYTHONHASHSEED — a regex binds by its canonical pattern, never by object identity."""
+    a = _secret_version_in_subprocess("0")
+    b = _secret_version_in_subprocess("999")
+    assert a == b and a.startswith("sha256:"), (
+        f"oracle_version(SECRET_CREDENTIAL_VALIDITY) is non-deterministic across interpreters: {a!r} != {b!r}")
