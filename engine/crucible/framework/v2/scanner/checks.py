@@ -194,13 +194,41 @@ def _nocred_baseline_valid_clause() -> dict:
 
 @dataclass(frozen=True)
 class DifferentialCheck:
-    """Boolean/logic differential: send a benign value and a probe value into the
-    same point and let the differential oracle judge whether the responses
-    diverge (boolean-blind SQLi/NoSQLi, auth-logic, filter bypass).
+    """Boolean/logic differential: send a benign value and a probe value into the same point and
+    let the differential oracle judge whether the responses diverge (boolean-blind SQLi/NoSQLi,
+    auth-logic, filter bypass).
 
-    The point's own base value is NOT used as the baseline — a fresh benign value
-    is, so the comparison is payload-vs-payload and the base is left untouched as
-    a control the engine can re-check."""
+    **LEAD-PRODUCING ONLY. This check cannot mint a FACT for any truth-value-attribution class**
+    (``boolean_sqli`` / ``auth_bypass`` / ``nosqli`` / ``ldap_injection`` / ``xpath_injection``) —
+    ``verify.verifier.DIFFERENTIAL_LEAD_ONLY_CLASSES`` removed DIFFERENTIAL_RESPONSE from those rows
+    and enforces the removal at import time. Its two responses are still SENT and still RETAINED as
+    coverage evidence (an exercised, oracle-cleared surface), and they remain a legitimate *lead* —
+    they are simply no longer a proof.
+
+    WHY, precisely. The claim a boolean class makes is "the response is a FUNCTION OF THE INJECTED
+    BOOLEAN'S TRUTH VALUE". This check has NO ATTRIBUTION STEP: its control is a DIFFERENT STRING,
+    not a same-shape negative, so nothing in it separates "the injected boolean changed the query"
+    from "the app treated two different strings differently". Any single dimension differing fires
+    (``status`` alone weighs 0.6; noisy-OR with ``lexical`` reaches 0.87–0.96), so the loudest
+    trigger is a DEFENCE:
+
+      * a STATIC page with NO DATABASE behind a ModSecurity-CRS-942130 tautology rule (200 -> 403
+        plus a different error page) minted ``boolean_sqli`` at 0.95, ``grounding: fact``, and the
+        offline ``framework.v2 verify`` RE-CONFIRMED the certificate;
+      * an app doing TEXTBOOK STRICT INPUT VALIDATION (``[A-Za-z0-9 _-]{0,64}``, else 400) minted it
+        at 0.87 on 3/3 runs;
+      * a benign echo with NO status change correctly did not fire — the defence was the trigger.
+
+    The SOUND replacement already exists and is the only confirming path:
+    :class:`BooleanInferenceCheck` (SPRT over ``K_T``/``K_F`` distinct, shape-VARIED always-true and
+    always-false clauses, each sent twice byte-identically), driven by
+    ``live/runtime_redrive.py::boolean_redrive``. It is not in :data:`DEFAULT_CHECKS` because it
+    costs ~64 requests per (point, clause family); the honest consequence is a RECALL cost on the
+    default profile — a LEAD instead of a FACT — which is the safe direction.
+
+    The point's own base value is NOT used as the baseline — a fresh benign value is, so the
+    comparison is payload-vs-payload and the base is left untouched as a control the engine can
+    re-check."""
 
     id: str
     bug_class: str
@@ -430,7 +458,8 @@ class BooleanInferenceCheck:
     shared_baseline: tuple = ()
 
     def probe(self, template: RequestTemplate, point: InsertionPoint, send: Send) -> FindingContext | None:
-        from ..verify.oracles import differential_response_oracle  # local: avoid import cycle at module load
+        # local: avoid import cycle at module load
+        from ..verify.oracles import _mask_boolean_reflection, differential_response_oracle
 
         trues = tuple(self.true_clauses)
         falses = tuple(self.false_clauses)
@@ -442,20 +471,33 @@ class BooleanInferenceCheck:
             # A clause appearing on BOTH sides is degenerate too. Emit no rounds — the oracle can only refuse.
             return FindingContext.from_boolean_probes(
                 true_rounds=[], false_rounds=[], true_repeat_rounds=[], false_repeat_rounds=[],
-                bug_class=self.bug_class, discriminator=BOOLEAN_DISCRIMINATOR)
+                bug_class=self.bug_class, discriminator=BOOLEAN_DISCRIMINATOR,
+                true_clauses=trues, false_clauses=falses)
+
+        def _tag(resp: dict, clause: str) -> dict:
+            # Pair each response with the injected clause that produced it, so BOTH the live early-stop
+            # below and the authoritative offline oracle strip that clause's own reflection before
+            # comparing (see verify.oracles._mask_boolean_reflection). New dict — never mutate send()'s.
+            return {**resp, "clause": clause}
 
         def _differs(a: dict, b: dict) -> bool:
             # the PINNED boolean discriminator — never the oracle's default set, which includes LATENCY
-            # (a boolean FACT must rest on response CONTENT; timing is timing_oracle's job).
-            return differential_response_oracle(a, b, BOOLEAN_DISCRIMINATOR).fired
+            # (a boolean FACT must rest on response CONTENT; timing is timing_oracle's job). Each side
+            # has its OWN reflected clause removed first, so this mirrors the offline oracle EXACTLY —
+            # both mask, so the live SPRT and the authoritative verdict cannot diverge on a reflecting
+            # target. A response without a clause masks to itself (a non-reflecting target is unchanged).
+            return differential_response_oracle(
+                _mask_boolean_reflection(a), _mask_boolean_reflection(b), BOOLEAN_DISCRIMINATOR).fired
 
         # --- DETERMINISM PRE-GATE: responses to ONE IDENTICAL request, all of which must be identical.
         #     A non-deterministic page (coarse OR high-entropy) fails this and is refused BEFORE any
         #     inference — short-circuit on the first divergence to bound the traffic. A driver that
         #     already collected this for the endpoint hands it in via ``shared_baseline`` (no re-sends).
-        baseline: list[dict] = [dict(b) for b in self.shared_baseline]
+        # The baseline re-sends ONE identical false clause (falses[0]); tag every sample with it so
+        # masking is identical across the samples and the determinism verdict is unchanged by it.
+        baseline: list[dict] = [_tag(dict(b), falses[0]) for b in self.shared_baseline]
         for _ in range(0 if baseline else max(2, self.baseline_samples)):
-            s = _as_dict(send(template.render(point, falses[0])))
+            s = _tag(_as_dict(send(template.render(point, falses[0]))), falses[0])
             baseline.append(s)
             if _differs(baseline[0], s):
                 break  # proven non-deterministic — the oracle will refuse over these samples
@@ -464,7 +506,7 @@ class BooleanInferenceCheck:
             return FindingContext.from_boolean_probes(
                 true_rounds=[], false_rounds=[], true_repeat_rounds=[], false_repeat_rounds=[],
                 bug_class=self.bug_class, false_baseline_samples=baseline,
-                discriminator=BOOLEAN_DISCRIMINATOR)
+                discriminator=BOOLEAN_DISCRIMINATOR, true_clauses=trues, false_clauses=falses)
 
         upper = math.log((1.0 - self.beta) / self.alpha)
         lower = math.log(self.beta / (1.0 - self.alpha))
@@ -474,10 +516,10 @@ class BooleanInferenceCheck:
         true_repeat_rounds: list[list[dict]] = []
         false_repeat_rounds: list[list[dict]] = []
         for _ in range(self.n_max):
-            t = [_as_dict(send(template.render(point, c))) for c in trues]
-            t_rep = [_as_dict(send(template.render(point, c))) for c in trues]
-            f = [_as_dict(send(template.render(point, c))) for c in falses]
-            f_rep = [_as_dict(send(template.render(point, c))) for c in falses]
+            t = [_tag(_as_dict(send(template.render(point, c))), c) for c in trues]
+            t_rep = [_tag(_as_dict(send(template.render(point, c))), c) for c in trues]
+            f = [_tag(_as_dict(send(template.render(point, c))), c) for c in falses]
+            f_rep = [_tag(_as_dict(send(template.render(point, c))), c) for c in falses]
             true_rounds.append(t)
             true_repeat_rounds.append(t_rep)
             false_rounds.append(f)
@@ -501,7 +543,7 @@ class BooleanInferenceCheck:
             true_rounds=true_rounds, false_rounds=false_rounds,
             true_repeat_rounds=true_repeat_rounds, false_repeat_rounds=false_repeat_rounds,
             bug_class=self.bug_class, false_baseline_samples=baseline,
-            discriminator=BOOLEAN_DISCRIMINATOR,
+            discriminator=BOOLEAN_DISCRIMINATOR, true_clauses=trues, false_clauses=falses,
         )
 
 
@@ -509,6 +551,21 @@ def _as_dict(resp: object) -> dict:
     if isinstance(resp, dict):
         return resp
     return {"body": str(resp)}
+
+
+@dataclass(frozen=True)
+class TimingObservations:
+    """One insertion point's ORDERED latency observations for one timing check.
+
+    Immutable, and ordered exactly as they were taken: ``baseline[i]`` and
+    ``treatment[i]`` (and ``dose[i]``) are the i-th INTERLEAVED pair/triple. Keeping the
+    observations as a value — separate from the evidence they are later shaped into —
+    keeps :meth:`TimingCheck.collect` (all of the I/O, none of the judgement) apart from
+    :meth:`TimingCheck.context_from` (pure, deterministic, offline-re-runnable)."""
+
+    baseline: tuple[float, ...] = ()
+    treatment: tuple[float, ...] = ()
+    dose: tuple[float, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -533,6 +590,34 @@ class TimingCheck:
     dose_ms: float | None = None
 
     def probe(self, template: RequestTemplate, point: InsertionPoint, send: Send) -> FindingContext | None:
+        """Measure, then adjudicate — the composition of :meth:`collect` and
+        :meth:`context_from`. Byte-identical to the one-shot loop it replaces."""
+        return self.context_from(self.collect(template, point, send))
+
+    # -- the two halves of a probe ------------------------------------------------
+    # The SLOW, I/O half (:meth:`collect`) is split from the PURE half
+    # (:meth:`context_from`) so the evidence a certificate re-runs offline is a
+    # deterministic function of an observation SEQUENCE — no clock, no rng, no network
+    # in the half that decides anything.
+    #
+    # The split once also served a concurrent driver that overlapped the idle waits of
+    # DIFFERENT insertion points. That driver was measured and REMOVED: this alternation
+    # phase-locks across overlapping points, which both manufactures shifts and loses
+    # real ones over any capacity-bounded origin. See the note in
+    # ``AuditEngine.audit``'s sweep before considering it again. This loop is serial,
+    # per point, and that is not an implementation detail.
+
+    def collect(
+        self, template: RequestTemplate, point: InsertionPoint, send: Send
+    ) -> "TimingObservations":
+        """Take this point's ``samples`` INTERLEAVED observations, serially.
+
+        The interleaving is the statistical control: benign and delay-injecting
+        requests alternate within the point so any latency drift (load, GC, a
+        congested hop) biases baseline and treatment EQUALLY. The Mann-Whitney U
+        shift test and the dose-response ratio both rest on it, so this loop is
+        never reordered, batched or sampled down — it is the same loop, in the same
+        order, that the serial probe always ran."""
         base: list[float] = []
         treat: list[float] = []
         dose_samples: list[float] = []
@@ -541,7 +626,16 @@ class TimingCheck:
             treat.append(self._time(send, template, point, self.sleep_payload))
             if self.dose_payload is not None:
                 dose_samples.append(self._time(send, template, point, self.dose_payload))
+        return TimingObservations(
+            baseline=tuple(base), treatment=tuple(treat), dose=tuple(dose_samples))
 
+    def context_from(self, observations: "TimingObservations") -> FindingContext | None:
+        """Shape already-measured observations into the oracle's evidence. PURE — no
+        I/O, no clock, no rng — so the retained context is a deterministic function of
+        the observation sequence, and an offline re-verify of it re-fires identically."""
+        base = list(observations.baseline)
+        treat = list(observations.treatment)
+        dose_samples = list(observations.dose)
         dose = None
         if self.dose_payload is not None and self.dose_ms:
             dose = {
@@ -1269,47 +1363,104 @@ class ErrorSignatureCheck:
 
 @dataclass(frozen=True)
 class ContentSignatureCheck:
-    """File read / local file inclusion by KNOWN-CONTENT signature.
+    """File read / local file inclusion by KNOWN-CONTENT signature, ATTRIBUTED BY A BENIGN CONTROL.
 
-    Injects a payload (e.g. a traversal ``../../../../etc/passwd``) into the
-    insertion point and confirms via the side-effect oracle ONLY when a
-    distinctive signature of the *target file's content* (``root:x:0:0:``, a
-    ``[extensions]`` INI section, ``<web-app``) appears in the response — proof the
-    file was actually READ, not merely that the path was reflected. The signature
-    is specific enough that its presence is the proof; a reflected-but-not-read
-    payload does not fire (the current marker-reflection path-traversal check only
-    proved reflection, which is not a file read)."""
+    Injects a payload (e.g. a traversal ``../../../../etc/passwd``) into the insertion point and
+    confirms via the side-effect oracle ONLY when a distinctive signature of the *target file's
+    content* (``root:x:0:0:``, a ``[extensions]`` INI section, ``<web-app``) appears in the response
+    AND is ABSENT from a benign CONTROL request on the SAME insertion point — proof the file was
+    actually READ, and that the read is attributable to the payload rather than to a page that
+    prints the signature whatever you send. A reflected-but-not-read payload does not fire (the
+    former marker-reflection path-traversal check only proved reflection, which is not a file read).
+
+    THE CONTROL IS THE FIX FOR A MEASURED DEFECT (audit C, rate 1.0, DEFAULT path). Without it the
+    check was ONE request with NO baseline and the oracle was pure substring presence at 0.90, so an
+    ordinary security KNOWLEDGE-BASE site — a static dict of articles, ZERO file I/O — whose
+    path-traversal article legitimately contains ``root:x:0:0:root:/root:/bin/bash`` minted FOUR High
+    ``path_traversal`` FACTs. The control existed only in ONE CONSUMER
+    (``live/runtime_redrive.py::runtime_redrive``) while the ``path_traversal.file_signature``
+    evidence branch ADVERTISED the control differential and named this check as its implementation
+    ref. The guard now lives in the CHECK — the branch's named authority — so every consumer
+    (the scanner engine, the library LFI entries, the re-drive) inherits it, and it is RETAINED in
+    the evidence (``control_sink``) so ``side_effect_oracle`` re-derives the same refusal offline.
+
+    COST: the control costs ONE extra request, and only on a probe that would otherwise FIRE — the
+    payload goes first and the control is sent only when the signature is actually present, so a
+    non-firing surface is exactly as cheap as before. FAIL-CLOSED: if the control request errors or
+    returns nothing readable there is no attribution, so the check refuses (a LEAD, never a FACT)."""
 
     id: str
     bug_class: str
     payload: str
     signature: str
+    # A benign, NON-traversal, file-shaped value. Fixed and public on purpose: a run must be
+    # replayable and the operator must be able to grep their logs for our traffic (constitution VI.4).
+    control_value: str = "crucible-benign-control.txt"
+
+    @staticmethod
+    def _body(resp: object) -> str:
+        return resp.get("body", "") if isinstance(resp, dict) else str(resp)
+
+    def _control_body(self, template: RequestTemplate, point: InsertionPoint, send: Send) -> str | None:
+        """The benign CONTROL response body, or ``None`` when no control could be observed
+        (fail-closed: no control, no attribution, no FACT)."""
+        try:
+            resp = send(template.render(point, self.control_value))
+        except Exception:
+            return None
+        if resp is None:
+            return None
+        return self._body(resp)
+
+    def _attributed(self, body: str, template: RequestTemplate, point: InsertionPoint,
+                    send: Send) -> FindingContext | None:
+        """Adjudicate one payload response. Returns the confirming context only when the signature
+        is present under the payload AND absent from the benign control; returns a NON-firing
+        context (retained coverage) when the signature never appeared; refuses with ``None`` when the
+        control already carries the signature or could not be observed."""
+        if self.signature not in body:
+            # Nothing to attribute — hand the oracle the observed sink so the probe is retained as an
+            # EXERCISED, oracle-cleared surface exactly as before. No control request is spent.
+            return FindingContext.from_side_effect(self.signature, body, bug_class=self.bug_class)
+        control = self._control_body(template, point, send)
+        if control is None or self.signature in control:
+            # The page prints the signature regardless of input (a docs/KB/paste page), or no control
+            # could be read. Either way the presence is NOT attributable to a file read → LEAD.
+            return None
+        return FindingContext.from_side_effect(
+            self.signature, body, bug_class=self.bug_class, control_sink=control,
+        )
 
     def probe(self, template: RequestTemplate, point: InsertionPoint, send: Send) -> FindingContext | None:
         resp = send(template.render(point, self.payload))
-        body = resp.get("body", "") if isinstance(resp, dict) else str(resp)
-        return FindingContext.from_side_effect(self.signature, body, bug_class=self.bug_class)
+        return self._attributed(self._body(resp), template, point, send)
 
     def adapt(self, template: RequestTemplate, point: InsertionPoint, send: Send) -> FindingContext | None:
         """WAF-adaptive fallback (opt-in): when a traversal payload is filtered,
         synthesize a form that gets past the filter AND still returns the target
         file's content signature. The sink proxy is the signature's presence — proof
         the file was read, not merely that the path reflected — so the confirmation
-        bar is identical to the normal path."""
+        bar is identical to the normal path, INCLUDING the benign-control differential:
+        the control is checked FIRST here, so a page that always prints the signature
+        never funds a bypass search."""
         from .waf_evasion import adaptive_bypass
+
+        control = self._control_body(template, point, send)
+        if control is None or self.signature in control:
+            return None
 
         def send_form(form: str) -> dict:
             return send(template.render(point, form))
 
         def sink_present(resp: dict) -> bool:
-            body = resp.get("body", "") if isinstance(resp, dict) else str(resp)
-            return self.signature in body
+            return self.signature in self._body(resp)
 
         res = adaptive_bypass(self.payload, send_form, sink_present)
         if res is None:
             return None
-        body = res.response.get("body", "") if isinstance(res.response, dict) else str(res.response)
-        return FindingContext.from_side_effect(self.signature, body, bug_class=self.bug_class)
+        return FindingContext.from_side_effect(
+            self.signature, self._body(res.response), bug_class=self.bug_class, control_sink=control,
+        )
 
 
 @dataclass(frozen=True)
@@ -1699,10 +1850,51 @@ def _emitted_url_hosts(body: str) -> list[str]:
 # class is a payload+shape declaration, not new confirmation machinery.
 # ---------------------------------------------------------------------------
 
+# LEAD-ONLY. Retained as a named symbol because the declarative library compiles the same shape
+# (21 `boolean_sqli` entries) and other rosters still reference it, but it is NOT in DEFAULT_CHECKS
+# any more: it cannot confirm `boolean_sqli` from any roster
+# (``verify.verifier.DIFFERENTIAL_LEAD_ONLY_CLASSES``), so leaving it in the default sweep spent two
+# requests per insertion point to produce evidence no oracle can act on. BOOLEAN_SQLI_SPRT below
+# replaces it.
 BOOLEAN_SQLI = DifferentialCheck(
     id="boolean-sqli", bug_class="boolean_sqli",
     benign="crucible-benign-term",
     probe_payload="x' OR '1'='1",
+)
+
+# The DEFAULT path's SOUND boolean detector — the producer half of the fix that made
+# `boolean_sqli` BOOLEAN_INFERENCE-only. Removing DIFFERENTIAL_RESPONSE from that row without this
+# would have been a pure capability removal: `DEFAULT_CHECKS` would have carried no producer of a
+# confirming oracle context for the class at all, so the default scan an operator actually runs
+# would have lost the TRUE positive along with the false one. (Measured: with the row removed and
+# this check absent, `eval.validation`'s labelled fixture scored 1/2 recall.)
+#
+# WHAT IT COSTS, stated rather than discovered later: one insertion point costs the determinism
+# PRE-GATE (8 identical sends) plus 4 x K_T per SPRT round (7 always-TRUE clauses, 7 always-FALSE,
+# each sent TWICE byte-identically = 28). The SPRT reaches a boundary in TWO rounds either way at
+# p1=0.9 / p0=0.1, so a decided surface costs 8 + 56 = 64 requests against the 2 the differential
+# spent: +62 per insertion point. That is the price of an attribution step, and it is why this
+# check is a SINGLE clause family rather than all three.
+#
+# COVERAGE, honestly: family 0 is the SINGLE-QUOTE string-literal breakout (`... WHERE x = '<v>'`),
+# the same injection context the retired differential's `x' OR '1'='1` payload targeted. The
+# numeric and double-quote families (`boolean_clause_families()[1]` and `[2]`) are NOT run here —
+# at +62 each they would triple the default sweep's cost. The differential appeared to cover them
+# only because it fired on ANY response difference, including differences that were not an
+# injection at all; a narrower detector that is right is not a regression against one that was
+# wide and wrong, but the gap is real and named: the gated `live/runtime_redrive.py::boolean_redrive`
+# drives all three families, and widening the default path needs a request-budget decision.
+#
+# n_max=6 (not the dataclass default of 24) bounds the worst case on a surface whose clusters keep
+# flapping: 8 + 6*28 = 176 requests instead of 680, without pre-empting a decision on a surface
+# that actually signals (two rounds).
+_BOOLEAN_SQLI_FAMILY: "tuple[tuple[str, ...], tuple[str, ...]]" = boolean_clause_families()[0]
+
+BOOLEAN_SQLI_SPRT = BooleanInferenceCheck(
+    id="boolean-sqli-sprt", bug_class="boolean_sqli",
+    true_clauses=_BOOLEAN_SQLI_FAMILY[0],
+    false_clauses=_BOOLEAN_SQLI_FAMILY[1],
+    n_max=6,
 )
 
 REFLECTED_XSS = MarkerReflectionCheck(
@@ -1800,21 +1992,45 @@ DNS_RCE_OOB = DNSOOBCheck(
 # prioritises redirect-ish params.
 OPEN_REDIRECT = OpenRedirectCheck()
 
+# ORDER IS COST-ASCENDING, and it is load-bearing under a request budget. `AuditEngine.audit`
+# iterates checks in THIS order at each insertion point and stops when `max_audit_requests` is hit,
+# so a check that runs early cannot be starved by one that runs late. Measured per insertion point on
+# a non-firing page: the single-request response-visible checks (reflected-XSS, path-traversal,
+# open-redirect) and the blind OOB checks (1 request each, and skipped entirely without an
+# OOBReceiver) cost 1; the evaluation/error checks cost 2; the boolean SPRT costs 64 (an 8-send
+# determinism pre-gate + two SPRT rounds of 28 byte-identical probes). Putting the 64-request boolean
+# check FIRST meant a bounded scan spent its whole budget probing the first parameter or two for
+# boolean SQLi before a 1-request reflection check ever reached a reflecting endpoint (measured: soak
+# cap=160 audited 2 endpoints, 0 findings). Cheap, high-yield, self-contained checks therefore run
+# first and the expensive boolean SPRT runs LAST. With the default unbounded budget every check runs
+# at every point regardless of order, so this reorder cannot change WHAT is found — only, under a cap,
+# HOW MUCH is reached before the budget runs out. A new check inserts at its cost tier (ties keep
+# prior relative order); anything comparably expensive to the SPRT belongs beside it, at the end.
 DEFAULT_CHECKS: tuple[Check, ...] = (
-    BOOLEAN_SQLI,
+    # -- 1 request/point: response-visible, self-contained ------------------------------------------
     REFLECTED_XSS,
-    SSTI_EVAL_BRACES,
-    SSTI_EVAL_DOLLAR,
     PATH_TRAVERSAL,
-    ERROR_BASED,
     OPEN_REDIRECT,
+    # -- 1 request/point: blind OOB (self-skips without an OOBReceiver) ------------------------------
     SSRF_OOB,
     XXE_OOB,
     RCE_OOB,
     DESERIALIZATION_OOB,
+    # -- 2 requests/point: a benign control plus the probe ------------------------------------------
+    SSTI_EVAL_BRACES,
+    SSTI_EVAL_DOLLAR,
+    ERROR_BASED,
+    # -- 64 requests/point: the boolean SPRT (determinism pre-gate + truth-value-attribution rounds) -
+    BOOLEAN_SQLI_SPRT,
 )
 """A ready-to-run seed set. Every check maps to a bug_class the verifier already
-routes to an oracle, so it confirms end-to-end. The OOB checks (`wants_oob`) run
+routes to an oracle, AND produces a context that oracle can actually act on — the second half is
+not automatic: when `boolean_sqli` became BOOLEAN_INFERENCE-only, the bare `BOOLEAN_SQLI`
+differential that used to sit first here stopped being able to confirm anything, so it was replaced
+by `BOOLEAN_SQLI_SPRT` rather than left in as dead traffic. `nosqli`, `auth_bypass`,
+`ldap_injection` and `xpath_injection` have never had an entry here; see the module docs and
+docs/capability-matrix/evidence-branches.json for which of them still have a FACT-capable producer
+on the opt-in `--library` path and which do not. The OOB checks (`wants_oob`) run
 only when the engine has an OOBReceiver — without one they are skipped, never
 guessed. Extend by declaring more DifferentialCheck / MarkerReflectionCheck /
 OOBCheck entries — no new oracle needed."""

@@ -7,10 +7,13 @@ Two properties matter and are tested here:
     unchanged: the arsenal lead lists stay empty and no arsenal-only bug class ever
     reaches active_findings. This is what keeps `make gate` byte-identical.
   * ADDITIVE + GATED + ORACLE-ANCHORED — with the flag ON the modules run: content /
-    JS discovery surface LEADS (never confirmed), request smuggling and CSWSH confirm
-    through their oracles (with a re-verifiable certificate), a benign server yields no
-    smuggling false positive, and the raw-socket modules refuse an unauthorized host
-    (fail-closed).
+    JS discovery surface LEADS (never confirmed), CSWSH confirms through its oracle
+    (with a re-verifiable certificate), the request-smuggling TIMING probe confirms
+    NOTHING — A12/RED-PEN: a hang cannot distinguish a desynced back-end from an
+    RFC 7230 §3.3.3-compliant origin awaiting the rest of an incomplete declared
+    body, so scanner/smuggling.py no longer calls an oracle at all — a benign server
+    yields no smuggling false positive, and the raw-socket modules refuse an
+    unauthorized host (fail-closed).
 
 All traffic is loopback. The smuggling and WS servers are raw-socket fixtures (the
 same shapes scanner.smuggling / scanner.websocket are unit-tested against).
@@ -27,6 +30,8 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Iterator
 from urllib.parse import parse_qs, urlsplit
+
+import pytest
 
 from framework.v2.scanner.campaign import WebScanCampaign
 
@@ -299,25 +304,32 @@ def test_smuggling_gate_blocks_probe_on_unauthorized_host() -> None:
     # no finding is produced — the raw socket is never opened for an unauthorized host.
     with _hanging_server(delay=2.0) as port:
         camp = WebScanCampaign(_dummy_send, enable_arsenal=True, arsenal_authz=lambda url: False)
-        findings, leads = camp._smuggling_findings([("127.0.0.1", port, f"http://127.0.0.1:{port}/")])
-    assert findings == [] and leads == []
+        leads, probes = camp._smuggling_leads([("127.0.0.1", port, f"http://127.0.0.1:{port}/")])
+    assert leads == [] and probes == []
 
 
 # ---------------------------------------------------------------------------
-# positive, oracle-confirmed arsenal findings (with a re-verifiable certificate)
+# arsenal outputs: CSWSH is the one oracle-confirmed class (with a re-verifiable
+# certificate); smuggling and race are LEAD-only (F3+B1, R3)
 # ---------------------------------------------------------------------------
 
 
-def test_smuggling_desync_confirmed_through_the_arsenal() -> None:
+def test_a_hanging_server_is_a_timing_lead_not_a_smuggling_fact() -> None:
+    """F3 — a server that merely HANGS on the CL+TE probe proves nothing: a conformant
+    origin awaiting an incomplete declared body delays identically. This test used to
+    assert the OPPOSITE (that a hang CONFIRMS a technique), which is exactly the A12 (#269)
+    overclaim the latency mint had reintroduced. The honest output is a LEAD.
+
+    B1 went further: the canary DIFFERENTIAL that replaced the timing mint is a LEAD too
+    (it is observed on the one connection VIGIL pipelined the prefix onto), so
+    ``_smuggling_leads`` returns leads + probe records and NO findings at all — see
+    ``test_audit_a_soundness`` for the measurement."""
     with _hanging_server(delay=2.0) as port:
         camp = WebScanCampaign(_dummy_send, enable_arsenal=True)  # loopback → allowed
-        findings, _leads = camp._smuggling_findings([("127.0.0.1", port, f"http://127.0.0.1:{port}/")])
-    assert findings, "a hanging desync server should confirm at least one smuggling technique"
-    f = findings[0]
-    assert f.bug_class == "request_smuggling"
-    assert f.confirmed_by  # an oracle kind carried the confirmation
-    assert f.oracle_context is not None  # a retained, re-verifiable certificate
-    assert f.confidence > 0.0
+        leads, probes = camp._smuggling_leads([("127.0.0.1", port, f"http://127.0.0.1:{port}/")])
+    assert not hasattr(camp, "_smuggling_findings"), "the FACT-minting smuggling path must be gone"
+    assert probes and all(p.bug_class == "request_smuggling" for p in probes)
+    assert any("smuggling" in ln for ln in leads), leads
 
 
 def test_cswsh_confirmed_through_the_arsenal() -> None:
@@ -363,4 +375,7 @@ def test_race_engine_does_not_run_without_explicit_targets() -> None:
     # enable_arsenal alone must not fire the destructive race engine.
     camp = WebScanCampaign(_dummy_send, enable_arsenal=True)
     assert camp.arsenal_race_targets == ()
-    assert camp._race_findings("http://127.0.0.1:8000/") == []
+    # R3: the race path is LEAD-only now (no owner-signed spec, no semantic success
+    # predicate), so there is no _race_findings to call at all.
+    assert not hasattr(camp, "_race_findings")
+    assert camp._race_leads("http://127.0.0.1:8000/") == []

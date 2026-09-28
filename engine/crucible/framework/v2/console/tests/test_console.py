@@ -312,12 +312,12 @@ def test_worldmodel_reexecutes_stored_findings_at_the_boundary(tmp_path, monkeyp
     refiring = FindingContext.from_http_responses(
         {"status": 200, "body": "No results."},
         {"status": 200, "body": "id=1 alice user\nid=2 bob admin\nid=3 carol user"},
-        bug_class="boolean_sqli", discriminator={"dimensions": ["status", "length", "lexical"]},
+        bug_class="error_based_sqli", discriminator={"dimensions": ["status", "length", "lexical"]},
     ).model_dump(mode="json")
     report = {
         "target": "http://t/",
         "active_findings": [
-            {"check_id": "good", "bug_class": "boolean_sqli", "insertion_point": "query:q", "param": "q",
+            {"check_id": "good", "bug_class": "error_based_sqli", "insertion_point": "query:q", "param": "q",
              "endpoint": "http://t/?q=1", "confidence": 0.9, "confirmed_by": "differential_response",
              "rationale": "divergent", "oracle_context": refiring},
             # recorded confirmed but NO retained proof → never re-fires → grants no grounded capability

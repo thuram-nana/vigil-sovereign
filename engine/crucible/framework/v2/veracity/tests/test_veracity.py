@@ -24,7 +24,7 @@ _DIVERGENT = {"status": 200, "body": "id=1 alice user\nid=2 bob admin\nid=3 caro
 
 def _oracle_ctx(mutated=_DIVERGENT) -> dict:
     return FindingContext.from_http_responses(
-        _BASE, mutated, bug_class="boolean_sqli",
+        _BASE, mutated, bug_class="error_based_sqli",
         discriminator={"dimensions": ["status", "length", "lexical"]}).model_dump(mode="json")
 
 
@@ -40,17 +40,17 @@ def _trust_root():
 
 def test_oracle_ground_admits_a_reproducing_context() -> None:
     ctx = _oracle_ctx()
-    c = confirm_finding(finding={"bug_class": "boolean_sqli"}, context=FindingContext.model_validate(ctx))
-    claim = Claim(text="boolean sqli at q", source="llm:critique", bug_class="boolean_sqli", tokens=[
-        GroundingToken.oracle(ctx, bug_class="boolean_sqli",
+    c = confirm_finding(finding={"bug_class": "error_based_sqli"}, context=FindingContext.model_validate(ctx))
+    claim = Claim(text="boolean sqli at q", source="llm:critique", bug_class="error_based_sqli", tokens=[
+        GroundingToken.oracle(ctx, bug_class="error_based_sqli",
                               confirmed_by=c.confirmed_by.value, confidence=c.confidence)])
     a = admit(claim)
     assert a.verdict is VeracityVerdict.GROUNDED and a.is_fact and a.strength is Ground.ORACLE
 
 
 def test_oracle_ground_rejects_a_non_firing_context() -> None:
-    claim = Claim(text="fabricated sqli", bug_class="boolean_sqli", tokens=[
-        GroundingToken.oracle(_oracle_ctx(_BASE), bug_class="boolean_sqli",  # non-divergent → won't fire
+    claim = Claim(text="fabricated sqli", bug_class="error_based_sqli", tokens=[
+        GroundingToken.oracle(_oracle_ctx(_BASE), bug_class="error_based_sqli",  # non-divergent → won't fire
                               confirmed_by="differential_response")])
     a = admit(claim)
     assert a.verdict is VeracityVerdict.UNGROUNDED and not a.is_fact
@@ -62,9 +62,9 @@ def test_oracle_ground_rejects_a_non_firing_context() -> None:
 def test_oracle_token_cannot_ground_a_mismatched_bug_class_claim() -> None:
     # a REAL, reproducing SQLi certificate must NOT ground a fabricated 'rce' claim —
     # reverifying the SQLi context under bug_class='rce' does not fire.
-    ctx = _oracle_ctx()  # a genuine boolean_sqli proof
+    ctx = _oracle_ctx()  # a genuine error_based_sqli proof
     forged = Claim(text="Attacker gets RCE via /admin", bug_class="rce", tokens=[
-        GroundingToken.oracle(ctx, bug_class="boolean_sqli")])
+        GroundingToken.oracle(ctx, bug_class="error_based_sqli")])
     a = admit(forged)
     assert not a.is_fact and a.verdict is VeracityVerdict.UNGROUNDED
 
@@ -73,15 +73,15 @@ def test_oracle_fact_requires_a_declared_subject() -> None:
     # a valid proof with NO bug_class subject on the claim grounds nothing (unbound).
     ctx = _oracle_ctx()
     a = admit(Claim(text="something is confirmed", tokens=[
-        GroundingToken.oracle(ctx, bug_class="boolean_sqli")]))  # claim.bug_class == ""
+        GroundingToken.oracle(ctx, bug_class="error_based_sqli")]))  # claim.bug_class == ""
     assert not a.is_fact and "bind" in a.reason.lower()
 
 
 def test_calibrated_confidence_is_the_reexecuted_value_not_the_proposed_one() -> None:
     ctx = _oracle_ctx()
-    c = confirm_finding(finding={"bug_class": "boolean_sqli"}, context=FindingContext.model_validate(ctx))
-    a = admit(Claim(text="sqli", bug_class="boolean_sqli", proposed_confidence=0.99, tokens=[
-        GroundingToken.oracle(ctx, bug_class="boolean_sqli")]))
+    c = confirm_finding(finding={"bug_class": "error_based_sqli"}, context=FindingContext.model_validate(ctx))
+    a = admit(Claim(text="sqli", bug_class="error_based_sqli", proposed_confidence=0.99, tokens=[
+        GroundingToken.oracle(ctx, bug_class="error_based_sqli")]))
     assert a.is_fact and a.calibrated_confidence is not None
     assert abs(a.calibrated_confidence - c.confidence) < 1e-6 and a.calibrated_confidence != 0.99
 
@@ -92,11 +92,11 @@ def test_calibrated_confidence_is_the_reexecuted_value_not_the_proposed_one() ->
 def test_cert_ground_admits_a_verifying_certificate() -> None:
     tr, signers = _trust_root()
     ctx = _oracle_ctx()
-    c = confirm_finding(finding={"bug_class": "boolean_sqli"}, context=FindingContext.model_validate(ctx))
-    finding = {"check_id": "s1", "bug_class": "boolean_sqli", "confirmed_by": c.confirmed_by.value,
+    c = confirm_finding(finding={"bug_class": "error_based_sqli"}, context=FindingContext.model_validate(ctx))
+    finding = {"check_id": "s1", "bug_class": "error_based_sqli", "confirmed_by": c.confirmed_by.value,
                "confidence": c.confidence, "oracle_context": ctx}
     signed = sign_certificate(build_certificate(finding, seq=0), signers)
-    claim = Claim(text="signed sqli", bug_class="boolean_sqli", tokens=[
+    claim = Claim(text="signed sqli", bug_class="error_based_sqli", tokens=[
         GroundingToken.cert(signed.model_dump(mode="json"), oracle_context=ctx)])
     a = admit(claim, trust_root=tr)
     assert a.is_fact and a.strength is Ground.CERT
@@ -194,10 +194,10 @@ def test_dryrun_claim_cannot_self_ground() -> None:
 def test_dryrun_claim_still_stands_on_reexecutable_oracle_proof() -> None:
     # re-executable proof stands on its own regardless of how the claim was authored
     ctx = _oracle_ctx()
-    c = confirm_finding(finding={"bug_class": "boolean_sqli"}, context=FindingContext.model_validate(ctx))
-    a = admit(Claim(text="dryrun-authored but oracle-proven", bug_class="boolean_sqli",
+    c = confirm_finding(finding={"bug_class": "error_based_sqli"}, context=FindingContext.model_validate(ctx))
+    a = admit(Claim(text="dryrun-authored but oracle-proven", bug_class="error_based_sqli",
                     from_dryrun=True, tokens=[
-        GroundingToken.oracle(ctx, bug_class="boolean_sqli", confirmed_by=c.confirmed_by.value)]))
+        GroundingToken.oracle(ctx, bug_class="error_based_sqli", confirmed_by=c.confirmed_by.value)]))
     assert a.is_fact
 
 

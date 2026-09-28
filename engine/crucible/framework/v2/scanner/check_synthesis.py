@@ -24,6 +24,7 @@ from typing import Callable
 from pydantic import BaseModel, ConfigDict
 
 from ..verify import BUG_CLASS_ORACLES, OracleKind, normalize_bug_class
+from ..verify.verifier import DIFFERENTIAL_LEAD_ONLY_CLASSES
 from ..verify.confirmation import confirm_finding
 from ..verify.verifier import OracleVerifier
 from .checks import Check, DifferentialCheck, MarkerReflectionCheck, Send, TimingCheck
@@ -32,16 +33,28 @@ from .insertion import HttpRequest, InsertionPoint, RequestTemplate
 
 def synthesize_check(bug_class: str, *, injected_ms: float = 500.0) -> Check | None:
     """Build a concrete, runnable check for ``bug_class`` from its primary oracle
-    shape. Differential/boolean -> a tautology differential; side-effect/
-    reflection -> a break-out marker reflection; timing -> a sleep-injection
-    check. Classes whose confirmation needs a target-specific predicate/OOB/
-    sanitizer spec return None (not auto-synthesizable here)."""
+    shape. Differential -> a tautology differential; side-effect/reflection -> a
+    break-out marker reflection; timing -> a sleep-injection check. Classes whose
+    confirmation needs a target-specific predicate/OOB/sanitizer spec return None
+    (not auto-synthesizable here) — and so do the TRUTH-VALUE-ATTRIBUTION classes.
+
+    WHY THOSE ARE DECLINED. This used to synthesize a single-shot ``DifferentialCheck`` for any
+    class whose primary oracle was DIFFERENTIAL_RESPONSE **or BOOLEAN_INFERENCE**, i.e. it answered
+    "I need a sound SPRT truth-value test" with "here is a bare benign-vs-payload differential".
+    That inference has no attribution step and minted High FACTs at rate 1.0 against a static page
+    behind a WAF tautology rule and against strict input validation, on targets with no database
+    (verify.verifier.DIFFERENTIAL_LEAD_ONLY_CLASSES). A sound boolean check is a
+    ``BooleanInferenceCheck`` with a clause family, which is not something this synthesizer can
+    derive from a class name alone — so it declines rather than emitting something that cannot
+    confirm (or, worse, something that could)."""
     norm = normalize_bug_class(bug_class)
+    if norm in DIFFERENTIAL_LEAD_ONLY_CLASSES:
+        return None
     kinds = BUG_CLASS_ORACLES.get(norm, ())
     primary = kinds[0] if kinds else None
     cid = f"synth-{norm}"
 
-    if primary in (OracleKind.DIFFERENTIAL_RESPONSE, OracleKind.BOOLEAN_INFERENCE):
+    if primary is OracleKind.DIFFERENTIAL_RESPONSE:
         return DifferentialCheck(id=cid, bug_class=norm, benign="crucible-benign-term",
                                  probe_payload="x' OR '1'='1")
     if primary in (OracleKind.SIDE_EFFECT, OracleKind.REFLECTION_CONTEXT):

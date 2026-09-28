@@ -299,6 +299,56 @@ class _SkewedApp(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
 
+class _ReflectVulnApp(BaseHTTPRequestHandler):
+    """A REAL boolean channel BEHIND a REFLECTION — the shape of the loopback ``vulnapp`` and of most
+    real search endpoints. The raw parameter is echoed UNESCAPED into ``<h1>Results for: {q}</h1>``
+    AND a string-concatenated query runs, so a TRUE clause returns rows and a FALSE clause returns
+    none. Because every distinct always-TRUE clause reflects a DIFFERENT string, the raw true-side
+    responses all differ in length/lexical content and within-cluster agreement FAILS on the raw
+    bytes — the recall regression this fix repairs. After each response's own reflected clause is
+    masked out, the reflection is gone and only the row-bearing part remains, so the channel attributes
+    and the FACT mints."""
+
+    def log_message(self, *a: object) -> None:
+        return
+
+    def do_GET(self) -> None:  # noqa: N802
+        q = parse_qs(urlsplit(self.path).query).get("q", [""])[0]
+        with _DB_LOCK:
+            try:
+                rows = _DB.execute("SELECT id, name FROM users WHERE name = '" + q + "'").fetchall()
+            except sqlite3.Error:
+                rows = []
+        body = (f"<h1>Results for: {q}</h1><ul>"
+                + "".join(f"<li>{i}:{n}</li>" for i, n in rows) + "</ul>").encode()
+        self.send_response(200)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
+class _ReflectOnlyApp(BaseHTTPRequestHandler):
+    """A page that REFLECTS the injected clause but has NO boolean channel behind it — the exact
+    control that proves masking manufactures no channel. The body echoes the raw parameter into
+    ``<h1>Results for: {q}</h1>`` and the row-bearing part is CONSTANT (always empty), independent of
+    the clause's truth value. On the raw bytes the responses differ (each reflects a different clause);
+    after masking each response's OWN reflected clause the residual body is IDENTICAL on the true side
+    and the false side, so the two clusters are NOT disjoint and the oracle must REFUSE — the same
+    residual body means no across-truth separation. If masking ever over-stripped a server-produced
+    substring it would invent a difference here; it does not."""
+
+    def log_message(self, *a: object) -> None:
+        return
+
+    def do_GET(self) -> None:  # noqa: N802
+        q = parse_qs(urlsplit(self.path).query).get("q", [""])[0]
+        body = f"<h1>Results for: {q}</h1><ul></ul>".encode()   # reflect only; row part is constant
+        self.send_response(200)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
 @contextlib.contextmanager
 def _server(handler: type[BaseHTTPRequestHandler]) -> Iterator[str]:
     srv = ThreadingHTTPServer(("127.0.0.1", 0), handler)
@@ -432,6 +482,52 @@ def test_sprt_check_confirms_boolean_sqli() -> None:
         confirmed = _confirm(_check().probe(tpl, point, _send))
         assert confirmed is not None
         assert confirmed.confirmed_by.value == "boolean_inference"
+
+
+def test_sprt_check_confirms_and_refuses_across_a_reflection() -> None:
+    """THE RECALL-REGRESSION FIX, and its soundness twin, in ONE test so neither half can be vacuous.
+
+    (1) A REAL boolean channel BEHIND a reflection (``_ReflectVulnApp`` — the loopback ``vulnapp``
+        shape: ``<h1>Results for: {q}</h1>`` echoes the raw clause AND the query really runs). Every
+        distinct always-TRUE clause reflects a different string, so on the RAW bytes the true-side
+        responses disagree and the oracle refuses — the regression PR #855 introduced. With each
+        response's own reflected clause masked out, the channel attributes and the FACT MINTS.
+
+    (2) The SAME reflection with NO channel behind it (``_ReflectOnlyApp`` — the row-bearing part is
+        constant, independent of truth value). After masking, the residual body is identical on both
+        sides, so the clusters are not disjoint and the oracle REFUSES. Masking manufactures no
+        channel; it only removes the echo. If (2) minted, masking would be unsound; if (1) refused,
+        the fix would be a no-op — asserting both makes the test falsifiable in both directions."""
+    with _server(_ReflectVulnApp) as base:
+        tpl, point = _q_point(base)
+        confirmed = _confirm(_check().probe(tpl, point, _send))
+        assert confirmed is not None, (
+            "a REAL boolean channel behind a reflected search box did not mint — the reflective-value "
+            "mask is not repairing the recall regression PR #855 introduced")
+        assert confirmed.confirmed_by.value == "boolean_inference"
+    with _server(_ReflectOnlyApp) as base:
+        tpl, point = _q_point(base)
+        assert _confirm(_check().probe(tpl, point, _send)) is None, (
+            "a REFLECT-ONLY page (no boolean channel) minted a FALSE boolean_sqli FACT — masking the "
+            "reflection manufactured a channel that is not there")
+
+
+def test_reflect_only_page_masks_to_one_indistinguishable_cluster() -> None:
+    """The soundness of (2) above, at the EVIDENCE level: on a reflect-only page the masked TRUE
+    responses and the masked FALSE responses collapse to the SAME single residual body — so there is
+    demonstrably nothing for the across-truth separation to fire on, and the refusal is not a fluke of
+    the SPRT's stopping rule."""
+    from framework.v2.verify.oracles import _mask_boolean_reflection
+
+    with _server(_ReflectOnlyApp) as base:
+        tpl, point = _q_point(base)
+        ctx = _check().probe(tpl, point, _send)
+    round0 = ctx.probe_rounds[0]
+    masked_true = {_mask_boolean_reflection(r)["body"] for r in round0["trues"]}
+    masked_false = {_mask_boolean_reflection(r)["body"] for r in round0["falses"]}
+    assert masked_true == masked_false == {"<h1>Results for: </h1><ul></ul>"}, (
+        f"reflect-only masking did not collapse to one residual body: "
+        f"true={masked_true!r} false={masked_false!r}")
 
 
 def test_a_truth_correlated_lexical_waf_does_not_mint_on_a_static_page() -> None:

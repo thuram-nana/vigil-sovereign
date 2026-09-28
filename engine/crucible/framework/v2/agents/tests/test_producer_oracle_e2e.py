@@ -11,11 +11,12 @@ the finding ONLY because the differential oracle fired.
 
 Two hermetic cases, both against localhost, operator-owned demo targets:
 
-  (a) DifferentialDemoHandler (boolean-blind SQLi): the probe pair diverges, the
+  (a) DifferentialDemoHandler (boolean-blind SQLi over a REAL sqlite3 engine): the
+      responses partition by the injected boolean's TRUTH VALUE, the
       oracle FIRES, and the finding is confirmed with verified_by_oracle=True —
       even though the LLM is stubbed to OBJECT. A real target drove a real
       confirmed finding via a fired signal.
-  (b) SafeDemoHandler (parameterised twin): the probe pair is identical, the
+  (b) SafeDemoHandler (parameterised twin on the same engine): no partition, the
       oracle stays SILENT, and the finding is NOT confirmed — even though the LLM
       is stubbed to CONFIRM. The oracle vetoes the LLM; no fired signal, no
       confirmation.
@@ -145,14 +146,20 @@ def test_real_local_target_drives_oracle_confirmed_finding(
             assert pending["oracle_context"] is not None, (
                 "producer did not attach oracle_context from the probe"
             )
-            assert pending["oracle_context"]["baseline"], "no baseline response captured"
-            assert pending["oracle_context"]["mutated"], "no mutated response captured"
+            # The retained evidence is the SOUND kind: truth-value-attribution rounds, not a lone
+            # benign-vs-tautology pair (which has no attribution step and confirmed against targets
+            # with no database — verify.verifier.DIFFERENTIAL_LEAD_ONLY_CLASSES).
+            assert pending["oracle_context"]["probe_rounds"], "no probe rounds captured"
+            assert pending["oracle_context"]["false_baseline_samples"], "no determinism pre-gate"
+            assert pending["oracle_context"].get("baseline") is None, (
+                "a bare differential must not be what a boolean finding rests on"
+            )
 
-            # The oracle adjudicates and CONFIRMS via a fired differential signal.
+            # The oracle adjudicates and CONFIRMS via a fired SPRT boolean-inference signal.
             CritiqueAgent(bb, _SLUG).step()
             confirmed = _live_finding(bb)
             assert confirmed["critique_status"] == "confirmed", (
-                "real differential fired but the finding was not confirmed"
+                "the response partitioned by truth value but the finding was not confirmed"
             )
             assert confirmed["verified_by_oracle"] is True
 

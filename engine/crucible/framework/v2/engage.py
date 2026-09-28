@@ -618,8 +618,15 @@ def _spine_finding_payload(f, admitted) -> dict:
     is_fact = bool(getattr(admitted, "is_fact", False))
     return {
         "finding_slug": (f"{f.bug_class}:{f.insertion_point}"[:120]) or f.bug_class,
-        "title": f"{f.bug_class} confirmed at {f.param}",
-        "severity": "High",
+        # B4 / audit-A red-pen BLOCK-5 — a producer that HEDGED keeps its hedge here too.
+        # This mirror hardcoded "<bug_class> confirmed at <param>" at severity High, which is
+        # the exact relabelling B4 retired in `scanner.report.build_report`: the CSWSH
+        # no-cookies branch ("… possible CSWSH — UNCONFIRMED", Medium) was written onto the
+        # IMMUTABLE event spine as a confirmed High. Same fallback shape as build_report, so
+        # a built-in point check (which sets neither field) serialises byte-identically.
+        "title": (f"{f.title} at {f.param}" if f.title
+                  else f"{f.bug_class} confirmed at {f.param}"),
+        "severity": (f.severity or "High"),
         "bug_class": f.bug_class,
         "surface": f.insertion_point,
         "summary": f.rationale or f"{f.bug_class} at {f.param}",
@@ -917,8 +924,21 @@ def run_engagement(
     slug: str,
     seed_url: str,
     *,
-    request_budget: int = 200,
+    # The per-engagement HARD request cap the gated executor enforces. It was 200 when the default
+    # boolean producer was a 1-request differential; since `boolean_sqli` became BOOLEAN_INFERENCE-only,
+    # DEFAULT_CHECKS carries the SOUND `BOOLEAN_SQLI_SPRT` (up to ~64 requests per boolean point), so a
+    # full sound audit of even a small app can consume 200 on the audit ALONE and TRUNCATE the run before
+    # the additive arsenal pass (content discovery, etc.) ever sends a request — its /.env-class leads then
+    # silently vanish. Raised so a default engagement completes its sound audit AND its additive arsenal
+    # without the cap truncating either, consistent with the same no-false-clean doctrine that keeps
+    # max_pages/max_audit_requests un-truncating below. It stays a FINITE OPSEC cap (operators tune it with
+    # --request-budget); raising it only UNBLOCKS scans that genuinely need the requests — a scan that runs
+    # out of insertion points stops well under the cap regardless (measured: a 2-page app sends ~281).
+    request_budget: int = 1000,
     max_pages: int = 100,
+    # 0 == UNBOUNDED, deliberately (see WebScanCampaign.__init__): an early-stopping cap that reports a
+    # clean-looking result is the false-clean failure this refuses. A cap an operator sets is honoured
+    # safely because DEFAULT_CHECKS runs cost-ascending, so cheap checks are never starved by the SPRT.
     max_audit_requests: int = 0,
     bandit_path: str | None = None,
     enable_domxss: bool = False,
@@ -1766,7 +1786,7 @@ def main(argv: list[str]) -> int:
     parser.add_argument("seed_url", nargs="?", default=None,
                         help="Absolute seed URL on an in-scope host. Omit ONLY with --fuse-only "
                              "(a seedless cloud/Kubernetes/infra posture run).")
-    parser.add_argument("--request-budget", type=int, default=200)
+    parser.add_argument("--request-budget", type=int, default=1000)  # matches run_engagement's default (see there)
     parser.add_argument("--max-pages", type=int, default=100)
     parser.add_argument("--max-audit-requests", type=int, default=0)
     parser.add_argument(

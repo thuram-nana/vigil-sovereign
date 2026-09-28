@@ -46,7 +46,7 @@ def test_benchmark_confirms_each_planted_class() -> None:
     confirmed = {(m.bug_class, m.param) for m in report.confirmed}
 
     # Each distinct oracle route lands its own class on its own parameter.
-    assert ("boolean_sqli", "term") in confirmed      # differential oracle
+    assert ("boolean_sqli", "term") in confirmed      # SPRT boolean-inference oracle
     assert ("xss", "bio") in confirmed                # side-effect oracle
     assert ("idor", "docid") in confirmed             # achieved-state oracle
 

@@ -6,9 +6,35 @@ on the wire — a request carrying both ``Content-Length`` and ``Transfer-Encodi
 so a front-end and back-end disagree on where it ends. This module drops to raw
 sockets to send those bytes and times the response: when the two parsers disagree,
 the back-end waits for a chunk that never comes and the connection HANGS, so a
-CL.TE / TE.CL probe returns far slower than a control request. That timing delta,
-confirmed by the differential oracle's latency dimension and gated by an absolute
-threshold (so jitter cannot false-positive), is the signal.
+CL.TE / TE.CL probe returns far slower than a control request.
+
+RED-PEN / A12 RESOLUTION — that timing delta is an UNCONFIRMED LEAD and nothing
+more, and this module now says so structurally. ``detect()`` no longer calls
+``confirm_finding``: a hang cannot distinguish a desynced back-end from an
+RFC 7230 §3.3.3-compliant origin patiently awaiting the rest of an incomplete
+declared body, so no oracle can soundly adjudicate it and ``detected=True`` was
+never a fact. Every result is therefore ``detected=False``, ``confidence=0.0``,
+and carries ``lead=True`` when the probe hung past ``delay_threshold_ms``. The
+SOUND desync proof lives elsewhere: ``verify/oracles.py::smuggling_desync_oracle``
+re-runs a unique-canary differential over VIGIL's OWN second requests on two
+connections it owns, reached through the ``smuggling_desync`` oracle-context key.
+The verifier refuses a ``baseline``/``mutated`` pair for ``request_smuggling``
+outright (``verify/verifier.py::_DIFFERENTIAL_BASELINE_REFUSED``), so nothing
+downstream can re-confirm this probe by any other route either.
+
+AUDIT-B5 — HONEST WIRING STATUS OF ``lead``; READ THIS BEFORE TRUSTING IT.
+``detect()`` does set ``lead=True`` on a hang, but **no production code reads it**
+(``grep -rn "[.]lead\\b"`` over ``scanner/`` finds only tests, plus the unrelated
+graphql-dos result at ``campaign.py:958``). ``campaign.py::_smuggling_findings``
+skips every result with ``if not r.detected: continue``, and ``detected`` is now
+ALWAYS False — so on the scan/engage path a hang that previously surfaced as a
+Low/UNCONFIRMED ``AuditFinding`` today surfaces as **NOTHING**. That is demotion to
+SILENCE, not demotion to a lead, and the paragraph above must not be read as
+claiming otherwise. It is a real, OPEN gap, tracked by the strict-xfail
+``test_B5_a_smuggling_hang_reaches_the_campaign_as_a_LEAD``
+(``scanner/tests/test_arsenal_wiring.py``), whose ``reason`` carries the exact
+one-line fix. That line lives in ``scanner/campaign.py``, which belongs to a
+sibling slice and is deliberately not edited from here.
 
 The base CL.TE / TE.CL pair only catches parsers that disagree on the *presence*
 of both headers. Real front-ends are stricter than that, so the desync usually
@@ -19,8 +45,9 @@ distinct technique here (``TE.CL-space``, ``TE.CL-tab``, ``TE.CL-dupe``, …), p
 two framing-disagreement classes that need no CL/TE pair at all: ``CL.0`` (the
 back-end ignores a body the front-end forwarded) and ``TE.TE`` (two conflicting
 Transfer-Encoding headers). Every one of them is confirmed the SAME way — a timing
-delta past ``delay_threshold_ms`` AND the latency oracle firing — because a
-false smuggling report is dangerous: we never claim a smuggle without the hang.
+delta past ``delay_threshold_ms`` — and every one of them is reported the SAME
+way, as an explicitly unconfirmed LEAD, because a false smuggling report is
+dangerous and timing is not proof.
 
 HTTP/2 note: genuine h2/h2c request smuggling (h2.CL, h2.TE, CRLF-in-header,
 :path splitting) needs HPACK and HTTP/2 frame encoding, which the standard library
@@ -42,6 +69,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from ..verify.confirmation import confirm_finding
 from ..verify.adapter import FindingContext
+from .rawhttp import RawResponseReader
 
 
 class SmugglingResult(BaseModel):
@@ -52,10 +80,25 @@ class SmugglingResult(BaseModel):
         "variant (TE.CL-space/-tab/-dupe/-xchunked/-fold/-vtab/-formfeed), "
         "CL.0, or TE.TE."
     )
-    detected: bool
+    detected: bool = Field(
+        default=False,
+        description="ALWAYS False. A CONFIRMED desync, which this TIMING probe "
+        "cannot establish — see the module docstring. Retained so downstream "
+        "consumers that promote a `detected` result keep compiling and keep "
+        "promoting nothing from timing alone.",
+    )
+    lead: bool = Field(
+        default=False,
+        description="The probe hung past `delay_threshold_ms` relative to the "
+        "control: an UNCONFIRMED hypothesis worth a human look, never a fact.",
+    )
     control_ms: float
     probe_ms: float
-    confidence: float = 0.0
+    confidence: float = Field(
+        default=0.0,
+        description="ALWAYS 0.0. No oracle adjudicates a timing hang, so there is "
+        "no confirmed confidence to report.",
+    )
     rationale: str = ""
 
 
@@ -273,60 +316,301 @@ def detect(
     suite (CL.TE, TE.CL, the obfuscated TE variants, CL.0 and TE.TE — see
     ``_TECHNIQUES``). Returns one result per technique, reported in that order.
 
-    ``detected`` is True for a technique only when its probe is slower than the
-    control by ``delay_threshold_ms`` AND the differential oracle's latency signal
-    fires — the exact same two-part gate the original CL.TE/TE.CL probes used, so
-    an obfuscation variant can no more false-positive than the base pair could. We
-    never claim a smuggle without the timing hang.
+    ``lead`` is True for a technique when its probe is slower than the control by
+    ``delay_threshold_ms``. ``detected`` is ALWAYS False and ``confidence`` ALWAYS
+    0.0: see the module docstring — a hang is not a desync proof, no oracle is
+    consulted, and this function mints nothing.
 
-    Note ``delay_threshold_ms`` is wired straight into the oracle's latency
-    threshold, so the parameter governs BOTH halves of the gate. (For any
-    ``delay_threshold_ms`` >= the oracle's old 1000 ms default this is behaviour-
-    identical to before — the parameter was already the binding constraint there;
-    it merely lets a caller probe with a lower, faster threshold when the network
-    path is quiet, e.g. loopback.)"""
+    ``delay_threshold_ms`` is the one knob, and it governs only the raw delta gate
+    (a lower, faster threshold is reasonable on a quiet path such as loopback).
+    Lowering it produces MORE leads for a human to triage; it can never produce a
+    confirmed finding, because there is no confirmation on this path."""
     control_ms, _ = raw_send(host, port, _control(host), timeout=timeout)
     results: list[SmugglingResult] = []
     for technique, builder in _TECHNIQUES:
         probe_ms, _ = raw_send(host, port, builder(host), timeout=timeout)
         delta = probe_ms - control_ms
 
-        ctx = FindingContext.from_http_responses(
-            {"status": 200, "body": "control"},
-            {"status": 200, "body": "control"},   # identical content: latency is the only signal
-            bug_class="request_smuggling",
-            baseline_latency_ms=control_ms,
-            mutated_latency_ms=probe_ms,
-            # The latency oracle's threshold tracks delay_threshold_ms so the one
-            # knob governs both the raw delta gate and the oracle's firing.
-            discriminator={"dimensions": ["latency"], "latency_threshold_ms": delay_threshold_ms},
-        )
-        # A12: the latency oracle confirms a TIMING ANOMALY, not request smuggling. Timing alone is a LEAD —
-        # a normal origin awaiting an incomplete declared body produces the same delay — so this is reported
-        # as a low-severity, explicitly-UNCONFIRMED hypothesis, never a "High desync" confirmed exploit.
-        confirmed = confirm_finding(
-            {"bug_class": "request_smuggling",
-             "title": f"{technique} timing anomaly (possible desync — UNCONFIRMED)",
-             "severity": "Low", "surface": technique,
-             "summary": (f"{technique} probe delayed vs the control — a TIMING LEAD, not proof of smuggling. "
-                         f"A normal origin waiting for an incomplete declared body produces the same delay; "
-                         f"manual confirmation over a real desync is required before this is an exploit.")},
-            ctx,
-        )
-        detected = delta >= delay_threshold_ms and confirmed is not None
+        hung = delta >= delay_threshold_ms
         results.append(SmugglingResult(
             technique=technique,
-            detected=detected,
+            # NEVER confirmed from timing. See the module docstring: the A12 probe no
+            # longer calls the oracle at all, because there is no sound adjudication
+            # for it to make.
+            detected=False,
+            lead=hung,
             control_ms=round(control_ms, 1),
             probe_ms=round(probe_ms, 1),
-            confidence=confirmed.confidence if confirmed else 0.0,
+            confidence=0.0,
             rationale=(
-                f"{technique} probe hung {delta:.0f}ms beyond the control — a TIMING LEAD (timing alone does "
-                f"not prove smuggling; a server awaiting an incomplete body delays identically)"
-                if detected else f"no significant delay ({delta:.0f}ms)"
+                f"{technique} probe hung {delta:.0f}ms beyond the control "
+                f"(threshold {delay_threshold_ms:.0f}ms) — an UNCONFIRMED TIMING LEAD. A hang cannot "
+                f"distinguish a desynced back-end from an RFC 7230 \u00a73.3.3-compliant origin awaiting the "
+                f"rest of an incomplete declared body, so this is never a desync FACT; the sound proof is "
+                f"the unique-canary desync differential (verify/oracles.py::smuggling_desync_oracle)."
+                if hung else
+                f"{technique} probe returned within {delta:.0f}ms of the control "
+                f"(threshold {delay_threshold_ms:.0f}ms) — no timing lead"
             ),
         ))
     return results
+
+
+# ---------------------------------------------------------------------------
+# The ACHIEVED-DESYNC differential — the timing-free proof (CWE-444, Wave-4.2)
+# ---------------------------------------------------------------------------
+#
+# Everything above this line is TIMING, and timing is a LEAD: a normal origin that
+# merely honours RFC 7230 §3.3.3 (Transfer-Encoding wins over Content-Length) hangs
+# waiting for a chunk that never comes, exactly like a desynced one. Audit A12 (#269)
+# capped that signal at an UNCONFIRMED Low, and `detect()` above reports it that way.
+#
+# What follows is the CANARY DIFFERENTIAL, and on this path it is an UNCONFIRMED LEAD —
+# NOT a CWE-444 fact. VIGIL opens ONE connection it owns and sends TWO requests. The FIRST
+# carries a framing conflict whose smuggled tail is a request to a reflect surface embedding
+# a UNIQUE, high-entropy per-probe canary; the SECOND is VIGIL's OWN ordinary follow-up,
+# carrying NO canary. On a SECOND VIGIL-owned connection it sends the SAME bytes WELL-FORMED
+# (no conflict) plus the SAME follow-up, so the framing conflict is the ONLY variable. If the
+# canary comes back in the conflict leg's second response and not in the control leg's, the
+# origin treated the smuggled prefix as the start of the next request ON THAT CONNECTION.
+#
+# WHY THAT IS A LEAD AND NOT A FACT (measured; audit-A red-pen B1). CWE-444 is TWO PARSERS
+# DISAGREEING across a trust boundary. This differential is observed on the one connection
+# VIGIL itself pipelined the prefix onto, so the "smuggled" request is VIGIL's own request to
+# itself and no second parser is involved. A BENIGN SINGLE ORIGIN with no proxy at all —
+# preferring Transfer-Encoding over Content-Length (permitted by RFC 9112 6.1) and doing
+# ordinary keep-alive pipelining, with a stock path-echoing 404 (the default of Apache httpd,
+# Express and Tomcat) — reproduces it exactly. The decisive control: TWO ORDINARY PIPELINED
+# REQUESTS with no framing conflict anywhere produce the IDENTICAL canary echo against that
+# origin (scanner/tests/test_audit_a_soundness.py::test_b1_plain_pipelining_reproduces_the_
+# whole_differential). What the differential actually measures is "does this origin honour
+# TE over CL and pipeline the remainder" — ONE parser — not a disagreement between two.
+#
+# The clause in the old comment that gave it away was "NO victim is poisoned": with no victim
+# there is also no evidence of a second hop. So the campaign reports this as an UNCONFIRMED
+# LEAD (`WebScanCampaign._smuggling_leads`) and the evidence branch
+# `request_smuggling.differential_desync` carries the FACT as named blocking_work.
+#
+# WHAT WOULD MAKE IT A FACT, and why it is not done here: the corruption must be observed on
+# a connection VIGIL did NOT pipeline the prefix onto (poison connection A, observe it on
+# connection B). That is sound only if the front-end POOLS connections — and VIGIL cannot
+# know whether that pool is shared with real users, so a queued prefix could land in front of
+# a third party's request. That is a live victim, which the ROE forbids; it needs explicit
+# operator authorisation for a co-tenant-affecting probe. Both requests on both connections
+# here are VIGIL's own, on VIGIL's own sockets: nothing is poisoned — and nothing is proven
+# about a second parser either.
+
+
+class DesyncLeg(BaseModel):
+    """One leg's RAW second-request response — the bytes the oracle adjudicates."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    channel: bool = Field(default=False, description="A complete response was read for the SECOND request.")
+    status: int | None = None
+    reason: str = ""
+    body: str = ""
+
+
+class DesyncProbe(BaseModel):
+    """One (technique, canary) single-connection capture: both legs' raw second responses.
+
+    Carries NO verdict. The campaign reports a canary differential over these bytes as an
+    UNCONFIRMED LEAD (audit-A B1); the gated live re-drive hands the same shape to
+    ``smuggling_desync_oracle``. ``note`` explains a leg that established no channel (an
+    honest INCONCLUSIVE, never a CLEAN and never a fabricated leak)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    technique: str
+    canary: str
+    conflict: DesyncLeg = Field(default_factory=DesyncLeg)
+    control: DesyncLeg = Field(default_factory=DesyncLeg)
+    note: str = ""
+
+    @property
+    def adjudicable(self) -> bool:
+        """Both VIGIL-owned second requests read a COMPLETE, well-formed response, so the
+        differential exists.
+
+        A plausible status is required on BOTH legs, not just ``channel``: before the shared
+        reader was corrected, an UNDER-DECLARED ``Content-Length`` on the first response made
+        the surplus bytes (which include a benign echo of the first request, canary and all)
+        come back as a "second response" with ``channel=True, status=None``. The reader now
+        refuses such a blob outright; this is the producer-side belt-and-braces, because the
+        differential must never be computed over bytes that are not a response."""
+        return (self.conflict.channel and self.control.channel
+                and self.conflict.status is not None and self.control.status is not None)
+
+    @property
+    def canary_echo_differential(self) -> bool:
+        """The per-probe canary came back in the CONFLICT leg's second response and NOT in the
+        WELL-FORMED control leg's — the observation the campaign reports as an UNCONFIRMED
+        LEAD (see the section comment above for why it is not a CWE-444 fact)."""
+        return (self.adjudicable and bool(self.canary)
+                and self.canary in self.conflict.body and self.canary not in self.control.body)
+
+
+# The framing conflicts driven over the connection VIGIL owns. Kept to the two base
+# classes: an obfuscation variant changes only which parser is fooled, and each extra
+# technique costs two more connections against the operator's origin.
+DESYNC_TECHNIQUES: tuple[str, ...] = ("CL.TE", "TE.CL")
+
+_DESYNC_MAX_RAW = 65536   # bounded read — the differential needs only the first two responses
+
+
+def _smuggled_prefix(host: str, canary: str) -> str:
+    """The smuggled request embedded in the conflict leg's first request: a GET to a
+    reflect surface carrying the UNIQUE per-probe canary. If the back-end desyncs, this
+    is served as VIGIL's OWN second response on the socket, echoing the canary.
+
+    The ``/vigil-*`` path shapes are deliberately the SAME ones the gated live re-drive
+    (``vigil_integration.live.smuggling_redrive``) uses, so ONE set of fixtures
+    (``eval.benchmark_app.serve_smuggling_{desync,benign,reflect_error}``) exercises both
+    producers: the positive, the safe twin and the echo-the-request red-pen twin."""
+    return (f"GET /vigil-reflect?c={canary} HTTP/1.1\r\nHost: {host}\r\n"
+            f"X-Vigil-Canary: {canary}\r\nConnection: keep-alive\r\n\r\n")
+
+
+def _desync_follow_up(host: str) -> bytes:
+    """VIGIL's OWN DISTINCT second request, actually sent on the SAME socket after the
+    first response has been fully consumed. It deliberately carries NO canary: if ITS
+    genuine response echoes the per-probe canary, that canary can ONLY have come from the
+    leftover smuggled prefix a desynced back-end prepended to it — never from an endpoint
+    that merely reflects this request's own bytes."""
+    return f"GET /vigil-follow HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n".encode("latin-1")
+
+
+def _desync_conflict_first(technique: str, host: str, canary: str) -> bytes:
+    """The CONFLICT leg's first request: a CL/TE framing conflict whose smuggled tail is
+    :func:`_smuggled_prefix`. ``Connection: keep-alive`` (on BOTH legs, so it is not the
+    variable) keeps the socket open for VIGIL's genuine second request."""
+    smuggled = _smuggled_prefix(host, canary)
+    if technique == "TE.CL":
+        body = f"{len(smuggled):x}\r\n{smuggled}\r\n0\r\n\r\n"
+        return (f"POST /vigil-start HTTP/1.1\r\nHost: {host}\r\nConnection: keep-alive\r\n"
+                f"Content-Length: 4\r\nTransfer-Encoding: chunked\r\n\r\n{body}").encode("latin-1")
+    body = f"0\r\n\r\n{smuggled}"
+    return (f"POST /vigil-start HTTP/1.1\r\nHost: {host}\r\nConnection: keep-alive\r\n"
+            f"Content-Length: {len(body)}\r\nTransfer-Encoding: chunked\r\n\r\n{body}").encode("latin-1")
+
+
+def _desync_control_first(host: str, canary: str) -> bytes:
+    """The CONTROL leg's first request: the SAME reflect surface + the SAME canary, but
+    WELL-FORMED (one honest Content-Length, no Transfer-Encoding), so no leftover prefix
+    exists. The only variable vs the conflict leg is the framing conflict itself."""
+    body = _smuggled_prefix(host, canary)
+    return (f"POST /vigil-start HTTP/1.1\r\nHost: {host}\r\nConnection: keep-alive\r\n"
+            f"Content-Length: {len(body)}\r\n\r\n{body}").encode("latin-1")
+
+
+class _RawResponseReader(RawResponseReader):
+    """The shared core reader (:mod:`scanner.rawhttp`) with its records typed as
+    :class:`DesyncLeg`.
+
+    The ~110-line body that used to live here was DUPLICATED verbatim in
+    ``vigil_integration.live.smuggling_redrive`` and carried three framing defects in both
+    copies (a 1xx interim returned as a complete response; an under-declared Content-Length
+    turning the surplus into "response 2"; unconsumed chunked trailers). ``scanner.rawhttp``
+    now owns the framing for THIS path — see it for the measured defects it fixes and
+    ``scanner.tests.test_rawhttp_reader`` for the unit tests and the drift guard.
+
+    Audit-A red-pen BLOCK-7a: that last sentence used to read as though the migration were
+    complete on every path. It is not. ``vigil_integration/live/smuggling_redrive.py:119``
+    STILL DEFINES its own ``class _RawResponseReader`` with the pre-fix framing; that file is
+    owned by a concurrent change and is not edited here. The drift guard's ``_PENDING`` /
+    ``_PENDING_DIVERGENT`` allowlist is the authority on that outstanding copy and fires the
+    day it is migrated."""
+
+    def read_response(self) -> DesyncLeg:      # type: ignore[override]
+        return DesyncLeg(**super().read_response())
+
+
+def _desync_leg(host: str, port: int, first: bytes, follow_up: bytes,
+                *, timeout: float) -> tuple[DesyncLeg, str]:
+    """Drive ONE fresh socket: send ``first``, CONSUME EXACTLY its first response by that
+    response's own framing, then ACTUALLY SEND ``follow_up`` on the SAME socket and read
+    ITS genuine response. Returns (second response, note). A connection that does not
+    persist past the first response yields ``channel=False`` — an honest INCONCLUSIVE."""
+    try:
+        s = socket.create_connection((host, port), timeout=timeout)
+    except OSError as exc:
+        return DesyncLeg(), f"connect error (no channel): {type(exc).__name__}"
+    try:
+        s.settimeout(timeout)
+        reader = _RawResponseReader(s)
+        s.sendall(first)
+        if not reader.read_response().channel:
+            return DesyncLeg(), (f"no complete first response observed (no channel to drive the "
+                                 f"second request): {reader.last_error}")
+        if reader.exhausted:
+            return DesyncLeg(), "connection did not persist after the first response — no second request driven"
+        s.sendall(follow_up)
+        second = reader.read_response()
+        # A leg whose SECOND read was not a complete, well-formed response established no
+        # channel: the reason (a broken frame, a truncated body, junk where a status line
+        # belongs) is carried through so the campaign reports an honest INCONCLUSIVE rather
+        # than adjudicating a differential over bytes that are not a response at all.
+        return second, ("" if second.channel else f"second response not framed: {reader.last_error}")
+    except OSError as exc:
+        return DesyncLeg(), f"transport error: {type(exc).__name__}"
+    finally:
+        try:
+            s.close()
+        except OSError:
+            pass
+
+
+def detect_desync(
+    host: str,
+    port: int,
+    *,
+    techniques: "tuple[str, ...]" = DESYNC_TECHNIQUES,
+    timeout: float = 6.0,
+    authorize: "Callable[[str], bool] | None" = None,
+    canary: "Callable[[], str] | None" = None,
+) -> list[DesyncProbe]:
+    """Capture the single-connection canary differential for each technique — the
+    timing-free OBSERVATION the campaign reports as an UNCONFIRMED LEAD.
+
+    Returns one :class:`DesyncProbe` per technique carrying BOTH legs' RAW second-request
+    responses. It renders NO verdict of its own. Read the section comment above before
+    wiring this anywhere: the differential is observed on the one connection VIGIL itself
+    pipelined the prefix onto, so it cannot distinguish a genuine front-end/back-end desync
+    from a single benign origin that honours TE over CL and pipelines the remainder. It is a
+    LEAD; the cross-connection FACT is named blocking_work on the evidence branch. ``authorize`` (when given) is
+    re-checked before EVERY probe and a falsy/raising gate means no byte leaves the box.
+    ``canary`` is injectable for tests; the default mints a fresh high-entropy token per
+    probe from ``secrets`` (never the global RNG, which a determinism test seeds)."""
+    import secrets
+
+    def _mint() -> str:
+        return "crsmug" + secrets.token_hex(13)   # unique, high-entropy, >= 12 alnum chars
+
+    mint = canary or _mint
+    origin_url = f"http://{host}:{port}/"
+    follow_up = _desync_follow_up(host)
+    probes: list[DesyncProbe] = []
+    for technique in techniques:
+        if authorize is not None:
+            try:
+                if not authorize(origin_url):
+                    continue
+            except Exception:       # a gate that raises fails CLOSED
+                continue
+        token = mint()
+        conflict, why_c = _desync_leg(
+            host, port, _desync_conflict_first(technique, host, token), follow_up, timeout=timeout)
+        if not conflict.channel:
+            probes.append(DesyncProbe(technique=technique, canary=token,
+                                      note=f"conflict leg: {why_c}"))
+            continue
+        control, why_k = _desync_leg(
+            host, port, _desync_control_first(host, token), follow_up, timeout=timeout)
+        probes.append(DesyncProbe(technique=technique, canary=token, conflict=conflict,
+                                  control=control,
+                                  note=("" if control.channel else f"control leg: {why_k}")))
+    return probes
 
 
 # ---------------------------------------------------------------------------

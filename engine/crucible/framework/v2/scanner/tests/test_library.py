@@ -396,13 +396,25 @@ def _confirm(check: Check, tpl: RequestTemplate, point) -> object:
     )
 
 
-def test_compiled_differential_confirms_on_vuln_and_not_on_safe() -> None:
+# LEAD-ONLY NOW. A bare benign-vs-payload differential can no longer CONFIRM a
+# truth-value-attribution class (verify.verifier.DIFFERENTIAL_LEAD_ONLY_CLASSES): it has no
+# attribution step — its control is a DIFFERENT STRING, not a same-shape negative — so it cannot
+# separate "the injected boolean changed the query" from "the app treated two strings differently",
+# and it minted High FACTs at rate 1.0 against a STATIC page behind a CRS-942130 WAF rule and
+# against an app doing strict input validation, neither with a database. Note this fixture is
+# ITSELF a payload-SHAPE matcher (it strips quotes and looks for `1=1`) — precisely what a WAF rule
+# is, which is why a differential cannot tell the two apart. So the assertion is now: the entry
+# drives real traffic and produces a LEAD, and NOTHING is confirmed on either side. Sound boolean
+# detection is the SPRT BooleanInferenceCheck (see scanner/tests/test_attribution_soundness.py and
+# the sqlite-backed scanner.benchmark).
+def test_compiled_differential_is_lead_only_on_vuln_and_safe() -> None:
     check = compile_entry(_entry("boolean-sqli"))
     with _server(_SqliVulnApp) as base:
         tpl, point = _q_point(base)
-        confirmed = _confirm(check, tpl, point)
-    assert confirmed is not None
-    assert confirmed.confirmed_by.value == "differential_response"
+        ctx = check.probe(tpl, point, _send)
+        # the probe DID run over real traffic and DID observe a divergence — that is the LEAD
+        assert ctx is not None and ctx.baseline != ctx.mutated
+        assert _confirm(check, tpl, point) is None
 
     with _server(_SqliSafeApp) as base:
         tpl, point = _q_point(base)

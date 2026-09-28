@@ -14,21 +14,35 @@ from framework.v2.worldmodel.graph import WorldModel
 from framework.v2.worldmodel.models import EdgeKind, NodeKind
 
 
+
+# ATTRIBUTED evidence. The confirmable fixture below is a path_traversal FILE-CONTENT signature with
+# its benign CONTROL retained: the signature is present under the payload and ABSENT from the
+# control, so the read is attributable. It used to be a boolean_sqli benign-vs-payload differential,
+# which is LEAD-only now — that inference has no attribution step (its control is a DIFFERENT
+# STRING, not a same-shape negative) and minted High FACTs at rate 1.0 against a static page behind
+# a WAF tautology rule and against strict input validation, on targets with no database. See
+# verify.verifier.DIFFERENTIAL_LEAD_ONLY_CLASSES. Nothing under test here changes — only the
+# evidence it is anchored to.
+_SIGNATURE = "root:x:0:0:"
+_READ_SINK = "root:x:0:0:root:/root:/bin/bash\ndaemon:x:1:1:daemon:/usr/sbin:/usr/sbin/nologin"
+_CONTROL_SINK = "<p>ordinary document</p>"
+_PT = "path_traversal"
+
+
+def _pt_ctx(*, firing: bool = True) -> "FindingContext":
+    """A path_traversal side-effect context. ``firing=False`` puts the signature in the CONTROL too,
+    so it is not attributable and the oracle stays silent."""
+    return FindingContext.from_side_effect(
+        _SIGNATURE, _READ_SINK, bug_class=_PT,
+        control_sink=_READ_SINK if not firing else _CONTROL_SINK)
+
+
 def _firing_ctx() -> dict:
-    return FindingContext.from_http_responses(
-        {"status": 200, "body": "no results"},
-        {"status": 200, "body": "id=1 alice admin\n" * 30},  # strong divergence
-        bug_class="boolean_sqli",
-        discriminator={"dimensions": ["status", "length", "lexical"]},
-    ).model_dump()
+    return _pt_ctx().model_dump()
 
 
 def _non_firing_ctx() -> dict:
-    same = {"status": 200, "body": "no results"}
-    return FindingContext.from_http_responses(
-        same, dict(same), bug_class="boolean_sqli",
-        discriminator={"dimensions": ["status", "length", "lexical"]},
-    ).model_dump()
+    return _pt_ctx(firing=False).model_dump()
 
 
 def _chain(hop2_ctx: dict) -> list[ProposedHop]:

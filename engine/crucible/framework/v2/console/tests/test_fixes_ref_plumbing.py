@@ -59,23 +59,23 @@ def store(tmp_path, monkeypatch):
     return root
 
 
-def _confirmed_active(check_id: str = "boolean-sqli") -> AuditFinding:
+def _confirmed_active(check_id: str = "error-based-sqli") -> AuditFinding:
     ctx = FindingContext.from_http_responses(
         {"status": 200, "body": "No results found."},
         {"status": 200, "body": "id=1 name=alice role=user\nid=2 name=bob role=admin"},
-        bug_class="boolean_sqli",
+        bug_class="error_based_sqli",
         discriminator={"dimensions": ["status", "length", "lexical"]},
     )
-    c = confirm_finding(finding={"bug_class": "boolean_sqli"}, context=ctx)
+    c = confirm_finding(finding={"bug_class": "error_based_sqli"}, context=ctx)
     assert c is not None, "the fixture must be oracle-confirmed or this test proves nothing"
     return AuditFinding(
-        check_id=check_id, bug_class="boolean_sqli", insertion_point="query_value:q", param="q",
+        check_id=check_id, bug_class="error_based_sqli", insertion_point="query_value:q", param="q",
         endpoint="http://127.0.0.1:8000/search", confidence=c.confidence,
         confirmed_by=c.confirmed_by.value, rationale="rows diverged", oracle_context=ctx.model_dump(mode="json"),
     )
 
 
-def _write_real_report(run_id: str, *, check_id: str = "boolean-sqli", meta: dict | None = None) -> None:
+def _write_real_report(run_id: str, *, check_id: str = "error-based-sqli", meta: dict | None = None) -> None:
     """Render a REAL scan report (active fact + passive lead + DOM lead) into the run dir."""
     scan = ScanReport(
         target="http://127.0.0.1:8000/",
@@ -131,8 +131,8 @@ def test_fixable_finding_carries_a_non_empty_ref(store) -> None:
     # offer the CLI fallback, for every finding on every run — the bug this closes)...
     assert f["ref"], "empty ref ⇒ the UI shows the 'no stable finding reference' fallback"
     # ...and it must be the finding's OWN check id (the token `vigil patch --finding-ref` takes)
-    assert f["ref"] == "boolean-sqli"
-    assert f["bug_class"] == "boolean_sqli"
+    assert f["ref"] == "error-based-sqli"
+    assert f["bug_class"] == "error_based_sqli"
 
 
 def test_ref_tracks_the_real_check_id_not_a_constant(store) -> None:
@@ -146,7 +146,7 @@ def test_leads_are_counted_but_never_offered_as_fixable(store) -> None:
     _write_real_report(_RUN_ID)
     r = api.remediate_plan(_RUN_ID)
     assert r["lead_count"] == 2                       # the passive + the DOM candidate
-    assert [f["bug_class"] for f in r["fixable"]] == ["boolean_sqli"]
+    assert [f["bug_class"] for f in r["fixable"]] == ["error_based_sqli"]
     assert all(f["bug_class"] != "dom_xss" for f in r["fixable"])
     # and the underlying rendered document gives the leads no reference at all
     doc = json.loads((actions.run_dir(_RUN_ID) / "report.json").read_text(encoding="utf-8"))
@@ -227,7 +227,7 @@ def test_unresolvable_vigil_entrypoint_is_not_runnable(store, tmp_path, monkeypa
     monkeypatch.setattr(actions, "_vigil_bin", lambda: None)
     plan = api.remediate_plan(_RUN_ID)
     assert plan["runnable"] is False and "not resolvable" in plan["why_not"]
-    assert actions.apply_fix(_RUN_ID, "boolean-sqli")["error"] == plan["why_not"]
+    assert actions.apply_fix(_RUN_ID, "error-based-sqli")["error"] == plan["why_not"]
 
 
 def test_pending_run_still_carries_the_honest_predicate(store) -> None:
@@ -264,7 +264,7 @@ def test_runnable_true_exactly_when_apply_fix_proceeds(store, tmp_path, monkeypa
     argv = captured["argv"]
     assert argv[:2] == ["/bin/vigil", "patch"]
     assert argv[argv.index("--from-spine") + 1] == "acme"
-    assert argv[argv.index("--finding-ref") + 1] == "boolean-sqli"
+    assert argv[argv.index("--finding-ref") + 1] == "error-based-sqli"
     assert argv[argv.index("--target-repo") + 1] == "/home/me/proj"
     assert argv[argv.index("--base-dir") + 1] == str(base)
     assert "--open-pr" not in argv                    # the console NEVER opens a PR
@@ -351,7 +351,7 @@ def test_ladder_edit_stage_describes_what_the_console_path_really_does(store, tm
 
     monkeypatch.setattr(actions.subprocess, "run",
                         lambda argv, **k: (captured.__setitem__("argv", argv), _P())[1])
-    out = actions.apply_fix(_RUN_ID, "boolean-sqli")
+    out = actions.apply_fix(_RUN_ID, "error-based-sqli")
     argv = captured["argv"]
     assert "--apply-edits" in argv          # the blanket up-front approval the ladder now states
     assert "--approve" in argv              # the click IS the operator-approval leg (else the gate queues)

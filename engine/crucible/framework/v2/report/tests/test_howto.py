@@ -144,7 +144,7 @@ def test_demoted_lead_is_confirm_block_with_its_own_reason() -> None:
 
 
 def test_remediation_weaves_the_findings_own_parameter() -> None:
-    fact = make_fact()  # bug_class boolean_sqli, surface GET /search?q=
+    fact = make_fact()  # bug_class error_based_sqli, surface GET /search?q=
     rem = finding_specific_remediation(fact)
     # the class rule is present AND scoped to this finding's own parameter/surface.
     assert "parameterised queries" in rem            # class rule text

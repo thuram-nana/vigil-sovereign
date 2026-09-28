@@ -32,6 +32,7 @@ here touches a non-loopback host.
 from __future__ import annotations
 
 import contextlib
+import sqlite3
 import threading
 import urllib.error
 import urllib.parse
@@ -42,7 +43,13 @@ from typing import Callable, Iterator
 from pydantic import BaseModel, ConfigDict, Field
 
 from .campaign import WebScanCampaign
-from .checks import BOOLEAN_SQLI, REFLECTED_XSS, IdorCheck, Send
+from .checks import (
+    REFLECTED_XSS,
+    BooleanInferenceCheck,
+    IdorCheck,
+    Send,
+    boolean_clause_families,
+)
 from .engine import AuditFinding
 from .insertion import HttpRequest, InsertionKind
 
@@ -148,12 +155,30 @@ _INDEX = (
 ).encode()
 
 
-def _looks_sqli(value: str) -> bool:
-    """The benchmark's stand-in for a query that a boolean-blind injection would
-    turn always-true. Deliberately narrow so the scanner's benign baseline value
-    never trips it — only an actual tautology payload does."""
-    low = value.lower()
-    return "'='" in value or " or " in low
+def _sqli_rows(value: str) -> list[tuple]:
+    """The planted boolean-blind SQLi: user input is string-CONCATENATED into a WHERE clause and
+    handed to a REAL sqlite3 engine, so the result set is a genuine FUNCTION OF THE INJECTED
+    BOOLEAN'S TRUTH VALUE for every comparison shape a SQL engine understands.
+
+    It used to be ``"'='" in value or " or " in value.lower()`` — a payload-SHAPE matcher. That is
+    the same thing a ModSecurity-CRS-942130 rule in front of a STATIC page does, and it is exactly
+    why the corpus could only ever be detected by an UNSOUND bare differential: the sound detector
+    varies COMPARISON SHAPE on purpose (``>``, ``LIKE``, ``<>``, ``BETWEEN``, ``IN (SELECT …)``, a
+    compound ``AND``), and against a shape matcher every one of those evaluates the same on the
+    always-TRUE and the always-FALSE clause, so the truth-value partition vanishes. A real engine
+    removes that artifact: this target is now injectable the way a real one is, and the SPRT
+    BooleanInferenceCheck confirms it SOUNDLY."""
+    con = sqlite3.connect(":memory:")
+    con.execute("CREATE TABLE accounts (id INTEGER, label TEXT)")
+    con.executemany("INSERT INTO accounts VALUES (?,?)",
+                    [(i, f"user account #{i}") for i in range(1, 25)])
+    try:
+        return con.execute(
+            "SELECT id, label FROM accounts WHERE label = '" + value + "'").fetchall()
+    except sqlite3.Error:
+        return []
+    finally:
+        con.close()
 
 
 class _BenchmarkApp(BaseHTTPRequestHandler):
@@ -188,8 +213,9 @@ class _BenchmarkApp(BaseHTTPRequestHandler):
             # large one. Input is NOT reflected, so the reflected-XSS check
             # cannot fire here and only the differential oracle sees a signal.
             term = params.get("term", [""])[0]
-            if _looks_sqli(term):
-                rows = "\n".join(f"row {i}: user account #{i}" for i in range(1, 25))
+            found = _sqli_rows(term)
+            if found:
+                rows = "\n".join(f"row {i}: {label}" for i, label in found)
                 self._reply(200, f"results:\n{rows}".encode())
             else:
                 self._reply(200, b"results:\nno matching records")
@@ -407,8 +433,19 @@ def _default_campaign(send: Send, *, insertion_kinds: tuple[InsertionKind, ...])
     # and the genuine intra-tenant BOLA still mints. (A 403 denial here would be a vacuous clause-(c) control —
     # it never renders the object — and is no longer accepted; see checks.py IdorCheck round-5.)
     unauth_send = _with_cookie(_raw_send, "session=crucible-carol")
+    # The SOUND boolean detector: an SPRT over DISTINCT, shape-VARIED always-true and always-false
+    # clauses, each sent twice byte-identically. It replaces the single-shot BOOLEAN_SQLI
+    # DifferentialCheck, which is LEAD-only now — one benign string vs one payload string has no
+    # attribution step, so it confirmed at rate 1.0 against a WAF block page and against strict
+    # input validation on targets with NO DATABASE (verify.verifier.DIFFERENTIAL_LEAD_ONLY_CLASSES).
+    # It costs more traffic (that is why it is not in DEFAULT_CHECKS) and buys a FACT instead of a
+    # coin flip; n_max is held low because this corpus endpoint is deterministic, so the SPRT
+    # crosses its boundary in two rounds.
+    boolean_trues, boolean_falses = boolean_clause_families()[0]
     checks = (
-        BOOLEAN_SQLI,
+        BooleanInferenceCheck(id="boolean-sqli-sprt", bug_class="boolean_sqli",
+                              true_clauses=boolean_trues, false_clauses=boolean_falses,
+                              n_max=6),
         REFLECTED_XSS,
         # Wave 3.1 soundness: the victim-UNIQUE discriminator (bob's private record content) is what the
         # attacker's cross-read must reach — never a whole-body containment on shared boilerplate. The

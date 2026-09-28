@@ -29,16 +29,25 @@ from framework.v2.scanner.self_improve import MergeGate, Verdict, analyze_gaps, 
 
 
 class _SqliOnly(BaseHTTPRequestHandler):
-    """A boolean-SQLi differential on `q` that does NOT echo input, so only the
-    differential (boolean_sqli) check confirms — the reflection checks miss."""
+    """A REAL path traversal on `q` that does NOT echo input, so only the content-signature
+    (path_traversal) check confirms — the reflection checks miss.
+
+    It used to be a boolean-SQLi differential keyed on the payload SHAPE ("'1'='1" in q). That is
+    the same thing a WAF tautology rule does, and a bare differential cannot tell the two apart —
+    it minted High FACTs at rate 1.0 against a static page behind such a rule and against strict
+    input validation, on targets with no database, so it is LEAD-only now
+    (verify.verifier.DIFFERENTIAL_LEAD_ONLY_CLASSES). The property under test — the bandit learns
+    WHICH class confirms from real outcomes inside the engine — needs one class that genuinely
+    confirms and others that genuinely miss, and an attributed file read gives exactly that: the
+    signature appears under the traversal payload and is ABSENT from the benign control."""
 
     def log_message(self, *a: object) -> None:
         return
 
     def do_GET(self) -> None:  # noqa: N802
         q = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query).get("q", [""])[0]
-        rows = "id=1\nid=2\nid=3\nid=4\nid=5" if ("'1'='1" in q or "1=1" in q) else "none"
-        body = f"results:\n{rows}".encode()  # deliberately does NOT reflect q
+        body = (b"root:x:0:0:root:/root:/bin/bash\ndaemon:x:1:1:daemon:/usr/sbin:/usr/sbin/nologin"
+                if "etc/passwd" in q else b"results:\nnone")   # deliberately does NOT reflect q
         self.send_response(200)
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
@@ -71,11 +80,11 @@ def test_bandit_learns_which_class_confirms_inside_the_engine() -> None:
         req = HttpRequest(method="GET", url=f"{base}/search?q=hello")
         engine.audit(req, checks=DEFAULT_CHECKS, insertion_kinds=(InsertionKind.QUERY_VALUE,))
 
-        # boolean_sqli confirmed (reward True); the reflection classes missed (False)
-        ev_sqli = bandit.expected_value("sqli-app", "boolean_sqli")
+        # path_traversal confirmed (reward True); the reflection classes missed (False)
+        ev_hit = bandit.expected_value("sqli-app", "path_traversal")
         ev_xss = bandit.expected_value("sqli-app", "xss")
-        assert ev_sqli > ev_xss, (ev_sqli, ev_xss)
-        assert bandit.rank("sqli-app", ["xss", "boolean_sqli", "path_traversal"])[0] == "boolean_sqli"
+        assert ev_hit > ev_xss, (ev_hit, ev_xss)
+        assert bandit.rank("sqli-app", ["xss", "boolean_sqli", "path_traversal"])[0] == "path_traversal"
 
 
 # ---------------------------------------------------------------------------

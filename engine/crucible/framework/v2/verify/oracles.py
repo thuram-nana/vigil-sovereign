@@ -21,6 +21,7 @@ import binascii
 import difflib
 import hashlib
 import hmac
+import html
 import ipaddress
 import json
 import math
@@ -30,7 +31,7 @@ from dataclasses import dataclass
 from html.parser import HTMLParser
 from statistics import median
 from typing import Any, Mapping, Sequence
-from urllib.parse import urlsplit
+from urllib.parse import quote as _urlquote, urlsplit
 
 from .models import OracleKind, OracleSignal
 
@@ -193,6 +194,11 @@ def _noisy_or(weights: list[float]) -> float:
 # ---------------------------------------------------------------------------
 
 
+# The DEFAULT comparison dimensions when a caller supplies no discriminator. See the
+# AUDIT R6 note inside the oracle: ``latency`` is deliberately excluded.
+_DEFAULT_DIFFERENTIAL_DIMENSIONS = frozenset({"status", "length", "lexical", "marker"})
+
+
 def differential_response_oracle(
     baseline: Any,
     mutated: Any,
@@ -206,7 +212,9 @@ def differential_response_oracle(
     blind bug a latency delta over threshold is the signal.
 
     discriminator (all optional):
-      dimensions          : subset of {status,length,lexical,latency,marker}
+      dimensions          : subset of {status,length,lexical,structural,latency,marker}
+                            (default: status,length,lexical,marker — ``latency`` must be
+                            asked for EXPLICITLY; see the AUDIT R6 note below)
       length_threshold    : min fractional length change to count (default 0.05)
       lexical_threshold   : min 1-similarity to count (default 0.10)
       latency_threshold_ms: min added latency to count (default 1000)
@@ -221,7 +229,26 @@ def differential_response_oracle(
     b = _normalize_response(baseline)
     m = _normalize_response(mutated)
 
-    wanted = set(disc.get("dimensions") or {"status", "length", "lexical", "latency", "marker"})
+    # AUDIT R6 — ``latency`` is NOT in the DEFAULT set. Its weight is 0.7, which is
+    # EXACTLY the verifier's HIGH_CONFIDENCE floor, so every caller that omitted a
+    # discriminator inherited a latency-ONLY confirm path: a single timing delta over
+    # two otherwise identical responses minted a FACT. That is a TIMING claim, and the
+    # engine has a dedicated statistically-sound oracle for it (``timing_oracle``:
+    # paired samples, alpha, dose-response). The fix is to remove the dimension from
+    # the DEFAULT rather than to shave its weight to 0.69 — a weight just under the
+    # floor still lets latency push a marginal second dimension over the line through
+    # the noisy-OR, and it would say "timing is weak evidence" when the honest
+    # statement is "timing is not part of this oracle's default proof at all".
+    # AUDIT (this slice) — that last sentence USED to read "callers that genuinely
+    # mean timing (the A12 request-smuggling LEAD probe) still ask for it
+    # EXPLICITLY". It is now STALE and is corrected rather than deleted, because the
+    # change of reachability matters: this slice removed that caller, and the
+    # verifier now PINS the discriminator per bug class from the AUTHORITY's table
+    # rather than accepting a producer-supplied one. So ZERO callers on the scan path
+    # can request ``latency``. The dimension remains implemented and reachable only
+    # by a direct, in-process ``differential_oracle`` call that names it — it is not
+    # dead code, but nothing in the shipped pipeline asks for it.
+    wanted = set(disc.get("dimensions") or _DEFAULT_DIFFERENTIAL_DIMENSIONS)
     length_thr = float(disc.get("length_threshold", 0.05))
     lexical_thr = float(disc.get("lexical_threshold", 0.10))
     latency_thr = float(disc.get("latency_threshold_ms", 1000.0))
@@ -534,6 +561,12 @@ def _hodges_lehmann(baseline: Sequence[float], treatment: Sequence[float]) -> fl
     return median(diffs) if diffs else 0.0
 
 
+# RED-PEN B3b — the LOOSEST significance level this oracle will run at. A caller
+# (ultimately: the producer of an untrusted report) may ask for a stricter alpha;
+# it may not ask for a more permissive one.
+_TIMING_MAX_ALPHA = 0.01
+
+
 def timing_oracle(
     baseline_samples: Any,
     treatment_samples: Any,
@@ -565,7 +598,33 @@ def timing_oracle(
          this. ``dose = {"low_ms": .., "low_samples": [..], "high_ms": .., "high_samples": [..]}``.
 
     Deterministic and pure: given the same samples it returns the same signal.
+
+    RED-PEN B3b — MONOTONE RATCHET on the two firing knobs. ``alpha`` and
+    ``injected_ms`` used to be read verbatim, and the ``framework.v2 verify`` path
+    fed them straight out of an UNTRUSTED report's oracle context. Measured on
+    samples ``[100..104]`` vs ``[105..109]`` (a 5 ms shift, i.e. ordinary jitter):
+    defaults refused it ("median shift 5ms < floor 250ms"), but
+    ``timing_injected_ms: 1.0`` drove the floor to 0 ms and CONFIRMED, and
+    ``timing_alpha: 0.5`` accepted a p of 0.047 (and 0.028 on a bimodal set that
+    cleared the 250 ms floor outright). Both are
+    now clamped HERE, at the authority, so every caller is covered — including
+    call sites this module does not own:
+
+      * ``alpha`` is clamped to at most ``_TIMING_MAX_ALPHA`` — a caller may only
+        make the test STRICTER, never more permissive;
+      * ``injected_ms`` may only RAISE the effect floor
+        (``floor = max(absolute_floor_ms, effect_floor_fraction * injected_ms)``),
+        so a declared 5 s sleep still demands a ~2.5 s shift while a declared 1 ms
+        one can no longer erase the 250 ms absolute floor.
+
+    ``dose`` is NOT clamped, deliberately: it is DEMOTE-ONLY. ``fired`` requires
+    ``dose_ok``, a malformed dose spec sets ``dose_ok=True``/``dose_conf=0.0``, and
+    once ``alpha <= 0.01`` any fired signal already has ``p_conf = 0.9``, so
+    ``dose_conf`` cannot lift a signal over a confirmation threshold it would not
+    otherwise clear. A hostile dose can only REFUSE a fire; removing it would
+    strictly WEAKEN this oracle. See ``test_timing_dose_is_demote_only``.
     """
+    alpha = min(float(alpha), _TIMING_MAX_ALPHA)
     base = [float(x) for x in (baseline_samples or [])]
     treat = [float(x) for x in (treatment_samples or [])]
     if len(base) < min_samples or len(treat) < min_samples:
@@ -577,7 +636,10 @@ def timing_oracle(
 
     z, p = _mann_whitney(base, treat)
     shift = _hodges_lehmann(base, treat)
-    floor = (effect_floor_fraction * injected_ms) if injected_ms else absolute_floor_ms
+    # RED-PEN B3b: the declared injected delay may only RAISE the floor, never
+    # lower it below the absolute floor (`injected_ms: 1.0` used to give floor 0).
+    floor = (max(absolute_floor_ms, effect_floor_fraction * injected_ms)
+             if injected_ms else absolute_floor_ms)
 
     reject = p < alpha
     effect_ok = shift >= floor
@@ -730,6 +792,65 @@ def _boolean_discriminator(discriminator: Mapping[str, Any] | str | None) -> dic
     wanted = [d for d in (disc.get("dimensions") or _BOOLEAN_DEFAULT_DIMENSIONS)
               if d in _BOOLEAN_DIMENSIONS]
     return {"dimensions": wanted or list(_BOOLEAN_DEFAULT_DIMENSIONS), "expect": "differ"}
+
+
+# --------------------------------------------------------------------------------------------------
+# REFLECTED-VALUE / DYNAMICITY REMOVAL — the sqlmap-style mask that makes truth-value attribution
+# hold on a page that REFLECTS the injected clause back into its body.
+# --------------------------------------------------------------------------------------------------
+# A boolean channel is real whenever the ROW-BEARING part of the response is a function of the
+# injected boolean's truth value. But many real endpoints ALSO echo the raw parameter into the page
+# (a search box: ``<h1>Results for: {q}</h1>``). Because every DISTINCT always-TRUE clause is a
+# different string, each reflects a different-length, different-lexical fragment, so the K_T true-side
+# responses no longer AGREE with each other and the oracle (correctly, on the raw bytes) refuses —
+# a RECALL loss on a genuinely vulnerable target.
+#
+# The fix is to remove, from EACH response, every occurrence of the exact clause that PRODUCED that
+# response — in its raw form, its HTML-escaped forms, and its URL-encoded forms — BEFORE the pinned
+# discriminator compares two bodies. After removal the reflected fragment (identical in shape, only
+# the injected string differs) is gone from every response, so what remains is the part the SERVER
+# chose: two TRUE responses become byte-equal iff the row-bearing part agrees, and a TRUE response
+# differs from a FALSE one iff the row-bearing part differs. On a reflect-ONLY page with no boolean
+# channel behind it, removing the reflection leaves the SAME residual body on both sides, so the
+# clusters are NOT disjoint and the oracle still REFUSES — masking manufactures no channel.
+#
+# SOUNDNESS BOUNDARY. Only the EXACT known-injected clause strings are removed; nothing heuristic.
+# A truth-correlated substring the SERVER produced (row text, an error signature) is never touched,
+# because it is not one of the injected clause values. The transformation is a PURE, DETERMINISTIC
+# function of (retained clause, retained response) — no I/O, clock, or rng — so offline re-verify
+# over the retained ``clause`` reproduces it byte-for-byte.
+def _boolean_reflection_forms(clause: str) -> tuple[str, ...]:
+    """Every encoding of ``clause`` that could appear reflected in a response body: the RAW clause,
+    both HTML-escaped forms (quotes escaped and not), and both URL-encoded forms. Deduplicated and
+    ordered LONGEST-first so a shorter encoding can never bite a substring of a longer one."""
+    if not clause:
+        return ()
+    forms = {
+        clause,
+        html.escape(clause, quote=True),
+        html.escape(clause, quote=False),
+        _urlquote(clause, safe=""),
+        _urlquote(clause),
+    }
+    return tuple(sorted((f for f in forms if f), key=len, reverse=True))
+
+
+def _mask_boolean_reflection(resp: Any) -> Any:
+    """Return ``resp`` with every occurrence of ITS OWN retained injected ``clause`` (raw /
+    HTML-escaped / URL-encoded) stripped from the body. A response carrying no ``clause`` is returned
+    UNCHANGED (an old context, or an arm that never reflected), so the behaviour on a non-reflecting
+    target — and on every pre-existing retained context — is byte-for-byte what it was."""
+    if not isinstance(resp, Mapping):
+        return resp
+    clause = resp.get("clause")
+    if not clause:
+        return resp
+    body = _coerce_text(resp.get("body", resp.get("text", resp.get("content", ""))))
+    for form in _boolean_reflection_forms(str(clause)):
+        body = body.replace(form, "")
+    out = dict(resp)
+    out["body"] = body
+    return out
 
 
 def boolean_inference_oracle(
@@ -948,10 +1069,18 @@ def boolean_inference_oracle(
         """Do two observed responses AGREE? ``differential_response_oracle`` is the authority; an
         EXACT match short-circuits it (identical bytes + identical status make every dimension
         non-differing, so the oracle provably cannot fire) — a pure speed path, never a
-        semantic one."""
+        semantic one.
+
+        Before the discriminator compares them, each response has ITS OWN reflected injected clause
+        removed (``_mask_boolean_reflection``): on a page that echoes the distinct clause back into
+        its body, two same-truth-value responses only DIFFER in that reflection, so masking is what
+        lets a genuine channel behind a reflection attribute. It never manufactures one — a reflect-
+        only page masks to the SAME residual on both sides and stays indistinguishable. A response
+        with no retained ``clause`` masks to itself, so a non-reflecting target is unchanged."""
         if a == b:
             return True
-        return not differential_response_oracle(a, b, disc).fired
+        return not differential_response_oracle(
+            _mask_boolean_reflection(a), _mask_boolean_reflection(b), disc).fired
 
     # --- PRE-FILTER 1: BASELINE DETERMINISM PRE-GATE ----------------------------------------------
     baseline = list(false_baseline_samples) if false_baseline_samples is not None else None
@@ -1229,11 +1358,41 @@ def _searchable(sink: Any) -> str:
     return _coerce_text(sink)
 
 
-def side_effect_oracle(marker: str, observed_sink: Any) -> OracleSignal:
-    """Fire when a unique, attacker-chosen marker appears somewhere it should
-    not — a reflected/stored XSS canary in rendered output, an SSTI evaluation
-    result, a log line, a filesystem read. The marker must be non-trivial
-    (>= 4 chars) so we do not confirm on incidental substrings."""
+def side_effect_oracle(marker: str, observed_sink: Any, control_sink: Any = None) -> OracleSignal:
+    """Fire when a unique, attacker-chosen marker appears somewhere it should not.
+
+    WHERE THIS ORACLE IS THE SOLE AUTHORITY (`verifier.BUG_CLASS_ORACLES`):
+    ``path_traversal`` and ``lfi``. Nothing else adjudicates those two classes, so
+    for them this function's verdict IS the FACT. It is also one of several
+    confirmers for ``error_based_sqli`` / ``sqli`` / ``rce`` / ``command_injection``
+    / ``ssti`` / ``el_injection`` / ``ssi`` / ``xxe`` / ``websocket_injection``.
+
+    WHERE IT IS **NOT** USED: XSS. A "reflected/stored XSS canary in rendered
+    output" is precisely what this oracle must NOT be used for — ``xss`` goes to
+    REFLECTION_CONTEXT (a proven breakout) and ``stored_xss``/``dom_xss`` to
+    DOM_EXECUTION (proven execution). Marker-in-a-sink is substring XSS detection,
+    the false positive both of those exist to refuse.
+
+    The marker must be non-trivial (>= 4 chars) so we do not confirm on incidental
+    substrings.
+
+    ``control_sink`` (OPTIONAL — absent ⇒ every existing caller is byte-identical) is the sink
+    observed under a BENIGN control on the same insertion point. When it is supplied and ALREADY
+    CONTAINS the marker, the marker's presence under the payload is NOT attributable to the payload
+    and the oracle REFUSES. That is the offline-re-derivable half of the fix for a measured defect:
+    a marker that is not attacker-UNIQUE (a KNOWN-CONTENT file signature such as ``root:x:0:0:``)
+    is present in an ordinary security knowledge-base page that merely documents it, and bare
+    substring presence minted four ``path_traversal`` FACTs against a site with ZERO file I/O.
+    Producers that hold a control must retain it here so re-verification re-derives the refusal.
+
+    KNOWN LIMITATION (RED-PEN), only PARTLY closed by ``control_sink``: a marker's PRESENCE in a
+    sink is not proof that the PAYLOAD put it there — an endpoint that echoes its own input into the
+    sink produces the same observation. A supplied ``control_sink`` refuses the KNOWN-CONTENT case,
+    but where no control is supplied, and for the sole-authority ``path_traversal``/``lfi`` classes,
+    a full payload-correlation / content-provenance guard is still owed (its own slice). Until then,
+    treat a bare ``path_traversal``/``lfi`` confirmation as needing a human look at the snippet.
+
+    Pure: it decides from the retained sinks alone and sends nothing."""
     marker = (marker or "").strip()
     haystack = _searchable(observed_sink)
 
@@ -1242,6 +1401,13 @@ def side_effect_oracle(marker: str, observed_sink: Any) -> OracleSignal:
             kind=OracleKind.SIDE_EFFECT, fired=False, confidence=0.0,
             evidence="marker too short to be a reliable canary",
             observed={"marker": marker})
+
+    if control_sink is not None and marker in _searchable(control_sink):
+        return OracleSignal(
+            kind=OracleKind.SIDE_EFFECT, fired=False, confidence=0.0,
+            evidence=(f"marker {marker!r} is ALREADY PRESENT in the benign control response — its "
+                      "presence under the payload is not attributable to the payload"),
+            observed={"marker": marker, "present_in_control": True})
 
     idx = haystack.find(marker)
     if idx < 0:
@@ -1264,65 +1430,621 @@ def side_effect_oracle(marker: str, observed_sink: Any) -> OracleSignal:
 # ---------------------------------------------------------------------------
 # 3b. Reflection context — a marker reached an EXECUTABLE HTML/JS position
 # ---------------------------------------------------------------------------
+#
+# AUDIT F4/R5 (soundness). This oracle used to fire on mere PRESENCE of the marker
+# inside a ``<script>`` element or inside any ``on*`` attribute value. Both are
+# unsound, and both were measured minting a High/FACT ``xss`` on a CORRECTLY
+# ESCAPED page:
+#
+#   * F4 — the canonical safe pattern (Django ``json_script`` / Rails
+#     ``json_escape``: JSON-encode, then escape ``< > & /`` as ``\uXXXX``) puts the
+#     value inside a JS STRING LITERAL from which it provably cannot escape. The
+#     old rule read "marker is inside <script>" as "executable JS context" and
+#     minted ``xss | High | fact | reflection_context | 0.90``.
+#   * R5 — ``convert_charrefs=True`` (and HTML attribute-value decoding, which is
+#     unconditional) means a CORRECTLY ``&quot;``-escaped handler
+#     ``onclick="search(&quot;…marker…&quot;)"`` arrives as a marker inside an
+#     ``on*`` value. The old rule fired on that too.
+#
+# The honest question is not "where did the marker land" but "did the payload
+# BREAK OUT — did it create the executable position, rather than being carried
+# INTO one as data the page itself escaped". This module now answers that:
+#
+#   html_tag     the marker is (part of) a TAG NAME → the payload created an
+#                element. Unchanged, and still the strongest signal.
+#   js_attribute the marker is the ENTIRE value of an event-handler attribute
+#                (or the entire body of a ``javascript:`` URL) → the attacker
+#                supplied the whole handler. A marker merely EMBEDDED in a larger
+#                handler expression the page composed (the R5 shape) is the page's
+#                own handler with the value escaped into it — a NON-FIRING advisory.
+#   script       the marker sits at CODE position inside an EXECUTABLE ``<script>``
+#                — outside every string literal, template literal and comment (the
+#                ``_js_scan`` lexer), in a script the browser actually runs
+#                (``type`` absent or a JS MIME and NO ``src``; ``application/json``
+#                and friends are data blocks, and a ``src``-bearing element ignores
+#                its child text), and with the lexer walk UNAMBIGUOUS. A marker
+#                inside a string literal — the F4 shape — is a NON-FIRING advisory,
+#                and so is any script text carrying a construct the lexer does not
+#                model (RED-PEN B1: a regex literal, an Annex B ``<!--``/``-->``
+#                comment or a ``${…}`` substitution desyncs it by one quote, which
+#                is enough to report a STRING's contents as code).
+#
+# Everything the oracle cannot PROVE broke out is reported as a non-firing,
+# NON-CONCLUSIVE advisory: not a FACT, and not a clean bill of health either
+# (a JS-string reflection may still be breakable through an escaping bug this
+# oracle cannot see — settling it needs an oracle that proves EXECUTION, which
+# REFLECTION_CONTEXT is not).
+#
+# AUDIT — NO AUTOMATIC HANDOFF EXISTS. Earlier wording here and in the
+# ``script_lexer_ambiguous`` evidence said to "escalate to the DOM_EXECUTION
+# oracle", which reads as a wired route. It is not one: nothing outside this
+# module, ``scanner/coverage.py`` and the tests consumes these advisories, and no
+# component schedules a DOM_EXECUTION probe when a reflection downgrades. The
+# advisory is an instruction to a HUMAN operator. Wiring that handoff is a NAMED
+# FOLLOW-UP (see the "residual" note in ``docs/FEATURES.md``), not shipped
+# behaviour, and no evidence string may imply otherwise.
+#
+# SCOPE, stated once and repeated in every evidence string: REFLECTION_CONTEXT
+# proves a reflection reached a LIVE / EXECUTABLE POSITION. It does NOT prove
+# EXECUTION. Nothing it emits may be worded as proven execution.
+
+
+# Elements whose children the HTML spec does NOT parse as live markup (raw-text,
+# escapable-raw-text and "not rendered when scripting is enabled" containers).
+# ``HTMLParser`` only knows the CDATA rule for <script>/<style>, so it happily
+# reports ``<xMARKER>`` inside a page's own <textarea>/<noscript> as a start tag —
+# it is inert text in a real browser. A marker there is an advisory, never a FACT.
+_INERT_TEXT_CONTAINERS = frozenset({
+    "noscript", "noembed", "noframes", "textarea", "title", "template",
+    "iframe", "xmp", "plaintext", "style",
+})
+
+# AUDIT-B2 — the JavaScript MIME type **ESSENCE** strings (MIME Sniffing standard
+# § "JavaScript MIME type"). "prepare the script element" step 12 requires a
+# *JavaScript MIME type essence match*: an ASCII case-insensitive match for one of
+# THESE EXACT STRINGS. A parameter is not part of an essence, so
+# ``type="text/javascript; charset=utf-8"`` is NOT a match and the element does not
+# execute (whatwg/html#3699, shipped in Chrome 69+).
+#
+# The previous code took ``.split(";")[0]`` before the membership test, which is a
+# PATTERN, not membership — exactly what the note on ``_EVENT_HANDLER_ATTRIBUTES``
+# twelve lines below forbids. Measured against /usr/bin/chromium 150 --dump-dom:
+# ``text/javascript; charset=utf-8`` and ``text/javascript;charset=utf-8`` fired at
+# 0.90 and Chromium executed NEITHER.
+#
+# Every member below was MEASURED executing in Chromium 150 (see
+# ``test_script_type_executability_matches_chromium``). ``""`` and ``module`` are
+# NOT members: they are not MIME essences and the spec handles them by separate
+# rules that this set must not conflate (see ``_script_is_executable``).
+_JS_MIME_ESSENCES = frozenset({
+    "application/ecmascript", "application/javascript", "application/x-ecmascript",
+    "application/x-javascript", "text/ecmascript", "text/javascript",
+    "text/javascript1.0", "text/javascript1.1", "text/javascript1.2",
+    "text/javascript1.3", "text/javascript1.4", "text/javascript1.5",
+    "text/jscript", "text/livescript", "text/x-ecmascript", "text/x-javascript",
+})
+
+# (The old name ``_EXECUTABLE_SCRIPT_TYPES`` is deliberately NOT kept as an alias. It
+# had ``""`` and ``module`` as members and was used as the whole executability test;
+# this set is neither, so re-using the old name for it would be a trap. Nothing outside
+# this module ever referenced it.)
+
+
+def _script_is_executable(
+    type_attr: str | None, has_nomodule: bool
+) -> tuple[bool, str]:
+    """Decide whether a browser EXECUTES a ``<script>``'s inline text, from its RAW
+    ``type`` attribute value and the presence of ``nomodule``.
+
+    Returns ``(executable, reason)``; ``reason`` names the non-executing rule.
+
+    ``type_attr`` is the RAW attribute value (``None`` when the attribute is
+    absent) — *not* stripped and *not* lowercased by the caller, because the HTML
+    Living Standard's rules distinguish the raw empty string from a whitespace-only
+    value. Pure and deterministic. Every branch below is measured against
+    /usr/bin/chromium 150 in ``test_script_type_executability_matches_chromium``:
+
+      * attribute ABSENT              -> classic, EXECUTES
+      * ``type=""`` (raw empty)       -> classic, EXECUTES  (LS: "if the type
+        attribute's value is the empty string, the script block's type is classic")
+      * ``type=" "`` / ``type="\\t"``  -> does NOT execute. The empty-string rule is
+        about the RAW value; a whitespace-only value strips to ``""``, which is not
+        a JavaScript MIME essence and is not ``module``, so the element is a data
+        block. (Chromium: measured inert. The old code stripped first and let it in
+        through the ``""`` member.)
+      * stripped, case-folded value in :data:`_JS_MIME_ESSENCES` -> EXECUTES
+      * raw value case-insensitively equal to ``module`` -> EXECUTES.  The match is
+        on the UNSTRIPPED value: Chromium runs ``type="MODULE"`` and does NOT run
+        ``type=" module "``.  Where Chromium and the LS may differ (the LS strips),
+        this oracle takes the NON-FIRING option — a missed detection, never a
+        manufactured FACT.
+      * ``nomodule`` present on a CLASSIC script -> does NOT execute ("prepare the
+        script element" step 13 returns early). Measured: ``<script nomodule>``
+        inert, ``<script type="module" nomodule>`` EXECUTES (``nomodule`` is
+        ignored for module scripts), ``nomodule="false"`` inert (boolean attribute
+        — presence is the test)."""
+    if type_attr is None:
+        is_module, executable = False, True
+    elif type_attr == "":
+        is_module, executable = False, True
+    else:
+        lowered = type_attr.lower()
+        is_module = lowered == "module"
+        executable = is_module or type_attr.strip().lower() in _JS_MIME_ESSENCES
+    if not executable:
+        return False, "script_data_block"
+    if has_nomodule and not is_module:
+        return False, "script_nomodule_ignored"
+    return True, ""
+
+# RED-PEN B2 — the CLOSED SET of HTML **event-handler content attributes**.
+#
+# The rule used to be ``attr.startswith("on")``, which is not a test for anything a
+# browser executes. Measured firing at 0.90 on ``on-click``, ``once`` and ``online``
+# — none of them is an event handler, and no browser runs any of them. The prefix
+# test is replaced by membership of this set: the event handler content attributes
+# of the HTML Living Standard (§ "event handlers on elements, Document objects and
+# Window objects", plus the Window-reflecting ones that only ``<body>``/``<frameset>``
+# carry), extended with the UI-Events / CSS / Pointer / Touch handlers browsers do
+# execute as content attributes.
+#
+# The set is CLOSED on purpose. A handler that is missing from it is a MISSED
+# detection (a non-firing advisory) — recoverable. A non-handler that fires is a
+# manufactured FACT — not recoverable. So membership, never a pattern.
+#
+# AUDIT-B4 — that promise was NOT kept, and the miss was worse than a miss. A
+# non-member never called ``_note(...)``, so the scan fell through to the terminal
+# ``conclusive=True`` branch and the probe was certified CLEAN. Measured: a real,
+# Chromium-executed handler content attribute
+# (``oncontentvisibilityautostatechange``) that is absent from this set turned a
+# TRUE POSITIVE into a channel-confirmed clean. A missed detection is acceptable;
+# a false clean is the exact coverage overclaim ``probe_verdict`` exists to refuse.
+# The miss is now routed to a NON-CONCLUSIVE advisory via
+# :data:`_ON_SHAPED_ATTRIBUTE` — see ``_ReflectionScanner.handle_starttag``.
+#
+# The five members tagged ``AUDIT-B4 (measured)`` were found by enumerating every
+# ``on[a-z]+`` IDL attribute on Element/HTMLElement/HTMLBodyElement/HTMLMediaElement/
+# SVGElement/Document/window in Chromium 150 and confirming, for each, that a
+# CONTENT attribute compiles into a handler AND that dispatching the event runs the
+# attacker-supplied body. The same measurement confirmed ``once``, ``online``,
+# ``on-click`` and ``onfuturethinghere`` do NOT — the closed set's founding claim.
+_EVENT_HANDLER_ATTRIBUTES = frozenset({
+    # AUDIT-B4 (measured in Chromium 150): real handler content attributes this
+    # closed set was missing.
+    "oncommand", "oncontentvisibilityautostatechange", "onmousewheel",
+    "onscrollsnapchange", "onscrollsnapchanging",
+    # HTML LS: element / document / window event handlers
+    "onabort", "onauxclick", "onbeforeinput", "onbeforematch", "onbeforetoggle",
+    "onblur", "oncancel", "oncanplay", "oncanplaythrough", "onchange", "onclick",
+    "onclose", "oncontextlost", "oncontextmenu", "oncontextrestored", "oncopy",
+    "oncuechange", "oncut", "ondblclick", "ondrag", "ondragend", "ondragenter",
+    "ondragexit", "ondragleave", "ondragover", "ondragstart", "ondrop",
+    "ondurationchange", "onemptied", "onended", "onerror", "onfocus", "onformdata",
+    "oninput", "oninvalid", "onkeydown", "onkeypress", "onkeyup", "onload",
+    "onloadeddata", "onloadedmetadata", "onloadstart", "onmousedown", "onmouseenter",
+    "onmouseleave", "onmousemove", "onmouseout", "onmouseover", "onmouseup",
+    "onpaste", "onpause", "onplay", "onplaying", "onprogress", "onratechange",
+    "onreset", "onresize", "onscroll", "onscrollend", "onsecuritypolicyviolation",
+    "onseeked", "onseeking", "onselect", "onslotchange", "onstalled", "onsubmit",
+    "onsuspend", "ontimeupdate", "ontoggle", "onvolumechange", "onwaiting", "onwheel",
+    # HTML LS: Window-reflecting handlers (<body> / <frameset>)
+    "onafterprint", "onbeforeprint", "onbeforeunload", "onhashchange",
+    "onlanguagechange", "onmessage", "onmessageerror", "onoffline", "ononline",
+    "onpagehide", "onpagereveal", "onpageshow", "onpageswap", "onpopstate",
+    "onrejectionhandled", "onstorage", "onunhandledrejection", "onunload",
+    # CSS animations / transitions
+    "onanimationcancel", "onanimationend", "onanimationiteration", "onanimationstart",
+    "ontransitioncancel", "ontransitionend", "ontransitionrun", "ontransitionstart",
+    "onwebkitanimationend", "onwebkitanimationiteration", "onwebkitanimationstart",
+    "onwebkittransitionend",
+    # Pointer / touch / gesture
+    "ongotpointercapture", "onlostpointercapture", "onpointercancel", "onpointerdown",
+    "onpointerenter", "onpointerleave", "onpointermove", "onpointerout",
+    "onpointerover", "onpointerrawupdate", "onpointerup", "ontouchcancel",
+    "ontouchend", "ontouchmove", "ontouchstart",
+    # Misc. widely-implemented content attributes
+    "onbeforecopy", "onbeforecut", "onbeforepaste", "onfocusin", "onfocusout",
+    "onfullscreenchange", "onfullscreenerror", "oninputsourceschange", "onsearch",
+    "onselectionchange", "onselectstart", "onshow", "onwebkitfullscreenchange",
+    "onwebkitfullscreenerror",  # ("ontoggle" listed once, with the HTML LS block above)
+})
+
+# AUDIT-B4 — the SHAPE every HTML event-handler content attribute has: ``on``
+# followed by ASCII lowercase letters only. Attribute names are ASCII
+# case-insensitive, so the caller lower-cases before matching.
+#
+# This is deliberately NOT an executability test — it is the *superset* used to
+# decide that a closed-set MISS must be reported as a non-conclusive ADVISORY
+# rather than silently certified clean. It over-matches (``once``, ``online``), and
+# that is correct: over-matching costs a ``clean`` that becomes ``inconclusive``,
+# which is a coverage cost. Under-matching would cost a false CLEAN over a real
+# handler, which is a soundness failure. Firing still requires membership of
+# :data:`_EVENT_HANDLER_ATTRIBUTES`; this pattern can never mint a FACT.
+_ON_SHAPED_ATTRIBUTE = re.compile(r"on[a-z]+\Z")
+
+
+def _rindex(seq: list[str], value: str) -> int:
+    """Index of the LAST occurrence of ``value`` in ``seq``. Pure; the caller has
+    already checked membership."""
+    return len(seq) - 1 - seq[::-1].index(value)
+
+
+def _js_scan(script_text: str, idx: int) -> tuple[bool, str]:
+    """Walk ``script_text`` up to ``idx`` and report
+    ``(at_code_position, ambiguity)``.
+
+    ``at_code_position`` is True iff offset ``idx`` is NOT inside a string literal,
+    template literal or comment. It is meaningful ONLY when ``ambiguity`` is the
+    empty string.
+
+    ``ambiguity`` names the first construct this deliberately-small, pure,
+    stdlib-only lexer does NOT model. The caller MUST fail closed on it.
+
+    RED-PEN B1 (the reason this function exists in this shape). The previous
+    version claimed "every misparse biases toward NOT-code → NOT-firing. The
+    failure direction is a missed detection, never a manufactured FACT". That was
+    FALSE, and reproduced in five shapes. The lexer had no regex-literal state, so
+    ``/it's/`` opened a PHANTOM single-quote state, and the OPENING quote of the
+    NEXT real string CLOSED it — leaving the real string's CONTENTS at apparent
+    code position. One quote of desync manufactures a High ``xss`` FACT at 0.90 on
+    a CORRECTLY ESCAPED page. The same one-quote desync is reachable through
+    Annex B ``<!--`` / ``-->`` (SingleLineHTMLOpenComment / HTMLCloseComment, which
+    a browser lexes as line comments inside a classic script) and through a
+    template-literal substitution ``${…}`` whose body contains a quote or a nested
+    backtick.
+
+    So the lexer no longer guesses. Each unmodelled construct encountered BEFORE
+    the marker offset aborts the walk with an ``ambiguity`` name:
+
+      ``regex_literal``          a ``/`` at apparent code position that is not
+                                 ``//`` or ``/*`` — a regex literal or a division,
+                                 and this lexer cannot tell which;
+      ``html_comment``           ``<!--`` or ``-->`` anywhere before the marker;
+      ``template_substitution``  a ``${`` inside a template literal;
+      ``hashbang``               a ``#!`` at apparent code position that is NOT at
+                                 offset 0 (see below).
+
+    AUDIT-B3 — the HashbangComment. ``#!`` at offset 0 of a script's source text is
+    a comment running to the end of the first line (ECMA-262 § Hashbang Comments;
+    ``node -e`` and Chromium agree). The lexer had no state for it, found no
+    ambiguity, and reported the first line as CODE POSITION — measured firing at
+    0.90 on ``<script>#! …</script>`` that Chromium does not execute at all. That is
+    the same class B1's fail-closed design exists to eliminate, so it is modelled
+    here rather than merely refused:
+
+      * at offset 0 the walk skips to the first line terminator — EXACT, so a
+        marker on the hashbang line is correctly "not code" and a marker after it
+        is still adjudicated normally (no capability lost);
+      * anywhere else ``#!`` at code position is a SyntaxError, so the whole script
+        fails to parse and NOTHING executes — the lexer refuses rather than
+        silently call the surrounding text code.
+
+    A ``#!`` inside a string literal (``var r = "#!/users"`` — the legacy hashbang
+    routing shape) is in string state and is not reached by either rule, so this
+    costs no real detection; measured.
+
+    A missed detection is an INCONCLUSIVE advisory and recoverable. A manufactured
+    FACT is not. Pure and deterministic."""
+    n = len(script_text)
+    stop = min(idx, n)
+    head = script_text[:stop]
+    # Annex B HTML-like comments are lexed by a real JS engine as line comments;
+    # this lexer does not model them at all, so their mere PRESENCE before the
+    # marker is ambiguity. Checked as a substring (not gated on lexer state)
+    # because the HTML tokenizer's script-data-escaped states react to ``<!--``
+    # irrespective of JS string context.
+    if "<!--" in head or "-->" in head:
+        return False, "html_comment"
+
+    state: str | None = None   # None | "'" | '"' | "`" | "//" | "/*"
+    i = 0
+    # AUDIT-B3: a HashbangComment is legal ONLY at offset 0 and runs to the first
+    # line terminator. Modelled exactly. (Only \n and \r are treated as
+    # terminators, matching the "//" state below: recognising fewer terminators
+    # extends the comment, which is the NON-FIRING direction.)
+    if script_text.startswith("#!"):
+        j = 2
+        while j < n and script_text[j] not in ("\n", "\r"):
+            j += 1
+        if stop <= j:
+            return False, ""       # the marker sits INSIDE the hashbang comment
+        i = j
+    while i < stop:
+        c = script_text[i]
+        if state is None:
+            if c in ("'", '"', "`"):
+                state = c
+            elif c == "#" and i + 1 < n and script_text[i + 1] == "!":
+                # AUDIT-B3: `#!` away from offset 0 is a SyntaxError — the script
+                # never runs, so "code position" is not a claim this lexer may
+                # make. FAIL CLOSED. (`#x` private names are untouched.)
+                return False, "hashbang"
+            elif c == "/":
+                nxt = script_text[i + 1] if i + 1 < n else ""
+                if nxt == "/":
+                    state = "//"
+                    i += 1
+                elif nxt == "*":
+                    state = "/*"
+                    i += 1
+                else:
+                    # A regex literal or a division — indistinguishable without a
+                    # full token stream. FAIL CLOSED.
+                    return False, "regex_literal"
+        elif state in ("'", '"'):
+            if c == "\\":
+                i += 1
+            elif c == state:
+                state = None
+        elif state == "`":
+            if c == "\\":
+                i += 1
+            elif c == "$" and i + 1 < n and script_text[i + 1] == "{":
+                # A substitution's body is CODE (it may contain strings, nested
+                # template literals and regexes). Not modelled → FAIL CLOSED.
+                return False, "template_substitution"
+            elif c == "`":
+                state = None
+        elif state == "//":
+            if c in ("\n", "\r"):
+                state = None
+        elif state == "/*":
+            if c == "*" and i + 1 < n and script_text[i + 1] == "/":
+                state = None
+                i += 1
+        i += 1
+    return state is None, ""
 
 
 class _ReflectionScanner(HTMLParser):
-    """Locate a marker's parse context with stdlib HTML parsing. Fires internal
-    state when the marker became (part of) a tag name, landed inside a
-    ``<script>``, or sits in an event-handler / ``javascript:`` attribute value.
-    ``convert_charrefs=True`` means an HTML-encoded payload arrives as inert TEXT
-    (not a tag), so it is correctly judged non-executable."""
+    """Locate a marker's parse context with stdlib HTML parsing, and decide whether
+    the payload PROVABLY BROKE OUT into that position (see the module note above).
+
+    ``context`` is set only for a proven breakout (``html_tag`` / ``js_attribute:…``
+    / ``script``). ``advisory`` records the strongest NON-proving observation — the
+    marker was seen in/near an executable position but as escaped DATA the page put
+    there, which is not a breakout."""
 
     def __init__(self, marker_lower: str) -> None:
         super().__init__(convert_charrefs=True)
         self._ml = marker_lower
         self._in_script = False
+        self._script_executable = False
+        # RED-PEN B2: per the HTML spec a <script> that bears a `src` IGNORES its
+        # child text entirely — the element's inline content never runs. The old
+        # `_script_executable` looked only at `type`, so
+        # `<script src="/app.js">MARKER();</script>` fired at 0.90 on text no
+        # browser evaluates.
+        self._script_has_src = False
+        # AUDIT-B2: `nomodule` makes a CLASSIC script non-executing.
+        self._script_nonexec_reason = ""
+        # RED-PEN B1: the JS lexer starts from a known state only at the FIRST data
+        # chunk of a script element. If HTMLParser ever splits a script's text, a
+        # later chunk begins mid-token and "code position" is unknowable — so a
+        # continuation chunk is ambiguity, never a breakout.
+        self._script_chunk = 0
+        self._inert_depth = 0
+        # AUDIT-B1: the innermost open inert container, so the advisory can NAME it.
+        self._inert_tags: list[str] = []
         self.context: str | None = None
         self.detail: str = ""
+        self.advisory: str | None = None
+        self.advisory_detail: str = ""
+
+    # -- advisory bookkeeping ------------------------------------------------
+
+    def _note(self, kind: str, detail: str = "") -> None:
+        if self.advisory is None:
+            self.advisory, self.advisory_detail = kind, detail
+
+    # -- parser callbacks ----------------------------------------------------
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        t = tag.lower()
+        if t == "script":
+            # AUDIT-B2: keep the RAW `type` value — the LS distinguishes the raw
+            # empty string (classic) from a whitespace-only one (a data block), and
+            # the essence match forbids parameters. No `.split(";")`, no pattern.
+            raw_type: str | None = None
+            has_src = False
+            has_nomodule = False
+            # HTML DUPLICATE-ATTRIBUTE FIRST-WINS: the tokenizer keeps the FIRST occurrence of an attribute
+            # name and DISCARDS every later one, so `<script type="application/json" type="text/javascript">`
+            # is a DATA block to Chromium — the FIRST `type` (a JSON essence) wins, not the executable one.
+            # Take the first `type` only (`raw_type is None` == "not yet seen"). `has_src` / `has_nomodule`
+            # are presence flags, so which duplicate wins does not change them.
+            for name, val in attrs:
+                lname = name.lower()
+                if lname == "type" and raw_type is None:
+                    raw_type = val if val is not None else ""
+                elif lname == "src":
+                    has_src = True
+                elif lname == "nomodule":
+                    has_nomodule = True
+            self._in_script = True
+            executable, reason = _script_is_executable(raw_type, has_nomodule)
+            self._script_executable = executable
+            self._script_nonexec_reason = reason
+            self._script_has_src = has_src
+            self._script_chunk = 0
+        if t in _INERT_TEXT_CONTAINERS:
+            self._inert_depth += 1
+            self._inert_tags.append(t)
         if self.context is not None:
             return
-        if self._ml in tag.lower():
-            self.context, self.detail = "html_tag", tag
+
+        inert = self._inert_depth > 0
+        if self._ml in t:
+            if inert:
+                self._note("inert_text_container", t)
+            else:
+                self.context, self.detail = "html_tag", tag
             return
-        if tag.lower() == "script":
-            self._in_script = True
+        # HTML DUPLICATE-ATTRIBUTE FIRST-WINS (the same tokenizer rule as the <script> `type` above): once an
+        # attribute NAME has been seen on this tag the tokenizer discards every later occurrence, so it never
+        # reaches Chromium. `<div onclick="void 0" onclick="MARKER">` runs `void 0` (the FIRST onclick) and
+        # `<a href="#" href="javascript:MARKER">` navigates `#` (the FIRST href) — the marker in the SECOND
+        # occurrence is inert. The name is recorded on first sight, BEFORE the marker filter, so a duplicate
+        # is dropped even when the first occurrence carried no marker; refusing it kills FACTs Chromium would
+        # never execute.
+        seen_attr_names: set[str] = set()
         for name, val in attrs:
-            v = (val or "").lower()
-            if self._ml not in v:
-                continue
             a = name.lower()
-            if a.startswith("on") or (a in ("href", "src", "action", "formaction")
-                                      and v.lstrip().startswith("javascript:")):
+            if a in seen_attr_names:
+                continue
+            seen_attr_names.add(a)
+            v = val or ""
+            if self._ml not in v.lower():
+                continue
+            stripped = v.strip()
+            # RED-PEN B2: membership of the CLOSED event-handler set, never an
+            # `on` prefix (`on-click` / `once` / `online` are not handlers).
+            is_handler = a in _EVENT_HANDLER_ATTRIBUTES
+            is_js_url = (a in ("href", "src", "action", "formaction")
+                         and stripped.lower().startswith("javascript:"))
+            if not (is_handler or is_js_url):
+                # AUDIT-B4 — a CLOSED-SET MISS MUST NOT FALL THROUGH TO "CLEAN".
+                # The comment on `_EVENT_HANDLER_ATTRIBUTES` promises a miss is "a
+                # non-firing advisory — recoverable". Without this branch it was
+                # not: nothing called `_note`, so the scan reached the terminal
+                # `conclusive=True` return and `probe_verdict` certified the probe
+                # CLEAN. Measured on `oncontentvisibilityautostatechange`, a real
+                # Chromium-executed handler: a true positive became a
+                # channel-confirmed clean. Any `on`-SHAPED non-member is therefore
+                # an advisory. It still cannot FIRE — firing needs membership.
+                if _ON_SHAPED_ATTRIBUTE.match(a):
+                    if inert:
+                        self._note("inert_text_container", name)
+                    else:
+                        self._note("unmodelled_handler_shape", name)
+                continue
+            if inert:
+                self._note("inert_text_container", name)
+                continue
+            # SOUND BREAKOUT (R5): the attacker must own the WHOLE executable value.
+            # A marker embedded inside a larger expression the PAGE composed
+            # (``onclick="search(&quot;…marker…&quot;)"``) is the page's own handler
+            # with the value correctly escaped into it — it did not break out.
+            body = stripped
+            if is_js_url:
+                body = stripped[len("javascript:"):].strip()
+            if body.lower() == self._ml:
                 self.context, self.detail = f"js_attribute:{name}", name
                 return
+            self._note("js_attribute_data", name)
+
+    def _close(self, t: str) -> None:
+        if t == "script":
+            self._in_script = False
+            self._script_executable = False
+            self._script_nonexec_reason = ""
+            self._script_has_src = False
+            self._script_chunk = 0
+        if t in _INERT_TEXT_CONTAINERS and t in self._inert_tags:
+            # AUDIT-B1: close back to the MATCHING open container. An UNMATCHED end
+            # tag must be IGNORED, exactly as a browser ignores one — a plain
+            # `self._inert_depth -= 1` let the shipped `</title><script>{marker}`
+            # payload cancel an enclosing `<noscript>` that was never closed, and
+            # the marker was reported live again. Chromium, measured: it is not.
+            del self._inert_tags[_rindex(self._inert_tags, t):]
+            self._inert_depth = len(self._inert_tags)
 
     def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         self.handle_starttag(tag, attrs)
+        # a self-closing form opens nothing, so undo the container/script bookkeeping
+        self._close(tag.lower())
 
     def handle_endtag(self, tag: str) -> None:
-        if tag.lower() == "script":
-            self._in_script = False
+        self._close(tag.lower())
 
     def handle_data(self, data: str) -> None:
-        if self.context is None and self._in_script and self._ml in data.lower():
-            self.context = "script"
+        if not self._in_script:
+            return
+        chunk = self._script_chunk
+        self._script_chunk += 1
+        if self.context is not None:
+            return
+        low = data.lower()
+        idx = low.find(self._ml)
+        if idx < 0:
+            return
+        if self._inert_depth > 0:
+            # AUDIT-B1 — `_inert_depth` was maintained but READ ONLY in
+            # `handle_starttag`. Python's HTMLParser has RCDATA handling for
+            # textarea/title/iframe/xmp, so those were ACCIDENTALLY safe — but NOT
+            # for <noscript> (with scripting enabled the HTML LS gives its start tag
+            # the generic RAW TEXT algorithm) or <template> (whose contents live in
+            # an inert DocumentFragment). So a nested <script> inside either was
+            # reported live. Measured: `<noscript><script>M</script></noscript>` and
+            # the <template> twin both fired 0.90 ctx=script; Chromium executes
+            # NEITHER, and six SHIPPED m2 payloads minted a High/0.9 xss FACT
+            # end-to-end through `confirm_finding`.
+            self._note("inert_text_container",
+                       self._inert_tags[-1] if self._inert_tags else "script")
+            return
+        if not self._script_executable:
+            # <script type="application/json"> and friends: a DATA block the browser
+            # never executes. Django's json_script emits exactly this. AUDIT-B2 adds
+            # the `nomodule` classic script and the whitespace-only `type`.
+            self._note(self._script_nonexec_reason or "script_data_block")
+            return
+        if self._script_has_src:
+            # RED-PEN B2: a `src`-bearing <script> never evaluates its child text.
+            self._note("script_src_ignored_body")
+            return
+        if chunk:
+            # RED-PEN B1: a continuation chunk starts mid-token — fail closed.
+            self._note("script_lexer_ambiguous", "split_script_text")
+            return
+        code, ambiguity = _js_scan(data, idx)
+        if ambiguity:
+            # RED-PEN B1 — FAIL CLOSED ON LEXER AMBIGUITY. A regex literal, an
+            # Annex B `<!--`/`-->` comment or a template substitution before the
+            # marker desyncs this lexer by one quote, which is enough to report a
+            # STRING's contents as code. Downgrade to a non-firing, non-conclusive
+            # advisory rather than mint a FACT the page does not support.
+            self._note("script_lexer_ambiguous", ambiguity)
+            return
+        if code:
+            self.context, self.detail = "script", "script"
+        else:
+            # F4: inside a string literal / template literal / comment — the value
+            # cannot terminate the element or the literal, so no breakout is proven.
+            self._note("script_string_literal")
 
 
 def reflection_context_oracle(marker: str, observed_sink: Any) -> OracleSignal:
-    """Fire only when a reflected marker lands in an EXECUTABLE position — the
-    payload broke out of its context into live markup or script — not merely when
-    the marker substring is present.
+    """Fire only when the reflected marker PROVABLY BROKE OUT into a live,
+    executable position — never merely because the marker substring is present
+    somewhere executable-looking.
 
     Substring-presence (what ``side_effect_oracle`` and most DAST use for XSS)
     over-reports: a marker reflected inside an HTML-encoded attribute, a comment,
-    or plain text is inert. Here the response is PARSED (stdlib, no third-party
-    dependency), and a signal fires only if the marker became (part of) a tag
-    name (the payload created an element), landed inside a ``<script>``, or sits
-    in an event-handler / ``javascript:`` attribute. An encoded or text-only
-    reflection does not fire — materially fewer false positives than substring
-    XSS detection."""
+    or plain text is inert. So does "the marker is somewhere inside a ``<script>``"
+    or "somewhere inside an ``on*`` value" — the audited F4/R5 false positives,
+    which a CORRECTLY escaped page (Django ``json_script``, a ``&quot;``-escaped
+    handler) reproduces on demand. The response is PARSED (stdlib, no third-party
+    dependency) and a signal fires ONLY for a proven breakout:
+
+      * ``html_tag``     — the marker is (part of) a TAG NAME: the payload created
+        an element (0.95);
+      * ``js_attribute`` — the marker is the ENTIRE value of an event-handler
+        attribute, or the entire body of a ``javascript:`` URL: the attacker owns
+        the whole handler (0.90);
+      * ``script``       — the marker sits at CODE position (outside every string
+        literal, template literal and comment) inside a script the browser actually
+        EXECUTES (``type`` absent or a JS MIME) (0.90).
+
+    Anything weaker — a marker inside a JS string literal, inside a handler
+    expression the page composed, inside a ``type="application/json"`` data block,
+    or inside a raw-text container (``<noscript>``/``<textarea>``/…) — is returned
+    as a NON-FIRING, NON-CONCLUSIVE advisory: not a FACT, and not a clean bill of
+    health either. A fully encoded / text-only reflection is the one decisive
+    negative (``conclusive=True``).
+
+    SCOPE: this oracle proves a reflection reached a LIVE / EXECUTABLE POSITION.
+    It does NOT prove EXECUTION — that is the DOM_EXECUTION oracle's claim, and no
+    evidence string here may be read as one."""
     marker = (marker or "").strip()
     body = observed_sink if isinstance(observed_sink, str) else _searchable(observed_sink)
     if len(marker) < 4:
@@ -1345,18 +2067,80 @@ def reflection_context_oracle(marker: str, observed_sink: Any) -> OracleSignal:
     if scanner.context == "html_tag":
         return OracleSignal(
             kind=OracleKind.REFLECTION_CONTEXT, fired=True, confidence=0.95,
-            evidence=f"marker created a live element <{scanner.detail}> — executable HTML injection",
+            evidence=(f"marker became the TAG NAME of a live element <{scanner.detail}> — the payload "
+                      f"broke out into markup (injection into an executable position PROVEN; this "
+                      f"oracle does not prove execution)"),
             observed={"marker": marker, "context": "html_tag", "tag": scanner.detail})
     if scanner.context == "script":
         return OracleSignal(
             kind=OracleKind.REFLECTION_CONTEXT, fired=True, confidence=0.9,
-            evidence="marker reflected inside a <script> block — executable JS context",
+            evidence=("marker sits at CODE position inside an executable <script> — outside every string "
+                      "literal, template literal and comment, so the payload broke out of the data "
+                      "position (injection into an executable position PROVEN; this oracle does not "
+                      "prove execution)"),
             observed={"marker": marker, "context": "script"})
     if scanner.context and scanner.context.startswith("js_attribute"):
         return OracleSignal(
             kind=OracleKind.REFLECTION_CONTEXT, fired=True, confidence=0.9,
-            evidence=f"marker in executable attribute {scanner.detail!r} — event/JS URL context",
+            evidence=(f"marker is the ENTIRE value of executable attribute {scanner.detail!r} — the "
+                      f"attacker supplied the whole handler / javascript: URL body (injection into an "
+                      f"executable position PROVEN; this oracle does not prove execution)"),
             observed={"marker": marker, "context": scanner.context})
+
+    if scanner.advisory is not None:
+        # AUDIT F4/R5 — NON-FIRING ADVISORY. The marker was seen in or beside an
+        # executable position, but as DATA the page itself placed there; no breakout
+        # is proven. NOT conclusive either: an escaping bug this parse cannot see
+        # could still make it executable, so the honest verdict is "UNRESOLVED —
+        # needs an execution-proving oracle, run by an operator" (no automatic
+        # handoff exists; see the module note), never "clean" and never a FACT.
+        _ADVISORY_EVIDENCE = {
+            "script_string_literal":
+                "marker is inside a JS STRING LITERAL / template literal / comment in an executable "
+                "<script> — it cannot terminate the literal or the element from this parse, so NO "
+                "breakout is proven (the Django json_script / Rails json_escape shape). ADVISORY ONLY",
+            "script_data_block":
+                "marker is inside a <script> the browser does NOT execute (type is a data MIME such as "
+                "application/json) — NO breakout is proven. ADVISORY ONLY",
+            "js_attribute_data":
+                f"marker is EMBEDDED IN a larger expression in attribute {scanner.advisory_detail!r} that "
+                "the PAGE composed (e.g. a correctly &quot;-escaped handler argument) — the attacker does "
+                "not own the value, so NO breakout is proven. ADVISORY ONLY",
+            "inert_text_container":
+                f"marker reached {scanner.advisory_detail!r} inside a raw-text container "
+                "(<noscript>/<textarea>/<title>/<template>/…) whose content a browser does not parse as "
+                "live markup — NO breakout is proven. ADVISORY ONLY",
+            "script_src_ignored_body":
+                "marker is inside a <script> that bears a `src` attribute — per the HTML spec such an "
+                "element IGNORES its child text, so the reflected bytes are never evaluated and NO "
+                "breakout is proven. ADVISORY ONLY",
+            "script_nomodule_ignored":
+                "marker is inside a CLASSIC <script> bearing `nomodule` — 'prepare the script element' "
+                "returns early for it, so a module-supporting browser never evaluates the element and NO "
+                "breakout is proven (measured inert in Chromium 150). ADVISORY ONLY",
+            "unmodelled_handler_shape":
+                f"marker is in attribute {scanner.advisory_detail!r}, which has the SHAPE of an HTML "
+                "event-handler content attribute but is NOT in this oracle's closed, measured set of "
+                "handlers — so whether a browser would execute it is UNKNOWN to this oracle. It does not "
+                "fire (firing needs membership) and it is explicitly NOT a clean bill of health. "
+                "ADVISORY ONLY",
+            "script_lexer_ambiguous":
+                f"marker is inside an executable <script> whose text contains "
+                f"{scanner.advisory_detail!r} before the marker — a construct this lexer does not model "
+                "(regex literal vs division, an Annex B <!-- / --> comment, a template substitution, a "
+                "misplaced hashbang, or split script text). The code-vs-string verdict is therefore "
+                "UNKNOWN, and this oracle FAILS CLOSED rather than risk reporting a string literal as "
+                "code. ADVISORY ONLY — this verdict is UNRESOLVED, not clean. NOTE: nothing in this "
+                "engine schedules a follow-up probe on this advisory; resolving it requires an operator "
+                "to run an execution-proving oracle by hand (wiring that handoff is tracked, not shipped)",
+        }
+        return OracleSignal(
+            kind=OracleKind.REFLECTION_CONTEXT, fired=False, confidence=0.0,
+            conclusive=False,
+            evidence=_ADVISORY_EVIDENCE.get(
+                scanner.advisory, "marker in a non-proving position. ADVISORY ONLY"),
+            observed={"marker": marker, "context": scanner.advisory,
+                      "detail": scanner.advisory_detail, "advisory": True})
 
     return OracleSignal(
         kind=OracleKind.REFLECTION_CONTEXT, fired=False, confidence=0.0,
@@ -6768,7 +7552,15 @@ _SHELL_CMDS = ("cat", "ls", "id", "whoami", "uname", "nc", "ncat", "netcat", "cu
                "sh", "zsh", "ksh", "powershell", "pwsh", "nslookup", "dig", "cmd", "python", "python3",
                "perl", "ruby", "php", "chmod", "chown", "mkfifo", "telnet", "socat", "base64", "xxd",
                "hostname", "ifconfig", "ping", "certutil", "sleep", "rm", "kill", "env")
-_CMD_ALT = "|".join(sorted(set(_SHELL_CMDS), key=len, reverse=True))
+# AUDIT-B6 (DETERMINISM). This used to be `sorted(set(_SHELL_CMDS), key=len, reverse=True)`.
+# `sorted` is stable, so SAME-LENGTH commands kept the iteration order of the SET, which for
+# strings depends on PYTHONHASHSEED. The resulting alternation STRING is baked into the
+# compiled pattern and `verify/oracle_version.py::_canon` hashes it via `repr`, so
+# `oracle_version(COMMAND_INJECTION_BREAKOUT)` took FIVE distinct values across
+# PYTHONHASHSEED 0/1/2/42/12345 — falsifying CRUCIBLE invariant 6 for the version identity.
+# The `(-len, s)` key is a TOTAL order over a tuple: longest-first is preserved (the property
+# the alternation needs, so `netcat` cannot be pre-empted by `nc`) and ties break on the string.
+_CMD_ALT = "|".join(sorted(set(_SHELL_CMDS), key=lambda s: (-len(s), s)))
 _SHELL_CMD_RE = re.compile(r"(?i)(?<![A-Za-z0-9_])(" + _CMD_ALT + r")(?![A-Za-z0-9_])")
 _SHELL_CMD_AT_START_RE = re.compile(r"(?i)^(" + _CMD_ALT + r")(?![A-Za-z0-9_])")
 # A command SUBSTITUTION body: $(...) or `...`. The bounded, negated char classes are LINEAR (no
@@ -6888,7 +7680,11 @@ _NOSQL_OPERATORS: frozenset[str] = frozenset({
 #     NOT a block (a $regex injection stays a lead at most). Near-zero-FP wins over coverage here.
 # Longest-first alternation so a prefix operator (`gt`) cannot pre-empt its extension (`gte`); the
 # key-segment lookahead below also guards this, but ordering keeps the match unambiguous.
-_NOSQL_OP_ALT = "|".join(sorted(_NOSQL_OPERATORS, key=len, reverse=True))
+# AUDIT-B6 (DETERMINISM) — same defect and same fix as `_CMD_ALT` above: iterating a
+# frozenset baked PYTHONHASHSEED into the compiled pattern string, and
+# `oracle_version(NOSQL_INJECTION_BREAKOUT)` took five distinct values across five seeds.
+# `(-len, s)` keeps longest-first (so `gt` cannot pre-empt `gte`) and is a TOTAL order.
+_NOSQL_OP_ALT = "|".join(sorted(_NOSQL_OPERATORS, key=lambda s: (-len(s), s)))
 # A `$operator` that is a WHOLE BRACKET key segment of a parameter name: preceded by start-of-string or
 # `[`, and followed (lookahead) by end-of-string or `]`. So `user[$ne]`, `q[$gt]`, `a[b][$in]`, and a
 # bare `$where` match; `pass$word`, `cost$negate`, and `$5.00` do NOT. DOT delimiting is deliberately

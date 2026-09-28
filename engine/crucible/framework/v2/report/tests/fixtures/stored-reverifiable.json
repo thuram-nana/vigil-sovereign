@@ -7,16 +7,16 @@
   "elapsed_s": 0.226,
   "active_findings": [
     {
-      "check_id": "boolean-sqli",
-      "bug_class": "boolean_sqli",
+      "check_id": "error-based-sqli",
+      "bug_class": "error_based_sqli",
       "insertion_point": "query_value:0",
       "param": "q",
       "endpoint": "http://127.0.0.1:18080/search?q=test",
       "confidence": 0.7553010369911779,
       "confirmed_by": "differential_response",
-      "rationale": "CONFIRMED boolean_sqli — 1 oracle(s) fired at high confidence: differential_response@0.76: responses diverge on length (51 vs 91 bytes (43.96%)), lexical (similarity 43.66%)",
+      "rationale": "CONFIRMED error_based_sqli — 1 oracle(s) fired at high confidence: differential_response@0.76: responses diverge on length (51 vs 91 bytes (43.96%)), lexical (similarity 43.66%)",
       "oracle_context": {
-        "bug_class": "boolean_sqli",
+        "bug_class": "error_based_sqli",
         "baseline": {
           "body": "<h1>Results for: crucible-benign-term</h1><ul></ul>",
           "status": 200,

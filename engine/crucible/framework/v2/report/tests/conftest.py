@@ -20,7 +20,7 @@ _DIVERGENT = {"status": 200, "body": "id=1 name=alice role=user\nid=2 name=bob r
 def firing_ctx() -> dict:
     """A differential context whose oracle DOES re-fire (base vs divergent)."""
     return FindingContext.from_http_responses(
-        _BASE, _DIVERGENT, bug_class="boolean_sqli",
+        _BASE, _DIVERGENT, bug_class="error_based_sqli",
         discriminator={"dimensions": ["status", "length", "lexical"]},
     ).model_dump(mode="json")
 
@@ -28,13 +28,13 @@ def firing_ctx() -> dict:
 def nonfiring_ctx() -> dict:
     """A context whose oracle does NOT re-fire (base vs base — no divergence)."""
     return FindingContext.from_http_responses(
-        _BASE, _BASE, bug_class="boolean_sqli",
+        _BASE, _BASE, bug_class="error_based_sqli",
         discriminator={"dimensions": ["status", "length", "lexical"]},
     ).model_dump(mode="json")
 
 
 def make_fact(slug: str = "001-sqli", *, severity: str = "Critical",
-              bug_class: str = "boolean_sqli") -> FindingPayload:
+              bug_class: str = "error_based_sqli") -> FindingPayload:
     """A genuinely oracle-confirmed finding whose retained proof re-fires → a FACT."""
     return FindingPayload(
         finding_slug=slug, title="Blind SQL injection in product search",
@@ -53,7 +53,7 @@ def make_demoted(slug: str = "002-stale") -> FindingPayload:
     """Recorded oracle-confirmed, but its retained proof no longer re-fires → DEMOTED lead."""
     return FindingPayload(
         finding_slug=slug, title="Recorded-confirmed finding with stale evidence",
-        severity="High", bug_class="boolean_sqli", surface="GET /x?q=", summary="s",
+        severity="High", bug_class="error_based_sqli", surface="GET /x?q=", summary="s",
         verified_by_oracle=True, oracle_kind="differential_response", confidence=0.9,
         oracle_rationale="claimed differential", critique_status="confirmed",
         oracle_context=nonfiring_ctx(),

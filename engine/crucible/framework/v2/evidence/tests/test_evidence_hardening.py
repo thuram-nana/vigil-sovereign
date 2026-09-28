@@ -42,12 +42,12 @@ def _trust_root(threshold=2, n=3):
     return tr, signers
 
 
-def _finding(ref="boolean-sqli", engagement="acme"):
+def _finding(ref="error-based-sqli", engagement="acme"):
     ctx = FindingContext.from_http_responses(
-        _BASE, _DIVERGENT, bug_class="boolean_sqli",
+        _BASE, _DIVERGENT, bug_class="error_based_sqli",
         discriminator={"dimensions": ["status", "length", "lexical"]})
-    c = confirm_finding(finding={"bug_class": "boolean_sqli"}, context=ctx)
-    return {"check_id": ref, "bug_class": "boolean_sqli",
+    c = confirm_finding(finding={"bug_class": "error_based_sqli"}, context=ctx)
+    return {"check_id": ref, "bug_class": "error_based_sqli",
             "confirmed_by": c.confirmed_by.value if c else "differential_response",
             "confidence": c.confidence if c else 0.9,
             "oracle_context": ctx.model_dump(mode="json")}, ctx.model_dump(mode="json")
@@ -61,13 +61,13 @@ def test_unsigned_head_bundle_is_not_ok_even_with_signed_certs():
     cert = sign_certificate(build_certificate(f, engagement_slug="acme", seq=0), signers[:2])
     chain = build_chain([cert.certificate.cert_digest])
     # head=None: an internally-consistent UNSIGNED chain must NOT pass — the exact hole the review found.
-    r = verify_bundle([cert], chain, None, contexts={"boolean-sqli": ctx}, trust_root=tr)
+    r = verify_bundle([cert], chain, None, contexts={"error-based-sqli": ctx}, trust_root=tr)
     assert r.chain_ok is True          # the unsigned chain is internally consistent...
     assert r.head_anchored is False    # ...but it is NOT anchored by a governance-signed head
     assert r.ok is False               # so the bundle is NOT sound
     # the same bundle WITH a valid signed head verifies
     head = sign_head(chain, engagement_slug="acme", signers=signers[:2])
-    r2 = verify_bundle([cert], chain, head, contexts={"boolean-sqli": ctx}, trust_root=tr)
+    r2 = verify_bundle([cert], chain, head, contexts={"error-based-sqli": ctx}, trust_root=tr)
     assert r2.head_anchored is True and r2.ok is True
 
 
@@ -133,7 +133,12 @@ def test_empty_oracle_version_reported_unconfirmed_not_a_pass():
 
 def test_oracle_version_verification_is_deterministic():
     """Re-running verification over the same version-skewed cert yields an IDENTICAL result (tier, status, both
-    version strings, serialized fields) — FATAL-2 determinism."""
+    version strings, serialized fields) — FATAL-2 determinism.
+
+    NOTE (AUDIT-B6): this asserts determinism of the VERIFICATION, in one process. It cannot and does not
+    catch a non-deterministic ``oracle_version`` itself — both calls sit behind the same ``@lru_cache`` and
+    would return the same wrong value. The cross-PROCESS assertion that does catch it is
+    ``test_B6_oracle_version_is_deterministic_across_processes`` below."""
     tr, signers = _trust_root()
     f, ctx = _finding()
     cert = build_certificate(f, engagement_slug="acme", seq=0)
@@ -158,7 +163,7 @@ def test_version_skewed_bundle_is_crypto_ok_but_not_fully_sound():
     signed = sign_certificate(forged, signers[:2])
     chain = build_chain([signed.certificate.cert_digest])
     head = sign_head(chain, engagement_slug="acme", signers=signers[:2])
-    b = verify_bundle([signed], chain, head, contexts={"boolean-sqli": ctx}, trust_root=tr)
+    b = verify_bundle([signed], chain, head, contexts={"error-based-sqli": ctx}, trust_root=tr)
     assert b.ok is True and b.fully_sound is False
     assert b.certificate_results[0].tier is VerificationTier.SOUND_ORACLE_VERSION_CHANGED
 
@@ -225,7 +230,7 @@ def test_unknown_schema_version_fails_closed():
 # ============ #6 — render_as is a closed label set ================================================
 
 def test_render_as_rejects_unknown_label():
-    ReportClaim(sentence="x", bug_class="boolean_sqli", render_as="fact")               # ok
+    ReportClaim(sentence="x", bug_class="error_based_sqli", render_as="fact")               # ok
     ReportClaim(sentence="x", render_as="analyst-commentary")                            # ok
     for bad in ("verified", "machine-fact", "FACT", ""):
         with pytest.raises(ValidationError):
@@ -297,3 +302,65 @@ def test_tool_version_and_freshness_signed_and_absent_is_byte_identical():
     assert verify_certificate(signed, oracle_context=ctx, trust_root=tr).ok is True
     tampered = signed.model_copy(update={"certificate": stamped.model_copy(update={"tool_version": "evil"})})
     assert verify_certificate(tampered, oracle_context=ctx, trust_root=tr).authentic is False
+
+
+# ---------------------------------------------------------------------------
+# AUDIT-B6 — oracle_version determinism ACROSS PROCESSES.
+#
+# The in-process test above is structurally incapable of catching a
+# non-deterministic version identity, and two real defects hid behind exactly that
+# blind spot for every one of the 47 kinds:
+#
+#   * `oracles._CMD_ALT` and `oracles._NOSQL_OP_ALT` were built by iterating a SET,
+#     baking PYTHONHASHSEED into the compiled pattern string that `_canon` hashes.
+#     Measured: FIVE distinct hashes for `command_injection_breakout` and for
+#     `nosql_injection_breakout` across PYTHONHASHSEED 0/1/2/42/12345.
+#   * `oracles._SECRET_RECOGNIZERS` holds LAMBDAS and `_canon` fell through to
+#     `repr(<function <lambda> at 0x…>)` — a HEAP ADDRESS. Measured:
+#     `secret_credential_validity` differed in ALL TEN of ten processes, including
+#     between two runs at the SAME pinned seed. Every certificate of that kind was
+#     therefore permanently "oracle_version CHANGED since mint" and could never
+#     verify fully-sound.
+#
+# This test spawns REAL subprocesses at DIFFERENT PYTHONHASHSEEDs and compares all
+# 47 kinds. It is the only shape that can fail on either defect.
+# ---------------------------------------------------------------------------
+
+_VERSION_DUMP = (
+    "import json;"
+    "from framework.v2.verify.models import OracleKind;"
+    "from framework.v2.verify.oracle_version import oracle_version;"
+    "print(json.dumps({k.value: oracle_version(k) for k in OracleKind}, sort_keys=True))"
+)
+
+
+def test_B6_oracle_version_is_deterministic_across_processes():
+    """CRUCIBLE invariant 6, for the VERSION IDENTITY, asserted where it can fail."""
+    import json as _json
+    import os as _os
+    import subprocess as _subprocess
+    import sys as _sys
+
+    def dump(seed: str) -> dict[str, str]:
+        env = dict(_os.environ, PYTHONHASHSEED=seed)
+        r = _subprocess.run([_sys.executable, "-c", _VERSION_DUMP],
+                            capture_output=True, text=True, env=env, timeout=300)
+        assert r.returncode == 0, r.stderr[-3000:]
+        return _json.loads(r.stdout)
+
+    # two runs at the SAME seed (catches a heap address) + different seeds (catches
+    # set-iteration order baked into a pattern string).
+    runs = {f"seed={s} run={r}": dump(s) for s in ("0", "1", "12345") for r in ("a", "b")}
+    kinds = sorted(next(iter(runs.values())))
+    assert len(kinds) >= 47, f"expected every OracleKind, got {len(kinds)}"
+
+    drift = {k: sorted({d[k] for d in runs.values()}) for k in kinds
+             if len({d[k] for d in runs.values()}) > 1}
+    assert not drift, (
+        "oracle_version is NOT deterministic across processes — every certificate of "
+        f"these kinds is permanently 'version CHANGED since mint': "
+        + ", ".join(f"{k} ({len(v)} distinct)" for k, v in drift.items()))
+
+    # non-vacuity: the subprocess really did compute real versions, not empty strings
+    first = next(iter(runs.values()))
+    assert all(first[k].startswith("sha256:") for k in kinds), first

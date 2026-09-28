@@ -20,12 +20,12 @@ def _finding_with_context() -> tuple[dict, FindingContext]:
     ctx = FindingContext.from_http_responses(
         {"status": 200, "body": "No results."},
         {"status": 200, "body": "id=1 alice user\nid=2 bob admin"},
-        bug_class="boolean_sqli",
+        bug_class="error_based_sqli",
         discriminator={"dimensions": ["status", "length", "lexical"]},
     )
-    c = confirm_finding(finding={"bug_class": "boolean_sqli"}, context=ctx)
+    c = confirm_finding(finding={"bug_class": "error_based_sqli"}, context=ctx)
     finding = {
-        "check_id": "boolean-sqli", "bug_class": "boolean_sqli",
+        "check_id": "error-based-sqli", "bug_class": "error_based_sqli",
         "insertion_point": "query", "param": "q",
         "confirmed_by": c.confirmed_by.value, "confidence": c.confidence,
         "oracle_context": ctx.model_dump(mode="json"),
@@ -56,7 +56,7 @@ def test_no_certificate_yields_empty_cert_id(tmp_path, monkeypatch) -> None:
     # a finding without a retained oracle_context is a lead, not a certified fact — no id is minted.
     rid = _stage(tmp_path, monkeypatch,
                  {"target": "https://app/",
-                  "active_findings": [{"check_id": "x", "bug_class": "boolean_sqli"}]})
+                  "active_findings": [{"check_id": "x", "bug_class": "error_based_sqli"}]})
     cert = api.evidence(rid)["findings"][0]
     assert cert["has_certificate"] is False and cert["cert_id"] == ""
 

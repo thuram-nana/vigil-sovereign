@@ -58,6 +58,45 @@ class _WpApp(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
 
+class _LfiWpApp(_WpApp):
+    """The same WordPress/PHP fixture, additionally GENUINELY vulnerable to local file
+    inclusion on the search param via the ``file://`` wrapper: ``?q=file:///etc/passwd``
+    returns the file's contents; any benign value echoes as before.
+
+    ``lfi`` is a library-only point class routed to the SOUND ``SIDE_EFFECT`` content
+    oracle: the shipped ``h1-lfi-etc-passwd-fileuri`` check sends ``file:///etc/passwd``,
+    sees ``root:x:0:0:`` in the payload response, spends a benign control that does NOT
+    carry it, and so confirms a real file READ — not a reflected path. A ``--library`` run
+    therefore ADJUDICATES ``lfi`` to a finding here, while a default run (which commits no
+    lfi check) leaves it honestly ``inconclusive``.
+
+    This is the migration for the demotion in 36fd3cf8: the earlier fixtures used
+    ``nosqli``, whose BARE DIFFERENTIAL is now correctly LEAD-only
+    (``DIFFERENTIAL_LEAD_ONLY_CLASSES``), so ``--library`` no longer confirms nosqli to a
+    finding. ``lfi`` preserves the honesty property with a class that STILL soundly
+    confirms. The match is EXACT (``q == "file:///etc/passwd"``) so only ``lfi`` fires —
+    the ``xxe`` in-band entry that embeds the same path stays inconclusive, and ldap/xpath
+    (asserted unadjudicable below) are untouched."""
+
+    def do_GET(self) -> None:  # noqa: N802
+        parts = urlsplit(self.path)
+        if parts.path == "/search":
+            q = parse_qs(parts.query).get("q", [""])[0]
+            if q == "file:///etc/passwd":
+                body = (b"root:x:0:0:root:/root:/bin/bash\n"
+                        b"daemon:x:1:1:daemon:/usr/sbin:/usr/sbin/nologin\n")
+            else:
+                body = f"echo:{q}".encode()
+            self.send_response(200)
+            self.send_header("Server", "nginx")
+            self.send_header("X-Powered-By", "PHP/8.1")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        super().do_GET()
+
+
 @contextlib.contextmanager
 def _server(handler) -> Iterator[str]:
     srv = ThreadingHTTPServer(("127.0.0.1", 0), handler)
@@ -204,23 +243,32 @@ def _library_only_point_classes() -> set[str]:
 
 
 def test_default_run_reports_library_only_class_inconclusive_not_clean() -> None:
-    """AC negative control: a target vulnerable to a library-only class (NoSQL injection)
-    is NOT reported CLEAN by a default run — its per-class verdict is `inconclusive`,
-    because the default roster committed no nosqli check at all."""
-    with _server(_WpApp) as base:
+    """AC negative control: a target vulnerable to a library-only class (local file
+    inclusion) is NOT reported CLEAN by a default run — its per-class verdict is
+    `inconclusive`, because the default roster committed no lfi check at all.
+
+    The exemplar is `lfi` (not `nosqli`): 36fd3cf8 correctly demoted the bare
+    benign-vs-payload differential to LEAD-only for the truth-value-attribution classes
+    (nosqli among them), so a --library run no longer CONFIRMS nosqli — a LEAD is not an
+    adjudication. `lfi` is the faithful replacement: it is still library-only, and it
+    confirms via the SOUND `SIDE_EFFECT` content oracle over a genuine file read on
+    `_LfiWpApp`, so the honesty property (default = inconclusive-not-falsely-clean;
+    --library = adjudicated to a finding) is tested with a class that really does confirm."""
+    with _server(_LfiWpApp) as base:
         default = _run(base, use_library=False)
         lib = _run(base, use_library=True)
 
-    # nosqli is genuinely in the corpus and library-only.
-    assert "nosqli" in _corpus_bug_classes()
-    assert "nosqli" in _library_only_point_classes()
+    # lfi is genuinely in the corpus and library-only.
+    assert "lfi" in _corpus_bug_classes()
+    assert "lfi" in _library_only_point_classes()
 
-    # DEFAULT run: nosqli was never adjudicated -> inconclusive, never clean/finding.
-    assert default.verdict_by_class()["nosqli"] == "inconclusive"
-    # --library run over the SAME fixture DOES adjudicate nosqli (the WP echo endpoint is
-    # in fact nosqli-vulnerable, so it lands as a finding) — proving the default run's
-    # "inconclusive" was a real coverage gap the operator would otherwise read as safe.
-    assert lib.verdict_by_class()["nosqli"] != "inconclusive"
+    # DEFAULT run: lfi was never adjudicated -> inconclusive, never clean/finding.
+    assert default.verdict_by_class()["lfi"] == "inconclusive"
+    # --library run over the SAME fixture DOES adjudicate lfi (the file:// wrapper on the
+    # search param really returns /etc/passwd, so the SIDE_EFFECT content oracle confirms a
+    # file READ and it lands as a finding) — proving the default run's "inconclusive" was a
+    # real coverage gap the operator would otherwise read as safe.
+    assert lib.verdict_by_class()["lfi"] == "finding"
 
 
 def test_default_run_clean_is_not_corpus_wide() -> None:
@@ -245,28 +293,59 @@ def test_default_run_clean_is_not_corpus_wide() -> None:
     # a probe, so it is honestly inconclusive, NOT clean; that is the #509 fix).
     seed_classes = {c.bug_class for c in DEFAULT_CHECKS}
     assert set(cb["classes_exercised"]) <= seed_classes
-    # the exercised-corpus set is derived from probes that ACTUALLY ran (∩ the point corpus),
-    # not from the committed plan — the #509 crux.
-    assert set(cb["classes_exercised"]) == (
-        {p.bug_class for p in report.exercised_probes} & _corpus_bug_classes()
+    # the exercised-corpus set is derived from probes that ACTUALLY ran AND were ADJUDICATED
+    # (∩ the point corpus): not from the committed plan (the #509 crux) and not from the bare
+    # SET of probed classes (the audit-A F2 crux — a class whose every probe came back
+    # `inconclusive` adjudicated nothing and must not count as exercised).
+    adjudicated = (
+        {p.bug_class for p in report.exercised_probes if p.verdict in ("clean", "finding")}
+        | {f.bug_class for f in report.active_findings}
     )
+    assert set(cb["classes_exercised"]) == (adjudicated & _corpus_bug_classes())
+    # ... and the F2 gate is NOT vacuous on this fixture: it really does probe corpus classes
+    # nothing could adjudicate (error_based_sqli / path_traversal / ssti against a plain echo
+    # with no database and no template engine). Every one of those is inconclusive here; under
+    # the old bare-probe-set rule every one of them read `clean`.
+    probed = {p.bug_class for p in report.exercised_probes} & _corpus_bug_classes()
+    all_inconclusive = probed - adjudicated
+    assert all_inconclusive, "fixture no longer probes an unadjudicable class — F2 check vacuous"
+    for c in sorted(all_inconclusive):
+        assert report.verdict_by_class()[c] == "inconclusive"
+        assert c in cb["classes_inconclusive"]
     for c in ("nosqli", "ldap_injection", "xpath_injection", "el_injection"):
         assert report.verdict_by_class()[c] == "inconclusive"
 
 
 def test_library_run_shrinks_the_inconclusive_set() -> None:
-    """--library over a fingerprintable target exercises the library-only classes, so the
-    inconclusive set becomes a STRICT subset of the default run's."""
-    with _server(_WpApp) as base:
+    """--library over a fingerprintable target ADJUDICATES classes the default run could not,
+    so the inconclusive set becomes a STRICT subset of the default run's.
+
+    Audit-A F2 sharpened what "shrinks" means. Running a library check is not by itself an
+    adjudication: ``ldap_injection`` / ``xpath_injection`` get probes under --library, but this
+    fixture is a plain echo with no LDAP directory and no XPath engine, so no oracle has a
+    channel and every one of those probes is ``inconclusive``. Calling that a bounded CLEAN
+    would be a false negative about a class the run proved nothing about, so they stay
+    inconclusive; the shrink comes from the classes the library really did adjudicate."""
+    with _server(_LfiWpApp) as base:
         default = _run(base, use_library=False)
         lib = _run(base, use_library=True)
 
     d_inc = set(default.coverage_bounds()["classes_inconclusive"])
     l_inc = set(lib.coverage_bounds()["classes_inconclusive"])
     assert l_inc < d_inc, "the library must adjudicate classes the default run could not"
-    for c in ("nosqli", "ldap_injection", "xpath_injection"):
+    # lfi IS adjudicated by the library over this fixture (the file:// wrapper really reads
+    # /etc/passwd, so the SIDE_EFFECT content oracle confirms it as a finding) — the default
+    # run's inconclusive was a real coverage gap. (nosqli's bare differential was demoted to
+    # LEAD-only in 36fd3cf8, so it is no longer the exemplar of an adjudicated class.)
+    assert default.verdict_by_class()["lfi"] == "inconclusive"
+    assert lib.verdict_by_class()["lfi"] == "finding"
+    # ldap_injection / xpath_injection are PROBED by the library and adjudicated by nothing,
+    # so they stay honestly inconclusive rather than becoming a false clean (F2).
+    for c in ("ldap_injection", "xpath_injection"):
         assert default.verdict_by_class()[c] == "inconclusive"
-        assert lib.verdict_by_class()[c] != "inconclusive"
+        verdicts = {p.verdict for p in lib.exercised_probes if p.bug_class == c}
+        assert verdicts == {"inconclusive"}, f"{c} probe verdicts changed: {verdicts}"
+        assert lib.verdict_by_class()[c] == "inconclusive"
 
 
 def _probe(bug_class: str, *, verdict: str = "clean", point: str = "query:q") -> ProbeRecord:

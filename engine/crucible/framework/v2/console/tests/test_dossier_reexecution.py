@@ -28,16 +28,16 @@ _DISC = {"dimensions": ["status", "length", "lexical"]}
 
 def _ctx(mutated: dict) -> dict:
     return FindingContext.from_http_responses(
-        _BASE, mutated, bug_class="boolean_sqli", discriminator=_DISC).model_dump(mode="json")
+        _BASE, mutated, bug_class="error_based_sqli", discriminator=_DISC).model_dump(mode="json")
 
 
 def _finding(param: str, ctx: dict) -> dict:
     """A serialized AuditFinding (the shape scanner/console runs write into reverifiable.json),
     with confirmed_by/confidence taken from the REAL oracle re-fire over ``ctx``."""
-    c = confirm_finding(finding={"bug_class": "boolean_sqli"},
+    c = confirm_finding(finding={"bug_class": "error_based_sqli"},
                         context=FindingContext.model_validate(ctx))
     return {
-        "check_id": "s1", "bug_class": "boolean_sqli", "insertion_point": f"query:{param}",
+        "check_id": "s1", "bug_class": "error_based_sqli", "insertion_point": f"query:{param}",
         "param": param, "endpoint": f"http://t/?{param}=1",
         "confidence": c.confidence if c else 0.5,
         "confirmed_by": c.confirmed_by.value if c else "differential_response",

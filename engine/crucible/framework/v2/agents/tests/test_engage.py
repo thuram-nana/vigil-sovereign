@@ -453,6 +453,10 @@ def test_spine_finding_mirror_never_claims_confirmed_without_a_live_verdict():
         confidence = 0.9
         confirmed_by = "differential_response"
         rationale = "rows diverged"
+        # A built-in point check sets neither field (AuditFinding defaults both to ""),
+        # so the mirror falls back to "<bug_class> confirmed at <param>" / "High".
+        title = ""
+        severity = ""
         oracle_context = {"bug_class": "boolean_sqli"}   # a certificate is PRESENT...
     p = engage_mod._spine_finding_payload(_F(), None)     # ...but NO live grounding verdict
     assert p["verified_by_oracle"] is False and p["critique_status"] == "llm_advisory"

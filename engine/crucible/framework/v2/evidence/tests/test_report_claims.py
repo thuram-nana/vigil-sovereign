@@ -35,11 +35,11 @@ _DIVERGENT = {"status": 200,
 
 def _finding(mutated=_DIVERGENT) -> dict:
     ctx = FindingContext.from_http_responses(
-        _BASE, mutated, bug_class="boolean_sqli",
+        _BASE, mutated, bug_class="error_based_sqli",
         discriminator={"dimensions": ["status", "length", "lexical"]})
-    c = confirm_finding(finding={"bug_class": "boolean_sqli"}, context=ctx)
+    c = confirm_finding(finding={"bug_class": "error_based_sqli"}, context=ctx)
     return {
-        "check_id": "boolean-sqli", "bug_class": "boolean_sqli",
+        "check_id": "error-based-sqli", "bug_class": "error_based_sqli",
         "confirmed_by": c.confirmed_by.value if c else "differential_response",
         "confidence": c.confidence if c else 0.9,
         "oracle_context": ctx.model_dump(mode="json"),
@@ -83,7 +83,7 @@ def test_canonical_fact_claim_regrounds_and_verifies() -> None:
 
 
 def test_relabelled_fact_claim_fails_the_certificate_closed() -> None:
-    # THE ENFORCED BINDING: a boolean_sqli finding whose bound fact claim DECLARES a
+    # THE ENFORCED BINDING: a error_based_sqli finding whose bound fact claim DECLARES a
     # different class (rce) than the evidence proves must NOT verify — the class does not
     # re-ground, so claims_grounded is False and the whole certificate is not ok, EVEN
     # THOUGH the signature is valid and the oracle reproduces for the real class.
@@ -105,9 +105,9 @@ def test_deterministic_gate_does_not_certify_natural_language() -> None:
     # passes — a deterministic gate cannot read English. The load-bearing mitigation is
     # that the sanctioned builder never mints a fact claim from arbitrary prose.
     tr, signers = _trust_root()
-    f = _finding()   # boolean_sqli
+    f = _finding()   # error_based_sqli
     overclaim = ReportClaim(sentence="The attacker achieves full RCE and drains every account.",
-                            bug_class="boolean_sqli", render_as="fact")   # class MATCHES
+                            bug_class="error_based_sqli", render_as="fact")   # class MATCHES
     cert = build_certificate(f, report_claims=[overclaim], seq=0)
     signed = sign_certificate(cert, signers[:2])
     v = verify_certificate(signed, oracle_context=f["oracle_context"], trust_root=tr)
@@ -197,18 +197,18 @@ def test_claims_for_finding_labels_fact_vs_commentary() -> None:
     f = _finding()
     claims = claims_for_finding(f, commentary_prose="B might matter. So might C.")
     kinds = [(c.render_as, c.bug_class) for c in claims]
-    assert kinds[0] == ("fact", "boolean_sqli")                       # exactly one structured fact, first
-    assert kinds.count(("fact", "boolean_sqli")) == 1
-    assert ("analyst-commentary", "boolean_sqli") in kinds           # prose -> commentary
+    assert kinds[0] == ("fact", "error_based_sqli")                       # exactly one structured fact, first
+    assert kinds.count(("fact", "error_based_sqli")) == 1
+    assert ("analyst-commentary", "error_based_sqli") in kinds           # prose -> commentary
 
 
 def test_build_certificate_sorts_claims_deterministically() -> None:
     f = _finding()
     a = build_certificate(f, report_claims=[
-        ReportClaim(sentence="zeta.", bug_class="boolean_sqli"),
-        ReportClaim(sentence="alpha.", bug_class="boolean_sqli")], seq=0)
+        ReportClaim(sentence="zeta.", bug_class="error_based_sqli"),
+        ReportClaim(sentence="alpha.", bug_class="error_based_sqli")], seq=0)
     b = build_certificate(f, report_claims=[
-        ReportClaim(sentence="alpha.", bug_class="boolean_sqli"),
-        ReportClaim(sentence="zeta.", bug_class="boolean_sqli")], seq=0)
+        ReportClaim(sentence="alpha.", bug_class="error_based_sqli"),
+        ReportClaim(sentence="zeta.", bug_class="error_based_sqli")], seq=0)
     assert a.cert_digest == b.cert_digest            # order-independent canonical bytes
     assert [c.sentence for c in a.report_claims] == ["alpha.", "zeta."]

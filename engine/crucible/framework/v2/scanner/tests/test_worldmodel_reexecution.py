@@ -27,31 +27,39 @@ from framework.v2.worldmodel.models import (
     classify_provenance,
 )
 
-_BASE = {"status": 200, "body": "No results."}
-_DIVERGENT = {"status": 200, "body": "id=1 alice user\nid=2 bob admin\nid=3 carol user"}
-_DISC = {"dimensions": ["status", "length", "lexical"]}
+# The re-firing proof is a path_traversal FILE-CONTENT signature with its benign CONTROL retained —
+# an ATTRIBUTED side-effect. It used to be a boolean_sqli benign-vs-payload differential, which has
+# no attribution step and minted High FACTs against targets with no database, so it is LEAD-only now
+# (verify.verifier.DIFFERENTIAL_LEAD_ONLY_CLASSES). ``_ctx(_CONTROL_SINK)`` is the twin whose proof
+# does NOT re-fire: the signature is already in the control, so nothing is attributable.
+_SIGNATURE = "root:x:0:0:"
+_READ_SINK = "root:x:0:0:root:/root:/bin/bash\ndaemon:x:1:1:daemon:/usr/sbin:/usr/sbin/nologin"
+_CONTROL_SINK = "<p>ordinary document</p>"
+_BASE = _READ_SINK          # the "stale / no longer re-firing" control value (see _ctx)
+_DIVERGENT = _CONTROL_SINK  # the genuine control: the signature is ABSENT from it
 
 
-def _ctx(mutated: dict) -> dict:
-    return FindingContext.from_http_responses(
-        _BASE, mutated, bug_class="boolean_sqli", discriminator=_DISC).model_dump(mode="json")
+def _ctx(control: str) -> dict:
+    return FindingContext.from_side_effect(
+        _SIGNATURE, _READ_SINK, bug_class="path_traversal",
+        control_sink=control).model_dump(mode="json")
 
 
 def _finding(param: str, ctx: dict) -> AuditFinding:
     """A serialized AuditFinding whose confirmed_by/confidence come from the REAL oracle re-fire
     over ``ctx`` (so the recorded metadata matches what reverification produces)."""
-    c = confirm_finding(finding={"bug_class": "boolean_sqli"},
+    c = confirm_finding(finding={"bug_class": "path_traversal"},
                         context=FindingContext.model_validate(ctx))
     return AuditFinding(
-        check_id="s1", bug_class="boolean_sqli", insertion_point=f"query:{param}", param=param,
+        check_id="s1", bug_class="path_traversal", insertion_point=f"query:{param}", param=param,
         confidence=c.confidence if c else 0.5,
-        confirmed_by=c.confirmed_by.value if c else "differential_response",
+        confirmed_by=c.confirmed_by.value if c else "side_effect",
         oracle_context=ctx,
     )
 
 
 def _finding_node(world: WorldModel, param: str):
-    return world.get_node(f"finding:boolean_sqli:query:{param}")
+    return world.get_node(f"finding:path_traversal:query:{param}")
 
 
 def test_refiring_finding_node_keeps_oracle_provenance() -> None:
@@ -64,8 +72,8 @@ def test_refiring_finding_node_keeps_oracle_provenance() -> None:
     assert n is not None
     assert n.provenance.startswith("oracle:")
     assert n.grounding == GROUNDING_GROUNDED == "grounded"
-    assert n.attrs.get("bug_class") == "boolean_sqli"
-    assert n.attrs.get("confirmed_by") == "differential_response"
+    assert n.attrs.get("bug_class") == "path_traversal"
+    assert n.attrs.get("confirmed_by") == "side_effect"
     assert "grounding" not in n.attrs  # a fact carries no demoted marker
     # the EVIDENCES edge to its endpoint is grounded too
     ev = world.get_edge(n.id, "endpoint:good", EdgeKind.EVIDENCES)
@@ -76,8 +84,8 @@ def test_nonrefiring_finding_node_is_demoted_and_not_grounded() -> None:
     # recorded confirmed (real confirmed_by/confidence), but the retained context is NON-divergent
     # → the oracle does NOT re-fire → the node is demoted, NOT a grounded fact.
     stale = AuditFinding(
-        check_id="s1", bug_class="boolean_sqli", insertion_point="query:stale", param="stale",
-        confidence=0.9, confirmed_by="differential_response", oracle_context=_ctx(_BASE))
+        check_id="s1", bug_class="path_traversal", insertion_point="query:stale", param="stale",
+        confidence=0.9, confirmed_by="side_effect", oracle_context=_ctx(_BASE))
     report = ScanReport(target="http://t/", active_findings=[stale])
     world = WorldModel()
     populate_worldmodel(report, world, seq=1)
@@ -94,13 +102,14 @@ def test_nonrefiring_finding_node_is_demoted_and_not_grounded() -> None:
 
 
 def test_tampered_evidence_finding_is_demoted() -> None:
-    # a genuine firing context whose retained MUTATED response was altered to match the baseline
-    # (divergence removed) — the classic tampered-certificate case — must demote, never stay a fact.
+    # a genuine firing context whose retained CONTROL sink was altered to already carry the
+    # signature (attribution removed) — the classic tampered-certificate case — must demote,
+    # never stay a fact.
     ctx = _ctx(_DIVERGENT)
-    ctx["mutated"] = dict(ctx["baseline"])   # tamper: kill the divergence the oracle keyed on
+    ctx["observed_sink_control"] = ctx["observed_sink"]   # tamper: kill the attribution
     tampered = AuditFinding(
-        check_id="s1", bug_class="boolean_sqli", insertion_point="query:evil", param="evil",
-        confidence=0.9, confirmed_by="differential_response", oracle_context=ctx)
+        check_id="s1", bug_class="path_traversal", insertion_point="query:evil", param="evil",
+        confidence=0.9, confirmed_by="side_effect", oracle_context=ctx)
     world = WorldModel()
     populate_worldmodel(ScanReport(target="http://t/", active_findings=[tampered]), world, seq=1)
     n = _finding_node(world, "evil")
@@ -160,8 +169,8 @@ def test_endpoint_nodes_are_unaffected() -> None:
     # fact — recon nodes are legitimately not oracle-proven and must not be touched by the T1 gate.
     report = ScanReport(target="http://t/", active_findings=[
         _finding("good", _ctx(_DIVERGENT)),
-        AuditFinding(check_id="s1", bug_class="boolean_sqli", insertion_point="query:stale",
-                     param="stale", confidence=0.9, confirmed_by="differential_response",
+        AuditFinding(check_id="s1", bug_class="path_traversal", insertion_point="query:stale",
+                     param="stale", confidence=0.9, confirmed_by="side_effect",
                      oracle_context=_ctx(_BASE)),
     ])
     world = WorldModel()

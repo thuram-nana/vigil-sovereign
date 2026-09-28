@@ -23,12 +23,12 @@ def _confirmed_active() -> AuditFinding:
     ctx = FindingContext.from_http_responses(
         {"status": 200, "body": "No results."},
         {"status": 200, "body": "id=1 alice user\nid=2 bob admin"},
-        bug_class="boolean_sqli",
+        bug_class="error_based_sqli",
         discriminator={"dimensions": ["status", "length", "lexical"]},
     )
-    c = confirm_finding(finding={"bug_class": "boolean_sqli"}, context=ctx)
+    c = confirm_finding(finding={"bug_class": "error_based_sqli"}, context=ctx)
     return AuditFinding(
-        check_id="boolean-sqli", bug_class="boolean_sqli", insertion_point="query", param="q",
+        check_id="error-based-sqli", bug_class="error_based_sqli", insertion_point="query", param="q",
         endpoint="https://app/search", confidence=c.confidence,
         confirmed_by=c.confirmed_by.value, rationale="differential across status/length/lexical",
         oracle_context=ctx.model_dump(mode="json"),

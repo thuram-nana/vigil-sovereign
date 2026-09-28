@@ -224,9 +224,9 @@ def proof_run(console_root, tmp_path):
     base = {"status": 200, "body": "No results."}
     mutated = {"status": 200, "body": "id=1 alice user\nid=2 bob admin\nid=3 carol user"}
     ctx = FindingContext.from_http_responses(
-        base, mutated, bug_class="boolean_sqli",
+        base, mutated, bug_class="error_based_sqli",
         discriminator={"dimensions": ["status", "length", "lexical"]}).model_dump(mode="json")
-    c = confirm_finding(finding={"bug_class": "boolean_sqli"},
+    c = confirm_finding(finding={"bug_class": "error_based_sqli"},
                         context=FindingContext.model_validate(ctx))
     rd = console_root / "runs" / "20260101-000000-001"
     rd.mkdir(parents=True, exist_ok=True)
@@ -234,7 +234,7 @@ def proof_run(console_root, tmp_path):
         {"target": "http://t/", "slug": "acme", "status": "done", "started": 1_700_000_000.0}),
         encoding="utf-8")
     (rd / "reverifiable.json").write_text(json.dumps({"target": "http://t/", "active_findings": [{
-        "check_id": "s1", "bug_class": "boolean_sqli", "insertion_point": "query:id", "param": "id",
+        "check_id": "s1", "bug_class": "error_based_sqli", "insertion_point": "query:id", "param": "id",
         "endpoint": "http://t/?id=1", "confidence": c.confidence, "confirmed_by": c.confirmed_by.value,
         "oracle_context": ctx}]}), encoding="utf-8")
     return rd

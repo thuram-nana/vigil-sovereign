@@ -74,7 +74,7 @@ def isolated_engagement(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 
 def _hyp(surface: str) -> HypothesisPayload:
     return HypothesisPayload(
-        handle="H-1", surface=surface, bug_class="boolean_sqli",
+        handle="H-1", surface=surface, bug_class="error_based_sqli",
         given="x", if_action=surface, then_observation="y",
         because_model="z", refute_on="n/a", cheap_test="one curl",
     )
@@ -107,7 +107,7 @@ def _reverify(oracle_context: dict) -> bool:
     critique-agent / re-verifier will. Returns whether it confirms."""
     ctx = FindingContext.model_validate(oracle_context)
     confirmed = confirm_finding(
-        finding={"bug_class": "boolean_sqli", "title": "t", "severity": "High",
+        finding={"bug_class": "error_based_sqli", "title": "t", "severity": "High",
                  "surface": "s", "summary": "x"},
         context=ctx, verifier=OracleVerifier(),
     )
@@ -123,11 +123,12 @@ def test_differential_emits_confirming_oracle_context(isolated_engagement, https
     out = ex.execute_differential(
         _hyp("/search"), _PLAN, param="q",
         baseline_value="crucible-benign-term", probe_value="x' OR '1'='1",
+        bug_class="error_based_sqli",
     )
     ex.close()
 
     assert out.success and out.oracle_context is not None
-    assert out.finding is not None and out.finding.bug_class == "boolean_sqli"
+    assert out.finding is not None and out.finding.bug_class == "error_based_sqli"
     # the retained evidence independently re-confirms via the pure oracle
     assert _reverify(out.oracle_context)
     # exactly two probes reached the target, both through the gate (no bypass)
@@ -145,6 +146,7 @@ def test_differential_does_not_confirm_on_safe_twin(isolated_engagement, httpser
     out = ex.execute_differential(
         _hyp("/search"), _PLAN, param="q",
         baseline_value="crucible-benign-term", probe_value="x' OR '1'='1",
+        bug_class="error_based_sqli",
     )
     ex.close()
 
@@ -165,6 +167,7 @@ def test_differential_refused_when_killswitch_tripped(isolated_engagement, https
     out = ex.execute_differential(
         _hyp("/search"), _PLAN, param="q",
         baseline_value="crucible-benign-term", probe_value="x' OR '1'='1",
+        bug_class="error_based_sqli",
     )
     ex.close()
 

@@ -30,10 +30,10 @@ _DISC = {"dimensions": ["status", "length", "lexical"]}
 
 def _ctx(mutated=_DIVERGENT) -> dict:
     return FindingContext.from_http_responses(
-        _BASE, mutated, bug_class="boolean_sqli", discriminator=_DISC).model_dump(mode="json")
+        _BASE, mutated, bug_class="error_based_sqli", discriminator=_DISC).model_dump(mode="json")
 
 
-def _finding(ctx, *, param="q", ipoint="query:q", bug_class="boolean_sqli") -> dict:
+def _finding(ctx, *, param="q", ipoint="query:q", bug_class="error_based_sqli") -> dict:
     """A serialized AuditFinding, with confirmed_by/confidence taken from the REAL oracle
     re-fire so the token's claim matches what reverification produces."""
     c = confirm_finding(finding={"bug_class": bug_class}, context=FindingContext.model_validate(ctx))
@@ -64,7 +64,7 @@ def test_admit_finding_grounds_a_reproducing_live_finding() -> None:
 def test_admit_finding_demotes_a_finding_whose_proof_no_longer_reproduces() -> None:
     # the scan recorded this as active, but the retained evidence does NOT re-fire
     # (non-divergent responses) — the firewall demotes the "confirmed" to commentary.
-    f = {"check_id": "s1", "bug_class": "boolean_sqli", "insertion_point": "query:q",
+    f = {"check_id": "s1", "bug_class": "error_based_sqli", "insertion_point": "query:q",
          "param": "q", "confidence": 0.9, "confirmed_by": "differential_response",
          "oracle_context": _ctx(_BASE)}
     a = admit_finding(f, _world_with_endpoint("endpoint:q"))
@@ -72,7 +72,7 @@ def test_admit_finding_demotes_a_finding_whose_proof_no_longer_reproduces() -> N
 
 
 def test_admit_finding_with_no_retained_proof_is_ungrounded() -> None:
-    f = {"check_id": "s1", "bug_class": "boolean_sqli", "insertion_point": "query:q",
+    f = {"check_id": "s1", "bug_class": "error_based_sqli", "insertion_point": "query:q",
          "param": "q", "confidence": 0.9, "confirmed_by": "x", "oracle_context": None}
     a = admit_finding(f, _world_with_endpoint("endpoint:q"))
     assert a.verdict is VeracityVerdict.UNGROUNDED
@@ -98,7 +98,7 @@ def test_admit_finding_contradicted_when_the_world_refutes_the_surface() -> None
 def test_admit_finding_accepts_a_pydantic_auditfinding() -> None:
     # the adapter reads a real AuditFinding model, not only a dict.
     d = _finding(_ctx())
-    f = AuditFinding(check_id="s1", bug_class="boolean_sqli", insertion_point="query:q",
+    f = AuditFinding(check_id="s1", bug_class="error_based_sqli", insertion_point="query:q",
                      param="q", confidence=d["confidence"], confirmed_by=d["confirmed_by"],
                      oracle_context=d["oracle_context"])
     a = admit_finding(f, _world_with_endpoint("endpoint:q"))
@@ -107,17 +107,17 @@ def test_admit_finding_accepts_a_pydantic_auditfinding() -> None:
 
 def test_claim_from_finding_binds_subject_and_names_the_surface() -> None:
     claim = claim_from_finding(_finding(_ctx()))
-    assert claim.bug_class == "boolean_sqli"
+    assert claim.bug_class == "error_based_sqli"
     assert claim.entity_refs == ["endpoint:q"]              # the surface the graph is consulted about
-    assert len(claim.tokens) == 1 and claim.tokens[0].bug_class == "boolean_sqli"  # oracle bound to subject
+    assert len(claim.tokens) == 1 and claim.tokens[0].bug_class == "error_based_sqli"  # oracle bound to subject
 
 
 def test_admit_finding_rejects_a_bug_class_flipped_finding() -> None:
-    # a GENUINE boolean_sqli proof whose top-level bug_class was flipped to 'rce' must NOT
+    # a GENUINE error_based_sqli proof whose top-level bug_class was flipped to 'rce' must NOT
     # ground as an RCE fact — the finding-level defeat the adversarial review found. The
     # oracle re-fires only under the class the EVIDENCE proves, so reverify refuses the
     # relabelled claim at the re-execution boundary. (review fix: binding-forgery)
-    tampered = _finding(_ctx())          # a real, firing boolean_sqli oracle_context
+    tampered = _finding(_ctx())          # a real, firing error_based_sqli oracle_context
     tampered["bug_class"] = "rce"        # tamper ONLY the label, leave the proof intact
     a = admit_finding(tampered, _world_with_endpoint("endpoint:q"))
     assert a.verdict is VeracityVerdict.UNGROUNDED and not a.is_fact
