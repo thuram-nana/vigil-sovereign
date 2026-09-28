@@ -491,7 +491,11 @@ class _SleepApp(BaseHTTPRequestHandler):
         q = parse_qs(urlsplit(self.path).query, keep_blank_values=True).get("q", [""])[0]
         low = q.lower()
         if "sleep(" in low or "sleep " in low or "; sleep" in low:
-            time.sleep(0.25)
+            # RED-PEN B3b: 0.25s used to be enough because the scaled-down
+            # `injected_ms=200` drove the effect floor down to 100ms. A declared
+            # delay can now only RAISE the floor (max(250ms, 0.5 x injected)), so the
+            # fixture delays past the oracle's documented absolute floor instead.
+            time.sleep(0.6)
         body = b"ok"
         self.send_response(200)
         self.send_header("Content-Length", str(len(body)))
@@ -532,12 +536,13 @@ def test_timing_entries_confirm_on_a_delaying_endpoint(entry_id) -> None:
     # Drive the SAME TimingCheck->timing_oracle path the shipped entry uses, but
     # with a scaled-down delay/samples so the test stays fast: a statistically
     # significant, effect-floor-clearing latency shift confirms; a flat endpoint
-    # does not.
+    # does not. The scaled-down delay still has to clear the oracle's ABSOLUTE
+    # 250ms floor (RED-PEN B3b: a declared injected_ms can no longer lower it).
     entry = _by_id(entry_id)
     fast = TimingCheck(
         id=entry.id, bug_class=entry.bug_class,
         benign=entry.oracle.benign, sleep_payload=entry.oracle.sleep_payload,
-        injected_ms=200.0, samples=8,
+        injected_ms=600.0, samples=8,
     )
     with _server(_SleepApp) as base:
         tpl, point = _q_point(base)

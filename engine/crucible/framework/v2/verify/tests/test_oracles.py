@@ -42,10 +42,22 @@ def test_differential_boolean_true_vs_false_condition() -> None:
     assert sig.confidence >= 0.7
 
 
-def test_differential_time_based_latency() -> None:
+def test_differential_time_based_latency_requires_an_explicit_opt_in() -> None:
+    # AUDIT R6. ``latency``'s weight is 0.7 — EXACTLY the verifier's HIGH_CONFIDENCE
+    # floor — so while it sat in the DEFAULT dimension set, every caller that omitted
+    # a discriminator inherited a latency-ONLY confirm path over two otherwise
+    # byte-identical responses. A latency delta is a TIMING claim; the engine has a
+    # dedicated statistically-sound ``timing_oracle`` for that (paired samples, alpha,
+    # dose-response). So the dimension is still available, but only ON REQUEST.
     baseline = {"status": 200, "body": "ok", "latency_ms": 40}
     mutated = {"status": 200, "body": "ok", "latency_ms": 5040}
-    sig = differential_response_oracle(baseline, mutated)
+
+    assert not differential_response_oracle(baseline, mutated).fired
+
+    sig = differential_response_oracle(
+        baseline, mutated,
+        discriminator={"dimensions": ["latency"], "latency_threshold_ms": 1500.0},
+    )
     assert sig.fired
     assert any(d["dim"] == "latency" and d["differs"] for d in sig.observed["dimensions"])
 
