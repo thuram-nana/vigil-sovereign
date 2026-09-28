@@ -384,6 +384,7 @@ jobs:
               --ignore=integration/tests/test_conformance.py \
               --ignore=integration/tests/test_sbom.py \
               --ignore=integration/tests/test_web_redrive.py \
+              --ignore=integration/tests/test_web_liveness.py \
               --ignore=integration/tests/test_web_redrive_proof_sink.py \
               --ignore=integration/tests/test_engine_web_redrive_seam.py \
               --ignore=integration/tests/test_engine_runtime_redrive_seam.py \
@@ -450,7 +451,7 @@ jobs:
               --ignore=integration/tests/test_brain_engine.py \
               --ignore=integration/tests/test_sovereignty_governs_llm_egress.py \
               --ignore=integration/tests/test_live_executor_report_builders.py \
-              --junit-xml="${RUNNER_TEMP:-/tmp}/sovereign-junit.xml" -q
+              --junit-xml="${RUNNER_TEMP:-/tmp}/sovereign-junit.xml" -q -m "not volume"
             # The offense-process suite: framework-dependent tests run in their OWN process. The
             # scoped-executor test (WS-A) exercises the signed-scope egress guard, which resolves scope via
             # vigil_gateway.scope_source → CRUCIBLE host_matches_scope, so it belongs here (it would load
@@ -479,6 +480,18 @@ jobs:
             # importorskips `framework` OR is --ignore'd in the sovereign leg (a hard framework import) is
             # missing from this offense list — covering both ways a framework-dependent test can hide, so the
             # gap cannot silently reopen.
+            #
+            # `-m "not volume"` (on BOTH commands above and below). A `volume` test is a STATISTICAL
+            # regression — the same property as its per-PR twin, asserted over 80-300 live re-drives to
+            # bound a low-rate class. test_web_liveness.py's volume loops alone are ~25 minutes, which
+            # took this job past GitHub's 45m0s hard maximum and got it CANCELED (run 36270471752), so
+            # they run NIGHTLY instead: soak.yml's "web-liveness volume regressions (nightly)" job runs
+            # exactly `-m volume` with this same env, and FAILS on a skip.
+            # NOTHING WAS DROPPED, and that is enforced rather than promised: every volume test has an
+            # unmarked low-run twin that keeps the WIRING on the PR path, the nightly counts are
+            # UNCHANGED, and integration/tests/test_ci_volume_tests_run_nightly.py turns the build red
+            # if a volume-marked test is not covered by the nightly job or if this flag is dropped from
+            # a leg that collects one.
             VIGIL_REQUIRE_FRONTIER_CHECK=1 \
             PYTHONPATH=integration:engine/crucible:gateway python -m pytest \
               docs/tests/test_out_of_scope_is_honest.py \
@@ -486,14 +499,17 @@ jobs:
               integration/tests/test_fuzz_corpus_replay.py \
               integration/tests/test_oracle_adapter.py \
               integration/tests/test_external_tool_runner.py \
+              integration/tests/test_tls_breadth.py \
               integration/tests/test_authority_root_decouple.py \
               integration/tests/test_executor_capability_boundary.py \
               integration/tests/test_conformance.py \
               integration/tests/test_sbom.py \
               integration/tests/test_web_redrive.py \
+              integration/tests/test_web_liveness.py \
               integration/tests/test_web_redrive_proof_sink.py \
               integration/tests/test_engine_web_redrive_seam.py \
               integration/tests/test_engine_runtime_redrive_seam.py \
+              integration/tests/test_runtime_redrive_soundness.py \
               integration/tests/test_stored_xss_redrive.py \
               integration/tests/test_proto_pollution_redrive.py \
               integration/tests/test_ssi_redrive.py \
@@ -610,7 +626,7 @@ jobs:
               integration/tests/test_enh2_unique_slug.py \
               integration/tests/test_loopback_charter.py \
               integration/tests/test_engage_mutation_approval.py \
-              integration/tests/test_mesh_cicd_posture.py -q
+              integration/tests/test_mesh_cicd_posture.py -q -m "not volume"
           else
             # STRICT branch protection ⇒ a mergeable PR is up to date with main and this committed
             # monorepo path always exists; its absence means a rename/deletion — fail RED, never skip GREEN.

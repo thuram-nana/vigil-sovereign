@@ -832,13 +832,16 @@ class VigilEngine:
             full = target if "://" in target else "http://" + target
             return {"kind": "web", "url": full, "bug_class": bug_class}
 
-        # RUNTIME response-derived classes (path_traversal / reflected xss / exposure): the runner-owned
-        # runtime_redrive engine needs only the URL (it crafts the probe + runs the matching oracle).
+        # RUNTIME response-derived classes (path_traversal / reflected xss / exposure / ssi): the
+        # runner-owned runtime_redrive engine needs only the URL (it crafts the probe + runs the matching
+        # oracle). The DISPATCH set is the union — a lead-only class (path_traversal) is still a
+        # runtime-redrive class, so the spec is labelled correctly; whether the FACT seam then drives it is
+        # that seam's decision (wiring._live_runtime_redrive_fact), not this router's.
         try:
-            from .runtime_redrive import RUNTIME_FACT_CLASSES  # noqa: PLC0415 — import-clean tuple (FATAL-2)
+            from .runtime_redrive import RUNTIME_REDRIVE_CLASSES  # noqa: PLC0415 — import-clean tuple (FATAL-2)
         except Exception:  # noqa: BLE001 — module unavailable ⇒ no runtime re-drive (other paths work)
-            RUNTIME_FACT_CLASSES = ()
-        if bug_class in RUNTIME_FACT_CLASSES:
+            RUNTIME_REDRIVE_CLASSES = ()
+        if bug_class in RUNTIME_REDRIVE_CLASSES:
             full = target if "://" in target else "http://" + target
             return {"kind": "runtime", "url": full, "bug_class": bug_class}
 

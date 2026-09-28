@@ -16,6 +16,7 @@ request budget bounds the sweep so an autonomous run cannot blow up.
 
 from __future__ import annotations
 
+import threading
 from collections.abc import Callable
 from typing import Literal
 
@@ -258,11 +259,19 @@ class AuditEngine:
         # campaign (one engine per campaign); audit()'s return type is unchanged
         # and campaign reads this back after the loop (mirrors requests_sent).
         self.exercised: list[ProbeRecord] = []
+        # Guards the check-then-spend on the shared request counter (a bare ``+= 1`` is a
+        # read-modify-write, not atomic), so K concurrent senders can never each spend the
+        # same last slot of ``max_requests``. No in-tree caller drives the sweep
+        # concurrently today — the staged timing driver that did was removed — so this is
+        # DEFENSIVE: the engine's ``send`` is an injected callable a caller may share, and
+        # the guard is uncontended and free on the serial path.
+        self._send_lock = threading.Lock()
 
     def _counted_send(self, request: HttpRequest) -> dict:
-        if self.max_requests and self.requests_sent >= self.max_requests:
-            raise BudgetExceeded()
-        self.requests_sent += 1
+        with self._send_lock:
+            if self.max_requests and self.requests_sent >= self.max_requests:
+                raise BudgetExceeded()
+            self.requests_sent += 1
         return self._send(request)
 
     def _record_probe(
@@ -284,6 +293,103 @@ class AuditEngine:
             endpoint=endpoint, method=method, insertion_point=insertion_point, param=param,
             check_id=check_id, bug_class=bug_class,
             oracle_kinds_run=kinds, verdict=verdict, evidence=evidence,
+        ))
+
+    def _probe_and_adjudicate(
+        self, template: RequestTemplate, point: InsertionPoint, check: Check,
+    ) -> "tuple[object, VerificationResult | None, object] | None":
+        """Run ONE check at ONE point and adjudicate it. Returns
+        ``(ctx, result, confirmed)``, or ``None`` when this check contributes nothing
+        (no OOB receiver for a blind check / the probe errored / no evidence and no
+        adaptive fallback) — the three cases the sweep used to express with ``continue``.
+
+        Pure w.r.t. engine state apart from the request counter inside ``_counted_send``
+        and the (immutable-after-construction, therefore thread-safe) ``self.verifier``:
+        the seen-dedup, the bandit reward, the coverage record and the finding emission
+        all stay with the caller, which keeps them in canonical order."""
+        try:
+            if getattr(check, "wants_oob", False):
+                if self.oob is None:
+                    return None  # no receiver -> blind check is skipped, not guessed
+                ctx = check.probe(template, point, self._counted_send, self.oob)
+            else:
+                ctx = check.probe(template, point, self._counted_send)
+        except BudgetExceeded:
+            raise  # budget is a hard stop for the whole audit
+        except Exception:
+            # Isolate a check failure to that check — a scan must be
+            # robust to one probe erroring on a hostile response.
+            return None
+        adaptive = self.waf_adaptive and hasattr(check, "adapt")
+        if ctx is None and not adaptive:
+            return None
+
+        finding_payload = {
+            "bug_class": check.bug_class,
+            "title": f"{check.bug_class} via {point.name}",
+            "severity": "High",
+            "surface": point.id,
+            "summary": f"{check.id} probe fired an oracle at {point.name}",
+        }
+
+        def _adjudicate(c: FindingContext) -> VerificationResult:
+            return adjudicate_finding(finding_payload, c, self.verifier)
+
+        # One oracle pass; the VerificationResult carries BOTH the positive
+        # (confirmed_from_result) and the retained negative (coverage) evidence.
+        result = _adjudicate(ctx) if ctx is not None else None
+        confirmed = (
+            confirmed_from_result(result, finding_payload, self.verifier)
+            if result is not None else None
+        )
+        # WAF-adaptive fallback: the canonical payload did not fire (blocked
+        # or filtered). Synthesize a form that slips past AND fires the SAME
+        # oracle, then confirm that — precision is unchanged (a bypass that
+        # does not fire the oracle is never a finding).
+        if confirmed is None and adaptive:
+            try:
+                actx = check.adapt(template, point, self._counted_send)
+            except BudgetExceeded:
+                raise
+            except Exception:
+                actx = None
+            if actx is not None:
+                ares = _adjudicate(actx)
+                ac = confirmed_from_result(ares, finding_payload, self.verifier)
+                # Record the adaptive adjudication as the probe's outcome
+                # (it superseded the blocked canonical attempt).
+                result, ctx = ares, actx
+                if ac is not None:
+                    confirmed = ac
+        return ctx, result, confirmed
+
+    def _emit(
+        self, *, request: HttpRequest, point: InsertionPoint, check: Check,
+        ctx: object, result: "VerificationResult | None", confirmed: object,
+        findings: list[AuditFinding],
+    ) -> None:
+        """Retain the coverage evidence for a probe that adjudicated over observed data
+        (BEFORE the None-drop discards the negative branch, as it always has) and append
+        the confirmed finding. Called in CANONICAL (point-major, roster-order) order, so
+        ``exercised`` and ``findings`` are ordered identically."""
+        if result is not None:
+            self._record_probe(
+                endpoint=request.url, method=request.method, insertion_point=point.id, param=point.name,
+                check_id=check.id, bug_class=check.bug_class, result=result, ctx=ctx,
+            )
+        if confirmed is None:
+            return
+        kind = confirmed.confirmed_by
+        findings.append(AuditFinding(
+            check_id=check.id,
+            bug_class=check.bug_class,
+            insertion_point=point.id,
+            param=point.name,
+            endpoint=request.url,
+            confidence=confirmed.confidence,
+            confirmed_by=kind.value if hasattr(kind, "value") else str(kind),
+            rationale=confirmed.rationale,
+            oracle_context=_context_dump(ctx),
         ))
 
     def audit(
@@ -347,6 +453,42 @@ class AuditEngine:
                         rationale=confirmed.rationale,
                         oracle_context=_context_dump(ctx),
                     ))
+            # W7 — DO NOT re-attempt a concurrent A/B timing sweep here. It was built,
+            # measured and REMOVED; the note is the whole finding, so nobody pays for it
+            # twice.
+            #
+            # A timing probe alternates base, treat, base, treat …, so overlapping N
+            # points puts every worker in the SAME half-cycle: they PHASE-LOCK. Over a
+            # CAPACITY-BOUNDED origin — a worker pool, a DB pool, PHP-FPM children, a GIL,
+            # i.e. every real web app — that self-inflicted queueing makes the origin serve
+            # N cheap requests during the baseline window and N expensive ones during the
+            # treatment window, and the observed shift QUANTISES into integer multiples of
+            # ~2x the delay. Measured on a true +300 ms channel the concurrent pass
+            # reported anywhere from -3120 ms to +3745 ms.
+            #
+            # Both halves of the trade fail, and they fail on the same precondition:
+            #   * PRECISION — the oracle's rank-sum test is ONE-SIDED, so it records only
+            #     the positive mode. An origin whose service time merely scales with the
+            #     payload's LENGTH (no conditional delay at all) manufactured confirmed
+            #     timing FACTs at 10/60 point-runs. Re-measuring every FLAGGED point
+            #     serially does fix this branch.
+            #   * RECALL — and this one cannot be fixed the same way, because a point that
+            #     is NOT flagged is never re-measured. 33-67% of real conditional delays
+            #     were lost across 2/3/4/8/12/24 workers; 50% lost at 2 workers over 12
+            #     points (the smallest possible opt-in is the WORST case), and 50% lost at
+            #     the shipped 3 s / injected_ms=3000 regime. Worse than silent: a lost
+            #     point still emits a ProbeRecord with verdict ``clean``, which this module
+            #     defines as exercised-and-provably-clean — a fact-strength negative
+            #     certifying a vulnerable surface. A two-sided |shift| >= floor guard
+            #     recovers 22 of 26 but then re-measures 92% of all points; negative-only
+            #     recovers 20 of 26. The bimodality is the entire distribution, not a tail.
+            #   * AND THERE IS NO WIN TO TRADE. At capacity 1 the concurrent sweep ran
+            #     33-66% SLOWER than serial (the origin serialises anyway, then flagged
+            #     points pay a second sequence); at capacity 8 it was still 17% slower. The
+            #     ~10x speedup only ever appeared on an UNBOUNDED origin — which is exactly
+            #     the shape where there is no queueing and therefore no defect to begin
+            #     with. The feature helps only where it is harmless and harms only where it
+            #     is useless.
             for point in points:
                 point_checks = selector(point, checks) if selector is not None else checks
                 if self.bandit is not None:
@@ -359,87 +501,20 @@ class AuditEngine:
                     key = (check.bug_class, point.id)
                     if key in seen:
                         continue
-                    try:
-                        if getattr(check, "wants_oob", False):
-                            if self.oob is None:
-                                continue  # no receiver -> blind check is skipped, not guessed
-                            ctx = check.probe(template, point, self._counted_send, self.oob)
-                        else:
-                            ctx = check.probe(template, point, self._counted_send)
-                    except BudgetExceeded:
-                        raise  # budget is a hard stop for the whole audit
-                    except Exception:
-                        # Isolate a check failure to that check — a scan must be
-                        # robust to one probe erroring on a hostile response.
+                    outcome = self._probe_and_adjudicate(template, point, check)
+                    if outcome is None:
                         continue
-                    adaptive = self.waf_adaptive and hasattr(check, "adapt")
-                    if ctx is None and not adaptive:
-                        continue
-
-                    finding_payload = {
-                        "bug_class": check.bug_class,
-                        "title": f"{check.bug_class} via {point.name}",
-                        "severity": "High",
-                        "surface": point.id,
-                        "summary": f"{check.id} probe fired an oracle at {point.name}",
-                    }
-
-                    def _adjudicate(c: FindingContext) -> VerificationResult:
-                        return adjudicate_finding(finding_payload, c, self.verifier)
-
-                    # One oracle pass; the VerificationResult carries BOTH the positive
-                    # (confirmed_from_result) and the retained negative (coverage) evidence.
-                    result = _adjudicate(ctx) if ctx is not None else None
-                    confirmed = (
-                        confirmed_from_result(result, finding_payload, self.verifier)
-                        if result is not None else None
-                    )
-                    # WAF-adaptive fallback: the canonical payload did not fire (blocked
-                    # or filtered). Synthesize a form that slips past AND fires the SAME
-                    # oracle, then confirm that — precision is unchanged (a bypass that
-                    # does not fire the oracle is never a finding).
-                    if confirmed is None and adaptive:
-                        try:
-                            actx = check.adapt(template, point, self._counted_send)
-                        except BudgetExceeded:
-                            raise
-                        except Exception:
-                            actx = None
-                        if actx is not None:
-                            ares = _adjudicate(actx)
-                            ac = confirmed_from_result(ares, finding_payload, self.verifier)
-                            # Record the adaptive adjudication as the probe's outcome
-                            # (it superseded the blocked canonical attempt).
-                            result, ctx = ares, actx
-                            if ac is not None:
-                                confirmed = ac
+                    ctx, result, confirmed = outcome
                     # reward the bandit on every probe that actually ran: a fired
                     # oracle is a hit, an exhausted probe is a miss.
                     if self.bandit is not None:
                         self.bandit.update(self.bandit_context, check.bug_class, reward=confirmed is not None)
-                    # Retain the coverage evidence for every probe that actually
-                    # adjudicated over observed data (result is not None) — BEFORE the
-                    # None-drop below discards the negative branch as it always has.
-                    if result is not None:
-                        self._record_probe(
-                            endpoint=request.url, method=request.method, insertion_point=point.id, param=point.name,
-                            check_id=check.id, bug_class=check.bug_class, result=result, ctx=ctx,
-                        )
-                    if confirmed is None:
-                        continue
-                    seen.add(key)
-                    kind = confirmed.confirmed_by
-                    findings.append(AuditFinding(
-                        check_id=check.id,
-                        bug_class=check.bug_class,
-                        insertion_point=point.id,
-                        param=point.name,
-                        endpoint=request.url,
-                        confidence=confirmed.confidence,
-                        confirmed_by=kind.value if hasattr(kind, "value") else str(kind),
-                        rationale=confirmed.rationale,
-                        oracle_context=_context_dump(ctx),
-                    ))
+                    if confirmed is not None:
+                        seen.add(key)
+                    self._emit(
+                        request=request, point=point, check=check, ctx=ctx, result=result,
+                        confirmed=confirmed, findings=findings,
+                    )
         except BudgetExceeded:
             pass
         return findings
