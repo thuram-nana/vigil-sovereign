@@ -1310,7 +1310,7 @@
       "id": "W16-STD-8b",
       "title": "Deliberate refusals hold: no evasion/C2/persistence/lateral-movement capability in first-party code",
       "claim": "VIGIL ships no detection-evasion, C2/persistence, lateral-movement, or credential-theft execution capability in its own first-party code, and a capability-absence test fails the build if such a capability is added.",
-      "source": "docs/DELIBERATE-REFUSALS.md:317",
+      "source": "docs/DELIBERATE-REFUSALS.md:333",
       "enforced_by": {
         "file": "integration/tests/test_deliberate_refusals.py",
         "symbol": "scan_tree_for_offense_capability"
@@ -1332,7 +1332,7 @@
       "id": "W16-STD-8",
       "title": "The rejected JWT embedded-key (jwk/x5c) forgery oracle stays rejected",
       "claim": "The JWT embedded-key (jwk/x5c) forgery oracle was built and rejected in review as unsound; jwt_forgery_oracle deliberately does not fire on a token whose own embedded key verifies it, and a regression test keeps that refusal true.",
-      "source": "docs/DELIBERATE-REFUSALS.md:327",
+      "source": "docs/DELIBERATE-REFUSALS.md:343",
       "enforced_by": {
         "file": "engine/crucible/framework/v2/verify/oracles.py",
         "symbol": "jwt_forgery_oracle"
@@ -1353,7 +1353,7 @@
       "id": "W16-STD-5",
       "title": "Client-side posture-weakness oracles (clickjacking/CSRF/postMessage) prove a missing defense, not an achieved-state exploit",
       "claim": "The three client-side posture-weakness oracles (clickjacking, CSRF, postMessage) each prove a MISSING or WEAK client-side defense from a retained artifact alone — never an achieved-state exploit — so the FP-prone achieved-state clickjacking oracle stays refused, and per-class negative-control tests keep each posture oracle sound (a page/handler/endpoint that HAS the defense is not confirmed; one that LACKS it is).",
-      "source": "docs/DELIBERATE-REFUSALS.md:335",
+      "source": "docs/DELIBERATE-REFUSALS.md:351",
       "enforced_by": {
         "file": "engine/crucible/framework/v2/verify/oracles.py",
         "symbol": "clickjacking_posture_oracle"
