@@ -2,12 +2,17 @@
 TRANSPORT handshake rather than an HTTP response body. A Strix LEAD becomes an oracle-confirmed FACT only
 because VIGIL re-fires its OWN gated probe; the report supplies the host:port (and the class) and nothing else.
 
-  * request_smuggling (CWE-444) — ``live.smuggling_redrive`` / ``smuggling_desync_oracle``, admitted to the
-    FACT-capable ``request_smuggling.differential_desync`` branch. VIGIL's unique per-probe canary must be
-    echoed in ITS OWN second response on the framing-conflict connection AND absent from an identical
-    well-formed control connection. The named false positives each get a real fixture and must stay LEADs:
-    a timing/hang origin, a bare mangled-method status differential, and a SHARED-POOL desync whose leak
-    lands on a co-tenant's connection rather than VIGIL's own second request.
+  * request_smuggling (CWE-444) — ``live.smuggling_redrive`` / ``smuggling_desync_oracle`` over the
+    ``request_smuggling.differential_desync`` branch, which #863 soundly DEMOTED to ``fact_capable: false``:
+    a single-connection canary differential is ONE parser, not two disagreeing across a trust boundary. The
+    branch declares the precondition ``second_parser_observation_on_an_unpipelined_connection``, which a
+    single-connection capture can never satisfy, so admission returns INCONCLUSIVE and the finding STAYS A
+    LEAD — the re-drive still RUNS end-to-end (VIGIL's unique per-probe canary echoed in ITS OWN second
+    response on the framing-conflict connection AND absent from an identical well-formed control connection)
+    and retains its differential, but it NEVER mints a CWE-444 FACT and is never re-armed to one. The named
+    false positives each get a real fixture and must stay non-firing: a timing/hang origin, a bare
+    mangled-method status differential, and a SHARED-POOL desync whose leak lands on a co-tenant's connection
+    rather than VIGIL's own second request.
   * service_reachable / weak_tls / weak_crypto_artifact — ``live.transport_redrive``, which re-authorises
     the reported host:port through the charter/scope gate and then performs VIGIL's OWN bounded
     ``capture_handshake`` / ``capture_tls_handshake``, admitting to the VIGIL-OWNED FACT-capable branches
@@ -122,14 +127,20 @@ def test_the_two_new_arms_are_on_the_rail_and_the_sink_screens_them_in():
 def test_the_strix_producer_branches_stay_lead_only():
     """S2 mints on the VIGIL-OWNED branches over VIGIL's OWN capture. The Strix producer branches describe a
     report VIGIL did not re-drive and must NEVER become FACT-capable — flipping them would let a producer's
-    narrative mint."""
+    narrative mint. The GUARD must also hold for request_smuggling.differential_desync: #863 soundly demoted
+    it to fact_capable:false (a single-connection differential is ONE parser, not two), so the smuggling arm
+    stays a LEAD and must never be re-armed to a FACT."""
     for producer in ("strix.service_reachability", "strix.tls_negotiation"):
         b = _branch(producer)
         assert b["fact_capable"] is False, f"{producer} must stay LEAD-only"
         assert b["clean_capable"] is False, f"{producer} must never clear on the producer's say-so"
-    # ... while the VIGIL-owned twins this slice routes INTO are the FACT-capable ones.
+    # request_smuggling.differential_desync is LEAD-only and STAYS retired (#863) — never re-armed here.
+    smug = _branch("request_smuggling.differential_desync")
+    assert smug["fact_capable"] is False, "request_smuggling.differential_desync must stay LEAD-only (#863)"
+    assert smug["clean_capable"] is False, "request_smuggling.differential_desync may never assert absence"
+    # ... while the VIGIL-owned TRANSPORT twins this slice routes INTO are the FACT-capable ones.
     for owned in ("service_reachability.tcp_handshake", "tls_weakness.tls_handshake",
-                  "weak_crypto.cert_signature_algorithm", "request_smuggling.differential_desync"):
+                  "weak_crypto.cert_signature_algorithm"):
         assert _branch(owned)["fact_capable"] is True
 
 
@@ -560,31 +571,52 @@ def test_a_dead_tls_port_mints_nothing(monkeypatch, tmp_path):
 # request smuggling — the rail arm over the planted desync fixture, and the named FALSE POSITIVES
 # =======================================================================================================
 
-def test_the_smuggling_arm_mints_a_fact_against_the_planted_desync(monkeypatch, tmp_path):
+def test_the_smuggling_arm_stays_a_lead_against_the_planted_desync(monkeypatch, tmp_path):
     """The Strix report says only "request smuggling, here". VIGIL drives its OWN gated raw-socket canary
-    differential and mints only because ITS OWN second response on the conflict connection echoed the canary
-    while the well-formed control's did not."""
+    differential end-to-end against the planted fixture — ITS OWN second response on the conflict connection
+    echoes the canary and the well-formed control's does not, so the oracle fires over the retained bytes.
+    But request_smuggling.differential_desync is fact_capable:false and declares the precondition
+    ``second_parser_observation_on_an_unpipelined_connection``, which a single-connection capture can NEVER
+    satisfy (a genuine CWE-444 desync needs a SECOND parser on a connection VIGIL did not pipeline the prefix
+    onto — #863). So admission returns INCONCLUSIVE and the finding STAYS A LEAD: no CWE-444 FACT is minted,
+    and the arm is never re-armed to one. This asserts the arm is REACHED, DRIVES the re-drive, and retains
+    its differential — it must not silently become a no-op."""
     from framework.v2.eval.benchmark_app import serve_smuggling_desync
     _grant_active_recon(monkeypatch)
     _charter(tmp_path, "127.0.0.1")
-    signers, tr = _signers_and_trust()
+    signers, _tr = _signers_and_trust()
     with serve_smuggling_desync() as url:
         mr = _mint(tmp_path, signers)({"id": "smug-1", "bug_class": "request_smuggling", "endpoint": url})
-    assert mr is not None and mr.is_fact, f"expected a desync FACT; got {mr}"
+    # the arm was REACHED and returned a result (not None), but it is NEVER a FACT — it stays a LEAD.
+    assert mr is not None and mr.is_fact is False, f"the smuggling arm must stay a LEAD, never a FACT; got {mr}"
     res = mr.result
-    assert res.n_facts == 1, res.admissions
-    fact = res.facts[0]
-    _assert_reverifies_and_rejects_tamper(fact, res.contexts[fact.finding_ref], tr, tmp_path)
+    assert res.n_facts == 0 and not res.facts, res.admissions
+    # the re-drive actually RAN and was adjudicated (not a no-op): admissions exist, all INCONCLUSIVE, each
+    # naming the second-parser precondition the single-connection differential can never satisfy.
+    assert res.admissions, "the re-drive must have run and been adjudicated"
+    assert all(v == "INCONCLUSIVE" for _b, v, _r in res.admissions), res.admissions
+    assert all("second_parser_observation_on_an_unpipelined_connection" in r
+               for _b, _v, r in res.admissions), res.admissions
+    # the retained differential IS carried on the finding for the operator: canary + both legs per technique.
+    assert res.contexts, "the differential must be retained on the finding"
+    for ctx in res.contexts.values():
+        sd = ctx.get("smuggling_desync") or {}
+        assert sd.get("canary") and sd.get("technique") and "conflict" in sd and "control" in sd, sd
 
 
 def test_the_smuggling_arm_is_reached_by_a_bare_cwe_444_report(monkeypatch, tmp_path):
+    """A bare CWE-444 report (no bug_class token) still REACHES the arm and DRIVES the gated re-drive; the
+    outcome stays a LEAD (INCONCLUSIVE admission over the fact_capable:false branch), never a FACT."""
     from framework.v2.eval.benchmark_app import serve_smuggling_desync
     _grant_active_recon(monkeypatch)
     _charter(tmp_path, "127.0.0.1")
     signers, _tr = _signers_and_trust()
     with serve_smuggling_desync() as url:
         mr = _mint(tmp_path, signers)({"id": "smug-cwe", "cwe": "CWE-444", "endpoint": url})
-    assert mr is not None and mr.is_fact
+    assert mr is not None and mr.is_fact is False
+    assert mr.result.n_facts == 0
+    assert mr.result.admissions, "the bare CWE-444 report must reach the arm and drive the re-drive"
+    assert all(v == "INCONCLUSIVE" for _b, v, _r in mr.result.admissions), mr.result.admissions
 
 
 def test_the_smuggling_arm_never_flags_the_benign_or_reflecting_twin(monkeypatch, tmp_path):
@@ -1135,14 +1167,20 @@ def test_the_smuggling_site_enforces_the_same_floor(monkeypatch, tmp_path, label
 
 def test_the_smuggling_site_still_drives_an_authorized_loopback_origin(monkeypatch, tmp_path):
     """The over-correction control for the smuggling site: the planted desync fixture on loopback must still
-    mint, so the floor did not turn a working mode into a dead path."""
+    be DRIVEN end-to-end, so the floor did not turn a working mode into a dead/refused path. The re-drive runs
+    and is adjudicated INCONCLUSIVE (the finding stays a LEAD, never a FACT — #863)."""
     from framework.v2.eval.benchmark_app import serve_smuggling_desync
     _grant_active_recon(monkeypatch)
     _charter(tmp_path, "127.0.0.1")
     signers, _tr = _signers_and_trust()
     with serve_smuggling_desync() as url:
         res = _drive_smuggling(signers, url)
-    assert res.refused is False and res.n_facts == 1, (res.notes, res.admissions)
+    # not refused (the floor let the authorized loopback origin through) and the burst actually ran ...
+    assert res.refused is False, (res.notes, res.admissions)
+    assert res.admissions, "the re-drive must have run and been adjudicated (not refused/dead)"
+    # ... but it stays a LEAD: no FACT, all admissions INCONCLUSIVE on the single-connection differential.
+    assert res.n_facts == 0, res.admissions
+    assert all(v == "INCONCLUSIVE" for _b, v, _r in res.admissions), res.admissions
 
 
 def test_a_charter_scoped_rfc1918_origin_reaches_the_smuggling_burst(monkeypatch, tmp_path):
@@ -1724,17 +1762,27 @@ def test_the_persisted_record_stamps_the_PROVEN_class_not_the_claimed_one(monkey
 
 
 def test_the_smuggling_branch_does_not_claim_a_mechanism_the_differential_cannot_show():
-    """FINDING-3. A WAF-style origin that REJECTS the ambiguous framing but echoes the offending request
-    bytes in a connection-scoped diagnostic on the SECOND response produces exactly the same canary
-    differential as a genuine back-end desync. The fire is sound as a conflict-attributable leak, but the
-    branch may not assert the MECHANISM it cannot discriminate."""
+    """FINDING-3 / #863. A single-connection canary differential cannot discriminate a genuine
+    front-end/back-end desync (TWO parsers disagreeing across a trust boundary) from a benign single origin
+    that merely honours TE over CL and pipelines the remainder (ONE parser). The branch is therefore an
+    UNCONFIRMED LEAD, and its registry claim must be exactly main's demoted (sound) text — it may NOT assert
+    the back-end-desync MECHANISM the differential cannot establish (the over-claim S2's own former
+    blocking_work flagged)."""
     b = _branch("request_smuggling.differential_desync")
     text = f"{b['evidence']}\n{b['limitation']}"
-    assert "CONFLICT-ATTRIBUTABLE LEAK OF PRIOR-REQUEST BYTES" in b["evidence"], b["evidence"]
-    assert "MECHANISM IS NOT DISCRIMINATED" in b["limitation"], b["limitation"]
-    # the mechanism may appear ONLY as a named, non-discriminated possibility — never as what a fire proves
-    assert "A fire proves the back-end treated the smuggled prefix" not in text
-    assert "conflict-leg-only echo" in text
+    # the SOUND LEAD claim (main's demoted evidence/limitation text)
+    assert b["fact_capable"] is False, b
+    assert "UNCONFIRMED LEAD" in b["evidence"], b["evidence"]
+    assert "not a CWE-444 fact" in b["evidence"], b["evidence"]
+    assert b["limitation"].startswith("LEAD-ONLY"), b["limitation"]
+    # the mechanism (two parsers disagreeing) appears ONLY as what the differential CANNOT show ...
+    assert "TWO PARSERS DISAGREEING" in b["evidence"], b["evidence"]
+    assert "one parser" in text, text
+    # ... any "treated the smuggled prefix" statement is scoped to the SAME single connection (one parser),
+    # never the FACT-era unscoped claim that a fire proves a back-end desync (a mechanism).
+    assert "ON THAT CONNECTION" in b["evidence"], b["evidence"]
+    assert "back-end treated the smuggled prefix" not in text, text
+    assert "ACHIEVED-DESYNC FACT" not in text, text
 
 
 @pytest.mark.parametrize("branch_id", ["service_reachability.tcp_handshake", "tls_weakness.tls_handshake"])
