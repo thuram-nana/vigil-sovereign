@@ -318,6 +318,76 @@ def test_audit_package_unseals_and_stays_verifiable(tmp_path):
     assert verify_certificate(sc, oracle_context=ctx, trust_root=tr).ok is True   # BINDING + reproduction hold
 
 
+def _trust_and_signers():
+    from vigil_core import AuthorizerKey, TrustRoot, generate_keypair
+    kp = generate_keypair()
+    tr = TrustRoot(threshold=1, authorizers=[
+        AuthorizerKey(key_id="gov0", name="gov0", public_key_b64=kp.public_key_b64)])
+    return tr, kp
+
+
+def test_evidence_certify_over_a_sealed_run_reproduces(tmp_path):
+    """`evidence certify --report <sealed proofs/reverifiable.json>` unseals in-engagement so the minted
+    certificate binds the PLAINTEXT context an external verifier REPRODUCES (bound AND reproduced)."""
+    from framework.v2.evidence import cli as ecli
+    from framework.v2.evidence.certify import verify_certificate
+    from framework.v2.evidence.models import SignedEvidence
+    from framework.v2.common.context_sealing import unseal_oracle_context
+    from vigil_integration.proof.run import read_reverifiable
+    run_dir, rv = _mint_errsig_reverifiable(tmp_path)
+    entry = read_reverifiable(run_dir).get("active_findings", [])[0]
+    assert str(entry["oracle_context"]["error_observed"]).startswith("evs1:")   # sealed input
+    tr, kp = _trust_and_signers()
+
+    out = tmp_path / "certdir"
+    rc = ecli.main(["certify", "--report", str(rv), "--slug", "acme", "--out", str(out),
+                    "--signer", f"gov0:{kp.private_key_b64}"])
+    assert rc == 0
+
+    bundle = json.loads((out / "evidence-bundle.json").read_text(encoding="utf-8"))
+    sc = SignedEvidence.model_validate(bundle["certificates"][0])
+    # the cert binds the plaintext (unsealed) context -> BINDING + REPRODUCTION both hold.
+    plaintext = unseal_oracle_context(entry["oracle_context"], entry["sealed_engagement"])
+    assert verify_certificate(sc, oracle_context=plaintext, trust_root=tr).ok is True
+    # ...and it does NOT reproduce over the SEALED context (that is exactly the bug the unseal prevents).
+    assert verify_certificate(sc, oracle_context=entry["oracle_context"], trust_root=tr).reproduced is False
+
+
+def test_evidence_pcf_export_over_a_sealed_run_verifies_offline(tmp_path):
+    """certify -> pcf-export -> pcf-verify over a SEALED run: the exported PCF carries the unsealed context,
+    so the offline PCF verifier REPRODUCES it (exit 0)."""
+    from framework.v2.evidence import cli as ecli
+    run_dir, rv = _mint_errsig_reverifiable(tmp_path)
+    tr, kp = _trust_and_signers()
+    (tmp_path / "tr.json").write_text(tr.model_dump_json(), encoding="utf-8")
+    out = tmp_path / "certdir"
+    assert ecli.main(["certify", "--report", str(rv), "--slug", "acme", "--out", str(out),
+                      "--signer", f"gov0:{kp.private_key_b64}"]) == 0
+    pcf = tmp_path / "pcf.json"
+    assert ecli.main(["pcf-export", "--report", str(rv), "--bundle", str(out), "--out", str(pcf)]) == 0
+    # the offline PCF verifier runs the five fail-closed steps INCLUDING reproduction.
+    assert ecli.main(["pcf-verify", "--pcf", str(pcf), "--trust-root", str(tmp_path / "tr.json")]) == 0
+
+
+def test_evidence_certify_and_pcf_export_fail_closed_after_cryptoshred(tmp_path):
+    """After the DEK is crypto-shredded neither certify nor pcf-export may mint a bound-but-non-reproducible
+    certificate over the now-unrecoverable sealed context — both fail closed (exit non-zero)."""
+    from framework.v2.common.crypto_shred import EvidenceKeyring
+    from framework.v2.evidence import cli as ecli
+    run_dir, rv = _mint_errsig_reverifiable(tmp_path)
+    tr, kp = _trust_and_signers()
+    out = tmp_path / "certdir"
+    # a bundle built while the DEK still existed (for the pcf-export leg to have certs to project).
+    assert ecli.main(["certify", "--report", str(rv), "--slug", "acme", "--out", str(out),
+                      "--signer", f"gov0:{kp.private_key_b64}"]) == 0
+
+    EvidenceKeyring().shred("acme")
+    assert ecli.main(["certify", "--report", str(rv), "--slug", "acme", "--out", str(tmp_path / "c2"),
+                      "--signer", f"gov0:{kp.private_key_b64}"]) != 0, "certify must fail closed after shred"
+    assert ecli.main(["pcf-export", "--report", str(rv), "--bundle", str(out),
+                      "--out", str(tmp_path / "pcf2.json")]) != 0, "pcf-export must fail closed after shred"
+
+
 # ===================================================================================================
 # byte-identity: a NON-secret context is never sealed and never stamped
 # ===================================================================================================
