@@ -175,6 +175,11 @@ def _executor(httpserver: HTTPServer, **kwargs) -> HttpExecutor:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.real_rate_floor
+# real_rate_floor: this test IS the rate-floor guard. It reads floor = _RATE_PROFILES["TEST"][0] and
+# asserts `floor > 0` outright, then measures that concurrent arrivals are spaced by >= floor*0.85. Under
+# the zero-floor override the first assertion fails and the spacing measurement is meaningless — it must
+# run against the genuine floor.
 def test_rate_floor_is_honoured_with_concurrent_callers(isolated_engagement):
     """N concurrent gated fetches must still leave >= the posture floor between the
     requests ARRIVING AT THE ORIGIN.
@@ -221,6 +226,11 @@ def test_rate_floor_is_honoured_with_concurrent_callers(isolated_engagement):
         f"no overlap: {elapsed:.2f}s is the serial cost, not the interleaved one")
 
 
+@pytest.mark.real_rate_floor
+# real_rate_floor: asserts elapsed >= 3*body_delay + 2*floor for a serial run, reading the real TEST floor.
+# Under the zero-floor override the `2*floor` term vanishes and the test would SILENTLY PASS as a tautology
+# on the body delays alone — no longer testing that the serial path is spaced by the floor at all. The
+# single worst silent-behaviour-change case in the tree, so it must keep the genuine floor.
 def test_serial_spacing_is_unchanged(isolated_engagement):
     """The serial path still spaces from the previous request's COMPLETION — the
     start-instant reservation added for concurrency is superseded by the completion
@@ -242,6 +252,11 @@ def test_serial_spacing_is_unchanged(isolated_engagement):
     assert elapsed >= lower * 0.9, f"serial spacing loosened: {elapsed:.3f}s < {lower:.3f}s"
 
 
+@pytest.mark.real_rate_floor
+# real_rate_floor: the assertion is `elapsed < floor` (8 dry-run actions must cost less than one floor).
+# With the zero-floor override floor becomes 0.0 and `elapsed < 0.0` is impossible → the test would FAIL;
+# and its premise (a dry run does NOT pay the floor that a real run would) is only meaningful when the
+# floor is nonzero. Needs the genuine floor.
 def test_a_dry_run_does_not_pay_the_rate_floor(isolated_engagement):
     """A dry run puts nothing on the wire, so it must not be spaced by the posture floor.
 

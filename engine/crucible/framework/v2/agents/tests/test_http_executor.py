@@ -409,6 +409,10 @@ def test_request_budget_exhaustion_halts_cleanly(
     assert ex.stats()["budget_refusals"] == 1
 
 
+@pytest.mark.real_rate_floor
+# real_rate_floor: runs under the AUDIT posture and asserts elapsed >= 0.9 s (the real 1.0 s AUDIT floor
+# between two requests). This is why the override must also detect the marker before zeroing AUDIT: with
+# AUDIT zeroed the two loopback requests complete in ~0 s and the assertion fails. Genuine floor needed.
 def test_rate_limit_enforced_for_audit_posture(
     isolated_engagement, httpserver: HTTPServer, hyp_get, plan_one,
 ):
@@ -429,6 +433,12 @@ def test_rate_limit_enforced_for_audit_posture(
     assert elapsed >= 0.9, f"AUDIT rate limit didn't kick in (elapsed={elapsed:.2f}s)"
 
 
+@pytest.mark.real_rate_floor
+# real_rate_floor: the claim is that JITTER is the measurable difference — it times a TEST run (real 0.2 s
+# floor, NO jitter) against an EMULATE run it sets to (0.2, 0.5) and asserts emul_elapsed > test_elapsed.
+# If the override zeroed the TEST floor, the TEST run would drop to ~0 s and the comparison would hold on
+# the floor DIFFERENCE alone (0.2 vs 0.0) even with zero jitter — silently no longer isolating jitter.
+# Also does its own save/restore of _RATE_PROFILES["EMULATE"], which must see the real (5.0, 3.0) original.
 def test_emulate_jitters_measurably_more_than_test(
     isolated_engagement, httpserver: HTTPServer, hyp_get, plan_one,
 ):
