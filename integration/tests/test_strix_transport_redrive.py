@@ -367,6 +367,16 @@ def _tls_endpoint(certfile: str, *, version=None):
     if version is not None:
         sctx.minimum_version = version
         sctx.maximum_version = version
+    # This fixture DELIBERATELY hosts weak crypto (undersized leaf keys, a deprecated protocol) so that
+    # VIGIL can retrieve and detect it. A stricter OpenSSL (SECLEVEL>=2 on the CI runners) refuses to even
+    # LOAD an undersized key here — load_cert_chain raises EE_KEY_TOO_SMALL at context-manager entry, before
+    # the _tls_negotiable / _force_negotiation fallback below can run. Lower the SERVER context's security
+    # level so the planted weakness can be served; this relaxes ONLY the fixture endpoint. Every layer that
+    # DECIDES anything — the standard client used by _tls_negotiable, VIGIL's own pinned connector, the gate
+    # chain, the egress floor, capture_tls_handshake, the deterministic oracle, admit, the signing and the
+    # offline re-verification — stays at full strength, so a strict host still routes through _force_negotiation.
+    with contextlib.suppress(ssl.SSLError):
+        sctx.set_ciphers("DEFAULT:@SECLEVEL=0")
     sctx.load_cert_chain(certfile)
 
     class _H(socketserver.BaseRequestHandler):
