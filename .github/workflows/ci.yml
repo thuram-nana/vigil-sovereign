@@ -382,6 +382,7 @@ jobs:
               --ignore=integration/tests/test_external_tool_runner.py \
               --ignore=integration/tests/test_authority_root_decouple.py \
               --ignore=integration/tests/test_conformance.py \
+              --ignore=integration/tests/test_reverifiable_secret_sealing.py \
               --ignore=integration/tests/test_sbom.py \
               --ignore=integration/tests/test_web_redrive.py \
               --ignore=integration/tests/test_web_liveness.py \
@@ -504,6 +505,7 @@ jobs:
               integration/tests/test_authority_root_decouple.py \
               integration/tests/test_executor_capability_boundary.py \
               integration/tests/test_conformance.py \
+              integration/tests/test_reverifiable_secret_sealing.py \
               integration/tests/test_sbom.py \
               integration/tests/test_web_redrive.py \
               integration/tests/test_web_liveness.py \
