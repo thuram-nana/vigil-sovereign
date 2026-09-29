@@ -1204,6 +1204,12 @@ def coverage_data(run_id: str) -> dict[str, Any]:
         "fingerprint": doc.get("fingerprint", []),
         "discovered_endpoints": doc.get("discovered_endpoints", []),
         "summary": doc.get("summary", {}),
+        # The BOUNDED coverage verdict (scanner/report.py:303 -> ScanReport.coverage_bounds()): what an
+        # absence of findings actually PROVES (verdict_by_class rolled up; clean_is_corpus_wide, the
+        # inconclusive classes). Pass it straight through so a console/CI consumer can tell a default
+        # (library-off) CLEAN from a corpus-wide negative. None for a fallback doc (progress/spine) that
+        # carries no rendered report — no new computation is done here.
+        "coverage_verdict": doc.get("coverage_verdict"),
         "passive": [f for f in findings if f.get("kind") == "passive"],
         "dom_xss": [f for f in findings if f.get("kind") == "dom_xss_candidate"],
     }
