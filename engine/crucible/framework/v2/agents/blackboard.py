@@ -23,8 +23,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
+from ..common import crypto_shred
 from ..common import logging as v2log
 from ..common import paths
+from ..common.crypto_shred import EvidenceKeyring
 from ..common.errors import CrucibleError
 from .models import (
     ALL_EVENT_KINDS,
@@ -91,8 +93,14 @@ class BlackboardEventRow:
 class Blackboard:
     """Append-only event log for an engagement."""
 
-    def __init__(self, *, db_path: Path | None = None) -> None:
+    def __init__(self, *, db_path: Path | None = None,
+                 keyring: EvidenceKeyring | None = None) -> None:
         self.path = db_path or blackboard_path()
+        # W16-8 seal-at-capture DEK store. Lazily constructed on first seal/reveal so opening a
+        # blackboard for a read-only tail never touches the keystore. Injectable for tests. The
+        # DEK lives in paths.evidence_keys_dir() — OUTSIDE this append-only spine — so a crypto-shred
+        # can destroy it without touching a spine row.
+        self._keyring = keyring
         paths.secure_dir(self.path.parent)            # owner-only spine dir (X2)
         self._conn = sqlite3.connect(self.path, detect_types=sqlite3.PARSE_DECLTYPES)
         paths.secure_existing(self.path)              # 0600 the spine DB (dir 0700 guards WAL sidecars)
@@ -259,6 +267,66 @@ class Blackboard:
         )
         self._conn.commit()
 
+    # ---- seal-at-capture (W16-8): a credential excerpt is sealed BEFORE it lands on the spine ----
+
+    # kind -> the credential-bearing excerpt field to seal at capture. These two are the only
+    # spine payload fields that carry raw signal (up to ~1KB / a response body) which may reflect an
+    # Authorization / Cookie / Set-Cookie value. Sealing is at the SINGLE append-only writer (post),
+    # so any current or future capture path is covered — a plaintext credential can never reach a row.
+    _SEAL_FIELD_BY_KIND: dict[str, str] = {
+        "observation": "raw_excerpt",
+        "result": "body_excerpt",
+    }
+
+    def _get_keyring(self) -> EvidenceKeyring:
+        if self._keyring is None:
+            self._keyring = EvidenceKeyring()
+        return self._keyring
+
+    def _slug_for_id(self, eid: int) -> str | None:
+        """The engagement slug for a registry id — the AAD/DEK-filename a seal is keyed by. None if
+        the id is unknown (a post with an unknown id fails at INSERT on the FK regardless)."""
+        row = self._conn.execute(
+            "SELECT slug FROM bb_engagements WHERE id = ?", (eid,)).fetchone()
+        return str(row["slug"]) if row is not None else None
+
+    def _seal_excerpt_in_place(self, *, kind: EventKind, engagement: str | int, eid: int,
+                               validated: dict[str, Any]) -> None:
+        """Seal the kind's credential excerpt field IN the validated payload, keyed by the engagement
+        slug, before it is written. Idempotent (already-sealed / empty passes through). FAIL-SAFE, not
+        fail-open: if a slug cannot be resolved or sealing raises (unreachable for a charter-safe slug),
+        the field is REDACTED rather than stored in the clear — plaintext must never reach the spine."""
+        field = self._SEAL_FIELD_BY_KIND.get(kind)
+        if field is None:
+            return
+        raw = validated.get(field)
+        if not isinstance(raw, str) or not raw or crypto_shred.is_sealed(raw):
+            return
+        slug = engagement if isinstance(engagement, str) else self._slug_for_id(eid)
+        if not slug:
+            validated[field] = crypto_shred.REDACTED_UNREADABLE
+            _log.warning("agents.blackboard.seal_no_slug", kind=kind, field=field, eid=eid)
+            return
+        try:
+            validated[field] = crypto_shred.seal_excerpt(slug, raw, keyring=self._get_keyring())
+        except Exception as exc:  # noqa: BLE001 — never store the credential in the clear, never crash post()
+            validated[field] = crypto_shred.REDACTED_UNREADABLE
+            _log.warning("agents.blackboard.seal_failed", kind=kind, field=field, error=str(exc))
+
+    def reveal_excerpt(self, engagement: str | int, value: str) -> str:
+        """Transparently reveal a possibly-sealed spine excerpt (raw_excerpt / body_excerpt) WITHIN its
+        engagement — the read dual of the seal-at-capture in :meth:`post`. TOTAL: a plaintext / legacy
+        value passes through; a sealed token is unsealed to its exact original while the DEK lives; a
+        crypto-shredded or unreadable token yields a fixed redacted placeholder (never plaintext, never a
+        crash). Keyed by the engagement slug (resolved from an id), using THIS blackboard's keyring so it
+        round-trips exactly what :meth:`post` sealed."""
+        if not isinstance(value, str) or not crypto_shred.is_sealed(value):
+            return value
+        slug = engagement if isinstance(engagement, str) else self._slug_for_id(engagement)
+        if not slug:
+            return crypto_shred.REDACTED_UNREADABLE
+        return crypto_shred.reveal_excerpt(slug, value, keyring=self._get_keyring())
+
     # ---- post (the only write path) ----
 
     def post(
@@ -287,6 +355,12 @@ class Blackboard:
             raise BlackboardError(
                 f"payload for kind={kind!r} did not validate: {e}"
             ) from e
+
+        # W16-8 seal-at-capture: seal the kind's credential excerpt UNDER the engagement DEK before it
+        # is written, so a raw_excerpt/body_excerpt that may reflect an Authorization/Cookie/Set-Cookie
+        # value never reaches the append-only spine in plaintext. Idempotent; every in-engagement reader
+        # unseals via reveal_excerpt while the DEK lives, and a crypto-shred makes it unrecoverable.
+        self._seal_excerpt_in_place(kind=kind, engagement=engagement, eid=eid, validated=validated)
 
         # S5 anti-spoof: a directed agent_message's `sender` MUST equal the posting agent, so a message can
         # never forge its origin — the RECORDED poster (agent_name) is authoritative, not the payload claim.
@@ -567,5 +641,6 @@ class Blackboard:
         return out[: max(0, int(limit))]
 
 
-def open_blackboard(*, db_path: Path | None = None) -> Blackboard:
-    return Blackboard(db_path=db_path)
+def open_blackboard(*, db_path: Path | None = None,
+                    keyring: EvidenceKeyring | None = None) -> Blackboard:
+    return Blackboard(db_path=db_path, keyring=keyring)

@@ -248,8 +248,22 @@ class LiveTransport:
     def __call__(self, method: str, url: str) -> TransportResult:
         # Protected-domain categorical floor (gov/mil/edu/IGO), gated by the owner toggle (default ON).
         # A real network capture against a protected host must HARD-fail (raise) before any bytes leave,
-        # fed the raw url (client-independent host analysis). OFF skips only this pre-filter; the signed
-        # scope + egress floor upstream remain in force.
+        # fed the raw url (client-independent host analysis).
+        #
+        # WHAT "UPSTREAM" ACTUALLY IS — named, because the previous wording ("the signed scope + egress
+        # floor upstream remain in force") claimed a guard that does not exist on this path, the same
+        # unenforced claim corrected in ``scanner/race.py``. Turning the toggle OFF leaves exactly:
+        #   * ``imds_runner``'s ``authorize()`` — the WARDEN A2 floor + kill-switch, and
+        #   * ``imds_runner``'s ``scope_gate.authorize(*scope)`` — the D5 CLOUD-scope gate,
+        # both evaluated before the runner ever calls this transport. There is NO L3/L4 egress floor
+        # anywhere on this path: ``vigil_gateway.denylist`` is never consulted and
+        # ``live/egress_floor.pin_egress`` is not called here.
+        #
+        # That exemption is DELIBERATE, not an oversight, and must not be "fixed": reaching
+        # 169.254.169.254 IS the E1 leg's purpose — the achieved-effect cloud runners prove an IMDS
+        # credential capture, which the never-liftable floor exists precisely to make impossible on the
+        # re-drive paths. Flooring this module would delete the capability. The authority that keeps it
+        # honest is WARDEN A2 + the signed cloud scope, not an address denylist.
         if protected_guard_enabled():
             assert_not_hard_blocked(url)
         scheme = (urlsplit(url).scheme or "").lower()

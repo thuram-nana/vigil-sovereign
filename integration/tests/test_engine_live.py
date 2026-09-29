@@ -92,9 +92,26 @@ def _complete():
 
 @pytest.fixture()
 def hermetic_root(tmp_path, monkeypatch):
-    """Point the CRUCIBLE authority store at a throwaway dir so provisioning is hermetic."""
-    monkeypatch.setenv("CRUCIBLE_ROOT", str(tmp_path / "crucible-root"))
-    return tmp_path
+    """Point the CRUCIBLE authority store at a throwaway dir so provisioning is hermetic.
+
+    ``crucible_root()`` only ACCEPTS a ``CRUCIBLE_ROOT`` whose ``CLAUDE.md`` sentinel is present
+    (common/paths.py:_SENTINEL); a throwaway dir with no sentinel is silently rejected and the resolver
+    falls THROUGH to the in-tree repo root, so the authority store, kill-switch and entitlement land on the
+    SHARED ``framework/v2/.authority`` — carrying whatever stale ``*.authority.json`` / halt a prior local
+    run left there — and the fixture is not hermetic at all. Drop the sentinel so ``CRUCIBLE_ROOT`` is
+    honoured and each test gets its OWN isolated authority store. ``crucible_root()`` is ``lru_cache``d, so
+    clear it around the test to make this test's root actually take effect and to avoid leaking the (deleted)
+    tmp root into a later test."""
+    root = tmp_path / "crucible-root"
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "CLAUDE.md").write_text("# hermetic test root (CRUCIBLE_ROOT sentinel)\n", encoding="utf-8")
+    monkeypatch.setenv("CRUCIBLE_ROOT", str(root))
+    from framework.v2.common import paths as _paths
+    _paths.crucible_root.cache_clear()
+    try:
+        yield tmp_path
+    finally:
+        _paths.crucible_root.cache_clear()
 
 
 @pytest.fixture(autouse=True)
