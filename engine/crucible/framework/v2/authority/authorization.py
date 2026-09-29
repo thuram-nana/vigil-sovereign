@@ -42,6 +42,7 @@ distinct, orthogonal bound; none re-implements another's policy.
 from __future__ import annotations
 
 import json
+import threading
 from collections import deque
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -326,26 +327,29 @@ class EngagementExecutor:
     authorization: EngagementAuthorization
     _recent: deque[float] = field(default_factory=deque)
     _in_flight: int = 0
+    # The rate window (``_recent``) and the in-flight count are mutated from
+    # whatever worker runs an action. Under fleet concurrency the whole point of
+    # the concurrency bound is that MANY workers reserve against ONE executor at
+    # once, so the authorize→reserve step MUST be atomic: a check-then-increment
+    # without this lock lets N workers each read ``in_flight < limit`` and all
+    # reserve, so the ``concurrency_limited`` denial never fires and the bound is
+    # DEFINED-BUT-UNFED. The lock is what actually FEEDS it. compare/repr are off
+    # so the executor stays comparable and printable as before.
+    _lock: threading.Lock = field(
+        default_factory=threading.Lock, repr=False, compare=False
+    )
 
     def _prune(self, now: datetime) -> None:
+        """Drop rate-window timestamps older than the window. Caller holds ``_lock``."""
         cutoff = now.timestamp() - self.authorization.rate_window_seconds
         while self._recent and self._recent[0] <= cutoff:
             self._recent.popleft()
 
-    @property
-    def in_flight(self) -> int:
-        return self._in_flight
-
-    def actions_in_window(self, now: datetime | None = None) -> int:
-        self._prune(now or _utcnow())
-        return len(self._recent)
-
-    def authorize(
-        self, operation: str, *, now: datetime | None = None
+    def _decide_locked(
+        self, operation: str, ts: datetime
     ) -> EngagementAuthorizationDecision:
-        """Evaluate an operation without reserving anything (does not mutate
-        rate/concurrency state). Classifies ``operation`` with WARDEN."""
-        ts = now or _utcnow()
+        """Evaluate ``operation`` against a consistent snapshot of the rate/
+        concurrency state. Caller holds ``_lock``."""
         self._prune(ts)
         return authorize_engagement_action(
             self.authorization,
@@ -354,6 +358,25 @@ class EngagementExecutor:
             in_flight=self._in_flight,
             now=ts,
         )
+
+    @property
+    def in_flight(self) -> int:
+        with self._lock:
+            return self._in_flight
+
+    def actions_in_window(self, now: datetime | None = None) -> int:
+        with self._lock:
+            self._prune(now or _utcnow())
+            return len(self._recent)
+
+    def authorize(
+        self, operation: str, *, now: datetime | None = None
+    ) -> EngagementAuthorizationDecision:
+        """Evaluate an operation without reserving anything (does not mutate
+        rate/concurrency state). Classifies ``operation`` with WARDEN."""
+        ts = now or _utcnow()
+        with self._lock:
+            return self._decide_locked(operation, ts)
 
     @contextmanager
     def execute(
@@ -364,18 +387,27 @@ class EngagementExecutor:
         duration of the ``with`` block). Raises the matching typed
         EthicsViolation if any of the four bounds is breached — the executor
         refusing to act. The reservation is released on exit even if the body
-        raises."""
+        raises.
+
+        The authorize→reserve step runs under ``_lock`` as ONE critical section,
+        so the concurrency limit actually bounds in-flight work when many workers
+        reserve at once (see the ``_lock`` note): whichever worker crosses the
+        limit gets the ``concurrency_limited`` refusal instead of every worker
+        reading a stale under-limit count and reserving anyway."""
         ts = now or _utcnow()
-        decision = self.authorize(operation, now=ts)
+        with self._lock:
+            decision = self._decide_locked(operation, ts)
+            if decision.allowed:
+                self._recent.append(ts.timestamp())
+                self._in_flight += 1
         if not decision.allowed:
             err = _DENIAL_ERRORS.get(decision.denial_code, EthicsViolation)
             raise err(decision.reason)
-        self._recent.append(ts.timestamp())
-        self._in_flight += 1
         try:
             yield decision
         finally:
-            self._in_flight -= 1
+            with self._lock:
+                self._in_flight -= 1
 
     def require(
         self, request: ActionRequest, *, now: datetime | None = None
