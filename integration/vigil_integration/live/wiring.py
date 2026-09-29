@@ -1924,10 +1924,15 @@ def _live_web_redrive_fact(prov: Provisioned, info: dict, redrive: Optional[dict
 
 
 def _live_runtime_redrive_fact(prov: Provisioned, info: dict, redrive: Optional[dict]) -> Optional[str]:
-    """T2 — RE-DRIVE a RESPONSE-DERIVED class (``path_traversal`` / ``xss`` reflected / ``exposure``) through
+    """T2 — RE-DRIVE a RESPONSE-DERIVED class (``path_traversal`` / ``xss`` reflected / ``exposure`` / ``ssi``,
+    and the W2 statistical/eval injection classes ``ssti`` / ``boolean_sqli`` / ``time_based_sqli``) through
     the runner-owned :mod:`live.runtime_redrive` engine and return a signed FACT's ``finding_ref`` ONLY when
-    the matching deterministic oracle (side_effect / reflection_context / predicate) confirms the CLAIMED
-    class over VIGIL's OWN gated live capture.
+    the matching deterministic oracle (side_effect / reflection_context / predicate / ssi_evaluation /
+    evaluation / boolean_inference SPRT / timing) confirms the CLAIMED class over VIGIL's OWN gated live
+    capture. B1 (governed-engage FACT-parity) added the three W2 classes to the dispatch set so the governed
+    engage/chat seam stops under-reporting classes the deterministic scanner already proves; ``runtime_redrive``
+    DELEGATES them to their ssti/boolean/timing sibling arms (boolean via the multi-round SPRT, never a
+    single-shot differential).
 
     Mirrors :func:`_live_web_redrive_fact`: the runner crafts its own probe (never the LLM's payload), mints
     via ``certify_admitted(provenance="live_redrive")``, and the FACT is tied to the CLAIM

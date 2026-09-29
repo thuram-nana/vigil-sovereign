@@ -82,7 +82,23 @@ from typing import Any, Callable, Optional
 # The classes this runner mints as FACTs, each mapped to its ONE registered evidence branch + the oracle
 # whose deterministic decision procedure adjudicates it. Named by value (the framework enums are resolved
 # function-locally, FATAL-2). Kept in lockstep with docs/capability-matrix/evidence-branches.json.
+#
+# INLINE FACT CLASSES — adjudicated by the single-capture body of :func:`runtime_redrive` via ``_BRANCH_FOR``.
 RUNTIME_FACT_CLASSES = ("xss", "exposure", "ssi")
+
+# STATISTICAL / EVAL FACT CLASSES (W2) — the injection classes the deterministic scanner already PROVES but
+# whose evidence is MULTI-CAPTURE (a per-round SPRT truth-value attribution, an interleaved dose-response
+# timing series, a per-probe evaluated product), so they are NOT adjudicated by the single-shot ``_BRANCH_FOR``
+# body above. Each is minted by its OWN self-contained sibling arm (:func:`ssti_redrive` /
+# :func:`boolean_redrive` / :func:`timing_redrive`), to which :func:`runtime_redrive` DELEGATES. Their branches
+# (``ssti.evaluation`` / ``boolean_sqli.sprt_inference`` / ``time_based_sqli.timing_inference``) are all already
+# ``fact_capable`` in docs/capability-matrix/evidence-branches.json — no new OracleKind. Kept out of
+# ``RUNTIME_FACT_CLASSES`` precisely because that tuple's contract is "resolvable through ``_BRANCH_FOR`` +
+# the inline body"; these resolve through the arms instead. They ARE dispatch classes (see
+# ``RUNTIME_REDRIVE_CLASSES``), so the engage seam (engine ``_redrive_spec`` → wiring
+# ``_live_runtime_redrive_fact``) now produces a spec and admits them — closing the under-report where the
+# deterministic scanner proved the class but the governed engage/chat seam refused to mint it.
+RUNTIME_STAT_FACT_CLASSES = ("ssti", "boolean_sqli", "time_based_sqli")
 
 # LEAD-ONLY classes: the runner still probes them end to end and records an admitted verdict, but their
 # registered branch declares ``fact_capable: false``, so ``verdict.admit`` demotes even a fired oracle to a
@@ -126,8 +142,10 @@ RUNTIME_FACT_CLASSES = ("xss", "exposure", "ssi")
 RUNTIME_LEAD_CLASSES = ("path_traversal",)
 
 # Every class this runner will DISPATCH. A FACT-capable class can reach a signed FACT; a lead-only class
-# runs the identical pipeline and stops at a LEAD.
-RUNTIME_REDRIVE_CLASSES = RUNTIME_FACT_CLASSES + RUNTIME_LEAD_CLASSES
+# runs the identical pipeline and stops at a LEAD. The union spans the INLINE fact classes, the W2
+# STATISTICAL/EVAL fact classes (delegated to their sibling arms), and the LEAD-only classes; the engage
+# seam (engine ``_redrive_spec`` + wiring ``_live_runtime_redrive_fact``) gates on this DISPATCH set.
+RUNTIME_REDRIVE_CLASSES = RUNTIME_FACT_CLASSES + RUNTIME_STAT_FACT_CLASSES + RUNTIME_LEAD_CLASSES
 
 _BRANCH_FOR = {
     "path_traversal": "path_traversal.file_signature",
@@ -153,10 +171,14 @@ _MAX_CANDIDATE_NAMES = 12
 
 # --- W2: three more HTTP-response-derived FACT arms (SSTI / boolean-blind / time-based) ---------------
 # Each is a sibling of :func:`runtime_redrive` (runner-owned gated re-drive → the matching frozen oracle →
-# admit()+certify_admitted(provenance="live_redrive")) but is NOT in ``RUNTIME_REDRIVE_CLASSES``, so the engage
-# ``_redrive_spec`` seam is UNCHANGED — these arms are reached only from the Strix proof-sink dispatch rail
-# (proof/run.py). No new OracleKind: SSTI reuses EVALUATION, boolean reuses BOOLEAN_INFERENCE, timing reuses
-# TIMING (all already frozen in _ALL_ORACLES). The registered evidence branch each admits through:
+# admit()+certify_admitted(provenance="live_redrive")). Their classes are ``RUNTIME_STAT_FACT_CLASSES``, part of
+# the dispatch union ``RUNTIME_REDRIVE_CLASSES``, so BOTH the Strix proof-sink dispatch rail (proof/run.py) AND
+# the governed engage seam reach them: :func:`runtime_redrive` DELEGATES a claimed stat class to its arm here
+# (B1 — governed-engage FACT-parity), and the engage ``_redrive_spec`` producer emits a ``{"kind":"runtime"}``
+# spec for them because they are in ``RUNTIME_REDRIVE_CLASSES``. No new OracleKind: SSTI reuses EVALUATION,
+# boolean reuses BOOLEAN_INFERENCE (the multi-round SPRT ``BooleanInferenceCheck``, never the single-shot
+# DifferentialCheck), timing reuses TIMING (all already frozen in _ALL_ORACLES). The registered evidence
+# branch each admits through:
 _SSTI_BRANCH = "ssti.evaluation"
 _BOOLEAN_BRANCH = "boolean_sqli.sprt_inference"
 _TIMING_BRANCH = "time_based_sqli.timing_inference"
@@ -706,6 +728,13 @@ def runtime_redrive(url: str, *, slug: str, engagement_slug: str, signers: "list
         probe fetch entirely against any origin that does not 404 unknown paths), plus per-path corroborators
         and — for a ``KEY=`` signature — a right-hand side that is a real value. The whole conjunction is in
         the certificate, so the offline verifier RE-EXECUTES it rather than trusting the runner.
+      * ssti / boolean_sqli / time_based_sqli (``RUNTIME_STAT_FACT_CLASSES``) — DELEGATED verbatim to their
+        self-contained sibling arms (:func:`ssti_redrive` / :func:`boolean_redrive` / :func:`timing_redrive`),
+        because each carries a MULTI-CAPTURE recipe + control the single-capture body here cannot express (a
+        per-round SPRT truth-value attribution with a dynamic-page control for boolean, an interleaved
+        base/treatment dose-response for timing, a per-probe evaluated random product with a benign control
+        for ssti). This delegation is what gives the governed engage seam FACT-parity with the deterministic
+        scanner for these classes; the arm runs its OWN charter gate before any traffic.
 
     A probe that established no channel is INCONCLUSIVE (never CLEAN). Returns a :class:`RuntimeRedriveResult`.
     Never raises (a probe error is recorded and what held is returned).
@@ -743,6 +772,20 @@ def runtime_redrive(url: str, *, slug: str, engagement_slug: str, signers: "list
     if bug_class not in RUNTIME_REDRIVE_CLASSES:
         res.notes.append(f"{bug_class!r} is not a runtime-redrive class")
         return res
+    # W2 STATISTICAL/EVAL ARMS (B1 — governed-engage FACT-parity). ssti / boolean_sqli / time_based_sqli are
+    # minted by their OWN self-contained sibling arms, NOT by the single-capture ``_BRANCH_FOR`` body below:
+    # each carries a distinct multi-capture recipe + control (a per-round SPRT truth-value attribution for
+    # boolean, an interleaved dose-response series for timing, a per-probe evaluated product for ssti) that
+    # the inline body cannot express, and each runs its own charter gate (:func:`_stat_setup` → ``_authorize``)
+    # before any byte. Delegate and return the arm's result VERBATIM — it is the same ``RuntimeRedriveResult``
+    # the seam reads (``.facts`` / ``.family_verdict()``). ``param=None`` ⇒ the arm walks its candidate
+    # parameter set, because the governed engage seam carries no declared param. boolean_sqli routes to
+    # :func:`boolean_redrive`, which adjudicates through the multi-round ``BooleanInferenceCheck`` /
+    # ``boolean_inference_oracle`` SPRT (dynamic-page control), never the single-shot ``DifferentialCheck``.
+    if bug_class in RUNTIME_STAT_FACT_CLASSES:
+        _arm = {"ssti": ssti_redrive, "boolean_sqli": boolean_redrive,
+                "time_based_sqli": timing_redrive}[bug_class]
+        return _arm(url, slug=slug, engagement_slug=engagement_slug, signers=signers, timeout=timeout)
     branch = _BRANCH_FOR[bug_class]
     if branch not in branch_ids():
         res.notes.append(f"branch {branch!r} is not registered — cannot admit (fail-closed)")
