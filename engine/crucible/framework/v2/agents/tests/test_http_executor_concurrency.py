@@ -238,6 +238,11 @@ def test_serial_spacing_is_unchanged(isolated_engagement):
     isolated_engagement("alpha", "127.0.0.1")
     body_delay = 0.15
     floor = _RATE_PROFILES["TEST"][0]
+    # Defence-in-depth: this test carries @pytest.mark.real_rate_floor so the autouse zero-floor
+    # fixture leaves the genuine TEST floor in place. If that marker is ever dropped/mistyped the
+    # floor would be 0 and the spacing assertion below would silently degrade to a tautology on
+    # body_delay alone — so fail loudly instead.
+    assert floor > 0, "real_rate_floor marker missing: the TEST rate floor was zeroed; this test needs the genuine floor"
     with _concurrent_origin(delay=body_delay) as base:
         ex = _executor_at(base + "/", request_budget=10)
         try:

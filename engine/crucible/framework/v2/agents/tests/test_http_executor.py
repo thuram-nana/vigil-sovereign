@@ -447,6 +447,13 @@ def test_emulate_jitters_measurably_more_than_test(
     import time as _time
     httpserver.expect_request("/api/orders/1").respond_with_data("ok")
 
+    # Defence-in-depth: this test carries @pytest.mark.real_rate_floor so the autouse zero-floor
+    # fixture leaves the genuine TEST floor. If that marker is ever dropped/mistyped, the TEST floor
+    # would be 0 while EMULATE is set to (0.2, 0.5) below, so emul_elapsed > test_elapsed would hold
+    # on the floor difference alone even with zero jitter — silently no longer isolating jitter. Fail loudly.
+    from framework.v2.agents import http_executor as _he
+    assert _he._RATE_PROFILES["TEST"][0] > 0, "real_rate_floor marker missing: the TEST rate floor was zeroed; this test needs the genuine floor to isolate jitter"
+
     # TEST run (0.2s floor, no jitter → 3 requests ≈ 0.4s+).
     isolated_engagement("alpha-test", httpserver.host, posture="TEST")
     ex_test = HttpExecutor(
