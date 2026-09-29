@@ -286,18 +286,18 @@
     },
     {
       "id": "LIMIT-spine-seal-at-capture",
-      "title": "Seal-at-capture is not wired, so credential excerpts on the append-only spine are stored in plaintext",
-      "summary": "Per-engagement crypto-shredding (EvidenceKeyring.seal_text) exists and erasure destroys the DEK, but seal-at-capture is NOT wired into the live executor. Credential excerpts already written to the append-only spine are therefore stored in PLAINTEXT and are not erasable by crypto-shredding (evidence_dir captures ARE sealable/shreddable). Documented in PRIVACY.md 'Honest scope'; wiring is a staged follow-up.",
+      "title": "Seal-at-capture is wired: credential excerpts on the append-only spine are sealed under the per-engagement DEK before they are written",
+      "summary": "CLOSED (wave-a/waveA1-seal). Seal-at-capture is now wired at the single append-only writer: Blackboard.post seals ObservationPayload.raw_excerpt and ResultPayload.body_excerpt under the per-engagement DEK (crypto_shred.seal_excerpt) BEFORE the row is written, so a credential excerpt never reaches the spine in plaintext; every in-engagement reader unseals transparently (Blackboard.reveal_excerpt: hypothesis-agent, the console Live tailer, the tier-3 audit observation), and after a crypto-shred the excerpt is unrecoverable while the append-only row and the spine hash-chain stay byte-for-byte unchanged. Proven end-to-end (seal -> reveal -> shred) by engine/crucible/framework/v2/agents/tests/test_spine_seal_at_capture.py, alongside the existing evidence_dir shred proof in test_evidence_erasure.py. RESIDUALS (honest scope): (1) FindingPayload.oracle_context is retained in plaintext on the spine because framework.v2 verify re-fires over it offline; it is intentionally NOT sealed by this slice (sealing it would need a verify-path-aware unseal), so a credential reflected inside a retained proof remains plaintext and is tracked as a separate, narrower concern. (2) Only captures written AFTER this wiring are sealed; append-only rows written before it cannot be retroactively sealed without rewriting them (which would break tamper-evidence), so a legacy spine's pre-wiring excerpts remain as they were, while every fresh engagement is fully protected.",
       "classification": "real-unfinished-code",
-      "severity": "high",
+      "severity": "low",
       "anchor": {
-        "file": "engine/crucible/framework/v2/common/crypto_shred.py",
-        "symbol": "EvidenceKeyring.seal_text"
+        "file": "engine/crucible/framework/v2/agents/blackboard.py",
+        "symbol": "Blackboard._seal_excerpt_in_place"
       },
       "marker": false,
       "check": "symbol-exists",
       "source_doc": "docs/PRIVACY.md",
-      "disposition": "file-into-w16",
+      "disposition": "re-verified-closed",
       "w16_issue": null
     },
     {
@@ -561,13 +561,6 @@
       "kind": "debt",
       "limit_id": "LIMIT-symbolic-crash-repair",
       "note": "The research-gated CRS/symbolic-synthesis tier docstrings and raise messages."
-    },
-    {
-      "file": "engine/crucible/framework/v2/common/crypto_shred.py",
-      "snippet": "seal-at-capture is NOT yet wired",
-      "kind": "debt",
-      "limit_id": "LIMIT-spine-seal-at-capture",
-      "note": "Spine credential excerpts stored in plaintext until seal-at-capture is wired."
     },
     {
       "file": "engine/crucible/framework/v2/console/api.py",
