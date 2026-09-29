@@ -13,10 +13,12 @@ Data Encryption Key (DEK). The DEK is held OUTSIDE the append-only spine, in a s
 keystore (``paths.evidence_keys_dir``). Erasure = destroy the DEK. Afterwards:
 
   * any SEALED ciphertext left behind — on disk, or in an off-host backup of the CIPHERTEXT (never
-    the key) — is cryptographically UNRECOVERABLE. NB: sealing a spine-payload excerpt is SUPPORTED
-    (``seal_text``) but seal-at-capture is NOT yet wired into the live executor, so credential
-    excerpts already written to the append-only spine are stored in PLAINTEXT and are not erasable by
-    this mechanism (documented in PRIVACY.md "Honest scope"; wiring is a staged follow-up); and
+    the key) — is cryptographically UNRECOVERABLE. Seal-at-capture is WIRED into the append-only
+    spine: ``agents.blackboard.Blackboard.post`` seals ``ObservationPayload.raw_excerpt`` and
+    ``ResultPayload.body_excerpt`` under the engagement DEK (via ``seal_excerpt``) BEFORE the row is
+    written, so a credential excerpt never reaches the spine in plaintext; every in-engagement reader
+    unseals transparently (``reveal_excerpt``) while the DEK lives, and a crypto-shred then renders the
+    retained ciphertext unrecoverable with the row and hash-chain byte-for-byte unchanged; and
   * every append-only row is byte-for-byte UNCHANGED and the spine hash-chain
     (``agents/spine_chain``) still verifies, because the chain digest covers the bytes that were
     stored, which erasure never touches.
@@ -245,3 +247,57 @@ def is_sealed(blob: bytes | str) -> bool:
     if isinstance(blob, str):
         return blob.startswith(_TEXT_PREFIX)
     return False
+
+
+# ---------------------------------------------------------------------------
+# Seal-at-capture helpers for the append-only spine (W16-8 wiring).
+#
+# ``seal_excerpt`` is the WRITE dual: called at the single append-only writer
+# (``agents.blackboard.Blackboard.post``) so a credential-bearing excerpt is
+# sealed under the per-engagement DEK BEFORE it lands on the spine.
+# ``reveal_excerpt`` is the READ dual: every in-engagement reader (replay,
+# console, hypothesis-agent, ...) calls it to see the plaintext while the DEK
+# lives, or a fixed redacted placeholder after a crypto-shred — never the opaque
+# token, never plaintext post-erasure, and never a raise.
+# ---------------------------------------------------------------------------
+
+# Fixed, non-secret placeholders a reader shows when a sealed excerpt cannot be opened. They carry NO
+# plaintext and are stable so a UI/report can special-case them.
+REDACTED_SHREDDED = "[redacted: evidence crypto-shredded]"
+REDACTED_UNREADABLE = "[redacted: sealed evidence could not be opened]"
+
+
+def seal_excerpt(engagement: str, value: str, *, keyring: EvidenceKeyring | None = None) -> str:
+    """Seal a credential-bearing spine excerpt AT CAPTURE, keyed by ``engagement`` (the slug).
+
+    Idempotent and total for the write path: an empty string or an already-sealed token passes through
+    unchanged (never double-sealed), so this is safe to call unconditionally at the single append-only
+    writer. Otherwise returns an ``evs1:`` token whose plaintext is recoverable only while the
+    engagement DEK lives; the DEK is created on first use in ``paths.evidence_keys_dir`` (OUTSIDE the
+    spine)."""
+    if not value or is_sealed(value):
+        return value
+    kr = keyring or EvidenceKeyring()
+    return kr.seal_text(engagement, value)
+
+
+def reveal_excerpt(engagement: str, value: str, *, keyring: EvidenceKeyring | None = None) -> str:
+    """Transparently reveal a possibly-sealed spine excerpt WITHIN its engagement — the read dual of
+    :func:`seal_excerpt`. TOTAL: it never raises, so a reader may call it on any excerpt.
+
+      * a plaintext value (a pre-seal legacy row or an empty string) is returned unchanged;
+      * a sealed token whose DEK still lives is unsealed to its EXACT original plaintext;
+      * a sealed token whose DEK was crypto-shredded returns ``REDACTED_SHREDDED`` (post-erasure state);
+      * a sealed token that fails authentication (tamper / wrong engagement) returns ``REDACTED_UNREADABLE``.
+
+    A reader that cannot obtain the DEK therefore shows a redacted placeholder — never plaintext, never
+    a crash."""
+    if not isinstance(value, str) or not is_sealed(value):
+        return value
+    kr = keyring or EvidenceKeyring()
+    try:
+        return kr.unseal_text(engagement, value)
+    except EvidenceShredded:
+        return REDACTED_SHREDDED
+    except CryptoShredError:
+        return REDACTED_UNREADABLE

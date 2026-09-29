@@ -160,7 +160,12 @@ def test_all_gates_pass_validates_and_proves_impact(bb: Blackboard, tmp_path: Pa
     obs = _spine_kinds(bb, "observation")
     assert len(obs) == 1
     assert obs[0]["source"] == "tier3-validation"
-    assert _MARKER in obs[0]["raw_excerpt"]
+    # W16-8 seal-at-capture: raw_excerpt is SEALED on the append-only spine (plaintext marker absent),
+    # and an in-engagement reader unseals it transparently to the original.
+    from framework.v2.common import crypto_shred
+    assert crypto_shred.is_sealed(obs[0]["raw_excerpt"])
+    assert _MARKER not in obs[0]["raw_excerpt"]
+    assert _MARKER in bb.reveal_excerpt(SLUG, obs[0]["raw_excerpt"])
     assert _spine_kinds(bb, "refusal") == []
 
 

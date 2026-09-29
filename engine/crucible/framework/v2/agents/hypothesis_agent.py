@@ -58,9 +58,13 @@ class HypothesisAgent(Agent):
                 self._processed_observation_ids.add(ev.id)
                 continue
 
+            # W16-8: raw_excerpt is sealed at capture on the append-only spine; unseal it in-engagement
+            # so the reasoning core sees the same plaintext it always did (a shredded excerpt reveals a
+            # redacted placeholder, never the opaque token, never a crash).
+            raw_excerpt = self.bb.reveal_excerpt(self.engagement_id, obs.raw_excerpt)
             try:
                 result, _trace = urk_hypothesize(
-                    observation=f"{obs.summary}\n\n{obs.raw_excerpt[:500]}",
+                    observation=f"{obs.summary}\n\n{raw_excerpt[:500]}",
                     surface=obs.surface,
                     context=f"posted by {ev.agent_name}",
                 )

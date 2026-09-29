@@ -86,6 +86,8 @@ class BlackboardTailer:
         for row in rows:
             self._cursor = max(self._cursor, int(row.id))
             ev = _row_to_event(row)
+            if row.kind in ("observation", "result"):
+                self._reveal_excerpt(ev, bb)
             if row.kind == "finding":
                 self._finding_grounding[int(row.id)] = bool((row.payload or {}).get("verified_by_oracle"))
             elif row.kind == "critic_verdict":
@@ -94,6 +96,30 @@ class BlackboardTailer:
         return out
 
     # ---- display calibration (view-only; the stored spine is never touched) ----
+
+    def _reveal_excerpt(self, ev: dict[str, Any], bb: Any) -> None:
+        """W16-8: unseal a sealed raw_excerpt / body_excerpt for the EMITTED view only (the append-only
+        row is never touched — the same view-copy discipline as :meth:`_calibrate_critic`), so the Live
+        console shows the in-engagement plaintext while the DEK lives and a fixed redacted placeholder
+        after a crypto-shred — never the opaque ``evs1:`` token, never plaintext post-erasure. Best-effort:
+        any failure leaves the emitted payload unchanged rather than breaking the stream."""
+        pl = ev.get("payload")
+        if not isinstance(pl, dict):
+            return
+        field = "raw_excerpt" if ev.get("kind") == "observation" else "body_excerpt"
+        val = pl.get(field)
+        if not isinstance(val, str) or not val:
+            return
+        try:
+            from ..common import crypto_shred
+            if not crypto_shred.is_sealed(val):
+                return
+            revealed = bb.reveal_excerpt(self._slug, val)
+        except Exception:
+            return
+        pl = dict(pl)  # copy: enrich the view, leave the append-only row untouched
+        pl[field] = revealed
+        ev["payload"] = pl
 
     def _target_grounding(self, target_event_id: Any, bb: Any) -> bool | None:
         """Is a critic verdict's TARGET finding a fact (True) or a lead (False)? None when the target is
