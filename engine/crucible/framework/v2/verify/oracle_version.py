@@ -203,23 +203,41 @@ def _referenced_names(fn: Callable[..., Any]) -> set[str]:
     return names
 
 
-def _canon_referenced_consts(fn: Callable[..., Any], _seen: frozenset[int]) -> str:
-    """The module-level CONSTANTS an in-repo lambda/function references, canonicalised and appended so their
-    VALUES enter the version. When such a callable is nested inside a constant container (``_canon`` recurses
-    into the container and SOURCE-binds the callable), only its SOURCE TEXT was captured — the constants it
-    calls appear only by NAME in that text, so mutating one changed the decision but left the version
-    byte-identical (AUDIT-B: the ``_SECRET_*`` regexes the ``_SECRET_RECOGNIZERS`` lambdas match against).
+def _canon_referenced_consts(fn: Callable[..., Any], _seen: frozenset[int],
+                             _covered: frozenset[int] = frozenset()) -> str:
+    """The module-level CONSTANTS *and* the UNCOVERED IN-REPO helper CALLABLES an in-repo lambda/function
+    references, canonicalised and appended so their VALUES / SOURCE enter the version. When such a callable is
+    nested inside a constant container (``_canon`` recurses into the container and SOURCE-binds the callable),
+    only its SOURCE TEXT was captured — anything it merely *references by name* appears only as a token in that
+    text, so mutating that referent changed the decision but left the version byte-identical.
+
+    TWO holes are closed here, both of the same shape (a referent reached ONLY inside a source-bound
+    lambda/nested function — i.e. one the closure walk never captured on its own):
+      * A module-level CONSTANT it calls (AUDIT-B: the ``_SECRET_*`` regexes the ``_SECRET_RECOGNIZERS``
+        lambdas match against) → bound by its canonical VALUE.
+      * An IN-REPO helper FUNCTION/METHOD it calls that is NOT already covered by the closure walk
+        (``id(val) not in _covered``) → recurse through ``_canon``'s source-binding arm so the helper's
+        SOURCE enters the version; mutating that helper's body now changes the version.
+
+    THE ``_covered`` GUARD — why it is load-bearing (and how it keeps this ZERO-DELTA). ``_covered`` is the
+    id-set of every in-repo function/class ``_reachable_source_blob`` already captured as its OWN standalone
+    source record. A helper reached BOTH inside a source-bound callable AND directly by the walk (today:
+    ``oracles._imds_text``, which the ``_SECRET_RECOGNIZERS`` identity functions call and which the walk also
+    reaches on its own) is ALREADY in the version once — binding it again here would only DUPLICATE its source
+    and change the hash for no soundness gain, invalidating every existing certificate of that kind. Skipping a
+    covered helper leaves the shipped oracles byte-identical while still binding a genuinely uncovered helper
+    (one reached ONLY inside the source-bound callable) — the exact latent hole. There is no such uncovered
+    helper today, which is why closing the hole is a zero-delta change.
 
     Each name in the callable's ``co_names`` is resolved against its DEFINING module
     (``sys.modules[fn.__module__]`` — the same rule ``_walk_body`` uses for a walked function, NOT
     ``fn.__globals__``, which for a compiler-generated method would bind ``dataclasses`` internals by heap
-    address), and only a module-level CONSTANT (``_is_hashable_constant``) is bound, by its canonical value.
-    A name that resolves to a module, a function, a class or any other callable is deliberately NOT bound
-    here: a function reached from a lambda is either genuinely third-party (out of scope — binding its source
-    would track a library) or already covered by the source-text / closure walk, so binding it would only
-    duplicate the closure or perturb the version with a library. Determinism is preserved — names are sorted
-    and a regex binds by its canonical PATTERN (``_canon`` → ``repr``), never by object identity — and
-    ``_seen`` (function ids) breaks any reference cycle so mutual/self references terminate."""
+    address). A module-level CONSTANT (``_is_hashable_constant``) is bound by its canonical value; an UNCOVERED
+    in-repo function/method (the predicate MIRRORS ``_canon``'s source-binding arm) is source-bound via
+    ``_canon``. A name that resolves to a module, a class, a genuinely THIRD-PARTY callable, or a COVERED
+    in-repo helper is deliberately NOT bound here. Determinism is preserved — names are sorted, a regex binds
+    by its canonical PATTERN (``_canon`` → ``repr``) and a callable by its SOURCE, never by object identity —
+    and ``_seen`` (function ids) breaks any reference cycle so mutual/self references terminate."""
     if id(fn) in _seen:
         return ""
     seen = _seen | {id(fn)}
@@ -231,13 +249,28 @@ def _canon_referenced_consts(fn: Callable[..., Any], _seen: frozenset[int]) -> s
     parts: list[str] = []
     for nm in sorted(_referenced_names(fn)):
         val = g.get(nm)
-        if val is None or not _is_hashable_constant(val):
+        if val is None:
             continue
-        parts.append(f"{nm}={_canon(val, seen)}")
+        if _is_hashable_constant(val):
+            # a module-level CONSTANT the callable references → bind by canonical VALUE.
+            parts.append(f"{nm}={_canon(val, seen, _covered)}")
+        elif (_in_repo_modname(getattr(val, "__module__", None))
+              and (inspect.isfunction(val) or inspect.ismethod(val))
+              and id(val) not in _covered):
+            # AUDIT-B (this slice): an IN-REPO helper FUNCTION/METHOD the callable CALLS, reached ONLY inside
+            # this source-bound lambda/nested function AND not already captured by the closure walk,
+            # previously entered the version by NAME only (it appears solely as a token in the lambda's
+            # captured TEXT), so mutating that helper's BODY left the version byte-identical — a staleness
+            # hole. Recurse through ``_canon``'s existing source-binding arm so the helper's SOURCE (and,
+            # transitively, ITS own referenced constants + uncovered in-repo callables) enters the version.
+            # ``seen`` breaks any reference cycle; ``_covered`` prevents re-binding an already-captured helper
+            # (which would change the hash for no soundness gain — see the ``_covered`` note above).
+            parts.append(f"{nm}={_canon(val, seen, _covered)}")
     return ("|consts:" + ",".join(parts)) if parts else ""
 
 
-def _canon(obj: Any, _seen: frozenset[int] = frozenset()) -> str:
+def _canon(obj: Any, _seen: frozenset[int] = frozenset(),
+           _covered: frozenset[int] = frozenset()) -> str:
     """A canonical, hash-stable repr of a module-level constant — ORDER-INDEPENDENT for sets/frozensets/
     dicts so the version does not depend on PYTHONHASHSEED (the version must be identical across processes
     and machines). Falls back to ``repr`` for scalars, compiled regexes, ip_address objects, etc.
@@ -261,14 +294,18 @@ def _canon(obj: Any, _seen: frozenset[int] = frozenset()) -> str:
     ``module.qualname`` is used, because embedding third-party source would make this version track
     library versions instead of this engine's decision procedure.
 
-    AUDIT-B (this slice) — CONSTANTS REACHED ONLY INSIDE A SOURCE-BOUND LAMBDA/NESTED FUNCTION are now
-    covered. Source-binding a callable captured only its TEXT, so a module-level constant it *calls* (the
-    ``_SECRET_*`` regexes referenced solely inside the ``_SECRET_RECOGNIZERS`` lambdas) entered the version by
-    NAME only — mutating ``_SECRET_AWS_KEY_ID_RE`` flipped a decision yet left
-    ``oracle_version(SECRET_CREDENTIAL_VALIDITY)`` byte-identical. When an IN-REPO function/lambda is
-    source-bound here, ``_canon_referenced_consts`` now also binds the module-level constants it references
-    (resolved against the callable's DEFINING module), by canonical value — so that hole is closed while
-    genuinely third-party names are still left untouched and determinism is preserved."""
+    AUDIT-B (this slice) — CONSTANTS *and UNCOVERED IN-REPO HELPER CALLABLES* REACHED ONLY INSIDE A
+    SOURCE-BOUND LAMBDA/NESTED FUNCTION are now covered. Source-binding a callable captured only its TEXT, so
+    a module-level constant it *calls* (the ``_SECRET_*`` regexes referenced solely inside the
+    ``_SECRET_RECOGNIZERS`` lambdas) entered the version by NAME only — mutating ``_SECRET_AWS_KEY_ID_RE``
+    flipped a decision yet left ``oracle_version(SECRET_CREDENTIAL_VALIDITY)`` byte-identical. Likewise an
+    in-repo helper FUNCTION a source-bound callable *calls*, reached ONLY inside it, entered by NAME only, so
+    mutating that helper's body left the version byte-identical. When an IN-REPO function/lambda is
+    source-bound here, ``_canon_referenced_consts`` now binds both the module-level constants it references
+    (by canonical value) AND the in-repo helper functions it references that are NOT already captured by the
+    closure walk (``_covered``) — resolved against the callable's DEFINING module — so both holes are closed
+    while genuinely third-party names, and helpers the walk already captured, are left untouched and
+    determinism is preserved."""
     if callable(obj):
         mod = getattr(obj, "__module__", None) or "?"
         name = (getattr(obj, "__qualname__", None) or getattr(obj, "__name__", None)
@@ -280,18 +317,20 @@ def _canon(obj: Any, _seen: frozenset[int] = frozenset()) -> str:
                 src = "|" + inspect.getsource(obj).strip()
             except (OSError, TypeError):
                 src = "|<source-unavailable>"
-            # ALSO bind the module-level constants this in-repo callable references — otherwise a constant
-            # used only inside a lambda nested in a container (a `_SECRET_*` regex) enters the version by
-            # name only and a changed pattern ships under an unchanged id@version.
-            deps = _canon_referenced_consts(obj, _seen)
+            # ALSO bind the module-level constants AND uncovered in-repo helper callables this in-repo
+            # callable references — otherwise a constant (a `_SECRET_*` regex) or an in-repo helper FUNCTION
+            # used only inside a lambda nested in a container enters the version by name only, and a changed
+            # pattern / changed helper body ships under an unchanged id@version. ``_covered`` (the walk's
+            # already-captured functions) keeps an already-covered helper from being re-bound here.
+            deps = _canon_referenced_consts(obj, _seen, _covered)
         return f"<callable {mod}.{name}{src}{deps}>"
     if isinstance(obj, (set, frozenset)):
-        return "{" + ",".join(sorted(_canon(x, _seen) for x in obj)) + "}"
+        return "{" + ",".join(sorted(_canon(x, _seen, _covered) for x in obj)) + "}"
     if isinstance(obj, dict):
-        return "{" + ",".join(f"{_canon(k, _seen)}:{_canon(v, _seen)}"
+        return "{" + ",".join(f"{_canon(k, _seen, _covered)}:{_canon(v, _seen, _covered)}"
                               for k, v in sorted(obj.items(), key=lambda kv: repr(kv[0]))) + "}"
     if isinstance(obj, (list, tuple)):
-        return "[" + ",".join(_canon(x, _seen) for x in obj) + "]"
+        return "[" + ",".join(_canon(x, _seen, _covered) for x in obj) + "]"
     return repr(obj)
 
 
@@ -328,6 +367,17 @@ def _reachable_source_blob(fns: tuple[Callable[..., Any], ...]) -> bytes:
         canonical VALUE is now bound too (covered, via ``_canon_referenced_consts``), resolved against the
         callable's DEFINING module. Editing such a regex now changes the version; before this slice it did
         not, so the changed decision procedure shipped under an unchanged id@version.
+      * An IN-REPO helper FUNCTION/METHOD reached ONLY inside such a SOURCE-BOUND in-repo lambda/nested
+        function (i.e. a helper the lambda *calls*, whose name appears solely in the lambda's captured TEXT)
+        AND not already captured as its own record by this walk → its SOURCE is now bound too (covered, via
+        ``_canon_referenced_consts`` recursing through ``_canon``'s source-binding arm, gated on the walk's
+        ``_covered`` id-set). Mutating that helper's body now changes the version; before this slice it did
+        not. This is latent — no shipped oracle reaches an in-repo helper ONLY this way today (a helper such
+        as ``_imds_text`` that a recognizer's identity function calls is ALSO reached directly by the walk and
+        so is ``_covered`` and NOT re-bound), so the version values are byte-identical — closing the hole
+        before a future recognizer relies on a helper reached solely inside a source-bound callable. The
+        constants are canonicalised only AFTER the walk finishes, so ``_covered`` is complete when the deps of
+        a constant-nested callable are computed.
       * A cross-module in-repo function/class reached only by a MODULE-GLOBAL name (e.g. ``OracleKind`` /
         ``OracleSignal`` imported at module top) is deliberately NOT walked into here — it belongs to the
         model layer, not the decision procedure, and following it would balloon every version identically;
@@ -353,12 +403,16 @@ def _reachable_source_blob(fns: tuple[Callable[..., Any], ...]) -> bytes:
     seen_fns: set[int] = set()
     seen_consts: set[str] = set()
     func_srcs: list[str] = []
-    const_reprs: list[str] = []
+    pending_consts: list[tuple[str, Any]] = []
 
     def _record_const(name: str, val: Any) -> None:
+        # DEFER canonicalisation: a constant may contain a source-bound in-repo callable whose deps must be
+        # deduplicated against EVERY function the walk captures (``_covered``), and that set is only complete
+        # once the walk finishes. Recording (name, val) here and canonicalising below keeps the deps check
+        # complete and order-independent (``const_reprs`` is sorted at the end regardless).
         if name not in seen_consts:
             seen_consts.add(name)
-            const_reprs.append(f"{name}={_canon(val)}")
+            pending_consts.append((name, val))
 
     def _follow_global(name: str, val: Any, own_module: str | None) -> None:
         """Follow a MODULE-GLOBAL name reference found in a walked function's ``co_names``. Functions and
@@ -507,6 +561,13 @@ def _reachable_source_blob(fns: tuple[Callable[..., Any], ...]) -> bytes:
 
     for fn in fns:
         visit(fn)
+    # The walk is complete: ``seen_fns`` now names EVERY in-repo function/class captured as its own standalone
+    # source record. Canonicalise the deferred constants against that ``_covered`` set, so a constant-nested
+    # source-bound callable's deps bind only an in-repo helper the walk did NOT already capture (a helper
+    # reached ONLY inside such a callable — the latent hole). An already-covered helper (e.g. ``_imds_text``,
+    # reached directly by the walk) is skipped, so this stays byte-identical for the shipped oracles.
+    covered = frozenset(seen_fns)
+    const_reprs = [f"{name}={_canon(val, _covered=covered)}" for name, val in pending_consts]
     # Sorted so the blob is independent of traversal order → stable across runs/machines.
     parts = sorted(func_srcs) + sorted(const_reprs)
     return "\x00".join(parts).encode("utf-8")

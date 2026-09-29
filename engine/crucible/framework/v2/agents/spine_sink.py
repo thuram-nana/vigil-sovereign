@@ -61,11 +61,13 @@ class SpineSink:
 
     def finding(self, bug_class: str, confirmed_by: str, param: str, endpoint: str,
                 confidence: float) -> None:
-        # A real-time PROGRESS signal (an observation), not the authoritative finding event —
-        # engage posts the high-fidelity finding_event() below with the oracle_context.
+        # A real-time PROGRESS signal (an observation), NOT the authoritative finding event — this fires
+        # for a scanner finding that may still be a LEAD, so the summary must NOT assert "confirmed". The
+        # authoritative verdict (FACT vs LEAD, carrying the oracle_context) is posted by finding_event()
+        # below; here we only report a progress signal and name the check/oracle that produced it.
         self._post("observation", {
             "source": "scanner:finding", "surface": f"{param} @ {endpoint}".strip(" @"),
-            "summary": f"{bug_class} confirmed by {confirmed_by} (conf {round(confidence, 3)})"})
+            "summary": f"{bug_class} progress signal from {confirmed_by} (conf {round(confidence, 3)})"})
 
     def done(self, findings: int, requests_sent: int, elapsed_s: float) -> None:
         self._post("observation", {"source": "scanner:done", "surface": "(scan)",

@@ -400,3 +400,85 @@ def test_secret_recognizer_version_is_identical_across_processes():
     b = _secret_version_in_subprocess("999")
     assert a == b and a.startswith("sha256:"), (
         f"oracle_version(SECRET_CREDENTIAL_VALIDITY) is non-deterministic across interpreters: {a!r} != {b!r}")
+
+
+# ---------------------------------------------------------------------------
+# AUDIT-B (this slice) — THE IN-REPO-HELPER-INSIDE-A-SOURCE-BOUND-LAMBDA HOLE.
+#
+# The prior AUDIT-B closed CONSTANTS reached only inside a source-bound lambda. A sibling hole remained: an
+# in-repo helper FUNCTION reached ONLY inside such a lambda (nested in a module-level constant container, and
+# visited by the reachable-source closure walk on NO other path) entered the version by NAME only — its body
+# lived solely as a token in the lambda's captured TEXT — so mutating that helper's body left the version
+# byte-identical. `_canon_referenced_consts` now recurses through `_canon`'s source-binding arm to bind such a
+# helper's SOURCE, guarded by the walk's `_covered` id-set so a helper the walk ALREADY captured (e.g.
+# `oracles._imds_text`, which the `_SECRET_RECOGNIZERS` identity functions call AND which the walk reaches
+# directly) is NOT re-bound — which is why closing the hole is a ZERO-DELTA change for every shipped oracle.
+#
+# No shipped oracle exercises the ONLY-inside-a-lambda shape today, so the behavioural proof uses the
+# synthetic `_stale_probe` fixture, which reproduces it exactly.
+# ---------------------------------------------------------------------------
+
+_PROBE_HELPER_MARKER = "return len(str(value)) + 1"
+_PROBE_HELPER_MUT = "return len(str(value)) + 42"
+
+
+def _probe_blob_sha_in_subprocess(hashseed: str = "0") -> str:
+    """sha256 of `_reachable_source_blob((probe_entry,))` computed in a FRESH interpreter — so an on-disk edit
+    to the probe fixture is reflected (a re-import) and the determinism of the helper binding is pinned."""
+    code = ("import hashlib;"
+            "from framework.v2.verify.oracle_version import _reachable_source_blob as rb;"
+            "from framework.v2.verify.tests._stale_probe import probe_entry;"
+            "print('sha256:'+hashlib.sha256(rb((probe_entry,))).hexdigest())")
+    env = dict(os.environ, PYTHONHASHSEED=hashseed)
+    out = subprocess.check_output([sys.executable, "-c", code], env=env, text=True)
+    return out.strip().splitlines()[-1]
+
+
+def test_in_repo_helper_only_inside_a_source_bound_lambda_is_inside_the_version_closure():
+    """Structural half: the helper reached ONLY inside the source-bound lambda is bound as a dep of that
+    lambda (`_probe_helper=<callable ...>`), and appears exactly ONCE — proving it is reached only there and
+    was NOT already captured as a standalone closure-walk record (which is what the `_covered` guard skips)."""
+    from framework.v2.verify.tests import _stale_probe as probe
+
+    blob = ov._reachable_source_blob((probe.probe_entry,)).decode()
+    assert "_probe_helper=<callable" in blob, (
+        "the in-repo helper reached only inside the source-bound lambda is not bound as a dep — the hole is open")
+    assert "def _probe_helper" in blob, "the helper's source is invisible to the version"
+    assert blob.count("def _probe_helper") == 1, (
+        "the helper is captured on another path too — this would not exercise the ONLY-inside-a-lambda hole")
+
+
+def test_mutating_an_in_repo_helper_only_inside_a_source_bound_lambda_changes_the_version():
+    """Behavioural half: editing the BODY of an in-repo helper reached ONLY inside a source-bound lambda — ON
+    DISK, in a FRESH subprocess (per the codebase's staleness pattern) — must move the version blob. Before
+    this slice the helper entered by name only, so this edit was invisible. Original bytes restored in a
+    finally; a final assert proves the restore returns the blob to baseline."""
+    from framework.v2.verify.tests import _stale_probe as probe
+
+    path = Path(probe.__file__)
+    original = path.read_bytes()
+    text = original.decode()
+    assert text.count(_PROBE_HELPER_MARKER) == 1, (
+        f"marker {_PROBE_HELPER_MARKER!r} not unique in the probe fixture (count={text.count(_PROBE_HELPER_MARKER)})")
+    baseline = _probe_blob_sha_in_subprocess("0")
+    assert baseline.startswith("sha256:")
+    try:
+        path.write_text(text.replace(_PROBE_HELPER_MARKER, _PROBE_HELPER_MUT, 1))
+        mutated = _probe_blob_sha_in_subprocess("0")
+        assert mutated != baseline, (
+            "mutating an in-repo helper reached ONLY inside a source-bound lambda left the version blob "
+            "byte-identical — the AUDIT-B in-repo-helper hole is open")
+    finally:
+        path.write_bytes(original)
+    assert _probe_blob_sha_in_subprocess("0") == baseline, (
+        "the version blob did not restore after the probe fixture was restored")
+
+
+def test_probe_version_blob_is_identical_across_processes():
+    """Determinism: the in-repo-helper dep binding must be byte-identical across interpreters at differing
+    PYTHONHASHSEED — a helper binds by its SOURCE, never by object identity, and the `_covered` set is a
+    membership test over ids computed within each process."""
+    a = _probe_blob_sha_in_subprocess("0")
+    b = _probe_blob_sha_in_subprocess("777")
+    assert a == b and a.startswith("sha256:"), (
+        f"the in-repo-helper version binding is non-deterministic across interpreters: {a!r} != {b!r}")
