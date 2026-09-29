@@ -16,6 +16,11 @@ Two properties, both required — either alone is insufficient:
 The pinned address travels with the capture, so a certificate records *which* endpoint was observed rather
 than only which name was requested.
 
+WHAT LIVES HERE NOW. Only the PIN half — :func:`pinned_handlers` and the two pinned connection classes,
+which ``live/web_redrive.py`` still uses. The VALIDATE half (:func:`resolve_and_validate`) is REMOVED and
+raises: it was charter-relative, so it never consulted the never-liftable L3/L4 egress floor and a charter
+listing a metadata address satisfied it. ``live/egress_floor.pin_egress`` is the one validator now.
+
 Pure stdlib; no framework imports (FATAL-2 safe).
 """
 
@@ -43,32 +48,30 @@ class PinnedResolution:
 
 
 def resolve_and_validate(host: str, port: int, is_authorized) -> PinnedResolution:
-    """Resolve ``host`` and require EVERY address to satisfy ``is_authorized(ip)``.
+    """REMOVED — always raises. Use ``live.egress_floor.pin_egress`` instead.
 
-    All-or-nothing on purpose: with a multi-address name, connecting to the one address that happens to be
-    in scope would let the others be reachable on a retry, so a mixed answer is refused. A name that does not
-    resolve is refused too — an unresolvable target is not an authorized one."""
-    out = PinnedResolution(host=host)
-    try:
-        infos = socket.getaddrinfo(host, port, proto=socket.IPPROTO_TCP)
-    except OSError as exc:
-        out.refused_reason = f"cannot resolve {host!r}: {exc}"
-        return out
-    for info in infos:
-        address = info[4][0]
-        if address not in out.addresses:
-            out.addresses.append(address)
-    if not out.addresses:
-        out.refused_reason = f"{host!r} resolved to no addresses"
-        return out
-    for address in out.addresses:
-        if not is_authorized(address):
-            out.refused_reason = (
-                f"{host!r} resolves to {address} which the scope decision does not authorize "
-                f"(all {len(out.addresses)} address(es) must be in scope)")
-            return out
-    out.pinned = out.addresses[0]
-    return out
+    This was a CHARTER-RELATIVE pin: it required every resolved address to satisfy the caller's own
+    ``is_authorized`` predicate and nothing else. That predicate bottoms out in
+    ``ethics.host_matches_scope``, pure string matching, so a charter that LISTS ``169.254.169.254``
+    satisfied it and the "pin" happily pinned the connection to cloud instance metadata. The
+    never-liftable L3/L4 floor (``vigil_gateway.denylist.is_egress_denied``) was never consulted.
+
+    Every call site now uses :func:`egress_floor.pin_egress`, which runs the charter-INDEPENDENT floor
+    FIRST and keeps the scope predicate on top of it. This stub stays — rather than the function being
+    quietly deleted — because the name reads like the safe thing and sits one import away from the next
+    author who adds a resolve-then-connect site; a silent revival is exactly how this class-bug reached
+    four sites. ``pinned_handlers`` below is NOT deprecated: ``web_redrive`` uses it to dial the address
+    ``pin_egress`` validated.
+
+    :raises RuntimeError: always.
+    """
+    raise RuntimeError(
+        "dns_pin.resolve_and_validate is removed: it was a charter-RELATIVE pin with no L3/L4 egress "
+        "floor, so a charter listing 169.254.169.254 pinned the connection straight at cloud instance "
+        "metadata. Use vigil_integration.live.egress_floor.pin_egress(host, port, slug=..., "
+        "address_authorized=charter_address_authorizer(slug)) — it runs the never-liftable gateway "
+        "denylist over EVERY resolved address before the scope predicate, and returns the literal to "
+        "pin the connect to (pair it with dns_pin.pinned_handlers / egress_floor.pinned_*_connector).")
 
 
 class PinnedHTTPConnection(http.client.HTTPConnection):

@@ -1609,7 +1609,10 @@ def _redrive_branch_for(bug_class: str) -> "Optional[str]":
         # OWNER-SIGNED WorkflowSpec attestation. request_race fires COUNT-based (successes > max_allowed,
         # re-derived by the operator's SEMANTIC success predicate over the retained raw burst responses —
         # NEVER timing; a bare any-2xx count is a LEAD); the raw-socket burst is re-gated through
-        # validate_action (scope/charter/kill-switch/never-liftable egress floor) BEFORE any byte. business_logic
+        # validate_action (scope/charter/kill-switch/posture — all STRING-matching, no DNS and no IP
+        # classification) AND, separately, through the never-liftable egress floor + connect-pin that the
+        # runner runs before the first burst (live/egress_floor.py:pin_egress; validate_action does NOT
+        # contain that floor, which is why it is a distinct step) BEFORE any byte. business_logic
         # fires when the operator's danger predicate holds over the observed post-state, the tampered WRITE
         # riding the 0.3 owner-signed per-action approval. No owner-signed spec ⇒ INCONCLUSIVE; a correctly-
         # locked resource / correctly-priced flow (the benign twin) ⇒ a channel-confirmed non-fire.
@@ -1621,9 +1624,16 @@ def _redrive_branch_for(bug_class: str) -> "Optional[str]":
         # TE.CL) first request is ECHOED in VIGIL's OWN second-request response on that connection AND ABSENT
         # from an identical WELL-FORMED control connection's second response (verify/oracles.py::
         # smuggling_desync_oracle). NO victim is poisoned (both requests are VIGIL's own on its own sockets); the
-        # raw-socket burst is re-gated through validate_action + DNS-pin before any byte leaves the box. Timing is
-        # never consulted; a bare mangled-method status does not mint; a shared-pool desync needing a real
-        # co-tenant victim, an https origin, or genuine HTTP/2 desync stays a LEAD.
+        # raw-socket burst is re-gated through validate_action + reachability_cloud._authorize + the NEVER-LIFTABLE
+        # egress floor and connect-pin (live/egress_floor.py:pin_egress over vigil_gateway.denylist) before any
+        # byte leaves the box. The floor is a SEPARATE authority from the DNS-pin on purpose: the pin used to be
+        # charter-RELATIVE (it re-asked the string-matching scope gate about each resolved address), so a charter
+        # LISTING 169.254.169.254 authorised raw connects straight at cloud metadata; the floor is
+        # charter-INDEPENDENT. Timing is never consulted; a bare mangled-method status does not mint; a
+        # shared-pool desync needing a real co-tenant victim, an https origin, or genuine HTTP/2 desync stays a
+        # LEAD. A fire is sound as a conflict-attributable leak of prior-request bytes across a response
+        # boundary; it does NOT discriminate a genuine back-end desync from a conflict-leg-only echo by a
+        # rejecting front-end (see the branch's registry limitation).
         "request_smuggling": "request_smuggling.differential_desync",
         # Wave 5.1 — STATIC source-code rule (the SAST bridge). These are ANALYSIS-ORIGIN static-FACT classes:
         # the certificate is minted by the ENGINE analysis bridge (framework.v2.analysis.static_facts) over a

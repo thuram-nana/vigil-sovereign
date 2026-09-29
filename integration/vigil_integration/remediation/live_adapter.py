@@ -217,8 +217,24 @@ class LiveHttpAdapter:
         host-only binding). A GATE refusal RAISES so an unauthorized target is REFUSED, not silently
         downgraded to a host-only pin. Framework import is function-local (FATAL-2)."""
         from framework.v2.verify.tls import capture_tls_handshake   # lazy — FATAL-2
+        from ..live.egress_floor import (                            # lazy — stdlib + gateway denylist
+            charter_address_authorizer, pin_egress, pinned_tls_connector,
+        )
         port = split.port or 443
-        tls = capture_tls_handshake(self._host, int(port), slug=self._slug)
+        # THE NEVER-LIFTABLE EGRESS FLOOR. ``capture_tls_handshake``'s own gate chain
+        # (kill-switch -> single-host -> ACTIVE_RECON -> ``ethics.host_matches_scope``) is STRING
+        # matching: it resolves nothing and classifies no address, so with the charter listing
+        # ``169.254.169.254`` this call opened a real socket to cloud instance metadata. Remediation
+        # validation runs on an operator-triggered RE-TEST after a fix, i.e. exactly when nobody is
+        # watching the wire. Resolve once, adjudicate every address against the gateway denylist and the
+        # charter, and PIN the handshake to the validated literal (SNI keeps the hostname).
+        pin = pin_egress(self._host, int(port), slug=self._slug,
+                         address_authorized=charter_address_authorizer(self._slug, self._host))
+        if not pin.allowed:
+            raise RuntimeError(f"identity sample TLS handshake refused by the egress floor: "
+                               f"{pin.refused_reason}")
+        tls = capture_tls_handshake(self._host, int(port), slug=self._slug,
+                                    connect=pinned_tls_connector(pin.pinned))
         if tls.get("connected"):
             return str(tls.get("spki_sha256") or "")
         err = str(tls.get("error") or "")

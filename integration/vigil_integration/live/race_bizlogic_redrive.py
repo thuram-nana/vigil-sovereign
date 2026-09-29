@@ -228,9 +228,35 @@ def race_bizlogic_redrive(
 
     # -- the RACE bursts (request_race) — the RUNNER fires the gated raw-socket burst -----------------
     from urllib.parse import urlsplit, urljoin  # noqa: PLC0415
+
+    # noqa: PLC0415 — the SHARED never-liftable floor + connect-pin + scope-over-addresses predicate
+    from .egress_floor import charter_address_authorizer, pin_egress
+
     sp = urlsplit(base_url)
     host = sp.hostname or "127.0.0.1"
     port = sp.port or (80 if sp.scheme != "https" else 443)
+    # The engine's ``raw_race`` gate (``charter_authorize_gate`` -> ``validate_action``) is CHARTER-relative
+    # and string-matching only: it resolves nothing, so it authorises a name — or a charter-LISTED literal —
+    # that is the cloud metadata address. Run the ONE shared never-liftable floor over every resolved address
+    # HERE, before any burst, and hand ``raw_race`` the VALIDATED LITERAL to dial while ``_build_request``
+    # keeps the original hostname in the Host header.
+    # ``address_authorized`` is the SAME shared predicate the other three re-drive sites use: the floor
+    # allows any globally-routable address, so without it an out-of-scope second A record on an in-scope
+    # name would be burst at. ``pin.scope_over_addresses`` records that the step ran.
+    race_pin = (pin_egress(host, port, slug=slug,
+                           address_authorized=charter_address_authorizer(slug, host))
+                if race_targets else None)
+    if race_pin is not None and not race_pin.allowed:
+        # The floor refused the ORIGIN, so no burst may be fired at all. Every declared race target is
+        # recorded INCONCLUSIVE (VIGIL never observed it) — never a clean, never a FACT. ``res.refused`` is
+        # deliberately NOT set: the bizlogic leg below is a separate authorisation and may still run, and
+        # marking the whole result refused would misdescribe a run that went on to observe something.
+        res.notes.append(f"request_race bursts refused before any traffic: {race_pin.refused_reason}")
+        for _t in race_targets:
+            res.inconclusive.append(
+                ("request_race", f"{getattr(_t, 'action_path', '')} (egress floor refused the origin)"))
+        race_targets = []
+    connect_host = race_pin.pinned if (race_pin is not None and race_pin.allowed) else host
     for target in race_targets:
         action_path = getattr(target, "action_path", "")
         if not action_path:
@@ -238,7 +264,7 @@ def race_bizlogic_redrive(
         target_url = urljoin(base_url if base_url.endswith("/") else base_url + "/", action_path.lstrip("/"))
         request_bytes = _build_request(host, port, action_path, body=getattr(target, "body", b"") or b"")
         try:
-            outcomes = raw_race(host, port, request_bytes, int(getattr(target, "count", 8)),
+            outcomes = raw_race(connect_host, port, request_bytes, int(getattr(target, "count", 8)),
                                 timeout=timeout, authorize=gate, target_url=target_url)
         except Exception as e:  # noqa: BLE001 — a refused / errored burst never fabricates a FACT
             res.notes.append(f"request_race burst error [{action_path}]: {type(e).__name__}: {e}")
