@@ -49,6 +49,50 @@ def _unbind_engagement_after_test() -> Generator[None, None, None]:
 
 
 @pytest.fixture(autouse=True)
+def _zero_http_rate_floor(
+    request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
+) -> Generator[None, None, None]:
+    """CI SPEED (ci/crucible-core-ratefloor): zero the HTTP-executor rate-throttle SLEEP for the
+    duration of each test — so the whole suite stays per-PR at full fidelity without the wall clock.
+
+    The "CRUCIBLE core on vigil_core" leg crept to ~44-45 min and hits GitHub's 45-min ceiling. The
+    dominant cost is NOT the statistical-volume tests: it is the ~23 functional engage integration
+    tests, each of which drives ~222 loopback requests through the gated ``HttpExecutor`` and pays the
+    TEST posture's 0.2 s minimum inter-request interval on every one (~43 s/test, ~19 min in total).
+
+    This fixture patches the MODULE-LEVEL ``_RATE_PROFILES`` dict VALUES (TEST/AUDIT/EMULATE) to a zero
+    floor ``(0.0, 0.0)`` for the duration of each test; ``monkeypatch.setitem`` auto-restores after.
+    The throttle MECHANISM still runs and stays covered: ``HttpExecutor._sleep_for_rate_limit`` still
+    takes the lock, still reads ``_RATE_PROFILES[posture]`` at sleep time, still computes
+    ``floor = max(profile_floor, self._operator_min_interval)`` and still RESERVES the request's start
+    instant on the anchor. Only the wall-clock wait vanishes: with the profile at 0.0 and the default
+    operator interval 0.0 the floor is 0.0, so ``total <= 0`` and the ``if total > 0: time.sleep(total)``
+    branch is never taken. (Verified against agents/http_executor.py:1182 ``_sleep_for_rate_limit``.)
+
+    NO PRODUCTION CODE CHANGES. The existing ``VIGIL_MIN_REQUEST_INTERVAL_S`` operator hook cannot be
+    used to reach zero: it can only TIGHTEN (raise) the floor, never lower it. Monkeypatching the
+    profile is the only test-side path to a zero floor.
+
+    A test whose assertions depend on the GENUINE throttle/timing/spacing opts OUT with
+    ``@pytest.mark.real_rate_floor`` (registered in framework/v2/pyproject.toml): this fixture detects
+    the marker and leaves the real profiles untouched, so those tests exercise the genuine floor and take
+    real wall-clock. Every such test is marked; see them for the per-test justification."""
+    if request.node.get_closest_marker("real_rate_floor") is not None:
+        # Genuine-throttle test: leave the real posture rate profiles in place.
+        yield
+        return
+    try:
+        from framework.v2.agents import http_executor
+    except Exception:  # noqa: BLE001 — no executor imported ⇒ no throttle to zero; nothing to do
+        yield
+        return
+    for posture in ("TEST", "AUDIT", "EMULATE"):
+        if posture in http_executor._RATE_PROFILES:
+            monkeypatch.setitem(http_executor._RATE_PROFILES, posture, (0.0, 0.0))
+    yield
+
+
+@pytest.fixture(autouse=True)
 def _isolate_crucible_root_cache() -> Generator[None, None, None]:
     """Keep CRUCIBLE_ROOT resolution hermetic per test (B4). ``common.paths.crucible_root`` is an
     ``@lru_cache(maxsize=1)`` — the FIRST caller freezes the resolved root for the whole process, so a test

@@ -71,3 +71,6 @@ testpaths        = [
 python_files     = ["test_*.py"]
 python_functions = ["test_*"]
 addopts          = "-q -ra"
+markers = [
+  "real_rate_floor: test asserts the GENUINE HTTP-executor rate throttle/timing/spacing — the autouse zero-floor CI-speed override in conftest._zero_http_rate_floor MUST NOT apply; it runs against the real _RATE_PROFILES and takes real wall-clock.",
+]

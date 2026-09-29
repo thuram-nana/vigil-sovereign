@@ -44,6 +44,10 @@ def test_min_interval_env_tightens_the_rate_floor(monkeypatch):
     assert slept and abs(slept[0] - 1.9) < 0.05, slept
 
 
+# real_rate_floor: operator min 0.05 is BELOW the TEST posture floor, so effective floor = max(0.2, 0.05)
+# = 0.2 and the assertion reads the TEST floor VALUE (0.2) directly. Zeroing TEST would give
+# max(0.0, 0.05) = 0.05 and the `slept[0] ≈ 0.2` assertion would FAIL — genuine dependence on the real floor.
+@pytest.mark.real_rate_floor
 def test_operator_min_below_posture_floor_cannot_loosen(monkeypatch):
     import framework.v2.agents.http_executor as H
     ex = _exec(monkeypatch, min_interval="0.05")      # BELOW the TEST posture floor 0.2
