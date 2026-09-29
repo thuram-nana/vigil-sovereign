@@ -217,6 +217,28 @@ def export_bundle(
     # collide, and the bundle-side refs_unique check would refuse the whole (legitimate) bundle CLOSED.
     findings = _assign_unique_refs(findings)
 
+    # Wave-A2: a client-verifiable bundle is a DELIBERATE disclosure — it must carry the evidence the oracle
+    # re-fires over. Any finding whose secret / raw-response fields were SEALED at rest is UNSEALED here,
+    # IN-ENGAGEMENT (the local DEK), so the stored certificate (signed over the plaintext context) is reused
+    # byte-identically and the shipped report re-fires for a recipient with no DEK. Best-effort: a finding
+    # whose DEK is already crypto-shredded cannot be exported (the evidence is gone) and is DROPPED rather
+    # than shipped as an un-re-fireable sealed token. The run's own reverifiable.json stays sealed at rest.
+    _unsealed: list = []
+    for f in findings:
+        slug = f.get("sealed_engagement")
+        if isinstance(slug, str) and slug:
+            from framework.v2.common.context_sealing import unseal_oracle_context  # lazy — FATAL-2
+            try:
+                f = {**f, "oracle_context": unseal_oracle_context(f.get("oracle_context"), slug)}
+            except Exception:  # noqa: BLE001 — crypto-shredded/unrecoverable → not exportable, drop it
+                continue
+            f.pop("sealed_engagement", None)
+        _unsealed.append(f)
+    findings = _unsealed
+    if not findings:
+        return {"ok": False, "error": "no proven findings to export (every proven FACT's evidence has been "
+                                      "crypto-shredded — nothing left to re-verify)"}
+
     prov = provision_authority(slug=engagement_slug, scope=["127.0.0.1"],
                                base_dir=(base_dir or str(run_dir)), vault=vault)
     evidence_root = Path(run_dir) / "evidence"

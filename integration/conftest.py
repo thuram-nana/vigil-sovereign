@@ -176,3 +176,18 @@ def _isolate_authority_root_dir(tmp_path_factory, monkeypatch):
     a specific dir sets ``VIGIL_AUTHORITY_ROOT_DIR`` in its own body (applied after this fixture, so it wins)."""
     monkeypatch.setenv("VIGIL_AUTHORITY_ROOT_DIR", str(tmp_path_factory.mktemp("authority-root")))
     yield
+
+
+@pytest.fixture(autouse=True)
+def _isolate_evidence_keys_dir(tmp_path_factory, monkeypatch):
+    """Keep the HOST-LEVEL crypto-shred KEYSTORE hermetic per test (Wave-A2). ``EvidenceKeyring`` seals the
+    at-rest secret / raw-response fields of a re-verifiable ``oracle_context`` under a per-engagement DEK
+    stored at ``<v2_root>/.evidence-keys/<slug>.dek`` (override ``CRUCIBLE_EVIDENCE_KEYS_DIR``). Without this
+    redirect the first errsig/exposure mint in the process writes a real DEK into the shared in-tree keystore
+    and it ACCUMULATES across the suite (and, worse, a second test reusing an engagement slug would silently
+    share the first test's DEK). Point it at a throwaway per test: each sealing test gets a fresh keystore in
+    which it both seals AND unseals for its own offline-verify assertion. Env-only, so a harmless no-op in the
+    framework-free (sovereign) leg and for tests that pass ``EvidenceKeyring(keys_dir=...)`` explicitly. A test
+    that needs a specific dir sets ``CRUCIBLE_EVIDENCE_KEYS_DIR`` in its own body (applied after, so it wins)."""
+    monkeypatch.setenv("CRUCIBLE_EVIDENCE_KEYS_DIR", str(tmp_path_factory.mktemp("evidence-keys")))
+    yield

@@ -206,8 +206,30 @@ def read_reverifiable(run_dir: str | os.PathLike) -> dict:
     return {"active_findings": out}
 
 
+def _seal_entry_at_rest(entry: dict, engagement_slug: str) -> None:
+    """Wave-A2 at-rest protection. If ``entry["oracle_context"]`` carries captured secret / raw-response
+    material (an exposure secret-signature or an error-signature context), SEAL those load-bearing fields
+    under the engagement DEK and stamp ``entry["sealed_engagement"]`` (the slug offline re-verify keys the
+    unseal by). A non-secret context — every boolean/timing/xss/ssti/dom/web-differential entry — is left
+    UNCHANGED, so this is a no-op that keeps those writes byte-identical.
+
+    In place on ``entry`` (its ``oracle_context`` is already a fresh per-entry copy, so the in-memory
+    context the signed certificate was minted over is never mutated). RAISES on a sealing failure so the
+    caller's best-effort ``try/except`` fails CLOSED — the plaintext secret is never written — rather than
+    falling back to plaintext; the signed certificate in ``res.facts`` is unaffected."""
+    ctx = entry.get("oracle_context")
+    if not (engagement_slug and isinstance(ctx, dict)):
+        return
+    from framework.v2.common.context_sealing import context_carries_secret, seal_oracle_context  # lazy — FATAL-2
+    if not context_carries_secret(ctx):
+        return
+    entry["oracle_context"] = seal_oracle_context(ctx, engagement_slug)
+    entry["sealed_engagement"] = str(engagement_slug)
+
+
 def _persist_reverifiable(run_dir: str | os.PathLike, finding: dict, action_id: str,
-                          exchanges: Any, resolve: Any, res: Any) -> None:
+                          exchanges: Any, resolve: Any, res: Any,
+                          engagement_slug: str = "") -> None:
     """Append (dedup by check_id) a re-verifiable finding — the SAME plain-dict oracle_context shape a
     scan's reverifiable.json carries, so ``framework.v2 evidence verify`` re-fires it byte-identically. The
     finding's top-level ``bug_class`` mirrors the class embedded in the context (reverify refuses a flip)."""
@@ -238,6 +260,12 @@ def _persist_reverifiable(run_dir: str | os.PathLike, finding: dict, action_id: 
     # serialization hiccup simply omits the stored cert and export falls back to a deterministic re-mint —
     # it never un-mints the FACT. The blob is stripped from the bundle's own reverifiable.json (it is
     # redundant with evidence-bundle.json) so the shipped report stays lean.
+    # Wave-A2: SEAL at rest the error-signature RAW response bytes (error_observed / error_control). A
+    # non-error-signature context (a web-differential open_redirect/cors/host_header entry) carries neither
+    # field, so this is a no-op that keeps those writes byte-identical; only an error-signature context is
+    # sealed (and stamped ``sealed_engagement``). Sealed AFTER the entry's oracle_context is built (a fresh
+    # per-entry dict), so the in-memory context the certificate was minted over is never mutated.
+    _seal_entry_at_rest(entry, engagement_slug)
     signed = getattr(res, "signed", None)
     if signed is not None:
         try:
@@ -643,7 +671,8 @@ def _strix_errsig_redrive(report: dict, eclass: str, *, run_dir: "str | os.PathL
         # Retain the re-verifiable material (oracle_context + action_id + signed cert) so the run's dossier
         # ships the offline-verifiable bundle and `framework.v2 verify` re-fires it byte-identically.
         try:
-            _persist_reverifiable(run_dir, finding, action_id, exchanges, _resolve, res)
+            _persist_reverifiable(run_dir, finding, action_id, exchanges, _resolve, res,
+                                 engagement_slug=engagement_slug)
         except Exception:  # noqa: BLE001
             pass
     return _ErrsigMintResult(is_fact=bool(getattr(res, "is_fact", False)), result=res,
@@ -913,7 +942,8 @@ def _persist_runtime_redrive(run_dir: "str | os.PathLike", report: dict, res: An
         json.dumps(rec, indent=2, sort_keys=True), encoding="utf-8")
 
 
-def _persist_runtime_reverifiable(run_dir: "str | os.PathLike", res: Any) -> None:
+def _persist_runtime_reverifiable(run_dir: "str | os.PathLike", res: Any,
+                                  engagement_slug: str = "") -> None:
     """Append (dedup by check_id) each of a runtime re-drive's signed FACTs to the run's re-verifiable report,
     storing the SAME JSON-safe ``oracle_context`` the FACT was minted over (from ``res.contexts``) DIRECTLY —
     the boolean/timing SPRT/latency contexts are not reconstructable via ``context_from_exchanges``, so unlike
@@ -941,6 +971,12 @@ def _persist_runtime_reverifiable(run_dir: "str | os.PathLike", res: Any) -> Non
             "action_id": "poc-" + hashlib.sha256(ref.encode("utf-8")).hexdigest()[:16],
             "oracle_context": ctx,
         }
+        # Wave-A2: SEAL at rest the exposure secret-signature secret fields (secret_value /
+        # secret_assignment / body). ``_seal_entry_at_rest`` returns the context UNCHANGED for a
+        # non-secret context (boolean/timing/xss/ssti/dom), so this write stays byte-identical for
+        # every arm that actually reaches this function today; it seals (and stamps ``sealed_engagement``,
+        # the slug the DEK is keyed by) only for a secret-bearing context.
+        _seal_entry_at_rest(entry, engagement_slug)
         signed = getattr(fact, "signed", None)
         if signed is not None:
             try:
@@ -957,9 +993,12 @@ def _persist_runtime_reverifiable(run_dir: "str | os.PathLike", res: Any) -> Non
         pass
 
 
-def _finish_runtime_arm(report: dict, res: Any, *, run_dir: "str | os.PathLike") -> "Any | None":
+def _finish_runtime_arm(report: dict, res: Any, *, run_dir: "str | os.PathLike",
+                        engagement_slug: str = "") -> "Any | None":
     """Persist a runtime re-drive result (Proof-Studio record + offline-reverifiable FACTs) and wrap it as a
-    ``_RuntimeMintResult``. Persistence is best-effort: a signed FACT is never un-minted by a persist hiccup."""
+    ``_RuntimeMintResult``. Persistence is best-effort: a signed FACT is never un-minted by a persist hiccup.
+    ``engagement_slug`` is threaded to ``_persist_runtime_reverifiable`` so a secret-bearing context (the
+    exposure secret-signature arm) is SEALED at rest under that engagement's DEK (Wave-A2)."""
     if res is None:
         return None
     try:
@@ -968,7 +1007,7 @@ def _finish_runtime_arm(report: dict, res: Any, *, run_dir: "str | os.PathLike")
         pass
     if int(getattr(res, "n_facts", 0) or 0) > 0:
         try:
-            _persist_runtime_reverifiable(run_dir, res)
+            _persist_runtime_reverifiable(run_dir, res, engagement_slug)
         except Exception:  # noqa: BLE001
             pass
     return _RuntimeMintResult(is_fact=int(getattr(res, "n_facts", 0) or 0) > 0, result=res)
@@ -991,7 +1030,7 @@ def _reflection_redrive(report: dict, cls: str, *, run_dir: "str | os.PathLike",
     except Exception as exc:  # noqa: BLE001 — a re-drive we could not RUN → LEAD (never a false CLEAN)
         _record_degraded(run_dir, REDRIVE_FAILED, "proof.run._reflection_redrive", exc)
         return None
-    return _finish_runtime_arm(report, res, run_dir=run_dir)
+    return _finish_runtime_arm(report, res, run_dir=run_dir, engagement_slug=engagement_slug)
 
 
 def _stat_redrive_arm(report: dict, fn_name: str, where: str, *, run_dir: "str | os.PathLike",
@@ -1011,7 +1050,7 @@ def _stat_redrive_arm(report: dict, fn_name: str, where: str, *, run_dir: "str |
     except Exception as exc:  # noqa: BLE001 — a re-drive we could not RUN → LEAD (never a false CLEAN)
         _record_degraded(run_dir, REDRIVE_FAILED, where, exc)
         return None
-    return _finish_runtime_arm(report, res, run_dir=run_dir)
+    return _finish_runtime_arm(report, res, run_dir=run_dir, engagement_slug=engagement_slug)
 
 
 def _ssti_redrive(report: dict, cls: str, *, run_dir: "str | os.PathLike",
@@ -1073,7 +1112,7 @@ def _dom_redrive_mint(report: dict, fn_name: str, where: str, *, run_dir: "str |
     except Exception as exc:  # noqa: BLE001 — a re-drive we could not RUN → LEAD (never a false CLEAN)
         _record_degraded(run_dir, REDRIVE_FAILED, where, exc)
         return None
-    return _finish_runtime_arm(report, res, run_dir=run_dir)
+    return _finish_runtime_arm(report, res, run_dir=run_dir, engagement_slug=engagement_slug)
 
 
 def _dom_xss_redrive(report: dict, cls: str, *, run_dir: "str | os.PathLike",
@@ -1481,7 +1520,8 @@ def build_report_mint(
             # Retain the re-verifiable material (the oracle_context + action_id) so `vigil proof-export` can
             # rebuild a client-verifiable bundle later. Best-effort: a serialization hiccup never un-mints.
             try:
-                _persist_reverifiable(run_dir, finding, action_id, exchanges, _resolve, res)
+                _persist_reverifiable(run_dir, finding, action_id, exchanges, _resolve, res,
+                                 engagement_slug=engagement_slug)
             except Exception:  # noqa: BLE001
                 pass
         return res

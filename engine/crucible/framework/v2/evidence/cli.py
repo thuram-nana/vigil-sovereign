@@ -68,6 +68,30 @@ def _findings(report: dict) -> list[dict]:
     return fs if isinstance(fs, list) else ([report] if report.get("oracle_context") else [])
 
 
+def _unseal_finding_or_none(f: dict) -> "dict | None":
+    """Wave-A2: return finding ``f`` with its retained ``oracle_context`` UNSEALED in-engagement (the local
+    DEK) when it was sealed at rest, so a minted certificate / PCF binds the PLAINTEXT context an external
+    verifier REPRODUCES (a cert bound to a sealed context is ``bound=True`` but ``reproduced=False``). A
+    plaintext finding (no ``sealed_engagement``) is returned UNCHANGED.
+
+    Returns ``None`` when a sealed context cannot be recovered — the DEK was crypto-shredded, sealed for a
+    different engagement, or the ciphertext was tampered — so the caller FAILS CLOSED (refuses to mint a
+    bound-but-non-reproducible certificate) rather than silently emit one. Never raises. The stale
+    ``sealed_engagement`` stamp is dropped so the returned finding is an honest plaintext finding."""
+    if not isinstance(f, dict):
+        return f
+    slug = f.get("sealed_engagement")
+    oc = f.get("oracle_context")
+    if not (isinstance(slug, str) and slug and isinstance(oc, dict)):
+        return f
+    from ..common.context_sealing import unseal_oracle_context
+    try:
+        oc_plain = unseal_oracle_context(oc, slug)
+    except Exception:  # noqa: BLE001 — unrecoverable sealed evidence → fail-closed (caller refuses)
+        return None
+    return {**{k: v for k, v in f.items() if k != "sealed_engagement"}, "oracle_context": oc_plain}
+
+
 def _strict_oracle_version_enabled() -> bool:
     """The STRICT ORACLE-VERSION production profile (fail-safe OFF). When on, a bundle that is crypto-sound but
     carries a certificate whose oracle version CHANGED since mint — or cannot be confirmed — is REFUSED (exit
@@ -86,6 +110,15 @@ def _certify(args: argparse.Namespace) -> int:
     for i, f in enumerate(_findings(report)):
         if not (isinstance(f, dict) and f.get("oracle_context")):
             continue
+        # Wave-A2: a sealed-at-rest retained context is recovered in-engagement BEFORE the cert is minted, so
+        # the certificate binds the plaintext context an external verifier REPRODUCES. Fail closed on an
+        # unrecoverable seal — never mint a bound-but-non-reproducible certificate.
+        f = _unseal_finding_or_none(f)
+        if f is None:
+            print("evidence certify: a retained oracle_context is SEALED and could not be recovered "
+                  "in-engagement (DEK crypto-shredded, tampered, or sealed for a different engagement); "
+                  "refusing to mint a bound-but-non-reproducible certificate (fail-closed).", file=sys.stderr)
+            return 2
         cert = build_certificate(f, engagement_slug=args.slug, seq=i,
                                  evidence_root=evidence_root, action_id=f.get("action_id"))
         signed_certs.append(sign_certificate(cert, signers) if signers
@@ -354,7 +387,14 @@ def _ctx_by_ref(report: dict) -> dict[str, dict]:
             ref = str(f.get("check_id") or f.get("finding_slug") or f.get("bug_class") or "finding")
             if ref in out:
                 raise ValueError(f"duplicate finding_ref {ref!r} in report contexts — refusing")
-            out[ref] = f["oracle_context"]
+            # Wave-A2: unseal a sealed-at-rest context in-engagement so the exported PCF carries the plaintext
+            # the external verifier reproduces; an unrecoverable seal is refused (fail-closed).
+            uf = _unseal_finding_or_none(f)
+            if uf is None:
+                raise ValueError(f"the oracle_context for {ref!r} is SEALED and could not be recovered "
+                                 f"in-engagement (crypto-shredded, tampered, or wrong engagement) — refusing "
+                                 f"to export a bound-but-non-reproducible PCF")
+            out[ref] = uf["oracle_context"]
     return out
 
 
@@ -363,7 +403,13 @@ def _pcf_export(args: argparse.Namespace) -> int:
     oracle_context comes from the report, by finding_ref — the same rule ``certify`` uses)."""
     from .pcf import to_pcf
     bundle = json.loads((Path(args.bundle) / "evidence-bundle.json").read_text(encoding="utf-8"))
-    ctx = _ctx_by_ref(json.loads(Path(args.report).read_text(encoding="utf-8")))
+    # ``_ctx_by_ref`` unseals a sealed-at-rest context in-engagement (Wave-A2) and refuses (raises) an
+    # unrecoverable seal or a duplicate ref — surface either as a clean fail-closed exit, not a traceback.
+    try:
+        ctx = _ctx_by_ref(json.loads(Path(args.report).read_text(encoding="utf-8")))
+    except ValueError as exc:
+        print(f"evidence pcf-export: {exc} (fail-closed).", file=sys.stderr)
+        return 2
     pcf_certs = []
     for raw in bundle.get("certificates", []):
         sc = SignedEvidence.model_validate(raw)

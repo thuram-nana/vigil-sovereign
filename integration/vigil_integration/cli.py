@@ -714,6 +714,31 @@ def _nonce_param_collision_refusal(param: str, nonce_param: str = _REDRIVE_NONCE
     return ""
 
 
+def _unseal_entry_context_or_none(entry: dict) -> "Optional[dict]":
+    """Wave-A2: return ``entry`` with its retained ``oracle_context`` UNSEALED in-engagement (the local DEK)
+    when it was sealed at rest, so the POSITIVE-CONTROL re-fire (``reverify_context`` in the remediation loop)
+    and the exploit-request reconstruction both see the byte-identical original plaintext. A plaintext entry
+    (no ``sealed_engagement``) is returned UNCHANGED.
+
+    Returns ``None`` when a sealed context cannot be recovered — the DEK was crypto-shredded, sealed for a
+    different engagement, or the ciphertext was tampered — so the caller FAILS CLOSED (its
+    ``original_firing_context`` becomes ``None`` and the existing "no retained firing oracle_context" refusal
+    fires; a positive control that cannot be re-fired proves nothing). Never raises."""
+    if not isinstance(entry, dict):
+        return entry
+    slug = entry.get("sealed_engagement")
+    oc = entry.get("oracle_context")
+    if not (isinstance(slug, str) and slug and isinstance(oc, dict)):
+        return entry
+    from framework.v2.common.context_sealing import unseal_oracle_context  # lazy — FATAL-2
+    try:
+        oc_plain = unseal_oracle_context(oc, slug)
+    except Exception:  # noqa: BLE001 — unrecoverable sealed evidence → fail-closed (caller refuses)
+        return None
+    # drop the now-stale seal stamp so the returned entry is an honest plaintext entry (no evs1: fields).
+    return {**{k: v for k, v in entry.items() if k != "sealed_engagement"}, "oracle_context": oc_plain}
+
+
 def _reconstruct_exploit_request(finding: Any, entry: dict) -> "tuple[Optional[dict], str]":
     """Reconstruct the ORIGINAL exploit request ``(endpoint_path, param, payload)`` from the RETAINED,
     provenance-grounded finding + its re-verifiable entry — never fabricated. Sources, in order:
@@ -924,7 +949,12 @@ def _build_patch_fix_oracle(*, finding: Any, slug: str, base_dir: str, run_dir: 
     # (5) the POSITIVE CONTROL, offline harness pre-check: present, and it still fires the original oracle in
     #     THIS build. It says nothing about the live target — the LIVE control + the freshness echo inside
     #     `prove_remediation` do that. This only refuses an obviously broken harness before the ladder starts.
-    original_firing_context = entry.get("oracle_context")
+    # Wave-A2: recover a SEALED retained context in-engagement (the local DEK) BEFORE the positive-control
+    # re-fire and the exploit-request reconstruction — this loop re-fires via reverify_context, NOT
+    # reverify_finding, so the offline-layer unseal never runs here. An unrecoverable seal (crypto-shredded /
+    # tampered / wrong engagement) → entry None → the refusal just below fires (fail-closed).
+    entry = _unseal_entry_context_or_none(entry)
+    original_firing_context = entry.get("oracle_context") if entry is not None else None
     if not (isinstance(original_firing_context, dict) and original_firing_context):
         return None, (f"finding {ref!r} has no retained firing oracle_context (the positive control) — the "
                       f"live prove-run could not confirm the harness re-fires it, so silence on the patched "
@@ -1155,7 +1185,12 @@ def _cmd_remediate(args: argparse.Namespace) -> int:
               f"Refusing rather than mis-driving a different oracle family (fail-closed).", file=sys.stderr)
         return 2
     bug_class = str(entry.get("bug_class") or "error_based_sqli")
-    original_firing_context = entry.get("oracle_context")
+    # Wave-A2: recover a SEALED retained context in-engagement (the local DEK) BEFORE the positive-control
+    # re-fire and the exploit-request reconstruction — this loop re-fires via reverify_context, NOT
+    # reverify_finding, so the offline-layer unseal never runs here. An unrecoverable seal (crypto-shredded /
+    # tampered / wrong engagement) → entry None → the refusal just below fires (fail-closed).
+    entry = _unseal_entry_context_or_none(entry)
+    original_firing_context = entry.get("oracle_context") if entry is not None else None
     if not (isinstance(original_firing_context, dict) and original_firing_context):
         print(f"vigil remediate: finding {finding.ref!r} has no retained firing oracle_context (the positive "
               f"control) — silence on the patched build could not be distinguished from a broken probe. Refusing.",
@@ -1334,7 +1369,12 @@ def _cmd_reprove(args: argparse.Namespace) -> int:
               f"Refusing (fail-closed).", file=sys.stderr)
         return 2
     bug_class = str(entry.get("bug_class") or "error_based_sqli")
-    original_firing_context = entry.get("oracle_context")
+    # Wave-A2: recover a SEALED retained context in-engagement (the local DEK) BEFORE the positive-control
+    # re-fire and the exploit-request reconstruction — this loop re-fires via reverify_context, NOT
+    # reverify_finding, so the offline-layer unseal never runs here. An unrecoverable seal (crypto-shredded /
+    # tampered / wrong engagement) → entry None → the refusal just below fires (fail-closed).
+    entry = _unseal_entry_context_or_none(entry)
+    original_firing_context = entry.get("oracle_context") if entry is not None else None
     if not (isinstance(original_firing_context, dict) and original_firing_context):
         print(f"vigil reprove: finding {finding.ref!r} has no retained firing oracle_context (the positive "
               f"control). Refusing (fail-closed).", file=sys.stderr)
