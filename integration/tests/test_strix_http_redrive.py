@@ -435,11 +435,17 @@ def test_a_capture_bearing_report_is_not_hijacked_by_a_w2_arm(monkeypatch, tmp_p
 # =======================================================================================================
 
 def test_redrive_arm_class_sets_are_disjoint():
-    """Every re-drive arm's class set AND CWE map is pairwise DISJOINT (web / errsig / xss / ssti / boolean /
-    timing / dom_xss / prototype_pollution). Even were it violated, no false FACT could result (each arm mints
-    only over its own oracle), but pinning it now that eight arms exist keeps arm ORDER from ever routing a
-    report to the wrong arm — in particular reflected xss (CWE-79, server-response reflection) vs dom_xss
-    (bug_class dom_xss, DOM execution) stay distinct."""
+    """Every re-drive arm's class set, CWE map AND ALIAS KEYS are pairwise DISJOINT (web / errsig / xss /
+    ssti / boolean / timing / dom_xss / prototype_pollution / smuggling / transport). Even were it violated,
+    no false FACT could result (each arm mints only over its own oracle), but pinning it now that TEN arms
+    exist keeps arm ORDER from ever routing a report to the wrong arm — in particular reflected xss (CWE-79,
+    server-response reflection) vs dom_xss (bug_class dom_xss, DOM execution) stay distinct, and the S2
+    transport arm (CWE-326/327/328) stays distinct from smuggling (CWE-444).
+
+    The alias-KEY check is DERIVED from the arm names rather than hand-listed. Sibling slices add arms in
+    parallel, and a hand-written alias dict is precisely what silently omits the arms the OTHER slice added
+    once the two are merged; deriving it means whichever ``class_sets`` survives the merge brings its arms'
+    alias maps with it, and the explicit assertion below fails loudly rather than quietly covering less."""
     from vigil_integration.proof import run
     from vigil_integration.live.web_redrive import WEB_FACT_CLASSES
 
@@ -457,6 +463,11 @@ def test_redrive_arm_class_sets_are_disjoint():
         "prototype_pollution": (set(run._PROTO_POLLUTION_REDRIVE_CLASSES)
                                 | set(run._PROTO_POLLUTION_ALIASES.values())
                                 | set(run._PROTO_POLLUTION_CWE_TO_CLASS.values())),
+        # S2 transport intake — the two arms whose evidence is a TRANSPORT handshake.
+        "smuggling": (set(run._SMUGGLING_REDRIVE_CLASSES) | set(run._SMUGGLING_ALIASES.values())
+                      | set(run._SMUGGLING_CWE_TO_CLASS.values())),
+        "transport": (set(run._TRANSPORT_REDRIVE_CLASSES) | set(run._TRANSPORT_ALIASES.values())
+                      | set(run._TRANSPORT_CWE_TO_CLASS.values())),
     }
     cwe_maps = {
         "web": set(run._WEB_CWE_TO_CLASS),
@@ -467,7 +478,103 @@ def test_redrive_arm_class_sets_are_disjoint():
         "timing": set(run._TIMING_CWE_TO_CLASS),
         "dom_xss": set(run._DOM_XSS_CWE_TO_CLASS),
         "prototype_pollution": set(run._PROTO_POLLUTION_CWE_TO_CLASS),
+        "smuggling": set(run._SMUGGLING_CWE_TO_CLASS),
+        "transport": set(run._TRANSPORT_CWE_TO_CLASS),
     }
+    # The alias-KEY sets (the spellings a report may carry). A key collision is the one way two arms could
+    # claim the SAME report, and an alias key that is another arm's CLASS name shadows that arm's exact-match
+    # branch.
+    #
+    # The previous version DERIVED these by ``getattr(run, f"_{arm.upper()}_ALIASES", None)`` and dropped
+    # any arm that came back None. That is a silent skip: mutation MA2 added a third arm whose alias map
+    # was named ``_NEWARM_ALIAS_TABLE`` and carried the alias key "timing" — a direct shadow of another
+    # arm's class name — and this test PASSED, because the derived lookup missed the map entirely. The
+    # only guard was the hand-written ``{"smuggling","transport"}`` assertion, i.e. exactly the
+    # hand-written list the old comment condemned.
+    #
+    # So: every arm in ``class_sets`` MUST declare where its alias map lives (or declare, explicitly,
+    # that it has none), and the declaration is checked BOTH ways — an undeclared arm and a stale
+    # declaration both fail loudly.
+    _ALIAS_ATTR = {
+        "web": None,                  # the web arm routes by class/CWE only — no alias spellings
+        "errsig": None,               # likewise
+        "xss": "_REFLECTION_ALIASES",
+        "ssti": "_SSTI_ALIASES",
+        "boolean": "_BOOLEAN_ALIASES",
+        "timing": "_TIMING_ALIASES",
+        "dom_xss": "_DOM_XSS_ALIASES",
+        "prototype_pollution": "_PROTO_POLLUTION_ALIASES",
+        "smuggling": "_SMUGGLING_ALIASES",
+        "transport": "_TRANSPORT_ALIASES",
+    }
+    assert set(_ALIAS_ATTR) == set(class_sets), (
+        "every arm in class_sets must declare its alias map here (use None for an arm that genuinely "
+        f"has none): undeclared arms {sorted(set(class_sets) - set(_ALIAS_ATTR))}, "
+        f"stale declarations {sorted(set(_ALIAS_ATTR) - set(class_sets))}")
+    alias_keys = {}
+    for arm, attr in _ALIAS_ATTR.items():
+        if attr is None:
+            continue
+        assert hasattr(run, attr), (
+            f"arm {arm!r} declares its alias map as proof.run.{attr}, which does not exist — an arm's "
+            "spellings must never be silently dropped from the collision check")
+        alias_keys[arm] = set(getattr(run, attr))
+    assert {"smuggling", "transport"} <= set(alias_keys), (
+        f"the S2 transport arms must be alias-key pinned; covered arms: {sorted(alias_keys)}")
+
+    # ...and NO alias map may exist in proof.run that no arm above claims. This reads the classifier CALL
+    # SITES out of the source, so an alias map wired into ``_classify_redrive`` but missing from
+    # ``_ALIAS_ATTR`` fails here whatever it is named.
+    #
+    # It must look at KEYWORD arguments too. The first version inspected only ``node.args[2]``, so
+    # mutation MA2c walked straight past it: ``_classify_redrive(report, CLASSES, aliases=_NEWARM_MAP,
+    # cwe_map=...)`` with ``"newarm": None`` in _ALIAS_ATTR wired an alias map carrying the shadowing key
+    # "timing" and this test PASSED. And an argument that is not a plain Name (an inline dict, an
+    # attribute, a ``**kwargs`` splat) is not something this test can attribute to an arm, so it is
+    # collected as UNRESOLVABLE and fails loudly rather than being skipped — the silent-skip family, not
+    # just the one instance.
+    import ast
+    import inspect
+    _ALIAS_PARAM = "aliases"
+    _wired: set = set()
+    _unresolvable: list = []
+    for _node in ast.walk(ast.parse(inspect.getsource(run))):
+        if not (isinstance(_node, ast.Call) and getattr(_node.func, "id", "") == "_classify_redrive"):
+            continue
+        _cands = [_node.args[2]] if len(_node.args) >= 3 else []
+        _cands += [kw.value for kw in _node.keywords if kw.arg == _ALIAS_PARAM]
+        if not _cands or any(kw.arg is None for kw in _node.keywords):
+            # no positional 3rd arg and no aliases= keyword (a default or a **splat supplied it)
+            _unresolvable.append(ast.dump(_node)[:160])
+            continue
+        for _c in _cands:
+            if isinstance(_c, ast.Name):
+                _wired.add(_c.id)
+            else:
+                _unresolvable.append(ast.dump(_c)[:160])
+    assert not _unresolvable, (
+        "a _classify_redrive call site passes its alias map in a form this pin cannot attribute to an "
+        f"arm, so its keys would go un-collision-checked: {_unresolvable}")
+    _claimed = {attr for attr in _ALIAS_ATTR.values() if attr}
+    assert _wired <= _claimed, (
+        f"alias map(s) {sorted(_wired - _claimed)} are wired into proof.run._classify_redrive but no arm "
+        "in this pin claims them, so their keys are never collision-checked — add the arm to class_sets "
+        "and declare its map in _ALIAS_ATTR")
+
+    # An alias key must never be another arm's own CLASS name (that would shadow the exact-match branch).
+    for arm, keys in alias_keys.items():
+        for other, classes in class_sets.items():
+            if other == arm:
+                continue
+            shadow = keys & classes
+            assert not shadow, f"arm {arm!r} aliases shadow arm {other!r}'s class(es) {sorted(shadow)}"
+    anames = list(alias_keys)
+    for i in range(len(anames)):
+        for j in range(i + 1, len(anames)):
+            a, b = anames[i], anames[j]
+            overlap = alias_keys[a] & alias_keys[b]
+            assert not overlap, f"arm alias KEYS {a!r} and {b!r} overlap on {sorted(overlap)}"
+
     names = list(class_sets)
     for i in range(len(names)):
         for j in range(i + 1, len(names)):
@@ -493,3 +600,12 @@ def test_redrive_arm_class_sets_are_disjoint():
     assert run._dom_xss_redrive_class({"cwe": "CWE-79"}) is None
     assert run._reflection_redrive_class({"bug_class": "dom_xss"}) is None
     assert run._dom_xss_redrive_class({"bug_class": "xss"}) is None
+    # S2: each transport arm claims its own classes and no other arm's.
+    assert run._smuggling_redrive_class({"bug_class": "request_smuggling"}) == "request_smuggling"
+    assert run._smuggling_redrive_class({"cwe": "CWE-444"}) == "request_smuggling"
+    assert run._transport_redrive_class({"bug_class": "service_reachable"}) == "service_reachable"
+    assert run._transport_redrive_class({"bug_class": "weak_tls"}) == "weak_tls"
+    assert run._transport_redrive_class({"bug_class": "weak_crypto_artifact"}) == "weak_crypto_artifact"
+    assert run._transport_redrive_class({"bug_class": "request_smuggling"}) is None
+    assert run._smuggling_redrive_class({"bug_class": "weak_tls"}) is None
+    assert run._errsig_redrive_class({"cwe": "CWE-444"}) is None

@@ -62,8 +62,21 @@ def charter_authorize_gate(
     ``agents.http_executor`` runs before every gated fetch, and identical in shape to the
     ``engage`` runner's ``arsenal_authz``. The kill-switch is checked FIRST (so a tripped
     switch halts even an in-scope target), then :func:`agents.scope_gate.validate_action`
-    (which itself enforces the never-liftable protected-domain egress floor, the charter
-    signature, and scope). Fail-closed: any error is a refusal, never an allow.
+    (charter present AND signed, URL parseable, the protected-domain NAME floor
+    (gov/mil/edu/IGO), host in the signed scope, posture). Fail-closed: any error is a
+    refusal, never an allow.
+
+    WHAT THIS GATE IS NOT (corrected — the previous wording claimed an egress floor this
+    function does not have). It is ``KillSwitch.is_tripped()`` + ``validate_action(...)``
+    and NOTHING else. Both halves answer questions about a STRING: no DNS resolution, no IP
+    classification, no ``vigil_gateway.denylist``. Measured with a charter listing
+    ``169.254.169.254``: this gate returns True and :func:`raw_race` opens two raw sockets
+    to cloud instance metadata. The L3/L4 egress floor lives in
+    ``vigil_gateway.denylist.is_egress_denied``, reached through
+    ``vigil_integration.live.egress_floor.pin_egress``, and it is the INTEGRATION caller
+    (``live/race_bizlogic_redrive.py``) that runs it before any burst and hands ``raw_race``
+    the validated literal to dial. An engine-side caller that uses this gate alone gets the
+    string-only chain.
 
     Imports are FUNCTION-LOCAL to keep ``scanner.race`` importable without pulling the
     agents/authority stack at module load (and to avoid any import cycle)."""
@@ -161,11 +174,23 @@ def raw_race(
     BYPASSES ``SovereignHttpxTransport`` and its egress allowlist. Left ungated that is an
     egress hole — a burst could reach an out-of-scope / kill-switched / protected host with
     no check. So it is re-gated here, INSIDE the engine (defense in depth, not only at the
-    caller): ``authorize(target_url)`` — the scope/charter/kill-switch/never-liftable egress
-    floor/posture chain (see :func:`charter_authorize_gate`) — is evaluated BEFORE any socket
-    is opened and FAILS CLOSED. A False verdict or a gate error raises
+    caller): ``authorize(target_url)`` — the scope / charter-signature / kill-switch /
+    protected-domain-NAME / posture chain (see :func:`charter_authorize_gate`) — is evaluated
+    BEFORE any socket is opened and FAILS CLOSED. A False verdict or a gate error raises
     :class:`SovereigntyViolation` and NO byte leaves the box; the callers (``race_burst`` /
     ``scanner.campaign``) supply a ``validate_action``-backed gate.
+
+    THAT CHAIN IS STRING-MATCHING ONLY — it is NOT an egress floor, and this docstring used
+    to say it was. It resolves nothing and classifies no address, so a charter that lists
+    ``169.254.169.254`` makes it return True and two raw sockets reach cloud instance
+    metadata (measured). ``host`` is also used VERBATIM as the connect destination below, so
+    the OS resolves it here, after the gate: a name authorised as a string is dialled at
+    whatever the resolver says at that instant. The never-liftable L3/L4 floor and the
+    connect-pin live in ``vigil_integration.live.egress_floor.pin_egress``; the shipped
+    caller ``live/race_bizlogic_redrive.py`` runs it over every resolved address before the
+    first burst and passes the VALIDATED LITERAL as ``host`` (``_build_request`` keeps the
+    original hostname in the Host header). An engine-side caller that skips that step has no
+    egress floor at all.
     """
     # Fail-closed authorization BEFORE any traffic. A gate error is a refusal, never an allow.
     try:
