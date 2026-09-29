@@ -159,6 +159,17 @@ def _reverifiable_finding_is_fact(f: dict) -> bool:
         from .grounding import GRADE_FACT, grade_finding
     except Exception:
         return False
+    # Wave-A2: a finding whose credential/raw-response fields were SEALED at rest re-fires only over the
+    # UNSEALED context. Recover it IN-ENGAGEMENT (the local DEK) on a COPY, so grading sees the byte-identical
+    # plaintext while the raw ``f`` returned for display is untouched. Fail-closed: a crypto-shredded /
+    # tampered / wrong-engagement seal cannot be recovered, so the finding is (correctly) not a fact.
+    slug = f.get("sealed_engagement")
+    if isinstance(slug, str) and slug:
+        from ..common.context_sealing import unseal_oracle_context
+        try:
+            f = {**f, "oracle_context": unseal_oracle_context(f.get("oracle_context"), slug)}
+        except Exception:  # noqa: BLE001 — unrecoverable sealed evidence is not a re-fireable fact
+            return False
     # First try the raw dict (handles a finding already in FindingPayload shape); on the
     # coercion failure that an AuditFinding-shaped dict produces, retry via the field map.
     try:

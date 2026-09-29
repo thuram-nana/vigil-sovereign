@@ -238,6 +238,24 @@ def reverify_finding(finding: dict, *, ref: str | None = None,
             matches_claim=False if has_claim else None,
             note="finding carries no oracle_context to re-verify",
         )
+    # Wave-A2: a finding whose credential/raw-response fields were SEALED at rest carries the
+    # engagement slug that seals/keys them. Recover the plaintext IN-ENGAGEMENT (the local DEK) so
+    # the pure oracle re-fires over the byte-identical original; a finding without ``sealed_engagement``
+    # (every plaintext finding) skips this entirely and is byte-identical to before. Fail-closed: if a
+    # sealed field cannot be recovered — DEK crypto-shredded, wrong engagement, or a tampered
+    # ciphertext — the finding does NOT re-confirm (the correct post-erasure / anti-tamper state).
+    sealed_slug = finding.get("sealed_engagement")
+    if isinstance(sealed_slug, str) and sealed_slug:
+        from ..common.context_sealing import unseal_oracle_context  # local: keystore I/O only when sealed
+        try:
+            oc = unseal_oracle_context(oc, sealed_slug)
+        except Exception as e:  # noqa: BLE001 — unrecoverable sealed evidence is fail-closed, never a raise
+            has_claim = bool(finding.get("confirmed_by") or finding.get("confidence"))
+            return ReverifyResult(
+                finding_ref=r, reproduced=False,
+                matches_claim=False if has_claim else None,
+                note=f"sealed evidence unavailable (crypto-shredded, wrong engagement, or tampered): {e}",
+            )
     return reverify_context(
         oc, bug_class=bug_class,
         claimed_confirmed_by=finding.get("confirmed_by"),

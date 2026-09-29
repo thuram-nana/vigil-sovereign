@@ -304,6 +304,28 @@ def build_audit_package(
     if not usable:
         return {"ok": False, "error": "no oracle-confirmed findings to package (each needs an oracle_context)"}
 
+    # Wave-A2: an external-audit package is a DELIBERATE disclosure — it must ship the evidence the oracle
+    # re-fires over (BINDING re-hashes the context; REPRODUCTION re-fires it). A finding whose secret /
+    # raw-response fields were SEALED at rest is UNSEALED here, IN-ENGAGEMENT (the local DEK), so the minted
+    # certificate binds the plaintext context and a third party can reproduce it. A finding whose DEK is
+    # already crypto-shredded cannot be packaged (the evidence is gone) and is DROPPED rather than shipped as
+    # an un-re-fireable sealed token. The run's own reverifiable.json stays sealed at rest.
+    _recovered: list[dict] = []
+    for f in usable:
+        slug = f.get("sealed_engagement")
+        if isinstance(slug, str) and slug:
+            from ..common.context_sealing import unseal_oracle_context
+            try:
+                oc = unseal_oracle_context(f.get("oracle_context"), slug)
+            except Exception:  # noqa: BLE001 — crypto-shredded/unrecoverable → not packageable, drop it
+                continue
+            f = {**{k: v for k, v in f.items() if k != "sealed_engagement"}, "oracle_context": oc}
+        _recovered.append(f)
+    usable = _recovered
+    if not usable:
+        return {"ok": False, "error": "no packageable findings (every proven FACT's evidence has been "
+                                      "crypto-shredded — nothing left to re-verify)"}
+
     ev_root = Path(evidence_root) if evidence_root is not None else None
     signed_certs: list[SignedEvidence] = []
     contexts: dict[str, dict] = {}
