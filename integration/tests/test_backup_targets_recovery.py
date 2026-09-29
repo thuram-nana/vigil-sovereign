@@ -202,9 +202,15 @@ def test_evidence_keystore_is_never_packaged(tmp_path):
     assert not (tmp_path / "rcrucible" / "targets" / SLUG / ".evidence-keys" / f"{SLUG}.dek").exists()
 
 
-def test_create_refuses_a_leaked_evidence_key(tmp_path):
+def test_create_refuses_a_leaked_evidence_key(tmp_path, monkeypatch):
     """Belt-and-braces: if a future iterator change ever yielded a keystore file, create() REFUSES rather than
     co-locate a DEK with its ciphertext."""
+    # This test's premise is a DEK co-located UNDER the crucible root, so opt out of the autouse
+    # _isolate_evidence_keys_dir fixture (which points CRUCIBLE_EVIDENCE_KEYS_DIR off-tree) — the documented
+    # per-test override — so _evidence_keys_dir(croot) resolves to <croot>/.evidence-keys and the DEK is
+    # relative_to(croot). Mirrors test_trust_state_backed_up_and_functionally_restored's delenv of the sibling
+    # isolation vars.
+    monkeypatch.delenv("CRUCIBLE_EVIDENCE_KEYS_DIR", raising=False)
     base = tmp_path / "base"
     _seed_offense_home(base)
     croot = tmp_path / "crucible"
