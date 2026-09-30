@@ -265,7 +265,7 @@
       "source": "docs/decisions/W16-STD-6-ops-defects.md:47",
       "enforced_by": {
         "file": "engine/crucible/framework/v2/agents/blackboard.py",
-        "symbol": "Blackboard._integrity_check"
+        "symbol": "Blackboard._maybe_integrity_check"
       },
       "proved_by": {
         "file": "engine/crucible/framework/v2/agents/tests/test_blackboard.py",
@@ -1462,7 +1462,7 @@
       "id": "W16-STD-7-vigil-cli-coverage",
       "title": "Every vigil native verb and passthrough verb is documented (bidirectional)",
       "claim": "The set below is the authoritative list;\na new sub-parser that is not documented here turns the required check red.",
-      "source": "docs/CLI-REFERENCE.md:121",
+      "source": "docs/CLI-REFERENCE.md:122",
       "enforced_by": {
         "file": "docs/tests/test_w16_std7_docs_completeness.py",
         "symbol": "documented_vigil_verbs"
