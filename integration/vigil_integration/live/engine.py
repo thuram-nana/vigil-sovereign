@@ -832,11 +832,14 @@ class VigilEngine:
             full = target if "://" in target else "http://" + target
             return {"kind": "web", "url": full, "bug_class": bug_class}
 
-        # RUNTIME response-derived classes (path_traversal / reflected xss / exposure / ssi): the
-        # runner-owned runtime_redrive engine needs only the URL (it crafts the probe + runs the matching
-        # oracle). The DISPATCH set is the union — a lead-only class (path_traversal) is still a
-        # runtime-redrive class, so the spec is labelled correctly; whether the FACT seam then drives it is
-        # that seam's decision (wiring._live_runtime_redrive_fact), not this router's.
+        # RUNTIME response-derived classes (path_traversal / reflected xss / exposure / ssi + the W2
+        # statistical/eval injection classes ssti / boolean_sqli / time_based_sqli): the runner-owned
+        # runtime_redrive engine needs only the URL (it crafts the probe + runs the matching oracle, and for
+        # the W2 classes DELEGATES to its ssti/boolean/timing sibling arms). The DISPATCH set is the union — a
+        # lead-only class (path_traversal) is still a runtime-redrive class, so the spec is labelled correctly;
+        # whether the FACT seam then drives it is that seam's decision (wiring._live_runtime_redrive_fact), not
+        # this router's. boolean_sqli / time_based_sqli normalize to THEMSELVES (never to `sqli`), so they are
+        # claimed HERE and never fall through to the error_signature SQLi branch below.
         try:
             from .runtime_redrive import RUNTIME_REDRIVE_CLASSES  # noqa: PLC0415 — import-clean tuple (FATAL-2)
         except Exception:  # noqa: BLE001 — module unavailable ⇒ no runtime re-drive (other paths work)
@@ -844,6 +847,21 @@ class VigilEngine:
         if bug_class in RUNTIME_REDRIVE_CLASSES:
             full = target if "://" in target else "http://" + target
             return {"kind": "runtime", "url": full, "bug_class": bug_class}
+
+        # INJECTION response-derived classes (nosqli / ldap_injection / xpath_injection): slice B2 routes them
+        # to the runner-owned ``live.runtime_redrive.injection_redrive`` engine (a class-specific error probe +
+        # a benign control twin). These branches are LEAD-only today (the error_signature oracle proves only
+        # CONDITIONAL EMISSION — the sound FACT path is a causation oracle in blocking_work), so the seam DRIVES
+        # a VIGIL-owned capture but mints no FACT. The engine needs only the URL. ADDITIVE to the runtime/web/
+        # sqli arms above: a separate dispatch set + the ``"injection"`` spec kind, so B1's runtime wiring is
+        # untouched. The seam re-normalizes + re-gates, so this is proposal-triage only.
+        try:
+            from .runtime_redrive import INJECTION_REDRIVE_CLASSES  # noqa: PLC0415 — import-clean tuple (FATAL-2)
+        except Exception:  # noqa: BLE001 — module unavailable ⇒ no injection re-drive (other paths work)
+            INJECTION_REDRIVE_CLASSES = ()
+        if bug_class in INJECTION_REDRIVE_CLASSES:
+            full = target if "://" in target else "http://" + target
+            return {"kind": "injection", "url": full, "bug_class": bug_class}
 
         # error_signature SQLi FAMILY (landmine 1): MERIDIAN labels its error-based plant `sqli`, and the
         # model may say `sqli`/`sql_injection`/`error_based_sqli`. Accept them all — the error_signature

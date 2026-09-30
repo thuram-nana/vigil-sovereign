@@ -82,7 +82,23 @@ from typing import Any, Callable, Optional
 # The classes this runner mints as FACTs, each mapped to its ONE registered evidence branch + the oracle
 # whose deterministic decision procedure adjudicates it. Named by value (the framework enums are resolved
 # function-locally, FATAL-2). Kept in lockstep with docs/capability-matrix/evidence-branches.json.
+#
+# INLINE FACT CLASSES — adjudicated by the single-capture body of :func:`runtime_redrive` via ``_BRANCH_FOR``.
 RUNTIME_FACT_CLASSES = ("xss", "exposure", "ssi")
+
+# STATISTICAL / EVAL FACT CLASSES (W2) — the injection classes the deterministic scanner already PROVES but
+# whose evidence is MULTI-CAPTURE (a per-round SPRT truth-value attribution, an interleaved dose-response
+# timing series, a per-probe evaluated product), so they are NOT adjudicated by the single-shot ``_BRANCH_FOR``
+# body above. Each is minted by its OWN self-contained sibling arm (:func:`ssti_redrive` /
+# :func:`boolean_redrive` / :func:`timing_redrive`), to which :func:`runtime_redrive` DELEGATES. Their branches
+# (``ssti.evaluation`` / ``boolean_sqli.sprt_inference`` / ``time_based_sqli.timing_inference``) are all already
+# ``fact_capable`` in docs/capability-matrix/evidence-branches.json — no new OracleKind. Kept out of
+# ``RUNTIME_FACT_CLASSES`` precisely because that tuple's contract is "resolvable through ``_BRANCH_FOR`` +
+# the inline body"; these resolve through the arms instead. They ARE dispatch classes (see
+# ``RUNTIME_REDRIVE_CLASSES``), so the engage seam (engine ``_redrive_spec`` → wiring
+# ``_live_runtime_redrive_fact``) now produces a spec and admits them — closing the under-report where the
+# deterministic scanner proved the class but the governed engage/chat seam refused to mint it.
+RUNTIME_STAT_FACT_CLASSES = ("ssti", "boolean_sqli", "time_based_sqli")
 
 # LEAD-ONLY classes: the runner still probes them end to end and records an admitted verdict, but their
 # registered branch declares ``fact_capable: false``, so ``verdict.admit`` demotes even a fired oracle to a
@@ -126,8 +142,10 @@ RUNTIME_FACT_CLASSES = ("xss", "exposure", "ssi")
 RUNTIME_LEAD_CLASSES = ("path_traversal",)
 
 # Every class this runner will DISPATCH. A FACT-capable class can reach a signed FACT; a lead-only class
-# runs the identical pipeline and stops at a LEAD.
-RUNTIME_REDRIVE_CLASSES = RUNTIME_FACT_CLASSES + RUNTIME_LEAD_CLASSES
+# runs the identical pipeline and stops at a LEAD. The union spans the INLINE fact classes, the W2
+# STATISTICAL/EVAL fact classes (delegated to their sibling arms), and the LEAD-only classes; the engage
+# seam (engine ``_redrive_spec`` + wiring ``_live_runtime_redrive_fact``) gates on this DISPATCH set.
+RUNTIME_REDRIVE_CLASSES = RUNTIME_FACT_CLASSES + RUNTIME_STAT_FACT_CLASSES + RUNTIME_LEAD_CLASSES
 
 _BRANCH_FOR = {
     "path_traversal": "path_traversal.file_signature",
@@ -153,10 +171,14 @@ _MAX_CANDIDATE_NAMES = 12
 
 # --- W2: three more HTTP-response-derived FACT arms (SSTI / boolean-blind / time-based) ---------------
 # Each is a sibling of :func:`runtime_redrive` (runner-owned gated re-drive → the matching frozen oracle →
-# admit()+certify_admitted(provenance="live_redrive")) but is NOT in ``RUNTIME_REDRIVE_CLASSES``, so the engage
-# ``_redrive_spec`` seam is UNCHANGED — these arms are reached only from the Strix proof-sink dispatch rail
-# (proof/run.py). No new OracleKind: SSTI reuses EVALUATION, boolean reuses BOOLEAN_INFERENCE, timing reuses
-# TIMING (all already frozen in _ALL_ORACLES). The registered evidence branch each admits through:
+# admit()+certify_admitted(provenance="live_redrive")). Their classes are ``RUNTIME_STAT_FACT_CLASSES``, part of
+# the dispatch union ``RUNTIME_REDRIVE_CLASSES``, so BOTH the Strix proof-sink dispatch rail (proof/run.py) AND
+# the governed engage seam reach them: :func:`runtime_redrive` DELEGATES a claimed stat class to its arm here
+# (B1 — governed-engage FACT-parity), and the engage ``_redrive_spec`` producer emits a ``{"kind":"runtime"}``
+# spec for them because they are in ``RUNTIME_REDRIVE_CLASSES``. No new OracleKind: SSTI reuses EVALUATION,
+# boolean reuses BOOLEAN_INFERENCE (the multi-round SPRT ``BooleanInferenceCheck``, never the single-shot
+# DifferentialCheck), timing reuses TIMING (all already frozen in _ALL_ORACLES). The registered evidence
+# branch each admits through:
 _SSTI_BRANCH = "ssti.evaluation"
 _BOOLEAN_BRANCH = "boolean_sqli.sprt_inference"
 _TIMING_BRANCH = "time_based_sqli.timing_inference"
@@ -202,6 +224,59 @@ _STAT_MAX_PARAMS = 4     # blind/statistical arms are expensive — probe at mos
 _BOOLEAN_MAX_PARAMS = 2
 # Identical-request sends for the per-PARAM determinism screen, shared across the clause families.
 _BOOLEAN_BASELINE_SAMPLES = 8
+
+# --- B2: governed-engage re-drive for the non-SQL injection classes (nosqli / ldap / xpath) -----------
+# Through governed engage these three were structurally LEAD-only (no dedicated branch → the LLM-provenanced
+# LEAD fallback). This arm DRIVES them end-to-end — a runner-owned, DNS-pinned gated re-drive of a
+# class-specific error-provoking probe + a benign CONTROL twin, judged by the deterministic
+# ``error_signature_oracle`` over VIGIL's FRESH bytes — so the operator's lead has a VIGIL-owned capture
+# behind it rather than the model's assertion (the same reason path_traversal is DRIVEN though LEAD-only).
+#
+# BOTH registered branches for these classes are LEAD-ONLY; this arm mints NO FACT (``admit`` demotes the
+# fired oracle because the branch is ``fact_capable: false``):
+#   * ``<class>.datastore_error`` — LEAD-only. RED-PEN BLOCK (fixed here): ``error_signature_oracle`` is a
+#     STRING MATCH and re-verifies only CONDITIONAL EMISSION, which is necessary but NOT sufficient for a
+#     query break. The benign control twin rules out only UNCONDITIONAL emission; a datastore-error-shaped
+#     string emitted CONDITIONALLY on the metacharacter by a NON-datastore source — a WAF/security-filter
+#     block page that names the engine, a validator rejection, or an unrelated 500 whose stack trace merely
+#     names the driver package (com.mongodb / javax.naming / MS.Internal.Xml) — passes the guard (four such
+#     false FACTs were reproduced at rate 1.0). The sound FACT path is a break-vs-repair PARSER-STATE-TOGGLE
+#     causation oracle re-executed OFFLINE (a new OracleKind, out of this reuse-only slice's scope) — see the
+#     branch ``blocking_work``.
+#   * ``<class>.sprt_inference``  — the boolean_inference SPRT truth-value channel, LEAD-only: the shipped SQL
+#     clause families cannot soundly ATTRIBUTE a non-SQL class (a SQL clause that partitions proves SQL
+#     boolean injection), so a class-specific truth-correct clause set is that branch's blocking_work.
+#
+# It is a governed-engage sibling of ``proof.run._strix_errsig_redrive`` built on the runtime_redrive
+# discipline so the engage seam reads ``family_verdict``/``facts`` like the other seams. NOT in
+# ``RUNTIME_REDRIVE_CLASSES`` (its own dispatch set + ``"injection"`` spec kind), so B1's ssti/boolean/timing
+# runtime wiring is untouched.
+_INJECTION_ERRSIG_BRANCH = {
+    "nosqli": "nosqli.datastore_error",
+    "ldap_injection": "ldap_injection.datastore_error",
+    "xpath_injection": "xpath_injection.datastore_error",
+}
+# The engage seam's dispatch set (an import-clean tuple, FATAL-2). Deliberately SEPARATE from
+# RUNTIME_REDRIVE_CLASSES so this slice adds arms without restructuring the runtime/web/sqli wiring.
+INJECTION_REDRIVE_CLASSES = tuple(_INJECTION_ERRSIG_BRANCH)
+# RUNNER-crafted, class-specific error-provoking probe payloads (kept in lockstep with
+# ``proof.run._ERRSIG_PROBE_PAYLOADS``). The RUNNER owns these — never a Strix/LLM value — so the observed
+# evidence rests on VIGIL's OWN injected metacharacters. The oracle (not the payload) decides whether an
+# engine error string appeared; the class stays a LEAD (see the branch note above).
+_INJECTION_ERRSIG_PAYLOAD = {
+    "nosqli": "'\"{[",              # break a JSON/BSON query document / operator parse
+    "ldap_injection": "*)(|&",     # unbalanced LDAP filter parens/operators
+    "xpath_injection": "']|//*[",  # break an XPath string/predicate
+}
+# The datastore/parser ENGINE the ``error_signature_oracle`` must match for the observed error to be
+# attributed to the claimed class (the engine label side of ``proof.run._ERRSIG_ENGINE_TO_CLASS``, class-
+# scoped). A nosqli probe that provokes a SQL error is SQLi, not nosqli — a mismatched (or unmapped) engine
+# is not admitted for this class, so even the LEAD stays class-appropriate.
+_INJECTION_ENGINE_FOR = {"nosqli": {"mongodb"}, "ldap_injection": {"ldap"}, "xpath_injection": {"xpath"}}
+# Candidate parameter names for the injection arm (mirrors the other point-check sets); the set only bounds
+# where the arm PROBES, never a claim of absence (the branches are not clean-capable).
+_INJECTION_PARAMS = ("id", "q", "query", "search", "name", "user", "uid", "item", "filter", "category",
+                     "username", "password", "email", "login")
 
 # --- D1: what the traversal arm's LEAD-quality guards do, and what they provably do NOT do -----------
 # The canonical traversal payload, plus SEMANTICALLY-IDENTICAL re-encodings of the SAME path. POSIX
@@ -706,6 +781,13 @@ def runtime_redrive(url: str, *, slug: str, engagement_slug: str, signers: "list
         probe fetch entirely against any origin that does not 404 unknown paths), plus per-path corroborators
         and — for a ``KEY=`` signature — a right-hand side that is a real value. The whole conjunction is in
         the certificate, so the offline verifier RE-EXECUTES it rather than trusting the runner.
+      * ssti / boolean_sqli / time_based_sqli (``RUNTIME_STAT_FACT_CLASSES``) — DELEGATED verbatim to their
+        self-contained sibling arms (:func:`ssti_redrive` / :func:`boolean_redrive` / :func:`timing_redrive`),
+        because each carries a MULTI-CAPTURE recipe + control the single-capture body here cannot express (a
+        per-round SPRT truth-value attribution with a dynamic-page control for boolean, an interleaved
+        base/treatment dose-response for timing, a per-probe evaluated random product with a benign control
+        for ssti). This delegation is what gives the governed engage seam FACT-parity with the deterministic
+        scanner for these classes; the arm runs its OWN charter gate before any traffic.
 
     A probe that established no channel is INCONCLUSIVE (never CLEAN). Returns a :class:`RuntimeRedriveResult`.
     Never raises (a probe error is recorded and what held is returned).
@@ -743,6 +825,20 @@ def runtime_redrive(url: str, *, slug: str, engagement_slug: str, signers: "list
     if bug_class not in RUNTIME_REDRIVE_CLASSES:
         res.notes.append(f"{bug_class!r} is not a runtime-redrive class")
         return res
+    # W2 STATISTICAL/EVAL ARMS (B1 — governed-engage FACT-parity). ssti / boolean_sqli / time_based_sqli are
+    # minted by their OWN self-contained sibling arms, NOT by the single-capture ``_BRANCH_FOR`` body below:
+    # each carries a distinct multi-capture recipe + control (a per-round SPRT truth-value attribution for
+    # boolean, an interleaved dose-response series for timing, a per-probe evaluated product for ssti) that
+    # the inline body cannot express, and each runs its own charter gate (:func:`_stat_setup` → ``_authorize``)
+    # before any byte. Delegate and return the arm's result VERBATIM — it is the same ``RuntimeRedriveResult``
+    # the seam reads (``.facts`` / ``.family_verdict()``). ``param=None`` ⇒ the arm walks its candidate
+    # parameter set, because the governed engage seam carries no declared param. boolean_sqli routes to
+    # :func:`boolean_redrive`, which adjudicates through the multi-round ``BooleanInferenceCheck`` /
+    # ``boolean_inference_oracle`` SPRT (dynamic-page control), never the single-shot ``DifferentialCheck``.
+    if bug_class in RUNTIME_STAT_FACT_CLASSES:
+        _arm = {"ssti": ssti_redrive, "boolean_sqli": boolean_redrive,
+                "time_based_sqli": timing_redrive}[bug_class]
+        return _arm(url, slug=slug, engagement_slug=engagement_slug, signers=signers, timeout=timeout)
     branch = _BRANCH_FOR[bug_class]
     if branch not in branch_ids():
         res.notes.append(f"branch {branch!r} is not registered — cannot admit (fail-closed)")
@@ -1461,6 +1557,128 @@ def timing_redrive(url: str, *, slug: str, engagement_slug: str, signers: "list[
                 break
     except Exception as e:  # noqa: BLE001 — a probe error never fabricates a FACT; record + return what held
         res.notes.append(f"timing_redrive error: {type(e).__name__}: {e}")
+    return res
+
+
+def injection_redrive(url: str, *, slug: str, engagement_slug: str, signers: "list[tuple[str, str]]",
+                      claimed_class: str, param: "str | None" = None, timeout: float = 8.0
+                      ) -> "RuntimeRedriveResult":
+    """Governed-engage re-drive for ``nosqli`` / ``ldap_injection`` / ``xpath_injection``. It DRIVES VIGIL's
+    OWN gated probe end-to-end and records an admitted LEAD; it mints **NO FACT** — both registered branches
+    for these classes are ``fact_capable: false``, so ``admit`` demotes even a fired oracle to a LEAD.
+
+    WHY LEAD-ONLY (red-pen BLOCK, fixed here). ``error_signature_oracle`` is a STRING MATCH; a fire over
+    VIGIL's fresh bytes proves only that a datastore-error-shaped string was emitted CONDITIONALLY on the
+    payload (present on the probe, absent from the benign control). That is NECESSARY but NOT SUFFICIENT for a
+    query break: the benign control twin rules out only UNCONDITIONAL emission, so a signature emitted
+    conditionally by a NON-datastore source — a WAF/security-filter block page that names the engine, an
+    input-validator rejection, or an unrelated 500 whose stack trace merely names the driver package — passes
+    the guard (four such false FACTs were reproduced at rate 1.0, one of them a high-frequency real-world case).
+    The SOUND FACT path is a break-vs-repair PARSER-STATE-TOGGLE causation oracle re-executed OFFLINE (a new
+    OracleKind, out of this reuse-only slice's scope) — see the branches' ``blocking_work``.
+
+    WHAT IT STILL DOES (real evidence for a human, same rationale as the DRIVEN-but-LEAD path_traversal arm):
+      * the RUNNER sends its OWN class-specific error-provoking probe (``_INJECTION_ERRSIG_PAYLOAD``) — the
+        Strix/LLM payload is never trusted — plus a benign CONTROL twin fetched FIRST;
+      * the oracle observes whether the matched engine string appeared conditionally, and the LEAD is admitted
+        only under the ENGINE that NAMES the claimed class (``_INJECTION_ENGINE_FOR``); a mismatched/unmapped
+        engine is not admitted for this class, so even the LEAD stays class-appropriate.
+
+    A gate refusal / no channel / an unreadable-or-empty body / an oracle non-fire / the same error in the
+    control / a mismatched engine all leave the finding a LEAD. Not CLEAN-capable either (a non-firing is
+    uninformative). Runs ONLY the claimed class. Never raises.
+
+    FATAL-2: every framework-touching import is function-local (offense-side re-drive path)."""
+    from framework.v2.evidence.poc import CapturedExchange  # noqa: PLC0415 (FATAL-2: offense plane)
+    from framework.v2.scanner.insertion import HttpRequest, InsertionKind, RequestTemplate  # noqa: PLC0415
+    from framework.v2.verify.oracles import error_signature_oracle  # noqa: PLC0415
+    from framework.v2.verify.poc_translate import context_from_exchanges  # noqa: PLC0415
+    from framework.v2.verify.verifier import normalize_bug_class  # noqa: PLC0415
+
+    bug_class = normalize_bug_class(claimed_class)
+    if bug_class not in INJECTION_REDRIVE_CLASSES:
+        res = RuntimeRedriveResult(url=url, bug_class=bug_class)
+        res.notes.append(f"{bug_class!r} is not an injection-redrive class")
+        return res
+    branch = _INJECTION_ERRSIG_BRANCH[bug_class]
+    payload = _INJECTION_ERRSIG_PAYLOAD[bug_class]
+    expected_engines = _INJECTION_ENGINE_FOR[bug_class]
+    res, send, state = _stat_setup(url, slug, bug_class, branch, timeout)
+    if send is None:
+        return res
+    nonce = _sha(f"{url}:{bug_class}")
+    try:
+        for name in _candidate_names_hint(url, _INJECTION_PARAMS, param, _MAX_CANDIDATE_NAMES):
+            probe_url = _url_with_param(url, name)
+            tmpl = RequestTemplate(HttpRequest(method="GET", url=probe_url))
+            point = next((p for p in tmpl.insertion_points(kinds=(InsertionKind.QUERY_VALUE,))
+                          if p.name.lower() == name.lower()), None)
+            if point is None:
+                continue
+            # CONTROL FIRST — a benign, metacharacter-free value on the SAME endpoint+param, so any datastore
+            # error is attributable to the PAYLOAD, not to the parameter's mere presence.
+            before_c = state["channels"]
+            try:
+                control = send(tmpl.render(point, f"vfctl{nonce}"))
+            except Exception as e:  # noqa: BLE001
+                res.notes.append(f"injection control error [{name}]: {type(e).__name__}: {e}")
+                continue
+            if state["channels"] <= before_c:
+                res.inconclusive.append((bug_class, f"{probe_url}#control"))
+                continue
+            control_bytes = _body_text(control).encode("utf-8", errors="replace")
+            # TREATMENT — VIGIL's OWN runner-crafted metacharacter payload.
+            before_t = state["channels"]
+            try:
+                probe = send(tmpl.render(point, payload))
+            except Exception as e:  # noqa: BLE001
+                res.notes.append(f"injection probe error [{name}]: {type(e).__name__}: {e}")
+                continue
+            if state["channels"] <= before_t:
+                res.inconclusive.append((bug_class, f"{probe_url}#{point.id}"))
+                continue
+            observed_text = _body_text(probe)
+            if not observed_text:
+                res.inconclusive.append((bug_class, f"{probe_url}#{point.id}"))
+                continue     # a real channel but no readable body → the oracle cannot fire → INCONCLUSIVE
+            observed_bytes = observed_text.encode("utf-8", errors="replace")
+            # the oracle over VIGIL's FRESH bytes, WITH the control twin. The control rules out only
+            # UNCONDITIONAL emission; a fire here is CONDITIONAL emission of an error-shaped string — necessary
+            # but NOT sufficient for a query break (a WAF/validator/unrelated-500 passes it), so it is a LEAD.
+            sig = error_signature_oracle(observed_bytes, control_bytes)
+            if not getattr(sig, "fired", False):
+                # no engine error string, or the SAME string rides the benign control → nothing to admit.
+                _note(res, f"error_signature did not fire for {bug_class} → LEAD")
+                continue
+            engine = str((getattr(sig, "observed", None) or {}).get("engine", ""))
+            if engine not in expected_engines:
+                # a real datastore error, but NOT the engine that names this class — the evidence proves a
+                # DIFFERENT class; refuse rather than mislabel (fail-closed, mirrors the Strix rail).
+                _note(res, f"error_signature matched engine {engine!r}, not {sorted(expected_engines)} for "
+                           f"{bug_class} → LEAD (the evidence proves a different class, not this one)")
+                continue
+            # Build the error_signature context (observed + control) and admit it. admit() DEMOTES this to a
+            # LEAD because the branch is fact_capable:false — no FACT is minted (the re-driven capture is
+            # retained on the result as real, class-appropriate evidence for the operator). Same context shape
+            # as the Strix rail (``context_from_exchanges`` + ``model_dump``).
+            blobs = {"inj_obs": observed_bytes, "inj_ctrl": control_bytes}
+            exchanges = [
+                CapturedExchange(channel="error_signature", role="mutated",
+                                 response_bytes_ref="inj_obs", status=probe.get("status")),
+                CapturedExchange(channel="error_signature", role="control",
+                                 response_bytes_ref="inj_ctrl", status=control.get("status")),
+            ]
+            ctx = context_from_exchanges(exchanges, bug_class=bug_class, resolve=blobs.get)
+            if ctx is None:
+                res.inconclusive.append((bug_class, f"{probe_url}#{point.id}"))
+                continue
+            context = ctx.model_dump(mode="json")
+            _admit_one(res, branch=branch, bug_class=bug_class, engagement_slug=engagement_slug,
+                       signers=signers, context=context, item=f"{probe_url}#{point.id}",
+                       surface=f"query:{name}", fired=True, conclusive=True, body_unreadable=False)
+            break     # one admitted (class-appropriate) capture is enough for a re-drive — stop (bounded work)
+    except Exception as e:  # noqa: BLE001 — a probe error never fabricates a FACT; record + return what held
+        res.notes.append(f"injection_redrive error: {type(e).__name__}: {e}")
     return res
 
 
