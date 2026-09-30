@@ -134,12 +134,12 @@
       "install": "go",
       "privileges": "none",
       "network_effect": "scans-target",
-      "oracle_family": "",
-      "fact_capable": false,
+      "oracle_family": "ACHIEVED_STATE",
+      "fact_capable": true,
       "claim_families": [
         "url-discovery"
       ],
-      "notes": "content/URL discovery is a hypothesis feeder; LEAD-only."
+      "notes": "C4 web_discovery FACT column: katana proposes URLs; VIGIL re-drives EACH through its OWN gated ACHIEVED_STATE web re-drive (live.web_redrive.web_redrive — open_redirect/cors/host_header/graphql_introspection), and the deterministic predicate_oracle mints a signed FACT over VIGIL's own no-redirect capture. The tool's URL row is grounding intel, never the authority; passed live.conformance before fact_capable was set. Distinct from httpx/ffuf's LEAD-only endpoint_liveness enricher."
     },
     {
       "name": "subfinder",
@@ -167,7 +167,7 @@
       "claim_families": [
         "vuln-template-match"
       ],
-      "notes": "template matches are LEADs until each class gets a runner-owned oracle re-drive; ACTIVE (A2 floor \u2014 queues on live)."
+      "notes": "LEAD-only as a tool (fact_capable=false): a nuclei template match is a scanner's say-so, never the authority. C4 gives the SCANNERS family a bug-class DISPATCHER: a nuclei finding whose class maps to a web FACT class (open_redirect/cors/host_header_injection/graphql_introspection) is re-driven through VIGIL's OWN gated ACHIEVED_STATE web re-drive (live.web_redrive), which mints a signed FACT ONLY when VIGIL's own oracle independently confirms the EXACT claimed class \u2014 the FACT is attributed to ACHIEVED_STATE, not to nuclei. ACTIVE (A2 floor \u2014 queues on live)."
     },
     {
       "name": "gobuster",
@@ -176,12 +176,12 @@
       "install": "go",
       "privileges": "none",
       "network_effect": "scans-target",
-      "oracle_family": "",
-      "fact_capable": false,
+      "oracle_family": "ACHIEVED_STATE",
+      "fact_capable": true,
       "claim_families": [
         "content-discovery"
       ],
-      "notes": "existence+anon-reach is FACT-capable via a future ACTIVE_EXPOSURE re-drive; LEAD-only today."
+      "notes": "C4 web_discovery FACT column: gobuster proposes discovered paths (joined onto the scope-authorised base, host-pinned); VIGIL re-drives EACH through its OWN gated ACHIEVED_STATE web re-drive (live.web_redrive.web_redrive) and the predicate_oracle mints a signed FACT over VIGIL's own capture. The tool's path row is grounding intel, never the authority; passed live.conformance before fact_capable was set. (The prior 'future ACTIVE_EXPOSURE' existence-reach FACT remains a separate, unbuilt lead-only capability.)"
     },
     {
       "name": "trivy",

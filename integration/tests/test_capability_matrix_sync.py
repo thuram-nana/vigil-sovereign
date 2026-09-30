@@ -95,12 +95,16 @@ def test_the_backfill_did_not_fake_fact_capability():
     conformance battery — never a faked claim. The H4 backfill added LEAD-only/UNAVAILABLE rows only; the H5
     reuse (masscan/rustscan/naabu) and its W1 batch-2 promotion (zmap/unicornscan) each earned their FACT via
     live.conformance.run_toolspec_conformance over VIGIL's own gated handshake, not by editing this pin."""
-    # HexStrike W2 does NOT grow this set: httpx/ffuf propose urls and VIGIL re-drives them through the
-    # gated sibling-differential capture, but that branch (achieved_state.endpoint_liveness) is declared
-    # LEAD-only PERMANENTLY after five adversarial rounds, so the re-drive is a LEAD ENRICHER and the two
-    # tools stay fact_capable=false. See docs/capability-matrix/evidence-branches.json.
+    # HexStrike W2 does NOT grow this set on the endpoint_liveness path: httpx/ffuf propose urls and VIGIL
+    # re-drives them through the gated sibling-differential capture, but that branch
+    # (achieved_state.endpoint_liveness) is declared LEAD-only PERMANENTLY, so the re-drive is a LEAD ENRICHER
+    # and the two tools stay fact_capable=false. C4 grows it via a DIFFERENT re-drive: katana/gobuster (the
+    # web_discovery family) earned FACT via the ACHIEVED_STATE web re-drive (live.web_redrive.web_redrive),
+    # each passing live.conformance first; nuclei stays fact_capable=false (a scanner is a proposer, not the
+    # authority). See docs/capability-matrix/evidence-branches.json.
     fact = {m.name for m in _manifests() if m.fact_capable}
-    assert fact == {"nmap", "sslscan", "masscan", "rustscan", "naabu", "zmap", "unicornscan"}, (
+    assert fact == {"nmap", "sslscan", "masscan", "rustscan", "naabu", "zmap", "unicornscan",
+                    "katana", "gobuster"}, (
         f"unexpected fact_capable set after backfill: {fact}"
     )
 

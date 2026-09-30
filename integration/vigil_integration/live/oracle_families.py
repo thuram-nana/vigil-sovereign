@@ -392,14 +392,21 @@ def fuse(observations: Iterable[ToolObservation]) -> list[FamilyVote]:
 #     run" merely because it is absent from the governed executor's ``_BUILDERS``.
 # Kept in lock-step with ``hexstrike_body._spec_for_kind`` by
 # ``test_oracle_mapped_tools_all_have_a_spec_builder_no_drift`` (every mapped tool must build a spec).
-# W2 DOWNGRADE: httpx and ffuf are deliberately ABSENT. They DO have runner-owned ToolSpec builders
-# (``external_tool.httpx_url_scan`` / ``ffuf_content_scan``) and the web re-drive still runs for them as a
-# LEAD ENRICHER (dispatched by ``hexstrike_body._LEAD_ENRICHER_TOOLS``), but after five adversarial rounds
-# the ``achieved_state.endpoint_liveness`` branch is LEAD-only PERMANENTLY. ``oracle_mapped_tools`` derives
-# "can mint a FACT" from this set, so membership here would assert the opposite of what the branch registry
-# now declares. A builder is not a mint.
+# C4 — the web_discovery FACT column. katana and gobuster carry runner-owned ToolSpec builders
+# (``external_tool.katana_web_scan`` / ``gobuster_web_scan``) that feed the FACT-CAPABLE ACHIEVED_STATE web
+# re-drive (``live.web_redrive.web_redrive`` → the open_redirect / cors / host_header / graphql_introspection
+# branches, all declared fact_capable=true). They are members of the FACT-capable ``web_discovery`` family, so
+# ``oracle_mapped_tools`` correctly maps them: a spec builder over a FACT-capable family. VIGIL's OWN gated
+# capture + oracle mints — the tool only proposes a URL.
+#
+# W2 DOWNGRADE STILL HOLDS: httpx and ffuf remain deliberately ABSENT. They DO have runner-owned ToolSpec
+# builders (``external_tool.httpx_url_scan`` / ``ffuf_content_scan``) whose web re-drive runs as a LEAD
+# ENRICHER (``hexstrike_body._LEAD_ENRICHER_TOOLS``) on the ``achieved_state.endpoint_liveness`` sibling-
+# differential branch, which is LEAD-only PERMANENTLY after five adversarial rounds. That is a DIFFERENT
+# re-drive from the exploitable-condition ``web_redrive`` katana/gobuster feed: membership here derives "can
+# mint", and endpoint_liveness cannot, so httpx/ffuf stay out. A builder is not a mint.
 SPEC_BUILDER_TOOLS: "frozenset[str]" = frozenset({"nmap", "sslscan", "masscan", "rustscan", "naabu",
-                                                  "zmap", "unicornscan"})
+                                                  "zmap", "unicornscan", "katana", "gobuster"})
 
 
 # ---------------------------------------------------------------------------

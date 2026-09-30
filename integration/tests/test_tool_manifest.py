@@ -41,12 +41,19 @@ def test_the_only_fact_capable_tools_are_the_ones_with_a_shipped_re_drive():
     # SERVICE_REACHABILITY (the H5 reuse; all six re-prove each proposed port with the runner's own gated
     # handshake); sslscan → TLS_WEAKNESS. Growing this set is deliberate — each addition must PASS
     # live.conformance.run_toolspec_conformance first.
-    # HexStrike W2 does NOT grow this set: httpx/ffuf propose urls and VIGIL re-drives them through the
-    # gated sibling-differential capture, but that branch (achieved_state.endpoint_liveness) is declared
-    # LEAD-only PERMANENTLY after five adversarial rounds, so the re-drive is a LEAD ENRICHER and the two
-    # tools stay fact_capable=false. See docs/capability-matrix/evidence-branches.json.
+    # HexStrike W2 does NOT grow this set on the endpoint_liveness path: httpx/ffuf propose urls and VIGIL
+    # re-drives them through the gated sibling-differential capture, but that branch
+    # (achieved_state.endpoint_liveness) is declared LEAD-only PERMANENTLY after five adversarial rounds, so
+    # the re-drive is a LEAD ENRICHER and the two tools stay fact_capable=false.
+    # C4 DOES grow it via a DIFFERENT re-drive: katana/gobuster (the web_discovery family) propose URLs that
+    # VIGIL re-drives through the FACT-CAPABLE ACHIEVED_STATE web re-drive (live.web_redrive.web_redrive —
+    # open_redirect/cors/host_header/graphql_introspection), each having passed live.conformance first.
+    # nuclei stays fact_capable=false: a scanner is a proposer, not the authority (its web-class findings are
+    # re-driven through the same web_redrive, but the FACT is attributed to ACHIEVED_STATE, never to nuclei).
+    # See docs/capability-matrix/evidence-branches.json.
     fact = {m.name for m in load_manifests(_MATRIX) if m.fact_capable}
-    assert fact == {"nmap", "sslscan", "masscan", "rustscan", "naabu", "zmap", "unicornscan"}, (
+    assert fact == {"nmap", "sslscan", "masscan", "rustscan", "naabu", "zmap", "unicornscan",
+                    "katana", "gobuster"}, (
         f"unexpected fact_capable set: {fact}")
 
 
@@ -199,9 +206,11 @@ def test_h5_batch2_reuse_tools_are_present_service_reachability_fact_capable():
         assert m.excluded is False, f"{name}: a reachability proposer is not excluded"
         assert m.category == "active-assessment", f"{name}: a port scanner actively probes"
         assert m.notes.strip(), f"{name}: a fact_capable tool still documents its re-drive in notes"
-    # the pinned fact_capable set now includes the two promoted batch-2 scanners
+    # the pinned fact_capable set includes the two promoted batch-2 scanners AND the C4 web_discovery FACT
+    # tools (katana/gobuster, ACHIEVED_STATE via web_redrive).
     fact = {m.name for m in load_manifests(_MATRIX) if m.fact_capable}
-    assert fact == {"nmap", "sslscan", "masscan", "rustscan", "naabu", "zmap", "unicornscan"}, (
+    assert fact == {"nmap", "sslscan", "masscan", "rustscan", "naabu", "zmap", "unicornscan",
+                    "katana", "gobuster"}, (
         f"fact set changed: {fact}")
 
 
