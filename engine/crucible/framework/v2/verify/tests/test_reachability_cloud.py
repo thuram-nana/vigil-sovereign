@@ -255,6 +255,10 @@ def _serve_once(handler_cls) -> "http.server.HTTPServer":
 
 
 def test_real_loopback_get_is_unauthenticated_and_confirms(monkeypatch, tmp_path) -> None:
+    # The egress floor runs on the real connect (connect=None) → needs vigil_gateway.denylist, which the
+    # vigil_core-only "CRUCIBLE core" CI job deliberately lacks (stdlib-only gateway). Skip there; the
+    # offense leg (which ships the gateway) runs it. The other, hermetic tests in this file still run.
+    pytest.importorskip("vigil_gateway")
     _grant_active_recon(monkeypatch)
     _charter(tmp_path, "127.0.0.1")
     seen: dict = {}
@@ -285,6 +289,10 @@ def test_real_loopback_get_is_unauthenticated_and_confirms(monkeypatch, tmp_path
 
 
 def test_real_loopback_redirect_is_not_followed_and_does_not_confirm(monkeypatch, tmp_path) -> None:
+    # The egress floor runs on the real connect (connect=None) → needs vigil_gateway.denylist, which the
+    # vigil_core-only "CRUCIBLE core" CI job deliberately lacks (stdlib-only gateway). Skip there; the
+    # offense leg (which ships the gateway) runs it. The other, hermetic tests in this file still run.
+    pytest.importorskip("vigil_gateway")
     _grant_active_recon(monkeypatch)
     _charter(tmp_path, "127.0.0.1")
 

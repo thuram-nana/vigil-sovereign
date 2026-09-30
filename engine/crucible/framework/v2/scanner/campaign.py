@@ -1072,8 +1072,12 @@ class WebScanCampaign:
                 continue
             try:
                 # The RAW-SOCKET burst is re-gated INSIDE raw_race (Wave-4.4): pass the SAME
-                # fail-closed scope/charter/kill-switch/egress gate the host check above used, so
-                # the engine authorizes the burst before any byte leaves the box (defense in depth).
+                # fail-closed scope / charter-signature / kill-switch / protected-NAME gate the host check
+                # above used, so the engine authorizes the burst before any byte leaves the box. NOTE: that
+                # gate is STRING-matching only — it is NOT an L3/L4 egress floor (raw_race's own docstring
+                # says so). The never-liftable metadata/RFC1918 floor + connect-pin is applied by the
+                # integration caller (live/race_bizlogic_redrive.py via pin_egress) and, for the eval, by the
+                # VM-firewall floor; wiring the floor here on the engine path too is tracked hardening (WS1.1b).
                 result = race_burst(base, action_path, max_allowed=int(max_allowed),
                                     authorize=self._arsenal_host_allowed)
             except Exception:

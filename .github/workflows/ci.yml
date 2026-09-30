@@ -496,6 +496,16 @@ jobs:
             # UNCHANGED, and integration/tests/test_ci_volume_tests_run_nightly.py turns the build red
             # if a volume-marked test is not covered by the nightly job or if this flag is dropped from
             # a leg that collects one.
+            #
+            # The four engine/crucible/framework/v2/verify/tests files at the TAIL of this list are here for
+            # the same reason the integration files are: their egress-floor + real-loopback tests connect on
+            # the real path, which pins through vigil_gateway.denylist. The "CRUCIBLE core on vigil_core" job
+            # runs the whole framework/v2 tree but installs NO gateway (the gateway image is deliberately
+            # stdlib-only), so those specific tests importorskip("vigil_gateway") and SKIP there. THIS leg
+            # ships the gateway, so it is where they actually EXECUTE — the other, hermetic tests in those
+            # files still run (and pass) in crucible-core. (They are not integration/tests files, so the
+            # test_ci_framework_tests_run_in_offense_leg guard neither requires nor counts them; listing them
+            # here is the coverage fix.)
             VIGIL_REQUIRE_FRONTIER_CHECK=1 \
             PYTHONPATH=integration:engine/crucible:gateway python -m pytest \
               docs/tests/test_out_of_scope_is_honest.py \
@@ -634,7 +644,11 @@ jobs:
               integration/tests/test_enh2_unique_slug.py \
               integration/tests/test_loopback_charter.py \
               integration/tests/test_engage_mutation_approval.py \
-              integration/tests/test_mesh_cicd_posture.py -q -m "not volume"
+              integration/tests/test_mesh_cicd_posture.py \
+              engine/crucible/framework/v2/verify/tests/test_egress_pin.py \
+              engine/crucible/framework/v2/verify/tests/test_reachability.py \
+              engine/crucible/framework/v2/verify/tests/test_tls_weakness.py \
+              engine/crucible/framework/v2/verify/tests/test_reachability_cloud.py -q -m "not volume"
           else
             # STRICT branch protection ⇒ a mergeable PR is up to date with main and this committed
             # monorepo path always exists; its absence means a rename/deletion — fail RED, never skip GREEN.

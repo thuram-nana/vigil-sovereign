@@ -157,6 +157,10 @@ def test_capture_tls_handshake_failure_is_a_clean_negative(monkeypatch, tmp_path
 
 
 def test_capture_tls_over_a_real_loopback_tls_server(monkeypatch, tmp_path) -> None:
+    # The egress floor runs on the real connect (connect=None) → needs vigil_gateway.denylist, which the
+    # vigil_core-only "CRUCIBLE core" CI job deliberately lacks (stdlib-only gateway). Skip there; the
+    # offense leg (which ships the gateway) runs it. The other, hermetic tests in this file still run.
+    pytest.importorskip("vigil_gateway")
     _grant(monkeypatch)
     _charter(tmp_path, "127.0.0.1")
     # a real self-signed TLS server on loopback — a genuine handshake, no mocks
@@ -274,6 +278,10 @@ def test_capture_tls_omits_spki_on_unparseable_cert(monkeypatch, tmp_path) -> No
 
 
 def test_capture_tls_over_real_loopback_returns_observed_spki(monkeypatch, tmp_path) -> None:
+    # The egress floor runs on the real connect (connect=None) → needs vigil_gateway.denylist, which the
+    # vigil_core-only "CRUCIBLE core" CI job deliberately lacks (stdlib-only gateway). Skip there; the
+    # offense leg (which ships the gateway) runs it. The other, hermetic tests in this file still run.
+    pytest.importorskip("vigil_gateway")
     _grant(monkeypatch)
     _charter(tmp_path, "127.0.0.1")
     cert = _self_signed_cert(tmp_path)

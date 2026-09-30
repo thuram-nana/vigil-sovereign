@@ -247,6 +247,21 @@ def capture_anonymous_get(
     refusal = _authorize(str(url or ""), slug)
     if refusal is not None:
         return {**base, "error": refusal}
+    # Never-liftable egress floor: resolve the URL host ONCE and refuse a metadata / link-local / RFC1918 /
+    # reserved destination before the GET (the direct hole this closes is the confirmed risk). Only the real
+    # default connector egresses; a test-injected ``connect`` is hermetic. The urllib GET re-resolves the
+    # name at connect, so a precisely-timed DNS rebinding is a NARROW named residual for THIS path (the plain
+    # socket paths — reachability/tls — pin the address; an urllib IP-pin is deferred because it breaks TLS
+    # cert validation for a vhost).
+    if connect is None:
+        try:
+            from ..common.egress_pin import resolve_and_pin
+            parts = urlsplit(str(url))
+            _host = parts.hostname or ""
+            _port = parts.port or (443 if (parts.scheme or "").lower() == "https" else 80)
+            resolve_and_pin(_host, int(_port), slug=slug)
+        except Exception as e:
+            return {**base, "error": f"egress floor refused: {e}"[:300]}
     conn = connect or _http_get
     try:
         status, headers, body = conn(str(url), timeout)

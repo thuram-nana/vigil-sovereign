@@ -201,8 +201,9 @@ def raw_race(
             f"{type(exc).__name__}: {exc}") from exc
     if not allowed:
         raise SovereigntyViolation(
-            f"race burst refused: {target_url!r} failed the scope/charter/kill-switch/"
-            f"egress-floor gate — raw-socket burst not authorized")
+            f"race burst refused: {target_url!r} failed the scope / charter-signature / kill-switch / "
+            f"protected-NAME gate — raw-socket burst not authorized (this string gate is NOT the L3/L4 "
+            f"egress floor; that is applied by the integration caller's pin_egress and the VM firewall)")
 
     if count < 1:
         return []

@@ -152,6 +152,10 @@ def test_capture_handshake_turns_a_connect_failure_into_a_clean_negative(monkeyp
 
 
 def test_capture_handshake_over_a_real_loopback_socket(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    # The egress floor runs on the real connect (connect=None) → needs vigil_gateway.denylist, which the
+    # vigil_core-only "CRUCIBLE core" CI job deliberately lacks (stdlib-only gateway). Skip there; the
+    # offense leg (which ships the gateway) runs it. The other, hermetic tests in this file still run.
+    pytest.importorskip("vigil_gateway")
     _grant_active_recon(monkeypatch)
     _charter(tmp_path, "127.0.0.1")
     # a real listening socket on an ephemeral loopback port — a genuine 3-way handshake, no mocks
