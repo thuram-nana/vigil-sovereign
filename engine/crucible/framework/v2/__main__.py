@@ -172,6 +172,15 @@ def _erase_evidence(argv: list[str]) -> int:
     return evidence_erasure.main(argv)
 
 
+def _spine_cert(argv: list[str]) -> int:
+    # Export a live engage's oracle-confirmed FACTs off the .blackboard spine as the SAME
+    # offline-re-verifiable cert bundle the scanner/proof paths produce (re-runnable by
+    # `verify`). LAZY import — agents/ is untouched until this subcommand runs, so the
+    # scan/engage/benchmark gate path never loads it and `make gate` stays byte-identical.
+    from .agents import spine_certs
+    return spine_certs.main(argv)
+
+
 def _mcp(argv: list[str]) -> int:
     from .mcp import cli as mcp_cli
     return mcp_cli.main(argv)
@@ -267,6 +276,7 @@ _DISPATCH: dict[str, Callable[[list[str]], int]] = {
     "evidence": _evidence,
     "erase-evidence": _erase_evidence,
     "report": _report,
+    "spine-cert": _spine_cert,
     "attack-paths": _attack_paths,
     "collaborator": _collaborator,
     "benchmark": _benchmark,

@@ -125,6 +125,43 @@ def _postmortem(args: argparse.Namespace) -> int:
     return 0
 
 
+def _rollup(args: argparse.Namespace) -> int:
+    """Compose many engagements' results (report.json / reverifiable.json / coverage
+    certificate) into one VERDICT-PRESERVING fleet roll-up. Offline, deterministic — it never
+    launders an inconclusive/lead into a clean/fact (see memory.fleet.FleetRollup)."""
+    from .fleet import FleetError, FleetRollup
+
+    roll = FleetRollup()
+    for d in args.engagement or []:
+        try:
+            roll.add_engagement(d, reverify=not args.no_reverify)
+        except (FleetError, OSError) as e:
+            print(f"warning: skipped engagement dir {d!r}: {e}", file=sys.stderr)
+    for r in args.report or []:
+        try:
+            roll.add_report(r)
+        except (FleetError, OSError) as e:
+            print(f"warning: skipped report {r!r}: {e}", file=sys.stderr)
+    for c in args.coverage_cert or []:
+        try:
+            roll.add_coverage_certificate(c)
+        except (FleetError, OSError) as e:
+            print(f"warning: skipped coverage cert {c!r}: {e}", file=sys.stderr)
+    for rv in args.reverifiable or []:
+        try:
+            roll.add_reverifiable(rv, reverify=not args.no_reverify)
+        except (FleetError, OSError) as e:
+            print(f"warning: skipped reverifiable {rv!r}: {e}", file=sys.stderr)
+
+    doc = roll.to_rollup_dict()
+    if args.out:
+        path = roll.write_rollup(args.out)
+        print(str(path))
+    else:
+        print(json.dumps(doc, indent=2, sort_keys=True, ensure_ascii=False))
+    return 0
+
+
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(
         prog="python3 -m framework.v2 memory",
@@ -165,6 +202,23 @@ def main(argv: list[str]) -> int:
     p = sub.add_parser("postmortem", help="run engagement postmortem")
     p.add_argument("--slug", required=True)
     p.set_defaults(fn=_postmortem)
+
+    p = sub.add_parser(
+        "rollup",
+        help="verdict-preserving cross-engagement result roll-up "
+             "(report.json / reverifiable.json / coverage certificate)")
+    p.add_argument("--engagement", action="append", metavar="RUN_DIR",
+                   help="An engagement run dir (folds report.json + coverage cert + reverifiable.json). Repeatable.")
+    p.add_argument("--report", action="append", metavar="PATH",
+                   help="A report.json to fold. Repeatable.")
+    p.add_argument("--coverage-cert", action="append", metavar="PATH",
+                   help="A signed coverage certificate to fold. Repeatable.")
+    p.add_argument("--reverifiable", action="append", metavar="PATH",
+                   help="A reverifiable.json / spine cert bundle to fold (re-executed). Repeatable.")
+    p.add_argument("--no-reverify", action="store_true",
+                   help="Do not re-execute reverifiable facts (count cert-carrying facts without re-firing the oracle).")
+    p.add_argument("--out", metavar="PATH", default=None, help="Write the roll-up JSON here (default: stdout).")
+    p.set_defaults(fn=_rollup)
 
     args = parser.parse_args(argv)
     return args.fn(args)
