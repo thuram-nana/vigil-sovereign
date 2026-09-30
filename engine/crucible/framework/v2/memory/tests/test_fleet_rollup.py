@@ -322,6 +322,111 @@ def test_reverifiable_lead_without_cert_is_not_a_fact() -> None:
     assert out["count"] == 0 and out["failures"] == 1
 
 
+def test_demoted_recorded_verdict_never_a_reverified_fact() -> None:
+    """PoC C — the recorded-verdict gate: a finding the engagement recorded as demoted
+    (verified_by_oracle=False, grounding='contradicted') with a STILL-RE-FIRING cert must NEVER
+    be counted as a reverified fact. It is a rejected lead, not a fact and not a cert failure."""
+    demoted = _rev_finding("d", genuine=True)
+    demoted["verified_by_oracle"] = False
+    demoted["grounding"] = "contradicted"
+    roll = FleetRollup()
+    roll.add_reverifiable({"active_findings": [demoted]}, reverify=True)
+    out = roll.to_rollup_dict()["reverified_facts"]
+    assert out["count"] == 0
+    assert out["by_class"] == {}
+    assert out["rejected_leads"] == 1
+    # prove the excluded lead's OWN cert really would have re-verified — so exclusion is a verdict
+    # decision (enforced), not a broken cert.
+    from framework.v2.verify import reverify as _rv
+    r = _rv.reverify_finding({"bug_class": _BUG, "oracle_context": demoted["oracle_context"]})
+    assert r.ok and r.reproduced
+
+
+def test_recorded_verdict_gate_applies_even_under_no_reverify() -> None:
+    # a demoted entry is rejected regardless of reverify mode — the gate is not re-execution.
+    demoted = _rev_finding("d", genuine=True)
+    demoted["verified_by_oracle"] = False
+    roll = FleetRollup()
+    roll.add_reverifiable({"active_findings": [demoted]}, reverify=False)
+    out = roll.to_rollup_dict()["reverified_facts"]
+    assert out["count"] == 0 and out["rejected_leads"] == 1
+
+
+def test_grounding_non_fact_rejected_ungrounded_hypothesis() -> None:
+    for g in ("ungrounded", "hypothesis", "unclassified"):
+        f = _rev_finding("x", genuine=True)
+        f["grounding"] = g
+        roll = FleetRollup()
+        roll.add_reverifiable({"active_findings": [f]}, reverify=True)
+        assert roll.to_rollup_dict()["reverified_facts"]["count"] == 0, g
+
+
+def test_scanner_shape_without_recorded_verdict_still_counts() -> None:
+    # a raw scanner AuditFinding carries NEITHER verified_by_oracle NOR grounding — its
+    # active_findings ARE the confirmed set, so it falls through to the cert+re-fire check and is
+    # counted (no regression to the real scanner path).
+    roll = FleetRollup()
+    roll.add_reverifiable({"active_findings": [_rev_finding("g", genuine=True)]}, reverify=True)
+    out = roll.to_rollup_dict()["reverified_facts"]
+    assert out["count"] == 1 and out["rejected_leads"] == 0 and out["failures"] == 0
+
+
+def test_no_reverify_stamps_reverify_skipped_marker() -> None:
+    """PoC F / FIX B(2) — the output tells a consumer whether re-execution was performed."""
+    roll = FleetRollup()
+    roll.add_reverifiable({"active_findings": [_rev_finding("g", genuine=True)]}, reverify=False)
+    assert roll.to_rollup_dict()["reverified_facts"]["reverify_skipped"] is True
+
+    roll2 = FleetRollup()
+    roll2.add_reverifiable({"active_findings": [_rev_finding("g", genuine=True)]}, reverify=True)
+    assert roll2.to_rollup_dict()["reverified_facts"]["reverify_skipped"] is False
+
+    # no reverifiable folded at all ⇒ nothing was skipped.
+    assert FleetRollup().to_rollup_dict()["reverified_facts"]["reverify_skipped"] is False
+
+
+# ---------------------------------------------------------------------------
+# corpus-wide clean is a strict, client-facing assurance
+# ---------------------------------------------------------------------------
+
+
+def test_corpus_wide_clean_false_under_bounded_reach_cert() -> None:
+    """PoC D — a bounded-reach engagement (budget exhausted / frontier truncated) must NOT
+    contribute to a corpus-wide-clean claim."""
+    roll = FleetRollup()
+    roll.add_report(_report(target="http://a", verdicts={"xss": "clean"}, exercised=["xss"],
+                            inconclusive=[], corpus_wide=True, findings=[]))
+    roll.add_coverage_certificate(_coverage_cert(
+        target_host="b", n_finding=0, n_clean=1, n_inconclusive=0, surfaces=1,
+        frontier_truncated=9, budget=True, probes=[{"class": "ssti", "verdict": "clean"}]))
+    out = roll.to_rollup_dict()
+    assert out["coverage_certificate_bounds"]["reach_bounded"] is True
+    assert out["coverage_bounds"]["clean_is_corpus_wide"] is False
+
+
+def test_corpus_wide_clean_requires_coverage_block_in_every_report() -> None:
+    """PoC E — a report that made clean claims but never declared corpus-wide-clean over its own
+    corpus (no coverage block) cannot yield a fleet corpus-wide-clean."""
+    roll = FleetRollup()
+    roll.add_report(_report(target="http://a", verdicts={"xss": "clean"}, exercised=["xss"],
+                            inconclusive=[], corpus_wide=True, findings=[]))
+    # report B: clean verdict_by_class but NO coverage_verdict block
+    roll.add_report({"tool": "CRUCIBLE", "target": "http://b",
+                     "verdict_by_class": {"cors": "clean"}, "findings": []})
+    assert roll.to_rollup_dict()["coverage_bounds"]["clean_is_corpus_wide"] is False
+
+
+def test_unknown_verdict_normalized_to_inconclusive_in_output() -> None:
+    """PoC (garbage) — a non-lattice verdict string must never appear in the surfaced output and
+    must never read as clean."""
+    roll = FleetRollup()
+    roll.add_report({"verdict_by_class": {"xss": "clean_ish_totally_fine", "sqli": "garbage"},
+                     "findings": []})
+    out = roll.to_rollup_dict()
+    assert out["verdict_by_class"] == {"sqli": "inconclusive", "xss": "inconclusive"}
+    assert out["coverage_bounds"]["classes_clean"] == []
+
+
 # ---------------------------------------------------------------------------
 # (5) hygiene: determinism + malformed input
 # ---------------------------------------------------------------------------

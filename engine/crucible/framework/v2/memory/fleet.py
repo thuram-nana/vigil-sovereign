@@ -44,6 +44,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+from typing import Any
 
 from ..common import logging as v2log
 from ..common import paths
@@ -515,18 +516,25 @@ def load_fleet_labels_from_env() -> FleetLabels | None:
 #   * CLEAN aggregates ONLY from real per-engagement CLEANs — a fleet ``clean`` for a class
 #     means EVERY engagement that stated a verdict for it adjudicated it clean (none inconclusive,
 #     none finding). "Not assessed" contributes no clean; it can only leave the verdict at, or
-#     push it to, inconclusive. ``clean_is_corpus_wide`` at the fleet level is True only when
-#     every contributing engagement was itself corpus-wide clean AND nothing is inconclusive.
-#   * LEAD stays LEAD and FACT stays FACT. On the finding axis a FACT is counted ONLY from a
-#     real per-engagement FACT WITH its certificate — a finding the engagement graded
-#     ``grounding == "fact"`` (which the honest export guarantees carries a re-verifiable
-#     ``oracle_context``: ``check_id != "" ==> grounding == "fact"``). A LEAD — passive
-#     hygiene, a DOM candidate, an ungrounded / contradicted / hypothesis active — is counted
-#     as a lead and can NEVER be rounded up to a fact.
+#     push it to, inconclusive. ``clean_is_corpus_wide`` at the fleet level is True only when EVERY
+#     folded report carried a coverage block that was itself corpus-wide clean, nothing is
+#     inconclusive/found, AND no contributing coverage certificate had bounded reach (truncation /
+#     budget) — a bounded-reach engagement never proves a corpus-wide negative.
+#   * LEAD stays LEAD and FACT stays FACT — ENFORCED, not assumed. On the finding axis a FACT is
+#     counted ONLY from a real per-engagement FACT WITH its certificate. Two independent tallies:
+#       - ``facts`` from a rendered report's ``findings`` graded ``grounding == "fact"`` (which the
+#         honest export guarantees carries a re-verifiable ``oracle_context``:
+#         ``check_id != "" ==> grounding == "fact"``);
+#       - ``reverified_facts`` from a reverifiable bundle, gated TWICE: the RECORDED per-engagement
+#         verdict must be a fact (``verified_by_oracle`` not-false AND ``grounding`` absent-or-``fact``)
+#         AND (unless ``reverify_skipped``) the pure oracle must RE-FIRE. So a lead == no re-firing
+#         portable cert AND recorded-verdict==fact; a demoted / contradicted active that stayed in
+#         ``active_findings`` with a still-re-firing cert is REFUSED by enforcement here, not left
+#         safe only by a producer's pre-gating contract. A LEAD is never rounded up to a fact.
 #   * The coverage certificate's BOUNDS are preserved: ``n_inconclusive`` is summed and
 #     surfaced (never dropped), and any truncation / budget-exhaustion in ANY certificate
 #     marks the fleet reach as bounded — so a reader can never mistake the pooled reach for
-#     whole-fleet completeness.
+#     whole-fleet completeness, and it blocks the corpus-wide-clean claim.
 #
 # The verdict lattice (the JOIN is the aggregate): clean < inconclusive < finding.
 # ---------------------------------------------------------------------------
@@ -568,12 +576,24 @@ class FleetRollup:
         # each contributing report's own clean_is_corpus_wide (fleet clean-wide needs all True)
         self._engagement_corpus_wide: list[bool] = []
         self._classes_outside_corpus: set[str] = set()
+        # how many reports were folded — a fleet corpus-wide CLEAN requires EVERY report to have
+        # carried a coverage block (so ``len(_engagement_corpus_wide) == _report_count``): a report
+        # that made clean claims but never declared corpus-wide-clean over its own corpus cannot
+        # contribute to the fleet claim.
+        self._report_count: int = 0
         # finding axis — facts (grounding == "fact") vs leads (everything else)
         self._facts_by_class: dict[str, int] = {}
         self._leads_by_bucket: dict[str, int] = {}
-        # reverifiable-sourced, RE-EXECUTED facts (independent corroboration)
+        # reverifiable-sourced facts. A fact here must pass the RECORDED-verdict gate (a demoted /
+        # contradicted finding is never a fact, even with a re-firing cert) AND carry a re-firing
+        # cert (re-executed unless --no-reverify). Rejected leads and cert failures are tracked
+        # separately so the output is honest.
         self._reverified_facts_by_class: dict[str, int] = {}
         self._reverify_failures: int = 0
+        self._reverify_rejected_leads: int = 0
+        # True iff some reverifiable bundle was folded WITHOUT re-execution (--no-reverify) — a
+        # consumer must be able to tell a re-executed roll-up from a non-executed one.
+        self._reverify_skipped: bool = False
         # coverage certificate bounds (summed / disjoined — never dropped)
         self._cert_n_finding = 0
         self._cert_n_clean = 0
@@ -614,7 +634,12 @@ class FleetRollup:
         if not bug_class:
             return
         cur = self._class_verdict.get(bug_class)
-        self._class_verdict[bug_class] = verdict if cur is None else _join_verdict(cur, verdict)
+        new = verdict if cur is None else _join_verdict(cur, verdict)
+        # CANONICALISE on store: an unknown / garbage verdict (a first-seen non-lattice label)
+        # normalises to ``inconclusive`` so the SURFACED verdict_by_class never shows e.g.
+        # {"sqli":"garbage"} and a non-canonical label can never read as clean.
+        self._class_verdict[bug_class] = _RANK_VERDICT[
+            _VERDICT_RANK.get(new, _VERDICT_RANK["inconclusive"])]
         self._class_sources.setdefault(bug_class, set()).add(source)
 
     def add_report(self, data: dict | Path | str, *, source_id: str | None = None) -> str:
@@ -660,6 +685,7 @@ class FleetRollup:
                 self._fold_finding(f, sid)
 
         self._report_sources.add(sid)
+        self._report_count += 1
         return sid
 
     def _fold_finding(self, f: dict, source: str) -> None:
@@ -715,16 +741,47 @@ class FleetRollup:
         self._cert_sources.add(sid)
         return sid
 
+    @staticmethod
+    def _recorded_verdict_is_fact(f: dict) -> bool:
+        """Honour the RECORDED per-engagement verdict a finding carries, mirroring
+        :func:`agents.spine_certs._is_fact_finding`. A finding the engagement itself recorded as a
+        LEAD is NEVER a fact — even with a still-re-firing certificate:
+
+          * ``verified_by_oracle`` PRESENT and falsy ⇒ recorded a lead ⇒ not a fact;
+          * ``grounding`` PRESENT and not ``"fact"`` (contradicted / ungrounded / hypothesis /
+            unclassified / …) ⇒ recorded a lead ⇒ not a fact.
+
+        A finding that carries NEITHER field (a raw scanner ``AuditFinding``, whose
+        ``active_findings`` ARE the oracle-confirmed set by construction) falls through to the
+        cert-presence + re-fire check — so the real scanner path is unchanged. The gate is what
+        makes the non-laundering guarantee ENFORCED here, not merely a producer contract: a
+        world-refuted active that ``engage`` demoted to CONTRADICTED while it stayed in
+        ``active_findings`` with a re-firing cert (or any third-party bundle) is rejected."""
+        if "verified_by_oracle" in f and not f["verified_by_oracle"]:
+            return False
+        grounding = f.get("grounding")
+        if grounding is not None and str(grounding) != "fact":
+            return False
+        return True
+
     def add_reverifiable(self, data: dict | Path | str, *, source_id: str | None = None,
                          reverify: bool = True) -> str:
         """Fold one engagement's ``reverifiable.json`` (a raw ScanReport dump, or the spine cert
         bundle from :mod:`agents.spine_certs`) — the FACTs WITH their retained ``oracle_context``.
 
-        With ``reverify=True`` (default) each ``active_findings`` entry is RE-EXECUTED offline
-        (``verify.reverify``): only a finding whose pure oracle re-fires over its retained
-        evidence is counted a re-verified fact; one that does not reproduce (tampered, or never
-        truly confirmed) is counted a failure, NOT a fact. This is the strongest, independently
-        re-executed fact tally — it can never launder a lead or a tampered cert into a fact.
+        A re-verified fact must pass a TWO-PART gate, so it can never launder a lead or a tampered
+        cert into a fact:
+
+          1. RECORDED VERDICT (always, regardless of ``reverify``): a finding the engagement
+             recorded as a lead — ``verified_by_oracle`` present-and-false, or ``grounding`` present
+             and not ``"fact"`` — is rejected (counted under ``rejected_leads``), never a fact.
+          2. RE-EXECUTION (``reverify=True``, the default): the admitted finding's pure oracle must
+             RE-FIRE over its retained evidence; one that does not reproduce (tampered, or never
+             truly confirmed) is a ``failure``, not a fact. With ``reverify=False`` the caller opts
+             OUT of re-execution — a cert-carrying finding is counted WITHOUT re-firing, and the
+             roll-up output is stamped ``reverify_skipped=True`` so a consumer knows the
+             re-executed guarantee does NOT hold for this tally.
+
         Returns the source id folded."""
         doc = self._read_doc(data)
         sid = source_id or str(doc.get("target") or doc.get("engagement") or "reverifiable")
@@ -740,12 +797,18 @@ class FleetRollup:
         for f in findings:
             if not isinstance(f, dict):
                 continue
+            # (1) RECORDED-verdict gate — a demoted / contradicted finding is never a fact, even
+            # with a re-firing cert, and even under --no-reverify.
+            if not self._recorded_verdict_is_fact(f):
+                self._reverify_rejected_leads += 1
+                continue
             oc = f.get("oracle_context")
             bug_class = str(f.get("bug_class") or "")
             if not (isinstance(oc, dict) and oc):
                 # no certificate ⇒ not a re-verifiable fact, never counted as one
                 self._reverify_failures += 1
                 continue
+            # (2) RE-EXECUTION gate (skipped under --no-reverify; the output marks that).
             if reverifier is not None:
                 res = reverifier(f)
                 if not getattr(res, "ok", False):
@@ -754,6 +817,8 @@ class FleetRollup:
             self._reverified_facts_by_class[bug_class] = (
                 self._reverified_facts_by_class.get(bug_class, 0) + 1)
 
+        if not reverify:
+            self._reverify_skipped = True
         self._reverifiable_sources.add(sid)
         return sid
 
@@ -805,14 +870,23 @@ class FleetRollup:
         invariant); every list/dict is sorted so two roll-ups over the same inputs match byte
         for byte."""
         clean, inconclusive, finding = self._partition()
-        # fleet clean-corpus-wide: every contributing report was itself corpus-wide clean AND
-        # the fleet join has nothing inconclusive and nothing found. "Not assessed" anywhere
-        # blocks it — a not-assessed corpus class is inconclusive, which fails this gate.
+        reach_bounded = bool(self._cert_frontier_truncated or self._cert_budget_exhausted)
+        # fleet clean-corpus-wide is a CLIENT-FACING assurance, so its bar is strict. True ONLY when:
+        #   * at least one report was folded, AND EVERY folded report carried a coverage block that
+        #     declared itself corpus-wide clean (``len(_engagement_corpus_wide) == _report_count``
+        #     and all True) — a report that made clean claims but never declared corpus-wide-clean
+        #     over its own corpus cannot contribute the assurance;
+        #   * the fleet join has NOTHING inconclusive and NOTHING found ("not assessed" anywhere is
+        #     inconclusive, which blocks it); AND
+        #   * no contributing coverage certificate had bounded reach (truncation / budget
+        #     exhaustion) — a bounded-reach engagement never proves a corpus-wide negative.
         clean_is_corpus_wide = bool(
-            self._engagement_corpus_wide
+            self._report_count > 0
+            and len(self._engagement_corpus_wide) == self._report_count
             and all(self._engagement_corpus_wide)
             and not inconclusive
             and not finding
+            and not reach_bounded
         )
         return {
             "schema": FLEET_ROLLUP_SCHEMA,
@@ -843,7 +917,7 @@ class FleetRollup:
                 "frontier_truncated": self._cert_frontier_truncated,
                 "budget_exhausted": self._cert_budget_exhausted,
                 # any truncation or budget exhaustion in ANY cert ⇒ the pooled reach is bounded
-                "reach_bounded": bool(self._cert_frontier_truncated or self._cert_budget_exhausted),
+                "reach_bounded": reach_bounded,
             },
             # finding axis — FACTs (grounding=="fact", cert-backed) vs LEADs
             "facts": {
@@ -854,11 +928,17 @@ class FleetRollup:
                 "count": sum(self._leads_by_bucket.values()),
                 "by_bucket": dict(sorted(self._leads_by_bucket.items())),
             },
-            # independently RE-EXECUTED facts from reverifiable bundles (strongest tally)
+            # reverifiable-sourced facts — each passed the recorded-verdict gate AND (unless
+            # reverify_skipped) re-fired offline. ``rejected_leads`` = demoted/contradicted entries
+            # refused by the recorded-verdict gate; ``failures`` = cert absent or did not reproduce.
+            # ``reverify_skipped`` is True iff any bundle was folded WITHOUT re-execution, so a
+            # consumer can tell a re-executed tally from a non-executed one.
             "reverified_facts": {
                 "count": sum(self._reverified_facts_by_class.values()),
                 "by_class": dict(sorted(self._reverified_facts_by_class.items())),
                 "failures": self._reverify_failures,
+                "rejected_leads": self._reverify_rejected_leads,
+                "reverify_skipped": self._reverify_skipped,
             },
         }
 
