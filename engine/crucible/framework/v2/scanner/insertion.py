@@ -291,7 +291,11 @@ def _strip_crlf(s: str) -> str:
 # We keep the split raw so unmodified parts round-trip byte-for-byte
 # (``("--"+boundary).join(segments) == body``) and only re-serialise the one part a
 # payload targets. Rendering never touches the boundary or the Content-Type, so the
-# emitted request stays valid multipart.
+# emitted request stays valid multipart FOR ANY PAYLOAD THAT DOES NOT ITSELF CONTAIN THE
+# DELIMITER ``--``+boundary. That residual is irreducible in RFC-2046 (multipart has no
+# in-body boundary-escaping mechanism); the only defense is a unique boundary, which we
+# preserve verbatim from the original request, and probe payloads never contain the
+# request-derived (typically random) boundary token — so a real probe cannot split framing.
 
 _MPART_NAME_RE = re.compile(r'name\s*=\s*"((?:[^"\\]|\\.)*)"', re.IGNORECASE)
 
