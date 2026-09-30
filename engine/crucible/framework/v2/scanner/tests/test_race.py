@@ -169,6 +169,9 @@ def _server(state: _CouponState, *, atomic: bool) -> Iterator[str]:
 
 
 def test_naive_coupon_is_over_redeemed_and_confirmed(race_slug: str) -> None:
+    # Drives raw_race through the WS1.1b egress floor, which imports vigil_gateway.denylist and fail-closes
+    # without it. SKIP in the gateway-less CRUCIBLE-core job, RUN in the offense leg (ships gateway).
+    pytest.importorskip("vigil_gateway")
     state = _CouponState(window_s=0.10)
     with _server(state, atomic=False) as base_url:
         confirmed = race_check(base_url, "/redeem", count=8, max_allowed=1, slug=race_slug)
@@ -189,6 +192,9 @@ def test_naive_coupon_is_over_redeemed_and_confirmed(race_slug: str) -> None:
 
 
 def test_locked_coupon_is_not_flagged(race_slug: str) -> None:
+    # Drives raw_race through the WS1.1b egress floor, which imports vigil_gateway.denylist and fail-closes
+    # without it. SKIP in the gateway-less CRUCIBLE-core job, RUN in the offense leg (ships gateway).
+    pytest.importorskip("vigil_gateway")
     state = _CouponState(window_s=0.10)
     with _server(state, atomic=True) as base_url:
         confirmed = race_check(base_url, "/redeem", count=8, max_allowed=1, slug=race_slug)
@@ -199,6 +205,9 @@ def test_locked_coupon_is_not_flagged(race_slug: str) -> None:
 
 
 def test_race_burst_reports_counts_without_confirming(race_slug: str) -> None:
+    # Drives raw_race through the WS1.1b egress floor, which imports vigil_gateway.denylist and fail-closes
+    # without it. SKIP in the gateway-less CRUCIBLE-core job, RUN in the offense leg (ships gateway).
+    pytest.importorskip("vigil_gateway")
     state = _CouponState(window_s=0.10)
     with _server(state, atomic=False) as base_url:
         result = race_burst(base_url, "/redeem", count=6, max_allowed=1, slug=race_slug)
@@ -212,6 +221,9 @@ def test_race_burst_reports_counts_without_confirming(race_slug: str) -> None:
 
 
 def test_raw_race_last_byte_sync_delivers_all_requests() -> None:
+    # Drives raw_race through the WS1.1b egress floor, which imports vigil_gateway.denylist and fail-closes
+    # without it. SKIP in the gateway-less CRUCIBLE-core job, RUN in the offense leg (ships gateway).
+    pytest.importorskip("vigil_gateway")
     # Every connection must actually complete: N successes on the naive endpoint
     # equals N 200s here only if all N won, but at minimum all N get a parseable
     # HTTP status back (200 winners + 409 losers), proving the burst delivered.
@@ -236,6 +248,9 @@ def test_raw_race_last_byte_sync_delivers_all_requests() -> None:
 
 
 def test_success_predicate_is_honoured(race_slug: str) -> None:
+    # Drives raw_race through the WS1.1b egress floor, which imports vigil_gateway.denylist and fail-closes
+    # without it. SKIP in the gateway-less CRUCIBLE-core job, RUN in the offense leg (ships gateway).
+    pytest.importorskip("vigil_gateway")
     # A custom predicate keys off the body marker instead of the status code.
     state = _CouponState(window_s=0.10)
     with _server(state, atomic=False) as base_url:
@@ -253,6 +268,9 @@ def test_success_predicate_is_honoured(race_slug: str) -> None:
 
 
 def test_a12_all_2xx_no_predicate_is_a_lead_not_a_confirmed_race(race_slug: str) -> None:
+    # Drives raw_race through the WS1.1b egress floor, which imports vigil_gateway.denylist and fail-closes
+    # without it. SKIP in the gateway-less CRUCIBLE-core job, RUN in the offense leg (ships gateway).
+    pytest.importorskip("vigil_gateway")
     # A12: when EVERY concurrent request returns 2xx (no losers) under the DEFAULT any-2xx predicate, the
     # verdict cannot distinguish a real over-consumption from a benignly-idempotent endpoint — it is a LEAD.
     import http.server
@@ -455,6 +473,9 @@ def test_rawrace_floor_refuses_a_bracketed_ipv6_metadata_literal(
 
 
 def test_rawrace_floor_allows_loopback_baseline_no_slug_no_new_reach() -> None:
+    # Drives raw_race through the WS1.1b egress floor, which imports vigil_gateway.denylist and fail-closes
+    # without it. SKIP in the gateway-less CRUCIBLE-core job, RUN in the offense leg (ships gateway).
+    pytest.importorskip("vigil_gateway")
     # NO-REGRESSION control: this engine is loopback-oriented and dialled loopback freely before the
     # floor existed, so 127.0.0.1 stays an in-scope baseline even with NO slug — the floor ADDS the
     # metadata/RFC1918 refusal without removing this legitimate reach. A live loopback burst still
@@ -478,6 +499,9 @@ def test_rawrace_floor_allows_loopback_baseline_no_slug_no_new_reach() -> None:
 def test_rawrace_pins_the_resolved_ip_not_the_name(
     rebind_slug: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # Drives raw_race through the WS1.1b egress floor, which imports vigil_gateway.denylist and fail-closes
+    # without it. SKIP in the gateway-less CRUCIBLE-core job, RUN in the offense leg (ships gateway).
+    pytest.importorskip("vigil_gateway")
     # POSITIVE control + pin proof: an in-scope charter name that resolves to a charter-listed
     # loopback literal connects, AND the socket is opened to the PINNED IP (127.0.0.1), never to the
     # re-resolvable name — so a resolver that later flipped the name could not redirect the dial.

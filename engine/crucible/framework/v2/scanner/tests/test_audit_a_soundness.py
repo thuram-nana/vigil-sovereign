@@ -673,6 +673,10 @@ def test_f7_cswsh_certificate_carries_raw_bytes_and_fails_on_tamper() -> None:
     ``achieved_state_oracle(True, True)`` re-confirmed FOREVER: no target bytes to tamper,
     nothing that could ever fail. The certificate must now carry the two handshakes' raw
     request/response blocks, and altering ANY of them must break the re-verification."""
+    # Drives a REAL CSWSH/race socket through the WS1.1b floor (websocket.handshake / race.raw_race),
+    # which imports vigil_gateway.denylist and fail-closes without it. SKIP in the gateway-less CRUCIBLE-core
+    # job, RUN in the offense leg that ships gateway — as verify/tests/test_egress_pin.py does.
+    pytest.importorskip("vigil_gateway")
     with _ws_server() as port:
         ws_url = f"ws://127.0.0.1:{port}/live"
         camp = WebScanCampaign(_dummy_send, enable_arsenal=True)
@@ -786,6 +790,10 @@ def test_b3_a_403_that_echoes_the_101_status_line_is_not_a_cswsh() -> None:
     really ran against the refusing endpoint (the server counts the foreign handshake it
     rejected) and that the producer's own status-line-anchored verdict says NOT accepted —
     not merely that no finding appeared."""
+    # Drives a REAL CSWSH/race socket through the WS1.1b floor (websocket.handshake / race.raw_race),
+    # which imports vigil_gateway.denylist and fail-closes without it. SKIP in the gateway-less CRUCIBLE-core
+    # job, RUN in the offense leg that ships gateway — as verify/tests/test_egress_pin.py does.
+    pytest.importorskip("vigil_gateway")
     srv = _Echo403WSServer()
     srv.start()
     try:
@@ -822,6 +830,10 @@ def test_b3_retained_response_is_bounded_to_the_header_block() -> None:
     ``_header_block`` reduced to ``return resp`` — 0 tests killed. The fixture now writes the
     101 headers AND a WebSocket text frame in a SINGLE ``sendall``, so one ``recv`` delivers
     both and the trimming is the only thing that keeps the frame out of the retained block."""
+    # Drives a REAL CSWSH/race socket through the WS1.1b floor (websocket.handshake / race.raw_race),
+    # which imports vigil_gateway.denylist and fail-closes without it. SKIP in the gateway-less CRUCIBLE-core
+    # job, RUN in the offense leg that ships gateway — as verify/tests/test_egress_pin.py does.
+    pytest.importorskip("vigil_gateway")
     with _ws_server() as port:
         from framework.v2.scanner.websocket import handshake
         _conn, hs = handshake(f"ws://127.0.0.1:{port}/live", origin="http://x.test")
@@ -839,6 +851,10 @@ def test_b4_an_unconfirmed_lead_is_never_rendered_as_confirmed() -> None:
     ``build_report`` re-labelled the entry ``"cross_site_websocket_hijacking confirmed at
     ws://…"`` at the class's table severity — so the hedge was cosmetic and this slice's own
     F3/R3 demotions would have rendered the same way."""
+    # Drives a REAL CSWSH/race socket through the WS1.1b floor (websocket.handshake / race.raw_race),
+    # which imports vigil_gateway.denylist and fail-closes without it. SKIP in the gateway-less CRUCIBLE-core
+    # job, RUN in the offense leg that ships gateway — as verify/tests/test_egress_pin.py does.
+    pytest.importorskip("vigil_gateway")
     with _ws_server() as port:
         ws_url = f"ws://127.0.0.1:{port}/live"
         camp = WebScanCampaign(_dummy_send, enable_arsenal=True)
@@ -952,6 +968,10 @@ def test_r3_race_over_run_is_a_lead_not_a_fact() -> None:
     DEFAULT any-2xx success rule, and the campaign has no owner-signed workflow spec and no
     SEMANTIC success predicate. ``BUG_CLASS_ORACLES``' own ``request_race`` row calls that
     a LEAD; on 838e0b42 it minted a High FACT from ``result.successes``."""
+    # Drives a REAL CSWSH/race socket through the WS1.1b floor (websocket.handshake / race.raw_race),
+    # which imports vigil_gateway.denylist and fail-closes without it. SKIP in the gateway-less CRUCIBLE-core
+    # job, RUN in the offense leg that ships gateway — as verify/tests/test_egress_pin.py does.
+    pytest.importorskip("vigil_gateway")
     with _http_server(_AlwaysOkApp) as base:
         camp = WebScanCampaign(_dummy_send, enable_arsenal=True,
                                arsenal_race_targets=(("/buy", 1),))
@@ -1206,6 +1226,10 @@ def test_block4_cswsh_producer_refusal_is_load_bearing() -> None:
     status line is contained in the retained block, and the retained block carries VIGIL's own
     accept key — yet the endpoint answered 403 and refused the handshake. Only the producer's
     ``_status_of``-anchored verdict separates the two."""
+    # Drives a REAL CSWSH/race socket through the WS1.1b floor (websocket.handshake / race.raw_race),
+    # which imports vigil_gateway.denylist and fail-closes without it. SKIP in the gateway-less CRUCIBLE-core
+    # job, RUN in the offense leg that ships gateway — as verify/tests/test_egress_pin.py does.
+    pytest.importorskip("vigil_gateway")
     from framework.v2.scanner.websocket import CswshCheck, handshake
     from framework.v2.verify.oracles import predicate_oracle
 

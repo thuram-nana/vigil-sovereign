@@ -333,6 +333,11 @@ def test_a_hanging_server_is_a_timing_lead_not_a_smuggling_fact() -> None:
 
 
 def test_cswsh_confirmed_through_the_arsenal() -> None:
+    # This drives a REAL CSWSH handshake through websocket.handshake, whose WS1.1b egress floor imports
+    # vigil_gateway.denylist and fail-closes when it is absent. The gateway-less CRUCIBLE-core job ships no
+    # gateway, so this floored-handshake test SKIPS there and RUNS in the offense leg (which ships gateway),
+    # exactly as verify/tests/test_egress_pin.py does. The gate/scope tests below open no accepting socket.
+    pytest.importorskip("vigil_gateway")
     with _ws_server() as port:
         camp = WebScanCampaign(_dummy_send, enable_arsenal=True)  # loopback → allowed
         findings = camp._cswsh_findings([f"ws://127.0.0.1:{port}/live"])
