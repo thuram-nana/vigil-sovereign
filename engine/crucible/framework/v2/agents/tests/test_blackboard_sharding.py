@@ -19,7 +19,10 @@ Proves the load-bearing D2 invariants:
 
 from __future__ import annotations
 
+import multiprocessing
+import os
 import threading
+from pathlib import Path
 
 import pytest
 
@@ -47,6 +50,29 @@ def _trust_root(threshold: int = 2, n: int = 3):
         AuthorizerKey(key_id=f"g{i}", name=f"A{i}", public_key_b64=k.public_key_b64)
         for i, k in enumerate(keys)])
     return tr, [(f"g{i}", k.private_key_b64) for i, k in enumerate(keys)]
+
+
+def _fleet_race_worker(tenant_name: str, root_str: str, go_path: str, q) -> None:
+    """A real, separate process that races the fleet guard against a SHARED root. Module-level so a
+    fork-context Process can target it. Spins on a 'go' file so all workers hit the atomic claim at once,
+    then reports PASS / FAILCLOSED / ERROR through the queue. Sets ``paths.v2_root`` to the shared root
+    directly (works whether the child was forked with the parent's monkeypatch or started fresh)."""
+    import os as _os
+    import time as _time
+    from pathlib import Path as _Path
+    from framework.v2.common import paths as _paths, tenant as _t
+
+    _paths.v2_root = lambda: _Path(root_str)
+    _os.environ["CRUCIBLE_TENANT"] = tenant_name
+    while not _os.path.exists(go_path):        # align all workers on the claim
+        _time.sleep(0.001)
+    try:
+        _t.assert_tenant_fleet_isolated()
+        q.put((tenant_name, "PASS"))
+    except _t.TenantIsolationError:
+        q.put((tenant_name, "FAILCLOSED"))
+    except BaseException as e:  # noqa: BLE001 — surface any unexpected shape as a test failure
+        q.put((tenant_name, "ERROR:" + repr(e)))
 
 
 # ---------------------------------------------------------------------------
@@ -209,6 +235,78 @@ def test_fleet_isolation_unsafe_tenant_id_still_fails(tmp_path, monkeypatch) -> 
     monkeypatch.setenv("CRUCIBLE_TENANT", "../evil")
     with pytest.raises((tenant.TenantIsolationError, CrucibleRootNotFound)):
         tenant.assert_tenant_fleet_isolated()
+
+
+# --- fail-OPEN regressions the red-pen found (atomic claim + malformed-is-fail-closed) --------------
+
+
+def test_fleet_isolation_concurrent_exactly_one_winner(tmp_path) -> None:
+    """RED-PEN (a): N real processes race the guard in ONE shared root. Because the claim is published
+    atomically (temp write + os.link), EXACTLY ONE wins and every other FAILS CLOSED — no loser ever reads
+    a 0-byte claim as 'unclaimed'. Proves the concurrent fail-open hole is closed."""
+    ctx = multiprocessing.get_context("fork")
+    root = tmp_path / "shared"
+    root.mkdir()
+    go = tmp_path / "GO"
+    q = ctx.Queue()
+    n = 8
+    procs = [ctx.Process(target=_fleet_race_worker, args=(f"t{i}", str(root), str(go), q))
+             for i in range(n)]
+    for p in procs:
+        p.start()
+    go.write_text("go")                                    # release all workers at once
+    for p in procs:
+        p.join(timeout=60)
+    results = [q.get(timeout=5) for _ in range(n)]
+    outcomes = [r[1] for r in results]
+    assert outcomes.count("PASS") == 1, results            # EXACTLY ONE passer
+    assert outcomes.count("FAILCLOSED") == n - 1, results  # everyone else fails closed
+    winner = next(r[0] for r in results if r[1] == "PASS")
+    assert (root / ".tenant-owner").read_text().strip() == winner   # the winner is the recorded owner
+
+
+def test_fleet_isolation_empty_claim_residue_fails_closed(tmp_path, monkeypatch) -> None:
+    """RED-PEN (b): a pre-existing 0-byte .tenant-owner (crash-mid-claim residue / the old bug's transient
+    state) must fail closed for EVERY tenant — never degrade the guard to pass-for-all."""
+    monkeypatch.setattr(paths, "v2_root", lambda: tmp_path)
+    claim = tenant.tenant_claim_path()
+    claim.parent.mkdir(parents=True, exist_ok=True)
+    os.close(os.open(claim, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600))   # exactly the 0-byte residue
+    assert claim.stat().st_size == 0
+    for t in ("alpha", "beta"):
+        monkeypatch.setenv("CRUCIBLE_TENANT", t)
+        with pytest.raises(tenant.TenantIsolationError) as ei:
+            tenant.assert_tenant_fleet_isolated()
+        assert "malformed" in str(ei.value).lower()
+    assert tenant.root_owner() is None                     # the empty residue was never accepted as an owner
+
+
+def test_fleet_isolation_whitespace_or_partial_claim_fails_closed(tmp_path, monkeypatch) -> None:
+    """Any non-well-formed claim content (whitespace, garbage, an invalid id, empty) is fail-closed, not
+    'unclaimed' — so a partial write can never be mistaken for a free root."""
+    monkeypatch.setattr(paths, "v2_root", lambda: tmp_path)
+    claim = tenant.tenant_claim_path()
+    claim.parent.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("CRUCIBLE_TENANT", "alpha")
+    for junk in ("   \n", "not a valid id!!\n", "a/b\n", "", "alpha\nbeta\n"):
+        claim.write_text(junk, encoding="utf-8")
+        with pytest.raises(tenant.TenantIsolationError):
+            tenant.assert_tenant_fleet_isolated()
+
+
+def test_claim_is_atomic_never_zero_byte(tmp_path, monkeypatch) -> None:
+    """The published claim, once present, always has valid content — there is no create-then-write window:
+    a claim written by _claim_root is non-empty and names the tenant."""
+    monkeypatch.setattr(paths, "v2_root", lambda: tmp_path)
+    monkeypatch.setenv("CRUCIBLE_TENANT", "alpha")
+    tenant.assert_tenant_fleet_isolated()
+    claim = tenant.tenant_claim_path()
+    assert claim.exists() and claim.stat().st_size > 0
+    assert claim.read_text(encoding="utf-8").strip() == "alpha"
+    # no orphan temp files left beside it
+    leftovers = [p.name for p in claim.parent.iterdir()
+                 if p.name.startswith(tenant._TENANT_OWNER_FILE + ".")]
+    assert leftovers == [], leftovers
 
 
 def test_n_workers_concurrent_no_contention_no_cross_read(tmp_path, monkeypatch) -> None:

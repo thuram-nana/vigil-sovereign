@@ -46,6 +46,7 @@ mode, and :func:`assert_tenant_fleet_isolated` refuses it for fleet use.
 from __future__ import annotations
 
 import os
+import tempfile
 from pathlib import Path
 
 from . import paths
@@ -136,9 +137,12 @@ def _is_relative(child: Path, parent: Path) -> bool:
 # The shard isolates spine + memory only; targets/evidence/authority/killswitch are per-SLUG, so two
 # tenants sharing a root AND a slug commingle them. One CRUCIBLE_ROOT per tenant is REQUIRED. This guard
 # makes that requirement enforceable: a fleet worker calls it at startup and it FAILS CLOSED unless the
-# process is sharded AND its root is dedicated to this tenant. Enforcement = a race-free trust-on-first-
-# use ROOT-OWNERSHIP claim (atomic O_EXCL) at the v2 root, plus a scan for another tenant's existing
-# spine/memory shard already under the root (catches a root that housed another tenant before any claim).
+# process is sharded AND its root is dedicated to this tenant. Enforcement = a trust-on-first-use
+# ROOT-OWNERSHIP claim published ATOMICALLY (write the id to a temp file in the same dir, then os.link it
+# into place — link is atomic and refuses an existing target, so the claim file NEVER has an observable
+# 0-byte/partial window and a create that loses the race is cleanly refused), plus a scan for another
+# tenant's existing spine/memory shard under the root. A malformed/empty/partial claim (old-bug or crash
+# residue) is a HARD fail-closed state, NEVER "unclaimed" — so the guard can never degrade to pass-for-all.
 # ---------------------------------------------------------------------------
 
 _TENANT_OWNER_FILE = ".tenant-owner"
@@ -150,12 +154,40 @@ def tenant_claim_path() -> Path:
     return paths.v2_root() / _TENANT_OWNER_FILE
 
 
-def root_owner() -> str | None:
-    """The tenant recorded as owning this root (the TOFU claim), or ``None`` if the root is unclaimed."""
+def _classify_claim() -> tuple[str, str | None]:
+    """Read + classify the on-disk root-ownership claim. Returns one of:
+
+      * ``("absent", None)``       — no claim file: the root is genuinely unclaimed.
+      * ``("owned", <tenant>)``    — a well-formed claim naming a VALID tenant id.
+      * ``("malformed", <detail>)``— the file exists but is empty / whitespace / not a valid tenant id
+        (the OLD 0-byte-window bug's residue, a crash between temp-write and publish that somehow touched
+        the path, or manual corruption). This is a HARD fail-closed state, NEVER 'unclaimed', so a partial
+        claim can never let the guard degrade to pass-for-all.
+
+    TOTAL and fail-closed on ambiguity: an UNREADABLE file classifies as ``malformed`` (never ``absent``).
+    Only a genuine ``FileNotFoundError`` is ``absent``."""
+    p = tenant_claim_path()
     try:
-        return (tenant_claim_path().read_text(encoding="utf-8").strip() or None)
+        raw = p.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return ("absent", None)
     except OSError:
-        return None
+        return ("malformed", "<unreadable>")
+    val = raw.strip()
+    if val and paths._TENANT_RE.fullmatch(val):
+        return ("owned", val)
+    return ("malformed", raw[:64] or "<empty>")
+
+
+def root_owner() -> str | None:
+    """The tenant recorded as owning this root, or ``None`` when the root is genuinely UNCLAIMED (no file).
+
+    Convenience accessor for status / tests. NOTE: it returns ``None`` only for an absent file; a present-
+    but-malformed/empty claim is NOT silently 'unclaimed' — it is a fail-closed state surfaced by
+    :func:`assert_tenant_fleet_isolated` and :func:`shard_summary`. Control flow uses :func:`_classify_claim`
+    directly, never this accessor, so a malformed residue can never be mistaken for an unclaimed root."""
+    state, val = _classify_claim()
+    return val if state == "owned" else None
 
 
 def _other_tenant_shards(active: str) -> list[str]:
@@ -176,21 +208,59 @@ def _other_tenant_shards(active: str) -> list[str]:
 
 
 def _claim_root(t: str) -> None:
-    """Atomically record ``t`` as this root's owner (O_EXCL — race-free). On a lost race (another worker
-    claimed in the gap) re-read and FAIL CLOSED if the winner is a different tenant."""
+    """Publish ``t`` as this root's owner ATOMICALLY. The claim file, once visible at its path, ALWAYS
+    contains a valid tenant id: the id is written (+fsync) to a UNIQUE temp file in the SAME directory,
+    then hard-LINKED into place. ``os.link`` is atomic and raises ``FileExistsError`` if the claim already
+    exists — giving exclusive-create semantics WITHOUT the 0-byte window a create-then-write has. The temp
+    is always unlinked (finally), so a lost race or a crash leaves no claim residue at the path.
+
+    On a lost race (another worker linked first) it re-classifies the now-complete claim and FAILS CLOSED
+    unless the winner is us (idempotent). Any other link failure (e.g. a FS without hardlinks) also fails
+    CLOSED — we never fall back to a replacing rename, which would let a second tenant overwrite the first."""
     p = tenant_claim_path()
     paths.secure_dir(p.parent)
+    fd, tmpname = tempfile.mkstemp(prefix=_TENANT_OWNER_FILE + ".", dir=str(p.parent))
+    tmp = Path(tmpname)
     try:
-        fd = os.open(p, os.O_WRONLY | os.O_CREAT | os.O_EXCL, paths.SECURE_FILE_MODE)
-    except FileExistsError:
-        owner = root_owner()
-        if owner is not None and owner != t:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(t + "\n")
+            f.flush()
+            os.fsync(f.fileno())              # temp is complete + durable BEFORE it is published
+        try:
+            os.chmod(tmp, paths.SECURE_FILE_MODE)   # mkstemp is already 0600; be explicit
+        except OSError:
+            pass
+        try:
+            os.link(str(tmp), str(p))         # ATOMIC publish; FileExistsError if already claimed
+        except FileExistsError:
+            state, owner = _classify_claim()
+            if state == "owned" and owner == t:
+                return                        # we already own it (idempotent / our own prior claim)
             raise TenantIsolationError(
-                f"CRUCIBLE_ROOT was just claimed by tenant {owner!r}, not {t!r} (startup race) — "
-                f"refusing to run a second tenant in one root")
-        return
-    with os.fdopen(fd, "w", encoding="utf-8") as f:
-        f.write(t + "\n")
+                f"CRUCIBLE_ROOT was claimed by tenant {owner!r} (claim state={state}), not {t!r} "
+                f"(startup race) — refusing to run a second tenant in one root")
+        except OSError as e:                  # e.g. FS without hardlink support: fail CLOSED, never rename
+            raise TenantIsolationError(
+                f"could not atomically claim CRUCIBLE_ROOT for tenant {t!r} ({e}) — refusing to run "
+                f"without exclusive ownership (fail-closed)") from e
+        _fsync_dir(p.parent)                  # best-effort: make the new link durable across a power loss
+    finally:
+        try:
+            os.unlink(tmp)                    # drop the temp; the linked claim (if any) survives
+        except OSError:
+            pass
+
+
+def _fsync_dir(d: Path) -> None:
+    """Best-effort fsync of a directory so a freshly-linked entry survives a power loss. Never raises."""
+    try:
+        dfd = os.open(str(d), os.O_RDONLY)
+        try:
+            os.fsync(dfd)
+        finally:
+            os.close(dfd)
+    except OSError:
+        pass
 
 
 def assert_tenant_fleet_isolated(*, claim: bool = True) -> None:
@@ -207,9 +277,12 @@ def assert_tenant_fleet_isolated(*, claim: bool = True) -> None:
     per-tenant, so two tenants sharing a root AND a slug commingle findings / evidence / authorization.
     One root per tenant is REQUIRED; this guard turns a mis-deploy into a hard startup error.
 
-    With ``claim=True`` (default) it takes race-free ownership of an unclaimed root (TOFU). With
-    ``claim=False`` it is read-only (a dry-run / status probe — verifies but never claims). To re-purpose
-    a root for a new tenant, remove its ``.tenant-owner`` file."""
+    Ownership is published atomically (write a temp file, then ``os.link`` it into place), so a CONCURRENT
+    startup of N workers in one root has EXACTLY ONE winner and every other FAILS CLOSED — there is no
+    0-byte window a loser could read as 'unclaimed', and a malformed/empty claim (crash residue) fails
+    closed for everyone rather than degrading the guard to pass-for-all. With ``claim=True`` (default) an
+    absent claim is taken (TOFU); with ``claim=False`` it is read-only (a dry-run / status probe — verifies
+    but never claims). To re-purpose a root for a new tenant, remove its ``.tenant-owner`` file."""
     t = tenant_id()                    # raises CrucibleRootNotFound on an unsafe id; None when unsharded
     if t is None:
         raise TenantIsolationError(
@@ -222,14 +295,22 @@ def assert_tenant_fleet_isolated(*, claim: bool = True) -> None:
             f"CRUCIBLE_ROOT is shared: it already houses spine/memory shards for other tenant(s) "
             f"{others!r} besides {t!r}. targets/evidence/authority/kill-switch are NOT tenant-sharded, "
             f"so tenants sharing this root commingle them. Give tenant {t!r} its own CRUCIBLE_ROOT.")
-    # (2b) race-free root-ownership claim (TOFU)
-    owner = root_owner()
-    if owner is not None and owner != t:
+    # (2b) root-ownership claim (TOFU, atomic publish). Classify the on-disk claim FIRST.
+    state, owner = _classify_claim()
+    if state == "malformed":
+        raise TenantIsolationError(
+            f"CRUCIBLE_ROOT has a malformed/empty {_TENANT_OWNER_FILE} (detail={owner!r}): refusing to "
+            f"run (fail-closed — a partial/corrupt claim is NEVER treated as unclaimed, so it can't "
+            f"degrade the guard to pass-for-all). Likely crash residue; remove {_TENANT_OWNER_FILE} to "
+            f"re-purpose this root, then restart.")
+    if state == "owned" and owner != t:
         raise TenantIsolationError(
             f"CRUCIBLE_ROOT is owned by tenant {owner!r}, not {t!r}: refusing to run a second tenant in "
             f"one root (would commingle targets/evidence/authority/kill-switch). Give tenant {t!r} its "
             f"own root, or remove {_TENANT_OWNER_FILE} to re-purpose this root.")
-    if claim and owner is None:
+    if state == "owned":                       # owner == t: already ours (idempotent re-attach)
+        return
+    if claim:                                  # state == "absent": take exclusive ownership atomically
         _claim_root(t)
 
 
@@ -244,9 +325,15 @@ def shard_summary() -> dict[str, str]:
         return {"tenant": f"INVALID ({exc})", "blackboard_db": "-", "memory_db": "-",
                 "root_owner": "-"}
     sp = store_paths()
+    state, owner = _classify_claim()
+    owner_label = {
+        "absent": "(unclaimed)",
+        "owned": owner or "(unclaimed)",
+        "malformed": "(MALFORMED — fail-closed; remove .tenant-owner to re-purpose)",
+    }.get(state, "(unknown)")
     return {
         "tenant": t if t is not None else "(shared/default)",
         "blackboard_db": str(sp["blackboard"]),
         "memory_db": str(sp["memory"]),
-        "root_owner": root_owner() or "(unclaimed)",
+        "root_owner": owner_label,
     }
