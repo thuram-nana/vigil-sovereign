@@ -1,0 +1,274 @@
+"""
+Wave D / D2 — horizontal single-tenant worker sharding + the bounded structural check.
+
+Proves the load-bearing D2 invariants:
+
+  * TENANT SHARDING. With ``CRUCIBLE_TENANT`` set, the otherwise-global ``.blackboard`` / ``.memory``
+    SQLite singletons resolve under a per-tenant subdir. Two tenants get PHYSICALLY DISJOINT stores;
+    a tenant-A worker cannot see tenant-B's engagements/events (no cross-tenant commingling). Unset =>
+    byte-identical to the historical singleton. A set-but-UNSAFE id FAILS CLOSED.
+  * NO CONTENTION. N single-tenant workers writing concurrently to their sharded DBs do not contend or
+    cross-read (each SQLite file has one writer — its own tenant).
+  * BOUNDED STRUCTURAL CHECK. ``PRAGMA quick_check`` no longer runs on EVERY open: ``first`` (default)
+    scans once per path per process, ``always`` every open, ``off`` never — while a torn store is still
+    caught, and the on-demand ``check_integrity()`` still works.
+  * TAMPER-EVIDENCE PRESERVED. The spine hash-chain (agents.spine_chain) STILL verifies — and still
+    detects tampering and a second-writer FORK — even with the per-open quick_check turned OFF, because
+    quick_check is SQLite-page structure, not the cryptographic chain.
+"""
+
+from __future__ import annotations
+
+import threading
+
+import pytest
+
+from framework.v2.agents import blackboard as bb_mod
+from framework.v2.agents.blackboard import (
+    BlackboardError, blackboard_path, open_blackboard,
+)
+from framework.v2.agents.spine_chain import (
+    build_spine_chain, sign_spine_head, verify_spine_chain, verify_spine_head,
+)
+from framework.v2.common import paths, tenant
+from framework.v2.common.errors import CrucibleRootNotFound
+from framework.v2.entitlement.crypto import generate_keypair
+from framework.v2.entitlement.models import AuthorizerKey, TrustRoot
+
+
+def _obs(b, slug: str, summary: str) -> int:
+    return b.post(engagement=slug, kind="observation", agent_name="a",
+                  payload={"source": "s", "surface": "p", "summary": summary})
+
+
+def _trust_root(threshold: int = 2, n: int = 3):
+    keys = [generate_keypair() for _ in range(n)]
+    tr = TrustRoot(schema_version=1, threshold=threshold, authorizers=[
+        AuthorizerKey(key_id=f"g{i}", name=f"A{i}", public_key_b64=k.public_key_b64)
+        for i, k in enumerate(keys)])
+    return tr, [(f"g{i}", k.private_key_b64) for i, k in enumerate(keys)]
+
+
+# ---------------------------------------------------------------------------
+# tenant path resolution
+# ---------------------------------------------------------------------------
+
+
+def test_default_unset_is_byte_identical(monkeypatch) -> None:
+    """No CRUCIBLE_TENANT => the historical singleton paths, unchanged (make-gate / benchmark path)."""
+    monkeypatch.delenv("CRUCIBLE_TENANT", raising=False)
+    assert paths.active_tenant() is None
+    assert tenant.is_sharded() is False
+    assert paths.blackboard_dir() == paths.v2_root() / ".blackboard"
+    assert blackboard_path() == paths.v2_root() / ".blackboard" / "store.sqlite"
+    assert paths.memory_db() == paths.v2_root() / ".memory" / "store.sqlite"
+
+
+def test_tenant_set_shards_both_stores(monkeypatch) -> None:
+    monkeypatch.setenv("CRUCIBLE_TENANT", "alpha")
+    assert paths.active_tenant() == "alpha"
+    assert tenant.is_sharded() is True
+    v2 = paths.v2_root()
+    assert blackboard_path() == v2 / ".blackboard" / "tenants" / "alpha" / "store.sqlite"
+    assert paths.memory_db() == v2 / ".memory" / "tenants" / "alpha" / "store.sqlite"
+
+
+@pytest.mark.parametrize("bad", ["../evil", "a/b", "a\\b", "..", ".", "-lead", "x" * 65, "@x"])
+def test_unsafe_tenant_fails_closed(monkeypatch, bad: str) -> None:
+    """A hostile / mis-set tenant id RAISES rather than silently falling back to the shared singleton —
+    a silent fallback would commingle the worker with the default store (the exact vector to prevent)."""
+    monkeypatch.setenv("CRUCIBLE_TENANT", bad)
+    with pytest.raises(CrucibleRootNotFound):
+        paths.active_tenant()
+
+
+@pytest.mark.parametrize("bad", ["../evil", "a/b", "..", "", "a\x00b"])
+def test_explicit_tenant_path_is_also_validated(bad: str) -> None:
+    """The explicit ``store_paths(tenant=...)`` route (used to compute another tenant's paths) is guarded
+    by the SAME fail-closed rule, so a traversal component can never be smuggled into a computed shard —
+    including an embedded NUL the OS would refuse in an env var but a caller could pass directly."""
+    with pytest.raises(CrucibleRootNotFound):
+        tenant.store_paths(tenant=bad)
+
+
+@pytest.mark.parametrize("blank", ["", "   "])
+def test_blank_tenant_is_unset(monkeypatch, blank: str) -> None:
+    monkeypatch.setenv("CRUCIBLE_TENANT", blank)
+    assert paths.active_tenant() is None                       # blank == unset, not an error
+
+
+# ---------------------------------------------------------------------------
+# real cross-tenant isolation (writes to disjoint sharded stores)
+# ---------------------------------------------------------------------------
+
+
+def test_two_tenants_cannot_cross_read(tmp_path, monkeypatch) -> None:
+    """Tenant alpha writes an engagement + event; tenant beta's store — a different physical file —
+    has NO such engagement. Cross-read is structurally impossible."""
+    monkeypatch.setattr(paths, "v2_root", lambda: tmp_path)   # keep writes off the repo tree
+
+    monkeypatch.setenv("CRUCIBLE_TENANT", "alpha")
+    a_path = blackboard_path()
+    with open_blackboard(db_path=a_path) as a:
+        _obs(a, "job", "alpha-only-secret")
+        assert a.count(engagement="job") == 1
+
+    monkeypatch.setenv("CRUCIBLE_TENANT", "beta")
+    b_path = blackboard_path()
+    assert a_path != b_path
+    # neither store path is nested inside the other
+    with pytest.raises(ValueError):
+        a_path.relative_to(b_path.parent)
+    with open_blackboard(db_path=b_path) as b:
+        # beta's fresh store does not know engagement 'job' at all
+        with pytest.raises(BlackboardError):
+            b.engagement_id("job", create=False)
+
+    assert a_path.exists() and b_path.exists()                 # two real, separate files
+
+
+def test_assert_isolated_from_guard(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(paths, "v2_root", lambda: tmp_path)
+    monkeypatch.setenv("CRUCIBLE_TENANT", "alpha")
+    tenant.assert_isolated_from("beta")                        # disjoint => no raise
+    with pytest.raises(AssertionError):
+        tenant.assert_isolated_from("alpha")                  # same tenant => not isolated from itself
+
+
+def test_n_workers_concurrent_no_contention_no_cross_read(tmp_path, monkeypatch) -> None:
+    """N single-tenant workers write concurrently to their OWN sharded DBs. No SQLite 'database is
+    locked' contention (each file has one writer) and each store ends with ONLY its own events."""
+    monkeypatch.setattr(paths, "v2_root", lambda: tmp_path)
+    n_workers, per_worker = 6, 25
+    tenants = [f"t{i}" for i in range(n_workers)]
+    db_paths = {t: tenant.store_paths(tenant=t)["blackboard"] for t in tenants}
+    errors: list[str] = []
+    barrier = threading.Barrier(n_workers)
+
+    def work(t: str) -> None:
+        try:
+            barrier.wait(timeout=10)                          # maximise overlap
+            with open_blackboard(db_path=db_paths[t]) as b:
+                for k in range(per_worker):
+                    _obs(b, "job", f"{t}-e{k}")
+        except Exception as exc:  # noqa: BLE001 — surface any lock/contention/cross-write failure
+            errors.append(f"{t}: {exc!r}")
+
+    threads = [threading.Thread(target=work, args=(t,)) for t in tenants]
+    for th in threads:
+        th.start()
+    for th in threads:
+        th.join(timeout=30)
+
+    assert not errors, errors
+    # every store has EXACTLY its own events, and every summary belongs to that tenant only
+    for t in tenants:
+        with open_blackboard(db_path=db_paths[t]) as b:
+            rows = b.read(engagement="job", limit=10_000)
+            assert len(rows) == per_worker
+            assert all(r.payload["summary"].startswith(f"{t}-") for r in rows)
+
+
+# ---------------------------------------------------------------------------
+# bounded structural check (quick_check off the hot path)
+# ---------------------------------------------------------------------------
+
+
+def _count_checks(monkeypatch) -> dict:
+    calls = {"n": 0}
+    orig = bb_mod.Blackboard.check_integrity
+
+    def counting(self):
+        calls["n"] += 1
+        return orig(self)
+
+    monkeypatch.setattr(bb_mod.Blackboard, "check_integrity", counting)
+    return calls
+
+
+def test_first_mode_scans_once_per_path(tmp_path, monkeypatch) -> None:
+    bb_mod._reset_integrity_memo()
+    calls = _count_checks(monkeypatch)
+    db = tmp_path / "s.sqlite"
+    for _ in range(4):                                         # per-request re-opens on the hot path
+        open_blackboard(db_path=db).close()
+    assert calls["n"] == 1                                     # scanned once, not on every open
+
+
+def test_always_mode_scans_every_open(tmp_path, monkeypatch) -> None:
+    bb_mod._reset_integrity_memo()
+    calls = _count_checks(monkeypatch)
+    db = tmp_path / "s.sqlite"
+    for _ in range(3):
+        open_blackboard(db_path=db, integrity="always").close()
+    assert calls["n"] == 3
+
+
+def test_off_mode_never_scans_on_open_but_on_demand_works(tmp_path, monkeypatch) -> None:
+    bb_mod._reset_integrity_memo()
+    calls = _count_checks(monkeypatch)
+    db = tmp_path / "s.sqlite"
+    for _ in range(3):
+        b = open_blackboard(db_path=db, integrity="off")
+        b.close()
+    assert calls["n"] == 0                                     # opting out removes the hot-path scan
+    # on-demand / at-boundary structural check still available and clean on a valid store
+    with open_blackboard(db_path=db, integrity="off") as b:
+        b.check_integrity()                                   # no raise on a valid store
+
+
+def test_corruption_still_detected_on_first_open(tmp_path) -> None:
+    """The default bound did NOT disable detection: a garbage / non-DB file is still caught at (first) open."""
+    bb_mod._reset_integrity_memo()
+    bad = tmp_path / "store.sqlite"
+    bad.write_bytes(b"absolutely not a sqlite database, pure garbage bytes " * 8)
+    with pytest.raises(BlackboardError) as ei:
+        open_blackboard(db_path=bad)                          # default mode == 'first' → scans on first touch
+    assert any(w in str(ei.value).lower() for w in ("corrupt", "integrity", "not a database"))
+
+
+# ---------------------------------------------------------------------------
+# tamper-evidence survives the quick_check change
+# ---------------------------------------------------------------------------
+
+
+def test_spine_hash_chain_verifies_without_per_open_quick_check(tmp_path) -> None:
+    """With per-open quick_check OFF, the cryptographic spine chain STILL verifies and STILL detects
+    tampering — proving quick_check was never the tamper-evidence (the hash-chain is)."""
+    db = tmp_path / "bb.sqlite"
+    with open_blackboard(db_path=db, integrity="off") as b:
+        b.engagement_id("job")
+        for i in range(5):
+            _obs(b, "job", f"e{i}")
+        entries = build_spine_chain(b, "job")
+        ok, reason = verify_spine_chain(b, "job", entries)
+        assert ok, reason
+
+    # reopen (still no per-open scan) — chain verifies from the reloaded store, and a raw-content edit is caught
+    with open_blackboard(db_path=db, integrity="off") as b:
+        entries2 = build_spine_chain(b, "job")
+        ok2, reason2 = verify_spine_chain(b, "job", entries2)
+        assert ok2, reason2
+        tampered = list(entries2)
+        tampered[0] = tampered[0].model_copy(update={"cert_digest": "de" * 32})
+        bad, why = verify_spine_chain(b, "job", tampered)
+        assert not bad and "mismatch" in why
+
+
+def test_second_writer_fork_still_detected_without_per_open_quick_check(tmp_path) -> None:
+    """A signed head anchors the single writer's committed spine. A SECOND writer appending to the same
+    engagement is a fork relative to that head — and is still DETECTED with per-open quick_check off."""
+    db = tmp_path / "bb.sqlite"
+    tr, signers = _trust_root()
+    with open_blackboard(db_path=db, integrity="off") as b:
+        b.engagement_id("job")
+        for i in range(4):
+            _obs(b, "job", f"e{i}")
+        head = sign_spine_head(b, "job", signers=signers[:2])
+        ok, _ = verify_spine_head(b, "job", head, tr)
+        assert ok                                             # intact + anchored
+
+    with open_blackboard(db_path=db, integrity="off") as b2:  # a second writer on the same spine
+        _obs(b2, "job", "forked-append-by-second-writer")
+        ok, reason = verify_spine_head(b2, "job", head, tr)
+        assert not ok                                         # the un-anchored forked append is detected

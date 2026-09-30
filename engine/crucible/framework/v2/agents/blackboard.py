@@ -18,6 +18,7 @@ helper.
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -49,9 +50,41 @@ _SCHEMA_SQL = Path(__file__).parent / "schema.sql"
 # sibling that migrated UP but never refused a version it was too old to understand.
 _MAX_BB_SCHEMA = 2
 
+# D2 — bounded/opt-in structural integrity check. The pre-D2 code ran ``PRAGMA quick_check`` on EVERY
+# ``Blackboard.__init__``. ``open_blackboard()`` is called PER-REQUEST on the console hot path, and
+# quick_check reads every page — an O(db-pages) scan that a long engagement (or an N-worker fleet)
+# pays again on every single connection open. ``CRUCIBLE_BB_INTEGRITY`` bounds it:
+#
+#   * ``first`` (DEFAULT) — run it only the FIRST time THIS process opens a given DB path. A torn /
+#     swapped / non-DB file is still caught the first time a worker touches it, but a long-lived
+#     worker never re-scans on subsequent per-request opens.
+#   * ``always`` — run it on every open (the exact pre-D2 behaviour; for paranoid deployments).
+#   * ``off``    — never run it on open (pure opt-in; call ``check_integrity()`` at boundaries).
+#
+# This does NOT weaken tamper-evidence. ``quick_check`` verifies SQLite PAGE structure, not the spine
+# hash-chain. The cryptographic tamper-evidence (``agents.spine_chain.verify_spine_chain`` /
+# ``verify_spine_head`` — hash-linked, governance-signed) is INDEPENDENT of this check and stays fully
+# verifiable on demand / at engagement boundaries. See test_spine_chain / test_blackboard_sharding.
+_INTEGRITY_ENV = "CRUCIBLE_BB_INTEGRITY"
+_INTEGRITY_MODES = ("first", "always", "off")
+_INTEGRITY_CHECKED: set[str] = set()   # per-process memo of DB paths already structurally checked
+
+
+def _integrity_mode(override: str | None) -> str:
+    raw = (override if override is not None else os.environ.get(_INTEGRITY_ENV, "")).strip().lower()
+    return raw if raw in _INTEGRITY_MODES else "first"
+
+
+def _reset_integrity_memo() -> None:
+    """Clear the per-process 'already structurally checked' memo. Tests use this to exercise the
+    first-open path deterministically; production never needs it."""
+    _INTEGRITY_CHECKED.clear()
+
 
 def blackboard_path() -> Path:
-    return paths.v2_root() / ".blackboard" / "store.sqlite"
+    # D2: sharded per tenant (one tenant per process) via paths.blackboard_dir(); unsharded =>
+    # byte-identical to the historical paths.v2_root()/.blackboard/store.sqlite singleton.
+    return paths.blackboard_dir() / "store.sqlite"
 
 
 class BlackboardError(CrucibleError):
@@ -94,18 +127,21 @@ class Blackboard:
     """Append-only event log for an engagement."""
 
     def __init__(self, *, db_path: Path | None = None,
-                 keyring: EvidenceKeyring | None = None) -> None:
+                 keyring: EvidenceKeyring | None = None,
+                 integrity: str | None = None) -> None:
         self.path = db_path or blackboard_path()
         # W16-8 seal-at-capture DEK store. Lazily constructed on first seal/reveal so opening a
         # blackboard for a read-only tail never touches the keystore. Injectable for tests. The
         # DEK lives in paths.evidence_keys_dir() — OUTSIDE this append-only spine — so a crypto-shred
         # can destroy it without touching a spine row.
         self._keyring = keyring
+        # D2: bounded/opt-in structural check mode. Constructor arg wins over CRUCIBLE_BB_INTEGRITY.
+        self._integrity_mode = _integrity_mode(integrity)
         paths.secure_dir(self.path.parent)            # owner-only spine dir (X2)
         self._conn = sqlite3.connect(self.path, detect_types=sqlite3.PARSE_DECLTYPES)
         paths.secure_existing(self.path)              # 0600 the spine DB (dir 0700 guards WAL sidecars)
         self._conn.row_factory = sqlite3.Row
-        self._integrity_check()                       # W16-STD-6(d): detect a torn store (quick_check), fail LOUD
+        self._maybe_integrity_check()                 # W16-STD-6(d): detect a torn store — now BOUNDED off the hot path
         self._conn.execute("PRAGMA foreign_keys = ON")
         # X3: under WAL (set in schema.sql), synchronous=NORMAL drops the per-commit fsync
         # (durable across app crashes; only an OS/power crash can lose the last commit) — the
@@ -126,17 +162,48 @@ class Blackboard:
 
     # ---- integrity ----
 
-    def _integrity_check(self) -> None:
-        """W16-STD-6(d): run ``PRAGMA integrity_check`` on open so a corrupt / torn / non-SQLite store is
-        reported as a clear ``BlackboardError`` instead of surfacing later as a raw ``sqlite3.DatabaseError``
-        traceback from deep inside a query. A pristine or freshly-created (empty) DB returns the single row
-        ``ok`` and passes silently. ``quick_check`` itself raises ``DatabaseError`` when the file is not a
-        database at all (garbage header) — caught here and re-raised in the same clear shape. We use
-        ``quick_check`` (not ``integrity_check``): open_blackboard() is called PER-REQUEST on console hot
-        paths, and a full ``integrity_check`` is O(db size) — it re-verifies every page + btree index, so a
-        long engagement's store would pay a growing scan on every open. ``quick_check`` skips the expensive
-        index cross-checks while still detecting a torn/truncated file, a bad header and page-level
-        corruption — the torn-store failure this guard exists to catch — at near-constant cost."""
+    def _maybe_integrity_check(self) -> None:
+        """D2: run the structural check per the BOUNDED/OPT-IN policy instead of on EVERY open.
+
+        The pre-D2 code ran ``PRAGMA quick_check`` unconditionally in ``__init__``; because
+        ``open_blackboard()`` is per-request on console hot paths, an N-worker fleet re-paid an
+        O(db-pages) scan on every connection. Modes (``self._integrity_mode`` — constructor arg or
+        ``CRUCIBLE_BB_INTEGRITY``):
+
+          * ``off``    — never scan on open (call :meth:`check_integrity` at boundaries instead);
+          * ``always`` — scan on every open (the exact pre-D2 behaviour);
+          * ``first`` (DEFAULT) — scan only the FIRST time THIS process opens a given path, so a
+            torn/swapped/non-DB file is still caught on first touch but a long-lived worker never
+            re-scans per request.
+
+        Tamper-evidence is untouched: this checks SQLite PAGE structure, NOT the spine hash-chain
+        (``agents.spine_chain``), which stays verifiable on demand regardless of this policy."""
+        mode = self._integrity_mode
+        if mode == "off":
+            return
+        key: str | None = None
+        if mode == "first":
+            try:
+                key = str(self.path.resolve())
+            except OSError:
+                key = str(self.path)
+            if key in _INTEGRITY_CHECKED:
+                return
+        self.check_integrity()                 # raises + closes the conn on a torn/corrupt store
+        if key is not None:                    # reached only on success (check_integrity raises otherwise)
+            _INTEGRITY_CHECKED.add(key)
+
+    def check_integrity(self) -> None:
+        """W16-STD-6(d): run ``PRAGMA quick_check`` NOW so a corrupt / torn / non-SQLite store is reported
+        as a clear ``BlackboardError`` instead of surfacing later as a raw ``sqlite3.DatabaseError`` deep
+        inside a query. A pristine / freshly-created (empty) DB returns the single row ``ok`` and passes
+        silently. ``quick_check`` itself raises ``DatabaseError`` when the file is not a database at all
+        (garbage header) — caught here and re-raised in the same clear shape.
+
+        This is the PUBLIC, on-demand / at-boundary structural check. ``__init__`` no longer calls it on
+        every open (D2 — see :meth:`_maybe_integrity_check`); a caller that wants a full structural pass at
+        an engagement boundary (or a paranoid re-check) calls this directly. It verifies SQLite page
+        structure only — the cryptographic tamper-evidence over the log is ``agents.spine_chain``."""
         try:
             rows = self._conn.execute("PRAGMA quick_check").fetchall()
         except sqlite3.DatabaseError as exc:
@@ -642,5 +709,6 @@ class Blackboard:
 
 
 def open_blackboard(*, db_path: Path | None = None,
-                    keyring: EvidenceKeyring | None = None) -> Blackboard:
-    return Blackboard(db_path=db_path, keyring=keyring)
+                    keyring: EvidenceKeyring | None = None,
+                    integrity: str | None = None) -> Blackboard:
+    return Blackboard(db_path=db_path, keyring=keyring, integrity=integrity)

@@ -29,6 +29,7 @@ a different root may call `_reset_cache()`.
 from __future__ import annotations
 
 import os
+import re
 import sys
 from functools import lru_cache
 from pathlib import Path
@@ -109,6 +110,67 @@ def crucible_root() -> Path:
 def _reset_cache() -> None:
     """Clear the cached root. Tests use this; production should not."""
     crucible_root.cache_clear()
+
+
+# ---------------------------------------------------------------------------
+# D2 — horizontal single-tenant worker sharding.
+#
+# The scale-out unit is ONE tenant per process — matching the per-process
+# ``crucible_root()`` (an ``lru_cache(maxsize=1)`` that freezes a single root for the
+# process) and the single-writer-per-engagement spine. A worker launched for one tenant
+# sets ``CRUCIBLE_TENANT=<id>``; the otherwise-GLOBAL ``.blackboard`` / ``.memory`` SQLite
+# singletons then shard under a per-tenant subdir, so:
+#
+#   * N single-tenant workers never contend on ONE DB file (SQLite serialises writers per
+#     file — the contention this shard removes from the hot path), and
+#   * a tenant-A worker can NEVER resolve tenant-B's store through this API: it can only
+#     ever name its OWN tenant's shard (a hard sovereignty invariant — no cross-tenant
+#     commingling of spine / memory).
+#
+# UNSET / empty ``CRUCIBLE_TENANT`` (the default, and the make-gate / benchmark path) =>
+# byte-identical: the historical singleton path is returned unchanged.
+#
+# A set-but-UNSAFE tenant id FAILS CLOSED (raises) rather than silently falling back to the
+# shared singleton. A silent fallback would COMMINGLE a misconfigured worker's spine/memory
+# with the default store — or with a second fallen-back worker — the exact cross-tenant
+# commingling this shard exists to prevent. Sovereignty wins over availability here.
+# ---------------------------------------------------------------------------
+
+_TENANT_ENV = "CRUCIBLE_TENANT"
+_TENANT_SUBDIR = "tenants"
+# A tenant id is ONE path component drawn from a conservative, portable charset: it must start
+# with an alphanumeric and may then contain [A-Za-z0-9._-], bounded to 64 chars. This forbids
+# path separators, ``.``/``..`` traversal, absolute paths and NUL by construction, so a shard can
+# never escape its parent into a sibling tenant's directory. Matched with ``fullmatch`` (no ``$``
+# trailing-newline slip).
+_TENANT_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
+
+
+def active_tenant() -> str | None:
+    """The tenant-shard id for THIS process, or ``None`` when unsharded (the default).
+
+    Resolved FRESH from ``CRUCIBLE_TENANT`` on each call — it is cheap, and reading (not
+    caching) it keeps tests hermetic under ``monkeypatch.setenv`` and matches the ephemeral /
+    root-strict env conventions elsewhere in this module. An empty / whitespace value is treated
+    as unset (byte-identical default). A set-but-UNSAFE value RAISES ``CrucibleRootNotFound``
+    (fail-closed): a worker with a bad tenant id must not silently write to the shared singleton
+    and commingle tenants."""
+    raw = (os.environ.get(_TENANT_ENV) or "").strip()
+    if not raw:
+        return None
+    if not _TENANT_RE.fullmatch(raw):
+        raise CrucibleRootNotFound(
+            f"{_TENANT_ENV}={raw!r} is not a safe single path component "
+            f"(allowed: an alphanumeric start then [A-Za-z0-9._-], max 64 chars, no separators / "
+            f"traversal) — refusing to shard to an unsafe path (fail-closed tenant pin)")
+    return raw
+
+
+def _tenant_shard(base: Path) -> Path:
+    """Insert the active tenant shard under a per-process state dir (``.blackboard`` / ``.memory``).
+    Unsharded (default) => ``base`` unchanged, so the resolved path is byte-identical to pre-D2."""
+    t = active_tenant()
+    return base / _TENANT_SUBDIR / t if t is not None else base
 
 
 # ---------------------------------------------------------------------------
@@ -242,11 +304,20 @@ def v2_root() -> Path:
 
 
 def memory_dir() -> Path:
-    return v2_root() / ".memory"
+    # D2: shard the MLS store under the active tenant (one tenant per process), so N single-tenant
+    # workers neither contend on one .memory DB nor cross-read each other. Unsharded => byte-identical.
+    return _tenant_shard(v2_root() / ".memory")
 
 
 def memory_db() -> Path:
     return memory_dir() / "store.sqlite"
+
+
+def blackboard_dir() -> Path:
+    # D2: the append-only event-spine store dir, sharded per tenant exactly like memory_dir(). The
+    # canonical store file is blackboard_dir()/store.sqlite (see agents.blackboard.blackboard_path).
+    # Unsharded => byte-identical to the historical v2_root()/.blackboard singleton.
+    return _tenant_shard(v2_root() / ".blackboard")
 
 
 def dryrun_dir() -> Path:
