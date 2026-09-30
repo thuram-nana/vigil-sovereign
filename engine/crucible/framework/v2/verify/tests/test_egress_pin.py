@@ -12,12 +12,14 @@ from __future__ import annotations
 
 import pytest
 
-# The floor's never-liftable denylist now lives in ``vigil_core.egress_denylist`` — the shared substrate
-# present in EVERY environment (re-exported by ``vigil_gateway.denylist`` for backward compatibility). So
-# this file NO LONGER importorskips: the "CRUCIBLE core on vigil_core" CI leg (which installs vigil_core +
-# framework but NOT the gateway) can now exercise the floor's real allow-path behaviour, not just the
-# fail-closed cases. egress_pin still imports the floor LAZILY inside resolve_and_pin (fail-closed on any
-# import error), so nothing regresses.
+# The floor's never-liftable denylist lives in ``vigil_gateway`` (the engine reuses that shared primitive).
+# The "CRUCIBLE core on vigil_core" CI job runs the framework tree WITHOUT gateway on the path (the two-env
+# boundary — it installs vigil_core + framework only), so the floor's allow-path cases would fail-closed there
+# for lack of the module, not for a real defect. Skip the file when gateway is absent (same pattern as
+# scanner/tests/test_forgery_acceptance.py); it runs wherever gateway IS importable (local + the offense leg),
+# which is the only environment where the floor's real behaviour is meaningful. Production is unaffected:
+# egress_pin imports vigil_gateway LAZILY inside resolve_and_pin, and the offense engine ships gateway.
+pytest.importorskip("vigil_gateway")
 
 from framework.v2.common import egress_pin
 from framework.v2.common.egress_pin import (

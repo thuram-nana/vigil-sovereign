@@ -18,12 +18,10 @@ covering all of them):
     from their campaign drivers, so they get their own build + red-pen rather than being crammed in here.
 
 This helper resolves the host ONCE, runs the SAME shared floor primitive
-``vigil_core.egress_denylist.is_egress_denied`` (re-exported by ``vigil_gateway.denylist``) over EVERY
-resolved address, and returns the first validated address for the caller to CONNECT TO DIRECTLY (never
-re-resolving the name) — the anti-rebinding pin. It is the engine's re-use of the one shared floor,
-respecting layering: the floor primitive now lives in ``vigil_core`` (the shared substrate present in every
-environment), so the engine reuses it WITHOUT depending on the offense-side gateway package, and must not
-import the integration layer.
+``vigil_gateway.denylist.is_egress_denied`` over EVERY resolved address, and returns the first validated
+address for the caller to CONNECT TO DIRECTLY (never re-resolving the name) — the anti-rebinding pin. It is
+the engine's re-use of the one shared floor, respecting layering: the engine may import ``vigil_gateway``
+(it already does, e.g. ``console/actions.py``), but must not import the integration layer.
 
 The floor is charter-independent where it must be: the metadata/link-local/reserved tier is NEVER liftable.
 The private and loopback tiers lift ONLY for an exact IP LITERAL written in the signed charter scope
@@ -126,9 +124,8 @@ def resolve_and_pin(
 ) -> str:
     """Resolve ``host`` and return the exact IP the caller MUST connect to, or raise
     :class:`EgressFloorRefused`. Every resolved address must clear
-    ``vigil_core.egress_denylist.is_egress_denied`` (re-exported by ``vigil_gateway.denylist``); the
-    connection is then pinned to the first validated address so a rebinding resolver cannot swap in a
-    denied IP after the check.
+    ``vigil_gateway.denylist.is_egress_denied``; the connection is then pinned to the first validated
+    address so a rebinding resolver cannot swap in a denied IP after the check.
 
     ``allowed_ips`` defaults to :func:`charter_ip_literals` for ``slug`` (the charter's IP literals — the
     only lift of the private/loopback tiers; the metadata/link-local/reserved tier is never lifted).
@@ -141,10 +138,10 @@ def resolve_and_pin(
     if not h:
         raise EgressFloorRefused("empty target host (fail-closed)")
     try:
-        from vigil_core import egress_denylist as denylist
+        from vigil_gateway import denylist
     except Exception as e:  # no floor importable => refuse rather than connect unguarded
         raise EgressFloorRefused(
-            "egress floor (vigil_core.egress_denylist) not importable, so no destination can be authorized "
+            "egress floor (vigil_gateway.denylist) not importable, so no destination can be authorized "
             f"(fail-closed): {type(e).__name__}: {e}") from e
     allowed = allowed_ips if allowed_ips is not None else charter_ip_literals(slug)
     resolve = resolver or socket.getaddrinfo
