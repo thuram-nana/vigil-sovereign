@@ -87,6 +87,21 @@ DEFAULT_REQUEST_CHECKS: tuple[RequestCheck, ...] = (
 )
 
 
+# Well-known locations a published OpenAPI / Swagger document is served at. The
+# discovery-seed pass probes these in order (through the gated send) and expands the
+# FIRST one that parses into a non-empty operation list. Root-relative; joined
+# against the seed origin.
+_OPENAPI_SPEC_PATHS: tuple[str, ...] = (
+    "openapi.json", "swagger.json", "v3/api-docs", "v2/api-docs",
+    "api-docs", "swagger/v1/swagger.json",
+)
+
+# The minimal GraphQL introspection query (same shape as scanner.graphql's) — enough
+# to recover the schema's type/field names for LEAD surfacing. Sent only to endpoints
+# the crawl already reached that look like a GraphQL endpoint.
+_GQL_INTROSPECTION = '{"query":"query{__schema{queryType{name} types{name fields{name}}}}"}'
+
+
 class ScanReport(BaseModel):
     """The consolidated result of one autonomous scan."""
 
@@ -153,6 +168,14 @@ class ScanReport(BaseModel):
     # alias overloading, batching) land in active_findings like any other; these are
     # the strictly-separated leads. Empty on every default (dos-off) run.
     graphql_leads: list[str] = Field(default_factory=list)
+    # Provenance-tagged leads from the opt-in discovery-seed pass (`enable_discovery`):
+    # the site's own robots.txt / sitemap.xml / OpenAPI spec and mined parameters turn
+    # into extra AUDIT requests (folded into the crawl surface, not listed here), while
+    # non-auditable references — GraphQL schema type/field names from an introspection
+    # response — surface here as LEADS. SURFACE, never a finding: a discovered endpoint
+    # produces a LEAD and is confirmed only if the oracle later fires over its gated
+    # response. Empty on every default (discovery-off) run.
+    discovery_leads: list[str] = Field(default_factory=list)
     # M2 coverage/completeness: every (surface, insertion_point, check) the active
     # audit actually adjudicated over observed data — with its verdict (finding /
     # clean / inconclusive) and the oracle kinds that ran. This is the raw evidence
@@ -396,6 +419,9 @@ class WebScanCampaign:
         arsenal_max_probes: int = 64,
         enable_sso: bool = False,
         enable_graphql_dos: bool = False,
+        enable_discovery: bool = False,
+        discovery_max_ops: int = 128,
+        discovery_max_params: int = 64,
         enable_access_control: bool = False,
         access_control_config: AccessControlConfig | None = None,
         retain_evidence: bool = False,
@@ -542,6 +568,22 @@ class WebScanCampaign:
         # off) populate `graphql_leads`. Minimal by doctrine — it demonstrates the
         # absent guard, it does not flood.
         self.enable_graphql_dos = enable_graphql_dos
+        # Opt-in discovery-seed pass (default OFF -> the default scan, and the gate, are
+        # byte-for-byte unchanged: zero extra fetches, zero extra audit surface). When on,
+        # an ADDITIVE pre-audit pass wires the built-but-unwired discovery parsers into the
+        # crawl: it fetches the target's OWN robots.txt / sitemap.xml / OpenAPI spec through
+        # the SAME gated `send`, and mines parameter names from the already-crawled corpus,
+        # turning each into an extra HttpRequest folded into the audit surface — so a route
+        # documented-but-linked-nowhere still reaches the oracle-gated engine. Every URL taken
+        # from the untrusted parsed content (a robots Sitemap: URL, a sitemap <loc>, a bridged
+        # OpenAPI op) is SCOPE-FILTERED BEFORE it is fetched OR queued, and still flows only
+        # through the gated executor, so a hostile sitemap/spec cannot pull the audit — or an
+        # intermediate fetch — off the authorized surface. Nothing here mints a fact: a
+        # discovered endpoint is a LEAD until the oracle fires over it.
+        self.enable_discovery = enable_discovery
+        # Bound the discovery pass so a huge spec / param corpus cannot balloon the surface.
+        self.discovery_max_ops = discovery_max_ops
+        self.discovery_max_params = discovery_max_params
         # Opt-in access-control pack (default OFF -> the default check roster, and the gate,
         # are byte-for-byte unchanged). Broken access control is a fundamentally TWO-IDENTITY
         # experiment (act as the attacker, compare against what a DIFFERENT identity legitimately
@@ -655,14 +697,27 @@ class WebScanCampaign:
                 continue
             for ep in result.endpoints:
                 absu = urljoin(page.url, ep.url)
-                key = (ep.method.upper(), absu)
+                method = ep.method.upper()
+                key = (method, absu)
                 if key in seen:
                     continue
                 seen.add(key)
-                endpoints.append(f"{ep.method.upper()} {absu}")
-                if ep.method.upper() == "GET" and urlsplit(absu).query:
-                    if self.scope is None or self.scope.in_scope(absu):
+                endpoints.append(f"{method} {absu}")
+                if not (self.scope is None or self.scope.in_scope(absu)):
+                    continue
+                if method == "GET":
+                    # A GET fetch is audit surface only when it carries a query (a point
+                    # to fuzz); a bare GET is already covered by the static crawl.
+                    if urlsplit(absu).query:
                         extra.append(HttpRequest(method="GET", url=absu))
+                else:
+                    # Non-GET endpoints the running app actually called (POST/PUT/PATCH/
+                    # DELETE) are surface the static crawl can never reach — route them into
+                    # the audit engine so its path/header/request-level checks (and any
+                    # body-aware checks) run against them. The SPA probe captures no body,
+                    # so this is a bare request of the observed method; every send still
+                    # flows through the gated executor.
+                    extra.append(HttpRequest(method=method, url=absu))
         return endpoints, extra
 
     def _browser_xss_pass(self, crawl, browser) -> list[AuditFinding]:
@@ -1123,6 +1178,143 @@ class WebScanCampaign:
                     oracle_context=result.context.model_dump(mode="json")))
         return findings, leads
 
+    # ---------------------------------------------------------------------
+    # opt-in discovery-seed pass (enable_discovery) — additive, gated, scope-filtered
+    # ---------------------------------------------------------------------
+
+    def _fetch_text(self, url: str) -> str:
+        """GET ``url`` through the injected gated ``send`` and return its body as
+        text, or ``""`` on any failure / non-text response. The gate (scope /
+        charter / kill-switch / egress in production, loopback in tests) is the
+        authorization boundary — this never bypasses it."""
+        try:
+            resp = self._send(HttpRequest(method="GET", url=url))
+        except Exception:
+            return ""
+        if not isinstance(resp, dict):
+            return ""
+        body = resp.get("body", "")
+        return body if isinstance(body, str) else ""
+
+    def _discovery_seeds(self, seed_url: str, crawl) -> tuple[list[HttpRequest], list[str]]:
+        """Wire the built-but-unwired discovery parsers into the crawl surface.
+
+        Turns the target's OWN ``robots.txt`` / ``sitemap.xml`` / OpenAPI spec (fetched
+        through the gated ``send``) and the parameter names mined from the already-crawled
+        page bodies into extra :class:`HttpRequest`s the audit engine will decompose and
+        fuzz — the same treatment a crawled request gets. Returns ``(extra_requests,
+        leads)``.
+
+        Boundary, by construction:
+
+          * The parsed documents are UNTRUSTED target output, so every URL derived from
+            them — a robots ``Sitemap:`` URL, a sitemap ``<loc>``, a bridged OpenAPI
+            operation — is SCOPE-FILTERED (``scope.in_scope``) BEFORE it is fetched OR
+            queued: a hostile ``Sitemap: http://evil/`` or a cloud-metadata IP is dropped
+            and never reaches ``send``. The ONLY fetches not gated by that check are the
+            seed's own well-known origin-root documents (``robots.txt`` / ``sitemap.xml`` /
+            the OpenAPI spec paths), built directly from the trusted seed origin, never from
+            untrusted content. Everything that does go out still flows solely through the
+            gated executor (defense in depth over the never-liftable egress floor).
+          * Everything produced is SURFACE / a crawl seed: it can only ever become a
+            finding if the existing oracle fires over its gated response. This method mints
+            nothing. GraphQL schema names (not auditable as REST insertion points) are
+            surfaced as LEADS, never as requests.
+
+        Deterministic and bounded; robust to missing/partial documents (a 404 or garbage
+        body simply yields nothing for that source)."""
+        from .discovery import (
+            mine_params, parse_graphql_schema, parse_openapi, parse_robots, parse_sitemap,
+        )
+        from .insertion import request_from_api_operation
+
+        sp = urlsplit(seed_url)
+        base = f"{sp.scheme}://{sp.netloc}/"
+        scope = self.scope or Scope.from_seed(seed_url)
+
+        extra: list[HttpRequest] = []
+        leads: list[str] = []
+        seen_surface: set[str] = set()
+
+        def _queue(req: HttpRequest) -> None:
+            # scope-filter (untrusted parsed content) then de-dupe by surface key.
+            if not scope.in_scope(req.url):
+                return
+            key = _surface_key(req)
+            if key in seen_surface:
+                return
+            seen_surface.add(key)
+            extra.append(req)
+
+        def _queue_get(url: str) -> None:
+            _queue(HttpRequest(method="GET", url=url))
+
+        # 1. robots.txt — Disallow/Allow paths (the interesting ones) + Sitemap: URLs.
+        for entry in parse_robots(self._fetch_text(urljoin(base, "robots.txt"))):
+            if entry.startswith(("http://", "https://")):
+                # A Sitemap: URL is lifted VERBATIM from the untrusted robots.txt, so it
+                # is scope-filtered (mirroring _queue for <loc>/OpenAPI) BEFORE it is
+                # fetched — an off-host Sitemap: (evil.example, a cloud-metadata IP) must
+                # never reach `send` at all, not merely be dropped from the queue after the
+                # fetch. This is the one candidate URL that would otherwise be fetched
+                # before scope was consulted.
+                if not scope.in_scope(entry):
+                    continue
+                for loc in parse_sitemap(self._fetch_text(entry)):
+                    _queue_get(loc)
+            else:
+                _queue_get(urljoin(base, entry))
+
+        # 2. sitemap.xml at the well-known location — every <loc> URL.
+        for loc in parse_sitemap(self._fetch_text(urljoin(base, "sitemap.xml"))):
+            _queue_get(loc)
+
+        # 3. OpenAPI / Swagger — the FIRST spec location that parses to operations wins;
+        #    each operation is bridged into a concrete fuzzable request.
+        for spec_path in _OPENAPI_SPEC_PATHS:
+            ops = parse_openapi(self._fetch_text(urljoin(base, spec_path)))
+            if not ops:
+                continue
+            for op in ops[: self.discovery_max_ops]:
+                try:
+                    _queue(request_from_api_operation(op, base))
+                except Exception:
+                    continue
+            break
+
+        # 4. Parameter mining over the already-crawled corpus (no extra traffic): each
+        #    candidate name becomes a query-param probe on the seed page, giving the
+        #    insertion engine a point to fuzz for a parameter no form declared.
+        names: list[str] = []
+        seen_name: set[str] = set()
+        for page in crawl.pages:
+            for name in mine_params(page.body or ""):
+                if name not in seen_name:
+                    seen_name.add(name)
+                    names.append(name)
+        for name in names[: self.discovery_max_params]:
+            _queue_get(f"{base}?{name}=1")
+
+        # 5. GraphQL schema (LEAD-only): introspect any GraphQL endpoint the crawl reached
+        #    and surface the recovered type/field names. GraphQL fields are not REST
+        #    insertion points, so these are references, not audit requests.
+        for endpoint in self._graphql_endpoints(seed_url, crawl)[:4]:
+            gql = HttpRequest(
+                method="POST", url=endpoint,
+                headers=[("Content-Type", "application/json"),
+                         ("Content-Length", str(len(_GQL_INTROSPECTION.encode("utf-8"))))],
+                body=_GQL_INTROSPECTION,
+            )
+            try:
+                resp = self._send(gql)
+                body = resp.get("body", "") if isinstance(resp, dict) else ""
+            except Exception:
+                continue
+            for gql_name in parse_graphql_schema(body if isinstance(body, str) else "")[:32]:
+                leads.append(f"graphql-schema {endpoint}: {gql_name}")
+
+        return extra, leads
+
     def run(self, seed_url: str) -> ScanReport:
         started = time.monotonic()
         if self._progress is not None:
@@ -1144,6 +1336,7 @@ class WebScanCampaign:
         steer_signals: list[SteerSignal] = []
         discovered_surfaces: list[str] = []
         committed_check_classes: list[str] = []
+        discovery_leads: list[str] = []
         try:
             if browser is not None and self.enable_spa_crawl:
                 spa_endpoints, extra_requests = self._spa_discover(crawl, browser)
@@ -1183,6 +1376,15 @@ class WebScanCampaign:
 
             # SPA-discovered in-scope GET endpoints join the audit surface.
             all_requests = list(crawl.requests) + extra_requests
+
+            # Opt-in discovery-seed pass (default OFF → this block is skipped and the run,
+            # and the gate, are byte-identical). Additive: the robots/sitemap/OpenAPI/param
+            # parsers turn documented-but-unlinked surface into extra audit requests (each
+            # scope-filtered and still routed through the gated send), folded in here so they
+            # flow through the identical crawl→audit→oracle pipeline as any crawled request.
+            if self.enable_discovery:
+                disc_requests, discovery_leads = self._discovery_seeds(seed_url, crawl)
+                all_requests += disc_requests
 
             # Grammar-aware fuzzing: induce a request grammar from what the crawl
             # observed and synthesize structurally-valid NEW requests (typed path
@@ -1332,6 +1534,7 @@ class WebScanCampaign:
             js_secrets=js_secrets,
             arsenal_leads=arsenal_leads,
             graphql_leads=graphql_leads,
+            discovery_leads=discovery_leads,
             fingerprint=fp,
             library_checks_run=library_checks_run,
             built_in_checks_run=len(self.checks),

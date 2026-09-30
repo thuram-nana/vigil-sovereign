@@ -23,9 +23,14 @@ from __future__ import annotations
 
 import enum
 import json
-from typing import Any, Iterable
+import re
+from typing import TYPE_CHECKING, Any, Iterable
+from urllib.parse import urljoin
 
 from pydantic import BaseModel, ConfigDict, Field
+
+if TYPE_CHECKING:  # annotation only — importing discovery at runtime would cycle
+    from .discovery import ApiOperation
 
 # Headers whose value the framework owns and must not fuzz (rendering recomputes
 # Content-Length; fuzzing it would only produce malformed requests).
@@ -489,3 +494,88 @@ class RequestTemplate:
         if not found and body:
             out.append(("Content-Length", str(n)))
         return out
+
+
+# ---------------------------------------------------------------------------
+# API-operation -> request bridge
+# ---------------------------------------------------------------------------
+#
+# The discovery layer (scanner.discovery.parse_openapi) lifts an OpenAPI/Swagger
+# document into a flat list of ``ApiOperation``s (method + path + declared param
+# names). This is the structural link that turns one such operation into a concrete
+# ``HttpRequest`` the audit engine can then decompose into insertion points and
+# fuzz — exactly like a crawled request. It SHAPES a request only: it sends
+# nothing, so the operation reaches the target solely through the engine's gated
+# executor, and it is audit SURFACE, never a finding on its own.
+
+# Methods that carry a request body by convention. For these, declared params are
+# placed in the body (in ``body_media_type``); for every other method they go in
+# the query string. ``ApiOperation`` does not retain OpenAPI's per-parameter
+# ``in:`` location, so this method convention is the deterministic mapping.
+_BODY_METHODS = frozenset({"POST", "PUT", "PATCH"})
+
+# OpenAPI path templating: ``/users/{id}`` — a braced token is a PATH parameter,
+# filled inline with a benign placeholder so the rendered path is concrete (and the
+# templated name is not ALSO emitted as a query/body param).
+_PATH_TEMPLATE = re.compile(r"\{[^{}/]+\}")
+
+
+def request_from_api_operation(
+    operation: "ApiOperation",
+    base_url: str,
+    *,
+    body_media_type: str = "application/json",
+    fill: str = "1",
+) -> HttpRequest:
+    """Bridge one discovered OpenAPI/Swagger operation into a concrete, fuzzable
+    :class:`HttpRequest` — the structural link from ``scanner.discovery.parse_openapi``
+    to the insertion-point engine, so a documented-but-unlinked API route becomes
+    audit surface.
+
+    The operation's ``method`` and ``path`` set the request line: the path is
+    resolved against ``base_url`` and any ``{template}`` segment is filled by
+    ``fill`` so it is concrete. Declared parameters become a benign, well-formed
+    baseline the audit engine then mutates one point at a time:
+
+      * a body method (POST/PUT/PATCH) renders them into the body in
+        ``body_media_type`` — a JSON object (``application/json``, the default) or a
+        urlencoded form — with a matching Content-Type and a correct Content-Length;
+      * every other method renders them as query-string values.
+
+    Path-template names are consumed by the path and never duplicated into the
+    query/body. An operation with no free params yields a bare request (its path +
+    method are still surface). Pure and deterministic (no network, no clock): the
+    same operation always yields the same request bytes. Like every crawl seed it
+    only SHAPES a request — the oracle still has to fire over the gated response for
+    anything to be confirmed."""
+    method = (operation.method or "GET").upper()
+    raw_path = operation.path or "/"
+    templated_names = {tok[1:-1] for tok in _PATH_TEMPLATE.findall(raw_path)}
+    concrete_path = _PATH_TEMPLATE.sub(fill, raw_path)
+    url = urljoin(base_url, concrete_path)
+
+    free: list[str] = []
+    seen: set[str] = set()
+    for p in operation.params:
+        if not p or p in templated_names or p in seen:
+            continue
+        seen.add(p)
+        free.append(p)
+
+    if not free:
+        return HttpRequest(method=method, url=url)
+
+    if method in _BODY_METHODS:
+        media = body_media_type.split(";", 1)[0].strip().lower()
+        if media == "application/json":
+            body = json.dumps({name: fill for name in free},
+                              separators=(",", ":"), ensure_ascii=False)
+        else:
+            body = _encode_pairs([(name, fill) for name in free])
+        headers = [("Content-Type", body_media_type),
+                   ("Content-Length", str(len(body.encode("utf-8"))))]
+        return HttpRequest(method=method, url=url, headers=headers, body=body)
+
+    query = _encode_pairs([(name, fill) for name in free])
+    sep = "&" if "?" in url else "?"
+    return HttpRequest(method=method, url=url + sep + query)
