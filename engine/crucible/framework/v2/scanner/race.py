@@ -94,6 +94,13 @@ def charter_authorize_gate(
         except Exception:
             return False   # fail closed on any gate error — never assume authorized
 
+    # Bind the engagement slug onto the gate so ``raw_race`` can recover it for the L3/L4 egress
+    # FLOOR (``resolve_and_pin``) when a caller passes this gate as ``authorize`` but does not also
+    # pass ``slug=`` — the shipped callers ``race_bizlogic_redrive`` and the benchmark do exactly
+    # that. The slug lifts ONLY the private/loopback tier for an exact charter IP literal; the
+    # metadata/link-local/reserved floor is never-liftable regardless, so exposing it here can only
+    # authorise a target the signed charter already lists, never widen reach.
+    authorize.slug = slug  # type: ignore[attr-defined]
     return authorize
 
 
@@ -158,6 +165,7 @@ def raw_race(
     timeout: float = 6.0,
     authorize: AuthorizeGate,
     target_url: str,
+    slug: str = "",
 ) -> list[tuple["int | None", bytes, float]]:
     """Fire `count` copies of `request_bytes` with minimal dispersion.
 
@@ -180,17 +188,22 @@ def raw_race(
     :class:`SovereigntyViolation` and NO byte leaves the box; the callers (``race_burst`` /
     ``scanner.campaign``) supply a ``validate_action``-backed gate.
 
-    THAT CHAIN IS STRING-MATCHING ONLY — it is NOT an egress floor, and this docstring used
-    to say it was. It resolves nothing and classifies no address, so a charter that lists
-    ``169.254.169.254`` makes it return True and two raw sockets reach cloud instance
-    metadata (measured). ``host`` is also used VERBATIM as the connect destination below, so
-    the OS resolves it here, after the gate: a name authorised as a string is dialled at
-    whatever the resolver says at that instant. The never-liftable L3/L4 floor and the
-    connect-pin live in ``vigil_integration.live.egress_floor.pin_egress``; the shipped
-    caller ``live/race_bizlogic_redrive.py`` runs it over every resolved address before the
-    first burst and passes the VALIDATED LITERAL as ``host`` (``_build_request`` keeps the
-    original hostname in the Host header). An engine-side caller that skips that step has no
-    egress floor at all.
+    THE NAME CHAIN IS STRING-MATCHING ONLY — the ``authorize`` gate resolves nothing and
+    classifies no address, so on its own a charter that lists ``169.254.169.254`` makes it
+    return True. The L3/L4 egress FLOOR that closes that hole is now applied HERE too, in the
+    engine (WS1.1b), not only by the integration caller: after the name gate passes,
+    :func:`common.egress_pin.resolve_and_pin` resolves ``host`` ONCE, runs the shared
+    ``vigil_gateway.denylist`` over EVERY resolved address, and returns the single validated IP
+    to CONNECT TO DIRECTLY. Every worker then dials that PINNED IP (never re-resolving the
+    name), so a metadata / link-local / RFC1918 / reserved address — directly or via a
+    DNS-rebinding answer — is REFUSED with zero packets sent (fail-closed
+    :class:`SovereigntyViolation`). ``_build_request`` keeps the ORIGINAL hostname in the Host
+    header, so the dial-the-IP pin does not disturb virtual-hosting. The metadata/link-local/
+    reserved tier is never-liftable; the private/loopback tier lifts ONLY for an exact charter
+    IP literal, sourced from the engagement ``slug`` (passed explicitly, or recovered from a
+    ``charter_authorize_gate`` handed in as ``authorize``). This mirrors the integration
+    ``pin_egress`` used by ``live/race_bizlogic_redrive.py``; running both is idempotent
+    defense-in-depth (the redrive hands an already-validated literal, which re-pins to itself).
     """
     # Fail-closed authorization BEFORE any traffic. A gate error is a refusal, never an allow.
     try:
@@ -203,12 +216,34 @@ def raw_race(
         raise SovereigntyViolation(
             f"race burst refused: {target_url!r} failed the scope / charter-signature / kill-switch / "
             f"protected-NAME gate — raw-socket burst not authorized (this string gate is NOT the L3/L4 "
-            f"egress floor; that is applied by the integration caller's pin_egress and the VM firewall)")
+            f"egress floor; that is applied by resolve_and_pin below and the VM firewall)")
 
     if count < 1:
         return []
     if not request_bytes:
         raise ValueError("request_bytes must be non-empty")
+
+    # NEVER-LIFTABLE L3/L4 EGRESS FLOOR + anti-rebinding pin. Resolve the host ONCE and refuse a
+    # metadata / link-local / RFC1918 / reserved destination (directly or via a rebinding answer)
+    # BEFORE any socket is opened; fail-closed. The engagement slug is taken explicitly or
+    # recovered from a ``charter_authorize_gate`` passed as ``authorize`` — it lifts ONLY the
+    # private/loopback tier for an exact charter IP literal, never the metadata floor. Every worker
+    # dials the returned PINNED IP, so a rebinding resolver cannot swap in a denied IP after the check.
+    from ..common.egress_pin import EgressFloorRefused, charter_ip_literals, resolve_and_pin  # noqa: PLC0415
+    effective_slug = slug or getattr(authorize, "slug", "") or ""
+    # This engine is loopback-oriented by construction ("loopback/authorised targets only"), and before
+    # this floor existed it dialled loopback freely. So loopback (127.0.0.1/::1) stays in-scope as a
+    # baseline — allowing it adds no NEW reach and preserves the loopback scan/benchmark paths that carry
+    # no charter. The charter IP literals (from the slug) lift the private tier for an exact literal on top.
+    # The metadata/link-local/RFC1918/reserved tier is NEVER in this set, so it is always refused.
+    allowed_ips = frozenset({"127.0.0.1", "::1"}) | charter_ip_literals(effective_slug)
+    try:
+        pinned_ip = resolve_and_pin(host, port, slug=effective_slug, allowed_ips=allowed_ips)
+    except EgressFloorRefused as exc:
+        raise SovereigntyViolation(
+            f"race burst refused: egress floor rejected {host!r} — the never-liftable "
+            f"metadata/link-local/RFC1918/reserved floor (or an unresolvable/errored host) barred every "
+            f"resolved address; zero packets sent. Reason: {exc}") from exc
 
     head, last = request_bytes[:-1], request_bytes[-1:]
     barrier = threading.Barrier(count)
@@ -217,7 +252,7 @@ def raw_race(
     def worker(idx: int) -> None:
         elapsed = 0.0
         try:
-            sock = socket.create_connection((host, port), timeout=timeout)
+            sock = socket.create_connection((pinned_ip, port), timeout=timeout)
         except OSError:
             with contextlib.suppress(threading.BrokenBarrierError):
                 barrier.abort()
@@ -333,8 +368,11 @@ def race_burst(
         base_url if base_url.endswith("/") else base_url + "/", action_path.lstrip("/"))
 
     request_bytes = _build_request(host, port, action_path, body=body)
+    # Thread the engagement slug to the socket so ``raw_race``'s L3/L4 egress floor can lift the
+    # private/loopback tier for an exact charter IP literal (e.g. a MERIDIAN loopback target). With
+    # no slug the never-liftable metadata/link-local/RFC1918 floor still applies.
     outcomes = raw_race(host, port, request_bytes, count, timeout=timeout,
-                        authorize=gate, target_url=target_url)
+                        authorize=gate, target_url=target_url, slug=slug or "")
 
     statuses = [status for status, _, _ in outcomes]
     successes = sum(1 for status, b, _ in outcomes if predicate(status, b))
