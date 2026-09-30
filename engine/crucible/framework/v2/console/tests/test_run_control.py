@@ -303,3 +303,53 @@ def test_strix_retry_restarts_even_when_marked_resumable_documented(console_root
     assert res["ok"] is True and res["resumed"] is False           # RESTART, not resume
     assert "--resume" not in captured["cmd"]                        # never appended to a strix argv
     assert "--target" in captured["cmd"]                           # the restart keeps the real target
+
+
+# --- D1: the atomic per-slug engagement lease ----------------------------------------------------
+def test_retry_is_refused_by_the_lease_in_the_window_the_meta_scan_misses(console_root, monkeypatch):
+    # The race the process-local lock could not close: two INDEPENDENT resumes of one paused run. The first
+    # has already CLAIMED the slug's lease but has not yet committed status=running, so the meta-scan
+    # fast-fail (_slug_has_running_run) sees NO running run and lets the second through — and only the atomic
+    # lease stops it. Simulate the first resume by pre-holding the lease, then resume the same slug.
+    monkeypatch.setattr(actions, "_spawn_background",
+                        lambda rid, rd, cmd, meta, **kw: None)
+    _write(console_root, "paused", {"status": "interrupted", "resumable": True, "run_kind": "engage",
+                                    "cmd": ["vigil", "engage", "x", "--slug", "s"], "slug": "s"})
+    held = actions._engagement_lease().acquire("s", run_id="resume-A")
+    assert held.ok is True
+    assert actions._slug_has_running_run("s") is False              # the fast-fail would let it through...
+    res = actions.retry_run("paused")                               # ...but the lease refuses the second
+    assert res["ok"] is False and "already in progress" in res["error"]
+
+
+def test_retry_reclaims_a_crashed_holders_lease(console_root, monkeypatch):
+    # A prior resume crashed WITHOUT releasing its lease (a dead-pid marker left behind). A new resume must
+    # not be wedged: the lease is reclaimable, so the retry proceeds.
+    captured = {}
+    monkeypatch.setattr(actions, "_spawn_background",
+                        lambda rid, rd, cmd, meta, **kw: captured.update(meta=meta))
+    _write(console_root, "paused2", {"status": "interrupted", "resumable": True, "run_kind": "engage",
+                                     "cmd": ["vigil", "engage", "x", "--slug", "z"], "slug": "z"})
+    # a crashed holder's stale lease (a pid that cannot be alive)
+    lease = actions._engagement_lease()
+    lease.dir.mkdir(parents=True, exist_ok=True)
+    lease._marker("z").write_text(json.dumps({"epoch": "old", "slug": "z", "pid": 2_147_483_600,
+                                              "boot_id": "old-boot", "ts": 0}), encoding="utf-8")
+    assert lease.is_held("z") is False                             # a dead holder does not wedge the slug
+    res = actions.retry_run("paused2")
+    assert res["ok"] is True                                       # reclaimed → the resume proceeds
+    assert captured["meta"]["lease_slug"] == "z" and captured["meta"]["lease_token"]
+
+
+def test_retry_releases_the_lease_when_the_run_reaches_a_terminal_status(console_root):
+    # end-to-end: a REAL spawn via the supervisor. The lease is claimed at launch and released by the
+    # supervisor's finally when the child exits, so the next engagement of the slug is not blocked.
+    _write(console_root, "paused3", {"status": "interrupted", "resumable": True, "run_kind": "engage",
+                                     "cmd": [sys.executable, "-c", "pass"], "slug": "q"})
+    res = actions.retry_run("paused3")
+    assert res["ok"] is True
+    new_id = res["run_id"]
+    m = _wait_until(new_id, lambda x: x.get("status") in ("done", "error", "cancelled", "paused"))
+    assert m.get("status") == "done"
+    assert actions._engagement_lease().is_held("q") is False        # released at terminal status
+
