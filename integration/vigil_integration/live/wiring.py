@@ -1724,6 +1724,14 @@ def _build_oracle(
         if runtime_ref:
             return runtime_ref
 
+        # T2 — INJECTION RE-DRIVE (nosqli / ldap_injection / xpath_injection): governed-engage FACT parity
+        # (slice B2) through the runner-owned ``live.runtime_redrive.injection_redrive`` engine — a
+        # class-specific error probe + a benign control twin judged by the error_signature oracle, minted only
+        # under the engine that NAMES the class. A non-confirmation stays a LEAD below (fail-closed).
+        injection_ref = _live_injection_redrive_fact(prov, info, redrive)
+        if injection_ref:
+            return injection_ref
+
         # LEAD-ONLY fallback (AUDIT G4): a boolean/other-class candidate, or an error_based_sqli whose live
         # re-drive did not reproduce, lands here. The deterministic oracle still runs so the LEAD is honestly
         # labelled with what fired, but an LLM-provenanced context is never signed into a FACT.
@@ -1961,6 +1969,56 @@ def _live_runtime_redrive_fact(prov: Provisioned, info: dict, redrive: Optional[
     try:
         rr = runtime_redrive(url, slug=prov.slug, engagement_slug=prov.slug, signers=prov.signers,
                              claimed_class=claimed)
+    except Exception:  # noqa: BLE001 — any re-drive/transport/cert error is an unconfirmed claim → LEAD
+        return None
+    try:
+        if rr.family_verdict(claimed) != "FACT":
+            return None
+    except Exception:  # noqa: BLE001 — cannot read the verdict ⇒ treat as unconfirmed → LEAD
+        return None
+    for f in getattr(rr, "facts", []) or []:
+        try:
+            if getattr(f, "is_fact", False) and normalize_bug_class(getattr(f, "bug_class", "")) == claimed:
+                ref = str(getattr(f, "finding_ref", "") or "")
+                if ref:
+                    return ref
+        except Exception:  # noqa: BLE001 — a malformed result entry is skipped, never crashes the seam
+            continue
+    return None    # family verdict said FACT but no matching signed cert surfaced → LEAD (fail-closed)
+
+
+def _live_injection_redrive_fact(prov: Provisioned, info: dict, redrive: Optional[dict]) -> Optional[str]:
+    """T2 — RE-DRIVE a non-SQL injection class (``nosqli`` / ``ldap_injection`` / ``xpath_injection``) through
+    the runner-owned :mod:`live.runtime_redrive` ``injection_redrive`` engine and return a signed FACT's
+    ``finding_ref`` ONLY when the deterministic ``error_signature`` oracle confirms the CLAIMED class over
+    VIGIL's OWN gated live capture (a class-specific error probe + a benign control twin, minted only under the
+    datastore/parser engine that NAMES the class).
+
+    Slice B2 — governed-engage FACT parity for the classes that were structurally LEAD-only here. Mirrors
+    :func:`_live_runtime_redrive_fact`: the runner crafts its own probe (never the LLM's payload), mints via
+    ``certify_admitted(provenance="live_redrive")``, and the FACT is tied to the CLAIM
+    (``family_verdict(claimed) == "FACT"`` and the returned cert's ``bug_class == claimed``). A gate refusal /
+    no channel / an oracle non-fire / a control that also carries the error / a mismatched engine all yield a
+    non-FACT → None → the claim stays a LEAD (fail-closed). Runs ONLY the claimed class, so there is no sibling
+    to disambiguate.
+
+    FATAL-2: every framework/runtime_redrive import is function-local (offense-side re-drive path)."""
+    if not isinstance(redrive, dict):
+        return None
+    url = str(redrive.get("url") or "").strip()
+    if not url:
+        return None
+    try:
+        from framework.v2.verify.verifier import normalize_bug_class  # noqa: PLC0415
+        from .runtime_redrive import INJECTION_REDRIVE_CLASSES, injection_redrive  # noqa: PLC0415 (framework at CALL)
+    except Exception:  # noqa: BLE001 — module unavailable ⇒ cannot re-drive → LEAD (fail-closed)
+        return None
+    claimed = normalize_bug_class(str(redrive.get("bug_class") or info.get("bug_class") or ""))
+    if claimed not in INJECTION_REDRIVE_CLASSES:
+        return None    # not an injection-redrive class → nothing for this seam to confirm → LEAD
+    try:
+        rr = injection_redrive(url, slug=prov.slug, engagement_slug=prov.slug, signers=prov.signers,
+                               claimed_class=claimed)
     except Exception:  # noqa: BLE001 — any re-drive/transport/cert error is an unconfirmed claim → LEAD
         return None
     try:

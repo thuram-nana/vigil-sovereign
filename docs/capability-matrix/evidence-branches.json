@@ -2136,6 +2136,165 @@
         "engine/crucible/framework/v2/scanner/checks.py:TimingCheck",
         "integration/vigil_integration/live/runtime_redrive.py:timing_redrive"
       ]
+    },
+    {
+      "id": "nosqli.datastore_error",
+      "check": "injection_redrive",
+      "evidence": "A NoSQL injection (nosqli) finding is a PROPOSAL; VIGIL's runner re-sends its OWN gated, DNS-pinned class-specific error-provoking probe against the finding's {endpoint, param} (the RUNNER crafts the probe — the Strix/LLM payload is never trusted) AND fetches a benign CONTROL twin of the same endpoint+param with a metacharacter-free value, then the deterministic error_signature oracle re-fires over VIGIL's FRESH response bytes WITH the control present. The FACT is minted ONLY when the datastore/parser ENGINE the oracle matches is 'mongodb' (the engine that names this class), so the certificate names the vulnerability the evidence proves; a fired-but-mismatched engine REFUSES to a LEAD. The FACT is decided by the wire bytes alone.",
+      "fact_capable": true,
+      "clean_capable": false,
+      "preconditions": [
+        "channel_established"
+      ],
+      "limitation": "A POSITIVE-only error_signature channel over a runner-owned re-drive plus a benign control twin: a fired oracle proves the in-charter target emitted a mongodb datastore/parser-error signature that VIGIL's OWN injection payload provoked and a benign control did NOT (payload-attributable). It is POSITIVE-only: a non-firing is UNINFORMATIVE by construction, because NoSQL injection (nosqli) can be present over a boolean/out-of-band channel this single error-signature response cannot see, so absence of an error signature can NEVER establish the target is not injectable. NOT CLEAN-capable.",
+      "target_fact_capable": true,
+      "target_clean_capable": false,
+      "target_downgrade_rationale": "A response-side error-signature re-drive is a POSITIVE-only detector whose absence of a signal is uninformative by construction; a sound CLEAN (NoSQL injection (nosqli) absent) is a different, coverage-based capability spanning the boolean/out-of-band channels and a benign differential control, not this single-response error-signature branch, so clean-capability is deliberately not a target here.",
+      "evidence_surface": "service_response",
+      "implementation_refs": [
+        "integration/vigil_integration/live/runtime_redrive.py:injection_redrive",
+        "integration/vigil_integration/live/wiring.py:_live_injection_redrive_fact"
+      ],
+      "oracle_version": "error_signature",
+      "control_requirements": [
+        "channel_established_gate",
+        "vigil_owned_live_redrive",
+        "benign_control_twin",
+        "deterministic_error_signature_oracle"
+      ]
+    },
+    {
+      "id": "nosqli.sprt_inference",
+      "check": "boolean_redrive (class-specific truth-value clause families — NOT YET BUILT)",
+      "evidence": "The SAME sequential-probability-ratio truth-value ATTRIBUTION decision as boolean_sqli.sprt_inference (verify.oracles.boolean_inference_oracle over K_T always-TRUE and K_F always-FALSE clauses, each sent twice byte-identically, confirming only when the response PARTITIONS by the injected boolean's truth value), but driven with NoSQL injection clauses in the NoSQL operator-injection context (e.g. $ne/$gt/$where operators) so a fire is soundly ATTRIBUTABLE to this class rather than to SQL.",
+      "fact_capable": false,
+      "clean_capable": false,
+      "preconditions": [
+        "channel_established",
+        "body_semantically_available"
+      ],
+      "limitation": "LEAD-only. The boolean SPRT channel proves truth-value attribution but does NOT name the datastore engine, so the CLAUSE SYNTAX is what attributes the class: the shipped scanner.checks.boolean_clause_families() are SQL breakout clauses, and a SQL clause that partitions proves SQL boolean injection — it cannot soundly attribute NoSQL injection. Until class-specific truth-correct clause families exist, this branch is body-derived and LEAD-only; NOT clean-capable (a non-confirming SPRT can never assert the target is not injectable).",
+      "target_fact_capable": true,
+      "target_clean_capable": false,
+      "target_downgrade_rationale": "Proving the ABSENCE of a boolean-blind NoSQL injection channel across every parameter, context and clause shape is a coverage-complete capability, not this SPRT re-drive over the driven insertion points, so CLEAN-capability is deliberately not pursued on this branch.",
+      "evidence_surface": "response_body",
+      "implementation_refs": [
+        "engine/crucible/framework/v2/verify/oracles.py:boolean_inference_oracle",
+        "engine/crucible/framework/v2/scanner/checks.py:BooleanInferenceCheck"
+      ],
+      "oracle_version": "",
+      "blocking_work": "Build class-specific, truth-CORRECT boolean clause families for the NoSQL operator-injection context (e.g. $ne/$gt/$where operators) — K_T always-TRUE and K_F always-FALSE clauses that are shape-varied and length-matched — MACHINE-VERIFIED against a real engine of the class (as boolean_clause_families is verified truth-correct against sqlite3; no offline NoSQL injection engine ships today, which is the blocker), then drive them through a governed-engage SPRT arm feeding the boolean_inference oracle. Only then does this branch mint a FACT; a SQL clause set cannot soundly attribute this class.",
+      "control_requirements": [
+        "class_specific_truth_correct_clause_families",
+        "engine_verified_clause_truth",
+        "sequential_probability_ratio_test"
+      ]
+    },
+    {
+      "id": "ldap_injection.datastore_error",
+      "check": "injection_redrive",
+      "evidence": "A LDAP injection finding is a PROPOSAL; VIGIL's runner re-sends its OWN gated, DNS-pinned class-specific error-provoking probe against the finding's {endpoint, param} (the RUNNER crafts the probe — the Strix/LLM payload is never trusted) AND fetches a benign CONTROL twin of the same endpoint+param with a metacharacter-free value, then the deterministic error_signature oracle re-fires over VIGIL's FRESH response bytes WITH the control present. The FACT is minted ONLY when the datastore/parser ENGINE the oracle matches is 'ldap' (the engine that names this class), so the certificate names the vulnerability the evidence proves; a fired-but-mismatched engine REFUSES to a LEAD. The FACT is decided by the wire bytes alone.",
+      "fact_capable": true,
+      "clean_capable": false,
+      "preconditions": [
+        "channel_established"
+      ],
+      "limitation": "A POSITIVE-only error_signature channel over a runner-owned re-drive plus a benign control twin: a fired oracle proves the in-charter target emitted a ldap datastore/parser-error signature that VIGIL's OWN injection payload provoked and a benign control did NOT (payload-attributable). It is POSITIVE-only: a non-firing is UNINFORMATIVE by construction, because LDAP injection can be present over a boolean/out-of-band channel this single error-signature response cannot see, so absence of an error signature can NEVER establish the target is not injectable. NOT CLEAN-capable.",
+      "target_fact_capable": true,
+      "target_clean_capable": false,
+      "target_downgrade_rationale": "A response-side error-signature re-drive is a POSITIVE-only detector whose absence of a signal is uninformative by construction; a sound CLEAN (LDAP injection absent) is a different, coverage-based capability spanning the boolean/out-of-band channels and a benign differential control, not this single-response error-signature branch, so clean-capability is deliberately not a target here.",
+      "evidence_surface": "service_response",
+      "implementation_refs": [
+        "integration/vigil_integration/live/runtime_redrive.py:injection_redrive",
+        "integration/vigil_integration/live/wiring.py:_live_injection_redrive_fact"
+      ],
+      "oracle_version": "error_signature",
+      "control_requirements": [
+        "channel_established_gate",
+        "vigil_owned_live_redrive",
+        "benign_control_twin",
+        "deterministic_error_signature_oracle"
+      ]
+    },
+    {
+      "id": "ldap_injection.sprt_inference",
+      "check": "boolean_redrive (class-specific truth-value clause families — NOT YET BUILT)",
+      "evidence": "The SAME sequential-probability-ratio truth-value ATTRIBUTION decision as boolean_sqli.sprt_inference (verify.oracles.boolean_inference_oracle over K_T always-TRUE and K_F always-FALSE clauses, each sent twice byte-identically, confirming only when the response PARTITIONS by the injected boolean's truth value), but driven with LDAP injection clauses in the LDAP search-filter context (e.g. (&)/(|)/(!) filter clauses) so a fire is soundly ATTRIBUTABLE to this class rather than to SQL.",
+      "fact_capable": false,
+      "clean_capable": false,
+      "preconditions": [
+        "channel_established",
+        "body_semantically_available"
+      ],
+      "limitation": "LEAD-only. The boolean SPRT channel proves truth-value attribution but does NOT name the datastore engine, so the CLAUSE SYNTAX is what attributes the class: the shipped scanner.checks.boolean_clause_families() are SQL breakout clauses, and a SQL clause that partitions proves SQL boolean injection — it cannot soundly attribute LDAP injection. Until class-specific truth-correct clause families exist, this branch is body-derived and LEAD-only; NOT clean-capable (a non-confirming SPRT can never assert the target is not injectable).",
+      "target_fact_capable": true,
+      "target_clean_capable": false,
+      "target_downgrade_rationale": "Proving the ABSENCE of a boolean-blind LDAP injection channel across every parameter, context and clause shape is a coverage-complete capability, not this SPRT re-drive over the driven insertion points, so CLEAN-capability is deliberately not pursued on this branch.",
+      "evidence_surface": "response_body",
+      "implementation_refs": [
+        "engine/crucible/framework/v2/verify/oracles.py:boolean_inference_oracle",
+        "engine/crucible/framework/v2/scanner/checks.py:BooleanInferenceCheck"
+      ],
+      "oracle_version": "",
+      "blocking_work": "Build class-specific, truth-CORRECT boolean clause families for the LDAP search-filter context (e.g. (&)/(|)/(!) filter clauses) — K_T always-TRUE and K_F always-FALSE clauses that are shape-varied and length-matched — MACHINE-VERIFIED against a real engine of the class (as boolean_clause_families is verified truth-correct against sqlite3; no offline LDAP injection engine ships today, which is the blocker), then drive them through a governed-engage SPRT arm feeding the boolean_inference oracle. Only then does this branch mint a FACT; a SQL clause set cannot soundly attribute this class.",
+      "control_requirements": [
+        "class_specific_truth_correct_clause_families",
+        "engine_verified_clause_truth",
+        "sequential_probability_ratio_test"
+      ]
+    },
+    {
+      "id": "xpath_injection.datastore_error",
+      "check": "injection_redrive",
+      "evidence": "A XPath injection finding is a PROPOSAL; VIGIL's runner re-sends its OWN gated, DNS-pinned class-specific error-provoking probe against the finding's {endpoint, param} (the RUNNER crafts the probe — the Strix/LLM payload is never trusted) AND fetches a benign CONTROL twin of the same endpoint+param with a metacharacter-free value, then the deterministic error_signature oracle re-fires over VIGIL's FRESH response bytes WITH the control present. The FACT is minted ONLY when the datastore/parser ENGINE the oracle matches is 'xpath' (the engine that names this class), so the certificate names the vulnerability the evidence proves; a fired-but-mismatched engine REFUSES to a LEAD. The FACT is decided by the wire bytes alone.",
+      "fact_capable": true,
+      "clean_capable": false,
+      "preconditions": [
+        "channel_established"
+      ],
+      "limitation": "A POSITIVE-only error_signature channel over a runner-owned re-drive plus a benign control twin: a fired oracle proves the in-charter target emitted a xpath datastore/parser-error signature that VIGIL's OWN injection payload provoked and a benign control did NOT (payload-attributable). It is POSITIVE-only: a non-firing is UNINFORMATIVE by construction, because XPath injection can be present over a boolean/out-of-band channel this single error-signature response cannot see, so absence of an error signature can NEVER establish the target is not injectable. NOT CLEAN-capable.",
+      "target_fact_capable": true,
+      "target_clean_capable": false,
+      "target_downgrade_rationale": "A response-side error-signature re-drive is a POSITIVE-only detector whose absence of a signal is uninformative by construction; a sound CLEAN (XPath injection absent) is a different, coverage-based capability spanning the boolean/out-of-band channels and a benign differential control, not this single-response error-signature branch, so clean-capability is deliberately not a target here.",
+      "evidence_surface": "service_response",
+      "implementation_refs": [
+        "integration/vigil_integration/live/runtime_redrive.py:injection_redrive",
+        "integration/vigil_integration/live/wiring.py:_live_injection_redrive_fact"
+      ],
+      "oracle_version": "error_signature",
+      "control_requirements": [
+        "channel_established_gate",
+        "vigil_owned_live_redrive",
+        "benign_control_twin",
+        "deterministic_error_signature_oracle"
+      ]
+    },
+    {
+      "id": "xpath_injection.sprt_inference",
+      "check": "boolean_redrive (class-specific truth-value clause families — NOT YET BUILT)",
+      "evidence": "The SAME sequential-probability-ratio truth-value ATTRIBUTION decision as boolean_sqli.sprt_inference (verify.oracles.boolean_inference_oracle over K_T always-TRUE and K_F always-FALSE clauses, each sent twice byte-identically, confirming only when the response PARTITIONS by the injected boolean's truth value), but driven with XPath injection clauses in the XPath predicate/string context (e.g. and/or predicate clauses) so a fire is soundly ATTRIBUTABLE to this class rather than to SQL.",
+      "fact_capable": false,
+      "clean_capable": false,
+      "preconditions": [
+        "channel_established",
+        "body_semantically_available"
+      ],
+      "limitation": "LEAD-only. The boolean SPRT channel proves truth-value attribution but does NOT name the datastore engine, so the CLAUSE SYNTAX is what attributes the class: the shipped scanner.checks.boolean_clause_families() are SQL breakout clauses, and a SQL clause that partitions proves SQL boolean injection — it cannot soundly attribute XPath injection. Until class-specific truth-correct clause families exist, this branch is body-derived and LEAD-only; NOT clean-capable (a non-confirming SPRT can never assert the target is not injectable).",
+      "target_fact_capable": true,
+      "target_clean_capable": false,
+      "target_downgrade_rationale": "Proving the ABSENCE of a boolean-blind XPath injection channel across every parameter, context and clause shape is a coverage-complete capability, not this SPRT re-drive over the driven insertion points, so CLEAN-capability is deliberately not pursued on this branch.",
+      "evidence_surface": "response_body",
+      "implementation_refs": [
+        "engine/crucible/framework/v2/verify/oracles.py:boolean_inference_oracle",
+        "engine/crucible/framework/v2/scanner/checks.py:BooleanInferenceCheck"
+      ],
+      "oracle_version": "",
+      "blocking_work": "Build class-specific, truth-CORRECT boolean clause families for the XPath predicate/string context (e.g. and/or predicate clauses) — K_T always-TRUE and K_F always-FALSE clauses that are shape-varied and length-matched — MACHINE-VERIFIED against a real engine of the class (as boolean_clause_families is verified truth-correct against sqlite3; no offline XPath injection engine ships today, which is the blocker), then drive them through a governed-engage SPRT arm feeding the boolean_inference oracle. Only then does this branch mint a FACT; a SQL clause set cannot soundly attribute this class.",
+      "control_requirements": [
+        "class_specific_truth_correct_clause_families",
+        "engine_verified_clause_truth",
+        "sequential_probability_ratio_test"
+      ]
     }
   ]
 }
