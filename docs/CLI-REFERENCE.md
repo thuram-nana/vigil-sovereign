@@ -60,6 +60,7 @@ locks shut.)
 | `crucible capabilities` | List / manage the capability plugins (the plugin registry). |
 | `crucible aegis` | The AEGIS defensive dual (embeddable runtime-defence oracles). |
 | `crucible evidence` | Inspect / export / verify the signed evidence tree. |
+| `crucible spine-cert` | Export a live `engage`'s oracle-confirmed FACTs off the `.blackboard` spine as the same offline-re-verifiable cert bundle `verify` re-checks; non-fact LEADs are kept in a separate, non-re-verifiable section and never minted as facts. |
 | `crucible erase-evidence` | W16-8 right-to-erasure: crypto-shred an engagement's at-rest credential-bearing evidence without breaking the append-only spine. |
 | `crucible report` | Assemble the executive / technical / remediation reports from the findings. |
 | `crucible attack-paths` | READ-ONLY graph triage over the asset topology: shortest attack path, chokepoints, blast radius. |

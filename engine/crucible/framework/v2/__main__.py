@@ -172,6 +172,15 @@ def _erase_evidence(argv: list[str]) -> int:
     return evidence_erasure.main(argv)
 
 
+def _spine_cert(argv: list[str]) -> int:
+    # Export a live engage's oracle-confirmed FACTs off the .blackboard spine as the SAME
+    # offline-re-verifiable cert bundle the scanner/proof paths produce (re-runnable by
+    # `verify`). LAZY import — agents/ is untouched until this subcommand runs, so the
+    # scan/engage/benchmark gate path never loads it and `make gate` stays byte-identical.
+    from .agents import spine_certs
+    return spine_certs.main(argv)
+
+
 def _mcp(argv: list[str]) -> int:
     from .mcp import cli as mcp_cli
     return mcp_cli.main(argv)
@@ -207,7 +216,17 @@ def _status(argv: list[str]) -> int:
         return 2
 
     print(f"  v2 root           : {paths.v2_root()}")
-    print(f"  memory db         : {paths.memory_db()}")
+    # D2 — surface the single-tenant worker shard so an operator sees WHICH tenant this process serves
+    # and where its (sharded) spine + memory stores live. Unsharded => "(shared/default)".
+    try:
+        from .common import tenant as _tenant
+        _shard = _tenant.shard_summary()
+        print(f"  tenant            : {_shard['tenant']}")
+        print(f"  root owner        : {_shard.get('root_owner', '-')}")
+        print(f"  blackboard db     : {_shard['blackboard_db']}")
+        print(f"  memory db         : {_shard['memory_db']}")
+    except Exception:  # noqa: BLE001 — status must never crash; fall back to the un-sharded memory line
+        print(f"  memory db         : {paths.memory_db()}")
     print(f"  dryrun dir        : {paths.dryrun_dir()}")
     print()
     print("  LLM backends      :")
@@ -267,6 +286,7 @@ _DISPATCH: dict[str, Callable[[list[str]], int]] = {
     "evidence": _evidence,
     "erase-evidence": _erase_evidence,
     "report": _report,
+    "spine-cert": _spine_cert,
     "attack-paths": _attack_paths,
     "collaborator": _collaborator,
     "benchmark": _benchmark,

@@ -47,6 +47,14 @@ from .authorization import (
     verify_authorization,
 )
 from .charter import authority_from_charter, authority_from_scope
+from .fleet import (
+    FleetConcurrencyGovernor,
+    HostRateLimiter,
+    ProofSerializer,
+    TenantBudget,
+    WorkKind,
+    canonical_host,
+)
 from .crosscheck import (
     EnvelopeCrossCheck,
     ScopeCrossCheck,
@@ -101,4 +109,12 @@ __all__ = [
     "crosscheck_envelope",
     "assert_envelope_consistent",
     "parse_envelope_declaration",
+    # Wave D / D3 — fleet-level concurrency governance and the
+    # serial-proof-per-target soundness invariant.
+    "WorkKind",
+    "canonical_host",
+    "HostRateLimiter",
+    "TenantBudget",
+    "ProofSerializer",
+    "FleetConcurrencyGovernor",
 ]

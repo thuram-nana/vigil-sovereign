@@ -87,11 +87,24 @@ def _valid_slug(slug: str) -> bool:
     return bool(slug) and ".." not in slug and _SLUG_RE.match(slug) is not None
 
 
-# A module-process lock that serialises the check-then-act around STARTING a run of a given slug (fresh
-# launch is unique-by-construction, but a concurrent DOUBLE-RESUME of ONE paused run would otherwise both
-# pass _slug_has_running_run and fork that slug's spine). Held across the guard + the status=running commit
-# in retry_run, it makes that window atomic WITHIN this console process (the only process that starts runs).
-_SLUG_LAUNCH_LOCK = threading.Lock()
+# D1 — the per-slug engagement lease.
+#
+# STARTING a run of a slug used to be serialised by a process-local ``threading.Lock`` around a
+# ``_slug_has_running_run`` check-then-``_write_meta(running)`` commit. That closed the race only WITHIN this
+# console process; two INDEPENDENT processes racing the same slug (two ``engage --resume`` POSTs, or a
+# console plus a hand-run CLI) could each read "not running", each commit, and fork that slug's ``{slug}.spine``
+# hash-chain. The lock is gone; the guard is now a durable, atomic, cross-process ``SlugLease`` whose ``O_EXCL``
+# create is the serialization point — of any number of racers for one slug, exactly one wins the lease and
+# every loser is cleanly refused, and a crashed holder's lease is reclaimable (liveness by pid + boot_id, the
+# same discipline reconcile_orphaned_runs uses). The lease is held for the life of the run and released by the
+# run's supervisor at its terminal status (or reclaimed if the holder dies). ``_slug_has_running_run`` stays as
+# a cheap, best-effort registry read for the UI liveness report and as a fast-fail defence-in-depth check.
+def _engagement_lease():
+    """The console's per-slug engagement lease, rooted under ``<.console>/leases`` (a sibling of ``runs``).
+    Constructed per call — it is stateless (all state is on disk), so this never caches a stale directory
+    when tests repoint ``console_dir``."""
+    from ..slug_lease import SlugLease
+    return SlugLease(console_dir() / "leases")
 
 
 def _unique_engagement_slug(raw: str, run_id: str) -> str:
@@ -826,63 +839,93 @@ def _spawn_background(run_id: str, rd: Path, cmd: list[str], meta: dict, *,
         for _k in [k for k in child_env if str(k).upper() in _rm]:
             child_env.pop(_k, None)
 
+    def _release_slug_lease() -> None:
+        """Release this run's per-slug engagement lease once its process is GONE (called on every terminal
+        path via _run's finally), so the next engagement of the slug can start at once. Keyed on the token
+        recorded at acquire, so it releases only OUR generation — a lease already reclaimed after a crash is
+        left untouched. Best-effort; a crash that skips this is covered by the lease's own liveness reclaim.
+        Only a leased run (a D1 resume) carries lease_slug/lease_token; every other launch is a no-op."""
+        tok = str(meta.get("lease_token") or "")
+        lslug = str(meta.get("lease_slug") or "")
+        if not tok or not lslug:
+            return
+        try:
+            _engagement_lease().release(lslug, tok)
+        except Exception:  # noqa: BLE001 — teardown must never crash the supervisor thread
+            pass
+
     def _run() -> None:
         try:
-            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,  # noqa: S603
-                                    text=True, env=child_env)
-        except Exception as e:  # a spawn failure (bad argv / OS pressure) — record and stop
-            _write_meta(run_id, **{**meta, "status": "error", "error": str(e), "finished": time.time()})
-            return
-        # record the live pid up front, so a console restart can reconcile this run if it is orphaned.
-        _write_meta(run_id, **{**meta, "status": "running", "pid": proc.pid, "boot_id": _boot_id()})
-        try:
-            out, err = proc.communicate(timeout=3600)
-        except subprocess.TimeoutExpired:
-            proc.kill()
             try:
-                out, err = proc.communicate()
-            except Exception:  # noqa: BLE001
-                out, err = "", ""
-            _write_bounded_stdout(rd, out)
-            _write_meta(run_id, **{**meta, "status": "error", "pid": proc.pid, "rc": None,
-                                   "stderr": "timed out after 3600s", "finished": time.time()})
-            return
-        except Exception as e:  # never let a launch crash the console
-            _write_meta(run_id, **{**meta, "status": "error", "pid": proc.pid, "error": str(e),
+                proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,  # noqa: S603
+                                        text=True, env=child_env)
+            except Exception as e:  # a spawn failure (bad argv / OS pressure) — record and stop
+                _write_meta(run_id, **{**meta, "status": "error", "error": str(e), "finished": time.time()})
+                return
+            # record the live pid up front, so a console restart can reconcile this run if it is orphaned.
+            _write_meta(run_id, **{**meta, "status": "running", "pid": proc.pid, "boot_id": _boot_id()})
+            # D1: re-point the slug lease's liveness at the CHILD pid (the actual engagement process), so
+            # staleness tracks exactly what reconcile_orphaned_runs keys on — a child reparented past a dead
+            # console still reads as held (no double-run), a dead child is reclaimable. Best-effort; keeping
+            # the console-pid holder on failure is still correct (the console outlives the run normally).
+            _tok, _lslug = str(meta.get("lease_token") or ""), str(meta.get("lease_slug") or "")
+            if _tok and _lslug:
+                try:
+                    _engagement_lease().rebind(_lslug, _tok, proc.pid)
+                except Exception:  # noqa: BLE001
+                    pass
+            try:
+                out, err = proc.communicate(timeout=3600)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                try:
+                    out, err = proc.communicate()
+                except Exception:  # noqa: BLE001
+                    out, err = "", ""
+                _write_bounded_stdout(rd, out)
+                _write_meta(run_id, **{**meta, "status": "error", "pid": proc.pid, "rc": None,
+                                       "stderr": "timed out after 3600s", "finished": time.time()})
+                return
+            except Exception as e:  # never let a launch crash the console
+                _write_meta(run_id, **{**meta, "status": "error", "pid": proc.pid, "error": str(e),
+                                       "finished": time.time()})
+                return
+            rc = proc.returncode
+            ok = rc == 0
+            if capture_report and ok and (out or "").strip():
+                (rd / "report.json").write_text(out, encoding="utf-8")
+                _write_findings_json(rd)      # W16-7 (AC2): the reports' finding source, written in production
+            else:
+                _write_bounded_stdout(rd, out)
+            # A negative rc means the child was killed by a signal — the operator's Cancel (W4), not a genuine
+            # error — so record it as 'cancelled', not 'error'. This supervisor thread is the SOLE terminal-status
+            # writer for a live run: cancel_run signals and then waits for THIS write (it only writes the status
+            # itself for an ORPHANED run with no live supervisor), so there is no double-write race.
+            status = "done" if ok else ("cancelled" if (rc is not None and rc < 0) else "error")
+            # A run that exited 0 but PAUSED (awaiting a signature / anti-spin / ask_user / plan-only) is not
+            # "done": read the engine's terminal run_summary and mark it "paused" so the UI shows an honest
+            # Paused state + a Resume affordance instead of a false "Done" (Wave 7). Any other engine (no
+            # run_summary event) is unaffected — paused_reason stays "".
+            paused_reason = ""
+            if ok:
+                paused_reason = str((_run_outcome(run_id) or {}).get("paused") or "").strip()
+                if paused_reason:
+                    status = "paused"
+            _write_meta(run_id, **{**meta, "status": status, "pid": proc.pid, "paused": paused_reason,
+                                   "rc": rc, "stderr": (err or "")[-2000:] if not ok else "",
                                    "finished": time.time()})
-            return
-        rc = proc.returncode
-        ok = rc == 0
-        if capture_report and ok and (out or "").strip():
-            (rd / "report.json").write_text(out, encoding="utf-8")
-            _write_findings_json(rd)      # W16-7 (AC2): the reports' finding source, written in production
-        else:
-            _write_bounded_stdout(rd, out)
-        # A negative rc means the child was killed by a signal — the operator's Cancel (W4), not a genuine
-        # error — so record it as 'cancelled', not 'error'. This supervisor thread is the SOLE terminal-status
-        # writer for a live run: cancel_run signals and then waits for THIS write (it only writes the status
-        # itself for an ORPHANED run with no live supervisor), so there is no double-write race.
-        status = "done" if ok else ("cancelled" if (rc is not None and rc < 0) else "error")
-        # A run that exited 0 but PAUSED (awaiting a signature / anti-spin / ask_user / plan-only) is not
-        # "done": read the engine's terminal run_summary and mark it "paused" so the UI shows an honest
-        # Paused state + a Resume affordance instead of a false "Done" (Wave 7). Any other engine (no
-        # run_summary event) is unaffected — paused_reason stays "".
-        paused_reason = ""
-        if ok:
-            paused_reason = str((_run_outcome(run_id) or {}).get("paused") or "").strip()
-            if paused_reason:
-                status = "paused"
-        _write_meta(run_id, **{**meta, "status": status, "pid": proc.pid, "paused": paused_reason,
-                               "rc": rc, "stderr": (err or "")[-2000:] if not ok else "",
-                               "finished": time.time()})
-        # AUTO-RESUME loop, first half: if an integration engage linked to a CHAT session just paused at
-        # ask_user, surface the agent's real question as a chat bubble so the operator can see it and answer
-        # (their reply auto-resumes the run — resume_engage_with_message). Best-effort, chat-only, never
-        # raises: a question-surfacing hiccup must not perturb the run's teardown.
-        try:
-            _maybe_surface_agent_question(run_id, meta)
-        except Exception:  # noqa: BLE001
-            pass
+            # AUTO-RESUME loop, first half: if an integration engage linked to a CHAT session just paused at
+            # ask_user, surface the agent's real question as a chat bubble so the operator can see it and answer
+            # (their reply auto-resumes the run — resume_engage_with_message). Best-effort, chat-only, never
+            # raises: a question-surfacing hiccup must not perturb the run's teardown.
+            try:
+                _maybe_surface_agent_question(run_id, meta)
+            except Exception:  # noqa: BLE001
+                pass
+        finally:
+            # The child is gone on EVERY path above (spawn failure / timeout-kill / error / normal exit), so
+            # the slug is no longer being run here — release its lease exactly once, whatever happened.
+            _release_slug_lease()
 
     threading.Thread(target=_run, daemon=True).start()
 
@@ -1167,12 +1210,14 @@ def _cmd_supports_resume(cmd: "list[str]") -> bool:
 
 
 def _slug_has_running_run(slug: str, *, exclude: str = "") -> bool:
-    """True iff some run of ``slug`` is currently 'running'. Used by retry as a BEST-EFFORT guard against
-    starting a SECOND concurrent run of the same engagement (two `engage --resume` would each read head_seq
-    independently and could collide the spine seq / fork the hash chain). It is check-then-act, NOT atomic:
-    two retries firing within the same instant can both pass (the UI in-flight guard closes the realistic
-    double-click; an atomic O_EXCL per-slug claim — the LAP-3b nonce-ledger pattern — is named follow-on
-    hardening for the independent-concurrent-POST case). Total; a broken meta is skipped."""
+    """True iff some run of ``slug`` is currently recorded 'running' in the run registry. This is a cheap,
+    BEST-EFFORT registry read — check-then-act, NOT atomic — used for two things: the UI liveness report in
+    ``engage_instruct`` (is a run alive to drain a steer?), and a fast-fail defence-in-depth check in
+    ``retry_run`` before the authoritative claim. The atomic, cross-process guard against starting a SECOND
+    concurrent run of one slug is now the ``SlugLease`` (D1): its O_EXCL create — not this scan — is what makes
+    the launch race-free (two independent-process POSTs, or a console + a hand-run CLI). Kept as a secondary
+    layer because it also catches a still-'running' original whose launch predates the lease. Total; a broken
+    meta is skipped."""
     if not slug:
         return False
     try:
@@ -1204,9 +1249,9 @@ def retry_run(run_id: str) -> dict:
         return {"ok": False, "error": "this run has no recorded command to relaunch"}
     slug = str(meta.get("slug") or "")
     # Fast fail for the obvious duplicate (avoids the setup work below); the AUTHORITATIVE, race-free guard
-    # is the atomic re-check under _SLUG_LAUNCH_LOCK immediately before the status=running commit (ENH2
-    # must-fix: two concurrent resumes of ONE paused run reuse the SAME recorded slug + --run-key and would
-    # otherwise both pass this check-then-act and fork that slug's spine).
+    # is the atomic SlugLease.acquire immediately before the status=running commit (D1: two concurrent resumes
+    # of ONE paused run reuse the SAME recorded slug + --run-key and would otherwise both pass this
+    # check-then-act and fork that slug's spine — the lease's O_EXCL create lets exactly one through).
     if slug and _slug_has_running_run(slug):
         return {"ok": False, "error": f"a run for '{slug}' is already in progress — wait for it or cancel it"}
     # GAP-1 (Strix sovereignty) — RE-APPLY the per-session model pin on the RETRY/RESUME path, or a retried
@@ -1248,15 +1293,29 @@ def retry_run(run_id: str) -> dict:
     if strix_env:                       # GAP-1: record the re-applied LOCAL pin (audit/UI); never a key/endpoint
         new_meta["strix_llm"] = strix_env.get("STRIX_LLM", "")
         new_meta["model_backend"] = "local"
-    # ATOMIC guard (ENH2 must-fix): serialise the "no other run of this slug is running" check with the
-    # status=running commit, so two concurrent resumes of one paused run cannot BOTH pass and fork the
-    # shared {slug}.spine. The lock spans only the fast re-check + the meta write (the spawn is outside it);
-    # _spawn_background is called AFTER, so a slow child start never holds the lock. Cross-process is out of
-    # scope — this console process is the sole starter of runs.
-    with _SLUG_LAUNCH_LOCK:
-        if slug and _slug_has_running_run(slug):
+    # ATOMIC guard (D1): claim the durable, cross-process per-slug lease BEFORE committing status=running, so
+    # two concurrent resumes of one paused run — in this process OR in two independent processes — cannot both
+    # proceed and fork the shared {slug}.spine. The lease's O_EXCL create is the serialization point: exactly
+    # one racer wins, every loser is cleanly refused here, and a crashed holder's lease is reclaimable (so a
+    # dead run never wedges the slug). The lease is held for the life of this run and released by its
+    # supervisor at terminal status (see _spawn_background). We hold it across the meta write only; the spawn
+    # is outside, so a slow child start never blocks another slug. A fresh-launch path never reaches here
+    # (unique-by-construction slugs), so it needs no lease; _slug_has_running_run above stays a fast-fail
+    # defence-in-depth read that also catches a still-'running' original whose launch predates the lease.
+    lease_token = ""
+    if slug:
+        _lease = _engagement_lease()
+        _acq = _lease.acquire(slug, run_id=new_id, extra={"parent_run_id": run_id})
+        if not _acq.ok:
             return {"ok": False, "error": f"a run for '{slug}' is already in progress — wait for it or cancel it"}
+        lease_token = _acq.token
+        new_meta = {**new_meta, "lease_slug": slug, "lease_token": lease_token}
+    try:
         _write_meta(new_id, **new_meta, status="running")
+    except Exception:  # noqa: BLE001 — never strand a held lease if the registry write fails
+        if slug and lease_token:
+            _engagement_lease().release(slug, lease_token)
+        raise
     # capture_report only for the loopback scan (JSON on stdout); engage/strix report elsewhere.
     capture_report = ("scan" in new_cmd and "--format" in new_cmd)
     # a Strix run needs its Proof Studio env re-pointed at the NEW run dir (else its proofs mis-locate).
