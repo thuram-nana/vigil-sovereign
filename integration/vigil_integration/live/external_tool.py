@@ -1728,21 +1728,29 @@ def _max_redriven_proposals() -> int:
     return max(1, _LIVENESS_REQUEST_BUDGET // max(1, int(MAX_GATED_GETS_PER_URL)))
 
 
-# --- OPSEC: the per-run gated-request BUDGET for the web-FACT leg (C4; constitution §VI) ------------------
-# The ACHIEVED_STATE re-drive (``web_redrive``) sends a BOUNDED burst of gated probes per URL: CORS (1) +
-# host-header (1) + GraphQL-introspection (1) + the open-redirect carriers across up to
-# ``web_redrive._MAX_CANDIDATE_REDIRECT_NAMES`` (12) names on five insertion surfaces. The worst case is a
-# URL with many query params / path segments; ``_WEB_REDRIVE_REQUESTS_PER_URL`` is the conservative REVIEWED
-# upper estimate of that burst (the reviewed knob, exactly like ``web_redrive.MAX_GATED_GETS_PER_URL`` for the
-# liveness leg — raising it is an edit here, never emergent from how many rows a wordlist matched). The CAP on
-# how many proposed findings one run re-drives is DERIVED from the budget so the two cannot drift, and
-# truncation is NEVER silent (counted on the result, named in the detail, and a "skipped" outcome row).
-_WEB_REDRIVE_REQUEST_BUDGET = 1000
-_WEB_REDRIVE_REQUESTS_PER_URL = 60
+# --- OPSEC: the ENFORCED gated-request budget for the web-FACT leg (C4; constitution §VI) ----------------
+# THE DEFECT this closes (C4 red-pen). ``web_redrive``'s open_redirect leg iterates ONE gated request per
+# query param and per path segment with NO ceiling, and this leg now feeds UNTRUSTED tool stdout as the URL
+# source — so a crafted in-scope URL with 150 params + 30 segments drove ~220 requests, not the ~60 a prior
+# comment estimated, i.e. the per-run total was effectively unbounded and the advertised "1000-request budget"
+# was a FALSE claim (only a FINDINGS cap was enforced). Both bounds below are now ACTUALLY ENFORCED by a shared
+# :class:`web_redrive.GatedRequestBudget`: every gated GET/POST across the whole run is counted, and once a cap
+# is hit each further send refuses BEFORE issuing traffic — mid-URL, regardless of the URL's param/segment
+# count. These are the reviewed knobs (raising one is an edit here); neither can be exceeded by tool input.
+#   * per-RUN request cap — the total gated requests one ToolSpec run may issue across all its findings.
+#   * per-URL request cap — the ceiling on any SINGLE tool-proposed URL, so one pathological URL cannot
+#     consume the whole run budget and starve the rest.
+# The FINDINGS cap (how many distinct findings are even attempted) is DERIVED from the two so the numbers can
+# never drift, and is a coarse pre-filter; the request budget is the authoritative bound. Truncation for EITHER
+# reason is NEVER silent (counted on the result, named in the detail, and a "skipped" outcome row).
+_WEB_REDRIVE_REQUEST_BUDGET = 1000        # ENFORCED per-run gated-request cap
+_WEB_REDRIVE_MAX_REQUESTS_PER_URL = 60    # ENFORCED per-URL gated-request cap
 
 
 def _max_web_redriven_findings() -> int:
-    return max(1, _WEB_REDRIVE_REQUEST_BUDGET // max(1, int(_WEB_REDRIVE_REQUESTS_PER_URL)))
+    """The coarse FINDINGS pre-filter: at most this many distinct findings are attempted, derived so
+    ``findings x per_url_cap <= run_budget`` (the request budget is what actually enforces the bound)."""
+    return max(1, _WEB_REDRIVE_REQUEST_BUDGET // max(1, int(_WEB_REDRIVE_MAX_REQUESTS_PER_URL)))
 
 
 def _run_web_fact_tool(
@@ -1760,7 +1768,7 @@ def _run_web_fact_tool(
     (each independently admit()-gated). Mirrors the other legs' outcome taxonomy + Observation. Called only
     when ``spec.propose_web_findings`` is set; the caller already ran the scope/pre-flight/capability gates."""
     from ..oracle_adapter import Outcome  # noqa: PLC0415 (FATAL-2: function-local)
-    from .web_redrive import web_redrive  # noqa: PLC0415 (FATAL-2: web_redrive is offense-neutral)
+    from .web_redrive import GatedRequestBudget, web_redrive  # noqa: PLC0415 (FATAL-2: web_redrive is offense-neutral)
 
     proposed = spec.propose_web_findings(outcome, target)   # list[ProposedWebFinding], host pinned to target
     facts: list = []
@@ -1774,8 +1782,8 @@ def _run_web_fact_tool(
         # are still parsed above for the canonical Observation, so the truncation is visible, never silent.
         outcomes.append({"check_id": spec.name, "bug_class": "", "outcome": Outcome.ERROR.value})
 
-    # OPSEC CAP: de-duplicate FIRST by (url, claimed_class) — a duplicate costs nothing and must not consume
-    # the budget — then take at most the derived cap. Everything past it is dropped LOUDLY, never quietly.
+    # De-duplicate FIRST by (url, claimed_class) — a duplicate costs nothing and must not consume the budget —
+    # then apply the coarse FINDINGS pre-filter. The AUTHORITATIVE bound is the shared request budget below.
     unique: "list[ProposedWebFinding]" = []
     dedup: set = set()
     for pf in proposed:
@@ -1784,26 +1792,31 @@ def _run_web_fact_tool(
             dedup.add(key)
             unique.append(pf)
     cap = _max_web_redriven_findings()
-    redriven, dropped = ([], unique) if tool_errored else (unique[:cap], unique[cap:])
-    budget_note = ""
-    if dropped and not tool_errored:
-        budget_note = (
-            f"OPSEC CAP: {spec.name} proposed {len(unique)} distinct web finding(s); this run re-drove the "
-            f"first {len(redriven)} and SKIPPED {len(dropped)}. Each web re-drive costs up to about "
-            f"{_WEB_REDRIVE_REQUESTS_PER_URL} serial gated requests, so the per-run budget of "
-            f"{_WEB_REDRIVE_REQUEST_BUDGET} request(s) admits {cap}. The skipped findings were NOT examined — "
-            f"a throttle, not a finding of absence; re-run with a narrower scope or raise the reviewed budget.")
-        outcomes.append({"check_id": f"{spec.name}:opsec_request_budget", "bug_class": "",
-                         "outcome": Outcome.SKIPPED.value, "note": budget_note})
+    candidates, findings_dropped = ([], unique) if tool_errored else (unique[:cap], unique[cap:])
 
-    for pf in redriven:
+    # THE ENFORCED per-run/per-URL gated-request budget (C4 red-pen fix). ONE shared counter for the whole run,
+    # threaded into EVERY web_redrive call: a crafted high-complexity URL cannot exceed the advertised cap
+    # regardless of its param/segment count, because web_redrive's own gated send refuses once the budget is
+    # spent — mid-URL. ``begin_url`` resets the per-URL sub-cap so one URL cannot starve the rest.
+    budget = GatedRequestBudget(_WEB_REDRIVE_REQUEST_BUDGET, per_url_cap=_WEB_REDRIVE_MAX_REQUESTS_PER_URL)
+    redriven: "list[ProposedWebFinding]" = []
+    budget_skipped: "list[ProposedWebFinding]" = []
+    for pf in candidates:
+        if budget.run_exhausted:
+            # The per-run request budget is spent — re-driving further URLs would only issue refusals. Stop
+            # and record the rest as budget-skipped (NOT examined), so truncation stays loud, never silent.
+            budget_skipped.append(pf)
+            continue
+        redriven.append(pf)
+        budget.begin_url()
         # web_redrive owns its OWN per-request gate (kill-switch → single-host → ACTIVE_RECON → charter scope
         # → http(s)); the URL host is already pinned to the scope-authorised target. slug == engagement_slug.
         # claimed_class="" for a web-discovery proposal (probe every web FACT class); set for a scanner
         # finding (attribute the FACT to the claimed class). oidc is never reachable from a label (web_redrive
         # class-gates it; web_fact_class_for excludes it), so a scanner cannot upgrade A01→A07 via its say-so.
+        # ``budget`` is the SHARED per-run/per-URL request cap — the ENFORCED OPSEC throttle.
         wr = web_redrive(pf.url, slug=engagement_slug, engagement_slug=engagement_slug, signers=signers,
-                         timeout=min(timeout, 30.0), claimed_class=pf.claimed_class or "")
+                         timeout=min(timeout, 30.0), claimed_class=pf.claimed_class or "", budget=budget)
         # Surface every signed FACT web_redrive minted over its OWN capture (each independently admit()-gated).
         for fct in getattr(wr, "facts", []) or []:
             ref = getattr(fct, "finding_ref", "")
@@ -1840,8 +1853,32 @@ def _run_web_fact_tool(
                              "note": (f"web re-drive minted {n_minted} FACT(s) over VIGIL's own capture"
                                       if n_minted else "web re-drive confirmed no FACT class over VIGIL's capture")})
 
+    # Truncation accounting (loud, never silent) — findings dropped by the coarse pre-filter PLUS findings the
+    # ENFORCED per-run request budget stopped us re-driving. The note states EXACTLY what is enforced (both a
+    # per-run request cap and a per-URL request cap, actually spent = ``budget.run_spent``), no overclaim.
+    dropped = list(findings_dropped) + list(budget_skipped)
+    budget_note = ""
+    if dropped and not tool_errored:
+        reasons = []
+        if findings_dropped:
+            reasons.append(f"{len(findings_dropped)} beyond the coarse findings pre-filter of {cap}")
+        if budget_skipped:
+            reasons.append(f"{len(budget_skipped)} after the ENFORCED per-run request budget of "
+                           f"{_WEB_REDRIVE_REQUEST_BUDGET} was spent")
+        budget_note = (
+            f"OPSEC CAP: {spec.name} proposed {len(unique)} distinct web finding(s); this run re-drove "
+            f"{len(redriven)} and SKIPPED {len(dropped)} ({'; '.join(reasons)}). ENFORCED throttle: every "
+            f"gated request across the run is counted against a per-run cap of {_WEB_REDRIVE_REQUEST_BUDGET} "
+            f"and a per-URL cap of {_WEB_REDRIVE_MAX_REQUESTS_PER_URL} (this run spent {budget.run_spent}), so "
+            f"a high-complexity URL cannot exceed the cap regardless of its param/segment count. The skipped "
+            f"findings were NOT examined — a throttle, not a finding of absence; narrow the scope or raise the "
+            f"reviewed budget.")
+        outcomes.append({"check_id": f"{spec.name}:opsec_request_budget", "bug_class": "",
+                         "outcome": Outcome.SKIPPED.value, "note": budget_note})
+
     detail = (f"{spec.name} ran via {outcome.backend}; proposed {len(proposed)} web finding(s), re-drove "
-              f"{len(redriven)}, oracle-confirmed {len(facts)} ACHIEVED_STATE FACT(s), {len(leads)} lead(s)"
+              f"{len(redriven)} (spent {budget.run_spent}/{_WEB_REDRIVE_REQUEST_BUDGET} gated requests), "
+              f"oracle-confirmed {len(facts)} ACHIEVED_STATE FACT(s), {len(leads)} lead(s)"
               + ("; TOOL ERRORED (timeout/spawn) — re-drove nothing" if tool_errored else "")
               + (f" | {budget_note}" if budget_note else ""))
     artifact_refs = tuple(fr for fr in (getattr(r, "finding_ref", "") for r in (facts + leads)) if fr)

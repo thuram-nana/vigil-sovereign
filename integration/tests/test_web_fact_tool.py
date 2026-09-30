@@ -400,8 +400,119 @@ def test_web_fact_leg_refuses_when_killswitch_tripped_before_any_traffic(monkeyp
 
 
 # ===================================================================================================
-# (6) OPSEC: the leg caps how many findings it re-drives against a documented request budget (never silent).
+# (6) OPSEC: the ENFORCED gated-request budget (C4 red-pen BLOCK). A crafted high-complexity URL cannot drive
+#     more than the enforced per-URL / per-run request cap — measured by an external counting server (spy).
 # ===================================================================================================
+class _CountingApp(http.server.BaseHTTPRequestHandler):
+    """Counts EVERY request it receives (GET and POST) — the external spy on VIGIL's actual gated traffic. It
+    404s everything (so nothing mints), so the count is a clean measurement of requests issued, not findings."""
+    hits = {"n": 0}
+
+    def log_message(self, *a):  # noqa: D401
+        return
+
+    def do_GET(self):  # noqa: N802
+        _CountingApp.hits["n"] += 1
+        self.send_response(404)
+        self.end_headers()
+
+    def do_POST(self):  # noqa: N802
+        _CountingApp.hits["n"] += 1
+        length = int(self.headers.get("Content-Length", "0") or "0")
+        if length:
+            self.rfile.read(length)
+        self.send_response(404)
+        self.end_headers()
+
+
+def _serve_counting():
+    _CountingApp.hits["n"] = 0
+    srv = http.server.HTTPServer(("127.0.0.1", 0), _CountingApp)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    return srv
+
+
+def _high_complexity_url(port: int, n_params: int = 200) -> str:
+    """An in-scope URL whose open-redirect insertion-point count (one gated request per query param) FAR
+    exceeds any cap — the crafted, attacker-influenced input the red-pen used to drive ~220 requests/URL."""
+    qs = "&".join(f"p{i}=v{i}" for i in range(n_params))
+    return f"http://127.0.0.1:{port}/a/b/c/d/e?{qs}"
+
+
+def test_a_crafted_high_complexity_url_cannot_exceed_the_enforced_per_url_request_cap(monkeypatch, tmp_path):
+    """C4 red-pen BLOCK closed (per-URL). A single crafted URL with 200 query params would, uncapped, drive
+    200+ gated requests through web_redrive's open-redirect leg. With the ENFORCED per-URL cap, VIGIL's own
+    gated send refuses once the cap is hit — MID-URL — so the counting server (the external spy) receives no
+    more than the cap, regardless of the URL's param count. The detail's spent number matches the observed
+    traffic (no overclaim)."""
+    from vigil_integration.live import external_tool
+    _charter(tmp_path, "127.0.0.1")
+    monkeypatch.setattr(external_tool, "_WEB_REDRIVE_REQUEST_BUDGET", 1000)  # run cap high: per-URL binds
+    monkeypatch.setattr(external_tool, "_WEB_REDRIVE_MAX_REQUESTS_PER_URL", 8)
+    srv = _serve_counting()
+    port = srv.server_address[1]
+    try:
+        res = _run(katana_web_scan(scheme="http"),
+                   _CannedBackend(_katana_jsonl(_high_complexity_url(port, n_params=200))))
+    finally:
+        srv.shutdown()
+    assert res.status == "ran"
+    assert res.proposed, "the crafted URL was proposed"
+    hits = _CountingApp.hits["n"]
+    assert hits <= 8, f"per-URL request cap NOT enforced: server received {hits} requests for one URL (cap 8)"
+    assert hits > 0, "VIGIL did genuinely re-drive (not a vacuous refusal)"
+    # the detail's spent count matches the ACTUAL traffic — no overclaim
+    assert f"spent {hits}/1000 gated requests" in res.reason, res.reason
+    assert res.facts == []
+
+
+def test_a_single_pathological_url_cannot_exceed_the_enforced_per_run_request_cap(monkeypatch, tmp_path):
+    """C4 red-pen BLOCK closed (per-run, mid-URL). Even with a HIGH per-URL cap, a single crafted URL cannot
+    exceed the per-RUN gated-request budget: the shared counter hard-stops MID-URL. The counting server
+    receives no more than the run cap, and the detail reports the true spent count."""
+    from vigil_integration.live import external_tool
+    _charter(tmp_path, "127.0.0.1")
+    monkeypatch.setattr(external_tool, "_WEB_REDRIVE_REQUEST_BUDGET", 20)     # run cap binds
+    monkeypatch.setattr(external_tool, "_WEB_REDRIVE_MAX_REQUESTS_PER_URL", 1000)
+    srv = _serve_counting()
+    port = srv.server_address[1]
+    try:
+        res = _run(katana_web_scan(scheme="http"),
+                   _CannedBackend(_katana_jsonl(_high_complexity_url(port, n_params=200))))
+    finally:
+        srv.shutdown()
+    assert res.status == "ran"
+    hits = _CountingApp.hits["n"]
+    assert hits <= 20, f"per-run request cap NOT enforced: server received {hits} requests (cap 20)"
+    assert hits > 0
+    assert f"spent {hits}/20 gated requests" in res.reason, res.reason
+    assert res.facts == []
+
+
+def test_many_high_complexity_urls_stay_within_the_per_run_request_cap(monkeypatch, tmp_path):
+    """C4 red-pen BLOCK closed (per-run across URLs). Several crafted high-complexity URLs together cannot
+    exceed the per-run cap: once spent, further URLs are budget-SKIPPED (loud, never silent), and the total
+    traffic the counting server sees stays within the cap."""
+    from vigil_integration.live import external_tool
+    _charter(tmp_path, "127.0.0.1")
+    monkeypatch.setattr(external_tool, "_WEB_REDRIVE_REQUEST_BUDGET", 40)
+    monkeypatch.setattr(external_tool, "_WEB_REDRIVE_MAX_REQUESTS_PER_URL", 8)
+    # findings pre-filter = 40 // 8 = 5; each URL uses its 8 → 5 x 8 = 40 = the run cap exactly.
+    srv = _serve_counting()
+    port = srv.server_address[1]
+    try:
+        stdout = "".join(_katana_jsonl(_high_complexity_url(port, n_params=50) + f"&u={i}") for i in range(12))
+        res = _run(katana_web_scan(scheme="http"), _CannedBackend(stdout))
+    finally:
+        srv.shutdown()
+    assert res.status == "ran"
+    hits = _CountingApp.hits["n"]
+    assert hits <= 40, f"per-run cap NOT enforced across URLs: server received {hits} requests (cap 40)"
+    assert res.truncated_proposals > 0, "the surplus URLs must be SKIPPED, and that truncation must be recorded"
+    assert "OPSEC CAP" in res.budget_note and "ENFORCED" in res.budget_note
+    assert res.facts == []
+
+
 def test_web_fact_leg_caps_redriven_findings_against_the_request_budget(monkeypatch, tmp_path):
     from vigil_integration.live.external_tool import _max_web_redriven_findings
     _charter(tmp_path, "127.0.0.1")

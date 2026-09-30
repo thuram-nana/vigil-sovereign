@@ -1008,7 +1008,59 @@ class WebRedriveResult:
         return {bug: self.family_verdict(bug) for bug in self.branch_verdicts}
 
 
-def _gated_web_send(slug: str, *, timeout: float = 8.0):
+class GatedRequestBudget:
+    """A shared, mutable per-run cap on the number of gated web requests a re-drive may issue (OPSEC §VI:
+    "throttle, don't break their production").
+
+    THE DEFECT it closes (C4 red-pen): ``web_redrive``'s open_redirect leg iterates ONE gated request per
+    query param and per path segment with NO ceiling, and the tool-catalogue leg now feeds UNTRUSTED tool
+    stdout as the URL source — so a crafted in-scope URL with many params/segments could drive far more
+    requests than the advertised budget, effectively unbounded per run. This object makes the advertised cap
+    ACTUALLY ENFORCED: it is created ONCE per tool-catalogue run and shared across EVERY ``web_redrive`` call,
+    so ``try_spend`` starts refusing (each further gated send becomes a no-channel refusal that issues NO
+    traffic) the instant the run cap is hit — mid-URL, regardless of that URL's param/segment count. An
+    optional ``per_url_cap`` additionally bounds any SINGLE URL so one pathological URL cannot consume the
+    whole run budget; ``begin_url`` resets the per-URL counter.
+
+    DEFAULT-SAFE: nothing constructs this on the shipped ``web_redrive`` FACT path (proof.run / wiring's
+    LLM-claim seam pass no budget), so ``budget=None`` in ``web_redrive`` / ``_gated_web_send`` leaves that
+    path byte-for-byte unchanged. It NEVER affects minting soundness — a refused send returns no channel, so
+    the oracle cannot fire over it (a budget cut-off can only turn a would-be FACT into an INCONCLUSIVE, never
+    the reverse)."""
+
+    __slots__ = ("run_cap", "per_url_cap", "run_spent", "_url_spent")
+
+    def __init__(self, run_cap: int, per_url_cap: "int | None" = None) -> None:
+        self.run_cap = max(0, int(run_cap))
+        self.per_url_cap = None if per_url_cap is None else max(0, int(per_url_cap))
+        self.run_spent = 0
+        self._url_spent = 0
+
+    def begin_url(self) -> None:
+        """Reset the per-URL counter before re-driving the next tool-proposed URL."""
+        self._url_spent = 0
+
+    def try_spend(self) -> bool:
+        """Reserve ONE gated request. Returns True while both the run cap and (if set) the per-URL cap have
+        room; False once either is hit — the caller then issues NO traffic for this request."""
+        if self.run_spent >= self.run_cap:
+            return False
+        if self.per_url_cap is not None and self._url_spent >= self.per_url_cap:
+            return False
+        self.run_spent += 1
+        self._url_spent += 1
+        return True
+
+    @property
+    def run_remaining(self) -> int:
+        return max(0, self.run_cap - self.run_spent)
+
+    @property
+    def run_exhausted(self) -> bool:
+        return self.run_spent >= self.run_cap
+
+
+def _gated_web_send(slug: str, *, timeout: float = 8.0, budget: "GatedRequestBudget | None" = None):
     """Return ``(send, state)``. ``send`` is a ``scanner.checks.Send`` —
     ``send(HttpRequest) -> {status, body, headers, latency_ms}`` — that AUTHORIZES each request's URL
     through the URL-shaped active-recon gate (kill-switch → single-host → ACTIVE_RECON → charter scope →
@@ -1063,6 +1115,15 @@ def _gated_web_send(slug: str, *, timeout: float = 8.0):
     state = {"channels": 0, "no_channel": 0, "body_unavailable": 0}
 
     def send(req: Any) -> dict:
+        # OPSEC per-run/per-URL request budget (C4). DEFAULT-OFF: ``budget is None`` skips this entirely, so
+        # the shipped web_redrive FACT path is byte-for-byte unchanged. When present and exhausted, refuse
+        # BEFORE any gate/traffic — a no-channel refusal that issues no packet (so the oracle can never fire
+        # over it: a cut-off only ever turns a would-be FACT into INCONCLUSIVE, never fabricates one).
+        if budget is not None and not budget.try_spend():
+            state["no_channel"] += 1
+            refused = dict(_EMPTY)
+            refused["body_unavailable_reason"] = "per-run gated-request budget exhausted (OPSEC throttle)"
+            return refused
         if _authorize(req.url, slug) is not None:
             state["no_channel"] += 1
             return dict(_EMPTY)   # refused (gate deny / kill-switch mid-run) — NO channel, not a CLEAN
@@ -1335,11 +1396,17 @@ def _branch_outcomes(bug_class: str, context: "dict", overall_fired: bool) -> "l
 
 
 def web_redrive(url: str, *, slug: str, engagement_slug: str, signers: "list[tuple[str, str]]",
-                timeout: float = 8.0, claimed_class: str = "") -> WebRedriveResult:
+                timeout: float = 8.0, claimed_class: str = "",
+                budget: "GatedRequestBudget | None" = None) -> WebRedriveResult:
     """Re-drive ``url`` through the shipped web checks via a gated send and mint a signed FACT for every
     ACHIEVED_STATE predicate the oracle confirms over VIGIL's OWN live capture. The predicates are scoped to
     the exploitable, co-located condition (a real navigation target / reflected-origin+creds), and a probe
-    that established no channel is INCONCLUSIVE (never CLEAN). Returns a :class:`WebRedriveResult`."""
+    that established no channel is INCONCLUSIVE (never CLEAN). Returns a :class:`WebRedriveResult`.
+
+    ``budget`` (C4, DEFAULT ``None`` ⇒ UNBOUNDED, byte-identical to the shipped FACT path) is a shared
+    :class:`GatedRequestBudget` the tool-catalogue leg threads across a whole run so a crafted high-complexity
+    URL cannot exceed the advertised per-run gated-request cap: once it is exhausted every further gated send
+    refuses BEFORE issuing traffic. It only ever suppresses requests, so it can never manufacture a FACT."""
     from framework.v2.scanner.checks import (  # noqa: PLC0415
         CorsActiveCheck,
         GraphqlIntrospectionCheck,
@@ -1363,7 +1430,7 @@ def web_redrive(url: str, *, slug: str, engagement_slug: str, signers: "list[tup
         res.notes.append(f"refused before any traffic: {refusal}")
         return res
 
-    send, state = _gated_web_send(slug, timeout=timeout)
+    send, state = _gated_web_send(slug, timeout=timeout, budget=budget)
     template = RequestTemplate(HttpRequest(method="GET", url=url))
 
     def _run(probe_fn, bug_class: str, item: str, *, surface: str = "") -> None:
