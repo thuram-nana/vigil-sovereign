@@ -1724,10 +1724,11 @@ def _build_oracle(
         if runtime_ref:
             return runtime_ref
 
-        # T2 — INJECTION RE-DRIVE (nosqli / ldap_injection / xpath_injection): governed-engage FACT parity
-        # (slice B2) through the runner-owned ``live.runtime_redrive.injection_redrive`` engine — a
-        # class-specific error probe + a benign control twin judged by the error_signature oracle, minted only
-        # under the engine that NAMES the class. A non-confirmation stays a LEAD below (fail-closed).
+        # T2 — INJECTION RE-DRIVE (nosqli / ldap_injection / xpath_injection): slice B2 DRIVES the runner-owned
+        # ``live.runtime_redrive.injection_redrive`` engine (a class-specific error probe + a benign control
+        # twin) for a VIGIL-owned capture. These branches are LEAD-only today (the error_signature oracle proves
+        # only CONDITIONAL EMISSION, which a WAF/validator/unrelated-500 can pass), so this returns None and the
+        # claim stays a LEAD below — the sound FACT path is a causation oracle in the branches' blocking_work.
         injection_ref = _live_injection_redrive_fact(prov, info, redrive)
         if injection_ref:
             return injection_ref
@@ -1988,19 +1989,23 @@ def _live_runtime_redrive_fact(prov: Provisioned, info: dict, redrive: Optional[
 
 
 def _live_injection_redrive_fact(prov: Provisioned, info: dict, redrive: Optional[dict]) -> Optional[str]:
-    """T2 — RE-DRIVE a non-SQL injection class (``nosqli`` / ``ldap_injection`` / ``xpath_injection``) through
-    the runner-owned :mod:`live.runtime_redrive` ``injection_redrive`` engine and return a signed FACT's
-    ``finding_ref`` ONLY when the deterministic ``error_signature`` oracle confirms the CLAIMED class over
-    VIGIL's OWN gated live capture (a class-specific error probe + a benign control twin, minted only under the
-    datastore/parser engine that NAMES the class).
+    """T2 — DRIVE a non-SQL injection class (``nosqli`` / ``ldap_injection`` / ``xpath_injection``) through the
+    runner-owned :mod:`live.runtime_redrive` ``injection_redrive`` engine.
 
-    Slice B2 — governed-engage FACT parity for the classes that were structurally LEAD-only here. Mirrors
-    :func:`_live_runtime_redrive_fact`: the runner crafts its own probe (never the LLM's payload), mints via
-    ``certify_admitted(provenance="live_redrive")``, and the FACT is tied to the CLAIM
-    (``family_verdict(claimed) == "FACT"`` and the returned cert's ``bug_class == claimed``). A gate refusal /
-    no channel / an oracle non-fire / a control that also carries the error / a mismatched engine all yield a
-    non-FACT → None → the claim stays a LEAD (fail-closed). Runs ONLY the claimed class, so there is no sibling
-    to disambiguate.
+    Slice B2. Both branches for these classes are LEAD-only today, so this seam ALWAYS returns ``None`` (the
+    claim stays a LEAD): it exists to DRIVE VIGIL's own gated probe (real, class-appropriate evidence for the
+    operator) rather than sourcing the lead from the model's assertion — the same DRIVEN-but-LEAD contract as
+    :func:`_live_runtime_redrive_fact` for path_traversal. ``injection_redrive`` admits to a
+    ``fact_capable: false`` branch, so ``family_verdict(claimed)`` is never ``"FACT"``.
+
+    WHY NOT A FACT (red-pen BLOCK, fixed): the ``error_signature`` oracle is a string match and re-verifies
+    only CONDITIONAL EMISSION of a datastore-error-shaped string — a WAF block page / validator rejection /
+    unrelated 500 naming the driver package emits one conditionally on the metacharacter and passes the
+    control-twin guard. The sound FACT path is a break-vs-repair parser-state-toggle causation oracle
+    re-executed offline (a new OracleKind) — see the branches' ``blocking_work``. The return-a-matching-cert
+    loop below is retained (harmless; it always falls through today) so this seam mints the moment those
+    branches become fact_capable, with the FACT tied to the CLAIM (``family_verdict(claimed) == "FACT"`` and
+    cert ``bug_class == claimed``). Runs ONLY the claimed class.
 
     FATAL-2: every framework/runtime_redrive import is function-local (offense-side re-drive path)."""
     if not isinstance(redrive, dict):

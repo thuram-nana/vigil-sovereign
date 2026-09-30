@@ -845,10 +845,11 @@ class VigilEngine:
             full = target if "://" in target else "http://" + target
             return {"kind": "runtime", "url": full, "bug_class": bug_class}
 
-        # INJECTION response-derived classes (nosqli / ldap_injection / xpath_injection): governed-engage
-        # FACT parity (slice B2) via the runner-owned ``live.runtime_redrive.injection_redrive`` engine — a
-        # class-specific error probe + a benign control twin judged by the error_signature oracle. The engine
-        # needs only the URL (it crafts the probe + control + runs the oracle). ADDITIVE to the runtime/web/
+        # INJECTION response-derived classes (nosqli / ldap_injection / xpath_injection): slice B2 routes them
+        # to the runner-owned ``live.runtime_redrive.injection_redrive`` engine (a class-specific error probe +
+        # a benign control twin). These branches are LEAD-only today (the error_signature oracle proves only
+        # CONDITIONAL EMISSION — the sound FACT path is a causation oracle in blocking_work), so the seam DRIVES
+        # a VIGIL-owned capture but mints no FACT. The engine needs only the URL. ADDITIVE to the runtime/web/
         # sqli arms above: a separate dispatch set + the ``"injection"`` spec kind, so B1's runtime wiring is
         # untouched. The seam re-normalizes + re-gates, so this is proposal-triage only.
         try:

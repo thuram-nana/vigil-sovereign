@@ -1,22 +1,23 @@
-"""Slice B2 — governed-engage FACT parity for nosqli / ldap_injection / xpath_injection.
+"""Slice B2 — governed-engage re-drive for nosqli / ldap_injection / xpath_injection (LEAD-only).
 
-Before this slice these three classes could mint a FACT ONLY on the Strix proof rail
-(proof.run._strix_errsig_redrive); through governed engage they were structurally LEAD-only (no dedicated
-evidence branch, so the oracle seam fell through to the LLM-provenanced LEAD). This file pins the sound FACT
-path built here:
+These three classes are now DRIVEN through the governed-engage seam
+(engine._redrive_spec → wiring._live_injection_redrive_fact → runtime_redrive.injection_redrive): VIGIL sends
+its OWN gated class-specific error probe + a benign control twin, so the operator's lead has a VIGIL-owned
+capture behind it instead of the model's assertion.
 
-  * ``VigilEngine._redrive_spec`` emits a ``{"kind": "injection", ...}`` spec for each class (+ aliases).
-  * ``runtime_redrive.injection_redrive`` mints a signed FACT ONLY when the deterministic
-    ``error_signature`` oracle fires ATTRIBUTABLY (VIGIL's OWN class-specific error probe provoked a
-    datastore/parser error a benign CONTROL twin did NOT) AND the matched ENGINE is the one that NAMES the
-    claimed class. The FACT re-verifies OFFLINE and a tamper is rejected.
-  * ``wiring._live_injection_redrive_fact`` returns a signed FACT's ref on the sound path and NOTHING on the
-    negative controls (benign twin, always-erroring page, verbatim reflection, a BARE benign-vs-payload
-    DIFFERENTIAL with no datastore error, a mismatched engine, a non-injection class, an out-of-scope URL).
+They are LEAD-ONLY. A RED-PEN BLOCKED the first (fact_capable) attempt with four durable false FACTs: the
+error_signature oracle is a STRING MATCH and re-verifies only CONDITIONAL EMISSION of a datastore-error-shaped
+string — a WAF block page, an input-validator rejection, or an unrelated 500 whose stack trace merely names
+the driver package all emit one conditionally on the metacharacter and pass the benign-control-twin guard.
+Conditional emission is necessary but NOT sufficient for a query break. The sound FACT path (a break-vs-repair
+parser-state-toggle causation oracle re-executed offline) needs a new OracleKind, out of this slice's scope,
+so the branches are honest LEAD-only ladder targets (see docs/capability-matrix/evidence-branches.json
+blocking_work + V2-LIMITATIONS §31).
 
-Every live proof drives a REAL loopback origin through the REAL gated send (mirrors
-test_strix_errsig_redrive / test_engine_runtime_redrive_seam). The RUNNER crafts the injection payload; the
-Strix/LLM value is never trusted.
+This file pins: the _redrive_spec routing; that the arm DRIVES a VIGIL-owned capture and admits a LEAD but
+mints NO FACT (no signed certificate) on a genuine error surface; and that the whole red-pen decoy battery —
+a WAF block, a validator rejection, an unrelated-500-naming-the-package, plus benign twin / bare differential
+/ mismatched engine — stays LEAD (assert facts == []).
 """
 from __future__ import annotations
 
@@ -93,13 +94,10 @@ def _charter(tmp_path: Path, host: str, slug: str = "alpha") -> None:
         f"## 7. Posture\n\n- [x] **TEST**\n", encoding="utf-8")
 
 
-def _signers_and_trust():
-    from vigil_core import AuthorizerKey, TrustRoot, generate_keypair
+def _signers():
+    from vigil_core import generate_keypair
     kp = generate_keypair()
-    signers = [("gov0", kp.private_key_b64)]
-    tr = TrustRoot(threshold=1, authorizers=[
-        AuthorizerKey(key_id="gov0", name="gov0", public_key_b64=kp.public_key_b64)])
-    return signers, tr
+    return [("gov0", kp.private_key_b64)]
 
 
 def _prov(signers, slug: str = "alpha"):
@@ -110,12 +108,12 @@ def _prov(signers, slug: str = "alpha"):
 
 
 # ---------------------------------------------------------------------------------------------------
-# a loopback app: a REAL error-based injection surface per class + the false-FACT decoys
+# a loopback app: genuine error surfaces + the red-pen false-FACT decoys
 # ---------------------------------------------------------------------------------------------------
 # The RUNNER's injection payloads carry syntax metacharacters; the benign control twin carries a
-# metacharacter-free "vfctl…" marker. A REAL surface emits its engine's error ONLY when a metacharacter is
-# present; the decoys emit the SAME datastore string regardless (so the control twin ALSO carries it → not
-# attributable → the mint refuses).
+# metacharacter-free "vfctl…" marker. The genuine surfaces emit the engine error ONLY when a metacharacter is
+# present; the decoys emit a datastore-error-SHAPED string CONDITIONALLY on the metacharacter from a
+# NON-datastore source — the exact class of false FACT the red-pen reproduced.
 _META = set("'\"(){}[]|&*/;$`\\<>")
 
 _REAL_ENGINE_ERROR = {
@@ -145,47 +143,73 @@ class _App(http.server.BaseHTTPRequestHandler):
         parts = urlsplit(self.path)
         q = parse_qs(parts.query, keep_blank_values=True)
         values = [v for vs in q.values() for v in vs]
+        meta = _has_meta(values)
 
         if parts.path in _REAL_ENGINE_ERROR:
             # A genuine error-based sink: a metacharacter breaks the query and the backend emits its engine
             # error; a benign value renders a clean row.
-            if _has_meta(values):
+            if meta:
                 self._text(500, _REAL_ENGINE_ERROR[parts.path] + repr(values))
             else:
                 self._text(200, json.dumps({"rows": [], "echo": values}))
             return
 
-        if parts.path == "/always-error":
-            # DECOY: ALWAYS emits the Mongo error, even for the benign control → present in BOTH → refused.
-            self._text(500, "MongoError: unknown top level operator (static banner)")
-            return
-
-        if parts.path == "/reflect":
-            # DECOY: reflects the value verbatim inside a static datastore-error TEMPLATE → the phrase is
-            # chrome (present for the benign control too), NOT engine-emitted → the control twin catches it.
-            self._text(200, f"MongoError: unknown top level operator near {values!r}")
-            return
-
-        if parts.path == "/bare-diff":
-            # DECOY (THE B2 SOUNDNESS CASE): a BARE benign-vs-payload DIFFERENTIAL — the body VARIES with the
-            # input (echoes it, distinct lengths/status) but there is NO datastore/parser error signature at
-            # all. A differential is a LEAD for these classes; the error_signature oracle must not fire.
-            if _has_meta(values):
-                self._text(418, f"filtered request rejected: {len(values[0]) if values else 0} chars")
+        # --- the red-pen false-FACT battery: a datastore-error-shaped string emitted CONDITIONALLY on the
+        #     metacharacter by a NON-datastore source. Each MUST stay a LEAD (no FACT). ---
+        if parts.path == "/waf-mongo":
+            if meta:
+                self._text(403, "Request blocked by WAF: possible MongoError NoSQL injection attempt rejected")
             else:
-                self._text(200, f"results for {values!r}: 3 items")
+                self._text(200, json.dumps({"rows": [1, 2, 3]}))
             return
-
-        if parts.path == "/sql-on-mongo":
-            # DECOY: emits a MySQL error on a metacharacter. A nosqli CLAIM re-drives here and the oracle
-            # matches the mysql engine, NOT mongodb → mismatched engine → refused (the evidence proves SQLi,
-            # not nosqli; never mislabel it).
-            if _has_meta(values):
-                self._text(500, "You have an error in your SQL syntax; check the manual near " + repr(values))
+        if parts.path == "/valid-ldap":
+            if meta:
+                self._text(400, "Invalid input rejected by request validator: LDAPException-style characters "
+                                "are not allowed")
+            else:
+                self._text(200, "ok")
+            return
+        if parts.path == "/stacktrace-mongo":
+            # unrelated 500 whose stack trace merely NAMES the driver package (com.mongodb frames); the root
+            # cause is a number parse, not a query break. A metacharacter routinely triggers some 500, so this
+            # is a high-frequency real-world false positive.
+            if meta:
+                self._text(500, "java.lang.NumberFormatException: For input string\n"
+                                "  at app.Handler.parseId(Handler.java:42)\n"
+                                "  at com.mongodb.client.internal.MongoClientDelegate.<init>"
+                                "(MongoClientDelegate.java:10)\n")
+            else:
+                self._text(200, "ok")
+            return
+        if parts.path == "/waf-xpath":
+            if meta:
+                self._text(403, "Blocked: Expression must evaluate to a node-set — injection filter tripped")
             else:
                 self._text(200, "ok")
             return
 
+        # --- other negative controls ---
+        if parts.path == "/always-error":
+            self._text(500, "MongoError: unknown top level operator (static banner)")   # control errors too
+            return
+        if parts.path == "/reflect":
+            self._text(200, f"MongoError: unknown top level operator near {values!r}")  # chrome, control too
+            return
+        if parts.path == "/bare-diff":
+            # a BARE benign-vs-payload DIFFERENTIAL: the body varies with the input (distinct status/length)
+            # but there is NO datastore/parser error signature at all.
+            if meta:
+                self._text(418, f"filtered request rejected: {len(values[0]) if values else 0} chars")
+            else:
+                self._text(200, f"results for {values!r}: 3 items")
+            return
+        if parts.path == "/sql-on-mongo":
+            # emits a MySQL error on a metacharacter → a nosqli claim matches the mysql engine, not mongodb.
+            if meta:
+                self._text(500, "You have an error in your SQL syntax; check the manual near " + repr(values))
+            else:
+                self._text(200, "ok")
+            return
         if parts.path == "/clean":
             self._text(200, json.dumps({"rows": [1, 2, 3], "echo": values}))   # benign twin: never errors
             return
@@ -204,122 +228,81 @@ def _serve():
 
 
 def _drive(url: str, claimed: str, signers):
-    """Call the runner-owned injection_redrive engine directly (like test_runtime_redrive_soundness) so we can
-    inspect the RuntimeRedriveResult (.facts / .contexts / .leads) for the offline-verify + tamper proofs."""
     from vigil_integration.live.runtime_redrive import injection_redrive
     return injection_redrive(url, slug="alpha", engagement_slug="alpha", signers=signers, claimed_class=claimed)
 
 
+def _drive_on(monkeypatch, tmp_path, path: str, claimed: str):
+    _grant_active_recon(monkeypatch)
+    _charter(tmp_path, "127.0.0.1")
+    signers = _signers()
+    srv = _serve(); port = srv.server_address[1]
+    try:
+        return _drive(f"http://127.0.0.1:{port}{path}?q=hello", claimed, signers)
+    finally:
+        srv.shutdown()
+
+
 # ---------------------------------------------------------------------------------------------------
-# live positives — each class mints a signed FACT that re-verifies OFFLINE, and a tamper is rejected
+# the arm DRIVES a VIGIL-owned capture and admits a LEAD, but mints NO FACT
 # ---------------------------------------------------------------------------------------------------
 
-@pytest.mark.parametrize("path,claimed,engine", [
-    ("/real-mongo", "nosqli", "mongodb"),
-    ("/real-ldap", "ldap_injection", "ldap"),
-    ("/real-xpath", "xpath_injection", "xpath"),
+@pytest.mark.parametrize("path,claimed", [
+    ("/real-mongo", "nosqli"), ("/real-ldap", "ldap_injection"), ("/real-xpath", "xpath_injection"),
 ])
-def test_each_class_mints_a_signed_fact_that_reverifies_offline(monkeypatch, tmp_path, path, claimed, engine):
-    _grant_active_recon(monkeypatch)
-    _charter(tmp_path, "127.0.0.1")
-    from framework.v2.evidence.certify import verify_certificate
-    signers, tr = _signers_and_trust()
-    srv = _serve(); port = srv.server_address[1]
-    try:
-        rr = _drive(f"http://127.0.0.1:{port}{path}?q=hello", claimed, signers)
-    finally:
-        srv.shutdown()
-    assert _App.hits >= 2, "the arm must send BOTH the injection probe AND the benign control twin"
-    assert rr.n_facts == 1, f"{claimed}: expected exactly one signed FACT; notes={rr.notes}"
-    fact = rr.facts[0]
-    assert fact.is_fact and fact.bug_class == claimed, f"the FACT must name the claimed class {claimed}"
-    ctx = rr.contexts[fact.finding_ref]
-
-    # (1) the signed cert re-verifies OFFLINE from the retained JSON-safe context — no network, no runner.
-    assert verify_certificate(fact.signed, oracle_context=ctx, trust_root=tr).ok is True
-
-    # (2) a TAMPER is rejected: strip the datastore-error signature from the retained observed body → the
-    #     oracle no longer fires over the reproduced context.
-    tampered = json.loads(json.dumps(ctx))
-    assert "error_observed" in tampered, "the error_signature context must carry the observed body"
-    tampered["error_observed"] = "clean OK\n{\"rows\": []}"
-    assert verify_certificate(fact.signed, oracle_context=tampered, trust_root=tr).ok is False
-
-
-def test_offline_reverify_rejects_a_tampered_control(monkeypatch, tmp_path):
-    """A second tamper direction: injecting the SAME datastore error into the retained CONTROL body makes the
-    error non-attributable, so the oracle refuses over the reproduced context (fail-closed)."""
-    _grant_active_recon(monkeypatch)
-    _charter(tmp_path, "127.0.0.1")
-    from framework.v2.evidence.certify import verify_certificate
-    signers, tr = _signers_and_trust()
-    srv = _serve(); port = srv.server_address[1]
-    try:
-        rr = _drive(f"http://127.0.0.1:{port}/real-mongo?q=hello", "nosqli", signers)
-    finally:
-        srv.shutdown()
-    assert rr.n_facts == 1
-    fact = rr.facts[0]
-    ctx = rr.contexts[fact.finding_ref]
-    tampered = json.loads(json.dumps(ctx))
-    tampered["error_control"] = tampered["error_observed"]     # the error now rides the control too
-    assert verify_certificate(fact.signed, oracle_context=tampered, trust_root=tr).ok is False
+def test_genuine_error_surface_is_driven_but_mints_no_fact(monkeypatch, tmp_path, path, claimed):
+    rr = _drive_on(monkeypatch, tmp_path, path, claimed)
+    assert _App.hits >= 2, "the arm must send BOTH the probe AND the benign control twin (not a vacuous pass)"
+    assert rr.n_facts == 0, f"{claimed}: LEAD-only — no FACT may be minted through governed engage"
+    # the fired oracle was ADMITTED and DEMOTED to a LEAD (the demotion, not an absent arm, is doing the work)
+    assert rr.leads, f"{claimed}: the driven capture must be recorded as an admitted LEAD"
+    assert all(getattr(f, "signed", None) is None for f in rr.leads), "a LEAD carries no signed certificate"
+    assert all(getattr(f, "is_fact", False) is False for f in rr.leads)
 
 
 # ---------------------------------------------------------------------------------------------------
-# the false-FACT battery — each drives the REAL arm and must yield NO fact (a LEAD)
+# THE RED-PEN BLOCK: the four reproduced false FACTs must each stay a LEAD (facts == [])
 # ---------------------------------------------------------------------------------------------------
 
-def _no_fact(monkeypatch, tmp_path, path: str, claimed: str = "nosqli"):
-    _grant_active_recon(monkeypatch)
-    _charter(tmp_path, "127.0.0.1")
-    signers, _ = _signers_and_trust()
-    srv = _serve(); port = srv.server_address[1]
-    try:
-        rr = _drive(f"http://127.0.0.1:{port}{path}?q=hello", claimed, signers)
-    finally:
-        srv.shutdown()
-    return rr
-
-
-def test_benign_twin_mints_nothing(monkeypatch, tmp_path):
-    rr = _no_fact(monkeypatch, tmp_path, "/clean")
+@pytest.mark.parametrize("path,claimed,why", [
+    ("/waf-mongo", "nosqli", "a WAF block page that names MongoError is not a datastore query break"),
+    ("/valid-ldap", "ldap_injection", "an input-validator rejection naming LDAPException is not a query break"),
+    ("/stacktrace-mongo", "nosqli", "an unrelated 500 whose stack trace names com.mongodb is not a query break"),
+    ("/waf-xpath", "xpath_injection", "an xpath WAF block echoing the node-set phrase is not a query break"),
+])
+def test_conditional_non_datastore_emitter_stays_lead(monkeypatch, tmp_path, path, claimed, why):
+    rr = _drive_on(monkeypatch, tmp_path, path, claimed)
     assert _App.hits >= 2, "the arm must actually contact the server (a refusal would be a vacuous pass)"
-    assert rr.n_facts == 0, "an endpoint that never emits a datastore error must not mint a FACT"
-
-
-def test_bare_differential_mints_nothing(monkeypatch, tmp_path):
-    """THE B2 soundness case: a bare benign-vs-payload DIFFERENTIAL (the body varies with the input, distinct
-    status/length) but with NO datastore error is a LEAD for these classes, never a FACT."""
-    rr = _no_fact(monkeypatch, tmp_path, "/bare-diff")
-    assert _App.hits >= 2
-    assert rr.n_facts == 0, "a bare differential masquerading as evidence must not mint a datastore-error FACT"
-
-
-def test_always_erroring_page_mints_nothing(monkeypatch, tmp_path):
-    """The benign control twin errors too → the error is not attributable → refused."""
-    rr = _no_fact(monkeypatch, tmp_path, "/always-error")
-    assert _App.hits >= 2
-    assert rr.n_facts == 0, "an always-erroring page must not mint a FACT"
-
-
-def test_verbatim_reflection_of_a_static_error_template_mints_nothing(monkeypatch, tmp_path):
-    rr = _no_fact(monkeypatch, tmp_path, "/reflect")
-    assert _App.hits >= 2
-    assert rr.n_facts == 0, "a verbatim-reflected static datastore-error template must not mint a FACT"
-
-
-def test_mismatched_engine_mints_nothing(monkeypatch, tmp_path):
-    """A nosqli claim whose probe provokes a SQL (mysql) engine error must NOT mint under nosqli — the
-    evidence proves a different class, so the arm refuses rather than mislabel it."""
-    rr = _no_fact(monkeypatch, tmp_path, "/sql-on-mongo", "nosqli")
-    assert _App.hits >= 2
-    assert rr.n_facts == 0, "a mysql error under a nosqli claim must not mint a nosqli FACT"
-    assert any("different class" in n for n in rr.notes), "the mismatch must be recorded honestly"
+    assert rr.n_facts == 0, f"BLOCK regression: {why} — minted a FALSE FACT"
 
 
 # ---------------------------------------------------------------------------------------------------
-# the governed-engage SEAM: _live_injection_redrive_fact returns a ref on the sound path, None otherwise
+# the rest of the false-FACT battery — all LEAD
+# ---------------------------------------------------------------------------------------------------
+
+@pytest.mark.parametrize("path,claimed", [
+    ("/clean", "nosqli"),            # benign twin — never errors
+    ("/bare-diff", "nosqli"),        # a bare benign-vs-payload differential, no datastore error
+    ("/always-error", "nosqli"),     # control errors too → not attributable
+    ("/reflect", "nosqli"),          # verbatim-reflected static error template → control carries it
+])
+def test_other_negative_controls_stay_lead(monkeypatch, tmp_path, path, claimed):
+    rr = _drive_on(monkeypatch, tmp_path, path, claimed)
+    assert _App.hits >= 2
+    assert rr.n_facts == 0, f"{path} must not mint a FACT"
+
+
+def test_mismatched_engine_is_not_admitted_for_the_class(monkeypatch, tmp_path):
+    """A nosqli claim whose probe provokes a SQL (mysql) engine error is not admitted under nosqli — the
+    evidence names a different class, so even the LEAD stays class-appropriate (and no FACT, since LEAD-only)."""
+    rr = _drive_on(monkeypatch, tmp_path, "/sql-on-mongo", "nosqli")
+    assert _App.hits >= 2
+    assert rr.n_facts == 0
+    assert any("different class" in n for n in rr.notes), "the engine mismatch must be recorded honestly"
+
+
+# ---------------------------------------------------------------------------------------------------
+# the governed-engage SEAM: _live_injection_redrive_fact returns None (LEAD-only) but DRIVES the probe
 # ---------------------------------------------------------------------------------------------------
 
 def _seam(url: str, claimed: str, signers):
@@ -328,10 +311,10 @@ def _seam(url: str, claimed: str, signers):
         _prov(signers), {}, {"kind": "injection", "url": url, "bug_class": claimed})
 
 
-def test_seam_mints_a_fact_for_each_class(monkeypatch, tmp_path):
+def test_seam_returns_none_and_drives_the_probe_on_a_genuine_surface(monkeypatch, tmp_path):
     _grant_active_recon(monkeypatch)
     _charter(tmp_path, "127.0.0.1")
-    signers, _ = _signers_and_trust()
+    signers = _signers()
     for path, claimed in [("/real-mongo", "nosqli"), ("/real-ldap", "ldap_injection"),
                           ("/real-xpath", "xpath_injection")]:
         srv = _serve(); port = srv.server_address[1]
@@ -339,27 +322,28 @@ def test_seam_mints_a_fact_for_each_class(monkeypatch, tmp_path):
             ref = _seam(f"http://127.0.0.1:{port}{path}?q=hello", claimed, signers)
         finally:
             srv.shutdown()
-        assert ref, f"the governed-engage seam must mint a signed FACT for {claimed}"
+        assert ref is None, f"{claimed} is LEAD-only through governed engage — the seam must not mint a FACT"
+        assert _App.hits >= 2, "the seam must still DRIVE VIGIL's own probe (a VIGIL-owned capture)"
 
 
-def test_seam_stays_lead_on_the_negative_controls(monkeypatch, tmp_path):
+def test_seam_stays_none_on_the_whole_decoy_battery(monkeypatch, tmp_path):
     _grant_active_recon(monkeypatch)
     _charter(tmp_path, "127.0.0.1")
-    signers, _ = _signers_and_trust()
-    for path, claimed in [("/clean", "nosqli"), ("/bare-diff", "nosqli"), ("/always-error", "nosqli"),
-                          ("/reflect", "nosqli"), ("/sql-on-mongo", "nosqli")]:
+    signers = _signers()
+    for path in ["/waf-mongo", "/valid-ldap", "/stacktrace-mongo", "/waf-xpath",
+                 "/clean", "/bare-diff", "/always-error", "/reflect", "/sql-on-mongo"]:
         srv = _serve(); port = srv.server_address[1]
         try:
-            ref = _seam(f"http://127.0.0.1:{port}{path}?q=hello", claimed, signers)
+            ref = _seam(f"http://127.0.0.1:{port}{path}?q=hello", "nosqli", signers)
         finally:
             srv.shutdown()
-        assert ref is None, f"the seam must stay a LEAD on {path} (got a FACT ref)"
+        assert ref is None, f"the seam must return None (LEAD) on {path}"
 
 
 def test_seam_ignores_a_non_injection_class(monkeypatch, tmp_path):
     _grant_active_recon(monkeypatch)
     _charter(tmp_path, "127.0.0.1")
-    signers, _ = _signers_and_trust()
+    signers = _signers()
     srv = _serve(); port = srv.server_address[1]
     try:
         ref = _seam(f"http://127.0.0.1:{port}/real-mongo?q=hello", "open_redirect", signers)
@@ -371,6 +355,23 @@ def test_seam_ignores_a_non_injection_class(monkeypatch, tmp_path):
 def test_seam_out_of_scope_url_mints_nothing(monkeypatch, tmp_path):
     _grant_active_recon(monkeypatch)
     _charter(tmp_path, "127.0.0.1")   # only 127.0.0.1 is in scope
-    signers, _ = _signers_and_trust()
+    signers = _signers()
     ref = _seam("http://10.99.99.99/real-mongo?q=hello", "nosqli", signers)
     assert ref is None, "an out-of-scope target must never mint a FACT"
+
+
+# ---------------------------------------------------------------------------------------------------
+# the registry: both branch families for these classes are LEAD-only (no FACT-capable nlx branch)
+# ---------------------------------------------------------------------------------------------------
+
+def test_all_nlx_branches_are_lead_only_in_the_registry():
+    root = Path(__file__).resolve().parents[2]
+    reg = json.loads((root / "docs" / "capability-matrix" / "evidence-branches.json").read_text("utf-8"))
+    by = {b["id"]: b for b in reg["branches"]}
+    for cls in ("nosqli", "ldap_injection", "xpath_injection"):
+        for suffix in ("datastore_error", "sprt_inference"):
+            b = by[f"{cls}.{suffix}"]
+            assert b["fact_capable"] is False, f"{cls}.{suffix} must be LEAD-only (no false FACT path)"
+            assert b["clean_capable"] is False
+            assert b["oracle_version"] == "", f"{cls}.{suffix} LEAD-only ⇒ no oracle_version"
+            assert len(b.get("blocking_work", "")) > 40, f"{cls}.{suffix} must name the sound FACT path"
