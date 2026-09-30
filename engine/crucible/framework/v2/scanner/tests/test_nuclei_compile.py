@@ -120,8 +120,8 @@ def test_compilation_is_deterministic() -> None:
 @pytest.mark.parametrize("yaml_text, needle", [
     # POST is out of the fixed-path GET subset
     ("id: t\ninfo:\n  name: n\n  severity: info\nhttp:\n  - method: POST\n    path:\n      - '{{BaseURL}}/x'\n    matchers:\n      - type: word\n        words: ['z']\n", "GET"),
-    # raw request blob
-    ("id: t\ninfo:\n  name: n\n  severity: info\nhttp:\n  - raw:\n      - 'GET /x HTTP/1.1'\n", "raw"),
+    # raw NON-GET request (a scanner mints only over idempotent probes) is still out of subset
+    ("id: t\ninfo:\n  name: n\n  severity: info\nhttp:\n  - raw:\n      - 'POST /x HTTP/1.1'\n    matchers:\n      - type: word\n        words: ['z']\n", "get"),
     # computed path (interpolation beyond BaseURL)
     ("id: t\ninfo:\n  name: n\n  severity: info\nhttp:\n  - method: GET\n    path:\n      - '{{BaseURL}}/{{randstr}}/x'\n    matchers:\n      - type: word\n        words: ['z']\n", "interpolation"),
     # only a regex/status matcher, no body word
@@ -175,5 +175,406 @@ def test_compiled_entry_is_not_written_into_the_shipped_library() -> None:
     from framework.v2.scanner.library import LIBRARY_DIR
     before = {p.name for p in Path(LIBRARY_DIR).glob("*.json")}
     compile_nuclei_template(_TEMPLATE)
+    after = {p.name for p in Path(LIBRARY_DIR).glob("*.json")}
+    assert before == after and not any(n.startswith("nuclei-") for n in after)
+
+
+# ---------------------------------------------------------------------------
+# Wave C slice C2 — the widened matcher subset (status / regex / dsl / multi-request / raw).
+# Each new matcher type: a template compiles to a LibraryEntry whose match VIGIL's OWN check
+# re-verifies via the predicate oracle; a NON-matching response mints nothing; and a matching
+# template ALONE never mints a FACT without the oracle re-firing over a real response.
+# ---------------------------------------------------------------------------
+
+
+def _resp(*, path: str, status: int, body: str):
+    """A send that returns (status, body) for `path`, else a 404 — so a probe of the wrong path, or a
+    response the predicate does not hold over, yields no fact."""
+    def send(req: HttpRequest) -> dict:
+        if urlsplit(req.url).path == path:
+            return {"status": status, "headers": [], "body": body}
+        return {"status": 404, "headers": [], "body": "not found"}
+    return send
+
+
+def _target_template():
+    return RequestTemplate(HttpRequest(method="GET", url="http://target.test/", headers=[], body=None))
+
+
+def _confirm(entry, ctx, severity="Info"):
+    if ctx is None:
+        return None
+    return confirm_finding({"bug_class": entry.bug_class, "title": "", "severity": severity}, ctx)
+
+
+def test_status_only_template_is_refused_at_compile() -> None:
+    # BLOCK 1 headline: a status-only matcher would fire over ANY live 200 -> a High exposure fact with
+    # no re-verification value. It must DEGRADE (no discriminating body observable), never mint.
+    tmpl = (
+        "id: admin-panel-open\ninfo:\n  name: Admin panel exposed\n  severity: high\n"
+        "http:\n  - method: GET\n    path:\n      - '{{BaseURL}}/admin'\n"
+        "    matchers:\n      - type: status\n        status:\n          - 200\n"
+    )
+    res = compile_nuclei_template(tmpl)
+    assert res.supported is False and res.entry is None
+    assert "discriminating" in res.reason.lower()
+
+
+def test_broad_status_set_template_is_refused_at_compile() -> None:
+    # A near-tautology status set is the same defect, larger.
+    tmpl = {
+        "id": "broad-status", "info": {"name": "n", "severity": "high"},
+        "http": [{"method": "GET", "path": ["{{BaseURL}}/x"],
+                  "matchers": [{"type": "status", "status": [200, 201, 301, 302, 401, 403, 404, 500, 502]}]}],
+    }
+    res = compile_nuclei_template(tmpl)
+    assert res.supported is False and res.entry is None
+
+
+def test_status_matcher_is_reverified_only_as_a_corroborator_of_a_body_literal() -> None:
+    # Status is admissible ONLY AND-combined with a discriminating body literal. A benign SAME-STATUS
+    # 200 (no signature) MUST mint nothing — the control that exposes the vacuous-mint defect.
+    tmpl = (
+        "id: actuator-200\ninfo:\n  name: Actuator env exposed\n  severity: high\n"
+        "http:\n  - method: GET\n    path:\n      - '{{BaseURL}}/actuator/env'\n"
+        "    matchers-condition: and\n    matchers:\n"
+        "      - type: word\n        part: body\n        words:\n          - 'propertySources'\n"
+        "      - type: status\n        status:\n          - 200\n"
+    )
+    res = compile_nuclei_template(tmpl)
+    assert res.supported and res.entry is not None
+    e = res.entry
+    # A single body word takes the back-compat `signature` path; the status is subsumed by
+    # PathProbeCheck's own "not a bare 2xx" rule. Either way the mint requires the body signature.
+    assert e.oracle.kind == "signature" and e.oracle.signature == "propertySources"
+    check = compile_entry(e)
+    tpl = _target_template()
+    # SAFE CONTROL: a benign homepage with the SAME status 200 but no signature mints NOTHING.
+    assert _confirm(e, check.probe(tpl, _resp(path="/actuator/env", status=200,
+                                              body="totally benign homepage")), "High") is None
+    # the signature actually present -> the oracle re-fires -> fact.
+    hit = _confirm(e, check.probe(tpl, _resp(path="/actuator/env", status=200,
+                                             body='{"propertySources": []}')), "High")
+    assert hit is not None and hit.confirmed_by == OracleKind.ACHIEVED_STATE
+
+
+def test_status_and_regex_literal_compiles_and_benign_same_status_mints_nothing() -> None:
+    # status AND a regex literal core -> a nuclei_http predicate whose mint REQUIRES the body literal.
+    tmpl = {
+        "id": "status-and-regex", "info": {"name": "n", "severity": "high"},
+        "http": [{"method": "GET", "path": ["{{BaseURL}}/x"], "matchers-condition": "and",
+                  "matchers": [
+                      {"type": "regex", "part": "body", "regex": ["X-Secret-Token: [A-Za-z0-9]{6,}"]},
+                      {"type": "status", "status": [200]},
+                  ]}],
+    }
+    res = compile_nuclei_template(tmpl)
+    assert res.supported and res.entry is not None
+    e = res.entry
+    assert e.oracle.kind == "nuclei_http"
+    assert e.oracle.match_predicate == {
+        "all": [{"contains": [{"var": "body"}, "X-Secret-Token: "]}, {"in": [{"var": "status"}, [200]]}]
+    }
+    check = compile_entry(e)
+    assert type(check).__name__ == "NucleiTemplateCheck"
+    tpl = _target_template()
+    # SAFE CONTROL: benign SAME-STATUS 200 without the literal mints NOTHING.
+    assert _confirm(e, check.probe(tpl, _resp(path="/x", status=200, body="totally benign homepage")), "High") is None
+    # right literal, wrong status -> AND not satisfied -> nothing.
+    assert _confirm(e, check.probe(tpl, _resp(path="/x", status=500, body="X-Secret-Token: abcdef")), "High") is None
+    # both hold -> the oracle re-fires -> fact.
+    hit = _confirm(e, check.probe(tpl, _resp(path="/x", status=200, body="X-Secret-Token: abcdef")), "High")
+    assert hit is not None and hit.confirmed_by == OracleKind.ACHIEVED_STATE
+
+
+def test_regex_matcher_compiles_to_literal_core_and_reverifies() -> None:
+    tmpl = (
+        "id: phpsessid-leak\ninfo:\n  name: PHPSESSID exposed\n  severity: low\n"
+        "http:\n  - method: GET\n    path:\n      - '{{BaseURL}}/status'\n"
+        "    matchers:\n      - type: regex\n        part: body\n"
+        "        regex:\n          - 'PHPSESSID=[a-f0-9]{10,}'\n"
+    )
+    res = compile_nuclei_template(tmpl)
+    assert res.supported and res.entry is not None
+    e = res.entry
+    assert e.oracle.kind == "nuclei_http"
+    # The regex reduces to its distinctive LITERAL CORE — VIGIL re-verifies the literal, not the pattern.
+    assert e.oracle.match_predicate == {"contains": [{"var": "body"}, "PHPSESSID="]}
+    assert any("literal core" in w for w in res.warnings)
+    check = compile_entry(e)
+    tpl = _target_template()
+    hit = _confirm(e, check.probe(tpl, _resp(path="/status", status=200, body="x PHPSESSID=deadbeef01 y")), "Low")
+    assert hit is not None and hit.confirmed_by == OracleKind.ACHIEVED_STATE
+    # literal core absent -> no fact.
+    assert _confirm(e, check.probe(tpl, _resp(path="/status", status=200, body="nothing here")), "Low") is None
+
+
+def test_regex_without_a_distinctive_literal_core_degrades_cleanly() -> None:
+    # A pure character-class pattern has no distinctive literal core -> the term (and template) degrade.
+    tmpl = (
+        "id: hashy\ninfo:\n  name: n\n  severity: info\n"
+        "http:\n  - method: GET\n    path:\n      - '{{BaseURL}}/x'\n"
+        "    matchers:\n      - type: regex\n        part: body\n        regex:\n          - '[a-f0-9]{32}'\n"
+    )
+    res = compile_nuclei_template(tmpl)
+    assert res.supported is False and res.entry is None
+    assert "literal core" in res.reason.lower() or "re-verifiable" in res.reason.lower()
+
+
+def test_dsl_matcher_compiles_and_is_reverified() -> None:
+    tmpl = (
+        "id: dsl-marker\ninfo:\n  name: dsl marker\n  severity: info\n"
+        "http:\n  - method: GET\n    path:\n      - '{{BaseURL}}/x'\n"
+        "    matchers:\n      - type: dsl\n        dsl:\n"
+        "          - 'status_code == 200 && contains(body, \"DEBUG_MODE=on\")'\n"
+    )
+    res = compile_nuclei_template(tmpl)
+    assert res.supported and res.entry is not None
+    e = res.entry
+    assert e.oracle.kind == "nuclei_http"
+    assert e.oracle.match_predicate == {
+        "all": [{"eq": [{"var": "status"}, 200]}, {"contains": [{"var": "body"}, "DEBUG_MODE=on"]}]
+    }
+    check = compile_entry(e)
+    tpl = _target_template()
+    hit = _confirm(e, check.probe(tpl, _resp(path="/x", status=200, body="... DEBUG_MODE=on ...")))
+    assert hit is not None and hit.confirmed_by == OracleKind.ACHIEVED_STATE
+    # right body, wrong status -> AND not satisfied -> no fact.
+    assert _confirm(e, check.probe(tpl, _resp(path="/x", status=500, body="DEBUG_MODE=on"))) is None
+    # right status, wrong body -> no fact.
+    assert _confirm(e, check.probe(tpl, _resp(path="/x", status=200, body="clean"))) is None
+
+
+def test_a_matching_template_alone_does_not_mint_a_fact_without_the_oracle() -> None:
+    # The whole point of the slice: compiling a template yields a LEAD (a library entry with a check
+    # spec + provenance) — NEVER a fact. The external template's verdict is never trusted; a fact
+    # exists only after VIGIL's OWN oracle re-fires over a REAL response.
+    # A regex+status AND template (a plain body WORD would take the back-compat 'signature' path; here
+    # we exercise the widened nuclei_http predicate path explicitly).
+    tmpl = (
+        "id: trust-nothing\ninfo:\n  name: trust nothing\n  severity: info\n"
+        "http:\n  - method: GET\n    path:\n      - '{{BaseURL}}/x'\n"
+        "    matchers-condition: and\n    matchers:\n"
+        "      - type: regex\n        part: body\n        regex:\n          - 'SECRET_MARKER'\n"
+        "      - type: status\n        status:\n          - 200\n"
+    )
+    res = compile_nuclei_template(tmpl)
+    assert res.supported and res.entry is not None
+    e = res.entry
+    # Provenance is retained; the entry is a LEAD, not a confirmed finding.
+    assert "nuclei-template:trust-nothing" in e.references
+    assert e.oracle.kind == "nuclei_http"
+    check = compile_entry(e)
+    tpl = _target_template()
+    # The template would "match" a 200 body containing SECRET_MARKER — but nothing is minted until the
+    # oracle re-fires over a real matching response. Each near-miss mints NOTHING, whatever the template
+    # claims.
+    assert _confirm(e, check.probe(tpl, _resp(path="/x", status=200, body="no marker"))) is None
+    assert _confirm(e, check.probe(tpl, _resp(path="/x", status=404, body="SECRET_MARKER"))) is None
+    hit = _confirm(e, check.probe(tpl, _resp(path="/x", status=200, body="here: SECRET_MARKER")))
+    assert hit is not None and hit.confirmed_by == OracleKind.ACHIEVED_STATE
+
+
+def test_multi_request_template_compiles_first_self_contained_reverifiable_request() -> None:
+    # req#1 is a POST (out of the idempotent-probe subset); the compiler picks the first self-contained
+    # GET probe (req#2). A dependent/POST leg is skipped, never fatal.
+    tmpl = (
+        "id: multi-probe\ninfo:\n  name: multi\n  severity: low\n"
+        "http:\n"
+        "  - method: POST\n    path:\n      - '{{BaseURL}}/login'\n"
+        "    matchers:\n      - type: word\n        words:\n          - 'ignored'\n"
+        "  - method: GET\n    path:\n      - '{{BaseURL}}/debug'\n"
+        "    matchers:\n      - type: word\n        part: body\n        words:\n          - 'DEBUG_MODE=on'\n"
+    )
+    res = compile_nuclei_template(tmpl)
+    assert res.supported and res.entry is not None
+    e = res.entry
+    assert e.oracle.probe_path == "/debug"
+    assert e.oracle.kind == "signature" and e.oracle.signature == "DEBUG_MODE=on"   # plain GET+word leg
+    assert any("multi-request" in w for w in res.warnings)
+
+
+def test_raw_get_request_compiles_carries_headers_and_reverifies() -> None:
+    # dict form keeps the raw blob unambiguous. Host is dropped (target netloc wins); interpolation-free
+    # headers are carried; the body-word matcher re-verifies via VIGIL's own oracle.
+    tmpl = {
+        "id": "raw-actuator",
+        "info": {"name": "raw actuator", "severity": "high", "classification": {"cwe-id": ["CWE-200"]}},
+        "http": [{
+            "raw": ["GET /actuator/env HTTP/1.1\nHost: {{Hostname}}\nAccept: application/json\nX-Probe: obsidian\n"],
+            "matchers": [{"type": "word", "part": "body", "words": ["propertySources"]}],
+        }],
+    }
+    res = compile_nuclei_template(tmpl)
+    assert res.supported and res.entry is not None
+    e = res.entry
+    assert e.oracle.kind == "nuclei_http"
+    assert e.oracle.probe_path == "/actuator/env" and e.oracle.http_method == "GET"
+    assert dict(tuple(h) for h in e.oracle.request_headers) == {
+        "Accept": "application/json", "X-Probe": "obsidian",
+    }
+    assert e.oracle.match_predicate == {"icontains": [{"var": "body"}, "propertySources"]}
+    assert e.bug_class == "sensitive_exposure"   # CWE-200 hint still applies through the raw path
+    check = compile_entry(e)
+    hit = _confirm(e, check.probe(_target_template(),
+                                  _resp(path="/actuator/env", status=200, body='{"propertySources": []}')), "High")
+    assert hit is not None and hit.confirmed_by == OracleKind.ACHIEVED_STATE
+
+
+def test_raw_non_get_request_degrades() -> None:
+    tmpl = {
+        "id": "raw-post", "info": {"name": "n", "severity": "info"},
+        "http": [{"raw": ["POST /x HTTP/1.1\n\nfoo=bar"],
+                  "matchers": [{"type": "word", "words": ["z"]}]}],
+    }
+    res = compile_nuclei_template(tmpl)
+    assert res.supported is False and res.entry is None
+    assert "get" in res.reason.lower()
+
+
+def test_and_condition_degrades_when_a_term_is_not_reverifiable() -> None:
+    # AND of a supported body regex and an UNSUPPORTED header regex: dropping the header term would fire
+    # MORE broadly than the template, so the whole template degrades (never widen an AND).
+    tmpl = {
+        "id": "and-degrade", "info": {"name": "x", "severity": "info"},
+        "http": [{"method": "GET", "path": ["{{BaseURL}}/x"], "matchers-condition": "and",
+                  "matchers": [
+                      {"type": "regex", "part": "body", "regex": ["MARKER_TOKEN_[0-9]+"]},
+                      {"type": "regex", "part": "header", "regex": ["X-Thing"]},
+                  ]}],
+    }
+    res = compile_nuclei_template(tmpl)
+    assert res.supported is False and res.entry is None
+    assert "and" in res.reason.lower()
+
+
+def test_or_condition_drops_unsupported_branch_and_stays_a_subset() -> None:
+    # OR of a supported, DISCRIMINATING body-regex branch and an UNSUPPORTED header regex: the header
+    # branch is dropped, leaving a STRICTER match (a subset) -> sound. The surviving clause still carries
+    # a discriminating body literal, so the mint stays grounded.
+    tmpl = {
+        "id": "or-drop", "info": {"name": "x", "severity": "info"},
+        "http": [{"method": "GET", "path": ["{{BaseURL}}/x"], "matchers-condition": "or",
+                  "matchers": [
+                      {"type": "regex", "part": "body", "regex": ["ADMIN_PANEL_[0-9]+"]},
+                      {"type": "regex", "part": "header", "regex": ["X-Thing"]},
+                  ]}],
+    }
+    res = compile_nuclei_template(tmpl)
+    assert res.supported and res.entry is not None
+    # Only the body-regex clause survives; a single clause needs no all/any wrapper.
+    assert res.entry.oracle.match_predicate == {"contains": [{"var": "body"}, "ADMIN_PANEL_"]}
+
+
+def test_or_of_status_and_a_body_literal_degrades_status_cannot_fire_alone() -> None:
+    # An OR that mixes status with a body literal is NOT discriminating: the status branch fires over any
+    # benign 200 on its own. The template must DEGRADE rather than mint (status is only an AND-corroborator).
+    tmpl = {
+        "id": "or-status-literal", "info": {"name": "x", "severity": "info"},
+        "http": [{"method": "GET", "path": ["{{BaseURL}}/x"], "matchers-condition": "or",
+                  "matchers": [
+                      {"type": "status", "status": [200]},
+                      {"type": "regex", "part": "body", "regex": ["SECRET_[0-9]+"]},
+                  ]}],
+    }
+    res = compile_nuclei_template(tmpl)
+    assert res.supported is False and res.entry is None
+    assert "discriminating" in res.reason.lower()
+
+
+def test_negative_matcher_never_grounds_a_fact() -> None:
+    # A negative (must-NOT-appear) matcher is never a basis for a mint; a template with only one degrades.
+    tmpl = {
+        "id": "neg", "info": {"name": "x", "severity": "info"},
+        "http": [{"method": "GET", "path": ["{{BaseURL}}/x"],
+                  "matchers": [{"type": "word", "part": "body", "words": ["notpresent"], "negative": True}]}],
+    }
+    res = compile_nuclei_template(tmpl)
+    assert res.supported is False and res.entry is None
+    assert "negative" in " ".join(res.warnings).lower()
+
+
+def test_widened_compilation_is_deterministic() -> None:
+    # status AND a discriminating body regex (an OR of status+literal would degrade — status can't fire
+    # alone). The body literal makes the predicate discriminating; status corroborates.
+    tmpl = (
+        "id: det\ninfo:\n  name: n\n  severity: info\n"
+        "http:\n  - method: GET\n    path:\n      - '{{BaseURL}}/x'\n"
+        "    matchers-condition: and\n    matchers:\n"
+        "      - type: status\n        status:\n          - 200\n          - 302\n"
+        "      - type: regex\n        part: body\n        regex:\n          - 'X-Marker: [0-9]+'\n"
+    )
+    a = compile_nuclei_template(tmpl).entry
+    b = compile_nuclei_template(tmpl).entry
+    assert a is not None and b is not None and a.model_dump() == b.model_dump()
+    assert a.oracle.kind == "nuclei_http"
+    assert a.oracle.match_predicate == {
+        "all": [{"in": [{"var": "status"}, [200, 302]]}, {"contains": [{"var": "body"}, "X-Marker: "]}]
+    }
+
+
+def test_sub_floor_literal_is_refused_at_compile() -> None:
+    # BLOCK 1: contains(body,"a") fires on "banana" — a 1-char literal is not a discriminating observable.
+    # Both a dsl contains and a short body word must be refused (they carry no distinctive signature).
+    dsl = {
+        "id": "banana", "info": {"name": "n", "severity": "info"},
+        "http": [{"method": "GET", "path": ["{{BaseURL}}/x"],
+                  "matchers": [{"type": "dsl", "dsl": ['contains(body, "a")']}]}],
+    }
+    res = compile_nuclei_template(dsl)
+    assert res.supported is False and res.entry is None
+    assert "discriminating" in res.reason.lower()
+    # a short body word is not a distinctive signature either -> degrades (does not mint via any path).
+    word = {
+        "id": "short-word", "info": {"name": "n", "severity": "info"},
+        "http": [{"method": "GET", "path": ["{{BaseURL}}/x"],
+                  "matchers": [{"type": "word", "part": "body", "words": ["ok"]}]}],
+    }
+    res2 = compile_nuclei_template(word)
+    assert res2.supported is False and res2.entry is None
+
+
+def test_regex_core_terminates_at_a_max_gt_1_quantifier() -> None:
+    # BLOCK 2: a char that may repeat (max>1) must END a run, not extend it. ab{2}cde matches "abbcde",
+    # which does NOT contain "abcde"; the core must not be "abcde".
+    from framework.v2.scanner.nuclei_compile import _regex_literal_core
+    assert _regex_literal_core("ab{2}cde") is None          # runs "ab"(2) / "cde"(3), both < floor
+    assert _regex_literal_core("ab{2,5}cde") is None
+    assert _regex_literal_core("x{2,}yzw") is None           # "xxyzw" — was wrongly "xyzw" before
+    # a clean prefix before a bounded class is still extracted; a clean run after a quantifier survives.
+    assert _regex_literal_core("PHPSESSID=[a-f0-9]{10,}") == "PHPSESSID="
+    assert _regex_literal_core("x{2,}abcd") == "abcd"
+    # sanity: the crafted core is never a substring the pattern can dodge.
+    import re as _re
+    assert _re.fullmatch("ab{2}cde", "abbcde") and "abcde" not in "abbcde"
+
+
+def test_raw_method_override_header_is_stripped() -> None:
+    # BLOCK 4: a raw template must never smuggle an HTTP method-override onto the idempotent GET probe.
+    tmpl = {
+        "id": "raw-override", "info": {"name": "n", "severity": "info"},
+        "http": [{
+            "raw": ["GET /x HTTP/1.1\nHost: {{Hostname}}\nX-HTTP-Method-Override: DELETE\n"
+                    "X-Method-Override: PUT\nAccept: application/json\n"],
+            "matchers": [{"type": "word", "part": "body", "words": ["propertySources"]}],
+        }],
+    }
+    res = compile_nuclei_template(tmpl)
+    assert res.supported and res.entry is not None
+    hdr_names = {n.lower() for n, _ in res.entry.oracle.request_headers}
+    assert "x-http-method-override" not in hdr_names and "x-method-override" not in hdr_names
+    assert dict(tuple(h) for h in res.entry.oracle.request_headers) == {"Accept": "application/json"}
+
+
+def test_compiled_nuclei_http_entry_is_not_written_into_the_shipped_library() -> None:
+    from framework.v2.scanner.library import LIBRARY_DIR
+    before = {p.name for p in Path(LIBRARY_DIR).glob("*.json")}
+    # a discriminating status+regex template that DOES compile to a nuclei_http entry.
+    compile_nuclei_template({
+        "id": "x", "info": {"name": "n", "severity": "info"},
+        "http": [{"method": "GET", "path": ["{{BaseURL}}/x"], "matchers-condition": "and",
+                  "matchers": [{"type": "regex", "part": "body", "regex": ["TOKEN_[0-9]+"]},
+                               {"type": "status", "status": [200]}]}],
+    })
     after = {p.name for p in Path(LIBRARY_DIR).glob("*.json")}
     assert before == after and not any(n.startswith("nuclei-") for n in after)

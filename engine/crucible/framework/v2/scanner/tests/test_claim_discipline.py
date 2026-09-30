@@ -558,18 +558,36 @@ def test_the_capability_matrix_does_not_outrun_the_branch_registry() -> None:
     # The W1 batch-2 promotion adds zmap/unicornscan as MORE SERVICE_REACHABILITY proposers wired
     # fact_capable=True through the runner (the SAME service_reachability.tcp_handshake branch + oracle), each
     # passing the conformance battery — so the fact set grows without outrunning the registry.
-    fact_families = {b["id"].split(".")[0] for b in branches if b["fact_capable"]}
+    # The "family" a fact_capable tool's oracle_family may name is backed by a real fact_capable branch in
+    # EITHER of two ways, both of which are a genuine registry linkage (never a fake): the branch id-PREFIX
+    # (the bug-class naming convention — nmap->service_reachability, sslscan->tls_weakness), OR the ORACLE that
+    # adjudicates the branch (its declared ``oracle_version`` — the field whose whole job is to name the
+    # decision procedure that mints the FACT). The oracle_version arm is load-bearing for the web ACHIEVED_STATE
+    # column (C4): katana/gobuster mint through the open_redirect / cors / host_header / graphql_introspection
+    # FACT branches, which are ALL adjudicated by the SAME achieved_state oracle (oracle_version="achieved_state"),
+    # so oracle_family "ACHIEVED_STATE" is backed by real fact_capable branches even though no branch is
+    # *prefixed* "achieved_state" (the only achieved_state.* branch, endpoint_liveness, is LEAD-only). Both arms
+    # are PURELY ADDITIVE — the guard still rejects an oracle_family that is neither a fact prefix nor a fact
+    # oracle_version (e.g. a scanner's "bug_class"), so a real overclaim still fails.
+    fact_families = ({b["id"].split(".")[0] for b in branches if b["fact_capable"]}
+                     | {(b.get("oracle_version") or "").lower() for b in branches if b["fact_capable"]})
     for t in matrix["tools"]:
         if t.get("fact_capable"):
             fam = (t.get("oracle_family") or "").lower()
             assert fam in fact_families, (
-                f"{t['name']} is marked fact_capable but its oracle_family {fam!r} has no fact_capable branch "
-                f"in the registry — the matrix outruns the registry")
-    # HexStrike W2 does NOT grow this set: httpx/ffuf propose urls and VIGIL re-drives them through the
-    # gated sibling-differential capture, but that branch (achieved_state.endpoint_liveness) is declared
-    # LEAD-only PERMANENTLY after five adversarial rounds, so the re-drive is a LEAD ENRICHER and the two
-    # tools stay fact_capable=false. See docs/capability-matrix/evidence-branches.json.
-    assert fact_tools == {"nmap", "sslscan", "masscan", "rustscan", "naabu", "zmap", "unicornscan"}, (
+                f"{t['name']} is marked fact_capable but its oracle_family {fam!r} matches neither a "
+                f"fact_capable branch id-prefix nor the oracle_version of any fact_capable branch — the matrix "
+                f"outruns the registry")
+    # HexStrike W2 does NOT grow this set on the endpoint_liveness path: httpx/ffuf propose urls and VIGIL
+    # re-drives them through the gated sibling-differential capture, but that branch
+    # (achieved_state.endpoint_liveness) is declared LEAD-only PERMANENTLY, so the re-drive is a LEAD ENRICHER
+    # and the two tools stay fact_capable=false. C4 grows it via a DIFFERENT, FACT-capable re-drive:
+    # katana/gobuster (the web_discovery family) mint through the achieved_state web FACT branches
+    # (open_redirect/cors/host_header/graphql_introspection) via web_redrive, each passing the conformance
+    # battery; nuclei stays fact_capable=false (a scanner is a proposer, not the authority).
+    # See docs/capability-matrix/evidence-branches.json.
+    assert fact_tools == {"nmap", "sslscan", "masscan", "rustscan", "naabu", "zmap", "unicornscan",
+                          "katana", "gobuster"}, (
         f"unexpected fact_capable tool set: {fact_tools}")
 
     httpx = [t for t in matrix["tools"] if t["name"] == "httpx"]

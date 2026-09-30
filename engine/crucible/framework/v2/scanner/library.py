@@ -51,7 +51,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_valida
 from ..common.errors import CrucibleError
 from .checks import (
     Check, ContentSignatureCheck, DifferentialCheck, ErrorSignatureCheck, EvaluationCheck,
-    MarkerReflectionCheck, OOBCheck, PathProbeCheck, TimingCheck,
+    MarkerReflectionCheck, NucleiTemplateCheck, OOBCheck, PathProbeCheck, TimingCheck,
 )
 from .insertion import InsertionKind
 
@@ -61,13 +61,13 @@ LIBRARY_DIR: Path = Path(__file__).resolve().parent / "library_entries"
 # The concrete check shapes an entry's oracle can name.
 ORACLE_KINDS: frozenset[str] = frozenset(
     {"differential", "reflection", "oob", "timing", "evaluation",
-     "error_signature", "signature", "content"}
+     "error_signature", "signature", "content", "nuclei_http"}
 )
 
 # Kinds that compile to a REQUEST-level check (probe the whole request/host once)
 # rather than a point-level check (fuzz one insertion point). The campaign routes
 # these into its per-host request_checks, the others into the per-point checks.
-REQUEST_LEVEL_KINDS: frozenset[str] = frozenset({"signature"})
+REQUEST_LEVEL_KINDS: frozenset[str] = frozenset({"signature", "nuclei_http"})
 
 # Severities an entry may claim (aligns with the framework's finding template).
 SEVERITIES: frozenset[str] = frozenset({"Critical", "High", "Medium", "Low", "Info"})
@@ -79,6 +79,40 @@ _PREDICATE_OPS: frozenset[str] = frozenset({"always", "tech", "category", "any",
 # kind either way ("query_value" or "QUERY_VALUE").
 _KIND_VALUES: frozenset[str] = frozenset(k.value for k in InsertionKind)
 _KIND_BY_NAME: dict[str, str] = {k.name: k.value for k in InsertionKind}
+
+# A ``nuclei_http`` predicate is judged by the (sound) predicate oracle, which fires CONCLUSIVE at
+# confidence 0.9 whenever the predicate holds over the observed {status, body}. So the predicate itself
+# must NOT be satisfiable by a benign response: it must require a DISCRIMINATING body observable — a
+# specific literal substring of at least this many characters — or a live 200 (or any near-tautology
+# status set) would mint a fact with no re-verification value. A status/short-literal-only predicate is
+# rejected; status is admissible only as an AND-corroborator of a discriminating body literal. This
+# mirrors PathProbeCheck's "signature specific enough that its presence is proof" requirement.
+MIN_NUCLEI_BODY_SIGNATURE: int = 4
+
+
+def predicate_has_body_signature(predicate: object, min_len: int = MIN_NUCLEI_BODY_SIGNATURE) -> bool:
+    """Whether ``predicate`` can only fire when a DISTINCTIVE body literal (``contains``/``icontains`` on
+    ``{"var": "body"}`` with a literal >= ``min_len``) is present in the observed response — i.e. it is
+    NOT satisfiable by status alone or by a sub-floor literal. Recursion mirrors the oracle's own
+    semantics: an ``all`` needs ANY discriminating conjunct (all must hold, so that one must be present);
+    an ``any`` needs EVERY disjunct discriminating (else a non-discriminating disjunct fires alone)."""
+    if not isinstance(predicate, dict) or len(predicate) != 1:
+        return False
+    op, args = next(iter(predicate.items()))
+    if op in ("contains", "icontains"):
+        return (
+            isinstance(args, (list, tuple)) and len(args) == 2
+            and isinstance(args[0], dict) and args[0].get("var") == "body"
+            and isinstance(args[1], str) and len(args[1]) >= min_len
+        )
+    if op == "all":
+        return isinstance(args, (list, tuple)) and any(predicate_has_body_signature(c, min_len) for c in args)
+    if op == "any":
+        return (
+            isinstance(args, (list, tuple)) and len(args) > 0
+            and all(predicate_has_body_signature(c, min_len) for c in args)
+        )
+    return False
 
 
 class LibraryError(CrucibleError):
@@ -239,6 +273,18 @@ class OracleSpec(BaseModel):
     content_payload: str | None = Field(default=None, description="Traversal/LFI payload (content).")
     content_signature: str | None = Field(
         default=None, description="Distinctive signature of the target file's content (content).")
+    # nuclei_http (compiled Nuclei template, wider matcher subset) — GET a fixed path and confirm a
+    # declarative predicate the compiler translated the template's matchers into. Reuses `probe_path`
+    # and `http_method` above; the request body/extra headers are for RAW-request templates.
+    match_predicate: dict | None = Field(
+        default=None,
+        description="Predicate-oracle AST over {status, body} translated from the template's matchers "
+                    "(nuclei_http).",
+    )
+    request_body: str | None = Field(
+        default=None, description="Fixed request body for a compiled RAW template (nuclei_http).")
+    request_headers: list[tuple[str, str]] | None = Field(
+        default=None, description="Fixed extra request headers for a compiled RAW template (nuclei_http).")
 
     @model_validator(mode="after")
     def _check_shape(self) -> "OracleSpec":
@@ -276,6 +322,19 @@ class OracleSpec(BaseModel):
         elif k == "content":
             _require(self, "content_payload")
             _require(self, "content_signature")
+        elif k == "nuclei_http":
+            _require(self, "probe_path")
+            if not isinstance(self.match_predicate, dict) or not self.match_predicate:
+                raise ValueError("nuclei_http oracle requires a non-empty 'match_predicate'")
+            # The predicate oracle mints a CONCLUSIVE fact whenever the predicate holds, so a
+            # nuclei_http predicate must not be satisfiable by a benign response: it must require a
+            # discriminating body literal (>= MIN_NUCLEI_BODY_SIGNATURE), not status/short-literal alone.
+            if not predicate_has_body_signature(self.match_predicate):
+                raise ValueError(
+                    "nuclei_http 'match_predicate' must require a discriminating body literal of at "
+                    f"least {MIN_NUCLEI_BODY_SIGNATURE} chars (status/short-literal-only predicates would "
+                    "mint a fact over a benign response)"
+                )
         return self
 
 
@@ -410,6 +469,13 @@ def compile_entry(entry: LibraryEntry) -> Check:
         return ContentSignatureCheck(
             id=entry.id, bug_class=entry.bug_class,
             payload=spec.content_payload, signature=spec.content_signature,  # type: ignore[arg-type]
+        )
+    if kind == "nuclei_http":
+        return NucleiTemplateCheck(
+            id=entry.id, bug_class=entry.bug_class,
+            probe_path=spec.probe_path, match_predicate=dict(spec.match_predicate or {}),  # type: ignore[arg-type]
+            http_method=spec.http_method, request_body=spec.request_body,
+            request_headers=tuple(tuple(h) for h in (spec.request_headers or ())),
         )
     # OracleSpec validation makes this unreachable; kept as a defensive guard.
     raise LibraryError(f"unknown oracle kind {kind!r} in entry {entry.id!r}")
