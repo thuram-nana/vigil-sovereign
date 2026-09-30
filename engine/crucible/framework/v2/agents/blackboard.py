@@ -65,6 +65,16 @@ _MAX_BB_SCHEMA = 2
 # hash-chain. The cryptographic tamper-evidence (``agents.spine_chain.verify_spine_chain`` /
 # ``verify_spine_head`` — hash-linked, governance-signed) is INDEPENDENT of this check and stays fully
 # verifiable on demand / at engagement boundaries. See test_spine_chain / test_blackboard_sharding.
+#
+# HONEST ERROR-SHAPE CAVEAT (``first`` / ``off``). The at-open scan is what converts a torn / non-DB store
+# into a CLEAN ``BlackboardError``. Under ``first`` (default) / ``off``, PHYSICAL corruption that arises
+# AFTER a path's first open within one long-lived worker is not re-scanned until the process restarts, so
+# on the per-request-reopen hot path it can surface as a raw ``sqlite3.DatabaseError`` from inside a query
+# rather than the clean ``BlackboardError`` shape — until restart (first open re-scans) or a manual
+# ``check_integrity()``. This is an error-SHAPE / early-detection tradeoff only: DETECTION still happens
+# (loudly, just later or in a rawer shape), and CONTENT/order tamper-evidence is unaffected (the hash-chain
+# rebuilds from live rows at verify time, whenever verified). ``CRUCIBLE_BB_INTEGRITY=always`` restores the
+# pre-D2 clean-error-shape-on-every-open guarantee for deployments that want it.
 _INTEGRITY_ENV = "CRUCIBLE_BB_INTEGRITY"
 _INTEGRITY_MODES = ("first", "always", "off")
 _INTEGRITY_CHECKED: set[str] = set()   # per-process memo of DB paths already structurally checked

@@ -135,6 +135,82 @@ def test_assert_isolated_from_guard(tmp_path, monkeypatch) -> None:
         tenant.assert_isolated_from("alpha")                  # same tenant => not isolated from itself
 
 
+# ---------------------------------------------------------------------------
+# fail-closed fleet-startup isolation guard (spine+memory shard is NOT enough on a shared root)
+# ---------------------------------------------------------------------------
+
+
+def test_fleet_isolation_requires_sharding(monkeypatch) -> None:
+    """An unsharded worker uses the shared/default store — NOT tenant-isolated — so the fleet guard
+    refuses it (evidence/targets/authority would commingle)."""
+    monkeypatch.delenv("CRUCIBLE_TENANT", raising=False)
+    with pytest.raises(tenant.TenantIsolationError):
+        tenant.assert_tenant_fleet_isolated()
+
+
+def test_fleet_isolation_fails_closed_when_two_tenants_share_a_root(tmp_path, monkeypatch) -> None:
+    """The core red-pen scenario: two tenants deployed into ONE CRUCIBLE_ROOT. The second worker's
+    startup guard FAILS CLOSED (the first claimed the root) — a hard error, not silent commingling of
+    targets/evidence/authority."""
+    monkeypatch.setattr(paths, "v2_root", lambda: tmp_path)   # ONE shared root for both
+    monkeypatch.setenv("CRUCIBLE_TENANT", "alpha")
+    tenant.assert_tenant_fleet_isolated()                      # alpha claims the root — passes
+    assert tenant.root_owner() == "alpha"
+
+    monkeypatch.setenv("CRUCIBLE_TENANT", "beta")             # beta starts in the SAME root
+    with pytest.raises(tenant.TenantIsolationError) as ei:
+        tenant.assert_tenant_fleet_isolated()
+    assert "own" in str(ei.value).lower() and "beta" in str(ei.value)
+    assert tenant.root_owner() == "alpha"                      # beta never took ownership
+
+
+def test_fleet_isolation_passes_for_one_root_per_tenant(tmp_path, monkeypatch) -> None:
+    """Properly deployed: each tenant gets its OWN CRUCIBLE_ROOT. Both pass and each claims its own root;
+    re-asserting for the same tenant/root is idempotent."""
+    root_a, root_b = tmp_path / "A", tmp_path / "B"
+    root_a.mkdir()
+    root_b.mkdir()
+
+    monkeypatch.setattr(paths, "v2_root", lambda: root_a)
+    monkeypatch.setenv("CRUCIBLE_TENANT", "alpha")
+    tenant.assert_tenant_fleet_isolated()                      # passes + claims root_a
+    tenant.assert_tenant_fleet_isolated()                      # idempotent re-attach (same tenant) — passes
+    assert tenant.root_owner() == "alpha"
+
+    monkeypatch.setattr(paths, "v2_root", lambda: root_b)
+    monkeypatch.setenv("CRUCIBLE_TENANT", "beta")
+    tenant.assert_tenant_fleet_isolated()                      # passes + claims root_b
+    assert tenant.root_owner() == "beta"
+
+
+def test_fleet_isolation_detects_preexisting_other_tenant_shard(tmp_path, monkeypatch) -> None:
+    """Even with NO claim file, an existing OTHER-tenant spine/memory shard under the root proves the root
+    is shared — the scan-based leg fails closed independently of the TOFU claim."""
+    monkeypatch.setattr(paths, "v2_root", lambda: tmp_path)
+    (tmp_path / ".blackboard" / "tenants" / "alpha").mkdir(parents=True)   # alpha ran here before
+    monkeypatch.setenv("CRUCIBLE_TENANT", "beta")
+    with pytest.raises(tenant.TenantIsolationError) as ei:
+        tenant.assert_tenant_fleet_isolated()
+    assert "shared" in str(ei.value).lower() and "alpha" in str(ei.value)
+
+
+def test_fleet_isolation_claim_false_is_readonly(tmp_path, monkeypatch) -> None:
+    """A dry-run probe (claim=False) verifies but never takes ownership, so it leaves no on-disk trace."""
+    monkeypatch.setattr(paths, "v2_root", lambda: tmp_path)
+    monkeypatch.setenv("CRUCIBLE_TENANT", "alpha")
+    tenant.assert_tenant_fleet_isolated(claim=False)
+    assert tenant.root_owner() is None                         # nothing claimed
+    assert not tenant.tenant_claim_path().exists()
+
+
+def test_fleet_isolation_unsafe_tenant_id_still_fails(tmp_path, monkeypatch) -> None:
+    """A hostile tenant id fails closed here too (via the shared fail-closed validation)."""
+    monkeypatch.setattr(paths, "v2_root", lambda: tmp_path)
+    monkeypatch.setenv("CRUCIBLE_TENANT", "../evil")
+    with pytest.raises((tenant.TenantIsolationError, CrucibleRootNotFound)):
+        tenant.assert_tenant_fleet_isolated()
+
+
 def test_n_workers_concurrent_no_contention_no_cross_read(tmp_path, monkeypatch) -> None:
     """N single-tenant workers write concurrently to their OWN sharded DBs. No SQLite 'database is
     locked' contention (each file has one writer) and each store ends with ONLY its own events."""

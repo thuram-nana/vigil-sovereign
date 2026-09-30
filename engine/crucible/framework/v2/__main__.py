@@ -213,6 +213,7 @@ def _status(argv: list[str]) -> int:
         from .common import tenant as _tenant
         _shard = _tenant.shard_summary()
         print(f"  tenant            : {_shard['tenant']}")
+        print(f"  root owner        : {_shard.get('root_owner', '-')}")
         print(f"  blackboard db     : {_shard['blackboard_db']}")
         print(f"  memory db         : {_shard['memory_db']}")
     except Exception:  # noqa: BLE001 — status must never crash; fall back to the un-sharded memory line
