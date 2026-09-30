@@ -9,23 +9,38 @@ engine and — crucially — re-verify the match with its OWN deterministic orac
 needed to run a compiled entry.
 
 Prove-don't-guess, by construction:
-  * The template's own verdict is NEVER trusted. A compiled entry is a PROVENANCE-TAGGED LEAD until
-    CRUCIBLE's OWN check re-fires the match over a REAL response and the predicate/ACHIEVED-STATE
-    oracle confirms it. A word/status/regex/dsl match compiles to a declarative predicate the
-    predicate oracle re-evaluates over the raw ``{status, body}`` a real request returned — the
-    external template's classification only ever raises priority; it never mints a fact. The compiled
+  * The template's own verdict/classification is NEVER trusted. A word/status/regex/dsl match compiles
+    to a declarative predicate that CRUCIBLE's OWN request-level check re-evaluates through the
+    predicate/ACHIEVED-STATE oracle over the raw ``{status, body}`` a real request returned. The oracle
+    — never the template — adjudicates, and it mints a CONCLUSIVE achieved-state fact (confidence 0.9)
+    when the predicate holds. Because that mint is conclusive, the compiler admits a template ONLY when
+    its predicate requires a DISCRIMINATING body observable (the discrimination rule below); a template
+    that would fire over a benign response mints NOTHING — it degrades at compile time. The compiled
     entry carries its origin in ``payload_family = "nuclei:<id>"`` and a ``nuclei-template:<id>``
-    reference.
-  * A template (or a matcher term) outside the supported subset compiles to nothing (``supported=False``
-    with a reason) — it degrades cleanly, never guesses.
+    reference; the template's agreement raises priority but is never the source of the fact.
+  * A template (or matcher term) outside the supported subset — or one with no discriminating
+    observable — compiles to nothing (``supported=False`` with a reason). It degrades cleanly, never
+    guesses.
+
+Discrimination rule (the anti-vacuous-mint guard): the compiled predicate must be UNSATISFIABLE by a
+benign response — it must require a distinctive body literal of at least ``MIN_NUCLEI_BODY_SIGNATURE``
+characters (a ``contains``/``icontains`` over the body). A status match is admissible only as an
+AND-corroborator of such a literal, never on its own (any live 200 would otherwise be a High fact); a
+sub-floor literal (``contains(body,"a")`` → "banana") is not discriminating. The library enforces the
+same rule on every ``nuclei_http`` entry, so a hand-built entry cannot bypass it either.
 
 Supported matcher subset (widened in Wave C, slice C2):
   * ``word`` matchers over the response BODY (the original slice) — case-insensitive substring.
   * ``status`` matchers — the response status is one of the template's codes.
-  * ``regex`` matchers over the BODY — reduced to the pattern's distinctive LITERAL CORE (the longest
-    literal run that any match MUST contain). CRUCIBLE re-verifies presence of that literal, never
-    "the full pattern matched": a SOUND weakening, since a regex match implies the literal is present.
-    The template's regex is NEVER compiled or executed here (no ReDoS surface), only statically parsed.
+  * ``regex`` matchers over the BODY — reduced to the pattern's distinctive LITERAL CORE: the longest
+    run of literal characters that EVERY string the pattern matches is guaranteed to contain. The static
+    parse accounts for quantifiers — a char that may repeat (``max > 1``) ends a run rather than
+    extending it, since repetition inserts copies between it and the next char (``ab{2}cde`` matches
+    ``abbcde``, which does NOT contain ``abcde``) — so the core never over-fires relative to the pattern.
+    CRUCIBLE re-verifies presence of that core, not "the full pattern matched"; a pattern with no core of
+    at least ``MIN_NUCLEI_BODY_SIGNATURE`` chars (a pure character class such as ``[a-f0-9]{32}``)
+    degrades. The template's regex is NEVER compiled or executed here (no ReDoS surface), only
+    statically parsed.
   * ``dsl`` matchers — a conservative subset (``status_code == N``, ``contains(body, "lit")`` /
     ``icontains`` / ``contains(tolower(body), "lit")``, joined by ``&&`` or ``||``). Anything else in
     the expression degrades that term.
@@ -59,7 +74,12 @@ from pathlib import Path
 from typing import Any
 
 from ..common.errors import CrucibleError
-from .library import LibraryEntry, OracleSpec
+from .library import (
+    MIN_NUCLEI_BODY_SIGNATURE,
+    LibraryEntry,
+    OracleSpec,
+    predicate_has_body_signature,
+)
 
 # Nuclei severities -> CRUCIBLE finding-template severities.
 _SEVERITY_MAP: dict[str, str] = {
@@ -85,12 +105,21 @@ _CWE_HINTS: dict[str, str] = {
 # The BaseURL interpolation nuclei uses for the target root; we strip it to a relative probe path.
 _BASE_URL_TOKENS: tuple[str, ...] = ("{{BaseURL}}", "{{RootURL}}", "{{Hostname}}")
 
-# A regex matcher is re-verified by its distinctive LITERAL CORE; a core shorter than this is not
-# distinctive enough to ground a fact (it would be an FP magnet), so the regex term degrades instead.
-_MIN_REGEX_LITERAL = 4
+# A regex/word/dsl literal is re-verified as a distinctive body signature; a literal shorter than this
+# is not distinctive enough to ground a fact (it would be an FP magnet — ``contains(body,"a")`` fires on
+# "banana"), so a sub-floor literal is not a discriminating observable. The floor is the same one the
+# library enforces on every ``nuclei_http`` predicate (see ``predicate_has_body_signature``).
+_MIN_BODY_LITERAL = MIN_NUCLEI_BODY_SIGNATURE
 
 # A defensive cap on the pattern length we will statically parse (single linear pass; no execution).
 _MAX_REGEX_PARSE = 8192
+
+# HTTP method-override headers: a compiled template must never smuggle one onto the idempotent GET probe
+# (a server honouring the override would perform a state-changing DELETE/PUT/…). Dropped at compile time.
+_METHOD_OVERRIDE_HEADERS: frozenset[str] = frozenset({
+    "x-http-method-override", "x-http-method", "x-method-override", "x-method",
+    "x-original-http-method",
+})
 
 
 class NucleiCompileError(CrucibleError):
@@ -165,10 +194,15 @@ def _extract_word_matcher(request: dict) -> tuple[str | None, tuple[str, ...]]:
         if isinstance(words, list) and words and isinstance(words[0], str) and words[0].strip():
             if "{{" in words[0] or "}}" in words[0]:
                 continue   # a computed word (interpolation) is not a fixed literal
+            if len(words[0]) < _MIN_BODY_LITERAL:
+                # A sub-floor word is not a discriminating signature (PathProbeCheck would fire over any
+                # non-404 that merely contains it). Fall through — the general predicate path applies the
+                # same floor and degrades if nothing distinctive remains.
+                continue
             if len(words) > 1:
                 warnings.append(f"used only the first of {len(words)} words as the signature")
             return words[0], tuple(warnings)
-    return None, tuple(warnings) or ("no body 'word' matcher found",)
+    return None, tuple(warnings) or ("no distinctive body 'word' matcher found",)
 
 
 def _bug_class_from_info(info: dict) -> str:
@@ -212,33 +246,43 @@ def _references(template_id: str, info: dict) -> list[str]:
 _QUANT_RE = re.compile(r"\{(\d*)(,?)(\d*)\}")
 
 
-def _quantifier_at(pattern: str, i: int) -> tuple[int, int] | None:
+def _quantifier_at(pattern: str, i: int) -> tuple[int, int, int | None] | None:
     """If a ``{m}``/``{m,}``/``{,n}``/``{m,n}`` quantifier begins at ``pattern[i]``, return
-    ``(end_index, min_count)``; otherwise None (a literal ``{``). ``{}``/``{,}`` are not quantifiers."""
+    ``(end_index, min_count, max_count)`` (``max_count`` None = unbounded); otherwise None (a literal
+    ``{``). ``{}``/``{,}`` are not quantifiers."""
     m = _QUANT_RE.match(pattern, i)
     if not m:
         return None
-    lo, _comma, hi = m.group(1), m.group(2), m.group(3)
+    lo, comma, hi = m.group(1), m.group(2), m.group(3)
     if not lo and not hi:
         return None   # {} or {,}: a literal brace, not a quantifier
-    return m.end(), (int(lo) if lo else 0)
+    min_count = int(lo) if lo else 0
+    if comma == ",":
+        max_count: int | None = int(hi) if hi else None   # {m,} -> unbounded; {m,n}/{,n} -> n
+    else:
+        max_count = int(lo)   # {m} -> exactly m
+    return m.end(), min_count, max_count
 
 
-def _regex_atoms(pattern: str) -> list[tuple[str | None, bool]] | None:
-    """Statically tokenise ``pattern`` into ``(literal_char | None, required)`` atoms in a single
-    linear pass, or return None when it uses a construct whose "required literal" is not well defined
-    (grouping ``(``/``)`` or alternation ``|`` — we bail conservatively).
+def _regex_atoms(pattern: str) -> list[tuple[str | None, bool, bool]] | None:
+    """Statically tokenise ``pattern`` into ``(literal_char | None, required, breaks_run)`` atoms in a
+    single linear pass, or return None when it uses a construct whose "required literal" is not well
+    defined (grouping ``(``/``)`` or alternation ``|`` — we bail conservatively).
 
     ``required`` is False for an atom a ``*``/``?``/``{0,..}`` quantifier can make zero-occurrence; a
-    literal char with ``required`` True is guaranteed to appear in every string the pattern matches.
-    Character classes, ``.``/anchors, and class escapes (``\\d``/``\\w``/…) are non-literal atoms (char
-    None). An escaped NON-alphanumeric (``\\.``/``\\/``/…) is the literal char it escapes. A ``{m,n}``
-    quantifier keeps the required literal PREFIX before it (only its own atom's required-ness depends on
-    ``m``). No regex engine is invoked — this is pure string scanning, so no attacker-authored pattern
-    can execute (no ReDoS)."""
+    literal char with ``required`` True is guaranteed to appear at least once. ``breaks_run`` is True
+    when the current contiguous run must TERMINATE after this atom — because the atom is non-literal
+    (class/``.``/anchor/``\\d``), optional, or its quantifier has ``max > 1``. A ``max > 1`` char may be
+    a run's FINAL char (min>=1 guarantees one occurrence adjacent to the previous char) but nothing may
+    follow it in the same run: repetition would insert copies between it and the next char, so e.g.
+    ``ab{2}cde`` matches ``abbcde`` which does NOT contain ``abcde`` — the run must break after ``b``.
+    A plain (``max == 1``) literal continues the run. Character classes, ``.``/anchors and class escapes
+    (``\\d``/``\\w``/…) are non-literal atoms (char None); an escaped NON-alphanumeric (``\\.``/``\\/``/…)
+    is the literal it escapes. No regex engine is invoked — pure string scanning, so no attacker-authored
+    pattern can execute (no ReDoS)."""
     if not isinstance(pattern, str) or not pattern or len(pattern) > _MAX_REGEX_PARSE:
         return None
-    atoms: list[tuple[str | None, bool]] = []
+    atoms: list[tuple[str | None, bool, bool]] = []
     i, n = 0, len(pattern)
     while i < n:
         ch = pattern[i]
@@ -272,49 +316,59 @@ def _regex_atoms(pattern: str) -> list[tuple[str | None, bool]] | None:
         else:
             atom_char = ch    # ordinary literal (a bare '{' that is not a quantifier lands here too)
             i += 1
-        # Peek for a quantifier that binds to the atom just consumed.
-        required = True
-        if i < n and pattern[i] in "*?":
-            required = False   # zero occurrences allowed
+        # Peek for a quantifier that binds to the atom just consumed. Default (no quantifier): min1,max1.
+        min_count, max_count = 1, 1
+        if i < n and pattern[i] == "*":
+            min_count, max_count = 0, None
             i += 1
             if i < n and pattern[i] == "?":   # lazy modifier
                 i += 1
+        elif i < n and pattern[i] == "?":
+            min_count, max_count = 0, 1
+            i += 1
+            if i < n and pattern[i] == "?":
+                i += 1
         elif i < n and pattern[i] == "+":
-            required = True    # one-or-more: at least once
+            min_count, max_count = 1, None
             i += 1
             if i < n and pattern[i] == "?":
                 i += 1
         elif i < n and pattern[i] == "{":
             q = _quantifier_at(pattern, i)
             if q is not None:
-                end, min_count = q
-                i = end
-                required = min_count >= 1
+                i, min_count, max_count = q[0], q[1], q[2]
                 if i < n and pattern[i] == "?":   # lazy modifier
                     i += 1
             # else: a literal '{' — leave it for the next iteration to consume as a literal atom.
-        atoms.append((atom_char, required))
+        required = min_count >= 1
+        breaks_run = (atom_char is None) or (not required) or (max_count is None) or (max_count > 1)
+        atoms.append((atom_char, required, breaks_run))
     return atoms
 
 
 def _regex_literal_core(pattern: str) -> str | None:
-    """The longest run of REQUIRED literal characters in ``pattern`` (a substring any match must
-    contain), or None when there is none of length ``_MIN_REGEX_LITERAL`` or when the pattern is
-    outside the statically-reasoned subset."""
+    """The longest run of contiguous REQUIRED literal characters guaranteed to appear in EVERY string
+    the pattern matches, or None when no such run reaches ``_MIN_BODY_LITERAL`` or the pattern is
+    outside the statically-reasoned subset. A ``max>1``-quantified char may end a run but not continue
+    it (see :func:`_regex_atoms`), so the extracted core never over-fires relative to the pattern."""
     atoms = _regex_atoms(pattern)
     if atoms is None:
         return None
     best, cur = "", ""
-    for c, required in atoms:
+    for c, required, breaks_run in atoms:
         if c is not None and required:
-            cur += c
-        else:
+            cur += c                       # guaranteed char: extend the run
+            if breaks_run:                 # ...but repetition may follow, so close the run after it
+                if len(cur) > len(best):
+                    best = cur
+                cur = ""
+        else:                              # non-literal or optional: the run cannot cross it
             if len(cur) > len(best):
                 best = cur
             cur = ""
     if len(cur) > len(best):
         best = cur
-    return best if len(best) >= _MIN_REGEX_LITERAL else None
+    return best if len(best) >= _MIN_BODY_LITERAL else None
 
 
 # ---------------------------------------------------------------------------
@@ -376,7 +430,7 @@ def _translate_regex_matcher(m: dict) -> tuple[dict | None, list[str]]:
             continue
         clauses.append({"contains": [{"var": "body"}, core]})
     if not clauses:
-        return None, [f"no regex pattern has a distinctive literal core (>= {_MIN_REGEX_LITERAL} chars)"]
+        return None, [f"no regex pattern has a distinctive literal core (>= {_MIN_BODY_LITERAL} chars)"]
     cond = str(m.get("condition") or "or").strip().lower()
     if cond == "and" and dropped:
         return None, ["a regex AND term has no literal core; won't widen an AND"]
@@ -504,11 +558,24 @@ def _build_match_predicate(request: dict) -> tuple[dict | None, list[str], str]:
         return (None, warnings,
                 "an AND matcher term is not re-verifiable; template degraded (won't widen an AND)")
     if len(clauses) == 1:
-        return clauses[0], warnings, ""   # a single clause needs no all/any wrapper
-    if condition == "and":
-        return {"all": clauses}, warnings, ""
-    # OR: dropping unsupported branches only makes the compiled match STRICTER (a subset) -> sound.
-    return {"any": clauses}, warnings, ""
+        predicate: dict = clauses[0]   # a single clause needs no all/any wrapper
+    elif condition == "and":
+        predicate = {"all": clauses}
+    else:
+        # OR: dropping unsupported branches only makes the compiled match STRICTER (a subset) -> sound.
+        predicate = {"any": clauses}
+
+    # DISCRIMINATION GATE (the fix for the vacuous-mint defect): the predicate oracle mints a CONCLUSIVE
+    # fact whenever the predicate holds, so the predicate must NOT be satisfiable by a benign response.
+    # It must require a distinctive body literal — status alone (any live 200 → a fact), a sub-floor
+    # literal (contains(body,"a") → "banana"), or an OR whose non-body branch fires alone all degrade
+    # here rather than mint. Status is admissible only as an AND-corroborator of a body literal.
+    if not predicate_has_body_signature(predicate):
+        return (None, warnings,
+                f"no discriminating observable: the matcher yields no body literal of >= "
+                f"{_MIN_BODY_LITERAL} chars that must be present (status/short-literal-only would mint "
+                f"over a benign response)")
+    return predicate, warnings, ""
 
 
 # ---------------------------------------------------------------------------
@@ -520,8 +587,10 @@ def _parse_raw_request(raw: Any) -> tuple[str, str, tuple[tuple[str, str], ...],
     """Parse a nuclei ``raw`` request blob into ``(method, probe_path, headers, body)`` or return a
     reason string when unsupported. Only a fixed ``GET`` with a BaseURL-relative target is accepted
     (a scanner mints only over idempotent probes). The ``Host`` header is dropped (the target's netloc
-    wins) and any header/body carrying interpolation is dropped (it cannot be resolved statically —
-    omitting it is safe: at worst re-verification does not fire, which mints nothing)."""
+    wins), any header/body carrying interpolation is dropped (it cannot be resolved statically —
+    omitting it is safe: at worst re-verification does not fire, which mints nothing), and any HTTP
+    method-override header (``X-HTTP-Method-Override`` etc.) is dropped so the compiled GET can never be
+    turned into a state-changing DELETE/PUT by a server that honours the override."""
     blob = _first(raw)
     if not isinstance(blob, str) or not blob.strip():
         return "raw request block is empty"
@@ -547,6 +616,8 @@ def _parse_raw_request(raw: Any) -> tuple[str, str, tuple[tuple[str, str], ...],
         name, value = name.strip(), value.strip()
         if not name or name.lower() == "host":
             continue
+        if name.lower() in _METHOD_OVERRIDE_HEADERS:
+            continue   # never let a compiled GET be re-methoded into a state-changing request
         if "{{" in name or "}}" in name or "{{" in value or "}}" in value:
             continue
         headers.append((name, value))

@@ -1515,13 +1515,23 @@ class NucleiTemplateCheck:
     oracle. The check makes NO trust decision and evaluates NO template logic itself: the ORACLE — never
     this check, and never the Nuclei template's own verdict — adjudicates whether the dangerous
     condition holds over the real response, and the predicate is pure JSON so the resulting finding's
-    certificate re-verifies offline exactly like every other achieved-state finding. A response the
-    predicate does not hold over yields a non-firing context (no fact); a transport failure yields
-    None. Runs once per host.
+    certificate re-verifies offline exactly like every other achieved-state finding. When the predicate
+    holds the oracle mints a CONCLUSIVE achieved-state fact (confidence 0.9); a response the predicate
+    does not hold over yields a non-firing context (no fact); a transport failure yields None. Runs once
+    per host.
+
+    Because that mint is conclusive, the predicate must be DISCRIMINATING — satisfiable only when a
+    distinctive body literal is actually present, never by a bare live 200 (the vacuous-mint failure the
+    sibling ``PathProbeCheck`` avoids by requiring a specific signature and rejecting a mere 2xx). This
+    check does not re-derive that floor at runtime because it cannot receive a non-discriminating
+    predicate: ``OracleSpec`` validation rejects any ``nuclei_http`` entry whose ``match_predicate`` lacks
+    a body signature (``scanner.library.predicate_has_body_signature``), so a benign homepage — same
+    status, no signature — fails the predicate and mints nothing.
 
     SIDE-EFFECT-FREE by construction: it fetches with the fixed request and does substring/equality
     comparisons via the oracle — it never compiles or executes a template regex (the compiler already
-    reduced any regex to a static literal), so no attacker-authored pattern can run here (no ReDoS)."""
+    reduced any regex to a static literal), and the compiler strips any HTTP method-override header, so
+    the probe stays an idempotent GET and no attacker-authored pattern can run here (no ReDoS)."""
 
     id: str
     bug_class: str

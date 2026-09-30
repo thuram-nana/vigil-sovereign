@@ -80,6 +80,40 @@ _PREDICATE_OPS: frozenset[str] = frozenset({"always", "tech", "category", "any",
 _KIND_VALUES: frozenset[str] = frozenset(k.value for k in InsertionKind)
 _KIND_BY_NAME: dict[str, str] = {k.name: k.value for k in InsertionKind}
 
+# A ``nuclei_http`` predicate is judged by the (sound) predicate oracle, which fires CONCLUSIVE at
+# confidence 0.9 whenever the predicate holds over the observed {status, body}. So the predicate itself
+# must NOT be satisfiable by a benign response: it must require a DISCRIMINATING body observable — a
+# specific literal substring of at least this many characters — or a live 200 (or any near-tautology
+# status set) would mint a fact with no re-verification value. A status/short-literal-only predicate is
+# rejected; status is admissible only as an AND-corroborator of a discriminating body literal. This
+# mirrors PathProbeCheck's "signature specific enough that its presence is proof" requirement.
+MIN_NUCLEI_BODY_SIGNATURE: int = 4
+
+
+def predicate_has_body_signature(predicate: object, min_len: int = MIN_NUCLEI_BODY_SIGNATURE) -> bool:
+    """Whether ``predicate`` can only fire when a DISTINCTIVE body literal (``contains``/``icontains`` on
+    ``{"var": "body"}`` with a literal >= ``min_len``) is present in the observed response — i.e. it is
+    NOT satisfiable by status alone or by a sub-floor literal. Recursion mirrors the oracle's own
+    semantics: an ``all`` needs ANY discriminating conjunct (all must hold, so that one must be present);
+    an ``any`` needs EVERY disjunct discriminating (else a non-discriminating disjunct fires alone)."""
+    if not isinstance(predicate, dict) or len(predicate) != 1:
+        return False
+    op, args = next(iter(predicate.items()))
+    if op in ("contains", "icontains"):
+        return (
+            isinstance(args, (list, tuple)) and len(args) == 2
+            and isinstance(args[0], dict) and args[0].get("var") == "body"
+            and isinstance(args[1], str) and len(args[1]) >= min_len
+        )
+    if op == "all":
+        return isinstance(args, (list, tuple)) and any(predicate_has_body_signature(c, min_len) for c in args)
+    if op == "any":
+        return (
+            isinstance(args, (list, tuple)) and len(args) > 0
+            and all(predicate_has_body_signature(c, min_len) for c in args)
+        )
+    return False
+
 
 class LibraryError(CrucibleError):
     """A library entry (or a predicate) is malformed, unloadable, or invalid.
@@ -292,6 +326,15 @@ class OracleSpec(BaseModel):
             _require(self, "probe_path")
             if not isinstance(self.match_predicate, dict) or not self.match_predicate:
                 raise ValueError("nuclei_http oracle requires a non-empty 'match_predicate'")
+            # The predicate oracle mints a CONCLUSIVE fact whenever the predicate holds, so a
+            # nuclei_http predicate must not be satisfiable by a benign response: it must require a
+            # discriminating body literal (>= MIN_NUCLEI_BODY_SIGNATURE), not status/short-literal alone.
+            if not predicate_has_body_signature(self.match_predicate):
+                raise ValueError(
+                    "nuclei_http 'match_predicate' must require a discriminating body literal of at "
+                    f"least {MIN_NUCLEI_BODY_SIGNATURE} chars (status/short-literal-only predicates would "
+                    "mint a fact over a benign response)"
+                )
         return self
 
 
