@@ -10,16 +10,28 @@ framework path) now mint signed FACTs from the autonomous chat/engage re-drive. 
     confirms the CLAIMED class over VIGIL's own gated live capture — and mints NOTHING for a benign endpoint
     (the mandatory negative controls), a non-runtime class, or an out-of-scope URL.
 
+B1 (governed-engage FACT-parity) extends this to the W2 statistical/eval injection classes the deterministic
+scanner already proves but the governed engage/chat seam previously refused to mint: ``ssti`` (evaluation
+oracle over a per-probe product), ``boolean_sqli`` (the multi-round SPRT BooleanInferenceCheck /
+boolean_inference_oracle — never the single-shot DifferentialCheck), and ``time_based_sqli`` (timing oracle:
+Mann-Whitney U + effect-size floor + dose-response). ``runtime_redrive`` DELEGATES these to their
+ssti/boolean/timing sibling arms; this file pins the routing spec, a live positive per class over a planted
+sink, and the mandatory safe-twin controls (a FACT never mints on a benign endpoint).
+
 Reuses the reviewed gated send (web_redrive._gated_web_send) and the existing checks
-(ContentSignatureCheck / MarkerReflectionCheck / PathProbeCheck) + oracles; this file proves the routing +
-live positive + the negative controls end-to-end.
+(ContentSignatureCheck / MarkerReflectionCheck / PathProbeCheck / BooleanInferenceCheck / TimingCheck) +
+oracles; this file proves the routing + live positive + the negative controls end-to-end.
 """
 from __future__ import annotations
 
 import http.server
+import re
+import sqlite3
 import threading
+import time
 import types
 from pathlib import Path
+from urllib.parse import parse_qs, urlsplit
 
 import pytest
 
@@ -49,6 +61,27 @@ def test_redrive_spec_emits_a_runtime_spec_for_response_derived_classes(claimed,
     assert spec["kind"] == "runtime"
     assert spec["bug_class"] == norm
     assert spec["url"].endswith("/documents/download?file=x")
+
+
+@pytest.mark.parametrize("claimed,norm", [
+    # B1 (governed-engage FACT-parity): the W2 statistical/eval injection classes the deterministic scanner
+    # already proves must now ALSO get a runtime re-drive spec from the governed engage producer. The blind
+    # SQLi spellings must normalize to THEMSELVES (never to `sqli`) so the producer claims them HERE and they
+    # never fall through to the error_signature SQLi branch.
+    ("ssti", "ssti"), ("server_side_template_injection", "ssti"),
+    ("boolean_sqli", "boolean_sqli"), ("blind_sqli", "boolean_sqli"), ("boolean_based_sqli", "boolean_sqli"),
+    ("time_based_sqli", "time_based_sqli"), ("time_based_blind_sqli", "time_based_sqli"),
+    ("time_sqli", "time_based_sqli"),
+])
+def test_redrive_spec_emits_a_runtime_spec_for_injection_classes(claimed, norm):
+    from vigil_integration.live.engine import VigilEngine
+    spec = VigilEngine._redrive_spec(
+        _decision(claimed, url="http://127.0.0.1:19010/items?id=1"), None)
+    assert spec is not None, f"{claimed} should be re-drivable through the governed engage seam"
+    assert spec["kind"] == "runtime", (
+        f"{claimed} must route to the runner-owned runtime engine, not the error_signature SQLi path")
+    assert spec["bug_class"] == norm
+    assert spec["url"].endswith("/items?id=1")
 
 
 # ---------------------------------------------------------------------------------------------------
@@ -354,3 +387,172 @@ def test_negctl_xss_quote_escaped_js_string_mints_nothing(monkeypatch, tmp_path)
     """BLOCK-3: a canary reflected into a quote-escaped <script> string literal (no breakout) must not mint."""
     ref = _fact(monkeypatch, tmp_path, "http://127.0.0.1:{port}/search?q=hello", "xss", handler=_JsStringApp)
     assert ref is None, "a quote-escaped JS-string reflection (presence, not breakout) must not mint an xss FACT"
+
+
+# ---------------------------------------------------------------------------------------------------
+# B1 — governed-engage FACT-parity for the W2 statistical/eval injection classes
+# ---------------------------------------------------------------------------------------------------
+#
+# The deterministic scanner (and the Strix proof-sink rail, test_strix_http_redrive.py) already PROVE ssti /
+# boolean_sqli / time_based_sqli; before B1 the governed engage/chat seam refused to mint them (under-report of
+# already-proven findings). These tests pin that the SAME seam the response-derived classes use now mints a
+# signed FACT for the three injection classes over a planted instance — through ``runtime_redrive``'s delegation
+# to the ssti/boolean/timing sibling arms — and stays SILENT (no FACT → LEAD) on a safe twin. The planted
+# surfaces mirror test_strix_http_redrive.py::_App: a REAL sink per class (never a payload-substring matcher),
+# so a FACT rests on the target's own behaviour, not on the shape of VIGIL's probe.
+
+_SLEEP_RE = re.compile(r"(?:pg_)?sleep\(\s*(\d*\.?\d+)\s*\)", re.IGNORECASE)
+_ARITH_RE = re.compile(r"(\d{4,})\s*\*\s*(\d{4,})")
+
+_INJ_DB = sqlite3.connect(":memory:", check_same_thread=False)
+_INJ_DB.execute("CREATE TABLE users(id INTEGER, name TEXT)")
+_INJ_DB.executemany("INSERT INTO users VALUES(?, ?)",
+                    list(enumerate("alice bob carol dave erin frank grace heidi".split())))
+_INJ_DB_LOCK = threading.Lock()
+
+
+def _inj_bool_rows(value: str) -> int:
+    """A REAL string-concatenated sqlite3 injection sink, so the origin EVALUATES the injected clause and
+    answers its TRUTH VALUE (mirrors test_strix_http_redrive._bool_rows). This is what lets the SPRT arm's
+    shape-varied always-true clauses land on one response and the always-false clauses on another — the
+    2-cluster split ``boolean_inference_oracle`` demands. A substring fixture would answer the payload STRING,
+    the exact confusion a lexical WAF masquerading as a boolean channel would exploit."""
+    with _INJ_DB_LOCK:
+        try:
+            return len(_INJ_DB.execute(
+                "SELECT id, name FROM users WHERE name = '" + value + "'").fetchall())
+        except sqlite3.Error:
+            return -1
+
+
+class _InjApp(http.server.BaseHTTPRequestHandler):
+    """Planted SSTI / boolean-blind / time-based sinks + their safe twins, for the governed engage seam."""
+
+    def _html(self, body: str, code: int = 200) -> None:
+        raw = body.encode("utf-8")
+        self.send_response(code)
+        self.send_header("Content-Type", "text/html; charset=utf-8")   # declared → body is adjudicable
+        self.send_header("Content-Length", str(len(raw)))
+        self.end_headers()
+        self.wfile.write(raw)
+
+    def do_GET(self):  # noqa: N802
+        parts = urlsplit(self.path)
+        q = parse_qs(parts.query, keep_blank_values=True)
+        value = (q.get("q") or q.get("id") or [""])[0]
+        path = parts.path
+
+        if path == "/ssti":                       # VULNERABLE: EVALUATES the arithmetic, emits ONLY the product
+            m = _ARITH_RE.search(value)
+            if m:
+                return self._html(f"<html><body><p>{int(m.group(1)) * int(m.group(2))}</p></body></html>")
+            return self._html(f"<html><body><p>{_esc(value)}</p></body></html>")   # benign echo, no product
+        if path == "/ssti-safe":                  # BENIGN: reflects the RAW expression verbatim (not evaluated)
+            return self._html(f"<html><body><p>{value}</p></body></html>")
+
+        if path == "/bool":                       # VULNERABLE: a REAL sqlite3 string-concatenation sink
+            n = _inj_bool_rows(value)
+            if n < 0:
+                return self._html("<html><body>query error, please retry</body></html>")
+            return self._html("<html><body>alice bob carol dave erin frank grace heidi</body></html>"
+                              if n else "<html><body>no results found for your query</body></html>")
+        if path == "/bool-safe":                  # BENIGN: identical body for ANY input → no boolean channel
+            return self._html("<html><body>welcome to the catalogue, browse our products</body></html>")
+        if path == "/bool-dynamic":               # DECOY (DETERMINISTIC always-varies, no RNG): the body LENGTH
+            # steps by a large fixed amount per request, so a byte-identical clause repeat comes back different →
+            # the SPRT determinism/stability control trips EVERY round and it refutes — this is the exact
+            # dynamic-page trap a single-shot DifferentialCheck would false-FACT on.
+            type(self).dyn = getattr(type(self), "dyn", 0) + 1
+            pad = "=" * (40 + (type(self).dyn % 5) * 90)
+            return self._html(f"<html><body>catalogue {pad} listing</body></html>")
+
+        if path == "/time":                       # VULNERABLE: sleeps the injected duration (dose-responsive)
+            m = _SLEEP_RE.search(value)
+            if m:
+                time.sleep(min(float(m.group(1)), 2.0))
+            return self._html("<html><body>ok</body></html>")
+        if path == "/time-safe":                  # BENIGN: UNIFORMLY slow — a fixed sleep for EVERY request
+            time.sleep(0.05)
+            return self._html("<html><body>ok</body></html>")
+
+        self.send_response(404)
+        self.end_headers()
+
+    def log_message(self, *a):  # silence
+        return
+
+
+# -- positives: the governed engage seam mints a FACT for each injection class ----------------------
+
+def test_live_ssti_mints_a_fact(monkeypatch, tmp_path):
+    """A live server that EVALUATES a runner-injected per-probe product must mint a signed SSTI FACT."""
+    ref = _fact(monkeypatch, tmp_path, "http://127.0.0.1:{port}/ssti?q=seed", "ssti", handler=_InjApp)
+    assert ref, "a live server evaluating the injected expression must mint a signed SSTI FACT via the seam"
+
+
+def test_live_boolean_sqli_mints_a_fact_via_sprt(monkeypatch, tmp_path):
+    """A REAL boolean-blind sink must mint a signed FACT — and ONLY via the multi-round SPRT
+    ``BooleanInferenceCheck`` / ``boolean_inference_oracle`` (never the single-shot DifferentialCheck, which
+    false-FACTs on a dynamic page). The boolean channel here is a genuine sqlite3 concatenation, so the SPRT
+    reaches its confirm boundary over the shape-varied true/false clusters."""
+    ref = _fact(monkeypatch, tmp_path, "http://127.0.0.1:{port}/bool?q=seed", "boolean_sqli", handler=_InjApp)
+    assert ref, "a live boolean-blind sink must mint a signed boolean_sqli FACT via the SPRT arm"
+
+
+def test_boolean_seam_routes_through_the_sprt_control_not_differential():
+    """Correctness-trap pin (non-negotiable): the boolean arm the seam dispatches to adjudicates through the
+    multi-round SPRT ``BooleanInferenceCheck`` + ``boolean_inference_oracle``, NOT the single-shot
+    ``DifferentialCheck`` (which false-FACTs on a dynamic page). Asserted structurally against the arm source so
+    a future refactor that swaps the control is caught even without a live dynamic-page origin."""
+    import inspect
+
+    from vigil_integration.live import runtime_redrive as rr
+    src = inspect.getsource(rr.boolean_redrive)
+    assert "BooleanInferenceCheck" in src and "boolean_inference_oracle" in src, (
+        "boolean_redrive must route through the SPRT BooleanInferenceCheck / boolean_inference_oracle")
+    assert "DifferentialCheck" not in src, (
+        "boolean_redrive must NOT use the single-shot DifferentialCheck (false-FACTs on a dynamic page)")
+    # and the dispatcher must delegate boolean_sqli to that arm (not to the single-capture inline body).
+    disp = inspect.getsource(rr.runtime_redrive)
+    assert "boolean_redrive" in disp and "RUNTIME_STAT_FACT_CLASSES" in disp, (
+        "the dispatcher must delegate the statistical classes to their sibling arms")
+
+
+def test_live_time_based_sqli_mints_a_fact(monkeypatch, tmp_path):
+    """A live server that SLEEPs proportionally to the injected delay must mint a signed time-based FACT."""
+    ref = _fact(monkeypatch, tmp_path, "http://127.0.0.1:{port}/time?q=seed", "time_based_sqli",
+                handler=_InjApp)
+    assert ref, "a live dose-responsive SLEEP sink must mint a signed time_based_sqli FACT via the seam"
+
+
+# -- mandatory negative controls: a safe twin mints nothing (stays a LEAD) --------------------------
+
+def test_negctl_ssti_reflected_but_unevaluated_mints_nothing(monkeypatch, tmp_path):
+    """FP: the raw expression survives verbatim (reflected, not evaluated) → no product → LEAD, not a FACT."""
+    ref = _fact(monkeypatch, tmp_path, "http://127.0.0.1:{port}/ssti-safe?q=seed", "ssti", handler=_InjApp)
+    assert ref is None, "a verbatim-reflected (unevaluated) expression must not mint an SSTI FACT"
+
+
+def test_negctl_boolean_sqli_static_page_mints_nothing(monkeypatch, tmp_path):
+    """FP: an endpoint with no true/false differential (same body for any input) → no SPRT flip → LEAD."""
+    ref = _fact(monkeypatch, tmp_path, "http://127.0.0.1:{port}/bool-safe?q=seed", "boolean_sqli",
+                handler=_InjApp)
+    assert ref is None, "a static page (no boolean channel) must not mint a boolean_sqli FACT"
+
+
+def test_negctl_boolean_sqli_dynamic_page_mints_nothing(monkeypatch, tmp_path):
+    """CORRECTNESS-TRAP control: a DETERMINISTIC always-varies page (body length steps every request) is the
+    exact dynamic page a single-shot differential would false-FACT on. The seam delegates to the SPRT arm, whose
+    per-round stability control sees a byte-identical clause repeat come back different → refutes EVERY round →
+    LEAD, not a FACT."""
+    ref = _fact(monkeypatch, tmp_path, "http://127.0.0.1:{port}/bool-dynamic?q=seed", "boolean_sqli",
+                handler=_InjApp)
+    assert ref is None, "a dynamic (always-varies) page must not mint a boolean_sqli FACT through the seam"
+
+
+def test_negctl_time_based_sqli_uniformly_slow_mints_nothing(monkeypatch, tmp_path):
+    """FP: a uniformly slow endpoint (fixed sleep for every request) — no distribution shift, no dose-response
+    → the timing oracle refuses → LEAD, not a FACT."""
+    ref = _fact(monkeypatch, tmp_path, "http://127.0.0.1:{port}/time-safe?q=seed", "time_based_sqli",
+                handler=_InjApp)
+    assert ref is None, "a uniformly slow endpoint must not mint a time_based_sqli FACT"

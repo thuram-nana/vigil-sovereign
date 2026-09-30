@@ -1404,6 +1404,47 @@ What is NOT here — honest scope:
   zero false certificates; the only findings were test-honesty items (a green-washed negative control, seq
   totality), both fixed.
 
+## 31. Non-SQL injection (nosqli / ldap / xpath) through governed engage is LEAD-only
+
+Wave B slice B2 wired `nosqli` / `ldap_injection` / `xpath_injection` through the governed-engage re-drive
+seam (`live.runtime_redrive.injection_redrive`, dispatched by `engine._redrive_spec` → `wiring.
+_live_injection_redrive_fact`). All four registered evidence branches for these classes —
+`{nosqli,ldap_injection,xpath_injection}.datastore_error` and `.sprt_inference` — are **LEAD-only**
+(`fact_capable: false`). The seam DRIVES VIGIL's own gated probe (a VIGIL-owned capture behind the operator's
+lead, not the model's assertion) but **mints no FACT** through governed engage.
+
+- **The error-signature false-positive residual (why `.datastore_error` is LEAD-only).** The
+  `error_signature_oracle` is a STRING MATCH; a fire proves only that a datastore/parser-error-shaped string
+  was emitted **conditionally** on the injected metacharacter (present on the probe, absent from a benign
+  control twin). That is *necessary but not sufficient* for a query break. The control twin rules out only
+  **unconditional** emission, so a signature emitted **conditionally by a non-datastore source** passes it.
+  A red-pen reproduced four durable false FACTs at rate 1.0 against the first B2 attempt (which was
+  fact_capable): (1) a WAF/security-filter block page that names the engine ("...MongoError NoSQL injection
+  attempt rejected", 403); (2) an input-validator rejection ("...LDAPException-style characters not allowed",
+  400); (3) an **unrelated** 500 whose stack trace merely names the driver package
+  (`com.mongodb...MongoClientDelegate`) — a **high-frequency** real-world case, because a metacharacter
+  routinely triggers *some* 500; (4) an XPath WAF block echoing "Expression must evaluate to a node-set" (403).
+  The bare package/class-name signatures (`com.mongodb`, `LDAPException`, `javax.naming.directory`,
+  `com.sun.jndi.ldap`, `XPathException`, `MS.Internal.Xml`, `xmlXPathEval`) name a *subsystem*, not a query
+  break, and appear in any error from that subsystem. **The same mechanism exists in the shipped
+  `error_based_sqli` / `proof.run._strix_errsig_redrive` path (pre-existing, surfaced separately, out of B2
+  scope).**
+- **The sound FACT path (blocking_work).** A break-vs-repair **parser-state-toggle** causation oracle,
+  re-executed OFFLINE (so the FACT is verify-by-re-execution, not a mint-time assertion): a genuine engine
+  parser error on the UNBALANCED breaking payload, **NO** error on a BALANCED/repaired payload carrying the
+  SAME metacharacters, and NO error on the benign control. A WAF/validator/unrelated-500 keying on
+  metacharacter *presence* fires on both breaking and balanced, so it cannot pass the toggle. Plus dropping
+  the bare package/class-name signatures and refusing block/rejection responses. This needs a **new
+  OracleKind** — deliberately out of this reuse-only slice's scope — which is why B2 registers the branches as
+  honest LEAD-only ladder targets rather than shipping a false FACT. Even once built, an irreducible residual
+  remains and is disclosed: a source that returns a non-block status AND perfectly echoes a real query-parser
+  error message only for the unbalanced payload.
+- **`.sprt_inference` is LEAD-only for a different reason.** The boolean SPRT channel proves truth-value
+  attribution but does NOT name the datastore engine, so the clause SYNTAX attributes the class; the shipped
+  SQL clause families cannot soundly attribute a non-SQL class (a SQL clause that partitions proves SQL
+  boolean injection). Class-specific, truth-correct clause families machine-verified against a real engine of
+  the class are that branch's blocking_work (no offline NoSQL/LDAP/XPath engine ships to verify them).
+
 ## What the operator should do next
 
 In rough order:

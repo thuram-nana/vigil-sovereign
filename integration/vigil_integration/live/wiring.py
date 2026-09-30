@@ -1724,6 +1724,15 @@ def _build_oracle(
         if runtime_ref:
             return runtime_ref
 
+        # T2 — INJECTION RE-DRIVE (nosqli / ldap_injection / xpath_injection): slice B2 DRIVES the runner-owned
+        # ``live.runtime_redrive.injection_redrive`` engine (a class-specific error probe + a benign control
+        # twin) for a VIGIL-owned capture. These branches are LEAD-only today (the error_signature oracle proves
+        # only CONDITIONAL EMISSION, which a WAF/validator/unrelated-500 can pass), so this returns None and the
+        # claim stays a LEAD below — the sound FACT path is a causation oracle in the branches' blocking_work.
+        injection_ref = _live_injection_redrive_fact(prov, info, redrive)
+        if injection_ref:
+            return injection_ref
+
         # LEAD-ONLY fallback (AUDIT G4): a boolean/other-class candidate, or an error_based_sqli whose live
         # re-drive did not reproduce, lands here. The deterministic oracle still runs so the LEAD is honestly
         # labelled with what fired, but an LLM-provenanced context is never signed into a FACT.
@@ -1924,10 +1933,15 @@ def _live_web_redrive_fact(prov: Provisioned, info: dict, redrive: Optional[dict
 
 
 def _live_runtime_redrive_fact(prov: Provisioned, info: dict, redrive: Optional[dict]) -> Optional[str]:
-    """T2 — RE-DRIVE a RESPONSE-DERIVED class (``path_traversal`` / ``xss`` reflected / ``exposure``) through
+    """T2 — RE-DRIVE a RESPONSE-DERIVED class (``path_traversal`` / ``xss`` reflected / ``exposure`` / ``ssi``,
+    and the W2 statistical/eval injection classes ``ssti`` / ``boolean_sqli`` / ``time_based_sqli``) through
     the runner-owned :mod:`live.runtime_redrive` engine and return a signed FACT's ``finding_ref`` ONLY when
-    the matching deterministic oracle (side_effect / reflection_context / predicate) confirms the CLAIMED
-    class over VIGIL's OWN gated live capture.
+    the matching deterministic oracle (side_effect / reflection_context / predicate / ssi_evaluation /
+    evaluation / boolean_inference SPRT / timing) confirms the CLAIMED class over VIGIL's OWN gated live
+    capture. B1 (governed-engage FACT-parity) added the three W2 classes to the dispatch set so the governed
+    engage/chat seam stops under-reporting classes the deterministic scanner already proves; ``runtime_redrive``
+    DELEGATES them to their ssti/boolean/timing sibling arms (boolean via the multi-round SPRT, never a
+    single-shot differential).
 
     Mirrors :func:`_live_web_redrive_fact`: the runner crafts its own probe (never the LLM's payload), mints
     via ``certify_admitted(provenance="live_redrive")``, and the FACT is tied to the CLAIM
@@ -1961,6 +1975,60 @@ def _live_runtime_redrive_fact(prov: Provisioned, info: dict, redrive: Optional[
     try:
         rr = runtime_redrive(url, slug=prov.slug, engagement_slug=prov.slug, signers=prov.signers,
                              claimed_class=claimed)
+    except Exception:  # noqa: BLE001 — any re-drive/transport/cert error is an unconfirmed claim → LEAD
+        return None
+    try:
+        if rr.family_verdict(claimed) != "FACT":
+            return None
+    except Exception:  # noqa: BLE001 — cannot read the verdict ⇒ treat as unconfirmed → LEAD
+        return None
+    for f in getattr(rr, "facts", []) or []:
+        try:
+            if getattr(f, "is_fact", False) and normalize_bug_class(getattr(f, "bug_class", "")) == claimed:
+                ref = str(getattr(f, "finding_ref", "") or "")
+                if ref:
+                    return ref
+        except Exception:  # noqa: BLE001 — a malformed result entry is skipped, never crashes the seam
+            continue
+    return None    # family verdict said FACT but no matching signed cert surfaced → LEAD (fail-closed)
+
+
+def _live_injection_redrive_fact(prov: Provisioned, info: dict, redrive: Optional[dict]) -> Optional[str]:
+    """T2 — DRIVE a non-SQL injection class (``nosqli`` / ``ldap_injection`` / ``xpath_injection``) through the
+    runner-owned :mod:`live.runtime_redrive` ``injection_redrive`` engine.
+
+    Slice B2. Both branches for these classes are LEAD-only today, so this seam ALWAYS returns ``None`` (the
+    claim stays a LEAD): it exists to DRIVE VIGIL's own gated probe (real, class-appropriate evidence for the
+    operator) rather than sourcing the lead from the model's assertion — the same DRIVEN-but-LEAD contract as
+    :func:`_live_runtime_redrive_fact` for path_traversal. ``injection_redrive`` admits to a
+    ``fact_capable: false`` branch, so ``family_verdict(claimed)`` is never ``"FACT"``.
+
+    WHY NOT A FACT (red-pen BLOCK, fixed): the ``error_signature`` oracle is a string match and re-verifies
+    only CONDITIONAL EMISSION of a datastore-error-shaped string — a WAF block page / validator rejection /
+    unrelated 500 naming the driver package emits one conditionally on the metacharacter and passes the
+    control-twin guard. The sound FACT path is a break-vs-repair parser-state-toggle causation oracle
+    re-executed offline (a new OracleKind) — see the branches' ``blocking_work``. The return-a-matching-cert
+    loop below is retained (harmless; it always falls through today) so this seam mints the moment those
+    branches become fact_capable, with the FACT tied to the CLAIM (``family_verdict(claimed) == "FACT"`` and
+    cert ``bug_class == claimed``). Runs ONLY the claimed class.
+
+    FATAL-2: every framework/runtime_redrive import is function-local (offense-side re-drive path)."""
+    if not isinstance(redrive, dict):
+        return None
+    url = str(redrive.get("url") or "").strip()
+    if not url:
+        return None
+    try:
+        from framework.v2.verify.verifier import normalize_bug_class  # noqa: PLC0415
+        from .runtime_redrive import INJECTION_REDRIVE_CLASSES, injection_redrive  # noqa: PLC0415 (framework at CALL)
+    except Exception:  # noqa: BLE001 — module unavailable ⇒ cannot re-drive → LEAD (fail-closed)
+        return None
+    claimed = normalize_bug_class(str(redrive.get("bug_class") or info.get("bug_class") or ""))
+    if claimed not in INJECTION_REDRIVE_CLASSES:
+        return None    # not an injection-redrive class → nothing for this seam to confirm → LEAD
+    try:
+        rr = injection_redrive(url, slug=prov.slug, engagement_slug=prov.slug, signers=prov.signers,
+                               claimed_class=claimed)
     except Exception:  # noqa: BLE001 — any re-drive/transport/cert error is an unconfirmed claim → LEAD
         return None
     try:
