@@ -141,3 +141,38 @@ def test_capture_anonymous_get_refuses_when_floor_denies(monkeypatch):
     monkeypatch.setattr(egress_pin, "resolve_and_pin", deny)
     out = reachability_cloud.capture_anonymous_get("https://victim.example/", slug="s", connect=None)
     assert "egress floor" in out["error"]
+
+
+# --------------------------------------------------------------------------- pin is actually dialled
+
+
+def test_capture_handshake_dials_the_pinned_ip_not_the_name(monkeypatch):
+    # Guards the anti-rebinding half: on a successful floor pass the TCP connect must go to the PINNED IP,
+    # never the re-resolvable name. A refactor that kept resolve_and_pin but dialled the name fails here.
+    from framework.v2.verify import reachability
+    monkeypatch.setattr(reachability, "_authorize", lambda *a, **k: None)
+    monkeypatch.setattr(egress_pin, "resolve_and_pin", lambda *a, **k: "203.0.113.7")
+    seen = {}
+
+    def rec(host, port, timeout, read_banner):
+        seen["host"] = host
+        return ("203.0.113.7:80", "banner")
+    monkeypatch.setattr(reachability, "_socket_connect", rec)
+    out = reachability.capture_handshake("example.com", 80, slug="s", connect=None)
+    assert seen["host"] == "203.0.113.7" and out["connected"] is True
+
+
+def test_capture_tls_dials_the_pinned_ip_with_sni_preserved(monkeypatch):
+    # TLS must connect to the PINNED IP (dial_ip) while SNI stays the hostname.
+    from framework.v2.verify import tls
+    monkeypatch.setattr(tls, "_authorize", lambda *a, **k: None)
+    monkeypatch.setattr(egress_pin, "resolve_and_pin", lambda *a, **k: "203.0.113.7")
+    seen = {}
+
+    def rec(host, port, timeout, *, dial_ip=None):
+        seen["host"] = host
+        seen["dial_ip"] = dial_ip
+        return ("TLSv1.3", "TLS_AES_256_GCM_SHA384", 256, None)
+    monkeypatch.setattr(tls, "_tls_connect", rec)
+    out = tls.capture_tls_handshake("example.com", 443, slug="s", connect=None)
+    assert seen["dial_ip"] == "203.0.113.7" and seen["host"] == "example.com" and out["connected"] is True

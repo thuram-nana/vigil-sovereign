@@ -3,10 +3,19 @@
 DEFENSIVE. This module only ever REFUSES a destination or returns the exact IP the caller must pin to;
 it never widens what may be reached. It exists to close the residual named in
 ``integration/vigil_integration/live/egress_floor.py:23-35``: the integration re-drive paths pin their
-egress through ``pin_egress`` + ``vigil_gateway.denylist``, but the engine's own capture connectors
-(``verify/reachability.py``, ``verify/tls.py``, ``verify/reachability_cloud.py``, ``scanner/smuggling.py``)
-historically did a string scope check and then a raw ``socket.create_connection`` on a RE-RESOLVED name —
-so a metadata / link-local / RFC1918 address (directly, or via a DNS-rebinding answer) could be dialled.
+egress through ``pin_egress`` + ``vigil_gateway.denylist``, but the engine's own raw-socket / urllib egress
+sites historically did a string scope check and then connected on a RE-RESOLVED name — so a metadata /
+link-local / RFC1918 address (directly, or via a DNS-rebinding answer) could be dialled.
+
+COVERAGE — be precise about which same-class engine sites this helper is wired into (do not read it as
+covering all of them):
+  * WIRED (this slice): ``verify/reachability.py`` (TCP handshake), ``verify/tls.py`` (TLS handshake, pin +
+    SNI preserved), ``verify/reachability_cloud.py`` (anonymous GET — floor CHECK only; urllib re-resolves,
+    so a precisely-timed DNS rebinding is a NARROW named residual there — an IP-pin breaks a vhost's cert).
+  * NOT YET WIRED (tracked hardening WS1.1b; covered for the eval by the VM-firewall floor): the raw sockets
+    in ``scanner/websocket.py`` (CSWSH — a FACT-minting path), ``scanner/race.py::raw_race`` (LEAD), and
+    ``scanner/smuggling.py::raw_send``. Those carry no slug/charter context at the socket and need it threaded
+    from their campaign drivers, so they get their own build + red-pen rather than being crammed in here.
 
 This helper resolves the host ONCE, runs the SAME shared floor primitive
 ``vigil_gateway.denylist.is_egress_denied`` over EVERY resolved address, and returns the first validated
@@ -18,6 +27,15 @@ The floor is charter-independent where it must be: the metadata/link-local/reser
 The private and loopback tiers lift ONLY for an exact IP LITERAL written in the signed charter scope
 (``ethics.parse_scope`` filtered to literals — mirroring ``charter_allowed_ips``: literals only, no DNS, so
 there is no second DNS view that could authorise itself). Fail-closed throughout: any error REFUSES.
+
+DIVERGENCE from the integration ``pin_egress`` (deliberate, named): this helper enforces the L3/L4 floor +
+the anti-rebinding pin + the caller's name-level scope check (in each connector's ``_authorize``), but does
+NOT add ``pin_egress``'s scope-over-RESOLVED-ADDRESSES step (its ``charter_address_authorizer``). Effect: a
+charter-listed NAME that resolves to several PUBLIC addresses will pin the first — the floor still refuses
+every metadata/link-local/RFC1918 address, so the only residual is an out-of-scope *public* address on an
+in-scope name (the name itself already passed the scope gate). Replicating the address-level scope predicate
+soundly means replicating ``charter_address_authorizer`` (and its self-reference pitfalls); that is deferred
+to WS1.1b with the raw-socket sites rather than approximated here.
 """
 
 from __future__ import annotations
