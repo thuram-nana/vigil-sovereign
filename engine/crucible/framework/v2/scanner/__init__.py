@@ -138,6 +138,7 @@ from .insertion import (
     InsertionKind,
     InsertionPoint,
     RequestTemplate,
+    request_from_api_operation,
 )
 from .jwt import JwtForgeryCheck, JwtNoneCheck
 from .sso import (
@@ -159,6 +160,7 @@ __all__ = [
     "InsertionKind",
     "InsertionPoint",
     "RequestTemplate",
+    "request_from_api_operation",
     # checks
     "Check",
     "DifferentialCheck",

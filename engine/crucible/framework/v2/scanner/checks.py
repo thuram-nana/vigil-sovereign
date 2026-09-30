@@ -1499,6 +1499,72 @@ class PathProbeCheck:
         )
 
 
+@dataclass(frozen=True)
+class NucleiTemplateCheck:
+    """A compiled-Nuclei-template exposure probe (a request-level check).
+
+    The sibling of :class:`PathProbeCheck`, generalised for the wider Nuclei matcher subset the
+    ``scanner.nuclei_compile`` compiler now understands: STATUS matchers, REGEX matchers (reduced to
+    their distinctive literal core), DSL matchers, multi-request templates and RAW requests. Where
+    ``PathProbeCheck`` carries a single body signature, this check carries a fully-declarative
+    ``match_predicate`` — the predicate-oracle AST the compiler translated the template's matchers into
+    (``all``/``any``/``not`` over ``eq``/``in``/``contains``/``icontains`` on ``status`` and ``body``).
+
+    It sends ONE fixed request (method/path/headers/body, all fixed at compile time — no interpolation,
+    no chaining) and hands the RAW observed ``{status, body}`` plus that predicate to the predicate
+    oracle. The check makes NO trust decision and evaluates NO template logic itself: the ORACLE — never
+    this check, and never the Nuclei template's own verdict — adjudicates whether the dangerous
+    condition holds over the real response, and the predicate is pure JSON so the resulting finding's
+    certificate re-verifies offline exactly like every other achieved-state finding. When the predicate
+    holds the oracle mints a CONCLUSIVE achieved-state fact (confidence 0.9); a response the predicate
+    does not hold over yields a non-firing context (no fact); a transport failure yields None. Runs once
+    per host.
+
+    Because that mint is conclusive, the predicate must be DISCRIMINATING — satisfiable only when a
+    distinctive body literal is actually present, never by a bare live 200 (the vacuous-mint failure the
+    sibling ``PathProbeCheck`` avoids by requiring a specific signature and rejecting a mere 2xx). This
+    check does not re-derive that floor at runtime because it cannot receive a non-discriminating
+    predicate: ``OracleSpec`` validation rejects any ``nuclei_http`` entry whose ``match_predicate`` lacks
+    a body signature (``scanner.library.predicate_has_body_signature``), so a benign homepage — same
+    status, no signature — fails the predicate and mints nothing.
+
+    SIDE-EFFECT-FREE by construction: it fetches with the fixed request and does substring/equality
+    comparisons via the oracle — it never compiles or executes a template regex (the compiler already
+    reduced any regex to a static literal), and the compiler strips any HTTP method-override header, so
+    the probe stays an idempotent GET and no attacker-authored pattern can run here (no ReDoS)."""
+
+    id: str
+    bug_class: str
+    probe_path: str
+    match_predicate: dict
+    http_method: str = "GET"
+    request_body: str | None = None
+    # Extra request headers the template pinned (Host is never carried — the target's netloc wins).
+    request_headers: tuple[tuple[str, str], ...] = ()
+
+    def probe(self, template: RequestTemplate, send: Send) -> FindingContext | None:
+        req = template.request
+        parts = urlsplit(req.url)
+        base = f"{parts.scheme}://{parts.netloc}/"
+        url = urljoin(base, self.probe_path.lstrip("/"))
+        # Start from the live request's headers, then append the template's fixed extras. The engine's
+        # gated send owns transport; we only shape method/url/headers/body.
+        headers = [*req.headers, *self.request_headers]
+        resp = send(req.model_copy(update={
+            "method": self.http_method, "url": url,
+            "headers": headers, "body": self.request_body if self.request_body is not None else "",
+        }))
+        if not isinstance(resp, dict):
+            return None
+        status = int(resp.get("status", 0))
+        body = str(resp.get("body", ""))
+        return FindingContext.from_predicate(
+            {"status": status, "body": body},
+            self.match_predicate,
+            bug_class=self.bug_class,
+        )
+
+
 def _slugify(s: str) -> str:
     return "".join(c for c in s if c.isalnum())
 
