@@ -33,11 +33,78 @@ import socket
 import ssl
 import urllib.parse
 from dataclasses import dataclass, field
+from typing import Any, Callable
 
 from ..verify.confirmation import ConfirmedFinding, confirm_finding
 from ..verify.adapter import FindingContext
 
 _GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"  # RFC 6455 magic
+
+# The no-engagement (``slug=""``) scan posture: loopback is the ONLY private/loopback address the
+# egress floor lifts, mirroring ``scanner.campaign._arsenal_host_allowed``'s no-gate discipline
+# (loopback-only, never off-box). It is a STATIC structural constant — NOT re-derived from the
+# target or any untrusted lookup (so it is not the allowlist-self-reference trap) — and it lifts
+# ONLY the loopback tier: the metadata / link-local / RFC1918 / reserved floor is never liftable
+# by it. When an engagement ``slug`` IS threaded, this is unused and the charter's own IP literals
+# (``egress_pin.charter_ip_literals``) are the sole lift, exactly as the floor's soundness rule
+# requires (an exact charter IP LITERAL sourced from the signed scope).
+_LOOPBACK_SCAN_ALLOWED = frozenset({"127.0.0.1", "::1"})
+
+
+def _probe_http_url(url: str) -> str:
+    """Map a ``ws://``/``wss://`` URL to the ``http(s)`` form the scope/charter gate parses.
+
+    ``agents.scope_gate.validate_action`` (and the categorical protected-domain floor) reason over an
+    ``http``/``https`` URL; a raw ``ws://`` scheme would be rejected as unparseable. The host/port/path
+    are preserved verbatim, so the gate validates the SAME host the socket dials."""
+    if url.startswith("wss://"):
+        return "https://" + url[len("wss://"):]
+    if url.startswith("ws://"):
+        return "http://" + url[len("ws://"):]
+    return url
+
+
+def _authorize_ws_name(probe_url: str, slug: str) -> "str | None":
+    """The NAME floor for the WS raw socket: return a refusal reason, or ``None`` to proceed.
+
+    Two layers, in ``validate_action``'s own order, both fail-closed:
+
+      * The categorical protected-domain floor (``.gov``/``.mil``/``.edu``/IGO) is charter-INDEPENDENT
+        and applies even with no engagement ``slug`` — a protected host is refused with ZERO packets.
+      * When an engagement ``slug`` is threaded, the FULL chain must also pass: kill-switch (checked
+        first, so a tripped switch halts even an in-scope target), then
+        :func:`agents.scope_gate.validate_action` (charter present AND signed, URL parseable, the
+        protected-domain NAME floor, host in the signed scope, posture). GET-only method, matching the
+        engine's GET-only default.
+
+    Imports are FUNCTION-LOCAL to keep ``scanner.websocket`` importable without pulling the
+    agents/authority stack at module load (and to avoid an import cycle). This layer touches ONLY
+    ``vigil_core`` + the engine's own ``agents``/``authority`` — never the integration layer (FATAL-2)."""
+    try:
+        from vigil_core.hard_guardrail import is_hard_blocked, protected_guard_enabled
+        if protected_guard_enabled():
+            blocked, why = is_hard_blocked(probe_url)
+            if blocked:
+                return f"protected-domain floor: {why}"
+    except Exception as e:  # a floor that errored refuses
+        return f"protected-domain floor errored (fail-closed): {type(e).__name__}: {e}"
+    if not slug:
+        # No engagement context: the categorical floor is the only NAME check (the scan/legacy
+        # posture). Signed-scope + kill-switch require a charter, which a slug-less call has none of.
+        return None
+    try:
+        from ..agents.scope_gate import validate_action
+        from ..agents.http_executor import parse_posture
+        from ..authority import KillSwitch
+        if KillSwitch(slug).is_tripped():
+            return "kill-switch tripped"
+        decision = validate_action(
+            slug=slug, method="GET", target_url=probe_url, posture=parse_posture(slug))
+        if not decision.allowed:
+            return f"scope/charter gate refused: {decision.reason}"
+    except Exception as e:  # any gate error is a refusal, never an allow
+        return f"name-floor gate errored (fail-closed): {type(e).__name__}: {e}"
+    return None
 
 
 class WSError(RuntimeError):
@@ -170,12 +237,30 @@ def handshake(
     cookies: str | None = None,
     extra_headers: list[tuple[str, str]] | None = None,
     timeout: float = 5.0,
+    slug: str = "",
+    resolver: "Callable[..., Any] | None" = None,
 ) -> tuple["WSConnection | None", Handshake]:
     """Perform the RFC 6455 handshake and return ``(connection_or_None, raw_record)``.
 
     The connection half is exactly :func:`connect`'s contract; the second half RETAINS
     the raw bytes of the exchange so a check can hand real target bytes to an oracle
-    instead of its own boolean."""
+    instead of its own boolean.
+
+    CHANNEL FLOOR (defensive, adds a refusal — never reach). Before ANY byte leaves the box this
+    raw socket is now floored twice, both fail-closed and returning a zero-packet refusal Handshake:
+
+      * NAME floor — :func:`_authorize_ws_name` (categorical protected-domain floor always; the full
+        kill-switch + signed-scope + posture chain when an engagement ``slug`` is threaded).
+      * IP floor + anti-rebinding pin — ``common.egress_pin.resolve_and_pin`` resolves the host ONCE,
+        refuses a metadata / link-local / RFC1918 / reserved destination (directly OR via a
+        DNS-rebinding answer), and returns the exact validated address to DIAL. The socket connects to
+        that PINNED IP, never the re-resolvable name; the ``Host`` header and (for ``wss``) the TLS
+        ``server_hostname`` keep the ORIGINAL hostname so vhosts/SNI/cert matching are unaffected. The
+        metadata/link-local/reserved tier is never liftable; loopback/private lift ONLY for an exact
+        charter IP literal from ``slug`` (or, with no slug, the loopback-only scan posture).
+
+    The CSWSH/injection oracle still decides the FACT over the live bytes — this only hardens the
+    channel it runs over, mints no FACT, and adds no oracle."""
     tls, host, port, path = _parse_ws_url(url)
     key = base64.b64encode(os.urandom(16)).decode("ascii")
     expected_accept = _accept_key(key)
@@ -196,8 +281,24 @@ def handshake(
     request = ("\r\n".join(lines) + "\r\n\r\n").encode("ascii")
     sent = request.decode("latin-1", "replace")
 
+    # NAME floor — refuse a protected/out-of-scope host with ZERO packets (no socket opened).
+    name_refusal = _authorize_ws_name(_probe_http_url(url), slug)
+    if name_refusal is not None:
+        return None, Handshake(request=sent, accept_key=expected_accept,
+                               error=f"egress floor refused (name): {name_refusal}")
+    # IP floor + anti-rebinding pin — resolve once, refuse metadata/link-local/RFC1918/reserved, and
+    # dial the validated address directly. Fail-closed: any refusal/resolve error yields a zero-packet
+    # refusal Handshake rather than an unguarded connect.
     try:
-        sock: socket.socket = socket.create_connection((host, port), timeout=timeout)
+        from ..common.egress_pin import resolve_and_pin
+        allowed_ips = None if slug else _LOOPBACK_SCAN_ALLOWED
+        dial_ip = resolve_and_pin(host, port, slug=slug, allowed_ips=allowed_ips, resolver=resolver)
+    except Exception as exc:  # EgressFloorRefused and any other error both fail closed
+        return None, Handshake(request=sent, accept_key=expected_accept,
+                               error=f"egress floor refused (ip): {type(exc).__name__}: {exc}")
+
+    try:
+        sock: socket.socket = socket.create_connection((dial_ip, port), timeout=timeout)
         if tls:
             ctx = ssl.create_default_context()
             ctx.check_hostname = False
@@ -235,12 +336,16 @@ def connect(
     cookies: str | None = None,
     extra_headers: list[tuple[str, str]] | None = None,
     timeout: float = 5.0,
+    slug: str = "",
+    resolver: "Callable[..., Any] | None" = None,
 ) -> WSConnection | None:
     """Perform the RFC 6455 handshake and return a WSConnection, or None if the
-    server refused the upgrade (any non-101 status). ``origin``/``cookies`` model
-    a browser-originated connection for CSWSH testing."""
+    server refused the upgrade (any non-101 status) OR the channel floor refused the
+    destination. ``origin``/``cookies`` model a browser-originated connection for CSWSH
+    testing; ``slug`` threads the engagement charter to the egress floor (see :func:`handshake`)."""
     return handshake(url, origin=origin, cookies=cookies,
-                     extra_headers=extra_headers, timeout=timeout)[0]
+                     extra_headers=extra_headers, timeout=timeout,
+                     slug=slug, resolver=resolver)[0]
 
 
 def _read_headers(sock: socket.socket) -> bytes:
@@ -311,6 +416,8 @@ class CswshCheck:
     bug_class: str = "cross_site_websocket_hijacking"
     evil_origin: str = "https://crucible-evil-origin.test"
     trusted_origin: str | None = None  # defaults to the target's own origin
+    slug: str = ""  # engagement slug — threads the charter to the egress floor (see handshake)
+    resolver: "Callable[..., Any] | None" = None  # injectable getaddrinfo for the IP floor (tests)
 
     def probe(self) -> ConfirmedFinding | None:
         return self.probe_with_context()[0]
@@ -331,10 +438,12 @@ class CswshCheck:
         retained byte breaks the accept-key binding and the offline re-verification FAILS."""
         tls, host, port, _ = _parse_ws_url(self.url)
         trusted = self.trusted_origin or f"{'https' if tls else 'http'}://{host}:{port}"
-        legit, legit_hs = handshake(self.url, origin=trusted, cookies=self.cookies or None)
+        legit, legit_hs = handshake(self.url, origin=trusted, cookies=self.cookies or None,
+                                    slug=self.slug, resolver=self.resolver)
         with _closing(legit):
             pass
-        evil, evil_hs = handshake(self.url, origin=self.evil_origin, cookies=self.cookies or None)
+        evil, evil_hs = handshake(self.url, origin=self.evil_origin, cookies=self.cookies or None,
+                                  slug=self.slug, resolver=self.resolver)
         with _closing(evil):
             pass
         # B3 — the PRODUCER's verdict is status-line anchored (``_status_of`` reads the
@@ -436,9 +545,12 @@ class WsMessageInjectionCheck:
     wrap: str = "{marker}"
     id: str = "ws-injection"
     bug_class: str = "websocket_injection"
+    slug: str = ""  # engagement slug — threads the charter to the egress floor (see handshake)
+    resolver: "Callable[..., Any] | None" = None  # injectable getaddrinfo for the IP floor (tests)
 
     def probe(self) -> ConfirmedFinding | None:
-        conn = connect(self.url, origin=self.origin, cookies=self.cookies or None)
+        conn = connect(self.url, origin=self.origin, cookies=self.cookies or None,
+                       slug=self.slug, resolver=self.resolver)
         if conn is None:
             return None
         marker = "cruciblews" + base64.b16encode(os.urandom(4)).decode("ascii").lower()
