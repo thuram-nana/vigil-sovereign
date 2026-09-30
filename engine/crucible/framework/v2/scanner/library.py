@@ -51,7 +51,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_valida
 from ..common.errors import CrucibleError
 from .checks import (
     Check, ContentSignatureCheck, DifferentialCheck, ErrorSignatureCheck, EvaluationCheck,
-    MarkerReflectionCheck, OOBCheck, PathProbeCheck, TimingCheck,
+    MarkerReflectionCheck, NucleiTemplateCheck, OOBCheck, PathProbeCheck, TimingCheck,
 )
 from .insertion import InsertionKind
 
@@ -61,13 +61,13 @@ LIBRARY_DIR: Path = Path(__file__).resolve().parent / "library_entries"
 # The concrete check shapes an entry's oracle can name.
 ORACLE_KINDS: frozenset[str] = frozenset(
     {"differential", "reflection", "oob", "timing", "evaluation",
-     "error_signature", "signature", "content"}
+     "error_signature", "signature", "content", "nuclei_http"}
 )
 
 # Kinds that compile to a REQUEST-level check (probe the whole request/host once)
 # rather than a point-level check (fuzz one insertion point). The campaign routes
 # these into its per-host request_checks, the others into the per-point checks.
-REQUEST_LEVEL_KINDS: frozenset[str] = frozenset({"signature"})
+REQUEST_LEVEL_KINDS: frozenset[str] = frozenset({"signature", "nuclei_http"})
 
 # Severities an entry may claim (aligns with the framework's finding template).
 SEVERITIES: frozenset[str] = frozenset({"Critical", "High", "Medium", "Low", "Info"})
@@ -239,6 +239,18 @@ class OracleSpec(BaseModel):
     content_payload: str | None = Field(default=None, description="Traversal/LFI payload (content).")
     content_signature: str | None = Field(
         default=None, description="Distinctive signature of the target file's content (content).")
+    # nuclei_http (compiled Nuclei template, wider matcher subset) — GET a fixed path and confirm a
+    # declarative predicate the compiler translated the template's matchers into. Reuses `probe_path`
+    # and `http_method` above; the request body/extra headers are for RAW-request templates.
+    match_predicate: dict | None = Field(
+        default=None,
+        description="Predicate-oracle AST over {status, body} translated from the template's matchers "
+                    "(nuclei_http).",
+    )
+    request_body: str | None = Field(
+        default=None, description="Fixed request body for a compiled RAW template (nuclei_http).")
+    request_headers: list[tuple[str, str]] | None = Field(
+        default=None, description="Fixed extra request headers for a compiled RAW template (nuclei_http).")
 
     @model_validator(mode="after")
     def _check_shape(self) -> "OracleSpec":
@@ -276,6 +288,10 @@ class OracleSpec(BaseModel):
         elif k == "content":
             _require(self, "content_payload")
             _require(self, "content_signature")
+        elif k == "nuclei_http":
+            _require(self, "probe_path")
+            if not isinstance(self.match_predicate, dict) or not self.match_predicate:
+                raise ValueError("nuclei_http oracle requires a non-empty 'match_predicate'")
         return self
 
 
@@ -410,6 +426,13 @@ def compile_entry(entry: LibraryEntry) -> Check:
         return ContentSignatureCheck(
             id=entry.id, bug_class=entry.bug_class,
             payload=spec.content_payload, signature=spec.content_signature,  # type: ignore[arg-type]
+        )
+    if kind == "nuclei_http":
+        return NucleiTemplateCheck(
+            id=entry.id, bug_class=entry.bug_class,
+            probe_path=spec.probe_path, match_predicate=dict(spec.match_predicate or {}),  # type: ignore[arg-type]
+            http_method=spec.http_method, request_body=spec.request_body,
+            request_headers=tuple(tuple(h) for h in (spec.request_headers or ())),
         )
     # OracleSpec validation makes this unreachable; kept as a defensive guard.
     raise LibraryError(f"unknown oracle kind {kind!r} in entry {entry.id!r}")
