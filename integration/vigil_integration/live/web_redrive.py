@@ -39,6 +39,45 @@ WEB_FACT_CLASSES = ("open_redirect", "cors", "host_header_injection", "graphql_i
 # (independent code/token evidence) exists, the LLM-claim seam never upgrades to oidc. (red-pen BLOCK-1)
 LLM_CLAIM_WEB_FACT_CLASSES = tuple(c for c in WEB_FACT_CLASSES if c != "oidc_redirect_uri")
 
+# The subset a SCANNER-reported label (nuclei / nikto template class or tag) may re-drive into. It is exactly
+# LLM_CLAIM_WEB_FACT_CLASSES — a scanner's classification is untrusted the same way a model's free text is, so
+# oidc_redirect_uri is EXCLUDED for the identical reason (its A07 impact is not observable; the live evidence
+# is byte-identical to a plain open_redirect, so the OIDC label would rest entirely on the scanner's say-so).
+SCANNER_CLAIM_WEB_FACT_CLASSES = LLM_CLAIM_WEB_FACT_CLASSES
+
+# Common scanner spellings → the canonical WEB_FACT_CLASS. Kept SMALL and EXACT (a fuzzy hint could re-drive
+# an endpoint the report did not implicate — worst case a wasted gated burst, since the oracle must still fire,
+# but keep it precise). Applied AFTER lower-casing and hyphen/space→underscore normalisation.
+_SCANNER_CLASS_SYNONYMS = {
+    "openredirect": "open_redirect",
+    "unvalidated_redirect": "open_redirect",
+    "url_redirection": "open_redirect",
+    "cors_misconfiguration": "cors",
+    "cors_misconfig": "cors",
+    "permissive_cors": "cors",
+    "host_header": "host_header_injection",
+    "host_header_attack": "host_header_injection",
+    "graphql_introspection_enabled": "graphql_introspection",
+    "introspection": "graphql_introspection",
+}
+
+
+def web_fact_class_for(reported_class: str) -> "str | None":
+    """The canonical WEB_FACT_CLASS a SCANNER-reported bug class maps to, or ``None`` when the report is not
+    web-re-drivable (it stays a LEAD elsewhere — never our concern to mint).
+
+    Conservative by design: an EXACT match against :data:`SCANNER_CLAIM_WEB_FACT_CLASSES` after normalising
+    case + hyphens/spaces to underscores, else a SMALL synonym table. This is the ONLY place a scanner's
+    label chooses a web verifier; the label never itself mints — it only selects WHICH VIGIL re-drive runs,
+    and the oracle over VIGIL's own gated capture is the sole authority (criterion-6). ``oidc_redirect_uri``
+    is deliberately unreachable from a scanner label (see :data:`SCANNER_CLAIM_WEB_FACT_CLASSES`)."""
+    v = (reported_class or "").strip().lower().replace("-", "_").replace(" ", "_")
+    if not v:
+        return None
+    if v in SCANNER_CLAIM_WEB_FACT_CLASSES:
+        return v
+    return _SCANNER_CLASS_SYNONYMS.get(v)
+
 # ---------------------------------------------------------------------------
 # HexStrike W2 — SIBLING RESPONSE DIFFERENTIAL.  *** LEAD-ONLY, PERMANENTLY. ***
 # Shipped bug-class token: ``sibling_response_differential``. Evidence-branch id (an internal admission key,

@@ -539,10 +539,13 @@ def test_h7_oracle_mapped_set_is_derived_from_the_family_registry():
     from vigil_integration.live.oracle_families import is_fact_capable_family, oracle_mapped_tools
 
     # httpx/ffuf are NOT here: they have R4 ToolSpec builders and still run the gated web re-drive, but
-    # as LEAD ENRICHERS (hexstrike_body._LEAD_ENRICHER_TOOLS) — their branch is LEAD-only, so they are
-    # absent from SPEC_BUILDER_TOOLS and therefore cannot be oracle-mapped. A builder is not a mint.
+    # as LEAD ENRICHERS (hexstrike_body._LEAD_ENRICHER_TOOLS) on the LEAD-only endpoint_liveness branch, so
+    # they are absent from SPEC_BUILDER_TOOLS and cannot be oracle-mapped. A builder is not a mint.
+    # C4: katana/gobuster ARE here — same web_discovery family, but their spec builders feed the FACT-CAPABLE
+    # ACHIEVED_STATE web re-drive (web_redrive), so they are in SPEC_BUILDER_TOOLS and thus oracle-mapped.
     assert _ORACLE_MAPPED_TOOLS == oracle_mapped_tools(_SPEC_BUILDER_TOOLS)
-    assert _ORACLE_MAPPED_TOOLS == {"nmap", "sslscan", "masscan", "rustscan", "naabu", "zmap", "unicornscan"}
+    assert _ORACLE_MAPPED_TOOLS == {"nmap", "sslscan", "masscan", "rustscan", "naabu", "zmap", "unicornscan",
+                                    "katana", "gobuster"}
     for tool in _ORACLE_MAPPED_TOOLS:
         assert is_fact_capable_family(tool), f"{tool}: mapped but its family is not FACT-capable"
 

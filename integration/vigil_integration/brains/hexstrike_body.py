@@ -97,9 +97,17 @@ _ORACLE_MAPPED_TOOLS = oracle_mapped_tools(_SPEC_BUILDER_TOOLS)
 # is `verdict.admit()` over the branch registry, NOT this set: httpx/ffuf re-drives cross admission with
 # ``achieved_state.endpoint_liveness`` declared fact_capable=false, so every result comes back a LEAD.
 _LEAD_ENRICHER_TOOLS: "frozenset[str]" = frozenset({"httpx", "ffuf"})
-# Everything the body may dispatch to the R4 runner at all. Disjoint by construction (asserted in tests): a
-# tool is either oracle-mapped (may mint) or a lead enricher (may not), never both.
-_RUNNER_DISPATCHED_TOOLS = _ORACLE_MAPPED_TOOLS | _LEAD_ENRICHER_TOOLS
+# C4 — the SCANNERS-family bug-class DISPATCHER. nuclei is dispatched to the R4 runner and CAN mint — but only
+# via ``web_redrive`` (ACHIEVED_STATE), reached when its reported class maps to a web FACT class and VIGIL's
+# own oracle independently confirms it. nuclei is deliberately NOT in _ORACLE_MAPPED_TOOLS / SPEC_BUILDER_TOOLS
+# and STAYS fact_capable=false in the matrix: a scanner is a PROPOSER, never the authority. Its family verifier
+# is the ``bug_class`` dispatcher (LEAD-only as a family); the FACT it can produce is attributed to
+# ACHIEVED_STATE, not to the scanner. Kept disjoint from both other sets (asserted in tests).
+_SCANNER_REDRIVE_TOOLS: "frozenset[str]" = frozenset({"nuclei"})
+# Everything the body may dispatch to the R4 runner at all — three disjoint roles: ORACLE-MAPPED (may mint via
+# its family's own re-drive), a LEAD ENRICHER (may never mint), or a SCANNER DISPATCHER (may mint only by
+# re-driving a labelled finding through an already-FACT-capable verifier). Disjoint by construction (tests).
+_RUNNER_DISPATCHED_TOOLS = _ORACLE_MAPPED_TOOLS | _LEAD_ENRICHER_TOOLS | _SCANNER_REDRIVE_TOOLS
 # a provenance/context/authorization key must NEVER originate from the body/brain (red-pen HIGH-3 guard).
 _FORBIDDEN_EXEC_KEYS = frozenset({"provenance", "oracle_context", "_authorized", "authorized"})
 
@@ -115,10 +123,13 @@ def _spec_for_kind(kind: str, params: "dict | None"):
     offense engine into the sovereign env."""
     from ..live.external_tool import (  # noqa: PLC0415
         ffuf_content_scan,
+        gobuster_web_scan,
         httpx_url_scan,
+        katana_web_scan,
         masscan_service_scan,
         naabu_service_scan,
         nmap_service_scan,
+        nuclei_web_redrive,
         rustscan_service_scan,
         tls_scan,
         unicornscan_service_scan,
@@ -135,6 +146,21 @@ def _spec_for_kind(kind: str, params: "dict | None"):
         return httpx_url_scan(scheme=str(p.get("scheme", "http")))
     if kind == "ffuf":
         return ffuf_content_scan(wordlist=str(p.get("wordlist", "") or ""))
+    # C4 — web_discovery FACT column: katana/gobuster propose URLs the runner re-drives through the gated
+    # ACHIEVED_STATE web re-drive (web_redrive → open_redirect/cors/host_header/graphql_introspection FACT
+    # branches). FACT-capable (their family's verifier is ACHIEVED_STATE); VIGIL's OWN capture mints, never
+    # the tool. Only typed scheme/wordlist VALUES are read; every flag is built server-side in the ToolSpec.
+    if kind == "katana":
+        return katana_web_scan(scheme=str(p.get("scheme", "http")))
+    if kind == "gobuster":
+        return gobuster_web_scan(scheme=str(p.get("scheme", "http")), wordlist=str(p.get("wordlist", "") or ""))
+    # C4 — scanners bug-class DISPATCHER: nuclei labels a class; the runner re-drives ONLY its web-mappable
+    # findings through web_redrive and a FACT is attributed only when VIGIL's own oracle confirms the EXACT
+    # claimed class. The scanner is never the authority — its family stays LEAD-only; the FACT is
+    # ACHIEVED_STATE's. nuclei is therefore NOT in _ORACLE_MAPPED_TOOLS (it stays fact_capable=false in the
+    # matrix) but IS dispatched via _SCANNER_REDRIVE_TOOLS.
+    if kind == "nuclei":
+        return nuclei_web_redrive(scheme=str(p.get("scheme", "http")))
     if kind == "nmap":
         return nmap_service_scan(ports=str(p.get("ports", "1-1024")))
     if kind == "masscan":

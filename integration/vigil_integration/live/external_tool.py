@@ -354,6 +354,30 @@ class ProposedURL:
 
 
 @dataclass(frozen=True)
+class ProposedWebFinding:
+    """A URL a WEB tool PROPOSED for the ACHIEVED_STATE web re-drive (``live.web_redrive.web_redrive``), with
+    an OPTIONAL scanner-CLAIMED bug class. Like :class:`ProposedURL`, ``host`` is PINNED to the
+    scope-authorised target (never a host the tool printed) and ``port`` is parsed from the URL.
+
+    The two shapes it carries, in ONE type so the runner has one leg:
+      * ``claimed_class == ""`` — a WEB-DISCOVERY proposal (katana/gobuster): the tool only says "here is a
+        URL"; VIGIL re-drives it across EVERY web FACT class over its OWN gated capture and mints whatever the
+        deterministic oracle confirms. The tool never classifies, so nothing of the tool's is trusted.
+      * ``claimed_class`` set — a SCANNER proposal (nuclei): the tool ALSO labelled a class; VIGIL re-drives
+        the URL and a FACT is ATTRIBUTED to the scanner's finding ONLY if VIGIL's own oracle independently
+        confirmed that EXACT class (``WebRedriveResult.family_verdict(claimed_class) == "FACT"``). The label
+        selects WHICH re-drive to attribute; it is never itself evidence (criterion-6).
+
+    In BOTH cases the URL row is GROUNDING INTEL / a LEAD; the FACT is minted ONLY by ``web_redrive``'s own
+    gated capture crossing ``verdict.admit()``. A scanner's classification is never trusted."""
+    url: str
+    host: str
+    port: int = 0
+    protocol: str = "tcp"
+    claimed_class: str = ""
+
+
+@dataclass(frozen=True)
 class Redrive:
     """One RUNNER-OWNED oracle re-drive for a proposed (host, port): an independent, gated ``capture`` the
     runner performs itself + a ``context`` builder that turns the captured evidence into an oracle_context
@@ -426,6 +450,15 @@ class ToolSpec:
     # (a no-op stub) and the ProposedService/redrive fields are ignored — the two paths never mix. None (the
     # default) ⇒ the existing ProposedService + handshake path, byte-for-byte unchanged for every caller.
     propose_urls: "Callable[[ToolOutcome, str], list[ProposedURL]] | None" = None
+    # WEB-FACT specs (katana/gobuster/nuclei) set this INSTEAD of propose_urls: it parses the tool output into
+    # PROPOSED WEB FINDINGS (host pinned to target, with an optional scanner-claimed class), and
+    # ``run_external_tool`` re-drives each through the gated ACHIEVED_STATE web re-drive
+    # (``live.web_redrive.web_redrive`` → the open_redirect / cors / host_header / graphql_introspection FACT
+    # branches) — the FACT-capable web column, distinct from the LEAD-only endpoint_liveness enricher that
+    # ``propose_urls`` feeds. A tool row is only a PROPOSAL; the FACT is web_redrive's OWN gated capture
+    # crossing ``verdict.admit()``. When set, ``propose`` is a no-op stub and the ProposedService/redrive
+    # fields are ignored; the three URL/finding paths (propose_web_findings, propose_urls, propose) never mix.
+    propose_web_findings: "Callable[[ToolOutcome, str], list[ProposedWebFinding]] | None" = None
     # The runner-owned re-drives to run for EACH proposed service. Empty ⇒ the runner uses the legacy
     # reachability re-drive (the injectable ``capture`` param + reachable_context + service_reachable), so
     # nmap and every existing caller are byte-for-byte unchanged. A spec that mints a non-reachability FACT
@@ -1177,6 +1210,195 @@ def ffuf_content_scan(*, wordlist: str = "", extra_args: Sequence[str] = ()) -> 
                     version_argv=lambda: ["ffuf", "-V"], danger="active")
 
 
+# ===========================================================================================================
+# WEB-FACT specs (C4) — the web_discovery family's FACT column and the scanners family's bug-class dispatcher.
+#
+# These set ``propose_web_findings`` (NOT ``propose_urls``): the runner re-drives each proposed URL through the
+# gated ACHIEVED_STATE re-drive ``live.web_redrive.web_redrive`` — the shipped, FACT-CAPABLE web checks
+# (open_redirect / cors / host_header_injection / graphql_introspection), each judged by the deterministic
+# ``predicate_oracle`` over VIGIL's OWN gated, no-redirect capture. This is a DIFFERENT re-drive from the
+# LEAD-only ``endpoint_liveness`` sibling-differential that httpx/ffuf's ``propose_urls`` feeds; nothing here
+# touches that permanent LEAD-only branch. In every case the tool's row is only a PROPOSAL (grounding intel);
+# the FACT is minted by web_redrive crossing ``verdict.admit()``, never by the tool's bytes or its label.
+#
+#   * katana / gobuster — WEB-DISCOVERY proposers: they emit URLs, no class. VIGIL probes EVERY web FACT class
+#     over its own capture (claimed_class=""). FACT-capable via the web_discovery family's ACHIEVED_STATE
+#     verifier (oracle_families).
+#   * nuclei — the SCANNERS-family bug-class DISPATCHER: nuclei ALSO labels a class; the finding is re-driven
+#     ONLY when that label maps to a web FACT class (``web_redrive.web_fact_class_for``), and a FACT is
+#     attributed to nuclei's finding only if VIGIL's own oracle independently confirmed that EXACT class. The
+#     scanner is never the authority — its family stays LEAD-only; the FACT is ACHIEVED_STATE's.
+# ===========================================================================================================
+def _no_web_finding_proposal(outcome: "ToolOutcome", target: str) -> "list[ProposedService]":
+    """A web-FACT spec proposes web findings (``propose_web_findings``), never ProposedServices — this stub
+    keeps the ToolSpec.propose contract total while the runner takes the ``propose_web_findings`` path."""
+    return []
+
+
+def _pin_web_finding(raw_url: str, target: str, *, claimed_class: str = "") -> "ProposedWebFinding | None":
+    """Host-PIN a tool-proposed URL into a :class:`ProposedWebFinding` (or ``None`` to drop it), reusing the
+    exact scope-safety pin the port-scanner/url parsers use (``_pin_url_host``): the URL's host must equal the
+    scope-authorised ``target`` or it is dropped, never re-pointed. The gated send re-authorises every URL
+    anyway (defence in depth)."""
+    pu = _pin_url_host(raw_url, target)
+    if pu is None:
+        return None
+    return ProposedWebFinding(url=pu.url, host=pu.host, port=pu.port, protocol=pu.protocol,
+                              claimed_class=str(claimed_class or ""))
+
+
+def katana_web_scan(*, scheme: str = "http", extra_args: Sequence[str] = ()) -> ToolSpec:
+    """A :class:`ToolSpec` for ProjectDiscovery katana as a WEB-DISCOVERY URL proposer feeding the
+    ACHIEVED_STATE web re-drive. ``build_argv`` emits a correlatable, bounded crawl
+    (``katana -u <url> -jsonl -silent -no-color -H 'User-Agent: …' -d 2 -c 10``); ``propose_web_findings``
+    parses each JSONL record's ``url``/``endpoint`` (or a plain URL line) into a host-PINNED
+    :class:`ProposedWebFinding` with NO class — so VIGIL probes every web FACT class over its own gated
+    capture. ``scheme`` is validated {http,https} HERE (BLOCK-5, interpolated into the argv); ``extra_args``
+    is validated the same way as httpx (the correlatable UA pin is structural). An invalid value raises
+    ValueError (``_spec_for_kind`` turns it into a blocked LEAD) before any argv exists."""
+    scheme = _validated_scheme(scheme)
+    extra_args = _validated_httpx_extra_args(extra_args)
+
+    def build(target: str) -> list[str]:
+        url = str(target) if "://" in str(target) else f"{scheme}://{target}/"
+        return ["katana", "-u", url, "-jsonl", "-silent", "-no-color",
+                "-H", f"User-Agent: {_CORRELATABLE_USER_AGENT}", "-d", "2", "-c", "10", *list(extra_args)]
+
+    def propose_web_findings(outcome: ToolOutcome, target: str) -> "list[ProposedWebFinding]":
+        return _parse_katana_web_findings(outcome.stdout or "", target)
+
+    return ToolSpec("katana", build, _no_web_finding_proposal, propose_web_findings=propose_web_findings,
+                    version_argv=lambda: ["katana", "-version"], danger="active")
+
+
+def gobuster_web_scan(*, scheme: str = "http", wordlist: str = "", extra_args: Sequence[str] = ()) -> ToolSpec:
+    """A :class:`ToolSpec` for gobuster (dir mode) as a CONTENT-DISCOVERY URL proposer feeding the
+    ACHIEVED_STATE web re-drive. ``build_argv`` emits
+    ``gobuster dir -u <base> -w <wordlist> -q --no-color -a 'User-Agent: …'`` (quiet, correlatable);
+    ``propose_web_findings`` joins each discovered PATH onto the scope-authorised base and host-pins it into a
+    :class:`ProposedWebFinding` with NO class. ``scheme`` and ``wordlist`` are validated HERE (BLOCK-5) — both
+    are interpolated into the argv; an invalid value raises ValueError before any argv exists."""
+    scheme = _validated_scheme(scheme)
+    wl = _validated_wordlist(wordlist)
+
+    def build(target: str) -> list[str]:
+        base = str(target) if "://" in str(target) else f"{scheme}://{target}/"
+        # ``-e`` (expanded) prints the FULL URL of each hit (scheme://host:port/path) rather than the bare
+        # path, so ``propose_web_findings`` re-drives the exact origin gobuster reached — and the parser
+        # host-pins it to the scope-authorised target, keeping the port. ``-q`` drops the banner.
+        return ["gobuster", "dir", "-u", base, "-w", wl, "-q", "-e", "--no-color",
+                "-a", _CORRELATABLE_USER_AGENT, *list(extra_args)]
+
+    def propose_web_findings(outcome: ToolOutcome, target: str) -> "list[ProposedWebFinding]":
+        base = str(target) if "://" in str(target) else f"{scheme}://{target}/"
+        return _parse_gobuster_web_findings(outcome.stdout or "", target, base)
+
+    return ToolSpec("gobuster", build, _no_web_finding_proposal, propose_web_findings=propose_web_findings,
+                    version_argv=lambda: ["gobuster", "version"], danger="active")
+
+
+def nuclei_web_redrive(*, scheme: str = "http", extra_args: Sequence[str] = ()) -> ToolSpec:
+    """A :class:`ToolSpec` for nuclei as the SCANNERS-family bug-class DISPATCHER into the ACHIEVED_STATE web
+    re-drive. ``build_argv`` emits nuclei's correlatable JSONL run
+    (``nuclei -target <url> -jsonl -silent -no-color -disable-update-check -no-interactsh -H 'User-Agent: …'``
+    — the two egress suppressors mirror the governed executor's ``_build_nuclei``); ``propose_web_findings``
+    parses nuclei's JSONL via the shipped ``parse_nuclei_export`` and keeps ONLY findings whose class maps to
+    a web FACT class (``web_redrive.web_fact_class_for``), each as a host-PINNED :class:`ProposedWebFinding`
+    carrying that CLAIMED class. VIGIL re-drives the URL and mints a FACT ONLY if its own oracle confirms the
+    claimed class — nuclei's template match is never the authority (criterion-6). Non-web nuclei findings are
+    not proposed here (they remain LEADs on the ingest path); this spec is the web dispatcher only."""
+    scheme = _validated_scheme(scheme)
+    extra_args = _validated_httpx_extra_args(extra_args)
+
+    def build(target: str) -> list[str]:
+        url = str(target) if "://" in str(target) else f"{scheme}://{target}/"
+        return ["nuclei", "-target", url, "-jsonl", "-silent", "-no-color", "-disable-update-check",
+                "-no-interactsh", "-H", f"User-Agent: {_CORRELATABLE_USER_AGENT}", *list(extra_args)]
+
+    def propose_web_findings(outcome: ToolOutcome, target: str) -> "list[ProposedWebFinding]":
+        return _parse_nuclei_web_findings(outcome.stdout or "", target)
+
+    return ToolSpec("nuclei", build, _no_web_finding_proposal, propose_web_findings=propose_web_findings,
+                    version_argv=lambda: ["nuclei", "-version"], danger="active")
+
+
+def _parse_katana_web_findings(stdout: str, target: str) -> "list[ProposedWebFinding]":
+    """Parse katana output into host-pinned web-discovery findings (no class). Accepts ``-jsonl`` records
+    (``url`` / ``endpoint``, or a nested ``request.endpoint``) and, defensively, a plain one-URL-per-line
+    ``-silent`` stream. Purely lexical — no network."""
+    import json as _json  # noqa: PLC0415 — stdlib, function-local
+    out: "list[ProposedWebFinding]" = []
+    seen: set[str] = set()
+    for line in (stdout or "").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        raw = ""
+        if line.startswith("{"):
+            try:
+                obj = _json.loads(line)
+                req = obj.get("request") if isinstance(obj.get("request"), dict) else {}
+                raw = str(obj.get("url") or obj.get("endpoint") or (req.get("endpoint") if req else "") or "")
+            except Exception:  # noqa: BLE001 — a malformed line contributes no URL
+                raw = ""
+        else:
+            raw = line
+        pu = _pin_web_finding(raw, target)
+        if pu is not None and pu.url not in seen:
+            seen.add(pu.url)
+            out.append(pu)
+    return out
+
+
+def _parse_gobuster_web_findings(stdout: str, target: str, base: str) -> "list[ProposedWebFinding]":
+    """Parse gobuster dir output into host-pinned web-discovery findings (no class). gobuster prints a
+    discovered path as ``/path (Status: 200) [Size: N]`` (quiet mode drops the banner); a pattern run may
+    print a full URL. Each PATH is joined onto the scope-authorised ``base`` and host-pinned. Purely lexical."""
+    from urllib.parse import urljoin  # noqa: PLC0415 — stdlib, function-local
+    out: "list[ProposedWebFinding]" = []
+    seen: set[str] = set()
+    for line in (stdout or "").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        tok = line.split()[0]
+        if "://" in tok:
+            raw = tok
+        elif tok.startswith("/"):
+            raw = urljoin(base, tok)
+        else:
+            continue
+        pu = _pin_web_finding(raw, target)
+        if pu is not None and pu.url not in seen:
+            seen.add(pu.url)
+            out.append(pu)
+    return out
+
+
+def _parse_nuclei_web_findings(stdout: str, target: str) -> "list[ProposedWebFinding]":
+    """Parse nuclei JSONL (via the shipped ``parse_nuclei_export``) into host-pinned SCANNER findings, keeping
+    ONLY the web-re-drivable subset: each finding whose normalised ``bug_class`` maps to a web FACT class
+    (``web_redrive.web_fact_class_for``) becomes a :class:`ProposedWebFinding` carrying that CLAIMED class.
+    Framework + web_redrive imports are FUNCTION-LOCAL (FATAL-2)."""
+    from framework.v2.imports.parsers import parse_nuclei_export  # noqa: PLC0415 — FATAL-2 (offense plane)
+
+    from .web_redrive import web_fact_class_for  # noqa: PLC0415 — offense-neutral tuple/helper
+    out: "list[ProposedWebFinding]" = []
+    seen: set[str] = set()
+    for f in parse_nuclei_export(stdout or ""):
+        wclass = web_fact_class_for(getattr(f, "bug_class", ""))
+        if not wclass:
+            continue  # not web-re-drivable — stays a LEAD on the ingest path, never minted here
+        pu = _pin_web_finding(getattr(f, "location", ""), target, claimed_class=wclass)
+        if pu is None:
+            continue
+        key = f"{pu.url}#{wclass}"
+        if key not in seen:
+            seen.add(key)
+            out.append(pu)
+    return out
+
+
 # ---------------------------------------------------------------------------
 # Scope gate — refuse an out-of-scope / egress-denied target BEFORE any traffic.
 # ---------------------------------------------------------------------------
@@ -1506,6 +1728,136 @@ def _max_redriven_proposals() -> int:
     return max(1, _LIVENESS_REQUEST_BUDGET // max(1, int(MAX_GATED_GETS_PER_URL)))
 
 
+# --- OPSEC: the per-run gated-request BUDGET for the web-FACT leg (C4; constitution §VI) ------------------
+# The ACHIEVED_STATE re-drive (``web_redrive``) sends a BOUNDED burst of gated probes per URL: CORS (1) +
+# host-header (1) + GraphQL-introspection (1) + the open-redirect carriers across up to
+# ``web_redrive._MAX_CANDIDATE_REDIRECT_NAMES`` (12) names on five insertion surfaces. The worst case is a
+# URL with many query params / path segments; ``_WEB_REDRIVE_REQUESTS_PER_URL`` is the conservative REVIEWED
+# upper estimate of that burst (the reviewed knob, exactly like ``web_redrive.MAX_GATED_GETS_PER_URL`` for the
+# liveness leg — raising it is an edit here, never emergent from how many rows a wordlist matched). The CAP on
+# how many proposed findings one run re-drives is DERIVED from the budget so the two cannot drift, and
+# truncation is NEVER silent (counted on the result, named in the detail, and a "skipped" outcome row).
+_WEB_REDRIVE_REQUEST_BUDGET = 1000
+_WEB_REDRIVE_REQUESTS_PER_URL = 60
+
+
+def _max_web_redriven_findings() -> int:
+    return max(1, _WEB_REDRIVE_REQUEST_BUDGET // max(1, int(_WEB_REDRIVE_REQUESTS_PER_URL)))
+
+
+def _run_web_fact_tool(
+    spec: "ToolSpec", target: str, outcome: "ToolOutcome", *, tool_errored: bool, tool_version: str,
+    engagement_slug: str, signers: "list[tuple[str, str]]", timeout: float, freshness_ttl_seconds: int,
+) -> "RunnerResult":
+    """The WEB-FACT runner leg (katana/gobuster/nuclei): parse the tool's proposed web findings (host-pinned)
+    and re-drive up to :func:`_max_web_redriven_findings` of them through the gated ACHIEVED_STATE web
+    re-drive (``live.web_redrive.web_redrive``). A tool's URL/label is only a PROPOSAL; the FACT is minted by
+    web_redrive's OWN gated capture crossing ``verdict.admit()`` (the open_redirect / cors / host_header /
+    graphql_introspection FACT branches), so a tool proposing a URL VIGIL cannot independently confirm mints
+    NOTHING (criterion-6). For a SCANNER finding (claimed_class set), the per-finding outcome is attributed
+    from ``family_verdict(claimed_class)`` — a FACT row only when VIGIL confirmed the EXACT claimed class —
+    while sibling web classes web_redrive ALSO confirmed over the same capture still surface as signed facts
+    (each independently admit()-gated). Mirrors the other legs' outcome taxonomy + Observation. Called only
+    when ``spec.propose_web_findings`` is set; the caller already ran the scope/pre-flight/capability gates."""
+    from ..oracle_adapter import Outcome  # noqa: PLC0415 (FATAL-2: function-local)
+    from .web_redrive import web_redrive  # noqa: PLC0415 (FATAL-2: web_redrive is offense-neutral)
+
+    proposed = spec.propose_web_findings(outcome, target)   # list[ProposedWebFinding], host pinned to target
+    facts: list = []
+    leads: list = []
+    contexts: dict = {}
+    outcomes: list = []
+    seen_fact_refs: set = set()
+    if tool_errored:
+        # A timed-out / crashed tool's output is untrustworthy (mirrors the ProposedService leg): record the
+        # typed ERROR and RE-DRIVE NOTHING — a truncated row must never become a positive signal. Proposals
+        # are still parsed above for the canonical Observation, so the truncation is visible, never silent.
+        outcomes.append({"check_id": spec.name, "bug_class": "", "outcome": Outcome.ERROR.value})
+
+    # OPSEC CAP: de-duplicate FIRST by (url, claimed_class) — a duplicate costs nothing and must not consume
+    # the budget — then take at most the derived cap. Everything past it is dropped LOUDLY, never quietly.
+    unique: "list[ProposedWebFinding]" = []
+    dedup: set = set()
+    for pf in proposed:
+        key = f"{pf.url}#{pf.claimed_class}"
+        if key not in dedup:
+            dedup.add(key)
+            unique.append(pf)
+    cap = _max_web_redriven_findings()
+    redriven, dropped = ([], unique) if tool_errored else (unique[:cap], unique[cap:])
+    budget_note = ""
+    if dropped and not tool_errored:
+        budget_note = (
+            f"OPSEC CAP: {spec.name} proposed {len(unique)} distinct web finding(s); this run re-drove the "
+            f"first {len(redriven)} and SKIPPED {len(dropped)}. Each web re-drive costs up to about "
+            f"{_WEB_REDRIVE_REQUESTS_PER_URL} serial gated requests, so the per-run budget of "
+            f"{_WEB_REDRIVE_REQUEST_BUDGET} request(s) admits {cap}. The skipped findings were NOT examined — "
+            f"a throttle, not a finding of absence; re-run with a narrower scope or raise the reviewed budget.")
+        outcomes.append({"check_id": f"{spec.name}:opsec_request_budget", "bug_class": "",
+                         "outcome": Outcome.SKIPPED.value, "note": budget_note})
+
+    for pf in redriven:
+        # web_redrive owns its OWN per-request gate (kill-switch → single-host → ACTIVE_RECON → charter scope
+        # → http(s)); the URL host is already pinned to the scope-authorised target. slug == engagement_slug.
+        # claimed_class="" for a web-discovery proposal (probe every web FACT class); set for a scanner
+        # finding (attribute the FACT to the claimed class). oidc is never reachable from a label (web_redrive
+        # class-gates it; web_fact_class_for excludes it), so a scanner cannot upgrade A01→A07 via its say-so.
+        wr = web_redrive(pf.url, slug=engagement_slug, engagement_slug=engagement_slug, signers=signers,
+                         timeout=min(timeout, 30.0), claimed_class=pf.claimed_class or "")
+        # Surface every signed FACT web_redrive minted over its OWN capture (each independently admit()-gated).
+        for fct in getattr(wr, "facts", []) or []:
+            ref = getattr(fct, "finding_ref", "")
+            if ref and ref in seen_fact_refs:
+                continue
+            if ref:
+                seen_fact_refs.add(ref)
+            facts.append(fct)
+            ctx = (getattr(wr, "contexts", {}) or {}).get(ref)
+            if ctx is not None and ref:
+                contexts[ref] = ctx
+        for ld in getattr(wr, "leads", []) or []:
+            leads.append(ld)
+            ref = getattr(ld, "finding_ref", "")
+            ctx = (getattr(wr, "contexts", {}) or {}).get(ref)
+            if ctx is not None and ref:
+                contexts[ref] = ctx
+        # Per-finding outcome. For a SCANNER finding, the CLAIMED class's family verdict decides the row (a
+        # POSITIVE only when VIGIL confirmed exactly that class); for a web-discovery finding (no class) the
+        # row is POSITIVE iff web_redrive minted anything over its own capture, else INCONCLUSIVE. Either way
+        # the row is a report of what VIGIL's oracle decided, never a copy of the tool's verdict.
+        if pf.claimed_class:
+            verdict = wr.family_verdict(pf.claimed_class)
+            out_val = (Outcome.POSITIVE.value if verdict == "FACT"
+                       else "clean" if verdict == "CLEAN" else Outcome.INCONCLUSIVE.value)
+            item = f"{spec.name}:{pf.url}#{pf.claimed_class}"
+            outcomes.append({"check_id": item, "bug_class": pf.claimed_class, "outcome": out_val,
+                             "note": f"claimed {pf.claimed_class}; VIGIL re-drive verdict {verdict}"})
+        else:
+            n_minted = len(getattr(wr, "facts", []) or [])
+            item = f"{spec.name}:{pf.url}#web_discovery"
+            outcomes.append({"check_id": item, "bug_class": "",
+                             "outcome": Outcome.POSITIVE.value if n_minted else Outcome.INCONCLUSIVE.value,
+                             "note": (f"web re-drive minted {n_minted} FACT(s) over VIGIL's own capture"
+                                      if n_minted else "web re-drive confirmed no FACT class over VIGIL's capture")})
+
+    detail = (f"{spec.name} ran via {outcome.backend}; proposed {len(proposed)} web finding(s), re-drove "
+              f"{len(redriven)}, oracle-confirmed {len(facts)} ACHIEVED_STATE FACT(s), {len(leads)} lead(s)"
+              + ("; TOOL ERRORED (timeout/spawn) — re-drove nothing" if tool_errored else "")
+              + (f" | {budget_note}" if budget_note else ""))
+    artifact_refs = tuple(fr for fr in (getattr(r, "finding_ref", "") for r in (facts + leads)) if fr)
+    error_reason = ""
+    if tool_errored:
+        error_reason = ("tool run timed out (no exit code)" if outcome.timed_out
+                        else (outcome.stderr or "tool failed to run").strip()[:200])
+    from .observation import observe  # noqa: PLC0415
+    observation = observe(spec, target, outcome, proposed, tool_version=tool_version,
+                          outcome_class="errored" if tool_errored else "ran",
+                          artifact_refs=artifact_refs, error_reason=error_reason)
+    return RunnerResult("ran", detail, spec.name, target, outcome, facts, leads, proposed, contexts,
+                        outcomes=outcomes, tool_errored=tool_errored, observation=observation,
+                        truncated_proposals=len(dropped), budget_note=budget_note)
+
+
 def _run_web_liveness_tool(
     spec: "ToolSpec", target: str, outcome: "ToolOutcome", *, tool_errored: bool, tool_version: str,
     engagement_slug: str, signers: "list[tuple[str, str]]", timeout: float, freshness_ttl_seconds: int,
@@ -1697,6 +2049,17 @@ def run_external_tool(
     # Best-effort tool VERSION (criterion 9): run the spec's version_argv ONCE through the SAME gated backend
     # (no target traffic) and stamp the parsed version into every FACT this run mints. Never fatal.
     tool_version = _capture_tool_version(spec, backend, timeout)
+
+    # WEB-FACT spec (katana/gobuster/nuclei): proposals are URLs (optionally class-labelled) re-driven through
+    # the gated ACHIEVED_STATE web re-drive (``web_redrive`` → the open_redirect / cors / host_header /
+    # graphql_introspection FACT branches). Dispatch there and return — this is the FACT-capable web column,
+    # distinct from the LEAD-only endpoint_liveness leg below. Checked FIRST so a spec that (mis)set both
+    # fields takes the FACT path, but the three proposal fields are mutually exclusive by construction.
+    if spec.propose_web_findings is not None:
+        return _run_web_fact_tool(
+            spec, target, outcome, tool_errored=tool_errored, tool_version=tool_version,
+            engagement_slug=engagement_slug, signers=signers, timeout=timeout,
+            freshness_ttl_seconds=freshness_ttl_seconds)
 
     # WEB-DISCOVERY spec (httpx/ffuf): the proposals are URLs re-driven through the gated web LIVENESS re-drive
     # (the L7 analogue of the TCP handshake), NOT the ProposedService/handshake path. Dispatch there and
