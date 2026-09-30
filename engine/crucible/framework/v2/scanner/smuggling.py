@@ -61,6 +61,7 @@ weaponised request. Targets must be operator-authorised (loopback in tests).
 
 from __future__ import annotations
 
+import ipaddress
 import socket
 import time
 from typing import Callable
@@ -70,6 +71,85 @@ from pydantic import BaseModel, ConfigDict, Field
 from ..verify.confirmation import confirm_finding
 from ..verify.adapter import FindingContext
 from .rawhttp import RawResponseReader
+
+
+# ---------------------------------------------------------------------------
+# Egress floor for the raw-socket dials — WS1.1b (defense in depth, at the socket)
+# ---------------------------------------------------------------------------
+#
+# Every raw socket this module opens (``raw_send`` and ``_desync_leg``) now passes through
+# BOTH floors before a byte leaves the box, closing the residual the egress_pin module names for
+# ``scanner/smuggling.py`` (a raw socket that used to connect on a re-resolved name with no L3/L4
+# floor of its own). This ADDS a refusal; it never adds reach — smuggling stays RETIRED to LEAD
+# (#863/#865) and mints NO FACT.
+
+
+def _egress_floor(host: str, port: int, *, slug: str = "") -> str:
+    """Both egress floors for a raw-socket dial. Returns the exact IP to CONNECT TO, or raises
+    :class:`~..common.egress_pin.EgressFloorRefused` (fail-closed — the caller then sends ZERO
+    packets). The request bytes keep the ORIGINAL ``host`` in their Host header; only the dial
+    target is the pinned IP.
+
+    1. NAME floor. With an engagement ``slug`` the full pre-flight chain runs — kill-switch, then
+       :func:`agents.scope_gate.validate_action` (charter present AND signed, the categorical
+       protected-domain floor gov/mil/edu/IGO, host in the signed scope, posture). With NO slug
+       (the legacy scanner-campaign path — the slug is not threaded to this module yet, see the
+       result's design note) only the client-independent categorical protected-domain floor is
+       applied, so a ``.gov``/``.mil``/``.edu``/``.int`` target is still refused.
+
+    2. L3/L4 floor + anti-rebinding pin. Every non-loopback destination goes through
+       ``resolve_and_pin``: the host is resolved ONCE, every resolved address must clear
+       ``vigil_gateway.denylist`` (the never-liftable metadata / link-local / RFC1918 / reserved
+       floor), and the connection is pinned to the first validated address so a rebinding resolver
+       cannot swap a denied IP in after the check. An exact RFC1918/loopback literal in the signed
+       charter scope (``charter_ip_literals(slug)``) is the ONLY lift of the private/loopback tier;
+       the metadata/link-local/reserved tier is never liftable.
+
+    Loopback carve-out: a loopback IP LITERAL the caller passed directly (``127.0.0.1``, ``::1`` —
+    the authorized detection target in tests and the MERIDIAN loopback range) is dialled without the
+    gateway denylist, because a literal resolves to itself and so is NOT a DNS-rebinding vector, and
+    loopback is never a metadata/link-local address. A NAME that RESOLVES to loopback does NOT take
+    this path — it goes through ``resolve_and_pin`` and clears only via a charter literal — so a name
+    that rebinds to loopback (or to metadata / RFC1918) is still refused. When a slug is present the
+    loopback literal must ALSO be in the signed scope (``validate_action`` runs FIRST), so the
+    carve-out never widens a charter; it only keeps the un-slugged loopback detection path working."""
+    from ..common.egress_pin import EgressFloorRefused
+    origin = f"http://{host}:{port}/"
+    if slug:
+        try:
+            from ..agents.scope_gate import validate_action
+            from ..authority import KillSwitch
+            tripped = KillSwitch(slug).is_tripped()
+            decision = None if tripped else validate_action(
+                slug=slug, method="GET", target_url=origin, posture="TEST")
+        except Exception as e:                      # a failing gate REFUSES (fail-closed)
+            raise EgressFloorRefused(
+                f"name floor errored (fail-closed): {type(e).__name__}: {e}") from e
+        if tripped:
+            raise EgressFloorRefused("kill-switch tripped")
+        if not decision.allowed:
+            raise EgressFloorRefused(
+                f"name floor refused (scope/charter/protected-domain): {decision.reason}")
+    else:
+        try:
+            from vigil_core.hard_guardrail import is_hard_blocked, protected_guard_enabled
+            blocked, why = (is_hard_blocked(origin) if protected_guard_enabled() else (False, ""))
+        except Exception as e:                      # a failing check REFUSES (fail-closed)
+            raise EgressFloorRefused(
+                f"protected-domain floor errored (fail-closed): {type(e).__name__}: {e}") from e
+        if blocked:
+            raise EgressFloorRefused(f"protected-domain NAME floor: {why}")
+    # A directly-passed loopback literal is not rebindable — dial it without the gateway denylist.
+    bare = (host or "").strip().strip("[]")
+    try:
+        if ipaddress.ip_address(bare).is_loopback:
+            return bare
+    except ValueError:
+        pass
+    from ..common.egress_pin import charter_ip_literals, resolve_and_pin
+    return resolve_and_pin(
+        host, port, slug=slug, allowed_ips=charter_ip_literals(slug),
+        loopback_allowed_if_scoped=True)
 
 
 class SmugglingResult(BaseModel):
@@ -102,14 +182,26 @@ class SmugglingResult(BaseModel):
     rationale: str = ""
 
 
-def raw_send(host: str, port: int, raw: bytes, *, timeout: float = 6.0) -> tuple[float, bytes]:
+def raw_send(host: str, port: int, raw: bytes, *, timeout: float = 6.0,
+             slug: str = "") -> tuple[float, bytes]:
     """Send exact bytes on a fresh connection and read the response until the peer
     closes or ``timeout`` elapses. Returns (elapsed_ms, data). A hang (the desync
-    signal) shows up as elapsed ≈ timeout."""
+    signal) shows up as elapsed ≈ timeout.
+
+    Fail-closed egress floor: the destination clears :func:`_egress_floor` (the categorical
+    protected-domain NAME floor + the never-liftable metadata/link-local/RFC1918/reserved L3/L4
+    floor + the anti-rebinding pin) BEFORE any socket is opened, and the dial goes to the PINNED IP
+    while ``raw``'s own Host header keeps the original name. A refusal returns the empty-response
+    shape a connect failure already yields — ZERO packets, never an unguarded connect."""
     start = time.monotonic()
     data = b""
+    from ..common.egress_pin import EgressFloorRefused
     try:
-        s = socket.create_connection((host, port), timeout=timeout)
+        dial_ip = _egress_floor(host, port, slug=slug)
+    except EgressFloorRefused:
+        return (time.monotonic() - start) * 1000.0, b""
+    try:
+        s = socket.create_connection((dial_ip, port), timeout=timeout)
     except OSError:
         return (time.monotonic() - start) * 1000.0, b""
     try:
@@ -311,6 +403,7 @@ def detect(
     *,
     timeout: float = 6.0,
     delay_threshold_ms: float = 1500.0,
+    slug: str = "",
 ) -> list[SmugglingResult]:
     """Probe ``host:port`` for request-smuggling desync across the full technique
     suite (CL.TE, TE.CL, the obfuscated TE variants, CL.0 and TE.TE — see
@@ -325,10 +418,10 @@ def detect(
     (a lower, faster threshold is reasonable on a quiet path such as loopback).
     Lowering it produces MORE leads for a human to triage; it can never produce a
     confirmed finding, because there is no confirmation on this path."""
-    control_ms, _ = raw_send(host, port, _control(host), timeout=timeout)
+    control_ms, _ = raw_send(host, port, _control(host), timeout=timeout, slug=slug)
     results: list[SmugglingResult] = []
     for technique, builder in _TECHNIQUES:
-        probe_ms, _ = raw_send(host, port, builder(host), timeout=timeout)
+        probe_ms, _ = raw_send(host, port, builder(host), timeout=timeout, slug=slug)
         delta = probe_ms - control_ms
 
         hung = delta >= delay_threshold_ms
@@ -527,13 +620,23 @@ class _RawResponseReader(RawResponseReader):
 
 
 def _desync_leg(host: str, port: int, first: bytes, follow_up: bytes,
-                *, timeout: float) -> tuple[DesyncLeg, str]:
+                *, timeout: float, slug: str = "") -> tuple[DesyncLeg, str]:
     """Drive ONE fresh socket: send ``first``, CONSUME EXACTLY its first response by that
     response's own framing, then ACTUALLY SEND ``follow_up`` on the SAME socket and read
     ITS genuine response. Returns (second response, note). A connection that does not
-    persist past the first response yields ``channel=False`` — an honest INCONCLUSIVE."""
+    persist past the first response yields ``channel=False`` — an honest INCONCLUSIVE.
+
+    Fail-closed egress floor: the destination clears :func:`_egress_floor` BEFORE any socket is
+    opened, and the dial goes to the PINNED IP (``first``/``follow_up`` keep the original name in
+    their Host header). A refusal returns an empty ``DesyncLeg`` + a note — ZERO packets, an honest
+    INCONCLUSIVE, never a channel and never a fabricated leak."""
+    from ..common.egress_pin import EgressFloorRefused
     try:
-        s = socket.create_connection((host, port), timeout=timeout)
+        dial_ip = _egress_floor(host, port, slug=slug)
+    except EgressFloorRefused as exc:
+        return DesyncLeg(), f"egress floor refused (no channel): {exc}"
+    try:
+        s = socket.create_connection((dial_ip, port), timeout=timeout)
     except OSError as exc:
         return DesyncLeg(), f"connect error (no channel): {type(exc).__name__}"
     try:
@@ -569,6 +672,7 @@ def detect_desync(
     timeout: float = 6.0,
     authorize: "Callable[[str], bool] | None" = None,
     canary: "Callable[[], str] | None" = None,
+    slug: str = "",
 ) -> list[DesyncProbe]:
     """Capture the single-connection canary differential for each technique — the
     timing-free OBSERVATION the campaign reports as an UNCONFIRMED LEAD.
@@ -600,13 +704,15 @@ def detect_desync(
                 continue
         token = mint()
         conflict, why_c = _desync_leg(
-            host, port, _desync_conflict_first(technique, host, token), follow_up, timeout=timeout)
+            host, port, _desync_conflict_first(technique, host, token), follow_up,
+            timeout=timeout, slug=slug)
         if not conflict.channel:
             probes.append(DesyncProbe(technique=technique, canary=token,
                                       note=f"conflict leg: {why_c}"))
             continue
         control, why_k = _desync_leg(
-            host, port, _desync_control_first(host, token), follow_up, timeout=timeout)
+            host, port, _desync_control_first(host, token), follow_up,
+            timeout=timeout, slug=slug)
         probes.append(DesyncProbe(technique=technique, canary=token, conflict=conflict,
                                   control=control,
                                   note=("" if control.channel else f"control leg: {why_k}")))
@@ -649,7 +755,7 @@ def _offers_h2c(data: bytes) -> bool:
     return False
 
 
-def detect_h2c_upgrade(host: str, port: int, *, timeout: float = 6.0) -> bool:
+def detect_h2c_upgrade(host: str, port: int, *, timeout: float = 6.0, slug: str = "") -> bool:
     """Capability detection ONLY — does the server OFFER a cleartext-HTTP/2 (h2c)
     upgrade? Sends one HTTP/1.1 request advertising ``Upgrade: h2c`` and returns
     True iff the server answers by advertising the h2c upgrade (a ``101 Switching
@@ -667,5 +773,5 @@ def detect_h2c_upgrade(host: str, port: int, *, timeout: float = 6.0) -> bool:
     (e.g. h2csmuggler) under the engagement charter. What it does NOT do: send a
     single HTTP/2 frame, complete the upgrade handshake, or prove any desync.
     Detection, not exploitation — consistent with the rest of this module."""
-    _elapsed_ms, data = raw_send(host, port, _h2c_upgrade_request(host), timeout=timeout)
+    _elapsed_ms, data = raw_send(host, port, _h2c_upgrade_request(host), timeout=timeout, slug=slug)
     return _offers_h2c(data)
