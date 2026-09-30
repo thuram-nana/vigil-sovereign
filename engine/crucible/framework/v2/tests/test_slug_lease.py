@@ -147,6 +147,67 @@ def test_release_with_a_wrong_token_never_yanks_a_live_lease(tmp_path):
     assert lease.release("theta", a.token) is True
 
 
+# --- concurrent reclaimers of ONE dead marker → exactly one winner (the BLOCK regression guard) ----
+def test_a_lagging_reclaimer_never_clobbers_a_freshly_reclaimed_live_lease(tmp_path):
+    # Deterministic white-box model of the concurrent-reclaim clobber (no timing): acquirer A proves the
+    # seeded marker dead and captures that generation; a peer B then fully reclaims it and installs a FRESH
+    # LIVE lease; the LAGGING A resumes _reclaim. A must NOT unlink B's live lease — the unlink is gated on the
+    # PROVEN-DEAD generation A captured, which no longer matches the marker. (On the pre-fix code A recomputed
+    # the target from a fresh read and unlinked B → two live holders.)
+    lease = SlugLease(tmp_path / "leases")
+    lease.dir.mkdir(parents=True, exist_ok=True)
+    marker = lease._marker("slug")
+    marker.write_text(json.dumps({"epoch": "E_dead", "slug": "slug", "pid": 2_147_483_600,
+                                  "boot_id": "old-boot", "ts": 0.0}), encoding="utf-8")
+    holder_a = lease._read(marker)
+    assert lease._alive(holder_a, marker) is False               # A's precondition: a dead holder
+    dead_gen_a = str(holder_a["epoch"])                          # the generation A proves dead (as acquire does)
+    # --- context switch to B --- B fully acquires: reclaims E_dead and installs a FRESH LIVE lease
+    res_b = lease.acquire("slug")
+    assert res_b.ok is True and lease.is_held("slug") is True
+    e_new = lease.holder("slug")["epoch"]
+    assert e_new != "E_dead"
+    # --- back to A --- the lagging reclaimer runs with the generation it PROVED dead
+    lease._reclaim("slug", marker, dead_gen_a)
+    assert lease.is_held("slug") is True                         # B's live lease SURVIVES — no clobber
+    assert lease.holder("slug")["epoch"] == e_new
+    assert lease.acquire("slug").ok is False                     # A is cleanly refused by B's live holder
+
+
+def _reclaim_race_worker(dirpath: str, slug: str, barrier, q) -> None:
+    lease = SlugLease(dirpath)
+    barrier.wait()                                               # every racer fires acquire together
+    res = lease.acquire(slug)
+    q.put((os.getpid(), res.token) if res.ok else None)
+    time.sleep(0.5)                                              # a live winner stays alive so overlap shows
+
+
+def test_concurrent_reclaimers_of_a_seeded_dead_marker_yield_exactly_one_winner(tmp_path):
+    # The natural (no injected timing) proof, modelled on the red-pen's clobber_natural.py: many processes
+    # race the PUBLIC acquire() over a SEEDED DEAD marker (so every racer takes the reclaim path). Exactly one
+    # LIVE winner per trial — distinct pids/tokens for >1 would be the spine-forking false-negative.
+    ctx = mp.get_context("fork")
+    n_procs, trials = 40, 10
+    for trial in range(trials):
+        d = tmp_path / f"t{trial}"
+        d.mkdir(parents=True, exist_ok=True)
+        seed = SlugLease(d)
+        seed.dir.mkdir(parents=True, exist_ok=True)
+        seed._marker("beta").write_text(json.dumps({"epoch": "E_dead", "slug": "beta", "pid": 2_147_483_600,
+                                                     "boot_id": "old-boot", "ts": 0.0}), encoding="utf-8")
+        barrier = ctx.Barrier(n_procs)
+        q: mp.Queue = ctx.Queue()
+        procs = [ctx.Process(target=_reclaim_race_worker, args=(str(d), "beta", barrier, q))
+                 for _ in range(n_procs)]
+        for p in procs:
+            p.start()
+        got = [q.get(timeout=40) for _ in range(n_procs)]
+        for p in procs:
+            p.join(timeout=40)
+        winners = [g for g in got if g]
+        assert len(winners) == 1, f"trial {trial}: expected exactly one live winner, got {winners}"
+
+
 def test_rebind_repoints_liveness_at_the_child_and_only_our_generation(tmp_path):
     lease = SlugLease(tmp_path / "leases")
     a = lease.acquire("iota")                          # holder pid = this (launcher) process

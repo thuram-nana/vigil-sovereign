@@ -24,14 +24,25 @@ Guarantees
   process is GONE (or whose ``boot_id`` differs — every pre-reboot pid is dead) as STALE and RECLAIMS it.
   So a dead holder is always reclaimable; only a LIVE holder blocks.
 * NO false-negative (never two live holders of one slug): reclaim of a stale marker is serialised by a
-  per-generation reclaim token (its own ``O_EXCL`` create), so of N racers reclaiming the same dead marker
-  exactly one removes it, and a fresh marker can only be created into the FREED slot via ``O_EXCL`` — one
-  winner. A concurrently-created LIVE marker is never removed (the reclaimer re-validates the marker's epoch
-  under its exclusive reclaim token before unlinking).
+  per-generation reclaim token (its own ``O_EXCL`` create), so of N racers reclaiming the same dead
+  generation exactly one removes it, and a fresh marker can only be created into the FREED slot via ``O_EXCL``
+  — one winner. Critically, the unlink is gated on the PROVEN-DEAD generation identity that ``acquire`` passes
+  in, never on a fresh re-read: a reclaimer unlinks the marker ONLY IF it still carries exactly that dead
+  generation AND is still dead. So a peer that already reclaimed the slot and created a FRESH LIVE lease in the
+  window is never unlinked (its epoch differs from the dead one) — this is what stops the concurrent-reclaim
+  clobber that would otherwise leave two (or more) live holders of one slug.
 * NO false-positive deadlock: the reclaim token itself records the reclaimer's liveness, so a reclaimer that
-  crashes mid-reclaim does not wedge the epoch — the next acquirer sees the token's holder is dead, drops it,
-  and reclaims. A parseable holder is judged by process liveness; a torn/empty marker (a crash mid-write) is
-  judged ALIVE only within a short birth grace (a writer between create and write) and DEAD afterwards.
+  crashes mid-reclaim does not wedge the generation — the next acquirer sees the token's holder is dead, drops
+  it, and reclaims. A parseable holder is judged by process liveness; a torn/empty marker (a crash mid-write)
+  is judged ALIVE only within a short birth grace (a writer between create and write) and DEAD afterwards.
+
+NAMED RESIDUAL — within-boot pid reuse. Liveness keys on ``pid`` + ``boot_id``. If a crashed holder's pid is
+recycled to an UNRELATED live process within the SAME boot (no reboot, so ``boot_id`` is unchanged), the
+stale marker reads as held and the slug stays blocked until that unrelated process exits. This is a BOUNDED
+false-POSITIVE (an over-cautious refusal / temporary wedge), NEVER a false-negative — it can never let two
+engagements run one slug. It mirrors exactly the same residual in ``console.actions.reconcile_orphaned_runs``
+(no portable pidfd / process-start-time check without new syscalls); it is stated here, not silently claimed
+away. A reboot resolves it deterministically (``boot_id`` changes ⇒ every prior pid is dead ⇒ reclaimable).
 
 Import-clean: stdlib only (no framework/strix/sigil), so both the offense console
 (``framework.v2.console.actions``) and the engagement scheduler (``framework.v2.engagement_scheduler``)
@@ -44,7 +55,7 @@ import json
 import os
 import secrets
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 
 #: A torn/empty holder file (a crash between the exclusive create and the identity write) is given the
@@ -212,19 +223,28 @@ class SlugLease:
             pass
 
     # -- reclaim -------------------------------------------------------------------------------------
-    def _reclaim(self, slug: str, marker: Path, dead: "dict | None") -> bool:
-        """Attempt to free ``marker`` whose holder ``dead`` is stale. Returns True iff this call made
-        progress (the slot may now be free — the caller re-attempts the O_EXCL create), False iff a LIVE
-        reclaimer currently owns this generation (back off and retry).
+    def _reclaim(self, slug: str, marker: Path, dead_gen: str) -> bool:
+        """Attempt to free ``marker``, whose generation ``dead_gen`` the caller PROVED dead. Returns True iff
+        the slot may now be free (the caller re-attempts the O_EXCL create), False iff a LIVE reclaimer
+        currently owns this generation (back off and retry).
 
-        Serialised by a per-generation reclaim token: only the token owner unlinks the marker, and it
-        re-validates the marker's epoch under the token before unlinking, so a fresh LIVE marker created in
-        the window is never removed. The token itself carries the reclaimer's liveness, so a reclaimer that
-        crashes mid-reclaim is detected and its token dropped — no epoch can wedge."""
-        epoch = self._epoch_of(marker)
-        if not epoch:
-            return True                         # marker already gone → slot may be free; re-attempt create
-        token = self._reclaim_token(slug, epoch)
+        SOUNDNESS — the unlink is gated on the PROVEN-DEAD generation identity, never on "whatever is at the
+        marker now". ``dead_gen`` is the generation ``acquire`` observed dead (its epoch, or a digest of a
+        torn marker). This call:
+          1. serialises on a per-generation reclaim token named by ``dead_gen`` (its own O_EXCL), so of N
+             racers reclaiming the SAME dead generation exactly one proceeds;
+          2. under that token, RE-READS the marker and unlinks it ONLY IF it STILL carries exactly
+             ``dead_gen`` AND is STILL dead.
+        If the generation has already flipped — a peer reclaimed it and a FRESH LIVE lease now sits in the slot
+        (the concurrent-reclaim clobber) — then ``cur_gen != dead_gen`` (epochs are 128-bit random, so a live
+        generation never collides with the dead one) and the unlink is REFUSED; the caller re-loops and is
+        cleanly refused by the live holder. The extra ``not _alive(cur)`` re-check also refuses the unlink if
+        ``dead_gen`` reads live again (a within-boot pid reuse), trading a wrong unlink for a bounded, safe
+        false-positive. The token itself carries the reclaimer's liveness, so a reclaimer that crashes
+        mid-reclaim is detected (dead) and its token dropped — no generation can wedge."""
+        if not dead_gen:
+            return True                         # nothing identified to reclaim → re-attempt create
+        token = self._reclaim_token(slug, dead_gen)
         try:
             tfd = os.open(str(token), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         except FileExistsError:
@@ -240,19 +260,20 @@ class SlugLease:
             self._write_holder(tfd, {"epoch": secrets.token_hex(8), "pid": os.getpid(),
                                      "boot_id": _boot_id(), "ts": time.time(), "role": "reclaim"})
             cur = self._read(marker)
-            cur_epoch = (str(cur["epoch"]) if isinstance(cur, dict) and cur.get("epoch")
-                         else self._epoch_of(marker))
-            if not cur_epoch:
+            # derive the current generation id from the SAME read used for the liveness check below (so the two
+            # can never disagree across a flip), mirroring how ``acquire`` captured ``dead_gen``.
+            cur_gen = (str(cur["epoch"]) if isinstance(cur, dict) and cur.get("epoch")
+                       else self._epoch_of(marker))
+            if not cur_gen:
                 return True                     # already freed by another reclaimer → re-attempt create
-            if cur_epoch == epoch:
-                # still the same stale generation, and WE are its sole live reclaimer, so the slot stayed
-                # occupied by it (a fresh marker needs an empty slot, which only our unlink creates) →
-                # unlinking removes exactly the dead generation, never a live one.
+            # Unlink ONLY the exact generation acquire proved dead, and only if it is STILL dead. A generation
+            # that has flipped (a peer reclaimed it → a fresh LIVE lease now sits here) has a different epoch,
+            # so cur_gen != dead_gen and we must NOT touch it — that is the clobber this gate prevents.
+            if cur_gen == dead_gen and not self._alive(cur, marker):
                 self._unlink(marker)
                 return True
-            # the marker is a DIFFERENT generation now. Leave it: if it is live it must not be touched; if it
-            # is dead a later acquire round reclaims it under its own token.
-            return True
+            return True                         # changed / now-live generation → re-loop; the O_EXCL retry
+                                                # then fails and the live holder cleanly refuses us
         finally:
             self._unlink(token)                 # release the reclaim right for this generation
 
@@ -286,8 +307,13 @@ class SlugLease:
                 if self._alive(holder, marker):
                     return LeaseResult(ok=False, slug=s, reason="a live engagement holds this slug",
                                        holder=holder)
-                # stale holder — try to reclaim, then re-attempt the exclusive create
-                if not self._reclaim(s, marker, holder):
+                # Stale holder. Capture the identity of the generation we JUST PROVED dead (from this very
+                # observation, not a fresh re-read) and reclaim ONLY that generation. Gating the unlink on the
+                # proven-dead identity — never on "whatever is at the marker now" — is what stops a lagging
+                # reclaimer from unlinking a peer's fresh LIVE lease (the concurrent-reclaim clobber).
+                dead_gen = (str(holder["epoch"]) if isinstance(holder, dict) and holder.get("epoch")
+                            else self._epoch_of(marker))
+                if not self._reclaim(s, marker, dead_gen):
                     time.sleep(0.002)           # a live reclaimer is working — brief back-off, then retry
                 continue
             except OSError as e:
