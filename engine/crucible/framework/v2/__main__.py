@@ -207,7 +207,17 @@ def _status(argv: list[str]) -> int:
         return 2
 
     print(f"  v2 root           : {paths.v2_root()}")
-    print(f"  memory db         : {paths.memory_db()}")
+    # D2 — surface the single-tenant worker shard so an operator sees WHICH tenant this process serves
+    # and where its (sharded) spine + memory stores live. Unsharded => "(shared/default)".
+    try:
+        from .common import tenant as _tenant
+        _shard = _tenant.shard_summary()
+        print(f"  tenant            : {_shard['tenant']}")
+        print(f"  root owner        : {_shard.get('root_owner', '-')}")
+        print(f"  blackboard db     : {_shard['blackboard_db']}")
+        print(f"  memory db         : {_shard['memory_db']}")
+    except Exception:  # noqa: BLE001 — status must never crash; fall back to the un-sharded memory line
+        print(f"  memory db         : {paths.memory_db()}")
     print(f"  dryrun dir        : {paths.dryrun_dir()}")
     print()
     print("  LLM backends      :")
