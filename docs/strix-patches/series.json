@@ -456,16 +456,22 @@
    "subject": "S6 control exchange: fix the veracity-layer doc drift the scheme rework left"
   },
   {
-   "commit": "36b8f0773b3cf78df57261cbc56898caba1fc169",
+   "commit": "0334d80dc60c026a32a845ed71fb3b6a8c44d798",
    "file": "032-strix-fix-caido-upstream-proxy-schema-drift-allo.patch",
-   "sha256": "57e70e967a15c3a28e5cf686dd61aa6545bf386187dc475635c65b466669c2cb",
-   "subject": "strix: fix caido upstream-proxy schema drift (allowlist + denylist now required)"
+   "sha256": "0a30e2873dc31fcbad38930b0bf36cf482ee65edadba3dbd4bef86e5054584ca",
+   "subject": "strix: fix caido upstream-proxy schema drift (allowlist + denylist now required) (#796)"
   },
   {
-   "commit": "8271648d21d1b50569384d842d6e7ed8ae1c5bfc",
-   "file": "033-strix-honest-comment-on-the-caido-allowlist-deny.patch",
-   "sha256": "afa692cb64a7ce057d6a2209c8249574b80636c04912ef41620ee45fd25661a1",
-   "subject": "strix: honest comment on the caido allowlist/denylist values (red-pen nit)"
+   "commit": "e7118477f994f39c99ae8c5f3b11c36400dc663c",
+   "file": "033-supply-chain-bump-anyio-4-14-2-cve-re-pin-tla2to.patch",
+   "sha256": "9e3326ab2d1ee4628fc59d44d217a763b75cd7e9a41ceb514e1f7d35490f6ee2",
+   "subject": "supply-chain: bump anyio 4.14.2 (CVE) + re-pin tla2tools (3rd re-cut) \u2014 unblocks A14 + formal (#810)"
+  },
+  {
+   "commit": "81fb894642574e2cf0905c8574d7f5f04c2eb968",
+   "file": "034-supply-chain-bump-pyjwt-2-13-0-2-15-1-fixes-cve.patch",
+   "sha256": "15c8587340de16d2c9fe0cc01e3029a4b40967fe9da1da21d17ab909efc55934",
+   "subject": "supply-chain: bump pyjwt 2.13.0 -> 2.15.1 (fixes CVE-2026-102268 CRITICAL + 5 HIGH); A14 unblock"
   }
  ],
  "schema": 1,
@@ -712,7 +718,7 @@
   "vendor/strix/tests_vigil/test_sandbox_hardening.py": "c5a6cbb4e51c5a86d1c9f30785fa7234af47706015222a9323f420b8a2059be8",
   "vendor/strix/tests_vigil/test_vigil_graph_progress.py": "b468b4ab45c317175af0a267f5692984c570b88a5bcf960f0e9f102706ffb337",
   "vendor/strix/tests_vigil/test_vigil_upstream_proxy.py": "5aec4434f994f0cc69b3fc2c6773ed484e2a26450bf6f1dcacfeb27dee63515c",
-  "vendor/strix/uv.lock": "fb6aac5af3350971e0ac108feebb0fd951c683f39437e9a2d49ef620fc3af8f5"
+  "vendor/strix/uv.lock": "11a8876f704adb11b8e21ca8fbba8da5c38e7c52a64fed5dfafce732fcc19ecc"
  },
  "upstream_commit": "230324d2b80a5a27506f85fc521845d8464b04c0",
  "upstream_license": "Apache-2.0",
