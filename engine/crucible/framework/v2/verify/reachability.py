@@ -138,9 +138,21 @@ def capture_handshake(
     refusal = _authorize(str(host), port, slug)
     if refusal is not None:
         return {**base, "error": refusal}
+    # Never-liftable egress floor: resolve ONCE and refuse a metadata / link-local / RFC1918 / reserved
+    # destination — directly or via a DNS-rebinding answer — pinning the connect to the validated address so
+    # a rebinding resolver cannot swap in a denied IP after the check. Only the REAL default connector
+    # egresses; a test-injected ``connect`` is hermetic, so the floor (which performs DNS) applies only when
+    # ``connect is None`` (the production path — engage_fusion drives this with connect=None).
     conn = connect or _socket_connect
+    dial_host = str(host)
+    if connect is None:
+        try:
+            from ..common.egress_pin import resolve_and_pin
+            dial_host = resolve_and_pin(str(host), int(port), slug=slug)
+        except Exception as e:
+            return {**base, "error": f"egress floor refused: {e}"[:300]}
     try:
-        peer, banner = conn(str(host), int(port), timeout, read_banner)
+        peer, banner = conn(dial_host, int(port), timeout, read_banner)
     except Exception as e:
         return {**base, "error": f"{type(e).__name__}: {e}"[:200]}
     return {"connected": True, "host": str(host), "port": int(port), "protocol": protocol,

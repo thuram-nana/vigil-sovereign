@@ -30,16 +30,20 @@ from .verifier import OracleVerifier
 _DEFAULT_TIMEOUT = 5.0
 
 
-def _tls_connect(host: str, port: int, timeout: float) -> tuple[str, str, int | None, bytes | None]:
+def _tls_connect(host: str, port: int, timeout: float, *, dial_ip: str | None = None) -> tuple[str, str, int | None, bytes | None]:
     """The default connector: ONE bounded TLS handshake with a standard client. Returns
     (tls_version, cipher_name, cipher_bits, peer_cert_der); raises OSError/SSLError on a failed handshake.
     Cert validation is disabled on purpose (posture probe, not trust check — see the module docstring);
     ``getpeercert(binary_form=True)`` still returns the presented leaf DER under CERT_NONE, which the
-    weak-crypto oracle judges (a broken-hash signature)."""
+    weak-crypto oracle judges (a broken-hash signature).
+
+    ``dial_ip`` (keyword) is the egress-floor-validated address to CONNECT to; the SNI stays ``host`` so a
+    vhost still presents its real certificate. When None the socket dials ``host`` directly (the injected
+    test path). Pinning to ``dial_ip`` stops a rebinding resolver swapping the address after the floor check."""
     ctx = ssl.create_default_context()
     ctx.check_hostname = False
     ctx.verify_mode = ssl.CERT_NONE
-    with socket.create_connection((host, port), timeout=timeout) as raw:
+    with socket.create_connection((dial_ip or host, port), timeout=timeout) as raw:
         raw.settimeout(timeout)
         with ctx.wrap_socket(raw, server_hostname=host) as tls:
             version = tls.version() or ""
@@ -83,9 +87,20 @@ def capture_tls_handshake(
     refusal = _authorize(str(host), port, slug)
     if refusal is not None:
         return {**base, "error": refusal}
-    conn = connect or _tls_connect
+    # Never-liftable egress floor: resolve ONCE, refuse a metadata / link-local / RFC1918 / reserved
+    # destination (directly or via a DNS-rebinding answer), and PIN the connect to the validated address
+    # while keeping SNI = host so a vhost still presents its real certificate. Only the real default
+    # connector egresses; a test-injected ``connect`` is hermetic, so the floor applies only when connect is None.
     try:
-        result = conn(str(host), int(port), timeout)
+        if connect is None:
+            try:
+                from ..common.egress_pin import resolve_and_pin
+                pinned = resolve_and_pin(str(host), int(port), slug=slug)
+            except Exception as e:
+                return {**base, "error": f"egress floor refused: {e}"[:300]}
+            result = _tls_connect(str(host), int(port), timeout, dial_ip=pinned)
+        else:
+            result = connect(str(host), int(port), timeout)
     except Exception as e:
         return {**base, "error": f"{type(e).__name__}: {e}"[:200]}
     # Flexible unpack: the default connector returns (version, cipher, bits, cert_der); an injected/legacy
