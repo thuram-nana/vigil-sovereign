@@ -90,6 +90,7 @@ DOMAIN_TAGS: dict[str, bytes] = {
     "wielder-pop": b"vigil-capability-wielder-pop-v1\x00",     # VF wielder proof-of-possession over a challenge
     "login-pop": b"vigil-login-pop-v1\x00",                     # S3 per-user login proof-of-possession over a challenge
     "remediation-attestation": b"vigil-remediation-attestation-v1\x00",  # PCR/W5 proof-carrying remediation attestation
+    "live-target-attestation": b"vigil-live-target-attestation-v1\x00",  # WS2 evaluator self-serve "this live target is mine" PoP
 }
 
 
