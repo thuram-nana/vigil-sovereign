@@ -24,6 +24,12 @@
       "evidence": "apps/sigil/tests/test_governance_replay_guard.py"
     },
     {
+      "id": "RVC-engine-rawsock-egress-floor",
+      "name": "Engine raw-socket egress sites (CSWSH / race / smuggling) were not software-floored",
+      "summary": "The never-liftable egress floor was wired only on the engine capture paths in #874; the raw sockets in scanner/websocket.py (CSWSH), scanner/race.py::raw_race, and scanner/smuggling.py (raw_send + _desync_leg) still connected on a re-resolved name with no IP floor, so a charter-scoped name resolving or rebinding to metadata/RFC1918 could be dialled. Re-verified closed (WS1.1b, #879): all three now resolve once, run vigil_gateway.denylist.is_egress_denied over every resolved address, refuse metadata/link-local/RFC1918 (and DNS-rebinding), and dial the pinned IP; fail-closed throughout. Channel-only: no FACT minted, _ALL_ORACLES frozen at 15. Proof: scanner/tests/test_{websocket,race,smuggling}.py (floor + anti-rebinding + fail-closed negative controls).",
+      "evidence": "engine/crucible/framework/v2/scanner/tests/test_smuggling.py"
+    },
+    {
       "id": "RVC-offense-backup-restore",
       "name": "No backup or restore for offense-side state",
       "summary": "There was no backup/restore path for any offense-side state. Re-verified closed: off-host backup and unit-scoped restore ship as vigil backup / vigil restore.",
@@ -488,22 +494,6 @@
       "source_doc": "docs/DEFERRED-INFRA.md",
       "disposition": "file-into-w16",
       "w16_issue": null
-    },
-    {
-      "id": "LIMIT-engine-rawsock-egress-floor-partial",
-      "title": "Engine raw-socket egress sites (CSWSH / race / smuggling) are not yet software-floored",
-      "summary": "common.egress_pin enforces the never-liftable egress floor + anti-rebinding pin on the engine capture connectors (verify/reachability.py, verify/tls.py) and a floor check on verify/reachability_cloud.py. Three same-class raw-socket egress sites are not yet routed through it: scanner/websocket.py (CSWSH handshake, a FACT-minting path), scanner/race.py::raw_race, and scanner/smuggling.py::raw_send. Each carries no charter/slug context at the socket, so wiring the floor needs the slug threaded from its campaign driver; that is tracked as WS1.1b with its own build + red-pen. Until then a charter-scoped name resolving (or rebinding) to metadata/RFC1918 could be dialled by those sites; for the hosted eval this is covered by the per-VM firewall egress floor, and the integration re-drive callers already pin via egress_floor.pin_egress.",
-      "classification": "real-unfinished-code",
-      "severity": "medium",
-      "anchor": {
-        "file": "engine/crucible/framework/v2/common/egress_pin.py",
-        "symbol": "resolve_and_pin"
-      },
-      "marker": false,
-      "check": "symbol-exists",
-      "source_doc": "docs/DEFERRED-INFRA.md",
-      "disposition": "file-into-w16",
-      "w16_issue": null
     }
   ],
   "honest_limit_sites_note": "The code-scan census. docs/tests/test_limitation_inventory.py scans every non-test product .py for the honest-limit/deferred debt phrases in _DEBT_PHRASES and requires EVERY hit to be either a VIGIL-LIMIT marker line OR a site listed here whose snippet (matched case-insensitively) is a substring of the hit line. kind 'debt' names the limitations id the site belongs to (which must exist); kind 'non-debt' explains why the phrase is not a capability limit (a deliberate design choice, a runtime-state description, or a phrase describing a CHECK's target rather than VIGIL itself). Bidirectional: every snippet here must still match a debt-phrase line in its file, so deleting the prose (or moving the debt) turns CI red.",
@@ -703,13 +693,6 @@
       "kind": "debt",
       "limit_id": "LIMIT-tls-certificate-validity-unwired",
       "note": "classify_certificate_defects docstring: states the inertness and what wiring it would require."
-    },
-    {
-      "file": "engine/crucible/framework/v2/common/egress_pin.py",
-      "snippet": "not yet wired",
-      "kind": "debt",
-      "limit_id": "LIMIT-engine-rawsock-egress-floor-partial",
-      "note": "COVERAGE-map bullet naming the same-class raw-socket sites (CSWSH/race/smuggling) not yet routed through the engine floor; tracked WS1.1b."
     }
   ]
 }
