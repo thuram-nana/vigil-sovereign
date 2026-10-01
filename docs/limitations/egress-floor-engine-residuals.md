@@ -7,12 +7,15 @@ fails the build if either site below loses the referenced tracking (this file) o
 ## What this records
 
 The completeness guard classifies every egress primitive under `framework/v2` as a floor primitive,
-floored (routed through `resolve_and_pin` / `pin_egress`), or covered-elsewhere (its own gate + a covering
-test). Two genuine engagement-egress-to-a-target sites are **not yet floored** because flooring them
-soundly needs its own slice — each must thread an engagement **slug** into the floor (so the charter can
-lift loopback/RFC1918 for an authorized literal), and neither is on a live, gated, FACT-minting path
-today. They are recorded here rather than rush-floored (a sloppy mass change) or falsely allowlisted (an
-allowlist entry is a claim that *another gate* covers the site — neither of these has one).
+floored (routed through `resolve_and_pin` / `pin_egress` and dialing the pinned IP), or covered-elsewhere
+(its own gate + a covering test). Three residuals remain: two genuine engagement-egress-to-a-target sites
+are **not yet floored** at all (R1, R2) because flooring them soundly needs its own slice — each must
+thread an engagement **slug** into the floor (so the charter can lift loopback/RFC1918 for an authorized
+literal), and neither is on a live, gated, FACT-minting path today; and one **validate-only** site (R3)
+where the floor *does* run and refuse metadata/RFC1918 on every hop but the HTTP client re-resolves at
+connect, leaving a narrow connect-time-rebind TOCTOU. They are recorded here rather than rush-floored (a
+sloppy mass change) or falsely allowlisted (an allowlist entry is a claim that *another gate* covers the
+site — R1/R2 have none; R3 is honestly labeled `covered` validate-only, not `floored`).
 
 ### R1 — `scanner/quantum_era.py::pqc_scan` (socket.create_connection, TLS)
 
@@ -36,6 +39,22 @@ URL. Flooring the fallback (resolve-and-refuse / pin) needs a slug threaded thro
 
 **Scope of the gap:** the live confirmation path is floored (via `web_redrive`); this is the unfloored
 fallback, reachable only when a caller omits the retained headers.
+
+### R3 — `agents/http_executor.py` httpx path (validate-only, connect-time rebind TOCTOU)
+
+`_assert_egress_floor` runs `resolve_and_pin` on the host before **every** `client.request` hop, so a
+metadata / link-local / RFC1918 destination (direct, or the DNS answer at check time) is refused and the
+request never leaves. But the actual socket is opened by `httpx` / `httpcore`, which **re-resolves** the
+name at connect — so a name that rebinds in the narrow window *between* the floor check and the connect
+could still be dialled. This is the same validate-only posture as `intake/http.py` (classified `covered`,
+not `floored`) and the same TOCTOU class that Wave 2 closed for `verify/reachability_cloud.py` via an
+SNI-preserving dial-the-pinned-IP. Closing it here means a custom httpx transport (or resolver) that
+connects to the floor-validated IP while preserving `Host` / SNI — a dedicated hardening slice, because
+httpcore manages connection reuse and resolution internally.
+
+**Scope of the gap:** metadata/RFC1918/link-local are refused on every hop by the validate step; the
+residual is only a precisely-timed rebind in the check→connect window on the httpx path. The census labels
+this site `covered` (validate-only), never `floored`, so the completeness guard does not overclaim it.
 
 ## Invariants held while deferring
 

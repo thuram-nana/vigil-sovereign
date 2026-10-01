@@ -160,14 +160,16 @@ CENSUS: "dict[tuple[str, str], dict]" = {
         justification="CSWSH raw socket dials dial_ip from resolve_and_pin (#879)",
         test="scanner/tests/test_websocket.py"),
     ("agents/http_executor.py", "httpx/requests.request"): dict(
-        category="floored", count=2, token=_PIN,
-        justification="_assert_egress_floor resolve_and_pins the host (metadata/RFC1918 refused) before "
-                      "every client.request hop, behind the string scope gate — WAVE 3",
+        category="covered", count=2, token=_PIN,
+        justification="validate-and-refuse (VALIDATE-ONLY, like intake/http.py): _assert_egress_floor runs "
+                      "resolve_and_pin on every client.request hop, refusing metadata/RFC1918/link-local, "
+                      "behind the string scope gate — but httpx/httpcore re-resolves at connect, so a "
+                      "connect-time rebind is a tracked TOCTOU residual (R3), not a true dial-the-pinned-IP",
         test="agents/tests/test_http_executor_egress_redirect.py"),
     ("agents/http_executor.py", "getaddrinfo"): dict(
-        category="floored", count=1, token=_PIN,
-        justification="the floor's OWN loopback-grant resolution inside _assert_egress_floor (adds only "
-                      "loopback addresses to the lift set; every tier is re-checked by resolve_and_pin)",
+        category="covered", count=1, token=_PIN,
+        justification="the validate step's OWN loopback-grant resolution inside _assert_egress_floor (adds "
+                      "only loopback addresses to the lift set; every tier is re-checked by resolve_and_pin)",
         test="agents/tests/test_http_executor_egress_redirect.py"),
 
     # ---- (c) COVERED ELSEWHERE: own SSRF floor / intel gated-egress / operator-infra / loopback / LLM --
