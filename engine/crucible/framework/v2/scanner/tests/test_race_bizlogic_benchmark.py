@@ -102,6 +102,9 @@ def _burst(base_url: str, action_path: str, slug: str, count: int = 8) -> list[d
 
 
 def test_planted_race_coupon_mints_a_fact_owner_signed_with_semantic_predicate(bench_slug: str) -> None:
+    # Drives raw_race through the WS1.1b egress floor, which imports vigil_gateway.denylist and fail-closes
+    # without it. SKIP in the gateway-less CRUCIBLE-core job, RUN in the offense leg (ships gateway).
+    pytest.importorskip("vigil_gateway")
     with serve() as base_url:
         _post(base_url, "/race/reset")
         responses = _burst(base_url, "/race/redeem", bench_slug, count=8)
@@ -116,6 +119,9 @@ def test_planted_race_coupon_mints_a_fact_owner_signed_with_semantic_predicate(b
 
 
 def test_locked_coupon_benign_twin_never_fires(bench_slug: str) -> None:
+    # Drives raw_race through the WS1.1b egress floor, which imports vigil_gateway.denylist and fail-closes
+    # without it. SKIP in the gateway-less CRUCIBLE-core job, RUN in the offense leg (ships gateway).
+    pytest.importorskip("vigil_gateway")
     with serve() as base_url:
         _post(base_url, "/race/reset")
         responses = _burst(base_url, "/race/redeem-locked", bench_slug, count=8)
@@ -127,6 +133,9 @@ def test_locked_coupon_benign_twin_never_fires(bench_slug: str) -> None:
 
 
 def test_race_without_owner_signed_spec_is_inconclusive(bench_slug: str) -> None:
+    # Drives raw_race through the WS1.1b egress floor, which imports vigil_gateway.denylist and fail-closes
+    # without it. SKIP in the gateway-less CRUCIBLE-core job, RUN in the offense leg (ships gateway).
+    pytest.importorskip("vigil_gateway")
     with serve() as base_url:
         _post(base_url, "/race/reset")
         responses = _burst(base_url, "/race/redeem", bench_slug, count=8)
@@ -138,6 +147,9 @@ def test_race_without_owner_signed_spec_is_inconclusive(bench_slug: str) -> None
 
 
 def test_race_without_semantic_predicate_is_a_lead(bench_slug: str) -> None:
+    # Drives raw_race through the WS1.1b egress floor, which imports vigil_gateway.denylist and fail-closes
+    # without it. SKIP in the gateway-less CRUCIBLE-core job, RUN in the offense leg (ships gateway).
+    pytest.importorskip("vigil_gateway")
     with serve() as base_url:
         _post(base_url, "/race/reset")
         responses = _burst(base_url, "/race/redeem", bench_slug, count=8)
