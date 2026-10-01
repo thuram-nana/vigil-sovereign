@@ -57,7 +57,7 @@ RVC_IDS = {
     "RVC-crash-resume", "RVC-k8s-rbac-livefire", "RVC-console-credential-gate",
     "RVC-per-action-approval-token", "RVC-sandbox-exec-wiring", "RVC-neo4j-client-body",
     "RVC-k8s-workload-oracle-wired", "RVC-warden-strix-fail-closed", "RVC-console-orphan-routes",
-    "RVC-a12-request-smuggling-timing-lead",
+    "RVC-a12-request-smuggling-timing-lead", "RVC-engine-rawsock-egress-floor",
 }
 
 # Directories whose sources are NOT scanned for markers (vendored trees; git internals).

@@ -9,13 +9,13 @@ link-local / RFC1918 address (directly, or via a DNS-rebinding answer) could be 
 
 COVERAGE — be precise about which same-class engine sites this helper is wired into (do not read it as
 covering all of them):
-  * WIRED (this slice): ``verify/reachability.py`` (TCP handshake), ``verify/tls.py`` (TLS handshake, pin +
+  * WIRED (#874): ``verify/reachability.py`` (TCP handshake), ``verify/tls.py`` (TLS handshake, pin +
     SNI preserved), ``verify/reachability_cloud.py`` (anonymous GET — floor CHECK only; urllib re-resolves,
     so a precisely-timed DNS rebinding is a NARROW named residual there — an IP-pin breaks a vhost's cert).
-  * NOT YET WIRED (tracked hardening WS1.1b; covered for the eval by the VM-firewall floor): the raw sockets
-    in ``scanner/websocket.py`` (CSWSH — a FACT-minting path), ``scanner/race.py::raw_race`` (LEAD), and
-    ``scanner/smuggling.py::raw_send``. Those carry no slug/charter context at the socket and need it threaded
-    from their campaign drivers, so they get their own build + red-pen rather than being crammed in here.
+  * WIRED (WS1.1b, #879): the raw sockets in ``scanner/websocket.py`` (CSWSH — a FACT-minting path),
+    ``scanner/race.py::raw_race`` (LEAD), and ``scanner/smuggling.py`` (``raw_send`` + ``_desync_leg``). The
+    engagement slug is threaded from their campaign drivers; each resolves once, refuses metadata/link-local/
+    RFC1918 (and a name rebinding to them), and dials the pinned IP. Channel-only — no FACT, oracles frozen.
 
 This helper resolves the host ONCE, runs the SAME shared floor primitive
 ``vigil_gateway.denylist.is_egress_denied`` over EVERY resolved address, and returns the first validated
@@ -34,8 +34,8 @@ NOT add ``pin_egress``'s scope-over-RESOLVED-ADDRESSES step (its ``charter_addre
 charter-listed NAME that resolves to several PUBLIC addresses will pin the first — the floor still refuses
 every metadata/link-local/RFC1918 address, so the only residual is an out-of-scope *public* address on an
 in-scope name (the name itself already passed the scope gate). Replicating the address-level scope predicate
-soundly means replicating ``charter_address_authorizer`` (and its self-reference pitfalls); that is deferred
-to WS1.1b with the raw-socket sites rather than approximated here.
+soundly means replicating ``charter_address_authorizer`` (and its self-reference pitfalls); this helper
+deliberately does not, so that out-of-scope-public residual is a documented divergence, not an open gap.
 """
 
 from __future__ import annotations
