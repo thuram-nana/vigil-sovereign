@@ -4,37 +4,61 @@
     "mem_slack_bytes": 8192,
     "regress_frac": 0.45
   },
-  "calibration_ops_s": 98667.96,
+  "calibration_ops_s": 93629.58,
   "cases": {
     "build_chain.1000": {
       "peak_bytes": 595887,
-      "rel_speed": 0.936006,
-      "throughput_ops_s": 92353.82,
-      "wall_s": 0.010828
+      "rel_speed": 0.910893,
+      "throughput_ops_s": 85286.49,
+      "wall_s": 0.011725
     },
     "canonical_json.nested": {
       "peak_bytes": 1247,
-      "rel_speed": 1.199747,
-      "throughput_ops_s": 118376.57,
-      "wall_s": 0.016895
+      "rel_speed": 1.242967,
+      "throughput_ops_s": 116378.46,
+      "wall_s": 0.017185
     },
     "digest_payload.nested": {
       "peak_bytes": 1247,
-      "rel_speed": 0.910065,
-      "throughput_ops_s": 89794.3,
-      "wall_s": 0.022273
+      "rel_speed": 0.90959,
+      "throughput_ops_s": 85164.52,
+      "wall_s": 0.023484
+    },
+    "scan.plan_fixed_corpus": {
+      "peak_bytes": 790496,
+      "rel_speed": 0.01925,
+      "throughput_ops_s": 1802.34,
+      "wall_s": 0.044387
     },
     "sha256_hex.1kb": {
       "peak_bytes": 209,
-      "rel_speed": 2.392984,
-      "throughput_ops_s": 236110.89,
-      "wall_s": 0.008471
+      "rel_speed": 2.494236,
+      "throughput_ops_s": 233534.23,
+      "wall_s": 0.008564
+    },
+    "synthetic.chaining": {
+      "peak_bytes": 251,
+      "rel_speed": 11.053496,
+      "throughput_ops_s": 1034934.22,
+      "wall_s": 0.000386
+    },
+    "synthetic.pathsearch": {
+      "peak_bytes": 241704,
+      "rel_speed": 7.201736,
+      "throughput_ops_s": 674295.49,
+      "wall_s": 0.002225
+    },
+    "synthetic.saturate": {
+      "peak_bytes": 41256,
+      "rel_speed": 84.655318,
+      "throughput_ops_s": 7926241.83,
+      "wall_s": 0.000315
     },
     "verify_chain.1000": {
       "peak_bytes": 1176,
-      "rel_speed": 1.339967,
-      "throughput_ops_s": 132211.84,
-      "wall_s": 0.007564
+      "rel_speed": 1.40416,
+      "throughput_ops_s": 131470.93,
+      "wall_s": 0.007606
     }
   },
   "note": "COMMITTED performance baseline for the VIGIL hot integrity paths (W2-6/#423). Regenerate with `python tools/perf/perf_bench.py record` (or `make bench-perf-record`) and COMMIT the diff \u2014 updating a baseline is an explicit, reviewed change; CI never self-updates it. Time metrics are gated on the machine-independent rel_speed ratio; peak_bytes is a deterministic tracemalloc figure. See tools/perf/README.md.",

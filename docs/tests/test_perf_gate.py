@@ -116,11 +116,58 @@ def test_end_to_end_slowed_path_is_rejected():
 
 
 # ---------------------------------------------------------------------------
+# (b2) ALGORITHMIC negative control (#828 class): the planted O(N^2) twin of each hot-path SHAPE
+#      is rejected, while its on-tree variant passes. Pure stdlib, so this rides the required
+#      docs/tests job with no engine/vigil_core import. Same-run baseline => drift-immune.
+# ---------------------------------------------------------------------------
+def _underlying_equal(label: str) -> bool:
+    """The planted twin must return the IDENTICAL logical result to its on-tree variant, so a
+    rejection can only be about speed — not a different (cheaper) computation."""
+    if label == "synthetic.chaining":
+        return pb._chain_fast(pb.SYNTH_CHAIN_N) == pb._chain_quadratic(pb.SYNTH_CHAIN_N)
+    if label == "synthetic.pathsearch":
+        adj = pb._synth_graph(pb.SYNTH_PATH_N)
+        return pb._dijkstra_fast(adj) == pb._dijkstra_quadratic(adj)
+    if label == "synthetic.saturate":
+        sigs = pb._synth_sigs(pb.SYNTH_SATURATE_N)
+        return pb._dedup_fast(sigs) == pb._dedup_quadratic(sigs)
+    raise AssertionError(f"unknown pair label {label!r}")
+
+
+def test_planted_quadratic_slowdown_is_rejected_on_tree_passes():
+    """The regression gate that would have caught #828: for each hot-path shape, a planted O(N^2)
+    variant is REJECTED and the on-tree variant PASSES — measured live, not assumed."""
+    cal = pb.calibrate()
+    pairs = pb.synthetic_algorithmic_pairs()
+    assert {p[0] for p in pairs} == {"synthetic.chaining", "synthetic.pathsearch", "synthetic.saturate"}
+    for label, ontree, quad in pairs:
+        assert _underlying_equal(label), (
+            f"{label}: the quadratic twin must compute the SAME result as on-tree, else a "
+            "rejection could be a different computation rather than a slowdown"
+        )
+        on_m = pb.measure(ontree, cal)
+        base = pb._entry_from_measurement(on_m)
+        ok_on, reasons_on = pb.evaluate(label, base, on_m)
+        assert ok_on, f"{label}: on-tree variant must pass its own baseline, got: {reasons_on}"
+
+        quad_m = pb.measure(quad, cal)
+        ok_quad, reasons_quad = pb.evaluate(f"{label}.quadratic", base, quad_m)
+        assert not ok_quad, (
+            f"the planted O(N^2) {label} was NOT rejected — the fence misses the #828 class. "
+            f"quadratic rel_speed={quad_m.rel_speed:.4f} vs on-tree baseline {base['rel_speed']:.4f}"
+        )
+        assert any("throughput regressed" in r for r in reasons_quad), reasons_quad
+
+
+# ---------------------------------------------------------------------------
 # (c) the baseline is committed, well-formed, and covers the real hot paths.
 # ---------------------------------------------------------------------------
 EXPECTED_CASES = {
     "canonical_json.nested", "digest_payload.nested", "sha256_hex.1kb",
     "build_chain.1000", "verify_chain.1000",
+    # the fixed-corpus scan sensor + the on-tree synthetic-N algorithmic cases (#828 class).
+    "scan.plan_fixed_corpus",
+    "synthetic.chaining", "synthetic.pathsearch", "synthetic.saturate",
 }
 
 

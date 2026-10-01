@@ -52,15 +52,18 @@ benchmark: ## comparative head-to-head vs installed incumbents (sqlmap/wapiti/ni
 	  --sign $$( [ -f $(BENCH_KEY) ] && printf -- '--signing-key %s --key-id benchmark-owner' "$$(cat $(BENCH_KEY))" )
 
 # PERFORMANCE regression gate (issue #423) — the complement to the ACCURACY scorecard above.
-# `bench` gates recall/precision; `bench-perf` gates wall-clock / throughput / peak-memory over the
-# vigil_core hot integrity paths against a COMMITTED baseline (tools/perf/baselines/perf-baseline.json),
-# failing on regression beyond the band. Stdlib-only harness; vigil_core supplies the real cases (needs
-# `pip install -e packages/core/vigil_core`, or its deps on PYTHONPATH). See tools/perf/README.md.
-bench-perf: ## PERFORMANCE gate: wall-clock/throughput/peak-mem floors over vigil_core hot paths vs committed baseline
-	@PYTHONPATH=packages/core/vigil_core python3 tools/perf/perf_bench.py check
+# `bench` gates recall/precision; `bench-perf` gates wall-clock / throughput / peak-memory against a
+# COMMITTED baseline (tools/perf/baselines/perf-baseline.json), failing on regression beyond the band.
+# It covers the vigil_core hot integrity paths, a fixed-corpus SCAN case (real saturate + best_paths,
+# the #828 shape), and on-tree synthetic-N algorithmic cases whose planted O(N^2) twins are the
+# negative control. Stdlib-only harness; vigil_core + the framework engine supply the real cases (needs
+# `pip install -e packages/core/vigil_core` + the engine's deps, or both on PYTHONPATH as below). See
+# tools/perf/README.md.
+bench-perf: ## PERFORMANCE gate: wall-clock/throughput/peak-mem floors over the hot paths vs committed baseline
+	@PYTHONPATH=packages/core/vigil_core:engine/crucible python3 tools/perf/perf_bench.py check
 
 bench-perf-record: ## re-record the committed perf baseline (EXPLICIT, reviewed change — COMMIT the diff)
-	@PYTHONPATH=packages/core/vigil_core python3 tools/perf/perf_bench.py record
+	@PYTHONPATH=packages/core/vigil_core:engine/crucible python3 tools/perf/perf_bench.py record
 
 down: ## stop a running `vigil up` (backends + reverse proxy)
 	@[ -n "$(VIGIL)" ] || { echo "vigil not found — run ./bootstrap.sh (or make setup) first" >&2; exit 127; }
