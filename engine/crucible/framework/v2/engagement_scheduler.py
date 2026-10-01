@@ -333,6 +333,49 @@ class EngagementScheduler:
 def default_engagement_runner(job: EngagementJob):
     """A runner that calls :func:`framework.v2.engage.run_engagement` with the job's slug/seed/params —
     the concrete tie between this scheduler layer and the run boundary. ``run_engagement`` is imported
-    lazily so merely scheduling a job never imports the heavy engine."""
+    lazily so merely scheduling a job never imports the heavy engine.
+
+    This is the GOVERNOR-LESS runner: no fleet bounds are applied, so a single-engagement deployment
+    behaves exactly as before (byte-identical). For the fleet case — N engagements at once against one
+    estate — use :func:`make_fleet_runner`, which routes each engagement through a
+    :class:`~framework.v2.authority.fleet.FleetConcurrencyGovernor`."""
     from .engage import run_engagement
     return run_engagement(job.slug, job.seed_url, **dict(job.params or {}))
+
+
+def make_fleet_runner(governor=None, executor=None, *, default_tenant: str = "default"):
+    """Return an engagement runner that routes each job through the fleet bounds (Wave D / M3.1).
+
+    This is how the fleet governor (and the signed authority's per-engagement
+    :class:`~framework.v2.authority.authorization.EngagementExecutor`) become REACHABLE on the live run
+    path: the scheduler decides WHICH engagement runs, and this runner wraps every engagement's one
+    traffic-sending phase in ``governor.engage(target, tenant, kind)`` so the per-target-host rate cap,
+    the per-tenant total budget, and the serial-proof-per-target invariant hold across all of a fleet's
+    concurrent engagements — without ``run_engagement`` or the scheduler re-implementing any of them.
+
+    The engagement is the fleet ADMISSION UNIT. For each job the runner resolves, from
+    ``job.params`` (these two keys are consumed here and NOT forwarded to ``run_engagement``):
+
+      * ``tenant`` — the tenant whose total budget this engagement draws on (else ``default_tenant``).
+      * ``work_kind`` — ``"search"`` or ``"proof"``; absent => PROOF, the safe serialize-per-host default.
+
+    The governor/executor are objects, injected here (they cannot ride the JSON job file). With both
+    ``None`` this is exactly :func:`default_engagement_runner` — byte-identical, no bound applied — so
+    wiring the runner never changes a verdict; it only shapes how concurrently authorized work runs."""
+    from .engage import run_engagement
+
+    def _runner(job: EngagementJob):
+        params = dict(job.params or {})
+        tenant = str(params.pop("tenant", default_tenant) or default_tenant)
+        work_kind = params.pop("work_kind", None)
+        return run_engagement(
+            job.slug,
+            job.seed_url,
+            fleet_governor=governor,
+            fleet_tenant=tenant,
+            fleet_work_kind=work_kind,
+            executor=executor,
+            **params,
+        )
+
+    return _runner
