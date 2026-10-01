@@ -2556,7 +2556,7 @@
     {
       "id": "PHASE1-2",
       "title": "The cockpit owner-signs a live-target authorization in-process and refuses dangerous inputs",
-      "claim": "The cockpit owner-signs a scoped, time-boxed, GET-only-by-default engagement authorization for a live external target IN-PROCESS (the owner private key is never written or sent — only the public signed bundle crosses the seam), and refuses a categorical-safety-floor host (.gov/.mil/.edu/.int and *.gov.cm-class), a loopback/link-local/metadata IP literal, and a live environment.",
+      "claim": "The cockpit owner-signs a scoped, time-boxed, GET-only-by-default engagement authorization for a live external target IN-PROCESS (the owner private key is never written or sent — only the public signed bundle crosses the seam), and refuses a categorical-safety-floor host (.gov/.mil/.edu/.int and *.gov.cm-class), a loopback/link-local/metadata IP literal, and a live environment unless a valid evaluator attestation is supplied (which unblocks live GET-only with allow_destructive=False; the owner still signs the authorization and the evaluator proves identity with their own key, never a governance key).",
       "source": "docs/decisions/phase1-ui-live-external-authorization.md:25",
       "enforced_by": {
         "file": "apps/sigil/sigil/ui/target_authorization.py",
@@ -2568,7 +2568,7 @@
           "test_add_target_writes_an_owner_signed_verifiable_authorization",
           "test_refuses_categorical_safety_floor",
           "test_refuses_loopback_linklocal_metadata_ip_literals",
-          "test_refuses_live_environment"
+          "test_refuses_live_environment_without_an_evaluator_attestation"
         ]
       },
       "ci_job": "SIGIL governor gates (P7 — offense gate + authn)",

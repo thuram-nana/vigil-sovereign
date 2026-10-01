@@ -26,7 +26,7 @@ verifier never raises, rejects a duplicate-pubkey quorum collapse, and rejects a
 The cockpit owner-signs a scoped, time-boxed, GET-only-by-default engagement authorization for a live external
 target IN-PROCESS (the owner private key is never written or sent — only the public signed bundle crosses the
 seam), and refuses a categorical-safety-floor host (.gov/.mil/.edu/.int and *.gov.cm-class), a
-loopback/link-local/metadata IP literal, and a live environment.
+loopback/link-local/metadata IP literal, and a live environment unless a valid evaluator attestation is supplied (which unblocks live GET-only with allow_destructive=False; the owner still signs the authorization and the evaluator proves identity with their own key, never a governance key).
 
 <!-- CLAIM:PHASE1-3 -->
 A remote engage installs + launches only under an owner-signed authority whose trust root is the pinned owner
