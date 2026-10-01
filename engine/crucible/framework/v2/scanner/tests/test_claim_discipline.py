@@ -585,9 +585,14 @@ def test_the_capability_matrix_does_not_outrun_the_branch_registry() -> None:
     # katana/gobuster (the web_discovery family) mint through the achieved_state web FACT branches
     # (open_redirect/cors/host_header/graphql_introspection) via web_redrive, each passing the conformance
     # battery; nuclei stays fact_capable=false (a scanner is a proposer, not the authority).
+    # M1.2 extends the SAME web_discovery FACT column: gau/waybackurls (passive archive URL proposers) and
+    # feroxbuster/dirsearch (content-discovery brute) all re-drive through the SAME achieved_state web FACT
+    # branches, each passing the conformance battery — so the fact set grows without outrunning the registry
+    # (oracle_family "ACHIEVED_STATE", backed by the achieved_state oracle_version arm above).
     # See docs/capability-matrix/evidence-branches.json.
     assert fact_tools == {"nmap", "sslscan", "masscan", "rustscan", "naabu", "zmap", "unicornscan",
-                          "katana", "gobuster"}, (
+                          "katana", "gobuster",
+                          "gau", "waybackurls", "feroxbuster", "dirsearch"}, (
         f"unexpected fact_capable tool set: {fact_tools}")
 
     httpx = [t for t in matrix["tools"] if t["name"] == "httpx"]

@@ -592,12 +592,12 @@
       "install": "pip",
       "privileges": "none",
       "network_effect": "scans-target",
-      "oracle_family": "",
-      "fact_capable": false,
+      "oracle_family": "ACHIEVED_STATE",
+      "fact_capable": true,
       "claim_families": [
         "content-discovery"
       ],
-      "notes": "LEAD-only content discovery (path brute). existence+anon-reach is FACT-capable only via a future ACTIVE_EXPOSURE re-drive; today a hit is a LEAD. No typed argv builder yet \u2014 UNAVAILABLE until adapted."
+      "notes": "M1.2 web_discovery FACT column: dirsearch proposes discovered PATHS (--full-url); VIGIL re-drives EACH joined URL through its OWN gated ACHIEVED_STATE web re-drive (live.web_redrive.web_redrive \u2014 open_redirect/cors/host_header/graphql_introspection) and the deterministic predicate_oracle mints a signed FACT over VIGIL's own no-redirect capture. The tool's hit is grounding intel, never the authority; a discovered path that does not re-confirm stays a LEAD. Passed live.conformance (test_web_fact_tool) before fact_capable was set. Runner-owned ToolSpec builder: live.external_tool.dirsearch_web_scan (R4 runner, not the governed executor)."
     },
     {
       "name": "enum4linux-ng",
@@ -620,12 +620,12 @@
       "install": "cargo",
       "privileges": "none",
       "network_effect": "scans-target",
-      "oracle_family": "",
-      "fact_capable": false,
+      "oracle_family": "ACHIEVED_STATE",
+      "fact_capable": true,
       "claim_families": [
         "content-discovery"
       ],
-      "notes": "LEAD-only content discovery (recursive path brute) \u2014 same authority ladder as gobuster/dirsearch: FACT-capable only via a future ACTIVE_EXPOSURE re-drive; a hit is a LEAD today. No typed argv builder yet \u2014 UNAVAILABLE until adapted."
+      "notes": "M1.2 web_discovery FACT column: feroxbuster proposes discovered full URLs (--silent, bounded with --no-recursion); VIGIL re-drives EACH through its OWN gated ACHIEVED_STATE web re-drive (live.web_redrive.web_redrive \u2014 open_redirect/cors/host_header/graphql_introspection) and the deterministic predicate_oracle mints a signed FACT over VIGIL's own no-redirect capture. The tool's hit is grounding intel, never the authority; a discovered path that does not re-confirm stays a LEAD. Passed live.conformance (test_web_fact_tool) before fact_capable was set. Runner-owned ToolSpec builder: live.external_tool.feroxbuster_web_scan (R4 runner, not the governed executor)."
     },
     {
       "name": "ffuf",
@@ -649,12 +649,12 @@
       "install": "go",
       "privileges": "none",
       "network_effect": "connects-out",
-      "oracle_family": "",
-      "fact_capable": false,
+      "oracle_family": "ACHIEVED_STATE",
+      "fact_capable": true,
       "claim_families": [
         "url-discovery"
       ],
-      "notes": "LEAD-only URL discovery from third-party archives (Wayback/OTX/CommonCrawl) \u2014 a URL is a hypothesis feeder, never a FACT. No typed argv builder yet \u2014 UNAVAILABLE until adapted."
+      "notes": "M1.2 web_discovery FACT column: gau PASSIVELY proposes archived URLs (Wayback/OTX/CommonCrawl/URLScan \u2014 its egress is to the archives, never the target); VIGIL re-drives EACH surfaced URL through its OWN gated ACHIEVED_STATE web re-drive (live.web_redrive.web_redrive \u2014 open_redirect/cors/host_header/graphql_introspection), carrying the correlatable UA, and the deterministic predicate_oracle mints a signed FACT over VIGIL's own no-redirect capture. The archive row is a hypothesis feeder, never the authority; a surfaced URL that does not re-confirm stays a LEAD. Passed live.conformance (test_web_fact_tool) before fact_capable was set. Runner-owned ToolSpec builder: live.external_tool.gau_web_scan (R4 runner, not the governed executor)."
     },
     {
       "name": "jaeles",
@@ -733,12 +733,12 @@
       "install": "go",
       "privileges": "none",
       "network_effect": "connects-out",
-      "oracle_family": "",
-      "fact_capable": false,
+      "oracle_family": "ACHIEVED_STATE",
+      "fact_capable": true,
       "claim_families": [
         "url-discovery"
       ],
-      "notes": "LEAD-only URL discovery from the Wayback Machine \u2014 a URL is a hypothesis feeder, never a FACT. No typed argv builder yet \u2014 UNAVAILABLE until adapted."
+      "notes": "M1.2 web_discovery FACT column: waybackurls PASSIVELY proposes archived URLs from the Wayback Machine (its egress is to the archive, never the target); VIGIL re-drives EACH surfaced URL through its OWN gated ACHIEVED_STATE web re-drive (live.web_redrive.web_redrive \u2014 open_redirect/cors/host_header/graphql_introspection), carrying the correlatable UA, and the deterministic predicate_oracle mints a signed FACT over VIGIL's own no-redirect capture. The archive row is a hypothesis feeder, never the authority; a surfaced URL that does not re-confirm stays a LEAD. Passed live.conformance (test_web_fact_tool) before fact_capable was set. Runner-owned ToolSpec builder: live.external_tool.waybackurls_web_scan (R4 runner, not the governed executor)."
     },
     {
       "name": "wpscan",

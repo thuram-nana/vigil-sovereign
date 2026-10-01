@@ -35,10 +35,14 @@ from vigil_integration.live.conformance import REQUIRED_PROPERTIES, run_toolspec
 from vigil_integration.live.external_tool import (  # noqa: E402
     ScopeGate,
     ToolOutcome,
+    dirsearch_web_scan,
+    feroxbuster_web_scan,
+    gau_web_scan,
     gobuster_web_scan,
     katana_web_scan,
     nuclei_web_redrive,
     run_external_tool,
+    waybackurls_web_scan,
 )
 
 
@@ -142,6 +146,16 @@ def _katana_jsonl(url: str) -> str:
 def _gobuster_line(url: str) -> str:
     # gobuster `-e` (expanded) prints the FULL URL of each hit; the parser host-pins it, keeping the port.
     return f"{url} (Status: 200) [Size: 42]\n"
+
+
+def _plain_url_line(url: str) -> str:
+    # gau / waybackurls / feroxbuster --silent print ONE full URL per line.
+    return f"{url}\n"
+
+
+def _dirsearch_line(url: str) -> str:
+    # dirsearch --full-url decorates each hit with a timestamp + status + size; the URL is a LATER token.
+    return f"[12:00:00] 200 -   42B - {url}\n"
 
 
 def _nuclei_jsonl(url: str, template_id: str, cwe: str) -> str:
@@ -270,6 +284,100 @@ def test_web_discovery_tool_passes_the_full_conformance_battery(tool, ctor, monk
             positive_spec=ctor(scheme="http"), positive_backend=pos_backend,
             deceptive_spec=ctor(scheme="http"), deceptive_backend=dec_backend,
             target=target,
+            scope_gate_in=_scope_gate(["127.0.0.1"]),
+            scope_gate_out=_scope_gate(["10.99.99.99"]),
+            engagement_slug="alpha", signers=SIGNERS, trust_root=TRUST,
+            trip_killswitch=lambda: KillSwitch("alpha").trip("conformance"),
+            clear_killswitch=lambda: halt.unlink(missing_ok=True),
+            timeout=30.0)
+    finally:
+        srv.shutdown()
+    assert report.conformant, report.summary() + " | notes: " + "; ".join(report.notes)
+    for prop in REQUIRED_PROPERTIES:
+        assert report.checks.get(prop) is True, f"{tool}: {prop} not satisfied: {report.summary()}"
+
+
+# ===================================================================================================
+# (3b) M1.2 — the rest of the web_discovery FACT column: gau / waybackurls (passive archive URL
+#      proposers) + feroxbuster / dirsearch (content-discovery brute). Each PROPOSES a URL the runner
+#      re-drives through the SAME gated ACHIEVED_STATE web re-drive; the FACT is VIGIL's own capture.
+# ===================================================================================================
+_M12_CTORS = {
+    "gau": gau_web_scan,
+    "waybackurls": waybackurls_web_scan,
+    "feroxbuster": feroxbuster_web_scan,
+    "dirsearch": dirsearch_web_scan,
+}
+
+
+def _m12_canned(tool: str, url: str) -> str:
+    """The real-format proposal each M1.2 tool emits for ``url`` (no binary run — a canned backend)."""
+    return _dirsearch_line(url) if tool == "dirsearch" else _plain_url_line(url)
+
+
+@pytest.mark.parametrize("tool", sorted(_M12_CTORS))
+def test_m12_web_discovery_tool_proposed_url_mints_a_fact_over_vigils_own_capture(tool, monkeypatch, tmp_path):
+    """Each M1.2 web_discovery tool PROPOSES a URL; VIGIL re-drives it through its OWN gated web capture and
+    the achieved_state oracle mints a signed open_redirect FACT that re-verifies OFFLINE. The tool's row
+    (an archive hit or a brute path) was never the authority — VIGIL's own no-redirect capture is."""
+    _charter(tmp_path, "127.0.0.1")
+    from framework.v2.evidence.certify import verify_certificate
+    srv = _serve()
+    port = srv.server_address[1]
+    try:
+        res = _run(_M12_CTORS[tool](),
+                   _CannedBackend(_m12_canned(tool, f"http://127.0.0.1:{port}/redirect?next=orig")))
+    finally:
+        srv.shutdown()
+    assert res.status == "ran", res.reason
+    assert res.proposed, f"{tool} must have proposed the URL (grounding intel)"
+    f = next((x for x in res.facts if "open_redirect" in x.finding_ref), None)
+    assert f is not None, f"expected an ACHIEVED_STATE FACT; leads={res.leads} detail={res.reason}"
+    ctx = res.contexts[f.finding_ref]
+    assert verify_certificate(f.signed, oracle_context=ctx, trust_root=TRUST).ok is True
+    assert _HITS["n"] > 0, "VIGIL's own gated capture must actually contact the server"
+
+
+@pytest.mark.parametrize("tool", sorted(_M12_CTORS))
+def test_m12_proposal_that_does_not_reconfirm_stays_a_lead(tool, monkeypatch, tmp_path):
+    """THE soundness property for the inflation guard: a surfaced URL that VIGIL's OWN re-drive cannot
+    reproduce as a finding (a SAFE endpoint that only reflects in plain text) mints NOTHING — the tool
+    proposed it, VIGIL genuinely re-drove it, and it stays a LEAD."""
+    _charter(tmp_path, "127.0.0.1")
+    srv = _serve()
+    port = srv.server_address[1]
+    try:
+        res = _run(_M12_CTORS[tool](),
+                   _CannedBackend(_m12_canned(tool, f"http://127.0.0.1:{port}/safe?next=orig")))
+    finally:
+        srv.shutdown()
+    assert res.status == "ran"
+    assert res.proposed, f"{tool} DID propose the URL"
+    assert _HITS["n"] > 0, "VIGIL genuinely re-drove it (not a vacuous gated refusal)"
+    assert res.facts == [], f"a safe endpoint must mint NO fact: {[x.finding_ref for x in res.facts]}"
+
+
+@pytest.mark.parametrize("tool", sorted(_M12_CTORS))
+def test_m12_web_discovery_tool_passes_the_full_conformance_battery(tool, monkeypatch, tmp_path):
+    """Each newly-fact_capable M1.2 web_discovery tool PASSES ``run_toolspec_conformance`` through the REAL
+    gated runner: a positive FACT that re-verifies offline; a deceptive proposal (a safe endpoint) mints NO
+    fact; a tool timeout is the typed ERROR; a tripped kill-switch and an out-of-scope target each refuse
+    before traffic. This is the gate ``docs/capability-matrix`` required before ``fact_capable=true`` was
+    set."""
+    from framework.v2.authority import KillSwitch
+    ctor = _M12_CTORS[tool]
+    _charter(tmp_path, "127.0.0.1")
+    srv = _serve()
+    port = srv.server_address[1]
+    vuln = f"http://127.0.0.1:{port}/redirect?next=orig"   # a real open redirect
+    safe = f"http://127.0.0.1:{port}/safe?next=orig"       # reflects in plain text; no redirect
+    halt = tmp_path / "alpha.halt"
+    try:
+        report = run_toolspec_conformance(
+            tool_name=tool,
+            positive_spec=ctor(), positive_backend=_CannedBackend(_m12_canned(tool, vuln)),
+            deceptive_spec=ctor(), deceptive_backend=_CannedBackend(_m12_canned(tool, safe)),
+            target="127.0.0.1",
             scope_gate_in=_scope_gate(["127.0.0.1"]),
             scope_gate_out=_scope_gate(["10.99.99.99"]),
             engagement_slug="alpha", signers=SIGNERS, trust_root=TRUST,
