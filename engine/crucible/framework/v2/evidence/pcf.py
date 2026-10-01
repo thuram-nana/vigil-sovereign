@@ -39,6 +39,13 @@ _REQUIRED_MEMBERS = ("pcf_version", "id", "claim", "subject", "evidence", "oracl
                      "verdict", "provenance", "grounding", "signature")
 
 
+class PcfExportError(ValueError):
+    """Raised by :func:`to_pcf` when a certificate CANNOT be exported as a reproducible PCF: its retained
+    ``oracle_context`` is absent, does not match the signed ``oracle_context_digest``, or does not re-fire the
+    pure oracle to the same verdict offline. Fail-closed — a non-reproducible certificate never leaves the
+    system as a PCF (PCF v1.0 posture: step-4 reproduction is enforced at EXPORT, not only at verify)."""
+
+
 def pcf_vocabulary() -> dict[str, Any]:
     """The controlled, versioned vocabulary a PCF certificate's ``claim.class`` is drawn from — the oracle-
     provable bug classes the substrate knows. Pinned by ``PCF_VOCABULARY`` so a class's meaning is fixed at
@@ -88,13 +95,51 @@ def _project_view(cert: EvidenceCertificate, oracle_context: dict[str, Any]) -> 
     }
 
 
+def _require_reproducible_or_refuse(cert: EvidenceCertificate, oracle_context: Any) -> None:
+    """Enforce, at export time, that ``cert`` is offline-reproducible over ``oracle_context``; raise
+    :class:`PcfExportError` otherwise. Three fail-closed checks, in the same order :func:`verify_pcf` uses so
+    an export can never produce a PCF its own verifier would reject at step 3/4:
+
+      1. a retained oracle_context is PRESENT (a dict, non-empty) — else the certificate is not re-runnable;
+      2. its digest EQUALS the signed ``oracle_context_digest`` — else the signature is bound to different
+         evidence than what would be carried (a lifted-signature hole);
+      3. the pure oracle RE-FIRES over it to the SAME verdict the certificate claims (``reverify_context.ok``
+         — reproduced AND not a claim mismatch).
+    """
+    if not isinstance(oracle_context, dict) or not oracle_context:
+        raise PcfExportError(
+            f"certificate {cert.finding_ref!r} carries no retained oracle_context — refusing to export a "
+            f"non-reproducible PCF (PCF §4.5 'complete')")
+    if digest_payload(oracle_context) != cert.oracle_context_digest:
+        raise PcfExportError(
+            f"certificate {cert.finding_ref!r} oracle_context digest does not match the signed "
+            f"oracle_context_digest — the signature is bound to different evidence; refusing to export")
+    from ..verify.reverify import reverify_context
+    rr = reverify_context(oracle_context, bug_class=str(cert.bug_class or ""),
+                          claimed_confirmed_by=cert.confirmed_by, claimed_confidence=cert.confidence,
+                          ref=cert.finding_ref)
+    if not rr.ok:
+        raise PcfExportError(
+            f"certificate {cert.finding_ref!r} does not reproduce offline "
+            f"({rr.note or 'no re-fire'}) — refusing to export a non-reproducible PCF")
+
+
 def to_pcf(signed: SignedEvidence, *, oracle_context: dict[str, Any]) -> dict[str, Any]:
     """Project a signed ``EvidenceCertificate`` into the PCF v0.1 wire format. ``oracle_context`` is the
     retained evidence the oracle re-runs over (its digest must equal the cert's ``oracle_context_digest``;
     :func:`verify_pcf` re-checks). A CRUCIBLE ``EvidenceCertificate`` exists only for a CONFIRMED finding, so
     the projection is a FACT (``verdict.fired`` True). The view is a pure projection of the signed cert (see
-    :func:`_project_view`) plus the signature and the authoritative embedded certificate."""
+    :func:`_project_view`) plus the signature and the authoritative embedded certificate.
+
+    PCF v1.0 posture — MANDATORY reproduction at export (fail-closed): a certificate is refused
+    (:class:`PcfExportError`) unless it is OFFLINE-REPRODUCIBLE. This guarantees that every PCF the system
+    emits retains an ``oracle_context`` that (a) is present, (b) matches the signed ``oracle_context_digest``
+    (so the signature cannot be lifted onto other evidence), and (c) re-fires the pure oracle to the SAME
+    verdict the certificate claims (the same step-4 reproduction + claim-match :func:`verify_pcf` enforces,
+    performed here so a non-reproducible certificate never leaves the system rather than only being caught by
+    a downstream verifier)."""
     cert = signed.certificate
+    _require_reproducible_or_refuse(cert, oracle_context)
     view = _project_view(cert, oracle_context)
     view["signature"] = {"scheme": "ed25519", "domain": _SIG_DOMAIN,
                          "signatures": [{"key_id": s.key_id, "sig": s.signature_b64} for s in signed.signatures]}

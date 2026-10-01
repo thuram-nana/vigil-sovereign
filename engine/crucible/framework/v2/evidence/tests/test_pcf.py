@@ -15,7 +15,8 @@ import pytest
 from framework.v2.entitlement.crypto import generate_keypair
 from framework.v2.entitlement.models import AuthorizerKey, TrustRoot
 from framework.v2.evidence.certify import build_certificate, sign_certificate
-from framework.v2.evidence.pcf import PCF_VOCABULARY, pcf_vocabulary, to_pcf, verify_pcf
+from framework.v2.evidence.pcf import (
+    PCF_VOCABULARY, PcfExportError, pcf_vocabulary, to_pcf, verify_pcf)
 from framework.v2.verify.adapter import FindingContext
 
 
@@ -222,6 +223,78 @@ def test_reject_descriptive_view_field_mutations():
     _rejects_at(lambda p: p["subject"]["context"].__setitem__("surface", "elsewhere"), "signature")
     _rejects_at(lambda p: p["oracle"].__setitem__("binding", "crucible/verify:evil"), "signature")
     _rejects_at(lambda p: p["provenance"].__setitem__("collected_by", "trusted-authority"), "signature")
+
+
+def _secure_mesh_oc():
+    """A benign (STRICT-mTLS) mesh control — the oracle does NOT fire over it, so a certificate whose
+    retained evidence is this context is NOT offline-reproducible."""
+    return FindingContext.from_mesh_control(
+        {"resource_kind": "PeerAuthentication", "provider": "istio", "name": "default",
+         "namespace": "istio-system", "mtls_mode": "STRICT"}).to_verifier_context()
+
+
+def test_export_refuses_cert_with_no_retained_context():
+    # MANDATORY-REPRODUCTION at export: a certificate with no retained oracle_context is NOT re-runnable;
+    # refuse rather than emit a PCF a verifier would reject at step 3.
+    finding, oc = _mesh_finding()
+    _, signers = _trust_root(2, 3)
+    signed = sign_certificate(build_certificate(finding), signers[:2])
+    for empty in ({}, None):
+        with pytest.raises(PcfExportError):
+            to_pcf(signed, oracle_context=empty)  # type: ignore[arg-type]
+
+
+def test_export_refuses_context_not_matching_signed_digest():
+    # the retained context must be the EXACT evidence the signature is bound to — a context whose digest
+    # differs from the signed oracle_context_digest is a lifted-signature attempt; refuse at export.
+    finding, oc = _mesh_finding()
+    _, signers = _trust_root(2, 3)
+    signed = sign_certificate(build_certificate(finding), signers[:2])
+    altered = copy.deepcopy(oc)
+    altered["injected_by_relay"] = "tampered"   # digest now differs from the signed one
+    with pytest.raises(PcfExportError) as ei:
+        to_pcf(signed, oracle_context=altered)
+    assert "digest" in str(ei.value)
+
+
+def test_export_refuses_cert_that_cannot_reproduce():
+    # the core PCF v1.0 property: a certificate whose retained oracle_context does not RE-FIRE the pure
+    # oracle offline is refused at export — even though it is well-formed, signed, and digest-consistent.
+    secure_oc = _secure_mesh_oc()
+    # a producer that signs a confirmed-mesh CLAIM over benign (non-firing) evidence
+    finding = {"check_id": "mesh-secure", "bug_class": "mesh_misconfiguration",
+               "confirmed_by": "mesh_posture", "confidence": 0.9, "oracle_context": secure_oc}
+    _, signers = _trust_root(2, 3)
+    signed = sign_certificate(build_certificate(finding), signers[:2])
+    # (sanity) the certificate is internally consistent: its digest matches the retained context...
+    from framework.v2.evidence.canonical import digest_payload
+    assert digest_payload(secure_oc) == signed.certificate.oracle_context_digest
+    # ...yet export is refused because the evidence does not reproduce the verdict.
+    with pytest.raises(PcfExportError) as ei:
+        to_pcf(signed, oracle_context=secure_oc)
+    assert "does not reproduce" in str(ei.value)
+
+
+def test_export_refuses_claim_mismatch_even_when_evidence_fires():
+    # reproduction means re-fire AND match the claim: a certificate that over-claims confidence over
+    # genuinely-firing evidence does not reproduce its OWN verdict and is refused at export.
+    _, oc = _mesh_finding()
+    overclaim = {"check_id": "mesh-overclaim", "bug_class": "mesh_misconfiguration",
+                 "confirmed_by": "mesh_posture", "confidence": 0.123, "oracle_context": oc}
+    _, signers = _trust_root(2, 3)
+    signed = sign_certificate(build_certificate(overclaim), signers[:2])
+    with pytest.raises(PcfExportError):
+        to_pcf(signed, oracle_context=oc)
+
+
+def test_verify_rejects_tampered_context_after_export():
+    # a GENUINE cert exports; tampering the carried oracle_context value afterwards breaks evidence
+    # integrity and is rejected on VERIFY at step 'evidence' (the digest no longer recomputes).
+    pcf, tr, _ = _signed_pcf()
+    assert verify_pcf(pcf, tr).verified
+    pcf["evidence"]["oracle_context"]["value"]["injected_by_relay"] = "tampered"
+    r = verify_pcf(pcf, tr)
+    assert not r.verified and r.step == "evidence"
 
 
 def test_malformed_members_are_rejections_not_crashes():
