@@ -27,9 +27,17 @@ Deliberate refusals (fail-closed, honest):
   * a ``.gov`` / ``.mil`` / ``.edu`` / ``.int`` (or ``*.gov.cm``-class) host is REFUSED here — the
     categorical hard floor. Lifting it is a separate, explicit owner act (VIGIL_ALLOW_PROTECTED_DOMAINS),
     never a silent authorization from this screen.
-  * ``environment="live"`` is REFUSED for now — a live-production authorization needs a deliberate,
-    separately-acknowledged flow (the schema carries ``live_destructive_acknowledged`` for it); this
-    ceremony issues TWIN / STAGING authorizations. Named, not hidden.
+  * ``environment="live"`` is UNBLOCKED (WS2) ONLY when a valid EVALUATOR ATTESTATION accompanies the
+    request — a Mode-2 self-serve "this live target is mine" proof. Without it, live stays refused. The
+    attestation is ADDITIVE, never a governance key: a distinct EVALUATOR proves possession of THEIR OWN
+    owner-bound key over a domain-separated, target-bound message (the ``live-target-attestation`` spine
+    domain tag), single-use via the SAME login-challenge ledger server._login_pop uses, verified against the
+    evaluator account's ``user_pubkey``. The OWNER key still signs the ``EngagementAuthority`` (owner-pin
+    intact) AND records the attestation as an owner-signed governance signal on the sovereign spine (so it
+    inherits the witnessed / anti-rollback head). ``allow_destructive`` stays ``False`` even on live — a
+    destructive action still needs the separate owner-signed, single-use, action-bound per-action approval;
+    unblocking live does NOT unblock writes. The categorical .gov/.mil/.edu/.int floor is checked FIRST, so
+    a protected host is refused even WITH an attestation.
 """
 
 from __future__ import annotations
@@ -43,7 +51,12 @@ from typing import Any, Optional
 # widens deliberately; a short window bounds a forgotten authorization.
 _DEFAULT_DURATION_HOURS = 8.0
 _MAX_DURATION_HOURS = 24.0 * 30                # a UI authorization caps at 30 days; longer is a CLI act
-_ALLOWED_ENVIRONMENTS = ("twin", "staging")   # "live" needs a deliberate, separately-acknowledged flow
+_ALLOWED_ENVIRONMENTS = ("twin", "staging")   # "live" is gated separately — it needs an evaluator attestation
+
+# WS2: the owner-signed governance SIGNAL that records an evaluator's live-target self-attestation on the
+# sovereign spine (mirrors governor.accounts.SIGNAL = "governor.account"). An audit-grade provenance row:
+# WHO attested, for which target, bound to which single-use challenge. The OWNER is its sole signer.
+LIVE_ATTESTATION_SIGNAL = "governor.live_target_attestation"
 
 # A valid DNS hostname: 1-63-char labels (alnum + hyphen, no leading/trailing hyphen), dot-separated,
 # total <= 253. No scheme, no path, no port, no wildcard, no "..", no whitespace — the scope must be a
@@ -109,6 +122,101 @@ def _validate_host(host: str) -> tuple[bool, str]:
     return True, h
 
 
+# --- WS2: Mode-2 live-target self-serve EVALUATOR ATTESTATION (sovereign plane only) --------------------
+# Unblocking environment="live" requires a distinct EVALUATOR to prove, with THEIR OWN owner-bound key, that
+# this specific target is theirs. The evaluator PoP is purely ADDITIVE admission — it is NEVER a governance
+# signer; the owner key still signs the authority and the spine record. Reuses the EXISTING PoP primitive
+# (login_challenges ledger + Account.user_pubkey) under a DISTINCT domain tag so an attestation signature can
+# never replay as a login-PoP (or any other signature), and binds the target (host + environment + evaluator)
+# so one attestation authorizes exactly one live target, exactly once.
+def _attestation_message(*, host: str, environment: str, challenge: str, evaluator: str) -> bytes:
+    """The exact bytes an evaluator signs / the ceremony checks: the distinct ``live-target-attestation``
+    domain tag followed by the compact canonical JSON of the target binding. Domain separation (a prefix no
+    other signed purpose uses) means a signature here can never verify under login-PoP / capability / any
+    other domain, and binding host+environment+evaluator means a captured attestation cannot be re-aimed at a
+    different target."""
+    from vigil_core.canonical import canonical_json
+    from vigil_core.spine_domains import DOMAIN_TAGS
+    core = {"host": host, "environment": environment, "challenge": challenge, "evaluator": evaluator}
+    body = canonical_json(core)
+    body = body if isinstance(body, (bytes, bytearray)) else str(body).encode("utf-8")
+    return DOMAIN_TAGS["live-target-attestation"] + bytes(body)
+
+
+def _attestation_challenge_ledger(store):
+    """The SAME single-use login-challenge ledger the cockpit serves at ``/api/login/challenge``, rooted next
+    to the spine file — mirrors ``server._challenge_ledger`` byte-for-byte so an evaluator mints a nonce there
+    and spends it HERE exactly once (the replay guard). Distinct domain tags keep an attestation signature and
+    a login signature non-interchangeable even though both draw nonces from the one pool."""
+    from pathlib import Path
+
+    from .login_challenges import ChallengeLedger
+    base = Path(store.path)
+    return ChallengeLedger(base.parent / (base.name + ".login-challenges"))
+
+
+def _verify_evaluator_attestation(store, *, host: str, environment: str, attestation) -> tuple[bool, str, dict]:
+    """``(ok, error, info)``. Fail-closed. A valid live-target attestation requires, in the SAME order
+    ``server._login_pop`` uses (identity → consume challenge → verify signature):
+      * ``attestation`` is a dict carrying non-empty ``evaluator`` / ``challenge`` / ``signature``;
+      * an ACTIVE evaluator account exists WITH an owner-bound ``user_pubkey`` (the owner enrolled the
+        evaluator's key — a distinct identity, never the owner's; the owner holds no Account);
+      * the challenge is a known, unexpired, not-yet-consumed single-use nonce, CONSUMED here atomically (a
+        replay of a captured attestation finds it already spent and is refused before any signature work);
+      * the signature verifies as the evaluator's key over the domain-separated, target-bound message.
+    Never raises out to the caller — a hostile/corrupt spine or malformed key material is a refusal."""
+    from ..governor.accounts import AccountsRegistry
+    from ..reuse import verify_one
+
+    if not isinstance(attestation, dict):
+        return (False, "environment=live requires an evaluator attestation "
+                       "({evaluator, challenge, signature})", {})
+    evaluator = str(attestation.get("evaluator", "") or "").strip()
+    challenge = str(attestation.get("challenge", "") or "").strip()
+    signature = str(attestation.get("signature", "") or "").strip()
+    if not (evaluator and challenge and signature):
+        return False, "the evaluator attestation must carry evaluator, challenge, and signature", {}
+    try:
+        acct = AccountsRegistry(store).account(evaluator)
+    except Exception:  # noqa: BLE001 — a hostile/corrupt spine must never crash the ceremony → fail-closed
+        acct = None
+    if acct is None or not acct.user_pubkey:
+        return (False, f"no owner-bound cryptographic identity for evaluator {evaluator!r} — the owner must "
+                       f"enroll the evaluator's key before they can self-attest a live target", {})
+    # Consume the challenge FIRST (single-use + TTL). A replay of a captured attestation finds it already spent
+    # → refused here, before any signature work (mirrors _login_pop's replay guard).
+    if not _attestation_challenge_ledger(store).consume(challenge):
+        return False, "the attestation challenge is unknown, expired, or already used (replay refused)", {}
+    message = _attestation_message(host=host, environment=environment, challenge=challenge, evaluator=evaluator)
+    try:
+        sig_ok = verify_one(acct.user_pubkey, message, signature)
+    except Exception:  # noqa: BLE001 — malformed sig/key material is a fail-closed refusal, not a crash
+        sig_ok = False
+    if not sig_ok:
+        return False, "the evaluator attestation signature is invalid for this target", {}
+    return True, "", {"evaluator": evaluator, "evaluator_pubkey": acct.user_pubkey, "challenge": challenge}
+
+
+def _record_live_attestation(store, owner_key, *, slug: str, host: str, info: dict,
+                             not_before: str, not_after: str, now_ts: float) -> int:
+    """Write the evaluator attestation as an OWNER-SIGNED governance signal on the SIGIL spine — the SAME
+    owner-signed-grant idiom as ``governor.accounts`` (``signed_payload`` core + ``store.append``) — so it
+    inherits the witnessed / anti-rollback head. Records WHO attested, for which target, bound to which
+    single-use challenge; the OWNER is its sole signer (the evaluator PoP gated admission upstream, it is not
+    a governance key). Returns the recorded spine seq."""
+    from ..governor.authn import signed_payload
+    core = {
+        "signal": LIVE_ATTESTATION_SIGNAL, "slug": slug, "host": host, "environment": "live",
+        "evaluator": info["evaluator"], "evaluator_pubkey": info["evaluator_pubkey"],
+        "challenge": info["challenge"], "allow_destructive": False,
+        "not_before": not_before, "not_after": not_after, "issued_at": float(now_ts),
+    }
+    payload = {**signed_payload(core, owner_key), "by": "owner", "requested_by": "owner",
+               "tier": "A0", "decision": "auto",
+               "reason": f"live-target attestation for {host} by evaluator {info['evaluator']} (owner-signed)"}
+    return store.append(kind="event", source="governor", actor="WARDEN", payload=payload)
+
+
 def authority_status(slug: str) -> dict:
     """Whether an owner-signed authorization exists on the seam for ``slug``, and whether its signer is
     THIS cockpit's owner key (so the offense side will accept it). Read-only; never raises."""
@@ -148,13 +256,23 @@ def add_target(
     oob_collector_pubkey: str = "",
     oob_dns_domain: str = "",
     oob_dns_collector_pubkey: str = "",
+    store: Optional[Any] = None,
+    evaluator_attestation: Optional[dict] = None,
     now: Optional[Any] = None,
 ) -> dict:
     """Owner-sign an engagement authorization for ``host`` and write the signed bundle to the seam.
 
-    Fail-closed: refuses an invalid / hard-blocked host, a non twin|staging environment, or a
-    non-positive / over-cap duration. GET-only / non-destructive by default (``allow_destructive=False``).
-    The owner PRIVATE key is used only inside the signer and is never written or returned."""
+    Fail-closed: refuses an invalid / hard-blocked host, an unknown environment, or a non-positive / over-cap
+    duration. GET-only / non-destructive by default (``allow_destructive=False``). The owner PRIVATE key is
+    used only inside the signer and is never written or returned.
+
+    ``environment="twin"`` / ``"staging"`` need no attestation. ``environment="live"`` (WS2) is unblocked ONLY
+    when ``evaluator_attestation`` (a dict ``{evaluator, challenge, signature}``) is a valid Mode-2 self-serve
+    proof AND ``store`` is supplied: a distinct evaluator proves possession of their own owner-bound key over a
+    domain-separated, target-bound, single-use message. The owner still signs the authority and records the
+    attestation as an owner-signed governance signal on the spine; ``allow_destructive`` stays ``False`` (a
+    write still needs the separate owner-signed per-action approval). A categorically-blocked host is refused
+    BEFORE any attestation check, so a protected host cannot be unblocked by an attestation."""
     from vigil_core import (
         AuthorizerKey, EngagementAuthority, TargetEnvironment, TrustRoot, sign_engagement_authority,
     )
@@ -166,11 +284,11 @@ def add_target(
     h = host_or_err
 
     env = str(environment or "").strip().lower()
-    if env not in _ALLOWED_ENVIRONMENTS:
-        if env == "live":
-            return {"ok": False, "error": "a LIVE-production authorization needs a deliberate, separately "
-                                          "acknowledged flow; this ceremony issues twin / staging only"}
-        return {"ok": False, "error": f"environment must be one of {_ALLOWED_ENVIRONMENTS}, got {env!r}"}
+    if env not in _ALLOWED_ENVIRONMENTS and env != "live":
+        return {"ok": False, "error": f"environment must be one of {_ALLOWED_ENVIRONMENTS} or 'live' (with a "
+                                      f"valid evaluator attestation), got {env!r}"}
+    # The LIVE attestation itself is verified LATER (just before the doc is built), AFTER the cheap duration /
+    # OOB validations pass — so a doomed request never consumes the evaluator's single-use challenge.
 
     try:
         dur = float(duration_hours)
@@ -235,6 +353,20 @@ def add_target(
     if t.tzinfo is None:
         t = t.replace(tzinfo=timezone.utc)
 
+    # WS2: verify the live-target evaluator attestation LAST (after host/duration/OOB/slug all validate), so the
+    # single-use challenge is spent only on an otherwise-admissible request. A categorically-blocked host was
+    # already refused above (``_validate_host``), so a protected host never reaches this point even WITH an
+    # attestation. The evaluator PoP is ADDITIVE admission; the owner key still signs everything below.
+    attestation_info: Optional[dict] = None
+    if env == "live":
+        if store is None:
+            return {"ok": False, "error": "LIVE environment refused: a live authorization must verify the "
+                                          "evaluator attestation against the spine (internal: store not supplied)"}
+        ok_att, att_err, attestation_info = _verify_evaluator_attestation(
+            store, host=h, environment="live", attestation=evaluator_attestation)
+        if not ok_att:
+            return {"ok": False, "error": f"LIVE environment refused: {att_err}"}
+
     doc = EngagementAuthority(
         engagement_slug=s,
         environment=TargetEnvironment(env),
@@ -259,12 +391,23 @@ def add_target(
         path = write_authorization(_base_dir(), s, signed, trust_root)
     except ValueError as e:  # broker path-safety backstop — honor the {ok:false} contract, don't 500
         return {"ok": False, "error": f"could not write the authorization ({e})"}
-    return {
+    result = {
         "ok": True, "action": "target_add", "slug": s, "host": h, "environment": env,
         "scope": [h], "not_before": doc.not_before.isoformat(), "not_after": doc.not_after.isoformat(),
         "oob_relay_host": relay, "oob_collector_pinned": bool(collector),
         "signed_path": str(path),
     }
+    # WS2: on a live authorization, also record the evaluator attestation as an owner-signed governance signal
+    # on the sovereign spine (witnessed / anti-rollback head). The authority bundle is already on the seam; the
+    # spine row is the provenance of WHO self-attested. A spine-write failure must not silently drop the record.
+    if env == "live" and attestation_info is not None:
+        seq = _record_live_attestation(
+            store, kp, slug=s, host=h, info=attestation_info,
+            not_before=doc.not_before.isoformat(), not_after=doc.not_after.isoformat(), now_ts=t.timestamp())
+        result["evaluator"] = attestation_info["evaluator"]
+        result["attestation_recorded_seq"] = seq
+        result["allow_destructive"] = False
+    return result
 
 
 def list_targets() -> dict:
