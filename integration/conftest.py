@@ -27,6 +27,14 @@ def pytest_configure(config):
         "markers",
         "volume: statistical, high-run-count regression — excluded from the per-PR leg, runs nightly",
     )
+    # `keyed` — needs a real external credential (e.g. ANTHROPIC_API_KEY) for a LIVE call; skips cleanly
+    # without it. Registered here AND in integration/pyproject.toml for the same two-rootdir reason as
+    # `volume` above (the offense leg's rootdir is the repo root, where that markers table does not exist).
+    config.addinivalue_line(
+        "markers",
+        "keyed: requires a real external credential (e.g. ANTHROPIC_API_KEY) for a LIVE call; "
+        "skips cleanly without it",
+    )
 
 
 # ---------------------------------------------------------------------------------------------------
