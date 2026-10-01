@@ -108,10 +108,18 @@ def test_refuses_categorical_safety_floor(host):
     assert not os.path.exists(_bundle_path(host)), "a refused host must write no bundle"
 
 
-def test_refuses_live_environment():
+def test_refuses_live_environment_without_an_evaluator_attestation():
+    """WS2: live is unblocked ONLY with a valid evaluator attestation. Without one (store present, no
+    attestation) it stays refused; the full attestation path is covered in test_live_target_attestation.py."""
+    import tempfile as _t
+
+    from sigil.spine.store import SpineStore
     from sigil.ui import target_authorization as ta
-    r = ta.add_target("apme.cm", environment="live")
-    assert not r["ok"] and "LIVE" in r["error"], r
+    store = SpineStore(_t.mktemp(suffix=".jsonl"))
+    r = ta.add_target("apme.cm", environment="live", store=store)
+    assert not r["ok"] and "LIVE" in r["error"] and "attestation" in r["error"], r
+    # and with no store at all it is likewise refused (never silently authorized)
+    assert ta.add_target("apme.cm", environment="live")["ok"] is False
 
 
 @pytest.mark.parametrize("bad", ["https://apme.cm/", "apme.cm:8443", "a b", "", "..", "-bad-.example",

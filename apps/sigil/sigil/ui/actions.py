@@ -244,12 +244,18 @@ def do_action(action: str, params: dict, *, store: Optional[SpineStore] = None,
         # The owner key is the persisted sovereign identity; only a public-safe signed bundle crosses.
         from . import target_authorization as _ta
         if action == "target_add":
+            # WS2: `environment="live"` is unblocked only when `evaluator_attestation` ({evaluator, challenge,
+            # signature}) is a valid self-serve PoP; it is verified inside add_target against the spine `store`
+            # (the evaluator's owner-bound user_pubkey + a single-use login challenge). twin/staging ignore it.
+            att = params.get("evaluator_attestation")
             return _ta.add_target(
                 str(params.get("host", "")),
                 slug=(str(params["slug"]) if params.get("slug") else None),
                 environment=str(params.get("environment", "staging")),
                 duration_hours=params.get("duration_hours", 8.0),
                 note=str(params.get("note", "")),
+                store=store,
+                evaluator_attestation=(att if isinstance(att, dict) else None),
             )
         if action == "target_authority_status":
             return _ta.authority_status(str(params.get("slug", "")))

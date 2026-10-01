@@ -13,9 +13,14 @@ deployment):
                           NEVER blocks an individual operation (no per-operation dependency on a vendor
                           service).
   4. :mod:`.telemetry` — schema-ALLOWLISTED telemetry with an explicit NO-COLLECT list, stated and tested.
+  5. :mod:`.eval_profile` — the per-org investor-EVALUATION deployment config (INV3): the single source of
+                          truth for the product-path "production-on" switches (family re-drive FACT-mint +
+                          AEGIS enforce) and the capabilities (AEGIS_RESPOND) a control plane must provision.
+                          Declares + honestly reports config; verifies nothing (the entitlement decision
+                          stays engine-side).
 
-Import-clean (FATAL-2): stdlib + ``vigil_core`` only; nothing from ``framework`` / ``strix`` / ``sigil``, so
-the whole package loads in the sovereign process.
+Import-clean (FATAL-2): stdlib + ``vigil_core`` + the framework-free ``live.oracle_families`` only; nothing
+from ``framework`` / ``strix`` / ``sigil``, so the whole package loads in the sovereign process.
 """
 
 from __future__ import annotations
@@ -37,6 +42,15 @@ from .bundle import (
     assemble_bundle,
     install_bundle,
     no_network,
+)
+from .eval_profile import (
+    REQUIRED_CAPABILITIES,
+    EvalReadiness,
+    aegis_enforce_requested,
+    assess_readiness,
+    engage_fact_mint_flags,
+    fact_mint_enabled,
+    production_env,
 )
 from .telemetry import (
     NO_COLLECT_FIELDS,
@@ -66,4 +80,7 @@ __all__ = [
     # telemetry (property 4)
     "build_telemetry_payload", "scrub_snapshot_for_export", "schema_allowlist", "no_collect_fields",
     "TELEMETRY_SCHEMA_ALLOWLIST", "NO_COLLECT_FIELDS",
+    # eval deployment config (INV3): the product-path "production-on" switches + required grants
+    "production_env", "engage_fact_mint_flags", "fact_mint_enabled", "aegis_enforce_requested",
+    "assess_readiness", "EvalReadiness", "REQUIRED_CAPABILITIES",
 ]
