@@ -147,41 +147,61 @@ def _authorize(url: str, slug: str) -> str | None:
 # ---------------------------------------------------------------------------
 
 
-def _http_get(url: str, timeout: float) -> tuple[int | None, Any, bytes]:
+def _http_get(url: str, timeout: float, *, dial_ip: str | None = None) -> tuple[int | None, Any, bytes]:
     """The default connector: ONE bounded, UNAUTHENTICATED HTTP GET. No credentials of any kind — no
-    ``Authorization`` header, no cookies, no ``.netrc`` (urllib never consults it), env proxies
-    disabled (a direct probe), and redirects NOT followed (a 3xx is returned as-is, never chased). A
-    non-2xx is a RESPONSE, not an error: its real status + body are returned so the oracle can judge
-    them. Returns ``(status, headers, body_bytes)``; raises only on a genuine transport failure (the
-    caller turns that into a ``status: None`` capture)."""
-    import urllib.error
-    import urllib.request
+    ``Authorization`` header, no cookies, no ``.netrc``, no env proxy (a direct probe), and redirects
+    NOT followed (a 3xx is returned as-is, never chased). A non-2xx is a RESPONSE, not an error: its
+    real status + body are returned so the oracle can judge them. Returns ``(status, headers,
+    body_bytes)``; raises only on a genuine transport failure (the caller turns that into a
+    ``status: None`` capture).
 
-    if (urlsplit(url).scheme or "").lower() not in ("http", "https"):  # defense-in-depth vs file:// etc.
+    ``dial_ip`` (keyword) is the egress-floor-validated address to CONNECT to; the request still carries
+    the ORIGINAL vhost identity — for HTTPS the TLS is wrapped with ``server_hostname=host`` (so full
+    certificate validation is preserved and a vhost presents its real certificate), for HTTP the
+    ``Host:`` header is the original authority. Pinning the transport to ``dial_ip`` is what closes the
+    DNS-rebinding window a re-resolve at connect time would otherwise reopen — the ``tls._tls_connect``
+    precedent, here over ``http.client`` so the connect address and the cert/SNI/Host name are split.
+    When ``dial_ip`` is None the connection dials ``host`` directly (the hermetic/injected path)."""
+    import http.client
+    import ssl as _ssl
+
+    parts = urlsplit(url)
+    scheme = (parts.scheme or "").lower()
+    if scheme not in ("http", "https"):  # defense-in-depth vs file:// etc.
         raise ValueError("refusing non-http(s) scheme")
+    host = parts.hostname or ""
+    port = parts.port or (443 if scheme == "https" else 80)
+    selector = parts.path or "/"
+    if parts.query:
+        selector += "?" + parts.query
+    connect_to = dial_ip or host
+    # The Host header carries the ORIGINAL authority (host[:port]) — never the pinned IP — so a vhost
+    # still routes the request. No Authorization, no Cookie, no .netrc, no env proxy, Connection: close.
+    host_header = host if parts.port is None else f"{host}:{port}"
+    req_headers = {"Host": host_header, "User-Agent": _USER_AGENT, "Accept": "*/*", "Connection": "close"}
 
-    class _NoRedirect(urllib.request.HTTPRedirectHandler):
-        def redirect_request(self, req, fp, code, msg, headers, newurl):  # type: ignore[override]
-            return None   # do not follow — the 3xx surfaces as an HTTPError we capture verbatim
-
-    # build_opener with an EMPTY ProxyHandler (no env proxies) and NO auth handler -> anonymous, direct.
-    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect())
-    req = urllib.request.Request(url, method="GET", headers={"User-Agent": _USER_AGENT})
+    if scheme == "https":
+        ctx = _ssl.create_default_context()  # FULL cert validation; SNI = conn.host = the vhost (host)
+        conn: http.client.HTTPConnection = http.client.HTTPSConnection(
+            host, port, timeout=timeout, context=ctx)
+    else:
+        conn = http.client.HTTPConnection(host, port, timeout=timeout)
+    # Pin the TRANSPORT to the validated address while keeping ``conn.host`` = the vhost: HTTPSConnection
+    # uses ``conn.host`` for both SNI and certificate validation, and the Host header above carries it
+    # for HTTP, so only the dialled IP is substituted. ``http.client`` never consults env proxies and
+    # never follows redirects, so the no-proxy / no-redirect posture is preserved by construction.
+    _orig_create = conn._create_connection  # type: ignore[attr-defined]
+    conn._create_connection = (  # type: ignore[attr-defined]
+        lambda address, *a, **k: _orig_create((connect_to, address[1]), *a, **k))
     try:
-        with opener.open(req, timeout=timeout) as resp:  # noqa: S310 (scheme validated http/https above)
-            status = getattr(resp, "status", None)
-            if status is None:
-                status = resp.getcode()
-            headers = list(resp.headers.items()) if resp.headers else []
-            body = resp.read(_MAX_BODY_BYTES)
-    except urllib.error.HTTPError as e:   # 3xx (not followed) / 4xx / 5xx — a real response, captured
-        headers = list(e.headers.items()) if getattr(e, "headers", None) else []
-        try:
-            body = e.read(_MAX_BODY_BYTES)
-        except Exception:
-            body = b""
-        return int(e.code), headers, body
-    return (int(status) if status is not None else None), headers, body
+        conn.request("GET", selector, headers=req_headers)
+        resp = conn.getresponse()  # a 3xx (not followed) / 4xx / 5xx is a RESPONSE here, not an exception
+        status = int(resp.status)
+        headers = resp.getheaders()
+        body = resp.read(_MAX_BODY_BYTES)
+    finally:
+        conn.close()
+    return status, headers, body
 
 
 def _content_type(headers: Any) -> str:
@@ -247,24 +267,28 @@ def capture_anonymous_get(
     refusal = _authorize(str(url or ""), slug)
     if refusal is not None:
         return {**base, "error": refusal}
-    # Never-liftable egress floor: resolve the URL host ONCE and refuse a metadata / link-local / RFC1918 /
-    # reserved destination before the GET (the direct hole this closes is the confirmed risk). Only the real
-    # default connector egresses; a test-injected ``connect`` is hermetic. The urllib GET re-resolves the
-    # name at connect, so a precisely-timed DNS rebinding is a NARROW named residual for THIS path (the plain
-    # socket paths — reachability/tls — pin the address; an urllib IP-pin is deferred because it breaks TLS
-    # cert validation for a vhost).
+    # Never-liftable egress floor: resolve the URL host ONCE, refuse a metadata / link-local / RFC1918 /
+    # reserved destination (directly or via a DNS-rebinding answer), and PIN the connect to the validated
+    # address while ``_http_get`` keeps the vhost identity (SNI/cert = host for HTTPS, Host: host for HTTP).
+    # Only the real default connector egresses; a test-injected ``connect`` is hermetic, so the floor + pin
+    # apply only when ``connect is None`` (the production path). Pinning closes the former narrow residual
+    # (an urllib re-resolve at connect time); dialling the IP over ``http.client`` preserves full TLS
+    # certificate validation for a vhost, so there is no cert-vs-pin trade-off here anymore.
+    dial_ip: str | None = None
     if connect is None:
         try:
             from ..common.egress_pin import resolve_and_pin
             parts = urlsplit(str(url))
             _host = parts.hostname or ""
             _port = parts.port or (443 if (parts.scheme or "").lower() == "https" else 80)
-            resolve_and_pin(_host, int(_port), slug=slug)
+            dial_ip = resolve_and_pin(_host, int(_port), slug=slug)
         except Exception as e:
             return {**base, "error": f"egress floor refused: {e}"[:300]}
-    conn = connect or _http_get
     try:
-        status, headers, body = conn(str(url), timeout)
+        if connect is None:
+            status, headers, body = _http_get(str(url), timeout, dial_ip=dial_ip)
+        else:
+            status, headers, body = connect(str(url), timeout)
     except Exception as e:
         return {**base, "error": f"{type(e).__name__}: {e}"[:200]}
     return _finalize_capture(str(url), status, headers, body)

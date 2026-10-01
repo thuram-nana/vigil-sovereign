@@ -10,8 +10,10 @@ link-local / RFC1918 address (directly, or via a DNS-rebinding answer) could be 
 COVERAGE — be precise about which same-class engine sites this helper is wired into (do not read it as
 covering all of them):
   * WIRED (#874): ``verify/reachability.py`` (TCP handshake), ``verify/tls.py`` (TLS handshake, pin +
-    SNI preserved), ``verify/reachability_cloud.py`` (anonymous GET — floor CHECK only; urllib re-resolves,
-    so a precisely-timed DNS rebinding is a NARROW named residual there — an IP-pin breaks a vhost's cert).
+    SNI preserved), ``verify/reachability_cloud.py`` (anonymous GET — now PINNED: the GET dials the
+    validated IP over ``http.client`` while keeping the vhost identity, HTTPS wrapping TLS with
+    ``server_hostname=host`` for full cert validation and HTTP sending ``Host: host``, so the former
+    re-resolve-at-connect rebinding residual is closed with no cert-vs-pin trade-off).
   * WIRED (WS1.1b, #879): the raw sockets in ``scanner/websocket.py`` (CSWSH — a FACT-minting path),
     ``scanner/race.py::raw_race`` (LEAD), and ``scanner/smuggling.py`` (``raw_send`` + ``_desync_leg``). The
     engagement slug is threaded from their campaign drivers; each resolves once, refuses metadata/link-local/

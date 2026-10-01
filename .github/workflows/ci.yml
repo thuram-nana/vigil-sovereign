@@ -651,6 +651,7 @@ jobs:
               integration/tests/test_engage_mutation_approval.py \
               integration/tests/test_mesh_cicd_posture.py \
               engine/crucible/framework/v2/verify/tests/test_egress_pin.py \
+              engine/crucible/framework/v2/verify/tests/test_egress_floor_complete.py \
               engine/crucible/framework/v2/verify/tests/test_reachability.py \
               engine/crucible/framework/v2/verify/tests/test_tls_weakness.py \
               engine/crucible/framework/v2/verify/tests/test_reachability_cloud.py \

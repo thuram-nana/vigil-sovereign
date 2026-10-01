@@ -315,6 +315,83 @@ def test_real_loopback_redirect_is_not_followed_and_does_not_confirm(monkeypatch
     assert cap["status"] == 302 and not confirm_anonymous_reachable(cap).confirmed
 
 
+# ---- the egress-floor PIN: the GET dials the validated IP, not a re-resolved name ----
+
+
+def _fake_getaddrinfo_name_rebinds_to_metadata(host, port, *a, **k):
+    """A hermetic resolver: an IP LITERAL resolves to itself; any NAME rebinds to the cloud metadata
+    address. So a connect that dials the pinned IP reaches it, while a connect that re-resolves the name
+    would be steered to 169.254.169.254."""
+    import ipaddress
+    import socket as _s
+    try:
+        ipaddress.ip_address(host)
+        addr = host
+    except ValueError:
+        addr = "169.254.169.254"
+    return [(_s.AF_INET, _s.SOCK_STREAM, _s.IPPROTO_TCP, "", (addr, int(port or 0)))]
+
+
+def test_default_connector_pins_the_validated_ip_and_a_rebind_loses(monkeypatch, tmp_path) -> None:
+    """The negative control the pin exists for: an in-scope NAME whose resolver rebinds to metadata AT
+    CONNECT TIME is REFUSED because the pinned IP wins. The floor validates+pins to a loopback server;
+    a resolver that now answers the name with 169.254.169.254 is irrelevant because ``_http_get`` dials
+    the pinned IP, and the request still carries the original vhost in its ``Host`` header."""
+    _grant_active_recon(monkeypatch)
+    _charter(tmp_path, "pinned-wins.example")
+    seen: dict = {}
+
+    class H(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):  # noqa: N802
+            seen["host"] = self.headers.get("Host", "")
+            body = b"<ListBucketResult><Contents/></ListBucketResult>"
+            self.send_response(200)
+            self.send_header("Content-Type", "application/xml")
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *a):  # silence
+            return
+
+    srv = _serve_once(H)
+    port = srv.server_address[1]
+    # The floor resolves+validates to the loopback server (stubbed so the test is hermetic and needs no
+    # gateway); the hostile resolver then rebinds the NAME to metadata. The pin must defeat it.
+    monkeypatch.setattr("framework.v2.common.egress_pin.resolve_and_pin",
+                        lambda host, port, **k: "127.0.0.1")
+    import socket as _socket
+    monkeypatch.setattr(_socket, "getaddrinfo", _fake_getaddrinfo_name_rebinds_to_metadata)
+    try:
+        cap = capture_anonymous_get(f"http://pinned-wins.example:{port}/", slug="alpha")
+    finally:
+        srv.server_close()
+    # Reached the loopback server over the PINNED IP (a re-resolve would have been steered to metadata
+    # and failed), and the vhost identity was preserved in the Host header.
+    assert cap["status"] == 200 and cap["body_len"] > 0
+    assert seen["host"] == f"pinned-wins.example:{port}"
+    assert confirm_anonymous_reachable(cap).confirmed
+
+
+def test_capture_returns_a_clean_floor_refusal_and_never_connects(monkeypatch, tmp_path) -> None:
+    """A floor refusal (the name resolves/rebinds to a denied address) is a clean ``status: None``
+    capture with an ``egress floor refused`` reason — never an exception, never a connect."""
+    _grant_active_recon(monkeypatch)
+    _charter(tmp_path, "metadata-name.example")
+
+    def _refuse(host, port, **k):
+        from framework.v2.common.egress_pin import EgressFloorRefused
+        raise EgressFloorRefused("metadata/link-local/reserved floor")
+
+    monkeypatch.setattr("framework.v2.common.egress_pin.resolve_and_pin", _refuse)
+    import socket as _socket
+    # Prove no connect is even attempted: a create_connection that would raise if called.
+    monkeypatch.setattr(_socket, "create_connection",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("connected despite floor refusal")))
+    cap = capture_anonymous_get("http://metadata-name.example/", slug="alpha")
+    assert cap["status"] is None and "egress floor refused" in cap["error"]
+    assert not confirm_anonymous_reachable(cap).confirmed
+
+
 def test_snippet_is_bounded_and_redacts_credential_shaped_tokens(monkeypatch, tmp_path) -> None:
     _grant_active_recon(monkeypatch)
     _charter(tmp_path, "acme-public.s3.amazonaws.com")

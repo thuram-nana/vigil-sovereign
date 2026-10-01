@@ -915,6 +915,65 @@ class HttpExecutor:
             self._http_client = httpx.Client(**kwargs)  # type: ignore[arg-type]
             return self._http_client
 
+    def _assert_egress_floor(self, url: str) -> None:
+        """The never-liftable L3/L4 egress floor, enforced on EVERY outbound request (the initial hop
+        and each redirect hop) IN ADDITION to the string scope gate.
+
+        The scope gate (``scope_gate.validate_action`` / ``ethics.host_matches_scope``) answers a
+        question about a STRING: it never resolves the host, so it authorises ``imds.corp.example``
+        without learning the name resolves to ``169.254.169.254`` (the cloud metadata address the
+        gateway denylist declares charter-INDEPENDENTLY denied). This floor resolves the target host
+        once and refuses a metadata / link-local / RFC1918 / reserved destination — reached directly or
+        via a DNS-rebinding answer — that the string gate cannot see. The private/loopback tiers lift
+        ONLY for an exact IP literal written in the signed charter scope (the loopback-engagement case,
+        e.g. a ``127.0.0.1`` MERIDIAN target), so loopback engagements are unaffected.
+
+        It reuses the engine's shared floor ``common.egress_pin.resolve_and_pin`` (the same
+        ``vigil_gateway.denylist`` conscience the integration ``pin_egress`` uses), so there is ONE
+        egress floor, not two. Fail-closed: any error REFUSES. It raises ``SovereigntyViolation`` so the
+        existing egress-refusal handler turns it into a refusal outcome, never a crash.
+
+        LOOPBACK (own box) stays reachable. A loopback web engagement is a heavily used legitimate mode,
+        and the scope gate has ALREADY authorised the host, so the loopback addresses the IN-SCOPE host
+        resolves to are added to the lift set here — including when the charter scopes the target by NAME
+        (``localhost``) rather than by the ``127.0.0.1`` IP literal. This grant is sound because it only
+        ever adds LOOPBACK addresses: the never-liftable metadata/link-local/reserved floor is Tier 1a
+        (checked first, never liftable) and the RFC1918/CGNAT/ULA tier still lifts ONLY for an exact
+        charter IP literal — resolve_and_pin re-checks every resolved address against this set, so a name
+        that (re)binds to a metadata or private address is still refused.
+
+        RESIDUAL, stated honestly (not papered over): this floor VALIDATES-and-REFUSES before the httpx
+        request; it does not PIN the httpx socket to the validated IP the way the plain-socket capture
+        paths (``verify/reachability.py``, ``verify/tls.py``, ``verify/reachability_cloud.py``) do,
+        because httpx re-resolves inside httpcore and splitting its dial address from its TLS
+        cert/SNI name is not a one-liner. So a precisely-timed DNS rebind BETWEEN this check and
+        httpcore's connect is a narrow residual on THIS path specifically — strictly narrower than the
+        no-floor-at-all state this closes, and tracked for a dedicated httpx-pin slice."""
+        try:
+            import ipaddress
+            import socket as _socket
+
+            from ..common.egress_pin import charter_ip_literals, resolve_and_pin
+            parts = urlsplit(url)
+            host = parts.hostname or ""
+            port = parts.port or (443 if (parts.scheme or "").lower() == "https" else 80)
+            # Grant the LOOPBACK addresses of the (already scope-authorised) host so a loopback engagement
+            # scoped by NAME is not refused. Only loopback addresses are added; every other tier is
+            # unchanged and re-checked by resolve_and_pin below. Fail-closed: a resolver error adds nothing.
+            allowed = set(charter_ip_literals(self.engagement_slug))
+            try:
+                for info in _socket.getaddrinfo(host, int(port), proto=_socket.IPPROTO_TCP):
+                    addr = str(info[4][0]).split("%")[0]
+                    if ipaddress.ip_address(addr).is_loopback:
+                        allowed.add(addr)
+            except Exception:  # noqa: BLE001 — a name that will not resolve grants no extra lift
+                pass
+            resolve_and_pin(host, int(port), slug=self.engagement_slug, allowed_ips=frozenset(allowed))
+        except SovereigntyViolation:
+            raise
+        except Exception as exc:  # EgressFloorRefused / resolver / import error — all fail closed
+            raise SovereigntyViolation(f"egress floor refused {url!r}: {exc}") from exc
+
     def _issue(
         self, *, action_id: str, method: str, url: str,
         hypothesis: HypothesisPayload,
@@ -947,6 +1006,8 @@ class HttpExecutor:
                             redirect_chain=redirect_chain,
                         )
                         break
+                # Never-liftable L3/L4 egress floor, on every hop, behind the string scope gate.
+                self._assert_egress_floor(current_url)
                 response = client.request(
                     current_method, current_url, headers=headers,
                 )
@@ -1081,6 +1142,8 @@ class HttpExecutor:
                 content = None
                 if current_body is not None:
                     content = current_body.encode("utf-8") if isinstance(current_body, str) else current_body
+                # Never-liftable L3/L4 egress floor, on every hop, behind the string scope gate.
+                self._assert_egress_floor(current_url)
                 response = client.request(current_method, current_url, headers=headers, content=content)
                 redirect_chain.append((response.status_code, current_url))
                 if response.is_redirect and response.headers.get("location"):

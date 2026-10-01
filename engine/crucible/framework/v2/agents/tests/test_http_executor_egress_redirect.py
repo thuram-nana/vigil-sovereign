@@ -168,6 +168,75 @@ def test_in_scope_redirect_is_followed(
 
 
 # ---------------------------------------------------------------------------
+# never-liftable L3/L4 egress floor (behind the string scope gate)
+# ---------------------------------------------------------------------------
+
+
+def _resolver_maps(name: str, addr: str):
+    """A hermetic ``socket.getaddrinfo`` that maps one NAME to one address and passes IP literals
+    through (so the floor's own loopback-grant resolution and the refusal path are both exercised
+    without touching the real resolver)."""
+    import ipaddress
+    import socket as _s
+
+    def _gai(host, port, *a, **k):
+        try:
+            ipaddress.ip_address(host)
+            out = host
+        except ValueError:
+            out = addr if host == name else "203.0.113.10"  # any other name -> a TEST-NET public IP
+        return [(_s.AF_INET, _s.SOCK_STREAM, _s.IPPROTO_TCP, "", (out, int(port or 0)))]
+
+    return _gai
+
+
+@pytest.mark.parametrize("bad_addr, tier", [
+    ("169.254.169.254", "metadata/link-local"),   # cloud IMDS — never liftable
+    ("10.0.0.5", "RFC1918"),                        # private — lifts only for a charter IP literal
+    ("192.168.1.1", "RFC1918"),
+    ("172.16.0.9", "RFC1918"),
+])
+def test_egress_floor_refuses_name_resolving_to_internal_despite_scope(
+    isolated_engagement, monkeypatch, bad_addr, tier,
+):
+    """The string scope gate authorises a NAME it never resolves; the floor resolves it and refuses the
+    metadata/RFC1918 address behind it — the exact hole a pure-string gate cannot see. A refusal, not a
+    crash, and nothing is dialled."""
+    import socket as _socket
+    isolated_engagement("alpha", "imds.corp.example")   # the NAME is in charter scope
+    monkeypatch.setattr(_socket, "getaddrinfo",
+                        _resolver_maps("imds.corp.example", bad_addr))
+    # If the floor failed and httpx tried to connect, this would raise instead of being a clean refusal.
+    monkeypatch.setattr(_socket, "create_connection",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("dialled a floored address")))
+    ex = HttpExecutor(engagement_slug="alpha",
+                      base_url="http://imds.corp.example/", prompt_callback=_deny)
+    out = ex.execute(_hyp("/"), _PLAN)
+    ex.close()
+    assert not out.success
+    assert "egress" in out.note.lower()
+    assert ex.stats()["scope_violations"] == 1
+
+
+def test_egress_floor_allows_loopback_scoped_by_name(
+    isolated_engagement, httpserver: HTTPServer,
+):
+    """A loopback engagement scoped by the NAME the server answers on (not the 127.0.0.1 literal) still
+    reaches the own-box target: the floor adds the resolved LOOPBACK addresses to the lift set, while the
+    metadata/RFC1918 tiers stay unaffected. This is the regression guard for the loopback-by-name mode."""
+    isolated_engagement("alpha", httpserver.host)   # e.g. "localhost", a NAME resolving to loopback
+    httpserver.expect_request("/ok").respond_with_data("served")
+    ex = HttpExecutor(engagement_slug="alpha",
+                      base_url=httpserver.url_for("/"), prompt_callback=_deny)
+    ex.execute(_hyp("/ok"), _PLAN)
+    ex.close()
+    # The floor ALLOWED the loopback request: no egress refusal, and the own-box target was contacted.
+    # (execute()'s success reflects hypothesis evaluation, not whether the request reached the host.)
+    assert ex.stats()["scope_violations"] == 0
+    assert "/ok" in [r[0].path for r in httpserver.log]
+
+
+# ---------------------------------------------------------------------------
 # egress guard wiring
 # ---------------------------------------------------------------------------
 
