@@ -113,6 +113,99 @@ def test_dirty_rule_ids_roundtrip_and_stay_argv_safe():
         assert (rr, pp, ll) == (rid, "pkg/app.py", 7), (rid, ref, rr, pp, ll)
 
 
+def _reverify(res: dict):
+    """Re-run the pure oracle over the scan's retained static-FACT contexts exactly as `python3 -m framework.v2
+    verify <scan.json>` does — serialise the scan result to JSON, reload it, and drive reverify_document (the
+    CLI's own re-verification entry point). Returns the list of ReverifyResult."""
+    import json
+    from framework.v2.verify.reverify import reverify_document
+    doc = json.loads(json.dumps(res))          # prove it survives the on-disk JSON round-trip the CLI reads
+    return reverify_document(doc)
+
+
+def test_weak_crypto_region_emits_reverifiable_static_fact(tmp_path):
+    """INV2: a codescan over a planted weak-crypto (MD5) region emits an oracle-confirmed STATIC FACT that
+    carries its retained source region and RE-VERIFIES OFFLINE via `framework.v2 verify`; a tamper that removes
+    the broken-crypto property no longer re-fires (tamper-reject)."""
+    src = tmp_path / "src"; src.mkdir()
+    (src / "sign.py").write_text(
+        "import hashlib\n"
+        "def sign(data):\n"
+        "    return hashlib.md5(data).hexdigest()\n", encoding="utf-8")
+    base = tmp_path / "base"
+    res = codescan.run_codescan(root=str(src), slug="wc", base_dir=str(base), max_files=20)
+
+    # the DAA weak-hash finding is ALSO confirmed by the pure STATIC_RULE oracle and surfaced as a static FACT
+    daa = [f for f in res["findings"] if f["ref"].startswith("DAA-WEAK-HASH")]
+    assert daa and daa[0]["static_oracle_confirmed"] is True
+    sfs = res["static_facts"]
+    assert len(sfs) == 1
+    sf = sfs[0]
+    assert sf["bug_class"] == "static_broken_crypto"
+    assert sf["confirmed_by"] == "static_rule" and sf["kind"] == "active"
+    assert sf["oracle_context"]["static_rule"]["rule_id"] == "broken-crypto-invocation"
+    # the scan JSON is directly re-verifiable (the standard `active_findings` convention)
+    assert res["active_findings"] == sfs
+
+    # re-verifies OFFLINE from the retained bytes
+    results = _reverify(res)
+    assert len(results) == 1 and results[0].ok and results[0].reproduced
+    assert results[0].confirmed_by == "static_rule"
+
+    # TAMPER-REJECT: mutate the retained source so the broken-crypto property is gone → no re-fire
+    import copy
+    tampered = copy.deepcopy(res)
+    tampered["active_findings"][0]["oracle_context"]["static_rule"]["source"] = (
+        "import hashlib\ndef sign(data):\n    return hashlib.sha256(data).hexdigest()\n")
+    tresults = _reverify(tampered)
+    assert len(tresults) == 1 and not tresults[0].reproduced
+
+
+def test_strong_primitive_safe_twin_stays_silent(tmp_path):
+    """INV2 negative control: a safe twin using a STRONG primitive (SHA-256) is not even flagged by DAA, so it
+    emits NO static FACT — the scan stays silent on it (never a false static FACT)."""
+    src = tmp_path / "src"; src.mkdir()
+    (src / "sign.py").write_text(
+        "import hashlib\n"
+        "def sign(data):\n"
+        "    return hashlib.sha256(data).hexdigest()\n", encoding="utf-8")
+    base = tmp_path / "base"
+    res = codescan.run_codescan(root=str(src), slug="safe", base_dir=str(base), max_files=20)
+    assert not [f for f in res["findings"] if f["ref"].startswith("DAA-WEAK-HASH")]
+    assert res["static_facts"] == [] and res["summary"]["static_facts"] == 0
+
+
+def test_usedforsecurity_false_daa_match_stays_lead(tmp_path):
+    """INV2 negative control: a DAA regex match the SOUND oracle refuses (a hash explicitly marked
+    ``usedforsecurity=False`` — a non-security checksum) is retained as a DAA finding but is NEVER promoted to a
+    static FACT. The oracle's authority overrides the regex: a static FACT is minted only when the property
+    genuinely holds."""
+    src = tmp_path / "src"; src.mkdir()
+    (src / "ck.py").write_text(
+        "import hashlib\n"
+        "def checksum(data):\n"
+        "    return hashlib.md5(data, usedforsecurity=False).hexdigest()\n", encoding="utf-8")
+    base = tmp_path / "base"
+    res = codescan.run_codescan(root=str(src), slug="ufs", base_dir=str(base), max_files=20)
+    daa = [f for f in res["findings"] if f["ref"].startswith("DAA-WEAK-HASH")]
+    assert daa, "DAA regex still flags md5( — it only says WHERE to look"
+    assert daa[0]["static_oracle_confirmed"] is False
+    assert res["static_facts"] == []
+    assert _reverify(res) == []                # nothing re-verifiable; never a false static FACT
+
+
+def test_static_fact_is_python_only(tmp_path):
+    """INV2: the STATIC_RULE oracle re-parses Python only, so a weak-crypto pattern in a non-Python file is not
+    promoted to a static FACT (it stays a DAA finding). Keeps the single-region offline oracle sound."""
+    src = tmp_path / "src"; src.mkdir()
+    (src / "app.js").write_text("const h = md5(payload);\n", encoding="utf-8")
+    base = tmp_path / "base"
+    res = codescan.run_codescan(root=str(src), slug="js", base_dir=str(base), max_files=20)
+    # whether or not a DAA rule matches the .js, NO static FACT may be minted for a non-Python file
+    assert res["static_facts"] == []
+    assert all(f.get("static_rule_id") is None for f in res["findings"])
+
+
 def test_moved_vuln_is_not_reported_cleared(tmp_path):
     """A vulnerable file that MOVES (rename/refactor) must NOT report cleared — cleared requires the
     rule to fire NOWHERE, not merely at the recorded path (red-pen 1a HIGH)."""

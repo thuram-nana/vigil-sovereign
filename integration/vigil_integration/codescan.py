@@ -129,6 +129,68 @@ def _bug_class(rule_id: str, cwe: str) -> str:
     return cwe or "Static Analysis Finding"
 
 
+# INV2 — the CLOSED-vocabulary STATIC_RULE rule_id a DAA finding maps to, for the FACT-capable tiers ONLY.
+# A DAA regex match only says WHERE to look; the pure STATIC_RULE oracle (analysis.static_facts) re-parses the
+# RETAINED source region and RE-DERIVES the code property itself — it NEVER trusts the DAA rule_id or CWE. Only
+# mappings the single-region offline oracle can SOUNDLY confirm are listed: weak hash/cipher
+# (``broken-crypto-invocation``). TLS verify-off maps to ``insecure-flag-literal`` but the oracle fires only
+# when import provenance is present in the retained region (fail-closed to a LEAD otherwise). LEAD-only DAA
+# classes — and ``debug=True`` (DAA-DEBUG-TRUE), which no static-FACT tier covers — are deliberately ABSENT:
+# they can never mint a static FACT here, matching the LEAD-only guards in verify/oracles.py.
+_STATIC_RULE_FOR_DAA: dict[str, str] = {
+    "DAA-WEAK-HASH": "broken-crypto-invocation",
+    "DAA-TLS-VERIFY-OFF": "insecure-flag-literal",
+}
+
+
+def _static_rule_for(af: Any) -> str:
+    """The CLOSED-vocabulary STATIC_RULE rule_id for a DAA finding on a PYTHON source file, or ``""`` when the
+    finding is not FACT-capable through the single-region offline oracle (a non-Python file, or a DAA class with
+    no sound static-FACT tier). ``""`` ⇒ the finding stays a DAA fact exactly as before and is NEVER promoted to
+    an oracle-re-verifiable static FACT."""
+    path = str(getattr(af, "path", "") or "")
+    if not path.endswith(".py"):
+        return ""      # the STATIC_RULE oracle re-parses Python only; any other language REFUSES (a LEAD)
+    return _STATIC_RULE_FOR_DAA.get(str(getattr(af, "rule_id", "") or ""), "")
+
+
+def _retain_source_region(root: str, af: Any) -> str:
+    """The RETAINED source region the STATIC_RULE oracle re-parses OFFLINE to re-derive the code property: the
+    module's top-level import statements (the crypto/HTTP provenance the oracle RESOLVES) plus the top-level
+    statement enclosing the finding line — both at column 0, so the concatenation re-parses as a module. Falls
+    back to the whole file (unparseable module), then the one-line snippet (unreadable file); the oracle then
+    re-parses whatever is retained and REFUSES → a LEAD, never a crash. The retained bytes travel verbatim into
+    the finding, so a confirmed static FACT re-verifies OFFLINE and a tamper that removes the property no longer
+    re-fires."""
+    import ast as _ast
+    snippet = str(getattr(af, "snippet", "") or "")
+    try:
+        text = (Path(root) / str(af.path)).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return snippet
+    try:
+        tree = _ast.parse(text)
+    except SyntaxError:
+        return text                         # whole file; the oracle re-parses it (or REFUSES → a LEAD)
+    try:
+        line = int(af.line)
+    except (TypeError, ValueError):
+        line = 0
+    imports: list[str] = []
+    enclosing = ""
+    for node in tree.body:                  # TOP-LEVEL statements only ⇒ each source segment starts at column 0
+        if isinstance(node, (_ast.Import, _ast.ImportFrom)):
+            seg = _ast.get_source_segment(text, node)
+            if seg:
+                imports.append(seg)
+            continue
+        end = getattr(node, "end_lineno", None) or getattr(node, "lineno", 0)
+        if not enclosing and getattr(node, "lineno", 0) <= line <= end:
+            enclosing = _ast.get_source_segment(text, node) or ""
+    region = "\n".join([*imports, enclosing]) if enclosing else "\n".join(imports)
+    return region or text
+
+
 def run_codescan(*, root: str, slug: str, base_dir: str, max_files: int = 5000) -> dict[str, Any]:
     """Scan ``root`` with DAA and write each finding into the signed ``<base_dir>/<slug>.spine`` as a
     re-runnable static fact. Returns ``{root, slug, spine, findings:[...], counts}`` — findings carry the
@@ -139,6 +201,8 @@ def run_codescan(*, root: str, slug: str, base_dir: str, max_files: int = 5000) 
     re-runnable static fact) with a content-digest ``evidence_ref``."""
     from vigil_core import digest_payload
     from vigil_core.vault import Vault
+
+    from framework.v2.analysis.static_facts import confirm_code_region, static_fact_finding
 
     from .agent.state import AgentState, Finding
     from .live.spine_identity import DEFAULT_SPINE_KEY_FILE, load_or_create_spine_keypair
@@ -152,6 +216,11 @@ def run_codescan(*, root: str, slug: str, base_dir: str, max_files: int = 5000) 
     state = AgentState(engagement_slug=slug, target=str(src),
                        objective="local codebase static review (DAA deterministic oracle)")
     findings_out: list[dict[str, Any]] = []
+    # INV2 — the oracle-re-verifiable STATIC FACTs. Each carries its RETAINED source region in ``oracle_context``,
+    # so ``python3 -m framework.v2 verify <scan.json>`` re-runs the pure STATIC_RULE oracle over the retained
+    # bytes (the `active_findings` convention read_reverifiable/reverify_document consume). A DAA match the sound
+    # oracle REFUSES (e.g. a hash marked ``usedforsecurity=False``) is NOT added here — it stays a DAA lead.
+    static_facts_out: list[dict[str, Any]] = []
     seen_refs: set[str] = set()
     for af in daa:
         ref = make_ref(af.rule_id, af.path, af.line)
@@ -165,7 +234,7 @@ def run_codescan(*, root: str, slug: str, base_dir: str, max_files: int = 5000) 
         f = Finding(ref=ref, bug_class=bug_class, title=af.message, severity=_cap(af.severity),
                     source=f"daa:{af.rule_id}", target=f"{af.path}:{af.line}")
         state.record_fact(f, evidence_ref=evidence_ref)   # status→fact, requires the signed evidence_ref
-        findings_out.append({
+        fo = {
             "ref": ref, "check_id": ref, "bug_class": bug_class,
             "cwe": [af.cwe] if af.cwe else [],
             "title": af.message, "severity": _cap(af.severity),
@@ -174,7 +243,38 @@ def run_codescan(*, root: str, slug: str, base_dir: str, max_files: int = 5000) 
             "confirmed_by": f"daa:{af.rule_id}", "oracle_kind": f"daa:{af.rule_id}",
             "evidence": af.snippet, "analyzer": af.analyzer, "re_verifiable": True,
             "kind": "finding", "references": [], "remediation": "",
+        }
+        findings_out.append(fo)
+
+        # INV2 — SAST bridge: promote a FACT-capable DAA match to an oracle-re-verifiable STATIC FACT. The pure
+        # STATIC_RULE oracle re-parses the RETAINED region and re-derives the property itself; it fires (a FACT)
+        # or refuses (a LEAD). The DAA rule_id/CWE are NEVER trusted for the verdict — only `path`/`line` point
+        # at WHERE to retain. This adds NO oracle/kind (STATIC_RULE is already registered) and does not alter the
+        # existing DAA finding above, so the spine/patch path and `make gate` are unchanged.
+        static_rule_id = _static_rule_for(af)
+        if not static_rule_id:
+            continue
+        region = _retain_source_region(str(src), af)
+        sfact = confirm_code_region(af.path, af.line, region, static_rule_id)
+        fo["static_rule_id"] = static_rule_id
+        fo["static_oracle_confirmed"] = bool(sfact.confirmed)
+        if not sfact.confirmed:
+            continue                               # the sound oracle REFUSED the DAA match → a LEAD, never a FACT
+        sff = static_fact_finding(sfact, check_id=f"static:{static_rule_id}:{af.path}:{af.line}")
+        sff.update({
+            "finding_slug": sff["check_id"],
+            "kind": "active",                      # read by reverify_document / read_reverifiable
+            "grounding": "fact", "re_verifiable": True, "verified_by_oracle": True,
+            "oracle_kind": sfact.confirmed_by, "confirmed_by": sfact.confirmed_by,
+            "confidence": sfact.confidence,
+            "title": af.message, "severity": _cap(af.severity),
+            "location": f"{af.path}:{af.line}", "surface": f"{af.path}:{af.line}",
+            "cwe": [af.cwe] if af.cwe else [],
+            "daa_rule_id": af.rule_id, "daa_ref": ref,
+            "evidence": sfact.evidence, "references": [], "remediation": "",
         })
+        static_facts_out.append(sff)
+        fo["static_fact_ref"] = sff["check_id"]
 
     base = Path(base_dir)
     base.mkdir(parents=True, exist_ok=True)
@@ -197,10 +297,14 @@ def run_codescan(*, root: str, slug: str, base_dir: str, max_files: int = 5000) 
         k = str(fo["severity"]).lower()
         counts[k] = counts.get(k, 0) + 1
     # every DAA finding is a re-runnable static FACT, so facts == total, leads == 0 (the Findings screen's
-    # summary tile reads this shape).
+    # summary tile reads this shape). INV2 adds `static_facts` — the subset ALSO confirmed by the pure
+    # STATIC_RULE oracle and re-verifiable offline via `python3 -m framework.v2 verify`; `active_findings`
+    # exposes them under the standard re-verifiable convention so the scan JSON is directly re-verifiable.
     return {"root": str(src), "slug": slug, "spine": str(spine_path), "engine": "codescan-daa",
             "findings": findings_out, "counts": counts, "total": len(findings_out),
-            "summary": {"findings": len(findings_out), "facts": len(findings_out), "leads": 0}}
+            "static_facts": static_facts_out, "active_findings": static_facts_out,
+            "summary": {"findings": len(findings_out), "facts": len(findings_out), "leads": 0,
+                        "static_facts": len(static_facts_out)}}
 
 
 class CodeFixVerdict:
