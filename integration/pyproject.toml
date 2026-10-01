@@ -36,6 +36,11 @@ testpaths = ["tests"]
 # the active configfile there and only the conftest registration reaches it.
 markers = [
     "volume: statistical, high-run-count regression — excluded from the per-PR leg, runs nightly",
+    # `keyed` — needs a real external credential (e.g. ANTHROPIC_API_KEY) to make a LIVE call. These tests
+    # SKIP cleanly when the key is absent (so the default CI leg is unaffected: no key → skip), and the
+    # marker lets an operator OPT IN explicitly with `-m keyed` once a key is wired. Registered here AND in
+    # integration/conftest.py's pytest_configure for the same two-rootdir reason as `volume`.
+    "keyed: requires a real external credential (e.g. ANTHROPIC_API_KEY) for a LIVE call; skips cleanly without it",
 ]
 
 # ── quality gates (W2-2 #419) ──────────────────────────────────────────────────────────────────────
