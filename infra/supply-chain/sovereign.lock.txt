@@ -357,9 +357,9 @@ cryptography==50.0.1 \
     #   -r apps/sigil/requirements.txt
     #   -r infra/supply-chain/sovereign.in
     #   pyjwt
-fastembed==0.8.0 \
-    --hash=sha256:40bee672657574a1009e35ec50030a55f2b426842cb011845379817641bbbbd0 \
-    --hash=sha256:75966edfa8b006ee78514c726bd7f6a50721dadc89305279052be9db72fd53e8
+fastembed==0.8.1 \
+    --hash=sha256:ad815f14873dce918f755a99f16929a1384775f91ca8a14645993a165b5f65ba \
+    --hash=sha256:b4f4043080af36ee820d22d2d3034df635c1a8b9764e5d2a642bc7aeb1d0e749
     # via -r apps/sigil/requirements.txt
 filelock==3.32.2 \
     --hash=sha256:87dd94cf281e586d135fa51132b8e3d9a598b316e90377a288663c9321036c82 \
