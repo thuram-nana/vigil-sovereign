@@ -313,8 +313,19 @@ def test_connect_targets_the_pinned_ip_not_the_name(
 
 
 def test_smuggling_import_pulls_in_no_integration_layer() -> None:
+    # Clean subprocess: a FRESH interpreter importing ONLY smuggling must pull in no integration layer.
+    # An in-process sys.modules check is polluted by any earlier test in the session that imported
+    # vigil_integration.* (e.g. vigil_integration.live.smuggling_redrive), yielding a false "leak";
+    # isolating the import tests exactly the FATAL-2 claim (smuggling in isolation imports no integration).
+    import subprocess
     import sys
-    import importlib
-    importlib.import_module("framework.v2.scanner.smuggling")
-    leaked = [m for m in sys.modules if m.startswith("vigil_integration")]
-    assert leaked == [], f"engine module leaked the integration layer: {leaked}"
+    code = (
+        "import sys, importlib;"
+        "importlib.import_module('framework.v2.scanner.smuggling');"
+        "leaked=sorted(m for m in sys.modules if m.startswith('vigil_integration'));"
+        "print(','.join(leaked));"
+        "sys.exit(1 if leaked else 0)"
+    )
+    r = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
+    assert r.returncode == 0, (
+        f"engine module leaked the integration layer: {r.stdout.strip()}\n{r.stderr.strip()}")
