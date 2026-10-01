@@ -146,6 +146,10 @@ def _synthetic_result(world: WorldModel, findings: list[AuditFinding]) -> Engage
 def test_autonomous_off_leaves_the_scan_report_byte_identical(
     isolated_engagement, httpserver: HTTPServer,
 ):
+    # CRUCIBLE-core runs this engine tree gateway-less; this e2e drives a real request through
+    # HttpExecutor._issue, whose never-liftable egress floor fails closed without vigil_gateway.
+    # It runs for real in the gateway-present jobs (offense leg + loopback engagement).
+    pytest.importorskip("vigil_gateway")
     port = httpserver.port
     isolated_engagement("alpha", "127.0.0.1")
     httpserver.expect_request("/").respond_with_handler(_root)
@@ -190,6 +194,10 @@ def test_cli_routes_to_autonomous_only_when_flag_set(monkeypatch: pytest.MonkeyP
 def test_autonomous_runs_one_bounded_gated_cycle_live(
     isolated_engagement, httpserver: HTTPServer,
 ):
+    # CRUCIBLE-core runs this engine tree gateway-less; this e2e drives a real request through
+    # HttpExecutor._issue, whose never-liftable egress floor fails closed without vigil_gateway.
+    # It runs for real in the gateway-present jobs (offense leg + loopback engagement).
+    pytest.importorskip("vigil_gateway")
     port = httpserver.port
     isolated_engagement("alpha", "127.0.0.1")
     httpserver.expect_request("/").respond_with_handler(_root)

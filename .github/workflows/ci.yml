@@ -511,6 +511,15 @@ jobs:
             # every one of those floored proofs would only ever SKIP (a skipped proof is not a passing proof).
             # (They are not integration/tests files, so the test_ci_framework_tests_run_in_offense_leg guard
             # neither requires nor counts them; listing them here is the coverage fix.)
+            #
+            # The engine/crucible/framework/v2/agents/tests + repeater/tests files at the very TAIL are WS1.1b
+            # wave23: the http_executor egress floor (_assert_egress_floor → common.egress_pin.resolve_and_pin
+            # → vigil_gateway.denylist) now fails closed on EVERY real request through HttpExecutor._issue, so
+            # the engage/repeater/http_executor end-to-end tests that drive a real loopback request
+            # importorskip("vigil_gateway") (per-test, except test_engage_transfer.py which is whole-file e2e
+            # and uses a module-level importorskip) and SKIP in the gateway-less crucible-core job. THIS leg
+            # ships the gateway, so it is where those 42 floored proofs actually EXECUTE; their hermetic
+            # siblings in the same files still run (and pass) in crucible-core.
             VIGIL_REQUIRE_FRONTIER_CHECK=1 \
             PYTHONPATH=integration:engine/crucible:gateway python -m pytest \
               docs/tests/test_out_of_scope_is_honest.py \
@@ -660,7 +669,19 @@ jobs:
               engine/crucible/framework/v2/scanner/tests/test_race.py \
               engine/crucible/framework/v2/scanner/tests/test_race_bizlogic_benchmark.py \
               engine/crucible/framework/v2/scanner/tests/test_arsenal_wiring.py \
-              engine/crucible/framework/v2/scanner/tests/test_audit_a_soundness.py -q -m "not volume"
+              engine/crucible/framework/v2/scanner/tests/test_audit_a_soundness.py \
+              engine/crucible/framework/v2/agents/tests/test_engage.py \
+              engine/crucible/framework/v2/agents/tests/test_engage_autonomous.py \
+              engine/crucible/framework/v2/agents/tests/test_engage_defender.py \
+              engine/crucible/framework/v2/agents/tests/test_engage_signed_authority.py \
+              engine/crucible/framework/v2/agents/tests/test_engage_transfer.py \
+              engine/crucible/framework/v2/agents/tests/test_egress_allowlist_wiring.py \
+              engine/crucible/framework/v2/agents/tests/test_http_executor.py \
+              engine/crucible/framework/v2/agents/tests/test_http_executor_body_cap.py \
+              engine/crucible/framework/v2/agents/tests/test_http_executor_concurrency.py \
+              engine/crucible/framework/v2/agents/tests/test_http_executor_egress_redirect.py \
+              engine/crucible/framework/v2/agents/tests/test_http_executor_oracle_context.py \
+              engine/crucible/framework/v2/repeater/tests/test_repeater.py -q -m "not volume"
           else
             # STRICT branch protection ⇒ a mergeable PR is up to date with main and this committed
             # monorepo path always exists; its absence means a rename/deletion — fail RED, never skip GREEN.

@@ -279,6 +279,10 @@ def test_repeater_replay_executor_carries_the_egress_allowlist(
     """The other wired target-traffic path: the gated intercepting repeater. After a replay, the
     executor the tool built for the slug carries a non-None ``egress_allowlist`` whose client rides
     the sovereign transport — so the repeater's replays are backstopped by gate 6 too."""
+    # CRUCIBLE-core runs this engine tree gateway-less; this e2e drives a real request through
+    # HttpExecutor._issue, whose never-liftable egress floor fails closed without vigil_gateway.
+    # It runs for real in the gateway-present jobs (offense leg + loopback engagement).
+    pytest.importorskip("vigil_gateway")
     from framework.v2 import entitlement
     from framework.v2.repeater import Repeater, RepeaterRequest
 

@@ -269,6 +269,10 @@ def test_executor_satisfies_protocol():
 def test_in_scope_get_succeeds_and_captures_response(
     isolated_engagement, httpserver: HTTPServer, hyp_get, plan_one,
 ):
+    # CRUCIBLE-core runs this engine tree gateway-less; this e2e drives a real request through
+    # HttpExecutor._issue, whose never-liftable egress floor fails closed without vigil_gateway.
+    # It runs for real in the gateway-present jobs (offense leg + loopback engagement).
+    pytest.importorskip("vigil_gateway")
     isolated_engagement("alpha", httpserver.host)
     httpserver.expect_request("/api/orders/1").respond_with_data(
         '{"order_id": 1, "user_id": 2, "amount": "100.00"}',
@@ -365,6 +369,10 @@ def test_destructive_action_prompts_and_respects_deny(
 def test_destructive_action_proceeds_when_operator_allows(
     isolated_engagement, httpserver: HTTPServer, plan_one,
 ):
+    # CRUCIBLE-core runs this engine tree gateway-less; this e2e drives a real request through
+    # HttpExecutor._issue, whose never-liftable egress floor fails closed without vigil_gateway.
+    # It runs for real in the gateway-present jobs (offense leg + loopback engagement).
+    pytest.importorskip("vigil_gateway")
     isolated_engagement("alpha", httpserver.host)
     httpserver.expect_request("/admin", method="POST").respond_with_data(
         '{"ok": true}', status=200, content_type="application/json",
@@ -390,6 +398,10 @@ def test_destructive_action_proceeds_when_operator_allows(
 def test_request_budget_exhaustion_halts_cleanly(
     isolated_engagement, httpserver: HTTPServer, hyp_get, plan_one,
 ):
+    # CRUCIBLE-core runs this engine tree gateway-less; this e2e drives a real request through
+    # HttpExecutor._issue, whose never-liftable egress floor fails closed without vigil_gateway.
+    # It runs for real in the gateway-present jobs (offense leg + loopback engagement).
+    pytest.importorskip("vigil_gateway")
     isolated_engagement("alpha", httpserver.host)
     httpserver.expect_request("/api/orders/1").respond_with_data("ok")
 
@@ -503,6 +515,10 @@ def test_emulate_jitters_measurably_more_than_test(
 def test_user_agent_set_correctly_per_posture(
     isolated_engagement, httpserver: HTTPServer, hyp_get, plan_one,
 ):
+    # CRUCIBLE-core runs this engine tree gateway-less; this e2e drives a real request through
+    # HttpExecutor._issue, whose never-liftable egress floor fails closed without vigil_gateway.
+    # It runs for real in the gateway-present jobs (offense leg + loopback engagement).
+    pytest.importorskip("vigil_gateway")
     isolated_engagement("alpha", httpserver.host)
     httpserver.expect_request("/api/orders/1").respond_with_data("ok")
 

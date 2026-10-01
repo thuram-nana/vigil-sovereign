@@ -207,6 +207,10 @@ def test_engage_accepts_correctly_signed_authority(isolated, httpserver: HTTPSer
     """NEGATIVE CONTROL for the refusals above: the pinned gate is NOT a blanket deny. A
     correctly-signed, in-window, in-scope authority is ACCEPTED and the scan reaches the
     server."""
+    # CRUCIBLE-core runs this engine tree gateway-less; this e2e drives a real request through
+    # HttpExecutor._issue, whose never-liftable egress floor fails closed without vigil_gateway.
+    # It runs for real in the gateway-present jobs (offense leg + loopback engagement).
+    pytest.importorskip("vigil_gateway")
     isolated("alpha", "127.0.0.1")
     httpserver.expect_request("/").respond_with_handler(_page)
     tr, privs = _provision_trust_root()
@@ -224,6 +228,10 @@ def test_engage_accepts_correctly_signed_authority(isolated, httpserver: HTTPSer
 def test_engage_greenfield_no_authority_still_runs(isolated, httpserver: HTTPServer):
     """Greenfield: no authority document and no trust root provisioned. The documented
     kill-switch-only path is preserved and the scan runs normally."""
+    # CRUCIBLE-core runs this engine tree gateway-less; this e2e drives a real request through
+    # HttpExecutor._issue, whose never-liftable egress floor fails closed without vigil_gateway.
+    # It runs for real in the gateway-present jobs (offense leg + loopback engagement).
+    pytest.importorskip("vigil_gateway")
     isolated("alpha", "127.0.0.1")
     httpserver.expect_request("/").respond_with_handler(_page)
     # no _provision_trust_root(), no save_authority()

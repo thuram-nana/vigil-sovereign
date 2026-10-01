@@ -198,6 +198,10 @@ def test_rate_floor_is_honoured_with_concurrent_callers(isolated_engagement):
 
     Removing the reservation gives ``gaps=[0,0,0,0,0]``: a full 6x burst past the
     authorized rate. That is the §VI hole the lock closes."""
+    # CRUCIBLE-core runs this engine tree gateway-less; this e2e drives a real request through
+    # HttpExecutor._issue, whose never-liftable egress floor fails closed without vigil_gateway.
+    # It runs for real in the gateway-present jobs (offense leg + loopback engagement).
+    pytest.importorskip("vigil_gateway")
     isolated_engagement("alpha", "127.0.0.1")
     floor = _RATE_PROFILES["TEST"][0]
     assert floor > 0, "the TEST posture must declare a real rate floor for this test to bite"
@@ -235,6 +239,10 @@ def test_serial_spacing_is_unchanged(isolated_engagement):
     """The serial path still spaces from the previous request's COMPLETION — the
     start-instant reservation added for concurrency is superseded by the completion
     timestamp, so a single-threaded run behaves exactly as before."""
+    # CRUCIBLE-core runs this engine tree gateway-less; this e2e drives a real request through
+    # HttpExecutor._issue, whose never-liftable egress floor fails closed without vigil_gateway.
+    # It runs for real in the gateway-present jobs (offense leg + loopback engagement).
+    pytest.importorskip("vigil_gateway")
     isolated_engagement("alpha", "127.0.0.1")
     body_delay = 0.15
     floor = _RATE_PROFILES["TEST"][0]
@@ -328,6 +336,10 @@ def test_counters_are_exact_under_concurrency(isolated_engagement, httpserver: H
     under the GIL, so the guard itself is pinned deterministically by
     :func:`test_mark_request_done_runs_under_the_executor_lock`; this is the end-to-end
     accounting check.)"""
+    # CRUCIBLE-core runs this engine tree gateway-less; this e2e drives a real request through
+    # HttpExecutor._issue, whose never-liftable egress floor fails closed without vigil_gateway.
+    # It runs for real in the gateway-present jobs (offense leg + loopback engagement).
+    pytest.importorskip("vigil_gateway")
     isolated_engagement("alpha", "127.0.0.1")
     httpserver.expect_request("/probe").respond_with_data("ok", status=200)
     n = 24

@@ -23,6 +23,14 @@ from framework.v2.engage import run_engagement
 from framework.v2.memory import priors as _priors
 from framework.v2.memory.store import open_store
 
+# CRUCIBLE-core runs this engine tree gateway-less. Every test in this file is an end-to-end
+# engagement that drives a real request through HttpExecutor._issue, whose never-liftable egress
+# floor fails closed without vigil_gateway.denylist (the two-env boundary). Module-level skip here
+# (the file is whole-file e2e); these run for real in the gateway-present jobs (offense leg +
+# loopback engagement). A module-level importorskip still COLLECTS the file, so the CRUCIBLE-core
+# coverage-by-construction census is unaffected.
+pytest.importorskip("vigil_gateway")
+
 _CHARTER = """\
 # Engagement charter — `{slug}`
 

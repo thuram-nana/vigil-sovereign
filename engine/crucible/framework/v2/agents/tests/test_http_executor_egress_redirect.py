@@ -110,6 +110,10 @@ def test_redirect_to_out_of_scope_host_is_refused_and_never_contacted(
     name pointing at `/pwned` on the very same server. If the re-gate
     failed to fire, the server would log a `/pwned` request.
     """
+    # CRUCIBLE-core runs this engine tree gateway-less; this e2e drives a real request through
+    # HttpExecutor._issue, whose never-liftable egress floor fails closed without vigil_gateway.
+    # It runs for real in the gateway-present jobs (offense leg + loopback engagement).
+    pytest.importorskip("vigil_gateway")
     port = httpserver.port
     isolated_engagement("alpha", "127.0.0.1")  # only 127.0.0.1 is in scope
 
@@ -144,6 +148,10 @@ def test_in_scope_redirect_is_followed(
 ):
     """A redirect that stays on the in-scope host is followed normally —
     the re-gate must not break legitimate same-host redirects."""
+    # CRUCIBLE-core runs this engine tree gateway-less; this e2e drives a real request through
+    # HttpExecutor._issue, whose never-liftable egress floor fails closed without vigil_gateway.
+    # It runs for real in the gateway-present jobs (offense leg + loopback engagement).
+    pytest.importorskip("vigil_gateway")
     port = httpserver.port
     isolated_engagement("alpha", "127.0.0.1")
 
@@ -224,6 +232,10 @@ def test_egress_floor_allows_loopback_scoped_by_name(
     """A loopback engagement scoped by the NAME the server answers on (not the 127.0.0.1 literal) still
     reaches the own-box target: the floor adds the resolved LOOPBACK addresses to the lift set, while the
     metadata/RFC1918 tiers stay unaffected. This is the regression guard for the loopback-by-name mode."""
+    # CRUCIBLE-core runs this engine tree gateway-less; this e2e drives a real request through
+    # HttpExecutor._issue, whose never-liftable egress floor fails closed without vigil_gateway.
+    # It runs for real in the gateway-present jobs (offense leg + loopback engagement).
+    pytest.importorskip("vigil_gateway")
     isolated_engagement("alpha", httpserver.host)   # e.g. "localhost", a NAME resolving to loopback
     httpserver.expect_request("/ok").respond_with_data("served")
     ex = HttpExecutor(engagement_slug="alpha",
@@ -350,6 +362,10 @@ def test_auto_load_authority_absent_document_is_noop(
     """Fail-closed but quiet: with no authority document on disk,
     `auto_load_authority=True` leaves `authority` None and behaviour is
     unchanged (a normal in-scope request proceeds)."""
+    # CRUCIBLE-core runs this engine tree gateway-less; this e2e drives a real request through
+    # HttpExecutor._issue, whose never-liftable egress floor fails closed without vigil_gateway.
+    # It runs for real in the gateway-present jobs (offense leg + loopback engagement).
+    pytest.importorskip("vigil_gateway")
     td = isolated_engagement("alpha", httpserver.host)
     httpserver.expect_request("/probe").respond_with_data("ok")
     monkeypatch.setattr(_paths, "authority_path", lambda s: td / "authority.json")

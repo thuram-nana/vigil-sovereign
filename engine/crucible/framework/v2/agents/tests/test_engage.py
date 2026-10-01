@@ -107,6 +107,10 @@ def _dom_sink(request) -> Response:
 def test_engage_confirms_findings_with_reverifiable_certificates(
     isolated_engagement, httpserver: HTTPServer,
 ):
+    # CRUCIBLE-core runs this engine tree gateway-less; this e2e drives a real request through
+    # HttpExecutor._issue, whose never-liftable egress floor fails closed without vigil_gateway.
+    # It runs for real in the gateway-present jobs (offense leg + loopback engagement).
+    pytest.importorskip("vigil_gateway")
     port = httpserver.port
     isolated_engagement("alpha", "127.0.0.1")
     httpserver.expect_request("/").respond_with_handler(_root)
@@ -138,6 +142,10 @@ _ATTACK_PREFIXES = ("endpoint:", "finding:", "datastore:", "cloud_resource:", "a
 def test_engage_recon_joins_intel_and_attack_on_one_clock_safe_world(
     isolated_engagement, httpserver: HTTPServer,
 ):
+    # CRUCIBLE-core runs this engine tree gateway-less; this e2e drives a real request through
+    # HttpExecutor._issue, whose never-liftable egress floor fails closed without vigil_gateway.
+    # It runs for real in the gateway-present jobs (offense leg + loopback engagement).
+    pytest.importorskip("vigil_gateway")
     port = httpserver.port
     isolated_engagement("alpha", "127.0.0.1")
     httpserver.expect_request("/").respond_with_handler(_root)
@@ -169,6 +177,10 @@ def test_engage_recon_joins_intel_and_attack_on_one_clock_safe_world(
 def test_engage_default_path_produces_no_intel_and_is_unchanged(
     isolated_engagement, httpserver: HTTPServer,
 ):
+    # CRUCIBLE-core runs this engine tree gateway-less; this e2e drives a real request through
+    # HttpExecutor._issue, whose never-liftable egress floor fails closed without vigil_gateway.
+    # It runs for real in the gateway-present jobs (offense leg + loopback engagement).
+    pytest.importorskip("vigil_gateway")
     port = httpserver.port
     isolated_engagement("alpha", "127.0.0.1")
     httpserver.expect_request("/").respond_with_handler(_root)
@@ -254,6 +266,10 @@ def test_engage_arsenal_off_is_the_default_and_surfaces_nothing(
 def test_engage_arsenal_on_surfaces_discovery_leads_through_the_gated_executor(
     isolated_engagement, httpserver: HTTPServer,
 ):
+    # CRUCIBLE-core runs this engine tree gateway-less; this e2e drives a real request through
+    # HttpExecutor._issue, whose never-liftable egress floor fails closed without vigil_gateway.
+    # It runs for real in the gateway-present jobs (offense leg + loopback engagement).
+    pytest.importorskip("vigil_gateway")
     port = httpserver.port
     isolated_engagement("alpha", "127.0.0.1")
     httpserver.expect_request("/").respond_with_handler(_root)
@@ -332,6 +348,10 @@ def test_engage_browser_xss_confirms_by_execution_confined_to_scope(
 def test_engage_returns_engagement_result_with_chaining_wired(
     isolated_engagement, httpserver: HTTPServer,
 ):
+    # CRUCIBLE-core runs this engine tree gateway-less; this e2e drives a real request through
+    # HttpExecutor._issue, whose never-liftable egress floor fails closed without vigil_gateway.
+    # It runs for real in the gateway-present jobs (offense leg + loopback engagement).
+    pytest.importorskip("vigil_gateway")
     port = httpserver.port
     isolated_engagement("alpha", "127.0.0.1")
     httpserver.expect_request("/").respond_with_handler(_root)
@@ -378,6 +398,10 @@ def test_engage_chaining_produces_attack_paths_from_chainable_findings():
 def test_engage_chaining_is_best_effort(
     isolated_engagement, httpserver: HTTPServer, monkeypatch: pytest.MonkeyPatch,
 ):
+    # CRUCIBLE-core runs this engine tree gateway-less; this e2e drives a real request through
+    # HttpExecutor._issue, whose never-liftable egress floor fails closed without vigil_gateway.
+    # It runs for real in the gateway-present jobs (offense leg + loopback engagement).
+    pytest.importorskip("vigil_gateway")
     # A chaining failure must NEVER sink the engagement: the oracle-confirmed report
     # is authoritative and is returned with empty paths rather than raising.
     port = httpserver.port
@@ -410,6 +434,10 @@ def test_engage_chaining_is_best_effort(
 def test_engage_spine_mirrors_findings_onto_the_immutable_stream(
     isolated_engagement, httpserver: HTTPServer, tmp_path: Path,
 ):
+    # CRUCIBLE-core runs this engine tree gateway-less; this e2e drives a real request through
+    # HttpExecutor._issue, whose never-liftable egress floor fails closed without vigil_gateway.
+    # It runs for real in the gateway-present jobs (offense leg + loopback engagement).
+    pytest.importorskip("vigil_gateway")
     from framework.v2.agents.blackboard import open_blackboard
 
     port = httpserver.port
@@ -486,6 +514,10 @@ def test_engage_spine_records_a_refusal_as_evidence(isolated_engagement, tmp_pat
 def test_engage_spine_runs_advisory_reasoning_pass(
     isolated_engagement, httpserver: HTTPServer, tmp_path: Path,
 ):
+    # CRUCIBLE-core runs this engine tree gateway-less; this e2e drives a real request through
+    # HttpExecutor._issue, whose never-liftable egress floor fails closed without vigil_gateway.
+    # It runs for real in the gateway-present jobs (offense leg + loopback engagement).
+    pytest.importorskip("vigil_gateway")
     # W1.1: with a spine attached, engage runs the multi-critic panel + cognitive refusal +
     # reward-bus credit over each authoritative finding — all ADVISORY. The findings themselves
     # are unchanged (oracle authority preserved); the reasoning only lands as evidence events.
@@ -644,6 +676,10 @@ def test_spine_advisors_leave_the_scan_report_byte_identical(
     reflection + learner-health meta-monitor all scheduled) produces a report byte-identical to the
     run WITHOUT the spine (advisors off). The nervous system only lands evidence events; it never
     touches report.active_findings."""
+    # CRUCIBLE-core runs this engine tree gateway-less; this e2e drives a real request through
+    # HttpExecutor._issue, whose never-liftable egress floor fails closed without vigil_gateway.
+    # It runs for real in the gateway-present jobs (offense leg + loopback engagement).
+    pytest.importorskip("vigil_gateway")
     from framework.v2.agents.blackboard import open_blackboard
 
     port = httpserver.port

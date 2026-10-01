@@ -169,6 +169,10 @@ def test_base_url_of_strips_path_and_defaults_https() -> None:
 def test_in_scope_replay_succeeds_through_the_gate_chain(
     isolated_engagement, grant_exploit, httpserver: HTTPServer,
 ) -> None:
+    # CRUCIBLE-core runs this engine tree gateway-less; this e2e drives a real request through
+    # HttpExecutor._issue, whose never-liftable egress floor fails closed without vigil_gateway.
+    # It runs for real in the gateway-present jobs (offense leg + loopback engagement).
+    pytest.importorskip("vigil_gateway")
     isolated_engagement("alpha", httpserver.host)
     httpserver.expect_request("/api/orders/1").respond_with_data(
         '{"order_id": 1}', status=200, content_type="application/json",
@@ -366,6 +370,10 @@ def test_repeater_accepts_correctly_signed_authority(
     """NEGATIVE CONTROL for the refusals above: the pinned gate is NOT a blanket deny. A correctly-
     signed, in-window, in-scope authority is ACCEPTED and the (non-destructive) replay reaches the
     server."""
+    # CRUCIBLE-core runs this engine tree gateway-less; this e2e drives a real request through
+    # HttpExecutor._issue, whose never-liftable egress floor fails closed without vigil_gateway.
+    # It runs for real in the gateway-present jobs (offense leg + loopback engagement).
+    pytest.importorskip("vigil_gateway")
     from framework.v2.authority.signing import sign_authority
     from framework.v2.authority.store import save_signed_authority
 
@@ -413,6 +421,10 @@ def test_repeater_greenfield_no_authority_still_replays(
     """NEGATIVE CONTROL against over-blocking: greenfield (no authority document, no trust root)
     resolves to a None trust root, so the documented kill-switch-only path is preserved and a
     legitimate replay still reaches the server — the fix does not break the normal path."""
+    # CRUCIBLE-core runs this engine tree gateway-less; this e2e drives a real request through
+    # HttpExecutor._issue, whose never-liftable egress floor fails closed without vigil_gateway.
+    # It runs for real in the gateway-present jobs (offense leg + loopback engagement).
+    pytest.importorskip("vigil_gateway")
     from framework.v2.engage import _engage_authority_trust_root
 
     isolated_engagement("alpha", httpserver.host)
@@ -485,6 +497,10 @@ def test_destructive_replay_default_denies_and_sends_nothing(
 def test_destructive_replay_proceeds_when_operator_allows(
     isolated_engagement, grant_exploit, httpserver: HTTPServer,
 ) -> None:
+    # CRUCIBLE-core runs this engine tree gateway-less; this e2e drives a real request through
+    # HttpExecutor._issue, whose never-liftable egress floor fails closed without vigil_gateway.
+    # It runs for real in the gateway-present jobs (offense leg + loopback engagement).
+    pytest.importorskip("vigil_gateway")
     isolated_engagement("alpha", httpserver.host)
     httpserver.expect_request("/api/orders", method="POST").respond_with_data(
         '{"ok": true}', status=201, content_type="application/json")
@@ -499,6 +515,10 @@ def test_destructive_replay_proceeds_when_operator_allows(
 def test_correlatable_ua_is_forced_and_operator_ua_is_stripped(
     isolated_engagement, grant_exploit, httpserver: HTTPServer,
 ) -> None:
+    # CRUCIBLE-core runs this engine tree gateway-less; this e2e drives a real request through
+    # HttpExecutor._issue, whose never-liftable egress floor fails closed without vigil_gateway.
+    # It runs for real in the gateway-present jobs (offense leg + loopback engagement).
+    pytest.importorskip("vigil_gateway")
     isolated_engagement("alpha", httpserver.host)
     httpserver.expect_request("/x").respond_with_data("ok")
     rep = Repeater(slug="alpha")
@@ -520,6 +540,10 @@ def test_correlatable_ua_is_forced_and_operator_ua_is_stripped(
 def test_per_engagement_budget_is_shared_across_replays(
     isolated_engagement, grant_exploit, httpserver: HTTPServer,
 ) -> None:
+    # CRUCIBLE-core runs this engine tree gateway-less; this e2e drives a real request through
+    # HttpExecutor._issue, whose never-liftable egress floor fails closed without vigil_gateway.
+    # It runs for real in the gateway-present jobs (offense leg + loopback engagement).
+    pytest.importorskip("vigil_gateway")
     isolated_engagement("alpha", httpserver.host)
     httpserver.expect_request("/x").respond_with_data("ok")
     rep = Repeater(slug="alpha", request_budget=2)
@@ -551,6 +575,10 @@ def test_dry_run_exercises_gates_but_touches_no_network(
 def test_replay_records_tool_call_and_result_on_the_spine(
     isolated_engagement, grant_exploit, httpserver: HTTPServer, tmp_path: Path,
 ) -> None:
+    # CRUCIBLE-core runs this engine tree gateway-less; this e2e drives a real request through
+    # HttpExecutor._issue, whose never-liftable egress floor fails closed without vigil_gateway.
+    # It runs for real in the gateway-present jobs (offense leg + loopback engagement).
+    pytest.importorskip("vigil_gateway")
     isolated_engagement("alpha", httpserver.host)
     httpserver.expect_request("/x").respond_with_data("ok")
     from framework.v2.agents.blackboard import open_blackboard
@@ -609,6 +637,10 @@ def test_target_url_must_equal_scope_gated_url() -> None:
 def test_baseline_probe_pair_builds_oracle_context_not_a_finding(
     isolated_engagement, grant_exploit, httpserver: HTTPServer,
 ) -> None:
+    # CRUCIBLE-core runs this engine tree gateway-less; this e2e drives a real request through
+    # HttpExecutor._issue, whose never-liftable egress floor fails closed without vigil_gateway.
+    # It runs for real in the gateway-present jobs (offense leg + loopback engagement).
+    pytest.importorskip("vigil_gateway")
     isolated_engagement("alpha", httpserver.host)
     httpserver.expect_request("/item", query_string="id=1").respond_with_data(
         "welcome user", status=200)

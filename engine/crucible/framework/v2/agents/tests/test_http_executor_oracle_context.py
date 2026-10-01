@@ -115,6 +115,10 @@ def _reverify(oracle_context: dict) -> bool:
 
 
 def test_differential_emits_confirming_oracle_context(isolated_engagement, httpserver: HTTPServer):
+    # CRUCIBLE-core runs this engine tree gateway-less; this e2e drives a real request through
+    # HttpExecutor._issue, whose never-liftable egress floor fails closed without vigil_gateway.
+    # It runs for real in the gateway-present jobs (offense leg + loopback engagement).
+    pytest.importorskip("vigil_gateway")
     port = httpserver.port
     isolated_engagement("alpha", "127.0.0.1")
     httpserver.expect_request("/search").respond_with_handler(_vuln_handler)
@@ -138,6 +142,10 @@ def test_differential_emits_confirming_oracle_context(isolated_engagement, https
 
 
 def test_differential_does_not_confirm_on_safe_twin(isolated_engagement, httpserver: HTTPServer):
+    # CRUCIBLE-core runs this engine tree gateway-less; this e2e drives a real request through
+    # HttpExecutor._issue, whose never-liftable egress floor fails closed without vigil_gateway.
+    # It runs for real in the gateway-present jobs (offense leg + loopback engagement).
+    pytest.importorskip("vigil_gateway")
     port = httpserver.port
     isolated_engagement("alpha", "127.0.0.1")
     httpserver.expect_request("/search").respond_with_handler(_safe_handler)

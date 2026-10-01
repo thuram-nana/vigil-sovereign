@@ -99,6 +99,10 @@ def _serve(httpserver: HTTPServer) -> None:
 # --- default-off: byte-identical -------------------------------------------
 
 def test_defender_off_is_default_and_defense_is_none(isolated_engagement, httpserver: HTTPServer):
+    # CRUCIBLE-core runs this engine tree gateway-less; this e2e drives a real request through
+    # HttpExecutor._issue, whose never-liftable egress floor fails closed without vigil_gateway.
+    # It runs for real in the gateway-present jobs (offense leg + loopback engagement).
+    pytest.importorskip("vigil_gateway")
     isolated_engagement("alpha", "127.0.0.1")
     _serve(httpserver)
     result = _run("alpha", httpserver.port)              # enable_defender defaults False
@@ -109,6 +113,10 @@ def test_defender_off_is_default_and_defense_is_none(isolated_engagement, httpse
 # --- opt-in: the purple-team report ----------------------------------------
 
 def test_defender_on_produces_a_defense_report(isolated_engagement, httpserver: HTTPServer):
+    # CRUCIBLE-core runs this engine tree gateway-less; this e2e drives a real request through
+    # HttpExecutor._issue, whose never-liftable egress floor fails closed without vigil_gateway.
+    # It runs for real in the gateway-present jobs (offense leg + loopback engagement).
+    pytest.importorskip("vigil_gateway")
     isolated_engagement("alpha", "127.0.0.1")
     _serve(httpserver)
     result = _run("alpha", httpserver.port, enable_defender=True)
@@ -125,6 +133,10 @@ def test_defender_on_produces_a_defense_report(isolated_engagement, httpserver: 
 def test_defender_efficacy_over_operator_sigma_maps_attack(
     isolated_engagement, httpserver: HTTPServer, tmp_path: Path,
 ):
+    # CRUCIBLE-core runs this engine tree gateway-less; this e2e drives a real request through
+    # HttpExecutor._issue, whose never-liftable egress floor fails closed without vigil_gateway.
+    # It runs for real in the gateway-present jobs (offense leg + loopback engagement).
+    pytest.importorskip("vigil_gateway")
     isolated_engagement("alpha", "127.0.0.1")
     _serve(httpserver)
     # The rule covers BOTH the injection payload shape and the XSS one. The fixture's confirmed
@@ -194,6 +206,10 @@ def test_defender_log_ingestion_refused_when_killswitch_tripped(
 def test_defender_pass_is_best_effort(
     isolated_engagement, httpserver: HTTPServer, monkeypatch: pytest.MonkeyPatch,
 ):
+    # CRUCIBLE-core runs this engine tree gateway-less; this e2e drives a real request through
+    # HttpExecutor._issue, whose never-liftable egress floor fails closed without vigil_gateway.
+    # It runs for real in the gateway-present jobs (offense leg + loopback engagement).
+    pytest.importorskip("vigil_gateway")
     isolated_engagement("alpha", "127.0.0.1")
     _serve(httpserver)
 

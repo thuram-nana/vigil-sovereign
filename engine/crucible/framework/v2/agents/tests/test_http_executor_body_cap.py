@@ -64,6 +64,10 @@ class _Req:
 
 
 def test_body_excerpt_captures_a_signature_past_8kib(isolated_engagement, httpserver: HTTPServer):
+    # CRUCIBLE-core runs this engine tree gateway-less; this e2e drives a real request through
+    # HttpExecutor._issue, whose never-liftable egress floor fails closed without vigil_gateway.
+    # It runs for real in the gateway-present jobs (offense leg + loopback engagement).
+    pytest.importorskip("vigil_gateway")
     # A page whose oracle-relevant signature ("SQL error: unrecognized token") renders AFTER ~12 KiB of
     # leading markup — exactly the shape that the old 8 KiB cap silently truncated.
     marker = "SQL error: unrecognized token"
