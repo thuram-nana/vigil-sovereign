@@ -125,8 +125,14 @@ def _start_status_writer(httpd: object, path: str, *, interval: float = 2.0) -> 
         with s._belief_lock:
             actors = [{"id": aid, "mean": b.mean, "lcb": b.lcb, "n": b.n_observations,
                        "action": graduated_action(b)} for aid, b in s.actor_graph.snapshot()]
-        snap = {"ts": time.time(), "effective_mode": "enforce" if s.enforce else "observe",
-                "requested_mode": s.intended_mode() if hasattr(s, "intended_mode") else s.config.mode,
+        # The HONEST enforce snapshot — carries downgraded/downgrade_reason so the console can render a
+        # "requested enforce, running observe BECAUSE …" state instead of a silent read-only mode.
+        es = s.enforcement_status() if hasattr(s, "enforcement_status") else {}
+        snap = {"ts": time.time(),
+                "effective_mode": es.get("effective_mode", "enforce" if s.enforce else "observe"),
+                "requested_mode": es.get("requested_mode",
+                                         s.intended_mode() if hasattr(s, "intended_mode") else s.config.mode),
+                "enforcement": es,
                 "slug": getattr(s, "slug", ""),
                 "actors": actors, "actor_count": len(actors)}
         fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
@@ -212,9 +218,14 @@ def _cmd_gateway(args: argparse.Namespace) -> int:
     httpd = serve_gateway(upstream, config=config, host=host, port=port,
                           slug=slug, on_verdict=on_verdict)
     status_stop = _start_status_writer(httpd, args.status_out) if args.status_out else None
-    active = "ENFORCE — blocking PROVEN attacks" if httpd.settings.enforce else "observe — read-only"
-    if mode == "enforce" and not httpd.settings.enforce:
-        active += " (downgraded: AEGIS_RESPOND entitlement not available in this governed deployment)"
+    # Read the EFFECTIVE gate state from the one honest source (never infer from the requested mode alone) so
+    # a downgrade is reported with its real reason (entitlement and/or kill-switch), never silently. Guard the
+    # call (hasattr) like the status writer does, so a minimal settings stub still runs.
+    _es = (httpd.settings.enforcement_status() if hasattr(httpd.settings, "enforcement_status")
+           else {"enforcing": httpd.settings.enforce, "downgraded": False, "downgrade_reason": None})
+    active = "ENFORCE — blocking PROVEN attacks" if _es["enforcing"] else "observe — read-only"
+    if _es["downgraded"]:
+        active += f" (downgraded: {_es['downgrade_reason']})"
     sys.stderr.write(f"AEGIS Gateway  http://{host}:{port}  ->  {upstream}  [{active}]\n")
     if verdict_webhook:
         _authset = "with auth" if os.environ.get("AEGIS_VERDICT_WEBHOOK_AUTHORIZATION") else "no auth header"

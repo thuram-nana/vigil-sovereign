@@ -49,6 +49,11 @@ from typing import Iterable, Mapping, Optional
 # marks nothing mint-eligible. The flag never mints by itself — it only lets the SEPARATE, gated runner path
 # (run_external_tool → verdict.admit) become eligible; approval / entitlement / scope still apply there.
 _REDRIVE_FLAG = "VIGIL_FAMILY_REDRIVE"
+# Public alias of the flag NAME so a deployment-config module (e.g.
+# ``vigil_integration.sovereign_deploy.eval_profile``) can SET the env var from the SAME source of truth it
+# is READ from here — the env literal lives in exactly one place, so a config that turns FACT-mint on and the
+# gate that reads it can never drift to two different names.
+FAMILY_REDRIVE_FLAG = _REDRIVE_FLAG
 _TRUTHY = frozenset({"1", "true", "yes", "on"})
 
 

@@ -214,6 +214,41 @@ class GatewaySettings:
                 and self._enforce_authorized
                 and not self._killswitch_tripped())
 
+    def enforcement_status(self) -> dict[str, object]:
+        """A machine-readable, HONEST snapshot of the enforce gate — the structural guarantee that a
+        downgrade is NEVER silent. A consumer (the CLI banner, the live status file the loopback console
+        renders, an investor-eval readiness probe) reads this to learn not just the effective mode but,
+        when enforce was REQUESTED yet is not active, exactly WHY.
+
+        ``downgraded`` is True iff the operator asked to enforce but the gateway is only observing; when so,
+        ``downgrade_reason`` names the fail-safe term(s) that kept it read-only — the AEGIS_RESPOND
+        entitlement being unprovisioned in a governed deployment, and/or a tripped kill-switch. It is never
+        an empty/None reason while downgraded (that would be the silent downgrade this method exists to
+        forbid). Every term is read exactly as the ``enforce`` property reads it, so the status cannot
+        disagree with the actual gate."""
+        requested = self.intended_mode()
+        entitled = bool(self._enforce_authorized)
+        ks_tripped = bool(self._killswitch_tripped())
+        enforcing = (requested == "enforce" and entitled and not ks_tripped)
+        downgraded = (requested == "enforce" and not enforcing)
+        reasons: list[str] = []
+        if downgraded:
+            if not entitled:
+                reasons.append("AEGIS_RESPOND entitlement not provisioned in this governed deployment")
+            if ks_tripped:
+                reasons.append("kill-switch tripped")
+            if not reasons:  # defence in depth: downgraded must ALWAYS carry a reason, never be silent
+                reasons.append("enforcement inactive for an unclassified reason")
+        return {
+            "requested_mode": requested,
+            "effective_mode": "enforce" if enforcing else "observe",
+            "enforcing": enforcing,
+            "entitled": entitled,
+            "kill_switch_tripped": ks_tripped,
+            "downgraded": downgraded,
+            "downgrade_reason": "; ".join(reasons) if reasons else None,
+        }
+
 
 class AegisGatewayHandler(BaseHTTPRequestHandler):
     """One request: inspect -> (block under enforce+confirmed) -> forward -> relay. Total and
