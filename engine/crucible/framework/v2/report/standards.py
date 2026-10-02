@@ -10,6 +10,11 @@ A PURE, data-driven mapper from a finding's ``bug_class`` (the oracle vocabulary
   * SOC 2 (AICPA TSC 2017)     — the Trust Services Criteria
   * ISO/IEC 27001:2022 Annex A — the Annex A control(s)
   * MITRE ATT&CK v15           — the technique id(s) (AI/LLM classes use MITRE ATLAS, ``AML.*``)
+  * NIST CSF 2.0               — the Function.Category-Subcategory id(s) (e.g. ``PR.AA-05``)
+  * MITRE D3FEND               — the DEFENSIVE countermeasure id(s) (``D3-*``); empty is an honest
+                                 "no confidently-cited D3FEND technique" (same convention as ``attack``)
+  * OCSF 1.x                   — the Findings-category class_uid(s) the detection maps to
+  * NIST SSDF (SP 800-218)     — the secure-development practice id(s) (``PW.*`` / ``RV.*`` / ``PS.*`` / ``PO.*``)
 
 The whole point of this module is the HONESTY rule, and it is enforced structurally:
 
@@ -40,7 +45,7 @@ so it imports ``framework`` freely, but it performs no I/O and sends no traffic.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Iterable
 
 from ..verify.verifier import canonical_bug_class
@@ -58,6 +63,18 @@ STANDARD_VERSIONS: dict[str, str] = {
     "soc2": "AICPA Trust Services Criteria (TSC) 2017 (rev. 2022)",
     "iso27001": "ISO/IEC 27001:2022 Annex A",
     "attack": "MITRE ATT&CK v15 (Enterprise); MITRE ATLAS for AI/LLM techniques (AML.*)",
+    "nist_csf": "NIST Cybersecurity Framework (CSF) 2.0",
+    "d3fend": "MITRE D3FEND 1.x (defensive countermeasures)",
+    "ocsf": "OCSF 1.x — Open Cybersecurity Schema Framework (Findings category)",
+    "ssdf": "NIST SSDF v1.1 (SP 800-218) — Secure Software Development Framework",
+}
+
+# Human labels for the OCSF Findings-category class_uids cited below (display only).
+OCSF_CLASS_NAMES: dict[str, str] = {
+    "2002": "Vulnerability Finding",
+    "2003": "Compliance Finding",
+    "2004": "Detection Finding",
+    "2006": "Data Security Finding",
 }
 
 # Human labels for the OWASP Top 10:2021 categories used below (display only).
@@ -89,6 +106,15 @@ class ControlMapping:
     soc2: tuple[str, ...]
     iso27001: tuple[str, ...]
     attack: tuple[str, ...]
+    # Standards-wave-2 columns (M3.3). Defaulted to the empty tuple so the frozen ``_m`` table
+    # below stays byte-for-byte unchanged; the per-bug_class values are merged in from the
+    # ``_WAVE2_GROUPS`` family table right after the table is built (a module-import completeness
+    # guard asserts every class received a wave-2 entry). ``d3fend`` may legitimately be empty —
+    # an honest "no confidently-cited defensive technique", the same convention ``attack`` uses.
+    nist_csf: tuple[str, ...] = ()
+    d3fend: tuple[str, ...] = ()
+    ocsf: tuple[str, ...] = ()
+    ssdf: tuple[str, ...] = ()
 
 
 # ---------------------------------------------------------------------------
@@ -464,6 +490,139 @@ _STANDARDS: dict[str, ControlMapping] = {
 }
 
 
+# ---------------------------------------------------------------------------
+# Standards-wave-2 columns (M3.3): NIST CSF 2.0 · MITRE D3FEND · OCSF · NIST SSDF.
+#
+# These are merged onto the frozen ``_STANDARDS`` table above so the honesty-documented ``_m``
+# literal stays unchanged. Each column is DATA (what a weakness of this class implicates /
+# the countermeasure family / the detection's OCSF class / the dev-practice that prevents it),
+# never a coverage assertion — the same rule the module header states.
+#
+# A ``_Wave2`` bundle is assigned per CONTROL FAMILY (the same granularity the pci/soc2/iso
+# clusters use), and each family lists its member bug_classes. A module-import guard asserts the
+# union of members is EXACTLY the ``_STANDARDS`` vocabulary, so a class can never silently miss
+# its wave-2 entry (the completeness test re-checks this). OCSF class_uids are the Findings
+# category (see ``OCSF_CLASS_NAMES``). ``d3fend=()`` is an honest "no confidently-cited D3FEND
+# countermeasure", exactly as an empty ``attack`` tuple is honest for ATT&CK.
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class _Wave2:
+    nist_csf: tuple[str, ...]
+    d3fend: tuple[str, ...]
+    ocsf: tuple[str, ...]
+    ssdf: tuple[str, ...]
+
+
+# (family bundle, member bug_classes). Families mirror the pci/soc2/iso clusters above.
+_WAVE2_GROUPS: tuple[tuple[_Wave2, tuple[str, ...]], ...] = (
+    # ---- query injection (SQL / NoSQL) — DB query-string analysis is the clean D3FEND dual ----
+    (_Wave2(("PR.PS-06", "ID.RA-01"), ("D3-DQSA",), ("2002", "2004"), ("PW.5", "PW.7", "RV.1")),
+     ("boolean_sqli", "time_based_sqli", "error_based_sqli", "sqli", "sqli_attempt", "nosqli",
+      "nosql_injection_attempt")),
+    # ---- OS-command / code-execution injection — executable allowlisting is the clean D3FEND dual ----
+    (_Wave2(("PR.PS-06", "ID.RA-01"), ("D3-EAL",), ("2002", "2004"), ("PW.5", "PW.7", "RV.1")),
+     ("time_based_command_injection", "command_injection", "command_injection_attempt", "rce", "ssti",
+      "el_injection", "ssi", "deserialization")),
+    # ---- other server-side injection (LDAP / XPath / generic-time / XXE / WS) — no clean D3FEND id ----
+    (_Wave2(("PR.PS-06", "ID.RA-01"), (), ("2002", "2004"), ("PW.5", "PW.7", "RV.1")),
+     ("ldap_injection", "xpath_injection", "time_based", "xxe", "blind_xxe", "websocket_injection")),
+    # ---- STATIC source-code properties (SAST bridge): a proven code property, not an observed
+    #      technique → no D3FEND countermeasure, OCSF Vulnerability Finding only; SSDF = review + test ----
+    (_Wave2(("PR.PS-06", "ID.RA-01"), (), ("2002",), ("PW.7", "PW.8", "RV.1")),
+     ("static_broken_crypto", "static_insecure_randomness", "static_insecure_flag", "static_taint")),
+    # ---- client-side script execution (XSS / prototype-pollution / achieved postMessage+CSP) ----
+    (_Wave2(("PR.PS-06",), (), ("2002", "2004"), ("PW.5", "PW.7", "RV.1")),
+     ("xss", "dom_xss", "stored_xss", "prototype_pollution", "postmessage_exploited", "csp_bypass")),
+    # ---- broken access control (BOLA/IDOR/BFLA/CORS/CSWSH/race/CSRF/path-traversal) ----
+    (_Wave2(("PR.AA-05",), (), ("2002", "2004"), ("PW.1", "PW.5", "RV.1")),
+     ("idor", "bola", "bfla", "broken_access_control", "authorization", "mass_assignment", "cors",
+      "cross_site_websocket_hijacking", "request_race", "path_traversal", "lfi", "csrf", "csrf_achieved")),
+    # ---- privilege escalation / cloud-IAM / K8s-RBAC verb grants — user-behavior analysis dual ----
+    (_Wave2(("PR.AA-05", "PR.AA-01"), ("D3-UBA",), ("2002", "2004"), ("PW.1", "PW.9", "RV.1")),
+     ("privilege_escalation", "privilege_path", "iam_privilege_escalation", "iam_escalation_primitive",
+      "excessive_privilege", "imds_credential_capture", "secret_credential_validity", "gcp_sa_impersonation",
+      "k8s_rbac_privilege_grant", "k8s_workload_misconfiguration")),
+    # ---- authentication / identity / SSO (JWT/SAML/OIDC/session/cross-user reset) — MFA dual ----
+    (_Wave2(("PR.AA-01", "PR.AA-03"), ("D3-MFA",), ("2002", "2004"), ("PW.1", "PW.5", "RV.1")),
+     ("auth_bypass", "jwt", "jwt_forgeable", "session_fixation", "identity_misconfiguration",
+      "saml_signature_wrapping", "saml_assertion_tampering", "saml_structural_forgery", "oidc_redirect_uri",
+      "oidc_idtoken_forgery", "jwt_forgery_accepted", "oidc_forgery_accepted", "saml_forgery_accepted",
+      "password_reset_cross_user")),
+    # ---- credential/recovery abuse (stuffing / MFA-bypass / reset reuse+collision) — MFA + strong-pw duals ----
+    (_Wave2(("PR.AA-01", "PR.AA-03"), ("D3-MFA", "D3-SPP"), ("2002", "2004"), ("PW.1", "PW.5", "RV.1")),
+     ("credential_stuffing", "mfa_bypass", "password_reset_reuse", "password_reset_collision")),
+    # ---- cryptographic failures (weak TLS / crypto artifact / mobile secret-at-rest) ----
+    (_Wave2(("PR.DS-02", "PR.DS-01"), (), ("2002", "2003"), ("PW.5", "PW.9", "RV.1")),
+     ("weak_tls", "weak_crypto_artifact", "mobile_misconfiguration")),
+    # ---- sensitive-data / information exposure (incl. GraphQL discovery, system-prompt disclosure) ----
+    (_Wave2(("PR.DS-01", "DE.CM-09"), (), ("2002", "2006"), ("PW.5", "PW.9", "RV.1")),
+     ("exposure", "sensitive_exposure", "graphql_introspection", "graphql_suggestions",
+      "system_prompt_disclosure")),
+    # ---- security misconfiguration (headers/redirect/smuggling/clickjacking/postMessage/CSP/email auth) ----
+    (_Wave2(("PR.PS-01",), ("D3-ACH",), ("2002", "2003"), ("PW.9", "RV.1")),
+     ("security_misconfiguration", "host_header_injection", "open_redirect", "request_smuggling",
+      "clickjacking", "postmessage", "csp_posture", "email_auth_misconfiguration")),
+    # ---- insecure design / business logic ----
+    (_Wave2(("PR.PS-06",), (), ("2002", "2004"), ("PW.1", "PW.8", "RV.1")),
+     ("business_logic",)),
+    # ---- resource exhaustion / availability (GraphQL DoS + crash) ----
+    (_Wave2(("PR.IR-04",), (), ("2002", "2004"), ("PW.1", "PW.5", "RV.1")),
+     ("graphql_depth_limit", "graphql_alias_overloading", "graphql_batching", "graphql_cost", "crash")),
+    # ---- SSRF — outbound traffic filtering is the clean D3FEND dual ----
+    (_Wave2(("PR.IR-01",), ("D3-OTF",), ("2002", "2004"), ("PW.5", "RV.1")),
+     ("ssrf",)),
+    # ---- memory-safety (sanitizer-proven) — compiler hardening + executable testing ----
+    (_Wave2(("PR.PS-06", "ID.RA-01"), (), ("2002", "2004"), ("PW.6", "PW.8", "RV.1")),
+     ("memory_corruption", "buffer_overflow", "use_after_free")),
+    # ---- network exposure — inbound filtering + traffic analysis duals ----
+    (_Wave2(("PR.IR-01", "DE.CM-01"), ("D3-ITF", "D3-NTA"), ("2002", "2004"), ("PW.9", "RV.1")),
+     ("service_reachable", "anonymous_reachable")),
+    # ---- vulnerable / outdated components — software-update dual ----
+    (_Wave2(("ID.RA-01", "PR.PS-02"), ("D3-SU",), ("2002",), ("PW.4", "RV.1")),
+     ("vulnerable_dependency",)),
+    # ---- cloud / container / mesh posture — application-config hardening dual ----
+    (_Wave2(("PR.PS-01", "PR.AA-05"), ("D3-ACH",), ("2002", "2003"), ("PW.9", "RV.1")),
+     ("cloud_misconfiguration", "k8s_misconfiguration", "mesh_misconfiguration")),
+    # ---- CI/CD / software supply chain — CSF supply-chain governance + software-update dual ----
+    (_Wave2(("GV.SC-09", "GV.SC-07"), ("D3-SU",), ("2002", "2003"), ("PS.1", "PO.3", "RV.1")),
+     ("cicd_misconfiguration",)),
+    # ---- LLM / AI prompt injection (MITRE ATLAS surface) — secure SDLC + risk identification ----
+    (_Wave2(("PR.PS-06", "ID.RA-01"), (), ("2002", "2004"), ("PW.1", "PW.5", "RV.1")),
+     ("prompt_injection",)),
+    # ---- anti-automation / bot telemetry — behavior analysis + traffic analysis duals ----
+    (_Wave2(("DE.CM-01", "DE.AE-02"), ("D3-UBA", "D3-NTA"), ("2002", "2004"), ("PW.1", "RV.1")),
+     ("automated_access",)),
+)
+
+
+def _merge_wave2(base: dict[str, ControlMapping]) -> dict[str, ControlMapping]:
+    """Fold the per-family wave-2 columns onto the frozen base table, and PROVE completeness at
+    import: the union of family members must equal the base vocabulary EXACTLY (no class missing
+    its wave-2 entry, no stray class). Any drift raises here — the mapper never ships a class with
+    silently-empty wave-2 columns."""
+    assigned: dict[str, _Wave2] = {}
+    for w2, classes in _WAVE2_GROUPS:
+        for bc in classes:
+            if bc in assigned:
+                raise AssertionError(f"wave-2 family table assigns {bc!r} twice")
+            assigned[bc] = w2
+    missing = set(base) - set(assigned)
+    extra = set(assigned) - set(base)
+    if missing or extra:
+        raise AssertionError(
+            f"wave-2 family table out of lock-step with the standards table: missing={sorted(missing)} "
+            f"extra={sorted(extra)}")
+    return {
+        bc: replace(m, nist_csf=assigned[bc].nist_csf, d3fend=assigned[bc].d3fend,
+                    ocsf=assigned[bc].ocsf, ssdf=assigned[bc].ssdf)
+        for bc, m in base.items()
+    }
+
+
+_STANDARDS = _merge_wave2(_STANDARDS)
+
+
 # Status vocabulary for a graded finding's coverage assertion.
 STATUS_PROVEN = "proven"        # graded FACT + a mapped class → coverage IS asserted
 STATUS_ADVISORY = "advisory"    # graded LEAD/DEMOTED + a mapped class → a NOTE, no coverage
@@ -475,7 +634,8 @@ CELL_ADVISORY = "advisory"      # only an unproven lead implicates this control
 CELL_TESTED_CLEAR = "tested_clear"   # a class implicating it was tested → no fact/lead (clear)
 CELL_NOT_TESTED = "not_tested"  # nothing tested implicates this control
 
-_FRAMEWORKS = ("owasp", "cwe", "pci_dss", "soc2", "iso27001", "attack")
+_FRAMEWORKS = ("owasp", "cwe", "pci_dss", "soc2", "iso27001", "attack",
+               "nist_csf", "d3fend", "ocsf", "ssdf")
 
 
 # ---------------------------------------------------------------------------
@@ -496,6 +656,10 @@ def _controls_dict(mapping: ControlMapping) -> dict[str, Any]:
         "soc2": sorted(mapping.soc2),
         "iso27001": sorted(mapping.iso27001),
         "attack": sorted(mapping.attack),
+        "nist_csf": sorted(mapping.nist_csf),
+        "d3fend": sorted(mapping.d3fend),
+        "ocsf": sorted(mapping.ocsf),
+        "ssdf": sorted(mapping.ssdf),
     }
 
 
@@ -687,6 +851,10 @@ def _control_universe() -> dict[str, list[str]]:
         universe["soc2"].update(mapping.soc2)
         universe["iso27001"].update(mapping.iso27001)
         universe["attack"].update(mapping.attack)
+        universe["nist_csf"].update(mapping.nist_csf)
+        universe["d3fend"].update(mapping.d3fend)
+        universe["ocsf"].update(mapping.ocsf)
+        universe["ssdf"].update(mapping.ssdf)
     return {fw: sorted(vals) for fw, vals in universe.items()}
 
 
@@ -698,6 +866,10 @@ def _controls_by_framework(mapping: ControlMapping) -> dict[str, tuple[str, ...]
         "soc2": mapping.soc2,
         "iso27001": mapping.iso27001,
         "attack": mapping.attack,
+        "nist_csf": mapping.nist_csf,
+        "d3fend": mapping.d3fend,
+        "ocsf": mapping.ocsf,
+        "ssdf": mapping.ssdf,
     }
     return fw
 

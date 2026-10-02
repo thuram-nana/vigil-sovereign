@@ -63,8 +63,12 @@ _TYPED_BUILDER_TOOLS = frozenset({"ffuf", "httpx", "hydra", "nikto", "nmap", "nu
 # oracle-mapped. Both are already recognised through the governed executor's ``_TYPED_BUILDER_TOOLS``.)
 # C4: katana/gobuster join the SSOT — they carry R4 ToolSpec builders that feed the FACT-capable ACHIEVED_STATE
 # web re-drive (web_redrive), so they are oracle-mapped web_discovery tools ("adapted (cli)"), not enrichers.
+# M1.2: gau/waybackurls/feroxbuster/dirsearch join the SAME web_discovery FACT column (each passed the
+# conformance battery over the gated runner); they feed the same ACHIEVED_STATE web re-drive, so they are
+# oracle-mapped "adapted (cli)" tools too.
 _SPEC_BUILDER_DRIVEN_TOOLS = frozenset({"masscan", "naabu", "nmap", "rustscan", "sslscan",
-                                        "unicornscan", "zmap", "katana", "gobuster"})
+                                        "unicornscan", "zmap", "katana", "gobuster",
+                                        "gau", "waybackurls", "feroxbuster", "dirsearch"})
 
 # Globally-recognised tools NOT in the host roster and without a Strix skill doc (net-new curated metadata;
 # empty today — the curated host roster + the maintained skill playbooks already are the recognition list).

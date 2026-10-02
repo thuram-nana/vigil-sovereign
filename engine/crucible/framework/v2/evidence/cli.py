@@ -401,7 +401,7 @@ def _ctx_by_ref(report: dict) -> dict[str, dict]:
 def _pcf_export(args: argparse.Namespace) -> int:
     """Project each signed certificate in a bundle into the PCF v0.1 wire format (the retained
     oracle_context comes from the report, by finding_ref — the same rule ``certify`` uses)."""
-    from .pcf import to_pcf
+    from .pcf import PcfExportError, to_pcf
     bundle = json.loads((Path(args.bundle) / "evidence-bundle.json").read_text(encoding="utf-8"))
     # ``_ctx_by_ref`` unseals a sealed-at-rest context in-engagement (Wave-A2) and refuses (raises) an
     # unrecoverable seal or a duplicate ref — surface either as a clean fail-closed exit, not a traceback.
@@ -417,7 +417,14 @@ def _pcf_export(args: argparse.Namespace) -> int:
         if oc is None:
             print(f"  skip {sc.certificate.finding_ref}: no oracle_context in report", file=sys.stderr)
             continue
-        pcf_certs.append(to_pcf(sc, oracle_context=oc))
+        # MANDATORY reproduction at export: ``to_pcf`` refuses (fail-closed) a certificate whose retained
+        # oracle_context is absent, digest-mismatched, or does not re-fire offline. Surface the refusal as a
+        # clean non-zero exit so a non-reproducible certificate never silently drops OR tracebacks.
+        try:
+            pcf_certs.append(to_pcf(sc, oracle_context=oc))
+        except PcfExportError as exc:
+            print(f"evidence pcf-export: {exc} (fail-closed).", file=sys.stderr)
+            return 2
     Path(args.out).write_text(json.dumps({"pcf_certificates": pcf_certs}, indent=2), encoding="utf-8")
     print(f"wrote {len(pcf_certs)} PCF certificate(s) to {args.out}")
     return 0

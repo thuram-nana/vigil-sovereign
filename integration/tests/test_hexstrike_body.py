@@ -543,9 +543,12 @@ def test_h7_oracle_mapped_set_is_derived_from_the_family_registry():
     # they are absent from SPEC_BUILDER_TOOLS and cannot be oracle-mapped. A builder is not a mint.
     # C4: katana/gobuster ARE here — same web_discovery family, but their spec builders feed the FACT-CAPABLE
     # ACHIEVED_STATE web re-drive (web_redrive), so they are in SPEC_BUILDER_TOOLS and thus oracle-mapped.
+    # M1.2: gau/waybackurls/feroxbuster/dirsearch join the SAME web_discovery FACT column (each passed the
+    # conformance battery), so they are in SPEC_BUILDER_TOOLS and thus oracle-mapped too.
     assert _ORACLE_MAPPED_TOOLS == oracle_mapped_tools(_SPEC_BUILDER_TOOLS)
     assert _ORACLE_MAPPED_TOOLS == {"nmap", "sslscan", "masscan", "rustscan", "naabu", "zmap", "unicornscan",
-                                    "katana", "gobuster"}
+                                    "katana", "gobuster",
+                                    "gau", "waybackurls", "feroxbuster", "dirsearch"}
     for tool in _ORACLE_MAPPED_TOOLS:
         assert is_fact_capable_family(tool), f"{tool}: mapped but its family is not FACT-capable"
 

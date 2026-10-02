@@ -410,8 +410,17 @@ def fuse(observations: Iterable[ToolObservation]) -> list[FamilyVote]:
 # differential branch, which is LEAD-only PERMANENTLY after five adversarial rounds. That is a DIFFERENT
 # re-drive from the exploitable-condition ``web_redrive`` katana/gobuster feed: membership here derives "can
 # mint", and endpoint_liveness cannot, so httpx/ffuf stay out. A builder is not a mint.
+# M1.2 — the rest of the web_discovery FACT column joins the SSOT. gau / waybackurls (passive archive URL
+# proposers) and feroxbuster / dirsearch (content-discovery brute) each carry a runner-owned ToolSpec builder
+# (``external_tool.{gau,waybackurls,feroxbuster,dirsearch}_web_scan``) that feeds the SAME FACT-capable
+# ACHIEVED_STATE web re-drive katana/gobuster use — VIGIL re-drives every surfaced URL over its OWN gated
+# capture and the oracle mints; a URL that does not re-confirm stays a LEAD (no double-counting a tool's
+# say-so). Each passed ``live.conformance.run_toolspec_conformance`` over the real gated runner before being
+# added here (test_web_fact_tool::test_m12_web_discovery_tool_passes_the_full_conformance_battery). The tool
+# is only a PROPOSER; the FACT is VIGIL's own capture, so these are mint-eligible, not a mint.
 SPEC_BUILDER_TOOLS: "frozenset[str]" = frozenset({"nmap", "sslscan", "masscan", "rustscan", "naabu",
-                                                  "zmap", "unicornscan", "katana", "gobuster"})
+                                                  "zmap", "unicornscan", "katana", "gobuster",
+                                                  "gau", "waybackurls", "feroxbuster", "dirsearch"})
 
 
 # ---------------------------------------------------------------------------

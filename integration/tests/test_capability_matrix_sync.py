@@ -104,7 +104,11 @@ def test_the_backfill_did_not_fake_fact_capability():
     # authority). See docs/capability-matrix/evidence-branches.json.
     fact = {m.name for m in _manifests() if m.fact_capable}
     assert fact == {"nmap", "sslscan", "masscan", "rustscan", "naabu", "zmap", "unicornscan",
-                    "katana", "gobuster"}, (
+                    "katana", "gobuster",
+                    # M1.2 — the rest of the web_discovery FACT column: gau/waybackurls (passive archive URL
+                    # proposers) + feroxbuster/dirsearch (content brute), each feeding the ACHIEVED_STATE web
+                    # re-drive and each passing live.conformance.run_toolspec_conformance before this flip.
+                    "gau", "waybackurls", "feroxbuster", "dirsearch"}, (
         f"unexpected fact_capable set after backfill: {fact}"
     )
 

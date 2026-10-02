@@ -9,8 +9,7 @@ throughput or peak memory. This directory adds the missing dimension.
 
 ## What it gates
 
-`perf_bench.py` measures real, deterministic, load-bearing `vigil_core` hot paths — canonical
-JSON, payload digests, and the hash-linked spine chain build + verify — and, for each, records:
+`perf_bench.py` measures real, deterministic, load-bearing hot paths and, for each, records:
 
 | metric | what | gated? |
 |---|---|---|
@@ -19,6 +18,24 @@ JSON, payload digests, and the hash-linked spine chain build + verify — and, f
 | `peak_bytes` | tracemalloc **peak** python-allocated bytes (deterministic) | **yes** — memory floor |
 | `rel_speed` | `throughput / a same-run calibration probe` | **yes** — throughput/wall floor |
 | `maxrss_kb` | `getrusage` peak RSS | recorded only (process-wide + monotonic ⇒ a poor gate) |
+
+The gated cases (`gated_cases()`, run by `check` / `record`) are:
+
+| case | what | kind |
+|---|---|---|
+| `canonical_json.nested`, `digest_payload.nested`, `sha256_hex.1kb` | `vigil_core` canonical JSON / digest primitives | real, C-accelerated |
+| `build_chain.1000`, `verify_chain.1000` | the hash-linked spine chain build + verify | real, C-accelerated |
+| `scan.plan_fixed_corpus` | the planner's real hot loop — `knowledge.operators.saturate` to a fixpoint **then** `worldmodel.pathsearch.best_paths` — over a fixed N-node world (the **#828 shape**, shrunk) | real, pure-Python engine |
+| `synthetic.chaining`, `synthetic.pathsearch`, `synthetic.saturate` | on-tree complexity **models** of the three hot-path shapes (O(N) fold, O(E·logV) Dijkstra, O(N) seen-set dedup), each with a planted O(N²) twin used as the negative control | synthetic, stdlib |
+
+**The regression gate that would have caught #828.** #828 was a ~2h *scan* — not a slow primitive but
+an **algorithmic** blow-up in the planner's super-linear paths. The `scan.plan_fixed_corpus` case is a
+live sensor over the real `saturate` + `best_paths`; the three `synthetic.*` cases model those paths'
+on-tree complexity and each ships a planted O(N²) twin (rolling-hash → re-fold-the-prefix; min-heap →
+linear-min-scan; seen-**set** → seen-**list**) that returns the *identical* logical result. At the
+committed N the twin is 20–100× slower — the negative control (`selftest` and the required
+`docs/tests/test_perf_gate.py`) proves the fence **rejects every twin and passes every on-tree
+variant**, so an O(N²) regression at these sites cannot ship green.
 
 **Why the time gate is normalised.** Absolute wall clock is meaningless across machines, so a
 committed absolute floor would false-fail forever. Each run first measures a **calibration probe**
@@ -67,10 +84,18 @@ goes through review like any other file. **CI never self-updates the baseline.**
 
 ## Negative control
 
-`synthetic_slow_run` is a deliberately ~10× slowed, memory-heavy variant of a fast synthetic case.
-`selftest` (and `test_end_to_end_slowed_path_is_rejected`) record a baseline for the fast case, then
-measure the slowed variant against it and assert it is **rejected**. The gate being a no-op is a
-test failure, not an assumption.
+Two layers, both exercised (not assumed):
+
+- **Constant-factor.** `synthetic_slow_run` is a deliberately ~10× slowed, memory-heavy variant of a
+  fast synthetic case. `selftest` (and `test_end_to_end_slowed_path_is_rejected`) record a baseline
+  for the fast case, then measure the slowed variant against it and assert it is **rejected**.
+- **Algorithmic (the #828 class).** For each of `synthetic.chaining` / `synthetic.pathsearch` /
+  `synthetic.saturate`, `selftest` and `test_planted_quadratic_slowdown_is_rejected_on_tree_passes`
+  record the **on-tree** variant's baseline *in the same run* (so the proof is immune to cross-machine
+  ratio drift), then measure the planted **O(N²)** twin against it and assert the on-tree variant
+  **passes** and the twin is **rejected**. The twin returns the identical logical result to its
+  on-tree twin, so "slower" is the only thing the gate can be reacting to. The gate being a no-op is a
+  test failure, not an assumption.
 
 ## Honest limits
 
@@ -78,6 +103,14 @@ test failure, not an assumption.
   intentionally generous so the advisory job is reliably green cross-machine; re-record on the CI
   runner (`make bench-perf-record`, committed via review) to tighten sensitivity before promoting
   the job to required.
+- **Pure-Python cases drift more than the C-accelerated ones.** `scan.plan_fixed_corpus` and the three
+  `synthetic.*` cases are pure Python, so their `rel_speed` (against a `json`+`sha256` C-accelerated
+  probe) carries more machine-to-machine drift than the `vigil_core` cases, where the shared C
+  primitives cancel cleanly. The wide −45 % band, the **advisory** (non-blocking) status, and the
+  re-record workflow absorb that drift; the committed-baseline check on these is a trend sensor. The
+  hard, drift-immune guarantee — *the fence catches an O(N²) regression at these sites* — comes from
+  the **same-run** algorithmic negative control above, which does not depend on the committed baseline
+  at all.
 - The gated memory metric is tracemalloc **peak python-allocated bytes** — deterministic and
   machine-independent — used as the sound proxy for the "peak RSS" the issue names; raw `ru_maxrss`
   is recorded but not gated (it is process-wide and monotonic, a poor gate).

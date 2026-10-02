@@ -169,6 +169,63 @@ def _dijkstra(
     return path
 
 
+def _single_source_tree(
+    world: WorldModel,
+    src: str,
+    weight: WeightFn,
+    edge_kinds: Iterable[EdgeKind] | None,
+) -> dict[str, Edge]:
+    """One Dijkstra from ``src`` run to a fixpoint, returning the predecessor
+    edge of every node reachable from ``src``.
+
+    Its relaxation order, ``(distance, node id)`` tie-breaking, visited-skip
+    and ``inf``-weight handling are **identical** to :func:`_dijkstra` with
+    empty exclusion sets. Up to the moment any node ``t`` is popped the two run
+    the exact same heap operations, and a popped node is never relaxed again,
+    so the predecessor of ``t`` here equals the one ``_dijkstra(src, t, ...)``
+    would leave — i.e. reconstructing from ``src`` to ``t`` yields the very
+    path :func:`_yen` accepts first (its lowest-weight route to ``t``). Running
+    the search once and sharing this frontier across all objectives is what
+    lets :func:`best_paths` floor every objective from a single Dijkstra.
+    Read-only on the world-model."""
+    dist: dict[str, float] = {src: 0.0}
+    pred: dict[str, Edge] = {}
+    visited: set[str] = set()
+    heap: list[tuple[float, str]] = [(0.0, src)]
+    while heap:
+        d, u = heapq.heappop(heap)
+        if u in visited:
+            continue
+        visited.add(u)
+        for edge in world.out_edges(u, edge_kinds):  # sorted adjacency
+            v = edge.dst
+            if v in visited:
+                continue
+            w = weight(edge)
+            if not math.isfinite(w):
+                continue
+            nd = d + w
+            if v not in dist or nd < dist[v]:
+                dist[v] = nd
+                pred[v] = edge
+                heapq.heappush(heap, (nd, v))
+    return pred
+
+
+def _reconstruct(pred: dict[str, Edge], src: str, dst: str) -> _EdgeList:
+    """Walk ``pred`` from ``dst`` back to ``src`` (``dst`` must be in ``pred``,
+    i.e. reachable). Mirrors :func:`_dijkstra`'s own reconstruction, so the
+    edge list is byte-for-byte the path that function would return."""
+    path: _EdgeList = []
+    cur = dst
+    while cur != src:
+        edge = pred[cur]
+        path.append(edge)
+        cur = edge.src
+    path.reverse()
+    return path
+
+
 # ---------------------------------------------------------------------------
 # Yen's k-shortest simple paths
 # ---------------------------------------------------------------------------
@@ -275,7 +332,20 @@ def best_paths(
     Returns :class:`~.models.Path` objects — inspect ``min_confidence`` and
     ``provenance_chain`` on each. The global top ``k`` across all objectives
     is exact: it is drawn from the per-objective ``k``-best unions, and every
-    path ends at exactly one objective."""
+    path ends at exactly one objective.
+
+    The per-objective Yen work is **bounded** without ever dropping an
+    objective. A single shared Dijkstra from ``src`` floors every objective by
+    the weight of its best route (an exact floor: weights are non-negative, so
+    no route to an objective can weigh less than its shortest path, which is
+    the first path Yen accepts). Objectives are then processed best-floor
+    first; once ``k`` candidates are in hand, an objective whose floor already
+    exceeds the current ``k``-th-best weight — and therefore every later
+    objective, whose floor is no smaller while the ``k``-th-best only falls —
+    cannot contribute to the global top ``k``, so the search stops. Every
+    skipped objective's best route is strictly heavier than the retained
+    ``k``-th, so the sorted-and-truncated result is byte-identical to running
+    Yen for all objectives."""
     if k < 1:
         raise ValueError("k must be >= 1")
     weight = weight_fn or default_weight
@@ -288,10 +358,26 @@ def best_paths(
             objectives.add(node.id)
     objectives.discard(src)
 
+    # One Dijkstra floors every objective. The floor is the exact weight of its
+    # best route (== Yen's first path), computed with the same `_total_weight`,
+    # so it is a true, tie-exact lower bound on anything Yen could return for it.
+    pred = _single_source_tree(world, src, weight, edge_kinds)
+    floored: list[tuple[float, str]] = []
+    for oid in objectives:
+        if oid not in pred:
+            continue  # unreachable — Yen would return [] anyway
+        floored.append((_total_weight(_reconstruct(pred, src, oid), weight), oid))
+    floored.sort()  # ascending floor, then objective id — deterministic
+
     ranked: list[tuple[float, tuple[_EdgeKey, ...], _EdgeList]] = []
-    for oid in sorted(objectives):
+    kth_weight = math.inf
+    for floor, oid in floored:
+        if len(ranked) >= k and floor > kth_weight:
+            break  # this floor and every later one outrank the k-th best
         for p in _yen(world, src, oid, weight, edge_kinds, k):
             ranked.append((_total_weight(p, weight), _path_sig(p), p))
+        if len(ranked) >= k:
+            kth_weight = heapq.nsmallest(k, (w for w, _, _ in ranked))[-1]
     ranked.sort(key=lambda t: (t[0], t[1]))
     return [Path(edges=p) for _, _, p in ranked[:k]]
 

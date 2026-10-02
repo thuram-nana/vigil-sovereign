@@ -63,6 +63,8 @@ if TYPE_CHECKING:  # intel types are only referenced in annotations on the defau
     from .intel.predict import AssetHypothesis
     from .intel.resolve import Entity
     from .scanner.access_control import AccessControlConfig
+    from .authority.authorization import EngagementExecutor
+    from .authority.fleet import FleetConcurrencyGovernor, WorkKind
 
 
 class EngagementRefused(RuntimeError):
@@ -920,6 +922,58 @@ def _run_fusion(world: "WorldModel", slug: str, *, seq_base: int, sink,
     return (len(minted), facts)
 
 
+def _fleet_admission(
+    *,
+    governor: "FleetConcurrencyGovernor | None",
+    executor: "EngagementExecutor | None",
+    slug: str,
+    target: str,
+    tenant: str,
+    work_kind: "WorkKind | str | None",
+):
+    """A context manager that admits this engagement's traffic-sending phase through
+    the fleet bounds that are wired, or a no-op when none is.
+
+    Composition order matters for soundness: the per-engagement concurrency
+    reservation (``executor.execute`` — feeds ``in_flight`` / enforces
+    ``concurrency_limit`` on the live path) is entered FIRST, then the cross-
+    engagement governor (``governor.engage`` — tenant budget, per-host rate cap,
+    and the serial-proof-per-target lock). An :class:`~contextlib.ExitStack`
+    unwinds whatever was entered if a later gate refuses, so a governor refusal
+    never strands an executor reservation. With both ``None`` nothing is entered —
+    byte-identical to the pre-M3.1 scan.
+
+    ``work_kind`` resolves to :class:`~authority.fleet.WorkKind`; ``None`` means
+    PROOF, the safe serialize-per-host default (serialization only ever costs
+    latency, never soundness). It is read only when a governor is present."""
+    from contextlib import ExitStack
+
+    stack = ExitStack()
+    try:
+        if executor is not None:
+            # A benign, stable operation label classified by the ONE WARDEN
+            # classifier the executor already uses; it reserves one in-flight slot
+            # for the scan's duration so the signed authority's concurrency_limit
+            # actually bounds N concurrent engagements sharing this executor.
+            stack.enter_context(executor.execute(f"engagement_scan:{slug}"))
+        if governor is not None:
+            from .authority.fleet import WorkKind
+
+            if work_kind is None:
+                kind = WorkKind.PROOF
+            elif isinstance(work_kind, WorkKind):
+                kind = work_kind
+            else:
+                kind = WorkKind(str(work_kind))
+            stack.enter_context(
+                governor.engage(target=target, tenant=tenant, kind=kind)
+            )
+    except BaseException:
+        stack.close()
+        raise
+    return stack
+
+
 def run_engagement(
     slug: str,
     seed_url: str,
@@ -978,6 +1032,22 @@ def run_engagement(
     resume: bool = False,
     run_dir: "str | None" = None,
     profile: str = "surface",
+    # M3.1 — fleet admission (all default to None/"default" ⇒ byte-identical no-op).
+    # When an operator runs N engagements at once against one estate they install a
+    # FleetConcurrencyGovernor (and, when a signed authority is live, feed its
+    # per-engagement EngagementExecutor): the ONE traffic-sending phase of this
+    # engagement is then admitted through them, so the cross-engagement bounds
+    # (per-target-host rate cap, per-tenant total budget) and the
+    # serial-proof-per-target invariant actually hold on the LIVE run path — the
+    # primitives were built+tested but unreachable until wired here. These shape
+    # only HOW CONCURRENTLY already-authorized work runs; they mint nothing, demote
+    # nothing, and change NO verdict. ``fleet_work_kind`` defaults to PROOF, the
+    # safe serialize-per-host default the WorkKind contract prescribes ("when in
+    # doubt, PROOF: serialization only ever costs latency, never soundness").
+    fleet_governor: "FleetConcurrencyGovernor | None" = None,
+    fleet_tenant: str = "default",
+    fleet_work_kind: "WorkKind | str | None" = None,
+    executor: "EngagementExecutor | None" = None,
 ) -> EngagementResult:
     """Run one authorized engagement end to end and return an
     :class:`EngagementResult` — the oracle-confirmed :class:`ScanReport` plus the
@@ -1272,10 +1342,22 @@ def run_engagement(
         if report is not None:
             ledger.skip(P_SCAN)
     if report is None:
-        ledger.start(P_SCAN)
-        report = _do_scan()
-        ledger.complete(P_SCAN)
-        ledger.persist_report(report)
+        # M3.1 — admit the traffic-sending scan through the fleet bounds when wired.
+        # The reload branch above runs NO traffic, so it is deliberately OUTSIDE the
+        # admission: resume stays free and never consumes host-rate/tenant budget for
+        # a phase that sends nothing. With both governor and executor None the ExitStack
+        # enters nothing — a true no-op, so the scan runs exactly as before. A PROOF
+        # kind holds this host's proof lock for the scan's duration (serial per host);
+        # SEARCH does not. Any refusal (budget/rate/concurrency) propagates fail-closed
+        # as the engine's typed EthicsViolation, exactly like every other bound.
+        with _fleet_admission(
+            governor=fleet_governor, executor=executor, slug=slug,
+            target=seed_url, tenant=fleet_tenant, work_kind=fleet_work_kind,
+        ):
+            ledger.start(P_SCAN)
+            report = _do_scan()
+            ledger.complete(P_SCAN)
+            ledger.persist_report(report)
 
     # Post-scan intel: register the observed target + stack, resolve the asset
     # inventory, and produce the gated prediction queue. Best-effort.

@@ -318,6 +318,34 @@ def derive(
     return apply(operator, world, binding, seq)
 
 
+def _narrow_focus_kind(op: Operator) -> NodeKind | None:
+    """The single :class:`NodeKind` the focus node of every match of `op` MUST
+    have, or ``None`` when that cannot be pinned statically (the operator has no
+    ``NODE_KIND`` precondition, more than one naming different kinds, or one
+    naming no kind at all).
+
+    This drives the saturation loop's candidate narrowing, and it is
+    behaviour-preserving BY CONSTRUCTION: a ``NODE_KIND`` precondition is checked
+    inside :func:`match` as ``focus.kind is pred.node_kind`` (see
+    :func:`_predicate_ok`), so a focus of any other kind fails it, ``match``
+    returns ``None``, ``derive`` returns ``None``, and NOTHING is asserted — the
+    graph, the sequence int and the ``seen`` set are all untouched. Visiting such
+    a node is therefore indistinguishable from skipping it. When this returns a
+    kind ``K``, the loop iterates ``world.nodes_of_kind(K)`` — which is exactly
+    ``world.all_nodes()`` filtered to kind ``K``, in the SAME id-sorted order
+    (the per-kind order index is maintained as that sorted subsequence; see
+    ``worldmodel.graph`` and ``test_graph_order_identity``) — so the surviving
+    matches fire in the identical order, at the identical seq, accumulating the
+    identical belief. ``None`` means 'do not narrow': scan every node, exactly as
+    the pre-index loop did, so an operator we cannot pin stays fully correct."""
+    kinds = {
+        p.node_kind
+        for p in op.preconditions
+        if p.kind is PredicateKind.NODE_KIND and p.node_kind is not None
+    }
+    return next(iter(kinds)) if len(kinds) == 1 else None
+
+
 def saturate(
     operators: Iterable[Operator],
     world: WorldModel,
@@ -336,7 +364,21 @@ def saturate(
     monotonic sequence int advances by one per asserted fact starting from
     `seq_start`, so every derived fact is uniquely and deterministically
     ordered. `max_rounds` bounds the loop; a well-formed catalog converges
-    far sooner (effects are monotonic — the graph only accretes)."""
+    far sooner (effects are monotonic — the graph only accretes).
+
+    Candidate narrowing (#828). The pre-index loop tried EVERY operator against
+    EVERY node every round — ``rounds x |ops| x |nodes|`` ``derive`` calls, the
+    bulk of which fail their very first (``NODE_KIND``) precondition and assert
+    nothing. Each operator whose focus kind is pinned (see
+    :func:`_narrow_focus_kind`) is instead scanned only over the nodes of that
+    kind via the maintained per-kind order index, dropping those guaranteed-None
+    ``derive`` calls. This changes NOTHING observable: the skipped calls had no
+    effect, and ``nodes_of_kind(K)`` visits the same nodes in the same order a
+    full scan would have reached them. An operator re-fires on every matching
+    node every round exactly as before — that re-firing accumulates belief
+    (``alpha``/``beta``) and widens ``last_seen``, so it is part of the result
+    and is deliberately NOT elided; only the empty probes are. The closure, the
+    derived facts, and the serialised graph are byte-for-byte identical."""
     seeds = seeds or {}
     ops = list(operators)
     all_applied: list[Applied] = []
@@ -347,13 +389,19 @@ def saturate(
         seen.add(("E", e.src, e.dst, e.kind.value))
     for n in world.all_nodes():
         seen.add(("N", n.id, ",".join(sorted(n.attrs))))
+    # Each operator's statically-pinned focus kind (None => scan every node).
+    # saturate never adds or removes nodes and never changes a node's kind
+    # (effects only ASSERT_EDGE between existing nodes or SET_ATTR on one), so
+    # these candidate sets are stable for the whole run.
+    narrowed = [_narrow_focus_kind(op) for op in ops]
     seq = seq_start
     for _ in range(max_rounds):
         round_new = 0
         # deterministic order: operator order, then node id order
-        for op in ops:
+        for op, kind in zip(ops, narrowed):
             seed = seeds.get(op.id)
-            for node in world.all_nodes():
+            nodes = world.all_nodes() if kind is None else world.nodes_of_kind(kind)
+            for node in nodes:
                 changes = derive(op, world, node, seq, seed)
                 if not changes:
                     continue

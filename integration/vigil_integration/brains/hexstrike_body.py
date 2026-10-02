@@ -122,7 +122,10 @@ def _spec_for_kind(kind: str, params: "dict | None"):
     FATAL-2: the offense-side ``external_tool`` import is function-local, so importing this module co-loads no
     offense engine into the sovereign env."""
     from ..live.external_tool import (  # noqa: PLC0415
+        dirsearch_web_scan,
+        feroxbuster_web_scan,
         ffuf_content_scan,
+        gau_web_scan,
         gobuster_web_scan,
         httpx_url_scan,
         katana_web_scan,
@@ -133,6 +136,7 @@ def _spec_for_kind(kind: str, params: "dict | None"):
         rustscan_service_scan,
         tls_scan,
         unicornscan_service_scan,
+        waybackurls_web_scan,
         zmap_service_scan,
     )
     p = params or {}
@@ -154,6 +158,21 @@ def _spec_for_kind(kind: str, params: "dict | None"):
         return katana_web_scan(scheme=str(p.get("scheme", "http")))
     if kind == "gobuster":
         return gobuster_web_scan(scheme=str(p.get("scheme", "http")), wordlist=str(p.get("wordlist", "") or ""))
+    # M1.2 — the rest of the web_discovery FACT column. gau/waybackurls PASSIVELY propose archived URLs (their
+    # egress is to third-party archives, never the target); feroxbuster/dirsearch actively brute content. ALL
+    # FOUR feed the SAME gated ACHIEVED_STATE web re-drive (web_redrive) katana/gobuster use — VIGIL re-drives
+    # every surfaced URL over its OWN capture and mints only what its oracle confirms; a URL that does not
+    # re-confirm stays a LEAD. Only typed scheme/wordlist VALUES are read; every flag is built server-side.
+    if kind == "gau":
+        return gau_web_scan(scheme=str(p.get("scheme", "http")))
+    if kind == "waybackurls":
+        return waybackurls_web_scan(scheme=str(p.get("scheme", "http")))
+    if kind == "feroxbuster":
+        return feroxbuster_web_scan(scheme=str(p.get("scheme", "http")),
+                                    wordlist=str(p.get("wordlist", "") or ""))
+    if kind == "dirsearch":
+        return dirsearch_web_scan(scheme=str(p.get("scheme", "http")),
+                                  wordlist=str(p.get("wordlist", "") or ""))
     # C4 — scanners bug-class DISPATCHER: nuclei labels a class; the runner re-drives ONLY its web-mappable
     # findings through web_redrive and a FACT is attributed only when VIGIL's own oracle confirms the EXACT
     # claimed class. The scanner is never the authority — its family stays LEAD-only; the FACT is

@@ -679,3 +679,99 @@ def test_advise_learner_health_is_a_noop_without_a_sink():
     """The advisory is spine-only: with no sink it does nothing (and cannot raise) — the guarantee
     that keeps the default/gate path (which attaches no spine) byte-identical."""
     engage_mod._advise_learner_health(None, "alpha")   # must not raise
+
+
+# ---------------------------------------------------------------------------
+# M3.1 — the fleet governor is WIRED onto the run path and changes NO verdict.
+# ---------------------------------------------------------------------------
+
+from datetime import datetime, timezone
+
+from framework.v2.authority.authorization import EngagementAuthorization, EngagementExecutor
+from framework.v2.authority.fleet import (
+    FleetConcurrencyGovernor,
+    HostRateLimiter,
+    TenantBudget,
+    WorkKind,
+)
+
+_M3_FAR_PAST = datetime(2020, 1, 1, tzinfo=timezone.utc)
+_M3_FAR_FUTURE = datetime(2099, 1, 1, tzinfo=timezone.utc)
+
+
+def _permissive_executor() -> EngagementExecutor:
+    """A verified authorization with ceilings high enough to admit the scan unconditionally
+    (ceiling A3, huge rate/concurrency), so wiring it FEEDS in_flight/concurrency_limit on the
+    live path without ever refusing — the whole point of the verdict-unchanged proof."""
+    return EngagementExecutor(
+        EngagementAuthorization(
+            authorization_id="m3-auth",
+            engagement_slug="alpha",
+            issuer="governance",
+            scope=["127.0.0.1"],
+            danger_ceiling="A3",
+            not_before=_M3_FAR_PAST,
+            not_after=_M3_FAR_FUTURE,
+            rate_limit=1_000_000,
+            rate_window_seconds=60.0,
+            concurrency_limit=8,
+            issued_at=_M3_FAR_PAST,
+        )
+    )
+
+
+def _permissive_governor() -> FleetConcurrencyGovernor:
+    """A governor whose three bounds are set wide enough to admit every action, so the serial-
+    proof lock still engages (soundness) but nothing is ever refused."""
+    return FleetConcurrencyGovernor(
+        # Wide window so the single grant stays inside it for the post-scan count() assertion
+        # regardless of how long the scan takes; the cap itself is effectively unlimited.
+        host_rate_limiter=HostRateLimiter(max_per_window=1_000_000, window_seconds=3600.0),
+        tenant_budget=TenantBudget({"acme": 1_000_000}, default=1_000_000),
+    )
+
+
+@pytest.mark.parametrize("work_kind", [WorkKind.SEARCH, WorkKind.PROOF])
+def test_fleet_governor_wired_on_run_path_changes_no_verdict(
+    isolated_engagement, httpserver: HTTPServer, work_kind,
+):
+    """The governor + the per-engagement executor are WIRED through ``run_engagement`` and the
+    authoritative verdict set is byte-identical to the un-wired run — for BOTH work kinds (so the
+    per-host PROOF serial lock, which only the PROOF path takes, is proven inert to the verdict).
+    This is the M3.1 invariant: the fleet bounds shape only HOW CONCURRENTLY work runs; they mint
+    nothing, demote nothing, change no verdict."""
+    port = httpserver.port
+    isolated_engagement("alpha", "127.0.0.1")
+    httpserver.expect_request("/").respond_with_handler(_root)
+    httpserver.expect_request("/search").respond_with_handler(_search)
+    seed = f"http://127.0.0.1:{port}/"
+
+    # Baseline — no fleet bounds wired (the pre-M3.1 run path).
+    baseline = run_engagement("alpha", seed, max_pages=5, enable_oob=False, prompt_callback=_deny)
+    assert baseline.report.active_findings, "the fixture target must confirm findings"
+
+    # Same engagement with the governor AND the executor wired on the live path.
+    gov = _permissive_governor()
+    ex = _permissive_executor()
+    wired = run_engagement(
+        "alpha", seed, max_pages=5, enable_oob=False, prompt_callback=_deny,
+        fleet_governor=gov, fleet_tenant="acme", fleet_work_kind=work_kind, executor=ex,
+    )
+
+    # (1) the verdict set is unchanged.
+    assert _report_signature(baseline.report) == _report_signature(wired.report), \
+        "wiring the fleet governor onto the run path changed the authoritative verdict set"
+
+    # (2) the bounds were actually EXERCISED on the live path (not silently skipped):
+    #   - the tenant's budget shows exactly one admitted scan,
+    #   - the host's rate window recorded exactly one grant,
+    #   - the executor released its in-flight reservation (back to 0 after the scan),
+    #   - and a PROOF scan actually took the per-host serial lock (max_concurrent == 1),
+    #     while a SEARCH scan never touched it (== 0).
+    assert gov.budget.spent("acme") == 1, "tenant budget was not charged — governor not on the path"
+    assert gov.host_rate.count(seed) == 1, "host rate cap did not record the scan"
+    assert ex.in_flight == 0, "executor reservation leaked after the scan"
+    if work_kind is WorkKind.PROOF:
+        assert gov.proof_serializer.max_concurrent(seed) == 1, "PROOF scan did not take the serial lock"
+    else:
+        assert gov.proof_serializer.max_concurrent(seed) == 0, "SEARCH must not take the proof lock"

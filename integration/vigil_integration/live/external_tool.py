@@ -1297,6 +1297,108 @@ def gobuster_web_scan(*, scheme: str = "http", wordlist: str = "", extra_args: S
                     version_argv=lambda: ["gobuster", "version"], danger="active")
 
 
+def _domain_of(target: str) -> str:
+    """The bare host/domain of ``target`` for an archive proposer that takes a domain, not a URL. Offline,
+    purely lexical (no DNS): a URL-form target yields its hostname, a bare host is returned as-is. The result
+    is only the tool's QUERY key; every URL the tool surfaces is re-pinned to the scope target by the parser,
+    so a surfaced out-of-scope host is dropped, never re-pointed."""
+    from urllib.parse import urlsplit  # noqa: PLC0415 — stdlib, function-local
+    t = str(target or "").strip()
+    return ((urlsplit(t).hostname if "://" in t else t) or t).strip("[]")
+
+
+def gau_web_scan(*, scheme: str = "http") -> ToolSpec:
+    """A :class:`ToolSpec` for gau (getallurls) as a WEB-DISCOVERY URL proposer feeding the ACHIEVED_STATE
+    web re-drive. gau PASSIVELY harvests historical URLs for a DOMAIN from third-party archives
+    (Wayback/OTX/CommonCrawl/URLScan) — ``build_argv`` emits a bounded ``gau --threads 5 <domain>`` and
+    ``propose_web_findings`` parses each plain one-URL-per-line record into a host-PINNED
+    :class:`ProposedWebFinding` with NO class, so VIGIL re-drives every surfaced URL across every web FACT
+    class over its OWN gated capture. The FACT is minted by VIGIL's re-drive (which carries the correlatable
+    UA), NEVER by gau's archive row — a URL gau surfaced that does not re-confirm stays a LEAD. gau's own
+    egress is to the archives, not the target; it takes a domain, so ``scheme`` is validated (BLOCK-5) and
+    used only to normalise a URL-form target to its host. An invalid value raises ValueError
+    (``_spec_for_kind`` turns it into a blocked LEAD) before any argv exists."""
+    _validated_scheme(scheme)
+
+    def build(target: str) -> list[str]:
+        return ["gau", "--threads", "5", _domain_of(target)]
+
+    def propose_web_findings(outcome: ToolOutcome, target: str) -> "list[ProposedWebFinding]":
+        return _parse_url_tokens_web_findings(outcome.stdout or "", target)
+
+    return ToolSpec("gau", build, _no_web_finding_proposal, propose_web_findings=propose_web_findings,
+                    version_argv=lambda: ["gau", "--version"], danger="active")
+
+
+def waybackurls_web_scan(*, scheme: str = "http") -> ToolSpec:
+    """A :class:`ToolSpec` for waybackurls as a WEB-DISCOVERY URL proposer feeding the ACHIEVED_STATE web
+    re-drive. Like gau, it PASSIVELY harvests a DOMAIN's historical URLs from the Wayback Machine —
+    ``build_argv`` emits ``waybackurls <domain>`` and ``propose_web_findings`` parses each plain
+    one-URL-per-line record into a host-PINNED :class:`ProposedWebFinding` with NO class. The FACT is minted
+    by VIGIL's own gated re-drive of each surfaced URL, NEVER by the archive row; a surfaced URL that does not
+    re-confirm stays a LEAD. Its egress is to the archive, not the target; it takes a domain, so ``scheme`` is
+    validated (BLOCK-5) and used only to normalise a URL-form target to its host. An invalid value raises
+    ValueError (``_spec_for_kind`` turns it into a blocked LEAD) before any argv exists."""
+    _validated_scheme(scheme)
+
+    def build(target: str) -> list[str]:
+        return ["waybackurls", _domain_of(target)]
+
+    def propose_web_findings(outcome: ToolOutcome, target: str) -> "list[ProposedWebFinding]":
+        return _parse_url_tokens_web_findings(outcome.stdout or "", target)
+
+    return ToolSpec("waybackurls", build, _no_web_finding_proposal, propose_web_findings=propose_web_findings,
+                    version_argv=lambda: ["waybackurls", "-h"], danger="active")
+
+
+def feroxbuster_web_scan(*, scheme: str = "http", wordlist: str = "") -> ToolSpec:
+    """A :class:`ToolSpec` for feroxbuster as a CONTENT-DISCOVERY URL proposer feeding the ACHIEVED_STATE web
+    re-drive — the same authority ladder as gobuster. ``build_argv`` emits a bounded, correlatable run
+    (``feroxbuster -u <base> -w <wordlist> --silent --no-recursion -a 'User-Agent: …'``): ``--silent`` prints
+    ONLY the discovered full URLs (one per line) and ``--no-recursion`` keeps the brute bounded.
+    ``propose_web_findings`` host-pins each discovered URL into a :class:`ProposedWebFinding` with NO class;
+    VIGIL re-drives it over its OWN gated capture and a discovered path that does not re-confirm stays a LEAD.
+    ``scheme`` and ``wordlist`` are validated HERE (BLOCK-5) — both are interpolated into the argv; an invalid
+    value raises ValueError before any argv exists."""
+    scheme = _validated_scheme(scheme)
+    wl = _validated_wordlist(wordlist)
+
+    def build(target: str) -> list[str]:
+        base = str(target) if "://" in str(target) else f"{scheme}://{target}/"
+        return ["feroxbuster", "-u", base, "-w", wl, "--silent", "--no-recursion",
+                "-a", _CORRELATABLE_USER_AGENT]
+
+    def propose_web_findings(outcome: ToolOutcome, target: str) -> "list[ProposedWebFinding]":
+        return _parse_url_tokens_web_findings(outcome.stdout or "", target)
+
+    return ToolSpec("feroxbuster", build, _no_web_finding_proposal, propose_web_findings=propose_web_findings,
+                    version_argv=lambda: ["feroxbuster", "--version"], danger="active")
+
+
+def dirsearch_web_scan(*, scheme: str = "http", wordlist: str = "") -> ToolSpec:
+    """A :class:`ToolSpec` for dirsearch as a CONTENT-DISCOVERY URL proposer feeding the ACHIEVED_STATE web
+    re-drive — the same authority ladder as gobuster/feroxbuster. ``build_argv`` emits a quiet, correlatable
+    run (``dirsearch -u <base> -w <wordlist> -q --full-url --user-agent 'User-Agent: …'``): ``--full-url``
+    makes each reported hit carry the complete URL, so ``propose_web_findings`` host-pins the exact origin
+    dirsearch reached into a :class:`ProposedWebFinding` with NO class. VIGIL re-drives it over its OWN gated
+    capture; a discovered path that does not re-confirm stays a LEAD. ``scheme`` and ``wordlist`` are validated
+    HERE (BLOCK-5) — both are interpolated into the argv; an invalid value raises ValueError before any argv
+    exists."""
+    scheme = _validated_scheme(scheme)
+    wl = _validated_wordlist(wordlist)
+
+    def build(target: str) -> list[str]:
+        base = str(target) if "://" in str(target) else f"{scheme}://{target}/"
+        return ["dirsearch", "-u", base, "-w", wl, "-q", "--full-url",
+                "--user-agent", _CORRELATABLE_USER_AGENT]
+
+    def propose_web_findings(outcome: ToolOutcome, target: str) -> "list[ProposedWebFinding]":
+        return _parse_url_tokens_web_findings(outcome.stdout or "", target)
+
+    return ToolSpec("dirsearch", build, _no_web_finding_proposal, propose_web_findings=propose_web_findings,
+                    version_argv=lambda: ["dirsearch", "--version"], danger="active")
+
+
 def nuclei_web_redrive(*, scheme: str = "http", extra_args: Sequence[str] = ()) -> ToolSpec:
     """A :class:`ToolSpec` for nuclei as the SCANNERS-family bug-class DISPATCHER into the ACHIEVED_STATE web
     re-drive. ``build_argv`` emits nuclei's correlatable JSONL run
@@ -1369,6 +1471,29 @@ def _parse_gobuster_web_findings(stdout: str, target: str, base: str) -> "list[P
         else:
             continue
         pu = _pin_web_finding(raw, target)
+        if pu is not None and pu.url not in seen:
+            seen.add(pu.url)
+            out.append(pu)
+    return out
+
+
+def _parse_url_tokens_web_findings(stdout: str, target: str) -> "list[ProposedWebFinding]":
+    """Parse discovery output where each line contains at most one URL token (``scheme://…``) into host-pinned
+    web-discovery findings (no class). Handles BOTH plain one-URL-per-line streams (gau / waybackurls /
+    feroxbuster ``--silent``) and decorated lines whose URL is a LATER token (dirsearch ``--full-url``:
+    ``[12:00:00] 200 -  42B - http://host/path``). Takes the FIRST ``://``-bearing whitespace token per line
+    and host-pins it to the scope-authorised ``target`` (a surfaced out-of-scope host is dropped, never
+    re-pointed). Purely lexical — no network."""
+    out: "list[ProposedWebFinding]" = []
+    seen: set[str] = set()
+    for line in (stdout or "").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        tok = next((t for t in line.split() if "://" in t), "")
+        if not tok:
+            continue
+        pu = _pin_web_finding(tok, target)
         if pu is not None and pu.url not in seen:
             seen.add(pu.url)
             out.append(pu)

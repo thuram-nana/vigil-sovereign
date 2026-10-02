@@ -51,9 +51,13 @@ def test_the_only_fact_capable_tools_are_the_ones_with_a_shipped_re_drive():
     # nuclei stays fact_capable=false: a scanner is a proposer, not the authority (its web-class findings are
     # re-driven through the same web_redrive, but the FACT is attributed to ACHIEVED_STATE, never to nuclei).
     # See docs/capability-matrix/evidence-branches.json.
+    # M1.2 grows the web_discovery FACT column further: gau/waybackurls (passive archive URL proposers) +
+    # feroxbuster/dirsearch (content-discovery brute) each feed the SAME ACHIEVED_STATE web re-drive and each
+    # passed live.conformance.run_toolspec_conformance before being flipped.
     fact = {m.name for m in load_manifests(_MATRIX) if m.fact_capable}
     assert fact == {"nmap", "sslscan", "masscan", "rustscan", "naabu", "zmap", "unicornscan",
-                    "katana", "gobuster"}, (
+                    "katana", "gobuster",
+                    "gau", "waybackurls", "feroxbuster", "dirsearch"}, (
         f"unexpected fact_capable set: {fact}")
 
 
@@ -206,11 +210,13 @@ def test_h5_batch2_reuse_tools_are_present_service_reachability_fact_capable():
         assert m.excluded is False, f"{name}: a reachability proposer is not excluded"
         assert m.category == "active-assessment", f"{name}: a port scanner actively probes"
         assert m.notes.strip(), f"{name}: a fact_capable tool still documents its re-drive in notes"
-    # the pinned fact_capable set includes the two promoted batch-2 scanners AND the C4 web_discovery FACT
-    # tools (katana/gobuster, ACHIEVED_STATE via web_redrive).
+    # the pinned fact_capable set includes the two promoted batch-2 scanners AND the web_discovery FACT
+    # column: katana/gobuster (C4) plus gau/waybackurls/feroxbuster/dirsearch (M1.2), all ACHIEVED_STATE via
+    # web_redrive.
     fact = {m.name for m in load_manifests(_MATRIX) if m.fact_capable}
     assert fact == {"nmap", "sslscan", "masscan", "rustscan", "naabu", "zmap", "unicornscan",
-                    "katana", "gobuster"}, (
+                    "katana", "gobuster",
+                    "gau", "waybackurls", "feroxbuster", "dirsearch"}, (
         f"fact set changed: {fact}")
 
 
