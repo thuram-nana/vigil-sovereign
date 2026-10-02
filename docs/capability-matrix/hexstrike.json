@@ -148,12 +148,12 @@
       "install": "go",
       "privileges": "none",
       "network_effect": "connects-out",
-      "oracle_family": "",
-      "fact_capable": false,
+      "oracle_family": "SERVICE_REACHABILITY",
+      "fact_capable": true,
       "claim_families": [
         "subdomain"
       ],
-      "notes": "a resolved subdomain becomes a FACT only via a SERVICE_REACHABILITY re-drive per host; bare enumeration is a LEAD."
+      "notes": "M1.1 SERVICE_REACHABILITY: subfinder is a PASSIVE subdomain PROPOSER (subfinder -silent -d, flags server-side). The enumeration stays a LEAD; VIGIL re-dials each SURFACED host on a server-side re-dial port set with its OWN gated TCP handshake (scoped surfaced-host re-drive on the service_reachability.tcp_handshake branch) and mints a FACT only on a confirmed connect. The scoped capture re-applies the protected-domain floor and the charter-scope-over-ADDRESSES predicate, so a surfaced host under a wildcard-only scope mints nothing. Passed live.conformance (full battery incl. deceptive_no_fact)."
     },
     {
       "name": "nuclei",
@@ -522,12 +522,12 @@
       "install": "go",
       "privileges": "none",
       "network_effect": "connects-out",
-      "oracle_family": "",
-      "fact_capable": false,
+      "oracle_family": "SERVICE_REACHABILITY",
+      "fact_capable": true,
       "claim_families": [
         "subdomain"
       ],
-      "notes": "LEAD-only subdomain enumerator (the brain's RECON class). A resolved subdomain becomes a FACT only via a per-host SERVICE_REACHABILITY re-drive (as for subfinder); bare enumeration is a LEAD. No typed argv builder in live.executor yet, so the executor denies it fail-closed \u2014 UNAVAILABLE until a ToolSpec is adapted. Rendered with a reason, never silently missing."
+      "notes": "M1.1 SERVICE_REACHABILITY: amass is a PASSIVE subdomain PROPOSER (amass enum -passive -silent -d, flags server-side, never actively probes the target). Same contract as subfinder: enumeration is a LEAD; the FACT is VIGIL's OWN scoped gated handshake against each surfaced host on the service_reachability.tcp_handshake branch. The scoped capture re-applies the protected-domain + charter-scope-over-ADDRESSES floor. Passed live.conformance (full battery incl. deceptive_no_fact)."
     },
     {
       "name": "arjun",
@@ -550,12 +550,12 @@
       "install": "apt",
       "privileges": "sometimes",
       "network_effect": "scans-target",
-      "oracle_family": "",
-      "fact_capable": false,
+      "oracle_family": "SERVICE_REACHABILITY",
+      "fact_capable": true,
       "claim_families": [
         "network-discovery"
       ],
-      "notes": "LEAD-only layer-2 host discovery (raw sockets \u2192 privileges=sometimes). A discovered host becomes a FACT only via a SERVICE_REACHABILITY re-drive; the ARP reply itself is a LEAD. No typed argv builder yet \u2014 UNAVAILABLE until adapted."
+      "notes": "M1.1 SERVICE_REACHABILITY: arp-scan is a LAYER-2 host-discovery PROPOSER (arp-scan --retry=1 <range>). Its NATIVE L2-presence claim has NO VIGIL oracle, so the ARP reply mints NOTHING. The FACT is SERVICE_REACHABILITY only: VIGIL re-dials each surfaced host on a server-side re-dial port set with its OWN gated TCP handshake and mints only on a confirmed connect \u2014 a surfaced L2 host with no open TCP port mints NOTHING (correct). Scoped surfaced-host capture (protected-domain + charter-scope-over-ADDRESSES floor). Passed live.conformance (full battery incl. deceptive_no_fact)."
     },
     {
       "name": "autorecon",
@@ -606,12 +606,12 @@
       "install": "pip",
       "privileges": "none",
       "network_effect": "scans-target",
-      "oracle_family": "",
-      "fact_capable": false,
+      "oracle_family": "SERVICE_REACHABILITY",
+      "fact_capable": true,
       "claim_families": [
         "smb-enum"
       ],
-      "notes": "LEAD-only SMB/NetBIOS enumeration. A reachable share/user is confirmed only by a VIGIL-owned re-drive; the scanner report is a LEAD. No typed argv builder yet \u2014 UNAVAILABLE until adapted."
+      "notes": "M1.1 SERVICE_REACHABILITY: enum4linux-ng is an SMB/NetBIOS enumeration PROPOSER against the already scope-authorised target (enum4linux-ng -A <target>). The SMB host IS the target, so the parser PINS the host to target (never a host the tool printed) and proposes the SMB port(s) on an SMB/NetBIOS marker. VIGIL's OWN default service_reachability.tcp_handshake re-drive re-proves reachability; the enumeration (shares/users/policy) stays a LEAD and a closed SMB port mints NOTHING. Passed live.conformance (full battery incl. deceptive_no_fact)."
     },
     {
       "name": "feroxbuster",
@@ -677,12 +677,12 @@
       "install": "apt",
       "privileges": "none",
       "network_effect": "scans-target",
-      "oracle_family": "",
-      "fact_capable": false,
+      "oracle_family": "SERVICE_REACHABILITY",
+      "fact_capable": true,
       "claim_families": [
         "netbios-enum"
       ],
-      "notes": "LEAD-only NetBIOS name scan. A responding host is confirmed only by a SERVICE_REACHABILITY re-drive; the scan output is a LEAD. No typed argv builder yet \u2014 UNAVAILABLE until adapted."
+      "notes": "M1.1 SERVICE_REACHABILITY: nbtscan is a NetBIOS (UDP-137) host-discovery PROPOSER (nbtscan <range>). Its UDP-137 name response has NO VIGIL TCP oracle, so it mints NOTHING on its own. The FACT is SERVICE_REACHABILITY only: VIGIL re-dials each surfaced host on a server-side re-dial port set with its OWN gated TCP handshake \u2014 a UDP-only host with no open TCP port mints NOTHING. Scoped surfaced-host capture (protected-domain + charter-scope-over-ADDRESSES floor). Passed live.conformance (full battery incl. deceptive_no_fact)."
     },
     {
       "name": "nikto",
@@ -719,12 +719,12 @@
       "install": "pip",
       "privileges": "none",
       "network_effect": "scans-target",
-      "oracle_family": "",
-      "fact_capable": false,
+      "oracle_family": "SERVICE_REACHABILITY",
+      "fact_capable": true,
       "claim_families": [
         "smb-enum"
       ],
-      "notes": "LEAD-only SMB share enumeration. Reachable-share / permission claims are confirmed only by a VIGIL-owned re-drive; the scanner report is a LEAD. No typed argv builder yet \u2014 UNAVAILABLE until adapted."
+      "notes": "M1.1 SERVICE_REACHABILITY: smbmap is an SMB share-enumeration PROPOSER against the already scope-authorised target (smbmap -H <target>). The parser reads the port from smbmap's own '[+] IP: <host>:<port>' line and PINS the host to target. VIGIL's OWN default service_reachability.tcp_handshake re-drive re-proves reachability; the share listing stays a LEAD and only a confirmed handshake mints. Passed live.conformance (full battery incl. deceptive_no_fact)."
     },
     {
       "name": "waybackurls",

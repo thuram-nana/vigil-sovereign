@@ -24,11 +24,17 @@ from vigil_integration.live.external_tool import (  # noqa: E402
     LocalSubprocessBackend,
     ScopeGate,
     ToolOutcome,
+    amass_subdomain_scan,
+    arp_scan_host_scan,
+    enum4linux_ng_smb_scan,
     masscan_service_scan,
     naabu_service_scan,
+    nbtscan_host_scan,
     nmap_service_scan,
     run_external_tool,
     rustscan_service_scan,
+    smbmap_smb_scan,
+    subfinder_subdomain_scan,
     unicornscan_service_scan,
     zmap_service_scan,
 )
@@ -375,3 +381,141 @@ def test_h5_batch2_argv_is_server_side_and_rejects_model_supplied_values():
         ["zmap", "-p", "443", "-q", "-o", "-", "10.0.0.5"]
     assert unicornscan_service_scan(ports="22,80").build_argv("10.0.0.5") == \
         ["unicornscan", "-mT", "10.0.0.5:22,80"]
+
+
+# ===================================================================================================
+# M1.1 — the HOST / SUBDOMAIN / SMB discovery proposers each PASS the full conformance battery through the
+# REAL gated runner. HERMETIC: the tool binaries need not be installed; the FACT is the runner's OWN gated
+# handshake against a real open loopback port, and the canned backend only supplies each tool's real-format
+# PROPOSAL. Two shapes, one doctrine (the tool proposes; VIGIL's re-drive is the fact authority):
+#   * subfinder / amass / arp-scan / nbtscan surface a HOST; VIGIL re-dials it on the server-side re-dial port
+#     set (scoped surfaced-host re-drive) — a surfaced host with no open TCP port mints NOTHING.
+#   * enum4linux-ng / smbmap enumerate SMB on the (scope-authorised) target; the host is PINNED to target and
+#     the SMB port(s) are re-proven by the runner's default service_reachability.tcp_handshake re-drive.
+# This is the gate each tool passed before docs/capability-matrix/hexstrike.json marks it fact_capable.
+# ===================================================================================================
+
+
+def _m1_spec(tool: str, port: int):
+    """The shipped spec for each M1.1 tool. For the surfacing tools the server-side re-dial port is the
+    battery's open/closed loopback port; smbmap parses the port from its own output, so its spec takes none."""
+    if tool == "subfinder":
+        return subfinder_subdomain_scan(ports=str(port))
+    if tool == "amass":
+        return amass_subdomain_scan(ports=str(port))
+    if tool == "arp-scan":
+        return arp_scan_host_scan(ports=str(port))
+    if tool == "nbtscan":
+        return nbtscan_host_scan(ports=str(port))
+    if tool == "enum4linux-ng":
+        return enum4linux_ng_smb_scan(ports=str(port))
+    if tool == "smbmap":
+        return smbmap_smb_scan()
+    raise AssertionError(tool)
+
+
+def _m1_stdout(tool: str, port: int, host: str = "127.0.0.1") -> str:
+    """Each tool's REAL-format output line proposing the loopback host (surfacing tools) or an SMB service on
+    the target (SMB tools). The host is pinned to the target by the SMB parsers and re-authorised at dial time
+    by the surfacing parsers' scoped capture, never trusted from these bytes beyond the parse."""
+    if tool in ("subfinder", "amass"):
+        return f"{host}\n"                                       # one host per line (subfinder -silent / amass)
+    if tool == "arp-scan":
+        return f"{host}\t00:11:22:33:44:55\tVendorCorp Inc.\n"   # <ip>\t<mac>\t<vendor>
+    if tool == "nbtscan":
+        return f"{host}     WORKGROUP        <00>  UNIQUE\n"      # <ip>  <name> ...
+    if tool == "enum4linux-ng":
+        return f"[*] Enumerating workgroup/domain on {host}\n[+] SMB session established; shares on {host}\n"
+    if tool == "smbmap":
+        return f"[+] IP: {host}:{port}\tName: {host}\n[+] Disk      Permissions\n----      -----------\n"
+    raise AssertionError(tool)
+
+
+_M1_TOOLS = ["subfinder", "amass", "arp-scan", "nbtscan", "enum4linux-ng", "smbmap"]
+
+
+@pytest.mark.parametrize("tool", _M1_TOOLS)
+def test_m1_discovery_toolspec_passes_the_full_conformance_battery(tool: str, tmp_path):
+    from framework.v2.authority import KillSwitch
+
+    _charter(tmp_path, "127.0.0.1")
+    # a real OPEN loopback port (positive: the runner's handshake reproduces it) + a definitely-CLOSED port
+    # (deceptive: the tool proposes the host/service, the runner's handshake refuses → no fact).
+    srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    srv.bind(("127.0.0.1", 0))
+    srv.listen(8)
+    open_port = srv.getsockname()[1]
+    tmp = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    tmp.bind(("127.0.0.1", 0))
+    closed_port = tmp.getsockname()[1]
+    tmp.close()
+
+    halt = tmp_path / "alpha.halt"
+    try:
+        report = run_toolspec_conformance(
+            tool_name=tool,
+            positive_spec=_m1_spec(tool, open_port),
+            positive_backend=_CannedBackend(_m1_stdout(tool, open_port)),
+            deceptive_spec=_m1_spec(tool, closed_port),
+            deceptive_backend=_CannedBackend(_m1_stdout(tool, closed_port)),
+            target="127.0.0.1",
+            scope_gate_in=ScopeGate(scope=StaticScopeSource(["127.0.0.1"]), loopback_allowed_if_scoped=True),
+            scope_gate_out=ScopeGate(scope=StaticScopeSource(["10.99.99.99"]), loopback_allowed_if_scoped=True),
+            engagement_slug="alpha", signers=SIGNERS, trust_root=TRUST,
+            trip_killswitch=lambda: KillSwitch("alpha").trip("conformance"),
+            clear_killswitch=lambda: halt.unlink(missing_ok=True),
+            timeout=30.0)
+    finally:
+        srv.close()
+
+    assert report.conformant, report.summary() + " | notes: " + "; ".join(report.notes)
+    from vigil_integration.live.conformance import REQUIRED_PROPERTIES
+    for prop in REQUIRED_PROPERTIES:
+        assert report.checks.get(prop) is True, f"{tool}: {prop} not satisfied: {report.summary()}"
+
+
+def test_m1_surfaced_host_out_of_scope_is_refused_no_fact(tmp_path):
+    """A surfaced host that is NOT attributable to a non-wildcard charter row is refused at dial time by the
+    scoped surfaced-host capture (charter-scope-over-ADDRESSES), so VIGIL never connects and no FACT is minted
+    — the scope floor is re-applied to a surfaced host, not only to the tool target. Here the TOOL TARGET is
+    the in-scope loopback (so the run is authorised and the tool executes), but subfinder SURFACES a different,
+    out-of-charter host; the handshake to it is refused and the result carries zero facts."""
+    _charter(tmp_path, "127.0.0.1")
+    srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    srv.bind(("127.0.0.1", 0))
+    srv.listen(8)
+    open_port = srv.getsockname()[1]
+    try:
+        res = run_external_tool(
+            subfinder_subdomain_scan(ports=str(open_port)), "127.0.0.1",
+            scope_gate=ScopeGate(scope=StaticScopeSource(["127.0.0.1"]), loopback_allowed_if_scoped=True),
+            # the tool surfaces 10.10.10.10 (NOT in the 127.0.0.1 charter) — the scoped capture must refuse it
+            backend=_CannedBackend("10.10.10.10\n"),
+            engagement_slug="alpha", signers=SIGNERS, timeout=30.0)
+    finally:
+        srv.close()
+
+    assert res.status == "ran", res.reason
+    assert res.proposed, "the surfaced host must be PROPOSED (so the refusal is at the re-drive, not the parse)"
+    assert res.facts == [], "an out-of-scope SURFACED host must mint NO fact (scope floor re-applied at dial)"
+
+
+def test_m1_argv_is_server_side_and_rejects_model_supplied_redial_ports():
+    """The typed-schema property: every flag is a fixed server-side construction and the re-dial port set
+    passes a STRICT single-port-list schema (no ranges, no flags), so a model/brain value that could inject a
+    flag or sweep a range is rejected at build time — never reaching the tool argv."""
+    for builder in (subfinder_subdomain_scan, amass_subdomain_scan, arp_scan_host_scan,
+                    nbtscan_host_scan, enum4linux_ng_smb_scan):
+        for bad in ("80; rm -rf /", "$(id)", "-p 22", "1-1024", "80-90", "0", "70000", "", "80,", ",80"):
+            with pytest.raises(ValueError):
+                builder(ports=bad)
+    # a valid spec builds a FIXED server-side argv (target only as a flag value, no free-form flag)
+    assert subfinder_subdomain_scan(ports="443,80").build_argv("example.com") == \
+        ["subfinder", "-silent", "-d", "example.com"]
+    assert amass_subdomain_scan(ports="443").build_argv("example.com") == \
+        ["amass", "enum", "-passive", "-silent", "-d", "example.com"]
+    assert arp_scan_host_scan(ports="80").build_argv("10.0.0.0/24") == \
+        ["arp-scan", "--retry=1", "10.0.0.0/24"]
+    assert nbtscan_host_scan(ports="139").build_argv("10.0.0.0/24") == ["nbtscan", "10.0.0.0/24"]
+    assert enum4linux_ng_smb_scan(ports="445").build_argv("10.0.0.5") == ["enum4linux-ng", "-A", "10.0.0.5"]
+    assert smbmap_smb_scan().build_argv("10.0.0.5") == ["smbmap", "-H", "10.0.0.5"]

@@ -80,10 +80,12 @@ class OracleFamily:
 # Membership rationale (kept honest, one line each):
 #   * network_discovery — port / host / subdomain / SMB-service discovery. ONE verifier: VIGIL's own gated
 #     TCP handshake (SERVICE_REACHABILITY). FACT-capable: the port scanners carry NO tool-supplied verdict —
-#     the runner re-proves each proposed port with its own handshake (H5). Non-port members (subfinder /
-#     amass / arp-scan / nbtscan / autorecon / enum4linux-ng / smbmap) are LEAD-only proposers in the SAME
-#     family (no wired spec builder yet), which is exactly the point: fact-capability is the family's, and a
-#     member gains it only when a runner-owned spec builder exists (see oracle_mapped_tools()).
+#     the runner re-proves each proposed port with its own handshake (H5). The host/subdomain/SMB members
+#     (subfinder / amass / arp-scan / nbtscan / enum4linux-ng / smbmap) gained runner-owned spec builders in
+#     M1.1: they PROPOSE a host (or an SMB port on the target) and VIGIL's own handshake re-proves reachability
+#     — the native claim stays a LEAD, the reachability of the re-observed host is the FACT. ``autorecon``
+#     stays a LEAD-only proposer (no wired spec builder): fact-capability is the family's, and a member gains
+#     it only when a runner-owned spec builder exists (see oracle_mapped_tools()).
 #   * web_discovery — URL / content / parameter discovery over HTTP. ONE verifier: the gated web re-drive
 #     (ACHIEVED_STATE, live.web_redrive). FACT-capable via the runner's OWN crafted, gated HTTP probe.
 #   * scanners — template / signature scanners. Verifier: the bug-class verifier (dispatches the reported
@@ -418,9 +420,20 @@ def fuse(observations: Iterable[ToolObservation]) -> list[FamilyVote]:
 # say-so). Each passed ``live.conformance.run_toolspec_conformance`` over the real gated runner before being
 # added here (test_web_fact_tool::test_m12_web_discovery_tool_passes_the_full_conformance_battery). The tool
 # is only a PROPOSER; the FACT is VIGIL's own capture, so these are mint-eligible, not a mint.
+#
+# M1.1 — the SIX host/subdomain/SMB discovery proposers join the FACT-capable network_discovery family with
+# runner-owned ToolSpec builders (``external_tool.{subfinder_subdomain_scan, amass_subdomain_scan,
+# arp_scan_host_scan, nbtscan_host_scan, enum4linux_ng_smb_scan, smbmap_smb_scan}``). Each PROPOSES a host (or
+# an SMB port on the target) and VIGIL's OWN gated TCP handshake re-proves reachability — the native claim
+# (subdomain / L2 presence / NetBIOS / SMB shares) stays a LEAD, the reachability of the re-observed host is
+# the FACT (same ``service_reachability.tcp_handshake`` branch, no new oracle). Each earned fact_capable via
+# ``live.conformance.run_toolspec_conformance`` (the full battery incl. ``deceptive_no_fact``). ``autorecon``
+# stays builder-less (LEAD-only proposer) — it orchestrates other tools rather than owning a verifiable argv.
 SPEC_BUILDER_TOOLS: "frozenset[str]" = frozenset({"nmap", "sslscan", "masscan", "rustscan", "naabu",
                                                   "zmap", "unicornscan", "katana", "gobuster",
-                                                  "gau", "waybackurls", "feroxbuster", "dirsearch"})
+                                                  "gau", "waybackurls", "feroxbuster", "dirsearch",
+                                                  "subfinder", "amass", "arp-scan", "nbtscan",
+                                                  "enum4linux-ng", "smbmap"})
 
 
 # ---------------------------------------------------------------------------
