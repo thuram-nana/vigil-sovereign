@@ -472,6 +472,12 @@
    "file": "034-supply-chain-bump-pyjwt-2-13-0-2-15-1-fixes-cve.patch",
    "sha256": "15c8587340de16d2c9fe0cc01e3029a4b40967fe9da1da21d17ab909efc55934",
    "subject": "supply-chain: bump pyjwt 2.13.0 -> 2.15.1 (fixes CVE-2026-102268 CRITICAL + 5 HIGH); A14 unblock"
+  },
+  {
+   "commit": "460a407c0d7793ea8c75d35fe2a634ca6fd3f78c",
+   "file": "035-supply-chain-bump-urllib3-2-7-0-2-8-0-2-high-cve.patch",
+   "sha256": "93e7bed85d62a296a59e5ad635021aa8d69ef3e095b0787380ab7cc40ec2d56f",
+   "subject": "supply-chain: bump urllib3 2.7.0 -> 2.8.0 (2 HIGH CVEs) across all locks"
   }
  ],
  "schema": 1,
@@ -718,7 +724,7 @@
   "vendor/strix/tests_vigil/test_sandbox_hardening.py": "c5a6cbb4e51c5a86d1c9f30785fa7234af47706015222a9323f420b8a2059be8",
   "vendor/strix/tests_vigil/test_vigil_graph_progress.py": "b468b4ab45c317175af0a267f5692984c570b88a5bcf960f0e9f102706ffb337",
   "vendor/strix/tests_vigil/test_vigil_upstream_proxy.py": "5aec4434f994f0cc69b3fc2c6773ed484e2a26450bf6f1dcacfeb27dee63515c",
-  "vendor/strix/uv.lock": "11a8876f704adb11b8e21ca8fbba8da5c38e7c52a64fed5dfafce732fcc19ecc"
+  "vendor/strix/uv.lock": "211bd71b137ea8ec7249bb8251dccf5b27773f00672b5c492fe6371f257eb3be"
  },
  "upstream_commit": "230324d2b80a5a27506f85fc521845d8464b04c0",
  "upstream_license": "Apache-2.0",
