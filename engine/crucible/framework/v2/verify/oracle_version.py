@@ -104,6 +104,11 @@ _ORACLE_FNS: dict[OracleKind, tuple[Callable[..., Any], ...]] = {
     OracleKind.SERVICE_REACHABILITY: (oracles.service_reachability_oracle,),
     OracleKind.ACTIVE_EXPOSURE: (oracles.anonymous_reachable_oracle,),
     OracleKind.TLS_WEAKNESS: (oracles.tls_weakness_oracle, oracles.weak_crypto_artifact_oracle),
+    # M1.3 TLS certificate validity — its OWN dedicated kind so editing the validity derivation changes ONLY
+    # oracle_version(CERTIFICATE_VALIDITY), never TLS_WEAKNESS. The transitive-closure walker picks up the
+    # module-level _cert_validity_* helpers + the _CERT_VALIDITY_DEFECTS vocabulary the oracle references, so
+    # editing any of them makes a certificate minted under the old body detectably stale.
+    OracleKind.CERTIFICATE_VALIDITY: (oracles.certificate_validity_oracle,),
     OracleKind.VERSION_RANGE: (oracles.version_range_oracle,),
     OracleKind.POLICY_PATH: (oracles.policy_path_oracle,),
     OracleKind.SYSTEM_PROMPT_DISCLOSURE: (oracles.system_prompt_disclosure_oracle,),

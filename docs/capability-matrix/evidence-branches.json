@@ -396,28 +396,31 @@
     },
     {
       "id": "tls_weakness.certificate_validity",
-      "check": "classify_certificate_defects",
-      "evidence": "NOT WIRED - no re-drive in the product admits to this branch. The derivation it describes exists and is tested (tls_breadth.classify_certificate_defects): the presented leaf certificate's validity window, subject alternative names and issuer, re-derived from RETAINED DER bytes and compared against a capture instant RETAINED in that same evidence (captured_at_epoch) rather than a clock read at verify time, so it is pure and re-runnable offline. Nothing produces that input today: no capture in live/tls_breadth.py stamps captured_at_epoch, so over live evidence the derivation returns None.",
-      "wired": false,
-      "fact_capable": false,
+      "check": "certificate_validity_oracle",
+      "evidence": "VIGIL's own gated TLS handshake (a DEDICATED bounded capture, live/external_tool.py:_tls_cert_capture) and the LEAF certificate the peer presented, together with the capture INSTANT (captured_at_epoch) and its provenance (capture_time_source) RETAINED in that same evidence. The deterministic OracleKind.CERTIFICATE_VALIDITY oracle (verify/oracles.py:certificate_validity_oracle) re-derives the defect set - expired / not_yet_valid (against the retained instant), hostname_mismatch (SAN/CN vs the captured host), self_signed (structural: issuer == subject AND the leaf verifies under its own key) - from the RETAINED DER at the RETAINED instant, so the FACT re-verifies OFFLINE. sslscan's rows are never read; VIGIL re-observes the cert itself.",
+      "wired": true,
+      "fact_capable": true,
       "clean_capable": false,
       "preconditions": [
         "gate_authorized",
         "channel_established"
       ],
-      "limitation": "NOT WIRED - this branch produces nothing at all today, and that is the honest state rather than a LEAD-only one. A re-drive WAS wired to it and was removed: no OracleKind adjudicates certificate VALIDITY (tls_weakness_oracle judges the negotiated protocol and cipher, weak_crypto_artifact_oracle judges the signature hash and public-key size, and neither reads a validity window, a SAN or an issuer), so verdict.admit could only ever return INCONCLUSIVE over it - a branch that reports a verdict whose stated reason is not the real one is worse than an absent branch. Two further boundaries would survive even a correct oracle: a capture retains only the LEAF, so self_signed is a structural property (issuer equals subject and the leaf verifies under its own key) rather than a trust-store verdict, and a chain-anchored conclusion is out of reach; and captured_at_epoch would be the runner's own clock, so any expiry conclusion is scoped to the instant of capture and is not a trusted timestamp. RESIDUAL, named rather than fixed: the `wired` flag is DOCUMENTATION, NOT ENFORCEMENT - verdict.admit() never reads it, so nothing in the code would stop a future re-drive from admitting to this branch. That is judged acceptable because fact_capable:false and clean_capable:false cap any such accidental wiring at LEAD / INCONCLUSIVE, and integration/tests/test_release_gate_false_clean.py asserts that no re-drive admits here; but the flag itself buys nothing at runtime.",
+      "limitation": "A validity defect is an existential FACT and is sound. Three honest boundaries remain. (1) NOT CLEAN-capable: the capture retains only the LEAF (VIGIL handshakes with validation OFF), so self_signed is a STRUCTURAL property rather than a trust-store verdict, and 'no validity defect over the leaf' is NOT a bounded negative over the presented chain - admission maps a conclusive non-fire to INCONCLUSIVE, never CLEAN. (2) The comparison instant is the RUNNER's own clock (capture_time_source = runner_clock), not a trusted timestamp, so any expiry conclusion is scoped to the instant of capture - the oracle states this in the FACT, and REFUSES to adjudicate at all when the instant carries no retained provenance rather than assuming a source. (3) hostname_mismatch is judged against the scope-authorised host VIGIL dialled (SNI), not an arbitrary vhost.",
       "target_fact_capable": true,
       "target_clean_capable": true,
-      "blocking_work": "WIRING needs all three of: (1) a deterministic VIGIL-owned certificate-validity oracle - a CERTIFICATE_VALIDITY OracleKind in engine/crucible/framework/v2/verify/models.py, its decision procedure in verify/oracles.py re-deriving the defect set from the retained DER at the retained instant, and an explicit BUG_CLASS_ORACLES row in verify/verifier.py keyed on the fresh certificate_validity context key (kept OUT of the frozen _ALL_ORACLES fallback so the unknown-class fallback stays at fifteen and the benchmark gate stays byte-identical); (2) a capture that RETAINS the comparison instant (captured_at_epoch) - note that adding it to the SHARED baseline capture live/external_tool.py:_tls_capture changes the signed oracle context of two already-shipped branches (tls_weakness.tls_handshake and weak_crypto.cert_signature_algorithm), which is a deliberate certificate-invalidating change that must be declared, so a dedicated capture is preferable; and (3) a Redrive on live/external_tool.py:_TLS_REDRIVES admitting to this branch, with observed= facts the capture actually stamps. CLEAN additionally needs the capture to retain and adjudicate the FULL presented chain, so that 'no validity defect' is a bounded negative over the chain rather than over the leaf alone. A WIRING TRAP to close at the same time: tls_breadth.classify_certificate_defects DEFAULTS at_epoch_source to the literal string 'runner_clock' when the evidence carries no capture_time_source key, so a capture that retained a TRUSTED timestamp without also stamping capture_time_source would have it silently mislabelled as an untrusted runner clock - understating the claim, but still a provenance label the evidence never earned. Any wiring must stamp capture_time_source at the capture alongside captured_at_epoch, and the derivation should be changed to refuse rather than to assume a source.",
+      "blocking_work": "CLEAN (target_clean_capable) still needs the capture to retain and adjudicate the FULL presented chain, so that 'no validity defect' is a bounded negative over the chain rather than over the leaf alone, plus a trust-anchor set to turn structural self_signed into a trust verdict. Until that lands the branch is FACT-only and a non-defect stays INCONCLUSIVE.",
       "evidence_surface": "tls_handshake",
       "implementation_refs": [
-        "integration/vigil_integration/live/tls_breadth.py:classify_certificate_defects"
+        "integration/vigil_integration/live/external_tool.py:_tls_cert_capture",
+        "integration/vigil_integration/live/external_tool.py:_cert_validity_context",
+        "engine/crucible/framework/v2/verify/oracles.py:certificate_validity_oracle"
       ],
-      "oracle_version": "",
+      "oracle_version": "certificate_validity",
       "control_requirements": [
-        "MISSING: runner_redrive_admitting_to_this_branch",
-        "MISSING: deterministic_certificate_validity_oracle",
-        "MISSING: retained_capture_instant",
+        "warden_scope_gate",
+        "vigil_owned_tls_handshake",
+        "deterministic_certificate_validity_oracle",
+        "retained_capture_instant_with_provenance",
         "MISSING: full_chain_retention"
       ]
     },

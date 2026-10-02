@@ -76,10 +76,12 @@ structurally: ``run_external_tool`` memoises one capture per DISTINCT capture ca
 (``id(rd.capture)``), and ``external_tool._TLS_REDRIVES`` carries exactly that many distinct callables. No
 retries, no per-suite enumeration loop, no UA/version rotation (Constitution VI.4 — VIGIL stays
 correlatable). COST: the budget is also the worst-case STALL. Against an unresponsive in-scope host each of
-the four handshakes burns its own full ``_DEFAULT_TIMEOUT``, so one endpoint can hold a ``tls_scan`` run for
-~4x the single-probe timeout (~20s at the default 5s) where the pre-WAVE-3 spec held it for ~5s. That is a
+the five handshakes burns its own full ``_DEFAULT_TIMEOUT``, so one endpoint can hold a ``tls_scan`` run for
+~5x the single-probe timeout (~25s at the default 5s) where the pre-WAVE-3 spec held it for ~5s. That is a
 throughput cost on a wide sweep, not a correctness one; shrink ``timeout`` rather than the budget if it
-bites.
+bites. M1.3 raised the count 4 -> 5: the certificate-VALIDITY re-drive uses a DEDICATED capture (not the
+shared baseline) because it must RETAIN the capture instant, and stamping that onto the baseline would
+invalidate the two certificates already shipping over it — so the honest cost is one extra handshake.
 
 FATAL-2: every ``framework`` import is FUNCTION-LOCAL; module import pulls in stdlib only.
 """
@@ -96,7 +98,7 @@ from typing import Any, Optional
 #: TLS handshakes VIGIL performs per (host, port) endpoint in one ``tls_scan`` run. Structurally enforced by
 #: the count of DISTINCT capture callables on ``external_tool._TLS_REDRIVES`` (the runner memoises per
 #: ``id(rd.capture)``), and pinned by ``test_tls_breadth.py::test_the_handshake_budget_is_structural``.
-TLS_HANDSHAKE_BUDGET_PER_ENDPOINT = 4
+TLS_HANDSHAKE_BUDGET_PER_ENDPOINT = 5
 
 #: The deprecated protocol versions VIGIL offers ONE AT A TIME, each in its own single bounded handshake.
 #: Spelled as ``ssl.TLSVersion`` attribute NAMES so the module imports without touching ``ssl`` at load.

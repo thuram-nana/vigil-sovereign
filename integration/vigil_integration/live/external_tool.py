@@ -1002,6 +1002,62 @@ def _weak_cipher_capture(host: str, port: int, *, slug: str, protocol: str = "tc
     return capture_weak_cipher_handshake(host, int(port), slug=slug)
 
 
+def _tls_cert_capture(host: str, port: int, *, slug: str, protocol: str = "tcp") -> dict:
+    """M1.3 — a DEDICATED runner-owned handshake for the certificate-VALIDITY re-drive. It is its OWN capture
+    callable (NOT the shared baseline ``_tls_capture``) for one reason of soundness: the validity branch needs
+    the capture to RETAIN the comparison instant, and stamping ``captured_at_epoch`` onto the shared baseline
+    dict would change the signed oracle context of the two branches that already ship over it
+    (``tls_weakness.tls_handshake`` + ``weak_crypto.cert_signature_algorithm``) — a deliberate
+    certificate-invalidating change the blocking_work says to avoid by using a dedicated capture. Being a
+    distinct callable it also counts against ``tls_breadth.TLS_HANDSHAKE_BUDGET_PER_ENDPOINT`` structurally.
+
+    The instant is the RUNNER's own clock, read ONCE here and RETAINED verbatim, so the oracle compares
+    against the retained instant (never a clock at verify time) and the FACT re-derives offline. Its provenance
+    is stamped alongside it (``capture_time_source``) so the oracle need not — and does not — assume one."""
+    import time
+
+    from framework.v2.verify import capture_tls_handshake  # offense-side only (FATAL-2: function-local)
+    from .egress_floor import charter_address_authorizer, pin_egress, pinned_tls_connector
+
+    pin = pin_egress(host, int(port), slug=slug,
+                     address_authorized=charter_address_authorizer(slug, host))
+    if not pin.allowed:
+        return {"connected": False, "host": str(host), "port": port, "error": pin.refused_reason}
+    hs = capture_tls_handshake(host, int(port), slug=slug, connect=pinned_tls_connector(pin.pinned))
+    hs = dict(hs)
+    # RETAIN the comparison instant + its provenance. The epoch is the runner's wallclock at capture; the
+    # source label says exactly that, so the oracle refuses to over-claim a trusted timestamp.
+    hs["captured_at_epoch"] = int(time.time())
+    hs["capture_time_source"] = "runner_clock"
+    return hs
+
+
+def _cert_validity_context(handshake: dict) -> "dict | None":
+    """The oracle context for the certificate-VALIDITY re-drive. Built ONLY when the runner's own handshake
+    completed and retained a leaf cert AND the capture stamped a retained instant — otherwise None (the
+    re-drive is SKIPPED: nothing was proven and nothing was cleared, never a fabricated FACT). Carries the
+    RETAINED inputs VERBATIM under the fresh ``cert_validity`` key the CERTIFICATE_VALIDITY oracle dispatches
+    on; the oracle does ALL the derivation (defect set from the DER at the retained instant), so nothing the
+    producer classified is trusted."""
+    if not isinstance(handshake, dict) or not handshake.get("connected"):
+        return None
+    b64 = handshake.get("cert_der_b64")
+    if not b64:
+        return None
+    at = handshake.get("captured_at_epoch")
+    if not isinstance(at, int) or isinstance(at, bool):
+        return None
+    return {
+        "bug_class": "certificate_validity",
+        "cert_validity": {
+            "host": str(handshake.get("host") or ""),
+            "cert_der_b64": b64,
+            "captured_at_epoch": at,
+            "capture_time_source": str(handshake.get("capture_time_source") or ""),
+        },
+    }
+
+
 def _weak_tls_context(handshake: dict) -> "dict | None":
     from framework.v2.verify import weak_tls_context  # offense-side only
     if not handshake.get("connected"):
@@ -1088,11 +1144,6 @@ _TLS_REDRIVES: "tuple[Redrive, ...]" = (
     Redrive("weak_tls", _tls_capture, _weak_tls_context, branch="tls_weakness.tls_handshake"),
     Redrive("weak_crypto_artifact", _tls_capture, _weak_crypto_context,
             branch="weak_crypto.cert_signature_algorithm"),
-    # CLAIM 4 — certificate validity is NOT WIRED. tls_breadth.classify_certificate_defects exists and is
-    # tested, but no OracleKind adjudicates certificate VALIDITY, so a re-drive on
-    # tls_weakness.certificate_validity could never admit anything but INCONCLUSIVE. It would have reported
-    # a verdict with a reason that was not the real one, which is worse than an absent branch, so it is
-    # absent. The registry row carries wired:false and names the work in blocking_work.
     # CLAIMS 1 + 2 — offer ONLY TLS1.0, then ONLY TLS1.1. A completed handshake is an existential FACT
     # (the oracle fires on the negotiated deprecated version). A peer protocol_version(70) alert is
     # INCONCLUSIVE, NOT a CLEAN: the branch is registered clean_capable:false because the corroborating
@@ -1113,6 +1164,23 @@ _TLS_REDRIVES: "tuple[Redrive, ...]" = (
     # (the local build limits what can be offered at all), so the branch is clean_capable:false.
     Redrive("weak_tls", _weak_cipher_capture, _weak_cipher_offer_context,
             branch="tls_weakness.weak_cipher_offer", observed=_tls_probe_observed, label="offer_weak_ciphers"),
+    # CLAIM 4 — certificate VALIDITY is now WIRED (M1.3). A DEDICATED handshake (_tls_cert_capture) retains
+    # the leaf DER + the capture INSTANT + its provenance; the OracleKind.CERTIFICATE_VALIDITY oracle
+    # re-derives the defect set (expired / not-yet-valid / hostname-mismatch / self-signed) OFFLINE from the
+    # retained bytes at the retained instant. A defect is an existential FACT. NOT clean-capable: the capture
+    # retains only the LEAF, so a non-defect is not a bounded negative over the chain — admission maps a
+    # conclusive non-fire to INCONCLUSIVE. Its own `cert_validity` context key + `cert_validity` label keep it
+    # distinct from the weak_crypto re-drive that shares the baseline handshake.
+    #
+    # DELIBERATELY LAST. The runner invokes one connection per distinct capture callable in redrive order
+    # (run_external_tool: `for rd in redrives ... if id(rd.capture) not in captured`), so appending this
+    # dedicated capture leaves the connection ordering of the four pre-existing handshakes (baseline, TLS1.0,
+    # TLS1.1, weak-cipher) byte-for-byte unchanged. That matters for exactly one fixture: the round-robin TLS
+    # pool permanent negative control (test_a_round_robin_tls_pool_would_have_been_falsely_cleared), which
+    # depends on the TLS1.0 probe landing on the pool member that rejects it. Inserting a 5th handshake
+    # anywhere BEFORE that probe would shift its connection parity and silently defeat the control.
+    Redrive("certificate_validity", _tls_cert_capture, _cert_validity_context,
+            branch="tls_weakness.certificate_validity", label="cert_validity"),
 )
 
 
@@ -1123,7 +1191,7 @@ def tls_scan(*, port: int = 443, extra_args: Sequence[str] = ()) -> ToolSpec:
     OWN gated handshake and the deterministic oracle judges the NEGOTIATED (protocol, cipher) and the
     PRESENTED cert.
 
-    WAVE 3 breadth — the spec now carries FIVE runner-owned re-drives over FOUR bounded handshakes
+    WAVE 3 breadth + M1.3 — the spec now carries SIX runner-owned re-drives over FIVE bounded handshakes
     (``tls_breadth.TLS_HANDSHAKE_BUDGET_PER_ENDPOINT``), and each claim is registered at the capability it
     honestly has:
 
@@ -1140,10 +1208,14 @@ def tls_scan(*, port: int = 443, extra_args: Sequence[str] = ()) -> ToolSpec:
         TLS1.2 so the oracle's fire is attributable to the CIPHER and not to a deprecated version, and the
         endpoint SELECTS one: a FACT. NOT clean-capable (the local OpenSSL build limits what can be
         offered).
-      * ``tls_weakness.certificate_validity`` — **NOT WIRED**, and deliberately so. The derivation exists
-        and is tested (``tls_breadth.classify_certificate_defects``), but no ``OracleKind`` adjudicates
-        certificate validity, so a re-drive there could only ever admit INCONCLUSIVE while reporting a
-        reason that was not the real one. The registry row carries ``wired: false`` + ``blocking_work``.
+      * ``tls_weakness.certificate_validity`` — **WIRED (M1.3)**. A DEDICATED bounded handshake
+        (``_tls_cert_capture``) retains the presented leaf DER + the capture INSTANT + its provenance, and the
+        ``OracleKind.CERTIFICATE_VALIDITY`` oracle re-derives the defect set (expired / not-yet-valid /
+        hostname-mismatch / self-signed) OFFLINE from the retained bytes at the retained instant: a defect is
+        an existential FACT. **NOT clean-capable** (the capture retains only the LEAF, so a non-defect is not a
+        bounded negative over the chain — a conclusive non-fire admits INCONCLUSIVE). Distinct from
+        ``weak_crypto`` (the signature hash / key size); this judges the window / SAN / issuer the weak-crypto
+        oracle never reads.
 
     HONEST SCOPE: the baseline capture uses a standard client, so ``weak_tls`` fires there only on a weakness
     a modern client still negotiates; the version/cipher probes widen that by restricting what VIGIL OFFERS.

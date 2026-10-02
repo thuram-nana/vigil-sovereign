@@ -457,20 +457,22 @@ def test_tls_scan_toolspec_argv_and_propose():
     spec = tls_scan(port=8443)
     assert spec.name == "tls_scan"
     assert spec.build_argv("example.test") == ["sslscan", "--no-colour", "example.test:8443"]
-    # WAVE 3 widened the family from 2 re-drives to 5, over 4 distinct bounded handshakes (the baseline
-    # modern-client capture is SHARED by two of them). The bug_class SET is unchanged — every new claim
-    # reuses the existing TLS_WEAKNESS oracle kind rather than adding one — so re-drives sharing a bug_class
-    # are told apart by their ``label``, which discriminates their check_id / finding_ref.
-    assert {r.bug_class for r in spec.redrives} == {"weak_tls", "weak_crypto_artifact"}
-    assert len(spec.redrives) == 5, [(r.bug_class, r.label, r.branch) for r in spec.redrives]
-    assert len({id(r.capture) for r in spec.redrives}) == 4, "the per-endpoint handshake budget drifted"
+    # WAVE 3 widened the family from 2 re-drives to 5; M1.3 added a 6th over a 5th distinct bounded handshake
+    # (the baseline modern-client capture is still SHARED by two of them). The deprecated-protocol / weak-cipher
+    # claims reuse the TLS_WEAKNESS kind and are told apart by ``label``; certificate_validity routes to its OWN
+    # dedicated CERTIFICATE_VALIDITY kind via a distinct bug_class + the fresh `cert_validity` ctx key.
+    assert {r.bug_class for r in spec.redrives} == {"weak_tls", "weak_crypto_artifact", "certificate_validity"}
+    assert len(spec.redrives) == 6, [(r.bug_class, r.label, r.branch) for r in spec.redrives]
+    assert len({id(r.capture) for r in spec.redrives}) == 5, "the per-endpoint handshake budget drifted"
     assert {r.branch for r in spec.redrives} == {
         "tls_weakness.tls_handshake", "weak_crypto.cert_signature_algorithm",
-        "tls_weakness.deprecated_protocol_offer", "tls_weakness.weak_cipher_offer"}
-    # tls_weakness.certificate_validity is DELIBERATELY absent: no OracleKind adjudicates certificate
-    # validity, so a re-drive there could only ever admit INCONCLUSIVE while reporting a reason that was
-    # not the real one. The registry row carries wired:false; see test_tls_breadth.py.
-    assert "tls_weakness.certificate_validity" not in {r.branch for r in spec.redrives}
+        "tls_weakness.deprecated_protocol_offer", "tls_weakness.weak_cipher_offer",
+        "tls_weakness.certificate_validity"}
+    # tls_weakness.certificate_validity is WIRED (M1.3): a DEDICATED capture retains the leaf DER + the capture
+    # instant + its provenance, and OracleKind.CERTIFICATE_VALIDITY re-derives the defect set OFFLINE. It admits
+    # a FACT on a defect and INCONCLUSIVE (never CLEAN) on a non-defect. Exactly one re-drive admits to it.
+    cert_rds = [r for r in spec.redrives if r.branch == "tls_weakness.certificate_validity"]
+    assert len(cert_rds) == 1 and cert_rds[0].label == "cert_validity"
     assert len({(r.bug_class, r.label) for r in spec.redrives}) == len(spec.redrives), (
         "two re-drives share a (bug_class, label) and would collide on one check_id")
     # proposes ONLY when the tool actually reached a TLS service

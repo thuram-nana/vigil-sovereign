@@ -283,6 +283,14 @@ BUG_CLASS_ORACLES: dict[str, tuple[OracleKind, ...]] = {
     # OID name. Reuses TLS_WEAKNESS (a weak-crypto FACT) via a distinct `crypto_artifact` ctx key no
     # benchmark finding carries, so the gate stays byte-identical. See verify/weak_crypto.py.
     "weak_crypto_artifact": (OracleKind.TLS_WEAKNESS,),
+    # M1.3 TLS certificate VALIDITY: the presented leaf's validity window / identity / self-issuance, a FACT
+    # when re-derived from the RETAINED DER at a RETAINED capture instant (verify.oracles
+    # certificate_validity_oracle). Routes to its OWN dedicated OracleKind.CERTIFICATE_VALIDITY (held OUT of
+    # the frozen _ALL_ORACLES fallback, reachable ONLY via this row, firing only when the ctx carries the
+    # `cert_validity` key no benchmark/scan finding carries), so the unknown-class fallback stays EXACTLY 15
+    # and `make gate` is byte-identical. Distinct from `weak_crypto_artifact` (the signature hash / key size);
+    # this judges the window/SAN/issuer the weak-crypto oracle never reads.
+    "certificate_validity": (OracleKind.CERTIFICATE_VALIDITY,),
     # supply chain: a scanner's "package @ version is affected by CVE" is a FACT only when the version
     # provably falls in the advisory's affected range (verify.version's deterministic membership check).
     "vulnerable_dependency": (OracleKind.VERSION_RANGE,),
@@ -1503,6 +1511,14 @@ class OracleVerifier:
                 return oracles.tls_weakness_oracle(ctx["tls"])
             if "crypto_artifact" in ctx:
                 return oracles.weak_crypto_artifact_oracle(ctx["crypto_artifact"])
+            return None
+        # M1.3 certificate validity — fire ONLY when the ctx carries the fresh `cert_validity` record (the
+        # retained DER + capture instant + its provenance); no benchmark/scan/engage finding carries it, so
+        # this arm is inert on the gate path. The oracle re-derives the defect set offline and REFUSES to
+        # adjudicate expiry when the instant has no retained provenance.
+        if kind is OracleKind.CERTIFICATE_VALIDITY:
+            if "cert_validity" in ctx:
+                return oracles.certificate_validity_oracle(ctx["cert_validity"])
             return None
         if kind is OracleKind.VERSION_RANGE:
             if "version_advisory" in ctx:
