@@ -50,6 +50,13 @@ from vigil_integration.sovereign_deploy.acceptance import (
     run_acceptance,
 )
 
+# The acceptance harness drives the full CRUCIBLE engine pipeline (framework.v2.* — real engage,
+# proof mint, offline re-verify, entitlement, AEGIS). That engine is absent from the keyless
+# two-env boundary leg BY CONSTRUCTION (FATAL-2), so these end-to-end checks can only run in the
+# offense leg. Skip the whole module where framework is unavailable; it runs fully under offense.
+# (The harness module itself lazy-imports framework, so importing it above stays safe here.)
+pytest.importorskip("framework.v2")
+
 
 # ---------------------------------------------------------------------------------------------------
 # a hermetic (no-egress) Anthropic client — the documented test/air-gap seam ``think`` accepts. It
