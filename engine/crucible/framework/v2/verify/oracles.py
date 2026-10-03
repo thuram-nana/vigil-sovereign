@@ -4819,13 +4819,20 @@ def _cred_leg_has_capture(status: "int | None", body: str, header_blob: str) -> 
 def _cred_descriptor_denial_model(descriptor: Mapping[str, Any]) -> "tuple[frozenset[int], list[str], str]":
     """Extract the operator-attested denial model from the protected-resource descriptor:
     ``(denial_statuses, login_redirect_locations, denial_body_signature)``. ``denial_statuses`` ALWAYS includes
-    the universal {401,403}; the operator may attest additional mechanisms. Pure."""
+    the universal {401,403}; the operator may attest additional mechanisms. Pure.
+
+    H1 coherence guard: a 2xx (200-299) is this oracle's definition of an authenticated SUCCESS, so an
+    operator-attested denial_status that intersects [200,299] is INCOHERENT — it would let a 2xx baseline count
+    as "denied" while a DIFFERENT 2xx weak leg fires. Such entries are DROPPED here (never let the success code
+    mean "denied"); a genuine soft-200 denial must be attested via ``denial_body_signature`` (which is sound in
+    both directions). A baseline whose only "denial" was a dropped 2xx then correctly falls through to the
+    "baseline is NOT a denial" REFUSE, surfacing the misconfiguration instead of manufacturing a differential."""
     statuses: set[int] = set(_CRED_DENIAL_STATUSES)
     raw_statuses = descriptor.get("denial_statuses")
     if isinstance(raw_statuses, (list, tuple, set, frozenset)):
         for s in raw_statuses:
             si = _cred_status_int(s)
-            if si is not None:
+            if si is not None and not (200 <= si < 300):   # H1: a 2xx is SUCCESS, never a denial
                 statuses.add(si)
     raw_loc = descriptor.get("login_redirect_locations")
     locations = ([t for t in (_coerce_text(x).strip() for x in raw_loc) if t]
@@ -4845,7 +4852,11 @@ def _cred_access_is_denial(status: "int | None", body: str, header_blob: str, lo
     if status is not None and status in denial_statuses:
         return True
     if status is not None and status in _CRED_REDIRECT_STATUSES and location and login_locations:
-        if any(loc and (location.startswith(loc) or loc in location) for loc in login_locations):
+        # H2: PREFIX match only. A removed ``loc in location`` substring arm could mis-classify a non-login
+        # redirect that merely EMBEDS the attested login url (an open-redirect to ``evil?next=.../login``) as a
+        # denial. A real "unauthenticated => redirect to login" gate puts the login url at the START of Location
+        # (optionally with a ``?return=`` suffix), which startswith captures; a login url buried mid-string is not.
+        if any(loc and location.startswith(loc) for loc in login_locations):
             return True
     if body_sig and (body_sig in body or (bool(header_blob) and body_sig in header_blob)):
         return True

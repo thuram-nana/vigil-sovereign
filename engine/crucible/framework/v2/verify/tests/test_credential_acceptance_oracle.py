@@ -167,7 +167,73 @@ def test_a_baseline_that_is_not_denied_is_refused():
     sig = credential_acceptance_oracle(_record(weak_access=_authed_access(), baseline_access=plain_200))
     assert not sig.fired, sig.evidence
     assert "REFUSED" in sig.evidence and "auth-gating" in sig.evidence
+
+
+# -- (f) H1: an operator-attested 2xx "denial" status is INCOHERENT (a 2xx is SUCCESS) => dropped => REFUSE -
+def test_a_two_xx_attested_as_a_denial_status_is_dropped_and_refuses():
+    # The operator mis-attests 200 as a "denial" status. A 2xx is this oracle's SUCCESS definition, so honoring
+    # it would let a 200 baseline count as "denied" while a DIFFERENT 2xx (201) weak read fires — a false FACT
+    # from a self-contradictory attestation (red-pen B1). H1 DROPS the 2xx from the denial set, so the 200
+    # baseline is correctly NOT a denial => REFUSE. No hostile TARGET reaches this; it needs operator misconfig.
+    desc = {**_DESCRIPTOR, "denial_statuses": [200]}
+    weak_201 = {"status": 201, "body": f"<main {_AUTHED_SIGNAL}>created</main>", "headers": {},
+                "url": _RESOURCE_URL, "method": "GET"}
+    base_200 = {"status": 200, "body": "<main>ok</main>", "headers": {}, "url": _RESOURCE_URL, "method": "GET"}
+    sig = credential_acceptance_oracle(_record(descriptor=desc, weak_access=weak_201, baseline_access=base_200))
+    assert not sig.fired, sig.evidence
+    assert "REFUSED" in sig.evidence and "denial" in sig.evidence.lower()
     assert sig.observed["baseline_is_denial"] is False
+
+
+# -- (g) H2: a non-login redirect that merely EMBEDS the login url is NOT a denial (prefix match only) ------
+def test_an_open_redirect_embedding_the_login_url_is_not_classified_as_a_denial():
+    # The baseline is a 302 to an OPEN-REDIRECT that embeds the attested login url mid-string
+    # (evil?next=.../login) — NOT an "unauthenticated => redirect to login" gate. The removed ``loc in location``
+    # substring arm would mis-read it as a denial; H2's prefix-only match rejects it => baseline NOT a denial =>
+    # REFUSE. (It could not mint a false FACT regardless — this only tightens an imprecise classifier.)
+    open_redirect = {"status": 302, "body": "",
+                     "headers": {"Location": "https://evil.test/redir?next=https://app.example/login"},
+                     "url": _RESOURCE_URL, "method": "GET"}
+    sig = credential_acceptance_oracle(_record(weak_access=_authed_access(), baseline_access=open_redirect))
+    assert not sig.fired, sig.evidence
+    assert "REFUSED" in sig.evidence
+    assert sig.observed["baseline_is_denial"] is False
+
+
+# -- (h) H1 corollary: a GENUINE soft-200 denial via denial_body_signature still fires (the sound path) -----
+def test_a_soft_200_denial_via_body_signature_still_fires():
+    # Some apps "deny" with a 200 that renders a login page rather than a 401. The SOUND way to attest that is a
+    # denial_body_signature (sound in both directions), NOT a 2xx denial status. Baseline: 200 carrying the login
+    # signature (denied); weak: 200 carrying the authed signal and NOT the login signature (authenticated). Fires.
+    desc = {**_DESCRIPTOR, "denial_body_signature": "please sign in to continue"}
+    base_soft = {"status": 200, "body": "<form>please sign in to continue</form>", "headers": {},
+                 "url": _RESOURCE_URL, "method": "GET"}
+    sig = credential_acceptance_oracle(_record(descriptor=desc, weak_access=_authed_access(),
+                                               baseline_access=base_soft))
+    assert sig.fired, sig.evidence
+    assert sig.observed["baseline_is_denial"] is True
+    assert sig.observed["weak_is_denial"] is False
+
+
+# -- (i) H1 fire-INCREASING corrective case — the ONE case the delta turns a non-fire INTO a fire -----------
+def test_h1_corrects_a_self_contradictory_200_denial_and_fires_the_real_acceptance():
+    # The ONLY behavior the H1/H2 delta makes MORE firing (red-pen PROBE B). An operator who mis-attests 200 as a
+    # "denial" status PRE-delta had the weak 200 read mis-classified as a denial => a genuine acceptance was
+    # SUPPRESSED (a false NEGATIVE). POST-delta H1 drops the 2xx (a 2xx is SUCCESS), the baseline's genuine 401
+    # denial stands, and the weak 200 carrying the attested authenticated signal fires the REAL achieved-access
+    # differential. This is a TRUE FACT (a correction of a previously operator-suppressed acceptance), not a false
+    # one — the weak session reached an authenticated state the 401-denied session could not, same request.
+    desc = {**_DESCRIPTOR, "denial_statuses": [200]}
+    weak_200 = {"status": 200, "body": f"<main {_AUTHED_SIGNAL}>Your account settings</main>", "headers": {},
+                "url": _RESOURCE_URL, "method": "GET"}
+    base_401 = {"status": 401, "body": "Authentication required", "headers": {},
+                "url": _RESOURCE_URL, "method": "GET"}
+    sig = credential_acceptance_oracle(_record(descriptor=desc, weak_access=weak_200, baseline_access=base_401))
+    assert sig.fired and sig.confidence >= 0.95, sig.evidence
+    assert sig.observed["baseline_is_denial"] is True       # the 401 is a genuine denial (unaffected by H1)
+    assert sig.observed["weak_is_denial"] is False           # H1 dropped the self-contradictory 200-as-denial
+    assert sig.observed["weak_is_authenticated_success"] is True
+    assert "ACHIEVED STATE" in sig.evidence
 
 
 # -- the DECISIVE guard: the attested signal present in BOTH legs CANCELS (no differential) ----------------
