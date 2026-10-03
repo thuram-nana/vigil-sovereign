@@ -4733,6 +4733,109 @@ _CRED_MARKER_MIN_ENTROPY = 2.5   # bits/char — the same floor the system-promp
 # Auth-REJECTION statuses on the WEAK-credential leg CONTRADICT acceptance even if a marker differential
 # coincidentally holds — the red-pen smell was a FACT that "recorded status=401 while asserting acceptance".
 _CRED_REJECTION_STATUSES = frozenset({401, 403})
+# The broader set of auth-REJECTION outcome statuses a login endpoint returns for a bad credential — used by
+# the SAME-SHAPE auth-OUTCOME predicate (NOT the post-state veto, which stays {401,403}). 400 = bad login
+# request, 422 = validation rejection.
+_CRED_AUTH_REJECT_STATUSES = frozenset({400, 401, 403, 422})
+
+# SAME-SHAPE FLOOR — the second red-pen defect this slice closes. The oracle advertised a "SAME-SHAPE
+# differential" but NEVER verified the two legs were same-shape: it only checked each leg had SOME capture,
+# then computed ``marker_in_weak AND NOT marker_in_baseline``. So a REJECTING weak leg (HTTP 200, "Invalid
+# credentials", no session) carrying a NON-exclusive high-entropy marker that clears the entropy floor (a
+# server banner "X-Powered-By: Express/4.18.2", or a session-cookie NAME "Set-Cookie: JSESSIONID=" present on
+# EVERY response) + a NON-same-shape baseline (a 404 / 500 that simply lacks the ubiquitous marker) manufactured
+# a false differential and a 0.95 ACCEPTED FACT. A differential is only meaningful when BOTH legs are the SAME
+# KIND of auth response to the SAME login request, differing ONLY in the auth OUTCOME. Two signals (plus an
+# optional provenance binding) establish same-shape; a pair that is not same-shape downgrades to a
+# LEAD/INCONCLUSIVE — never a FACT (an honest LEAD beats a false FACT):
+#   (1) STATUS same-shape — both legs must carry a login-endpoint ACCEPT-or-REJECT OUTCOME status. A 2xx/3xx
+#       (success / redirect) or a 400/401/403/422 (rejection) is an outcome; a 404/410 (endpoint/resource
+#       absent), 405/406 (wrong request kind), 408/429 (timeout/throttle), ANY 5xx (server error), or an ABSENT
+#       status is NOT an auth outcome — that leg is a different kind of event, so the differential is
+#       meaningless (this disarms the 404 / 500 red-pen baselines).
+#   (2) STRUCTURAL same-shape — the two response BODIES must be the same document kind and not structurally
+#       dissimilar beyond a threshold, measured by the module's OWN token-noise-invariant ``structural_diff``
+#       (the in-canon tool). A login page (HTML) vs an error JSON, or any cross-kind pair, scores a maximal
+#       diff and is NOT same-shape.
+#   (3) PROVENANCE binding (when the ctx carries it on BOTH legs) — the two legs must be the SAME login request
+#       (same url + method); a mismatch is not same-shape. This makes same-shape structural, not just heuristic.
+# After same-shape is enforced, a marker present on EVERY response (server banner, cookie NAME) appears in a
+# TRUE same-shape baseline too and the differential correctly CANCELS — only a genuine auth-outcome difference
+# survives.
+_CRED_SAMESHAPE_MAX_STRUCTURAL = 0.5   # bodies sharing < half their structure are not the same kind of page
+
+
+def _cred_is_auth_outcome_status(status: "int | None") -> bool:
+    """True iff a captured status is a login endpoint's ACCEPT-or-REJECT OUTCOME (a same-shape auth response).
+    2xx/3xx (success / redirect) and 400/401/403/422 (rejection) are outcomes; a 404/405/408/410/429 or any
+    5xx is NOT an auth outcome (a missing endpoint / wrong request kind / server error), and an ABSENT status
+    cannot be placed in the auth flow. Pure."""
+    if status is None:
+        return False
+    if 200 <= status < 400:
+        return True
+    return status in _CRED_AUTH_REJECT_STATUSES
+
+
+def _cred_leg_provenance(resp: Any) -> "tuple[str, str]":
+    """Extract ``(url, method)`` request provenance from a captured leg, or ``('', '')`` when absent. Pure.
+    Reads ONLY the request's url / method (where the capture carries it) — never any credential or secret."""
+    if not isinstance(resp, Mapping):
+        return "", ""
+    url = _coerce_text(resp.get("url", resp.get("request_url", ""))).strip()
+    method = _coerce_text(resp.get("method", resp.get("request_method", ""))).strip().upper()
+    req = resp.get("request")
+    if isinstance(req, Mapping):
+        url = url or _coerce_text(req.get("url", "")).strip()
+        method = method or _coerce_text(req.get("method", "")).strip().upper()
+    return url, method
+
+
+def _cred_same_shape(weak_resp: Any, baseline_resp: Any, weak_body: str, base_body: str,
+                     weak_status: "int | None", base_status: "int | None") -> "tuple[bool, str, dict]":
+    """Decide whether the weak-credential leg and the negative-credential baseline leg are the SAME KIND of
+    auth response to the SAME login request (differing ONLY in the auth OUTCOME). Returns
+    ``(same_shape, lead_reason, obs)``; pure, uses the module's OWN ``structural_diff``. See the constant block
+    above for the contract. When ``same_shape`` is False the differential is meaningless — the caller must
+    downgrade to a LEAD/INCONCLUSIVE, never a FACT."""
+    weak_outcome = _cred_is_auth_outcome_status(weak_status)
+    base_outcome = _cred_is_auth_outcome_status(base_status)
+    sd = structural_diff(weak_body, base_body)
+    structural_same = sd <= _CRED_SAMESHAPE_MAX_STRUCTURAL
+    weak_url, weak_method = _cred_leg_provenance(weak_resp)
+    base_url, base_method = _cred_leg_provenance(baseline_resp)
+    prov_bound = bool(weak_url and base_url)
+    prov_same = (not prov_bound) or (
+        weak_url == base_url and (not weak_method or not base_method or weak_method == base_method))
+    obs = {
+        "same_shape_weak_status_is_auth_outcome": weak_outcome,
+        "same_shape_baseline_status_is_auth_outcome": base_outcome,
+        "same_shape_structural_diff": round(sd, 3),
+        "same_shape_provenance_bound": prov_bound,
+        "same_shape_provenance_match": prov_same,
+    }
+    same_shape = weak_outcome and base_outcome and structural_same and prov_same
+    obs["same_shape"] = same_shape
+    if same_shape:
+        return True, "", obs
+    if not (weak_outcome and base_outcome):
+        reason = (f"LEAD: the two legs are NOT same-shape — a leg's status is not a login-endpoint "
+                  f"accept-or-reject OUTCOME (weak_status={weak_status}, baseline_status={base_status}); a "
+                  "404/410/405/5xx or an absent status is a different kind of event (a missing endpoint / "
+                  "server error), so the marker differential is meaningless, not an auth-outcome difference — "
+                  "an INCONCLUSIVE LEAD, never a FACT (the red-pen 404/500-baseline false-FACT shape)")
+    elif not structural_same:
+        reason = (f"LEAD: the two legs are NOT same-shape — the response bodies differ in document KIND / are "
+                  f"structurally dissimilar beyond the floor (structural_diff {sd:.2f} > "
+                  f"{_CRED_SAMESHAPE_MAX_STRUCTURAL}); a login page vs a different document is not the same "
+                  "kind of auth response, so the marker differential is meaningless — an INCONCLUSIVE LEAD, "
+                  "never a FACT")
+    else:
+        reason = (f"LEAD: the two legs are NOT same-shape — the bound request provenance differs (weak "
+                  f"{weak_method or '?'} {weak_url!r} vs baseline {base_method or '?'} {base_url!r}); the "
+                  "differential is only meaningful across the SAME login request — an INCONCLUSIVE LEAD, "
+                  "never a FACT")
+    return False, reason, obs
 
 
 def _cred_status_int(status: Any) -> "int | None":
@@ -4793,6 +4896,7 @@ def credential_acceptance_oracle(observed: Any) -> OracleSignal:
             "should_reject":  ["<cred id>", ...],                          # the planted must-be-REJECTED set
             "success_marker": "<string that appears ONLY on a successful auth>"
           },
+          # each leg: optional request provenance ("url"/"method") binds same-shape structurally where present
           "auth_response":     {"status": <int>, "body": "...", "headers": {...}},  # the WEAK-credential leg
           "baseline_response": {"status": <int>, "body": "...", "headers": {...}}   # the NEGATIVE-cred baseline
         }
@@ -4807,7 +4911,12 @@ def credential_acceptance_oracle(observed: Any) -> OracleSignal:
 
     LEAD (a non-fire that is NOT a sound negative — just undecidable from this input):
       * a short / low-entropy ``success_marker`` cannot be a reliable discriminator (a coincidental substring
-        could manufacture a differential) — downgraded to a LEAD, never a FACT (the smuggling-canary treatment).
+        could manufacture a differential) — downgraded to a LEAD, never a FACT (the smuggling-canary treatment);
+      * the two legs are NOT SAME-SHAPE — a leg's status is not a login-endpoint accept-or-reject OUTCOME
+        (a 404/410/405/5xx or an absent status), the bodies differ in document KIND / beyond the structural
+        floor (``structural_diff``), or the bound request provenance differs. A differential across non-same-
+        shape legs is meaningless (a 404/500 baseline that merely lacks a ubiquitous marker manufactures a
+        false differential) — downgraded to a LEAD, never a FACT.
 
     NON-FIRE (safe) — a sound judgement that did NOT confirm acceptance:
       * the attempted ``credential_id`` is NOT in ``should_reject`` (not a planted weak credential); or
@@ -4914,6 +5023,19 @@ def credential_acceptance_oracle(observed: Any) -> OracleSignal:
                       "response (no status, no body, no headers) — there is no sound differential to adjudicate"),
             observed=base_obs)
 
+    # SAME-SHAPE ENFORCEMENT — the differential is only meaningful when BOTH legs are the SAME KIND of auth
+    # response to the SAME login request, differing ONLY in the auth OUTCOME. A non-same-shape baseline (a
+    # 404/500, a different-kind document, a different endpoint) that merely lacks a ubiquitous marker
+    # manufactures a false differential (the red-pen defect). Enforce same-shape with the module's OWN
+    # structural_diff + the auth-outcome status predicate + optional provenance binding BEFORE trusting the
+    # differential; a non-same-shape pair downgrades to a LEAD/INCONCLUSIVE, never a FACT.
+    same_shape, shape_lead, shape_obs = _cred_same_shape(
+        weak_resp, baseline_resp, weak_body, base_body, weak_status, base_status)
+    if not same_shape:
+        return OracleSignal(
+            kind=OracleKind.CREDENTIAL_ACCEPTANCE, fired=False, confidence=0.0,
+            evidence=shape_lead, observed={**base_obs, **shape_obs})
+
     marker_in_weak = _cred_marker_present(marker, weak_body, weak_hdr)
     marker_in_baseline = _cred_marker_present(marker, base_body, base_hdr)
     weak_rejected_status = weak_status in _CRED_REJECTION_STATUSES
@@ -4921,6 +5043,7 @@ def credential_acceptance_oracle(observed: Any) -> OracleSignal:
     accepted = differential and not weak_rejected_status
     fire_obs = {
         **base_obs,
+        **shape_obs,
         "marker_in_weak_leg": marker_in_weak,
         "marker_in_negative_baseline": marker_in_baseline,
         "differential": differential,

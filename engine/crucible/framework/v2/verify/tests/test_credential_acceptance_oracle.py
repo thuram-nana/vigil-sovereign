@@ -21,7 +21,10 @@ from __future__ import annotations
 
 from framework.v2.verify import OracleVerifier
 from framework.v2.verify.models import OracleKind
-from framework.v2.verify.oracles import credential_acceptance_oracle
+from framework.v2.verify.oracles import (
+    _CRED_SAMESHAPE_MAX_STRUCTURAL as _SS_MAX_STRUCTURAL,
+    credential_acceptance_oracle,
+)
 
 _CORPUS = "OBSIDIAN-TEST-corpus-7"
 # A STRONG success_marker (33 chars, ~3.9 bits/char) — clears the discriminator floor, so firing is governed
@@ -145,6 +148,104 @@ def test_a_rejection_status_on_the_weak_leg_vetoes_a_coincidental_differential()
     assert not sig.fired, sig.evidence
     assert sig.observed["differential"] is True
     assert sig.observed["weak_status_contradicts_acceptance"] is True
+
+
+# == SAME-SHAPE ENFORCEMENT (the second red-pen false-FACT this slice disarms) ============================
+# The oracle advertised a "same-shape differential" but never VERIFIED the two legs were same-shape — it only
+# checked each leg had SOME capture. So a REJECTING weak leg carrying a NON-exclusive high-entropy marker
+# (a server banner / a session-cookie NAME present on EVERY response) + a NON-same-shape baseline (a 404/500
+# that simply lacks the ubiquitous marker) manufactured a false differential and a 0.95 ACCEPTED FACT. These
+# controls assert same-shape is now ENFORCED (via the module's own structural_diff + the auth-outcome status
+# predicate + optional provenance binding): a non-same-shape pair is a LEAD, never a FACT.
+
+# -- (A6) non-exclusive high-entropy marker (server banner on every response) + NON-same-shape 404 baseline
+def test_red_pen_a6_banner_marker_with_non_same_shape_404_baseline_does_not_fire():
+    # The weak leg is a textbook REJECTING login (HTTP 200 re-renders the error, NO session granted). The planted
+    # marker is a server banner present on EVERY response (non-exclusive to success). The baseline is a 404 — NOT
+    # the same kind of auth response — so it lacks the banner and manufactures a false differential. MUST NOT fire.
+    banner = "X-Powered-By: Express/4.18.2"
+    policy = dict(_POLICY, success_marker=banner)
+    weak = {"status": 200, "body": "Invalid credentials. Please try again.",
+            "headers": {"X-Powered-By": "Express/4.18.2"}}
+    base = {"status": 404, "body": "Not Found", "headers": {}}   # NON-same-shape (missing endpoint)
+    sig = credential_acceptance_oracle(_record(policy=policy, weak_leg=weak, baseline_leg=base))
+    assert not sig.fired, sig.evidence
+    assert "LEAD" in sig.evidence and "same-shape" in sig.evidence
+    assert sig.observed["same_shape"] is False
+    assert sig.observed["same_shape_baseline_status_is_auth_outcome"] is False
+    # and it does not reach FACT strength via the verifier, nor re-fire offline
+    v = OracleVerifier()
+    rec = _record(policy=policy, weak_leg=weak, baseline_leg=base)
+    assert not v.confirm({"bug_class": "credential_acceptance", "credential_acceptance": rec}).confirmed
+    assert not credential_acceptance_oracle(dict(rec)).fired
+
+
+# -- (A6b) session-cookie NAME present on EVERY response + NON-same-shape 500 baseline --------------------
+def test_red_pen_a6b_cookie_name_marker_with_non_same_shape_500_baseline_does_not_fire():
+    # Many apps issue a session cookie on FAILED login too (an anonymous session); only the VALUE differs. The
+    # operator plants the cookie-NAME marker — present on success AND failure. With a mismatched 500 baseline the
+    # old oracle fired falsely; same-shape enforcement rejects the 500 (not an auth outcome). MUST NOT fire.
+    marker = "Set-Cookie: JSESSIONID="
+    policy = dict(_POLICY, success_marker=marker)
+    weak = {"status": 200, "body": "Login failed", "headers": {"Set-Cookie": "JSESSIONID=anon-xyz; error=1"}}
+    base = {"status": 500, "body": "Server Error", "headers": {}}   # NON-same-shape (server error)
+    sig = credential_acceptance_oracle(_record(policy=policy, weak_leg=weak, baseline_leg=base))
+    assert not sig.fired, sig.evidence
+    assert "LEAD" in sig.evidence and "same-shape" in sig.evidence
+    assert sig.observed["same_shape"] is False
+
+
+# -- the PRINCIPLED cancel: give it a TRUE same-shape baseline that DOES carry the ubiquitous marker ------
+def test_a_same_shape_baseline_carrying_the_ubiquitous_marker_cancels():
+    # The sound fix for A6 is not just "reject the 404" — with a genuine same-shape rejecting baseline (a 401
+    # login rejection that carries the SAME server banner, because the banner is on every response), the marker
+    # appears in BOTH legs and the differential correctly CANCELS. Only a genuine auth-outcome difference fires.
+    banner = "X-Powered-By: Express/4.18.2"
+    policy = dict(_POLICY, success_marker=banner)
+    weak = {"status": 200, "body": "Invalid credentials.", "headers": {"X-Powered-By": "Express/4.18.2"}}
+    base = {"status": 401, "body": "Invalid credentials.", "headers": {"X-Powered-By": "Express/4.18.2"}}
+    sig = credential_acceptance_oracle(_record(policy=policy, weak_leg=weak, baseline_leg=base))
+    assert not sig.fired, sig.evidence
+    assert sig.observed["same_shape"] is True          # legs ARE same-shape ...
+    assert sig.observed["marker_in_weak_leg"] is True
+    assert sig.observed["marker_in_negative_baseline"] is True   # ... so the ubiquitous marker cancels
+    assert sig.observed["differential"] is False
+
+
+# -- a cross-KIND baseline (HTML login page vs JSON error) is not same-shape -> LEAD ----------------------
+def test_a_cross_document_kind_baseline_is_not_same_shape():
+    # The weak leg is an HTML login page carrying the marker; the baseline is a JSON error body. Different
+    # document kinds score a maximal structural_diff — not the same kind of auth response — so the differential
+    # is meaningless. LEAD, never a FACT.
+    marker = "Set-Cookie: session=authenticated"
+    policy = dict(_POLICY, success_marker=marker)
+    weak = {"status": 200, "body": "<html><body><h1>Welcome</h1></body></html>",
+            "headers": {"Set-Cookie": "session=authenticated"}}
+    base = {"status": 401, "body": '{"error": "invalid", "code": 401, "detail": "bad creds"}', "headers": {}}
+    sig = credential_acceptance_oracle(_record(policy=policy, weak_leg=weak, baseline_leg=base))
+    assert not sig.fired, sig.evidence
+    assert "LEAD" in sig.evidence and "same-shape" in sig.evidence
+    assert sig.observed["same_shape"] is False
+    assert sig.observed["same_shape_structural_diff"] > _SS_MAX_STRUCTURAL
+
+
+# -- PROVENANCE binding: same endpoint fires; a different endpoint is not same-shape -> LEAD --------------
+def test_request_provenance_binding_enforces_same_endpoint():
+    marker = "Set-Cookie: session=authenticated"
+    policy = dict(_POLICY, success_marker=marker)
+    # both legs bound to the SAME login request -> same-shape holds, the genuine acceptance fires
+    weak = {"status": 200, "body": "Welcome", "headers": {"Set-Cookie": "session=authenticated"},
+            "url": "https://app.example/login", "method": "POST"}
+    base = {"status": 401, "body": "Invalid credentials", "headers": {},
+            "url": "https://app.example/login", "method": "POST"}
+    assert credential_acceptance_oracle(_record(policy=policy, weak_leg=weak, baseline_leg=base)).fired
+    # the baseline bound to a DIFFERENT endpoint is not the same login request -> LEAD, never a FACT
+    base_other = dict(base, url="https://app.example/somewhere-else")
+    sig = credential_acceptance_oracle(_record(policy=policy, weak_leg=weak, baseline_leg=base_other))
+    assert not sig.fired, sig.evidence
+    assert "LEAD" in sig.evidence and "provenance" in sig.evidence
+    assert sig.observed["same_shape_provenance_bound"] is True
+    assert sig.observed["same_shape_provenance_match"] is False
 
 
 # -- HARD PRECONDITION: REFUSE without the same-shape negative baseline -----------------------------------
