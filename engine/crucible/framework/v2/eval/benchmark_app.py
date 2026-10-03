@@ -145,6 +145,28 @@ def _reset_private(user: str) -> str:
     return f"RESET-PRIVATE-{user}-9931-2050"
 
 # ---------------------------------------------------------------------------
+# Credential-acceptance model (M-11.2). A POST login flow + an auth-gated protected resource, for the
+# credential_acceptance arm (integration/vigil_integration/live/runtime_redrive.py:credential_acceptance_redrive)
+# feeding credential_acceptance_oracle. The operator plants a TEST credential (admin:admin) marked
+# should-be-REJECTED; the VULNERABLE login ACCEPTS it and issues a session that reads the protected resource,
+# while a no-session baseline is DENIED — the achieved-access FACT. Two SAFE TWINS the arm must NEVER flag:
+#   * /credtest/login-strict — a REJECTING login: admin:admin gets 401 and NO session, so the weak read of the
+#                              protected resource is itself a denial (weak_access is a denial ⇒ oracle non-fire);
+#   * /credtest/public       — a NON-auth-gated resource served 200 to EVERYONE, so the no-session baseline is
+#                              NOT a denial (⇒ oracle REFUSES: a resource that serves everyone proves nothing).
+# The login routes are POST-only and the account/public routes are DELIBERATELY NOT linked from the index, so the
+# default GET-only benchmark crawl never POSTs a login, never obtains a session, and never reaches the
+# authenticated state — it adds 0 scored findings, so the default corpus + signed baseline stay byte-identical.
+# Exercised only by integration/tests/test_credential_acceptance_arm.py driving the gated re-drive.
+_CREDTEST_SESSIONS: dict[str, str] = {}          # session id -> username (set by the VULNERABLE login)
+_CREDTEST_COOKIE = "CREDTEST_SESSION"
+# The PLANTED weak credential the VULNERABLE login accepts (operator-planted TEST identity; never a real user).
+_CREDTEST_WEAK = {"admin": "admin"}
+# The attested AUTHENTICATED-CONTENT signal: >= 12 chars, high-entropy, present ONLY in an authenticated account
+# view (never on the 401 denial page), so it reliably tells an authenticated read from an inlined login page.
+_CREDTEST_SIGNAL = 'data-credtest-acct="acct_7Fq2Lp9x"'
+
+# ---------------------------------------------------------------------------
 # CSRF-achieved model (Wave 3.3). A cookie-authenticated state-changing endpoint that
 # authorizes a write on the ambient session cookie ALONE, driven by a REAL headless browser:
 #   * GET  /csrf/login?mode=none|strict — VIGIL's OWN authenticated session: the SERVER sets the
@@ -1307,6 +1329,56 @@ class BenchmarkHandler(BaseHTTPRequestHandler):
         else:
             self._respond(200, _page("Account", "<h1>Please log in</h1><p>You are logged out.</p>"))
 
+    # -- credential-acceptance model (M-11.2) ------------------------------
+
+    def _credtest_cookie(self) -> str:
+        """The presented CREDTEST session id (empty if none)."""
+        import http.cookies  # noqa: PLC0415 — stdlib
+        jar = http.cookies.SimpleCookie(self.headers.get("Cookie", "") or "")
+        morsel = jar.get(_CREDTEST_COOKIE)
+        return morsel.value if morsel is not None else ""
+
+    def _credtest_login(self) -> None:
+        # PLANTED BUG (credential acceptance). The VULNERABLE login ACCEPTS the operator-planted weak credential
+        # (admin:admin) and issues a session; any other credential is rejected 401 with NO session. State-changing
+        # POST — the default GET-only crawl never issues it, so `make gate` is unaffected.
+        fields = self._csrf_post_fields()
+        user = fields.get("username", [""])[0]
+        pw = fields.get("password", [""])[0]
+        if user and _CREDTEST_WEAK.get(user) == pw:
+            sid = f"credsess-{user}"
+            _CREDTEST_SESSIONS[sid] = user
+            self._respond(200, _page("Login", "<p>authenticated</p>"),
+                          extra_headers=[("Set-Cookie", f"{_CREDTEST_COOKIE}={sid}; Path=/; HttpOnly")])
+        else:
+            self._respond(401, _page("Login failed", "<p>Authentication required</p>"))
+
+    def _credtest_login_strict(self) -> None:
+        # SAFE TWIN (rejecting login). REJECTS the SAME planted weak credential (admin:admin) — no credential is
+        # accepted here, so the weak session gets NO cookie and its read of the protected resource is itself a
+        # denial ⇒ the oracle's SAFE negative. The arm must NEVER flag this. (There is no hard-coded accept.)
+        self._respond(401, _page("Login failed", "<p>Authentication required</p>"))
+
+    def _credtest_account(self) -> None:
+        # The auth-gated PROTECTED RESOURCE. A valid session reads an authenticated view carrying the attested
+        # signal; a no-session / invalid-session request is DENIED 401 (no signal) — the achieved-access
+        # differential the oracle adjudicates. The attested authenticated_signal appears ONLY on the 200 branch.
+        sid = self._credtest_cookie()
+        if sid and sid in _CREDTEST_SESSIONS:
+            user = _CREDTEST_SESSIONS[sid]
+            self._respond(200, _page("Account",
+                                     f"<main {_CREDTEST_SIGNAL}><h1>Account</h1>"
+                                     f"<p>Signed in as {user}. Your settings.</p></main>"))
+        else:
+            self._respond(401, _page("Denied", "<p>Authentication required</p>"))
+
+    def _credtest_public(self) -> None:
+        # SAFE TWIN (non-auth-gated resource). Served 200 to EVERYONE — a no-session baseline is NOT a denial, so
+        # the oracle REFUSES (a resource that serves everyone proves nothing). The arm must NEVER flag this even
+        # though the page carries the same signal: there is no access differential to adjudicate.
+        self._respond(200, _page("Public",
+                                 f"<main {_CREDTEST_SIGNAL}><h1>Public help</h1><p>Open to all.</p></main>"))
+
     # -- planted-bug routes ------------------------------------------------
 
     def _index(self) -> None:
@@ -1731,6 +1803,12 @@ _ROUTES = {
     # by the deep-profile gated reset assertion (which first POSTs a reset + login); the default GET-only crawl
     # only ever sees a logged-out page here, so the default corpus + signed baseline stay byte-identical.
     "/reset/account": BenchmarkHandler._reset_account,
+    # Credential-acceptance protected resource + safe-twin public resource (M-11.2). DELIBERATELY NOT linked from
+    # the index; /credtest/account is auth-gated (401 without a session) and /credtest/public is a non-auth-gated
+    # safe twin, so the default GET-only crawl adds 0 scored findings and the default corpus + signed baseline
+    # stay byte-identical. Exercised only by integration/tests/test_credential_acceptance_arm.py.
+    "/credtest/account": BenchmarkHandler._credtest_account,     # auth-gated protected resource (401 w/o session)
+    "/credtest/public": BenchmarkHandler._credtest_public,       # SAFE TWIN: non-auth-gated (served to everyone)
 }
 
 
@@ -1772,6 +1850,11 @@ _POST_ROUTES = {
     "/reset/safe/request": BenchmarkHandler._reset_safe_request,  # SAFE TWIN: random single-use token (no collision)
     "/reset/safe/consume": BenchmarkHandler._reset_safe_consume,  # SAFE TWIN: single-use, deleted on consume (no reuse)
     "/reset/login": BenchmarkHandler._reset_login,               # authenticate with the reset-set secret
+    # Credential-acceptance login flows (M-11.2). POST-only; the default GET-only benchmark crawl never issues a
+    # POST, so these leave `make gate` + the signed baseline byte-identical. Exercised only by
+    # integration/tests/test_credential_acceptance_arm.py driving the gated credential re-drive.
+    "/credtest/login": BenchmarkHandler._credtest_login,                # VULNERABLE: accepts the planted admin:admin
+    "/credtest/login-strict": BenchmarkHandler._credtest_login_strict,  # SAFE TWIN: rejects admin:admin (no session)
 }
 
 
