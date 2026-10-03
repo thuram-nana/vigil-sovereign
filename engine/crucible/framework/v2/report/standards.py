@@ -291,6 +291,14 @@ _STANDARDS: dict[str, ControlMapping] = {
     "jwt": _m("A07:2021", ("CWE-347",), pci=_AUTH_PCI, soc2=_AUTH_SOC2, iso=_AUTH_ISO, attack=("T1550.001",)),
     "jwt_forgeable": _m("A07:2021", ("CWE-347", "CWE-327"), pci=_AUTH_PCI, soc2=_AUTH_SOC2, iso=_AUTH_ISO,
                         attack=("T1606",)),
+    # M-11.3 CREDENTIAL ACCEPTANCE (OracleKind.CREDENTIAL_ACCEPTANCE): a target auth that ACCEPTED a credential
+    # the operator-planted TEST policy marks should-be-REJECTED — a weak/default/guessable credential admitted.
+    # A07:2021 Identification and Authentication Failures. CWE-1391 (Use of Weak Credentials), CWE-521 (Weak
+    # Password Requirements), CWE-307 (Improper Restriction of Excessive Authentication Attempts — the hydra
+    # brute-force surface the LEAD proposer exercises). ATT&CK T1110 (Brute Force) + T1078 (Valid Accounts: a
+    # weak credential becomes a valid account). Same _AUTH cluster as the other authentication classes.
+    "credential_acceptance": _m("A07:2021", ("CWE-1391", "CWE-521", "CWE-307"), pci=_AUTH_PCI, soc2=_AUTH_SOC2,
+                                iso=_AUTH_ISO, attack=("T1110", "T1078")),
     "credential_stuffing": _m("A07:2021", ("CWE-307", "CWE-799"), pci=_AUTH_PCI, soc2=_AUTH_SOC2, iso=_AUTH_ISO,
                              attack=("T1110.004",)),
     # Session fixation (Wave-3.2): an attacker-fixable session id survives authentication (CWE-384).
@@ -566,7 +574,8 @@ _WAVE2_GROUPS: tuple[tuple[_Wave2, tuple[str, ...]], ...] = (
       "password_reset_cross_user")),
     # ---- credential/recovery abuse (stuffing / MFA-bypass / reset reuse+collision) — MFA + strong-pw duals ----
     (_Wave2(("PR.AA-01", "PR.AA-03"), ("D3-MFA", "D3-SPP"), ("2002", "2004"), ("PW.1", "PW.5", "RV.1")),
-     ("credential_stuffing", "mfa_bypass", "password_reset_reuse", "password_reset_collision")),
+     ("credential_stuffing", "credential_acceptance", "mfa_bypass", "password_reset_reuse",
+      "password_reset_collision")),
     # ---- cryptographic failures (weak TLS / crypto artifact / mobile secret-at-rest) ----
     (_Wave2(("PR.DS-02", "PR.DS-01"), (), ("2002", "2003"), ("PW.5", "PW.9", "RV.1")),
      ("weak_tls", "weak_crypto_artifact", "mobile_misconfiguration")),

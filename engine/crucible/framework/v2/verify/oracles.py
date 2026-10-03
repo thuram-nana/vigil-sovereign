@@ -4684,6 +4684,436 @@ def certificate_validity_oracle(observed: Any) -> OracleSignal:
 
 
 # ---------------------------------------------------------------------------
+# M-11.3 CREDENTIAL ACCEPTANCE — the ACHIEVED-STATE authentication-weakness oracle for the credential unit.
+#
+# It CONFIRMS that a target's auth ACCEPTED a credential the OPERATOR-PLANTED TEST policy marks
+# should-be-REJECTED — proven NOT by the login response, but by an UNFORGEABLE ACHIEVED EFFECT: the weak/
+# attacker credential yielded a SESSION that SUCCESSFULLY ACCESSES AN AUTHENTICATED PROTECTED RESOURCE that a
+# KNOWN-BAD (or no) session is DENIED. The DISCRIMINATOR is the PROTECTED-RESOURCE ACCESS OUTCOME, never the
+# login response. Judged over the VIGIL-captured record ALONE — pure, offline, deterministic — so a confirmed
+# FACT re-verifies with no network. hydra (login brute-force) and john (sample-hash cracking) are only LEAD
+# PROPOSERS; VIGIL re-drives the login + the protected read through its OWN gated channel and THIS oracle is the
+# sole authority over the captured ACCESS outcomes, so a tool byte is never a FACT.
+#
+# WHY NOT THE LOGIN RESPONSE (the three failed attempts). Three prior versions proved "weak credential ACCEPTED"
+# by matching LOGIN-response BYTES, and all three failed the red-pen: a coincidental marker present on every
+# response + a differently-shaped baseline (404/500/302/301/307/204/plain-text) kept minting a false ACCEPTED
+# FACT on a target that actually REJECTED the credential. Byte-diffing a login response CANNOT soundly
+# distinguish accepted from rejected — a correctly-rejecting login re-renders content, sets anonymous cookies,
+# and carries server banners just like a success. This oracle therefore does NOT read the login response at all:
+# acceptance is an ACHIEVED STATE (reaching an auth-gated resource the denied session cannot), the one effect a
+# rejecting target cannot manufacture.
+#
+# TEST-IDENTITIES-ONLY, BY CONSTRUCTION. It fires only when the attempted credential IDENTIFIER is a MEMBER of
+# the operator-planted corpus's ``should_reject`` set (the weak / default / planted credentials the TEST policy
+# declares must be refused). A real user's login is never in the planted corpus, so it can never mint a FACT. The
+# oracle reads only credential IDENTIFIERS and the captured PROTECTED-RESOURCE access outcomes (status / headers /
+# body, for the attested denial + authenticated-content signals); it never reads or retains a secret/password
+# field, and it never echoes a response body into its output, so no real-user secret is captured.
+#
+# HARD PRECONDITION — REFUSE WITHOUT THE PLANTED TEST CORPUS. No ``corpus_id``, no ``policy``, a policy whose own
+# ``corpus_id`` does not bind the record's corpus, or an empty ``should_reject`` set => the oracle REFUSES (a
+# non-fire with an explicit reason, never a raise). Upstream maps that to a LEAD/INCONCLUSIVE, never a FACT.
+#
+# HARD PRECONDITION — REFUSE WITHOUT THE PROTECTED-RESOURCE ATTESTATION. Acceptance is an achieved READ of an
+# auth-gated resource, so the operator must ATTEST the resource in ``protected_resource``: its ``url`` (+ optional
+# ``method``), HOW it DENIES unauthenticated access (``denial_statuses`` — always including the universal
+# {401,403}; ``login_redirect_locations`` for a redirect-to-login/SSO denial; and/or a ``denial_body_signature``),
+# and the ``authenticated_signal`` that marks a genuinely authenticated view. Without the descriptor's ``url`` or
+# ``authenticated_signal`` the oracle REFUSES — a bare 2xx is not acceptance.
+#
+# ACCEPTANCE IS AN ACHIEVED-ACCESS DIFFERENTIAL — SAME REQUEST, DIFFERENT SESSION. The record carries, for the
+# SAME protected-resource request (same url + method), two captured reads differing ONLY in the session:
+#   * ``weak_access``     — the protected-resource response obtained WITH the weak-credential session;
+#   * ``baseline_access`` — the protected-resource response obtained with a KNOWN-BAD (or no) session.
+# The oracle fires "ACCEPTED" IFF ALL of these hold (re-derived offline from the retained bytes):
+#   (1) SAME-SHAPE — weak_access and baseline_access are reads of the SAME attested resource url with the SAME
+#       method (both legs carry request provenance that EQUALS the attested descriptor); a mismatch / missing
+#       provenance is not a differential => REFUSE.
+#   (2) BASELINE DENIED — baseline_access matches the attested denial (a status in the denial set, a redirect to
+#       the attested login/SSO url, or the attested denial-body signature). If the baseline is NOT denied, the
+#       resource is not actually auth-gating (it serves the known-bad/no session too) => REFUSE (no differential;
+#       a resource that serves everyone proves nothing).
+#   (3) WEAK AUTHENTICATED — weak_access is NOT a denial AND is an AUTHENTICATED SUCCESS: a 2xx that carries the
+#       attested ``authenticated_signal`` AND whose signal is ABSENT from the denied baseline (a true
+#       differential, not a coincidental substring present on both legs). A rejecting login yields no session, so
+#       weak_access is itself a denial => (3) fails => NO fire (the SAFE negative).
+#   (4) => the weak-credential session reached an authenticated state the denied session could not = ACCEPTED.
+# A too-short / low-entropy ``authenticated_signal`` cannot reliably tell an authenticated view from an inlined
+# login page, so it downgrades to a LEAD, never a FACT (the smuggling-canary floor). This mirrors the module's
+# own achieved-state canon (the session-fixation / MFA-bypass private-read reductions: a datum PRESENT in the
+# authorized read and ABSENT in a same-shape denied reference); runtime_redrive: "the control must be SAME-SHAPE
+# as the payload"; measured-claim: "measure a difference AS a difference".
+# ---------------------------------------------------------------------------
+
+# The authenticated-content-signal discriminator floor — mirrors the smuggling-canary floor. The
+# ``authenticated_signal`` is operator-attested STRUCTURAL text (a "Sign out" control / an account id / a
+# post-login sentinel), so there is no alnum-regex gate — but a signal that is too short OR too low-entropy
+# cannot reliably distinguish an authenticated view from an inlined login page (a coincidental substring could),
+# and is downgraded to a LEAD, never a FACT.
+_CRED_SIGNAL_MIN_LEN = 12
+_CRED_SIGNAL_MIN_ENTROPY = 2.5   # bits/char — the same floor the system-prompt / smuggling canaries use
+# The DEFAULT auth-denial statuses: a protected resource that answers a session with 401/403 has DENIED it
+# (access requires credentials). The operator may attest more denial mechanisms (a login/SSO redirect, a
+# denial-body signature); 401/403 are the universal auth-denial outcome and ALWAYS apply.
+_CRED_DENIAL_STATUSES = frozenset({401, 403})
+# Redirect statuses that can constitute a LOGIN/SSO-redirect denial when the Location targets the attested login
+# url — the common "unauthenticated => 302 to /login" gate.
+_CRED_REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
+
+
+def _cred_status_int(status: Any) -> "int | None":
+    """Coerce a captured status to an int, or None (a non-int / bool / unparseable status). Pure."""
+    if isinstance(status, bool):
+        return None
+    if isinstance(status, int):
+        return status
+    try:
+        return int(status) if status is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _cred_access_fields(resp: Any) -> "tuple[int | None, str, str, str, str, str]":
+    """Coerce one captured PROTECTED-RESOURCE access leg to
+    ``(status, body, header_blob, location, url, method)`` (pure). Reads ONLY the response's status / body /
+    header values and the request's url / method — never any credential or secret field. ``location`` is the
+    (case-insensitive) Location header, used to adjudicate a redirect-to-login denial; ``url`` / ``method`` carry
+    the request provenance used to prove the two legs are the SAME protected-resource request (same-shape)."""
+    body = ""
+    header_blob = ""
+    location = ""
+    url = ""
+    method = ""
+    status: Any = None
+    if isinstance(resp, Mapping):
+        body = _coerce_text(resp.get("body", resp.get("text", resp.get("content", ""))))
+        status = resp.get("status", resp.get("status_code"))
+        headers = resp.get("headers")
+        if isinstance(headers, Mapping):
+            parts = []
+            for k, v in headers.items():
+                ks = _coerce_text(k)
+                vs = _coerce_text(v)
+                parts.append(f"{ks}: {vs}")
+                if ks.strip().lower() == "location":
+                    location = vs.strip()
+            header_blob = " ".join(parts)
+        url = _coerce_text(resp.get("url", resp.get("request_url", ""))).strip()
+        method = _coerce_text(resp.get("method", resp.get("request_method", ""))).strip().upper()
+        req = resp.get("request")
+        if isinstance(req, Mapping):
+            url = url or _coerce_text(req.get("url", "")).strip()
+            method = method or _coerce_text(req.get("method", "")).strip().upper()
+    else:
+        body = _coerce_text(resp)
+    return _cred_status_int(status), body, header_blob, location, url, method
+
+
+def _cred_leg_has_capture(status: "int | None", body: str, header_blob: str) -> bool:
+    """True iff a leg actually captured a response (a status, a body, or headers) — a leg that captured
+    nothing is INCONCLUSIVE, never half of a sound differential. Pure."""
+    return status is not None or bool(body) or bool(header_blob)
+
+
+def _cred_descriptor_denial_model(descriptor: Mapping[str, Any]) -> "tuple[frozenset[int], list[str], str]":
+    """Extract the operator-attested denial model from the protected-resource descriptor:
+    ``(denial_statuses, login_redirect_locations, denial_body_signature)``. ``denial_statuses`` ALWAYS includes
+    the universal {401,403}; the operator may attest additional mechanisms. Pure.
+
+    H1 coherence guard: a 2xx (200-299) is this oracle's definition of an authenticated SUCCESS, so an
+    operator-attested denial_status that intersects [200,299] is INCOHERENT — it would let a 2xx baseline count
+    as "denied" while a DIFFERENT 2xx weak leg fires. Such entries are DROPPED here (never let the success code
+    mean "denied"); a genuine soft-200 denial must be attested via ``denial_body_signature`` (which is sound in
+    both directions). A baseline whose only "denial" was a dropped 2xx then correctly falls through to the
+    "baseline is NOT a denial" REFUSE, surfacing the misconfiguration instead of manufacturing a differential."""
+    statuses: set[int] = set(_CRED_DENIAL_STATUSES)
+    raw_statuses = descriptor.get("denial_statuses")
+    if isinstance(raw_statuses, (list, tuple, set, frozenset)):
+        for s in raw_statuses:
+            si = _cred_status_int(s)
+            if si is not None and not (200 <= si < 300):   # H1: a 2xx is SUCCESS, never a denial
+                statuses.add(si)
+    raw_loc = descriptor.get("login_redirect_locations")
+    locations = ([t for t in (_coerce_text(x).strip() for x in raw_loc) if t]
+                 if isinstance(raw_loc, (list, tuple, set, frozenset)) else [])
+    body_sig = _coerce_text(descriptor.get("denial_body_signature")).strip()
+    return frozenset(statuses), locations, body_sig
+
+
+def _cred_access_is_denial(status: "int | None", body: str, header_blob: str, location: str,
+                           denial_statuses: "frozenset[int]", login_locations: "list[str]",
+                           body_sig: str) -> bool:
+    """True iff a protected-resource access is a DENIAL that matches the operator-attested denial model:
+    (a) ``status`` in the attested denial statuses (default {401,403}); OR
+    (b) a 3xx redirect whose Location targets one of the attested login/SSO prefixes; OR
+    (c) the attested ``denial_body_signature`` is present in the body or header blob.
+    Pure — the denial model is the operator's attestation, re-derived offline from the retained bytes."""
+    if status is not None and status in denial_statuses:
+        return True
+    if status is not None and status in _CRED_REDIRECT_STATUSES and location and login_locations:
+        # H2: PREFIX match only. A removed ``loc in location`` substring arm could mis-classify a non-login
+        # redirect that merely EMBEDS the attested login url (an open-redirect to ``evil?next=.../login``) as a
+        # denial. A real "unauthenticated => redirect to login" gate puts the login url at the START of Location
+        # (optionally with a ``?return=`` suffix), which startswith captures; a login url buried mid-string is not.
+        if any(loc and location.startswith(loc) for loc in login_locations):
+            return True
+    if body_sig and (body_sig in body or (bool(header_blob) and body_sig in header_blob)):
+        return True
+    return False
+
+
+def credential_acceptance_oracle(observed: Any) -> OracleSignal:
+    """Fire when a target's auth ACCEPTED a credential the operator-planted TEST policy marks
+    should-be-REJECTED, proven by an UNFORGEABLE ACHIEVED EFFECT: the weak-credential session SUCCESSFULLY
+    ACCESSES an AUTHENTICATED PROTECTED RESOURCE that a KNOWN-BAD (or no) session is DENIED. The discriminator is
+    the PROTECTED-RESOURCE ACCESS OUTCOME, re-derived offline from the retained record — NEVER the login response
+    (three prior login-byte-marker versions failed the red-pen). Pure + offline-re-derivable.
+
+    Expected ``observed`` mapping::
+
+        {
+          "corpus_id":     "<operator-planted test-identity corpus id>",   # REQUIRED — refuse without it
+          "credential_id": "<identifier of the attempted WEAK credential>",# an IDENTIFIER, never the secret
+          "policy": {
+            "corpus_id":     "<must equal the record's corpus_id>",        # the corpus binds itself
+            "should_reject": ["<cred id>", ...]                            # the planted must-be-REJECTED set
+          },
+          "protected_resource": {                                          # the operator-attested descriptor
+            "url":    "<the auth-gated protected resource url>",           # REQUIRED — refuse without it
+            "method": "GET",                                              # optional (default GET)
+            "authenticated_signal": "<text present ONLY in an authenticated view>",  # REQUIRED
+            # how the resource DENIES unauthenticated access (401/403 always apply):
+            "denial_statuses":          [401, 403],                        # optional (added to the default set)
+            "login_redirect_locations": ["https://app/login", "https://sso/..."],   # optional
+            "denial_body_signature":    "<attested denial-body text>"      # optional
+          },
+          # the SAME protected-resource request (same url+method), differing ONLY in the session:
+          "weak_access":     {"status": <int>, "body": "...", "headers": {...}, "url": "...", "method": "GET"},
+          "baseline_access": {"status": <int>, "body": "...", "headers": {...}, "url": "...", "method": "GET"}
+        }
+
+    REFUSES (a non-fire, never a raise) when there is nothing it may soundly judge:
+      * no mapping / no ``corpus_id`` — no planted corpus;
+      * no ``policy`` mapping, or ``policy['corpus_id']`` != the record's ``corpus_id`` — the corpus does not bind;
+      * an empty / missing ``should_reject`` set, or no ``credential_id``;
+      * no ``protected_resource`` descriptor, or it carries no ``url`` or no ``authenticated_signal`` — without the
+        attestation a bare 2xx is not acceptance;
+      * no ``weak_access`` / ``baseline_access`` capture, or a leg captured nothing;
+      * the two legs are NOT same-shape — a leg's provenance (url/method) is missing or does not equal the attested
+        resource (not the SAME protected-resource request); or
+      * ``baseline_access`` is NOT a denial — the resource is not auth-gating (it serves the known-bad/no session
+        too), so there is no differential.
+
+    LEAD (a non-fire that is NOT a sound negative — just undecidable from this input):
+      * a short / low-entropy ``authenticated_signal`` cannot reliably tell an authenticated view from an inlined
+        login page — downgraded to a LEAD, never a FACT;
+      * the ``authenticated_signal`` appears in BOTH legs — a coincidental substring, not a differential.
+
+    NON-FIRE (safe) — a sound judgement that did NOT confirm acceptance:
+      * the attempted ``credential_id`` is NOT in ``should_reject`` (not a planted weak credential); or
+      * ``weak_access`` is itself a DENIAL — the weak credential yielded no session (a rejecting login), so the
+        target DENIED it the SAME protected resource as the baseline; or
+      * ``weak_access`` is not a 2xx authenticated success carrying the attested signal (the weak session did not
+        reach an authenticated view of the resource).
+
+    FIRES (ACCEPTED) IFF the legs are same-shape AND ``baseline_access`` is denied AND ``weak_access`` is an
+    authenticated success (2xx + the attested signal, absent from the denied baseline): the weak-credential
+    session reached an authenticated state the denied session could not.
+    """
+    if not isinstance(observed, Mapping):
+        return OracleSignal(kind=OracleKind.CREDENTIAL_ACCEPTANCE, fired=False, confidence=0.0,
+                            evidence="no credential-acceptance evidence")
+    corpus_id = _coerce_text(observed.get("corpus_id")).strip()
+    if not corpus_id:
+        # HARD PRECONDITION: without the operator-planted TEST corpus there is no sound FACT — REFUSE.
+        return OracleSignal(kind=OracleKind.CREDENTIAL_ACCEPTANCE, fired=False, confidence=0.0,
+                            evidence="REFUSED: no operator-planted test-identity corpus (corpus_id absent) — "
+                                     "a credential-acceptance FACT requires the planted TEST corpus; this is a "
+                                     "LEAD/INCONCLUSIVE, never a FACT")
+    policy = observed.get("policy")
+    if not isinstance(policy, Mapping):
+        return OracleSignal(kind=OracleKind.CREDENTIAL_ACCEPTANCE, fired=False, confidence=0.0,
+                            evidence="REFUSED: no planted policy (policy absent) — nothing marks a credential "
+                                     "should-be-rejected")
+    policy_corpus = _coerce_text(policy.get("corpus_id")).strip()
+    if policy_corpus != corpus_id:
+        # The planted corpus must bind itself: a policy that does not name THIS corpus cannot authorise a verdict
+        # over this record (defeats re-aiming a policy at an unrelated capture — the relabelled-certificate case).
+        return OracleSignal(kind=OracleKind.CREDENTIAL_ACCEPTANCE, fired=False, confidence=0.0,
+                            evidence="REFUSED: the planted policy's corpus_id does not bind this record's "
+                                     "corpus_id — the planted corpus does not authorise this capture")
+    should_reject = policy.get("should_reject")
+    reject_set = {_coerce_text(c).strip() for c in should_reject if _coerce_text(c).strip()} \
+        if isinstance(should_reject, (list, tuple, set, frozenset)) else set()
+    if not reject_set:
+        return OracleSignal(kind=OracleKind.CREDENTIAL_ACCEPTANCE, fired=False, confidence=0.0,
+                            evidence="REFUSED: the planted policy carries no should_reject set — no credential "
+                                     "is marked should-be-rejected, so nothing can be judged")
+    credential_id = _coerce_text(observed.get("credential_id")).strip()
+    if not credential_id:
+        return OracleSignal(kind=OracleKind.CREDENTIAL_ACCEPTANCE, fired=False, confidence=0.0,
+                            evidence="REFUSED: no credential_id on the record — nothing to test for membership")
+
+    base_obs = {
+        "corpus_id": corpus_id,
+        "credential_id": credential_id,
+        "credential_in_should_reject": credential_id in reject_set,
+    }
+    if credential_id not in reject_set:
+        # SAFE / sound non-fire: the attempted credential is not a planted must-be-rejected one. (Could be a
+        # legitimate credential; this oracle only speaks to planted weak credentials.)
+        return OracleSignal(
+            kind=OracleKind.CREDENTIAL_ACCEPTANCE, fired=False, confidence=0.0,
+            evidence=(f"credential {credential_id!r} is not in the planted should-be-rejected set — the oracle "
+                      "only confirms acceptance of a planted weak credential"),
+            observed=base_obs)
+
+    # HARD PRECONDITION — the operator-attested PROTECTED-RESOURCE descriptor. Acceptance is an achieved READ of
+    # an auth-gated resource, so without the descriptor (its url + the authenticated_signal) a bare 2xx is not
+    # acceptance => REFUSE (a LEAD/INCONCLUSIVE, never a FACT).
+    descriptor = observed.get("protected_resource")
+    if not isinstance(descriptor, Mapping):
+        return OracleSignal(
+            kind=OracleKind.CREDENTIAL_ACCEPTANCE, fired=False, confidence=0.0,
+            evidence=("REFUSED: no protected-resource attestation (protected_resource absent) — acceptance is an "
+                      "ACHIEVED read of an auth-gated resource; without the descriptor this is a LEAD, never a FACT"),
+            observed=base_obs)
+    resource_url = _coerce_text(descriptor.get("url")).strip()
+    if not resource_url:
+        return OracleSignal(
+            kind=OracleKind.CREDENTIAL_ACCEPTANCE, fired=False, confidence=0.0,
+            evidence=("REFUSED: the protected-resource descriptor carries no url — the attested auth-gated "
+                      "resource is unidentified, so the SAME-SHAPE access differential cannot be established"),
+            observed=base_obs)
+    authed_signal = _coerce_text(descriptor.get("authenticated_signal"))
+    if not authed_signal.strip():
+        return OracleSignal(
+            kind=OracleKind.CREDENTIAL_ACCEPTANCE, fired=False, confidence=0.0,
+            evidence=("REFUSED: the protected-resource descriptor carries no authenticated_signal — a bare 2xx "
+                      "is not acceptance; the operator-attested signal that marks a genuinely authenticated view "
+                      "is required to tell an authenticated read from an inlined login page"),
+            observed=base_obs)
+    resource_method = (_coerce_text(descriptor.get("method")).strip().upper() or "GET")
+    base_obs = {**base_obs, "resource_url": resource_url, "resource_method": resource_method}
+
+    # The authenticated-content-signal discriminator floor (the smuggling-canary treatment). A too-short /
+    # low-entropy signal cannot reliably tell an authenticated view from an inlined login page (a coincidental
+    # substring could manufacture an authenticated-looking read) — so it is a LEAD, never a FACT.
+    signal = authed_signal.strip()
+    signal_entropy = _shannon_bits_per_char(signal)
+    if len(signal) < _CRED_SIGNAL_MIN_LEN or signal_entropy < _CRED_SIGNAL_MIN_ENTROPY:
+        return OracleSignal(
+            kind=OracleKind.CREDENTIAL_ACCEPTANCE, fired=False, confidence=0.0,
+            evidence=(f"LEAD: the attested authenticated_signal is too weak to be a reliable discriminator "
+                      f"(needs >= {_CRED_SIGNAL_MIN_LEN} chars AND >= {_CRED_SIGNAL_MIN_ENTROPY} bits/char; got "
+                      f"{len(signal)} chars, {signal_entropy:.2f} bits/char) — a coincidental substring could "
+                      "manufacture an authenticated-looking read, so this is a LEAD, never a FACT"),
+            observed={**base_obs, "signal_len": len(signal),
+                      "signal_entropy_bits_per_char": round(signal_entropy, 3)})
+
+    # HARD PRECONDITION — both captured PROTECTED-RESOURCE reads. The differential is over the SAME resource
+    # request with the weak session vs a known-bad/no session; without BOTH legs there is nothing to adjudicate.
+    weak_resp = observed.get("weak_access")
+    baseline_resp = observed.get("baseline_access")
+    if not isinstance(weak_resp, (Mapping, str, bytes)) or not isinstance(baseline_resp, (Mapping, str, bytes)):
+        return OracleSignal(
+            kind=OracleKind.CREDENTIAL_ACCEPTANCE, fired=False, confidence=0.0,
+            evidence=("REFUSED: a protected-resource access capture is missing (need BOTH weak_access AND "
+                      "baseline_access) — the achieved-access differential cannot be adjudicated, a LEAD never "
+                      "a FACT"),
+            observed=base_obs)
+
+    weak_status, weak_body, weak_hdr, weak_loc, weak_url, weak_method = _cred_access_fields(weak_resp)
+    base_status, base_body, base_hdr, base_loc, base_url, base_method = _cred_access_fields(baseline_resp)
+    if not _cred_leg_has_capture(weak_status, weak_body, weak_hdr) \
+            or not _cred_leg_has_capture(base_status, base_body, base_hdr):
+        return OracleSignal(
+            kind=OracleKind.CREDENTIAL_ACCEPTANCE, fired=False, confidence=0.0,
+            evidence=("REFUSED: a protected-resource access leg captured no response (no status, no body, no "
+                      "headers) — there is no sound differential to adjudicate"),
+            observed=base_obs)
+
+    # (1) SAME-SHAPE — both legs must be reads of the SAME attested resource url with the SAME method, differing
+    # ONLY in the session. Missing provenance or a mismatch is not a differential => REFUSE (this disarms the
+    # mis-shaped / different-endpoint baseline red-pen shape — the legs must be the SAME request).
+    weak_m = weak_method or resource_method
+    base_m = base_method or resource_method
+    same_shape = (weak_url == resource_url and base_url == resource_url
+                  and weak_m == resource_method and base_m == resource_method)
+    shape_obs = {"weak_url": weak_url, "baseline_url": base_url, "weak_method": weak_m,
+                 "baseline_method": base_m, "same_shape": same_shape}
+    if not same_shape:
+        return OracleSignal(
+            kind=OracleKind.CREDENTIAL_ACCEPTANCE, fired=False, confidence=0.0,
+            evidence=("REFUSED: the two protected-resource legs are NOT the same request — weak_access "
+                      f"({weak_m or '?'} {weak_url!r}) and baseline_access ({base_m or '?'} {base_url!r}) must "
+                      f"both read the attested resource ({resource_method} {resource_url!r}), differing ONLY in "
+                      "the session; a mis-shaped / different-endpoint / provenance-less leg is not a differential"),
+            observed={**base_obs, **shape_obs})
+
+    denial_statuses, login_locations, body_sig = _cred_descriptor_denial_model(descriptor)
+    weak_denial = _cred_access_is_denial(weak_status, weak_body, weak_hdr, weak_loc,
+                                         denial_statuses, login_locations, body_sig)
+    base_denial = _cred_access_is_denial(base_status, base_body, base_hdr, base_loc,
+                                         denial_statuses, login_locations, body_sig)
+    outcome_obs = {**base_obs, **shape_obs, "weak_status": weak_status, "baseline_status": base_status,
+                   "baseline_is_denial": base_denial, "weak_is_denial": weak_denial}
+
+    # (2) BASELINE DENIED — the known-bad/no session MUST be DENIED the resource, else it is not auth-gating and
+    # there is no differential (a resource that serves everyone proves nothing) => REFUSE.
+    if not base_denial:
+        return OracleSignal(
+            kind=OracleKind.CREDENTIAL_ACCEPTANCE, fired=False, confidence=0.0,
+            evidence=(f"REFUSED: baseline_access is NOT a denial (status {base_status}) — the known-bad/no "
+                      "session was SERVED the resource, so it is not actually auth-gating; without a denied "
+                      "baseline there is no differential (a resource that serves everyone proves nothing), a "
+                      "LEAD never a FACT"),
+            observed=outcome_obs)
+
+    # (3) WEAK AUTHENTICATED — weak_access must be a 2xx authenticated SUCCESS carrying the attested signal, which
+    # must be ABSENT from the denied baseline (a TRUE differential, not a coincidental substring present on both
+    # legs). A rejecting login makes weak_access itself a denial => (3) fails => NO fire (the SAFE negative).
+    signal_in_weak = (signal in weak_body) or (bool(weak_hdr) and signal in weak_hdr)
+    signal_in_base = (signal in base_body) or (bool(base_hdr) and signal in base_hdr)
+    weak_2xx = weak_status is not None and 200 <= weak_status < 300
+    weak_authenticated = weak_2xx and (not weak_denial) and signal_in_weak and (not signal_in_base)
+    fire_obs = {**outcome_obs, "weak_is_2xx": weak_2xx, "signal_in_weak": signal_in_weak,
+                "signal_in_baseline": signal_in_base, "weak_is_authenticated_success": weak_authenticated}
+
+    # (4) FIRE — the weak-credential session reached an authenticated state the denied session could not.
+    if weak_authenticated:
+        return OracleSignal(
+            kind=OracleKind.CREDENTIAL_ACCEPTANCE, fired=True, confidence=0.95,
+            evidence=(f"the target auth ACCEPTED credential {credential_id!r}, which the operator-planted TEST "
+                      f"policy for corpus {corpus_id!r} marks should-be-REJECTED — ACHIEVED STATE: the weak-"
+                      f"credential session SUCCESSFULLY read the auth-gated resource {resource_method} "
+                      f"{resource_url!r} (a 2xx carrying the attested authenticated signal) while a known-bad/no "
+                      f"session was DENIED the SAME request (baseline status {base_status}). The weak session "
+                      "reached an authenticated state the denied session could not; a planted TEST identity, "
+                      "no real-user secret is read or retained."),
+            observed=fire_obs)
+
+    if weak_denial:
+        reason = ("weak_access is itself a DENIAL — the weak credential yielded no session (a rejecting login), "
+                  "so the target DENIED it the SAME protected resource as the known-bad/no baseline; the "
+                  "credential was NOT accepted (the SAFE negative)")
+    elif not weak_2xx:
+        reason = (f"weak_access is not a 2xx authenticated success (status {weak_status}) — the weak session did "
+                  "not reach an authenticated read of the protected resource; did not fire")
+    elif not signal_in_weak:
+        reason = ("the attested authenticated_signal is ABSENT from weak_access — a 2xx that is not an "
+                  "authenticated view (e.g. an inlined login page); the weak session did not reach an "
+                  "authenticated state; did not fire")
+    else:  # signal_in_base
+        reason = ("the attested authenticated_signal appears in BOTH the weak read AND the denied baseline — a "
+                  "coincidental substring that CANCELS (not a differential); did not fire (a LEAD, never a FACT)")
+    return OracleSignal(
+        kind=OracleKind.CREDENTIAL_ACCEPTANCE, fired=False, confidence=0.0,
+        evidence=reason, observed=fire_obs)
+
+
+# ---------------------------------------------------------------------------
 # Static source-code rule — a re-runnable deterministic rule over RETAINED SOURCE-CODE BYTES.
 #
 # The SAST bridge: the analysis path emits LEADs; this oracle promotes ONE to a "static FACT" by RE-PARSING

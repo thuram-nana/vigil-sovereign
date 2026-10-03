@@ -109,6 +109,10 @@ _ORACLE_FNS: dict[OracleKind, tuple[Callable[..., Any], ...]] = {
     # module-level _cert_validity_* helpers + the _CERT_VALIDITY_DEFECTS vocabulary the oracle references, so
     # editing any of them makes a certificate minted under the old body detectably stale.
     OracleKind.CERTIFICATE_VALIDITY: (oracles.certificate_validity_oracle,),
+    # M-11.3 credential acceptance — its OWN dedicated kind so editing the acceptance derivation changes ONLY
+    # oracle_version(CREDENTIAL_ACCEPTANCE). The transitive-closure walker picks up the module-level helpers the
+    # oracle references, so editing the procedure makes a certificate minted under the old body detectably stale.
+    OracleKind.CREDENTIAL_ACCEPTANCE: (oracles.credential_acceptance_oracle,),
     OracleKind.VERSION_RANGE: (oracles.version_range_oracle,),
     OracleKind.POLICY_PATH: (oracles.policy_path_oracle,),
     OracleKind.SYSTEM_PROMPT_DISCLOSURE: (oracles.system_prompt_disclosure_oracle,),
