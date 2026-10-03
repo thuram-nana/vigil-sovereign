@@ -240,6 +240,13 @@
       "evidence": "Fixtures only"
     },
     {
+      "kind": "credential_acceptance",
+      "name": "Weak-credential acceptance",
+      "family": "live capture",
+      "tier": "fixtures",
+      "evidence": "Fixtures only — the deterministic oracle re-derives, from a VIGIL-captured auth-attempt record, that a target auth ACCEPTED a credential the operator-planted TEST policy marks should-be-REJECTED (planted corpus id + attempted credential identifier + planted success marker re-evaluated over the captured response), and the minted FACT re-verifies offline. Proven over retained/hand-written captures; no live hydra/john run has been exercised in CI (the weaponized run is eval-mode self-serve-consent + planted-corpus gated), and the oracle REFUSES without the planted corpus, so the FACT path is TEST-IDENTITIES-ONLY and never reads a real-user secret"
+    },
+    {
       "kind": "command_injection_breakout",
       "name": "Command break-out",
       "family": "request-only",

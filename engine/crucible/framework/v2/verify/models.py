@@ -509,6 +509,24 @@ class OracleKind(str, enum.Enum):
     # ``capture_time_source`` provenance is absent rather than assuming the runner clock. FACT-capable but NOT
     # clean-capable: the capture retains only the LEAF, so a non-defect is not a bounded negative over the chain.
     CERTIFICATE_VALIDITY = "certificate_validity"
+    # M-11.3 CREDENTIAL ACCEPTANCE — the deterministic authentication-weakness oracle for the credential unit.
+    # It CONFIRMS that a target's auth ACCEPTED a credential the OPERATOR-PLANTED TEST policy marks
+    # should-be-REJECTED, re-derived offline from a VIGIL-captured auth-attempt record ALONE (the planted
+    # corpus id + the attempted credential IDENTIFIER + the planted policy + the captured response's
+    # operator-planted success marker). TEST-IDENTITIES-ONLY by construction: it fires only on a credential
+    # that is a MEMBER of the operator-planted corpus's should-be-rejected set, so a real user's login (never
+    # in the planted corpus) can never mint a FACT, and the oracle reads only credential IDENTIFIERS and the
+    # response's success-marker — never a secret/password field, so no real-user secret is captured/retained.
+    # HARD PRECONDITION: it REFUSES (a non-fire, never a raise) without the planted test corpus — no corpus,
+    # no policy, or a policy that does not bind the same corpus id => REFUSE (a LEAD/INCONCLUSIVE upstream),
+    # never a FACT. SAFE negative: a correct auth that REJECTS the weak credential (the planted success marker
+    # is absent from the capture) does NOT fire. Additive, reachable ONLY via its ``credential_acceptance``
+    # BUG_CLASS_ORACLES row keyed on a ``credential_acceptance`` ctx field no benchmark/scan/engage finding
+    # carries; HELD OUT of the frozen ``_ALL_ORACLES`` fallback (stays EXACTLY 15, `make gate` byte-identical).
+    # The verdict is a pure function of the retained record, so the FACT re-verifies OFFLINE. hydra/john are
+    # only LEAD PROPOSERS — VIGIL re-drives the login through its OWN gated channel and THIS oracle is the sole
+    # authority over the captured response; a tool byte is never a FACT.
+    CREDENTIAL_ACCEPTANCE = "credential_acceptance"
 
 
 class OracleProbe(BaseModel):

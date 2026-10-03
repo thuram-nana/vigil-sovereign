@@ -158,14 +158,20 @@ _W51_CLASSES = {"static_broken_crypto", "static_insecure_randomness", "static_in
 # carries; the unknown-class fallback stays EXACTLY 15 and `make gate` is byte-identical.
 _M1TLS_KINDS = {OracleKind.CERTIFICATE_VALIDITY}
 _M1TLS_CLASSES = {"certificate_validity"}
+# M-11.3 CREDENTIAL ACCEPTANCE — a NEW OracleKind held OUT of _ALL_ORACLES, reachable ONLY via its
+# `credential_acceptance` BUG_CLASS_ORACLES row keyed on a `credential_acceptance` ctx field no benchmark/scan
+# finding carries; the unknown-class fallback stays EXACTLY 15 and `make gate` is byte-identical. hydra/john are
+# LEAD proposers only and the oracle REFUSES without the operator-planted test corpus.
+_M11CRED_KINDS = {OracleKind.CREDENTIAL_ACCEPTANCE}
+_M11CRED_CLASSES = {"credential_acceptance"}
 # every additive kind that must stay out of the frozen unknown-class fallback.
 _EXCLUDED_KINDS = (_AEGIS_KINDS | _WS3_KINDS | _WSB_KINDS | _NW1_KINDS | _WF1_KINDS
                    | _G2_KINDS | _G3_KINDS | _CICD_KINDS | _MOBILE_KINDS | _EMAIL_KINDS | _IDENTITY_KINDS
                    | _C3_KINDS | _T4_KINDS | _E1_KINDS | _E5_KINDS | _E3_KINDS | _E2_KINDS | _E4T2_KINDS
                    | _CS_KINDS | _W22_KINDS | _W24_KINDS | _W32_KINDS | _W45_KINDS | _W43_KINDS | _W51_KINDS
-                   | _M1TLS_KINDS)
+                   | _M1TLS_KINDS | _M11CRED_KINDS)
 _EXCLUDED_CLASSES = {"prompt_injection", "system_prompt_disclosure", "automated_access",
-                     "credential_stuffing", "sqli_attempt", "command_injection_attempt"} | _WS3_CLASSES | _WSB_CLASSES | _NW1_CLASSES | _WF1_CLASSES | _G2_CLASSES | _G3_CLASSES | _CICD_CLASSES | _MOBILE_CLASSES | _EMAIL_CLASSES | _IDENTITY_CLASSES | _C3_CLASSES | _T4_CLASSES | _E1_CLASSES | _E5_CLASSES | _E3_CLASSES | _E2_CLASSES | _E4T2_CLASSES | _CS_CLASSES | _W22_CLASSES | _W24_CLASSES | _W32_CLASSES | _W45_CLASSES | _W43_CLASSES | _W51_CLASSES | _M1TLS_CLASSES
+                     "credential_stuffing", "sqli_attempt", "command_injection_attempt"} | _WS3_CLASSES | _WSB_CLASSES | _NW1_CLASSES | _WF1_CLASSES | _G2_CLASSES | _G3_CLASSES | _CICD_CLASSES | _MOBILE_CLASSES | _EMAIL_CLASSES | _IDENTITY_CLASSES | _C3_CLASSES | _T4_CLASSES | _E1_CLASSES | _E5_CLASSES | _E3_CLASSES | _E2_CLASSES | _E4T2_CLASSES | _CS_CLASSES | _W22_CLASSES | _W24_CLASSES | _W32_CLASSES | _W45_CLASSES | _W43_CLASSES | _W51_CLASSES | _M1TLS_CLASSES | _M11CRED_CLASSES
 _AEGIS_CLASSES = {"prompt_injection", "system_prompt_disclosure", "automated_access",
                   "credential_stuffing", "sqli_attempt", "command_injection_attempt"}
 _AEGIS_ALIASES = {"jailbreak", "llm_prompt_injection", "indirect_prompt_injection",

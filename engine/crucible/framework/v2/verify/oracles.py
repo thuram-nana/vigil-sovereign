@@ -4684,6 +4684,154 @@ def certificate_validity_oracle(observed: Any) -> OracleSignal:
 
 
 # ---------------------------------------------------------------------------
+# M-11.3 CREDENTIAL ACCEPTANCE — the deterministic authentication-weakness oracle for the credential unit.
+#
+# It CONFIRMS that a target's auth ACCEPTED a credential the OPERATOR-PLANTED TEST policy marks
+# should-be-REJECTED, judged over a VIGIL-captured auth-attempt record ALONE — pure, offline, deterministic,
+# so a confirmed FACT re-verifies with no network. hydra (login brute-force) and john (sample-hash cracking)
+# are only LEAD PROPOSERS; VIGIL re-drives the login through its OWN gated channel and THIS oracle is the sole
+# authority over the captured response, so a tool byte is never a FACT.
+#
+# TEST-IDENTITIES-ONLY, BY CONSTRUCTION. It fires only when the attempted credential IDENTIFIER is a MEMBER of
+# the operator-planted corpus's ``should_reject`` set — the credentials the planted TEST policy declares must
+# be refused (weak / default / planted). A real user's login is never in the planted corpus, so it can never
+# mint a FACT. The oracle reads only credential IDENTIFIERS and the captured response's operator-planted
+# SUCCESS MARKER; it never reads or retains a secret/password field, so no real-user secret is captured.
+#
+# HARD PRECONDITION — REFUSE WITHOUT THE PLANTED TEST CORPUS. No ``corpus_id``, no ``policy``, a policy whose
+# own ``corpus_id`` does not bind the record's corpus, or an empty ``should_reject`` set => the oracle REFUSES
+# (a non-fire with an explicit reason, never a raise). Upstream maps that to a LEAD/INCONCLUSIVE, never a FACT.
+#
+# ACCEPTANCE IS RE-DERIVED, NOT TRUSTED. A bare producer boolean or a bare 200 is NOT acceptance (the repeated
+# soundness lesson of this engine). The planted policy carries a ``success_marker`` — a string the operator
+# attests appears in a captured response ONLY on a SUCCESSFUL authentication (an authenticated-session token /
+# redirect target / body sentinel). The oracle re-evaluates that marker over the RETAINED response bytes, so
+# the verdict is a pure re-derivation. A correct auth that REJECTS the weak credential (marker absent) does
+# NOT fire — the SAFE negative control.
+# ---------------------------------------------------------------------------
+
+
+def credential_acceptance_oracle(observed: Any) -> OracleSignal:
+    """Fire when a target's auth ACCEPTED a credential the operator-planted TEST policy marks
+    should-be-REJECTED. The proof is the retained capture: the planted ``corpus_id``, the attempted
+    ``credential_id``, the planted ``policy`` (``corpus_id`` + ``should_reject`` + ``success_marker``), and the
+    VIGIL-captured ``auth_response``. Pure + offline-re-derivable.
+
+    Expected ``observed`` mapping::
+
+        {
+          "corpus_id":     "<operator-planted test-identity corpus id>",   # REQUIRED — refuse without it
+          "credential_id": "<identifier of the attempted credential>",     # an IDENTIFIER, never the secret
+          "policy": {
+            "corpus_id":      "<must equal the record's corpus_id>",       # the corpus binds itself
+            "should_reject":  ["<cred id>", ...],                          # the planted must-be-REJECTED set
+            "success_marker": "<string that appears ONLY on a successful auth>"
+          },
+          "auth_response": {"status": <int>, "body": "<captured body>", "headers": {...}}
+        }
+
+    REFUSES (a non-fire, never a raise) when there is nothing it may soundly judge:
+      * no mapping / no ``corpus_id`` — no planted corpus, nothing to judge;
+      * no ``policy`` mapping, or ``policy['corpus_id']`` does not equal the record's ``corpus_id`` — the
+        planted corpus does not bind this record;
+      * an empty / missing ``should_reject`` set, or no ``success_marker`` — the planted policy is incomplete;
+      * no ``credential_id`` — nothing to test for membership.
+
+    NON-FIRE (safe) — a sound judgement that did NOT confirm acceptance:
+      * the attempted ``credential_id`` is NOT in ``should_reject`` (not a planted weak credential); or
+      * the planted ``success_marker`` is ABSENT from the captured response (the target REJECTED it).
+    """
+    if not isinstance(observed, Mapping):
+        return OracleSignal(kind=OracleKind.CREDENTIAL_ACCEPTANCE, fired=False, confidence=0.0,
+                            evidence="no credential-acceptance evidence")
+    corpus_id = _coerce_text(observed.get("corpus_id")).strip()
+    if not corpus_id:
+        # HARD PRECONDITION: without the operator-planted TEST corpus there is no sound FACT — REFUSE.
+        return OracleSignal(kind=OracleKind.CREDENTIAL_ACCEPTANCE, fired=False, confidence=0.0,
+                            evidence="REFUSED: no operator-planted test-identity corpus (corpus_id absent) — "
+                                     "a credential-acceptance FACT requires the planted TEST corpus; this is a "
+                                     "LEAD/INCONCLUSIVE, never a FACT")
+    policy = observed.get("policy")
+    if not isinstance(policy, Mapping):
+        return OracleSignal(kind=OracleKind.CREDENTIAL_ACCEPTANCE, fired=False, confidence=0.0,
+                            evidence="REFUSED: no planted policy (policy absent) — nothing marks a credential "
+                                     "should-be-rejected")
+    policy_corpus = _coerce_text(policy.get("corpus_id")).strip()
+    if policy_corpus != corpus_id:
+        # The planted corpus must bind itself: a policy that does not name THIS corpus cannot authorise a
+        # verdict over this record (defeats re-aiming a policy at an unrelated capture).
+        return OracleSignal(kind=OracleKind.CREDENTIAL_ACCEPTANCE, fired=False, confidence=0.0,
+                            evidence="REFUSED: the planted policy's corpus_id does not bind this record's "
+                                     "corpus_id — the planted corpus does not authorise this capture")
+    should_reject = policy.get("should_reject")
+    reject_set = {_coerce_text(c).strip() for c in should_reject if _coerce_text(c).strip()} \
+        if isinstance(should_reject, (list, tuple, set, frozenset)) else set()
+    if not reject_set:
+        return OracleSignal(kind=OracleKind.CREDENTIAL_ACCEPTANCE, fired=False, confidence=0.0,
+                            evidence="REFUSED: the planted policy carries no should_reject set — no credential "
+                                     "is marked should-be-rejected, so nothing can be judged")
+    success_marker = _coerce_text(policy.get("success_marker"))
+    if not success_marker.strip():
+        return OracleSignal(kind=OracleKind.CREDENTIAL_ACCEPTANCE, fired=False, confidence=0.0,
+                            evidence="REFUSED: the planted policy carries no success_marker — acceptance cannot "
+                                     "be re-derived from the captured response (a bare 200 is not acceptance)")
+    credential_id = _coerce_text(observed.get("credential_id")).strip()
+    if not credential_id:
+        return OracleSignal(kind=OracleKind.CREDENTIAL_ACCEPTANCE, fired=False, confidence=0.0,
+                            evidence="REFUSED: no credential_id on the record — nothing to test for membership")
+
+    base_obs = {
+        "corpus_id": corpus_id,
+        "credential_id": credential_id,
+        "credential_in_should_reject": credential_id in reject_set,
+        "success_marker_name": "success_marker",
+    }
+    if credential_id not in reject_set:
+        # SAFE / sound non-fire: the attempted credential is not a planted must-be-rejected one. (Could be a
+        # legitimate credential; this oracle only speaks to planted weak credentials.)
+        return OracleSignal(
+            kind=OracleKind.CREDENTIAL_ACCEPTANCE, fired=False, confidence=0.0,
+            evidence=(f"credential {credential_id!r} is not in the planted should-be-rejected set — the oracle "
+                      "only confirms acceptance of a planted weak credential"),
+            observed=base_obs)
+
+    # Re-derive ACCEPTANCE over the RETAINED response: the operator-planted success_marker must appear in the
+    # captured body or a header value. A bare status code is never acceptance (soundness lesson). We read ONLY
+    # the response's success marker — never any secret.
+    resp = observed.get("auth_response")
+    body = ""
+    header_blob = ""
+    status: Any = None
+    if isinstance(resp, Mapping):
+        body = _coerce_text(resp.get("body", resp.get("text", resp.get("content", ""))))
+        status = resp.get("status", resp.get("status_code"))
+        headers = resp.get("headers")
+        if isinstance(headers, Mapping):
+            header_blob = " ".join(f"{_coerce_text(k)}: {_coerce_text(v)}" for k, v in headers.items())
+    else:
+        body = _coerce_text(resp)
+    accepted = success_marker in body or (bool(header_blob) and success_marker in header_blob)
+    fire_obs = {
+        **base_obs,
+        "status": int(status) if isinstance(status, int) and not isinstance(status, bool) else None,
+        "success_marker_present": accepted,
+    }
+    if accepted:
+        return OracleSignal(
+            kind=OracleKind.CREDENTIAL_ACCEPTANCE, fired=True, confidence=0.95,
+            evidence=(f"the target auth ACCEPTED credential {credential_id!r}, which the operator-planted TEST "
+                      f"policy for corpus {corpus_id!r} marks should-be-REJECTED — the planted success marker "
+                      "was re-derived from the captured auth response (a planted TEST identity; no real-user "
+                      "secret is read or retained)"),
+            observed=fire_obs)
+    return OracleSignal(
+        kind=OracleKind.CREDENTIAL_ACCEPTANCE, fired=False, confidence=0.0,
+        evidence=(f"the target REJECTED credential {credential_id!r} — the planted success marker is absent "
+                  "from the captured response (the SAFE negative: a correct auth rejects the weak credential)"),
+        observed=fire_obs)
+
+
+# ---------------------------------------------------------------------------
 # Static source-code rule — a re-runnable deterministic rule over RETAINED SOURCE-CODE BYTES.
 #
 # The SAST bridge: the analysis path emits LEADs; this oracle promotes ONE to a "static FACT" by RE-PARSING

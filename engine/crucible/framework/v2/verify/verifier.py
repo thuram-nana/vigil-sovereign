@@ -291,6 +291,14 @@ BUG_CLASS_ORACLES: dict[str, tuple[OracleKind, ...]] = {
     # and `make gate` is byte-identical. Distinct from `weak_crypto_artifact` (the signature hash / key size);
     # this judges the window/SAN/issuer the weak-crypto oracle never reads.
     "certificate_validity": (OracleKind.CERTIFICATE_VALIDITY,),
+    # M-11.3 CREDENTIAL ACCEPTANCE: a target auth that ACCEPTED a credential the operator-planted TEST policy
+    # marks should-be-REJECTED, a FACT when re-derived from a VIGIL-captured auth-attempt record (verify.oracles
+    # credential_acceptance_oracle). Routes to its OWN dedicated OracleKind.CREDENTIAL_ACCEPTANCE (held OUT of
+    # the frozen _ALL_ORACLES fallback, reachable ONLY via this row, firing only when the ctx carries the
+    # `credential_acceptance` key no benchmark/scan/engage finding carries), so the unknown-class fallback stays
+    # EXACTLY 15 and `make gate` is byte-identical. hydra/john are LEAD proposers only; the oracle is the sole
+    # authority and REFUSES without the operator-planted test corpus (TEST-IDENTITIES-ONLY, no real secret read).
+    "credential_acceptance": (OracleKind.CREDENTIAL_ACCEPTANCE,),
     # supply chain: a scanner's "package @ version is affected by CVE" is a FACT only when the version
     # provably falls in the advisory's affected range (verify.version's deterministic membership check).
     "vulnerable_dependency": (OracleKind.VERSION_RANGE,),
@@ -1519,6 +1527,14 @@ class OracleVerifier:
         if kind is OracleKind.CERTIFICATE_VALIDITY:
             if "cert_validity" in ctx:
                 return oracles.certificate_validity_oracle(ctx["cert_validity"])
+            return None
+        # M-11.3 credential acceptance — fire ONLY when the ctx carries the fresh `credential_acceptance` record
+        # (the planted corpus id + attempted credential id + planted policy + the captured auth response); no
+        # benchmark/scan/engage finding carries it, so this arm is inert on the gate path. The oracle REFUSES to
+        # mint without the operator-planted test corpus and re-derives acceptance offline (TEST-IDENTITIES-ONLY).
+        if kind is OracleKind.CREDENTIAL_ACCEPTANCE:
+            if "credential_acceptance" in ctx:
+                return oracles.credential_acceptance_oracle(ctx["credential_acceptance"])
             return None
         if kind is OracleKind.VERSION_RANGE:
             if "version_advisory" in ctx:

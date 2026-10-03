@@ -168,6 +168,12 @@ _ADDITIVE = frozenset({
     # carries; never in the frozen fallback. FACT-capable (an existential defect) but NOT clean-capable
     # (leaf-only, no chain).
     "CERTIFICATE_VALIDITY",
+    # M-11.3 CREDENTIAL ACCEPTANCE kind — a target auth ACCEPTED a credential the operator-planted TEST policy
+    # marks should-be-REJECTED, re-derived offline from a VIGIL-captured auth-attempt record. Its OWN dedicated
+    # kind, additive, reachable ONLY via its `credential_acceptance` row keyed on a `credential_acceptance` ctx
+    # field no benchmark/scan finding carries; never in the frozen fallback. hydra/john are LEAD proposers only;
+    # the oracle REFUSES without the operator-planted test corpus (TEST-IDENTITIES-ONLY, no real secret read).
+    "CREDENTIAL_ACCEPTANCE",
 })
 
 
@@ -200,8 +206,10 @@ def test_every_additive_oraclekind_is_excluded_from_the_fallback():
     # is untouched): 45 -> 46; Wave 5.1 added STATIC_RULE (the SAST bridge — a deterministic rule over retained
     # source-code bytes; four static_* classes, its own dedicated kind): 46 -> 47. M1.3 added
     # CERTIFICATE_VALIDITY (TLS leaf validity window/identity/self-issuance, its own dedicated kind so
-    # TLS_WEAKNESS's oracle_version is untouched): 47 -> 48.)
-    assert len(OracleKind) == 48
+    # TLS_WEAKNESS's oracle_version is untouched): 47 -> 48. M-11.3 added CREDENTIAL_ACCEPTANCE (a target auth
+    # accepted a planted should-be-rejected credential, re-derived offline; its own dedicated kind, LEAD-proposer
+    # tools only, refuses without the planted test corpus): 48 -> 49.)
+    assert len(OracleKind) == 49
     assert {k.name for k in OracleKind} == _FROZEN_15 | _ADDITIVE
     assert set(V._ALL_ORACLES) == set(OracleKind) - {OracleKind[n] for n in _ADDITIVE}
 
