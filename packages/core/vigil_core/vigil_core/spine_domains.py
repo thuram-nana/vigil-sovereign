@@ -91,6 +91,8 @@ DOMAIN_TAGS: dict[str, bytes] = {
     "login-pop": b"vigil-login-pop-v1\x00",                     # S3 per-user login proof-of-possession over a challenge
     "remediation-attestation": b"vigil-remediation-attestation-v1\x00",  # PCR/W5 proof-carrying remediation attestation
     "live-target-attestation": b"vigil-live-target-attestation-v1\x00",  # WS2 evaluator self-serve "this live target is mine" PoP
+    "eval-offense-attestation": b"vigil-eval-offense-attestation-v1\x00",  # M-11.1 owner-signed HARD PRECONDITION for arming weaponized offense on a LIVE eval target (distinct from WS2 live-target-attestation; an owner sig for any other purpose cannot replay here, and the evaluator PoP counter-signs under THIS tag only)
+    "eval-offense-attestation-seal": b"vigil-eval-offense-attestation-seal-v1\x00",  # M-11.1 offense-side tamper-evidence: owner-signed SEAL over the WHOLE published ORDERED eval-offense record list + a monotonic publish seq. The offense verifier recomputes it over the records it read and refuses a DROPPED/REORDERED list (the seal no longer verifies) or a ROLLED-BACK publication (seq below the last-seen high-water). Distinct tag so neither a record's owner sig nor its evaluator PoP can replay as a seal, and vice-versa.
 }
 
 

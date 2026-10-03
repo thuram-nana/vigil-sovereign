@@ -145,6 +145,30 @@ def _provision_trust_root():
     return tr, {"a0": priv}
 
 
+def _publish_eval_attestation(base_dir, slug, owner_priv, owner_pub):
+    """M-11.1: publish a valid owner-signed, evaluator-countersigned EvalOffenseAttestation to the shared seam
+    so a LIVE engage may ARM. Owner-signed by the pinned authority key; the evaluator PoP is a fresh keypair's
+    (the offense plane verifies the PUBLIC signed material only — it enrolls no accounts)."""
+    _eva = pytest.importorskip("vigil_integration.live.eval_attestation")
+    from vigil_core import canonical_json, generate_keypair, sign
+    from vigil_core.spine_domains import DOMAIN_TAGS
+    ev = generate_keypair()
+    fields = ("signal", "state", "engagement_slug", "charter_id", "charter_hash", "evaluator_pubkey",
+              "environment", "not_after", "issued_at", "allow_destructive")
+    core = {"signal": "governor.eval_offense_attestation", "state": "attested", "engagement_slug": slug,
+            "charter_id": "c-eval", "charter_hash": "a" * 64, "evaluator_pubkey": ev.public_key_b64,
+            "environment": "live", "not_after": 2_000_000_000.0, "issued_at": 5.0, "allow_destructive": False}
+    cb = canonical_json({k: core[k] for k in fields})
+    cb = cb if isinstance(cb, (bytes, bytearray)) else str(cb).encode("utf-8")
+    rec = {**core, "sig": sign(owner_priv, cb), "pubkey": owner_pub,
+           "evaluator_sig": sign(ev.private_key_b64, DOMAIN_TAGS["eval-offense-attestation"] + cb),
+           "evaluator": "eval"}
+    # M-11.1 residual: the published LIST also carries an owner-signed SEAL (what the SIGIL governor mints),
+    # so the offense verifier's tamper-evidence gate (drop/reorder/rollback) is satisfied for this valid publish.
+    seal = _eva.build_seal(slug, 1, [rec], sign_fn=lambda b: sign(owner_priv, b), pubkey=owner_pub)
+    _eva.write_eval_attestations(base_dir, slug, [rec], seal=seal)
+
+
 # ---------------------------------------------------------------------------
 # end-to-end engage path
 # ---------------------------------------------------------------------------
@@ -319,13 +343,20 @@ def test_autonomous_discover_greenfield_does_not_raise(isolated):
 # ---------------------------------------------------------------------------
 
 
-def test_engage_loaded_authority_enforces_all_four_governed_fields(isolated):
+def test_engage_loaded_authority_enforces_all_four_governed_fields(isolated, tmp_path, monkeypatch):
     """Load the authority exactly as the engage path does (verified, via the pinned trust
     root) and prove each of the four governed fields is enforced by ``authorize_action`` — the
     same evaluator the executor's ``_authority_gate`` runs. A clean action is the positive
     control."""
     isolated("alpha", "127.0.0.1")
     tr, privs = _provision_trust_root()
+    # M-11.1: the engage-path trust-root pin now refuses a LIVE authority with no verified eval-offense
+    # attestation. Publish one so the LIVE sub-case below reaches authorize_action (the layer THIS test
+    # exercises); the TWIN sub-cases never consult the eval gate.
+    _base = tmp_path / ".vigil-live"
+    _base.mkdir()
+    monkeypatch.setenv("VIGIL_BASE_DIR", str(_base))
+    _publish_eval_attestation(str(_base), "alpha", privs["a0"], tr.authorizers[0].public_key_b64)
 
     def _load(doc: EngagementAuthority) -> EngagementAuthority:
         save_signed_authority(sign_authority(doc, {"a0": privs["a0"]}),

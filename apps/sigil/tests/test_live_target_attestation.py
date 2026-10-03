@@ -74,6 +74,28 @@ def _attestation(store, user, *, host, evaluator, challenge, environment="live")
     return {"evaluator": evaluator, "challenge": challenge, "signature": sign(user.private_key_b64, msg)}
 
 
+def _mint_eval_attestation(store, user, *, slug="apme-cm", evaluator="eval-alice",
+                           charter_id="eval-2026", charter_hash="a" * 64, not_after=None):
+    """M-11.1: owner-mint the EvalOffenseAttestation hard precondition so a LIVE add_target is permitted. The
+    evaluator (`user`) counter-signs the exact core; the OWNER signs it. Mirrors the sovereign attest()
+    ceremony so these WS2 live tests exercise the real (raised) live bar."""
+    import time as _t
+
+    from sigil.governor.eval_offense_attestation import (
+        EvalOffenseAttestation, build_core, sign_evaluator_pop,
+    )
+    from sigil.governor.identity import ensure_owner_keypair
+    na = not_after if not_after is not None else _t.time() + 3600.0
+    iat = float(next(_iss))
+    core = build_core(engagement_slug=slug, charter_id=charter_id, charter_hash=charter_hash,
+                      evaluator_pubkey=user.public_key_b64, not_after=na, issued_at=iat, environment="live")
+    pop = sign_evaluator_pop(core, user.private_key_b64)
+    att = EvalOffenseAttestation(store, owner_key=ensure_owner_keypair())
+    return att.attest(engagement_slug=slug, charter_id=charter_id, charter_hash=charter_hash,
+                      evaluator=evaluator, evaluator_pubkey=user.public_key_b64, evaluator_pop=pop,
+                      not_after=na, issued_at=iat)
+
+
 # --- POSITIVE benchmark ---------------------------------------------------------------------------
 def test_live_unblocked_with_a_valid_attestation():
     from sigil.governor.identity import ensure_owner_keypair
@@ -83,6 +105,7 @@ def test_live_unblocked_with_a_valid_attestation():
 
     s = _store()
     user = _enrolled_evaluator(s)
+    _mint_eval_attestation(s, user)                               # M-11.1 hard precondition
     chal = _mint_challenge(s)
     att = _attestation(s, user, host="apme.cm", evaluator="eval-alice", challenge=chal)
 
@@ -110,6 +133,7 @@ def test_live_attestation_is_recorded_as_an_owner_signed_governance_signal():
 
     s = _store()
     user = _enrolled_evaluator(s)
+    _mint_eval_attestation(s, user)                               # M-11.1 hard precondition
     chal = _mint_challenge(s)
     att = _attestation(s, user, host="apme.cm", evaluator="eval-alice", challenge=chal)
     r = ta.add_target("apme.cm", environment="live", store=s, evaluator_attestation=att)
@@ -186,6 +210,7 @@ def test_live_refused_on_a_replayed_attestation():
     from sigil.ui import target_authorization as ta
     s = _store()
     user = _enrolled_evaluator(s)
+    _mint_eval_attestation(s, user)                               # M-11.1 hard precondition
     chal = _mint_challenge(s)
     att = _attestation(s, user, host="apme.cm", evaluator="eval-alice", challenge=chal)
     assert ta.add_target("apme.cm", environment="live", store=s, evaluator_attestation=att)["ok"] is True
@@ -214,6 +239,7 @@ def test_destructive_is_not_unblocked_by_a_live_attestation():
     from vigil_integration.live.authorization_broker import read_authorization
     s = _store()
     user = _enrolled_evaluator(s)
+    _mint_eval_attestation(s, user)                               # M-11.1 hard precondition
     chal = _mint_challenge(s)
     att = _attestation(s, user, host="apme.cm", evaluator="eval-alice", challenge=chal)
     r = ta.add_target("apme.cm", environment="live", store=s, evaluator_attestation=att)
@@ -246,7 +272,8 @@ def test_mutation_neutering_verify_one_flips_the_forged_case_to_a_leak():
     from sigil.ui import target_authorization as ta
     from sigil.ui.target_authorization import _attestation_message
     s = _store()
-    _enrolled_evaluator(s)
+    user = _enrolled_evaluator(s)
+    _mint_eval_attestation(s, user)                               # M-11.1 hard precondition (real crypto)
     wrong = generate_keypair()
 
     chal = _mint_challenge(s)
