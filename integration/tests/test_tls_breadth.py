@@ -621,61 +621,67 @@ def test_the_handshake_budget_is_structural_not_a_comment():
     budget cannot drift by someone adding a re-drive with a fresh capture function."""
     spec = tls_scan(port=443)
     distinct = {id(r.capture) for r in spec.redrives}
-    assert len(distinct) == tb.TLS_HANDSHAKE_BUDGET_PER_ENDPOINT == 4, (
+    assert len(distinct) == tb.TLS_HANDSHAKE_BUDGET_PER_ENDPOINT == 5, (
         f"{len(distinct)} distinct captures != declared budget {tb.TLS_HANDSHAKE_BUDGET_PER_ENDPOINT}")
-    assert len(spec.redrives) == 5, [(r.bug_class, r.label, r.branch) for r in spec.redrives]
+    assert len(spec.redrives) == 6, [(r.bug_class, r.label, r.branch) for r in spec.redrives]
     # and every re-drive that shares a bug_class carries a discriminating label, so no two overwrite each
     # other's retained context
     keys = [(r.bug_class, r.label) for r in spec.redrives]
     assert len(set(keys)) == len(keys), f"two re-drives collide on (bug_class, label): {keys}"
 
 
-def test_the_certificate_validity_branch_is_not_wired_and_says_so():
-    """CLAIM 4 IS NOT WIRED, and this is the pin that keeps the code and the registry saying the same thing.
+def test_the_certificate_validity_branch_is_wired_and_mints(tmp_path, monkeypatch):
+    """CLAIM 4 IS WIRED (M1.3), and this is the pin that keeps the code and the registry saying the same.
 
-    A re-drive WAS wired to ``tls_weakness.certificate_validity`` and was removed. It could not work: the
-    branch's only route to a non-INCONCLUSIVE verdict is ``fired=True`` (it is not clean-capable), and no
-    ``OracleKind`` dispatches on the ``certificate_validity`` context key, so the oracle can never fire.
-    A branch that always returns INCONCLUSIVE while naming a reason that is not the real one is worse than
-    an absent branch. Asserted three ways so re-adding a dead branch reddens CI:
-      (a) no re-drive on the shipped ToolSpec admits to it;
-      (b) the registry row declares ``wired: false`` and says NOT WIRED in its limitation;
-      (c) the mechanism is still true — a context under that key draws no oracle signal.
+    A DEDICATED re-drive (``_tls_cert_capture`` + ``_cert_validity_context``) now admits to
+    ``tls_weakness.certificate_validity``, and ``OracleKind.CERTIFICATE_VALIDITY`` adjudicates the retained
+    LEAF's validity at the retained instant. Asserted three ways:
+      (a) exactly one re-drive on the shipped ToolSpec admits to the branch, under the ``cert_validity`` label;
+      (b) the registry row declares ``wired: true`` + ``fact_capable: true`` (and ``clean_capable: false``,
+          because the capture retains only the leaf);
+      (c) the mechanism fires — a certificate_validity context over a defective leaf draws a FACT signal, and
+          a VALID leaf does not (the safe twin).
     """
     import json
+    import ipaddress
     from vigil_integration.live.external_tool import _oracle_signal
 
     spec = tls_scan(port=443)
-    assert _CERT_BRANCH not in {r.branch for r in spec.redrives}, (
-        "a re-drive admits to the certificate-validity branch again; it can only emit INCONCLUSIVE with a "
-        "reason that is not the real one — wire a real oracle first (see the row's blocking_work)")
-    assert not any(r.label == "cert_validity" for r in spec.redrives)
+    cert_rds = [r for r in spec.redrives if r.branch == _CERT_BRANCH]
+    assert len(cert_rds) == 1, "exactly one re-drive must admit to the certificate-validity branch"
+    assert cert_rds[0].label == "cert_validity" and cert_rds[0].bug_class == "certificate_validity"
 
     row = {b["id"]: b for b in json.loads(
         Path(__file__).resolve().parents[2].joinpath(
             "docs/capability-matrix/evidence-branches.json").read_text(encoding="utf-8"))["branches"]
     }[_CERT_BRANCH]
-    assert row.get("wired") is False, "the registry must declare this branch unwired"
-    assert "not wired" in row["limitation"].lower()
-    assert row["fact_capable"] is False and row["clean_capable"] is False
+    assert row.get("wired") is True, "the registry must declare this branch wired"
+    assert "not wired" not in row["limitation"].lower()
+    assert row["fact_capable"] is True and row["clean_capable"] is False
+    assert row["oracle_version"] == "certificate_validity"
 
-    # (c) the mechanism: even a fully-populated certificate_validity context draws NO oracle signal, which
-    # is exactly why a re-drive there is dead. Non-vacuous — the same call shape over the branch that IS
-    # wired does produce a signal.
-    cert, _ = _leaf(not_before_days=-40, not_after_days=-10)
-    record = tb.classify_certificate_defects(_cert_evidence(cert))
-    assert record and record["defects"], "precondition of this test: the derivation found real defects"
-    dead = {"check_id": "x", "bug_class": "weak_tls", "insertion_point": "h:443",
-            "oracle_context": {"bug_class": "weak_tls", "certificate_validity": record}}
-    assert _oracle_signal(dead) == (False, False), (
-        "an OracleKind now adjudicates certificate validity — WIRE the branch and delete this pin")
-    live = {"check_id": "y", "bug_class": "weak_tls", "insertion_point": "h:443",
-            "oracle_context": {"bug_class": "weak_tls",
-                               "tls": {"connected": True, "host": "h", "tls_version": "TLSv1",
-                                       "cipher": "AES128-SHA"}}}
-    assert _oracle_signal(live)[0] is True, (
-        "control: the TLS oracle does fire over a context it DOES dispatch on, so the (False, False) above "
-        "is the certificate_validity key drawing no oracle, not a broken call shape")
+    # (c) the mechanism: a certificate_validity context over a DEFECTIVE leaf draws a FACT signal (fired),
+    # and the SAFE TWIN (a valid CA-issued leaf matching the host, in-window) does NOT fire.
+    ca = _ca()
+    bad, _ = _leaf(not_before_days=-40, not_after_days=-10,
+                   sans=[x509.IPAddress(ipaddress.ip_address("127.0.0.1"))], issuer=ca)
+    bad_ctx = {"bug_class": "certificate_validity",
+               "cert_validity": {"host": "127.0.0.1", "cert_der_b64": _der_b64(bad),
+                                 "captured_at_epoch": int(_now().timestamp()),
+                                 "capture_time_source": "runner_clock"}}
+    fired, _concl = _oracle_signal({"check_id": "x", "bug_class": "certificate_validity",
+                                    "insertion_point": "127.0.0.1:443", "oracle_context": bad_ctx})
+    assert fired is True, "a defective leaf must now draw a CERTIFICATE_VALIDITY FACT signal"
+
+    good, _ = _leaf(cn="127.0.0.1", sans=[x509.IPAddress(ipaddress.ip_address("127.0.0.1"))],
+                    not_before_days=-1, not_after_days=365, issuer=ca)
+    good_ctx = {"bug_class": "certificate_validity",
+                "cert_validity": {"host": "127.0.0.1", "cert_der_b64": _der_b64(good),
+                                  "captured_at_epoch": int(_now().timestamp()),
+                                  "capture_time_source": "runner_clock"}}
+    fired2, _ = _oracle_signal({"check_id": "y", "bug_class": "certificate_validity",
+                                "insertion_point": "127.0.0.1:443", "oracle_context": good_ctx})
+    assert fired2 is False, "the safe twin (a valid matching leaf) must NOT fire"
 
 
 def test_the_three_new_branches_are_registered_with_the_capability_they_actually_have():
@@ -703,13 +709,16 @@ def test_the_three_new_branches_are_registered_with_the_capability_they_actually
     assert len((wc.get("blocking_work") or "").strip()) > 40
 
     cv = branches[_CERT_BRANCH]
-    assert cv["fact_capable"] is False and cv["clean_capable"] is False, (
-        "certificate validity is not adjudicated by any OracleKind")
-    assert cv["oracle_version"] == "", "an unadjudicated branch names no oracle"
-    assert cv.get("wired") is False and "not wired" in cv["limitation"].lower(), (
-        "the certificate-validity row must say plainly that nothing drives it")
-    assert all(c.startswith("MISSING:") for c in cv["control_requirements"]), (
-        f"an unwired branch may not claim satisfied controls: {cv['control_requirements']}")
+    assert cv["fact_capable"] is True and cv["clean_capable"] is False, (
+        "certificate validity mints a FACT (an existential defect) but is NOT clean-capable: the capture "
+        "retains only the LEAF, so a non-defect is not a bounded negative over the chain")
+    assert cv["oracle_version"] == "certificate_validity", "the wired branch names its dedicated oracle"
+    assert cv.get("wired") is True and "not wired" not in cv["limitation"].lower(), (
+        "the certificate-validity row must declare it is now wired")
+    assert cv["target_clean_capable"] is True and len((cv.get("blocking_work") or "").strip()) > 40, (
+        "the FACT-only state keeps its CLEAN target and names the full-chain work that would close it")
+    assert "MISSING: full_chain_retention" in cv["control_requirements"], (
+        "the control that caps CLEAN (no retained chain) must stay named")
 
 
 def test_the_weak_cipher_vocabulary_size_is_pinned():
@@ -963,11 +972,11 @@ def test_admission_turns_the_predicate_into_the_verdict_at_the_choke():
     # the weak-cipher branch may NEVER clear, whatever conclusiveness is claimed
     assert V.admit(_WEAK_CIPHER_BRANCH, fired=False, conclusive=True,
                    observed=ok).verdict is V.Verdict.INCONCLUSIVE
-    # the certificate-validity ROW may neither mint nor clear. Nothing admits to it (the branch is
-    # unwired — see test_the_certificate_validity_branch_is_not_wired_and_says_so); these two lines pin
-    # the registry declaration itself, so if it is ever wired it starts from a capability nobody can
-    # accidentally raise.
-    assert V.admit(_CERT_BRANCH, fired=True, conclusive=True, observed=ok).verdict is V.Verdict.LEAD
+    # the certificate-validity ROW is WIRED (M1.3) at fact_capable:true / clean_capable:false. A fired oracle
+    # over it is a FACT (an existential validity defect); a conclusive non-fire is INCONCLUSIVE, NEVER CLEAN —
+    # the capture retains only the LEAF, so a non-defect is not a bounded negative over the presented chain.
+    # See test_the_certificate_validity_branch_is_wired_and_mints.
+    assert V.admit(_CERT_BRANCH, fired=True, conclusive=True, observed=ok).verdict is V.Verdict.FACT
     assert V.admit(_CERT_BRANCH, fired=False, conclusive=True, observed=ok).verdict is V.Verdict.INCONCLUSIVE
 
 
@@ -1598,22 +1607,22 @@ def test_missing_or_unparseable_inputs_judge_nothing_rather_than_clearing():
         {"cert_der_b64": base64.b64encode(b"not a certificate").decode(), "captured_at_epoch": 1}) is None
 
 
-def test_the_certificate_validity_derivation_is_inert_against_live_evidence(tmp_path):
-    """THE honest end-to-end statement of claim 4, driven through the whole runner against the strongest
-    possible input — a server presenting an EXPIRED, hostname-MISMATCHED, SELF-SIGNED leaf.
+def test_a_defective_leaf_server_mints_a_certificate_validity_fact_that_reverifies_offline(tmp_path):
+    """M1.3 — THE end-to-end POSITIVE for the now-WIRED certificate-validity branch, driven through the whole
+    gated runner against the strongest possible input: a server presenting an EXPIRED, hostname-MISMATCHED,
+    SELF-SIGNED leaf.
 
-    The previous version of this test was vacuous: every substantive assertion sat behind
-    ``if ref in res.contexts:`` and one of them was ``record["at_epoch"] == record["at_epoch"]``, so it
-    passed whether or not the path under test ran at all. This one asserts POSITIVELY, in both directions:
-
-      1. the runner really captured that certificate (non-vacuity — the defects are derivable from the DER
-         the runner itself retained, which is the whole value of the derivation), AND
-      2. NOTHING in the run adjudicates it: no ``cert_validity`` outcome exists at all, because the branch
-         is unwired; and the live capture retains no ``captured_at_epoch``, so handing that same capture to
-         the derivation returns ``None`` rather than a verdict.
+    VIGIL's OWN dedicated handshake (``_tls_cert_capture``) retains the leaf DER + the capture instant + its
+    provenance; the ``OracleKind.CERTIFICATE_VALIDITY`` oracle re-derives the defect set from the RETAINED DER
+    at the RETAINED instant; and the signed FACT RE-VERIFIES OFFLINE from its certificate. A TAMPERED retained
+    capture FAILS that re-verification — the certificate binds its evidence. sslscan's rows are never read; the
+    FACT is VIGIL's own re-observation of the leaf.
     """
+    from framework.v2.evidence.certify import verify_certificate
+    from framework.v2.verify.oracles import certificate_validity_oracle
+
     cert, key = _leaf(cn="wrong.example", sans=[x509.DNSName("wrong.example")],
-                      not_before_days=-40, not_after_days=-10)
+                      not_before_days=-40, not_after_days=-10)        # expired + mismatch + self-signed
     cpem, kpem = _pem(cert, key)
     srv = _TLSServer(cpem, kpem, min_version=ssl.TLSVersion.TLSv1_2, max_version=ssl.TLSVersion.TLSv1_3,
                      ciphers=_STRONG_SUITES, seclevel0=False)
@@ -1623,35 +1632,64 @@ def test_the_certificate_validity_derivation_is_inert_against_live_evidence(tmp_
         srv.close()
 
     assert res.status == "ran" and res.proposed
-    # (1) NON-VACUITY: the runner's OWN baseline capture really retained this defective leaf. Reached via
-    # the weak_crypto re-drive's retained context, which is built from the same shared baseline handshake.
-    live_der = _der_b64(cert)
-    retained_leaf = [c["tls"]["cert_der_b64"] for c in res.contexts.values()
-                     if isinstance(c, dict) and isinstance(c.get("tls"), dict)
-                     and c["tls"].get("cert_der_b64")]
-    assert live_der in retained_leaf, (
-        f"the runner's own captures did not retain this defective leaf at all; outcomes={res.outcomes}")
-    # the derivation DOES find every defect when it is given an instant to compare against
-    record = tb.classify_certificate_defects(
-        {"connected": True, "host": "127.0.0.1", "port": srv.port, "cert_der_b64": live_der,
-         "captured_at_epoch": int(_now().timestamp())})
-    assert record is not None
-    assert {"expired", "hostname_mismatch", "self_signed"} <= set(record["defects"]), record
+    facts = _facts(res, "cert_validity")
+    assert facts, (
+        "a server presenting an expired/mismatched/self-signed leaf minted NO certificate-validity FACT; "
+        f"outcomes={res.outcomes}")
+    fact = facts[0]
+    ctx = res.contexts[fact.finding_ref]
+    cv = ctx["cert_validity"]
+    # (1) NON-VACUITY: the FACT is VIGIL's OWN re-observation — the retained DER is the exact leaf the peer
+    # presented, judged at the RETAINED runner instant (never a verify-time clock), with provenance stamped.
+    assert cv["cert_der_b64"] == _der_b64(cert), "the retained leaf must be the one the peer presented"
+    assert isinstance(cv["captured_at_epoch"], int) and cv["capture_time_source"] == "runner_clock"
+    # the pure oracle re-derives every defect OFFLINE from the retained bytes at the retained instant
+    sig = certificate_validity_oracle(cv)
+    assert sig.fired and {"expired", "hostname_mismatch", "self_signed"} <= set(sig.observed["defects"]), (
+        f"the oracle did not re-derive the planted defects from the retained leaf: {sig.observed}")
+    # (2) the signed FACT re-verifies OFFLINE from its retained context
+    assert verify_certificate(fact.signed, oracle_context=ctx, trust_root=TRUST).ok is True, (
+        "the certificate-validity FACT did not re-verify offline from its retained context")
+    # (3) TAMPER: substitute a VALID CA-issued matching leaf for the retained DER. The digest no longer
+    # matches AND the oracle no longer fires over it, so the tampered record does not re-verify.
+    ca = _ca()
+    good, _ = _leaf(cn="127.0.0.1", sans=[x509.IPAddress(__import__("ipaddress").ip_address("127.0.0.1"))],
+                    not_before_days=-1, not_after_days=365, issuer=ca)
+    tampered = {**ctx, "cert_validity": {**cv, "cert_der_b64": _der_b64(good)}}
+    assert verify_certificate(fact.signed, oracle_context=tampered, trust_root=TRUST).ok is False, (
+        "a TAMPERED retained capture re-verified — the certificate does not bind its evidence")
 
-    # (2a) NOTHING adjudicates it: the branch is unwired, so there is no cert_validity outcome to inspect.
-    assert _outcomes(res, "cert_validity") == [], (
-        "a cert_validity outcome exists again — the dead branch was re-wired; see "
-        "test_the_certificate_validity_branch_is_not_wired_and_says_so")
-    assert all(_CERT_BRANCH not in str(o.get("check_id", "")) for o in res.outcomes)
 
-    # (2b) and it is inert on live evidence, because no live capture retains a comparison instant.
-    for probe_label in ("offer_tls1_0", "offer_tls1_1", "offer_weak_ciphers"):
-        for out in _outcomes(res, probe_label):
-            ctx = res.contexts.get(out["check_id"])
-            if isinstance(ctx, dict) and isinstance(ctx.get("tls"), dict):
-                assert tb.classify_certificate_defects(ctx["tls"]) is None, (
-                    "a live capture now carries a comparison instant — if that is deliberate, it is a "
-                    "certificate-invalidating change for that branch and must be declared")
+def test_a_valid_matching_leaf_server_mints_no_certificate_validity_fact(tmp_path):
+    """M1.3 — THE MANDATORY SAFE NEGATIVE CONTROL at the live-capture level. A server presenting a VALID
+    CA-issued leaf whose SAN matches the dialled host, in-window, must mint NO certificate-validity FACT.
+
+    It is a same-shape negative of the positive above: the SAME gated runner, the SAME dedicated capture, the
+    SAME oracle — only the cert is clean. The non-fire is NOT vacuous: the cert_validity re-drive GENUINELY ran
+    over the retained valid leaf (its outcome exists and is a judged non-fire, never a skip), and it is
+    admitted INCONCLUSIVE, NEVER CLEAN — the capture retains only the LEAF, so a non-defect is not a bounded
+    negative over the presented chain (the branch is ``clean_capable: false``)."""
+    ca = _ca()
+    cert, key = _leaf(cn="127.0.0.1",
+                      sans=[x509.IPAddress(__import__("ipaddress").ip_address("127.0.0.1"))],
+                      not_before_days=-1, not_after_days=365, issuer=ca)
+    cpem, kpem = _pem(cert, key)
+    srv = _TLSServer(cpem, kpem, min_version=ssl.TLSVersion.TLSv1_2, max_version=ssl.TLSVersion.TLSv1_3,
+                     ciphers=_STRONG_SUITES, seclevel0=False)
+    try:
+        res = _run(srv.port, tmp_path)
+    finally:
+        srv.close()
+
+    assert res.status == "ran" and res.proposed
+    assert _facts(res, "cert_validity") == [], (
+        "a VALID CA-issued in-window matching leaf minted a certificate-validity FACT — this is the safe "
+        f"negative the oracle must NEVER flag: {[f.finding_ref for f in _facts(res, 'cert_validity')]}")
+    # NON-VACUITY: the re-drive really ran over the retained valid leaf (exactly one outcome, a judged
+    # non-fire), and that non-fire is INCONCLUSIVE — never a vacuous skip, and never a false CLEAN.
+    outs = _outcomes(res, "cert_validity")
+    assert len(outs) == 1 and outs[0]["outcome"] == Outcome.INCONCLUSIVE.value, (
+        f"the safe negative must be a channel-confirmed INCONCLUSIVE non-fire, not a skip/clean/fact: {outs}")
 
 
 def test_no_live_capture_retains_a_wallclock_instant(tmp_path):

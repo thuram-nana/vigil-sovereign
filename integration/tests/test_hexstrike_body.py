@@ -534,7 +534,7 @@ def test_the_fact_based_ok_semantics_are_unchanged_for_oracle_mapped_tools(tmp_p
 def test_h7_oracle_mapped_set_is_derived_from_the_family_registry():
     """_ORACLE_MAPPED_TOOLS is no longer a literal: it is oracle_mapped_tools(_SPEC_BUILDER_TOOLS), so
     FACT-capability is a property of a tool's family (FACT-capable) AND its having a runner spec builder.
-    The derived set is exactly the seven shipped re-drive tools, and each is in a FACT-capable family."""
+    The derived set is exactly the shipped re-drive tools, and each is in a FACT-capable family."""
     from vigil_integration.brains.hexstrike_body import _ORACLE_MAPPED_TOOLS, _SPEC_BUILDER_TOOLS
     from vigil_integration.live.oracle_families import is_fact_capable_family, oracle_mapped_tools
 
@@ -545,10 +545,14 @@ def test_h7_oracle_mapped_set_is_derived_from_the_family_registry():
     # ACHIEVED_STATE web re-drive (web_redrive), so they are in SPEC_BUILDER_TOOLS and thus oracle-mapped.
     # M1.2: gau/waybackurls/feroxbuster/dirsearch join the SAME web_discovery FACT column (each passed the
     # conformance battery), so they are in SPEC_BUILDER_TOOLS and thus oracle-mapped too.
+    # M1.1: the six host/subdomain/SMB network_discovery proposers gained runner-owned spec builders and are
+    # now oracle-mapped (SERVICE_REACHABILITY via VIGIL's own gated handshake; each passed live.conformance).
     assert _ORACLE_MAPPED_TOOLS == oracle_mapped_tools(_SPEC_BUILDER_TOOLS)
     assert _ORACLE_MAPPED_TOOLS == {"nmap", "sslscan", "masscan", "rustscan", "naabu", "zmap", "unicornscan",
                                     "katana", "gobuster",
-                                    "gau", "waybackurls", "feroxbuster", "dirsearch"}
+                                    "gau", "waybackurls", "feroxbuster", "dirsearch",
+                                    "subfinder", "amass", "arp-scan", "nbtscan",
+                                    "enum4linux-ng", "smbmap"}
     for tool in _ORACLE_MAPPED_TOOLS:
         assert is_fact_capable_family(tool), f"{tool}: mapped but its family is not FACT-capable"
 

@@ -135,6 +135,13 @@
       "evidence": "Real local process — a real encrypted handshake"
     },
     {
+      "kind": "certificate_validity",
+      "name": "Certificate validity",
+      "family": "core",
+      "tier": "local",
+      "evidence": "Real local process — a real TLS handshake against a defective-leaf loopback server; the deterministic oracle re-derives the presented leaf's validity defects (expired / not-yet-valid against the retained capture instant, hostname-mismatch, structural self-signed) from the retained DER, and the minted FACT re-verifies offline (the valid CA-issued matching twin mints nothing)"
+    },
+    {
       "kind": "policy_path",
       "name": "Permission path",
       "family": "core",

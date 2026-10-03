@@ -122,7 +122,10 @@ def _spec_for_kind(kind: str, params: "dict | None"):
     FATAL-2: the offense-side ``external_tool`` import is function-local, so importing this module co-loads no
     offense engine into the sovereign env."""
     from ..live.external_tool import (  # noqa: PLC0415
+        amass_subdomain_scan,
+        arp_scan_host_scan,
         dirsearch_web_scan,
+        enum4linux_ng_smb_scan,
         feroxbuster_web_scan,
         ffuf_content_scan,
         gau_web_scan,
@@ -131,9 +134,12 @@ def _spec_for_kind(kind: str, params: "dict | None"):
         katana_web_scan,
         masscan_service_scan,
         naabu_service_scan,
+        nbtscan_host_scan,
         nmap_service_scan,
         nuclei_web_redrive,
         rustscan_service_scan,
+        smbmap_smb_scan,
+        subfinder_subdomain_scan,
         tls_scan,
         unicornscan_service_scan,
         waybackurls_web_scan,
@@ -196,6 +202,24 @@ def _spec_for_kind(kind: str, params: "dict | None"):
         return zmap_service_scan(port=int(p.get("port", 80)), fact_capable=True)
     if kind == "unicornscan":
         return unicornscan_service_scan(ports=str(p.get("ports", "1-1024")), fact_capable=True)
+    # M1.1 — host/subdomain/SMB discovery proposers in the FACT-capable network_discovery family. Each
+    # PROPOSES a host (subfinder/amass/arp-scan/nbtscan) or an SMB port on the target (enum4linux-ng/smbmap);
+    # VIGIL's OWN gated TCP handshake re-proves reachability on the service_reachability.tcp_handshake branch —
+    # the native enumeration stays a LEAD, the reachability of the re-observed host is the FACT. The ``ports``
+    # VALUE (the server-side re-dial set for the surfacing tools) is the only typed value read; every flag is
+    # built server-side in the ToolSpec and an invalid value raises ValueError (the caller keeps it a LEAD).
+    if kind == "subfinder":
+        return subfinder_subdomain_scan(ports=str(p.get("ports", "443,80")))
+    if kind == "amass":
+        return amass_subdomain_scan(ports=str(p.get("ports", "443,80")))
+    if kind == "arp-scan":
+        return arp_scan_host_scan(ports=str(p.get("ports", "80,443")))
+    if kind == "nbtscan":
+        return nbtscan_host_scan(ports=str(p.get("ports", "139,445")))
+    if kind == "enum4linux-ng":
+        return enum4linux_ng_smb_scan(ports=str(p.get("ports", "445,139")))
+    if kind == "smbmap":
+        return smbmap_smb_scan()
     return None
 
 

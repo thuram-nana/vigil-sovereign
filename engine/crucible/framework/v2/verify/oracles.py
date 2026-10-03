@@ -4496,6 +4496,194 @@ def weak_crypto_artifact_oracle(observed: Any) -> OracleSignal:
 
 
 # ---------------------------------------------------------------------------
+# Certificate VALIDITY — the presented leaf's validity window / identity / self-issuance, re-derived from
+# the RETAINED DER at a RETAINED capture instant. Distinct from weak_crypto_artifact_oracle (which judges
+# the signature HASH and public-key SIZE and reads neither a validity window, a SAN, nor an issuer). Emitted
+# under its OWN dedicated OracleKind.CERTIFICATE_VALIDITY — held OUT of the frozen _ALL_ORACLES fallback and
+# reachable ONLY via the `certificate_validity` BUG_CLASS_ORACLES row keyed on a `cert_validity` ctx field no
+# benchmark/scan finding carries — so the unknown-class fallback stays EXACTLY 15 and `make gate` is
+# byte-identical.
+#
+# PURE + OFFLINE-RE-DERIVABLE. The comparison instant is READ FROM THE RETAINED EVIDENCE (`captured_at_epoch`),
+# NEVER a clock read at verify time, so re-running the oracle over the same retained context yields the same
+# verdict in a year — which is what makes an offline re-verification meaningful. The honest cost, stated in
+# the FACT: such an instant is the RUNNER's own clock, not a trusted timestamp, so an expiry conclusion is
+# scoped to the instant of capture.
+#
+# PROVENANCE REFUSAL (the WIRING TRAP named in the registry row's blocking_work): the instant's provenance
+# (`capture_time_source`) MUST be retained alongside it. If the evidence carries an instant but NO source,
+# the oracle REFUSES (a non-fire) rather than silently labelling it `runner_clock` — a provenance label the
+# evidence never earned. The capture stamps the source; the oracle refuses to assume one.
+#
+# SCOPE. The capture retains only the LEAF (VIGIL deliberately handshakes with validation OFF), so
+# `self_signed` is a STRUCTURAL property (issuer == subject AND the leaf verifies under its own key), never a
+# trust-store verdict, and a chain-anchored conclusion is out of reach — which is why the branch is
+# fact_capable but NOT clean_capable (a "no defect" over the leaf is not a bounded negative over the chain).
+# ---------------------------------------------------------------------------
+
+#: The CLOSED certificate-validity defect vocabulary. A property absent from this tuple is never reported.
+_CERT_VALIDITY_DEFECTS: tuple[str, ...] = ("expired", "not_yet_valid", "hostname_mismatch", "self_signed")
+
+
+def _cert_validity_epochs(cert: Any) -> "tuple[int, int]":
+    """(not_before, not_after) as UTC epochs, preferring the timezone-aware accessors so the comparison is
+    unambiguous on every ``cryptography`` version."""
+    import datetime
+
+    def _epoch(aware_attr: str, naive_attr: str) -> int:
+        dt = getattr(cert, aware_attr, None)
+        if dt is None:
+            dt = getattr(cert, naive_attr)
+            dt = dt.replace(tzinfo=datetime.timezone.utc)
+        return int(dt.timestamp())
+
+    return (_epoch("not_valid_before_utc", "not_valid_before"),
+            _epoch("not_valid_after_utc", "not_valid_after"))
+
+
+def _cert_validity_identity_matches(cert: Any, host: str) -> "tuple[bool, list[str]]":
+    """(matched, presented_identities) for ``host`` against the leaf's SAN dNSName / iPAddress entries,
+    falling back to the subject CN only when the cert presents no SAN at all (RFC 6125 §6.4.4). Wildcards
+    match ONE left-most label, as a browser does. Deterministic: no DNS, no clock, no network."""
+    import ipaddress
+
+    from cryptography import x509
+
+    names: list[str] = []
+    try:
+        san = cert.extensions.get_extension_for_class(x509.SubjectAlternativeName).value
+        names.extend(str(n) for n in san.get_values_for_type(x509.DNSName))
+        names.extend(str(n) for n in san.get_values_for_type(x509.IPAddress))
+    except x509.ExtensionNotFound:
+        pass
+    if not names:
+        try:
+            from cryptography.x509.oid import NameOID
+            names = [a.value for a in cert.subject.get_attributes_for_oid(NameOID.COMMON_NAME)]
+        except Exception:  # noqa: BLE001
+            names = []
+    target = (host or "").strip().strip("[]").lower()
+    try:
+        target_ip: "ipaddress._BaseAddress | None" = ipaddress.ip_address(target)
+    except ValueError:
+        target_ip = None
+    for raw in names:
+        cand = str(raw).strip().lower()
+        if target_ip is not None:
+            try:
+                if ipaddress.ip_address(cand) == target_ip:
+                    return True, [str(n) for n in names]
+            except ValueError:
+                continue
+            continue
+        if cand == target:
+            return True, [str(n) for n in names]
+        if cand.startswith("*.") and "." in target and target.split(".", 1)[1] == cand[2:]:
+            return True, [str(n) for n in names]
+    return False, [str(n) for n in names]
+
+
+def _cert_validity_self_signed(cert: Any) -> bool:
+    """True iff issuer == subject AND the certificate's signature verifies under its OWN public key. The
+    second half matters: a name collision alone is not self-issuance. Fail-closed — any verification error
+    returns False rather than asserting self-signature."""
+    try:
+        if cert.issuer != cert.subject:
+            return False
+    except Exception:  # noqa: BLE001
+        return False
+    try:
+        cert.verify_directly_issued_by(cert)
+        return True
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def certificate_validity_oracle(observed: Any) -> OracleSignal:
+    """Fire when the presented leaf has a VALIDITY defect — expired / not-yet-valid (against the RETAINED
+    capture instant), hostname-mismatch (SAN/CN vs the captured host), or self-signed (structural). The proof
+    is the retained DER bytes + the retained instant + its provenance — a pure, deterministic re-derivation
+    that re-verifies OFFLINE, exactly like ``weak_crypto_artifact_oracle`` re-derives the signature hash.
+
+    REFUSES (a non-fire, never a raise) when there is nothing it may soundly judge:
+      * no mapping / no ``cert_der_b64`` / unparseable DER — nothing to judge;
+      * ``captured_at_epoch`` missing or not an int — no retained instant to compare against;
+      * ``capture_time_source`` missing/empty — the instant has no provenance, so the oracle will NOT assume
+        one (the WIRING TRAP: a trusted timestamp the evidence never earned). The capture must stamp it.
+
+    A non-fire over a LEAF cert is NOT a clean certificate — the branch is clean_incapable (leaf-only, no
+    chain), so admission maps a conclusive non-fire to INCONCLUSIVE, never CLEAN."""
+    if not isinstance(observed, Mapping):
+        return OracleSignal(kind=OracleKind.CERTIFICATE_VALIDITY, fired=False, confidence=0.0,
+                            evidence="no certificate-validity evidence")
+    b64 = _coerce_text(observed.get("cert_der_b64")).strip()
+    if not b64:
+        return OracleSignal(kind=OracleKind.CERTIFICATE_VALIDITY, fired=False, confidence=0.0,
+                            evidence="no retained certificate (cert_der_b64 absent)")
+    at = observed.get("captured_at_epoch")
+    if not isinstance(at, int) or isinstance(at, bool):
+        return OracleSignal(kind=OracleKind.CERTIFICATE_VALIDITY, fired=False, confidence=0.0,
+                            evidence="no retained capture instant (captured_at_epoch absent/non-int) — nothing to judge")
+    source = _coerce_text(observed.get("capture_time_source")).strip()
+    if not source:
+        # REFUSE rather than assume a source: an instant with no retained provenance cannot ground an
+        # expiry claim. Do not default it to 'runner_clock' — that is a label the evidence never earned.
+        return OracleSignal(kind=OracleKind.CERTIFICATE_VALIDITY, fired=False, confidence=0.0,
+                            evidence="REFUSED: captured_at_epoch carries no capture_time_source provenance — "
+                                     "the oracle will not assume a timestamp source it was not given")
+    try:
+        der = base64.b64decode(b64)
+    except Exception:  # noqa: BLE001
+        return OracleSignal(kind=OracleKind.CERTIFICATE_VALIDITY, fired=False, confidence=0.0,
+                            evidence="retained cert_der_b64 is not valid base64")
+    try:
+        from cryptography import x509
+        cert = x509.load_der_x509_certificate(der)
+        not_before, not_after = _cert_validity_epochs(cert)
+    except Exception:  # noqa: BLE001 — unparseable DER judges nothing
+        return OracleSignal(kind=OracleKind.CERTIFICATE_VALIDITY, fired=False, confidence=0.0,
+                            evidence="retained DER did not parse as an X.509 certificate")
+
+    host = _coerce_text(observed.get("host")).strip()
+    defects: list[str] = []
+    if at > not_after:
+        defects.append("expired")
+    if at < not_before:
+        defects.append("not_yet_valid")
+    matched, presented = _cert_validity_identity_matches(cert, host)
+    if not matched:
+        defects.append("hostname_mismatch")
+    if _cert_validity_self_signed(cert):
+        defects.append("self_signed")
+    defects = [d for d in _CERT_VALIDITY_DEFECTS if d in defects]
+
+    base_obs = {
+        "host": host,
+        "at_epoch": at,
+        "at_epoch_source": source,
+        "not_before_epoch": not_before,
+        "not_after_epoch": not_after,
+        "presented_identities": presented,
+        "issuer": cert.issuer.rfc4514_string(),
+        "subject": cert.subject.rfc4514_string(),
+        "defects": defects,
+    }
+    if defects:
+        return OracleSignal(
+            kind=OracleKind.CERTIFICATE_VALIDITY, fired=True, confidence=0.95,
+            evidence=("the presented leaf certificate has validity defect(s) "
+                      f"{defects} at the retained capture instant {at} (source={source}; the runner's own "
+                      "clock, so an expiry conclusion is scoped to the instant of capture, not a trusted "
+                      f"timestamp) — subject {base_obs['subject']!r}, issuer {base_obs['issuer']!r}"),
+            observed=base_obs)
+    return OracleSignal(
+        kind=OracleKind.CERTIFICATE_VALIDITY, fired=False, confidence=0.0,
+        evidence=("the presented leaf certificate shows no validity defect over the retained leaf at the "
+                  f"capture instant {at} — this is a LEAF-only observation, not a chain-anchored clean"),
+        observed=base_obs)
+
+
+# ---------------------------------------------------------------------------
 # Static source-code rule — a re-runnable deterministic rule over RETAINED SOURCE-CODE BYTES.
 #
 # The SAST bridge: the analysis path emits LEADs; this oracle promotes ONE to a "static FACT" by RE-PARSING

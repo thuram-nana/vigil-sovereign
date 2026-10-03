@@ -10,6 +10,8 @@ advisory note and can never occupy a proven-coverage cell.
 
 from __future__ import annotations
 
+import pytest
+
 from framework.v2.agents.models import FindingPayload
 from framework.v2.report.standards import (
     OCSF_CLASS_NAMES,
@@ -21,6 +23,7 @@ from framework.v2.report.standards import (
     known_mapped_classes,
     map_finding,
 )
+from framework.v2.verify.adapter import FindingContext
 from framework.v2.verify.verifier import BUG_CLASS_ORACLES
 
 from .conftest import make_demoted, make_fact, make_lead
@@ -175,6 +178,95 @@ def test_wave2_attestation_stays_deterministic_and_signable() -> None:
     # the embedded coverage matrix now spans the new frameworks.
     for fw in ("nist_csf", "d3fend", "ocsf", "ssdf"):
         assert fw in a["coverage_matrix"]["frameworks"]
+
+
+# ---------------------------------------------------------------------------
+# certificate_validity (M1.3) — the TLS leaf-certificate validity oracle's row. The completeness tests above
+# prove the row EXISTS; these pin WHAT it says and that the honesty gate holds for it end to end.
+# ---------------------------------------------------------------------------
+
+def test_certificate_validity_is_mapped_as_a_transport_crypto_class() -> None:
+    m = controls_for("certificate_validity")
+    assert m is not None
+    assert m["owasp"] == "A02:2021"                          # with weak_tls / weak_crypto_artifact
+    assert m["cwe"] == ["CWE-295", "CWE-297", "CWE-298"]      # umbrella + host mismatch + expiration
+    assert m["pci_dss"] == ["4.2.1"]                         # certificates in transit must be valid + unexpired
+    assert m["attack"] == ["T1557"]                          # Adversary-in-the-Middle (enabling condition)
+    assert m["nist_csf"] == ["PR.AA-01", "PR.DS-02"]         # service credential mgmt + data-in-transit
+    assert m["d3fend"] == ["D3-ACA", "D3-CERO"]              # Active Certificate Analysis + Certificate Rotation
+    assert m["ocsf"] == ["2002", "2003"]                     # Vulnerability + Compliance Finding
+    assert m["ssdf"] == ["PW.9", "RV.1"]                     # secure deployed settings + ongoing confirmation
+
+
+def _expired_self_signed_leaf_ctx(*, with_provenance: bool) -> dict:
+    """A REAL retained context for the certificate-validity oracle: an expired, self-signed 2048-bit RSA leaf for
+    127.0.0.1 'captured' now. The oracle reads the RETAINED instant (never a clock at verify time), so the proof
+    re-derives identically whenever this runs. Without ``capture_time_source`` the oracle REFUSES to adjudicate
+    (it will not assume a provenance the evidence never carried)."""
+    pytest.importorskip("cryptography")
+    import base64
+    import datetime
+    import ipaddress
+
+    from cryptography import x509
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import rsa
+    from cryptography.x509.oid import NameOID
+
+    now = datetime.datetime.now(datetime.timezone.utc)
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "standards-test.invalid")])
+    cert = (x509.CertificateBuilder().subject_name(name).issuer_name(name).public_key(key.public_key())
+            .serial_number(x509.random_serial_number())
+            .not_valid_before(now - datetime.timedelta(days=40))
+            .not_valid_after(now - datetime.timedelta(days=10))
+            .add_extension(x509.SubjectAlternativeName([x509.IPAddress(ipaddress.ip_address("127.0.0.1"))]),
+                           critical=False)
+            .sign(key, hashes.SHA256()))
+    record = {
+        "host": "127.0.0.1",
+        "cert_der_b64": base64.b64encode(cert.public_bytes(serialization.Encoding.DER)).decode("ascii"),
+        "captured_at_epoch": int(now.timestamp()),
+    }
+    if with_provenance:
+        record["capture_time_source"] = "runner_clock"
+    return FindingContext.from_cert_validity(record).model_dump(mode="json")
+
+
+def _cert_validity_finding(ctx: dict) -> FindingPayload:
+    return FindingPayload(
+        finding_slug="010-expired-cert", title="TLS certificate is expired and self-signed", severity="Low",
+        bug_class="certificate_validity", surface="tls://127.0.0.1:8443",
+        summary="The presented leaf certificate is expired and self-signed.",
+        impact="Clients cannot authenticate the server and are conditioned to click through certificate warnings.",
+        verified_by_oracle=True, oracle_kind="certificate_validity", confidence=0.95,
+        oracle_rationale="leaf validity defects re-derived from the retained DER at the retained instant",
+        critique_status="confirmed", oracle_context=ctx,
+    )
+
+
+def test_certificate_validity_fact_asserts_coverage_and_a_refused_proof_does_not() -> None:
+    # A defective leaf whose proof RE-FIRES is a FACT: the new row's controls are asserted, in every column.
+    fact_finding = _cert_validity_finding(_expired_self_signed_leaf_ctx(with_provenance=True))
+    fact = map_finding(fact_finding)
+    assert fact["graded"] == "fact" and fact["status"] == "proven" and fact["coverage_asserted"] is True
+    assert fact["controls"] == controls_for("certificate_validity")
+    assert fact["proof"]["oracle_kind"] == "certificate_validity"
+    proven = coverage_matrix([fact_finding])["frameworks"]
+    assert proven["d3fend"]["D3-ACA"]["status"] == "proven"
+    assert proven["nist_csf"]["PR.AA-01"]["status"] == "proven"
+
+    # The SAME retained bytes, but the instant carries no provenance: the oracle REFUSES (a non-fire), so the
+    # recorded 'confirmed' claim no longer re-fires -> DEMOTED -> an advisory NOTE that asserts NO coverage and
+    # never occupies a proven cell, however confidently the finding claims verified_by_oracle.
+    refused_finding = _cert_validity_finding(_expired_self_signed_leaf_ctx(with_provenance=False))
+    refused = map_finding(refused_finding)
+    assert refused["graded"] != "fact" and refused["is_fact"] is False
+    assert refused["coverage_asserted"] is False and refused["controls"] is None
+    assert refused["advisory"] == controls_for("certificate_validity")
+    advisory = coverage_matrix([refused_finding])["frameworks"]
+    assert advisory["d3fend"]["D3-ACA"]["status"] == "advisory"
+    assert advisory["nist_csf"]["PR.AA-01"]["status"] == "advisory"
 
 
 # ---------------------------------------------------------------------------

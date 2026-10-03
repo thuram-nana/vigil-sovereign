@@ -342,6 +342,21 @@ _STANDARDS: dict[str, ControlMapping] = {
                    attack=("T1557",)),
     "weak_crypto_artifact": _m("A02:2021", ("CWE-327",), pci=("4.2.1", "3.6.1"), soc2=_CRYPTO_SOC2, iso=_CRYPTO_ISO,
                               attack=("T1553",)),
+    # M1.3 TLS leaf-CERTIFICATE VALIDITY (OracleKind.CERTIFICATE_VALIDITY): the presented server certificate is
+    # expired / not-yet-valid (against a RETAINED capture instant), names a different host (SAN/CN mismatch), or is
+    # self-signed (structural) — re-derived offline from the retained DER. Distinct from weak_crypto_artifact above,
+    # which judges only the signature hash / key size and never the window, the SAN or the issuer.
+    # A02:2021 Cryptographic Failures, with the other transport-crypto classes (A02's own text asks whether "the
+    # received server certificate and the trust chain [are] properly validated"). JUDGMENT CALL: MITRE files
+    # CWE-295/297 under A07 and CWE-296/324 under A02; A02 is the best fit for a server-PRESENTED certificate.
+    # CWE-295 (Improper Certificate Validation — the umbrella; also covers not-yet-valid and self-signed) and its two
+    # children that match the oracle's defect kinds one-to-one: CWE-297 (host mismatch) + CWE-298 (expiration). They
+    # name the validation failure; the weakness PROVEN is the server presenting such a certificate.
+    # PCI DSS 4.2.1: certificates that safeguard PAN in transit must be valid and not expired or revoked.
+    # ATT&CK T1557 (Adversary-in-the-Middle): an already-invalid certificate habituates clients to click through the
+    # very warning an interposed attacker's certificate raises — the enabling-condition mapping weak_tls uses.
+    "certificate_validity": _m("A02:2021", ("CWE-295", "CWE-297", "CWE-298"), pci=_CRYPTO_PCI, soc2=_CRYPTO_SOC2,
+                               iso=_CRYPTO_ISO, attack=("T1557",)),
     # ---- Wave-5.1 STATIC source-code rule (the SAST bridge) — code-property FACTs, honestly scoped: each is a
     # PROVEN property of the source, NOT an observed attacker technique, so the ATT&CK column is empty (no clean
     # technique for a static code property, per the honesty convention above). ----
@@ -555,6 +570,17 @@ _WAVE2_GROUPS: tuple[tuple[_Wave2, tuple[str, ...]], ...] = (
     # ---- cryptographic failures (weak TLS / crypto artifact / mobile secret-at-rest) ----
     (_Wave2(("PR.DS-02", "PR.DS-01"), (), ("2002", "2003"), ("PW.5", "PW.9", "RV.1")),
      ("weak_tls", "weak_crypto_artifact", "mobile_misconfiguration")),
+    # ---- TLS leaf-certificate validity (expired / not-yet-valid / host mismatch / self-signed). Same pci/soc2/iso
+    #      cluster as the crypto family but NOT its bundle: CSF PR.DS-02 (data-in-transit) + PR.AA-01 (a server
+    #      certificate is the SERVICE's credential; CSF's own PR.AA-01 example is "issue, manage, and revoke
+    #      cryptographic certificates"). It is not a data-at-rest (PR.DS-01) or secure-coding (PW.5) failure, so
+    #      neither is cited. D3FEND has exact duals: D3-ACA Active Certificate Analysis (connect, collect the server
+    #      certificate, analyze it — what the oracle's capture does) + D3-CERO Certificate Rotation (the fix for an
+    #      expired or wrongly-issued certificate). OCSF Vulnerability + Compliance Finding (PCI 4.2.1 requires valid,
+    #      unexpired certificates). SSDF: secure-by-default configuration (PW.9) + ongoing vulnerability confirmation
+    #      (RV.1). ----
+    (_Wave2(("PR.DS-02", "PR.AA-01"), ("D3-ACA", "D3-CERO"), ("2002", "2003"), ("PW.9", "RV.1")),
+     ("certificate_validity",)),
     # ---- sensitive-data / information exposure (incl. GraphQL discovery, system-prompt disclosure) ----
     (_Wave2(("PR.DS-01", "DE.CM-09"), (), ("2002", "2006"), ("PW.5", "PW.9", "RV.1")),
      ("exposure", "sensitive_exposure", "graphql_introspection", "graphql_suggestions",

@@ -348,6 +348,13 @@ class FindingContext(BaseModel):
     # PROPERTY (never runtime exploitability).
     static_rule: dict[str, Any] | None = None
 
+    # certificate_validity_oracle (M1.3 — the presented TLS leaf's validity window / identity / self-issuance,
+    # re-derived from the RETAINED DER at a RETAINED capture instant). No benchmark/scan/engage finding carries
+    # this, so it leaves the gate byte-identical; routes to the dedicated CERTIFICATE_VALIDITY kind via a
+    # distinct `cert_validity` ctx key. Carries {host, cert_der_b64, captured_at_epoch, capture_time_source} —
+    # the retained leaf the oracle re-parses to re-derive the defect set OFFLINE (so the FACT re-verifies).
+    cert_validity: dict[str, Any] | None = None
+
     # AEGIS system_prompt_disclosure_oracle (a planted high-entropy canary appeared VERBATIM
     # in the app's own LLM output). PR1: these carry PLAINTEXT — the reverify contract re-fires
     # on verbatim substrings, so the certificate honestly retains the random sentinel + a
@@ -888,6 +895,18 @@ class FindingContext(BaseModel):
         retained OID name is what the oracle classifies — a pure, re-verifiable string check (a broken
         signature hash MD5/SHA1 is unconditionally weak), like the TLS oracle re-verifies a cipher name."""
         return cls(bug_class=bug_class, crypto_artifact=dict(artifact or {}))
+
+    @classmethod
+    def from_cert_validity(
+        cls, record: Mapping[str, Any], *, bug_class: str = "certificate_validity"
+    ) -> "FindingContext":
+        """A captured TLS leaf descriptor ({host, cert_der_b64, captured_at_epoch, capture_time_source}) for
+        the M1.3 certificate-validity oracle. The retained DER + capture instant are what the oracle re-derives
+        the defect set from — a pure, offline-re-verifiable derivation (expired / not-yet-valid against the
+        RETAINED instant, hostname-mismatch, structural self-signed), distinct from the weak-crypto oracle that
+        judges only the signature hash / key size. The DER MUST come from a real gated handshake
+        (``tls.capture_tls_handshake``), never a scanner's parsed row."""
+        return cls(bug_class=bug_class, cert_validity=dict(record or {}))
 
     @classmethod
     def from_code_region(
@@ -2588,6 +2607,8 @@ class FindingContext(BaseModel):
             ctx["crypto_artifact"] = self.crypto_artifact
         if self.static_rule is not None:
             ctx["static_rule"] = self.static_rule
+        if self.cert_validity is not None:
+            ctx["cert_validity"] = self.cert_validity
         if self.version_advisory is not None:
             ctx["version_advisory"] = self.version_advisory
         if self.policy is not None:

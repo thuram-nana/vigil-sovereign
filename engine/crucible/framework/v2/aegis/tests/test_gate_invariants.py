@@ -161,6 +161,13 @@ _ADDITIVE = frozenset({
     # ONLY via its four `static_*` rows keyed on a `static_rule` ctx field no benchmark/scan finding carries;
     # never in the frozen fallback. Each mints a code-property FACT (never runtime exploitability).
     "STATIC_RULE",
+    # M1.3 TLS CERTIFICATE VALIDITY kind — the presented leaf's validity window / identity / self-issuance,
+    # re-derived from RETAINED DER at a RETAINED instant. Its OWN dedicated kind (so editing the validity
+    # derivation changes ONLY oracle_version(CERTIFICATE_VALIDITY), never TLS_WEAKNESS), additive, reachable
+    # ONLY via its `certificate_validity` row keyed on a `cert_validity` ctx field no benchmark/scan finding
+    # carries; never in the frozen fallback. FACT-capable (an existential defect) but NOT clean-capable
+    # (leaf-only, no chain).
+    "CERTIFICATE_VALIDITY",
 })
 
 
@@ -191,8 +198,10 @@ def test_every_additive_oraclekind_is_excluded_from_the_fallback():
     # untouched): 44 -> 45; Wave 4.3 added PASSWORD_RESET_INVARIANT (token reuse/non-expiry + deterministic
     # predictable-counter collision, CWE-640/613/330, its own dedicated kind so ACHIEVED_STATE's oracle_version
     # is untouched): 45 -> 46; Wave 5.1 added STATIC_RULE (the SAST bridge — a deterministic rule over retained
-    # source-code bytes; four static_* classes, its own dedicated kind): 46 -> 47.)
-    assert len(OracleKind) == 47
+    # source-code bytes; four static_* classes, its own dedicated kind): 46 -> 47. M1.3 added
+    # CERTIFICATE_VALIDITY (TLS leaf validity window/identity/self-issuance, its own dedicated kind so
+    # TLS_WEAKNESS's oracle_version is untouched): 47 -> 48.)
+    assert len(OracleKind) == 48
     assert {k.name for k in OracleKind} == _FROZEN_15 | _ADDITIVE
     assert set(V._ALL_ORACLES) == set(OracleKind) - {OracleKind[n] for n in _ADDITIVE}
 

@@ -66,9 +66,15 @@ _TYPED_BUILDER_TOOLS = frozenset({"ffuf", "httpx", "hydra", "nikto", "nmap", "nu
 # M1.2: gau/waybackurls/feroxbuster/dirsearch join the SAME web_discovery FACT column (each passed the
 # conformance battery over the gated runner); they feed the same ACHIEVED_STATE web re-drive, so they are
 # oracle-mapped "adapted (cli)" tools too.
+# M1.1: the six host/subdomain/SMB discovery proposers (subfinder/amass/arp-scan/nbtscan/enum4linux-ng/smbmap)
+# join the SSOT too — each carries an R4 ToolSpec builder feeding the SAME FACT-capable SERVICE_REACHABILITY
+# re-drive (VIGIL's own gated TCP handshake) the port scanners use, so they are oracle-mapped "adapted (cli)"
+# tools, not enrichers (each passed the conformance battery before fact_capable was set on the matrix).
 _SPEC_BUILDER_DRIVEN_TOOLS = frozenset({"masscan", "naabu", "nmap", "rustscan", "sslscan",
                                         "unicornscan", "zmap", "katana", "gobuster",
-                                        "gau", "waybackurls", "feroxbuster", "dirsearch"})
+                                        "gau", "waybackurls", "feroxbuster", "dirsearch",
+                                        "subfinder", "amass", "arp-scan", "nbtscan",
+                                        "enum4linux-ng", "smbmap"})
 
 # Globally-recognised tools NOT in the host roster and without a Strix skill doc (net-new curated metadata;
 # empty today — the curated host roster + the maintained skill playbooks already are the recognition list).

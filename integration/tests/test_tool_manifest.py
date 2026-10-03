@@ -54,10 +54,16 @@ def test_the_only_fact_capable_tools_are_the_ones_with_a_shipped_re_drive():
     # M1.2 grows the web_discovery FACT column further: gau/waybackurls (passive archive URL proposers) +
     # feroxbuster/dirsearch (content-discovery brute) each feed the SAME ACHIEVED_STATE web re-drive and each
     # passed live.conformance.run_toolspec_conformance before being flipped.
+    # M1.1 grows the SERVICE_REACHABILITY column with six more network_discovery proposers
+    # (subfinder/amass/arp-scan/nbtscan/enum4linux-ng/smbmap): each PROPOSES a host (or an SMB port on the
+    # target) and VIGIL's OWN gated TCP handshake re-proves reachability on the SAME
+    # service_reachability.tcp_handshake branch — the enumeration/L2/NetBIOS/SMB claim stays a LEAD. Each
+    # passed live.conformance first; no new oracle and no new branch were added.
     fact = {m.name for m in load_manifests(_MATRIX) if m.fact_capable}
     assert fact == {"nmap", "sslscan", "masscan", "rustscan", "naabu", "zmap", "unicornscan",
                     "katana", "gobuster",
-                    "gau", "waybackurls", "feroxbuster", "dirsearch"}, (
+                    "gau", "waybackurls", "feroxbuster", "dirsearch",
+                    "subfinder", "amass", "arp-scan", "nbtscan", "enum4linux-ng", "smbmap"}, (
         f"unexpected fact_capable set: {fact}")
 
 
@@ -210,13 +216,15 @@ def test_h5_batch2_reuse_tools_are_present_service_reachability_fact_capable():
         assert m.excluded is False, f"{name}: a reachability proposer is not excluded"
         assert m.category == "active-assessment", f"{name}: a port scanner actively probes"
         assert m.notes.strip(), f"{name}: a fact_capable tool still documents its re-drive in notes"
-    # the pinned fact_capable set includes the two promoted batch-2 scanners AND the web_discovery FACT
-    # column: katana/gobuster (C4) plus gau/waybackurls/feroxbuster/dirsearch (M1.2), all ACHIEVED_STATE via
-    # web_redrive.
+    # the pinned fact_capable set includes the two promoted batch-2 scanners, the web_discovery FACT column
+    # (katana/gobuster C4 + gau/waybackurls/feroxbuster/dirsearch M1.2, all ACHIEVED_STATE via web_redrive),
+    # and the M1.1 host/subdomain/SMB discovery proposers (subfinder/amass/arp-scan/nbtscan/enum4linux-ng/
+    # smbmap, SERVICE_REACHABILITY via re-drive).
     fact = {m.name for m in load_manifests(_MATRIX) if m.fact_capable}
     assert fact == {"nmap", "sslscan", "masscan", "rustscan", "naabu", "zmap", "unicornscan",
                     "katana", "gobuster",
-                    "gau", "waybackurls", "feroxbuster", "dirsearch"}, (
+                    "gau", "waybackurls", "feroxbuster", "dirsearch",
+                    "subfinder", "amass", "arp-scan", "nbtscan", "enum4linux-ng", "smbmap"}, (
         f"fact set changed: {fact}")
 
 

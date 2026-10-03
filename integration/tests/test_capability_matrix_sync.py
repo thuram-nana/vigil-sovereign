@@ -102,13 +102,22 @@ def test_the_backfill_did_not_fake_fact_capability():
     # web_discovery family) earned FACT via the ACHIEVED_STATE web re-drive (live.web_redrive.web_redrive),
     # each passing live.conformance first; nuclei stays fact_capable=false (a scanner is a proposer, not the
     # authority). See docs/capability-matrix/evidence-branches.json.
+    # M1.1 grows the SERVICE_REACHABILITY column: the six host/subdomain/SMB discovery proposers
+    # (subfinder/amass/arp-scan/nbtscan/enum4linux-ng/smbmap) each earned FACT via live.conformance over
+    # VIGIL's own gated handshake (the surfacing tools re-dial the SURFACED host; enum4linux-ng/smbmap pin the
+    # host to the target and re-prove the SMB port). Same oracle + branch (service_reachability.tcp_handshake),
+    # no new oracle — the native enumeration stays a LEAD, the reachability of the re-observed host is the FACT.
     fact = {m.name for m in _manifests() if m.fact_capable}
     assert fact == {"nmap", "sslscan", "masscan", "rustscan", "naabu", "zmap", "unicornscan",
                     "katana", "gobuster",
                     # M1.2 — the rest of the web_discovery FACT column: gau/waybackurls (passive archive URL
                     # proposers) + feroxbuster/dirsearch (content brute), each feeding the ACHIEVED_STATE web
                     # re-drive and each passing live.conformance.run_toolspec_conformance before this flip.
-                    "gau", "waybackurls", "feroxbuster", "dirsearch"}, (
+                    "gau", "waybackurls", "feroxbuster", "dirsearch",
+                    # M1.1 — the SERVICE_REACHABILITY network_discovery proposers (host/subdomain/SMB), each
+                    # re-driven over VIGIL's own gated handshake and each passing live.conformance first.
+                    "subfinder", "amass", "arp-scan", "nbtscan",
+                    "enum4linux-ng", "smbmap"}, (
         f"unexpected fact_capable set after backfill: {fact}"
     )
 

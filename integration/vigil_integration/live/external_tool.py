@@ -718,6 +718,225 @@ def unicornscan_service_scan(*, ports: str = "1-1024", fact_capable: bool = Fals
                     version_argv=lambda: ["unicornscan", "-v"], danger="recon")
 
 
+# --- M1.1 batch: HOST / SUBDOMAIN / SMB discovery proposers -> SERVICE_REACHABILITY re-drive ---------
+# Six more network_discovery proposers. The doctrine is unchanged and the FACT authority is the same as for
+# the port scanners: the tool is a PROPOSER, VIGIL's OWN gated TCP handshake is the fact. Two shapes:
+#
+#   * subfinder / amass (passive subdomain enumeration) and arp-scan / nbtscan (L2 / NetBIOS host discovery)
+#     surface a HOST (not a port). VIGIL re-dials each SURFACED host on a SERVER-SIDE configured TCP port set
+#     and mints a SERVICE_REACHABILITY FACT for each (host, port) its own handshake confirms; the enumeration
+#     itself stays a LEAD. A surfaced host is a NEW host the runner's top-level ScopeGate never adjudicated,
+#     so these specs carry a SCOPED re-drive capture (:func:`_scoped_surfaced_capture`) that re-applies the
+#     protected-domain floor the ScopeGate gives the tool target AND relies on the egress floor's
+#     charter-scope-over-ADDRESSES predicate (``charter_address_authorizer`` inside ``_default_capture``),
+#     which refuses any surfaced host not attributable to a NON-wildcard charter row — strictly tighter than
+#     ``scope.matches``. A host that is L2-only (arp-scan) or UDP-137-only (nbtscan) with NO open TCP port on
+#     re-dial therefore mints NOTHING — correct, not a gap (``deceptive_no_fact`` holds).
+#   * enum4linux-ng / smbmap enumerate SMB on the ALREADY-scope-authorised tool target, so their SMB host is
+#     the target: the parser PINS the host to ``target`` (never a host the tool printed) and proposes the SMB
+#     port(s). They carry NO redrives, so the runner's own ``service_reachability.tcp_handshake`` FACT branch
+#     (the nmap/masscan path) re-proves reachability. The SMB enumeration (shares / users / policy) is a LEAD.
+#
+# Every parser extracts ONLY a host token (validated) or a port (validated), and every flag is built
+# SERVER-SIDE — no model/brain value reaches the tool argv.
+
+# a comma list of SINGLE ports (no ranges): the SERVER-SIDE set a surfaced host is re-dialed on. Ranges are
+# rejected so one surfaced host can never fan out into a per-host range sweep (OPSEC: bounded re-dial).
+_REDIAL_PORTS_RE = re.compile(r"^\d{1,5}(,\d{1,5})*$")
+# a plausible DNS hostname OR IP literal token (subfinder/amass print one per line); a flag / log prefix /
+# empty token never matches, so it is dropped. Length-bounded per RFC 1035; underscores allowed (some SRV /
+# wildcard names). The host is re-authorised at dial time by the scoped capture — this is only a parse gate.
+_HOSTNAME_TOKEN = re.compile(
+    r"^(?=.{1,253}$)(?:[A-Za-z0-9_](?:[A-Za-z0-9_-]{0,61}[A-Za-z0-9_])?)"
+    r"(?:\.[A-Za-z0-9_](?:[A-Za-z0-9_-]{0,61}[A-Za-z0-9_])?)*$")
+# a LEADING IPv4 on a line (arp-scan: ``<ip>\t<mac>\t<vendor>``; nbtscan: ``<ip>  <name>  ...``). Octet range
+# is validated after the match. A header / status line (no leading IP) is dropped.
+_LEADING_IPV4 = re.compile(r"^\s*((?:\d{1,3}\.){3}\d{1,3})\b")
+# smbmap prints ``[+] IP: <host>:<port>`` — take the PORT (host pinned to target). Real smbmap format.
+_SMBMAP_IP_PORT = re.compile(r"(?im)^\s*\[\+\]\s*IP:\s*[^\s:]+:(\d{1,5})\b")
+# enum4linux-ng produces no reliable port, but its output carries unmistakable SMB/NetBIOS markers when an
+# SMB service answered. Presence of a marker ⇒ propose (target, <server-side SMB ports>); VIGIL's own
+# handshake is still the fact authority, so a false marker just costs a refused handshake (never a FACT).
+_ENUM4_SMB_MARKER = re.compile(r"(?i)\b(smb(?:v?[123])?|netbios|share(?:s|name)?|rid\s|domain\s+sid)\b")
+
+
+def _validate_redial_ports(ports: str) -> list[int]:
+    """Parse a comma list of SINGLE ports into a bounded, deduped, order-preserving list of ints in
+    1..65535, or raise ``ValueError`` (STRICT schema — a re-dial port set may not inject a flag or sweep a
+    range). Used for the surfaced-host re-dial port set (server-side, never model-supplied)."""
+    s = str(ports).strip()
+    if not _REDIAL_PORTS_RE.match(s):
+        raise ValueError(
+            f"invalid re-dial ports {ports!r}: only a comma list of single ports (no ranges, no flags) is "
+            f"allowed (server-side schema — a re-dial port set may not inject a tool flag or sweep a range)")
+    out: list[int] = []
+    for tok in s.split(","):
+        p = int(tok)
+        if not (1 <= p <= 65535):
+            raise ValueError(f"invalid re-dial port {tok!r} in {ports!r}: must be 1..65535")
+        if p not in out:
+            out.append(p)
+    return out
+
+
+def _surfaced_hostnames(stdout: str) -> list[str]:
+    """Validated host tokens (hostname or IP literal) surfaced by a subdomain enumerator, deduped and
+    order-preserving. The FIRST whitespace token of each line is validated — a log/flag prefix is dropped."""
+    out: list[str] = []
+    seen: set[str] = set()
+    for line in (stdout or "").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        tok = line.split()[0].strip().rstrip(".").lower()
+        if tok and tok not in seen and _HOSTNAME_TOKEN.match(tok):
+            seen.add(tok)
+            out.append(tok)
+    return out
+
+
+def _surfaced_ipv4s(stdout: str) -> list[str]:
+    """Validated LEADING IPv4 addresses surfaced by arp-scan / nbtscan, deduped and order-preserving. A line
+    with no leading IPv4 (header / status) is dropped; an octet > 255 is rejected."""
+    out: list[str] = []
+    seen: set[str] = set()
+    for line in (stdout or "").splitlines():
+        m = _LEADING_IPV4.match(line)
+        if not m:
+            continue
+        ip = m.group(1)
+        if any(int(o) > 255 for o in ip.split(".")):
+            continue
+        if ip not in seen:
+            seen.add(ip)
+            out.append(ip)
+    return out
+
+
+def subfinder_subdomain_scan(*, ports: str = "443,80") -> ToolSpec:
+    """A :class:`ToolSpec` for subfinder as a PASSIVE subdomain-enumeration PROPOSER. ``build_argv`` emits
+    ``subfinder -silent -d <target>`` (``-silent`` so only results print; ``-d`` takes the domain as a flag
+    VALUE so it cannot be read as a flag). ``propose`` validates each surfaced host token and proposes it at
+    each SERVER-SIDE re-dial port. The enumeration is a LEAD; the FACT is VIGIL's OWN gated handshake against
+    the surfaced host (the SCOPED surfaced-host re-drive on the FACT-capable
+    ``service_reachability.tcp_handshake`` branch), which refuses any host not attributable to a NON-wildcard
+    charter row — so a surfaced subdomain under a wildcard-only scope mints nothing."""
+    pl = _validate_redial_ports(ports)
+
+    def build(target: str) -> list[str]:
+        return ["subfinder", "-silent", "-d", target]
+
+    def propose(outcome: ToolOutcome, target: str) -> list[ProposedService]:
+        return [ProposedService(host=h, port=p, protocol="tcp")
+                for h in _surfaced_hostnames(outcome.stdout) for p in pl]
+
+    return ToolSpec("subfinder", build, propose, redrives=_surfaced_host_redrive(),
+                    version_argv=lambda: ["subfinder", "-version"], danger="recon")
+
+
+def amass_subdomain_scan(*, ports: str = "443,80") -> ToolSpec:
+    """A :class:`ToolSpec` for amass as a PASSIVE subdomain-enumeration PROPOSER. ``build_argv`` emits
+    ``amass enum -passive -silent -d <target>`` (``-passive`` so it never actively probes the target, only
+    OSINT sources; ``-d`` a flag value). Same contract as :func:`subfinder_subdomain_scan`: enumeration is a
+    LEAD, the FACT is VIGIL's own scoped gated handshake against each surfaced host."""
+    pl = _validate_redial_ports(ports)
+
+    def build(target: str) -> list[str]:
+        return ["amass", "enum", "-passive", "-silent", "-d", target]
+
+    def propose(outcome: ToolOutcome, target: str) -> list[ProposedService]:
+        return [ProposedService(host=h, port=p, protocol="tcp")
+                for h in _surfaced_hostnames(outcome.stdout) for p in pl]
+
+    return ToolSpec("amass", build, propose, redrives=_surfaced_host_redrive(),
+                    version_argv=lambda: ["amass", "-version"], danger="recon")
+
+
+def arp_scan_host_scan(*, ports: str = "80,443") -> ToolSpec:
+    """A :class:`ToolSpec` for arp-scan as a LAYER-2 host-discovery PROPOSER. ``build_argv`` emits
+    ``arp-scan --retry=1 <target>`` (target = the range / host to ARP, a flag value). ``propose`` takes the
+    LEADING IPv4 of each result line and proposes it at each SERVER-SIDE re-dial port. arp-scan's NATIVE claim
+    is layer-2 presence, for which VIGIL has NO oracle — so NOTHING is minted from the ARP reply. The FACT, if
+    any, is SERVICE_REACHABILITY: VIGIL re-dials the surfaced host over TCP and mints only when its own
+    handshake confirms an open port. A surfaced L2 host with no open TCP port mints NOTHING (correct)."""
+    pl = _validate_redial_ports(ports)
+
+    def build(target: str) -> list[str]:
+        return ["arp-scan", "--retry=1", target]
+
+    def propose(outcome: ToolOutcome, target: str) -> list[ProposedService]:
+        return [ProposedService(host=ip, port=p, protocol="tcp")
+                for ip in _surfaced_ipv4s(outcome.stdout) for p in pl]
+
+    return ToolSpec("arp-scan", build, propose, redrives=_surfaced_host_redrive(),
+                    version_argv=lambda: ["arp-scan", "--version"], danger="recon")
+
+
+def nbtscan_host_scan(*, ports: str = "139,445") -> ToolSpec:
+    """A :class:`ToolSpec` for nbtscan as a NetBIOS (UDP-137) host-discovery PROPOSER. ``build_argv`` emits
+    ``nbtscan <target>`` (target = the range to scan, a flag value). Same contract as
+    :func:`arp_scan_host_scan`: the UDP-137 name response is a claim VIGIL has NO TCP oracle for, so NOTHING is
+    minted from it; the FACT is the SERVICE_REACHABILITY of the surfaced host over VIGIL's own TCP handshake,
+    and a UDP-only host with no open TCP port mints NOTHING."""
+    pl = _validate_redial_ports(ports)
+
+    def build(target: str) -> list[str]:
+        return ["nbtscan", target]
+
+    def propose(outcome: ToolOutcome, target: str) -> list[ProposedService]:
+        return [ProposedService(host=ip, port=p, protocol="tcp")
+                for ip in _surfaced_ipv4s(outcome.stdout) for p in pl]
+
+    return ToolSpec("nbtscan", build, propose, redrives=_surfaced_host_redrive(),
+                    version_argv=lambda: ["nbtscan", "-v"], danger="recon")
+
+
+def enum4linux_ng_smb_scan(*, ports: str = "445,139") -> ToolSpec:
+    """A :class:`ToolSpec` for enum4linux-ng as an SMB/NetBIOS enumeration PROPOSER against the already
+    scope-authorised tool target. ``build_argv`` emits ``enum4linux-ng -A <target>`` (``-A`` = the simple
+    aggregate enumeration; target a flag value). The SMB host is the TARGET, so ``propose`` PINS the host to
+    ``target`` (never a host the tool printed) and, when the output carries an SMB/NetBIOS marker, proposes the
+    SMB port(s). It carries NO redrives, so the runner re-proves reachability with its own gated handshake on
+    the FACT-capable ``service_reachability.tcp_handshake`` branch. The SMB enumeration (shares/users/policy)
+    is a LEAD; only VIGIL's own confirmed handshake mints — a closed SMB port mints NOTHING."""
+    pl = _validate_redial_ports(ports)
+
+    def build(target: str) -> list[str]:
+        return ["enum4linux-ng", "-A", target]
+
+    def propose(outcome: ToolOutcome, target: str) -> list[ProposedService]:
+        if not _ENUM4_SMB_MARKER.search(outcome.stdout or ""):
+            return []
+        return [ProposedService(host=target, port=p, protocol="tcp") for p in pl]
+
+    return ToolSpec("enum4linux-ng", build, propose,
+                    version_argv=lambda: ["enum4linux-ng", "-h"], danger="recon")
+
+
+def smbmap_smb_scan() -> ToolSpec:
+    """A :class:`ToolSpec` for smbmap as an SMB share-enumeration PROPOSER against the already scope-authorised
+    tool target. ``build_argv`` emits ``smbmap -H <target>`` (``-H`` takes the host as a flag value). ``propose``
+    parses the ``[+] IP: <host>:<port>`` line smbmap prints, takes the PORT and PINS the host to ``target``.
+    It carries NO redrives, so the runner re-proves reachability with its own gated handshake on the
+    FACT-capable ``service_reachability.tcp_handshake`` branch. The share listing is a LEAD; only VIGIL's own
+    confirmed handshake mints."""
+    def build(target: str) -> list[str]:
+        return ["smbmap", "-H", target]
+
+    def propose(outcome: ToolOutcome, target: str) -> list[ProposedService]:
+        seen: set[int] = set()
+        out: list[ProposedService] = []
+        for m in _SMBMAP_IP_PORT.finditer(outcome.stdout or ""):
+            p = int(m.group(1))
+            if 0 < p < 65536 and p not in seen:
+                seen.add(p)
+                out.append(ProposedService(host=target, port=p, protocol="tcp"))
+        return out
+
+    return ToolSpec("smbmap", build, propose,
+                    version_argv=lambda: ["smbmap", "-h"], danger="recon")
+
+
 # --- TLS posture re-drives (weak protocol/cipher + broken-hash cert) -------------------------------
 # The runner negotiates its OWN bounded, gated TLS handshake (capture_tls_handshake, the same audited gate
 # as reachability) and judges THAT with the pure tls/weak-crypto oracles — never sslscan's output rows.
@@ -781,6 +1000,62 @@ def _tls11_capture(host: str, port: int, *, slug: str, protocol: str = "tcp") ->
 def _weak_cipher_capture(host: str, port: int, *, slug: str, protocol: str = "tcp") -> dict:
     from .tls_breadth import capture_weak_cipher_handshake
     return capture_weak_cipher_handshake(host, int(port), slug=slug)
+
+
+def _tls_cert_capture(host: str, port: int, *, slug: str, protocol: str = "tcp") -> dict:
+    """M1.3 — a DEDICATED runner-owned handshake for the certificate-VALIDITY re-drive. It is its OWN capture
+    callable (NOT the shared baseline ``_tls_capture``) for one reason of soundness: the validity branch needs
+    the capture to RETAIN the comparison instant, and stamping ``captured_at_epoch`` onto the shared baseline
+    dict would change the signed oracle context of the two branches that already ship over it
+    (``tls_weakness.tls_handshake`` + ``weak_crypto.cert_signature_algorithm``) — a deliberate
+    certificate-invalidating change the blocking_work says to avoid by using a dedicated capture. Being a
+    distinct callable it also counts against ``tls_breadth.TLS_HANDSHAKE_BUDGET_PER_ENDPOINT`` structurally.
+
+    The instant is the RUNNER's own clock, read ONCE here and RETAINED verbatim, so the oracle compares
+    against the retained instant (never a clock at verify time) and the FACT re-derives offline. Its provenance
+    is stamped alongside it (``capture_time_source``) so the oracle need not — and does not — assume one."""
+    import time
+
+    from framework.v2.verify import capture_tls_handshake  # offense-side only (FATAL-2: function-local)
+    from .egress_floor import charter_address_authorizer, pin_egress, pinned_tls_connector
+
+    pin = pin_egress(host, int(port), slug=slug,
+                     address_authorized=charter_address_authorizer(slug, host))
+    if not pin.allowed:
+        return {"connected": False, "host": str(host), "port": port, "error": pin.refused_reason}
+    hs = capture_tls_handshake(host, int(port), slug=slug, connect=pinned_tls_connector(pin.pinned))
+    hs = dict(hs)
+    # RETAIN the comparison instant + its provenance. The epoch is the runner's wallclock at capture; the
+    # source label says exactly that, so the oracle refuses to over-claim a trusted timestamp.
+    hs["captured_at_epoch"] = int(time.time())
+    hs["capture_time_source"] = "runner_clock"
+    return hs
+
+
+def _cert_validity_context(handshake: dict) -> "dict | None":
+    """The oracle context for the certificate-VALIDITY re-drive. Built ONLY when the runner's own handshake
+    completed and retained a leaf cert AND the capture stamped a retained instant — otherwise None (the
+    re-drive is SKIPPED: nothing was proven and nothing was cleared, never a fabricated FACT). Carries the
+    RETAINED inputs VERBATIM under the fresh ``cert_validity`` key the CERTIFICATE_VALIDITY oracle dispatches
+    on; the oracle does ALL the derivation (defect set from the DER at the retained instant), so nothing the
+    producer classified is trusted."""
+    if not isinstance(handshake, dict) or not handshake.get("connected"):
+        return None
+    b64 = handshake.get("cert_der_b64")
+    if not b64:
+        return None
+    at = handshake.get("captured_at_epoch")
+    if not isinstance(at, int) or isinstance(at, bool):
+        return None
+    return {
+        "bug_class": "certificate_validity",
+        "cert_validity": {
+            "host": str(handshake.get("host") or ""),
+            "cert_der_b64": b64,
+            "captured_at_epoch": at,
+            "capture_time_source": str(handshake.get("capture_time_source") or ""),
+        },
+    }
 
 
 def _weak_tls_context(handshake: dict) -> "dict | None":
@@ -869,11 +1144,6 @@ _TLS_REDRIVES: "tuple[Redrive, ...]" = (
     Redrive("weak_tls", _tls_capture, _weak_tls_context, branch="tls_weakness.tls_handshake"),
     Redrive("weak_crypto_artifact", _tls_capture, _weak_crypto_context,
             branch="weak_crypto.cert_signature_algorithm"),
-    # CLAIM 4 — certificate validity is NOT WIRED. tls_breadth.classify_certificate_defects exists and is
-    # tested, but no OracleKind adjudicates certificate VALIDITY, so a re-drive on
-    # tls_weakness.certificate_validity could never admit anything but INCONCLUSIVE. It would have reported
-    # a verdict with a reason that was not the real one, which is worse than an absent branch, so it is
-    # absent. The registry row carries wired:false and names the work in blocking_work.
     # CLAIMS 1 + 2 — offer ONLY TLS1.0, then ONLY TLS1.1. A completed handshake is an existential FACT
     # (the oracle fires on the negotiated deprecated version). A peer protocol_version(70) alert is
     # INCONCLUSIVE, NOT a CLEAN: the branch is registered clean_capable:false because the corroborating
@@ -894,6 +1164,23 @@ _TLS_REDRIVES: "tuple[Redrive, ...]" = (
     # (the local build limits what can be offered at all), so the branch is clean_capable:false.
     Redrive("weak_tls", _weak_cipher_capture, _weak_cipher_offer_context,
             branch="tls_weakness.weak_cipher_offer", observed=_tls_probe_observed, label="offer_weak_ciphers"),
+    # CLAIM 4 — certificate VALIDITY is now WIRED (M1.3). A DEDICATED handshake (_tls_cert_capture) retains
+    # the leaf DER + the capture INSTANT + its provenance; the OracleKind.CERTIFICATE_VALIDITY oracle
+    # re-derives the defect set (expired / not-yet-valid / hostname-mismatch / self-signed) OFFLINE from the
+    # retained bytes at the retained instant. A defect is an existential FACT. NOT clean-capable: the capture
+    # retains only the LEAF, so a non-defect is not a bounded negative over the chain — admission maps a
+    # conclusive non-fire to INCONCLUSIVE. Its own `cert_validity` context key + `cert_validity` label keep it
+    # distinct from the weak_crypto re-drive that shares the baseline handshake.
+    #
+    # DELIBERATELY LAST. The runner invokes one connection per distinct capture callable in redrive order
+    # (run_external_tool: `for rd in redrives ... if id(rd.capture) not in captured`), so appending this
+    # dedicated capture leaves the connection ordering of the four pre-existing handshakes (baseline, TLS1.0,
+    # TLS1.1, weak-cipher) byte-for-byte unchanged. That matters for exactly one fixture: the round-robin TLS
+    # pool permanent negative control (test_a_round_robin_tls_pool_would_have_been_falsely_cleared), which
+    # depends on the TLS1.0 probe landing on the pool member that rejects it. Inserting a 5th handshake
+    # anywhere BEFORE that probe would shift its connection parity and silently defeat the control.
+    Redrive("certificate_validity", _tls_cert_capture, _cert_validity_context,
+            branch="tls_weakness.certificate_validity", label="cert_validity"),
 )
 
 
@@ -904,7 +1191,7 @@ def tls_scan(*, port: int = 443, extra_args: Sequence[str] = ()) -> ToolSpec:
     OWN gated handshake and the deterministic oracle judges the NEGOTIATED (protocol, cipher) and the
     PRESENTED cert.
 
-    WAVE 3 breadth — the spec now carries FIVE runner-owned re-drives over FOUR bounded handshakes
+    WAVE 3 breadth + M1.3 — the spec now carries SIX runner-owned re-drives over FIVE bounded handshakes
     (``tls_breadth.TLS_HANDSHAKE_BUDGET_PER_ENDPOINT``), and each claim is registered at the capability it
     honestly has:
 
@@ -921,10 +1208,14 @@ def tls_scan(*, port: int = 443, extra_args: Sequence[str] = ()) -> ToolSpec:
         TLS1.2 so the oracle's fire is attributable to the CIPHER and not to a deprecated version, and the
         endpoint SELECTS one: a FACT. NOT clean-capable (the local OpenSSL build limits what can be
         offered).
-      * ``tls_weakness.certificate_validity`` — **NOT WIRED**, and deliberately so. The derivation exists
-        and is tested (``tls_breadth.classify_certificate_defects``), but no ``OracleKind`` adjudicates
-        certificate validity, so a re-drive there could only ever admit INCONCLUSIVE while reporting a
-        reason that was not the real one. The registry row carries ``wired: false`` + ``blocking_work``.
+      * ``tls_weakness.certificate_validity`` — **WIRED (M1.3)**. A DEDICATED bounded handshake
+        (``_tls_cert_capture``) retains the presented leaf DER + the capture INSTANT + its provenance, and the
+        ``OracleKind.CERTIFICATE_VALIDITY`` oracle re-derives the defect set (expired / not-yet-valid /
+        hostname-mismatch / self-signed) OFFLINE from the retained bytes at the retained instant: a defect is
+        an existential FACT. **NOT clean-capable** (the capture retains only the LEAF, so a non-defect is not a
+        bounded negative over the chain — a conclusive non-fire admits INCONCLUSIVE). Distinct from
+        ``weak_crypto`` (the signature hash / key size); this judges the window / SAN / issuer the weak-crypto
+        oracle never reads.
 
     HONEST SCOPE: the baseline capture uses a standard client, so ``weak_tls`` fires there only on a weakness
     a modern client still negotiates; the version/cipher probes widen that by restricting what VIGIL OFFERS.
@@ -1767,6 +2058,35 @@ def _capture_tool_version(spec: "ToolSpec", backend: "ExecBackend", timeout: flo
 def _reachable_context(handshake: dict) -> dict:
     from framework.v2.verify import reachable_context  # offense-side only
     return reachable_context(handshake)
+
+
+def _scoped_surfaced_capture(host: str, port: int, *, slug: str, protocol: str) -> dict:
+    """The reachability capture for a SURFACED host (M1.1) — a host the tool discovered, NOT the tool target
+    the runner's top-level ``ScopeGate.authorize`` already adjudicated. It re-applies the SAME protected-domain
+    categorical floor the ScopeGate gives the target (``is_hard_blocked``, gated by the owner toggle) and then
+    delegates to :func:`_default_capture`, whose ``pin_egress`` enforces the egress floor AND the
+    charter-scope-over-ADDRESSES predicate (``charter_address_authorizer``) — which refuses any surfaced host
+    not attributable to a NON-wildcard charter row, strictly tighter than ``scope.matches``. So a surfaced host
+    is adjudicated by the full floor before VIGIL dials it; an out-of-scope / protected / wildcard-only host is
+    refused and the oracle sees ``connected: False`` → no FACT. ``is_hard_blocked`` is a pure predicate already
+    imported at module scope (FATAL-2 safe); the handshake's framework import stays function-local in
+    ``_default_capture``."""
+    if protected_guard_enabled():
+        blocked, why = is_hard_blocked(host)
+        if blocked:
+            return {"connected": False, "host": str(host), "port": port, "protocol": protocol,
+                    "error": f"protected-domain floor refused surfaced host: {why}"}
+    return _default_capture(host, port, slug=slug, protocol=protocol)
+
+
+def _surfaced_host_redrive() -> "tuple[Redrive, ...]":
+    """The runner-owned SERVICE_REACHABILITY re-drive for a SURFACED host (subfinder/amass/arp-scan/nbtscan):
+    VIGIL's own gated handshake via :func:`_scoped_surfaced_capture`, judged by ``_reachable_context`` and
+    admitted to the FACT-capable ``service_reachability.tcp_handshake`` branch — the SAME oracle + branch
+    nmap/masscan use, with the surfaced-host scope floor in front. Built at spec-construction time (after
+    import), so referencing the module-global capture here is safe (mirrors ``_reachability_redrives``)."""
+    return (Redrive("service_reachable", _scoped_surfaced_capture, _reachable_context,
+                    branch="service_reachability.tcp_handshake"),)
 
 
 def _oracle_signal(finding: "dict") -> "tuple[bool, bool]":

@@ -260,8 +260,9 @@ def test_the_negatives_capable_branch_count_is_pinned_and_named():
 
     WAVE 3's other two branches never had absence-authority — ``tls_weakness.weak_cipher_offer`` cannot,
     because the local OpenSSL build limits which legacy suites can be offered at all (a refusal may mean
-    untested), and ``tls_weakness.certificate_validity`` is NOT WIRED at all (``wired: false``) — no
-    OracleKind adjudicates certificate validity, so no re-drive admits to it and it produces nothing."""
+    untested), and ``tls_weakness.certificate_validity`` (WIRED + FACT-capable as of M1.3) still cannot: a
+    validity defect is an existential FACT, but a non-defect over the retained LEAF is not a bounded negative
+    over the presented chain, so the branch mints yet may NOT assert absence (``clean_capable: false``)."""
     branches = {b["id"]: b for b in _branches()}
     clean = sorted(bid for bid, b in branches.items() if b.get("clean_capable"))
     expected = sorted([
@@ -307,14 +308,18 @@ def test_the_negatives_capable_branch_count_is_pinned_and_named():
     for not_clean_capable in ("tls_weakness.weak_cipher_offer", "tls_weakness.certificate_validity"):
         assert branches[not_clean_capable]["clean_capable"] is False, (
             f"{not_clean_capable} gained absence-authority it has no bounded negative for")
-    assert branches["tls_weakness.certificate_validity"].get("wired") is False, (
-        "the certificate-validity row must keep saying that nothing drives it")
-    # RESIDUAL, named not fixed: `wired` is documentation — verdict.admit() never reads it. What actually
-    # caps an accidental future wiring is fact_capable:false/clean_capable:false, plus the assertion in
-    # test_external_tool_runner.py that no re-drive admits to this branch. The registry row says so.
-    assert "wired` flag is DOCUMENTATION, NOT ENFORCEMENT" in branches[
-        "tls_weakness.certificate_validity"]["limitation"], (
-        "the certificate-validity row must keep admitting that `wired` is not enforced at runtime")
+    # certificate_validity is now WIRED (M1.3) and FACT-capable, but it did NOT gain CLEAN-authority — that is
+    # the safety-relevant property this release gate pins: the branch mints an existential defect FACT yet a
+    # non-defect over the retained LEAF is not a bounded negative over the presented chain, so it still may not
+    # assert absence. The clean-capable SET pinned above already excludes it; here we pin the capability row.
+    cv = branches["tls_weakness.certificate_validity"]
+    assert cv.get("wired") is True and cv["fact_capable"] is True, (
+        "certificate_validity is wired + fact_capable as of M1.3 — if that regressed, fix the slice not the pin")
+    assert cv["target_clean_capable"] is True and (cv.get("blocking_work") or "").strip(), (
+        "the FACT-only state must keep its CLEAN target and name the full-chain work that would close the gap "
+        "(claim discipline: meet up, never soften the claim)")
+    assert "MISSING: full_chain_retention" in cv["control_requirements"], (
+        "the control that caps CLEAN (no retained presented chain) must stay named")
     # the three redirect HEADER branches must all remain negatives-capable ...
     for header_branch in ("open_redirect.location_header", "host_header.location_header",
                           "oidc_redirect_uri.location_header"):

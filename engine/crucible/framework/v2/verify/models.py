@@ -498,6 +498,17 @@ class OracleKind(str, enum.Enum):
     # NOT this oracle's job. A tamper (the retained bytes edited so the property no longer holds) is rejected at
     # re-verification; if the retained bytes cannot be re-parsed, the oracle REFUSES.
     STATIC_RULE = "static_rule"
+    # M1.3 TLS CERTIFICATE VALIDITY — the presented leaf's validity window / identity / self-issuance, re-derived
+    # from the RETAINED DER at a RETAINED capture instant (its own ``cert_validity`` ctx key). Its OWN dedicated
+    # kind, distinct from TLS_WEAKNESS (which judges the negotiated protocol/cipher and the signature hash/key
+    # size and reads neither a validity window, a SAN, nor an issuer). Additive, reachable ONLY via its
+    # ``certificate_validity`` BUG_CLASS_ORACLES row keyed on a ``cert_validity`` ctx field no benchmark/scan
+    # finding carries; HELD OUT of the frozen ``_ALL_ORACLES`` fallback (stays EXACTLY 15, `make gate`
+    # byte-identical). The comparison instant comes from the retained ``captured_at_epoch`` and NEVER a clock at
+    # verify time, so the FACT re-derives offline; the oracle REFUSES to adjudicate expiry when the instant's
+    # ``capture_time_source`` provenance is absent rather than assuming the runner clock. FACT-capable but NOT
+    # clean-capable: the capture retains only the LEAF, so a non-defect is not a bounded negative over the chain.
+    CERTIFICATE_VALIDITY = "certificate_validity"
 
 
 class OracleProbe(BaseModel):

@@ -589,10 +589,17 @@ def test_the_capability_matrix_does_not_outrun_the_branch_registry() -> None:
     # feroxbuster/dirsearch (content-discovery brute) all re-drive through the SAME achieved_state web FACT
     # branches, each passing the conformance battery — so the fact set grows without outrunning the registry
     # (oracle_family "ACHIEVED_STATE", backed by the achieved_state oracle_version arm above).
+    # M1.1 grows the SERVICE_REACHABILITY column (NOT a new branch): the six host/subdomain/SMB discovery
+    # proposers (subfinder/amass/arp-scan/nbtscan/enum4linux-ng/smbmap) each carry oracle_family
+    # "SERVICE_REACHABILITY", backed by the already-fact_capable service_reachability.tcp_handshake branch
+    # (nmap's exact arm) — VIGIL re-drives the surfaced/pinned host with its OWN gated handshake and the
+    # enumeration stays a LEAD. Each passed the conformance battery first, so the fact set grows without
+    # outrunning the registry (the fam-in-fact_families guard above still holds for every one).
     # See docs/capability-matrix/evidence-branches.json.
     assert fact_tools == {"nmap", "sslscan", "masscan", "rustscan", "naabu", "zmap", "unicornscan",
                           "katana", "gobuster",
-                          "gau", "waybackurls", "feroxbuster", "dirsearch"}, (
+                          "gau", "waybackurls", "feroxbuster", "dirsearch",
+                          "subfinder", "amass", "arp-scan", "nbtscan", "enum4linux-ng", "smbmap"}, (
         f"unexpected fact_capable tool set: {fact_tools}")
 
     httpx = [t for t in matrix["tools"] if t["name"] == "httpx"]

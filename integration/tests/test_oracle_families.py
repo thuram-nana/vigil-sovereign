@@ -227,13 +227,15 @@ def test_oracle_mapped_derivation_is_a_family_property_not_a_flat_list():
     # a spec-builder tool in a LEAD-only family is NOT fact-capable (a builder alone does not make a FACT)
     assert oracle_mapped_tools({"nuclei"}) == frozenset()
     # a FACT-capable family member with NO spec builder is excluded from the DERIVED set, because it is not
-    # in the spec-builder input: subfinder is in the FACT-capable network-discovery family, yet the body's
-    # derivation over the real spec-builder set does not make it mint-capable (it has no runner re-drive).
-    assert family_for("subfinder").name == "network_discovery"    # a FACT-capable family
-    assert "subfinder" not in oracle_mapped_tools(spec_builders)   # but not in the derived set (no builder)
+    # in the spec-builder input: autorecon is in the FACT-capable network-discovery family, yet the body's
+    # derivation over the real spec-builder set does not make it mint-capable (it has no runner re-drive —
+    # it orchestrates other tools rather than owning a verifiable argv). NOTE: subfinder is NO LONGER this
+    # example — M1.1 gave it a runner-owned spec builder, so it IS now in the derived set.
+    assert family_for("autorecon").name == "network_discovery"    # a FACT-capable family
+    assert "autorecon" not in oracle_mapped_tools(spec_builders)   # but not in the derived set (no builder)
     # the filter is on family fact-capability: only when a tool is BOTH a spec builder AND in a FACT-capable
     # family is it mapped — the two conditions the body composes.
-    assert oracle_mapped_tools({"subfinder"}) == {"subfinder"}     # if it HAD a builder, its family qualifies
+    assert oracle_mapped_tools({"autorecon"}) == {"autorecon"}     # if it HAD a builder, its family qualifies
 
 
 def test_the_browser_family_is_fact_capable_via_the_cdp_redrive_but_its_members_never_map():
