@@ -118,8 +118,23 @@ def _provision(owner, *, slug=_SLUG, host=_HOST, env_kind=TargetEnvironment.LIVE
     return tr
 
 
-def _publish(base, owner, evaluator, **kw):
-    write_eval_attestations(base, _SLUG, [_att_record(owner, evaluator, **kw)])
+def _seal_for(seal_owner, records, *, seq=1):
+    """An owner-signed publish seal over the ordered ``records`` + monotonic ``seq`` — exactly what the
+    SIGIL governor's ``_publish`` mints (reuses the production seal helpers so test + prod never drift)."""
+    return _eva.build_seal(
+        _SLUG, seq, records,
+        sign_fn=lambda b: sign(seal_owner.private_key_b64, b), pubkey=seal_owner.public_key_b64)
+
+
+def _write(base, records, *, seal_owner, seq=1, seal=None):
+    """Publish ``records`` sealed by ``seal_owner`` (the pinned owner in the happy path). Pass an explicit
+    ``seal`` to simulate a tampered publish (a seal that does NOT match the written ``records``)."""
+    write_eval_attestations(
+        base, _SLUG, records, seal=seal if seal is not None else _seal_for(seal_owner, records, seq=seq))
+
+
+def _publish(base, owner, evaluator, *, seq=1, **kw):
+    _write(base, [_att_record(owner, evaluator, **kw)], seal_owner=owner, seq=seq)
 
 
 # === arm site 1/3: console.actions._has_verified_authority =========================================
@@ -151,7 +166,7 @@ def test_staging_authority_arms_without_an_attestation_but_live_does_not(env):
 def test_revoked_attestation_refuses_arm(env):
     owner, ev = generate_keypair(), generate_keypair()
     _provision(owner)
-    write_eval_attestations(env["base"], _SLUG, [_att_record(owner, ev), _revoke_record(owner)])
+    _write(env["base"], [_att_record(owner, ev), _revoke_record(owner)], seal_owner=owner, seq=2)
     assert actions._has_verified_authority(_SLUG) is False
 
 
@@ -165,9 +180,9 @@ def test_expired_attestation_refuses_arm(env):
 def test_forged_owner_attestation_refuses_arm(env):
     owner, ev, attacker = generate_keypair(), generate_keypair(), generate_keypair()
     _provision(owner)                                     # trust root pins `owner`
-    # signed by `attacker` and carrying attacker's pubkey → not the pinned owner → refused
-    write_eval_attestations(env["base"], _SLUG,
-                            [_att_record(attacker, ev)])  # owner=attacker ⇒ pubkey=attacker ⇒ not pinned
+    # Defense-in-depth: even inside a list validly SEALED by the pinned owner, a record signed by `attacker`
+    # (carrying attacker's pubkey → not the pinned owner) is refused by the per-record owner-sig check.
+    _write(env["base"], [_att_record(attacker, ev)], seal_owner=owner)  # record owner=attacker ⇒ not pinned
     assert actions._has_verified_authority(_SLUG) is False
 
 
@@ -261,9 +276,9 @@ def test_verify_replay_below_highwater_refused(env):
     # attest (issued=10) → revoke → replay the SAME issued=10 attestation: below the high-water → ignored,
     # so the state stays revoked (un-armed). Mirrors the sovereign anti-replay fold.
     replay = _att_record(owner, ev, issued_at=10.0)
-    write_eval_attestations(env["base"], _SLUG, [
+    _write(env["base"], [
         _att_record(owner, ev, issued_at=10.0), _revoke_record(owner), replay,
-    ])
+    ], seal_owner=owner, seq=3)
     ok, _ = verify_live_offense_attested(
         env["base"], engagement_slug=_SLUG, trusted_owner_pubkeys=pinned, now=_NOW)
     assert ok is False
@@ -274,3 +289,77 @@ def test_verify_owner_pubkeys_of_extracts_pinned_keys(env):
     tr = _provision(owner)
     assert owner_pubkeys_of(tr) == frozenset({owner.public_key_b64})
     assert owner_pubkeys_of(None) == frozenset()
+
+
+# === tamper-evidence of the LIST ITSELF (red-pen 12/13 + rollback residual) =======================
+# The loose seam's record-list order/membership is not authenticated by the per-record signatures, and the
+# fold honours a revoke POSITIONALLY. An attacker WITHOUT the owner key must not be able to re-arm a revoked
+# attestation by DROPPING / REORDERING / ROLLING BACK the published list. The owner-signed publish seal +
+# the durable monotonic high-water close all three; each probe asserts the offense verifier REFUSES.
+def _verify(base, owner, now=_NOW):
+    return verify_live_offense_attested(
+        base, engagement_slug=_SLUG, trusted_owner_pubkeys=[owner.public_key_b64], now=now)
+
+
+def test_unsealed_list_refuses_to_arm(env):
+    # CONTROL: a validly SEALED single attestation arms; the SAME list with NO seal refuses (fail-closed —
+    # an unauthenticated list is exactly what an off-seam drop/reorder would leave).
+    owner, ev = generate_keypair(), generate_keypair()
+    att = _att_record(owner, ev)
+    write_eval_attestations(env["base"], _SLUG, [att])                 # no seal at all
+    ok, reason = _verify(env["base"], owner)
+    assert ok is False and "seal" in reason.lower()
+    write_eval_attestations(env["base"], _SLUG, [att], seal=_seal_for(owner, [att]))   # now sealed
+    ok2, _ = _verify(env["base"], owner)
+    assert ok2 is True
+
+
+def test_forged_seal_by_non_owner_refuses(env):
+    # A seal signed by an attacker key (not the pinned owner) does not authenticate the list.
+    owner, ev, attacker = generate_keypair(), generate_keypair(), generate_keypair()
+    att = _att_record(owner, ev)
+    write_eval_attestations(env["base"], _SLUG, [att], seal=_seal_for(attacker, [att]))
+    ok, reason = _verify(env["base"], owner)
+    assert ok is False and "owner" in reason.lower()
+
+
+def test_dropped_revoke_record_is_detected_and_refused(env):
+    # PROBE 12: owner published [att, revoke] (revoked ⇒ un-armed). Attacker DROPS the revoke but keeps the
+    # genuine seal (minted over [att, revoke]). The verifier recomputes the seal over the dropped list [att] —
+    # it no longer verifies ⇒ REFUSED. Without the seal the bare fold would see only [att] and ARM.
+    owner, ev = generate_keypair(), generate_keypair()
+    att, revoke = _att_record(owner, ev), _revoke_record(owner)
+    good_seal = _seal_for(owner, [att, revoke], seq=2)
+    write_eval_attestations(env["base"], _SLUG, [att], seal=good_seal)   # revoke dropped, seal unchanged
+    ok, reason = _verify(env["base"], owner)
+    assert ok is False and "seal" in reason.lower()
+
+
+def test_reordered_revoke_before_attest_is_detected_and_refused(env):
+    # PROBE 13: owner published [att, revoke] (revoke LAST ⇒ un-armed). Attacker REORDERS to [revoke, att]
+    # hoping the positional fold lets the now-last attest win, keeping the genuine seal over [att, revoke].
+    # The verifier recomputes the seal over [revoke, att] — it no longer verifies ⇒ REFUSED.
+    owner, ev = generate_keypair(), generate_keypair()
+    att, revoke = _att_record(owner, ev), _revoke_record(owner)
+    good_seal = _seal_for(owner, [att, revoke], seq=2)
+    write_eval_attestations(env["base"], _SLUG, [revoke, att], seal=good_seal)  # reordered, seal unchanged
+    ok, reason = _verify(env["base"], owner)
+    assert ok is False and "seal" in reason.lower()
+
+
+def test_rolledback_pre_revoke_publication_is_detected_and_refused(env):
+    # ROLLBACK: owner publishes [att] (seq=1, armed), then [att, revoke] (seq=2, revoked). The offense plane
+    # verifies each in turn, advancing its durable high-water to 2. The attacker then REPLAYS the genuine,
+    # still-owner-signed seq=1 file — the seal verifies, but seq=1 is below the high-water ⇒ REFUSED.
+    owner, ev = generate_keypair(), generate_keypair()
+    att, revoke = _att_record(owner, ev, issued_at=10.0), _revoke_record(owner)
+    write_eval_attestations(env["base"], _SLUG, [att], seal=_seal_for(owner, [att], seq=1))
+    ok1, _ = _verify(env["base"], owner)
+    assert ok1 is True                                                   # armed; high-water now 1
+    write_eval_attestations(env["base"], _SLUG, [att, revoke], seal=_seal_for(owner, [att, revoke], seq=2))
+    ok2, _ = _verify(env["base"], owner)
+    assert ok2 is False                                                  # revoked; high-water now 2
+    # ROLLBACK: byte-for-byte replay of the genuine seq=1 publication
+    write_eval_attestations(env["base"], _SLUG, [att], seal=_seal_for(owner, [att], seq=1))
+    ok3, reason = _verify(env["base"], owner)
+    assert ok3 is False and "ROLLBACK" in reason

@@ -307,15 +307,40 @@ class EvalOffenseAttestation:
         the shared seam, so the offense plane can READ+VERIFY the public signed material without importing
         this module or holding the owner key (FATAL-2). The spine stays the source of truth; a publish
         failure merely leaves the offense plane UNARMED (fail-closed), never falsely armed. Best-effort over
-        an OSError (unwritable seam); a programming error propagates."""
+        an OSError (unwritable seam); a programming error propagates.
+
+        The loose seam's record-LIST order/membership is unauthenticated on its own (each record is signed, but
+        the list is not), so an off-seam DROP/REORDER/ROLLBACK of the revoke record could re-arm a revoked
+        attestation on the offense plane (the sovereign fold is immune because it reads the append-only
+        hash-chained spine; the offense plane cannot fold that spine at arm time). So the OWNER additionally
+        signs a SEAL over the WHOLE ordered record list + a monotonic publish ``seq`` (the current spine head);
+        the offense verifier re-derives it over the records it read (drop/reorder no longer verify) and enforces
+        the monotonic ``seq`` against a durable high-water (a rollback is refused). The owner key signs ONLY
+        here in SIGIL; the import-clean broker merely transports the public seal (FATAL-2)."""
         records = []
         for record in self.store.iter_records():
             p = record.payload if isinstance(record.payload, dict) else {}
             if p.get("signal") == SIGNAL and p.get("engagement_slug") == engagement_slug:
                 records.append(dict(p))
         try:
-            from vigil_integration.live.eval_attestation import write_eval_attestations
-            write_eval_attestations(self._base_dir(), engagement_slug, records)
+            from vigil_integration.live.eval_attestation import build_seal, write_eval_attestations
+            seal = None
+            if self.owner_key is not None:
+                from ..reuse import sign
+                # The monotonic publish seq is the current spine head — strictly larger than any prior
+                # publish's (every attest/revoke appended to the spine before calling _publish), so a
+                # replayed older seam has a lower seq and is refused by the offense high-water. ``next_seq``
+                # is a property; fall back to the per-slug record count (also strictly growing per publish,
+                # since each attest/revoke appends exactly one record for this slug) for a store without it.
+                seq = getattr(self.store, "next_seq", None)
+                if not isinstance(seq, int):
+                    seq = len(records)
+                seal = build_seal(
+                    engagement_slug, seq, records,
+                    sign_fn=lambda b: sign(self.owner_key.private_key_b64, b),
+                    pubkey=self.owner_key.public_key_b64,
+                )
+            write_eval_attestations(self._base_dir(), engagement_slug, records, seal=seal)
         except (OSError, ValueError):
             # Unwritable / unsafe seam → the offense plane simply never arms (fail-closed). The spine record
             # stands; a later attest/revoke re-publishes the full list.

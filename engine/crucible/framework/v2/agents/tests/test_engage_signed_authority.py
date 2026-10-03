@@ -163,7 +163,10 @@ def _publish_eval_attestation(base_dir, slug, owner_priv, owner_pub):
     rec = {**core, "sig": sign(owner_priv, cb), "pubkey": owner_pub,
            "evaluator_sig": sign(ev.private_key_b64, DOMAIN_TAGS["eval-offense-attestation"] + cb),
            "evaluator": "eval"}
-    _eva.write_eval_attestations(base_dir, slug, [rec])
+    # M-11.1 residual: the published LIST also carries an owner-signed SEAL (what the SIGIL governor mints),
+    # so the offense verifier's tamper-evidence gate (drop/reorder/rollback) is satisfied for this valid publish.
+    seal = _eva.build_seal(slug, 1, [rec], sign_fn=lambda b: sign(owner_priv, b), pubkey=owner_pub)
+    _eva.write_eval_attestations(base_dir, slug, [rec], seal=seal)
 
 
 # ---------------------------------------------------------------------------
