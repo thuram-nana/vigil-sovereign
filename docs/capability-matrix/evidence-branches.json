@@ -2301,6 +2301,38 @@
         "engine_verified_clause_truth",
         "sequential_probability_ratio_test"
       ]
+    },
+    {
+      "id": "credential_acceptance.achieved_access",
+      "check": "credential_acceptance_redrive",
+      "evidence": "A single-shot GATED, DNS-pinned re-drive performed ONE login per operator-planted TEST credential marked should-be-rejected AND ONE read of the operator-attested protected resource; the deterministic credential_acceptance_oracle re-derived — OFFLINE from the retained record (both access legs + the attested descriptor) — an ACHIEVED authenticated read by the weak-credential session (a 2xx carrying the attested authenticated_signal, ABSENT from the denied no-session baseline over the SAME-shape request). The RUNNER owns the planted corpus + attestation; the tool's bytes are never the FACT and no real-user secret is recovered or retained (credential_id is an identifier; the legs are responses).",
+      "fact_capable": true,
+      "clean_capable": false,
+      "preconditions": [
+        "channel_established",
+        "body_semantically_available"
+      ],
+      "limitation": "Body-derived, POSITIVE-only, CONTROL-DIFFERENTIAL and FULLY RE-EXECUTABLE: the retained record carries BOTH protected-resource access legs plus the attested descriptor, so the oracle re-derives the achieved-access differential OFFLINE and a tamper that removes it no longer re-fires. It REQUIRES an operator-planted TEST corpus (corpus_id) and an attested protected-resource descriptor (url + authenticated_signal); without them the oracle REFUSES (a non-fire, never a FACT) and the generic runtime_redrive delegation is inert. Bounded to the planted should-be-rejected credentials, the attested resource request and the attested denial model ({401,403} always apply; a login-redirect or soft-200 body signature only when attested). Scoped to cookie-session logins — the Set-Cookie issued by the login is captured and replayed as the Cookie header; a bearer-token or multi-step/SSO login flow this arm does not drive stays INCONCLUSIVE rather than a FACT. A too-short / low-entropy attested authenticated_signal is downgraded by the oracle to a non-fire (it cannot reliably tell an authenticated view from an inlined login page). NOT CLEAN-capable: a non-firing cannot distinguish 'the credential was rejected' from 'the attested signal / denial model did not match' or an undecodable body, so it never asserts the absence of credential acceptance. TEST-IDENTITIES-ONLY: the secret lives only in the transient login request body and is never written to the retained record.",
+      "target_fact_capable": true,
+      "target_clean_capable": false,
+      "target_downgrade_rationale": "A sound credential-acceptance CLEAN (no planted credential is accepted anywhere) is a coverage-complete capability over every login surface, session mechanism and protected resource across the app, not this per-credential achieved-access re-drive's target; a non-firing here is POSITIVE-only by construction (it cannot distinguish a genuine rejection from an unmatched attestation or an undecodable body), so CLEAN-capability is deliberately not pursued on this branch.",
+      "oracle_version": "credential_acceptance",
+      "control_requirements": [
+        "warden_active_recon_gate",
+        "vigil_owned_gated_probe",
+        "vigil_owned_live_redrive",
+        "operator_planted_test_credential_corpus",
+        "operator_attested_protected_resource",
+        "no_session_denied_baseline",
+        "same_shape_access_differential",
+        "cookie_session_capture",
+        "response_body_decode"
+      ],
+      "evidence_surface": "response_body",
+      "implementation_refs": [
+        "engine/crucible/framework/v2/verify/oracles.py:credential_acceptance_oracle",
+        "integration/vigil_integration/live/runtime_redrive.py:credential_acceptance_redrive"
+      ]
     }
   ]
 }

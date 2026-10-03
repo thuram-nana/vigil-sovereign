@@ -1733,6 +1733,15 @@ def _build_oracle(
         if injection_ref:
             return injection_ref
 
+        # T2 — CREDENTIAL-UNIT RE-DRIVE (credential_acceptance, M-11.2): mint ONLY from an operator-planted TEST
+        # corpus + a protected-resource attestation carried on the TRUSTED redrive spec (never the model),
+        # confirmed by credential_acceptance_oracle over VIGIL's OWN gated login + protected-resource capture.
+        # The LLM-claim path carries no planted corpus (engine._redrive_spec never sources it from the model), so
+        # this returns None and the claim stays a LEAD below — TEST-IDENTITIES-ONLY, no corpus, no FACT.
+        credential_ref = _live_credential_redrive_fact(prov, info, redrive)
+        if credential_ref:
+            return credential_ref
+
         # LEAD-ONLY fallback (AUDIT G4): a boolean/other-class candidate, or an error_based_sqli whose live
         # re-drive did not reproduce, lands here. The deterministic oracle still runs so the LEAD is honestly
         # labelled with what fired, but an LLM-provenanced context is never signed into a FACT.
@@ -2029,6 +2038,66 @@ def _live_injection_redrive_fact(prov: Provisioned, info: dict, redrive: Optiona
     try:
         rr = injection_redrive(url, slug=prov.slug, engagement_slug=prov.slug, signers=prov.signers,
                                claimed_class=claimed)
+    except Exception:  # noqa: BLE001 — any re-drive/transport/cert error is an unconfirmed claim → LEAD
+        return None
+    try:
+        if rr.family_verdict(claimed) != "FACT":
+            return None
+    except Exception:  # noqa: BLE001 — cannot read the verdict ⇒ treat as unconfirmed → LEAD
+        return None
+    for f in getattr(rr, "facts", []) or []:
+        try:
+            if getattr(f, "is_fact", False) and normalize_bug_class(getattr(f, "bug_class", "")) == claimed:
+                ref = str(getattr(f, "finding_ref", "") or "")
+                if ref:
+                    return ref
+        except Exception:  # noqa: BLE001 — a malformed result entry is skipped, never crashes the seam
+            continue
+    return None    # family verdict said FACT but no matching signed cert surfaced → LEAD (fail-closed)
+
+
+def _live_credential_redrive_fact(prov: Provisioned, info: dict, redrive: Optional[dict]) -> Optional[str]:
+    """T2 (M-11.2) — DRIVE the CREDENTIAL-UNIT re-drive (``credential_acceptance``) through the runner-owned
+    :mod:`live.runtime_redrive` ``credential_acceptance_redrive`` arm and return a signed FACT's ``finding_ref``
+    ONLY when the deterministic ``credential_acceptance_oracle`` confirms an ACHIEVED authenticated read by an
+    operator-planted TEST credential over VIGIL's OWN gated login + protected-resource capture.
+
+    Mirrors :func:`_live_injection_redrive_fact`, with the M-11.2 difference that the planted material is
+    MANDATORY: the operator-planted TEST corpus + the protected-resource attestation + the login spec arrive
+    ONLY on the TRUSTED redrive spec (never the model's ``extracted_info``). ``engine._redrive_spec`` — whose
+    only inputs are LLM-derived — never puts a corpus on the spec, so on the LLM-claim path those keys are ABSENT
+    and this seam returns ``None`` (the claim stays a LEAD): TEST-IDENTITIES-ONLY, no corpus ⇒ no FACT, no
+    self-serve consent. It mints the moment a trusted planted-corpus channel supplies them on the spec, with the
+    FACT tied to the CLAIM (``family_verdict(claimed) == "FACT"`` and the cert's ``bug_class == claimed``). A gate
+    refusal / no channel / an oracle non-fire all yield a non-FACT → None → LEAD (fail-closed).
+
+    FATAL-2: every framework/runtime_redrive import is function-local (offense-side re-drive path)."""
+    if not isinstance(redrive, dict):
+        return None
+    url = str(redrive.get("url") or "").strip()
+    corpus = redrive.get("corpus")
+    policy = redrive.get("policy")
+    protected_resource = redrive.get("protected_resource")
+    login_spec = redrive.get("login_spec")
+    # The operator-planted corpus + attestation are MANDATORY and come ONLY from a trusted channel on the spec.
+    # Absent (the LLM-claim path) ⇒ fail-closed here, BEFORE any re-drive: no corpus, no FACT (TEST-IDENTITIES-
+    # ONLY). The arm + oracle refuse too, but refusing here keeps the model's assertion from even driving traffic.
+    if not url or not isinstance(corpus, dict) or not corpus or not isinstance(policy, dict) \
+            or not isinstance(protected_resource, dict) or not isinstance(login_spec, dict):
+        return None
+    try:
+        from framework.v2.verify.verifier import normalize_bug_class  # noqa: PLC0415
+        from .runtime_redrive import (  # noqa: PLC0415 (framework at CALL)
+            CREDENTIAL_REDRIVE_CLASSES, credential_acceptance_redrive)
+    except Exception:  # noqa: BLE001 — module unavailable ⇒ cannot re-drive → LEAD (fail-closed)
+        return None
+    claimed = normalize_bug_class(str(redrive.get("bug_class") or info.get("bug_class") or ""))
+    if claimed not in CREDENTIAL_REDRIVE_CLASSES:
+        return None    # not a credential-redrive class → nothing for this seam to confirm → LEAD
+    try:
+        rr = credential_acceptance_redrive(url, slug=prov.slug, engagement_slug=prov.slug, signers=prov.signers,
+                                           corpus=corpus, policy=policy,
+                                           protected_resource=protected_resource, login_spec=login_spec)
     except Exception:  # noqa: BLE001 — any re-drive/transport/cert error is an unconfirmed claim → LEAD
         return None
     try:

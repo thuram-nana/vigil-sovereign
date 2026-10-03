@@ -572,6 +572,7 @@ jobs:
               integration/tests/test_remediation_attestation.py \
               integration/tests/test_ws4_acceptance.py \
               integration/tests/test_eval_offense_arm.py \
+              integration/tests/test_credential_acceptance_arm.py \
               integration/tests/test_campaign.py \
               integration/tests/test_strix_fix.py \
               integration/tests/test_fix_ladder_matches_the_gate.py \

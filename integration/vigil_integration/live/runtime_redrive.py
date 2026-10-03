@@ -278,6 +278,23 @@ _INJECTION_ENGINE_FOR = {"nosqli": {"mongodb"}, "ldap_injection": {"ldap"}, "xpa
 _INJECTION_PARAMS = ("id", "q", "query", "search", "name", "user", "uid", "item", "filter", "category",
                      "username", "password", "email", "login")
 
+# --- M-11.2: CREDENTIAL-UNIT re-drive — the PRODUCER arm that feeds credential_acceptance_oracle ------
+# A single-shot GATED re-drive (NOT a brute-forcer): it takes an OPERATOR-PLANTED TEST credential corpus + an
+# operator attestation (the protected-resource descriptor + a login spec), performs ONE gated login attempt
+# per planted credential and ONE gated read of the attested protected resource, and lets the deterministic
+# ``credential_acceptance_oracle`` adjudicate the ACHIEVED-ACCESS differential over VIGIL's OWN capture. The
+# tool's bytes are NEVER the FACT; the oracle re-fires over VIGIL's gated capture. hydra/john stay EXTERNAL
+# LEAD PROPOSERS (not wired here) — this arm takes the planted corpus, never a recovered real-user secret.
+#
+# Its OWN dispatch set, DELIBERATELY SEPARATE from RUNTIME_REDRIVE_CLASSES / INJECTION_REDRIVE_CLASSES (a
+# ``"credential"`` spec kind + a dedicated ``wiring._live_credential_redrive_fact`` seam), so the runtime/
+# web/sqli/injection wiring is untouched and ``make gate`` stays byte-identical. The operator-planted corpus +
+# attestation are MANDATORY and arrive ONLY through the arm's explicit params / the trusted seam — NEVER the
+# model (``engine._redrive_spec`` has only LLM-derived inputs, so it never sources the corpus); the arm +
+# oracle REFUSE without the planted corpus, so the generic ``runtime_redrive`` delegation is inert fail-closed.
+_CREDENTIAL_BRANCH = "credential_acceptance.achieved_access"
+CREDENTIAL_REDRIVE_CLASSES = ("credential_acceptance",)
+
 # --- D1: what the traversal arm's LEAD-quality guards do, and what they provably do NOT do -----------
 # The canonical traversal payload, plus SEMANTICALLY-IDENTICAL re-encodings of the SAME path. POSIX
 # dot-segment resolution makes every one of them name /etc/passwd, so a genuine file read reproduces the
@@ -821,6 +838,14 @@ def runtime_redrive(url: str, *, slug: str, engagement_slug: str, signers: "list
     from .web_redrive import _gated_web_send  # noqa: PLC0415 — the reviewed gated, DNS-pinned, no-proxy send
 
     bug_class = normalize_bug_class(claimed_class)
+    # M-11.2 CREDENTIAL-UNIT delegation. credential_acceptance carries operator-planted inputs (a TEST corpus +
+    # a protected-resource attestation + a login spec) this generic (url, claimed_class) dispatch cannot supply,
+    # so a generic re-drive DELEGATES to :func:`credential_acceptance_redrive` WITHOUT a corpus, which REFUSES
+    # (no corpus, no FACT) — a VIGIL-owned, fail-closed non-fire. The planted material only ever reaches the arm
+    # through its explicit params / the dedicated ``wiring._live_credential_redrive_fact`` seam, never the model.
+    if bug_class in CREDENTIAL_REDRIVE_CLASSES:
+        return credential_acceptance_redrive(url, slug=slug, engagement_slug=engagement_slug,
+                                             signers=signers, timeout=timeout)
     res = RuntimeRedriveResult(url=url, bug_class=bug_class)
     if bug_class not in RUNTIME_REDRIVE_CLASSES:
         res.notes.append(f"{bug_class!r} is not a runtime-redrive class")
@@ -1679,6 +1704,222 @@ def injection_redrive(url: str, *, slug: str, engagement_slug: str, signers: "li
             break     # one admitted (class-appropriate) capture is enough for a re-drive — stop (bounded work)
     except Exception as e:  # noqa: BLE001 — a probe error never fabricates a FACT; record + return what held
         res.notes.append(f"injection_redrive error: {type(e).__name__}: {e}")
+    return res
+
+
+def _cred_login_body_and_headers(login_spec: dict, username: str, secret: str) -> "tuple[str, list]":
+    """Build the gated LOGIN request's ``(body, headers)`` from the operator's login spec + the planted TEST
+    credential. Form-urlencoded by default (``content_type: "json"`` ⇒ a JSON body); the username/secret go into
+    the attested field names (default ``username``/``password``), plus any static ``extra_fields`` / ``headers``.
+    stdlib only (FATAL-2). The SECRET lives only in this transient request body — it is NEVER written to the
+    retained oracle record (which carries the credential_id identifier + the two response legs, no secret)."""
+    import json as _json  # noqa: PLC0415 — stdlib
+    from urllib.parse import urlencode  # noqa: PLC0415 — stdlib
+    content_type = str(login_spec.get("content_type") or "form").strip().lower()
+    ufield = str(login_spec.get("username_field") or "username")
+    pfield = str(login_spec.get("password_field") or "password")
+    fields: dict = {ufield: username, pfield: secret}
+    extra = login_spec.get("extra_fields")
+    if isinstance(extra, dict):
+        for k, v in extra.items():
+            fields[str(k)] = str(v)
+    if content_type == "json":
+        body, ct = _json.dumps(fields), "application/json"
+    else:
+        body, ct = urlencode(fields), "application/x-www-form-urlencoded"
+    headers: list = [("Content-Type", ct)]
+    extra_headers = login_spec.get("headers")
+    if isinstance(extra_headers, dict):
+        for k, v in extra_headers.items():
+            headers.append((str(k), str(v)))
+    return body, headers
+
+
+def _cred_access_leg(resp: Any, url: str, method: str) -> dict:
+    """Coerce one gated ``send()`` response (whose ``headers`` is a LIST of ``(k, v)`` tuples) into a
+    credential_acceptance oracle ACCESS LEG — ``{status, body, headers:{...}, url, method}``. It CARRIES the
+    request provenance (``url`` + ``method``) the oracle's SAME-SHAPE check requires, and FOLDS the header list
+    into a Mapping (duplicates joined) the oracle reads for the Location / denial-body-signature model. Pure; it
+    reads only the response's status/body/headers — never any credential or secret field."""
+    headers: dict = {}
+    for k, v in ((resp.get("headers") or []) if isinstance(resp, dict) else []):
+        ks, vs = str(k), str(v)
+        headers[ks] = f"{headers[ks]}, {vs}" if ks in headers else vs
+    status = resp.get("status") if isinstance(resp, dict) else None
+    return {"status": status, "body": _body_text(resp), "headers": headers, "url": url, "method": method}
+
+
+def _cred_record(corpus_id: str, credential_id: str, should_reject: "list[str]", descriptor: dict,
+                 resource_url: str, resource_method: str, authed_signal: str,
+                 weak_access: dict, baseline_access: dict) -> dict:
+    """Assemble the credential_acceptance oracle record from the planted corpus/policy + the operator-attested
+    protected-resource descriptor + the two captured access legs. Carries ONLY the ATTESTED denial model from
+    the descriptor (default {401,403} always apply in the oracle; an attested login-redirect / soft-200 body
+    signature is copied VERBATIM), and NO secret — ``credential_id`` is an identifier and the legs are
+    responses, so the whole record (which the certificate retains) is secret-safe and offline-re-derivable."""
+    pr: dict = {"url": resource_url, "method": resource_method, "authenticated_signal": authed_signal}
+    ds = descriptor.get("denial_statuses")
+    if isinstance(ds, (list, tuple)):
+        pr["denial_statuses"] = list(ds)
+    loc = descriptor.get("login_redirect_locations")
+    if isinstance(loc, (list, tuple)):
+        pr["login_redirect_locations"] = [str(x) for x in loc]
+    sig = descriptor.get("denial_body_signature")
+    if sig:
+        pr["denial_body_signature"] = str(sig)
+    return {
+        "corpus_id": corpus_id,
+        "credential_id": credential_id,
+        "policy": {"corpus_id": corpus_id, "should_reject": list(should_reject)},
+        "protected_resource": pr,
+        "weak_access": weak_access,
+        "baseline_access": baseline_access,
+    }
+
+
+def credential_acceptance_redrive(url: str, *, slug: str, engagement_slug: str,
+                                  signers: "list[tuple[str, str]]", corpus: "dict | None" = None,
+                                  policy: "dict | None" = None, protected_resource: "dict | None" = None,
+                                  login_spec: "dict | None" = None, timeout: float = 8.0
+                                  ) -> "RuntimeRedriveResult":
+    """M-11.2 — the CREDENTIAL-UNIT re-drive arm that FEEDS :func:`credential_acceptance_oracle`. A SINGLE-SHOT
+    GATED re-drive (structurally like :func:`ssti_redrive` / :func:`boolean_redrive`), NOT a brute-forcer: it
+    takes an OPERATOR-PLANTED TEST credential corpus (``{credential_id: {username, secret, ...}}``) + the
+    operator's attestation (the ``protected_resource`` descriptor + a ``login_spec``), performs ONE gated login
+    attempt per planted should-be-rejected credential and ONE gated read of the attested protected resource, and
+    lets the deterministic oracle adjudicate the ACHIEVED-ACCESS differential over VIGIL's OWN capture.
+
+    Mints a signed FACT (``certify_admitted(provenance="live_redrive")`` via :func:`_admit_one`) ONLY when the
+    oracle confirms the weak-credential session SUCCESSFULLY read the auth-gated resource (a 2xx carrying the
+    attested authenticated signal, ABSENT from the denied baseline) while a known-bad/no session was DENIED the
+    SAME request. The tool's bytes are NEVER the FACT — VIGIL's oracle re-fires over VIGIL's gated capture, and
+    re-derives acceptance OFFLINE from the retained record. hydra/john stay EXTERNAL LEAD PROPOSERS (not wired
+    here); this arm consumes an operator-planted TEST corpus, never a recovered real-user secret.
+
+    FAIL-CLOSED, in order: (a) ``_stat_setup`` verifies the ``credential_acceptance.achieved_access`` branch is
+    REGISTERED and runs the URL-shaped charter gate BEFORE any traffic; (b) the operator-planted corpus +
+    ``policy.should_reject`` + protected-resource attestation + ``login_spec.url`` are MANDATORY — absent ⇒ a
+    recorded refusal and NO traffic (no corpus, no FACT); (c) every request is the gated, DNS-pinned, proxy-free
+    send; (d) a no-channel / send error is a note or INCONCLUSIVE, never a fabricated FACT. Stops on the first
+    FACT (bounded work). Never raises.
+
+    Fire conditions (ALL): the branch is registered + the charter gate authorized; the planted corpus has
+    material for a ``should_reject`` id; the no-session baseline read of the attested resource is a DENIAL; the
+    weak-credential session's read of the SAME request is a 2xx authenticated success carrying the attested
+    ``authenticated_signal`` that is ABSENT from the denied baseline. Everything else (a rejecting login whose
+    weak read is itself denied; a non-auth-gated resource served to the baseline too; a weak 2xx without the
+    signal; a too-weak/low-entropy attested signal) is a non-FACT (the oracle's SAFE negative / LEAD)."""
+    from framework.v2.scanner.insertion import HttpRequest  # noqa: PLC0415 (framework at CALL — FATAL-2)
+    from framework.v2.scanner.session import CookieJar  # noqa: PLC0415 — the reviewed Set-Cookie capturer
+    from framework.v2.verify.adapter import FindingContext  # noqa: PLC0415
+    from framework.v2.verify.oracles import credential_acceptance_oracle  # noqa: PLC0415
+
+    bug_class = "credential_acceptance"
+    res, send, state = _stat_setup(url, slug, bug_class, _CREDENTIAL_BRANCH, timeout)
+    if send is None:
+        return res
+
+    corpus = corpus if isinstance(corpus, dict) else {}
+    policy = policy if isinstance(policy, dict) else {}
+    descriptor = protected_resource if isinstance(protected_resource, dict) else {}
+    login_spec = login_spec if isinstance(login_spec, dict) else {}
+    corpus_id = str(policy.get("corpus_id") or "").strip()
+    should_reject = [str(c).strip() for c in (policy.get("should_reject") or ()) if str(c).strip()]
+    resource_url = str(descriptor.get("url") or "").strip()
+    authed_signal = str(descriptor.get("authenticated_signal") or "")
+    login_url = str(login_spec.get("url") or "").strip()
+    resource_method = (str(descriptor.get("method") or "GET").strip().upper() or "GET")
+
+    # HARD PRECONDITIONS — the operator-planted corpus + policy + attestation + login spec. Absent ⇒ REFUSE (a
+    # note + return, never a FACT; no traffic). This is what makes the generic runtime_redrive delegation (which
+    # passes NO corpus) inert fail-closed, and TEST-IDENTITIES-ONLY: without a planted corpus there is no FACT.
+    if not corpus:
+        res.notes.append("refused before any traffic: no operator-planted TEST credential corpus — no "
+                         "corpus, no FACT")
+        return res
+    if not corpus_id:
+        res.notes.append("refused before any traffic: planted policy carries no corpus_id — the corpus does "
+                         "not bind itself")
+        return res
+    if not should_reject:
+        res.notes.append("refused before any traffic: planted policy carries no should_reject set — nothing "
+                         "is marked should-be-rejected")
+        return res
+    if not resource_url or not authed_signal.strip():
+        res.notes.append("refused before any traffic: no protected-resource attestation (both url and "
+                         "authenticated_signal are required)")
+        return res
+    if not login_url:
+        res.notes.append("refused before any traffic: no login_spec.url — cannot attempt a gated login")
+        return res
+
+    # Mark the surface EXAMINED up front, so a control can POSITIVELY assert the arm RAN (not stubbed to None).
+    res.surfaces.setdefault(bug_class, set()).add(f"login:{login_url}")
+    try:
+        # (1) baseline_access ONCE — a gated read of the attested protected resource with NO session.
+        before = state["channels"]
+        try:
+            baseline_resp = send(HttpRequest(method=resource_method, url=resource_url))
+        except Exception as e:  # noqa: BLE001
+            res.notes.append(f"credential baseline error: {type(e).__name__}: {e}")
+            return res
+        if state["channels"] <= before:
+            res.inconclusive.append((bug_class, f"{resource_url}#baseline"))
+            res.notes.append("inconclusive: no channel to the protected resource for the no-session baseline")
+            return res
+        baseline_access = _cred_access_leg(baseline_resp, resource_url, resource_method)
+
+        login_method = (str(login_spec.get("method") or "POST").strip().upper() or "POST")
+        # (2) per planted should-reject credential the corpus has material for: gated login → gated weak read.
+        for credential_id in should_reject:
+            material = corpus.get(credential_id)
+            if not isinstance(material, dict):
+                continue    # no planted material for this id — nothing to attempt (bounded to the corpus)
+            username = str(material.get("username", material.get("user", "")))
+            secret = str(material.get("secret", material.get("password", "")))
+            jar = CookieJar()
+            # gated LOGIN — part of the gated re-drive (the SAME gated send the other arms use, not a new
+            # destructive default): POST the planted credential; capture the issued session from Set-Cookie.
+            body, headers = _cred_login_body_and_headers(login_spec, username, secret)
+            before_l = state["channels"]
+            try:
+                login_resp = send(HttpRequest(method=login_method, url=login_url, headers=headers, body=body))
+            except Exception as e:  # noqa: BLE001
+                res.notes.append(f"credential login error [{credential_id}]: {type(e).__name__}: {e}")
+                continue
+            if state["channels"] <= before_l:
+                res.inconclusive.append((bug_class, f"{login_url}#login:{credential_id}"))
+                continue
+            jar.update_from_headers([(str(k), str(v)) for k, v in (login_resp.get("headers") or [])]
+                                    if isinstance(login_resp, dict) else [])
+            # gated WEAK read — the SAME protected-resource request as the baseline, differing ONLY in the
+            # captured session (replayed as the Cookie request header).
+            cookie = jar.header()
+            weak_headers = [("Cookie", cookie)] if cookie else []
+            before_w, before_bodies = state["channels"], state["body_unavailable"]
+            try:
+                weak_resp = send(HttpRequest(method=resource_method, url=resource_url, headers=weak_headers))
+            except Exception as e:  # noqa: BLE001
+                res.notes.append(f"credential weak-read error [{credential_id}]: {type(e).__name__}: {e}")
+                continue
+            if state["channels"] <= before_w:
+                res.inconclusive.append((bug_class, f"{resource_url}#weak:{credential_id}"))
+                continue
+            weak_access = _cred_access_leg(weak_resp, resource_url, resource_method)
+            record = _cred_record(corpus_id, credential_id, should_reject, descriptor,
+                                  resource_url, resource_method, authed_signal, weak_access, baseline_access)
+            fc = FindingContext.from_credential_acceptance(record)
+            context = fc.to_verifier_context()
+            signal = credential_acceptance_oracle(context["credential_acceptance"])
+            r = _admit_one(res, branch=_CREDENTIAL_BRANCH, bug_class=bug_class,
+                           engagement_slug=engagement_slug, signers=signers, context=context,
+                           item=f"{resource_url}#cred:{credential_id}", surface=f"login:{credential_id}",
+                           fired=signal.fired, conclusive=signal.conclusive,
+                           body_unreadable=state["body_unavailable"] > before_bodies)
+            if r.is_fact:
+                break     # one FACT is decisive for a re-drive — stop (bounded work)
+    except Exception as e:  # noqa: BLE001 — a probe error never fabricates a FACT; record + return what held
+        res.notes.append(f"credential_acceptance_redrive error: {type(e).__name__}: {e}")
     return res
 
 

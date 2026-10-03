@@ -679,6 +679,18 @@
       "kind": "debt",
       "limit_id": "LIMIT-tls-certificate-validity-unwired",
       "note": "classify_certificate_defects docstring: states the inertness and what wiring it would require."
+    },
+    {
+      "file": "integration/vigil_integration/live/runtime_redrive.py",
+      "snippet": "LEAD PROPOSERS (not wired here)",
+      "kind": "non-debt",
+      "note": "Deliberate doctrine, not debt (M-11.2 credential arm): hydra/john are EXTERNAL LEAD proposers and are intentionally never wired as FACT-minting tool executors — a credential FACT comes only from VIGIL's own gated re-drive + the credential_acceptance oracle. The arm consumes the operator-planted TEST corpus, never a recovered real-user secret."
+    },
+    {
+      "file": "integration/vigil_integration/live/runtime_redrive.py",
+      "snippet": "EXTERNAL LEAD PROPOSERS (not wired",
+      "kind": "non-debt",
+      "note": "Same deliberate doctrine in the credential_acceptance_redrive docstring: hydra/john stay external LEAD proposers; the FACT is VIGIL-owned (the oracle re-fires over VIGIL's own gated capture). Not deferred work."
     }
   ]
 }

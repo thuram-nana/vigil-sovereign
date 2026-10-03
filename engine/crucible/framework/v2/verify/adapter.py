@@ -355,6 +355,15 @@ class FindingContext(BaseModel):
     # the retained leaf the oracle re-parses to re-derive the defect set OFFLINE (so the FACT re-verifies).
     cert_validity: dict[str, Any] | None = None
 
+    # credential_acceptance_oracle (M-11.2 — a target auth ACCEPTED an operator-planted TEST credential the
+    # planted policy marks should-be-REJECTED, proven by an ACHIEVED authenticated read of a protected resource
+    # a known-bad/no session is DENIED). Routes the dedicated CREDENTIAL_ACCEPTANCE kind via its distinct
+    # `credential_acceptance` ctx key — no benchmark/scan/engage finding carries it, so appending it leaves the
+    # gate byte-identical. Carries the whole record {corpus_id, credential_id, policy, protected_resource,
+    # weak_access, baseline_access} the oracle RE-DERIVES acceptance from OFFLINE (so the FACT re-verifies);
+    # TEST-IDENTITIES-ONLY — credential_id is an identifier, never a secret, and the legs are responses.
+    credential_acceptance: dict[str, Any] | None = None
+
     # AEGIS system_prompt_disclosure_oracle (a planted high-entropy canary appeared VERBATIM
     # in the app's own LLM output). PR1: these carry PLAINTEXT — the reverify contract re-fires
     # on verbatim substrings, so the certificate honestly retains the random sentinel + a
@@ -907,6 +916,21 @@ class FindingContext(BaseModel):
         judges only the signature hash / key size. The DER MUST come from a real gated handshake
         (``tls.capture_tls_handshake``), never a scanner's parsed row."""
         return cls(bug_class=bug_class, cert_validity=dict(record or {}))
+
+    @classmethod
+    def from_credential_acceptance(
+        cls, record: Mapping[str, Any], *, bug_class: str = "credential_acceptance"
+    ) -> "FindingContext":
+        """A full credential-acceptance record (M-11.2) for the achieved-access oracle: the operator-planted
+        {corpus_id, credential_id, policy:{corpus_id, should_reject}, protected_resource:{url, method?,
+        authenticated_signal, denial_statuses?, login_redirect_locations?, denial_body_signature?}, weak_access,
+        baseline_access}. The oracle RE-DERIVES acceptance OFFLINE from the retained record — the SAME-shape
+        protected-resource differential (the weak-credential session reached an authenticated read a known-bad/no
+        session was denied) — so the FACT re-verifies by re-running the pure oracle over these retained bytes; a
+        tamper that removes the achieved differential no longer re-fires. TEST-IDENTITIES-ONLY and SECRET-SAFE by
+        construction: ``credential_id`` is an identifier (never the secret), and the two access legs are captured
+        RESPONSES (status/body/headers + the request's url/method), not credential material."""
+        return cls(bug_class=bug_class, credential_acceptance=dict(record or {}))
 
     @classmethod
     def from_code_region(
@@ -2609,6 +2633,10 @@ class FindingContext(BaseModel):
             ctx["static_rule"] = self.static_rule
         if self.cert_validity is not None:
             ctx["cert_validity"] = self.cert_validity
+        if self.credential_acceptance is not None:
+            # M-11.2: the dedicated ctx key the verifier's CREDENTIAL_ACCEPTANCE arm dispatches to
+            # oracles.credential_acceptance_oracle (so offline re-verify re-fires over the retained record).
+            ctx["credential_acceptance"] = self.credential_acceptance
         if self.version_advisory is not None:
             ctx["version_advisory"] = self.version_advisory
         if self.policy is not None:
