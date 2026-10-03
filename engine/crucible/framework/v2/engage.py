@@ -393,6 +393,34 @@ def _engage_authority_trust_root(slug: str) -> object | None:
             f"no governance authority trust root is discoverable ({_paths.authority_root_path()}) — refusing "
             "to apply an UNVERIFIABLE authority on the engage path (W16-2). Provision the authority root, or "
             "remove the authority document to run greenfield (kill-switch only).")
+    # M-11.1 HARD PRECONDITION (arm site 2/3): if the provisioned authority is LIVE, refuse to pin the trust
+    # root (and thus to arm the engage path) unless a verified, owner-signed, evaluator-countersigned
+    # EvalOffenseAttestation covers this engagement on the shared seam. Only the VERIFIED (owner-pinned) load
+    # is consulted — an unsigned/tampered authority already fails closed downstream at the executor's
+    # _authority_gate, so that path is unchanged. TWIN/STAGING are untouched (byte-identical). The offense
+    # plane only VERIFIES the public signed attestation against the pinned owner key (FATAL-2).
+    try:
+        from .authority.store import load_verified_authority as _load_verified_authority
+        _doc = _load_verified_authority(slug, trust_root)
+    except Exception:  # noqa: BLE001 — unsigned/tampered/absent → leave the downstream gate to refuse
+        _doc = None
+    if _doc is not None and getattr(_doc.environment, "value", str(_doc.environment)) == "live":
+        import os as _os
+        import time as _time
+
+        from vigil_integration.live.eval_attestation import (
+            owner_pubkeys_of as _owner_pubkeys_of,
+            verify_live_offense_attested as _verify_live_offense_attested,
+        )
+        _base = _os.environ.get("VIGIL_BASE_DIR") or ".vigil-live"
+        _ok_att, _att_reason = _verify_live_offense_attested(
+            _base, engagement_slug=slug, trusted_owner_pubkeys=_owner_pubkeys_of(trust_root),
+            now=_time.time())
+        if not _ok_att:
+            raise EngagementRefused(
+                f"a LIVE EngagementAuthority is provisioned for {slug!r} but no verified eval-offense "
+                f"attestation covers it (M-11.1 hard precondition): {_att_reason}. Weaponized offense will not "
+                f"arm until the owner + the enrolled evaluator co-sign an attestation on the spine.")
     return trust_root
 
 

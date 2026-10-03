@@ -28,6 +28,7 @@ existing importer of ``vigil_integration.conjunctive_gate``) and adds the OFFENS
 
 from __future__ import annotations
 
+import os
 import time
 from datetime import datetime, timezone
 from typing import Any, Callable
@@ -82,6 +83,7 @@ def build_offense_gate(
     destruction_authority: Any = None,
     is_consumed: Callable[[str], bool] | None = None,
     destruction_ledger: Any = None,
+    base_dir: str = "",
 ) -> Callable[..., GateVerdict]:
     """Return ``gate(tool_name, target_url, destructive=False, *, destruction_action=None,
     destruction_signed=None) -> GateVerdict`` wired to the REAL gates — including the I4 threshold-
@@ -135,6 +137,26 @@ def build_offense_gate(
             from framework.v2.authority.models import ActionRequest
 
             authority = load_authority_for_gate(slug, trust_root=trust_root)  # verified, fail-closed
+            # M-11.1 HARD PRECONDITION (arm site 3/3): a LIVE authority may ARM only when a verified,
+            # owner-signed, evaluator-countersigned EvalOffenseAttestation covers this engagement on the
+            # shared seam. Checked here so EVERY target-touching offense action on a LIVE authority re-verifies
+            # it (defense-in-depth with the console launch gate + the engage trust-root pin). The offense plane
+            # only VERIFIES the PUBLIC signed material against the pinned owner key (this gate's trust_root) —
+            # it never imports the sovereign governor nor holds the owner key (FATAL-2). TWIN/STAGING are
+            # byte-identical (no new check fires). Fail-closed: no attestation ⇒ DENY.
+            _env = getattr(authority, "environment", None)
+            if getattr(_env, "value", str(_env)) == "live":
+                from .live.eval_attestation import (
+                    owner_pubkeys_of,
+                    verify_live_offense_attested,
+                )
+                _base = base_dir or os.environ.get("VIGIL_BASE_DIR") or ".vigil-live"
+                _ok_att, _att_reason = verify_live_offense_attested(
+                    _base, engagement_slug=slug,
+                    trusted_owner_pubkeys=owner_pubkeys_of(trust_root), now=_as_epoch(now))
+                if not _ok_att:
+                    return CrucibleResult(
+                        allowed=False, reason=f"LIVE arm refused (M-11.1 hard precondition): {_att_reason}")
             req = ActionRequest(target=target_url, action_kind="offense", destructive=destructive)
             decision = authorize_action(
                 authority, req, killswitch=killswitch, actions_taken=actions_taken,

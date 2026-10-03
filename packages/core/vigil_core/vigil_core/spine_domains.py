@@ -91,6 +91,7 @@ DOMAIN_TAGS: dict[str, bytes] = {
     "login-pop": b"vigil-login-pop-v1\x00",                     # S3 per-user login proof-of-possession over a challenge
     "remediation-attestation": b"vigil-remediation-attestation-v1\x00",  # PCR/W5 proof-carrying remediation attestation
     "live-target-attestation": b"vigil-live-target-attestation-v1\x00",  # WS2 evaluator self-serve "this live target is mine" PoP
+    "eval-offense-attestation": b"vigil-eval-offense-attestation-v1\x00",  # M-11.1 owner-signed HARD PRECONDITION for arming weaponized offense on a LIVE eval target (distinct from WS2 live-target-attestation; an owner sig for any other purpose cannot replay here, and the evaluator PoP counter-signs under THIS tag only)
 }
 
 

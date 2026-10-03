@@ -608,6 +608,23 @@ def _has_verified_authority(slug: str, host: str = "") -> bool:
             from ..common import ethics
             if not ethics.host_matches_scope(host, list(doc.scope)):
                 return False
+        # M-11.1 HARD PRECONDITION (arm site 1/3): a LIVE authority may ARM weaponized offense ONLY when a
+        # verified, owner-signed, evaluator-countersigned EvalOffenseAttestation covers this engagement on the
+        # shared seam. The offense plane only VERIFIES the PUBLIC signed material against the pinned owner key
+        # (this authority's trust root) — it never imports the sovereign governor nor holds the owner key
+        # (FATAL-2). TWIN/STAGING authorities are untouched (byte-identical). Fail-closed: no attestation ⇒
+        # no arm. The engage path and the conjunctive gate re-check this independently (defense-in-depth).
+        if getattr(doc.environment, "value", str(doc.environment)) == "live":
+            from vigil_integration.live.eval_attestation import (
+                owner_pubkeys_of,
+                verify_live_offense_attested,
+            )
+            _base = os.environ.get("VIGIL_BASE_DIR") or ".vigil-live"
+            _ok_att, _att_reason = verify_live_offense_attested(
+                _base, engagement_slug=slug, trusted_owner_pubkeys=owner_pubkeys_of(trust_root),
+                now=_now.timestamp())
+            if not _ok_att:
+                return False
         return True
     except Exception:  # noqa: BLE001 — any load/verify failure is a fail-closed refusal
         return False

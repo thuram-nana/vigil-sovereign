@@ -366,6 +366,22 @@ def add_target(
             store, host=h, environment="live", attestation=evaluator_attestation)
         if not ok_att:
             return {"ok": False, "error": f"LIVE environment refused: {att_err}"}
+        # M-11.1 HARD PRECONDITION (slice 11.1): weaponized offense may ARM on a LIVE target ONLY when a
+        # verified, owner-signed, evaluator-countersigned EvalOffenseAttestation already covers THIS
+        # engagement on the spine. This is ADDITIVE to the WS2 self-serve proof above (checked after it, so a
+        # WS2 refusal keeps its own message) and is enforced BEFORE any live authority bundle is written, so
+        # no live authority is minted without the attestation. The offense arm re-verifies the SAME public
+        # signed attestation independently (defense-in-depth). Fail-closed: no attestation ⇒ live refused.
+        from ..governor.eval_offense_attestation import (  # sovereign sibling; no offense import
+            EvalOffenseAttestationMissing,
+            assert_eval_offense_attested,
+        )
+        try:
+            assert_eval_offense_attested(store, engagement_slug=s, charter_hash=None,
+                                         now=t.timestamp(), environment="live")
+        except EvalOffenseAttestationMissing as e:
+            return {"ok": False, "error": "LIVE environment refused: no verified eval-offense attestation "
+                                          f"(M-11.1 hard precondition) — {e}"}
 
     doc = EngagementAuthority(
         engagement_slug=s,

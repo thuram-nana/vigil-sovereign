@@ -43,11 +43,19 @@ from .offense_gate import (  # noqa: E402
     OffenseGateState,
     assert_offense_gated,
 )
+from .eval_offense_attestation import (  # noqa: E402
+    EvalOffenseAttestation,
+    EvalOffenseAttestationMissing,
+    EvalOffenseAttestationState,
+    assert_eval_offense_attested,
+)
 from .promotion import PromotionPolicy  # noqa: E402
 
 __all__ = ["Governor", "Decision", "Outcome", "KillSwitch", "BudgetCaps", "BudgetLedger",
            "Spend", "Usage", "load_prices", "DEFAULT_PRICES", "PromotionPolicy",
            "OffenseGate", "OffenseGateClosed", "OffenseGateState", "assert_offense_gated",
+           "EvalOffenseAttestation", "EvalOffenseAttestationMissing", "EvalOffenseAttestationState",
+           "assert_eval_offense_attested",
            "CapabilityGate", "CAPABILITIES",
            "AccountsRegistry", "Account", "Principal", "OWNER_PRINCIPAL", "PermissionDenied",
            "role_can", "ROLES", "PERMISSIONS", "PERMISSION_BY_ACTION"]
