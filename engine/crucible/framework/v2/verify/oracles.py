@@ -4702,32 +4702,99 @@ def certificate_validity_oracle(observed: Any) -> OracleSignal:
 # own ``corpus_id`` does not bind the record's corpus, or an empty ``should_reject`` set => the oracle REFUSES
 # (a non-fire with an explicit reason, never a raise). Upstream maps that to a LEAD/INCONCLUSIVE, never a FACT.
 #
-# ACCEPTANCE IS RE-DERIVED, NOT TRUSTED. A bare producer boolean or a bare 200 is NOT acceptance (the repeated
-# soundness lesson of this engine). The planted policy carries a ``success_marker`` — a string the operator
-# attests appears in a captured response ONLY on a SUCCESSFUL authentication (an authenticated-session token /
-# redirect target / body sentinel). The oracle re-evaluates that marker over the RETAINED response bytes, so
-# the verdict is a pure re-derivation. A correct auth that REJECTS the weak credential (marker absent) does
-# NOT fire — the SAFE negative control.
+# ACCEPTANCE IS A SAME-SHAPE DIFFERENTIAL, NOT A BARE SUBSTRING. A bare producer boolean, a bare 200, or a
+# bare substring over a SINGLE captured response is NOT acceptance (the repeated soundness lesson of this
+# engine — a correctly-REJECTING target whose body coincidentally contains a NON-EXCLUSIVE marker, e.g.
+# "Dashboard" in a nav or "session" in "your session expired", would otherwise mint a false ACCEPTED FACT;
+# red-pen minted exactly that, even recording status=401 while asserting acceptance). The oracle therefore
+# consumes TWO SAME-SHAPE captures: the WEAK/attacker-credential ``auth_response`` AND a NEGATIVE-credential
+# ``baseline_response`` (a known-bad credential the target should reject). The planted policy carries a
+# ``success_marker`` the operator attests appears ONLY on a SUCCESSFUL authentication (an authenticated-session
+# token / redirect target / body sentinel). The oracle fires "ACCEPTED" ONLY when that marker is PRESENT in the
+# weak-credential capture AND ABSENT in the same-shape negative baseline — the DIFFERENTIAL is the sound
+# discriminator (a coincidental substring present in BOTH legs cancels and does NOT fire). It also enforces the
+# smuggling-canary floor: a short / low-entropy marker that cannot be a reliable discriminator downgrades to a
+# LEAD, never a FACT; and an auth-rejection status (401/403) on the weak leg CONTRADICTS acceptance even if the
+# marker differs. A correct auth that REJECTS the weak credential (marker absent, or present in BOTH legs) does
+# NOT fire — the SAFE negative control. No same-shape ``baseline_response`` => REFUSE (a LEAD/INCONCLUSIVE,
+# never a FACT). This mirrors the module's own canon: the discrimination oracle (a true_marker present in the
+# payload leg AND absent in a same-shape baseline) and the smuggling canary (a unique high-entropy marker; a
+# weak substring is a LEAD). runtime_redrive: "the control must be SAME-SHAPE as the payload"; measured-claim:
+# "measure a difference AS a difference".
 # ---------------------------------------------------------------------------
+
+# The success-marker discriminator floor — mirrors the smuggling-canary floor (_SMUGGLING_MIN_CANARY_LEN /
+# _SMUGGLING_MIN_CANARY_ENTROPY). The ``success_marker`` is operator-planted STRUCTURAL text (a Set-Cookie line
+# / redirect target / body sentinel), not an alnum token, so there is no alnum-regex gate — but a marker that is
+# too short OR too low-entropy cannot be a reliable discriminator (a coincidental substring could manufacture a
+# differential) and is downgraded to a LEAD, never a FACT.
+_CRED_MARKER_MIN_LEN = 12
+_CRED_MARKER_MIN_ENTROPY = 2.5   # bits/char — the same floor the system-prompt / smuggling canaries use
+# Auth-REJECTION statuses on the WEAK-credential leg CONTRADICT acceptance even if a marker differential
+# coincidentally holds — the red-pen smell was a FACT that "recorded status=401 while asserting acceptance".
+_CRED_REJECTION_STATUSES = frozenset({401, 403})
+
+
+def _cred_status_int(status: Any) -> "int | None":
+    """Coerce a captured status to an int, or None (a non-int / bool / unparseable status). Pure."""
+    if isinstance(status, bool):
+        return None
+    if isinstance(status, int):
+        return status
+    try:
+        return int(status) if status is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _cred_leg_fields(resp: Any) -> "tuple[str, str, Any]":
+    """Coerce one captured auth-response leg to ``(body, header_blob, status)`` (pure). Reads ONLY the
+    response's body / header values / status — never any credential or secret field."""
+    body = ""
+    header_blob = ""
+    status: Any = None
+    if isinstance(resp, Mapping):
+        body = _coerce_text(resp.get("body", resp.get("text", resp.get("content", ""))))
+        status = resp.get("status", resp.get("status_code"))
+        headers = resp.get("headers")
+        if isinstance(headers, Mapping):
+            header_blob = " ".join(f"{_coerce_text(k)}: {_coerce_text(v)}" for k, v in headers.items())
+    else:
+        body = _coerce_text(resp)
+    return body, header_blob, status
+
+
+def _cred_leg_has_capture(body: str, header_blob: str, status: "int | None") -> bool:
+    """True iff a leg actually captured a response (a status, a body, or headers) — a leg that captured
+    nothing is INCONCLUSIVE, never half of a sound differential."""
+    return status is not None or bool(body) or bool(header_blob)
+
+
+def _cred_marker_present(marker: str, body: str, header_blob: str) -> bool:
+    """True iff the planted success marker appears in a leg's body or header blob (pure substring)."""
+    return marker in body or (bool(header_blob) and marker in header_blob)
 
 
 def credential_acceptance_oracle(observed: Any) -> OracleSignal:
     """Fire when a target's auth ACCEPTED a credential the operator-planted TEST policy marks
-    should-be-REJECTED. The proof is the retained capture: the planted ``corpus_id``, the attempted
-    ``credential_id``, the planted ``policy`` (``corpus_id`` + ``should_reject`` + ``success_marker``), and the
-    VIGIL-captured ``auth_response``. Pure + offline-re-derivable.
+    should-be-REJECTED, proven by a SAME-SHAPE DIFFERENTIAL over two VIGIL-captured auth attempts: the
+    WEAK/attacker-credential response AND a NEGATIVE-credential BASELINE response (a known-bad credential the
+    target should reject). The proof is the retained capture: the planted ``corpus_id``, the attempted
+    ``credential_id``, the planted ``policy`` (``corpus_id`` + ``should_reject`` + ``success_marker``), and BOTH
+    captured responses. Pure + offline-re-derivable.
 
     Expected ``observed`` mapping::
 
         {
           "corpus_id":     "<operator-planted test-identity corpus id>",   # REQUIRED — refuse without it
-          "credential_id": "<identifier of the attempted credential>",     # an IDENTIFIER, never the secret
+          "credential_id": "<identifier of the attempted WEAK credential>",# an IDENTIFIER, never the secret
           "policy": {
             "corpus_id":      "<must equal the record's corpus_id>",       # the corpus binds itself
             "should_reject":  ["<cred id>", ...],                          # the planted must-be-REJECTED set
             "success_marker": "<string that appears ONLY on a successful auth>"
           },
-          "auth_response": {"status": <int>, "body": "<captured body>", "headers": {...}}
+          "auth_response":     {"status": <int>, "body": "...", "headers": {...}},  # the WEAK-credential leg
+          "baseline_response": {"status": <int>, "body": "...", "headers": {...}}   # the NEGATIVE-cred baseline
         }
 
     REFUSES (a non-fire, never a raise) when there is nothing it may soundly judge:
@@ -4735,11 +4802,20 @@ def credential_acceptance_oracle(observed: Any) -> OracleSignal:
       * no ``policy`` mapping, or ``policy['corpus_id']`` does not equal the record's ``corpus_id`` — the
         planted corpus does not bind this record;
       * an empty / missing ``should_reject`` set, or no ``success_marker`` — the planted policy is incomplete;
-      * no ``credential_id`` — nothing to test for membership.
+      * no ``credential_id`` — nothing to test for membership;
+      * no same-shape ``baseline_response``, or either leg captured no response — there is no sound differential.
+
+    LEAD (a non-fire that is NOT a sound negative — just undecidable from this input):
+      * a short / low-entropy ``success_marker`` cannot be a reliable discriminator (a coincidental substring
+        could manufacture a differential) — downgraded to a LEAD, never a FACT (the smuggling-canary treatment).
 
     NON-FIRE (safe) — a sound judgement that did NOT confirm acceptance:
       * the attempted ``credential_id`` is NOT in ``should_reject`` (not a planted weak credential); or
-      * the planted ``success_marker`` is ABSENT from the captured response (the target REJECTED it).
+      * the planted ``success_marker`` is ABSENT from the weak-credential capture (the target REJECTED it); or
+      * the ``success_marker`` is PRESENT in BOTH legs — a coincidental substring that CANCELS (not a
+        differential; this is the exact red-pen false-FACT shape, now disarmed); or
+      * the weak-credential leg answered with an auth-rejection status (401/403) — the post-state contradicts
+        acceptance even if the marker differs between legs.
     """
     if not isinstance(observed, Mapping):
         return OracleSignal(kind=OracleKind.CREDENTIAL_ACCEPTANCE, fired=False, confidence=0.0,
@@ -4795,40 +4871,88 @@ def credential_acceptance_oracle(observed: Any) -> OracleSignal:
                       "only confirms acceptance of a planted weak credential"),
             observed=base_obs)
 
-    # Re-derive ACCEPTANCE over the RETAINED response: the operator-planted success_marker must appear in the
-    # captured body or a header value. A bare status code is never acceptance (soundness lesson). We read ONLY
-    # the response's success marker — never any secret.
-    resp = observed.get("auth_response")
-    body = ""
-    header_blob = ""
-    status: Any = None
-    if isinstance(resp, Mapping):
-        body = _coerce_text(resp.get("body", resp.get("text", resp.get("content", ""))))
-        status = resp.get("status", resp.get("status_code"))
-        headers = resp.get("headers")
-        if isinstance(headers, Mapping):
-            header_blob = " ".join(f"{_coerce_text(k)}: {_coerce_text(v)}" for k, v in headers.items())
-    else:
-        body = _coerce_text(resp)
-    accepted = success_marker in body or (bool(header_blob) and success_marker in header_blob)
+    # ENTROPY / UNIQUENESS FLOOR (the smuggling-canary treatment). A short / low-entropy success_marker cannot
+    # be a RELIABLE discriminator — a coincidental substring could manufacture a differential — so it is a LEAD,
+    # never a FACT (an honest LEAD beats a false FACT). The red-pen "Dashboard" / "session" markers land here
+    # (too short), as do repeated-char / trivial markers (too low-entropy). We read ONLY the planted marker.
+    marker = success_marker.strip()
+    marker_entropy = _shannon_bits_per_char(marker)
+    if len(marker) < _CRED_MARKER_MIN_LEN or marker_entropy < _CRED_MARKER_MIN_ENTROPY:
+        return OracleSignal(
+            kind=OracleKind.CREDENTIAL_ACCEPTANCE, fired=False, confidence=0.0,
+            evidence=(f"LEAD: the planted success_marker is too weak to be a reliable discriminator (needs "
+                      f">= {_CRED_MARKER_MIN_LEN} chars AND >= {_CRED_MARKER_MIN_ENTROPY} bits/char; got "
+                      f"{len(marker)} chars, {marker_entropy:.2f} bits/char) — a coincidental substring could "
+                      "manufacture a differential, so this is a LEAD, never a FACT"),
+            observed={**base_obs, "marker_len": len(marker),
+                      "marker_entropy_bits_per_char": round(marker_entropy, 3)})
+
+    # SAME-SHAPE DIFFERENTIAL — the sound discriminator. A credential-ACCEPTANCE FACT is NOT a bare substring
+    # over one capture (the red-pen defect); it is the planted marker PRESENT in the WEAK-credential leg AND
+    # ABSENT in a SAME-SHAPE NEGATIVE-credential baseline (a known-bad credential the target should reject).
+    # No baseline capture => REFUSE: there is no differential to adjudicate, so this is a LEAD/INCONCLUSIVE,
+    # never a FACT. We read ONLY each leg's body / headers / status — never any secret.
+    weak_resp = observed.get("auth_response")
+    baseline_resp = observed.get("baseline_response")
+    if not isinstance(baseline_resp, (Mapping, str, bytes)):
+        return OracleSignal(
+            kind=OracleKind.CREDENTIAL_ACCEPTANCE, fired=False, confidence=0.0,
+            evidence=("REFUSED: no same-shape negative-credential baseline capture (baseline_response absent) — "
+                      "a credential-acceptance FACT is a DIFFERENTIAL over a weak-credential leg AND a known-bad "
+                      "baseline leg; without the baseline this is a LEAD/INCONCLUSIVE, never a FACT"),
+            observed=base_obs)
+
+    weak_body, weak_hdr, weak_status_raw = _cred_leg_fields(weak_resp)
+    base_body, base_hdr, base_status_raw = _cred_leg_fields(baseline_resp)
+    weak_status = _cred_status_int(weak_status_raw)
+    base_status = _cred_status_int(base_status_raw)
+    if not _cred_leg_has_capture(weak_body, weak_hdr, weak_status) \
+            or not _cred_leg_has_capture(base_body, base_hdr, base_status):
+        return OracleSignal(
+            kind=OracleKind.CREDENTIAL_ACCEPTANCE, fired=False, confidence=0.0,
+            evidence=("REFUSED: the weak-credential leg and/or the negative-credential baseline captured no "
+                      "response (no status, no body, no headers) — there is no sound differential to adjudicate"),
+            observed=base_obs)
+
+    marker_in_weak = _cred_marker_present(marker, weak_body, weak_hdr)
+    marker_in_baseline = _cred_marker_present(marker, base_body, base_hdr)
+    weak_rejected_status = weak_status in _CRED_REJECTION_STATUSES
+    differential = marker_in_weak and not marker_in_baseline
+    accepted = differential and not weak_rejected_status
     fire_obs = {
         **base_obs,
-        "status": int(status) if isinstance(status, int) and not isinstance(status, bool) else None,
-        "success_marker_present": accepted,
+        "marker_in_weak_leg": marker_in_weak,
+        "marker_in_negative_baseline": marker_in_baseline,
+        "differential": differential,
+        "weak_status": weak_status,
+        "baseline_status": base_status,
+        "weak_status_contradicts_acceptance": weak_rejected_status,
     }
+
     if accepted:
         return OracleSignal(
             kind=OracleKind.CREDENTIAL_ACCEPTANCE, fired=True, confidence=0.95,
             evidence=(f"the target auth ACCEPTED credential {credential_id!r}, which the operator-planted TEST "
-                      f"policy for corpus {corpus_id!r} marks should-be-REJECTED — the planted success marker "
-                      "was re-derived from the captured auth response (a planted TEST identity; no real-user "
-                      "secret is read or retained)"),
+                      f"policy for corpus {corpus_id!r} marks should-be-REJECTED — the planted success marker is "
+                      "PRESENT in the weak-credential capture and ABSENT in the SAME-SHAPE negative-credential "
+                      "baseline (a differential, not a bare substring) and the weak-leg post-state does not "
+                      "contradict acceptance (a planted TEST identity; no real-user secret is read or retained)"),
             observed=fire_obs)
+
+    if marker_in_weak and marker_in_baseline:
+        reason = ("the planted success marker appears in BOTH the weak-credential capture AND the same-shape "
+                  "negative-credential baseline — a coincidental substring that CANCELS (NOT a differential); "
+                  "the target did not treat the weak credential differently (the SAFE negative: e.g. a 401 "
+                  "rejection whose body coincidentally contains the marker)")
+    elif differential and weak_rejected_status:
+        reason = (f"the weak-credential leg answered with an auth-rejection status ({weak_status}) — the "
+                  "post-state CONTRADICTS acceptance even though the marker differs between legs; did not fire")
+    else:
+        reason = (f"the target REJECTED credential {credential_id!r} — the planted success marker is ABSENT "
+                  "from the weak-credential capture (the SAFE negative: a correct auth rejects the weak credential)")
     return OracleSignal(
         kind=OracleKind.CREDENTIAL_ACCEPTANCE, fired=False, confidence=0.0,
-        evidence=(f"the target REJECTED credential {credential_id!r} — the planted success marker is absent "
-                  "from the captured response (the SAFE negative: a correct auth rejects the weak credential)"),
-        observed=fire_obs)
+        evidence=reason, observed=fire_obs)
 
 
 # ---------------------------------------------------------------------------
