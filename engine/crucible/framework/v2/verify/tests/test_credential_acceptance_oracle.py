@@ -1,285 +1,272 @@
-"""M-11.3 — the deterministic credential-ACCEPTANCE oracle (OracleKind.CREDENTIAL_ACCEPTANCE).
+"""M-11.3 — the ACHIEVED-STATE credential-ACCEPTANCE oracle (OracleKind.CREDENTIAL_ACCEPTANCE).
 
-The oracle CONFIRMS, from TWO VIGIL-captured auth attempts, that a target auth ACCEPTED a credential the
-operator-planted TEST policy marks should-be-REJECTED — proven by a SAME-SHAPE DIFFERENTIAL (the planted
-success marker PRESENT in the weak-credential capture AND ABSENT in a same-shape negative-credential baseline),
-re-derived offline from the retained record so a FACT re-verifies with no network.
+Three prior versions tried to prove "weak credential ACCEPTED" by matching LOGIN-response BYTES, and all three
+failed the red-pen: a coincidental marker present on every response + a differently-shaped baseline (404/500/302/
+301/307/204/plain-text) kept minting a false ACCEPTED FACT on a target that actually REJECTED the credential.
+Byte-diffing a login response cannot soundly distinguish accepted from rejected. This rebuild proves acceptance by
+an UNFORGEABLE ACHIEVED EFFECT instead: the weak-credential session SUCCESSFULLY ACCESSES an AUTHENTICATED
+PROTECTED RESOURCE that a KNOWN-BAD (or no) session is DENIED. The discriminator is the PROTECTED-RESOURCE ACCESS
+OUTCOME (same url+method, differing only in the session), re-derived offline from the retained record.
 
-These tests plant the TRUE positive (the weak credential treated differently from a known-bad baseline), and
-then assert the MANDATORY safe controls that disarm the red-pen false FACTs:
-  * the EXACT red-pen cases — a 401 "Invalid credentials" rejection whose body contains the NON-EXCLUSIVE
-    markers "Dashboard" / "session" => must NOT fire;
-  * a (strong) marker present in BOTH legs => must NOT fire (a coincidental substring cancels);
-  * a low-entropy marker => a LEAD, never a FACT;
-  * a rejecting (401/403) weak leg whose marker coincidentally differs => must NOT fire (post-state veto);
-  * no same-shape negative baseline => REFUSE.
-They also keep the hard precondition (no planted test corpus => never a FACT), prove no real-user secret is
-read/retained, and prove the verdict re-derives byte-identically over the retained context (offline
-re-verification + the verifier routing).
+These tests plant the TRUE positive (the weak session reaches a resource the denied baseline cannot) and assert
+the MANDATORY must-not-fire controls:
+  * (a) a NON-auth-gated resource that returns 2xx to BOTH sessions => no differential => REFUSE;
+  * (b) a REJECTING login (the weak credential gets no session, so weak_access is itself a denial) => no fire;
+  * (c) a coincidental authenticated-marker without a denied baseline => REFUSE;
+  * (d) a mis-shaped / different-endpoint baseline => REFUSE;
+  * (e) a baseline that is NOT denied => REFUSE.
+The MANDATORY true positive (weak_access authenticated — 2xx + attested signal — and baseline_access denied — 401
+or a login redirect — on the SAME resource) fires @ high confidence, re-verifies offline, and is tamper-rejected.
+They also keep the hard preconditions (no planted corpus / no protected-resource attestation => never a FACT),
+prove no real-user secret is read/retained, and prove the verdict re-derives byte-identically over the ctx.
 """
 from __future__ import annotations
 
 from framework.v2.verify import OracleVerifier
 from framework.v2.verify.models import OracleKind
-from framework.v2.verify.oracles import (
-    _CRED_SAMESHAPE_MAX_STRUCTURAL as _SS_MAX_STRUCTURAL,
-    credential_acceptance_oracle,
-)
+from framework.v2.verify.oracles import credential_acceptance_oracle
 
 _CORPUS = "OBSIDIAN-TEST-corpus-7"
-# A STRONG success_marker (33 chars, ~3.9 bits/char) — clears the discriminator floor, so firing is governed
-# by the SAME-SHAPE DIFFERENTIAL, not by the marker's strength.
-_MARKER = "Set-Cookie: session=authenticated"
-_POLICY = {
-    "corpus_id": _CORPUS,
-    "should_reject": ["admin:admin", "root:toor", "guest:guest"],
-    "success_marker": _MARKER,
+_RESOURCE_URL = "https://app.example/account/settings"
+# A STRONG authenticated-content signal (>= 12 chars, >= 2.5 bits/char): a post-login account sentinel that the
+# operator attests appears ONLY in an authenticated view of the resource (not in its login page / denial page).
+_AUTHED_SIGNAL = 'data-account-id="acct_9f3kz7"'
+_POLICY = {"corpus_id": _CORPUS, "should_reject": ["admin:admin", "root:toor", "guest:guest"]}
+_DESCRIPTOR = {
+    "url": _RESOURCE_URL,
+    "method": "GET",
+    "authenticated_signal": _AUTHED_SIGNAL,
+    "login_redirect_locations": ["https://app.example/login"],
 }
 
-# The SAME-SHAPE NEGATIVE-credential baseline: a known-bad credential the target correctly REJECTS. It carries
-# NO authenticated session cookie, so the strong marker is absent from it. Every record ships this baseline.
-_NEGATIVE_BASELINE = {"status": 401, "body": "Invalid credentials",
-                      "headers": {"Set-Cookie": "session=deleted"}}
+
+def _authed_access():
+    """A protected-resource read that ACHIEVED authenticated access: 200 carrying the attested authed signal."""
+    return {"status": 200, "body": f"<main {_AUTHED_SIGNAL}>Your account settings</main>",
+            "headers": {}, "url": _RESOURCE_URL, "method": "GET"}
 
 
-def _accepted_leg():
-    """An auth response that genuinely ACCEPTED the credential: 200 + the authenticated-session cookie."""
-    return {"status": 200, "body": "Welcome back", "headers": {"Set-Cookie": "session=authenticated"}}
+def _denied_access():
+    """The SAME protected-resource request DENIED to the session: 401, no authed signal."""
+    return {"status": 401, "body": "Authentication required", "headers": {}, "url": _RESOURCE_URL, "method": "GET"}
 
 
-def _rejected_leg():
-    """An auth response that correctly REJECTED the credential: 401 + no authenticated-session cookie."""
-    return {"status": 401, "body": "Invalid credentials", "headers": {"Set-Cookie": "session=deleted"}}
+def _login_redirect_access():
+    """The SAME protected-resource request DENIED via a 302 redirect to the attested login page."""
+    return {"status": 302, "body": "", "headers": {"Location": "https://app.example/login?next=/account/settings"},
+            "url": _RESOURCE_URL, "method": "GET"}
 
 
-def _record(*, credential_id="admin:admin", accepted=True, corpus_id=_CORPUS, policy=None,
-            weak_leg=None, baseline_leg=None):
-    """A full oracle record: the planted corpus/policy, the attempted WEAK credential's capture, and the
-    same-shape NEGATIVE-credential baseline capture."""
-    rec = {
+def _served_access():
+    """The SAME request SERVED a 2xx to a known-bad/no session (a NON-auth-gated resource — no denial)."""
+    return {"status": 200, "body": "<main>Public settings help page</main>",
+            "headers": {}, "url": _RESOURCE_URL, "method": "GET"}
+
+
+def _record(*, credential_id="admin:admin", corpus_id=_CORPUS, policy=None, descriptor=None,
+            weak_access=None, baseline_access=None, accepted=True, baseline_denied=True):
+    """A full achieved-state oracle record: the planted corpus/policy, the operator-attested protected-resource
+    descriptor, the weak-credential session's read of the resource, and the known-bad/no session's read of the
+    SAME resource."""
+    return {
         "corpus_id": corpus_id,
         "credential_id": credential_id,
         "policy": _POLICY if policy is None else policy,
-        "auth_response": weak_leg if weak_leg is not None else (_accepted_leg() if accepted else _rejected_leg()),
-        "baseline_response": baseline_leg if baseline_leg is not None else dict(_NEGATIVE_BASELINE),
+        "protected_resource": _DESCRIPTOR if descriptor is None else descriptor,
+        "weak_access": weak_access if weak_access is not None else (_authed_access() if accepted else _denied_access()),
+        "baseline_access": baseline_access if baseline_access is not None
+        else (_denied_access() if baseline_denied else _served_access()),
     }
-    return rec
 
 
-# -- TRUE POSITIVE: a planted weak credential ACCEPTED (the differential holds) --------------------------
-def test_an_accepted_planted_weak_credential_fires():
-    sig = credential_acceptance_oracle(_record(credential_id="admin:admin", accepted=True))
+# == TRUE POSITIVE: the weak session ACHIEVED access the denied baseline could not =========================
+def test_weak_credential_that_achieves_protected_access_fires():
+    sig = credential_acceptance_oracle(_record(credential_id="admin:admin", accepted=True, baseline_denied=True))
     assert sig.kind is OracleKind.CREDENTIAL_ACCEPTANCE
     assert sig.fired and sig.confidence >= 0.95, sig.evidence
+    assert sig.conclusive is True
     assert sig.observed["credential_in_should_reject"] is True
-    assert sig.observed["marker_in_weak_leg"] is True
-    assert sig.observed["marker_in_negative_baseline"] is False
-    assert sig.observed["differential"] is True
+    assert sig.observed["same_shape"] is True
+    assert sig.observed["baseline_is_denial"] is True
+    assert sig.observed["weak_is_denial"] is False
+    assert sig.observed["weak_is_authenticated_success"] is True
+    assert sig.observed["signal_in_weak"] is True
+    assert sig.observed["signal_in_baseline"] is False
+    # the discriminator is the ACHIEVED ACCESS outcome, not the login response: "ACHIEVED STATE" is cited.
+    assert "ACHIEVED STATE" in sig.evidence
 
 
-# -- SAFE NEGATIVE: the SAME weak credential REJECTED (marker absent from the weak leg) -> NO fire --------
-def test_a_rejected_planted_weak_credential_does_not_fire():
-    sig = credential_acceptance_oracle(_record(credential_id="admin:admin", accepted=False))
+def test_fires_when_the_baseline_is_denied_via_a_login_redirect():
+    # the no-session baseline is DENIED not with a 401 but with a 302 redirect to the attested login page —
+    # still a denial, so the weak session's 2xx authenticated read fires.
+    sig = credential_acceptance_oracle(_record(baseline_access=_login_redirect_access()))
+    assert sig.fired, sig.evidence
+    assert sig.observed["baseline_is_denial"] is True
+    assert sig.observed["baseline_status"] == 302
+
+
+# == MANDATORY must-not-fire controls =====================================================================
+# -- (a) a NON-auth-gated resource that returns 2xx to BOTH sessions => no differential => REFUSE ----------
+def test_a_non_auth_gated_resource_served_to_both_sessions_does_not_fire():
+    # Both the weak session AND the known-bad/no session get a 2xx — the resource is not auth-gating, so there is
+    # no differential: a resource that serves everyone proves nothing. REFUSE, never a FACT.
+    sig = credential_acceptance_oracle(_record(accepted=True, baseline_denied=False))
     assert not sig.fired, sig.evidence
-    assert sig.observed["marker_in_weak_leg"] is False
-    assert sig.observed["differential"] is False
+    assert "REFUSED" in sig.evidence and "not" in sig.evidence.lower() and "denial" in sig.evidence.lower()
+    assert sig.observed["baseline_is_denial"] is False
 
 
-# -- RED-PEN false-FACT #1: a 401 "Invalid credentials" rejection whose body contains "Dashboard" ---------
-def test_red_pen_401_rejection_with_dashboard_marker_does_not_fire():
-    # The EXACT shape red-pen minted a false ACCEPTED FACT on: a correctly-REJECTING target (HTTP 401,
-    # "Invalid credentials") whose nav body coincidentally contains the NON-EXCLUSIVE marker "Dashboard".
-    policy = dict(_POLICY, success_marker="Dashboard")
-    weak = {"status": 401, "body": "Invalid credentials — <nav>Dashboard</nav>", "headers": {}}
-    base = {"status": 401, "body": "Invalid credentials — <nav>Dashboard</nav>", "headers": {}}
-    sig = credential_acceptance_oracle(_record(policy=policy, weak_leg=weak, baseline_leg=base))
+# -- (b) a REJECTING login: the weak cred gets no session, so weak_access is itself a denial => no fire ----
+def test_a_rejecting_login_whose_weak_access_is_itself_denied_does_not_fire():
+    # The target correctly REJECTED the weak credential: no session was issued, so the weak session's read of the
+    # protected resource is DENIED (401) exactly like the known-bad baseline. No achieved state => no fire.
+    sig = credential_acceptance_oracle(_record(weak_access=_denied_access(), baseline_access=_denied_access()))
     assert not sig.fired, sig.evidence
-    # "Dashboard" is caught by the discriminator floor (too short) — a LEAD, never a FACT; it would ALSO be
-    # cancelled by the same-shape differential (present in both legs).
-    assert "LEAD" in sig.evidence
+    assert sig.observed["weak_is_denial"] is True
+    assert sig.observed["weak_is_authenticated_success"] is False
+    assert "rejecting login" in sig.evidence
 
 
-# -- RED-PEN false-FACT #2: a 401 rejection whose body contains "session" in "your session expired" -------
-def test_red_pen_401_rejection_with_session_marker_does_not_fire():
-    policy = dict(_POLICY, success_marker="session")
-    weak = {"status": 401, "body": "Invalid credentials. Also: your session expired.", "headers": {}}
-    base = {"status": 401, "body": "Invalid credentials. Also: your session expired.", "headers": {}}
-    sig = credential_acceptance_oracle(_record(policy=policy, weak_leg=weak, baseline_leg=base))
+# -- (c) a coincidental authenticated-marker WITHOUT a denied baseline => no fire --------------------------
+def test_a_coincidental_authed_marker_without_a_denied_baseline_does_not_fire():
+    # The attested signal is PRESENT in the weak 2xx read, but the baseline ALSO gets a 2xx carrying it (the
+    # resource is not auth-gating / the marker is non-exclusive). Without a denied baseline there is no
+    # differential — the exact byte-marker false-FACT shape, now disarmed. REFUSE.
+    served_with_marker = {"status": 200, "body": f"<p>{_AUTHED_SIGNAL}</p>", "headers": {},
+                          "url": _RESOURCE_URL, "method": "GET"}
+    sig = credential_acceptance_oracle(_record(weak_access=_authed_access(), baseline_access=served_with_marker))
     assert not sig.fired, sig.evidence
-    assert "LEAD" in sig.evidence
+    assert "REFUSED" in sig.evidence
+    assert sig.observed["baseline_is_denial"] is False
 
 
-# -- DIFFERENTIAL mechanism (isolated): a STRONG marker present in BOTH legs -> cancels -> NO fire ---------
-def test_a_strong_marker_present_in_both_legs_does_not_fire():
-    # The marker clears the discriminator floor, so this isolates the SAME-SHAPE DIFFERENTIAL: a coincidental
-    # substring present in BOTH the weak leg and the same-shape negative baseline CANCELS and does not fire.
-    weak = {"status": 200, "body": "page for " + _MARKER, "headers": {}}
-    base = {"status": 200, "body": "page for " + _MARKER, "headers": {}}   # same-shape, marker in BOTH
-    sig = credential_acceptance_oracle(_record(weak_leg=weak, baseline_leg=base))
+# -- (d) a mis-shaped / different-endpoint baseline => REFUSE ----------------------------------------------
+def test_a_different_endpoint_baseline_is_not_same_shape_and_is_refused():
+    # The baseline reads a DIFFERENT url than the attested resource the weak session read — the two legs are not
+    # the SAME request, so the "differential" is meaningless. REFUSE (the mis-shaped-baseline red-pen shape).
+    other = {**_denied_access(), "url": "https://app.example/somewhere-else"}
+    sig = credential_acceptance_oracle(_record(weak_access=_authed_access(), baseline_access=other))
     assert not sig.fired, sig.evidence
-    assert sig.observed["marker_in_weak_leg"] is True
-    assert sig.observed["marker_in_negative_baseline"] is True
-    assert sig.observed["differential"] is False
+    assert "REFUSED" in sig.evidence and "same request" in sig.evidence
+    assert sig.observed["same_shape"] is False
+
+
+def test_a_provenance_less_baseline_is_not_same_shape_and_is_refused():
+    # A leg that carries no request provenance (no url) cannot be proven to be the same protected-resource
+    # request, so same-shape fails. REFUSE.
+    no_prov = {"status": 401, "body": "Authentication required", "headers": {}}
+    sig = credential_acceptance_oracle(_record(weak_access=_authed_access(), baseline_access=no_prov))
+    assert not sig.fired and "REFUSED" in sig.evidence
+    assert sig.observed["same_shape"] is False
+
+
+# -- (e) a baseline that is NOT denied => REFUSE (explicit: a 200 that merely lacks the signal) ------------
+def test_a_baseline_that_is_not_denied_is_refused():
+    plain_200 = {"status": 200, "body": "<main>welcome, everyone</main>", "headers": {},
+                 "url": _RESOURCE_URL, "method": "GET"}
+    sig = credential_acceptance_oracle(_record(weak_access=_authed_access(), baseline_access=plain_200))
+    assert not sig.fired, sig.evidence
+    assert "REFUSED" in sig.evidence and "auth-gating" in sig.evidence
+    assert sig.observed["baseline_is_denial"] is False
+
+
+# -- the DECISIVE guard: the attested signal present in BOTH legs CANCELS (no differential) ----------------
+def test_the_signal_present_in_both_a_denied_baseline_and_the_weak_read_cancels():
+    # Even with a genuinely DENIED baseline (401), if the denial body coincidentally carries the attested signal
+    # the signal is not exclusive to the authenticated view — the differential CANCELS and does not fire.
+    denied_with_signal = {"status": 401, "body": f"Access denied {_AUTHED_SIGNAL}", "headers": {},
+                          "url": _RESOURCE_URL, "method": "GET"}
+    sig = credential_acceptance_oracle(_record(weak_access=_authed_access(), baseline_access=denied_with_signal))
+    assert not sig.fired, sig.evidence
+    assert sig.observed["baseline_is_denial"] is True
+    assert sig.observed["signal_in_weak"] is True
+    assert sig.observed["signal_in_baseline"] is True
     assert "BOTH" in sig.evidence
 
 
-# -- ENTROPY floor (isolated): a 12-char BUT low-entropy marker -> a LEAD, never a FACT -------------------
-def test_a_low_entropy_marker_is_a_lead_not_a_fact():
-    # "aaaaaaaaaaaa" clears the LENGTH floor (12 chars) but is 0 bits/char — it cannot be a reliable
-    # discriminator even though it is present in the weak leg and absent in the baseline. LEAD, not a FACT.
-    low = "aaaaaaaaaaaa"
-    policy = dict(_POLICY, success_marker=low)
-    weak = {"status": 200, "body": "welcome " + low, "headers": {}}
-    base = {"status": 401, "body": "Invalid credentials", "headers": {}}   # marker absent -> would differ
-    sig = credential_acceptance_oracle(_record(policy=policy, weak_leg=weak, baseline_leg=base))
+# -- a 2xx weak read that LACKS the attested signal (an inlined login page) does not fire ------------------
+def test_a_weak_2xx_without_the_attested_signal_does_not_fire():
+    # Some apps serve HTTP 200 with the login page inline (no redirect) to an unauthenticated session. The 2xx
+    # alone is not acceptance — the attested signal is ABSENT, so the weak session did not reach an authenticated
+    # view. No fire (a bare 2xx is not an achieved authenticated state).
+    inline_login = {"status": 200, "body": "<form action='/login'>Please sign in</form>", "headers": {},
+                    "url": _RESOURCE_URL, "method": "GET"}
+    sig = credential_acceptance_oracle(_record(weak_access=inline_login, baseline_access=_denied_access()))
+    assert not sig.fired, sig.evidence
+    assert sig.observed["signal_in_weak"] is False
+    assert sig.observed["weak_is_authenticated_success"] is False
+
+
+# == DISCRIMINATOR floor: a weak authenticated_signal is a LEAD, never a FACT ==============================
+def test_a_low_entropy_authenticated_signal_is_a_lead_not_a_fact():
+    low = "aaaaaaaaaaaa"  # 12 chars (clears the length floor) but 0 bits/char — not a reliable discriminator
+    desc = dict(_DESCRIPTOR, authenticated_signal=low)
+    weak = {"status": 200, "body": f"welcome {low}", "headers": {}, "url": _RESOURCE_URL, "method": "GET"}
+    sig = credential_acceptance_oracle(_record(descriptor=desc, weak_access=weak, baseline_access=_denied_access()))
     assert not sig.fired, sig.evidence
     assert "LEAD" in sig.evidence
-    assert sig.observed["marker_entropy_bits_per_char"] == 0.0
+    assert sig.observed["signal_entropy_bits_per_char"] == 0.0
 
 
-# -- POST-STATE veto: a 401 weak leg whose marker coincidentally differs -> must NOT fire -----------------
-def test_a_rejection_status_on_the_weak_leg_vetoes_a_coincidental_differential():
-    # The strong marker is PRESENT in the weak leg and ABSENT in the baseline (the differential holds), BUT the
-    # weak leg answered 401 — the post-state CONTRADICTS acceptance (the red-pen "status=401 while asserting
-    # acceptance" smell). Must not fire.
-    weak = {"status": 401, "body": "Invalid credentials", "headers": {"Set-Cookie": "session=authenticated"}}
-    base = {"status": 401, "body": "Invalid credentials", "headers": {"Set-Cookie": "session=deleted"}}
-    sig = credential_acceptance_oracle(_record(weak_leg=weak, baseline_leg=base))
-    assert not sig.fired, sig.evidence
-    assert sig.observed["differential"] is True
-    assert sig.observed["weak_status_contradicts_acceptance"] is True
+def test_a_too_short_authenticated_signal_is_a_lead_not_a_fact():
+    desc = dict(_DESCRIPTOR, authenticated_signal="Sign out")  # 8 chars < the length floor
+    weak = {"status": 200, "body": "<a>Sign out</a>", "headers": {}, "url": _RESOURCE_URL, "method": "GET"}
+    sig = credential_acceptance_oracle(_record(descriptor=desc, weak_access=weak, baseline_access=_denied_access()))
+    assert not sig.fired and "LEAD" in sig.evidence
 
 
-# == SAME-SHAPE ENFORCEMENT (the second red-pen false-FACT this slice disarms) ============================
-# The oracle advertised a "same-shape differential" but never VERIFIED the two legs were same-shape — it only
-# checked each leg had SOME capture. So a REJECTING weak leg carrying a NON-exclusive high-entropy marker
-# (a server banner / a session-cookie NAME present on EVERY response) + a NON-same-shape baseline (a 404/500
-# that simply lacks the ubiquitous marker) manufactured a false differential and a 0.95 ACCEPTED FACT. These
-# controls assert same-shape is now ENFORCED (via the module's own structural_diff + the auth-outcome status
-# predicate + optional provenance binding): a non-same-shape pair is a LEAD, never a FACT.
-
-# -- (A6) non-exclusive high-entropy marker (server banner on every response) + NON-same-shape 404 baseline
-def test_red_pen_a6_banner_marker_with_non_same_shape_404_baseline_does_not_fire():
-    # The weak leg is a textbook REJECTING login (HTTP 200 re-renders the error, NO session granted). The planted
-    # marker is a server banner present on EVERY response (non-exclusive to success). The baseline is a 404 — NOT
-    # the same kind of auth response — so it lacks the banner and manufactures a false differential. MUST NOT fire.
-    banner = "X-Powered-By: Express/4.18.2"
-    policy = dict(_POLICY, success_marker=banner)
-    weak = {"status": 200, "body": "Invalid credentials. Please try again.",
-            "headers": {"X-Powered-By": "Express/4.18.2"}}
-    base = {"status": 404, "body": "Not Found", "headers": {}}   # NON-same-shape (missing endpoint)
-    sig = credential_acceptance_oracle(_record(policy=policy, weak_leg=weak, baseline_leg=base))
-    assert not sig.fired, sig.evidence
-    assert "LEAD" in sig.evidence and "same-shape" in sig.evidence
-    assert sig.observed["same_shape"] is False
-    assert sig.observed["same_shape_baseline_status_is_auth_outcome"] is False
-    # and it does not reach FACT strength via the verifier, nor re-fire offline
-    v = OracleVerifier()
-    rec = _record(policy=policy, weak_leg=weak, baseline_leg=base)
-    assert not v.confirm({"bug_class": "credential_acceptance", "credential_acceptance": rec}).confirmed
-    assert not credential_acceptance_oracle(dict(rec)).fired
-
-
-# -- (A6b) session-cookie NAME present on EVERY response + NON-same-shape 500 baseline --------------------
-def test_red_pen_a6b_cookie_name_marker_with_non_same_shape_500_baseline_does_not_fire():
-    # Many apps issue a session cookie on FAILED login too (an anonymous session); only the VALUE differs. The
-    # operator plants the cookie-NAME marker — present on success AND failure. With a mismatched 500 baseline the
-    # old oracle fired falsely; same-shape enforcement rejects the 500 (not an auth outcome). MUST NOT fire.
-    marker = "Set-Cookie: JSESSIONID="
-    policy = dict(_POLICY, success_marker=marker)
-    weak = {"status": 200, "body": "Login failed", "headers": {"Set-Cookie": "JSESSIONID=anon-xyz; error=1"}}
-    base = {"status": 500, "body": "Server Error", "headers": {}}   # NON-same-shape (server error)
-    sig = credential_acceptance_oracle(_record(policy=policy, weak_leg=weak, baseline_leg=base))
-    assert not sig.fired, sig.evidence
-    assert "LEAD" in sig.evidence and "same-shape" in sig.evidence
-    assert sig.observed["same_shape"] is False
-
-
-# -- the PRINCIPLED cancel: give it a TRUE same-shape baseline that DOES carry the ubiquitous marker ------
-def test_a_same_shape_baseline_carrying_the_ubiquitous_marker_cancels():
-    # The sound fix for A6 is not just "reject the 404" — with a genuine same-shape rejecting baseline (a 401
-    # login rejection that carries the SAME server banner, because the banner is on every response), the marker
-    # appears in BOTH legs and the differential correctly CANCELS. Only a genuine auth-outcome difference fires.
-    banner = "X-Powered-By: Express/4.18.2"
-    policy = dict(_POLICY, success_marker=banner)
-    weak = {"status": 200, "body": "Invalid credentials.", "headers": {"X-Powered-By": "Express/4.18.2"}}
-    base = {"status": 401, "body": "Invalid credentials.", "headers": {"X-Powered-By": "Express/4.18.2"}}
-    sig = credential_acceptance_oracle(_record(policy=policy, weak_leg=weak, baseline_leg=base))
-    assert not sig.fired, sig.evidence
-    assert sig.observed["same_shape"] is True          # legs ARE same-shape ...
-    assert sig.observed["marker_in_weak_leg"] is True
-    assert sig.observed["marker_in_negative_baseline"] is True   # ... so the ubiquitous marker cancels
-    assert sig.observed["differential"] is False
-
-
-# -- a cross-KIND baseline (HTML login page vs JSON error) is not same-shape -> LEAD ----------------------
-def test_a_cross_document_kind_baseline_is_not_same_shape():
-    # The weak leg is an HTML login page carrying the marker; the baseline is a JSON error body. Different
-    # document kinds score a maximal structural_diff — not the same kind of auth response — so the differential
-    # is meaningless. LEAD, never a FACT.
-    marker = "Set-Cookie: session=authenticated"
-    policy = dict(_POLICY, success_marker=marker)
-    weak = {"status": 200, "body": "<html><body><h1>Welcome</h1></body></html>",
-            "headers": {"Set-Cookie": "session=authenticated"}}
-    base = {"status": 401, "body": '{"error": "invalid", "code": 401, "detail": "bad creds"}', "headers": {}}
-    sig = credential_acceptance_oracle(_record(policy=policy, weak_leg=weak, baseline_leg=base))
-    assert not sig.fired, sig.evidence
-    assert "LEAD" in sig.evidence and "same-shape" in sig.evidence
-    assert sig.observed["same_shape"] is False
-    assert sig.observed["same_shape_structural_diff"] > _SS_MAX_STRUCTURAL
-
-
-# -- PROVENANCE binding: same endpoint fires; a different endpoint is not same-shape -> LEAD --------------
-def test_request_provenance_binding_enforces_same_endpoint():
-    marker = "Set-Cookie: session=authenticated"
-    policy = dict(_POLICY, success_marker=marker)
-    # both legs bound to the SAME login request -> same-shape holds, the genuine acceptance fires
-    weak = {"status": 200, "body": "Welcome", "headers": {"Set-Cookie": "session=authenticated"},
-            "url": "https://app.example/login", "method": "POST"}
-    base = {"status": 401, "body": "Invalid credentials", "headers": {},
-            "url": "https://app.example/login", "method": "POST"}
-    assert credential_acceptance_oracle(_record(policy=policy, weak_leg=weak, baseline_leg=base)).fired
-    # the baseline bound to a DIFFERENT endpoint is not the same login request -> LEAD, never a FACT
-    base_other = dict(base, url="https://app.example/somewhere-else")
-    sig = credential_acceptance_oracle(_record(policy=policy, weak_leg=weak, baseline_leg=base_other))
-    assert not sig.fired, sig.evidence
-    assert "LEAD" in sig.evidence and "provenance" in sig.evidence
-    assert sig.observed["same_shape_provenance_bound"] is True
-    assert sig.observed["same_shape_provenance_match"] is False
-
-
-# -- HARD PRECONDITION: REFUSE without the same-shape negative baseline -----------------------------------
-def test_refuses_without_the_negative_baseline():
+# == HARD PRECONDITIONS ===================================================================================
+def test_refuses_without_the_protected_resource_attestation():
     rec = _record()
-    rec.pop("baseline_response")
+    rec.pop("protected_resource")
     sig = credential_acceptance_oracle(rec)
     assert not sig.fired
-    assert "REFUSED" in sig.evidence and "baseline" in sig.evidence.lower()
-    # positive control: WITH the baseline the SAME record fires, so the refusal is the missing baseline.
+    assert "REFUSED" in sig.evidence and "protected-resource attestation" in sig.evidence
+    # positive control: WITH the attestation the SAME record fires.
     assert credential_acceptance_oracle(_record()).fired
 
 
-# -- a degenerate (empty) baseline is not a sound negative -> REFUSE --------------------------------------
+def test_refuses_without_a_resource_url():
+    desc = {k: v for k, v in _DESCRIPTOR.items() if k != "url"}
+    sig = credential_acceptance_oracle(_record(descriptor=desc))
+    assert not sig.fired and "REFUSED" in sig.evidence and "no url" in sig.evidence
+
+
+def test_refuses_without_an_authenticated_signal():
+    desc = {k: v for k, v in _DESCRIPTOR.items() if k != "authenticated_signal"}
+    sig = credential_acceptance_oracle(_record(descriptor=desc))
+    assert not sig.fired and "REFUSED" in sig.evidence and "authenticated_signal" in sig.evidence
+
+
+def test_refuses_without_both_access_legs():
+    rec = _record()
+    rec.pop("baseline_access")
+    sig = credential_acceptance_oracle(rec)
+    assert not sig.fired and "REFUSED" in sig.evidence and "baseline_access" in sig.evidence
+    rec2 = _record()
+    rec2.pop("weak_access")
+    assert not credential_acceptance_oracle(rec2).fired
+    # positive control: WITH both legs the SAME record fires.
+    assert credential_acceptance_oracle(_record()).fired
+
+
 def test_refuses_when_a_leg_captured_no_response():
-    sig = credential_acceptance_oracle(_record(baseline_leg={}))
+    sig = credential_acceptance_oracle(_record(baseline_access={}))
     assert not sig.fired and "REFUSED" in sig.evidence
 
 
-# -- a credential NOT in the planted should-be-rejected set never fires (real/legit credential) ----------
 def test_a_credential_outside_the_planted_set_does_not_fire():
     sig = credential_acceptance_oracle(_record(credential_id="realuser:correcthorse", accepted=True))
     assert not sig.fired
     assert sig.observed["credential_in_should_reject"] is False
 
 
-# -- HARD PRECONDITION: REFUSE without the operator-planted test corpus ----------------------------------
 def test_refuses_without_the_planted_corpus():
     rec = _record()
     rec.pop("corpus_id")
     sig = credential_acceptance_oracle(rec)
     assert not sig.fired
     assert "REFUSED" in sig.evidence and "corpus" in sig.evidence.lower()
-    # positive control: WITH the corpus the SAME record fires, so the refusal is the missing corpus.
     assert credential_acceptance_oracle(_record()).fired
 
 
@@ -289,10 +276,10 @@ def test_refuses_when_policy_does_not_bind_the_corpus():
     assert not sig.fired and "REFUSED" in sig.evidence
 
 
-def test_refuses_without_a_success_marker():
-    nomarker = {"corpus_id": _CORPUS, "should_reject": ["admin:admin"]}
-    sig = credential_acceptance_oracle(_record(policy=nomarker))
-    assert not sig.fired and "REFUSED" in sig.evidence and "success_marker" in sig.evidence
+def test_refuses_without_a_should_reject_set():
+    nolist = {"corpus_id": _CORPUS}
+    sig = credential_acceptance_oracle(_record(policy=nolist))
+    assert not sig.fired and "REFUSED" in sig.evidence and "should_reject" in sig.evidence
 
 
 def test_missing_or_malformed_inputs_do_not_fire():
@@ -302,12 +289,13 @@ def test_missing_or_malformed_inputs_do_not_fire():
     assert not credential_acceptance_oracle({"corpus_id": _CORPUS, "policy": {}}).fired  # empty policy
 
 
-# -- NO REAL-USER SECRET is read or retained ------------------------------------------------------------
+# == NO REAL-USER SECRET is read or retained =============================================================
 def test_the_oracle_never_reads_or_retains_a_secret():
-    # even if the capture carries a secret/password field, the oracle must not read it into its observed output.
+    # even if the capture carries a secret/password field and the resource body echoes it, the oracle must not
+    # read it into its observed output or its evidence (it reads only identifiers + access outcomes, no body).
     rec = _record()
     rec["credential"] = {"username": "admin", "password": "SUPER-SECRET-REAL-PASSWORD"}
-    rec["auth_response"]["body"] = "Welcome back SUPER-SECRET-REAL-PASSWORD"  # even if echoed, not our field
+    rec["weak_access"]["body"] = f"<main {_AUTHED_SIGNAL}>Welcome SUPER-SECRET-REAL-PASSWORD</main>"
     sig = credential_acceptance_oracle(rec)
     assert sig.fired
     import json
@@ -315,7 +303,7 @@ def test_the_oracle_never_reads_or_retains_a_secret():
     assert "SUPER-SECRET-REAL-PASSWORD" not in blob, "a secret leaked into the oracle output"
 
 
-# -- OFFLINE RE-DERIVATION: the FACT re-verifies byte-identically over the retained context --------------
+# == OFFLINE RE-DERIVATION + TAMPER REJECTION ============================================================
 def test_the_verdict_re_derives_identically_over_the_retained_context():
     rec = _record()
     a = credential_acceptance_oracle(rec)
@@ -324,7 +312,21 @@ def test_the_verdict_re_derives_identically_over_the_retained_context():
     assert a.observed == b.observed
 
 
-# -- ROUTING: the verifier selects CREDENTIAL_ACCEPTANCE only via the fresh ctx key ----------------------
+def test_a_tampered_certificate_no_longer_re_fires():
+    # the retained ctx re-fires exactly; tamper it and the achieved-state proof collapses.
+    assert credential_acceptance_oracle(_record()).fired
+    # (1) tamper the weak read to drop the attested signal => no authenticated state => no re-fire.
+    t1 = _record()
+    t1["weak_access"] = {"status": 200, "body": "<main>no sentinel here</main>", "headers": {},
+                         "url": _RESOURCE_URL, "method": "GET"}
+    assert not credential_acceptance_oracle(t1).fired
+    # (2) tamper the baseline to a served 200 (pretend the resource is not gated) => no denial => REFUSE.
+    t2 = _record()
+    t2["baseline_access"] = _served_access()
+    assert not credential_acceptance_oracle(t2).fired
+
+
+# == ROUTING: the verifier selects CREDENTIAL_ACCEPTANCE only via the credential_acceptance ctx key =======
 def test_the_verifier_confirms_only_via_the_credential_acceptance_ctx_key():
     rec = _record()
     v = OracleVerifier()
@@ -338,13 +340,17 @@ def test_the_verifier_confirms_only_via_the_credential_acceptance_ctx_key():
     norec = dict(rec)
     norec.pop("corpus_id")
     assert not v.confirm({"bug_class": "credential_acceptance", "credential_acceptance": norec}).confirmed
-    # no FACT without the same-shape negative baseline, either (the differential precondition holds end-to-end).
-    nobase = dict(rec)
-    nobase.pop("baseline_response")
-    assert not v.confirm({"bug_class": "credential_acceptance", "credential_acceptance": nobase}).confirmed
+    # no FACT without the protected-resource attestation, either (the achieved-state precondition holds e2e).
+    noattest = dict(rec)
+    noattest.pop("protected_resource")
+    assert not v.confirm({"bug_class": "credential_acceptance", "credential_acceptance": noattest}).confirmed
+    # no FACT without a denied baseline, either (a non-auth-gated resource proves nothing end-to-end).
+    nogate = dict(rec)
+    nogate["baseline_access"] = _served_access()
+    assert not v.confirm({"bug_class": "credential_acceptance", "credential_acceptance": nogate}).confirmed
 
 
-# -- a RELABELLED certificate (wrong corpus binding) refuses to re-confirm --------------------------------
+# == a RELABELLED certificate (wrong corpus binding) refuses to re-confirm ================================
 def test_a_relabelled_certificate_refuses_to_re_confirm():
     # re-aim the planted policy at a DIFFERENT corpus than the record's: the certificate no longer binds and
     # cannot re-confirm (the corpus must authorise the capture).
@@ -354,7 +360,7 @@ def test_a_relabelled_certificate_refuses_to_re_confirm():
     assert not sig.fired and "REFUSED" in sig.evidence
 
 
-# -- the credential-acceptance kind is NOT in the frozen unknown-class fallback (gate byte-identical) ----
+# == the credential-acceptance kind is NOT in the frozen unknown-class fallback (gate byte-identical) =====
 def test_the_kind_is_held_out_of_the_frozen_fallback():
     from framework.v2.verify.verifier import _ALL_ORACLES
     assert len(_ALL_ORACLES) == 15
