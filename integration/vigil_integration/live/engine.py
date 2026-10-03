@@ -863,6 +863,22 @@ class VigilEngine:
             full = target if "://" in target else "http://" + target
             return {"kind": "injection", "url": full, "bug_class": bug_class}
 
+        # CREDENTIAL-UNIT re-drive (M-11.2): credential_acceptance is OPERATOR-PLANTED (a TEST corpus + a
+        # protected-resource attestation + a login spec), NONE of which may come from the model. This router's
+        # ONLY inputs are LLM-derived (tool args + the LLM's analysis), so it NEVER sources the planted material
+        # here — it emits the class + url only. The planted corpus is threaded to the arm by the dedicated
+        # wiring._live_credential_redrive_fact seam from a TRUSTED channel (never info/octx), and the arm + the
+        # credential_acceptance_oracle REFUSE without it, so on the LLM-claim path this is fail-closed (no corpus,
+        # no FACT). ADDITIVE: a separate dispatch set + the "credential" spec kind, so the runtime/web/sqli/
+        # injection arms above are untouched and make gate stays byte-identical. The seam re-normalizes + re-gates.
+        try:
+            from .runtime_redrive import CREDENTIAL_REDRIVE_CLASSES  # noqa: PLC0415 — import-clean tuple (FATAL-2)
+        except Exception:  # noqa: BLE001 — module unavailable ⇒ no credential re-drive (other paths work)
+            CREDENTIAL_REDRIVE_CLASSES = ()
+        if bug_class in CREDENTIAL_REDRIVE_CLASSES:
+            full = target if "://" in target else "http://" + target
+            return {"kind": "credential", "url": full, "bug_class": bug_class}
+
         # error_signature SQLi FAMILY (landmine 1): MERIDIAN labels its error-based plant `sqli`, and the
         # model may say `sqli`/`sql_injection`/`error_based_sqli`. Accept them all — the error_signature
         # oracle only fires over a real datastore-error signature, so a boolean/time-based `sqli` that
