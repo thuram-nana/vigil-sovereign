@@ -84,7 +84,7 @@ def _domain_tag() -> bytes:
 
 def _canon(core: dict) -> bytes:
     m = canonical_json(core)
-    return m if isinstance(m, (bytes, bytearray)) else str(m).encode("utf-8")
+    return bytes(m) if isinstance(m, (bytes, bytearray)) else str(m).encode("utf-8")
 
 
 def build_core(

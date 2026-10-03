@@ -25,6 +25,8 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
+pytest.importorskip("framework.v2")  # offense-leg only; skips cleanly in the keyless two-env leg
+
 from framework.v2.console import actions
 from framework.v2.engage import EngagementRefused, _engage_authority_trust_root
 from vigil_core import (
