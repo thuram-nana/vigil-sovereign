@@ -1742,6 +1742,18 @@ def _build_oracle(
         if credential_ref:
             return credential_ref
 
+        # T2 — OOB-CALLBACK RE-DRIVE (ssrf / xxe / blind_xxe / rce / command_injection / deserialization /
+        # oob_sqli, M-11): mint ONLY from the TRUSTED collector material (an independent collector keypair + the
+        # out-of-band pinned pubkey + an optional owner-signed window) carried on the TRUSTED redrive spec (never
+        # the model), confirmed by oob_callback_oracle over VIGIL's OWN collector capture of a token-matched,
+        # receipt-verified interaction. The LLM-claim path carries no material (engine._redrive_spec emits
+        # class+url only), so this returns None and the claim stays a LEAD below — no material, no FACT. The
+        # LEAD-fallback _redrive_branch_for deliberately OMITS these classes, so an OOB claim never reaches a
+        # FACT-capable admit without this seam's trusted material.
+        oob_ref = _live_oob_redrive_fact(prov, info, redrive)
+        if oob_ref:
+            return oob_ref
+
         # LEAD-ONLY fallback (AUDIT G4): a boolean/other-class candidate, or an error_based_sqli whose live
         # re-drive did not reproduce, lands here. The deterministic oracle still runs so the LEAD is honestly
         # labelled with what fired, but an LLM-provenanced context is never signed into a FACT.
@@ -2098,6 +2110,61 @@ def _live_credential_redrive_fact(prov: Provisioned, info: dict, redrive: Option
         rr = credential_acceptance_redrive(url, slug=prov.slug, engagement_slug=prov.slug, signers=prov.signers,
                                            corpus=corpus, policy=policy,
                                            protected_resource=protected_resource, login_spec=login_spec)
+    except Exception:  # noqa: BLE001 — any re-drive/transport/cert error is an unconfirmed claim → LEAD
+        return None
+    try:
+        if rr.family_verdict(claimed) != "FACT":
+            return None
+    except Exception:  # noqa: BLE001 — cannot read the verdict ⇒ treat as unconfirmed → LEAD
+        return None
+    for f in getattr(rr, "facts", []) or []:
+        try:
+            if getattr(f, "is_fact", False) and normalize_bug_class(getattr(f, "bug_class", "")) == claimed:
+                ref = str(getattr(f, "finding_ref", "") or "")
+                if ref:
+                    return ref
+        except Exception:  # noqa: BLE001 — a malformed result entry is skipped, never crashes the seam
+            continue
+    return None    # family verdict said FACT but no matching signed cert surfaced → LEAD (fail-closed)
+
+
+def _live_oob_redrive_fact(prov: Provisioned, info: dict, redrive: Optional[dict]) -> Optional[str]:
+    """M-11 — DRIVE the OOB-CALLBACK re-drive (``ssrf`` / ``xxe`` / ``blind_xxe`` / ``rce`` /
+    ``command_injection`` / ``deserialization`` / ``oob_sqli``) through the runner-owned
+    :mod:`live.runtime_redrive` ``oob_callback_redrive`` arm and return a signed FACT's ``finding_ref`` ONLY
+    when the deterministic ``oob_callback_oracle`` confirms a token-matched, independent-collector-receipt-
+    verified OUT-OF-BAND interaction over VIGIL's OWN collector capture.
+
+    Mirrors :func:`_live_credential_redrive_fact`, with the M-11 difference that the planted material is the
+    TRUSTED COLLECTOR BUNDLE (``oob_material``: an independent collector keypair + the OUT-OF-BAND pinned
+    collector pubkey + an optional owner-signed engagement window). It is MANDATORY and arrives ONLY on the
+    TRUSTED redrive spec (never the model's ``extracted_info``). ``engine._redrive_spec`` — whose only inputs
+    are LLM-derived — emits class + url ONLY (the triple-lock: the router emits no token/pin/window), so on the
+    LLM-claim path ``oob_material`` is ABSENT and this seam returns ``None`` (the claim stays a LEAD): no
+    material, no FACT. A gate refusal / no callback / an oracle non-fire all yield a non-FACT → None → LEAD
+    (fail-closed). FATAL-2: every framework/runtime_redrive import is function-local."""
+    if not isinstance(redrive, dict):
+        return None
+    url = str(redrive.get("url") or "").strip()
+    oob_material = redrive.get("oob_material")
+    # The TRUSTED collector material is MANDATORY and comes ONLY from a trusted channel on the spec. Absent
+    # (the LLM-claim path) ⇒ fail-closed here, BEFORE any re-drive: no material, no FACT. The arm refuses too,
+    # but refusing here keeps the model's assertion from even driving traffic.
+    if not url or not isinstance(oob_material, dict) or not oob_material:
+        return None
+    try:
+        from framework.v2.verify.verifier import normalize_bug_class  # noqa: PLC0415
+        from .runtime_redrive import OOB_REDRIVE_CLASSES, oob_callback_redrive  # noqa: PLC0415 (framework at CALL)
+    except Exception:  # noqa: BLE001 — module unavailable ⇒ cannot re-drive → LEAD (fail-closed)
+        return None
+    claimed = normalize_bug_class(str(redrive.get("bug_class") or info.get("bug_class") or ""))
+    if claimed not in OOB_REDRIVE_CLASSES:
+        return None    # not an oob-redrive class → nothing for this seam to confirm → LEAD
+    material = dict(oob_material)
+    material["bug_class"] = claimed    # the claimed class rides on the trusted material bundle for the arm
+    try:
+        rr = oob_callback_redrive(url, slug=prov.slug, engagement_slug=prov.slug, signers=prov.signers,
+                                  oob_material=material)
     except Exception:  # noqa: BLE001 — any re-drive/transport/cert error is an unconfirmed claim → LEAD
         return None
     try:

@@ -147,6 +147,19 @@ def _transport_redrivable(report: Any) -> bool:
         return False
 
 
+def _oob_redrivable(report: Any) -> bool:
+    """True when this report names a blind OOB class VIGIL routes through its governed OOB re-drive (M-11:
+    ssrf / xxe / blind_xxe / rce / command_injection / deserialization / oob_sqli). LEAD-ONLY on the Strix
+    rail (the FACT mint is the governed-engage seam, fed trusted collector material a Strix report cannot
+    carry); owning the report here routes it to the governed re-drive instead of the executor-capture path.
+    Delegates to ``run._oob_redrive_class`` (single source of truth). Fail-closed."""
+    try:
+        from .run import _oob_redrive_class  # noqa: PLC0415 — function-local: breaks the run⇄sink cycle
+        return _oob_redrive_class(report) is not None
+    except Exception:  # noqa: BLE001
+        return False
+
+
 @dataclass(frozen=True)
 class SinkResult:
     """What the sink decided about one report. ``gate`` is ``"allow"``/``"deny"``; ``minted`` is True only
@@ -252,7 +265,8 @@ class ProofSink:
                                            or _timing_redrivable(report) or _dom_xss_redrivable(report)
                                            or _prototype_pollution_redrivable(report)
                                            or _smuggling_redrivable(report)
-                                           or _transport_redrivable(report)):
+                                           or _transport_redrivable(report)
+                                           or _oob_redrivable(report)):
                 try:
                     result = self._mint(report)
                     minted = bool(getattr(result, "is_fact", False))

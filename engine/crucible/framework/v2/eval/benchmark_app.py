@@ -167,6 +167,17 @@ _CREDTEST_WEAK = {"admin": "admin"}
 _CREDTEST_SIGNAL = 'data-credtest-acct="acct_7Fq2Lp9x"'
 
 # ---------------------------------------------------------------------------
+# Blind out-of-band callback model (M-11). A VULNERABLE endpoint that performs a server-side fetch of a
+# LOOPBACK callback URL embedded in its input (the blind-SSRF/XXE/OOB-SQLi/… shape), plus two safe twins:
+#   * /oobtest/fetch   — VULNERABLE: fetches the embedded loopback callback (⇒ a token-matched collector hit);
+#   * /oobtest/reflect — SAFE TWIN: echoes the callback in the response but NEVER fetches (no interaction);
+#   * /oobtest/forge   — SAFE TWIN: calls back with a FIXED FORGED token, not the per-finding one (no match).
+# All three are DELIBERATELY NOT linked from the index; the default GET-only benchmark crawl never reaches
+# them, so they add 0 scored findings and the default corpus + signed baseline stay byte-identical. Exercised
+# only by integration/tests/test_oob_redrive_arm.py driving the gated OOB re-drive against VIGIL's own collector.
+_OOBTEST_FORGED_TOKEN = "f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0"
+
+# ---------------------------------------------------------------------------
 # CSRF-achieved model (Wave 3.3). A cookie-authenticated state-changing endpoint that
 # authorizes a write on the ambient session cookie ALONE, driven by a REAL headless browser:
 #   * GET  /csrf/login?mode=none|strict — VIGIL's OWN authenticated session: the SERVER sets the
@@ -1379,6 +1390,68 @@ class BenchmarkHandler(BaseHTTPRequestHandler):
         self._respond(200, _page("Public",
                                  f"<main {_CREDTEST_SIGNAL}><h1>Public help</h1><p>Open to all.</p></main>"))
 
+    # -- blind out-of-band callback model (M-11) ---------------------------
+
+    def _oobtest_callback_url(self) -> str:
+        """Extract the LOOPBACK callback URL the OOB probe embedded (in a query-param value or the request
+        body) — models a target that parses an attacker-controlled URL out of its input. Returns "" when none
+        is present. LOOPBACK-SHAPED only (``http://127.0.0.1:<port>/<token>``) so the fetch below can never
+        reach anything but VIGIL's own loopback collector."""
+        import re  # noqa: PLC0415 — stdlib
+        from urllib.parse import parse_qs, urlsplit  # noqa: PLC0415
+        cands: list[str] = []
+        for vals in parse_qs(urlsplit(self.path).query, keep_blank_values=True).values():
+            cands.extend(vals)
+        n = int(self.headers.get("Content-Length", "0") or "0")
+        if n:
+            cands.append(self.rfile.read(n).decode("utf-8", "replace"))
+        for c in cands:
+            m = re.search(r"http://127\.0\.0\.1:\d+/[0-9a-fA-F]+", c)
+            if m:
+                return m.group(0)
+        return ""
+
+    def _oobtest_do_fetch(self, cb: str) -> None:
+        # The blind server-side fetch. LOOPBACK-ONLY by construction (it refuses any non-127.0.0.1 host), so it
+        # models the vulnerability without being a real SSRF. Synchronous: the collector records the hit before
+        # the probe response returns, so the re-drive arm sees it on its first poll.
+        import urllib.request  # noqa: PLC0415 — stdlib
+        from urllib.parse import urlsplit  # noqa: PLC0415
+        if urlsplit(cb).hostname != "127.0.0.1":
+            return
+        try:
+            urllib.request.urlopen(cb, timeout=2).read()  # noqa: S310 — loopback-pinned above
+        except Exception:  # noqa: BLE001 — a failed callback simply records nothing
+            pass
+
+    def _oobtest_fetch(self) -> None:
+        # PLANTED BUG (blind OOB callback). The VULNERABLE route fetches the loopback callback URL embedded in
+        # the request — the out-of-band interaction oob_callback_oracle adjudicates. GET and POST both route
+        # here (so URL-param SSRF/command probes AND XML/body probes reach the same sink). DELIBERATELY NOT
+        # linked from the index and never issued by the default GET crawl, so `make gate` is byte-identical.
+        cb = self._oobtest_callback_url()
+        if cb:
+            self._oobtest_do_fetch(cb)
+        self._respond(200, _page("Fetch", "<p>processed</p>"))
+
+    def _oobtest_reflect(self) -> None:
+        # SAFE TWIN 1 (reflected, not executed). ECHOES the embedded callback URL in the response body but NEVER
+        # fetches it — no out-of-band interaction occurs, so the collector logs nothing and the oracle never
+        # fires. The arm must NEVER mint here (a reflected token is not an executed callback).
+        cb = self._oobtest_callback_url()
+        self._respond(200, _page("Reflect", f"<p>echo {cb}</p>"))
+
+    def _oobtest_forge(self) -> None:
+        # SAFE TWIN 2 (wrong/forged token). Calls back to the collector base but with a FIXED FORGED token, not
+        # the per-finding registered one — so the hit lands under a different token and poll(registered) is
+        # empty; the oracle sees no token-matched interaction and never fires. The arm must NEVER mint here.
+        cb = self._oobtest_callback_url()
+        if cb:
+            from urllib.parse import urlsplit  # noqa: PLC0415
+            sp = urlsplit(cb)
+            self._oobtest_do_fetch(f"{sp.scheme}://{sp.netloc}/{_OOBTEST_FORGED_TOKEN}")
+        self._respond(200, _page("Forge", "<p>processed</p>"))
+
     # -- planted-bug routes ------------------------------------------------
 
     def _index(self) -> None:
@@ -1809,6 +1882,12 @@ _ROUTES = {
     # stay byte-identical. Exercised only by integration/tests/test_credential_acceptance_arm.py.
     "/credtest/account": BenchmarkHandler._credtest_account,     # auth-gated protected resource (401 w/o session)
     "/credtest/public": BenchmarkHandler._credtest_public,       # SAFE TWIN: non-auth-gated (served to everyone)
+    # Blind out-of-band callback routes (M-11). DELIBERATELY NOT linked from the index; the default GET-only
+    # crawl never reaches them (0 scored findings ⇒ default corpus + signed baseline byte-identical). Exercised
+    # only by integration/tests/test_oob_redrive_arm.py. GET serves URL-param SSRF/command/OOB-SQLi probes.
+    "/oobtest/fetch": BenchmarkHandler._oobtest_fetch,           # VULNERABLE: fetches the embedded loopback callback
+    "/oobtest/reflect": BenchmarkHandler._oobtest_reflect,       # SAFE TWIN: echoes but NEVER fetches (no interaction)
+    "/oobtest/forge": BenchmarkHandler._oobtest_forge,           # SAFE TWIN: calls back with a FORGED token (no match)
 }
 
 
@@ -1855,6 +1934,12 @@ _POST_ROUTES = {
     # integration/tests/test_credential_acceptance_arm.py driving the gated credential re-drive.
     "/credtest/login": BenchmarkHandler._credtest_login,                # VULNERABLE: accepts the planted admin:admin
     "/credtest/login-strict": BenchmarkHandler._credtest_login_strict,  # SAFE TWIN: rejects admin:admin (no session)
+    # Blind out-of-band callback POST sinks (M-11). The same handlers as the GET routes, so XML/body OOB probes
+    # (XXE / deserialization) reach the same sink. POST-only for the default crawl means these leave `make gate`
+    # byte-identical; exercised only by integration/tests/test_oob_redrive_arm.py.
+    "/oobtest/fetch": BenchmarkHandler._oobtest_fetch,
+    "/oobtest/reflect": BenchmarkHandler._oobtest_reflect,
+    "/oobtest/forge": BenchmarkHandler._oobtest_forge,
 }
 
 
