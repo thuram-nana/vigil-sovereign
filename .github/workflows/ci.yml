@@ -391,6 +391,7 @@ jobs:
               --ignore=integration/tests/test_web_fact_tool.py \
               --ignore=integration/tests/test_engine_web_redrive_seam.py \
               --ignore=integration/tests/test_engine_runtime_redrive_seam.py \
+              --ignore=integration/tests/test_oob_autonomous_feeder.py \
               --ignore=integration/tests/test_stored_xss_redrive.py \
               --ignore=integration/tests/test_proto_pollution_redrive.py \
               --ignore=integration/tests/test_ssi_redrive.py \
@@ -574,6 +575,7 @@ jobs:
               integration/tests/test_eval_offense_arm.py \
               integration/tests/test_credential_acceptance_arm.py \
               integration/tests/test_oob_redrive_arm.py \
+              integration/tests/test_oob_autonomous_feeder.py \
               integration/tests/test_fleet_kill_sign.py \
               integration/tests/test_coders_egress_gateway.py \
               integration/tests/test_live_think_gateway.py \
