@@ -1126,7 +1126,7 @@ The ladder is tiered by blast radius, and it **never** runs `git add -A` — onl
 - a **request-side** class (the payload is in the request) → RAISE, because a patch changes the *server's response*, not the request — so that class is honestly declared not oracle-provable rather than faked either way.
 
 **5. `remediation_cert.py` — the portable negative proof.**
-Mints the offline-verifiable **remediation certificate** (`vigil-remediation-cert-v2`, wrapping the `vigil-remediation-v1` attestation, verdict `oracle-silent`). It **refuses to mint** unless the oracle genuinely re-fired and did not confirm, and it **pairs the negative with the positive** via `original_finding_cert_digest` — so a third party reads one artifact that says *"this was exploitable → it is now remediated,"* with the compliance controls bound into the signature (they cannot be stripped post-hoc).
+Mints the offline-verifiable **remediation certificate** (`vigil-remediation-cert-v2`, wrapping the `vigil-remediation-v1` attestation, verdict `oracle-silent`). It **refuses to mint** unless the oracle genuinely re-fired and did not confirm, and it **pairs the negative with the positive** via `original_finding_cert_digest` — so a third party reads one artifact that says *"this was exploitable → it is now remediated,"* with the compliance controls bound into the signature (stripping them post-hoc invalidates the signature).
 
 **6. `vigil remediate --prove` → `prove_driver.py` — four signed states.**
 A live remediation proof resolves to exactly one of **`REMEDIATED` · `STILL_VULNERABLE` · `INCONCLUSIVE` · `REFUSED`**, all signed (so an `INCONCLUSIVE` or `REFUSED` reason cannot be stripped and re-read as success). Only **one narrow path** reaches `REMEDIATED`. On the freshness gradient **F0–F4**, `REMEDIATED` is capped at **F1** (a fixed sink emits no fresh signature), while `STILL_VULNERABLE` can reach a genuine **F2**.
@@ -1211,7 +1211,7 @@ A structural-override marker with no canary and no behavior delta stays a **LEAD
 
 ### The inline provable firewall (`aegis/gateway.py`)
 
-The gateway is a reverse proxy where **every hard block rides on a fired oracle and a re-runnable certificate** (doctrine D1). Anything that cannot be proven inline near-zero-FP stays a LEAD or a graduated soft response — it is **never** hard-blocked.
+The gateway is a reverse proxy where **every hard block rides on a fired oracle and a re-runnable certificate** (doctrine D1). Anything not provable inline near-zero-FP stays a LEAD or a graduated soft response — it is **never** hard-blocked.
 
 | Decision | Classes | How it is proven |
 |----------|---------|------------------|
@@ -1535,7 +1535,7 @@ python3 -m framework.v2 <subcommand> [args]   # directly, from engine/crucible w
 
 A reviewer evaluating an offensive-security engine usually has to *discover* its limits. VIGIL states them up front, because here they are **design strengths, not gaps**. Each refusal below is a capability VIGIL could have built, deliberately did not, and *keeps out of the code with a test that fails the build if it ever reappears*. The governing rule is [CLAIM-DISCIPLINE](docs/CLAIM-DISCIPLINE.md): a claim is made only when it is **true of the code**, so every refusal is paired with the enforcing code and the test that proves it stays true.
 
-**Why refuse at all?** VIGIL is run **against systems the operator owns and has authorized**. In that setting the value is *completeness and provable discipline*, not raw offensive reach. A capability that (a) helps an attacker evade the customer's own defenses, (b) establishes attacker infrastructure inside the customer's estate, or (c) cannot be turned into a **near-zero-false-positive proof** makes the product *worse* for its actual buyer. Refusing it is the senior-operator move — and it is auditable here.
+**Why refuse at all?** VIGIL is run **against systems the operator owns and has authorized**. In that setting the value is *completeness and provable discipline*, not raw offensive reach. A capability that (a) helps an attacker evade the customer's own defenses, (b) establishes attacker infrastructure inside the customer's estate, or (c) does not reduce to a **near-zero-false-positive proof** makes the product *worse* for its actual buyer. Refusing it is the senior-operator move — and it is auditable here.
 
 | # | Refusal | Why it is a strength | Held in place by |
 |---|---|---|---|
@@ -1627,7 +1627,39 @@ The full, per-component command list is in [`.github/workflows/ci.yml`](.github/
 
 The strong controls this project describes (egress gate, sovereignty tier, entitlement gate, sealed vault, backup/reprove timers, a signed charter) are **off, permissive, or unprovisioned by default** — a fresh checkout runs on the safe core without provisioning. `vigil doctor` is a **read-only** readiness report that ends with a **security-posture block**: one honest line per control showing its **current, on-disk** state (a control it can't read reports `UNKNOWN`, never an optimistic default), so you — and any reviewer — can see at a glance what is actually engaged. On a fresh checkout that block reads, for instance, `backups: OFF — 0/10 systemd timers enabled`: all **10** cadence `.timer` units (`infra/systemd/`) ship **disabled**, so backup/reprove durability is not running until you enable and start them. The block never changes the exit code, and `vigil doctor` imports no `framework`/`strix`/`sigil` (the one sovereign-plane line, `vault`, is read from disk), so the two trust planes never co-load to produce it.
 
+On a fresh checkout that block reads:
+
+```text
+Security posture (informational — off-by-default controls; does NOT affect the exit code):
+  .. egress-gate: OFF  — no vigil-gateway container running (state: 'absent'); STRIX_DOCKER_SANDBOX_NETWORK unset
+  .. vault:       UNPROVISIONED  — keys plaintext (~/.sigil/sigil.env) — run `sigil vault provision` to seal secrets at rest
+  .. key-sealing: ABSENT  — no trust-root key files present yet (owner.priv=ABSENT, spine.dek=ABSENT, warden.key=ABSENT)
+  .. sovereignty: PERMISSIVE  — dev default — the sovereignty ladder binds but admits cloud LLM egress; set CRUCIBLE_SOVEREIGNTY_TIER (AIR_GAPPED / SOVEREIGN_CLOUD / TRUSTED_CLOUD) to raise it
+  .. entitlement: UNGOVERNED  — no trust root at ~/vigil/engine/crucible/framework/v2/.entitlement/trust-root.json — gated capabilities are permitted (logged at WARNING) but NOT enforced
+  .. entitlement-anchor: DEFAULT-IN-TREE  — the entitlement (capability-enforcement) trust root uses the default in-tree (offense-writable) location; for a governed deployment anchor it out-of-band via CRUCIBLE_ENTITLEMENT_DIR on a read-only/HSM mount (docs/runbooks/anchor-trust-root-out-of-band.md)
+  .. authority-root-anchor: DEFAULT-IN-TREE  — the remote-engage launch-gate authority root uses the default in-tree (offense-writable) location; for a governed deployment anchor it out-of-band via VIGIL_AUTHORITY_ROOT_DIR on a read-only/HSM mount (docs/runbooks/anchor-trust-root-out-of-band.md)
+  .. backups:     OFF  — 0/10 systemd timers enabled — backup durability NOT running; need one of vigil-backup/vigil-backup-push + vigil-backup-drill enabled and fired (disabled: vigil-backup.timer, vigil-backup-push.timer, vigil-backup-drill.timer)
+  .. charter:     ABSENT  — no active VIGIL_ENGAGEMENT and no chartered engagement under targets/
+  .. egress-supervisor: OFF  — the seccomp connect/sendto/sendmsg egress supervisor is not enabled — set VIGIL_EGRESS_GUARD=require, or run under VIGIL_POSTURE=production which forces it on
+  .. witness:     SOLO  — no production witness roster — the shipped default is a solo self-witness (rollback DETECTION, not split-view prevention); provision >=2 DISTINCT witnesses with `python -m vigil_integration.witness_provision add`
+  .. owner-key-backend: FILE  — owner key is a file-based Ed25519 key loaded into the process (the default). Set VIGIL_OWNER_KEY_BACKEND=pkcs11 to hold it in a hardware token instead.
+```
+
 For a real deployment, set **`VIGIL_POSTURE=production`** and a start path (`vigil up` / `vigil engage`) **refuses to start** unless **all eight** of these production preconditions hold — `vault` SEALED, `sovereignty` non-PERMISSIVE, `entitlement` ACTIVE, `backups` timers ON, `charter` PRESENT, `legacy-owner-token` DISABLED, `egress-supervisor` ARMED, `witness` a DISTINCT-QUORUM. The gate is additive and opt-in (inert when `VIGIL_POSTURE` is unset) and **fail-closed**: any precondition not in its required state — `UNKNOWN` included — refuses the start with one line per unmet control and how to satisfy it. When armed, `vigil doctor` doubles as the production preflight and exits non-zero while any precondition is unmet. The `egress-supervisor` precondition is itself a seccomp connect/sendto/sendmsg guard that is **off-by-default and opt-in outside production**; under `VIGIL_POSTURE=production` it is forced on in fail-closed `require` mode (`docs/decisions/W10-8-egress-supervisor-production-gate.md`).
+
+On a fully-misconfigured host that block reads:
+
+```text
+PRODUCTION posture gate (VIGIL_POSTURE=production) — REFUSES to start: 8 precondition(s) unmet (each blocks `vigil up` / `vigil engage`):
+  !! vault:              UNPROVISIONED  — secrets must be SEALED at rest — run `sigil vault provision` (keys rest as plaintext until then)
+  !! sovereignty:        PERMISSIVE  — the sovereignty tier must be raised OFF PERMISSIVE — set CRUCIBLE_SOVEREIGNTY_TIER (AIR_GAPPED / SOVEREIGN_CLOUD / TRUSTED_CLOUD)
+  !! entitlement:        UNGOVERNED  — capability-entitlement enforcement must be ACTIVE — provision the trust root, or set CRUCIBLE_ENTITLEMENT_ENFORCED=1
+  !! backups:            OFF  — the backup/reprove timers must be ENABLED — install + `systemctl --user enable --now` the infra/systemd/*.timer units
+  !! charter:            ABSENT  — a signed charter + EngagementAuthority must be PRESENT — provision one under targets/ and pin it with VIGIL_ENGAGEMENT
+  !! legacy-owner-token: ENABLED  — the legacy embedded shared owner token must be DISABLED — set SIGIL_LEGACY_OWNER_TOKEN=0 so the cockpit requires per-user proof-of-possession auth (the fail-open shared token is refused; the sigil server also refuses it at runtime under this posture)
+  !! egress-supervisor:  OFF  — the seccomp egress supervisor must be ARMED — build its binary (`make -C tools/egress-guard`) so production forces it on (VIGIL_EGRESS_GUARD=require, fail-closed). It supervises connect/sendto/sendmsg to refuse a tool's own non-loopback egress; it is NOT a containment boundary for hostile code and does NOT cover 32-bit binaries, sendmmsg or io_uring (see docs)
+  !! witness:            SOLO  — the transparency-log witness set must be a STRICT MAJORITY of DISTINCT witnesses (W8-3) — a solo self-witness is rollback DETECTION, not split-view PREVENTION. Provision >=2 distinct witnesses with `python -m vigil_integration.witness_provision add` (mint one) or `register` an out-of-band witness key; witnesses that share a canonical key are refused as NOT distinct. Split-view prevention additionally needs those keys held by INDEPENDENT parties (uncheckable by code)
+```
 
 ### 4 · Run the loop (loopback demo)
 
