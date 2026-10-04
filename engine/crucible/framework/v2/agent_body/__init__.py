@@ -53,8 +53,26 @@ __all__ = [
     "ProposedAction",
     "GateDecision",
     "ActionOutcome",
-    *sorted(_DEFENSIVE_EXPORTS),
+    # M4.3 defensive-kernel names (resolved lazily via __getattr__) — spelled as string literals so
+    # __all__ stays a list of literals (ruff PLE0604); the assert below keeps them in lock-step with
+    # _DEFENSIVE_EXPORTS so __getattr__/__dir__ can never desync from __all__.
+    "BLOCK_IP",
+    "CapabilityGatedBody",
+    "DEFENSIVE_KINDS",
+    "DefensiveCapabilityError",
+    "DefensiveRateLimiter",
+    "ISOLATE_ENDPOINT",
+    "QUARANTINE_HOST",
+    "REVOKE_SESSION",
+    "defensive_kinds",
+    "defensive_target_digest",
+    "gate_defensive_action",
+    "is_defensive_kind",
+    "mint_defensive_capability",
+    "register_defensive_kind",
 ]
+
+assert _DEFENSIVE_EXPORTS <= frozenset(__all__), "agent_body __all__ drifted from the lazy export set"
 
 
 def __getattr__(name: str):
