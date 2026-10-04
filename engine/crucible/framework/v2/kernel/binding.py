@@ -25,7 +25,7 @@ from typing import Any
 from pydantic import BaseModel
 
 from ..common import docs
-from .llm import LLMBackend, Prompt, complete_with_failover
+from .llm import LLMBackend, Prompt, complete_with_backend, complete_with_failover
 from .models import CallTrace
 
 
@@ -313,11 +313,14 @@ def run(
         # value (e.g. from the chatbot's effort control) overrides it. Older models ignore effort entirely.
         effort=effort,
     )
-    # An explicitly-passed backend is the caller's choice (tests / a pinned run) — use it
-    # directly. The auto-selected production path goes through complete_with_failover, which
-    # retries a transient overload and fails over to the next permitted backend in-tier (X4).
+    # An explicitly-passed backend is the caller's choice (tests / a pinned run), but it is STILL a model
+    # egress, so it routes through the ONE gateway chokepoint (``complete_with_backend`` — classify -> redact
+    # -> provenance -> audit, no failover). The auto-selected production path goes through
+    # complete_with_failover, which also routes through the gateway and additionally retries a transient
+    # overload + fails over to the next permitted backend in-tier (X4). Neither reaches a provider outside the
+    # chokepoint (enforced by the no-bypass guard).
     if backend is not None:
-        result = backend.complete(prompt)
+        result = complete_with_backend(backend, prompt)
     else:
         result = complete_with_failover(prompt)
     return result.parsed, result.trace

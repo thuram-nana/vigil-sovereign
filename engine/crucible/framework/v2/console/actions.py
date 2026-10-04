@@ -43,6 +43,16 @@ from urllib.parse import urlsplit
 from ..common import paths
 from ..common.redact import MASK, scrub_log_event
 
+# M4.1 — the ONE egress chokepoint every model call routes through (``vigil_core.ai_gateway``). vigil_core
+# is the shared stdlib-only leaf both planes import (it pulls in no framework/strix/sigil), so routing the
+# console's cloud model calls here crosses no FATAL-2 boundary. Guarded like the other adapters so the
+# console still works if the shared core is ever absent; when present it composes classify -> redact ->
+# authorize -> route -> provenance -> audit around the SDK call and emits the unified audit record.
+try:                                                       # pragma: no cover - import guard
+    from vigil_core import ai_gateway as _gw
+except Exception:                                          # noqa: BLE001
+    _gw = None
+
 _LOOPBACK = frozenset({"127.0.0.1", "localhost", "::1", "[::1]"})
 
 
@@ -4811,6 +4821,48 @@ _TERM_ROUTER_SYSTEM = (
 )
 
 
+# ---------------------------------------------------------------------------------------------------
+# M4.1 — the engine-plane adapters onto the ONE egress chokepoint (shared by terminal_propose + chat)
+# ---------------------------------------------------------------------------------------------------
+
+_GW_REFUSED = object()  # sentinel: the gateway refused this egress (sovereignty / case / trust-root)
+
+
+def _gw_assert_permitted(name: str) -> None:
+    """The gateway's model-route hook (engine plane): raise iff the kernel sovereignty ladder refuses
+    ``name``. This is the SAME ladder the console asserts BEFORE building a client (``_cloud_gate_and_key`` /
+    ``terminal_propose``), so inside the gateway it is defense in depth — never a second, divergent policy."""
+    from ..kernel import sovereignty as _sov
+    _sov.current().assert_permitted(name)
+
+
+def _gw_backend_name() -> str:
+    """The ``kernel.sovereignty`` backend name for a direct Anthropic client — names the egress record and the
+    gateway re-assertion. Falls back to the STRICTER ``anthropic`` (cloud_only) if the policy cannot be read,
+    so the degradation can only narrow what is permitted."""
+    try:
+        from ..kernel import sovereignty as _sov
+        return _sov.direct_anthropic_backend_name()
+    except Exception:  # noqa: BLE001
+        return "anthropic"
+
+
+def _egress_via_gateway(system, user, *, path, invoke):
+    """Route one console cloud model call through the ONE gateway chokepoint (``vigil_core.ai_gateway``):
+    classify -> redact -> authorize -> model-route -> provenance -> output-verify -> audit. ``invoke(redacted)``
+    performs the actual SDK round-trip on the gateway-redacted ``{system, user}`` and MUST assert the egress
+    context first (a bypass fails closed). Returns the invoke output, or the ``_GW_REFUSED`` sentinel on a
+    gateway refusal. When the shared core is absent the call still completes on the ORIGINAL payload (the
+    core-absent degradation the URK path also uses)."""
+    if _gw is None:
+        return invoke({"system": system, "user": user})
+    case = _gw.EgressCase(
+        path=path, invoke=invoke, backend=_gw_backend_name(),
+        assert_permitted=_gw_assert_permitted, provider_identity="anthropic-provider")
+    res = _gw.egress({"system": system, "user": user}, case=case)
+    return _GW_REFUSED if res.refused else res.output
+
+
 def terminal_propose(intent, run_id=None, session_id=None) -> dict:
     """Capability-router (T2b): CLASSIFY a natural-language intent via Claude and return a TYPED result —
     ``{ok, mode:"command", command, explanation, verdict}`` (verdict = ``terminal_dryrun(command)``),
@@ -4876,15 +4928,28 @@ def terminal_propose(intent, run_id=None, session_id=None) -> dict:
             _term_mx = _tb.clamp_output("terminal", 1024)
         except Exception:  # noqa: BLE001
             _tb = None
+    # M4.1 — route the capability-router egress through the ONE gateway chokepoint. Sovereignty is already
+    # asserted above (before the SDK import); the gateway additionally redacts the session context carried in
+    # ``user`` (idempotent with the assembly-time redaction), re-asserts the ladder (defense in depth), and
+    # emits the unified audit record. The SDK round-trip runs only inside the egress context (bypass → closed).
     try:
         client = anthropic.Anthropic(api_key=key)
-        resp = client.messages.create(
-            model="claude-opus-4-8", max_tokens=_term_mx,
-            system=_TERM_ROUTER_SYSTEM,
-            messages=[{"role": "user", "content": user}],
-        )
+
+        def _invoke(red):
+            if _gw is not None:
+                _gw.assert_in_egress("terminal_router")      # a bypass of the chokepoint fails closed
+            ru = red.get("user")
+            return client.messages.create(
+                model="claude-opus-4-8", max_tokens=_term_mx,
+                system=_TERM_ROUTER_SYSTEM,                  # static, secret-free system prompt sent verbatim
+                messages=[{"role": "user", "content": ru if isinstance(ru, str) else user}],
+            )
+
+        resp = _egress_via_gateway(_TERM_ROUTER_SYSTEM, user, path="terminal_router", invoke=_invoke)
     except Exception as e:  # noqa: BLE001 — never surface the key; an API error is an honest refusal
         return {"ok": False, "error": f"the model could not be reached ({type(e).__name__}); type a command directly."}
+    if resp is _GW_REFUSED:   # the gateway refused the egress (sovereignty / case) — the direct terminal still works
+        return {"ok": False, "error": "the model egress was refused; type a command directly — the local terminal does not egress."}
     if _tb is not None:
         try:
             _tb.record_usage("terminal", getattr(resp, "usage", None))

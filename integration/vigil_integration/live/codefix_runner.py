@@ -39,7 +39,8 @@ from ..warden_gate import decide_tool
 from .executor import subprocess_runner
 from .sandbox_exec import SandboxUnavailable, run_sandboxed
 from ..tools.mcp_registry import _redact_str
-from .think_claude import _build_live_client, _extract_text, _resolve_key, llm_egress_refusal
+from .think_claude import (_build_live_client, _extract_text, _resolve_key, egress_cloud_create,
+                           llm_egress_refusal)
 from .wiring import default_classify
 
 logger = logging.getLogger("vigil.live.codefix_runner")
@@ -504,11 +505,17 @@ class CodefixSession:
                 _mx = _tb.clamp_output("codefix", self.config.max_tokens)
             except Exception:  # noqa: BLE001
                 _tb = None
+        # M4.1 — route the coder through the ONE egress chokepoint (classify -> redact -> authorize -> route
+        # -> provenance -> audit). The source prompt is gateway-redacted — every credential SHAPE the shared
+        # masker recognises (Bearer tokens, credential headers, secret-named name=value assignments) is masked
+        # before the model sees it; the SDK round-trip runs only inside the egress context (a bypass fails
+        # closed). Behaviour is otherwise unchanged: a model error OR a gateway refusal both degrade to no-patch.
         try:
-            resp = client.messages.create(
-                model=self.config.model, max_tokens=_mx,
-                messages=[{"role": "user", "content": prompt}])
+            resp = egress_cloud_create(client, path="codefix", model=self.config.model,
+                                       max_tokens=_mx, user=prompt)
         except Exception:  # noqa: BLE001 — a coder failure degrades to no-patch (the loop is total)
+            return ""
+        if resp is None:            # gateway refusal (sovereignty / case) — no proposal, fail-closed
             return ""
         if _tb is not None:
             try:

@@ -399,6 +399,40 @@ def _route_urk_egress(prompt: "Prompt") -> "LLMResult":
     return res.output
 
 
+def _backend_complete_raw(backend: "LLMBackend", prompt: "Prompt") -> "LLMResult":
+    """The raw round-trip for an EXPLICITLY-provided backend. Reached ONLY inside the egress context (asserts
+    it first), so a direct call that skips the chokepoint fails closed."""
+    if _gw is not None:
+        _gw.assert_in_egress("kernel.urk.explicit")     # raw explicit-backend round-trip: only inside egress
+    return backend.complete(prompt)
+
+
+def complete_with_backend(backend: "LLMBackend", prompt: "Prompt") -> "LLMResult":
+    """Complete ``prompt`` on an EXPLICITLY-provided backend (``binding.run(backend=...)`` — a pinned run or a
+    test), routed through the ONE egress chokepoint — classify -> redact -> provenance -> audit — exactly like
+    the auto-selected failover path, so there is no second un-redacted, un-audited egress. The explicit backend
+    is the caller's choice, so there is NO failover and NO sovereignty pre-assert (the backend was already
+    constructed, which asserts the policy); the gateway still masks every credential shape it recognises in the
+    prompt, records the unified audit entry, and runs the call inside the egress context so a bypass fails
+    closed. When the shared core is absent the call still completes via the raw round-trip."""
+    if _gw is None:
+        return _backend_complete_raw(backend, prompt)
+
+    def _invoke(redacted: dict) -> "LLMResult":
+        return _backend_complete_raw(backend, _apply_redaction_to_prompt(prompt, redacted))
+
+    case = _gw.EgressCase(
+        path="urk_explicit", invoke=_invoke, backend="",     # explicit backend: no failover, no pre-assert
+        provenance=_urk_provenance,
+        provider_identity=str(getattr(backend, "name", "") or "urk-backend"),
+    )
+    payload = {"system": getattr(prompt, "system", None), "user": getattr(prompt, "user", None)}
+    res = _gw.egress(payload, case=case)
+    if res.refused:
+        raise BackendUnavailable(res.refusal_reason)
+    return res.output
+
+
 def _complete_with_failover_raw(prompt: "Prompt") -> "LLMResult":
     """Complete ``prompt``, failing over across the permitted backends IN-TIER on a transient
     overload (Speed X4). Tries the auto-selected primary (the cached ``get_backend()``); a
@@ -411,7 +445,13 @@ def _complete_with_failover_raw(prompt: "Prompt") -> "LLMResult":
 
     An explicit env-override backend is honoured as the operator's choice (no failover). This is
     the auto-selection path binding._bind uses when no backend is passed; an explicitly-passed
-    backend bypasses this entirely (the caller owns that choice)."""
+    backend bypasses this entirely (the caller owns that choice).
+
+    Every ``backend.complete`` below is a raw provider round-trip reached ONLY from inside the egress
+    context (via :func:`_route_urk_egress`'s invoke closure), so this asserts that context first — a
+    direct call that skips the chokepoint fails closed. The no-bypass guard depends on this self-assertion."""
+    if _gw is not None:
+        _gw.assert_in_egress("kernel.urk.raw")     # raw URK round-trips: reached only inside the gateway
     override = os.environ.get(_ENV_OVERRIDE, "").strip().lower()
     if override:
         return get_backend().complete(prompt)      # explicit operator choice: no failover

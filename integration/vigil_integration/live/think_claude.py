@@ -439,10 +439,14 @@ def _think_via_local_backend(backend_name: str, state: object, prompt_ctx: objec
         prompt = Prompt(system=system, user=user, schema=_local_decision_schema(),
                         schema_name="ThinkDecision", cognitive_doc="", max_tokens=max_tokens,
                         temperature=0.2)
-        result = backend.complete(prompt)      # ONE backend, NO failover (never complete_with_failover)
+        # M4.1 — route the LOCAL completion through the ONE gateway chokepoint too (ONE backend, NO failover).
+        result = egress_local_complete(backend, prompt, path="live.think.local", backend_name=backend_name)
     except Exception as exc:  # noqa: BLE001 — a local failure REFUSES; it never reaches for a cloud model
         return _refused(f"the local model call failed ({type(exc).__name__}). No cloud fallback — nothing "
                         f"was sent anywhere else.")
+    if result is None:          # gateway refusal (defensive; a local case never refuses) — no cloud fallback
+        return _refused("the local model egress was refused by the gateway. No cloud fallback — nothing "
+                        "was sent anywhere else.")
     text = str(getattr(getattr(result, "parsed", None), "decision", "") or "")
     if len(text) > _MAX_RESPONSE_CHARS:        # bound a hostile oversized output before the parser sees it
         text = text[:_MAX_RESPONSE_CHARS]
@@ -724,7 +728,14 @@ def _invoke(client: Any, params: dict) -> Any:
     max_tokens (the think prompt carries the whole untrusted context and adaptive thinking can be lengthy),
     per the Claude API guidance. A client without ``.messages.stream`` (the injected test fakes, an older
     SDK) transparently falls back to a plain ``.create``. May raise — the sole caller fail-closes on any
-    error. Secret-free: only ``params`` (never a key) is passed."""
+    error. Secret-free: only ``params`` (never a key) is passed.
+
+    This is a raw provider round-trip (``messages.stream`` / ``messages.create``): it is reached ONLY from
+    inside the egress context (via :func:`_think_via_client_raw`, itself only reached through the gateway's
+    invoke closure), so it asserts that context first — a direct call that skips the chokepoint fails closed.
+    The no-bypass guard (``test_egress_no_bypass_guard``) depends on this self-assertion being present."""
+    if _gw is not None:
+        _gw.assert_in_egress("live.think.invoke")     # raw SDK round-trip: reached only inside the gateway
     messages = getattr(client, "messages", None)
     stream = getattr(messages, "stream", None)
     if callable(stream):
@@ -978,6 +989,126 @@ def _build_live_client(api_key: str) -> Optional[Any]:
 
 
 # ---------------------------------------------------------------------------------------------------
+# M4.1 — the shared cloud single-turn egress helper (used by live.dev_edit + live.codefix_runner)
+# ---------------------------------------------------------------------------------------------------
+
+
+def _cloud_create_raw(client: Any, *, model: str, max_tokens: int, user: str) -> Any:
+    """The raw single-user-turn provider round-trip for the cloud coders (``messages.create``). Reached
+    ONLY from inside the egress context (asserts it first), so a direct call that skips the chokepoint
+    fails closed. Secret-free: only the (already gateway-redacted) ``user`` text and ``model`` are sent."""
+    if _gw is not None:
+        _gw.assert_in_egress("cloud.create.raw")       # raw SDK round-trip: reached only inside the gateway
+    return client.messages.create(model=model, max_tokens=max_tokens,
+                                  messages=[{"role": "user", "content": user}])
+
+
+def egress_cloud_create(client: Any, *, path: str, model: str, max_tokens: int, user: str,
+                        backend: Optional[str] = None) -> Any:
+    """Route ONE blocking single-user-turn cloud ``messages.create`` through the ONE gateway chokepoint
+    (``vigil_core.ai_gateway.egress``): classify -> redact -> authorize -> model-route -> provenance ->
+    output-verify -> audit. Returns the raw SDK response, or ``None`` on a gateway refusal
+    (sovereignty / case / trust-root). The ``user`` text is gateway-redacted — every credential SHAPE the
+    shared masker RECOGNISES (Bearer tokens, credential headers, secret-named ``name=value`` assignments) is
+    masked before the model sees it, the same symmetric guarantee the URK/think paths get; the raw round-trip
+    runs only inside the egress context (a bypass fails closed), and one unified audit record is emitted. Token-budget
+    metering stays with the caller (it needs the raw response). When the shared core is absent the call
+    still completes via the raw round-trip (the core-absent degradation the URK path also uses).
+
+    Shared by ``live.dev_edit.propose_dev_edit`` and ``live.codefix_runner.CodefixSession.propose`` — the
+    two coders have the identical single-prompt cloud shape. The caller still asserts the sovereignty ladder
+    (``llm_egress_refusal``) BEFORE building the client, so an AIR_GAPPED tier refuses before the SDK import;
+    the gateway's model-route step re-asserts here as defense in depth and names the backend in the record."""
+    if _gw is None:
+        return _cloud_create_raw(client, model=model, max_tokens=max_tokens, user=user)
+
+    def _invoke(red: "dict") -> Any:
+        ru = red.get("user")
+        return _cloud_create_raw(client, model=model, max_tokens=max_tokens,
+                                 user=ru if isinstance(ru, str) else user)
+
+    case = _gw.EgressCase(
+        path=path, invoke=_invoke,
+        backend=(backend or _direct_backend_name(None)),       # names the resolved direct-Anthropic backend
+        assert_permitted=_gateway_assert_permitted,            # re-asserts the SAME ladder (defense in depth)
+        provenance=lambda _r: {"model": model},
+        provider_identity="anthropic-provider",                # a label; the provider is never a trust anchor
+    )
+    res = _gw.egress({"user": user}, case=case)
+    if res.refused:
+        return None
+    return res.output
+
+
+# ---------------------------------------------------------------------------------------------------
+# M4.1 — the shared LOOPBACK-LOCAL egress helper (used by think + dev_edit local backends)
+# ---------------------------------------------------------------------------------------------------
+
+
+def _apply_redaction_to_local_prompt(prompt: Any, red: "dict") -> Any:
+    """Return ``prompt`` with its ``system``/``user`` replaced by the gateway-redacted text in ``red``; a
+    prompt double with no such fields, or a non-dataclass, is returned unchanged. Never raises — the
+    integration-plane twin of ``kernel.llm._apply_redaction_to_prompt`` / ``console.chat._redact_local_prompt``."""
+    rs, ru = red.get("system"), red.get("user")
+    upd = {}
+    if isinstance(rs, str):
+        upd["system"] = rs
+    if isinstance(ru, str):
+        upd["user"] = ru
+    if not upd:
+        return prompt
+    try:
+        import dataclasses
+        if dataclasses.is_dataclass(prompt):
+            return dataclasses.replace(prompt, **upd)
+    except Exception:  # noqa: BLE001 — fall through to a shallow-copy mutation
+        pass
+    try:
+        import copy
+        p = copy.copy(prompt)
+        for k, v in upd.items():
+            setattr(p, k, v)
+        return p
+    except Exception:  # noqa: BLE001 — last resort: use the original rather than crash
+        return prompt
+
+
+def _local_complete_raw(backend: Any, prompt: Any) -> Any:
+    """The raw loopback-LOCAL completion (``backend.complete``). Reached ONLY inside the egress context
+    (asserts it first), so a direct call that skips the chokepoint fails closed."""
+    if _gw is not None:
+        _gw.assert_in_egress("local.complete.raw")     # raw local round-trip: reached only inside the gateway
+    return backend.complete(prompt)
+
+
+def egress_local_complete(backend: Any, prompt: Any, *, path: str, backend_name: str = "") -> Any:
+    """Route ONE loopback-LOCAL ``backend.complete`` through the ONE gateway chokepoint, so EVERY model call
+    (cloud or loopback-local) shares the one audit/provenance stream and the chokepoint guarantee. The prompt's
+    ``system``/``user`` are gateway-redacted and rebuilt; the backend call runs only inside the egress context
+    (a bypass fails closed); one unified audit record is emitted. A local backend is loopback-enforced +
+    sovereignty-checked at construction, so the gateway skips the cloud sovereignty assert (``backend=""``).
+    Returns the raw ``LLMResult`` (or ``None`` on a gateway refusal — a local case never refuses here, so this
+    is defensive). Core-absent → the raw completion. Shared by ``think._think_via_local_backend`` and
+    ``dev_edit._propose_dev_edit_local`` so both keep the identical guarantee in ONE place."""
+    if _gw is None:
+        return _local_complete_raw(backend, prompt)
+
+    def _invoke(red: "dict") -> Any:
+        return _local_complete_raw(backend, _apply_redaction_to_local_prompt(prompt, red))
+
+    case = _gw.EgressCase(
+        path=path, invoke=_invoke, backend="",             # local: sovereignty asserted at construction
+        provenance=lambda _r: {"backend": str(getattr(backend, "name", "") or backend_name or "local")},
+        provider_identity=str(getattr(backend, "name", "") or backend_name or "local"),
+    )
+    res = _gw.egress({"system": getattr(prompt, "system", None), "user": getattr(prompt, "user", None)},
+                     case=case)
+    if res.refused:
+        return None
+    return res.output
+
+
+# ---------------------------------------------------------------------------------------------------
 # public API
 # ---------------------------------------------------------------------------------------------------
 
@@ -1134,5 +1265,5 @@ class ReplayThinker:
 
 
 __all__ = ["think", "ReplayThinker", "resolve_model", "llm_egress_refusal",
-           "is_local_backend", "local_backend_or_refusal",
+           "is_local_backend", "local_backend_or_refusal", "egress_cloud_create",
            "DEFAULT_MODEL", "DEFAULT_MAX_TOKENS"]

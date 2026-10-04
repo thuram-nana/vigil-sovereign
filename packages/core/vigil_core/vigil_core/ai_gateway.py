@@ -1,19 +1,31 @@
 """vigil_core.ai_gateway — the ONE mandatory chokepoint every LLM egress routes through (M4.1).
 
-Before this module the pieces of a disciplined model egress lived in two separate places and were
-ASYMMETRIC: the URK backend layer (``framework.v2.kernel.llm``) asserted sovereignty and stamped a call
-trace but sent the prompt to the provider WITHOUT masking secrets, while the live think step
-(``vigil_integration.live.think_claude``) framed and redacted but kept its own copy of the discipline.
-There was no single place that composed classify -> redact -> authorize -> route -> provenance ->
-output-verify -> audit, and no unified provenance record spanning both paths.
+Before this module the pieces of a disciplined model egress were scattered across EVERY model-touching
+call site and were ASYMMETRIC: the URK backend layer (``framework.v2.kernel.llm``) asserted sovereignty
+and stamped a call trace but sent the prompt to the provider WITHOUT masking secrets; the live think step
+(``vigil_integration.live.think_claude``) framed and redacted but kept its own copy of the discipline;
+and the console chat / terminal router (``framework.v2.console.chat`` / ``.actions``) and the codebase-edit
+coders (``vigil_integration.live.dev_edit`` / ``.codefix_runner``) each reached the provider SDK directly,
+with no classification, no symmetric redaction, and no shared audit. There was no single place that
+composed classify -> redact -> authorize -> route -> provenance -> output-verify -> audit, and no unified
+provenance record spanning the paths.
 
-``egress(payload, *, case)`` is that single place. It is a PURE composition: every environment-specific
-step (the sovereignty ladder, the authorization gate, the actual model call, the audit sink) is INJECTED
-through the :class:`EgressCase`, so this module imports nothing but the standard library and the shared
+``egress(payload, *, case)`` is that single place, and EVERY model-egress call site now routes through it:
+the URK completion (auto-failover and an explicitly-pinned backend), the live think step (cloud +
+loopback-local), the console chat reasoning (blocking cloud, streaming cloud, loopback-local), the terminal
+capability router, and both codebase-edit coders (cloud + loopback-local). It is a PURE composition: every environment-specific step (the sovereignty ladder, the
+authorization gate, the actual model call — blocking or streaming — the audit sink) is INJECTED through the
+:class:`EgressCase`, so this module imports nothing but the standard library and the shared
 ``vigil_core.redact`` masker. Because ``vigil_core`` imports no ``framework.*`` / ``strix.*`` / ``sigil.*``,
 both the offense framework and the sovereign planes load the SAME chokepoint without crossing the
 keyless two-environment boundary (FATAL-2); each side supplies a thin adapter that wires its own
 sovereignty policy and its own model call.
+
+A model call that must STREAM its output (the chat streaming path, the live think streaming SDK call) is
+supported without buffering: the injected ``invoke`` closure does the streaming round-trip itself — handing
+each delta to its own sink AS IT ARRIVES, inside the egress context — and returns the assembled final result
+for the record. The gateway never holds the whole response; it only brackets the streamed call with the
+classify/redact/authorize/route steps before and the provenance/audit steps after.
 
 The seven composed steps, in order:
 
@@ -31,10 +43,14 @@ The seven composed steps, in order:
   7. audit          — emit one unified :class:`EgressRecord` (to the shared ring and the injected sink)
                        for both paths.
 
-The chokepoint is mandatory, not advisory: the invoke closures guard themselves with
-:func:`assert_in_egress`, so a direct call that skips :func:`egress` fails closed (:class:`EgressBypass`).
-Everything here is deterministic and offline-re-verifiable; the record carries metadata and counts, never
-the raw payload or any credential.
+The chokepoint is mandatory, not advisory, and that is enforced two ways. At RUNTIME the invoke closures
+guard themselves with :func:`assert_in_egress`, so a direct call that skips :func:`egress` fails closed
+(:class:`EgressBypass`). STATICALLY a structural no-bypass guard (``integration/tests/test_egress_no_bypass_guard.py``)
+walks the offense + integration trees and fails CI if any ``messages.create`` / ``messages.stream`` /
+backend ``.complete`` call appears in a function that does not assert the egress context — so a newly added
+provider call outside the chokepoint reds the build. Together they make "the gateway is the only egress
+path" a falsifiable claim, not a hope. Everything here is deterministic and offline-re-verifiable; the
+record carries metadata and counts, never the raw payload or any credential.
 """
 
 from __future__ import annotations
