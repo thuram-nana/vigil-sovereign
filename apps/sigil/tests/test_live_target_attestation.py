@@ -168,6 +168,7 @@ def test_staging_needs_no_attestation_and_the_live_gate_does_not_fire():
 def test_live_refused_without_an_attestation():
     from sigil.ui import target_authorization as ta
     s = _store()
+    _mint_eval_attestation(s, _enrolled_evaluator(s))   # M-11.1 satisfied; the missing piece is the WS2 proof
     r = ta.add_target("apme.cm", environment="live", store=s, evaluator_attestation=None)
     assert r["ok"] is False and "LIVE" in r["error"] and "attestation" in r["error"], r
     # nothing was written to the seam
@@ -180,7 +181,8 @@ def test_live_refused_with_a_forged_wrong_key_signature():
     from sigil.ui import target_authorization as ta
     from sigil.ui.target_authorization import _attestation_message
     s = _store()
-    _enrolled_evaluator(s)                                   # eval-alice has a bound key
+    user = _enrolled_evaluator(s)                            # eval-alice has a bound key
+    _mint_eval_attestation(s, user)                         # M-11.1 satisfied, so the WS2 signature check runs
     chal = _mint_challenge(s)
     wrong = generate_keypair()                               # NOT the evaluator's key
     msg = _attestation_message(host="apme.cm", environment="live", challenge=chal, evaluator="eval-alice")
@@ -197,6 +199,7 @@ def test_live_refused_for_an_evaluator_with_no_bound_key():
     from sigil.reuse import generate_keypair
     from sigil.ui import target_authorization as ta
     s = _store()
+    _mint_eval_attestation(s, _enrolled_evaluator(s))       # M-11.1 satisfied (a DISTINCT enrolled evaluator)
     # create the account but DO NOT enroll a pubkey
     AccountsRegistry(s, owner_key=ensure_owner_keypair()).create(
         "nokey", "operator", bearer_token="B" * 40, issued_at=float(next(_iss)))
@@ -224,6 +227,7 @@ def test_attestation_is_bound_to_the_target_host():
     from sigil.ui import target_authorization as ta
     s = _store()
     user = _enrolled_evaluator(s)
+    _mint_eval_attestation(s, user, slug="other-example")   # M-11.1 for the TARGET slug, so the WS2 check runs
     chal = _mint_challenge(s)
     att_for_a = _attestation(s, user, host="apme.cm", evaluator="eval-alice", challenge=chal)
     # submit the apme.cm-signed attestation against a DIFFERENT host → the recomputed message differs → refused
@@ -292,3 +296,81 @@ def test_mutation_neutering_verify_one_flips_the_forged_case_to_a_leak():
         assert r["ok"] is True, "mutation must flip the forged refusal into a leak (proving the sig is the gate)"
     finally:
         reuse_mod.verify_one = orig
+
+
+# --- WS2 floor: a LIVE authority must never be minted for internal space --------------------------
+# The egress floor (denylist Tier 2) LIFTS its conditional private deny for any IP written as a charter-scope
+# literal (egress_floor.charter_allowed_ips). So a LIVE authority scoped to a private literal would AIM egress
+# at internal space. The ceremony must refuse private literals AT MINT, for the LIVE environment only
+# (twin/staging legitimately engage internal space). Metadata/link-local stay refused for EVERY environment.
+@pytest.mark.parametrize("ip", ["10.0.0.1", "192.168.1.1", "172.16.0.1", "100.64.0.1"])
+def test_live_refuses_private_internal_literal_even_with_a_valid_attestation(ip):
+    """A LIVE add_target for an RFC1918 (10/8, 172.16/12, 192.168/16) or CGNAT (100.64/10) literal is REFUSED
+    even WITH a fully valid WS2 + M-11.1 attestation — the refusal is at _validate_host, BEFORE the attestation,
+    so nothing is minted and the evaluator's single-use challenge is NOT consumed. (CGNAT is covered explicitly:
+    ipaddress.is_private is False for 100.64/10 on this runtime.)"""
+    from sigil.ui import target_authorization as ta
+    from sigil.ui.target_authorization import _attestation_challenge_ledger, _slug_for
+    from vigil_integration.live.authorization_broker import read_authorization
+    s = _store()
+    user = _enrolled_evaluator(s)
+    _mint_eval_attestation(s, user, slug=_slug_for(ip, None))     # a VALID M-11.1 for this engagement
+    chal = _mint_challenge(s)
+    att = _attestation(s, user, host=ip, evaluator="eval-alice", challenge=chal)   # a VALID WS2 proof
+    r = ta.add_target(ip, environment="live", store=s, evaluator_attestation=att)
+    assert r["ok"] is False and "private / internal" in r["error"], r
+    # nothing minted, and the floor refusal PRECEDED the challenge consume (the nonce is still live to spend).
+    assert read_authorization(os.environ["VIGIL_BASE_DIR"], _slug_for(ip, None)) is None
+    assert _attestation_challenge_ledger(s).consume(chal) is True, \
+        "the private-literal refusal must precede the WS2 challenge consume (do not burn the nonce)"
+
+
+@pytest.mark.parametrize("ula", ["fc00::1", "fd00::1"])
+def test_live_refuses_ipv6_ula_literal(ula):
+    """An IPv6 ULA literal is refused for a LIVE target (a DISTINCT refusal: the bare-hostname ':' guard rejects
+    every IPv6 literal before the Tier-2 check, which is why the ULA term in _validate_host is defense-in-depth)."""
+    from sigil.ui import target_authorization as ta
+    r = ta.add_target(ula, environment="live")
+    assert r["ok"] is False, r
+
+
+def test_live_still_refuses_cloud_metadata_literal():
+    """The never-liftable Tier-1 floor still refuses the cloud metadata address on live (distinct from the new
+    Tier-2 private refusal: metadata/link-local are denied for EVERY environment, never lifted by a scope)."""
+    from sigil.ui import target_authorization as ta
+    r = ta.add_target("169.254.169.254", environment="live")
+    assert r["ok"] is False and ("link-local" in r["error"] or "reserved" in r["error"]
+                                 or "loopback" in r["error"]), r
+
+
+@pytest.mark.parametrize("ip", ["10.0.0.1", "192.168.1.1", "172.16.0.1", "100.64.0.1"])
+@pytest.mark.parametrize("env", ["twin", "staging"])
+def test_twin_staging_still_allow_internal_literals(env, ip):
+    """twin/staging legitimately engage internal space, so the Tier-2 private refusal is scoped to live: an
+    internal literal is still authorized for twin/staging, needing no attestation (byte-identical to before)."""
+    from sigil.ui import target_authorization as ta
+    s = _store()
+    r = ta.add_target(ip, environment=env, store=s)
+    assert r["ok"] is True and r["environment"] == env and r["scope"] == [ip], r
+    assert "attestation_recorded_seq" not in r and "evaluator" not in r
+
+
+def test_live_allows_a_public_ip_literal_with_a_valid_attestation():
+    """A PUBLIC IP literal is a legitimate live target: the Tier-2 refusal must not over-block it (is_private /
+    CGNAT / ULA all False, is_global True). With a valid WS2 + M-11.1 attestation it is authorized end-to-end."""
+    from sigil.ui import target_authorization as ta
+    from sigil.ui.target_authorization import _slug_for
+    from vigil_core import verify_engagement_authority
+    from vigil_integration.live.authorization_broker import read_authorization
+    s = _store()
+    user = _enrolled_evaluator(s)
+    ip = "93.184.216.34"                                          # a globally-routable literal
+    _mint_eval_attestation(s, user, slug=_slug_for(ip, None))
+    chal = _mint_challenge(s)
+    att = _attestation(s, user, host=ip, evaluator="eval-alice", challenge=chal)
+    r = ta.add_target(ip, environment="live", store=s, evaluator_attestation=att)
+    assert r["ok"] is True and r["environment"] == "live" and r["scope"] == [ip], r
+    got = read_authorization(os.environ["VIGIL_BASE_DIR"], r["slug"])
+    ok, reason = verify_engagement_authority(got.signed_authority, got.trust_root)
+    assert ok, reason
+    assert got.signed_authority.document.allow_destructive is False
