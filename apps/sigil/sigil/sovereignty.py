@@ -51,7 +51,17 @@ from __future__ import annotations
 import enum
 import ipaddress
 import os
+from typing import Any, Callable, Mapping
 from urllib.parse import urlsplit
+
+# M4.1 — the shared, stdlib-only egress chokepoint (``vigil_core.ai_gateway``). ``vigil_core`` is a member of
+# BOTH isolated environments and imports no ``framework.*``/``strix.*``/``sigil.*``, so the SIGIL plane loads
+# the SAME chokepoint the offense plane does without crossing the FATAL-2 boundary. Guarded: when it is absent
+# the sovereign model calls still complete (the core-absent degradation the engine adapter also uses).
+try:                                                       # pragma: no cover - import guard
+    from vigil_core import ai_gateway as _gw
+except Exception:                                          # noqa: BLE001
+    _gw = None
 
 __all__ = [
     "SovereigntyRefusal",
@@ -60,8 +70,14 @@ __all__ = [
     "is_permissive",
     "classify_endpoint",
     "assert_endpoint_permitted",
+    "egress_via_gateway",
+    "GW_REFUSED",
     "explain",
 ]
+
+# Sentinel returned by :func:`egress_via_gateway` when the gateway REFUSES the egress (case / sovereignty /
+# trust-root). Distinct from ``None`` (a completed call that produced no usable output).
+GW_REFUSED = object()
 
 
 class SovereigntyRefusal(RuntimeError):
@@ -157,6 +173,32 @@ def assert_endpoint_permitted(url: str, *, purpose: str = "model call") -> None:
         f"control — it stops the engine ATTEMPTING the call; enforce the boundary "
         f"with host firewalling / the egress gateway (see engine/crucible/SECURITY.md)."
     )
+
+
+def egress_via_gateway(user_text: str, *, path: str,
+                       invoke: "Callable[[Mapping[str, Any]], Any]",
+                       backend: str = "anthropic-sigil-direct") -> Any:
+    """Route ONE sovereign-plane cloud LLM call through the shared gateway chokepoint
+    (``vigil_core.ai_gateway.egress``): classify -> redact -> authorize -> route -> provenance -> audit. The
+    SIGIL plane supplies its OWN payload (``{"user": user_text}``) and path label, so this crosses no FATAL-2
+    boundary (``vigil_core`` imports no ``framework.*``/``strix.*``/``sigil.*``).
+
+    ``invoke(redacted)`` performs the actual HTTP round-trip on the gateway-redacted ``user`` text (free of
+    every credential SHAPE the shared masker recognises) and MUST call ``ai_gateway.assert_in_egress`` first,
+    so a direct call that skips this chokepoint fails closed. The SIGIL sovereignty tier
+    (:func:`assert_endpoint_permitted`) stays the fail-closed network-posture gate and is asserted inside
+    ``invoke`` at the resolved URL — so an air-gapped/sovereign tier still REFUSES (raises
+    :class:`SovereigntyRefusal`) before any socket opens; this chokepoint adds the symmetric secret-redaction
+    and the unified audit record the sovereign plane previously lacked.
+
+    Returns the invoke output, :data:`GW_REFUSED` on a gateway refusal, or — when the shared core is absent —
+    the invoke output computed on the ORIGINAL ``user`` text (the core-absent degradation)."""
+    if _gw is None:
+        return invoke({"user": user_text})
+    case = _gw.EgressCase(path=path, invoke=invoke, backend=backend,
+                          provider_identity="anthropic-provider")
+    res = _gw.egress({"user": user_text}, case=case)
+    return GW_REFUSED if res.refused else res.output
 
 
 def explain() -> str:

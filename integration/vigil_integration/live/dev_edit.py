@@ -37,6 +37,8 @@ from .think_claude import (
     _build_live_client,
     _extract_text,
     _resolve_key,
+    egress_cloud_create,
+    egress_local_complete,
     is_local_backend,
     llm_egress_refusal,
     local_backend_or_refusal,
@@ -103,8 +105,11 @@ def _propose_dev_edit_local(backend_name: str, instruction: str, ctx: list, *, m
     try:
         prompt = Prompt(system=system, user=user, schema=DiffReply, schema_name="DiffReply",
                         cognitive_doc="", max_tokens=max_tokens, temperature=0.2)
-        result = backend.complete(prompt)          # ONE backend, NO failover
+        # M4.1 — route the LOCAL completion through the ONE gateway chokepoint too (ONE backend, NO failover).
+        result = egress_local_complete(backend, prompt, path="dev_edit.local", backend_name=str(backend_name))
     except Exception:  # noqa: BLE001 — a local failure yields no proposal; it never reaches for a cloud model
+        return ""
+    if result is None:                             # gateway refusal (defensive) — no proposal, never cloud
         return ""
     return str(getattr(getattr(result, "parsed", None), "diff", "") or "")
 
@@ -156,10 +161,16 @@ def propose_dev_edit(workdir: str, instruction: str, files=None, *, client: Any 
             _mx = _tb.clamp_output("devedit", max_tokens)
         except Exception:  # noqa: BLE001
             _tb = None
+    # M4.1 — route the cloud coder through the ONE egress chokepoint (classify -> redact -> authorize ->
+    # route -> provenance -> audit). The source prompt is gateway-redacted — every credential SHAPE the shared
+    # masker recognises (Bearer tokens, credential headers, secret-named name=value assignments) is masked
+    # before the model sees it; the SDK round-trip runs only inside the egress context (a bypass fails closed).
+    # Behaviour is otherwise unchanged: a model error OR a gateway refusal both degrade to no-patch, as before.
     try:
-        resp = client.messages.create(model=model, max_tokens=_mx,
-                                      messages=[{"role": "user", "content": prompt}])
+        resp = egress_cloud_create(client, path="dev_edit", model=model, max_tokens=_mx, user=prompt)
     except Exception:  # noqa: BLE001 — a coder failure degrades to no-patch
+        return ""
+    if resp is None:                 # gateway refusal (sovereignty / case) — no proposal, fail-closed
         return ""
     if _tb is not None:
         try:

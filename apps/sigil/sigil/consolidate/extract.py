@@ -23,6 +23,14 @@ from ..config import claude_bin as _resolve_claude_bin
 from ..spine.models import SpineRecord
 from .models import CandidateFact
 
+# M4.1 — the ONE shared egress chokepoint (``vigil_core.ai_gateway``). vigil_core is the stdlib-only leaf both
+# planes share (no framework/strix/sigil imports), so routing the sovereign-plane memory-consolidation egress
+# through it crosses no FATAL-2 boundary. Guarded; when absent the call still completes (core-absent degradation).
+try:                                                       # pragma: no cover - import guard
+    from vigil_core import ai_gateway as _gw
+except Exception:                                          # noqa: BLE001
+    _gw = None
+
 _log = logging.getLogger(__name__)
 
 # the prove-don't-guess doctrine, distilled for extraction (framework/cognitive/metacognition.md).
@@ -173,24 +181,41 @@ class ApiProvider:
                 _mt = _tb.clamp_output("sigil", self.max_tokens)
             except Exception:  # noqa: BLE001
                 _tb = None
-        body = _json.dumps({
-            "model": self.model, "max_tokens": _mt,
-            "messages": [{"role": "user", "content": build_prompt(records)}],
-        }).encode("utf-8")
-        # W16-9: SIGIL-plane memory-consolidation egress is now under the sovereignty tier —
-        # an air-gapped/sovereign tier REFUSES this direct-Anthropic call (SovereigntyRefusal).
-        from ..sovereignty import assert_endpoint_permitted
-        url = "https://api.anthropic.com/v1/messages"
-        assert_endpoint_permitted(url, purpose="memory consolidation (Anthropic API)")
-        req = urllib.request.Request(
-            url, data=body, method="POST",
-            headers={"content-type": "application/json", "x-api-key": self.api_key,
-                     "anthropic-version": "2023-06-01"})
-        try:
-            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
-                payload = _json.loads(resp.read().decode("utf-8"))
-        except (urllib.error.URLError, OSError, ValueError) as e:
-            _log.warning("ApiProvider extraction request failed: %s", e)  # never carries the key
+        prompt = build_prompt(records)
+
+        # M4.1 — route this memory-consolidation egress through the ONE shared gateway chokepoint. The prompt
+        # rides the gateway-redacted ``user`` field, so any credential SHAPE the masker recognises is masked
+        # before the model sees it; the SIGIL sovereignty tier is still asserted at the resolved URL inside the
+        # closure, so an air-gapped/sovereign tier REFUSES before any socket opens; the gateway adds the
+        # symmetric redaction + the unified audit record.
+        def _invoke(red):
+            if _gw is not None:
+                _gw.assert_in_egress("sigil_consolidate")   # a bypass of the chokepoint fails closed
+            url = "https://api.anthropic.com/v1/messages"
+            # W16-9: SIGIL-plane memory-consolidation egress is under the sovereignty tier —
+            # an air-gapped/sovereign tier REFUSES this direct-Anthropic call (SovereigntyRefusal).
+            from ..sovereignty import assert_endpoint_permitted
+            assert_endpoint_permitted(url, purpose="memory consolidation (Anthropic API)")
+            ru = red.get("user")
+            content = ru if isinstance(ru, str) else prompt   # gateway-redacted prompt
+            body = _json.dumps({
+                "model": self.model, "max_tokens": _mt,
+                "messages": [{"role": "user", "content": content}],
+            }).encode("utf-8")
+            req = urllib.request.Request(
+                url, data=body, method="POST",
+                headers={"content-type": "application/json", "x-api-key": self.api_key,
+                         "anthropic-version": "2023-06-01"})
+            try:
+                with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+                    return _json.loads(resp.read().decode("utf-8"))
+            except (urllib.error.URLError, OSError, ValueError) as e:
+                _log.warning("ApiProvider extraction request failed: %s", e)  # never carries the key
+                return None
+
+        from ..sovereignty import egress_via_gateway, GW_REFUSED
+        payload = egress_via_gateway(prompt, path="sigil_consolidate", invoke=_invoke)
+        if payload is GW_REFUSED or not isinstance(payload, dict):
             return []
         if _tb is not None:
             try:

@@ -38,6 +38,17 @@ from pathlib import Path
 
 from . import actions
 
+# M4.1 — the ONE egress chokepoint every model call routes through (``vigil_core.ai_gateway``). vigil_core
+# is the shared stdlib-only leaf (no framework/strix/sigil), so routing the console chat's cloud + local
+# model calls through it crosses no FATAL-2 boundary. Guarded like the other adapters; when present it
+# composes classify -> redact -> authorize -> route -> provenance -> audit around the model call and emits
+# the unified audit record. The engine-plane sovereignty hook + case helpers live in ``actions`` (chat
+# already depends on actions); the local path builds its own case (a loopback backend needs no cloud assert).
+try:                                                       # pragma: no cover - import guard
+    from vigil_core import ai_gateway as _gw
+except Exception:                                          # noqa: BLE001
+    _gw = None
+
 # a target URL embedded in free-text ("scan http://127.0.0.1:8080 for me") — a convenience so the operator
 # can just talk; an explicit `target` in the request always wins over this.
 _URL_RE = re.compile(r"https?://[^\s'\"<>]+")
@@ -1614,6 +1625,33 @@ def _history_messages(chat_id: str) -> list[dict]:
     return msgs
 
 
+def _redact_history_for_egress(history: list[dict]) -> list[dict]:
+    """Mask every credential SHAPE the shared masker recognises in EACH prior-turn message BEFORE it joins
+    the egress ``messages`` array. ``_history_messages`` replays prior user+assistant turns RAW from the
+    session store, and the gateway redacts only the CURRENT turn's ``system``/``user`` — so a recognised
+    secret the operator pasted in an EARLIER turn (an ``Authorization: Bearer`` / ``api_key=`` / ``password=``
+    line), or an assistant turn that echoed one, would otherwise reach the provider UNMASKED. This runs each
+    message's text through the SAME masker the gateway applies to the current turn
+    (``vigil_core.ai_gateway.redact_payload`` -> ``vigil_core.redact.redact_log_message``), so BOTH roles are
+    masked symmetrically before egress. Only the credential SHAPES the masker recognises are covered (see
+    ``ai_gateway.redact_payload`` / ``redact.redact_log_message``); shapes it does not recognise ride through
+    like any other text. A non-str ``content`` passes through unchanged (``_history_messages`` only ever
+    produces str content today; this is future-proofing). When the shared core is absent the history passes
+    through unchanged — exactly the gateway's own core-absent degradation, so a core-absent build stays
+    byte-identical to the pre-gateway behaviour on this path too."""
+    if _gw is None or not history:
+        return history
+    out: list[dict] = []
+    for m in history:
+        c = m.get("content")
+        if isinstance(c, str) and c:
+            red, _n = _gw.redact_payload({"user": c})
+            out.append({**m, "content": red.get("user", c)})
+        else:
+            out.append(m)
+    return out
+
+
 def _has_prior_conversation(chat_id: str) -> bool:
     """True once this chat has at least one prior user turn AND one prior assistant reply (excluding the
     current turn) — i.e. the operator has already been talking with it, so a follow-up should CONTINUE the
@@ -1893,6 +1931,35 @@ def _configured_local_endpoint(backend_name: str) -> str:
     return (os.environ.get("CRUCIBLE_SELFHOSTED_ENDPOINT") or os.environ.get("LLM_API_BASE") or "").strip()
 
 
+def _redact_local_prompt(prompt, red):
+    """Return ``prompt`` with its ``system``/``user`` replaced by the gateway-redacted text in ``red``, so a
+    loopback-local backend receives the masked prompt too (uniform with the cloud paths). A prompt double with
+    no such fields, or a non-dataclass, is returned unchanged. Never raises — mirrors the URK adapter's
+    ``_apply_redaction_to_prompt``."""
+    rs, ru = red.get("system"), red.get("user")
+    upd = {}
+    if isinstance(rs, str):
+        upd["system"] = rs
+    if isinstance(ru, str):
+        upd["user"] = ru
+    if not upd:
+        return prompt
+    try:
+        import dataclasses
+        if dataclasses.is_dataclass(prompt):
+            return dataclasses.replace(prompt, **upd)
+    except Exception:  # noqa: BLE001 — fall through to a shallow-copy mutation
+        pass
+    try:
+        import copy
+        p = copy.copy(prompt)
+        for k, v in upd.items():
+            setattr(p, k, v)
+        return p
+    except Exception:  # noqa: BLE001 — last resort: use the original rather than crash
+        return prompt
+
+
 def _reason_local(chat_id: str, question: str, entry: dict, reason_mode: str) -> dict:
     """E3 — reason with a LOCAL model through the kernel provider layer. Sovereignty-correct by construction:
     the backend is built via ``get_backend(force=...)`` which asserts the sovereignty policy FIRST (a local
@@ -1954,10 +2021,33 @@ def _reason_local(chat_id: str, question: str, entry: dict, reason_mode: str) ->
     except Exception:  # noqa: BLE001 — metering must never break the call
         pass
     system = _CHAT_SYSTEM + _REASON_MODE_SUFFIX.get(_resolve_reason_mode(reason_mode), "")
+    user_text = "\n\n".join(parts)
+    # M4.1 — route the LOCAL completion through the ONE gateway chokepoint too, so EVERY model call (cloud or
+    # loopback-local) shares the one audit/provenance stream and the chokepoint guarantee. A local backend is
+    # loopback-enforced + sovereignty-checked at construction, so the gateway skips the cloud sovereignty assert
+    # (backend=""); it still classifies, redacts the prompt, and records the call. NO cloud failover: a local
+    # failure still REFUSES via the except below.
     try:
-        prompt = Prompt(system=system, user="\n\n".join(parts), schema=_local_chat_schema(),
+        prompt = Prompt(system=system, user=user_text, schema=_local_chat_schema(),
                         schema_name="ChatReply", cognitive_doc="", max_tokens=_mx, temperature=0.2)
-        result = backend.complete(prompt)                  # ONE backend, NO failover (never complete_with_failover)
+
+        def _invoke(red):
+            if _gw is not None:
+                _gw.assert_in_egress("chat_reason_local")    # a bypass of the chokepoint fails closed
+            return backend.complete(_redact_local_prompt(prompt, red))
+
+        if _gw is None:
+            result = _invoke({"user": user_text})          # core absent: invoke runs the completion
+        else:
+            _res = _gw.egress(
+                {"user": user_text},                       # redact the user content; system stays verbatim
+                case=_gw.EgressCase(
+                    path="chat_reason_local", invoke=_invoke, backend="",
+                    provenance=lambda r: {"backend": str(getattr(backend, "name", "") or "local")},
+                    provider_identity=str(getattr(backend, "name", "") or backend_name or "local")))
+            if _res.refused:                               # defensive: a local case never refuses here
+                return {"ok": False, "error": "the local model egress was refused; the gated assessment still runs."}
+            result = _res.output
     except Exception as e:  # noqa: BLE001 — a local failure REFUSES; it never reaches for a cloud model
         return {"ok": False, "error": f"the local model call failed ({type(e).__name__}). Nothing was sent "
                                       f"anywhere else — no cloud fallback. The gated assessment still runs."}
@@ -2037,14 +2127,32 @@ def _reason_stream_cloud(chat_id: str, question: str, *, reason_mode: str, model
     if thinks:
         notes.append(f"{rmode} mode — reasoning with extended thinking.")
     entry = _model_entry(model)
-    kwargs = {"model": entry["model"], "max_tokens": _mx, "system": system,
-              "messages": history + [{"role": "user", "content": content}]}
-    if thinks:
-        kwargs["thinking"] = {"type": "adaptive"}
-    client = anthropic.Anthropic(api_key=key, timeout=600.0) if thinks else anthropic.Anthropic(api_key=key)
     chunks: list[str] = []
-    try:
-        with client.messages.stream(**kwargs) as stream:
+    # M4.1 — route the STREAMING cloud call through the ONE gateway chokepoint WITHOUT buffering: the invoke
+    # closure does the streamed round-trip itself, handing each text delta to `emit` AS IT ARRIVES (inside the
+    # egress context) and returning the assembled final message for the record. The operator's files + redacted
+    # session context ride the first content block's text; the gateway masks any credential shape there (and in
+    # the system) before the model sees it, re-asserts the ladder (defense in depth beside `_cloud_gate_and_key`),
+    # and emits the unified audit record. stream() is called exactly once, only inside the egress context.
+    stream_user_text = content[0].get("text", "") if (isinstance(content, list) and content
+                                                      and isinstance(content[0], dict)) else ""
+
+    def _invoke(red):
+        if _gw is not None:
+            _gw.assert_in_egress("chat_reason_stream")       # a bypass of the chokepoint fails closed
+        ru = red.get("user")
+        rcontent = content
+        if isinstance(ru, str) and isinstance(content, list) and content and isinstance(content[0], dict):
+            rcontent = [{**content[0], "text": ru}, *content[1:]]
+        skwargs = {"model": entry["model"], "max_tokens": _mx,
+                   "system": system,       # static, secret-free system prompt sent verbatim (identity preserved)
+                   # history is replayed RAW from the store; mask every recognised secret shape in each prior
+                   # turn too (not only the gateway-redacted current turn) before it egresses.
+                   "messages": _redact_history_for_egress(history) + [{"role": "user", "content": rcontent}]}
+        if thinks:
+            skwargs["thinking"] = {"type": "adaptive"}
+        client = anthropic.Anthropic(api_key=key, timeout=600.0) if thinks else anthropic.Anthropic(api_key=key)
+        with client.messages.stream(**skwargs) as stream:
             for delta in stream.text_stream:            # only text deltas; thinking blocks are excluded
                 if delta:
                     chunks.append(delta)
@@ -2052,10 +2160,16 @@ def _reason_stream_cloud(chat_id: str, question: str, *, reason_mode: str, model
                         emit({"event": "token", "text": delta})
                     except Exception:  # noqa: BLE001 — a client hiccup never aborts the model read
                         pass
-            final = stream.get_final_message()
+            return stream.get_final_message()
+
+    try:
+        final = actions._egress_via_gateway(system, stream_user_text, path="chat_reason_stream", invoke=_invoke)
     except Exception as e:  # noqa: BLE001 — a streamed error is an honest refusal; never surface the key
         return {"ok": False, "error": f"the model could not be reached ({type(e).__name__}); the gated "
                                       f"assessment still runs."}
+    if final is actions._GW_REFUSED:
+        return {"ok": False, "error": "the model egress was refused by the sovereignty gateway; the gated "
+                                      "assessment still runs."}
     if _tb is not None:
         try:
             _tb.record_usage("chat", getattr(final, "usage", None))
@@ -2160,11 +2274,37 @@ def _reason(chat_id: str, question: str, *, reason_mode: str = "ask", model: str
     def _call(blocks):
         client = anthropic.Anthropic(api_key=key, timeout=600.0) if thinks \
             else anthropic.Anthropic(api_key=key)
-        kwargs = {"model": active_model, "max_tokens": _mx, "system": system,
-                  "messages": history + [{"role": "user", "content": blocks}]}
-        if thinks:
-            kwargs["thinking"] = {"type": "adaptive"}   # adaptive thinking (budget_tokens rejected)
-        return client.messages.create(**kwargs)
+        # M4.1 — route the cloud reasoning call through the ONE gateway chokepoint. The operator's files +
+        # redacted session context ride the FIRST content block's text (the rest are image blocks — binary,
+        # not text-redactable); the gateway masks any credential shape in that text (and the system) before
+        # the model sees it, re-asserts the sovereignty ladder (defense in depth beside `_cloud_gate_and_key`),
+        # and emits the unified audit record. The SDK round-trip runs only inside the egress context, and the
+        # call COUNT is unchanged (one create per `_call`, exactly as before).
+        user_text = blocks[0].get("text", "") if (isinstance(blocks, list) and blocks
+                                                   and isinstance(blocks[0], dict)) else ""
+
+        def _invoke(red):
+            if _gw is not None:
+                _gw.assert_in_egress("chat_reason")          # a bypass of the chokepoint fails closed
+            ru = red.get("user")
+            rblocks = blocks
+            if isinstance(ru, str) and isinstance(blocks, list) and blocks and isinstance(blocks[0], dict):
+                rblocks = [{**blocks[0], "text": ru}, *blocks[1:]]
+            kwargs = {"model": active_model, "max_tokens": _mx,
+                      "system": system,    # static, secret-free system prompt sent verbatim (identity preserved)
+                      # history is replayed RAW from the store; mask every recognised secret shape in each
+                      # prior turn too (not only the gateway-redacted current turn) before it egresses.
+                      "messages": _redact_history_for_egress(history) + [{"role": "user", "content": rblocks}]}
+            if thinks:
+                kwargs["thinking"] = {"type": "adaptive"}   # adaptive thinking (budget_tokens rejected)
+            return client.messages.create(**kwargs)
+
+        out = actions._egress_via_gateway(system, user_text, path="chat_reason", invoke=_invoke)
+        if out is actions._GW_REFUSED:
+            # defense-in-depth: `_cloud_gate_and_key` already asserted the ladder, so this fires only if the
+            # gateway refuses underneath; surface it like a transport failure so the caller degrades honestly.
+            raise RuntimeError("model egress refused by the sovereignty gateway")
+        return out
 
     def _run_and_read():
         """One transport-safe call on the CURRENT ``active_model`` → ``(kind, payload)``: kind is
