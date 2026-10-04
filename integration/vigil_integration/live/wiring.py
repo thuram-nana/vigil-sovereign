@@ -1803,13 +1803,19 @@ def _governed_oob_material(prov: Provisioned, config: "EngineConfig") -> "Option
     return material
 
 
-def _spec_is_oob_consumable(redrive: dict) -> bool:
+def _spec_is_oob_consumable(redrive: dict, info: "Optional[dict]" = None) -> bool:
     """True iff :func:`_live_oob_redrive_fact` would treat this spec as an OOB-redrive class — the SAME surface
     the consumer gates on (``kind == "oob"`` OR ``bug_class ∈ OOB_REDRIVE_CLASSES``). ``_with_trusted_oob_material``
     scopes its TRUSTED injection to exactly this predicate, so Lock #1's strip (which is unconditional) and its
     inject share the consumer's surface — closing the strip-on-kind / consume-on-bug_class mismatch. The
     ``kind == "oob"`` arm needs no import (the router's own shape), so the legit path never depends on the
-    framework import; the ``bug_class`` arm mirrors the consumer's own function-local import and fails closed."""
+    framework import; the ``bug_class`` arm mirrors the consumer's own function-local import and fails closed.
+
+    The class is resolved from ``redrive["bug_class"]`` OR ``info["bug_class"]`` — the EXACT expression the
+    consumer uses (:func:`_live_oob_redrive_fact`: ``redrive.get("bug_class") or info.get("bug_class")``), so the
+    inject scope mirrors the consume scope with no asymmetry (a spec whose class lives only in ``info`` is still
+    injected for, so the trusted feeder bundle is never dropped). The strip is unconditional regardless, so
+    widening the inject scope can never pass producer material (producer ``oob_material`` is always removed)."""
     if redrive.get("kind") == "oob":
         return True
     try:
@@ -1817,11 +1823,15 @@ def _spec_is_oob_consumable(redrive: dict) -> bool:
         from .runtime_redrive import OOB_REDRIVE_CLASSES  # noqa: PLC0415 (framework at CALL — FATAL-2)
     except Exception:  # noqa: BLE001 — module unavailable ⇒ not consumable ⇒ no injection (fail-closed)
         return False
-    return normalize_bug_class(str(redrive.get("bug_class") or "")) in OOB_REDRIVE_CLASSES
+    bug_class = redrive.get("bug_class")
+    if not bug_class and isinstance(info, dict):
+        bug_class = info.get("bug_class")     # mirror the consumer's `redrive OR info` resolution exactly
+    return normalize_bug_class(str(bug_class or "")) in OOB_REDRIVE_CLASSES
 
 
 def _with_trusted_oob_material(redrive: "Optional[dict]",
-                               provider: "Optional[Callable[[], Optional[dict]]]") -> "Optional[dict]":
+                               provider: "Optional[Callable[[], Optional[dict]]]",
+                               info: "Optional[dict]" = None) -> "Optional[dict]":
     """Return the redrive spec with its ``oob_material`` sourced SOLELY from the trusted ``provider`` (the
     governed-engage OOB feeder). Lock #1 of the triple-lock, and a TRUE independent lock: it UNCONDITIONALLY
     strips any producer-supplied ``oob_material`` from EVERY spec — of ANY ``kind`` — because the consumer
@@ -1837,7 +1847,7 @@ def _with_trusted_oob_material(redrive: "Optional[dict]",
     if not isinstance(redrive, dict):
         return redrive
     had_material = "oob_material" in redrive
-    consumable = _spec_is_oob_consumable(redrive)
+    consumable = _spec_is_oob_consumable(redrive, info)
     # Nothing to strip AND not a target for trusted injection ⇒ return the spec UNCHANGED (identity; the
     # byte-identical no-op for every non-OOB spec and the production default-off path).
     if not had_material and (provider is None or not consumable):
@@ -1947,7 +1957,8 @@ def _build_oracle(
         # any kind — the consumer gates on bug_class, not kind) and sets only the feeder's bundle (or none when
         # OOB is unprovisioned / a forged collector). No feeder wired (the default) ⇒ no material ⇒ the seam
         # fail-closes to a LEAD, byte-identical to today.
-        oob_ref = _live_oob_redrive_fact(prov, info, _with_trusted_oob_material(redrive, oob_material_provider))
+        oob_ref = _live_oob_redrive_fact(prov, info,
+                                         _with_trusted_oob_material(redrive, oob_material_provider, info))
         if oob_ref:
             return oob_ref
 

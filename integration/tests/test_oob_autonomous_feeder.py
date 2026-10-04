@@ -267,6 +267,25 @@ def test_enrichment_replaces_producer_material_with_the_trusted_feeder_on_a_non_
     assert out["oob_material"]["collector_keypair"] is not atk, "the attacker keypair must be gone"
 
 
+def test_enrichment_mirrors_the_consumer_info_bug_class_resolution():
+    # The consumer (_live_oob_redrive_fact) resolves the class from redrive.bug_class OR info.bug_class.
+    # _with_trusted_oob_material mirrors that EXACT resolution, so a spec whose OOB class lives ONLY in `info`
+    # (not on the spec) is still OOB-consumable ⇒ the TRUSTED feeder bundle is injected — no legit FACT is
+    # dropped by a strip/inject-vs-consume scope asymmetry (fail-closed false-negative the re-red-pen flagged).
+    info = {"bug_class": "ssrf"}
+    spec = {"kind": "web", "url": "http://127.0.0.1:1/oobtest/fetch"}   # NO bug_class on the spec itself
+    trusted = {"collector_keypair": object(), "collector_pubkey": "TRUSTED-PIN"}
+    out = _with_trusted_oob_material(spec, lambda: trusted, info)
+    assert out.get("oob_material", {}).get("collector_pubkey") == "TRUSTED-PIN", (
+        "a class carried only in `info` must still be OOB-consumable (mirror the consumer) so the feeder bundle "
+        "is injected — strip/inject scope must equal the consume scope")
+    # and producer material on that SAME shape is STILL stripped (unconditional strip, no feeder ⇒ LEAD):
+    atk = _collector_keypair()
+    forged = {"kind": "web", "url": "http://127.0.0.1:1/oobtest/fetch",
+              "oob_material": {"collector_keypair": atk, "collector_pubkey": atk.public_key_b64}}
+    assert "oob_material" not in _with_trusted_oob_material(forged, None, info)
+
+
 def test_governed_seam_refuses_producer_material_on_a_non_oob_kind_spec_end_to_end(hermetic_root, monkeypatch):
     # END-TO-END RED-PEN REGRESSION: the full governed oracle seam, driven by the red-pen's exact spec shape
     # (kind="web", OOB bug_class, a SELF-CONSISTENT attacker bundle) with NO feeder wired, mints NOTHING.
