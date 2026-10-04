@@ -131,6 +131,8 @@ HA_UNITS: tuple[UnitSpec, ...] = (
              "signed posture re-proof series (every 30m)"),
     UnitSpec("vigil-reprove.service", "vigil-reprove.timer", 6 * 3600, 300,
              "continuous re-proof of confirmed findings (every 6h)"),
+    UnitSpec("vigil-twin.service", "vigil-twin.timer", 6 * 3600, 300,
+             "standing twin — re-project the signed spine into a stored advisory worldmodel snapshot (every 6h)"),
     UnitSpec("vigil-checkpoint.service", "vigil-checkpoint.timer", 15 * 60, 60,
              "scheduled off-box witnessed-checkpoint emitter — anti-rollback anchor (every 15m)"),
 )

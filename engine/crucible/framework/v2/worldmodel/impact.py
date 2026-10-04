@@ -16,6 +16,12 @@ business-impact weight — and the read-only decision helpers that consume it:
   * `what_if_remediate` — a pure counterfactual: if these edges were fixed, which crown
     jewels become unreachable, and how much impact is removed — reusing `_reaches`, no
     graph mutation, no traffic.
+  * `predict_action_blast_radius` — the FORWARD sibling of `what_if_remediate`: if an action
+    OPENED a set of edges, which crown jewels become NEWLY reachable from the action's source,
+    and how much impact does it INCREMENTALLY expose — computed over an adjacency AUGMENTED with
+    the opened edges (a local augmented BFS, never a write to the graph), no mutation, no traffic.
+    ADVISORY: it informs a pre-action gate/operator decision; it mints no FACT and is never an
+    oracle input.
 
 Everything here is read-only over the world-model and additive: absent an impact.yaml,
 paths and portfolios score exactly as they did.
@@ -23,6 +29,7 @@ paths and portfolios score exactly as they did.
 
 from __future__ import annotations
 
+from collections import deque
 from pathlib import Path
 from typing import Iterable
 
@@ -133,6 +140,25 @@ class WhatIfResult(BaseModel):
     impact_remaining: float = 0.0
 
 
+class ForwardBlastResult(BaseModel):
+    """The counterfactual outcome of an action that OPENS a set of edges — the forward sibling of
+    :class:`WhatIfResult`. Where WhatIfResult answers "if we REMOVE these edges, which crown jewels
+    can the attacker no longer reach, and how much impact is removed", this answers "if this action
+    ADDS these edges, which crown jewels does it NEWLY reach, and how much impact does it
+    incrementally expose". Mirrors WhatIfResult field-for-field: ``opened_edges`` ↔ remediated_edges,
+    ``newly_reachable_jewels`` ↔ now_unreachable, ``already_reachable_jewels`` ↔ still_reachable,
+    ``incremental_blast`` ↔ impact_removed, ``baseline_blast`` ↔ impact_remaining."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    action_src: str = ""
+    opened_edges: list[str] = Field(default_factory=list)
+    newly_reachable_jewels: list[str] = Field(default_factory=list)    # crown jewels this action opens
+    already_reachable_jewels: list[str] = Field(default_factory=list)  # reachable before it (the baseline)
+    incremental_blast: float = 0.0    # Σ impact of the jewels this action NEWLY exposes
+    baseline_blast: float = 0.0       # Σ impact of the jewels already reachable before it
+
+
 def _fmt_key(k) -> str:
     """A readable rendering of an edge key tuple (src, dst, kind)."""
     if isinstance(k, (tuple, list)) and len(k) == 3:
@@ -172,4 +198,92 @@ def what_if_remediate(
         now_unreachable=unreachable, still_reachable=reachable,
         impact_removed=round(sum(impact.impact_of_id(world, o) for o in unreachable), 4),
         impact_remaining=round(sum(impact.impact_of_id(world, o) for o in reachable), 4),
+    )
+
+
+def _reachable_augmented(
+    world: WorldModel,
+    src: str,
+    edge_kinds: Iterable[EdgeKind] | None,
+    opened_adj: dict[str, list[str]],
+) -> set[str]:
+    """The FORWARD sibling of ``pathsearch._reaches``: the set of node ids reachable from ``src``
+    over ``edge_kinds`` when ``opened_adj`` (a ``src -> [dst]`` map of hypothetically-opened edges)
+    is ADDED to the real adjacency. ``_reaches`` tests one target over an EXCLUDED edge set; this
+    accumulates the whole reachable set over an AUGMENTED one.
+
+    Read-only: the opened edges are followed only out of the caller's local ``opened_adj`` map and
+    are NEVER written to ``world``. Matches ``WorldModel.reachable``'s BFS semantics (``src`` enters
+    the result only if a cycle — real or opened — routes back to it), so with an empty ``opened_adj``
+    the result is exactly ``world.reachable(src, edge_kinds)`` and ``after ⊇ before`` always holds."""
+    seen: set[str] = set()
+    queue: deque[str] = deque([src])
+    while queue:
+        cur = queue.popleft()
+        for edge in world.out_edges(cur, edge_kinds):      # the real graph (never mutated)
+            nxt = edge.dst
+            if nxt not in seen:
+                seen.add(nxt)
+                queue.append(nxt)
+        for nxt in opened_adj.get(cur, ()):                # the hypothetically-opened edges
+            if nxt not in seen:
+                seen.add(nxt)
+                queue.append(nxt)
+    return seen
+
+
+def predict_action_blast_radius(
+    world: WorldModel,
+    action_src: str,
+    opened_edges: Iterable[tuple[str, str]],
+    objective_kinds: Iterable[NodeKind],
+    *,
+    edge_kinds: Iterable[EdgeKind] | None = None,
+    impact: ImpactModel | None = None,
+) -> ForwardBlastResult:
+    """Pure FORWARD counterfactual — the sibling of :func:`what_if_remediate`. If an action at
+    ``action_src`` OPENED ``opened_edges`` (``(src, dst)`` node-id pairs — the new reachability the
+    action would create), which crown jewels become NEWLY reachable from ``action_src``, and how
+    much business impact does that incrementally expose?
+
+    ``before`` is the crown jewels ``action_src`` already reaches over ``edge_kinds``; ``after`` is
+    what it reaches once ``opened_edges`` are added to the adjacency (via an augmented BFS that
+    mirrors ``_reaches``). The INCREMENTAL jewels (``after − before``) and their summed impact are
+    the action's blast radius — the ``baseline_blast`` (what was already exposed) is carried
+    separately so a veto can reason about the delta, not the total.
+
+    Read-only and offline: the opened edges are followed in a local augmented BFS and are NEVER
+    written to ``world`` (no mutation, no traffic). ADVISORY only — this informs a pre-action gate or
+    operator decision; it mints no FACT and is never an oracle input. Because ``after`` is computed
+    over a superset of ``before``'s adjacency from the same source, the incremental set and its blast
+    are always ≥ 0."""
+    impact = impact or ImpactModel.uniform()
+    eks = list(edge_kinds) if edge_kinds is not None else None
+
+    opened_adj: dict[str, list[str]] = {}
+    opened_pairs: list[tuple[str, str]] = []
+    for pair in opened_edges:
+        s, d = pair
+        opened_adj.setdefault(s, []).append(d)
+        opened_pairs.append((s, d))
+
+    jewels: set[str] = set()
+    for kind in objective_kinds:
+        for node in world.nodes_of_kind(kind):
+            if node.id != action_src:
+                jewels.add(node.id)
+
+    before_all = set(world.reachable(action_src, eks))
+    after_all = _reachable_augmented(world, action_src, eks, opened_adj)
+
+    before_jewels = sorted(before_all & jewels)
+    newly = sorted((after_all & jewels) - before_all)   # jewels in `after` that were not in `before`
+
+    return ForwardBlastResult(
+        action_src=action_src,
+        opened_edges=sorted(f"{s} --> {d}" for s, d in opened_pairs),
+        newly_reachable_jewels=newly,
+        already_reachable_jewels=before_jewels,
+        incremental_blast=round(sum(impact.impact_of_id(world, j) for j in newly), 4),
+        baseline_blast=round(sum(impact.impact_of_id(world, j) for j in before_jewels), 4),
     )

@@ -53,7 +53,7 @@ class AuthorizationDecision(BaseModel):
     denial_code: str = Field(
         default="",
         description="halted | expired | out_of_scope | destructive | "
-        "live_destructive | budget — empty when allowed.",
+        "live_destructive | budget | blast_radius — empty when allowed.",
     )
     checked_at: datetime
 

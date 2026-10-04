@@ -200,6 +200,15 @@ def _attack_paths(argv: list[str]) -> int:
     return attack_paths_mod.main(argv)
 
 
+def _twin(argv: list[str]) -> int:
+    # The STANDING TWIN: `twin refresh --once` re-projects the latest signed spine into a
+    # stored, ADVISORY worldmodel snapshot (JSON). Deterministic; read-only; no traffic.
+    # The snapshot is never an oracle input and never mints a FACT. LAZY import — the sibling
+    # of attack-paths — so the scan/engage/benchmark gate path never loads worldmodel.
+    from .worldmodel import twin_refresh as twin_refresh_mod
+    return twin_refresh_mod.main(argv)
+
+
 def _status(argv: list[str]) -> int:
     """One-shot environment summary: which backends are reachable, which
     paths resolve, which optional deps are installed."""
@@ -288,6 +297,7 @@ _DISPATCH: dict[str, Callable[[list[str]], int]] = {
     "report": _report,
     "spine-cert": _spine_cert,
     "attack-paths": _attack_paths,
+    "twin": _twin,
     "collaborator": _collaborator,
     "benchmark": _benchmark,
     "calibration": _calibration,

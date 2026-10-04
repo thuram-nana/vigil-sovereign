@@ -7,8 +7,11 @@ It is modeled line-for-line on :mod:`governor.offense_gate` (the fail-closed, ow
 auto-expiring offense gate), with ONE capability added: a distinct EVALUATOR proves possession of their own
 owner-enrolled key by COUNTER-SIGNING the exact attestation the owner signs. The evaluator PoP is purely
 ADDITIVE admission — it binds a DISTINCT evaluator identity to the arming decision; it is NEVER a governance
-key. The OWNER key remains the sole governance signer; a forged, unsigned, wrong-charter, wrong-environment,
-expired, replayed, or evaluator-unsigned "attestation" arms NOTHING.
+key, and :meth:`EvalOffenseAttestation.attest` ENFORCES that distinctness: it refuses, before any spine
+write, a mint whose ``evaluator_pubkey`` is the owner's own key (a self-attestation would collapse the
+two-party control to the owner key alone). The OWNER key remains the sole governance signer; a forged,
+unsigned, wrong-charter, wrong-environment, expired, replayed, self-attested, or evaluator-unsigned
+"attestation" arms NOTHING.
 
 Defaults UNATTESTED (arming denied). Like the offense gate:
   * the signed CORE carries the charter binding (id+hash), the environment, the expiry (``not_after``) AND
@@ -169,18 +172,34 @@ class EvalOffenseAttestation:
         """Owner-sign an EvalOffenseAttestation binding exactly ``(engagement_slug, charter_id, charter_hash,
         environment)``, expiring at ``not_after`` (unix seconds), anti-replay-bound by a strictly-increasing
         ``issued_at``. The ADDITIVE evaluator PoP (``evaluator_pop``) is verified here against the evaluator's
-        OWNER-ENROLLED ``Account.user_pubkey`` (a DISTINCT identity, never the owner's) — so a mint requires
-        BOTH the owner signature AND a genuine counter-signature by the enrolled evaluator. Only the owner key
-        produces a signature the fold will honour; the evaluator PoP alone arms nothing."""
+        OWNER-ENROLLED ``Account.user_pubkey``, which is ENFORCED to be DISTINCT from the owner key: a mint
+        whose ``evaluator_pubkey`` equals the owner's own signing/pinned key is REFUSED before any spine write
+        (M-11.1 two-party control — the owner cannot self-attest). So a mint requires BOTH the owner signature
+        AND a genuine counter-signature by a DISTINCT enrolled evaluator. Only the owner key produces a
+        signature the fold will honour; the evaluator PoP alone arms nothing."""
         if self.owner_key is None:
             raise ValueError("attest requires the owner signing key")
         if not engagement_slug or not charter_id or not charter_hash:
             raise ValueError("attest requires engagement_slug, charter_id and charter_hash to bind to")
         if not evaluator or not evaluator_pubkey:
             raise ValueError("attest requires the evaluator username and its enrolled pubkey")
-        # The evaluator PoP must be by a DISTINCT, owner-ENROLLED identity — look the account up and require
+        # M-11.1 TWO-PARTY DISTINCTNESS (red-pen §11.4 BLOCK 1): the evaluator MUST be a DISTINCT identity from
+        # the owner. Refuse — BEFORE any spine write — to mint a SELF-attestation whose evaluator_pubkey is the
+        # owner's own signing/pinned key. Without this, if the owner key were ALSO enrolled as an account
+        # (accounts.enroll_pubkey places no such guard), the owner could satisfy the enrollment + PoP checks
+        # below by signing BOTH slots, collapsing the two-party control to the owner key alone. The offense-side
+        # verifier refuses the identical shape independently, so the control holds at BOTH the mint and the arm.
+        # Compared against the SAME canonical base64 the owner identity is stored under.
+        _owner_pub = getattr(self.owner_key, "public_key_b64", None)
+        if str(evaluator_pubkey) in {k for k in (_owner_pub, self.trusted_pubkey) if k}:
+            raise ValueError(
+                "evaluator must be DISTINCT from the owner — refusing to mint a self-attestation "
+                "(evaluator_pubkey equals the owner key; the M-11.1 two-party control requires an independent, "
+                "owner-enrolled evaluator identity, never the owner's own key)")
+        # The evaluator PoP must additionally be by an owner-ENROLLED identity — look the account up and require
         # the supplied pubkey to be exactly the one the owner enrolled (accounts.enroll_pubkey). This is the
-        # SAME primitive server._login_pop / ui.login_challenges use (Account.user_pubkey).
+        # SAME primitive server._login_pop / ui.login_challenges use (Account.user_pubkey). (Distinctness FROM
+        # the owner key is enforced just above, before this lookup.)
         from .accounts import AccountsRegistry
         try:
             acct = AccountsRegistry(self.store).account(evaluator)
@@ -269,6 +288,16 @@ class EvalOffenseAttestation:
                     continue  # the destructive-floor echo must be False — never honour one claiming otherwise
                 if not verify_signed(payload, _CORE, resolver.at(record.seq)):
                     continue  # forged/unsigned owner sig (or wrong key at this seq) — no effect
+                # M-11.1 TWO-PARTY DISTINCTNESS (red-pen §11.4 BLOCK 1 — defense-in-depth with attest()):
+                # verify_signed just proved this record's OWNER sig against the owner key valid at its seq
+                # (payload['pubkey']). If evaluator_pubkey equals THAT owner key, or the current pinned owner,
+                # the "co-sign" is the owner signing both slots — a self-attestation that collapses the
+                # two-party control. attest() already refuses to MINT one, so a record reaching the fold with
+                # evaluator==owner was appended OUTSIDE the ceremony (e.g. a compromised owner writing the
+                # spine directly); the READ path refuses to HONOUR it too — no effect, no high-water consume —
+                # so assert_eval_offense_attested / add_target cannot be fooled either.
+                if payload.get("evaluator_pubkey") in {payload.get("pubkey"), self.trusted_pubkey}:
+                    continue  # self-attestation: the evaluator is the owner key — not an independent co-signer
                 core = {k: payload.get(k) for k in _CORE}
                 if not _verify_pop(core, payload.get("evaluator_sig")):
                     continue  # missing/forged evaluator PoP — the ADDITIVE identity proof failed, no effect

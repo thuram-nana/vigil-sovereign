@@ -365,3 +365,74 @@ def test_rolledback_pre_revoke_publication_is_detected_and_refused(env):
     write_eval_attestations(env["base"], _SLUG, [att], seal=_seal_for(owner, [att], seq=1))
     ok3, reason = _verify(env["base"], owner)
     assert ok3 is False and "ROLLBACK" in reason
+
+
+# === M-11.1 red-pen §11.4 BLOCK 1: the evaluator MUST be DISTINCT from the owner (two-party control) ====
+# The DISTINCT two-party control collapses to the owner key alone if an attestation whose evaluator_pubkey
+# EQUALS a pinned owner key is allowed to ARM — a unilateral/compromised owner then arms weaponized LIVE
+# offense WITHOUT the independent evaluator's co-sign. A self-attestation (the owner signing the owner-sig,
+# the evaluator-PoP, AND the seal — the exact repro the red-pen used) MUST be refused by the verifier and by
+# ALL THREE arm sites; a GENUINE distinct evaluator still arms (positive control, proving the guard is not
+# over-broad).
+def test_verify_evaluator_equals_owner_is_refused(env):
+    owner = generate_keypair()
+    _publish(env["base"], owner, owner)       # evaluator_pubkey == owner key; owner signs both slots + seal
+    ok, reason = verify_live_offense_attested(
+        env["base"], engagement_slug=_SLUG, trusted_owner_pubkeys=[owner.public_key_b64], now=_NOW)
+    assert ok is False
+    assert "DISTINCT" in reason and "self-attestation" in reason
+
+
+def test_self_attestation_does_not_arm_any_of_the_three_sites(env):
+    owner = generate_keypair()
+    tr = _provision(owner)
+    _publish(env["base"], owner, owner)       # the exact self-attestation the red-pen minted
+    # arm site 1/3 — console launch gate
+    assert actions._has_verified_authority(_SLUG) is False
+    assert actions._has_verified_authority(_SLUG, _HOST) is False
+    # arm site 2/3 — engage trust-root pin
+    with pytest.raises(EngagementRefused) as ei:
+        _engage_authority_trust_root(_SLUG)
+    assert "eval-offense attestation" in str(ei.value)
+    # arm site 3/3 — conjunctive offense gate (every target-touching action)
+    v = _gate(tr, env["base"])("http_get", f"http://{_HOST}/")
+    assert v.outcome == "deny" and v.allowed is False
+    assert v.crucible_allowed is False and "M-11.1" in v.reason
+
+
+def test_distinct_evaluator_still_arms_positive_control(env):
+    # POSITIVE CONTROL: the SAME shape with a genuine DISTINCT evaluator arms unchanged at the verifier and at
+    # all three sites — the distinctness guard refuses ONLY the owner-as-evaluator collapse.
+    owner, ev = generate_keypair(), generate_keypair()
+    tr = _provision(owner)
+    _publish(env["base"], owner, ev)
+    ok, _ = verify_live_offense_attested(
+        env["base"], engagement_slug=_SLUG, trusted_owner_pubkeys=[owner.public_key_b64], now=_NOW)
+    assert ok is True
+    assert actions._has_verified_authority(_SLUG) is True
+    assert _engage_authority_trust_root(_SLUG) is not None
+    v = _gate(tr, env["base"])("http_get", f"http://{_HOST}/")
+    assert "M-11.1" not in v.reason
+
+
+def test_evaluator_matching_a_non_signing_pinned_owner_key_is_refused(env):
+    # VARIANT (multi-owner trust root): the record is owner-signed + sealed by owner A, but its evaluator_pubkey
+    # is owner B — another PINNED owner authorizer, NOT an independent evaluator. Membership in the pinned set
+    # (not just equality to the signing key) must still refuse it, so no owner authorizer can stand in as the
+    # evaluator for another.
+    owner_a, owner_b = generate_keypair(), generate_keypair()
+    _write(env["base"], [_att_record(owner_a, owner_b)], seal_owner=owner_a)
+    ok, reason = verify_live_offense_attested(
+        env["base"], engagement_slug=_SLUG,
+        trusted_owner_pubkeys=[owner_a.public_key_b64, owner_b.public_key_b64], now=_NOW)
+    assert ok is False and "DISTINCT" in reason
+
+
+def test_verify_pop_defense_in_depth_rejects_a_self_pop(env):
+    # DEFENSE-IN-DEPTH: the private PoP verifier itself refuses an evaluator key that is a pinned owner key —
+    # so even a future caller that bypassed the explicit loop guard cannot honour a self-attestation (two
+    # independent refusals at different layers). A genuine distinct evaluator PoP still verifies.
+    owner, ev = generate_keypair(), generate_keypair()
+    pinned = frozenset({owner.public_key_b64})
+    assert _eva._verify_pop(_att_record(owner, owner), pinned) is False   # evaluator == pinned owner → refused
+    assert _eva._verify_pop(_att_record(owner, ev), pinned) is True       # genuine distinct evaluator → verifies

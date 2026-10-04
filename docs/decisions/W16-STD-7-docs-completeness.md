@@ -32,7 +32,7 @@ true in-tree.
 | D3 | `docs/AS-BUILT-LIVE.md` | `test_engine_live.py`, **5 tests** (a stale UNDERclaim) | count dropped (it had grown to 19) |
 | D4 | `docs/AS-BUILT-LIVE.md` | the **22nd** screen | "one of the UI's screens" — the authoritative count lives in the `NAV` allowlist and is pinned by `test_documented_commands_and_screen_count.py` (the UI has 32) |
 | D5 | `README.md` | deterministic oracle **(~33 kinds)** (a stale UNDERclaim) | **(~38 kinds)** — `OracleKind` has 38 members |
-| D6 | `README.md` | `vigil doctor` example: **0/7 systemd timers** | **0/9** — `infra/systemd` ships 9 `.timer` units |
+| D6 | `README.md` | `vigil doctor` example: **0/7 systemd timers** | **0/10** — `infra/systemd` ships 10 `.timer` units (W16-STD-7 corrected 0/7→0/9; M4.5 added `vigil-twin.timer`, so the code fact is now 10) |
 
 Every one of D1/D5/D6 is re-anchored to a **code fact** the guard re-checks (the sandbox flag, the
 `OracleKind` member count, the `.timer` file count); D2/D3 were UNDERclaims fixed by removing the brittle

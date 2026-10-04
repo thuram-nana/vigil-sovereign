@@ -64,6 +64,7 @@ locks shut.)
 | `crucible erase-evidence` | W16-8 right-to-erasure: crypto-shred an engagement's at-rest credential-bearing evidence without breaking the append-only spine. |
 | `crucible report` | Assemble the executive / technical / remediation reports from the findings. |
 | `crucible attack-paths` | READ-ONLY graph triage over the asset topology: shortest attack path, chokepoints, blast radius. |
+| `crucible twin` | The standing twin: `twin refresh --once` re-projects the latest signed spine into a stored, ADVISORY worldmodel snapshot (JSON). Deterministic; read-only; never an oracle input (never mints a FACT). |
 | `crucible collaborator` | The out-of-band (OOB) collaborator relay used by blind SSRF/XXE/RCE/deserialization checks. |
 | `crucible benchmark` | Run the signed benchmark corpus. |
 | `crucible calibration` | The confidence-calibration report (predicted vs measured). |

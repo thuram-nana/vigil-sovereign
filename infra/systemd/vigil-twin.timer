@@ -1,0 +1,34 @@
+# VIGIL standing-twin timer — fires the oneshot on a cadence.
+# =====================================================================
+# THIS is the "standing" in "standing twin": it fires vigil-twin.service on
+# a schedule, so the stored advisory worldmodel snapshot is re-projected
+# from the latest signed spine on every cadence and the twin tracks the
+# spine head across time.
+#
+# Enable with:
+#   systemctl --user enable --now vigil-twin.timer
+#   systemctl --user list-timers 'vigil-*'     # confirm next run
+#
+# HONEST RESIDUAL: the stored twin is only ever as current as the LAST fire
+# of this timer — it is a cadence snapshot, not a live view. Tighten
+# OnCalendar for a fresher twin. (The snapshot is ADVISORY regardless: it is
+# never an oracle input and never mints a FACT.)
+
+[Unit]
+Description=Cadence trigger for the VIGIL standing twin
+Documentation=file:%h/vigil/docs/CLI-REFERENCE.md
+
+[Timer]
+# Every 6 hours, at a minute offset so it does not stampede with other jobs.
+# Tighten (e.g. hourly / */15) for a fresher twin; loosen to reduce load.
+# (The cadence here mirrors unit_alerts.py::HA_UNITS vigil-twin entry: 6h.)
+OnCalendar=*-*-* 00/6:09:00
+# If the machine was asleep/off at the scheduled time, run once on the next
+# wake instead of skipping the window entirely.
+Persistent=true
+# Smear the start by up to 5 min so many hosts do not fire simultaneously.
+RandomizedDelaySec=300
+Unit=vigil-twin.service
+
+[Install]
+WantedBy=timers.target

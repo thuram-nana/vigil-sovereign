@@ -1462,7 +1462,7 @@
       "id": "W16-STD-7-vigil-cli-coverage",
       "title": "Every vigil native verb and passthrough verb is documented (bidirectional)",
       "claim": "The set below is the authoritative list;\na new sub-parser that is not documented here turns the required check red.",
-      "source": "docs/CLI-REFERENCE.md:122",
+      "source": "docs/CLI-REFERENCE.md:123",
       "enforced_by": {
         "file": "docs/tests/test_w16_std7_docs_completeness.py",
         "symbol": "documented_vigil_verbs"
