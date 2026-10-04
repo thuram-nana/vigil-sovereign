@@ -1803,26 +1803,56 @@ def _governed_oob_material(prov: Provisioned, config: "EngineConfig") -> "Option
     return material
 
 
+def _spec_is_oob_consumable(redrive: dict) -> bool:
+    """True iff :func:`_live_oob_redrive_fact` would treat this spec as an OOB-redrive class — the SAME surface
+    the consumer gates on (``kind == "oob"`` OR ``bug_class ∈ OOB_REDRIVE_CLASSES``). ``_with_trusted_oob_material``
+    scopes its TRUSTED injection to exactly this predicate, so Lock #1's strip (which is unconditional) and its
+    inject share the consumer's surface — closing the strip-on-kind / consume-on-bug_class mismatch. The
+    ``kind == "oob"`` arm needs no import (the router's own shape), so the legit path never depends on the
+    framework import; the ``bug_class`` arm mirrors the consumer's own function-local import and fails closed."""
+    if redrive.get("kind") == "oob":
+        return True
+    try:
+        from framework.v2.verify.verifier import normalize_bug_class  # noqa: PLC0415
+        from .runtime_redrive import OOB_REDRIVE_CLASSES  # noqa: PLC0415 (framework at CALL — FATAL-2)
+    except Exception:  # noqa: BLE001 — module unavailable ⇒ not consumable ⇒ no injection (fail-closed)
+        return False
+    return normalize_bug_class(str(redrive.get("bug_class") or "")) in OOB_REDRIVE_CLASSES
+
+
 def _with_trusted_oob_material(redrive: "Optional[dict]",
                                provider: "Optional[Callable[[], Optional[dict]]]") -> "Optional[dict]":
     """Return the redrive spec with its ``oob_material`` sourced SOLELY from the trusted ``provider`` (the
-    governed-engage OOB feeder). For an ``oob``-kind spec this STRIPS any producer-supplied ``oob_material``
-    (``engine._redrive_spec`` never sets it — this is defense-in-depth) and sets ONLY the feeder's bundle when
-    one is available, so the TRUSTED channel is the SOLE source of the material (the triple-lock). A non-oob
-    spec, a missing provider, or a feeder that yields nothing leaves the OOB seam with NO material ⇒ the claim
-    stays a LEAD (fail-closed, default-off byte-identical when no feeder is wired). Never raises (a feeder
-    error ⇒ no material)."""
-    if not isinstance(redrive, dict) or redrive.get("kind") != "oob":
+    governed-engage OOB feeder). Lock #1 of the triple-lock, and a TRUE independent lock: it UNCONDITIONALLY
+    strips any producer-supplied ``oob_material`` from EVERY spec — of ANY ``kind`` — because the consumer
+    :func:`_live_oob_redrive_fact` gates on ``bug_class ∈ OOB_REDRIVE_CLASSES`` (NOT on ``kind``). Keying the
+    strip on ``kind == "oob"`` would let a non-"oob"-kind spec carrying an OOB ``bug_class`` pass producer
+    material straight through to the consumer — a defense-in-depth collapse; so the strip is keyed on the same
+    surface the consumer reads (every spec). ``engine._redrive_spec`` never sets ``oob_material``, so in
+    production (and default-off, no feeder) this is a no-op and byte-identical; the strip is pure defense-in-
+    depth. When a feeder is wired it sets ONLY the feeder's bundle, so the TRUSTED channel is the SOLE source
+    (the consumer then filters by ``bug_class``, so an injected bundle on a non-OOB spec is inert). A missing
+    provider, or a feeder that yields nothing, leaves the OOB seam with NO material ⇒ the claim stays a LEAD
+    (fail-closed). Never raises (a feeder error ⇒ no material)."""
+    if not isinstance(redrive, dict):
         return redrive
+    had_material = "oob_material" in redrive
+    consumable = _spec_is_oob_consumable(redrive)
+    # Nothing to strip AND not a target for trusted injection ⇒ return the spec UNCHANGED (identity; the
+    # byte-identical no-op for every non-OOB spec and the production default-off path).
+    if not had_material and (provider is None or not consumable):
+        return redrive
+    # Lock #1 STRIP — unconditional: remove ANY producer-supplied oob_material (the strip is keyed on NOTHING,
+    # so it covers every spec of every kind, closing the strip-on-kind / consume-on-bug_class mismatch).
     base = {k: v for k, v in redrive.items() if k != "oob_material"}
-    if provider is None:
-        return base
+    if provider is None or not consumable:
+        return base                         # strip-only: producer material removed, no trusted source ⇒ LEAD
     try:
         material = provider()
     except Exception:  # noqa: BLE001 — a feeder error ⇒ no material ⇒ LEAD (fail-closed)
         return base
     if isinstance(material, dict) and material:
-        base["oob_material"] = material
+        base["oob_material"] = material     # the TRUSTED feeder bundle is the SOLE source of the key
     return base
 
 
@@ -1913,9 +1943,10 @@ def _build_oracle(
         # TRUSTED-CHANNEL ENRICHMENT (the triple-lock in force): the oob_material is threaded onto the spec HERE,
         # in the trusted wiring, SOLELY from the governed-engage feeder bound at provisioning (the signed
         # authority + the deployment collector key) — NEVER from the model. _with_trusted_oob_material is the
-        # SOLE writer of the key: for an OOB spec it strips any producer-supplied material and sets only the
-        # feeder's bundle (or none when OOB is unprovisioned / a forged collector). No feeder wired (the
-        # default) ⇒ no material ⇒ the seam fail-closes to a LEAD, byte-identical to today.
+        # SOLE writer of the key: it UNCONDITIONALLY strips any producer-supplied material from EVERY spec (of
+        # any kind — the consumer gates on bug_class, not kind) and sets only the feeder's bundle (or none when
+        # OOB is unprovisioned / a forged collector). No feeder wired (the default) ⇒ no material ⇒ the seam
+        # fail-closes to a LEAD, byte-identical to today.
         oob_ref = _live_oob_redrive_fact(prov, info, _with_trusted_oob_material(redrive, oob_material_provider))
         if oob_ref:
             return oob_ref

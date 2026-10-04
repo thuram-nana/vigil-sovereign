@@ -232,9 +232,61 @@ def test_enrichment_strips_a_model_supplied_material_and_is_fail_closed_without_
 
 
 def test_enrichment_leaves_non_oob_specs_untouched():
+    # A spec that is NOT OOB-consumable (non-"oob" kind AND a non-OOB bug_class) is returned UNCHANGED
+    # (identity) — the byte-identical no-op. open_redirect is not in OOB_REDRIVE_CLASSES.
     web = {"kind": "web", "url": "http://x/", "bug_class": "open_redirect"}
     assert _with_trusted_oob_material(web, lambda: {"collector_keypair": object()}) is web
     assert _with_trusted_oob_material(None, lambda: {"collector_keypair": object()}) is None
+
+
+def test_enrichment_strips_producer_material_on_a_NON_oob_kind_spec_with_an_oob_bug_class():
+    # RED-PEN REGRESSION (the BLOCK): the consumer _live_oob_redrive_fact gates on bug_class ∈
+    # OOB_REDRIVE_CLASSES, NOT on kind. A spec whose kind is NOT "oob" but whose bug_class IS an OOB class,
+    # carrying a producer/model-supplied (even SELF-CONSISTENT: keypair + its own pubkey as the pin)
+    # oob_material, must have that material STRIPPED — Lock #1 is keyed on the consumer's surface, not kind.
+    atk = _collector_keypair()
+    forged = {"kind": "web", "url": "http://127.0.0.1:1/oobtest/fetch", "bug_class": "ssrf",
+              "oob_material": {"collector_keypair": atk, "collector_pubkey": atk.public_key_b64}}
+    out = _with_trusted_oob_material(forged, None)   # default-off: no trusted feeder
+    assert "oob_material" not in out, (
+        "producer oob_material on a non-'oob'-kind spec carrying an OOB bug_class MUST be stripped "
+        "(strip-on-kind / consume-on-bug_class mismatch = the defense-in-depth collapse)")
+    # a feeder that yields nothing also leaves NO material on such a spec.
+    assert "oob_material" not in _with_trusted_oob_material(forged, lambda: None)
+
+
+def test_enrichment_replaces_producer_material_with_the_trusted_feeder_on_a_non_oob_kind_oob_class_spec():
+    # With a trusted feeder wired, the attacker bundle on a non-"oob"-kind OOB-class spec is REPLACED by the
+    # feeder's bundle — the feeder is the SOLE source of the key, even on this surface (never the producer's).
+    atk = _collector_keypair()
+    forged = {"kind": "web", "url": "http://127.0.0.1:1/oobtest/fetch", "bug_class": "ssrf",
+              "oob_material": {"collector_keypair": atk, "collector_pubkey": atk.public_key_b64}}
+    trusted = {"collector_keypair": object(), "collector_pubkey": "TRUSTED-PIN"}
+    out = _with_trusted_oob_material(forged, lambda: trusted)
+    assert out["oob_material"]["collector_pubkey"] == "TRUSTED-PIN", "the feeder bundle must win"
+    assert out["oob_material"]["collector_keypair"] is not atk, "the attacker keypair must be gone"
+
+
+def test_governed_seam_refuses_producer_material_on_a_non_oob_kind_spec_end_to_end(hermetic_root, monkeypatch):
+    # END-TO-END RED-PEN REGRESSION: the full governed oracle seam, driven by the red-pen's exact spec shape
+    # (kind="web", OOB bug_class, a SELF-CONSISTENT attacker bundle) with NO feeder wired, mints NOTHING.
+    # Without the fix this minted a real signed OOB FACT from the model's own material.
+    _grant_active_recon(monkeypatch)
+    _write_charter("gov-nonoob")
+    prov = provision_authority(slug="gov-nonoob", scope=["127.0.0.1"])
+    oracle = _build_oracle(prov)   # no feeder (default-off)
+    atk = _collector_keypair()
+    srv = _serve_benchmark()
+    port = srv.server_address[1]
+    try:
+        spec = {"kind": "web", "url": f"http://127.0.0.1:{port}/oobtest/fetch", "bug_class": "ssrf",
+                "oob_material": {"collector_keypair": atk, "collector_pubkey": atk.public_key_b64}}
+        ref = oracle("", _analysis("ssrf"), redrive=spec)
+    finally:
+        srv.shutdown()
+    assert ref is None, (
+        "a producer-supplied oob_material on a non-'oob'-kind OOB-class spec must be stripped — the model can "
+        "never mint an OOB FACT through the kind/bug_class mismatch")
 
 
 # ===================================================================================================
