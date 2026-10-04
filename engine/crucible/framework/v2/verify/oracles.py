@@ -1269,6 +1269,73 @@ def _eval_predicate(pred: Any, observed: Mapping[str, Any]) -> tuple[bool, str]:
     raise ValueError(f"unknown predicate op {op!r}")
 
 
+def _operand_binds_captured(operand: Any, observed: Mapping[str, Any]) -> bool:
+    """True iff ``operand`` is a ``{"var": key}`` reference whose key resolves to a REAL
+    captured value in ``observed`` (present AND not None). A literal, or a ``var`` whose key is
+    absent / None (not actually captured), does NOT bind — it adjudicates nothing about the target."""
+    if isinstance(operand, Mapping) and set(operand.keys()) == {"var"}:
+        return observed.get(operand["var"]) is not None
+    return False
+
+
+# Terminal comparison ops that are a TAUTOLOGY when their two operands are structurally identical
+# (``a == a`` / ``a >= a`` / ``a contains a`` — always TRUE) vs a CONTRADICTION (``a > a`` — always FALSE).
+# ``min_len`` / ``in`` over identical operands are value-dependent, so they are flagged as neither.
+_REFLEXIVE_TRUE_OPS: "frozenset[str]" = frozenset({"eq", "ieq", "ge", "contains", "icontains"})
+_REFLEXIVE_FALSE_OPS: "frozenset[str]" = frozenset({"gt"})
+
+
+def _predicate_binds_and_const(pred: Any, observed: Mapping[str, Any]) -> "tuple[bool, bool, bool]":
+    """Walk the predicate AST (the SAME grammar :func:`_eval_predicate` enforces) and return
+    ``(binds_captured, constant_true, constant_false)``:
+
+      * ``binds_captured`` — at least one operand ANYWHERE in the tree is a ``{"var": key}`` bound to a real
+        captured value in ``observed`` (see :func:`_operand_binds_captured`). An all-literal predicate
+        (``{"eq": ["x", "x"]}``) binds NOTHING.
+      * ``constant_true`` — the predicate is a STRUCTURAL tautology: it fires for ALL values of its captured
+        vars (so its firing cannot depend on any captured value — it adjudicates nothing). Derived through
+        the tree: a self-comparison leaf under a reflexive-true op; ``all`` ⇔ every child constant-true;
+        ``any`` ⇔ some child constant-true; ``not`` ⇔ the child is constant-false.
+      * ``constant_false`` — the dual (always-false), tracked only so ``not`` can prove constant-true.
+
+    This is the S1 soundness pre-gate: the caller REFUSES a predicate that binds no captured value OR is
+    constant-true. NOTE it is a WHOLE-PREDICATE property — a self-comparison CONJUNCT inside an ``all`` that
+    also has real captured-evidence clauses (e.g. the liveness anchor ``sha==sha``) is NOT degenerate, because
+    the ``all`` is constant-true only if EVERY clause is. Raises ``ValueError`` on a malformed node (mirroring
+    :func:`_eval_predicate`), so the caller funnels it into the existing malformed (non-conclusive) branch."""
+    if not isinstance(pred, Mapping) or len(pred) != 1:
+        raise ValueError(f"predicate node must be a single-op mapping, got {pred!r}")
+    op, args = next(iter(pred.items()))
+    if op in ("all", "any"):
+        if not isinstance(args, (list, tuple)) or not args:
+            raise ValueError(f"{op!r} requires a non-empty list of sub-predicates")
+        binds = False
+        child_true: list[bool] = []
+        child_false: list[bool] = []
+        for p in args:
+            b, ct, cf = _predicate_binds_and_const(p, observed)
+            binds = binds or b
+            child_true.append(ct)
+            child_false.append(cf)
+        if op == "all":
+            return binds, all(child_true), any(child_false)
+        return binds, any(child_true), all(child_false)
+    if op == "not":
+        b, ct, cf = _predicate_binds_and_const(args, observed)
+        return b, cf, ct   # not X is constant-true iff X is constant-false, and vice versa
+    if op not in ("eq", "ieq", "contains", "icontains", "in", "min_len", "gt", "ge"):
+        raise ValueError(f"unknown predicate op {op!r}")
+    if not isinstance(args, (list, tuple)) or not args:
+        raise ValueError(f"{op!r} requires operand(s)")
+    has_second = len(args) > 1
+    left, right = args[0], (args[1] if has_second else None)
+    identical = has_second and left == right
+    const_true = identical and op in _REFLEXIVE_TRUE_OPS
+    const_false = identical and op in _REFLEXIVE_FALSE_OPS
+    binds = _operand_binds_captured(left, observed) or (has_second and _operand_binds_captured(right, observed))
+    return binds, const_true, const_false
+
+
 def predicate_oracle(observed_evidence: Mapping[str, Any], predicate: Any) -> OracleSignal:
     """Evaluate a dangerous CONDITION over RAW observed values — the fix for the
     achieved-state rubber-stamp.
@@ -1280,8 +1347,37 @@ def predicate_oracle(observed_evidence: Mapping[str, Any], predicate: Any) -> Or
     identities' bodies, the accepted/rejected statuses, the concurrent successes)
     plus a declarative predicate, and THIS oracle decides — emitting evidence that
     cites the values it judged. The predicate is a pure JSON AST, so the finding's
-    certificate re-verifies offline exactly like every other oracle."""
+    certificate re-verifies offline exactly like every other oracle.
+
+    S1 SOUNDNESS PRE-GATE (Lane S — the headline fix): the predicate must be BOUND to captured
+    evidence and must not be a constant-true tautology. A producer-authored all-literal predicate like
+    ``{"eq": ["x", "x"]}`` (or a whole-predicate self-comparison such as ``{"eq": [{"var":"k"},{"var":"k"}]}``)
+    adjudicates NO captured value — yet it previously fired at 0.9/conclusive and minted an ACHIEVED_STATE
+    FACT for the ~40 classes routed here (idor/bola/bfla/open_redirect/cors/jwt/...). It now REFUSES: at
+    least one operand must be a ``{"var": <key>}`` that resolves to a real captured value in
+    ``observed_evidence``, AND the predicate as a whole must not be a structural tautology (its firing must be
+    able to depend on a captured value). This is a WHOLE-PREDICATE property — a self-comparison CONJUNCT
+    inside an ``all`` that also carries real captured-evidence clauses (e.g. a liveness anchor ``sha==sha``)
+    is NOT degenerate. The refusal is a NON-firing, NON-conclusive signal (nothing was adjudicated over
+    captured evidence — like the malformed branch), so it can never be a FACT and never a channel-confirmed
+    CLEAN."""
     observed = dict(observed_evidence or {})
+    try:
+        binds_captured, constant_true, _constant_false = _predicate_binds_and_const(predicate, observed)
+    except (ValueError, TypeError) as e:
+        return OracleSignal(
+            kind=OracleKind.ACHIEVED_STATE, fired=False, confidence=0.0,
+            evidence=f"malformed predicate: {e}", observed={"predicate": predicate})
+    if constant_true or not binds_captured:
+        reason = ("predicate is a constant-true tautology — its firing cannot depend on any captured value"
+                  if constant_true else
+                  "predicate references no captured observed value — every operand is a literal or an "
+                  "unresolved var; a dangerous-condition proof must adjudicate at least one {'var': <key>} "
+                  "bound to a real value in observed_evidence")
+        return OracleSignal(
+            kind=OracleKind.ACHIEVED_STATE, fired=False, confidence=0.0, conclusive=False,
+            evidence=f"REFUSED (unsound predicate): {reason}",
+            observed={"predicate": predicate, "values": observed})
     try:
         fired, evidence = _eval_predicate(predicate, observed)
     except (ValueError, TypeError) as e:
@@ -1324,6 +1420,21 @@ def achieved_state_oracle(
     matched = {k: v for k, v in expected.items() if k in observed and observed[k] == v}
     mismatched = {k: v for k, v in expected.items() if k not in matched}
     full = len(matched) == len(expected)
+
+    # S1 SOUNDNESS GATE (Lane S): the match must be against GENUINELY CAPTURED observed keys, not a
+    # producer echo of its own expectation. A full match can only arise when every expected key is present
+    # in observed (keys(expected) ⊆ keys(observed)); if additionally keys(observed) ⊆ keys(expected) then
+    # observed is the EXACT echo of expected (observed == expected) and introduces no captured key beyond
+    # the attacker's prediction — indistinguishable from the producer supplying expected==observed to
+    # rubber-stamp a FACT. A genuine captured record (the resource that should have been denied) carries
+    # keys BEYOND the predicted subset (ids, other columns). REFUSE the echo as a non-firing, non-conclusive
+    # signal — nothing was adjudicated over genuinely captured state.
+    if full and set(observed).issubset(set(expected)):
+        return OracleSignal(
+            kind=OracleKind.ACHIEVED_STATE, fired=False, confidence=0.0, conclusive=False,
+            evidence=("REFUSED (unsound achieved-state): observed_state introduces no captured key beyond "
+                      "the expectation — it is an echo of expected_state, not a genuinely captured record"),
+            observed={"expected": expected, "observed": observed})
 
     confidence = 0.9 if full else (len(matched) / len(expected)) * 0.5
     evidence = (

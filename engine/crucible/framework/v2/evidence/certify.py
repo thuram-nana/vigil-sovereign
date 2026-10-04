@@ -73,6 +73,7 @@ def build_certificate(
     artifact_encoding: str = "",
     witness_quorum_required: int = 0,
     witness_kinds: "list[str] | None" = None,
+    provenance: str = "reproduced",
 ) -> EvidenceCertificate:
     """Build an (unsigned) certificate from a serialized finding carrying an
     `oracle_context`. If an evidence dir is given, its raw artifacts are manifested by
@@ -84,6 +85,22 @@ def build_certificate(
     N-of-M oracle-witness quorum the FACT was admitted under, so offline verification re-checks it.
     0 / None (the default) ⇒ the certificate serialises byte-identically (dropped from canonical form)."""
     oracle_context = finding.get("oracle_context") or {}
+    # S2 SAME-SHAPE CLASS-BIND AT BIRTH (Lane S): a certificate is byte-sound at mint only if the oracle
+    # that FIRED is a valid confirmer for the class it certifies — the SAME deterministic predicate the PCF
+    # verifier re-checks (``evidence.pcf.verify_pcf`` step 5) and the integration mint choke enforce. Derive
+    # the gate from the fired oracle (``confirmed_by``), never the (possibly echoed) class alone, and REFUSE
+    # to build a cert whose ``confirmed_by`` does not prove its ``bug_class`` — so a relabelled mint cannot be
+    # signed and mint == verify_pcf. Only guards a cert that CLAIMS a fired oracle (``confirmed_by`` set): a
+    # cert with no ``confirmed_by`` is not a FACT-grade oracle cert and is built byte-identically as before.
+    _confirmed_by = str(finding.get("confirmed_by", "")).strip()
+    if _confirmed_by:
+        from ..verify.verifier import oracle_confirms_class  # local: avoid an evidence<->verify import cycle
+        _bc = str(finding.get("bug_class", "")).strip()
+        if not oracle_confirms_class(_confirmed_by, _bc):
+            raise ValueError(
+                f"refusing to build an unsound certificate: oracle {_confirmed_by!r} is not a valid "
+                f"confirmer for class {_bc!r} (S2 class-bind — a relabelled FACT cannot be minted; "
+                f"mint == verify_pcf step 5)")
     artifacts = []
     if evidence_root is not None and action_id:
         artifacts = manifest_dir(Path(evidence_root) / action_id, root=Path(evidence_root))
@@ -130,6 +147,9 @@ def build_certificate(
         # M4.4 witness quorum (dropped-when-empty → byte-identical when a caller passes none).
         witness_quorum_required=int(witness_quorum_required or 0),
         witness_kinds=sorted({str(k) for k in (witness_kinds or [])}),
+        # S4 (Lane S): bind the oracle-context provenance into the signed cert. Dropped from the canonical
+        # form for a reproduced value (serializer) → byte-identical for every FACT; see EvidenceCertificate.
+        provenance=str(provenance or finding.get("provenance", "") or "reproduced"),
     )
 
 
@@ -427,7 +447,11 @@ def verify_certificate(
     rr = reverify_context(
         oracle_context, bug_class=cert.bug_class,
         claimed_confirmed_by=cert.confirmed_by, claimed_confidence=cert.confidence,
-        ref=cert.finding_ref)
+        ref=cert.finding_ref,
+        # S4 (Lane S): re-establish the oracle-context provenance OFFLINE — a non-reproduced provenance
+        # (e.g. an LLM-authored context) does not reproduce as a FACT. Byte-identical for every existing cert
+        # (absent ⇒ the "reproduced" default).
+        provenance=cert.provenance)
 
     claims_grounded, claims_note = _claims_grounded(cert, oracle_context)
 

@@ -80,8 +80,9 @@ def _reverify_cached(
     bug_class: str,
     claimed_confirmed_by: str | None,
     claimed_confidence: float | None,
+    provenance: str,
 ) -> ReverifyResult:
-    """Memoized re-execution keyed on the canonical evidence bytes + the claim under the
+    """Memoized re-execution keyed on the canonical evidence bytes + the claim + the provenance under the
     DEFAULT deterministic verifier. Determinism-safe: a pure function of its key, so the
     memo can only ever elide a recompute that would have produced the identical result;
     it never changes an output (replay / `make gate` stay byte-identical). The result is
@@ -89,7 +90,7 @@ def _reverify_cached(
     return _reverify_context_impl(
         json.loads(oracle_json), bug_class=bug_class,
         claimed_confirmed_by=claimed_confirmed_by,
-        claimed_confidence=claimed_confidence, ref="finding", verifier=None)
+        claimed_confidence=claimed_confidence, ref="finding", verifier=None, provenance=provenance)
 
 
 def reverify_context(
@@ -100,24 +101,30 @@ def reverify_context(
     claimed_confidence: float | None = None,
     ref: str = "finding",
     verifier: OracleVerifier | None = None,
+    provenance: str = "reproduced",
 ) -> ReverifyResult:
     """Re-run the deterministic oracle over a retained FindingContext dict.
 
     Memoized on the DEFAULT verifier path (``verifier is None``): identical
-    (oracle_context, bug_class, claimed_confirmed_by, claimed_confidence) re-fires the
+    (oracle_context, bug_class, claimed_confirmed_by, claimed_confidence, provenance) re-fires the
     oracle at most once. A caller-supplied ``verifier`` bypasses the memo (it may carry a
     different threshold / behaviour, so its result is not cache-shareable). The returned
-    object is always a fresh copy, so a caller may mutate it without corrupting the memo."""
+    object is always a fresh copy, so a caller may mutate it without corrupting the memo.
+
+    ``provenance`` (S4 / Lane S): the oracle_context's origin, re-checked OFFLINE. A non-reproduced
+    provenance (not ``reproduced`` / ``live_redrive``) is NOT a FACT — it does not reproduce — so "an
+    LLM-authored context can never be a FACT" is re-establishable offline, not only enforced at mint. The
+    DEFAULT ``"reproduced"`` keeps every existing caller (which passes nothing) byte-identical."""
     if verifier is None:
         key = _cache_key(oracle_context)
         if key is not None:
-            cached = _reverify_cached(key, bug_class, claimed_confirmed_by, claimed_confidence)
+            cached = _reverify_cached(key, bug_class, claimed_confirmed_by, claimed_confidence, provenance)
             # fresh copy carrying the caller's ref — never hand back the shared cached object.
             return cached.model_copy(update={"finding_ref": ref})
     return _reverify_context_impl(
         oracle_context, bug_class=bug_class,
         claimed_confirmed_by=claimed_confirmed_by,
-        claimed_confidence=claimed_confidence, ref=ref, verifier=verifier)
+        claimed_confidence=claimed_confidence, ref=ref, verifier=verifier, provenance=provenance)
 
 
 def _reverify_context_impl(
@@ -128,10 +135,25 @@ def _reverify_context_impl(
     claimed_confidence: float | None = None,
     ref: str = "finding",
     verifier: OracleVerifier | None = None,
+    provenance: str = "reproduced",
 ) -> ReverifyResult:
     """The uncached re-execution. See :func:`reverify_context` for the public contract."""
     verifier = verifier or OracleVerifier()
     has_claim = claimed_confirmed_by is not None or claimed_confidence is not None
+
+    # S4 (Lane S) RE-VERIFIABLE PROVENANCE: a FACT's oracle_context must come from a non-LLM channel
+    # (``reproduced`` / ``live_redrive``). A context declared with any other provenance does NOT reproduce
+    # offline — even if the pure oracle would fire over it — because a crafted-but-firing LLM context is
+    # exactly the route to a FACT the mint-time gate (oracle_adapter 2b) closes; this re-establishes that
+    # gate OFFLINE. Fail-closed BEFORE re-firing.
+    from ..evidence.models import _REPRODUCED_PROVENANCE  # local: avoid a verify<->evidence import cycle
+    if provenance not in _REPRODUCED_PROVENANCE:
+        return ReverifyResult(
+            finding_ref=ref, reproduced=False,
+            matches_claim=False if has_claim else None,
+            note=(f"oracle_context provenance {provenance!r} is not a non-LLM channel "
+                  f"({sorted(_REPRODUCED_PROVENANCE)}) — not a FACT offline (S4 re-verifiable provenance)"),
+        )
 
     try:
         ctx = FindingContext.model_validate(oracle_context)
@@ -273,6 +295,9 @@ def reverify_finding(finding: dict, *, ref: str | None = None,
         claimed_confirmed_by=finding.get("confirmed_by"),
         claimed_confidence=finding.get("confidence"),
         ref=r, verifier=verifier,
+        # S4 (Lane S): a finding/cert that DECLARES a non-reproduced provenance is not a FACT offline. Absent
+        # (every existing finding) ⇒ "reproduced" ⇒ byte-identical behaviour.
+        provenance=str(finding.get("provenance", "reproduced") or "reproduced"),
     )
     # M4.4 — OFFLINE WITNESS-QUORUM HONOR (demote-only). A finding minted under an operator-set N-of-M
     # oracle-witness quorum carries ``witness_quorum_required`` (+ the ``witness_kinds`` that satisfied it).

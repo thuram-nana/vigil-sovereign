@@ -329,6 +329,29 @@ def confirm_and_certify(
                 outcome=Outcome.UNSUPPORTED.value,
             )
 
+    # 2a2. S2 SAME-SHAPE CLASS-BIND AT THE MINT (Lane S). The certified class is DERIVED from the FIRED
+    #      oracle signal (``confirmed.confirmed_by``) and re-checked against the SAME deterministic predicate
+    #      the PCF verifier / reverify use at their claim-grounded step — ``oracle_confirms_class``
+    #      (verify/verifier.py; evidence/pcf.py verify_pcf step 5). The verifier only RUNS the oracles mapped
+    #      to the declared class, but a signed FACT is actually MINTED here, so the binding is re-asserted at
+    #      the choke: an oracle that is not a valid confirmer for the certified class — the hallmark of a
+    #      relabel / an echoed ctx class the fired signal does not prove — is REFUSED as a labelled lead,
+    #      never signed. This makes the mint byte-sound at birth and mint == verify_pcf. (STATIC_RULE's
+    #      stricter rule_id→class derivation is handled above at 2a; this is the general same-shape check
+    #      for every oracle kind, so no generic ACHIEVED_STATE/SIDE_EFFECT fire can certify a class it does
+    #      not prove.)
+    _confirmed_by = _kind_str(confirmed.confirmed_by)
+    if not oracle_confirms_class(_confirmed_by, confirmed_class):
+        return AdapterResult(
+            "lead",
+            f"oracle {_confirmed_by!r} is not a valid confirmer for the certified class {confirmed_class!r} "
+            f"— the FIRED signal does not prove the claimed class; retained as a labelled lead, not a signed "
+            f"fact (S2 class-bind at the mint choke; mint == verify_pcf step 5)",
+            confirmed_class, _finding_ref(finding),
+            confirmed_by=_confirmed_by, confidence=float(confirmed.confidence),
+            outcome=Outcome.UNSUPPORTED.value,
+        )
+
     # 2b. sovereign anti-hallucination gate (audit G4) — a signed FACT requires the oracle_context to be
     #     REPRODUCED from a non-LLM channel. An LLM-provenanced context (the model's own extracted_info)
     #     that fires is retained as a labelled LEAD, never signed — a crafted-but-firing context must not
@@ -383,7 +406,11 @@ def confirm_and_certify(
     cert = build_certificate(enriched, engagement_slug=engagement_slug, seq=seq,
                              report_claims=list(report_claims) if report_claims else None,
                              witness_quorum_required=(_q.required if _q.applicable else 0),
-                             witness_kinds=(list(_q.kinds) if _q.applicable else None), **d2)
+                             witness_kinds=(list(_q.kinds) if _q.applicable else None),
+                             # S4 (Lane S): bind the proven provenance into the signed cert so the offline
+                             # re-verify re-establishes it. Reached only past the 2b gate, so it is always a
+                             # reproduced value here → the cert serialises byte-identically.
+                             provenance=provenance, **d2)
     signed = sign_certificate(cert, signers)
     return AdapterResult(
         "fact",

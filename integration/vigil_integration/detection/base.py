@@ -278,6 +278,18 @@ def reverify_certificate(
         oracle = resolve(cert.oracle)
         if not isinstance(oracle, DetectionOracle):
             return False
+        # S5 (Lane S): RE-DERIVE the authoritative identity from the RESOLVED ORACLE INSTANCE, never trust the
+        # producer-controlled cert strings. A detection certificate is signature-gated (step 1 covers oracle +
+        # bug_class + verdict), so this is defense-in-depth that CLOSES THE SHAPE: a verifier that re-runs an
+        # oracle must re-derive the class/verdict from the instance it re-ran, not match only signature_kind —
+        # otherwise a cert whose bug_class disagrees with the oracle that produces it (a relabel to a
+        # higher-severity class, or an oracle-registry drift under a reused name) would still re-verify.
+        if str(getattr(oracle, "name", "")) != str(cert.oracle):
+            return False
+        if str(getattr(oracle, "bug_class", "")) != str(cert.bug_class):
+            return False
+        if str(getattr(cert, "verdict", "")) != "fact":   # a certificate is only ever a FACT (certificate.py)
+            return False
         records = oracle._records_from_evidence(cert.evidence)
         hit = oracle._safe_evaluate(records)
         if hit is None:

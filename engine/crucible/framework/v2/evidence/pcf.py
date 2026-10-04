@@ -117,7 +117,7 @@ def _require_reproducible_or_refuse(cert: EvidenceCertificate, oracle_context: A
     from ..verify.reverify import reverify_context
     rr = reverify_context(oracle_context, bug_class=str(cert.bug_class or ""),
                           claimed_confirmed_by=cert.confirmed_by, claimed_confidence=cert.confidence,
-                          ref=cert.finding_ref)
+                          ref=cert.finding_ref, provenance=cert.provenance)
     if not rr.ok:
         raise PcfExportError(
             f"certificate {cert.finding_ref!r} does not reproduce offline "
@@ -252,7 +252,10 @@ def verify_pcf(pcf_cert: Any, trust_root: Any, *, evidence_root: Any = None) -> 
     from ..verify.oracle_version import oracle_version as _oracle_version
     from ..verify.reverify import reverify_context
     rr = reverify_context(oc, bug_class=cert.bug_class, claimed_confirmed_by=cert.confirmed_by,
-                          claimed_confidence=cert.confidence, ref=cert.finding_ref)
+                          claimed_confidence=cert.confidence, ref=cert.finding_ref,
+                          # S4 (Lane S): re-establish the oracle-context provenance OFFLINE — a non-reproduced
+                          # provenance (e.g. an LLM-authored context) is not a FACT, re-checked by reverify.
+                          provenance=cert.provenance)
     if not rr.ok:
         return _reject("oracle", f"oracle did not reproduce the verdict ({rr.note or 'no re-fire'})")
     current = _oracle_version(cert.confirmed_by)

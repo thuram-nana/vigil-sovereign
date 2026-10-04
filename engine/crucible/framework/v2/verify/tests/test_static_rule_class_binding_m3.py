@@ -91,6 +91,17 @@ def _project_pcf(signed, oc: dict) -> dict:
     return view
 
 
+def _signed_relabel_cert(oc: dict, signers):
+    """A signed RELABEL certificate obtained PAST the S2 build-time class-bind (which now REFUSES a relabel at
+    birth — see ``test_build_certificate_refuses_a_relabel_at_the_mint``). Mirrors a pre-S2 / hand-assembled
+    certificate: build it CONSISTENT (its rule_id's own class), then relabel the ``bug_class`` on the model and
+    re-sign. This keeps the DOWNSTREAM to_pcf / verify_pcf relabel refusals under test — the point of this
+    module — now that the relabel can no longer be minted through build_certificate directly."""
+    base = build_certificate(_finding(oc, "static_broken_crypto", slug="relabel"))
+    relabelled = base.model_copy(update={"bug_class": "static_taint"})
+    return sign_certificate(relabelled, signers[:2])
+
+
 # ---------------------------------------------------------------------------
 # (1) CONSTRUCTION — from_code_region refuses a mismatched bug_class.
 # ---------------------------------------------------------------------------
@@ -148,10 +159,17 @@ def test_reverify_demotes_a_relabel_and_reconfirms_a_consistent_static_fact():
 # (3) PCF EXPORT + VERIFY — to_pcf refuses a relabel; verify_pcf rejects at the oracle step.
 # ---------------------------------------------------------------------------
 
+def test_build_certificate_refuses_a_relabel_at_the_mint():
+    # S2 (Lane S): the EARLIEST refusal — build_certificate re-checks oracle_confirms_class and will not even
+    # BUILD a cert whose confirmed_by (static_rule) does not prove the claimed LEAD-only class (static_taint).
+    with pytest.raises(ValueError, match="not a valid confirmer"):
+        build_certificate(_finding(_relabel_oc(), "static_taint", slug="relabel"))
+
+
 def test_to_pcf_refuses_to_export_a_relabel_and_exports_a_consistent_fact():
     _tr, signers = _trust_root()
     relabel = _relabel_oc()
-    signed = sign_certificate(build_certificate(_finding(relabel, "static_taint", slug="relabel")), signers[:2])
+    signed = _signed_relabel_cert(relabel, signers)   # past the S2 build guard, to test to_pcf's own refusal
     with pytest.raises(PcfExportError):
         to_pcf(signed, oracle_context=relabel)
     # positive control: a consistent static fact exports, byte-faithful to the signed cert.
@@ -165,7 +183,7 @@ def test_to_pcf_refuses_to_export_a_relabel_and_exports_a_consistent_fact():
 def test_verify_pcf_rejects_a_relabel_at_the_oracle_step_and_verifies_a_consistent_fact():
     tr, signers = _trust_root()
     relabel = _relabel_oc()
-    signed = sign_certificate(build_certificate(_finding(relabel, "static_taint", slug="relabel")), signers[:2])
+    signed = _signed_relabel_cert(relabel, signers)   # past the S2 build guard (see dedicated test above)
     pcf = _project_pcf(signed, relabel)   # a hand-built / pre-fix PCF, past to_pcf's own guard
     r = verify_pcf(pcf, tr)
     assert not r.verified and r.step == "oracle", f"relabel PCF verified or wrong step: {r.step}: {r.reason}"
