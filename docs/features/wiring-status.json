@@ -47,6 +47,32 @@
       "rationale": "Native verb dispatched in-process; parser registered and handler resolves."
     },
     {
+      "id": "cli.fleet",
+      "name": "vigil fleet",
+      "surface": "cli-native",
+      "status": "LIVE",
+      "verb": "fleet",
+      "anchor": {
+        "file": "integration/vigil_integration/cli.py",
+        "symbol": "_cmd_fleet_status"
+      },
+      "check": "cli-native-verb",
+      "rationale": "WS3 cross-VM fleet operations: read-only monitor roll-up (status) + owner-authorized kill fan-out (kill); parser registered, handlers resolve in-process."
+    },
+    {
+      "id": "cli.sign-revocation",
+      "name": "vigil sign-revocation",
+      "surface": "cli-native",
+      "status": "LIVE",
+      "verb": "sign-revocation",
+      "anchor": {
+        "file": "integration/vigil_integration/cli.py",
+        "symbol": "_cmd_sign_revocation"
+      },
+      "check": "cli-native-verb",
+      "rationale": "WS3 owner-signed entitlement revocation verb feeding the fleet kill-switch; parser registered and handler resolves."
+    },
+    {
       "id": "cli.approve",
       "name": "vigil approve",
       "surface": "cli-native",
