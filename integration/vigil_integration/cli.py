@@ -3363,6 +3363,158 @@ def _cmd_emergency_stop(args: argparse.Namespace) -> int:
     return 0
 
 
+def _print_fleet_rollup(snap: dict) -> None:
+    """Render the read-only fleet roll-up (WS3). Instances are pre-sorted by id in :func:`fold_roster`, so
+    the printout is deterministic. Nothing here feeds a gate — it is an operator view only."""
+    instances = snap.get("instances") or []
+    totals = snap.get("totals") or {}
+    print(f"=== vigil fleet — {len(instances)} instance(s) (read-only roll-up over the signed spine) ===")
+    for inst in instances:
+        att = inst.get("attestation") or {}
+        tgts = inst.get("attested_targets") or []
+        tgt_str = ", ".join(tgts) if tgts else "-"
+        print(f"  {inst.get('instance_id', '?'):<20} att={att.get('status', '?'):<18} "
+              f"targets={tgt_str}")
+        print(f"  {'':<20} eng={inst.get('engagements', 0)} cmd={inst.get('commands', 0)} "
+              f"events={inst.get('spine_events', 0)} facts={inst.get('facts', 0)} "
+              f"leads={inst.get('leads', 0)} refusals={inst.get('refusals', 0)} "
+              f"findings={inst.get('findings', 0)}  (snapshot={inst.get('snapshot_status', '?')}, "
+              f"records={att.get('records', 0)})")
+    att_t = totals.get("attestation") or {}
+    snap_t = totals.get("snapshots") or {}
+    print(f"--- fleet totals: instances={totals.get('instances', 0)}  "
+          f"eng={totals.get('engagements', 0)} cmd={totals.get('commands', 0)} "
+          f"events={totals.get('spine_events', 0)} facts={totals.get('facts', 0)} "
+          f"leads={totals.get('leads', 0)} refusals={totals.get('refusals', 0)} "
+          f"findings={totals.get('findings', 0)} ---")
+    print(f"    attestation: verified={att_t.get('verified', 0)} present={att_t.get('present', 0)} "
+          f"records={att_t.get('records', 0)}  by_status={att_t.get('by_status', {})}")
+    print(f"    attested targets (fleet): {att_t.get('attested_targets', []) or '-'}")
+    print(f"    snapshots: by_status={snap_t.get('by_status', {})}")
+
+
+def _cmd_fleet_status(args: argparse.Namespace) -> int:
+    """`vigil fleet status --roster <path> [--out <path>]` (WS3) — the read-only cross-VM FLEET MONITOR:
+    fold a roster of per-box telemetry snapshots (+ optional usage-attestation ledgers) into ONE operator
+    roll-up. PURE + ONE-WAY — it reflects only what each box's oracle+gate already recorded, mints nothing,
+    and is never an input to a gate. Deterministic (byte-identical on re-run of the same roster)."""
+    from .fleet_monitor import fold_roster, load_roster
+    try:
+        roster = load_roster(args.roster)
+    except ValueError as e:
+        print(f"vigil fleet status: {e}", file=sys.stderr)
+        return 2
+    snap = fold_roster(roster)
+    if getattr(args, "out", ""):
+        out = Path(args.out)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(json.dumps(snap, sort_keys=True, indent=2), encoding="utf-8")
+        print(f"vigil fleet status: wrote roll-up JSON to {out}")
+    _print_fleet_rollup(snap)
+    return 0
+
+
+def _cmd_fleet_kill(args: argparse.Namespace) -> int:
+    """`vigil fleet kill --roster <path> --revocation <signed.json> --yes [--reason ...]` (WS3) — the
+    fleet KILL-SWITCH fan-out: per instance, HARD-STOP the box (`run_panic`) and APPLY an OWNER-SIGNED
+    entitlement revocation. Owner authorization is UNCHANGED — the revocation must already be signed to the
+    trust root's m-of-n threshold (mint it with `vigil sign-revocation`); this verb only distributes it.
+    Fail-closed: no `--revocation` fails the revoke leg per instance (containment still runs); `--yes` is a
+    mandatory explicit confirmation for a destructive fleet-wide action."""
+    from .fleet_monitor import fan_out_kill, load_roster
+    try:
+        roster = load_roster(args.roster)
+    except ValueError as e:
+        print(f"vigil fleet kill: {e}", file=sys.stderr)
+        return 2
+    if not getattr(args, "yes", False):
+        print("vigil fleet kill: refusing a fleet-wide hard-stop without --yes (explicit confirmation). "
+              f"This would contain {len(roster)} instance(s) and apply an owner-signed revocation to each.",
+              file=sys.stderr)
+        return 2
+    signed = None
+    if getattr(args, "revocation", ""):
+        from framework.v2.entitlement.models import SignedRevocation
+        try:
+            signed = SignedRevocation.model_validate_json(Path(args.revocation).read_text(encoding="utf-8"))
+        except Exception as e:  # noqa: BLE001 — an unreadable/invalid revocation is NOT applied (fail-closed)
+            print(f"vigil fleet kill: could not load an owner-signed revocation from "
+                  f"{args.revocation!r}: {type(e).__name__}: {e}", file=sys.stderr)
+            return 2
+    else:
+        print("vigil fleet kill: WARNING — no --revocation supplied; the per-instance revoke leg is "
+              "fail-closed (containment still runs). Mint one with `vigil sign-revocation`.", file=sys.stderr)
+    report = fan_out_kill(roster, signed_revocation=signed, reason=(args.reason or "vigil fleet kill"))
+    t = report["totals"]
+    print(f"=== vigil fleet kill — {t['instances']} instance(s), reason={report['reason']!r} ===")
+    for r in report["instances"]:
+        p, rv = r["panic"], r["revoke"]
+        print(f"  {r['instance_id']:<20} panic={p.get('status', '?')} (ok={p.get('ok')})  "
+              f"revoke={rv.get('status', '?')} (ok={rv.get('ok')})")
+    print(f"--- contained {t['panic_ok']}/{t['instances']}; revoked {t['revoke_ok']}/{t['instances']} "
+          f"(refused={t['revoke_refused']}, error={t['revoke_error']}) ---")
+    # Non-zero exit if any leg did not fully complete, so a script notices a partial fan-out.
+    incomplete = (t["panic_ok"] < t["instances"]) or (t["revoke_ok"] < t["instances"])
+    return 3 if incomplete else 0
+
+
+def _cmd_sign_revocation(args: argparse.Namespace) -> int:
+    """`vigil sign-revocation --revoke <id> [--revoke <id> ...] --serial N --signers <signers.json>
+    [--issued-at ISO8601] [--out <path>]` (WS3) — the OWNER ceremony that signs an entitlement-revocation
+    list with authoriser private keys, wiring the existing `entitlement.provision.sign_revocation` library.
+
+    The signer bundle is a JSON map ``{key_id: private_key_b64}`` of authoriser crown-jewel keys (never in
+    source control). Supply at least the trust root's threshold — the m-of-n policy is UNCHANGED and is
+    enforced by the runtime when the revocation is consumed. The signed document is what `vigil fleet kill`
+    distributes across the roster."""
+    from framework.v2.entitlement.models import RevocationDocument
+    from framework.v2.entitlement.provision import sign_revocation, write_revocation
+
+    try:
+        signers = json.loads(Path(args.signers).read_text(encoding="utf-8"))
+    except Exception as e:  # noqa: BLE001 — no signer material ⇒ no signature (refuse, never a blank sign)
+        print(f"vigil sign-revocation: could not read the signer bundle {args.signers!r}: "
+              f"{type(e).__name__}: {e}", file=sys.stderr)
+        return 2
+    if not isinstance(signers, dict) or not signers:
+        print("vigil sign-revocation: the signer bundle must be a non-empty JSON object "
+              "{key_id: private_key_b64}", file=sys.stderr)
+        return 2
+    doc_kwargs = {"serial": int(args.serial), "revoked_entitlement_ids": list(args.revoke or [])}
+    if getattr(args, "issued_at", ""):
+        doc_kwargs["issued_at"] = args.issued_at
+    else:
+        from datetime import datetime, timezone
+        doc_kwargs["issued_at"] = datetime.now(timezone.utc)
+    try:
+        doc = RevocationDocument(**doc_kwargs)
+        signed = sign_revocation(doc, {str(k): str(v) for k, v in signers.items()})
+    except Exception as e:  # noqa: BLE001 — a malformed document / bad key surfaces clean, never a trace
+        print(f"vigil sign-revocation: could not sign the revocation: {type(e).__name__}: {e}",
+              file=sys.stderr)
+        return 2
+    out = Path(args.out) if getattr(args, "out", "") else None
+    written = write_revocation(signed, out)
+    # Advisory: compare the signer count against the trust root threshold if one is readable. This is a
+    # courtesy note only — the runtime remains the authority on m-of-n at consumption time.
+    note = ""
+    try:
+        from framework.v2.common import paths
+        from framework.v2.entitlement.models import TrustRoot
+        trp = paths.trust_root_path()
+        if trp.is_file():
+            tr = TrustRoot.model_validate_json(trp.read_text(encoding="utf-8"))
+            if len(signers) < int(getattr(tr, "threshold", 0) or 0):
+                note = (f"  WARNING: {len(signers)} signer(s) is BELOW the trust root threshold "
+                        f"{tr.threshold} — the runtime will REJECT this revocation until it meets m-of-n.")
+    except Exception:  # noqa: BLE001 — the advisory is cosmetic; never let it fail the signing
+        pass
+    print(f"vigil sign-revocation: signed revocation serial={signed.document.serial} over "
+          f"{len(signed.document.revoked_entitlement_ids)} entitlement id(s) with {len(signers)} "
+          f"signer(s) → {written}.{note}")
+    return 0
+
+
 def _cmd_knowledge(args: argparse.Namespace) -> int:
     """`vigil knowledge sync|push|status` (K6) — the operator-gated `knowledge/` → GitHub sync.
 
@@ -4945,6 +5097,46 @@ def build_parser() -> argparse.ArgumentParser:
                      help="record a deliberate LEAVE transition (clearing kill-switches stays separate)")
     pes.add_argument("--status", action="store_true", help="print the current mode and exit")
     pes.set_defaults(func=_cmd_emergency_stop)
+
+    pfl = sub.add_parser("fleet", help="cross-VM FLEET operations (WS3): a read-only monitor roll-up over "
+                                       "a roster of instances, and an owner-authorized kill-switch fan-out")
+    pfl_sub = pfl.add_subparsers(dest="fleet_action", required=True)
+    pfls = pfl_sub.add_parser("status", help="read-only cross-VM roll-up: fold a roster of per-box "
+                                             "telemetry snapshots (+ optional attestation ledgers) into one "
+                                             "operator view. PURE + ONE-WAY; never an input to a gate.")
+    pfls.add_argument("--roster", required=True,
+                      help="roster JSON: {\"instances\":[{instance_id, snapshot, attestation?}, ...]} — "
+                           "snapshot/attestation are paths to a telemetry snapshot JSON / usage-ledger JSONL")
+    pfls.add_argument("--out", default="", help="also write the roll-up JSON to this path (sorted, stable)")
+    pfls.set_defaults(func=_cmd_fleet_status)
+    pflk = pfl_sub.add_parser("kill", help="EMERGENCY fleet-wide HARD-STOP: per instance, contain the box "
+                                           "(run_panic) + apply an OWNER-SIGNED entitlement revocation. "
+                                           "m-of-n owner authorization UNCHANGED (mint with `sign-revocation`); "
+                                           "requires --yes and is fail-closed without --revocation.")
+    pflk.add_argument("--roster", required=True,
+                      help="roster JSON: instances carry {instance_id, base_dir, revocation_path}")
+    pflk.add_argument("--revocation", default="",
+                      help="path to an OWNER-SIGNED SignedRevocation JSON (from `vigil sign-revocation`); "
+                           "the revoke leg is fail-closed without it")
+    pflk.add_argument("--reason", default="", help="reason recorded in the fan-out report")
+    pflk.add_argument("--yes", action="store_true",
+                      help="REQUIRED explicit confirmation for the destructive fleet-wide hard-stop")
+    pflk.set_defaults(func=_cmd_fleet_kill)
+
+    psr = sub.add_parser("sign-revocation",
+                         help="OWNER ceremony: sign an entitlement-revocation list with authoriser private "
+                              "keys (wires entitlement.provision.sign_revocation). m-of-n UNCHANGED — supply "
+                              "at least the trust root threshold; the runtime enforces it at consumption.")
+    psr.add_argument("--revoke", action="append", default=[], metavar="ENTITLEMENT_ID",
+                     help="an entitlement id to revoke (repeatable)")
+    psr.add_argument("--serial", type=int, required=True,
+                     help="monotonically-increasing revocation serial (a newer list supersedes an older)")
+    psr.add_argument("--signers", required=True,
+                     help="JSON bundle {key_id: private_key_b64} of authoriser keys (owner-held, never in VCS)")
+    psr.add_argument("--issued-at", dest="issued_at", default="",
+                     help="ISO-8601 issuance time (default: now, UTC)")
+    psr.add_argument("--out", default="", help="output path (default: the entitlement revocation path)")
+    psr.set_defaults(func=_cmd_sign_revocation)
 
     pk = sub.add_parser("knowledge", help="operator-gated sync of the living knowledge/ folder to git "
                                           "(regenerate + secret-scan + commit; push is separate). NB: the "
