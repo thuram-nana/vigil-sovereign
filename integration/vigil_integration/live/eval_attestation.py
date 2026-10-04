@@ -9,8 +9,15 @@ pinned owner key before it will ARM weaponized offense on a LIVE target.
 This module is the TRANSPORT + the fail-closed VERIFIER; it holds NO private key and is the mirror image of
 ``authorization_broker`` (same atomic-write + path-safety discipline) plus a fold that mirrors the sovereign
 ``EvalOffenseAttestation.state`` — honouring any revoke, rejecting a forged owner sig, a missing/forged
-evaluator PoP, a wrong charter/environment, an expired, or a replayed (``issued_at`` below the high-water)
-record.
+evaluator PoP, an evaluator that is NOT DISTINCT from the owner (a self-attestation whose
+``evaluator_pubkey`` is itself a pinned owner key — the M-11.1 two-party control refuses it, so the owner's
+OWN pinned key cannot stand in as the evaluator; organizational independence of the evaluator key is an
+enrollment/operational property, not cryptographically enforced (the evaluator key is held by the independent evaluator, enrolled via the owner-run ceremony)),
+a wrong environment, an expired, or a replayed
+(``issued_at`` below the high-water) record. The CHARTER is checked ONLY when a ``charter_hash`` is supplied;
+the three arm sites supply none, so the charter binding here is the MINT-TIME consent recorded inside the
+owner-signed core, NOT an arm-time guarantee — the separately owner-signed EngagementAuthority is the
+enforced-scope boundary at arm time.
 
   ``<base>/eval-offense-attestations/<slug>.json`` — the owner-signed record list + the publish SEAL::
 
@@ -392,13 +399,24 @@ def _verify_owner(payload: dict, trusted_owner_pubkeys: frozenset) -> bool:
         return False
 
 
-def _verify_pop(payload: dict) -> bool:
+def _verify_pop(payload: dict, trusted_owner_pubkeys: frozenset) -> bool:
     """True iff the ADDITIVE evaluator PoP verifies, by ``payload['evaluator_pubkey']``, over the
-    domain-tagged core. Fail-closed."""
+    domain-tagged core AND the evaluator key is DISTINCT from every pinned owner key. Fail-closed.
+
+    The distinctness guard is the M-11.1 two-party control (red-pen §11.4 BLOCK 1): an owner key can never
+    stand in as the independent evaluator, so an ``evaluator_pubkey`` that is itself a pinned owner key is a
+    SELF-attestation and is refused here regardless of whether its PoP signature is otherwise valid. This is
+    the defense-in-depth layer; the caller (:func:`verify_live_offense_attested`) also refuses it explicitly
+    with an auditable reason, so BOTH an edit to the caller AND an edit here would have to drop the guard for
+    a self-attestation to arm. Comparison is exact-string membership, which IS canonical here: a verifiable
+    Ed25519 pubkey has exactly ONE accepted encoding (``crypto._b64decode_exact`` refuses non-canonical pad
+    bits and ``_reject_weak_public_key`` refuses a non-canonical ``y``), and the pins use the same strings."""
     pk = payload.get("evaluator_pubkey")
     sig = payload.get("evaluator_sig")
     if not pk or not isinstance(pk, str) or not sig or not isinstance(sig, str):
         return False
+    if pk in trusted_owner_pubkeys:
+        return False  # self-attestation: the "evaluator" is a pinned owner key, not an independent co-signer
     core = {k: payload.get(k) for k in _CORE}
     try:
         return verify_one(pk, _pop_signing_bytes(core), sig)
@@ -413,8 +431,15 @@ def verify_live_offense_attested(
     """``(attested, reason)``. The OFFENSE plane's fail-closed check that a verified EvalOffenseAttestation
     covers ``engagement_slug`` at ``now`` — reading the PUBLIC signed records from the seam and verifying them
     against the pinned owner key(s). Mirrors the sovereign fold: honour ANY revoke; reject a forged owner sig,
-    a missing/forged evaluator PoP, a wrong charter (when ``charter_hash`` given) / environment / destructive
-    echo, an expired, or a replayed (``issued_at`` below the high-water) record. NEVER raises."""
+    a missing/forged evaluator PoP, an evaluator that is NOT DISTINCT from the owner (``evaluator_pubkey`` in
+    the pinned owner keys — a SELF-attestation; the M-11.1 two-party control refuses it, so the owner's OWN
+    pinned key cannot stand in as the evaluator — organizational independence of the evaluator key is an
+    enrollment/operational property, not cryptographically enforced — the evaluator key is held by the independent evaluator org)),
+    a wrong environment / destructive echo, an
+    expired, or a replayed (``issued_at`` below the high-water) record. The CHARTER is checked ONLY when a
+    ``charter_hash`` is supplied; the three arm sites supply none, so the charter binding here is the MINT-TIME
+    consent carried in the owner-signed core, NOT an arm-time guarantee — the separately owner-signed
+    EngagementAuthority is the enforced-scope boundary at arm time. NEVER raises."""
     pinned = frozenset(p for p in (trusted_owner_pubkeys or ()) if isinstance(p, str) and p)
     if not pinned:
         return False, "no pinned owner key — cannot verify any eval-offense attestation (fail-closed)"
@@ -454,7 +479,21 @@ def verify_live_offense_attested(
                 continue
             if not _verify_owner(payload, pinned):
                 continue
-            if not _verify_pop(payload):
+            # M-11.1 TWO-PARTY DISTINCTNESS (red-pen §11.4 BLOCK 1): the evaluator identity MUST be DISTINCT
+            # from the owner authority. `_verify_owner` just proved this record is a genuine owner-signed
+            # attestation; if its `evaluator_pubkey` is itself a pinned owner key, the "co-sign" is the owner
+            # signing both slots — the two-party control has collapsed to the owner key alone, letting a
+            # unilateral or compromised owner arm weaponized LIVE offense with NO independent evaluator. Refuse
+            # fail-closed with an auditable reason. Exact membership IS the canonical comparison the pins use
+            # (a verifiable Ed25519 pubkey has exactly one accepted encoding — crypto._b64decode_exact refuses
+            # non-canonical pad bits, _reject_weak_public_key refuses a non-canonical y), and it catches the
+            # evaluator matching ANY pinned owner key, not only the one that signed this record.
+            if payload.get("evaluator_pubkey") in pinned:
+                return False, (
+                    "evaluator must be DISTINCT from the owner — refusing self-attestation "
+                    "(evaluator_pubkey is a pinned owner key; the M-11.1 two-party control requires an "
+                    "independent evaluator co-sign, not the owner key alone)")
+            if not _verify_pop(payload, pinned):
                 continue
             issued = _as_issued_at(payload.get("issued_at"))
             if issued <= max_issued:

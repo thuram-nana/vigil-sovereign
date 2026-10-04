@@ -260,6 +260,72 @@ def test_attest_refuses_an_unenrolled_or_mismatched_evaluator():
     assert user is not None
 
 
+def test_attest_refuses_a_self_attestation_evaluator_equals_owner():
+    """M-11.1 red-pen §11.4 BLOCK 1 (SOVEREIGN MINT): even if the OWNER key is also enrolled as an account
+    (so the enrollment + PoP checks would pass with the owner signing BOTH slots — the exact precondition the
+    red-pen used), attest() refuses to mint a SELF-attestation whose evaluator_pubkey is the owner's own key,
+    BEFORE any spine write. This is the two-party control enforced at the mint (the offense verifier enforces
+    the identical shape at the arm)."""
+    from sigil.governor.accounts import AccountsRegistry
+    from sigil.governor.eval_offense_attestation import build_core, sign_evaluator_pop
+    s = _store()
+    owner = _owner()
+    # Enroll the OWNER key itself as an account (enroll_pubkey places no owner-key guard) — the reachable
+    # precondition. WITHOUT the fix this mint would succeed and produce a self-attestation.
+    reg = AccountsRegistry(s, owner_key=owner)
+    reg.create("owner-as-eval", "operator", bearer_token="B" * 40, issued_at=_iss_())
+    reg.enroll_pubkey("owner-as-eval", owner.public_key_b64, issued_at=_iss_())
+    iat = _iss_()
+    core = build_core(engagement_slug=SLUG, charter_id=CID, charter_hash=CHASH,
+                      evaluator_pubkey=owner.public_key_b64, not_after=FUTURE, issued_at=iat)
+    pop = sign_evaluator_pop(core, owner.private_key_b64)      # the owner signs its own "evaluator" PoP
+    before = len(list(s.iter_records()))
+    with pytest.raises(ValueError) as ei:
+        _gate(s).attest(engagement_slug=SLUG, charter_id=CID, charter_hash=CHASH, evaluator="owner-as-eval",
+                        evaluator_pubkey=owner.public_key_b64, evaluator_pop=pop, not_after=FUTURE,
+                        issued_at=iat)
+    assert "DISTINCT" in str(ei.value) and "self-attestation" in str(ei.value)
+    # nothing was written to the spine (refused BEFORE the append) and the gate does not arm
+    assert len(list(s.iter_records())) == before
+    assert _gate(s).is_attested(engagement_slug=SLUG, now=NOW) is False
+
+
+def test_state_fold_refuses_a_self_attestation_appended_outside_attest():
+    """DEFENSE-IN-DEPTH (red-pen variant): a self-attestation appended DIRECTLY to the spine (bypassing the
+    attest() mint guard — e.g. a compromised owner writing the spine) is NOT honoured by the read fold, so
+    assert_eval_offense_attested / add_target cannot be fooled by it either. The owner signature + evaluator
+    PoP are BOTH genuine here (the owner signs both slots); only the evaluator==owner distinctness refuses it."""
+    from sigil.governor.authn import signed_payload
+    from sigil.governor.eval_offense_attestation import (
+        EvalOffenseAttestationMissing,
+        assert_eval_offense_attested,
+        build_core,
+        sign_evaluator_pop,
+    )
+    s = _store()
+    owner = _owner()
+    core = build_core(engagement_slug=SLUG, charter_id=CID, charter_hash=CHASH,
+                      evaluator_pubkey=owner.public_key_b64, not_after=FUTURE, issued_at=100.0)
+    pop = sign_evaluator_pop(core, owner.private_key_b64)      # owner signs its own "evaluator" PoP
+    payload = {**signed_payload(core, owner), "evaluator_sig": pop, "evaluator": "owner-as-eval",
+               "tier": "A0", "decision": "auto"}
+    s.append(kind="event", source="governor", actor="WARDEN", payload=payload)   # directly, not via attest()
+    assert _gate(s).is_attested(engagement_slug=SLUG, now=NOW) is False
+    with pytest.raises(EvalOffenseAttestationMissing):
+        assert_eval_offense_attested(s, engagement_slug=SLUG, now=NOW)
+
+
+def test_attest_still_mints_with_a_distinct_evaluator_positive_control():
+    """POSITIVE CONTROL: the SAME ceremony with a genuine DISTINCT enrolled evaluator still mints and arms —
+    the distinctness guard refuses only the owner-as-evaluator collapse, nothing legitimate."""
+    from sigil.governor.eval_offense_attestation import assert_eval_offense_attested
+    s = _store()
+    user = _enroll(s)                 # a DISTINCT evaluator keypair, owner-enrolled
+    _attest(s, user)
+    st = assert_eval_offense_attested(s, engagement_slug=SLUG, charter_hash=CHASH, now=NOW)
+    assert st.attested and st.evaluator_pubkey == user.public_key_b64
+
+
 def test_fresh_domain_tag_pop_without_the_tag_is_refused():
     """The evaluator PoP MUST sign under the fresh eval-offense-attestation domain tag. A PoP computed over
     the bare canonical core (no tag) does not verify — so a signature minted for any other purpose cannot be
