@@ -89,8 +89,16 @@ def _slug_for(host: str, explicit: Optional[str]) -> str:
     return "".join(c if (c.isalnum() or c in "-_") else "-" for c in raw).strip("-")[:48]
 
 
-def _validate_host(host: str) -> tuple[bool, str]:
-    """(ok, host_or_error). A single literal DNS hostname, not categorically hard-blocked. Fail-closed."""
+def _validate_host(host: str, *, environment: str = "") -> tuple[bool, str]:
+    """(ok, host_or_error). A single literal DNS hostname, not categorically hard-blocked. Fail-closed.
+
+    ``environment`` is threaded in because the IP-literal floor is TIER-dependent (it mirrors the egress
+    gateway's two tiers): the loopback / link-local / metadata / multicast / reserved / unspecified set is
+    NEVER-LIFTABLE and refused for every environment, while RFC1918 / CGNAT / IPv6-ULA private space sits on
+    the gateway's CONDITIONAL tier and is refused only for ``environment == "live"`` (see the inline note).
+    A caller validating a NON-scope host (an OOB relay / DNS base, which is never written into the charter
+    scope and so can never lift the private tier) passes no environment and keeps only the never-liftable
+    floor."""
     from vigil_core.hard_guardrail import HardBlockError, assert_not_hard_blocked
 
     h = str(host or "").strip().lower()
@@ -101,10 +109,18 @@ def _validate_host(host: str) -> tuple[bool, str]:
                        "a single literal host")
     if not _HOSTNAME_RE.match(h):
         return False, f"{h!r} is not a valid hostname"
-    # An IPv4 literal passes the hostname regex; refuse the ranges that are never a legitimate LIVE EXTERNAL
-    # target — loopback, link-local (incl. the cloud metadata address 169.254.169.254), multicast, reserved,
-    # unspecified. (RFC-1918 private space is left to twin/staging and is independently blocked by the
-    # never-liftable egress floor at runtime; IPv6 literals are already rejected by the ':' check above.)
+    # An IPv4 literal passes the hostname regex. The IP-literal floor here mirrors the egress gateway's TWO
+    # tiers (gateway/vigil_gateway/denylist.py::is_egress_denied):
+    #   Tier 1 (NEVER-LIFTABLE): loopback, link-local (incl. the cloud metadata address 169.254.169.254),
+    #     multicast, reserved, unspecified — refused for EVERY environment; no charter scope or opt-in can lift
+    #     them. IPv6 literals never reach this check: the ':' guard above already rejected them.
+    #   Tier 2 (LIFTABLE private space): RFC1918 (10/8, 172.16/12, 192.168/16), CGNAT 100.64.0.0/10, IPv6-ULA
+    #     fc00::/7. This is NOT independently blocked for a LIVE scope host: is_egress_denied puts it on a
+    #     CONDITIONAL tier LIFTED for any IP in ``allowed_ips``, and egress_floor.charter_allowed_ips derives
+    #     ``allowed_ips`` from the charter-scope IP LITERALS — so minting a LIVE authority scoped to a private
+    #     literal writes the EXACT key that lifts the floor and aims egress at internal space. The live ceremony
+    #     must therefore refuse a private literal AT MINT. twin/staging legitimately engage internal space, so
+    #     this Tier-2 refusal is scoped to environment == "live"; Tier 1 stays refused for every environment.
     import ipaddress as _ip
     try:
         _addr = _ip.ip_address(h)
@@ -114,6 +130,16 @@ def _validate_host(host: str) -> tuple[bool, str]:
                               or _addr.is_reserved or _addr.is_unspecified):
         return False, (f"{h!r} is a loopback / link-local / reserved address (e.g. cloud metadata) — not a "
                        f"live external target")
+    # Tier 2 (live only). ``is_private`` covers RFC1918 but NOT CGNAT 100.64/10 on this runtime, so CGNAT and
+    # IPv6-ULA are matched explicitly; a v4 address is never "in" the v6 ULA net (version mismatch → False, not
+    # an error), so the ULA term is a harmless defense-in-depth backstop should the ':' guard ever be relaxed.
+    if (_addr is not None and str(environment or "").strip().lower() == "live"
+            and (_addr.is_private or _addr in _ip.ip_network("100.64.0.0/10")
+                 or _addr in _ip.ip_network("fc00::/7"))):
+        return False, (f"{h!r} is a private / internal address (RFC1918 / CGNAT / IPv6-ULA) — not a live "
+                       f"external target; internal space is reachable only through a twin/staging engagement, "
+                       f"never a signed LIVE authority (a live charter-scope literal would lift the egress "
+                       f"floor's conditional private tier)")
     try:
         assert_not_hard_blocked(h)
     except HardBlockError as e:
@@ -278,17 +304,23 @@ def add_target(
     )
     from vigil_integration.live.authorization_broker import write_authorization
 
-    ok, host_or_err = _validate_host(host)
+    env = str(environment or "").strip().lower()
+    # The scope host is validated WITH the environment: a LIVE scope host additionally refuses private/internal
+    # literals (see _validate_host Tier 2), because a live charter-scope literal would lift the egress floor's
+    # conditional private tier. twin/staging keep only the never-liftable floor. (The OOB relay / DNS hosts
+    # below are NON-scope — never written into the charter scope, so they cannot lift the floor — and are
+    # validated env-agnostic, keeping only the never-liftable floor.)
+    ok, host_or_err = _validate_host(host, environment=env)
     if not ok:
         return {"ok": False, "error": host_or_err}
     h = host_or_err
 
-    env = str(environment or "").strip().lower()
     if env not in _ALLOWED_ENVIRONMENTS and env != "live":
         return {"ok": False, "error": f"environment must be one of {_ALLOWED_ENVIRONMENTS} or 'live' (with a "
                                       f"valid evaluator attestation), got {env!r}"}
-    # The LIVE attestation itself is verified LATER (just before the doc is built), AFTER the cheap duration /
-    # OOB validations pass — so a doomed request never consumes the evaluator's single-use challenge.
+    # The LIVE attestation checks happen LATER (just before the doc is built): AFTER the cheap duration / OOB
+    # validations AND after the M-11.1 hard-precondition READ, so a request doomed by host / duration / OOB /
+    # M-11.1 never consumes the evaluator's single-use WS2 challenge (the challenge is the LAST thing spent).
 
     try:
         dur = float(duration_hours)
@@ -353,25 +385,22 @@ def add_target(
     if t.tzinfo is None:
         t = t.replace(tzinfo=timezone.utc)
 
-    # WS2: verify the live-target evaluator attestation LAST (after host/duration/OOB/slug all validate), so the
-    # single-use challenge is spent only on an otherwise-admissible request. A categorically-blocked host was
-    # already refused above (``_validate_host``), so a protected host never reaches this point even WITH an
-    # attestation. The evaluator PoP is ADDITIVE admission; the owner key still signs everything below.
+    # WS2 + M-11.1: the live-target proofs are verified LAST (after host / duration / OOB / slug all validate).
+    # ORDER MATTERS (OVERCLAIM-2): the M-11.1 hard precondition is a pure, side-effect-free spine READ
+    # (``assert_eval_offense_attested`` folds state, it never appends), so it is checked FIRST — before the WS2
+    # self-serve proof, which CONSUMES the evaluator's single-use challenge. A request doomed by a missing M-11.1
+    # attestation is thus refused WITHOUT burning the WS2 nonce. A categorically-blocked or private host was
+    # already refused above (``_validate_host``), so neither reaches this point even WITH an attestation.
     attestation_info: Optional[dict] = None
     if env == "live":
         if store is None:
             return {"ok": False, "error": "LIVE environment refused: a live authorization must verify the "
                                           "evaluator attestation against the spine (internal: store not supplied)"}
-        ok_att, att_err, attestation_info = _verify_evaluator_attestation(
-            store, host=h, environment="live", attestation=evaluator_attestation)
-        if not ok_att:
-            return {"ok": False, "error": f"LIVE environment refused: {att_err}"}
         # M-11.1 HARD PRECONDITION (slice 11.1): weaponized offense may ARM on a LIVE target ONLY when a
-        # verified, owner-signed, evaluator-countersigned EvalOffenseAttestation already covers THIS
-        # engagement on the spine. This is ADDITIVE to the WS2 self-serve proof above (checked after it, so a
-        # WS2 refusal keeps its own message) and is enforced BEFORE any live authority bundle is written, so
-        # no live authority is minted without the attestation. The offense arm re-verifies the SAME public
-        # signed attestation independently (defense-in-depth). Fail-closed: no attestation ⇒ live refused.
+        # verified, owner-signed, evaluator-countersigned EvalOffenseAttestation already covers THIS engagement
+        # on the spine. Enforced BEFORE any live authority bundle is written (no live authority without it) AND
+        # before the WS2 challenge is consumed (a doomed request keeps the nonce live). The offense arm
+        # re-verifies the SAME public signed attestation independently (defense-in-depth). Fail-closed.
         from ..governor.eval_offense_attestation import (  # sovereign sibling; no offense import
             EvalOffenseAttestationMissing,
             assert_eval_offense_attested,
@@ -382,6 +411,13 @@ def add_target(
         except EvalOffenseAttestationMissing as e:
             return {"ok": False, "error": "LIVE environment refused: no verified eval-offense attestation "
                                           f"(M-11.1 hard precondition) — {e}"}
+        # WS2 self-serve proof: a distinct evaluator proves possession of their own owner-bound key over a
+        # domain-separated, target-bound, single-use message. This CONSUMES the challenge — so it runs AFTER the
+        # M-11.1 read above. The evaluator PoP is ADDITIVE admission; the owner key still signs everything below.
+        ok_att, att_err, attestation_info = _verify_evaluator_attestation(
+            store, host=h, environment="live", attestation=evaluator_attestation)
+        if not ok_att:
+            return {"ok": False, "error": f"LIVE environment refused: {att_err}"}
 
     doc = EngagementAuthority(
         engagement_slug=s,

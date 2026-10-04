@@ -440,8 +440,12 @@ def _ws2_attestation(store, user, *, host="apme.cm", evaluator="eval-alice"):
 
 def test_add_target_live_refused_without_an_eval_offense_attestation():
     """HARD PRECONDITION at add_target: even with a VALID WS2 evaluator proof, environment="live" is REFUSED
-    when no eval-offense attestation covers the engagement — and nothing is written to the seam."""
+    when no eval-offense attestation covers the engagement — and nothing is written to the seam.
+
+    OVERCLAIM-2 (ordering): the M-11.1 precondition is a side-effect-free spine READ checked BEFORE the WS2
+    proof consumes its single-use challenge, so this doomed request must NOT burn the evaluator's nonce."""
     from sigil.ui import target_authorization as ta
+    from sigil.ui.target_authorization import _attestation_challenge_ledger
     from vigil_integration.live.authorization_broker import read_authorization
     import os
     s = _store()
@@ -450,6 +454,10 @@ def test_add_target_live_refused_without_an_eval_offense_attestation():
     r = ta.add_target("apme.cm", environment="live", store=s, evaluator_attestation=att)
     assert r["ok"] is False and "eval-offense attestation" in r["error"], r
     assert read_authorization(os.environ["VIGIL_BASE_DIR"], "apme-cm") is None
+    # the WS2 single-use challenge was NOT consumed by the M-11.1-doomed request (it is still live to spend) —
+    # proving the M-11.1 read precedes the challenge consume (OVERCLAIM-2 fixed).
+    assert _attestation_challenge_ledger(s).consume(att["challenge"]) is True, \
+        "an M-11.1-doomed live request must not burn the evaluator's single-use WS2 challenge"
 
 
 def test_add_target_live_permitted_with_an_eval_offense_attestation():
