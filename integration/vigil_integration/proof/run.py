@@ -918,6 +918,31 @@ def _oob_redrive_class(report: Any) -> "str | None":
     return _classify_redrive(report, _OOB_REDRIVE_CLASSES, _OOB_ALIASES, _OOB_CWE_TO_CLASS)
 
 
+def _oob_redrive_target(report: Any) -> str:
+    """The re-drive TARGET url the OOB arm needs (``endpoint`` / ``url`` / ``target``, stripped), or ``""``.
+    SINGLE source of truth for the OOB arm's precondition — both ``_oob_redrive`` (which refuses with no url)
+    and ``_oob_redrive_eligible`` read it, so the sink gate and the driver can never disagree on what counts as
+    a re-drivable OOB report. Stdlib only (import-clean sink path, FATAL-2)."""
+    r = report if isinstance(report, dict) else {}
+    return str(r.get("endpoint") or r.get("url") or r.get("target") or "").strip()
+
+
+def _oob_redrive_eligible(report: Any) -> bool:
+    """True when this report may RELAX the no-capture mint gate for the OOB arm: an OOB-re-drivable CLASS
+    (``_oob_redrive_class``) that ALSO carries a re-drive TARGET (``_oob_redrive_target``).
+
+    Why the OOB arm is gated on a target when the web / errsig / W2 / W3 / transport arms are NOT: those arms
+    are FACT-capable on the Strix rail — VIGIL's own gated probe crafts fresh traffic (or drives its own
+    headless browser / handshake) and can MINT — so they are capture-OPTIONAL on class alone. The OOB Strix
+    rail is LEAD-ONLY BY CONSTRUCTION (a sound OOB FACT needs VIGIL's OWN trusted collector material a Strix
+    report cannot carry; the FACT mint is the governed-engage seam ``wiring._live_oob_redrive_fact``). So an
+    OOB class ALONE must NOT relax the gate: a bare OOB class with no target (and no attached capture, which
+    the gate's first clause already admits to the executor path) is not genuinely re-drivable — the arm would
+    immediately refuse — and stays a LEAD without reaching the mint. SINGLE source of truth
+    (``sink._oob_mint_eligible`` delegates here)."""
+    return _oob_redrive_class(report) is not None and bool(_oob_redrive_target(report))
+
+
 class _RuntimeMintResult:
     """The mint callback's return for a W2 runtime/statistical re-drive arm. The sink reads ONLY ``.is_fact``;
     ``.result`` (the :class:`live.runtime_redrive.RuntimeRedriveResult`) is retained for the persisted record
@@ -1220,8 +1245,7 @@ def _oob_redrive(report: dict, cls: str, *, run_dir: "str | os.PathLike",
     arm REFUSES (no material, no FACT) and this returns a non-FACT — the Strix report's narrative is NEVER
     proof. The mint path is the governed-engage seam (``wiring._live_oob_redrive_fact``) fed trusted
     ``oob_material``. A missing endpoint / gate refusal / the refusal all yield a non-FACT → LEAD. Never raises."""
-    url = str((report or {}).get("endpoint") or (report or {}).get("url")
-              or (report or {}).get("target") or "").strip()
+    url = _oob_redrive_target(report)          # SINGLE source: same precondition the sink gate's eligibility reads
     if not url:
         return None
     try:

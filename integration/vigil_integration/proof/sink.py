@@ -160,6 +160,25 @@ def _oob_redrivable(report: Any) -> bool:
         return False
 
 
+def _oob_mint_eligible(report: Any) -> bool:
+    """True when an OOB report may RELAX the no-capture mint gate: it is an OOB-re-drivable class AND carries
+    the re-drive TARGET the governed OOB arm needs to run (``endpoint`` / ``url`` / ``target``). Delegates to
+    ``run._oob_redrive_eligible`` (single source of truth with ``run._oob_redrive``'s own precondition).
+
+    This is DELIBERATELY STRICTER than ``_oob_redrivable`` (the pure class screen): the OOB Strix rail is
+    LEAD-ONLY by construction (a sound OOB FACT needs trusted collector material a Strix report cannot carry —
+    the FACT mint is the governed-engage seam), so an OOB class ALONE is NOT capture-optional. Only a report
+    that is genuinely re-drivable (a target to re-drive against — or an attached capture, which the gate's
+    FIRST clause already admits to the executor-capture path) reaches the mint; a bare OOB class with no target
+    and no capture stays a LEAD without ever reaching the mint. Fail-closed: any import/lookup error ⇒ not
+    eligible (the report then needs a capture as before)."""
+    try:
+        from .run import _oob_redrive_eligible  # noqa: PLC0415 — function-local: breaks the run⇄sink cycle
+        return _oob_redrive_eligible(report)
+    except Exception:  # noqa: BLE001
+        return False
+
+
 @dataclass(frozen=True)
 class SinkResult:
     """What the sink decided about one report. ``gate`` is ``"allow"``/``"deny"``; ``minted`` is True only
@@ -254,11 +273,17 @@ class ProofSink:
             # HTTP-response-derived re-drive classes (reflected xss / ssti / boolean_sqli / time_based_sqli),
             # OR one of the two W3 browser-backed DOM classes (dom_xss / prototype_pollution), OR one of the
             # S2 TRANSPORT-derived classes (request_smuggling / service_reachable / weak_tls /
-            # weak_crypto_artifact): every re-drivable class reaches the mint WITHOUT a capture because the
-            # VIGIL-owned re-drive crafts its OWN gated traffic (or drives its OWN gated headless browser /
-            # its OWN gated handshake) against the endpoint (the Strix report is never proof). A mint error
-            # (or a re-drive that observed nothing / found the target safe / had no usable browser) leaves
-            # the finding a LEAD — never propagates.
+            # weak_crypto_artifact): every one of those re-drivable classes reaches the mint WITHOUT a capture
+            # because the VIGIL-owned re-drive crafts its OWN gated traffic (or drives its OWN gated headless
+            # browser / its OWN gated handshake) against the endpoint (the Strix report is never proof) and is
+            # FACT-capable on class alone (capture-OPTIONAL). The M-11 blind-OOB arm is DIFFERENT: it is
+            # LEAD-ONLY on the Strix rail by construction (a sound OOB FACT needs VIGIL's OWN trusted collector
+            # material a Strix report cannot carry — the FACT mint is the governed-engage seam), so it is NOT
+            # capture-optional on class alone. It relaxes the gate ONLY for a report that is GENUINELY OOB-
+            # re-drivable — an OOB class WITH a re-drive target (``_oob_mint_eligible``) — so a bare OOB class
+            # with no target and no capture does NOT reach the mint (it would only refuse). A mint error (or a
+            # re-drive that observed nothing / found the target safe / had no usable browser) leaves the
+            # finding a LEAD — never propagates.
             if self._mint is not None and (report.get(CAPTURE_KEY) is not None or _web_redrivable(report)
                                            or _errsig_redrivable(report) or _reflection_redrivable(report)
                                            or _ssti_redrivable(report) or _boolean_redrivable(report)
@@ -266,7 +291,7 @@ class ProofSink:
                                            or _prototype_pollution_redrivable(report)
                                            or _smuggling_redrivable(report)
                                            or _transport_redrivable(report)
-                                           or _oob_redrivable(report)):
+                                           or _oob_mint_eligible(report)):
                 try:
                     result = self._mint(report)
                     minted = bool(getattr(result, "is_fact", False))
