@@ -288,6 +288,7 @@ FORBIDDEN: list[tuple[Path, str]] = [
     (AS_BUILT_LIVE, "`test_engine_live.py`, 5 tests"),
     (AS_BUILT_LIVE, "the **22nd** screen"),
     (README, "(~33 kinds)"),
+    (README, "(~38 kinds)"),  # now ALSO a stale UNDERCLAIM: code has 49 OracleKinds and the README states 49.
     (README, "0/7 systemd timers enabled"),
 ]
 
@@ -296,7 +297,7 @@ ANCHORS: list[tuple[Path, str]] = [
     (AS_BUILT_LIVE, "(`test_engine.py`), and the live validation over the REAL gate"),
     (AS_BUILT_LIVE, "(`test_engine_live.py`, `PYTHONPATH=integration:engine/crucible:gateway`)"),
     (AS_BUILT_LIVE, "one of the UI's screens"),
-    (README, "(~38 kinds)"),
+    (README, "49 oracle kinds"),  # advanced 33→38→49: pins the now-correct count ("(~38 kinds)" is now forbidden above).
     (README, "0/10 systemd timers enabled"),
 ]
 
@@ -326,10 +327,11 @@ def drift_code_fact_violations() -> list[str]:
     # #1 — the bwrap runner really passes --unshare-all.
     if "--unshare-all" not in _read(SANDBOX):
         errs.append("sandbox_exec.py does not pass --unshare-all")
-    # #5 — OracleKind really has >= 38 kinds (the '~33' was a stale underclaim).
+    # #5 — OracleKind really has >= 49 kinds. '~33' then '~38' were successive stale UNDERCLAIMS; the README
+    # now states the real count ("49 oracle kinds"), so the anchor pins 49 and BOTH '~33' and '~38' are forbidden.
     n = _oraclekind_member_count()
-    if n < 38:
-        errs.append(f"OracleKind has {n} members (<38) — the '~38 kinds' correction would overstate")
+    if n < 49:
+        errs.append(f"OracleKind has {n} members (<49) — the README's '49 oracle kinds' would overstate")
     # #6 — infra/systemd really ships 10 .timer units (M4.5 added vigil-twin.timer alongside the original 9).
     timers = sorted(p.name for p in TIMERS_DIR.glob("*.timer"))
     if len(timers) != 10:
@@ -400,8 +402,8 @@ def test_negative_control_licensing_absence_is_caught():
 
 
 def test_negative_control_a_returned_forbidden_phrase_is_flagged():
-    # An anchor phrase IS present in the tree; used here to prove present_forbidden actually detects it.
-    assert present_forbidden([(README, "(~38 kinds)")]), "present_forbidden is a no-op"
+    # A phrase that IS present in the tree (the now-correct oracle count) proves present_forbidden detects it.
+    assert present_forbidden([(README, "49 oracle kinds")]), "present_forbidden is a no-op"
 
 
 def test_negative_control_a_missing_anchor_is_flagged():
