@@ -49,6 +49,17 @@ try:                                                       # pragma: no cover - 
 except Exception:                                          # noqa: BLE001
     _token_budget = None
 
+# M4.1 — the ONE egress chokepoint both LLM paths route through. vigil_core is the shared leaf both the
+# offense framework and the sovereign planes import, so composing the egress discipline (classify ->
+# redact -> authorize -> route -> provenance -> output-verify -> audit) there crosses no FATAL-2 boundary.
+# Guarded like the budget import so the kernel still completes a call if the shared core is ever absent;
+# when present it is the egress path (it adds the symmetric secret-redaction the URK path lacked, and the
+# unified audit record), with sovereignty still asserted at backend construction underneath.
+try:                                                       # pragma: no cover - import guard
+    from vigil_core import ai_gateway as _gw
+except Exception:                                          # noqa: BLE001
+    _gw = None
+
 
 def _tb_tool() -> str:
     try:
@@ -284,7 +295,7 @@ def reset_cache() -> None:
 
 
 def complete_with_failover(prompt: "Prompt") -> "LLMResult":
-    """Complete ``prompt`` with failover (see ``_complete_with_failover`` for the failover contract),
+    """Complete ``prompt`` with failover (see ``_complete_with_failover_raw`` for the failover contract),
     wrapped in the per-tool TOKEN BUDGET: consult the current tool's budget and apply WARN + THROTTLE
     (a bounded delay, NEVER a block) before the call, clamp the per-call output ceiling, and charge the
     ACTUAL tokens the call spent afterwards. The tool is read from ``token_budget.current_tool()`` (a
@@ -298,12 +309,97 @@ def complete_with_failover(prompt: "Prompt") -> "LLMResult":
             prompt.max_tokens = _tb_clamp(tool, _mx)
         except (AttributeError, TypeError):
             pass
-    result = _complete_with_failover(prompt)
+    result = _route_urk_egress(prompt)                   # M4.1: through the single egress chokepoint
     _tb_record(tool, getattr(result, "trace", None))     # None trace records nothing (spent == 0)
     return result
 
 
-def _complete_with_failover(prompt: "Prompt") -> "LLMResult":
+# ---------------------------------------------------------------------------
+# M4.1 — the URK adapter: route the in-tier failover through the shared egress chokepoint.
+# ---------------------------------------------------------------------------
+
+
+def _intended_backend_name() -> str:
+    """The backend name the next URK call will use IF the operator pinned one via ``CRUCIBLE_LLM_BACKEND``;
+    an empty string means auto-selection (the gateway then skips the pre-assert and lets the per-candidate
+    sovereignty check inside construction decide). Reads env only — never constructs or probes a backend."""
+    return os.environ.get(_ENV_OVERRIDE, "").strip().lower()
+
+
+def _apply_redaction_to_prompt(prompt: "Prompt", redacted: dict) -> "Prompt":
+    """Return a prompt whose ``system``/``user`` carry the gateway-redacted text, so the backend sends the
+    masked payload. A prompt double with no such fields (the resilience tests pass ``SimpleNamespace()``)
+    is returned unchanged. Never raises."""
+    rs, ru = redacted.get("system"), redacted.get("user")
+    if rs is None and ru is None:
+        return prompt
+    updates = {}
+    if isinstance(rs, str):
+        updates["system"] = rs
+    if isinstance(ru, str):
+        updates["user"] = ru
+    if not updates:
+        return prompt
+    try:
+        import dataclasses
+        if dataclasses.is_dataclass(prompt):
+            return dataclasses.replace(prompt, **updates)
+    except Exception:  # noqa: BLE001 — fall through to a shallow-copy mutation
+        pass
+    try:
+        import copy
+        p = copy.copy(prompt)
+        for k, v in updates.items():
+            setattr(p, k, v)
+        return p
+    except Exception:  # noqa: BLE001 — last resort: send the original (unredacted) rather than crash
+        return prompt
+
+
+def _urk_provenance(result: "LLMResult") -> dict:
+    """Extract the answering backend + token counts from the result's CallTrace for the unified record.
+    The provider is NEVER a trust anchor; this is provenance, not authority. Never raises."""
+    tr = getattr(result, "trace", None)
+    if tr is None:
+        return {}
+    return {
+        "answered_backend": getattr(tr, "backend", ""),
+        "tokens_in": int(getattr(tr, "tokens_in", 0) or 0),
+        "tokens_out": int(getattr(tr, "tokens_out", 0) or 0),
+        "is_dryrun": bool(getattr(tr, "is_dryrun", False)),
+    }
+
+
+def _route_urk_egress(prompt: "Prompt") -> "LLMResult":
+    """Route one URK completion through ``vigil_core.ai_gateway.egress`` (classify -> redact -> authorize
+    -> route -> provenance -> output-verify -> audit). When the shared core is absent the call still
+    completes via the in-tier failover, with sovereignty asserted at construction. A sovereignty refusal
+    surfaces as :class:`SovereigntyViolation` (the URK contract)."""
+    if _gw is None:
+        return _complete_with_failover_raw(prompt)
+
+    def _invoke(redacted: dict) -> "LLMResult":
+        _gw.assert_in_egress("kernel.urk")               # a bypass of the chokepoint fails closed
+        return _complete_with_failover_raw(_apply_redaction_to_prompt(prompt, redacted))
+
+    case = _gw.EgressCase(
+        path="urk",
+        invoke=_invoke,
+        backend=_intended_backend_name(),                # "" => auto (per-candidate assert inside invoke)
+        assert_permitted=lambda name: sovereignty.current().assert_permitted(name),
+        provenance=_urk_provenance,
+        provider_identity=_intended_backend_name() or "urk-backend",
+    )
+    payload = {"system": getattr(prompt, "system", None), "user": getattr(prompt, "user", None)}
+    res = _gw.egress(payload, case=case)
+    if res.refused:
+        if res.refusal_kind == "sovereignty":
+            raise SovereigntyViolation(res.refusal_reason)
+        raise BackendUnavailable(res.refusal_reason)
+    return res.output
+
+
+def _complete_with_failover_raw(prompt: "Prompt") -> "LLMResult":
     """Complete ``prompt``, failing over across the permitted backends IN-TIER on a transient
     overload (Speed X4). Tries the auto-selected primary (the cached ``get_backend()``); a
     :class:`BackendOverloaded` — a rate-limit / overload / 5xx / connection failure that

@@ -697,6 +697,17 @@ try:                                                       # pragma: no cover - 
 except Exception:                                          # noqa: BLE001
     _token_budget = None
 
+# M4.1 — the ONE egress chokepoint both LLM paths route through (``vigil_core.ai_gateway``). vigil_core
+# is the shared leaf both planes import and it pulls in NO framework/strix/sigil, so routing the live
+# cloud think here crosses no FATAL-2 boundary. When present it composes classify -> redact -> authorize
+# -> route -> provenance -> output-verify -> audit around the SDK call, adding the SAME secret-redaction
+# the URK path now applies (symmetric) plus the unified audit record. The sovereignty ladder itself is
+# still asserted by ``llm_egress_refusal`` before this point (same ladder, framework imported lazily).
+try:                                                       # pragma: no cover - import guard
+    from vigil_core import ai_gateway as _gw
+except Exception:                                          # noqa: BLE001
+    _gw = None
+
 
 def _tb_tool() -> str:
     if _token_budget is None:
@@ -790,13 +801,63 @@ def _no_usable_decision(decision: LLMDecision) -> bool:
             and (decision.reasoning or "") == _FAILCLOSED_DEFAULT.reasoning)
 
 
-def _think_via_client(client: Any, system: str, user: str, *, model: str, max_tokens: int) -> LLMDecision:
+def _gateway_assert_permitted(name: str) -> None:
+    """The gateway's model-route hook for the live path: raise iff the sovereignty ladder refuses ``name``.
+    Reuses :func:`llm_egress_refusal` (which imports the framework policy LAZILY, so the FATAL-2 boundary
+    holds) so the live path asserts the SAME ladder the URK path does — defense in depth beside the
+    pre-``_think_via_client`` gate in :func:`think`, with the CORRECT resolved backend name (a declared
+    local client stays local, a cloud client is cloud)."""
+    refusal = llm_egress_refusal(name)
+    if refusal is not None:
+        raise PermissionError(refusal)
+
+
+def _think_via_client(client: Any, system: str, user: str, *, model: str, max_tokens: int,
+                      backend: Optional[str] = None) -> LLMDecision:
+    """One live think call, routed through the ONE egress chokepoint (``vigil_core.ai_gateway.egress``):
+    classify -> redact -> authorize -> route -> provenance -> output-verify -> audit. Redaction runs on
+    BOTH the system and user text (the symmetric guarantee), so a secret in the context is masked before
+    it reaches the model, exactly as on the URK path. ``backend`` (when known) names the resolved backend
+    for the gateway's sovereignty assertion + the unified record; an unknown backend skips the pre-assert
+    (the sovereignty ladder is still enforced by :func:`think` before this point). The actual SDK round-trip
+    lives in :func:`_think_via_client_raw`, which the gateway invokes inside the egress context — a direct
+    call that skips the chokepoint fails closed. Never raises; a refusal degrades to the safest action."""
+    if _gw is None:
+        return _think_via_client_raw(client, system, user, model=model, max_tokens=max_tokens)
+
+    def _invoke(red: "dict") -> LLMDecision:
+        _gw.assert_in_egress("live.think")          # a bypass of the chokepoint fails closed
+        rs = red.get("system")
+        ru = red.get("user")
+        return _think_via_client_raw(
+            client, rs if isinstance(rs, str) else system, ru if isinstance(ru, str) else user,
+            model=model, max_tokens=max_tokens)
+
+    case = _gw.EgressCase(
+        path="live_think",
+        invoke=_invoke,
+        backend=(backend or "").strip(),            # "" => skip pre-assert (think() already gated)
+        assert_permitted=_gateway_assert_permitted,
+        provenance=lambda d: {"decision_action": getattr(getattr(d, "action", None), "value", None),
+                              "model": model},
+        provider_identity="anthropic-provider",     # a label; the provider is never a trust anchor
+    )
+    res = _gw.egress({"system": system, "user": user}, case=case)
+    if res.refused:
+        return _refused(res.refusal_reason)
+    return res.output
+
+
+def _think_via_client_raw(client: Any, system: str, user: str, *, model: str, max_tokens: int) -> LLMDecision:
     """One live think call through an injected/real client, fail-closed on ANY error. Current-generation
     models get adaptive extended thinking (``thinking: {type: "adaptive"}``) and the effort chosen in the UI;
     the call STREAMS when the client supports it (``.get_final_message()``), else a plain create. The
     response text is parsed by ``parse_decision`` (garbage/oversized → safest); any thinking blocks are
     ignored — only the JSON decision text is read. Secret-free: nothing here logs the request, the response,
-    or any credential."""
+    or any credential. Reached only through the gateway's invoke closure (which guards the egress context),
+    so the model round-trip is never performed outside the chokepoint."""
+    if _gw is not None:
+        _gw.assert_in_egress("live.think.raw")      # belt-and-suspenders: never a raw call outside egress
     tool = _tb_tool()
     if _token_budget is not None:      # warn + throttle (bounded, never blocks) + clamp the output ceiling
         try:
@@ -834,7 +895,9 @@ def _think_via_client(client: Any, system: str, user: str, *, model: str, max_to
     if _no_usable_decision(decision) and model != _FALLBACK_MODEL:
         logger.warning("live think: model %r returned no usable decision (refusal/empty/unparseable) — "
                        "falling back once to %r", model, _FALLBACK_MODEL)
-        fb = _think_via_client(client, system, user, model=_FALLBACK_MODEL, max_tokens=max_tokens)
+        # the fallback reuses the ALREADY-redacted system/user and stays inside the current egress context,
+        # so it does not re-redact or emit a second audit record (one egress event, with a model fallback).
+        fb = _think_via_client_raw(client, system, user, model=_FALLBACK_MODEL, max_tokens=max_tokens)
         if not _no_usable_decision(fb) and not getattr(fb, "error_class", None):
             note = (f"[model fallback: '{model}' returned no usable decision (it likely declined the "
                     f"request); reasoning continued on '{_FALLBACK_MODEL}'.] ")
@@ -999,7 +1062,7 @@ def think(
         refusal = llm_egress_refusal(backend)
         if refusal is not None:
             return _refused(refusal)
-        return _think_via_client(client, system, user, model=model, max_tokens=max_tokens)
+        return _think_via_client(client, system, user, model=model, max_tokens=max_tokens, backend=backend)
 
     # 2. GAP-1 — a per-session LOCAL backend pick routes through the loopback-enforced kernel provider with
     #    NO cloud failover. Checked BEFORE the key path so a LOCAL pick on a cloud-permitting tier with an
@@ -1022,7 +1085,8 @@ def think(
             return _refused(refusal)
         live = _build_live_client(key)
         if live is not None:
-            return _think_via_client(live, system, user, model=model, max_tokens=max_tokens)
+            return _think_via_client(live, system, user, model=model, max_tokens=max_tokens,
+                                     backend=_direct_backend_name(None))
         return _safest(
             "a live Claude client could not be built",
             "the live model backend is unavailable — how should I proceed?",
