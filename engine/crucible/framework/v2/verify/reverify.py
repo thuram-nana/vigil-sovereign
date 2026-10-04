@@ -149,7 +149,19 @@ def _reverify_context_impl(
     # letting a finding whose bug_class was flipped (e.g. sqli evidence relabelled 'rce')
     # re-confirm as the flipped class. Refuse the mismatch here, at the re-execution
     # boundary, so the requested class is actually load-bearing.
-    evidence_class = str(ctx.to_verifier_context().get("bug_class") or "")
+    vctx = ctx.to_verifier_context()
+    evidence_class = str(vctx.get("bug_class") or "")
+    # M3 anti-relabel (STATIC_RULE): a static-rule context's PROVEN class is the one its rule_id proves,
+    # re-derived here from `observed['rule_id']` — NOT the producer-controlled free `bug_class` label that
+    # to_verifier_context copies verbatim. Binding against that free label let a broken-crypto re-fire
+    # carrying a `static_taint` label slip through and re-confirm under the flipped (LEAD-only) class; the
+    # rule_id is what the oracle actually re-derives, so it is authoritative for the binding below.
+    sr = vctx.get("static_rule")
+    if isinstance(sr, dict):
+        from .adapter import _STATIC_RULE_BUG_CLASS  # local: the closed rule_id -> canonical class map
+        rule_class = _STATIC_RULE_BUG_CLASS.get(str(sr.get("rule_id") or "").strip(), "")
+        if rule_class:
+            evidence_class = rule_class
     if bug_class and evidence_class and bug_class != evidence_class:
         return ReverifyResult(
             finding_ref=ref, reproduced=False, matches_claim=False,

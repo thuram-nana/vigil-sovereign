@@ -1125,18 +1125,38 @@ def canonical_oracle_for(bug_class: str) -> OracleKind | None:
     return kinds[0] if kinds else None
 
 
+# The LEAD-only STATIC static classes — the class-level mirror of oracles._LEAD_ONLY_RULE_IDS. Their
+# BUG_CLASS_ORACLES rows ROUTE a finding to the STATIC_RULE oracle (so a static_* finding is adjudicated),
+# but the oracle is FAIL-CLOSED for them and NEVER mints a FACT, so STATIC_RULE is NOT a valid CONFIRMER for
+# a CLAIM of these classes. A drift guard (analysis/tests/test_static_facts) asserts this equals
+# {adapter._STATIC_RULE_BUG_CLASS[r] for r in oracles._LEAD_ONLY_RULE_IDS}, so the two can never diverge.
+_STATIC_RULE_LEAD_ONLY_CLASSES: "frozenset[str]" = frozenset({"static_insecure_randomness", "static_taint"})
+
+
 def oracle_confirms_class(confirmed_by: str, bug_class: str) -> bool:
     """PCF step 5 (claim-grounded): ``True`` iff the oracle that fired is a VALID confirmer for the
     claimed class — i.e. it is in that class's acceptable oracle set. This defeats relabelling (you cannot
     claim class X with an oracle that does not confirm X). An out-of-vocabulary class returns ``False``
-    (nothing in the substrate confirms it)."""
-    kinds = BUG_CLASS_ORACLES.get(normalize_bug_class(bug_class))
+    (nothing in the substrate confirms it).
+
+    STATIC_RULE confirms ONLY the FACT-capable static classes: the LEAD-only static classes
+    (``static_taint`` / ``static_insecure_randomness``) route to STATIC_RULE for a fail-closed LEAD, but the
+    oracle provably never mints them, so STATIC_RULE is NOT a confirmer for a CLAIM of those classes (a
+    LEAD-only rule_id's class can never ground a FACT here)."""
+    n = normalize_bug_class(bug_class)
+    kinds = BUG_CLASS_ORACLES.get(n)
     if not kinds:
         return False
     try:
-        return OracleKind(str(confirmed_by)) in kinds
+        kind = OracleKind(str(confirmed_by))
     except ValueError:
         return False
+    if kind not in kinds:
+        return False
+    # STATIC_RULE is not a confirmer for a LEAD-only static class (the oracle provably never mints it).
+    if kind is OracleKind.STATIC_RULE and n in _STATIC_RULE_LEAD_ONLY_CLASSES:
+        return False
+    return True
 
 
 def require_known_bug_class(bug_class: str) -> str:
