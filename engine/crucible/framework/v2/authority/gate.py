@@ -9,7 +9,15 @@ Check order (first failure wins), fail-closed throughout:
   4. destructive & not permitted            -> denied (destructive)
   5. destructive on LIVE without 2nd ack     -> denied (live_destructive)
   6. action budget exhausted                 -> denied (budget)
+  6b. blast-radius over ceiling (OPT-IN)     -> denied (blast_radius)
   7. otherwise            -> allowed
+
+Step 6b is DEFAULT-OFF and ADVISORY: it runs ONLY when the caller injects both a
+`blast_radius_fn` predictor and a `blast_ceiling`, and only AFTER every other check has
+otherwise cleared the action (so a denied action keeps its original code and the predictor is
+not even consulted). The predictor is a read-only forward world-model query injected as a
+callable — the gate never imports the world model, which informs the decision but mints no FACT
+and is no oracle input. Absent those two kwargs the decision is byte-identical to before.
 
 `authorize_action` returns a decision (for callers that branch);
 `require_authorization` raises the matching typed EthicsViolation (for
@@ -21,10 +29,12 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Callable, Protocol
 from urllib.parse import urlparse
 
 from ..common.errors import (
     AuthorityExpired,
+    BlastRadiusExceeded,
     BudgetExhausted,
     DestructiveActionRefused,
     EngagementHalted,
@@ -57,6 +67,21 @@ def _as_utc(dt: datetime) -> datetime:
     return dt.replace(tzinfo=timezone.utc) if dt.tzinfo is None else dt.astimezone(timezone.utc)
 
 
+class BlastRadiusVerdict(Protocol):
+    """The structural shape the optional blast-radius veto reads back from an injected predictor.
+
+    Deliberately a Protocol, NOT an import of ``worldmodel.impact.ForwardBlastResult``: the gate
+    stays decoupled from the world model (the world model is ADVISORY — injected as a callable,
+    never imported here, so this engine module never pulls in the graph layer). Any object with these
+    two attributes satisfies it; ``ForwardBlastResult`` does, structurally."""
+
+    @property
+    def incremental_blast(self) -> float: ...
+
+    @property
+    def newly_reachable_jewels(self) -> list[str]: ...
+
+
 def authorize_action(
     authority: EngagementAuthority,
     request: ActionRequest,
@@ -64,8 +89,21 @@ def authorize_action(
     killswitch: KillSwitch | None = None,
     actions_taken: int = 0,
     now: datetime | None = None,
+    blast_radius_fn: Callable[[ActionRequest], BlastRadiusVerdict] | None = None,
+    blast_ceiling: float | None = None,
 ) -> AuthorizationDecision:
-    """Evaluate one action. Pure except for reading the kill-switch file."""
+    """Evaluate one action. Pure except for reading the kill-switch file and — only when the
+    optional pre-action blast-radius veto is wired — calling the injected read-only predictor.
+
+    The blast-radius veto (``blast_radius_fn`` + ``blast_ceiling``) is DEFAULT-OFF and ADVISORY. It
+    runs ONLY when BOTH are supplied, and ONLY as the final conjunct — after every other check has
+    cleared the action — so a kill-switch/window/scope/destructive/budget denial always wins and the
+    predictor is not consulted for an action that is refused anyway. When wired, it DENIES
+    (code ``blast_radius``) any otherwise-allowed action whose predicted INCREMENTAL blast — the
+    summed business impact of the crown jewels it would newly expose — strictly exceeds the ceiling.
+    A predictor that raises propagates (the veto fails loud, never silently allowing). Absent either
+    kwarg this function behaves and returns byte-identically to before, so every existing caller is
+    unaffected."""
     ts = now or _utcnow()
 
     def decide(
@@ -122,6 +160,20 @@ def authorize_action(
                       f"action budget exhausted ({actions_taken}/{authority.max_actions})",
                       "budget")
 
+    # 6b. blast-radius veto — OPT-IN, DEFAULT-OFF, ADVISORY. Runs only when BOTH a predictor and a
+    #     ceiling are supplied; absent either, this block is skipped and the decision is byte-identical
+    #     to before. Placed last so it vetoes only an OTHERWISE-ALLOWED action (every prior denial keeps
+    #     its own code and the predictor is never consulted for a refused action). The predictor is the
+    #     read-only forward world-model query injected as a callable — advisory to the gate, no FACT.
+    if blast_radius_fn is not None and blast_ceiling is not None:
+        verdict = blast_radius_fn(request)
+        if verdict.incremental_blast > blast_ceiling:
+            return decide(
+                False, AuthorityState.ACTIVE,
+                f"blast-radius veto: action would newly expose crown jewels worth "
+                f"{verdict.incremental_blast} (> ceiling {blast_ceiling}): "
+                f"{verdict.newly_reachable_jewels}", "blast_radius")
+
     # 7. allowed
     return decide(True, AuthorityState.ACTIVE,
                   f"authorized against {authority.environment.value} environment")
@@ -151,6 +203,7 @@ _DENIAL_ERRORS: dict[str, type[EthicsViolation]] = {
     "destructive": DestructiveActionRefused,
     "live_destructive": DestructiveActionRefused,
     "budget": BudgetExhausted,
+    "blast_radius": BlastRadiusExceeded,
 }
 
 
@@ -161,11 +214,16 @@ def require_authorization(
     killswitch: KillSwitch | None = None,
     actions_taken: int = 0,
     now: datetime | None = None,
+    blast_radius_fn: Callable[[ActionRequest], BlastRadiusVerdict] | None = None,
+    blast_ceiling: float | None = None,
 ) -> AuthorizationDecision:
     """Authorize or raise. The typed EthicsViolation must not be silently
-    caught — it is the engagement refusing to act."""
+    caught — it is the engagement refusing to act. The optional blast-radius veto
+    (``blast_radius_fn`` + ``blast_ceiling``) is forwarded unchanged; when it fires it raises the
+    typed ``BlastRadiusExceeded``. Absent both kwargs this is byte-identical to before."""
     decision = authorize_action(
         authority, request, killswitch=killswitch, actions_taken=actions_taken, now=now,
+        blast_radius_fn=blast_radius_fn, blast_ceiling=blast_ceiling,
     )
     if not decision.allowed:
         err = _DENIAL_ERRORS.get(decision.denial_code, EthicsViolation)

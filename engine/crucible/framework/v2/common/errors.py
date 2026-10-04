@@ -165,6 +165,15 @@ class ConcurrencyLimitExceeded(EthicsViolation):
     action completes."""
 
 
+class BlastRadiusExceeded(EthicsViolation):
+    """An otherwise-authorized action was vetoed because its predicted blast radius — the summed
+    business impact of the crown jewels it would NEWLY expose, per the read-only forward world-model
+    predictor (``worldmodel.impact.predict_action_blast_radius``) — exceeds the operator's configured
+    ceiling. The world model is ADVISORY to the gate here: it informs this refusal, it never mints a
+    FACT and is never an oracle input. Default-off — absent a configured predictor AND ceiling the
+    gate never runs the predictor and never raises this, so existing call sites are unaffected."""
+
+
 class ScopeDrift(EthicsViolation):
     """The three legs of an engagement's authorization — the authorization
     letter, the charter.md scope table, and the signed EngagementAuthorization
