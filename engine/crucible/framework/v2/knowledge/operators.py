@@ -24,6 +24,7 @@ asserted fact, exactly as the world-model demands.
 
 from __future__ import annotations
 
+import heapq
 from collections.abc import Iterable, Mapping
 
 from ..common.errors import CrucibleError
@@ -346,7 +347,7 @@ def _narrow_focus_kind(op: Operator) -> NodeKind | None:
     return next(iter(kinds)) if len(kinds) == 1 else None
 
 
-def saturate(
+def _saturate_full(
     operators: Iterable[Operator],
     world: WorldModel,
     seq_start: int,
@@ -354,31 +355,20 @@ def saturate(
     seeds: Mapping[str, Mapping[str, str]] | None = None,
     max_rounds: int = 16,
 ) -> list[Applied]:
-    """Run `operators` against every node to a fixpoint: repeatedly derive
-    until a full round asserts nothing new. This is the forward-chaining the
-    planner uses to expand the reachable attack surface before querying for
-    paths.
+    """The FULL-RESCAN fixpoint — the pre-M2.1 ``saturate`` body, retained verbatim
+    as the differential reference :func:`saturate` is proven byte-identical against.
 
-    `seeds` optionally maps an operator id to a role->node seed binding (for
-    roles the preconditions cannot capture, e.g. an `actor` principal). The
-    monotonic sequence int advances by one per asserted fact starting from
-    `seq_start`, so every derived fact is uniquely and deterministically
-    ordered. `max_rounds` bounds the loop; a well-formed catalog converges
-    far sooner (effects are monotonic — the graph only accretes).
+    Every round tries EVERY operator against EVERY candidate node (narrowed by
+    statically-pinned focus kind — the earlier #828 win) and ``derive``s it. A
+    successful match re-fires its effects on EVERY round until the loop stops, which
+    is how the model accumulates Beta belief (``alpha``/``beta``) and widens
+    ``last_seen`` — that re-firing is part of the result, not noise.
 
-    Candidate narrowing (#828). The pre-index loop tried EVERY operator against
-    EVERY node every round — ``rounds x |ops| x |nodes|`` ``derive`` calls, the
-    bulk of which fail their very first (``NODE_KIND``) precondition and assert
-    nothing. Each operator whose focus kind is pinned (see
-    :func:`_narrow_focus_kind`) is instead scanned only over the nodes of that
-    kind via the maintained per-kind order index, dropping those guaranteed-None
-    ``derive`` calls. This changes NOTHING observable: the skipped calls had no
-    effect, and ``nodes_of_kind(K)`` visits the same nodes in the same order a
-    full scan would have reached them. An operator re-fires on every matching
-    node every round exactly as before — that re-firing accumulates belief
-    (``alpha``/``beta``) and widens ``last_seen``, so it is part of the result
-    and is deliberately NOT elided; only the empty probes are. The closure, the
-    derived facts, and the serialised graph are byte-for-byte identical."""
+    :func:`saturate` is the worklist rewrite (M2.1) that reaches the IDENTICAL
+    saturated graph with strictly fewer ``derive`` calls. This function is the slow,
+    obviously-correct truth it is diffed against over fixture AND random graphs (see
+    ``knowledge/tests/test_operators.py``). Do NOT optimise it — its only job is to
+    be unmistakably correct so the fast path can be checked."""
     seeds = seeds or {}
     ops = list(operators)
     all_applied: list[Applied] = []
@@ -390,9 +380,6 @@ def saturate(
     for n in world.all_nodes():
         seen.add(("N", n.id, ",".join(sorted(n.attrs))))
     # Each operator's statically-pinned focus kind (None => scan every node).
-    # saturate never adds or removes nodes and never changes a node's kind
-    # (effects only ASSERT_EDGE between existing nodes or SET_ATTR on one), so
-    # these candidate sets are stable for the whole run.
     narrowed = [_narrow_focus_kind(op) for op in ops]
     seq = seq_start
     for _ in range(max_rounds):
@@ -413,6 +400,177 @@ def saturate(
                     all_applied.append(ch)
                     round_new += 1
                     seq += 1
+        if round_new == 0:
+            break
+    return all_applied
+
+
+def saturate(
+    operators: Iterable[Operator],
+    world: WorldModel,
+    seq_start: int,
+    *,
+    seeds: Mapping[str, Mapping[str, str]] | None = None,
+    max_rounds: int = 16,
+) -> list[Applied]:
+    """Run `operators` against the world to a fixpoint — the forward-chaining the
+    planner uses to expand the reachable attack surface before querying for paths.
+
+    `seeds` optionally maps an operator id to a role->node seed binding (for roles
+    the preconditions cannot capture, e.g. an `actor` principal). The monotonic
+    sequence int advances by one per asserted fact starting from `seq_start`, so
+    every derived fact is uniquely and deterministically ordered. `max_rounds`
+    bounds the loop; a well-formed catalog converges far sooner.
+
+    WORKLIST / DELTA fixpoint (#828 M2.1). The full rescan (:func:`_saturate_full`,
+    kept as the reference) re-``derive``s ``rounds x |ops| x |nodes|`` pairs, the
+    bulk of which re-fail their preconditions every round and assert nothing. This
+    rewrite instead re-``derive``s, after the first sweep, only the (operator, node)
+    pairs whose match RESULT can have changed since it was last evaluated — those a
+    graph mutation of the previous (or earlier-this-sweep) step could flip — plus the
+    pairs that currently match (which MUST re-fire every sweep to reproduce the
+    belief/`last_seen` accretion). It is **pure perf**: BYTE-IDENTICAL to
+    :func:`_saturate_full` — same derived facts, same `seen` closure, same
+    `first_seen`/`last_seen`, same Beta belief (`alpha`/`beta`), same provenance, and
+    the same `all_applied` in the same order. ``test_operators`` diffs the two deeply
+    over fixture and random graphs; a synthetic case proves the derive-call count is
+    strictly lower.
+
+    WHY IT STAYS SOUND (no under-saturation, no divergence). A ``match`` reads only:
+    the focus node's kind (never mutated) and attrs (NODE_ATTR); the edges incident
+    to the focus and their far-node kinds (INCIDENT_EDGE); and, globally, the nodes
+    of a kind and their attrs (GRAPH_HAS_NODE). ``apply`` writes only: a new/re-fired
+    edge (ASSERT_EDGE) and a node attr (SET_ATTR). Cross-referencing the two:
+
+      * NO precondition reads an edge's attrs/confidence/belief/seen, so an edge
+        RE-FIRE (an existing (src,dst,kind) re-asserted) changes no match result and
+        dirties nothing. A NEW edge changes the incident sets of its two endpoints,
+        so it dirties every INCIDENT_EDGE operator whose focus candidate is one of
+        them.
+      * A SET_ATTR changes a node's attrs (its value may change even when the sig —
+        keyed on attr NAMES — does not), so it dirties every NODE_ATTR operator on
+        that focus, and every GRAPH_HAS_NODE operator that reads that node's kind
+        globally (a kind-only GRAPH_HAS_NODE is constant — saturate never adds or
+        removes a node — so only an attr-constrained one is tracked).
+
+    The dependency map is a sound OVER-approximation (it may re-derive a pair whose
+    result did not actually change — a harmless no-op or an identical re-fire), so it
+    never MISSES a flip. Pairs are visited in a per-sweep heap keyed by
+    ``(operator-index, node-id)`` — exactly the full rescan's (operator order, then
+    id-sorted node) visit order — and a mutation that dirties a not-yet-visited pair
+    THIS sweep is pushed to fire this sweep (reproducing the full rescan's
+    within-sweep chaining), while one that dirties an already-passed pair defers to
+    the next sweep. Skipped pairs are precisely those that would re-fail with no
+    mutation, so the surviving pairs see the IDENTICAL graph state, in the identical
+    order, at the identical seq — including the multi-hop case where a round-k
+    derivation depends on a node first touched in round k-2. Induction over sweeps
+    gives byte-identity; ``round_new`` per sweep is therefore identical, so the loop
+    stops on the same round."""
+    seeds = seeds or {}
+    ops = list(operators)
+    all_applied: list[Applied] = []
+    # Pre-seed with the graph's current facts so a re-run over an already converged
+    # graph reports nothing new — the honest fixpoint contract (same as the full rescan).
+    seen: set[tuple[str, ...]] = set()
+    for e in world.all_edges():
+        seen.add(("E", e.src, e.dst, e.kind.value))
+    for n in world.all_nodes():
+        seen.add(("N", n.id, ",".join(sorted(n.attrs))))
+
+    # saturate never adds/removes a node and never changes a kind (effects only
+    # ASSERT_EDGE between existing nodes or SET_ATTR on one), so the candidate node
+    # set, its id-sorted order, and each node's kind are STABLE for the whole run.
+    narrowed = [_narrow_focus_kind(op) for op in ops]
+    all_nodes = world.all_nodes()                       # id-sorted, stable
+    kind_of: dict[str, NodeKind] = {n.id: n.kind for n in all_nodes}
+    all_ids = [n.id for n in all_nodes]
+    cand_ids: list[list[str]] = [
+        all_ids if narrowed[oi] is None else [n.id for n in world.nodes_of_kind(narrowed[oi])]
+        for oi in range(len(ops))
+    ]
+
+    # --- dependency indexes: which operators' match result a mutation can flip -----
+    incident_ops = [oi for oi, op in enumerate(ops)
+                    if any(p.kind is PredicateKind.INCIDENT_EDGE for p in op.preconditions)]
+    node_attr_ops = [oi for oi, op in enumerate(ops)
+                     if any(p.kind is PredicateKind.NODE_ATTR for p in op.preconditions)]
+    # GRAPH_HAS_NODE is global; only an ATTR-constrained one is non-constant (the node
+    # set of a kind never changes). Watched NodeKind -> operators reading it globally.
+    graph_attr_ops: dict[NodeKind, list[int]] = {}
+    for oi, op in enumerate(ops):
+        for p in op.preconditions:
+            if (p.kind is PredicateKind.GRAPH_HAS_NODE and p.attr is not None
+                    and p.node_kind is not None):
+                graph_attr_ops.setdefault(p.node_kind, []).append(oi)
+
+    def _is_cand(oi: int, nid: str) -> bool:
+        k = narrowed[oi]
+        return k is None or kind_of.get(nid) is k
+
+    def _incident_deps(src: str, dst: str) -> list[tuple[int, str]]:
+        out: list[tuple[int, str]] = []
+        for oi in incident_ops:
+            if _is_cand(oi, src):
+                out.append((oi, src))
+            if _is_cand(oi, dst):
+                out.append((oi, dst))
+        return out
+
+    def _node_attr_deps(nid: str) -> list[tuple[int, str]]:
+        out: list[tuple[int, str]] = [(oi, nid) for oi in node_attr_ops if _is_cand(oi, nid)]
+        for oi in graph_attr_ops.get(kind_of.get(nid), ()):  # type: ignore[arg-type]
+            out.extend((oi, c) for c in cand_ids[oi])
+        return out
+
+    seq = seq_start
+    live: set[tuple[int, str]] = set()
+    # First sweep: evaluate every candidate pair, exactly as the full rescan's round 0.
+    carry: set[tuple[int, str]] = {(oi, nid) for oi in range(len(ops)) for nid in cand_ids[oi]}
+
+    for _ in range(max_rounds):
+        round_new = 0
+        heap: list[tuple[int, str]] = list(carry | live)
+        heapq.heapify(heap)
+        processed: set[tuple[int, str]] = set()
+        carry = set()                                   # pairs dirtied FOR THE NEXT sweep
+        while heap:
+            key = heapq.heappop(heap)
+            if key in processed:
+                continue                                # a pair is evaluated at most once per sweep
+            processed.add(key)
+            oi, nid = key
+            op = ops[oi]
+            node = world.get_node(nid)                  # fresh object; never None (no node removal)
+            if node is None:                            # pragma: no cover - defensive
+                live.discard(key)
+                continue
+            changes = derive(op, world, node, seq, seeds.get(op.id))
+            if not changes:
+                live.discard(key)                       # no longer matches -> stop re-firing it
+                continue
+            live.add(key)
+            for ch in changes:
+                sig = _signature(ch)
+                is_new = sig not in seen
+                # Route this mutation's dependents: a NEW edge flips INCIDENT_EDGE
+                # readers of its endpoints; any SET_ATTR (new key OR value overwrite)
+                # flips NODE_ATTR / attr-GRAPH_HAS_NODE readers; an edge RE-FIRE flips
+                # nothing (no precondition reads edge metadata).
+                if ch.edge is not None:
+                    deps = _incident_deps(ch.edge.src, ch.edge.dst) if is_new else ()
+                else:
+                    deps = _node_attr_deps(ch.node.id)  # type: ignore[union-attr]
+                for dep in deps:
+                    if dep > key:
+                        heapq.heappush(heap, dep)       # not-yet-visited this sweep -> fire this sweep
+                    else:
+                        carry.add(dep)                  # already visited -> next sweep
+                if not is_new:
+                    continue                            # idempotent refine of a fact we already have
+                seen.add(sig)
+                all_applied.append(ch)
+                round_new += 1
+                seq += 1
         if round_new == 0:
             break
     return all_applied
