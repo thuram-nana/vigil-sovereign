@@ -130,9 +130,17 @@ def admit(
     verifier=None,
     belief_floor: float = _BELIEF_FLOOR,
     require_entities: bool = True,
+    witness_quorum=None,
 ) -> AdmittedClaim:
     """Admit a claim by re-executing its grounds. See the module docstring for the
-    decision order. Never mutates; never promotes an oracle-refused claim."""
+    decision order. Never mutates; never promotes an oracle-refused claim.
+
+    ``witness_quorum`` (M4.4, OPTIONAL, DEFAULT-OFF, DEMOTE-ONLY): an operator-set N-of-M
+    oracle-witness quorum policy (``None`` ⇒ the ambient operator policy, DISABLED unless set).
+    When it applies to the claim's critical ``bug_class``, a claim that would otherwise ground at
+    FACT strength on a re-fired ORACLE context is DEMOTED to UNGROUNDED (a LEAD everywhere it
+    renders) unless N-or-more DISTINCT INDEPENDENT oracle-witness kinds re-fire over that context.
+    It can only subtract: it never promotes, and with no policy admission is byte-identical."""
     # 1. contradiction — the world-model actively refutes a named entity.
     contra, score, creason = contradicts(claim.entity_refs, world)
     if contra:
@@ -153,15 +161,20 @@ def admit(
     #    cert must certify it, the world-model node must be one the claim names.
     resolved: set[Ground] = set()
     oracle_conf: float | None = None
+    fact_oracle_context: dict | None = None   # M4.4: the re-fired context a witness quorum re-checks
     for tok in claim.tokens:
         if tok.ground is Ground.ORACLE:
             ok, conf = _oracle_ok(tok, claim, verifier)
             if ok:
                 resolved.add(Ground.ORACLE)
                 oracle_conf = conf if oracle_conf is None else max(oracle_conf, conf)
+                if fact_oracle_context is None and isinstance(tok.oracle_context, dict):
+                    fact_oracle_context = tok.oracle_context
         elif tok.ground is Ground.CERT:
             if _cert_ok(tok, claim, trust_root):
                 resolved.add(Ground.CERT)
+                if fact_oracle_context is None and isinstance(tok.oracle_context, dict):
+                    fact_oracle_context = tok.oracle_context
         elif tok.ground is Ground.WORLDMODEL:
             if _worldmodel_ok(tok, claim, world, belief_floor):
                 resolved.add(Ground.WORLDMODEL)
@@ -185,6 +198,21 @@ def admit(
                 claim=claim, verdict=VeracityVerdict.UNGROUNDED,
                 reason="a re-executed proof is present but the claim declares no bug_class "
                        "subject to bind it to — an unbound proof grounds nothing")
+        # M4.4 WITNESS-QUORUM CONJUNCT (OPTIONAL, DEFAULT-OFF, DEMOTE-ONLY). Reached only on a claim that
+        # ALREADY grounds at FACT strength on a re-fired oracle context, so it can only ever DEMOTE — never
+        # promote. When an operator-set quorum applies to this critical bug_class, require N-or-more DISTINCT
+        # INDEPENDENT oracle-witness kinds to re-fire over the same context; below quorum, demote to
+        # UNGROUNDED (a LEAD on every render path). With no policy (the default) it is inapplicable (ok=True)
+        # ⇒ byte-identical. A worldmodel-only fact (no oracle context captured) is unaffected.
+        if fact in (Ground.ORACLE, Ground.CERT) and fact_oracle_context is not None:
+            from .witness_quorum import evaluate as _quorum_eval
+            _q = _quorum_eval(fact_oracle_context, bug_class=claim.bug_class,
+                              config=witness_quorum, verifier=verifier)
+            if not _q.ok:
+                return AdmittedClaim(
+                    claim=claim, verdict=VeracityVerdict.UNGROUNDED,
+                    grounded_by=[g.value for g in resolved],
+                    reason=f"demoted by witness quorum — {_q.reason}")
         # the calibrated confidence is the RE-EXECUTED oracle value, not a proposer number.
         conf = oracle_conf if (fact is Ground.ORACLE and oracle_conf is not None) else claim.proposed_confidence
         return AdmittedClaim(claim=claim, verdict=VeracityVerdict.GROUNDED, strength=fact,

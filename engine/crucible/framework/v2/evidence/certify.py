@@ -71,12 +71,18 @@ def build_certificate(
     collector_signature: str = "",
     artifact_recheck_required: bool = False,
     artifact_encoding: str = "",
+    witness_quorum_required: int = 0,
+    witness_kinds: "list[str] | None" = None,
 ) -> EvidenceCertificate:
     """Build an (unsigned) certificate from a serialized finding carrying an
     `oracle_context`. If an evidence dir is given, its raw artifacts are manifested by
     per-file sha256 and bound into the certificate. ``report_claims`` (optional) binds
     atomic report sentences INTO the certificate so the signature covers them and
-    ``verify_certificate`` re-admits each — sorted for deterministic canonical bytes."""
+    ``verify_certificate`` re-admits each — sorted for deterministic canonical bytes.
+
+    ``witness_quorum_required`` + ``witness_kinds`` (M4.4, OPTIONAL) record an operator-set
+    N-of-M oracle-witness quorum the FACT was admitted under, so offline verification re-checks it.
+    0 / None (the default) ⇒ the certificate serialises byte-identically (dropped from canonical form)."""
     oracle_context = finding.get("oracle_context") or {}
     artifacts = []
     if evidence_root is not None and action_id:
@@ -121,6 +127,9 @@ def build_certificate(
         collector_signature=collector_signature,
         artifact_recheck_required=bool(artifact_recheck_required),
         artifact_encoding=artifact_encoding,
+        # M4.4 witness quorum (dropped-when-empty → byte-identical when a caller passes none).
+        witness_quorum_required=int(witness_quorum_required or 0),
+        witness_kinds=sorted({str(k) for k in (witness_kinds or [])}),
     )
 
 
@@ -253,6 +262,9 @@ class EvidenceVerification(BaseModel):
     reproduced: bool = False       # the pure oracle re-fires and matches the claim
     claims_grounded: bool = True   # every fact-bound report sentence re-admits as a fact
     schema_ok: bool = True         # the certificate schema version is one this verifier models
+    witness_quorum_met: bool = True  # M4.4: when the cert recorded an N-of-M oracle-witness quorum, >= N
+    #                                  distinct kinds still re-fire AND every recorded witness re-fires. True
+    #                                  (no-op) for a certificate that recorded no quorum → byte-identical .ok.
     oracle_version_current: bool = True   # BACK-COMPAT: False iff status is CHANGED (see oracle_version_status)
     oracle_version_status: OracleVersionStatus = OracleVersionStatus.UNCONFIRMED  # LOUD first-class comparison
     stamped_oracle_version: str = ""   # the oracle id@version the certificate was MINTED + signed under ("" = none)
@@ -273,7 +285,8 @@ class EvidenceVerification(BaseModel):
         # signal). CALLERS THAT NEED THE RE-EXECUTABILITY GUARANTEE MUST CHECK ``fully_sound`` / ``tier`` —
         # ``ok`` alone reports a version-skewed cert as (crypto-)sound, which is honest only alongside the tier.
         return (self.authentic and self.bound and self.artifacts_ok and self.primary_artifact_ok
-                and self.reproduced and self.claims_grounded and self.schema_ok)
+                and self.reproduced and self.claims_grounded and self.schema_ok
+                and self.witness_quorum_met)
 
     @property
     def tier(self) -> VerificationTier:
@@ -418,6 +431,19 @@ def verify_certificate(
 
     claims_grounded, claims_note = _claims_grounded(cert, oracle_context)
 
+    # M4.4 — OFFLINE WITNESS-QUORUM HONOR (demote-only). When the certificate recorded an operator-set
+    # N-of-M oracle-witness quorum, re-derive the distinct independent oracle kinds that re-fire over the
+    # presented context and require >= N AND that every recorded witness still re-fires. A certificate that
+    # recorded no quorum (the default) is byte-identical: witness_quorum_met stays True and .ok is unchanged.
+    witness_quorum_met = True
+    quorum_note = ""
+    if cert.witness_quorum_required > 0:
+        from ..veracity.witness_quorum import witnesses_reconfirm
+        witness_quorum_met, got_kinds, quorum_note = witnesses_reconfirm(
+            oracle_context, bug_class=cert.bug_class,
+            required=cert.witness_quorum_required, expected_kinds=cert.witness_kinds)
+        quorum_note = "; " + quorum_note
+
     # ORACLE-VERSION currency (surfaced LOUDLY as first-class fields; DOWNGRADES the tier, does NOT gate the
     # crypto ``ok``). RE-DERIVE the current oracle id@version from the pure oracle source and compare it to the
     # version stamped + signed at MINT. Three honest outcomes (see OracleVersionStatus):
@@ -467,11 +493,13 @@ def verify_certificate(
     reason = (f"signature: {thr.reason}; "
               f"binding: {'oracle_context matches digest' if bound else 'DIGEST MISMATCH — signature is for different evidence'}; "
               f"reproduction: {rr.note}; claims: {claims_note}"
-              f"{artifact_note}{primary_note}{tr_note}{schema_note}{ov_note}{fresh_note}{identity_note}")
+              f"{artifact_note}{primary_note}{tr_note}{schema_note}{ov_note}{fresh_note}{identity_note}"
+              f"{quorum_note}")
     return EvidenceVerification(
         finding_ref=cert.finding_ref, authentic=authentic, bound=bound,
         artifacts_ok=artifacts_ok, primary_artifact_ok=primary_artifact_ok, reproduced=rr.ok,
-        claims_grounded=claims_grounded, schema_ok=schema_ok, oracle_version_current=oracle_version_current,
+        claims_grounded=claims_grounded, schema_ok=schema_ok, witness_quorum_met=witness_quorum_met,
+        oracle_version_current=oracle_version_current,
         oracle_version_status=ov_status, stamped_oracle_version=stamped_ov, current_oracle_version=current_ov,
         currently_fresh=currently_fresh, valid_signers=thr.valid_signers, bound_identity=bound_identity,
         reason=reason)

@@ -123,6 +123,7 @@ def certify_admitted(
     freshness_ttl_seconds: int = 0,
     binding: "dict | None" = None,
     report_claims: "list[Any] | None" = None,
+    witness_quorum: Any = None,
 ) -> AdapterResult:
     """Mint a certificate ONLY for a verdict that has already passed admission.
 
@@ -155,7 +156,7 @@ def certify_admitted(
     result = confirm_and_certify(
         finding, engagement_slug=engagement_slug, signers=signers, seq=seq, verifier=verifier,
         provenance=provenance, tool_version=tool_version, freshness_ttl_seconds=freshness_ttl_seconds,
-        binding=binding, report_claims=report_claims)
+        binding=binding, report_claims=report_claims, witness_quorum=witness_quorum)
     if not result.is_fact:
         # Admission said FACT but the deterministic layer refused (unmapped class, LLM provenance, signing
         # failure). The stricter answer wins — admission grants permission, it does not manufacture proof.
@@ -186,6 +187,7 @@ def confirm_and_certify(
     freshness_ttl_seconds: int = 0,
     binding: "dict | None" = None,
     report_claims: "list[Any] | None" = None,
+    witness_quorum: Any = None,
 ) -> AdapterResult:
     """Drive CRUCIBLE's oracle over ``finding['oracle_context']`` and, on a confirmed + oracle-mapped +
     REPRODUCED finding, mint + sign a proof-carrying certificate. ``signers`` = [(key_id, priv_b64)]
@@ -199,6 +201,15 @@ def confirm_and_certify(
     context that fires is an LLM-influenced route to a FACT. Every caller that cannot prove reproduction
     from a non-LLM channel gets a LEAD (fail-closed); the deterministic oracle still runs, so the LEAD is
     honestly labelled with what fired.
+
+    ``witness_quorum`` (M4.4, OPTIONAL, DEFAULT-OFF, DEMOTE-ONLY) is an operator-set N-of-M oracle-witness
+    quorum policy (a :class:`framework.v2.veracity.witness_quorum.WitnessQuorumConfig`, or ``None`` to use
+    the ambient operator policy, which is DISABLED unless the operator set one). When it applies to the
+    confirmed class — the switch is on AND the class is operator-designated critical — a signed FACT is
+    minted ONLY if N-or-more DISTINCT INDEPENDENT oracle-witness kinds RE-FIRE over the retained context;
+    below quorum the confirmed finding is WITHHELD as a labelled LEAD, never signed. It can only make
+    admission stricter (demote a would-be FACT) — it NEVER promotes, and with no policy (the default) the
+    mint path is BYTE-IDENTICAL to today.
     """
     if not signers:
         raise ValueError(
@@ -307,6 +318,22 @@ def confirm_and_certify(
             outcome=Outcome.UNSUPPORTED.value,
         )
 
+    # 2c. M4.4 WITNESS-QUORUM CONJUNCT (OPTIONAL, DEFAULT-OFF, DEMOTE-ONLY). Only reached on a claim the
+    #     deterministic layer has ALREADY decided is a FACT (confirmed + oracle-mapped + reproduced), so this
+    #     can only ever WITHHOLD — it never promotes and never runs on the non-confirmed branch. When an
+    #     operator-set quorum applies to the confirmed critical class, require N-or-more DISTINCT INDEPENDENT
+    #     oracle-witness kinds to RE-FIRE over the retained context (critics/RL/LLM are not oracle signals, so
+    #     they are structurally never witnesses). Below quorum ⇒ a labelled LEAD, never a signed FACT. With no
+    #     policy (the default) `evaluate` is inapplicable (ok=True, required=0) ⇒ byte-identical to today.
+    from framework.v2.veracity.witness_quorum import evaluate as _quorum_eval  # noqa: PLC0415 (FATAL-2)
+    _q = _quorum_eval(oracle_context, bug_class=confirmed_class, config=witness_quorum, verifier=verifier)
+    if not _q.ok:
+        return AdapterResult(
+            "lead", _q.reason, confirmed_class, _finding_ref(finding),
+            confirmed_by=_kind_str(confirmed.confirmed_by), confidence=float(confirmed.confidence),
+            outcome=Outcome.UNSUPPORTED.value,
+        )
+
     # 3. mint + sign the proof-carrying certificate over the exact confirmed evidence.
     enriched = {
         **finding,
@@ -324,8 +351,13 @@ def confirm_and_certify(
     # signed, so the text is tamper-evident and travels with the proof). A check whose FACT is NARROWER than
     # its bug-class token uses this so a consumer receives the narrowing, not just the token — the fix for
     # "the note never reached the wire". None (the default) ⇒ the certificate serialises byte-identically.
+    # Record the quorum INTO the signed certificate when it was enforced, so offline verification
+    # re-checks all N witnesses. When inapplicable (the default), required=0 / kinds=() are dropped from
+    # the canonical form (serializer) → the certificate serialises byte-identically.
     cert = build_certificate(enriched, engagement_slug=engagement_slug, seq=seq,
-                             report_claims=list(report_claims) if report_claims else None, **d2)
+                             report_claims=list(report_claims) if report_claims else None,
+                             witness_quorum_required=(_q.required if _q.applicable else 0),
+                             witness_kinds=(list(_q.kinds) if _q.applicable else None), **d2)
     signed = sign_certificate(cert, signers)
     return AdapterResult(
         "fact",
