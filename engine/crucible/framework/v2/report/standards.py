@@ -202,6 +202,9 @@ _STANDARDS: dict[str, ControlMapping] = {
     "error_based_sqli": _m("A03:2021", ("CWE-89",), pci=_SDLC_PCI, soc2=_SDLC_SOC2, iso=_SDLC_ISO, attack=("T1190",)),
     "sqli": _m("A03:2021", ("CWE-89",), pci=_SDLC_PCI, soc2=_SDLC_SOC2, iso=_SDLC_ISO, attack=("T1190",)),
     "sqli_attempt": _m("A03:2021", ("CWE-89",), pci=_SDLC_PCI, soc2=_SDLC_SOC2, iso=_SDLC_ISO, attack=("T1190",)),
+    # out-of-band SQLi (M-11): the OOB-exfil variant of SQL injection — same CWE-89 / A03 family, proven by an
+    # out-of-band callback the injected query triggers (OracleKind.OOB_CALLBACK).
+    "oob_sqli": _m("A03:2021", ("CWE-89",), pci=_SDLC_PCI, soc2=_SDLC_SOC2, iso=_SDLC_ISO, attack=("T1190",)),
     "nosqli": _m("A03:2021", ("CWE-943", "CWE-89"), pci=_SDLC_PCI, soc2=_SDLC_SOC2, iso=_SDLC_ISO, attack=("T1190",)),
     "nosql_injection_attempt": _m("A03:2021", ("CWE-943",), pci=_SDLC_PCI, soc2=_SDLC_SOC2, iso=_SDLC_ISO,
                                   attack=("T1190",)),
@@ -541,7 +544,7 @@ class _Wave2:
 _WAVE2_GROUPS: tuple[tuple[_Wave2, tuple[str, ...]], ...] = (
     # ---- query injection (SQL / NoSQL) — DB query-string analysis is the clean D3FEND dual ----
     (_Wave2(("PR.PS-06", "ID.RA-01"), ("D3-DQSA",), ("2002", "2004"), ("PW.5", "PW.7", "RV.1")),
-     ("boolean_sqli", "time_based_sqli", "error_based_sqli", "sqli", "sqli_attempt", "nosqli",
+     ("boolean_sqli", "time_based_sqli", "error_based_sqli", "sqli", "sqli_attempt", "oob_sqli", "nosqli",
       "nosql_injection_attempt")),
     # ---- OS-command / code-execution injection — executable allowlisting is the clean D3FEND dual ----
     (_Wave2(("PR.PS-06", "ID.RA-01"), ("D3-EAL",), ("2002", "2004"), ("PW.5", "PW.7", "RV.1")),

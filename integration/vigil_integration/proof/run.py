@@ -888,6 +888,61 @@ def _transport_redrive_class(report: Any) -> "str | None":
                              _TRANSPORT_CWE_TO_CLASS)
 
 
+# ---- OOB-CALLBACK intake (M-11) — the blind classes VIGIL re-drives via its OWN loopback collector. --------
+# LEAD-ONLY on the Strix rail BY CONSTRUCTION: a sound FACT needs VIGIL's OWN TRUSTED collector material (an
+# independent collector keypair + the out-of-band pinned pubkey), which a Strix REPORT does not carry and the
+# signed authority (a PUBLIC pin only) cannot supply a private key for — so an ephemeral pin would not
+# re-verify offline. The GOVERNED-ENGAGE seam (wiring._live_oob_redrive_fact, fed trusted oob_material) is the
+# mint path. This arm OWNS an OOB-class report so it is routed to the governed re-drive, which fail-closes to a
+# LEAD without material (the Strix report's own narrative is NEVER proof). Class set + CWE map are PAIRWISE
+# DISJOINT from every other arm: CWE-918 (ssrf) / CWE-611 (xxe) / CWE-502 (deserialization) belong to no other
+# arm; rce / command_injection / oob_sqli are keyed on the EXPLICIT class ONLY (CWE-78/94/89 are owned
+# elsewhere or ambiguous), exactly as dom_xss keeps off CWE-79.
+_OOB_REDRIVE_CLASSES = frozenset({"ssrf", "blind_xxe", "xxe", "rce", "command_injection",
+                                  "deserialization", "oob_sqli"})
+_OOB_ALIASES = {
+    "server_side_request_forgery": "ssrf", "ssrf_oob": "ssrf",
+    "xml_external_entity": "xxe", "xxe_injection": "xxe",
+    "blind_xml_external_entity": "blind_xxe",
+    "remote_code_execution": "rce",
+    "os_command_injection": "command_injection", "command_injection_oob": "command_injection",
+    "insecure_deserialization": "deserialization",
+    "out_of_band_sqli": "oob_sqli", "oob_sql_injection": "oob_sqli", "blind_sqli_oob": "oob_sqli",
+}
+_OOB_CWE_TO_CLASS = {"cwe-918": "ssrf", "cwe-611": "xxe", "cwe-502": "deserialization"}
+
+
+def _oob_redrive_class(report: Any) -> "str | None":
+    """The blind-OOB class this report maps to (ssrf / xxe / blind_xxe / rce / command_injection /
+    deserialization / oob_sqli), or ``None``. SINGLE source of truth (``sink._oob_redrivable`` delegates here)."""
+    return _classify_redrive(report, _OOB_REDRIVE_CLASSES, _OOB_ALIASES, _OOB_CWE_TO_CLASS)
+
+
+def _oob_redrive_target(report: Any) -> str:
+    """The re-drive TARGET url the OOB arm needs (``endpoint`` / ``url`` / ``target``, stripped), or ``""``.
+    SINGLE source of truth for the OOB arm's precondition — both ``_oob_redrive`` (which refuses with no url)
+    and ``_oob_redrive_eligible`` read it, so the sink gate and the driver can never disagree on what counts as
+    a re-drivable OOB report. Stdlib only (import-clean sink path, FATAL-2)."""
+    r = report if isinstance(report, dict) else {}
+    return str(r.get("endpoint") or r.get("url") or r.get("target") or "").strip()
+
+
+def _oob_redrive_eligible(report: Any) -> bool:
+    """True when this report may RELAX the no-capture mint gate for the OOB arm: an OOB-re-drivable CLASS
+    (``_oob_redrive_class``) that ALSO carries a re-drive TARGET (``_oob_redrive_target``).
+
+    Why the OOB arm is gated on a target when the web / errsig / W2 / W3 / transport arms are NOT: those arms
+    are FACT-capable on the Strix rail — VIGIL's own gated probe crafts fresh traffic (or drives its own
+    headless browser / handshake) and can MINT — so they are capture-OPTIONAL on class alone. The OOB Strix
+    rail is LEAD-ONLY BY CONSTRUCTION (a sound OOB FACT needs VIGIL's OWN trusted collector material a Strix
+    report cannot carry; the FACT mint is the governed-engage seam ``wiring._live_oob_redrive_fact``). So an
+    OOB class ALONE must NOT relax the gate: a bare OOB class with no target (and no attached capture, which
+    the gate's first clause already admits to the executor path) is not genuinely re-drivable — the arm would
+    immediately refuse — and stays a LEAD without reaching the mint. SINGLE source of truth
+    (``sink._oob_mint_eligible`` delegates here)."""
+    return _oob_redrive_class(report) is not None and bool(_oob_redrive_target(report))
+
+
 class _RuntimeMintResult:
     """The mint callback's return for a W2 runtime/statistical re-drive arm. The sink reads ONLY ``.is_fact``;
     ``.result`` (the :class:`live.runtime_redrive.RuntimeRedriveResult`) is retained for the persisted record
@@ -1181,6 +1236,30 @@ def _transport_redrive(report: dict, cls: str, *, run_dir: "str | os.PathLike",
     return _finish_runtime_arm(report, res, run_dir=run_dir)
 
 
+def _oob_redrive(report: dict, cls: str, *, run_dir: "str | os.PathLike",
+                 signers: "list[tuple[str, str]]", engagement_slug: str,
+                 control_fetch: "Optional[Callable[[dict], bytes | None]]" = None) -> "Any | None":
+    """Rail adapter for the blind OOB classes (M-11). LEAD-ONLY by construction on the Strix rail: it consults
+    the governed ``live.runtime_redrive.oob_callback_redrive`` arm WITHOUT trusted collector material (a Strix
+    report carries none, and the signed authority holds only a PUBLIC pin, no collector private key), so the
+    arm REFUSES (no material, no FACT) and this returns a non-FACT — the Strix report's narrative is NEVER
+    proof. The mint path is the governed-engage seam (``wiring._live_oob_redrive_fact``) fed trusted
+    ``oob_material``. A missing endpoint / gate refusal / the refusal all yield a non-FACT → LEAD. Never raises."""
+    url = _oob_redrive_target(report)          # SINGLE source: same precondition the sink gate's eligibility reads
+    if not url:
+        return None
+    try:
+        from ..live.runtime_redrive import oob_callback_redrive  # noqa: PLC0415 — pulls framework at CALL time
+        # NO trusted material on the Strix path (a report cannot carry VIGIL's collector keypair) ⇒ the arm
+        # refuses before any traffic. The ``bug_class`` only labels the result's class; it never sources proof.
+        res = oob_callback_redrive(url, slug=engagement_slug, engagement_slug=engagement_slug,
+                                   signers=signers, oob_material={"bug_class": cls})
+    except Exception as exc:  # noqa: BLE001 — a re-drive we could not RUN → LEAD (never a false CLEAN)
+        _record_degraded(run_dir, REDRIVE_FAILED, "proof.run._oob_redrive", exc)
+        return None
+    return _finish_runtime_arm(report, res, run_dir=run_dir, engagement_slug=engagement_slug)
+
+
 # The GENERIC Strix→re-drive dispatch rail. Each ARM is ``(classify, drive, requires_no_capture)``: the
 # classifier maps a Strix report to the class it can re-drive (or None), and the driver re-sends VIGIL's OWN
 # gated probe and mints ONLY over VIGIL's fresh capture + its oracle (never the Strix report). Arms are tried
@@ -1200,6 +1279,10 @@ _REDRIVE_ARMS = (
     (_prototype_pollution_redrive_class, _prototype_pollution_redrive, True),
     (_smuggling_redrive_class, _smuggling_redrive, True),
     (_transport_redrive_class, _transport_redrive, True),
+    # M-11 blind OOB intake — LEAD-ONLY on the Strix rail (the FACT mint is the governed-engage seam, fed
+    # trusted collector material a Strix report cannot carry). requires_no_capture=True: a capture-bearing
+    # report stays on the executor-capture path.
+    (_oob_redrive_class, _oob_redrive, True),
 )
 
 

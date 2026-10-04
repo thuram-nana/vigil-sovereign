@@ -879,6 +879,24 @@ class VigilEngine:
             full = target if "://" in target else "http://" + target
             return {"kind": "credential", "url": full, "bug_class": bug_class}
 
+        # OOB-CALLBACK re-drive (M-11): the blind classes (ssrf / xxe / blind_xxe / rce / command_injection /
+        # deserialization / oob_sqli) whose proof is an OUT-OF-BAND interaction, adjudicated by oob_callback_oracle
+        # over VIGIL's OWN collector capture. The TRUSTED collector material (an independent collector keypair +
+        # the OUT-OF-BAND pinned pubkey + an optional owner-signed window) is NEVER model-derived, and this router's
+        # ONLY inputs are LLM-derived (tool args + the LLM's analysis), so it emits the class + url ONLY — NEVER the
+        # token / pinned key / signed window (the triple-lock: the router emits no trusted material). The material is
+        # threaded to the arm by the dedicated wiring._live_oob_redrive_fact seam from a TRUSTED channel, and the
+        # arm + oracle REFUSE without it, so on the LLM-claim path this is fail-closed (no material, no FACT).
+        # ADDITIVE: a separate dispatch set + the "oob" spec kind, so the runtime/web/sqli/injection/credential arms
+        # above are untouched and make gate stays byte-identical. The seam re-normalizes + re-gates.
+        try:
+            from .runtime_redrive import OOB_REDRIVE_CLASSES  # noqa: PLC0415 — import-clean tuple (FATAL-2)
+        except Exception:  # noqa: BLE001 — module unavailable ⇒ no oob re-drive (other paths work)
+            OOB_REDRIVE_CLASSES = ()
+        if bug_class in OOB_REDRIVE_CLASSES:
+            full = target if "://" in target else "http://" + target
+            return {"kind": "oob", "url": full, "bug_class": bug_class}
+
         # error_signature SQLi FAMILY (landmine 1): MERIDIAN labels its error-based plant `sqli`, and the
         # model may say `sqli`/`sql_injection`/`error_based_sqli`. Accept them all — the error_signature
         # oracle only fires over a real datastore-error signature, so a boolean/time-based `sqli` that

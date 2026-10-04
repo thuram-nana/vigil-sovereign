@@ -468,6 +468,9 @@ def test_redrive_arm_class_sets_are_disjoint():
                       | set(run._SMUGGLING_CWE_TO_CLASS.values())),
         "transport": (set(run._TRANSPORT_REDRIVE_CLASSES) | set(run._TRANSPORT_ALIASES.values())
                       | set(run._TRANSPORT_CWE_TO_CLASS.values())),
+        # M-11 blind OOB intake — the arm whose evidence is an OUT-OF-BAND callback to VIGIL's own collector.
+        "oob": (set(run._OOB_REDRIVE_CLASSES) | set(run._OOB_ALIASES.values())
+                | set(run._OOB_CWE_TO_CLASS.values())),
     }
     cwe_maps = {
         "web": set(run._WEB_CWE_TO_CLASS),
@@ -480,6 +483,7 @@ def test_redrive_arm_class_sets_are_disjoint():
         "prototype_pollution": set(run._PROTO_POLLUTION_CWE_TO_CLASS),
         "smuggling": set(run._SMUGGLING_CWE_TO_CLASS),
         "transport": set(run._TRANSPORT_CWE_TO_CLASS),
+        "oob": set(run._OOB_CWE_TO_CLASS),
     }
     # The alias-KEY sets (the spellings a report may carry). A key collision is the one way two arms could
     # claim the SAME report, and an alias key that is another arm's CLASS name shadows that arm's exact-match
@@ -506,6 +510,7 @@ def test_redrive_arm_class_sets_are_disjoint():
         "prototype_pollution": "_PROTO_POLLUTION_ALIASES",
         "smuggling": "_SMUGGLING_ALIASES",
         "transport": "_TRANSPORT_ALIASES",
+        "oob": "_OOB_ALIASES",
     }
     assert set(_ALIAS_ATTR) == set(class_sets), (
         "every arm in class_sets must declare its alias map here (use None for an arm that genuinely "
@@ -609,3 +614,12 @@ def test_redrive_arm_class_sets_are_disjoint():
     assert run._transport_redrive_class({"bug_class": "request_smuggling"}) is None
     assert run._smuggling_redrive_class({"bug_class": "weak_tls"}) is None
     assert run._errsig_redrive_class({"cwe": "CWE-444"}) is None
+    # M-11: the OOB arm claims its own classes (and OOB-exclusive CWEs) and no other arm's.
+    assert run._oob_redrive_class({"bug_class": "ssrf"}) == "ssrf"
+    assert run._oob_redrive_class({"bug_class": "oob_sqli"}) == "oob_sqli"
+    assert run._oob_redrive_class({"cwe": "CWE-918"}) == "ssrf"
+    assert run._oob_redrive_class({"cwe": "CWE-611"}) == "xxe"
+    assert run._oob_redrive_class({"bug_class": "server_side_request_forgery"}) == "ssrf"
+    assert run._oob_redrive_class({"bug_class": "xss"}) is None
+    assert run._oob_redrive_class({"cwe": "CWE-89"}) is None  # OOB-SQLi keyed on explicit class, not CWE-89
+    assert run._reflection_redrive_class({"bug_class": "ssrf"}) is None

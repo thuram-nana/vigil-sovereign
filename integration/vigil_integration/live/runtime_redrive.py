@@ -295,6 +295,31 @@ _INJECTION_PARAMS = ("id", "q", "query", "search", "name", "user", "uid", "item"
 _CREDENTIAL_BRANCH = "credential_acceptance.achieved_access"
 CREDENTIAL_REDRIVE_CLASSES = ("credential_acceptance",)
 
+# --- M-11: OOB-CALLBACK re-drive — the PRODUCER arm that feeds oob_callback_oracle -------------------
+# The BLIND bug classes whose proof is an OUT-OF-BAND interaction the target executes against VIGIL's OWN
+# collector (not a response byte VIGIL can read): SSRF, blind/classic XXE, RCE, OS-command injection,
+# insecure deserialization, and out-of-band SQLi. VIGIL mints its OWN per-finding secret callback token,
+# the RUNNER embeds it in a class-shaped probe, and the deterministic ``oob_callback_oracle`` adjudicates a
+# token-matched + independent-collector-receipt-verified interaction over VIGIL's OWN capture. The tool's
+# bytes / the model's claim are NEVER the FACT — the oracle re-fires over the retained hits + its OUT-OF-BAND
+# pinned collector key. metasploit/sqlmap stay EXCLUDED by doctrine: this is the VIGIL-native "own callback
+# token + oracle adjudication" form of achieved-effect, not a tool-byte import.
+#
+# Its OWN dispatch set + spec kind + ``wiring._live_oob_redrive_fact`` seam, DELIBERATELY SEPARATE from the
+# runtime / injection / credential sets so those stay byte-identical. The TRUSTED collector material (an
+# independent collector keypair + the OUT-OF-BAND-pinned collector pubkey + an optional owner-signed
+# engagement window) is MANDATORY and arrives ONLY through the arm's explicit ``oob_material`` param / the
+# trusted seam — NEVER the model (``engine._redrive_spec`` carries only LLM-derived inputs, so it emits the
+# class + url only). The arm REFUSES without it, so the generic ``runtime_redrive`` delegation (which passes
+# NO material) is inert fail-closed. The LEAD-fallback ``wiring._redrive_branch_for`` deliberately OMITS
+# these classes, so an OOB claim with no trusted material stays a LEAD, never routed to any FACT-capable mint.
+_OOB_BRANCH = "oob_callback.collector_receipt"
+OOB_REDRIVE_CLASSES = ("ssrf", "blind_xxe", "xxe", "rce", "command_injection", "deserialization", "oob_sqli")
+# RUNNER-crafted candidate query-param names a URL-embedding probe (SSRF / OOB-SQLi / command) uses to carry
+# the callback URL. The set only bounds where the RUNNER INJECTS — never a claim of absence (the branch is
+# positive-only, not clean-capable). The oracle (a token-matched signed receipt), not the param, is authority.
+_OOB_PARAMS = ("url", "uri", "target", "dest", "callback", "webhook", "feed", "image", "host", "q")
+
 # --- D1: what the traversal arm's LEAD-quality guards do, and what they provably do NOT do -----------
 # The canonical traversal payload, plus SEMANTICALLY-IDENTICAL re-encodings of the SAME path. POSIX
 # dot-segment resolution makes every one of them name /etc/passwd, so a genuine file read reproduces the
@@ -846,6 +871,15 @@ def runtime_redrive(url: str, *, slug: str, engagement_slug: str, signers: "list
     if bug_class in CREDENTIAL_REDRIVE_CLASSES:
         return credential_acceptance_redrive(url, slug=slug, engagement_slug=engagement_slug,
                                              signers=signers, timeout=timeout)
+    # M-11 OOB-CALLBACK delegation. The blind OOB classes carry TRUSTED collector material (an independent
+    # collector keypair + the OUT-OF-BAND-pinned collector pubkey + an optional owner-signed engagement
+    # window) this generic (url, claimed_class) dispatch cannot supply, so a generic re-drive DELEGATES to
+    # :func:`oob_callback_redrive` WITHOUT material, which REFUSES (no material, no FACT) — a VIGIL-owned,
+    # fail-closed non-fire. The material only ever reaches the arm through its explicit ``oob_material`` /
+    # the dedicated ``wiring._live_oob_redrive_fact`` seam, never the model.
+    if bug_class in OOB_REDRIVE_CLASSES:
+        return oob_callback_redrive(url, slug=slug, engagement_slug=engagement_slug,
+                                    signers=signers, oob_material=None, timeout=timeout)
     res = RuntimeRedriveResult(url=url, bug_class=bug_class)
     if bug_class not in RUNTIME_REDRIVE_CLASSES:
         res.notes.append(f"{bug_class!r} is not a runtime-redrive class")
@@ -1262,11 +1296,19 @@ def _candidate_names_hint(url: str, base_names: "tuple[str, ...]", hint: "str | 
 
 def _admit_one(res: "RuntimeRedriveResult", *, branch: str, bug_class: str, engagement_slug: str,
                signers: "list[tuple[str, str]]", context: dict, item: str, surface: str,
-               fired: bool, conclusive: bool, body_unreadable: bool) -> Any:
+               fired: bool, conclusive: bool, body_unreadable: bool, verifier: Any = None) -> Any:
     """Admit ONE branch outcome against its declared capability and, on a FACT-capable fire, mint a signed,
     offline-re-verifiable certificate over VIGIL's OWN reproduced context (provenance=live_redrive). A
-    standalone twin of the ``_admit`` closure in :func:`runtime_redrive`, shared by the three W2 arms so the
-    admission + certification discipline is identical. Returns the ``AdapterResult`` (``.is_fact``)."""
+    standalone twin of the ``_admit`` closure in :func:`runtime_redrive`, shared by the W2 + credential +
+    OOB arms so the admission + certification discipline is identical. Returns the ``AdapterResult``
+    (``.is_fact``).
+
+    ``verifier`` (default None) is threaded to ``certify_admitted`` so the deterministic MINT re-drive
+    (``confirm_and_certify`` → ``adjudicate_finding``) runs over the SAME out-of-band authority as the arm's
+    live decision. The W2 / credential arms pass None (their oracles are self-contained in the retained
+    context), so this is byte-identical for them; the OOB arm passes a verifier carrying the OUT-OF-BAND
+    pinned collector key + owner-signed window, WITHOUT which a receipt-bearing OOB mint re-drive fails
+    CLOSED (there is no pin to verify the receipt) — the pin is NEVER in the producer context."""
     from ..oracle_adapter import certify_admitted  # noqa: PLC0415 (FATAL-2: function-local)
     from .verdict import Verdict, admit, compose  # noqa: PLC0415
 
@@ -1281,7 +1323,7 @@ def _admit_one(res: "RuntimeRedriveResult", *, branch: str, bug_class: str, enga
     prior = bm.get(branch)
     bm[branch] = compose([prior, admitted.verdict.value]).value if prior else admitted.verdict.value
     r = certify_admitted(finding, admitted, engagement_slug=engagement_slug, signers=signers,
-                         provenance="live_redrive")
+                         provenance="live_redrive", verifier=verifier)
     res.contexts[r.finding_ref] = context
     if r.is_fact:
         res.facts.append(r)
@@ -1920,6 +1962,211 @@ def credential_acceptance_redrive(url: str, *, slug: str, engagement_slug: str,
                 break     # one FACT is decisive for a re-drive — stop (bounded work)
     except Exception as e:  # noqa: BLE001 — a probe error never fabricates a FACT; record + return what held
         res.notes.append(f"credential_acceptance_redrive error: {type(e).__name__}: {e}")
+    return res
+
+
+def _oob_material_verifier(oob_material: "dict | None"):
+    """Build the OUT-OF-BAND :class:`OracleVerifier` + resolve the independent collector keypair from the
+    TRUSTED ``oob_material`` bundle (the seam/arm param — NEVER the finding context). Returns
+    ``(verifier, collector_keypair, advertise_base_url)`` or ``None`` when the material is absent/invalid
+    (⇒ the arm refuses: no material, no FACT). The OUT-OF-BAND collector pubkey PIN is taken from the
+    material (explicit ``collector_pubkey`` else the keypair's own public key) — the SAME authority that
+    signs the receipts — so a receipt-bearing hit re-verifies against a key the producer context never
+    carried. An owner-signed engagement window (``not_before``/``not_after``) is threaded only when BOTH
+    edges are present (a half-window is refused by the oracle, fail-closed); absent ⇒ advisory-TTL-only, the
+    VIGIL-owned loopback self-check tier."""
+    from framework.v2.verify.verifier import OracleVerifier  # noqa: PLC0415 (framework at CALL — FATAL-2)
+
+    if not isinstance(oob_material, dict) or not oob_material:
+        return None
+    kp = oob_material.get("collector_keypair")
+    kp_pub = getattr(kp, "public_key_b64", None)
+    if not kp_pub:
+        return None    # an independent collector keypair (it SIGNS each receipt) is mandatory — no kp, no FACT
+    pin = str(oob_material.get("collector_pubkey") or kp_pub).strip() or None
+    dns_pin = str(oob_material.get("dns_collector_pubkey") or "").strip() or None
+
+    def _num(key: str):
+        v = oob_material.get(key)
+        return float(v) if isinstance(v, (int, float)) else None
+
+    verifier = OracleVerifier(
+        oob_collector_pubkey=pin, oob_dns_collector_pubkey=dns_pin,
+        oob_ttl_seconds=_num("ttl_seconds"), oob_skew_seconds=_num("skew_seconds"),
+        oob_not_before=_num("not_before"), oob_not_after=_num("not_after"))
+    advertise = oob_material.get("advertise_base_url")
+    advertise = str(advertise).strip() if isinstance(advertise, str) and advertise.strip() else None
+    return verifier, kp, advertise
+
+
+def _oob_probe_requests(HttpRequest: Any, bug_class: str, url: str, callback: str) -> "list[Any]":
+    """The RUNNER-crafted, class-shaped probes that embed VIGIL's per-finding callback URL so a vulnerable
+    target EXECUTES it out-of-band. The RUNNER owns these (never a tool/LLM value); the oracle (a token-
+    matched signed receipt), not the payload, decides. URL-embedding classes carry the callback across a
+    bounded candidate-param set; XML classes use an external-entity body; deserialization a URL-bearing
+    gadget body. Pure/lexical — no network here."""
+    reqs: "list[Any]" = []
+    if bug_class in ("ssrf", "oob_sqli", "rce", "command_injection"):
+        for p in _OOB_PARAMS[:6]:
+            if bug_class in ("rce", "command_injection"):
+                value = f";curl -s {callback};"          # a shell-metachar wrapper; the callback stays intact
+            elif bug_class == "oob_sqli":
+                value = f"1';SELECT 1 FROM dual WHERE '{callback}'='{callback}';--"   # OOB-SQLi-shaped wrapper
+            else:
+                value = callback                          # SSRF: the callback is the fetched URL itself
+            reqs.append(HttpRequest(method="GET", url=_url_with_param(url, p, value)))
+    if bug_class in ("xxe", "blind_xxe"):
+        body = ('<?xml version="1.0"?>'
+                f'<!DOCTYPE r [<!ENTITY xxe SYSTEM "{callback}">]><r>&xxe;</r>')
+        reqs.append(HttpRequest(method="POST", url=url, headers=[("Content-Type", "application/xml")], body=body))
+    if bug_class == "deserialization":
+        import json as _json  # noqa: PLC0415 — stdlib
+        body = _json.dumps({"@type": "java.net.URL", "url": callback})   # a URL-fetching gadget shape
+        reqs.append(HttpRequest(method="POST", url=url, headers=[("Content-Type", "application/json")], body=body))
+    return reqs
+
+
+def _oob_poll_matched(receiver: Any, token: str, deadline: float) -> "list[Any]":
+    """Poll the receiver for interactions carrying ``token`` until one arrives or ``deadline`` (monotonic)
+    passes. A synchronous blind fetch is already recorded when the probe response returns, so the first poll
+    usually succeeds; the bounded wait tolerates an async callback without ever blocking unboundedly."""
+    import time  # noqa: PLC0415 — stdlib (a mint-anchor/poll clock; retained timestamps re-verify offline)
+    while True:
+        matched = [h for h in receiver.poll(token) if str(getattr(h, "token", "")) == token]
+        if matched or time.monotonic() >= deadline:
+            return matched
+        time.sleep(0.02)
+
+
+def oob_callback_redrive(url: str, *, slug: str, engagement_slug: str,
+                         signers: "list[tuple[str, str]]", oob_material: "dict | None" = None,
+                         timeout: float = 8.0) -> "RuntimeRedriveResult":
+    """M-11 — the OOB-CALLBACK re-drive arm that FEEDS :func:`oob_callback_oracle`. For the BLIND classes
+    (``ssrf`` / ``xxe`` / ``blind_xxe`` / ``rce`` / ``command_injection`` / ``deserialization`` /
+    ``oob_sqli``) whose proof is an OUT-OF-BAND interaction the target executes, not a readable response
+    byte. VIGIL mints its OWN per-finding secret token, the RUNNER embeds it in a class-shaped probe sent via
+    the gated DNS-pinned proxy-free send, and the deterministic ``oob_callback_oracle`` adjudicates a
+    token-matched, INDEPENDENT-collector-receipt-verified interaction over VIGIL's OWN capture — the correct
+    VIGIL-native form of "achieved-effect", never a metasploit/sqlmap tool byte.
+
+    Mints a signed FACT (``certify_admitted(provenance="live_redrive")`` via :func:`_admit_one`) ONLY when
+    the oracle confirms a hit that carries the REGISTERED token AND a collector receipt that verifies against
+    the OUT-OF-BAND pinned collector key (threaded through ``_admit_one``'s ``verifier`` so the deterministic
+    MINT re-drive uses the SAME authority), inside the owner-signed window (or the advisory-TTL self-check
+    window). The retained context carries ONLY the hits + token + mint anchor; the pinned key + signed window
+    live in the SIGNED authority, never the context — so offline re-verify re-derives the FACT via
+    ``verifier_from_authority`` and fails CLOSED without the pin.
+
+    FAIL-CLOSED, in order: (a) ``_stat_setup`` verifies the ``oob_callback.collector_receipt`` branch is
+    REGISTERED and runs the URL-shaped charter gate BEFORE any traffic; (b) the TRUSTED ``oob_material`` (an
+    independent collector keypair + the OUT-OF-BAND pin + an optional owner-signed window) is MANDATORY —
+    absent ⇒ a recorded refusal and NO traffic (no material, no FACT), which is what makes the generic
+    ``runtime_redrive`` delegation inert; (c) every probe is the gated, DNS-pinned, proxy-free send; (d) NO
+    token-matched interaction ⇒ INCONCLUSIVE, never CLEAN ("no callback" can never prove not-vulnerable); a
+    DNS-ONLY observation (no HTTP fetch) is likewise INCONCLUSIVE here — this arm runs the HTTP collector, so
+    a resolution-only signal is a strictly weaker claim it does not mint. Stops on the first FACT. Never raises.
+
+    Fire conditions (ALL): the branch is registered + the charter gate authorized; the TRUSTED material is
+    present; the in-charter target EXECUTED the embedded callback so VIGIL's own collector logged a hit that
+    carries the registered token AND a receipt that verifies against the pinned collector key, inside the
+    replay window. Everything else (a reflected-but-not-executed token, a callback carrying a wrong/forged
+    token, a receipt that does not verify, an out-of-window received_at) is a non-FACT (the oracle's SAFE
+    refusal / an INCONCLUSIVE)."""
+    from framework.v2.scanner.insertion import HttpRequest  # noqa: PLC0415 (framework at CALL — FATAL-2)
+    from framework.v2.verify.adapter import FindingContext  # noqa: PLC0415
+    from framework.v2.verify.oracles import oob_callback_oracle  # noqa: PLC0415
+    from framework.v2.verify.oob import OOBReceiver  # noqa: PLC0415 — the loopback-only collector
+    from framework.v2.verify.verifier import normalize_bug_class  # noqa: PLC0415
+
+    import time  # noqa: PLC0415 — stdlib mint-anchor clock (retained; re-verified offline over the timestamp)
+
+    # The claimed OOB class rides on the trusted material (the dedicated seam sets it from the redrive spec).
+    bug_class = normalize_bug_class(str((oob_material or {}).get("bug_class") or "")) \
+        if isinstance(oob_material, dict) else ""
+    if bug_class not in OOB_REDRIVE_CLASSES:
+        # Default to ssrf for a bare delegation so the result still names a coherent OOB class; a generic
+        # delegation passes no material, so it refuses below regardless.
+        bug_class = bug_class or "ssrf"
+
+    res, send, state = _stat_setup(url, slug, bug_class, _OOB_BRANCH, timeout)
+    if send is None:
+        return res
+
+    # HARD PRECONDITION — the TRUSTED collector material. Absent ⇒ REFUSE before any probe (no material, no
+    # FACT), which is what makes the generic runtime_redrive delegation inert and keeps the material OUT of
+    # the model's reach (the router emits class+url only; only the seam supplies material from a trusted channel).
+    built = _oob_material_verifier(oob_material)
+    if built is None:
+        res.notes.append("refused before any traffic: no trusted OOB collector material (an independent "
+                         "collector keypair + the out-of-band pinned pubkey) — no material, no FACT")
+        return res
+    verifier, collector_keypair, advertise = built
+    if bug_class not in OOB_REDRIVE_CLASSES:
+        res.notes.append(f"refused: {bug_class!r} is not an OOB re-drive class")
+        return res
+
+    receiver = None
+    try:
+        receiver = OOBReceiver(collector_keypair=collector_keypair, advertise_base_url=advertise).start()
+        token, callback = receiver.register_token()
+        issued_at = time.time()
+        # Mark the surface EXAMINED up front, so a control can POSITIVELY assert the arm RAN (not stubbed).
+        res.surfaces.setdefault(bug_class, set()).add(f"oob:{token[:8]}")
+        deadline = time.monotonic() + max(0.1, min(float(timeout), 30.0))
+        matched: "list[Any]" = []
+        for req in _oob_probe_requests(HttpRequest, bug_class, url, callback):
+            before = state["channels"]
+            try:
+                send(req)
+            except Exception as e:  # noqa: BLE001 — a probe error never fabricates a FACT; record + continue
+                res.notes.append(f"oob probe error [{bug_class}]: {type(e).__name__}: {e}")
+                continue
+            if state["channels"] <= before:
+                res.inconclusive.append((bug_class, f"{url}#oob-probe"))
+                continue
+            matched = _oob_poll_matched(receiver, token, deadline)
+            if matched:
+                break    # the target executed the callback — stop probing (bounded work)
+        if not matched:
+            matched = _oob_poll_matched(receiver, token, deadline)
+        if not matched:
+            res.inconclusive.append((bug_class, f"{url}#oob"))
+            res.notes.append("inconclusive: no token-matched out-of-band interaction observed — a missing "
+                             "callback can never prove the target is not vulnerable (never CLEAN)")
+            return res
+        # DNS-only guard: a resolution-only observation (method DNS) is a strictly weaker claim than a
+        # completed HTTP fetch. This arm runs the HTTP collector, so an all-DNS set is INCONCLUSIVE, not a FACT.
+        if all(str(getattr(h, "method", "")).upper() == "DNS" for h in matched):
+            res.inconclusive.append((bug_class, f"{url}#oob-dns-only"))
+            res.notes.append("inconclusive: only DNS-resolution interactions (no HTTP fetch) — a weaker claim "
+                             "this HTTP-collector arm does not mint (never CLEAN)")
+            return res
+
+        context = FindingContext.from_oob(matched, bug_class=bug_class, expected_token=token,
+                                          issued_at=issued_at).to_verifier_context()
+        # The LIVE decision is BYTE-IDENTICAL to the MINT re-drive (verifier.py routes oob_hits the same way):
+        # the pin + signed window come from the OUT-OF-BAND verifier, the hits + token + anchor from the ctx.
+        signal = oob_callback_oracle(
+            context["oob_hits"], context.get("oob_token"),
+            collector_pubkey=verifier.oob_collector_pubkey,
+            dns_collector_pubkey=verifier.oob_dns_collector_pubkey,
+            issued_at=context.get("oob_issued_at"), expires_at=context.get("oob_expires_at"),
+            skew=context.get("oob_skew"),
+            authority_ttl=verifier.oob_ttl_seconds, authority_skew=verifier.oob_skew_seconds,
+            authority_not_before=verifier.oob_not_before, authority_not_after=verifier.oob_not_after)
+        _admit_one(res, branch=_OOB_BRANCH, bug_class=bug_class, engagement_slug=engagement_slug,
+                   signers=signers, context=context, item=f"{url}#oob:{bug_class}",
+                   surface=f"oob:{token[:8]}", fired=signal.fired,
+                   conclusive=bool(getattr(signal, "conclusive", False)), body_unreadable=False,
+                   verifier=verifier)
+    except Exception as e:  # noqa: BLE001 — a probe/receiver error never fabricates a FACT; return what held
+        res.notes.append(f"oob_callback_redrive error: {type(e).__name__}: {e}")
+    finally:
+        if receiver is not None:
+            try:
+                receiver.stop()
+            except Exception:  # noqa: BLE001 — best-effort teardown; the signed cert (if any) already exists
+                pass
     return res
 
 

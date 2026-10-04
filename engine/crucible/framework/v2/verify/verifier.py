@@ -245,6 +245,12 @@ BUG_CLASS_ORACLES: dict[str, tuple[OracleKind, ...]] = {
     "ssrf": (OracleKind.OOB_CALLBACK,),
     "xxe": (OracleKind.OOB_CALLBACK, OracleKind.SIDE_EFFECT),
     "blind_xxe": (OracleKind.OOB_CALLBACK,),
+    # out-of-band SQLi (M-11): the OUT-OF-BAND exfil/callback variant of SQLi, proven by an out-of-band
+    # interaction the injected query triggers (never a readable response byte), so it routes to the EXISTING
+    # OracleKind.OOB_CALLBACK (NO new OracleKind — _ALL_ORACLES stays 15). Kept DISTINCT from `sqli` (whose
+    # row also carries ERROR_SIGNATURE/BOOLEAN/DIFFERENTIAL) so it is not hijacked by the error-signature SQLi
+    # re-drive family; VIGIL mints its OWN callback token and the oracle adjudicates.
+    "oob_sqli": (OracleKind.OOB_CALLBACK,),
     "deserialization": (OracleKind.OOB_CALLBACK, OracleKind.SANITIZER_SIGNAL),
     "rce": (OracleKind.OOB_CALLBACK, OracleKind.SIDE_EFFECT, OracleKind.SANITIZER_SIGNAL),
     "command_injection": (OracleKind.OOB_CALLBACK, OracleKind.SIDE_EFFECT),
