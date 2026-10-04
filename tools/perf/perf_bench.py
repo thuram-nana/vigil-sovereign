@@ -471,6 +471,69 @@ def _scan_case() -> Case:
     return Case("scan.plan_fixed_corpus", lambda: None, run, ops=n, real=True)
 
 
+def saturate_delta_derivation_counts(chain_n: int = 5, inert_n: int = 60) -> tuple[int, int, bool]:
+    """Proof for M2.1 (#828): the worklist ``knowledge.operators.saturate`` reaches the
+    IDENTICAL saturated graph as the retained full-rescan reference ``_saturate_full`` while
+    making STRICTLY FEWER operator-derivations.
+
+    The win is proportional to (rounds-1) x (clean-failed candidate pairs), so this builds the
+    shape where it shows: a reverse-ordered SET_ATTR chain of length ``chain_n`` (which takes
+    ``chain_n + 1`` rounds to converge) over one active node, among ``inert_n`` same-kind nodes
+    that are candidates of every chain operator but RE-FAIL the attr precondition every round.
+    The full rescan re-probes those inert candidates each round; the worklist probes them once
+    (the first sweep) and never re-visits them, because nothing they read ever changes.
+
+    Returns ``(full_derivations, worklist_derivations, byte_identical)``. Counts ``derive``
+    CALLS (the 'derivation count' the win is measured in — NOT wall clock), by swapping the
+    module-global both functions call. Engine is imported lazily so ``import perf_bench`` stays
+    stdlib-only for the required ``docs/tests`` job; a bare-stdlib environment raises
+    ``ImportError`` here and the caller skips the proof rather than failing it."""
+    from framework.v2.knowledge import operators as _ops  # noqa: PLC0415 (lazy on purpose)
+    from framework.v2.knowledge.models import (  # noqa: PLC0415
+        AttrOp, Effect, EffectKind, Operator, Predicate, PredicateKind)
+    from framework.v2.worldmodel.graph import WorldModel  # noqa: PLC0415
+    from framework.v2.worldmodel.models import Node, NodeKind  # noqa: PLC0415
+
+    H = NodeKind.HOST
+    ops = [Operator(id=f"pstep{i}", name=f"p{i}", technique_ref=["X"],
+                    preconditions=[Predicate(kind=PredicateKind.NODE_KIND, node_kind=H),
+                                   Predicate(kind=PredicateKind.NODE_ATTR, attr=f"s{i - 1}",
+                                             op=AttrOp.TRUTHY)],
+                    effects=[Effect(kind=EffectKind.SET_ATTR, attr=f"s{i}", value=True)])
+           for i in range(chain_n, 0, -1)]
+
+    def build() -> Any:
+        w = WorldModel()
+        w.add_node(Node(id="active", kind=H, attrs={"s0": True}, provenance="o",
+                        confidence=1.0, first_seen=1, last_seen=1))
+        for i in range(inert_n):
+            w.add_node(Node(id=f"inert_{i:04d}", kind=H, provenance="o",
+                            confidence=1.0, first_seen=1, last_seen=1))
+        return w
+
+    real = _ops.derive
+    n = [0]
+
+    def counting(*a: Any, **k: Any) -> Any:
+        n[0] += 1
+        return real(*a, **k)
+
+    _ops.derive = counting  # type: ignore[assignment]
+    try:
+        wf = build()
+        n[0] = 0
+        _ops._saturate_full(ops, wf, 1000)
+        full_n = n[0]
+        ww = build()
+        n[0] = 0
+        _ops.saturate(ops, ww, 1000)
+        wl_n = n[0]
+    finally:
+        _ops.derive = real  # type: ignore[assignment]
+    identical = (wf.all_nodes() == ww.all_nodes()) and (wf.all_edges() == ww.all_edges())
+    return full_n, wl_n, identical
+
+
 def gated_cases() -> list[Case]:
     """Every case the committed-baseline gate (`check` / `record`) covers: the vigil_core hot
     paths, the fixed-corpus scan sensor, and the on-tree synthetic-N algorithmic cases. The
@@ -652,6 +715,25 @@ def cmd_selftest(_baseline_path: Path) -> int:
         print(f"planted O(N^2) {label} rejected (on-tree passes):")
         for r in quad_reasons:
             print("  - " + r)
+
+    # M2.1 (#828) delta-fixpoint proof: the worklist `saturate` reaches the IDENTICAL closure
+    # as the full rescan with STRICTLY FEWER operator-derivations. Engine-gated so this stays a
+    # pure-stdlib import; where the engine is not importable the proof is SKIPPED, not failed.
+    try:
+        full_n, wl_n, identical = saturate_delta_derivation_counts()
+    except ImportError as exc:  # pragma: no cover - only in a bare-stdlib environment
+        print(f"saturate delta-fixpoint proof skipped (engine not importable: {exc})")
+    else:
+        if not identical:
+            print("SATURATE DELTA BUG: worklist result is NOT byte-identical to the full rescan",
+                  file=sys.stderr)
+            return 1
+        if not wl_n < full_n:
+            print(f"SATURATE DELTA CONTROL FAILED: worklist {wl_n} not < full rescan {full_n}",
+                  file=sys.stderr)
+            return 1
+        print(f"saturate delta-fixpoint OK — worklist {wl_n} derivations < full rescan {full_n} "
+              f"({100 * (full_n - wl_n) / full_n:.0f}% fewer), byte-identical closure")
 
     print("clean path passes its baseline. self-test PASS")
     return 0
