@@ -962,11 +962,18 @@ class FindingContext(BaseModel):
         canonical = _STATIC_RULE_BUG_CLASS.get(rid, "")
         # M3 anti-relabel: the proven class is DERIVED from the rule_id (the STATIC_RULE oracle re-derives the
         # rule_id's property, nothing else). A caller-supplied bug_class may ONLY be an alias spelling that
-        # normalises to the SAME canonical class; a label that DISAGREES is REFUSED here, so a producer cannot
-        # construct a context that would mint a FACT for a class the oracle never proves (e.g. a broken-crypto
-        # region relabelled `static_taint`, a LEAD-only class). An out-of-vocabulary rule_id has no canonical
-        # class to alias, so any explicit bug_class on it is refused too (the oracle REFUSES the rule_id
-        # regardless — no legitimate caller needs an override there).
+        # normalises to the SAME canonical class; a label that DISAGREES is REFUSED here (e.g. a broken-crypto
+        # region relabelled `static_taint`, a LEAD-only class). This is the CONSTRUCTION-time refusal — ONE of
+        # FIVE independent binding points. A producer who assembles the verifier context DIRECTLY (not via this
+        # builder) bypasses this guard, so the binding is NOT self-sufficient here: it is re-asserted at
+        # re-execution (reverify re-derives the class from observed['rule_id']), at grade (oracle_confirms_class
+        # treats STATIC_RULE as a confirmer only for the FACT-capable static classes), at export
+        # (to_pcf/verify_pcf reject a relabel), AND — closing the last gap — at the MINT itself
+        # (verifier.confirm demotes a STATIC_RULE signal whose rule_id does not derive the claimed class out of
+        # the confirming set, and integration.confirm_and_certify refuses to sign it). Only with all five does
+        # the guarantee hold: NO mint path signs a FACT for a class the oracle never proves. An out-of-
+        # vocabulary rule_id has no canonical class to alias, so any explicit bug_class on it is refused too
+        # (the oracle REFUSES the rule_id regardless — no legitimate caller needs an override there).
         supplied = _coerce_text(bug_class).strip() if bug_class is not None else ""
         if supplied:
             from .verifier import normalize_bug_class  # local import: avoid a module-load cycle

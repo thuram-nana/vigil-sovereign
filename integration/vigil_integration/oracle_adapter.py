@@ -219,7 +219,8 @@ def confirm_and_certify(
     # Lazy CRUCIBLE imports — offense-side only; keeps the module import-clean for the sovereign env.
     from framework.v2.evidence.certify import build_certificate, sign_certificate
     from framework.v2.verify.confirmation import adjudicate_finding, confirmed_from_result
-    from framework.v2.verify.verifier import OracleVerifier, is_known_bug_class, normalize_bug_class
+    from framework.v2.verify.verifier import (
+        OracleVerifier, is_known_bug_class, normalize_bug_class, oracle_confirms_class)
     from framework.v2.scanner.engine import probe_verdict
 
     oracle_context = finding.get("oracle_context") or {}
@@ -302,6 +303,31 @@ def confirm_and_certify(
             confirmed_by=_kind_str(confirmed.confirmed_by), confidence=float(confirmed.confidence),
             outcome=Outcome.UNSUPPORTED.value,
         )
+
+    # 2a. M3 anti-relabel MINT guard (defense-in-depth at the integration mint choke — the red-pen BLOCK).
+    #     verifier.confirm already DEMOTES a STATIC_RULE relabel out of its confirming set (so `confirmed` is
+    #     None for a mismatch and we never reach here), but a signed FACT is actually MINTED at THIS choke, so
+    #     the binding is re-asserted at the mint site too — the step-0 relabel refusal only compares the
+    #     finding's vs the context's own `bug_class` (a producer who sets BOTH to `static_taint` passes it),
+    #     which is precisely the gap. For a STATIC_RULE confirmation the authoritative class is DERIVED from the
+    #     retained `static_rule.rule_id`; a claimed class the rule_id does not prove — or one STATIC_RULE is not
+    #     a valid confirmer for (the LEAD-only static classes) — is refused as a labelled LEAD, never signed.
+    if _kind_str(confirmed.confirmed_by) == "static_rule":
+        from framework.v2.verify.adapter import _STATIC_RULE_BUG_CLASS  # noqa: PLC0415 (FATAL-2: function-local)
+        sr = (oracle_context or {}).get("static_rule") or {}
+        rid = str(sr.get("rule_id", "")).strip() if isinstance(sr, dict) else ""
+        derived = normalize_bug_class(_STATIC_RULE_BUG_CLASS.get(rid, ""))
+        if (not derived) or derived != confirmed_class or not oracle_confirms_class("static_rule", confirmed_class):
+            return AdapterResult(
+                "lead",
+                f"STATIC_RULE confirmation is bound to rule_id {rid!r} (proves "
+                f"{derived or '<out-of-vocabulary>'!r}), not the claimed {confirmed_class!r} — a static-rule "
+                f"FACT's class is DERIVED from its rule_id; retained as a labelled lead, not a signed fact "
+                f"(M3 anti-relabel at the mint choke)",
+                confirmed_class, _finding_ref(finding),
+                confirmed_by="static_rule", confidence=float(confirmed.confidence),
+                outcome=Outcome.UNSUPPORTED.value,
+            )
 
     # 2b. sovereign anti-hallucination gate (audit G4) — a signed FACT requires the oracle_context to be
     #     REPRODUCED from a non-LLM channel. An LLM-provenanced context (the model's own extracted_info)

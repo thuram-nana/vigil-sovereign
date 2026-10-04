@@ -27,13 +27,14 @@ import pytest
 
 from framework.v2.entitlement.crypto import generate_keypair
 from framework.v2.entitlement.models import AuthorizerKey, TrustRoot
-from framework.v2.evidence.certify import build_certificate, sign_certificate
+from framework.v2.evidence.certify import build_certificate, sign_certificate, verify_certificate
 from framework.v2.evidence.pcf import _SIG_DOMAIN, _project_view, PcfExportError, to_pcf, verify_pcf
 from framework.v2.report.standards import map_finding
 from framework.v2.verify.adapter import _STATIC_RULE_BUG_CLASS, FindingContext
 from framework.v2.verify.oracles import _LEAD_ONLY_RULE_IDS
 from framework.v2.verify.reverify import reverify_context
-from framework.v2.verify.verifier import _STATIC_RULE_LEAD_ONLY_CLASSES, oracle_confirms_class
+from framework.v2.verify.verifier import (
+    _STATIC_RULE_LEAD_ONLY_CLASSES, OracleVerifier, oracle_confirms_class)
 
 # A region the STATIC_RULE oracle genuinely FIRES on (a real md5 invocation) — the proof is a broken-crypto
 # code property. The relabel carries this proof under the LEAD-only `static_taint` label.
@@ -210,3 +211,83 @@ def test_static_lead_only_class_set_cannot_drift_from_the_oracle():
     rule_id -> class map, so the two sources of truth can never diverge."""
     assert _STATIC_RULE_LEAD_ONLY_CLASSES == {
         _STATIC_RULE_BUG_CLASS[rid] for rid in _LEAD_ONLY_RULE_IDS}
+
+
+# ---------------------------------------------------------------------------
+# (6) MINT CHOKE (the 4th binding point) — verifier.confirm + the integration public mint.
+#
+# The prior three controls bound CONSTRUCTION, RE-EXEC, GRADE and EXPORT, but NOT the mint: a producer who
+# assembles the oracle_context DIRECTLY (claimed == ctx bug_class == `static_taint`, inner rule_id =
+# broken-crypto-invocation) and calls the PUBLIC mint (confirm_and_certify / certify_admitted,
+# provenance="live_redrive") used to sign status="fact" for the LEAD-only `static_taint` class. These controls
+# drive that exact public mint and pin the refusal.
+# ---------------------------------------------------------------------------
+
+
+def test_confirm_demotes_a_static_rule_relabel_at_the_mint_choke():
+    """verifier.confirm (the single choke every mint path re-adjudicates through) DERIVES the authoritative
+    class from the FIRED signal's own observed['rule_id'] and DEMOTES a relabel out of the confirming set — so
+    a directly-assembled relabel context is NOT confirmed, while the consistent context still confirms."""
+    relabel = OracleVerifier().confirm(_relabel_oc())
+    assert relabel.confirmed is False, "a directly-assembled static_rule relabel must NOT confirm at the mint choke"
+    assert "anti-relabel" in relabel.rationale.lower() or "does not" in relabel.rationale.lower()
+    # the STATIC_RULE oracle DID fire (the broken-crypto region is real) — the demotion is the class binding,
+    # not a non-firing oracle: the fired signal is retained for audit.
+    assert any(s.kind.value == "static_rule" and s.fired for s in relabel.signals)
+    # the consistent context (class derived from the rule_id) still confirms under its OWN class.
+    consistent = OracleVerifier().confirm(_consistent_oc())
+    assert consistent.confirmed is True and consistent.bug_class == "static_broken_crypto"
+
+
+def _mint():
+    """The PUBLIC integration mint path (the no-hallucinated-findings choke). Imported lazily via importorskip
+    so the engine-only (CRUCIBLE-core) CI job SKIPS these rather than failing; the offense leg has
+    `integration` on the path and RUNS them."""
+    oa = pytest.importorskip("vigil_integration.oracle_adapter")
+    vd = pytest.importorskip("vigil_integration.live.verdict")
+    return oa, vd
+
+
+def test_public_mint_refuses_a_directly_assembled_static_rule_relabel():
+    """NEGATIVE CONTROL (drives the PUBLIC mint directly — the gap the prior suite missed). A directly-
+    assembled static_rule ctx with claimed == ctx bug_class == `static_taint` + inner rule_id
+    broken-crypto-invocation must mint NO signed fact via confirm_and_certify OR certify_admitted, and the
+    returned object must NOT reach web_redrive's `if r.is_fact:` true branch."""
+    oa, vd = _mint()
+    _tr, signers = _trust_root()
+    finding = _finding(_relabel_oc(), "static_taint", slug="relabel-mint")
+
+    # confirm_and_certify — the real mint choke. provenance="live_redrive" is a reproduced channel, so the
+    # ONLY thing that can stop the signed fact is the class binding (not the provenance gate).
+    r = oa.confirm_and_certify(finding, engagement_slug="m3", signers=signers, provenance="live_redrive")
+    assert r.is_fact is False, "a static_rule relabel must NOT mint a signed fact at the public mint choke"
+    assert r.status != "fact" and r.signed is None
+    # web_redrive.py does `if r.is_fact: res.fact = r` — a False here means the relabel can never surface as a
+    # fact on that render path (nor on engine.py's `is_fact and status == 'fact'` projection gate).
+    assert r.is_fact is False
+
+    # certify_admitted (the wrapper that production uses) refuses too: a FACT AdmittedVerdict + the same
+    # relabel finding still yields a LEAD, because certify_admitted delegates to confirm_and_certify.
+    admitted = vd.admit("error_signature.datastore_error", fired=True, conclusive=True,
+                        observed={"channel_established": True})
+    r2 = oa.certify_admitted(finding, admitted, engagement_slug="m3", signers=signers,
+                             provenance="live_redrive")
+    assert r2.is_fact is False and r2.status != "fact" and r2.signed is None
+
+
+def test_public_mint_still_signs_a_consistent_static_broken_crypto():
+    """POSITIVE CONTROL — a consistent static_broken_crypto (rule_id broken-crypto-invocation + class
+    static_broken_crypto) STILL mints + signs + verifies, unchanged behaviour. The fired oracle re-fires for
+    the CLAIM's own class, so the class binding is a no-op on the legit path."""
+    oa, _vd = _mint()
+    tr, signers = _trust_root()
+    oc = _consistent_oc()
+    finding = _finding(oc, "static_broken_crypto", slug="consistent-mint")
+    r = oa.confirm_and_certify(finding, engagement_slug="m3", signers=signers[:2], provenance="live_redrive")
+    assert r.is_fact is True and r.status == "fact"
+    assert r.bug_class == "static_broken_crypto" and r.confirmed_by == "static_rule"
+    assert r.signed is not None and r.signed.certificate.bug_class == "static_broken_crypto"
+    assert len(r.signed.signatures) == 2
+    # the signed certificate independently verifies (the mint is sound end to end, not merely labelled a fact).
+    ok = verify_certificate(r.signed, oracle_context=oc, trust_root=tr)
+    assert ok.ok, f"the consistent static fact must verify: {ok.reason}"
