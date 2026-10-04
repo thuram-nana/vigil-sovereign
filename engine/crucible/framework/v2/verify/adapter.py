@@ -950,13 +950,40 @@ class FindingContext(BaseModel):
         source bytes VERBATIM so the pure oracle re-parses them itself and never trusts the tool's CWE.
 
         ``rule_id`` is the CLOSED vocabulary (broken-crypto-invocation / insecure-randomness-sink /
-        insecure-flag-literal / direct-taint); the canonical bug_class is DERIVED from it (a caller-supplied
-        ``bug_class`` overrides only for an alias spelling). The source is coerced to text (JSON-safe), so a
-        confirmed static FACT re-verifies OFFLINE from its certificate — re-run the pure oracle over the
-        retained bytes and get the same verdict; a tamper that removes the property no longer re-fires."""
+        insecure-flag-literal / direct-taint); the canonical bug_class is DERIVED from it. A caller-supplied
+        ``bug_class`` is REFUSED (``ValueError``) unless it normalises to the SAME canonical class (an alias
+        spelling ONLY) — a label that DISAGREES with the rule_id cannot relabel the proof, because the
+        STATIC_RULE oracle proves the rule_id's property and nothing else (M3 anti-relabel). The source is
+        coerced to text (JSON-safe), so a confirmed static FACT re-verifies OFFLINE from its certificate —
+        re-run the pure oracle over the retained bytes and get the same verdict; a tamper that removes the
+        property no longer re-fires."""
         src = source_bytes.decode("utf-8", "replace") if isinstance(source_bytes, bytes) else _coerce_text(source_bytes)
         rid = _coerce_text(rule_id).strip()
-        bc = bug_class or _STATIC_RULE_BUG_CLASS.get(rid, "")
+        canonical = _STATIC_RULE_BUG_CLASS.get(rid, "")
+        # M3 anti-relabel: the proven class is DERIVED from the rule_id (the STATIC_RULE oracle re-derives the
+        # rule_id's property, nothing else). A caller-supplied bug_class may ONLY be an alias spelling that
+        # normalises to the SAME canonical class; a label that DISAGREES is REFUSED here (e.g. a broken-crypto
+        # region relabelled `static_taint`, a LEAD-only class). This is the CONSTRUCTION-time refusal — ONE of
+        # FIVE independent binding points. A producer who assembles the verifier context DIRECTLY (not via this
+        # builder) bypasses this guard, so the binding is NOT self-sufficient here: it is re-asserted at
+        # re-execution (reverify re-derives the class from observed['rule_id']), at grade (oracle_confirms_class
+        # treats STATIC_RULE as a confirmer only for the FACT-capable static classes), at export
+        # (to_pcf/verify_pcf reject a relabel), AND — closing the last gap — at the MINT itself
+        # (verifier.confirm demotes a STATIC_RULE signal whose rule_id does not derive the claimed class out of
+        # the confirming set, and integration.confirm_and_certify refuses to sign it). Only with all five does
+        # the guarantee hold: NO mint path signs a FACT for a class the oracle never proves. An out-of-
+        # vocabulary rule_id has no canonical class to alias, so any explicit bug_class on it is refused too
+        # (the oracle REFUSES the rule_id regardless — no legitimate caller needs an override there).
+        supplied = _coerce_text(bug_class).strip() if bug_class is not None else ""
+        if supplied:
+            from .verifier import normalize_bug_class  # local import: avoid a module-load cycle
+            if not canonical or normalize_bug_class(supplied) != canonical:
+                raise ValueError(
+                    f"bug_class {bug_class!r} is inconsistent with rule_id {rid!r} "
+                    f"(the static rule proves {canonical or '<out-of-vocabulary>'!r}) — a static-rule "
+                    f"context's class is derived from its rule_id; the override may only be an alias of the "
+                    f"SAME canonical class, never a relabel")
+        bc = canonical
         try:
             ln = int(line)
         except (TypeError, ValueError):

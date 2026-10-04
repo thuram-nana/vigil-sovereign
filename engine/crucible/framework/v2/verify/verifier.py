@@ -1125,18 +1125,38 @@ def canonical_oracle_for(bug_class: str) -> OracleKind | None:
     return kinds[0] if kinds else None
 
 
+# The LEAD-only STATIC static classes — the class-level mirror of oracles._LEAD_ONLY_RULE_IDS. Their
+# BUG_CLASS_ORACLES rows ROUTE a finding to the STATIC_RULE oracle (so a static_* finding is adjudicated),
+# but the oracle is FAIL-CLOSED for them and NEVER mints a FACT, so STATIC_RULE is NOT a valid CONFIRMER for
+# a CLAIM of these classes. A drift guard (analysis/tests/test_static_facts) asserts this equals
+# {adapter._STATIC_RULE_BUG_CLASS[r] for r in oracles._LEAD_ONLY_RULE_IDS}, so the two can never diverge.
+_STATIC_RULE_LEAD_ONLY_CLASSES: "frozenset[str]" = frozenset({"static_insecure_randomness", "static_taint"})
+
+
 def oracle_confirms_class(confirmed_by: str, bug_class: str) -> bool:
     """PCF step 5 (claim-grounded): ``True`` iff the oracle that fired is a VALID confirmer for the
     claimed class — i.e. it is in that class's acceptable oracle set. This defeats relabelling (you cannot
     claim class X with an oracle that does not confirm X). An out-of-vocabulary class returns ``False``
-    (nothing in the substrate confirms it)."""
-    kinds = BUG_CLASS_ORACLES.get(normalize_bug_class(bug_class))
+    (nothing in the substrate confirms it).
+
+    STATIC_RULE confirms ONLY the FACT-capable static classes: the LEAD-only static classes
+    (``static_taint`` / ``static_insecure_randomness``) route to STATIC_RULE for a fail-closed LEAD, but the
+    oracle provably never mints them, so STATIC_RULE is NOT a confirmer for a CLAIM of those classes (a
+    LEAD-only rule_id's class can never ground a FACT here)."""
+    n = normalize_bug_class(bug_class)
+    kinds = BUG_CLASS_ORACLES.get(n)
     if not kinds:
         return False
     try:
-        return OracleKind(str(confirmed_by)) in kinds
+        kind = OracleKind(str(confirmed_by))
     except ValueError:
         return False
+    if kind not in kinds:
+        return False
+    # STATIC_RULE is not a confirmer for a LEAD-only static class (the oracle provably never mints it).
+    if kind is OracleKind.STATIC_RULE and n in _STATIC_RULE_LEAD_ONLY_CLASSES:
+        return False
+    return True
 
 
 def require_known_bug_class(bug_class: str) -> str:
@@ -1240,6 +1260,34 @@ class OracleVerifier:
                 signals.append(sig)
 
         confirming = [s for s in signals if s.fired and s.confidence >= self.high_confidence]
+        # M3 anti-relabel at the MINT choke (the 4th binding point — build/re-exec/grade/export were already
+        # bound; THIS closes the mint, the one every producer path must traverse). A STATIC_RULE confirmation
+        # proves the CODE PROPERTY of its FIRED rule_id and NOTHING else, so the authoritative class is DERIVED
+        # from the signal's own ``observed['rule_id']`` — NEVER the producer-controlled ctx ``bug_class`` that
+        # merely SELECTED the oracle. A producer who assembles the context directly (bypassing
+        # from_code_region's construction guard) and sets BOTH the finding and ctx class to one the rule_id does
+        # not prove — e.g. a real broken-crypto region claimed as the LEAD-only ``static_taint`` — would
+        # otherwise ride the broken-crypto FIRE into ``result.bug_class='static_taint'`` and a signed FACT.
+        # confirm() is the SINGLE choke EVERY mint path re-adjudicates through (the sovereign engine AND the
+        # integration confirm_and_certify / certify_admitted paths), so a STATIC_RULE signal is DEMOTED out of
+        # ``confirming`` here unless its own rule_id derives EXACTLY the claimed class — and never for a
+        # LEAD-only rule_id (which the oracle already fails closed on; re-asserted here belt-and-suspenders).
+        static_rule_relabel: "list[str]" = []
+        if confirming and any(s.kind is OracleKind.STATIC_RULE for s in confirming):
+            from .adapter import _STATIC_RULE_BUG_CLASS  # local: closed rule_id->class map (avoids a cycle)
+            claimed = normalize_bug_class(bug_class)
+            kept = []
+            for s in confirming:
+                if s.kind is OracleKind.STATIC_RULE:
+                    rid = str((s.observed or {}).get("rule_id", "")).strip()
+                    derived = _STATIC_RULE_BUG_CLASS.get(rid, "")
+                    if (not derived) or rid in oracles._LEAD_ONLY_RULE_IDS or derived != claimed:
+                        static_rule_relabel.append(
+                            f"STATIC_RULE fired on rule_id {rid!r} (proves "
+                            f"{derived or '<out-of-vocabulary>'!r}) but the claimed class is {claimed!r}")
+                        continue
+                kept.append(s)
+            confirming = kept
         # ANTI-HALLUCINATION — unknown-class FAIL-CLOSED (audit A1). A confirmation is valid ONLY for a
         # bug_class the oracle vocabulary can actually prove. An INVENTED / out-of-vocabulary class must NEVER
         # become a confirmed FACT, even if a generic side-effect / OOB / reflection oracle fires over the
@@ -1263,6 +1311,16 @@ class OracleVerifier:
         )
 
         rationale = self._rationale(bug_class, kinds, signals, confirming, skipped, dissent)
+        if static_rule_relabel:
+            # A would-be STATIC_RULE confirmation suppressed by the mint-choke class binding — say so loudly
+            # and auditable (a static-rule FACT is bound to its rule_id's class; the oracle re-fires only for
+            # the CLAIM's own class, never a relabel of a FACT-capable region onto a class it does not prove).
+            rationale = (
+                "NOT CONFIRMED (fail-closed, M3 anti-relabel at the mint choke): "
+                + "; ".join(static_rule_relabel)
+                + " — a static-rule FACT's class is DERIVED from its rule_id, so a relabel cannot mint. "
+                + rationale
+            )
         if confirming and not class_known:
             # A would-be confirmation suppressed by the vocabulary gate — say so, loudly and auditable.
             rationale = (
