@@ -520,8 +520,14 @@ def saturate_delta_derivation_counts(chain_n: int = 5, inert_n: int = 60) -> tup
 
     _ops.derive = counting  # type: ignore[assignment]
     try:
-        wf = build(); n[0] = 0; _ops._saturate_full(ops, wf, 1000); full_n = n[0]
-        ww = build(); n[0] = 0; _ops.saturate(ops, ww, 1000); wl_n = n[0]
+        wf = build()
+        n[0] = 0
+        _ops._saturate_full(ops, wf, 1000)
+        full_n = n[0]
+        ww = build()
+        n[0] = 0
+        _ops.saturate(ops, ww, 1000)
+        wl_n = n[0]
     finally:
         _ops.derive = real  # type: ignore[assignment]
     identical = (wf.all_nodes() == ww.all_nodes()) and (wf.all_edges() == ww.all_edges())
