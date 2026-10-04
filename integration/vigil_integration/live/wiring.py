@@ -147,10 +147,19 @@ def provision_authority(
     max_actions: int = 1000,
     base_dir: Optional[str] = None,
     vault: Any = None,
+    oob_collector_pubkey: str = "",
+    oob_relay_host: str = "",
+    oob_dns_collector_pubkey: str = "",
 ) -> Provisioned:
     """Create + SIGN a CRUCIBLE authority for ``slug`` scoped to ``scope`` (LITERAL hosts — the scope
     matcher has no CIDR, so pass ``["127.0.0.1"]`` not a block), persist it to the default authority
     store, and return the shared governance material. Offense-side (lazy ``framework`` import).
+
+    The ``oob_*`` params PIN the out-of-band collector (PUBLIC material only) + the operator relay INTO the
+    owner-signed authority so the governed OOB re-drive feeder (:func:`_governed_oob_material`) re-derives the
+    verifier pin + the egress destination from the signed document, never from a producer context. All default
+    to ``""`` ⇒ a non-OOB authority is byte-identical in meaning (the fields are owner-signed defaults on the
+    model) and no OOB material is ever threaded (fail-closed).
 
     Governance key resolution (S7): an explicit ``keypair`` wins (tests / an externally-managed key);
     otherwise, when ``base_dir`` is given, a STABLE offense-governance key is loaded-or-provisioned under
@@ -178,6 +187,17 @@ def provision_authority(
         slug, list(scope), environment=TargetEnvironment(environment),
         duration_hours=duration_hours, max_actions=max_actions,
     )
+    # Pin the OOB collector + operator relay (public material only) into the document BEFORE signing, so the
+    # owner's signature COVERS the pin (the feeder re-derives the verifier's pin from the signed authority, and
+    # the oracle's offline re-verify re-derives the same window). ``model_copy`` sets only existing string
+    # fields (``extra="forbid"`` is satisfied); the engagement window is untouched, so the window validator is
+    # unaffected. Default-off: all-empty ⇒ no update ⇒ the signed canonical bytes are byte-identical to today.
+    if oob_collector_pubkey.strip() or oob_relay_host.strip() or oob_dns_collector_pubkey.strip():
+        doc = doc.model_copy(update={
+            "oob_collector_pubkey": oob_collector_pubkey.strip(),
+            "oob_relay_host": oob_relay_host.strip(),
+            "oob_dns_collector_pubkey": oob_dns_collector_pubkey.strip(),
+        })
     signed = sign_authority(doc, {key_id: kp.private_key_b64})   # authority signer = dict[key_id→priv]
     out_path = save_signed_authority(signed)
     # B3: persist the governance AUTHORITY trust root so `framework.v2 engage` (engage._engage_authority_trust_root)
@@ -320,6 +340,26 @@ class EngineConfig:
     # run's truth. This is the opt-in that makes `docker-compose.yml`'s otel-collector service and the
     # AS-BUILT "OTLP exporter wired into the engine" claim actually true.
     otlp_endpoint: Optional[str] = None
+    # M-11 OOB AUTONOMOUS COLLECTOR-FEEDER — deployment config; DEFAULT OFF ⇒ fail-closed LEAD. The governed
+    # OOB re-drive seam (``_live_oob_redrive_fact``) mints a signed FACT ONLY when fed the TRUSTED collector
+    # material; these fields PROVISION that material for a governed engage, mirroring the engine's own
+    # ``engage._engage_oob_authority`` scan path. ``oob_enable`` is the master switch — OFF (the default) ⇒ no
+    # material is threaded and an OOB claim stays a LEAD, byte-identical to today. ``oob_collector_keypair`` is
+    # the INDEPENDENT collector's PRIVATE Ed25519 key (it SIGNS each receipt), loaded from a trusted deployment
+    # keystore: the signed authority carries only its PUBLIC pin, so the private half must arrive out-of-band
+    # here, never from the model. Its public key is pinned INTO the signed authority at provisioning, and the
+    # feeder refuses a keypair whose public key does not match that owner-signed pin (the triple-lock: a forged
+    # collector cannot mint). ``oob_relay_host`` names the operator-hosted collaborator relay — an EGRESS
+    # destination gated by ``authority.gate.authorize_oob_egress``, never a scan target; ``oob_advertise_base_url``
+    # is the reachable absolute http(s) callback base a remote target executes (the relay's public URL tunneled
+    # to the loopback receiver). Empty ⇒ the VIGIL-owned loopback self-check tier (the receiver advertises its
+    # own loopback URL). ``oob_dns_collector_pubkey`` optionally pins a DNS collector (public material). ON only
+    # when a relay + the signed pins are provisioned — never a default.
+    oob_enable: bool = False
+    oob_collector_keypair: Optional[KeyPair] = None
+    oob_relay_host: str = ""
+    oob_advertise_base_url: str = ""
+    oob_dns_collector_pubkey: str = ""
 
 
 def _offense_scope_source(slug: str, trust_root: Any):
@@ -389,8 +429,15 @@ def build_engine(config: EngineConfig) -> VigilEngine:
 
     # S7: provision the authority under a STABLE, sealed governance key (base_dir + vault), so one owner
     # delegation covers the anchor-1 signer across runs. A caller-supplied provisioned authority still wins.
+    # M-11: when the deployment enables OOB and supplies the independent collector keypair, PIN its PUBLIC key
+    # (+ the operator relay) INTO the authority we sign here, so the governed OOB feeder re-derives the verifier
+    # pin from the owner-signed document. Default-off (no keypair) ⇒ empty pins ⇒ byte-identical provisioning.
+    _oob_on = bool(config.oob_enable) and config.oob_collector_keypair is not None
     prov = config.provisioned or provision_authority(
-        slug=config.slug, scope=config.scope, base_dir=config.base_dir, vault=op_vault)
+        slug=config.slug, scope=config.scope, base_dir=config.base_dir, vault=op_vault,
+        oob_collector_pubkey=(config.oob_collector_keypair.public_key_b64 if _oob_on else ""),
+        oob_relay_host=(config.oob_relay_host if _oob_on else ""),
+        oob_dns_collector_pubkey=(config.oob_dns_collector_pubkey if _oob_on else ""))
 
     # Materialize the CRUCIBLE charter form of this run's LOOPBACK authorization so the T2 SQLi re-drive's
     # HttpExecutor scope gate (which reads targets/<slug>/charter.md) agrees with the engine's own signed
@@ -764,7 +811,14 @@ def build_engine(config: EngineConfig) -> VigilEngine:
         from framework.v2.agents import HttpExecutor
         return HttpExecutor(engagement_slug=prov.slug, base_url=base_url, prompt_callback=lambda *_a: False)
 
-    oracle = _build_oracle(prov, redrive_executor_factory=_redrive_executor_factory)
+    def _oob_material_provider() -> Optional[dict]:
+        # M-11 — the TRUSTED governed-engage OOB material (the signed authority's collector pin + the deployment
+        # collector key + the owner-signed window). Re-read per call so a mid-engagement authority re-sign is
+        # honoured (mirrors _offense_scope_source). Default-off ⇒ None ⇒ an OOB claim stays a LEAD.
+        return _governed_oob_material(prov, config)
+
+    oracle = _build_oracle(prov, redrive_executor_factory=_redrive_executor_factory,
+                           oob_material_provider=_oob_material_provider)
 
     # -- per-session knowledge graph (F3): the partition key is the SESSION id (falls back to the slug),
     # so each session owns a disjoint Neo4j partition + accumulates its own prior context. graph_writer is
@@ -1674,10 +1728,109 @@ def _admit_and_mint(finding: "dict", *, prov: Provisioned, provenance: str,
     return res.finding_ref if getattr(res, "is_fact", False) else None
 
 
+def _governed_oob_material(prov: Provisioned, config: "EngineConfig") -> "Optional[dict]":
+    """Integration-side mirror of ``engine.engage._engage_oob_authority``: build the TRUSTED out-of-band
+    material bundle — an independent collector keypair + the owner-pinned collector pubkey + the owner-signed
+    engagement window — that the governed OOB re-drive seam (:func:`_live_oob_redrive_fact`) needs to mint a
+    signed FACT, SOURCED ENTIRELY from the SIGNED authority + the deployment-provisioned collector private key.
+
+    The bundle NEVER comes from the model (``engine._redrive_spec`` emits class + url only — the triple-lock).
+    Returns ``None`` (⇒ the OOB claim stays a LEAD, fail-closed) unless EVERY condition holds:
+
+      * ``config.oob_enable`` is True — the deployment master switch (OFF by default);
+      * an independent collector PRIVATE keypair is provisioned (``config.oob_collector_keypair``): it SIGNS
+        each receipt, and the signed authority carries only the PUBLIC pin, so the private half must arrive
+        through this trusted deployment channel;
+      * the SIGNED authority (verified against ``prov.trust_root``) carries a non-empty ``oob_collector_pubkey``
+        (the owner pinned a collector out-of-band);
+      * the provisioned keypair's public key EXACTLY matches the authority's pin — a forged / wrong collector is
+        refused HERE (the feeder-side half of the triple-lock, upstream of ``_oob_material_verifier``'s offline
+        half, so a mismatched key never even stands up a receiver);
+      * when the authority names an ``oob_relay_host``, the dedicated OOB egress gate
+        (``authority.gate.authorize_oob_egress``) authorizes the advertised relay host — fail-closed when it
+        does not match the owner-signed relay (authorizing the relay never widens scan scope).
+
+    Empty ``oob_advertise_base_url`` ⇒ the VIGIL-owned loopback self-check tier (the arm's receiver advertises
+    its own loopback URL). FATAL-2: every framework import is function-local. Total: any load/verify error ⇒
+    ``None`` (never raises into the oracle seam)."""
+    if not getattr(config, "oob_enable", False):
+        return None    # deployment master switch OFF (default) ⇒ no material ⇒ OOB stays a LEAD
+    kp = getattr(config, "oob_collector_keypair", None)
+    kp_pub = (getattr(kp, "public_key_b64", "") or "").strip()
+    if not kp_pub:
+        return None    # no provisioned collector private key ⇒ cannot sign receipts ⇒ no material, no FACT
+    try:
+        from framework.v2.authority.gate import (  # noqa: PLC0415 (framework at CALL — FATAL-2)
+            authorize_oob_egress, load_authority_for_gate)
+        from framework.v2.verify.reverify import _authority_epoch  # noqa: PLC0415
+        authority = load_authority_for_gate(prov.slug, trust_root=prov.trust_root)
+    except Exception:  # noqa: BLE001 — an unverifiable / absent authority cannot provision OOB ⇒ LEAD
+        return None
+    pin = (getattr(authority, "oob_collector_pubkey", "") or "").strip()
+    if not pin:
+        return None    # the owner did not pin a collector ⇒ OOB not provisioned on the authority ⇒ LEAD
+    if kp_pub != pin:
+        return None    # the provisioned key does not match the owner-signed pin ⇒ forged collector ⇒ refuse
+    advertise = (getattr(config, "oob_advertise_base_url", "") or "").strip()
+    relay_host = (getattr(authority, "oob_relay_host", "") or "").strip()
+    if advertise or relay_host:
+        # RELAY tier — a REACHABLE callback for a non-loopback target. BOTH the owner-signed ``oob_relay_host``
+        # AND the deployment's advertised callback URL are required, and the advertised host must match the
+        # owner-signed relay via the dedicated OOB egress gate (which never widens scan scope). ANY half-config —
+        # an advertise with no signed relay, a signed relay with no advertise, or a host mismatch — is refused,
+        # so a reachable callback is embedded ONLY toward the owner-authorized egress (fail-closed).
+        if not advertise or not relay_host or not authorize_oob_egress(authority, advertise):
+            return None
+    material: dict = {
+        "collector_keypair": kp,
+        "collector_pubkey": pin,                           # the OUT-OF-BAND pin from the SIGNED authority
+        "ttl_seconds": float(getattr(authority, "oob_ttl_seconds", 300.0)),
+        "skew_seconds": float(getattr(authority, "oob_skew_seconds", 5.0)),
+    }
+    dns_pin = (getattr(authority, "oob_dns_collector_pubkey", "") or "").strip()
+    if dns_pin:
+        material["dns_collector_pubkey"] = dns_pin
+    # The OWNER-SIGNED engagement window is the anti-replay boundary. Threaded only when BOTH edges resolve (a
+    # half-window is refused by the oracle, fail-closed); sourced from the SAME signed authority as the pin, so
+    # a producer cannot slide a stale/prior-engagement receipt onto it.
+    nb = _authority_epoch(getattr(authority, "not_before", None))
+    na = _authority_epoch(getattr(authority, "not_after", None))
+    if nb is not None and na is not None:
+        material["not_before"] = nb
+        material["not_after"] = na
+    if advertise:
+        material["advertise_base_url"] = advertise
+    return material
+
+
+def _with_trusted_oob_material(redrive: "Optional[dict]",
+                               provider: "Optional[Callable[[], Optional[dict]]]") -> "Optional[dict]":
+    """Return the redrive spec with its ``oob_material`` sourced SOLELY from the trusted ``provider`` (the
+    governed-engage OOB feeder). For an ``oob``-kind spec this STRIPS any producer-supplied ``oob_material``
+    (``engine._redrive_spec`` never sets it — this is defense-in-depth) and sets ONLY the feeder's bundle when
+    one is available, so the TRUSTED channel is the SOLE source of the material (the triple-lock). A non-oob
+    spec, a missing provider, or a feeder that yields nothing leaves the OOB seam with NO material ⇒ the claim
+    stays a LEAD (fail-closed, default-off byte-identical when no feeder is wired). Never raises (a feeder
+    error ⇒ no material)."""
+    if not isinstance(redrive, dict) or redrive.get("kind") != "oob":
+        return redrive
+    base = {k: v for k, v in redrive.items() if k != "oob_material"}
+    if provider is None:
+        return base
+    try:
+        material = provider()
+    except Exception:  # noqa: BLE001 — a feeder error ⇒ no material ⇒ LEAD (fail-closed)
+        return base
+    if isinstance(material, dict) and material:
+        base["oob_material"] = material
+    return base
+
+
 def _build_oracle(
     prov: Provisioned,
     *,
     redrive_executor_factory: Optional[Callable[[str], Any]] = None,
+    oob_material_provider: Optional[Callable[[], Optional[dict]]] = None,
 ) -> Callable[..., Optional[str]]:
     """The CRUCIBLE oracle seam. Returns a signed certificate's finding ref ONLY on a real confirmation
     (else None ⇒ the claim stays a LEAD).
@@ -1694,7 +1847,13 @@ def _build_oracle(
     AUDIT G4 — the LEAD-only fallback (unchanged): the context here is the model's own
     ``analysis.extracted_info['oracle_context']`` — LLM-PROVENANCED — so it is passed with
     ``provenance="llm"`` and ``certify_admitted`` demotes it to a LEAD even when the oracle fires. A
-    crafted-but-firing context therefore CANNOT mint a signed FACT (the exact route this gate closes)."""
+    crafted-but-firing context therefore CANNOT mint a signed FACT (the exact route this gate closes).
+
+    M-11 — ``oob_material_provider`` (DEFAULT None) is the governed-engage OOB feeder: a zero-arg callable
+    returning the TRUSTED out-of-band material bundle (the signed authority's collector pin + the deployment
+    collector key + the owner-signed window) or None. It is the SOLE source of the OOB seam's material (the
+    triple-lock: the model's redrive spec never carries it). None (the default) ⇒ OOB stays a LEAD, byte-
+    identical to today."""
 
     def oracle(raw_output: str, analysis: Any, *, redrive: Optional[dict] = None) -> Optional[str]:
         info = getattr(analysis, "extracted_info", None) or {}
@@ -1750,7 +1909,14 @@ def _build_oracle(
         # class+url only), so this returns None and the claim stays a LEAD below — no material, no FACT. The
         # LEAD-fallback _redrive_branch_for deliberately OMITS these classes, so an OOB claim never reaches a
         # FACT-capable admit without this seam's trusted material.
-        oob_ref = _live_oob_redrive_fact(prov, info, redrive)
+        #
+        # TRUSTED-CHANNEL ENRICHMENT (the triple-lock in force): the oob_material is threaded onto the spec HERE,
+        # in the trusted wiring, SOLELY from the governed-engage feeder bound at provisioning (the signed
+        # authority + the deployment collector key) — NEVER from the model. _with_trusted_oob_material is the
+        # SOLE writer of the key: for an OOB spec it strips any producer-supplied material and sets only the
+        # feeder's bundle (or none when OOB is unprovisioned / a forged collector). No feeder wired (the
+        # default) ⇒ no material ⇒ the seam fail-closes to a LEAD, byte-identical to today.
+        oob_ref = _live_oob_redrive_fact(prov, info, _with_trusted_oob_material(redrive, oob_material_provider))
         if oob_ref:
             return oob_ref
 

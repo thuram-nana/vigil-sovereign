@@ -32,13 +32,19 @@ def coverage_cert_from_report(report: Any, *, max_pages: int, max_depth: int,
 
 
 def scan_loopback_benchmark(*, max_pages: int = 25, max_depth: int = 4,
-                            retain_evidence: bool = False) -> Any:
+                            retain_evidence: bool = False, enable_oob: bool = False) -> Any:
     """Run ONE real coverage scan of the in-process benchmark app → its ScanReport (framework
     import is function-local). The reproducible, authorized live target for the MVP proof.
 
     ``retain_evidence`` (OPT-IN) retains the re-execution kernel (predicate + observed values) on
     predicate-oracle probes so the resulting posture certificate carries RE-EXECUTABLE CLOSED claims a
-    VIGIL-free verifier re-derives itself. Default OFF → the coverage certificate is byte-identical."""
+    VIGIL-free verifier re-derives itself. Default OFF → the coverage certificate is byte-identical.
+
+    ``enable_oob`` is DEPLOYMENT-CONFIG-DRIVEN and DEFAULT OFF (fail-closed): the loopback self-check needs
+    no out-of-band channel, so with it OFF the campaign plants no OOB probes and the certificate is byte-
+    identical. Turn it ON only when a relay + the signed collector pins are provisioned on the engagement
+    authority (the campaign then pulls its collector pins from that signed authority via
+    ``engage._engage_oob_authority``); without those pins an OOB finding stays a LEAD by construction."""
     from framework.v2.eval.benchmark_app import serve  # noqa: PLC0415 (FATAL-2: function-local)
     from framework.v2.eval.benchmark_run import loopback_send  # noqa: PLC0415
     from framework.v2.scanner.campaign import WebScanCampaign  # noqa: PLC0415
@@ -46,7 +52,7 @@ def scan_loopback_benchmark(*, max_pages: int = 25, max_depth: int = 4,
 
     with serve() as base:
         return WebScanCampaign(
-            loopback_send, max_pages=max_pages, max_depth=max_depth, enable_oob=False,
+            loopback_send, max_pages=max_pages, max_depth=max_depth, enable_oob=enable_oob,
             insertion_kinds=(InsertionKind.QUERY_VALUE,), retain_evidence=retain_evidence,
         ).run(base)
 
@@ -75,6 +81,7 @@ def attest_loopback_benchmark(
     max_pages: int = 25,
     max_depth: int = 4,
     retain_evidence: bool = False,
+    enable_oob: bool = False,
     run_dir: "str | Path | None" = None,
 ) -> dict:
     """End-to-end: scan the loopback benchmark app → coverage cert → posture cert → sign → export the
@@ -88,7 +95,7 @@ def attest_loopback_benchmark(
     owner = owner_key or generate_keypair()
     gov = gov_key or generate_keypair()
     report = scan_loopback_benchmark(max_pages=max_pages, max_depth=max_depth,
-                                     retain_evidence=retain_evidence)
+                                     retain_evidence=retain_evidence, enable_oob=enable_oob)
     coverage = coverage_cert_from_report(report, max_pages=max_pages, max_depth=max_depth)
 
     # The target's identity: the benchmark app is loopback. Bind to host 127.0.0.1.
