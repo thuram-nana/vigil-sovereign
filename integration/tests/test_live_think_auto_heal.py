@@ -11,6 +11,21 @@ import pytest
 from vigil_integration.live import think_claude as tc
 
 
+@pytest.fixture(autouse=True)
+def _within_gateway_egress():
+    """M4.1: think_claude._invoke asserts it runs INSIDE the gateway egress chokepoint (fail-closed).
+    In production the retry loop runs inside ai_gateway.egress(); these UNIT tests drive
+    _invoke_with_backoff directly, so enter the egress depth-context to mirror the real caller. This is
+    test-local (the private depth contextvar) — NOT a public bypass API (which would defeat the gateway);
+    it only sets in_egress()=True, exactly as the real egress() wrapper does around the same call."""
+    from vigil_core import ai_gateway
+    tok = ai_gateway._EGRESS_DEPTH.set(ai_gateway._EGRESS_DEPTH.get() + 1)
+    try:
+        yield
+    finally:
+        ai_gateway._EGRESS_DEPTH.reset(tok)
+
+
 def test_retryable_classification():
     class RateLimitError(Exception):
         pass
