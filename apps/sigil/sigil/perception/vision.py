@@ -23,6 +23,14 @@ from typing import Optional, Protocol, runtime_checkable
 
 from .capture import Frame
 
+# M4.1 — the ONE shared egress chokepoint (``vigil_core.ai_gateway``). vigil_core is the stdlib-only leaf both
+# planes share (no framework/strix/sigil imports), so routing the sovereign-plane frontier upload through it
+# crosses no FATAL-2 boundary. Guarded; when absent the call still completes (core-absent degradation).
+try:                                                       # pragma: no cover - import guard
+    from vigil_core import ai_gateway as _gw
+except Exception:                                          # noqa: BLE001
+    _gw = None
+
 
 @runtime_checkable
 class VisionModel(Protocol):
@@ -103,26 +111,44 @@ class ClaudeVision:
             except Exception:  # noqa: BLE001
                 _tb = None
         media = "image/png" if (frame.image_path or "").lower().endswith(".png") else "image/jpeg"
-        body = json.dumps({
-            "model": self.model, "max_tokens": _mt,
-            "messages": [{"role": "user", "content": [
-                {"type": "image", "source": {"type": "base64", "media_type": media, "data": b64}},
-                {"type": "text", "text": (question or "Describe what is visible.")},
-            ]}],
-        }).encode("utf-8")
-        url = "https://api.anthropic.com/v1/messages"
-        # W16-9: SIGIL-plane frontier vision egress is now under the sovereignty tier —
-        # an air-gapped/sovereign tier REFUSES this cloud upload (raises SovereigntyRefusal).
-        from ..sovereignty import assert_endpoint_permitted
-        assert_endpoint_permitted(url, purpose="vision (frontier upload)")
-        req = urllib.request.Request(
-            url, data=body, method="POST",
-            headers={"content-type": "application/json", "x-api-key": self.api_key,
-                     "anthropic-version": "2023-06-01"})
-        try:
-            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
-                payload = json.loads(resp.read().decode("utf-8"))
-        except (urllib.error.URLError, OSError, ValueError):
+        q = question or "Describe what is visible."
+
+        # M4.1 — route this frontier upload through the ONE shared gateway chokepoint. The accompanying TEXT
+        # (the question) rides the gateway-redacted ``user`` field, so any credential SHAPE the masker
+        # recognises is masked before the model sees it; the IMAGE BYTES themselves pass through unredacted
+        # (binary, not text-maskable) — stated honestly. The SIGIL sovereignty tier is still asserted at the
+        # resolved URL inside the closure, so an air-gapped/sovereign tier REFUSES (raises SovereigntyRefusal)
+        # BEFORE any socket opens; the gateway adds the symmetric redaction + the unified audit record.
+        def _invoke(red):
+            if _gw is not None:
+                _gw.assert_in_egress("sigil_vision")        # a bypass of the chokepoint fails closed
+            url = "https://api.anthropic.com/v1/messages"
+            # W16-9: SIGIL-plane frontier vision egress is under the sovereignty tier —
+            # an air-gapped/sovereign tier REFUSES this cloud upload (raises SovereigntyRefusal).
+            from ..sovereignty import assert_endpoint_permitted
+            assert_endpoint_permitted(url, purpose="vision (frontier upload)")
+            rq = red.get("user")
+            text = rq if isinstance(rq, str) else q         # gateway-redacted question (image bytes pass as-is)
+            body = json.dumps({
+                "model": self.model, "max_tokens": _mt,
+                "messages": [{"role": "user", "content": [
+                    {"type": "image", "source": {"type": "base64", "media_type": media, "data": b64}},
+                    {"type": "text", "text": text},
+                ]}],
+            }).encode("utf-8")
+            req = urllib.request.Request(
+                url, data=body, method="POST",
+                headers={"content-type": "application/json", "x-api-key": self.api_key,
+                         "anthropic-version": "2023-06-01"})
+            try:
+                with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+                    return json.loads(resp.read().decode("utf-8"))
+            except (urllib.error.URLError, OSError, ValueError):
+                return None
+
+        from ..sovereignty import egress_via_gateway, GW_REFUSED
+        payload = egress_via_gateway(q, path="sigil_vision", invoke=_invoke)
+        if payload is GW_REFUSED or not isinstance(payload, dict):
             return ""
         if _tb is not None:
             try:

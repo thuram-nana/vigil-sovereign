@@ -494,6 +494,22 @@
       "source_doc": "docs/DEFERRED-INFRA.md",
       "disposition": "file-into-w16",
       "w16_issue": null
+    },
+    {
+      "id": "LIMIT-sigil-voice-probe-egress-not-gatewayed",
+      "title": "SIGIL sovereign-plane voice + credential-probe provider egress is sovereignty-tier-governed but not gateway-routed/redacted",
+      "summary": "M4.1 routes the SIGIL sovereign plane's cloud LLM egress (frontier vision upload + cloud memory consolidation) through the shared chokepoint vigil_core.ai_gateway.egress (classify -> redact -> audit), and the no-bypass guard (integration/tests/test_egress_no_bypass_guard.py) now scans apps/sigil to enforce it. Two sovereign-plane provider-egress classes are NOT routed through that chokepoint: (1) the ElevenLabs VOICE provider (voice.backends.ElevenLabsTts.synth sends TTS text; ElevenLabsAsr.transcribe sends STT audio; find_voices does a voice-library lookup) and (2) the credential-validation probes (platform.secret_probes, which POST a candidate key to a provider's metadata endpoint to validate it). Both are governed by the SIGIL sovereignty tier (sigil.sovereignty.assert_endpoint_permitted — an air-gapped/sovereign tier REFUSES them before any socket opens) and are honestly out of the LLM-gateway's scope: voice is a distinct egress class (audio synthesis/recognition; STT carries no text prompt to redact; TTS speaks SIGIL's own already-governed responses), and a probe deliberately sends the credential itself to verify it (redaction cannot help). The residual gap vs. the LLM sites: their accompanying text is not symmetrically masked and they emit no unified ai_gateway audit record. Future work (file-into-w16, the recorded blocking_work): route ElevenLabsTts.synth's text through a voice-aware egress case (redact the text, let audio bytes pass like image bytes) and emit a unified audit record for the voice + probe egress. The local PiperTts / WhisperAsr backends remain the sovereign zero-egress alternative.",
+      "classification": "real-unfinished-code",
+      "severity": "low",
+      "anchor": {
+        "file": "apps/sigil/sigil/voice/backends.py",
+        "symbol": "ElevenLabsTts.synth"
+      },
+      "marker": true,
+      "check": "symbol-exists",
+      "source_doc": "engine/crucible/SECURITY.md",
+      "disposition": "file-into-w16",
+      "w16_issue": null
     }
   ],
   "honest_limit_sites_note": "The code-scan census. docs/tests/test_limitation_inventory.py scans every non-test product .py for the honest-limit/deferred debt phrases in _DEBT_PHRASES and requires EVERY hit to be either a VIGIL-LIMIT marker line OR a site listed here whose snippet (matched case-insensitively) is a substring of the hit line. kind 'debt' names the limitations id the site belongs to (which must exist); kind 'non-debt' explains why the phrase is not a capability limit (a deliberate design choice, a runtime-state description, or a phrase describing a CHECK's target rather than VIGIL itself). Bidirectional: every snippet here must still match a debt-phrase line in its file, so deleting the prose (or moving the debt) turns CI red.",

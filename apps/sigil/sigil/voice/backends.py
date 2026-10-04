@@ -200,6 +200,14 @@ class PiperTts:
         yield from fb.flush()
 
 
+# VIGIL-LIMIT:LIMIT-sigil-voice-probe-egress-not-gatewayed — the SIGIL voice provider (ElevenLabs TTS text /
+# STT audio / voice-library lookup) and the credential-validation probes reach a third party directly. They
+# are governed by the SIGIL sovereignty tier (assert_endpoint_permitted, below) but — unlike the plane's cloud
+# LLM egress (vision + memory consolidation), which routes through vigil_core.ai_gateway.egress — they do not
+# route through that chokepoint, so their accompanying text is not symmetrically redacted and no unified egress
+# audit record is emitted. Registered in docs/limitations/inventory.json; routing them (TTS text redaction; a
+# voice-aware egress case) is the recorded follow-up. The local PiperTts / WhisperAsr backends are the
+# sovereign (zero-egress) alternative.
 class ElevenLabsTts:
     """ElevenLabs cloud TTS (SIGIL owner's choice). Requests raw pcm_16000 so the pipeline can
     play/barge-in at the frame level. Needs ELEVENLABS_API_KEY (env or ~/.sigil/sigil.env). NOTE:

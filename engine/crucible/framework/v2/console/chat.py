@@ -1625,6 +1625,33 @@ def _history_messages(chat_id: str) -> list[dict]:
     return msgs
 
 
+def _redact_history_for_egress(history: list[dict]) -> list[dict]:
+    """Mask every credential SHAPE the shared masker recognises in EACH prior-turn message BEFORE it joins
+    the egress ``messages`` array. ``_history_messages`` replays prior user+assistant turns RAW from the
+    session store, and the gateway redacts only the CURRENT turn's ``system``/``user`` — so a recognised
+    secret the operator pasted in an EARLIER turn (an ``Authorization: Bearer`` / ``api_key=`` / ``password=``
+    line), or an assistant turn that echoed one, would otherwise reach the provider UNMASKED. This runs each
+    message's text through the SAME masker the gateway applies to the current turn
+    (``vigil_core.ai_gateway.redact_payload`` -> ``vigil_core.redact.redact_log_message``), so BOTH roles are
+    masked symmetrically before egress. Only the credential SHAPES the masker recognises are covered (see
+    ``ai_gateway.redact_payload`` / ``redact.redact_log_message``); shapes it does not recognise ride through
+    like any other text. A non-str ``content`` passes through unchanged (``_history_messages`` only ever
+    produces str content today; this is future-proofing). When the shared core is absent the history passes
+    through unchanged — exactly the gateway's own core-absent degradation, so a core-absent build stays
+    byte-identical to the pre-gateway behaviour on this path too."""
+    if _gw is None or not history:
+        return history
+    out: list[dict] = []
+    for m in history:
+        c = m.get("content")
+        if isinstance(c, str) and c:
+            red, _n = _gw.redact_payload({"user": c})
+            out.append({**m, "content": red.get("user", c)})
+        else:
+            out.append(m)
+    return out
+
+
 def _has_prior_conversation(chat_id: str) -> bool:
     """True once this chat has at least one prior user turn AND one prior assistant reply (excluding the
     current turn) — i.e. the operator has already been talking with it, so a follow-up should CONTINUE the
@@ -2119,7 +2146,9 @@ def _reason_stream_cloud(chat_id: str, question: str, *, reason_mode: str, model
             rcontent = [{**content[0], "text": ru}, *content[1:]]
         skwargs = {"model": entry["model"], "max_tokens": _mx,
                    "system": system,       # static, secret-free system prompt sent verbatim (identity preserved)
-                   "messages": history + [{"role": "user", "content": rcontent}]}
+                   # history is replayed RAW from the store; mask every recognised secret shape in each prior
+                   # turn too (not only the gateway-redacted current turn) before it egresses.
+                   "messages": _redact_history_for_egress(history) + [{"role": "user", "content": rcontent}]}
         if thinks:
             skwargs["thinking"] = {"type": "adaptive"}
         client = anthropic.Anthropic(api_key=key, timeout=600.0) if thinks else anthropic.Anthropic(api_key=key)
@@ -2263,7 +2292,9 @@ def _reason(chat_id: str, question: str, *, reason_mode: str = "ask", model: str
                 rblocks = [{**blocks[0], "text": ru}, *blocks[1:]]
             kwargs = {"model": active_model, "max_tokens": _mx,
                       "system": system,    # static, secret-free system prompt sent verbatim (identity preserved)
-                      "messages": history + [{"role": "user", "content": rblocks}]}
+                      # history is replayed RAW from the store; mask every recognised secret shape in each
+                      # prior turn too (not only the gateway-redacted current turn) before it egresses.
+                      "messages": _redact_history_for_egress(history) + [{"role": "user", "content": rblocks}]}
             if thinks:
                 kwargs["thinking"] = {"type": "adaptive"}   # adaptive thinking (budget_tokens rejected)
             return client.messages.create(**kwargs)

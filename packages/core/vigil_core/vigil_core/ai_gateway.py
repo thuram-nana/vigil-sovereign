@@ -10,16 +10,27 @@ with no classification, no symmetric redaction, and no shared audit. There was n
 composed classify -> redact -> authorize -> route -> provenance -> output-verify -> audit, and no unified
 provenance record spanning the paths.
 
-``egress(payload, *, case)`` is that single place, and EVERY model-egress call site now routes through it:
+``egress(payload, *, case)`` is that single place, and EVERY LLM-egress call site now routes through it:
 the URK completion (auto-failover and an explicitly-pinned backend), the live think step (cloud +
 loopback-local), the console chat reasoning (blocking cloud, streaming cloud, loopback-local), the terminal
-capability router, and both codebase-edit coders (cloud + loopback-local). It is a PURE composition: every environment-specific step (the sovereignty ladder, the
+capability router, both codebase-edit coders (cloud + loopback-local), AND the SIGIL sovereign plane's cloud
+LLM egress (the frontier vision upload and the cloud memory-consolidation call). It is a PURE composition:
+every environment-specific step (the sovereignty ladder, the
 authorization gate, the actual model call — blocking or streaming — the audit sink) is INJECTED through the
 :class:`EgressCase`, so this module imports nothing but the standard library and the shared
 ``vigil_core.redact`` masker. Because ``vigil_core`` imports no ``framework.*`` / ``strix.*`` / ``sigil.*``,
-both the offense framework and the sovereign planes load the SAME chokepoint without crossing the
+both the offense framework and the sovereign plane load the SAME chokepoint without crossing the
 keyless two-environment boundary (FATAL-2); each side supplies a thin adapter that wires its own
 sovereignty policy and its own model call.
+
+SCOPE — "every LLM egress", precisely. This chokepoint covers LLM (model-completion) egress on all three
+planes. The sovereign plane ALSO has NON-LLM provider egress this gateway does NOT cover: its VOICE provider
+(ElevenLabs TTS text / STT audio / voice-library lookup) and its credential-validation probes, which are
+governed by the SIGIL sovereignty tier (``sigil.sovereignty.assert_endpoint_permitted``) but are not
+gateway-redacted — a different egress class, registered as a documented limitation
+(``docs/limitations/inventory.json``: ``LIMIT-sigil-voice-probe-egress-not-gatewayed``). A sovereign-plane
+on-box/loopback model call (local Ollama vision / memory consolidation) stays on the host under that same
+endpoint gate and is not routed here.
 
 A model call that must STREAM its output (the chat streaming path, the live think streaming SDK call) is
 supported without buffering: the injected ``invoke`` closure does the streaming round-trip itself — handing
@@ -30,9 +41,14 @@ classify/redact/authorize/route steps before and the provenance/audit steps afte
 The seven composed steps, in order:
 
   1. classify       — label the payload's sensitivity (does it carry a secret shape?) and the bug-class.
-  2. minimize/redact — mask every secret shape in the outbound payload with the shared redactor, so a
-                       credential never leaves the host in a prompt (this is the symmetric guarantee the
-                       URK path previously lacked).
+  2. minimize/redact — mask every credential SHAPE THE SHARED MASKER RECOGNISES in the outbound payload:
+                       ``Bearer`` tokens, credential-header values, and secret-named ``key=value`` assignments
+                       (see ``vigil_core.redact``), so a recognised credential shape never leaves the host in a
+                       prompt (the symmetric guarantee the URK path previously lacked). HONEST LIMIT: the
+                       masker does NOT recognise a bare AWS key, a PEM block, a bare JWT, a GitHub/Slack token,
+                       a raw high-entropy string, or inline db-URL creds — such a value rides through like any
+                       other text. This is "every credential shape the masker recognises", never "every
+                       conceivable secret".
   3. case-authorize — consult the injected case gate; a deny refuses BEFORE any model call.
   4. model-route    — assert the sovereignty policy permits this backend, and that the provider identity
                        is not a trust anchor; a refusal happens BEFORE the invoke closure runs, hence

@@ -155,7 +155,13 @@ _GENERIC_KV_RE = re.compile(r"([A-Za-z_][A-Za-z0-9_.\-]{0,63})(\s*[:=]\s*)(\"?[^
 
 def redact_log_message(text: Any) -> Any:
     """Mask credential VALUES embedded in a free-text log message. Non-str input passes through
-    unchanged. Deterministic; order-fixed so it is idempotent (masking twice yields the same string)."""
+    unchanged. Deterministic; order-fixed so it is idempotent (masking twice yields the same string).
+
+    Scope is exactly the three SHAPES above: a ``Bearer`` token, a credential-HEADER value, and a
+    secret-named ``key=value`` assignment. It does NOT recognise a bare AWS key id/secret, a PEM block, a
+    bare JWT, a GitHub/Slack token, a raw high-entropy string, or inline db-URL credentials — those carry no
+    recognised shape and ride through unchanged. Callers that claim a redaction guarantee must scope it to
+    "every credential shape this masker recognises", never "every secret"."""
     if not isinstance(text, str) or not text:
         return text
     # 1) credential header values (mask the whole value, cookies included) — runs first so a later,

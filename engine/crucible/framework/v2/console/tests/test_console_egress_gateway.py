@@ -13,6 +13,7 @@ controls:
 """
 from __future__ import annotations
 
+import json
 import sys
 import types
 from pathlib import Path
@@ -172,3 +173,86 @@ def test_chat_stream_routes_through_the_gateway(monkeypatch):
     assert cap.get("kwargs"), "messages.stream was never called"
     rec = ai_gateway.audit_log()[-1]
     assert rec.path == "chat_reason_stream" and rec.invoked is True
+
+
+# ── BLOCK-1 regression: a recognised secret in a PRIOR turn is MASKED in the egress messages array ────────
+# The gateway redacts only the CURRENT turn; history was replayed RAW, so a prior-turn secret of a recognised
+# shape leaked UNMASKED to the provider. These pin the fix on BOTH cloud paths (the gap the prior conformance
+# test missed: it only checked a record was produced, never that history was masked).
+
+_HIST_CHAT = "egress-history-chat"
+_HIST_SECRET = "sk-ant-PRIORTURN-HISTORY-SECRET-abc123XYZ"
+
+
+def _seed_prior_turn_with_secret(chat_id: str):
+    """A prior user turn carrying a recognised secret shape, a prior assistant reply, and a trailing user
+    record (which ``_prior_records`` strips — the current turn is the ``_reason`` arg, not a record)."""
+    chat._append(chat_id, {"role": "user", "text": f"my config Authorization: Bearer {_HIST_SECRET}"})
+    chat._append(chat_id, {"role": "assistant", "text": "noted."})
+    chat._append(chat_id, {"role": "user", "text": "placeholder current (stripped as history)"})
+
+
+def _assert_history_masked(msgs: list):
+    blob = json.dumps(msgs, default=str)
+    assert _HIST_SECRET not in blob, "prior-turn secret leaked UNMASKED into the egress history array"
+    assert "<redacted" in blob, "expected the masked placeholder in the egress history"
+    roles = [m["role"] for m in msgs]
+    # the conversation is still replayed: a prior user + assistant precede the current (final) user turn
+    assert roles[0] == "user" and roles[-1] == "user" and "assistant" in roles[:-1]
+
+
+def test_chat_reason_blocking_masks_prior_turn_secret_in_history(monkeypatch):
+    cap: dict = {}
+    _install_blocking(monkeypatch, cap)
+    _seed_prior_turn_with_secret(_HIST_CHAT)
+    out = chat._reason(_HIST_CHAT, "continue the review please", reason_mode="ask")
+    assert out["ok"] is True
+    assert cap.get("create_kw"), "the model was never called"
+    _assert_history_masked(cap["create_kw"]["messages"])
+
+
+def test_chat_stream_masks_prior_turn_secret_in_history(monkeypatch):
+    cap: dict = {}
+    mod = types.ModuleType("anthropic")
+
+    class _Final:
+        stop_reason = "end_turn"
+        usage = None
+        content: list = []
+
+    class _Stream:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        @property
+        def text_stream(self):
+            return iter(["ok."])
+
+        def get_final_message(self):
+            return _Final()
+
+    class _Msgs:
+        def stream(self, **kw):
+            cap["kwargs"] = kw
+            return _Stream()
+
+        def create(self, **kw):
+            cap["create_kw"] = kw
+            return _Final()
+
+    class _Client:
+        def __init__(self, api_key=None, **kw):
+            self.messages = _Msgs()
+
+    mod.Anthropic = _Client
+    monkeypatch.setitem(sys.modules, "anthropic", mod)
+
+    _seed_prior_turn_with_secret(_HIST_CHAT)
+    res = chat._reason_stream_cloud(_HIST_CHAT, "continue it", reason_mode="ask",
+                                    model="claude-sonnet-5", emit=lambda ev: None)
+    assert res.get("ok") is True
+    assert cap.get("kwargs"), "messages.stream was never called"
+    _assert_history_masked(cap["kwargs"]["messages"])
