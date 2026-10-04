@@ -157,6 +157,17 @@ class EvidenceCertificate(BaseModel):
     # behaviour + signature.
     artifact_recheck_required: bool = False
     artifact_encoding: str = ""         # "" | "bytes" | "canonical_text"
+    # ---- M4.4: OPTIONAL, DEFAULT-OFF, DEMOTE-ONLY N-of-M oracle-witness quorum --------------------
+    # When a FACT was admitted under an operator-set witness quorum for a critical bug class, the number N
+    # of DISTINCT independent oracle-witness kinds that had to re-fire, plus the sorted kind values that
+    # satisfied it. Bound INTO the signed certificate so the governance signature covers them and
+    # ``verify_certificate`` re-derives the witnesses over the retained context and refuses the certificate
+    # when fewer than N re-fire or a recorded witness no longer re-fires (a tampered witness). 0 / [] by
+    # default and dropped from the canonical form when empty (serializer below), so a certificate minted
+    # WITHOUT a quorum — and every existing evidence bundle — serialises BYTE-IDENTICALLY, keeping its
+    # signature valid. This never promotes: it only ever carries a stricter admission bar a verifier re-checks.
+    witness_quorum_required: int = Field(default=0, ge=0)
+    witness_kinds: list[str] = Field(default_factory=list)
 
     # The additive D2 members whose empty value is dropped for byte-identity (canonical bytes sort keys, so
     # order-independent — listed once here so the serializer and the ``bound_identity`` view agree).
@@ -215,6 +226,12 @@ class EvidenceCertificate(BaseModel):
             data.pop("tool_version", None)
         if not data.get("freshness_ttl_seconds"):
             data.pop("freshness_ttl_seconds", None)
+        # M4.4 witness-quorum members: dropped when the quorum was not enforced (0 / []), so a
+        # non-quorum certificate serialises byte-identically to before these fields existed.
+        if not data.get("witness_quorum_required"):
+            data.pop("witness_quorum_required", None)
+        if not data.get("witness_kinds"):
+            data.pop("witness_kinds", None)
         for k in self._D2_FIELDS:
             if not data.get(k):        # None / "" / {} / 0 are all "absent" for canonical bytes
                 data.pop(k, None)

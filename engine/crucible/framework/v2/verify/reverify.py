@@ -256,12 +256,33 @@ def reverify_finding(finding: dict, *, ref: str | None = None,
                 matches_claim=False if has_claim else None,
                 note=f"sealed evidence unavailable (crypto-shredded, wrong engagement, or tampered): {e}",
             )
-    return reverify_context(
+    result = reverify_context(
         oc, bug_class=bug_class,
         claimed_confirmed_by=finding.get("confirmed_by"),
         claimed_confidence=finding.get("confidence"),
         ref=r, verifier=verifier,
     )
+    # M4.4 — OFFLINE WITNESS-QUORUM HONOR (demote-only). A finding minted under an operator-set N-of-M
+    # oracle-witness quorum carries ``witness_quorum_required`` (+ the ``witness_kinds`` that satisfied it).
+    # Re-derive the witnesses over the SAME retained context and refuse the certificate when fewer than N
+    # distinct kinds re-fire or a recorded witness no longer re-fires (a tampered witness). A finding with no
+    # recorded quorum (the default) skips this entirely → byte-identical. This can only demote a reproduced
+    # certificate to not-reproduced; it never turns a non-reproducing one into a pass.
+    required = int(finding.get("witness_quorum_required", 0) or 0)
+    if required > 0 and result.reproduced:
+        from ..veracity.witness_quorum import witnesses_reconfirm
+        ok, _got, note = witnesses_reconfirm(
+            oc, bug_class=bug_class, required=required,
+            expected_kinds=finding.get("witness_kinds") or [], verifier=verifier)
+        if not ok:
+            has_claim = bool(finding.get("confirmed_by") or finding.get("confidence"))
+            return ReverifyResult(
+                finding_ref=r, reproduced=False,
+                matches_claim=False if has_claim else None,
+                confirmed_by=result.confirmed_by, confidence=result.confidence,
+                note=f"re-confirmed a single oracle, but {note}",
+            )
+    return result
 
 
 def reverify_document(doc: dict, *, verifier: OracleVerifier | None = None) -> list[ReverifyResult]:
