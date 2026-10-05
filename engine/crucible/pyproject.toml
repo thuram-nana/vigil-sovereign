@@ -63,7 +63,7 @@ analysis    = ["semgrep>=1.100"]
 smt         = ["z3-solver>=4.12,<5"]
 numerics    = ["numpy>=2.4.6,<3"]
 saml        = ["signxml>=5.1.0,<6"]                # opt-in cryptographic SAML XML-DSig verification (pulls lxml + cryptography)
-dev         = ["pytest>=9.1.1,<11", "mypy>=2.3.1,<3"]
+dev         = ["pytest>=9.1.1,<11", "mypy>=2.4.0,<3"]
 
 # Console entry points. `python3 -m framework.v2 <subcommand>` keeps working exactly
 # as before; these are additive ergonomic shortcuts a defender can type directly.
