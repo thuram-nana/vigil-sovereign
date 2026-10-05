@@ -31,7 +31,7 @@ dependencies = [
 # (extras-absent) path is byte-identical + deterministic. Probe availability
 # via framework.v2.common.capabilities (has_z3/has_semantic/has_numpy).
 [project.optional-dependencies]
-anthropic   = ["anthropic>=0.40,<1"]
+anthropic   = ["anthropic>=0.40,<2"]
 embeddings  = ["sentence-transformers>=2,<6"]  # semantic embedder (opt-in; lexical is default)
 analysis    = ["semgrep>=1.100"]               # DAA real taint/dataflow analysis
 smt         = ["z3-solver>=4.12,<6"]           # bounded SMT / path-condition feasibility (analysis.smt)
