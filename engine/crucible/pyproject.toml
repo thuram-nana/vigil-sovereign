@@ -57,7 +57,7 @@ dependencies = [
 # hard deps: every import is try/except-guarded with a pure-Python/stdlib fallback,
 # and the default (extras-absent) path is byte-identical + deterministic.
 [project.optional-dependencies]
-anthropic   = ["anthropic>=0.40,<1"]
+anthropic   = ["anthropic>=1.11.0,<2"]
 embeddings  = ["sentence-transformers>=2,<6"]
 analysis    = ["semgrep>=1.100"]
 smt         = ["z3-solver>=4.12,<5"]
