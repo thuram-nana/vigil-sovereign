@@ -46,9 +46,13 @@ def _sqli_finding(sink=None) -> AuditFinding:
 
 
 def _exposure_finding() -> AuditFinding:
+    # Lane S: an exposure FACT is a PRESENT/ABSENT signature DIFFERENTIAL (PD4) — the .git/config signature
+    # is in the sensitive path's body but ABSENT from a benign random-path control — not a bare literal match.
     ctx = FindingContext.from_predicate(
-        {"repositoryformatversion": "0"},
-        {"eq": [{"var": "repositoryformatversion"}, "0"]}, bug_class="exposure")
+        {"body": "[core]\n\trepositoryformatversion = 0\n\tbare = false\n", "control_body": "404 Not Found"},
+        {"all": [{"icontains": [{"var": "body"}, "repositoryformatversion"]},
+                 {"not": {"icontains": [{"var": "control_body"}, "repositoryformatversion"]}}]},
+        bug_class="exposure")
     c = confirm_finding(finding={"bug_class": "exposure"}, context=ctx)
     return AuditFinding(
         check_id="m5-fw-git-config", bug_class="exposure", insertion_point="request:m5-fw-git-config",

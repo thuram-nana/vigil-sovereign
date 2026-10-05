@@ -282,9 +282,11 @@ def test_status_and_regex_literal_compiles_and_benign_same_status_mints_nothing(
     assert _confirm(e, check.probe(tpl, _resp(path="/x", status=200, body="totally benign homepage")), "High") is None
     # right literal, wrong status -> AND not satisfied -> nothing.
     assert _confirm(e, check.probe(tpl, _resp(path="/x", status=500, body="X-Secret-Token: abcdef")), "High") is None
-    # both hold -> the oracle re-fires -> fact.
-    hit = _confirm(e, check.probe(tpl, _resp(path="/x", status=200, body="X-Secret-Token: abcdef")), "High")
-    assert hit is not None and hit.confirmed_by == OracleKind.ACHIEVED_STATE
+    # Lane S: a third-party template's status+body-literal predicate carries NO positive discriminator
+    # (no VIGIL canary, no present/absent differential, no numeric achieved-state — "status==200" is a
+    # gate-B corroborator and a body literal is producer-authorable), so the structural grammar REFUSES it.
+    # nuclei_http stays a compile-time LEAD (the entry + provenance above), never a runtime FACT.
+    assert _confirm(e, check.probe(tpl, _resp(path="/x", status=200, body="X-Secret-Token: abcdef")), "High") is None
 
 
 def test_regex_matcher_compiles_to_literal_core_and_reverifies() -> None:
@@ -303,9 +305,9 @@ def test_regex_matcher_compiles_to_literal_core_and_reverifies() -> None:
     assert any("literal core" in w for w in res.warnings)
     check = compile_entry(e)
     tpl = _target_template()
-    hit = _confirm(e, check.probe(tpl, _resp(path="/status", status=200, body="x PHPSESSID=deadbeef01 y")), "Low")
-    assert hit is not None and hit.confirmed_by == OracleKind.ACHIEVED_STATE
-    # literal core absent -> no fact.
+    # Lane S: a bare body-literal predicate from a third-party template has no positive discriminator, so
+    # the grammar REFUSES it — nuclei_http is a compile-time LEAD (entry + provenance), never a FACT.
+    assert _confirm(e, check.probe(tpl, _resp(path="/status", status=200, body="x PHPSESSID=deadbeef01 y")), "Low") is None
     assert _confirm(e, check.probe(tpl, _resp(path="/status", status=200, body="nothing here")), "Low") is None
 
 
@@ -337,11 +339,11 @@ def test_dsl_matcher_compiles_and_is_reverified() -> None:
     }
     check = compile_entry(e)
     tpl = _target_template()
-    hit = _confirm(e, check.probe(tpl, _resp(path="/x", status=200, body="... DEBUG_MODE=on ...")))
-    assert hit is not None and hit.confirmed_by == OracleKind.ACHIEVED_STATE
-    # right body, wrong status -> AND not satisfied -> no fact.
+    # Lane S: the DSL compiles to all[eq[status,200], contains[body,literal]] — status==200 is a gate-B
+    # protocol-status corroborator (not a discriminator) and the body literal is producer-authorable, so
+    # the grammar REFUSES this third-party predicate. nuclei_http is a compile-time LEAD, never a FACT.
+    assert _confirm(e, check.probe(tpl, _resp(path="/x", status=200, body="... DEBUG_MODE=on ..."))) is None
     assert _confirm(e, check.probe(tpl, _resp(path="/x", status=500, body="DEBUG_MODE=on"))) is None
-    # right status, wrong body -> no fact.
     assert _confirm(e, check.probe(tpl, _resp(path="/x", status=200, body="clean"))) is None
 
 
@@ -371,8 +373,9 @@ def test_a_matching_template_alone_does_not_mint_a_fact_without_the_oracle() -> 
     # claims.
     assert _confirm(e, check.probe(tpl, _resp(path="/x", status=200, body="no marker"))) is None
     assert _confirm(e, check.probe(tpl, _resp(path="/x", status=404, body="SECRET_MARKER"))) is None
-    hit = _confirm(e, check.probe(tpl, _resp(path="/x", status=200, body="here: SECRET_MARKER")))
-    assert hit is not None and hit.confirmed_by == OracleKind.ACHIEVED_STATE
+    # Lane S: even a FULL match mints nothing — a third-party template's status+literal predicate has no
+    # positive discriminator, so the oracle REFUSES it. The entry remains a compile-time LEAD, never a FACT.
+    assert _confirm(e, check.probe(tpl, _resp(path="/x", status=200, body="here: SECRET_MARKER"))) is None
 
 
 def test_multi_request_template_compiles_first_self_contained_reverifiable_request() -> None:
@@ -416,9 +419,10 @@ def test_raw_get_request_compiles_carries_headers_and_reverifies() -> None:
     assert e.oracle.match_predicate == {"icontains": [{"var": "body"}, "propertySources"]}
     assert e.bug_class == "sensitive_exposure"   # CWE-200 hint still applies through the raw path
     check = compile_entry(e)
-    hit = _confirm(e, check.probe(_target_template(),
-                                  _resp(path="/actuator/env", status=200, body='{"propertySources": []}')), "High")
-    assert hit is not None and hit.confirmed_by == OracleKind.ACHIEVED_STATE
+    # Lane S: the raw-request template's bare body-literal predicate has no positive discriminator, so the
+    # grammar REFUSES it — the compiled entry is a LEAD (headers/path/provenance above), never a FACT.
+    assert _confirm(e, check.probe(_target_template(),
+                                   _resp(path="/actuator/env", status=200, body='{"propertySources": []}')), "High") is None
 
 
 def test_raw_non_get_request_degrades() -> None:

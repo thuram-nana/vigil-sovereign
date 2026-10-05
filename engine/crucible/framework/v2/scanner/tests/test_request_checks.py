@@ -293,7 +293,10 @@ def test_body_navigation_is_ignored_on_a_followed_redirect() -> None:
                 {"all": [{"not": {"eq": [{"var": "followed_redirect"}, True]}},
                          {"min_len": [{"var": "canary_host"}, 1]},
                          {"in": [{"var": "canary_host"}, {"var": "markup_redirect_hosts"}]}]},
-            ]}).fired
+            ]},
+            # Lane S: canary_host is a VIGIL-injected canary (as OpenRedirectCheck declares) → both
+            # disjuncts carry a PD2.
+            provenance_refs={"canary_host": "canary"}).fired
 
     assert fires(302, "app.example", [canary]) is False   # redirected somewhere SAFE; body never rendered
     assert fires(200, "", [canary]) is True               # rendered page: the body redirect is real

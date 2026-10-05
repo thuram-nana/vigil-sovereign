@@ -897,8 +897,13 @@ class _GraphQLApp(BaseHTTPRequestHandler):
         if "__schema" in query:
             body = json.dumps({"data": {"__schema": {"queryType": {"name": "Query"},
                                                      "types": [{"name": "User"}]}}}).encode()
-        else:
+        elif "__crucible_no_such_field" in query:
+            # a REAL suggestions-on server offers a hint only for an actually-unknown field (VIGIL's typo
+            # probe), not for a valid query — the faithfulness the Lane-S present/absent control differential
+            # relies on (a benign ``__typename`` control draws no "Did you mean").
             body = json.dumps({"errors": [{"message": 'Cannot query field "x". Did you mean "xy"?'}]}).encode()
+        else:
+            body = json.dumps({"data": {"__typename": "Query"}}).encode()
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
@@ -1266,7 +1271,9 @@ def test_block4_cswsh_producer_refusal_is_load_bearing() -> None:
             {"icontains": [{"var": "evil_status_line"}, "http/1.1 101"]},
             {"contains": [{"var": "evil_response"}, {"var": "evil_status_line"}]},
             {"contains": [{"var": "evil_response"}, {"var": "evil_accept_key"}]},
-        ]})
+        ]},
+        # Lane S: the accept keys are VIGIL-nonce-derived canaries (PD2), as the live CswshCheck declares.
+        provenance_refs={"trusted_accept_key": "canary", "evil_accept_key": "canary"})
     assert would_fire.fired is True, (
         "this control has gone vacuous: the predicate no longer accepts the decoy, so the "
         "producer refusal it exists to pin is redundant again")

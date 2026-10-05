@@ -1467,7 +1467,9 @@ class OracleVerifier:
             # Predicate mode (Wave 7): the oracle evaluates the dangerous
             # condition over raw observed values — no rubber-stamp.
             if "predicate" in ctx and "observed_evidence" in ctx:
-                return oracles.predicate_oracle(ctx["observed_evidence"], ctx["predicate"])
+                return oracles.predicate_oracle(
+                    ctx["observed_evidence"], ctx["predicate"],
+                    provenance_refs=ctx.get("provenance_refs"))
             if "expected_state" in ctx and "observed_state" in ctx:
                 return oracles.achieved_state_oracle(
                     ctx["expected_state"], ctx["observed_state"]

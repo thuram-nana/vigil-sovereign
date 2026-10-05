@@ -1291,6 +1291,229 @@ _REFLEXIVE_TRUE_OPS: "frozenset[str]" = frozenset({"eq", "ieq", "ge", "contains"
 _REFLEXIVE_FALSE_OPS: "frozenset[str]" = frozenset({"gt"})
 
 
+# ---------------------------------------------------------------------------
+# Lane S (S1, re-slice) — STRUCTURAL FACT-ELIGIBILITY GRAMMAR.
+#
+# The perturbation sampler (``_predicate_is_value_independent``) is RETIRED as the soundness AUTHORITY:
+# it only ever refused value-INDEPENDENT tautologies, and the red-pen proved two value-DEPENDENT-yet-
+# unsound shapes slipped past it (a bare boilerplate single-leaf positive match, and a ``ge`` floor at a
+# domain minimum). The authority is now a decidable structural walk over the frozen JSON-AST: a predicate
+# is FACT-eligible only when every firing path carries a POSITIVE DISCRIMINATOR (PD) — a fire-driver that
+# is sound by SHAPE, not merely value-dependent.
+#
+# Operand kinds (resolved against ``observed`` + the ``provenance_refs`` slot):
+#   PR  (provenance-ref)   {"var": k}, k declared in ``provenance_refs`` — a VIGIL-injected canary /
+#                          reduction the producer cannot author. STRICTLY VIGIL-injected: an operator
+#                          discriminator or a well-known secret literal is NEVER a PR (marking it one would
+#                          write a FALSE provenance claim into the signed cert and forge eligibility).
+#   CV  (captured-var)     {"var": k}, k present + non-None in ``observed`` AND NOT in ``provenance_refs``.
+#   LIT (producer-literal) any inline value a producer / third-party template could author.
+#
+# Positive discriminators:
+#   PD2  var-vs-provenance-ref: a positive-match op {eq,ieq,contains,icontains,in} with one PR operand and
+#        one CV operand, ORDER-INSENSITIVE. A single leaf suffices (the producer cannot forge the canary).
+#   PD3  provenance-ref vs numeric floor: ``gt[PR, int>=0]`` — the op MUST be ``gt`` (strict), the floor at
+#        or above the reduction's domain minimum so the leaf FLIPS inside the domain. ``ge``/``min_len`` at
+#        the floor is vacuous (always true over the domain) and is refused.
+#   PD-NUM numeric achieved-comparison: ``gt``/``ge`` between two DISTINCT captured vars (e.g.
+#        ``successes > max_allowed``) — a genuine measured relation, value-dependent and non-reflexive.
+#   PD4  present/absent DIFFERENTIAL (recognised at an enclosing ``all``): a positive match
+#        ``pos(CV_a, needle)`` AND a negated match ``not(pos(CV_b, needle))`` over DISTINCT captured bodies
+#        (``CV_a != CV_b``) sharing ONE needle, with a distinctiveness floor on the needle (a LIT needle
+#        must be a string of length >= ``_DISTINCTIVENESS_MIN_LEN``; a var needle — CV or PR — is inherently
+#        distinctive). This is the ONLY way a bare positive match against a CAPTURED / operator value is
+#        FACT-eligible: it REFUSES the differential-free boilerplate shape (idor
+#        ``contains[attacker_body, discriminator]`` alone, bare ``PathProbe icontains[body, SIG]``) while
+#        KEEPING real idor/bola/bfla, mass_assignment (after vs before), exposure (body vs control_body),
+#        and the status-set differentials (jwt none-accepted, saml forged-accepted).
+#
+# Gates/corroborators (status floors, substantiveness ``min_len``, not-controls, CV-vs-LIT matches) are
+# allowed as CONJUNCTS that only RESTRICT firing; they NEVER satisfy the PD requirement on their own.
+# ---------------------------------------------------------------------------
+
+_DISTINCTIVENESS_MIN_LEN: int = 6
+_POSITIVE_MATCH_OPS: "frozenset[str]" = frozenset({"eq", "ieq", "contains", "icontains", "in"})
+# Protocol-status constants (HTTP status codes). A comparison of a captured value against one of these is a
+# protocol-status CORROBORATOR (gate B), NEVER a self-sufficient discriminator: "status == 200" adjudicates
+# nothing dangerous (every live endpoint is 200), so it must not make a predicate FACT-eligible on its own
+# (this is what keeps a third-party nuclei template's status+literal shape a LEAD, not a FACT).
+_PROTOCOL_STATUS_CONSTANTS: "frozenset[int]" = frozenset(
+    {100, 200, 300, 301, 302, 303, 307, 308, 400, 401, 403})
+
+
+def _is_var_operand(operand: Any) -> bool:
+    return isinstance(operand, Mapping) and set(operand.keys()) == {"var"}
+
+
+def _operand_is_provenance_ref(operand: Any, provenance_refs: Mapping[str, Any]) -> bool:
+    """True iff ``operand`` is a ``{"var": k}`` whose key is declared in ``provenance_refs`` — a
+    VIGIL-injected canary / reduction the producer cannot author (mirrors :func:`_operand_binds_captured`
+    but checks provenance-slot membership)."""
+    return _is_var_operand(operand) and operand["var"] in (provenance_refs or {})
+
+
+def _operand_is_captured_var(operand: Any, observed: Mapping[str, Any],
+                             provenance_refs: Mapping[str, Any]) -> bool:
+    """True iff ``operand`` is a ``{"var": k}`` bound to a real captured value in ``observed`` and NOT
+    declared a provenance-ref — a value captured from the target."""
+    return (_is_var_operand(operand) and operand["var"] not in (provenance_refs or {})
+            and observed.get(operand["var"]) is not None)
+
+
+def _needle_sig(operand: Any) -> "tuple[str, Any]":
+    """A hashable identity for a PD4 needle: ``("var", key)`` for a var operand, else ``("lit", value)``."""
+    if _is_var_operand(operand):
+        return ("var", operand["var"])
+    try:
+        hash(operand)
+        return ("lit", operand)
+    except TypeError:
+        return ("lit", repr(operand))
+
+
+def _needle_is_distinctive(sig: "tuple[str, Any]") -> bool:
+    """A PD4 needle is distinctive iff it is a var (CV/PR — the differential itself proves it partitions two
+    distinct captured bodies) OR a string LITERAL of length >= the distinctiveness floor (so a 1-char, empty,
+    or boolean/int literal needle cannot drive a differential)."""
+    kind, val = sig
+    if kind == "var":
+        return True
+    return isinstance(val, str) and len(val) >= _DISTINCTIVENESS_MIN_LEN
+
+
+def _is_scalar_value_literal(operand: Any) -> bool:
+    """An inline NUMERIC or BOOLEAN literal that is the operand kind of an achieved-STATE value comparison
+    (a persisted quantity / count / flag): ``eq[qty,-5]``, ``gt[redeemed_count,1]``, ``eq[checked_out,True]``.
+    EXCLUDES a string literal (a producer-authorable text-substring match is the red-pen's false-positive-
+    prone class) AND a protocol-status constant (``eq[status,200]`` is a gate-B corroborator, never a
+    self-sufficient discriminator)."""
+    if isinstance(operand, bool):
+        return True
+    if isinstance(operand, (int, float)) and not isinstance(operand, bool):
+        return operand not in _PROTOCOL_STATUS_CONSTANTS
+    return False
+
+
+def _leaf_is_self_sufficient_pd(op: str, args: Any, observed: Mapping[str, Any],
+                                provenance_refs: Mapping[str, Any]) -> bool:
+    """A terminal leaf that is a SELF-SUFFICIENT positive discriminator on its own:
+      * PD2    var-vs-PR (order-insensitive) — a canary the producer cannot author.
+      * PD3    ``gt[PR, int>=0]`` — a reduction strictly inside its domain.
+      * PD-NUM ``gt``/``ge`` over two DISTINCT captured vars (e.g. successes > max_allowed).
+      * PD-VALUE ``eq``/``gt``/``ge`` of a captured var against a NUMERIC or BOOLEAN literal — an
+                 achieved-STATE value comparison (a persisted quantity/count/flag: ``eq[qty,-5]``,
+                 ``gt[redeemed_count,1]``, ``eq[checked_out,True]``). A string-literal match is NOT a PD
+                 (the producer-authorable text-echo class the red-pen refuses); ``min_len`` is a length
+                 floor, never a value comparison.
+    """
+    if not isinstance(args, (list, tuple)) or len(args) != 2:
+        return False
+    a, b = args[0], args[1]
+    # PD2 — one operand a provenance-ref canary, the other a captured var; any positive-match op, either order.
+    if op in _POSITIVE_MATCH_OPS:
+        if (_operand_is_provenance_ref(a, provenance_refs)
+                and _operand_is_captured_var(b, observed, provenance_refs)):
+            return True
+        if (_operand_is_provenance_ref(b, provenance_refs)
+                and _operand_is_captured_var(a, observed, provenance_refs)):
+            return True
+        # PD-VALUE (eq/ieq only here among the match ops): a captured var equated to a scalar value literal.
+        if op in ("eq", "ieq"):
+            if _operand_is_captured_var(a, observed, provenance_refs) and _is_scalar_value_literal(b):
+                return True
+            if _operand_is_captured_var(b, observed, provenance_refs) and _is_scalar_value_literal(a):
+                return True
+        return False
+    # PD3 — a provenance-ref reduction strictly above its domain floor (gt only; ge/min_len would be vacuous).
+    if op == "gt" and _operand_is_provenance_ref(a, provenance_refs) and isinstance(b, int) \
+            and not isinstance(b, bool) and b >= 0:
+        return True
+    # PD-NUM — a numeric comparison of two DISTINCT captured quantities (e.g. successes > max_allowed).
+    if op in ("gt", "ge") and _operand_is_captured_var(a, observed, provenance_refs) \
+            and _operand_is_captured_var(b, observed, provenance_refs) and a != b:
+        return True
+    # PD-VALUE — a STRICT inequality of a captured quantity against a scalar value literal (a persisted
+    # count/quantity threshold, e.g. gt[qty,0], gt[redeemed_count,1]). STRICT gt only: ``ge`` against a
+    # literal at a domain floor is vacuous (the red-pen's ge-at-domain-min), so it is NOT a PD-VALUE.
+    if op == "gt":
+        if _operand_is_captured_var(a, observed, provenance_refs) and _is_scalar_value_literal(b):
+            return True
+        if _operand_is_captured_var(b, observed, provenance_refs) and _is_scalar_value_literal(a):
+            return True
+    return False
+
+
+def _collect_match_relations(pred: Any, observed: Mapping[str, Any], provenance_refs: Mapping[str, Any],
+                             negated: bool, pos: "set", neg: "set") -> None:
+    """Collect ``(cv_key, needle_sig)`` tuples from positive-match leaves (``contains``/``icontains``/``in``/
+    ``eq``/``ieq``) across the subtree, routing each into ``pos`` or ``neg`` by whether an ODD number of
+    ``not`` wrappers enclose it. A leaf contributes only when its body operand (``args[0]`` — the element for
+    ``in``) is a CAPTURED var, because a differential compares two DISTINCT captured bodies against one
+    needle."""
+    if not isinstance(pred, Mapping) or len(pred) != 1:
+        return
+    op, args = next(iter(pred.items()))
+    if op in ("all", "any"):
+        if isinstance(args, (list, tuple)):
+            for c in args:
+                _collect_match_relations(c, observed, provenance_refs, negated, pos, neg)
+        return
+    if op == "not":
+        _collect_match_relations(args, observed, provenance_refs, not negated, pos, neg)
+        return
+    if op in _POSITIVE_MATCH_OPS and isinstance(args, (list, tuple)) and len(args) == 2:
+        body, needle = args[0], args[1]
+        if _operand_is_captured_var(body, observed, provenance_refs):
+            (neg if negated else pos).add((body["var"], _needle_sig(needle)))
+
+
+def _pd4_present(pred: Any, observed: Mapping[str, Any], provenance_refs: Mapping[str, Any]) -> bool:
+    """A present/absent DIFFERENTIAL exists in ``pred``'s subtree: a positive match ``pos(CV_a, needle)`` and
+    a negated match ``not(pos(CV_b, needle))`` over DISTINCT captured bodies (``CV_a != CV_b``) sharing one
+    DISTINCTIVE needle."""
+    pos: "set[tuple[str, tuple[str, Any]]]" = set()
+    neg: "set[tuple[str, tuple[str, Any]]]" = set()
+    _collect_match_relations(pred, observed, provenance_refs, False, pos, neg)
+    for a_key, a_needle in pos:
+        if not _needle_is_distinctive(a_needle):
+            continue
+        for b_key, b_needle in neg:
+            if b_needle == a_needle and b_key != a_key:
+                return True
+    return False
+
+
+def _fact_eligible(pred: Any, observed: Mapping[str, Any], provenance_refs: Mapping[str, Any]) -> bool:
+    """Decidable FACT-eligibility over the frozen predicate AST. The recursion mirrors
+    ``scanner/library.py:predicate_has_body_signature`` (``all`` => ANY child; ``any`` => EVERY disjunct; a
+    leaf carries its own discriminator), EXTENDED with the PD4 differential recognised at an ``all``:
+
+      * leaf      -> True iff it is a self-sufficient PD (PD2 / PD3 / PD-NUM).
+      * all([..]) -> True iff ANY child is fact-eligible OR a PD4 differential is present among the children
+                     (one conjunct's sound relationship makes the whole conjunction sound — firing REQUIRES
+                     every conjunct, so extra literal conjuncts only narrow).
+      * any([..]) -> True iff EVERY disjunct is fact-eligible (a disjunct can fire alone, so each needs a PD).
+      * not(X)    -> False (negation is never a positive fire-driver; sound only as a G1/G2 conjunct inside
+                     an eligible ``all``).
+    """
+    if not isinstance(pred, Mapping) or len(pred) != 1:
+        return False
+    op, args = next(iter(pred.items()))
+    if op == "all":
+        if not isinstance(args, (list, tuple)) or not args:
+            return False
+        if any(_fact_eligible(c, observed, provenance_refs) for c in args):
+            return True
+        return _pd4_present(pred, observed, provenance_refs)
+    if op == "any":
+        if not isinstance(args, (list, tuple)) or not args:
+            return False
+        return all(_fact_eligible(c, observed, provenance_refs) for c in args)
+    if op == "not":
+        return False
+    return _leaf_is_self_sufficient_pd(op, args, observed, provenance_refs)
+
+
 def _predicate_binds_and_const(pred: Any, observed: Mapping[str, Any]) -> "tuple[bool, bool, bool]":
     """Walk the predicate AST (the SAME grammar :func:`_eval_predicate` enforces) and return
     ``(binds_captured, constant_true, constant_false)``:
@@ -1413,7 +1636,8 @@ def _predicate_is_value_independent(predicate: Any, observed: Mapping[str, Any])
     return any_non_erroring
 
 
-def predicate_oracle(observed_evidence: Mapping[str, Any], predicate: Any) -> OracleSignal:
+def predicate_oracle(observed_evidence: Mapping[str, Any], predicate: Any,
+                     provenance_refs: Mapping[str, Any] | None = None) -> OracleSignal:
     """Evaluate a dangerous CONDITION over RAW observed values — the fix for the
     achieved-state rubber-stamp.
 
@@ -1470,12 +1694,30 @@ def predicate_oracle(observed_evidence: Mapping[str, Any], predicate: Any) -> Or
     seam+signature are the provenance authority — do not read a fired predicate as a defence against a
     fully-untrusted producer; that defence is the seam capture and the signature."""
     observed = dict(observed_evidence or {})
+    prefs = dict(provenance_refs or {})
     try:
         binds_captured, constant_true, _constant_false = _predicate_binds_and_const(predicate, observed)
     except (ValueError, TypeError) as e:
         return OracleSignal(
             kind=OracleKind.ACHIEVED_STATE, fired=False, confidence=0.0,
             evidence=f"malformed predicate: {e}", observed={"predicate": predicate})
+    # S1 (re-slice) STRUCTURAL FACT-ELIGIBILITY GATE — the soundness AUTHORITY. A predicate mints only when
+    # every firing path carries a POSITIVE DISCRIMINATOR (PD2 canary / PD3 strict reduction floor / PD-NUM
+    # numeric achieved-comparison / PD4 present-absent differential). A predicate whose only discriminating
+    # content is a negation, a floor, or a bare positive match against a captured/operator/producer value
+    # (no canary, no differential) adjudicates nothing SOUND and is REFUSED here (non-firing, non-conclusive)
+    # — the same shape as the binds/tautology refusal below — so it can never be a FACT nor a channel-
+    # confirmed CLEAN. This retires the perturbation sampler as the authority (it only caught value-
+    # INDEPENDENT tautologies; the red-pen's boilerplate single-leaf match and ge-at-domain-min were value-
+    # DEPENDENT yet unsound and slipped past it).
+    if not _fact_eligible(predicate, observed, prefs):
+        return OracleSignal(
+            kind=OracleKind.ACHIEVED_STATE, fired=False, confidence=0.0, conclusive=False,
+            evidence=("REFUSED (unsound predicate): no positive discriminator — its firing rests only on a "
+                      "negation, a numeric floor, or a bare positive match against a captured/producer value "
+                      "with neither a VIGIL-injected provenance-ref nor a present/absent differential over "
+                      "distinct captured bodies, so it does not SOUNDLY adjudicate the target"),
+            observed={"predicate": predicate, "values": observed})
     if constant_true or not binds_captured:
         reason = ("predicate is a constant-true tautology — its firing cannot depend on any captured value"
                   if constant_true else
@@ -1492,18 +1734,10 @@ def predicate_oracle(observed_evidence: Mapping[str, Any], predicate: Any) -> Or
         return OracleSignal(
             kind=OracleKind.ACHIEVED_STATE, fired=False, confidence=0.0,
             evidence=f"malformed predicate: {e}", observed={"predicate": predicate})
-    # S1 COUNTERFACTUAL backstop: a predicate that FIRED but fires under every type-consistent perturbation
-    # of its captured vars is value-INDEPENDENT (a tautology over the captured values) — it adjudicates
-    # nothing about the target, so it is REFUSED exactly like the syntactic pre-filter (non-firing,
-    # non-conclusive). Only run when it fired: a non-firing predicate mints nothing and a non-fire over
-    # captured evidence is a legitimate channel-confirmed clean we must not disturb.
-    if fired and _predicate_is_value_independent(predicate, observed):
-        return OracleSignal(
-            kind=OracleKind.ACHIEVED_STATE, fired=False, confidence=0.0, conclusive=False,
-            evidence=("REFUSED (unsound predicate): value-independent predicate / tautology over captured "
-                      "values — it fires under every type-consistent perturbation of the captured vars, so "
-                      "its firing cannot depend on any captured value (adjudicates nothing about the target)"),
-            observed={"predicate": predicate, "values": observed})
+    # S1 (re-slice): the perturbation-sampler counterfactual backstop is RETIRED as the authority — the
+    # structural FACT-eligibility gate above is the soundness authority now (it refuses by SHAPE, catching
+    # BOTH the value-independent tautologies the sampler caught AND the value-dependent-yet-unsound shapes
+    # the red-pen proved slipped past it). The sampler helpers are retained but no longer gate the mint.
     return OracleSignal(
         kind=OracleKind.ACHIEVED_STATE,
         fired=fired,

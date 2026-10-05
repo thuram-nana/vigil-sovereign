@@ -582,7 +582,10 @@ class OidcRedirectUriCheck:
                     {"in": [{"var": "canary_host"}, {"var": "markup_redirect_hosts"}]},
                 ]},
             ]},
-            bug_class=self.bug_class)
+            bug_class=self.bug_class,
+            # Lane S: canary_host is the host of VIGIL's injected attacker redirect_uri (producer-unauthorable)
+            # — the same canary-PR pattern as OpenRedirectCheck, so both disjuncts carry a PD2.
+            provenance_refs={"canary_host": "canary"})
 
 
 @dataclass(frozen=True)

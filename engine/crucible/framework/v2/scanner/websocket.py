@@ -508,6 +508,11 @@ class CswshCheck:
                 {"contains": [{"var": "evil_response"}, {"var": "evil_accept_key"}]},
             ]},
             bug_class=self.bug_class,
+            # Lane S: the Sec-WebSocket-Accept value is derived from VIGIL's OWN per-handshake nonce (RFC 6455
+            # SHA-1 of nonce+GUID), so the producer cannot author it without completing VIGIL's handshake —
+            # it is a provenance-ref canary. ``contains[*_response, *_accept_key]`` is therefore a PD2 that
+            # binds each response to VIGIL's nonce; the status-line / origin-echo clauses are corroborators.
+            provenance_refs={"trusted_accept_key": "canary", "evil_accept_key": "canary"},
         )
         # A12: an authenticated HIJACK requires the victim's SESSION (cookies). Without cookies the probe
         # proves only that the endpoint accepts a foreign-Origin handshake (Origin not validated) — a LEAD,
