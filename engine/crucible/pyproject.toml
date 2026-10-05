@@ -50,7 +50,7 @@ dependencies = [
   "beautifulsoup4>=4.12,<5",
   "Jinja2>=3.1,<4",
   "cryptography>=50.0.1,<51",
-  "packaging>=23",
+  "packaging>=26.3",
 ]
 
 # OPTIONAL, feature-flagged extras (mirror of framework/v2/pyproject.toml). None are
