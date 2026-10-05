@@ -109,9 +109,12 @@ def test_confirm_finding_returns_none_when_no_oracle_fires() -> None:
 
 
 def test_confirm_finding_promotes_on_real_state_signal() -> None:
-    ctx = FindingContext.from_state(
-        {"owner": "victim", "readable": True},
+    # A genuine captured record (attacker reached victim's readable order) adjudicated by a value-dependent
+    # predicate over the captured evidence — the SOUND achieved-state FACT path (predicate_oracle). The
+    # old expected/observed echo form is retired (Lane S / S1).
+    ctx = FindingContext.from_predicate(
         {"owner": "victim", "readable": True, "id": 42},
+        {"all": [{"eq": [{"var": "owner"}, "victim"]}, {"eq": [{"var": "readable"}, True]}]},
         bug_class="idor",
     )
     confirmed = confirm_finding(
@@ -128,9 +131,9 @@ def test_confirm_finding_fills_bug_class_from_finding() -> None:
     # Context carries no bug_class; the finding supplies it. (The carrier class is `idor` because a
     # bare differential can no longer confirm a boolean class at all — see
     # verifier.DIFFERENTIAL_LEAD_ONLY_CLASSES; what is under test here is the bug_class fill-in.)
-    ctx = FindingContext.from_state(
-        {"owner": "victim", "readable": True},
+    ctx = FindingContext.from_predicate(
         {"owner": "victim", "readable": True, "id": 42},
+        {"all": [{"eq": [{"var": "owner"}, "victim"]}, {"eq": [{"var": "readable"}, True]}]},
     )
     ctx.bug_class = ""
     confirmed = confirm_finding({"bug_class": "idor"}, ctx)

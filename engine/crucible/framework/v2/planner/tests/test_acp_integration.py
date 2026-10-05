@@ -131,9 +131,10 @@ def test_simulated_run_terminates_cleanly_on_no_more_leaves(
         impact="cross-tenant data exposure",
         # Real oracle proof (achieved-state): the attacker reached victim B's order.
         # A "confirmed" finding is oracle-backed, never LLM-only.
-        oracle_context=FindingContext.from_state(
-            {"owner": "victimB", "readable_by_attackerA": True},
-            {"owner": "victimB", "readable_by_attackerA": True},
+        oracle_context=FindingContext.from_predicate(
+            {"owner": "victimB", "readable_by_attackerA": True, "order_id": 123},
+            {"all": [{"eq": [{"var": "owner"}, "victimB"]},
+                     {"eq": [{"var": "readable_by_attackerA"}, True]}]},
             bug_class="idor").model_dump(mode="json"),
     )
     outcomes = {

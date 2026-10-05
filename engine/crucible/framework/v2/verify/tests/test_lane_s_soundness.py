@@ -38,6 +38,31 @@ _CORS_PRED = {"all": [
 ]}
 _CORS_OBS = {"acao": "https://evil", "acac": "true", "evil_origin": "https://evil"}
 
+# A real ~50-byte captured body for the value-independence controls.
+_REAL_BODY = "HTTP/1.1 200 OK\r\nContent-Length: 18\r\n\r\n{\"secret\":\"abcde\"}"
+
+# The red-pen BYPASS-A counterexamples: each BINDS a captured var yet fires for ALL values of it (its firing
+# cannot depend on the captured value), so each must be REFUSED — the exact set the counterfactual + the
+# reflexive-``in`` pre-filter close.
+_VALUE_INDEPENDENT = {
+    "min_len>=0":    ({"body": _REAL_BODY},  {"min_len": [{"var": "body"}, 0]}),
+    "min_len>=-1":   ({"body": _REAL_BODY},  {"min_len": [{"var": "body"}, -1]}),
+    "in[body,body]": ({"body": _REAL_BODY},  {"in": [{"var": "body"}, {"var": "body"}]}),
+    "eq[k,k]":       ({"k": "anything"},     {"eq": [{"var": "k"}, {"var": "k"}]}),
+    "ge[k,'']":      ({"k": "anything"},     {"ge": [{"var": "k"}, ""]}),
+}
+
+# Genuinely value-DEPENDENT predicates that must STILL fire (each is flipped off by at least one
+# perturbation family, so the counterfactual leaves it untouched).
+_VALUE_DEPENDENT = {
+    "min_len>=10":     ({"body": _REAL_BODY},                        {"min_len": [{"var": "body"}, 10]}),
+    "eq[loc,canary]":  ({"loc_host": "canary.example"},              {"eq": [{"var": "loc_host"}, "canary.example"]}),
+    "eq[a,b]/equal":   ({"a": "https://evil", "b": "https://evil"},  {"eq": [{"var": "a"}, {"var": "b"}]}),
+    "all+liveness":    ({"sha": "deadbeef", "loc_host": "canary.example"},
+                        {"all": [{"eq": [{"var": "sha"}, {"var": "sha"}]},
+                                 {"eq": [{"var": "loc_host"}, "canary.example"]}]}),
+}
+
 
 def _trust():
     kp = generate_keypair()
@@ -92,22 +117,35 @@ def test_s1_predicate_with_no_resolving_var_refused():
     assert not sig_none.fired and not sig_none.conclusive
 
 
-def test_s1_echo_achieved_state_refused():
-    # observed == expected (pure echo) introduces no genuinely captured key beyond the prediction.
-    sig = achieved_state_oracle({"owner": "victim", "readable": True}, {"owner": "victim", "readable": True})
-    assert not sig.fired and not sig.conclusive
-    # observed keys ⊆ expected keys (a sub-record) also cannot be a genuine capture of the predicted state.
-    sig2 = achieved_state_oracle({"a": 1, "b": 2}, {"a": 1})
-    assert not sig2.fired
+def test_s1_achieved_state_expected_observed_form_is_retired():
+    # BYPASS B + its whole family: the producer-supplied expected/observed form is now NON-MINTING for
+    # EVERY pair — a value-only match cannot be distinguished from a fabrication. The echo, the
+    # echo-plus-junk that slipped past the old subset refusal, AND a "genuine extra keys" record all refuse.
+    echo = achieved_state_oracle({"owner": "victim", "readable": True}, {"owner": "victim", "readable": True})
+    junk = achieved_state_oracle({"role": "admin"}, {"role": "admin", "_pad": "x"})          # the red-pen bypass
+    extra = achieved_state_oracle({"owner": "victim"}, {"owner": "victim", "id": 42, "balance": 1000})
+    for sig in (echo, junk, extra):
+        assert not sig.fired and not sig.conclusive and sig.confidence == 0.0
+        assert "REFUSED" in sig.evidence and "predicate_oracle" in sig.evidence
+
+
+def test_s1_value_independent_predicates_refused():
+    # BYPASS A: each binds a captured var but fires for ALL values of it — refused (non-firing,
+    # non-conclusive), whether by the reflexive-identical pre-filter or the counterfactual backstop.
+    for label, (obs, pred) in _VALUE_INDEPENDENT.items():
+        sig = predicate_oracle(obs, pred)
+        assert not sig.fired and not sig.conclusive and sig.confidence == 0.0, label
+        assert "REFUSED" in sig.evidence, label
 
 
 def test_s1_positive_real_predicate_still_fires_byte_identical():
     sig = predicate_oracle(_CORS_OBS, _CORS_PRED)
     assert sig.fired and sig.conclusive and sig.confidence >= 0.9
-    # a genuine captured record (extra keys beyond the expectation) still fires the achieved-state arm.
-    pos = achieved_state_oracle({"owner": "victim", "readable": True},
-                                {"owner": "victim", "readable": True, "id": 42, "balance": 1000})
-    assert pos.fired and pos.confidence >= 0.9
+    # every genuinely value-dependent predicate still fires at full confidence (the counterfactual leaves
+    # it untouched because at least one perturbation family flips it off).
+    for label, (obs, pred) in _VALUE_DEPENDENT.items():
+        pos = predicate_oracle(obs, pred)
+        assert pos.fired and pos.conclusive and pos.confidence >= 0.9, label
 
 
 def test_s1_degenerate_does_not_reproduce_through_framework_verify():
@@ -118,6 +156,25 @@ def test_s1_degenerate_does_not_reproduce_through_framework_verify():
     assert not rr.ok and not rr.reproduced
     # positive: the real captured-evidence CORS finding reproduces.
     assert reverify_finding(_cors_finding()).ok
+
+
+def test_s1_bypasses_do_not_reproduce_through_framework_verify():
+    # BYPASS A — each value-independent predicate (which signed a FACT before the fix) now fails the offline
+    # re-exec; and a genuinely value-dependent predicate over the same evidence still reproduces.
+    for label, (obs, pred) in _VALUE_INDEPENDENT.items():
+        f = {"check_id": f"a-{label}", "bug_class": "idor", "confirmed_by": "achieved_state",
+             "confidence": 0.9, "oracle_context": {"predicate": pred, "observed_evidence": obs}}
+        rr = reverify_finding(f)
+        assert not rr.ok and not rr.reproduced, label
+    for label, (obs, pred) in _VALUE_DEPENDENT.items():
+        f = {"check_id": f"p-{label}", "bug_class": "idor", "confirmed_by": "achieved_state",
+             "confidence": 0.9, "oracle_context": {"predicate": pred, "observed_evidence": obs}}
+        assert reverify_finding(f).ok, label
+    # BYPASS B — the retired expected/observed echo-plus-junk form does not reproduce offline.
+    b = {"check_id": "b-echo-junk", "bug_class": "bola", "confirmed_by": "achieved_state", "confidence": 0.9,
+         "oracle_context": {"expected_state": {"role": "admin"}, "observed_state": {"role": "admin", "_pad": "x"}}}
+    rr = reverify_finding(b)
+    assert not rr.ok and not rr.reproduced
 
 
 # ===========================================================================

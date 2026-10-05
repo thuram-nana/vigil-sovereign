@@ -110,9 +110,10 @@ def _executor_with_one_real_bug_and_one_hedged() -> DeterministicExecutor:
         # achieved-state oracle fires: the attacker reached an illicit state (read
         # victim B's order) — so this promotes to "confirmed" by the deterministic
         # oracle, not by the LLM's say-so.
-        oracle_context=FindingContext.from_state(
-            {"owner": "victimB", "readable_by_attackerA": True},
-            {"owner": "victimB", "readable_by_attackerA": True},
+        oracle_context=FindingContext.from_predicate(
+            {"owner": "victimB", "readable_by_attackerA": True, "order_id": 123},
+            {"all": [{"eq": [{"var": "owner"}, "victimB"]},
+                     {"eq": [{"var": "readable_by_attackerA"}, True]}]},
             bug_class="idor").model_dump(mode="json"),
     )
     hedged_finding = FindingPayload(

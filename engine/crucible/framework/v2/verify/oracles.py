@@ -1279,9 +1279,15 @@ def _operand_binds_captured(operand: Any, observed: Mapping[str, Any]) -> bool:
 
 
 # Terminal comparison ops that are a TAUTOLOGY when their two operands are structurally identical
-# (``a == a`` / ``a >= a`` / ``a contains a`` — always TRUE) vs a CONTRADICTION (``a > a`` — always FALSE).
-# ``min_len`` / ``in`` over identical operands are value-dependent, so they are flagged as neither.
-_REFLEXIVE_TRUE_OPS: "frozenset[str]" = frozenset({"eq", "ieq", "ge", "contains", "icontains"})
+# (``a == a`` / ``a >= a`` / ``a contains a`` / ``a in a`` — always TRUE for the substring/membership
+# intent) vs a CONTRADICTION (``a > a`` — always FALSE). ``in`` is reflexive-TRUE: ``x in x`` is the
+# degenerate self-membership a producer uses to fabricate a fire. Its one non-true edge — an empty
+# operand, where ``_eval_predicate``'s ``b or []`` coercion yields ``"" in [] == False`` — is a VALUE
+# ARTIFACT the counterfactual backstop below would MISS (the all-empty perturbation family flips
+# ``x in x`` off, so the predicate would read as value-dependent), so this syntactic identical-operand
+# catch is LOAD-BEARING for ``in``, not redundant with the counterfactual. ``min_len`` over identical
+# operands stays value-dependent (``len(str(a)) >= int(a)``), so it is flagged as neither.
+_REFLEXIVE_TRUE_OPS: "frozenset[str]" = frozenset({"eq", "ieq", "ge", "contains", "icontains", "in"})
 _REFLEXIVE_FALSE_OPS: "frozenset[str]" = frozenset({"gt"})
 
 
@@ -1336,6 +1342,77 @@ def _predicate_binds_and_const(pred: Any, observed: Mapping[str, Any]) -> "tuple
     return binds, const_true, const_false
 
 
+def _collect_captured_var_keys(pred: Any, observed: Mapping[str, Any]) -> "set[str]":
+    """Every ``{"var": key}`` the predicate references whose ``key`` is a captured value present in
+    ``observed`` (None-handling is the binds gate's job). Walks the SAME grammar :func:`_eval_predicate`
+    enforces; a malformed node contributes no keys (the caller has already eval'd the predicate once)."""
+    keys: "set[str]" = set()
+    if not isinstance(pred, Mapping) or len(pred) != 1:
+        return keys
+    op, args = next(iter(pred.items()))
+    if op in ("all", "any"):
+        if isinstance(args, (list, tuple)):
+            for p in args:
+                keys |= _collect_captured_var_keys(p, observed)
+        return keys
+    if op == "not":
+        return _collect_captured_var_keys(args, observed)
+    if isinstance(args, (list, tuple)):
+        for operand in args:
+            if (isinstance(operand, Mapping) and set(operand.keys()) == {"var"}
+                    and operand["var"] in observed):
+                keys.add(operand["var"])
+    return keys
+
+
+def _perturbation_families(keys: "list[str]") -> "list[dict[str, Any]]":
+    """The S1 counterfactual perturbation families. Each maps the i-th referenced captured var key (in a
+    STABLE sorted order) to a DISTINCT value, so two DIFFERENT captured vars diverge (a genuine
+    ``eq[{var:a},{var:b}]`` stops firing) while a same-var-both-sides form stays equal (applied
+    consistently via the observed dict). The families jointly flip every value-DEPENDENT shape:
+    distinct non-empty strings + all-empty (flips ``min_len>=N`` / ``contains`` / a string ``eq`` to a
+    literal) + distinct small ints (0,1,2,..) + distinct negative ints (-1,-2,..)."""
+    return [
+        {k: f"__cf_s_{i}__token__" for i, k in enumerate(keys)},   # distinct non-empty strings
+        {k: "" for k in keys},                                     # all-empty string
+        {k: i for i, k in enumerate(keys)},                        # distinct small ints 0,1,2,..
+        {k: -(i + 1) for i, k in enumerate(keys)},                 # distinct negative ints -1,-2,..
+    ]
+
+
+def _predicate_is_value_independent(predicate: Any, observed: Mapping[str, Any]) -> bool:
+    """COUNTERFACTUAL soundness backstop (Lane S / S1) — the robust complement to the cheap syntactic
+    identical-operand pre-filter. Precondition: ``predicate`` already FIRED on the real ``observed`` and
+    bound at least one captured var. Re-evaluate it on perturbed copies of ``observed`` in which every
+    referenced captured var key is overwritten by each perturbation family.
+
+    A perturbation that RAISES (a type mismatch the real values did not have — e.g. ``int >= str``, or a
+    ``min_len`` threshold var coerced to a non-numeric string) is INCONCLUSIVE and SKIPPED, never counted
+    as a flip. The predicate is VALUE-INDEPENDENT (a tautology over the captured values — its firing
+    cannot depend on them, so it adjudicates nothing about the target) IFF there is at least one
+    non-erroring perturbation AND it FIRES under EVERY non-erroring perturbation. If any non-erroring
+    perturbation makes it NOT fire, its firing genuinely depends on a captured value and it is allowed to
+    stand. Catches ``min_len>=0`` / ``min_len>=-1`` / ``ge[{var},""]`` and the like that the syntactic
+    pre-filter (identical-operand only) cannot see; leaves a real ``min_len>=10`` over a 50-byte body,
+    ``eq[{var},"canary"]`` on a real match, and ``eq[{var:a},{var:b}]`` on two equal captured values
+    untouched (each is flipped off by at least one family)."""
+    keys = sorted(_collect_captured_var_keys(predicate, observed))
+    if not keys:
+        return False  # nothing captured to perturb — the binds gate already handled the all-literal case
+    any_non_erroring = False
+    for fam in _perturbation_families(keys):
+        perturbed = dict(observed)
+        perturbed.update(fam)
+        try:
+            fired, _ = _eval_predicate(predicate, perturbed)
+        except (ValueError, TypeError):
+            continue  # type mismatch under this family — inconclusive, not a flip
+        any_non_erroring = True
+        if not fired:
+            return False  # a non-erroring perturbation flipped it off — genuinely value-dependent
+    return any_non_erroring
+
+
 def predicate_oracle(observed_evidence: Mapping[str, Any], predicate: Any) -> OracleSignal:
     """Evaluate a dangerous CONDITION over RAW observed values — the fix for the
     achieved-state rubber-stamp.
@@ -1349,18 +1426,49 @@ def predicate_oracle(observed_evidence: Mapping[str, Any], predicate: Any) -> Or
     cites the values it judged. The predicate is a pure JSON AST, so the finding's
     certificate re-verifies offline exactly like every other oracle.
 
-    S1 SOUNDNESS PRE-GATE (Lane S — the headline fix): the predicate must be BOUND to captured
-    evidence and must not be a constant-true tautology. A producer-authored all-literal predicate like
-    ``{"eq": ["x", "x"]}`` (or a whole-predicate self-comparison such as ``{"eq": [{"var":"k"},{"var":"k"}]}``)
-    adjudicates NO captured value — yet it previously fired at 0.9/conclusive and minted an ACHIEVED_STATE
-    FACT for the ~40 classes routed here (idor/bola/bfla/open_redirect/cors/jwt/...). It now REFUSES: at
-    least one operand must be a ``{"var": <key>}`` that resolves to a real captured value in
-    ``observed_evidence``, AND the predicate as a whole must not be a structural tautology (its firing must be
-    able to depend on a captured value). This is a WHOLE-PREDICATE property — a self-comparison CONJUNCT
-    inside an ``all`` that also carries real captured-evidence clauses (e.g. a liveness anchor ``sha==sha``)
-    is NOT degenerate. The refusal is a NON-firing, NON-conclusive signal (nothing was adjudicated over
-    captured evidence — like the malformed branch), so it can never be a FACT and never a channel-confirmed
-    CLEAN."""
+    S1 SOUNDNESS GATE (Lane S — the headline fix), in TWO layers over the SAME property (the predicate's
+    firing must be able to DEPEND on a captured value; a predicate that fires no matter what the captured
+    values are adjudicates NOTHING about the target and must not mint):
+
+      1. Cheap SYNTACTIC pre-filter (``_predicate_binds_and_const``): at least one operand must be a
+         ``{"var": <key>}`` resolving to a real captured value in ``observed_evidence``, AND the predicate
+         must not be a structural tautology — an all-literal ``{"eq": ["x", "x"]}`` or a self-comparison
+         under a reflexive-true op (``{"eq": [{"var":"k"},{"var":"k"}]}``, ``{"in":[{"var":"k"},{"var":"k"}]}``)
+         is refused here as a fast early-out. It is a WHOLE-PREDICATE property — a self-comparison CONJUNCT
+         inside an ``all`` that also carries real captured-evidence clauses (a liveness anchor ``sha==sha``)
+         is NOT degenerate (the ``all`` is constant-true only if EVERY clause is).
+
+      2. COUNTERFACTUAL backstop (``_predicate_is_value_independent``), the robust complement that the
+         red-pen required: after the predicate FIRES on the real ``observed``, it is re-evaluated on
+         perturbation families that overwrite every referenced captured var with distinct strings /
+         all-empty / distinct small ints / distinct negative ints. If it fires under EVERY type-consistent
+         perturbation (type-mismatch perturbations are inconclusive and skipped), its firing cannot depend
+         on the captured values and it is REFUSED. This catches the value-INDEPENDENT shapes the syntactic
+         pre-filter cannot see because their operands are NOT identical: ``{"min_len":[{"var":"body"},0]}``
+         and ``[-1]`` (``len(...)>=0`` is always true), ``{"ge":[{"var":"k"},""]}`` (any string ≥ ""). A
+         genuine value-dependent predicate (``min_len>=10`` over a real body, ``eq[{var},"canary"]`` on a
+         match, ``eq[{var:a},{var:b}]`` over two equal captured values) is flipped off by at least one
+         family and stands.
+
+    Both refusals are a NON-firing, NON-conclusive signal (nothing was adjudicated over captured evidence
+    — like the malformed branch), so a refused predicate can never be a FACT and never a channel-confirmed
+    CLEAN. The old rubber-stamp had each state check compute a boolean and pass ``{"k": that_boolean}`` to
+    ``achieved_state_oracle`` to be re-asserted; this oracle (the ~40 classes idor/bola/bfla/open_redirect/
+    cors/jwt/... route here) now decides over the raw values instead.
+
+    TRUST BOUNDARY — WHAT THIS ORACLE DOES AND DOES NOT PROVE (red-pen deeper question, stated honestly):
+    this oracle proves that ``predicate`` HOLDS, and holds value-DEPENDENTLY, over the RETAINED
+    ``observed_evidence`` — nothing more. It does NOT, and cannot, prove that ``observed_evidence`` is a
+    GENUINE capture of the target rather than a value a producer fabricated. A value-dependent predicate
+    over a producer-authored observed dict (``observed={"loc_host":"evil"}`` + ``eq[{var:loc_host},"evil"]``)
+    still fires here. Genuineness of the evidence is enforced ELSEWHERE in the stack, not by this oracle:
+    (a) in the live flow ``observed_evidence`` is built by the GATED SEAMS from captured target bytes
+    (capture-bound), and (b) authenticity is carried by the certificate SIGNATURE and the out-of-band
+    trust-root pin that the zero-dependency standalone verifier checks. ``framework.v2 verify``
+    re-executes this oracle WITHOUT checking signatures BY DESIGN (it re-derives the predicate-over-evidence
+    claim; it is not the authenticity authority). So this oracle is the value-dependence authority, the
+    seam+signature are the provenance authority — do not read a fired predicate as a defence against a
+    fully-untrusted producer; that defence is the seam capture and the signature."""
     observed = dict(observed_evidence or {})
     try:
         binds_captured, constant_true, _constant_false = _predicate_binds_and_const(predicate, observed)
@@ -1384,6 +1492,18 @@ def predicate_oracle(observed_evidence: Mapping[str, Any], predicate: Any) -> Or
         return OracleSignal(
             kind=OracleKind.ACHIEVED_STATE, fired=False, confidence=0.0,
             evidence=f"malformed predicate: {e}", observed={"predicate": predicate})
+    # S1 COUNTERFACTUAL backstop: a predicate that FIRED but fires under every type-consistent perturbation
+    # of its captured vars is value-INDEPENDENT (a tautology over the captured values) — it adjudicates
+    # nothing about the target, so it is REFUSED exactly like the syntactic pre-filter (non-firing,
+    # non-conclusive). Only run when it fired: a non-firing predicate mints nothing and a non-fire over
+    # captured evidence is a legitimate channel-confirmed clean we must not disturb.
+    if fired and _predicate_is_value_independent(predicate, observed):
+        return OracleSignal(
+            kind=OracleKind.ACHIEVED_STATE, fired=False, confidence=0.0, conclusive=False,
+            evidence=("REFUSED (unsound predicate): value-independent predicate / tautology over captured "
+                      "values — it fires under every type-consistent perturbation of the captured vars, so "
+                      "its firing cannot depend on any captured value (adjudicates nothing about the target)"),
+            observed={"predicate": predicate, "values": observed})
     return OracleSignal(
         kind=OracleKind.ACHIEVED_STATE,
         fired=fired,
@@ -1405,55 +1525,35 @@ def achieved_state_oracle(
     expected_state: Mapping[str, Any],
     observed_state: Mapping[str, Any],
 ) -> OracleSignal:
-    """Fire when every key/value the attacker predicted appears in the
-    observed state — e.g. `{"owner": "victim", "readable": True}` shows up in
-    a record that should have been denied. A full match of a non-empty
-    expectation is a strong signal; a partial match is informational only."""
+    """RETIRED minting path (Lane S / S1 close) — returns a NON-firing, NON-conclusive signal for EVERY
+    expected/observed pair, so the only ACHIEVED_STATE FACT path is :func:`predicate_oracle`.
+
+    The old contract fired when every key/value the attacker PREDICTED appeared in the OBSERVED state.
+    But ``expected_state`` AND ``observed_state`` are BOTH producer-supplied plain dicts, so the match is a
+    pure RUBBER-STAMP: the producer asserts both sides and the oracle re-asserts their agreement, with NO
+    value-dependence structure and NO way — BY VALUE ALONE — to tell a genuine capture from a fabrication.
+    The S1 echo-refusal (``observed ⊆ expected``) caught only the exact echo; a single producer-planted
+    junk key (``expected={"role":"admin"}``, ``observed={"role":"admin","_pad":"x"}``) made ``observed`` not
+    a subset, skipped the refusal, and minted a signed FACT (the red-pen BYPASS B). There is no sound
+    value-only gate for this form — a capture-provenance marker in ``observed_state`` would itself be
+    producer-settable (it must survive offline JSON re-verification, so it cannot be an unforgeable
+    sentinel), which is why this path is retired rather than patched.
+
+    No real (non-test) check mints through this form: the scanner/live checks (bizlogic step-skip/replay/
+    tamper, access-control re-drive, CORS/redirect/host-header/graphql, websocket CSWSH) all build
+    ``observed_evidence`` + a value-dependent ``predicate`` and route to :func:`predicate_oracle` (the
+    sound achieved-state FACT path — a predicate re-evaluated over captured evidence, value-dependence
+    enforced, re-verifiable offline). A caller that needs an achieved-state FACT migrates to
+    ``FindingContext.from_predicate`` (var-bound over the captured record), never ``from_state``."""
     expected = dict(expected_state or {})
     observed = dict(observed_state or {})
-
-    if not expected:
-        return OracleSignal(
-            kind=OracleKind.ACHIEVED_STATE, fired=False, confidence=0.0,
-            evidence="no expected state supplied", observed={"expected": expected})
-
-    matched = {k: v for k, v in expected.items() if k in observed and observed[k] == v}
-    mismatched = {k: v for k, v in expected.items() if k not in matched}
-    full = len(matched) == len(expected)
-
-    # S1 SOUNDNESS GATE (Lane S): the match must be against GENUINELY CAPTURED observed keys, not a
-    # producer echo of its own expectation. A full match can only arise when every expected key is present
-    # in observed (keys(expected) ⊆ keys(observed)); if additionally keys(observed) ⊆ keys(expected) then
-    # observed is the EXACT echo of expected (observed == expected) and introduces no captured key beyond
-    # the attacker's prediction — indistinguishable from the producer supplying expected==observed to
-    # rubber-stamp a FACT. A genuine captured record (the resource that should have been denied) carries
-    # keys BEYOND the predicted subset (ids, other columns). REFUSE the echo as a non-firing, non-conclusive
-    # signal — nothing was adjudicated over genuinely captured state.
-    if full and set(observed).issubset(set(expected)):
-        return OracleSignal(
-            kind=OracleKind.ACHIEVED_STATE, fired=False, confidence=0.0, conclusive=False,
-            evidence=("REFUSED (unsound achieved-state): observed_state introduces no captured key beyond "
-                      "the expectation — it is an echo of expected_state, not a genuinely captured record"),
-            observed={"expected": expected, "observed": observed})
-
-    confidence = 0.9 if full else (len(matched) / len(expected)) * 0.5
-    evidence = (
-        f"achieved all {len(expected)} expected field(s): "
-        + ", ".join(f"{k}={v!r}" for k, v in matched.items())
-        if full else
-        f"only {len(matched)}/{len(expected)} expected field(s) matched"
-    )
     return OracleSignal(
-        kind=OracleKind.ACHIEVED_STATE,
-        fired=full,
-        confidence=confidence,
-        # A concrete expectation was supplied (the empty-expectation branch returned
-        # above), so a full-match / no-match is a decisive adjudication of an observed
-        # state — a non-firing (unmatched) result is a channel-confirmed clean.
-        conclusive=True,
-        evidence=evidence,
-        observed={"matched": matched, "mismatched": mismatched},
-    )
+        kind=OracleKind.ACHIEVED_STATE, fired=False, confidence=0.0, conclusive=False,
+        evidence=("REFUSED (retired rubber-stamp): an expected/observed state pair is producer-supplied on "
+                  "BOTH sides and cannot be distinguished from a fabrication by value alone — a planted key "
+                  "defeats any echo/subset test. The sound ACHIEVED_STATE FACT path is predicate_oracle (a "
+                  "value-dependent predicate re-evaluated over captured observed_evidence)."),
+        observed={"expected": expected, "observed": observed})
 
 
 # ---------------------------------------------------------------------------

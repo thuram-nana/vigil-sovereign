@@ -106,6 +106,64 @@ def test_s1_positive_mints_via_both_entrypoints():
 
 
 # ===========================================================================
+# S1b — the red-pen bypasses mint NOTHING through the sanctioned path:
+#   A) a value-INDEPENDENT predicate that binds a captured var but fires for all its values;
+#   B) the retired producer-supplied expected/observed achieved-state form (echo-plus-junk).
+# ===========================================================================
+
+# A real ~50-byte captured body (so the value-independent predicates below genuinely FIRE on it before
+# the counterfactual / reflexive pre-filter refuses them — proving the refusal, not a non-fire).
+_REALBODY = "HTTP/1.1 200 OK\r\nContent-Length: 18\r\n\r\n{\"secret\":\"abcde\"}"
+
+_A_VALUE_INDEPENDENT = [
+    ("min_len_ge_0",   {"predicate": {"min_len": [{"var": "body"}, 0]},  "observed_evidence": {"body": _REALBODY}}),
+    ("min_len_ge_m1",  {"predicate": {"min_len": [{"var": "body"}, -1]}, "observed_evidence": {"body": _REALBODY}}),
+    ("in_body_body",   {"predicate": {"in": [{"var": "body"}, {"var": "body"}]}, "observed_evidence": {"body": _REALBODY}}),
+    ("eq_k_k",         {"predicate": {"eq": [{"var": "k"}, {"var": "k"}]}, "observed_evidence": {"k": "x"}}),
+    ("ge_k_empty",     {"predicate": {"ge": [{"var": "k"}, ""]},          "observed_evidence": {"k": "anything"}}),
+]
+
+
+@pytest.mark.parametrize("label,oc", _A_VALUE_INDEPENDENT, ids=[x[0] for x in _A_VALUE_INDEPENDENT])
+def test_s1b_value_independent_predicate_mints_nothing_via_both_entrypoints(label, oc):
+    f = {"check_id": f"a-{label}", "bug_class": "open_redirect", "oracle_context": oc}
+    r1 = confirm_and_certify(f, engagement_slug="s1b", signers=_signers(), provenance="reproduced")
+    assert not r1.is_fact and r1.signed is None, label
+    r2 = certify_admitted(f, _admit_fact(), engagement_slug="s1b", signers=_signers(), provenance="reproduced")
+    assert not r2.is_fact and r2.signed is None, label
+
+
+def test_s1b_achieved_state_echo_plus_junk_mints_nothing():
+    # BYPASS B: one producer-planted junk key (``_pad``) made observed NOT a subset of expected, slipping
+    # past the old echo-only refusal and signing a FACT. The expected/observed form is now retired.
+    f = {"check_id": "b-echo-junk", "bug_class": "idor",
+         "oracle_context": {"expected_state": {"role": "admin"}, "observed_state": {"role": "admin", "_pad": "x"}}}
+    r = confirm_and_certify(f, engagement_slug="s1b", signers=_signers(), provenance="reproduced")
+    assert not r.is_fact and r.signed is None
+    from framework.v2.verify.reverify import reverify_finding
+    assert not reverify_finding(f).ok   # nor does it reproduce offline
+
+
+# POSITIVE: genuinely value-dependent predicates STILL mint a signed FACT (each is flipped off by at least
+# one perturbation family, so the counterfactual leaves it untouched).
+_P_VALUE_DEPENDENT = [
+    ("min_len_ge_10", "idor",
+     {"predicate": {"min_len": [{"var": "body"}, 10]}, "observed_evidence": {"body": _REALBODY}}),
+    ("eq_loc_canary", "open_redirect",
+     {"predicate": {"eq": [{"var": "location_host"}, "canary.test"]}, "observed_evidence": {"location_host": "canary.test"}}),
+    ("eq_a_b_equal", "idor",
+     {"predicate": {"eq": [{"var": "a"}, {"var": "b"}]}, "observed_evidence": {"a": "https://evil", "b": "https://evil"}}),
+]
+
+
+@pytest.mark.parametrize("label,bug_class,oc", _P_VALUE_DEPENDENT, ids=[x[0] for x in _P_VALUE_DEPENDENT])
+def test_s1b_value_dependent_predicate_still_mints(label, bug_class, oc):
+    f = {"check_id": f"p-{label}", "bug_class": bug_class, "oracle_context": oc}
+    r = confirm_and_certify(f, engagement_slug="s1b", signers=_signers(), provenance="reproduced")
+    assert r.is_fact and r.signed is not None, label
+
+
+# ===========================================================================
 # S4 — provenance re-verifiable at the mint + byte-identical FACT cert
 # ===========================================================================
 

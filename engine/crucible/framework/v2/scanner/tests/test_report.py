@@ -46,8 +46,9 @@ def _sqli_finding(sink=None) -> AuditFinding:
 
 
 def _exposure_finding() -> AuditFinding:
-    ctx = FindingContext.from_state({"repositoryformatversion": "0"},
-                                    {"repositoryformatversion": "0"}, bug_class="exposure")
+    ctx = FindingContext.from_predicate(
+        {"repositoryformatversion": "0"},
+        {"eq": [{"var": "repositoryformatversion"}, "0"]}, bug_class="exposure")
     c = confirm_finding(finding={"bug_class": "exposure"}, context=ctx)
     return AuditFinding(
         check_id="m5-fw-git-config", bug_class="exposure", insertion_point="request:m5-fw-git-config",
