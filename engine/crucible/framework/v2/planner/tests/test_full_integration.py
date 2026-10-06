@@ -168,9 +168,10 @@ def _webhook_forgery_finding(bug_class: str) -> FindingPayload:
         # fires on the illicit state (a forged webhook was accepted) — deterministic
         # promotion, not the LLM's say-so. The context's class must match the
         # finding's, or the veracity firewall demotes on the mismatch alone.
-        oracle_context=FindingContext.from_state(
+        oracle_context=FindingContext.from_predicate(
             {"forged_webhook_accepted": True, "balance_credited_to_attacker": True},
-            {"forged_webhook_accepted": True, "balance_credited_to_attacker": True},
+            {"all": [{"eq": [{"var": "forged_webhook_accepted"}, True]},
+                     {"eq": [{"var": "balance_credited_to_attacker"}, True]}]},
             bug_class=bug_class).model_dump(mode="json"),
     )
 

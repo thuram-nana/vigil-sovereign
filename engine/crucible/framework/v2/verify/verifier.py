@@ -1132,6 +1132,48 @@ def canonical_oracle_for(bug_class: str) -> OracleKind | None:
 # {adapter._STATIC_RULE_BUG_CLASS[r] for r in oracles._LEAD_ONLY_RULE_IDS}, so the two can never diverge.
 _STATIC_RULE_LEAD_ONLY_CLASSES: "frozenset[str]" = frozenset({"static_insecure_randomness", "static_taint"})
 
+def _assert_vocabulary_fully_rowed(
+    bug_class_oracles: "dict[str, tuple[OracleKind, ...]]",
+    aliases: "dict[str, str]",
+    lead_only: "frozenset[str]",
+) -> None:
+    """S3 IMPORT-TIME COVERAGE GUARD (Lane S). Enforce two structural invariants (callable so a test can
+    drive it with a deliberately-broken table; also invoked at import below with the SAME fail-loud
+    mechanism as the DIFFERENTIAL_LEAD_ONLY guard — a plain ``assert`` vanishes under ``-O``):
+
+      (1) every ALIAS TARGET (``set(aliases.values())``) is a real ``bug_class_oracles`` row; and
+      (2) every KNOWN class (rows ∪ alias spellings ∪ alias targets) — after normalisation through
+          ``aliases`` — resolves to a ``bug_class_oracles`` row OR the LEAD-only set.
+
+    Together these close the "known but ROWLESS" hole: a future class/alias edit cannot make a class read as
+    ``is_known_bug_class`` (so it passes the vocabulary gate in ``confirm`` / ``confirm_and_certify`` /
+    ``verify_pcf``) while ``oracles_for`` finds NO row for it and silently falls through to the frozen
+    ``_ALL_ORACLES`` fallback — where a GENERIC oracle (ACHIEVED_STATE / SIDE_EFFECT / …) could then mint it
+    as a FACT for a class nothing is mapped to. (Normalisation is applied so an ALIAS SPELLING, which is
+    "known" but is itself not a row, is checked via the canonical class it folds onto — exactly what
+    ``oracles_for`` does.) A LEAD-only class is allowed because its row routes to a fail-closed oracle."""
+    def _norm(c: str) -> str:
+        key = (c or "").strip().lower().replace("-", "_").replace(" ", "_")
+        while "__" in key:
+            key = key.replace("__", "_")
+        return aliases.get(key, key)
+    known = frozenset(bug_class_oracles) | frozenset(aliases) | frozenset(aliases.values())
+    dangling_aliases = sorted(v for v in set(aliases.values()) if v not in bug_class_oracles)
+    rowless_known = sorted(
+        c for c in known
+        if _norm(c) not in bug_class_oracles and _norm(c) not in lead_only
+    )
+    if dangling_aliases or rowless_known:
+        raise RuntimeError(
+            "verify.verifier: the bug-class vocabulary is not fully oracle-rowed — a 'known' class would "
+            "fall through oracles_for() to the frozen _ALL_ORACLES fallback and let a GENERIC oracle mint it "
+            f"as a FACT. alias target(s) with no BUG_CLASS_ORACLES row: {dangling_aliases}; known class(es) "
+            f"that do not normalise to a row or the LEAD-only set: {rowless_known}."
+        )
+
+
+_assert_vocabulary_fully_rowed(BUG_CLASS_ORACLES, _ALIASES, _STATIC_RULE_LEAD_ONLY_CLASSES)
+
 
 def oracle_confirms_class(confirmed_by: str, bug_class: str) -> bool:
     """PCF step 5 (claim-grounded): ``True`` iff the oracle that fired is a VALID confirmer for the
@@ -1425,7 +1467,9 @@ class OracleVerifier:
             # Predicate mode (Wave 7): the oracle evaluates the dangerous
             # condition over raw observed values — no rubber-stamp.
             if "predicate" in ctx and "observed_evidence" in ctx:
-                return oracles.predicate_oracle(ctx["observed_evidence"], ctx["predicate"])
+                return oracles.predicate_oracle(
+                    ctx["observed_evidence"], ctx["predicate"],
+                    provenance_refs=ctx.get("provenance_refs"))
             if "expected_state" in ctx and "observed_state" in ctx:
                 return oracles.achieved_state_oracle(
                     ctx["expected_state"], ctx["observed_state"]

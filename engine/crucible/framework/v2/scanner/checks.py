@@ -862,7 +862,10 @@ class CorsActiveCheck:
                 {"eq": [{"var": "acao"}, {"var": "evil_origin"}]},
                 {"ieq": [{"var": "acac"}, "true"]},
             ]},
-            bug_class=self.bug_class)
+            bug_class=self.bug_class,
+            # Lane S: evil_origin is a VIGIL-injected canary the producer cannot author, so the reflected-
+            # origin match is a PD2 discriminator (the credentials clause ieq[acac,"true"] is a corroborator).
+            provenance_refs={"evil_origin": "canary"})
 
 
 @dataclass(frozen=True)
@@ -909,7 +912,10 @@ class HostHeaderCheck:
                     {"in": [{"var": "evil_host"}, {"var": "emitted_url_hosts"}]},
                 ]},
             ]},
-            bug_class=self.bug_class)
+            bug_class=self.bug_class,
+            # Lane S: evil_host is a VIGIL-injected canary (producer-unauthorable), so BOTH disjuncts carry a
+            # PD2 — eq[location_host, evil_host] and (order-insensitive) in[evil_host, emitted_url_hosts].
+            provenance_refs={"evil_host": "canary"})
 
 
 @dataclass(frozen=True)
@@ -969,7 +975,11 @@ class OpenRedirectCheck:
                     {"in": [{"var": "canary_host"}, {"var": "markup_redirect_hosts"}]},
                 ]},
             ]},
-            bug_class=self.bug_class)
+            bug_class=self.bug_class,
+            # Lane S: canary_host is the host of VIGIL's injected canary URL (producer-unauthorable), so both
+            # disjuncts carry a PD2 — eq[location_host, canary_host] and in[canary_host, markup_redirect_hosts]
+            # (the min_len[canary_host,1] self-guard is a harmless redundant gate).
+            provenance_refs={"canary_host": "canary"})
 
 
 def _graphql_schema_type_count(body: str) -> int:
@@ -1023,7 +1033,12 @@ class GraphqlIntrospectionCheck:
                 {"eq": [{"var": "body_available"}, True]},
                 {"gt": [{"var": "introspection_type_count"}, 0]},
             ]},
-            bug_class=self.bug_class)
+            bug_class=self.bug_class,
+            # Lane S: introspection_type_count is a VIGIL reducer output (_graphql_schema_type_count) that
+            # exists only in VIGIL's reduction of its OWN introspection response — a provenance-ref. The
+            # strict gt[count,0] (count domain [0,inf)) is a PD3 that flips inside the domain; a hypothetical
+            # ge[count,0] would be vacuous and is refused by the grammar.
+            provenance_refs={"introspection_type_count": "reduction"})
 
 
 @dataclass(frozen=True)
@@ -1463,6 +1478,12 @@ class ContentSignatureCheck:
         )
 
 
+# Lane S: a fixed, deterministic, almost-certainly-nonexistent control path for PathProbeCheck's
+# present/absent differential. Deterministic (no nonce) so the benchmark / determinism gates stay stable; a
+# well-behaved origin 404s it (control_body empty), a catch-all echoes the signature into it (refused).
+_PATHPROBE_CONTROL_PATH: str = "/vigil-nonexistent-control-7f3a9e2b.probe"
+
+
 @dataclass(frozen=True)
 class PathProbeCheck:
     """Framework/CMS exposure via a known-path signature (a request-level check).
@@ -1470,9 +1491,16 @@ class PathProbeCheck:
     Fetches a fixed path relative to the target (e.g. ``/actuator/env``,
     ``/wp-json``, ``/.git/config``) and confirms exposure ONLY when a distinctive
     signature the framework leaks (``propertySources``, ``DB_PASSWORD``, a WP REST
-    JSON) appears in the response — adjudicated by the predicate oracle, not a mere
-    2xx. The signature must be specific enough that its presence is proof; a 404 or
-    a signature-less response does not fire. Runs once per host."""
+    JSON) appears in the sensitive path's response AND is ABSENT from a benign
+    random-path control on the SAME target — adjudicated by the predicate oracle as
+    a PRESENT/ABSENT differential, not a mere 2xx or a bare literal match. A 404, a
+    signature-less response, or a catch-all origin that serves the signature on every
+    path (soft-404 / SPA) does NOT fire. Runs once per host.
+
+    Lane S (Option B — the previously-deferred blocking_work): the old predicate was a bare
+    ``icontains[body, signature]``, which is unsound (an origin that echoes the signature on every path
+    mints a false exposure FACT). The control-body differential makes it a sound PD4 over DISTINCT captured
+    bodies, with ``signature`` floored at the grammar's distinctiveness minimum."""
 
     id: str
     bug_class: str
@@ -1492,9 +1520,20 @@ class PathProbeCheck:
         body = str(resp.get("body", ""))
         if status in (0, 404):
             return None  # not present -> nothing to adjudicate
+        # Lane S (Option B): a benign random-path control on the SAME gated target. The signature must be
+        # PRESENT on the sensitive path yet ABSENT from this control — the present/absent differential (PD4)
+        # that makes the exposure sound. A catch-all / soft-404 origin that echoes the signature everywhere
+        # carries it in the control too, so the not-clause fails and NOTHING mints (the honest boundary).
+        control_url = urljoin(base, _PATHPROBE_CONTROL_PATH.lstrip("/"))
+        control = send(req.model_copy(update={"method": self.http_method, "url": control_url, "body": ""}))
+        control_body = str(control.get("body", "")) if isinstance(control, dict) else ""
         return FindingContext.from_predicate(
-            {"status": status, "body": body},
-            {"all": [{"icontains": [{"var": "body"}, self.signature]}]},
+            {"status": status, "body": body, "control_body": control_body,
+             "control_path": _PATHPROBE_CONTROL_PATH},
+            {"all": [
+                {"icontains": [{"var": "body"}, self.signature]},
+                {"not": {"icontains": [{"var": "control_body"}, self.signature]}},
+            ]},
             bug_class=self.bug_class,
         )
 

@@ -13,7 +13,8 @@ byte-identical. Two things must never move without a deliberate, reviewed change
      name-pinned twin that survives even if the enum or the arithmetic is refactored.)
 
   2. The in-process benchmark tally is byte-identical: crucible tp=11, fp=0, fn=0, precision=recall=
-     f1=1.0, 1831 requests, 11 findings reported — the exact row `make gate` prints and gates on.
+     f1=1.0, 1836 requests, 11 findings reported — the exact row `make gate` prints and gates on.
+     (Lane S moved ONLY the unsigned cost 1831 -> 1836: +5 PathProbe control fetches; see STAGE 3 below.)
      (TRUTHENOVATION-M1 #213 deliberately broadened the corpus 9->11 bugs — adding SSTI + host-header —
      and re-baselined the gate; the frozen row moved 9/853/9 -> 11/1069/11 with it.)
 
@@ -254,5 +255,12 @@ def test_benchmark_tally_is_byte_identical(crucible_measured):
 
 def test_benchmark_cost_row_is_byte_identical(crucible_measured):
     m = crucible_measured.metrics
-    assert m.requests_sent == 1831, f"request budget drifted: {m.requests_sent} (gate requires 1831)"
+    # STAGE 3 (Lane S, 1831 -> 1836, +5): PathProbeCheck's Option-B soundness upgrade fetches ONE benign
+    # random-path control per PRESENT sensitive path, to require a present/absent signature DIFFERENTIAL
+    # instead of a bare literal match. The corpus has 5 such present paths, so +5 control fetches. The
+    # ACCURACY half did NOT move — 11/0/0 still holds (the 3 exposure TPs still fire: the sensitive path
+    # reveals the secret while the random control 404s without it) — so the signed
+    # ``eval/baselines/recall-accuracy-core.json`` is NOT re-signed (the request count is not in its signed
+    # bytes). Only this UNSIGNED cost row moves.
+    assert m.requests_sent == 1836, f"request budget drifted: {m.requests_sent} (gate requires 1836)"
     assert m.findings_reported == 11, f"findings reported drifted: {m.findings_reported} (gate requires 11)"

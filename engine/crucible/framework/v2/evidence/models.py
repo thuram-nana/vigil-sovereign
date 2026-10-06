@@ -78,6 +78,14 @@ class ArtifactRef(BaseModel):
         return v
 
 
+# S4 (Lane S) — the oracle-context PROVENANCE values that may back a signed FACT: a context REPRODUCED from
+# the executor-captured raw tool output, or a live re-drive of the scope-gated target. A context the LLM
+# emitted (``"llm"``, the mint-time default) is NOT a FACT. Mirrors integration ``oracle_adapter.
+# _REPRODUCED_PROVENANCE``; both the mint (certify) and the offline re-verify (reverify / verify_pcf) gate on
+# this SAME set, so "an LLM-authored context can never be a FACT" is re-establishable OFFLINE, not only at mint.
+_REPRODUCED_PROVENANCE: "frozenset[str]" = frozenset({"reproduced", "live_redrive"})
+
+
 class EvidenceCertificate(BaseModel):
     """The signable, verifiable claim about ONE confirmed finding. Everything here is
     deterministic (no wallclock — `seq` is the monotonic order), so its canonical bytes
@@ -168,6 +176,17 @@ class EvidenceCertificate(BaseModel):
     # signature valid. This never promotes: it only ever carries a stricter admission bar a verifier re-checks.
     witness_quorum_required: int = Field(default=0, ge=0)
     witness_kinds: list[str] = Field(default_factory=list)
+    # ---- S4 (Lane S): RE-VERIFIABLE oracle-context PROVENANCE ----------------------------------------
+    # WHERE the oracle_context came from, bound INTO the signed certificate so "an LLM-authored context can
+    # never be a FACT" is re-establishable OFFLINE (``reverify_context`` / ``verify_pcf`` re-check it), not
+    # only enforced at mint. A signed FACT is only ever minted from a non-LLM channel (``reproduced`` =
+    # executor-captured raw output; ``live_redrive`` = re-driven against the scope-gated target), so for every
+    # FACT this is a REPRODUCED value. Default ``"reproduced"`` and DROPPED from the canonical form whenever it
+    # is a reproduced value (serializer below), so EVERY existing/legit FACT certificate — reproduced AND
+    # live_redrive — serialises BYTE-IDENTICALLY and keeps its signature valid. It is present in the signed
+    # bytes ONLY when it is a NON-FACT value (e.g. ``"llm"``), which is exactly the case the offline re-check
+    # refuses.
+    provenance: str = "reproduced"
 
     # The additive D2 members whose empty value is dropped for byte-identity (canonical bytes sort keys, so
     # order-independent — listed once here so the serializer and the ``bound_identity`` view agree).
@@ -232,6 +251,12 @@ class EvidenceCertificate(BaseModel):
             data.pop("witness_quorum_required", None)
         if not data.get("witness_kinds"):
             data.pop("witness_kinds", None)
+        # S4: drop ``provenance`` from the canonical form whenever it is a REPRODUCED (FACT-valid) value, so
+        # every FACT certificate — the only kind minted — serialises byte-identically to before this field
+        # existed. It survives into the signed bytes ONLY for a NON-FACT value (which the offline re-check then
+        # refuses); such a certificate is never one the mint produces.
+        if data.get("provenance") in _REPRODUCED_PROVENANCE:
+            data.pop("provenance", None)
         for k in self._D2_FIELDS:
             if not data.get(k):        # None / "" / {} / 0 are all "absent" for canonical bytes
                 data.pop(k, None)

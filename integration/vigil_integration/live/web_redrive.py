@@ -1335,7 +1335,9 @@ def _oracle_signal(context: "dict"):
 
     evidence = context.get("observed_evidence") or {}
     predicate = context.get("predicate") or {}
-    return predicate_oracle(evidence, predicate)
+    # Lane S: thread the provenance-ref slot so the live redrive's PD2 canary classes (cors/host/redirect/
+    # oidc) are judged by the same structural grammar the offline verifier re-derives from the signed cert.
+    return predicate_oracle(evidence, predicate, provenance_refs=context.get("provenance_refs"))
 
 
 def _branch_outcomes(bug_class: str, context: "dict", overall_fired: bool) -> "list[tuple[str, bool]]":

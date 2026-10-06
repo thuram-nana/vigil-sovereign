@@ -40,8 +40,12 @@ _OR_PRED = {"any": [{"all": [{"in": [{"var": "status"}, [301, 302, 303, 307, 308
 
 def _predicate_finding(observed: dict, *, bug_class: str = "open_redirect") -> dict:
     from framework.v2.verify.adapter import FindingContext
-    ctx = FindingContext.from_predicate(observed_evidence=observed, predicate=_OR_PRED,
-                                        bug_class=bug_class).to_verifier_context()
+    # Lane S: canary_host is VIGIL's injected canary (producer-unauthorable), so it is a PROVENANCE-REF —
+    # the SAME marking scanner.checks.OpenRedirectCheck sets. Without it the structural grammar refuses this
+    # shape as a bare captured-var compare (no positive discriminator); WITH it, eq[location_host, canary_host]
+    # is a PD2 canary, so the predicate is FACT-eligible and this fixture exercises the genuine fire/clean path.
+    ctx = FindingContext.from_predicate(observed_evidence=observed, predicate=_OR_PRED, bug_class=bug_class,
+                                        provenance_refs={"canary_host": "canary"}).to_verifier_context()
     return {"bug_class": bug_class, "check_id": "t", "surface": "http://t/", "oracle_context": ctx}
 
 
@@ -181,9 +185,11 @@ _FIRE_OR = {"any": [{"all": [{"in": [{"var": "status"}, [302]]},
 
 def _firing_redrive_ctx(_cap):
     from framework.v2.verify.adapter import FindingContext
+    # canary_host is a provenance-ref (PD2 canary) — see _predicate_finding — so the shape is FACT-eligible.
     return FindingContext.from_predicate(
         observed_evidence={"status": 302, "location_host": "c.test", "canary_host": "c.test", "body": ""},
-        predicate=_FIRE_OR, bug_class="open_redirect").to_verifier_context()
+        predicate=_FIRE_OR, bug_class="open_redirect",
+        provenance_refs={"canary_host": "canary"}).to_verifier_context()
 
 
 def test_tool_errored_fact_still_comes_from_the_runner_owned_redrive(tmp_path):

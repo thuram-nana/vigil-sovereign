@@ -32,12 +32,15 @@ _DIVERGENT = {"status": 200,
 
 
 def _finding(action_id: str = "act-1") -> dict:
+    # A SOUND fixture: `sqli` is a class DIFFERENTIAL_RESPONSE validly confirms (boolean_sqli is
+    # DIFFERENTIAL_LEAD_ONLY — a differential is a LEAD there, never a FACT — so a boolean_sqli finding
+    # would NOT confirm and the cert's confirmed_by would be a fabricated label the S2 class-bind refuses).
     ctx = FindingContext.from_http_responses(
-        _BASE, _DIVERGENT, bug_class="boolean_sqli",
+        _BASE, _DIVERGENT, bug_class="sqli",
         discriminator={"dimensions": ["status", "length", "lexical"]})
-    confirmed = confirm_finding(finding={"bug_class": "boolean_sqli"}, context=ctx)
+    confirmed = confirm_finding(finding={"bug_class": "sqli"}, context=ctx)
     return {
-        "check_id": "boolean-sqli", "bug_class": "boolean_sqli", "action_id": action_id,
+        "check_id": "sqli-differential", "bug_class": "sqli", "action_id": action_id,
         "confirmed_by": confirmed.confirmed_by.value if confirmed else "differential_response",
         "confidence": confirmed.confidence if confirmed else 0.9,
         "oracle_context": ctx.model_dump(mode="json"),

@@ -67,7 +67,17 @@ def reexecutable_evidence(ctx: object) -> dict | None:
     pred = dump.get("predicate")
     obs = dump.get("observed_evidence")
     if isinstance(pred, dict) and isinstance(obs, dict):
-        return {"predicate": pred, "observed_evidence": obs}
+        kernel = {"predicate": pred, "observed_evidence": obs}
+        # Lane S: the provenance-ref slot is part of the oracle's INPUT (``predicate_oracle`` /
+        # ``_fact_eligible`` gate the mint on it), so a VIGIL-free re-execution that OMITTED it would
+        # evaluate a DIFFERENT (unprovenanced) grammar verdict than the oracle minted — a non-faithful
+        # re-derivation. Retain it alongside the predicate + observed values when present, so the stdlib
+        # kernels re-derive the IDENTICAL fired/conclusive verdict. Absent it (a probe with no
+        # provenance-ref), the kernel is byte-identical to before (only these two keys).
+        pref = dump.get("provenance_refs")
+        if isinstance(pref, dict) and pref:
+            kernel["provenance_refs"] = pref
+        return kernel
     return None
 
 

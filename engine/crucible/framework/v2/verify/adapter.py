@@ -278,6 +278,14 @@ class FindingContext(BaseModel):
     # predicate_oracle (evidence-carrying achieved-state; Wave 7)
     observed_evidence: dict[str, Any] | None = None
     predicate: dict[str, Any] | None = None
+    # Lane S (S1 re-slice): the dedicated PROVENANCE-BOUND reference slot. Maps an observed_evidence KEY ->
+    # a provenance tag ("canary" | "reduction") for a VIGIL-injected, producer-UNPREDICTABLE reference. A key
+    # listed here is classified PR by the structural grammar (PD2 canary / PD3 reduction); everything else in
+    # observed_evidence is a captured var (CV). It travels into the canonical/SIGNED cert bytes
+    # (to_verifier_context -> cert) so offline ``framework.v2 verify`` re-derives the IDENTICAL grammar
+    # verdict. NEVER tag an operator discriminator or a well-known secret literal here — that would write a
+    # FALSE provenance claim into the signed attestation and forge FACT-eligibility.
+    provenance_refs: dict[str, str] | None = None
 
     # side_effect_oracle
     marker: str | None = None
@@ -786,15 +794,22 @@ class FindingContext(BaseModel):
         predicate: Mapping[str, Any],
         *,
         bug_class: str = "cors",
+        provenance_refs: Mapping[str, str] | None = None,
     ) -> "FindingContext":
         """Raw observed values plus a declarative dangerous-condition predicate
         for the predicate oracle (CORS/host-header/redirect/JWT/IDOR/race). The
         oracle — not the check — evaluates the condition, so the verdict is no
-        longer a rubber-stamp. Both are JSON so the certificate re-verifies."""
+        longer a rubber-stamp. Both are JSON so the certificate re-verifies.
+
+        ``provenance_refs`` (Lane S) declares which observed_evidence keys are VIGIL-injected
+        provenance-refs (canary/reduction) for the structural FACT-eligibility grammar; it is carried into
+        the signed cert bytes so offline verify re-derives the identical verdict."""
         return cls(
             bug_class=bug_class,
             observed_evidence={str(k): v for k, v in dict(observed_evidence or {}).items()},
             predicate=dict(predicate),
+            provenance_refs=({str(k): str(v) for k, v in dict(provenance_refs).items()}
+                             if provenance_refs else None),
         )
 
     @classmethod
@@ -2611,6 +2626,11 @@ class FindingContext(BaseModel):
         if self.observed_evidence is not None and self.predicate is not None:
             ctx["observed_evidence"] = self.observed_evidence
             ctx["predicate"] = self.predicate
+            # Lane S: the provenance-ref slot MUST ride into the canonical/signed cert bytes so offline
+            # ``framework.v2 verify`` re-derives the IDENTICAL structural grammar verdict (a stripped or
+            # tampered provenance_refs then fails re-verification — see the Lane-S controls).
+            if self.provenance_refs is not None:
+                ctx["provenance_refs"] = self.provenance_refs
         if self.marker is not None and self.observed_sink is not None:
             ctx["marker"] = self.marker
             ctx["observed_sink"] = self.observed_sink

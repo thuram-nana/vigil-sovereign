@@ -68,10 +68,12 @@ def test_every_mapping_value_is_valid() -> None:
 
 
 def test_confirm_idor_via_achieved_state() -> None:
+    # The sound achieved-state FACT path (Lane S / S1): a value-dependent predicate over the captured
+    # record, adjudicated by predicate_oracle (the retired expected/observed echo form is non-minting).
     result = OracleVerifier().confirm({
         "bug_class": "idor",
-        "expected_state": {"owner": "victim", "readable": True},
-        "observed_state": {"owner": "victim", "readable": True, "id": 42},
+        "observed_evidence": {"owner": "victim", "readable": True, "id": 42},
+        "predicate": {"all": [{"eq": [{"var": "owner"}, "victim"]}, {"eq": [{"var": "readable"}, True]}]},
     })
     assert result.confirmed
     assert result.confirming_signals

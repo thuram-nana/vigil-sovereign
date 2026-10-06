@@ -108,6 +108,31 @@ def _disclosed_schema_name(body: str) -> str:
     return ""
 
 
+def _schema_type_count(body: str) -> int:
+    """Lane S: the number of NAMED types VIGIL's reducer finds under ``data.__schema.types`` in the response
+    to its OWN introspection query — a VIGIL-COMPUTED reduction that is 0 for every non-disclosing body (a
+    parse failure, an errors-only Apollo body, an empty/absent/`__schema`-shaped denial, a page that merely
+    quotes a sample). It is declared a provenance-ref so the strict ``gt[count,0]`` is a sound PD3 (the
+    reducer output, not a producer-authorable text substring, drives the fire)."""
+    doc = _parse_body({"body": body})
+    if not isinstance(doc, dict):
+        return 0
+    data = doc.get("data")
+    schema = data.get("__schema") if isinstance(data, dict) else None
+    types = schema.get("types") if isinstance(schema, dict) else None
+    if not isinstance(types, list):
+        return 0
+    return sum(1 for t in types
+               if isinstance(t, dict) and isinstance(t.get("name"), str) and t.get("name").strip())
+
+
+# A benign, well-formed control query for the field-suggestion differential: the spec meta-field
+# ``__typename`` is valid on every GraphQL schema, so a correct server answers it WITHOUT a "did you mean"
+# hint. Fetched ONLY when the typo probe actually drew a suggestion, so a non-suggesting origin (every
+# benchmark host) pays no control request and the cost row is unchanged.
+_SUGGEST_CONTROL = '{"query":"query{__typename}"}'
+
+
 @dataclass(frozen=True)
 class GraphQLIntrospectionCheck:
     """Confirm introspection is enabled: POST the introspection query and check
@@ -156,14 +181,19 @@ class GraphQLIntrospectionCheck:
         body = _body_of(resp)
         return FindingContext.from_predicate(
             {"response_body": body, "query": _INTROSPECTION,
-             "disclosed_schema_name": _disclosed_schema_name(body)},
+             "disclosed_schema_name": _disclosed_schema_name(body),
+             "introspection_type_count": _schema_type_count(body)},
             {"all": [
                 {"contains": [{"var": "response_body"}, '"data"']},
                 {"contains": [{"var": "response_body"}, '"__schema"']},
                 {"min_len": [{"var": "disclosed_schema_name"}, 1]},
                 {"contains": [{"var": "response_body"}, {"var": "disclosed_schema_name"}]},
+                # Lane S: the sound discriminator is VIGIL's schema-type-count reduction, strictly > 0 (PD3).
+                # The substring/self-consistency anchors above remain as corroborators (they only narrow).
+                {"gt": [{"var": "introspection_type_count"}, 0]},
             ]},
-            bug_class=self.bug_class)
+            bug_class=self.bug_class,
+            provenance_refs={"introspection_type_count": "reduction"})
 
 
 @dataclass(frozen=True)
@@ -180,9 +210,22 @@ class GraphQLSuggestionsCheck:
         oracle re-derives the leak from it, instead of the check computing ``leaks`` in
         Python and having ``achieved_state_oracle`` rubber-stamp the boolean back."""
         resp = send(_post_json(template.request, _TYPO))
+        body = _body_of(resp)
+        # Lane S: a bare icontains[body, "did you mean"] is the producer-authorable text-echo shape the
+        # grammar refuses (a page could carry the phrase for unrelated reasons). Confirm a PRESENT/ABSENT
+        # differential: the suggestion appears for VIGIL's typo'd field but NOT for a benign ``__typename``
+        # control on the SAME endpoint. The control is fetched ONLY when the typo actually drew a suggestion,
+        # so a non-suggesting origin pays no control request (the cost row stays unchanged).
+        if "did you mean" not in body.lower():
+            return None   # no suggestion -> nothing to adjudicate (and no control request spent)
+        control_body = _body_of(send(_post_json(template.request, _SUGGEST_CONTROL)))
         return FindingContext.from_predicate(
-            {"response_body": _body_of(resp), "query": _TYPO},
-            {"icontains": [{"var": "response_body"}, "did you mean"]},
+            {"response_body": body, "query": _TYPO,
+             "control_body": control_body, "control_query": _SUGGEST_CONTROL},
+            {"all": [
+                {"icontains": [{"var": "response_body"}, "did you mean"]},
+                {"not": {"icontains": [{"var": "control_body"}, "did you mean"]}},
+            ]},
             bug_class=self.bug_class)
 
 

@@ -90,32 +90,23 @@ def test_differential_accepts_plain_strings() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_achieved_state_fires_on_full_match() -> None:
-    expected = {"owner": "victim", "readable": True}
-    observed = {"owner": "victim", "readable": True, "id": 42, "balance": 1000}
-    sig = achieved_state_oracle(expected, observed)
-    assert sig.fired
-    assert sig.kind is OracleKind.ACHIEVED_STATE
-    assert sig.confidence >= 0.7
-
-
-def test_achieved_state_no_fire_on_partial_match() -> None:
-    expected = {"owner": "victim", "readable": True}
-    observed = {"owner": "victim", "readable": False}
-    sig = achieved_state_oracle(expected, observed)
-    assert not sig.fired
-    assert sig.confidence < 0.7
-
-
-def test_achieved_state_no_fire_on_empty_expectation() -> None:
-    sig = achieved_state_oracle({}, {"anything": 1})
-    assert not sig.fired
-    assert sig.confidence == 0.0
-
-
-def test_achieved_state_no_fire_when_key_absent() -> None:
-    sig = achieved_state_oracle({"secret": "abc"}, {"other": "abc"})
-    assert not sig.fired
+def test_achieved_state_expected_observed_form_is_retired() -> None:
+    # Lane S / S1: the producer-supplied expected/observed form is a RUBBER-STAMP (both sides are
+    # producer-supplied; a value-only match cannot be told from a fabrication, and a planted junk key
+    # defeats any echo/subset test). It is now NON-MINTING for EVERY pair — a full match (even with
+    # "captured" extra keys), a partial match, an empty expectation, and an absent key all return a
+    # non-firing, non-conclusive REFUSED signal. predicate_oracle is the sound achieved-state FACT path.
+    for expected, observed in [
+        ({"owner": "victim", "readable": True}, {"owner": "victim", "readable": True, "id": 42, "balance": 1000}),
+        ({"role": "admin"}, {"role": "admin", "_pad": "x"}),   # the red-pen echo-plus-junk bypass
+        ({"owner": "victim", "readable": True}, {"owner": "victim", "readable": False}),
+        ({}, {"anything": 1}),
+        ({"secret": "abc"}, {"other": "abc"}),
+    ]:
+        sig = achieved_state_oracle(expected, observed)
+        assert not sig.fired and not sig.conclusive and sig.confidence == 0.0
+        assert sig.kind is OracleKind.ACHIEVED_STATE
+        assert "REFUSED" in sig.evidence and "predicate_oracle" in sig.evidence
 
 
 # ---------------------------------------------------------------------------

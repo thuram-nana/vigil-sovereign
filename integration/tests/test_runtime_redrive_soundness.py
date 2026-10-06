@@ -548,7 +548,16 @@ def test_secret_value_predicate_is_a_pure_json_ast():
     from framework.v2.verify.oracles import predicate_oracle
     from vigil_integration.live.runtime_redrive import _secret_value_predicates
 
-    preds = _secret_value_predicates("DB_PASSWORD=")
+    sig = "DB_PASSWORD="
+    # Lane S: the value-shape conjunction is ALWAYS composed WITH the present/absent control differential
+    # that runtime_redrive prepends (icontains[body, SIG] AND not(icontains[control_body, SIG])). That PD4
+    # differential is the exposure arm's positive discriminator; the value-shape clauses only narrow it. Test
+    # the predicate AS COMPOSED — an isolated value-shape conjunction is the self-consistency tautology the
+    # structural grammar correctly refuses (contains[body, secret_assignment] with secret_assignment lifted
+    # FROM body).
+    preds = [{"icontains": [{"var": "body"}, sig]},
+             {"not": {"icontains": [{"var": "control_body"}, sig]}},
+             *_secret_value_predicates(sig)]
     json.dumps(preds)     # pure JSON AST — no code, no callables
     good = {"body": "DB_PASSWORD=S3cr3t-Real-Prod-Key\n", "control_body": "nope",
             "secret_assignment": "DB_PASSWORD=S3cr3t-Real-Prod-Key", "secret_value": "S3cr3t-Real-Prod-Key"}

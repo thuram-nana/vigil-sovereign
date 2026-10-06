@@ -58,15 +58,25 @@ _SEPARATE_HOST_SLICE = "air-gapped SEPARATE-HOST replay (transfer the package to
 # ---------------------------------------------------------------------------------------------------------
 # Building a real signed package (the minting side — uses framework, in-process).
 # ---------------------------------------------------------------------------------------------------------
+# Lane S S2 class-bind (certify.py): a FACT mints only when the oracle that FIRED is a valid confirmer for
+# the certified class. ``boolean_sqli`` is a DIFFERENTIAL_LEAD_ONLY class — its only sound confirmer is
+# BOOLEAN_INFERENCE (an SPRT over probe rounds), and a bare benign-vs-payload differential is a LEAD there,
+# not a FACT (``confirm_finding`` correctly returns None for it). So the old fixture — a ``boolean_sqli``
+# finding carrying ``confirmed_by="differential_response"`` — is an INVALID class/oracle pairing the S2
+# mint-choke rightly refuses (a fixture bug, NOT a release-gate regression). The differential_response oracle
+# IS a valid confirmer of the generic ``sqli`` class (verifier.BUG_CLASS_ORACLES), and ``confirm_finding``
+# genuinely confirms it over this two-response differential — so we certify ``sqli``, a real signed FACT whose
+# class/oracle pairing is sound, which is all the offline-replay gate needs.
 def _finding(action_id: str = "act-1") -> dict:
     ctx = FindingContext.from_http_responses(
-        _BASE, _DIVERGENT, bug_class="boolean_sqli",
+        _BASE, _DIVERGENT, bug_class="sqli",
         discriminator={"dimensions": ["status", "length", "lexical"]})
-    confirmed = confirm_finding(finding={"bug_class": "boolean_sqli"}, context=ctx)
+    confirmed = confirm_finding(finding={"bug_class": "sqli"}, context=ctx)
+    assert confirmed is not None, "sqli over a real response differential must confirm via differential_response"
     return {
-        "check_id": "boolean-sqli", "bug_class": "boolean_sqli", "action_id": action_id,
-        "confirmed_by": confirmed.confirmed_by.value if confirmed else "differential_response",
-        "confidence": confirmed.confidence if confirmed else 0.9,
+        "check_id": "sqli-differential", "bug_class": "sqli", "action_id": action_id,
+        "confirmed_by": confirmed.confirmed_by.value,
+        "confidence": confirmed.confidence,
         "oracle_context": ctx.model_dump(mode="json"),
     }
 
