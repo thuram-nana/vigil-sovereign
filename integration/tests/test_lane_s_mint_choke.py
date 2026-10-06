@@ -16,12 +16,22 @@ from __future__ import annotations
 
 import pytest
 
-from vigil_core import generate_keypair, sign
-from vigil_integration import detection as d
-from vigil_integration.detection import SqliStructureOracle, parse_access_log, reverify_certificate
-from vigil_integration.detection.certificate import sign_certificate as _d_sign
-from vigil_integration.live.verdict import Verdict, admit
-from vigil_integration.oracle_adapter import certify_admitted, confirm_and_certify
+# Two-env boundary: these mint-choke controls drive oracle_adapter's lazy ``import framework`` (the offense
+# verification layer), so they RUN in the offense CI leg (engine/crucible on PYTHONPATH) and SKIP cleanly in
+# the keyless boundary leg where ``framework`` is intentionally absent — the control is proven in the offense
+# leg, never silently skipped everywhere (see the offense-leg list in .github/workflows/ci.yml).
+pytest.importorskip("framework.v2")
+
+from vigil_core import generate_keypair, sign  # noqa: E402
+from vigil_integration import detection as d  # noqa: E402
+from vigil_integration.detection import (  # noqa: E402
+    SqliStructureOracle,
+    parse_access_log,
+    reverify_certificate,
+)
+from vigil_integration.detection.certificate import sign_certificate as _d_sign  # noqa: E402
+from vigil_integration.live.verdict import Verdict, admit  # noqa: E402
+from vigil_integration.oracle_adapter import certify_admitted, confirm_and_certify  # noqa: E402
 
 
 def _signers():
