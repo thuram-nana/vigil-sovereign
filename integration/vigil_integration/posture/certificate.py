@@ -93,7 +93,15 @@ def _probe_reexec_evidence(probe: dict) -> dict | None:
         return None
     pred, obs = ev.get("predicate"), ev.get("observed_evidence")
     if isinstance(pred, dict) and isinstance(obs, dict):
-        return {"predicate": pred, "observed_evidence": obs}
+        kernel = {"predicate": pred, "observed_evidence": obs}
+        # Lane S: the provenance-ref slot is part of the oracle INPUT the structural grammar gate reads, so a
+        # faithful re-execution carries it when present (``reexecutable_evidence`` retains it). Absent it the
+        # kernel is the two-key dict as before. Identical in the standalone ``verify_vf``, so the tier
+        # projection and the re-execution agree by construction.
+        pref = ev.get("provenance_refs")
+        if isinstance(pref, dict) and pref:
+            kernel["provenance_refs"] = pref
+        return kernel
     return None
 
 
@@ -140,10 +148,228 @@ def _reexec_eval_predicate(pred: Any, observed: dict) -> bool:
     raise ValueError(f"unknown re-execution predicate op {op!r}")
 
 
-def _reexec_fired_conclusive(pred: Any, observed: dict) -> tuple[bool, bool]:
-    """Re-run the predicate → ``(fired, conclusive)``, faithful to ``predicate_oracle``: a well-formed
-    evaluation is conclusive; ANY evaluation error (malformed node, bad operand types) is
-    ``(False, False)`` — non-conclusive, never a silent pass. Fail-closed by construction."""
+# --------------------------------------------------------------------------------------------------
+# Lane S (S1, re-slice) — the STRUCTURAL FACT-ELIGIBILITY GRAMMAR, ported BYTE-FAITHFULLY from
+# ``verify.oracles._fact_eligible`` (+ its helpers) and the ``_predicate_binds_and_const`` pre-gate, so this
+# stdlib kernel renders the IDENTICAL ``(fired, conclusive)`` verdict ``predicate_oracle`` mints over the SAME
+# ``(predicate, observed, provenance_refs)`` — not merely RAW predicate truth. Without this gate a bare shape
+# (``eq[a,b]`` with ``a==b``, ``contains[body, LIT]``, ``in[status, [3xx]]``, ``min_len[tok,3]``,
+# ``ge[n,5]``, ``not(eq[a,b])``, the canary-less ``open_redirect`` all/any) RE-DERIVES ``True`` here while the
+# grammar-gated oracle REFUSES it — a divergence that breaks the byte-parity the re-executable tier rests on.
+#
+# A predicate is FACT-eligible only when every firing path carries a POSITIVE DISCRIMINATOR sound by SHAPE:
+#   PD2  var-vs-provenance-ref canary (a positive-match op, one PR operand + one CV operand, order-insensitive);
+#   PD3  ``gt[PR, int>=0]`` — a strict reduction floor (``ge``/``min_len`` at the floor is vacuous, refused);
+#   PD-NUM ``gt``/``ge`` over two DISTINCT captured vars (a measured relation);
+#   PD-VALUE ``eq``/``gt`` of a captured var vs a NUMERIC/BOOL non-status literal (an achieved-STATE value);
+#   PD4  a present/absent DIFFERENTIAL at an ``all`` — ``pos(CV_a, needle)`` AND ``not(pos(CV_b, needle))`` over
+#        DISTINCT captured bodies sharing one DISTINCTIVE needle (a LIT needle >= the distinctiveness floor).
+# ``provenance_refs`` names the observed_evidence keys that are VIGIL-injected (a PR the producer cannot
+# author); a var NOT listed there but present+non-None in ``observed`` is a captured var (CV); any other inline
+# value is a producer literal (LIT). ``all`` ⇒ ANY child eligible OR a PD4 pair; ``any`` ⇒ EVERY child
+# eligible; ``not`` ⇒ never a positive fire-driver. Pure stdlib + vigil_core — no framework import.
+# --------------------------------------------------------------------------------------------------
+
+_DISTINCTIVENESS_MIN_LEN = 6
+_POSITIVE_MATCH_OPS = frozenset({"eq", "ieq", "contains", "icontains", "in"})
+_PROTOCOL_STATUS_CONSTANTS = frozenset({100, 200, 300, 301, 302, 303, 307, 308, 400, 401, 403})
+_REFLEXIVE_TRUE_OPS = frozenset({"eq", "ieq", "ge", "contains", "icontains", "in"})
+_REFLEXIVE_FALSE_OPS = frozenset({"gt"})
+
+
+def _is_var_operand(operand: Any) -> bool:
+    return isinstance(operand, dict) and set(operand.keys()) == {"var"}
+
+
+def _operand_is_provenance_ref(operand: Any, provenance_refs: dict) -> bool:
+    """A ``{"var": k}`` whose key is declared in ``provenance_refs`` — a VIGIL-injected canary/reduction."""
+    return _is_var_operand(operand) and operand["var"] in (provenance_refs or {})
+
+
+def _operand_is_captured_var(operand: Any, observed: dict, provenance_refs: dict) -> bool:
+    """A ``{"var": k}`` bound to a real captured value in ``observed`` and NOT a declared provenance-ref."""
+    return (_is_var_operand(operand) and operand["var"] not in (provenance_refs or {})
+            and observed.get(operand["var"]) is not None)
+
+
+def _operand_binds_captured(operand: Any, observed: dict) -> bool:
+    """A ``{"var": k}`` reference whose key resolves to a REAL captured value in ``observed`` (present + not
+    None). A literal, or a var with an absent/None key, binds NOTHING (mirrors ``oracles._operand_binds_captured``)."""
+    if _is_var_operand(operand):
+        return observed.get(operand["var"]) is not None
+    return False
+
+
+def _needle_sig(operand: Any) -> tuple:
+    if _is_var_operand(operand):
+        return ("var", operand["var"])
+    try:
+        hash(operand)
+        return ("lit", operand)
+    except TypeError:
+        return ("lit", repr(operand))
+
+
+def _needle_is_distinctive(sig: tuple) -> bool:
+    kind, val = sig
+    if kind == "var":
+        return True
+    return isinstance(val, str) and len(val) >= _DISTINCTIVENESS_MIN_LEN
+
+
+def _is_scalar_value_literal(operand: Any) -> bool:
+    """An inline NUMERIC or BOOLEAN literal of an achieved-STATE value comparison. EXCLUDES a string literal
+    (producer-authorable text match) AND a protocol-status constant (a gate-B corroborator, never a PD)."""
+    if isinstance(operand, bool):
+        return True
+    if isinstance(operand, (int, float)) and not isinstance(operand, bool):
+        return operand not in _PROTOCOL_STATUS_CONSTANTS
+    return False
+
+
+def _leaf_is_self_sufficient_pd(op: str, args: Any, observed: dict, provenance_refs: dict) -> bool:
+    if not isinstance(args, (list, tuple)) or len(args) != 2:
+        return False
+    a, b = args[0], args[1]
+    if op in _POSITIVE_MATCH_OPS:
+        if (_operand_is_provenance_ref(a, provenance_refs)
+                and _operand_is_captured_var(b, observed, provenance_refs)):
+            return True
+        if (_operand_is_provenance_ref(b, provenance_refs)
+                and _operand_is_captured_var(a, observed, provenance_refs)):
+            return True
+        if op in ("eq", "ieq"):
+            if _operand_is_captured_var(a, observed, provenance_refs) and _is_scalar_value_literal(b):
+                return True
+            if _operand_is_captured_var(b, observed, provenance_refs) and _is_scalar_value_literal(a):
+                return True
+        return False
+    if op == "gt" and _operand_is_provenance_ref(a, provenance_refs) and isinstance(b, int) \
+            and not isinstance(b, bool) and b >= 0:
+        return True
+    if op in ("gt", "ge") and _operand_is_captured_var(a, observed, provenance_refs) \
+            and _operand_is_captured_var(b, observed, provenance_refs) and a != b:
+        return True
+    if op == "gt":
+        if _operand_is_captured_var(a, observed, provenance_refs) and _is_scalar_value_literal(b):
+            return True
+        if _operand_is_captured_var(b, observed, provenance_refs) and _is_scalar_value_literal(a):
+            return True
+    return False
+
+
+def _collect_match_relations(pred: Any, observed: dict, provenance_refs: dict,
+                             negated: bool, pos: set, neg: set) -> None:
+    if not isinstance(pred, dict) or len(pred) != 1:
+        return
+    op, args = next(iter(pred.items()))
+    if op in ("all", "any"):
+        if isinstance(args, (list, tuple)):
+            for c in args:
+                _collect_match_relations(c, observed, provenance_refs, negated, pos, neg)
+        return
+    if op == "not":
+        _collect_match_relations(args, observed, provenance_refs, not negated, pos, neg)
+        return
+    if op in _POSITIVE_MATCH_OPS and isinstance(args, (list, tuple)) and len(args) == 2:
+        body, needle = args[0], args[1]
+        if _operand_is_captured_var(body, observed, provenance_refs):
+            (neg if negated else pos).add((body["var"], _needle_sig(needle)))
+
+
+def _pd4_present(pred: Any, observed: dict, provenance_refs: dict) -> bool:
+    pos: set = set()
+    neg: set = set()
+    _collect_match_relations(pred, observed, provenance_refs, False, pos, neg)
+    for a_key, a_needle in pos:
+        if not _needle_is_distinctive(a_needle):
+            continue
+        for b_key, b_needle in neg:
+            if b_needle == a_needle and b_key != a_key:
+                return True
+    return False
+
+
+def _fact_eligible(pred: Any, observed: dict, provenance_refs: dict) -> bool:
+    """Decidable FACT-eligibility over the frozen predicate AST — BYTE-IDENTICAL to
+    ``oracles._fact_eligible``: leaf ⇒ a self-sufficient PD; ``all`` ⇒ ANY child eligible OR a PD4 pair;
+    ``any`` ⇒ EVERY disjunct eligible; ``not`` ⇒ False."""
+    if not isinstance(pred, dict) or len(pred) != 1:
+        return False
+    op, args = next(iter(pred.items()))
+    if op == "all":
+        if not isinstance(args, (list, tuple)) or not args:
+            return False
+        if any(_fact_eligible(c, observed, provenance_refs) for c in args):
+            return True
+        return _pd4_present(pred, observed, provenance_refs)
+    if op == "any":
+        if not isinstance(args, (list, tuple)) or not args:
+            return False
+        return all(_fact_eligible(c, observed, provenance_refs) for c in args)
+    if op == "not":
+        return False
+    return _leaf_is_self_sufficient_pd(op, args, observed, provenance_refs)
+
+
+def _predicate_binds_and_const(pred: Any, observed: dict) -> tuple[bool, bool, bool]:
+    """``(binds_captured, constant_true, constant_false)`` over the AST — BYTE-IDENTICAL to
+    ``oracles._predicate_binds_and_const``. Raises ``ValueError`` on a malformed node (the caller funnels
+    that into the non-conclusive malformed branch, as ``predicate_oracle`` does)."""
+    if not isinstance(pred, dict) or len(pred) != 1:
+        raise ValueError(f"predicate node must be a single-op mapping, got {pred!r}")
+    op, args = next(iter(pred.items()))
+    if op in ("all", "any"):
+        if not isinstance(args, (list, tuple)) or not args:
+            raise ValueError(f"{op!r} requires a non-empty list of sub-predicates")
+        binds = False
+        child_true: list[bool] = []
+        child_false: list[bool] = []
+        for p in args:
+            b, ct, cf = _predicate_binds_and_const(p, observed)
+            binds = binds or b
+            child_true.append(ct)
+            child_false.append(cf)
+        if op == "all":
+            return binds, all(child_true), any(child_false)
+        return binds, any(child_true), all(child_false)
+    if op == "not":
+        b, ct, cf = _predicate_binds_and_const(args, observed)
+        return b, cf, ct
+    if op not in ("eq", "ieq", "contains", "icontains", "in", "min_len", "gt", "ge"):
+        raise ValueError(f"unknown predicate op {op!r}")
+    if not isinstance(args, (list, tuple)) or not args:
+        raise ValueError(f"{op!r} requires operand(s)")
+    has_second = len(args) > 1
+    left, right = args[0], (args[1] if has_second else None)
+    identical = has_second and left == right
+    const_true = identical and op in _REFLEXIVE_TRUE_OPS
+    const_false = identical and op in _REFLEXIVE_FALSE_OPS
+    binds = _operand_binds_captured(left, observed) or (has_second and _operand_binds_captured(right, observed))
+    return binds, const_true, const_false
+
+
+def _reexec_fired_conclusive(pred: Any, observed: dict, provenance_refs: dict | None = None) -> tuple[bool, bool]:
+    """Re-run the predicate → ``(fired, conclusive)``, mirroring ``predicate_oracle``'s decision sequence
+    EXACTLY so the verdict is byte-identical over the SAME ``(predicate, observed, provenance_refs)``:
+
+      1. a malformed predicate (the binds/const walk raises) is NON-conclusive (the oracle's malformed branch);
+      2. a predicate that is NOT FACT-eligible under the structural grammar is REFUSED — non-firing,
+         NON-conclusive (the S1 soundness gate: no positive discriminator adjudicates nothing SOUND);
+      3. a constant-true tautology, or a predicate binding no captured value, is REFUSED (non-conclusive);
+      4. otherwise the predicate is evaluated — a well-formed evaluation is conclusive; ANY evaluation error
+         (malformed node / bad operand types) is ``(False, False)`` — non-conclusive, never a silent pass.
+
+    Fail-closed by construction."""
+    prefs = dict(provenance_refs or {})
+    try:
+        binds_captured, constant_true, _constant_false = _predicate_binds_and_const(pred, observed)
+    except Exception:  # noqa: BLE001 — a malformed predicate is NON-CONCLUSIVE (predicate_oracle's malformed branch)
+        return False, False
+    if not _fact_eligible(pred, observed, prefs):
+        return False, False
+    if constant_true or not binds_captured:
+        return False, False
     try:
         return bool(_reexec_eval_predicate(pred, observed)), True
     except Exception:  # noqa: BLE001 — a malformed/ill-typed kernel is NON-CONCLUSIVE, never fired-clean
@@ -170,7 +396,8 @@ def reexecute_posture_claims(cert: dict) -> None:
         kernel = _probe_reexec_evidence(probe)
         if kernel is None:
             continue
-        fired, conclusive = _reexec_fired_conclusive(kernel["predicate"], dict(kernel["observed_evidence"]))
+        fired, conclusive = _reexec_fired_conclusive(kernel["predicate"], dict(kernel["observed_evidence"]),
+                                                     kernel.get("provenance_refs"))
         verdict = probe.get("verdict")
         if verdict == "clean" and (fired or not conclusive):
             raise PostureError(

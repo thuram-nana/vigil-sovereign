@@ -41,37 +41,52 @@ _VERIFY_VF = Path(__file__).resolve().parents[2] / "docs" / "proof-carrying-find
 
 # ---- 1. byte-parity: stdlib kernel(s) vs the REAL framework oracle -------------------------------
 
+# (predicate, observed, provenance_refs) — a representative spread of every op the oracle supports, pinned
+# to the Lane S structural FACT-eligibility grammar. The grammar gates FIRING: a predicate mints (and a
+# non-fire is a conclusive clean) ONLY when a firing path carries a positive discriminator (PD2 canary / PD3
+# strict floor / PD-NUM / PD-VALUE / PD4 differential). So the parity is proven on BOTH paths:
+#   * the REFUSE path — a bare shape with NO provenance-ref and no differential (eq[a,b] a==b, a lone
+#     contains/in/ieq against a captured/producer value, min_len, ge-vs-literal, not(...), the canary-less
+#     open_redirect all/any) is INELIGIBLE: all three (both kernels AND the real oracle) return `fired=False`,
+#     even where a RAW evaluation would have said True (that raw-True-vs-grammar-False gap is exactly what
+#     this slice closes);
+#   * the FIRE path — a shape with a genuine discriminator fires: gt[n,5] is a PD-VALUE (no canary needed);
+#     the real open_redirect canary shape fires once `canary_host` is marked a provenance-ref (PD2), and the
+#     same shape over a non-redirect status is eligible-but-non-firing (value-dependent, so still False).
 _PREDICATE_CASES = [
-    # (predicate, observed) — a representative spread of every op the oracle supports.
-    ({"eq": [{"var": "a"}, {"var": "b"}]}, {"a": "x", "b": "x"}),
-    ({"eq": [{"var": "a"}, {"var": "b"}]}, {"a": "x", "b": "y"}),
-    ({"ieq": [{"var": "a"}, "HELLO"]}, {"a": "hello"}),
-    ({"contains": [{"var": "body"}, "secret"]}, {"body": "a secret token"}),
-    ({"icontains": [{"var": "body"}, "SECRET"]}, {"body": "a secret token"}),
-    ({"in": [{"var": "status"}, [301, 302, 303, 307, 308]]}, {"status": 302}),
-    ({"in": [{"var": "status"}, [301, 302, 303, 307, 308]]}, {"status": 200}),
-    ({"min_len": [{"var": "tok"}, 8]}, {"tok": "short"}),
-    ({"min_len": [{"var": "tok"}, 3]}, {"tok": "longenough"}),
-    ({"gt": [{"var": "n"}, 5]}, {"n": 9}),
-    ({"ge": [{"var": "n"}, 5]}, {"n": 5}),
-    ({"not": {"eq": [{"var": "a"}, {"var": "b"}]}}, {"a": "x", "b": "y"}),
+    # --- REFUSE path: ineligible bare shapes -> all three agree fired=False (raw eval would over-fire) ---
+    ({"eq": [{"var": "a"}, {"var": "b"}]}, {"a": "x", "b": "x"}, {}),
+    ({"eq": [{"var": "a"}, {"var": "b"}]}, {"a": "x", "b": "y"}, {}),
+    ({"ieq": [{"var": "a"}, "HELLO"]}, {"a": "hello"}, {}),
+    ({"contains": [{"var": "body"}, "secret"]}, {"body": "a secret token"}, {}),
+    ({"icontains": [{"var": "body"}, "SECRET"]}, {"body": "a secret token"}, {}),
+    ({"in": [{"var": "status"}, [301, 302, 303, 307, 308]]}, {"status": 302}, {}),
+    ({"in": [{"var": "status"}, [301, 302, 303, 307, 308]]}, {"status": 200}, {}),
+    ({"min_len": [{"var": "tok"}, 8]}, {"tok": "short"}, {}),
+    ({"min_len": [{"var": "tok"}, 3]}, {"tok": "longenough"}, {}),
+    # --- FIRE path: PD-VALUE (a captured quantity strictly over a numeric literal) is eligible, no canary ---
+    ({"gt": [{"var": "n"}, 5]}, {"n": 9}, {}),
+    # ge-vs-literal is NOT a PD (vacuous at a floor) -> ineligible refuse path even though raw eval is True
+    ({"ge": [{"var": "n"}, 5]}, {"n": 5}, {}),
+    ({"not": {"eq": [{"var": "a"}, {"var": "b"}]}}, {"a": "x", "b": "y"}, {}),
     ({"all": [{"in": [{"var": "status"}, [302]]}, {"eq": [{"var": "h"}, {"var": "c"}]}]},
-     {"status": 302, "h": "evil.test", "c": "evil.test"}),
+     {"status": 302, "h": "evil.test", "c": "evil.test"}, {}),
     ({"all": [{"in": [{"var": "status"}, [302]]}, {"eq": [{"var": "h"}, {"var": "c"}]}]},
-     {"status": 302, "h": "", "c": "evil.test"}),
-    ({"any": [{"eq": [{"var": "a"}, "1"]}, {"eq": [{"var": "b"}, "2"]}]}, {"a": "0", "b": "2"}),
-    ({"any": [{"eq": [{"var": "a"}, "1"]}, {"eq": [{"var": "b"}, "2"]}]}, {"a": "0", "b": "0"}),
-    # the real open_redirect predicate shape (nested any/all with a var-to-var host compare)
+     {"status": 302, "h": "", "c": "evil.test"}, {}),
+    ({"any": [{"eq": [{"var": "a"}, "1"]}, {"eq": [{"var": "b"}, "2"]}]}, {"a": "0", "b": "2"}, {}),
+    ({"any": [{"eq": [{"var": "a"}, "1"]}, {"eq": [{"var": "b"}, "2"]}]}, {"a": "0", "b": "0"}, {}),
+    # --- FIRE path: the real open_redirect canary shape, with canary_host marked a provenance-ref (PD2) ---
     ({"any": [{"all": [{"in": [{"var": "status"}, [301, 302, 303, 307, 308]]},
                        {"eq": [{"var": "location_host"}, {"var": "canary_host"}]}]}]},
-     {"status": 302, "location_host": "c.test", "canary_host": "c.test"}),
+     {"status": 302, "location_host": "c.test", "canary_host": "c.test"}, {"canary_host": "canary"}),
+    # same eligible shape, but the value does not satisfy it (non-redirect) -> eligible-but-non-firing, False
     ({"any": [{"all": [{"in": [{"var": "status"}, [301, 302, 303, 307, 308]]},
                        {"eq": [{"var": "location_host"}, {"var": "canary_host"}]}]}]},
-     {"status": 200, "location_host": "", "canary_host": "c.test"}),
-    # ill-typed child under any/: the real oracle EAGERLY evaluates + catches TypeError -> fired=False;
-    # the faithful kernel must agree (this is the LOW divergence the red-pen found under short-circuit).
-    ({"any": [{"eq": [1, 1]}, {"gt": ["x", 1]}]}, {}),
-    ({"all": [{"eq": [1, 1]}, {"gt": ["x", 1]}]}, {}),
+     {"status": 200, "location_host": "", "canary_host": "c.test"}, {"canary_host": "canary"}),
+    # ill-typed child under any/all: ineligible by shape (no PD among literal-only leaves) -> fired=False in
+    # all three; the real oracle reaches the grammar gate BEFORE eval, so the TypeError is never raised.
+    ({"any": [{"eq": [1, 1]}, {"gt": ["x", 1]}]}, {}, {}),
+    ({"all": [{"eq": [1, 1]}, {"gt": ["x", 1]}]}, {}, {}),
 ]
 
 
@@ -84,22 +99,25 @@ def _load_verify_vf():
     return mod
 
 
-@pytest.mark.parametrize("pred,obs", _PREDICATE_CASES)
-def test_kernel_matches_real_oracle(pred, obs):
-    """The stdlib kernel (both copies) must equal the REAL oracle's `fired` on every case — via the
-    faithful `_reexec_fired_conclusive` wrapper, which (like predicate_oracle) EAGERLY evaluates and turns
-    a ValueError/TypeError into a non-conclusive non-fire, so ill-typed children agree too."""
+@pytest.mark.parametrize("pred,obs,prefs", _PREDICATE_CASES)
+def test_kernel_matches_real_oracle(pred, obs, prefs):
+    """The stdlib kernel (both copies) must equal the REAL oracle's `fired` on every case — over the SAME
+    (predicate, observed, provenance_refs). Each kernel now ports the Lane S structural FACT-eligibility
+    grammar, so it refuses the ineligible bare shapes the oracle refuses (fired=False in all three, even
+    where a raw evaluation would have said True) AND fires exactly where the oracle fires (a PD-VALUE / a
+    provenance-ref canary) — faithful parity on BOTH the refuse and the fire path."""
     from framework.v2.verify import oracles
 
-    real = oracles.predicate_oracle(obs, pred).fired
-    assert C._reexec_fired_conclusive(pred, dict(obs))[0] is real, (pred, obs)
+    real = oracles.predicate_oracle(obs, pred, provenance_refs=prefs).fired
+    assert C._reexec_fired_conclusive(pred, dict(obs), prefs)[0] is real, (pred, obs, prefs)
     vf = _load_verify_vf()
-    assert vf._reexec_fired_conclusive(pred, dict(obs))[0] is real, (pred, obs)
+    assert vf._reexec_fired_conclusive(pred, dict(obs), prefs)[0] is real, (pred, obs, prefs)
 
 
 def test_kernel_faithful_over_real_scan_contexts():
-    """Every predicate/observed pair the benchmark actually produces re-derives identically in the
-    kernel and the real oracle — the port is faithful on real inputs, not just hand-picked ones."""
+    """Every predicate/observed/provenance triple the benchmark actually produces re-derives identically in
+    the kernel and the real oracle — the port is faithful on real inputs, not just hand-picked ones. The
+    retained provenance-ref slot (when present) is threaded into BOTH so they evaluate the SAME grammar."""
     from framework.v2.verify import oracles
 
     report = scan_loopback_benchmark(retain_evidence=True)
@@ -110,8 +128,9 @@ def test_kernel_faithful_over_real_scan_contexts():
         if ev is None:
             continue
         seen += 1
-        real = oracles.predicate_oracle(ev["observed_evidence"], ev["predicate"]).fired
-        assert C._reexec_fired_conclusive(ev["predicate"], dict(ev["observed_evidence"]))[0] is real
+        prefs = ev.get("provenance_refs")
+        real = oracles.predicate_oracle(ev["observed_evidence"], ev["predicate"], provenance_refs=prefs).fired
+        assert C._reexec_fired_conclusive(ev["predicate"], dict(ev["observed_evidence"]), prefs)[0] is real
     assert seen > 0, "the scan produced no re-executable evidence to check parity over"
 
 
@@ -227,14 +246,20 @@ def test_retention_off_is_byte_identical_and_binding_only():
 
 
 def test_retain_on_adds_only_reexec_evidence_keys():
-    """With retention on, ONLY predicate-oracle probes gain an evidence key (predicate+observed_evidence);
-    the row is otherwise unchanged, and no other probe class is touched."""
+    """With retention on, ONLY predicate-oracle probes gain an evidence key: the re-execution kernel the
+    oracle re-derives over — ``predicate`` + ``observed_evidence``, plus the ``provenance_refs`` slot WHEN
+    the probe carries one (Lane S: the structural grammar gate reads it, so a faithful re-execution must
+    carry it). The row is otherwise unchanged, and no other probe class is touched."""
     report = scan_loopback_benchmark(retain_evidence=True)
     coverage = coverage_cert_from_report(report, max_pages=25, max_depth=4)
     with_ev = [p for p in coverage["probes"] if "evidence" in p]
     assert with_ev, "retention on should retain some evidence"
     for p in with_ev:
-        assert set(p["evidence"].keys()) == {"predicate", "observed_evidence"}
+        keys = set(p["evidence"].keys())
+        assert {"predicate", "observed_evidence"} <= keys <= {"predicate", "observed_evidence", "provenance_refs"}
+    # at least one benchmark predicate probe (open_redirect / cors / host-header) carries a provenance-ref
+    assert any("provenance_refs" in p["evidence"] for p in with_ev), (
+        "expected some retained predicate probe to carry a VIGIL-injected provenance-ref")
 
 
 # ---- 5. red-pen fixes: malformed fails CLOSED; honest bound (no producer-independent overclaim) --------
