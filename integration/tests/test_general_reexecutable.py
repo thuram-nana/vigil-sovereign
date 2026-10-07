@@ -274,7 +274,7 @@ def test_standalone_cli_reexec_general(tmp_path):
 # framework.v2.verify.oracles pulls a module outside the stdlib + the one Ed25519 lib). Every PORTED
 # family must be stdlib-closure (so the port is sound), and every oracle the inventory calls
 # PURE-BUT-DEFERRED must ALSO be stdlib-closure (so it is honestly "portable", never mislabelled
-# irreducible). The genuinely-irreducible set must be EXACTLY the five named oracles.
+# irreducible). The genuinely-irreducible set must be EXACTLY the three named oracles.
 import framework.v2.verify.oracles as _oracles_mod  # noqa: E402
 
 _STDLIB_OK = {"ast", "base64", "binascii", "difflib", "hashlib", "hmac", "html", "ipaddress", "json",
@@ -354,7 +354,7 @@ def test_bucket_classification_is_enforced():
         assert not _oracle_closure_needs_nonstdlib(name), (
             f"{name} is listed PURE-BUT-DEFERRED but its closure needs a non-stdlib dep "
             f"— reclassify it as irreducible")
-    # the genuinely-irreducible set must be EXACTLY the five named oracles (each needs a non-stdlib dep)
+    # the genuinely-irreducible set must be EXACTLY the three named oracles (each needs a non-stdlib dep)
     for name in _IRREDUCIBLE:
         assert _oracle_closure_needs_nonstdlib(name), (
             f"{name} is named irreducible but its closure is stdlib-only — it is actually portable")
