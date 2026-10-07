@@ -1,0 +1,65 @@
+{
+  "_crucible": {
+    "certificate": {
+      "artifacts": [],
+      "bug_class": "crash",
+      "confidence": 0.95,
+      "confirmed_by": "sanitizer_signal",
+      "engagement_slug": "conformance",
+      "finding_ref": "CONF-sanitizer-signal",
+      "how_to_verify": "Verify: re-run this finding's retained proof offline with `python3 -m framework.v2 verify <reverifiable.json>` over the reverifiable material \u2014 the `sanitizer_signal` oracle re-fires over the captured bytes and reports OK when it reproduces. Surface: the affected surface. Fix: Remediate at the root cause for this bug class and add a regression test that re-runs this finding's proof; re-verify with `python3 -m framework.v2 verify`.",
+      "oracle_context_digest": "bd15fcd12c4adb7d6d0ea6344d31d232ab21367393652d74227b29e983d57b44",
+      "oracle_version": "sha256:ed35c0f3d201aafa7e71cfb26f7aa117c31a341dba138554806d5fedaac58ec9",
+      "schema_version": 1,
+      "seq": 0,
+      "surface": ""
+    }
+  },
+  "claim": {
+    "class": "crash",
+    "statement": "crash confirmed by sanitizer_signal",
+    "vocabulary": "pcf-classes/1"
+  },
+  "evidence": {
+    "oracle_context": {
+      "digest": "bd15fcd12c4adb7d6d0ea6344d31d232ab21367393652d74227b29e983d57b44",
+      "value": {
+        "bug_class": "crash",
+        "process_output": "==1==ERROR: AddressSanitizer: heap-buffer-overflow"
+      }
+    }
+  },
+  "grounding": "FACT",
+  "id": "5869125a0448b8858313708763b677bd91f9255a266609c92ef04acaa308d04c",
+  "oracle": {
+    "binding": "crucible/verify:sanitizer_signal",
+    "id": "sanitizer_signal",
+    "version": "sha256:ed35c0f3d201aafa7e71cfb26f7aa117c31a341dba138554806d5fedaac58ec9"
+  },
+  "pcf_version": "0.1",
+  "provenance": {
+    "collected_by": "crucible/evidence",
+    "sequence": 0
+  },
+  "signature": {
+    "domain": "crucible-evidence-v1",
+    "scheme": "ed25519",
+    "signatures": [
+      {
+        "key_id": "conformance-fixture",
+        "sig": "5OLg+CAHqEfzAncqWUpPy9hkFHK0BO2RbBlzyklSekh1MsJc+f+iLNcWYET4FA+7EhrCwVy1vGTesOi4Sf+EDA=="
+      }
+    ]
+  },
+  "subject": {
+    "context": {
+      "engagement": "conformance",
+      "surface": ""
+    },
+    "identifier": "CONF-sanitizer-signal"
+  },
+  "verdict": {
+    "confidence": 0.95,
+    "fired": true
+  }
+}

@@ -1,0 +1,67 @@
+{
+  "_crucible": {
+    "certificate": {
+      "artifacts": [],
+      "bug_class": "ssti",
+      "confidence": 0.95,
+      "confirmed_by": "evaluation",
+      "engagement_slug": "conformance",
+      "finding_ref": "CONF-evaluation-ssti",
+      "how_to_verify": "Verify: re-run this finding's retained proof offline with `python3 -m framework.v2 verify <reverifiable.json>` over the reverifiable material \u2014 the `evaluation` oracle re-fires over the captured bytes and reports OK when it reproduces. Surface: the affected surface. Fix: Remediate at the root cause for this bug class and add a regression test that re-runs this finding's proof; re-verify with `python3 -m framework.v2 verify`.",
+      "oracle_context_digest": "38a271eb6b1b607cd766b7cee9468afaca6b062c08c95d3dcfd0934fc55025f8",
+      "oracle_version": "sha256:9d4d772bb347c29802202028291e739c806b1e5492ba4098077d0d2c769b0ef5",
+      "schema_version": 1,
+      "seq": 0,
+      "surface": ""
+    }
+  },
+  "claim": {
+    "class": "ssti",
+    "statement": "ssti confirmed by evaluation",
+    "vocabulary": "pcf-classes/1"
+  },
+  "evidence": {
+    "oracle_context": {
+      "digest": "38a271eb6b1b607cd766b7cee9468afaca6b062c08c95d3dcfd0934fc55025f8",
+      "value": {
+        "bug_class": "ssti",
+        "eval_expected": "49",
+        "eval_observed": "result is 49",
+        "eval_raw": "${7*7}"
+      }
+    }
+  },
+  "grounding": "FACT",
+  "id": "ed8ad68e6a2efe514b93f3d3671f5f561e8dfec25735029a5fa7842d492461c5",
+  "oracle": {
+    "binding": "crucible/verify:evaluation",
+    "id": "evaluation",
+    "version": "sha256:9d4d772bb347c29802202028291e739c806b1e5492ba4098077d0d2c769b0ef5"
+  },
+  "pcf_version": "0.1",
+  "provenance": {
+    "collected_by": "crucible/evidence",
+    "sequence": 0
+  },
+  "signature": {
+    "domain": "crucible-evidence-v1",
+    "scheme": "ed25519",
+    "signatures": [
+      {
+        "key_id": "conformance-fixture",
+        "sig": "Wo1s6RhRneXfeBRW4aCu4JAy9PwCPsJgsDXAXNu7/aXU/goXIhJKFm8MlucqlcQtkaDSb7eEjuh7MECCTpFQCA=="
+      }
+    ]
+  },
+  "subject": {
+    "context": {
+      "engagement": "conformance",
+      "surface": ""
+    },
+    "identifier": "CONF-evaluation-ssti"
+  },
+  "verdict": {
+    "confidence": 0.95,
+    "fired": true
+  }
+}

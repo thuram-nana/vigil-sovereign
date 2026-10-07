@@ -1,0 +1,21 @@
+{
+  "schema": "vigil-benchmark-scorecard-sig/1",
+  "scorecard": "conformance-scorecard.json",
+  "scorecard_digest": "sha256:f03348fa3d7f857b3092938941dc84fca2890fd72fbd2ab1a738d14ab678ebd6",
+  "signatures": [
+    {
+      "key_id": "conformance-fixture",
+      "signature_b64": "8BpYiaGJDZH18MMZ9JtLsmkKzRqxPAp4gtcbWadYI7l/wylmBspSxBzXYhPSPdmy2UPC1hPjE2SFc/abrR4ZAw=="
+    }
+  ],
+  "threshold": 1,
+  "trust_root": {
+    "authorizers": [
+      {
+        "key_id": "conformance-fixture",
+        "public_key_b64": "pUHrF5jkpSlaK/Hgy+PMjHwiaZ/oMvnMQgi8CpayKCo="
+      }
+    ],
+    "threshold": 1
+  }
+}

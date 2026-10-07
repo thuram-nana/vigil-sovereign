@@ -1,0 +1,66 @@
+{
+  "_crucible": {
+    "certificate": {
+      "artifacts": [],
+      "bug_class": "sqli_attempt",
+      "confidence": 0.92,
+      "confirmed_by": "sql_injection_breakout",
+      "engagement_slug": "conformance",
+      "finding_ref": "CONF-sqli-breakout",
+      "how_to_verify": "Verify: re-run this finding's retained proof offline with `python3 -m framework.v2 verify <reverifiable.json>` over the reverifiable material \u2014 the `sql_injection_breakout` oracle re-fires over the captured bytes and reports OK when it reproduces. Surface: the affected surface. Fix: Remediate at the root cause for this bug class and add a regression test that re-runs this finding's proof; re-verify with `python3 -m framework.v2 verify`.",
+      "oracle_context_digest": "97fb252f44d888d09671ee4f407612c6724ce7765cea75606b95c72d92edff11",
+      "oracle_version": "sha256:f6bc09e0c594fe76047e4b69131c299a14fa00bd56512ab87428072ce9a3e761",
+      "schema_version": 1,
+      "seq": 0,
+      "surface": ""
+    }
+  },
+  "claim": {
+    "class": "sqli_attempt",
+    "statement": "sqli_attempt confirmed by sql_injection_breakout",
+    "vocabulary": "pcf-classes/1"
+  },
+  "evidence": {
+    "oracle_context": {
+      "digest": "97fb252f44d888d09671ee4f407612c6724ce7765cea75606b95c72d92edff11",
+      "value": {
+        "bug_class": "sqli_attempt",
+        "payload_param": "id",
+        "request_payload": "1' OR '1'='1"
+      }
+    }
+  },
+  "grounding": "FACT",
+  "id": "0b4d1f1235a64826ffe5cecbb4c0aca6743a82091a3c7845307604c8ab7836e3",
+  "oracle": {
+    "binding": "crucible/verify:sql_injection_breakout",
+    "id": "sql_injection_breakout",
+    "version": "sha256:f6bc09e0c594fe76047e4b69131c299a14fa00bd56512ab87428072ce9a3e761"
+  },
+  "pcf_version": "0.1",
+  "provenance": {
+    "collected_by": "crucible/evidence",
+    "sequence": 0
+  },
+  "signature": {
+    "domain": "crucible-evidence-v1",
+    "scheme": "ed25519",
+    "signatures": [
+      {
+        "key_id": "conformance-fixture",
+        "sig": "qD626IL5kIZCKT6r0a14GKe1FHDpDFSaR3ntgZqCrA32N5Rijzthfa9Xl6CdYEVB98aOimEaPYwNAEa3QiW9Cw=="
+      }
+    ]
+  },
+  "subject": {
+    "context": {
+      "engagement": "conformance",
+      "surface": ""
+    },
+    "identifier": "CONF-sqli-breakout"
+  },
+  "verdict": {
+    "confidence": 0.92,
+    "fired": true
+  }
+}

@@ -1,0 +1,68 @@
+{
+  "_crucible": {
+    "certificate": {
+      "artifacts": [],
+      "bug_class": "weak_crypto_artifact",
+      "confidence": 0.95,
+      "confirmed_by": "tls_weakness",
+      "engagement_slug": "conformance",
+      "finding_ref": "CONF-weak-crypto",
+      "how_to_verify": "Verify: re-run this finding's retained proof offline with `python3 -m framework.v2 verify <reverifiable.json>` over the reverifiable material \u2014 the `tls_weakness` oracle re-fires over the captured bytes and reports OK when it reproduces. Surface: the affected surface. Fix: Remediate at the root cause for this bug class and add a regression test that re-runs this finding's proof; re-verify with `python3 -m framework.v2 verify`.",
+      "oracle_context_digest": "bb4aa534d0834471340949d789afc7959d7c02ac21812d0a3d899ca72e05021f",
+      "oracle_version": "sha256:6802215ebb2618922261b18a7ba5ae7eafe9f5f2b4f8f8c36c20c06304e726e9",
+      "schema_version": 1,
+      "seq": 0,
+      "surface": ""
+    }
+  },
+  "claim": {
+    "class": "weak_crypto_artifact",
+    "statement": "weak_crypto_artifact confirmed by tls_weakness",
+    "vocabulary": "pcf-classes/1"
+  },
+  "evidence": {
+    "oracle_context": {
+      "digest": "bb4aa534d0834471340949d789afc7959d7c02ac21812d0a3d899ca72e05021f",
+      "value": {
+        "bug_class": "weak_crypto_artifact",
+        "crypto_artifact": {
+          "kind": "signature",
+          "signature_algorithm": "sha1WithRSAEncryption"
+        }
+      }
+    }
+  },
+  "grounding": "FACT",
+  "id": "653a9f62a3cf3e9cbf327cc84a52a1beda4be6f0572097f8a009f07336baef98",
+  "oracle": {
+    "binding": "crucible/verify:tls_weakness",
+    "id": "tls_weakness",
+    "version": "sha256:6802215ebb2618922261b18a7ba5ae7eafe9f5f2b4f8f8c36c20c06304e726e9"
+  },
+  "pcf_version": "0.1",
+  "provenance": {
+    "collected_by": "crucible/evidence",
+    "sequence": 0
+  },
+  "signature": {
+    "domain": "crucible-evidence-v1",
+    "scheme": "ed25519",
+    "signatures": [
+      {
+        "key_id": "conformance-fixture",
+        "sig": "083ERjlcOGu6s0wQ0Sq0wRo9eirsv27Br+psyy8E6h2l789ANbw1muH7JKyJyk4GnV+AEq64CL/c3R2sHTo4Bg=="
+      }
+    ]
+  },
+  "subject": {
+    "context": {
+      "engagement": "conformance",
+      "surface": ""
+    },
+    "identifier": "CONF-weak-crypto"
+  },
+  "verdict": {
+    "confidence": 0.95,
+    "fired": true
+  }
+}

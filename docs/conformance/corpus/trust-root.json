@@ -1,0 +1,11 @@
+{
+  "authorizers": [
+    {
+      "key_id": "conformance-fixture",
+      "name": "VIGIL Conformance Fixture (deterministic, non-governance)",
+      "public_key_b64": "pUHrF5jkpSlaK/Hgy+PMjHwiaZ/oMvnMQgi8CpayKCo="
+    }
+  ],
+  "schema_version": 1,
+  "threshold": 1
+}
