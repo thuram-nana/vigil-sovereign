@@ -3,7 +3,7 @@
 .DEFAULT_GOAL := help
 SHELL := /bin/bash
 
-.PHONY: help all setup up down services services-down logs smoke strix aegis-image systemd envs egress-guard clean-services bench benchmark bench-perf bench-perf-record
+.PHONY: help all setup up down services services-down logs smoke strix aegis-image systemd envs egress-guard clean-services bench benchmark conformance bench-perf bench-perf-record
 
 # extra flags for `make up`, e.g.  make up ARGS="--domain vigil.example.com --no-browser"
 ARGS ?=
@@ -50,6 +50,9 @@ benchmark: ## comparative head-to-head vs installed incumbents (sqlmap/wapiti/ni
 	@PYTHONPATH=engine/crucible .venv-offense/bin/python -m framework.v2 benchmark \
 	  --report $(BENCH_DOCS)/benchmark-comparative.md --json $(BENCH_DOCS)/benchmark-comparative.json \
 	  --sign $$( [ -f $(BENCH_KEY) ] && printf -- '--signing-key %s --key-id benchmark-owner' "$$(cat $(BENCH_KEY))" )
+
+conformance: ## Lane C/C2 SIGNED conformance run over the frozen PCF corpus → docs/conformance (byte-stable, offline-verifiable)
+	@PYTHONPATH=engine/crucible .venv-offense/bin/python -m framework.v2.eval.conformance_run verify
 
 # PERFORMANCE regression gate (issue #423) — the complement to the ACCURACY scorecard above.
 # `bench` gates recall/precision; `bench-perf` gates wall-clock / throughput / peak-memory against a

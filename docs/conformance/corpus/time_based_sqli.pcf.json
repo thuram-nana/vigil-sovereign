@@ -1,0 +1,80 @@
+{
+  "_crucible": {
+    "certificate": {
+      "artifacts": [],
+      "bug_class": "time_based_sqli",
+      "confidence": 0.985,
+      "confirmed_by": "timing",
+      "engagement_slug": "conformance",
+      "finding_ref": "CONF-timing",
+      "how_to_verify": "Verify: re-run this finding's retained proof offline with `python3 -m framework.v2 verify <reverifiable.json>` over the reverifiable material \u2014 the `timing` oracle re-fires over the captured bytes and reports OK when it reproduces. Surface: the affected surface. Fix: Remediate at the root cause for this bug class and add a regression test that re-runs this finding's proof; re-verify with `python3 -m framework.v2 verify`.",
+      "oracle_context_digest": "ac86758e28590b3bc242ac870a445bff650c2dc3f43823f41a785b41ef60efb7",
+      "oracle_version": "sha256:e7012754d946d8660c30d758fe254f78e8df329e06a3f0ea1bd3c262027c3085",
+      "schema_version": 1,
+      "seq": 0,
+      "surface": ""
+    }
+  },
+  "claim": {
+    "class": "time_based_sqli",
+    "statement": "time_based_sqli confirmed by timing",
+    "vocabulary": "pcf-classes/1"
+  },
+  "evidence": {
+    "oracle_context": {
+      "digest": "ac86758e28590b3bc242ac870a445bff650c2dc3f43823f41a785b41ef60efb7",
+      "value": {
+        "baseline_latencies": [
+          100.0,
+          101.0,
+          102.0,
+          103.0,
+          104.0
+        ],
+        "bug_class": "time_based_sqli",
+        "timing_alpha": 0.01,
+        "timing_injected_ms": 2000.0,
+        "treatment_latencies": [
+          2000.0,
+          2100.0,
+          2050.0,
+          1990.0,
+          2200.0
+        ]
+      }
+    }
+  },
+  "grounding": "FACT",
+  "id": "30dc498f168b93c40afc07bfc9fd53d2def0921c6c32178e50c755f1c36f31c4",
+  "oracle": {
+    "binding": "crucible/verify:timing",
+    "id": "timing",
+    "version": "sha256:e7012754d946d8660c30d758fe254f78e8df329e06a3f0ea1bd3c262027c3085"
+  },
+  "pcf_version": "0.1",
+  "provenance": {
+    "collected_by": "crucible/evidence",
+    "sequence": 0
+  },
+  "signature": {
+    "domain": "crucible-evidence-v1",
+    "scheme": "ed25519",
+    "signatures": [
+      {
+        "key_id": "conformance-fixture",
+        "sig": "GQPNNBMqy8kvoR0xQSdAAGoy+mB+qvjnjlNpxV8ftv45tex5r6A/ZWrTcJyewdUmnsEyMFEQKc7WotlRgcSaAw=="
+      }
+    ]
+  },
+  "subject": {
+    "context": {
+      "engagement": "conformance",
+      "surface": ""
+    },
+    "identifier": "CONF-timing"
+  },
+  "verdict": {
+    "confidence": 0.985,
+    "fired": true
+  }
+}

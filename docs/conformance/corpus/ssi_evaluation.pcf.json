@@ -1,0 +1,67 @@
+{
+  "_crucible": {
+    "certificate": {
+      "artifacts": [],
+      "bug_class": "ssi",
+      "confidence": 0.95,
+      "confirmed_by": "evaluation",
+      "engagement_slug": "conformance",
+      "finding_ref": "CONF-evaluation-ssi",
+      "how_to_verify": "Verify: re-run this finding's retained proof offline with `python3 -m framework.v2 verify <reverifiable.json>` over the reverifiable material \u2014 the `evaluation` oracle re-fires over the captured bytes and reports OK when it reproduces. Surface: the affected surface. Fix: Remediate at the root cause for this bug class and add a regression test that re-runs this finding's proof; re-verify with `python3 -m framework.v2 verify`.",
+      "oracle_context_digest": "bf36fcab53846e6576bdc3b75f24953c710b3a150a5dbd828aef5a33231965b8",
+      "oracle_version": "sha256:9d4d772bb347c29802202028291e739c806b1e5492ba4098077d0d2c769b0ef5",
+      "schema_version": 1,
+      "seq": 0,
+      "surface": ""
+    }
+  },
+  "claim": {
+    "class": "ssi",
+    "statement": "ssi confirmed by evaluation",
+    "vocabulary": "pcf-classes/1"
+  },
+  "evidence": {
+    "oracle_context": {
+      "digest": "bf36fcab53846e6576bdc3b75f24953c710b3a150a5dbd828aef5a33231965b8",
+      "value": {
+        "bug_class": "ssi",
+        "ssi_expected": "UNIQ42",
+        "ssi_observed": "out UNIQ42 here",
+        "ssi_raw": "<!--#exec cmd=...-->"
+      }
+    }
+  },
+  "grounding": "FACT",
+  "id": "8e7dfe69179ab0f0e712d0d8a9289628c57da8e08e02bf5ccc5cb5700421c8a1",
+  "oracle": {
+    "binding": "crucible/verify:evaluation",
+    "id": "evaluation",
+    "version": "sha256:9d4d772bb347c29802202028291e739c806b1e5492ba4098077d0d2c769b0ef5"
+  },
+  "pcf_version": "0.1",
+  "provenance": {
+    "collected_by": "crucible/evidence",
+    "sequence": 0
+  },
+  "signature": {
+    "domain": "crucible-evidence-v1",
+    "scheme": "ed25519",
+    "signatures": [
+      {
+        "key_id": "conformance-fixture",
+        "sig": "TClqSaC3LJTt/Lk0EPz7Rira0l+NTvZcCYkXingJxGqqmKgZkl2bldwB9zUYDOYAtibnY9mGtUeYO+YYSQLfAQ=="
+      }
+    ]
+  },
+  "subject": {
+    "context": {
+      "engagement": "conformance",
+      "surface": ""
+    },
+    "identifier": "CONF-evaluation-ssi"
+  },
+  "verdict": {
+    "confidence": 0.95,
+    "fired": true
+  }
+}

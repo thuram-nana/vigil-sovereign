@@ -1,0 +1,66 @@
+{
+  "_crucible": {
+    "certificate": {
+      "artifacts": [],
+      "bug_class": "path_traversal",
+      "confidence": 0.9,
+      "confirmed_by": "side_effect",
+      "engagement_slug": "conformance",
+      "finding_ref": "CONF-side-effect",
+      "how_to_verify": "Verify: re-run this finding's retained proof offline with `python3 -m framework.v2 verify <reverifiable.json>` over the reverifiable material \u2014 the `side_effect` oracle re-fires over the captured bytes and reports OK when it reproduces. Surface: the affected surface. Fix: Remediate at the root cause for this bug class and add a regression test that re-runs this finding's proof; re-verify with `python3 -m framework.v2 verify`.",
+      "oracle_context_digest": "13f8de3860d2543d10daec2c47aaaccb7ebd603592bdb4fea59eca645d2800b1",
+      "oracle_version": "sha256:b4daebb44a73c14ee224be4fcbf4c66b35c865394d78c4fc8b01d40ad6d76224",
+      "schema_version": 1,
+      "seq": 0,
+      "surface": ""
+    }
+  },
+  "claim": {
+    "class": "path_traversal",
+    "statement": "path_traversal confirmed by side_effect",
+    "vocabulary": "pcf-classes/1"
+  },
+  "evidence": {
+    "oracle_context": {
+      "digest": "13f8de3860d2543d10daec2c47aaaccb7ebd603592bdb4fea59eca645d2800b1",
+      "value": {
+        "bug_class": "path_traversal",
+        "marker": "CANARY123XYZ",
+        "observed_sink": "reflected: CANARY123XYZ"
+      }
+    }
+  },
+  "grounding": "FACT",
+  "id": "b1ff4de851fc4c207b97f8de154f066536304440271a4a9af4210fc95e19da9a",
+  "oracle": {
+    "binding": "crucible/verify:side_effect",
+    "id": "side_effect",
+    "version": "sha256:b4daebb44a73c14ee224be4fcbf4c66b35c865394d78c4fc8b01d40ad6d76224"
+  },
+  "pcf_version": "0.1",
+  "provenance": {
+    "collected_by": "crucible/evidence",
+    "sequence": 0
+  },
+  "signature": {
+    "domain": "crucible-evidence-v1",
+    "scheme": "ed25519",
+    "signatures": [
+      {
+        "key_id": "conformance-fixture",
+        "sig": "f8cjKCRzNnfbLI5V1zImbfrgnvsodlrd7OxRiP8Bk8KbKoBd41rUKahZKCFFEiU5RCmne5lg6fiZjo+XjoLaDQ=="
+      }
+    ]
+  },
+  "subject": {
+    "context": {
+      "engagement": "conformance",
+      "surface": ""
+    },
+    "identifier": "CONF-side-effect"
+  },
+  "verdict": {
+    "confidence": 0.9,
+    "fired": true
+  }
+}

@@ -1,0 +1,65 @@
+{
+  "_crucible": {
+    "certificate": {
+      "artifacts": [],
+      "bug_class": "error_based_sqli",
+      "confidence": 0.95,
+      "confirmed_by": "error_signature",
+      "engagement_slug": "conformance",
+      "finding_ref": "CONF-error-signature",
+      "how_to_verify": "Verify: re-run this finding's retained proof offline with `python3 -m framework.v2 verify <reverifiable.json>` over the reverifiable material \u2014 the `error_signature` oracle re-fires over the captured bytes and reports OK when it reproduces. Surface: the affected surface. Fix: Remediate at the root cause for this bug class and add a regression test that re-runs this finding's proof; re-verify with `python3 -m framework.v2 verify`.",
+      "oracle_context_digest": "476262f9f1317a10754a741da2c41efff5be1f1434795ed44c1505ba03b54788",
+      "oracle_version": "sha256:7ff961c3d79b56c54385db4f278dbb8eb6782e0e926d1ae99217f9094f4c3ce8",
+      "schema_version": 1,
+      "seq": 0,
+      "surface": ""
+    }
+  },
+  "claim": {
+    "class": "error_based_sqli",
+    "statement": "error_based_sqli confirmed by error_signature",
+    "vocabulary": "pcf-classes/1"
+  },
+  "evidence": {
+    "oracle_context": {
+      "digest": "476262f9f1317a10754a741da2c41efff5be1f1434795ed44c1505ba03b54788",
+      "value": {
+        "bug_class": "error_based_sqli",
+        "error_observed": "you have an error in your SQL syntax near '1''"
+      }
+    }
+  },
+  "grounding": "FACT",
+  "id": "99ce440683cc7366fd184bc089ef5787e4ccfbf48a8fb182d47cc696a8da29d4",
+  "oracle": {
+    "binding": "crucible/verify:error_signature",
+    "id": "error_signature",
+    "version": "sha256:7ff961c3d79b56c54385db4f278dbb8eb6782e0e926d1ae99217f9094f4c3ce8"
+  },
+  "pcf_version": "0.1",
+  "provenance": {
+    "collected_by": "crucible/evidence",
+    "sequence": 0
+  },
+  "signature": {
+    "domain": "crucible-evidence-v1",
+    "scheme": "ed25519",
+    "signatures": [
+      {
+        "key_id": "conformance-fixture",
+        "sig": "61P+0YyhVPgo/lUgbah+ICy9LLjMZZ8eVCvGi1ri+Q3DOxibo8GmHjDriLG88jhomp437grFfR1NhUBu80JrAQ=="
+      }
+    ]
+  },
+  "subject": {
+    "context": {
+      "engagement": "conformance",
+      "surface": ""
+    },
+    "identifier": "CONF-error-signature"
+  },
+  "verdict": {
+    "confidence": 0.95,
+    "fired": true
+  }
+}

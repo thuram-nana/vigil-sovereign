@@ -1,0 +1,66 @@
+{
+  "_crucible": {
+    "certificate": {
+      "artifacts": [],
+      "bug_class": "nosql_injection_attempt",
+      "confidence": 0.9,
+      "confirmed_by": "nosql_injection_breakout",
+      "engagement_slug": "conformance",
+      "finding_ref": "CONF-nosql-breakout",
+      "how_to_verify": "Verify: re-run this finding's retained proof offline with `python3 -m framework.v2 verify <reverifiable.json>` over the reverifiable material \u2014 the `nosql_injection_breakout` oracle re-fires over the captured bytes and reports OK when it reproduces. Surface: the affected surface. Fix: Remediate at the root cause for this bug class and add a regression test that re-runs this finding's proof; re-verify with `python3 -m framework.v2 verify`.",
+      "oracle_context_digest": "44ded45d98e8774f3c89a0c8e2043af694a19c3cece5a6603d5094fcb9c2c265",
+      "oracle_version": "sha256:9558c2f304b5dd5379cc993780e2021aab396bdae3d3a91bb31fbbe0ace2f922",
+      "schema_version": 1,
+      "seq": 0,
+      "surface": ""
+    }
+  },
+  "claim": {
+    "class": "nosql_injection_attempt",
+    "statement": "nosql_injection_attempt confirmed by nosql_injection_breakout",
+    "vocabulary": "pcf-classes/1"
+  },
+  "evidence": {
+    "oracle_context": {
+      "digest": "44ded45d98e8774f3c89a0c8e2043af694a19c3cece5a6603d5094fcb9c2c265",
+      "value": {
+        "bug_class": "nosql_injection_attempt",
+        "payload_param": "u",
+        "request_payload": "{\"$ne\": null}"
+      }
+    }
+  },
+  "grounding": "FACT",
+  "id": "4b4cf93c2f51a26d4c6ee87bafdfd0445ebe374b1581f32fa983144a2ea87b7d",
+  "oracle": {
+    "binding": "crucible/verify:nosql_injection_breakout",
+    "id": "nosql_injection_breakout",
+    "version": "sha256:9558c2f304b5dd5379cc993780e2021aab396bdae3d3a91bb31fbbe0ace2f922"
+  },
+  "pcf_version": "0.1",
+  "provenance": {
+    "collected_by": "crucible/evidence",
+    "sequence": 0
+  },
+  "signature": {
+    "domain": "crucible-evidence-v1",
+    "scheme": "ed25519",
+    "signatures": [
+      {
+        "key_id": "conformance-fixture",
+        "sig": "mCJ5XSPJyq/d9XJ9glatw/AnbLLqeTga2wQAgPocnCW9U1T1CXUVP+XlGBvUNGzLJ3SPOpxSZOKydRO8ToZACw=="
+      }
+    ]
+  },
+  "subject": {
+    "context": {
+      "engagement": "conformance",
+      "surface": ""
+    },
+    "identifier": "CONF-nosql-breakout"
+  },
+  "verdict": {
+    "confidence": 0.9,
+    "fired": true
+  }
+}

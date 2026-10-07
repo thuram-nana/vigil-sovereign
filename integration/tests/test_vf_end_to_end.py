@@ -67,6 +67,7 @@ _VERIFIER = _PCF_DIR / "verify_vf.py"
 def _load_standalone():
     spec = importlib.util.spec_from_file_location("standalone_verify_vf_e2e", _VERIFIER)
     mod = importlib.util.module_from_spec(spec)
+    import sys as _sys; _sys.modules[spec.name] = mod  # register before exec (dataclasses PEP563 annotation resolution)
     spec.loader.exec_module(mod)
     return mod
 
