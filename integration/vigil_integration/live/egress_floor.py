@@ -20,19 +20,27 @@ called by the INTEGRATION-SIDE RE-DRIVE paths and by the runner's own gated capt
   * ``remediation/live_adapter.py`` and ``remediation/differential_adapter.py`` (the TLS-SPKI identity
     samples taken on an operator-triggered re-test)
 
-ENGINE-SIDE RESIDUAL (explicitly NOT closed here, and not claimed to be). ``framework.v2`` still holds
-connect sites this module does not sit in front of, and a caller that reaches them directly gets the
-string-only chain:
+ENGINE-SIDE SITES (now CLOSED by the engine's own floor — this note is kept current). ``framework.v2``
+holds raw connect sites this module does not sit in front of. They are NOT left on the string-only chain:
+each routes through ``common.egress_pin.resolve_and_pin`` — the engine's re-use of the SAME shared
+``vigil_gateway.denylist`` floor — which resolves ONCE, refuses every metadata/link-local/RFC1918/reserved
+address (directly OR via a rebinding answer), and PINS the connect to the validated IP:
 
-  * ``scanner/smuggling.py:raw_send``  — a raw socket with NO gate of its own at all.
-  * ``verify/reachability.py:_socket_connect`` and ``verify/tls.py:_tls_connect`` — re-resolve the NAME
-    and dial it whenever the caller does not inject a pinned ``connect=``. Every call site in the list
-    above now injects one; an engine-internal caller (e.g. ``engage_fusion``) does not.
+  * ``scanner/smuggling.py:raw_send`` — gated (#879): a NAME floor (``validate_action`` under a slug, else
+    the categorical protected-domain floor) THEN ``resolve_and_pin``. A directly-passed loopback LITERAL is
+    dialled without the denylist (a literal resolves to itself, so it is not a rebinding vector); a NAME
+    that resolves to loopback / metadata / RFC1918 still goes through the floor and is refused.
+  * ``verify/reachability.py:_socket_connect`` and ``verify/tls.py:_tls_connect`` — gated (#874): when the
+    caller does not inject a pinned ``connect=`` (the engine-internal path, e.g. ``engage_fusion``) the
+    connector resolves via ``resolve_and_pin`` and dials the PINNED IP (TLS keeps SNI = host). A
+    test-injected ``connect`` is hermetic and bypasses the DNS-performing floor by construction.
 
-So the honest framing is: this closes the class on the INTEGRATION RE-DRIVE PATHS, not repo-wide. The
-repo's recorded lesson (a class-bug recurs at every unguarded site, so close it with ONE shared helper)
-is why those paths all call :func:`pin_egress`; any future resolve-then-connect site must too, and the
-engine-side sites above remain open work.
+NAMED, DEFERRED residual (honestly open): ``verify/reachability_cloud.py``'s urllib GET runs the floor as a
+CHECK, but urllib re-resolves the name at connect, so a precisely-timed DNS rebinding is a narrow residual
+there — an IP-pin is deferred because it breaks a vhost's TLS cert validation. The recorded lesson (a
+class-bug recurs at every unguarded site, so close it with ONE shared helper) is why BOTH the integration
+re-drive paths (:func:`pin_egress`) and the engine sites (``resolve_and_pin``) reuse the one floor; any
+future resolve-then-connect site must too.
 
 WHAT IT ENFORCES, in order, before any byte leaves the box:
 
