@@ -408,3 +408,73 @@ def test_pristine_store_passes_integrity_check(tmp_path):
         assert eng >= 1
     with Blackboard(db_path=p) as bb:               # reopen an existing, valid store: still clean
         assert bb.engagement_id("eng") == eng
+
+
+# ---------------------------------------------------------------------------
+# R5 — lightweight spine NOTIFY (consumers block on a signal instead of hot-polling)
+# ---------------------------------------------------------------------------
+#
+# The notify is a strictly-additive scheduling hint: post() signals AFTER commit, a waiter wakes, and the
+# appended spine is byte-identical to a run with no waiter. Correctness never depends on the signal — a
+# cross-process producer would not wake this process, so a waiter falls back to its timeout.
+
+import threading as _threading  # noqa: E402
+
+from framework.v2.agents import blackboard as _bbmod  # noqa: E402
+
+
+def test_wait_for_append_wakes_on_post(bb: Blackboard) -> None:
+    bb.engagement_id("e")
+    tick0 = _bbmod.current_append_tick()
+    woke = _threading.Event()
+    result = {}
+
+    def _consumer() -> None:
+        # block up to a generous timeout; a real post must wake us well before it elapses
+        result["tick"] = _bbmod.wait_for_append(5.0, since_tick=tick0)
+        woke.set()
+
+    t = _threading.Thread(target=_consumer)
+    t.start()
+    # give the waiter a moment to actually enter wait()
+    _threading.Event().wait(0.05)
+    new_id = bb.post(engagement="e", kind="observation", agent_name="a",
+                     payload={"source": "recon", "surface": "/x", "summary": "wake"})
+    assert woke.wait(2.0), "waiter was not woken by the append notify"
+    t.join(1.0)
+    assert result["tick"] != tick0          # the tick advanced on the append
+    # the append is unchanged: the row is really there and readable by the durable cursor
+    rows = bb.replay(engagement="e", since_id=0)
+    assert [r.id for r in rows] == [new_id]
+
+
+def test_wait_for_append_no_lost_wakeup(bb: Blackboard) -> None:
+    # An append that lands BEFORE the wait (captured by since_tick) returns immediately, never blocking.
+    bb.engagement_id("e")
+    tick0 = _bbmod.current_append_tick()
+    bb.post(engagement="e", kind="observation", agent_name="a",
+            payload={"source": "recon", "surface": "/x", "summary": "early"})
+    # since_tick is the PRE-append value, so the already-advanced tick returns without waiting
+    t = _bbmod.wait_for_append(5.0, since_tick=tick0)
+    assert t != tick0
+
+
+def test_wait_for_append_times_out_without_a_producer(bb: Blackboard) -> None:
+    # No append in THIS process → the wait simply times out at its bound (byte-identical to the old poll).
+    import time as _time
+    tick = _bbmod.current_append_tick()
+    t0 = _time.monotonic()
+    got = _bbmod.wait_for_append(0.2, since_tick=tick)
+    assert got == tick                       # nothing happened
+    assert _time.monotonic() - t0 >= 0.19    # it actually waited (bounded)
+
+
+def test_notify_does_not_change_spine_content(bb: Blackboard) -> None:
+    # Posting with and without an active waiter yields the SAME stored rows/payloads — the notify is
+    # post-commit and touches no row.
+    bb.engagement_id("e")
+    ids = [bb.post(engagement="e", kind="observation", agent_name="a",
+                   payload={"source": "recon", "surface": f"/{i}", "summary": str(i)}) for i in range(3)]
+    rows = bb.replay(engagement="e", since_id=0)
+    assert [r.id for r in rows] == ids
+    assert [r.payload["summary"] for r in rows] == ["0", "1", "2"]
