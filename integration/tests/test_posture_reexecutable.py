@@ -87,6 +87,30 @@ _PREDICATE_CASES = [
     # all three; the real oracle reaches the grammar gate BEFORE eval, so the TypeError is never raised.
     ({"any": [{"eq": [1, 1]}, {"gt": ["x", 1]}]}, {}, {}),
     ({"all": [{"eq": [1, 1]}, {"gt": ["x", 1]}]}, {}, {}),
+    # --- REFUSE path: a bare AUTO-CHECK LIVENESS/AVAILABILITY flag is NOT a PD-VALUE (it is true for any live
+    # target and adjudicates nothing about a vuln). The grammar demotes it to a corroborator, so these are
+    # ineligible -> fired=False in all three, even though a raw eval would have said True. This closes the
+    # bare-liveness-flag PD-VALUE hole the Lane S merge red-pen left open. ---
+    ({"eq": [{"var": "body_available"}, True]}, {"body_available": True}, {}),
+    ({"gt": [{"var": "probe_count"}, 0]}, {"probe_count": 3}, {}),
+    ({"eq": [{"var": "reachable"}, True]}, {"reachable": True}, {}),
+    # as a lone any-disjunct it is still refused (any requires EVERY disjunct eligible)
+    ({"any": [{"eq": [{"var": "body_available"}, True]}]}, {"body_available": True}, {}),
+    # --- FIRE path: a GENUINE operator-declared achieved-state scalar (bizlogic's danger/effect predicates)
+    # stays a PD-VALUE and fires. Note gt[qty,0] has the EXACT shape of the refused gt[probe_count,0] above:
+    # only the NAMED key separates them, proving the floor value cannot be the discriminator. ---
+    ({"eq": [{"var": "checked_out"}, True]}, {"checked_out": True}, {}),
+    ({"gt": [{"var": "redeemed_count"}, 1]}, {"redeemed_count": 2}, {}),
+    ({"eq": [{"var": "qty"}, -5]}, {"qty": -5}, {}),
+    ({"gt": [{"var": "qty"}, 0]}, {"qty": 1}, {}),
+    # a liveness flag CORROBORATING inside an `all` that ALSO carries a real PD (PD3 reduction / PD2 canary —
+    # the real graphql-introspection and host-header shapes) still fires: the demotion costs nothing where a
+    # genuine discriminator is present.
+    ({"all": [{"eq": [{"var": "body_available"}, True]}, {"gt": [{"var": "tc"}, 0]}]},
+     {"body_available": True, "tc": 5}, {"tc": "reduction"}),
+    ({"all": [{"eq": [{"var": "body_available"}, True]},
+              {"in": [{"var": "evil"}, {"var": "emitted"}]}]},
+     {"body_available": True, "evil": "e.test", "emitted": ["e.test"]}, {"evil": "canary"}),
 ]
 
 
@@ -112,6 +136,53 @@ def test_kernel_matches_real_oracle(pred, obs, prefs):
     assert C._reexec_fired_conclusive(pred, dict(obs), prefs)[0] is real, (pred, obs, prefs)
     vf = _load_verify_vf()
     assert vf._reexec_fired_conclusive(pred, dict(obs), prefs)[0] is real, (pred, obs, prefs)
+
+
+def test_bare_liveness_flag_refused_genuine_achieved_state_kept():
+    """CONCRETE semantics (not just three-way agreement): the bare-liveness-flag PD-VALUE hole is closed.
+
+    A bare auto-check liveness/availability flag (``eq[body_available,True]`` / ``gt[probe_count,0]`` /
+    ``eq[reachable,True]``) is REFUSED as a sole discriminator and as a lone ``any`` disjunct (it adjudicates
+    nothing about the vuln), while a GENUINE operator-declared achieved-state scalar (bizlogic's
+    ``eq[qty,-5]`` / ``eq[checked_out,True]`` / ``gt[redeemed_count,1]`` and race's ``gt[successes,max_allowed]``)
+    still MINTS. ``gt[qty,0]`` shares the exact shape of the refused ``gt[probe_count,0]`` — proving the floor
+    value cannot be the discriminator, only the NAMED liveness key. Checked across the REAL oracle AND both
+    stdlib kernels (fired AND conclusive agree everywhere)."""
+    from framework.v2.verify import oracles
+
+    vf = _load_verify_vf()
+
+    def verdicts(pred, obs, prefs):
+        r = oracles.predicate_oracle(obs, pred, provenance_refs=prefs)
+        p = C._reexec_fired_conclusive(pred, dict(obs), prefs)
+        v = vf._reexec_fired_conclusive(pred, dict(obs), prefs)
+        # all three agree on BOTH fired and conclusive
+        assert (r.fired, r.conclusive) == p == v, (pred, obs, prefs, (r.fired, r.conclusive), p, v)
+        return r.fired, r.conclusive
+
+    # REFUSED: a bare liveness/availability flag is ineligible -> not fired, not conclusive (not a clean either)
+    for pred, obs in [
+        ({"eq": [{"var": "body_available"}, True]}, {"body_available": True}),
+        ({"gt": [{"var": "probe_count"}, 0]}, {"probe_count": 3}),
+        ({"eq": [{"var": "reachable"}, True]}, {"reachable": True}),
+        ({"gt": [{"var": "response_count"}, 0]}, {"response_count": 7}),
+        ({"any": [{"eq": [{"var": "body_available"}, True]}]}, {"body_available": True}),
+    ]:
+        assert verdicts(pred, obs, {}) == (False, False), pred
+
+    # KEPT: genuine achieved-state scalars (bizlogic effect/replay/danger) fire and are conclusive
+    for pred, obs in [
+        ({"eq": [{"var": "checked_out"}, True]}, {"checked_out": True}),
+        ({"eq": [{"var": "paid"}, True]}, {"paid": True}),
+        ({"eq": [{"var": "qty"}, -5]}, {"qty": -5}),
+        ({"gt": [{"var": "qty"}, 0]}, {"qty": 1}),                      # SAME shape as gt[probe_count,0]
+        ({"gt": [{"var": "redeemed_count"}, 1]}, {"redeemed_count": 2}),
+    ]:
+        assert verdicts(pred, obs, {}) == (True, True), pred
+
+    # KEPT: race's PD-NUM (two distinct captured quantities) is untouched by the liveness exclusion
+    assert verdicts({"gt": [{"var": "successes"}, {"var": "max_allowed"}]},
+                    {"successes": 5, "max_allowed": 1}, {}) == (True, True)
 
 
 def test_kernel_faithful_over_real_scan_contexts():

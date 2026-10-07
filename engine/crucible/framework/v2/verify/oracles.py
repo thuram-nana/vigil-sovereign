@@ -1394,6 +1394,38 @@ def _is_scalar_value_literal(operand: Any) -> bool:
     return False
 
 
+# Auto-check LIVENESS / AVAILABILITY flags. A comparison of a captured var of one of these names against a
+# scalar literal — ``eq[body_available, True]``, ``gt[probe_count, 0]``, ``eq[reachable, True]`` — is TRUE for
+# any merely-reachable target and adjudicates NOTHING about a vulnerability, so it is a gate CORROBORATOR, never
+# a self-sufficient PD-VALUE. This is structurally indistinguishable (``eq[CV, True]`` / ``gt[CV, 0]``) from a
+# GENUINE operator-declared achieved-state scalar — bizlogic's ``eq[qty,-5]`` / ``eq[checked_out,True]`` /
+# ``gt[redeemed_count,1]`` (note ``gt[qty,0]`` shares the EXACT shape of ``gt[probe_count,0]``) — so SHAPE alone
+# cannot separate them. The out-of-band authority that makes a genuine achieved-state sound is the OWNER-SIGNED
+# WorkflowSpec (bizlogic danger / race success ride an Ed25519-verified spec through
+# ``from_workflow_tamper`` / ``from_race_burst``), but that signal is NOT reachable inside THIS pure, offline-
+# re-executable predicate oracle (the ``from_predicate`` seam carries no ``owner_signed_spec``). So — mirroring
+# ``_PROTOCOL_STATUS_CONSTANTS`` — this NAMED set is the structural stand-in: it enumerates the known auto-check
+# liveness/availability var names, demoting their bare PD-VALUE to a corroborator. A leaf over one of these keys
+# is FACT-eligible ONLY when the enclosing predicate ALSO carries a real PD (a PR canary/reduction via PD2/PD3,
+# or a PD4 differential). Matched case-insensitively against the captured-var name.
+_LIVENESS_AVAILABILITY_KEYS: "frozenset[str]" = frozenset({
+    "body_available", "body_semantically_available",
+    "reachable", "available", "responsive", "responded",
+    "alive", "is_alive", "is_live",
+    "host_up", "online", "port_open",
+    "probe_count", "probes", "response_count", "reply_count",
+})
+
+
+def _operand_is_liveness_flag(operand: Any, observed: Mapping[str, Any],
+                              provenance_refs: Mapping[str, Any]) -> bool:
+    """True iff ``operand`` is a captured var whose KEY is a known auto-check liveness/availability flag
+    (``_LIVENESS_AVAILABILITY_KEYS``). Such a flag is true for any merely-reachable target and adjudicates
+    nothing about the vulnerability, so it is a gate corroborator, NEVER a self-sufficient PD-VALUE."""
+    return (_operand_is_captured_var(operand, observed, provenance_refs)
+            and str(operand["var"]).lower() in _LIVENESS_AVAILABILITY_KEYS)
+
+
 def _leaf_is_self_sufficient_pd(op: str, args: Any, observed: Mapping[str, Any],
                                 provenance_refs: Mapping[str, Any]) -> bool:
     """A terminal leaf that is a SELF-SUFFICIENT positive discriminator on its own:
@@ -1404,7 +1436,10 @@ def _leaf_is_self_sufficient_pd(op: str, args: Any, observed: Mapping[str, Any],
                  achieved-STATE value comparison (a persisted quantity/count/flag: ``eq[qty,-5]``,
                  ``gt[redeemed_count,1]``, ``eq[checked_out,True]``). A string-literal match is NOT a PD
                  (the producer-authorable text-echo class the red-pen refuses); ``min_len`` is a length
-                 floor, never a value comparison.
+                 floor, never a value comparison. A captured var whose NAME is an auto-check liveness/
+                 availability flag (``_LIVENESS_AVAILABILITY_KEYS`` — ``body_available`` / ``probe_count`` /
+                 ``reachable`` ...) is EXCLUDED from PD-VALUE: it adjudicates nothing about the vuln (true for
+                 any live target), so it is only a corroborator and needs a real PD (PR/PD4) elsewhere.
     """
     if not isinstance(args, (list, tuple)) or len(args) != 2:
         return False
@@ -1418,10 +1453,15 @@ def _leaf_is_self_sufficient_pd(op: str, args: Any, observed: Mapping[str, Any],
                 and _operand_is_captured_var(a, observed, provenance_refs)):
             return True
         # PD-VALUE (eq/ieq only here among the match ops): a captured var equated to a scalar value literal.
+        # A captured var that is an auto-check liveness/availability flag is EXCLUDED (corroborator, not a PD).
         if op in ("eq", "ieq"):
-            if _operand_is_captured_var(a, observed, provenance_refs) and _is_scalar_value_literal(b):
+            if (_operand_is_captured_var(a, observed, provenance_refs)
+                    and not _operand_is_liveness_flag(a, observed, provenance_refs)
+                    and _is_scalar_value_literal(b)):
                 return True
-            if _operand_is_captured_var(b, observed, provenance_refs) and _is_scalar_value_literal(a):
+            if (_operand_is_captured_var(b, observed, provenance_refs)
+                    and not _operand_is_liveness_flag(b, observed, provenance_refs)
+                    and _is_scalar_value_literal(a)):
                 return True
         return False
     # PD3 — a provenance-ref reduction strictly above its domain floor (gt only; ge/min_len would be vacuous).
@@ -1434,11 +1474,16 @@ def _leaf_is_self_sufficient_pd(op: str, args: Any, observed: Mapping[str, Any],
         return True
     # PD-VALUE — a STRICT inequality of a captured quantity against a scalar value literal (a persisted
     # count/quantity threshold, e.g. gt[qty,0], gt[redeemed_count,1]). STRICT gt only: ``ge`` against a
-    # literal at a domain floor is vacuous (the red-pen's ge-at-domain-min), so it is NOT a PD-VALUE.
+    # literal at a domain floor is vacuous (the red-pen's ge-at-domain-min), so it is NOT a PD-VALUE. An
+    # auto-check liveness/availability count (e.g. gt[probe_count,0]) is EXCLUDED (corroborator, not a PD).
     if op == "gt":
-        if _operand_is_captured_var(a, observed, provenance_refs) and _is_scalar_value_literal(b):
+        if (_operand_is_captured_var(a, observed, provenance_refs)
+                and not _operand_is_liveness_flag(a, observed, provenance_refs)
+                and _is_scalar_value_literal(b)):
             return True
-        if _operand_is_captured_var(b, observed, provenance_refs) and _is_scalar_value_literal(a):
+        if (_operand_is_captured_var(b, observed, provenance_refs)
+                and not _operand_is_liveness_flag(b, observed, provenance_refs)
+                and _is_scalar_value_literal(a)):
             return True
     return False
 

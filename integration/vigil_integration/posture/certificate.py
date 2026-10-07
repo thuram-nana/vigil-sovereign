@@ -227,6 +227,31 @@ def _is_scalar_value_literal(operand: Any) -> bool:
     return False
 
 
+# Auto-check LIVENESS / AVAILABILITY flags (BYTE-FAITHFUL mirror of oracles._LIVENESS_AVAILABILITY_KEYS). A
+# captured var of one of these names compared to a scalar literal (eq[body_available,True], gt[probe_count,0],
+# eq[reachable,True]) is true for any merely-reachable target and adjudicates NOTHING about a vuln — a
+# CORROBORATOR, never a self-sufficient PD-VALUE. It is structurally indistinguishable from a genuine
+# achieved-state scalar (bizlogic eq[qty,-5] / eq[checked_out,True] / gt[redeemed_count,1]; gt[qty,0] has the
+# SAME shape as gt[probe_count,0]), and the owner-signed-spec authority that would separate them is not
+# reachable inside the pure predicate oracle, so this NAMED set is the structural stand-in (mirrors
+# _PROTOCOL_STATUS_CONSTANTS). A leaf over one of these keys is FACT-eligible only when the enclosing predicate
+# ALSO carries a real PD (PR canary/reduction or a PD4 differential). Matched case-insensitively.
+_LIVENESS_AVAILABILITY_KEYS = frozenset({
+    "body_available", "body_semantically_available",
+    "reachable", "available", "responsive", "responded",
+    "alive", "is_alive", "is_live",
+    "host_up", "online", "port_open",
+    "probe_count", "probes", "response_count", "reply_count",
+})
+
+
+def _operand_is_liveness_flag(operand: Any, observed: dict, provenance_refs: dict) -> bool:
+    """A captured var whose KEY is a known auto-check liveness/availability flag — a gate corroborator, NEVER
+    a self-sufficient PD-VALUE."""
+    return (_operand_is_captured_var(operand, observed, provenance_refs)
+            and str(operand["var"]).lower() in _LIVENESS_AVAILABILITY_KEYS)
+
+
 def _leaf_is_self_sufficient_pd(op: str, args: Any, observed: dict, provenance_refs: dict) -> bool:
     if not isinstance(args, (list, tuple)) or len(args) != 2:
         return False
@@ -239,9 +264,13 @@ def _leaf_is_self_sufficient_pd(op: str, args: Any, observed: dict, provenance_r
                 and _operand_is_captured_var(a, observed, provenance_refs)):
             return True
         if op in ("eq", "ieq"):
-            if _operand_is_captured_var(a, observed, provenance_refs) and _is_scalar_value_literal(b):
+            if (_operand_is_captured_var(a, observed, provenance_refs)
+                    and not _operand_is_liveness_flag(a, observed, provenance_refs)
+                    and _is_scalar_value_literal(b)):
                 return True
-            if _operand_is_captured_var(b, observed, provenance_refs) and _is_scalar_value_literal(a):
+            if (_operand_is_captured_var(b, observed, provenance_refs)
+                    and not _operand_is_liveness_flag(b, observed, provenance_refs)
+                    and _is_scalar_value_literal(a)):
                 return True
         return False
     if op == "gt" and _operand_is_provenance_ref(a, provenance_refs) and isinstance(b, int) \
@@ -251,9 +280,13 @@ def _leaf_is_self_sufficient_pd(op: str, args: Any, observed: dict, provenance_r
             and _operand_is_captured_var(b, observed, provenance_refs) and a != b:
         return True
     if op == "gt":
-        if _operand_is_captured_var(a, observed, provenance_refs) and _is_scalar_value_literal(b):
+        if (_operand_is_captured_var(a, observed, provenance_refs)
+                and not _operand_is_liveness_flag(a, observed, provenance_refs)
+                and _is_scalar_value_literal(b)):
             return True
-        if _operand_is_captured_var(b, observed, provenance_refs) and _is_scalar_value_literal(a):
+        if (_operand_is_captured_var(b, observed, provenance_refs)
+                and not _operand_is_liveness_flag(b, observed, provenance_refs)
+                and _is_scalar_value_literal(a)):
             return True
     return False
 
