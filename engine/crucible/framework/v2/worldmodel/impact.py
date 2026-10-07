@@ -83,6 +83,31 @@ class ImpactModel:
         return self.impact_of(world.get_node(node_id))
 
 
+def blast_ceiling_for_slug(slug: str) -> float | None:
+    """The per-engagement pre-action blast-radius VETO ceiling, read from the SAME
+    ``targets/<slug>/impact.yaml`` that supplies node worths (top-level key ``blast_ceiling``).
+
+    Returns ``None`` when the file is absent, the key is unset, or the value is malformed /
+    negative — in which case the veto stays DEFAULT-OFF for the engagement (byte-identical to a
+    deployment that never configured one). A ceiling of ``0.0`` is honored (veto any action with
+    ANY incremental blast). Total: a missing or corrupt file degrades to ``None``, never raises,
+    so resolving the ceiling can never itself refuse an action or crash the gate."""
+    try:
+        from ..common import paths
+        fp = Path(paths.target_dir(slug)) / "impact.yaml"
+        if not fp.is_file():
+            return None
+        import yaml
+        doc = yaml.safe_load(fp.read_text(encoding="utf-8")) or {}
+        raw = doc.get("blast_ceiling")
+        if raw is None:
+            return None
+        val = float(raw)
+        return val if val >= 0.0 else None
+    except Exception:
+        return None
+
+
 def path_value(world: WorldModel, path_node_ids: list[str], impact: ImpactModel) -> float:
     """A route's business worth = the impact of the crown jewel it terminates at."""
     if not path_node_ids:
