@@ -21,10 +21,15 @@ log (an altered payload, a reordered or deleted event breaks it).
 
 from __future__ import annotations
 
+from typing import Callable
+
+from ..common import logging as v2log
 from ..evidence.canonical import digest_payload
 from ..evidence.chain import build_chain, sign_head, verify_chain, verify_head
 from ..evidence.models import ChainEntry, SignedChainHead
 from .blackboard import Blackboard, BlackboardEventRow
+
+_log = v2log.get_logger(__name__)
 
 
 class SpineChainError(RuntimeError):
@@ -132,3 +137,79 @@ def verify_spine_head(bb: Blackboard, engagement: str, head: SignedChainHead,
     except SpineChainError as e:
         return (False, f"{e} — failing closed")
     return verify_head(head, entries, trust_root, prev_highwater=prev_highwater)
+
+
+# ── RUNTIME CALLER: verify the LIVE SQLite spine (built above was verify-only, never invoked) ──────────────
+#
+# The functions above are the verify PRIMITIVES. Until now nothing CALLED them on the live runtime path, so a
+# tamper that bypassed the append-only triggers (a raw DB edit/delete, a swapped file) sat undetected until
+# someone ran a manual verify. The two functions below are the CALLER: they run the existing verifiers over
+# the LIVE spine at engagement CLOSE (and are the primitive a bounded cadence tick calls), and surface a
+# FAILURE as a loud tamper alarm — fail-closed, logged, never silent. They add no new integrity scheme and
+# mint nothing; they only VERIFY (an oracle-sole-authority-safe, demote-nothing operation).
+
+
+def verify_live_spine(
+    bb: Blackboard,
+    engagement: str,
+    *,
+    head: SignedChainHead | None = None,
+    trust_root: object | None = None,
+    reference: list[ChainEntry] | None = None,
+    prev_highwater: int | None = None,
+) -> tuple[bool, str]:
+    """Verify the LIVE spine for ``engagement`` against the STRONGEST anchor available, reusing the existing
+    verifiers unchanged. Precedence:
+
+      * a governance-SIGNED ``head`` (+ pinned ``trust_root``) → :func:`verify_spine_head`: full
+        content+order+authenticity+anti-rollback — an edited, reordered, deleted, or appended-after-signing
+        event is detected and the head signature must meet the governance threshold;
+      * else an independently-anchored ``reference`` chain (the EXPORT the integrity monitor reads, or a
+        checkpoint retained from an earlier cadence tick) → :func:`verify_spine_chain`: content+order against
+        that out-of-band reference, so a divergence between the export of record and the live DB is caught
+        (the export chain-of-custody check);
+      * else (no anchor provisioned yet) build the live chain and self-verify it → confirms the log reads
+        COMPLETE (fails CLOSED on a truncated/unreadable read via :class:`SpineChainError`) and links cleanly.
+        HONEST SCOPE: with no out-of-band anchor this detects truncation/read-failure/internal break, NOT a
+        bare payload edit — exactly the limit ``integration.integrity_verifier`` documents for its unkeyed
+        on-disk dual.
+
+    Never raises: a read that cannot complete returns ``(False, …)`` (fail-closed). Call it at engagement
+    CLOSE, where no concurrent writer exists, so the read is a consistent snapshot (the concurrent-cadence
+    snapshot race is handled separately); minting/verdicts are untouched."""
+    if head is not None and trust_root is not None:
+        return verify_spine_head(bb, engagement, head, trust_root, prev_highwater=prev_highwater)
+    if reference is not None:
+        return verify_spine_chain(bb, engagement, reference)
+    try:
+        built = build_spine_chain(bb, engagement)
+    except SpineChainError as e:
+        return (False, f"{e} — failing closed")
+    return verify_spine_chain(bb, engagement, built)
+
+
+def verify_spine_at_engagement_close(
+    bb: Blackboard,
+    engagement: str,
+    *,
+    head: SignedChainHead | None = None,
+    trust_root: object | None = None,
+    reference: list[ChainEntry] | None = None,
+    on_alarm: Callable[[str, str], None] | None = None,
+) -> tuple[bool, str]:
+    """RUNTIME CALLER wired at engagement CLOSE: crypto-verify the live SQLite spine via
+    :func:`verify_live_spine`, then — on FAILURE — surface a tamper alarm through ``on_alarm`` (e.g. a loud
+    spine refusal) AND a structured ``error`` log, never silently. Fail-closed/total: the verify itself never
+    raises; a notifier that throws is swallowed only AFTER the alarm has been logged (one bad sink must not
+    bury the alarm). Returns ``(ok, reason)``. This changes no oracle verdict and mints nothing."""
+    ok, reason = verify_live_spine(bb, engagement, head=head, trust_root=trust_root, reference=reference)
+    if ok:
+        _log.info("agents.spine_chain.live_verified", engagement=str(engagement), detail=reason)
+        return ok, reason
+    _log.error("agents.spine_chain.tamper_alarm", engagement=str(engagement), detail=reason)
+    if on_alarm is not None:
+        try:
+            on_alarm(str(engagement), reason)
+        except Exception:  # noqa: BLE001 — the alarm is already logged; a bad notifier must not swallow it
+            _log.error("agents.spine_chain.tamper_alarm_notify_failed", engagement=str(engagement))
+    return ok, reason

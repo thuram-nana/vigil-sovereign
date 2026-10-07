@@ -212,4 +212,86 @@ def test_real_tamper_inside_the_snapshot_is_still_caught(tmp_path: Path) -> None
 
     ok, reason = verify_spine_chain(b, _SLUG, entries)
     assert not ok and "mismatch" in reason   # the deleted event is detected
+# ---- O3: the RUNTIME CALLER — verify the live spine at engagement CLOSE ------------------------------------
+
+
+def test_close_caller_clean_spine_self_verifies_no_alarm(tmp_path: Path) -> None:
+    # With no out-of-band anchor the close caller self-verifies the live log: a clean, fully-readable
+    # spine passes and fires NO alarm.
+    from framework.v2.agents.spine_chain import verify_spine_at_engagement_close
+
+    b = _bb(tmp_path)
+    for i in range(5):
+        _obs(b, f"e{i}")
+    alarms: list[tuple[str, str]] = []
+    ok, reason = verify_spine_at_engagement_close(
+        b, _SLUG, on_alarm=lambda eng, r: alarms.append((eng, r)))
+    assert ok and not alarms
+    b.close()
+
+
+def test_close_caller_detects_tamper_against_signed_head_and_alarms(tmp_path: Path) -> None:
+    # A governance-signed head anchors the spine at close; an event appended AFTER the anchor (a tamper that
+    # bypasses the append-only trigger discipline, e.g. a raw write) is DETECTED and raises a tamper alarm.
+    from framework.v2.agents.spine_chain import verify_spine_at_engagement_close
+
+    b = _bb(tmp_path)
+    for i in range(4):
+        _obs(b, f"e{i}")
+    tr, signers = _trust_root()
+    head = sign_spine_head(b, _SLUG, signers=signers[:2])
+
+    alarms: list[tuple[str, str]] = []
+    ok, _ = verify_spine_at_engagement_close(
+        b, _SLUG, head=head, trust_root=tr, on_alarm=lambda eng, r: alarms.append((eng, r)))
+    assert ok and not alarms                                        # intact anchor → clean, no alarm
+
+    _obs(b, "un-anchored append after close-anchor")               # tamper: a row not covered by the head
+    ok, reason = verify_spine_at_engagement_close(
+        b, _SLUG, head=head, trust_root=tr, on_alarm=lambda eng, r: alarms.append((eng, r)))
+    assert not ok                                                  # detected
+    assert alarms and alarms[0][0] == _SLUG                        # tamper alarm fired (never silent)
+    b.close()
+
+
+def test_close_caller_detects_reference_divergence_and_alarms(tmp_path: Path) -> None:
+    # The export chain-of-custody check: an out-of-band reference chain (what the integrity monitor reads)
+    # that no longer matches the live DB is detected and alarmed.
+    from framework.v2.agents.spine_chain import verify_spine_at_engagement_close
+
+    b = _bb(tmp_path)
+    for i in range(3):
+        _obs(b, f"e{i}")
+    reference = build_spine_chain(b, _SLUG)                        # the export of record (3 events)
+    _obs(b, "live grew past the export")                          # live DB diverges from the export
+    alarms: list[tuple[str, str]] = []
+    ok, reason = verify_spine_at_engagement_close(
+        b, _SLUG, reference=reference, on_alarm=lambda eng, r: alarms.append((eng, r)))
+    assert not ok and "mismatch" in reason
+    assert alarms                                                  # alarm fired
+    b.close()
+
+
+def test_close_caller_fails_closed_on_incomplete_read(tmp_path: Path) -> None:
+    # If the live log cannot be read to completion, the self-verify fails CLOSED (never passes a partial log)
+    # and alarms — the verifier's own inability to read the whole spine is treated as a tamper condition.
+    from framework.v2.agents import spine_chain as sc
+
+    b = _bb(tmp_path)
+    for i in range(3):
+        _obs(b, f"e{i}")
+
+    def _short_events(_bb, _eng):                                  # simulate a truncated/unreadable read
+        raise sc.SpineChainError("incomplete spine read: fetched 1 of 3 events")
+
+    orig = sc._events
+    sc._events = _short_events                                     # type: ignore[assignment]
+    try:
+        alarms: list[tuple[str, str]] = []
+        ok, reason = sc.verify_spine_at_engagement_close(
+            b, _SLUG, on_alarm=lambda eng, r: alarms.append((eng, r)))
+        assert not ok and "failing closed" in reason
+        assert alarms
+    finally:
+        sc._events = orig                                         # type: ignore[assignment]
     b.close()
