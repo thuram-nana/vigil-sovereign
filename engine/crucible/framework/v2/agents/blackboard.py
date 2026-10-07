@@ -20,6 +20,7 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable, Mapping
@@ -42,6 +43,63 @@ _log = v2log.get_logger(__name__)
 
 
 _SCHEMA_SQL = Path(__file__).parent / "schema.sql"
+
+
+# ---------------------------------------------------------------------------------------------------
+# R5 — lightweight spine NOTIFY (cut consumer hot-polling WITHOUT touching append-only semantics).
+# ---------------------------------------------------------------------------------------------------
+#
+# A consumer tails the spine by replaying with its last-seen id as ``since_id`` (a durable cursor). Left to
+# itself it HOT-POLLS — a fixed ``time.sleep`` between empty replays — which at fleet scale is needless CPU
+# and SQLite lock contention while nothing is being appended. This process-wide condition lets an in-process
+# consumer BLOCK until the next append (or a timeout) instead of busy-waiting: :meth:`Blackboard.post` /
+# :meth:`Blackboard.supersede` bump a monotonic tick and ``notify_all`` AFTER the row is committed.
+#
+# It is a pure SCHEDULING hint, strictly additive and best-effort:
+#   * The append itself is UNCHANGED and the signal fires only POST-commit, so the stored spine is
+#     byte-identical and stays append-only — the notify touches no row and no DB.
+#   * It is process-local (each process has its own condition). A cross-process producer does not wake this
+#     process's waiters, so a consumer treats a wake purely as "maybe look now" and STILL replays by its id
+#     cursor — correctness never depends on the signal, only latency/contention does. A missed signal just
+#     means the consumer falls back to its ``timeout`` exactly like the old poll.
+#   * No verdict/finding depends on it: the spine content a consumer reads is identical whether it was woken
+#     by the notify or by a timeout.
+_APPEND_COND = threading.Condition()
+_APPEND_TICK = 0
+
+
+def _signal_append() -> None:
+    """Bump the process-wide append tick and wake every waiter. Called AFTER a successful commit; total
+    (never raises into the writer)."""
+    global _APPEND_TICK
+    try:
+        with _APPEND_COND:
+            _APPEND_TICK += 1
+            _APPEND_COND.notify_all()
+    except Exception:  # noqa: BLE001 — a notify failure must never perturb an append
+        pass
+
+
+def current_append_tick() -> int:
+    """The current process-wide append tick. A consumer reads this BEFORE it replays, then passes it to
+    :func:`wait_for_append`, so an append landing between the replay and the wait is not a lost wakeup."""
+    with _APPEND_COND:
+        return _APPEND_TICK
+
+
+def wait_for_append(timeout: float, *, since_tick: int | None = None) -> int:
+    """Block up to ``timeout`` seconds until SOME event is appended to the spine in THIS process, then
+    return the current append tick. Pass ``since_tick`` (from :func:`current_append_tick`, captured before
+    your replay) to return immediately if an append already happened since — a lost-wakeup guard. This is a
+    best-effort latency/contention optimisation only: the caller MUST still replay by its id cursor, because
+    a cross-process producer does not signal this process (the wait then simply times out, exactly like the
+    pre-R5 poll). Returns the (possibly unchanged) tick."""
+    with _APPEND_COND:
+        start = _APPEND_TICK if since_tick is None else int(since_tick)
+        if _APPEND_TICK != start:
+            return _APPEND_TICK
+        _APPEND_COND.wait(timeout=max(0.0, float(timeout)))
+        return _APPEND_TICK
 
 # Highest ``bb_schema_meta`` version this build understands. REFUSE-NEWER (W5-3, #447): a store stamped with
 # a version ABOVE this is refused, never silently opened as the old shape — its events.kind CHECK, its
@@ -483,6 +541,9 @@ class Blackboard:
             event_id=new_id, engagement_id=eid, kind=kind, agent=agent_name,
             supersedes=supersedes_id,
         )
+        # R5: wake any in-process spine consumer AFTER the row is committed (strictly post-commit, so the
+        # append is byte-identical and append-only — the signal is a scheduling hint, never a spine write).
+        _signal_append()
         return new_id
 
     def supersede(
@@ -532,6 +593,7 @@ class Blackboard:
         agent: str | None = None,
         parent_id: int | None = None,
         since_id: int = 0,
+        until_id: int | None = None,
         include_superseded: bool = False,
         limit: int = 1000,
     ) -> list[BlackboardEventRow]:
@@ -541,7 +603,13 @@ class Blackboard:
         ``idx_events_parent`` index, so a consumer that wants only the events posted ABOUT a
         given event (e.g. the critic verdicts on a finding) reads O(children) rows instead of
         scanning every event of that kind and filtering in Python. Additive: ``None`` (default)
-        yields the identical query as before."""
+        yields the identical query as before.
+
+        ``until_id`` (R2) sets an INCLUSIVE upper id bound (``e.id <= until_id``). ``None``
+        (default) leaves the query unchanged. It lets a reader pin a consistent id snapshot so a
+        concurrent append (which necessarily gets a higher id) is excluded — the companion to the
+        ``since_id`` lower bound. ``until_id=0`` is honoured literally (bounds to the empty set),
+        so a caller may pass a pinned max id of 0 for an empty log without an unbounded read."""
         eid = engagement if isinstance(engagement, int) else self.engagement_id(engagement, create=False)
 
         sql = ["SELECT e.* FROM events e"]
@@ -560,6 +628,9 @@ class Blackboard:
         if since_id > 0:
             sql.append("AND e.id > ?")
             params.append(since_id)
+        if until_id is not None:
+            sql.append("AND e.id <= ?")
+            params.append(until_id)
         if kinds:
             placeholders = ",".join("?" * len(list(kinds)))
             sql.append(f"AND e.kind IN ({placeholders})")
@@ -603,18 +674,23 @@ class Blackboard:
 
     def count(
         self, *, engagement: str | int, kind: EventKind | None = None,
+        until_id: int | None = None,
     ) -> int:
+        """Count events for an engagement. ``until_id`` (R2) sets an INCLUSIVE upper id bound
+        (``id <= until_id``), the same consistent-snapshot bound ``read`` takes, so a count and a
+        paged read pinned to the same max id observe the same event set regardless of concurrent
+        appends. ``None`` (default) counts the whole log, unchanged; ``until_id=0`` counts the
+        empty set."""
         eid = engagement if isinstance(engagement, int) else self.engagement_id(engagement, create=False)
-        if kind is None:
-            row = self._conn.execute(
-                "SELECT COUNT(*) AS c FROM events WHERE engagement_id = ?", (eid,),
-            ).fetchone()
-        else:
-            row = self._conn.execute(
-                "SELECT COUNT(*) AS c FROM events "
-                "WHERE engagement_id = ? AND kind = ?",
-                (eid, kind),
-            ).fetchone()
+        sql = ["SELECT COUNT(*) AS c FROM events WHERE engagement_id = ?"]
+        params: list[Any] = [eid]
+        if kind is not None:
+            sql.append("AND kind = ?")
+            params.append(kind)
+        if until_id is not None:
+            sql.append("AND id <= ?")
+            params.append(until_id)
+        row = self._conn.execute(" ".join(sql), tuple(params)).fetchone()
         return int(row["c"])
 
     def latest_event_id(self, *, engagement: str | int) -> int:

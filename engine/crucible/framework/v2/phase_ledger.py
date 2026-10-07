@@ -55,7 +55,10 @@ import time
 from pathlib import Path
 from typing import Any, Callable, TypeVar
 
+from .common import logging as _v2log
 from .common import paths as _paths
+
+_log = _v2log.get_logger(__name__)
 
 T = TypeVar("T")
 
@@ -204,8 +207,11 @@ class PhaseLedger:
                 with os.fdopen(fd, "a", encoding="utf-8") as f:
                     f.write(json.dumps(rec, ensure_ascii=False, default=str,
                                        separators=(",", ":")) + "\n")
-        except Exception:
-            pass   # a ledger write failure is a recorded no-op, never a raise
+        except Exception as exc:
+            # A ledger write failure is a recorded no-op (never a raise) — but no longer SILENT: a lost
+            # checkpoint is a fail-open the operator should be able to see (a crash afterwards would
+            # re-run this phase rather than skip it). Log-only; changes no control flow and no verdict.
+            _log.warning("phase_ledger.append_failed", phase=phase, status=status, error=str(exc))
         self._emit(phase, status)
 
     def _emit(self, phase: str, status: str) -> None:
@@ -257,6 +263,9 @@ class PhaseLedger:
         ``fn`` may carry its own side effects (mutating the run ``result``); its return value is
         passed straight back. This wrapper NEVER raises."""
         if not enabled:
+            # The phase's opt-in flag is off — a legitimate fail-open skip, but make it VISIBLE instead of
+            # silent so a skipped step shows up in the record (log-only; returns default exactly as before).
+            _log.info("phase_ledger.phase_skipped_disabled", phase=phase)
             return default
         if not self.should_run(phase):
             self.skip(phase)

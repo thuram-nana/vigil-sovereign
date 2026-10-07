@@ -971,7 +971,7 @@ def _tls_capture(host: str, port: int, *, slug: str, protocol: str = "tcp") -> d
     # rebinding / short-TTL / poisoned-resolver window the pin exists to close (measured: the gate
     # authorised 93.184.216.34, the capture dialled the name, the next resolution returned
     # 169.254.169.254). Resolve once HERE and dial the validated literal; SNI keeps the hostname.
-    pin = pin_egress(host, int(port), slug=slug,
+    pin = pin_egress(host, int(port), slug=slug, loopback_allowed_if_scoped=True,
                      address_authorized=charter_address_authorizer(slug, host))
     if not pin.allowed:
         return {"connected": False, "host": str(host), "port": port, "error": pin.refused_reason}
@@ -1019,7 +1019,7 @@ def _tls_cert_capture(host: str, port: int, *, slug: str, protocol: str = "tcp")
     from framework.v2.verify import capture_tls_handshake  # offense-side only (FATAL-2: function-local)
     from .egress_floor import charter_address_authorizer, pin_egress, pinned_tls_connector
 
-    pin = pin_egress(host, int(port), slug=slug,
+    pin = pin_egress(host, int(port), slug=slug, loopback_allowed_if_scoped=True,
                      address_authorized=charter_address_authorizer(slug, host))
     if not pin.allowed:
         return {"connected": False, "host": str(host), "port": port, "error": pin.refused_reason}
@@ -1934,7 +1934,7 @@ def _default_capture(host: str, port: int, *, slug: str, protocol: str) -> dict:
     # the floor is only consulted for a connect that would really have happened.
     if str(protocol).strip().lower() != "tcp":
         return capture_handshake(host, port, slug=slug, protocol=protocol)
-    pin = pin_egress(host, int(port), slug=slug,
+    pin = pin_egress(host, int(port), slug=slug, loopback_allowed_if_scoped=True,
                      address_authorized=charter_address_authorizer(slug, host))
     if not pin.allowed:
         return {"connected": False, "host": str(host), "port": port, "protocol": protocol,

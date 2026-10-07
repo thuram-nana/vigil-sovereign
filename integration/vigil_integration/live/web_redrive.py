@@ -1149,7 +1149,7 @@ def _gated_web_send(slug: str, *, timeout: float = 8.0, budget: "GatedRequestBud
         parts = urlsplit(req.url)
         target_host = parts.hostname or ""
         target_port = parts.port or (443 if parts.scheme == "https" else 80)
-        resolution = pin_egress(target_host, target_port, slug=slug,
+        resolution = pin_egress(target_host, target_port, slug=slug, loopback_allowed_if_scoped=True,
                                 address_authorized=_address_authorized_for(target_host))
         if not resolution.allowed:
             state["no_channel"] += 1

@@ -20,19 +20,27 @@ called by the INTEGRATION-SIDE RE-DRIVE paths and by the runner's own gated capt
   * ``remediation/live_adapter.py`` and ``remediation/differential_adapter.py`` (the TLS-SPKI identity
     samples taken on an operator-triggered re-test)
 
-ENGINE-SIDE RESIDUAL (explicitly NOT closed here, and not claimed to be). ``framework.v2`` still holds
-connect sites this module does not sit in front of, and a caller that reaches them directly gets the
-string-only chain:
+ENGINE-SIDE SITES (now CLOSED by the engine's own floor — this note is kept current). ``framework.v2``
+holds raw connect sites this module does not sit in front of. They are NOT left on the string-only chain:
+each routes through ``common.egress_pin.resolve_and_pin`` — the engine's re-use of the SAME shared
+``vigil_gateway.denylist`` floor — which resolves ONCE, refuses every metadata/link-local/RFC1918/reserved
+address (directly OR via a rebinding answer), and PINS the connect to the validated IP:
 
-  * ``scanner/smuggling.py:raw_send``  — a raw socket with NO gate of its own at all.
-  * ``verify/reachability.py:_socket_connect`` and ``verify/tls.py:_tls_connect`` — re-resolve the NAME
-    and dial it whenever the caller does not inject a pinned ``connect=``. Every call site in the list
-    above now injects one; an engine-internal caller (e.g. ``engage_fusion``) does not.
+  * ``scanner/smuggling.py:raw_send`` — gated (#879): a NAME floor (``validate_action`` under a slug, else
+    the categorical protected-domain floor) THEN ``resolve_and_pin``. A directly-passed loopback LITERAL is
+    dialled without the denylist (a literal resolves to itself, so it is not a rebinding vector); a NAME
+    that resolves to loopback / metadata / RFC1918 still goes through the floor and is refused.
+  * ``verify/reachability.py:_socket_connect`` and ``verify/tls.py:_tls_connect`` — gated (#874): when the
+    caller does not inject a pinned ``connect=`` (the engine-internal path, e.g. ``engage_fusion``) the
+    connector resolves via ``resolve_and_pin`` and dials the PINNED IP (TLS keeps SNI = host). A
+    test-injected ``connect`` is hermetic and bypasses the DNS-performing floor by construction.
 
-So the honest framing is: this closes the class on the INTEGRATION RE-DRIVE PATHS, not repo-wide. The
-repo's recorded lesson (a class-bug recurs at every unguarded site, so close it with ONE shared helper)
-is why those paths all call :func:`pin_egress`; any future resolve-then-connect site must too, and the
-engine-side sites above remain open work.
+NAMED, DEFERRED residual (honestly open): ``verify/reachability_cloud.py``'s urllib GET runs the floor as a
+CHECK, but urllib re-resolves the name at connect, so a precisely-timed DNS rebinding is a narrow residual
+there — an IP-pin is deferred because it breaks a vhost's TLS cert validation. The recorded lesson (a
+class-bug recurs at every unguarded site, so close it with ONE shared helper) is why BOTH the integration
+re-drive paths (:func:`pin_egress`) and the engine sites (``resolve_and_pin``) reuse the one floor; any
+future resolve-then-connect site must too.
 
 WHAT IT ENFORCES, in order, before any byte leaves the box:
 
@@ -546,15 +554,20 @@ def _resolve(host: str, port: int, resolver: Callable[..., Any]) -> "list[str]":
 
 def pin_egress(host: str, port: Any = 0, *, slug: str = "",
                allowed_ips: Optional[Iterable[str]] = None,
-               loopback_allowed_if_scoped: bool = True,
+               loopback_allowed_if_scoped: bool = False,
                resolver: Optional[Callable[..., Any]] = None,
                address_authorized: Optional[Callable[[str], bool]] = None) -> EgressPin:
     """Resolve ``host``, run the never-liftable egress floor over EVERY resolved address, and return the
     address the caller must PIN its connection to. Total: never raises.
 
     ``allowed_ips`` defaults to :func:`charter_allowed_ips` for ``slug`` — the IP LITERALS of the signed
-    charter scope, the only set that may lift the private and (opted-in) loopback tiers. Pass an explicit
-    set only to narrow it or for a hermetic test. ``address_authorized`` is the scope-over-ADDRESSES
+    charter scope, the only set that may lift the private tier (and, with ``loopback_allowed_if_scoped``,
+    the loopback tier). Pass an explicit set only to narrow it or for a hermetic test.
+    ``loopback_allowed_if_scoped`` defaults False (fail-closed): a resolved-to-loopback destination is
+    REFUSED unless the CALLER opts in — the deliberate decision a re-drive path that engages an
+    owner-authorised loopback target (e.g. the MERIDIAN range) makes. Even then loopback lifts ONLY for
+    an exact charter IP literal, so the opt-in never widens a charter; the metadata/link-local/reserved
+    floor is never lifted either way. ``address_authorized`` is the scope-over-ADDRESSES
     predicate, applied to every address IN ADDITION to the floor; pass
     :func:`charter_address_authorizer` unless you have a narrower one. It may return a plain ``bool`` or
     ``(bool, reason)``; either way the outcome lands in ``pin.scope_checked`` so a caller (or a test) can

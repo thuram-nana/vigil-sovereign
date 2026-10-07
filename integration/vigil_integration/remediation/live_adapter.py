@@ -228,7 +228,7 @@ class LiveHttpAdapter:
         # validation runs on an operator-triggered RE-TEST after a fix, i.e. exactly when nobody is
         # watching the wire. Resolve once, adjudicate every address against the gateway denylist and the
         # charter, and PIN the handshake to the validated literal (SNI keeps the hostname).
-        pin = pin_egress(self._host, int(port), slug=self._slug,
+        pin = pin_egress(self._host, int(port), slug=self._slug, loopback_allowed_if_scoped=True,
                          address_authorized=charter_address_authorizer(self._slug, self._host))
         if not pin.allowed:
             raise RuntimeError(f"identity sample TLS handshake refused by the egress floor: "

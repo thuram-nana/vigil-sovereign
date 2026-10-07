@@ -149,6 +149,69 @@ def test_rollback_below_highwater_is_rejected(tmp_path: Path) -> None:
     b.close()
 
 
+# ---- R2: benign concurrent-append race must NOT produce a false tamper verdict ----
+
+
+def test_concurrent_append_during_verify_is_not_a_false_tamper(tmp_path: Path) -> None:
+    # A verify pins a consistent id snapshot (the max event id at entry) and bounds BOTH the
+    # paged read and the completeness count to it. A benign append that lands DURING the verify
+    # — here, committed by a second connection right between the paged read and the count —
+    # necessarily gets a higher id, so it falls OUTSIDE the snapshot and cannot make the read and
+    # count disagree. Before R2 it tripped the "incomplete spine read" fail-closed and reported a
+    # spurious broken chain.
+    db = tmp_path / "bb.sqlite"
+    b = open_blackboard(db_path=db)
+    b.engagement_id(_SLUG)
+    for i in range(5):
+        _obs(b, f"e{i}")
+    entries = build_spine_chain(b, _SLUG)
+
+    writer = open_blackboard(db_path=db)   # a SECOND, independent connection = a concurrent writer
+
+    real_count = b.count
+    fired = {"n": 0}
+
+    def racing_count(**kwargs):
+        # simulate the writer committing an append AFTER the paged read, BEFORE the count
+        if fired["n"] == 0:
+            fired["n"] = 1
+            writer.post(engagement=_SLUG, kind="observation", agent_name="a",
+                        payload={"source": "s", "surface": "p", "summary": "concurrent-append"})
+        return real_count(**kwargs)
+
+    b.count = racing_count   # type: ignore[method-assign]
+    ok, reason = verify_spine_chain(b, _SLUG, entries)
+    assert ok, f"benign concurrent append must not be reported as tamper: {reason}"
+
+    b.count = real_count     # type: ignore[method-assign]
+    # the append is real and now inside the snapshot → the stale chain is correctly detected
+    ok2, reason2 = verify_spine_chain(b, _SLUG, entries)
+    assert not ok2 and "mismatch" in reason2
+    writer.close()
+    b.close()
+
+
+def test_real_tamper_inside_the_snapshot_is_still_caught(tmp_path: Path) -> None:
+    # R2 only removes the benign-append race; a genuine tamper to a row INSIDE the pinned
+    # snapshot must still fail closed. Deleting a committed event (raw-DB tamper that bypasses
+    # the append-only triggers) makes the paged read and the count disagree within the snapshot.
+    db = tmp_path / "bb.sqlite"
+    b = open_blackboard(db_path=db)
+    b.engagement_id(_SLUG)
+    ids = [_obs(b, f"e{i}") for i in range(5)]
+    entries = build_spine_chain(b, _SLUG)
+    assert verify_spine_chain(b, _SLUG, entries)[0]
+
+    # raw-DB deletion of a middle event (within id <= max_id) — bypasses API discipline by
+    # dropping the append-only trigger, exactly the class of tamper the chain must still catch
+    b._conn.execute("PRAGMA foreign_keys = OFF")
+    b._conn.execute("DROP TRIGGER IF EXISTS bb_events_no_delete")
+    b._conn.execute("DELETE FROM events WHERE id = ?", (ids[2],))
+    b._conn.commit()
+    b._conn.execute("PRAGMA foreign_keys = ON")
+
+    ok, reason = verify_spine_chain(b, _SLUG, entries)
+    assert not ok and "mismatch" in reason   # the deleted event is detected
 # ---- O3: the RUNTIME CALLER — verify the live spine at engagement CLOSE ------------------------------------
 
 

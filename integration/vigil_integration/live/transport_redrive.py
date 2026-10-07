@@ -202,7 +202,7 @@ def _gate_refusal(host: str, port: int, *, slug: str, protocol: str, scheme: str
         # globally-routable ADDRESS. Without the predicate an out-of-scope second A record (8.8.8.8 on
         # an in-scope name) was allowed HERE while the smuggling/web sites refused it — the shared
         # docstring advertised the property this site did not have. One predicate, all four sites.
-        pin = pin_egress(host, int(port), slug=slug,
+        pin = pin_egress(host, int(port), slug=slug, loopback_allowed_if_scoped=True,
                          address_authorized=charter_address_authorizer(slug, host))
     except Exception as exc:  # noqa: BLE001 — a floor we could not RUN is a refusal, never a free pass
         return f"egress-floor error (fail-closed): {type(exc).__name__}: {exc}", None

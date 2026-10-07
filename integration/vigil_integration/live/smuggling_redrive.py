@@ -320,7 +320,7 @@ def _gated_raw_burst(origin_url: str, first_payload: bytes, follow_up: bytes, *,
     # an IP-literal charter row can satisfy — which made this site refuse a HOSTNAME-ONLY charter such
     # as the shipped ``targets/testasp/charter.md`` while the transport/race sites allowed it. The
     # kill-switch / entitlement half of ``_authorize`` already ran above, per request.
-    resolution = pin_egress(host, port, slug=slug,
+    resolution = pin_egress(host, port, slug=slug, loopback_allowed_if_scoped=True,
                             address_authorized=charter_address_authorizer(slug, host))
     if not resolution.allowed:
         return dict(empty), f"egress-floor/dns-pin refused: {resolution.refused_reason}"

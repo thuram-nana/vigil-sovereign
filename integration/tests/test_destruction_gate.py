@@ -366,3 +366,84 @@ def test_import_clean_no_offense_modules():
     import vigil_integration.destruction_gate  # noqa: F401
     assert not any(m == "framework" or m.startswith("framework.")
                    or m == "strix" or m.startswith("strix.") for m in sys.modules)
+
+
+# ---------------------------------------------------------------------------------------------------
+# R4 — EXECUTOR-SIDE command binding (close the approval->execution TOCTOU in Property 3)
+# ---------------------------------------------------------------------------------------------------
+#
+# The quorum signs an opaque ``action_id``; for a real destructive command the signer sets
+# ``action_id = command_action_id(command)`` and the privileged executor RE-DERIVES it at execution
+# time. A command swapped between approval and execution must be REFUSED at the executor (digest
+# mismatch), and the refusal must happen BEFORE the single-use nonce is burned.
+
+from vigil_integration.destruction_gate import (  # noqa: E402
+    command_action_id,
+    command_binding_reason,
+)
+
+_CMD = ["rm", "-rf", "--no-preserve-root", "/srv/acme/db"]
+
+
+def _signed_for_command(command, **auth_over):
+    """A fully owner-inclusive authorization whose action_id IS command_action_id(command)."""
+    aid = command_action_id(command)
+    action = _action(action_id=aid)
+    auth = _auth(action=action, **auth_over)
+    return action, _signed(auth=auth)
+
+
+def test_command_action_id_is_stable_and_domain_separated():
+    # Deterministic + re-derivable; a str and the equivalent argv are DISTINCT inputs (no confusion).
+    assert command_action_id(_CMD) == command_action_id(list(_CMD))
+    assert command_action_id("rm -rf /srv/acme/db") != command_action_id(_CMD)
+    # Domain separation: a command digest is NOT the authorization signing digest.
+    assert len(command_action_id(_CMD)) == 64  # sha256 hex
+
+
+def test_command_binding_reason_matches_and_mismatches():
+    aid = command_action_id(_CMD)
+    assert command_binding_reason(_CMD, aid) == ""
+    assert "command binding" in command_binding_reason(["rm", "-rf", "/other"], aid)
+    # fail-closed on a non-string approved id
+    assert "not a string" in command_binding_reason(_CMD, None)
+
+
+def test_executor_binds_the_approved_command(tmp_path):
+    # The command the executor runs == the one the quorum approved -> authorizes, returns the nonce.
+    action, signed = _signed_for_command(_CMD)
+    ledger = NonceLedger(str(tmp_path / "nonces"))
+    nonce = require_destruction_authorization(
+        action, signed, authority=AUTHORITY, now=NOW, ledger=ledger, command=_CMD)
+    assert nonce == signed.authorization.nonce
+
+
+def test_swapped_command_is_refused_at_execution_without_burning_the_nonce(tmp_path):
+    # The quorum approved _CMD; an attacker swaps in a DIFFERENT command at execution time.
+    action, signed = _signed_for_command(_CMD)
+    swapped = ["rm", "-rf", "--no-preserve-root", "/srv/victim/everything"]
+    ledger = NonceLedger(str(tmp_path / "nonces"))
+    with pytest.raises(DestructionRefused, match="command binding"):
+        require_destruction_authorization(
+            action, signed, authority=AUTHORITY, now=NOW, ledger=ledger, command=swapped)
+    # The refusal happened BEFORE any burn: the nonce is still unspent, so the GENUINE approved
+    # command can still execute exactly once.
+    assert ledger.is_consumed(signed.authorization.nonce) is False
+    nonce = require_destruction_authorization(
+        action, signed, authority=AUTHORITY, now=NOW, ledger=ledger, command=_CMD)
+    assert nonce == signed.authorization.nonce
+
+
+def test_command_binding_is_opt_in_and_quorum_still_required(tmp_path):
+    # With command=None behaviour is byte-identical to before (no binding enforced).
+    action, signed = _signed_for_command(_CMD)
+    ledger = NonceLedger(str(tmp_path / "nonces"))
+    assert require_destruction_authorization(
+        action, signed, authority=AUTHORITY, now=NOW, ledger=ledger) == signed.authorization.nonce
+    # Even a MATCHING command cannot rescue an under-quorum authorization: the m-of-n stays intact.
+    action2, under = _signed_for_command(_CMD)
+    under = _signed(auth=under.authorization, signer_ids=("owner",))  # 1 < 2
+    ledger2 = NonceLedger(str(tmp_path / "nonces2"))
+    with pytest.raises(DestructionRefused):
+        require_destruction_authorization(
+            action2, under, authority=AUTHORITY, now=NOW, ledger=ledger2, command=_CMD)

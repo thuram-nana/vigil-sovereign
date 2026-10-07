@@ -98,6 +98,7 @@ def _is_loopback_host(host: str) -> bool:
         return False
 
 from . import actions, api, chat, labels, sessions
+from ..agents.blackboard import current_append_tick, wait_for_append
 from .blackboard_sse import BlackboardTailer
 from .sse import EventTailer, stream_path
 
@@ -370,6 +371,11 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             self.wfile.write(b"retry: 3000\n\n")
             self.wfile.flush()
             while True:
+                # R5: capture the append tick BEFORE draining so an append that lands mid-drain is not a
+                # lost wakeup; then block on the spine NOTIFY instead of hot-polling. An in-process producer
+                # wakes us at once; a cross-process one just times out at 0.5s — byte-identical to the old
+                # poll. The read stays a durable-cursor replay, so the stream content is unchanged.
+                tick = current_append_tick()
                 for event_id, ev in tailer.read_new():
                     payload = json.dumps(ev, ensure_ascii=False, default=str)
                     self.wfile.write(f"id: {event_id}\ndata: {payload}\n\n".encode("utf-8"))
@@ -379,7 +385,7 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                     self.wfile.write(b": ping\n\n")  # heartbeat keeps the socket open
                     self.wfile.flush()
                     last_beat = now
-                time.sleep(0.5)
+                wait_for_append(0.5, since_tick=tick)
         except (BrokenPipeError, ConnectionResetError, OSError):
             return
         finally:

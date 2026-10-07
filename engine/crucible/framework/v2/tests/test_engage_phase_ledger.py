@@ -507,3 +507,43 @@ def test_preflight_refusal_is_recorded_and_raised(isolate, monkeypatch):
         run_engagement("alpha", "http://10.9.9.9/")     # not in the charter scope
     assert state["runs"] == 0                            # refused BEFORE any scan
     assert _statuses(_read_ledger("alpha"), P_PREFLIGHT) == ["started", "failed"]
+
+
+# ---------------------------------------------------------------------------
+# R5 — the fail-open checkpoint LOGS a skipped / lost step (it no longer fails open silently)
+# ---------------------------------------------------------------------------
+
+
+def test_run_phase_disabled_logs_the_skip(isolate, monkeypatch):
+    # enabled=False is a legitimate fail-open skip (the phase's opt-in flag is off). Behaviour is
+    # unchanged (fn not called, default returned), but the skip is now VISIBLE in the log rather than
+    # silent.
+    isolate("alpha")
+    from framework.v2 import phase_ledger as pl
+    seen = []
+    monkeypatch.setattr(pl._log, "info", lambda event, **kw: seen.append((event, kw)))
+    led = pl.PhaseLedger("alpha")
+    calls = []
+    out = led.run_phase("chaining", lambda: calls.append(1), enabled=False, default="DFLT")
+    assert out == "DFLT"
+    assert calls == []                                  # disabled → fn never ran (unchanged)
+    assert ("phase_ledger.phase_skipped_disabled", {"phase": "chaining"}) in seen
+
+
+def test_append_failure_is_logged_not_silent(isolate, monkeypatch):
+    # A ledger write failure stays a recorded no-op (never a raise), but is now logged as a fail-open
+    # so a lost checkpoint is visible.
+    isolate("alpha")
+    from framework.v2 import phase_ledger as pl
+    warned = []
+    monkeypatch.setattr(pl._log, "warning", lambda event, **kw: warned.append((event, kw)))
+    led = pl.PhaseLedger("alpha")
+
+    def _boom(*a, **k):
+        raise OSError("disk full")
+    monkeypatch.setattr(pl.os, "open", _boom)       # force the append write to fail
+
+    # must NOT raise — the engagement is never perturbed by a ledger write failure
+    led.start("chaining")
+    assert warned and warned[0][0] == "phase_ledger.append_failed"
+    assert warned[0][1].get("phase") == "chaining"
