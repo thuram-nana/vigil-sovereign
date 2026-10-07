@@ -33,9 +33,14 @@ from pathlib import Path
 
 import pytest
 
-from framework.v2.verify import oracles as O
-from framework.v2.verify.adapter import FindingContext
-from framework.v2.verify.verifier import OracleVerifier
+# Two-env boundary: this parity test imports the offense framework (framework.v2.verify.*) to compare the
+# zero-VIGIL standalone verifier against the REAL oracles, so it RUNS in the offense CI leg (engine/crucible
+# on PYTHONPATH) and SKIPS cleanly in the keyless boundary leg where framework is intentionally absent.
+pytest.importorskip("framework.v2")
+
+from framework.v2.verify import oracles as O  # noqa: E402
+from framework.v2.verify.adapter import FindingContext  # noqa: E402
+from framework.v2.verify.verifier import OracleVerifier  # noqa: E402
 
 _VERIFY_VF = Path(__file__).resolve().parents[2] / "docs" / "proof-carrying-finding" / "verify_vf.py"
 
