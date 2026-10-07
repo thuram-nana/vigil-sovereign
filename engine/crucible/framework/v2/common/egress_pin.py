@@ -26,7 +26,21 @@ the engine's re-use of the one shared floor, respecting layering: the engine may
 The floor is charter-independent where it must be: the metadata/link-local/reserved tier is NEVER liftable.
 The private and loopback tiers lift ONLY for an exact IP LITERAL written in the signed charter scope
 (``ethics.parse_scope`` filtered to literals — mirroring ``charter_allowed_ips``: literals only, no DNS, so
-there is no second DNS view that could authorise itself). Fail-closed throughout: any error REFUSES.
+there is no second DNS view that could authorise itself). Fail-closed throughout: any resolution/parse
+error REFUSES.
+
+GATEWAY-LESS ENGINE PLANE (the backstop). When ``vigil_gateway.denylist`` — the richer L3/L4 authority — is
+importable it stays the SOLE floor authority. When it is ABSENT (the CRUCIBLE-core "engine v2 test tree" CI
+leg and any ``vigil_core``-only sovereign deploy legitimately run gateway-less against OWNER-CONTROLLED
+loopback targets), the check does NOT fail-open (an unguarded connect) and does NOT fail the whole loopback
+plane closed; it DEGRADES to a pure-stdlib ``ipaddress`` structural floor (:func:`_stdlib_floor_denied`)
+that mirrors ``is_egress_denied``'s NEVER-LIFTABLE tier EXACTLY and applies the SAME charter-literal /
+loopback lift. The backstop is a strict structural SUBSET of the full denylist (identical refusals on the
+never-liftable tier; identical lifts), so it never contradicts or widens the richer authority — it only
+ever refuses, never authorises anything the full denylist would deny. This is the Lane-O disarm doctrine: a
+control degrades to its safe structural floor when its richer authority is absent, it does not fail-open.
+The INTEGRATION ``egress_floor.pin_egress`` real-external-egress plane always ships vigil_gateway and
+correctly stays fail-closed — no backstop there.
 
 DIVERGENCE from the integration ``pin_egress`` (deliberate, named): this helper enforces the L3/L4 floor +
 the anti-rebinding pin + the caller's name-level scope check (in each connector's ``_authorize``), but does
@@ -48,6 +62,139 @@ from typing import Any, Callable
 class EgressFloorRefused(Exception):
     """The never-liftable egress floor refused this destination. The message is the reason; callers turn
     it into a fail-closed ``connected: False`` / refusal, never an unguarded connect."""
+
+
+# ---------------------------------------------------------------------------
+# Stdlib structural BACKSTOP for the gateway-less engine plane (Lane-O disarm doctrine: a control
+# DEGRADES to its SAFE structural floor when its richer authority is absent — it does NOT fail-open).
+#
+# The engine's own scan/test plane (the CRUCIBLE-core "engine v2 test tree" CI leg, and any sovereign
+# deployment that ships only ``vigil_core`` + ``framework``) legitimately runs WITHOUT ``vigil_gateway``
+# on the path: it engages LOOPBACK werkzeug test servers the owner controls, and the two-env boundary
+# installs the gateway only on the offense egress plane. When ``vigil_gateway.denylist`` — the richer
+# L3/L4 authority — IS importable it stays the SOLE authority (see ``resolve_and_validate_all``). When it
+# is ABSENT the control must neither fail-OPEN (an unguarded connect — forbidden) nor fail the whole
+# loopback plane CLOSED (a gateway-less loopback scan is legitimate); it degrades to this pure-stdlib
+# floor, which mirrors ``is_egress_denied``'s NEVER-LIFTABLE tier EXACTLY and applies the SAME
+# charter-literal / loopback lift. The refused tier (metadata/link-local/multicast/CGNAT/RFC1918/ULA/
+# reserved/unspecified) is a strict structural SUBSET of the full denylist's refusals and the lifts are
+# identical, so it can never contradict or widen the richer authority — it only ever refuses, never
+# authorises anything the full denylist would deny. Pure ``ipaddress``: no DNS, no I/O, no clock.
+
+# Tier 1a — ABSOLUTE floor (never liftable). The exact non-loopback always-deny set from
+# ``vigil_gateway.denylist._ALWAYS_DENY_{V4,V6}`` (loopback split out to Tier 1b), re-expressed in stdlib.
+_BACKSTOP_ALWAYS_DENY_V4: tuple[str, ...] = (
+    "0.0.0.0/8", "169.254.0.0/16", "192.0.0.0/24", "192.0.2.0/24", "198.51.100.0/24",
+    "203.0.113.0/24", "198.18.0.0/15", "192.88.99.0/24", "224.0.0.0/4", "240.0.0.0/4",
+)
+_BACKSTOP_ALWAYS_DENY_V6: tuple[str, ...] = (
+    "::/128", "100::/64", "2001:db8::/32", "fd00:ec2::/32", "fe80::/10", "fec0::/10", "ff00::/8",
+)
+_BACKSTOP_ALWAYS_DENY_NETS = tuple(
+    ipaddress.ip_network(c) for c in (*_BACKSTOP_ALWAYS_DENY_V4, *_BACKSTOP_ALWAYS_DENY_V6))
+# Tier 1b — loopback: hard-denied unless the caller opts in AND the exact IP is charter-authorized.
+_BACKSTOP_LOOPBACK_NETS = (ipaddress.ip_network("127.0.0.0/8"), ipaddress.ip_network("::1/128"))
+# Tier 2 — private (RFC1918 / CGNAT / IPv6 ULA): denied unless the exact IP is a charter literal.
+_BACKSTOP_PRIVATE_NETS = tuple(
+    ipaddress.ip_network(c) for c in (
+        "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "100.64.0.0/10", "fc00::/7"))
+# Embedded-IPv4 forms, so ``::ffff:169.254.169.254`` / ``::169.254.169.254`` cannot evade the v6 check.
+_BACKSTOP_NAT64 = ipaddress.ip_network("64:ff9b::/96")
+_BACKSTOP_NAT64_LOCAL = ipaddress.ip_network("64:ff9b:1::/48")
+_BACKSTOP_IPV4_COMPAT = ipaddress.ip_network("::/96")
+_BACKSTOP_V6_UNSPEC = ipaddress.IPv6Address("::")
+_BACKSTOP_V6_LOOPBACK = ipaddress.IPv6Address("::1")
+
+
+def _coerce_allowed(allowed_ips: "Any") -> "frozenset[str]":
+    """Canonicalise the caller's authorized-IP allowlist to canonical string forms (mirrors
+    ``denylist._coerce_allowed``). Unparseable entries drop (they can never authorise anything)."""
+    out: set[str] = set()
+    for entry in allowed_ips or ():
+        try:
+            out.add(str(ipaddress.ip_address(str(entry).strip().strip("[]"))))
+        except ValueError:
+            continue
+    return frozenset(out)
+
+
+def _backstop_embedded_v4(ip: "ipaddress._BaseAddress") -> "ipaddress.IPv4Address | None":
+    """The IPv4 address embedded in an IPv6 form, else None (mirrors ``denylist._embedded_ipv4``)."""
+    if not isinstance(ip, ipaddress.IPv6Address):
+        return None
+    if ip.ipv4_mapped is not None:
+        return ip.ipv4_mapped
+    if ip.sixtofour is not None:
+        return ip.sixtofour
+    if ip in _BACKSTOP_NAT64 or ip in _BACKSTOP_NAT64_LOCAL:
+        return ipaddress.IPv4Address(int(ip) & 0xFFFFFFFF)
+    if ip in _BACKSTOP_IPV4_COMPAT and ip != _BACKSTOP_V6_UNSPEC and ip != _BACKSTOP_V6_LOOPBACK:
+        return ipaddress.IPv4Address(int(ip) & 0xFFFFFFFF)
+    return None
+
+
+def _backstop_candidates(ip: "ipaddress._BaseAddress") -> "list[Any]":
+    cands: list[Any] = [ip]
+    emb = _backstop_embedded_v4(ip)
+    if emb is not None:
+        cands.append(emb)
+    return cands
+
+
+def _backstop_in_any(ip: "Any", nets: "Any") -> bool:
+    return any(ip.version == net.version and ip in net for net in nets)
+
+
+def _stdlib_floor_denied(
+    ip_str: str,
+    allowed_ips: "Any" = None,
+    *,
+    loopback_allowed_if_scoped: bool = False,
+) -> "tuple[bool, str]":
+    """Pure-stdlib structural mirror of ``vigil_gateway.denylist.is_egress_denied`` — same signature,
+    same decision order, same never-liftable tier and same charter-literal / loopback lift — for the
+    gateway-less engine plane. Returns ``(denied, reason)``. It is a strict structural SUBSET of the full
+    denylist: it refuses the identical never-liftable tier (metadata/link-local/multicast/reserved/
+    unspecified) regardless of scope, lifts the private tier only for an exact charter literal, and lifts
+    loopback only on the caller's opt-in + an exact literal — so it never authorises anything the full
+    denylist would deny. Fail-closed: an unparseable address is denied."""
+    raw = (ip_str or "").strip().strip("[]")
+    try:
+        ip = ipaddress.ip_address(raw)
+    except ValueError:
+        return True, f"unparseable IP {ip_str!r} (fail-closed) [stdlib backstop]"
+    allowed = _coerce_allowed(allowed_ips)
+    cands = _backstop_candidates(ip)
+    # An IP that authorises itself must still not hit the never-liftable floor (checked FIRST below).
+    self_authorized = any(str(c) in allowed for c in cands)
+    # Tier 1a — the ABSOLUTE floor: metadata / link-local / multicast / reserved / unspecified. Never
+    # liftable by any scope or opt-in. The explicit CIDR set mirrors ``denylist._ALWAYS_DENY_*`` (minus
+    # loopback); the predicate fallbacks also refuse any future special-use block ipaddress learns.
+    # Loopback is EXCLUDED here and handled in Tier 1b — ``denylist`` splits loopback out of its
+    # always-deny set so an opted-in caller can lift it, and stdlib ``::1.is_reserved`` is True (``::1``
+    # sits in ``::/8``), which would otherwise wrongly hard-deny a charter-scoped loopback target.
+    for c in cands:
+        if not c.is_loopback and (
+                _backstop_in_any(c, _BACKSTOP_ALWAYS_DENY_NETS)
+                or c.is_link_local or c.is_multicast or c.is_reserved or c.is_unspecified):
+            return True, (f"{c} is in an always-denied range "
+                          "(metadata/link-local/multicast/reserved) [stdlib backstop]")
+    # Tier 1b — loopback: hard-denied unless the caller opted in AND the exact IP is charter-authorized.
+    for c in cands:
+        if _backstop_in_any(c, _BACKSTOP_LOOPBACK_NETS) or c.is_loopback:
+            if loopback_allowed_if_scoped and self_authorized:
+                return False, f"allowed ({c} is a charter-authorized loopback target) [stdlib backstop]"
+            return True, f"{c} is loopback (denied for egress) [stdlib backstop]"
+    # Tier 2 — private (RFC1918 / CGNAT / ULA): denied unless the exact IP is a charter literal.
+    for c in cands:
+        if (_backstop_in_any(c, _BACKSTOP_PRIVATE_NETS) or c.is_private) and not self_authorized:
+            return True, (f"{c} is private/internal and not in the charter-authorized "
+                          "allowlist [stdlib backstop]")
+    # Final — the destination must be globally routable (unless an exact literal lifted it above).
+    for c in cands:
+        if not c.is_global and not self_authorized:
+            return True, f"{c} is not globally routable (is_global=False) [stdlib backstop]"
+    return False, "allowed [stdlib backstop]"
 
 
 def _as_ip_literal(entry: str) -> str | None:
@@ -168,10 +315,16 @@ def resolve_and_validate_all(
         raise EgressFloorRefused("empty target host (fail-closed)")
     try:
         from vigil_gateway import denylist
-    except Exception as e:  # no floor importable => refuse rather than connect unguarded
-        raise EgressFloorRefused(
-            "egress floor (vigil_gateway.denylist) not importable, so no destination can be authorized "
-            f"(fail-closed): {type(e).__name__}: {e}") from e
+        floor_check = denylist.is_egress_denied  # the richer L3/L4 authority; SOLE authority when present
+    except Exception:
+        # Gateway-less engine plane (the CRUCIBLE-core engine test tree; a vigil_core-only sovereign
+        # deploy): DEGRADE to the pure-stdlib structural floor rather than fail-OPEN (an unguarded
+        # connect) or fail the whole legitimate loopback plane CLOSED. The backstop mirrors the
+        # never-liftable tier EXACTLY and is a strict structural subset of the full denylist, so it
+        # never widens it. Lane-O disarm doctrine: a control degrades to its safe structural floor when
+        # its richer authority is absent; it does not fail-open. (The INTEGRATION ``egress_floor``
+        # real-external-egress plane always ships vigil_gateway and correctly stays fail-closed.)
+        floor_check = _stdlib_floor_denied
     allowed = allowed_ips if allowed_ips is not None else charter_ip_literals(slug)
     resolve = resolver or socket.getaddrinfo
     try:
@@ -183,7 +336,7 @@ def resolve_and_validate_all(
         raise EgressFloorRefused(f"{h!r} resolved to no address (fail-closed)")
     for address in addresses:
         try:
-            denied, why = denylist.is_egress_denied(
+            denied, why = floor_check(
                 address, allowed, loopback_allowed_if_scoped=loopback_allowed_if_scoped)
         except Exception as e:  # a floor that errored refuses
             denied, why = True, f"egress-floor check errored (fail-closed): {type(e).__name__}: {e}"
