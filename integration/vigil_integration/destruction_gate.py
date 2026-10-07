@@ -29,10 +29,19 @@ Five properties, all fail-closed (first failure wins; any error or malformed inp
      the mandatory set is fixed at deployment and the gate refuses unless EVERY mandatory signer is
      among the valid signers. A worker+policy quorum without the owner authorizes nothing.
   3. **Action binding** — the signed authorization names the action (engagement, target, blast class,
-     action_id); it cannot be replayed to authorize a DIFFERENT authorization. NOTE: ``action_id`` is
-     an opaque string to this gate — binding to the real command depends on the signer computing
-     ``action_id = digest(command)`` and the executor re-deriving it; the gate never sees the command
-     and cannot enforce that. Property 3 is exact at the (engagement, target, class, action_id) level.
+     action_id); it cannot be replayed to authorize a DIFFERENT authorization. ``action_id`` is an
+     opaque string to the PURE decision; binding it to the real command is an EXECUTOR-SIDE step: the
+     signer computes ``action_id = command_action_id(command)`` at authorization time and the executor
+     RE-DERIVES ``command_action_id(command)`` at the moment of execution. R4 closes that TOCTOU: when
+     the privileged executor passes the ``command`` it is about to run to
+     :func:`require_destruction_authorization`, the gate re-derives the canonical, domain-separated
+     digest and REFUSES fail-closed unless it equals the quorum-approved ``action_id`` — so a command
+     swapped between approval and execution is rejected at execution (digest mismatch), BEFORE the
+     single-use nonce is burned (a mismatch cannot grief-burn a victim's nonce). The m-of-n quorum,
+     mandatory owner, dead-man's-switch and single-use are unchanged; this only BINDS the approved
+     command to the executed one. With no ``command`` passed, the binding is the caller's responsibility
+     exactly as before (e.g. the ``pr-<remediation_id>`` label leg), and Property 3 is exact at the
+     (engagement, target, class, action_id) level.
   4. **Dead-man's-switch (anti-dormancy)** — the validity window is bounded (``not_after`` and a
      policy-capped lifetime). A pre-signed, long-lived "sleeper" authorization is void; a quorum must
      re-authorize close in time to execution, bounding autonomy.
@@ -60,6 +69,7 @@ safe and runs in either environment; the offense worker consults it, it does not
 
 from __future__ import annotations
 
+import hmac
 from dataclasses import dataclass, field
 from numbers import Real
 from typing import Callable, Iterable
@@ -69,6 +79,7 @@ from vigil_core import (
     Signature,
     TrustRoot,
     canonical_json,
+    sha256_hex,
     sign,
     verify_threshold,
 )
@@ -90,6 +101,45 @@ from .live.nonce_ledger import NonceLedger
 # Fresh domain tag: a destruction authorization signature can NEVER be replayed as an evidence
 # certificate, a transparency checkpoint, an offense-gate open, or any other signed artifact.
 _DESTRUCTION_DOMAIN = b"vigil-destruction-authorization-v1\x00"
+
+# R4 — EXECUTOR-SIDE command binding. ``action_id`` in a DestructionAuthorization is an opaque string to
+# the m-of-n decision (Property 3): the quorum signs whatever ``action_id`` it is handed. For a real
+# destructive command the signer sets ``action_id = command_action_id(command)``, and the privileged
+# executor RE-DERIVES the same digest at the moment of execution and refuses unless it matches — so a
+# command swapped between approval and execution is rejected (digest mismatch). Domain-separated so a
+# command digest can never be confused with an authorization signature or any other signed artifact.
+_COMMAND_DOMAIN = b"vigil-destruction-command-v1\x00"
+
+
+def command_action_id(command: object) -> str:
+    """Canonical, domain-separated digest of the EXACT command a destructive action will run, for use as
+    a DestructionAuthorization ``action_id``. The signer computes it at authorization time; the executor
+    re-derives it at execution time (see :func:`require_destruction_authorization`'s ``command`` arg), and
+    a mismatch is a fail-closed DENY — this is what binds the approved command to the executed one.
+
+    Accepts a ``str`` (a shell/command line) or any JSON-serialisable structure (an argv ``list`` or a
+    param ``dict``), hashed via the SAME deterministic ``canonical_json`` the signing path uses, so the
+    digest is stable across processes and re-derivable offline. Deterministic and side-effect-free."""
+    payload = command.encode("utf-8") if isinstance(command, str) else canonical_json(command)
+    return sha256_hex(_COMMAND_DOMAIN + payload)
+
+
+def command_binding_reason(command: object, approved_action_id: object) -> str:
+    """Return "" if ``command`` re-derives to the quorum-approved ``approved_action_id``, else a
+    human-readable DENY reason. Fail-closed: a non-digestible command, or a non-string approved id, is a
+    DENY (never a silent allow). Constant-time compare on the hex digests. Pure — no I/O, no burn — so it
+    is safe to run BEFORE the single-use nonce is consumed (a swapped command refuses without burning the
+    victim's nonce)."""
+    if type(approved_action_id) is not str:
+        return "approved action_id is not a string — cannot bind the command (fail closed)"
+    try:
+        derived = command_action_id(command)
+    except Exception:  # noqa: BLE001 — a non-digestible command is never a valid binding
+        return "executed command is not digestible — fail closed (command binding)"
+    if not hmac.compare_digest(derived, approved_action_id):
+        return ("executed command does not match the authorized action_id "
+                "(command binding: a command swapped after approval is refused)")
+    return ""
 
 # Blast classes that REQUIRE a threshold authorization. Anything else is handled by the ordinary
 # conjunctive gate; these are the irreversible / high-radius classes.
@@ -417,6 +467,7 @@ def require_destruction_authorization(
     signed: SignedDestructionAuthorization,
     *,
     ledger: NonceLedger | None = None,
+    command: object | None = None,
     **kwargs,
 ) -> str:
     """Raise :class:`DestructionRefused` fail-closed unless ``action`` is threshold-authorized.
@@ -429,7 +480,20 @@ def require_destruction_authorization(
     (:func:`consume_authorization`) — the correct surface for an actual authorization, closing the
     single-use TOCTOU. Omitting ``ledger`` and passing the pure ``is_consumed`` keeps the check-only
     decision (:func:`authorize_destruction`); that leg is retained only for a caller that owns its own
-    atomic burn and MUST record consumption atomically at/after execution."""
+    atomic burn and MUST record consumption atomically at/after execution.
+
+    R4 — EXECUTOR-SIDE COMMAND BINDING (Property 3). Pass ``command`` (the exact command the executor is
+    about to run) to close the approval→execution TOCTOU: the gate re-derives
+    :func:`command_action_id` and REFUSES fail-closed unless it equals the quorum-approved
+    ``signed.authorization.action_id`` — so a command swapped after the quorum signed is rejected at
+    execution (digest mismatch). The check runs BEFORE any nonce burn, so a mismatched command cannot
+    grief-burn the victim's single-use nonce; only a matching command proceeds to the m-of-n /
+    single-use decision below, which is otherwise unchanged. With ``command=None`` behaviour is exactly
+    as before (the caller owns the action_id↔command binding, e.g. the ``pr-<remediation_id>`` leg)."""
+    if command is not None:
+        reason = command_binding_reason(command, getattr(getattr(signed, "authorization", None), "action_id", None))
+        if reason:
+            raise DestructionRefused(reason)
     if ledger is not None:
         decision = consume_authorization(action, signed, ledger=ledger, **kwargs)
     else:
