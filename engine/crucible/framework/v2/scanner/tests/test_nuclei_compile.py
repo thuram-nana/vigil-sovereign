@@ -582,3 +582,75 @@ def test_compiled_nuclei_http_entry_is_not_written_into_the_shipped_library() ->
     })
     after = {p.name for p in Path(LIBRARY_DIR).glob("*.json")}
     assert before == after and not any(n.startswith("nuclei-") for n in after)
+
+
+# ---------------------------------------------------------------------------
+# Wave B, slice B1 — breadth by INGESTION. A request that lists several FIXED probe paths compiles
+# to one independent, oracle-re-verified LibraryEntry per path (more LEADs, same oracle, same
+# discrimination gate). A compiled entry is a CHECK to run, never a fact: the fact exists only after
+# VIGIL's OWN oracle re-fires over a real response — no nuclei byte is ever trusted.
+# ---------------------------------------------------------------------------
+
+_MULTI_PATH_TEMPLATE = (
+    "id: multi-path-env\ninfo:\n  name: dotenv exposure\n  severity: high\n"
+    "http:\n  - method: GET\n    path:\n"
+    "      - '{{BaseURL}}/.env'\n      - '{{BaseURL}}/config/.env'\n      - '{{BaseURL}}/app/.env'\n"
+    "      - '{{BaseURL}}/.env'\n"                      # a duplicate — must be de-duplicated
+    "    matchers:\n      - type: word\n        part: body\n        words:\n          - 'DB_PASSWORD='\n"
+)
+
+
+def test_multi_path_request_compiles_one_entry_per_fixed_path() -> None:
+    res = compile_nuclei_template(_MULTI_PATH_TEMPLATE)
+    assert res.supported and res.entry is not None
+    # back-compat: `.entry` is the first path and keeps the canonical id.
+    assert res.entry.id == "nuclei-multi-path-env" and res.entry.oracle.probe_path == "/.env"
+    assert res.entries[0] is res.entry
+    # one entry per DISTINCT fixed path (the duplicate collapsed), each with a unique id.
+    assert [e.oracle.probe_path for e in res.entries] == ["/.env", "/config/.env", "/app/.env"]
+    assert len({e.id for e in res.entries}) == len(res.entries)
+    # every entry shares the one compiled matcher (same signature), and compiled_entries flattens them.
+    assert {e.oracle.signature for e in res.entries} == {"DB_PASSWORD="}
+    assert len(compiled_entries([res])) == 3
+
+
+def test_each_multi_path_entry_is_oracle_reverified_independently_and_mints_no_fact_from_bytes() -> None:
+    res = compile_nuclei_template(_MULTI_PATH_TEMPLATE)
+    tpl = _target_template()
+    for entry in res.entries:
+        p = entry.oracle.probe_path
+        check = compile_entry(entry)
+        # the signature really appears at THIS path -> VIGIL's own oracle re-fires -> a fact.
+        hit = _confirm(entry, check.probe(tpl, _resp(path=p, status=200, body="DB_PASSWORD=hunter2")), "High")
+        assert hit is not None and hit.confirmed_by == OracleKind.ACHIEVED_STATE, p
+        # the path exists but the signature is ABSENT -> oracle does NOT fire -> no fact from the mere path.
+        assert _confirm(entry, check.probe(tpl, _resp(path=p, status=200, body="nothing here")), "High") is None, p
+        # a match at a DIFFERENT path never fires this entry's check (host/path pinned).
+        assert _confirm(entry, check.probe(tpl, _resp(path="/elsewhere", status=200, body="DB_PASSWORD=x"))) is None
+
+
+def test_ingested_multi_path_entries_carry_only_lead_semantics() -> None:
+    """A compiled entry — for EVERY path — is a LibraryEntry (a check definition + provenance), never a
+    Finding/fact object. The ingestion widens the set of CHECKS, not the set of facts."""
+    res = compile_nuclei_template(_MULTI_PATH_TEMPLATE)
+    for entry in res.entries:
+        assert isinstance(entry, LibraryEntry)
+        assert "nuclei-template:multi-path-env" in entry.references   # provenance retained
+        assert entry.payload_family == "nuclei:multi-path-env"
+        # the entry is a re-verification spec, not a verdict: it carries an oracle to RUN.
+        assert entry.oracle.kind in ("signature", "nuclei_http")
+        assert not hasattr(entry, "confirmed_by")
+
+
+def test_multi_path_widening_is_deterministic() -> None:
+    a = compile_nuclei_template(_MULTI_PATH_TEMPLATE)
+    b = compile_nuclei_template(_MULTI_PATH_TEMPLATE)
+    assert [e.id for e in a.entries] == [e.id for e in b.entries]
+    assert [e.oracle.probe_path for e in a.entries] == [e.oracle.probe_path for e in b.entries]
+
+
+def test_single_path_template_entries_is_just_the_one_entry() -> None:
+    """Back-compat: a single-path template compiles to exactly one entry and ``entries == (entry,)``."""
+    res = compile_nuclei_template(_TEMPLATE)
+    assert res.supported and res.entry is not None
+    assert res.entries == (res.entry,)

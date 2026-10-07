@@ -2,6 +2,30 @@
   "schema": "vigil-capability-matrix/1",
   "upstream": "hexstrike-ai (0x4m4), pinned d689933 \u2014 vendored NON-runnable; 79 distinct external tools",
   "note": "fact_capable is set ONLY when a runner-owned oracle re-drive exists AND the ToolSpec passes the conformance battery (live.conformance). Everything else is LEAD-only or excluded. The count that matters is fact_capable, not the upstream tool count. Two FACT families are VIGIL-DIRECT (no tool is the authority): VERSION_RANGE via live.sbom (SBOM/dependency-CVE) and ACHIEVED_STATE via live.web_redrive \u2014 both HEADER-DERIVED (3xx Location, CORS headers, OIDC via Location) and BODY-DERIVED evidence. Body-derived branches are FACT-capable: the capture reverses Content-Encoding and determines the charset the way a browser does (integration/vigil_integration/live/body_decode.py \u2014 complete single-member gzip/deflate + the WHATWG encoding map), and the JS-redirect branch mints only from executable code, decided by a real tokenizer (engine/crucible/framework/v2/scanner/js_lex.py:sink_is_executable), not a regex. They remain NOT CLEAN-capable, for a different reason than the decode: a non-firing cannot distinguish 'the document declares no redirect' from 'we could not read the document', and lexing cannot prove a runtime-assembled sink absent. An undeclared charset, brotli/zstd, concatenated members and truncated reads are INCONCLUSIVE, and no-channel is INCONCLUSIVE not CLEAN. Their proposer tools (trivy/grype, httpx) keep fact_capable=false by design.",
+  "b2_grounding": {
+    "lane": "prod/gs-lane-b (B2)",
+    "grounded_against": "current code at this branch head; live.conformance REQUIRED_PROPERTIES is the gate",
+    "counts": {"fact_capable": 19, "sound_lead": 20, "blocked_excluded": 17, "total": 56},
+    "verdict": "HONEST CEILING REACHED — no remaining row is soundly addable via an existing OracleKind. No new OracleKind minted (frozen _ALL_ORACLES==15). No fact_capable flip: a FACT comes from a VIGIL-owned gated capture + a deterministic oracle re-fire, never a tool's bytes, and every remaining class is either already covered by a certified proposer, a heuristic/differential LEAD, a VIGIL-DIRECT-authority LEAD, or doctrine-BLOCKED.",
+    "not_fact_capable_rationale": {
+      "achieved_state_proposers_lead": {
+        "tools": ["httpx", "ffuf", "autorecon", "paramspider", "arjun", "x8"],
+        "reason": "httpx/ffuf feed achieved_state.endpoint_liveness, declared LEAD-only PERMANENTLY after five adversarial rounds (conformance fails positive_fact — the load-bearing reason they stay false, not a flag). ffuf is mechanically identical to the certified dir-brute proposers (gobuster/dirsearch/feroxbuster) and COULD feed web_redrive, but that surface is already covered by six certified proposers; adding ffuf would be a redundant proposer that overturns a settled, tested doctrine (widen-to-hit-a-number — forbidden). autorecon wraps the SERVICE_REACHABILITY scanners (redundant proposals). paramspider/arjun/x8 produce parameter/endpoint existence — a differential of the same downgraded class, not a VIGIL-re-observable achieved-state under any of the 15 oracles."
+      },
+      "scanner_template_heuristic_lead": {
+        "tools": ["nuclei", "nikto", "wpscan", "dalfox", "jaeles", "kube-hunter"],
+        "reason": "a template/signature match is a scanner's say-so, never the authority. nuclei is a SCANNERS-family bug-class DISPATCHER (its label can TRIGGER a web_redrive FACT attributed to ACHIEVED_STATE, but the tool stays fact_capable=false). dalfox targets XSS, for which no achieved-state oracle exists in the frozen 15 (XSS needs DOM rendering, not wired)."
+      },
+      "vigil_direct_authority_lead": {
+        "tools": ["trivy", "grype", "checkov", "terrascan", "kube-bench", "prowler", "scout-suite", "gdb"],
+        "reason": "trivy/grype propose SBOM rows but VIGIL's live.sbom VERSION_RANGE parse is the authority; checkov/terrascan propose IaC findings but live.iac_posture parse-proof is the authority; kube-bench reads config (heuristic); prowler/scout-suite need cloud credentials; gdb is a local binary debugger with no achieved-state claim mapping to the 15 oracles. In every case the tool is a proposer, not the fact authority."
+      },
+      "blocked_by_doctrine_excluded": {
+        "tools": ["sqlmap", "xsser", "metasploit", "pacu", "pwntools", "angr", "ropgadget", "ropper", "one-gadget", "libc-database", "pwninit", "hashpump", "hydra", "netexec", "responder", "john", "hashcat"],
+        "reason": "offense/exploitation and credential-access binaries — excluded=true by the offense-drift honesty invariant (validate_manifest forbids excluded+fact_capable)."
+      }
+    }
+  },
   "tools": [
     {
       "name": "nmap",

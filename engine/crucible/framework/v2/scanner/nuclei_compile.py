@@ -132,13 +132,21 @@ class CompiledTemplate:
     """The outcome of compiling one Nuclei template. ``supported`` is True with a populated ``entry``
     when the template fell in the subset this compiler understands; otherwise ``entry`` is None and
     ``reason`` explains why (the template degrades cleanly rather than being force-fit). ``template_id``
-    is the source template's id (provenance)."""
+    is the source template's id (provenance).
+
+    ``entry`` is the FIRST compiled check (back-compat: a single-path template's only entry). ``entries``
+    is EVERY compiled check — for a request that lists several fixed probe paths (Wave B, slice B1), each
+    path is an independent, equally re-verifiable probe carrying the SAME matcher predicate, so each
+    compiles to its own :class:`~scanner.library.LibraryEntry`. ``entries[0] is entry`` always; a
+    single-path template has ``entries == (entry,)``. Widening ingestion this way adds more oracle-BACKED
+    LEADs (checks CRUCIBLE's OWN oracle re-fires), never a fact — a compiled entry is a check to RUN."""
 
     template_id: str
     supported: bool
     entry: LibraryEntry | None = None
     reason: str = ""
     warnings: tuple[str, ...] = field(default_factory=tuple)
+    entries: tuple[LibraryEntry, ...] = field(default_factory=tuple)
 
 
 # ---------------------------------------------------------------------------
@@ -678,6 +686,31 @@ def _compile_request(request: dict) -> tuple[OracleSpec | None, tuple[str, ...],
     return spec, tuple(warnings), ""
 
 
+def _extra_probe_paths(request: dict, chosen_path: str) -> list[str]:
+    """The ADDITIONAL fixed probe paths a non-raw GET request lists beyond the one already compiled.
+
+    A nuclei request may enumerate several candidate paths (``path: ["{{BaseURL}}/a","{{BaseURL}}/b"]``)
+    that share one matcher block. Each path is an INDEPENDENT, equally re-verifiable probe, so compiling
+    all of them (not just the first) widens ingestion soundly — every extra path reuses the SAME compiled
+    matcher predicate and is re-fired by CRUCIBLE's OWN oracle. Returns the fixed, de-duplicated paths
+    other than ``chosen_path``, order-preserving. A raw request (no ``path`` list) yields none, and a
+    path carrying interpolation beyond ``{{BaseURL}}`` is dropped (it is not a fixed probe)."""
+    raw_paths = request.get("path")
+    if not isinstance(raw_paths, list) or len(raw_paths) < 2:
+        return []
+    out: list[str] = []
+    seen = {chosen_path}
+    for pv in raw_paths:
+        if not isinstance(pv, str) or not pv.strip():
+            continue
+        p = _strip_base_url(pv)
+        if p is None or p in seen:
+            continue
+        seen.add(p)
+        out.append(p)
+    return out
+
+
 # ---------------------------------------------------------------------------
 # the compiler
 # ---------------------------------------------------------------------------
@@ -752,23 +785,42 @@ def compile_nuclei_template(source: str | dict) -> CompiledTemplate:
     severity = _SEVERITY_MAP.get(str(info.get("severity", "")).strip().lower(), "Info")
     bug_class = _bug_class_from_info(info)
     title = str(info.get("name") or template_id).strip() or template_id
+    references = _references(template_id, info)
+    remediation = str(info.get("remediation") or "")
 
-    try:
-        entry = LibraryEntry(
-            id=f"nuclei-{template_id}",
+    # Each fixed probe path the chosen request lists is its own independent, re-verifiable probe carrying
+    # the SAME compiled matcher spec. Compile all of them (the first keeps the back-compat id/probe_path;
+    # extras get a distinct id + probe_path) so ingestion is wider without widening fact-capability — each
+    # extra entry is still a LEAD check re-fired by CRUCIBLE's OWN oracle.
+    extra_paths = _extra_probe_paths(http[chosen_idx], spec.probe_path or "")
+
+    def _build_entry(entry_id: str, oracle_spec: "OracleSpec") -> LibraryEntry:
+        return LibraryEntry(
+            id=entry_id,
             bug_class=bug_class,
             title=title,
             severity=severity,
             applies_when={"always": True},
-            oracle=spec,
-            references=_references(template_id, info),
-            remediation=str(info.get("remediation") or ""),
+            oracle=oracle_spec,
+            references=references,
+            remediation=remediation,
             payload_family=f"nuclei:{template_id}",
         )
+
+    try:
+        entries: list[LibraryEntry] = [_build_entry(f"nuclei-{template_id}", spec)]
+        for n, p in enumerate(extra_paths, start=2):
+            entries.append(_build_entry(f"nuclei-{template_id}--path{n}", spec.model_copy(update={"probe_path": p})))
     except Exception as e:   # noqa: BLE001 - a schema rejection is a clean unsupported outcome, not a crash
         return _unsupported(f"compiled entry failed schema validation: {e}", warnings)
 
-    return CompiledTemplate(template_id=template_id, supported=True, entry=entry, warnings=warnings)
+    if extra_paths:
+        warnings = warnings + (
+            f"multi-path request: compiled {len(entries)} probe paths, each re-verified independently",
+        )
+
+    return CompiledTemplate(template_id=template_id, supported=True, entry=entries[0],
+                            warnings=warnings, entries=tuple(entries))
 
 
 def compile_nuclei_templates(sources: list[str | dict]) -> list[CompiledTemplate]:
@@ -802,5 +854,15 @@ def compile_nuclei_dir(directory: str | Path) -> list[CompiledTemplate]:
 
 def compiled_entries(results: list[CompiledTemplate]) -> list[LibraryEntry]:
     """The successfully-compiled :class:`~scanner.library.LibraryEntry` objects from a batch — the
-    subset an operator would hand to a campaign as ``library_entries``."""
-    return [r.entry for r in results if r.supported and r.entry is not None]
+    subset an operator would hand to a campaign as ``library_entries``. Multi-path templates contribute
+    one entry per fixed probe path (``CompiledTemplate.entries``); a single-path template contributes its
+    one ``entry`` — so the count is >= the number of supported templates."""
+    out: list[LibraryEntry] = []
+    for r in results:
+        if not r.supported:
+            continue
+        if r.entries:
+            out.extend(r.entries)
+        elif r.entry is not None:
+            out.append(r.entry)
+    return out
