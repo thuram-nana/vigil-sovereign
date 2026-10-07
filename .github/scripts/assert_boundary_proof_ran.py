@@ -26,6 +26,12 @@ REQUIRED: tuple[tuple[str, str], ...] = (
     ("test_no_sovereign_member_declares_offense_dependency", "two_env_boundary"),
     # the assert_no_offense / sys.modules scan in a REAL sovereign venv (framework/strix unimportable)
     ("test_real_sovereign_venv_cannot_reach_offense", "two_env_boundary"),
+    # the VACUITY proof: with engine/crucible on the path a real offense module IS loaded and
+    # assert_no_offense must FIRE — this is what proves the boundary guard is not a no-op. It has
+    # its own pytest.skip sites (crucible absent / deps unavailable in the subprocess), so without
+    # it here a silently-skipped vacuity proof would let the positive proof pass green while the
+    # detector itself was never exercised. (R3)
+    ("test_guard_is_not_vacuous_negative_control", "two_env_boundary"),
     # a keyless offense actor cannot forge a verifiable governance event (proven vs the real sigil module)
     ("test_keyless_actor_cannot_forge_a_verifiable_governance_event", "offense_worker_keyless"),
 )

@@ -43,6 +43,7 @@ _ENFORCER_BASENAME = "assert_boundary_proof_ran.py"
 _REQUIRED_PROOFS = (
     "test_no_sovereign_member_declares_offense_dependency",
     "test_real_sovereign_venv_cannot_reach_offense",
+    "test_guard_is_not_vacuous_negative_control",
     "test_keyless_actor_cannot_forge_a_verifiable_governance_event",
 )
 
@@ -241,6 +242,7 @@ def _all_passed_entries() -> list[tuple[str, str, str | None]]:
     return [
         ("tests.test_two_env_boundary", "test_no_sovereign_member_declares_offense_dependency", None),
         ("tests.test_two_env_boundary", "test_real_sovereign_venv_cannot_reach_offense", None),
+        ("tests.test_two_env_boundary", "test_guard_is_not_vacuous_negative_control", None),
         ("tests.test_offense_worker_keyless", "test_keyless_actor_cannot_forge_a_verifiable_governance_event", None),
     ]
 
@@ -256,6 +258,18 @@ def test_enforcer_fails_when_a_boundary_proof_is_skipped(tmp_path):
     entries = _all_passed_entries()
     # skip the assert_no_offense / sys.modules scan — exactly the importorskip case this slice closes
     entries[1] = (entries[1][0], entries[1][1], "sigil not importable here")
+    report = _junit(tmp_path, entries)
+    assert mod.main(["assert_boundary_proof_ran.py", report]) == 1
+
+
+def test_enforcer_fails_when_the_vacuity_proof_is_skipped(tmp_path):
+    # R3: the FATAL-2 vacuity negative control (a real offense module IS loaded and the guard must
+    # FIRE) has its own pytest.skip sites. A silent skip of it must fail the required job, not pass
+    # green with the detector unexercised.
+    mod = _load_enforcer()
+    entries = _all_passed_entries()
+    vac = next(i for i, e in enumerate(entries) if e[1] == "test_guard_is_not_vacuous_negative_control")
+    entries[vac] = (entries[vac][0], entries[vac][1], "crucible deps unavailable in this interpreter")
     report = _junit(tmp_path, entries)
     assert mod.main(["assert_boundary_proof_ran.py", report]) == 1
 

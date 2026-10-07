@@ -680,8 +680,9 @@ jobs:
         # THE POINT OF SLICE W0-13. The two-env boundary is what makes this a REQUIRED check; before this
         # step the job could go GREEN with that proof never having run. The sovereign pytest leg above wrote
         # a JUnit report; this reads it and FAILS the job unless every named boundary proof — the
-        # dependency-graph guarantee, the assert_no_offense / sys.modules scan (test_two_env_boundary), and
-        # the keyless-actor governance-forge proof — is present AND not skipped. A `pytest.importorskip`
+        # dependency-graph guarantee, the assert_no_offense / sys.modules scan, the not-vacuous
+        # negative control (test_two_env_boundary), and the keyless-actor governance-forge proof — is
+        # present AND not skipped. A `pytest.importorskip`
         # skip (e.g. if apps/sigil ever stopped importing from source) leaves a <skipped> testcase and
         # exits 0, which is exactly the "skipped proof == passing proof" hole this closes: here it is a hard
         # failure. --strict-markers/-p no:cacheprovider hygiene lives on the pytest run that produced the
