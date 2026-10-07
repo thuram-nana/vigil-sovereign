@@ -95,7 +95,9 @@ def capture_tls_handshake(
         if connect is None:
             try:
                 from ..common.egress_pin import resolve_and_pin
-                pinned = resolve_and_pin(str(host), int(port), slug=slug)
+                # Opt in to owner-scoped loopback (a charter-scoped loopback/MERIDIAN TLS target);
+                # loopback still lifts ONLY for an exact charter IP literal.
+                pinned = resolve_and_pin(str(host), int(port), slug=slug, loopback_allowed_if_scoped=True)
             except Exception as e:
                 return {**base, "error": f"egress floor refused: {e}"[:300]}
             result = _tls_connect(str(host), int(port), timeout, dial_ip=pinned)

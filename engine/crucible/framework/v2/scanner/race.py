@@ -238,7 +238,10 @@ def raw_race(
     # The metadata/link-local/RFC1918/reserved tier is NEVER in this set, so it is always refused.
     allowed_ips = frozenset({"127.0.0.1", "::1"}) | charter_ip_literals(effective_slug)
     try:
-        pinned_ip = resolve_and_pin(host, port, slug=effective_slug, allowed_ips=allowed_ips)
+        # Loopback-oriented engine: opt in so the loopback baseline + charter literals above lift the
+        # loopback tier (the default is now fail-closed). Metadata/link-local/RFC1918 stay never-liftable.
+        pinned_ip = resolve_and_pin(host, port, slug=effective_slug, allowed_ips=allowed_ips,
+                                    loopback_allowed_if_scoped=True)
     except EgressFloorRefused as exc:
         raise SovereigntyViolation(
             f"race burst refused: egress floor rejected {host!r} — the never-liftable "

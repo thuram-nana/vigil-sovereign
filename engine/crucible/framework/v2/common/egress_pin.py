@@ -119,7 +119,7 @@ def resolve_and_pin(
     *,
     slug: str = "",
     allowed_ips: "frozenset[str] | None" = None,
-    loopback_allowed_if_scoped: bool = True,
+    loopback_allowed_if_scoped: bool = False,
     resolver: Callable[..., Any] | None = None,
 ) -> str:
     """Resolve ``host`` and return the exact IP the caller MUST connect to, or raise
@@ -129,9 +129,14 @@ def resolve_and_pin(
 
     ``allowed_ips`` defaults to :func:`charter_ip_literals` for ``slug`` (the charter's IP literals — the
     only lift of the private/loopback tiers; the metadata/link-local/reserved tier is never lifted).
-    ``loopback_allowed_if_scoped`` defaults True: this is the offense engine engaging a loopback target its
-    signed charter authorises (e.g. a loopback range or MERIDIAN); loopback still lifts ONLY for an exact
-    charter IP literal. Total / fail-closed: any error REFUSES rather than connecting unguarded."""
+    ``loopback_allowed_if_scoped`` defaults False (fail-closed): a resolved-to-loopback destination is
+    REFUSED unless the CALLER explicitly opts in — the deliberate, greppable decision a path that engages
+    an owner-authorised loopback target (a loopback range or MERIDIAN) makes. Even when opted in, loopback
+    lifts ONLY for an exact charter IP literal, so the opt-in never widens a charter; a caller that does
+    not opt in (or a future one that forgets) gets the stricter refusal. The private (RFC1918/CGNAT/ULA)
+    tier is unaffected by this flag — it lifts on an exact charter literal regardless. The
+    metadata/link-local/reserved floor is never lifted either way. Total / fail-closed: any error
+    REFUSES rather than connecting unguarded."""
     h = (host or "").strip()
     if h.startswith("[") and h.endswith("]"):
         h = h[1:-1]

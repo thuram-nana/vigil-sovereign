@@ -259,7 +259,9 @@ def capture_anonymous_get(
             parts = urlsplit(str(url))
             _host = parts.hostname or ""
             _port = parts.port or (443 if (parts.scheme or "").lower() == "https" else 80)
-            resolve_and_pin(_host, int(_port), slug=slug)
+            # Opt in to owner-scoped loopback (a charter-scoped loopback recon GET); the floor still
+            # lifts loopback ONLY for an exact charter IP literal, so this never widens a charter.
+            resolve_and_pin(_host, int(_port), slug=slug, loopback_allowed_if_scoped=True)
         except Exception as e:
             return {**base, "error": f"egress floor refused: {e}"[:300]}
     conn = connect or _http_get

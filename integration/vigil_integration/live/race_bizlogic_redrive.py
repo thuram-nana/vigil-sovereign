@@ -243,7 +243,7 @@ def race_bizlogic_redrive(
     # ``address_authorized`` is the SAME shared predicate the other three re-drive sites use: the floor
     # allows any globally-routable address, so without it an out-of-scope second A record on an in-scope
     # name would be burst at. ``pin.scope_over_addresses`` records that the step ran.
-    race_pin = (pin_egress(host, port, slug=slug,
+    race_pin = (pin_egress(host, port, slug=slug, loopback_allowed_if_scoped=True,
                            address_authorized=charter_address_authorizer(slug, host))
                 if race_targets else None)
     if race_pin is not None and not race_pin.allowed:

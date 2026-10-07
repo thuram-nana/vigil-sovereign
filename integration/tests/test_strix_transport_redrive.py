@@ -1257,7 +1257,10 @@ def test_a_legal_ipv6_spelling_of_the_charters_own_row_authorises_its_own_target
     assert _ip.ip_address(row.strip("[]")) == _ip.ip_address(target.strip("[]")), "the case is malformed"
     _charter_hosts(tmp_path, row)
 
-    pin = pin_egress(target, 443, slug="alpha",
+    # The ``::1`` spellings are loopback; the floor now hard-denies loopback by DEFAULT, so this
+    # charter-scoped loopback engagement opts in exactly as the production re-drive paths do (the
+    # lift still requires the exact charter literal). Harmless for the public/ULA cases.
+    pin = pin_egress(target, 443, slug="alpha", loopback_allowed_if_scoped=True,
                      address_authorized=charter_address_authorizer("alpha", target))
 
     assert pin.floor_ran and not [a for a, d, _w in pin.checked if d], pin.checked

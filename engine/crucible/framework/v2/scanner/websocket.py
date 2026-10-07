@@ -292,7 +292,8 @@ def handshake(
     try:
         from ..common.egress_pin import resolve_and_pin
         allowed_ips = None if slug else _LOOPBACK_SCAN_ALLOWED
-        dial_ip = resolve_and_pin(host, port, slug=slug, allowed_ips=allowed_ips, resolver=resolver)
+        dial_ip = resolve_and_pin(host, port, slug=slug, allowed_ips=allowed_ips,
+                                  loopback_allowed_if_scoped=True, resolver=resolver)
     except Exception as exc:  # EgressFloorRefused and any other error both fail closed
         return None, Handshake(request=sent, accept_key=expected_accept,
                                error=f"egress floor refused (ip): {type(exc).__name__}: {exc}")

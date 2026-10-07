@@ -554,15 +554,20 @@ def _resolve(host: str, port: int, resolver: Callable[..., Any]) -> "list[str]":
 
 def pin_egress(host: str, port: Any = 0, *, slug: str = "",
                allowed_ips: Optional[Iterable[str]] = None,
-               loopback_allowed_if_scoped: bool = True,
+               loopback_allowed_if_scoped: bool = False,
                resolver: Optional[Callable[..., Any]] = None,
                address_authorized: Optional[Callable[[str], bool]] = None) -> EgressPin:
     """Resolve ``host``, run the never-liftable egress floor over EVERY resolved address, and return the
     address the caller must PIN its connection to. Total: never raises.
 
     ``allowed_ips`` defaults to :func:`charter_allowed_ips` for ``slug`` — the IP LITERALS of the signed
-    charter scope, the only set that may lift the private and (opted-in) loopback tiers. Pass an explicit
-    set only to narrow it or for a hermetic test. ``address_authorized`` is the scope-over-ADDRESSES
+    charter scope, the only set that may lift the private tier (and, with ``loopback_allowed_if_scoped``,
+    the loopback tier). Pass an explicit set only to narrow it or for a hermetic test.
+    ``loopback_allowed_if_scoped`` defaults False (fail-closed): a resolved-to-loopback destination is
+    REFUSED unless the CALLER opts in — the deliberate decision a re-drive path that engages an
+    owner-authorised loopback target (e.g. the MERIDIAN range) makes. Even then loopback lifts ONLY for
+    an exact charter IP literal, so the opt-in never widens a charter; the metadata/link-local/reserved
+    floor is never lifted either way. ``address_authorized`` is the scope-over-ADDRESSES
     predicate, applied to every address IN ADDITION to the floor; pass
     :func:`charter_address_authorizer` unless you have a narrower one. It may return a plain ``bool`` or
     ``(bool, reason)``; either way the outcome lands in ``pin.scope_checked`` so a caller (or a test) can

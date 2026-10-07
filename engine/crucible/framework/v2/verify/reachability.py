@@ -148,7 +148,9 @@ def capture_handshake(
     if connect is None:
         try:
             from ..common.egress_pin import resolve_and_pin
-            dial_host = resolve_and_pin(str(host), int(port), slug=slug)
+            # Opt in to owner-scoped loopback (engage_fusion against a charter-scoped loopback/MERIDIAN
+            # target); the floor still lifts loopback ONLY for an exact charter IP literal.
+            dial_host = resolve_and_pin(str(host), int(port), slug=slug, loopback_allowed_if_scoped=True)
         except Exception as e:
             return {**base, "error": f"egress floor refused: {e}"[:300]}
     try:
