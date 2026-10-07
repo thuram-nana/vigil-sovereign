@@ -150,7 +150,7 @@ sha256:f2f1254d298412b147019166db8f8201b30b635b79c40800964713e0ebbeca21
 | Verifier | sha256 |
 |---|---|
 | `docs/proof-carrying-finding/verify_pcf.py` | `6984865c11ce421de34a5542c4e19a118ff90ad0b3c03ed6b19718fef640a2b6` |
-| `docs/proof-carrying-finding/verify_vf.py` | `bbbd5f8dee0e8281accd21ddb3315af988ef9e35b907958c5eefd4cc0b3da7cf` |
+| `docs/proof-carrying-finding/verify_vf.py` | `216486814c477c06c5e44b5151adf2324d4c90d1b54fb488c3e21bffe412e4bc` |
 | `engine/crucible/framework/v2/evidence/audit_offline_verifier.py` | `32e134c20d60bb34b34ba4bf28dbdd959114d14d2366d5aadd364764681d9de6` |
 
 To confirm a verifier is the exact audited file, re-hash it and compare to the pin above (zero

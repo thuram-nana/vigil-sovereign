@@ -1,0 +1,1577 @@
+{
+ "service_reachability_oracle": {
+  "fire": {
+   "args": [
+    {
+     "connected": true,
+     "host": "10.0.0.5",
+     "port": 443
+    }
+   ],
+   "kwargs": {},
+   "fired": true,
+   "conclusive": true
+  },
+  "nofire": {
+   "args": [
+    {
+     "connected": false,
+     "host": "h",
+     "port": 22,
+     "error": "timeout"
+    }
+   ],
+   "kwargs": {},
+   "fired": false,
+   "conclusive": false
+  }
+ },
+ "anonymous_reachable_oracle": {
+  "fire": {
+   "args": [
+    {
+     "status": 200,
+     "body_len": 64,
+     "authenticated": false
+    }
+   ],
+   "kwargs": {},
+   "fired": true,
+   "conclusive": true
+  },
+  "nofire": {
+   "args": [
+    {
+     "status": 403,
+     "body_len": 20
+    }
+   ],
+   "kwargs": {},
+   "fired": false,
+   "conclusive": false
+  }
+ },
+ "tls_weakness_oracle": {
+  "fire": {
+   "args": [
+    {
+     "connected": true,
+     "host": "10.0.0.5",
+     "port": 443,
+     "tls_version": "TLSv1.1",
+     "cipher": "AES128-SHA"
+    }
+   ],
+   "kwargs": {},
+   "fired": true,
+   "conclusive": true
+  },
+  "nofire": {
+   "args": [
+    {
+     "connected": true,
+     "host": "h",
+     "port": 443,
+     "tls_version": "TLSv1.3",
+     "cipher": "TLS_AES_128_GCM_SHA256"
+    }
+   ],
+   "kwargs": {},
+   "fired": false,
+   "conclusive": false
+  }
+ },
+ "certificate_validity_oracle": {
+  "fire": {
+   "args": [
+    {
+     "host": "127.0.0.1",
+     "cert_der_b64": "MIIC4TCCAcmgAwIBAgIUOCLuny8z9wVG8nm4g5cF84iKna0wDQYJKoZIhvcNAQELBQAwHTEbMBkGA1UEAwwSVklHSUwgTTEuMyBUZXN0IENBMB4XDTI2MDgyODE4NTIzOFoXDTI2MDkyNzE4NTIzOFowIzEhMB8GA1UEAwwYdmlnaWwtY2VydC12YWxpZGl0eS50ZXN0MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAk5DfU9V8zy7IudgKbNR/c7AVUj4MtutJlD1ciHLXgHpZI1rmulTHEtZS5hhTPeCjYLgY+/ueAjeUvpPHQJTOg1etay1BzmN7zgGm+4o6iVV6/+XJGwNYE2AYJ/RixQYZdFwDfJ0evIwFBDDBVbtSZYGBRsbTB+kDcDZnNBdEd2Dj3+MU3cxV4SNcbov+mnHpRI5U02chhBU33jGvqMWJdavFbJWwciCAL4pkBIVcPhHzGticm3QTRx6BkGB/FeL/WLIBda7/8wZF1uV93sn+H3fVZwHJEnHtloqhrJ/0EsUiyRNaN+w2W1MDNSZvW6WPlswd1FQQkOP6TPAg24H+sQIDAQABoxMwETAPBgNVHREECDAGhwR/AAABMA0GCSqGSIb3DQEBCwUAA4IBAQB1Zyj6t2Tr9voAi+YIwacmfGnvlw1BDRyjWPDvxeF0Foj34kWRcIpGKwFAuJFBJjYof4XN38IycGv3ZggyS3IbZUdbfSB8rOGFz65FHV/Fgq12exHhlpKC9fLuSb2uQGr6LQ0dtFB3adyYWqedAmbe4gzDyW/9XkZfWPVbSJm8s0PqmN4jES67ply+GQXQBBgZ03noevMSKe7RdrmdcrByWyL8qAe+SJECL4ml8hnawkryWZh9s6C04IjFjaNzFRbLIHL7OhgbZiNA8c75FKv1LI0TINdZUmbOZuGgnHJNgvzSB0a08JYallqAhTj6Sl+4jn1Svr5CjXM4DaQsfLkV",
+     "captured_at_epoch": 1791399158,
+     "capture_time_source": "runner_clock"
+    }
+   ],
+   "kwargs": {},
+   "fired": true,
+   "conclusive": true
+  },
+  "nofire": {
+   "args": [
+    {
+     "host": "127.0.0.1",
+     "cert_der_b64": "MIIC0jCCAbqgAwIBAgIUB98hjAejgb3+2+j/RLsH8MNYwoAwDQYJKoZIhvcNAQELBQAwHTEbMBkGA1UEAwwSVklHSUwgTTEuMyBUZXN0IENBMB4XDTI2MTAwNjE4NTIzOVoXDTI3MTAwNzE4NTIzOVowFDESMBAGA1UEAwwJMTI3LjAuMC4xMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAvCQmCBBQ5l+FX5+xt5lSDgdgY426YJoRoujalo8b3iKr3brs56SXBn2xQBC84xD5j6awIReO3unwdyjUePvEs+eM2Uf9fSbik1Yc0mAv7NrNS53hFWbD65275ju9b8Ndb/6bdIIv4kpNenoDdmmpBuWy1hXsX806v/4p1VeJJfPvg/bUFgD/l1qzo81i5u33VeKY3faK9I1B2rfxAiMLr7XjnXBV4vIsOnkWBvkRFi3c2KVYYNy7kkfaV8fgmysiaDIoeOvRQOjuxUsQDYX/wJrWdJ8/8HOV6WKVq6wtaMlc4FKm8cPiw46g+Ug5LevT56SNFkL31sl30wmWJqfHkQIDAQABoxMwETAPBgNVHREECDAGhwR/AAABMA0GCSqGSIb3DQEBCwUAA4IBAQBQjyFs9itJsPdM7KUrI54kvDj3lCum/SSnQAFtLPwJShidwjRQZsala/aNWLhXQ9r/D/qrbnmx0WEUcpJMoihOXMByJPeM6k4wIhC6fwR0OmDHB5AdgQMT4fy9cmpgoxbNVl7TebGMt+tAoC+qx5786dZDqwQ/8Y4rOEBHYOaQ4Wqd0SxnfA62r9nGboJjmQ4XciB4DiGLjj+zzu0lbuTLR4HTqoGrL27lXN0+u+pk5BRnWZfZ56gji0WxcTekCNoXT+KpgdlvfD4tDjo+Y8xxpVB8yOYXK1Odu94GzoVMcHdRvb63YhOOuCjvGNaXS2JH8ETyyo30N4+GmU/X5YD0",
+     "captured_at_epoch": 1791399159,
+     "capture_time_source": "runner_clock"
+    }
+   ],
+   "kwargs": {},
+   "fired": false,
+   "conclusive": false
+  }
+ },
+ "credential_acceptance_oracle": {
+  "fire": {
+   "args": [
+    {
+     "corpus_id": "OBSIDIAN-TEST-corpus-7",
+     "credential_id": "admin:admin",
+     "policy": {
+      "corpus_id": "OBSIDIAN-TEST-corpus-7",
+      "should_reject": [
+       "admin:admin",
+       "root:toor",
+       "guest:guest"
+      ]
+     },
+     "protected_resource": {
+      "url": "https://app.example/account/settings",
+      "method": "GET",
+      "authenticated_signal": "data-account-id=\"acct_9f3kz7\"",
+      "login_redirect_locations": [
+       "https://app.example/login"
+      ]
+     },
+     "weak_access": {
+      "status": 200,
+      "body": "<main data-account-id=\"acct_9f3kz7\">Your account settings</main>",
+      "headers": {},
+      "url": "https://app.example/account/settings",
+      "method": "GET"
+     },
+     "baseline_access": {
+      "status": 401,
+      "body": "Authentication required",
+      "headers": {},
+      "url": "https://app.example/account/settings",
+      "method": "GET"
+     }
+    }
+   ],
+   "kwargs": {},
+   "fired": true,
+   "conclusive": true
+  },
+  "nofire": {
+   "args": [
+    {
+     "corpus_id": "OBSIDIAN-TEST-corpus-7",
+     "credential_id": "admin:admin",
+     "policy": {
+      "corpus_id": "OBSIDIAN-TEST-corpus-7",
+      "should_reject": [
+       "admin:admin",
+       "root:toor",
+       "guest:guest"
+      ]
+     },
+     "protected_resource": {
+      "url": "https://app.example/account/settings",
+      "method": "GET",
+      "authenticated_signal": "data-account-id=\"acct_9f3kz7\"",
+      "login_redirect_locations": [
+       "https://app.example/login"
+      ]
+     },
+     "weak_access": {
+      "status": 200,
+      "body": "<main data-account-id=\"acct_9f3kz7\">Your account settings</main>",
+      "headers": {},
+      "url": "https://app.example/account/settings",
+      "method": "GET"
+     },
+     "baseline_access": {
+      "status": 200,
+      "body": "<main>Public settings help page</main>",
+      "headers": {},
+      "url": "https://app.example/account/settings",
+      "method": "GET"
+     }
+    }
+   ],
+   "kwargs": {},
+   "fired": false,
+   "conclusive": false
+  }
+ },
+ "dom_execution_oracle": {
+  "fire": {
+   "args": [
+    [
+     "cxss00deadbeef"
+    ],
+    "cxss00deadbeef"
+   ],
+   "kwargs": {},
+   "fired": true,
+   "conclusive": true
+  },
+  "nofire": {
+   "args": [
+    [],
+    "cxss00deadbeef"
+   ],
+   "kwargs": {},
+   "fired": false,
+   "conclusive": false
+  }
+ },
+ "clickjacking_posture_oracle": {
+  "fire": {
+   "args": [
+    {
+     "rule": "framing_unprotected",
+     "url": "https://app.example/dash",
+     "headers": {
+      "content-type": "text/html",
+      "server": "nginx"
+     }
+    }
+   ],
+   "kwargs": {},
+   "fired": true,
+   "conclusive": true
+  },
+  "nofire": {
+   "args": [
+    {
+     "rule": "framing_unprotected",
+     "url": "https://x",
+     "headers": {
+      "content-type": "text/html",
+      "x-frame-options": "DENY"
+     }
+    }
+   ],
+   "kwargs": {},
+   "fired": false,
+   "conclusive": false
+  }
+ },
+ "csrf_posture_oracle": {
+  "fire": {
+   "args": [
+    {
+     "rule": "token_not_enforced",
+     "method": "POST",
+     "endpoint": "/api/profile",
+     "token_present_status": 200,
+     "token_absent_status": 200
+    }
+   ],
+   "kwargs": {},
+   "fired": true,
+   "conclusive": true
+  },
+  "nofire": {
+   "args": [
+    {
+     "rule": "token_not_enforced",
+     "method": "POST",
+     "endpoint": "/api/profile",
+     "token_present_status": 200,
+     "token_absent_status": 403
+    }
+   ],
+   "kwargs": {},
+   "fired": false,
+   "conclusive": false
+  }
+ },
+ "postmessage_posture_oracle": {
+  "fire": {
+   "args": [
+    {
+     "handler_source": "(function(){ top.postMessage(secretState, '*'); })()"
+    }
+   ],
+   "kwargs": {},
+   "fired": true,
+   "conclusive": true
+  },
+  "nofire": {
+   "args": [
+    {
+     "handler_source": "top.postMessage(secretState, 'https://trusted.example')"
+    }
+   ],
+   "kwargs": {},
+   "fired": false,
+   "conclusive": false
+  }
+ },
+ "mobile_posture_oracle": {
+  "fire": {
+   "args": [
+    {
+     "rule": "private_key_material",
+     "check_id": "secret:0",
+     "pem": "-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQC30LY3YFj9sS0L\nwtpfBAfAAK7oFofmoSZb5p90/AZuCsJDmI4iid5pX6/zqguNWXTqbklDFtlnUdQf\nlRoywVzalywlTVHM2AU4eB6iqB1qnHk8Oi6h0ZzosRGIMpS7RcKEOSMf7ZpZj7gh\nN/vb8EHFlDDSfo9/PVFRka04o/IFEUXWDVcwFf3n/MzqUsd06IG2+zRri1g1OHBa\nxllxcaHrRQ3sRN9cpTugyLpDHPqI0oCw2hxKl8SddZ8bXW+s+1KtJZw6WrBT7XaM\nGzmZWFoUn1XVRh43DPMWGVLM/94ZP273r1WNRjyQjyWMGlP81cE9/Yeh8TCWHoRm\n9DEmguBhAgMBAAECggEACHcJXoP78n+YDDhb5O/IfpWuzbE0mXuhiq5pzfye5tmX\n0tPsnxe7y8epu0jWXDBQM3ftkkl0AhomhhIlq8wz/zy306ZGUS6/5iGWrEAd41oT\niuFADVjb8cBZHG1TOaDvtrXzPDtti1h/GYfckVH0vslWtT7kU1mqzBzvaKduKWsA\npv8eOZkrL9YhQqJbVTe/WGXVdoHzBZkE1Mh0fQTiVhpmVvS5FAyVd+nQQ9TKP+XE\ng1oBJHDxx4bwqvyuKVCZa6RtYDNSwRzIAcQOO/BIJm5NGh7sbYGiT2U0CavjsB7c\nVSuFn80onnRkb1kjP82mS/hXDKbHykStw7S3rTL6pQKBgQDcL/1IeTJjkgoYJVue\n2WndH+H1JEPsKyTikimT15IShubpC6FkV7rMJ4TtQFargc8Gs/oFc+20driOfIVD\nCE5zBtq7ENqPGaeOTyJ2WsQPaRSnYdTJIzc8uQYImlIvY99o4kTnZwrJD6Z1dGGE\nzfb7O2zIdDwh+SUsA1jRqAru9QKBgQDVtkiAfB3NTJkMT8Yc8fMnoMKc/8DQYw0e\n1s2JIdjFwcsYg0XBn+ZwtC9oPn3kYEQgJOGv7PyBa2BUsHU3hahkuNFdBQ10R+tZ\neopILqqtW0wQ27Nybo3HEi70XmHSMQjRCCy0T+mTjoH96u4Bc8S3sXbEtPMA2o61\nANq5TnIwPQKBgQDHYyWHBUjd5ZcCeoHW/KXiuUZSSH7BU+hYy2afHCyIXmSnUALb\n7J2Y1YiHlyVktW2VclDLs0jjjEZfsN6z7serXd+gWgiwYNjcA0j/x/2Wvt8XG34m\njZ8te5a9H5GgnF3oik0/Bo47t9JStgrAygoHQq6lbqwtT4Gbs4Qwhm0wKQKBgG7v\nDxV61/FwmGV2p2zw/voMDdl3PLwvHmlqsQhFBIQqw2T3B2epu/G25oDjJ3A7tEFH\nQ8uRZcU8WqW7by0h+TZHZY42iDRa/MTWwh8T8k7IfGSn1q9IydmTC8KXl4mHIH95\nEdOLQ8DvkXSf1Wn1kSCVQwR6tUU1Liyww9i66rU1AoGAbSMe4JvIcuHp1z0qFftm\nj0IHqjIcEyJHJOa01i64lNygomACOHzbm06uozpOsn0fr2iGdq/NK39iCtZRrTF8\nvKpBnnMEqxfUIn8G4XQw6euqlRxsPx6hIs8IyX5ef/3TLjQBbt1rszHjK4hX5gEH\nzKNSFpdCWFIkd2JFbg9VSHY=\n-----END PRIVATE KEY-----\n"
+    }
+   ],
+   "kwargs": {},
+   "fired": true,
+   "conclusive": true
+  },
+  "nofire": {
+   "args": [
+    {
+     "rule": "private_key_material",
+     "check_id": "secret:0",
+     "pem": "-----BEGIN ENCRYPTED PRIVATE KEY-----\nMIIFNTBfBgkqhkiG9w0BBQ0wUjAxBgkqhkiG9w0BBQwwJAQQB7zXUQGppwhxgHT1\nx60P7AICCAAwDAYIKoZIhvcNAgkFADAdBglghkgBZQMEASoEEA/tiGhM+SjU6Yov\n5NW8Lw4EggTQ8jFqDxc/ANOWXowkqsxu9DVkE2oOSfF+3SV7I0MJXc68HHqEQu2j\nV1Q2dzCypvNe7kFh6DQLhfqMx0R64E0gBOGNrKSGNlkaqJiso7bAga6UoAb1SwR9\n7G1XVLvmFUUv2mhGtiPnrbEO4hXWY8R9O2fLYg+v/3s8da8u97NR0WnE6I6LBpOr\n6IvBQI+XcfeiVQUoeBMLT8qoVJDBjbp99GcjXR87qhXaKBe/5Kqr3sEWQEUCc9pZ\nmEB8iMs7vJBw27FsALzPVdq9NoOytfmqS+SND3lLmCcOdZOruULotC5g2r8Ix/nL\n+LpUy0vXhXrVqabEMhDAUfX1Dc+u8brjOJCPZ4t/lzsaA74FGkmAJTuEnFmHDxFS\nLt0Qq/E3Q0RPLcYbd5gHuVRhIsZ7WtaHXW1OoyNoxEz6OBBL1xlC3zXY71jxoM1g\n1g1Lj9FWZmtNRSy45yJZBLsQXT/+ZSwMd6xtddW1FGUedeuXKma0BqLG5hdfmPt6\n9Zv0eUoFQKIyLvs2PD34i6iZrxiN/Xbanr6eX6WBP0EFEWJBsKTrS8V5YAq1v99v\npYsE4WP6bOoZwFT4sfPeQjHitYHq09TXBOZVNXC5mjiQoNeiWZ9Qs0u5JmNPY+YJ\nsCcJVV+WNxBgg7fK4r8MlwqgCgURSeE5WIkTI5k0WRAPUnOtTdKtddHDFCBOPsMY\nOqfgUQ4p/4ozUeMo7YRAaHvnr4v/2iw9JSR+pWHnv1GrcXCH/gvfAXXikMd4Sndk\nOXVBv1CbLcGSk+D+d9ErMQ+a1N88vkfLDHiw8kXztS31I3wzzfui65vw5uyzhQFx\nIf5GHJOuILYfIfM3lgaTkJMC2hCzFBap9FBfqP7empKPlkhOuPNeJyBxStSC48Vg\n4oOLIGHpcwWSkSoHHUHPL6rDiuAIIdm4jMKuPdytbW+/FvbfByE2Ze8B5y/PazRz\nDoQd5Cak66xzSmeFGDtGjV2OMqFCal6/9I5YE2vZfbzSyfDH13PvNEQpqFGHe7be\n+qk+hrEG4EH3ZIFjCR6zNLG0mRCfDKGpvS6ny6cbAXRn0GfY+XVwfgHuV6xxQrbl\nf7RKYolZ/RuBIcd/rOOrRDYwgFCt0QIlIsNv5qIu76hQNzF+LJ30snRUc/iLHsuQ\nBHVMUAcfoGojoa598spCfSHV7IyxbhURBy7gOi82pi8Y/ic61+L0S2uOBbQwyfht\naMJ9+2U+R2wDiHc2SqNN7cWp94+2TuOY6F4AOyW6ga6iePBMACujL4SjGZIEwxD/\nyTJwmHAFsqDqESA4d1vCki8qFACMQ3m3H9Qwlqhegywx3FqR+McRsjiiJqrdAl0A\n4W3LE046fPr6n8wfNJQX08smL/j8kPzCaaXR48D5mUKckrMwxCE4aZj9o+bAihPI\nuWK4cORAh2jXavVC/ENxhYI+e91mptWylvpUlKMAvUaqDbWbhrGPBDzT3wyqxvBe\nXrKcLX4lXGJiuQwXNLGaSMgnpWiHIaAkLWQhNb5HIkbjTeFW0IAIWNgGnhRFoni5\neVK43am0Iavelnna5nTj79Gp150/fvJINC3uj5n61okNlvBCpV3jzvF6wyJdO9zE\nOgUeX8UmViAxjUejFw+DIskCbVuU3qLPK/CHwYkeJRsZShpxu8KvPQo=\n-----END ENCRYPTED PRIVATE KEY-----\n"
+    }
+   ],
+   "kwargs": {},
+   "fired": false,
+   "conclusive": false
+  }
+ },
+ "email_auth_posture_oracle": {
+  "fire": {
+   "args": [
+    {
+     "rule": "dmarc_missing",
+     "domain": "gov.example",
+     "dmarc_observed": true,
+     "is_org_domain": true
+    }
+   ],
+   "kwargs": {},
+   "fired": true,
+   "conclusive": true
+  },
+  "nofire": {
+   "args": [
+    {
+     "rule": "dmarc_missing",
+     "domain": "mail.gov.example",
+     "org_domain": "gov.example",
+     "org_dmarc_record": "v=DMARC1; p=reject",
+     "dmarc_observed": true,
+     "org_dmarc_observed": true
+    }
+   ],
+   "kwargs": {},
+   "fired": false,
+   "conclusive": false
+  }
+ },
+ "identity_posture_oracle": {
+  "fire": {
+   "args": [
+    {
+     "rule": "privileged_without_mfa",
+     "subject": "admin@x",
+     "privileged": true,
+     "mfa_enrolled": false
+    }
+   ],
+   "kwargs": {},
+   "fired": true,
+   "conclusive": true
+  },
+  "nofire": {
+   "args": [
+    {
+     "rule": "privileged_without_mfa",
+     "subject": "a",
+     "privileged": true,
+     "mfa_enrolled": true
+    }
+   ],
+   "kwargs": {},
+   "fired": false,
+   "conclusive": false
+  }
+ },
+ "jwt_forgery_oracle": {
+  "fire": {
+   "args": [
+    "eyJhbGciOiJub25lIiwidHlwIjoiSldUIn0.eyJzdWIiOiJhZG1pbiJ9."
+   ],
+   "kwargs": {
+    "candidate_keys": []
+   },
+   "fired": true,
+   "conclusive": true
+  },
+  "nofire": {
+   "args": [
+    "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJhZG1pbiJ9.ZFSJLnEXyVF9Wo6aUto_3yZHdI2QQuZNQSjrvM7lRYE"
+   ],
+   "kwargs": {
+    "candidate_keys": [
+     "wrong"
+    ]
+   },
+   "fired": false,
+   "conclusive": false
+  }
+ },
+ "imds_credential_capture_oracle": {
+  "nofire": {
+   "args": [
+    {
+     "credential": {
+      "AccessKeyId": "ASIAZZ7EXAMPLE0KEY01",
+      "SecretAccessKey": "[REDACTED]",
+      "Token": "[REDACTED]",
+      "source": "http://169.254.169.254/latest/meta-data/iam/security-credentials/app-role",
+      "credential_fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "resolved_peer": "169.254.169.254",
+      "no_proxy": true,
+      "no_redirect": true
+     },
+     "provider": "aws",
+     "confirming_call": {
+      "status": 200,
+      "action": "sts:GetCallerIdentity",
+      "response": {
+       "__type": "InvalidClientTokenId",
+       "message": "invalid"
+      }
+     }
+    }
+   ],
+   "kwargs": {},
+   "fired": false,
+   "conclusive": false
+  },
+  "fire": {
+   "args": [
+    {
+     "credential": {
+      "AccessKeyId": "ASIAZZ7EXAMPLE0KEY01",
+      "SecretAccessKey": "[REDACTED]",
+      "Token": "[REDACTED]",
+      "source": "http://169.254.169.254/latest/meta-data/iam/security-credentials/app-role",
+      "credential_fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "resolved_peer": "169.254.169.254",
+      "no_proxy": true,
+      "no_redirect": true
+     },
+     "provider": "aws",
+     "confirming_call": {
+      "status": 200,
+      "action": "sts:GetCallerIdentity",
+      "endpoint": "https://sts.amazonaws.com/",
+      "credential_fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "resolved_peer": "72.21.206.80",
+      "response_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "tls_verified": true,
+      "no_proxy": true,
+      "no_redirect": true,
+      "response": {
+       "Arn": "arn:aws:sts::123456789012:assumed-role/app-role/i-0abc123def",
+       "Account": "123456789012",
+       "UserId": "AROAEXAMPLEID12345:i-0abc123def"
+      }
+     }
+    }
+   ],
+   "kwargs": {},
+   "fired": true,
+   "conclusive": true
+  }
+ },
+ "exposed_secret_validity_oracle": {
+  "fire": {
+   "args": [
+    {
+     "secret_type": "aws_access_key",
+     "credential": {
+      "identifier": "AKIA1234567890ABCDEF",
+      "secret": "[REDACTED]",
+      "credential_fingerprint": "fp-aws-1",
+      "source": "js:app.min.js:1024"
+     },
+     "confirming_call": {
+      "action": "sts:GetCallerIdentity",
+      "status": 200,
+      "credential_fingerprint": "fp-aws-1",
+      "endpoint": "https://sts.us-east-1.amazonaws.com/",
+      "tls_verified": true,
+      "no_proxy": true,
+      "no_redirect": true,
+      "resolved_peer": "1.2.3.4",
+      "response_digest": "sha256:aaa",
+      "response": {
+       "Arn": "arn:aws:iam::123456789012:user/leaked",
+       "Account": "123456789012",
+       "UserId": "AIDAEXAMPLE"
+      }
+     }
+    }
+   ],
+   "kwargs": {},
+   "fired": true,
+   "conclusive": true
+  },
+  "nofire": {
+   "args": [
+    {
+     "secret_type": "mystery_token",
+     "credential": {
+      "identifier": "AKIA1234567890ABCDEF",
+      "secret": "[REDACTED]",
+      "credential_fingerprint": "fp-aws-1",
+      "source": "js:app.min.js:1024"
+     },
+     "confirming_call": {
+      "action": "sts:GetCallerIdentity",
+      "status": 200,
+      "credential_fingerprint": "fp-aws-1",
+      "endpoint": "https://sts.us-east-1.amazonaws.com/",
+      "tls_verified": true,
+      "no_proxy": true,
+      "no_redirect": true,
+      "resolved_peer": "1.2.3.4",
+      "response_digest": "sha256:aaa",
+      "response": {
+       "Arn": "arn:aws:iam::123456789012:user/leaked",
+       "Account": "123456789012",
+       "UserId": "AIDAEXAMPLE"
+      }
+     }
+    }
+   ],
+   "kwargs": {},
+   "fired": false,
+   "conclusive": false
+  }
+ },
+ "iam_escalation_oracle": {
+  "fire": {
+   "args": [
+    {
+     "base_principal": "role/dev",
+     "target_resource": "s3/crown-jewels",
+     "target_access": "admin",
+     "graph": {
+      "grants": [
+       {
+        "principal": "role/admin",
+        "resource": "s3/crown-jewels",
+        "access": "admin"
+       }
+      ],
+      "assume": [],
+      "member_of": []
+     },
+     "escalation": {
+      "primitive": "assume_role_trust_rewrite",
+      "via": "role/admin",
+      "statements": [
+       {
+        "effect": "Allow",
+        "action": [
+         "sts:AssumeRole",
+         "iam:UpdateAssumeRolePolicy"
+        ],
+        "resource": [
+         "role/admin"
+        ]
+       }
+      ]
+     }
+    }
+   ],
+   "kwargs": {},
+   "fired": true,
+   "conclusive": true
+  },
+  "nofire": {
+   "args": [
+    {
+     "base_principal": "role/dev",
+     "target_resource": "s3/crown-jewels",
+     "target_access": "admin",
+     "graph": {
+      "grants": [
+       {
+        "principal": "role/admin",
+        "resource": "s3/crown-jewels",
+        "access": "admin"
+       }
+      ],
+      "assume": [],
+      "member_of": []
+     },
+     "escalation": {
+      "primitive": "iam:DeleteUser",
+      "via": "role/admin",
+      "statements": [
+       {
+        "effect": "Allow",
+        "action": [
+         "sts:AssumeRole",
+         "iam:UpdateAssumeRolePolicy"
+        ],
+        "resource": [
+         "role/admin"
+        ]
+       }
+      ]
+     }
+    }
+   ],
+   "kwargs": {},
+   "fired": false,
+   "conclusive": false
+  }
+ },
+ "k8s_rbac_verb_grant_oracle": {
+  "fire": {
+   "args": [
+    {
+     "check_id": "clusterrolebinding:custom-reader",
+     "binding": {
+      "kind": "ClusterRoleBinding",
+      "namespace": "",
+      "name": "b1",
+      "subjects": [
+       {
+        "kind": "User",
+        "name": "system:anonymous",
+        "namespace": "",
+        "api_group": "rbac.authorization.k8s.io"
+       }
+      ],
+      "role_ref": {
+       "name": "custom-reader",
+       "kind": "ClusterRole",
+       "api_group": "rbac.authorization.k8s.io"
+      }
+     },
+     "role_object": {
+      "name": "custom-reader",
+      "kind": "ClusterRole",
+      "api_group": "rbac.authorization.k8s.io",
+      "namespace": "",
+      "rules": [
+       {
+        "verbs": [
+         "get",
+         "list",
+         "watch"
+        ],
+        "resources": [
+         "secrets"
+        ],
+        "apiGroups": [
+         ""
+        ]
+       }
+      ],
+      "rules_source": "live_clusterrole_get"
+     }
+    }
+   ],
+   "kwargs": {},
+   "fired": true,
+   "conclusive": true
+  },
+  "nofire": {
+   "args": [
+    {
+     "check_id": "rolebinding:admin",
+     "binding": {
+      "kind": "RoleBinding",
+      "namespace": "default",
+      "name": "b1",
+      "subjects": [
+       {
+        "kind": "ServiceAccount",
+        "name": "default",
+        "namespace": "default",
+        "api_group": ""
+       }
+      ],
+      "role_ref": {
+       "name": "admin",
+       "kind": "ClusterRole",
+       "api_group": "rbac.authorization.k8s.io"
+      }
+     },
+     "role_object": {
+      "name": "admin",
+      "kind": "ClusterRole",
+      "api_group": "rbac.authorization.k8s.io",
+      "namespace": "",
+      "rules": [
+       {
+        "verbs": [
+         "get",
+         "list",
+         "watch",
+         "create",
+         "update",
+         "delete"
+        ],
+        "resources": [
+         "secrets",
+         "pods",
+         "deployments"
+        ],
+        "apiGroups": [
+         "",
+         "apps"
+        ]
+       }
+      ],
+      "rules_source": "live_clusterrole_get"
+     }
+    }
+   ],
+   "kwargs": {},
+   "fired": false,
+   "conclusive": false
+  }
+ },
+ "static_rule_oracle": {
+  "nofire": {
+   "args": [
+    {
+     "language": "python",
+     "line": 1,
+     "path": "a.py",
+     "rule_id": "direct-taint",
+     "source": "import os\ndef run():\n    os.system(request.args[\"c\"])\n"
+    }
+   ],
+   "kwargs": {},
+   "fired": false,
+   "conclusive": false
+  },
+  "fire": {
+   "args": [
+    {
+     "language": "python",
+     "line": 3,
+     "path": "app/mod.py",
+     "rule_id": "broken-crypto-invocation",
+     "source": "import hashlib\ndef sign(x):\n    return hashlib.md5(x).hexdigest()\n"
+    }
+   ],
+   "kwargs": {},
+   "fired": true,
+   "conclusive": true
+  }
+ },
+ "session_fixation_oracle": {
+  "fire": {
+   "args": [
+    {
+     "sentinel_id": "sfx_ab12cd34ab12cd34ab12cd34ab12cd34",
+     "post_auth_id": "sfx_ab12cd34ab12cd34ab12cd34ab12cd34",
+     "cookie_name": "SESSION",
+     "private_discriminator": "PRIVATE-SSN-victim-4021-7788",
+     "authorized_view": {
+      "status": 200,
+      "body": "<h1>SESSFIX-AUTHENTICATED</h1><p>Welcome back.</p><p>PRIVATE-SSN-victim-4021-7788</p>"
+     },
+     "owner_view": {
+      "status": 200,
+      "body": "<h1>SESSFIX-AUTHENTICATED</h1><p>Welcome back.</p><p>PRIVATE-SSN-victim-4021-7788</p>"
+     },
+     "unauth_ref": {
+      "status": 200,
+      "body": "<h1>SESSFIX-AUTHENTICATED</h1><p>Welcome back.</p><p>PRIVATE-SSN-mallory-9999-0000</p>"
+     },
+     "logged_out_ref": {
+      "status": 200,
+      "body": "<h1>Please log in</h1><p>You are logged out.</p>"
+     },
+     "logged_out_markers": [],
+     "logged_out_statuses": []
+    }
+   ],
+   "kwargs": {},
+   "fired": true,
+   "conclusive": true
+  },
+  "nofire": {
+   "args": [
+    {
+     "sentinel_id": "sfx_ab12cd34ab12cd34ab12cd34ab12cd34",
+     "post_auth_id": "sfx_ab12cd34ab12cd34ab12cd34ab12cd34",
+     "cookie_name": "SESSION",
+     "private_discriminator": "SESSFIX-AUTHENTICATED",
+     "authorized_view": {
+      "status": 200,
+      "body": "<h1>SESSFIX-AUTHENTICATED</h1><p>Welcome, valued user.</p>"
+     },
+     "owner_view": {
+      "status": 200,
+      "body": "<h1>SESSFIX-AUTHENTICATED</h1><p>Welcome, valued user.</p>"
+     },
+     "unauth_ref": {
+      "status": 200,
+      "body": "<h1>SESSFIX-AUTHENTICATED</h1><p>Welcome, valued user.</p>"
+     },
+     "logged_out_ref": {
+      "status": 200,
+      "body": "<h1>Portal</h1><p>Please sign in.</p>"
+     },
+     "logged_out_markers": [],
+     "logged_out_statuses": []
+    }
+   ],
+   "kwargs": {},
+   "fired": false,
+   "conclusive": false
+  }
+ },
+ "mfa_bypass_oracle": {
+  "fire": {
+   "args": [
+    {
+     "operator_attestation": {
+      "mfa_enrolled_account": true,
+      "factor1_only_presented": true,
+      "post_mfa_resource_certified": true
+     },
+     "private_discriminator": "PRIVATE-MFA-TOKEN-victim-9207-5531",
+     "factor1_view": {
+      "status": 200,
+      "body": "<h1>MFA-CONSOLE-DASHBOARD</h1><p>console overview.</p><p>PRIVATE-MFA-TOKEN-victim-9207-5531</p>"
+     },
+     "owner_view": {
+      "status": 200,
+      "body": "<h1>MFA-CONSOLE-DASHBOARD</h1><p>console overview.</p><p>PRIVATE-MFA-TOKEN-victim-9207-5531</p>"
+     },
+     "pre_mfa_ref": {
+      "status": 200,
+      "body": "<h1>MFA-CONSOLE-DASHBOARD</h1><p>console overview.</p><p>PRIVATE-MFA-TOKEN-mallory-0-0</p>"
+     },
+     "logged_out_ref": {
+      "status": 200,
+      "body": "<h1>Please log in</h1><p>You are logged out.</p>"
+     },
+     "logged_out_markers": [],
+     "logged_out_statuses": []
+    }
+   ],
+   "kwargs": {},
+   "fired": true,
+   "conclusive": true
+  },
+  "nofire": {
+   "args": [
+    {
+     "operator_attestation": null,
+     "private_discriminator": "PRIVATE-MFA-TOKEN-victim-9207-5531",
+     "factor1_view": {
+      "status": 200,
+      "body": "<h1>MFA-CONSOLE-DASHBOARD</h1><p>console overview.</p><p>PRIVATE-MFA-TOKEN-victim-9207-5531</p>"
+     },
+     "owner_view": {
+      "status": 200,
+      "body": "<h1>MFA-CONSOLE-DASHBOARD</h1><p>console overview.</p><p>PRIVATE-MFA-TOKEN-victim-9207-5531</p>"
+     },
+     "pre_mfa_ref": {
+      "status": 200,
+      "body": "<h1>MFA-CONSOLE-DASHBOARD</h1><p>console overview.</p><p>PRIVATE-MFA-TOKEN-mallory-0-0</p>"
+     },
+     "logged_out_ref": {
+      "status": 200,
+      "body": "<h1>Please log in</h1><p>You are logged out.</p>"
+     },
+     "logged_out_markers": [],
+     "logged_out_statuses": []
+    }
+   ],
+   "kwargs": {},
+   "fired": false,
+   "conclusive": false
+  }
+ },
+ "password_reset_invariant_oracle": {
+  "fire": {
+   "args": [
+    {
+     "mode": "token_reuse",
+     "reset_token": "rt_deadbeefcafebabe0011",
+     "private_discriminator": "RESET-PRIVATE-victim-9931-2050",
+     "authorized_view": {
+      "status": 200,
+      "body": "<html><nav>Home</nav><main>RESET-PRIVATE-victim-9931-2050</main><footer>Acme Corp support portal</footer></html>"
+     },
+     "owner_view": {
+      "status": 200,
+      "body": "<html><nav>Home</nav><main>RESET-PRIVATE-victim-9931-2050</main><footer>Acme Corp support portal</footer></html>"
+     },
+     "unauth_ref": {
+      "status": 200,
+      "body": "<html><nav>Home</nav><main>record owner=victim status=(restricted) \u2014 no access</main><footer>Acme Corp support portal</footer></html>"
+     },
+     "logged_out_ref": {
+      "status": 403,
+      "body": "login required to view this account page"
+     },
+     "logged_out_markers": [
+      "You are logged out"
+     ],
+     "logged_out_statuses": [
+      401,
+      403
+     ],
+     "consumed_secret": "OBSIDIAN-TEST-consume-secret-1000",
+     "replay_secret": "OBSIDIAN-TEST-replay-secret-2000",
+     "authorized_secret": "OBSIDIAN-TEST-replay-secret-2000"
+    }
+   ],
+   "kwargs": {},
+   "fired": true,
+   "conclusive": true
+  },
+  "nofire": {
+   "args": [
+    {
+     "mode": "token_reuse",
+     "reset_token": "rt_deadbeefcafebabe0011",
+     "private_discriminator": "RESET-PRIVATE-victim-9931-2050",
+     "authorized_view": {
+      "status": 200,
+      "body": "<html><nav>Home</nav><main>Please log in \u2014 you are logged out</main><footer>Acme Corp support portal</footer></html>"
+     },
+     "owner_view": {
+      "status": 200,
+      "body": "<html><nav>Home</nav><main>RESET-PRIVATE-victim-9931-2050</main><footer>Acme Corp support portal</footer></html>"
+     },
+     "unauth_ref": {
+      "status": 200,
+      "body": "<html><nav>Home</nav><main>record owner=victim status=(restricted) \u2014 no access</main><footer>Acme Corp support portal</footer></html>"
+     },
+     "logged_out_ref": {
+      "status": 403,
+      "body": "login required to view this account page"
+     },
+     "logged_out_markers": [
+      "You are logged out"
+     ],
+     "logged_out_statuses": [
+      401,
+      403
+     ],
+     "consumed_secret": "OBSIDIAN-TEST-consume-secret-1000",
+     "replay_secret": "OBSIDIAN-TEST-replay-secret-2000",
+     "authorized_secret": "OBSIDIAN-TEST-replay-secret-2000"
+    }
+   ],
+   "kwargs": {},
+   "fired": false,
+   "conclusive": true
+  }
+ },
+ "csrf_achieved_oracle": {
+  "fire": {
+   "args": [
+    {
+     "rule": "cross_site_state_change",
+     "method": "post",
+     "endpoint": "/csrf/transfer",
+     "target_origin": "http://127.0.0.1:8001",
+     "initiator_origin": "http://localhost:9002",
+     "ambient_cookie_name": "csrf_session",
+     "associated_cookies": [
+      {
+       "name": "csrf_session",
+       "blocked_reasons": []
+      }
+     ],
+     "observed_cookie_header": "csrf_session=owner-authenticated-session",
+     "observed_request_fields": [
+      "marker"
+     ],
+     "observed_request_header_names": [
+      "content-type",
+      "origin",
+      "referer"
+     ],
+     "marker": "VIGIL-CSRF-0123456789abcdef",
+     "with_cookie_state": "<ul><li>VIGIL-CSRF-0123456789abcdef</li></ul>",
+     "no_cookie_state": "<ul></ul>"
+    }
+   ],
+   "kwargs": {},
+   "fired": true,
+   "conclusive": true
+  },
+  "nofire": {
+   "args": [
+    {
+     "rule": "cross_site_state_change",
+     "method": "post",
+     "endpoint": "/csrf/transfer",
+     "target_origin": "http://127.0.0.1:8001",
+     "initiator_origin": "http://localhost:9002",
+     "ambient_cookie_name": "csrf_session",
+     "associated_cookies": [
+      {
+       "name": "csrf_session",
+       "blocked_reasons": [
+        "SameSiteStrict"
+       ]
+      }
+     ],
+     "observed_cookie_header": "csrf_session=owner-authenticated-session",
+     "observed_request_fields": [
+      "marker"
+     ],
+     "observed_request_header_names": [
+      "content-type",
+      "origin",
+      "referer"
+     ],
+     "marker": "VIGIL-CSRF-0123456789abcdef",
+     "with_cookie_state": "<ul></ul>",
+     "no_cookie_state": "<ul></ul>"
+    }
+   ],
+   "kwargs": {},
+   "fired": false,
+   "conclusive": false
+  }
+ },
+ "honeypot_hit_oracle": {
+  "fire": {
+   "args": [
+    "/__aegis_hp__/abc123",
+    [
+     "/__aegis_hp__/abc123",
+     "/__aegis_hp__/other"
+    ]
+   ],
+   "kwargs": {},
+   "fired": true,
+   "conclusive": true
+  },
+  "nofire": {
+   "args": [
+    "/index.html",
+    [
+     "/__aegis_hp__/abc123"
+    ]
+   ],
+   "kwargs": {},
+   "fired": false,
+   "conclusive": false
+  }
+ },
+ "credential_stuffing_oracle": {
+  "fire": {
+   "args": [
+    [
+     {
+      "account": "acct0",
+      "source": "srcA",
+      "success": true
+     },
+     {
+      "account": "acct1",
+      "source": "srcA",
+      "success": true
+     },
+     {
+      "account": "acct2",
+      "source": "srcA",
+      "success": true
+     },
+     {
+      "account": "acct3",
+      "source": "srcA",
+      "success": true
+     },
+     {
+      "account": "acct4",
+      "source": "srcA",
+      "success": true
+     },
+     {
+      "account": "acct5",
+      "source": "srcA",
+      "success": true
+     }
+    ]
+   ],
+   "kwargs": {},
+   "fired": true,
+   "conclusive": true
+  },
+  "nofire": {
+   "args": [
+    [
+     {
+      "account": "acct0",
+      "source": "natIP",
+      "success": false
+     },
+     {
+      "account": "acct1",
+      "source": "natIP",
+      "success": false
+     },
+     {
+      "account": "acct2",
+      "source": "natIP",
+      "success": false
+     },
+     {
+      "account": "acct3",
+      "source": "natIP",
+      "success": false
+     },
+     {
+      "account": "acct4",
+      "source": "natIP",
+      "success": false
+     },
+     {
+      "account": "acct5",
+      "source": "natIP",
+      "success": false
+     },
+     {
+      "account": "acct6",
+      "source": "natIP",
+      "success": false
+     },
+     {
+      "account": "acct7",
+      "source": "natIP",
+      "success": false
+     },
+     {
+      "account": "acct8",
+      "source": "natIP",
+      "success": false
+     },
+     {
+      "account": "acct9",
+      "source": "natIP",
+      "success": false
+     },
+     {
+      "account": "acct10",
+      "source": "natIP",
+      "success": false
+     },
+     {
+      "account": "acct11",
+      "source": "natIP",
+      "success": false
+     },
+     {
+      "account": "acct12",
+      "source": "natIP",
+      "success": false
+     },
+     {
+      "account": "acct13",
+      "source": "natIP",
+      "success": false
+     },
+     {
+      "account": "acct14",
+      "source": "natIP",
+      "success": false
+     },
+     {
+      "account": "acct15",
+      "source": "natIP",
+      "success": false
+     },
+     {
+      "account": "acct16",
+      "source": "natIP",
+      "success": false
+     },
+     {
+      "account": "acct17",
+      "source": "natIP",
+      "success": false
+     },
+     {
+      "account": "acct18",
+      "source": "natIP",
+      "success": false
+     },
+     {
+      "account": "acct19",
+      "source": "natIP",
+      "success": false
+     },
+     {
+      "account": "acct20",
+      "source": "natIP",
+      "success": false
+     },
+     {
+      "account": "acct21",
+      "source": "natIP",
+      "success": false
+     },
+     {
+      "account": "acct22",
+      "source": "natIP",
+      "success": false
+     },
+     {
+      "account": "acct23",
+      "source": "natIP",
+      "success": false
+     },
+     {
+      "account": "acct24",
+      "source": "natIP",
+      "success": false
+     },
+     {
+      "account": "acct25",
+      "source": "natIP",
+      "success": false
+     },
+     {
+      "account": "acct26",
+      "source": "natIP",
+      "success": false
+     },
+     {
+      "account": "acct27",
+      "source": "natIP",
+      "success": false
+     },
+     {
+      "account": "acct28",
+      "source": "natIP",
+      "success": false
+     },
+     {
+      "account": "acct29",
+      "source": "natIP",
+      "success": false
+     },
+     {
+      "account": "acct30",
+      "source": "natIP",
+      "success": false
+     },
+     {
+      "account": "acct31",
+      "source": "natIP",
+      "success": false
+     },
+     {
+      "account": "acct32",
+      "source": "natIP",
+      "success": false
+     },
+     {
+      "account": "acct33",
+      "source": "natIP",
+      "success": false
+     },
+     {
+      "account": "acct34",
+      "source": "natIP",
+      "success": false
+     },
+     {
+      "account": "acct35",
+      "source": "natIP",
+      "success": false
+     },
+     {
+      "account": "acct36",
+      "source": "natIP",
+      "success": false
+     },
+     {
+      "account": "acct37",
+      "source": "natIP",
+      "success": false
+     },
+     {
+      "account": "acct38",
+      "source": "natIP",
+      "success": false
+     },
+     {
+      "account": "acct39",
+      "source": "natIP",
+      "success": false
+     },
+     {
+      "account": "acct40",
+      "source": "natIP",
+      "success": false
+     },
+     {
+      "account": "acct41",
+      "source": "natIP",
+      "success": false
+     },
+     {
+      "account": "acct42",
+      "source": "natIP",
+      "success": false
+     },
+     {
+      "account": "acct43",
+      "source": "natIP",
+      "success": false
+     },
+     {
+      "account": "acct44",
+      "source": "natIP",
+      "success": false
+     },
+     {
+      "account": "acct45",
+      "source": "natIP",
+      "success": false
+     },
+     {
+      "account": "acct46",
+      "source": "natIP",
+      "success": false
+     },
+     {
+      "account": "acct47",
+      "source": "natIP",
+      "success": false
+     },
+     {
+      "account": "acct48",
+      "source": "natIP",
+      "success": false
+     },
+     {
+      "account": "acct49",
+      "source": "natIP",
+      "success": false
+     }
+    ]
+   ],
+   "kwargs": {},
+   "fired": false,
+   "conclusive": false
+  }
+ },
+ "csp_posture_oracle": {
+  "fire": {
+   "args": [
+    {
+     "rule": "permissive_script_src",
+     "url": "http://t/",
+     "header": "script-src 'unsafe-inline'; object-src 'none'",
+     "report_only": false
+    }
+   ],
+   "kwargs": {},
+   "fired": true,
+   "conclusive": true
+  },
+  "nofire": {
+   "args": [
+    {
+     "rule": "permissive_script_src",
+     "url": "http://t/",
+     "header": "script-src 'nonce-staticNonceABC'; object-src 'none'",
+     "report_only": false
+    }
+   ],
+   "kwargs": {},
+   "fired": false,
+   "conclusive": false
+  }
+ },
+ "dom_execution_csp_bypass_oracle": {
+  "fire": {
+   "args": [
+    [
+     "__crucible_xss:cspb00deadbeefca"
+    ],
+    "cspb00deadbeefca",
+    {
+     "header": "script-src 'self' 'nonce-staticNonceABC'",
+     "report_only": false
+    }
+   ],
+   "kwargs": {},
+   "fired": true,
+   "conclusive": true
+  },
+  "nofire": {
+   "args": [
+    [
+     "__crucible_xss:cspb00deadbeefca"
+    ],
+    "cspb00deadbeefca",
+    {
+     "header": "",
+     "report_only": false
+    }
+   ],
+   "kwargs": {},
+   "fired": false,
+   "conclusive": false
+  }
+ },
+ "workflow_abuse_oracle": {
+  "fire": {
+   "args": [
+    {
+     "mode": "race",
+     "owner_signed_spec": true,
+     "max_allowed": 1,
+     "responses": [
+      {
+       "status": 200,
+       "body": "<!doctype html><html><head><title>Coupon</title></head><body><p>COUPON-REDEEMED-OK</p></body></html>"
+      },
+      {
+       "status": 200,
+       "body": "<!doctype html><html><head><title>Coupon</title></head><body><p>COUPON-REDEEMED-OK</p></body></html>"
+      },
+      {
+       "status": 200,
+       "body": "<!doctype html><html><head><title>Coupon</title></head><body><p>COUPON-REDEEMED-OK</p></body></html>"
+      },
+      {
+       "status": 200,
+       "body": "<!doctype html><html><head><title>Coupon</title></head><body><p>COUPON-REDEEMED-OK</p></body></html>"
+      },
+      {
+       "status": 200,
+       "body": "<!doctype html><html><head><title>Coupon</title></head><body><p>COUPON-REDEEMED-OK</p></body></html>"
+      },
+      {
+       "status": 200,
+       "body": "<!doctype html><html><head><title>Coupon</title></head><body><p>COUPON-REDEEMED-OK</p></body></html>"
+      },
+      {
+       "status": 200,
+       "body": "<!doctype html><html><head><title>Coupon</title></head><body><p>COUPON-REDEEMED-OK</p></body></html>"
+      },
+      {
+       "status": 200,
+       "body": "<!doctype html><html><head><title>Coupon</title></head><body><p>COUPON-REDEEMED-OK</p></body></html>"
+      }
+     ],
+     "success_predicate": {
+      "contains": [
+       {
+        "var": "body"
+       },
+       "COUPON-REDEEMED-OK"
+      ]
+     }
+    }
+   ],
+   "kwargs": {},
+   "fired": true,
+   "conclusive": true
+  },
+  "nofire": {
+   "args": [
+    {
+     "mode": "race",
+     "owner_signed_spec": true,
+     "max_allowed": 1,
+     "responses": [
+      {
+       "status": 409,
+       "body": "<!doctype html><html><head><title>Coupon</title></head><body><p>already redeemed</p></body></html>"
+      },
+      {
+       "status": 409,
+       "body": "<!doctype html><html><head><title>Coupon</title></head><body><p>already redeemed</p></body></html>"
+      },
+      {
+       "status": 409,
+       "body": "<!doctype html><html><head><title>Coupon</title></head><body><p>already redeemed</p></body></html>"
+      },
+      {
+       "status": 409,
+       "body": "<!doctype html><html><head><title>Coupon</title></head><body><p>already redeemed</p></body></html>"
+      },
+      {
+       "status": 200,
+       "body": "<!doctype html><html><head><title>Coupon</title></head><body><p>COUPON-REDEEMED-OK</p></body></html>"
+      },
+      {
+       "status": 409,
+       "body": "<!doctype html><html><head><title>Coupon</title></head><body><p>already redeemed</p></body></html>"
+      },
+      {
+       "status": 409,
+       "body": "<!doctype html><html><head><title>Coupon</title></head><body><p>already redeemed</p></body></html>"
+      },
+      {
+       "status": 409,
+       "body": "<!doctype html><html><head><title>Coupon</title></head><body><p>already redeemed</p></body></html>"
+      }
+     ],
+     "success_predicate": {
+      "contains": [
+       {
+        "var": "body"
+       },
+       "COUPON-REDEEMED-OK"
+      ]
+     }
+    }
+   ],
+   "kwargs": {},
+   "fired": false,
+   "conclusive": true
+  }
+ },
+ "gcp_sa_impersonation_oracle": {
+  "fire": {
+   "args": [
+    {
+     "mint": {
+      "method": "generateAccessToken",
+      "target": "svc-b@proj.iam.gserviceaccount.com",
+      "token": "REDACTED",
+      "credential_fingerprint": "fp-abc-123"
+     },
+     "confirming_call": {
+      "action": "tokeninfo",
+      "status": 200,
+      "credential_fingerprint": "fp-abc-123",
+      "endpoint": "https://oauth2.googleapis.com/tokeninfo",
+      "tls_verified": true,
+      "no_proxy": true,
+      "no_redirect": true,
+      "resolved_peer": "142.250.1.1",
+      "response_digest": "d",
+      "response": {
+       "email": "svc-b@proj.iam.gserviceaccount.com",
+       "sub": "102938",
+       "expires_in": 3599
+      }
+     }
+    }
+   ],
+   "kwargs": {},
+   "fired": true,
+   "conclusive": true
+  },
+  "nofire": {
+   "args": [
+    {
+     "mint": {
+      "method": "list",
+      "target": "svc-b@proj.iam.gserviceaccount.com"
+     }
+    }
+   ],
+   "kwargs": {},
+   "fired": false,
+   "conclusive": false
+  }
+ }
+}
