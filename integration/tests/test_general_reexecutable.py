@@ -266,3 +266,98 @@ def test_standalone_cli_reexec_general(tmp_path):
     out = (r.stdout + r.stderr)
     assert "sql_injection_breakout" in out and "RE-DERIVED" in out
     assert "producer-supplied" in out and "live re-run" in out
+
+
+# ---- 6. ENFORCED A/B classification: the irreducible set is exactly the non-stdlib-closure oracles --
+# This pins the HONESTY of LIMIT-audit-package-reproduction objectively: an oracle is "genuinely
+# irreducible" iff re-firing its body needs a non-stdlib import (its AST import-closure over
+# framework.v2.verify.oracles pulls a module outside the stdlib + the one Ed25519 lib). Every PORTED
+# family must be stdlib-closure (so the port is sound), and every oracle the inventory calls
+# PURE-BUT-DEFERRED must ALSO be stdlib-closure (so it is honestly "portable", never mislabelled
+# irreducible). The genuinely-irreducible set must be EXACTLY the five named oracles.
+import framework.v2.verify.oracles as _oracles_mod  # noqa: E402
+
+_STDLIB_OK = {"ast", "base64", "binascii", "difflib", "hashlib", "hmac", "html", "ipaddress", "json",
+              "math", "re", "collections", "dataclasses", "statistics", "typing", "urllib", "enum",
+              "datetime", "functools", "itertools", "string", "unicodedata", "decimal", "cryptography"}
+
+_PORTED = [
+    "differential_response_oracle", "smuggling_desync_oracle", "timing_oracle",
+    "boolean_inference_oracle", "side_effect_oracle", "reflection_context_oracle",
+    "evaluation_oracle", "ssi_evaluation_oracle", "error_signature_oracle",
+    "sanitizer_signal_oracle", "system_prompt_disclosure_oracle", "prompt_injection_oracle",
+    "sql_injection_breakout_oracle", "command_injection_breakout_oracle",
+    "nosql_injection_breakout_oracle", "weak_crypto_artifact_oracle", "prototype_pollution_oracle",
+]
+_PURE_BUT_DEFERRED = [
+    "service_reachability_oracle", "tls_weakness_oracle", "anonymous_reachable_oracle",
+    "dom_execution_oracle", "dom_execution_csp_bypass_oracle", "credential_stuffing_oracle",
+    "honeypot_hit_oracle", "jwt_forgery_oracle", "static_rule_oracle", "session_fixation_oracle",
+    "mfa_bypass_oracle", "password_reset_invariant_oracle", "csrf_achieved_oracle",
+    "workflow_abuse_oracle", "clickjacking_posture_oracle", "csrf_posture_oracle",
+    "postmessage_posture_oracle", "csp_posture_oracle", "email_auth_posture_oracle",
+    "identity_posture_oracle", "imds_credential_capture_oracle", "exposed_secret_validity_oracle",
+    "gcp_sa_impersonation_oracle", "iam_escalation_oracle", "k8s_rbac_verb_grant_oracle",
+    # cryptography is the ONE non-stdlib dep this verifier already carries, so an oracle whose only
+    # extra need is cryptography is PORTABLE (not irreducible): x509 cert parsing / key classification.
+    "certificate_validity_oracle", "mobile_posture_oracle",
+]
+# Genuinely irreducible-by-dependency: the body's import-closure needs a module NOT in
+# stdlib + cryptography — packaging (version_range), signxml/lxml (saml_forgery), or a framework
+# module backing an EXTERNAL collector's receipt crypto (oob_callback -> verify.oob).
+_IRREDUCIBLE = {"oob_callback_oracle", "version_range_oracle", "saml_forgery_oracle"}
+
+
+def _oracle_closure_needs_nonstdlib(seed: str) -> bool:
+    """Does re-firing ``seed``'s body need a non-stdlib import? Compute the transitive closure of
+    ``seed`` over oracles.py's module-level symbols and scan each for an import outside _STDLIB_OK."""
+    src = Path(_oracles_mod.__file__).read_text(encoding="utf-8")
+    tree = ast.parse(src)
+    sym: dict = {}
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            sym[node.name] = node
+        elif isinstance(node, ast.Assign):
+            for t in node.targets:
+                if isinstance(t, ast.Name):
+                    sym[t.id] = node
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            sym[node.target.id] = node
+    closure: set = set()
+    stack = [seed]
+    while stack:
+        n = stack.pop()
+        if n in closure or n not in sym:
+            continue
+        closure.add(n)
+        for ref in {x.id for x in ast.walk(sym[n]) if isinstance(x, ast.Name)}:
+            if ref in sym and ref not in closure:
+                stack.append(ref)
+    for n in closure:
+        for node in ast.walk(sym[n]):
+            if isinstance(node, ast.Import):
+                if any(a.name.split(".")[0] not in _STDLIB_OK for a in node.names):
+                    return True
+            elif isinstance(node, ast.ImportFrom):
+                if (node.module or "").split(".")[0] not in _STDLIB_OK:
+                    return True
+    return False
+
+
+def test_bucket_classification_is_enforced():
+    # every PORTED family must be stdlib-closure (the port is sound) AND callable in verify_vf
+    for name in _PORTED:
+        assert not _oracle_closure_needs_nonstdlib(name), f"{name} ported but needs a non-stdlib dep"
+        assert callable(getattr(VF, name, None)), f"{name} not present in verify_vf"
+    # every PURE-BUT-DEFERRED oracle must be stdlib-closure (honestly portable, not irreducible)
+    for name in _PURE_BUT_DEFERRED:
+        assert not _oracle_closure_needs_nonstdlib(name), (
+            f"{name} is listed PURE-BUT-DEFERRED but its closure needs a non-stdlib dep "
+            f"— reclassify it as irreducible")
+    # the genuinely-irreducible set must be EXACTLY the five named oracles (each needs a non-stdlib dep)
+    for name in _IRREDUCIBLE:
+        assert _oracle_closure_needs_nonstdlib(name), (
+            f"{name} is named irreducible but its closure is stdlib-only — it is actually portable")
+    # and none of the irreducibles were silently ported into verify_vf
+    for name in _IRREDUCIBLE:
+        assert not callable(getattr(VF, name, None)), f"{name} is irreducible but was ported — remove it"

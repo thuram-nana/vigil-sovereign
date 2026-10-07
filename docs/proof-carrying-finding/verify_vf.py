@@ -52,15 +52,21 @@ re-run — the producer-supplied honesty bound). Otherwise this file checks SIGN
 STRUCTURE — authenticity, cross-binding, digest binding, chain, anti-rollback, quorum, and the median
 clock — all fully checkable standalone. A single flipped byte anywhere flips a standalone verdict to NOT SOUND.
 
-WHAT IT DOES NOT DO (the documented, genuinely-IRREDUCIBLE boundary): it does NOT re-fire the oracle
-families whose re-execution needs something beyond stdlib + the one Ed25519 lib — a live socket/DNS
-(service_reachability, tls_weakness live-handshake, active_exposure, oob_callback's external collector,
-credential_stuffing's live auth), a real browser/CDP (dom_execution / DOM-XSS, CSP-bypass), a subprocess
-tool or live cloud/cluster-API capture (imds/secret/gcp/iam/k8s_rbac, mobile MobSF), or a heavy dependency
-(version_range -> packaging; certificate_validity -> cryptography.x509; saml/jwt structural forgery ->
-signxml / full cryptography). For those, re-verification rests on the SIGNATURE + an in-VIGIL re-run (the
-sound maximum; see docs/limitations/inventory.json LIMIT-audit-package-reproduction) — NAMED here as the
-boundary, never faked as reproduced.
+WHAT IT DOES NOT DO (two honestly-distinct remainders — see docs/limitations/inventory.json
+LIMIT-audit-package-reproduction, pinned by test_general_reexecutable.py::test_bucket_classification_is
+_enforced): (1) GENUINELY IRREDUCIBLE — three oracle bodies cannot be re-fired with stdlib + the one
+Ed25519 lib (cryptography) because their import-closure needs a module NOT in that surface: version_range
+(packaging), saml_forgery (signxml / lxml), and oob_callback (the framework verify.oob receipt verification
+backing an EXTERNAL collector). Those rest on the signature + an in-VIGIL re-run, NAMED here, never faked as
+reproduced. (2) PURE-BUT-NOT-YET-PORTED — a residual of oracles whose bodies ARE re-fireable with stdlib +
+cryptography (same producer-supplied honesty bound as the ported families) that this slice did not yet port:
+service_reachability, tls_weakness (live-handshake path), active_exposure, dom_execution (+ csp_bypass),
+credential_stuffing, automated_access/honeypot, jwt_forgery (HS/structural), static_rule, session_fixation,
+mfa_bypass, password_reset_invariant, csrf_achieved, workflow_abuse, the client-side posture oracles
+(clickjacking/csrf/postmessage/csp), email_auth/identity posture, certificate_validity (cryptography.x509)
+and mobile_posture (cryptography), and the WARDEN-gated cloud/cluster capture oracles
+(imds/secret/gcp/iam/k8s_rbac). Until ported they rest on the signature + an in-VIGIL re-run. This boundary
+is stated precisely, not faked closed.
 
 Verification only — no offensive capability, never writes, never phones home, deterministic.
 
@@ -1876,11 +1882,14 @@ def reexecute_posture_oracle(oracle_context: Any) -> tuple[Optional[bool], str]:
 #
 # HONEST BOUND (identical to the posture tier): re-firing proves the verdict is the correct
 # FUNCTION of the retained evidence — it does NOT prove the retained evidence reflects the live
-# target (that still needs an in-VIGIL live re-run). The GENUINELY-IRREDUCIBLE oracle families —
-# those whose re-execution needs a live socket/DNS, a real browser/CDP, a subprocess tool, heavy
-# deps (packaging / cryptography.x509 / signxml), or an external OOB collector — are NOT ported
-# here and are named in LIMIT-audit-package-reproduction; their re-verification rests on the
-# signature + an in-VIGIL re-run (the sound maximum), never faked as reproduced.
+# target (that still needs an in-VIGIL live re-run). Two sets are NOT ported here (both named in
+# LIMIT-audit-package-reproduction, and their split enforced by test_general_reexecutable.py::
+# test_bucket_classification_is_enforced): the GENUINELY-IRREDUCIBLE oracles whose import-closure
+# needs a module outside stdlib + cryptography (version_range -> packaging; saml_forgery ->
+# signxml/lxml; oob_callback -> the framework verify.oob receipt crypto backing an EXTERNAL
+# collector); and a PURE-BUT-NOT-YET-PORTED residual whose bodies ARE re-fireable with stdlib +
+# cryptography (follow-up work). Both rest, for now, on the signature + an in-VIGIL re-run (the
+# sound maximum), never faked as reproduced.
 # ---------------------------------------------------------------------------
 class OracleKind:
     """String-valued stand-in for ``framework.v2.verify.models.OracleKind`` (the ``.value`` of each
@@ -4663,20 +4672,27 @@ def reexecute_general_oracle(oracle_context: Any) -> dict:
             _record(kind, fn(ctx))
     _record(*(_GENERAL_WEAK_CRYPTO[0], _GENERAL_WEAK_CRYPTO[1](ctx)))
 
-    # IRREDUCIBLE oracle keys present but NOT re-derivable standalone — report them, never fake them.
-    unported = [k for k in _GENERAL_IRREDUCIBLE_CONTEXT_KEYS if k in ctx]
+    # Oracle keys present but NOT re-derived standalone HERE (a genuinely-irreducible oracle, or a
+    # pure-but-not-yet-ported one) — REPORT them so the caller is told the FACT also rests on an
+    # in-VIGIL re-run; never fake them as reproduced.
+    unported = [k for k in _GENERAL_UNPORTED_CONTEXT_KEYS if k in ctx]
     fired = any(s["fired"] and s["confidence"] >= _GENERAL_HIGH_CONFIDENCE for s in signals)
     return {"signals": signals, "fired": fired, "reproduced": bool(signals), "unported_keys": unported}
 
 
-# The oracle_context keys of the GENUINELY-IRREDUCIBLE oracle families (live socket/DNS, browser/CDP,
-# subprocess tool, heavy dep, external collector). Their presence is REPORTED by
-# reexecute_general_oracle, never re-derived here — see LIMIT-audit-package-reproduction.
-_GENERAL_IRREDUCIBLE_CONTEXT_KEYS = frozenset({
+# The oracle_context keys whose oracle this file does NOT re-derive standalone — either genuinely
+# IRREDUCIBLE (version_advisory -> packaging, saml_xml -> signxml/lxml, oob_hits -> external collector)
+# or PURE-BUT-NOT-YET-PORTED (the live-capture / browser / subprocess / cloud-API families; re-fireable
+# with stdlib+cryptography, port is follow-up). Presence is REPORTED by reexecute_general_oracle, never
+# re-derived here — see LIMIT-audit-package-reproduction + test_bucket_classification_is_enforced.
+_GENERAL_UNPORTED_CONTEXT_KEYS = frozenset({
     "handshake", "anon_get", "tls", "dom_binding_calls", "oob_hits", "version_advisory",
     "cert_validity", "credential_acceptance", "jwt_token", "saml_xml", "imds_capture",
     "secret_capture", "gcp_impersonation_capture", "iam_escalation_capture", "auth_events",
-    "requested_path", "mobile_control",
+    "requested_path", "mobile_control", "static_rule", "session_fixation", "mfa_bypass",
+    "password_reset_invariant", "csrf_achieved", "workflow_abuse", "clickjacking_control",
+    "csrf_control", "postmessage_control", "csp_control", "email_auth_control", "identity_control",
+    "k8s_rbac_grant_control",
 })
 
 # ---------------------------------------------------------------------------
