@@ -1,11 +1,11 @@
 {
   "schema": "vigil-benchmark-scorecard-sig/1",
   "scorecard": "verifier-provenance.json",
-  "scorecard_digest": "sha256:67ed44cd7e4853ff11f0c1c6afc211c8ec0900430e74a374532980e2e3089ce8",
+  "scorecard_digest": "sha256:6d240901cb95b0916b814c95477259cdb0cd26fde9643eef607e6b0c22eb8daa",
   "signatures": [
     {
       "key_id": "verifier-provenance-fixture",
-      "signature_b64": "J/WeZGcvzwnhXAm1hzfygSMzW1WRp5YyoLMYeCWvf1h4MMxetzSfV1vs4cpJ64MBIH4vLGdZT9LXYWrRdMHfAw=="
+      "signature_b64": "37Ibim7OHfYD8EWJWypPfr4tCQpS1ThgF44H3DCI9CCAgynmw+90TKf60+qIwVrNZowcYBuZdFO+Qhr+sEEiAA=="
     }
   ],
   "threshold": 1,
