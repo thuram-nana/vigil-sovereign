@@ -1,0 +1,529 @@
+{
+  "attestation_key": {
+    "kind": "conformance-fixture",
+    "note": "deterministic non-governance key derived from a committed public seed; signs a SELF-attestation so the run is byte-stable and re-runnable with nothing provisioned. A PUBLISHED attestation re-runs with the operator's governance key (passed in; FATAL-2), yielding the same scorecard CONTENT under the operator's trust root."
+  },
+  "differential_parity": {
+    "dispatch_agree": 7,
+    "dispatch_total": 7,
+    "oracle_case_agree": 35,
+    "oracle_case_total": 35,
+    "parity_holds": true
+  },
+  "frozen_corpus": {
+    "all_families_sound": true,
+    "all_tampers_refused": true,
+    "families": [
+      {
+        "bug_class": "sqli_attempt",
+        "confirmed_by": "sql_injection_breakout",
+        "family": "sqli_attempt",
+        "pcf_sound": true,
+        "re_derived_fired": true,
+        "re_fired_signals": [
+          "sql_injection_breakout"
+        ],
+        "reproduced": true,
+        "sound": true,
+        "tampers": [
+          {
+            "refused": true,
+            "refuted_by": "verify_pcf",
+            "tamper": "flip-claim-class"
+          },
+          {
+            "refused": true,
+            "refuted_by": "verify_pcf",
+            "tamper": "strip-signatures"
+          },
+          {
+            "refused": true,
+            "refuted_by": "verify_pcf",
+            "tamper": "tamper-oracle-context-value"
+          },
+          {
+            "refused": true,
+            "refuted_by": "verify_pcf",
+            "tamper": "flip-signature-byte"
+          },
+          {
+            "refused": true,
+            "refuted_by": "verify_pcf",
+            "tamper": "wrong-trust-root-pin"
+          },
+          {
+            "refused": true,
+            "refuted_by": "verify_vf.reexecute",
+            "tamper": "benign-retained-value"
+          }
+        ]
+      },
+      {
+        "bug_class": "command_injection_attempt",
+        "confirmed_by": "command_injection_breakout",
+        "family": "command_injection_attempt",
+        "pcf_sound": true,
+        "re_derived_fired": true,
+        "re_fired_signals": [
+          "command_injection_breakout"
+        ],
+        "reproduced": true,
+        "sound": true,
+        "tampers": [
+          {
+            "refused": true,
+            "refuted_by": "verify_pcf",
+            "tamper": "flip-claim-class"
+          },
+          {
+            "refused": true,
+            "refuted_by": "verify_pcf",
+            "tamper": "strip-signatures"
+          },
+          {
+            "refused": true,
+            "refuted_by": "verify_pcf",
+            "tamper": "tamper-oracle-context-value"
+          },
+          {
+            "refused": true,
+            "refuted_by": "verify_pcf",
+            "tamper": "flip-signature-byte"
+          },
+          {
+            "refused": true,
+            "refuted_by": "verify_pcf",
+            "tamper": "wrong-trust-root-pin"
+          },
+          {
+            "refused": true,
+            "refuted_by": "verify_vf.reexecute",
+            "tamper": "benign-retained-value"
+          }
+        ]
+      },
+      {
+        "bug_class": "nosql_injection_attempt",
+        "confirmed_by": "nosql_injection_breakout",
+        "family": "nosql_injection_attempt",
+        "pcf_sound": true,
+        "re_derived_fired": true,
+        "re_fired_signals": [
+          "nosql_injection_breakout"
+        ],
+        "reproduced": true,
+        "sound": true,
+        "tampers": [
+          {
+            "refused": true,
+            "refuted_by": "verify_pcf",
+            "tamper": "flip-claim-class"
+          },
+          {
+            "refused": true,
+            "refuted_by": "verify_pcf",
+            "tamper": "strip-signatures"
+          },
+          {
+            "refused": true,
+            "refuted_by": "verify_pcf",
+            "tamper": "tamper-oracle-context-value"
+          },
+          {
+            "refused": true,
+            "refuted_by": "verify_pcf",
+            "tamper": "flip-signature-byte"
+          },
+          {
+            "refused": true,
+            "refuted_by": "verify_pcf",
+            "tamper": "wrong-trust-root-pin"
+          },
+          {
+            "refused": true,
+            "refuted_by": "verify_vf.reexecute",
+            "tamper": "benign-retained-value"
+          }
+        ]
+      },
+      {
+        "bug_class": "crash",
+        "confirmed_by": "sanitizer_signal",
+        "family": "crash_sanitizer",
+        "pcf_sound": true,
+        "re_derived_fired": true,
+        "re_fired_signals": [
+          "sanitizer_signal"
+        ],
+        "reproduced": true,
+        "sound": true,
+        "tampers": [
+          {
+            "refused": true,
+            "refuted_by": "verify_pcf",
+            "tamper": "flip-claim-class"
+          },
+          {
+            "refused": true,
+            "refuted_by": "verify_pcf",
+            "tamper": "strip-signatures"
+          },
+          {
+            "refused": true,
+            "refuted_by": "verify_pcf",
+            "tamper": "tamper-oracle-context-value"
+          },
+          {
+            "refused": true,
+            "refuted_by": "verify_pcf",
+            "tamper": "flip-signature-byte"
+          },
+          {
+            "refused": true,
+            "refuted_by": "verify_pcf",
+            "tamper": "wrong-trust-root-pin"
+          },
+          {
+            "refused": true,
+            "refuted_by": "verify_vf.reexecute",
+            "tamper": "benign-retained-value"
+          }
+        ]
+      },
+      {
+        "bug_class": "error_based_sqli",
+        "confirmed_by": "error_signature",
+        "family": "error_based_sqli",
+        "pcf_sound": true,
+        "re_derived_fired": true,
+        "re_fired_signals": [
+          "error_signature"
+        ],
+        "reproduced": true,
+        "sound": true,
+        "tampers": [
+          {
+            "refused": true,
+            "refuted_by": "verify_pcf",
+            "tamper": "flip-claim-class"
+          },
+          {
+            "refused": true,
+            "refuted_by": "verify_pcf",
+            "tamper": "strip-signatures"
+          },
+          {
+            "refused": true,
+            "refuted_by": "verify_pcf",
+            "tamper": "tamper-oracle-context-value"
+          },
+          {
+            "refused": true,
+            "refuted_by": "verify_pcf",
+            "tamper": "flip-signature-byte"
+          },
+          {
+            "refused": true,
+            "refuted_by": "verify_pcf",
+            "tamper": "wrong-trust-root-pin"
+          },
+          {
+            "refused": true,
+            "refuted_by": "verify_vf.reexecute",
+            "tamper": "benign-retained-value"
+          }
+        ]
+      },
+      {
+        "bug_class": "path_traversal",
+        "confirmed_by": "side_effect",
+        "family": "path_traversal_side_effect",
+        "pcf_sound": true,
+        "re_derived_fired": true,
+        "re_fired_signals": [
+          "side_effect"
+        ],
+        "reproduced": true,
+        "sound": true,
+        "tampers": [
+          {
+            "refused": true,
+            "refuted_by": "verify_pcf",
+            "tamper": "flip-claim-class"
+          },
+          {
+            "refused": true,
+            "refuted_by": "verify_pcf",
+            "tamper": "strip-signatures"
+          },
+          {
+            "refused": true,
+            "refuted_by": "verify_pcf",
+            "tamper": "tamper-oracle-context-value"
+          },
+          {
+            "refused": true,
+            "refuted_by": "verify_pcf",
+            "tamper": "flip-signature-byte"
+          },
+          {
+            "refused": true,
+            "refuted_by": "verify_pcf",
+            "tamper": "wrong-trust-root-pin"
+          },
+          {
+            "refused": true,
+            "refuted_by": "verify_vf.reexecute",
+            "tamper": "benign-retained-value"
+          }
+        ]
+      },
+      {
+        "bug_class": "weak_crypto_artifact",
+        "confirmed_by": "tls_weakness",
+        "family": "weak_crypto_artifact",
+        "pcf_sound": true,
+        "re_derived_fired": true,
+        "re_fired_signals": [
+          "tls_weakness"
+        ],
+        "reproduced": true,
+        "sound": true,
+        "tampers": [
+          {
+            "refused": true,
+            "refuted_by": "verify_pcf",
+            "tamper": "flip-claim-class"
+          },
+          {
+            "refused": true,
+            "refuted_by": "verify_pcf",
+            "tamper": "strip-signatures"
+          },
+          {
+            "refused": true,
+            "refuted_by": "verify_pcf",
+            "tamper": "tamper-oracle-context-value"
+          },
+          {
+            "refused": true,
+            "refuted_by": "verify_pcf",
+            "tamper": "flip-signature-byte"
+          },
+          {
+            "refused": true,
+            "refuted_by": "verify_pcf",
+            "tamper": "wrong-trust-root-pin"
+          },
+          {
+            "refused": true,
+            "refuted_by": "verify_vf.reexecute",
+            "tamper": "benign-retained-value"
+          }
+        ]
+      },
+      {
+        "bug_class": "time_based_sqli",
+        "confirmed_by": "timing",
+        "family": "time_based_sqli",
+        "pcf_sound": true,
+        "re_derived_fired": true,
+        "re_fired_signals": [
+          "timing"
+        ],
+        "reproduced": true,
+        "sound": true,
+        "tampers": [
+          {
+            "refused": true,
+            "refuted_by": "verify_pcf",
+            "tamper": "flip-claim-class"
+          },
+          {
+            "refused": true,
+            "refuted_by": "verify_pcf",
+            "tamper": "strip-signatures"
+          },
+          {
+            "refused": true,
+            "refuted_by": "verify_pcf",
+            "tamper": "tamper-oracle-context-value"
+          },
+          {
+            "refused": true,
+            "refuted_by": "verify_pcf",
+            "tamper": "flip-signature-byte"
+          },
+          {
+            "refused": true,
+            "refuted_by": "verify_pcf",
+            "tamper": "wrong-trust-root-pin"
+          },
+          {
+            "refused": true,
+            "refuted_by": "verify_vf.reexecute",
+            "tamper": "benign-retained-value"
+          }
+        ]
+      },
+      {
+        "bug_class": "ssti",
+        "confirmed_by": "evaluation",
+        "family": "ssti_evaluation",
+        "pcf_sound": true,
+        "re_derived_fired": true,
+        "re_fired_signals": [
+          "evaluation"
+        ],
+        "reproduced": true,
+        "sound": true,
+        "tampers": [
+          {
+            "refused": true,
+            "refuted_by": "verify_pcf",
+            "tamper": "flip-claim-class"
+          },
+          {
+            "refused": true,
+            "refuted_by": "verify_pcf",
+            "tamper": "strip-signatures"
+          },
+          {
+            "refused": true,
+            "refuted_by": "verify_pcf",
+            "tamper": "tamper-oracle-context-value"
+          },
+          {
+            "refused": true,
+            "refuted_by": "verify_pcf",
+            "tamper": "flip-signature-byte"
+          },
+          {
+            "refused": true,
+            "refuted_by": "verify_pcf",
+            "tamper": "wrong-trust-root-pin"
+          },
+          {
+            "refused": true,
+            "refuted_by": "verify_vf.reexecute",
+            "tamper": "benign-retained-value"
+          }
+        ]
+      },
+      {
+        "bug_class": "ssi",
+        "confirmed_by": "evaluation",
+        "family": "ssi_evaluation",
+        "pcf_sound": true,
+        "re_derived_fired": true,
+        "re_fired_signals": [
+          "evaluation"
+        ],
+        "reproduced": true,
+        "sound": true,
+        "tampers": [
+          {
+            "refused": true,
+            "refuted_by": "verify_pcf",
+            "tamper": "flip-claim-class"
+          },
+          {
+            "refused": true,
+            "refuted_by": "verify_pcf",
+            "tamper": "strip-signatures"
+          },
+          {
+            "refused": true,
+            "refuted_by": "verify_pcf",
+            "tamper": "tamper-oracle-context-value"
+          },
+          {
+            "refused": true,
+            "refuted_by": "verify_pcf",
+            "tamper": "flip-signature-byte"
+          },
+          {
+            "refused": true,
+            "refuted_by": "verify_pcf",
+            "tamper": "wrong-trust-root-pin"
+          },
+          {
+            "refused": true,
+            "refuted_by": "verify_vf.reexecute",
+            "tamper": "benign-retained-value"
+          }
+        ]
+      },
+      {
+        "bug_class": "system_prompt_disclosure",
+        "confirmed_by": "system_prompt_disclosure",
+        "family": "system_prompt_disclosure",
+        "pcf_sound": true,
+        "re_derived_fired": true,
+        "re_fired_signals": [
+          "system_prompt_disclosure"
+        ],
+        "reproduced": true,
+        "sound": true,
+        "tampers": [
+          {
+            "refused": true,
+            "refuted_by": "verify_pcf",
+            "tamper": "flip-claim-class"
+          },
+          {
+            "refused": true,
+            "refuted_by": "verify_pcf",
+            "tamper": "strip-signatures"
+          },
+          {
+            "refused": true,
+            "refuted_by": "verify_pcf",
+            "tamper": "tamper-oracle-context-value"
+          },
+          {
+            "refused": true,
+            "refuted_by": "verify_pcf",
+            "tamper": "flip-signature-byte"
+          },
+          {
+            "refused": true,
+            "refuted_by": "verify_pcf",
+            "tamper": "wrong-trust-root-pin"
+          },
+          {
+            "refused": true,
+            "refuted_by": "verify_vf.reexecute",
+            "tamper": "benign-retained-value"
+          }
+        ]
+      }
+    ],
+    "families_sound": 11,
+    "families_total": 11,
+    "tamper_refused": 66,
+    "tamper_total": 66,
+    "trust_root_fingerprint": "sha256:5765e3ceaaf4bffe0c70524aba934e7f3a14be1503326d40dea76135e68c23bf"
+  },
+  "green": true,
+  "irreducible_boundary": {
+    "irreducible_by_dependency": [
+      "version_range_oracle (packaging)",
+      "saml_forgery_oracle (signxml/lxml)",
+      "oob_callback_oracle (framework verify.oob, external collector)"
+    ],
+    "liveness_bound": "re-execution proves the verdict is the correct FUNCTION of the retained evidence; it does NOT prove the evidence is live \u2014 that still needs an in-VIGIL live re-run (the producer-supplied honesty bound)."
+  },
+  "run": "lane-c/c2-conformance",
+  "schema": "vigil-conformance-run/1",
+  "tool": "VIGIL",
+  "verified_standalone_with": [
+    "docs/proof-carrying-finding/verify_pcf.py (authenticity + binding + pin)",
+    "docs/proof-carrying-finding/verify_vf.py (reexecute_general_oracle \u2014 verdict re-derivation)"
+  ],
+  "zero_vigil": {
+    "verify_pcf_offenders": [],
+    "verify_vf_offenders": [],
+    "zero_vigil": true
+  }
+}

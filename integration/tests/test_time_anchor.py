@@ -85,6 +85,7 @@ _PCF_DIR = Path(__file__).resolve().parents[2] / "docs" / "proof-carrying-findin
 def _load_standalone():
     spec = importlib.util.spec_from_file_location("standalone_verify_vf_a1", _PCF_DIR / "verify_vf.py")
     mod = importlib.util.module_from_spec(spec)
+    import sys as _sys; _sys.modules[spec.name] = mod  # register before exec (dataclasses PEP563 annotation resolution)
     spec.loader.exec_module(mod)
     return mod
 

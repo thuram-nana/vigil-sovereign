@@ -107,6 +107,7 @@ _VF = Path(__file__).resolve().parents[2] / "docs" / "proof-carrying-finding" / 
 def _load_vf():
     spec = importlib.util.spec_from_file_location("standalone_vf_authority", _VF)
     mod = importlib.util.module_from_spec(spec)
+    import sys as _sys; _sys.modules[spec.name] = mod  # register before exec (dataclasses PEP563 annotation resolution)
     spec.loader.exec_module(mod)
     return mod
 

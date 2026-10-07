@@ -1,0 +1,66 @@
+{
+  "_crucible": {
+    "certificate": {
+      "artifacts": [],
+      "bug_class": "command_injection_attempt",
+      "confidence": 0.9,
+      "confirmed_by": "command_injection_breakout",
+      "engagement_slug": "conformance",
+      "finding_ref": "CONF-command-breakout",
+      "how_to_verify": "Verify: re-run this finding's retained proof offline with `python3 -m framework.v2 verify <reverifiable.json>` over the reverifiable material \u2014 the `command_injection_breakout` oracle re-fires over the captured bytes and reports OK when it reproduces. Surface: the affected surface. Fix: Remediate at the root cause for this bug class and add a regression test that re-runs this finding's proof; re-verify with `python3 -m framework.v2 verify`.",
+      "oracle_context_digest": "d4c474df68e462fdfc3c5eb0728756231af4cb98ac851c235445af232aabaf5a",
+      "oracle_version": "sha256:4d014ecb377dce0613056e4b9151313c3648a938b0d543eec383d73797836697",
+      "schema_version": 1,
+      "seq": 0,
+      "surface": ""
+    }
+  },
+  "claim": {
+    "class": "command_injection_attempt",
+    "statement": "command_injection_attempt confirmed by command_injection_breakout",
+    "vocabulary": "pcf-classes/1"
+  },
+  "evidence": {
+    "oracle_context": {
+      "digest": "d4c474df68e462fdfc3c5eb0728756231af4cb98ac851c235445af232aabaf5a",
+      "value": {
+        "bug_class": "command_injection_attempt",
+        "payload_param": "q",
+        "request_payload": "x; cat /etc/passwd"
+      }
+    }
+  },
+  "grounding": "FACT",
+  "id": "4c8d4908e51f92daab3f1852da420bfa908d323d11d3a8261946ba0f10e30e69",
+  "oracle": {
+    "binding": "crucible/verify:command_injection_breakout",
+    "id": "command_injection_breakout",
+    "version": "sha256:4d014ecb377dce0613056e4b9151313c3648a938b0d543eec383d73797836697"
+  },
+  "pcf_version": "0.1",
+  "provenance": {
+    "collected_by": "crucible/evidence",
+    "sequence": 0
+  },
+  "signature": {
+    "domain": "crucible-evidence-v1",
+    "scheme": "ed25519",
+    "signatures": [
+      {
+        "key_id": "conformance-fixture",
+        "sig": "+8efaZtw0Gw53MPnINUxeqbKxVrCNtdIrMI+83aa+3OaT4XHFQflzlqhJZVjF66ZhxOwd3iBpsu2GIf+Ph2LBA=="
+      }
+    ]
+  },
+  "subject": {
+    "context": {
+      "engagement": "conformance",
+      "surface": ""
+    },
+    "identifier": "CONF-command-breakout"
+  },
+  "verdict": {
+    "confidence": 0.9,
+    "fired": true
+  }
+}

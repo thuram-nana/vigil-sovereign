@@ -1,0 +1,3697 @@
+{
+  "adversarial_review": {
+    "cadence": [
+      "Per slice: parallel worktree build, then an independent RED-PEN agent, then (for a defensive domain) the adversarial-sweep companion attacking from disjoint lenses \u2014 NON-NEGOTIABLE before a sequential merge.",
+      "Per wave: report at the wave boundary; lessons are baked forward into the next wave.",
+      "Isolation: parallel mutation lenses run in a committed worktree (isolation:'worktree') so they cannot race into a false 'backdoor' BLOCK."
+    ],
+    "control_id": "AR-REDPEN",
+    "evidence_of_effect": "On the email-auth stream the adversarial sweep caught 3 CRITICAL/LOW defects PAST a RED-PEN PASS \u2014 a single reviewer cannot self-attest near-zero-FP.",
+    "methodology_refs": [
+      ".claude/skills/adversarial-sweep/SKILL.md",
+      "docs/CLAIM-DISCIPLINE.md",
+      "docs/proof-carrying-finding/TRUST-GRADIENT.md"
+    ],
+    "name": "Adversarial review (RED-PEN + adversarial-sweep)",
+    "purpose": "Make the near-zero-false-positive bar an AUDITABLE control, not tribal knowledge: no defensive-oracle domain or FACT-class merges without an independent adversarial re-attack that refutes each objection with a real repro and reports only what survives.",
+    "sign_off": {
+      "_note": "A sign-off slot per audited release. A human reviewer fills one entry; the slots are intentionally EMPTY until signed \u2014 an unsigned review is recorded as pending, never fabricated.",
+      "entries": [],
+      "entry_schema": {
+        "date": "ISO-8601 date",
+        "findings_ref": "path or issue link to the recorded findings",
+        "release": "git tag or commit the review covered",
+        "reviewer": "named human reviewer (not the author)",
+        "scope": "the domains / FACT-classes re-attacked",
+        "verdict": "one of: PASS | PASS-WITH-FIXES | BLOCK"
+      }
+    }
+  },
+  "claims": [
+    {
+      "default": "on",
+      "enforced_by": {
+        "file": "engine/crucible/framework/v2/eval/gate.py",
+        "symbol": "zero_fp_gate"
+      },
+      "failure_class": "n-a",
+      "id": "COV-W6-ZEROFP",
+      "objective": "SO-AUTHZ",
+      "title": "The deep/full profile is corpus-wide zero-FP (the wider roster is safe on by default)",
+      "verifier": {
+        "ci_job": "CRUCIBLE eval + benchmark corpus",
+        "kind": "required-ci-proof",
+        "proving_tests": {
+          "file": "engine/crucible/framework/v2/eval/tests/test_corpus_zero_fp.py",
+          "tests": [
+            "test_gate_fails_on_any_false_positive",
+            "test_corpus_is_zero_fp_with_full_coverage_under_the_profile",
+            "test_the_zero_fp_gate_passes_under_deep_and_full",
+            "test_dedup_NEVER_launders_a_benign_endpoint_false_positive"
+          ]
+        }
+      }
+    },
+    {
+      "default": "on",
+      "enforced_by": {
+        "file": "engine/crucible/framework/v2/console/actions.py",
+        "symbol": "_has_verified_authority"
+      },
+      "failure_class": "n-a",
+      "id": "PHASE0-1",
+      "objective": "SO-AUTHZ",
+      "title": "Remote engage requires an owner-signed, threshold-verified authority",
+      "verifier": {
+        "ci_job": "CRUCIBLE core on vigil_core",
+        "kind": "required-ci-proof",
+        "proving_tests": {
+          "file": "engine/crucible/framework/v2/console/tests/test_launch_assessment.py",
+          "tests": [
+            "test_charter_existence_alone_no_longer_authorizes_remote"
+          ]
+        }
+      }
+    },
+    {
+      "default": "on",
+      "enforced_by": {
+        "file": "packages/core/vigil_core/vigil_core/posture.py",
+        "symbol": "legacy_owner_token_grants_owner"
+      },
+      "failure_class": "n-a",
+      "id": "PHASE0-2",
+      "objective": "SO-AUTHZ",
+      "title": "Governed deployment refuses the fail-open owner token without the egress lockdown",
+      "verifier": {
+        "ci_job": "vigil_core \u2014 shared integrity substrate",
+        "kind": "required-ci-proof",
+        "proving_tests": {
+          "file": "packages/core/vigil_core/tests/test_posture.py",
+          "tests": [
+            "test_governed_posture_refuses_the_legacy_owner_token_without_the_egress_lockdown"
+          ]
+        }
+      }
+    },
+    {
+      "default": "on",
+      "enforced_by": {
+        "file": "packages/core/vigil_core/vigil_core/authority.py",
+        "symbol": "verify_engagement_authority"
+      },
+      "failure_class": "n-a",
+      "id": "PHASE1-1",
+      "objective": "SO-AUTHZ",
+      "title": "One shared engagement-authority definition; the verifier is fail-closed and tamper-evident",
+      "verifier": {
+        "ci_job": "vigil_core \u2014 shared integrity substrate",
+        "kind": "required-ci-proof",
+        "proving_tests": {
+          "file": "packages/core/vigil_core/tests/test_authority.py",
+          "tests": [
+            "test_tamper_after_signing_fails_verification",
+            "test_duplicate_pubkey_trust_root_is_rejected_not_collapsed",
+            "test_malformed_signature_returns_false_not_raises"
+          ]
+        }
+      }
+    },
+    {
+      "default": "on",
+      "enforced_by": {
+        "file": "apps/sigil/sigil/ui/target_authorization.py",
+        "symbol": "add_target"
+      },
+      "failure_class": "n-a",
+      "id": "PHASE1-2",
+      "objective": "SO-AUTHZ",
+      "title": "The cockpit owner-signs a live-target authorization in-process and refuses dangerous inputs",
+      "verifier": {
+        "ci_job": "SIGIL governor gates (P7 \u2014 offense gate + authn)",
+        "kind": "required-ci-proof",
+        "proving_tests": {
+          "file": "apps/sigil/tests/test_target_authorization.py",
+          "tests": [
+            "test_add_target_writes_an_owner_signed_verifiable_authorization",
+            "test_refuses_categorical_safety_floor",
+            "test_refuses_loopback_linklocal_metadata_ip_literals",
+            "test_refuses_live_environment_without_an_evaluator_attestation"
+          ]
+        }
+      }
+    },
+    {
+      "default": "on",
+      "enforced_by": {
+        "file": "engine/crucible/framework/v2/console/actions.py",
+        "symbol": "_install_target_authorization"
+      },
+      "failure_class": "n-a",
+      "id": "PHASE1-3",
+      "objective": "SO-CRYPTO",
+      "title": "A remote engage launches only under an owner-pinned, verified, in-window, in-scope authority",
+      "verifier": {
+        "ci_job": "CRUCIBLE core on vigil_core",
+        "kind": "required-ci-proof",
+        "proving_tests": {
+          "file": "engine/crucible/framework/v2/console/tests/test_target_authorization_install.py",
+          "tests": [
+            "test_install_then_verified_authority_gate_passes",
+            "test_bundle_not_signed_by_pinned_owner_refuses",
+            "test_validly_signed_malformed_scope_entry_is_refused",
+            "test_launch_refuses_a_target_host_outside_the_authorized_scope"
+          ]
+        }
+      }
+    },
+    {
+      "default": "on",
+      "enforced_by": {
+        "file": "engine/crucible/framework/v2/agents/tools/invoker.py",
+        "symbol": "_authority_scope_gate"
+      },
+      "failure_class": "n-a",
+      "id": "PHASE1-4",
+      "objective": "SO-AUTHZ",
+      "title": "The signed authority's scope binds every host-acting op, not just HTTP",
+      "verifier": {
+        "ci_job": "CRUCIBLE core on vigil_core",
+        "kind": "required-ci-proof",
+        "proving_tests": {
+          "file": "engine/crucible/framework/v2/agents/tools/tests/test_authority_scope_gate.py",
+          "tests": [
+            "test_out_of_scope_target_is_refused",
+            "test_in_scope_target_is_allowed",
+            "test_absent_authority_falls_back_to_charter_not_a_false_refusal",
+            "test_skips_when_no_trust_root_pinned"
+          ]
+        }
+      }
+    },
+    {
+      "default": "on",
+      "enforced_by": {
+        "file": "engine/crucible/framework/v2/common/paths.py",
+        "symbol": "crucible_root"
+      },
+      "failure_class": "n-a",
+      "id": "PHASE1-5",
+      "objective": "SO-AUTHZ",
+      "title": "Opt-in hard root pin: a sentinel-less CRUCIBLE_ROOT fails closed, not a silent fall-through",
+      "verifier": {
+        "ci_job": "CRUCIBLE core on vigil_core",
+        "kind": "required-ci-proof",
+        "proving_tests": {
+          "file": "engine/crucible/framework/v2/common/tests/test_paths_root_security.py",
+          "tests": [
+            "test_strict_pin_raises_on_sentinel_less_root",
+            "test_strict_pin_returns_root_when_sentinel_present",
+            "test_without_strict_a_sentinel_less_root_still_falls_through"
+          ]
+        }
+      }
+    },
+    {
+      "default": "on",
+      "enforced_by": {
+        "file": "engine/crucible/framework/v2/agents/http_executor.py",
+        "symbol": "HttpExecutor._sleep_for_rate_limit"
+      },
+      "failure_class": "n-a",
+      "id": "PHASE3-1",
+      "objective": "SO-AUTHZ",
+      "title": "Operator rate control can only tighten the posture rate; the UA carries the operator tag",
+      "verifier": {
+        "ci_job": "CRUCIBLE core on vigil_core",
+        "kind": "required-ci-proof",
+        "proving_tests": {
+          "file": "engine/crucible/framework/v2/agents/tests/test_operator_rate_ua.py",
+          "tests": [
+            "test_min_interval_env_tightens_the_rate_floor",
+            "test_operator_min_below_posture_floor_cannot_loosen",
+            "test_operator_id_env_tags_the_correlatable_user_agent"
+          ]
+        }
+      }
+    },
+    {
+      "default": "on",
+      "enforced_by": {
+        "file": "engine/crucible/framework/v2/aegis/cli.py",
+        "symbol": "_make_webhook_verdict_sink"
+      },
+      "failure_class": "n-a",
+      "id": "PHASE4-1",
+      "objective": "SO-SOUND",
+      "title": "AEGIS gateway delivers verdicts to an outbound sink: bounded, browser-safe, env-auth, fail-open",
+      "verifier": {
+        "ci_job": "CRUCIBLE core on vigil_core",
+        "kind": "required-ci-proof",
+        "proving_tests": {
+          "file": "engine/crucible/framework/v2/aegis/tests/test_gateway_verdict_webhook.py",
+          "tests": [
+            "test_webhook_sink_posts_browser_safe_verdict",
+            "test_auth_header_from_env_not_argv",
+            "test_webhook_sink_is_fail_open"
+          ]
+        }
+      }
+    },
+    {
+      "default": "on",
+      "enforced_by": {
+        "file": "docs/tests/test_claims_registry.py",
+        "symbol": "validate_claim"
+      },
+      "failure_class": "n-a",
+      "id": "REGISTRY-SELF",
+      "objective": "SO-ASSURANCE",
+      "title": "Every registered claim resolves to a real enforcing symbol AND a real proving test",
+      "verifier": {
+        "ci_job": "the briefing explains every agent and capability",
+        "kind": "required-ci-proof",
+        "proving_tests": {
+          "file": "docs/tests/test_claims_registry.py",
+          "tests": [
+            "test_every_registered_claim_resolves_to_a_real_symbol",
+            "test_every_registered_claim_has_a_real_proving_test",
+            "test_doc_markers_and_registry_are_bijective"
+          ]
+        }
+      }
+    },
+    {
+      "default": "n-a",
+      "enforced_by": {
+        "file": "engine/crucible/framework/v2/console/api.py",
+        "symbol": "_REMEDIATION_LADDER"
+      },
+      "failure_class": "display-manufactures-evidence",
+      "id": "REM-LADDER",
+      "objective": "SO-AUTHZ",
+      "title": "The served remediation ladder shows the tier the WARDEN gate really assigns",
+      "verifier": {
+        "ci_job": "integration two-env boundary (P5)",
+        "kind": "required-ci-proof",
+        "proving_tests": {
+          "file": "integration/tests/test_fix_ladder_matches_the_gate.py",
+          "tests": [
+            "test_every_gated_row_shows_the_tier_the_warden_gate_really_assigns",
+            "test_the_live_gate_agrees__unattended_queues_and_the_apply_click_is_what_opens_it"
+          ]
+        }
+      }
+    },
+    {
+      "default": "on",
+      "enforced_by": {
+        "file": "tools/governance/branch_protection_check.py",
+        "symbol": "compare_protection"
+      },
+      "failure_class": "n-a",
+      "id": "W0-1-branch-protection-verify",
+      "objective": "SO-AUTHZ",
+      "title": "Branch-protection verify logic is a single tested module that detects policy drift (W0-1 #554)",
+      "verifier": {
+        "ci_job": "the briefing explains every agent and capability",
+        "kind": "required-ci-proof",
+        "proving_tests": {
+          "file": "docs/tests/test_branch_protection_verify.py",
+          "tests": [
+            "test_matching_protection_has_no_problems",
+            "test_dropping_a_required_check_from_the_policy_fails"
+          ]
+        }
+      }
+    },
+    {
+      "default": "on",
+      "enforced_by": {
+        "file": "gateway/tests/test_env_gated_tests_run_in_ci.py",
+        "symbol": "_env_gates_without_a_setter"
+      },
+      "failure_class": "n-a",
+      "id": "W1-4",
+      "objective": "SO-ASSURANCE",
+      "title": "No test is gated on an env var no workflow sets",
+      "verifier": {
+        "ci_job": "gateway egress gate (P6)",
+        "kind": "required-ci-proof",
+        "proving_tests": {
+          "file": "gateway/tests/test_env_gated_tests_run_in_ci.py",
+          "tests": [
+            "test_no_test_is_gated_on_an_env_var_no_workflow_sets",
+            "test_env_gate_guard_is_not_vacuous_negative_control"
+          ]
+        }
+      }
+    },
+    {
+      "default": "on",
+      "enforced_by": {
+        "file": "integration/tests/test_aegis_dockerfile_wired.py",
+        "symbol": "aegis_python_pin_drift"
+      },
+      "failure_class": "n-a",
+      "id": "W1-7",
+      "objective": "SO-ASSURANCE",
+      "title": "AEGIS runtime Python is aligned to the locked target",
+      "verifier": {
+        "ci_job": "integration two-env boundary (P5)",
+        "kind": "required-ci-proof",
+        "proving_tests": {
+          "file": "integration/tests/test_aegis_dockerfile_wired.py",
+          "tests": [
+            "test_aegis_runtime_python_is_aligned_to_the_locked_target",
+            "test_python_pin_drift_is_not_vacuous_negative_control"
+          ]
+        }
+      }
+    },
+    {
+      "default": "on",
+      "enforced_by": {
+        "file": "integration/tests/test_nested_github_guard.py",
+        "symbol": "nested_github_offenses"
+      },
+      "failure_class": "n-a",
+      "id": "W1-8",
+      "objective": "SO-ASSURANCE",
+      "title": "No .github/workflows or pull-request template exists outside the repo root (nested inert copies are guarded out)",
+      "verifier": {
+        "ci_job": "integration two-env boundary (P5)",
+        "kind": "required-ci-proof",
+        "proving_tests": {
+          "file": "integration/tests/test_nested_github_guard.py",
+          "tests": [
+            "test_no_nested_github_workflows_or_templates_outside_root",
+            "test_negative_control_scanner_flags_a_nested_workflow",
+            "test_negative_control_scanner_flags_a_nested_pr_template",
+            "test_negative_control_vendored_github_tree_is_exempt"
+          ]
+        }
+      }
+    },
+    {
+      "default": "on",
+      "enforced_by": {
+        "file": "engine/crucible/framework/v2/agents/egress_guard.py",
+        "symbol": "build_engagement_allowlist"
+      },
+      "failure_class": "config-stated-as-code",
+      "id": "W10-1",
+      "objective": "SO-AUTHZ",
+      "title": "Runtime egress allowlist (gate 6) is installed on the real target-traffic path",
+      "verifier": {
+        "ci_job": "the briefing explains every agent and capability",
+        "kind": "required-ci-proof",
+        "proving_tests": {
+          "file": "docs/tests/test_w10_egress_allowlist_wired.py",
+          "tests": [
+            "test_readme_cited_code_facts_are_true_in_tree",
+            "test_readme_gate6_describes_the_real_reach_and_the_two_always_on_gates"
+          ]
+        }
+      }
+    },
+    {
+      "default": "off",
+      "enforced_by": {
+        "file": "integration/vigil_integration/doctor.py",
+        "symbol": "_posture_egress_supervisor"
+      },
+      "failure_class": "opt-in-stated-as-default",
+      "id": "W10-8",
+      "objective": "SO-ISOLATION",
+      "title": "Seccomp egress supervisor is FORCED ON under the production posture (and its bound is stated)",
+      "verifier": {
+        "ci_job": "integration two-env boundary (P5)",
+        "kind": "required-ci-proof",
+        "proving_tests": {
+          "file": "integration/tests/test_doctor_production_gate.py",
+          "tests": [
+            "test_production_posture_forces_the_egress_supervisor_on",
+            "test_gate_refuses_when_egress_supervisor_binary_missing",
+            "test_wrap_argv_fails_closed_under_production_when_binary_missing"
+          ]
+        }
+      }
+    },
+    {
+      "default": "on",
+      "enforced_by": {
+        "file": "tools/livefire/require_tools.py",
+        "symbol": "require_tools"
+      },
+      "failure_class": "n-a",
+      "id": "W11-2",
+      "objective": "SO-ASSURANCE",
+      "title": "Live-fire scripts fail closed on a missing required tool",
+      "verifier": {
+        "ci_job": "integration two-env boundary (P5)",
+        "kind": "required-ci-proof",
+        "proving_tests": {
+          "file": "integration/tests/test_livefire_require_tools.py",
+          "tests": [
+            "test_present_required_tool_is_accepted",
+            "test_missing_required_tool_fails_closed",
+            "test_negative_control_absent_tool_is_named_not_swallowed",
+            "test_allow_missing_downgrades_only_the_named_tool",
+            "test_cli_exits_nonzero_and_annotates_on_missing_tool",
+            "test_the_gate_is_actually_wired_into_scripts_and_scheduled_jobs"
+          ]
+        }
+      }
+    },
+    {
+      "default": "on",
+      "enforced_by": {
+        "file": "tools/mutation/mutation_probe.py",
+        "symbol": "evaluate"
+      },
+      "failure_class": "n-a",
+      "id": "W11-3",
+      "objective": "SO-AUTHZ",
+      "title": "The mutation gate has proven sensitivity (an adequate test kills a boundary mutant, a weak test does not)",
+      "verifier": {
+        "ci_job": "integration two-env boundary (P5)",
+        "kind": "required-ci-proof",
+        "proving_tests": {
+          "file": "integration/tests/test_mutation_gate_sensitivity.py",
+          "tests": [
+            "test_adequate_test_kills_the_boundary_mutant",
+            "test_weak_test_lets_the_mutant_survive_the_negative_control",
+            "test_identity_mutant_survives_even_the_strong_test_so_KILLED_is_load_bearing"
+          ]
+        }
+      }
+    },
+    {
+      "default": "on",
+      "enforced_by": {
+        "file": "integration/vigil_integration/live/spine_vigilcore.py",
+        "symbol": "VigilCoreSpine.writer"
+      },
+      "failure_class": "n-a",
+      "id": "W11-4",
+      "objective": "SO-RESILIENCE",
+      "title": "Audit/spine writer fails closed under resource exhaustion",
+      "verifier": {
+        "ci_job": "integration two-env boundary (P5)",
+        "kind": "required-ci-proof",
+        "proving_tests": {
+          "file": "integration/tests/test_spine_resource_exhaustion_failclosed.py",
+          "tests": [
+            "test_unwritable_audit_sink_refuses_the_action",
+            "test_disk_full_enospc_refuses_and_does_not_advance",
+            "test_fd_exhaustion_rlimit_nofile_refuses",
+            "test_oom_memoryerror_on_append_refuses_and_does_not_advance"
+          ]
+        }
+      }
+    },
+    {
+      "default": "on",
+      "enforced_by": {
+        "file": "apps/sigil/sigil/spine/store.py",
+        "symbol": "SpineStore._resolve_segments"
+      },
+      "failure_class": "n-a",
+      "id": "W11-5",
+      "objective": "SO-AUTHZ",
+      "title": "Two engagements share one spine and stay a single contiguous verified chain across a concurrent compaction",
+      "verifier": {
+        "ci_job": "SIGIL governor gates (P7 \u2014 offense gate + authn)",
+        "kind": "required-ci-proof",
+        "proving_tests": {
+          "file": "apps/sigil/tests/test_spine_concurrency_stress.py",
+          "tests": [
+            "test_two_engagements_one_spine_stay_contiguous_and_attributed",
+            "test_concurrent_engagement_read_survives_compaction_supersession",
+            "test_genuine_segment_loss_still_raises_under_concurrent_engagements"
+          ]
+        }
+      }
+    },
+    {
+      "default": "on",
+      "enforced_by": {
+        "file": "tools/flake/flake_tracker.py",
+        "symbol": "require_registered_quarantine"
+      },
+      "failure_class": "n-a",
+      "id": "W11-5-flake",
+      "objective": "SO-ASSURANCE",
+      "title": "A flaky test can only be quarantined through an explicit, reviewer-visible registry entry",
+      "verifier": {
+        "ci_job": "SIGIL governor gates (P7 \u2014 offense gate + authn)",
+        "kind": "required-ci-proof",
+        "proving_tests": {
+          "file": "apps/sigil/tests/test_flake_tracking.py",
+          "tests": [
+            "test_quarantine_is_explicit_not_silent",
+            "test_check_quarantine_explicit_flags_only_unregistered",
+            "test_pass_rate_computed_from_the_ledger",
+            "test_committed_ledger_has_real_history_for_the_stress_harness"
+          ]
+        }
+      }
+    },
+    {
+      "default": "on",
+      "enforced_by": {
+        "file": "engine/crucible/framework/v2/eval/soak.py",
+        "symbol": "run_soak_sustained"
+      },
+      "failure_class": "n-a",
+      "id": "W11-6",
+      "objective": "SO-RESILIENCE",
+      "title": "The soak harness holds a documented throughput floor and detects memory leaks",
+      "verifier": {
+        "ci_job": "CRUCIBLE eval + benchmark corpus",
+        "kind": "required-ci-proof",
+        "proving_tests": {
+          "file": "engine/crucible/framework/v2/eval/tests/test_soak_leak.py",
+          "tests": [
+            "test_detect_leak_flags_a_rising_series",
+            "test_leaking_fixture_is_detected",
+            "test_clean_fixture_is_not_flagged",
+            "test_throughput_floor_predicate_rejects_below_and_accepts_at_or_above",
+            "test_scaled_sustained_soak_holds_the_ci_floor_and_stays_deterministic",
+            "test_sustained_pass_roll_up_fails_below_floor",
+            "test_full_soak_is_a_scheduled_job_not_a_pr_gate"
+          ]
+        }
+      }
+    },
+    {
+      "default": "on",
+      "enforced_by": {
+        "file": "integration/vigil_integration/transparency.py",
+        "symbol": "is_split_view_resistant"
+      },
+      "failure_class": "n-a",
+      "id": "W11-7",
+      "objective": "SO-RESILIENCE",
+      "title": "A chaos-and-failover suite pins the spine's documented behaviour; a byzantine witness that violates quorum-intersection is rejected",
+      "verifier": {
+        "ci_job": "SIGIL governor gates (P7 \u2014 offense gate + authn)",
+        "kind": "required-ci-proof",
+        "proving_tests": {
+          "file": "apps/sigil/tests/test_chaos_failover.py",
+          "tests": [
+            "test_partition_split_brain_fork_is_detected_and_refused",
+            "test_clock_skew_future_dated_anchor_refused",
+            "test_clock_skew_stale_anchor_refused_fresh_accepted",
+            "test_byzantine_witness_equivocation_is_refused_by_an_honest_witness",
+            "test_byzantine_witness_violating_quorum_intersection_is_rejected",
+            "test_torn_page_tail_is_repaired_and_append_not_lost",
+            "test_torn_page_middle_is_rejected_not_silently_short_read",
+            "test_chaos_suite_runs_on_a_schedule",
+            "test_scheduled_chaos_failure_alerts",
+            "test_ha_profile_non_claim_and_symbols_are_true_of_the_code"
+          ]
+        }
+      }
+    },
+    {
+      "default": "on",
+      "enforced_by": {
+        "file": "apps/sigil/sigil/spine/deploy_verify.py",
+        "symbol": "deploy_verify_roundtrip"
+      },
+      "failure_class": "n-a",
+      "id": "W11-8",
+      "objective": "SO-RESILIENCE",
+      "title": "Deploy-verify pipeline with rollback proof",
+      "verifier": {
+        "ci_job": "SIGIL governor gates (P7 \u2014 offense gate + authn)",
+        "kind": "required-ci-proof",
+        "proving_tests": {
+          "file": "apps/sigil/tests/test_deploy_verify.py",
+          "tests": [
+            "test_healthy_deployment_passes_smoke_and_stands",
+            "test_negative_control_broken_deployment_is_caught_and_auto_rolled_back",
+            "test_negative_control_rollback_is_not_a_no_op",
+            "test_run_smoke_honours_the_command_exit_code",
+            "test_a_nonzero_exit_smoke_drives_the_rollback"
+          ]
+        }
+      }
+    },
+    {
+      "default": "on",
+      "enforced_by": {
+        "file": "integration/tests/test_nested_github_guard.py",
+        "symbol": "root_pr_template_defect"
+      },
+      "failure_class": "n-a",
+      "id": "W12-1",
+      "objective": "SO-ASSURANCE",
+      "title": "A pull-request template exists at the root path GitHub reads, and CONTRIBUTING points to it",
+      "verifier": {
+        "ci_job": "integration two-env boundary (P5)",
+        "kind": "required-ci-proof",
+        "proving_tests": {
+          "file": "integration/tests/test_nested_github_guard.py",
+          "tests": [
+            "test_root_pull_request_template_exists",
+            "test_contributing_points_to_the_real_pr_template_path",
+            "test_negative_control_missing_root_template_is_rejected"
+          ]
+        }
+      }
+    },
+    {
+      "default": "on",
+      "enforced_by": {
+        "file": "docs/tests/test_security_policy_present.py",
+        "symbol": "security_policy_defects"
+      },
+      "failure_class": "n-a",
+      "id": "W12-2",
+      "objective": "SO-ASSURANCE",
+      "title": "A root SECURITY.md publishes a contact, supported-versions, coordinated-disclosure and a safe-harbour statement",
+      "verifier": {
+        "ci_job": "the briefing explains every agent and capability",
+        "kind": "required-ci-proof",
+        "proving_tests": {
+          "file": "docs/tests/test_security_policy_present.py",
+          "tests": [
+            "test_security_md_exists_at_root",
+            "test_security_md_has_a_contact_so_it_cannot_be_silently_gutted",
+            "test_security_md_has_all_required_elements",
+            "test_readme_references_the_disclosure_path",
+            "test_negative_control_missing_contact_is_rejected",
+            "test_negative_control_missing_safe_harbour_is_rejected"
+          ]
+        }
+      }
+    },
+    {
+      "default": "on",
+      "enforced_by": {
+        "file": "integration/tests/test_codeowners_coverage.py",
+        "symbol": "codeowners_coverage_defects"
+      },
+      "failure_class": "n-a",
+      "id": "W12-3",
+      "objective": "SO-AUTHZ",
+      "title": "CODEOWNERS gives every security-critical path an explicit owner (W12-3 #492)",
+      "verifier": {
+        "ci_job": "integration two-env boundary (P5)",
+        "kind": "required-ci-proof",
+        "proving_tests": {
+          "file": "integration/tests/test_codeowners_coverage.py",
+          "tests": [
+            "test_root_codeowners_covers_every_critical_path",
+            "test_negative_control_missing_critical_rule_is_flagged"
+          ]
+        }
+      }
+    },
+    {
+      "default": "on",
+      "enforced_by": {
+        "file": "tools/governance/commit_signing.py",
+        "symbol": "signing_config_defects"
+      },
+      "failure_class": "n-a",
+      "id": "W12-4",
+      "objective": "SO-ASSURANCE",
+      "title": "Commit-signing setup + a real local verify check ship (W12-4 #493)",
+      "verifier": {
+        "ci_job": "integration two-env boundary (P5)",
+        "kind": "required-ci-proof",
+        "proving_tests": {
+          "file": "integration/tests/test_commit_signing_setup.py",
+          "tests": [
+            "test_signing_config_defects_passes_a_configured_setup",
+            "test_negative_control_unsigned_config_is_rejected"
+          ]
+        }
+      }
+    },
+    {
+      "default": "off",
+      "enforced_by": {
+        "file": "engine/crucible/framework/v2/authority/authorization.py",
+        "symbol": "authorize_engagement_action"
+      },
+      "failure_class": "n-a",
+      "id": "W13-3",
+      "objective": "SO-AUTHZ",
+      "title": "The signed EngagementAuthorization's four bounds are honoured by the executor, and the letter/charter/object scope is cross-checked",
+      "verifier": {
+        "ci_job": "CRUCIBLE core on vigil_core",
+        "kind": "required-ci-proof",
+        "proving_tests": {
+          "file": "engine/crucible/framework/v2/authority/tests/test_engagement_authorization.py",
+          "tests": [
+            "test_danger_ceiling_uses_the_warden_classifier",
+            "test_negative_control_action_above_ceiling_is_refused",
+            "test_ceiling_gate_is_not_a_no_op",
+            "test_negative_control_action_before_window_is_refused",
+            "test_negative_control_action_after_window_is_refused",
+            "test_negative_control_action_beyond_rate_limit_is_refused",
+            "test_negative_control_action_beyond_concurrency_limit_is_refused",
+            "test_sign_and_verify_roundtrip",
+            "test_tampered_ceiling_is_detected"
+          ]
+        }
+      }
+    },
+    {
+      "default": "on",
+      "enforced_by": {
+        "file": "integration/vigil_integration/live/external_tool.py",
+        "symbol": "_capability_boundary_refusal"
+      },
+      "failure_class": "n-a",
+      "id": "W13-5",
+      "objective": "SO-AUTHZ",
+      "title": "A PRESENTED capability token is validated (single-use, nine-field bound) at the external-tool executor boundary",
+      "verifier": {
+        "ci_job": "integration two-env boundary (P5)",
+        "kind": "required-ci-proof",
+        "proving_tests": {
+          "file": "integration/tests/test_capability_token.py",
+          "tests": [
+            "test_a_valid_token_authorizes_exactly_once",
+            "test_negative_control_replayed_token_is_refused",
+            "test_negative_control_different_operation_hash_is_refused",
+            "test_negative_control_token_past_expiry_is_refused",
+            "test_negative_control_different_target_is_refused",
+            "test_uses_the_existing_o_excl_nonce_ledger",
+            "test_executor_consults_the_capability_boundary_before_running",
+            "test_structural_check_is_not_a_no_op_negative_control"
+          ]
+        }
+      }
+    },
+    {
+      "default": "off",
+      "enforced_by": {
+        "file": "integration/vigil_integration/restricted_mode.py",
+        "symbol": "enforce_integrity_or_restrict"
+      },
+      "failure_class": "opt-in-stated-as-default",
+      "id": "W13-6",
+      "objective": "SO-ISOLATION",
+      "title": "Restricted mode over the existing kill-switch (safe landing state)",
+      "verifier": {
+        "ci_job": "integration two-env boundary (P5)",
+        "kind": "required-ci-proof",
+        "proving_tests": {
+          "file": "integration/tests/test_restricted_mode.py",
+          "tests": [
+            "test_integrity_failure_drops_into_restricted_mode",
+            "test_clean_integrity_leaves_the_system_operational",
+            "test_emergency_stop_enters_restricted_mode_recorded_on_chain",
+            "test_restricted_mode_survives_restart",
+            "test_restricted_mode_permits_only_the_diagnostic_surface"
+          ]
+        }
+      }
+    },
+    {
+      "default": "on",
+      "enforced_by": {
+        "file": "vscp/vscp/config.py",
+        "symbol": "VscpConfig"
+      },
+      "failure_class": "n-a",
+      "id": "W13-7",
+      "objective": "SO-CRYPTO",
+      "title": "VSCP is a sibling application with CI-enforced isolation from the assessment product",
+      "verifier": {
+        "ci_job": "integration two-env boundary (P5)",
+        "kind": "required-ci-proof",
+        "proving_tests": {
+          "file": "integration/tests/test_vscp_isolation.py",
+          "tests": [
+            "test_vscp_is_a_sibling_folder_with_its_own_runtime_deps_migrations_and_ci",
+            "test_no_import_path_to_assessment_findings",
+            "test_import_scanner_is_not_a_no_op_negative_control",
+            "test_separate_db_and_credentials",
+            "test_config_refuses_overlap_with_product_data_root_negative_control",
+            "test_reading_an_assessment_finding_is_refused",
+            "test_reviewer_write_is_refused_but_operator_is_allowed",
+            "test_reviewer_is_read_only_per_route",
+            "test_reviewer_readonly_report_is_not_a_no_op_negative_control"
+          ]
+        }
+      }
+    },
+    {
+      "default": "on",
+      "enforced_by": {
+        "file": "integration/vigil_integration/sovereign_deploy/bundle.py",
+        "symbol": "install_bundle"
+      },
+      "failure_class": "n-a",
+      "id": "W13-8-1",
+      "objective": "SO-NONREP",
+      "title": "Offline signed deployment bundles install + verify with NO network (fail-closed)",
+      "verifier": {
+        "ci_job": "integration two-env boundary (P5)",
+        "kind": "required-ci-proof",
+        "proving_tests": {
+          "file": "integration/tests/test_sovereign_deploy_bundle.py",
+          "tests": [
+            "test_offline_bundle_installs_and_verifies_with_no_network",
+            "test_negative_control_tampered_artifact_is_rejected",
+            "test_negative_control_non_customer_signature_is_rejected"
+          ]
+        }
+      }
+    },
+    {
+      "default": "on",
+      "enforced_by": {
+        "file": "integration/vigil_integration/sovereign_deploy/trust.py",
+        "symbol": "deployment_operational"
+      },
+      "failure_class": "n-a",
+      "id": "W13-8-2",
+      "objective": "SO-AUTHZ",
+      "title": "Deployment trust anchor is CUSTOMER-controlled; no vendor kill switch",
+      "verifier": {
+        "ci_job": "integration two-env boundary (P5)",
+        "kind": "required-ci-proof",
+        "proving_tests": {
+          "file": "integration/tests/test_sovereign_deploy_trust.py",
+          "tests": [
+            "test_operational_iff_customer_bundle_verifies",
+            "test_no_vendor_kill_switch_a_vendor_disallow_cannot_disable",
+            "test_negative_control_tampered_customer_bundle_is_not_operational"
+          ]
+        }
+      }
+    },
+    {
+      "default": "on",
+      "enforced_by": {
+        "file": "integration/vigil_integration/sovereign_deploy/attest.py",
+        "symbol": "verify_attestation"
+      },
+      "failure_class": "n-a",
+      "id": "W13-8-3",
+      "objective": "SO-NONREP",
+      "title": "Challenge-response attestation rejects a replay and never blocks an operation",
+      "verifier": {
+        "ci_job": "integration two-env boundary (P5)",
+        "kind": "required-ci-proof",
+        "proving_tests": {
+          "file": "integration/tests/test_sovereign_deploy_attest.py",
+          "tests": [
+            "test_fresh_challenge_is_verified_then_a_replay_is_rejected",
+            "test_dark_attestor_does_not_block_the_operation",
+            "test_negative_control_verified_attestation_cannot_rescue_a_failing_operation"
+          ]
+        }
+      }
+    },
+    {
+      "default": "on",
+      "enforced_by": {
+        "file": "integration/vigil_integration/sovereign_deploy/telemetry.py",
+        "symbol": "build_telemetry_payload"
+      },
+      "failure_class": "n-a",
+      "id": "W13-8-4",
+      "objective": "SO-CONFIG",
+      "title": "Schema-allowlisted telemetry with an explicit no-collect list",
+      "verifier": {
+        "ci_job": "integration two-env boundary (P5)",
+        "kind": "required-ci-proof",
+        "proving_tests": {
+          "file": "integration/tests/test_sovereign_deploy_telemetry.py",
+          "tests": [
+            "test_planted_no_collect_fields_are_absent_from_the_payload",
+            "test_allowlisted_fields_survive_so_the_scrubber_is_not_a_no_op",
+            "test_allowlist_and_no_collect_are_disjoint_and_nonempty"
+          ]
+        }
+      }
+    },
+    {
+      "default": "on",
+      "enforced_by": {
+        "file": "tools/reviewer-package/assemble.py",
+        "symbol": "build_package"
+      },
+      "failure_class": "display-manufactures-evidence",
+      "id": "W13-9",
+      "objective": "SO-ASSURANCE",
+      "title": "The reviewer readiness package is script-assembled from committed sources and every claim is bound to a proving test",
+      "verifier": {
+        "ci_job": "the briefing explains every agent and capability",
+        "kind": "required-ci-proof",
+        "proving_tests": {
+          "file": "docs/tests/test_w13_9_reviewer_package.py",
+          "tests": [
+            "test_build_package_assembles_from_committed_sources",
+            "test_every_assurance_claim_resolves_to_a_passing_registry_test",
+            "test_every_assurance_claim_sowhat_is_grounded_in_its_registered_claim",
+            "test_a_drifted_sowhat_is_rejected",
+            "test_build_fails_when_a_sowhat_drifts_from_its_registered_claim",
+            "test_removing_a_proving_test_makes_the_build_fail",
+            "test_no_wording_asserts_a_compliance_accreditation",
+            "test_inserting_forbidden_wording_fails_the_gate",
+            "test_pending_inputs_are_flagged_not_fabricated"
+          ]
+        }
+      }
+    },
+    {
+      "default": "on",
+      "enforced_by": {
+        "file": "integration/vigil_integration/attestation/anchor.py",
+        "symbol": "default_counter_path"
+      },
+      "failure_class": "n-a",
+      "id": "W14-1-anchor",
+      "objective": "SO-AUTHZ",
+      "title": "Usage-ledger anti-rollback anchor lives host-level and survives a base-dir wipe (W10-3 #475)",
+      "verifier": {
+        "ci_job": "integration two-env boundary (P5)",
+        "kind": "required-ci-proof",
+        "proving_tests": {
+          "file": "integration/tests/test_anchor_out_of_base.py",
+          "tests": [
+            "test_anchor_survives_rm_rf_of_the_base_dir",
+            "test_default_counter_path_tracks_the_redirectable_state_dir"
+          ]
+        }
+      }
+    },
+    {
+      "default": "on",
+      "enforced_by": {
+        "file": "integration/vigil_integration/uiproxy.py",
+        "symbol": "_contain_service_unit"
+      },
+      "failure_class": "config-stated-as-code",
+      "id": "W14-1-containment",
+      "objective": "SO-ISOLATION",
+      "title": "vigil down contains a systemd-managed unit; vigil panic masks it and disables the sidecars (W10-5 #477/#478)",
+      "verifier": {
+        "ci_job": "integration two-env boundary (P5)",
+        "kind": "required-ci-proof",
+        "proving_tests": {
+          "file": "integration/tests/test_down_contains.py",
+          "tests": [
+            "test_run_down_contains_the_unit_a_bare_pidkill_would_be_revived",
+            "test_manual_down_disables_and_stops_a_managed_active_unit",
+            "test_run_panic_masks_and_stops_the_unit"
+          ]
+        }
+      }
+    },
+    {
+      "default": "on",
+      "enforced_by": {
+        "file": "engine/crucible/framework/v2/agents/egress_guard.py",
+        "symbol": "build_engagement_allowlist"
+      },
+      "failure_class": "config-stated-as-code",
+      "id": "W14-1-egress",
+      "objective": "SO-AUTHZ",
+      "title": "Target traffic: two always-on gates + the egress allowlist wired on the engage/repeater path (W10-1 #473)",
+      "verifier": {
+        "ci_job": "the briefing explains every agent and capability",
+        "kind": "required-ci-proof",
+        "proving_tests": {
+          "file": "docs/tests/test_w10_egress_allowlist_wired.py",
+          "tests": [
+            "test_readme_cited_code_facts_are_true_in_tree",
+            "test_readme_gate6_describes_the_real_reach_and_the_two_always_on_gates"
+          ]
+        }
+      }
+    },
+    {
+      "default": "on",
+      "enforced_by": {
+        "file": "integration/vigil_integration/uiproxy.py",
+        "symbol": "PlaneControl.start_offense"
+      },
+      "failure_class": "config-stated-as-code",
+      "id": "W14-1-tier",
+      "objective": "SO-ASSURANCE",
+      "title": "Sovereignty tier is re-resolved at each offense-plane restart, not only at a fresh vigil up (W10-2 #474)",
+      "verifier": {
+        "ci_job": "integration two-env boundary (P5)",
+        "kind": "required-ci-proof",
+        "proving_tests": {
+          "file": "integration/tests/test_uiproxy.py",
+          "tests": [
+            "test_plane_control_start_offense_reresolves_the_tier",
+            "test_plane_control_start_offense_fails_closed_when_resolver_errors"
+          ]
+        }
+      }
+    },
+    {
+      "default": "off",
+      "enforced_by": {
+        "file": "engine/crucible/framework/v2/authority/counsel_review.py",
+        "symbol": "ship_instruments"
+      },
+      "failure_class": "n-a",
+      "id": "W14-2",
+      "objective": "SO-AUTHZ",
+      "title": "No client legal instrument ships until counsel has reviewed it AND every placeholder is resolved",
+      "verifier": {
+        "ci_job": "CRUCIBLE core on vigil_core",
+        "kind": "required-ci-proof",
+        "proving_tests": {
+          "file": "engine/crucible/framework/v2/authority/tests/test_counsel_review.py",
+          "tests": [
+            "test_manifest_lists_the_three_instruments_all_pending",
+            "test_a_reviewed_placeholder_free_instrument_ships",
+            "test_unreviewed_instrument_is_refused",
+            "test_reintroducing_a_placeholder_turns_the_gate_red",
+            "test_no_shipped_instrument_can_contain_a_placeholder",
+            "test_ship_gate_refuses_the_current_pending_set"
+          ]
+        }
+      }
+    },
+    {
+      "default": "on",
+      "enforced_by": {
+        "file": "docs/data-ground-truth/gen_data_ground_truth.py",
+        "symbol": "validate"
+      },
+      "failure_class": "n-a",
+      "id": "W14-3",
+      "objective": "SO-AUTHZ",
+      "title": "DATA-GROUND-TRUTH.md is generated from and verified against the code that defines each on-disk store",
+      "verifier": {
+        "ci_job": "the briefing explains every agent and capability",
+        "kind": "required-ci-proof",
+        "proving_tests": {
+          "file": "docs/tests/test_data_ground_truth_drift.py",
+          "tests": [
+            "test_the_document_is_in_sync_with_the_source_of_truth",
+            "test_a_new_undocumented_egress_site_turns_the_build_red",
+            "test_every_discovered_sink_is_accounted_for"
+          ]
+        }
+      }
+    },
+    {
+      "default": "on",
+      "enforced_by": {
+        "file": "docs/tests/test_limitation_inventory.py",
+        "symbol": "validate_limitation"
+      },
+      "failure_class": "n-a",
+      "id": "W15-1",
+      "objective": "SO-ASSURANCE",
+      "title": "The documented-limitation inventory is code-grounded and machine-checked",
+      "verifier": {
+        "ci_job": "the briefing explains every agent and capability",
+        "kind": "required-ci-proof",
+        "proving_tests": {
+          "file": "docs/tests/test_limitation_inventory.py",
+          "tests": [
+            "test_every_limitation_is_valid",
+            "test_reverified_closed_named_with_real_evidence",
+            "test_marker_bijection_forward_every_marker_is_registered",
+            "test_negative_control_stub_that_no_longer_raises_is_rejected"
+          ]
+        }
+      }
+    },
+    {
+      "default": "on",
+      "enforced_by": {
+        "file": "docs/tests/test_limitation_inventory.py",
+        "symbol": "find_unregistered_debt_prose"
+      },
+      "failure_class": "n-a",
+      "id": "W15-1-prose",
+      "objective": "SO-ASSURANCE",
+      "title": "The honest-limit prose scan catches unregistered deferred/limitation docstrings in code",
+      "verifier": {
+        "ci_job": "the briefing explains every agent and capability",
+        "kind": "required-ci-proof",
+        "proving_tests": {
+          "file": "docs/tests/test_limitation_inventory.py",
+          "tests": [
+            "test_no_unregistered_honest_limit_prose",
+            "test_honest_limit_sites_schema_and_not_stale",
+            "test_negative_control_unregistered_prose_is_flagged",
+            "test_negative_control_stale_site_is_flagged"
+          ]
+        }
+      }
+    },
+    {
+      "default": "on",
+      "enforced_by": {
+        "file": "docs/tests/test_feature_wiring_status.py",
+        "symbol": "validate_feature"
+      },
+      "failure_class": "n-a",
+      "id": "W15-2",
+      "objective": "SO-ASSURANCE",
+      "title": "The feature-wiring completeness audit is code-grounded and machine-checked",
+      "verifier": {
+        "ci_job": "the briefing explains every agent and capability",
+        "kind": "required-ci-proof",
+        "proving_tests": {
+          "file": "docs/tests/test_feature_wiring_status.py",
+          "tests": [
+            "test_every_feature_is_valid",
+            "test_native_verb_coverage_is_exactly_the_parser_contract",
+            "test_passthrough_verb_coverage_is_exactly_the_dispatch_table",
+            "test_negative_control_stub_that_does_not_raise_rejected"
+          ]
+        }
+      }
+    },
+    {
+      "default": "on",
+      "enforced_by": {
+        "file": "docs/tests/test_feature_wiring_status.py",
+        "symbol": "validate_feature"
+      },
+      "failure_class": "n-a",
+      "id": "W15-2b",
+      "objective": "SO-ASSURANCE",
+      "title": "The feature-wiring audit also covers the UI-screen map and the MCP / chat / fireteam / brain subsystem seams",
+      "verifier": {
+        "ci_job": "the briefing explains every agent and capability",
+        "kind": "required-ci-proof",
+        "proving_tests": {
+          "file": "docs/tests/test_feature_wiring_status.py",
+          "tests": [
+            "test_ui_screen_coverage_equals_the_system_map",
+            "test_mcp_live_client_seam_is_still_unwired",
+            "test_negative_control_ui_screen_phantom_rejected",
+            "test_negative_control_symbol_exists_phantom_rejected"
+          ]
+        }
+      }
+    },
+    {
+      "default": "on",
+      "enforced_by": {
+        "file": "docs/tests/test_claim_vs_enforcement_audit.py",
+        "symbol": "validate_audit_entry"
+      },
+      "failure_class": "n-a",
+      "id": "W15-3",
+      "objective": "SO-AUTHZ",
+      "title": "The claim-vs-enforcement audit is code-grounded and machine-checked",
+      "verifier": {
+        "ci_job": "the briefing explains every agent and capability",
+        "kind": "required-ci-proof",
+        "proving_tests": {
+          "file": "docs/tests/test_claim_vs_enforcement_audit.py",
+          "tests": [
+            "test_every_audit_entry_is_valid",
+            "test_every_false_or_scoped_verdict_is_pinned_by_a_registry_entry",
+            "test_all_eight_named_surfaces_are_represented",
+            "test_no_false_self_verifiable_claim_is_left_unflagged",
+            "test_negative_control_false_without_registry_is_rejected"
+          ]
+        }
+      }
+    },
+    {
+      "default": "on",
+      "enforced_by": {
+        "file": "engine/crucible/framework/v2/api/server.py",
+        "symbol": "ApiHandler._authorize"
+      },
+      "failure_class": "n-a",
+      "id": "W16-12",
+      "objective": "SO-AUTHZ",
+      "title": "Offense gated API enforces per-user RBAC + authenticated-principal attribution (direct on-host holder owner-equivalent \u2014 residual)",
+      "verifier": {
+        "ci_job": "CRUCIBLE core on vigil_core",
+        "kind": "required-ci-proof",
+        "proving_tests": {
+          "file": "engine/crucible/framework/v2/api/tests/test_api_rbac.py",
+          "tests": [
+            "test_viewer_stamped_invoke_is_refused_attributed_and_tool_never_runs",
+            "test_operator_stamped_invoke_reaches_handler_and_is_attributed",
+            "test_forged_or_replayed_role_assertion_is_refused",
+            "test_no_hop_headers_keeps_full_access_and_is_attributed_as_on_host",
+            "test_api_with_no_hop_key_refuses_stamped_role_but_allows_direct"
+          ]
+        }
+      }
+    },
+    {
+      "default": "on",
+      "enforced_by": {
+        "file": "integration/tests/test_capability_invocation_paths.py",
+        "symbol": "_production_callers"
+      },
+      "failure_class": "n-a",
+      "id": "W16-16",
+      "objective": "SO-AUTHZ",
+      "title": "Every registered capability has a product invocation path; a structural CI guard reddens on a new orphan",
+      "verifier": {
+        "ci_job": "integration two-env boundary (P5)",
+        "kind": "required-ci-proof",
+        "proving_tests": {
+          "file": "integration/tests/test_capability_invocation_paths.py",
+          "tests": [
+            "test_each_cloud_confirmation_has_an_invocation_path",
+            "test_named_symbol_capability_has_an_invocation_path",
+            "test_new_cloud_exploit_verb_wires_all_six_confirmations",
+            "test_ast_detector_is_not_a_no_op"
+          ]
+        }
+      }
+    },
+    {
+      "default": "n-a",
+      "enforced_by": {
+        "file": "engine/crucible/framework/v2/common/crypto_shred.py",
+        "symbol": "EvidenceKeyring.shred"
+      },
+      "failure_class": "n-a",
+      "id": "W16-8",
+      "objective": "SO-CRYPTO",
+      "title": "Right-to-erasure by crypto-shred (destroy the off-spine key)",
+      "verifier": {
+        "ci_job": "CRUCIBLE core on vigil_core",
+        "kind": "required-ci-proof",
+        "proving_tests": {
+          "file": "engine/crucible/framework/v2/agents/tests/test_evidence_erasure.py",
+          "tests": [
+            "test_erasure_makes_credential_unrecoverable_while_the_spine_chain_verifies",
+            "test_append_only_guarantee_survives_the_erasure_mechanism"
+          ]
+        }
+      }
+    },
+    {
+      "default": "on",
+      "enforced_by": {
+        "file": "integration/vigil_integration/live/web_redrive.py",
+        "symbol": "_redirect_templates"
+      },
+      "failure_class": "n-a",
+      "id": "W16-STD-1a",
+      "objective": "SO-SOUND",
+      "title": "The live web re-drive probes cookie / urlencoded-body / JSON-body redirect parameters, not only the URL",
+      "verifier": {
+        "ci_job": "integration two-env boundary (P5)",
+        "kind": "required-ci-proof",
+        "proving_tests": {
+          "file": "integration/tests/test_web_redrive.py",
+          "tests": [
+            "test_a_redirect_reachable_only_via_cookie_form_or_json_body_is_found",
+            "test_clean_target_is_bounded_clean_and_names_every_insertion_surface",
+            "test_insertion_coverage_went_from_two_surfaces_to_five"
+          ]
+        }
+      }
+    },
+    {
+      "default": "on",
+      "enforced_by": {
+        "file": "integration/vigil_integration/live/body_decode.py",
+        "symbol": "_whatwg_codec"
+      },
+      "failure_class": "n-a",
+      "id": "W16-STD-1b",
+      "objective": "SO-SOUND",
+      "title": "WHATWG charset determination is a fixed label table (not a regex), pinned by a conformance corpus",
+      "verifier": {
+        "ci_job": "integration two-env boundary (P5)",
+        "kind": "required-ci-proof",
+        "proving_tests": {
+          "file": "integration/tests/test_whatwg_encoding_conformance.py",
+          "tests": [
+            "test_every_corpus_label_resolves_exactly_as_the_spec_prescribes",
+            "test_decode_vectors_produce_the_characters_a_browser_would",
+            "test_every_non_ok_label_is_refused_by_the_decoder_not_silently_decoded"
+          ]
+        }
+      }
+    },
+    {
+      "default": "on",
+      "enforced_by": {
+        "file": "integration/vigil_integration/live/verdict.py",
+        "symbol": "admit"
+      },
+      "failure_class": "n-a",
+      "id": "W16-STD-1c",
+      "objective": "SO-AUTHZ",
+      "title": "The count of negatives-capable (CLEAN-capable) evidence branches is pinned by name in a test",
+      "verifier": {
+        "ci_job": "integration two-env boundary (P5)",
+        "kind": "required-ci-proof",
+        "proving_tests": {
+          "file": "integration/tests/test_release_gate_false_clean.py",
+          "tests": [
+            "test_the_negatives_capable_branch_count_is_pinned_and_named"
+          ]
+        }
+      }
+    },
+    {
+      "default": "on",
+      "enforced_by": {
+        "file": "integration/vigil_integration/live/cloud_live_posture.py",
+        "symbol": "cloud_live_verify"
+      },
+      "failure_class": "n-a",
+      "id": "W16-STD-2a",
+      "objective": "SO-AUTHZ",
+      "title": "The cross_account_principal evidence branch is cited by a real code path",
+      "verifier": {
+        "ci_job": "integration two-env boundary (P5)",
+        "kind": "required-ci-proof",
+        "proving_tests": {
+          "file": "integration/tests/test_cloud_live_posture.py",
+          "tests": [
+            "test_named_cross_account_grant_is_attributed_to_the_cross_account_branch",
+            "test_wildcard_grant_stays_on_achieved_state_not_cross_account",
+            "test_cross_account_grant_without_owner_mints_no_cross_account_fact"
+          ]
+        }
+      }
+    },
+    {
+      "default": "on",
+      "enforced_by": {
+        "file": "engine/crucible/framework/v2/verify/oracles.py",
+        "symbol": "_SECRET_RECOGNIZERS"
+      },
+      "failure_class": "n-a",
+      "id": "W16-STD-2b",
+      "objective": "SO-SOUND",
+      "title": "E5's secret-type recognizer set is broadened from two types to four",
+      "verifier": {
+        "ci_job": "CRUCIBLE core on vigil_core",
+        "kind": "required-ci-proof",
+        "proving_tests": {
+          "file": "engine/crucible/framework/v2/verify/tests/test_secret_capture.py",
+          "tests": [
+            "test_the_recognizer_set_is_the_broadened_closed_four",
+            "test_good_gitlab_and_slack_captures_fire",
+            "test_gitlab_single_field_breaks_are_mutation_verified",
+            "test_slack_single_field_breaks_are_mutation_verified"
+          ]
+        }
+      }
+    },
+    {
+      "default": "on",
+      "enforced_by": {
+        "file": "integration/vigil_integration/live/secret_discovery.py",
+        "symbol": "scan"
+      },
+      "failure_class": "n-a",
+      "id": "W16-STD-2c",
+      "objective": "SO-AUTHZ",
+      "title": "A secret-DISCOVERY runner emits LEADs only (no FACT from tool bytes)",
+      "verifier": {
+        "ci_job": "integration two-env boundary (P5)",
+        "kind": "required-ci-proof",
+        "proving_tests": {
+          "file": "integration/tests/test_secret_discovery.py",
+          "tests": [
+            "test_scan_finds_a_candidate_of_every_recognised_shape",
+            "test_candidate_finding_is_a_lead_and_the_module_exposes_no_mint_path",
+            "test_a_discovered_candidate_stays_a_lead_until_the_oracle_confirms_a_real_call",
+            "test_benign_text_and_near_misses_yield_no_candidates"
+          ]
+        }
+      }
+    },
+    {
+      "default": "on",
+      "enforced_by": {
+        "file": "docs/capability-matrix/gen_coverage_tiers.py",
+        "symbol": "render_sentence"
+      },
+      "failure_class": "n-a",
+      "id": "W16-STD-2d",
+      "objective": "SO-AUTHZ",
+      "title": "The evidence-tier sentence is generated from the registry, not hand-written",
+      "verifier": {
+        "ci_job": "the briefing explains every agent and capability",
+        "kind": "required-ci-proof",
+        "proving_tests": {
+          "file": "docs/tests/test_coverage_tiers_drift.py",
+          "tests": [
+            "test_the_generated_tier_sentence_matches_the_registry_counts",
+            "test_the_generated_tier_sentence_is_published_and_in_sync",
+            "test_the_sentence_is_generated_not_hardcoded",
+            "test_check_catches_a_drifted_sentence"
+          ]
+        }
+      }
+    },
+    {
+      "default": "on",
+      "enforced_by": {
+        "file": "integration/vigil_integration/live/destruction_provision.py",
+        "symbol": "write_single_use_authorization"
+      },
+      "failure_class": "n-a",
+      "id": "W16-STD-3a",
+      "objective": "SO-AUTHZ",
+      "title": "authorize-destruction writes its single-use token with O_EXCL",
+      "verifier": {
+        "ci_job": "integration two-env boundary (P5)",
+        "kind": "required-ci-proof",
+        "proving_tests": {
+          "file": "integration/tests/test_destruction_provision.py",
+          "tests": [
+            "test_write_single_use_authorization_first_write_succeeds",
+            "test_write_single_use_authorization_second_write_is_refused"
+          ]
+        }
+      }
+    },
+    {
+      "default": "on",
+      "enforced_by": {
+        "file": "apps/sigil/sigil/spine/manifest.py",
+        "symbol": "read_manifest"
+      },
+      "failure_class": "n-a",
+      "id": "W16-STD-3b",
+      "objective": "SO-CRYPTO",
+      "title": "the spine segment manifest supports owner-key signing (tamper-refused)",
+      "verifier": {
+        "ci_job": "SIGIL governor gates (P7 \u2014 offense gate + authn)",
+        "kind": "required-ci-proof",
+        "proving_tests": {
+          "file": "apps/sigil/tests/test_spine_manifest_signature.py",
+          "tests": [
+            "test_write_signed_read_verified_roundtrip",
+            "test_read_refuses_edited_manifest_on_disk",
+            "test_read_refuses_unsigned_manifest_when_key_required"
+          ]
+        }
+      }
+    },
+    {
+      "default": "on",
+      "enforced_by": {
+        "file": "integration/vigil_integration/time_anchor.py",
+        "symbol": "LocalTSA"
+      },
+      "failure_class": "n-a",
+      "id": "W16-STD-3c",
+      "objective": "SO-AUTHZ",
+      "title": "the RFC3161 time anchor is a capability; independence needs an external TSA",
+      "verifier": {
+        "ci_job": "integration two-env boundary (P5)",
+        "kind": "required-ci-proof",
+        "proving_tests": {
+          "file": "integration/tests/test_time_anchor.py",
+          "tests": [
+            "test_anchor_roundtrip_supersedes_median_and_gentime_is_real",
+            "test_remote_tsa_is_the_independence_path_and_is_present_but_offline"
+          ]
+        }
+      }
+    },
+    {
+      "default": "on",
+      "enforced_by": {
+        "file": "apps/sigil/sigil/cli.py",
+        "symbol": "_signed_head_doctor"
+      },
+      "failure_class": "n-a",
+      "id": "W16-STD-4-A",
+      "objective": "SO-RESILIENCE",
+      "title": "A records-bearing host with no signed head fails the health check",
+      "verifier": {
+        "ci_job": "SIGIL governor gates (P7 \u2014 offense gate + authn)",
+        "kind": "required-ci-proof",
+        "proving_tests": {
+          "file": "apps/sigil/tests/test_doctor_signed_head.py",
+          "tests": [
+            "test_records_without_signed_head_fails_doctor",
+            "test_signed_head_passes_doctor",
+            "test_empty_pristine_box_passes_doctor"
+          ]
+        }
+      }
+    },
+    {
+      "default": "on",
+      "enforced_by": {
+        "file": "apps/sigil/sigil/spine/health.py",
+        "symbol": "grounded_after_refusal"
+      },
+      "failure_class": "n-a",
+      "id": "W16-STD-4-B",
+      "objective": "SO-NONREP",
+      "title": "Unresolvable citations are refused at read time, not rendered",
+      "verifier": {
+        "ci_job": "SIGIL governor gates (P7 \u2014 offense gate + authn)",
+        "kind": "required-ci-proof",
+        "proving_tests": {
+          "file": "apps/sigil/tests/test_spine_health.py",
+          "tests": [
+            "test_grounded_after_refusal_drops_high_score_drift",
+            "test_resolve_citation_refuses_seq_beyond_tip",
+            "test_resolve_citation_refuses_wrong_entry_hash"
+          ]
+        }
+      }
+    },
+    {
+      "default": "on",
+      "enforced_by": {
+        "file": "apps/sigil/sigil/spine/health.py",
+        "symbol": "projection_drift"
+      },
+      "failure_class": "n-a",
+      "id": "W16-STD-4-C",
+      "objective": "SO-NONREP",
+      "title": "Projection drift from the signed chain is detected and reported",
+      "verifier": {
+        "ci_job": "SIGIL governor gates (P7 \u2014 offense gate + authn)",
+        "kind": "required-ci-proof",
+        "proving_tests": {
+          "file": "apps/sigil/tests/test_spine_health.py",
+          "tests": [
+            "test_projection_drift_trips_on_reference_host_shape",
+            "test_projection_trailing_is_not_drift",
+            "test_projection_drift_in_sync_is_clean"
+          ]
+        }
+      }
+    },
+    {
+      "default": "off",
+      "enforced_by": {
+        "file": "apps/sigil/sigil/spine/store.py",
+        "symbol": "SpineStore._find_dedup"
+      },
+      "failure_class": "n-a",
+      "id": "W16-STD-4-D",
+      "objective": "SO-NONREP",
+      "title": "Opt-in content de-duplication on append does not break the hash chain",
+      "verifier": {
+        "ci_job": "SIGIL governor gates (P7 \u2014 offense gate + authn)",
+        "kind": "required-ci-proof",
+        "proving_tests": {
+          "file": "apps/sigil/tests/test_spine_dedup.py",
+          "tests": [
+            "test_dedup_returns_existing_seq_and_writes_nothing",
+            "test_dedup_keys_on_plaintext_for_sealed_content",
+            "test_dedup_off_by_default_appends_the_duplicate"
+          ]
+        }
+      }
+    },
+    {
+      "default": "on",
+      "enforced_by": {
+        "file": "apps/sigil/sigil/spine/prune.py",
+        "symbol": "commit_prune"
+      },
+      "failure_class": "n-a",
+      "id": "W16-STD-4-E",
+      "objective": "SO-NONREP",
+      "title": "The hard-prune cutover deletes crash-safely (kill-9 fuzz)",
+      "verifier": {
+        "ci_job": "SIGIL governor gates (P7 \u2014 offense gate + authn)",
+        "kind": "required-ci-proof",
+        "proving_tests": {
+          "file": "apps/sigil/tests/test_spine_prune_crashfuzz.py",
+          "tests": [
+            "test_crash_at_each_cutover_barrier",
+            "test_random_sigkill_during_cutover",
+            "test_recovery_oracle_is_not_a_rubber_stamp"
+          ]
+        }
+      }
+    },
+    {
+      "default": "on",
+      "enforced_by": {
+        "file": "engine/crucible/framework/v2/verify/oracles.py",
+        "symbol": "clickjacking_posture_oracle"
+      },
+      "failure_class": "n-a",
+      "id": "W16-STD-5",
+      "objective": "SO-SOUND",
+      "title": "Client-side posture-weakness oracles (clickjacking/CSRF/postMessage) prove a missing defense, not an achieved-state exploit",
+      "verifier": {
+        "ci_job": "CRUCIBLE core on vigil_core",
+        "kind": "required-ci-proof",
+        "proving_tests": {
+          "file": "engine/crucible/framework/v2/verify/tests/test_client_side_posture.py",
+          "tests": [
+            "test_clickjacking_fires_only_when_no_framing_defense_is_present",
+            "test_csrf_fires_only_when_token_removal_does_not_change_acceptance",
+            "test_postmessage_missing_origin_check_fires_but_a_present_one_does_not",
+            "test_each_client_side_class_has_a_bug_class_oracle_row"
+          ]
+        }
+      }
+    },
+    {
+      "default": "on",
+      "enforced_by": {
+        "file": "engine/crucible/framework/v2/common/logging.py",
+        "symbol": "_rotate_with_retention"
+      },
+      "failure_class": "n-a",
+      "id": "W16-STD-6a",
+      "objective": "SO-RESILIENCE",
+      "title": "Engagement log rotates with retention (no silent discard)",
+      "verifier": {
+        "ci_job": "CRUCIBLE core on vigil_core",
+        "kind": "required-ci-proof",
+        "proving_tests": {
+          "file": "engine/crucible/framework/v2/common/tests/test_logging_rotation.py",
+          "tests": [
+            "test_rotation_retains_history_across_multiple_backups",
+            "test_rotation_preserves_earlier_lines_that_old_code_discarded"
+          ]
+        }
+      }
+    },
+    {
+      "default": "on",
+      "enforced_by": {
+        "file": "engine/crucible/framework/v2/common/logging.py",
+        "symbol": "bind_engagement"
+      },
+      "failure_class": "n-a",
+      "id": "W16-STD-6b",
+      "objective": "SO-AUTHZ",
+      "title": "Concurrent engagements do not cross-log (per-context slug)",
+      "verifier": {
+        "ci_job": "CRUCIBLE core on vigil_core",
+        "kind": "required-ci-proof",
+        "proving_tests": {
+          "file": "engine/crucible/framework/v2/common/tests/test_logging_rotation.py",
+          "tests": [
+            "test_concurrent_engagements_do_not_cross_log",
+            "test_unbound_context_routes_to_ambient_not_a_siblings_engagement"
+          ]
+        }
+      }
+    },
+    {
+      "default": "on",
+      "enforced_by": {
+        "file": "integration/vigil_integration/live/instructions.py",
+        "symbol": "resolve_live_dir"
+      },
+      "failure_class": "n-a",
+      "id": "W16-STD-6c",
+      "objective": "SO-ASSURANCE",
+      "title": "Live directory resolves absolute and CWD-independent",
+      "verifier": {
+        "ci_job": "integration two-env boundary (P5)",
+        "kind": "required-ci-proof",
+        "proving_tests": {
+          "file": "integration/tests/test_live_instructions.py",
+          "tests": [
+            "test_live_dir_default_is_cwd_independent",
+            "test_live_dir_explicit_base_wins_and_is_absolute"
+          ]
+        }
+      }
+    },
+    {
+      "default": "on",
+      "enforced_by": {
+        "file": "engine/crucible/framework/v2/agents/blackboard.py",
+        "symbol": "Blackboard._maybe_integrity_check"
+      },
+      "failure_class": "n-a",
+      "id": "W16-STD-6d",
+      "objective": "SO-RESILIENCE",
+      "title": "Blackboard SQLite corruption detected at open",
+      "verifier": {
+        "ci_job": "CRUCIBLE core on vigil_core",
+        "kind": "required-ci-proof",
+        "proving_tests": {
+          "file": "engine/crucible/framework/v2/agents/tests/test_blackboard.py",
+          "tests": [
+            "test_corrupt_store_is_detected_with_a_clear_error",
+            "test_partially_corrupt_page_is_detected",
+            "test_pristine_store_passes_integrity_check"
+          ]
+        }
+      }
+    },
+    {
+      "default": "on",
+      "enforced_by": {
+        "file": "docs/tests/test_briefing_documents_every_subcommand.py",
+        "symbol": "undocumented_subcommands"
+      },
+      "failure_class": "n-a",
+      "id": "W16-STD-7-cli-coverage",
+      "objective": "SO-ASSURANCE",
+      "title": "The briefing documents every CRUCIBLE subcommand and subsystem",
+      "verifier": {
+        "ci_job": "the briefing explains every agent and capability",
+        "kind": "required-ci-proof",
+        "proving_tests": {
+          "file": "docs/tests/test_briefing_documents_every_subcommand.py",
+          "tests": [
+            "test_every_subcommand_is_documented",
+            "test_no_documented_subcommand_is_fictional",
+            "test_every_subsystem_is_documented",
+            "test_negative_control_a_new_undocumented_subcommand_is_caught",
+            "test_negative_control_removing_a_documented_subcommand_from_code_turns_red",
+            "test_negative_control_a_new_undocumented_subsystem_is_caught"
+          ]
+        }
+      }
+    },
+    {
+      "default": "on",
+      "enforced_by": {
+        "file": "docs/tests/test_w16_std7_docs_completeness.py",
+        "symbol": "index_bare_md_links"
+      },
+      "failure_class": "n-a",
+      "id": "W16-STD-7-docs-index",
+      "objective": "SO-ASSURANCE",
+      "title": "The docs INDEX links every top-level doc and every link resolves",
+      "verifier": {
+        "ci_job": "the briefing explains every agent and capability",
+        "kind": "required-ci-proof",
+        "proving_tests": {
+          "file": "docs/tests/test_w16_std7_docs_completeness.py",
+          "tests": [
+            "test_index_lists_every_top_level_doc",
+            "test_index_links_resolve",
+            "test_negative_control_a_new_undocumented_top_level_doc_is_caught",
+            "test_negative_control_a_broken_index_link_is_caught"
+          ]
+        }
+      }
+    },
+    {
+      "default": "on",
+      "enforced_by": {
+        "file": "docs/tests/test_w16_std7_doc_drifts_corrected.py",
+        "symbol": "drift_violations"
+      },
+      "failure_class": "n-a",
+      "id": "W16-STD-7-drift",
+      "objective": "SO-ASSURANCE",
+      "title": "The \u00a716 doc-vs-code drifts are corrected and cannot re-open",
+      "verifier": {
+        "ci_job": "the briefing explains every agent and capability",
+        "kind": "required-ci-proof",
+        "proving_tests": {
+          "file": "docs/tests/test_w16_std7_doc_drifts_corrected.py",
+          "tests": [
+            "test_no_forbidden_false_phrase_returned",
+            "test_every_corrected_anchor_is_present",
+            "test_every_cited_code_fact_is_true_in_tree",
+            "test_all_drift_corrections_hold"
+          ]
+        }
+      }
+    },
+    {
+      "default": "on",
+      "enforced_by": {
+        "file": "docs/tests/test_w16_std7_docs_completeness.py",
+        "symbol": "_glossary_missing"
+      },
+      "failure_class": "n-a",
+      "id": "W16-STD-7-glossary",
+      "objective": "SO-ASSURANCE",
+      "title": "The GLOSSARY defines the core terms the docs rely on",
+      "verifier": {
+        "ci_job": "the briefing explains every agent and capability",
+        "kind": "required-ci-proof",
+        "proving_tests": {
+          "file": "docs/tests/test_w16_std7_docs_completeness.py",
+          "tests": [
+            "test_glossary_defines_the_core_terms",
+            "test_negative_control_glossary_missing_term_is_caught"
+          ]
+        }
+      }
+    },
+    {
+      "default": "on",
+      "enforced_by": {
+        "file": "docs/tests/test_w16_std7_docs_completeness.py",
+        "symbol": "documented_http_routes"
+      },
+      "failure_class": "n-a",
+      "id": "W16-STD-7-http-api",
+      "objective": "SO-ASSURANCE",
+      "title": "The HTTP API chapter documents exactly the routes the code serves",
+      "verifier": {
+        "ci_job": "the briefing explains every agent and capability",
+        "kind": "required-ci-proof",
+        "proving_tests": {
+          "file": "docs/tests/test_w16_std7_docs_completeness.py",
+          "tests": [
+            "test_every_http_route_is_documented",
+            "test_no_documented_http_route_is_fictional",
+            "test_negative_control_removing_a_documented_http_route_from_code_turns_red",
+            "test_negative_control_a_new_undocumented_http_route_is_caught"
+          ]
+        }
+      }
+    },
+    {
+      "default": "on",
+      "enforced_by": {
+        "file": "docs/tests/test_w16_std7_docs_completeness.py",
+        "symbol": "_licensing_violations"
+      },
+      "failure_class": "n-a",
+      "id": "W16-STD-7-licensing-surface",
+      "objective": "SO-ASSURANCE",
+      "title": "The public-sector licensing exclusion is surfaced where a buyer sees it",
+      "verifier": {
+        "ci_job": "the briefing explains every agent and capability",
+        "kind": "required-ci-proof",
+        "proving_tests": {
+          "file": "docs/tests/test_w16_std7_docs_completeness.py",
+          "tests": [
+            "test_public_sector_exclusion_is_surfaced_for_buyers",
+            "test_negative_control_licensing_absence_is_caught"
+          ]
+        }
+      }
+    },
+    {
+      "default": "on",
+      "enforced_by": {
+        "file": "docs/tests/test_w16_std7_docs_completeness.py",
+        "symbol": "drift_code_fact_violations"
+      },
+      "failure_class": "n-a",
+      "id": "W16-STD-7-rederived-drift",
+      "objective": "SO-ASSURANCE",
+      "title": "The re-derived doc-vs-code drift batch stays corrected",
+      "verifier": {
+        "ci_job": "the briefing explains every agent and capability",
+        "kind": "required-ci-proof",
+        "proving_tests": {
+          "file": "docs/tests/test_w16_std7_docs_completeness.py",
+          "tests": [
+            "test_no_rederived_drift_reopened",
+            "test_negative_control_a_returned_forbidden_phrase_is_flagged",
+            "test_negative_control_a_missing_anchor_is_flagged"
+          ]
+        }
+      }
+    },
+    {
+      "default": "on",
+      "enforced_by": {
+        "file": "docs/tests/test_w16_std7_docs_completeness.py",
+        "symbol": "documented_vigil_verbs"
+      },
+      "failure_class": "n-a",
+      "id": "W16-STD-7-vigil-cli-coverage",
+      "objective": "SO-ASSURANCE",
+      "title": "Every vigil native verb and passthrough verb is documented (bidirectional)",
+      "verifier": {
+        "ci_job": "the briefing explains every agent and capability",
+        "kind": "required-ci-proof",
+        "proving_tests": {
+          "file": "docs/tests/test_w16_std7_docs_completeness.py",
+          "tests": [
+            "test_every_vigil_native_verb_is_documented",
+            "test_every_passthrough_verb_is_documented",
+            "test_no_documented_vigil_verb_is_fictional",
+            "test_negative_control_a_new_undocumented_vigil_verb_is_caught",
+            "test_negative_control_a_fictional_vigil_verb_is_caught"
+          ]
+        }
+      }
+    },
+    {
+      "default": "on",
+      "enforced_by": {
+        "file": "engine/crucible/framework/v2/verify/oracles.py",
+        "symbol": "jwt_forgery_oracle"
+      },
+      "failure_class": "n-a",
+      "id": "W16-STD-8",
+      "objective": "SO-AUTHZ",
+      "title": "The rejected JWT embedded-key (jwk/x5c) forgery oracle stays rejected",
+      "verifier": {
+        "ci_job": "CRUCIBLE core on vigil_core",
+        "kind": "required-ci-proof",
+        "proving_tests": {
+          "file": "engine/crucible/framework/v2/verify/tests/test_jwt_forgery.py",
+          "tests": [
+            "test_does_not_fire_on_rs256_with_a_self_verifying_embedded_jwk",
+            "test_does_not_fire_on_rs256_with_a_self_verifying_embedded_x5c",
+            "test_x5c_refusal_has_a_live_control_the_oracle_is_not_globally_silent"
+          ]
+        }
+      }
+    },
+    {
+      "default": "on",
+      "enforced_by": {
+        "file": "integration/tests/test_deliberate_refusals.py",
+        "symbol": "scan_tree_for_offense_capability"
+      },
+      "failure_class": "n-a",
+      "id": "W16-STD-8b",
+      "objective": "SO-AUTHZ",
+      "title": "Deliberate refusals hold: no evasion/C2/persistence/lateral-movement capability in first-party code",
+      "verifier": {
+        "ci_job": "integration two-env boundary (P5)",
+        "kind": "required-ci-proof",
+        "proving_tests": {
+          "file": "integration/tests/test_deliberate_refusals.py",
+          "tests": [
+            "test_first_party_code_has_no_evasion_c2_or_lateral_capability",
+            "test_negative_control_a_planted_capability_is_flagged",
+            "test_negative_control_benign_gating_and_detection_is_not_flagged",
+            "test_negative_control_planting_into_a_real_first_party_style_tree"
+          ]
+        }
+      }
+    },
+    {
+      "default": "on",
+      "enforced_by": {
+        "file": "engine/crucible/framework/v2/console/tests/test_orphan_route_guard_w17_14.py",
+        "symbol": "_orphans"
+      },
+      "failure_class": "n-a",
+      "id": "W17-14",
+      "objective": "SO-ASSURANCE",
+      "title": "No orphaned console read route: every route is consumed or documented",
+      "verifier": {
+        "ci_job": "CRUCIBLE core on vigil_core",
+        "kind": "required-ci-proof",
+        "proving_tests": {
+          "file": "engine/crucible/framework/v2/console/tests/test_orphan_route_guard_w17_14.py",
+          "tests": [
+            "test_every_registered_read_route_is_consumed_or_documented",
+            "test_negative_control_the_checker_is_not_a_no_op",
+            "test_reports_data_dead_code_is_gone",
+            "test_attachments_list_provider_and_route_are_gone"
+          ]
+        }
+      }
+    },
+    {
+      "default": "on",
+      "enforced_by": {
+        "file": "integration/vigil_integration/fireteam/resolver.py",
+        "symbol": "resolve_pending"
+      },
+      "failure_class": "n-a",
+      "id": "W17-7",
+      "objective": "SO-AUTHZ",
+      "title": "The fireteam Tier-B escalation resolve loop is wired to a production caller",
+      "verifier": {
+        "ci_job": "integration two-env boundary (P5)",
+        "kind": "required-ci-proof",
+        "proving_tests": {
+          "file": "integration/tests/test_fireteam_resolve_loop.py",
+          "tests": [
+            "test_signed_operator_approval_reaches_approved_via_resolve_loop",
+            "test_no_decision_still_fails_closed_at_deadline",
+            "test_forged_untrusted_key_approval_never_approves"
+          ]
+        }
+      }
+    },
+    {
+      "default": "on",
+      "enforced_by": {
+        "file": "engine/crucible/framework/v2/console/actions.py",
+        "symbol": "engine_plan"
+      },
+      "failure_class": "n-a",
+      "id": "W17-9",
+      "objective": "SO-AUTHZ",
+      "title": "New-Assessment preflight surfaces the agentic engine's triple-conjunction gate before Send",
+      "verifier": {
+        "ci_job": "CRUCIBLE core on vigil_core",
+        "kind": "required-ci-proof",
+        "proving_tests": {
+          "file": "engine/crucible/framework/v2/console/tests/test_engine_plan_w17_9.py",
+          "tests": [
+            "test_agentic_runs_when_every_conjunct_is_met",
+            "test_the_three_fall_through_reasons_are_distinct_and_visible",
+            "test_vigil_not_on_path_names_its_own_reason",
+            "test_plan_matches_the_real_routing_when_agentic_runs"
+          ]
+        }
+      }
+    },
+    {
+      "default": "on",
+      "enforced_by": {
+        "file": "tools/governance/mypy_ratchet.py",
+        "symbol": "evaluate"
+      },
+      "failure_class": "n-a",
+      "id": "W2-1",
+      "objective": "SO-ASSURANCE",
+      "title": "mypy is blocking behind a per-module ratchet",
+      "verifier": {
+        "ci_job": "the briefing explains every agent and capability",
+        "kind": "required-ci-proof",
+        "proving_tests": {
+          "file": "docs/tests/test_mypy_ratchet.py",
+          "tests": [
+            "test_evaluate_rejects_a_regression",
+            "test_evaluate_rejects_a_stale_entry",
+            "test_ci_mypy_step_is_blocking_and_wired"
+          ]
+        }
+      }
+    },
+    {
+      "default": "on",
+      "enforced_by": {
+        "file": "tools/coverage/coverage_ratchet.py",
+        "symbol": "evaluate"
+      },
+      "failure_class": "n-a",
+      "id": "W2-4",
+      "objective": "SO-AUTHZ",
+      "title": "line + branch coverage is measured and ratcheted",
+      "verifier": {
+        "ci_job": "the briefing explains every agent and capability",
+        "kind": "required-ci-proof",
+        "proving_tests": {
+          "file": "docs/tests/test_coverage_ratchet.py",
+          "tests": [
+            "test_evaluate_rejects_a_line_regression",
+            "test_evaluate_rejects_a_branch_regression",
+            "test_ci_job_measures_and_gates"
+          ]
+        }
+      }
+    },
+    {
+      "default": "on",
+      "enforced_by": {
+        "file": "infra/supply-chain/verify_native_locks.py",
+        "symbol": "check_lock_matches_manifest"
+      },
+      "failure_class": "n-a",
+      "id": "W3-10",
+      "objective": "SO-SUPPLY",
+      "title": "PEP 517 build backends are hash-locked and the non-Python locks are verified",
+      "verifier": {
+        "ci_job": "integration two-env boundary (P5)",
+        "kind": "required-ci-proof",
+        "proving_tests": {
+          "file": "integration/tests/test_supply_chain.py",
+          "tests": [
+            "test_build_backends_lock_covers_every_declared_backend",
+            "test_build_envs_installs_backends_hashed_and_builds_without_isolation",
+            "test_native_locks_are_consistent_with_their_manifests",
+            "test_native_lock_check_is_not_a_no_op",
+            "test_no_first_party_package_lock_json_only_a_cve_fixture",
+            "test_workflow_regenerate_checks_the_native_locks"
+          ]
+        }
+      }
+    },
+    {
+      "default": "on",
+      "enforced_by": {
+        "file": "integration/tests/test_supply_chain.py",
+        "symbol": "_unpinned_action_uses"
+      },
+      "failure_class": "n-a",
+      "id": "W3-3",
+      "objective": "SO-SUPPLY",
+      "title": "Every GitHub Action in every workflow is SHA-pinned (drift-checked)",
+      "verifier": {
+        "ci_job": "integration two-env boundary (P5)",
+        "kind": "required-ci-proof",
+        "proving_tests": {
+          "file": "integration/tests/test_supply_chain.py",
+          "tests": [
+            "test_every_workflow_action_is_sha_pinned",
+            "test_sha_pin_gate_rejects_a_tag_pinned_workflow"
+          ]
+        }
+      }
+    },
+    {
+      "default": "on",
+      "enforced_by": {
+        "file": "infra/supply-chain/sbom_crosscheck.py",
+        "symbol": "missing_components"
+      },
+      "failure_class": "n-a",
+      "id": "W3-5",
+      "objective": "SO-SUPPLY",
+      "title": "Every release carries a signed SBOM, retrievable independently of CI artifact retention",
+      "verifier": {
+        "ci_job": "integration two-env boundary (P5)",
+        "kind": "required-ci-proof",
+        "proving_tests": {
+          "file": "integration/tests/test_release_sbom.py",
+          "tests": [
+            "test_release_workflow_generates_signs_and_durably_attaches_sboms",
+            "test_release_sbom_is_attached_to_the_release_not_only_a_ci_artifact",
+            "test_verifier_crosschecks_the_released_sbom_with_a_negative_control",
+            "test_crosscheck_passes_a_complete_sbom_and_fails_an_incomplete_one"
+          ]
+        }
+      }
+    },
+    {
+      "default": "on",
+      "enforced_by": {
+        "file": "infra/supply-chain/image_pins.py",
+        "symbol": "content_addressed_tag"
+      },
+      "failure_class": "n-a",
+      "id": "W3-7",
+      "objective": "SO-SUPPLY",
+      "title": "The built container images are scanned, and given content-addressed tags",
+      "verifier": {
+        "ci_job": "integration two-env boundary (P5)",
+        "kind": "required-ci-proof",
+        "proving_tests": {
+          "file": "integration/tests/test_supply_chain.py",
+          "tests": [
+            "test_a14_workflow_builds_and_image_scans_the_gateway",
+            "test_a14_workflow_tags_the_built_image_by_content_address",
+            "test_content_addressed_tag_is_content_sensitive"
+          ]
+        }
+      }
+    },
+    {
+      "default": "off",
+      "enforced_by": {
+        "file": "docs/tests/test_strix_sandbox_image_scan_workflow.py",
+        "symbol": "strix_sandbox_scan_workflow_defects"
+      },
+      "failure_class": "n-a",
+      "id": "W3-7-strix-selfhosted",
+      "objective": "SO-SUPPLY",
+      "title": "Strix sandbox live-image-scan is a shape-pinned, self-hosted-guarded advisory scaffold (W3-7 #653)",
+      "verifier": {
+        "ci_job": "the briefing explains every agent and capability",
+        "kind": "required-ci-proof",
+        "proving_tests": {
+          "file": "docs/tests/test_strix_sandbox_image_scan_workflow.py",
+          "tests": [
+            "test_workflow_is_correctly_shaped",
+            "test_negative_control_missing_self_hosted_guard"
+          ]
+        }
+      }
+    },
+    {
+      "default": "on",
+      "enforced_by": {
+        "file": "infra/supply-chain/image_pins.py",
+        "symbol": "run_drift"
+      },
+      "failure_class": "n-a",
+      "id": "W3-8",
+      "objective": "SO-SUPPLY",
+      "title": "Base-image drift is ADVISORY where resolvable (unpinned still blocks); other registries are an explicit UNKNOWN",
+      "verifier": {
+        "ci_job": "integration two-env boundary (P5)",
+        "kind": "required-ci-proof",
+        "proving_tests": {
+          "file": "integration/tests/test_supply_chain.py",
+          "tests": [
+            "test_resolvable_drift_blocks",
+            "test_unresolvable_registry_is_explicit_unknown_not_a_pass",
+            "test_drift_gate_negative_control_can_fail",
+            "test_drift_summary_makes_unknowns_visible",
+            "test_workflow_drift_step_is_advisory_and_negative_control_still_blocks",
+            "test_allowlisted_rolling_drift_is_advisory_not_blocking",
+            "test_non_allowlisted_moved_digest_still_blocks_negative_control",
+            "test_reverting_the_allowlist_makes_the_rolling_drift_block",
+            "test_every_rolling_drift_allowlist_entry_carries_a_reason"
+          ]
+        }
+      }
+    },
+    {
+      "default": "n-a",
+      "enforced_by": {
+        "file": "docs/tests/test_product_version_consistency.py",
+        "symbol": "mismatched_versions"
+      },
+      "failure_class": "n-a",
+      "id": "W4-1",
+      "objective": "SO-ASSURANCE",
+      "title": "One product version, asserted consistent across every first-party package",
+      "verifier": {
+        "ci_job": "the briefing explains every agent and capability",
+        "kind": "required-ci-proof",
+        "proving_tests": {
+          "file": "docs/tests/test_product_version_consistency.py",
+          "tests": [
+            "test_all_first_party_versions_match_product",
+            "test_product_version_exists_and_is_wellformed",
+            "test_negative_control_bumped_package_is_reported"
+          ]
+        }
+      }
+    },
+    {
+      "default": "on",
+      "enforced_by": {
+        "file": "packages/core/vigil_core/vigil_core/build_info.py",
+        "symbol": "compose_build_id"
+      },
+      "failure_class": "n-a",
+      "id": "W4-2",
+      "objective": "SO-NONREP",
+      "title": "--version on every CLI reports version + build id + git sha (dirty-honest)",
+      "verifier": {
+        "ci_job": "vigil_core \u2014 shared integrity substrate",
+        "kind": "required-ci-proof",
+        "proving_tests": {
+          "file": "packages/core/vigil_core/tests/test_build_info.py",
+          "tests": [
+            "test_negative_control_dirty_tree_build_id_is_marked_dirty",
+            "test_negative_control_unknown_sha_build_id_is_unknown_not_clean",
+            "test_negative_control_dirty_repo_reports_dirty_end_to_end"
+          ]
+        }
+      }
+    },
+    {
+      "default": "on",
+      "enforced_by": {
+        "file": "packages/core/vigil_core/vigil_core/signed_build_manifest.py",
+        "symbol": "build_manifest_from_specs"
+      },
+      "failure_class": "n-a",
+      "id": "W4-3",
+      "objective": "SO-SUPPLY",
+      "title": "One signed manifest carries a content-addressed build id for every shipped artifact (offline-verifiable)",
+      "verifier": {
+        "ci_job": "vigil_core \u2014 shared integrity substrate",
+        "kind": "required-ci-proof",
+        "proving_tests": {
+          "file": "packages/core/vigil_core/tests/test_signed_build_manifest.py",
+          "tests": [
+            "test_manifest_covers_all_four_shipped_artifact_kinds",
+            "test_rebuilt_artifact_changes_build_id_and_fails_old_manifest",
+            "test_two_builds_of_the_same_tree_are_byte_identical",
+            "test_clean_signed_tree_is_VALID_and_offline_verifiable"
+          ]
+        }
+      }
+    },
+    {
+      "default": "on",
+      "enforced_by": {
+        "file": "docs/tests/test_release_runbook.py",
+        "symbol": "undocumented_or_missing"
+      },
+      "failure_class": "n-a",
+      "id": "W4-4",
+      "objective": "SO-RESILIENCE",
+      "title": "The release/upgrade/rollback runbook documents only real CLI commands",
+      "verifier": {
+        "ci_job": "the briefing explains every agent and capability",
+        "kind": "required-ci-proof",
+        "proving_tests": {
+          "file": "docs/tests/test_release_runbook.py",
+          "tests": [
+            "test_every_documented_command_is_a_real_cli_subcommand",
+            "test_negative_control_renamed_command_in_source_turns_the_guard_red",
+            "test_negative_control_bogus_command_in_a_snippet_is_flagged"
+          ]
+        }
+      }
+    },
+    {
+      "default": "on",
+      "enforced_by": {
+        "file": "apps/sigil/sigil/spine/store.py",
+        "symbol": "SpineStore.append"
+      },
+      "failure_class": "n-a",
+      "id": "W5-1",
+      "objective": "SO-NONREP",
+      "title": "Spine append enforces kind + schema_version vocabulary (fail-closed)",
+      "verifier": {
+        "ci_job": "SIGIL governor gates (P7 \u2014 offense gate + authn)",
+        "kind": "required-ci-proof",
+        "proving_tests": {
+          "file": "apps/sigil/tests/test_spine_kind_schema_enforcement.py",
+          "tests": [
+            "test_append_refuses_unknown_kind_and_writes_nothing",
+            "test_append_refuses_unknown_schema_version",
+            "test_append_accepts_every_declared_kind"
+          ]
+        }
+      }
+    },
+    {
+      "default": "on",
+      "enforced_by": {
+        "file": "integration/vigil_integration/witnessed_anchor.py",
+        "symbol": "load_witnessed_envelope"
+      },
+      "failure_class": "n-a",
+      "id": "W5-3",
+      "objective": "SO-NONREP",
+      "title": "Witnessed-checkpoint envelope reader refuses a newer schema (fail-closed)",
+      "verifier": {
+        "ci_job": "integration two-env boundary (P5)",
+        "kind": "required-ci-proof",
+        "proving_tests": {
+          "file": "integration/tests/test_witness_envelope_refuse_newer.py",
+          "tests": [
+            "test_a_newer_envelope_schema_is_refused_with_an_upgrade_message",
+            "test_an_uncoercible_schema_fails_closed"
+          ]
+        }
+      }
+    },
+    {
+      "default": "on",
+      "enforced_by": {
+        "file": "packages/core/vigil_core/vigil_core/install_manifest.py",
+        "symbol": "ensure_operable"
+      },
+      "failure_class": "n-a",
+      "id": "W5-4",
+      "objective": "SO-NONREP",
+      "title": "Every data directory carries an install manifest, verified fail-closed at startup",
+      "verifier": {
+        "ci_job": "vigil_core \u2014 shared integrity substrate",
+        "kind": "required-ci-proof",
+        "proving_tests": {
+          "file": "packages/core/vigil_core/tests/test_install_manifest.py",
+          "tests": [
+            "test_fresh_install_writes_manifest_without_operator_action",
+            "test_newer_tracked_schema_is_refused",
+            "test_corrupt_or_tampered_manifest_is_refused",
+            "test_generation_is_reproducible_byte_identical"
+          ]
+        }
+      }
+    },
+    {
+      "default": "on",
+      "enforced_by": {
+        "file": "apps/sigil/sigil/spine/upgrade_harness.py",
+        "symbol": "run_full_harness"
+      },
+      "failure_class": "n-a",
+      "id": "W5-7",
+      "objective": "SO-RESILIENCE",
+      "title": "N-1 -> N upgrade/rollback + schema-compat harness (falsifiable, additive-only)",
+      "verifier": {
+        "ci_job": "SIGIL governor gates (P7 \u2014 offense gate + authn)",
+        "kind": "required-ci-proof",
+        "proving_tests": {
+          "file": "apps/sigil/tests/test_upgrade_harness.py",
+          "tests": [
+            "test_roundtrip_signature_survives_upgrade_and_rollback_with_data_intact",
+            "test_compat_matrix_is_all_green_on_the_live_tree",
+            "test_full_harness_verdict_is_green_on_the_live_tree",
+            "test_negative_control_a_non_additive_schema_change_makes_the_harness_FAIL",
+            "test_negative_control_schema_version_exclusion_is_load_bearing"
+          ]
+        }
+      }
+    },
+    {
+      "default": "on",
+      "enforced_by": {
+        "file": "engine/crucible/framework/v2/aegis/gateway.py",
+        "symbol": "AegisGatewayHandler._handle_probe"
+      },
+      "failure_class": "n-a",
+      "id": "W6-1",
+      "objective": "SO-RESILIENCE",
+      "title": "Every server exposes unauthenticated /healthz + dependency-checking /readyz",
+      "verifier": {
+        "ci_job": "CRUCIBLE core on vigil_core",
+        "kind": "required-ci-proof",
+        "proving_tests": {
+          "file": "engine/crucible/framework/v2/aegis/tests/test_gateway_health_readyz.py",
+          "tests": [
+            "test_healthz_answered_locally_not_forwarded",
+            "test_readyz_200_when_upstream_up",
+            "test_readyz_503_when_upstream_down_negative_control",
+            "test_non_probe_path_still_forwards"
+          ]
+        }
+      }
+    },
+    {
+      "default": "on",
+      "enforced_by": {
+        "file": "tools/ha/require_probes.py",
+        "symbol": "require"
+      },
+      "failure_class": "n-a",
+      "id": "W6-2",
+      "objective": "SO-RESILIENCE",
+      "title": "Dockerfile HEALTHCHECKs + real k8s liveness/readiness probes wired to /readyz + /healthz",
+      "verifier": {
+        "ci_job": "SIGIL governor gates (P7 \u2014 offense gate + authn)",
+        "kind": "required-ci-proof",
+        "proving_tests": {
+          "file": "apps/sigil/tests/test_ha_probes_required.py",
+          "tests": [
+            "test_every_workload_declares_both_probes",
+            "test_sovereign_statefulset_has_a_liveness_probe",
+            "test_vigil_owned_workload_wired_to_readyz_and_healthz",
+            "test_shallow_root_readiness_is_rejected_negative_control",
+            "test_shipped_server_dockerfiles_declare_a_healthcheck"
+          ]
+        }
+      }
+    },
+    {
+      "default": "on",
+      "enforced_by": {
+        "file": "packages/core/vigil_core/vigil_core/metrics.py",
+        "symbol": "MetricsRegistry.render"
+      },
+      "failure_class": "n-a",
+      "id": "W6-3",
+      "objective": "SO-RESILIENCE",
+      "title": "Each plane exposes a stdlib OpenMetrics /metrics with RED + process + domain counters",
+      "verifier": {
+        "ci_job": "vigil_core \u2014 shared integrity substrate",
+        "kind": "required-ci-proof",
+        "proving_tests": {
+          "file": "packages/core/vigil_core/tests/test_metrics.py",
+          "tests": [
+            "test_render_is_valid_openmetrics_with_red_process_and_domain",
+            "test_forced_gate_denial_increments_counter_and_fires_alert",
+            "test_update_domain_from_snapshot_is_total_on_garbage"
+          ]
+        }
+      }
+    },
+    {
+      "default": "off",
+      "enforced_by": {
+        "file": "integration/vigil_integration/live/otel_export.py",
+        "symbol": "probe_collector"
+      },
+      "failure_class": "n-a",
+      "id": "W6-4",
+      "objective": "SO-RESILIENCE",
+      "title": "A real OTLP collector profile + documented backends, with an unreachable backend made VISIBLE (not silently dropped)",
+      "verifier": {
+        "ci_job": "integration two-env boundary (P5)",
+        "kind": "required-ci-proof",
+        "proving_tests": {
+          "file": "integration/tests/test_otlp_collector_backend.py",
+          "tests": [
+            "test_probe_reports_reachable_against_a_live_loopback_endpoint",
+            "test_unreachable_backend_surfaces_a_visible_error_not_a_silent_drop",
+            "test_probe_refuses_a_non_loopback_endpoint_visibly",
+            "test_backend_collector_profile_exports_to_a_real_backend_not_only_stdout",
+            "test_default_profile_is_stdout_only_so_the_backend_profile_is_the_real_delta"
+          ]
+        }
+      }
+    },
+    {
+      "default": "on",
+      "enforced_by": {
+        "file": "packages/core/vigil_core/vigil_core/logging_setup.py",
+        "symbol": "RedactingJsonFormatter"
+      },
+      "failure_class": "n-a",
+      "id": "W6-5",
+      "objective": "SO-ASSURANCE",
+      "title": "Unified structured logging: JSON + shared redaction across every plane",
+      "verifier": {
+        "ci_job": "vigil_core \u2014 shared integrity substrate",
+        "kind": "required-ci-proof",
+        "proving_tests": {
+          "file": "packages/core/vigil_core/tests/test_logging_unified.py",
+          "tests": [
+            "test_scrub_masks_credentials_and_preserves_telemetry",
+            "test_json_line_redacts_secret_message_and_extra",
+            "test_vigil_log_level_takes_effect",
+            "test_legacy_var_honoured_with_deprecation_warning",
+            "test_rotating_line_writer_bounds_and_retains"
+          ]
+        }
+      }
+    },
+    {
+      "default": "on",
+      "enforced_by": {
+        "file": "packages/core/vigil_core/vigil_core/doctor.py",
+        "symbol": "REQUIRED_CONTROLS"
+      },
+      "failure_class": "n-a",
+      "id": "W6-6",
+      "objective": "SO-AUTHZ",
+      "title": "vigil doctor and sigil doctor share ONE check registry (no drift; README block CI-regenerated)",
+      "verifier": {
+        "ci_job": "integration two-env boundary (P5)",
+        "kind": "required-ci-proof",
+        "proving_tests": {
+          "file": "integration/tests/test_doctor_consolidation.py",
+          "tests": [
+            "test_the_registry_is_the_shared_vigil_core_one",
+            "test_readme_posture_block_is_ci_regenerated_from_the_registry",
+            "test_readme_regenerated_block_is_the_doctors_own_output",
+            "test_cli_exit_nonzero_on_bad_posture_when_armed"
+          ]
+        }
+      }
+    },
+    {
+      "default": "on",
+      "enforced_by": {
+        "file": "tools/backup/objectives.py",
+        "symbol": "assert_within_objectives"
+      },
+      "failure_class": "n-a",
+      "id": "W7-1",
+      "objective": "SO-RESILIENCE",
+      "title": "RPO/RTO are defined numerically and the recovery drill asserts them (fail-closed)",
+      "verifier": {
+        "ci_job": "integration two-env boundary (P5)",
+        "kind": "required-ci-proof",
+        "proving_tests": {
+          "file": "integration/tests/test_backup_dr_objectives.py",
+          "tests": [
+            "test_objectives_are_stated_as_sane_numbers",
+            "test_assert_fails_when_recovery_exceeds_the_rto",
+            "test_assert_fails_when_data_loss_exceeds_the_rpo",
+            "test_objectives_cli_fails_closed_on_a_stale_backup",
+            "test_drill_passes_within_objectives_and_reports_them",
+            "test_drill_FAILS_when_the_restore_exceeds_the_rto"
+          ]
+        }
+      }
+    },
+    {
+      "default": "on",
+      "enforced_by": {
+        "file": "integration/vigil_integration/backup.py",
+        "symbol": "restore_offense_backup"
+      },
+      "failure_class": "n-a",
+      "id": "W7-3a",
+      "objective": "SO-RESILIENCE",
+      "title": "The offense recovery drill covers retained/pruned + pushed backups and detects a corrupted one",
+      "verifier": {
+        "ci_job": "integration two-env boundary (P5)",
+        "kind": "required-ci-proof",
+        "proving_tests": {
+          "file": "integration/tests/test_backup_dr_drill_coverage.py",
+          "tests": [
+            "test_drill_restores_a_retained_pruned_backup",
+            "test_drill_restores_the_pushed_off_host_copy",
+            "test_negative_control_corrupted_retained_backup_is_detected_by_the_cli",
+            "test_negative_control_inner_body_tamper_raises_and_leaves_destination_untouched"
+          ]
+        }
+      }
+    },
+    {
+      "default": "on",
+      "enforced_by": {
+        "file": "apps/sigil/sigil/backup.py",
+        "symbol": "restore_backup"
+      },
+      "failure_class": "n-a",
+      "id": "W7-3b",
+      "objective": "SO-RESILIENCE",
+      "title": "The sovereign plane is drilled: restore re-verifies the signed chain, retained restores, corruption detected",
+      "verifier": {
+        "ci_job": "SIGIL governor gates (P7 \u2014 offense gate + authn)",
+        "kind": "required-ci-proof",
+        "proving_tests": {
+          "file": "apps/sigil/tests/test_backup_recovery_drill_sovereign.py",
+          "tests": [
+            "test_sovereign_drill_restores_and_reverifies_the_signed_chain",
+            "test_sovereign_drill_of_a_retained_superseded_backup",
+            "test_negative_control_corrupted_retained_sovereign_backup_is_detected",
+            "test_negative_control_a_tampered_record_in_a_retained_backup_fails_reverify"
+          ]
+        }
+      }
+    },
+    {
+      "default": "on",
+      "enforced_by": {
+        "file": "tools/backup/transport.py",
+        "symbol": "Transport.verify"
+      },
+      "failure_class": "n-a",
+      "id": "W7-4",
+      "objective": "SO-RESILIENCE",
+      "title": "Backup push verifies the copy at the destination + a real remote transport ships (fail-closed)",
+      "verifier": {
+        "ci_job": "integration two-env boundary (P5)",
+        "kind": "required-ci-proof",
+        "proving_tests": {
+          "file": "integration/tests/test_backup_push_transport.py",
+          "tests": [
+            "test_local_verify_catches_a_TRUNCATED_destination_copy",
+            "test_local_verify_catches_a_TAMPERED_destination_copy",
+            "test_rsync_transport_roundtrips_via_the_real_binary",
+            "test_cli_push_FAILS_CLOSED_when_the_destination_is_corrupted"
+          ]
+        }
+      }
+    },
+    {
+      "default": "on",
+      "enforced_by": {
+        "file": "integration/vigil_integration/backup.py",
+        "symbol": "verify_orchestrator_manifest"
+      },
+      "failure_class": "n-a",
+      "id": "W7-6",
+      "objective": "SO-RESILIENCE",
+      "title": "the orchestrator MANIFEST.json is governance-signed (domain-separated) and the DEFAULT restore is authenticated against a host trust anchor + rollback-resistant",
+      "verifier": {
+        "ci_job": "integration two-env boundary (P5)",
+        "kind": "required-ci-proof",
+        "proving_tests": {
+          "file": "integration/tests/test_backup_manifest_signature.py",
+          "tests": [
+            "test_backup_writes_a_verifying_signature_and_establishes_the_anchor",
+            "test_default_restore_refuses_attacker_remint_once_anchor_exists",
+            "test_production_with_no_anchor_fails_closed",
+            "test_default_restore_refuses_rollback_to_an_older_backup",
+            "test_explicit_pin_mismatch_refused_and_correct_pin_accepted",
+            "test_restore_refuses_an_unsigned_manifest"
+          ]
+        }
+      }
+    },
+    {
+      "default": "off",
+      "enforced_by": {
+        "file": "packages/core/vigil_core/vigil_core/escrow.py",
+        "symbol": "recover_passphrase"
+      },
+      "failure_class": "n-a",
+      "id": "W7-7",
+      "objective": "SO-CRYPTO",
+      "title": "Optional m-of-n passphrase escrow reconstructs at threshold and never below (fail-closed)",
+      "verifier": {
+        "ci_job": "vigil_core \u2014 shared integrity substrate",
+        "kind": "required-ci-proof",
+        "proving_tests": {
+          "file": "packages/core/vigil_core/tests/test_escrow.py",
+          "tests": [
+            "test_reconstruct_at_threshold_succeeds",
+            "test_m_minus_one_shares_are_refused_for_every_subset",
+            "test_recover_passphrase_below_threshold_fails_closed",
+            "test_forged_share_below_threshold_fails_closed_never_returns_wrong_passphrase",
+            "test_shares_indistinguishable_below_threshold_exhaustive",
+            "test_maybe_escrow_is_opt_in_and_off_by_default",
+            "test_committed_known_answer_vector"
+          ]
+        }
+      }
+    },
+    {
+      "default": "on",
+      "enforced_by": {
+        "file": "tools/ha/fork_detection_sla.py",
+        "symbol": "detection_within_sla"
+      },
+      "failure_class": "n-a",
+      "id": "W8-2",
+      "objective": "SO-RESILIENCE",
+      "title": "Passive fencing is advisory; the accepted limitation is a fork-DETECTION SLA",
+      "verifier": {
+        "ci_job": "SIGIL governor gates (P7 \u2014 offense gate + authn)",
+        "kind": "required-ci-proof",
+        "proving_tests": {
+          "file": "apps/sigil/tests/test_ha_fork_detection_sla.py",
+          "tests": [
+            "test_cadence_and_jitter_match_the_shipped_checkpoint_timers",
+            "test_worst_case_from_the_real_timers_meets_the_sla",
+            "test_the_sla_assertion_can_fail_negative_control",
+            "test_second_writer_fork_is_detected_within_the_sla",
+            "test_legitimate_single_writer_extension_is_not_flagged",
+            "test_detected_fork_can_never_be_silently_promoted",
+            "test_decision_record_states_the_limitation_and_sla"
+          ]
+        }
+      }
+    },
+    {
+      "default": "off",
+      "enforced_by": {
+        "file": "integration/vigil_integration/doctor.py",
+        "symbol": "_posture_witness"
+      },
+      "failure_class": "opt-in-stated-as-default",
+      "id": "W8-3",
+      "objective": "SO-AUTHZ",
+      "title": "Production posture refuses a solo / non-distinct transparency-log witness set",
+      "verifier": {
+        "ci_job": "integration two-env boundary (P5)",
+        "kind": "required-ci-proof",
+        "proving_tests": {
+          "file": "integration/tests/test_witness_provision_posture.py",
+          "tests": [
+            "test_production_gate_refuses_solo_witness",
+            "test_production_gate_refuses_shared_key_witness",
+            "test_production_gate_witness_met_with_distinct_quorum",
+            "test_shared_canonical_key_is_rejected_not_distinct",
+            "test_sub_majority_threshold_is_not_distinct_quorum",
+            "test_provision_two_local_witnesses_reaches_distinct_quorum",
+            "test_provision_tool_refuses_duplicate_canonical_key",
+            "test_gate_inert_when_posture_unset"
+          ]
+        }
+      }
+    },
+    {
+      "default": "on",
+      "enforced_by": {
+        "file": "tools/ha/spine_failover_guard.py",
+        "symbol": "evaluate_promotion"
+      },
+      "failure_class": "n-a",
+      "id": "W8-4",
+      "objective": "SO-RESILIENCE",
+      "title": "A stale passive mirror is refused promotion by the failover guard, not silently promoted",
+      "verifier": {
+        "ci_job": "SIGIL governor gates (P7 \u2014 offense gate + authn)",
+        "kind": "required-ci-proof",
+        "proving_tests": {
+          "file": "apps/sigil/tests/test_ha_mirror_sync.py",
+          "tests": [
+            "test_stale_mirror_anchor_is_refused_fresh_is_promoted",
+            "test_torn_delta_sync_is_detectably_incomplete_not_silently_partial",
+            "test_delta_mirror_sync_transfers_state_faithfully"
+          ]
+        }
+      }
+    },
+    {
+      "default": "on",
+      "enforced_by": {
+        "file": "apps/sigil/sigil/spine/checkpoint.py",
+        "symbol": "trust_root"
+      },
+      "failure_class": "n-a",
+      "id": "W8-5",
+      "objective": "SO-CRYPTO",
+      "title": "HA passives share ONE owner key; per-host keys with delegation evaluated and deferred (not half-built)",
+      "verifier": {
+        "ci_job": "SIGIL governor gates (P7 \u2014 offense gate + authn)",
+        "kind": "required-ci-proof",
+        "proving_tests": {
+          "file": "apps/sigil/tests/test_ha_shared_owner_key_residual.py",
+          "tests": [
+            "test_ha_profile_states_the_shared_owner_key_concession",
+            "test_design_note_records_the_evaluation_and_decision",
+            "test_head_path_is_single_owner_and_admits_no_per_host_key",
+            "test_checkpoint_trust_root_is_1of1_single_owner",
+            "test_evaluated_delegation_machinery_bounds_a_signer_to_its_grant"
+          ]
+        }
+      }
+    },
+    {
+      "default": "off",
+      "enforced_by": {
+        "file": "integration/vigil_integration/uiproxy.py",
+        "symbol": "resolve_hop_tls"
+      },
+      "failure_class": "opt-in-stated-as-default",
+      "id": "W8-6",
+      "objective": "SO-AUTHZ",
+      "title": "Proxy->cockpit hop refuses a plaintext remote hop under the production posture (fail-closed)",
+      "verifier": {
+        "ci_job": "integration two-env boundary (P5)",
+        "kind": "required-ci-proof",
+        "proving_tests": {
+          "file": "integration/tests/test_uiproxy_hop_tls.py",
+          "tests": [
+            "test_production_refuses_a_plaintext_remote_hop",
+            "test_production_loopback_hop_is_allowed",
+            "test_nonproduction_remote_plaintext_hop_is_allowed",
+            "test_make_proxy_server_refuses_plaintext_remote_hop_in_production",
+            "test_tls_hop_round_trips_via_hop_connection",
+            "test_mtls_client_cert_is_presented_and_absence_is_refused",
+            "test_operator_ca_pin_rejects_a_same_host_cert_from_a_DIFFERENT_ca",
+            "test_operator_ca_pin_does_not_trust_the_system_store"
+          ]
+        }
+      }
+    },
+    {
+      "default": "off",
+      "enforced_by": {
+        "file": "integration/vigil_integration/doctor.py",
+        "symbol": "evaluate_production_gate"
+      },
+      "failure_class": "opt-in-stated-as-default",
+      "id": "W9-4",
+      "objective": "SO-CONFIG",
+      "title": "Production refuse-to-start gate is OPT-IN (inert unless VIGIL_POSTURE selects production)",
+      "verifier": {
+        "ci_job": "integration two-env boundary (P5)",
+        "kind": "required-ci-proof",
+        "proving_tests": {
+          "file": "integration/tests/test_doctor_production_gate.py",
+          "tests": [
+            "test_gate_inert_when_posture_unset",
+            "test_gate_refuses_each_condition_independently",
+            "test_gate_fails_closed_when_a_control_is_unknown"
+          ]
+        }
+      }
+    },
+    {
+      "default": "off",
+      "enforced_by": {
+        "file": "integration/vigil_integration/destruction_gate.py",
+        "symbol": "DestructionAuthority.__post_init__"
+      },
+      "failure_class": "opt-in-stated-as-default",
+      "id": "W9-5",
+      "objective": "SO-AUTHZ",
+      "title": "Production posture requires a multi-signer destruction quorum (refuses 1-of-1)",
+      "verifier": {
+        "ci_job": "integration two-env boundary (P5)",
+        "kind": "required-ci-proof",
+        "proving_tests": {
+          "file": "integration/tests/test_cosigner_enrollment.py",
+          "tests": [
+            "test_production_refuses_all_on_one_box_generate_authority",
+            "test_production_refuses_building_a_1of1_authority",
+            "test_production_accepts_a_genuine_multisigner_authority",
+            "test_forged_pubkey_without_a_valid_pop_is_refused",
+            "test_encoding_variant_of_one_key_is_refused_everywhere",
+            "test_assemble_refuses_collapsed_or_threshold1_under_production"
+          ]
+        }
+      }
+    },
+    {
+      "default": "on",
+      "enforced_by": {
+        "file": "packages/core/vigil_core/vigil_core/key_backend.py",
+        "symbol": "select_owner_backend"
+      },
+      "failure_class": "n-a",
+      "id": "W9-6",
+      "objective": "SO-CRYPTO",
+      "title": "The owner signing key can be held by a pluggable hardware backend that fails closed when the token is absent",
+      "verifier": {
+        "ci_job": "vigil_core \u2014 shared integrity substrate",
+        "kind": "required-ci-proof",
+        "proving_tests": {
+          "file": "packages/core/vigil_core/tests/test_key_backend.py",
+          "tests": [
+            "test_file_backend_is_byte_identical_to_the_legacy_owner_signing_path",
+            "test_hardware_selected_but_token_absent_fails_closed_never_uses_file_key",
+            "test_hardware_selected_without_a_module_configured_fails_closed_before_opening",
+            "test_hardware_path_never_reads_private_material_into_the_process",
+            "test_hardware_backend_signs_with_the_token_key_not_the_supplied_file_key",
+            "test_unknown_backend_name_is_fail_closed_not_file",
+            "test_describe_owner_backend_reports_each_state"
+          ]
+        }
+      }
+    },
+    {
+      "default": "on",
+      "enforced_by": {
+        "file": "packages/core/vigil_core/vigil_core/signed_build_manifest.py",
+        "symbol": "verify_build_integrity"
+      },
+      "failure_class": "n-a",
+      "id": "W9-7",
+      "objective": "SO-NONREP",
+      "title": "Signed build manifest yields six explicit integrity states (fail-closed; hostile-admin-defeatable)",
+      "verifier": {
+        "ci_job": "vigil_core \u2014 shared integrity substrate",
+        "kind": "required-ci-proof",
+        "proving_tests": {
+          "file": "packages/core/vigil_core/tests/test_signed_build_manifest.py",
+          "tests": [
+            "test_clean_signed_tree_is_VALID_and_offline_verifiable",
+            "test_modifying_a_shipped_file_yields_MODIFIED",
+            "test_deleting_a_shipped_file_yields_MISSING",
+            "test_unsigned_build_yields_UNSIGNED_BUILD",
+            "test_no_manifest_yields_UNKNOWN_BUILD",
+            "test_development_channel_yields_DEVELOPMENT_BUILD",
+            "test_a_signature_by_an_untrusted_key_is_not_authenticated"
+          ]
+        }
+      }
+    }
+  ],
+  "fact_class_assurance": [
+    {
+      "oracle_class": "achieved_state",
+      "oracle_functions": [
+        "achieved_state_oracle",
+        "predicate_oracle"
+      ],
+      "primary_verifier": {
+        "command": "python3 -m framework.v2 evidence verify",
+        "kind": "framework-reproduction",
+        "re_executes": "the oracle_version-bound deterministic procedure over the retained oracle_context (bound into the certificate at mint)."
+      },
+      "standalone_verifier": {
+        "file": "docs/proof-carrying-finding/verify_vf.py",
+        "kind": "zero-vigil-standalone",
+        "note": "re-fires this oracle body with the Python standard library + one Ed25519 lib, importing no framework/vigil code (C3 pins its bytes)."
+      },
+      "standalone_zero_dependency": true
+    },
+    {
+      "oracle_class": "boolean_inference",
+      "oracle_functions": [
+        "boolean_inference_oracle"
+      ],
+      "primary_verifier": {
+        "command": "python3 -m framework.v2 evidence verify",
+        "kind": "framework-reproduction",
+        "re_executes": "the oracle_version-bound deterministic procedure over the retained oracle_context (bound into the certificate at mint)."
+      },
+      "standalone_verifier": {
+        "file": "docs/proof-carrying-finding/verify_vf.py",
+        "kind": "zero-vigil-standalone",
+        "note": "re-fires this oracle body with the Python standard library + one Ed25519 lib, importing no framework/vigil code (C3 pins its bytes)."
+      },
+      "standalone_zero_dependency": true
+    },
+    {
+      "oracle_class": "certificate_validity",
+      "oracle_functions": [
+        "certificate_validity_oracle"
+      ],
+      "primary_verifier": {
+        "command": "python3 -m framework.v2 evidence verify",
+        "kind": "framework-reproduction",
+        "re_executes": "the oracle_version-bound deterministic procedure over the retained oracle_context (bound into the certificate at mint)."
+      },
+      "reproduction_boundary": "pure-but-deferred: the body is portable (stdlib + cryptography) but is re-fired today only inside the framework over a live-capture / browser / subprocess / cloud-API context \u2014 the irreducible boundary is live I/O, not a missing verifier.",
+      "standalone_zero_dependency": false
+    },
+    {
+      "oracle_class": "cicd_posture",
+      "oracle_functions": [
+        "cicd_posture_oracle"
+      ],
+      "primary_verifier": {
+        "command": "python3 -m framework.v2 evidence verify",
+        "kind": "framework-reproduction",
+        "re_executes": "the oracle_version-bound deterministic procedure over the retained oracle_context (bound into the certificate at mint)."
+      },
+      "standalone_verifier": {
+        "file": "docs/proof-carrying-finding/verify_vf.py",
+        "kind": "zero-vigil-standalone",
+        "note": "re-fires this oracle body with the Python standard library + one Ed25519 lib, importing no framework/vigil code (C3 pins its bytes)."
+      },
+      "standalone_zero_dependency": true
+    },
+    {
+      "oracle_class": "cloud_posture",
+      "oracle_functions": [
+        "cloud_posture_oracle"
+      ],
+      "primary_verifier": {
+        "command": "python3 -m framework.v2 evidence verify",
+        "kind": "framework-reproduction",
+        "re_executes": "the oracle_version-bound deterministic procedure over the retained oracle_context (bound into the certificate at mint)."
+      },
+      "standalone_verifier": {
+        "file": "docs/proof-carrying-finding/verify_vf.py",
+        "kind": "zero-vigil-standalone",
+        "note": "re-fires this oracle body with the Python standard library + one Ed25519 lib, importing no framework/vigil code (C3 pins its bytes)."
+      },
+      "standalone_zero_dependency": true
+    },
+    {
+      "oracle_class": "credential_acceptance",
+      "oracle_functions": [
+        "credential_acceptance_oracle"
+      ],
+      "primary_verifier": {
+        "command": "python3 -m framework.v2 evidence verify",
+        "kind": "framework-reproduction",
+        "re_executes": "the oracle_version-bound deterministic procedure over the retained oracle_context (bound into the certificate at mint)."
+      },
+      "reproduction_boundary": "pure-but-deferred: the body is portable (stdlib + cryptography) but is re-fired today only inside the framework over a live-capture / browser / subprocess / cloud-API context \u2014 the irreducible boundary is live I/O, not a missing verifier.",
+      "standalone_zero_dependency": false
+    },
+    {
+      "oracle_class": "csp_posture",
+      "oracle_functions": [
+        "csp_posture_oracle"
+      ],
+      "primary_verifier": {
+        "command": "python3 -m framework.v2 evidence verify",
+        "kind": "framework-reproduction",
+        "re_executes": "the oracle_version-bound deterministic procedure over the retained oracle_context (bound into the certificate at mint)."
+      },
+      "reproduction_boundary": "pure-but-deferred: the body is portable (stdlib + cryptography) but is re-fired today only inside the framework over a live-capture / browser / subprocess / cloud-API context \u2014 the irreducible boundary is live I/O, not a missing verifier.",
+      "standalone_zero_dependency": false
+    },
+    {
+      "oracle_class": "dom_execution",
+      "oracle_functions": [
+        "dom_execution_oracle"
+      ],
+      "primary_verifier": {
+        "command": "python3 -m framework.v2 evidence verify",
+        "kind": "framework-reproduction",
+        "re_executes": "the oracle_version-bound deterministic procedure over the retained oracle_context (bound into the certificate at mint)."
+      },
+      "reproduction_boundary": "pure-but-deferred: the body is portable (stdlib + cryptography) but is re-fired today only inside the framework over a live-capture / browser / subprocess / cloud-API context \u2014 the irreducible boundary is live I/O, not a missing verifier.",
+      "standalone_zero_dependency": false
+    },
+    {
+      "oracle_class": "error_signature",
+      "oracle_functions": [
+        "error_signature_oracle"
+      ],
+      "primary_verifier": {
+        "command": "python3 -m framework.v2 evidence verify",
+        "kind": "framework-reproduction",
+        "re_executes": "the oracle_version-bound deterministic procedure over the retained oracle_context (bound into the certificate at mint)."
+      },
+      "standalone_verifier": {
+        "file": "docs/proof-carrying-finding/verify_vf.py",
+        "kind": "zero-vigil-standalone",
+        "note": "re-fires this oracle body with the Python standard library + one Ed25519 lib, importing no framework/vigil code (C3 pins its bytes)."
+      },
+      "standalone_zero_dependency": true
+    },
+    {
+      "oracle_class": "evaluation",
+      "oracle_functions": [
+        "evaluation_oracle",
+        "ssi_evaluation_oracle"
+      ],
+      "primary_verifier": {
+        "command": "python3 -m framework.v2 evidence verify",
+        "kind": "framework-reproduction",
+        "re_executes": "the oracle_version-bound deterministic procedure over the retained oracle_context (bound into the certificate at mint)."
+      },
+      "standalone_verifier": {
+        "file": "docs/proof-carrying-finding/verify_vf.py",
+        "kind": "zero-vigil-standalone",
+        "note": "re-fires this oracle body with the Python standard library + one Ed25519 lib, importing no framework/vigil code (C3 pins its bytes)."
+      },
+      "standalone_zero_dependency": true
+    },
+    {
+      "oracle_class": "gcp_sa_impersonation",
+      "oracle_functions": [
+        "gcp_sa_impersonation_oracle"
+      ],
+      "primary_verifier": {
+        "command": "python3 -m framework.v2 evidence verify",
+        "kind": "framework-reproduction",
+        "re_executes": "the oracle_version-bound deterministic procedure over the retained oracle_context (bound into the certificate at mint)."
+      },
+      "reproduction_boundary": "pure-but-deferred: the body is portable (stdlib + cryptography) but is re-fired today only inside the framework over a live-capture / browser / subprocess / cloud-API context \u2014 the irreducible boundary is live I/O, not a missing verifier.",
+      "standalone_zero_dependency": false
+    },
+    {
+      "oracle_class": "iam_escalation_primitive",
+      "oracle_functions": [
+        "iam_escalation_oracle"
+      ],
+      "primary_verifier": {
+        "command": "python3 -m framework.v2 evidence verify",
+        "kind": "framework-reproduction",
+        "re_executes": "the oracle_version-bound deterministic procedure over the retained oracle_context (bound into the certificate at mint)."
+      },
+      "reproduction_boundary": "pure-but-deferred: the body is portable (stdlib + cryptography) but is re-fired today only inside the framework over a live-capture / browser / subprocess / cloud-API context \u2014 the irreducible boundary is live I/O, not a missing verifier.",
+      "standalone_zero_dependency": false
+    },
+    {
+      "oracle_class": "imds_credential_capture",
+      "oracle_functions": [
+        "imds_credential_capture_oracle"
+      ],
+      "primary_verifier": {
+        "command": "python3 -m framework.v2 evidence verify",
+        "kind": "framework-reproduction",
+        "re_executes": "the oracle_version-bound deterministic procedure over the retained oracle_context (bound into the certificate at mint)."
+      },
+      "reproduction_boundary": "pure-but-deferred: the body is portable (stdlib + cryptography) but is re-fired today only inside the framework over a live-capture / browser / subprocess / cloud-API context \u2014 the irreducible boundary is live I/O, not a missing verifier.",
+      "standalone_zero_dependency": false
+    },
+    {
+      "oracle_class": "k8s_posture",
+      "oracle_functions": [
+        "k8s_posture_oracle"
+      ],
+      "primary_verifier": {
+        "command": "python3 -m framework.v2 evidence verify",
+        "kind": "framework-reproduction",
+        "re_executes": "the oracle_version-bound deterministic procedure over the retained oracle_context (bound into the certificate at mint)."
+      },
+      "standalone_verifier": {
+        "file": "docs/proof-carrying-finding/verify_vf.py",
+        "kind": "zero-vigil-standalone",
+        "note": "re-fires this oracle body with the Python standard library + one Ed25519 lib, importing no framework/vigil code (C3 pins its bytes)."
+      },
+      "standalone_zero_dependency": true
+    },
+    {
+      "oracle_class": "k8s_rbac_verb_grant",
+      "oracle_functions": [
+        "k8s_rbac_verb_grant_oracle"
+      ],
+      "primary_verifier": {
+        "command": "python3 -m framework.v2 evidence verify",
+        "kind": "framework-reproduction",
+        "re_executes": "the oracle_version-bound deterministic procedure over the retained oracle_context (bound into the certificate at mint)."
+      },
+      "reproduction_boundary": "pure-but-deferred: the body is portable (stdlib + cryptography) but is re-fired today only inside the framework over a live-capture / browser / subprocess / cloud-API context \u2014 the irreducible boundary is live I/O, not a missing verifier.",
+      "standalone_zero_dependency": false
+    },
+    {
+      "oracle_class": "k8s_workload_posture",
+      "oracle_functions": [
+        "k8s_workload_posture_oracle"
+      ],
+      "primary_verifier": {
+        "command": "python3 -m framework.v2 evidence verify",
+        "kind": "framework-reproduction",
+        "re_executes": "the oracle_version-bound deterministic procedure over the retained oracle_context (bound into the certificate at mint)."
+      },
+      "standalone_verifier": {
+        "file": "docs/proof-carrying-finding/verify_vf.py",
+        "kind": "zero-vigil-standalone",
+        "note": "re-fires this oracle body with the Python standard library + one Ed25519 lib, importing no framework/vigil code (C3 pins its bytes)."
+      },
+      "standalone_zero_dependency": true
+    },
+    {
+      "oracle_class": "mesh_posture",
+      "oracle_functions": [
+        "mesh_posture_oracle"
+      ],
+      "primary_verifier": {
+        "command": "python3 -m framework.v2 evidence verify",
+        "kind": "framework-reproduction",
+        "re_executes": "the oracle_version-bound deterministic procedure over the retained oracle_context (bound into the certificate at mint)."
+      },
+      "standalone_verifier": {
+        "file": "docs/proof-carrying-finding/verify_vf.py",
+        "kind": "zero-vigil-standalone",
+        "note": "re-fires this oracle body with the Python standard library + one Ed25519 lib, importing no framework/vigil code (C3 pins its bytes)."
+      },
+      "standalone_zero_dependency": true
+    },
+    {
+      "oracle_class": "mfa_bypass",
+      "oracle_functions": [
+        "mfa_bypass_oracle"
+      ],
+      "primary_verifier": {
+        "command": "python3 -m framework.v2 evidence verify",
+        "kind": "framework-reproduction",
+        "re_executes": "the oracle_version-bound deterministic procedure over the retained oracle_context (bound into the certificate at mint)."
+      },
+      "reproduction_boundary": "pure-but-deferred: the body is portable (stdlib + cryptography) but is re-fired today only inside the framework over a live-capture / browser / subprocess / cloud-API context \u2014 the irreducible boundary is live I/O, not a missing verifier.",
+      "standalone_zero_dependency": false
+    },
+    {
+      "oracle_class": "oob_callback",
+      "oracle_functions": [
+        "oob_callback_oracle"
+      ],
+      "primary_verifier": {
+        "command": "python3 -m framework.v2 evidence verify",
+        "kind": "framework-reproduction",
+        "re_executes": "the oracle_version-bound deterministic procedure over the retained oracle_context (bound into the certificate at mint)."
+      },
+      "reproduction_boundary": "irreducible-by-dependency: requires framework verify.oob + an external OOB collector's receipt crypto",
+      "standalone_zero_dependency": false
+    },
+    {
+      "oracle_class": "password_reset_invariant",
+      "oracle_functions": [
+        "password_reset_invariant_oracle"
+      ],
+      "primary_verifier": {
+        "command": "python3 -m framework.v2 evidence verify",
+        "kind": "framework-reproduction",
+        "re_executes": "the oracle_version-bound deterministic procedure over the retained oracle_context (bound into the certificate at mint)."
+      },
+      "reproduction_boundary": "pure-but-deferred: the body is portable (stdlib + cryptography) but is re-fired today only inside the framework over a live-capture / browser / subprocess / cloud-API context \u2014 the irreducible boundary is live I/O, not a missing verifier.",
+      "standalone_zero_dependency": false
+    },
+    {
+      "oracle_class": "policy_path",
+      "oracle_functions": [
+        "policy_path_oracle"
+      ],
+      "primary_verifier": {
+        "command": "python3 -m framework.v2 evidence verify",
+        "kind": "framework-reproduction",
+        "re_executes": "the oracle_version-bound deterministic procedure over the retained oracle_context (bound into the certificate at mint)."
+      },
+      "standalone_verifier": {
+        "file": "docs/proof-carrying-finding/verify_vf.py",
+        "kind": "zero-vigil-standalone",
+        "note": "re-fires this oracle body with the Python standard library + one Ed25519 lib, importing no framework/vigil code (C3 pins its bytes)."
+      },
+      "standalone_zero_dependency": true
+    },
+    {
+      "oracle_class": "prototype_pollution",
+      "oracle_functions": [
+        "prototype_pollution_oracle"
+      ],
+      "primary_verifier": {
+        "command": "python3 -m framework.v2 evidence verify",
+        "kind": "framework-reproduction",
+        "re_executes": "the oracle_version-bound deterministic procedure over the retained oracle_context (bound into the certificate at mint)."
+      },
+      "standalone_verifier": {
+        "file": "docs/proof-carrying-finding/verify_vf.py",
+        "kind": "zero-vigil-standalone",
+        "note": "re-fires this oracle body with the Python standard library + one Ed25519 lib, importing no framework/vigil code (C3 pins its bytes)."
+      },
+      "standalone_zero_dependency": true
+    },
+    {
+      "oracle_class": "reflection_context",
+      "oracle_functions": [
+        "reflection_context_oracle"
+      ],
+      "primary_verifier": {
+        "command": "python3 -m framework.v2 evidence verify",
+        "kind": "framework-reproduction",
+        "re_executes": "the oracle_version-bound deterministic procedure over the retained oracle_context (bound into the certificate at mint)."
+      },
+      "standalone_verifier": {
+        "file": "docs/proof-carrying-finding/verify_vf.py",
+        "kind": "zero-vigil-standalone",
+        "note": "re-fires this oracle body with the Python standard library + one Ed25519 lib, importing no framework/vigil code (C3 pins its bytes)."
+      },
+      "standalone_zero_dependency": true
+    },
+    {
+      "oracle_class": "secret_credential_validity",
+      "oracle_functions": [
+        "exposed_secret_validity_oracle"
+      ],
+      "primary_verifier": {
+        "command": "python3 -m framework.v2 evidence verify",
+        "kind": "framework-reproduction",
+        "re_executes": "the oracle_version-bound deterministic procedure over the retained oracle_context (bound into the certificate at mint)."
+      },
+      "reproduction_boundary": "pure-but-deferred: the body is portable (stdlib + cryptography) but is re-fired today only inside the framework over a live-capture / browser / subprocess / cloud-API context \u2014 the irreducible boundary is live I/O, not a missing verifier.",
+      "standalone_zero_dependency": false
+    },
+    {
+      "oracle_class": "service_reachability",
+      "oracle_functions": [
+        "service_reachability_oracle"
+      ],
+      "primary_verifier": {
+        "command": "python3 -m framework.v2 evidence verify",
+        "kind": "framework-reproduction",
+        "re_executes": "the oracle_version-bound deterministic procedure over the retained oracle_context (bound into the certificate at mint)."
+      },
+      "reproduction_boundary": "pure-but-deferred: the body is portable (stdlib + cryptography) but is re-fired today only inside the framework over a live-capture / browser / subprocess / cloud-API context \u2014 the irreducible boundary is live I/O, not a missing verifier.",
+      "standalone_zero_dependency": false
+    },
+    {
+      "oracle_class": "session_fixation",
+      "oracle_functions": [
+        "session_fixation_oracle"
+      ],
+      "primary_verifier": {
+        "command": "python3 -m framework.v2 evidence verify",
+        "kind": "framework-reproduction",
+        "re_executes": "the oracle_version-bound deterministic procedure over the retained oracle_context (bound into the certificate at mint)."
+      },
+      "reproduction_boundary": "pure-but-deferred: the body is portable (stdlib + cryptography) but is re-fired today only inside the framework over a live-capture / browser / subprocess / cloud-API context \u2014 the irreducible boundary is live I/O, not a missing verifier.",
+      "standalone_zero_dependency": false
+    },
+    {
+      "oracle_class": "static_rule",
+      "oracle_functions": [
+        "static_rule_oracle"
+      ],
+      "primary_verifier": {
+        "command": "python3 -m framework.v2 evidence verify",
+        "kind": "framework-reproduction",
+        "re_executes": "the oracle_version-bound deterministic procedure over the retained oracle_context (bound into the certificate at mint)."
+      },
+      "reproduction_boundary": "pure-but-deferred: the body is portable (stdlib + cryptography) but is re-fired today only inside the framework over a live-capture / browser / subprocess / cloud-API context \u2014 the irreducible boundary is live I/O, not a missing verifier.",
+      "standalone_zero_dependency": false
+    },
+    {
+      "oracle_class": "timing",
+      "oracle_functions": [
+        "timing_oracle"
+      ],
+      "primary_verifier": {
+        "command": "python3 -m framework.v2 evidence verify",
+        "kind": "framework-reproduction",
+        "re_executes": "the oracle_version-bound deterministic procedure over the retained oracle_context (bound into the certificate at mint)."
+      },
+      "standalone_verifier": {
+        "file": "docs/proof-carrying-finding/verify_vf.py",
+        "kind": "zero-vigil-standalone",
+        "note": "re-fires this oracle body with the Python standard library + one Ed25519 lib, importing no framework/vigil code (C3 pins its bytes)."
+      },
+      "standalone_zero_dependency": true
+    },
+    {
+      "oracle_class": "tls_weakness",
+      "oracle_functions": [
+        "tls_weakness_oracle",
+        "weak_crypto_artifact_oracle"
+      ],
+      "primary_verifier": {
+        "command": "python3 -m framework.v2 evidence verify",
+        "kind": "framework-reproduction",
+        "re_executes": "the oracle_version-bound deterministic procedure over the retained oracle_context (bound into the certificate at mint)."
+      },
+      "reproduction_boundary": "mixed: the weak-crypto-ARTIFACT path is ported standalone (weak_crypto_artifact_oracle); the LIVE TLS-handshake path (tls_weakness_oracle) is irreducible (needs a live socket)",
+      "standalone_zero_dependency": false
+    },
+    {
+      "oracle_class": "version_range",
+      "oracle_functions": [
+        "version_range_oracle"
+      ],
+      "primary_verifier": {
+        "command": "python3 -m framework.v2 evidence verify",
+        "kind": "framework-reproduction",
+        "re_executes": "the oracle_version-bound deterministic procedure over the retained oracle_context (bound into the certificate at mint)."
+      },
+      "reproduction_boundary": "irreducible-by-dependency: requires the `packaging` library to parse/compare version ranges",
+      "standalone_zero_dependency": false
+    }
+  ],
+  "irreducible_boundaries": [
+    {
+      "boundary": "An external, accredited assessment body is required for an actual Common-Criteria / FedRAMP accreditation. This mapping is the audit-ready INPUT to that process, not the accreditation itself.",
+      "id": "IRR-external-body",
+      "limitation_ref": "LIMIT-external-audit-team"
+    },
+    {
+      "boundary": "Origin/integrity is anchored to out-of-band-pinned Ed25519 trust roots, not a hardware root of trust (TEE). Hardware-backed attestation is not available here and fails closed when no hardware root is present; see LIMIT-attest-tee-hardware.",
+      "id": "IRR-hardware-root",
+      "limitation_ref": "LIMIT-attest-tee-hardware"
+    },
+    {
+      "boundary": "Re-execution proves a verdict is the correct FUNCTION of the retained evidence; it does not prove the evidence was live. A live re-run inside VIGIL is the producer-supplied honesty bound for that.",
+      "id": "IRR-liveness-bound",
+      "limitation_ref": "LIMIT-audit-package-reproduction"
+    }
+  ],
+  "note": "AUDIT-READY structure (security objective -> claim -> evidence/verifier -> residual limitation), generated from docs/claims/registry.json + docs/limitations/inventory.json + docs/capability-matrix/evidence-branches.json. NOT an external accreditation; see irreducible_boundaries. Regenerate with docs/assurance/gen_assurance_mapping.py; drift is caught by docs/tests/test_assurance_mapping.py.",
+  "schema": "vigil-assurance-mapping/1",
+  "security_objectives": [
+    {
+      "cc_family": "FDP_ACC / FIA_UAU (access control, authentication of actors)",
+      "claim_count": 40,
+      "claims": [
+        "COV-W6-ZEROFP",
+        "PHASE0-1",
+        "PHASE0-2",
+        "PHASE1-1",
+        "PHASE1-2",
+        "PHASE1-4",
+        "PHASE1-5",
+        "PHASE3-1",
+        "REM-LADDER",
+        "W0-1-branch-protection-verify",
+        "W10-1",
+        "W11-3",
+        "W11-5",
+        "W12-3",
+        "W13-3",
+        "W13-5",
+        "W13-8-2",
+        "W14-1-anchor",
+        "W14-1-egress",
+        "W14-2",
+        "W14-3",
+        "W15-3",
+        "W16-12",
+        "W16-16",
+        "W16-STD-1c",
+        "W16-STD-2a",
+        "W16-STD-2c",
+        "W16-STD-2d",
+        "W16-STD-3a",
+        "W16-STD-3c",
+        "W16-STD-6b",
+        "W16-STD-8",
+        "W16-STD-8b",
+        "W17-7",
+        "W17-9",
+        "W2-4",
+        "W6-6",
+        "W8-3",
+        "W8-6",
+        "W9-5"
+      ],
+      "fedramp_family": "AC \u2014 Access Control",
+      "id": "SO-AUTHZ",
+      "label": "Authorization & scope control",
+      "objective": "Every host-acting operation is bounded by a signed authority (charter/scope/capability) and a fail-closed gate; an unauthorised or out-of-scope action is refused, not performed.",
+      "residual_limitations": []
+    },
+    {
+      "cc_family": "FCO_NRO / FPT_TDC (non-repudiation of origin, inter-TSF data consistency)",
+      "claim_count": 11,
+      "claims": [
+        "W13-8-1",
+        "W13-8-3",
+        "W16-STD-4-B",
+        "W16-STD-4-C",
+        "W16-STD-4-D",
+        "W16-STD-4-E",
+        "W4-2",
+        "W5-1",
+        "W5-3",
+        "W5-4",
+        "W9-7"
+      ],
+      "fedramp_family": "AU \u2014 Audit & Accountability",
+      "id": "SO-NONREP",
+      "label": "Evidence integrity & non-repudiation",
+      "objective": "Every recorded action and finding is tamper-evident and attributable: a hash-chained, signed spine and offline-re-verifiable certificates bind origin and integrity.",
+      "residual_limitations": [
+        "LIMIT-evidence-empty-engagement-slug"
+      ]
+    },
+    {
+      "cc_family": "assurance objective (truth of a reported result)",
+      "claim_count": 5,
+      "claims": [
+        "PHASE4-1",
+        "W16-STD-1a",
+        "W16-STD-1b",
+        "W16-STD-2b",
+        "W16-STD-5"
+      ],
+      "fedramp_family": "RA \u2014 Risk Assessment (accuracy of findings)",
+      "id": "SO-SOUND",
+      "label": "Finding soundness (oracle sole authority)",
+      "objective": "A FACT is minted only by a deterministic oracle re-executing over retained evidence; an AI judgement, a tool's bytes, or an unproven lead can never be laundered into a FACT.",
+      "residual_limitations": [
+        "LIMIT-audit-package-reproduction",
+        "LIMIT-cloud-exploit-fixture-proven",
+        "LIMIT-dns-oob-proves-resolution-not-completed-connection",
+        "LIMIT-dns-oob-requires-operator-owned-delegated-domain",
+        "LIMIT-dns-oob-resolver-ip-not-target-ip",
+        "LIMIT-dns-oob-token-cleartext-broadcast",
+        "LIMIT-favicon-fingerprint-stub",
+        "LIMIT-field-record-accrual",
+        "LIMIT-llm-redteam-tools-deferred",
+        "LIMIT-posture-no-structured-findings",
+        "LIMIT-profile-packs-incremental",
+        "LIMIT-sanitizer-output-synthesis",
+        "LIMIT-spine-seal-at-capture",
+        "LIMIT-symbolic-crash-repair",
+        "LIMIT-target-authz-owner-anchor-writable",
+        "LIMIT-tls-certificate-validity-unwired"
+      ]
+    },
+    {
+      "cc_family": "FPT_SEP (domain separation)",
+      "claim_count": 3,
+      "claims": [
+        "W10-8",
+        "W13-6",
+        "W14-1-containment"
+      ],
+      "fedramp_family": "SC \u2014 System & Communications Protection",
+      "id": "SO-ISOLATION",
+      "label": "Isolation & containment",
+      "objective": "The offense and sovereign planes run as two isolated processes; sandboxed execution and the egress floor contain target traffic and third-party applications from the control plane.",
+      "residual_limitations": [
+        "LIMIT-container-kill-unwired"
+      ]
+    },
+    {
+      "cc_family": "ALC_DVS / ALC_CMC (development security, configuration management)",
+      "claim_count": 7,
+      "claims": [
+        "W3-10",
+        "W3-3",
+        "W3-5",
+        "W3-7",
+        "W3-7-strix-selfhosted",
+        "W3-8",
+        "W4-3"
+      ],
+      "fedramp_family": "SR / SA \u2014 Supply Chain Risk / System & Services Acquisition",
+      "id": "SO-SUPPLY",
+      "label": "Supply-chain integrity",
+      "objective": "What the system is built from is what was chosen: images are digest-pinned, actions are SHA-pinned, locks are hash-verified, and the shipped verifiers are provenance-pinned.",
+      "residual_limitations": []
+    },
+    {
+      "cc_family": "FMT_MSA (management of security attributes)",
+      "claim_count": 2,
+      "claims": [
+        "W13-8-4",
+        "W9-4"
+      ],
+      "fedramp_family": "CM \u2014 Configuration Management",
+      "id": "SO-CONFIG",
+      "label": "Secure configuration & fail-closed posture",
+      "objective": "Security-relevant configuration is validated fail-closed at startup; a production posture forces the stricter controls on and refuses to start when they are absent.",
+      "residual_limitations": []
+    },
+    {
+      "cc_family": "FCS_COP / FCS_CKM (cryptographic operation, key management)",
+      "claim_count": 7,
+      "claims": [
+        "PHASE1-3",
+        "W13-7",
+        "W16-8",
+        "W16-STD-3b",
+        "W7-7",
+        "W8-5",
+        "W9-6"
+      ],
+      "fedramp_family": "SC-12/13 \u2014 Cryptographic Key Establishment & Protection",
+      "id": "SO-CRYPTO",
+      "label": "Cryptography & key management",
+      "objective": "Signing keys are handled fail-closed (hardware backend, m-of-n quorum, escrow at threshold, crypto-shred erasure); keys are passed in, never provisioned by the tool (FATAL-2).",
+      "residual_limitations": [
+        "LIMIT-attest-tee-hardware",
+        "LIMIT-evidence-producer-refs-unique"
+      ]
+    },
+    {
+      "cc_family": "FRU (resource utilisation / fault tolerance)",
+      "claim_count": 20,
+      "claims": [
+        "W11-4",
+        "W11-6",
+        "W11-7",
+        "W11-8",
+        "W16-STD-4-A",
+        "W16-STD-6a",
+        "W16-STD-6d",
+        "W4-4",
+        "W5-7",
+        "W6-1",
+        "W6-2",
+        "W6-3",
+        "W6-4",
+        "W7-1",
+        "W7-3a",
+        "W7-3b",
+        "W7-4",
+        "W7-6",
+        "W8-2",
+        "W8-4"
+      ],
+      "fedramp_family": "CP / SI \u2014 Contingency Planning / System & Information Integrity",
+      "id": "SO-RESILIENCE",
+      "label": "Resilience, recovery & observability",
+      "objective": "Backup, restore, upgrade/rollback and crash-resume are drilled against numeric RPO/RTO; health, readiness and metrics are exposed, and a degraded dependency is made visible.",
+      "residual_limitations": [
+        "LIMIT-neo4j-deploy-gated"
+      ]
+    },
+    {
+      "cc_family": "AGD / ALC_FLR (guidance documents, flaw remediation) + claim discipline",
+      "claim_count": 28,
+      "claims": [
+        "REGISTRY-SELF",
+        "W1-4",
+        "W1-7",
+        "W1-8",
+        "W11-2",
+        "W11-5-flake",
+        "W12-1",
+        "W12-2",
+        "W12-4",
+        "W13-9",
+        "W14-1-tier",
+        "W15-1",
+        "W15-1-prose",
+        "W15-2",
+        "W15-2b",
+        "W16-STD-6c",
+        "W16-STD-7-cli-coverage",
+        "W16-STD-7-docs-index",
+        "W16-STD-7-drift",
+        "W16-STD-7-glossary",
+        "W16-STD-7-http-api",
+        "W16-STD-7-licensing-surface",
+        "W16-STD-7-rederived-drift",
+        "W16-STD-7-vigil-cli-coverage",
+        "W17-14",
+        "W2-1",
+        "W4-1",
+        "W6-5"
+      ],
+      "fedramp_family": "CA / PL \u2014 Assessment & Authorization / Planning",
+      "id": "SO-ASSURANCE",
+      "label": "Assurance governance & documentation honesty",
+      "objective": "Every product claim resolves to an enforcing symbol and a proving test in a required CI job; limitations are code-grounded and never worded as completeness (claim discipline).",
+      "residual_limitations": [
+        "LIMIT-a11y-capture-unwired",
+        "LIMIT-agent-body-scaffold",
+        "LIMIT-external-audit-team",
+        "LIMIT-gesture-native-inject-unwired",
+        "LIMIT-sigil-voice-probe-egress-not-gatewayed"
+      ]
+    }
+  ],
+  "title": "VIGIL assurance mapping (Common-Criteria / FedRAMP-shaped)"
+}

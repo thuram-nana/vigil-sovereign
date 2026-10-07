@@ -120,3 +120,50 @@ To stay within this safe harbour, your research must:
 If in doubt whether a specific action is authorized, ask first via the security contact above.
 This safe harbour is a commitment from the maintainer of this project only; it cannot and does
 not bind any third party.
+
+---
+
+## Verifying the standalone verifiers (out-of-band pins)
+
+VIGIL ships three **standalone, zero-VIGIL** verifiers so a third party can re-check a finding with
+nothing of VIGIL installed — only the Python standard library and one Ed25519 library:
+
+- `docs/proof-carrying-finding/verify_pcf.py` — the proof-carrying-finding (PCF v0.1) verifier;
+- `docs/proof-carrying-finding/verify_vf.py` — the Verifiable-Fact lifecycle + re-execution verifier;
+- `engine/crucible/framework/v2/evidence/audit_offline_verifier.py` — the external-audit-package verifier.
+
+Because those three files are the trusted computing base a reviewer runs, their integrity must be
+confirmable WITHOUT trusting the copy you downloaded. This section is the **out-of-band channel** for that
+confirmation: the signed provenance (`docs/supply-chain/verifier-provenance.json` + `.sig.json`) and the
+committed transparency record (`docs/supply-chain/verifier-transparency.jsonl`) pin each verifier's content
+hash, and the signing **trust-root fingerprint** is published here, in a durable channel independent of the
+signature file an attacker who rewrites the repo would also rewrite.
+
+**Trust-root fingerprint (pin this):**
+
+```
+sha256:f2f1254d298412b147019166db8f8201b30b635b79c40800964713e0ebbeca21
+```
+
+**Pinned verifier content hashes (sha256):**
+
+| Verifier | sha256 |
+|---|---|
+| `docs/proof-carrying-finding/verify_pcf.py` | `6984865c11ce421de34a5542c4e19a118ff90ad0b3c03ed6b19718fef640a2b6` |
+| `docs/proof-carrying-finding/verify_vf.py` | `bbbd5f8dee0e8281accd21ddb3315af988ef9e35b907958c5eefd4cc0b3da7cf` |
+| `engine/crucible/framework/v2/evidence/audit_offline_verifier.py` | `32e134c20d60bb34b34ba4bf28dbdd959114d14d2366d5aadd364764681d9de6` |
+
+To confirm a verifier is the exact audited file, re-hash it and compare to the pin above (zero
+dependencies):
+
+```
+sha256sum docs/proof-carrying-finding/verify_pcf.py
+```
+
+The pins above, the transparency record, and the provenance subject digests are kept in lock-step by the
+CI drift test `docs/tests/test_verifier_provenance.py`: changing any verifier without updating the
+provenance — or updating one pin and not another — turns the build red. See
+[`docs/supply-chain/README.md`](docs/supply-chain/README.md) for the full re-verification walkthrough and
+the honest boundary (the default signing key is a deterministic fixture; a published provenance re-signs
+with the operator's governance key — this is audit-ready integrity of the verifier bytes, **not** an
+external accreditation by a third-party body).
