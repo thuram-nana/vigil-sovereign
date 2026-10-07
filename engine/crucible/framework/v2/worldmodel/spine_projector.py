@@ -62,7 +62,7 @@ from typing import Any, Optional
 from pydantic import BaseModel, ConfigDict, Field
 
 from .graph import WorldModel
-from .models import Edge, EdgeKind, Node, NodeKind
+from .models import GROUNDING_GROUNDED, Edge, EdgeKind, Node, NodeKind, classify_provenance
 
 # Conservative belief defaults used ONLY when a record omits an explicit confidence.
 # A grounded fact never defaults to 1.0 (certainty is never manufactured — 0.9 mirrors
@@ -233,13 +233,29 @@ def _belief_and_prov(rec: AssetSpineRecord, *, grounded: bool, tag: str) -> tupl
     if present (faithful, clamped in the model), else a conservative default keyed on
     grounding — never manufacturing certainty. Provenance: the explicit spine string if
     present, else derived with an ``oracle:`` / ``intel:`` prefix so
-    ``classify_provenance`` tags the correct grounding tier."""
+    ``classify_provenance`` tags the correct grounding tier.
+
+    ADMIT-CHOKE INVARIANT (B1): the SIGNED EVIDENCE — never the free-text provenance string —
+    is the sole authority for grounding. ``project_spine`` is the only writer of the asset
+    topology, so this is the choke an ingested tool/intel ``finding`` must cross, and
+    ``graph.add_node`` (by design) grants grounding purely from the provenance string it is
+    handed. An explicit provenance may ANNOTATE a record, but it must NEVER up-level a record
+    that carries no signed evidence (``grounded=False``) to a GROUNDED fact — otherwise a raw
+    tool finding stamped ``provenance="oracle:<tool>-said-so"`` reads back as a FACT without any
+    VIGIL oracle re-fire (the one forbidden outcome: a tool's bytes becoming a FACT). So a
+    grounded-looking explicit provenance on an un-signed record is DEMOTED to the derived intel
+    tier; a grounded record keeps its explicit (signed-backed) provenance, and an explicit
+    intel/ungrounded string is honoured as-is (it can only ever LOWER grounding)."""
     if rec.confidence is not None:
         conf = rec.confidence
     else:
         conf = _CONFIRMED_DEFAULT if grounded else _LEAD_DEFAULT
     if rec.provenance.strip():
         prov = rec.provenance.strip()
+        # The signed evidence is the grounding authority; a free-text ``oracle:``/grounded
+        # provenance on a NON-grounded record cannot mint a fact — demote it to intel.
+        if not grounded and classify_provenance(prov) == GROUNDING_GROUNDED:
+            prov = f"intel:{tag}:{(rec.finding_ref or rec.hash).strip()}"
     elif grounded:
         prov = f"oracle:{(rec.evidence_ref or rec.hash).strip()}"
     else:
