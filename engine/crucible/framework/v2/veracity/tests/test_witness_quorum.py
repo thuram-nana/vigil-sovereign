@@ -372,3 +372,86 @@ def test_empty_cert_drops_witness_fields_for_byte_identity():
     empty = EvidenceCertificate(finding_ref="x", oracle_context_digest="sha256:deadbeef")
     dumped = empty.model_dump(mode="json")
     assert "witness_quorum_required" not in dumped and "witness_kinds" not in dumped
+
+
+# --------------------------------------------------------------------------- O4: the SHIPPED default policy
+
+
+def test_default_policy_enabled_covers_critical_classes_n2():
+    from framework.v2.veracity.witness_quorum import DEFAULT_CRITICAL_CLASSES, default_critical_policy
+    pol = default_critical_policy()
+    assert pol.enabled and pol.quorum_n == 2
+    assert pol is not DISABLED
+    for c in DEFAULT_CRITICAL_CLASSES:
+        assert pol.applies_to(c), c
+    # a non-critical class is still admitted exactly as today, even under the default policy
+    assert not pol.applies_to("xss")
+
+
+def test_default_policy_classes_are_satisfiable_not_blanket_suppression():
+    """Every default critical class must map to >= quorum_n DISTINCT oracle kinds, else the policy would
+    be a class the quorum can never clear (blanket suppression, not corroboration). Guards the default
+    from silently becoming a suppress-all list if the oracle map changes."""
+    from framework.v2.verify.verifier import BUG_CLASS_ORACLES, normalize_bug_class
+    from framework.v2.veracity.witness_quorum import DEFAULT_CRITICAL_CLASSES, default_critical_policy
+    n = default_critical_policy().quorum_n
+    for c in DEFAULT_CRITICAL_CLASSES:
+        kinds = BUG_CLASS_ORACLES.get(normalize_bug_class(c)) or BUG_CLASS_ORACLES.get(c) or ()
+        assert len(set(kinds)) >= n, f"{c} maps to < {n} oracle kinds — default quorum unsatisfiable"
+
+
+def test_shipped_default_json_matches_builtin_policy():
+    """The committed witness_quorum.default.json must deserialise to EXACTLY the built-in default policy,
+    so the two cannot drift."""
+    import json
+
+    from framework.v2.veracity.witness_quorum import default_critical_policy
+    p = _ROOT / "engine" / "crucible" / "framework" / "v2" / "veracity" / "witness_quorum.default.json"
+    doc = json.loads(p.read_text())
+    assert WitnessQuorumConfig.from_dict(doc) == default_critical_policy()
+
+
+def test_sentinel_selects_default_env_unset_stays_disabled(monkeypatch):
+    from framework.v2.veracity import witness_quorum as wq
+    monkeypatch.delenv("CRUCIBLE_WITNESS_QUORUM_CONFIG", raising=False)
+    wq._load_cached.cache_clear()
+    assert wq.load_quorum_config() is DISABLED                         # env-unset ⇒ byte-identical
+    monkeypatch.setenv("CRUCIBLE_WITNESS_QUORUM_CONFIG", "default")    # the sentinel
+    wq._load_cached.cache_clear()
+    loaded = wq.load_quorum_config()
+    assert loaded == wq.default_critical_policy() and loaded.applies_to("sqli")
+    wq._load_cached.cache_clear()
+
+
+def test_default_policy_evaluate_demotes_single_witness_admits_two():
+    from framework.v2.veracity.witness_quorum import default_critical_policy
+    pol = default_critical_policy()
+    two = evaluate(_finding(_ctx_two_witness())["oracle_context"], bug_class=_CLASS, config=pol)
+    assert two.applicable and two.ok and two.got == 2                 # corroborated → admitted
+    one = evaluate(_finding(_ctx_one_witness())["oracle_context"], bug_class=_CLASS, config=pol)
+    assert one.applicable and not one.ok and one.got == 1            # single witness → withheld
+
+
+def test_default_policy_mint_demotes_single_and_mints_two_never_promotes():
+    """The VALIDATE proof driven through the real mint choke (certify_admitted): under the shipped default
+    policy a critical-class FACT lacking quorum is DEMOTED to a LEAD; a corroborated one still mints; and
+    a non-FACT is never promoted."""
+    from framework.v2.veracity.witness_quorum import default_critical_policy
+    vadmit, certify_admitted = _import_mint()
+    _tr, signers = _trust_root()
+    admitted = _admitted_fact(vadmit)
+    pol = default_critical_policy()
+
+    short = certify_admitted(_finding(_ctx_one_witness()), admitted, engagement_slug="acme",
+                             signers=signers, provenance="reproduced", witness_quorum=pol)
+    assert not short.is_fact and short.status == "lead" and short.signed is None    # demoted
+
+    full = certify_admitted(_finding(_ctx_two_witness()), admitted, engagement_slug="acme",
+                            signers=signers, provenance="reproduced", witness_quorum=pol)
+    assert full.is_fact                                                             # corroborated → mints
+    assert full.signed.certificate.model_dump(mode="json")["witness_quorum_required"] == 2
+
+    inconclusive = vadmit("error_signature.datastore_error", fired=False, conclusive=True, observed={})
+    never = certify_admitted(_finding(_ctx_two_witness()), inconclusive, engagement_slug="acme",
+                             signers=signers, provenance="reproduced", witness_quorum=pol)
+    assert not never.is_fact and never.signed is None                              # never promoted
