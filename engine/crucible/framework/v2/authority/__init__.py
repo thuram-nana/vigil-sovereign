@@ -54,6 +54,7 @@ from .fleet import (
     TenantBudget,
     WorkKind,
     canonical_host,
+    default_fleet_governor,
 )
 from .crosscheck import (
     EnvelopeCrossCheck,
@@ -117,4 +118,5 @@ __all__ = [
     "TenantBudget",
     "ProofSerializer",
     "FleetConcurrencyGovernor",
+    "default_fleet_governor",
 ]

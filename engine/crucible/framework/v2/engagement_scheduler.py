@@ -343,8 +343,15 @@ def default_engagement_runner(job: EngagementJob):
     return run_engagement(job.slug, job.seed_url, **dict(job.params or {}))
 
 
-def make_fleet_runner(governor=None, executor=None, *, default_tenant: str = "default"):
-    """Return an engagement runner that routes each job through the fleet bounds (Wave D / M3.1).
+def make_fleet_runner(
+    governor=None,
+    executor=None,
+    *,
+    default_tenant: str = "default",
+    xproc_root=None,
+    cross_process: bool = True,
+):
+    """Return an engagement runner that routes each job through the fleet bounds (Wave D / M3.1; Lane O / O1).
 
     This is how the fleet governor (and the signed authority's per-engagement
     :class:`~framework.v2.authority.authorization.EngagementExecutor`) become REACHABLE on the live run
@@ -353,16 +360,33 @@ def make_fleet_runner(governor=None, executor=None, *, default_tenant: str = "de
     the per-tenant total budget, and the serial-proof-per-target invariant hold across all of a fleet's
     concurrent engagements — without ``run_engagement`` or the scheduler re-implementing any of them.
 
+    DEFAULT = CROSS-PROCESS SERIAL-PROOF (Lane O / O1). This scheduler is a MULTI-PROCESS queue: N worker
+    processes each claim and run engagements. An in-process lock cannot stop two of those processes from
+    running a TIMING proof against one host at once and phase-locking into a false ``time_based_sqli`` FACT.
+    So with ``governor=None`` this runner now constructs the CROSS-PROCESS
+    :func:`~framework.v2.authority.fleet.default_fleet_governor` (a per-host ``flock`` + on-disk counters
+    under ``crucible_root``) rather than running governor-less. That governor's ONLY behaviour change versus
+    governor-less is serial-PROOF-per-host and concurrent SEARCH — its budget/rate caps default to
+    effectively unbounded, so it never newly refuses an engagement the old fleet path admitted. A single-
+    engagement (non-fleet) deployment uses :func:`default_engagement_runner` and is unaffected (byte-
+    identical); pass ``cross_process=False`` to get the old governor-less fleet runner explicitly.
+
     The engagement is the fleet ADMISSION UNIT. For each job the runner resolves, from
     ``job.params`` (these two keys are consumed here and NOT forwarded to ``run_engagement``):
 
       * ``tenant`` — the tenant whose total budget this engagement draws on (else ``default_tenant``).
       * ``work_kind`` — ``"search"`` or ``"proof"``; absent => PROOF, the safe serialize-per-host default.
 
-    The governor/executor are objects, injected here (they cannot ride the JSON job file). With both
-    ``None`` this is exactly :func:`default_engagement_runner` — byte-identical, no bound applied — so
-    wiring the runner never changes a verdict; it only shapes how concurrently authorized work runs."""
+    The governor/executor are objects, injected here (they cannot ride the JSON job file). An explicit
+    ``governor`` is used as-is; ``governor=None`` + ``cross_process=True`` (the default) builds the
+    cross-process governor; ``governor=None`` + ``cross_process=False`` applies NO bound (byte-identical to
+    :func:`default_engagement_runner`)."""
     from .engage import run_engagement
+
+    if governor is None and cross_process:
+        from .authority.fleet import default_fleet_governor
+
+        governor = default_fleet_governor(xproc_root)
 
     def _runner(job: EngagementJob):
         params = dict(job.params or {})
