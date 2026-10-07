@@ -116,8 +116,14 @@ def _effective_blast_ceiling(slug: str, explicit: float | None):
     stays OFF for this engagement (byte-identical to pre-M4.2)."""
     if explicit is not None:
         return float(explicit)
-    from framework.v2.worldmodel.impact import blast_ceiling_for_slug
-
+    try:
+        from framework.v2.worldmodel.impact import blast_ceiling_for_slug
+    except ImportError:
+        # CRUCIBLE world-model half not present on this plane (integration-only / the two-env
+        # keyless boundary): the veto has no impact model to reason over, so it stays DISARMED
+        # (None ⇒ byte-identical to pre-M4.2). The destruction quorum + authority gate still
+        # protect the action; fail-closed is reserved for a world-model that is present-but-corrupt.
+        return None
     return blast_ceiling_for_slug(slug)
 
 
