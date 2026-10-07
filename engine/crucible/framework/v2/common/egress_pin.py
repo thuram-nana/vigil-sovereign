@@ -35,9 +35,11 @@ leg and any ``vigil_core``-only sovereign deploy legitimately run gateway-less a
 loopback targets), the check does NOT fail-open (an unguarded connect) and does NOT fail the whole loopback
 plane closed; it DEGRADES to a pure-stdlib ``ipaddress`` structural floor (:func:`_stdlib_floor_denied`)
 that mirrors ``is_egress_denied``'s NEVER-LIFTABLE tier EXACTLY and applies the SAME charter-literal /
-loopback lift. The backstop is a strict structural SUBSET of the full denylist (identical refusals on the
-never-liftable tier; identical lifts), so it never contradicts or widens the richer authority — it only
-ever refuses, never authorises anything the full denylist would deny. This is the Lane-O disarm doctrine: a
+loopback lift. The backstop's refusals are a SUPERSET-OR-EQUAL of the full denylist's on the never-liftable
+tier (the explicit CIDR mirror plus the ipaddress predicate fallbacks can only refuse MORE, never less) and
+its lifts are identical, so it is never LESS strict than the richer authority — it never contradicts or
+widens it, only ever refuses, never authorises anything the full denylist would deny. This is the Lane-O
+disarm doctrine: a
 control degrades to its safe structural floor when its richer authority is absent, it does not fail-open.
 The INTEGRATION ``egress_floor.pin_egress`` real-external-egress plane always ships vigil_gateway and
 correctly stays fail-closed — no backstop there.
@@ -76,10 +78,11 @@ class EgressFloorRefused(Exception):
 # is ABSENT the control must neither fail-OPEN (an unguarded connect — forbidden) nor fail the whole
 # loopback plane CLOSED (a gateway-less loopback scan is legitimate); it degrades to this pure-stdlib
 # floor, which mirrors ``is_egress_denied``'s NEVER-LIFTABLE tier EXACTLY and applies the SAME
-# charter-literal / loopback lift. The refused tier (metadata/link-local/multicast/CGNAT/RFC1918/ULA/
-# reserved/unspecified) is a strict structural SUBSET of the full denylist's refusals and the lifts are
-# identical, so it can never contradict or widen the richer authority — it only ever refuses, never
-# authorises anything the full denylist would deny. Pure ``ipaddress``: no DNS, no I/O, no clock.
+# charter-literal / loopback lift. Its refusals on the never-liftable tier (metadata/link-local/multicast/
+# CGNAT/RFC1918/ULA/reserved/unspecified) are a SUPERSET-OR-EQUAL of the full denylist's (the explicit CIDR
+# mirror plus the ipaddress predicate fallbacks can only refuse MORE, never less) and the lifts are
+# identical, so it is never LESS strict than the richer authority — it can never contradict or widen it, only
+# ever refuses, never authorises anything the full denylist would deny. Pure ``ipaddress``: no DNS, no I/O.
 
 # Tier 1a — ABSOLUTE floor (never liftable). The exact non-loopback always-deny set from
 # ``vigil_gateway.denylist._ALWAYS_DENY_{V4,V6}`` (loopback split out to Tier 1b), re-expressed in stdlib.
@@ -153,10 +156,13 @@ def _stdlib_floor_denied(
 ) -> "tuple[bool, str]":
     """Pure-stdlib structural mirror of ``vigil_gateway.denylist.is_egress_denied`` — same signature,
     same decision order, same never-liftable tier and same charter-literal / loopback lift — for the
-    gateway-less engine plane. Returns ``(denied, reason)``. It is a strict structural SUBSET of the full
-    denylist: it refuses the identical never-liftable tier (metadata/link-local/multicast/reserved/
-    unspecified) regardless of scope, lifts the private tier only for an exact charter literal, and lifts
-    loopback only on the caller's opt-in + an exact literal — so it never authorises anything the full
+    gateway-less engine plane. Returns ``(denied, reason)``. On the never-liftable tier its refusals are a
+    SUPERSET-OR-EQUAL of the full denylist's: the explicit CIDR mirror reproduces the authority's set
+    (minus loopback) and the ``ipaddress`` predicate fallbacks (is_link_local / is_multicast / is_reserved
+    / is_unspecified / is_private) can only refuse MORE, never less — so it is never LESS strict than the
+    authority. Its lifts are identical: it refuses the never-liftable tier (metadata/link-local/multicast/
+    reserved/unspecified) regardless of scope, lifts the private tier only for an exact charter literal, and
+    lifts loopback only on the caller's opt-in + an exact literal — so it never authorises anything the full
     denylist would deny. Fail-closed: an unparseable address is denied."""
     raw = (ip_str or "").strip().strip("[]")
     try:
