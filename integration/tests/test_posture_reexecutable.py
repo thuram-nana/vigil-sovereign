@@ -116,9 +116,16 @@ _PREDICATE_CASES = [
 
 def _load_verify_vf():
     import importlib.util
+    import sys
 
     spec = importlib.util.spec_from_file_location("verify_vf_reexec", _VERIFY_VF)
     mod = importlib.util.module_from_spec(spec)
+    # Register BEFORE exec (the standard importlib pattern): verify_vf now defines dataclasses, and
+    # under `from __future__ import annotations` dataclass creation resolves annotations via
+    # sys.modules[cls.__module__] — which must exist. A third party running the file as a script
+    # (__main__) or importing it normally already satisfies this; only an unregistered spec-exec did
+    # not. This does not make the module any less standalone: it imports no VIGIL code either way.
+    sys.modules[spec.name] = mod
     spec.loader.exec_module(mod)
     return mod
 

