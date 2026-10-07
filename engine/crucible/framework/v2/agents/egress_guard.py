@@ -45,8 +45,9 @@ into every `httpx.Client` they construct.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Iterable
+from typing import Callable, Iterable
 
+import httpcore
 import httpx
 
 from ..common import ethics, paths
@@ -234,10 +235,126 @@ def collector_scope_conflicts(
     return conflicts
 
 
+# Loopback is the operator's OWN box: dialling 127.0.0.1/::1 adds no NEW network reach (it cannot reach
+# the cloud metadata service, another host's RFC1918, or anything off-box), and the engine has always been
+# able to engage loopback/MERIDIAN targets. So a loopback baseline is carried (mirrors
+# ``scanner.race.raw_race``), on TOP of which the charter's IP literals lift the private tier for an exact
+# literal. The metadata/link-local/RFC1918/multicast/CGNAT/reserved tier is NEVER in this set, so it is
+# always refused regardless of slug.
+_LOOPBACK_BASELINE: frozenset[str] = frozenset({"127.0.0.1", "::1"})
+
+
+class _FloorPinnedBackend(httpcore.NetworkBackend):
+    """httpcore network backend that enforces the never-liftable L3/L4 egress FLOOR with an anti-rebinding
+    pin, reusing the SAME shared primitive the raw-socket capture paths use
+    (``common.egress_pin.resolve_and_validate_all`` -> ``vigil_gateway.denylist.is_egress_denied``).
+
+    Why a backend rather than a URL rewrite: the floor's resolution and the dial happen HERE, atomically,
+    so there is NO check/connect TOCTOU — the host is resolved exactly ONCE, every resolved address must
+    clear the floor, and the connection is then made ONLY to those validated addresses (create_connection-
+    style fallback across them, so a dual-stack host still falls back across its validated IPs) and the name
+    is NEVER re-resolved. A DNS-rebinding resolver therefore cannot present a safe answer to the check and a
+    denied answer to the dialer. The ``Host`` header and TLS SNI are untouched (the origin host stays the
+    original name), so a vhost still routes and presents + validates its real certificate.
+
+    Fail-closed: a floor refusal raises :class:`SovereigntyViolation` BEFORE any socket is opened; an
+    import/resolution error refuses too. The metadata/link-local/RFC1918/multicast/CGNAT/reserved tier is
+    charter-independent and never lifted; loopback/private lift only for the loopback baseline + an exact
+    charter IP literal from ``slug``."""
+
+    def __init__(
+        self,
+        *,
+        slug: str,
+        resolver: Callable[..., object] | None,
+        inner: httpcore.NetworkBackend,
+    ) -> None:
+        self._slug = slug
+        self._resolver = resolver
+        self._inner = inner
+
+    def connect_tcp(
+        self,
+        host: str,
+        port: int,
+        timeout: float | None = None,
+        local_address: str | None = None,
+        socket_options: "Iterable[object] | None" = None,
+    ) -> "httpcore.NetworkStream":
+        try:
+            from ..common.egress_pin import (
+                EgressFloorRefused,
+                charter_ip_literals,
+                resolve_and_validate_all,
+            )
+        except Exception as exc:  # no floor importable => refuse rather than connect unguarded
+            raise SovereigntyViolation(
+                f"egress floor (common.egress_pin) not importable, so no destination can be authorized "
+                f"(fail-closed): {type(exc).__name__}: {exc}") from exc
+        allowed = _LOOPBACK_BASELINE | charter_ip_literals(self._slug)
+        try:
+            # Opt in to owner-scoped loopback; loopback + RFC1918 lift ONLY for the loopback baseline / an
+            # exact charter literal. metadata/link-local/multicast/CGNAT/reserved are never in ``allowed``.
+            validated = resolve_and_validate_all(
+                host, int(port), allowed_ips=allowed,
+                loopback_allowed_if_scoped=True, resolver=self._resolver)
+        except EgressFloorRefused as exc:
+            raise SovereigntyViolation(
+                f"egress to {host!r}:{port} refused by the never-liftable L3/L4 egress floor "
+                f"(metadata/link-local/RFC1918/multicast/CGNAT/reserved — directly or via a DNS-rebinding "
+                f"answer; the floor is charter-independent and cannot be lifted by a scope listing). "
+                f"Reason: {exc}") from exc
+        # Dial the VALIDATED addresses only, in resolution order, with fallback — never the re-resolvable
+        # name. Every address here already cleared the floor, so fallback cannot reach a denied address.
+        last_exc: Exception | None = None
+        for ip in validated:
+            try:
+                return self._inner.connect_tcp(
+                    ip, port, timeout=timeout, local_address=local_address,
+                    socket_options=socket_options)
+            except (httpcore.ConnectError, httpcore.ConnectTimeout) as exc:
+                last_exc = exc
+        raise last_exc if last_exc is not None else httpcore.ConnectError(
+            f"no validated address for {host!r}:{port} could be dialled")
+
+    def connect_unix_socket(self, path, timeout=None, socket_options=None):  # noqa: ANN001, ANN201
+        # No egress leaves the host over a unix socket; pass through (the LLM backend / local IPC case).
+        return self._inner.connect_unix_socket(path, timeout=timeout, socket_options=socket_options)
+
+    def sleep(self, seconds: float) -> None:
+        self._inner.sleep(seconds)
+
+
 class SovereignHttpxTransport(httpx.BaseTransport):
-    """httpx transport that refuses requests to hosts outside the
-    allowlist. Wraps an inner transport (defaults to a fresh
-    `httpx.HTTPTransport`)."""
+    """httpx transport that refuses requests to hosts outside the allowlist (the NAME control) AND
+    enforces the never-liftable L3/L4 egress FLOOR with an anti-rebinding pin (the ADDRESS control).
+
+    Wraps an inner transport (defaults to a fresh `httpx.HTTPTransport`).
+
+    Two egress controls, both fail-closed:
+
+      * NAME allowlist — refuses a host outside the engagement scope under sovereign mode (unchanged).
+      * L3/L4 egress FLOOR + anti-rebinding pin (WS1.1b) — the NAME allowlist alone was a BYPASS: a
+        charter-scoped name that resolves to the cloud metadata IP / an RFC1918 / link-local / multicast /
+        CGNAT / reserved address (directly, or via a DNS-rebinding answer) passed ``permits()`` and the
+        inner ``httpx.HTTPTransport`` then RE-RESOLVED the name and dialled the denied IP. The floor closes
+        that by installing :class:`_FloorPinnedBackend` under the real ``httpx.HTTPTransport``: it resolves
+        the host ONCE through the SAME shared primitive the raw-socket capture paths use
+        (``common.egress_pin.resolve_and_validate_all`` -> ``vigil_gateway.denylist.is_egress_denied`` over
+        EVERY resolved address), refuses on any denied address, and connects ONLY to the validated
+        addresses — never the re-resolvable name. The ``Host`` header and TLS SNI stay the original
+        hostname (the origin host is untouched) so a vhost still routes and presents + validates its real
+        certificate. The metadata/link-local/multicast/CGNAT/reserved tier is charter-independent and NEVER
+        lifted; loopback/RFC1918 lift ONLY for the loopback baseline / an exact charter IP literal taken
+        from ``slug``. The floor runs in BOTH sovereign and permissive mode — a floor a mode could lift
+        would not be a floor.
+
+    Hermeticity (mirrors ``verify.reachability``'s "floor only when ``connect is None``" rule): the floor
+    performs DNS + dials, so it is installed on the REAL egress path only — when the caller did not inject
+    its own ``inner`` transport (production: ``inner is None`` -> a real ``httpx.HTTPTransport``). A caller
+    that injects its own ``inner`` double (the existing unit tests, which dial non-resolving ``*.example``
+    hosts through a ``MockTransport`` that never reaches the network backend) exercises only the NAME
+    allowlist; the floor backend has its own resolver-injected tests."""
 
     def __init__(
         self,
@@ -245,11 +362,30 @@ class SovereignHttpxTransport(httpx.BaseTransport):
         *,
         inner: httpx.BaseTransport | None = None,
         sovereign_only: bool = True,
+        slug: str = "",
+        resolver: Callable[..., object] | None = None,
     ) -> None:
         super().__init__()
         self._allowlist = allowlist
-        self._inner: httpx.BaseTransport = inner or httpx.HTTPTransport()
         self._sovereign_only = sovereign_only
+        self._slug = slug
+        if inner is not None:
+            # Caller injected its own (test) transport: no network backend to pin; NAME control only.
+            self._inner: httpx.BaseTransport = inner
+        else:
+            # Production egress path: install the never-liftable floor backend UNDER the real transport so
+            # every connect resolves-once / validates-all / dials-only-validated (fail-closed). Reaching the
+            # pool's network backend slot is the supported extension point for a pinned/SSRF-safe dialer.
+            real = httpx.HTTPTransport()
+            try:
+                default_backend = real._pool._network_backend  # type: ignore[attr-defined]
+                real._pool._network_backend = _FloorPinnedBackend(  # type: ignore[attr-defined]
+                    slug=slug, resolver=resolver, inner=default_backend)
+            except AttributeError as exc:  # fail-closed: never ship a transport without the floor
+                raise SovereigntyViolation(
+                    "cannot install the never-liftable egress floor on the httpx transport "
+                    f"(fail-closed): {type(exc).__name__}: {exc}") from exc
+            self._inner = real
 
     def handle_request(self, request: httpx.Request) -> httpx.Response:
         # Protected-domain categorical floor (gov/mil/edu/IGO). This runs UNCONDITIONALLY — above the
@@ -259,25 +395,24 @@ class SovereignHttpxTransport(httpx.BaseTransport):
         # skipped and the sovereign allowlist below remains the sole egress control (scope not relaxed).
         if protected_guard_enabled():
             assert_not_hard_blocked(str(request.url))
-        # In permissive mode the guard logs but does not refuse — the
-        # operator may want development workflows that hit external
-        # docs / package mirrors. In sovereign mode it always refuses.
-        if self._sovereign_only and not sovereignty.current().strict:
-            return self._inner.handle_request(request)
-
-        host = request.url.host
-        if not self._allowlist.permits(host):
-            raise SovereigntyViolation(
-                f"egress to {host!r} refused under sovereign mode "
-                f"(URL={request.url}, method={request.method}). "
-                f"Allowlist: target_hosts={self._allowlist.target_hosts}, "
-                f"llm_hosts={self._allowlist.llm_hosts}, "
-                f"collector_hosts={self._allowlist.collector_hosts}, "
-                f"extra_hosts={self._allowlist.extra_hosts}. "
-                f"If this host is legitimately required, add it to the "
-                f"engagement charter scope or pass extra_hosts=... "
-                f"explicitly when constructing the allowlist."
-            )
+        # NAME allowlist (unchanged semantics). In permissive mode the guard logs but does not refuse —
+        # the operator may want development workflows that hit external docs / package mirrors — UNLESS
+        # sovereign_only is False (always enforce). In sovereign mode it always refuses. The never-liftable
+        # L3/L4 ADDRESS floor runs underneath, in the pinned network backend, in BOTH modes.
+        if not (self._sovereign_only and not sovereignty.current().strict):
+            host = request.url.host
+            if not self._allowlist.permits(host):
+                raise SovereigntyViolation(
+                    f"egress to {host!r} refused under sovereign mode "
+                    f"(URL={request.url}, method={request.method}). "
+                    f"Allowlist: target_hosts={self._allowlist.target_hosts}, "
+                    f"llm_hosts={self._allowlist.llm_hosts}, "
+                    f"collector_hosts={self._allowlist.collector_hosts}, "
+                    f"extra_hosts={self._allowlist.extra_hosts}. "
+                    f"If this host is legitimately required, add it to the "
+                    f"engagement charter scope or pass extra_hosts=... "
+                    f"explicitly when constructing the allowlist."
+                )
         return self._inner.handle_request(request)
 
     def close(self) -> None:

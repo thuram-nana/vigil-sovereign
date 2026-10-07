@@ -137,6 +137,30 @@ def resolve_and_pin(
     tier is unaffected by this flag — it lifts on an exact charter literal regardless. The
     metadata/link-local/reserved floor is never lifted either way. Total / fail-closed: any error
     REFUSES rather than connecting unguarded."""
+    return resolve_and_validate_all(
+        host, port, slug=slug, allowed_ips=allowed_ips,
+        loopback_allowed_if_scoped=loopback_allowed_if_scoped, resolver=resolver,
+    )[0]  # pin the first validated address; every address cleared the floor
+
+
+def resolve_and_validate_all(
+    host: str,
+    port: int,
+    *,
+    slug: str = "",
+    allowed_ips: "frozenset[str] | None" = None,
+    loopback_allowed_if_scoped: bool = False,
+    resolver: Callable[..., Any] | None = None,
+) -> "list[str]":
+    """Resolve ``host`` ONCE and return EVERY resolved address (order-preserving) after each has cleared
+    ``vigil_gateway.denylist.is_egress_denied``, or raise :class:`EgressFloorRefused` if ANY resolved
+    address is denied (or resolution fails). Same floor and same ``allowed_ips`` / loopback semantics as
+    :func:`resolve_and_pin`, which returns element ``[0]`` of this list.
+
+    A caller that connects over this WHOLE validated list (create_connection-style fallback across it)
+    gets the anti-rebinding guarantee AND dual-stack connect fallback: the host is resolved exactly once
+    here, only these validated addresses are ever dialled, and the name is never re-resolved — so a
+    rebinding resolver cannot present a safe answer to this check and a denied answer to the dialer."""
     h = (host or "").strip()
     if h.startswith("[") and h.endswith("]"):
         h = h[1:-1]
@@ -167,4 +191,4 @@ def resolve_and_pin(
             raise EgressFloorRefused(
                 f"egress floor refused {h!r} -> {address}: {why} (the metadata/link-local/reserved floor "
                 "is charter-independent and cannot be lifted by a scope listing)")
-    return addresses[0]  # pin the first validated address; every address cleared the floor
+    return addresses  # every address cleared the floor; dial over this validated set, never the name
