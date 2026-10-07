@@ -634,6 +634,42 @@ def _make_spine_sink(spine: object, slug: str):
         return None
 
 
+def _verify_live_spine_at_close(spine: object, slug: str, sink) -> None:
+    """Engagement-CLOSE caller for the live-spine crypto verify (O3). Runs the already-built
+    ``spine_chain`` verifiers over the LIVE SQLite spine for ``slug`` and marks the engagement closed.
+    Best-effort/total: a verify that cannot even run never sinks the engagement, but a genuine tamper
+    FAILURE is surfaced LOUDLY — a ``spine-integrity`` refusal on the spine (via ``sink``) plus the
+    verifier's own ``error`` log — never swallowed. VERIFIES only: mints nothing, moves no verdict.
+
+    No governance-signed spine head is auto-provisioned on the engage path, so the close verify runs the
+    completeness+linkage self-check (fail-closed on a truncated/unreadable live read); when an operator HAS
+    provisioned a signed head (or retains an out-of-band export/checkpoint reference), the same caller
+    upgrades to full content/order/authenticity tamper detection — see ``spine_chain.verify_live_spine``."""
+    try:
+        from .agents.spine_chain import verify_spine_at_engagement_close
+    except Exception:
+        return
+
+    def _alarm(eng: str, reason: str) -> None:
+        if sink is None:
+            return
+        try:
+            sink.refusal("spine-integrity", f"engagement-close:{eng}",
+                         reason=f"LIVE-SPINE TAMPER ALARM: {reason}", fatal=True)
+        except Exception:
+            pass
+
+    try:
+        verify_spine_at_engagement_close(spine, slug, on_alarm=_alarm)  # type: ignore[arg-type]
+    except Exception:
+        pass
+    # Stamp the engagement closed on the registry (the close seam) — additive, spine-only, best-effort.
+    try:
+        spine.close_engagement(slug)  # type: ignore[attr-defined]
+    except Exception:
+        pass
+
+
 def _spine_finding_payload(f, admitted) -> dict:
     """A FindingPayload-shaped mirror of an AuditFinding, tagged with its LIVE grounding
     verdict (P3). Oracle authority preserved: ``critique_status='confirmed'`` /
@@ -1511,6 +1547,15 @@ def run_engagement(
         # engage path and the gate stay byte-identical. Best-effort — never sinks the run.
         _persist_plan_input(slug, report, world)
     ledger.run_phase(P_REASONING, _do_reasoning, enabled=(sink is not None))
+
+    # Engagement CLOSE: crypto-verify the LIVE spine hash-chain NOW that the run is done and no concurrent
+    # writer remains (a consistent snapshot — the concurrent-cadence snapshot race is handled elsewhere).
+    # Opt-in: runs ONLY when a spine is attached, so `make gate` (no spine) is byte-identical and no verdict
+    # moves. A verification FAILURE surfaces as a loud tamper refusal on the spine + an `error` log — never
+    # silent, fail-closed. This VERIFIES only; it mints nothing and never alters report.active_findings nor
+    # the oracle verdict.
+    if spine is not None:
+        _verify_live_spine_at_close(spine, slug, sink)
     return result
 
 

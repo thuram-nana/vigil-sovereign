@@ -1,0 +1,16 @@
+{
+  "_comment": "SHIPPED default witness-quorum policy (Lane O / O4). OPERATOR-ACTIVATED, demote-only: activate by setting CRUCIBLE_WITNESS_QUORUM_CONFIG to this file's path, or to the sentinel 'default'. Env-unset keeps the quorum DISABLED (byte-identical). A crown-jewel FACT re-firing fewer than quorum_n independent oracle-witness kinds is withheld as a LEAD; it never promotes. Mirrors witness_quorum.default_critical_policy(); tests pin the two together so they cannot drift.",
+  "enabled": true,
+  "quorum_n": 2,
+  "critical_classes": [
+    "rce",
+    "command_injection",
+    "time_based_command_injection",
+    "ssti",
+    "el_injection",
+    "deserialization",
+    "sqli",
+    "error_based_sqli",
+    "xxe"
+  ]
+}

@@ -31,7 +31,9 @@ from __future__ import annotations
 import os
 import time
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Callable
+from urllib.parse import urlparse
 
 # The pure gate-of-record composition now lives in the neutral shared core (S6). Re-exported here so every
 # existing `from vigil_integration.conjunctive_gate import ...` keeps working, byte-identical semantics.
@@ -70,6 +72,98 @@ def _as_epoch(now: Any) -> float:
     return time.time()
 
 
+# --- M4.2 pre-action blast-radius VETO (defense-in-depth) ----------------------------------------
+#
+# The authority gate (`framework.v2.authority.gate.authorize_action`) already carries an OPT-IN,
+# DEFAULT-OFF blast-radius veto conjunct, but until now it had NO production caller — only tests
+# injected a predictor. These helpers wire the REAL predictor into `build_offense_gate` so a
+# CONSEQUENTIAL (state-changing / destructive) action that would newly expose crown jewels worth
+# more than a per-engagement ceiling is REFUSED before it runs. Strictly defense-in-depth: it can
+# only REFUSE, never promote; it is ADVISORY (reads a read-only forward world-model query, mints no
+# FACT, is no oracle input); and it NEVER touches the non-consequential (read-only) hot path — for a
+# read it is not even constructed. Every `framework`/`worldmodel` import below is LAZY (offense env
+# only), so this module stays import-clean for the sovereign plane (FATAL-2).
+
+
+def _host_of(target: str) -> str:
+    """The bare hostname of a target URL/host (stdlib only — keeps the module sovereign-safe)."""
+    parsed = urlparse(target if "://" in target else "https://" + target)
+    return (parsed.hostname or "").strip()
+
+
+def _load_engagement_world(slug: str):
+    """The engagement's persisted attack-graph, projected from the signed spine at
+    ``targets/<slug>/worldmodel-spine.json`` (the SAME canonical slug path the attack-paths triage
+    reads). Returns ``None`` when no spine exists yet — a normal, benign state in which the veto has
+    no basis to refuse and therefore stays DISARMED (it never fabricates a refusal from no evidence).
+    A spine that is present but corrupt is allowed to raise: any error in the CRUCIBLE gate half is a
+    DENY (fail-closed), so a broken world-model refuses the consequential action rather than waving it
+    through. Read-only: the projection never mutates the spine and sends no traffic."""
+    from framework.v2.common import paths as _paths
+    from framework.v2.worldmodel.attack_paths import _load_spine
+    from framework.v2.worldmodel.spine_projector import project_spine, records_from_dicts
+
+    spine_path = Path(_paths.target_dir(slug)) / "worldmodel-spine.json"
+    if not spine_path.is_file():
+        return None
+    rows = _load_spine(spine_path)
+    return project_spine(records_from_dicts(rows))
+
+
+def _effective_blast_ceiling(slug: str, explicit: float | None):
+    """Resolve the per-engagement veto ceiling: a trusted-caller ``explicit`` value wins; otherwise
+    the engagement's own ``targets/<slug>/impact.yaml`` (``blast_ceiling`` key). ``None`` ⇒ the veto
+    stays OFF for this engagement (byte-identical to pre-M4.2)."""
+    if explicit is not None:
+        return float(explicit)
+    try:
+        from framework.v2.worldmodel.impact import blast_ceiling_for_slug
+    except ImportError:
+        # CRUCIBLE world-model half not present on this plane (integration-only / the two-env
+        # keyless boundary): the veto has no impact model to reason over, so it stays DISARMED
+        # (None ⇒ byte-identical to pre-M4.2). The destruction quorum + authority gate still
+        # protect the action; fail-closed is reserved for a world-model that is present-but-corrupt.
+        return None
+    return blast_ceiling_for_slug(slug)
+
+
+def _build_blast_radius_fn(slug: str, target_url: str, world_provider):
+    """Build the read-only predictor the authority gate consults for ONE consequential action, or
+    ``None`` when there is no world-model to reason over (⇒ the veto is left disarmed for this call).
+
+    The action is modelled as OPENING attacker reachability to the target host: the predictor asks
+    "if the attacker (``attacker:self``) could now reach ``host:<target>``, which crown jewels does
+    that NEWLY expose, and what is their summed business worth?" — ``impact.predict_action_blast_radius``
+    over the engagement impact model, an AUGMENTED read-only BFS that never writes the graph. The
+    returned ``ForwardBlastResult`` structurally satisfies the gate's ``BlastRadiusVerdict`` Protocol
+    (``incremental_blast`` + ``newly_reachable_jewels``). ``world_provider`` is an injection seam (a
+    callable returning a WorldModel) so the wiring is testable without a spine on disk; absent it the
+    default loads the engagement spine."""
+    from framework.v2.worldmodel.attack_paths import (
+        DEFAULT_ATTACK_EDGE_KINDS,
+        DEFAULT_OBJECTIVE_KINDS,
+    )
+    from framework.v2.worldmodel.attacker import ATTACKER_ID
+    from framework.v2.worldmodel.impact import ImpactModel, predict_action_blast_radius
+
+    world = (world_provider or (lambda: _load_engagement_world(slug)))()
+    if world is None:
+        return None
+
+    impact = ImpactModel.from_slug(slug)
+    host = _host_of(target_url)
+    target_node = f"host:{host}" if host else target_url
+    opened = [(ATTACKER_ID, target_node)]
+    obj_kinds = list(DEFAULT_OBJECTIVE_KINDS)
+    edge_kinds = list(DEFAULT_ATTACK_EDGE_KINDS)
+
+    def predict(_req):
+        return predict_action_blast_radius(
+            world, ATTACKER_ID, opened, obj_kinds, edge_kinds=edge_kinds, impact=impact)
+
+    return predict
+
+
 def build_offense_gate(
     *,
     slug: str,
@@ -84,6 +178,8 @@ def build_offense_gate(
     is_consumed: Callable[[str], bool] | None = None,
     destruction_ledger: Any = None,
     base_dir: str = "",
+    blast_ceiling: float | None = None,
+    world_provider: Callable[[], Any] | None = None,
 ) -> Callable[..., GateVerdict]:
     """Return ``gate(tool_name, target_url, destructive=False, *, destruction_action=None,
     destruction_signed=None) -> GateVerdict`` wired to the REAL gates — including the I4 threshold-
@@ -115,6 +211,18 @@ def build_offense_gate(
     (no ledger) keeps the legacy PURE check (:func:`destruction_gate.authorize_destruction`), which
     carries the documented TOCTOU and is retained ONLY for a caller that owns its own atomic burn;
     prefer ``destruction_ledger``. If BOTH are given, the atomic ledger path wins.
+
+    BLAST-RADIUS VETO (M4.2, defense-in-depth): a CONSEQUENTIAL (destructive) action is additionally
+    refused — code ``blast_radius`` on the CRUCIBLE leg — when its predicted INCREMENTAL blast radius
+    (the summed worth of the crown jewels it would NEWLY expose) exceeds a per-engagement ceiling.
+    The ceiling is ``blast_ceiling`` if the trusted caller passes one, else the engagement's own
+    ``targets/<slug>/impact.yaml`` (``blast_ceiling`` key); absent both the veto is DEFAULT-OFF and
+    every decision is byte-identical to before. It is armed ONLY for a destructive action and ONLY
+    when a world-model exists — a read (``destructive=False``) never resolves a ceiling, loads the
+    graph or builds a predictor, so the read hot path is untouched. ADVISORY and REFUSE-ONLY: it can
+    never promote, mints no FACT and is no oracle input; the predictor is a read-only forward query.
+    ``world_provider`` (a callable returning the WorldModel) is an injection seam for testing; by
+    default the engagement's signed spine at ``targets/<slug>/worldmodel-spine.json`` is projected.
     """
     if trust_root is None:
         raise ValueError(
@@ -158,9 +266,26 @@ def build_offense_gate(
                     return CrucibleResult(
                         allowed=False, reason=f"LIVE arm refused (M-11.1 hard precondition): {_att_reason}")
             req = ActionRequest(target=target_url, action_kind="offense", destructive=destructive)
+
+            # M4.2 pre-action blast-radius VETO — defense-in-depth, consulted BEFORE a
+            # CONSEQUENTIAL (destructive/state-changing) action ONLY. A read (destructive=False)
+            # never resolves a ceiling, never loads the world-model and never builds a predictor,
+            # so the read hot path pays NOTHING and stays byte-identical. The veto is armed only
+            # when a per-engagement ceiling is configured AND a world-model exists to reason over;
+            # otherwise both kwargs are None and authorize_action is byte-identical to before.
+            blast_fn = None
+            blast_ceil = None
+            if destructive:
+                blast_ceil = _effective_blast_ceiling(slug, blast_ceiling)
+                if blast_ceil is not None:
+                    blast_fn = _build_blast_radius_fn(slug, target_url, world_provider)
+                    if blast_fn is None:
+                        blast_ceil = None   # no world-model → leave the veto disarmed (not a refusal)
+
             decision = authorize_action(
                 authority, req, killswitch=killswitch, actions_taken=actions_taken,
                 now=_as_datetime(now),          # CRUCIBLE leg wants a datetime (or None)
+                blast_radius_fn=blast_fn, blast_ceiling=blast_ceil,
             )
             return CrucibleResult(allowed=bool(decision.allowed), reason=decision.reason)
 

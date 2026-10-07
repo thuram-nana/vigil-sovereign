@@ -11,6 +11,7 @@ from pathlib import Path
 
 from framework.v2.worldmodel.graph import WorldModel
 from framework.v2.worldmodel.impact import (
+    blast_ceiling_for_slug,
     ImpactModel,
     path_value,
     rank_choke_points,
@@ -77,6 +78,37 @@ def test_from_slug_loads_yaml_else_uniform(tmp_path, monkeypatch) -> None:
     assert m.impact_of(w.get_node("datastore:A")) == 20.0 and m.impact_of(w.get_node("datastore:B")) == 8.0
     # a slug with no impact.yaml → uniform, never raises
     assert ImpactModel.from_slug("nonexistent").impact_of(w.get_node("datastore:A")) == 1.0
+
+
+def test_blast_ceiling_for_slug_reads_impact_yaml_else_none(tmp_path, monkeypatch) -> None:
+    from framework.v2.common import paths
+    monkeypatch.setattr(paths, "target_dir", lambda s: tmp_path / s)
+
+    # no impact.yaml at all → None (veto default-off)
+    assert blast_ceiling_for_slug("nosuch") is None
+
+    # file present but no blast_ceiling key → None
+    (tmp_path / "a").mkdir(parents=True)
+    (tmp_path / "a" / "impact.yaml").write_text("default: 1.0\n", encoding="utf-8")
+    assert blast_ceiling_for_slug("a") is None
+
+    # a configured positive ceiling is read as a float
+    (tmp_path / "b").mkdir(parents=True)
+    (tmp_path / "b" / "impact.yaml").write_text("blast_ceiling: 250\n", encoding="utf-8")
+    assert blast_ceiling_for_slug("b") == 250.0
+
+    # a zero ceiling is honored (veto any incremental blast), a negative one degrades to None
+    (tmp_path / "c").mkdir(parents=True)
+    (tmp_path / "c" / "impact.yaml").write_text("blast_ceiling: 0\n", encoding="utf-8")
+    assert blast_ceiling_for_slug("c") == 0.0
+    (tmp_path / "d").mkdir(parents=True)
+    (tmp_path / "d" / "impact.yaml").write_text("blast_ceiling: -5\n", encoding="utf-8")
+    assert blast_ceiling_for_slug("d") is None
+
+    # a malformed file never raises → None
+    (tmp_path / "e").mkdir(parents=True)
+    (tmp_path / "e" / "impact.yaml").write_text("blast_ceiling: not-a-number\n", encoding="utf-8")
+    assert blast_ceiling_for_slug("e") is None
 
 
 # ---- impact-ranked choke points --------------------------------------------

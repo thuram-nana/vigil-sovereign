@@ -46,8 +46,42 @@ from typing import Any
 
 # The env var naming the operator's JSON policy document. Unset (the default) ⇒ the quorum is OFF
 # for every class ⇒ admission is byte-identical to today. The value is a filesystem path the operator
-# controls; the model never writes it. Kept here as the single source of truth for the config source.
+# controls (or the sentinel ``_DEFAULT_SENTINEL`` to select the SHIPPED default policy below); the
+# model never writes it. Kept here as the single source of truth for the config source.
 _CONFIG_ENV = "CRUCIBLE_WITNESS_QUORUM_CONFIG"
+
+# The sentinel value an operator sets ``CRUCIBLE_WITNESS_QUORUM_CONFIG`` to in order to activate the
+# SHIPPED default critical-class policy (:func:`default_critical_policy`) without authoring a file —
+# the committed, reviewed default. ANY other value is treated as a path to a JSON document, exactly as
+# before. The env-UNSET default stays DISABLED, so the no-config path is byte-identical.
+_DEFAULT_SENTINEL = "default"
+
+# ── the SHIPPED DEFAULT critical-class policy (Lane O / O4) ──────────────────────────────────────────────
+# The mechanism above was built but shipped with NO default policy (operators had to author their own
+# file), so in practice it stayed off everywhere. This is that default policy: the crown-jewel FACT
+# classes — remote code execution / template + expression injection / insecure deserialization, and
+# full-database / file disclosure (the SQLi family, XXE) — where a FALSE signed FACT is most damaging,
+# so a signed FACT must re-fire N-of-M INDEPENDENT oracle-witness kinds. Every class here maps to >= 2
+# DISTINCT oracle kinds (verifier.BUG_CLASS_ORACLES), so the quorum is a GENUINE, SATISFIABLE
+# corroboration bar — never a blanket suppression a single oracle could never clear.
+#
+# INVARIANTS kept: DEMOTE-ONLY (below quorum a would-be FACT is withheld as a LEAD; it NEVER promotes a
+# non-FACT, and is consulted only on a claim the oracle already confirmed — oracle stays sole mint
+# authority); OPERATOR-ACTIVATED, NOT ambient (env-unset ⇒ DISABLED ⇒ byte-identical; the single-scan
+# `make gate` benchmark does not read this policy at all, so its verdicts are unchanged whether the
+# default is active or not). Mirrored byte-for-byte by the committed ``witness_quorum.default.json``.
+_DEFAULT_QUORUM_N = 2
+DEFAULT_CRITICAL_CLASSES: tuple[str, ...] = (
+    "rce",
+    "command_injection",
+    "time_based_command_injection",
+    "ssti",
+    "el_injection",
+    "deserialization",
+    "sqli",
+    "error_based_sqli",
+    "xxe",
+)
 
 
 def _normalize(bug_class: str) -> str:
@@ -104,6 +138,20 @@ class WitnessQuorumConfig:
 DISABLED = WitnessQuorumConfig(enabled=False, quorum_n=2, critical_classes=frozenset())
 
 
+def default_critical_policy() -> WitnessQuorumConfig:
+    """The SHIPPED default critical-class quorum policy (Lane O / O4): ENABLED, N=2, over
+    :data:`DEFAULT_CRITICAL_CLASSES`. Built through :meth:`WitnessQuorumConfig.from_dict` so the classes
+    are normalised exactly as an operator file's would be. This is what the sentinel
+    ``CRUCIBLE_WITNESS_QUORUM_CONFIG=default`` resolves to, and what ``witness_quorum.default.json``
+    serialises. Activating it DEMOTES a crown-jewel FACT that re-fires fewer than 2 independent oracle
+    kinds to a LEAD; it never promotes, and env-unset still yields :data:`DISABLED` (byte-identical)."""
+    return WitnessQuorumConfig.from_dict({
+        "enabled": True,
+        "quorum_n": _DEFAULT_QUORUM_N,
+        "critical_classes": list(DEFAULT_CRITICAL_CLASSES),
+    })
+
+
 @lru_cache(maxsize=8)
 def _load_cached(path: str) -> WitnessQuorumConfig:
     """Read + parse one policy path, memoised (the policy is static for a process). A missing or
@@ -119,11 +167,15 @@ def _load_cached(path: str) -> WitnessQuorumConfig:
 
 
 def load_quorum_config() -> WitnessQuorumConfig:
-    """The ambient operator policy: the JSON document named by ``CRUCIBLE_WITNESS_QUORUM_CONFIG``.
-    Unset ⇒ :data:`DISABLED` (the default). This is what the mint choke and the firewall consult when
-    a caller passes no explicit config, so a single operator file reaches every admission + render
-    path, while leaving every default (no file) byte-identical."""
-    return _load_cached((os.environ.get(_CONFIG_ENV) or "").strip())
+    """The ambient operator policy: the JSON document named by ``CRUCIBLE_WITNESS_QUORUM_CONFIG`` — or,
+    when that env var is the sentinel ``"default"``, the SHIPPED :func:`default_critical_policy`. Unset ⇒
+    :data:`DISABLED` (the default). This is what the mint choke and the firewall consult when a caller
+    passes no explicit config, so a single operator selection reaches every admission + render path,
+    while leaving every default (env unset) byte-identical."""
+    raw = (os.environ.get(_CONFIG_ENV) or "").strip()
+    if raw.lower() == _DEFAULT_SENTINEL:
+        return default_critical_policy()
+    return _load_cached(raw)
 
 
 def resolve(config: "WitnessQuorumConfig | None") -> WitnessQuorumConfig:
