@@ -1,0 +1,75 @@
+{
+  "_type": "https://in-toto.io/Statement/v1",
+  "predicate": {
+    "buildDefinition": {
+      "buildType": "https://vigil.dev/provenance/zero-vigil-verifier/1",
+      "externalParameters": {
+        "attests": "The sha256 of each subject is the EXACT, audited content of that standalone, zero-VIGIL verifier. A third party re-hashes the file they downloaded and compares it to the pinned subject digest; a mismatch means the file is not the audited one.",
+        "verifier_roles": {
+          "docs/proof-carrying-finding/verify_pcf.py": "PCF v0.1 reference verifier \u2014 authenticity (m-of-n Ed25519) + binding + faithful projection + the out-of-band trust-root pin, over a proof bundle / certificate.",
+          "docs/proof-carrying-finding/verify_vf.py": "Verifiable-Fact lifecycle verifier \u2014 prove-certificate authenticity, attestation series, witnessed time bound, AND zero-VIGIL RE-EXECUTION of the pure oracle bodies (verdict re-derivation).",
+          "engine/crucible/framework/v2/evidence/audit_offline_verifier.py": "External-audit-package re-verifier (shipped verbatim as verify_offline.py) \u2014 authenticity + binding + artifact integrity + chain/anti-suppression + the out-of-band trust-root pin."
+        },
+        "zero_vigil_property": "Each subject imports NO framework/vigil/crucible/strix/gateway code \u2014 it runs with the Python standard library and one Ed25519 library (cryptography). This provenance file does NOT relax that; the drift test re-confirms it by AST over the import graph."
+      },
+      "resolvedDependencies": [
+        {
+          "annotations": {
+            "role": "PCF v0.1 wire spec the verifiers re-implement"
+          },
+          "uri": "docs/proof-carrying-finding/SPEC.md"
+        },
+        {
+          "annotations": {
+            "role": "Verifiable-Fact lifecycle protocol"
+          },
+          "uri": "docs/proof-carrying-finding/PROTOCOL.md"
+        },
+        {
+          "annotations": {
+            "role": "out-of-band publication of the trust-root fingerprint + pins"
+          },
+          "uri": "SECURITY.md"
+        },
+        {
+          "annotations": {
+            "role": "durable committed transparency record of the pins"
+          },
+          "uri": "docs/supply-chain/verifier-transparency.jsonl"
+        }
+      ]
+    },
+    "irreducible_boundary": {
+      "fixture_signing_key": "The default signing key is a deterministic, committed-public-seed FIXTURE key (non-governance), so CI is byte-stable with nothing provisioned. Published provenance re-signs with the operator's governance key (--signing-key; FATAL-2).",
+      "no_hardware_root": "Origin is anchored to an out-of-band-pinned Ed25519 trust root, NOT to a hardware root of trust (TEE) \u2014 see docs/limitations LIMIT-attest-tee-hardware.",
+      "not_an_external_certification": "This is certifiable-READY provenance (integrity + origin of the verifier bytes under a pinned trust root). It is NOT a Common-Criteria / FedRAMP / third-party certification; that requires an external accredited body (see docs/limitations LIMIT-external-audit-team)."
+    },
+    "runDetails": {
+      "builder": {
+        "id": "https://vigil.dev/eval/verifier_provenance",
+        "note": "deterministic: the statement is a pure function of the verifier bytes + committed spec references; mint is idempotent and byte-reproducible."
+      }
+    }
+  },
+  "predicateType": "https://slsa.dev/provenance/v1",
+  "subject": [
+    {
+      "digest": {
+        "sha256": "6984865c11ce421de34a5542c4e19a118ff90ad0b3c03ed6b19718fef640a2b6"
+      },
+      "name": "docs/proof-carrying-finding/verify_pcf.py"
+    },
+    {
+      "digest": {
+        "sha256": "bbbd5f8dee0e8281accd21ddb3315af988ef9e35b907958c5eefd4cc0b3da7cf"
+      },
+      "name": "docs/proof-carrying-finding/verify_vf.py"
+    },
+    {
+      "digest": {
+        "sha256": "32e134c20d60bb34b34ba4bf28dbdd959114d14d2366d5aadd364764681d9de6"
+      },
+      "name": "engine/crucible/framework/v2/evidence/audit_offline_verifier.py"
+    }
+  ]
+}
