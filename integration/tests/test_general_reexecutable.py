@@ -245,11 +245,23 @@ def test_verify_vf_is_zero_vigil():
 
 # ---- 5. HONEST BOUND: irreducible key reported, and the standalone CLI runs over a crafted ctx ---
 def test_irreducible_key_reported_not_faked():
-    # a FACT resting on a LIVE handshake (SERVICE_REACHABILITY) is IRREDUCIBLE — reported, never fired
-    res = VF.reexecute_general_oracle({"bug_class": "service_reachable", "handshake": {"banner": "x"}})
-    assert res["reproduced"] is False
-    assert "handshake" in res["unported_keys"]
-    assert res["fired"] is False
+    # After G1 the SERVICE_REACHABILITY handshake path is PORTED (re-derived over retained bytes), so the
+    # only genuinely-irreducible general keys left are version_advisory (packaging), saml_xml (signxml/
+    # lxml) and oob_hits (external collector). A FACT resting ONLY on one of those is REPORTED, never
+    # faked as reproduced.
+    for key, val in (("version_advisory", {"advisory": "x"}),
+                     ("saml_xml", "<samlp:Response/>"),
+                     ("oob_hits", [{"token": "t"}])):
+        res = VF.reexecute_general_oracle({"bug_class": "generic", key: val})
+        assert res["reproduced"] is False, (key, res)
+        assert key in res["unported_keys"], (key, res)
+        assert res["fired"] is False, (key, res)
+    # and a PORTED handshake re-derives standalone (no longer reported irreducible)
+    hs = VF.reexecute_general_oracle({"bug_class": "service_reachable",
+                                      "handshake": {"transport": "tcp", "port": 22, "connected": True,
+                                                    "banner": "SSH-2.0-OpenSSH"}})
+    assert "handshake" not in hs["unported_keys"]
+    assert hs["reproduced"] is True
 
 
 def test_standalone_cli_reexec_general(tmp_path):
@@ -293,8 +305,8 @@ _PORTED = [
     "sanitizer_signal_oracle", "system_prompt_disclosure_oracle", "prompt_injection_oracle",
     "sql_injection_breakout_oracle", "command_injection_breakout_oracle",
     "nosql_injection_breakout_oracle", "weak_crypto_artifact_oracle", "prototype_pollution_oracle",
-]
-_PURE_BUT_DEFERRED = [
+    # --- G1: the A-prime set Lane C left PURE-BUT-DEFERRED, now re-derived standalone (section 8c-G1).
+    #     Each is stdlib+cryptography-closure (asserted below) and byte-faithfully ported. ---
     "service_reachability_oracle", "tls_weakness_oracle", "anonymous_reachable_oracle",
     "dom_execution_oracle", "dom_execution_csp_bypass_oracle", "credential_stuffing_oracle",
     "honeypot_hit_oracle", "jwt_forgery_oracle", "static_rule_oracle", "session_fixation_oracle",
@@ -306,7 +318,13 @@ _PURE_BUT_DEFERRED = [
     # cryptography is the ONE non-stdlib dep this verifier already carries, so an oracle whose only
     # extra need is cryptography is PORTABLE (not irreducible): x509 cert parsing / key classification.
     "certificate_validity_oracle", "mobile_posture_oracle",
+    # credential_acceptance_oracle (M-11.3) — Lane C left it untracked; its closure is stdlib-only.
+    "credential_acceptance_oracle",
 ]
+# G1 completed the A-prime port: every formerly-deferred general oracle is now in _PORTED above, so
+# the PURE-BUT-DEFERRED residual is EMPTY. The only general oracles NOT re-derived standalone are the
+# three genuinely-irreducible ones (_IRREDUCIBLE below), whose import-closure needs a non-stdlib dep.
+_PURE_BUT_DEFERRED: list[str] = []
 # Genuinely irreducible-by-dependency: the body's import-closure needs a module NOT in
 # stdlib + cryptography — packaging (version_range), signxml/lxml (saml_forgery), or a framework
 # module backing an EXTERNAL collector's receipt crypto (oob_callback -> verify.oob).
@@ -366,3 +384,135 @@ def test_bucket_classification_is_enforced():
     # and none of the irreducibles were silently ported into verify_vf
     for name in _IRREDUCIBLE:
         assert not callable(getattr(VF, name, None)), f"{name} is irreducible but was ported — remove it"
+
+
+# ---- 7. G1 A-PRIME oracle-level parity battery + dispatch SOUND/FORGE ----------------------------
+# The battery (integration/tests/g1_aprime_battery.json) was HARVESTED by instrumenting the real
+# oracles while their existing unit-test suites ran (a crib, per the C1 lesson), capturing one FIRED
+# and one NON-FIRED real call per newly-ported A-prime family. Each entry asserts the standalone
+# kernel == the real framework oracle on BOTH (fired, conclusive) — the byte-faithful-port guarantee
+# proven over real retained evidence, independently of the AST byte-equality check.
+_BATTERY_PATH = Path(__file__).resolve().parent / "g1_aprime_battery.json"
+
+
+def _g1_decode(o):
+    if isinstance(o, dict):
+        if set(o) == {"__bytes__"}:
+            import base64
+            return base64.b64decode(o["__bytes__"])
+        if set(o) == {"__tuple__"}:
+            return tuple(_g1_decode(x) for x in o["__tuple__"])
+        if set(o) == {"__fset__"}:
+            return frozenset(_g1_decode(x) for x in o["__fset__"])
+        if set(o) == {"__set__"}:
+            return {_g1_decode(x) for x in o["__set__"]}
+        return {k: _g1_decode(v) for k, v in o.items()}
+    if isinstance(o, list):
+        return [_g1_decode(x) for x in o]
+    return o
+
+
+_G1_BATTERY = _g1_decode(json.loads(_BATTERY_PATH.read_text(encoding="utf-8")))
+
+# Every A-prime family must be present in the battery with BOTH a fired and a non-fired real case.
+_G1_FAMILIES = sorted(_G1_BATTERY)
+_G1_BATTERY_CASES = [(name, slot) for name in _G1_FAMILIES for slot in ("fire", "nofire")]
+
+
+def test_g1_battery_covers_every_ported_aprime_family():
+    # the ported A-prime oracle functions (the G1 block of _PORTED) all appear in the battery
+    aprime = set(_PORTED[17:])  # everything after the original Lane-C ports
+    covered = set(_G1_BATTERY)
+    # dom_execution_csp_bypass is exercised by the DOM battery entry under its own key
+    missing = aprime - covered
+    assert not missing, f"A-prime families with no parity battery case: {sorted(missing)}"
+    for name, slots in _G1_BATTERY.items():
+        assert slots.get("fire", {}).get("fired") is True, f"{name} battery has no genuine FIRED case"
+        assert slots.get("nofire", {}).get("fired") is False, f"{name} battery has no NON-FIRED case"
+
+
+@pytest.mark.parametrize("name,slot", _G1_BATTERY_CASES)
+def test_g1_kernel_matches_real_oracle(name, slot):
+    e = _G1_BATTERY[name][slot]
+    args, kw = e["args"], e["kwargs"]
+    real = getattr(O, name)(*args, **kw)
+    port = getattr(VF, name)(*args, **kw)
+    assert (port.fired, port.conclusive) == (real.fired, real.conclusive), (
+        name, slot, (real.fired, real.conclusive), (port.fired, port.conclusive))
+    # the captured verdict must also match (guards against battery drift)
+    assert (port.fired, port.conclusive) == (e["fired"], e["conclusive"]), (name, slot)
+
+
+# dispatch SOUND + FORGE-A-FALSE for every A-prime family: build the verifier-context the family's
+# retained evidence occupies (mirroring verifier._run's ctx keys), and assert the standalone dispatch
+# re-derives a POSITIVE over the real fire evidence and REFUSES the non-firing (tampered-benign) copy.
+_G1_SINGLE_KEY = {
+    "service_reachability_oracle": "handshake", "anonymous_reachable_oracle": "anon_get",
+    "tls_weakness_oracle": "tls", "certificate_validity_oracle": "cert_validity",
+    "credential_acceptance_oracle": "credential_acceptance", "csp_posture_oracle": "csp_control",
+    "mobile_posture_oracle": "mobile_control", "email_auth_posture_oracle": "email_auth_control",
+    "identity_posture_oracle": "identity_control", "imds_credential_capture_oracle": "imds_capture",
+    "exposed_secret_validity_oracle": "secret_capture",
+    "gcp_sa_impersonation_oracle": "gcp_impersonation_capture",
+    "iam_escalation_oracle": "iam_escalation_capture",
+    "k8s_rbac_verb_grant_oracle": "k8s_rbac_grant_control",
+    "clickjacking_posture_oracle": "clickjacking_control", "csrf_posture_oracle": "csrf_control",
+    "postmessage_posture_oracle": "postmessage_control", "static_rule_oracle": "static_rule",
+    "session_fixation_oracle": "session_fixation", "mfa_bypass_oracle": "mfa_bypass",
+    "password_reset_invariant_oracle": "password_reset_invariant",
+    "csrf_achieved_oracle": "csrf_achieved", "workflow_abuse_oracle": "workflow_abuse",
+}
+
+
+def _g1_build_ctx(name, e):
+    a, kw = e["args"], e["kwargs"]
+    if name in _G1_SINGLE_KEY:
+        return {_G1_SINGLE_KEY[name]: a[0]}
+    if name == "honeypot_hit_oracle":
+        return {"requested_path": a[0], "honeypot_paths": a[1],
+                "crawler_allowlisted": bool(kw.get("crawler_allowlisted", False))}
+    if name == "credential_stuffing_oracle":
+        c = {"auth_events": a[0]}
+        if kw.get("benign_sources") is not None:
+            c["benign_sources"] = kw["benign_sources"]
+        for k in ("alpha", "beta", "p1", "p0", "fwer"):
+            if k in kw:
+                c[f"credstuff_{k}"] = kw[k]
+        return c
+    if name == "jwt_forgery_oracle":
+        c = {"jwt_token": a[0]}
+        if kw.get("candidate_keys"):
+            c["jwt_candidate_keys"] = kw["candidate_keys"]
+        return c
+    if name == "dom_execution_oracle":
+        return {"dom_binding_calls": a[0], "dom_canary": a[1]}
+    if name == "dom_execution_csp_bypass_oracle":
+        return {"dom_binding_calls": a[0], "dom_canary": a[1], "csp_block_control": a[2]}
+    raise KeyError(name)
+
+
+@pytest.mark.parametrize("name", _G1_FAMILIES)
+def test_g1_dispatch_sound_and_forged_refused(name):
+    fire_ctx = _g1_build_ctx(name, _G1_BATTERY[name]["fire"])
+    benign_ctx = _g1_build_ctx(name, _G1_BATTERY[name]["nofire"])
+    rf = VF.reexecute_general_oracle(fire_ctx)
+    rn = VF.reexecute_general_oracle(benign_ctx)
+    assert rf["reproduced"] is True, (name, rf)      # a ported oracle re-fired over the retained keys
+    assert rf["fired"] is True, (name, rf)           # SOUND: real evidence re-derives a positive
+    assert rn["fired"] is False, (name, rn)          # FORGE-A-FALSE: tampered-benign copy is REFUSED
+
+
+def test_g1_dispatch_standalone_cli_over_crafted_cert(tmp_path):
+    """The standalone CLI re-derives a ported A-prime family (certificate_validity) over a retained
+    context with the framework PYTHONPATH stripped (structural zero-VIGIL is proven separately)."""
+    import os
+    e = _G1_BATTERY["certificate_validity_oracle"]["fire"]
+    oc = {"bug_class": "weak_tls_or_cert", "cert_validity": e["args"][0]}
+    p = tmp_path / "cert_ctx.json"
+    p.write_text(json.dumps(oc), encoding="utf-8")
+    env = {k: v for k, v in os.environ.items() if k != "PYTHONPATH" and not k.startswith("CRUCIBLE_")}
+    r = subprocess.run([sys.executable, str(_VERIFY_VF), "reexec-general", "--context", str(p)],
+                       capture_output=True, text=True, env=env, cwd=str(tmp_path))
+    assert r.returncode == 0, r.stdout + r.stderr
+    out = r.stdout + r.stderr
+    assert "certificate_validity" in out and "RE-DERIVED" in out
