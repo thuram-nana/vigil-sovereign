@@ -25,7 +25,12 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from vigil_integration.conjunctive_gate import build_offense_gate
+# Two-env boundary: the fixtures import framework.v2.authority (the offense engine) to drive the REAL
+# authorize_action + blast-radius math, so these tests RUN in the offense CI leg (engine/crucible on
+# PYTHONPATH) and SKIP cleanly in the keyless boundary leg where framework is intentionally absent.
+pytest.importorskip("framework.v2")
+
+from vigil_integration.conjunctive_gate import build_offense_gate  # noqa: E402
 
 _NOW = datetime(2026, 6, 1, 12, 0, tzinfo=timezone.utc)
 
