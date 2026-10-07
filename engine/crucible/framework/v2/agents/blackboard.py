@@ -532,6 +532,7 @@ class Blackboard:
         agent: str | None = None,
         parent_id: int | None = None,
         since_id: int = 0,
+        until_id: int | None = None,
         include_superseded: bool = False,
         limit: int = 1000,
     ) -> list[BlackboardEventRow]:
@@ -541,7 +542,13 @@ class Blackboard:
         ``idx_events_parent`` index, so a consumer that wants only the events posted ABOUT a
         given event (e.g. the critic verdicts on a finding) reads O(children) rows instead of
         scanning every event of that kind and filtering in Python. Additive: ``None`` (default)
-        yields the identical query as before."""
+        yields the identical query as before.
+
+        ``until_id`` (R2) sets an INCLUSIVE upper id bound (``e.id <= until_id``). ``None``
+        (default) leaves the query unchanged. It lets a reader pin a consistent id snapshot so a
+        concurrent append (which necessarily gets a higher id) is excluded — the companion to the
+        ``since_id`` lower bound. ``until_id=0`` is honoured literally (bounds to the empty set),
+        so a caller may pass a pinned max id of 0 for an empty log without an unbounded read."""
         eid = engagement if isinstance(engagement, int) else self.engagement_id(engagement, create=False)
 
         sql = ["SELECT e.* FROM events e"]
@@ -560,6 +567,9 @@ class Blackboard:
         if since_id > 0:
             sql.append("AND e.id > ?")
             params.append(since_id)
+        if until_id is not None:
+            sql.append("AND e.id <= ?")
+            params.append(until_id)
         if kinds:
             placeholders = ",".join("?" * len(list(kinds)))
             sql.append(f"AND e.kind IN ({placeholders})")
@@ -603,18 +613,23 @@ class Blackboard:
 
     def count(
         self, *, engagement: str | int, kind: EventKind | None = None,
+        until_id: int | None = None,
     ) -> int:
+        """Count events for an engagement. ``until_id`` (R2) sets an INCLUSIVE upper id bound
+        (``id <= until_id``), the same consistent-snapshot bound ``read`` takes, so a count and a
+        paged read pinned to the same max id observe the same event set regardless of concurrent
+        appends. ``None`` (default) counts the whole log, unchanged; ``until_id=0`` counts the
+        empty set."""
         eid = engagement if isinstance(engagement, int) else self.engagement_id(engagement, create=False)
-        if kind is None:
-            row = self._conn.execute(
-                "SELECT COUNT(*) AS c FROM events WHERE engagement_id = ?", (eid,),
-            ).fetchone()
-        else:
-            row = self._conn.execute(
-                "SELECT COUNT(*) AS c FROM events "
-                "WHERE engagement_id = ? AND kind = ?",
-                (eid, kind),
-            ).fetchone()
+        sql = ["SELECT COUNT(*) AS c FROM events WHERE engagement_id = ?"]
+        params: list[Any] = [eid]
+        if kind is not None:
+            sql.append("AND kind = ?")
+            params.append(kind)
+        if until_id is not None:
+            sql.append("AND id <= ?")
+            params.append(until_id)
+        row = self._conn.execute(" ".join(sql), tuple(params)).fetchone()
         return int(row["c"])
 
     def latest_event_id(self, *, engagement: str | int) -> int:

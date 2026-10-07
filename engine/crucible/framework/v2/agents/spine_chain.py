@@ -55,25 +55,35 @@ def _events(bb: Blackboard, engagement: str | int) -> list[BlackboardEventRow]:
     """The FULL immutable history for an engagement in id (logical-clock) order — including
     superseded rows, because they are part of the append-only log and the chain covers them.
 
-    Pages ``replay`` to exhaustion (its default limit would silently truncate a large log,
-    leaving the tail unanchored) and FAILS CLOSED: if the fetched count does not equal the
-    live event count, it raises rather than anchor/verify a partial log."""
+    Pins a CONSISTENT id snapshot (``max_id`` = the latest event id at entry) and bounds BOTH
+    the paged read and the completeness count to it. This gives the completeness check a single
+    atomic reference: a concurrent append necessarily gets a HIGHER id, so it is excluded from
+    both the read and the count, and cannot make them disagree — closing the benign-append race
+    that otherwise raised a spurious "incomplete spine read" (a false tamper verdict).
+
+    Pages the read to exhaustion (the default limit would silently truncate a large log, leaving
+    the tail unanchored) and FAILS CLOSED: if the fetched count does not equal the live event
+    count — both pinned to ``max_id`` — it raises rather than anchor/verify a partial log. A REAL
+    tamper is unaffected: any event with ``id <= max_id`` is fully inside the snapshot, so a
+    deleted/altered/reordered row within it is still caught (here, or by the digest comparison in
+    ``verify_spine_chain`` / ``verify_spine_head``)."""
+    max_id = bb.latest_event_id(engagement=engagement)   # pin the snapshot BEFORE reading
     out: list[BlackboardEventRow] = []
     since = 0
     while True:
-        batch = bb.replay(engagement=engagement, since_id=since,
-                          include_superseded=True, limit=_PAGE)
+        batch = bb.read(engagement=engagement, since_id=since, until_id=max_id,
+                        include_superseded=True, limit=_PAGE)
         if not batch:
             break
         out.extend(batch)
         since = batch[-1].id
         if len(batch) < _PAGE:
             break
-    total = bb.count(engagement=engagement)
+    total = bb.count(engagement=engagement, until_id=max_id)
     if len(out) != total:
         raise SpineChainError(
-            f"incomplete spine read: fetched {len(out)} of {total} events — refusing to "
-            f"anchor/verify a truncated log")
+            f"incomplete spine read: fetched {len(out)} of {total} events (snapshot id "
+            f"<= {max_id}) — refusing to anchor/verify a truncated log")
     return out
 
 
