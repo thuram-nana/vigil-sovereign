@@ -53,6 +53,30 @@
       }
     },
     {
+      "default": "off",
+      "enforced_by": {
+        "file": "engine/crucible/framework/v2/authority/witness_quorum_gate.py",
+        "symbol": "witness_quorum_predicate"
+      },
+      "failure_class": "n-a",
+      "id": "M4-4-witness-quorum",
+      "objective": "SO-AUTHZ",
+      "title": "The optional witness-quorum conjunct (6c) is the authority gate's default-off, demote-only veto",
+      "verifier": {
+        "ci_job": "CRUCIBLE core on vigil_core",
+        "kind": "required-ci-proof",
+        "proving_tests": {
+          "file": "engine/crucible/framework/v2/authority/tests/test_witness_quorum_veto.py",
+          "tests": [
+            "test_veto_denies_an_applicable_under_quorum_action",
+            "test_veto_allows_a_satisfied_quorum",
+            "test_blast_veto_wins_before_the_witness_quorum_is_consulted",
+            "test_passing_none_kwargs_is_byte_identical_to_omitting_them"
+          ]
+        }
+      }
+    },
+    {
       "default": "on",
       "enforced_by": {
         "file": "engine/crucible/framework/v2/console/actions.py",
@@ -3500,9 +3524,10 @@
   "security_objectives": [
     {
       "cc_family": "FDP_ACC / FIA_UAU (access control, authentication of actors)",
-      "claim_count": 40,
+      "claim_count": 41,
       "claims": [
         "COV-W6-ZEROFP",
+        "M4-4-witness-quorum",
         "PHASE0-1",
         "PHASE0-2",
         "PHASE1-1",
@@ -3603,7 +3628,8 @@
         "LIMIT-spine-seal-at-capture",
         "LIMIT-symbolic-crash-repair",
         "LIMIT-target-authz-owner-anchor-writable",
-        "LIMIT-tls-certificate-validity-unwired"
+        "LIMIT-tls-certificate-validity-unwired",
+        "LIMIT-witness-quorum-action-gate-default-off"
       ]
     },
     {
@@ -3671,6 +3697,7 @@
       "objective": "Signing keys are handled fail-closed (hardware backend, m-of-n quorum, escrow at threshold, crypto-shred erasure); keys are passed in, never provisioned by the tool (FATAL-2).",
       "residual_limitations": [
         "LIMIT-attest-tee-hardware",
+        "LIMIT-capture-attestation-offense-plane",
         "LIMIT-evidence-producer-refs-unique"
       ]
     },
