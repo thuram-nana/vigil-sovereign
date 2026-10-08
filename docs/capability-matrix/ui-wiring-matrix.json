@@ -305,12 +305,12 @@
       "pending": 1,
       "ui-driven": 39
     },
-    "routes": 181,
+    "routes": 187,
     "routes_by_status": {
       "ORPHAN": 0,
       "headless": 27,
       "pending": 4,
-      "ui-driven": 150
+      "ui-driven": 156
     },
     "ui_calls": 150
   },
@@ -493,8 +493,32 @@
     },
     {
       "kind": "exact",
+      "method": "POST",
+      "path": "/api/ceremonies/mesh/authorize",
+      "plane": "sovereign",
+      "reason": "",
+      "status": "ui-driven"
+    },
+    {
+      "kind": "exact",
       "method": "GET",
       "path": "/api/ceremonies/mesh/devices",
+      "plane": "sovereign",
+      "reason": "",
+      "status": "ui-driven"
+    },
+    {
+      "kind": "exact",
+      "method": "POST",
+      "path": "/api/ceremonies/mesh/fingerprint",
+      "plane": "sovereign",
+      "reason": "",
+      "status": "ui-driven"
+    },
+    {
+      "kind": "exact",
+      "method": "POST",
+      "path": "/api/ceremonies/mesh/revoke",
       "plane": "sovereign",
       "reason": "",
       "status": "ui-driven"
@@ -559,6 +583,30 @@
       "kind": "prefix",
       "method": "POST",
       "path": "/api/hostcmd/",
+      "plane": "sovereign",
+      "reason": "",
+      "status": "ui-driven"
+    },
+    {
+      "kind": "exact",
+      "method": "POST",
+      "path": "/api/hostcmd/consolidate",
+      "plane": "sovereign",
+      "reason": "",
+      "status": "ui-driven"
+    },
+    {
+      "kind": "exact",
+      "method": "POST",
+      "path": "/api/hostcmd/index",
+      "plane": "sovereign",
+      "reason": "",
+      "status": "ui-driven"
+    },
+    {
+      "kind": "exact",
+      "method": "POST",
+      "path": "/api/hostcmd/ingest",
       "plane": "sovereign",
       "reason": "",
       "status": "ui-driven"

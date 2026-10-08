@@ -19,7 +19,11 @@ What it does:
         * sigil    (apps/sigil/sigil/ui/server.py):  the inline _do_GET/_do_POST ``path ==`` /
           ``startswith`` / ``path in (...)`` strings, the _BODY_PATHS ceremony set, the local
           _DESTRUCTIVE / _READS ceremony dicts, AND the ``POST /api/action`` funnel's CLOSED verb set
-          (apps/sigil/sigil/ui/actions.py ``ACTIONS``).
+          (apps/sigil/sigil/ui/actions.py ``ACTIONS``). Three of those ``startswith`` forms are CLOSED
+          dispatch guards (``/api/ceremonies/``, ``/api/ceremonies/mesh/``, ``/api/hostcmd/`` — unknown
+          member -> 404, NOT catch-alls): their exact members are enumerated from source (the bare
+          _BODY_PATHS tuple + the cross-file ``_HOST_VERBS`` allowlist in .../ui/hostcmd.py) so a UI call
+          to a NON-member under one of them is a DEAD BUTTON, not a prefix-swallowed false-green.
         * gated-api (engine/crucible/framework/v2/api/server.py):  _EXACT_GET / _PREFIX_GET  +  the
           inline do_GET/do_POST ``f"{_API}/..."`` strings.
       The uiproxy's own plane-local routes (/__vigil/plane/*) are read from
@@ -68,6 +72,7 @@ UIPROXY = ROOT / "integration" / "vigil_integration" / "uiproxy.py"
 CONSOLE = ROOT / "engine" / "crucible" / "framework" / "v2" / "console" / "server.py"
 SIGIL = ROOT / "apps" / "sigil" / "sigil" / "ui" / "server.py"
 SIGIL_ACTIONS = ROOT / "apps" / "sigil" / "sigil" / "ui" / "actions.py"
+SIGIL_HOSTCMD = ROOT / "apps" / "sigil" / "sigil" / "ui" / "hostcmd.py"   # the /api/hostcmd/<verb> allowlist
 GATED = ROOT / "engine" / "crucible" / "framework" / "v2" / "api" / "server.py"
 MATRIX = ROOT / "docs" / "capability-matrix" / "ui-wiring-matrix.json"
 
@@ -367,12 +372,81 @@ def extract_action_verbs(src: str):
 
 
 # ==================================================================================================
+# CLOSED dispatch-guard prefixes
+# --------------------------------------------------------------------------------------------------
+# A ``path.startswith("X")`` is turned into a PREFIX route by extract_backend_routes, and by default a
+# prefix route resolves ANY UI call that merely starts with it. That is correct for an ARG-BEARING
+# prefix (``/api/report/<run>``, ``/api/coverage/<slug>``, ``/api/record/<seq>`` — a real catch-all).
+# It is WRONG for a CLOSED dispatch guard: a ``startswith`` that fronts an EXACT-match set where an
+# unknown member returns 404. For those, a UI call to a bogus member is a DEAD BUTTON, not a live route,
+# and letting the prefix swallow it false-greens the guard. The sigil cockpit has exactly three:
+#
+#   apps/sigil/sigil/ui/server.py
+#     ~1234  if path.startswith("/api/ceremonies/")       -> _ceremonies_post; "dispatch is a CLOSED
+#            exact-match set of ceremony paths (unknown -> 404)" (zero-arg POSTs + the _BODY_PATHS tuple
+#            + the _DESTRUCTIVE dict + the GET reads); a non-member hits the trailing ``return 404``.
+#     ~1356  if path.startswith("/api/ceremonies/mesh/")  -> the closed {fingerprint,authorize,revoke}
+#            (+ GET /api/ceremonies/mesh/devices) mesh set, nested under the above.
+#     ~1239  if path.startswith("/api/hostcmd/")          -> _hostcmd_post; the verb (path tail) is
+#            validated against the FIXED _HOST_VERBS allowlist in .../ui/hostcmd.py ("unknown host verb").
+#
+# A UI call UNDER one of these prefixes resolves ONLY if it exactly matches an enumerated member. The
+# members are PARSED FROM SOURCE (extract_sigil_closed_members), so adding/removing one is still
+# drift-caught; this constant only names WHICH prefixes are closed (staleness-checked below).
+# ==================================================================================================
+CLOSED_PREFIXES = {
+    P_SOV: frozenset({"/api/ceremonies/", "/api/ceremonies/mesh/", "/api/hostcmd/"}),
+}
+
+
+def _hostcmd_verbs(hostcmd_src: str):
+    """The sigil host-op broker's CLOSED verb set: the KEYS of ``_HOST_VERBS`` in .../ui/hostcmd.py.
+
+    Each key ``V`` is a live ``POST /api/hostcmd/V`` (the route tail is matched against this allowlist;
+    anything else is refused). The frozenset VALUES (flag names) are deliberately NOT collected — only a
+    dict key (a string literal immediately followed by ``:``) is a verb."""
+    m = re.search(r'_HOST_VERBS[^=\n]*=\s*\{(.*?)\n\}', hostcmd_src, re.DOTALL)
+    if not m:
+        return set()
+    return set(re.findall(r'^\s*"([a-z][a-z0-9_-]*)"\s*:', m.group(1), re.MULTILINE))
+
+
+_BODY_PATHS_RX = re.compile(r'_BODY_PATHS\s*=\s*\((.*?)\)', re.DOTALL)
+
+
+def extract_sigil_closed_members(server_src: str, hostcmd_src: str):
+    """Enumerate the EXACT members of the sigil CLOSED dispatch-guard namespaces, PARSED from source.
+
+    Returns ``{path: method}``. These are the members the generic extractor CANNOT see because they are
+    not in a ``path ==`` / ``path in (...)`` / dict-key form:
+
+      * the ceremony POSTs in the bare ``_BODY_PATHS`` tuple — notably ``/api/ceremonies/mesh/{finger
+        print,authorize,revoke}``, which exist ONLY in that tuple (dispatched by ``endswith`` suffixes);
+      * the ``/api/hostcmd/<verb>`` POSTs, whose verb set lives in a DIFFERENT file (``_HOST_VERBS``).
+
+    (The zero-arg ceremony POSTs, the _DESTRUCTIVE dict, and the GET ceremony/hostcmd reads are already
+    captured from their ``path ==`` / ``path in (...)`` / dict-key forms by extract_backend_routes, so
+    they are not re-listed here — parsing the authoritative construct once keeps drift-detection intact.)
+    """
+    members = {}
+    m = _BODY_PATHS_RX.search(server_src)
+    if m:
+        for lit in re.findall(r'"(/api/[^"]+)"', m.group(1)):
+            members[_strip_query(lit)] = "POST"
+    for verb in _hostcmd_verbs(hostcmd_src):
+        members["/api/hostcmd/" + verb] = "POST"
+    return members
+
+
+# ==================================================================================================
 # Resolution (PATH-based)
 # ==================================================================================================
-def _path_match(upath: str, rpath: str, rprefix: bool) -> bool:
+def _path_match(upath: str, rpath: str, rprefix: bool, rclosed: bool = False) -> bool:
     if upath == rpath:
         return True
-    if rprefix and upath.startswith(rpath):
+    # A CLOSED dispatch-guard prefix never resolves a call by mere startswith — only an exact member
+    # (handled by the ``upath == rpath`` branch against the enumerated member routes) is live under it.
+    if rprefix and not rclosed and upath.startswith(rpath):
         return True
     # the UI passed a prefix literal (ends "/") and the route is a leaf under it
     if upath.endswith("/") and rpath.startswith(upath):
@@ -385,8 +459,10 @@ def _ui_resolves(call, routes_by_plane, prefix_by_plane):
     up, upath = call["plane"], call["path"]
     planes = routes_by_plane.keys() if up == "?" else [up]
     for pl in planes:
+        closed = CLOSED_PREFIXES.get(pl, frozenset())
         for rpath, meta in routes_by_plane.get(pl, {}).items():
-            if _path_match(upath, rpath, meta["kind"] == "prefix"):
+            rprefix = meta["kind"] == "prefix"
+            if _path_match(upath, rpath, rprefix, rclosed=(rprefix and rpath in closed)):
                 return True
     return False
 
@@ -415,7 +491,15 @@ def build_model():
     ui_inline_verbs, ui_all_verbs, ui_prefix_verbs = extract_ui_action_verbs(app_src)
 
     console_routes, _cp = extract_backend_routes(CONSOLE.read_text(encoding="utf-8", errors="replace"), P_CONSOLE)
-    sigil_routes, _sp = extract_backend_routes(SIGIL.read_text(encoding="utf-8", errors="replace"), P_SOV)
+    sigil_src = SIGIL.read_text(encoding="utf-8", errors="replace")
+    sigil_routes, _sp = extract_backend_routes(sigil_src, P_SOV)
+    # Enumerate the CLOSED dispatch-guard members the generic extractor can't see (the bare _BODY_PATHS
+    # tuple + the cross-file _HOST_VERBS allowlist) as EXACT routes, so a non-member under a CLOSED prefix
+    # is a DEAD BUTTON rather than being swallowed by the prefix. setdefault never downgrades a member the
+    # generic pass already registered (keeps its method/kind); it only ADDS the ones it missed.
+    hostcmd_src = SIGIL_HOSTCMD.read_text(encoding="utf-8", errors="replace")
+    for _mpath, _mmethod in extract_sigil_closed_members(sigil_src, hostcmd_src).items():
+        sigil_routes.setdefault(_mpath, {"method": _mmethod, "kind": "exact"})
     gated_routes, _gp = extract_backend_routes(GATED.read_text(encoding="utf-8", errors="replace"), P_API)
     plane_routes = extract_plane_routes(UIPROXY.read_text(encoding="utf-8", errors="replace"))
     action_verbs = extract_action_verbs(SIGIL_ACTIONS.read_text(encoding="utf-8", errors="replace"))
@@ -524,7 +608,7 @@ def build_matrix(model):
 # ==================================================================================================
 class TestSourcesPresent(unittest.TestCase):
     def test_all_sources_exist(self):
-        for p in (APP_JS, UIPROXY, CONSOLE, SIGIL, SIGIL_ACTIONS, GATED):
+        for p in (APP_JS, UIPROXY, CONSOLE, SIGIL, SIGIL_ACTIONS, SIGIL_HOSTCMD, GATED):
             self.assertTrue(p.is_file(), f"missing source the guard parses: {p}")
 
 
@@ -596,6 +680,14 @@ class TestNoOrphanRoutes(unittest.TestCase):
             self.assertIn(v, m["action_verbs"], f"stale headless verb (verb gone): {v}")
         for v in PENDING_UI_WIRING_VERBS:
             self.assertIn(v, m["action_verbs"], f"stale pending verb (verb gone): {v}")
+        # A CLOSED_PREFIXES entry that is no longer a registered prefix route is drift too: either the
+        # guard moved (closedness now unenforced) or the name rotted. Keep the constant honest.
+        for pl, prefs in CLOSED_PREFIXES.items():
+            for pre in prefs:
+                meta = m["routes_by_plane"][pl].get(pre)
+                self.assertIsNotNone(meta, f"stale CLOSED_PREFIXES entry (prefix route gone): {(pl, pre)}")
+                self.assertEqual(meta["kind"], "prefix",
+                                 f"CLOSED_PREFIXES entry is not a prefix route anymore: {(pl, pre)}")
 
 
 class TestMatrixArtifactInSync(unittest.TestCase):
@@ -647,6 +739,51 @@ class TestGuardSelfTest(unittest.TestCase):
         # a planted verb that is in neither the UI nor any allowlist is an ORPHAN verb
         vstatus, _ = verb_status("__planted_orphan_verb__", m["ui_all_verbs"], m["ui_prefix_verbs"])
         self.assertEqual(vstatus, "ORPHAN", "guard FAILED to flag a planted un-allowlisted orphan verb")
+
+    def test_selftest_closed_set_guards_catch_fake_members(self):
+        """RED-PEN FIX: a non-member under a CLOSED dispatch-guard prefix is a DEAD BUTTON; real members
+        still resolve. Before the fix, extract_backend_routes turned ``startswith("/api/ceremonies/")``
+        (and mesh/, hostcmd/) into catch-all PREFIX routes, so a bogus member false-greened as a live
+        route — defeating dead-button detection for the three CLOSED exact-match namespaces."""
+        m = build_model()
+        rbp, pbp = m["routes_by_plane"], m["prefix_by_plane"]
+
+        # (1) planted NON-members, fed through the REAL UI extractor, MUST be flagged dead buttons.
+        for fake in ("/api/ceremonies/__planted_fake_ceremony__",
+                     "/api/ceremonies/mesh/__planted_fake_mesh__",
+                     "/api/hostcmd/__fake__"):
+            planted = extract_ui_calls(f'V.postJSON(SOV("{fake}"), {{}});')
+            self.assertEqual([c["path"] for c in planted], [fake])
+            dead = [c["path"] for c in planted if not _ui_resolves(c, rbp, pbp)]
+            self.assertEqual(dead, [fake],
+                             f"CLOSED-SET HOLE: non-member {fake} false-greened as a live route")
+
+        # (2) real enumerated members MUST still resolve (the guard is not just rejecting the namespace).
+        #     mesh/authorize is a BARE literal in app.js (plane '?'), like meshAct(path) — prove that too.
+        for real in ('V.postJSON(SOV("/api/ceremonies/vault-provision"), {});',
+                     'V.getJSON(SOV("/api/ceremonies/eval-grant/status"));',
+                     'V.getJSON(SOV("/api/hostcmd/runs"));',
+                     'meshAct("/api/ceremonies/mesh/authorize");'):
+            calls = extract_ui_calls(real)
+            self.assertTrue(calls, f"fixture produced no UI call: {real!r}")
+            dead = [c["path"] for c in calls if not _ui_resolves(c, rbp, pbp)]
+            self.assertEqual(dead, [], f"real closed-set member wrongly flagged dead: {dead}")
+
+        # (3) the three mesh ceremonies live ONLY in the bare _BODY_PATHS tuple (NO per-endpoint route
+        #     existed before the fix); the /api/hostcmd/<verb> set lives in a DIFFERENT file. Prove all
+        #     were parsed from source into EXACT routes.
+        for mem in ("/api/ceremonies/mesh/fingerprint", "/api/ceremonies/mesh/authorize",
+                    "/api/ceremonies/mesh/revoke", "/api/hostcmd/index",
+                    "/api/hostcmd/ingest", "/api/hostcmd/consolidate"):
+            self.assertIn(mem, rbp[P_SOV], f"closed-set member not enumerated as a route: {mem}")
+            self.assertEqual(rbp[P_SOV][mem]["kind"], "exact", f"member should be an EXACT route: {mem}")
+
+        # (4) the enumerators actually parsed source (a silently-empty set would vacuously pass (1)).
+        members = extract_sigil_closed_members(SIGIL.read_text(encoding="utf-8", errors="replace"),
+                                               SIGIL_HOSTCMD.read_text(encoding="utf-8", errors="replace"))
+        self.assertIn("/api/ceremonies/mesh/authorize", members)
+        self.assertEqual(_hostcmd_verbs(SIGIL_HOSTCMD.read_text(encoding="utf-8", errors="replace")),
+                         {"index", "ingest", "consolidate"})
 
 
 if __name__ == "__main__":
