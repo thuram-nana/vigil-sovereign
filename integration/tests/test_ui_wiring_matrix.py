@@ -129,20 +129,12 @@ INTENTIONALLY_HEADLESS_VERBS = {
 }
 
 # ==================================================================================================
-# PENDING_UI_WIRING  — registered routes/verbs that WILL be UI-driven; slice 1.3 is adding the caller.
+# PENDING_UI_WIRING  — registered routes/verbs WIRED in-flight (a caller is being added), so UI-driven
 # These are NOT headless: they are treated as UI-driven (post-merge). Tracked separately so the ledger
 # never mislabels an in-flight wiring as "intentionally no button".
 # ==================================================================================================
-_SLICE13 = "slice 1.3 adds the UI caller — UI-driven post-merge, not headless"
-PENDING_UI_WIRING = {
-    (P_SOV, "/api/ceremonies/eval-grant/status"): _SLICE13,
-    (P_SOV, "/api/ceremonies/eval-grant/arm"): _SLICE13,
-    (P_SOV, "/api/ceremonies/eval-grant/revoke"): _SLICE13,
-    (P_SOV, "/api/logout"): _SLICE13,
-}
-PENDING_UI_WIRING_VERBS = {
-    "revoke_webauthn": _SLICE13,
-}
+PENDING_UI_WIRING = {}
+PENDING_UI_WIRING_VERBS = {}
 
 
 # ==================================================================================================
