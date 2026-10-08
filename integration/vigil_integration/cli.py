@@ -2445,6 +2445,27 @@ def _cmd_codescan(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_deploy_acceptance(args: argparse.Namespace) -> int:
+    """WS4 — run the per-VM PRODUCTION ACCEPTANCE HARNESS and surface its exit code (a convenience wrapper
+    around ``vigil_integration.sovereign_deploy.acceptance``, the self-test a freshly provisioned box runs
+    BEFORE handover). It drives the REAL pipeline against the BUNDLED controlled loopback target (MERIDIAN,
+    default :19010 — NEVER external) and applies the harness's own fail-closed verdict UNCHANGED: every
+    required check PASS -> exit 0 (handover-ready); ANY check FAIL, or a REQUIRED check NOT-RUN -> non-zero
+    (handover BLOCKED). This wrapper weakens nothing — a missing prerequisite (no ANTHROPIC_API_KEY, the
+    range down, AEGIS_RESPOND un-entitled) stays a BLOCK, never a skip.
+
+    FATAL-2: the acceptance module is imported FUNCTION-LOCAL here and is itself import-clean (every
+    ``framework`` import inside it is function-local), so this verb never pulls the engine into module load
+    and never widens the two-env boundary."""
+    from .sovereign_deploy.acceptance import AcceptanceConfig, render_report, run_acceptance
+
+    cfg = AcceptanceConfig(target_host=args.target_host, target_port=args.target_port,
+                           workspace=args.workspace)
+    results, rc = run_acceptance(cfg)
+    print(render_report(results))
+    return rc
+
+
 def _deep_fix_one(finding: Any, args: argparse.Namespace) -> Any:
     """Run the gated deep-fix ladder for ONE finding on its own disposable clone (repo-aware context + real-
     test gate + oracle re-verify), NEVER opening a PR. Returns the PatchResult. Reuses the exact same
@@ -4802,6 +4823,17 @@ def build_parser() -> argparse.ArgumentParser:
                      help="fix-verification oracle: re-run DAA and report whether --ref still fires (exit 0 iff cleared)")
     pcs.add_argument("--ref", default="", help="the finding ref to verify (with --verify)")
     pcs.set_defaults(func=_cmd_codescan)
+
+    pda = sub.add_parser("deploy-acceptance",
+                         help="WS4: run the per-VM PRODUCTION ACCEPTANCE HARNESS against the bundled loopback "
+                              "MERIDIAN range (exit 0 = handover-ready; non-zero = handover BLOCKED)")
+    pda.add_argument("--target-host", default="127.0.0.1",
+                     help="the bundled controlled loopback target host (default 127.0.0.1 — NEVER external)")
+    pda.add_argument("--target-port", type=int, default=19010,
+                     help="the bundled controlled loopback target port (default 19010 — MERIDIAN)")
+    pda.add_argument("--workspace", default=None,
+                     help="isolate CRUCIBLE state here (default: a fresh temp dir)")
+    pda.set_defaults(func=_cmd_deploy_acceptance)
 
     pvr = sub.add_parser("verify-remediation",
                          help="OFFLINE, zero-trust verify of a Proof-Carrying Remediation Attestation "
