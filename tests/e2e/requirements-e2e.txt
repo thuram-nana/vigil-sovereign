@@ -1,0 +1,12 @@
+# VIGIL browser E2E harness — PINNED deps for the isolated .venv-e2e.
+#
+# This venv is NOT either FATAL-2 venv (sovereign / offense). It is only a
+# browser + HTTP client of http://127.0.0.1:8770. It must NEVER contain
+# `framework`, `strix`, or any sovereign package.
+#
+# Pin EXACTLY. A given playwright release pins a specific Chromium revision, so
+# pinning playwright pins the vendored browser build (air-gap reproducibility).
+# Bump deliberately (new playwright => new Chromium => re-vendor), never float.
+playwright==1.49.1
+pytest==8.3.4
+pytest-playwright==0.6.2
