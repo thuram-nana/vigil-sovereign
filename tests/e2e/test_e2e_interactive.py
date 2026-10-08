@@ -313,32 +313,55 @@ def test_defense_start_gateway_posts_setup_fail_closed(authed_page):
 
 
 @pytest.mark.real_flow
-def test_defense_destruction_quorum_card_read_method_mismatch_defect(authed_page, base_url):
-    """DEFECT: the Destruction-quorum card reads via GET, but the route is POST-only.
+def test_defense_destruction_quorum_card_reads_via_post(authed_page, base_url):
+    """FIXED: the Destruction-quorum card reads via POST (the route is POST-only).
 
-    destructionQuorumCard (app.js:5609) does V.getJSON(OFF('/api/destruction/status'))
-    — a GET — on nav. The console server only registers /api/destruction/status in
-    its POST dispatch (server.py:986). So the GET 404s and the card is a DEAD read
-    that always shows its error state ('Could not read the quorum status (owner
-    only).'); the working method is POST.
+    destructionQuorumCard (app.js:5609) now does
+    V.postJSON(OFF('/api/destruction/status'), {}) — matching the console server's
+    POST-only dispatch (server.py:986). On nav the card POSTs and renders the REAL
+    quorum status (a provisioned m-of-n line, or an honest 'No destruction quorum
+    provisioned'), NOT the dead-read error fallback it showed when it used GET.
 
-    This test pins the defect deterministically (it will fail — prompting review —
-    if the method contract changes):
-      * the card DOES issue the GET on nav (grounding);
-      * GET  /api/destruction/status -> 404 {"error":"unknown endpoint"}  (the bug);
-      * POST /api/destruction/status -> 200 {"ok":true, ...}              (works).
+    Pins the fix deterministically:
+      * the card issues the POST on nav (grounding the fix);
+      * #dq-status shows a real status, never the 'Could not read the quorum
+        status' error fallback;
+      * POST /api/destruction/status -> 200 {"ok":true, ...}  (the working method);
+      * GET  /api/destruction/status -> 404                   (still POST-only).
     """
+    import time
+
     page = authed_page
-    with assert_calls(page, "GET", f"{OFFENSE_BASE}/api/destruction/status"):
+    with assert_calls(page, "POST", f"{OFFENSE_BASE}/api/destruction/status"):
         _nav(page, DEFENSE.id)
     page.wait_for_selector("#def-tiles", timeout=15_000)
+    page.wait_for_selector("#dq-status", timeout=15_000)
 
-    get_res = _same_origin_fetch(page, base_url, "GET", f"{OFFENSE_BASE}/api/destruction/status")
-    post_res = _same_origin_fetch(page, base_url, "POST", f"{OFFENSE_BASE}/api/destruction/status", json_body={})
-    assert get_res["status"] == 404, (
-        "DEFECT REGRESSED/CHANGED: the card's GET to /api/destruction/status now "
-        f"returns {get_res['status']} (was 404 unknown-endpoint). Re-ground the card's method."
+    # the card renders a REAL status, not the error fallback. (CSP-safe read via a
+    # passed function — the harness CSP forbids wait_for_function's string eval.)
+    end = time.time() + 15
+    txt = ""
+    while time.time() < end:
+        txt = page.evaluate(
+            "() => { var e = document.querySelector('#dq-status'); return e ? e.textContent : ''; }"
+        ) or ""
+        if ("Provisioned:" in txt) or ("No destruction quorum provisioned" in txt):
+            break
+        page.wait_for_timeout(200)
+    assert "Could not read the quorum status" not in txt, (
+        f"the card still shows the dead-read error fallback — the POST read is not working: {txt!r}"
     )
+    assert ("Provisioned:" in txt) or ("No destruction quorum provisioned" in txt), (
+        f"the card did not render a real quorum status (expected a provisioned m-of-n line or "
+        f"'No destruction quorum provisioned'): {txt!r}"
+    )
+
+    # Contract: POST is the working method (200 ok); GET stays unregistered (404).
+    post_res = _same_origin_fetch(page, base_url, "POST", f"{OFFENSE_BASE}/api/destruction/status", json_body={})
     assert post_res["status"] == 200 and (post_res["data"] or {}).get("ok") is True, (
         f"the POST contract for /api/destruction/status changed: {post_res!r}"
+    )
+    get_res = _same_origin_fetch(page, base_url, "GET", f"{OFFENSE_BASE}/api/destruction/status")
+    assert get_res["status"] == 404, (
+        f"GET /api/destruction/status should stay unregistered (POST-only); got {get_res['status']}"
     )

@@ -370,6 +370,101 @@ def test_ceremonies_delegate_sign_gated(authed_page):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# CEREMONIES — DANGER ZONE (dangerBtn app.js:7083). Three irreversible / trust-
+# weakening owner ceremonies, each gated by a typed-phrase window.prompt the server
+# re-checks: "Rotate owner key" (7105 -> /key/rotate), "Re-genesis (abandon
+# continuity)" (7107 -> /key/re-genesis), "Reset anti-rollback floor" (7109 ->
+# /floor/reset). NEVER fired: assert each control renders, its typed-confirm gate
+# is DEMANDED, then DECLINE it and assert NO POST fired. The prior ops build report
+# enumerated the gate-only controls (panic, kernel-pin, vault-provision, eval
+# arm/revoke, device authorize/revoke, delegate-sign, gateway-down, restricted-
+# mode, console-down) but OMITTED this danger zone — these three close that gap, so
+# the suite's assert_gate coverage of the destructive owner ceremonies is complete.
+# ══════════════════════════════════════════════════════════════════════════════
+def _assert_ceremony_gate_declined(page, button_text, phrase, post_substr):
+    """A danger-zone ceremony (dangerBtn app.js:7083) gates on a window.prompt that
+    demands an EXACT typed phrase before it POSTs SOV(url) {confirm}. Click the
+    control, assert the typed-confirm gate is DEMANDED (the prompt names the exact
+    phrase), DISMISS it (prompt -> null != phrase, so onClick returns BEFORE the
+    POST), and assert NO POST to the ceremony route fired. Uses page.once("dialog")
+    so the dismiss unblocks the click (page.expect_event around the click would
+    deadlock — see _gate_dismiss)."""
+    posts = []
+
+    def _on_req(req):
+        if req.method.upper() == "POST" and post_substr in req.url:
+            posts.append(req.url)
+
+    captured: dict = {}
+
+    def _on_dialog(dlg):
+        captured["msg"] = dlg.message
+        dlg.dismiss()
+
+    page.on("request", _on_req)
+    page.once("dialog", _on_dialog)
+    try:
+        page.click(f"#screen button:has-text('{button_text}')")
+        end = time.time() + 8
+        while "msg" not in captured and time.time() < end:
+            page.wait_for_timeout(100)
+        assert "msg" in captured, (
+            f"no typed-confirm prompt fired for {button_text!r} — the ceremony gate did not engage"
+        )
+        assert phrase.lower() in captured["msg"].lower(), (
+            f"the prompt {captured['msg']!r} did not demand the exact phrase {phrase!r}"
+        )
+        # declined (prompt dismissed -> null) => onClick returns before the POST.
+        page.wait_for_timeout(600)
+        assert not posts, f"a POST to {post_substr!r} fired despite declining the gate: {posts!r}"
+    finally:
+        page.remove_listener("request", _on_req)
+
+
+@pytest.mark.assert_gate
+def test_ceremonies_rotate_owner_key_gated(authed_page):
+    """DANGER ZONE: 'Rotate owner key' (dangerBtn app.js:7105) POSTs
+    /sovereign/api/ceremonies/key/rotate only after an exact typed-phrase gate.
+    Control renders + gate demanded; declined so nothing is submitted."""
+    page = authed_page
+    _boot_owner(page)
+    _goto(page, "ceremonies", "Danger zone (owner)")
+    assert page.locator("#screen button:has-text('Rotate owner key')").count() == 1, \
+        "the 'Rotate owner key' danger-zone control did not render"
+    _assert_ceremony_gate_declined(page, "Rotate owner key", "ROTATE OWNER KEY",
+                                   "/sovereign/api/ceremonies/key/rotate")
+
+
+@pytest.mark.assert_gate
+def test_ceremonies_re_genesis_gated(authed_page):
+    """DANGER ZONE: 'Re-genesis (abandon continuity)' (dangerBtn app.js:7107) POSTs
+    /sovereign/api/ceremonies/key/re-genesis only after an exact typed-phrase gate.
+    Control renders + gate demanded; declined so continuity is NEVER abandoned."""
+    page = authed_page
+    _boot_owner(page)
+    _goto(page, "ceremonies", "Danger zone (owner)")
+    assert page.locator("#screen button:has-text('Re-genesis')").count() == 1, \
+        "the 'Re-genesis' danger-zone control did not render"
+    _assert_ceremony_gate_declined(page, "Re-genesis", "ABANDON CONTINUITY",
+                                   "/sovereign/api/ceremonies/key/re-genesis")
+
+
+@pytest.mark.assert_gate
+def test_ceremonies_floor_reset_gated(authed_page):
+    """DANGER ZONE: 'Reset anti-rollback floor' (dangerBtn app.js:7109) POSTs
+    /sovereign/api/ceremonies/floor/reset only after an exact typed-phrase gate.
+    Control renders + gate demanded; declined so the anti-rollback floor is NEVER
+    lowered."""
+    page = authed_page
+    _boot_owner(page)
+    _goto(page, "ceremonies", "Danger zone (owner)")
+    assert page.locator("#screen button:has-text('Reset anti-rollback floor')").count() == 1, \
+        "the 'Reset anti-rollback floor' danger-zone control did not render"
+    _assert_ceremony_gate_declined(page, "Reset anti-rollback floor", "LOWER THE FLOOR",
+                                   "/sovereign/api/ceremonies/floor/reset")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # SAFETY — renderSafety 5282. Both top reads are POLLED (snapshot 4s/5s,
 # approvals/loopback 5s) -> NO nav-driven un-polled read exists. Assert render +
 # control WIRING only (never assert_calls here: a poll would green-wash it).
