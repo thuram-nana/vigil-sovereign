@@ -622,6 +622,71 @@ if [ "$DOCKER_OK" = 1 ] && [ "$NO_SERVICES" != 1 ]; then
   if curl -fsS http://127.0.0.1:6333/readyz >/dev/null 2>&1; then echo "    [ok] Qdrant readyz"; else echo "    [warn] Qdrant not ready (embedded fallback still works)"; fi
 fi
 
+# =============================================================================
+# PRODUCTION HANDOVER GATE (WS4) — only under the production posture.
+# =============================================================================
+# A freshly provisioned PRODUCTION box must PROVE the real VIGIL pipeline works end-to-end before handover:
+# bring up (or reuse) the bundled loopback MERIDIAN range on :19010 and run the per-VM acceptance harness
+# (`vigil_integration.sovereign_deploy.acceptance`) through the SAME SMOKE_FAIL gate as every other smoke.
+# The harness is FAIL-CLOSED by construction — a missing prerequisite (no ANTHROPIC_API_KEY, the range
+# unreachable, AEGIS_RESPOND un-entitled, a required check NOT-RUN) is a BLOCK, never a skip — and a non-zero
+# exit is a HARD smoke failure that fails this bootstrap. We NEVER `|| true` the harness and never swallow its
+# exit; the verdict line (HANDOVER-READY / HANDOVER BLOCKED) is always printed. This runs ONLY under the
+# production posture (VIGIL_POSTURE=production / --production); the generic fresh-box path is unchanged.
+if [ "$PRODUCTION" = 1 ]; then
+  step "production handover gate (WS4 acceptance harness)"
+  HANDOVER_PY="$REPO/.venv-offense/bin/python"
+  HANDOVER_TARGET_PORT=19010
+  RANGE_BASE="$REPO/.target-live"
+  RANGE_STARTED=0
+  RANGE_LOG="$(mktemp)"
+  if curl -fsS -m 2 "http://127.0.0.1:${HANDOVER_TARGET_PORT}/" >/dev/null 2>&1; then
+    ok "MERIDIAN range already up on :${HANDOVER_TARGET_PORT} (reusing it)"
+  elif [ -x "$REPO/.venv-offense/bin/target" ]; then
+    "$REPO/.venv-offense/bin/target" up meridian --no-browser --base-dir "$RANGE_BASE" >"$RANGE_LOG" 2>&1 &
+    RANGE_PID=$!
+    RANGE_STARTED=1
+    for _ in $(seq 1 30); do
+      if curl -fsS -m 2 "http://127.0.0.1:${HANDOVER_TARGET_PORT}/" >/dev/null 2>&1; then break; fi
+      kill -0 "$RANGE_PID" 2>/dev/null || break
+      sleep 1
+    done
+    if curl -fsS -m 2 "http://127.0.0.1:${HANDOVER_TARGET_PORT}/" >/dev/null 2>&1; then
+      ok "MERIDIAN range up on :${HANDOVER_TARGET_PORT}"
+    else
+      warn "MERIDIAN range did not come up on :${HANDOVER_TARGET_PORT} — the harness will BLOCK handover (fail-closed)"
+      sed 's/^/      /' "$RANGE_LOG" 2>/dev/null | tail -n 5 || true
+    fi
+  else
+    warn ".venv-offense/bin/target missing — cannot bring up the range; the harness will BLOCK handover (fail-closed)"
+  fi
+
+  # Run the harness and apply its verdict UNCHANGED. The output (incl. the HANDOVER verdict) is shown, and a
+  # non-zero exit sets SMOKE_FAIL — the SAME gate that fails the bootstrap below. The `if VAR=$(...)` form
+  # captures the exit under `set -e` without aborting; NO `|| true` touches the harness.
+  echo "  running: vigil deploy-acceptance --target-port ${HANDOVER_TARGET_PORT}"
+  if HANDOVER_OUT="$("$HANDOVER_PY" -m vigil_integration.sovereign_deploy.acceptance --target-port "$HANDOVER_TARGET_PORT" 2>&1)"; then
+    HANDOVER_RC=0
+  else
+    HANDOVER_RC=$?
+  fi
+  printf '%s\n' "$HANDOVER_OUT" | sed 's/^/    /'
+  if [ "$HANDOVER_RC" != 0 ]; then
+    SMOKE_FAIL=1
+    printf "  ${c_r}FAIL${c_0} production handover gate — HANDOVER BLOCKED (acceptance exit ${HANDOVER_RC})\n"
+  else
+    ok "production handover gate — HANDOVER-READY (acceptance exit 0)"
+  fi
+
+  # Tear down only a range WE started (reused ranges are left running). Teardown is best-effort cleanup — its
+  # `|| true` governs the stop, NEVER the harness verdict captured above.
+  if [ "$RANGE_STARTED" = 1 ]; then
+    [ -x "$REPO/.venv-offense/bin/target" ] && "$REPO/.venv-offense/bin/target" down meridian --base-dir "$RANGE_BASE" >/dev/null 2>&1 || true
+    kill "$RANGE_PID" 2>/dev/null || true
+  fi
+  rm -f "$RANGE_LOG" 2>/dev/null || true
+fi
+
 echo
 if [ "$SMOKE_FAIL" = 0 ]; then
   printf "${c_g}${c_b}VIGIL is ready.${c_0}\n"

@@ -180,6 +180,7 @@ a new sub-parser that is not documented here turns the required check red.
 | `vigil sandbox` | Run an arbitrary command inside a network-isolated, workspace-confined bwrap sandbox (A3 → queued for approval). |
 | `vigil terminal` | Run a governed LOCAL read/inspect command through the gate (A2 → queued for approval, never auto). |
 | `vigil fleet` | Cross-VM FLEET operations (WS3): a read-only monitor roll-up over N single-tenant instances (`fleet status`) + an owner-authorized kill-switch fan-out (`fleet kill`). |
+| `vigil deploy-acceptance` | Run the per-VM production acceptance harness against the loopback MERIDIAN range (`--target-port`): a real Anthropic call, engage→FACT→offline re-verify + tamper-reject, a LEAD stays a LEAD, a codescan static FACT, an AEGIS oracle fires, and a FACT-capable tool mints — exit non-zero + "HANDOVER BLOCKED" on any failure or missing prerequisite, so handover is gated on a GREEN run on the provisioned box. |
 | `vigil sign-revocation` | Owner-sign an entitlement revocation that the fleet kill-switch fans out (feeds `fleet kill`; m-of-n destruction authorization unchanged). |
 
 ## D. Passthrough verbs (route into a subsystem's own CLI)

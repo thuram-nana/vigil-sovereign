@@ -203,6 +203,19 @@
       "rationale": "Native verb dispatched in-process; parser registered and handler resolves."
     },
     {
+      "id": "cli.deploy-acceptance",
+      "name": "vigil deploy-acceptance",
+      "surface": "cli-native",
+      "status": "LIVE",
+      "verb": "deploy-acceptance",
+      "anchor": {
+        "file": "integration/vigil_integration/cli.py",
+        "symbol": "_cmd_deploy_acceptance"
+      },
+      "check": "cli-native-verb",
+      "rationale": "Native verb dispatched in-process; parser registered and handler resolves. Runs the per-VM production acceptance harness fail-closed (WS4-RESIDUAL handover gate)."
+    },
+    {
       "id": "cli.down",
       "name": "vigil down",
       "surface": "cli-native",
