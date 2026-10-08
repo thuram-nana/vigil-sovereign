@@ -80,7 +80,10 @@ def authed_page(page, base_url: str, e2e_token: str | None):
     Fails loudly if no authenticated principal is obtained — an unauthenticated
     run never silently passes.
     """
-    page.goto(base_url + "/sovereign/", wait_until="domcontentloaded")
+    # The unified Command UI is served at "/" (uiproxy route() -> None -> static,
+    # assemble_serve_dir). "/sovereign/" proxies to the sigil cockpit's OWN standalone
+    # SPA and the proxy BLANKS the relayed data-token (uiproxy.py:293,1945) -> load "/".
+    page.goto(base_url + "/", wait_until="domcontentloaded")
 
     if e2e_token:
         principal = login_via_api(page, base_url, e2e_token)
@@ -95,5 +98,5 @@ def authed_page(page, base_url: str, e2e_token: str | None):
     assert principal.get("authenticated"), f"authentication failed: {principal!r}"
     # Reload so the SPA boots with the seeded session and renders as the logged-in
     # principal (nav/permission gating reflects whoami).
-    page.goto(base_url + "/sovereign/#/home", wait_until="domcontentloaded")
+    page.goto(base_url + "/#/home", wait_until="domcontentloaded")
     return page
