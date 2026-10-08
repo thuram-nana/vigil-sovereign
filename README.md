@@ -148,7 +148,7 @@ flowchart LR
 <summary><b>Read the boundary in plain English</b></summary>
 
 - The **sovereign process** (`.venv-sovereign`) holds the owner key and the governor. It signs the engagement **charter and authority** and sends them across the seam as the scope the offense side must obey.
-- The **offense process** (`.venv-offense`) runs the CRUCIBLE engine and the vendored Strix agent **with no owner key at all**. Its only route to the network is an **egress floor** that denies everything by default and that **no scope or opt-in can ever lift** (metadata, link-local, and cloud-credential endpoints such as `169.254.169.254` are blocked before anything else is even considered).
+- The **offense process** (`.venv-offense`) runs the CRUCIBLE engine and the vendored Strix agent **with no owner key at all**. Its only route to the network is an **egress floor** that denies everything by default and that **no scope or opt-in can ever lift** (metadata, link-local, and cloud-credential endpoints such as `169.254.169.254` are blocked before anything else is even considered). The floor holds even if the sidecar gateway is down: `common/egress_pin.py` degrades to a pure-stdlib `ipaddress` structural **backstop** (`_stdlib_floor_denied`) that still refuses metadata/link-local/RFC1918 before any socket opens, and the `http_executor`'s `SovereignHttpxTransport` pin closes the last engine capture-path site (the WS1.1b residual), so no httpx request can route around the floor.
 - Findings come back as **signed, inert JSON**. The sovereign side verifies the signature and *appends* them to the owner-signed spine — it never loads offense code to do so.
 - Co-loading the two planes in a single interpreter is the one cardinal error, and the test suite fails the build if it ever happens: **FATAL-2**.
 
@@ -178,7 +178,7 @@ flowchart LR
 <summary><b>Read the pipeline in plain English</b></summary>
 
 1. **The AI proposes a LEAD** — a hypothesis about where a bug might be and what a result might mean. That is *all* the AI is ever allowed to do.
-2. **The conjunctive gate** must pass *every* condition at once — a signed charter and usage attestation, the target in authorized scope right now, and the action's WARDEN danger tier (with owner approval, and an m-of-n quorum for anything destructive). First failure wins; any error at all = deny.
+2. **The conjunctive gate** must pass *every* condition at once — a signed charter and usage attestation, the target in authorized scope right now, and the action's WARDEN danger tier (with owner approval, and an m-of-n quorum for anything destructive). First failure wins; any error at all = deny. An optional **default-off witness-quorum conjunct** (6c, `authority/witness_quorum_gate.py`) can demote an otherwise-authorized action to denied (`witness_quorum`) when fewer than N-of-M independent oracle-witnesses corroborate it — opt-in, demote-only, and byte-identical to the gate without it when unarmed.
 3. **The never-liftable egress floor** pins the only network route to the authorized target.
 4. **The gated capture** runs the real tool and keeps the target's own raw output.
 5. **The deterministic oracle** independently re-fires over those bytes. If it fires at or above threshold → a **signed certificate** (a FACT). If it stays silent, or no oracle exists for that class → it **stays a LEAD**, honestly labelled, never asserted.
@@ -304,11 +304,11 @@ Over that log sits the cryptographic layer (`agents/spine_chain.py`). `event_dig
 
 ### The live layer and the `vigil` CLI
 
-`integration/vigil_integration/cli.py` is the **only** cross-plane orchestrator, and it dispatches by subprocess so the two trust domains never co-load. It exposes ~78 commands in four groups: **41 native `vigil` verbs** (engage, codescan, patch, remediate, verify, provision, approve, detect, cloud-exploit, fleet, panic, up/down, backup/restore, the m-of-n destruction family…), **5 pass-through verbs** that exec a subsystem in its own venv (`vigil crucible`, `vigil sigil`, `vigil aegis`, `vigil strix`, `vigil gateway`), and the **34 CRUCIBLE subcommands** reachable either as `vigil crucible <sub>` or `python3 -m framework.v2 <sub>`. The unified UI is one origin behind a pure-stdlib reverse proxy (`uiproxy.py`, `vigil up`): `/sovereign/*` reaches the SIGIL cockpit, `/offense/*` the CRUCIBLE console — never a public bind (its `bind_ok` admits loopback or a private/tunnel address only, so a public/`0.0.0.0` bind is refused), strict `'self'` CSP, three OS processes each in its own venv.
+`integration/vigil_integration/cli.py` is the **only** cross-plane orchestrator, and it dispatches by subprocess so the two trust domains never co-load. It exposes ~90 commands in four groups: **52 native `vigil` verbs** (engage, codescan, patch, remediate, verify, provision, approve, detect, cloud-exploit, fleet, deploy-acceptance, panic, up/down, backup/restore, the m-of-n destruction family…), **5 pass-through verbs** that exec a subsystem in its own venv (`vigil crucible`, `vigil sigil`, `vigil aegis`, `vigil strix`, `vigil gateway`), and the **34 CRUCIBLE subcommands** reachable either as `vigil crucible <sub>` or `python3 -m framework.v2 <sub>`. The unified UI is one origin behind a pure-stdlib reverse proxy (`uiproxy.py`, `vigil up`): `/sovereign/*` reaches the SIGIL cockpit, `/offense/*` the CRUCIBLE console — never a public bind (its `bind_ok` admits loopback or a private/tunnel address only, so a public/`0.0.0.0` bind is refused), strict `'self'` CSP, three OS processes each in its own venv.
 
 ### CRUCIBLE — the offense engine
 
-`engine/crucible/framework/v2/` is the offensive plane: the full **recon → scan → engage → verify → report** arsenal, and it is **keyless by construction**. It never holds the owner key; it produces findings, re-executable evidence, and reports, and hands them across the inert seam. It is where the oracles, the scanners (58 modules), the universal sensors (22 modules), the world-model/digital-twin, and the reasoning agents live. The offense-side worker (`offense_worker.py`, `KeylessOffenseWorker`) makes the keylessness physical — it refuses an owner key at construction, so it can only *package* a confirmed finding into a plain, signed data envelope; it can never mint a trusted record. Its deep mechanics — Strix driving, the OODA loop, and every safety gate — are in **[The offense engine and governed autonomy](#the-offense-engine-and-governed-autonomy)** below.
+`engine/crucible/framework/v2/` is the offensive plane: the full **recon → scan → engage → verify → report** arsenal, and it is **keyless by construction**. It never holds the owner key; it produces findings, re-executable evidence, and reports, and hands them across the inert seam. It is where the oracles, the scanners (56 modules), the universal sensors (22 modules), the world-model/digital-twin, and the reasoning agents live. The offense-side worker (`offense_worker.py`, `KeylessOffenseWorker`) makes the keylessness physical — it refuses an owner key at construction, so it can only *package* a confirmed finding into a plain, signed data envelope; it can never mint a trusted record. Its deep mechanics — Strix driving, the OODA loop, and every safety gate — are in **[The offense engine and governed autonomy](#the-offense-engine-and-governed-autonomy)** below.
 
 ### AEGIS — the defensive dual
 
@@ -1157,7 +1157,7 @@ Per-language dependency and call-graph context is supplied by `depfetch.py` + `g
 
 **The proof survives without VIGIL.** The remediation lifecycle is re-derivable by a third party with **zero VIGIL code**:
 
-- `docs/proof-carrying-finding/verify_vf.py` (103 KB) imports only the Python standard library and one Ed25519 library; its `--prove-standalone` flag first **asserts no VIGIL module is importable**, then re-fires the oracles and re-checks every signature — a single flipped byte flips the verdict.
+- `docs/proof-carrying-finding/verify_vf.py` (621 KB) imports only the Python standard library and one Ed25519 library; its `--prove-standalone` flag first **asserts no VIGIL module is importable**, then re-fires the oracles and re-checks every signature — a single flipped byte flips the verdict. It now also re-fires the ported A-prime GENERAL oracle set (G1), so a standalone re-verify covers the broadened family breadth.
 - `docs/proof-carrying-finding/verify_pcf.py` (26 KB) is the third-party Proof-Carrying-Finding verifier.
 
 The trust protocol (`docs/proof-carrying-finding/PROTOCOL.md`) defines three modes between mutually-distrusting parties, so a consumer can pin the minimum rigor they will accept:
@@ -1284,9 +1284,10 @@ Every target-touching action passes a single conjunctive gate (`integration/vigi
 
 - **CRUCIBLE authority** — is this target/action inside the signed engagement envelope *right now*? **AND**
 - **WARDEN tool gate** — what tier is this tool-class, and must the owner approve it? **AND**
-- **Threshold-destruction** — for a destructive / high-blast action *only*, is there an owner-inclusive m-of-n authorization for exactly this action?
+- **Threshold-destruction** — for a destructive / high-blast action *only*, is there an owner-inclusive m-of-n authorization for exactly this action? **AND**
+- **Witness-quorum (optional, default-off)** — conjunct **6c** (`authority/gate.py` `authorize_action`, armed through `authority/witness_quorum_gate.py`): when enabled it **demotes** an otherwise-authorized action to denied (code `witness_quorum`) if fewer than N-of-M independent oracle-witnesses corroborate it. It is **opt-in, demote-only**, runs as the final conjunct after every other leg has cleared, and is byte-identical to the gate without it when unarmed. It adds **no OracleKind** (still 49) and no `_ALL_ORACLES` change (still 15). It is distinct from the continuous-assurance witness below (`attestation_witness.py`, which countersigns a *reprove* series head, not a live ACTION).
 
-ALLOW only if in-envelope **and** WARDEN-auto **and** (if destructive) threshold-authorized; QUEUE if in-envelope and destruction-satisfied but WARDEN needs owner approval; DENY otherwise. The full enforced chain is: **WARDEN → signed-scope → egress floor → kill-switch → capability latch → owner approval → m-of-n (if destructive).**
+ALLOW only if in-envelope **and** WARDEN-auto **and** (if destructive) threshold-authorized; QUEUE if in-envelope and destruction-satisfied but WARDEN needs owner approval; DENY otherwise. The full enforced chain is: **WARDEN → signed-scope → egress floor → kill-switch → capability latch → owner approval → m-of-n (if destructive) → witness-quorum (if armed).**
 
 ### The individual brakes
 
@@ -1340,7 +1341,7 @@ And five capabilities VIGIL *has* whose residual honestly **stays a LEAD** rathe
 
 Everything VIGIL does is reachable from one command surface. There are **~90 invokable command forms** in four groups, and the catalog below is kept honest by required CI checks that enumerate the command sets **from the code** and fail the build when a command is added without a doc row, or documented without existing in the code:
 
-- **51 `vigil` native verbs** — the super-CLI's own sub-parsers (`integration/vigil_integration/cli.py`), run in-process on the sovereign/integration side.
+- **52 `vigil` native verbs** — the super-CLI's own sub-parsers (`integration/vigil_integration/cli.py`), run in-process on the sovereign/integration side.
 - **5 passthrough verbs** — route into a subsystem's *own* CLI, in that subsystem's isolated environment, so the two trust domains never co-load in one interpreter (`dispatch.py` `PASSTHROUGH_VERBS`).
 - **34 CRUCIBLE subcommands** — the offense engine's verbs (`_DISPATCH`, `engine/crucible/framework/v2/__main__.py`), reached through the `crucible` passthrough.
 - **38 CRUCIBLE subsystems** — the importable sub-packages of `framework/v2` (some are the module behind a subcommand; others are internal seams).
@@ -1357,7 +1358,7 @@ python3 -m framework.v2 <subcommand> [args]   # directly, from engine/crucible w
 > **Honest tiers, at the command level.** The verbs that end in a *proof* — `verify`, `verify-remediation`, `cloud-exploit`, `proof-export`, `drift`, `spine-cert`, `crucible verify`/`plan-integrity` — re-fire a deterministic **oracle** over retained bytes and mint only a **FACT** (everything else stays a labelled **LEAD**). The read-only projections — `crucible twin`, `crucible plan`, `crucible attack-paths` — are **advisory** and *never* mint a FACT. The honesty of the tiers (**FACT · LEAD · CLEAN · INCONCLUSIVE**) is a property of the code the commands drive, not of the labels in this table.
 
 <details>
-<summary><b>A — the 51 <code>vigil</code> native verbs</b> (grouped by what they do)</summary>
+<summary><b>A — the 52 <code>vigil</code> native verbs</b> (grouped by what they do)</summary>
 
 | Verb | What it does |
 |---|---|
@@ -1409,6 +1410,7 @@ python3 -m framework.v2 <subcommand> [args]   # directly, from engine/crucible w
 | `vigil down` | CONTAIN a running `vigil up`: stop + disable the systemd unit, then kill the backends + proxy. |
 | `vigil services` | Docker bring-up: create the egress gateway + qdrant / neo4j / otel sidecars if none exist (idempotent). |
 | `vigil doctor` | Read-only readiness + **security-posture** report: prerequisites (binaries, both venvs, writable dirs), UI ports, docker services. |
+| `vigil deploy-acceptance` | Run the per-VM **production acceptance harness** against the bundled MERIDIAN loopback range (`--target-port`); exit 0 = **handover-ready**, non-zero = **HANDOVER BLOCKED** on any failure or missing prerequisite. |
 | `vigil alerts` | Heartbeat-staleness alarms for every HA / scheduled unit (backup, off-host push, drill, HA sync, integrity, posture, reprove). |
 | `vigil unit-heartbeat` | Record that a scheduled unit ran (a systemd `ExecStopPost` hook the alerts monitor reads). |
 | `vigil telemetry` | Live assurance/metrics collector over the signed spine: fact / lead / refusal / tool snapshots. |

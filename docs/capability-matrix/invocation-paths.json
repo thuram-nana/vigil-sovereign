@@ -97,6 +97,15 @@
       "invocation": "vigil posture attest|verify|endpoint",
       "invocation_ref": "integration/vigil_integration/cli.py:_cmd_posture",
       "residual": "none — already a first-class dispatch verb (#546)."
+    },
+    {
+      "id": "deploy_acceptance_verb",
+      "name": "per-VM production deploy-acceptance handover gate (vigil deploy-acceptance)",
+      "kind": "cli_verb",
+      "verb": "vigil:deploy-acceptance",
+      "invocation": "vigil deploy-acceptance [--target-port 19010]",
+      "invocation_ref": "integration/vigil_integration/cli.py:_cmd_deploy_acceptance",
+      "residual": "a FULL green run needs a live Anthropic key and the bundled MERIDIAN loopback range on the provisioned box; the verb (the invocation path) exists regardless and exits non-zero / HANDOVER BLOCKED on any missing prerequisite (WS4)."
     }
   ]
 }

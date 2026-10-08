@@ -26,7 +26,7 @@
     {
       "id": "RVC-engine-rawsock-egress-floor",
       "name": "Engine raw-socket egress sites (CSWSH / race / smuggling) were not software-floored",
-      "summary": "The never-liftable egress floor was wired only on the engine capture paths in #874; the raw sockets in scanner/websocket.py (CSWSH), scanner/race.py::raw_race, and scanner/smuggling.py (raw_send + _desync_leg) still connected on a re-resolved name with no IP floor, so a charter-scoped name resolving or rebinding to metadata/RFC1918 could be dialled. Re-verified closed (WS1.1b, #879): all three now resolve once, run vigil_gateway.denylist.is_egress_denied over every resolved address, refuse metadata/link-local/RFC1918 (and DNS-rebinding), and dial the pinned IP; fail-closed throughout. Channel-only: no FACT minted, _ALL_ORACLES frozen at 15. Proof: scanner/tests/test_{websocket,race,smuggling}.py (floor + anti-rebinding + fail-closed negative controls).",
+      "summary": "The never-liftable egress floor was wired only on the engine capture paths in #874; the raw sockets in scanner/websocket.py (CSWSH), scanner/race.py::raw_race, and scanner/smuggling.py (raw_send + _desync_leg) still connected on a re-resolved name with no IP floor, so a charter-scoped name resolving or rebinding to metadata/RFC1918 could be dialled. Re-verified closed (WS1.1b, #879): all three now resolve once, run vigil_gateway.denylist.is_egress_denied over every resolved address, refuse metadata/link-local/RFC1918 (and DNS-rebinding), and dial the pinned IP; fail-closed throughout. Channel-only: no FACT minted, _ALL_ORACLES frozen at 15. Proof: scanner/tests/test_{websocket,race,smuggling}.py (floor + anti-rebinding + fail-closed negative controls). FOURTH/last site closed by G2 (#919): the engine's httpx capture path now routes through agents/http_executor.py's SovereignHttpxTransport (built on agents/egress_guard.py), so no httpx request skips the floor either. Gateway-less backstop (G2): common/egress_pin.py degrades to a pure-stdlib ipaddress structural floor (_stdlib_floor_denied) that still refuses metadata/link-local/RFC1918 before any socket opens even when the sidecar gateway is down; its drift-guard mirror tests are common/tests/test_egress_backstop.py and integration/tests/test_egress_backstop_mirror.py.",
       "evidence": "engine/crucible/framework/v2/scanner/tests/test_smuggling.py"
     },
     {
@@ -508,6 +508,38 @@
       "marker": true,
       "check": "symbol-exists",
       "source_doc": "engine/crucible/SECURITY.md",
+      "disposition": "file-into-w16",
+      "w16_issue": null
+    },
+    {
+      "id": "LIMIT-capture-attestation-offense-plane",
+      "title": "NAMED FRONTIER (TM-B): reflection PD2 + in-process-capture families trust the keyless offense plane to not fabricate the captured operand",
+      "summary": "The reflection (REFLECTION_CONTEXT / PD2) and in-process-capture families — e.g. the runner-owned gated HTTP re-drive (live/web_redrive.py::web_redrive) that retains the in-band HTTP response operand an oracle then re-fires over — are SOUND against the normal gated pipeline and are function-correct over the retained evidence: offline re-verification re-derives the verdict from the captured bytes exactly. The named frontier (TM-B, classified here as real-unfinished-code because the sound close is a capability not yet built): a FULLY-COMPROMISED in-process OFFENSE-plane producer could fabricate the captured operand before the oracle ever sees it — the oracle re-fires faithfully over a forged input. This is NOT the normal threat model (the offense plane is keyless and cannot mint a trusted record; the sovereign plane verifies signatures and never loads offense code), so the class is not underclaimed: it is sound against every non-compromised pipeline. The sound close is a NON-OFFENSE capture-attestation collector (the VF-2b pattern applied to the in-band HTTP response) that stamps provenance outside the offense producer; signing the injection in-band would be theater (the compromised producer would sign the forgery too). This is the same irreducible owner-vault trust base as every signed artifact. Not built; recorded so it is never overclaimed as closed.",
+      "classification": "real-unfinished-code",
+      "severity": "low",
+      "anchor": {
+        "file": "integration/vigil_integration/live/web_redrive.py",
+        "symbol": "web_redrive"
+      },
+      "marker": false,
+      "check": "symbol-exists",
+      "source_doc": "engine/crucible/V2-LIMITATIONS.md",
+      "disposition": "file-into-w16",
+      "w16_issue": null
+    },
+    {
+      "id": "LIMIT-witness-quorum-action-gate-default-off",
+      "title": "M4.4 witness-quorum ACTION gate is built DEFAULT-OFF; threading it through every production caller is follow-on work",
+      "summary": "M4.4 adds an OPT-IN, DEFAULT-OFF, DEMOTE-ONLY witness-quorum conjunct (6c) to the authority gate: when armed (authority/gate.py::authorize_action is passed witness_quorum_fn / witness_quorum_ack, evaluated by authority/witness_quorum_gate.py::witness_quorum_predicate over veracity/witness_quorum.py) it DENIES (denial_code witness_quorum) an otherwise-authorized action for which fewer than N-of-M independent oracle-witnesses corroborate. It is DEMOTE-ONLY (never widens authority), runs only as the final conjunct after every other leg clears, is byte-identical to the gate without it when unarmed (test_passing_none_kwargs_is_byte_identical_to_omitting_them), and adds NO OracleKind (still 49) and no _ALL_ORACLES change (still 15). Wiring it into the live engagement callers so a production deployment requires the quorum on every applicable action is named follow-on work; today it is reachable but not armed by default.",
+      "classification": "real-unfinished-code",
+      "severity": "low",
+      "anchor": {
+        "file": "engine/crucible/framework/v2/authority/witness_quorum_gate.py",
+        "symbol": "witness_quorum_predicate"
+      },
+      "marker": false,
+      "check": "symbol-exists",
+      "source_doc": "engine/crucible/V2-LIMITATIONS.md",
       "disposition": "file-into-w16",
       "w16_issue": null
     }

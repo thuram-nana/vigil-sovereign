@@ -2703,6 +2703,28 @@
       "ci_job": "CRUCIBLE eval + benchmark corpus",
       "failure_class": "n-a",
       "default": "on"
+    },
+    {
+      "id": "M4-4-witness-quorum",
+      "title": "The optional witness-quorum conjunct (6c) is the authority gate's default-off, demote-only veto",
+      "claim": "The authority gate's optional witness-quorum conjunct (6c) is OPT-IN, DEFAULT-OFF, and DEMOTE-ONLY: when it is armed with a witness_quorum_fn it DENIES (denial_code witness_quorum) an otherwise-authorized action for which fewer than the configured N-of-M independent oracle-witnesses corroborate, it runs ONLY as the final conjunct after every other leg (the blast-radius veto 6b included) has cleared, it is byte-identical to the gate without it when unarmed, and it adds no new OracleKind and no change to the frozen _ALL_ORACLES.",
+      "source": "docs/decisions/M4-4-witness-quorum-action-gate.md:7",
+      "enforced_by": {
+        "file": "engine/crucible/framework/v2/authority/witness_quorum_gate.py",
+        "symbol": "witness_quorum_predicate"
+      },
+      "proved_by": {
+        "file": "engine/crucible/framework/v2/authority/tests/test_witness_quorum_veto.py",
+        "tests": [
+          "test_veto_denies_an_applicable_under_quorum_action",
+          "test_veto_allows_a_satisfied_quorum",
+          "test_blast_veto_wins_before_the_witness_quorum_is_consulted",
+          "test_passing_none_kwargs_is_byte_identical_to_omitting_them"
+        ]
+      },
+      "ci_job": "CRUCIBLE core on vigil_core",
+      "failure_class": "n-a",
+      "default": "off"
     }
   ]
 }
