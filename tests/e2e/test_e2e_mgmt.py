@@ -52,10 +52,12 @@ def _assert_rendered(page, text: str, timeout_ms: int = 12_000) -> None:
     Scoped to #screen (the content mount, app.js setupShell) so a nav-sidebar
     label can never satisfy it.
 
-    NOTE on the h2-screen-head screens (compliance/assurance): their draw*()
-    re-mounts the WHOLE screen node (V.mount(body=screen,…); ui.js mount() returns
-    its arg), which DESTROYS the <h2> title once data loads — see the recorded
-    DEFECT. For those we assert a stable post-draw marker instead of the title.
+    NOTE on the h2-screen-head screens (compliance/assurance): their draw*() now
+    redraws into a dedicated child #<screen>-body container instead of re-mounting
+    the whole screen node (B2 fix), so the <h2> screen-head PERSISTS after data
+    loads. The title-wipe defect (V.mount(body=screen,…); ui.js mount() returns its
+    arg) is fixed, and the compliance/assurance tests assert BOTH a stable post-draw
+    marker and the persistent <h2>.
     """
     page.wait_for_selector(f"#screen :text('{text}')", timeout=timeout_ms)
 
@@ -304,9 +306,12 @@ def test_compliance_renders(authed_page):
     page = authed_page
     with assert_calls(page, "GET", "/offense/api/compliance/"):
         _nav(page, "compliance")
-    # The <h2> "Compliance & ATT&CK" title is wiped by drawCompliance (see DEFECT);
-    # assert the stable post-draw card header instead.
+    # Stable post-draw marker (proves the async draw ran).
     _assert_rendered(page, "standards controls")
+    # FIXED (B2): drawCompliance now redraws into #compliance-body, so the <h2>
+    # screen-head PERSISTS after the data load (it used to be wiped).
+    assert page.locator("#screen h2:has-text('Compliance & ATT&CK')").count() == 1, \
+        "the <h2> 'Compliance & ATT&CK' screen-head did not persist after the async draw (B2 regressed)"
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -321,9 +326,12 @@ def test_assurance_renders(authed_page):
     page = authed_page
     with assert_calls(page, "GET", "/offense/api/telemetry"):
         _nav(page, "assurance")
-    # The <h2> "Assurance …" title is wiped by drawAssurance (see DEFECT); assert
-    # the stable post-draw integrity card instead.
+    # Stable post-draw marker (proves the async draw ran).
     _assert_rendered(page, "Integrity & verify")
+    # FIXED (B2): drawAssurance now redraws into #assurance-body, so the <h2>
+    # screen-head PERSISTS after the data load (it used to be wiped).
+    assert page.locator("#screen h2:has-text('continuous proof')").count() == 1, \
+        "the <h2> 'Assurance …' screen-head did not persist after the async draw (B2 regressed)"
 
 
 @pytest.mark.real_flow

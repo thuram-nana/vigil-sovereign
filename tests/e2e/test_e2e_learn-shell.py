@@ -126,25 +126,29 @@ def test_plane_toggle_filters_nav(authed_page):
 
 
 @pytest.mark.real_flow
-def test_plane_toggle_highlight_is_stale_DEFECT(authed_page):
-    """DEFECT (minor, cosmetic): the segmented toggle does not re-highlight the
-    active plane after a click.
+def test_plane_toggle_highlight_updates_on_click(authed_page):
+    """FIXED: the segmented plane toggle re-highlights the active plane on click.
 
-    topbar() marks the `.on` class from app.get().plane only at render time; the
-    onClick does `app.set({plane}); renderNav()` and never refreshTopbar(), so the
-    `.on` highlight stays on the ORIGINAL ('all') button even though the nav
-    filter (test above) correctly reflects the new plane. Documented as a product
-    observation; the functional effect still works.
+    topbar() marks the `.on` class from app.get().plane at render time; the onClick
+    now does `app.set({plane}); refreshTopbar()` (app.js:154) — refreshTopbar()
+    rebuilds the topbar (so the clicked button gains `.on`) AND calls renderNav() (so
+    the nav filter still updates). Previously the onClick called only renderNav() and
+    never refreshed the topbar, leaving `.on` stuck on the original 'all' button — a
+    cosmetic defect, now fixed. (Renamed from
+    test_plane_toggle_highlight_is_stale_DEFECT: it now proves the fix.)
     """
     page = authed_page
     page.wait_for_selector(".segmented button[data-plane='defense']", timeout=15000)
     page.click(".segmented button[data-plane='defense']")
+    # nav filter still applies (refreshTopbar -> renderNav): the offense 'assess' item is filtered out.
     page.wait_for_selector("#nav [data-nav='assess']", state="detached", timeout=5000)
-    # the clicked 'defense' button did NOT gain `.on`; the stale 'all' keeps it.
+    # the highlight MOVED: the clicked 'defense' button now carries `.on`, and the
+    # original 'all' no longer does.
+    page.wait_for_selector(".segmented button[data-plane='defense'].on", timeout=5000)
     defense_on = page.locator(".segmented button[data-plane='defense'].on").count()
     all_on = page.locator(".segmented button[data-plane='all'].on").count()
-    assert defense_on == 0, "expected the highlight NOT to move (documenting the stale-highlight defect)"
-    assert all_on == 1, "stale highlight remains on the original 'all' button"
+    assert defense_on == 1, "the clicked 'defense' plane button should gain `.on` after refreshTopbar()"
+    assert all_on == 0, "the stale highlight should have left the original 'all' button"
 
 
 @pytest.mark.real_flow
@@ -422,14 +426,20 @@ def test_knowledge_hostops_launch_wiring_not_executed(authed_page, label, verb):
     """The host-op launch buttons are wired to POST /sovereign/api/hostcmd/<verb>.
 
     Each launches a REAL tracked background host subprocess (index/ingest rebuild,
-    consolidation) with NO client-side confirm (owner-gated server-side only — see
-    DEFECT note in the report). ASSERT GATE: prove the button targets the correct
-    verb route, but INTERCEPT so no host subprocess is spawned on the live stack.
-    'ingest' in particular can carry a destructive --reset flag.
+    consolidation). 'Rebuild memory' (ingest) — which can carry a destructive
+    --reset flag — is now additionally gated by a client-side window.confirm (B4),
+    which we ACCEPT here so the underlying POST wiring is still proven; the other
+    two carry no client confirm. ASSERT GATE either way: INTERCEPT the route so no
+    host subprocess is spawned on the live stack.
     """
     page = authed_page
     _nav(page, "knowledge")
     page.wait_for_selector(f"button:has-text('{label}')", timeout=15000)
+    if verb == "ingest":
+        # B4: 'Rebuild memory' now confirms first — accept it so the POST still
+        # fires (the destructive run itself is blocked by the intercept below). A
+        # no-op if the confirm is not yet deployed.
+        page.once("dialog", lambda d: d.accept())
     with intercepted(page, f"**/api/hostcmd/{verb}"):
         with assert_calls(page, "POST", HOSTCMD + verb):
             page.click(f"button:has-text('{label}')")
@@ -465,12 +475,17 @@ def test_knowledge_gitsync_sync_wiring_not_executed(authed_page):
 def test_knowledge_feed_pull_wiring_not_executed(authed_page):
     """'Pull now' is wired to POST /offense/api/feed/<slug>/pull — a conscious
     opt-in EGRESS act (refreshes the vuln feed from NVD/OSV/CISA over the network).
-    ASSERT GATE: prove the wiring, but INTERCEPT so no outbound egress fires."""
+    It is now additionally gated by a client-side window.confirm (B4), which we
+    ACCEPT here to prove the POST wiring. ASSERT GATE: INTERCEPT so no outbound
+    egress fires."""
     page = authed_page
     _nav(page, "knowledge")
     page.wait_for_selector("button:has-text('Pull now')", timeout=15000)
     # the live engagement 'loopback' is selected and the global kill-switch is
-    # released, so the button is enabled.
+    # released, so the button is enabled. B4: accept the new confirm so the POST
+    # still fires (the egress itself is blocked by the intercept below). A no-op if
+    # the confirm is not yet deployed.
+    page.once("dialog", lambda d: d.accept())
     with intercepted(page, "**/api/feed/**"):
         with assert_calls(page, "POST", FEED):
             page.click("button:has-text('Pull now')")

@@ -151,7 +151,7 @@
   function topbar() {
     const seg = h("div.segmented", null, ["all", "offense", "defense"].map(function (p) {
       return h("button" + (app.get().plane === p ? ".on" : ""), { dataset: { plane: p },
-        onClick: function () { app.set({ plane: p }); renderNav(); } }, p[0].toUpperCase() + p.slice(1));
+        onClick: function () { app.set({ plane: p }); refreshTopbar(); } }, p[0].toUpperCase() + p.slice(1));
     }));
     const cmdk = h("div.cmdk", { title: "Command palette (⌘K)", onClick: openPalette },
       [V.icon("search"), "Search or run a command", h("span.kbd", null, "⌘K")]);
@@ -5085,10 +5085,12 @@
     var role = h("select.input.sm", null, USER_ROLES.map(function (r) {
       var o = h("option", { value: r }, r); if (r === a.role) o.selected = true; return o; }));
     var assign = h("button.btn.sm.owner", { onClick: function () {
+      if (!window.confirm("Assign the role \"" + role.value + "\" to \"" + a.username + "\"?\n\nThis changes the account privileges immediately.")) return;
       settingsAct({ action: "assign_role", username: a.username, role: role.value,
         reason: "assign role from Users & Roles" }, "Role updated for " + a.username + ".", loadUsers);
     } }, "Assign role");
     var revoke = h("button.btn.sm.danger", { onClick: function () {
+      if (!window.confirm("Revoke the account \"" + a.username + "\"?\n\nIts bearer token stops authenticating immediately. This cannot be undone; you would re-create the account.")) return;
       settingsAct({ action: "revoke_account", username: a.username, reason: "revoke from Users & Roles" },
         "Account " + a.username + " revoked.", loadUsers);
     } }, [V.icon("x"), "Revoke"]);
@@ -5606,7 +5608,7 @@
   function destructionQuorumCard() {
     var st = h("div#dq-status", null, h("div.empty", null, "Loading quorum status…"));
     function refresh() {
-      V.getJSON(OFF("/api/destruction/status")).then(function (r) {
+      V.postJSON(OFF("/api/destruction/status"), {}).then(function (r) {
         r = r || {};
         if (r.ok === false) { V.mount(st, h("div.set-status.danger", null, r.error || "could not read the quorum")); return; }
         if (!r.provisioned) {
@@ -7665,10 +7667,11 @@
   // kill-switch), never a spawn.
   var STX = { run: "", data: null, err: null, loaded: false, _body: null };
   function renderStrix(screen) {
-    var body = V.mount(screen, [h("div.screen-head", null, [h("h1", null, "Strix Control"),
+    var body = h("div#strix-body", null, h("div.empty", null, "Loading Strix control"));
+    V.mount(screen, [h("div.screen-head", null, [h("h1", null, "Strix Control"),
       h("span.sub", null, "The Strix agent's runtime control state — gateway, sandbox, approvals, "
         + "proof health and the FACT/LEAD/CLEAN/INCONCLUSIVE verdicts. Read-only: nothing here spawns "
-        + "a run or mints a fact.")])]);
+        + "a run or mints a fact.")]), body]);
     loadStrix(body);
   }
   function loadStrix(body) {
@@ -10002,6 +10005,10 @@
         h("button.btn.sm.owner", { onClick: function () { launch("index", []); } }, [V.icon("bolt"), "Rebuild vector index"]),
         h("button.btn.sm.owner", { onClick: function () {
           var f = []; if (iReset.checked) f.push("reset"); if (iDocs.checked) f.push("docs"); if (iGit.checked) f.push("git");
+          var warn = iReset.checked
+            ? "Rebuild memory WITH --reset?\n\nThis WIPES the existing memory store and rebuilds it from scratch. This cannot be undone."
+            : "Rebuild memory from transcripts/docs/git?\n\nThis runs a tracked background host process on the sovereign host.";
+          if (!window.confirm(warn)) return;
           launch("ingest", f);
         } }, [V.icon("brain"), "Rebuild memory"]),
         h("label", { style: { display: "flex", gap: "5px", alignItems: "center", fontSize: "12.5px" } }, [iReset, "reset"]),
@@ -10079,6 +10086,7 @@
         h("button.btn.sm", { disabled: killed || !d.slug || K.feedBusy,
           title: killed ? "kill-switch engaged" : (!d.slug ? "select an engagement" : ""),
           onClick: function () {
+            if (!window.confirm("Pull the vulnerability feed now?\n\nThis performs a one-shot LIVE EXTERNAL egress to the configured sources (NVD / OSV / CISA-KEV) through the gated transport.")) return;
             V.toast("Pulling the vuln feed (gated egress)…");
             V.postJSON(OFF("/api/feed/" + encodeURIComponent(d.slug) + "/pull"), {}).then(function (r) {
               if (r && r.ok) {
@@ -11082,10 +11090,11 @@
   // ---- Compliance & ATT&CK (C3): map proven findings → standards controls ----
   var CMP = { run: "", runs: [], data: null, loaded: false };
   function renderCompliance(screen) {
-    var body = V.mount(screen, [h("div.screen-head", null, [
+    var body = h("div#compliance-body", null, h("div.empty", null, "Loading compliance"));
+    V.mount(screen, [h("div.screen-head", null, [
       h("h2", null, "Compliance & ATT&CK"),
       h("p.sub", null, "Every oracle-confirmed FACT mapped to OWASP / CWE / PCI-DSS / SOC 2 / ISO 27001 + "
-        + "MITRE ATT&CK. A lead never asserts control coverage — only a proven fact does.")])]);
+        + "MITRE ATT&CK. A lead never asserts control coverage — only a proven fact does.")]), body]);
     V.getJSON(runsURL()).then(function (d) {
       CMP.runs = runsOf(d); CMP.loaded = true;   // scoped to the active engagement
       // this screen's selection outlives a route change, so a run picked under a previous scope has to go
@@ -11157,12 +11166,13 @@
     });
   }
   function renderCharter(screen) {
-    var body = V.mount(screen, [h("div.screen-head", null, [
+    var body = h("div#charter-body", null, h("div.empty", null, "Loading charter"));
+    V.mount(screen, [h("div.screen-head", null, [
       h("h2", null, "Charter & Attestation"),
       h("p.sub", null, "Every target-touching action is gated on a signed engagement charter + a who/when/what "
         + "usage attestation minted BEFORE anything runs — no attestation, no run. This UI provisions a "
         + "LOOPBACK authority; a REMOTE target needs a signed charter this UI cannot mint — it VERIFIES + "
-        + "guides you through the out-of-band ceremony instead.")])]);
+        + "guides you through the out-of-band ceremony instead.")]), body]);
     drawCharter(body);
     loadAuthority(body);
   }
@@ -11300,10 +11310,11 @@
   }
 
   function renderReport(screen) {
-    var body = V.mount(screen, [h("div.screen-head", null, [
+    var body = h("div#report-body", null, h("div.empty", null, "Loading report"));
+    V.mount(screen, [h("div.screen-head", null, [
       h("h2", null, "Client Report"),
       h("p.sub", null, "A LIVE, always-current report: every finding is re-verified OFFLINE on load, so a "
-        + "FACT is a re-checkable certificate — not a stale PDF, and not the AI's word. Read-only.")])]);
+        + "FACT is a re-checkable certificate — not a stale PDF, and not the AI's word. Read-only.")]), body]);
     V.getJSON(runsURL()).then(function (d) {
       RPT.runs = runsOf(d); RPT.loaded = true;   // scoped to the active engagement
       if (RPT.run && !RPT.runs.some(function (r) { return r.run_id === RPT.run; })) { RPT.run = ""; RPT.ev = null; RPT.cmp = null; }
@@ -11371,11 +11382,12 @@
   // ---- Assurance (C2): continuous proof / drift between two runs ----
   var ASR = { curr: "", prev: "", runs: [], data: null, telemetry: null, loaded: false };
   function renderAssurance(screen) {
-    var body = V.mount(screen, [h("div.screen-head", null, [
+    var body = h("div#assurance-body", null, h("div.empty", null, "Loading assurance"));
+    V.mount(screen, [h("div.screen-head", null, [
       h("h2", null, "Assurance — continuous proof / drift"),
       h("p.sub", null, "Diff the ORACLE-CONFIRMED fact set between two runs: a fact that newly appears is a "
         + "regression (a new exposure); one that disappears is a fix. Deterministic + offline — each run's "
-        + "certificates are re-fired, never re-attacked. A lead is never counted.")])]);
+        + "certificates are re-fired, never re-attacked. A lead is never counted.")]), body]);
     // B3: the live assurance/metrics PROJECTION over the signed spine (read-only, mints nothing). One-way —
     // no new authority, no scope widening. A separate fetch so a missing collector never blocks the drift view.
     ASR.telemetry = null;
@@ -11530,12 +11542,13 @@
   // ---- Proof Studio (B5): oracle-confirmed, signed, replayable exploit proofs ----
   var PRF = { run: "", runs: [], data: null, loaded: false };
   function renderProof(screen) {
-    var body = V.mount(screen, [h("div.screen-head", null, [
+    var body = h("div#proof-body", null, h("div.empty", null, "Loading proof"));
+    V.mount(screen, [h("div.screen-head", null, [
       h("h2", null, "Proof Studio"),
       h("p.sub", null, "Strix generates an exploit; VIGIL turns it into PROOF. A FACT here means a "
         + "deterministic oracle FIRED over the executor-captured raw bytes of the reproduction — not the "
         + "model's word. A LEAD is an honest 'not reproduced'. A DENIED proof had dangerous PoC content "
-        + "refused BEFORE any mint. Read-only.")])]);
+        + "refused BEFORE any mint. Read-only.")]), body]);
     V.getJSON(runsURL()).then(function (d) {
       PRF.runs = runsOf(d); PRF.loaded = true;   // scoped to the active engagement
       if (PRF.run && !PRF.runs.some(function (r) { return r.run_id === PRF.run; })) { PRF.run = ""; PRF.data = null; PRF.exported = null; }

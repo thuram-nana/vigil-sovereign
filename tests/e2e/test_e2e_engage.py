@@ -144,32 +144,100 @@ def test_assess_preview_and_launch_meridian(authed_page, base_url):
 
 
 # ── live ────────────────────────────────────────────────────────────────────
+def _live_sse_target(page, base_url):
+    """Choose a run to drive the Live SSE assertion, mirroring attachStream
+    (app.js:3068 blackboard / 3075 progress) and IMMUNE to the background
+    process-box poll green-wash (see the test docstring).
+
+    Returns {"run_id","stream","slug"} for a run that (a) actually opens an SSE —
+    stream=="progress", or "blackboard" with a slug — and (b) is NOT the run the
+    pbox poller follows (the newest RUNNING run, pboxPickRun app.js:11060). Prefers
+    a well-formed run (one carrying a slug) so the Live view renders a real
+    timeline; falls back to any SSE-opening non-pbox run. None if the stack has no
+    such run.
+    """
+    runs = page.evaluate(
+        """async ([base, tokKey]) => {
+            let tok = ""; try { tok = sessionStorage.getItem(tokKey) || ""; } catch (e) {}
+            const H = { "X-Requested-With": "vigil-ui" }; if (tok) H["X-SIGIL-Token"] = tok;
+            let d = null;
+            try { const r = await fetch(base + "/offense/api/runs", { headers: H, credentials: "same-origin" }); d = r.ok ? await r.json() : null; } catch (e) {}
+            return ((d || {}).runs || []).slice(0, 120).map(r => ({ run_id: r.run_id, stream: r.stream, slug: r.slug || "", status: r.status || "" }));
+        }""",
+        [base_url.rstrip("/"), SESSION_TOKEN_KEY],
+    )
+    if not runs:
+        return None
+    # the run the GLOBAL pboxPoll follows (newest RUNNING) opens its own SSE every
+    # 4s regardless of navigation — exclude it so the assertion can ONLY be met by
+    # the navigated run's attachStream.
+    pbox = next((r["run_id"] for r in runs if r["status"] == "running"), None)
+
+    def opens_sse(r):
+        if r["run_id"] == pbox:
+            return False
+        if r["stream"] == "blackboard" and r["slug"]:
+            return True
+        return r["stream"] == "progress"
+
+    cands = [r for r in runs if opens_sse(r)]            # newest-first, pbox excluded
+    if not cands:
+        return None
+    chosen = next((r for r in cands if r["slug"]), cands[0])  # prefer a well-formed (slug'd) run
+    return {"run_id": chosen["run_id"], "stream": chosen["stream"], "slug": chosen["slug"]}
+
+
+def _wait_live_rendered(page, timeout_ms: int = 15_000):
+    """Wait until #live-body shows the run timeline (not the 'Loading runs…'
+    empty). CSP-safe: polls page.evaluate of a FUNCTION — the harness CSP forbids
+    wait_for_function's string eval (see tests/e2e/conftest ops note)."""
+    import time
+
+    end = time.time() + timeout_ms / 1000
+    while time.time() < end:
+        if page.evaluate(
+            "() => { var b = document.querySelector('#live-body');"
+            " return !!b && b.textContent.indexOf('Loading runs') === -1; }"
+        ):
+            return
+        page.wait_for_timeout(200)
+    raise AssertionError("Live view never rendered the run timeline (stuck on 'Loading runs')")
+
+
 @pytest.mark.real_flow
 def test_live_run_appears_and_event_feed_streams(authed_page, base_url):
-    """Live view: a run appears and its event feed (SSE) opens.
+    """Live view: the RUN-SCOPED event feed (SSE) opens for the navigated run.
 
-    Nav-driven, UNPOLLED read: the live screen opens an EventSource on the
-    selected run (attachStream():3056). A loopback/scan run has stream "progress"
-    -> GET /offense/api/events?run=...&from_start=1; a blackboard engage run ->
-    GET /offense/api/blackboard?slug=... . Neither is on a setInterval (only
-    refreshRunMeta polls /api/runs, which we deliberately do not assert). We
-    assert the events SSE opens for the newest run.
+    attachStream (app.js:3068/3075) branches on the run's `stream`: a loopback/scan
+    "progress" run opens GET /offense/api/events?run=<id>&from_start=1; a blackboard
+    engage run opens GET /offense/api/blackboard?slug=<slug>.
+
+    SOUNDNESS (fixes a recorded green-wash). The GLOBAL process-box poller
+    (pboxPoll app.js:11078 -> pboxFollow -> SSE app.js:11002/10998) independently
+    opens the newest RUNNING run's stream every 4s, regardless of navigation. An
+    UNSCOPED "/offense/api/events" assertion is therefore satisfied by that
+    background poll for ANY action — and for a blackboard run it would never match
+    at all (the real read is /api/blackboard). So we (1) RUN-SCOPE the assertion to
+    a specific run, (2) pin it to a run the pbox poller is NOT following, and
+    (3) branch on that run's own stream exactly as attachStream does. The match
+    then proves the navigated run's attachStream fired — nothing else can satisfy
+    it.
     """
     page = authed_page
-    d = discover_runs(page, base_url)
-    newest = d.get("newest")
-    assert newest, "no runs on the stack to drive the Live view"
+    tgt = _live_sse_target(page, base_url)
+    assert tgt, "no run on the stack can drive a run-scoped, pbox-independent Live SSE"
+    run_id, stream, slug = tgt["run_id"], tgt["stream"], tgt.get("slug") or ""
 
-    # Navigate to the newest run explicitly so the SSE target is deterministic.
-    with assert_calls(page, "GET", "/offense/api/events", timeout_ms=20_000):
-        page.evaluate(f"location.hash = '#/live?run={newest}'")
+    if stream == "progress":
+        want = f"{OFFENSE_BASE}/api/events?run={run_id}"   # run-scoped (attachStream:3080)
+    else:
+        want = f"{OFFENSE_BASE}/api/blackboard?slug={slug}"  # slug-scoped (attachStream:3070)
+
+    with assert_calls(page, "GET", want, timeout_ms=20_000):
+        page.evaluate(f"location.hash = '#/live?run={run_id}'")
     page.wait_for_selector("#live-body", timeout=15_000)
     # Render signal: the run header/timeline replaced the "Loading runs…" empty.
-    page.wait_for_function(
-        "!!document.querySelector('#live-body') && "
-        "document.querySelector('#live-body').textContent.indexOf('Loading runs') === -1",
-        timeout=15_000,
-    )
+    _wait_live_rendered(page)
 
 
 # ── strix (DESTRUCTIVE control -> assert the gate) ──────────────────────────────
@@ -262,9 +330,9 @@ def test_proof_studio_read_and_export_gate(authed_page, base_url):
 
     with assert_calls(page, "GET", "/offense/api/proof/", timeout_ms=15_000):
         page.evaluate("location.hash = '#/proof'")
-    # NB: the screen-head h2 "Proof Studio" is transient — drawProof() re-mounts
-    # into the whole #screen (V.mount returns the element, body===screen) and
-    # wipes it. The stable post-load render signal is the "Proofs" summary card.
+    # Post-load render signal: the "Proofs" summary card. (drawProof() now redraws
+    # into a child #proof-body container, so the screen-head h2 "Proof Studio" also
+    # PERSISTS after load — the earlier title-wipe defect was fixed; see B2.)
     page.wait_for_selector("#screen h3:has-text('Proofs')", timeout=15_000)
 
     facts_run = d.get("proof_facts_run")
@@ -307,10 +375,13 @@ def test_report_evidence_read_and_dossier_build(authed_page, base_url):
 
     with assert_calls(page, "GET", "/offense/api/evidence/", timeout_ms=15_000):
         page.evaluate("location.hash = '#/report'")
-    # NB: the screen-head h2 "Client Report" is transient — drawReport() re-mounts
-    # into the whole #screen (V.mount returns the element, body===screen) and
-    # wipes it. The stable post-load render signal is the "Executive summary" card.
+    # Stable post-draw marker (proves the async draw ran): the "Executive summary" card.
     page.wait_for_selector("#screen h3:has-text('Executive summary')", timeout=15_000)
+    # FIXED (B2): drawReport now redraws into a child #report-body container, so the
+    # screen-head <h2> "Client Report" PERSISTS after the data load (it used to be
+    # wiped when drawReport re-mounted the whole #screen).
+    assert page.locator("#screen h2:has-text('Client Report')").count() == 1, \
+        "the <h2> 'Client Report' screen-head did not persist after the async draw (B2 regressed)"
 
     # Target a run that has evidence so the dossier build has content.
     with assert_calls(page, "GET", "/offense/api/evidence/", timeout_ms=15_000):
