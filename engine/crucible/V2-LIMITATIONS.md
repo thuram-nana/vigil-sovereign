@@ -1445,6 +1445,42 @@ lead, not the model's assertion) but **mints no FACT** through governed engage.
   boolean injection). Class-specific, truth-correct clause families machine-verified against a real engine of
   the class are that branch's blocking_work (no offline NoSQL/LDAP/XPath engine ships to verify them).
 
+## 32. M4 assurance consolidation — the TM-B capture frontier, and two bounded gate mechanisms
+
+Three honest boundaries landed with the M4 assurance consolidation. They are recorded here (and in
+`docs/limitations/inventory.json`) so none is overclaimed as closed.
+
+- **TM-B — the in-process capture frontier (named, not faked closed).** The reflection
+  (`REFLECTION_CONTEXT`) and in-process-capture families — the runner-owned gated HTTP re-drive
+  (`live/web_redrive.py`) that retains the in-band HTTP response operand, and the DOM-execution canary the
+  `dom_execution_oracle` re-fires over — are SOUND against the normal gated pipeline and function-correct over
+  the retained evidence: an offline re-verify re-derives the verdict from the captured bytes exactly. The
+  frontier is that a FULLY-COMPROMISED in-process offense-plane producer could fabricate the captured operand
+  before the oracle re-fires — the oracle then re-fires faithfully over a forged input. This is not the normal
+  threat model (the offense plane is keyless and mints no trusted record; the sovereign plane verifies
+  signatures without loading offense code), so the class is not underclaimed — it IS sound against every
+  non-compromised pipeline; the residual is a fully-compromised offense plane. The sound close is a NON-OFFENSE
+  capture-attestation collector (the VF-2b pattern applied to the in-band HTTP response); signing the injection
+  in-band would be theater, since the compromised producer would sign the forgery too. Same irreducible
+  owner-vault trust base as every signed artifact. Tracked as `LIMIT-capture-attestation-offense-plane`.
+
+- **M4.3 real-world actuator — declined / operator-gated.** A fully-autonomous real-world actuator (one-click
+  arming of a live offensive action) was declined in review; any live offensive action stays operator-gated
+  behind the per-action owner-signed approval (`integration/vigil_integration/live/approval_token.py`) and,
+  for destructive / high-blast actions, the m-of-n destruction quorum. No auto-arming actuator ships in
+  first-party code.
+
+- **M4.4 witness-quorum ACTION gate — built, DEFAULT-OFF.** The optional witness-quorum conjunct (6c) in the
+  authority gate (`authority/gate.py::authorize_action`, armed through
+  `authority/witness_quorum_gate.py::witness_quorum_predicate`) can DEMOTE an otherwise-authorized action to
+  denied (denial code `witness_quorum`) when fewer than N-of-M independent oracle-witnesses corroborate. It is
+  opt-in, demote-only, runs only as the final conjunct after every other leg (the 6b blast veto included) has
+  cleared, is byte-identical to the gate when unarmed (so `make gate` is unaffected), and adds no new
+  `OracleKind` (still 49) and no `_ALL_ORACLES` change (still 15). It is distinct from the continuous-assurance
+  witness (`attestation_witness.py`, which countersigns a *reprove* series head, not a live ACTION). Threading
+  it through every production engagement caller is named follow-on work; tracked as
+  `LIMIT-witness-quorum-action-gate-default-off`.
+
 ## What the operator should do next
 
 In rough order:

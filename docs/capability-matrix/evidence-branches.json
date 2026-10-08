@@ -1136,7 +1136,7 @@
         "engine/crucible/framework/v2/scanner/checks.py:MarkerReflectionCheck",
         "integration/vigil_integration/live/runtime_redrive.py:runtime_redrive"
       ],
-      "blocking_work": "A sound reflected-xss CLEAN needs (1) the response-body decode-completeness guarantee shared with open_redirect.body_markup so a non-firing is a channel-confirmed negative, AND (2) exhaustive insertion-surface coverage (path/cookie/body/JSON params, not only the query) plus DOM-rendered contexts (headless render), since a marker inert in the raw body can still execute after client-side templating.",
+      "blocking_work": "A sound reflected-xss CLEAN needs (1) the response-body decode-completeness guarantee shared with open_redirect.body_markup so a non-firing is a channel-confirmed negative, AND (2) exhaustive insertion-surface coverage (path/cookie/body/JSON params, not only the query) plus DOM-rendered contexts (headless render), since a marker inert in the raw body can still execute after client-side templating. TM-B frontier (orthogonal to the CLEAN gap above): the reflected/DOM-execution operand is captured in-process by the keyless offense plane, so a fully-compromised in-process producer could fabricate it before the oracle re-fires — sound against the normal gated pipeline, with the owed close being the non-offense capture-attestation collector recorded as LIMIT-capture-attestation-offense-plane.",
       "oracle_version": "reflection_context",
       "control_requirements": [
         "warden_active_recon_gate",
@@ -1307,6 +1307,7 @@
       "target_fact_capable": true,
       "target_clean_capable": false,
       "target_downgrade_rationale": "Proving the ABSENCE of a DOM-XSS sink is a coverage-complete capability over every client source, every gadget shape, and every runtime-assembled sink across every reachable rendered page (a sink built at runtime never appears literally), not this per-probe achieved-execution re-drive's target, so CLEAN-capability is deliberately not pursued on this branch.",
+      "blocking_work": "TM-B frontier (orthogonal to the coverage bound above): the execution operand (the Runtime.bindingCalled canary) is captured in-process by the keyless offense plane, so a fully-compromised in-process producer could fabricate it before dom_execution_oracle re-fires — sound against the normal gated pipeline (the offense plane is keyless and mints no trusted record), with the owed close being the non-offense capture-attestation collector recorded as LIMIT-capture-attestation-offense-plane.",
       "oracle_version": "dom_execution",
       "control_requirements": [
         "warden_active_recon_gate",

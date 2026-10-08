@@ -359,6 +359,40 @@ job.
 
 ---
 
+### M4 assurance consolidation — one named capture frontier and two built-but-bounded mechanisms
+
+Three M4 items are recorded here so their honest boundary stays visible beside the LEADs. None is a false
+FACT and none is underclaimed; each is bounded for a named reason.
+
+* **TM-B — the in-process capture frontier.** The reflection (`REFLECTION_CONTEXT`) and in-process-capture
+  families — e.g. the runner-owned gated HTTP re-drive (`web_redrive`) and the DOM-execution canary re-fired
+  by `dom_execution_oracle` — are SOUND against the normal gated pipeline and function-correct over the
+  retained evidence: an offline re-verify re-derives the verdict from the captured bytes. The named frontier
+  is that a *fully-compromised* in-process offense-plane producer could fabricate the captured operand before
+  the oracle ever re-fires. That is **not** the normal threat model — the offense plane is keyless and mints
+  no trusted record, and the sovereign plane verifies signatures without loading offense code — so the class
+  is sound against every non-compromised pipeline. The owed sound close is a NON-OFFENSE capture-attestation
+  collector (the VF-2b pattern applied to the in-band HTTP response); signing the injection in-band would be
+  theater, since the compromised producer would sign the forgery too. It is the same irreducible owner-vault
+  trust base as every signed artifact, recorded as `LIMIT-capture-attestation-offense-plane` in
+  `docs/limitations/inventory.json`.
+
+* **M4.3 real-world actuator — declined / operator-gated.** A fully-autonomous real-world actuator (one-click
+  arming of a live offensive action) was declined in review; any live offensive action stays operator-gated
+  behind the per-action owner-signed approval (`live/approval_token.py`) and, for destructive / high-blast
+  actions, the m-of-n destruction quorum. VIGIL ships no auto-arming actuator in first-party code — the same
+  posture as the eight refusals above.
+
+* **M4.4 witness-quorum ACTION gate — built, DEFAULT-OFF.** The optional witness-quorum conjunct (6c) in
+  `authorize_action` (armed through `authority/witness_quorum_gate.py` and evaluated by
+  `witness_quorum_predicate`) can DEMOTE an otherwise-authorized action to denied (`witness_quorum`) when
+  fewer than N-of-M independent oracle-witnesses corroborate it. It is opt-in, demote-only, runs only as the
+  final conjunct after every other leg (the 6b blast veto included) has cleared, is byte-identical to the gate
+  when unarmed, and adds no `OracleKind` (still 49) and no `_ALL_ORACLES` change (still 15). It is distinct
+  from the continuous-assurance witness (`attestation_witness.py`, which countersigns a *reprove* series head,
+  not a live ACTION). Threading it through every production caller is named follow-on work, recorded as
+  `LIMIT-witness-quorum-action-gate-default-off`.
+
 ## What this list is *not*
 
 It is not a claim that VIGIL is safe against everything, nor that these are the *only* things it does
