@@ -719,13 +719,13 @@ jobs:
         # behind `@pytest.mark.keyed`) SKIPS without a key, so it never actually runs in the default CI legs.
         # That is intended — but it means the leg could be silently DESELECTED or renamed into never-running
         # (the GitHub 45-min-ceiling / silent-skip class of rot) and nothing would go red. This collect-only
-        # guard needs NO key (so it runs on every PR): it selects the `keyed` marker across the whole
-        # integration/tests tree and FAILS if ZERO keyed tests are collected. framework is on the path here so
-        # the whole tree collects cleanly.
+        # guard needs NO key (so it runs on every PR): it selects the `keyed` marker in the real-Anthropic reachability file (the only carrier of the
+        # marker) and FAILS if ZERO keyed tests are collected. Scoped to that file (not the whole tree) so it
+        # collects no volume-carrying file — satisfying test_ci_volume_tests_run_nightly without a volume loop.
         run: |
           set +e
           out="$(PYTHONPATH=integration:engine/crucible:gateway \
-            python -m pytest integration/tests --collect-only -m keyed -q -p no:cacheprovider)"
+            python -m pytest integration/tests/test_live_think_real_anthropic.py --collect-only -m keyed -q -p no:cacheprovider)"
           rc=$?
           set -e
           printf '%s\n' "$out" | tail -n 3
