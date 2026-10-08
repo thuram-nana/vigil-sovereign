@@ -575,28 +575,49 @@ PY
 # PHASE 5 — start the UI (vigil-command.service) + docker bring-up (vigil-bringup)
 # =============================================================================
 phase_ui(){
-  banner "PHASE 5/9  START THE UI (systemd --user)"
-  # Ensure the units are installed (bootstrap --production copies them; re-assert).
-  local unit_dir="$HOME/.config/systemd/user"
-  mkdir -p "$unit_dir"
-  local u; for u in vigil-command.service vigil-bringup.service; do
-    if [ ! -f "$unit_dir/$u" ] && [ -f "$REPO/infra/systemd/$u" ]; then
-      cp "$REPO/infra/systemd/$u" "$unit_dir/$u"; info "installed $u"
+  if [ "${VIGIL_ONESHOT_UI_FOREGROUND:-0}" = 1 ]; then
+    # TPM/tss path. systemd --user cannot add the 'tss' group to the unit without a
+    # full re-login (SupplementaryGroups fails 216/GROUP), so a systemd vigil-command
+    # could not UNSEAL the TPM-sealed vault at runtime. Run `vigil up` as a FOREGROUND
+    # child of THIS shell (invoked under `sg tss`) so the uiproxy + the sigil/console/
+    # api backends inherit TPM access. Trade-off: no systemd auto-restart THIS run; a
+    # full re-login later lets the vigil-command unit take over with tss for persistence.
+    banner "PHASE 5/9  START THE UI (foreground; TPM/tss-compatible)"
+    mkdir -p "$REPO/.vigil-live"
+    step "docker services (vigil services up --all; best-effort, parallel)"
+    if "$VIGIL" services up --all >"$REPO/.vigil-live/services-oneshot.log" 2>&1; then
+      ok "docker services up (gateway/qdrant)"
+    else
+      warn "vigil services up had issues (best-effort; see .vigil-live/services-oneshot.log) — later gates arbitrate"
     fi
-  done
-  user_systemctl daemon-reload || true
+    step "starting the UI: vigil up --port $UI_PORT --no-browser (nohup, current credentials)"
+    nohup "$VIGIL" up --port "$UI_PORT" --no-browser >"$REPO/.vigil-live/ui-oneshot.log" 2>&1 &
+    UI_FG_PID=$!; disown "$UI_FG_PID" 2>/dev/null || true
+    info "vigil up pid=$UI_FG_PID (log: .vigil-live/ui-oneshot.log)"
+  else
+    banner "PHASE 5/9  START THE UI (systemd --user)"
+    # Ensure the units are installed (bootstrap --production copies them; re-assert).
+    local unit_dir="$HOME/.config/systemd/user"
+    mkdir -p "$unit_dir"
+    local u; for u in vigil-command.service vigil-bringup.service; do
+      if [ ! -f "$unit_dir/$u" ] && [ -f "$REPO/infra/systemd/$u" ]; then
+        cp "$REPO/infra/systemd/$u" "$unit_dir/$u"; info "installed $u"
+      fi
+    done
+    user_systemctl daemon-reload || true
 
-  # linger so the stack survives logout/reboot (production persistence). Best-effort.
-  if loginctl enable-linger "$USER" >/dev/null 2>&1; then ok "linger enabled for $USER (starts at boot)"
-  else warn "could not enable linger (may need 'sudo loginctl enable-linger $USER') — the UI will still run this session, just not persist across a full logout."; fi
+    # linger so the stack survives logout/reboot (production persistence). Best-effort.
+    if loginctl enable-linger "$USER" >/dev/null 2>&1; then ok "linger enabled for $USER (starts at boot)"
+    else warn "could not enable linger (may need 'sudo loginctl enable-linger $USER') — the UI will still run this session, just not persist across a full logout."; fi
 
-  step "enable + start vigil-command.service (vigil up --port $UI_PORT --no-browser) and vigil-bringup.service"
-  req "enable+start vigil-command.service" "inspect 'systemctl --user status vigil-command' and 'journalctl --user -u vigil-command'" \
-    -- user_systemctl enable --now vigil-command.service
-  # vigil-bringup is best-effort (docker side, parallel) — never a hard gate.
-  user_systemctl enable --now vigil-bringup.service >/dev/null 2>&1 \
-    && ok "vigil-bringup.service started (docker services/images, best-effort, parallel)" \
-    || warn "vigil-bringup.service did not start cleanly (best-effort; docker side only)"
+    step "enable + start vigil-command.service (vigil up --port $UI_PORT --no-browser) and vigil-bringup.service"
+    req "enable+start vigil-command.service" "inspect 'systemctl --user status vigil-command' and 'journalctl --user -u vigil-command'" \
+      -- user_systemctl enable --now vigil-command.service
+    # vigil-bringup is best-effort (docker side, parallel) — never a hard gate.
+    user_systemctl enable --now vigil-bringup.service >/dev/null 2>&1 \
+      && ok "vigil-bringup.service started (docker services/images, best-effort, parallel)" \
+      || warn "vigil-bringup.service did not start cleanly (best-effort; docker side only)"
+  fi
 
   step "waiting for /readyz on 127.0.0.1:$UI_PORT (bounded, fail-closed)"
   local i code
@@ -606,8 +627,13 @@ phase_ui(){
     sleep 1
   done
   warn "last /readyz status: ${code:-none}"
-  info "recent UI logs:"; user_systemctl --no-pager status vigil-command.service 2>&1 | sed 's/^/      /' | tail -n 12 || true
-  die "/readyz did not reach 200 within ${READYZ_RETRIES}s. The UI unit self-gates on the production posture; if it refused, re-check PHASE 4. Inspect 'journalctl --user -u vigil-command'."
+  if [ "${VIGIL_ONESHOT_UI_FOREGROUND:-0}" = 1 ]; then
+    info "recent UI log:"; tail -n 20 "$REPO/.vigil-live/ui-oneshot.log" 2>/dev/null | sed 's/^/      /' || true
+    die "/readyz did not reach 200 within ${READYZ_RETRIES}s (foreground UI). Inspect .vigil-live/ui-oneshot.log; vigil up self-gates on the production posture, so re-check PHASE 4 if it refused."
+  else
+    info "recent UI logs:"; user_systemctl --no-pager status vigil-command.service 2>&1 | sed 's/^/      /' | tail -n 12 || true
+    die "/readyz did not reach 200 within ${READYZ_RETRIES}s. The UI unit self-gates on the production posture; if it refused, re-check PHASE 4. Inspect 'journalctl --user -u vigil-command'."
+  fi
 }
 
 # =============================================================================
