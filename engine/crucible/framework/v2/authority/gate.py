@@ -18,7 +18,11 @@ Step 6b is DEFAULT-OFF and ADVISORY: it runs ONLY when the caller injects both a
 otherwise cleared the action (so a denied action keeps its original code and the predictor is
 not even consulted). The predictor is a read-only forward world-model query injected as a
 callable — the gate never imports the world model, which informs the decision but mints no FACT
-and is no oracle input. Absent those two kwargs the decision is byte-identical to before.
+and is no oracle input. Absent those two kwargs the decision is byte-identical to before. An
+operator may lift the 6b veto for THIS action only by injecting `blast_radius_ack` (a verified,
+action-bound acknowledgement, the structural twin of the 6c ack); absent it an over-ceiling action
+is denied. The ack is consulted ONLY once the veto has already fired, so wiring it never changes
+the default path.
 
 Step 6c is DEFAULT-OFF and DEMOTE-ONLY, and mirrors 6b exactly. It runs ONLY when the caller
 injects `witness_quorum_fn` (the re-executed oracle-witness quorum evaluator), and only AFTER
@@ -129,6 +133,7 @@ def authorize_action(
     now: datetime | None = None,
     blast_radius_fn: Callable[[ActionRequest], BlastRadiusVerdict] | None = None,
     blast_ceiling: float | None = None,
+    blast_radius_ack: Callable[[ActionRequest, BlastRadiusVerdict], bool] | None = None,
     witness_quorum_fn: Callable[[ActionRequest], WitnessQuorumVerdict] | None = None,
     witness_quorum_ack: Callable[[ActionRequest, WitnessQuorumVerdict], bool] | None = None,
 ) -> AuthorizationDecision:
@@ -223,11 +228,17 @@ def authorize_action(
     if blast_radius_fn is not None and blast_ceiling is not None:
         verdict = blast_radius_fn(request)
         if verdict.incremental_blast > blast_ceiling:
-            return decide(
-                False, AuthorityState.ACTIVE,
-                f"blast-radius veto: action would newly expose crown jewels worth "
-                f"{verdict.incremental_blast} (> ceiling {blast_ceiling}): "
-                f"{verdict.newly_reachable_jewels}", "blast_radius")
+            if blast_radius_ack is None or not blast_radius_ack(request, verdict):
+                return decide(
+                    False, AuthorityState.ACTIVE,
+                    f"blast-radius veto: action would newly expose crown jewels worth "
+                    f"{verdict.incremental_blast} (> ceiling {blast_ceiling}): "
+                    f"{verdict.newly_reachable_jewels}", "blast_radius")
+            # else: a valid, action-bound operator ACK (the structural twin of the 6c
+            # PROCEED-BELOW-QUORUM ack) lifts the blast-radius veto for THIS action only. The ACTION
+            # proceeds; nothing is promoted and nothing is minted here (the gate stays pure — it mints
+            # no FACT/cert/spine row; any override audit event is emitted by the injected ack itself,
+            # which holds the {action, grant_id, gate, blast verdict} context — see FIX E).
 
     # 6c. witness-quorum veto — OPT-IN, DEFAULT-OFF, DEMOTE-ONLY. Mirrors 6b: runs only when an
     #     evaluator is injected; absent it this block is skipped and the decision is byte-identical to
@@ -295,6 +306,7 @@ def require_authorization(
     now: datetime | None = None,
     blast_radius_fn: Callable[[ActionRequest], BlastRadiusVerdict] | None = None,
     blast_ceiling: float | None = None,
+    blast_radius_ack: Callable[[ActionRequest, BlastRadiusVerdict], bool] | None = None,
     witness_quorum_fn: Callable[[ActionRequest], WitnessQuorumVerdict] | None = None,
     witness_quorum_ack: Callable[[ActionRequest, WitnessQuorumVerdict], bool] | None = None,
 ) -> AuthorizationDecision:
@@ -307,6 +319,7 @@ def require_authorization(
     decision = authorize_action(
         authority, request, killswitch=killswitch, actions_taken=actions_taken, now=now,
         blast_radius_fn=blast_radius_fn, blast_ceiling=blast_ceiling,
+        blast_radius_ack=blast_radius_ack,
         witness_quorum_fn=witness_quorum_fn, witness_quorum_ack=witness_quorum_ack,
     )
     if not decision.allowed:

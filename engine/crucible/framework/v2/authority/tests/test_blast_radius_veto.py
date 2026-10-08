@@ -238,3 +238,60 @@ def test_the_gate_module_imports_neither_the_world_model_nor_the_oracle_layer() 
             if "worldmodel" in mod or "verify" in mod or "oracle" in mod:
                 offenders.append(mod)
     assert not offenders, f"authority/gate.py must not import the world model / oracle layer: {offenders}"
+
+
+# --- 6b ACK (M-11 eval-grant): an action-bound operator ack lifts the veto for THIS action only -----
+
+def test_blast_ack_none_is_byte_identical_to_the_pre_ack_gate() -> None:
+    """Default path: blast_radius_ack omitted / None ⇒ an over-ceiling action is DENIED exactly as before
+    (the new kwarg defaults None ⇒ byte-identical)."""
+    d_omit = authorize_action(_authority(), _req(), now=_NOW, blast_radius_fn=_fn(50.0), blast_ceiling=10.0)
+    d_none = authorize_action(_authority(), _req(), now=_NOW, blast_radius_fn=_fn(50.0), blast_ceiling=10.0,
+                              blast_radius_ack=None)
+    assert d_omit.allowed is False and d_omit.denial_code == "blast_radius"
+    assert (d_none.allowed, d_none.denial_code, d_none.state) == (False, "blast_radius", AuthorityState.ACTIVE)
+
+
+def test_blast_ack_returning_true_lifts_the_veto_for_this_action() -> None:
+    seen = {}
+
+    def ack(request, verdict) -> bool:
+        seen["target"] = request.target
+        seen["blast"] = verdict.incremental_blast
+        return True
+
+    d = authorize_action(_authority(), _req(), now=_NOW, blast_radius_fn=_fn(50.0, ["datastore:crown"]),
+                         blast_ceiling=10.0, blast_radius_ack=ack)
+    assert d.allowed is True and d.denial_code == ""
+    assert seen == {"target": "https://app.example.com/x", "blast": 50.0}
+
+
+def test_blast_ack_returning_false_still_denies() -> None:
+    d = authorize_action(_authority(), _req(), now=_NOW, blast_radius_fn=_fn(50.0), blast_ceiling=10.0,
+                         blast_radius_ack=lambda r, v: False)
+    assert d.allowed is False and d.denial_code == "blast_radius"
+
+
+def test_blast_ack_is_not_consulted_when_the_veto_does_not_fire() -> None:
+    def ack(r, v):
+        raise AssertionError("ack consulted though the veto never fired")
+
+    d = authorize_action(_authority(), _req(), now=_NOW, blast_radius_fn=_fn(3.0), blast_ceiling=10.0,
+                         blast_radius_ack=ack)
+    assert d.allowed is True
+
+
+def test_blast_ack_is_not_consulted_for_a_prior_denial() -> None:
+    def ack(r, v):
+        raise AssertionError("ack consulted for an action denied by a prior check")
+
+    # out-of-scope wins; the blast veto (and its ack) are never reached
+    d = authorize_action(_authority(), _req(target="https://evil.invalid/x"), now=_NOW,
+                         blast_radius_fn=_fn(50.0), blast_ceiling=10.0, blast_radius_ack=ack)
+    assert d.allowed is False and d.denial_code == "out_of_scope"
+
+
+def test_require_authorization_forwards_the_blast_ack() -> None:
+    d = require_authorization(_authority(), _req(), now=_NOW, blast_radius_fn=_fn(99.0), blast_ceiling=10.0,
+                              blast_radius_ack=lambda r, v: True)
+    assert d.allowed is True

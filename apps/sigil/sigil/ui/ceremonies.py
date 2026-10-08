@@ -144,6 +144,79 @@ def mesh_revoke(device_id, pubkey) -> dict:
     return _run(["mesh", "revoke", device_id, pubkey], timeout=60)
 
 
+# --- OWNER-ONLY M-11 EvalCapabilityGrant ceremony (route gates `secrets`) — the "eval button". Every arg is
+#     STRICTLY validated BEFORE it reaches argv (slug/username via the device-id regex, pubkey as base64-32B,
+#     overrides ⊆ the closed enum, pop/target non-flag) so none can be read as a flag. The owner key is sealed
+#     host-side and never crosses; only the audited `sigil eval-grant` verb's secret-free stdout returns -----
+_EVAL_OVERRIDES = frozenset({"witness_quorum", "blast_veto", "containment_preview"})
+# base64url-ish signature token (standard or url-safe base64; NO leading '-'): never a flag.
+_B64_SIG_RE = re.compile(r"^[A-Za-z0-9+/=_-]{1,512}\Z")
+# a target URL/host: a leading alnum or scheme (never a flag), bounded, no whitespace/control.
+_TARGET_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:/%?&=~@+-]{0,511}\Z")
+
+
+def eval_grant_status(engagement) -> dict:
+    """`sigil eval-grant status --engagement <slug>` — a fail-closed READ: armed? engagement/target/budget/
+    void-conditions. No signing. The slug is validated (a leading-alnum slug; never a flag)."""
+    if not isinstance(engagement, str) or not _DEVICE_ID_RE.match(engagement):
+        return {"ok": False, "error": "engagement must be a slug: a leading letter/digit then [A-Za-z0-9_.-], <=64"}
+    return _run(["eval-grant", "status", "--engagement", engagement], timeout=30)
+
+
+def eval_grant_revoke(engagement, reason="") -> dict:
+    """`sigil eval-grant revoke --engagement <slug>` — owner-sign a grant revocation (the fail-safe direction).
+    The slug is strictly validated; the optional reason is passed as one positional-after-flag argv element."""
+    if not isinstance(engagement, str) or not _DEVICE_ID_RE.match(engagement):
+        return {"ok": False, "error": "engagement must be a slug: a leading letter/digit then [A-Za-z0-9_.-], <=64"}
+    argv = ["eval-grant", "revoke", "--engagement", engagement]
+    if reason:
+        if not isinstance(reason, str) or len(reason) > 256 or any(ord(c) < 0x20 for c in reason):
+            return {"ok": False, "error": "reason must be <=256 printable chars"}
+        argv += ["--reason", reason]
+    return _run(argv, timeout=60)
+
+
+def eval_grant_arm(engagement, target, overrides, evaluator, evaluator_pubkey, evaluator_pop,
+                   max_covered_actions="0", charter_hash="", environment="live", reason="") -> dict:
+    """`sigil eval-grant arm ...` — owner-sign + publish an EvalCapabilityGrant. Requires a DISTINCT owner-
+    enrolled evaluator's FRESH PoP over this grant's core (produced out-of-band; the keys never enter the
+    browser). EVERY argument is validated here BEFORE argv so none can be a flag, and the override tokens are
+    checked against the CLOSED enum (the never-liftable floors are not members and can never be named)."""
+    if not isinstance(engagement, str) or not _DEVICE_ID_RE.match(engagement):
+        return {"ok": False, "error": "engagement must be a slug: a leading letter/digit then [A-Za-z0-9_.-], <=64"}
+    if not isinstance(target, str) or not _TARGET_RE.match(target):
+        return {"ok": False, "error": "target must be a leading-alnum URL/host (no leading '-', no whitespace), <=512"}
+    toks = [t.strip() for t in str(overrides or "").split(",") if t.strip()] if not isinstance(overrides, (list, tuple)) \
+        else [str(t).strip() for t in overrides if str(t).strip()]
+    if not toks or any(t not in _EVAL_OVERRIDES for t in toks):
+        return {"ok": False, "error": f"overrides must be a non-empty subset of {sorted(_EVAL_OVERRIDES)} "
+                                      "(the never-liftable floors can never be granted)"}
+    if not isinstance(evaluator, str) or not _DEVICE_ID_RE.match(evaluator):
+        return {"ok": False, "error": "evaluator must be a slug username: leading letter/digit then [A-Za-z0-9_.-], <=64"}
+    if not _valid_pubkey(evaluator_pubkey):
+        return {"ok": False, "error": "evaluator-pubkey must be base64 of a 32-byte Ed25519 key"}
+    if not isinstance(evaluator_pop, str) or not _B64_SIG_RE.match(evaluator_pop):
+        return {"ok": False, "error": "evaluator-pop must be a base64 signature token (no leading '-'), <=512"}
+    mca = str(max_covered_actions)
+    if not re.fullmatch(r"[0-9]{1,12}", mca):
+        return {"ok": False, "error": "max-covered-actions must be a non-negative integer"}
+    if environment not in ("live", "twin", "staging"):
+        return {"ok": False, "error": "environment must be one of live|twin|staging"}
+    argv = ["eval-grant", "arm", "--engagement", engagement, "--target", target,
+            "--overrides", ",".join(toks), "--evaluator", evaluator,
+            "--evaluator-pubkey", evaluator_pubkey, "--evaluator-pop", evaluator_pop,
+            "--max-covered-actions", mca, "--environment", environment]
+    if charter_hash:
+        if not re.fullmatch(r"[0-9a-fA-F]{1,128}", str(charter_hash)):
+            return {"ok": False, "error": "charter-hash must be hex, <=128"}
+        argv += ["--charter-hash", str(charter_hash)]
+    if reason:
+        if not isinstance(reason, str) or len(reason) > 256 or any(ord(c) < 0x20 for c in reason):
+            return {"ok": False, "error": "reason must be <=256 printable chars"}
+        argv += ["--reason", reason]
+    return _run(argv, timeout=60)
+
+
 # --- OWNER-ONLY offense delegation (route gates `secrets`) — the owner blesses the OFFENSE plane's PUBLIC
 #     identity. The identity JSON reaches argv only via a SERVER-controlled temp file (never a user path);
 #     the certs written are PUBLIC (no private key). The owner key signs on the host. ------------------

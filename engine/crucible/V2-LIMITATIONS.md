@@ -1477,9 +1477,13 @@ Three honest boundaries landed with the M4 assurance consolidation. They are rec
   opt-in, demote-only, runs only as the final conjunct after every other leg (the 6b blast veto included) has
   cleared, is byte-identical to the gate when unarmed (so `make gate` is unaffected), and adds no new
   `OracleKind` (still 49) and no `_ALL_ORACLES` change (still 15). It is distinct from the continuous-assurance
-  witness (`attestation_witness.py`, which countersigns a *reprove* series head, not a live ACTION). Threading
-  it through every production engagement caller is named follow-on work; tracked as
-  `LIMIT-witness-quorum-action-gate-default-off`.
+  witness (`attestation_witness.py`, which countersigns a *reprove* series head, not a live ACTION). The conjunct is now
+  wired into the live engagement caller `build_offense_gate`
+  (`integration/vigil_integration/conjunctive_gate.py`, via `veracity/witness_quorum.py::load_quorum_config`),
+  unconditionally of any eval grant. It stays DEFAULT-OFF: `load_quorum_config` yields an inactive policy
+  unless the operator supplies a witness-quorum policy, so the gate is byte-identical until armed. The
+  remaining follow-on is per-deployment policy configuration (the critical-class set and N), not wiring;
+  tracked as `LIMIT-witness-quorum-action-gate-default-off`.
 
 ## What the operator should do next
 

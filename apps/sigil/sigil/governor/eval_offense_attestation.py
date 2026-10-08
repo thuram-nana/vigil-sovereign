@@ -247,6 +247,19 @@ class EvalOffenseAttestation:
         }
         seq = self.store.append(kind="event", source="governor", actor="WARDEN", payload=payload)
         self._publish(str(engagement_slug))
+        # FIX C1 (engagement-close site): revoking the covering attestation CLOSES the engagement's eval, so
+        # any EvalCapabilityGrant that rode inside it must not outlive it — publish a grant-revoke to the seam
+        # for this engagement too, so the keyless offense verifier (which, for TWIN/STAGING, does not consult
+        # this attestation) sees the void. Best-effort + fail-safe: a NO-OP when no grant was published.
+        try:
+            from .eval_capability_grant import EvalCapabilityGrant
+            _g = EvalCapabilityGrant(self.store, owner_key=self.owner_key, trusted_pubkey=self.trusted_pubkey)
+            if _g.state(engagement_slug=str(engagement_slug), now=0.0).granted:
+                _g.revoke(engagement_slug=str(engagement_slug), by=by,
+                          reason=f"covering eval-offense attestation revoked: {reason}" if reason
+                          else "covering eval-offense attestation revoked")
+        except Exception:  # noqa: BLE001 — a grant-revoke failure must never prevent the attestation revoke
+            pass
         return seq
 
     # -- the fail-closed fold (NEVER cached — the verdict is time-dependent) ---------------------------

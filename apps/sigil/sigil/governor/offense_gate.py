@@ -93,12 +93,26 @@ class OffenseGate:
         return self.store.append(kind="event", source="governor", actor="WARDEN", payload=payload)
 
     def close_gate(self, *, by: str = "owner", reason: str = "") -> int:
-        """CLOSE offense (the fail-safe direction — honoured whoever signs it, like kill engage)."""
+        """CLOSE offense (the fail-safe direction — honoured whoever signs it, like kill engage).
+
+        FIX C1: closing offense ALSO publishes a grant-REVOKE to the eval-capability-grant seam for every
+        currently-granted engagement, so the KEYLESS offense verifier — which cannot read sovereign
+        OffenseGate state — sees the void via the seam (a lingering grant must never outlive an offense
+        close). Best-effort and fail-safe: with NO grant ever published it is a NO-OP (byte-identical to
+        today); a revoke failure never prevents the close."""
         core = {"signal": SIGNAL, "state": "closed", "charter_id": "", "charter_hash": "",
                 "not_after": 0.0, "issued_at": 0.0}
         payload = {**signed_payload(core, self.owner_key), "by": by, "reason": reason,
                    "tier": "A0", "decision": "auto"}
-        return self.store.append(kind="event", source="governor", actor="WARDEN", payload=payload)
+        seq = self.store.append(kind="event", source="governor", actor="WARDEN", payload=payload)
+        try:
+            from .eval_capability_grant import revoke_grants_on_close
+            revoke_grants_on_close(self.store, owner_key=self.owner_key,
+                                   trusted_pubkey=self.trusted_pubkey, by=by,
+                                   reason=f"offense-gate close: {reason}" if reason else "offense-gate close")
+        except Exception:  # noqa: BLE001 — a grant-revoke failure must never prevent the fail-safe close
+            pass
+        return seq
 
     # -- the fail-closed fold (never cached — the verdict is time-dependent) -------------------
 

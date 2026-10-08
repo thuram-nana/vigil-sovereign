@@ -640,6 +640,113 @@ def cmd_delegate_offense(a) -> None:
           f"--owner-pubkey {owner_pubkey()} --delegation <home>/offense-spine.deleg.json --scope {a.scope}")
 
 
+def cmd_eval_grant(a) -> None:
+    """M-11 — the owner half of the EvalCapabilityGrant ("eval button"): arm / revoke / status.
+
+    `arm` owner-signs a grant that PRE-AUTHORIZES lifting a CLOSED-ENUM set of OPT-IN, DEMOTE-ONLY authority-
+    gate vetoes (witness_quorum / blast_veto / containment_preview) for ONE engagement/target, and publishes
+    the signed record + owner SEAL to the shared seam the KEYLESS offense plane verifies. It requires BOTH the
+    owner signature (the persisted sealed owner key, host-side) AND a FRESH evaluator proof-of-possession over
+    THIS grant's core (produced out-of-band by a DISTINCT owner-enrolled evaluator — never reused from the
+    covering attestation), and a verified covering EvalOffenseAttestation. `revoke` is the fail-safe direction.
+    `status` is a fail-closed read. The owner private key never leaves the host."""
+    import time as _time
+    from .governor.eval_capability_grant import ALLOWED_OVERRIDES, EvalCapabilityGrant
+    from .governor.identity import ensure_owner_keypair, owner_keypair, owner_pubkey
+    store = SpineStore()
+
+    if a.action == "status":
+        g = EvalCapabilityGrant(store)
+        st = g.state(engagement_slug=a.engagement, target=(a.target or None), now=_time.time())
+        print(json.dumps({
+            "engagement": a.engagement,
+            "armed": st.granted,
+            "reason": st.reason,
+            "target": st.target,
+            "allowed_gate_overrides": list(st.allowed_gate_overrides),
+            "max_covered_actions": st.max_covered_actions,
+            "evaluator_pubkey": st.evaluator_pubkey,
+            "void_conditions": [
+                "owner revoke (sigil eval-grant revoke)",
+                "offense-gate close / covering eval-offense attestation revoke",
+                "per-engagement kill-switch",
+                "signed engagement scope",
+                "covering eval-offense attestation not_after (enforced at arm for LIVE)",
+            ],
+            "budget_note": ("max_covered_actions is signed+PoP-bound and attributable, but a durable spine-"
+                            "anchored auto-void was not wired this slice (the resettable process counter is "
+                            "NOT used); the void_conditions above are the enforced durable ceiling."),
+        }, indent=2))
+        return
+
+    # Fail CLOSED on a locked/tampered vault (mirror `mesh`): never mint a fresh owner identity over an
+    # existing one — that would FORK the trust root and sign under a key no verifier trusts.
+    owner = owner_keypair()
+    if owner is None:
+        if owner_pubkey() is not None:
+            print("!! the owner key is present but its private half is unavailable (locked vault) — run "
+                  "`sigil vault provision`/unlock first; refusing to mint a new owner identity.",
+                  file=sys.stderr)
+            sys.exit(1)
+        owner = ensure_owner_keypair()
+
+    g = EvalCapabilityGrant(store, owner_key=owner)
+
+    if a.action == "revoke":
+        seq = g.revoke(engagement_slug=a.engagement, reason=(a.reason or ""))
+        print(f"eval-capability-grant REVOKED for engagement {a.engagement!r} (seq {seq}); every gate "
+              f"enforces again until a fresh owner+evaluator grant lands.")
+        return
+
+    # arm
+    overrides = [t.strip() for t in (a.overrides or "").split(",") if t.strip()]
+    bad = [t for t in overrides if t not in ALLOWED_OVERRIDES]
+    if not overrides:
+        print(f"refusing: --overrides must name at least one of {sorted(ALLOWED_OVERRIDES)}", file=sys.stderr)
+        sys.exit(2)
+    if bad:
+        print(f"refusing override token(s) {bad!r}: a grant may lift ONLY {sorted(ALLOWED_OVERRIDES)} — the "
+              f"never-liftable floors (egress, m-of-n destruction quorum, GET-only write baseline) are "
+              f"structurally separate conjuncts the grant cannot feed.", file=sys.stderr)
+        sys.exit(2)
+    if not a.target or not a.evaluator or not a.evaluator_pubkey or not a.evaluator_pop:
+        print("refusing: arm requires --target, --evaluator, --evaluator-pubkey and --evaluator-pop "
+              "(the FRESH evaluator PoP over this grant's core, produced by the distinct enrolled evaluator).",
+              file=sys.stderr)
+        sys.exit(2)
+    try:
+        max_actions = int(a.max_covered_actions)
+    except (TypeError, ValueError):
+        print(f"refusing: --max-covered-actions {a.max_covered_actions!r} is not an integer", file=sys.stderr)
+        sys.exit(2)
+    # The anti-replay issued_anchor: a strictly-increasing, spine-anchored value. Default to the current spine
+    # head (monotonic, survives restart) when the owner does not pass one explicitly.
+    if a.issued_anchor is not None:
+        try:
+            anchor = float(a.issued_anchor)
+        except (TypeError, ValueError):
+            print(f"refusing: --issued-anchor {a.issued_anchor!r} is not a number", file=sys.stderr)
+            sys.exit(2)
+    else:
+        anchor = float(getattr(store, "next_seq", 0) or 0)
+
+    try:
+        seq = g.attest(
+            engagement_slug=a.engagement, target=a.target, allowed_gate_overrides=overrides,
+            evaluator=a.evaluator, evaluator_pubkey=a.evaluator_pubkey, evaluator_pop=a.evaluator_pop,
+            max_covered_actions=max_actions, issued_anchor=anchor,
+            charter_hash=(a.charter_hash or None), now=_time.time(),
+            environment=(a.environment or "live"), reason=(a.reason or ""))
+    except ValueError as e:
+        print(f"refusing to arm: {e}", file=sys.stderr)
+        sys.exit(1)
+    print(f"eval-capability-grant ARMED for engagement {a.engagement!r} target {a.target!r} (seq {seq})")
+    print(f"  overrides={sorted(overrides)}  max_covered_actions={max_actions}  issued_anchor={anchor}")
+    print(f"  evaluator={a.evaluator!r}  (two-party: owner + distinct enrolled evaluator PoP)")
+    print(f"  PIN this owner pubkey at the offense verifier: {owner_pubkey()}")
+    print("  the keyless offense plane now reads+verifies the signed grant from the seam; revoke un-arms it.")
+
+
 def cmd_dashboard(a) -> None:
     from .dashboard import render_dashboard, snapshot
     print(render_dashboard(snapshot(SpineStore())))
@@ -2189,6 +2296,29 @@ def main(argv=None) -> None:
     pm.add_argument("--yes", action="store_true",
                     help="skip the interactive fingerprint confirmation (authorize)")
     pm.set_defaults(fn=cmd_mesh)
+    peg = sub.add_parser("eval-grant",
+                         help="M-11 EvalCapabilityGrant (the eval button): arm/revoke/status the owner+"
+                              "evaluator pre-authorization that lifts the opt-in witness_quorum/blast_veto/"
+                              "containment_preview gate vetoes for one engagement/target")
+    peg.add_argument("action", choices=["arm", "revoke", "status"])
+    peg.add_argument("--engagement", required=True, help="the engagement slug the grant binds to")
+    peg.add_argument("--target", default=None, help="the target URL/host the grant binds to (arm; optional filter on status)")
+    peg.add_argument("--overrides", default=None,
+                     help="comma-list ⊆ {witness_quorum,blast_veto,containment_preview} to pre-authorize (arm)")
+    peg.add_argument("--evaluator", default=None, help="the distinct owner-enrolled evaluator username (arm)")
+    peg.add_argument("--evaluator-pubkey", dest="evaluator_pubkey", default=None,
+                     help="the evaluator's enrolled Ed25519 public key b64 (arm)")
+    peg.add_argument("--evaluator-pop", dest="evaluator_pop", default=None,
+                     help="the evaluator's FRESH proof-of-possession over THIS grant's core (arm)")
+    peg.add_argument("--max-covered-actions", dest="max_covered_actions", default="0",
+                     help="declared covered-action ceiling (signed+PoP-bound; see status for the enforced ceiling)")
+    peg.add_argument("--issued-anchor", dest="issued_anchor", default=None,
+                     help="strictly-increasing anti-replay anchor (default: the current spine head)")
+    peg.add_argument("--charter-hash", dest="charter_hash", default=None,
+                     help="optional charter_hash to require of the covering eval-offense attestation (arm)")
+    peg.add_argument("--environment", default="live", help="the covering-attestation environment (arm; default live)")
+    peg.add_argument("--reason", default=None)
+    peg.set_defaults(fn=cmd_eval_grant)
     pb = sub.add_parser("bridge", help="the WireGuard-bound phone bridge transport (owner-pinned self-signed TLS)")
     pb.add_argument("action", choices=["serve"])
     pb.add_argument("--addr", required=True, help="bind address — loopback or a PRIVATE WireGuard IP (bind_ok)")

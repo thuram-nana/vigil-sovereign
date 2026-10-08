@@ -664,6 +664,7 @@ jobs:
               integration/tests/test_loopback_charter.py \
               integration/tests/test_engage_mutation_approval.py \
               integration/tests/test_mesh_cicd_posture.py \
+              integration/tests/test_eval_capability_grant_e2e.py \
               engine/crucible/framework/v2/verify/tests/test_egress_pin.py \
               engine/crucible/framework/v2/verify/tests/test_reachability.py \
               engine/crucible/framework/v2/verify/tests/test_tls_weakness.py \
