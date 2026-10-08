@@ -522,6 +522,7 @@ jobs:
               integration/tests/test_verdict_fuzzer_mint.py \
               integration/tests/test_conjunctive_gate_blast_veto.py \
               integration/tests/test_general_reexecutable.py \
+              integration/tests/test_egress_backstop_mirror.py \
               integration/tests/test_external_tool_runner.py \
               integration/tests/test_tls_breadth.py \
               integration/tests/test_authority_root_decouple.py \
