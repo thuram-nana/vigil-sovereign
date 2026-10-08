@@ -11310,10 +11310,11 @@
   }
 
   function renderReport(screen) {
-    var body = V.mount(screen, [h("div.screen-head", null, [
+    var body = h("div#report-body", null, h("div.empty", null, "Loading report"));
+    V.mount(screen, [h("div.screen-head", null, [
       h("h2", null, "Client Report"),
       h("p.sub", null, "A LIVE, always-current report: every finding is re-verified OFFLINE on load, so a "
-        + "FACT is a re-checkable certificate — not a stale PDF, and not the AI's word. Read-only.")])]);
+        + "FACT is a re-checkable certificate — not a stale PDF, and not the AI's word. Read-only.")]), body]);
     V.getJSON(runsURL()).then(function (d) {
       RPT.runs = runsOf(d); RPT.loaded = true;   // scoped to the active engagement
       if (RPT.run && !RPT.runs.some(function (r) { return r.run_id === RPT.run; })) { RPT.run = ""; RPT.ev = null; RPT.cmp = null; }

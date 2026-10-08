@@ -375,10 +375,13 @@ def test_report_evidence_read_and_dossier_build(authed_page, base_url):
 
     with assert_calls(page, "GET", "/offense/api/evidence/", timeout_ms=15_000):
         page.evaluate("location.hash = '#/report'")
-    # NB: the screen-head h2 "Client Report" is transient — drawReport() re-mounts
-    # into the whole #screen (V.mount returns the element, body===screen) and
-    # wipes it. The stable post-load render signal is the "Executive summary" card.
+    # Stable post-draw marker (proves the async draw ran): the "Executive summary" card.
     page.wait_for_selector("#screen h3:has-text('Executive summary')", timeout=15_000)
+    # FIXED (B2): drawReport now redraws into a child #report-body container, so the
+    # screen-head <h2> "Client Report" PERSISTS after the data load (it used to be
+    # wiped when drawReport re-mounted the whole #screen).
+    assert page.locator("#screen h2:has-text('Client Report')").count() == 1, \
+        "the <h2> 'Client Report' screen-head did not persist after the async draw (B2 regressed)"
 
     # Target a run that has evidence so the dossier build has content.
     with assert_calls(page, "GET", "/offense/api/evidence/", timeout_ms=15_000):
