@@ -10,6 +10,7 @@ Check order (first failure wins), fail-closed throughout:
   5. destructive on LIVE without 2nd ack     -> denied (live_destructive)
   6. action budget exhausted                 -> denied (budget)
   6b. blast-radius over ceiling (OPT-IN)     -> denied (blast_radius)
+  6c. witness quorum unmet (OPT-IN)          -> denied (witness_quorum)
   7. otherwise            -> allowed
 
 Step 6b is DEFAULT-OFF and ADVISORY: it runs ONLY when the caller injects both a
@@ -18,6 +19,21 @@ otherwise cleared the action (so a denied action keeps its original code and the
 not even consulted). The predictor is a read-only forward world-model query injected as a
 callable — the gate never imports the world model, which informs the decision but mints no FACT
 and is no oracle input. Absent those two kwargs the decision is byte-identical to before.
+
+Step 6c is DEFAULT-OFF and DEMOTE-ONLY, and mirrors 6b exactly. It runs ONLY when the caller
+injects `witness_quorum_fn` (the re-executed oracle-witness quorum evaluator), and only AFTER
+every other check — including 6b — has cleared the action, so a prior denial keeps its own code
+and the quorum is never consulted for a refused action. The evaluator RE-EXECUTES the
+deterministic oracle over the finding's retained `witness_context` and counts DISTINCT
+oracle-witness kinds; a producer-carried corroboration set or a critic/RL/LLM vote can never
+satisfy N (only a re-fired oracle signal is a witness). It can ONLY map an otherwise-allowed
+action to a denied one — it NEVER promotes, and it MINTS NOTHING (no FACT, certificate or spine
+row): it only returns this decision. The oracle remains the sole mint authority. An operator may
+PROCEED-BELOW-QUORUM for THIS action only by injecting `witness_quorum_ack` (a verified,
+action-bound acknowledgement) — which lifts the ACTION veto without promoting the finding. Absent
+`witness_quorum_fn` (and the policy + `witness_context` it keys on) the decision is byte-identical
+to before. Both the predictor and the quorum evaluator are injected as callables — the gate never
+imports the world model NOR the oracle/veracity layer.
 
 `authorize_action` returns a decision (for callers that branch);
 `require_authorization` raises the matching typed EthicsViolation (for
@@ -40,6 +56,7 @@ from ..common.errors import (
     EngagementHalted,
     EthicsViolation,
     OutOfScope,
+    WitnessQuorumUnmet,
 )
 from ..common.ethics import host_matches_scope
 from ..entitlement.models import TrustRoot
@@ -82,6 +99,27 @@ class BlastRadiusVerdict(Protocol):
     def newly_reachable_jewels(self) -> list[str]: ...
 
 
+class WitnessQuorumVerdict(Protocol):
+    """The structural shape the optional witness-quorum veto reads back from an injected quorum
+    evaluator.
+
+    Deliberately a Protocol, NOT an import of ``veracity.witness_quorum.QuorumOutcome``: the gate stays
+    decoupled from the oracle/veracity layer (the quorum is ADVISORY to the authority gate — injected as
+    a callable, never imported here, so this engine module never pulls in the verify/oracle layer and
+    never becomes an oracle input). Any object with these attributes satisfies it; ``QuorumOutcome``
+    does, structurally. The gate acts on ``applicable`` and ``ok`` ONLY — so the veto can only ever
+    WITHHOLD (map allowed True->False), never promote — and uses ``reason`` for the denial message."""
+
+    @property
+    def applicable(self) -> bool: ...
+
+    @property
+    def ok(self) -> bool: ...
+
+    @property
+    def reason(self) -> str: ...
+
+
 def authorize_action(
     authority: EngagementAuthority,
     request: ActionRequest,
@@ -91,6 +129,8 @@ def authorize_action(
     now: datetime | None = None,
     blast_radius_fn: Callable[[ActionRequest], BlastRadiusVerdict] | None = None,
     blast_ceiling: float | None = None,
+    witness_quorum_fn: Callable[[ActionRequest], WitnessQuorumVerdict] | None = None,
+    witness_quorum_ack: Callable[[ActionRequest, WitnessQuorumVerdict], bool] | None = None,
 ) -> AuthorizationDecision:
     """Evaluate one action. Pure except for reading the kill-switch file and — only when the
     optional pre-action blast-radius veto is wired — calling the injected read-only predictor.
@@ -103,7 +143,22 @@ def authorize_action(
     summed business impact of the crown jewels it would newly expose — strictly exceeds the ceiling.
     A predictor that raises propagates (the veto fails loud, never silently allowing). Absent either
     kwarg this function behaves and returns byte-identically to before, so every existing caller is
-    unaffected."""
+    unaffected.
+
+    The witness-quorum veto (``witness_quorum_fn`` [+ optional ``witness_quorum_ack``]) is DEFAULT-OFF
+    and DEMOTE-ONLY, and mirrors the blast veto. It runs ONLY when ``witness_quorum_fn`` is supplied,
+    and ONLY as the FINAL conjunct — after every other check (6b included) has cleared the action — so
+    any prior denial keeps its own code and the evaluator is not consulted for a refused action. When
+    wired, it DENIES (code ``witness_quorum``) an otherwise-allowed action whose injected verdict is
+    ``applicable and not ok`` — i.e. the finding's retained ``witness_context``, RE-EXECUTED by the
+    evaluator, re-fires fewer than N DISTINCT independent oracle-witness kinds for an operator-critical
+    class. It can ONLY map allowed True->False (never promote), and this function MINTS NOTHING — it
+    only returns a decision. An operator may PROCEED-BELOW-QUORUM for THIS action only via
+    ``witness_quorum_ack`` (a verified, action-bound acknowledgement): when it returns True the ACTION
+    is authorized below the quorum WITHOUT promoting the finding to a FACT. Absent ``witness_quorum_fn``
+    (and the policy + ``witness_context`` it keys on) this function is byte-identical to before. The
+    evaluator and ack are injected as callables — the gate imports neither the oracle/veracity layer
+    nor any crypto, so it never becomes an oracle input."""
     ts = now or _utcnow()
 
     def decide(
@@ -174,6 +229,29 @@ def authorize_action(
                 f"{verdict.incremental_blast} (> ceiling {blast_ceiling}): "
                 f"{verdict.newly_reachable_jewels}", "blast_radius")
 
+    # 6c. witness-quorum veto — OPT-IN, DEFAULT-OFF, DEMOTE-ONLY. Mirrors 6b: runs only when an
+    #     evaluator is injected; absent it this block is skipped and the decision is byte-identical to
+    #     before. Placed LAST (after 6b) so it vetoes only an OTHERWISE-ALLOWED action — every prior
+    #     denial keeps its own code and the evaluator is never consulted for a refused action. The
+    #     evaluator RE-EXECUTES the deterministic oracle over the finding's retained witness_context
+    #     and returns a verdict; the gate acts on ``applicable`` and ``ok`` ONLY, so it can only
+    #     WITHHOLD an under-corroborated action (map allowed True->False), NEVER promote. It MINTS
+    #     NOTHING — no FACT, certificate or spine row; only this decision is returned. A producer-
+    #     carried corroboration set or a critic/RL/LLM vote cannot satisfy N (that exclusion is
+    #     enforced by the injected evaluator, which counts only re-fired oracle signals). An
+    #     action-bound operator PROCEED-BELOW-QUORUM ack (``witness_quorum_ack``) may lift the veto for
+    #     THIS action only — authorizing the ACTION without promoting the finding.
+    if witness_quorum_fn is not None:
+        wq = witness_quorum_fn(request)
+        if wq.applicable and not wq.ok:
+            if witness_quorum_ack is None or not witness_quorum_ack(request, wq):
+                return decide(
+                    False, AuthorityState.ACTIVE,
+                    f"witness-quorum veto: {wq.reason}", "witness_quorum")
+            # else: a valid, action-bound PROCEED-BELOW-QUORUM acknowledgement authorizes THIS action
+            # below the quorum. The ACTION proceeds; the finding is NOT promoted to a FACT (the oracle
+            # layer is untouched and nothing is minted here).
+
     # 7. allowed
     return decide(True, AuthorityState.ACTIVE,
                   f"authorized against {authority.environment.value} environment")
@@ -204,6 +282,7 @@ _DENIAL_ERRORS: dict[str, type[EthicsViolation]] = {
     "live_destructive": DestructiveActionRefused,
     "budget": BudgetExhausted,
     "blast_radius": BlastRadiusExceeded,
+    "witness_quorum": WitnessQuorumUnmet,
 }
 
 
@@ -216,14 +295,19 @@ def require_authorization(
     now: datetime | None = None,
     blast_radius_fn: Callable[[ActionRequest], BlastRadiusVerdict] | None = None,
     blast_ceiling: float | None = None,
+    witness_quorum_fn: Callable[[ActionRequest], WitnessQuorumVerdict] | None = None,
+    witness_quorum_ack: Callable[[ActionRequest, WitnessQuorumVerdict], bool] | None = None,
 ) -> AuthorizationDecision:
     """Authorize or raise. The typed EthicsViolation must not be silently
     caught — it is the engagement refusing to act. The optional blast-radius veto
-    (``blast_radius_fn`` + ``blast_ceiling``) is forwarded unchanged; when it fires it raises the
-    typed ``BlastRadiusExceeded``. Absent both kwargs this is byte-identical to before."""
+    (``blast_radius_fn`` + ``blast_ceiling``) and witness-quorum veto (``witness_quorum_fn`` [+
+    ``witness_quorum_ack``]) are forwarded unchanged; when the blast veto fires it raises
+    ``BlastRadiusExceeded`` and when the quorum veto fires it raises ``WitnessQuorumUnmet``. Absent all
+    of these kwargs this is byte-identical to before."""
     decision = authorize_action(
         authority, request, killswitch=killswitch, actions_taken=actions_taken, now=now,
         blast_radius_fn=blast_radius_fn, blast_ceiling=blast_ceiling,
+        witness_quorum_fn=witness_quorum_fn, witness_quorum_ack=witness_quorum_ack,
     )
     if not decision.allowed:
         err = _DENIAL_ERRORS.get(decision.denial_code, EthicsViolation)

@@ -174,6 +174,20 @@ class BlastRadiusExceeded(EthicsViolation):
     gate never runs the predictor and never raises this, so existing call sites are unaffected."""
 
 
+class WitnessQuorumUnmet(EthicsViolation):
+    """An otherwise-authorized ACTION on a finding of an operator-designated CRITICAL bug class was
+    refused because the finding's RETAINED oracle evidence, RE-EXECUTED at decision time, re-fires
+    fewer than N DISTINCT independent oracle-witness kinds (the ``veracity.witness_quorum`` policy).
+    This is an AUTHORITY veto, not an oracle: the oracle remains the sole mint authority. It only
+    ever maps an allowed action to a denied one — it NEVER promotes, mints no FACT / certificate /
+    spine row, and only RE-EXECUTED oracle signals count toward N (a producer-carried corroboration
+    set, or a critic / RL / reflection / LLM vote, can never satisfy the quorum). Default-off — absent
+    an injected witness-quorum policy AND a ``witness_context`` the gate never evaluates it and never
+    raises this, so existing call sites are byte-identical. The operator may PROCEED-BELOW-QUORUM for
+    THIS action only by signing a bound acknowledgement (never by promoting the finding to a FACT), or
+    REQUIRE-MORE by running further oracle arms until N distinct kinds re-fire."""
+
+
 class ScopeDrift(EthicsViolation):
     """The three legs of an engagement's authorization — the authorization
     letter, the charter.md scope table, and the signed EngagementAuthorization
