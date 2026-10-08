@@ -17,6 +17,12 @@ from ipaddress import ip_address, ip_network
 
 import pytest
 
+# This leg of P5 runs integration/tests in a SOVEREIGN sub-process where ``framework`` is ABSENT (but
+# ``vigil_gateway`` is present) — so importorskip("framework") must come FIRST, or the hard
+# ``from framework...`` below is a collection ERROR, not a skip, in that pass. It runs in the OFFENSE pass
+# where both are importable. (The offense venv has framework installed, which MASKS this locally — only the
+# sovereign sub-process or a framework meta_path block is faithful.)
+pytest.importorskip("framework")
 pytest.importorskip("vigil_gateway")
 
 from framework.v2.common import egress_pin  # noqa: E402
