@@ -287,9 +287,16 @@ def build_offense_gate(
             # grant is present (otherwise 6c would only exist when a grant bypasses it, which is unsound); the
             # grant later injects ONLY the ACK that lifts it, never the fn. Absent an operator policy (env
             # unset ⇒ DISABLED), the predicate is inapplicable ⇒ 6c is a no-op ⇒ byte-identical to before.
-            from framework.v2.authority.witness_quorum_gate import witness_quorum_predicate
-            from framework.v2.veracity.witness_quorum import load_quorum_config
-            wq_fn = witness_quorum_predicate(load_quorum_config())
+            # Disarm gracefully if the witness-quorum modules are absent (a test that doubles the
+            # framework.v2.authority namespace, or a plane without them): wq_fn=None => the 6c veto is a
+            # no-op (disarmed), byte-identical to before — NOT a deny. (Same disarm-when-half-absent rule as
+            # the blast veto; see vigil-crucible-core-gateway-importorskip.)
+            try:
+                from framework.v2.authority.witness_quorum_gate import witness_quorum_predicate
+                from framework.v2.veracity.witness_quorum import load_quorum_config
+                wq_fn = witness_quorum_predicate(load_quorum_config())
+            except Exception:  # noqa: BLE001 — no witness-quorum module => 6c disarmed, never a deny
+                wq_fn = None
 
             # 2e: a VALID, in-scope EvalCapabilityGrant for THIS engagement/target injects ONLY the gate ACKS
             # (never a witness_quorum_fn — fix D). Absent/expired/revoked ⇒ no acks ⇒ the 6b/6c vetoes ENFORCE
