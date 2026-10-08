@@ -1486,8 +1486,13 @@ def test_the_charter_relative_dns_pin_is_removed_and_cannot_be_revived_by_accide
     assert callable(dns_pin.pinned_handlers), "the PIN half is still used by web_redrive"
     # and nothing in the shipped tree calls it any more.
     import subprocess
+    # Word-boundary match: the removed footgun is ``dns_pin.resolve_and_validate`` (and a bare-imported
+    # ``resolve_and_validate(`` revival). The ``\b`` excludes the genuinely-different, SOUND
+    # ``common.egress_pin.resolve_and_validate_all`` (which — unlike the footgun — DOES consult the L3/L4
+    # floor over every resolved IP) and its docstring mentions, since ``_`` is a word char so there is no
+    # boundary before ``_all``. A real revival of the charter-relative pin still trips this.
     hits = subprocess.run(
-        ["grep", "-rn", "resolve_and_validate", "--include=*.py",
+        ["grep", "-rn", r"resolve_and_validate\b", "--include=*.py",
          str(_ROOT / "integration" / "vigil_integration"), str(_ROOT / "engine")],
         capture_output=True, text=True).stdout.splitlines()
     offenders = [h for h in hits if "dns_pin.py" not in h and "egress_floor.py" not in h]

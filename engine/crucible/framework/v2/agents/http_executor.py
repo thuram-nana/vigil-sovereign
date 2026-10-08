@@ -908,10 +908,18 @@ class HttpExecutor:
             )
             if self.egress_allowlist is not None:
                 # Route every request through the sovereign egress guard.
-                # In non-strict sovereign mode the transport passes
+                # In non-strict sovereign mode the NAME allowlist passes
                 # through; in strict mode it refuses non-allowlisted
-                # hosts before any bytes leave the host.
-                kwargs["transport"] = SovereignHttpxTransport(self.egress_allowlist)
+                # hosts before any bytes leave the host. EITHER mode, the
+                # transport's never-liftable L3/L4 egress floor resolves
+                # the host once and pins the connect to a validated IP so
+                # a charter-scoped name that resolves to metadata/RFC1918
+                # (directly or via DNS rebinding) is refused. The slug
+                # supplies the charter IP literals that lift the private/
+                # loopback tier for an exact literal (e.g. a MERIDIAN
+                # loopback target); the metadata tier is never lifted.
+                kwargs["transport"] = SovereignHttpxTransport(
+                    self.egress_allowlist, slug=self.engagement_slug)
             self._http_client = httpx.Client(**kwargs)  # type: ignore[arg-type]
             return self._http_client
 
