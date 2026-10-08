@@ -31,16 +31,16 @@ def test_smoke_authenticates_and_renders_system_and_users(authed_page, base_url)
         page.evaluate("location.hash = '#/system'")
 
     # And a SOVEREIGN-plane nav read, through the /sovereign/* proxy mapping.
-    # renderUsers (app.js:4913) reads GET /sovereign/api/accounts (sigil server.py
-    # AccountsRegistry) on nav; it is NOT background-polled. We deliberately do NOT
-    # assert /sovereign/api/snapshot here: pboxApprovalPoll hits it every 4s
-    # (app.js:10937), so a poll would satisfy the match regardless of the action
-    # (green-washing). Assert only nav-driven, unpolled reads.
-    with assert_calls(page, "GET", "/sovereign/api/accounts"):
-        page.evaluate("location.hash = '#/users'")
+    # renderSettings (app.js:4575) reads GET /sovereign/api/settings at the TOP of the
+    # render on nav; it is NOT background-polled. We deliberately do NOT assert
+    # /sovereign/api/snapshot here: pboxApprovalPoll hits it every 4s (app.js:10937),
+    # so a poll would satisfy the match regardless of the action (green-washing).
+    # Assert only nav-driven, unpolled reads.
+    with assert_calls(page, "GET", "/sovereign/api/settings"):
+        page.evaluate("location.hash = '#/settings'")
 
     # Sanity: the smoke target screens are known screens in the matrix.
-    assert "system" in BY_ID and "users" in BY_ID
+    assert "system" in BY_ID and "settings" in BY_ID
 
 
 @pytest.mark.real_flow
