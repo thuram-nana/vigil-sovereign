@@ -707,6 +707,12 @@
       "snippet": "EXTERNAL LEAD PROPOSERS (not wired",
       "kind": "non-debt",
       "note": "Same deliberate doctrine in the credential_acceptance_redrive docstring: hydra/john stay external LEAD proposers; the FACT is VIGIL-owned (the oracle re-fires over VIGIL's own gated capture). Not deferred work."
+    },
+    {
+      "file": "apps/sigil/sigil/cli.py",
+      "snippet": "auto-void was not wired this slice",
+      "kind": "non-debt",
+      "note": "Deliberate design decision, not debt (M-11 EvalCapabilityGrant FIX C2/F): the `sigil eval-grant status` budget_note states honestly that a durable spine-anchored covered-action AUTO-VOID was DROPPED this slice (the resettable http_executor process counter is deliberately NOT used, as it would be a trivial reset-to-arm fail-open). max_covered_actions stays signed+PoP-bound and attributable, and the grant's REAL durable ceiling is fully enforced by the four void_conditions listed alongside it (owner revoke + offense-gate/engagement close + per-engagement kill-switch + signed engagement scope + the covering attestation not_after). A capability consciously scoped out with its security ceiling complete by other means, not deferred/unfinished code."
     }
   ]
 }
