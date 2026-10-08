@@ -1,4 +1,4 @@
-"""Smoke test: load :8770, authenticate, navigate ONE screen, assert ONE GET fired.
+"""Smoke test: load :8770, authenticate, navigate screens, assert nav-driven GETs fire.
 
 This is the end-to-end proof that the harness works: a real Chromium loads the
 real UI through the uiproxy, a real session is established, a screen renders, and
@@ -16,25 +16,31 @@ from screens import BY_ID
 
 
 @pytest.mark.real_flow
-def test_smoke_authenticates_and_renders_home(authed_page, base_url):
+def test_smoke_authenticates_and_renders_system_and_users(authed_page, base_url):
     page = authed_page
 
     # The shell mounts #main > #screen (app.js setupShell). Its presence is the
     # minimal "the SPA booted and rendered" signal.
     page.wait_for_selector("#screen", timeout=15_000)
 
-    # Navigate to System and assert the readiness GET actually fires. /offense/api/status
-    # is a zero-arg read route (console server.py _EXACT_ROUTES:143) reached via the
-    # uiproxy /offense/* -> console mapping.
-    with assert_calls(page, "GET", "/offense/api/status"):
+    # Navigate to System and assert its readiness GET fires at the NETWORK layer.
+    # renderSystem (app.js:6399) reads GET /offense/api/services (console server.py:162)
+    # on nav; it is on NO setInterval, so only the navigation itself can satisfy this
+    # (it fails for the right reason if the nav fired nothing).
+    with assert_calls(page, "GET", "/offense/api/services"):
         page.evaluate("location.hash = '#/system'")
 
-    # And the sovereign snapshot the home/topbar reads (sigil server.py:443).
-    with assert_calls(page, "GET", "/sovereign/api/snapshot"):
-        page.evaluate("location.hash = '#/home'")
+    # And a SOVEREIGN-plane nav read, through the /sovereign/* proxy mapping.
+    # renderUsers (app.js:4913) reads GET /sovereign/api/accounts (sigil server.py
+    # AccountsRegistry) on nav; it is NOT background-polled. We deliberately do NOT
+    # assert /sovereign/api/snapshot here: pboxApprovalPoll hits it every 4s
+    # (app.js:10937), so a poll would satisfy the match regardless of the action
+    # (green-washing). Assert only nav-driven, unpolled reads.
+    with assert_calls(page, "GET", "/sovereign/api/accounts"):
+        page.evaluate("location.hash = '#/users'")
 
-    # Sanity: the smoke target screen is a known screen in the matrix.
-    assert "system" in BY_ID and "home" in BY_ID
+    # Sanity: the smoke target screens are known screens in the matrix.
+    assert "system" in BY_ID and "users" in BY_ID
 
 
 @pytest.mark.real_flow

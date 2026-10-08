@@ -33,6 +33,14 @@ def assert_calls(page, method: str, path_substr: str,
 
     This is the core of "button -> real backend call". It observes the request at
     the NETWORK layer via Playwright request interception (`page.expect_request`),
+
+    WARNING — never assert on a BACKGROUND-POLLED endpoint. `page.expect_request`
+    resolves on the first match regardless of initiator, so an endpoint on a
+    setInterval (e.g. /sovereign/api/snapshot, polled every 4s by pboxApprovalPoll
+    app.js:10937; or /offense/api/events on live/strix/defense screens) would satisfy
+    the match from a background poll even if the action under test fired nothing —
+    green-washing the assertion. Assert only a nav-driven read that NO setInterval
+    touches (grep app.js for setInterval to confirm).
     so it proves the call happened — not merely that the DOM changed. A screen
     that re-renders from stale state WITHOUT hitting the backend will NOT satisfy
     this assertion and the test fails.
