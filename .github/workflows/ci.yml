@@ -691,6 +691,50 @@ jobs:
         # failure. --strict-markers/-p no:cacheprovider hygiene lives on the pytest run that produced the
         # report; this step is the assertion that it actually executed.
         run: python .github/scripts/assert_boundary_proof_ran.py "${RUNNER_TEMP:-/tmp}/sovereign-junit.xml"
+      - name: WS4 handover-wrapper wiring is exercised (the acceptance entrypoint cannot silently rot)
+        # Coverage for the WS4 production handover gate: the bootstrap production step and the
+        # `vigil deploy-acceptance` verb both invoke `python -m vigil_integration.sovereign_deploy.acceptance`.
+        # This runs that SAME module entrypoint against an UNREACHABLE loopback port (no range, no key — pure
+        # loopback, no egress) and asserts it FAILS CLOSED: a non-zero exit AND the "HANDOVER BLOCKED" verdict.
+        # If the module path, main()/render_report wiring, or the fail-closed exit code ever breaks, this
+        # step goes red instead of the gate silently passing. (The healthy/broken directions are proven by
+        # integration/tests/test_ws4_acceptance.py, already in the offense run-list above.)
+        run: |
+          set +e
+          out="$(VIGIL_REQUIRE_FRONTIER_CHECK=1 \
+            CRUCIBLE_ROOT="${RUNNER_TEMP:-/tmp}/ws4-handover-root" \
+            PYTHONPATH=integration:engine/crucible:gateway \
+            python -m vigil_integration.sovereign_deploy.acceptance --target-port 65000)"
+          rc=$?
+          set -e
+          printf '%s\n' "$out" | tail -n 8
+          if [ "$rc" -eq 0 ]; then
+            echo "::error::WS4 handover wrapper did NOT block on an unreachable target (exit 0) — fail-closed wiring broken"; exit 1
+          fi
+          printf '%s\n' "$out" | grep -q "HANDOVER BLOCKED" || {
+            echo "::error::WS4 handover wrapper exited non-zero but printed no HANDOVER BLOCKED verdict — reporting wiring broken"; exit 1; }
+          echo "WS4 handover wrapper fails closed on an unreachable target (exit $rc, verdict HANDOVER BLOCKED) — wiring exercised"
+      - name: keyed reachability tests are still COLLECTED (assert-it-ran guard, WS1.4)
+        # WS1.4 — the real-Anthropic reachability leg (integration/tests/test_live_think_real_anthropic.py,
+        # behind `@pytest.mark.keyed`) SKIPS without a key, so it never actually runs in the default CI legs.
+        # That is intended — but it means the leg could be silently DESELECTED or renamed into never-running
+        # (the GitHub 45-min-ceiling / silent-skip class of rot) and nothing would go red. This collect-only
+        # guard needs NO key (so it runs on every PR): it selects the `keyed` marker in the real-Anthropic reachability file (the only carrier of the
+        # marker) and FAILS if ZERO keyed tests are collected. Scoped to that file (not the whole tree) so it
+        # collects no volume-carrying file — satisfying test_ci_volume_tests_run_nightly without a volume loop.
+        run: |
+          set +e
+          out="$(PYTHONPATH=integration:engine/crucible:gateway \
+            python -m pytest integration/tests/test_live_think_real_anthropic.py --collect-only -m keyed -q -p no:cacheprovider)"
+          rc=$?
+          set -e
+          printf '%s\n' "$out" | tail -n 3
+          n="$(printf '%s\n' "$out" | sed -n 's#^\([0-9][0-9]*\)/[0-9][0-9]* tests collected.*#\1#p' | tail -n 1)"
+          n="${n:-0}"
+          if [ "$rc" -ne 0 ] || [ "$n" -lt 1 ]; then
+            echo "::error::no keyed tests collected (selected=$n, pytest rc=$rc) — the real-Anthropic reachability leg has been deselected/renamed into never-running"; exit 1
+          fi
+          echo "keyed-collect guard: $n keyed reachability test(s) still selectable — OK"
 
   strix-vigil:
     name: strix Claude-runtime (P8)

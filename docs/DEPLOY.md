@@ -51,6 +51,37 @@ configure `VIGIL_PUSH_DEST` in `~/.config/vigil/backup-push.env` (a mounted path
 The push copies ciphertext only and then verifies the copy **at the destination** — a truncated, corrupted,
 or tampered remote copy fails the run (fail-closed) and raises the push-unit alert.
 
+### Production handover acceptance gate (WS4)
+
+Under the **production posture only** (`VIGIL_POSTURE=production` / `--production`), `bootstrap.sh` runs a
+per-VM **acceptance harness** before it reports the box ready — the self-test that proves the REAL VIGIL
+pipeline works end-to-end against the bundled **loopback MERIDIAN range** on `:19010` (a `127.0.0.1` vulnapp,
+never an external target). It is the same harness the `vigil deploy-acceptance` verb runs:
+
+```
+vigil deploy-acceptance --target-port 19010     # exit 0 = HANDOVER-READY; non-zero = HANDOVER BLOCKED
+```
+
+It exercises the real product paths (a keyed Anthropic `think` that the deterministic oracle still gates; a
+governed engage → signed FACT → offline re-verify with a tamper rejected; a codescan static FACT; AEGIS
+`enforce` returning a 403 + re-runnable certificate; a FACT-capable HexStrike `nmap` mint) and prints a
+per-check report ending in `VERDICT: HANDOVER-READY` or `VERDICT: HANDOVER BLOCKED`.
+
+**It is fail-closed: a missing prerequisite BLOCKS handover — it never skips to green.** Two prerequisites
+must be provisioned on the box *before* `./bootstrap.sh --production`, or the gate blocks and the bootstrap
+exits non-zero:
+
+| Prerequisite | Why | If missing |
+|---|---|---|
+| `ANTHROPIC_API_KEY` exported in the bootstrap environment | the harness makes ONE real keyed `think` call to prove reachability (check 1) | check 1 is reported **NOT-RUN**, which **BLOCKS** handover (a required NOT-RUN is never rounded to green) |
+| the MERIDIAN range reachable on `:19010` | the governed engage + HexStrike reachability checks read it (checks 2, 6) | bootstrap brings it up itself via `.venv-offense/bin/target`; if it cannot (launcher absent / port never opens), those checks **FAIL** → **BLOCK** |
+| the `AEGIS_RESPOND` entitlement grantable | AEGIS `enforce` must block with a certificate (check 3/5) | the harness provisions this in its own isolated governed workspace; an un-entitled box downgrades to observe and that check **FAILS** → **BLOCK** |
+
+**Handover is gated on a GREEN run on the actual provisioned box** — a non-zero exit from the acceptance
+harness is a hard bootstrap failure (it is wired through the same `SMOKE_FAIL` gate as every other smoke, and
+is never `|| true`-swallowed). The full procedure, including how to read the per-check verdict and what each
+block means, is in **[`docs/runbooks/HANDOVER-ACCEPTANCE.md`](runbooks/HANDOVER-ACCEPTANCE.md)**.
+
 ### Prerequisites
 
 | Need | Why | If missing |
