@@ -374,3 +374,60 @@ def test_destructive_routes_are_owner_only(monkeypatch):
         assert _post(port, f"/api/ceremonies/{leaf}", token=operator, body={"confirm": "ROTATE OWNER KEY"})[0] == 403
         assert _post(port, f"/api/ceremonies/{leaf}", token=viewer, body={"confirm": "ROTATE OWNER KEY"})[0] == 403
         assert _post(port, f"/api/ceremonies/{leaf}", token=None, body={"confirm": "ROTATE OWNER KEY"})[0] == 403
+
+
+# --- M-11 EvalCapabilityGrant ceremony (the "eval button") -----------------------------------------
+
+def _ok_pubkey():
+    return base64.b64encode(b"\x01" * 32).decode()
+
+
+def test_eval_grant_status_shells_fixed_argv(monkeypatch):
+    seen = []
+    monkeypatch.setattr(subprocess, "run", lambda a, **k: (seen.append(a) or _P(0, "{}")))
+    ceremonies.eval_grant_status("eng-apme")
+    assert seen[-1] == [sys.executable, "-m", "sigil", "eval-grant", "status", "--engagement", "eng-apme"]
+
+
+def test_eval_grant_status_rejects_a_flag_slug_without_shelling(monkeypatch):
+    def _boom(*a, **k):
+        raise AssertionError("shelled despite an invalid slug")
+    monkeypatch.setattr(subprocess, "run", _boom)
+    assert ceremonies.eval_grant_status("--help")["ok"] is False
+
+
+def test_eval_grant_arm_rejects_non_enum_override_before_shelling(monkeypatch):
+    def _boom(*a, **k):
+        raise AssertionError("shelled despite a non-enum override token")
+    monkeypatch.setattr(subprocess, "run", _boom)
+    res = ceremonies.eval_grant_arm("eng-apme", "https://apme.cm/a", "witness_quorum,egress_floor",
+                                    "eval-bob", _ok_pubkey(), "c2ln")
+    assert res["ok"] is False and "subset" in res["error"]
+
+
+def test_eval_grant_arm_rejects_flag_target_before_shelling(monkeypatch):
+    def _boom(*a, **k):
+        raise AssertionError("shelled despite a flag-looking target")
+    monkeypatch.setattr(subprocess, "run", _boom)
+    assert ceremonies.eval_grant_arm("eng-apme", "--oops", "witness_quorum", "eval-bob",
+                                     _ok_pubkey(), "c2ln")["ok"] is False
+
+
+def test_eval_grant_arm_shells_validated_argv(monkeypatch):
+    seen = []
+    monkeypatch.setattr(subprocess, "run", lambda a, **k: (seen.append(a) or _P(0, "armed")))
+    res = ceremonies.eval_grant_arm("eng-apme", "https://apme.cm/a", "witness_quorum,blast_veto",
+                                    "eval-bob", _ok_pubkey(), "c2lnbg", max_covered_actions="50")
+    assert res["ok"] is True
+    argv = seen[-1]
+    assert argv[:4] == [sys.executable, "-m", "sigil", "eval-grant"]
+    assert "arm" in argv and "--engagement" in argv and "eng-apme" in argv
+    # the normalized (sorted) override list is passed as one argv element
+    assert "witness_quorum,blast_veto" in argv
+
+
+def test_eval_grant_revoke_shells_fixed_argv(monkeypatch):
+    seen = []
+    monkeypatch.setattr(subprocess, "run", lambda a, **k: (seen.append(a) or _P(0, "revoked")))
+    ceremonies.eval_grant_revoke("eng-apme")
+    assert seen[-1] == [sys.executable, "-m", "sigil", "eval-grant", "revoke", "--engagement", "eng-apme"]

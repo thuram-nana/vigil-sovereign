@@ -282,10 +282,44 @@ def build_offense_gate(
                     if blast_fn is None:
                         blast_ceil = None   # no world-model → leave the veto disarmed (not a refusal)
 
+            # 1b / adversary fix D: wire the witness-quorum VETO (gate conjunct 6c) UNCONDITIONALLY from the
+            # operator posture/policy config — INDEPENDENT of any grant. The veto must EXIST whether or not a
+            # grant is present (otherwise 6c would only exist when a grant bypasses it, which is unsound); the
+            # grant later injects ONLY the ACK that lifts it, never the fn. Absent an operator policy (env
+            # unset ⇒ DISABLED), the predicate is inapplicable ⇒ 6c is a no-op ⇒ byte-identical to before.
+            from framework.v2.authority.witness_quorum_gate import witness_quorum_predicate
+            from framework.v2.veracity.witness_quorum import load_quorum_config
+            wq_fn = witness_quorum_predicate(load_quorum_config())
+
+            # 2e: a VALID, in-scope EvalCapabilityGrant for THIS engagement/target injects ONLY the gate ACKS
+            # (never a witness_quorum_fn — fix D). Absent/expired/revoked ⇒ no acks ⇒ the 6b/6c vetoes ENFORCE
+            # (fail-closed). A grant can lift ONLY the CLOSED-ENUM 6b/6c vetoes; the never-liftable floors
+            # (egress / m-of-n destruction quorum / GET-only write) are separate conjuncts it never feeds.
+            _grant_base = base_dir or os.environ.get("VIGIL_BASE_DIR") or ".vigil-live"
+            wq_ack = None
+            bl_ack = None
+            try:
+                from .live.eval_capability_grant import (
+                    grant_overrides,
+                    owner_pubkeys_of as _grant_owner_pubkeys_of,
+                    verify_eval_capability_grant,
+                )
+                _gverdict = verify_eval_capability_grant(
+                    _grant_base, engagement_slug=slug, target=target_url,
+                    trusted_owner_pubkeys=_grant_owner_pubkeys_of(trust_root),
+                    actions_covered=None)   # FIX C2/F: no durable spine-anchored count this slice ⇒ budget off
+                if _gverdict.granted:
+                    wq_ack, bl_ack, _caps = grant_overrides(
+                        _gverdict, base_dir=_grant_base, engagement_slug=slug)
+            except Exception:  # noqa: BLE001 — any grant-verify error ⇒ NO acks ⇒ the vetoes enforce (fail-closed)
+                wq_ack = None
+                bl_ack = None
+
             decision = authorize_action(
                 authority, req, killswitch=killswitch, actions_taken=actions_taken,
                 now=_as_datetime(now),          # CRUCIBLE leg wants a datetime (or None)
-                blast_radius_fn=blast_fn, blast_ceiling=blast_ceil,
+                blast_radius_fn=blast_fn, blast_ceiling=blast_ceil, blast_radius_ack=bl_ack,
+                witness_quorum_fn=wq_fn, witness_quorum_ack=wq_ack,
             )
             return CrucibleResult(allowed=bool(decision.allowed), reason=decision.reason)
 

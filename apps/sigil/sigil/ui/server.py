@@ -477,6 +477,15 @@ class Handler(BaseHTTPRequestHandler):
                 return self._deny(403, "owner only")
             from . import ceremonies as _cer
             return self._json(_cer.mesh_list())
+        if path == "/api/ceremonies/eval-grant/status":
+            # M-11: the EvalCapabilityGrant status read (`sigil eval-grant status`) — OWNER (`secrets`), the
+            # same trust-boundary class as the mesh roster (it reports whether a security-control OVERRIDE is
+            # armed). A fail-closed read: armed?/engagement/target/overrides/budget/void-conditions; no key.
+            from ..governor.accounts import role_can
+            if not role_can(principal.role, "secrets"):
+                return self._deny(403, "owner only")
+            from . import ceremonies as _cer
+            return self._json(_cer.eval_grant_status(self._query().get("engagement", [""])[0]))
         if path == "/api/verify":
             # Parity (Wave 2): the sovereign spine self-verify — chain integrity + the owner-signed head
             # anchor (exactly what `sigil verify` runs, in-process, same venv). Viewer+ read, no secret.
@@ -1332,7 +1341,8 @@ class Handler(BaseHTTPRequestHandler):
         _BODY_PATHS = ("/api/ceremonies/mesh/fingerprint", "/api/ceremonies/mesh/authorize",
                        "/api/ceremonies/mesh/revoke", "/api/ceremonies/delegate/preview",
                        "/api/ceremonies/delegate", "/api/ceremonies/key/rotate",
-                       "/api/ceremonies/key/re-genesis", "/api/ceremonies/floor/reset")
+                       "/api/ceremonies/key/re-genesis", "/api/ceremonies/floor/reset",
+                       "/api/ceremonies/eval-grant/arm", "/api/ceremonies/eval-grant/revoke")
         if path in _BODY_PATHS:
             try:
                 length = int(self.headers.get("Content-Length", "0"))
@@ -1354,6 +1364,30 @@ class Handler(BaseHTTPRequestHandler):
                 else:
                     res = _cer.mesh_revoke(device_id, pubkey)
                     self._audit_ceremony("mesh-revoke", principal, {"device_id": device_id[:64], "ok": res.get("ok")})
+                return self._json(res)
+            # M-11 EvalCapabilityGrant — the "eval button". arm owner-signs+publishes a grant over a STRICTLY
+            # validated {engagement, target, overrides, evaluator, evaluator_pubkey, evaluator_pop, ...} (every
+            # arg validated in ceremonies before argv; the override tokens must be ⊆ the closed enum — the
+            # never-liftable floors can never be named); revoke is the fail-safe direction. Owner key sealed
+            # host-side, never in the browser. The evaluator PoP is produced out-of-band by the distinct
+            # enrolled evaluator; the server only transports it to the audited CLI.
+            if path == "/api/ceremonies/eval-grant/arm":
+                res = _cer.eval_grant_arm(
+                    str(body.get("engagement", "")), str(body.get("target", "")),
+                    body.get("overrides", ""), str(body.get("evaluator", "")),
+                    str(body.get("evaluator_pubkey", "")), str(body.get("evaluator_pop", "")),
+                    max_covered_actions=str(body.get("max_covered_actions", "0")),
+                    charter_hash=str(body.get("charter_hash", "")),
+                    environment=str(body.get("environment", "live")),
+                    reason=str(body.get("reason", "")))
+                self._audit_ceremony("eval-grant-arm", principal,
+                                     {"engagement": str(body.get("engagement", ""))[:64],
+                                      "target": str(body.get("target", ""))[:128], "ok": res.get("ok")})
+                return self._json(res)
+            if path == "/api/ceremonies/eval-grant/revoke":
+                res = _cer.eval_grant_revoke(str(body.get("engagement", "")), reason=str(body.get("reason", "")))
+                self._audit_ceremony("eval-grant-revoke", principal,
+                                     {"engagement": str(body.get("engagement", ""))[:64], "ok": res.get("ok")})
                 return self._json(res)
             # offense delegation — bless the offense PUBLIC identity {identity, scope, hours}; the identity
             # JSON reaches argv only via a server-controlled temp file (ceremonies handles it)

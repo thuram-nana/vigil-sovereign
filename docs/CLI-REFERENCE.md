@@ -208,3 +208,26 @@ For the full behaviour and honest scope of each, see [`docs/FEATURES.md`](FEATUR
 [`docs/DEFERRED-INFRA.md`](DEFERRED-INFRA.md). For a map of the whole documentation set see
 [`docs/INDEX.md`](INDEX.md); for a plain-language dictionary of the terms above see
 [`docs/GLOSSARY.md`](GLOSSARY.md).
+
+## F. Sovereign `sigil eval-grant` ceremony (the M-11 "eval button")
+
+`sigil eval-grant` is a SOVEREIGN verb (it runs in `.venv-sovereign` via `vigil sigil eval-grant …`, or
+directly as `sigil eval-grant …`), not a `vigil` native/passthrough verb — so it is not one of the §C/§D
+rows above. It owner-signs an **EvalCapabilityGrant**: a security-control OVERRIDE authorization that
+pre-authorizes lifting a CLOSED-ENUM set of OPT-IN, DEMOTE-ONLY authority-gate vetoes
+(`witness_quorum` / `blast_veto` / `containment_preview`) for ONE engagement/target during a sanctioned
+full-capability evaluation. It can never name the never-liftable floors (the egress floor, the m-of-n
+destruction quorum, the GET-only write baseline) — those are structurally separate conjuncts the grant does
+not feed.
+
+| Action | What it does |
+|---|---|
+| `sigil eval-grant arm --engagement <slug> --target <url> --overrides <a,b,c> --evaluator <user> --evaluator-pubkey <b64> --evaluator-pop <b64> [--max-covered-actions N] [--charter-hash H] [--environment live]` | Owner-signs + publishes a grant. Requires a verified covering eval-offense attestation AND a FRESH proof-of-possession over THIS grant's core by a DISTINCT owner-enrolled evaluator (two-party control). |
+| `sigil eval-grant revoke --engagement <slug>` | The fail-safe direction — un-arms every grant for the engagement; every gate enforces again. |
+| `sigil eval-grant status --engagement <slug> [--target <url>]` | A fail-closed read: armed?/overrides/declared ceiling/void-conditions. No signing. |
+
+Default-off: with no grant published the keyless offense plane injects no acks and every gate enforces
+byte-identically. The owner key is sealed host-side and never crosses; the keyless offense plane only reads
+and verifies the public signed grant (owner signature + owner SEAL + monotonic rollback high-water) from the
+shared seam. The same ceremony is exposed owner-only (`secrets` tier) in the web UI Settings surface
+(`/api/ceremonies/eval-grant/arm|revoke` + the `status` read), which shells this audited verb.
