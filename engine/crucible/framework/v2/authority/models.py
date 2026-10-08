@@ -39,6 +39,20 @@ class ActionRequest(BaseModel):
         "data, or risk availability? Caller classifies conservatively.",
     )
     description: str = Field(default="")
+    bug_class: str = Field(
+        default="",
+        description="The normalized bug class of the finding this action acts on, if any. Keyed on "
+        "by the OPT-IN witness-quorum veto (conjunct 6c): empty ⇒ the quorum is never enforced for "
+        "this action (byte-identical). The caller/producer may set it, but it is never trusted as a "
+        "corroboration claim — the quorum RE-EXECUTES the oracle over witness_context regardless.",
+    )
+    witness_context: dict | None = Field(
+        default=None,
+        description="The finding's retained oracle_context the action acts on; RE-EXECUTED, never "
+        "trusted — the witness-quorum veto recounts how many DISTINCT oracle-witness kinds re-fire "
+        "over it. None ⇒ the action is not tied to a finding, so the quorum is a no-op (byte-"
+        "identical). Never a promoted FACT and never a producer-carried corroboration set.",
+    )
 
 
 class AuthorizationDecision(BaseModel):
@@ -53,7 +67,7 @@ class AuthorizationDecision(BaseModel):
     denial_code: str = Field(
         default="",
         description="halted | expired | out_of_scope | destructive | "
-        "live_destructive | budget | blast_radius — empty when allowed.",
+        "live_destructive | budget | blast_radius | witness_quorum — empty when allowed.",
     )
     checked_at: datetime
 
