@@ -151,7 +151,7 @@
   function topbar() {
     const seg = h("div.segmented", null, ["all", "offense", "defense"].map(function (p) {
       return h("button" + (app.get().plane === p ? ".on" : ""), { dataset: { plane: p },
-        onClick: function () { app.set({ plane: p }); renderNav(); } }, p[0].toUpperCase() + p.slice(1));
+        onClick: function () { app.set({ plane: p }); refreshTopbar(); } }, p[0].toUpperCase() + p.slice(1));
     }));
     const cmdk = h("div.cmdk", { title: "Command palette (⌘K)", onClick: openPalette },
       [V.icon("search"), "Search or run a command", h("span.kbd", null, "⌘K")]);
@@ -233,12 +233,19 @@
     ]));
   }
   function logout() {
-    V.setSessionToken(""); V.setPrincipal(null); closeDrawer();
-    loadPrincipal(function (pp, ok) {
-      refreshTopbar(); renderNav();
-      if (ok && pp && !pp.authenticated) { renderLoginGate(V.$("#screen")); }
-      else { location.hash = "#/home"; route(); }
-    });
+    // Tell the server FIRST (while the session still authenticates) so a COOKIE session is truly invalidated
+    // server-side (its ledger record is dropped, so the id stops authenticating everywhere), then clear the
+    // client token regardless. Fail-open on the clear: even if the POST fails (offline / bearer-only session
+    // with no server record), the local sign-out below still runs so the button always works.
+    function finish() {
+      V.setSessionToken(""); V.setPrincipal(null); closeDrawer();
+      loadPrincipal(function (pp, ok) {
+        refreshTopbar(); renderNav();
+        if (ok && pp && !pp.authenticated) { renderLoginGate(V.$("#screen")); }
+        else { location.hash = "#/home"; route(); }
+      });
+    }
+    V.postJSON(SOV("/api/logout"), {}).then(finish, finish);
   }
 
   // ---- login gate + principal load (Claim 6) ---------------------------------
@@ -4979,6 +4986,16 @@
     } }, [V.icon("x"), "Sign out all sessions"]);
     var enrollPk = _hasWebAuthn()
       ? h("button.btn.owner", { onClick: passkeyEnroll }, [V.icon("shield"), "Enrol a passkey"]) : null;
+    // paired passkey REVOKE — owner-only, mirrors enrol. With no credential_id the server revokes ALL enrolled
+    // passkeys (revoke_all); the owner-signed credential store is updated on the host.
+    var revokePk = _hasWebAuthn()
+      ? h("button.btn.danger", { onClick: function () {
+          if (!window.confirm("Revoke ALL enrolled owner passkeys?\n\nEvery enrolled authenticator is removed "
+            + "from the owner-signed credential store on the host. The owner must re-enrol a passkey to use "
+            + "passkey sign-in again.")) return;
+          settingsAct({ action: "revoke_webauthn", reason: "revoke owner passkeys from Users & Roles" },
+            function (r) { return "Passkeys revoked" + (r && r.revoked_all != null ? " (revoked_all=" + r.revoked_all + ")" : "") + "."; }, function () {});
+        } }, [V.icon("x"), "Revoke passkeys"]) : null;
     return h("div", null, [
       h("div.hint", null, "Your owner login token now PERSISTS across restarts (dev posture) — the same "
         + "?token= URL keeps working after a reboot. Rotate to issue a new token, or revoke to kill it; both "
@@ -4987,7 +5004,7 @@
         + "sessions” immediately invalidates every server-side cookie session (idle + absolute expiry are "
         + "enforced automatically)."),
       h("div.acts", { style: { marginTop: "12px", display: "flex", gap: "8px", flexWrap: "wrap" } },
-        [rotate, revoke, signoutAll, enrollPk]),
+        [rotate, revoke, signoutAll, enrollPk, revokePk]),
       out,
     ]);
   }
@@ -5068,10 +5085,12 @@
     var role = h("select.input.sm", null, USER_ROLES.map(function (r) {
       var o = h("option", { value: r }, r); if (r === a.role) o.selected = true; return o; }));
     var assign = h("button.btn.sm.owner", { onClick: function () {
+      if (!window.confirm("Assign the role \"" + role.value + "\" to \"" + a.username + "\"?\n\nThis changes the account privileges immediately.")) return;
       settingsAct({ action: "assign_role", username: a.username, role: role.value,
         reason: "assign role from Users & Roles" }, "Role updated for " + a.username + ".", loadUsers);
     } }, "Assign role");
     var revoke = h("button.btn.sm.danger", { onClick: function () {
+      if (!window.confirm("Revoke the account \"" + a.username + "\"?\n\nIts bearer token stops authenticating immediately. This cannot be undone; you would re-create the account.")) return;
       settingsAct({ action: "revoke_account", username: a.username, reason: "revoke from Users & Roles" },
         "Account " + a.username + " revoked.", loadUsers);
     } }, [V.icon("x"), "Revoke"]);
@@ -5589,7 +5608,7 @@
   function destructionQuorumCard() {
     var st = h("div#dq-status", null, h("div.empty", null, "Loading quorum status…"));
     function refresh() {
-      V.getJSON(OFF("/api/destruction/status")).then(function (r) {
+      V.postJSON(OFF("/api/destruction/status"), {}).then(function (r) {
         r = r || {};
         if (r.ok === false) { V.mount(st, h("div.set-status.danger", null, r.error || "could not read the quorum")); return; }
         if (!r.provisioned) {
@@ -6935,6 +6954,130 @@
         dStatus,
       ]));
 
+      // --- EVAL CAPABILITY GRANT (M-11, the "eval button") — owner-sign + publish a time-boxed, scoped
+      //     EvalCapabilityGrant that arms a NAMED, LIFTABLE security-control override for a supervised eval.
+      //     The owner key signs ON THE HOST (never in the browser); the distinct enrolled evaluator's PoP is
+      //     produced OUT-OF-BAND (their key never enters the browser either) and this form only TRANSPORTS the
+      //     evaluator_pubkey + evaluator_pop strings to the audited CLI. overrides are constrained HERE to the
+      //     CLOSED enum {witness_quorum, blast_veto, containment_preview} — the never-liftable floors can NEVER
+      //     be named (the server re-checks the same closed subset). Status is a fail-closed read; revoke is the
+      //     fail-safe direction. Matches the server routes at SOV /api/ceremonies/eval-grant/{status,arm,revoke}.
+      var _EG_OVERRIDES = ["witness_quorum", "blast_veto", "containment_preview"];
+      var egStatusEng = h("input.inp", { type: "text", placeholder: "engagement slug to inspect", autocomplete: "off" });
+      var egStatus = h("div", null, "");
+      var egStatusPre = h("pre.mono", { style: { whiteSpace: "pre-wrap", fontSize: "12px", margin: "10px 0 0", maxHeight: "240px", overflow: "auto" } }, "(enter an engagement slug and Read)");
+      function readEgStatus() {
+        var eng = (egStatusEng.value || "").trim();
+        if (!eng) { V.mount(egStatus, h("div.set-status.danger", { style: { marginTop: "8px" } }, "enter an engagement slug")); return; }
+        V.mount(egStatus, h("div.hint", { style: { marginTop: "8px" } }, "Reading grant status (fail-closed)…"));
+        V.getJSON(SOV("/api/ceremonies/eval-grant/status") + "?engagement=" + encodeURIComponent(eng)).then(function (r) {
+          r = r || {}; V.mount(egStatus, "");
+          if (r.ok === false) V.mount(egStatus, h("div.set-status.danger", { style: { marginTop: "8px" } }, (r.error || r.stderr || "the status command failed (non-zero exit)")));
+          V.mount(egStatusPre, h("span", null, ((r.text || "") + (r.ok === false && r.stderr ? "\n" + r.stderr : "")).trim() || "(nothing reported — no grant armed?)"));
+        }).catch(function (e) { V.mount(egStatusPre, ""); V.mount(egStatus, offlineEmpty(e, "Could not read grant status (owner only).")); });
+      }
+      var egStatusBtn = h("button.btn", { onClick: readEgStatus }, [V.icon("find"), "Read status"]);
+
+      // the ARM form — every field validated server-side before argv; overrides limited to the closed enum here too.
+      var egArmEng = h("input.inp", { type: "text", placeholder: "engagement slug (e.g. acme-q4-eval)", autocomplete: "off" });
+      var egArmTgt = h("input.inp", { type: "text", placeholder: "target (URL/host, no leading '-')", autocomplete: "off" });
+      var egOvChecks = _EG_OVERRIDES.map(function (ov) {
+        return h("label", { style: { display: "inline-flex", gap: "6px", alignItems: "center", fontSize: "13px" } },
+          [h("input", { type: "checkbox", value: ov }), h("span.mono", null, ov)]);
+      });
+      function egSelectedOverrides() {
+        return egOvChecks.filter(function (lbl) { return lbl.querySelector("input").checked; })
+          .map(function (lbl) { return lbl.querySelector("input").value; });
+      }
+      var egEvaluator = h("input.inp", { type: "text", placeholder: "evaluator username (a DISTINCT owner-enrolled slug)", autocomplete: "off" });
+      var egPub = h("input.inp", { type: "text", placeholder: "evaluator pubkey (base64, 32-byte Ed25519)", autocomplete: "off", style: { fontFamily: "var(--mono, monospace)" } });
+      var egPop = h("input.inp", { type: "text", placeholder: "evaluator PoP (base64 signature, produced OUT-OF-BAND)", autocomplete: "off", style: { fontFamily: "var(--mono, monospace)" } });
+      var egMca = h("input.inp", { type: "number", min: "0", step: "1", value: "0", placeholder: "max covered actions (0 = unbounded by count)", style: { maxWidth: "260px" } });
+      var egCharter = h("input.inp", { type: "text", placeholder: "charter hash (hex, optional)", autocomplete: "off", style: { fontFamily: "var(--mono, monospace)" } });
+      var egEnv = h("select.inp", { style: { maxWidth: "180px" } }, ["live", "twin", "staging"].map(function (e) { return h("option", { value: e }, e); }));
+      var egReason = h("input.inp", { type: "text", placeholder: "reason (optional, <=256 chars)", autocomplete: "off" });
+      var egArmStatus = h("div", null, "");
+      var egArmBtn = h("button.btn.owner", { onClick: function () {
+        var eng = (egArmEng.value || "").trim(), tgt = (egArmTgt.value || "").trim();
+        var ovs = egSelectedOverrides(), evaluator = (egEvaluator.value || "").trim();
+        var pub = (egPub.value || "").trim(), pop = (egPop.value || "").trim();
+        if (!eng || !tgt || !evaluator || !pub || !pop) { V.mount(egArmStatus, h("div.set-status.danger", { style: { marginTop: "8px" } }, "engagement, target, evaluator, evaluator pubkey and evaluator PoP are all required")); return; }
+        if (!ovs.length) { V.mount(egArmStatus, h("div.set-status.danger", { style: { marginTop: "8px" } }, "select at least one override from the closed enum (the never-liftable floors can never be granted)")); return; }
+        if (!window.confirm("Arm an EvalCapabilityGrant?\n\nengagement: " + eng + "\ntarget: " + tgt + "\noverrides: " + ovs.join(", ")
+          + "\nevaluator: " + evaluator + "\nenvironment: " + egEnv.value
+          + "\n\nThis owner-signs a grant ON THE HOST that LIFTS the named controls for this engagement. The never-liftable floors are NOT affected. Proceed?")) return;
+        egArmBtn.disabled = true; V.mount(egArmStatus, h("div.hint", { style: { marginTop: "8px" } }, "Owner-signing the grant on the host…"));
+        V.postJSON(SOV("/api/ceremonies/eval-grant/arm"), {
+          engagement: eng, target: tgt, overrides: ovs, evaluator: evaluator,
+          evaluator_pubkey: pub, evaluator_pop: pop,
+          max_covered_actions: (egMca.value || "0"), charter_hash: (egCharter.value || "").trim(),
+          environment: egEnv.value, reason: (egReason.value || "").trim(),
+        }).then(function (r) {
+          r = r || {}; var failed = (r.ok === false);
+          V.mount(egArmStatus, h("div.set-status" + (failed ? ".danger" : ".ok"), { style: { marginTop: "8px", flexDirection: "column", alignItems: "stretch" } }, [
+            h("div", null, [V.icon(failed ? "x" : "check"), h("span", null, " " + (failed ? "Grant NOT armed" : "Grant armed"))]),
+            h("pre.mono", { style: { marginTop: "6px", whiteSpace: "pre-wrap", fontSize: "12px" } }, ((r.text || "") + (r.stderr ? "\n" + r.stderr : "")).trim() || (r.error || "(no output)")),
+          ]));
+          if (!failed && (egStatusEng.value || "").trim() === eng) readEgStatus();
+        }).catch(function (e) { V.mount(egArmStatus, h("div.set-status.danger", { style: { marginTop: "8px" } }, (e && e.message) || "arm failed")); })
+          .then(function () { egArmBtn.disabled = false; });
+      } }, [V.icon("shield"), "Arm grant (owner-sign)"]);
+
+      var egRevEng = h("input.inp", { type: "text", placeholder: "engagement slug to revoke", autocomplete: "off" });
+      var egRevReason = h("input.inp", { type: "text", placeholder: "reason (optional)", autocomplete: "off" });
+      var egRevStatus = h("div", null, "");
+      var egRevBtn = h("button.btn.owner", { onClick: function () {
+        var eng = (egRevEng.value || "").trim();
+        if (!eng) { V.mount(egRevStatus, h("div.set-status.danger", { style: { marginTop: "8px" } }, "enter the engagement slug to revoke")); return; }
+        if (!window.confirm("Revoke the eval grant for \"" + eng + "\"? This owner-signs a revocation (the fail-safe direction) — the armed overrides are withdrawn.")) return;
+        egRevBtn.disabled = true; V.mount(egRevStatus, h("div.hint", { style: { marginTop: "8px" } }, "Owner-signing the revocation on the host…"));
+        V.postJSON(SOV("/api/ceremonies/eval-grant/revoke"), { engagement: eng, reason: (egRevReason.value || "").trim() }).then(function (r) {
+          r = r || {}; var failed = (r.ok === false);
+          V.mount(egRevStatus, h("div.set-status" + (failed ? ".danger" : ".ok"), { style: { marginTop: "8px", flexDirection: "column", alignItems: "stretch" } }, [
+            h("div", null, [V.icon(failed ? "x" : "check"), h("span", null, " " + (failed ? "Revoke did not complete" : "Grant revoked"))]),
+            h("pre.mono", { style: { marginTop: "6px", whiteSpace: "pre-wrap", fontSize: "12px" } }, ((r.text || "") + (r.stderr ? "\n" + r.stderr : "")).trim() || (r.error || "(no output)")),
+          ]));
+        }).catch(function (e) { V.mount(egRevStatus, h("div.set-status.danger", { style: { marginTop: "8px" } }, (e && e.message) || "revoke failed")); })
+          .then(function () { egRevBtn.disabled = false; });
+      } }, [V.icon("x"), "Revoke grant"]);
+
+      parts.push(h("div.card", { style: { marginTop: "16px" } }, [
+        h("div.card-h", null, [h("h3", null, [V.icon("key"), " Eval capability grant (supervised eval)"])]),
+        h("div.hint", null, "Owner-sign + publish a time-boxed EvalCapabilityGrant — the “eval button”. It arms "
+          + "a NAMED, liftable security-control override for a single engagement under a supervised evaluation. "
+          + "The owner key signs ON THE HOST and never enters the browser; the distinct enrolled evaluator's "
+          + "proof-of-possession is produced OUT-OF-BAND (their key never enters the browser either) — this form "
+          + "only transports the evaluator pubkey + PoP strings to the audited CLI. Overrides are restricted to "
+          + "the closed set {witness_quorum, blast_veto, containment_preview}; the never-liftable floors can NEVER "
+          + "be granted here. Revoke is the fail-safe direction."),
+        h("div", { style: { marginTop: "12px" } }, [
+          h("div.hint", { style: { marginBottom: "6px", fontWeight: "600" } }, "Status (fail-closed read)"),
+          h("div", { style: { display: "flex", gap: "10px", alignItems: "center", flexWrap: "wrap" } }, [egStatusEng, egStatusBtn]),
+          egStatus, egStatusPre,
+        ]),
+        h("div", { style: { marginTop: "16px" } }, [
+          h("div.hint", { style: { marginBottom: "6px", fontWeight: "600" } }, "Arm a grant (owner-signs on the host)"),
+          h("div", { style: { display: "flex", flexDirection: "column", gap: "8px", maxWidth: "640px" } }, [
+            egArmEng, egArmTgt,
+            h("div", null, [h("div.dim", { style: { fontSize: "12px", marginBottom: "4px" } }, "overrides (closed enum — pick ≥1; floors can never be granted):"),
+              h("div", { style: { display: "flex", gap: "16px", flexWrap: "wrap" } }, egOvChecks)]),
+            egEvaluator, egPub, egPop,
+            h("div", { style: { display: "flex", gap: "10px", alignItems: "center", flexWrap: "wrap" } }, [
+              h("span.dim", { style: { fontSize: "12px" } }, "max covered actions"), egMca,
+              h("span.dim", { style: { fontSize: "12px" } }, "environment"), egEnv,
+            ]),
+            egCharter, egReason,
+            h("div", { style: { display: "flex", gap: "10px", flexWrap: "wrap" } }, [egArmBtn]),
+          ]),
+          egArmStatus,
+        ]),
+        h("div", { style: { marginTop: "16px" } }, [
+          h("div.hint", { style: { marginBottom: "6px", fontWeight: "600" } }, "Revoke a grant (fail-safe)"),
+          h("div", { style: { display: "flex", gap: "10px", alignItems: "center", flexWrap: "wrap", maxWidth: "640px" } }, [egRevEng, egRevReason, egRevBtn]),
+          egRevStatus,
+        ]),
+      ]));
+
       // --- DANGER ZONE — destructive owner ceremonies. Each requires TYPING an exact phrase (a window.prompt
       //     match) before the POST fires, and the SERVER re-checks the same phrase — an irreversible op must
       //     not go off on a fat-fingered click. The `sigil` verb's own danger flags are hardcoded server-side.
@@ -7524,10 +7667,11 @@
   // kill-switch), never a spawn.
   var STX = { run: "", data: null, err: null, loaded: false, _body: null };
   function renderStrix(screen) {
-    var body = V.mount(screen, [h("div.screen-head", null, [h("h1", null, "Strix Control"),
+    var body = h("div#strix-body", null, h("div.empty", null, "Loading Strix control"));
+    V.mount(screen, [h("div.screen-head", null, [h("h1", null, "Strix Control"),
       h("span.sub", null, "The Strix agent's runtime control state — gateway, sandbox, approvals, "
         + "proof health and the FACT/LEAD/CLEAN/INCONCLUSIVE verdicts. Read-only: nothing here spawns "
-        + "a run or mints a fact.")])]);
+        + "a run or mints a fact.")]), body]);
     loadStrix(body);
   }
   function loadStrix(body) {
@@ -9861,6 +10005,10 @@
         h("button.btn.sm.owner", { onClick: function () { launch("index", []); } }, [V.icon("bolt"), "Rebuild vector index"]),
         h("button.btn.sm.owner", { onClick: function () {
           var f = []; if (iReset.checked) f.push("reset"); if (iDocs.checked) f.push("docs"); if (iGit.checked) f.push("git");
+          var warn = iReset.checked
+            ? "Rebuild memory WITH --reset?\n\nThis WIPES the existing memory store and rebuilds it from scratch. This cannot be undone."
+            : "Rebuild memory from transcripts/docs/git?\n\nThis runs a tracked background host process on the sovereign host.";
+          if (!window.confirm(warn)) return;
           launch("ingest", f);
         } }, [V.icon("brain"), "Rebuild memory"]),
         h("label", { style: { display: "flex", gap: "5px", alignItems: "center", fontSize: "12.5px" } }, [iReset, "reset"]),
@@ -9938,6 +10086,7 @@
         h("button.btn.sm", { disabled: killed || !d.slug || K.feedBusy,
           title: killed ? "kill-switch engaged" : (!d.slug ? "select an engagement" : ""),
           onClick: function () {
+            if (!window.confirm("Pull the vulnerability feed now?\n\nThis performs a one-shot LIVE EXTERNAL egress to the configured sources (NVD / OSV / CISA-KEV) through the gated transport.")) return;
             V.toast("Pulling the vuln feed (gated egress)…");
             V.postJSON(OFF("/api/feed/" + encodeURIComponent(d.slug) + "/pull"), {}).then(function (r) {
               if (r && r.ok) {
@@ -10941,10 +11090,11 @@
   // ---- Compliance & ATT&CK (C3): map proven findings → standards controls ----
   var CMP = { run: "", runs: [], data: null, loaded: false };
   function renderCompliance(screen) {
-    var body = V.mount(screen, [h("div.screen-head", null, [
+    var body = h("div#compliance-body", null, h("div.empty", null, "Loading compliance"));
+    V.mount(screen, [h("div.screen-head", null, [
       h("h2", null, "Compliance & ATT&CK"),
       h("p.sub", null, "Every oracle-confirmed FACT mapped to OWASP / CWE / PCI-DSS / SOC 2 / ISO 27001 + "
-        + "MITRE ATT&CK. A lead never asserts control coverage — only a proven fact does.")])]);
+        + "MITRE ATT&CK. A lead never asserts control coverage — only a proven fact does.")]), body]);
     V.getJSON(runsURL()).then(function (d) {
       CMP.runs = runsOf(d); CMP.loaded = true;   // scoped to the active engagement
       // this screen's selection outlives a route change, so a run picked under a previous scope has to go
@@ -11016,12 +11166,13 @@
     });
   }
   function renderCharter(screen) {
-    var body = V.mount(screen, [h("div.screen-head", null, [
+    var body = h("div#charter-body", null, h("div.empty", null, "Loading charter"));
+    V.mount(screen, [h("div.screen-head", null, [
       h("h2", null, "Charter & Attestation"),
       h("p.sub", null, "Every target-touching action is gated on a signed engagement charter + a who/when/what "
         + "usage attestation minted BEFORE anything runs — no attestation, no run. This UI provisions a "
         + "LOOPBACK authority; a REMOTE target needs a signed charter this UI cannot mint — it VERIFIES + "
-        + "guides you through the out-of-band ceremony instead.")])]);
+        + "guides you through the out-of-band ceremony instead.")]), body]);
     drawCharter(body);
     loadAuthority(body);
   }
@@ -11159,10 +11310,11 @@
   }
 
   function renderReport(screen) {
-    var body = V.mount(screen, [h("div.screen-head", null, [
+    var body = h("div#report-body", null, h("div.empty", null, "Loading report"));
+    V.mount(screen, [h("div.screen-head", null, [
       h("h2", null, "Client Report"),
       h("p.sub", null, "A LIVE, always-current report: every finding is re-verified OFFLINE on load, so a "
-        + "FACT is a re-checkable certificate — not a stale PDF, and not the AI's word. Read-only.")])]);
+        + "FACT is a re-checkable certificate — not a stale PDF, and not the AI's word. Read-only.")]), body]);
     V.getJSON(runsURL()).then(function (d) {
       RPT.runs = runsOf(d); RPT.loaded = true;   // scoped to the active engagement
       if (RPT.run && !RPT.runs.some(function (r) { return r.run_id === RPT.run; })) { RPT.run = ""; RPT.ev = null; RPT.cmp = null; }
@@ -11230,11 +11382,12 @@
   // ---- Assurance (C2): continuous proof / drift between two runs ----
   var ASR = { curr: "", prev: "", runs: [], data: null, telemetry: null, loaded: false };
   function renderAssurance(screen) {
-    var body = V.mount(screen, [h("div.screen-head", null, [
+    var body = h("div#assurance-body", null, h("div.empty", null, "Loading assurance"));
+    V.mount(screen, [h("div.screen-head", null, [
       h("h2", null, "Assurance — continuous proof / drift"),
       h("p.sub", null, "Diff the ORACLE-CONFIRMED fact set between two runs: a fact that newly appears is a "
         + "regression (a new exposure); one that disappears is a fix. Deterministic + offline — each run's "
-        + "certificates are re-fired, never re-attacked. A lead is never counted.")])]);
+        + "certificates are re-fired, never re-attacked. A lead is never counted.")]), body]);
     // B3: the live assurance/metrics PROJECTION over the signed spine (read-only, mints nothing). One-way —
     // no new authority, no scope widening. A separate fetch so a missing collector never blocks the drift view.
     ASR.telemetry = null;
@@ -11389,12 +11542,13 @@
   // ---- Proof Studio (B5): oracle-confirmed, signed, replayable exploit proofs ----
   var PRF = { run: "", runs: [], data: null, loaded: false };
   function renderProof(screen) {
-    var body = V.mount(screen, [h("div.screen-head", null, [
+    var body = h("div#proof-body", null, h("div.empty", null, "Loading proof"));
+    V.mount(screen, [h("div.screen-head", null, [
       h("h2", null, "Proof Studio"),
       h("p.sub", null, "Strix generates an exploit; VIGIL turns it into PROOF. A FACT here means a "
         + "deterministic oracle FIRED over the executor-captured raw bytes of the reproduction — not the "
         + "model's word. A LEAD is an honest 'not reproduced'. A DENIED proof had dangerous PoC content "
-        + "refused BEFORE any mint. Read-only.")])]);
+        + "refused BEFORE any mint. Read-only.")]), body]);
     V.getJSON(runsURL()).then(function (d) {
       PRF.runs = runsOf(d); PRF.loaded = true;   // scoped to the active engagement
       if (PRF.run && !PRF.runs.some(function (r) { return r.run_id === PRF.run; })) { PRF.run = ""; PRF.data = null; PRF.exported = null; }
