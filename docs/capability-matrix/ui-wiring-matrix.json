@@ -2064,7 +2064,7 @@
       "plane": "offense-console"
     },
     {
-      "method": "GET",
+      "method": "POST",
       "path": "/api/destruction/status",
       "plane": "offense-console"
     },
