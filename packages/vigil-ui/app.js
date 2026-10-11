@@ -5987,11 +5987,12 @@
       V.card("The gated fix ladder", "PROCESS", fixLadder(plan.ladder || []), false),
       h("div.legend", null, [V.icon("shield"), h("span", null, plan.note || "")]),
     ];
+    nodes.push(fixSinkCard(plan));
     if (!fixable.length) {
       nodes.push(h("div.empty", null, "No oracle-confirmed findings to fix in this run. Only proven FACTs are eligible — unproven leads are never auto-fixed."));
     } else {
       nodes.push(V.card("Fixable findings", "CONFIRMED", h("div.stack", null,
-        fixable.map(function (f, i) { return fixFindingCard(f, plan.run_id, i, plan.runnable, plan.why_not); })), false));
+        fixable.map(function (f, i) { return fixFindingCard(f, plan.run_id, i, plan.runnable, plan.why_not, plan.default_dest, plan.source_root); })), false));
     }
     nodes.push(V.card("Highest-impact fix points", "IMPACT", h("div#fx-chokes", null, h("div.empty", null, "Loading…")), false));
     V.mount(view, nodes);
@@ -6007,6 +6008,34 @@
     }));
   }
 
+  // Per-run fix SINK (WHERE a fix goes): ONE primary with a one-line WHY, chosen from the backend's shared
+  // `fix_precondition` (plan.repo_kind / plan.remote_host_only) — the UI never stats paths itself. A git
+  // remote ships a fix as a gated m-of-n PULL REQUEST (the read-only Destruction quorum card on the Defense
+  // screen; `vigil patch --open-pr` fires on the host, keys never in the browser). A local codebase applies
+  // locally (download the verified .patch, or apply it to a confined path) — no PR, because there is no remote.
+  function fixSinkCard(plan) {
+    var toPR = (String(plan.repo_kind) === "git-remote") || plan.remote_host_only;
+    var body;
+    if (toPR) {
+      body = h("div.stack", null, [
+        h("div.legend", null, [V.icon("shield"), h("span", null,
+          "This run targets a git remote — a fix ships as a gated PULL REQUEST, never a local write from here.")]),
+        h("div.hint", null, "Orchestrate it with the m-of-n Destruction quorum (the read-only card on the "
+          + "Defense screen): the signing keys stay on the host and `vigil patch --open-pr` fires only when the "
+          + "quorum is fully armed. No PR is ever opened from the browser."),
+      ]);
+    } else {
+      body = h("div.stack", null, [
+        h("div.legend", null, [V.icon("fixes"), h("span", null,
+          "Your fixes apply LOCALLY — download the verified diff or apply it to a path. No PR, because this is "
+          + "a local codebase, not a git remote.")]),
+        plan.source_root ? h("div.mono.dim", { style: { fontSize: "var(--fs-xs)" } }, "source: " + plan.source_root) : null,
+        plan.default_dest ? h("div.mono.dim", { style: { fontSize: "var(--fs-xs)" } }, "default copy: " + plan.default_dest) : null,
+      ]);
+    }
+    return V.card("Where fixes go", "SINK", body, false);
+  }
+
   function sevClass(sev) {
     var s = String(sev || "").toLowerCase();
     if (s === "critical" || s === "high") return "danger";
@@ -6017,7 +6046,7 @@
   // ladder (`plan.runnable` — the SAME precondition `actions.apply_fix` enforces, served by the one shared
   // helper). Otherwise we show the backend's own `why_not` verbatim and point at the CLI. The UI must never
   // offer an action the backend is guaranteed to refuse.
-  function fixFindingCard(f, runId, idx, runnable, whyNot) {
+  function fixFindingCard(f, runId, idx, runnable, whyNot, defaultDest, sourceRoot) {
     var outId = "fx-out-" + idx, btnId = "fx-btn-" + idx;
     var applyBlock;
     if (!f.ref) {
@@ -6029,12 +6058,12 @@
         + " You can still apply from the CLI with `vigil patch`.");
     } else {
       var vbtnId = "fx-vbtn-" + idx, voutId = "fx-vout-" + idx, dbtnId = "fx-dbtn-" + idx, doutId = "fx-dout-" + idx;
-      var sxId = "fx-strix-" + idx;
+      var sxId = "fx-strix-" + idx, skId = "fx-sink-" + idx;
       applyBlock = h("div", { style: { marginTop: "10px" } }, [
         h("button.btn.sm#" + btnId, { onClick: function () { applyFix(runId, f.ref, btnId, outId); } },
           [V.icon("bolt"), "Apply fix (gated)"]),
         h("button.btn.sm.primary#" + dbtnId, { style: { marginLeft: "8px" },
-          onClick: function () { deepFix(runId, f.ref, dbtnId, doutId, sxId); } },
+          onClick: function () { deepFix(runId, f.ref, dbtnId, doutId, sxId, idx, defaultDest, sourceRoot); } },
           [V.icon("brain"), "Deep fix (iterate + verify)"]),
         h("label.hint", { style: { marginLeft: "8px", cursor: "pointer", userSelect: "none" }, title:
           "Agentic front-end: the vendored Strix agent proposes the diff (needs Docker + a live gated egress "
@@ -6053,6 +6082,11 @@
           + "Then Verify re-runs the deterministic static rule over YOUR source: `cleared` means the rule "
           + "no longer fires anywhere in the tree. It proves the pattern is gone, not that a runtime "
           + "exploit was ever reachable."),
+        // The local SINK controls — gated on a VERIFIED diff (f.has_verified_diff from the plan, OR revealed
+        // in-session when Deep fix returns r.verified). Only an oracle-verified fix is downloadable/appliable;
+        // until then this host holds ONLY the honest hint (the load-bearing safety message). `deepFix` re-mounts
+        // this host by #fx-sink-<idx> on a verified result.
+        h("div#" + skId, { style: { marginTop: "4px" } }, fixSinkContent(runId, f.ref, idx, !!f.has_verified_diff, defaultDest, sourceRoot)),
         h("div#" + outId, { style: { marginTop: "8px" } }),
         h("div#" + doutId, { style: { marginTop: "8px" } }),
         h("div#" + voutId, { style: { marginTop: "8px" } }),
@@ -6117,7 +6151,7 @@
         if (out) V.mount(out, h("div.legend", null, [V.icon("x"), (e && e.message) || "verify failed"]));
       });
   }
-  function deepFix(runId, ref, btnId, outId, strixId) {
+  function deepFix(runId, ref, btnId, outId, strixId, idx, defaultDest, sourceRoot) {
     var btn = V.$("#" + btnId), out = V.$("#" + outId);
     var sx = strixId ? V.$("#" + strixId) : null;
     var agent = (sx && sx.checked) ? "strix" : "none";
@@ -6139,10 +6173,128 @@
           r.note ? h("div.hint", null, r.note) : null,
           h("pre.mono", { style: { marginTop: "6px", maxHeight: "320px", overflow: "auto", fontSize: "var(--fs-xs)", whiteSpace: "pre-wrap" } }, r.output || "(no output)"),
         ]);
+        // IN-SESSION reveal: a verified deep fix just PERSISTED the diff (deep_fix emits it only on a verified
+        // result), so turn on the download/apply-local affordance for THIS finding without a page reload. The
+        // gate is the same on refresh (f.has_verified_diff ⇐ the persisted .patch exists), never UI state.
+        if (r.verified && idx != null) {
+          var sink = V.$("#fx-sink-" + idx);
+          if (sink) V.mount(sink, fixSinkContent(runId, ref, idx, true, defaultDest, sourceRoot));
+        }
       })
       .catch(function (e) {
         if (btn) btn.disabled = false;
         if (out) V.mount(out, h("div.legend", null, [V.icon("x"), (e && e.message) || "deep fix failed"]));
+      });
+  }
+
+  // The verified-fix SINK controls for one finding. VERIFIED ⇒ (a) download the pre-built .patch (pure GET,
+  // no build), (b) apply it to a LOCAL path — a confined fixed COPY by default; in_place patches the source
+  // and is double-gated (a window.confirm NAMING the source here + the backend's own confirm flag). NOT
+  // verified ⇒ ONLY the honest hint — the load-bearing safety message that only an oracle-verified fix can be
+  // downloaded or applied (styled like the !ref / !runnable hints above). Pure builder (no DOM lookup) so the
+  // same call renders at card build AND when `deepFix` re-mounts the sink host in-session.
+  function fixSinkContent(runId, ref, idx, verified, defaultDest, sourceRoot) {
+    if (!verified) {
+      return h("div.hint", { style: { marginTop: "10px" } },
+        "Produce a verified fix first (Deep fix) — only an oracle-verified fix can be downloaded or applied.");
+    }
+    var aBtnId = "fx-applybtn-" + idx, aOutId = "fx-applyout-" + idx;
+    var dest = h("input.input", { type: "text", placeholder: defaultDest || "<source>-fixed",
+      style: { maxWidth: "560px" } });
+    var inplace = h("input", { type: "checkbox", style: { width: "auto", marginRight: "4px" } });
+    return h("div", { style: { marginTop: "10px" } }, [
+      h("div.legend", null, [V.icon("check"), h("span", null,
+        "Oracle-verified fix — downloadable and appliable.")]),
+      h("div.acts", null, [
+        h("button.btn.sm.primary", { onClick: function () { downloadFixDiff(runId, ref); } },
+          [V.icon("fixes"), "Download verified fix (.patch)"]),
+      ]),
+      h("div", { style: { marginTop: "10px" } }, [
+        h("label.hint", { style: { display: "block", marginBottom: "4px" } },
+          "Apply fix to a local path — a confined fixed COPY by default; your source is never touched unless you tick in-place."),
+        h("div.row-flex", { style: { gap: "8px", flexWrap: "wrap" } }, [
+          dest,
+          h("button.btn.sm#" + aBtnId, { onClick: function () {
+            applyFixLocal(runId, ref, dest.value, aBtnId, aOutId, !!inplace.checked, sourceRoot); } },
+            [V.icon("fixes"), "Apply fix to path"]),
+          h("label.hint", { style: { cursor: "pointer", userSelect: "none" }, title:
+            "In-place patches YOUR source tree directly (not a copy). Double-gated: a confirm here AND the "
+            + "backend's own confirm flag — either alone refuses." },
+            [inplace, "in place (patch my source)"]),
+        ]),
+      ]),
+      h("div.hint", { style: { marginTop: "6px" } },
+        "Copy mode writes a fixed tree at the path above (confined under the source's parent dir or the VIGIL "
+        + "apply workspace — never the source, a non-empty dir, or a system path). The CLEARED / STILL-PRESENT "
+        + "verdict below is the deterministic oracle re-run over the WRITTEN tree, not the apply step asserting "
+        + "success."),
+      h("div#" + aOutId, { style: { marginTop: "8px" } }),
+    ]);
+  }
+  // PURE GET download of the PRE-BUILT verified .patch (modeled on downloadDossier, but with NO build POST —
+  // deep_fix already persisted the diff on verifying). The session token rides the query string because a
+  // download navigation cannot set a request header (same carrier the dossier download uses). The backend
+  // 404s until a verified diff exists, so a still-vulnerable finding has nothing to serve.
+  function downloadFixDiff(runId, ref) {
+    if (!runId || !ref) { V.toast("No verified fix to download.", true); return; }
+    var a = document.createElement("a");
+    a.href = V.authUrl(OFF("/api/remediate/" + encodeURIComponent(runId) + "/" + encodeURIComponent(ref) + "/diff"));
+    a.download = "vigil-fix-" + runId + "-" + ref + ".patch";
+    document.body.appendChild(a); a.click(); document.body.removeChild(a);
+    V.toast("Downloading verified fix (.patch).");
+  }
+  // Apply an already-oracle-VERIFIED fix to the operator's LOCAL tree. DEFAULT mode is a confined fixed COPY
+  // at `dest` (the backend path-safety is arbitrary-write-critical). in_place patches the SOURCE and is
+  // double-gated: a window.confirm NAMING the source here AND confirm:true in the body (the backend refuses
+  // in_place without BOTH). The CLEARED/STILL-PRESENT verdict is the deterministic oracle re-run over the
+  // APPLIED tree (r.reverify), never the apply verb asserting success.
+  function applyFixLocal(runId, ref, dest, btnId, outId, inPlace, sourceRoot) {
+    var btn = V.$("#" + btnId), out = V.$("#" + outId);
+    var body = { dest_path: dest || "", mode: inPlace ? "in_place" : "copy", confirm: false };
+    if (inPlace) {
+      // Double gate for the destructive mode: this confirm NAMES the SOURCE tree (the backend patches
+      // source_root in in_place, ignoring dest_path), and the backend separately requires confirm:true.
+      var ok = window.confirm("Apply the fix IN PLACE to your SOURCE tree?\n\n" + (sourceRoot || "(the run's source tree)")
+        + "\n\nThis patches your operator source directly — NOT a copy. Only an oracle-verified fix reaches "
+        + "here, but your working tree will change. Continue?");
+      if (!ok) return;
+      body.confirm = true;
+    }
+    if (btn) btn.disabled = true;
+    if (out) V.mount(out, h("div.dim", null, inPlace
+      ? "Applying the verified fix IN PLACE to your source, then re-running the oracle over the patched tree…"
+      : "Writing a fixed COPY, then re-running the oracle over the written tree…"));
+    V.postJSON(OFF("/api/remediate/" + encodeURIComponent(runId) + "/" + encodeURIComponent(ref) + "/apply-local"), body)
+      .then(function (r) {
+        if (btn) btn.disabled = false;
+        if (!out) return;
+        if (r && r.error) {
+          V.mount(out, [
+            h("div.legend", null, [V.icon("info"), r.error]),
+            r.output ? h("pre.mono", { style: { marginTop: "6px", maxHeight: "260px", overflow: "auto", fontSize: "var(--fs-xs)", whiteSpace: "pre-wrap" } }, r.output) : null,
+          ]);
+          return;
+        }
+        var rv = r.reverify || {};
+        var stillAt = (rv.still_fires_at || []).join(", ");
+        V.mount(out, [
+          h("div.legend", null, [V.icon("check"), (r.mode === "in_place"
+            ? "Fix applied IN PLACE to your source: " : "Fixed copy written to: ") + (r.applied_path || "")]),
+          (r.applied_paths && r.applied_paths.length)
+            ? h("div.mono.dim", { style: { fontSize: "var(--fs-xs)", margin: "4px 0" } }, "files: " + r.applied_paths.join(", ")) : null,
+          h("div.legend", null, [V.icon(rv.cleared ? "check" : "x"),
+            rv.cleared
+              ? "CLEARED — the deterministic rule no longer fires anywhere in the applied tree (the vulnerable pattern is gone)."
+              : ((rv.moved ? "STILL PRESENT (moved) — the rule now fires at a different path"
+                           : "STILL PRESENT — the rule still fires over the applied tree")
+                 + (stillAt ? " at " + stillAt : "")
+                 + ".")]),
+          r.note ? h("div.hint", null, r.note) : null,
+        ]);
+      })
+      .catch(function (e) {
+        if (btn) btn.disabled = false;
+        if (out) V.mount(out, h("div.legend", null, [V.icon("x"), (e && e.message) || "apply-local failed"]));
       });
   }
 

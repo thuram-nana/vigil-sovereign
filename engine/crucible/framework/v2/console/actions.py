@@ -4086,6 +4086,142 @@ def _valid_finding_ref(finding_ref: str) -> bool:
         and not any(c in ref for c in "/\\ \t\r\n")
 
 
+def _safe_fix_ref(finding_ref: str) -> str:
+    """A finding ref reduced to ONE filesystem-safe path component (never a traversal / separator), for the
+    persisted ``<ref>.patch`` / ``<ref>.verify.json`` names. Mirrors the CLI's ``_remediate_safe_ref``; the
+    caller has ALREADY passed ``_valid_finding_ref`` (so this only normalises for the filename)."""
+    s = "".join(c if (c.isalnum() or c in "-_.") else "_" for c in str(finding_ref or "finding"))
+    s = s.strip("._") or "finding"
+    return s[:80]
+
+
+def fix_diff_path(run_id: str, finding_ref: str) -> Path:
+    """The persisted VERIFIED unified diff for one finding: ``<run_dir>/fixes/<safe_ref>.patch``. Guarded by
+    ``run_dir`` (traversal → ValueError) AND ``_valid_finding_ref`` (an unsafe ref → ValueError), then the
+    ref is sanitised to one path component — so this can only ever name a file inside this run's own
+    ``fixes/`` dir. Its EXISTENCE is the console's only-verified apply gate (``deep_fix`` persists here ONLY
+    on a verified-no-pr result; a still-vulnerable run writes nothing)."""
+    rd = run_dir(run_id)                                   # traversal-guarded; raises ValueError on a bad id
+    if not _valid_finding_ref(finding_ref):
+        raise ValueError("invalid finding reference")
+    return rd / "fixes" / f"{_safe_fix_ref(finding_ref)}.patch"
+
+
+def fix_verify_path(run_id: str, finding_ref: str) -> Path:
+    """The sidecar of :func:`fix_diff_path` — ``<run_dir>/fixes/<safe_ref>.verify.json`` holding
+    ``{status, suite_ran, tests_passed, ...}``. Same guards; kept in lockstep with the CLI's
+    ``_emit_verify_sidecar_path`` so the writer (``vigil patch --emit-diff``) and this reader agree."""
+    return fix_diff_path(run_id, finding_ref).with_name(f"{_safe_fix_ref(finding_ref)}.verify.json")
+
+
+def _detect_repo_kind(repo_abs: str) -> str:
+    """Classify a LOCAL source tree for the Fixes screen's primary-affordance choice, READ-ONLY + cheap:
+
+      * ``git-remote`` — a git work tree whose a push remote resolves (so a gated PR is possible);
+      * ``git-local``  — a git work tree with NO push remote (local-apply/patch only);
+      * ``local``      — not a git work tree (or no ``git``), or ``repo_abs`` is empty (a URL / absent tree).
+
+    NOTE: ``git remote get-url --push`` REQUIRES a remote name (the bare form is a usage error), so this
+    enumerates remotes and queries each — equivalent to "a push remote resolves". Short-timeout ``git`` reads,
+    argv list (no shell), fail-closed to ``local`` on any error."""
+    if not repo_abs:
+        return "local"
+    git = shutil.which("git")
+    if not git:
+        return "local"
+
+    def _git(*a: str):
+        try:
+            return subprocess.run([git, "-C", repo_abs, *a], capture_output=True, text=True, timeout=10)  # noqa: S603
+        except (OSError, subprocess.SubprocessError):
+            return None
+
+    wt = _git("rev-parse", "--is-inside-work-tree")
+    if not wt or wt.returncode != 0 or (wt.stdout or "").strip() != "true":
+        return "local"
+    rem = _git("remote")
+    for name in [n.strip() for n in ((rem.stdout if rem else "") or "").splitlines() if n.strip()]:
+        pu = _git("remote", "get-url", "--push", name)
+        if pu and pu.returncode == 0 and (pu.stdout or "").strip():
+            return "git-remote"
+    return "git-local"
+
+
+def _apply_workspace() -> str:
+    """An allowlisted VIGIL workspace root under which a local-apply COPY may be written (besides the source's
+    own parent dir). Rooted at ``<live_base>/apply-local``; created best-effort. Returns the abspath, or ""."""
+    try:
+        ws = Path(_live_base()) / "apply-local"
+        ws.mkdir(parents=True, exist_ok=True)
+        return str(ws.resolve())
+    except OSError:
+        return ""
+
+
+# System roots a local-apply COPY may never be written at or under (belt-and-suspenders beside the positive
+# allowlist confinement below — the allowlist is the load-bearing gate; this refuses the pathological cases).
+_APPLY_SYSTEM_DIRS = ("/etc", "/usr", "/bin", "/sbin", "/lib", "/lib64", "/boot", "/dev", "/proc", "/sys",
+                      "/run", "/var", "/opt", "/srv", "/root")
+_APPLY_SYSTEM_EXACT = frozenset(("/", "/home", "/mnt", "/media", "/tmp", *_APPLY_SYSTEM_DIRS))
+
+
+def _safe_apply_dest(dest_path: str, source_root: str) -> "tuple[str, str]":
+    """ARBITRARY-WRITE-CRITICAL path safety for a local-apply COPY destination. Returns ``(resolved_dest, "")``
+    on success or ``("", reason)`` — fail-closed. Rejects, in order: an empty dest · a ``..`` component ·
+    a non-absolute path · an unresolvable path · a dest equal to / inside / an ancestor of the source · an
+    exact/nested system dir · a non-empty existing dir (or an existing non-dir) · a dest NOT confined under
+    an allowlisted root (the source's PARENT dir, or the VIGIL apply workspace). The dest is realpath-resolved
+    FIRST, so a symlink that escapes the allowlist resolves to its real target and is caught by confinement."""
+    raw = str(dest_path or "").strip()
+    if not raw:
+        return "", "a destination path is required for a copy apply"
+    if ".." in raw.replace("\\", "/").split("/"):
+        return "", "destination must not contain a '..' component"
+    p = Path(raw).expanduser()
+    if not p.is_absolute():
+        return "", "destination must be an absolute path"
+    try:
+        dest = os.path.realpath(str(p))                    # resolves symlinks in the whole chain
+        src = os.path.realpath(str(source_root or ""))
+    except (OSError, ValueError) as exc:
+        return "", f"cannot resolve the destination path: {type(exc).__name__}"
+    if not src or not os.path.isdir(src):
+        return "", "the source tree is not a readable local directory"
+    if dest == src:
+        return "", "destination equals the source tree"
+    try:
+        if os.path.commonpath([dest, src]) == src:
+            return "", "destination is inside the source tree"
+        if os.path.commonpath([dest, src]) == dest:
+            return "", "destination is an ancestor of the source tree"
+    except ValueError:
+        pass                                               # no common path (different roots) — fine
+    if dest in _APPLY_SYSTEM_EXACT:
+        return "", "destination is a system directory"
+    for sysd in _APPLY_SYSTEM_DIRS:
+        if dest == sysd or dest.startswith(sysd + "/"):
+            return "", f"destination is under a system directory ({sysd})"
+    if os.path.isdir(dest) and any(os.scandir(dest)):
+        return "", "destination directory exists and is not empty"
+    if os.path.exists(dest) and not os.path.isdir(dest):
+        return "", "destination exists and is not a directory"
+    # POSITIVE allowlist: the dest MUST sit strictly under the source's parent dir, or the VIGIL workspace.
+    allow_roots = [os.path.dirname(src)]
+    ws = _apply_workspace()
+    if ws:
+        allow_roots.append(ws)
+    for root in allow_roots:
+        if not root:
+            continue
+        try:
+            if os.path.commonpath([dest, root]) == root and dest != root:
+                return dest, ""
+        except ValueError:
+            continue
+    return "", ("destination is not under an allowlisted root (the source's parent dir, or the VIGIL "
+                "apply workspace under the live base)")
+
+
 def fix_precondition(run_id: str) -> dict:
     """THE single source of truth for "can the gated auto-patch actually RUN for this run?".
 
@@ -4102,14 +4238,19 @@ def fix_precondition(run_id: str) -> dict:
       * the engagement's OWN signed offense spine at ``<base>/<slug>.spine`` — ``vigil patch --from-spine``
         grounds the driving finding there and NEVER in raw JSON.
 
-    Returns ``{runnable, why_not, slug, repo, base_dir, spine, vigil, command}``. Total: a bad/traversing run
-    id or an unreadable meta is a clean, honest ``runnable=False``, never an exception. ``why_not`` is "" iff
-    runnable; ``command`` is the equivalent CLI invocation (shown to the operator when the console cannot run
-    it here), and ``vigil`` is "" when no entrypoint resolved.
+    Returns ``{runnable, why_not, slug, repo, base_dir, spine, vigil, command}`` PLUS the Fixes-screen
+    affordance predicate ``{repo_kind, remote_host_only, source_root, default_dest}`` — the SAME shared helper
+    ``api.remediate_plan`` surfaces to the UI so it picks the right primary (local-apply vs gated PR) WITHOUT
+    statting paths itself (one predicate, two callers — the anti-drift discipline of ``runnable``/``why_not``).
+    Total: a bad/traversing run id or an unreadable meta is a clean, honest ``runnable=False``, never an
+    exception. ``why_not`` is "" iff runnable; ``command`` is the equivalent CLI invocation (shown to the
+    operator when the console cannot run it here), and ``vigil`` is "" when no entrypoint resolved.
     """
     base_dir = os.environ.get("VIGIL_BASE_DIR") or ".vigil-live"
     out = {"runnable": False, "why_not": "", "slug": "", "repo": "", "base_dir": base_dir,
-           "spine": "", "vigil": "", "command": ""}
+           "spine": "", "vigil": "", "command": "",
+           # Fixes-screen local-apply affordance predicate (defaults for every early return).
+           "repo_kind": "local", "remote_host_only": False, "source_root": "", "default_dest": ""}
     try:
         rd = run_dir(run_id)                    # traversal-guarded; raises ValueError on a bad id
         meta = json.loads((rd / "meta.json").read_text(encoding="utf-8"))
@@ -4131,6 +4272,20 @@ def fix_precondition(run_id: str) -> dict:
         return {**out, "why_not": "this run has no repository to patch — the gated auto-patch applies to a "
                                   "codebase run's source. Run a codebase (DAA) scan to enable a gated fix here."}
     out["repo"] = repo
+    # Local-apply affordance (READ-ONLY + cheap): resolve the on-disk source tree, its default fixed-copy dest
+    # (<source>-fixed, a sibling under the allowlisted parent), and classify the repo. ``remote_host_only`` is
+    # True when ``target`` is a git URL / has no local tree — then local-apply is N/A and the UI steers to the
+    # gated PR path. Computed here (not in the UI) so there is ONE predicate both callers share.
+    source_root = ""
+    try:
+        if repo and os.path.isdir(repo):
+            source_root = os.path.realpath(repo)
+    except OSError:
+        source_root = ""
+    out["source_root"] = source_root
+    out["default_dest"] = (source_root + "-fixed") if source_root else ""
+    out["remote_host_only"] = not bool(source_root)        # a URL / absent local tree → no local copy possible
+    out["repo_kind"] = _detect_repo_kind(source_root)
     # prefer the base_dir the run itself recorded (the DAA codescan writes <base>/<slug>.spine there), so this
     # check and `vigil patch` always agree on the same base even if the ambient env differs.
     base_dir = str(meta.get("base_dir") or base_dir)
@@ -4158,12 +4313,16 @@ def fix_precondition(run_id: str) -> dict:
     return {**out, "runnable": True}
 
 
-def verify_fix(run_id: str, finding_ref: str) -> dict:
+def verify_fix(run_id: str, finding_ref: str, *, root: str = "") -> dict:
     """Fixes screen — the DETERMINISTIC fix-verification oracle for a codebase (DAA) finding: re-run the DAA
     rule over the run's source and report whether the finding still fires. ``cleared=True`` iff the rule no
     longer matches at its file — the honest, offline, non-destructive "did the fix remove it?" check. The
     operator applies the proposed diff to their source, then clicks Verify (or re-scans); a cleared result is
     the proof the finding is gone. Shells ``vigil codescan --verify`` (exit 0 ⇔ cleared).
+
+    ``root`` overrides WHICH tree is re-scanned (default: the run's own source). ``apply_fix_local`` passes
+    the APPLIED copy here so the re-verify verdict comes from the deterministic oracle re-run over the tree
+    that was actually patched — never from the apply step asserting its own success.
 
     Fail-closed: an unsafe ref refuses before argv; a non-codebase run (no repo to re-scan) returns a clean
     ``cleared=False`` with the reason. Never raises for a bad run id beyond ``run_dir``'s guard."""
@@ -4172,13 +4331,14 @@ def verify_fix(run_id: str, finding_ref: str) -> dict:
     if not _valid_finding_ref(finding_ref):
         return {"ok": False, "cleared": False, "error": "invalid finding reference"}
     pre = fix_precondition(run_id)
-    if not pre["repo"]:
+    scan_root = str(root or "").strip() or pre["repo"]
+    if not scan_root:
         return {"ok": False, "cleared": False,
                 "error": pre.get("why_not") or "this run has no codebase to re-scan for verification"}
     vigil = pre.get("vigil") or _vigil_bin()
     if not vigil:
         return {"ok": False, "cleared": False, "error": "the `vigil` entrypoint is not resolvable"}
-    cmd = [vigil, "codescan", "--verify", "--root", pre["repo"], "--ref", finding_ref]
+    cmd = [vigil, "codescan", "--verify", "--root", scan_root, "--ref", finding_ref]
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=600)  # noqa: S603
     except (OSError, subprocess.SubprocessError) as e:
@@ -4190,7 +4350,7 @@ def verify_fix(run_id: str, finding_ref: str) -> dict:
     if not isinstance(detail, dict):
         detail = {}
     cleared = (proc.returncode == 0) and bool(detail.get("cleared"))
-    return {"ok": True, "cleared": cleared, "finding_ref": finding_ref, "repo": pre["repo"],
+    return {"ok": True, "cleared": cleared, "finding_ref": finding_ref, "repo": scan_root,
             "still_fires_at": detail.get("still_fires_at", []), "moved": bool(detail.get("moved")),
             "command": f"vigil codescan --verify --root <repo> --ref {finding_ref}",
             "note": ("Re-runs the deterministic DAA rule over the run's source. `cleared=True` means the rule "
@@ -4207,7 +4367,13 @@ def deep_fix(run_id: str, finding_ref: str, *, fix_attempts: int = 3, agent: str
     (``--from-spine``) and same disposable-clone / never-``--open-pr`` posture as :func:`apply_fix`; it just
     iterates + verifies. Success is ``verified-no-pr`` (the rule cleared AND the build passed) — never the
     signed ``remediated`` (which still needs the live oracle + m-of-n PR). Returns the verb's real output
-    (transcript + verdict + the applied diff to ``git apply``), or its fail-closed refusal verbatim."""
+    (transcript + verdict + the applied diff to ``git apply``), or its fail-closed refusal verbatim.
+
+    PERSISTENCE (the local-apply enabling change): the verb is told ``--emit-diff <run_dir>/fixes/<ref>.patch``,
+    which writes the portable diff + a ``.verify.json`` sidecar ONLY on a verified-no-pr result. A stale diff
+    from a prior attempt is cleared first, and a non-verified result is scrubbed after — so the file EXISTS
+    iff THIS attempt verified. That existence is the only-verified gate ``GET …/diff`` and ``apply_fix_local``
+    key on; it is enforced by what gets PERSISTED (at the gated verb), never by UI state."""
     run_dir(run_id)
     finding_ref = str(finding_ref or "").strip()
     if not _valid_finding_ref(finding_ref):
@@ -4222,9 +4388,23 @@ def deep_fix(run_id: str, finding_ref: str, *, fix_attempts: int = 3, agent: str
     slug, repo, base_dir = pre["slug"], pre["repo"], pre["base_dir"]
     attempts = max(1, min(int(fix_attempts or 3), 6))   # bound the self-correcting loop
     _agent = "strix" if str(agent or "").strip().lower() == "strix" else "none"
+    # Persist destination for the verified diff + its sidecar. CLEAR any stale pair first, so a failed re-run
+    # can never leave a previously-verified diff appliable (the file's existence must reflect THIS attempt).
+    diff_path = fix_diff_path(run_id, finding_ref)          # run_dir + ref guards; one path component
+    verify_path = fix_verify_path(run_id, finding_ref)
+    try:
+        diff_path.parent.mkdir(parents=True, exist_ok=True)
+        for stale in (diff_path, verify_path):
+            try:
+                stale.unlink()
+            except FileNotFoundError:
+                pass
+    except OSError:
+        pass
     cmd = [pre["vigil"], "patch", "--deep", "--fix-attempts", str(attempts),
            "--from-spine", slug, "--finding-ref", finding_ref,
-           "--target-repo", repo, "--base-dir", base_dir, "--apply-edits", "--approve"]
+           "--target-repo", repo, "--base-dir", base_dir, "--apply-edits", "--approve",
+           "--emit-diff", str(diff_path)]
     if _agent == "strix":
         # AGENTIC front-end: Strix produces the diff (in the gated Docker sandbox), then it is re-verified by
         # the same ladder. Needs the gated egress gateway up (`vigil services up`); a gateway-down run fails
@@ -4236,7 +4416,17 @@ def deep_fix(run_id: str, finding_ref: str, *, fix_attempts: int = 3, agent: str
         return {"ok": False, "error": f"the deep-fix ladder failed to run: {type(e).__name__}: {e}"}
     out = ((proc.stdout or "") + (("\n--- stderr ---\n" + proc.stderr) if proc.stderr else "")).strip()[-12000:]
     verified = proc.returncode == 0    # `vigil patch --deep` exits 0 ONLY on verified-no-pr
+    if not verified:
+        # DEFENSE-IN-DEPTH: the verb only emits on verified, but scrub anyway so a non-verified result can
+        # never present an apply affordance (enforced by what is PERSISTED, not UI state).
+        for stale in (diff_path, verify_path):
+            try:
+                stale.unlink()
+            except (FileNotFoundError, OSError):
+                pass
+    has_verified_diff = diff_path.is_file()
     return {"ok": verified, "runnable": True, "rc": proc.returncode, "verified": verified,
+            "has_verified_diff": has_verified_diff,
             "finding_ref": finding_ref, "slug": slug, "attempts": attempts, "agent": _agent,
             "command": ("vigil patch --deep --from-spine " + slug + " --finding-ref " + finding_ref
                         + " --target-repo <repo> --base-dir " + base_dir + " --apply-edits --approve"
@@ -4317,6 +4507,113 @@ def apply_fix(run_id: str, finding_ref: str) -> dict:
                      "EARNED only when the driving oracle re-fires SILENT on the rebuilt patch (the live "
                      "re-drive capability); opening a real PR is a separate m-of-n-gated CLI act "
                      "(`vigil patch --open-pr`).")}
+
+
+def apply_fix_local(run_id: str, finding_ref: str, dest_path: str = "",
+                    mode: str = "copy", confirm: bool = False) -> dict:
+    """Fixes screen — APPLY an already-oracle-VERIFIED fix to the operator's LOCAL tree, two ways:
+
+      * ``mode="copy"`` (DEFAULT, non-destructive): write a fixed COPY at a CONFINED ``dest_path`` — the
+        operator source is NEVER touched. ``dest_path`` defaults to ``<source>-fixed`` client-side; whatever
+        is sent is subjected to arbitrary-write-critical path safety here (:func:`_safe_apply_dest`).
+      * ``mode="in_place"``: patch the operator SOURCE directly — ONLY when ``confirm`` is also True (both
+        the mode AND the explicit confirm are required; either alone refuses).
+
+    The verdict is NEVER the apply tool's self-report: after the gated verb writes, THIS function re-runs the
+    deterministic oracle (``verify_fix`` over the APPLIED tree) and returns ITS verdict.
+
+    Fail-closed order: (a) run_dir + ref guard; (b) REFUSE unless the VERIFIED diff file exists (the only-
+    verified gate — ``deep_fix`` persists it only on verified-no-pr); (c) path safety / confirm; (d) SPAWN
+    the gated ``vigil patch --apply-to`` (argv list, no shell — the executor is NEVER imported; FATAL-2);
+    (e) re-verify over the written tree. A drifted source (``git apply --check`` fails) is a clean
+    ``{ok:false, error:"source drifted …"}`` with NOTHING left half-applied."""
+    run_dir(run_id)                             # traversal-guarded; raises ValueError on a bad id → 404
+    finding_ref = str(finding_ref or "").strip()
+    if not _valid_finding_ref(finding_ref):
+        return {"ok": False, "error": "invalid finding reference"}
+    mode = str(mode or "copy").strip().lower()
+    if mode not in ("copy", "in_place"):
+        return {"ok": False, "error": "mode must be 'copy' (a confined fixed copy) or 'in_place'"}
+    # (b) only-verified gate (defense-in-depth): the persisted VERIFIED diff MUST exist. No verified diff ⇒
+    #     no apply affordance, enforced by what was persisted — never by UI state.
+    diff_path = fix_diff_path(run_id, finding_ref)          # run_dir + ref guards; one path component
+    if not diff_path.is_file():
+        return {"ok": False, "error": "no verified fix diff for this finding yet — run Deep Fix until it "
+                                      "reports VERIFIED first (only an oracle-verified fix can be applied)."}
+    pre = fix_precondition(run_id)
+    source_root = str(pre.get("source_root") or "")
+    if not source_root or not os.path.isdir(source_root):
+        return {"ok": False, "error": pre.get("why_not")
+                or "this run has no local source tree to apply a fix to (a remote/URL target has none)."}
+    vigil = pre.get("vigil") or _vigil_bin()
+    if not vigil:
+        return {"ok": False, "error": "the `vigil` entrypoint is not resolvable (set VIGIL_BIN / activate the venv)"}
+    slug, base_dir = pre["slug"], pre["base_dir"]
+
+    # (c) + (d) resolve the write target and spawn the gated verb.
+    cmd = [vigil, "patch", "--target-repo", source_root, "--proposed-diff", str(diff_path),
+           "--from-spine", slug, "--finding-ref", finding_ref, "--base-dir", base_dir, "--approve"]
+    if mode == "in_place":
+        if not bool(confirm):
+            return {"ok": False, "error": "in_place apply patches your source directly — it requires "
+                                          "confirm:true (the default 'copy' mode writes a fixed copy and never "
+                                          "touches your source)."}
+        applied_path = source_root
+        cmd.append("--in-place")
+    else:
+        dest, why = _safe_apply_dest(dest_path or (source_root + "-fixed"), source_root)
+        if not dest:
+            return {"ok": False, "error": f"unsafe destination: {why}"}
+        applied_path = dest
+        cmd += ["--apply-to", dest]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=1800)  # noqa: S603
+    except (OSError, subprocess.SubprocessError) as e:
+        return {"ok": False, "error": f"the local-apply verb failed to run: {type(e).__name__}: {e}"}
+    # DRIFT: the verb exits 3 when `git apply --check` refused the diff — a clean refusal, nothing applied.
+    if proc.returncode == 3:
+        return {"ok": False, "error": "source drifted since the scan; re-scan",
+                "output": ((proc.stdout or "") + (proc.stderr or "")).strip()[-4000:]}
+    if proc.returncode == 2:
+        return {"ok": False, "error": "the local-apply verb refused (precondition/usage)",
+                "output": ((proc.stdout or "") + (proc.stderr or "")).strip()[-4000:]}
+    # (e) ZERO-TRUST re-verify: the verdict comes from the deterministic oracle re-run over the APPLIED tree,
+    #     never from parsing the verb's self-reported success.
+    rv = verify_fix(run_id, finding_ref, root=applied_path)
+    applied_paths = _diff_target_paths_safe(diff_path)
+    return {"ok": True, "applied_path": applied_path, "applied_paths": applied_paths,
+            "mode": mode, "finding_ref": finding_ref,
+            "reverify": {"cleared": bool(rv.get("cleared")),
+                         "still_fires_at": rv.get("still_fires_at", []),
+                         "moved": bool(rv.get("moved")),
+                         "ran": bool(rv.get("ok"))},
+            "command": ("vigil patch --target-repo <source> --proposed-diff <verified.patch> --from-spine "
+                        + slug + " --finding-ref " + finding_ref + " --base-dir " + base_dir + " --approve"
+                        + (" --in-place" if mode == "in_place" else " --apply-to <dest>")),
+            "note": ("The fixed tree was written by the gated `vigil patch --apply-to` verb (never an imported "
+                     "executor); the cleared/still-fires verdict is the deterministic DAA oracle re-run over "
+                     "the APPLIED tree, not the apply step asserting success. Copy mode never touches your "
+                     "source; in_place required an explicit confirm.")}
+
+
+def _diff_target_paths_safe(diff_path: Path) -> list:
+    """The repo-relative files the persisted diff touches (its ``+++ b/<path>`` targets) — for an honest
+    ``applied_paths`` report. Total: an unreadable/absent diff yields []."""
+    out: list = []
+    try:
+        text = diff_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return out
+    for line in text.splitlines():
+        if line.startswith("+++ "):
+            tgt = line[4:].strip().split("\t", 1)[0].strip()
+            if tgt in ("/dev/null", ""):
+                continue
+            if tgt.startswith("b/"):
+                tgt = tgt[2:]
+            if tgt and tgt not in out:
+                out.append(tgt)
+    return out
 
 
 # =====================================================================================================

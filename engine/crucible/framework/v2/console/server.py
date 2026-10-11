@@ -520,6 +520,16 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                 # raises ValueError in dossier_path/run_dir → caught below → 404.
                 self._download_dossier(path[len("/api/dossier/"):-len(".zip")].strip("/"))
                 return
+            if path.startswith("/api/remediate/") and path.endswith("/diff"):
+                # Stream the PRE-BUILT verified fix diff as a .patch attachment. Dispatched HERE, above the
+                # `/api/remediate/` prefix loop below, so `api.remediate_plan` does not swallow it. Never
+                # builds — `deep_fix` persists the diff (only on a verified result). A bad run id / unsafe ref
+                # raises ValueError in fix_diff_path/run_dir → caught below → 404. Token via ?token= (same as
+                # the dossier download). Pure GET, no build.
+                mid = path[len("/api/remediate/"):-len("/diff")].strip("/")
+                dl_run, _, dl_ref = mid.partition("/")
+                self._download_fix_diff(dl_run, dl_ref)
+                return
             if path == "/api/brain/decision":
                 # Brain: the propose-only decision engine + its live proposal. `?run=<id>` scopes the read
                 # to ONE run's persisted proposal with NO cross-run fallback (a run with no proposal → the
@@ -579,6 +589,29 @@ class ConsoleHandler(BaseHTTPRequestHandler):
         safe = "".join(c if (c.isalnum() or c in "._-") else "-" for c in f"vigil-dossier-{run_id}.zip")[:120]
         self.send_response(200)
         self.send_header("Content-Type", "application/zip")
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Content-Disposition", f'attachment; filename="{safe}"')
+        self.send_header("Cache-Control", "no-store")
+        self._sec_headers()
+        self.end_headers()
+        self.wfile.write(data)
+
+    def _download_fix_diff(self, run_id: str, finding_ref: str) -> None:
+        """Stream the PRE-BUILT verified fix diff for one finding as a ``.patch`` attachment. Confined to
+        ``<run_dir>/fixes/<safe_ref>.patch`` (``fix_diff_path`` traversal-guards the run id AND refuses an
+        unsafe finding ref, then sanitises it to one path component), so it can never stream an arbitrary
+        file. 404s until a verified diff exists (``deep_fix`` persists it ONLY on a verified result) — so a
+        still-vulnerable/unverified fix offers no download. Never builds."""
+        p = actions.fix_diff_path(run_id, finding_ref)   # run_dir + ref guards; raises ValueError → 404 in do_GET
+        if not p.is_file():
+            self._json({"error": "no verified fix diff for this finding yet — run Deep Fix until it reports "
+                                 "VERIFIED first"}, status=404)
+            return
+        data = p.read_bytes()
+        safe = "".join(c if (c.isalnum() or c in "._-") else "-"
+                       for c in f"vigil-fix-{run_id}-{finding_ref}.patch")[:160]
+        self.send_response(200)
+        self.send_header("Content-Type", "text/x-patch")
         self.send_header("Content-Length", str(len(data)))
         self.send_header("Content-Disposition", f'attachment; filename="{safe}"')
         self.send_header("Cache-Control", "no-store")
@@ -875,6 +908,21 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                 mid = path[len("/api/remediate/"):-len("/verify")].strip("/")
                 run_id, _, fref = mid.partition("/")
                 self._json(actions.verify_fix(run_id, fref))
+                return
+            if path.startswith("/api/remediate/") and path.endswith("/apply-local"):
+                # Fixes screen: APPLY an already-oracle-VERIFIED fix to the operator's LOCAL tree — a confined
+                # fixed COPY by default, or in_place (source) only when confirm is also set. Same-origin +
+                # token + RBAC _OWN gated above. Dispatched BEFORE "/apply" is moot (the suffixes are disjoint)
+                # but kept beside it. Path-safety + the only-verified gate live in actions.apply_fix_local; the
+                # re-verify verdict comes from the deterministic oracle re-run over the APPLIED tree. A bad run
+                # id raises ValueError in run_dir → caught below → clean 404.
+                mid = path[len("/api/remediate/"):-len("/apply-local")].strip("/")
+                run_id, _, fref = mid.partition("/")
+                self._json(actions.apply_fix_local(
+                    run_id, fref,
+                    dest_path=str((body or {}).get("dest_path", "") or ""),
+                    mode=str((body or {}).get("mode", "copy") or "copy"),
+                    confirm=bool((body or {}).get("confirm", False))))
                 return
             if path.startswith("/api/remediate/") and path.endswith("/apply"):
                 # Fixes screen (U1): run the GATED, non-destructive auto-patch ladder for one oracle-confirmed

@@ -166,6 +166,17 @@ OFFENSE_ACTION_PERM: dict[str, str] = {
     "/api/authority/ledger": _OWN,
     "/api/terminal/run": _OWN,
     "/api/remediate/*/apply": _OWN,
+    # Remediation writes. `/apply` (disposable-clone auto-patch) and `/deepfix` (iterate-until-green +
+    # oracle-verify, applies into a clone + PERSISTS the verified diff) both APPLY an auto-patch → owner-tier,
+    # matching the "APPLYING an auto-patch" doctrine above. `/apply-local` writes a fixed COPY to the host (or,
+    # on an explicit confirm, the operator SOURCE in place) → owner-tier (host write). NOTE (pre-existing gap
+    # this closed): `/deepfix` and `/verify` were ABSENT from this map — under a per-user proxy role they
+    # resolved to None ⇒ default-deny ⇒ 403 for EVERY role (an availability hole in the safe direction). They
+    # are mapped now: `/deepfix` at owner (it applies + persists a patch), `/verify` at operator (a read-
+    # recompute DAA re-scan, mirroring `/api/verify` and `/api/reverify/*`).
+    "/api/remediate/*/apply-local": _OWN,
+    "/api/remediate/*/deepfix": _OWN,
+    "/api/remediate/*/verify": _RUN,
     "/api/aegis/setup": _OWN,
     "/api/aegis/mode": _OWN,
     "/api/tools/install": _OWN,
@@ -186,6 +197,11 @@ _EXACT_KEYS = frozenset(k for k in OFFENSE_ACTION_PERM if "*" not in k)
 _PATTERNS = (
     ("/api/run/", "/cancel", "/api/run/*/cancel"),
     ("/api/run/", "/retry", "/api/run/*/retry"),
+    # Remediation group — ORDER mirrors do_POST (deepfix, verify, apply-local, apply). The suffixes are
+    # pairwise disjoint (".../apply-local" never ends with "/apply"), so precedence is unambiguous.
+    ("/api/remediate/", "/deepfix", "/api/remediate/*/deepfix"),
+    ("/api/remediate/", "/verify", "/api/remediate/*/verify"),
+    ("/api/remediate/", "/apply-local", "/api/remediate/*/apply-local"),
     ("/api/remediate/", "/apply", "/api/remediate/*/apply"),
     ("/api/dossier/", "/build", "/api/dossier/*/build"),
     ("/api/evolve/", "/tick", "/api/evolve/*/tick"),

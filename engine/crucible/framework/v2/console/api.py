@@ -863,6 +863,14 @@ def remediate_plan(run_id: str) -> dict[str, Any]:
             # the gated-apply precondition of record (identical to apply_fix's own) — the UI's button gate.
             "runnable": bool(pre.get("runnable")),
             "why_not": "" if pre.get("runnable") else str(pre.get("why_not") or ""),
+            # LOCAL-APPLY affordance predicate (the SAME `fix_precondition` the gated apply enforces) — so the
+            # UI picks the right primary (local-apply vs gated PR) WITHOUT statting paths itself. `repo_kind`:
+            # git-remote | git-local | local; `remote_host_only` ⇒ no local tree (steer to PR); `source_root`
+            # the on-disk tree; `default_dest` the confined <source>-fixed copy target.
+            "repo_kind": str(pre.get("repo_kind") or "local"),
+            "remote_host_only": bool(pre.get("remote_host_only")),
+            "source_root": str(pre.get("source_root") or ""),
+            "default_dest": str(pre.get("default_dest") or ""),
             "note": ("VIGIL shows what to fix and the gated process an auto-fix follows. Opening this page "
                      "clones, builds and opens nothing: every gated stage below QUEUES for owner approval, "
                      "and the ladder runs only on your explicit Apply click — into a DISPOSABLE clone, never "
@@ -880,11 +888,20 @@ def remediate_plan(run_id: str) -> dict[str, Any]:
         # honest gate the Findings hub uses; a lead (unproven) is counted but never offered for auto-fix.
         if f.get("grounding") == "fact":
             ref = str(f.get("check_id") or f.get("id") or f.get("ref") or "")
+            safe_ref = ref if actions._valid_finding_ref(ref) else ""
+            # has_verified_diff: does THIS finding's VERIFIED diff already exist on disk? The SAME
+            # `fix_diff_path` existence that `apply_fix_local`'s only-verified gate turns on — so the UI
+            # offers the download/apply affordance iff a verified fix was persisted (never on UI state).
+            has_verified_diff = False
+            if safe_ref:
+                has_verified_diff = _safe(lambda r=safe_ref: actions.fix_diff_path(run_id, r).is_file(),
+                                          default=False) or False
             fixable.append({
                 # the stable finding reference the gated `vigil patch` ladder keys on (== the reverifiable.json
                 # check_id). Absent OR not an argv-safe token → withheld, and the Fixes screen offers the CLI
                 # path rather than a button whose only possible answer is "invalid finding reference".
-                "ref": ref if actions._valid_finding_ref(ref) else "",
+                "ref": safe_ref,
+                "has_verified_diff": bool(has_verified_diff),
                 "title": f.get("title", ""), "bug_class": f.get("bug_class", ""),
                 "severity": f.get("severity", ""), "location": f.get("location", ""),
                 "confirmed_by": f.get("confirmed_by", ""),
