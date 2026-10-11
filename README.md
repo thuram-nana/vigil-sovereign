@@ -51,6 +51,36 @@ Nothing else promotes a claim to a fact — not model confidence, not a critic's
 
 ---
 
+## ⚡ Quick start — from clone to the UI in your browser
+
+New here? This is the whole path.
+
+```bash
+# 1. One-time build (both isolated environments + the Rust kernel; a few minutes)
+git clone https://github.com/thuram-nana/vigil-sovereign.git vigil && cd vigil
+./bootstrap.sh                 # add --yes for non-interactive; `make all` also starts the UI
+
+# 2. Bring the whole system up at ONE browser origin (loopback only)
+vigil up                       # prints a banner like the two lines below:
+#   VIGIL COMMAND is up — open ONE origin in your browser:
+#       http://127.0.0.1:8770/?token=YOUR-LONG-TOKEN
+```
+
+### Signing in — your bearer token
+
+`vigil up` mints a **fresh session bearer token** every time it starts and prints it in that banner. Two ways to get in:
+
+1. **Easiest — use the printed link.** Open the full `http://127.0.0.1:8770/?token=…` URL from the banner in your browser. The `?token=` in the URL signs you in automatically.
+2. **Or paste it.** Open `http://127.0.0.1:8770/` and paste the token into the login screen's **“Paste your VIGIL bearer token”** box, then press Enter. (If your account has a TOTP second factor enrolled, add the code; otherwise leave it blank.)
+
+> **Lost the token, or closed the terminal?** It is printed in the `vigil up` output and saved under `.vigil-live/ui/logs/`. It **rotates on every `vigil up`**, so always use the newest one. Stop the system with `vigil down`.
+
+**Want a safe target to watch it work end-to-end?** Bring up the built-in, deliberately-vulnerable **MERIDIAN** range (loopback only): `target up`, then open `http://127.0.0.1:19011/` and click **Run all ▸** (details in *Setup, running it, and the built-in range* below).
+
+**Deploying for real (production posture)?** Use the one-command bring-up `tools/oneshot-bringup/vigil-oneshot.sh` and see [`docs/DEPLOY.md`](docs/DEPLOY.md). Under `VIGIL_POSTURE=production` the system **refuses to start** until eight security controls are satisfied (vault sealed, witness quorum, egress supervisor, …).
+
+---
+
 ## How it's different
 
 Two kinds of tools exist today, and both ask for your trust. Classic scanners (DAST/SAST) emit **unverified findings** you must triage by hand. The new wave of **autonomous AI "hackers"** is worse: they can *hallucinate* vulnerabilities and *act unsafely* on their own — surveyed false-positive rates run **35–90%**, and in January 2026 curl ended its bug-bounty program over the flood of AI "slop" *(see [`docs/research/FRONTIER.md`](docs/research/FRONTIER.md))*. VIGIL refuses both failure modes by construction.
@@ -1688,6 +1718,8 @@ vigil up        # → http://127.0.0.1:8770/?token=…  (loopback bind; a public
 # vigil down    # CONTAIN: stop+disable the systemd unit, then reap the tracked backends
 # vigil panic   # EMERGENCY HARD-STOP: trip every kill-switch, mask+stop the unit + every cadence sidecar
 ```
+
+**Signing in:** `vigil up` prints a banner with `http://127.0.0.1:8770/?token=…`— open that full URL (the `?token=` signs you in), or open `http://127.0.0.1:8770/` and paste the token into the login screen’s “Paste your VIGIL bearer token” box. The token is minted fresh each start (it rotates on restart) and is also saved under `.vigil-live/ui/logs/`.
 
 One origin routes `/sovereign/*` → the SIGIL cockpit (`:8733`), `/offense/api/v1/*` → the gated action API (`:8799`), and `/offense/*` → the read-only console + SSE (`:8787`). Hosted mode (`--domain …`) sits behind your own TLS edge and **refuses** unless `CRUCIBLE_API_KEY` is set. The single bundle presents all **34 screens** (the canonical count gated in `knowledge/system-map/system-map.json`, kept == `app.js`'s `NAV`) — each fail-soft (an offline backend renders an honest empty state, never fake data), among them **Home · New Assessment · Chat · Terminal · Live · Strix Control · Findings · Fixes · Defense (AEGIS) · Sessions · Activity · Approvals & Safety · API Keys · Tools · Brain · Compliance · Settings · Manual · Knowledge Engine** — including an offline **evidence browser** (re-verify → sound / tampered / mismatch), per-finding **how-to test/verify/patch**, and a **one-click dossier download** (a self-contained, tamper-evident `.zip` that re-verifies offline).
 
