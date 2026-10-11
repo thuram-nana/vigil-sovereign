@@ -80,7 +80,9 @@ def _cmd_provision(args: argparse.Namespace) -> int:
     # `vigil engage --base-dir <same>` reuses the SAME anchor-1 signer and one owner delegation covers it (S7).
     prov = provision_authority(slug=args.slug, scope=scope, environment=args.environment,
                                duration_hours=args.hours, max_actions=args.max_actions,
-                               base_dir=args.base_dir, vault=Vault(Path(args.base_dir) / "vault"))
+                               base_dir=args.base_dir, vault=Vault(Path(args.base_dir) / "vault"),
+                               oob_collector_pubkey=args.oob_collector_pubkey,
+                               oob_relay_host=args.oob_relay_host)
     print(f"provisioned signed authority for {prov.slug!r}")
     print(f"  scope         : {', '.join(scope)}")
     print(f"  authority_path: {prov.authority_path}")
@@ -4324,6 +4326,14 @@ def build_parser() -> argparse.ArgumentParser:
     pp.add_argument("--max-actions", type=int, default=1000)
     pp.add_argument("--base-dir", default=".vigil-live",
                     help="engagement home for the STABLE governance key (shared with `vigil engage`)")
+    pp.add_argument("--oob-collector-pubkey", default="",
+                    help="Base64 Ed25519 PUBLIC key of the OOB relay's independent collector to PIN into the "
+                         "owner-signed authority (VF-2b). Public material only, obtained OUT-OF-BAND from the "
+                         "`collaborator serve` relay — the owner's signature then COVERS the pin so the engine's "
+                         "governed OOB feeder re-derives the verifier pin from the signed document.")
+    pp.add_argument("--oob-relay-host", default="",
+                    help="Bare hostname of the operator-hosted OOB collaborator relay authorized as an OOB "
+                         "EGRESS destination (a SEPARATE gate; NOT a scan target, NOT added to scope).")
     pp.set_defaults(func=_cmd_provision)
 
     pid = sub.add_parser("identity",

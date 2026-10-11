@@ -427,7 +427,7 @@ def _write_findings_json(rd: Path) -> bool:
 
 
 def launch_scan(target: str, *, max_pages: int = 60, use_library: bool = True,
-                ephemeral: bool = False) -> dict:
+                ephemeral: bool = False, oob: bool = False) -> dict:
     """Spawn a loopback `scan` subprocess that streams progress + saves its report.
     Returns ``{run_id, status}``. Refuses a non-loopback target (scan is loopback-only;
     a remote target must go through the gated `engage`). With ``ephemeral`` the whole run
@@ -447,10 +447,14 @@ def launch_scan(target: str, *, max_pages: int = 60, use_library: bool = True,
         "--format", "json", "--progress-log", str(progress),
         "--reverifiable-out", str(rd / "reverifiable.json"),
         "--max-pages", str(max_pages),
-        # a quick, bounded console scan: skip the out-of-band blind checks (they need
-        # a receiver + poll for callbacks, adding latency) and prioritise per point.
-        "--no-oob", "--targeted",
     ]
+    # a quick, bounded console scan: by default skip the out-of-band blind checks (they need a receiver + poll
+    # for callbacks, adding latency) and prioritise per point. With `oob` ON, OMIT `--no-oob` so the scan's
+    # CO-RESIDENT loopback OOB receiver runs — loopback scan is loopback-only, so the receiver is on the same
+    # host as the target and a blind callback reaches it (VF-2a token-only, sound co-resident).
+    if not oob:
+        cmd.append("--no-oob")
+    cmd.append("--targeted")
     # Honour `use_library`. It was previously accepted and then DROPPED — the parameter
     # appeared exactly ONCE in this file, in the signature — so every console-launched scan
     # silently ran the built-in checks only and never the declarative check library, despite
@@ -2658,6 +2662,12 @@ def launch_assessment(body: dict) -> dict:
                          f"(got {len(tools)}) — otherwise the run would start with no tool at all."}
     apply_fixes = bool(body.get("apply_fixes", False))
     keyless = bool(body.get("keyless", False))
+    # OOB (out-of-band blind-callback) opt-in. Default OFF ⇒ every branch is byte-identical to before. When ON,
+    # the loopback scan path runs the co-resident OOB receiver (we OMIT `--no-oob`), and a REMOTE engage wires
+    # the MANAGED collaborator relay — looked up SERVER-AUTHORITATIVELY from the registry by slug, NEVER from
+    # this body — fail-closed if it is not running+armed. The collaborator/arm lifecycle is its own gated flow.
+    _oob = body.get("oob") if isinstance(body.get("oob"), dict) else {}
+    oob_enabled = bool(_oob.get("enabled"))
     model = str(body.get("model", "")).strip()[:64]
     # F2: the session this run belongs to (optional). Recorded in meta so list_runs/session_detail can
     # associate the run; an unsafe id is dropped (never a traversal, never a raise) — the run still launches.
@@ -2908,7 +2918,13 @@ def launch_assessment(body: dict) -> dict:
         cmd = [sys.executable, "-m", "framework.v2", "scan", target,
                "--format", "json", "--progress-log", str(rd / "progress.jsonl"),
                "--reverifiable-out", str(rd / "reverifiable.json"),
-               "--max-pages", str(pages), "--no-oob"]
+               "--max-pages", str(pages)]
+        # Default: skip the blind OOB checks (they add a receiver + poll latency) for a quick loopback scan.
+        # With OOB ON, OMIT `--no-oob` so the scan's CO-RESIDENT loopback OOB receiver runs — on loopback the
+        # receiver is on the same host as the target, so a blind callback reaches it (VF-2a token-only, sound
+        # co-resident). No managed relay is needed for loopback; the remote relay is the engage branch below.
+        if not oob_enabled:
+            cmd.append("--no-oob")
         if targeted:
             cmd += ["--targeted"]
         slug = _slugify(body.get("slug") or "loopback", fallback="loopback")
@@ -2990,6 +3006,34 @@ def launch_assessment(body: dict) -> dict:
 
     cmd = [sys.executable, "-m", "framework.v2", "engage", slug, target, "--spine",
            "--request-budget", str(_ENGAGE_DEPTH[scan_mode])]
+    # OOB on a REMOTE engage: wire the MANAGED collaborator relay, looked up SERVER-AUTHORITATIVELY from the
+    # registry by slug (NEVER from the body). FAIL-CLOSED: OOB requested + remote + (no running+listening relay
+    # OR the engagement is NOT armed — no owner-signed authority whose oob_collector_pubkey == the running
+    # relay's pubkey) ⇒ refuse with a plain reason, before anything is spawned. A loopback engage uses the
+    # co-resident receiver (the engage default), so this is REMOTE-ONLY. The console appends only PUBLIC /
+    # loopback material + the secret-file PATH — never the secret value — and signs NOTHING (the VF-2b pin
+    # lives in the owner-signed authority, re-derived by the engine's governed OOB feeder).
+    if oob_enabled and not is_loopback:
+        from . import oob_collaborator
+        _oobst = oob_collaborator.status(slug)
+        if not (_oobst.get("running") and _oobst.get("listening")):
+            return {"error": f"OOB requested for a remote engage of {slug!r} but no running OOB collaborator "
+                             f"is listening for it — start it first (OOB panel), then arm it."}
+        if not _oobst.get("armed"):
+            return {"error": f"OOB requested for a remote engage of {slug!r} but it is NOT armed: an "
+                             f"owner-signed authority must pin the running collaborator's collector pubkey "
+                             f"(arm it — the owner signs it sovereign-side; the console never signs)."}
+        _advertise = str(_oobst.get("advertise_url") or "").strip()
+        _poll_url = str(_oobst.get("relay_poll_url") or "").strip()
+        _secret_path = str(_oobst.get("secret_path") or "").strip()
+        if not (_advertise and _poll_url and _secret_path):
+            return {"error": f"OOB requested for a remote engage of {slug!r} but the collaborator has no "
+                             f"advertise URL to embed in callbacks — re-start it with the operator-fronted "
+                             f"advertise URL (the public https endpoint in front of the loopback relay)."}
+        # --oob-relay = the advertise base the remote target hits (operator-fronted TLS); --oob-relay-url = the
+        # LOOPBACK base the co-resident scanner polls; --oob-relay-secret-file = the 0600 secret PATH (off argv).
+        cmd += ["--oob-relay", _advertise, "--oob-relay-url", _poll_url,
+                "--oob-relay-secret-file", _secret_path]
     if mode == "suite":
         # #799: a whole-app "suite" run must reach FACT parity with `scan --library` and crawl the REAL
         # surface, not short-circuit to "1 page / 0 FACTs". Two launcher-level fixes, both load-bearing:
@@ -5164,6 +5208,118 @@ def attestation_ledger() -> dict:
     return {"ok": who_rc == 0, "who": who[:4000], "verify": ver[:1000], "verified": ver_rc == 0,
             "note": "The usage attestation (who / when / what) is minted BEFORE any target-touching action — "
                     "no attestation, no run — and the chain is signed, so a record can't be back-dated."}
+
+
+# ---------------------------------------------------------------------------
+# OOB collaborator (out-of-band relay) — per-slug managed-process lifecycle + loopback arming.
+#
+# These are THIN wrappers over console.oob_collaborator (the registry that owns the process, the keypair,
+# and the secret). FATAL-2 holds here exactly as it does for the charter: the console NEVER signs an
+# authority. collaborator start/stop/status touch only process lifecycle + PUBLIC pin material; `oob_arm`
+# either shells the exec-only `vigil provision` for a LOOPBACK slug (scope HARD-FIXED to 127.0.0.1 —
+# governance-signed INSIDE that subprocess, never here) or, for a REMOTE slug, returns the out-of-band
+# ceremony and mints NOTHING. The collector pubkey to pin is taken from the RUNNING relay (server-
+# authoritative), never from the request body.
+# ---------------------------------------------------------------------------
+
+
+def oob_collaborator_start(body: dict) -> dict:
+    """Stand up the per-slug managed OOB collaborator on loopback. Returns the PUBLIC collector pubkey + the
+    loopback poll URL + the operator's advertise URL — NEVER the poll secret. Fail-closed on a missing slug /
+    bad advertise URL. CSRF/rebind/role (_OWN) gated by do_POST."""
+    body = body if isinstance(body, dict) else {}
+    slug = str(body.get("slug", "")).strip()
+    if not slug:
+        return {"ok": False, "error": "slug required (a path-safe engagement token)"}
+    advertise = str(body.get("advertise_url", "")).strip() or None
+    from . import oob_collaborator
+    return oob_collaborator.start(slug, advertise)
+
+
+def oob_status(slug: str = "") -> dict:
+    """MEASURED status of the per-slug OOB collaborator (running/listening/armed/pid/port/collector_pubkey).
+    Read-only; never includes the secret; an absent/blank slug is the honest not-running state."""
+    from . import oob_collaborator
+    return oob_collaborator.status(str(slug or ""))
+
+
+def oob_collaborator_stop(body: dict) -> dict:
+    """Stop the per-slug OOB collaborator and PURGE its secret + collector keypair + meta (idempotent).
+    CSRF/rebind/role (_RUN) gated by do_POST."""
+    body = body if isinstance(body, dict) else {}
+    slug = str(body.get("slug", "")).strip()
+    if not slug:
+        return {"ok": False, "error": "slug required (a path-safe engagement token)"}
+    from . import oob_collaborator
+    return oob_collaborator.stop(slug)
+
+
+def oob_arm_loopback(body: dict) -> dict:
+    """Arm an engagement's OOB channel by PINNING the running collaborator's collector pubkey into an
+    owner-signed authority.
+
+    LOOPBACK slug (host ∈ 127.0.0.1/localhost/::1): shells the exec-only ``vigil provision --slug <slug>
+    --scope 127.0.0.1 --oob-collector-pubkey <pin>`` — scope is HARD-FIXED (the UI can never widen it), the
+    authority is governance-signed INSIDE that subprocess, and the console holds no key and signs nothing.
+
+    REMOTE slug: the console does NOT sign a remote authority (FATAL-2). It returns the exact out-of-band
+    ``vigil provision`` ceremony, PRE-FILLED with the running relay's collector pubkey (and advertise host),
+    for the owner to run where the owner key lives — and it MINTS NOTHING.
+
+    The collector pubkey is read from the RUNNING relay (server-authoritative), never from the request body;
+    a slug with no running, listening collaborator is refused. CSRF/rebind/role (_OWN) gated by do_POST."""
+    body = body if isinstance(body, dict) else {}
+    # Same path-safe sanitisation provision_loopback_authority uses — the slug reaches an argv.
+    slug = "".join(c for c in str(body.get("slug", "")).strip() if c.isalnum() or c in "-_.")[:120]
+    if not slug:
+        return {"ok": False, "error": "slug required (a path-safe token)"}
+    # loopback-vs-remote is decided by the SERVER from the target host, never a body flag (which could lie).
+    target = str(body.get("target", "")).strip()
+    host = str(body.get("host", "")).strip().lower()
+    if not host and target:
+        host = (urlsplit(target).hostname or "").lower()
+
+    from . import oob_collaborator
+    st = oob_collaborator.status(slug)
+    if not st.get("running") or not st.get("listening"):
+        return {"ok": False, "error": "no running OOB collaborator for this engagement — start it first. The "
+                                      "collector pubkey to pin comes from the running relay, never the request."}
+    pin = str(st.get("collector_pubkey") or "")
+    if not pin:
+        return {"ok": False, "error": "the running OOB collaborator exposed no collector pubkey to pin "
+                                      "(restart it)."}
+
+    is_loopback = bool(host) and host in _LOOPBACK
+    if not is_loopback:
+        # REMOTE: GUIDE-ONLY — mint NOTHING. The owner signs this sovereign-side, out of band.
+        advertise = st.get("advertise_url")
+        relay_host = (urlsplit(advertise).hostname or "") if advertise else ""
+        guide = (f"vigil provision --slug {slug} --scope {host or '<target-host>'} "
+                 f"--oob-collector-pubkey {pin}"
+                 + (f" --oob-relay-host {relay_host}" if relay_host else " --oob-relay-host <your-relay-host>"))
+        return {"ok": True, "armed": False, "remote": True, "slug": slug, "collector_pubkey": pin,
+                "guide": guide,
+                "note": "REMOTE OOB is armed OUT-OF-BAND: run the command above where the owner key lives. The "
+                        "console never signs a remote authority (FATAL-2) and minted nothing here."}
+
+    # LOOPBACK: scope HARD-CODED to 127.0.0.1 (never the caller's) — the UI cannot widen it or arm a remote
+    # charter. Mirrors provision_loopback_authority, plus the collector-pubkey pin. The signing happens inside
+    # the `vigil` subprocess; this process signs nothing.
+    vigil = _vigil_bin()
+    if not vigil:
+        return {"ok": False, "error": "the `vigil` entrypoint is not resolvable (set VIGIL_BIN / activate the venv)"}
+    try:
+        proc = subprocess.run([vigil, "provision", "--slug", slug, "--scope", "127.0.0.1",
+                               "--oob-collector-pubkey", pin],
+                              capture_output=True, text=True, timeout=120)
+    except (OSError, subprocess.SubprocessError) as e:
+        return {"ok": False, "error": f"{type(e).__name__}: {e}"}
+    armed = bool(proc.returncode == 0 and oob_collaborator.status(slug).get("armed"))
+    return {"ok": proc.returncode == 0, "armed": armed, "remote": False, "slug": slug, "scope": "127.0.0.1",
+            "collector_pubkey": pin, "output": (proc.stdout or "")[:2000],
+            "stderr": (proc.stderr or "")[:1000] if proc.returncode else "",
+            "note": "Armed a LOOPBACK OOB authority (scope 127.0.0.1) pinning the running collaborator's "
+                    "collector pubkey — governance-signed inside `vigil provision`; the console signed nothing."}
 
 
 # ---------------------------------------------------------------------------

@@ -307,14 +307,14 @@
       "pending": 0,
       "ui-driven": 40
     },
-    "routes": 187,
+    "routes": 191,
     "routes_by_status": {
       "ORPHAN": 0,
       "headless": 27,
       "pending": 0,
-      "ui-driven": 160
+      "ui-driven": 164
     },
-    "ui_calls": 154
+    "ui_calls": 158
   },
   "generated_from": {
     "console": "engine/crucible/framework/v2/console/server.py",
@@ -1328,6 +1328,38 @@
     {
       "kind": "exact",
       "method": "POST",
+      "path": "/api/oob/arm",
+      "plane": "offense-console",
+      "reason": "",
+      "status": "ui-driven"
+    },
+    {
+      "kind": "exact",
+      "method": "POST",
+      "path": "/api/oob/collaborator/start",
+      "plane": "offense-console",
+      "reason": "",
+      "status": "ui-driven"
+    },
+    {
+      "kind": "exact",
+      "method": "POST",
+      "path": "/api/oob/collaborator/stop",
+      "plane": "offense-console",
+      "reason": "",
+      "status": "ui-driven"
+    },
+    {
+      "kind": "exact",
+      "method": "GET",
+      "path": "/api/oob/status",
+      "plane": "offense-console",
+      "reason": "",
+      "status": "ui-driven"
+    },
+    {
+      "kind": "exact",
+      "method": "POST",
       "path": "/api/panic",
       "plane": "offense-console",
       "reason": "",
@@ -2226,6 +2258,26 @@
     {
       "method": "GET",
       "path": "/api/memory",
+      "plane": "offense-console"
+    },
+    {
+      "method": "POST",
+      "path": "/api/oob/arm",
+      "plane": "offense-console"
+    },
+    {
+      "method": "POST",
+      "path": "/api/oob/collaborator/start",
+      "plane": "offense-console"
+    },
+    {
+      "method": "POST",
+      "path": "/api/oob/collaborator/stop",
+      "plane": "offense-console"
+    },
+    {
+      "method": "GET",
+      "path": "/api/oob/status",
       "plane": "offense-console"
     },
     {
