@@ -55,6 +55,10 @@ _SPECIAL_GET_ROUTES = (
     "/api/events", "/api/blackboard", "/api/chat/sessions", "/api/chat/session/",
     "/api/chat/hypotheses", "/api/chat/models", "/api/aegis/verdicts", "/api/dossier/",
     "/api/brain/decision", "/api/strix/control",
+    # do_GET special-cases `/api/remediate/<run>/<ref>/diff` ABOVE the `/api/remediate/` prefix loop (so the
+    # verified-fix .patch download is not swallowed by remediate_plan). The prefix is also a _PREFIX_ROUTES
+    # key (remediate_plan) — both are consumed by the Fixes screen in app.js.
+    "/api/remediate/",
 )
 
 
