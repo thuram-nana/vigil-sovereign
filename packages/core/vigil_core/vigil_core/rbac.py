@@ -144,6 +144,7 @@ OFFENSE_ACTION_PERM: dict[str, str] = {
     "/api/terminal/dryrun": _RUN,
     "/api/terminal/propose": _RUN,
     "/api/aegis/stop": _RUN,
+    "/api/oob/collaborator/stop": _RUN,   # OOB: stop + purge the managed loopback collaborator (lifecycle; mirrors /api/aegis/stop)
     # ---- offense gated API (framework.v2.api.server) — the loopback /api/v1 external action plane
     #      (W16-12). Both POST routes are ordinary run-tier offense actions: invoking a tool through the
     #      fail-closed gate chain (the api exposes only the SAFE registry — reverify + import), and
@@ -169,6 +170,11 @@ OFFENSE_ACTION_PERM: dict[str, str] = {
     "/api/aegis/mode": _OWN,
     "/api/tools/install": _OWN,
     "/api/services/up": _OWN,
+    # OOB: standing up the managed collaborator mints a collector keypair + spawns a managed process (infra
+    # provisioning — mirrors /api/aegis/setup); arming shells `vigil provision` to mint an owner-signed
+    # authority (mirrors /api/authority/provision). Both are owner-tier.
+    "/api/oob/collaborator/start": _OWN,
+    "/api/oob/arm": _OWN,
 }
 
 # The exact-match route keys (no wildcard). Membership test is O(1) and case-sensitive.

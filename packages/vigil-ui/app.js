@@ -2261,6 +2261,10 @@
     const W = { step: 1, mode: "", target: "", slug: "", authorized: false, mount: false, cbEngine: "daa",
       scope: [], scopeInput: "", objective: "", scan_mode: "standard", aiTools: true,
       tool: "", tools: [], apply_fixes: false, aegis_action: "detect",
+      // OOB (blind / out-of-band) confirmation for this run, plus its MEASURED gate state. `oobStatusFor`
+      // records the slug the cached `oobStatus` was read for, so a redraw never re-fires the status GET
+      // (nav-driven read, no polling). `oob` is forced off while unarmed — an unarmed run never claims OOB.
+      oob: false, oobStatus: null, oobStatusFor: null,
       session_id: "", graph_backed: false, sessions: [],
       cloud_mode: "cloud", provider: "aws",
       caps: null, profiles: null, profilesErr: false, kernel: null, launching: false,
@@ -2579,6 +2583,7 @@
           }
         }
         body.push(fixesCheckbox());
+        body.push(oobCheckbox());
       } else {
         const legendTxt = W.mode === "codebase" ? (W.cbEngine === "strix" ? "Strix chooses its own analysis passes over the source." : "DAA runs deterministic static rules over the source; each finding is written to the signed spine (fix-enabled).")
           : W.mode === "cloud" ? "The posture sensor runs its full deterministic check set over your imported inventory."
@@ -2597,6 +2602,39 @@
       return checkbox("Flag this run as one I want fixed", W.apply_fixes, function (v) { W.apply_fixes = v; },
         "Recorded with the run and shown on the Fixes screen, which lists the fixable findings and the gated "
         + "ladder either way. Ticking it applies nothing — a real fix is a separate, signed, gated step.");
+    }
+    // OOB (blind / out-of-band) confirmation for the run — UNAMBIGUOUSLY distinct from a cert's "out-of-band
+    // pin" (that pins a certificate's trust root; THIS keeps the scan's OOB receiver live so a blind class can
+    // be confirmed by a real callback). It is GATED on a MEASURED armed status (an owner-signed authority whose
+    // collector pubkey equals the running relay's). The status is read once per slug on draw and cached in
+    // `W.oobStatus` keyed by `W.oobStatusFor`, so a redraw never re-fires the GET — a nav-driven read, no poll.
+    // Unarmed (or status not yet read): the checkbox is DISABLED and points at Charter & Attestation, and
+    // `W.oob` is forced off so an unarmed run never carries an OOB claim (fail-closed).
+    function oobCheckbox() {
+      var oobSlug = W.slug.trim() || slugify(hostOf(W.target), "engagement");
+      if (W.oobStatusFor !== oobSlug) {
+        W.oobStatusFor = oobSlug;   // claim this slug BEFORE the async read so the redraw below can't re-fire it
+        W.oobStatus = null;
+        V.getJSON(OFF("/api/oob/status?slug=" + encodeURIComponent(oobSlug)))
+          .then(function (d) { if (W.oobStatusFor === oobSlug) { W.oobStatus = d; draw(); } })
+          .catch(function () { if (W.oobStatusFor === oobSlug) { W.oobStatus = { armed: false }; draw(); } });
+      }
+      var armed = !!(W.oobStatus && W.oobStatus.armed);
+      if (armed) {
+        return checkbox("Confirm blind / out-of-band (OOB) findings", W.oob, function (v) { W.oob = v; },
+          "On: the run keeps its out-of-band receiver live so a blind class (blind SSRF/RCE/XXE, OOB "
+          + "interactions) can be CONFIRMED by a real callback to the armed collaborator. A FACT is still only "
+          + "minted by the oracle — this only lets the callback reach it.");
+      }
+      if (W.oob) W.oob = false;   // never let a stale tick ride into an unarmed run
+      return h("div.field", null, [
+        h("label", { class: "row-flex", style: { opacity: "0.55", cursor: "not-allowed" } }, [
+          h("input", { type: "checkbox", checked: false, disabled: true, style: { width: "auto" } }),
+          h("span", null, "Confirm blind / out-of-band (OOB) findings")]),
+        h("div.hint", null, [
+          "OOB confirmation needs an armed authority + a running collaborator — set it up on ",
+          h("a", { href: "#/charter" }, "Charter & Attestation"), "."]),
+      ]);
     }
     // What a run of THIS mode actually does with a model. Read out of the engine rather than assumed:
     // `framework.v2 engage` / `scan` / `aegis` import no LLM backend at all (only __main__, the console
@@ -2716,6 +2754,7 @@
           put("Objective", W.mode === "codebase" ? "steers the agent" : "recorded only (does not steer)");
         }
         put("Fixes", W.apply_fixes ? "flagged (nothing auto-applies)" : "off");
+        if (isEngage()) put("OOB", W.oob ? "on (confirms blind findings via the armed collaborator)" : "off");
       }
       put("Model", modelNeed().key ? "needed (the agent reads your source)"
         : (W.mode === "suite" ? "optional (advisory reasoning only)" : "not used (deterministic run)"));
@@ -2794,6 +2833,12 @@
         mount: W.mount, aegis_action: W.aegis_action,
         session_id: W.session_id,
         graph_backed: wantGraph,
+        // OOB (blind / out-of-band) confirmation. Reuses the EXISTING /api/launch/assessment route (no new
+        // route): the server reads `oob.enabled` and, when on, OMITS `--no-oob` so the scan's OOB receiver
+        // runs (loopback = co-resident; a remote target additionally requires an armed collaborator, enforced
+        // server-side). The wizard only enables the box on a MEASURED armed status; a FACT is still minted
+        // only by the oracle.
+        oob: { enabled: W.oob },
       };
       V.postJSON(OFF("/api/launch/assessment"), body).then(function (r) {
         if (r && r.error) { W.launching = false; V.toast(r.error, true); refreshFoot(); return; }
@@ -11149,7 +11194,7 @@
   }
 
   // ---- Charter & Attestation (owner): authorization + who/when/what ledger ----
-  var CHT = { slug: "loopback", auth: null, ledger: null, remoteTarget: "" };
+  var CHT = { slug: "loopback", auth: null, ledger: null, remoteTarget: "", oob: null };
   // Advisory client-side scope check — the AUTHORITATIVE gate is server-side; this only GUIDES the operator.
   function _scopeCovers(scope, target) {
     target = String(target || "").trim().toLowerCase();
@@ -11180,6 +11225,12 @@
     V.getJSON(OFF("/api/charter/" + encodeURIComponent(CHT.slug)))
       .then(function (d) { CHT.auth = d; drawCharter(body); })
       .catch(function () { CHT.auth = null; drawCharter(body); });
+    // The OOB collaborator/arm status for this slug — MEASURED (running/listening/armed/pubkey), never the
+    // poll secret. Nav/button-driven only: this runs on screen load, the Load button, and after each
+    // start/stop/arm/Re-check — there is NO setInterval, so the reading is only ever as fresh as an action.
+    V.getJSON(OFF("/api/oob/status?slug=" + encodeURIComponent(CHT.slug)))
+      .then(function (d) { CHT.oob = d; drawCharter(body); })
+      .catch(function () { CHT.oob = null; drawCharter(body); });
   }
   function drawCharter(body) {
     var a = CHT.auth || {};
@@ -11256,7 +11307,91 @@
             : h("span.st.st-idle", null, [h("span.dot"), "unverified"]))]),
         h("pre", { style: { whiteSpace: "pre-wrap", fontSize: "12px", marginTop: "6px", overflowX: "auto" } },
           String(CHT.ledger.who || CHT.ledger.error || "no records yet"))]) : null)]);
-    V.mount(body, [slugRow, status, provision, remoteCard, ledgerCard,
+    // ---- Out-of-band (OOB) collaborator & arming (reuses CHT.slug) ----
+    // The managed collaborator binds 127.0.0.1 ONLY; Start mints its collector keypair + 0600 poll secret
+    // (the secret is NEVER returned or shown), Stop purges them. "Arm OOB (loopback)" shells the
+    // governance-signed `vigil provision` SOVEREIGN-SIDE (scope hard-fixed to 127.0.0.1) pinning the RUNNING
+    // relay's collector pubkey — the console holds no key and signs nothing (FATAL-2). A REMOTE arm is
+    // GUIDE-ONLY: we render the exact out-of-band `vigil provision` command for the owner to run where the
+    // key lives and POST NOTHING. Every call reuses CHT.slug; the loopback arm also sends host 127.0.0.1 so
+    // the server takes its loopback branch (scope is hard-fixed server-side, so this can never widen it).
+    var oob = CHT.oob || {};
+    var oobUp = !!(oob.running && oob.listening);
+    var oobPin = String(oob.collector_pubkey || "");
+    var relayHost = "";
+    try { relayHost = oob.advertise_url ? (new URL(oob.advertise_url).hostname || "") : ""; } catch (e) { relayHost = ""; }
+    var remoteGuide = "vigil provision --slug " + (CHT.slug || "<slug>")
+      + " --scope " + (CHT.remoteTarget || "<REMOTE-HOST[,HOST2,...]>")
+      + " --oob-collector-pubkey " + (oobPin || "<start-the-collaborator-first>")
+      + " --oob-relay-host " + (relayHost || "<your-relay-host>");
+    var oobCard = h("div.card.owner", null, [
+      h("div.card-h", null, [h("h3", null, "Out-of-band (OOB) collaborator & arming")]),
+      h("div.hint", { style: { marginBottom: "8px" } },
+        "A blind finding (blind SSRF / RCE / XXE, OOB interactions) is CONFIRMED by a real callback to this "
+        + "collaborator. It binds 127.0.0.1 only; its poll secret stays in a 0600 file and is never shown here. "
+        + "Arming pins the running relay's collector PUBLIC key into an owner-signed authority — governance-"
+        + "signed sovereign-side inside `vigil provision`; this console signs nothing."),
+      h("div.kv", null, [h("div.k", null, "Collaborator"),
+        h("div.v", null, oobUp
+          ? h("span.st.st-confirmed", null, [h("span.dot"), "listening on 127.0.0.1" + (oob.port ? (":" + oob.port) : "")])
+          : (oob.running
+              ? h("span.st.st-idle", null, [h("span.dot"), "running — not yet listening"])
+              : h("span.st.st-idle", null, [h("span.dot"), "down"])))]),
+      h("div.kv", null, [h("div.k", null, "Bind"),
+        h("div.v", null, h("span.pill.sm", null, (oob.host || "127.0.0.1") + " (loopback only)"))]),
+      h("div.kv", null, [h("div.k", null, "Collector public key"),
+        h("div.v", null, oobPin
+          ? h("code", { style: { fontSize: "12px", wordBreak: "break-all" } }, oobPin)
+          : h("span.hint", null, "none — start the collaborator"))]),
+      h("div.kv", null, [h("div.k", null, "Armed"),
+        h("div.v", null, oob.armed
+          ? h("span.st.st-confirmed", null, [h("span.dot"), "ARMED — an owner-signed authority pins this collector"])
+          : h("span.st.st-idle", null, [h("span.dot"), "not armed"]))]),
+      // Lifecycle — Start / Stop the managed loopback collaborator (both reuse CHT.slug; RBAC is server-side).
+      h("div", { style: { marginTop: "10px", marginBottom: "6px" } }, [
+        h("button.btn.sm.owner", { onClick: function () {
+          V.postJSON(OFF("/api/oob/collaborator/start"), { slug: CHT.slug }).then(function (r) {
+            if (r && r.ok) { V.toast("OOB collaborator listening on loopback for " + CHT.slug); loadAuthority(body); }
+            else { V.toast((r && r.error) || "could not start the collaborator", true); } })
+            .catch(function () { V.toast("could not start the collaborator", true); }); } },
+          "Start collaborator (loopback)"),
+        h("button.btn.sm", { style: { marginLeft: "8px" }, onClick: function () {
+          V.postJSON(OFF("/api/oob/collaborator/stop"), { slug: CHT.slug }).then(function (r) {
+            if (r && r.ok) { V.toast("OOB collaborator stopped — secret / keypair purged"); loadAuthority(body); }
+            else { V.toast((r && r.error) || "stop failed", true); } })
+            .catch(function () { V.toast("stop failed", true); }); } },
+          "Stop collaborator")]),
+      // LOOPBACK arm — shells the governance-signed `vigil provision` (scope hard-fixed 127.0.0.1) sovereign-
+      // side. Disabled until a collaborator is listening (the pin comes from the RUNNING relay, never a body).
+      h("div.kv", null, [h("div.k", null, "Arm (loopback)"),
+        h("div.v", null, [
+          h("button.btn.sm.owner", { disabled: !oobUp, onClick: function () {
+            V.postJSON(OFF("/api/oob/arm"), { slug: CHT.slug, host: "127.0.0.1" }).then(function (r) {
+              if (r && r.ok && r.armed) { V.toast("Armed a loopback OOB authority (scope 127.0.0.1) for " + CHT.slug); loadAuthority(body); }
+              else { V.toast((r && r.error) || (r && r.note) || "arm did not complete", true); loadAuthority(body); } })
+              .catch(function () { V.toast("arm failed", true); }); } },
+            "Arm OOB (loopback)"),
+          h("div.hint", { style: { marginTop: "4px" } }, oobUp
+            ? "Pins the running collector pubkey into an owner-signed authority — scope hard-fixed to "
+              + "127.0.0.1; signed inside `vigil provision`, never by this console."
+            : "Start the collaborator first — the collector pubkey to pin is read from the running relay.")])]),
+      // REMOTE arm — GUIDE ONLY. The console never signs a remote authority (FATAL-2): it renders the exact
+      // out-of-band command for the owner to run where the key lives, and posts NOTHING. Re-check is a GET.
+      h("div.kv", null, [h("div.k", null, "Arm (remote) — out-of-band"),
+        h("div.v", null, [
+          h("div.hint", { style: { marginBottom: "4px" } },
+            "Remote OOB is armed OUT-OF-BAND on a trusted host that holds the owner key — NOT in this UI. Run "
+            + "this there (scope = your remote target); this console mints nothing for a remote target:"),
+          h("code", { style: { fontSize: "12px", whiteSpace: "pre-wrap", display: "block", wordBreak: "break-all" } },
+            remoteGuide),
+          h("div", { style: { marginTop: "6px" } }, [
+            h("button.btn.sm", { onClick: function () {
+              try { navigator.clipboard.writeText(remoteGuide); V.toast("Copied."); } catch (e) { V.toast(remoteGuide); } } },
+              "Copy command"),
+            h("button.btn.sm", { style: { marginLeft: "8px" }, onClick: function () { loadAuthority(body); } },
+              "Re-check")])])]),
+    ]);
+    V.mount(body, [slugRow, status, provision, remoteCard, oobCard, ledgerCard,
       h("div.hint", { style: { marginTop: "10px" } },
         String(a.note || CHT.ledger && CHT.ledger.note
           || "No attestation, no run. The UI can never widen a charter-signed scope."))]);

@@ -171,6 +171,9 @@ _EXACT_ROUTES = {
 # unknown slug is an honest empty list, never an error and never the unfiltered list.
 _SCOPED_ROUTES = {
     "/api/runs": api.list_runs,
+    # OOB collaborator status, scoped to the engagement slug (`?slug=`). MEASURED (running/listening/armed);
+    # read-only; never returns the poll secret. Token + Host gated like every other GET read.
+    "/api/oob/status": actions.oob_status,
 }
 
 # Prefixed GET routes: "/api/<name>/<arg>" -> api provider taking one string arg.
@@ -1181,6 +1184,24 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                 # LIVE observe<->enforce switch on the running gateway (no restart). Same-origin +
                 # RBAC (_OWN) already enforced above, exactly like /api/aegis/setup.
                 self._json(actions.aegis_set_mode(body))
+                return
+            if path == "/api/oob/collaborator/start":
+                # OOB UI: stand up the per-slug managed collaborator on loopback (binds 127.0.0.1 ONLY).
+                # Returns the PUBLIC collector pubkey + loopback poll URL, never the poll secret. Validated
+                # fail-closed in actions/oob_collaborator before any spawn. Same-origin + RBAC (_OWN) above.
+                self._json(actions.oob_collaborator_start(body))
+                return
+            if path == "/api/oob/collaborator/stop":
+                # OOB UI: stop + PURGE the per-slug collaborator's secret/keypair/meta (idempotent).
+                # Same-origin + RBAC (_RUN) already enforced above, like /api/aegis/stop.
+                self._json(actions.oob_collaborator_stop(body))
+                return
+            if path == "/api/oob/arm":
+                # OOB UI: pin the RUNNING collaborator's collector pubkey into an owner-signed authority.
+                # LOOPBACK shells the exec-only `vigil provision` (scope hard-fixed 127.0.0.1 — governance-
+                # signed sovereign-side); REMOTE is GUIDE-ONLY and mints nothing (FATAL-2). The console never
+                # signs. Same-origin + RBAC (_OWN) already enforced above, like /api/authority/provision.
+                self._json(actions.oob_arm_loopback(body))
                 return
             self._json({"error": "unknown action"}, status=404)
         except ValueError as e:  # an unsafe run id (run_dir guard) → honest 404, consistent with do_GET
