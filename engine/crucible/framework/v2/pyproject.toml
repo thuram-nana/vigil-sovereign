@@ -32,7 +32,7 @@ dependencies = [
 # via framework.v2.common.capabilities (has_z3/has_semantic/has_numpy).
 [project.optional-dependencies]
 anthropic   = ["anthropic>=0.40,<1"]
-embeddings  = ["sentence-transformers>=2,<6"]  # semantic embedder (opt-in; lexical is default)
+embeddings  = ["sentence-transformers>=2,<7"]  # semantic embedder (opt-in; lexical is default)
 analysis    = ["semgrep>=1.100"]               # DAA real taint/dataflow analysis
 smt         = ["z3-solver>=4.12,<6"]           # bounded SMT / path-condition feasibility (analysis.smt)
 numerics    = ["numpy>=1.26,<3"]               # opt-in fast integer numerics (CRUCIBLE_FAST_NUMERICS)
