@@ -37,6 +37,8 @@ _MAP: dict[str, ControlSet] = {
     "business_logic": ControlSet("V11.1.1", "SI-10", "A.8.26", "16.10", "T1499"),
     "authentication": ControlSet("V2.2.1", "IA-2", "A.8.5", "6.3", "T1110"),
     "xxe": ControlSet("V5.5.2", "SI-10", "A.8.28", "16.11", "T1059"),
+    "ssti": ControlSet("V5.2.5", "SI-10", "A.8.28", "16.11", "T1059"),
+    "command_injection": ControlSet("V5.3.8", "SI-10", "A.8.28", "16.11", "T1059.004"),
     "llm_injection": ControlSet("OWASP LLM01", "SI-10", "A.8.28", "16.11", "AML.T0051"),
 }
 

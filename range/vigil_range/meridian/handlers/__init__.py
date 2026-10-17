@@ -8,7 +8,22 @@ records/api/staff/admin/documents/assistant/auth surfaces.
 from __future__ import annotations
 
 from ..router import Router
-from . import api, assistant, authroutes, base, discovery, documents, portal, records, staff
+from . import (
+    api,
+    assistant,
+    authroutes,
+    base,
+    billing,
+    diagnostics,
+    discovery,
+    documents,
+    messages,
+    portal,
+    profile,
+    records,
+    reports,
+    staff,
+)
 
 
 def build_router() -> Router:
@@ -22,4 +37,9 @@ def build_router() -> Router:
     api.register(r)           # S2: BOLA/IDOR + CORS + host-header + pay (business logic) + openapi
     staff.register(r)         # S2: broken access control (queue) + BFLA (approve) + priv-esc (role change)
     assistant.register(r)     # S3: PermitBot mock-LLM prompt injection
+    profile.register(r)       # S5: IDOR + mass-assignment priv-esc + reflected XSS (account settings)
+    messages.register(r)      # S5: stored XSS + IDOR (secure messaging)
+    reports.register(r)       # S5: SSTI (evaluation) + SQLi (report builder)
+    billing.register(r)       # S5: IDOR + payment business-logic (invoices)
+    diagnostics.register(r)   # S5: OS command injection (network diagnostics)
     return r
