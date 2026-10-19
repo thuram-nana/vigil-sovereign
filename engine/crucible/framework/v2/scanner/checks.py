@@ -1478,6 +1478,99 @@ class ContentSignatureCheck:
         )
 
 
+# The EXECUTION-ONLY signature of OS command injection confirmed IN-BAND: the output of ``id(1)``,
+# ``uid=<digits>(``. Anchored (no alnum/underscore immediately before ``uid=``) so an echoed benign
+# parameter such as ``fluid=1000(`` / ``squid=5(`` / ``druid=1000(`` can NEVER satisfy it. Crucially the
+# injection payload (``;id`` / ``|id`` / ``$(id)``) contains NO ``uid=`` substring, so this marker is a
+# property of the command actually RUNNING on the target, never of the app reflecting our input — the
+# exact distinction that makes it a sound FACT signal where a reflected canary / ``;echo MARKER`` is not
+# (an attacker-chosen marker is satisfied by input-echo AND by a hardened ``Refused: <host>`` message).
+_CMDI_UID_RE: "re.Pattern[str]" = re.compile(r"(?<![0-9A-Za-z_])uid=\d+\(")
+
+
+@dataclass(frozen=True)
+class CmdiReflectedCheck:
+    """In-band (reflected-output) OS command injection, ATTRIBUTED BY A BENIGN CONTROL.
+
+    Injects a shell break-out that runs ``id`` (``127.0.0.1;id`` and the pipe/subshell variants) into
+    the insertion point and confirms via ``side_effect_oracle`` ONLY when the EXECUTION output of
+    ``id`` — ``uid=<digits>(`` — appears in the response AND is ABSENT from a benign CONTROL request
+    (a plain ``127.0.0.1``, which runs only the intended command) on the SAME insertion point.
+
+    WHY THIS IS A SOUND FACT SIGNAL (and a reflected canary / ``;echo MARKER`` is not):
+      * The marker is the command's OUTPUT, not our input. The payload carries no ``uid=``; an endpoint
+        that merely ECHOES ``;id`` back (a search box, an error page) emits no ``uid=<digits>(`` and does
+        NOT fire — so reflection-without-execution is refused, which is exactly the false positive a
+        marker-reflection cmdi check would mint.
+      * The regex is anchored, so an echoed benign value like ``fluid=1000(`` cannot match.
+      * The benign control attributes the output to the INJECTION: an endpoint that prints uid output
+        regardless of input (a status page) carries the marker in the control too, and the oracle then
+        REFUSES (``side_effect_oracle``'s control-attribution guard). Fail-closed: no readable control,
+        no attribution, no FACT (a LEAD).
+
+    NAMED RESIDUAL (red-pen): a contrived endpoint that pattern-matches ``;id`` and emits canned
+    uid-shaped text WITHOUT executing is the one case an in-band signature cannot distinguish from
+    execution. It is not a realistic real-app behaviour (no hardened/benchmark twin does it), but it is
+    why promoting this to a FACT on the GOVERNED-ENGAGE route (a registered ``fact_capable`` branch) is a
+    separate, red-penned slice. The signature is nonetheless materially STRONGER than the known-content
+    path-traversal signature that was correctly demoted, because ``uid=<digits>(`` is a property of
+    ``id`` RUNNING, not merely of a known string appearing in a response.
+
+    COST: like ``ContentSignatureCheck`` the control is sent ONLY on a hit (the payload goes first), so a
+    non-firing point costs ``len(payloads)`` and a firing point one extra request. FAIL-CLOSED on a
+    control that cannot be read."""
+
+    id: str
+    bug_class: str = "command_injection"
+    # command-chain, pipe, and subshell — the three dominant in-band cmdi vectors. Each runs ``id`` iff
+    # the handler concatenates the value into a shell string; an argv/validated handler runs none of them.
+    payloads: tuple[str, ...] = ("127.0.0.1;id", "127.0.0.1|id", "127.0.0.1;$(id)")
+    # A benign host of the SAME shape with no break-out: runs only the intended command, so its output
+    # never contains ``uid=<digits>(``. Fixed + public so a run is replayable and log-greppable (VI.4).
+    control_value: str = "127.0.0.1"
+
+    @staticmethod
+    def _body(resp: object) -> str:
+        return resp.get("body", "") if isinstance(resp, dict) else str(resp)
+
+    def _control_body(self, template: RequestTemplate, point: InsertionPoint, send: Send) -> "str | None":
+        """The benign CONTROL response body, or ``None`` when no control could be observed
+        (fail-closed: no control, no attribution, no FACT)."""
+        try:
+            resp = send(template.render(point, self.control_value))
+        except Exception:
+            return None
+        if resp is None:
+            return None
+        return self._body(resp)
+
+    def probe(self, template: RequestTemplate, point: InsertionPoint, send: Send) -> "FindingContext | None":
+        exercised: "FindingContext | None" = None
+        for payload in self.payloads:
+            try:
+                resp = send(template.render(point, payload))
+            except Exception:
+                continue
+            body = self._body(resp)
+            m = _CMDI_UID_RE.search(body)
+            if m is None:
+                # Retained coverage: record the surface as EXERCISED + oracle-cleared (marker absent).
+                # The synthetic marker is guaranteed absent, so the oracle returns a clean non-firing
+                # signal exactly as a non-matching ContentSignatureCheck probe does. No control is spent.
+                exercised = FindingContext.from_side_effect(
+                    "vigil-cmdi-uid-unseen", body, bug_class=self.bug_class)
+                continue
+            marker = m.group(0)  # concrete execution output, e.g. "uid=1000(" (>= 4 chars)
+            control = self._control_body(template, point, send)
+            if control is None or _CMDI_UID_RE.search(control) is not None:
+                # No readable control, or the endpoint prints uid output regardless of input → the
+                # presence is NOT attributable to the injected command → refuse (a LEAD, never a FACT).
+                return None
+            return FindingContext.from_side_effect(
+                marker, body, bug_class=self.bug_class, control_sink=control)
+        return exercised
+
+
 # Lane S: a fixed, deterministic, almost-certainly-nonexistent control path for PathProbeCheck's
 # present/absent differential. Deterministic (no nonce) so the benchmark / determinism gates stay stable; a
 # well-behaved origin 404s it (control_body empty), a catch-all echoes the signature into it (refused).
@@ -2033,6 +2126,8 @@ PATH_TRAVERSAL = ContentSignatureCheck(
     payload="../../../../etc/passwd", signature="root:x:0:0:",
 )
 
+CMDI_REFLECTED = CmdiReflectedCheck(id="cmdi-reflected")
+
 ERROR_BASED = ErrorSignatureCheck(
     id="error-based-injection", bug_class="error_based_sqli",
 )
@@ -2125,6 +2220,14 @@ DEFAULT_CHECKS: tuple[Check, ...] = (
     SSTI_EVAL_BRACES,
     SSTI_EVAL_DOLLAR,
     ERROR_BASED,
+    # -- up to len(payloads) requests/point: in-band (reflected-output) command injection. One probe per
+    #    shell separator; the benign control is sent ONLY on a hit, so a non-firing point costs
+    #    len(payloads) and never spends a control. On the TARGETED path the selector picks it for
+    #    command-sink-ish params (host/hostname/server/ip/cmd/...) ALONGSIDE the OOB cmdi check — they are
+    #    different confirmation channels, so targeting.select_checks keeps BOTH (it dedups per
+    #    (class, channel), not per class). On the non-targeted path it runs at every point like the other
+    #    DEFAULT_CHECKS. Either way its cost tier sits below the 64-request boolean SPRT.
+    CMDI_REFLECTED,
     # -- 64 requests/point: the boolean SPRT (determinism pre-gate + truth-value-attribution rounds) -
     BOOLEAN_SQLI_SPRT,
 )

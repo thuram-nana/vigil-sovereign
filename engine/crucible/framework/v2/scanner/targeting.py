@@ -69,9 +69,22 @@ def select_checks(
 ) -> list[Check]:
     """The prioritised checks for one insertion point. Falls back to the full set
     when the point matches no hint, so coverage is never silently lost."""
-    by_class: dict[str, Check] = {}
+    # Keep the first check of each (bug_class, CHANNEL) pair — NOT one per bug_class. An OOB
+    # (callback-confirmed) check and an in-band (response-confirmed) check for the SAME class are not
+    # interchangeable: the OOB one self-skips without an OOB receiver and confirms over a callback, the
+    # in-band one reads the response. Collapsing them to the-first-by-class silently SHADOWED the in-band
+    # command-injection check behind the OOB `;curl {callback}` one, leaving an in-band-only cmdi sink
+    # (MERIDIAN's /diagnostics/ping?host=, no OOB receiver) confirmed by NOTHING on the targeted/
+    # autonomous path. `wants_oob` is the channel discriminator (OOBCheck/DNSOOBCheck set it True;
+    # response-based checks do not). Order within a class stays the input (cost-ascending) order.
+    groups: dict[str, list[Check]] = {}
+    seen: set[tuple[str, bool]] = set()
     for c in checks:
-        by_class.setdefault(c.bug_class, c)
+        key = (c.bug_class, bool(getattr(c, "wants_oob", False)))
+        if key in seen:
+            continue
+        seen.add(key)
+        groups.setdefault(c.bug_class, []).append(c)
 
     wanted = likely_classes(point.name)
     # A HINTED point (or one known to reflect input) ALSO gets the in-band reflection/evaluation
@@ -85,5 +98,5 @@ def select_checks(
     if reflected or wanted:
         wanted = wanted + list(_REFLECTION_CLASSES)
 
-    selected = [by_class[bc] for bc in dict.fromkeys(wanted) if bc in by_class]
+    selected = [c for bc in dict.fromkeys(wanted) for c in groups.get(bc, [])]
     return selected or list(checks)
