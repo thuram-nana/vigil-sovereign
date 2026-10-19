@@ -2334,6 +2334,63 @@
         "engine/crucible/framework/v2/verify/oracles.py:credential_acceptance_oracle",
         "integration/vigil_integration/live/runtime_redrive.py:credential_acceptance_redrive"
       ]
+    },
+    {
+      "id": "command_injection.reflected_output",
+      "check": "cmdi_reflected_redrive",
+      "evidence": "a runner-injected shell break-out (127.0.0.1;echo $((N1*N2)) with per-probe random N1,N2, plus pipe/expr variants) made the server COMPUTE the arithmetic product, which appeared in the response body VIGIL captured and was ABSENT from a benign 127.0.0.1 control. This is a LEAD, never a FACT: a benign arithmetic evaluator (a calculator / instant-answer / $(( )) config-expander) ALSO computes N1*N2 from the input and emits it while the control lacks it, so an in-band computed product does not distinguish shell execution from ordinary app arithmetic - an adversarial red-pen reproduced a signed false FACT at rate 1.0 against a benign calculator. The sound command_injection FACT is the dose-scaled timing channel (time_based_command_injection.timing_inference) or the blind curl-callback (OOB); a calculator reproduces neither.",
+      "fact_capable": false,
+      "clean_capable": false,
+      "preconditions": [
+        "channel_established",
+        "body_semantically_available"
+      ],
+      "limitation": "LEAD-only, in-band, body-derived. The marker is a per-probe random computed product attributed by a benign 127.0.0.1 control; it defeats pure reflection (the product value is absent from the payload) and a documented-signature KB (the product is random, unlike id's uid=0(root)), but it does NOT defeat a benign ARITHMETIC EVALUATOR, which computes the same product from the input - so the in-band computed product is fundamentally ambiguous between shell math and app math (an adversarial red-pen reproduced a rate-1.0 signed false FACT against a plain calculator). It stays a useful LEAD that flags the command sink with a VIGIL-owned capture; the FACT is minted on the sound sibling channels - time_based_command_injection.timing_inference (a dose-scaled latency only shell execution produces) and the OOB curl-callback. NOT clean-capable: a non-firing probe does not establish the absence of a command sink.",
+      "target_fact_capable": false,
+      "target_clean_capable": false,
+      "target_downgrade_rationale": "An in-band computed arithmetic product is not a sound FACT on this branch: a benign arithmetic evaluator reproduces the product from the input, so no retained (product, body, control) capture distinguishes shell execution from app math (the generic side_effect oracle sees only marker-in-sink). Command-injection FACTs are minted on the execution-provenance channels instead - time_based_command_injection.timing_inference (dose-scaled latency) and the OOB curl-callback - so this in-band branch stays a LEAD by design.",
+      "evidence_surface": "response_body",
+      "implementation_refs": [
+        "engine/crucible/framework/v2/scanner/checks.py:CmdiReflectedCheck",
+        "integration/vigil_integration/live/runtime_redrive.py:cmdi_reflected_redrive"
+      ],
+      "control_requirements": [
+        "warden_active_recon_gate",
+        "vigil_owned_gated_probe",
+        "response_body_decode",
+        "benign_control_attribution",
+        "sink_observation_capture"
+      ],
+      "oracle_version": ""
+    },
+    {
+      "id": "time_based_command_injection.timing_inference",
+      "check": "cmdi_timing_redrive",
+      "evidence": "VIGIL's own gated re-drive injects a SHELL break-out that runs `sleep` (127.0.0.1;sleep {s} plus pipe/subshell/backtick) and measures interleaved baseline vs delay-injected latencies (>= 5 samples each, interleaved so drift biases both equally) at two doses; the deterministic timing_oracle re-derives the decision offline - a one-sided Mann-Whitney U rejects the no-shift null, the Hodges-Lehmann median shift clears the effect-size floor, AND the shift SCALES with the injected sleep (dose-response). A benign calculator / reflector / docs page computes arithmetic or echoes input but does not DELAY the response, and a slow proxy's constant offset does not fake the dose-response scaling - so the delay attributes to SHELL EXECUTION, not to in-band content a non-vulnerable endpoint reproduces. The RUNNER crafts the SLEEP payloads; the LLM/Strix payload is never trusted.",
+      "fact_capable": true,
+      "clean_capable": false,
+      "preconditions": [
+        "channel_established"
+      ],
+      "limitation": "Timing-derived, positive-only, coverage-bounded: a fire requires a rank-sum rejection, an effect-size floor, AND a dose-response that scales with the injected sleep - so a uniformly slow/loaded endpoint, a one-off latency spike, and a constant offset with no dose-response are all refused. This is the SOUND in-band command-injection FACT channel: the in-band computed-product side_effect (command_injection.reflected_output) is not fact-capable because a benign arithmetic evaluator reproduces the product, whereas only shell execution of `sleep` produces a dose-scaled latency. The blind curl-callback channel (OOB) is the other sound FACT, setup-gated on a pinned collector. NOT clean-capable: absence of a timing shift over the driven probes does not assert the target has no command-injection channel.",
+      "target_fact_capable": true,
+      "target_clean_capable": false,
+      "target_downgrade_rationale": "Proving the ABSENCE of a command-injection channel across every parameter and shell primitive is a coverage-complete capability, not this statistical dose-response re-drive over the driven insertion points, so CLEAN-capability is deliberately not pursued on this branch.",
+      "oracle_version": "timing",
+      "control_requirements": [
+        "warden_active_recon_gate",
+        "vigil_owned_gated_probe",
+        "vigil_owned_live_redrive",
+        "runner_crafted_sleep_payloads",
+        "interleaved_paired_sampling",
+        "mann_whitney_effect_floor_dose_response"
+      ],
+      "evidence_surface": "service_response",
+      "implementation_refs": [
+        "engine/crucible/framework/v2/verify/oracles.py:timing_oracle",
+        "engine/crucible/framework/v2/scanner/checks.py:TimingCheck",
+        "integration/vigil_integration/live/runtime_redrive.py:_cmdi_timing_redrive"
+      ]
     }
   ]
 }

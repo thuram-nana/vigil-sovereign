@@ -1478,56 +1478,70 @@ class ContentSignatureCheck:
         )
 
 
-# The EXECUTION-ONLY signature of OS command injection confirmed IN-BAND: the output of ``id(1)``,
-# ``uid=<digits>(``. Anchored (no alnum/underscore immediately before ``uid=``) so an echoed benign
-# parameter such as ``fluid=1000(`` / ``squid=5(`` / ``druid=1000(`` can NEVER satisfy it. Crucially the
-# injection payload (``;id`` / ``|id`` / ``$(id)``) contains NO ``uid=`` substring, so this marker is a
-# property of the command actually RUNNING on the target, never of the app reflecting our input — the
-# exact distinction that makes it a sound FACT signal where a reflected canary / ``;echo MARKER`` is not
-# (an attacker-chosen marker is satisfied by input-echo AND by a hardened ``Refused: <host>`` message).
-_CMDI_UID_RE: "re.Pattern[str]" = re.compile(r"(?<![0-9A-Za-z_])uid=\d+\(")
+# OS command injection confirmed IN-BAND by an UNGUESSABLE COMPUTED PRODUCT. We make the server COMPUTE a
+# distinctive arithmetic product (``$((N1*N2))``, with ``expr`` as the portable fallback) and confirm on the
+# PRODUCT — never on a documented string like ``id``'s ``uid=0(root)``. A documented signature is the
+# path_traversal ``root:x:0:0:`` trap: a benign command-injection KB / search / deny page carries it, and a
+# benign-value control only catches endpoints that emit it REGARDLESS of input, not ones that emit it
+# CORRELATED with the payload (path_traversal was DEMOTED to LEAD-only for exactly this, rate 1.0 over 8
+# benign origins — see live/runtime_redrive.py). The product is NOT a documented string: a benign echo
+# reflects the raw ``$((N1*N2))`` literally (the product is ABSENT) and only a shell that EXECUTES the
+# arithmetic produces the value, so the signal is a property of EXECUTION, not of input-correlated content.
+_CMDI_N1: int = 7919
+_CMDI_N2: int = 6271   # a distinctive, non-documented product only a shell computes (echo reflects the raw)
 
 
 @dataclass(frozen=True)
 class CmdiReflectedCheck:
-    """In-band (reflected-output) OS command injection, ATTRIBUTED BY A BENIGN CONTROL.
+    """In-band (reflected-OUTPUT) OS command injection — a LEAD driver, NOT a sound FACT minter.
 
-    Injects a shell break-out that runs ``id`` (``127.0.0.1;id`` and the pipe/subshell variants) into
-    the insertion point and confirms via ``side_effect_oracle`` ONLY when the EXECUTION output of
-    ``id`` — ``uid=<digits>(`` — appears in the response AND is ABSENT from a benign CONTROL request
-    (a plain ``127.0.0.1``, which runs only the intended command) on the SAME insertion point.
+    DELIBERATELY NOT in DEFAULT_CHECKS and fact_capable=false in the capability matrix
+    (command_injection.reflected_output): the only in-band marker is a COMPUTED PRODUCT, which a benign
+    arithmetic evaluator (a calculator / $(( )) config-expander) reproduces from the input exactly as a shell
+    does, so side_effect cannot distinguish execution from app math (a red-pen reproduced a rate-1.0 false
+    FACT against a plain calculator). It flags a command sink with a VIGIL-owned capture (a useful LEAD); the
+    SOUND command-injection FACTs are the dose-scaled timing channel (time_based_command_injection) and the
+    blind OOB curl callback — execution-provenance channels a calculator cannot reproduce.
 
-    WHY THIS IS A SOUND FACT SIGNAL (and a reflected canary / ``;echo MARKER`` is not):
-      * The marker is the command's OUTPUT, not our input. The payload carries no ``uid=``; an endpoint
-        that merely ECHOES ``;id`` back (a search box, an error page) emits no ``uid=<digits>(`` and does
-        NOT fire — so reflection-without-execution is refused, which is exactly the false positive a
-        marker-reflection cmdi check would mint.
-      * The regex is anchored, so an echoed benign value like ``fluid=1000(`` cannot match.
-      * The benign control attributes the output to the INJECTION: an endpoint that prints uid output
-        regardless of input (a status page) carries the marker in the control too, and the oracle then
-        REFUSES (``side_effect_oracle``'s control-attribution guard). Fail-closed: no readable control,
-        no attribution, no FACT (a LEAD).
+    Injects a shell break-out that makes the server COMPUTE a distinctive product
+    (``127.0.0.1;echo $((N1*N2))`` + pipe / ``expr`` variants) and confirms via ``side_effect_oracle``
+    ONLY when that product appears in the response AND is ABSENT from a benign ``127.0.0.1`` control on
+    the SAME insertion point.
 
-    NAMED RESIDUAL (red-pen): a contrived endpoint that pattern-matches ``;id`` and emits canned
-    uid-shaped text WITHOUT executing is the one case an in-band signature cannot distinguish from
-    execution. It is not a realistic real-app behaviour (no hardened/benchmark twin does it), but it is
-    why promoting this to a FACT on the GOVERNED-ENGAGE route (a registered ``fact_capable`` branch) is a
-    separate, red-penned slice. The signature is nonetheless materially STRONGER than the known-content
-    path-traversal signature that was correctly demoted, because ``uid=<digits>(`` is a property of
-    ``id`` RUNNING, not merely of a known string appearing in a response.
+    WHY THE PRODUCT, NOT ``id``'s ``uid=`` OUTPUT: a documented signature (``uid=0(root)``) is the
+    path_traversal ``root:x:0:0:`` trap — a benign cmdi KB / search / deny page carries it, and a benign
+    control only catches endpoints that emit it REGARDLESS of input, not ones that emit it CORRELATED with
+    the payload (a docs search that returns the command-injection article for a ``;id``-ish query). The
+    product is not a documented string: a benign echo reflects the raw ``$((N1*N2))`` literally (the
+    product is ABSENT), and only a shell that EXECUTES the arithmetic produces the value — so the signal is
+    a property of EXECUTION, not of input-correlated content. (The raw ``$((...))`` is echoed in the
+    output, so the EVALUATION oracle's raw-absent gate does not fit; ``side_effect`` on the computed
+    product, attributed by the benign control, is the sound shape — the per-probe-product idea of ``ssi``.)
 
-    COST: like ``ContentSignatureCheck`` the control is sent ONLY on a hit (the payload goes first), so a
-    non-firing point costs ``len(payloads)`` and a firing point one extra request. FAIL-CLOSED on a
-    control that cannot be read."""
+    FP boundary (all → non-fire): a reflection echoes the raw ``$((N1*N2))`` (product absent); an endpoint
+    that prints the product regardless of input carries it in the control too (``side_effect_oracle``
+    refuses). FAIL-CLOSED on an unreadable control. The product is FIXED here (deterministic, like
+    ``SSTI_EVAL_BRACES``); the governed-engage re-drive arm
+    (``live/runtime_redrive.py:cmdi_reflected_redrive``) uses a PER-PROBE RANDOM product for the signed-FACT
+    path, so a target cannot pre-seed it.
+
+    COST: like ``ContentSignatureCheck`` the control is sent ONLY on a hit, so a non-firing point costs
+    ``len(_payloads())`` and a firing point one extra request."""
 
     id: str
     bug_class: str = "command_injection"
-    # command-chain, pipe, and subshell — the three dominant in-band cmdi vectors. Each runs ``id`` iff
-    # the handler concatenates the value into a shell string; an argv/validated handler runs none of them.
-    payloads: tuple[str, ...] = ("127.0.0.1;id", "127.0.0.1|id", "127.0.0.1;$(id)")
-    # A benign host of the SAME shape with no break-out: runs only the intended command, so its output
-    # never contains ``uid=<digits>(``. Fixed + public so a run is replayable and log-greppable (VI.4).
     control_value: str = "127.0.0.1"
+
+    @property
+    def _product(self) -> str:
+        return str(_CMDI_N1 * _CMDI_N2)
+
+    def _payloads(self) -> "tuple[str, ...]":
+        # command-chain, pipe, and subshell break-outs that make the shell COMPUTE the product. ``$((...))``
+        # is POSIX arithmetic expansion; ``expr`` the portable fallback. An argv/validated handler runs none
+        # of them, so the computed product never appears.
+        a, b = _CMDI_N1, _CMDI_N2
+        return (f"127.0.0.1;echo $(({a}*{b}))", f"127.0.0.1|echo $(({a}*{b}))", f"127.0.0.1;expr {a} \\* {b}")
 
     @staticmethod
     def _body(resp: object) -> str:
@@ -1545,29 +1559,28 @@ class CmdiReflectedCheck:
         return self._body(resp)
 
     def probe(self, template: RequestTemplate, point: InsertionPoint, send: Send) -> "FindingContext | None":
+        product = self._product
         exercised: "FindingContext | None" = None
-        for payload in self.payloads:
+        for payload in self._payloads():
             try:
                 resp = send(template.render(point, payload))
             except Exception:
                 continue
             body = self._body(resp)
-            m = _CMDI_UID_RE.search(body)
-            if m is None:
-                # Retained coverage: record the surface as EXERCISED + oracle-cleared (marker absent).
-                # The synthetic marker is guaranteed absent, so the oracle returns a clean non-firing
-                # signal exactly as a non-matching ContentSignatureCheck probe does. No control is spent.
+            if product not in body:
+                # Retained coverage: the surface was EXERCISED + oracle-cleared (the computed product never
+                # appeared, so the shell did not evaluate our break-out). A benign echo reflecting the raw
+                # ``$((...))`` lands here. No control is spent.
                 exercised = FindingContext.from_side_effect(
-                    "vigil-cmdi-uid-unseen", body, bug_class=self.bug_class)
+                    "vigil-cmdi-product-unseen", body, bug_class=self.bug_class)
                 continue
-            marker = m.group(0)  # concrete execution output, e.g. "uid=1000(" (>= 4 chars)
             control = self._control_body(template, point, send)
-            if control is None or _CMDI_UID_RE.search(control) is not None:
-                # No readable control, or the endpoint prints uid output regardless of input → the
-                # presence is NOT attributable to the injected command → refuse (a LEAD, never a FACT).
+            if control is None or product in control:
+                # No readable control, or the endpoint prints the product regardless of input → the
+                # presence is NOT attributable to the injected computation → refuse (a LEAD, never a FACT).
                 return None
             return FindingContext.from_side_effect(
-                marker, body, bug_class=self.bug_class, control_sink=control)
+                product, body, bug_class=self.bug_class, control_sink=control)
         return exercised
 
 
@@ -2220,14 +2233,17 @@ DEFAULT_CHECKS: tuple[Check, ...] = (
     SSTI_EVAL_BRACES,
     SSTI_EVAL_DOLLAR,
     ERROR_BASED,
-    # -- up to len(payloads) requests/point: in-band (reflected-output) command injection. One probe per
-    #    shell separator; the benign control is sent ONLY on a hit, so a non-firing point costs
-    #    len(payloads) and never spends a control. On the TARGETED path the selector picks it for
-    #    command-sink-ish params (host/hostname/server/ip/cmd/...) ALONGSIDE the OOB cmdi check — they are
-    #    different confirmation channels, so targeting.select_checks keeps BOTH (it dedups per
-    #    (class, channel), not per class). On the non-targeted path it runs at every point like the other
-    #    DEFAULT_CHECKS. Either way its cost tier sits below the 64-request boolean SPRT.
-    CMDI_REFLECTED,
+    # NOTE: in-band (reflected-output) command injection is DELIBERATELY NOT a DEFAULT_CHECKS fact-minter.
+    # Its only in-band marker is a COMPUTED PRODUCT ($((N1*N2))), which a benign arithmetic evaluator (a
+    # calculator / instant-answer / $(( )) config-expander) reproduces from the input exactly as a shell
+    # does — so the side_effect confirmation cannot distinguish shell execution from ordinary app math (an
+    # adversarial red-pen reproduced a rate-1.0 false FACT against a plain calculator; see
+    # scanner/tests/test_cmdi_reflected.py::test_calculator_false_confirms_so_cmdi_reflected_is_lead_only).
+    # CmdiReflectedCheck (CMDI_REFLECTED) is retained as the governed-engage LEAD driver's scanner analog —
+    # command_injection.reflected_output is fact_capable=false in docs/capability-matrix/evidence-branches.json
+    # — but it is NOT in DEFAULT_CHECKS. The SOUND command-injection FACTs are the dose-scaled timing channel
+    # (library w4b-time-cmdi-sleep → time_based_command_injection.timing_inference) and the blind OOB curl
+    # callback (library w4b-time-cmdi-oob-curl) — execution-provenance channels a calculator cannot reproduce.
     # -- 64 requests/point: the boolean SPRT (determinism pre-gate + truth-value-attribution rounds) -
     BOOLEAN_SQLI_SPRT,
 )

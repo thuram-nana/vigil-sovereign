@@ -262,15 +262,18 @@ def test_benchmark_cost_row_is_byte_identical(crucible_measured):
     # reveals the secret while the random control 404s without it) — so the signed
     # ``eval/baselines/recall-accuracy-core.json`` is NOT re-signed (the request count is not in its signed
     # bytes). Only this UNSIGNED cost row moves.
-    # STAGE 4 (meridian-s5-expansion, 1836 -> 1875, +39): CMDI_REFLECTED — the in-band (reflected-output)
-    # command-injection check added to DEFAULT_CHECKS (commit c4f4def1) — issues its 3 shell-separator probes
-    # (;id / |id / $(id)) at each corpus insertion point. This sweep is un-targeted (targeted=False) and
-    # use_library=True runs DEFAULT_CHECKS + the library (campaign.py:1354-1364), so CMDI_REFLECTED runs on
-    # every point; no benign corpus app executes the payload, so the benign control is never spent (control
-    # is sent only on a hit) and the ACCURACY half is unchanged — 11/0/0 still holds, only this cost row moves.
-    # STAGE 5 (meridian-s5-expansion, 1875 -> 1899, +24): the always-on {{N*N}} SSTI library entry
+    # STAGE 4 (meridian-s5-expansion): CMDI_REFLECTED was briefly added to DEFAULT_CHECKS (+39) then REVERTED
+    # here. In-band (reflected-output) command injection is NOT a sound scan-route FACT: its only in-band
+    # marker is a computed product ($((N*N))) that a benign arithmetic evaluator reproduces from the input
+    # exactly as a shell does (a rate-1.0 red-pen FP against a plain calculator — see
+    # scanner/tests/test_cmdi_reflected.py::test_calculator_false_confirms_so_cmdi_reflected_is_lead_only), so
+    # the check is now a LEAD driver EXCLUDED from DEFAULT_CHECKS (command_injection.reflected_output is
+    # fact_capable=false) and the +39 it contributed is removed. The SOUND cmdi FACTs are the dose-scaled
+    # timing channel (w4b-time-cmdi-sleep → time_based_command_injection) and the blind OOB curl callback
+    # (w4b-time-cmdi-oob-curl), both on the opt-in --library path, so they are not in this DEFAULT_CHECKS row.
+    # STAGE 5 (meridian-s5-expansion, 1836 -> 1860, +24): the always-on {{N*N}} SSTI library entry
     # (m2-ssti-generic-braces) sends a benign control + the probe at each applicable corpus point. The
     # EVALUATION oracle fires only on a COMPUTED product with the raw token absent AND absent from the
     # control, which no benign corpus app produces, so 11/0/0 still holds — again only the cost row moves.
-    assert m.requests_sent == 1899, f"request budget drifted: {m.requests_sent} (gate requires 1899)"
+    assert m.requests_sent == 1860, f"request budget drifted: {m.requests_sent} (gate requires 1860)"
     assert m.findings_reported == 11, f"findings reported drifted: {m.findings_reported} (gate requires 11)"

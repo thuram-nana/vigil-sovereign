@@ -27,6 +27,7 @@ from __future__ import annotations
 import http.server
 import re
 import sqlite3
+import subprocess
 import threading
 import time
 import types
@@ -72,6 +73,11 @@ def test_redrive_spec_emits_a_runtime_spec_for_response_derived_classes(claimed,
     ("boolean_sqli", "boolean_sqli"), ("blind_sqli", "boolean_sqli"), ("boolean_based_sqli", "boolean_sqli"),
     ("time_based_sqli", "time_based_sqli"), ("time_based_blind_sqli", "time_based_sqli"),
     ("time_sqli", "time_based_sqli"),
+    # the SOUND in-band command-injection FACT is the dose-scaled timing channel — it normalizes to ITSELF
+    # (never to `command_injection`, which would fall through to the OOB/side_effect branches) so the producer
+    # claims it HERE and the seam routes it to the _cmdi_timing_redrive arm.
+    ("time_based_command_injection", "time_based_command_injection"),
+    ("time_based_rce", "time_based_command_injection"), ("time_based_cmdi", "time_based_command_injection"),
 ])
 def test_redrive_spec_emits_a_runtime_spec_for_injection_classes(claimed, norm):
     from vigil_integration.live.engine import VigilEngine
@@ -475,6 +481,17 @@ class _InjApp(http.server.BaseHTTPRequestHandler):
             time.sleep(0.05)
             return self._html("<html><body>ok</body></html>")
 
+        if path == "/cmd-time":                    # VULNERABLE: GENUINE shell execution of the host param
+            # (subprocess shell=True) — a REAL command-injection sink, NOT a simulated timer. The cmdi-timing
+            # arm injects `127.0.0.1;sleep {s}` into `host`, so the shell runs a REAL `sleep` and the latency
+            # SCALES with the injected dose (dose-responsive) → time_based_command_injection.
+            host = (q.get("host") or [""])[0]
+            try:
+                subprocess.run("echo reached " + host, shell=True, capture_output=True, text=True, timeout=5)
+            except Exception:  # noqa: BLE001
+                pass
+            return self._html("<html><body>ok</body></html>")
+
         self.send_response(404)
         self.end_headers()
 
@@ -525,6 +542,38 @@ def test_live_time_based_sqli_mints_a_fact(monkeypatch, tmp_path):
     assert ref, "a live dose-responsive SLEEP sink must mint a signed time_based_sqli FACT via the seam"
 
 
+def test_live_time_based_command_injection_mints_a_fact(monkeypatch, tmp_path):
+    """The SOUND in-band command-injection FACT: a GENUINE shell sink (subprocess shell=True) that runs the
+    injected `;sleep {s}` makes the latency SCALE with the dose, so the governed engage seam dispatches
+    time_based_command_injection to the _cmdi_timing_redrive arm and the timing oracle mints a signed FACT —
+    the channel the calculator-fakeable in-band computed-product side_effect (now LEAD-only) could not sound."""
+    ref = _fact(monkeypatch, tmp_path, "http://127.0.0.1:{port}/cmd-time?host=seed",
+                "time_based_command_injection", handler=_InjApp)
+    assert ref, "a live dose-responsive shell `sleep` sink must mint a signed time_based_command_injection FACT"
+
+
+def test_cmdi_timing_seam_routes_through_the_timing_oracle_not_the_side_effect():
+    """Correctness-trap pin: the seam dispatches time_based_command_injection to the _cmdi_timing_redrive arm,
+    which adjudicates through the dose-response TimingCheck / timing_oracle over SHELL sleep break-outs — NOT
+    the calculator-fakeable side_effect computed-product channel (command_injection.reflected_output, now
+    LEAD-only). Asserted structurally so a refactor that re-points it at the unsound channel is caught."""
+    import inspect
+
+    from vigil_integration.live import runtime_redrive as rr
+    wrapper = inspect.getsource(rr._cmdi_timing_redrive)
+    assert "timing_redrive" in wrapper and "_CMDI_SLEEP_TEMPLATES" in wrapper, (
+        "_cmdi_timing_redrive must drive the timing arm with the shell sleep break-out templates")
+    assert "cmdi_reflected_redrive(" not in wrapper and "side_effect_oracle" not in wrapper, (
+        "_cmdi_timing_redrive must NOT call the calculator-fakeable side_effect arm/oracle (the docstring may "
+        "name it to contrast; the routing must go through timing_redrive only)")
+    disp = inspect.getsource(rr.runtime_redrive)
+    assert '"time_based_command_injection": _cmdi_timing_redrive' in disp, (
+        "the dispatcher must delegate time_based_command_injection to the _cmdi_timing_redrive arm")
+    # and the shell sleep templates must actually be shell break-outs that run `sleep`
+    assert all("sleep {s}" in t for t in rr._CMDI_SLEEP_TEMPLATES) and len(rr._CMDI_SLEEP_TEMPLATES) >= 3, (
+        "_CMDI_SLEEP_TEMPLATES must be shell break-outs invoking `sleep`")
+
+
 # -- mandatory negative controls: a safe twin mints nothing (stays a LEAD) --------------------------
 
 def test_negctl_ssti_reflected_but_unevaluated_mints_nothing(monkeypatch, tmp_path):
@@ -556,3 +605,12 @@ def test_negctl_time_based_sqli_uniformly_slow_mints_nothing(monkeypatch, tmp_pa
     ref = _fact(monkeypatch, tmp_path, "http://127.0.0.1:{port}/time-safe?q=seed", "time_based_sqli",
                 handler=_InjApp)
     assert ref is None, "a uniformly slow endpoint must not mint a time_based_sqli FACT"
+
+
+def test_negctl_time_based_command_injection_uniformly_slow_mints_nothing(monkeypatch, tmp_path):
+    """FP: the same uniformly slow endpoint, claimed as time_based_command_injection — a fixed per-request
+    delay has no dose-response, so the cmdi-timing arm refuses → LEAD, not a FACT (the dose-response gate is
+    what makes the shell-sleep channel sound where a slow/loaded endpoint is not)."""
+    ref = _fact(monkeypatch, tmp_path, "http://127.0.0.1:{port}/time-safe?host=seed",
+                "time_based_command_injection", handler=_InjApp)
+    assert ref is None, "a uniformly slow endpoint must not mint a time_based_command_injection FACT"
