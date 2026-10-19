@@ -875,7 +875,13 @@ def _run_reasoning_pass(sink, spine, slug, report, result, world) -> None:
             fe = sink.finding_event(finding)
 
             # (1) multi-critic panel — re-ground / provenance / calibration lenses, advisory.
-            _advise_critics(sink, finding, fe)
+            # ONLY over oracle-carrying findings: an active LEAD (oracle did not fire — no
+            # oracle_context and not verified_by_oracle) gets no panel, matching MultiCriticAgent
+            # and keeping the advisory stream free of routine per-lead verdict noise. The
+            # reward-bus credit below still runs for EVERY active finding (non-circular outcome
+            # labelling), so learning is unchanged — only the advisory panel is scoped to facts.
+            if finding.get("verified_by_oracle") or finding.get("oracle_context"):
+                _advise_critics(sink, finding, fe)
 
             # (2) cognitive refusal — feed the finding AS THE SCAN CONCLUDED IT (its retained
             # certificate), so the primitive independently RE-EXECUTES that certificate and
