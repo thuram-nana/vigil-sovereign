@@ -30,7 +30,8 @@ _HINTS: tuple[tuple[tuple[str, ...], tuple[str, ...]], ...] = (
     (("file", "filename", "path", "filepath", "template", "page", "include",
       "document", "dir", "folder", "download", "read"),
      ("path_traversal",)),
-    (("cmd", "command", "exec", "execute", "run", "ping", "host_cmd"),
+    (("cmd", "command", "exec", "execute", "run", "ping", "host_cmd",
+      "host", "hostname", "server", "ip", "addr", "target_host"),
      ("command_injection",)),
     (("xml", "soap", "xmldata"),
      ("blind_xxe",)),
@@ -73,7 +74,15 @@ def select_checks(
         by_class.setdefault(c.bug_class, c)
 
     wanted = likely_classes(point.name)
-    if reflected:
+    # A HINTED point (or one known to reflect input) ALSO gets the in-band reflection/evaluation
+    # classes — reflected XSS, SSTI (server-side template EVAL), error-based SQLi, path traversal —
+    # because a parameter name rarely advertises them (a `title=` is not obviously an SSTI sink).
+    # Previously these were gated behind a `reflected` flag the engine's call site never set, which
+    # SILENTLY DROPPED SSTI / error-based-SQLi at their OWN sinks (SSTI at /reports/run?title=,
+    # error-based SQLi at /records/search?q=). Gated on `wanted` so a TRULY UNHINTED point adds
+    # nothing here and still falls back to the FULL set below — targeting narrows effort where a
+    # param gives a signal, it never silently drops a class at a point it can say nothing about.
+    if reflected or wanted:
         wanted = wanted + list(_REFLECTION_CLASSES)
 
     selected = [by_class[bc] for bc in dict.fromkeys(wanted) if bc in by_class]

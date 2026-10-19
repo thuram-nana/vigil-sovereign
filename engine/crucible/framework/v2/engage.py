@@ -1084,6 +1084,7 @@ def run_engagement(
     enable_sso: bool = False,
     enable_graphql_dos: bool = False,
     use_library: bool = False,
+    targeted: bool = False,
     enable_access_control: bool = False,
     access_control_config: "AccessControlConfig | None" = None,
     access_control_victim_headers: "tuple[str, ...]" = (),
@@ -1393,6 +1394,7 @@ def run_engagement(
                 enable_sso=enable_sso,
                 enable_graphql_dos=enable_graphql_dos,
                 use_library=use_library,
+                targeted=targeted,
                 enable_access_control=enable_access_control,
                 access_control_config=ac_config,
                 priors=priors,
@@ -2017,6 +2019,17 @@ def main(argv: list[str]) -> int:
                              "via the predicate oracle; cost / introspection-off signals are honest "
                              "leads. One bounded probe per check through the gated executor (it "
                              "demonstrates a missing guard, it does not flood). Off by default.")
+    parser.add_argument("--targeted", action="store_true",
+                        help="Spend the request budget where a bug is plausible: at each parameter run "
+                             "only the classes its NAME suggests (scanner.targeting) PLUS the always-tried "
+                             "in-band reflection/eval classes (xss/ssti/error-sqli/traversal); a parameter "
+                             "with no name signal still runs the FULL set. This trades per-parameter "
+                             "breadth for surface REACH under a bounded budget — a HINTED parameter does "
+                             "NOT run classes outside its hints + the reflection set (e.g. "
+                             "deserialization/xxe on an all-named surface are offered only where a point is "
+                             "unhinted), so use it to reach every sink on a WIDE surface, not for maximum "
+                             "depth per point. Pairs with --library. Off by default; the scan-gate/"
+                             "benchmark path never uses it and stays byte-identical.")
     parser.add_argument("--library", action="store_true",
                         help="Fingerprint the target from the crawl and also run the declarative check "
                              "LIBRARY (scanner.library) whose applicability predicate matches the "
@@ -2329,6 +2342,7 @@ def _engage_body(args: argparse.Namespace, spine: object) -> int:
             enable_sso=args.sso,
             enable_graphql_dos=args.graphql_dos,
             use_library=args.library,
+            targeted=args.targeted,
             enable_access_control=args.access_control,
             access_control_victim_headers=tuple(args.ac_victim_header or ()),
             access_control_unauth_headers=tuple(args.ac_unauth_header or ()),
