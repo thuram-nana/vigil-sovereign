@@ -2081,6 +2081,35 @@
       ]
     },
     {
+      "id": "el_injection.evaluation",
+      "check": "el_injection_redrive",
+      "evidence": "A per-probe RANDOM product N1*N2 (unguessable, unable to pre-exist) that VIGIL's own gated re-drive injected as an EXPRESSION-LANGUAGE expression (${N1*N2} JSP-EL / #{N1*N2} SpEL / %{N1*N2} OGNL) appears in the target's FRESH response body, the raw expression did NOT survive verbatim (a reflected-but-unevaluated payload is a conclusive clean, not a fire), AND a benign no-expression CONTROL request lacked the product - the ACHIEVED server-side EVALUATION of the expression (EL / SpEL / OGNL injection, CWE-917), re-derived offline by verify/oracles.py:evaluation_oracle over the retained bytes. SOUND for the same reason SSTI is: the ONLY producer of the unguessable product from ${N*M} / #{N*M} / %{N*M} is a server-side EXPRESSION EVALUATOR, which IS the vulnerability - a benign ${VAR} variable-substitution / config interpolation does not COMPUTE arithmetic, so it never produces the product (unlike the cmdi $((N*M)) arithmetic a calculator fakes). The RUNNER crafts the expression; the Strix/LLM payload is never trusted and the report is never proof.",
+      "fact_capable": true,
+      "clean_capable": false,
+      "preconditions": [
+        "channel_established",
+        "body_semantically_available"
+      ],
+      "limitation": "Body-derived, POSITIVE-only and coverage-bounded: a fire is unforgeable (the product is a per-probe random N1*N2 that could not pre-exist, the raw expression provably did not survive, and a benign control attributes the product to THIS probe), but VIGIL only confirms EL injection across the insertion points and EL/SpEL/OGNL expression shapes it actually drives. An expression reflected but NOT evaluated is the honest boundary (reflected, not evaluated) and does not fire; a blind/second-order EL sink VIGIL never renders stays INCONCLUSIVE. This is the EL-family sibling of ssti.evaluation - the SAME sound evaluation_oracle, a distinct CWE-917 class label. NOT CLEAN-capable: a non-firing can never assert the target evaluates no injected expression.",
+      "target_fact_capable": true,
+      "target_clean_capable": false,
+      "target_downgrade_rationale": "Proving the ABSENCE of any server-side expression evaluation is a coverage-complete capability over every insertion point and every EL/SpEL/OGNL expression shape across every reachable page, not this per-probe computed-product re-drive's target, so CLEAN-capability is deliberately not pursued on this branch.",
+      "oracle_version": "evaluation",
+      "control_requirements": [
+        "warden_active_recon_gate",
+        "vigil_owned_gated_probe",
+        "vigil_owned_live_redrive",
+        "vigil_owned_unique_probe_product",
+        "benign_control_attribution",
+        "response_body_decode"
+      ],
+      "evidence_surface": "response_body",
+      "implementation_refs": [
+        "engine/crucible/framework/v2/verify/oracles.py:evaluation_oracle",
+        "integration/vigil_integration/live/runtime_redrive.py:_el_injection_redrive"
+      ]
+    },
+    {
       "id": "boolean_sqli.sprt_inference",
       "check": "boolean_redrive | scanner.checks.BOOLEAN_SQLI_SPRT",
       "evidence": "VIGIL's own gated re-drive sends N runner-crafted true/false probe PAIRS against the finding's {endpoint, param} and the deterministic boolean_inference_oracle re-derives a Wald SEQUENTIAL PROBABILITY RATIO TEST decision offline: each round's Bernoulli signal is (the TRUE clause differs from the FALSE clause) AND (the two FALSE responses AGREE) - the first half is the boolean channel, the second a dynamic-page control - and the SPRT confirms only when the log-likelihood ratio crosses the upper boundary. The RUNNER crafts the clauses; the Strix/LLM payload is never trusted and the report is never proof.",

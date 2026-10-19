@@ -710,6 +710,16 @@ _ALIASES: dict[str, str] = {
     "os_command_injection": "command_injection",
     "cmdi": "command_injection",
     "server_side_template_injection": "ssti",
+    # Expression-language injection (CWE-917) — canonical key `el_injection` (EVALUATION oracle, the EL-family
+    # subset of the SSTI evaluation channel). The framework-specific spellings fold onto it so an LLM/Strix
+    # label reaches the el_injection evaluation arm; NOT aliased to `ssti` (distinct CWE and class label).
+    "expression_language_injection": "el_injection",
+    "expression_language": "el_injection",
+    "spel_injection": "el_injection",
+    "spel": "el_injection",
+    "ognl_injection": "el_injection",
+    "ognl": "el_injection",
+    "mvel_injection": "el_injection",
     # Wave-4.1 Server-Side Includes (SSI, CWE-97) — canonical key `ssi`; the common spellings fold onto it.
     "server_side_includes": "ssi",
     "server_side_include": "ssi",

@@ -98,7 +98,8 @@ RUNTIME_FACT_CLASSES = ("xss", "exposure", "ssi")
 # ``RUNTIME_REDRIVE_CLASSES``), so the engage seam (engine ``_redrive_spec`` → wiring
 # ``_live_runtime_redrive_fact``) now produces a spec and admits them — closing the under-report where the
 # deterministic scanner proved the class but the governed engage/chat seam refused to mint it.
-RUNTIME_STAT_FACT_CLASSES = ("ssti", "boolean_sqli", "time_based_sqli", "time_based_command_injection")
+RUNTIME_STAT_FACT_CLASSES = ("ssti", "boolean_sqli", "time_based_sqli", "time_based_command_injection",
+                             "el_injection")
 
 # LEAD-ONLY classes: the runner still probes them end to end and records an admitted verdict, but their
 # registered branch declares ``fact_capable: false``, so ``verdict.admit`` demotes even a fired oracle to a
@@ -205,6 +206,15 @@ _TIMING_PARAMS = ("id", "q", "query", "search", "name", "user", "uid", "item", "
 # out and evaluates TRUE vs a false one that evaluates FALSE, over the same insertion point. Timing:
 # (benign, low_sleep, high_sleep, low_ms, high_ms) — a benign value vs two SLEEP doses for the dose-response.
 _SSTI_EXPR_TEMPLATES = ("{{{{{n1}*{n2}}}}}", "${{{n1}*{n2}}}", "#{{{n1}*{n2}}}", "{{{n1}*{n2}}}")
+# EL / SpEL / OGNL expression-language injection (CWE-917): the EL-family subset of the evaluation channel.
+# ${N*M} (JSP-EL), #{N*M} (SpEL / JSF-EL), %{N*M} (OGNL / Struts). SAME sound evaluation_oracle as SSTI: the
+# ONLY way the unguessable per-probe product appears from these is a server-side EXPRESSION EVALUATOR (which
+# IS the vuln); a benign ${VAR} variable-substitution / config interpolation does not COMPUTE arithmetic, so
+# it never produces the product — unlike the cmdi $((N*M)) arithmetic a benign calculator fakes.
+_EL_BRANCH = "el_injection.evaluation"
+_EL_EXPR_TEMPLATES = ("${{{n1}*{n2}}}", "#{{{n1}*{n2}}}", "%{{{n1}*{n2}}}")
+_EL_PARAMS = ("q", "query", "search", "name", "input", "data", "msg", "message", "comment", "lang",
+              "expr", "eval", "tpl", "template", "value", "id")
 
 # --- in-band (reflected-OUTPUT) command injection: the UNGUESSABLE COMPUTED PRODUCT channel ---------------
 _CMDI_REFLECTED_BRANCH = "command_injection.reflected_output"
@@ -936,7 +946,8 @@ def runtime_redrive(url: str, *, slug: str, engagement_slug: str, signers: "list
     if bug_class in RUNTIME_STAT_FACT_CLASSES:
         _arm = {"ssti": ssti_redrive, "boolean_sqli": boolean_redrive,
                 "time_based_sqli": timing_redrive,
-                "time_based_command_injection": _cmdi_timing_redrive}[bug_class]
+                "time_based_command_injection": _cmdi_timing_redrive,
+                "el_injection": _el_injection_redrive}[bug_class]
         return _arm(url, slug=slug, engagement_slug=engagement_slug, signers=signers, timeout=timeout)
     branch = _BRANCH_FOR[bug_class]
     if branch not in branch_ids():
@@ -1397,11 +1408,20 @@ def _stat_setup(url: str, slug: str, bug_class: str, branch: str, timeout: float
 
 
 def ssti_redrive(url: str, *, slug: str, engagement_slug: str, signers: "list[tuple[str, str]]",
-                 param: "str | None" = None, timeout: float = 8.0) -> "RuntimeRedriveResult":
+                 param: "str | None" = None, timeout: float = 8.0, bug_class: str = "ssti",
+                 branch: "str | None" = None, expr_templates: "tuple[str, ...] | None" = None,
+                 params: "tuple[str, ...] | None" = None) -> "RuntimeRedriveResult":
     """Re-drive ``url`` for SERVER-SIDE TEMPLATE / EXPRESSION-LANGUAGE injection and mint a signed FACT ONLY
     when the deterministic ``evaluation_oracle`` confirms the server EVALUATED a runner-injected expression:
     a PER-PROBE random product ``N1*N2`` present in the FRESH response body, the raw expression ABSENT
     (reflected-verbatim ⇒ a conclusive clean, not a fire), and a benign no-expression CONTROL lacking it.
+
+    Class-agnostic: ``ssti`` (template ``{{N*M}}`` / EL ``${N*M}`` / SpEL ``#{N*M}``) and ``el_injection``
+    (EL/SpEL/OGNL only) share the SAME sound ``evaluation_oracle`` — only the class/branch label and the
+    expression templates differ. The evaluation channel is SOUND for both because the ONLY way the unguessable
+    per-probe product appears from ``${N*M}`` / ``#{N*M}`` is a server-side EXPRESSION EVALUATOR, which IS the
+    vulnerability (a benign ``${VAR}`` variable-substitution / config interpolation does not compute arithmetic,
+    so it never produces the product) — unlike the cmdi ``$((N*M))`` arithmetic a benign calculator fakes.
 
     FP boundary (all → LEAD): a raw expression that survives unevaluated (reflected==sent), a product present
     in the benign control, and an arithmetic coincidence (guarded by the unique per-probe product + raw-absent
@@ -1412,13 +1432,15 @@ def ssti_redrive(url: str, *, slug: str, engagement_slug: str, signers: "list[tu
     from framework.v2.verify.adapter import FindingContext  # noqa: PLC0415
     from framework.v2.verify.oracles import evaluation_oracle  # noqa: PLC0415
 
-    bug_class = "ssti"
-    res, send, state = _stat_setup(url, slug, bug_class, _SSTI_BRANCH, timeout)
+    branch = branch or _SSTI_BRANCH
+    expr_templates = expr_templates or _SSTI_EXPR_TEMPLATES
+    params = params or _SSTI_PARAMS
+    res, send, state = _stat_setup(url, slug, bug_class, branch, timeout)
     if send is None:
         return res
     nonce = _sha(url)
     try:
-        for name in _candidate_names_hint(url, _SSTI_PARAMS, param, _MAX_CANDIDATE_NAMES):
+        for name in _candidate_names_hint(url, params, param, _MAX_CANDIDATE_NAMES):
             probe_url = _url_with_param(url, name)
             tmpl = RequestTemplate(HttpRequest(method="GET", url=probe_url))
             point = next((p for p in tmpl.insertion_points(kinds=(InsertionKind.QUERY_VALUE,))
@@ -1430,14 +1452,14 @@ def ssti_redrive(url: str, *, slug: str, engagement_slug: str, signers: "list[tu
             try:
                 control = send(tmpl.render(point, f"vigilbenign{nonce}"))
             except Exception as e:  # noqa: BLE001
-                res.notes.append(f"ssti control error [{name}]: {type(e).__name__}: {e}")
+                res.notes.append(f"{bug_class} control error [{name}]: {type(e).__name__}: {e}")
                 continue
             if state["channels"] <= before:
                 res.inconclusive.append((bug_class, f"{probe_url}#control"))
                 continue
             control_body = _body_text(control)
             fired_here = False
-            for tpl in _SSTI_EXPR_TEMPLATES:
+            for tpl in expr_templates:
                 n1 = secrets.randbelow(90000) + 10000
                 n2 = secrets.randbelow(90000) + 10000
                 product = str(n1 * n2)
@@ -1446,17 +1468,17 @@ def ssti_redrive(url: str, *, slug: str, engagement_slug: str, signers: "list[tu
                 try:
                     probe = send(tmpl.render(point, payload))
                 except Exception as e:  # noqa: BLE001
-                    res.notes.append(f"ssti probe error [{name}]: {type(e).__name__}: {e}")
+                    res.notes.append(f"{bug_class} probe error [{name}]: {type(e).__name__}: {e}")
                     continue
                 if state["channels"] <= before2:
                     res.inconclusive.append((bug_class, f"{probe_url}#{point.id}"))
                     continue
                 fc = FindingContext.from_evaluation(payload, product, _body_text(probe),
-                                                    control_body=control_body, bug_class="ssti")
+                                                    control_body=control_body, bug_class=bug_class)
                 context = fc.to_verifier_context()
                 signal = evaluation_oracle(context.get("eval_raw", ""), context.get("eval_expected", ""),
                                            context.get("eval_observed", ""), context.get("eval_control"))
-                r = _admit_one(res, branch=_SSTI_BRANCH, bug_class=bug_class,
+                r = _admit_one(res, branch=branch, bug_class=bug_class,
                                engagement_slug=engagement_slug, signers=signers, context=context,
                                item=f"{probe_url}#{point.id}", surface=f"query:{name}",
                                fired=signal.fired, conclusive=signal.conclusive,
@@ -1469,6 +1491,19 @@ def ssti_redrive(url: str, *, slug: str, engagement_slug: str, signers: "list[tu
     except Exception as e:  # noqa: BLE001 — a probe error never fabricates a FACT; record + return what held
         res.notes.append(f"ssti_redrive error: {type(e).__name__}: {e}")
     return res
+
+
+def _el_injection_redrive(url: str, *, slug: str, engagement_slug: str, signers: "list[tuple[str, str]]",
+                          timeout: float = 8.0) -> "RuntimeRedriveResult":
+    """EL / SpEL / OGNL expression-language injection (CWE-917) — the EL-family subset of the SOUND evaluation
+    channel. Delegates to :func:`ssti_redrive` with the EL expression templates (${N*M} / #{N*M} / %{N*M}) and
+    the el_injection class/branch: the SAME evaluation_oracle mints the FACT only when the server COMPUTED the
+    unguessable per-probe product (raw expression absent, benign control lacking it). Sound for the same reason
+    SSTI is — a server-side EXPRESSION EVALUATOR is the only producer of the product — and distinct from ssti
+    only in the class label and the EL-family templates (no Jinja ``{{ }}``)."""
+    return ssti_redrive(url, slug=slug, engagement_slug=engagement_slug, signers=signers, timeout=timeout,
+                        bug_class="el_injection", branch=_EL_BRANCH, expr_templates=_EL_EXPR_TEMPLATES,
+                        params=_EL_PARAMS)
 
 
 def cmdi_reflected_redrive(url: str, *, slug: str, engagement_slug: str, signers: "list[tuple[str, str]]",

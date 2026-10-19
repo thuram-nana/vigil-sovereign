@@ -78,6 +78,10 @@ def test_redrive_spec_emits_a_runtime_spec_for_response_derived_classes(claimed,
     # claims it HERE and the seam routes it to the _cmdi_timing_redrive arm.
     ("time_based_command_injection", "time_based_command_injection"),
     ("time_based_rce", "time_based_command_injection"), ("time_based_cmdi", "time_based_command_injection"),
+    # EL / SpEL / OGNL expression-language injection (CWE-917) — the EL-family subset of the SOUND evaluation
+    # channel. Normalizes to itself (distinct CWE from ssti); the framework spellings fold onto it.
+    ("el_injection", "el_injection"), ("spel_injection", "el_injection"),
+    ("ognl_injection", "el_injection"), ("expression_language_injection", "el_injection"),
 ])
 def test_redrive_spec_emits_a_runtime_spec_for_injection_classes(claimed, norm):
     from vigil_integration.live.engine import VigilEngine
@@ -409,6 +413,9 @@ def test_negctl_xss_quote_escaped_js_string_mints_nothing(monkeypatch, tmp_path)
 
 _SLEEP_RE = re.compile(r"(?:pg_)?sleep\(\s*(\d*\.?\d+)\s*\)", re.IGNORECASE)
 _ARITH_RE = re.compile(r"(\d{4,})\s*\*\s*(\d{4,})")
+# EL / SpEL / OGNL arithmetic ONLY inside an expression wrapper (${...} / #{...} / %{...}) — so the /el sink
+# evaluates an EL expression (the vuln) but a bare reflected number never fires it.
+_EL_ARITH_RE = re.compile(r"[$#%]\{(\d{4,})\s*\*\s*(\d{4,})\}")
 
 _INJ_DB = sqlite3.connect(":memory:", check_same_thread=False)
 _INJ_DB.execute("CREATE TABLE users(id INTEGER, name TEXT)")
@@ -492,6 +499,19 @@ class _InjApp(http.server.BaseHTTPRequestHandler):
                 pass
             return self._html("<html><body>ok</body></html>")
 
+        if path == "/el":                          # VULNERABLE: EVALUATES an EL/SpEL/OGNL expression and emits
+            # ONLY the product (a server-side expression evaluator — the CWE-917 vuln). Fires on ${N*M}/#{N*M}/
+            # %{N*M}; a bare reflected number does not (the wrapper is required), mirroring /ssti for EL syntax.
+            m = _EL_ARITH_RE.search(value)
+            if m:
+                return self._html(f"<html><body><p>{int(m.group(1)) * int(m.group(2))}</p></body></html>")
+            return self._html(f"<html><body><p>{_esc(value)}</p></body></html>")   # benign echo, no product
+        if path == "/el-safe":                     # BENIGN ${VAR} SUBSTITUTION engine — the decisive EL control:
+            # substitutes KNOWN variables but NEVER computes arithmetic, so ${N*M} (an unknown "var") yields the
+            # empty string, the product never appears, and the evaluation oracle refuses → LEAD, not a FACT.
+            out = re.sub(r"[$#%]\{([^}]*)\}", lambda mo: {"user": "guest", "env": "prod"}.get(mo.group(1), ""), value)
+            return self._html(f"<html><body><p>config: {_esc(out)}</p></body></html>")
+
         self.send_response(404)
         self.end_headers()
 
@@ -505,6 +525,15 @@ def test_live_ssti_mints_a_fact(monkeypatch, tmp_path):
     """A live server that EVALUATES a runner-injected per-probe product must mint a signed SSTI FACT."""
     ref = _fact(monkeypatch, tmp_path, "http://127.0.0.1:{port}/ssti?q=seed", "ssti", handler=_InjApp)
     assert ref, "a live server evaluating the injected expression must mint a signed SSTI FACT via the seam"
+
+
+def test_live_el_injection_mints_a_fact(monkeypatch, tmp_path):
+    """A live server that EVALUATES a runner-injected EL/SpEL/OGNL expression (${N*M} / #{N*M} / %{N*M}) must
+    mint a signed el_injection FACT via the governed seam — the EL-family sibling of SSTI, the SAME sound
+    evaluation_oracle. Proves el_injection reaches the (already EL-capable) evaluation arm and mints under its
+    own CWE-917 class rather than staying a LEAD."""
+    ref = _fact(monkeypatch, tmp_path, "http://127.0.0.1:{port}/el?q=seed", "el_injection", handler=_InjApp)
+    assert ref, "a live EL-evaluating sink must mint a signed el_injection FACT via the seam"
 
 
 def test_live_boolean_sqli_mints_a_fact_via_sprt(monkeypatch, tmp_path):
@@ -580,6 +609,15 @@ def test_negctl_ssti_reflected_but_unevaluated_mints_nothing(monkeypatch, tmp_pa
     """FP: the raw expression survives verbatim (reflected, not evaluated) → no product → LEAD, not a FACT."""
     ref = _fact(monkeypatch, tmp_path, "http://127.0.0.1:{port}/ssti-safe?q=seed", "ssti", handler=_InjApp)
     assert ref is None, "a verbatim-reflected (unevaluated) expression must not mint an SSTI FACT"
+
+
+def test_negctl_el_injection_variable_substitution_mints_nothing(monkeypatch, tmp_path):
+    """FP (the decisive EL control): a benign ${VAR} substitution engine substitutes known variables but NEVER
+    computes arithmetic, so the unguessable ${N*M} product never appears → the evaluation oracle refuses →
+    LEAD, not a FACT. This is why the EL evaluation channel is SOUND where the cmdi computed product is not:
+    only a real server-side EXPRESSION EVALUATOR (the vuln) produces the product, not a variable substitution."""
+    ref = _fact(monkeypatch, tmp_path, "http://127.0.0.1:{port}/el-safe?q=seed", "el_injection", handler=_InjApp)
+    assert ref is None, "a benign ${VAR} substitution engine must not mint an el_injection FACT"
 
 
 def test_negctl_boolean_sqli_static_page_mints_nothing(monkeypatch, tmp_path):
