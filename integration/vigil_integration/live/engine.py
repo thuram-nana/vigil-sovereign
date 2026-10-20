@@ -930,6 +930,37 @@ class VigilEngine:
             full = target if "://" in target else "http://" + target
             return {"kind": "access_control", "url": full, "bug_class": bug_class}
 
+        # WORKFLOW re-drive (request_race / business_logic): the owner-signed-WorkflowSpec ceremony adjudicated
+        # by workflow_abuse_oracle over VIGIL's OWN capture (a COUNT-based limit-overrun burst / a tamper write
+        # whose danger predicate the oracle evaluates over the read_state post-state). The owner-signed
+        # WorkflowSpec + the perform/read_state/mutating_send descriptors are MANDATORY and arrive ONLY via the
+        # dedicated wiring._live_race_bizlogic_redrive_fact seam from a TRUSTED channel (never the model); the
+        # arm REFUSES without a valid owner signature (owner_signed_spec False ⇒ every class INCONCLUSIVE). This
+        # router emits class + url ONLY (the triple-lock). ADDITIVE: a separate dispatch set + the "workflow"
+        # spec kind, so the arms above are untouched and make gate stays byte-identical.
+        try:
+            from .race_bizlogic_redrive import RACE_BIZLOGIC_FACT_CLASSES  # noqa: PLC0415 — tuple (FATAL-2)
+        except Exception:  # noqa: BLE001 — module unavailable ⇒ no workflow re-drive (other paths work)
+            RACE_BIZLOGIC_FACT_CLASSES = ()
+        if bug_class in RACE_BIZLOGIC_FACT_CLASSES:
+            full = target if "://" in target else "http://" + target
+            return {"kind": "workflow", "url": full, "bug_class": bug_class}
+
+        # PASSWORD-RESET invariant re-drive (password_reset_reuse / _collision / _cross_user): the
+        # password_reset_invariant_oracle (private-read reduction / predictable-counter proof) /
+        # cross-user same-shape private-read differential over VIGIL's OWN capture. The reset-flow driver
+        # callables + the operator private-datum baseline + the two-identity cross-read material are MANDATORY
+        # and arrive ONLY via the dedicated wiring._live_reset_invariant_redrive_fact seam from a TRUSTED
+        # channel (never the model). This router emits class + url ONLY (the triple-lock). ADDITIVE: a separate
+        # dispatch set + the "reset" spec kind, so the arms above are untouched.
+        try:
+            from .reset_invariant_redrive import RESET_INVARIANT_FACT_CLASSES  # noqa: PLC0415 — tuple (FATAL-2)
+        except Exception:  # noqa: BLE001 — module unavailable ⇒ no reset re-drive (other paths work)
+            RESET_INVARIANT_FACT_CLASSES = ()
+        if bug_class in RESET_INVARIANT_FACT_CLASSES:
+            full = target if "://" in target else "http://" + target
+            return {"kind": "reset", "url": full, "bug_class": bug_class}
+
         # DOM ACHIEVED-STATE classes (dom_xss / prototype_pollution): the runner-owned browser arms
         # (live.dom_redrive) craft VIGIL's OWN canary/gadget and judge VIGIL's OWN egress-gated headless-DOM
         # capture — the model proposes only url + param. ADDITIVE: a separate dispatch set + the "dom" spec

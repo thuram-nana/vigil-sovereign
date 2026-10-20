@@ -89,12 +89,13 @@ def test_redrive_spec_sqli_without_a_complete_spec_is_not_redrivable():
     assert VigilEngine._redrive_spec(_decision("sqli", insertion_point="", payload=""), None) is None
 
 
-@pytest.mark.parametrize("claimed", ["business_logic", "not_a_real_class"])
+@pytest.mark.parametrize("claimed", ["clickjacking", "not_a_real_class"])
 def test_redrive_spec_returns_none_for_classes_not_yet_wired(claimed):
-    """Wave-3+ classes and unknown classes must NOT produce a spec (they stay LEAD-only for now).
+    """Classes with no re-drive seam and unknown classes must NOT produce a spec (they stay LEAD-only).
     NOTE: path_traversal/xss/exposure moved to the runtime seam in Wave 2 (see
-    test_engine_runtime_redrive_seam.py); idor/bola/bfla/mass_assignment moved to the access_control seam
-    (see test_engine_access_control_redrive_seam.py)."""
+    test_engine_runtime_redrive_seam.py); idor/bola/bfla/mass_assignment moved to the access_control seam;
+    request_race/business_logic moved to the workflow seam and password_reset_* to the reset seam (see
+    test_engine_workflow_reset_redrive_seam.py)."""
     from vigil_integration.live.engine import VigilEngine
     assert VigilEngine._redrive_spec(_decision(claimed), None) is None
 

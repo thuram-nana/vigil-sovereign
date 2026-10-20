@@ -382,6 +382,24 @@ class EngineConfig:
     # signature. ON only when identities are provisioned — never a default.
     access_control_enable: bool = False
     access_control_material: Optional[dict] = None
+    # WORKFLOW (request_race / business_logic) AUTONOMOUS FEEDER — deployment config; DEFAULT OFF ⇒ fail-closed
+    # LEAD. The governed workflow re-drive seam (``_live_race_bizlogic_redrive_fact``) mints a signed FACT ONLY
+    # when fed the TRUSTED material: an OWNER-SIGNED WorkflowSpec (+ its Ed25519 signature + owner pubkey) and
+    # the race/tamper descriptors + the 0.3-gated ``mutating_send`` write approval. The arm itself REFUSES
+    # without a valid owner signature (owner_signed_spec False ⇒ every class INCONCLUSIVE), so the model can
+    # never mint. Shape of ``workflow_material``: {"workflow_spec", "spec_signature_b64", "owner_public_key_b64",
+    # "race_targets", "tamper_probes", "perform", "read_state", "reset", "mutating_send"}. SOURCED FROM A
+    # TRUSTED DEPLOYMENT CHANNEL, NEVER from the model.
+    workflow_enable: bool = False
+    workflow_material: Optional[dict] = None
+    # PASSWORD-RESET invariant AUTONOMOUS FEEDER — deployment config; DEFAULT OFF ⇒ fail-closed LEAD. The
+    # governed reset re-drive seam (``_live_reset_invariant_redrive_fact``) mints a signed FACT ONLY when fed
+    # the TRUSTED material: the app-specific reset-flow driver callables + the operator private-datum baseline
+    # (cross_specs) + the two-identity header sets. Shape of ``reset_material``: {"reuse_driver",
+    # "collision_driver", "cross_specs", "victim_headers", "attacker_headers", "unauth_headers"}. SOURCED FROM
+    # A TRUSTED DEPLOYMENT CHANNEL, NEVER from the model.
+    reset_enable: bool = False
+    reset_material: Optional[dict] = None
 
 
 def _offense_scope_source(slug: str, trust_root: Any):
@@ -845,9 +863,21 @@ def build_engine(config: EngineConfig) -> VigilEngine:
         # per call so a mid-engagement authority re-sign is honoured. Default-off ⇒ None ⇒ the claim stays a LEAD.
         return _governed_access_control_material(prov, config)
 
+    def _workflow_material_provider() -> Optional[dict]:
+        # The TRUSTED governed-engage workflow material (owner-signed WorkflowSpec + race/tamper descriptors),
+        # gated on a verified owner authority. Default-off ⇒ None ⇒ the claim stays a LEAD.
+        return _governed_workflow_material(prov, config)
+
+    def _reset_material_provider() -> Optional[dict]:
+        # The TRUSTED governed-engage password-reset material (reset-flow drivers + private-datum baseline),
+        # gated on a verified owner authority. Default-off ⇒ None ⇒ the claim stays a LEAD.
+        return _governed_reset_material(prov, config)
+
     oracle = _build_oracle(prov, redrive_executor_factory=_redrive_executor_factory,
                            oob_material_provider=_oob_material_provider,
-                           access_control_material_provider=_access_control_material_provider)
+                           access_control_material_provider=_access_control_material_provider,
+                           workflow_material_provider=_workflow_material_provider,
+                           reset_material_provider=_reset_material_provider)
 
     # -- per-session knowledge graph (F3): the partition key is the SESSION id (falls back to the slug),
     # so each session owns a disjoint Neo4j partition + accumulates its own prior context. graph_writer is
@@ -2015,12 +2045,197 @@ def _with_trusted_access_control_material(redrive: "Optional[dict]",
     return base
 
 
+def _governed_workflow_material(prov: Provisioned, config: "EngineConfig") -> "Optional[dict]":
+    """Build the TRUSTED workflow (request_race / business_logic) material bundle the governed workflow
+    re-drive seam (:func:`_live_race_bizlogic_redrive_fact`) needs, SOURCED ENTIRELY from the deployment-
+    provisioned ``config.workflow_material`` + gated on a VERIFIED owner-signed engagement authority. The
+    bundle NEVER comes from the model (``engine._redrive_spec`` emits class + url only — the triple-lock).
+    Returns ``None`` (⇒ the claim stays a LEAD, fail-closed) unless EVERY condition holds:
+
+      * ``config.workflow_enable`` is True — the deployment master switch (OFF by default);
+      * ``config.workflow_material`` supplies a ``workflow_spec`` AND a non-empty ``spec_signature_b64`` AND a
+        non-empty ``owner_public_key_b64`` (the OWNER-SIGNED ceremony — the arm re-verifies this Ed25519
+        signature and refuses to confirm anything without it);
+      * a VERIFIED owner-signed engagement authority loads for ``prov.slug`` (the owner-attestation gate).
+
+    RESIDUAL (named, defense-in-depth): the workflow-owner public key is not yet cross-checked against an
+    owner-signed authority field (a crypto-sensitive follow-on). The arm's owner-signed-spec verification +
+    the oracle's danger predicate over VIGIL's OWN capture already make the model unable to mint. FATAL-2:
+    framework import is function-local. Any error ⇒ ``None``."""
+    if not getattr(config, "workflow_enable", False):
+        return None
+    material = getattr(config, "workflow_material", None)
+    if not isinstance(material, dict) or not material:
+        return None
+    if material.get("workflow_spec") is None:
+        return None
+    if not str(material.get("spec_signature_b64") or "").strip():
+        return None    # no owner signature ⇒ the arm would refuse anyway ⇒ no material (fail-closed)
+    if not str(material.get("owner_public_key_b64") or "").strip():
+        return None
+    try:
+        from framework.v2.authority.gate import load_authority_for_gate  # noqa: PLC0415 (framework at CALL)
+        load_authority_for_gate(prov.slug, trust_root=prov.trust_root)   # owner-attestation gate (OOB precedent)
+    except Exception:  # noqa: BLE001 — an unverifiable / absent authority cannot provision ⇒ LEAD
+        return None
+    return {
+        "workflow_spec": material.get("workflow_spec"),
+        "spec_signature_b64": str(material.get("spec_signature_b64") or ""),
+        "owner_public_key_b64": str(material.get("owner_public_key_b64") or ""),
+        "race_targets": tuple(material.get("race_targets") or ()),
+        "tamper_probes": tuple(material.get("tamper_probes") or ()),
+        "perform": material.get("perform"),
+        "read_state": material.get("read_state"),
+        "reset": material.get("reset"),
+        "mutating_send": material.get("mutating_send"),
+    }
+
+
+_WORKFLOW_MATERIAL_KEYS = (
+    "workflow_spec", "spec_signature_b64", "owner_public_key_b64", "race_targets", "tamper_probes",
+    "perform", "read_state", "reset", "mutating_send", "workflow_material",
+)
+
+
+def _spec_is_workflow_consumable(redrive: dict, info: "Optional[dict]" = None) -> bool:
+    """True iff :func:`_live_race_bizlogic_redrive_fact` would treat this spec as a workflow-redrive class —
+    the SAME surface the consumer gates on (``kind == "workflow"`` OR ``bug_class ∈
+    RACE_BIZLOGIC_FACT_CLASSES``). Mirrors :func:`_spec_is_oob_consumable`."""
+    if redrive.get("kind") == "workflow":
+        return True
+    try:
+        from framework.v2.verify.verifier import normalize_bug_class  # noqa: PLC0415
+        from .race_bizlogic_redrive import RACE_BIZLOGIC_FACT_CLASSES  # noqa: PLC0415 (framework at CALL)
+    except Exception:  # noqa: BLE001
+        return False
+    bug_class = redrive.get("bug_class")
+    if not bug_class and isinstance(info, dict):
+        bug_class = info.get("bug_class")
+    return normalize_bug_class(str(bug_class or "")) in RACE_BIZLOGIC_FACT_CLASSES
+
+
+def _with_trusted_workflow_material(redrive: "Optional[dict]",
+                                    provider: "Optional[Callable[[], Optional[dict]]]",
+                                    info: "Optional[dict]" = None) -> "Optional[dict]":
+    """Return the redrive spec with its workflow material sourced SOLELY from the trusted ``provider``. The
+    workflow half of the triple-lock, a TRUE independent lock: it UNCONDITIONALLY strips any producer-supplied
+    workflow material (``workflow_spec`` / ``spec_signature_b64`` / ``owner_public_key_b64`` / ``race_targets``
+    / ``tamper_probes`` / ``perform`` / ``read_state`` / ``reset`` / ``mutating_send`` / ``workflow_material``)
+    from EVERY spec — of ANY ``kind`` — then injects ONLY the feeder's bundle under ``workflow_material``. A
+    byte-identical no-op in production (the router never sets these). Fail-closed without a feeder. Mirrors
+    :func:`_with_trusted_oob_material`."""
+    if not isinstance(redrive, dict):
+        return redrive
+    had_material = any(k in redrive for k in _WORKFLOW_MATERIAL_KEYS)
+    consumable = _spec_is_workflow_consumable(redrive, info)
+    if not had_material and (provider is None or not consumable):
+        return redrive
+    base = {k: v for k, v in redrive.items() if k not in _WORKFLOW_MATERIAL_KEYS}
+    if provider is None or not consumable:
+        return base
+    try:
+        material = provider()
+    except Exception:  # noqa: BLE001
+        return base
+    if isinstance(material, dict) and material:
+        base["workflow_material"] = material
+    return base
+
+
+def _governed_reset_material(prov: Provisioned, config: "EngineConfig") -> "Optional[dict]":
+    """Build the TRUSTED password-reset material bundle the governed reset re-drive seam
+    (:func:`_live_reset_invariant_redrive_fact`) needs, SOURCED ENTIRELY from the deployment-provisioned
+    ``config.reset_material`` + gated on a VERIFIED owner-signed engagement authority. The bundle NEVER comes
+    from the model. Returns ``None`` (⇒ LEAD, fail-closed) unless EVERY condition holds:
+
+      * ``config.reset_enable`` is True;
+      * ``config.reset_material`` supplies at least one usable consumer — a ``reuse_driver`` OR a
+        ``collision_driver`` OR a non-empty ``cross_specs`` (with the two-identity headers);
+      * a VERIFIED owner-signed engagement authority loads for ``prov.slug``.
+
+    The reset-flow driver callables + the operator private-datum baseline are the operator's app-specific
+    protocol wiring; the arm OWNS the gate, the gated send, admission + minting and confirms only over VIGIL's
+    OWN capture. FATAL-2: framework import is function-local. Any error ⇒ ``None``."""
+    if not getattr(config, "reset_enable", False):
+        return None
+    material = getattr(config, "reset_material", None)
+    if not isinstance(material, dict) or not material:
+        return None
+    has_consumer = (material.get("reuse_driver") is not None
+                    or material.get("collision_driver") is not None
+                    or bool(material.get("cross_specs")))
+    if not has_consumer:
+        return None
+    try:
+        from framework.v2.authority.gate import load_authority_for_gate  # noqa: PLC0415 (framework at CALL)
+        load_authority_for_gate(prov.slug, trust_root=prov.trust_root)
+    except Exception:  # noqa: BLE001
+        return None
+    return {
+        "reuse_driver": material.get("reuse_driver"),
+        "collision_driver": material.get("collision_driver"),
+        "cross_specs": tuple(material.get("cross_specs") or ()),
+        "victim_headers": tuple(material.get("victim_headers") or ()),
+        "attacker_headers": tuple(material.get("attacker_headers") or ()),
+        "unauth_headers": tuple(material.get("unauth_headers") or ()),
+    }
+
+
+_RESET_MATERIAL_KEYS = (
+    "reuse_driver", "collision_driver", "cross_specs", "victim_headers", "attacker_headers",
+    "unauth_headers", "reset_material",
+)
+
+
+def _spec_is_reset_consumable(redrive: dict, info: "Optional[dict]" = None) -> bool:
+    """True iff :func:`_live_reset_invariant_redrive_fact` would treat this spec as a reset-redrive class —
+    ``kind == "reset"`` OR ``bug_class ∈ RESET_INVARIANT_FACT_CLASSES``. Mirrors :func:`_spec_is_oob_consumable`."""
+    if redrive.get("kind") == "reset":
+        return True
+    try:
+        from framework.v2.verify.verifier import normalize_bug_class  # noqa: PLC0415
+        from .reset_invariant_redrive import RESET_INVARIANT_FACT_CLASSES  # noqa: PLC0415 (framework at CALL)
+    except Exception:  # noqa: BLE001
+        return False
+    bug_class = redrive.get("bug_class")
+    if not bug_class and isinstance(info, dict):
+        bug_class = info.get("bug_class")
+    return normalize_bug_class(str(bug_class or "")) in RESET_INVARIANT_FACT_CLASSES
+
+
+def _with_trusted_reset_material(redrive: "Optional[dict]",
+                                 provider: "Optional[Callable[[], Optional[dict]]]",
+                                 info: "Optional[dict]" = None) -> "Optional[dict]":
+    """Return the redrive spec with its reset material sourced SOLELY from the trusted ``provider``. The reset
+    half of the triple-lock: UNCONDITIONALLY strips any producer-supplied reset material from EVERY spec, then
+    injects ONLY the feeder's bundle under ``reset_material``. Fail-closed without a feeder. Mirrors
+    :func:`_with_trusted_oob_material`."""
+    if not isinstance(redrive, dict):
+        return redrive
+    had_material = any(k in redrive for k in _RESET_MATERIAL_KEYS)
+    consumable = _spec_is_reset_consumable(redrive, info)
+    if not had_material and (provider is None or not consumable):
+        return redrive
+    base = {k: v for k, v in redrive.items() if k not in _RESET_MATERIAL_KEYS}
+    if provider is None or not consumable:
+        return base
+    try:
+        material = provider()
+    except Exception:  # noqa: BLE001
+        return base
+    if isinstance(material, dict) and material:
+        base["reset_material"] = material
+    return base
+
+
 def _build_oracle(
     prov: Provisioned,
     *,
     redrive_executor_factory: Optional[Callable[[str], Any]] = None,
     oob_material_provider: Optional[Callable[[], Optional[dict]]] = None,
     access_control_material_provider: Optional[Callable[[], Optional[dict]]] = None,
+    workflow_material_provider: Optional[Callable[[], Optional[dict]]] = None,
+    reset_material_provider: Optional[Callable[[], Optional[dict]]] = None,
 ) -> Callable[..., Optional[str]]:
     """The CRUCIBLE oracle seam. Returns a signed certificate's finding ref ONLY on a real confirmation
     (else None ⇒ the claim stays a LEAD).
@@ -2144,6 +2359,29 @@ def _build_oracle(
             prov, info, _with_trusted_access_control_material(redrive, access_control_material_provider, info))
         if ac_ref:
             return ac_ref
+
+        # T2 — WORKFLOW RE-DRIVE (request_race / business_logic): mint ONLY from the TRUSTED material (an
+        # OWNER-SIGNED WorkflowSpec + its Ed25519 signature + owner pubkey + the race/tamper descriptors + the
+        # 0.3-gated write) carried on the TRUSTED redrive spec (never the model), confirmed by
+        # workflow_abuse_oracle over VIGIL's OWN capture. The arm REFUSES without a valid owner signature
+        # (owner_signed_spec False ⇒ INCONCLUSIVE). _with_trusted_workflow_material is the SOLE writer of the
+        # material key: it UNCONDITIONALLY strips any producer-supplied material and sets only the feeder's
+        # bundle. No feeder (the default) ⇒ no material ⇒ LEAD (fail-closed, byte-identical to today).
+        workflow_ref = _live_race_bizlogic_redrive_fact(
+            prov, info, _with_trusted_workflow_material(redrive, workflow_material_provider, info))
+        if workflow_ref:
+            return workflow_ref
+
+        # T2 — PASSWORD-RESET RE-DRIVE (password_reset_reuse / _collision / _cross_user): mint ONLY from the
+        # TRUSTED material (the reset-flow driver callables + the operator private-datum baseline + the two-
+        # identity header sets) carried on the TRUSTED redrive spec (never the model), confirmed by the
+        # password_reset_invariant_oracle / the cross-user same-shape private-read differential over VIGIL's OWN
+        # capture. _with_trusted_reset_material is the SOLE writer of the material key (unconditional strip +
+        # feeder-only inject). No feeder (the default) ⇒ no material ⇒ LEAD (fail-closed).
+        reset_ref = _live_reset_invariant_redrive_fact(
+            prov, info, _with_trusted_reset_material(redrive, reset_material_provider, info))
+        if reset_ref:
+            return reset_ref
 
         # LEAD-ONLY fallback (AUDIT G4): a boolean/other-class candidate, or an error_based_sqli whose live
         # re-drive did not reproduce, lands here. The deterministic oracle still runs so the LEAD is honestly
@@ -2713,6 +2951,113 @@ def _live_access_control_redrive_fact(prov: Provisioned, info: dict, redrive: Op
             unauth_headers=tuple(material.get("unauth_headers") or ()),
             mass_assignment=material.get("mass_assignment"),
             mutating_send=material.get("mutating_send"))
+    except Exception:  # noqa: BLE001 — any re-drive/transport/cert error is an unconfirmed claim → LEAD
+        return None
+    try:
+        if rr.family_verdict(claimed) != "FACT":
+            return None
+    except Exception:  # noqa: BLE001 — cannot read the verdict ⇒ treat as unconfirmed → LEAD
+        return None
+    for f in getattr(rr, "facts", []) or []:
+        try:
+            if getattr(f, "is_fact", False) and normalize_bug_class(getattr(f, "bug_class", "")) == claimed:
+                ref = str(getattr(f, "finding_ref", "") or "")
+                if ref:
+                    return ref
+        except Exception:  # noqa: BLE001 — a malformed result entry is skipped, never crashes the seam
+            continue
+    return None    # family verdict said FACT but no matching signed cert surfaced → LEAD (fail-closed)
+
+
+def _live_race_bizlogic_redrive_fact(prov: Provisioned, info: dict, redrive: Optional[dict]) -> Optional[str]:
+    """DRIVE the WORKFLOW re-drive (``request_race`` / ``business_logic``) through the runner-owned
+    :mod:`live.race_bizlogic_redrive` arm and return a signed FACT's ``finding_ref`` ONLY when the
+    deterministic ``workflow_abuse_oracle`` confirms over VIGIL's OWN capture, behind an OWNER-SIGNED
+    WorkflowSpec the arm cryptographically verified.
+
+    Mirrors :func:`_live_oob_redrive_fact`: the TRUSTED material (``workflow_material``: the owner-signed
+    WorkflowSpec + its signature + owner pubkey + the race/tamper descriptors + the 0.3-gated ``mutating_send``)
+    is MANDATORY and arrives ONLY on the TRUSTED redrive spec (never the model's ``extracted_info``).
+    ``engine._redrive_spec`` emits class + url ONLY (the triple-lock), so on the LLM-claim path
+    ``workflow_material`` is ABSENT and this seam returns ``None`` (the claim stays a LEAD). The arm ALSO refuses
+    without a valid owner signature (owner_signed_spec False ⇒ every class INCONCLUSIVE), so a model-authored
+    spec can never mint. FATAL-2: every framework/arm import is function-local."""
+    if not isinstance(redrive, dict):
+        return None
+    url = str(redrive.get("url") or "").strip()
+    material = redrive.get("workflow_material")
+    if not url or not isinstance(material, dict) or not material:
+        return None
+    try:
+        from framework.v2.verify.verifier import normalize_bug_class  # noqa: PLC0415
+        from .race_bizlogic_redrive import (  # noqa: PLC0415 (framework at CALL — FATAL-2)
+            RACE_BIZLOGIC_FACT_CLASSES, race_bizlogic_redrive)
+    except Exception:  # noqa: BLE001 — module unavailable ⇒ cannot re-drive → LEAD (fail-closed)
+        return None
+    claimed = normalize_bug_class(str(redrive.get("bug_class") or info.get("bug_class") or ""))
+    if claimed not in RACE_BIZLOGIC_FACT_CLASSES:
+        return None    # not a workflow-redrive class → nothing for this seam to confirm → LEAD
+    try:
+        rr = race_bizlogic_redrive(
+            url, slug=prov.slug, engagement_slug=prov.slug, signers=prov.signers,
+            workflow_spec=material.get("workflow_spec"),
+            spec_signature_b64=str(material.get("spec_signature_b64") or ""),
+            owner_public_key_b64=str(material.get("owner_public_key_b64") or ""),
+            race_targets=tuple(material.get("race_targets") or ()),
+            tamper_probes=tuple(material.get("tamper_probes") or ()),
+            perform=material.get("perform"), read_state=material.get("read_state"),
+            reset=material.get("reset"), mutating_send=material.get("mutating_send"))
+    except Exception:  # noqa: BLE001 — any re-drive/transport/cert error is an unconfirmed claim → LEAD
+        return None
+    try:
+        if rr.family_verdict(claimed) != "FACT":
+            return None
+    except Exception:  # noqa: BLE001 — cannot read the verdict ⇒ treat as unconfirmed → LEAD
+        return None
+    for f in getattr(rr, "facts", []) or []:
+        try:
+            if getattr(f, "is_fact", False) and normalize_bug_class(getattr(f, "bug_class", "")) == claimed:
+                ref = str(getattr(f, "finding_ref", "") or "")
+                if ref:
+                    return ref
+        except Exception:  # noqa: BLE001 — a malformed result entry is skipped, never crashes the seam
+            continue
+    return None    # family verdict said FACT but no matching signed cert surfaced → LEAD (fail-closed)
+
+
+def _live_reset_invariant_redrive_fact(prov: Provisioned, info: dict, redrive: Optional[dict]) -> Optional[str]:
+    """DRIVE the PASSWORD-RESET re-drive (``password_reset_reuse`` / ``password_reset_collision`` /
+    ``password_reset_cross_user``) through the runner-owned :mod:`live.reset_invariant_redrive` arm and return a
+    signed FACT's ``finding_ref`` ONLY when the deterministic oracle confirms over VIGIL's OWN capture.
+
+    Mirrors :func:`_live_oob_redrive_fact`: the TRUSTED material (``reset_material``: the app-specific reset-flow
+    driver callables + the operator private-datum baseline ``cross_specs`` + the two-identity header sets) is
+    MANDATORY and arrives ONLY on the TRUSTED redrive spec (never the model). ``engine._redrive_spec`` emits
+    class + url ONLY (the triple-lock), so on the LLM-claim path ``reset_material`` is ABSENT and this seam
+    returns ``None`` (LEAD). FATAL-2: every framework/arm import is function-local."""
+    if not isinstance(redrive, dict):
+        return None
+    url = str(redrive.get("url") or "").strip()
+    material = redrive.get("reset_material")
+    if not url or not isinstance(material, dict) or not material:
+        return None
+    try:
+        from framework.v2.verify.verifier import normalize_bug_class  # noqa: PLC0415
+        from .reset_invariant_redrive import (  # noqa: PLC0415 (framework at CALL — FATAL-2)
+            RESET_INVARIANT_FACT_CLASSES, reset_invariant_redrive)
+    except Exception:  # noqa: BLE001 — module unavailable ⇒ cannot re-drive → LEAD (fail-closed)
+        return None
+    claimed = normalize_bug_class(str(redrive.get("bug_class") or info.get("bug_class") or ""))
+    if claimed not in RESET_INVARIANT_FACT_CLASSES:
+        return None    # not a reset-redrive class → nothing for this seam to confirm → LEAD
+    try:
+        rr = reset_invariant_redrive(
+            url, slug=prov.slug, engagement_slug=prov.slug, signers=prov.signers,
+            reuse_driver=material.get("reuse_driver"), collision_driver=material.get("collision_driver"),
+            cross_specs=tuple(material.get("cross_specs") or ()),
+            victim_headers=tuple(material.get("victim_headers") or ()),
+            attacker_headers=tuple(material.get("attacker_headers") or ()),
+            unauth_headers=tuple(material.get("unauth_headers") or ()))
     except Exception:  # noqa: BLE001 — any re-drive/transport/cert error is an unconfirmed claim → LEAD
         return None
     try:
