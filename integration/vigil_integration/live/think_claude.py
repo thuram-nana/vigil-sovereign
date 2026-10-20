@@ -962,35 +962,17 @@ def _think_via_replay(replay: Any, state: object, prompt_ctx: object) -> LLMDeci
 
 
 def _read_live_key() -> Optional[str]:
-    """Re-read the CURRENT persisted Anthropic key from ``~/.sigil/sigil.env`` (the 0600 KEY=VALUE store the
-    UI's ``settings.set_secret`` writes for the plaintext backend) at CALL time — the ONE thing that lets a key
-    re-sealed through the UI reach the RUNNING offense engine without a Stop->Start. Mirrors
-    ``sigil.config._load_env_file``'s parse (split on "\\n", ``partition("=")``, strip) and its
-    ``SIGIL_ANTHROPIC_API_KEY`` > ``ANTHROPIC_API_KEY`` precedence, but ONLY extracts the Anthropic key and
-    NEVER mutates ``os.environ``. FATAL-2-clean: a bare data read of a 0600 file — imports no sovereign code.
-    Never logs the value, never raises (a missing / unreadable / keyring-or-TPM-vault-sealed store -> None, so
-    those backends still fall back to the spawn env — the offense cannot unseal the sovereign vault)."""
-    import pathlib  # noqa: PLC0415 — function-local, offense-side
+    """Re-read the CURRENT persisted Anthropic key from ``~/.sigil/sigil.env`` at CALL time — the ONE thing
+    that lets a key re-sealed through the UI reach the RUNNING offense engine without a Stop->Start. Delegates
+    to the shared ``framework.v2.common.live_keys`` reader so the live-think, console-chat and kernel-backend
+    paths share ONE reader (no drift). UNGATED here; ``_resolve_key`` applies the VIGIL_LIVE_KEY_RELOAD gate.
+    Never raises (a reader-unavailable / missing store -> None, so the sealed backends fall back to the spawn
+    env — the offense cannot unseal the sovereign vault). FATAL-2: the framework import is function-local."""
     try:
-        home = os.environ.get("SIGIL_HOME") or str(pathlib.Path.home() / ".sigil")
-        f = pathlib.Path(home) / "sigil.env"
-        if not f.exists():
-            return None
-        raw = f.read_text(encoding="utf-8", errors="replace")
-    except OSError:
+        from framework.v2.common.live_keys import read_persisted_anthropic_key  # noqa: PLC0415
+    except Exception:  # noqa: BLE001 — reader unavailable ⇒ no fresh key → fall back to the env
         return None
-    found: dict = {}
-    for line in raw.split("\n"):
-        line = line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        k, _, v = line.partition("=")
-        k = k.strip()
-        if k in ("ANTHROPIC_API_KEY", "SIGIL_ANTHROPIC_API_KEY"):
-            v = v.strip()
-            if v:
-                found[k] = v
-    return found.get("SIGIL_ANTHROPIC_API_KEY") or found.get("ANTHROPIC_API_KEY")
+    return read_persisted_anthropic_key()
 
 
 def _resolve_key(api_key: Optional[str]) -> Optional[str]:
