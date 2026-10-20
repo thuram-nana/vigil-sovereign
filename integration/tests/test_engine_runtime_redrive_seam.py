@@ -25,6 +25,7 @@ oracles; this file proves the routing + live positive + the negative controls en
 from __future__ import annotations
 
 import http.server
+import json
 import re
 import sqlite3
 import subprocess
@@ -739,3 +740,148 @@ def test_negctl_csp_out_of_scope_mints_nothing(monkeypatch, tmp_path):
     ref = _live_csp_redrive_fact(_prov(), {},
                                  {"kind": "csp", "url": "http://10.99.99.99/", "bug_class": "csp_posture"})
     assert ref is None, "an out-of-scope host is refused by the gate (no channel) → never a FACT"
+
+
+# --- dom_xss / prototype_pollution: the browser-confirmed achieved-state FACTs via the governed seam -------
+# The arms (dom_xss_redrive / proto_pollution_redrive) are already red-penned on the Strix rail; this pins
+# that the governed-engage LLM-claim seam now ROUTES to them and mints under their fact_capable branches.
+# Stub browser replicated from test_strix_dom_redrive.py (patches cdp.cdp_available/CdpBrowser): no real
+# Chromium, deterministic. The arm's own per-probe canary (cxss..) is echoed by the vulnerable stub.
+_XSS_CANARY_RE = re.compile(r"cxss[0-9]{2}[0-9a-f]{8}")
+
+
+class _DomXssStubSession:
+    def __init__(self, *, vulnerable: bool) -> None:
+        self._vulnerable = vulnerable
+        self._url = ""
+
+    def add_binding(self, name: str) -> None:
+        return None
+
+    def navigate(self, url: str, *, settle: float = 0.4, timeout: float = 15.0) -> None:
+        self._url = url
+
+    def binding_calls(self, name: str) -> list:
+        if not self._vulnerable:
+            return []
+        m = _XSS_CANARY_RE.search(self._url)
+        return [m.group(0)] if m else []
+
+
+class _ProtoStubSession:
+    def __init__(self, mode: str) -> None:
+        self._mode = mode
+        self._calls: list = []
+
+    def add_binding(self, name: str) -> None:
+        return None
+
+    def navigate(self, url: str, *, settle: float = 0.4, timeout: float = 15.0) -> None:
+        return None
+
+    def drain_events(self, *, timeout: float = 1.0) -> list:
+        return []
+
+    def evaluate(self, expression: str, **_kw):
+        keys = re.findall(r'"(cpp_[0-9a-f]{12}|benign_[0-9a-f]{12})"', expression)
+        if len(keys) < 2:
+            return None
+        key, benign = keys[0], keys[1]
+        val = f"ppv_{key[len('cpp_'):]}"
+        blob = {
+            "pollute": {"polluted_key": key, "polluted_val": val, "benign_key": benign, "benign_key_undefined": True},
+            "ambient": {"polluted_key": key, "polluted_val": val, "benign_key": benign, "benign_key_undefined": False},
+        }[self._mode]
+        self._calls.append(json.dumps(blob))
+        return None
+
+    def binding_calls(self, name: str) -> list:
+        return list(self._calls) if name == "__crucible_pp" else []
+
+
+class _StubBrowser:
+    def __init__(self, *, session_factory, **_kw) -> None:
+        self._session_factory = session_factory
+
+    def start(self) -> "_StubBrowser":
+        return self
+
+    def session(self):
+        return self._session_factory()
+
+    def stop(self) -> None:
+        return None
+
+
+def _install_stub_browser(monkeypatch, session_factory) -> None:
+    from framework.v2.scanner import cdp
+    monkeypatch.setattr(cdp, "cdp_available", lambda: True)
+    monkeypatch.setattr(cdp, "CdpBrowser", lambda **kw: _StubBrowser(session_factory=session_factory, **kw))
+
+
+def _dom_ref(monkeypatch, tmp_path, bug_class, url="http://127.0.0.1:9/echo?q=seed"):
+    _grant_active_recon(monkeypatch)
+    _charter(tmp_path, "127.0.0.1")
+    from vigil_integration.live.wiring import _live_dom_redrive_fact
+    return _live_dom_redrive_fact(_prov(), {}, {"kind": "dom", "url": url, "param": "q", "bug_class": bug_class})
+
+
+def test_redrive_spec_emits_a_dom_spec_for_dom_classes_and_aliases():
+    from vigil_integration.live.engine import VigilEngine
+    for claimed, norm in [("dom_xss", "dom_xss"), ("dom_based_xss", "dom_xss"),
+                          ("prototype_pollution", "prototype_pollution")]:
+        spec = VigilEngine._redrive_spec(_decision(claimed, url="http://127.0.0.1:19010/echo?q=1"), None)
+        assert spec is not None and spec["kind"] == "dom" and spec["bug_class"] == norm, \
+            f"{claimed} must route to the dom spec; got {spec}"
+
+
+def test_live_dom_xss_executing_mints_a_fact(monkeypatch, tmp_path):
+    _install_stub_browser(monkeypatch, lambda: _DomXssStubSession(vulnerable=True))
+    assert _dom_ref(monkeypatch, tmp_path, "dom_xss"), \
+        "an executing DOM-XSS sink (a __crucible_xss binding call carrying VIGIL's canary) must mint a dom_xss FACT"
+
+
+def test_negctl_dom_xss_reflected_but_inert_mints_nothing(monkeypatch, tmp_path):
+    _install_stub_browser(monkeypatch, lambda: _DomXssStubSession(vulnerable=False))
+    assert _dom_ref(monkeypatch, tmp_path, "dom_xss") is None, \
+        "a reflected-but-inert payload (no execution) must not mint a dom_xss FACT"
+
+
+def test_live_prototype_pollution_mints_a_fact(monkeypatch, tmp_path):
+    _install_stub_browser(monkeypatch, lambda: _ProtoStubSession("pollute"))
+    assert _dom_ref(monkeypatch, tmp_path, "prototype_pollution"), \
+        "a gadget that pollutes Object.prototype (benign control key undefined) must mint a prototype_pollution FACT"
+
+
+def test_negctl_prototype_pollution_ambient_mints_nothing(monkeypatch, tmp_path):
+    # FP: the benign control key is ALSO polluted → cannot attribute to THIS probe → no FACT.
+    _install_stub_browser(monkeypatch, lambda: _ProtoStubSession("ambient"))
+    assert _dom_ref(monkeypatch, tmp_path, "prototype_pollution") is None, \
+        "ambient pollution (benign key also set) must not mint a prototype_pollution FACT"
+
+
+def test_negctl_dom_browserless_mints_nothing(monkeypatch, tmp_path):
+    # Browserless (cdp_available False) → the arm marks inconclusive (a LEAD), never a CLEAN/FACT.
+    from framework.v2.scanner import cdp
+    monkeypatch.setattr(cdp, "cdp_available", lambda: False)
+    assert _dom_ref(monkeypatch, tmp_path, "dom_xss") is None, "a browserless env must not mint a dom_xss FACT"
+
+
+def test_negctl_dom_wrong_class_returns_none(monkeypatch, tmp_path):
+    _install_stub_browser(monkeypatch, lambda: _DomXssStubSession(vulnerable=True))
+    _grant_active_recon(monkeypatch)
+    _charter(tmp_path, "127.0.0.1")
+    from vigil_integration.live.wiring import _live_dom_redrive_fact
+    ref = _live_dom_redrive_fact(_prov(), {},
+                                 {"kind": "dom", "url": "http://127.0.0.1:9/x", "param": "q", "bug_class": "open_redirect"})
+    assert ref is None, "a non-dom class must not be confirmed by the dom seam"
+
+
+def test_negctl_dom_out_of_scope_mints_nothing(monkeypatch, tmp_path):
+    _install_stub_browser(monkeypatch, lambda: _DomXssStubSession(vulnerable=True))
+    _grant_active_recon(monkeypatch)
+    _charter(tmp_path, "127.0.0.1")
+    from vigil_integration.live.wiring import _live_dom_redrive_fact
+    ref = _live_dom_redrive_fact(_prov(), {},
+                                 {"kind": "dom", "url": "http://10.99.99.99/x", "param": "q", "bug_class": "dom_xss"})
+    assert ref is None, "an out-of-scope host is refused by the browser preamble gate → never a FACT"

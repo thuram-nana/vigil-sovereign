@@ -1932,6 +1932,13 @@ def _build_oracle(
         if runtime_ref:
             return runtime_ref
 
+        # T2 — DOM RE-DRIVE (dom_xss / prototype_pollution): route through the runner-owned browser arms
+        # (live.dom_redrive) in VIGIL's OWN egress-gated headless-Chromium/CDP harness. A browserless env /
+        # gate refusal / oracle non-fire stays a LEAD below (fail-closed; never a false CLEAN/negative).
+        dom_ref = _live_dom_redrive_fact(prov, info, redrive)
+        if dom_ref:
+            return dom_ref
+
         # T2 — INJECTION RE-DRIVE (nosqli / ldap_injection / xpath_injection): slice B2 DRIVES the runner-owned
         # ``live.runtime_redrive.injection_redrive`` engine (a class-specific error probe + a benign control
         # twin) for a VIGIL-owned capture. These branches are LEAD-only today (the error_signature oracle proves
@@ -2264,6 +2271,50 @@ def _live_runtime_redrive_fact(prov: Provisioned, info: dict, redrive: Optional[
         rr = runtime_redrive(url, slug=prov.slug, engagement_slug=prov.slug, signers=prov.signers,
                              claimed_class=claimed)
     except Exception:  # noqa: BLE001 — any re-drive/transport/cert error is an unconfirmed claim → LEAD
+        return None
+    try:
+        if rr.family_verdict(claimed) != "FACT":
+            return None
+    except Exception:  # noqa: BLE001 — cannot read the verdict ⇒ treat as unconfirmed → LEAD
+        return None
+    for f in getattr(rr, "facts", []) or []:
+        try:
+            if getattr(f, "is_fact", False) and normalize_bug_class(getattr(f, "bug_class", "")) == claimed:
+                ref = str(getattr(f, "finding_ref", "") or "")
+                if ref:
+                    return ref
+        except Exception:  # noqa: BLE001 — a malformed result entry is skipped, never crashes the seam
+            continue
+    return None    # family verdict said FACT but no matching signed cert surfaced → LEAD (fail-closed)
+
+
+def _live_dom_redrive_fact(prov: Provisioned, info: dict, redrive: Optional[dict]) -> Optional[str]:
+    """T2 — RE-DRIVE a DOM ACHIEVED-STATE class (``dom_xss`` / ``prototype_pollution``) through the
+    runner-owned :mod:`live.dom_redrive` browser arms and return a signed FACT's ``finding_ref`` ONLY when the
+    matching deterministic oracle (dom_execution / prototype_pollution) confirms the CLAIMED class over VIGIL's
+    OWN egress-gated headless-DOM capture. The runner crafts its own per-probe canary/gadget (never the LLM's
+    payload — ``confirm_dom_xss`` / ``confirm_proto_pollution`` generate them internally); the model proposes
+    only url + param ("where to look"). A browserless env (``cdp_available()`` False) / a gate refusal / an
+    oracle non-fire all yield a non-FACT → None → the claim stays a LEAD (fail-closed; never a false CLEAN).
+    FATAL-2: every framework/dom_redrive import is function-local."""
+    if not isinstance(redrive, dict):
+        return None
+    url = str(redrive.get("url") or "").strip()
+    if not url:
+        return None
+    try:
+        from framework.v2.verify.verifier import normalize_bug_class  # noqa: PLC0415
+        from .dom_redrive import DOM_REDRIVE_CLASSES, dom_redrive  # noqa: PLC0415 (framework at CALL)
+    except Exception:  # noqa: BLE001 — module unavailable ⇒ cannot re-drive → LEAD (fail-closed)
+        return None
+    claimed = normalize_bug_class(str(redrive.get("bug_class") or info.get("bug_class") or ""))
+    if claimed not in DOM_REDRIVE_CLASSES:
+        return None    # not a dom-redrive class → nothing for this seam to confirm → LEAD
+    param = str(redrive.get("param") or info.get("insertion_point") or "").strip() or None
+    try:
+        rr = dom_redrive(url, slug=prov.slug, engagement_slug=prov.slug, signers=prov.signers,
+                         claimed_class=claimed, param=param)
+    except Exception:  # noqa: BLE001 — any re-drive/cert error is an unconfirmed claim → LEAD
         return None
     try:
         if rr.family_verdict(claimed) != "FACT":

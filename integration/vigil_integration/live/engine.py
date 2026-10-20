@@ -910,6 +910,20 @@ class VigilEngine:
             full = target if "://" in target else "http://" + target
             return {"kind": "oob", "url": full, "bug_class": bug_class}
 
+        # DOM ACHIEVED-STATE classes (dom_xss / prototype_pollution): the runner-owned browser arms
+        # (live.dom_redrive) craft VIGIL's OWN canary/gadget and judge VIGIL's OWN egress-gated headless-DOM
+        # capture — the model proposes only url + param. ADDITIVE: a separate dispatch set + the "dom" spec
+        # kind, so the runtime/web/sqli/injection/credential/oob arms above are untouched. The seam re-normalizes
+        # + re-gates (reachability gate before any browser launch), so this is proposal-triage only.
+        try:
+            from .dom_redrive import DOM_REDRIVE_CLASSES  # noqa: PLC0415 — import-clean tuple (FATAL-2)
+        except Exception:  # noqa: BLE001 — module unavailable ⇒ no dom re-drive (other paths work)
+            DOM_REDRIVE_CLASSES = ()
+        if bug_class in DOM_REDRIVE_CLASSES:
+            full = target if "://" in target else "http://" + target
+            param = str(info.get("insertion_point") or octx.get("payload_param") or "").strip() or None
+            return {"kind": "dom", "url": full, "param": param, "bug_class": bug_class}
+
         # error_signature SQLi FAMILY (landmine 1): MERIDIAN labels its error-based plant `sqli`, and the
         # model may say `sqli`/`sql_injection`/`error_based_sqli`. Accept them all — the error_signature
         # oracle only fires over a real datastore-error signature, so a boolean/time-based `sqli` that

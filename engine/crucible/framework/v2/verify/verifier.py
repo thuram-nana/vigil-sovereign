@@ -727,6 +727,12 @@ _ALIASES: dict[str, str] = {
     "edge_side_includes": "ssi",   # ESI shares the include-directive evaluation model
     "cross_site_scripting": "xss",
     "reflected_xss": "xss",
+    # DOM-based XSS spellings fold onto the canonical dom_xss (DOM_EXECUTION, browser-confirmed) — NOT xss
+    # (REFLECTION_CONTEXT), which cannot prove execution of a DOM-sink payload. Mirrors proof/run.py aliases.
+    "dom_based_xss": "dom_xss",
+    "dom_based_cross_site_scripting": "dom_xss",
+    "dombased_xss": "dom_xss",
+    "dom_xss_injection": "dom_xss",
     # NOTE: `stored_xss` is NOT aliased to `xss` — it is a first-class BUG_CLASS_ORACLES entry routed to the
     # DOM_EXECUTION oracle (browser-confirmed execution of a persisted payload). Aliasing it to `xss` would
     # route it to REFLECTION_CONTEXT, which cannot prove execution of a stored payload and would silently
