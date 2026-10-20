@@ -182,6 +182,32 @@
       ]
     },
     {
+      "id": "graphql_batching.array_batch_executed",
+      "check": "GraphQLBatchingCheck",
+      "evidence": "VIGIL's own single POST of a JSON ARRAY of M tiny {__typename} operations returns a JSON array of >=2 data-bearing results (batch_result_count reduction > 1)",
+      "fact_capable": true,
+      "clean_capable": false,
+      "preconditions": [
+        "channel_established",
+        "body_semantically_available"
+      ],
+      "limitation": "Body-derived: fires ONLY on a returned JSON array of >=2 elements each carrying a non-null data member, from VIGIL's OWN array-batch POST. Proves array request-batching is ENABLED (one HTTP request ran multiple operations, defeating per-request rate limits); does NOT prove an unbounded batch size. A non-batching origin returns a single object/error (not an array) and fails the predicate; NOT CLEAN-capable (an unreadable body is indistinguishable from batching-off).",
+      "target_fact_capable": true,
+      "target_clean_capable": true,
+      "evidence_surface": "response_body",
+      "implementation_refs": [
+        "engine/crucible/framework/v2/scanner/graphql.py:GraphQLBatchingCheck",
+        "integration/vigil_integration/live/web_redrive.py:web_redrive"
+      ],
+      "blocking_work": "CLEAN-capability needs the same decode-completeness guarantee as graphql_introspection.schema_returned. The proposition (a returned M>=2 result array) is DEFINITE, so no benign-twin baseline is needed for the FACT.",
+      "oracle_version": "achieved_state",
+      "control_requirements": [
+        "warden_active_recon_gate",
+        "vigil_owned_gated_probe",
+        "response_body_decode"
+      ]
+    },
+    {
       "id": "oidc_redirect_uri.location_header",
       "check": "OidcRedirectUriCheck",
       "evidence": "the authorization endpoint redirects (3xx Location) to the attacker-supplied redirect_uri host",

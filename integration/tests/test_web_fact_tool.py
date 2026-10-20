@@ -459,9 +459,9 @@ def test_a_scanner_label_can_never_reach_the_oidc_fact_class():
     assert web_fact_class_for("oidc_redirect_uri") is None
     assert web_fact_class_for("oidc-redirect") is None
     assert "oidc_redirect_uri" not in SCANNER_CLAIM_WEB_FACT_CLASSES
-    # the four classes a scanner label MAY select are exactly the header/body ACHIEVED_STATE web classes
+    # the classes a scanner label MAY select are exactly the header/body ACHIEVED_STATE web classes
     assert set(SCANNER_CLAIM_WEB_FACT_CLASSES) == {
-        "open_redirect", "cors", "host_header_injection", "graphql_introspection"}
+        "open_redirect", "cors", "host_header_injection", "graphql_introspection", "graphql_batching"}
 
 
 # ===================================================================================================

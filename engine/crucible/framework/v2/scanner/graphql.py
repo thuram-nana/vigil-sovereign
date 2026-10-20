@@ -126,6 +126,22 @@ def _schema_type_count(body: str) -> int:
                if isinstance(t, dict) and isinstance(t.get("name"), str) and t.get("name").strip())
 
 
+def _batch_result_count(body: str) -> int:
+    """VIGIL reduction: the number of top-level JSON-ARRAY elements each a dict with a non-None ``data``
+    member, in the response to VIGIL's OWN M-operation array-batch POST; 0 for a single object, an
+    errors-only body, a non-array, or non-JSON. A VIGIL-COMPUTED reduction over the RAW bytes (declared a
+    provenance-ref), never a boolean the check pre-decided — so a strict ``gt[count,1]`` is a sound PD3 that
+    fires ONLY when the server really returned >=2 data-bearing results to one request (array batching
+    ENABLED). A batching-off origin returns a single object/error (count 0) and cannot fire."""
+    try:
+        doc = json.loads(body)
+    except (ValueError, TypeError):
+        return 0
+    if not isinstance(doc, list):
+        return 0
+    return sum(1 for e in doc if isinstance(e, dict) and e.get("data") is not None)
+
+
 # A benign, well-formed control query for the field-suggestion differential: the spec meta-field
 # ``__typename`` is valid on every GraphQL schema, so a correct server answers it WITHOUT a "did you mean"
 # hint. Fetched ONLY when the typo probe actually drew a suggestion, so a non-suggesting origin (every
@@ -343,14 +359,17 @@ class GraphQLDepthCheck:
         executed = isinstance(data, dict) and "__type" in data
         depth_rejected = _has_token(errors, _DEPTH_GUARD_TOKENS)
         if executed:
-            ctx = FindingContext.from_predicate(
-                {"executed": True, "depth_rejected": depth_rejected, "probe_depth": self.depth},
-                {"all": [
-                    {"eq": [{"var": "executed"}, True]},
-                    {"not": {"eq": [{"var": "depth_rejected"}, True]}},
-                ]},
-                bug_class=self.bug_class)
-            return GraphQLDosResult(context=ctx, reason=f"depth-{self.depth} query executed")
+            # LEAD, never a FACT (mirrors GraphQLCostCheck). A bounded depth-``N`` probe being accepted
+            # proves only that the depth limit (if any) is >= N, NOT that none exists — a benign origin
+            # with an ADEQUATE but higher limit (graphql-depth-limit 20 answering a depth-12 probe, the
+            # common secure-enough config) would mint a FALSE 'depth limit absent' FACT. An honest LEAD
+            # beats that false FACT; proving absence needs an unbounded probe we will not send (no flood).
+            return GraphQLDosResult(
+                lead=f"a depth-{self.depth} query was accepted without a depth-guard rejection — no "
+                     f"query-depth limit observed at depth {self.depth} (this proves only the limit, if "
+                     "any, is >= this probe, NOT that none exists); assess a deeper schema-aware depth "
+                     "attack manually",
+                reason=f"depth-{self.depth} query executed")
         if depth_rejected:
             return GraphQLDosResult(reason="depth guard rejected the probe (protected)")
         # GraphQL-shaped but the meta-schema path did not execute (introspection
@@ -399,17 +418,17 @@ class GraphQLAliasCheck:
                 if data.get(f"a{i}") is not None
             )
         alias_rejected = _has_token(errors, _ALIAS_GUARD_TOKENS)
-        ctx = FindingContext.from_predicate(
-            {"sent_aliases": self.aliases, "returned_aliases": returned,
-             "alias_rejected": alias_rejected},
-            {"all": [
-                {"gt": [{"var": "sent_aliases"}, 1]},
-                {"eq": [{"var": "returned_aliases"}, {"var": "sent_aliases"}]},
-                {"not": {"eq": [{"var": "alias_rejected"}, True]}},
-            ]},
-            bug_class=self.bug_class)
         if returned == self.aliases and not alias_rejected:
-            return GraphQLDosResult(context=ctx, reason=f"{returned} aliases resolved")
+            # LEAD, never a FACT (mirrors GraphQLCostCheck / the depth probe). A bounded ``N``-alias probe
+            # resolving proves only that the alias limit (if any) is >= N, NOT that none exists — a benign
+            # origin with an adequate higher alias limit (the common secure config) resolves VIGIL's 40
+            # aliases and would mint a FALSE 'alias limit absent' FACT. An honest LEAD beats that false FACT.
+            return GraphQLDosResult(
+                lead=f"{returned} aliases resolved in one query without an alias-count rejection — no "
+                     f"alias limit observed at {self.aliases} aliases (this proves only the limit, if any, "
+                     "is >= this probe, NOT that none exists); assess a larger alias-amplification attack "
+                     "manually",
+                reason=f"{returned} aliases resolved")
         if alias_rejected:
             return GraphQLDosResult(reason="alias guard rejected the probe (protected)")
         return GraphQLDosResult(reason=f"only {returned}/{self.aliases} aliases resolved")
@@ -442,27 +461,28 @@ class GraphQLBatchingCheck:
         ])
 
     def assess(self, resp: object) -> GraphQLDosResult:
-        doc = _parse_body(resp)
-        if not isinstance(doc, list):
-            # Single object / error / non-JSON: batching not honoured (or not GraphQL).
-            if _is_graphql_shaped(doc):
-                return GraphQLDosResult(reason="batching not honoured (single response)")
-            return GraphQLDosResult(reason="not a GraphQL response")
-        if not _is_graphql_shaped(doc):
-            return GraphQLDosResult(reason="array response is not GraphQL-shaped")
-        returned = len(doc)
-        all_data = all(isinstance(e, dict) and e.get("data") is not None for e in doc)
+        """F7 — capture-bound, mirroring the introspection fix. The certificate retains the RAW response
+        body and the ORACLE decides over a VIGIL reduction (``_batch_result_count``), never over a boolean
+        this check pre-computed. The old form handed the predicate ``all_have_data=True`` — a rubber-stamp
+        the oracle could only re-assert, re-verifying offline as ``eq[True,True]`` with no target bytes to
+        fail on. The sound discriminator is the reduction, strict ``gt[count,1]`` (PD3): batching is proven
+        ONLY when >=2 operations ran in one request. A ``"data"`` corroborator over the retained raw bytes
+        narrows but does not drive the fire. A batching-off origin returns a single object/error
+        (count 0) and the strict ``gt`` cannot fire."""
+        body = _body_of(resp)
+        count = _batch_result_count(body)
         ctx = FindingContext.from_predicate(
-            {"sent_batch": self.batch, "returned_len": returned, "all_have_data": all_data},
+            {"response_body": body, "batch_result_count": count, "sent_batch": self.batch},
             {"all": [
-                {"gt": [{"var": "sent_batch"}, 1]},
-                {"eq": [{"var": "returned_len"}, {"var": "sent_batch"}]},
-                {"eq": [{"var": "all_have_data"}, True]},
+                # PD3: VIGIL reduction, strict, floor 1 >= domain-min 0 — fires at count>=2.
+                {"gt": [{"var": "batch_result_count"}, 1]},
+                {"contains": [{"var": "response_body"}, '"data"']},
             ]},
-            bug_class=self.bug_class)
-        if returned == self.batch and all_data:
-            return GraphQLDosResult(context=ctx, reason=f"{returned}-operation batch executed")
-        return GraphQLDosResult(reason=f"array of {returned}, all_data={all_data}")
+            bug_class=self.bug_class,
+            provenance_refs={"batch_result_count": "reduction"})
+        if count >= 2:
+            return GraphQLDosResult(context=ctx, reason=f"{count}-operation batch executed")
+        return GraphQLDosResult(reason=f"batching not honoured (array data results={count})")
 
     def probe(self, template: RequestTemplate, send: Send) -> FindingContext | None:
         return self.probe_dos(template, send).context

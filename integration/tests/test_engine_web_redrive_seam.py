@@ -18,6 +18,7 @@ CLEAN"); this file proves the ROUTING, plus one live positive + the negative con
 from __future__ import annotations
 
 import http.server
+import json
 import threading
 import types
 from pathlib import Path
@@ -44,7 +45,7 @@ def _decision(bug_class: str, *, url: str = "http://127.0.0.1:19010/auth/continu
 
 
 @pytest.mark.parametrize("claimed", ["open_redirect", "cors", "host_header_injection",
-                                     "graphql_introspection"])
+                                     "graphql_introspection", "graphql_batching"])
 def test_redrive_spec_emits_a_web_spec_for_web_fact_classes(claimed):
     from vigil_integration.live.engine import VigilEngine
     spec = VigilEngine._redrive_spec(_decision(claimed), None)
@@ -165,6 +166,31 @@ class _WebApp(http.server.BaseHTTPRequestHandler):
             self.send_response(404)
             self.end_headers()
 
+    def do_POST(self):  # noqa: N802 — GraphQL batching is a JSON-array POST
+        from urllib.parse import urlsplit
+        parts = urlsplit(self.path)
+        length = int(self.headers.get("Content-Length", "0") or "0")
+        raw = self.rfile.read(length) if length else b""
+        try:
+            doc = json.loads(raw.decode("utf-8", "replace"))
+        except Exception:
+            doc = None
+        if parts.path == "/graphql-batch" and isinstance(doc, list):   # VULNERABLE: batching ENABLED
+            body = json.dumps([{"data": {"__typename": "Query"}} for _ in doc]).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.end_headers()
+            self.wfile.write(body)
+        elif parts.path == "/graphql-batch-off" and isinstance(doc, list):  # SAFE: batching DISABLED
+            body = b'{"errors":[{"message":"Batching is not enabled on this endpoint"}]}'
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.end_headers()
+            self.wfile.write(body)
+        else:
+            self.send_response(404)
+            self.end_headers()
+
     def log_message(self, *a):  # silence
         return
 
@@ -217,6 +243,34 @@ def test_live_seam_negative_control_benign_endpoint_mints_nothing(monkeypatch, t
     finally:
         srv.shutdown()
     assert ref is None, "a benign reflecting endpoint must NOT mint an open_redirect FACT"
+
+
+def test_live_seam_mints_a_fact_for_a_claimed_graphql_batching(monkeypatch, tmp_path):
+    _grant_active_recon(monkeypatch)
+    _charter(tmp_path, "127.0.0.1")
+    from vigil_integration.live.wiring import _live_web_redrive_fact
+    srv = _serve(); port = srv.server_address[1]
+    try:
+        ref = _live_web_redrive_fact(
+            _prov(), {}, _redrive(f"http://127.0.0.1:{port}/graphql-batch", "graphql_batching"))
+    finally:
+        srv.shutdown()
+    assert ref, "a claimed graphql_batching over a batching-ENABLED endpoint must mint a signed FACT ref"
+
+
+def test_live_seam_negative_control_graphql_batching_disabled_mints_nothing(monkeypatch, tmp_path):
+    """DECISIVE negative control: a batching-DISABLED endpoint answering the IDENTICAL array POST with a
+    single object (not an array) → batch_result_count 0 → the seam returns None (stays a LEAD)."""
+    _grant_active_recon(monkeypatch)
+    _charter(tmp_path, "127.0.0.1")
+    from vigil_integration.live.wiring import _live_web_redrive_fact
+    srv = _serve(); port = srv.server_address[1]
+    try:
+        ref = _live_web_redrive_fact(
+            _prov(), {}, _redrive(f"http://127.0.0.1:{port}/graphql-batch-off", "graphql_batching"))
+    finally:
+        srv.shutdown()
+    assert ref is None, "a batching-disabled endpoint must NOT mint a graphql_batching FACT"
 
 
 def test_live_seam_wrong_class_claim_mints_nothing(monkeypatch, tmp_path):

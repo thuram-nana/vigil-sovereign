@@ -144,7 +144,37 @@ class _WebApp(http.server.BaseHTTPRequestHandler):
         self._count()
         parts = urlsplit(self.path)
         length = int(self.headers.get("Content-Length", "0") or "0")
-        _ = self.rfile.read(length) if length else b""     # consume VIGIL's introspection query body
+        raw = self.rfile.read(length) if length else b""   # VIGIL's introspection / batch-array query body
+        try:
+            _doc = json.loads(raw.decode("utf-8", "replace"))
+        except Exception:
+            _doc = None
+        if parts.path == "/graphql-batch":                 # VULNERABLE: array request-BATCHING enabled
+            # Answer VIGIL's OWN M-operation JSON-ARRAY POST with a JSON ARRAY of M data-bearing results.
+            # A single (non-array) POST (e.g. the introspection probe) gets a non-schema 404 → nothing mints.
+            if isinstance(_doc, list):
+                arr = [{"data": {"__typename": "Query"}} for _ in _doc]
+                body = json.dumps(arr).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.end_headers()
+                self.wfile.write(body)
+            else:
+                self.send_response(404)
+                self.end_headers()
+            return
+        if parts.path == "/graphql-batch-off":             # SAFE: batching DISABLED (negative control)
+            # Answer the IDENTICAL 3-op array POST with a SINGLE OBJECT (not an array) → batch_result_count 0.
+            if isinstance(_doc, list):
+                body = b'{"errors":[{"message":"Batching is not enabled on this endpoint"}]}'
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.end_headers()
+                self.wfile.write(body)
+            else:
+                self.send_response(404)
+                self.end_headers()
+            return
         if parts.path == "/graphql":                       # VULNERABLE: introspection ENABLED → returns a schema
             body = (b'{"data":{"__schema":{"types":['
                     b'{"name":"Query"},{"name":"User"},{"name":"Mutation"}]}}}')
@@ -1027,3 +1057,55 @@ def test_graphql_introspection_undecodable_body_is_inconclusive_not_a_fact(monke
         "an undecodable body must never mint a graphql FACT"
     assert res.family_verdict("graphql_introspection") != "CLEAN", \
         "an undecodable body must never read CLEAN (INCONCLUSIVE only)"
+
+
+# ===================================================================================================
+# graphql_batching: VIGIL POSTs a JSON ARRAY of M tiny {__typename} ops and mints a FACT ONLY when the
+# server returns a JSON array of >=2 data-bearing results (batch_result_count reduction > 1). A
+# batching-DISABLED origin answers the IDENTICAL array POST with a single object → count 0 → no FACT.
+# Class-gated: the batching probe runs ONLY when the CLAIMED class is exactly "graphql_batching".
+# ===================================================================================================
+def test_live_graphql_batching_mints_a_signed_fact_that_reverifies_offline(monkeypatch, tmp_path):
+    _grant_active_recon(monkeypatch)
+    _charter(tmp_path, "127.0.0.1")
+    from framework.v2.evidence.certify import verify_certificate
+    from vigil_integration.live.web_redrive import web_redrive
+    signers, tr = _signers_and_trust()
+    srv = _serve()
+    port = srv.server_address[1]
+    try:
+        res = web_redrive(f"http://127.0.0.1:{port}/graphql-batch",
+                          slug="alpha", engagement_slug="alpha", signers=signers,
+                          claimed_class="graphql_batching")
+    finally:
+        srv.shutdown()
+    gql = [x for x in res.facts if "graphql_batching" in x.finding_ref]
+    assert gql, f"expected a graphql_batching FACT; leads={res.leads} notes={res.notes}"
+    f = gql[0]
+    ctx = res.contexts[f.finding_ref]
+    # OFFLINE re-verify from the retained JSON-safe capture — no network, no VIGIL runner.
+    assert verify_certificate(f.signed, oracle_context=ctx, trust_root=tr).ok is True
+    assert res.family_verdict("graphql_batching") == "FACT"
+
+
+def test_graphql_batching_disabled_endpoint_mints_no_fact(monkeypatch, tmp_path):
+    """DECISIVE NEGATIVE CONTROL (same-shape): a batching-DISABLED endpoint answers VIGIL's IDENTICAL
+    3-operation JSON-ARRAY POST with a SINGLE object ({"errors":[{"message":"Batching is not enabled..."}]}),
+    so batch_result_count == 0 → the strict gt[count,1] cannot fire → no graphql_batching FACT. Paired with
+    the positive proof above, this shows 'no fact' is a real difference, not a check that never mints."""
+    _grant_active_recon(monkeypatch)
+    _charter(tmp_path, "127.0.0.1")
+    from vigil_integration.live.web_redrive import web_redrive
+    signers, _ = _signers_and_trust()
+    srv = _serve()
+    port = srv.server_address[1]
+    try:
+        res = web_redrive(f"http://127.0.0.1:{port}/graphql-batch-off",
+                          slug="alpha", engagement_slug="alpha", signers=signers,
+                          claimed_class="graphql_batching")
+    finally:
+        srv.shutdown()
+    assert not [x for x in res.facts if "graphql_batching" in x.finding_ref], (
+        f"a batching-disabled endpoint minted a graphql_batching FACT: "
+        f"{[x.finding_ref for x in res.facts]}")
+    assert res.family_verdict("graphql_batching") != "FACT"
