@@ -1202,6 +1202,35 @@
       ]
     },
     {
+      "id": "sensitive_exposure.secret_signature",
+      "check": "runtime_redrive",
+      "evidence": "a cloud/service CREDENTIAL signature (aws_secret_access_key) is present at a fixed credential path (/.aws/credentials), ABSENT from the BODY of a random CONTROL path, and corroborated by strings a genuine credentials artifact also carries (aws_access_key_id, [default]). CWE-359/CWE-538, the sensitive-data dual of exposure.secret_signature (CWE-200). LEAD-ONLY: a bare secret-signature at a fixed path is a placeholder/EXAMPLE-fakeable artifact (a committed .aws/credentials TEMPLATE with AWS's documented example keys carries the signature + both corroborators at the probed path), so it is WEAKER than the framework's own credential bar and is NOT accepted as a FACT.",
+      "fact_capable": false,
+      "clean_capable": false,
+      "preconditions": [
+        "channel_established",
+        "body_semantically_available"
+      ],
+      "limitation": "LEAD-ONLY (fact_capable: false), body-derived, positive-only, CONTROL-DIFFERENTIAL. The runtime_redrive arm DRIVES the /.aws/credentials probe (a VIGIL-owned gated capture with a random-control-path body differential) but can NEVER mint a signed FACT: fact_capable:false is enforced at live/verdict.py:admit (the sole reader of this registry), so a fired oracle is demoted to a LEAD. WHY LEAD-ONLY: a bare 'aws_secret_access_key' signature + corroborators at the fixed path is satisfied by a benign committed .aws/credentials TEMPLATE serving AWS's documented example keys ('aws_access_key_id = AKIAIOSFODNN7EXAMPLE / aws_secret_access_key = wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY'), which leaks NO real credential — the file announces the FORMAT, it does not prove a live secret. The probe is declared value_shaped=True, but the current _secret_assignment parses only the dotenv 'KEY=value' form, NOT the INI 'key = value' (space-separated) form an .aws/credentials file uses, so the value-shape REFUSES every value here and the arm mints nothing on this path regardless. A non-firing cannot distinguish 'no credential served' from 'served under a path/signature not probed' or an undecodable body. Bounded to the fixed credential-path + signature set. CWE-359 PII (SSN/email/PAN) is a DIFFERENT, unbuilt detector — there is no sound PII oracle and none is implied here.",
+      "target_fact_capable": true,
+      "target_clean_capable": true,
+      "evidence_surface": "response_body",
+      "implementation_refs": [
+        "integration/vigil_integration/live/runtime_redrive.py:runtime_redrive",
+        "integration/vigil_integration/live/runtime_redrive.py:_SENSITIVE_EXPOSURE_PROBES"
+      ],
+      "blocking_work": "A sound sensitive_exposure FACT needs the INI 'key = value' value-shape that exposure.secret_signature already uses for /.env: a surgical separator-skip in _secret_assignment (accept the ' = ' INI separator) so the right-hand side is extracted and the value-shape predicate (non-empty, >=6 chars, free of template/placeholder/EXAMPLE markers — 'example' is already in _SECRET_VALUE_FORBIDDEN, so AWS's documented example key is refused) re-executes OFFLINE. Only once the extractor parses the INI form may this branch be flipped fact_capable:true / oracle_version:achieved_state. It then inherits exposure.secret_signature's value-shape recall residuals, plus the residual that a page reproducing a full .aws/credentials artifact VERBATIM at the exact path with a real-entropy value satisfies the conjunction. Separately, CWE-359 PII detection (SSN/email/PAN) is a NEW oracle, not this branch.",
+      "oracle_version": "",
+      "control_requirements": [
+        "warden_active_recon_gate",
+        "vigil_owned_gated_probe",
+        "vigil_owned_live_redrive",
+        "response_body_decode",
+        "random_control_path_body_differential",
+        "MISSING:ini_key_value_value_shape_in_secret_assignment"
+      ]
+    },
+    {
       "id": "oob_callback.collector_receipt",
       "check": "OOBCheck",
       "evidence": "A blind class (SSRF / OOB-SQLi / blind XXE / deserialization / OS-command / RCE) is proven by an INBOUND out-of-band interaction carrying the finding's per-finding secret token, captured by VIGIL's OWN collaborator (loopback OOBReceiver or the operator-hosted RelayServer). At the VF-2b tier an INDEPENDENT collector signs each hit's receipt over target-observed facts only (token/client_ip/received_at/method/path); the oob_callback oracle re-checks that receipt against a collector public key the verifier PINS OUT-OF-BAND (charter/CLI, never the producer-controlled context), so a fully-dishonest producer that does not hold the collector key cannot forge a firing.",

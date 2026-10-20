@@ -54,6 +54,7 @@ def _decision(bug_class: str, *, url: str) -> types.SimpleNamespace:
     ("path_traversal", "path_traversal"), ("directory_traversal", "path_traversal"),
     ("xss", "xss"), ("reflected_xss", "xss"), ("cross_site_scripting", "xss"),
     ("exposure", "exposure"), ("information_disclosure", "exposure"), ("framework_exposure", "exposure"),
+    ("sensitive_exposure", "sensitive_exposure"), ("sensitive_data_exposure", "sensitive_exposure"),
 ])
 def test_redrive_spec_emits_a_runtime_spec_for_response_derived_classes(claimed, norm):
     from vigil_integration.live.engine import VigilEngine
@@ -317,6 +318,80 @@ def test_non_runtime_class_is_not_handled_here(monkeypatch, tmp_path):
     """A web-fact class (open_redirect) is routed to the web seam, not this one → None here."""
     ref = _fact(monkeypatch, tmp_path, "http://127.0.0.1:{port}/search?q=x", "open_redirect")
     assert ref is None
+
+
+# -- sensitive_exposure: LEAD-ONLY (fact_capable:false) — DRIVEN, never mints -----------------------
+# A REAL AWS creds file (INI 'key = value' form) and AWS's documented EXAMPLE template both serve the
+# signature + corroborators at the probed path. sensitive_exposure.secret_signature is fact_capable:false,
+# so NEITHER mints a FACT — but the arm is DISPATCHED (a VIGIL-owned gated capture behind the lead).
+_AWS_REAL = ("[default]\naws_access_key_id = AKIADECOYLABKEYID01\n"
+             "aws_secret_access_key = AKIADECOYwJalrXUtnFEMILABdecoykey0123456789\n")
+_AWS_EXAMPLE = ("[default]\naws_access_key_id = AKIAIOSFODNN7EXAMPLE\n"
+                "aws_secret_access_key = wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY\n")
+
+
+class _AwsVulnApp(http.server.BaseHTTPRequestHandler):
+    """Serves a REAL-looking .aws/credentials (INI form) at the probed path; 404s everything else."""
+    body = _AWS_REAL
+
+    def do_GET(self):  # noqa: N802
+        from urllib.parse import urlsplit
+        if urlsplit(self.path).path == "/.aws/credentials":
+            raw = type(self).body.encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.send_header("Content-Length", str(len(raw)))
+            self.end_headers()
+            self.wfile.write(raw)
+            return
+        self.send_response(404)
+        self.send_header("Content-Type", "text/plain; charset=utf-8")
+        self.end_headers()
+        self.wfile.write(b"Not Found")
+
+    def log_message(self, *a):
+        return
+
+
+class _AwsExampleApp(_AwsVulnApp):
+    body = _AWS_EXAMPLE
+
+
+class _AwsCountingApp(_AwsVulnApp):
+    hits = 0
+
+    def do_GET(self):  # noqa: N802
+        type(self).hits += 1
+        return super().do_GET()
+
+
+def test_sensitive_exposure_is_lead_only_in_the_registry():
+    from vigil_integration.live.runtime_redrive import RUNTIME_FACT_CLASSES, RUNTIME_REDRIVE_CLASSES
+    assert "sensitive_exposure" not in RUNTIME_FACT_CLASSES, "sensitive_exposure must NOT be a FACT class"
+    assert "sensitive_exposure" in RUNTIME_REDRIVE_CLASSES, "it is DISPATCHED (demoted), not removed"
+
+
+def test_live_sensitive_exposure_is_DRIVEN_and_never_mints_a_fact(monkeypatch, tmp_path):
+    """A served .aws/credentials with a REAL-looking secret is LEAD-ONLY: the arm is DRIVEN (a VIGIL-owned
+    gated capture — control + probe) but mints NO signed FACT (fact_capable:false)."""
+    _AwsCountingApp.hits = 0
+    ref = _fact(monkeypatch, tmp_path, "http://127.0.0.1:{port}/", "sensitive_exposure",
+                handler=_AwsCountingApp)
+    assert ref is None, "sensitive_exposure is LEAD-ONLY — a bare AWS signature must never mint a signed FACT"
+    assert _AwsCountingApp.hits >= 2, (
+        f"the seam did not DRIVE the lead-only arm — only {_AwsCountingApp.hits} request(s) reached the "
+        f"origin, so there is no VIGIL-owned capture behind the operator's lead")
+
+
+def test_negctl_sensitive_exposure_example_template_mints_nothing(monkeypatch, tmp_path):
+    ref = _fact(monkeypatch, tmp_path, "http://127.0.0.1:{port}/", "sensitive_exposure",
+                handler=_AwsExampleApp)
+    assert ref is None, "AWS's documented EXAMPLE credentials file must NOT mint (LEAD-only, and 'example')"
+
+
+def test_negctl_sensitive_exposure_no_file_mints_nothing(monkeypatch, tmp_path):
+    ref = _fact(monkeypatch, tmp_path, "http://127.0.0.1:{port}/", "sensitive_exposure", handler=_SafeApp)
+    assert ref is None, "a host that 404s /.aws/credentials must not mint"
 
 
 def test_out_of_scope_url_mints_nothing(monkeypatch, tmp_path):

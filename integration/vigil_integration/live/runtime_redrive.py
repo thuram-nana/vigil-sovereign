@@ -140,7 +140,7 @@ RUNTIME_STAT_FACT_CLASSES = ("ssti", "boolean_sqli", "time_based_sqli", "time_ba
 # article for ``passwd`` but cannot produce a well-formed second file), a size/entropy relation between the
 # response and the file VIGIL asked for, or a per-probe unpredictable target whose content VIGIL already
 # knows. Each also needs a multi-capture oracle row; see the branch's ``blocking_work``.
-RUNTIME_LEAD_CLASSES = ("path_traversal",)
+RUNTIME_LEAD_CLASSES = ("path_traversal", "sensitive_exposure")
 
 # Every class this runner will DISPATCH. A FACT-capable class can reach a signed FACT; a lead-only class
 # runs the identical pipeline and stops at a LEAD. The union spans the INLINE fact classes, the W2
@@ -160,6 +160,12 @@ _BRANCH_FOR = {
     "xss": "xss.reflected_execution",
     "exposure": "exposure.secret_signature",
     "ssi": "ssi.evaluation",
+    # sensitive_exposure (CWE-359/CWE-538): the cloud-credential-path dual of exposure. LEAD-ONLY — its branch
+    # sensitive_exposure.secret_signature is declared fact_capable=false / oracle_version="" in the matrix, so
+    # admit() demotes any firing to a LEAD and a signed FACT is IMPOSSIBLE. A bare secret-signature at a fixed
+    # path is placeholder/EXAMPLE-fakeable (weaker than the framework's own credential bar); a sound FACT needs
+    # the INI "key = value" value-shape that exposure uses for /.env (blocking_work on the branch).
+    "sensitive_exposure": "sensitive_exposure.secret_signature",
 }
 
 # Candidate query-parameter names synthesised for the point-check classes when the proposed URL does not
@@ -517,6 +523,18 @@ _EXPOSURE_PROBES = (
     ("/.env", "DB_PASSWORD=", (), True),
     ("/actuator/env", "spring.datasource", ("propertySources", '"value"'), False),
     ("/.git/config", "[core]", ("repositoryformatversion",), False),
+)
+
+# CWE-359/CWE-538 sensitive-data dual of _EXPOSURE_PROBES: a cloud CREDENTIAL signature at a fixed credential
+# path. value_shaped=True so even a future FACT upgrade demands a real value — but the current
+# _secret_assignment parses only the dotenv "KEY=value" form, NOT the INI "key = value" (space-separated)
+# form an .aws/credentials file uses, so the value-shape REFUSES every INI value here and this probe mints
+# NOTHING. Combined with the fact_capable=false branch, sensitive_exposure is LEAD-ONLY by construction: the
+# arm DRIVES the AWS probe (a VIGIL-owned capture) but can never mint a FACT. A sound FACT needs the INI
+# value-shape (a surgical separator-skip in _secret_assignment) — named in the branch blocking_work.
+_SENSITIVE_EXPOSURE_PROBES = (
+    # (probe_path, signature, corroborators, value_shaped)
+    ("/.aws/credentials", "aws_secret_access_key", ("aws_access_key_id", "[default]"), True),
 )
 
 
@@ -1253,8 +1271,11 @@ def runtime_redrive(url: str, *, slug: str, engagement_slug: str, signers: "list
                                  "differential a signature's presence is not adjudicable → INCONCLUSIVE")
             control_body = _body(control_resp) if control_resp is not None else ""
             control_status = int(control_resp.get("status", 0) or 0) if control_resp is not None else 0
+            # sensitive_exposure (CWE-359/CWE-538) reuses this EXACT exposure machinery with a cloud-credential
+            # probe set; every other class routed here is plain exposure (CWE-200).
+            _probes = _SENSITIVE_EXPOSURE_PROBES if bug_class == "sensitive_exposure" else _EXPOSURE_PROBES
             for probe_path, signature, corroborators, value_shaped in (
-                    _EXPOSURE_PROBES if control_resp is not None else ()):
+                    _probes if control_resp is not None else ()):
                 surface = f"path:{probe_path}"
                 res.surfaces.setdefault(bug_class, set()).add(surface)
                 # CONTROL DIFFERENTIAL, evaluated by the RUNNER over the control BODY.
@@ -1317,7 +1338,7 @@ def runtime_redrive(url: str, *, slug: str, engagement_slug: str, signers: "list
                     observed["secret_assignment"] = assignment
                     observed["secret_value"] = value
                     preds += _secret_value_predicates(signature)
-                fc = FindingContext.from_predicate(observed, {"all": preds}, bug_class="exposure")
+                fc = FindingContext.from_predicate(observed, {"all": preds}, bug_class=bug_class)
                 context = fc.to_verifier_context()
                 signal = predicate_oracle(context.get("observed_evidence", {}), context.get("predicate", {}))
                 _admit(context, f"{url}#{probe_path}", surface,
