@@ -184,14 +184,14 @@
     {
       "id": "graphql_batching.array_batch_executed",
       "check": "GraphQLBatchingCheck",
-      "evidence": "VIGIL's own single POST of a JSON ARRAY of M tiny {__typename} operations returns a JSON array of >=2 data-bearing results (batch_result_count reduction > 1)",
+      "evidence": "VIGIL's own single POST of a JSON ARRAY of M (>=2) operations EACH carrying a distinct VIGIL-chosen alias ({ v{i}: __typename }) returns a JSON array whose i-th result echoes alias v{i}; the reduction batch_result_count counts the per-position alias matches and the oracle fires only when it equals M (eq[batch_result_count, sent_batch], sent_batch > 1)",
       "fact_capable": true,
       "clean_capable": false,
       "preconditions": [
         "channel_established",
         "body_semantically_available"
       ],
-      "limitation": "Body-derived: fires ONLY on a returned JSON array of >=2 elements each carrying a non-null data member, from VIGIL's OWN array-batch POST. Proves array request-batching is ENABLED (one HTTP request ran multiple operations, defeating per-request rate limits); does NOT prove an unbounded batch size. A non-batching origin returns a single object/error (not an array) and fails the predicate; NOT CLEAN-capable (an unreadable body is indistinguishable from batching-off).",
+      "limitation": "Body-derived + alias-bound: fires ONLY when ALL M (>=2) of VIGIL's distinctly-aliased operations ran in the one request — array position i must carry VIGIL's alias v{i} under a non-null data member (eq[batch_result_count, sent_batch]). A benign >=2-element data array that does NOT carry VIGIL's v{i} aliases (a static list, a REST/collection feed), a wrong-length or wrong-order response, a partial-alias array, and a single object/error all score < M and fail the predicate. Proves array request-batching is ENABLED (one HTTP request ran multiple operations, defeating per-request rate limits); does NOT prove an unbounded batch size. NOT CLEAN-capable (an unreadable body is indistinguishable from batching-off). Named residual (NOT benign- or model-reachable): VIGIL's v{i} alias scheme is predictable, so a deliberately-deceptive in-scope target could hand-echo it to assert a FACT about its OWN endpoint (impact-nil; same class as the access_control compromised-deployment residual). A per-probe high-entropy alias would retire even this residual.",
       "target_fact_capable": true,
       "target_clean_capable": true,
       "evidence_surface": "response_body",
@@ -199,7 +199,7 @@
         "engine/crucible/framework/v2/scanner/graphql.py:GraphQLBatchingCheck",
         "integration/vigil_integration/live/web_redrive.py:web_redrive"
       ],
-      "blocking_work": "CLEAN-capability needs the same decode-completeness guarantee as graphql_introspection.schema_returned. The proposition (a returned M>=2 result array) is DEFINITE, so no benign-twin baseline is needed for the FACT.",
+      "blocking_work": "CLEAN-capability needs the same decode-completeness guarantee as graphql_introspection.schema_returned. The proposition (all M>=2 of VIGIL's distinctly-aliased ops ran in one request) is DEFINITE, so no benign-twin baseline is needed for the FACT.",
       "oracle_version": "achieved_state",
       "control_requirements": [
         "warden_active_recon_gate",
