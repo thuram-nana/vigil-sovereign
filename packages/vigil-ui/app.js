@@ -510,22 +510,24 @@
         title: "Starting the offense console and API — this takes a few seconds." },
         [h("span.dot"), h("span.txt", null, "Starting offense…")]);
     }
+    if (OFFENSE.up && OFFENSE.canStart) {
+      // Up: a REAL, clickable toggle — the WHOLE chip stops the offense side, pairing with the Start button
+      // the down state shows, so offense is brought DOWN from the top bar the same way it is brought up. The
+      // proxy serving this page owns the two backends' lifecycle and tears exactly them down (never the
+      // cockpit, never itself). confirmStopOffense() asks first, so an accidental click can't kill offense.
+      return h("button.offense-chip.up.action#offense-chip", {
+        title: "Offense side is up — click to STOP the console and API. Findings, reports and proof stay on "
+          + "disk; start it again here or with `vigil up`.",
+        onClick: function () { confirmStopOffense(); },
+      }, [h("span.dot"), h("span.txt", null, "Offense up"), h("span.oc-hint", null, "Stop")]);
+    }
     if (OFFENSE.up) {
-      // Up: a quiet indicator, PLUS the STOP that pairs with the start button — so the offense side can
-      // be brought DOWN from the screen the same way it is brought up. The proxy serving this page owns
-      // the two backends' lifecycle and tears exactly them down (never the cockpit, never itself).
-      // `canStart` gates stop too: a proxy that cannot start the plane cannot stop it, so it shows no
-      // button rather than one that cannot work.
-      const upKids = [h("span.dot"), h("span.txt", null, "Offense up")];
-      if (OFFENSE.canStart) {
-        upKids.push(h("button.oc-stop", {
-          title: "Stop the offense console and API. Findings, reports and proof stay on disk; you can "
-            + "start the offense side again here or with `vigil up`.",
-          onClick: function (e) { e.preventDefault(); e.stopPropagation(); confirmStopOffense(); },
-        }, "Stop"));
-      }
+      // Up, but this proxy does NOT own the lifecycle (k8s/systemd/--proxy-only) — an honest status
+      // indicator, because a button here could not actually stop the backend.
       return h("span.offense-chip.up#offense-chip",
-        { title: "The offense console and API are answering." }, upKids);
+        { title: "The offense console and API are answering. This page's proxy does not manage the offense "
+          + "lifecycle — stop it with `vigil down` in a terminal." },
+        [h("span.dot"), h("span.txt", null, "Offense up")]);
     }
     if (!OFFENSE.canStart) {                    // honest: no button, because this proxy cannot start it
       return h("span.offense-chip.down#offense-chip",
@@ -2889,8 +2891,10 @@
 
   // ---- Live run view ---------------------------------------------------------
   let liveES = null, liveTimers = [], liveApprovalModal = null;
+  let defVerdictStreams = {};   // slug -> EventSource: the AEGIS Defense verdict streams, one per LIVE gateway
   function teardownLive() {
     if (liveES) { try { liveES.close(); } catch (e) {} liveES = null; }
+    defCloseAllVerdictStreams();   // close every per-gateway AEGIS verdict stream (a no-op off the Defense screen)
     liveTimers.forEach(function (t) { clearInterval(t); });
     liveTimers = [];
     if (liveApprovalModal) { try { liveApprovalModal.close(); } catch (e) {} liveApprovalModal = null; }  // don't leave a proposal popup floating after navigation
@@ -5634,7 +5638,7 @@
       h("div.grid.cols-4#def-tiles", { style: { marginTop: "16px" } }),
       h("div.grid.cols-2", { style: { alignItems: "start", marginTop: "4px" } }, [
         h("div.stack", null, [
-          V.card("Set up your defense", "DEFENSE", h("div#def-setup", null, h("div.empty", null, "Loading…")), false),
+          V.card("Your defense gateways", "DEFENSE", h("div#def-setup", null, h("div.empty", null, "Loading…")), false),
           V.card("Who is attacking (actor beliefs)", "DEFENSE", h("div#def-actors", null, h("div.empty", null, "Loading…")), false),
         ]),
         V.card("Live verdicts", "LIVE", h("div.feed#def-feed", null, h("div.empty", null, "Connecting to the verdict stream…")), false),
@@ -5730,84 +5734,184 @@
     ]);
   }
 
+  // One status GET → defDrawStatus, which reconciles the per-gateway verdict SSEs. Called for the
+  // immediate paint, on the 4s poll, and after any mode/stop/setup POST (re-poll, NOT a fresh loadDefense:
+  // that would stack another interval + stream set — the multi-gateway equivalent of the old leak).
+  function defRefreshStatus() {
+    V.getJSON(OFF("/api/aegis/status")).then(defDrawStatus).catch(function () {
+      var b = V.$("#def-setup");
+      if (b) V.mount(b, h("div.empty", null, "The offense engine is offline. Start it with `vigil up`."));
+      defCloseAllVerdictStreams();   // the engine is gone — drop every verdict stream
+    });
+  }
+
   function loadDefense() {
-    function refresh() {
-      V.getJSON(OFF("/api/aegis/status")).then(defDrawStatus).catch(function () {
-        var b = V.$("#def-setup");
-        if (b) V.mount(b, h("div.empty", null, "The offense engine is offline. Start it with `vigil up`."));
-      });
-    }
-    refresh();
-    liveTimers.push(setInterval(refresh, 4000));
-    var feed = V.$("#def-feed");
-    try {
-      liveES = V.sse(OFF("/api/aegis/verdicts"), function (v) {
-        if (!feed) return;
-        var empty = feed.querySelector(".empty"); if (empty) empty.remove();
-        feed.insertBefore(defVerdictRow(v), feed.firstChild);
-        while (feed.childNodes.length > 80) feed.removeChild(feed.lastChild);
-      }, function () { /* no gateway yet / stream ended — the poll keeps status live */ });
-    } catch (e) { /* EventSource unavailable — non-fatal */ }
+    defRefreshStatus();                                     // immediate paint
+    liveTimers.push(setInterval(defRefreshStatus, 4000));   // cleaned up by teardownLive() on navigation
+    // Verdict streams are opened/closed PER GATEWAY by defSyncVerdictStreams(), driven from defDrawStatus on
+    // every poll; teardownLive() closes them all on navigation. There is no single ambient SSE here any more.
+  }
+
+  // Reconcile the open verdict streams against the gateways in the latest status: open an SSE for any new
+  // slug, close the SSE for any slug that is gone (or whose verdicts went unavailable), never two for one
+  // slug. Each stream feeds the ONE shared #def-feed, tagged with its source slug so the merge is readable.
+  function defSyncVerdictStreams(gws) {
+    gws = Array.isArray(gws) ? gws : [];
+    var want = {};
+    gws.forEach(function (gw) {
+      if (!gw || !gw.slug) return;
+      if (gw.verdicts_available === false) return;         // this gateway exposes no verdict stream — skip it
+      var slug = gw.slug;
+      want[slug] = true;
+      if (defVerdictStreams[slug]) return;                 // already streaming this slug — never open a second
+      try {
+        defVerdictStreams[slug] = V.sse(OFF("/api/aegis/verdicts?slug=" + encodeURIComponent(slug)), function (v) {
+          var feed = V.$("#def-feed"); if (!feed) return;
+          var empty = feed.querySelector(".empty"); if (empty) empty.remove();
+          feed.insertBefore(defVerdictRow(v, slug), feed.firstChild);
+          while (feed.childNodes.length > 80) feed.removeChild(feed.lastChild);
+        }, function () { /* no verdicts yet / stream ended / 404 — the status poll keeps the gateway live */ });
+      } catch (e) { /* EventSource unavailable — non-fatal */ }
+    });
+    Object.keys(defVerdictStreams).forEach(function (slug) {
+      if (!want[slug]) {
+        try { defVerdictStreams[slug].close(); } catch (e) {}
+        delete defVerdictStreams[slug];
+      }
+    });
+  }
+
+  function defCloseAllVerdictStreams() {
+    Object.keys(defVerdictStreams).forEach(function (slug) {
+      try { defVerdictStreams[slug].close(); } catch (e) {}
+    });
+    defVerdictStreams = {};
   }
 
   function defDrawStatus(st) {
-    var running = !!st.running;
-    var eff = st.effective_mode || null;
-    var req = st.requested_mode || "observe";
-    var gw = st.gateway || {};
-    var actors = st.actors || [];
+    st = st || {};
+    var gws = Array.isArray(st.gateways) ? st.gateways : [];
+    var n = gws.length;
+    var enforcing = 0, downgraded = 0;
+    gws.forEach(function (gw) {
+      gw = gw || {};
+      var enf = gw.enforcement || {};
+      if ((gw.effective_mode || null) === "enforce") enforcing++;
+      if (enf.downgraded || (gw.requested_mode === "enforce" && (gw.effective_mode || null) !== "enforce")) downgraded++;
+    });
+    var observe = n - enforcing;
+
+    // -- summary tiles: a roll-up across EVERY live gateway (N gateways · M enforcing · K observe) --------
     var tiles = V.$("#def-tiles");
     if (tiles) V.mount(tiles, [
-      V.tile("Gateway", running ? "RUNNING" : "Stopped", running ? (gw.bind || "") : "not started", running ? "ok" : null),
-      V.tile("Mode", running ? (eff === "enforce" ? "ENFORCE" : "Observe") : "—",
-        running && req === "enforce" && eff !== "enforce" ? "downgraded (no entitlement)" : (eff === "enforce" ? "blocking proven attacks" : "watch-only"),
-        eff === "enforce" ? "warn" : null),
-      V.tile("Upstream", running ? "protected" : "—", running ? (gw.upstream || "") : "point me at your app", null),
-      V.tile("Actors seen", String(st.actor_count || 0), "with a belief", actors.length ? "warn" : null),
+      V.tile("Gateways", String(n), n ? "live" : "none running", n ? "ok" : null),
+      V.tile("Enforcing", String(enforcing), "blocking proven attacks", enforcing ? "warn" : null),
+      V.tile("Observe", String(observe), "watch-only", null),
+      V.tile("Downgraded", String(downgraded), downgraded ? "requested enforce, not entitled" : "none", downgraded ? "down" : null),
     ]);
+
+    // -- #def-setup: a LIVE card per gateway + an always-present "add a gateway" form --------------------
+    // defDrawStatus re-runs every 4s. Re-mounting the setup FORM each tick would destroy the operator's
+    // half-typed inputs (upstream/port/secret/slug/honeypot), so the form lives in its own sub-container
+    // (#def-gw-add) that is built ONCE and left untouched while present (detected by the url input, unique
+    // to the form); only the gateway cards (#def-gw-cards, no inputs) refresh each tick. The form is ALWAYS
+    // present — a new gateway can be added even while others run.
     var setup = V.$("#def-setup");
-    // The status poll re-runs defDrawStatus every 4s; re-mounting defSetupForm() each tick replaces the
-    // uncontrolled <input> nodes and wipes whatever the operator is mid-typing (upstream/port/secret/slug/
-    // honeypot). Only (re)build the form when it is not already on screen — first paint, or after the
-    // running panel / an offline message cleared it (detected by the absence of the upstream url input,
-    // which is unique to the form). While the form is present, leave its live inputs untouched. The
-    // running panel has no inputs, so re-mounting it every tick to refresh live status is harmless.
     if (setup) {
-      if (running) V.mount(setup, defRunningPanel(gw, eff, req));
-      else if (!setup.querySelector('input[type="url"]')) V.mount(setup, defSetupForm());
+      if (!setup.querySelector("#def-gw-cards")) V.mount(setup, [h("div#def-gw-cards"), h("div#def-gw-add")]);
+      var cardsBox = setup.querySelector("#def-gw-cards");
+      var addBox = setup.querySelector("#def-gw-add");
+      if (cardsBox) {
+        var kids = gws.map(defRunningPanel);
+        if (!n && st.note) kids.push(h("div.hint", { style: { marginBottom: "10px" } }, String(st.note)));
+        kids.push(h("div.hint", { style: { margin: "4px 0 8px", fontWeight: "600" } }, n ? "Add another gateway" : "Set up a gateway"));
+        V.mount(cardsBox, kids);
+      }
+      if (addBox && !addBox.querySelector('input[type="url"]')) V.mount(addBox, defSetupForm());
     }
+
+    // -- #def-actors: a global roll-up of attacker beliefs across ALL gateways (per-gateway detail is on --
+    // each card). Merge by source id: worst (max) belief seen anywhere, observations summed.
     var ab = V.$("#def-actors");
     if (ab) {
-      if (!actors.length) V.mount(ab, h("div.empty", null, running ? "No actors yet — drive some traffic through the gateway." : "Start the gateway to build per-actor beliefs."));
-      else V.mount(ab, h("div.stack", null, actors.slice(0, 24).map(defActorRow)));
+      var merged = {};
+      gws.forEach(function (gw) {
+        ((gw && gw.actors) || []).forEach(function (a) {
+          if (!a || a.id == null) return;
+          var cur = merged[a.id];
+          if (!cur) merged[a.id] = { id: a.id, mean: a.mean || 0, lcb: a.lcb || 0, n: a.n || 0, action: a.action || null };
+          else {
+            cur.mean = Math.max(cur.mean, a.mean || 0);
+            cur.lcb = Math.max(cur.lcb, a.lcb || 0);
+            cur.n += (a.n || 0);
+            if (!cur.action && a.action) cur.action = a.action;
+          }
+        });
+      });
+      var list = Object.keys(merged).map(function (k) { return merged[k]; })
+        .sort(function (x, y) { return (y.mean || 0) - (x.mean || 0); });
+      if (!list.length) V.mount(ab, h("div.empty", null, n ? "No actors yet — drive some traffic through a gateway." : "Start a gateway to build per-actor beliefs."));
+      else V.mount(ab, [
+        h("div.hint", { style: { marginBottom: "8px" } }, "Worst belief per source across all your gateways. Per-gateway detail is on each card."),
+        h("div.stack", null, list.slice(0, 24).map(defActorRow)),
+      ]);
     }
+
+    // -- verdict SSE lifecycle: one stream per gateway, merged into the single #def-feed -----------------
+    defSyncVerdictStreams(gws);
   }
 
-  function defRunningPanel(gw, eff, req) {
-    var cur = eff || req;   // the mode actually in force
+  // ONE live gateway → ONE card. `gw` is an entry of st.gateways (slug/bind/upstream/requested_mode/
+  // effective_mode/enforcement/actors/launched_by/stoppable/…). The mode toggle works for EVERY gateway
+  // (incl. CLI/cron ones); only Stop is gated to UI-managed gateways (stoppable===false → disabled + note).
+  function defRunningPanel(gw) {
+    gw = gw || {};
+    var slug = gw.slug || "";
+    var req = gw.requested_mode || "observe";
+    var eff = gw.effective_mode || null;
+    var enf = gw.enforcement || {};
+    var downgraded = !!enf.downgraded || (req === "enforce" && eff !== "enforce");
+    var killed = !!enf.kill_switch_tripped;
+    var cur = eff || req;                                   // the mode actually in force
     var next = cur === "enforce" ? "observe" : "enforce";
     var toggleLabel = cur === "enforce" ? "Switch to Observe (watch-only)" : "Switch to Enforce (blocking)";
+    var byCli = gw.launched_by === "cli";
+    var stoppable = (gw.stoppable != null) ? !!gw.stoppable : !byCli;   // default: UI-managed are stoppable
+    var actors = gw.actors || [];
+
     var toggleBtn = h("button.btn.primary", { onClick: function () {
       if (next === "enforce" && !confirm("Enforce will BLOCK requests proven to be attacks — live, no restart. (Needs the AEGIS_RESPOND entitlement, else it stays observe.) Continue?")) return;
-      V.postJSON(OFF("/api/aegis/mode"), { mode: next })
-        .then(function (r) { if (r && r.error) { V.toast(r.error, true); return; } V.toast("Mode → " + next + "."); loadDefense(); })
+      V.postJSON(OFF("/api/aegis/mode"), { slug: slug, mode: next })
+        .then(function (r) { if (r && r.error) { V.toast(r.error, true); return; } V.toast("Mode → " + next + "."); defRefreshStatus(); })
         .catch(function (e) { V.toast((e && e.message) || "Could not change mode", true); });
     } }, [V.icon(next === "enforce" ? "shield" : "info"), toggleLabel]);
-    return [
-      h("div.set-status.ok", null, [V.icon("check"),
-        h("span", null, "Gateway running — " + (gw.bind || "") + " → " + (gw.upstream || "") + " · mode " + (eff || req))]),
-      req === "enforce" && eff !== "enforce"
-        ? h("div.set-status.off", null, [V.icon("info"), h("span", null, "You requested ENFORCE but it downgraded to observe (the AEGIS_RESPOND entitlement isn’t available here) — nothing is being blocked.")])
-        : null,
-      h("div.acts", { style: { marginTop: "12px" } }, [
-        toggleBtn,
-        h("button.btn.danger", { onClick: function () {
-          V.postJSON(OFF("/api/aegis/stop"), {}).then(function () { V.toast("Gateway stopped."); loadDefense(); })
+
+    var stopBtn = stoppable
+      ? h("button.btn.danger", { onClick: function () {
+          V.postJSON(OFF("/api/aegis/stop"), { slug: slug }).then(function () { V.toast("Gateway stopped."); defRefreshStatus(); })
             .catch(function (e) { V.toast((e && e.message) || "Could not stop the gateway", true); });
-        } }, [V.icon("x"), "Stop gateway"]),
+        } }, [V.icon("x"), "Stop gateway"])
+      : h("button.btn.danger", { disabled: true, title: "started outside the UI" }, [V.icon("x"), "Stop gateway"]);
+
+    return h("div.def-gw", { style: { border: "1px solid var(--border)", borderRadius: "10px", padding: "12px 14px", background: "var(--bg-2)", marginBottom: "12px" } }, [
+      h("div.row-flex", { style: { justifyContent: "space-between", gap: "10px", flexWrap: "wrap" } }, [
+        h("div", null, [h("b", null, (gw.bind || "?")), h("span.dim", null, "  →  "), h("span.mono.dim", null, (gw.upstream || "—"))]),
+        byCli ? V.pill("CLI/cron", "sm warn") : V.pill("UI-managed", "sm"),
       ]),
-      h("div.hint", { style: { marginTop: "10px" } }, "Watch proven attacks in the live verdicts stream. To run this on your real edge, use the production command shown when you started it (bind your routable interface there, never here)."),
-    ];
+      h("div.set-status.ok", { style: { marginTop: "10px" } }, [V.icon("check"),
+        h("span", null, "Running · requested " + req + " → effective " + (eff || "pending") + (slug ? " · " + slug : ""))]),
+      downgraded ? h("div.set-status.off", { style: { marginTop: "8px" } }, [V.icon("info"),
+        h("span", null, enf.downgrade_reason || ("requested " + req + ", running " + (eff || "observe") + " — AEGIS_RESPOND not entitled; nothing is being blocked."))]) : null,
+      killed ? h("div.set-status.off", { style: { marginTop: "8px" } }, [V.icon("info"),
+        h("span", null, "kill-switch tripped — enforcement is halted for this gateway.")]) : null,
+      h("div.acts", { style: { marginTop: "12px" } }, [
+        toggleBtn, stopBtn,
+        stoppable ? null : h("span.hint", null, "managed outside the UI — stop from its launcher"),
+      ]),
+      actors.length
+        ? h("div.stack", { style: { marginTop: "12px" } }, actors.slice(0, 24).map(defActorRow))
+        : h("div.hint", { style: { marginTop: "12px" } }, "No actors yet — drive some traffic through this gateway."),
+    ]);
   }
 
   function defSetupForm() {
@@ -5833,7 +5937,7 @@
         if (r && r.error) { V.toast(r.error, true); return; }
         V.toast("Defense gateway started.");
         if (r && r.production_command) defShowProdCommand(r.production_command, r.warn_public);
-        loadDefense();
+        defRefreshStatus();   // re-poll (the 4s interval is already running — don't stack another)
       }).catch(function (e) { start.disabled = false; V.toast((e && e.message) || "Could not start", true); });
     } }, [V.icon("shield"), "Start defense"]);
     return [
@@ -5861,15 +5965,18 @@
     ]);
   }
 
-  function defVerdictRow(v) {
+  function defVerdictRow(v, slug) {
     var decision = (v && v.decision) || "clear";
     var cls = decision === "confirmed" ? "danger" : (decision === "lead" ? "warn" : "muted");
     var label = decision === "confirmed" ? "ATTACK PROVEN" : (decision === "lead" ? "lead" : "clear");
     var ac = (v && v.attack_class) || "";
     var conf = (v && typeof v.confidence === "number") ? (" · " + Math.round(v.confidence * 100) + "%") : "";
     var act = (v && v.action && v.action !== "observe" && v.action !== "allow") ? (" · " + v.action) : "";
+    // The feed merges verdicts from EVERY gateway, so tag each row with its source gateway slug.
+    var src = slug || (v && v.slug) || "";
     var row = h("div.feed-row.verdict-" + cls, null, [
       h("span.vbadge." + cls, null, label),
+      src ? h("span.pill.sm", { title: "gateway" }, src) : null,
       h("span.fr-t", null, [ac ? h("b", null, ac) : "activity", conf, act]),
       (v && v.certificate) ? h("span.pill.sm", null, "cert") : null,
     ]);
