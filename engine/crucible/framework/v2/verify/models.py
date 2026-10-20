@@ -96,6 +96,36 @@ class OracleKind(str, enum.Enum):
     # `../` (`how do I use ../ in a path?`), a deep-but-benign relative path (`../../../../a/b/c`), and a
     # benign-normalising URL (`/app/../home`) all stay inert — BOTH halves are required.
     PATH_TRAVERSAL_BREAKOUT = "path_traversal_breakout"
+    # Request-side SERVER-SIDE REQUEST FORGERY ATTEMPT — the request-side sibling of the four parse-proof
+    # members above, and the BLOCK-worthy UNAMBIGUOUS subset of the existing SSRF LEAD (inspect._ssrf_lead_param,
+    # which ALSO raises on a general internal/RFC1918/loopback http(s) URL — a shape a benign app legitimately
+    # fetches, so that broader set stays a LEAD, never a block). Like the others this is an ADDITIVE append
+    # reachable ONLY via its explicit BUG_CLASS_ORACLES row (keyed on the SAME `request_payload` ctx field no
+    # benchmark/scan/engage finding carries), never via the frozen unknown-class fallback
+    # (verifier._ALL_ORACLES stays EXACTLY 15). SSRF_BREAKOUT proves a STRUCTURED SSRF ATTEMPT — judged on the
+    # REQUEST VALUE ALONE, offline, NO DNS/network resolution — NOT that the app dereferenced it (an app that
+    # validates the URL is still safe; the OOB callback oracle proves a dereference). Near-zero-FP: after a
+    # defensive decode (percent-decode up to twice, lowercased) the value must PARSE (urlsplit) as a URL whose
+    # (a) HOST is a cloud-metadata endpoint (169.254.169.254, [fd00:ec2::254], metadata.google.internal,
+    # 100.100.100.200, 169.254.170.2) OR (b) SCHEME is a dangerous non-HTTP protocol (file/gopher/dict/ftp/
+    # tftp/ldap/jar/netdoc/expect). A general internal URL (`http://10.0.0.5/webhook`,
+    # `https://localhost:3000/health`), an external API (`https://api.github.com/x`), a bare `169.254.169.254`
+    # with no scheme/authority, and prose mentioning `file://` all stay inert.
+    SSRF_BREAKOUT = "ssrf_breakout"
+    # Request-side XXE (XML EXTERNAL ENTITY) ATTEMPT — the request-side sibling of the parse-proof members
+    # above, and the BLOCK-worthy UNAMBIGUOUS subset of the existing XXE LEAD (inspect._XXE_RE). Like the
+    # others this is an ADDITIVE append reachable ONLY via its explicit BUG_CLASS_ORACLES row (keyed on the
+    # SAME `request_payload` ctx field no benchmark/scan/engage finding carries), never via the frozen
+    # unknown-class fallback (verifier._ALL_ORACLES stays EXACTLY 15). XXE_BREAKOUT proves a STRUCTURED XXE
+    # ATTEMPT — the request BODY declares an EXTERNAL entity — judged on the REQUEST BODY ALONE, offline — NOT
+    # that the app parsed it with a vulnerable parser or leaked a file (the response-side oracle deliberately
+    # NEVER blocks XXE: a single inline exchange cannot causally prove the leak — a `/etc/passwd` line in the
+    # answer can be reflected content; the OOB callback oracle proves a dereference). Near-zero-FP by a COMPLETE
+    # `<!DOCTYPE … [ … <!ENTITY … (SYSTEM|PUBLIC) … > … ]>` construct (bounded, ReDoS-safe). A normal
+    # `<?xml?><soap:Envelope>…` (no DOCTYPE), a bare `<!DOCTYPE html>` (no entity), an internal-subset DTD with
+    # only literal entities (`<!ENTITY a "hello">` — no SYSTEM/PUBLIC), a truncated/unclosed declaration (stays
+    # the LEAD), and prose/paste merely mentioning DOCTYPE/ENTITY all stay inert.
+    XXE_BREAKOUT = "xxe_breakout"
     # Workstream-3 posture (the DORMANT-sensor promotions). Like the AEGIS members above, this is an
     # ADDITIVE append reachable ONLY via its explicit BUG_CLASS_ORACLES row (keyed on the `k8s_control`
     # ctx field no benchmark/scan/engage finding carries), never via the frozen unknown-class fallback

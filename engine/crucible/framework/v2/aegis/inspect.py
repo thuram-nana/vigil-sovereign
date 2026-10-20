@@ -13,6 +13,8 @@ Request-side coverage (fires on the request ALONE, no app response needed):
   * parse-proof cmd-inject -> command_injection_attempt       (shell command-execution construct)
   * parse-proof NoSQLi     -> nosql_injection_attempt         (MongoDB operator injected as a KEY)
   * parse-proof traversal  -> path_traversal_attempt          (`../` dot-dot escape reaching a sensitive file)
+  * parse-proof SSRF       -> ssrf_attempt                    (URL to a cloud-metadata host / dangerous scheme)
+  * parse-proof XXE        -> xxe_attempt                     (body declares an external SYSTEM/PUBLIC entity)
 
 Honest scope: a request-side confirmation proves a STRUCTURED INJECTION ATTEMPT, never that the app is
 exploited — the response-side oracles (G4) prove exploitation. Everything below a fired oracle stays a
@@ -35,13 +37,21 @@ from .models import CertRef, Verdict
 # is first-match: a value that also trips an EARLIER class keeps that (existing) verdict, so each append is
 # purely additive to the prior behaviour. The nosql oracle proves an operator injected as a KEY, from
 # either the bracket/dot param NAME (`user[$ne]`) or a JSON-object VALUE (`{"$ne":null}`);
-# `path_traversal_attempt` (appended LAST) proves a `../` dot-dot escape that chains — after a defensive
-# double-decode, through a whitespace-free path — into a well-known sensitive target (etc/passwd,
-# .ssh/id_rsa, windows/win.ini, …). It is the REQUEST-side sibling of the response-side `path_traversal`
-# leak-proof and near-zero-FP: a benign `../` (a normal relative path / prose / deep benign path) never
-# reaches a sensitive target, so it never fires.
+# `path_traversal_attempt` proves a `../` dot-dot escape that chains — after a defensive double-decode,
+# through a whitespace-free path — into a well-known sensitive target (etc/passwd, .ssh/id_rsa,
+# windows/win.ini, …). It is the REQUEST-side sibling of the response-side `path_traversal` leak-proof and
+# near-zero-FP: a benign `../` (a normal relative path / prose / deep benign path) never reaches a sensitive
+# target, so it never fires. `ssrf_attempt` (appended LAST) proves a value that parses — after a defensive
+# decode, NO DNS/network — to a URL whose HOST is a cloud-metadata endpoint (169.254.169.254, …) or whose
+# SCHEME is a dangerous non-HTTP protocol (file/gopher/dict/…); the BLOCK-worthy UNAMBIGUOUS subset of the
+# SSRF LEAD below (a general internal/RFC1918/loopback http(s) URL does NOT fire here — it stays that LEAD).
 _REQUEST_PAYLOAD_CLASSES = ("sqli_attempt", "command_injection_attempt", "nosql_injection_attempt",
-                            "path_traversal_attempt")
+                            "path_traversal_attempt", "ssrf_attempt")
+# A request BODY worth a whole-body XXE external-entity scan: the `xxe_attempt` oracle requires a COMPLETE
+# `<!DOCTYPE … [ … <!ENTITY … (SYSTEM|PUBLIC) … > … ]>` construct, which lives in the raw XML body (an XML
+# body is NOT extracted into `values`), so it is scanned directly like the SSRF/XXE LEADs. Bounded to match
+# the oracle's own scan cap so the scan and certificate stay small (a larger body simply won't fire here).
+_MAX_XXE_BODY_CHARS = 65536
 
 # A JSON request body worth a whole-body NoSQL operator-structure scan (see `inspect_request` step 2b):
 # the string-leaf candidate walk (`candidate_values`) cannot surface `{"user":{"$ne":null}}` (the operator
@@ -262,27 +272,27 @@ def _lead_verdict(bug_class: str, param: str, evidence: str) -> Verdict:
     )
 
 
-# --- SSRF / XXE — request-side LEADS (NOT blocks) --------------------------------------------------
+# --- SSRF / XXE — request-side LEADS (the SOFTER residue; the unambiguous subset BLOCKS above) ----
 #
-# HONEST SCOPE: server-side request forgery, and BLIND / out-of-band XXE, are confirmed by an
-# OUT-OF-BAND (callback) interaction — a request the app makes to an attacker-controlled collector.
-# A single INLINE request/response cannot prove that near-zero-FP (a value that LOOKS like an
-# internal-host URL, or an XML doctype that DECLARES an external entity, does not prove the app
-# actually dereferenced it). So AEGIS emits these as LEADS: they raise the per-actor belief and are
-# logged, but they NEVER block. The out-of-band block-path (reuse ``verify/oob.py``'s OOB_CALLBACK
-# oracle: mint a per-request correlation token, plant it in the payload, and confirm on an inbound
-# hit) is the roadmap to promote these to a proven block — it is deliberately NOT forced here.
+# HONEST SCOPE: proving SSRF/XXE EXPLOITATION (the app actually dereferenced the URL / parsed the
+# entity and leaked a file) needs an OUT-OF-BAND (callback) interaction — a single INLINE
+# request/response cannot prove the dereference near-zero-FP (a `/etc/passwd` line in the answer can be
+# reflected content). So the DEREFERENCE proof stays the OOB callback oracle (roadmap), and the
+# RESPONSE side (``inspect_response``) deliberately NEVER blocks XXE.
 #
-# ONE narrow slice is promoted to a real inline block on the RESPONSE side (see ``inspect_response``):
-# IN-BAND file-disclosure XXE, where the leaked file content (a strict `/etc/passwd` root line)
-# surfaces in the app's OWN response. That is provable from a single exchange with the SAME three-part
-# near-zero-FP discipline path traversal uses (declared vector + strict root-line anchor + not-
-# reflected guard). BLIND/OOB XXE (no file content inline) and ALL SSRF stay LEADS here — their only
-# sound block-path is the OOB callback oracle.
-#
-# SSRF lead: a candidate value that is a URL toward an internal / link-local / cloud-metadata host,
-# or uses a dangerous non-HTTP scheme (file/gopher/dict/...). XXE lead: a request body that declares
-# an EXTERNAL ENTITY (SYSTEM/PUBLIC) inside a DOCTYPE. Both signatures a benign client rarely sends.
+# But the ATTEMPT is provable on the request alone, exactly as path-traversal's request-side block is:
+# the UNAMBIGUOUS-construct subset is now promoted to a real inline BLOCK (``ssrf_attempt`` /
+# ``xxe_attempt``, steps 2 and 2c above) — a URL whose host is a cloud-metadata endpoint or whose scheme
+# is a dangerous non-HTTP protocol, and a request body declaring a COMPLETE external (SYSTEM/PUBLIC)
+# entity. Those block BEFORE this point, so the LEADS below now cover ONLY the SOFTER residue a benign
+# client might plausibly send:
+#   * SSRF lead: a general internal / RFC1918 / loopback http(s) URL (a benign app's internal-webhook
+#     shape), or a metadata/scheme LOOKALIKE the block's exact-host / start-anchored-scheme test did not
+#     confirm (`http://169.254.169.254.evil.com/`, a mid-string `file://`).
+#   * XXE lead: a truncated/unclosed external-entity declaration the block's complete-construct test did
+#     not confirm.
+# Both signatures a benign client rarely sends, so they still raise the per-actor belief — but they never
+# block (the false-block risk is why the softer set is a lead, not a 403).
 _SSRF_SCHEME_RE = re.compile(r"(?i)\b(?:file|gopher|dict|ftp|tftp|ldap|jar|netdoc|expect)://")
 _SSRF_INTERNAL_HOST_RE = re.compile(
     r"(?i)(?:^|//|@|\bhost=|\burl=)(?:"
@@ -371,8 +381,24 @@ def inspect_request(
         if confirmed is not None:
             return _payload_verdict("nosql_injection_attempt", "body", confirmed, fc, enforce=enforce)
 
+    # (2c) XXE BLOCK — a request BODY declaring a COMPLETE external (SYSTEM/PUBLIC) entity is the
+    #      BLOCK-worthy UNAMBIGUOUS subset of the XXE lead. Scanned over the raw body (an XML body is not
+    #      extracted into `values`). A benign entity-free / internal-entity-only / truncated body does NOT
+    #      confirm here and falls through to the XXE LEAD below. Runs BEFORE step (3) so the unambiguous
+    #      construct BLOCKS rather than merely leading.
+    if body:
+        xbody = body[:_MAX_XXE_BODY_CHARS]
+        fc = FindingContext.from_request_payload(xbody, bug_class="xxe_attempt", param="body")
+        confirmed = confirm_finding({"bug_class": "xxe_attempt"}, context=fc, verifier=verifier)
+        if confirmed is not None:
+            return _payload_verdict("xxe_attempt", "body", confirmed, fc, enforce=enforce)
+
     # (3) SSRF / XXE LEADS — belief-raising, NEVER a block (their confirmation is out-of-band; see the
-    #     _lead_verdict / SSRF-XXE note above). Only reached when nothing above proved a block.
+    #     _lead_verdict / SSRF-XXE note above). Only reached when NO block fired above — so the UNAMBIGUOUS
+    #     subset (a cloud-metadata / dangerous-scheme SSRF URL in step 2, a complete external-entity XXE body
+    #     in step 2c) has ALREADY blocked, and these LEADS now cover only the SOFTER residue: a general
+    #     internal/RFC1918/loopback http(s) URL (a benign app's internal webhook shape) and a
+    #     truncated/unclosed external-entity declaration.
     ssrf_param = _ssrf_lead_param(values)
     if ssrf_param is not None:
         return _lead_verdict("ssrf", ssrf_param, "internal/metadata-host URL or dangerous scheme")

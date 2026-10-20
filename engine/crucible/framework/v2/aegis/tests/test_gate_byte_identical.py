@@ -170,14 +170,24 @@ _M11CRED_CLASSES = {"credential_acceptance"}
 # from the response-side `path_traversal`/`lfi` SIDE_EFFECT leak-proof, which is NOT additive and stays in.
 _PT_KINDS = {OracleKind.PATH_TRAVERSAL_BREAKOUT}
 _PT_CLASSES = {"path_traversal_attempt"}
+# Request-side SSRF / XXE parse-proofs — the request-side siblings of the sqli/cmdi/nosql/path-traversal
+# break-out kinds (SAME `request_payload` ctx field, SAME frozen-fallback discipline): each a NEW OracleKind
+# held OUT of _ALL_ORACLES, reachable ONLY via its `ssrf_attempt` / `xxe_attempt` BUG_CLASS_ORACLES row. The
+# BLOCK-worthy UNAMBIGUOUS subset of the SSRF/XXE LEADs (cloud-metadata host / dangerous scheme; a COMPLETE
+# external-entity DOCTYPE); the softer internal-URL / truncated-declaration cases stay LEADs, and the LIVE
+# response-side / OOB `ssrf`/`xxe` proofs stay distinct classes that are NOT additive and stay in.
+_SSRF_KINDS = {OracleKind.SSRF_BREAKOUT}
+_SSRF_CLASSES = {"ssrf_attempt"}
+_XXE_KINDS = {OracleKind.XXE_BREAKOUT}
+_XXE_CLASSES = {"xxe_attempt"}
 # every additive kind that must stay out of the frozen unknown-class fallback.
 _EXCLUDED_KINDS = (_AEGIS_KINDS | _WS3_KINDS | _WSB_KINDS | _NW1_KINDS | _WF1_KINDS
-                   | _G2_KINDS | _PT_KINDS | _G3_KINDS | _CICD_KINDS | _MOBILE_KINDS | _EMAIL_KINDS | _IDENTITY_KINDS
+                   | _G2_KINDS | _PT_KINDS | _SSRF_KINDS | _XXE_KINDS | _G3_KINDS | _CICD_KINDS | _MOBILE_KINDS | _EMAIL_KINDS | _IDENTITY_KINDS
                    | _C3_KINDS | _T4_KINDS | _E1_KINDS | _E5_KINDS | _E3_KINDS | _E2_KINDS | _E4T2_KINDS
                    | _CS_KINDS | _W22_KINDS | _W24_KINDS | _W32_KINDS | _W45_KINDS | _W43_KINDS | _W51_KINDS
                    | _M1TLS_KINDS | _M11CRED_KINDS)
 _EXCLUDED_CLASSES = {"prompt_injection", "system_prompt_disclosure", "automated_access",
-                     "credential_stuffing", "sqli_attempt", "command_injection_attempt"} | _WS3_CLASSES | _WSB_CLASSES | _NW1_CLASSES | _WF1_CLASSES | _G2_CLASSES | _PT_CLASSES | _G3_CLASSES | _CICD_CLASSES | _MOBILE_CLASSES | _EMAIL_CLASSES | _IDENTITY_CLASSES | _C3_CLASSES | _T4_CLASSES | _E1_CLASSES | _E5_CLASSES | _E3_CLASSES | _E2_CLASSES | _E4T2_CLASSES | _CS_CLASSES | _W22_CLASSES | _W24_CLASSES | _W32_CLASSES | _W45_CLASSES | _W43_CLASSES | _W51_CLASSES | _M1TLS_CLASSES | _M11CRED_CLASSES
+                     "credential_stuffing", "sqli_attempt", "command_injection_attempt"} | _WS3_CLASSES | _WSB_CLASSES | _NW1_CLASSES | _WF1_CLASSES | _G2_CLASSES | _PT_CLASSES | _SSRF_CLASSES | _XXE_CLASSES | _G3_CLASSES | _CICD_CLASSES | _MOBILE_CLASSES | _EMAIL_CLASSES | _IDENTITY_CLASSES | _C3_CLASSES | _T4_CLASSES | _E1_CLASSES | _E5_CLASSES | _E3_CLASSES | _E2_CLASSES | _E4T2_CLASSES | _CS_CLASSES | _W22_CLASSES | _W24_CLASSES | _W32_CLASSES | _W45_CLASSES | _W43_CLASSES | _W51_CLASSES | _M1TLS_CLASSES | _M11CRED_CLASSES
 _AEGIS_CLASSES = {"prompt_injection", "system_prompt_disclosure", "automated_access",
                   "credential_stuffing", "sqli_attempt", "command_injection_attempt"}
 _AEGIS_ALIASES = {"jailbreak", "llm_prompt_injection", "indirect_prompt_injection",

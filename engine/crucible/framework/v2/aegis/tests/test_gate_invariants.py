@@ -125,6 +125,11 @@ _ADDITIVE = frozenset({
     # kinds above (keyed on the SAME `request_payload` ctx field no benchmark/scan finding carries), DISTINCT
     # from the response-side SIDE_EFFECT path_traversal/lfi leak-proof; never in the frozen fallback.
     "PATH_TRAVERSAL_BREAKOUT",
+    # Request-side SSRF / XXE parse-proofs — the request-side siblings of the parse-proof kinds above (SAME
+    # `request_payload` ctx field), the BLOCK-worthy UNAMBIGUOUS subset of the SSRF/XXE LEADs (cloud-metadata
+    # host / dangerous scheme; a COMPLETE external-entity DOCTYPE). The softer cases stay LEADs. Never in the
+    # frozen fallback — reachable only via their explicit `ssrf_attempt` / `xxe_attempt` rows.
+    "SSRF_BREAKOUT", "XXE_BREAKOUT",
     "K8S_POSTURE",
     "K8S_WORKLOAD_POSTURE",
     "SSO_ASSERTION_FORGERY", "SAML_STRUCTURAL_FORGERY", "CLOUD_POSTURE", "MESH_POSTURE",
@@ -217,8 +222,11 @@ def test_every_additive_oraclekind_is_excluded_from_the_fallback():
     # tools only, refuses without the planted test corpus): 48 -> 49. The request-side PATH_TRAVERSAL_BREAKOUT
     # parse-proof (the request-side sibling of SQL/CMD/NOSQL break-out; keyed on `request_payload`, never in the
     # frozen fallback — the response-side path_traversal/lfi leak-proof stays a distinct SIDE_EFFECT class):
-    # 49 -> 50.)
-    assert len(OracleKind) == 50
+    # 49 -> 50. The request-side SSRF_BREAKOUT + XXE_BREAKOUT parse-proofs (the BLOCK-worthy unambiguous
+    # subset of the SSRF/XXE LEADs — cloud-metadata host / dangerous scheme; a complete external-entity
+    # DOCTYPE — keyed on `request_payload`, never in the frozen fallback; the softer cases stay LEADs and the
+    # response-side/OOB proofs stay distinct classes): 50 -> 52.)
+    assert len(OracleKind) == 52
     assert {k.name for k in OracleKind} == _FROZEN_15 | _ADDITIVE
     assert set(V._ALL_ORACLES) == set(OracleKind) - {OracleKind[n] for n in _ADDITIVE}
 
