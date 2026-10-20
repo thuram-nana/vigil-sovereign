@@ -652,3 +652,90 @@ def test_negctl_time_based_command_injection_uniformly_slow_mints_nothing(monkey
     ref = _fact(monkeypatch, tmp_path, "http://127.0.0.1:{port}/time-safe?host=seed",
                 "time_based_command_injection", handler=_InjApp)
     assert ref is None, "a uniformly slow endpoint must not mint a time_based_command_injection FACT"
+
+
+# --- csp_posture: the PASSIVE header-posture FACT (one gated GET + a parse of the enforced CSP header) ------
+
+def test_redrive_spec_emits_a_csp_spec_for_csp_posture_and_aliases():
+    from vigil_integration.live.engine import VigilEngine
+    for claimed in ("csp_posture", "permissive_csp", "csp_weakness", "content_security_policy"):
+        spec = VigilEngine._redrive_spec(_decision(claimed, url="http://127.0.0.1:19010/"), None)
+        assert spec is not None and spec["kind"] == "csp" and spec["bug_class"] == "csp_posture", \
+            f"{claimed} must route to the csp spec; got {spec}"
+
+
+class _CspApp(http.server.BaseHTTPRequestHandler):
+    CSP = None
+    CSP2 = None
+    REPORT_ONLY = False
+
+    def do_GET(self):  # noqa: N802
+        body = b"<!doctype html><title>x</title>"
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        if self.CSP is not None:
+            self.send_header("Content-Security-Policy-Report-Only" if self.REPORT_ONLY
+                             else "Content-Security-Policy", self.CSP)
+        if self.CSP2 is not None:
+            self.send_header("Content-Security-Policy", self.CSP2)
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *a):  # noqa: ANN002
+        return
+
+
+def _csp_handler(csp, *, csp2=None, report_only=False):
+    return type("_H", (_CspApp,), {"CSP": csp, "CSP2": csp2, "REPORT_ONLY": report_only})
+
+
+def _csp_ref(monkeypatch, tmp_path, handler):
+    _grant_active_recon(monkeypatch)
+    _charter(tmp_path, "127.0.0.1")
+    from vigil_integration.live.wiring import _live_csp_redrive_fact
+    srv = _serve(handler)
+    port = srv.server_address[1]
+    try:
+        return _live_csp_redrive_fact(_prov(), {},
+                                      {"kind": "csp", "url": f"http://127.0.0.1:{port}/", "bug_class": "csp_posture"})
+    finally:
+        srv.shutdown()
+
+
+def test_live_csp_permissive_header_mints_a_fact(monkeypatch, tmp_path):
+    ref = _csp_ref(monkeypatch, tmp_path, _csp_handler("script-src 'unsafe-inline'; object-src 'none'"))
+    assert ref, "an enforced permissive script-src (unsafe-inline, no nonce) must mint a signed csp_posture FACT"
+
+
+def test_negctl_csp_wellformed_nonce_mints_nothing(monkeypatch, tmp_path):
+    ref = _csp_ref(monkeypatch, tmp_path, _csp_handler("script-src 'nonce-staticNonceABC'; object-src 'none'"))
+    assert ref is None, "a well-formed nonce policy must not mint a csp_posture FACT"
+
+
+def test_negctl_csp_neutralized_unsafe_inline_mints_nothing(monkeypatch, tmp_path):
+    ref = _csp_ref(monkeypatch, tmp_path, _csp_handler("script-src 'nonce-staticNonceABC' 'unsafe-inline'"))
+    assert ref is None, "nonce-neutralized unsafe-inline (CSP3) must not mint a csp_posture FACT"
+
+
+def test_negctl_csp_report_only_mints_nothing(monkeypatch, tmp_path):
+    ref = _csp_ref(monkeypatch, tmp_path, _csp_handler("script-src 'unsafe-inline'", report_only=True))
+    assert ref is None, "a report-only header enforces nothing and must not mint a csp_posture FACT"
+
+
+def test_negctl_csp_multiple_enforced_policies_mints_nothing(monkeypatch, tmp_path):
+    # DECISIVE benign-faker control: permissive FIRST policy + restrictive SECOND. The browser enforces the
+    # INTERSECTION (inline blocked by the nonce policy), so the posture is NOT weak → the multi-enforced-header
+    # guard must fail closed. This is the one benign origin that would mint a FALSE FACT without the guard.
+    ref = _csp_ref(monkeypatch, tmp_path,
+                   _csp_handler("script-src 'unsafe-inline'", csp2="script-src 'nonce-staticNonceABC'"))
+    assert ref is None, "two enforced policies (restrictive intersection) must not mint a FALSE csp_posture FACT"
+
+
+def test_negctl_csp_out_of_scope_mints_nothing(monkeypatch, tmp_path):
+    _grant_active_recon(monkeypatch)
+    _charter(tmp_path, "127.0.0.1")
+    from vigil_integration.live.wiring import _live_csp_redrive_fact
+    ref = _live_csp_redrive_fact(_prov(), {},
+                                 {"kind": "csp", "url": "http://10.99.99.99/", "bug_class": "csp_posture"})
+    assert ref is None, "an out-of-scope host is refused by the gate (no channel) → never a FACT"

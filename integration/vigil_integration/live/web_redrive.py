@@ -45,6 +45,13 @@ LLM_CLAIM_WEB_FACT_CLASSES = tuple(c for c in WEB_FACT_CLASSES if c != "oidc_red
 # is byte-identical to a plain open_redirect, so the OIDC label would rest entirely on the scanner's say-so).
 SCANNER_CLAIM_WEB_FACT_CLASSES = LLM_CLAIM_WEB_FACT_CLASSES
 
+# PASSIVE header-posture re-drive classes — NOT canary-injection classes (WEB_FACT_CLASSES). csp_posture is a
+# SINGLE gated GET + a pure parse of the RETAINED enforced CSP response header (scanner.csp_bypass.
+# capture_csp_posture -> verify.oracles.csp_posture_oracle), admitted to the FACT-capable
+# csp_posture.header_weakness branch. Kept SEPARATE so web_redrive's "inject VIGIL's own canary" contract is
+# untouched; the producer (engine._redrive_spec) and the seam (wiring._live_csp_redrive_fact) gate on THIS set.
+CSP_REDRIVE_CLASSES = ("csp_posture",)
+
 # Common scanner spellings → the canonical WEB_FACT_CLASS. Kept SMALL and EXACT (a fuzzy hint could re-drive
 # an endpoint the report did not implicate — worst case a wasted gated burst, since the oracle must still fire,
 # but keep it precise). Applied AFTER lower-casing and hyphen/space→underscore normalisation.

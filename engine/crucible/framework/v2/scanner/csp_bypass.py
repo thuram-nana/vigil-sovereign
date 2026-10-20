@@ -190,6 +190,14 @@ def capture_csp_posture(
     well-formed nonce policy, a report-only header, or a header with no effective script-src does
     NOT fire."""
     headers = response_headers if response_headers is not None else _gated_fetch_headers(url, timeout=timeout)
+    # MULTI-POLICY FAIL-CLOSED (belt-and-braces mirror of wiring._live_csp_redrive_fact's guard): >1 ENFORCED
+    # Content-Security-Policy header ⇒ the browser enforces their INTERSECTION, which this single-header parse
+    # (_extract_csp reads only the first) cannot judge, so fail closed (no weaknesses) rather than fire on the
+    # first policy alone — protects the scanner path + any future proof.run wiring, not only the live seam.
+    if len(_header_message(headers).get_all("Content-Security-Policy") or []) > 1:
+        ctx = FindingContext.from_csp_control(
+            {"rule": "permissive_script_src", "url": url, "header": "", "report_only": False})
+        return CspPostureResult(url=url, header="", report_only=False, weaknesses=[], context=ctx)
     header, report_only = _extract_csp(headers)
     control = {"rule": "permissive_script_src", "url": url, "header": header, "report_only": report_only}
     ctx = FindingContext.from_csp_control(control)

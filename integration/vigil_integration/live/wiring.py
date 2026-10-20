@@ -1916,6 +1916,15 @@ def _build_oracle(
         if web_ref:
             return web_ref
 
+        # T2 — CSP POSTURE RE-DRIVE (csp_posture): a SINGLE passive gated GET + a pure parse of the retained
+        # enforced CSP header (capture_csp_posture → csp_posture_oracle), admitted to the FACT-capable
+        # csp_posture.header_weakness branch via provenance="live_redrive". A gate refusal / no channel / no
+        # enforced CSP / report-only / nonce-neutralized / strict-dynamic / MULTIPLE enforced policies all
+        # yield None → the claim stays a LEAD below (fail-closed).
+        csp_ref = _live_csp_redrive_fact(prov, info, redrive)
+        if csp_ref:
+            return csp_ref
+
         # T2 — RUNTIME RE-DRIVE (path_traversal / reflected xss / exposure / ssi): route through the runner-owned
         # runtime_redrive engine (gated send → the matching deterministic oracle → per-branch admit →
         # certify_admitted provenance="live_redrive"). A non-confirmation stays a LEAD below (fail-closed).
@@ -2159,6 +2168,56 @@ def _live_web_redrive_fact(prov: Provisioned, info: dict, redrive: Optional[dict
         except Exception:  # noqa: BLE001 — a malformed result entry is skipped, never crashes the seam
             continue
     return None    # family verdict said FACT but no matching signed cert surfaced → LEAD (fail-closed)
+
+
+def _live_csp_redrive_fact(prov: Provisioned, info: dict, redrive: Optional[dict]) -> Optional[str]:
+    """T2 — PASSIVE CSP-posture re-drive. ONE plain gated GET of the claimed URL (NO canary), parse the
+    RETAINED enforced Content-Security-Policy response header with scanner.csp_bypass.capture_csp_posture, and
+    mint a signed csp_posture FACT via the FACT-capable ``csp_posture.header_weakness`` branch ONLY when the
+    deterministic ``csp_posture_oracle`` fires over VIGIL's OWN gated capture (an enforced script-src with a
+    real permissive weakness a browser honors). A gate refusal / no channel / no enforced CSP header / a
+    report-only or nonce-neutralized or strict-dynamic policy / MULTIPLE enforced CSP headers (the effective
+    posture is their intersection, which this single-header oracle does not compute) all yield None → the
+    claim stays a LEAD (fail-closed). The out-of-scope case is refused by the per-request gate INSIDE ``send``
+    (no channel → None). The LLM's claimed oracle_context is never read for the fact (the mint rests on
+    VIGIL's gated capture). FATAL-2: framework imports are function-local."""
+    if not isinstance(redrive, dict):
+        return None
+    url = str(redrive.get("url") or "").strip()
+    if not url:
+        return None
+    try:
+        from framework.v2.scanner.csp_bypass import capture_csp_posture, csp_posture_finding  # noqa: PLC0415
+        from framework.v2.scanner.insertion import HttpRequest  # noqa: PLC0415
+        from framework.v2.verify.verifier import normalize_bug_class  # noqa: PLC0415
+        from .web_redrive import CSP_REDRIVE_CLASSES, _gated_web_send  # noqa: PLC0415 (framework at CALL)
+    except Exception:  # noqa: BLE001 — module unavailable ⇒ cannot re-drive → LEAD (fail-closed)
+        return None
+    claimed = normalize_bug_class(str(redrive.get("bug_class") or info.get("bug_class") or ""))
+    if claimed not in CSP_REDRIVE_CLASSES:
+        return None    # not a csp-posture class → nothing for this seam to confirm → LEAD
+    try:
+        send, state = _gated_web_send(prov.slug)
+        resp = send(HttpRequest(method="GET", url=url))
+    except Exception:  # noqa: BLE001 — any transport/re-drive error is an unconfirmed claim → LEAD
+        return None
+    if state.get("channels", 0) < 1:
+        return None    # VIGIL's own gated GET reached no channel (gate refusal / transport error) → LEAD
+    headers = (resp.get("headers") or []) if isinstance(resp, dict) else []
+    # MULTI-POLICY FAIL-CLOSED (benign-faker guard). >1 ENFORCED Content-Security-Policy header ⇒ the browser
+    # enforces their INTERSECTION (a script must satisfy EVERY policy), so a permissive FIRST policy beside a
+    # restrictive SECOND is NOT a real posture weakness. The single-header csp_posture_oracle reads only the
+    # first, so refuse to mint here and keep the claim a LEAD (an honest LEAD beats a benign-fakeable FACT).
+    enforced = [v for (k, v) in headers if str(k).strip().lower() == "content-security-policy"]
+    if len(enforced) > 1:
+        return None
+    result = capture_csp_posture(url, response_headers=headers)   # FRESH context — the LLM's is discarded
+    finding = csp_posture_finding(result)
+    observed = {"retained_csp_header": bool((result.header or "").strip())}
+    try:
+        return _admit_and_mint(finding, prov=prov, provenance="live_redrive", observed=observed)
+    except Exception:  # noqa: BLE001 — a cert/admission error confirms nothing (fail-closed)
+        return None
 
 
 def _live_runtime_redrive_fact(prov: Provisioned, info: dict, redrive: Optional[dict]) -> Optional[str]:

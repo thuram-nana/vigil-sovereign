@@ -832,6 +832,19 @@ class VigilEngine:
             full = target if "://" in target else "http://" + target
             return {"kind": "web", "url": full, "bug_class": bug_class}
 
+        # CSP-POSTURE passive re-drive (csp_posture): a PASSIVE header-posture class (one gated GET + a parse of
+        # the retained enforced CSP header), NOT a canary injection — so it is its OWN spec kind + dispatch set,
+        # distinct from the WEB_FACT canary classes above. The seam (wiring._live_csp_redrive_fact) needs only
+        # the URL. normalize_bug_class already folds the CSP spellings (content_security_policy / csp_weakness /
+        # csp_misconfiguration / permissive_csp) onto csp_posture.
+        try:
+            from .web_redrive import CSP_REDRIVE_CLASSES  # noqa: PLC0415 — import-clean tuple (FATAL-2)
+        except Exception:  # noqa: BLE001 — module unavailable ⇒ no csp re-drive (other paths work)
+            CSP_REDRIVE_CLASSES = ()
+        if bug_class in CSP_REDRIVE_CLASSES:
+            full = target if "://" in target else "http://" + target
+            return {"kind": "csp", "url": full, "bug_class": bug_class}
+
         # RUNTIME response-derived classes (path_traversal / reflected xss / exposure / ssi + the W2
         # statistical/eval injection classes ssti / boolean_sqli / time_based_sqli): the runner-owned
         # runtime_redrive engine needs only the URL (it crafts the probe + runs the matching oracle, and for
