@@ -360,6 +360,28 @@ class EngineConfig:
     oob_relay_host: str = ""
     oob_advertise_base_url: str = ""
     oob_dns_collector_pubkey: str = ""
+    # ACCESS-CONTROL AUTONOMOUS IDENTITY-FEEDER — deployment config; DEFAULT OFF ⇒ fail-closed LEAD. The
+    # governed access-control re-drive seam (``_live_access_control_redrive_fact``) mints a signed FACT ONLY
+    # when fed the TRUSTED two-identity material; these fields PROVISION that material for a governed engage,
+    # mirroring the OOB feeder. ``access_control_enable`` is the master switch — OFF (the default) ⇒ no
+    # material is threaded and an idor/bola/bfla/mass_assignment claim stays a LEAD, byte-identical to today.
+    # ``access_control_material`` is the deployment-provisioned identity bundle, SOURCED FROM A TRUSTED
+    # DEPLOYMENT CHANNEL, NEVER from the model. Shape:
+    #   {"victim_headers": tuple[tuple[str,str],...],     # the owner identity (authoritative ground truth)
+    #    "attacker_headers": tuple[tuple[str,str],...],   # a DISTINCT authenticated attacker — MUST differ
+    #    "unauth_headers": tuple[tuple[str,str],...],     # the round-4/5 unauthorized-authenticated principal
+    #    "cross_specs": tuple of objects with attrs bug_class/ref_param/victim_ref/victim_discriminator/control_ref,
+    #    "mass_assignment": object or None,               # the mass-assignment write descriptor
+    #    "mutating_send": callable or None}               # the 0.3 owner-signed per-action write approval
+    # Session cookies / bearer tokens live in this deployment secret. RESIDUAL (named, defense-in-depth): the
+    # per-class victim_discriminator is NOT YET cross-checked against an owner-signed authority field (that
+    # needs a new signed field on vigil_core.EngagementAuthority — a crypto-sensitive follow-on). The arm's own
+    # logged-out + same-shape unauthorized-authenticated baselines already defeat a PUBLIC/reflected datum, and
+    # the feeder enforces DISTINCT identities + a verified owner authority, so a benign ORIGIN cannot fake the
+    # FACT; the authority-field cross-check would additionally bind the discriminator's privacy to the owner
+    # signature. ON only when identities are provisioned — never a default.
+    access_control_enable: bool = False
+    access_control_material: Optional[dict] = None
 
 
 def _offense_scope_source(slug: str, trust_root: Any):
@@ -817,8 +839,15 @@ def build_engine(config: EngineConfig) -> VigilEngine:
         # honoured (mirrors _offense_scope_source). Default-off ⇒ None ⇒ an OOB claim stays a LEAD.
         return _governed_oob_material(prov, config)
 
+    def _access_control_material_provider() -> Optional[dict]:
+        # The TRUSTED governed-engage access-control identity material (deployment-provisioned two-identity
+        # bundle + the owner-attested discriminator / cross-specs), gated on a verified owner authority. Re-read
+        # per call so a mid-engagement authority re-sign is honoured. Default-off ⇒ None ⇒ the claim stays a LEAD.
+        return _governed_access_control_material(prov, config)
+
     oracle = _build_oracle(prov, redrive_executor_factory=_redrive_executor_factory,
-                           oob_material_provider=_oob_material_provider)
+                           oob_material_provider=_oob_material_provider,
+                           access_control_material_provider=_access_control_material_provider)
 
     # -- per-session knowledge graph (F3): the partition key is the SESSION id (falls back to the slug),
     # so each session owns a disjoint Neo4j partition + accumulates its own prior context. graph_writer is
@@ -1866,11 +1895,132 @@ def _with_trusted_oob_material(redrive: "Optional[dict]",
     return base
 
 
+def _governed_access_control_material(prov: Provisioned, config: "EngineConfig") -> "Optional[dict]":
+    """Build the TRUSTED two-identity access-control material bundle the governed access-control re-drive seam
+    (:func:`_live_access_control_redrive_fact`) needs to mint a signed idor/bola/bfla/mass_assignment FACT,
+    SOURCED ENTIRELY from the deployment-provisioned ``config.access_control_material`` + gated on a VERIFIED
+    owner-signed engagement authority. The bundle NEVER comes from the model (``engine._redrive_spec`` emits
+    class + url only — the triple-lock). Returns ``None`` (⇒ the claim stays a LEAD, fail-closed) unless EVERY
+    condition holds:
+
+      * ``config.access_control_enable`` is True — the deployment master switch (OFF by default);
+      * ``config.access_control_material`` supplies ``victim_headers`` AND ``attacker_headers`` that are
+        NON-EMPTY and DISTINCT (two different principals — same headers ⇒ a self-read, refused) AND
+        ``unauth_headers`` (the round-4/5 same-shape unauthorized-authenticated baseline the arm requires);
+      * at least one usable consumer is provisioned: a non-empty ``cross_specs`` (idor/bola/bfla) OR a
+        ``mass_assignment`` descriptor;
+      * a VERIFIED owner-signed engagement authority loads for ``prov.slug`` (the owner-attestation gate —
+        the engagement is owner-authorized; mirrors the OOB precondition that the authority loads/verifies).
+
+    RESIDUAL (named, defense-in-depth): the per-class ``victim_discriminator`` is not yet cross-checked against
+    an owner-signed authority field (a crypto-sensitive follow-on adding a signed field to
+    vigil_core.EngagementAuthority). The arm's own logged-out + same-shape baselines already structurally defeat
+    a PUBLIC/reflected datum, and this feeder enforces DISTINCT identities + a verified authority, so a benign
+    ORIGIN cannot fake the FACT. FATAL-2: every framework import is function-local. Any load/verify error ⇒
+    ``None`` (never raises into the oracle seam)."""
+    if not getattr(config, "access_control_enable", False):
+        return None    # deployment master switch OFF (default) ⇒ no material ⇒ access-control stays a LEAD
+    material = getattr(config, "access_control_material", None)
+    if not isinstance(material, dict) or not material:
+        return None    # no provisioned identity bundle ⇒ no material, no FACT
+    victim_headers = tuple(material.get("victim_headers") or ())
+    attacker_headers = tuple(material.get("attacker_headers") or ())
+    unauth_headers = tuple(material.get("unauth_headers") or ())
+    cross_specs = tuple(material.get("cross_specs") or ())
+    mass_assignment = material.get("mass_assignment")
+    # Two DISTINCT authenticated identities are MANDATORY: without a distinct attacker the cross-read collapses
+    # onto the anonymous baseline (cannot prove a cross-IDENTITY read); identical headers would be a self-read.
+    if not victim_headers or not attacker_headers or tuple(victim_headers) == tuple(attacker_headers):
+        return None
+    # The round-4/5 same-shape unauthorized-authenticated baseline is the DECISIVE anti-reflection reference;
+    # without it the cross-read downgrades to a LEAD in the arm, so refuse to provision rather than drive it.
+    if not unauth_headers:
+        return None
+    if not cross_specs and mass_assignment is None:
+        return None    # nothing to adjudicate ⇒ no material
+    try:
+        from framework.v2.authority.gate import load_authority_for_gate  # noqa: PLC0415 (framework at CALL)
+        # The owner-attestation gate: a VERIFIED (threshold-signed) authority must exist for this engagement,
+        # exactly the OOB precondition. A missing / unverifiable authority ⇒ not owner-authorized ⇒ LEAD.
+        load_authority_for_gate(prov.slug, trust_root=prov.trust_root)
+    except Exception:  # noqa: BLE001 — an unverifiable / absent authority cannot provision access-control ⇒ LEAD
+        return None
+    bundle: dict = {
+        "victim_headers": victim_headers,
+        "attacker_headers": attacker_headers,
+        "unauth_headers": unauth_headers,
+        "cross_specs": cross_specs,
+        "mass_assignment": mass_assignment,
+        "mutating_send": material.get("mutating_send"),
+    }
+    return bundle
+
+
+_ACCESS_CONTROL_MATERIAL_KEYS = (
+    "victim_headers", "attacker_headers", "unauth_headers", "cross_specs",
+    "mass_assignment", "mutating_send", "access_control_material",
+)
+
+
+def _spec_is_access_control_consumable(redrive: dict, info: "Optional[dict]" = None) -> bool:
+    """True iff :func:`_live_access_control_redrive_fact` would treat this spec as an access-control-redrive
+    class — the SAME surface the consumer gates on (``kind == "access_control"`` OR
+    ``bug_class ∈ ACCESS_CONTROL_FACT_CLASSES``). Mirrors :func:`_spec_is_oob_consumable`: the inject scope
+    equals the consume scope, and the strip is unconditional regardless, so widening the inject scope can never
+    pass producer material."""
+    if redrive.get("kind") == "access_control":
+        return True
+    try:
+        from framework.v2.verify.verifier import normalize_bug_class  # noqa: PLC0415
+        from .access_control_redrive import ACCESS_CONTROL_FACT_CLASSES  # noqa: PLC0415 (framework at CALL)
+    except Exception:  # noqa: BLE001 — module unavailable ⇒ not consumable ⇒ no injection (fail-closed)
+        return False
+    bug_class = redrive.get("bug_class")
+    if not bug_class and isinstance(info, dict):
+        bug_class = info.get("bug_class")     # mirror the consumer's `redrive OR info` resolution exactly
+    return normalize_bug_class(str(bug_class or "")) in ACCESS_CONTROL_FACT_CLASSES
+
+
+def _with_trusted_access_control_material(redrive: "Optional[dict]",
+                                          provider: "Optional[Callable[[], Optional[dict]]]",
+                                          info: "Optional[dict]" = None) -> "Optional[dict]":
+    """Return the redrive spec with its access-control identity material sourced SOLELY from the trusted
+    ``provider`` (the governed-engage feeder). The identity half of the triple-lock, and a TRUE independent
+    lock: it UNCONDITIONALLY strips any producer-supplied identity keys (``victim_headers`` / ``attacker_headers``
+    / ``unauth_headers`` / ``cross_specs`` / ``mass_assignment`` / ``mutating_send`` / ``access_control_material``)
+    from EVERY spec — of ANY ``kind`` — because the consumer gates on ``bug_class ∈ ACCESS_CONTROL_FACT_CLASSES``,
+    not on ``kind``. ``engine._redrive_spec`` never sets these keys, so in production (and default-off, no
+    feeder) this is a byte-identical no-op; the strip is pure defense-in-depth. When a feeder is wired it sets
+    ONLY the feeder's bundle under ``access_control_material``, so the TRUSTED channel is the SOLE source. A
+    missing provider, or a feeder that yields nothing, leaves the seam with NO material ⇒ the claim stays a
+    LEAD (fail-closed). Never raises (a feeder error ⇒ no material). A model-authored discriminator / headers
+    can therefore NEVER reach the arm."""
+    if not isinstance(redrive, dict):
+        return redrive
+    had_material = any(k in redrive for k in _ACCESS_CONTROL_MATERIAL_KEYS)
+    consumable = _spec_is_access_control_consumable(redrive, info)
+    if not had_material and (provider is None or not consumable):
+        return redrive
+    # Lock STRIP — unconditional: remove ANY producer-supplied identity material (keyed on NOTHING, so it
+    # covers every spec of every kind, closing the strip-on-kind / consume-on-bug_class mismatch).
+    base = {k: v for k, v in redrive.items() if k not in _ACCESS_CONTROL_MATERIAL_KEYS}
+    if provider is None or not consumable:
+        return base                         # strip-only: producer material removed, no trusted source ⇒ LEAD
+    try:
+        material = provider()
+    except Exception:  # noqa: BLE001 — a feeder error ⇒ no material ⇒ LEAD (fail-closed)
+        return base
+    if isinstance(material, dict) and material:
+        base["access_control_material"] = material   # the TRUSTED feeder bundle is the SOLE source of the key
+    return base
+
+
 def _build_oracle(
     prov: Provisioned,
     *,
     redrive_executor_factory: Optional[Callable[[str], Any]] = None,
     oob_material_provider: Optional[Callable[[], Optional[dict]]] = None,
+    access_control_material_provider: Optional[Callable[[], Optional[dict]]] = None,
 ) -> Callable[..., Optional[str]]:
     """The CRUCIBLE oracle seam. Returns a signed certificate's finding ref ONLY on a real confirmation
     (else None ⇒ the claim stays a LEAD).
@@ -1977,6 +2127,23 @@ def _build_oracle(
                                          _with_trusted_oob_material(redrive, oob_material_provider, info))
         if oob_ref:
             return oob_ref
+
+        # T2 — ACCESS-CONTROL RE-DRIVE (idor / bola / bfla / mass_assignment): mint ONLY from the TRUSTED
+        # two-identity material (victim + attacker + unauth header bundles + the owner-attested victim-unique
+        # discriminator / cross-specs, and the 0.3-gated mass-assignment write) carried on the TRUSTED redrive
+        # spec (never the model), confirmed by the predicate oracle over VIGIL's OWN gated cross-read capture.
+        # The LLM-claim path carries no material (engine._redrive_spec emits class+url only), so this returns
+        # None and the claim stays a LEAD below — no material, no FACT. _with_trusted_access_control_material is
+        # the SOLE writer of the material key: it UNCONDITIONALLY strips any producer-supplied identity material
+        # from EVERY spec (of any kind — the consumer gates on bug_class, not kind) and sets only the feeder's
+        # bundle (or none when access-control is unprovisioned). No feeder wired (the default) ⇒ no material ⇒
+        # the seam fail-closes to a LEAD, byte-identical to today. The arm itself refuses without a distinct
+        # attacker identity / the unauthorized-authenticated same-shape baseline / a victim-unique ref-
+        # independent discriminator, so a model-authored discriminator can never mint.
+        ac_ref = _live_access_control_redrive_fact(
+            prov, info, _with_trusted_access_control_material(redrive, access_control_material_provider, info))
+        if ac_ref:
+            return ac_ref
 
         # LEAD-ONLY fallback (AUDIT G4): a boolean/other-class candidate, or an error_based_sqli whose live
         # re-drive did not reproduce, lands here. The deterministic oracle still runs so the LEAD is honestly
@@ -2483,6 +2650,69 @@ def _live_oob_redrive_fact(prov: Provisioned, info: dict, redrive: Optional[dict
     try:
         rr = oob_callback_redrive(url, slug=prov.slug, engagement_slug=prov.slug, signers=prov.signers,
                                   oob_material=material)
+    except Exception:  # noqa: BLE001 — any re-drive/transport/cert error is an unconfirmed claim → LEAD
+        return None
+    try:
+        if rr.family_verdict(claimed) != "FACT":
+            return None
+    except Exception:  # noqa: BLE001 — cannot read the verdict ⇒ treat as unconfirmed → LEAD
+        return None
+    for f in getattr(rr, "facts", []) or []:
+        try:
+            if getattr(f, "is_fact", False) and normalize_bug_class(getattr(f, "bug_class", "")) == claimed:
+                ref = str(getattr(f, "finding_ref", "") or "")
+                if ref:
+                    return ref
+        except Exception:  # noqa: BLE001 — a malformed result entry is skipped, never crashes the seam
+            continue
+    return None    # family verdict said FACT but no matching signed cert surfaced → LEAD (fail-closed)
+
+
+def _live_access_control_redrive_fact(prov: Provisioned, info: dict, redrive: Optional[dict]) -> Optional[str]:
+    """DRIVE the ACCESS-CONTROL re-drive (``idor`` / ``bola`` / ``bfla`` / ``mass_assignment``) through the
+    runner-owned :mod:`live.access_control_redrive` arm and return a signed FACT's ``finding_ref`` ONLY when the
+    deterministic predicate oracle confirms CAUSATION over VIGIL's OWN gated cross-read capture: an attacker
+    identity reaching a victim-unique, ref-independent discriminator that is ABSENT from a SAME-SHAPE
+    unauthorized-authenticated peer render, from the attacker's own control object, and from a logged-out
+    baseline (or, for mass_assignment, a privileged field PERSISTED into the authoritative owner readback via
+    the 0.3-gated ``mutating_send``).
+
+    Mirrors :func:`_live_oob_redrive_fact`: the TRUSTED two-identity material (``access_control_material``: the
+    victim/attacker/unauth header bundles + the cross-specs carrying the owner-attested victim-unique
+    discriminator + the mass-assignment write descriptor) is MANDATORY and arrives ONLY on the TRUSTED redrive
+    spec (never the model's ``extracted_info``). ``engine._redrive_spec`` — whose only inputs are LLM-derived —
+    emits class + url ONLY (the triple-lock: the router emits no identity material), so on the LLM-claim path
+    ``access_control_material`` is ABSENT and this seam returns ``None`` (the claim stays a LEAD): no material,
+    no FACT. A gate refusal / no distinct attacker / no unauthorized-authenticated same-shape baseline / an
+    oracle non-fire all yield a non-FACT → None → LEAD (fail-closed). FATAL-2: every framework/arm import is
+    function-local."""
+    if not isinstance(redrive, dict):
+        return None
+    url = str(redrive.get("url") or "").strip()
+    material = redrive.get("access_control_material")
+    # The TRUSTED two-identity material is MANDATORY and comes ONLY from a trusted channel on the spec. Absent
+    # (the LLM-claim path) ⇒ fail-closed here, BEFORE any re-drive: no material, no FACT. The arm refuses too,
+    # but refusing here keeps the model's assertion from even driving traffic.
+    if not url or not isinstance(material, dict) or not material:
+        return None
+    try:
+        from framework.v2.verify.verifier import normalize_bug_class  # noqa: PLC0415
+        from .access_control_redrive import (  # noqa: PLC0415 (framework at CALL — FATAL-2)
+            ACCESS_CONTROL_FACT_CLASSES, access_control_redrive)
+    except Exception:  # noqa: BLE001 — module unavailable ⇒ cannot re-drive → LEAD (fail-closed)
+        return None
+    claimed = normalize_bug_class(str(redrive.get("bug_class") or info.get("bug_class") or ""))
+    if claimed not in ACCESS_CONTROL_FACT_CLASSES:
+        return None    # not an access-control-redrive class → nothing for this seam to confirm → LEAD
+    try:
+        rr = access_control_redrive(
+            url, slug=prov.slug, engagement_slug=prov.slug, signers=prov.signers,
+            cross_specs=tuple(material.get("cross_specs") or ()),
+            victim_headers=tuple(material.get("victim_headers") or ()),
+            attacker_headers=tuple(material.get("attacker_headers") or ()),
+            unauth_headers=tuple(material.get("unauth_headers") or ()),
+            mass_assignment=material.get("mass_assignment"),
+            mutating_send=material.get("mutating_send"))
     except Exception:  # noqa: BLE001 — any re-drive/transport/cert error is an unconfirmed claim → LEAD
         return None
     try:

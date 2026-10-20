@@ -910,6 +910,26 @@ class VigilEngine:
             full = target if "://" in target else "http://" + target
             return {"kind": "oob", "url": full, "bug_class": bug_class}
 
+        # ACCESS-CONTROL re-drive (idor / bola / bfla / mass_assignment): the two-identity achieved-state
+        # ceremony adjudicated by the predicate oracle over VIGIL's OWN gated cross-read capture. The TWO
+        # owner-attested identities (victim + attacker + unauth header bundles), the owner-signed victim-unique
+        # discriminator / cross-specs, and the 0.3-gated mass-assignment write (mutating_send) are NEVER
+        # model-derived, and this router's ONLY inputs are LLM-derived (tool args + the LLM's analysis), so it
+        # emits the class + url ONLY (the triple-lock: the router emits no identity material). The material is
+        # threaded to the arm by the dedicated wiring._live_access_control_redrive_fact seam from a TRUSTED
+        # channel (EngineConfig deployment secret + the owner-signed authority), and the arm + oracle REFUSE
+        # without a distinct attacker identity / the unauthorized-authenticated same-shape baseline / a
+        # victim-unique ref-independent discriminator, so on the LLM-claim path this is fail-closed (no
+        # material, no FACT). ADDITIVE: a separate dispatch set + the "access_control" spec kind, so the
+        # arms above are untouched and make gate stays byte-identical. The seam re-normalizes + re-gates.
+        try:
+            from .access_control_redrive import ACCESS_CONTROL_FACT_CLASSES  # noqa: PLC0415 — tuple (FATAL-2)
+        except Exception:  # noqa: BLE001 — module unavailable ⇒ no access-control re-drive (other paths work)
+            ACCESS_CONTROL_FACT_CLASSES = ()
+        if bug_class in ACCESS_CONTROL_FACT_CLASSES:
+            full = target if "://" in target else "http://" + target
+            return {"kind": "access_control", "url": full, "bug_class": bug_class}
+
         # DOM ACHIEVED-STATE classes (dom_xss / prototype_pollution): the runner-owned browser arms
         # (live.dom_redrive) craft VIGIL's OWN canary/gadget and judge VIGIL's OWN egress-gated headless-DOM
         # capture — the model proposes only url + param. ADDITIVE: a separate dispatch set + the "dom" spec
