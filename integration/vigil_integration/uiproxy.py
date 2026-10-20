@@ -2246,6 +2246,14 @@ def _child_env() -> dict:
     # serve_forever; with a PIPE (a fresh box), CPython block-buffers that ~200-byte line and _await_token
     # would hang the full cockpit-timeout before aborting. PYTHONUNBUFFERED forces the flush.
     env["PYTHONUNBUFFERED"] = "1"
+    # HOT-RELOAD of the Anthropic key: tell the managed offense engine it may re-read the CURRENT persisted
+    # key (~/.sigil/sigil.env) at think time instead of its spawn-frozen env, so a key re-sealed through the
+    # UI reaches the RUNNING engine with no Stop->Start (think_claude._resolve_key gates on this flag). Scoped
+    # to uiproxy-spawned children only — a test or a bare-shell `vigil engage` never sets it and keeps the
+    # plain-env behaviour. Not a secret and not a settings-plane var, so the config/offense allowlists are
+    # untouched. The plaintext sigil.env backend hot-reloads; a keyring/TPM-vault secret still needs a
+    # Start-offense (the offense cannot unseal the sovereign vault).
+    env["VIGIL_LIVE_KEY_RELOAD"] = "1"
     return env
 
 
