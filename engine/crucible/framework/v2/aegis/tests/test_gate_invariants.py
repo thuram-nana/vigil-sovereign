@@ -120,7 +120,12 @@ _FROZEN_15 = frozenset({
 # BUG_CLASS_ORACLES rows.
 _ADDITIVE = frozenset({
     "PROMPT_INJECTION", "SYSTEM_PROMPT_DISCLOSURE", "AUTOMATED_ACCESS", "CREDENTIAL_STUFFING",
-    "SQL_INJECTION_BREAKOUT", "COMMAND_INJECTION_BREAKOUT", "NOSQL_INJECTION_BREAKOUT", "K8S_POSTURE",
+    "SQL_INJECTION_BREAKOUT", "COMMAND_INJECTION_BREAKOUT", "NOSQL_INJECTION_BREAKOUT",
+    # Request-side directory-traversal / LFI parse-proof — the request-side sibling of the three parse-proof
+    # kinds above (keyed on the SAME `request_payload` ctx field no benchmark/scan finding carries), DISTINCT
+    # from the response-side SIDE_EFFECT path_traversal/lfi leak-proof; never in the frozen fallback.
+    "PATH_TRAVERSAL_BREAKOUT",
+    "K8S_POSTURE",
     "K8S_WORKLOAD_POSTURE",
     "SSO_ASSERTION_FORGERY", "SAML_STRUCTURAL_FORGERY", "CLOUD_POSTURE", "MESH_POSTURE",
     "CICD_POSTURE", "MOBILE_POSTURE", "EMAIL_AUTH_POSTURE", "IDENTITY_POSTURE", "ACTIVE_EXPOSURE",
@@ -209,8 +214,11 @@ def test_every_additive_oraclekind_is_excluded_from_the_fallback():
     # CERTIFICATE_VALIDITY (TLS leaf validity window/identity/self-issuance, its own dedicated kind so
     # TLS_WEAKNESS's oracle_version is untouched): 47 -> 48. M-11.3 added CREDENTIAL_ACCEPTANCE (a target auth
     # accepted a planted should-be-rejected credential, re-derived offline; its own dedicated kind, LEAD-proposer
-    # tools only, refuses without the planted test corpus): 48 -> 49.)
-    assert len(OracleKind) == 49
+    # tools only, refuses without the planted test corpus): 48 -> 49. The request-side PATH_TRAVERSAL_BREAKOUT
+    # parse-proof (the request-side sibling of SQL/CMD/NOSQL break-out; keyed on `request_payload`, never in the
+    # frozen fallback — the response-side path_traversal/lfi leak-proof stays a distinct SIDE_EFFECT class):
+    # 49 -> 50.)
+    assert len(OracleKind) == 50
     assert {k.name for k in OracleKind} == _FROZEN_15 | _ADDITIVE
     assert set(V._ALL_ORACLES) == set(OracleKind) - {OracleKind[n] for n in _ADDITIVE}
 

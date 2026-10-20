@@ -261,7 +261,10 @@ def test_s3_guard_fires_on_a_known_but_rowless_class():
 
 def test_s3_frozen_oracle_counts_unchanged():
     assert len(V._ALL_ORACLES) == 15
-    assert len(list(OracleKind)) == 49
+    # The frozen unknown-class fallback stays EXACTLY 15; the enum grows only by ADDITIVE kinds reachable
+    # solely via explicit BUG_CLASS_ORACLES rows (PATH_TRAVERSAL_BREAKOUT, the request-side traversal
+    # parse-proof, took this 49 -> 50). The 15-vs-enum split is what must never drift.
+    assert len(list(OracleKind)) == 50
 
 
 # ===========================================================================

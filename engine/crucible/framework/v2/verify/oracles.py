@@ -31,7 +31,7 @@ from dataclasses import dataclass
 from html.parser import HTMLParser
 from statistics import median
 from typing import Any, Mapping, Sequence
-from urllib.parse import quote as _urlquote, urlsplit
+from urllib.parse import quote as _urlquote, unquote as _urlunquote, urlsplit
 
 from .models import OracleKind, OracleSignal
 
@@ -8877,6 +8877,90 @@ def nosql_injection_breakout_oracle(payload: Any, *, param: str = "") -> OracleS
         evidence=("no NoSQL operator-injection structure (a $-prefixed KNOWN query operator as a KEY where "
                   "a scalar was expected); a $ in text/a price/an operator-shaped string value is inert"),
         observed={"param": name})
+
+
+# ---------------------------------------------------------------------------
+# Request-side DIRECTORY-TRAVERSAL / LFI parse-proof oracle (the PATH_TRAVERSAL_BREAKOUT kind).
+#
+# The request-side sibling of the SQLi / cmd-injection / NoSQL break-out oracles above, and DISTINCT from
+# the response-side `path_traversal`/`lfi` classes (which prove EXPLOITATION from a leaked file in the
+# app's OWN answer via SIDE_EFFECT). Judged on the request VALUE ALONE, offline, deterministically — it
+# proves a STRUCTURED traversal ATTEMPT, never that the app is exploited (an app that canonicalises/chroots
+# is still safe). The failure mode here is a FALSE BLOCK of benign traffic, so the whole design is
+# near-zero-FP: a fire requires a TWO-PART AND that benign `../` traffic cannot satisfy.
+#
+# Curated, DOCUMENTED sensitive-target allowlist — the request-side mirror of inspect._PASSWD_ROOT_RE's
+# response-side discipline, pointed at the REQUEST. Each entry is a canonical high-value read target; the
+# list is explicit so a reviewer sees exactly what fires.
+_TRAVERSAL_SENSITIVE_TARGETS: tuple[str, ...] = (
+    "etc/passwd", "etc/shadow", "etc/hosts", "proc/self/environ", "proc/self/cmdline",
+    "windows/win.ini", "win.ini", "boot.ini", "windows/system32", ".ssh/id_rsa", ".aws/credentials",
+)
+# Fire pattern (over the DECODED, normalised value): a dot-dot escape `../` (also present as a substring of
+# `..\` once backslashes are folded, and of the `....//` obfuscation) that chains — through a path of
+# NON-WHITESPACE chars ONLY, so an unrelated prose `../` can never link across a space to a far-off
+# filename — into a sensitive target sitting on a path-SEGMENT boundary (the escape's own `/`, or an
+# intermediate directory ending in `/`), never mid-word. The trailing `(?![a-z0-9._-])` anchors the target
+# to a COMPLETE filename leaf — `.` and `-` count as name-continuation, so `etc/passwdx`, `win.inix`, AND a
+# benign suffixed sibling (`etc/passwd.bak`, `.ssh/id_rsa.pub` PUBLIC key, `.aws/credentials.example`
+# template) all stay inert; only the exact sensitive leaf fires, whether it ends the value or is followed by
+# `/`, a separator, or a NUL/control byte. BOTH halves in ONE contiguous path = near-zero-FP. Bounded
+# negated gap + a fixed alternation ⇒ linear-time (ReDoS-safe) on adversarial input.
+_TRAVERSAL_TARGET_ALT = "|".join(re.escape(t) for t in _TRAVERSAL_SENSITIVE_TARGETS)
+_TRAVERSAL_TO_SENSITIVE_RE = re.compile(
+    r"\.\./(?:[^\s?#&;,]{0,512}/)?(" + _TRAVERSAL_TARGET_ALT + r")(?![a-z0-9._-])")
+
+
+def _traversal_decode_normalise(text: str) -> str:
+    """Percent-decode up to TWICE (catch `..%2f`, `%2e%2e%2f`, and double-encoded `%252e`/`%252f`), fold
+    backslashes to `/`, and lowercase — WITHOUT resolving against any filesystem (the LITERAL escape is
+    what we test). ``unquote`` is idempotent on non-escape text, so the early break stops at the decode
+    fixpoint; decoding can only REVEAL an encoded `../`, never erase a literal one, so this is strictly
+    more sensitive and cannot hide an attack."""
+    d = text
+    for _ in range(2):
+        nd = _urlunquote(d)
+        if nd == d:
+            break
+        d = nd
+    return d.replace("\\", "/").lower()
+
+
+def path_traversal_breakout_oracle(payload: Any, *, param: str = "") -> OracleSignal:
+    """Fire iff `payload` is a STRUCTURED directory-traversal / LFI attempt: after a defensive decode
+    (percent-decode up to twice — `..%2f`, `%2e%2e%2f`, double-encoded `%252e` — backslashes folded to
+    `/`, lowercased, NO filesystem resolution), it carries a dot-dot escape (`../`, also inside `..\\` and
+    `....//`) that chains through a WHITESPACE-FREE path into a WELL-KNOWN SENSITIVE TARGET (`etc/passwd`,
+    `etc/shadow`, `etc/hosts`, `proc/self/environ`, `proc/self/cmdline`, `windows/win.ini`, `win.ini`,
+    `boot.ini`, `windows/system32`, `.ssh/id_rsa`, `.aws/credentials`). BOTH halves are required, so a
+    normal relative path (`../styles/app.css`), a bare sensitive filename with NO traversal (`/etc/passwd`
+    as content), a prose `../` (`how do I use ../ in a path?`, `cd ../project`), a deep-but-benign relative
+    path (`../../../../a/b/c`), and a benign-normalising URL (`/app/../home`) all stay inert. Proves an
+    ATTEMPT on the request alone — never exploitation (the response-side `path_traversal` oracle proves a
+    leak). Pure/deterministic; bounded; ReDoS-safe — re-verifies offline from the retained value."""
+    kind = OracleKind.PATH_TRAVERSAL_BREAKOUT
+    text = payload if isinstance(payload, str) else str(payload if payload is not None else "")
+    # cheap pre-filter: a fireable value must carry a literal `..` or an encoded dot/slash (`%2e`/`%2f`/the
+    # double-encoded `%25..` forms all contain `%2`). Anything else cannot decode to a `../` and is inert.
+    if len(text) < 5 or (".." not in text and "%2" not in text.lower()):
+        return OracleSignal(kind=kind, fired=False, confidence=0.0,
+                            evidence="no dot-dot sequence present (not a traversal attempt)",
+                            observed={"param": param})
+    decoded = _traversal_decode_normalise(text)
+    m = _TRAVERSAL_TO_SENSITIVE_RE.search(decoded)
+    if m:
+        target = m.group(1)
+        return OracleSignal(
+            kind=kind, fired=True, confidence=0.9,
+            evidence=(f"value walks a dot-dot (`../`) traversal into the sensitive target {target!r} "
+                      f"(decoded path {m.group(0)[:160]!r}) — a structured directory-traversal attempt"),
+            observed={"param": param, "sensitive_target": target, "traversal_path": m.group(0)[:160],
+                      "break_out": True})
+    return OracleSignal(
+        kind=kind, fired=False, confidence=0.0,
+        evidence=("a dot-dot sequence is present but does not chain through a path to a known sensitive "
+                  "target — a normal relative path / prose `../` / bare filename is inert"),
+        observed={"param": param})
 
 
 # ---------------------------------------------------------------------------

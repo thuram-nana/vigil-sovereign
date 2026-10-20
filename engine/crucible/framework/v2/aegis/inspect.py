@@ -12,6 +12,7 @@ Request-side coverage (fires on the request ALONE, no app response needed):
   * parse-proof SQLi       -> sqli_attempt                    (string-literal break-out into structure)
   * parse-proof cmd-inject -> command_injection_attempt       (shell command-execution construct)
   * parse-proof NoSQLi     -> nosql_injection_attempt         (MongoDB operator injected as a KEY)
+  * parse-proof traversal  -> path_traversal_attempt          (`../` dot-dot escape reaching a sensitive file)
 
 Honest scope: a request-side confirmation proves a STRUCTURED INJECTION ATTEMPT, never that the app is
 exploited — the response-side oracles (G4) prove exploitation. Everything below a fired oracle stays a
@@ -30,11 +31,17 @@ from ..verify.confirmation import confirm_finding
 from ..verify.verifier import OracleVerifier
 from .models import CertRef, Verdict
 
-# The request-side parse-proof classes checked over each request-parameter (name, value) pair. NoSQL is
-# last so a value that also trips SQLi/cmdi keeps its existing (first-match) verdict — appending is purely
-# additive to the existing behaviour. The nosql oracle proves an operator injected as a KEY, from either
-# the bracket/dot param NAME (`user[$ne]`) or a JSON-object VALUE (`{"$ne":null}`).
-_REQUEST_PAYLOAD_CLASSES = ("sqli_attempt", "command_injection_attempt", "nosql_injection_attempt")
+# The request-side parse-proof classes checked over each request-parameter (name, value) pair. The order
+# is first-match: a value that also trips an EARLIER class keeps that (existing) verdict, so each append is
+# purely additive to the prior behaviour. The nosql oracle proves an operator injected as a KEY, from
+# either the bracket/dot param NAME (`user[$ne]`) or a JSON-object VALUE (`{"$ne":null}`);
+# `path_traversal_attempt` (appended LAST) proves a `../` dot-dot escape that chains — after a defensive
+# double-decode, through a whitespace-free path — into a well-known sensitive target (etc/passwd,
+# .ssh/id_rsa, windows/win.ini, …). It is the REQUEST-side sibling of the response-side `path_traversal`
+# leak-proof and near-zero-FP: a benign `../` (a normal relative path / prose / deep benign path) never
+# reaches a sensitive target, so it never fires.
+_REQUEST_PAYLOAD_CLASSES = ("sqli_attempt", "command_injection_attempt", "nosql_injection_attempt",
+                            "path_traversal_attempt")
 
 # A JSON request body worth a whole-body NoSQL operator-structure scan (see `inspect_request` step 2b):
 # the string-leaf candidate walk (`candidate_values`) cannot surface `{"user":{"$ne":null}}` (the operator

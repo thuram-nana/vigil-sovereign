@@ -77,6 +77,25 @@ class OracleKind(str, enum.Enum):
     # appear in bodies) AND a KEY. A price `$5.00`, `$net`, an email, a regex `^admin$`, a mid-word `$`
     # (`pass$word`), an operator as a string VALUE (`["$ne"]`), or a plain scalar do NOT fire.
     NOSQL_INJECTION_BREAKOUT = "nosql_injection_breakout"
+    # Request-side DIRECTORY-TRAVERSAL / LFI ATTEMPT — the request-side sibling of the three parse-proof
+    # members above (and DISTINCT from the response-side `path_traversal`/`lfi` classes, which prove
+    # EXPLOITATION from a leaked file in the app's OWN answer via SIDE_EFFECT). Like the others this is an
+    # ADDITIVE append reachable ONLY via its explicit BUG_CLASS_ORACLES row (keyed on the SAME
+    # `request_payload` ctx field no benchmark/scan/engage finding carries), never via the frozen
+    # unknown-class fallback (verifier._ALL_ORACLES stays EXACTLY 15). PATH_TRAVERSAL_BREAKOUT proves a
+    # STRUCTURED directory-traversal ATTEMPT — judged on the REQUEST VALUE ALONE, offline — NOT that the app
+    # is exploited (an app that canonicalises/chroots the path is still safe; the response-side oracle proves
+    # the leak). Near-zero-FP by a TWO-PART AND after a defensive decode (percent-decode up to twice to catch
+    # `..%2f`/`%2e%2e%2f`/double-encoded `%252e`, backslashes folded to `/`, lowercased): the decoded value
+    # must (1) contain a real dot-dot escape (`../`, also inside `..\`/`....//`) AND (2) that escape must chain
+    # — through a WHITESPACE-FREE path only (so prose with an unrelated `../` and a far-off filename cannot
+    # link) — into a WELL-KNOWN SENSITIVE TARGET from a curated, documented allowlist (`etc/passwd`,
+    # `etc/shadow`, `etc/hosts`, `proc/self/environ`, `proc/self/cmdline`, `windows/win.ini`, `win.ini`,
+    # `boot.ini`, `windows/system32`, `.ssh/id_rsa`, `.aws/credentials`). A normal relative path
+    # (`../styles/app.css`), a bare sensitive filename with NO traversal (`/etc/passwd` as content), a prose
+    # `../` (`how do I use ../ in a path?`), a deep-but-benign relative path (`../../../../a/b/c`), and a
+    # benign-normalising URL (`/app/../home`) all stay inert — BOTH halves are required.
+    PATH_TRAVERSAL_BREAKOUT = "path_traversal_breakout"
     # Workstream-3 posture (the DORMANT-sensor promotions). Like the AEGIS members above, this is an
     # ADDITIVE append reachable ONLY via its explicit BUG_CLASS_ORACLES row (keyed on the `k8s_control`
     # ctx field no benchmark/scan/engage finding carries), never via the frozen unknown-class fallback
