@@ -12,6 +12,7 @@ from __future__ import annotations
 import http.server
 import json
 import pathlib
+import re
 import threading
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
@@ -150,11 +151,29 @@ class _WebApp(http.server.BaseHTTPRequestHandler):
         except Exception:
             _doc = None
         if parts.path == "/graphql-batch":                 # VULNERABLE: array request-BATCHING enabled
-            # Answer VIGIL's OWN M-operation JSON-ARRAY POST with a JSON ARRAY of M data-bearing results.
-            # A single (non-array) POST (e.g. the introspection probe) gets a non-schema 404 → nothing mints.
+            # A real batching server runs each of VIGIL's M aliased ops and echoes result i under VIGIL's
+            # distinct alias v{i} (parsed from the op VIGIL actually sent). A single (non-array) POST (e.g.
+            # the introspection probe) gets a non-schema 404 → nothing mints.
             if isinstance(_doc, list):
-                arr = [{"data": {"__typename": "Query"}} for _ in _doc]
+                arr = []
+                for op in _doc:
+                    q = op.get("query", "") if isinstance(op, dict) else ""
+                    m = re.search(r"(\w+)\s*:\s*__typename", q)
+                    arr.append({"data": {(m.group(1) if m else "__typename"): "Query"}})
                 body = json.dumps(arr).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.end_headers()
+                self.wfile.write(body)
+            else:
+                self.send_response(404)
+                self.end_headers()
+            return
+        if parts.path == "/graphql-batch-benign-array":    # BENIGN same-shape negative: a static >=2-element
+            # data array (a REST/collection feed / static list) that NEVER carries VIGIL's v{i} aliases, so
+            # batch_result_count == 0 and eq[count, sent_batch] cannot fire. The pre-fix oracle minted here.
+            if isinstance(_doc, list):
+                body = b'[{"id":1,"data":{"t":"A"}},{"id":2,"data":{"t":"B"}}]'
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json; charset=utf-8")
                 self.end_headers()
@@ -1089,10 +1108,10 @@ def test_live_graphql_batching_mints_a_signed_fact_that_reverifies_offline(monke
 
 
 def test_graphql_batching_disabled_endpoint_mints_no_fact(monkeypatch, tmp_path):
-    """DECISIVE NEGATIVE CONTROL (same-shape): a batching-DISABLED endpoint answers VIGIL's IDENTICAL
-    3-operation JSON-ARRAY POST with a SINGLE object ({"errors":[{"message":"Batching is not enabled..."}]}),
-    so batch_result_count == 0 → the strict gt[count,1] cannot fire → no graphql_batching FACT. Paired with
-    the positive proof above, this shows 'no fact' is a real difference, not a check that never mints."""
+    """NEGATIVE CONTROL: a batching-DISABLED endpoint answers VIGIL's IDENTICAL 3-operation JSON-ARRAY POST
+    with a SINGLE object ({"errors":[{"message":"Batching is not enabled..."}]}), so batch_result_count == 0
+    → eq[count, sent_batch] cannot fire → no graphql_batching FACT. Paired with the positive proof above and
+    the benign-array control below, this shows 'no fact' is a real difference, not a check that never mints."""
     _grant_active_recon(monkeypatch)
     _charter(tmp_path, "127.0.0.1")
     from vigil_integration.live.web_redrive import web_redrive
@@ -1107,5 +1126,29 @@ def test_graphql_batching_disabled_endpoint_mints_no_fact(monkeypatch, tmp_path)
         srv.shutdown()
     assert not [x for x in res.facts if "graphql_batching" in x.finding_ref], (
         f"a batching-disabled endpoint minted a graphql_batching FACT: "
+        f"{[x.finding_ref for x in res.facts]}")
+    assert res.family_verdict("graphql_batching") != "FACT"
+
+
+def test_graphql_batching_benign_array_mints_no_fact(monkeypatch, tmp_path):
+    """DECISIVE same-shape negative control (the hole the red-pen found): a BENIGN origin answers VIGIL's
+    IDENTICAL 3-operation JSON-ARRAY POST with a static >=2-element JSON array of data-bearing objects that
+    NEVER carry VIGIL's distinct v{i} aliases (a REST/collection feed / static list). batch_result_count == 0
+    → eq[count, sent_batch] cannot fire → NO graphql_batching FACT. The pre-fix gt[count,1]-over-any-data-
+    element oracle minted a FALSE signed FACT on exactly this body."""
+    _grant_active_recon(monkeypatch)
+    _charter(tmp_path, "127.0.0.1")
+    from vigil_integration.live.web_redrive import web_redrive
+    signers, _ = _signers_and_trust()
+    srv = _serve()
+    port = srv.server_address[1]
+    try:
+        res = web_redrive(f"http://127.0.0.1:{port}/graphql-batch-benign-array",
+                          slug="alpha", engagement_slug="alpha", signers=signers,
+                          claimed_class="graphql_batching")
+    finally:
+        srv.shutdown()
+    assert not [x for x in res.facts if "graphql_batching" in x.finding_ref], (
+        f"a benign >=2-element data array (no VIGIL aliases) minted a graphql_batching FACT: "
         f"{[x.finding_ref for x in res.facts]}")
     assert res.family_verdict("graphql_batching") != "FACT"

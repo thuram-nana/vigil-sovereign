@@ -127,19 +127,26 @@ def _schema_type_count(body: str) -> int:
 
 
 def _batch_result_count(body: str) -> int:
-    """VIGIL reduction: the number of top-level JSON-ARRAY elements each a dict with a non-None ``data``
-    member, in the response to VIGIL's OWN M-operation array-batch POST; 0 for a single object, an
-    errors-only body, a non-array, or non-JSON. A VIGIL-COMPUTED reduction over the RAW bytes (declared a
-    provenance-ref), never a boolean the check pre-decided — so a strict ``gt[count,1]`` is a sound PD3 that
-    fires ONLY when the server really returned >=2 data-bearing results to one request (array batching
-    ENABLED). A batching-off origin returns a single object/error (count 0) and cannot fire."""
+    """VIGIL reduction: the number of array positions ``i`` whose element is a GraphQL result whose
+    ``data`` echoes VIGIL's OWN distinct i-th alias ``v{i}`` (non-None), in the response to VIGIL's
+    M-operation array-batch POST where operation ``i`` is ``{ v{i}: __typename }``. Binding the count to
+    VIGIL's per-operation aliases (not merely "any element with a ``data`` member") is what proves the
+    server actually RAN VIGIL's batch: a static JSON list, a REST/collection feed, or a dashboard array
+    carries its own keys, never VIGIL's ``v{i}`` aliases, so it scores 0 and cannot fire — closing the
+    same-shape hole where any >=2-element data array would otherwise read as batching. 0 also for a single
+    object, an errors-only body, a non-array, or non-JSON. A VIGIL-COMPUTED reduction over the RAW bytes
+    (declared a provenance-ref), never a boolean the check pre-decided — so ``eq[count, sent_batch]`` (with
+    ``sent_batch>1``) is a sound PD3 that fires ONLY when the server ran ALL of VIGIL's >=2 aliased
+    operations in one request (array batching ENABLED)."""
     try:
         doc = json.loads(body)
     except (ValueError, TypeError):
         return 0
     if not isinstance(doc, list):
         return 0
-    return sum(1 for e in doc if isinstance(e, dict) and e.get("data") is not None)
+    return sum(1 for i, e in enumerate(doc)
+               if isinstance(e, dict) and isinstance(e.get("data"), dict)
+               and e["data"].get(f"v{i}") is not None)
 
 
 # A benign, well-formed control query for the field-suggestion differential: the spec meta-field
@@ -442,22 +449,29 @@ class GraphQLAliasCheck:
 
 @dataclass(frozen=True)
 class GraphQLBatchingCheck:
-    """Request BATCHING. POSTs a JSON ARRAY of ``M`` tiny ``{__typename}``
-    operations. A server that returns a JSON array of ``M`` results has array
-    batching enabled — a binary capability (``M`` need only exceed 1 to prove it)
-    that lets one HTTP request carry many operations, defeating per-request rate
-    limits and enabling batched credential/enumeration attacks. Routed to the
-    predicate oracle over the returned array length; a non-batching server
-    returns a single object/error and does not fire."""
+    """Request BATCHING. POSTs a JSON ARRAY of ``M`` tiny ``{ v{i}: __typename }``
+    operations, each carrying a DISTINCT VIGIL-chosen alias. A server with array
+    batching enabled runs all ``M`` and returns a JSON array whose i-th result
+    echoes alias ``v{i}`` — a binary capability (``M`` need only exceed 1 to prove
+    it) that lets one HTTP request carry many operations, defeating per-request
+    rate limits and enabling batched credential/enumeration attacks. Routed to the
+    predicate oracle over a reduction bound to VIGIL's per-position aliases
+    (``eq[count, sent_batch]``); a non-batching server returns a single object/
+    error, and a benign array that never carried VIGIL's aliases scores 0 — neither
+    fires."""
 
     id: str = "graphql-batching"
     bug_class: str = "graphql_batching"
     batch: int = _BATCH_PROBE
 
     def build(self) -> str:
+        # Each batched operation carries a DISTINCT VIGIL-chosen alias ``v{i}`` on ``__typename`` so the
+        # response can be bound, per position, to the operation VIGIL sent: a static array / REST list that
+        # does not execute VIGIL's ops cannot carry these aliases, so it cannot fire (``_batch_result_count``
+        # counts the per-position matches).
         return json.dumps([
-            {"query": "{ __typename }", "operationName": None}
-            for _ in range(self.batch)
+            {"query": f"{{ v{i}: __typename }}", "operationName": None}
+            for i in range(self.batch)
         ])
 
     def assess(self, resp: object) -> GraphQLDosResult:
@@ -474,15 +488,19 @@ class GraphQLBatchingCheck:
         ctx = FindingContext.from_predicate(
             {"response_body": body, "batch_result_count": count, "sent_batch": self.batch},
             {"all": [
-                # PD3: VIGIL reduction, strict, floor 1 >= domain-min 0 — fires at count>=2.
-                {"gt": [{"var": "batch_result_count"}, 1]},
-                {"contains": [{"var": "response_body"}, '"data"']},
+                # PD3 (sound same-shape): the reduction counts positions whose data echoes VIGIL's distinct
+                # alias v{i}; the fire requires ALL sent_batch (>1) of VIGIL's operations to have run in the
+                # one request. Binding to sent_batch — not a bare gt[.,1] over "any data element" — is what
+                # leaves a benign >=2-element array (a static list / REST feed that never carried VIGIL's
+                # aliases, count 0) UNABLE to fire, and rejects a wrong-length response (count != sent_batch).
+                {"gt": [{"var": "sent_batch"}, 1]},
+                {"eq": [{"var": "batch_result_count"}, {"var": "sent_batch"}]},
             ]},
             bug_class=self.bug_class,
             provenance_refs={"batch_result_count": "reduction"})
-        if count >= 2:
-            return GraphQLDosResult(context=ctx, reason=f"{count}-operation batch executed")
-        return GraphQLDosResult(reason=f"batching not honoured (array data results={count})")
+        if self.batch > 1 and count == self.batch:
+            return GraphQLDosResult(context=ctx, reason=f"{count}-operation aliased batch executed")
+        return GraphQLDosResult(reason=f"batching not honoured (aliased data results={count}/{self.batch})")
 
     def probe(self, template: RequestTemplate, send: Send) -> FindingContext | None:
         return self.probe_dos(template, send).context

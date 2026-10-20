@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import http.server
 import json
+import re
 import threading
 import types
 from pathlib import Path
@@ -178,7 +179,20 @@ class _WebApp(http.server.BaseHTTPRequestHandler):
         except Exception:
             doc = None
         if parts.path == "/graphql-batch" and isinstance(doc, list):   # VULNERABLE: batching ENABLED
-            body = json.dumps([{"data": {"__typename": "Query"}} for _ in doc]).encode("utf-8")
+            # Faithful: run each of VIGIL's aliased ops and echo result i under its VIGIL alias v{i}.
+            arr = []
+            for op in doc:
+                q = op.get("query", "") if isinstance(op, dict) else ""
+                m = re.search(r"(\w+)\s*:\s*__typename", q)
+                arr.append({"data": {(m.group(1) if m else "__typename"): "Query"}})
+            body = json.dumps(arr).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.end_headers()
+            self.wfile.write(body)
+        elif parts.path == "/graphql-batch-benign-array" and isinstance(doc, list):  # BENIGN same-shape:
+            # a static >=2-element data array with NO VIGIL aliases → batch_result_count 0 → stays a LEAD.
+            body = b'[{"id":1,"data":{"t":"A"}},{"id":2,"data":{"t":"B"}}]'
             self.send_response(200)
             self.send_header("Content-Type", "application/json; charset=utf-8")
             self.end_headers()
@@ -273,6 +287,23 @@ def test_live_seam_negative_control_graphql_batching_disabled_mints_nothing(monk
     finally:
         srv.shutdown()
     assert ref is None, "a batching-disabled endpoint must NOT mint a graphql_batching FACT"
+
+
+def test_live_seam_negative_control_graphql_batching_benign_array_mints_nothing(monkeypatch, tmp_path):
+    """DECISIVE same-shape negative control (the red-pen's hole): a BENIGN endpoint answering the IDENTICAL
+    array POST with a static >=2-element JSON array of data-bearing objects that NEVER carry VIGIL's v{i}
+    aliases → batch_result_count 0 → eq[count, sent_batch] cannot fire → the seam returns None (stays a
+    LEAD). The pre-fix oracle minted a false signed FACT via this very seam on this body."""
+    _grant_active_recon(monkeypatch)
+    _charter(tmp_path, "127.0.0.1")
+    from vigil_integration.live.wiring import _live_web_redrive_fact
+    srv = _serve(); port = srv.server_address[1]
+    try:
+        ref = _live_web_redrive_fact(
+            _prov(), {}, _redrive(f"http://127.0.0.1:{port}/graphql-batch-benign-array", "graphql_batching"))
+    finally:
+        srv.shutdown()
+    assert ref is None, "a benign >=2-element data array (no VIGIL aliases) must NOT mint a graphql_batching FACT"
 
 
 def test_live_seam_wrong_class_claim_mints_nothing(monkeypatch, tmp_path):
