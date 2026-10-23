@@ -2811,9 +2811,11 @@ def ssi_evaluation_oracle(
 #     benign benchmark finding never carries, so `make gate` stays byte-identical.
 # ---------------------------------------------------------------------------
 
-# A planted canary must be a random, collision-resistant sentinel: long enough and
-# high-entropy enough that a VERBATIM substring match cannot be coincidental and a
-# natural-language phrase a user might legitimately paste cannot masquerade as it.
+# A planted canary SHOULD be a random, collision-resistant sentinel — long + high-entropy so a
+# VERBATIM match is not coincidental. The floor below (and ``canary_meets_entropy_floor``) reject
+# obvious degeneracy (too short / low-diversity / whitespace / sequential runs), but CANNOT verify
+# UNPREDICTABILITY: a predictable-but-diverse string passes, so an unpredictable randomly-generated
+# sentinel is the operator's responsibility (near-zero-FP holds only for such a sentinel).
 _MIN_CANARY_LEN = 16
 _MIN_CANARY_ENTROPY_BITS_PER_CHAR = 2.5
 
@@ -2826,6 +2828,50 @@ def _shannon_bits_per_char(s: str) -> float:
     counts = Counter(s)
     n = len(s)
     return -sum((c / n) * math.log2(c / n) for c in counts.values())
+
+
+_MAX_CANARY_SEQUENTIAL_RUN = 8   # an 'abcdef…'/'012345…' run this long is a tell-tale non-random sentinel
+
+
+def _has_monotonic_run(s: str, n: int) -> bool:
+    """True if ``s`` holds a run of >= ``n`` chars whose codepoints step by a constant +1 or -1
+    (an alphabet/digit sequence like 'abcdefgh' or '98765432'). Pure, O(len)."""
+    if len(s) < n:
+        return False
+    asc = desc = 1
+    for i in range(1, len(s)):
+        step = ord(s[i]) - ord(s[i - 1])
+        asc = asc + 1 if step == 1 else 1
+        desc = desc + 1 if step == -1 else 1
+        if asc >= n or desc >= n:
+            return True
+    return False
+
+
+def canary_meets_entropy_floor(sentinel: str) -> tuple[bool, str | None]:
+    """A BEST-EFFORT DEGENERACY floor for a planted canary; returns ``(ok, reason_if_not)``. It is the
+    CONFIG-POLICY floor and is at least as STRICT as the oracle's inline mechanism floor: it rejects a
+    sentinel shorter than ``_MIN_CANARY_LEN``, of low character diversity
+    (< ``_MIN_CANARY_ENTROPY_BITS_PER_CHAR`` bits/char), containing whitespace (a natural-language
+    phrase), or with a long monotonic run (``abcdef…``/``012345…``).
+
+    HONEST SCOPE: this does NOT and CANNOT verify UNPREDICTABILITY — a predictable but diverse string
+    (e.g. ``"password1234!@#$"``) passes. The block's near-zero-FP property holds ONLY for an
+    UNPREDICTABLE, randomly-generated sentinel, which is the OPERATOR's responsibility; generate one
+    with ``python3 -c "import secrets; print('AEGIS-' + secrets.token_urlsafe(18))"``. A predictable
+    canary that appears in benign output WILL be blocked as a disclosure. Pure."""
+    s = (sentinel or "").strip()
+    if len(s) < _MIN_CANARY_LEN:
+        return False, f"canary must be >= {_MIN_CANARY_LEN} chars (got {len(s)})"
+    if any(ch.isspace() for ch in s):
+        return False, "canary must not contain whitespace — use a contiguous random token, not a phrase"
+    if _shannon_bits_per_char(s) < _MIN_CANARY_ENTROPY_BITS_PER_CHAR:
+        return False, (f"canary character-diversity too low (< {_MIN_CANARY_ENTROPY_BITS_PER_CHAR} "
+                       "bits/char) — use a random token, not a repeated/degenerate string")
+    if _has_monotonic_run(s, _MAX_CANARY_SEQUENTIAL_RUN):
+        return False, (f"canary has a sequential run of >= {_MAX_CANARY_SEQUENTIAL_RUN} chars "
+                       "(e.g. 'abcdef'/'012345') — use a random token, not a sequence")
+    return True, None
 
 
 def system_prompt_disclosure_oracle(canary: str, llm_output: Any) -> OracleSignal:

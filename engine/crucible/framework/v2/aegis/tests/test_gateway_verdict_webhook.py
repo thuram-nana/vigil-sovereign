@@ -127,6 +127,7 @@ def test_gateway_reads_operator_config_from_env_not_argv(monkeypatch):
     # argv left at defaults (empty upstream) — the env must supply everything
     args = argparse.Namespace(upstream="", host="127.0.0.1", port=8080, mode="observe",
                               slug="aegis-gateway", secret="", honeypot=None, oob_canary=None,
+                              canary=None,
                               verdicts_out=None, status_out=None, verdict_webhook=None, verdict_sink="webhook")
     rc = C._cmd_gateway(args)
     assert rc == 0
@@ -142,5 +143,6 @@ def test_gateway_missing_upstream_everywhere_is_refused(monkeypatch):
         monkeypatch.delenv(k, raising=False)
     args = argparse.Namespace(upstream="", host="127.0.0.1", port=8080, mode="observe",
                               slug="aegis-gateway", secret="", honeypot=None, oob_canary=None,
+                              canary=None,
                               verdicts_out=None, status_out=None, verdict_webhook=None, verdict_sink="webhook")
     assert C._cmd_gateway(args) == 2

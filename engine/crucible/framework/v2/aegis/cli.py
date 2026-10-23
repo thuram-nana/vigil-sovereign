@@ -244,10 +244,15 @@ def _cmd_gateway(args: argparse.Namespace) -> int:
         honeypots = [h for h in _hp_env.split("\n") if h]
     verdict_webhook = os.environ.get("AEGIS_GW_VERDICT_WEBHOOK") or args.verdict_webhook
     verdict_sink = os.environ.get("AEGIS_GW_VERDICT_SINK") or args.verdict_sink
+    # The canary is a SECRET (the sentinel the app also plants in its LLM system prompt) — prefer the
+    # env (AEGIS_GW_CANARY) over argv so it is not exposed on /proc/<pid>/cmdline; --canary is the
+    # explicit fallback for a hand-run gateway. A weak canary is rejected at AegisConfig construction.
+    canary = os.environ.get("AEGIS_GW_CANARY") or args.canary
 
     config = AegisConfig(deployment_secret=secret, mode=mode,
                          honeypot_paths=honeypots,
-                         oob_canary=args.oob_canary)
+                         oob_canary=args.oob_canary,
+                         canary=canary)
 
     def _log_verdict(v: object) -> None:
         try:
@@ -298,6 +303,10 @@ def _cmd_gateway(args: argparse.Namespace) -> int:
     elif args.oob_canary:
         sys.stderr.write("  passive OOB belief elevation requested but DORMANT "
                          "(AEGIS_RESPOND entitlement not available)\n")
+    if config.canary:
+        sys.stderr.write("  prompt-injection canary-disclosure block ON — a proxied LLM response that "
+                         "leaks the planted sentinel VERBATIM is blocked (system_prompt_disclosure); "
+                         "AEGIS never injects the canary\n")
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:
@@ -383,6 +392,17 @@ def main(argv: list[str] | None = None) -> int:
                         "hit on the canary that correlates to an actor's SSRF/XXE payload ELEVATES that "
                         "actor's belief toward the graduated challenge/throttle, NEVER a block. Needs "
                         "the AEGIS_RESPOND entitlement; the reverse tunnel is your charter responsibility")
+    g.add_argument("--canary", default=None, metavar="SENTINEL",
+                   help="OPT-IN prompt-injection / system-prompt DISCLOSURE block: a SECRET, high-entropy "
+                        "sentinel you ALSO plant in your LLM's system prompt / hidden context (out of band). "
+                        "AEGIS scans each proxied LLM RESPONSE and BLOCKS (confirmed system_prompt_disclosure "
+                        "+ re-runnable certificate) when the sentinel appears VERBATIM — proof the hidden "
+                        "context leaked. AEGIS NEVER injects it; a canary echoed from the client's own request "
+                        "is suppressed (reflection). Prefer AEGIS_GW_CANARY (env) so the secret is not exposed "
+                        "on /proc/<pid>/cmdline. MUST be UNPREDICTABLE and randomly generated — the near-zero-FP "
+                        "property holds only then; a predictable canary can false-block. Generate one with: "
+                        "python3 -c \"import secrets; print('AEGIS-'+secrets.token_urlsafe(18))\". The floor "
+                        "rejects only obvious degeneracy (short / whitespace / sequential). Blocks only under --mode enforce.")
     g.set_defaults(func=_cmd_gateway)
 
     demo = sub.add_parser("demo", help="run the class-1 canary-disclosure flow end-to-end")

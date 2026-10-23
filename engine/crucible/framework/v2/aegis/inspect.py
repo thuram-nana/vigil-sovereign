@@ -505,6 +505,20 @@ _PASSWD_ROOT_RE = re.compile(
 _TRAVERSAL_MARGIN = 48   # bounded window retained around the matched signature (small certificate)
 
 
+def _request_surface(path: str, headers: list[tuple[str, str]], body: str | None) -> str:
+    """The raw CLIENT-CONTROLLED request text (path + header values + body), concatenated, for the
+    canary REQUEST-ECHO guard below: if a configured canary appears HERE, its later presence in the
+    response is a client-supplied REFLECTION — not a disclosure of the HIDDEN sentinel — so the
+    disclosure block must stand down (the same reflected-request false-positive pattern the XSS and
+    path-traversal blocks guard against). Total; bounded by the caller's existing body-inspection cap."""
+    parts: list[str] = [path or ""]
+    for _k, v in (headers or []):
+        parts.append(str(v))
+    if body:
+        parts.append(body)
+    return "\n".join(parts)
+
+
 def inspect_response(
     path: str,
     headers: list[tuple[str, str]],
@@ -513,18 +527,51 @@ def inspect_response(
     *,
     enforce: bool = False,
     verifier: OracleVerifier | None = None,
+    canary: str | None = None,
 ) -> Verdict | None:
     """Run the RESPONSE-SIDE effect oracles over the (request, PROXIED-response) pair. Returns a
     CONFIRMED ``Verdict`` (with a re-runnable ``CertRef``) when the app's own answer PROVES
     exploitation — a request value reflected into an executable HTML context (reflected XSS), a
     template expression the server EVALUATED (SSTI), a `/etc/passwd` signature a traversal payload
-    surfaced (path traversal), or a `/etc/passwd` signature an external-entity DTD leaked into the
-    response (in-band file-disclosure XXE) — else ``None`` (the gateway then relays the response
-    untouched). Pure/deterministic; total. ``enforce`` sets the confirmed action to ``block``."""
+    surfaced (path traversal), a `/etc/passwd` signature an external-entity DTD leaked into the
+    response (in-band file-disclosure XXE), or (when ``canary`` is set) the deployment's planted
+    high-entropy sentinel surfacing VERBATIM in the model's own output (prompt-injection / system-
+    prompt disclosure) — else ``None`` (the gateway then relays the response untouched).
+    Pure/deterministic; total. ``enforce`` sets the confirmed action to ``block``. ``canary`` is the
+    SECRET sentinel the deployment planted in its LLM hidden context (``None`` disables the scan)."""
     if not response_body:
         return None
     sink = response_body[:_MAX_RESPONSE_CHARS]
     verifier = verifier or OracleVerifier()
+
+    # Prompt-injection / system-prompt canary DISCLOSURE — the deployment planted a SECRET, high-entropy
+    # sentinel in the LLM's hidden context (system prompt), out of band. If that sentinel surfaces
+    # VERBATIM in the model's own response, the instruction/data boundary broke and the hidden context
+    # leaked. ``system_prompt_disclosure_oracle`` confirms ONLY on a verbatim hit of a sentinel that
+    # clears the entropy/length floor, so a benign response (which never contains the random sentinel)
+    # cannot fire it (near-zero FP). Honest class: this proves DISCLOSURE of the planted sentinel — the
+    # sound, inline-blockable impact of prompt injection — not that a particular injection string caused
+    # it (the behavioural ``prompt_injection`` oracle needs a control/treatment pair a single inline
+    # response cannot supply). Runs only when the deployment configured a canary.
+    #
+    # REQUEST-ECHO GUARD (soundness): if the canary also appears in the REQUEST (its path, a header
+    # value, or the inspected body prefix), a party who already holds it sent it and the app merely
+    # reflected it — so its presence in the response is a REFLECTION, not a disclosure of the HIDDEN
+    # sentinel, and we must NOT block. This assumes the canary is planted OUT OF BAND and is never in a
+    # benign request (the model under which near-zero-FP holds). It does NOT cover every echo vector — a
+    # canary in a header NAME, split across headers, or past the body-inspection cap is not seen here;
+    # under the out-of-band model those are SELF-INFLICTED (only a party already holding the secret can
+    # trigger them, blocking their OWN response), not a benign false block. A genuine FIRST leak (canary
+    # in the response, absent from the request) still blocks; a later replay that echoes the now-known
+    # value is suppressed, which is correct.
+    if canary and canary not in _request_surface(path, headers, body):
+        # margin=0: the upstream response is RAW (not boundary PII-redacted), so retain ONLY the sentinel
+        # in the certificate — no adjacent response bytes (possible PII) are kept.
+        fc = FindingContext.from_llm_disclosure(canary, sink, margin=0)
+        confirmed = confirm_finding({"bug_class": "system_prompt_disclosure"}, context=fc, verifier=verifier)
+        if confirmed is not None:
+            return _payload_verdict("system_prompt_disclosure", "llm_output", confirmed, fc, enforce=enforce)
+
     values = candidate_values(path, headers, body)
 
     # reflected XSS — a request value's executable token reached an EXECUTABLE HTML context in the
