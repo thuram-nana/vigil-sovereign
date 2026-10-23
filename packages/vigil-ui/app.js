@@ -12119,6 +12119,17 @@
     // config comes from the server-injected <body> data-attributes (CSP-native; no inline script).
     const ds = document.body.dataset;
     if (ds.token && ds.token !== "__VIGIL_TOKEN__") CFG.token = ds.token;
+    // Remote access (WireGuard / reverse-proxy / forwarder): the proxy SCRUBS the owner token from the
+    // HTML body for a non-loopback request (so it never rides in cacheable HTML), leaving data-token
+    // empty. The operator's bearer then arrives only as ?token= in the bookmarked URL — adopt it into the
+    // per-tab session (the same store a per-user login uses) and STRIP it from the address bar so it does
+    // not linger in history. data-token (owner, loopback) still takes precedence when present above.
+    if (!V.token()) {
+      try {
+        var _urlTok = new URLSearchParams(location.search || "").get("token");
+        if (_urlTok) { V.setSessionToken(_urlTok); history.replaceState(null, "", location.pathname + location.hash); }
+      } catch (e) { /* no URLSearchParams / storage disabled: fall through to the login gate */ }
+    }
     if (ds.sovereign != null && ds.sovereign !== "__VIGIL_SOVEREIGN__") CFG.api.sovereign = ds.sovereign;
     if (ds.offense != null && ds.offense !== "__VIGIL_OFFENSE__") CFG.api.offense = ds.offense;
     try { const t = localStorage.getItem("vigil-theme"); if (t) document.documentElement.setAttribute("data-theme", t); } catch (e) {}
