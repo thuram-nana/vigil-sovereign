@@ -428,12 +428,21 @@ _STANDARDS: dict[str, ControlMapping] = {
     # ---- SSRF (A10) ----
     "ssrf": _m("A10:2021", ("CWE-918",), pci=("1.3.1", "1.4.1"), soc2=("CC6.6",), iso=("A.8.23", "A.8.20"),
                attack=("T1090",)),
+    # AEGIS request-side block (PATH_TRAVERSAL/SSRF/XXE break-out oracles): a proven SSRF ATTEMPT,
+    # same CWE-918 / A10 family as ssrf (cf. command_injection_attempt, nosql_injection_attempt).
+    "ssrf_attempt": _m("A10:2021", ("CWE-918",), pci=("1.3.1", "1.4.1"), soc2=("CC6.6",), iso=("A.8.23", "A.8.20"),
+                       attack=("T1090",)),
     # ---- XXE (A05, external entities) ----
     "xxe": _m("A05:2021", ("CWE-611",), pci=_SDLC_PCI, soc2=_SDLC_SOC2, iso=_SDLC_ISO, attack=("T1190",)),
     "blind_xxe": _m("A05:2021", ("CWE-611",), pci=_SDLC_PCI, soc2=_SDLC_SOC2, iso=_SDLC_ISO, attack=("T1190",)),
+    # AEGIS request-side block: a proven XXE ATTEMPT (same CWE-611 / A05 family as xxe).
+    "xxe_attempt": _m("A05:2021", ("CWE-611",), pci=_SDLC_PCI, soc2=_SDLC_SOC2, iso=_SDLC_ISO, attack=("T1190",)),
     # ---- File access (path traversal / LFI) ----
     "path_traversal": _m("A01:2021", ("CWE-22",), pci=_SDLC_PCI, soc2=_AC_SOC2, iso=("A.8.3", "A.8.28"),
                          attack=("T1083", "T1005")),
+    # AEGIS request-side block: a proven path-traversal ATTEMPT (same CWE-22 / A01 family as path_traversal).
+    "path_traversal_attempt": _m("A01:2021", ("CWE-22",), pci=_SDLC_PCI, soc2=_AC_SOC2, iso=("A.8.3", "A.8.28"),
+                                 attack=("T1083", "T1005")),
     "lfi": _m("A01:2021", ("CWE-98", "CWE-22"), pci=_SDLC_PCI, soc2=_AC_SOC2, iso=("A.8.3", "A.8.28"),
               attack=("T1083", "T1005")),
     # ---- Memory-safety (sanitizer-proven) ----
@@ -552,7 +561,7 @@ _WAVE2_GROUPS: tuple[tuple[_Wave2, tuple[str, ...]], ...] = (
       "el_injection", "ssi", "deserialization")),
     # ---- other server-side injection (LDAP / XPath / generic-time / XXE / WS) — no clean D3FEND id ----
     (_Wave2(("PR.PS-06", "ID.RA-01"), (), ("2002", "2004"), ("PW.5", "PW.7", "RV.1")),
-     ("ldap_injection", "xpath_injection", "time_based", "xxe", "blind_xxe", "websocket_injection")),
+     ("ldap_injection", "xpath_injection", "time_based", "xxe", "xxe_attempt", "blind_xxe", "websocket_injection")),
     # ---- STATIC source-code properties (SAST bridge): a proven code property, not an observed
     #      technique → no D3FEND countermeasure, OCSF Vulnerability Finding only; SSDF = review + test ----
     (_Wave2(("PR.PS-06", "ID.RA-01"), (), ("2002",), ("PW.7", "PW.8", "RV.1")),
@@ -563,7 +572,8 @@ _WAVE2_GROUPS: tuple[tuple[_Wave2, tuple[str, ...]], ...] = (
     # ---- broken access control (BOLA/IDOR/BFLA/CORS/CSWSH/race/CSRF/path-traversal) ----
     (_Wave2(("PR.AA-05",), (), ("2002", "2004"), ("PW.1", "PW.5", "RV.1")),
      ("idor", "bola", "bfla", "broken_access_control", "authorization", "mass_assignment", "cors",
-      "cross_site_websocket_hijacking", "request_race", "path_traversal", "lfi", "csrf", "csrf_achieved")),
+      "cross_site_websocket_hijacking", "request_race", "path_traversal", "path_traversal_attempt", "lfi",
+      "csrf", "csrf_achieved")),
     # ---- privilege escalation / cloud-IAM / K8s-RBAC verb grants — user-behavior analysis dual ----
     (_Wave2(("PR.AA-05", "PR.AA-01"), ("D3-UBA",), ("2002", "2004"), ("PW.1", "PW.9", "RV.1")),
      ("privilege_escalation", "privilege_path", "iam_privilege_escalation", "iam_escalation_primitive",
@@ -609,7 +619,7 @@ _WAVE2_GROUPS: tuple[tuple[_Wave2, tuple[str, ...]], ...] = (
      ("graphql_depth_limit", "graphql_alias_overloading", "graphql_batching", "graphql_cost", "crash")),
     # ---- SSRF — outbound traffic filtering is the clean D3FEND dual ----
     (_Wave2(("PR.IR-01",), ("D3-OTF",), ("2002", "2004"), ("PW.5", "RV.1")),
-     ("ssrf",)),
+     ("ssrf", "ssrf_attempt")),
     # ---- memory-safety (sanitizer-proven) — compiler hardening + executable testing ----
     (_Wave2(("PR.PS-06", "ID.RA-01"), (), ("2002", "2004"), ("PW.6", "PW.8", "RV.1")),
      ("memory_corruption", "buffer_overflow", "use_after_free")),
