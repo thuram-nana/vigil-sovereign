@@ -31,7 +31,7 @@ from dataclasses import dataclass
 from html.parser import HTMLParser
 from statistics import median
 from typing import Any, Mapping, Sequence
-from urllib.parse import quote as _urlquote, urlsplit
+from urllib.parse import quote as _urlquote, unquote as _urlunquote, urlsplit
 
 from .models import OracleKind, OracleSignal
 
@@ -2811,9 +2811,11 @@ def ssi_evaluation_oracle(
 #     benign benchmark finding never carries, so `make gate` stays byte-identical.
 # ---------------------------------------------------------------------------
 
-# A planted canary must be a random, collision-resistant sentinel: long enough and
-# high-entropy enough that a VERBATIM substring match cannot be coincidental and a
-# natural-language phrase a user might legitimately paste cannot masquerade as it.
+# A planted canary SHOULD be a random, collision-resistant sentinel — long + high-entropy so a
+# VERBATIM match is not coincidental. The floor below (and ``canary_meets_entropy_floor``) reject
+# obvious degeneracy (too short / low-diversity / whitespace / sequential runs), but CANNOT verify
+# UNPREDICTABILITY: a predictable-but-diverse string passes, so an unpredictable randomly-generated
+# sentinel is the operator's responsibility (near-zero-FP holds only for such a sentinel).
 _MIN_CANARY_LEN = 16
 _MIN_CANARY_ENTROPY_BITS_PER_CHAR = 2.5
 
@@ -2826,6 +2828,50 @@ def _shannon_bits_per_char(s: str) -> float:
     counts = Counter(s)
     n = len(s)
     return -sum((c / n) * math.log2(c / n) for c in counts.values())
+
+
+_MAX_CANARY_SEQUENTIAL_RUN = 8   # an 'abcdef…'/'012345…' run this long is a tell-tale non-random sentinel
+
+
+def _has_monotonic_run(s: str, n: int) -> bool:
+    """True if ``s`` holds a run of >= ``n`` chars whose codepoints step by a constant +1 or -1
+    (an alphabet/digit sequence like 'abcdefgh' or '98765432'). Pure, O(len)."""
+    if len(s) < n:
+        return False
+    asc = desc = 1
+    for i in range(1, len(s)):
+        step = ord(s[i]) - ord(s[i - 1])
+        asc = asc + 1 if step == 1 else 1
+        desc = desc + 1 if step == -1 else 1
+        if asc >= n or desc >= n:
+            return True
+    return False
+
+
+def canary_meets_entropy_floor(sentinel: str) -> tuple[bool, str | None]:
+    """A BEST-EFFORT DEGENERACY floor for a planted canary; returns ``(ok, reason_if_not)``. It is the
+    CONFIG-POLICY floor and is at least as STRICT as the oracle's inline mechanism floor: it rejects a
+    sentinel shorter than ``_MIN_CANARY_LEN``, of low character diversity
+    (< ``_MIN_CANARY_ENTROPY_BITS_PER_CHAR`` bits/char), containing whitespace (a natural-language
+    phrase), or with a long monotonic run (``abcdef…``/``012345…``).
+
+    HONEST SCOPE: this does NOT and CANNOT verify UNPREDICTABILITY — a predictable but diverse string
+    (e.g. ``"password1234!@#$"``) passes. The block's near-zero-FP property holds ONLY for an
+    UNPREDICTABLE, randomly-generated sentinel, which is the OPERATOR's responsibility; generate one
+    with ``python3 -c "import secrets; print('AEGIS-' + secrets.token_urlsafe(18))"``. A predictable
+    canary that appears in benign output WILL be blocked as a disclosure. Pure."""
+    s = (sentinel or "").strip()
+    if len(s) < _MIN_CANARY_LEN:
+        return False, f"canary must be >= {_MIN_CANARY_LEN} chars (got {len(s)})"
+    if any(ch.isspace() for ch in s):
+        return False, "canary must not contain whitespace — use a contiguous random token, not a phrase"
+    if _shannon_bits_per_char(s) < _MIN_CANARY_ENTROPY_BITS_PER_CHAR:
+        return False, (f"canary character-diversity too low (< {_MIN_CANARY_ENTROPY_BITS_PER_CHAR} "
+                       "bits/char) — use a random token, not a repeated/degenerate string")
+    if _has_monotonic_run(s, _MAX_CANARY_SEQUENTIAL_RUN):
+        return False, (f"canary has a sequential run of >= {_MAX_CANARY_SEQUENTIAL_RUN} chars "
+                       "(e.g. 'abcdef'/'012345') — use a random token, not a sequence")
+    return True, None
 
 
 def system_prompt_disclosure_oracle(canary: str, llm_output: Any) -> OracleSignal:
@@ -8877,6 +8923,254 @@ def nosql_injection_breakout_oracle(payload: Any, *, param: str = "") -> OracleS
         evidence=("no NoSQL operator-injection structure (a $-prefixed KNOWN query operator as a KEY where "
                   "a scalar was expected); a $ in text/a price/an operator-shaped string value is inert"),
         observed={"param": name})
+
+
+# ---------------------------------------------------------------------------
+# Request-side DIRECTORY-TRAVERSAL / LFI parse-proof oracle (the PATH_TRAVERSAL_BREAKOUT kind).
+#
+# The request-side sibling of the SQLi / cmd-injection / NoSQL break-out oracles above, and DISTINCT from
+# the response-side `path_traversal`/`lfi` classes (which prove EXPLOITATION from a leaked file in the
+# app's OWN answer via SIDE_EFFECT). Judged on the request VALUE ALONE, offline, deterministically — it
+# proves a STRUCTURED traversal ATTEMPT, never that the app is exploited (an app that canonicalises/chroots
+# is still safe). The failure mode here is a FALSE BLOCK of benign traffic, so the whole design is
+# near-zero-FP: a fire requires a TWO-PART AND that benign `../` traffic cannot satisfy.
+#
+# Curated, DOCUMENTED sensitive-target allowlist — the request-side mirror of inspect._PASSWD_ROOT_RE's
+# response-side discipline, pointed at the REQUEST. Each entry is a canonical high-value read target; the
+# list is explicit so a reviewer sees exactly what fires.
+_TRAVERSAL_SENSITIVE_TARGETS: tuple[str, ...] = (
+    "etc/passwd", "etc/shadow", "etc/hosts", "proc/self/environ", "proc/self/cmdline",
+    "windows/win.ini", "win.ini", "boot.ini", "windows/system32", ".ssh/id_rsa", ".aws/credentials",
+)
+# Fire pattern (over the DECODED, normalised value): a dot-dot escape `../` (also present as a substring of
+# `..\` once backslashes are folded, and of the `....//` obfuscation) that chains — through a path of
+# NON-WHITESPACE chars ONLY, so an unrelated prose `../` can never link across a space to a far-off
+# filename — into a sensitive target sitting on a path-SEGMENT boundary (the escape's own `/`, or an
+# intermediate directory ending in `/`), never mid-word. The trailing `(?![a-z0-9._-])` anchors the target
+# to a COMPLETE filename leaf — `.` and `-` count as name-continuation, so `etc/passwdx`, `win.inix`, AND a
+# benign suffixed sibling (`etc/passwd.bak`, `.ssh/id_rsa.pub` PUBLIC key, `.aws/credentials.example`
+# template) all stay inert; only the exact sensitive leaf fires, whether it ends the value or is followed by
+# `/`, a separator, or a NUL/control byte. BOTH halves in ONE contiguous path = near-zero-FP. Bounded
+# negated gap + a fixed alternation ⇒ linear-time (ReDoS-safe) on adversarial input.
+_TRAVERSAL_TARGET_ALT = "|".join(re.escape(t) for t in _TRAVERSAL_SENSITIVE_TARGETS)
+_TRAVERSAL_TO_SENSITIVE_RE = re.compile(
+    r"\.\./(?:[^\s?#&;,]{0,512}/)?(" + _TRAVERSAL_TARGET_ALT + r")(?![a-z0-9._-])")
+
+
+def _traversal_decode_normalise(text: str) -> str:
+    """Percent-decode up to TWICE (catch `..%2f`, `%2e%2e%2f`, and double-encoded `%252e`/`%252f`), fold
+    backslashes to `/`, and lowercase — WITHOUT resolving against any filesystem (the LITERAL escape is
+    what we test). ``unquote`` is idempotent on non-escape text, so the early break stops at the decode
+    fixpoint; decoding can only REVEAL an encoded `../`, never erase a literal one, so this is strictly
+    more sensitive and cannot hide an attack."""
+    d = text
+    for _ in range(2):
+        nd = _urlunquote(d)
+        if nd == d:
+            break
+        d = nd
+    return d.replace("\\", "/").lower()
+
+
+def path_traversal_breakout_oracle(payload: Any, *, param: str = "") -> OracleSignal:
+    """Fire iff `payload` is a STRUCTURED directory-traversal / LFI attempt: after a defensive decode
+    (percent-decode up to twice — `..%2f`, `%2e%2e%2f`, double-encoded `%252e` — backslashes folded to
+    `/`, lowercased, NO filesystem resolution), it carries a dot-dot escape (`../`, also inside `..\\` and
+    `....//`) that chains through a WHITESPACE-FREE path into a WELL-KNOWN SENSITIVE TARGET (`etc/passwd`,
+    `etc/shadow`, `etc/hosts`, `proc/self/environ`, `proc/self/cmdline`, `windows/win.ini`, `win.ini`,
+    `boot.ini`, `windows/system32`, `.ssh/id_rsa`, `.aws/credentials`). BOTH halves are required, so a
+    normal relative path (`../styles/app.css`), a bare sensitive filename with NO traversal (`/etc/passwd`
+    as content), a prose `../` (`how do I use ../ in a path?`, `cd ../project`), a deep-but-benign relative
+    path (`../../../../a/b/c`), and a benign-normalising URL (`/app/../home`) all stay inert. Proves an
+    ATTEMPT on the request alone — never exploitation (the response-side `path_traversal` oracle proves a
+    leak). Pure/deterministic; bounded; ReDoS-safe — re-verifies offline from the retained value."""
+    kind = OracleKind.PATH_TRAVERSAL_BREAKOUT
+    text = payload if isinstance(payload, str) else str(payload if payload is not None else "")
+    # cheap pre-filter: a fireable value must carry a literal `..` or an encoded dot/slash (`%2e`/`%2f`/the
+    # double-encoded `%25..` forms all contain `%2`). Anything else cannot decode to a `../` and is inert.
+    if len(text) < 5 or (".." not in text and "%2" not in text.lower()):
+        return OracleSignal(kind=kind, fired=False, confidence=0.0,
+                            evidence="no dot-dot sequence present (not a traversal attempt)",
+                            observed={"param": param})
+    decoded = _traversal_decode_normalise(text)
+    m = _TRAVERSAL_TO_SENSITIVE_RE.search(decoded)
+    if m:
+        target = m.group(1)
+        return OracleSignal(
+            kind=kind, fired=True, confidence=0.9,
+            evidence=(f"value walks a dot-dot (`../`) traversal into the sensitive target {target!r} "
+                      f"(decoded path {m.group(0)[:160]!r}) — a structured directory-traversal attempt"),
+            observed={"param": param, "sensitive_target": target, "traversal_path": m.group(0)[:160],
+                      "break_out": True})
+    return OracleSignal(
+        kind=kind, fired=False, confidence=0.0,
+        evidence=("a dot-dot sequence is present but does not chain through a path to a known sensitive "
+                  "target — a normal relative path / prose `../` / bare filename is inert"),
+        observed={"param": param})
+
+
+# ---------------------------------------------------------------------------
+# Request-side SERVER-SIDE REQUEST FORGERY parse-proof oracle (the SSRF_BREAKOUT kind).
+#
+# The request-side sibling of the SQLi / cmd-injection / NoSQL / path-traversal break-out oracles above,
+# and the BLOCK-worthy UNAMBIGUOUS subset of the existing ``inspect._ssrf_lead_param`` LEAD (which ALSO
+# raises on a general internal/RFC1918/loopback http(s) URL — a shape a benign app legitimately fetches,
+# e.g. an internal webhook, so that broader set stays a LEAD, never a block). Judged on the request VALUE
+# ALONE, offline, deterministically, with NO DNS/network resolution — it proves a STRUCTURED SSRF ATTEMPT,
+# never that the app dereferenced it (an app that validates the URL is still safe; the OOB callback oracle
+# proves a dereference). The failure mode here is a FALSE BLOCK of benign traffic, so the whole design is
+# near-zero-FP: a fire requires the value to PARSE as a URL whose host is a cloud-metadata endpoint, or
+# whose scheme is a dangerous non-HTTP protocol — neither of which a benign web/API client submits.
+#
+# Curated, DOCUMENTED cloud-metadata endpoint allowlist — the canonical link-local credential/identity
+# endpoints across the major clouds. Matched ONLY as a parsed URL HOST (``urlsplit().hostname`` — userinfo
+# / port / brackets stripped, lowercased), never as a bare substring, so a plain `169.254.169.254` sitting
+# in prose (no scheme/authority) stays inert.
+_SSRF_METADATA_HOSTS: frozenset[str] = frozenset({
+    "169.254.169.254",           # AWS / Azure / GCP IMDS (IPv4 link-local)
+    "fd00:ec2::254",             # AWS IMDS over IPv6 (urlsplit strips the [] and lowercases)
+    "metadata.google.internal",  # GCP metadata server (DNS name)
+    "100.100.100.200",           # Alibaba Cloud metadata
+    "169.254.170.2",             # AWS ECS task-metadata / credential endpoint
+})
+# NON-HTTP schemes that BLOCK: the narrow subset with NO legitimate URL-param use — read local files
+# (file://) or smuggle arbitrary protocols (gopher/dict/jar/netdoc/expect). ftp/tftp/ldap are DELIBERATELY
+# EXCLUDED from the block: real apps legitimately take ftp:// mirror/package URLs, tftp:// firmware, and
+# ldap:// directory lookups, so blocking them is a false positive — they stay the belief-raising LEAD
+# (still matched by _SSRF_SCHEME_RE in aegis/inspect.py). The block additionally requires the `scheme://`
+# authority marker (see the oracle), so a bare `file:report.pdf` config value never fires.
+_SSRF_DANGEROUS_SCHEMES: frozenset[str] = frozenset({
+    "file", "gopher", "dict", "jar", "netdoc", "expect",
+})
+
+
+def _ssrf_decode_normalise(text: str) -> str:
+    """Percent-decode up to TWICE (catch `%2f`, `%3a`, and double-encoded forms), strip surrounding
+    whitespace, and lowercase — WITHOUT resolving DNS or touching the network (the LITERAL authority is
+    what we test). ``unquote`` is idempotent at the decode fixpoint, so the loop stops early; decoding can
+    only REVEAL an encoded scheme/host, never hide a literal one, so this is strictly more sensitive."""
+    d = text
+    for _ in range(2):
+        nd = _urlunquote(d)
+        if nd == d:
+            break
+        d = nd
+    return d.strip().lower()
+
+
+def ssrf_breakout_oracle(payload: Any, *, param: str = "") -> OracleSignal:
+    """Fire iff `payload`, after a defensive decode (percent-decode up to twice, whitespace-stripped,
+    lowercased, NO DNS/network resolution), PARSES as a URL/authority whose (a) HOST is a cloud-metadata
+    endpoint (`169.254.169.254`, `[fd00:ec2::254]`, `metadata.google.internal`, `100.100.100.200`,
+    `169.254.170.2`) OR (b) SCHEME is a never-legitimate non-HTTP protocol with a `://` authority
+    (`file`/`gopher`/`dict`/`jar`/`netdoc`/`expect`). These are the UNAMBIGUOUS, BLOCK-worthy subset of SSRF;
+    `ftp`/`tftp`/`ldap` are EXCLUDED (real apps fetch ftp mirrors / do ldap lookups) and stay the softer
+    LEAD, and a bare `file:report.pdf` (no `://`) does not fire. A general
+    internal/RFC1918/loopback http(s) URL (`http://10.0.0.5/webhook`, `https://localhost:3000/health`,
+    `http://192.168.1.10/api`) does NOT fire — a benign app legitimately fetches internal webhooks, so
+    that softer shape stays the existing LEAD. A bare `169.254.169.254` with no scheme/authority (host
+    parses to None), an external API (`https://api.github.com/x`), and prose merely mentioning `file://`
+    (no scheme at the value start) all stay inert. Proves an ATTEMPT on the request alone — never a
+    dereference (the OOB callback oracle proves that). Pure/deterministic; bounded; no catastrophic
+    backtracking — re-verifies offline from the retained value."""
+    kind = OracleKind.SSRF_BREAKOUT
+    text = payload if isinstance(payload, str) else str(payload if payload is not None else "")
+    low = text.lower()
+    # cheap pre-filter: a fireable value must carry a scheme colon or an authority `//` (or their encoded
+    # forms). A plain word / bare IP / prose fragment with none of these cannot parse to a dangerous-scheme
+    # or host-bearing URL and is inert without the urlsplit.
+    if len(text) < 5 or (":" not in low and "//" not in low and "%3a" not in low and "%2f" not in low):
+        return OracleSignal(kind=kind, fired=False, confidence=0.0,
+                            evidence="no URL scheme/authority present (not an SSRF attempt)",
+                            observed={"param": param})
+    decoded = _ssrf_decode_normalise(text)
+    try:
+        parts = urlsplit(decoded)
+        scheme = parts.scheme
+        host = parts.hostname
+    except ValueError:
+        return OracleSignal(kind=kind, fired=False, confidence=0.0,
+                            evidence="value does not parse as a URL authority (not an SSRF attempt)",
+                            observed={"param": param})
+    if scheme in _SSRF_DANGEROUS_SCHEMES and "://" in decoded:
+        return OracleSignal(
+            kind=kind, fired=True, confidence=0.9,
+            evidence=(f"value is a URL with the dangerous non-HTTP scheme {scheme!r} "
+                      f"({decoded[:160]!r}) — a structured SSRF / protocol-smuggling attempt"),
+            observed={"param": param, "ssrf_vector": "dangerous_scheme", "scheme": scheme,
+                      "break_out": True})
+    if host is not None and host in _SSRF_METADATA_HOSTS:
+        return OracleSignal(
+            kind=kind, fired=True, confidence=0.9,
+            evidence=(f"value is a URL whose host is the cloud-metadata endpoint {host!r} "
+                      f"({decoded[:160]!r}) — a structured SSRF attempt at instance credentials"),
+            observed={"param": param, "ssrf_vector": "cloud_metadata", "metadata_host": host,
+                      "break_out": True})
+    return OracleSignal(
+        kind=kind, fired=False, confidence=0.0,
+        evidence=("a URL is present but its host is not a cloud-metadata endpoint and its scheme is not a "
+                  "dangerous protocol — a general internal/external http(s) URL is inert (stays a LEAD)"),
+        observed={"param": param})
+
+
+# ---------------------------------------------------------------------------
+# Request-side XXE (XML EXTERNAL ENTITY) parse-proof oracle (the XXE_BREAKOUT kind).
+#
+# The request-side sibling of the parse-proof oracles above, and the BLOCK-worthy UNAMBIGUOUS subset of
+# the existing ``inspect._XXE_RE`` LEAD. Judged on the request BODY ALONE, offline, deterministically — it
+# proves a STRUCTURED XXE ATTEMPT (the body declares an EXTERNAL entity), never that the app parsed it with
+# a vulnerable parser or leaked a file (an app that disables external entities is still safe; the response-
+# side oracle deliberately NEVER blocks XXE — a single inline exchange cannot causally prove the leak, as a
+# `/etc/passwd` line in the answer can be reflected content; the OOB callback oracle proves a dereference).
+# The failure mode is a FALSE BLOCK of benign XML, so the design is near-zero-FP: a fire requires a COMPLETE
+# external-entity DECLARATION a benign SOAP/XML client never sends.
+#
+# Adapted from ``inspect._XXE_RE`` (bounded, ReDoS-safe) with ONE added requirement: the external-entity
+# declaration must CLOSE with its own `>` (a COMPLETE declaration) — so a truncated/unclosed
+# `<!ENTITY e SYSTEM`, which the LEAD still raises on, is deliberately NOT blocked (block only the
+# unambiguous, complete construct). An internal-subset entity with only a literal value
+# (`<!ENTITY a "hello">` — no SYSTEM/PUBLIC), a bare `<!DOCTYPE html>`, a normal entity-free XML body, and
+# prose merely mentioning the words DOCTYPE/ENTITY (no `<!…>` markup) all stay inert.
+_XXE_EXTERNAL_ENTITY_RE = re.compile(
+    r"(?is)<!DOCTYPE\b[^\[>]{0,200}\[[^\]]{0,4000}?<!ENTITY\b[^>]{0,200}?\b(?:SYSTEM|PUBLIC)\b[^>]{0,400}?>")
+# The DOCTYPE external-entity declaration must fall within this many leading bytes of the body (an XML
+# DOCTYPE is a PROLOG construct — it precedes the root element). Bounds the certificate size and the scan.
+_MAX_XXE_BODY_CHARS = 65536
+
+
+def xxe_breakout_oracle(payload: Any, *, param: str = "") -> OracleSignal:
+    """Fire iff `payload` (an XML request body) declares an EXTERNAL ENTITY — a COMPLETE
+    `<!DOCTYPE … [ … <!ENTITY … (SYSTEM|PUBLIC) … > … ]>` construct (the external-entity declaration closes
+    with its own `>`). This is the UNAMBIGUOUS, BLOCK-worthy XXE attempt. Benign XML with NO external-entity
+    declaration stays inert: a normal `<?xml?><soap:Envelope>…` (no DOCTYPE), a bare `<!DOCTYPE html>` (no
+    entity), an internal-subset DTD with only literal entities (`<!DOCTYPE r [ <!ENTITY a "hello"> ]>` — no
+    SYSTEM/PUBLIC), and prose/paste merely MENTIONING the words DOCTYPE/ENTITY (no `<!…>` markup) all return
+    no fire. A truncated/unclosed external-entity declaration is NOT blocked here (it remains the existing
+    LEAD). Proves an ATTEMPT on the request alone — never exploitation / file disclosure (a single inline
+    exchange cannot causally prove the leak; the OOB callback oracle proves a dereference). Pure/
+    deterministic; bounded; ReDoS-safe — re-verifies offline from the retained body."""
+    kind = OracleKind.XXE_BREAKOUT
+    text = payload if isinstance(payload, str) else str(payload if payload is not None else "")
+    scan = text[:_MAX_XXE_BODY_CHARS]
+    low = scan.lower()
+    # cheap pre-filter: a fireable body must carry BOTH a `<!doctype` and a `<!entity` token; without the
+    # literal markup (e.g. prose that merely says "DOCTYPE"/"ENTITY") no external-entity construct exists.
+    if "<!doctype" not in low or "<!entity" not in low:
+        return OracleSignal(kind=kind, fired=False, confidence=0.0,
+                            evidence="no DOCTYPE/ENTITY markup present (not an XXE attempt)",
+                            observed={"param": param})
+    m = _XXE_EXTERNAL_ENTITY_RE.search(scan)
+    if m:
+        return OracleSignal(
+            kind=kind, fired=True, confidence=0.9,
+            evidence=("body declares an external XML entity inside a DOCTYPE internal subset "
+                      f"({m.group(0)[:200]!r}) — a structured XXE attempt"),
+            observed={"param": param, "entity_construct": m.group(0)[:200], "break_out": True})
+    return OracleSignal(
+        kind=kind, fired=False, confidence=0.0,
+        evidence=("a DOCTYPE/ENTITY is present but no COMPLETE external (SYSTEM/PUBLIC) entity declaration "
+                  "— an internal-entity-only DTD / truncated declaration is inert (not a block)"),
+        observed={"param": param})
 
 
 # ---------------------------------------------------------------------------

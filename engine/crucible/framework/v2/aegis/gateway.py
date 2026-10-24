@@ -709,6 +709,7 @@ class AegisGatewayHandler(BaseHTTPRequestHandler):
                 self.path, self._request_headers(), inspect_body,
                 content.decode("utf-8", "replace") if content else None,
                 enforce=settings.enforce,
+                canary=settings.config.canary,
             )
         except Exception:
             rverdict = None
