@@ -11,18 +11,29 @@
 #
 # v2 ships in DryRun mode by default — no network and no GPU required.
 # See V2-LIMITATIONS.md for what dry-run sacrifices.
-
-pydantic>=2.10,<3
-structlog>=25.0,<26
-httpx>=0.28,<1
-requests>=2.32,<3
-PyYAML>=6,<7
-beautifulsoup4>=4.12,<5
-Jinja2>=3.1,<4
-# Ed25519 signatures (entitlement/authority/evidence trust-root + signed certificates).
-cryptography>=50,<51
-
-# Test-only dependency: HttpExecutor unit tests run against a local
-# mock HTTP server fixture (pytest-httpserver) so they never hit a
-# real network. Skip if not running tests.
-pytest-httpserver>=1.1,<2
+annotated-types==0.8.0
+anyio==4.15.1
+beautifulsoup4==4.15.0
+certifi==2026.10.23
+cffi==2.1.1
+charset-normalizer==3.5.2
+cryptography==50.0.2
+h11==0.16.0
+httpcore==1.0.9
+httpx==0.28.1
+idna==3.20
+jinja2==3.1.6
+markupsafe==3.0.4
+packaging==26.3
+pycparser==3.12
+pydantic==2.14.1
+pydantic-core==2.50.1
+pytest-httpserver==1.2.0
+pyyaml==6.0.3
+requests==2.34.2
+soupsieve==3.0.4
+structlog==26.1.0
+typing-extensions==4.16.0
+typing-inspection==0.4.4
+urllib3==2.8.0
+werkzeug==3.1.9

@@ -54,4 +54,4 @@ packaging>=23
 # Test-only: HttpExecutor unit tests run against a local mock HTTP
 # server fixture so they never hit a real network. Sovereign-strict
 # CI omits this entry from the runtime install.
-pytest-httpserver>=1.1,<2
+pytest-httpserver>=1.2.0,<2
