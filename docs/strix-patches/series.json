@@ -478,6 +478,12 @@
    "file": "035-supply-chain-bump-urllib3-2-7-0-2-8-0-2-high-cve.patch",
    "sha256": "93e7bed85d62a296a59e5ad635021aa8d69ef3e095b0787380ab7cc40ec2d56f",
    "subject": "supply-chain: bump urllib3 2.7.0 -> 2.8.0 (2 HIGH CVEs) across all locks"
+  },
+  {
+   "commit": "4ba47ff621a7dbd3ed1be23302b127e5dbbbdc1f",
+   "file": "036-a14-bump-certifi-aiohttp-graphql-core-filelock-t.patch",
+   "sha256": "eab23b9f4c11c6229fccb9fa9e757a5db139e23fea9cb31421c6019dfcdd0438",
+   "subject": "A14: bump certifi, aiohttp, graphql-core, filelock to patched versions"
   }
  ],
  "schema": 1,
@@ -724,7 +730,7 @@
   "vendor/strix/tests_vigil/test_sandbox_hardening.py": "c5a6cbb4e51c5a86d1c9f30785fa7234af47706015222a9323f420b8a2059be8",
   "vendor/strix/tests_vigil/test_vigil_graph_progress.py": "b468b4ab45c317175af0a267f5692984c570b88a5bcf960f0e9f102706ffb337",
   "vendor/strix/tests_vigil/test_vigil_upstream_proxy.py": "5aec4434f994f0cc69b3fc2c6773ed484e2a26450bf6f1dcacfeb27dee63515c",
-  "vendor/strix/uv.lock": "211bd71b137ea8ec7249bb8251dccf5b27773f00672b5c492fe6371f257eb3be"
+  "vendor/strix/uv.lock": "81fa574cad8beb38e34f40953e6b7f10c887238e0cf3e58bf5a4de7abe06ffe2"
  },
  "upstream_commit": "230324d2b80a5a27506f85fc521845d8464b04c0",
  "upstream_license": "Apache-2.0",
