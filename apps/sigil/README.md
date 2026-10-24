@@ -97,7 +97,7 @@ Everything below is built and tested. Where something is a documented seam or of
   truncation/rewrite. 43k+ records.
 - **Ingestion** (`sigil/ingest/`) — your Claude Code history, git commits (live post-commit/post-merge
   hooks), subagent transcripts (each a titled session), and curated docs. Incremental, idempotent.
-- **Vectors** (`sigil/vectors/`) — on-device embeddings (`fastembed` / bge-small, CPU, no API, no cost)
+- **Vectors** (`sigil/vectors/`) — on-device embeddings (bge-small-en-v1.5 ONNX via onnxruntime + tokenizers, CPU, no API, no cost)
   in a local Qdrant. An absent topic returns *"no grounded match"* — never a fabrication.
 - **Graph** (`sigil/graph/`) — a deterministic Kùzu entity mirror of the spine, rebuilt by replay with an
   atomic swap; every node cites its spine anchor.
@@ -177,7 +177,7 @@ optionally Ollama (local VLM), a WireGuard/Tailscale tunnel (phone companion), a
 # 1. Python environment + dependencies
 python3 -m venv ~/.sigil/venv
 ~/.sigil/venv/bin/pip install -r requirements.txt
-#    (cryptography, fastembed, kuzu, mcp, onnxruntime, pydantic, qdrant-client)
+#    (cryptography, huggingface-hub, kuzu, mcp, onnxruntime, pydantic, qdrant-client, tokenizers)
 
 # 2. Local vector store (Qdrant on loopback)
 docker run -d --name sigil-qdrant --restart unless-stopped -p 127.0.0.1:6333:6333 \
