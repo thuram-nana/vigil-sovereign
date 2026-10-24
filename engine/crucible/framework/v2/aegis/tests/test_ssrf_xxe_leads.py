@@ -1,16 +1,20 @@
 """
-AEGIS — SSRF / XXE emitted as LEADS, never blocks (the honest first slice).
+AEGIS — SSRF / XXE LEADS cover the SOFTER residue (the unambiguous subset now BLOCKS).
 
-SSRF and XXE are confirmed by an OUT-OF-BAND callback (the app dereferencing an attacker-controlled
-resource), which a single inline request/response cannot prove near-zero-FP. So AEGIS emits them as
-LEAD verdicts: belief-raising + logged, carrying NO certificate and action=observe — the gateway
-forwards the request untouched. These tests pin that contract:
+Proving SSRF/XXE EXPLOITATION (the app actually dereferenced the URL / parsed the external entity and
+leaked a file) needs an OUT-OF-BAND callback, which a single inline exchange cannot supply near-zero-FP.
+So the DEREFERENCE proof stays the OOB oracle and the response side never blocks XXE. But the ATTEMPT is
+provable on the request alone: the UNAMBIGUOUS-construct subset is promoted to a real inline BLOCK
+(``ssrf_attempt`` / ``xxe_attempt`` — a cloud-metadata host / dangerous scheme; a COMPLETE external-entity
+DOCTYPE), exercised in ``test_ssrf_xxe_block.py``. What remains a LEAD here is the SOFTER residue a benign
+client might plausibly send — and these tests pin that contract:
 
-  * an SSRF probe (internal / cloud-metadata host, or file://) -> a LEAD "ssrf", NOT a block,
-  * an XXE payload (DOCTYPE declaring a SYSTEM/PUBLIC entity) -> a LEAD "xxe", NOT a block,
+  * a SOFTER SSRF URL (general internal / RFC1918 / loopback http(s), or a metadata lookalike) -> a LEAD
+    "ssrf", NOT a block,
+  * a TRUNCATED external-entity XXE declaration -> a LEAD "xxe", NOT a block,
   * a CONFIRMED block still takes priority over a lead in the same request,
   * a benign external URL / benign XML does not even raise a lead,
-  * end-to-end: the gateway relays an SSRF probe in ENFORCE mode (a lead never blocks).
+  * end-to-end: the gateway relays a SOFTER SSRF probe in ENFORCE mode (a lead never blocks).
 """
 
 from __future__ import annotations
@@ -36,18 +40,20 @@ def _req(path, *, headers=None, body=None):
     return inspect_request("GET", path, headers or [], body, enforce=True)
 
 
-# --------------------------------------------------------------------------- SSRF leads
+# --------------------------------------------------------------------------- SSRF leads (softer residue)
 
 @pytest.mark.parametrize("value", [
-    "http://169.254.169.254/latest/meta-data/",         # AWS metadata
-    "http://metadata.google.internal/computeMetadata/",  # GCP metadata
     "http://127.0.0.1:8080/admin",                        # loopback
     "https://10.0.0.5/internal",                           # RFC1918
     "http://192.168.1.1/",                                 # RFC1918
-    "file:///etc/passwd",                                 # dangerous scheme
-    "gopher://127.0.0.1:6379/_INFO",                       # dangerous scheme
+    "http://172.16.0.9/metrics",                           # RFC1918
+    "https://localhost:3000/health",                       # loopback by name
+    "http://169.254.169.254.evil.com/",                    # a metadata LOOKALIKE (not the exact IMDS host)
 ])
-def test_ssrf_probe_is_a_lead_not_a_block(value):
+def test_softer_ssrf_probe_is_a_lead_not_a_block(value):
+    """The softer internal/RFC1918/loopback/lookalike URL stays a LEAD — a benign app legitimately fetches
+    internal webhooks, so blocking it would be a false positive. (The unambiguous cloud-metadata host /
+    dangerous scheme subset BLOCKS — see test_ssrf_xxe_block.py.)"""
     v = _req("/fetch?url=" + urllib.parse.quote(value, safe=""))
     assert v is not None
     assert v.decision == "lead" and v.attack_class == "ssrf"
@@ -66,22 +72,16 @@ def test_benign_url_does_not_raise_an_ssrf_lead(value):
     assert v is None, f"benign value falsely raised a lead: {value!r} -> {v}"
 
 
-# --------------------------------------------------------------------------- XXE leads
+# --------------------------------------------------------------------------- XXE leads (softer residue)
 
-def test_xxe_external_entity_is_a_lead_not_a_block():
-    body = ('<?xml version="1.0"?>'
-            '<!DOCTYPE foo [ <!ENTITY xxe SYSTEM "file:///etc/passwd"> ]>'
-            '<foo>&xxe;</foo>')
+def test_truncated_external_entity_is_a_lead_not_a_block():
+    """A truncated/unclosed external-entity declaration stays a LEAD — only a COMPLETE
+    `<!DOCTYPE … [ … <!ENTITY … SYSTEM/PUBLIC … > … ]>` construct is blocked (test_ssrf_xxe_block.py)."""
+    body = '<?xml version="1.0"?><!DOCTYPE foo [ <!ENTITY xxe SYSTEM'
     v = _req("/upload", headers=_XML, body=body)
     assert v is not None
     assert v.decision == "lead" and v.attack_class == "xxe"
     assert v.certificate is None and v.action == "observe"
-
-
-def test_xxe_public_entity_is_a_lead():
-    body = ('<!DOCTYPE r [ <!ENTITY e PUBLIC "-//x//y" "http://evil/x.dtd"> ]><r>&e;</r>')
-    v = _req("/upload", headers=_XML, body=body)
-    assert v is not None and v.attack_class == "xxe" and v.decision == "lead"
 
 
 def test_benign_xml_without_external_entity_is_not_a_lead():
@@ -89,6 +89,7 @@ def test_benign_xml_without_external_entity_is_not_a_lead():
         '<?xml version="1.0"?><note><to>bob</to><body>hi</body></note>',
         '<!DOCTYPE html><html><body>ordinary doctype, no entity</body></html>',
         '<config><entry name="timeout">30</entry></config>',
+        '<!DOCTYPE r [ <!ENTITY a "hello"> ]><r>&a;</r>',   # internal-entity-only DTD (no SYSTEM/PUBLIC)
     ):
         assert _req("/upload", headers=_XML, body=body) is None, body
 
@@ -128,7 +129,7 @@ def upstream() -> Iterator[int]:
         srv.server_close()
 
 
-def test_gateway_relays_an_ssrf_probe_in_enforce_mode_and_emits_the_lead(upstream):
+def test_gateway_relays_a_softer_ssrf_probe_in_enforce_mode_and_emits_the_lead(upstream):
     sink: list[Verdict] = []
     gw = serve_gateway(f"http://127.0.0.1:{upstream}",
                        config=AegisConfig(deployment_secret="k", mode="enforce"),
@@ -137,7 +138,7 @@ def test_gateway_relays_an_ssrf_probe_in_enforce_mode_and_emits_the_lead(upstrea
     port = gw.server_address[1]
     try:
         url = f"http://127.0.0.1:{port}/fetch?url=" + urllib.parse.quote(
-            "http://169.254.169.254/latest/meta-data/", safe="")
+            "http://10.0.0.5/internal-webhook", safe="")
         body = urllib.request.urlopen(url, timeout=5).read()
         assert body == b"UP"   # a lead NEVER blocks — forwarded
         assert any(v.decision == "lead" and v.attack_class == "ssrf" for v in sink)

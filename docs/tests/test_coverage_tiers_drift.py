@@ -54,7 +54,7 @@ def test_both_documents_match_the_generated_block() -> None:
     assert problems == [], "coverage-tiers drift:\n" + "\n".join(problems)
 
 
-def test_the_reconciled_numbers_are_3_2_18_1_25() -> None:
+def test_the_reconciled_numbers_are_3_2_18_1_28() -> None:
     """Pin the reconciled truth. It was 3/2/13/20; W16-STD-5 added THREE fixtures-tier client-side
     posture detectors (clickjacking / CSRF / postMessage), so the fixtures column moved 20 -> 23; then
     Wave 2.2 added ONE local-tier achieved-state detector (client-side prototype pollution — a real
@@ -80,13 +80,15 @@ def test_the_reconciled_numbers_are_3_2_18_1_25() -> None:
     deterministic oracle re-derives from a VIGIL-captured auth-attempt record that a target auth ACCEPTED a
     credential the operator-planted TEST policy marks should-be-REJECTED; proven over retained captures, no live
     hydra/john run exercised in CI, the oracle REFUSING without the planted corpus so the FACT path is
-    TEST-IDENTITIES-ONLY), so the fixtures column moved 24 -> 25.
+    TEST-IDENTITIES-ONLY), so the fixtures column moved 24 -> 25; then the AEGIS request-side break-out
+    blocks (path-traversal / SSRF / XXE — fixtures-tier request-only parse-proofs, siblings of the command /
+    nosql break-out detectors and excluded from the frozen benchmark) added THREE, so fixtures moved 25 -> 28.
 
     Derived, not asserted blind — the counts come from the registry-grounded source; this states the
     value that reconciliation landed on so a future edit that changes an honesty number is loud."""
     counts = g.validate()
     assert (counts["external"], counts["own_infrastructure"], counts["local"], counts["source"],
-            counts["fixtures"]) == (3, 2, 18, 1, 25)
+            counts["fixtures"]) == (3, 2, 18, 1, 28)
 
 
 def test_the_inventory_inline_quotable_row_matches_the_source() -> None:
@@ -154,7 +156,7 @@ def test_the_sentence_is_generated_not_hardcoded() -> None:
     moved = next(d for d in src["detectors"] if d["tier"] == "local")
     moved["tier"] = "fixtures"
     sentence = g.render_sentence(src)
-    assert "17 loopback" in sentence and "26 fixtures-only" in sentence   # the counts followed the move (18→17 loopback, 25→26 fixtures)
+    assert "17 loopback" in sentence and "29 fixtures-only" in sentence   # the counts followed the move (18→17 loopback, 28→29 fixtures)
     assert "18 loopback" not in sentence
 
 
@@ -185,7 +187,7 @@ def test_generation_is_real_not_hardcoded() -> None:
     moved = next(d for d in src["detectors"] if d["tier"] == "local")
     moved["tier"] = "fixtures"
     counts = g.validate(src)
-    assert counts["local"] == 17 and counts["fixtures"] == 26     # 18->17 local, 25->26 fixtures, on purpose
+    assert counts["local"] == 17 and counts["fixtures"] == 29     # 18->17 local, 28->29 fixtures, on purpose
     assert "| 17 |" in g.render_block(src)
 
 

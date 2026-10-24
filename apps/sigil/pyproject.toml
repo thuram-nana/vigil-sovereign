@@ -32,10 +32,12 @@ dynamic = ["version"]
 
 # Core runtime dependencies — the memory loop, the MCP server, and the always-imported paths.
 # `numpy` is a genuine top-level import (sigil/voice/backends.py) and MUST be declared, not relied on
-# transitively via fastembed/onnxruntime.
+# transitively via onnxruntime/tokenizers. The embedding backend (sigil/vectors/embed.py) runs the
+# bge-small-en-v1.5 ONNX directly on onnxruntime + tokenizers (huggingface-hub fetches the model);
+# fastembed was removed because every release hard-pins pillow<13, which carries unpatched CVEs.
 dependencies = [
     "cryptography==50.0.1",
-    "fastembed==0.8.1",
+    "huggingface-hub==1.27.0",
     "kuzu==0.11.3",
     "mcp==2.1.1",
     "numpy>=2.4.6,<3",
@@ -43,6 +45,7 @@ dependencies = [
     "pydantic==2.13.4",
     "PyYAML>=6.0.3",                  # structural kubeconfig safety gate (refuse exec/cmd-path plugins)
     "qdrant-client==1.19.0",
+    "tokenizers==0.23.1",
 ]
 
 # Optional stacks are lazy-imported and degrade gracefully; the extras make the install intentional
