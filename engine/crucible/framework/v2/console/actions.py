@@ -5677,11 +5677,116 @@ def _pid_alive(pid) -> bool:
     return True
 
 
-def aegis_verdicts_path() -> str | None:
-    """The JSONL the live verdict feed tails — the current gateway's verdicts file, or None."""
-    cur = _read_aegis_current()
-    p = cur.get("verdicts")
-    return p if p else None
+def _read_gateway_record(path: Path) -> dict:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+
+def aegis_list_gateways() -> list[dict]:
+    """Every self-registered AEGIS gateway (UI-, CLI-, or cron-launched, observe or enforce), with dead
+    records pruned. Each gateway writes + refreshes its own record (identity + a live snapshot) in
+    paths.aegis_registry_dir(); reading that snapshot here makes a CLI/cron gateway as observable as a
+    UI-launched one — closing the gap where a gateway the console did not launch was invisible. Returns one
+    UI-ready entry per LIVE gateway, oldest first."""
+    out: list[dict] = []
+    try:
+        reg_dir = paths.aegis_registry_dir()
+        files = sorted(reg_dir.glob("*.json")) if reg_dir.is_dir() else []
+    except OSError:
+        files = []
+    for f in files:
+        rec = _read_gateway_record(f)
+        if not rec:
+            continue
+        if not _pid_alive(rec.get("pid")):
+            try:
+                f.unlink()                 # prune the stale record of an exited gateway
+            except OSError:
+                pass
+            continue
+        launched_by = rec.get("launched_by", "cli")
+        out.append({
+            "slug": rec.get("slug", ""),
+            "pid": rec.get("pid"),
+            "bind": f"{rec.get('host', '')}:{rec.get('port', '')}",
+            "upstream": rec.get("upstream"),
+            "requested_mode": rec.get("requested_mode"),
+            "effective_mode": rec.get("effective_mode"),
+            "enforcement": rec.get("enforcement") or {},
+            "actors": rec.get("actors", []),
+            "actor_count": rec.get("actor_count", 0),
+            "launched_by": launched_by,
+            # Only a UI-launched child is stoppable here; a CLI/cron gateway is owned by its launcher (and a
+            # cron keep-alive would respawn it), so the UI badges it and disables Stop — but its mode is still
+            # live-switchable via the slug-keyed control file (see aegis_set_mode).
+            "stoppable": (launched_by == "ui"),
+            "verdicts_available": bool(rec.get("verdicts_file")),
+            "started": rec.get("started"),
+        })
+    out.sort(key=lambda g: (g.get("started") or 0))
+    return out
+
+
+def _gateway_by_slug(slug: str, gws: list[dict] | None = None) -> dict | None:
+    """The tracked gateway with this slug; with an empty slug, the single running gateway (None if several
+    run — the caller must then name one). Keeps stop/mode unambiguous."""
+    gws = gws if gws is not None else aegis_list_gateways()
+    if slug:
+        return next((g for g in gws if g.get("slug") == slug), None)
+    return gws[-1] if len(gws) == 1 else None
+
+
+def _verdicts_file_allowed(vf: str) -> bool:
+    """Defence-in-depth for the live SSE: the console streams a gateway's verdicts_file verbatim, so a
+    stray/spoofed registry record must NOT point it at an arbitrary file (e.g. /etc/passwd). Require a
+    .jsonl that resolves UNDER the deployment tree (crucible_root's grandparent — <deploy>/engine/crucible
+    → <deploy> — which holds both the console run dir and .vigil-live), never a system path."""
+    try:
+        p = Path(vf).resolve()
+        cr = paths.crucible_root().resolve()
+    except Exception:  # noqa: BLE001
+        return False
+    if p.suffix != ".jsonl":               # verdicts are JSONL; /etc/passwd, ~/.ssh/id_rsa, … are rejected here
+        return False
+    bases = [cr]                           # UI-launched verdicts live under crucible_root (…/.console/runs/…)
+    gp = cr.parent.parent                  # the deployment root (…/engine/crucible → …) holds .vigil-live (cron)
+    if gp not in (cr, Path(gp.anchor)):    # include it only when distinct + not the filesystem root
+        bases.append(gp)
+    for b in bases:
+        try:
+            p.relative_to(b)
+            return True
+        except ValueError:
+            continue
+    return False
+
+
+def _pid_is_aegis_gateway(pid) -> bool:
+    """Confirm `pid` is actually a live AEGIS gateway before Stop signals it, so a stale/spoofed registry
+    record (launched_by='ui' + an arbitrary pid) cannot turn Stop into an arbitrary-process kill. Reads
+    /proc/<pid>/cmdline (Linux); unreadable → False (fail-closed — refuse to signal)."""
+    try:
+        with open(f"/proc/{int(pid)}/cmdline", "rb") as fh:
+            cmd = fh.read().replace(b"\x00", b" ").decode("utf-8", "replace").lower()
+    except (OSError, TypeError, ValueError):
+        return False
+    return "aegis" in cmd and "gateway" in cmd
+
+
+def aegis_verdicts_path(slug: str | None = None) -> str | None:
+    """The JSONL the live verdict feed tails for one gateway (by slug), or None. With no slug it resolves
+    the single running gateway's feed (back-comp); ambiguous (None) when several run. The resolved path is
+    confined to the deployment tree (_verdicts_file_allowed) so the SSE can never serve an arbitrary file."""
+    target = _gateway_by_slug(slug or "")
+    if target is None:
+        return None
+    rec = _read_gateway_record(paths.aegis_registry_path(target.get("slug", "")))
+    vf = rec.get("verdicts_file")
+    if not vf or not _verdicts_file_allowed(str(vf)):
+        return None
+    return vf
 
 
 def aegis_setup(body: dict) -> dict:
@@ -5738,10 +5843,12 @@ def aegis_setup(body: dict) -> dict:
         return {"error": f"invalid gateway config: {type(e).__name__}: {str(e)[:160]}"}
     if importlib.util.find_spec("httpx") is None:
         return {"error": "the gateway needs httpx to forward requests — install it (pip install httpx)"}
-    cur = _read_aegis_current()
-    if cur and _pid_alive(cur.get("pid")):
-        return {"error": f"a gateway is already running (pid {cur.get('pid')} → {cur.get('upstream')}); "
-                         f"stop it first", "running": cur}
+    # The UI now tracks MANY gateways; refuse only a DUPLICATE live slug (its registry + mode/kill-switch
+    # files are slug-keyed, so a second gateway sharing a slug would collide on its control channel).
+    _dup = _gateway_by_slug(slug)
+    if _dup is not None:
+        return {"error": f"a gateway with slug '{slug}' is already running (pid {_dup.get('pid')} "
+                         f"→ {_dup.get('upstream')}); stop it or choose a different slug", "running": _dup}
 
     run_id = _new_run_id()
     rd = run_dir(run_id)
@@ -5773,6 +5880,7 @@ def aegis_setup(body: dict) -> dict:
     _gw_env["AEGIS_GW_MODE"] = mode
     _gw_env["AEGIS_GW_SLUG"] = slug
     _gw_env["AEGIS_GW_SECRET"] = secret
+    _gw_env["AEGIS_GW_LAUNCHED_BY"] = "ui"   # self-register as UI-managed → stoppable + mode-toggle from here
     if honeypots:
         _gw_env["AEGIS_GW_HONEYPOTS"] = "\n".join(honeypots)
     if verdict_webhook:
@@ -5792,7 +5900,8 @@ def aegis_setup(body: dict) -> dict:
     # `meta` carries "run_id" for _write_aegis_current below, but _write_meta already takes run_id
     # positionally — pass the rest WITHOUT it, or Python raises "got multiple values for argument 'run_id'".
     _write_meta(run_id, **{k: v for k, v in meta.items() if k != "run_id"})
-    _write_aegis_current(meta)
+    # The gateway SELF-REGISTERS into paths.aegis_registry_dir() on startup (launched_by="ui"), so the
+    # console keeps no single-pointer — aegis_list_gateways() discovers it alongside CLI/cron gateways.
     # the production edge command (secret REDACTED) — the operator runs this on their own routable edge.
     prod = ["aegis", "gateway", "--upstream", upstream, "--host", "0.0.0.0", "--port", str(port),
             "--mode", mode, "--slug", slug, "--secret", "<your-deployment-secret>"]
@@ -5806,53 +5915,70 @@ def aegis_setup(body: dict) -> dict:
             "production_command": " ".join(prod)}
 
 
-def aegis_stop(_body: dict | None = None) -> dict:
-    """Stop the managed AEGIS gateway (SIGTERM). Idempotent — a no-op if none is running."""
-    cur = _read_aegis_current()
-    pid = cur.get("pid")
-    if not pid or not _pid_alive(pid):
-        _write_aegis_current({})
-        return {"stopped": False, "note": "no gateway was running"}
+def aegis_stop(body: dict | None = None) -> dict:
+    """Stop a tracked AEGIS gateway by slug (SIGTERM). Only a UI-launched gateway is stoppable here; a
+    CLI/cron gateway is owned by its launcher (a cron keep-alive would just respawn it), so we refuse with
+    a clear note rather than fight it. With exactly one gateway running, slug is optional. Idempotent."""
+    body = body if isinstance(body, dict) else {}
+    slug = str(body.get("slug", "")).strip()
+    gws = aegis_list_gateways()
+    if not gws:
+        return {"stopped": False, "note": "no gateway is running"}
+    target = _gateway_by_slug(slug, gws)
+    if target is None:
+        return {"error": ("several gateways are running — specify which to stop (slug)"
+                          if len(gws) > 1 else f"no gateway with slug '{slug}'")}
+    if not target.get("stoppable"):
+        return {"stopped": False, "slug": target.get("slug"), "launched_by": target.get("launched_by"),
+                "note": "this gateway was started outside the UI (CLI/cron); stop it from its launcher "
+                        "(a cron keep-alive would otherwise respawn it). Its mode is still switchable here."}
+    pid = target.get("pid")
+    if not _pid_is_aegis_gateway(pid):
+        return {"stopped": False, "slug": target.get("slug"),
+                "note": "refused: the tracked pid is not a live AEGIS gateway process (stale or spoofed "
+                        "record) — not signalling it"}
     try:
         os.kill(int(pid), signal.SIGTERM)
-    except (OSError, TypeError, ValueError) as e:
+    except (ProcessLookupError, TypeError, ValueError):
+        pass                                     # already gone — fall through to prune the record
+    except PermissionError:
+        return {"error": f"cannot signal pid {pid} (not ours)"}
+    except OSError as e:
         return {"error": f"could not stop pid {pid}: {e}"}
-    if cur.get("run_id"):
-        # `cur` itself carries a "run_id" key, so it must NOT also be splatted as a
-        # kwarg alongside the positional run_id (that raised TypeError: got multiple
-        # values for 'run_id'). Merge status/finished IN, then pop run_id out.
-        _meta = {**cur, "status": "stopped", "finished": time.time()}
-        _rid = _meta.pop("run_id")
-        _write_meta(_rid, **_meta)
-    _write_aegis_current({})
-    return {"stopped": True, "pid": pid}
+    try:
+        paths.aegis_registry_path(target.get("slug", "")).unlink()   # prune now; gateway also self-removes
+    except OSError:
+        pass
+    return {"stopped": True, "slug": target.get("slug"), "pid": pid}
 
 
 def aegis_set_mode(body: dict) -> dict:
-    """Live-switch a RUNNING AEGIS gateway between observe and enforce WITHOUT a restart, by writing the
-    per-request mode-control file the gateway re-reads (mirrors the kill-switch). Owner-gated. enforce
-    takes effect only if AEGIS_RESPOND is entitled; otherwise the gateway stays observe."""
+    """Live-switch a tracked gateway between observe and enforce WITHOUT a restart, by writing its
+    slug-keyed mode-control file (the gateway re-reads it per request, mirroring the kill-switch). Works for
+    ANY tracked gateway — UI-, CLI-, or cron-launched — because the control channel is the slug-keyed file,
+    not a pid. Owner-gated. enforce takes effect only if AEGIS_RESPOND is entitled; otherwise the gateway
+    stays observe (reported as downgraded in /api/aegis/status). With one gateway running, slug is optional."""
     mode = str(body.get("mode", "")).strip()
     if mode not in _AEGIS_MODES:
         return {"error": "mode must be 'observe' or 'enforce'"}
-    cur = _read_aegis_current()
-    pid = cur.get("pid") if cur else None
-    if not pid or not _pid_alive(pid):
-        if cur:
-            _write_aegis_current({})
+    slug = str(body.get("slug", "")).strip()
+    gws = aegis_list_gateways()
+    if not gws:
         return {"error": "no AEGIS gateway is running"}
-    slug = str(cur.get("slug") or "aegis-gateway")
+    target = _gateway_by_slug(slug, gws)
+    if target is None:
+        return {"error": ("several gateways are running — specify which (slug)"
+                          if len(gws) > 1 else f"no gateway with slug '{slug}'")}
+    prev = target.get("requested_mode")
     try:
-        paths.secure_write(paths.aegis_mode_path(slug), mode)
+        paths.secure_write(paths.aegis_mode_path(target.get("slug", "")), mode)
     except Exception as e:  # noqa: BLE001
         return {"error": f"could not set mode: {type(e).__name__}: {e}"}
-    prev = cur.get("mode")
-    cur["mode"] = mode
-    _write_aegis_current(cur)
     note = ("enforce is live only if the AEGIS_RESPOND entitlement is granted; otherwise the gateway "
             "downgrades to observe — read effective_mode from /api/aegis/status") if mode == "enforce" \
         else "observe: detect-only; nothing is blocked"
-    return {"switched": prev != mode, "from": prev, "to": mode, "mode": mode, "slug": slug, "note": note}
+    return {"switched": prev != mode, "from": prev, "to": mode, "mode": mode,
+            "slug": target.get("slug"), "note": note}
 
 
 def services_up(body: dict) -> dict:

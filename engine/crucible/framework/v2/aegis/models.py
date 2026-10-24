@@ -21,7 +21,7 @@ import hashlib
 import json
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from ..verify.verifier import KnownBugClass
 
@@ -243,6 +243,36 @@ class AegisConfig(BaseModel):
     # only ELEVATES that actor's belief (soft challenge/throttle), never a block. Entitlement-gated
     # (AEGIS_RESPOND) at the gateway, the operator's charter responsibility for the tunnel.
     oob_canary: str | None = Field(default=None, description="Opt-in operator-planted OOB canary URL (passive belief elevation; never injected).")
+    # Opt-in per-deployment prompt-injection / system-prompt DISCLOSURE guard. The operator plants this
+    # SECRET sentinel in the LLM's system prompt / hidden context OUT OF BAND; AEGIS scans each proxied
+    # LLM RESPONSE and BLOCKS (confirmed ``system_prompt_disclosure``) when it appears VERBATIM — proof
+    # the hidden context leaked. AEGIS NEVER injects/plants it. The near-zero-FP property holds ONLY for
+    # an UNPREDICTABLE, randomly-generated sentinel (generate one with
+    # ``python3 -c "import secrets; print('AEGIS-' + secrets.token_urlsafe(18))"``); the validator rejects
+    # OBVIOUSLY-weak canaries (too short / low-diversity / whitespace / a sequential run) but CANNOT
+    # verify unpredictability — a predictable-but-diverse canary that appears in benign output WOULD be
+    # blocked, so choosing an unpredictable sentinel is the operator's responsibility. A canary ECHOED
+    # from the client's own request is suppressed (reflection, not disclosure). Blocks only in ``enforce``
+    # mode; entitlement-gated (AEGIS_RESPOND).
+    canary: str | None = Field(default=None, description="Opt-in SECRET, UNPREDICTABLE, randomly-generated system-prompt canary planted out of band; a proxied LLM response that leaks it verbatim is blocked (system_prompt_disclosure). The operator is responsible for unpredictability (the floor rejects only obvious degeneracy).")
+
+    @field_validator("canary")
+    @classmethod
+    def _canary_meets_floor(cls, v: str | None) -> str | None:
+        """Reject an OBVIOUSLY-weak canary at config time (too short / low-diversity / whitespace /
+        sequential run) via the shared ``canary_meets_entropy_floor``, and NORMALISE by stripping
+        surrounding whitespace so the stored value matches what the floor validated and what the oracle
+        (which strips the sentinel at inspect time), the echo guard and the retained span all use — no
+        silent under-detection from a padded value. Best-effort degeneracy guard, NOT a guarantee of
+        unpredictability — a predictable but diverse canary passes and the operator alone is responsible
+        for choosing a random sentinel (see the field doc)."""
+        if v is None:
+            return v
+        from ..verify.oracles import canary_meets_entropy_floor
+        ok, reason = canary_meets_entropy_floor(v)
+        if not ok:
+            raise ValueError(reason)
+        return v.strip()
 
     @classmethod
     def from_mapping(cls, data: dict[str, Any]) -> "AegisConfig":

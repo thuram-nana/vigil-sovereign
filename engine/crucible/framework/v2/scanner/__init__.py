@@ -120,7 +120,7 @@ from .race import RaceResult, race_burst, race_check, raw_race
 from .self_improve import CapabilityGap, CapabilityProposal, MergeGate, analyze_gaps, draft_proposals
 from .sequencer import SequencerResult, analyze as analyze_tokens, collect_tokens
 from .websocket import CswshCheck, WsMessageInjectionCheck
-from .browser import find_browser, render_dom, scan_dom_xss
+from .browser import find_browser, render_dom
 from .browser_crawler import BrowserCrawler, browser_send
 from .domxss import DomXssCandidate, analyze_html, analyze_js
 from .graphql import (
@@ -206,7 +206,6 @@ __all__ = [
     "browser",
     "find_browser",
     "render_dom",
-    "scan_dom_xss",
     "browser_crawler",
     "BrowserCrawler",
     "browser_send",

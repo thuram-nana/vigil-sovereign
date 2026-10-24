@@ -1530,30 +1530,31 @@ def capabilities_data() -> dict[str, Any]:
 
 
 def aegis_status() -> dict[str, Any]:
-    """The managed AEGIS gateway's live status for the Defense dashboard: whether it is running, its
-    EFFECTIVE mode (enforce may downgrade to observe without the AEGIS_RESPOND entitlement), the target,
-    and the per-actor Beta beliefs snapshotted by the gateway. Read-only + resilient (never raises;
-    _safe-wrapped by the router). NO gateway launched yet → an honest empty state, not fabricated data."""
+    """Live status of EVERY tracked AEGIS gateway (UI-, CLI-, or cron-launched, observe or enforce) for the
+    Defense dashboard: each gateway's EFFECTIVE mode (enforce may downgrade to observe without the
+    AEGIS_RESPOND entitlement), target, per-actor Beta beliefs, and whether it is stoppable from here.
+    Read-only + resilient (never raises; _safe-wrapped by the router). No gateway running → an honest empty
+    state. Also mirrors the newest gateway into the legacy single-gateway fields for back-compat."""
     from . import actions
-    cur = _safe(actions._read_aegis_current, {}) or {}
-    if not cur:
-        return {"running": False, "gateway": None, "actors": [], "actor_count": 0,
+    gws = _safe(actions.aegis_list_gateways, []) or []
+    if not gws:
+        return {"running": False, "gateways": [], "count": 0, "gateway": None,
+                "actors": [], "actor_count": 0, "effective_mode": None, "requested_mode": None,
                 "note": "No AEGIS gateway is running. Start one from the Defense screen to watch it live."}
-    alive = bool(_safe(lambda: actions._pid_alive(cur.get("pid")), False))
-    snap: dict[str, Any] = {}
-    sp = cur.get("status_file")
-    if sp and Path(sp).is_file():
-        snap = _safe(lambda: json.loads(Path(sp).read_text(encoding="utf-8")), {}) or {}
+    primary = gws[-1]   # newest; mirrored into the legacy single-gateway fields
     return {
-        "running": alive,
-        "gateway": {"upstream": cur.get("upstream"), "bind": f"{cur.get('host')}:{cur.get('port')}",
-                    "requested_mode": cur.get("mode"), "slug": cur.get("slug"),
-                    "pid": cur.get("pid"), "started": cur.get("started"), "run_id": cur.get("run_id")},
-        "effective_mode": snap.get("effective_mode") if alive else None,
-        "requested_mode": cur.get("mode"),
-        "actors": snap.get("actors", []) if alive else [],
-        "actor_count": snap.get("actor_count", 0) if alive else 0,
-        "note": None if alive else "The last gateway is no longer running — start a new one.",
+        "running": True,
+        "count": len(gws),
+        "gateways": gws,
+        # legacy single-gateway mirror (the newest) — kept so older callers keep working during the transition
+        "gateway": {"upstream": primary.get("upstream"), "bind": primary.get("bind"),
+                    "requested_mode": primary.get("requested_mode"), "slug": primary.get("slug"),
+                    "pid": primary.get("pid"), "started": primary.get("started")},
+        "effective_mode": primary.get("effective_mode"),
+        "requested_mode": primary.get("requested_mode"),
+        "actors": primary.get("actors", []),
+        "actor_count": primary.get("actor_count", 0),
+        "note": None,
     }
 
 
