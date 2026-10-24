@@ -863,6 +863,14 @@ def remediate_plan(run_id: str) -> dict[str, Any]:
             # the gated-apply precondition of record (identical to apply_fix's own) — the UI's button gate.
             "runnable": bool(pre.get("runnable")),
             "why_not": "" if pre.get("runnable") else str(pre.get("why_not") or ""),
+            # LOCAL-APPLY affordance predicate (the SAME `fix_precondition` the gated apply enforces) — so the
+            # UI picks the right primary (local-apply vs gated PR) WITHOUT statting paths itself. `repo_kind`:
+            # git-remote | git-local | local; `remote_host_only` ⇒ no local tree (steer to PR); `source_root`
+            # the on-disk tree; `default_dest` the confined <source>-fixed copy target.
+            "repo_kind": str(pre.get("repo_kind") or "local"),
+            "remote_host_only": bool(pre.get("remote_host_only")),
+            "source_root": str(pre.get("source_root") or ""),
+            "default_dest": str(pre.get("default_dest") or ""),
             "note": ("VIGIL shows what to fix and the gated process an auto-fix follows. Opening this page "
                      "clones, builds and opens nothing: every gated stage below QUEUES for owner approval, "
                      "and the ladder runs only on your explicit Apply click — into a DISPOSABLE clone, never "
@@ -880,11 +888,20 @@ def remediate_plan(run_id: str) -> dict[str, Any]:
         # honest gate the Findings hub uses; a lead (unproven) is counted but never offered for auto-fix.
         if f.get("grounding") == "fact":
             ref = str(f.get("check_id") or f.get("id") or f.get("ref") or "")
+            safe_ref = ref if actions._valid_finding_ref(ref) else ""
+            # has_verified_diff: does THIS finding's VERIFIED diff already exist on disk? The SAME
+            # `fix_diff_path` existence that `apply_fix_local`'s only-verified gate turns on — so the UI
+            # offers the download/apply affordance iff a verified fix was persisted (never on UI state).
+            has_verified_diff = False
+            if safe_ref:
+                has_verified_diff = _safe(lambda r=safe_ref: actions.fix_diff_path(run_id, r).is_file(),
+                                          default=False) or False
             fixable.append({
                 # the stable finding reference the gated `vigil patch` ladder keys on (== the reverifiable.json
                 # check_id). Absent OR not an argv-safe token → withheld, and the Fixes screen offers the CLI
                 # path rather than a button whose only possible answer is "invalid finding reference".
-                "ref": ref if actions._valid_finding_ref(ref) else "",
+                "ref": safe_ref,
+                "has_verified_diff": bool(has_verified_diff),
                 "title": f.get("title", ""), "bug_class": f.get("bug_class", ""),
                 "severity": f.get("severity", ""), "location": f.get("location", ""),
                 "confirmed_by": f.get("confirmed_by", ""),
@@ -1513,30 +1530,31 @@ def capabilities_data() -> dict[str, Any]:
 
 
 def aegis_status() -> dict[str, Any]:
-    """The managed AEGIS gateway's live status for the Defense dashboard: whether it is running, its
-    EFFECTIVE mode (enforce may downgrade to observe without the AEGIS_RESPOND entitlement), the target,
-    and the per-actor Beta beliefs snapshotted by the gateway. Read-only + resilient (never raises;
-    _safe-wrapped by the router). NO gateway launched yet → an honest empty state, not fabricated data."""
+    """Live status of EVERY tracked AEGIS gateway (UI-, CLI-, or cron-launched, observe or enforce) for the
+    Defense dashboard: each gateway's EFFECTIVE mode (enforce may downgrade to observe without the
+    AEGIS_RESPOND entitlement), target, per-actor Beta beliefs, and whether it is stoppable from here.
+    Read-only + resilient (never raises; _safe-wrapped by the router). No gateway running → an honest empty
+    state. Also mirrors the newest gateway into the legacy single-gateway fields for back-compat."""
     from . import actions
-    cur = _safe(actions._read_aegis_current, {}) or {}
-    if not cur:
-        return {"running": False, "gateway": None, "actors": [], "actor_count": 0,
+    gws = _safe(actions.aegis_list_gateways, []) or []
+    if not gws:
+        return {"running": False, "gateways": [], "count": 0, "gateway": None,
+                "actors": [], "actor_count": 0, "effective_mode": None, "requested_mode": None,
                 "note": "No AEGIS gateway is running. Start one from the Defense screen to watch it live."}
-    alive = bool(_safe(lambda: actions._pid_alive(cur.get("pid")), False))
-    snap: dict[str, Any] = {}
-    sp = cur.get("status_file")
-    if sp and Path(sp).is_file():
-        snap = _safe(lambda: json.loads(Path(sp).read_text(encoding="utf-8")), {}) or {}
+    primary = gws[-1]   # newest; mirrored into the legacy single-gateway fields
     return {
-        "running": alive,
-        "gateway": {"upstream": cur.get("upstream"), "bind": f"{cur.get('host')}:{cur.get('port')}",
-                    "requested_mode": cur.get("mode"), "slug": cur.get("slug"),
-                    "pid": cur.get("pid"), "started": cur.get("started"), "run_id": cur.get("run_id")},
-        "effective_mode": snap.get("effective_mode") if alive else None,
-        "requested_mode": cur.get("mode"),
-        "actors": snap.get("actors", []) if alive else [],
-        "actor_count": snap.get("actor_count", 0) if alive else 0,
-        "note": None if alive else "The last gateway is no longer running — start a new one.",
+        "running": True,
+        "count": len(gws),
+        "gateways": gws,
+        # legacy single-gateway mirror (the newest) — kept so older callers keep working during the transition
+        "gateway": {"upstream": primary.get("upstream"), "bind": primary.get("bind"),
+                    "requested_mode": primary.get("requested_mode"), "slug": primary.get("slug"),
+                    "pid": primary.get("pid"), "started": primary.get("started")},
+        "effective_mode": primary.get("effective_mode"),
+        "requested_mode": primary.get("requested_mode"),
+        "actors": primary.get("actors", []),
+        "actor_count": primary.get("actor_count", 0),
+        "note": None,
     }
 
 

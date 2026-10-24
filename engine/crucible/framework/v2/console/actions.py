@@ -432,7 +432,7 @@ def _write_findings_json(rd: Path) -> bool:
 
 
 def launch_scan(target: str, *, max_pages: int = 60, use_library: bool = True,
-                ephemeral: bool = False) -> dict:
+                ephemeral: bool = False, oob: bool = False) -> dict:
     """Spawn a loopback `scan` subprocess that streams progress + saves its report.
     Returns ``{run_id, status}``. Refuses a non-loopback target (scan is loopback-only;
     a remote target must go through the gated `engage`). With ``ephemeral`` the whole run
@@ -452,10 +452,14 @@ def launch_scan(target: str, *, max_pages: int = 60, use_library: bool = True,
         "--format", "json", "--progress-log", str(progress),
         "--reverifiable-out", str(rd / "reverifiable.json"),
         "--max-pages", str(max_pages),
-        # a quick, bounded console scan: skip the out-of-band blind checks (they need
-        # a receiver + poll for callbacks, adding latency) and prioritise per point.
-        "--no-oob", "--targeted",
     ]
+    # a quick, bounded console scan: by default skip the out-of-band blind checks (they need a receiver + poll
+    # for callbacks, adding latency) and prioritise per point. With `oob` ON, OMIT `--no-oob` so the scan's
+    # CO-RESIDENT loopback OOB receiver runs — loopback scan is loopback-only, so the receiver is on the same
+    # host as the target and a blind callback reaches it (VF-2a token-only, sound co-resident).
+    if not oob:
+        cmd.append("--no-oob")
+    cmd.append("--targeted")
     # Honour `use_library`. It was previously accepted and then DROPPED — the parameter
     # appeared exactly ONCE in this file, in the signature — so every console-launched scan
     # silently ran the built-in checks only and never the declarative check library, despite
@@ -2663,6 +2667,12 @@ def launch_assessment(body: dict) -> dict:
                          f"(got {len(tools)}) — otherwise the run would start with no tool at all."}
     apply_fixes = bool(body.get("apply_fixes", False))
     keyless = bool(body.get("keyless", False))
+    # OOB (out-of-band blind-callback) opt-in. Default OFF ⇒ every branch is byte-identical to before. When ON,
+    # the loopback scan path runs the co-resident OOB receiver (we OMIT `--no-oob`), and a REMOTE engage wires
+    # the MANAGED collaborator relay — looked up SERVER-AUTHORITATIVELY from the registry by slug, NEVER from
+    # this body — fail-closed if it is not running+armed. The collaborator/arm lifecycle is its own gated flow.
+    _oob = body.get("oob") if isinstance(body.get("oob"), dict) else {}
+    oob_enabled = bool(_oob.get("enabled"))
     model = str(body.get("model", "")).strip()[:64]
     # F2: the session this run belongs to (optional). Recorded in meta so list_runs/session_detail can
     # associate the run; an unsafe id is dropped (never a traversal, never a raise) — the run still launches.
@@ -2913,7 +2923,13 @@ def launch_assessment(body: dict) -> dict:
         cmd = [sys.executable, "-m", "framework.v2", "scan", target,
                "--format", "json", "--progress-log", str(rd / "progress.jsonl"),
                "--reverifiable-out", str(rd / "reverifiable.json"),
-               "--max-pages", str(pages), "--no-oob"]
+               "--max-pages", str(pages)]
+        # Default: skip the blind OOB checks (they add a receiver + poll latency) for a quick loopback scan.
+        # With OOB ON, OMIT `--no-oob` so the scan's CO-RESIDENT loopback OOB receiver runs — on loopback the
+        # receiver is on the same host as the target, so a blind callback reaches it (VF-2a token-only, sound
+        # co-resident). No managed relay is needed for loopback; the remote relay is the engage branch below.
+        if not oob_enabled:
+            cmd.append("--no-oob")
         if targeted:
             cmd += ["--targeted"]
         slug = _slugify(body.get("slug") or "loopback", fallback="loopback")
@@ -2995,6 +3011,34 @@ def launch_assessment(body: dict) -> dict:
 
     cmd = [sys.executable, "-m", "framework.v2", "engage", slug, target, "--spine",
            "--request-budget", str(_ENGAGE_DEPTH[scan_mode])]
+    # OOB on a REMOTE engage: wire the MANAGED collaborator relay, looked up SERVER-AUTHORITATIVELY from the
+    # registry by slug (NEVER from the body). FAIL-CLOSED: OOB requested + remote + (no running+listening relay
+    # OR the engagement is NOT armed — no owner-signed authority whose oob_collector_pubkey == the running
+    # relay's pubkey) ⇒ refuse with a plain reason, before anything is spawned. A loopback engage uses the
+    # co-resident receiver (the engage default), so this is REMOTE-ONLY. The console appends only PUBLIC /
+    # loopback material + the secret-file PATH — never the secret value — and signs NOTHING (the VF-2b pin
+    # lives in the owner-signed authority, re-derived by the engine's governed OOB feeder).
+    if oob_enabled and not is_loopback:
+        from . import oob_collaborator
+        _oobst = oob_collaborator.status(slug)
+        if not (_oobst.get("running") and _oobst.get("listening")):
+            return {"error": f"OOB requested for a remote engage of {slug!r} but no running OOB collaborator "
+                             f"is listening for it — start it first (OOB panel), then arm it."}
+        if not _oobst.get("armed"):
+            return {"error": f"OOB requested for a remote engage of {slug!r} but it is NOT armed: an "
+                             f"owner-signed authority must pin the running collaborator's collector pubkey "
+                             f"(arm it — the owner signs it sovereign-side; the console never signs)."}
+        _advertise = str(_oobst.get("advertise_url") or "").strip()
+        _poll_url = str(_oobst.get("relay_poll_url") or "").strip()
+        _secret_path = str(_oobst.get("secret_path") or "").strip()
+        if not (_advertise and _poll_url and _secret_path):
+            return {"error": f"OOB requested for a remote engage of {slug!r} but the collaborator has no "
+                             f"advertise URL to embed in callbacks — re-start it with the operator-fronted "
+                             f"advertise URL (the public https endpoint in front of the loopback relay)."}
+        # --oob-relay = the advertise base the remote target hits (operator-fronted TLS); --oob-relay-url = the
+        # LOOPBACK base the co-resident scanner polls; --oob-relay-secret-file = the 0600 secret PATH (off argv).
+        cmd += ["--oob-relay", _advertise, "--oob-relay-url", _poll_url,
+                "--oob-relay-secret-file", _secret_path]
     if mode == "suite":
         # #799: a whole-app "suite" run must reach FACT parity with `scan --library` and crawl the REAL
         # surface, not short-circuit to "1 page / 0 FACTs". Two launcher-level fixes, both load-bearing:
@@ -4047,6 +4091,142 @@ def _valid_finding_ref(finding_ref: str) -> bool:
         and not any(c in ref for c in "/\\ \t\r\n")
 
 
+def _safe_fix_ref(finding_ref: str) -> str:
+    """A finding ref reduced to ONE filesystem-safe path component (never a traversal / separator), for the
+    persisted ``<ref>.patch`` / ``<ref>.verify.json`` names. Mirrors the CLI's ``_remediate_safe_ref``; the
+    caller has ALREADY passed ``_valid_finding_ref`` (so this only normalises for the filename)."""
+    s = "".join(c if (c.isalnum() or c in "-_.") else "_" for c in str(finding_ref or "finding"))
+    s = s.strip("._") or "finding"
+    return s[:80]
+
+
+def fix_diff_path(run_id: str, finding_ref: str) -> Path:
+    """The persisted VERIFIED unified diff for one finding: ``<run_dir>/fixes/<safe_ref>.patch``. Guarded by
+    ``run_dir`` (traversal → ValueError) AND ``_valid_finding_ref`` (an unsafe ref → ValueError), then the
+    ref is sanitised to one path component — so this can only ever name a file inside this run's own
+    ``fixes/`` dir. Its EXISTENCE is the console's only-verified apply gate (``deep_fix`` persists here ONLY
+    on a verified-no-pr result; a still-vulnerable run writes nothing)."""
+    rd = run_dir(run_id)                                   # traversal-guarded; raises ValueError on a bad id
+    if not _valid_finding_ref(finding_ref):
+        raise ValueError("invalid finding reference")
+    return rd / "fixes" / f"{_safe_fix_ref(finding_ref)}.patch"
+
+
+def fix_verify_path(run_id: str, finding_ref: str) -> Path:
+    """The sidecar of :func:`fix_diff_path` — ``<run_dir>/fixes/<safe_ref>.verify.json`` holding
+    ``{status, suite_ran, tests_passed, ...}``. Same guards; kept in lockstep with the CLI's
+    ``_emit_verify_sidecar_path`` so the writer (``vigil patch --emit-diff``) and this reader agree."""
+    return fix_diff_path(run_id, finding_ref).with_name(f"{_safe_fix_ref(finding_ref)}.verify.json")
+
+
+def _detect_repo_kind(repo_abs: str) -> str:
+    """Classify a LOCAL source tree for the Fixes screen's primary-affordance choice, READ-ONLY + cheap:
+
+      * ``git-remote`` — a git work tree whose a push remote resolves (so a gated PR is possible);
+      * ``git-local``  — a git work tree with NO push remote (local-apply/patch only);
+      * ``local``      — not a git work tree (or no ``git``), or ``repo_abs`` is empty (a URL / absent tree).
+
+    NOTE: ``git remote get-url --push`` REQUIRES a remote name (the bare form is a usage error), so this
+    enumerates remotes and queries each — equivalent to "a push remote resolves". Short-timeout ``git`` reads,
+    argv list (no shell), fail-closed to ``local`` on any error."""
+    if not repo_abs:
+        return "local"
+    git = shutil.which("git")
+    if not git:
+        return "local"
+
+    def _git(*a: str):
+        try:
+            return subprocess.run([git, "-C", repo_abs, *a], capture_output=True, text=True, timeout=10)  # noqa: S603
+        except (OSError, subprocess.SubprocessError):
+            return None
+
+    wt = _git("rev-parse", "--is-inside-work-tree")
+    if not wt or wt.returncode != 0 or (wt.stdout or "").strip() != "true":
+        return "local"
+    rem = _git("remote")
+    for name in [n.strip() for n in ((rem.stdout if rem else "") or "").splitlines() if n.strip()]:
+        pu = _git("remote", "get-url", "--push", name)
+        if pu and pu.returncode == 0 and (pu.stdout or "").strip():
+            return "git-remote"
+    return "git-local"
+
+
+def _apply_workspace() -> str:
+    """An allowlisted VIGIL workspace root under which a local-apply COPY may be written (besides the source's
+    own parent dir). Rooted at ``<live_base>/apply-local``; created best-effort. Returns the abspath, or ""."""
+    try:
+        ws = Path(_live_base()) / "apply-local"
+        ws.mkdir(parents=True, exist_ok=True)
+        return str(ws.resolve())
+    except OSError:
+        return ""
+
+
+# System roots a local-apply COPY may never be written at or under (belt-and-suspenders beside the positive
+# allowlist confinement below — the allowlist is the load-bearing gate; this refuses the pathological cases).
+_APPLY_SYSTEM_DIRS = ("/etc", "/usr", "/bin", "/sbin", "/lib", "/lib64", "/boot", "/dev", "/proc", "/sys",
+                      "/run", "/var", "/opt", "/srv", "/root")
+_APPLY_SYSTEM_EXACT = frozenset(("/", "/home", "/mnt", "/media", "/tmp", *_APPLY_SYSTEM_DIRS))
+
+
+def _safe_apply_dest(dest_path: str, source_root: str) -> "tuple[str, str]":
+    """ARBITRARY-WRITE-CRITICAL path safety for a local-apply COPY destination. Returns ``(resolved_dest, "")``
+    on success or ``("", reason)`` — fail-closed. Rejects, in order: an empty dest · a ``..`` component ·
+    a non-absolute path · an unresolvable path · a dest equal to / inside / an ancestor of the source · an
+    exact/nested system dir · a non-empty existing dir (or an existing non-dir) · a dest NOT confined under
+    an allowlisted root (the source's PARENT dir, or the VIGIL apply workspace). The dest is realpath-resolved
+    FIRST, so a symlink that escapes the allowlist resolves to its real target and is caught by confinement."""
+    raw = str(dest_path or "").strip()
+    if not raw:
+        return "", "a destination path is required for a copy apply"
+    if ".." in raw.replace("\\", "/").split("/"):
+        return "", "destination must not contain a '..' component"
+    p = Path(raw).expanduser()
+    if not p.is_absolute():
+        return "", "destination must be an absolute path"
+    try:
+        dest = os.path.realpath(str(p))                    # resolves symlinks in the whole chain
+        src = os.path.realpath(str(source_root or ""))
+    except (OSError, ValueError) as exc:
+        return "", f"cannot resolve the destination path: {type(exc).__name__}"
+    if not src or not os.path.isdir(src):
+        return "", "the source tree is not a readable local directory"
+    if dest == src:
+        return "", "destination equals the source tree"
+    try:
+        if os.path.commonpath([dest, src]) == src:
+            return "", "destination is inside the source tree"
+        if os.path.commonpath([dest, src]) == dest:
+            return "", "destination is an ancestor of the source tree"
+    except ValueError:
+        pass                                               # no common path (different roots) — fine
+    if dest in _APPLY_SYSTEM_EXACT:
+        return "", "destination is a system directory"
+    for sysd in _APPLY_SYSTEM_DIRS:
+        if dest == sysd or dest.startswith(sysd + "/"):
+            return "", f"destination is under a system directory ({sysd})"
+    if os.path.isdir(dest) and any(os.scandir(dest)):
+        return "", "destination directory exists and is not empty"
+    if os.path.exists(dest) and not os.path.isdir(dest):
+        return "", "destination exists and is not a directory"
+    # POSITIVE allowlist: the dest MUST sit strictly under the source's parent dir, or the VIGIL workspace.
+    allow_roots = [os.path.dirname(src)]
+    ws = _apply_workspace()
+    if ws:
+        allow_roots.append(ws)
+    for root in allow_roots:
+        if not root:
+            continue
+        try:
+            if os.path.commonpath([dest, root]) == root and dest != root:
+                return dest, ""
+        except ValueError:
+            continue
+    return "", ("destination is not under an allowlisted root (the source's parent dir, or the VIGIL "
+                "apply workspace under the live base)")
+
+
 def fix_precondition(run_id: str) -> dict:
     """THE single source of truth for "can the gated auto-patch actually RUN for this run?".
 
@@ -4063,14 +4243,19 @@ def fix_precondition(run_id: str) -> dict:
       * the engagement's OWN signed offense spine at ``<base>/<slug>.spine`` — ``vigil patch --from-spine``
         grounds the driving finding there and NEVER in raw JSON.
 
-    Returns ``{runnable, why_not, slug, repo, base_dir, spine, vigil, command}``. Total: a bad/traversing run
-    id or an unreadable meta is a clean, honest ``runnable=False``, never an exception. ``why_not`` is "" iff
-    runnable; ``command`` is the equivalent CLI invocation (shown to the operator when the console cannot run
-    it here), and ``vigil`` is "" when no entrypoint resolved.
+    Returns ``{runnable, why_not, slug, repo, base_dir, spine, vigil, command}`` PLUS the Fixes-screen
+    affordance predicate ``{repo_kind, remote_host_only, source_root, default_dest}`` — the SAME shared helper
+    ``api.remediate_plan`` surfaces to the UI so it picks the right primary (local-apply vs gated PR) WITHOUT
+    statting paths itself (one predicate, two callers — the anti-drift discipline of ``runnable``/``why_not``).
+    Total: a bad/traversing run id or an unreadable meta is a clean, honest ``runnable=False``, never an
+    exception. ``why_not`` is "" iff runnable; ``command`` is the equivalent CLI invocation (shown to the
+    operator when the console cannot run it here), and ``vigil`` is "" when no entrypoint resolved.
     """
     base_dir = os.environ.get("VIGIL_BASE_DIR") or ".vigil-live"
     out = {"runnable": False, "why_not": "", "slug": "", "repo": "", "base_dir": base_dir,
-           "spine": "", "vigil": "", "command": ""}
+           "spine": "", "vigil": "", "command": "",
+           # Fixes-screen local-apply affordance predicate (defaults for every early return).
+           "repo_kind": "local", "remote_host_only": False, "source_root": "", "default_dest": ""}
     try:
         rd = run_dir(run_id)                    # traversal-guarded; raises ValueError on a bad id
         meta = json.loads((rd / "meta.json").read_text(encoding="utf-8"))
@@ -4092,6 +4277,20 @@ def fix_precondition(run_id: str) -> dict:
         return {**out, "why_not": "this run has no repository to patch — the gated auto-patch applies to a "
                                   "codebase run's source. Run a codebase (DAA) scan to enable a gated fix here."}
     out["repo"] = repo
+    # Local-apply affordance (READ-ONLY + cheap): resolve the on-disk source tree, its default fixed-copy dest
+    # (<source>-fixed, a sibling under the allowlisted parent), and classify the repo. ``remote_host_only`` is
+    # True when ``target`` is a git URL / has no local tree — then local-apply is N/A and the UI steers to the
+    # gated PR path. Computed here (not in the UI) so there is ONE predicate both callers share.
+    source_root = ""
+    try:
+        if repo and os.path.isdir(repo):
+            source_root = os.path.realpath(repo)
+    except OSError:
+        source_root = ""
+    out["source_root"] = source_root
+    out["default_dest"] = (source_root + "-fixed") if source_root else ""
+    out["remote_host_only"] = not bool(source_root)        # a URL / absent local tree → no local copy possible
+    out["repo_kind"] = _detect_repo_kind(source_root)
     # prefer the base_dir the run itself recorded (the DAA codescan writes <base>/<slug>.spine there), so this
     # check and `vigil patch` always agree on the same base even if the ambient env differs.
     base_dir = str(meta.get("base_dir") or base_dir)
@@ -4119,12 +4318,16 @@ def fix_precondition(run_id: str) -> dict:
     return {**out, "runnable": True}
 
 
-def verify_fix(run_id: str, finding_ref: str) -> dict:
+def verify_fix(run_id: str, finding_ref: str, *, root: str = "") -> dict:
     """Fixes screen — the DETERMINISTIC fix-verification oracle for a codebase (DAA) finding: re-run the DAA
     rule over the run's source and report whether the finding still fires. ``cleared=True`` iff the rule no
     longer matches at its file — the honest, offline, non-destructive "did the fix remove it?" check. The
     operator applies the proposed diff to their source, then clicks Verify (or re-scans); a cleared result is
     the proof the finding is gone. Shells ``vigil codescan --verify`` (exit 0 ⇔ cleared).
+
+    ``root`` overrides WHICH tree is re-scanned (default: the run's own source). ``apply_fix_local`` passes
+    the APPLIED copy here so the re-verify verdict comes from the deterministic oracle re-run over the tree
+    that was actually patched — never from the apply step asserting its own success.
 
     Fail-closed: an unsafe ref refuses before argv; a non-codebase run (no repo to re-scan) returns a clean
     ``cleared=False`` with the reason. Never raises for a bad run id beyond ``run_dir``'s guard."""
@@ -4133,13 +4336,14 @@ def verify_fix(run_id: str, finding_ref: str) -> dict:
     if not _valid_finding_ref(finding_ref):
         return {"ok": False, "cleared": False, "error": "invalid finding reference"}
     pre = fix_precondition(run_id)
-    if not pre["repo"]:
+    scan_root = str(root or "").strip() or pre["repo"]
+    if not scan_root:
         return {"ok": False, "cleared": False,
                 "error": pre.get("why_not") or "this run has no codebase to re-scan for verification"}
     vigil = pre.get("vigil") or _vigil_bin()
     if not vigil:
         return {"ok": False, "cleared": False, "error": "the `vigil` entrypoint is not resolvable"}
-    cmd = [vigil, "codescan", "--verify", "--root", pre["repo"], "--ref", finding_ref]
+    cmd = [vigil, "codescan", "--verify", "--root", scan_root, "--ref", finding_ref]
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=600)  # noqa: S603
     except (OSError, subprocess.SubprocessError) as e:
@@ -4151,7 +4355,7 @@ def verify_fix(run_id: str, finding_ref: str) -> dict:
     if not isinstance(detail, dict):
         detail = {}
     cleared = (proc.returncode == 0) and bool(detail.get("cleared"))
-    return {"ok": True, "cleared": cleared, "finding_ref": finding_ref, "repo": pre["repo"],
+    return {"ok": True, "cleared": cleared, "finding_ref": finding_ref, "repo": scan_root,
             "still_fires_at": detail.get("still_fires_at", []), "moved": bool(detail.get("moved")),
             "command": f"vigil codescan --verify --root <repo> --ref {finding_ref}",
             "note": ("Re-runs the deterministic DAA rule over the run's source. `cleared=True` means the rule "
@@ -4168,7 +4372,13 @@ def deep_fix(run_id: str, finding_ref: str, *, fix_attempts: int = 3, agent: str
     (``--from-spine``) and same disposable-clone / never-``--open-pr`` posture as :func:`apply_fix`; it just
     iterates + verifies. Success is ``verified-no-pr`` (the rule cleared AND the build passed) — never the
     signed ``remediated`` (which still needs the live oracle + m-of-n PR). Returns the verb's real output
-    (transcript + verdict + the applied diff to ``git apply``), or its fail-closed refusal verbatim."""
+    (transcript + verdict + the applied diff to ``git apply``), or its fail-closed refusal verbatim.
+
+    PERSISTENCE (the local-apply enabling change): the verb is told ``--emit-diff <run_dir>/fixes/<ref>.patch``,
+    which writes the portable diff + a ``.verify.json`` sidecar ONLY on a verified-no-pr result. A stale diff
+    from a prior attempt is cleared first, and a non-verified result is scrubbed after — so the file EXISTS
+    iff THIS attempt verified. That existence is the only-verified gate ``GET …/diff`` and ``apply_fix_local``
+    key on; it is enforced by what gets PERSISTED (at the gated verb), never by UI state."""
     run_dir(run_id)
     finding_ref = str(finding_ref or "").strip()
     if not _valid_finding_ref(finding_ref):
@@ -4183,9 +4393,23 @@ def deep_fix(run_id: str, finding_ref: str, *, fix_attempts: int = 3, agent: str
     slug, repo, base_dir = pre["slug"], pre["repo"], pre["base_dir"]
     attempts = max(1, min(int(fix_attempts or 3), 6))   # bound the self-correcting loop
     _agent = "strix" if str(agent or "").strip().lower() == "strix" else "none"
+    # Persist destination for the verified diff + its sidecar. CLEAR any stale pair first, so a failed re-run
+    # can never leave a previously-verified diff appliable (the file's existence must reflect THIS attempt).
+    diff_path = fix_diff_path(run_id, finding_ref)          # run_dir + ref guards; one path component
+    verify_path = fix_verify_path(run_id, finding_ref)
+    try:
+        diff_path.parent.mkdir(parents=True, exist_ok=True)
+        for stale in (diff_path, verify_path):
+            try:
+                stale.unlink()
+            except FileNotFoundError:
+                pass
+    except OSError:
+        pass
     cmd = [pre["vigil"], "patch", "--deep", "--fix-attempts", str(attempts),
            "--from-spine", slug, "--finding-ref", finding_ref,
-           "--target-repo", repo, "--base-dir", base_dir, "--apply-edits", "--approve"]
+           "--target-repo", repo, "--base-dir", base_dir, "--apply-edits", "--approve",
+           "--emit-diff", str(diff_path)]
     if _agent == "strix":
         # AGENTIC front-end: Strix produces the diff (in the gated Docker sandbox), then it is re-verified by
         # the same ladder. Needs the gated egress gateway up (`vigil services up`); a gateway-down run fails
@@ -4197,7 +4421,17 @@ def deep_fix(run_id: str, finding_ref: str, *, fix_attempts: int = 3, agent: str
         return {"ok": False, "error": f"the deep-fix ladder failed to run: {type(e).__name__}: {e}"}
     out = ((proc.stdout or "") + (("\n--- stderr ---\n" + proc.stderr) if proc.stderr else "")).strip()[-12000:]
     verified = proc.returncode == 0    # `vigil patch --deep` exits 0 ONLY on verified-no-pr
+    if not verified:
+        # DEFENSE-IN-DEPTH: the verb only emits on verified, but scrub anyway so a non-verified result can
+        # never present an apply affordance (enforced by what is PERSISTED, not UI state).
+        for stale in (diff_path, verify_path):
+            try:
+                stale.unlink()
+            except (FileNotFoundError, OSError):
+                pass
+    has_verified_diff = diff_path.is_file()
     return {"ok": verified, "runnable": True, "rc": proc.returncode, "verified": verified,
+            "has_verified_diff": has_verified_diff,
             "finding_ref": finding_ref, "slug": slug, "attempts": attempts, "agent": _agent,
             "command": ("vigil patch --deep --from-spine " + slug + " --finding-ref " + finding_ref
                         + " --target-repo <repo> --base-dir " + base_dir + " --apply-edits --approve"
@@ -4278,6 +4512,113 @@ def apply_fix(run_id: str, finding_ref: str) -> dict:
                      "EARNED only when the driving oracle re-fires SILENT on the rebuilt patch (the live "
                      "re-drive capability); opening a real PR is a separate m-of-n-gated CLI act "
                      "(`vigil patch --open-pr`).")}
+
+
+def apply_fix_local(run_id: str, finding_ref: str, dest_path: str = "",
+                    mode: str = "copy", confirm: bool = False) -> dict:
+    """Fixes screen — APPLY an already-oracle-VERIFIED fix to the operator's LOCAL tree, two ways:
+
+      * ``mode="copy"`` (DEFAULT, non-destructive): write a fixed COPY at a CONFINED ``dest_path`` — the
+        operator source is NEVER touched. ``dest_path`` defaults to ``<source>-fixed`` client-side; whatever
+        is sent is subjected to arbitrary-write-critical path safety here (:func:`_safe_apply_dest`).
+      * ``mode="in_place"``: patch the operator SOURCE directly — ONLY when ``confirm`` is also True (both
+        the mode AND the explicit confirm are required; either alone refuses).
+
+    The verdict is NEVER the apply tool's self-report: after the gated verb writes, THIS function re-runs the
+    deterministic oracle (``verify_fix`` over the APPLIED tree) and returns ITS verdict.
+
+    Fail-closed order: (a) run_dir + ref guard; (b) REFUSE unless the VERIFIED diff file exists (the only-
+    verified gate — ``deep_fix`` persists it only on verified-no-pr); (c) path safety / confirm; (d) SPAWN
+    the gated ``vigil patch --apply-to`` (argv list, no shell — the executor is NEVER imported; FATAL-2);
+    (e) re-verify over the written tree. A drifted source (``git apply --check`` fails) is a clean
+    ``{ok:false, error:"source drifted …"}`` with NOTHING left half-applied."""
+    run_dir(run_id)                             # traversal-guarded; raises ValueError on a bad id → 404
+    finding_ref = str(finding_ref or "").strip()
+    if not _valid_finding_ref(finding_ref):
+        return {"ok": False, "error": "invalid finding reference"}
+    mode = str(mode or "copy").strip().lower()
+    if mode not in ("copy", "in_place"):
+        return {"ok": False, "error": "mode must be 'copy' (a confined fixed copy) or 'in_place'"}
+    # (b) only-verified gate (defense-in-depth): the persisted VERIFIED diff MUST exist. No verified diff ⇒
+    #     no apply affordance, enforced by what was persisted — never by UI state.
+    diff_path = fix_diff_path(run_id, finding_ref)          # run_dir + ref guards; one path component
+    if not diff_path.is_file():
+        return {"ok": False, "error": "no verified fix diff for this finding yet — run Deep Fix until it "
+                                      "reports VERIFIED first (only an oracle-verified fix can be applied)."}
+    pre = fix_precondition(run_id)
+    source_root = str(pre.get("source_root") or "")
+    if not source_root or not os.path.isdir(source_root):
+        return {"ok": False, "error": pre.get("why_not")
+                or "this run has no local source tree to apply a fix to (a remote/URL target has none)."}
+    vigil = pre.get("vigil") or _vigil_bin()
+    if not vigil:
+        return {"ok": False, "error": "the `vigil` entrypoint is not resolvable (set VIGIL_BIN / activate the venv)"}
+    slug, base_dir = pre["slug"], pre["base_dir"]
+
+    # (c) + (d) resolve the write target and spawn the gated verb.
+    cmd = [vigil, "patch", "--target-repo", source_root, "--proposed-diff", str(diff_path),
+           "--from-spine", slug, "--finding-ref", finding_ref, "--base-dir", base_dir, "--approve"]
+    if mode == "in_place":
+        if not bool(confirm):
+            return {"ok": False, "error": "in_place apply patches your source directly — it requires "
+                                          "confirm:true (the default 'copy' mode writes a fixed copy and never "
+                                          "touches your source)."}
+        applied_path = source_root
+        cmd.append("--in-place")
+    else:
+        dest, why = _safe_apply_dest(dest_path or (source_root + "-fixed"), source_root)
+        if not dest:
+            return {"ok": False, "error": f"unsafe destination: {why}"}
+        applied_path = dest
+        cmd += ["--apply-to", dest]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=1800)  # noqa: S603
+    except (OSError, subprocess.SubprocessError) as e:
+        return {"ok": False, "error": f"the local-apply verb failed to run: {type(e).__name__}: {e}"}
+    # DRIFT: the verb exits 3 when `git apply --check` refused the diff — a clean refusal, nothing applied.
+    if proc.returncode == 3:
+        return {"ok": False, "error": "source drifted since the scan; re-scan",
+                "output": ((proc.stdout or "") + (proc.stderr or "")).strip()[-4000:]}
+    if proc.returncode == 2:
+        return {"ok": False, "error": "the local-apply verb refused (precondition/usage)",
+                "output": ((proc.stdout or "") + (proc.stderr or "")).strip()[-4000:]}
+    # (e) ZERO-TRUST re-verify: the verdict comes from the deterministic oracle re-run over the APPLIED tree,
+    #     never from parsing the verb's self-reported success.
+    rv = verify_fix(run_id, finding_ref, root=applied_path)
+    applied_paths = _diff_target_paths_safe(diff_path)
+    return {"ok": True, "applied_path": applied_path, "applied_paths": applied_paths,
+            "mode": mode, "finding_ref": finding_ref,
+            "reverify": {"cleared": bool(rv.get("cleared")),
+                         "still_fires_at": rv.get("still_fires_at", []),
+                         "moved": bool(rv.get("moved")),
+                         "ran": bool(rv.get("ok"))},
+            "command": ("vigil patch --target-repo <source> --proposed-diff <verified.patch> --from-spine "
+                        + slug + " --finding-ref " + finding_ref + " --base-dir " + base_dir + " --approve"
+                        + (" --in-place" if mode == "in_place" else " --apply-to <dest>")),
+            "note": ("The fixed tree was written by the gated `vigil patch --apply-to` verb (never an imported "
+                     "executor); the cleared/still-fires verdict is the deterministic DAA oracle re-run over "
+                     "the APPLIED tree, not the apply step asserting success. Copy mode never touches your "
+                     "source; in_place required an explicit confirm.")}
+
+
+def _diff_target_paths_safe(diff_path: Path) -> list:
+    """The repo-relative files the persisted diff touches (its ``+++ b/<path>`` targets) — for an honest
+    ``applied_paths`` report. Total: an unreadable/absent diff yields []."""
+    out: list = []
+    try:
+        text = diff_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return out
+    for line in text.splitlines():
+        if line.startswith("+++ "):
+            tgt = line[4:].strip().split("\t", 1)[0].strip()
+            if tgt in ("/dev/null", ""):
+                continue
+            if tgt.startswith("b/"):
+                tgt = tgt[2:]
+            if tgt and tgt not in out:
+                out.append(tgt)
+    return out
 
 
 # =====================================================================================================
@@ -5172,6 +5513,118 @@ def attestation_ledger() -> dict:
 
 
 # ---------------------------------------------------------------------------
+# OOB collaborator (out-of-band relay) — per-slug managed-process lifecycle + loopback arming.
+#
+# These are THIN wrappers over console.oob_collaborator (the registry that owns the process, the keypair,
+# and the secret). FATAL-2 holds here exactly as it does for the charter: the console NEVER signs an
+# authority. collaborator start/stop/status touch only process lifecycle + PUBLIC pin material; `oob_arm`
+# either shells the exec-only `vigil provision` for a LOOPBACK slug (scope HARD-FIXED to 127.0.0.1 —
+# governance-signed INSIDE that subprocess, never here) or, for a REMOTE slug, returns the out-of-band
+# ceremony and mints NOTHING. The collector pubkey to pin is taken from the RUNNING relay (server-
+# authoritative), never from the request body.
+# ---------------------------------------------------------------------------
+
+
+def oob_collaborator_start(body: dict) -> dict:
+    """Stand up the per-slug managed OOB collaborator on loopback. Returns the PUBLIC collector pubkey + the
+    loopback poll URL + the operator's advertise URL — NEVER the poll secret. Fail-closed on a missing slug /
+    bad advertise URL. CSRF/rebind/role (_OWN) gated by do_POST."""
+    body = body if isinstance(body, dict) else {}
+    slug = str(body.get("slug", "")).strip()
+    if not slug:
+        return {"ok": False, "error": "slug required (a path-safe engagement token)"}
+    advertise = str(body.get("advertise_url", "")).strip() or None
+    from . import oob_collaborator
+    return oob_collaborator.start(slug, advertise)
+
+
+def oob_status(slug: str = "") -> dict:
+    """MEASURED status of the per-slug OOB collaborator (running/listening/armed/pid/port/collector_pubkey).
+    Read-only; never includes the secret; an absent/blank slug is the honest not-running state."""
+    from . import oob_collaborator
+    return oob_collaborator.status(str(slug or ""))
+
+
+def oob_collaborator_stop(body: dict) -> dict:
+    """Stop the per-slug OOB collaborator and PURGE its secret + collector keypair + meta (idempotent).
+    CSRF/rebind/role (_RUN) gated by do_POST."""
+    body = body if isinstance(body, dict) else {}
+    slug = str(body.get("slug", "")).strip()
+    if not slug:
+        return {"ok": False, "error": "slug required (a path-safe engagement token)"}
+    from . import oob_collaborator
+    return oob_collaborator.stop(slug)
+
+
+def oob_arm_loopback(body: dict) -> dict:
+    """Arm an engagement's OOB channel by PINNING the running collaborator's collector pubkey into an
+    owner-signed authority.
+
+    LOOPBACK slug (host ∈ 127.0.0.1/localhost/::1): shells the exec-only ``vigil provision --slug <slug>
+    --scope 127.0.0.1 --oob-collector-pubkey <pin>`` — scope is HARD-FIXED (the UI can never widen it), the
+    authority is governance-signed INSIDE that subprocess, and the console holds no key and signs nothing.
+
+    REMOTE slug: the console does NOT sign a remote authority (FATAL-2). It returns the exact out-of-band
+    ``vigil provision`` ceremony, PRE-FILLED with the running relay's collector pubkey (and advertise host),
+    for the owner to run where the owner key lives — and it MINTS NOTHING.
+
+    The collector pubkey is read from the RUNNING relay (server-authoritative), never from the request body;
+    a slug with no running, listening collaborator is refused. CSRF/rebind/role (_OWN) gated by do_POST."""
+    body = body if isinstance(body, dict) else {}
+    # Same path-safe sanitisation provision_loopback_authority uses — the slug reaches an argv.
+    slug = "".join(c for c in str(body.get("slug", "")).strip() if c.isalnum() or c in "-_.")[:120]
+    if not slug:
+        return {"ok": False, "error": "slug required (a path-safe token)"}
+    # loopback-vs-remote is decided by the SERVER from the target host, never a body flag (which could lie).
+    target = str(body.get("target", "")).strip()
+    host = str(body.get("host", "")).strip().lower()
+    if not host and target:
+        host = (urlsplit(target).hostname or "").lower()
+
+    from . import oob_collaborator
+    st = oob_collaborator.status(slug)
+    if not st.get("running") or not st.get("listening"):
+        return {"ok": False, "error": "no running OOB collaborator for this engagement — start it first. The "
+                                      "collector pubkey to pin comes from the running relay, never the request."}
+    pin = str(st.get("collector_pubkey") or "")
+    if not pin:
+        return {"ok": False, "error": "the running OOB collaborator exposed no collector pubkey to pin "
+                                      "(restart it)."}
+
+    is_loopback = bool(host) and host in _LOOPBACK
+    if not is_loopback:
+        # REMOTE: GUIDE-ONLY — mint NOTHING. The owner signs this sovereign-side, out of band.
+        advertise = st.get("advertise_url")
+        relay_host = (urlsplit(advertise).hostname or "") if advertise else ""
+        guide = (f"vigil provision --slug {slug} --scope {host or '<target-host>'} "
+                 f"--oob-collector-pubkey {pin}"
+                 + (f" --oob-relay-host {relay_host}" if relay_host else " --oob-relay-host <your-relay-host>"))
+        return {"ok": True, "armed": False, "remote": True, "slug": slug, "collector_pubkey": pin,
+                "guide": guide,
+                "note": "REMOTE OOB is armed OUT-OF-BAND: run the command above where the owner key lives. The "
+                        "console never signs a remote authority (FATAL-2) and minted nothing here."}
+
+    # LOOPBACK: scope HARD-CODED to 127.0.0.1 (never the caller's) — the UI cannot widen it or arm a remote
+    # charter. Mirrors provision_loopback_authority, plus the collector-pubkey pin. The signing happens inside
+    # the `vigil` subprocess; this process signs nothing.
+    vigil = _vigil_bin()
+    if not vigil:
+        return {"ok": False, "error": "the `vigil` entrypoint is not resolvable (set VIGIL_BIN / activate the venv)"}
+    try:
+        proc = subprocess.run([vigil, "provision", "--slug", slug, "--scope", "127.0.0.1",
+                               "--oob-collector-pubkey", pin],
+                              capture_output=True, text=True, timeout=120)
+    except (OSError, subprocess.SubprocessError) as e:
+        return {"ok": False, "error": f"{type(e).__name__}: {e}"}
+    armed = bool(proc.returncode == 0 and oob_collaborator.status(slug).get("armed"))
+    return {"ok": proc.returncode == 0, "armed": armed, "remote": False, "slug": slug, "scope": "127.0.0.1",
+            "collector_pubkey": pin, "output": (proc.stdout or "")[:2000],
+            "stderr": (proc.stderr or "")[:1000] if proc.returncode else "",
+            "note": "Armed a LOOPBACK OOB authority (scope 127.0.0.1) pinning the running collaborator's "
+                    "collector pubkey — governance-signed inside `vigil provision`; the console signed nothing."}
+
+
+# ---------------------------------------------------------------------------
 # AEGIS Defense gateway (P5a) — launch / stop / current-pointer
 #
 # The AEGIS gateway is a PERSISTENT data-plane reverse proxy (`serve_forever`), so — unlike a scan —
@@ -5229,11 +5682,116 @@ def _pid_alive(pid) -> bool:
     return True
 
 
-def aegis_verdicts_path() -> str | None:
-    """The JSONL the live verdict feed tails — the current gateway's verdicts file, or None."""
-    cur = _read_aegis_current()
-    p = cur.get("verdicts")
-    return p if p else None
+def _read_gateway_record(path: Path) -> dict:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+
+def aegis_list_gateways() -> list[dict]:
+    """Every self-registered AEGIS gateway (UI-, CLI-, or cron-launched, observe or enforce), with dead
+    records pruned. Each gateway writes + refreshes its own record (identity + a live snapshot) in
+    paths.aegis_registry_dir(); reading that snapshot here makes a CLI/cron gateway as observable as a
+    UI-launched one — closing the gap where a gateway the console did not launch was invisible. Returns one
+    UI-ready entry per LIVE gateway, oldest first."""
+    out: list[dict] = []
+    try:
+        reg_dir = paths.aegis_registry_dir()
+        files = sorted(reg_dir.glob("*.json")) if reg_dir.is_dir() else []
+    except OSError:
+        files = []
+    for f in files:
+        rec = _read_gateway_record(f)
+        if not rec:
+            continue
+        if not _pid_alive(rec.get("pid")):
+            try:
+                f.unlink()                 # prune the stale record of an exited gateway
+            except OSError:
+                pass
+            continue
+        launched_by = rec.get("launched_by", "cli")
+        out.append({
+            "slug": rec.get("slug", ""),
+            "pid": rec.get("pid"),
+            "bind": f"{rec.get('host', '')}:{rec.get('port', '')}",
+            "upstream": rec.get("upstream"),
+            "requested_mode": rec.get("requested_mode"),
+            "effective_mode": rec.get("effective_mode"),
+            "enforcement": rec.get("enforcement") or {},
+            "actors": rec.get("actors", []),
+            "actor_count": rec.get("actor_count", 0),
+            "launched_by": launched_by,
+            # Only a UI-launched child is stoppable here; a CLI/cron gateway is owned by its launcher (and a
+            # cron keep-alive would respawn it), so the UI badges it and disables Stop — but its mode is still
+            # live-switchable via the slug-keyed control file (see aegis_set_mode).
+            "stoppable": (launched_by == "ui"),
+            "verdicts_available": bool(rec.get("verdicts_file")),
+            "started": rec.get("started"),
+        })
+    out.sort(key=lambda g: (g.get("started") or 0))
+    return out
+
+
+def _gateway_by_slug(slug: str, gws: list[dict] | None = None) -> dict | None:
+    """The tracked gateway with this slug; with an empty slug, the single running gateway (None if several
+    run — the caller must then name one). Keeps stop/mode unambiguous."""
+    gws = gws if gws is not None else aegis_list_gateways()
+    if slug:
+        return next((g for g in gws if g.get("slug") == slug), None)
+    return gws[-1] if len(gws) == 1 else None
+
+
+def _verdicts_file_allowed(vf: str) -> bool:
+    """Defence-in-depth for the live SSE: the console streams a gateway's verdicts_file verbatim, so a
+    stray/spoofed registry record must NOT point it at an arbitrary file (e.g. /etc/passwd). Require a
+    .jsonl that resolves UNDER the deployment tree (crucible_root's grandparent — <deploy>/engine/crucible
+    → <deploy> — which holds both the console run dir and .vigil-live), never a system path."""
+    try:
+        p = Path(vf).resolve()
+        cr = paths.crucible_root().resolve()
+    except Exception:  # noqa: BLE001
+        return False
+    if p.suffix != ".jsonl":               # verdicts are JSONL; /etc/passwd, ~/.ssh/id_rsa, … are rejected here
+        return False
+    bases = [cr]                           # UI-launched verdicts live under crucible_root (…/.console/runs/…)
+    gp = cr.parent.parent                  # the deployment root (…/engine/crucible → …) holds .vigil-live (cron)
+    if gp not in (cr, Path(gp.anchor)):    # include it only when distinct + not the filesystem root
+        bases.append(gp)
+    for b in bases:
+        try:
+            p.relative_to(b)
+            return True
+        except ValueError:
+            continue
+    return False
+
+
+def _pid_is_aegis_gateway(pid) -> bool:
+    """Confirm `pid` is actually a live AEGIS gateway before Stop signals it, so a stale/spoofed registry
+    record (launched_by='ui' + an arbitrary pid) cannot turn Stop into an arbitrary-process kill. Reads
+    /proc/<pid>/cmdline (Linux); unreadable → False (fail-closed — refuse to signal)."""
+    try:
+        with open(f"/proc/{int(pid)}/cmdline", "rb") as fh:
+            cmd = fh.read().replace(b"\x00", b" ").decode("utf-8", "replace").lower()
+    except (OSError, TypeError, ValueError):
+        return False
+    return "aegis" in cmd and "gateway" in cmd
+
+
+def aegis_verdicts_path(slug: str | None = None) -> str | None:
+    """The JSONL the live verdict feed tails for one gateway (by slug), or None. With no slug it resolves
+    the single running gateway's feed (back-comp); ambiguous (None) when several run. The resolved path is
+    confined to the deployment tree (_verdicts_file_allowed) so the SSE can never serve an arbitrary file."""
+    target = _gateway_by_slug(slug or "")
+    if target is None:
+        return None
+    rec = _read_gateway_record(paths.aegis_registry_path(target.get("slug", "")))
+    vf = rec.get("verdicts_file")
+    if not vf or not _verdicts_file_allowed(str(vf)):
+        return None
+    return vf
 
 
 def aegis_setup(body: dict) -> dict:
@@ -5290,10 +5848,12 @@ def aegis_setup(body: dict) -> dict:
         return {"error": f"invalid gateway config: {type(e).__name__}: {str(e)[:160]}"}
     if importlib.util.find_spec("httpx") is None:
         return {"error": "the gateway needs httpx to forward requests — install it (pip install httpx)"}
-    cur = _read_aegis_current()
-    if cur and _pid_alive(cur.get("pid")):
-        return {"error": f"a gateway is already running (pid {cur.get('pid')} → {cur.get('upstream')}); "
-                         f"stop it first", "running": cur}
+    # The UI now tracks MANY gateways; refuse only a DUPLICATE live slug (its registry + mode/kill-switch
+    # files are slug-keyed, so a second gateway sharing a slug would collide on its control channel).
+    _dup = _gateway_by_slug(slug)
+    if _dup is not None:
+        return {"error": f"a gateway with slug '{slug}' is already running (pid {_dup.get('pid')} "
+                         f"→ {_dup.get('upstream')}); stop it or choose a different slug", "running": _dup}
 
     run_id = _new_run_id()
     rd = run_dir(run_id)
@@ -5325,6 +5885,7 @@ def aegis_setup(body: dict) -> dict:
     _gw_env["AEGIS_GW_MODE"] = mode
     _gw_env["AEGIS_GW_SLUG"] = slug
     _gw_env["AEGIS_GW_SECRET"] = secret
+    _gw_env["AEGIS_GW_LAUNCHED_BY"] = "ui"   # self-register as UI-managed → stoppable + mode-toggle from here
     if honeypots:
         _gw_env["AEGIS_GW_HONEYPOTS"] = "\n".join(honeypots)
     if verdict_webhook:
@@ -5344,7 +5905,8 @@ def aegis_setup(body: dict) -> dict:
     # `meta` carries "run_id" for _write_aegis_current below, but _write_meta already takes run_id
     # positionally — pass the rest WITHOUT it, or Python raises "got multiple values for argument 'run_id'".
     _write_meta(run_id, **{k: v for k, v in meta.items() if k != "run_id"})
-    _write_aegis_current(meta)
+    # The gateway SELF-REGISTERS into paths.aegis_registry_dir() on startup (launched_by="ui"), so the
+    # console keeps no single-pointer — aegis_list_gateways() discovers it alongside CLI/cron gateways.
     # the production edge command (secret REDACTED) — the operator runs this on their own routable edge.
     prod = ["aegis", "gateway", "--upstream", upstream, "--host", "0.0.0.0", "--port", str(port),
             "--mode", mode, "--slug", slug, "--secret", "<your-deployment-secret>"]
@@ -5358,53 +5920,70 @@ def aegis_setup(body: dict) -> dict:
             "production_command": " ".join(prod)}
 
 
-def aegis_stop(_body: dict | None = None) -> dict:
-    """Stop the managed AEGIS gateway (SIGTERM). Idempotent — a no-op if none is running."""
-    cur = _read_aegis_current()
-    pid = cur.get("pid")
-    if not pid or not _pid_alive(pid):
-        _write_aegis_current({})
-        return {"stopped": False, "note": "no gateway was running"}
+def aegis_stop(body: dict | None = None) -> dict:
+    """Stop a tracked AEGIS gateway by slug (SIGTERM). Only a UI-launched gateway is stoppable here; a
+    CLI/cron gateway is owned by its launcher (a cron keep-alive would just respawn it), so we refuse with
+    a clear note rather than fight it. With exactly one gateway running, slug is optional. Idempotent."""
+    body = body if isinstance(body, dict) else {}
+    slug = str(body.get("slug", "")).strip()
+    gws = aegis_list_gateways()
+    if not gws:
+        return {"stopped": False, "note": "no gateway is running"}
+    target = _gateway_by_slug(slug, gws)
+    if target is None:
+        return {"error": ("several gateways are running — specify which to stop (slug)"
+                          if len(gws) > 1 else f"no gateway with slug '{slug}'")}
+    if not target.get("stoppable"):
+        return {"stopped": False, "slug": target.get("slug"), "launched_by": target.get("launched_by"),
+                "note": "this gateway was started outside the UI (CLI/cron); stop it from its launcher "
+                        "(a cron keep-alive would otherwise respawn it). Its mode is still switchable here."}
+    pid = target.get("pid")
+    if not _pid_is_aegis_gateway(pid):
+        return {"stopped": False, "slug": target.get("slug"),
+                "note": "refused: the tracked pid is not a live AEGIS gateway process (stale or spoofed "
+                        "record) — not signalling it"}
     try:
         os.kill(int(pid), signal.SIGTERM)
-    except (OSError, TypeError, ValueError) as e:
+    except (ProcessLookupError, TypeError, ValueError):
+        pass                                     # already gone — fall through to prune the record
+    except PermissionError:
+        return {"error": f"cannot signal pid {pid} (not ours)"}
+    except OSError as e:
         return {"error": f"could not stop pid {pid}: {e}"}
-    if cur.get("run_id"):
-        # `cur` itself carries a "run_id" key, so it must NOT also be splatted as a
-        # kwarg alongside the positional run_id (that raised TypeError: got multiple
-        # values for 'run_id'). Merge status/finished IN, then pop run_id out.
-        _meta = {**cur, "status": "stopped", "finished": time.time()}
-        _rid = _meta.pop("run_id")
-        _write_meta(_rid, **_meta)
-    _write_aegis_current({})
-    return {"stopped": True, "pid": pid}
+    try:
+        paths.aegis_registry_path(target.get("slug", "")).unlink()   # prune now; gateway also self-removes
+    except OSError:
+        pass
+    return {"stopped": True, "slug": target.get("slug"), "pid": pid}
 
 
 def aegis_set_mode(body: dict) -> dict:
-    """Live-switch a RUNNING AEGIS gateway between observe and enforce WITHOUT a restart, by writing the
-    per-request mode-control file the gateway re-reads (mirrors the kill-switch). Owner-gated. enforce
-    takes effect only if AEGIS_RESPOND is entitled; otherwise the gateway stays observe."""
+    """Live-switch a tracked gateway between observe and enforce WITHOUT a restart, by writing its
+    slug-keyed mode-control file (the gateway re-reads it per request, mirroring the kill-switch). Works for
+    ANY tracked gateway — UI-, CLI-, or cron-launched — because the control channel is the slug-keyed file,
+    not a pid. Owner-gated. enforce takes effect only if AEGIS_RESPOND is entitled; otherwise the gateway
+    stays observe (reported as downgraded in /api/aegis/status). With one gateway running, slug is optional."""
     mode = str(body.get("mode", "")).strip()
     if mode not in _AEGIS_MODES:
         return {"error": "mode must be 'observe' or 'enforce'"}
-    cur = _read_aegis_current()
-    pid = cur.get("pid") if cur else None
-    if not pid or not _pid_alive(pid):
-        if cur:
-            _write_aegis_current({})
+    slug = str(body.get("slug", "")).strip()
+    gws = aegis_list_gateways()
+    if not gws:
         return {"error": "no AEGIS gateway is running"}
-    slug = str(cur.get("slug") or "aegis-gateway")
+    target = _gateway_by_slug(slug, gws)
+    if target is None:
+        return {"error": ("several gateways are running — specify which (slug)"
+                          if len(gws) > 1 else f"no gateway with slug '{slug}'")}
+    prev = target.get("requested_mode")
     try:
-        paths.secure_write(paths.aegis_mode_path(slug), mode)
+        paths.secure_write(paths.aegis_mode_path(target.get("slug", "")), mode)
     except Exception as e:  # noqa: BLE001
         return {"error": f"could not set mode: {type(e).__name__}: {e}"}
-    prev = cur.get("mode")
-    cur["mode"] = mode
-    _write_aegis_current(cur)
     note = ("enforce is live only if the AEGIS_RESPOND entitlement is granted; otherwise the gateway "
             "downgrades to observe — read effective_mode from /api/aegis/status") if mode == "enforce" \
         else "observe: detect-only; nothing is blocked"
-    return {"switched": prev != mode, "from": prev, "to": mode, "mode": mode, "slug": slug, "note": note}
+    return {"switched": prev != mode, "from": prev, "to": mode, "mode": mode,
+            "slug": target.get("slug"), "note": note}
 
 
 def services_up(body: dict) -> dict:

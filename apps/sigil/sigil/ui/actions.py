@@ -254,6 +254,14 @@ def do_action(action: str, params: dict, *, store: Optional[SpineStore] = None,
                 environment=str(params.get("environment", "staging")),
                 duration_hours=params.get("duration_hours", 8.0),
                 note=str(params.get("note", "")),
+                # OOB pins (public material only): the operator-hosted relay host + its independent collector
+                # pubkey, plus the optional DNS-OOB pair. add_target VALIDATES each and binds them INTO the
+                # owner-signed authority (the owner key signs sovereign-side, in-process) — forward them
+                # instead of dropping them. Absent ⇒ "" ⇒ a non-OOB authority, byte-identical to before.
+                oob_relay_host=str(params.get("oob_relay_host", "")),
+                oob_collector_pubkey=str(params.get("oob_collector_pubkey", "")),
+                oob_dns_domain=str(params.get("oob_dns_domain", "")),
+                oob_dns_collector_pubkey=str(params.get("oob_dns_collector_pubkey", "")),
                 store=store,
                 evaluator_attestation=(att if isinstance(att, dict) else None),
             )

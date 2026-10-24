@@ -1,23 +1,27 @@
 """
-Dynamic DOM-XSS confirmation in a real headless browser.
+Headless-browser DOM rendering — the dynamic half of DOM-XSS analysis.
 
-A vulnerable page sinks the URL fragment into innerHTML; a safe page uses
-textContent. The injected <img onerror> sets a marker attribute on <body> only if
-it executes, so the side-effect oracle confirms the vulnerable page and stays
-silent on the safe one. Skipped where no browser is installed.
+``render_dom`` drives headless Chromium/Chrome and returns the post-JavaScript
+DOM, so a static source->sink candidate (``scanner.domxss``) can be checked
+against what actually renders. Skipped where no working browser is installed.
+
+DOM-XSS *confirmation* is deliberately NOT done here: a marker found in the
+rendered DOM is substring detection — the exact false positive the
+``DOM_EXECUTION`` oracle exists to refuse. Proven DOM-XSS execution is confirmed
+by ``scanner.browser_xss`` (CDP binding call carrying a canary + the
+``DOM_EXECUTION`` oracle); see ``test_browser_xss.py`` / ``test_domxss*.py``.
 """
 
 from __future__ import annotations
 
 import contextlib
 import threading
-import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Iterator
 
 import pytest
 
-from framework.v2.scanner.browser import browser_usable, render_dom, scan_dom_xss
+from framework.v2.scanner.browser import browser_usable, render_dom
 
 pytestmark = pytest.mark.skipif(
     not browser_usable(),
@@ -26,11 +30,6 @@ pytestmark = pytest.mark.skipif(
 _VULN = b"""<html><body><div id="out"></div><script>
   var h = decodeURIComponent(location.hash.slice(1));
   document.getElementById("out").innerHTML = h;   // DOM-XSS sink
-</script></body></html>"""
-
-_SAFE = b"""<html><body><div id="out"></div><script>
-  var h = decodeURIComponent(location.hash.slice(1));
-  document.getElementById("out").textContent = h;  // safe: no HTML parsing
 </script></body></html>"""
 
 
@@ -67,17 +66,3 @@ def test_render_dom_executes_javascript() -> None:
     with _server(_VULN) as base:
         dom = render_dom(base + "#%3Cb%3EHELLO_DOM%3C/b%3E")  # #<b>HELLO_DOM</b>
         assert dom is not None and "HELLO_DOM" in dom
-
-
-def test_dom_xss_confirmed_in_browser_on_vulnerable_page() -> None:
-    with _server(_VULN) as base:
-        confirmed = scan_dom_xss(base, inject="fragment", timeout=30.0)
-        assert confirmed is not None, "browser did not confirm DOM-XSS on the vulnerable page"
-        assert confirmed.bug_class == "dom_xss"
-        assert confirmed.confirmed_by.value == "side_effect"
-
-
-def test_dom_xss_not_confirmed_on_safe_page() -> None:
-    with _server(_SAFE) as base:
-        confirmed = scan_dom_xss(base, inject="fragment", timeout=30.0)
-        assert confirmed is None, "textContent page must not be confirmed as DOM-XSS"

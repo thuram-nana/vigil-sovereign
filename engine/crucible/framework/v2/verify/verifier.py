@@ -385,6 +385,35 @@ BUG_CLASS_ORACLES: dict[str, tuple[OracleKind, ...]] = {
     # benchmark/scan/engage finding does. So appending it leaves the unknown-class fallback and `make gate`
     # byte-identical.
     "nosql_injection_attempt": (OracleKind.NOSQL_INJECTION_BREAKOUT,),
+    # Request-side DIRECTORY-TRAVERSAL / LFI attempt — the request-side sibling of the three rows above, and
+    # DISTINCT from the response-side `path_traversal`/`lfi` classes (which prove a leak via SIDE_EFFECT over
+    # the app's answer). A request VALUE provably walks a `../` dot-dot escape — through a whitespace-free
+    # path, after a defensive double-decode — into a WELL-KNOWN SENSITIVE TARGET (etc/passwd, .ssh/id_rsa,
+    # windows/win.ini, …). Proves a STRUCTURED traversal ATTEMPT (re-runnable), NOT exploitation. This NEW
+    # OracleKind is reachable ONLY via this row — it is NOT in the frozen _ALL_ORACLES fallback — and fires
+    # only when the ctx carries `request_payload` (the SAME key sqli_attempt uses), which no
+    # benchmark/scan/engage finding does. So appending it leaves the unknown-class fallback and `make gate`
+    # byte-identical.
+    "path_traversal_attempt": (OracleKind.PATH_TRAVERSAL_BREAKOUT,),
+    # Request-side SSRF attempt — the request-side sibling of the rows above, and the BLOCK-worthy
+    # UNAMBIGUOUS subset of the SSRF LEAD. A request VALUE provably parses (urlsplit, after a defensive
+    # decode, NO DNS/network) to a URL whose HOST is a cloud-metadata endpoint (169.254.169.254,
+    # metadata.google.internal, …) or whose SCHEME is a dangerous non-HTTP protocol (file/gopher/dict/…).
+    # Proves a STRUCTURED SSRF ATTEMPT (re-runnable), NOT a dereference (a general internal/RFC1918/loopback
+    # http(s) URL does NOT fire — it stays the LEAD). This NEW OracleKind is reachable ONLY via this row — it
+    # is NOT in the frozen _ALL_ORACLES fallback — and fires only when the ctx carries `request_payload` (the
+    # SAME key sqli_attempt uses), which no benchmark/scan/engage finding does. So appending it leaves the
+    # unknown-class fallback and `make gate` byte-identical.
+    "ssrf_attempt": (OracleKind.SSRF_BREAKOUT,),
+    # Request-side XXE attempt — the request-side sibling of the rows above, and the BLOCK-worthy UNAMBIGUOUS
+    # subset of the XXE LEAD. A request BODY provably declares an EXTERNAL entity (a COMPLETE
+    # `<!DOCTYPE … [ … <!ENTITY … (SYSTEM|PUBLIC) … > … ]>` construct). Proves a STRUCTURED XXE ATTEMPT
+    # (re-runnable), NOT exploitation/file-disclosure (the response-side oracle deliberately never blocks XXE;
+    # a truncated/internal-only declaration does NOT fire — it stays the LEAD / is inert). This NEW OracleKind
+    # is reachable ONLY via this row — it is NOT in the frozen _ALL_ORACLES fallback — and fires only when the
+    # ctx carries `request_payload` (the SAME key sqli_attempt uses), which no benchmark/scan/engage finding
+    # does. So appending it leaves the unknown-class fallback and `make gate` byte-identical.
+    "xxe_attempt": (OracleKind.XXE_BREAKOUT,),
     # Workstream-3 (dormant-sensor promotion): a kube-bench CIS-control-failure LEAD
     # (sensors.k8s_runtime) becomes a FACT only when the k8s-posture oracle re-derives a CONCRETE
     # insecure setting over the RETAINED control (a hard FAIL whose observed value literally carries a
@@ -951,6 +980,24 @@ _ALIASES: dict[str, str] = {
     "mongo_injection_attempt": "nosql_injection_attempt",
     "mongodb_injection_attempt": "nosql_injection_attempt",
     "mongodb_operator_injection": "nosql_injection_attempt",
+    # Request-side directory-traversal / LFI ATTEMPT spelling variants fold onto the single canonical class.
+    # NOTE: the LIVE response-side `path_traversal` class (and its `directory_traversal`/`lfi` aliases — a
+    # leaked-file SIDE_EFFECT proof) is deliberately NOT aliased here: a request-side `../`-to-sensitive-file
+    # ATTEMPT (a parse-proof on the request alone) and a confirmed LFI leak (proven on the app's response)
+    # are distinct proofs and stay distinct classes, exactly as `sqli_attempt` is distinct from `sqli`.
+    "directory_traversal_attempt": "path_traversal_attempt",
+    "lfi_attempt": "path_traversal_attempt",
+    # Request-side SSRF ATTEMPT spelling variant folds onto the single canonical class. NOTE: the LIVE
+    # response-side `ssrf` class (an OOB/callback dereference proof) is deliberately NOT aliased here: a
+    # request-side metadata/dangerous-scheme ATTEMPT (a parse-proof on the request alone) and a confirmed
+    # SSRF dereference (proven out-of-band) are distinct proofs and stay distinct classes, exactly as
+    # `sqli_attempt` is distinct from `sqli`.
+    "server_side_request_forgery_attempt": "ssrf_attempt",
+    # Request-side XXE ATTEMPT spelling variants fold onto the single canonical class. The LIVE response-
+    # side / OOB `xxe` class stays distinct for the same reason (an external-entity DECLARATION in the
+    # request vs a proven out-of-band dereference).
+    "xml_external_entity_attempt": "xxe_attempt",
+    "xxe_injection_attempt": "xxe_attempt",
     # E1 IMDS/metadata credential-capture spelling variants fold onto the single canonical class. This is
     # the achieved-EFFECT proof (creds retrieved from IMDS AND proven usable), distinct from the cloud
     # posture classes above — a captured, authenticated credential, not a mis-configuration.
@@ -1707,6 +1754,21 @@ class OracleVerifier:
         if kind is OracleKind.NOSQL_INJECTION_BREAKOUT:
             if "request_payload" in ctx:
                 return oracles.nosql_injection_breakout_oracle(
+                    ctx["request_payload"], param=str(ctx.get("payload_param", "")))
+            return None
+        if kind is OracleKind.PATH_TRAVERSAL_BREAKOUT:
+            if "request_payload" in ctx:
+                return oracles.path_traversal_breakout_oracle(
+                    ctx["request_payload"], param=str(ctx.get("payload_param", "")))
+            return None
+        if kind is OracleKind.SSRF_BREAKOUT:
+            if "request_payload" in ctx:
+                return oracles.ssrf_breakout_oracle(
+                    ctx["request_payload"], param=str(ctx.get("payload_param", "")))
+            return None
+        if kind is OracleKind.XXE_BREAKOUT:
+            if "request_payload" in ctx:
+                return oracles.xxe_breakout_oracle(
                     ctx["request_payload"], param=str(ctx.get("payload_param", "")))
             return None
         # -- Workstream-3 k8s posture — fire ONLY when the ctx carries `k8s_control` (a retained

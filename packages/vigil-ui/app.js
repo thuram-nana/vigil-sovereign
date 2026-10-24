@@ -510,22 +510,24 @@
         title: "Starting the offense console and API — this takes a few seconds." },
         [h("span.dot"), h("span.txt", null, "Starting offense…")]);
     }
+    if (OFFENSE.up && OFFENSE.canStart) {
+      // Up: a REAL, clickable toggle — the WHOLE chip stops the offense side, pairing with the Start button
+      // the down state shows, so offense is brought DOWN from the top bar the same way it is brought up. The
+      // proxy serving this page owns the two backends' lifecycle and tears exactly them down (never the
+      // cockpit, never itself). confirmStopOffense() asks first, so an accidental click can't kill offense.
+      return h("button.offense-chip.up.action#offense-chip", {
+        title: "Offense side is up — click to STOP the console and API. Findings, reports and proof stay on "
+          + "disk; start it again here or with `vigil up`.",
+        onClick: function () { confirmStopOffense(); },
+      }, [h("span.dot"), h("span.txt", null, "Offense up"), h("span.oc-hint", null, "Stop")]);
+    }
     if (OFFENSE.up) {
-      // Up: a quiet indicator, PLUS the STOP that pairs with the start button — so the offense side can
-      // be brought DOWN from the screen the same way it is brought up. The proxy serving this page owns
-      // the two backends' lifecycle and tears exactly them down (never the cockpit, never itself).
-      // `canStart` gates stop too: a proxy that cannot start the plane cannot stop it, so it shows no
-      // button rather than one that cannot work.
-      const upKids = [h("span.dot"), h("span.txt", null, "Offense up")];
-      if (OFFENSE.canStart) {
-        upKids.push(h("button.oc-stop", {
-          title: "Stop the offense console and API. Findings, reports and proof stay on disk; you can "
-            + "start the offense side again here or with `vigil up`.",
-          onClick: function (e) { e.preventDefault(); e.stopPropagation(); confirmStopOffense(); },
-        }, "Stop"));
-      }
+      // Up, but this proxy does NOT own the lifecycle (k8s/systemd/--proxy-only) — an honest status
+      // indicator, because a button here could not actually stop the backend.
       return h("span.offense-chip.up#offense-chip",
-        { title: "The offense console and API are answering." }, upKids);
+        { title: "The offense console and API are answering. This page's proxy does not manage the offense "
+          + "lifecycle — stop it with `vigil down` in a terminal." },
+        [h("span.dot"), h("span.txt", null, "Offense up")]);
     }
     if (!OFFENSE.canStart) {                    // honest: no button, because this proxy cannot start it
       return h("span.offense-chip.down#offense-chip",
@@ -2261,6 +2263,10 @@
     const W = { step: 1, mode: "", target: "", slug: "", authorized: false, mount: false, cbEngine: "daa",
       scope: [], scopeInput: "", objective: "", scan_mode: "standard", aiTools: true,
       tool: "", tools: [], apply_fixes: false, aegis_action: "detect",
+      // OOB (blind / out-of-band) confirmation for this run, plus its MEASURED gate state. `oobStatusFor`
+      // records the slug the cached `oobStatus` was read for, so a redraw never re-fires the status GET
+      // (nav-driven read, no polling). `oob` is forced off while unarmed — an unarmed run never claims OOB.
+      oob: false, oobStatus: null, oobStatusFor: null,
       session_id: "", graph_backed: false, sessions: [],
       cloud_mode: "cloud", provider: "aws",
       caps: null, profiles: null, profilesErr: false, kernel: null, launching: false,
@@ -2579,6 +2585,7 @@
           }
         }
         body.push(fixesCheckbox());
+        body.push(oobCheckbox());
       } else {
         const legendTxt = W.mode === "codebase" ? (W.cbEngine === "strix" ? "Strix chooses its own analysis passes over the source." : "DAA runs deterministic static rules over the source; each finding is written to the signed spine (fix-enabled).")
           : W.mode === "cloud" ? "The posture sensor runs its full deterministic check set over your imported inventory."
@@ -2597,6 +2604,39 @@
       return checkbox("Flag this run as one I want fixed", W.apply_fixes, function (v) { W.apply_fixes = v; },
         "Recorded with the run and shown on the Fixes screen, which lists the fixable findings and the gated "
         + "ladder either way. Ticking it applies nothing — a real fix is a separate, signed, gated step.");
+    }
+    // OOB (blind / out-of-band) confirmation for the run — UNAMBIGUOUSLY distinct from a cert's "out-of-band
+    // pin" (that pins a certificate's trust root; THIS keeps the scan's OOB receiver live so a blind class can
+    // be confirmed by a real callback). It is GATED on a MEASURED armed status (an owner-signed authority whose
+    // collector pubkey equals the running relay's). The status is read once per slug on draw and cached in
+    // `W.oobStatus` keyed by `W.oobStatusFor`, so a redraw never re-fires the GET — a nav-driven read, no poll.
+    // Unarmed (or status not yet read): the checkbox is DISABLED and points at Charter & Attestation, and
+    // `W.oob` is forced off so an unarmed run never carries an OOB claim (fail-closed).
+    function oobCheckbox() {
+      var oobSlug = W.slug.trim() || slugify(hostOf(W.target), "engagement");
+      if (W.oobStatusFor !== oobSlug) {
+        W.oobStatusFor = oobSlug;   // claim this slug BEFORE the async read so the redraw below can't re-fire it
+        W.oobStatus = null;
+        V.getJSON(OFF("/api/oob/status?slug=" + encodeURIComponent(oobSlug)))
+          .then(function (d) { if (W.oobStatusFor === oobSlug) { W.oobStatus = d; draw(); } })
+          .catch(function () { if (W.oobStatusFor === oobSlug) { W.oobStatus = { armed: false }; draw(); } });
+      }
+      var armed = !!(W.oobStatus && W.oobStatus.armed);
+      if (armed) {
+        return checkbox("Confirm blind / out-of-band (OOB) findings", W.oob, function (v) { W.oob = v; },
+          "On: the run keeps its out-of-band receiver live so a blind class (blind SSRF/RCE/XXE, OOB "
+          + "interactions) can be CONFIRMED by a real callback to the armed collaborator. A FACT is still only "
+          + "minted by the oracle — this only lets the callback reach it.");
+      }
+      if (W.oob) W.oob = false;   // never let a stale tick ride into an unarmed run
+      return h("div.field", null, [
+        h("label", { class: "row-flex", style: { opacity: "0.55", cursor: "not-allowed" } }, [
+          h("input", { type: "checkbox", checked: false, disabled: true, style: { width: "auto" } }),
+          h("span", null, "Confirm blind / out-of-band (OOB) findings")]),
+        h("div.hint", null, [
+          "OOB confirmation needs an armed authority + a running collaborator — set it up on ",
+          h("a", { href: "#/charter" }, "Charter & Attestation"), "."]),
+      ]);
     }
     // What a run of THIS mode actually does with a model. Read out of the engine rather than assumed:
     // `framework.v2 engage` / `scan` / `aegis` import no LLM backend at all (only __main__, the console
@@ -2716,6 +2756,7 @@
           put("Objective", W.mode === "codebase" ? "steers the agent" : "recorded only (does not steer)");
         }
         put("Fixes", W.apply_fixes ? "flagged (nothing auto-applies)" : "off");
+        if (isEngage()) put("OOB", W.oob ? "on (confirms blind findings via the armed collaborator)" : "off");
       }
       put("Model", modelNeed().key ? "needed (the agent reads your source)"
         : (W.mode === "suite" ? "optional (advisory reasoning only)" : "not used (deterministic run)"));
@@ -2794,6 +2835,12 @@
         mount: W.mount, aegis_action: W.aegis_action,
         session_id: W.session_id,
         graph_backed: wantGraph,
+        // OOB (blind / out-of-band) confirmation. Reuses the EXISTING /api/launch/assessment route (no new
+        // route): the server reads `oob.enabled` and, when on, OMITS `--no-oob` so the scan's OOB receiver
+        // runs (loopback = co-resident; a remote target additionally requires an armed collaborator, enforced
+        // server-side). The wizard only enables the box on a MEASURED armed status; a FACT is still minted
+        // only by the oracle.
+        oob: { enabled: W.oob },
       };
       V.postJSON(OFF("/api/launch/assessment"), body).then(function (r) {
         if (r && r.error) { W.launching = false; V.toast(r.error, true); refreshFoot(); return; }
@@ -2844,8 +2891,10 @@
 
   // ---- Live run view ---------------------------------------------------------
   let liveES = null, liveTimers = [], liveApprovalModal = null, liveRAF = 0;
+  let defVerdictStreams = {};   // slug -> EventSource: the AEGIS Defense verdict streams, one per LIVE gateway
   function teardownLive() {
     if (liveES) { try { liveES.close(); } catch (e) {} liveES = null; }
+    defCloseAllVerdictStreams();   // close every per-gateway AEGIS verdict stream (a no-op off the Defense screen)
     liveTimers.forEach(function (t) { clearInterval(t); });
     liveTimers = [];
     if (liveRAF) { try { (window.cancelAnimationFrame || window.clearTimeout)(liveRAF); } catch (e) {} liveRAF = 0; }  // drop any queued Live render frame
@@ -5608,7 +5657,7 @@
       h("div.grid.cols-4#def-tiles", { style: { marginTop: "16px" } }),
       h("div.grid.cols-2", { style: { alignItems: "start", marginTop: "4px" } }, [
         h("div.stack", null, [
-          V.card("Set up your defense", "DEFENSE", h("div#def-setup", null, h("div.empty", null, "Loading…")), false),
+          V.card("Your defense gateways", "DEFENSE", h("div#def-setup", null, h("div.empty", null, "Loading…")), false),
           V.card("Who is attacking (actor beliefs)", "DEFENSE", h("div#def-actors", null, h("div.empty", null, "Loading…")), false),
         ]),
         V.card("Live verdicts", "LIVE", h("div.feed#def-feed", null, h("div.empty", null, "Connecting to the verdict stream…")), false),
@@ -5704,84 +5753,184 @@
     ]);
   }
 
+  // One status GET → defDrawStatus, which reconciles the per-gateway verdict SSEs. Called for the
+  // immediate paint, on the 4s poll, and after any mode/stop/setup POST (re-poll, NOT a fresh loadDefense:
+  // that would stack another interval + stream set — the multi-gateway equivalent of the old leak).
+  function defRefreshStatus() {
+    V.getJSON(OFF("/api/aegis/status")).then(defDrawStatus).catch(function () {
+      var b = V.$("#def-setup");
+      if (b) V.mount(b, h("div.empty", null, "The offense engine is offline. Start it with `vigil up`."));
+      defCloseAllVerdictStreams();   // the engine is gone — drop every verdict stream
+    });
+  }
+
   function loadDefense() {
-    function refresh() {
-      V.getJSON(OFF("/api/aegis/status")).then(defDrawStatus).catch(function () {
-        var b = V.$("#def-setup");
-        if (b) V.mount(b, h("div.empty", null, "The offense engine is offline. Start it with `vigil up`."));
-      });
-    }
-    refresh();
-    liveTimers.push(setInterval(refresh, 4000));
-    var feed = V.$("#def-feed");
-    try {
-      liveES = V.sse(OFF("/api/aegis/verdicts"), function (v) {
-        if (!feed) return;
-        var empty = feed.querySelector(".empty"); if (empty) empty.remove();
-        feed.insertBefore(defVerdictRow(v), feed.firstChild);
-        while (feed.childNodes.length > 80) feed.removeChild(feed.lastChild);
-      }, function () { /* no gateway yet / stream ended — the poll keeps status live */ });
-    } catch (e) { /* EventSource unavailable — non-fatal */ }
+    defRefreshStatus();                                     // immediate paint
+    liveTimers.push(setInterval(defRefreshStatus, 4000));   // cleaned up by teardownLive() on navigation
+    // Verdict streams are opened/closed PER GATEWAY by defSyncVerdictStreams(), driven from defDrawStatus on
+    // every poll; teardownLive() closes them all on navigation. There is no single ambient SSE here any more.
+  }
+
+  // Reconcile the open verdict streams against the gateways in the latest status: open an SSE for any new
+  // slug, close the SSE for any slug that is gone (or whose verdicts went unavailable), never two for one
+  // slug. Each stream feeds the ONE shared #def-feed, tagged with its source slug so the merge is readable.
+  function defSyncVerdictStreams(gws) {
+    gws = Array.isArray(gws) ? gws : [];
+    var want = {};
+    gws.forEach(function (gw) {
+      if (!gw || !gw.slug) return;
+      if (gw.verdicts_available === false) return;         // this gateway exposes no verdict stream — skip it
+      var slug = gw.slug;
+      want[slug] = true;
+      if (defVerdictStreams[slug]) return;                 // already streaming this slug — never open a second
+      try {
+        defVerdictStreams[slug] = V.sse(OFF("/api/aegis/verdicts?slug=" + encodeURIComponent(slug)), function (v) {
+          var feed = V.$("#def-feed"); if (!feed) return;
+          var empty = feed.querySelector(".empty"); if (empty) empty.remove();
+          feed.insertBefore(defVerdictRow(v, slug), feed.firstChild);
+          while (feed.childNodes.length > 80) feed.removeChild(feed.lastChild);
+        }, function () { /* no verdicts yet / stream ended / 404 — the status poll keeps the gateway live */ });
+      } catch (e) { /* EventSource unavailable — non-fatal */ }
+    });
+    Object.keys(defVerdictStreams).forEach(function (slug) {
+      if (!want[slug]) {
+        try { defVerdictStreams[slug].close(); } catch (e) {}
+        delete defVerdictStreams[slug];
+      }
+    });
+  }
+
+  function defCloseAllVerdictStreams() {
+    Object.keys(defVerdictStreams).forEach(function (slug) {
+      try { defVerdictStreams[slug].close(); } catch (e) {}
+    });
+    defVerdictStreams = {};
   }
 
   function defDrawStatus(st) {
-    var running = !!st.running;
-    var eff = st.effective_mode || null;
-    var req = st.requested_mode || "observe";
-    var gw = st.gateway || {};
-    var actors = st.actors || [];
+    st = st || {};
+    var gws = Array.isArray(st.gateways) ? st.gateways : [];
+    var n = gws.length;
+    var enforcing = 0, downgraded = 0;
+    gws.forEach(function (gw) {
+      gw = gw || {};
+      var enf = gw.enforcement || {};
+      if ((gw.effective_mode || null) === "enforce") enforcing++;
+      if (enf.downgraded || (gw.requested_mode === "enforce" && (gw.effective_mode || null) !== "enforce")) downgraded++;
+    });
+    var observe = n - enforcing;
+
+    // -- summary tiles: a roll-up across EVERY live gateway (N gateways · M enforcing · K observe) --------
     var tiles = V.$("#def-tiles");
     if (tiles) V.mount(tiles, [
-      V.tile("Gateway", running ? "RUNNING" : "Stopped", running ? (gw.bind || "") : "not started", running ? "ok" : null),
-      V.tile("Mode", running ? (eff === "enforce" ? "ENFORCE" : "Observe") : "—",
-        running && req === "enforce" && eff !== "enforce" ? "downgraded (no entitlement)" : (eff === "enforce" ? "blocking proven attacks" : "watch-only"),
-        eff === "enforce" ? "warn" : null),
-      V.tile("Upstream", running ? "protected" : "—", running ? (gw.upstream || "") : "point me at your app", null),
-      V.tile("Actors seen", String(st.actor_count || 0), "with a belief", actors.length ? "warn" : null),
+      V.tile("Gateways", String(n), n ? "live" : "none running", n ? "ok" : null),
+      V.tile("Enforcing", String(enforcing), "blocking proven attacks", enforcing ? "warn" : null),
+      V.tile("Observe", String(observe), "watch-only", null),
+      V.tile("Downgraded", String(downgraded), downgraded ? "requested enforce, not entitled" : "none", downgraded ? "down" : null),
     ]);
+
+    // -- #def-setup: a LIVE card per gateway + an always-present "add a gateway" form --------------------
+    // defDrawStatus re-runs every 4s. Re-mounting the setup FORM each tick would destroy the operator's
+    // half-typed inputs (upstream/port/secret/slug/honeypot), so the form lives in its own sub-container
+    // (#def-gw-add) that is built ONCE and left untouched while present (detected by the url input, unique
+    // to the form); only the gateway cards (#def-gw-cards, no inputs) refresh each tick. The form is ALWAYS
+    // present — a new gateway can be added even while others run.
     var setup = V.$("#def-setup");
-    // The status poll re-runs defDrawStatus every 4s; re-mounting defSetupForm() each tick replaces the
-    // uncontrolled <input> nodes and wipes whatever the operator is mid-typing (upstream/port/secret/slug/
-    // honeypot). Only (re)build the form when it is not already on screen — first paint, or after the
-    // running panel / an offline message cleared it (detected by the absence of the upstream url input,
-    // which is unique to the form). While the form is present, leave its live inputs untouched. The
-    // running panel has no inputs, so re-mounting it every tick to refresh live status is harmless.
     if (setup) {
-      if (running) V.mount(setup, defRunningPanel(gw, eff, req));
-      else if (!setup.querySelector('input[type="url"]')) V.mount(setup, defSetupForm());
+      if (!setup.querySelector("#def-gw-cards")) V.mount(setup, [h("div#def-gw-cards"), h("div#def-gw-add")]);
+      var cardsBox = setup.querySelector("#def-gw-cards");
+      var addBox = setup.querySelector("#def-gw-add");
+      if (cardsBox) {
+        var kids = gws.map(defRunningPanel);
+        if (!n && st.note) kids.push(h("div.hint", { style: { marginBottom: "10px" } }, String(st.note)));
+        kids.push(h("div.hint", { style: { margin: "4px 0 8px", fontWeight: "600" } }, n ? "Add another gateway" : "Set up a gateway"));
+        V.mount(cardsBox, kids);
+      }
+      if (addBox && !addBox.querySelector('input[type="url"]')) V.mount(addBox, defSetupForm());
     }
+
+    // -- #def-actors: a global roll-up of attacker beliefs across ALL gateways (per-gateway detail is on --
+    // each card). Merge by source id: worst (max) belief seen anywhere, observations summed.
     var ab = V.$("#def-actors");
     if (ab) {
-      if (!actors.length) V.mount(ab, h("div.empty", null, running ? "No actors yet — drive some traffic through the gateway." : "Start the gateway to build per-actor beliefs."));
-      else V.mount(ab, h("div.stack", null, actors.slice(0, 24).map(defActorRow)));
+      var merged = {};
+      gws.forEach(function (gw) {
+        ((gw && gw.actors) || []).forEach(function (a) {
+          if (!a || a.id == null) return;
+          var cur = merged[a.id];
+          if (!cur) merged[a.id] = { id: a.id, mean: a.mean || 0, lcb: a.lcb || 0, n: a.n || 0, action: a.action || null };
+          else {
+            cur.mean = Math.max(cur.mean, a.mean || 0);
+            cur.lcb = Math.max(cur.lcb, a.lcb || 0);
+            cur.n += (a.n || 0);
+            if (!cur.action && a.action) cur.action = a.action;
+          }
+        });
+      });
+      var list = Object.keys(merged).map(function (k) { return merged[k]; })
+        .sort(function (x, y) { return (y.mean || 0) - (x.mean || 0); });
+      if (!list.length) V.mount(ab, h("div.empty", null, n ? "No actors yet — drive some traffic through a gateway." : "Start a gateway to build per-actor beliefs."));
+      else V.mount(ab, [
+        h("div.hint", { style: { marginBottom: "8px" } }, "Worst belief per source across all your gateways. Per-gateway detail is on each card."),
+        h("div.stack", null, list.slice(0, 24).map(defActorRow)),
+      ]);
     }
+
+    // -- verdict SSE lifecycle: one stream per gateway, merged into the single #def-feed -----------------
+    defSyncVerdictStreams(gws);
   }
 
-  function defRunningPanel(gw, eff, req) {
-    var cur = eff || req;   // the mode actually in force
+  // ONE live gateway → ONE card. `gw` is an entry of st.gateways (slug/bind/upstream/requested_mode/
+  // effective_mode/enforcement/actors/launched_by/stoppable/…). The mode toggle works for EVERY gateway
+  // (incl. CLI/cron ones); only Stop is gated to UI-managed gateways (stoppable===false → disabled + note).
+  function defRunningPanel(gw) {
+    gw = gw || {};
+    var slug = gw.slug || "";
+    var req = gw.requested_mode || "observe";
+    var eff = gw.effective_mode || null;
+    var enf = gw.enforcement || {};
+    var downgraded = !!enf.downgraded || (req === "enforce" && eff !== "enforce");
+    var killed = !!enf.kill_switch_tripped;
+    var cur = eff || req;                                   // the mode actually in force
     var next = cur === "enforce" ? "observe" : "enforce";
     var toggleLabel = cur === "enforce" ? "Switch to Observe (watch-only)" : "Switch to Enforce (blocking)";
+    var byCli = gw.launched_by === "cli";
+    var stoppable = (gw.stoppable != null) ? !!gw.stoppable : !byCli;   // default: UI-managed are stoppable
+    var actors = gw.actors || [];
+
     var toggleBtn = h("button.btn.primary", { onClick: function () {
       if (next === "enforce" && !confirm("Enforce will BLOCK requests proven to be attacks — live, no restart. (Needs the AEGIS_RESPOND entitlement, else it stays observe.) Continue?")) return;
-      V.postJSON(OFF("/api/aegis/mode"), { mode: next })
-        .then(function (r) { if (r && r.error) { V.toast(r.error, true); return; } V.toast("Mode → " + next + "."); loadDefense(); })
+      V.postJSON(OFF("/api/aegis/mode"), { slug: slug, mode: next })
+        .then(function (r) { if (r && r.error) { V.toast(r.error, true); return; } V.toast("Mode → " + next + "."); defRefreshStatus(); })
         .catch(function (e) { V.toast((e && e.message) || "Could not change mode", true); });
     } }, [V.icon(next === "enforce" ? "shield" : "info"), toggleLabel]);
-    return [
-      h("div.set-status.ok", null, [V.icon("check"),
-        h("span", null, "Gateway running — " + (gw.bind || "") + " → " + (gw.upstream || "") + " · mode " + (eff || req))]),
-      req === "enforce" && eff !== "enforce"
-        ? h("div.set-status.off", null, [V.icon("info"), h("span", null, "You requested ENFORCE but it downgraded to observe (the AEGIS_RESPOND entitlement isn’t available here) — nothing is being blocked.")])
-        : null,
-      h("div.acts", { style: { marginTop: "12px" } }, [
-        toggleBtn,
-        h("button.btn.danger", { onClick: function () {
-          V.postJSON(OFF("/api/aegis/stop"), {}).then(function () { V.toast("Gateway stopped."); loadDefense(); })
+
+    var stopBtn = stoppable
+      ? h("button.btn.danger", { onClick: function () {
+          V.postJSON(OFF("/api/aegis/stop"), { slug: slug }).then(function () { V.toast("Gateway stopped."); defRefreshStatus(); })
             .catch(function (e) { V.toast((e && e.message) || "Could not stop the gateway", true); });
-        } }, [V.icon("x"), "Stop gateway"]),
+        } }, [V.icon("x"), "Stop gateway"])
+      : h("button.btn.danger", { disabled: true, title: "started outside the UI" }, [V.icon("x"), "Stop gateway"]);
+
+    return h("div.def-gw", { style: { border: "1px solid var(--border)", borderRadius: "10px", padding: "12px 14px", background: "var(--bg-2)", marginBottom: "12px" } }, [
+      h("div.row-flex", { style: { justifyContent: "space-between", gap: "10px", flexWrap: "wrap" } }, [
+        h("div", null, [h("b", null, (gw.bind || "?")), h("span.dim", null, "  →  "), h("span.mono.dim", null, (gw.upstream || "—"))]),
+        byCli ? V.pill("CLI/cron", "sm warn") : V.pill("UI-managed", "sm"),
       ]),
-      h("div.hint", { style: { marginTop: "10px" } }, "Watch proven attacks in the live verdicts stream. To run this on your real edge, use the production command shown when you started it (bind your routable interface there, never here)."),
-    ];
+      h("div.set-status.ok", { style: { marginTop: "10px" } }, [V.icon("check"),
+        h("span", null, "Running · requested " + req + " → effective " + (eff || "pending") + (slug ? " · " + slug : ""))]),
+      downgraded ? h("div.set-status.off", { style: { marginTop: "8px" } }, [V.icon("info"),
+        h("span", null, enf.downgrade_reason || ("requested " + req + ", running " + (eff || "observe") + " — AEGIS_RESPOND not entitled; nothing is being blocked."))]) : null,
+      killed ? h("div.set-status.off", { style: { marginTop: "8px" } }, [V.icon("info"),
+        h("span", null, "kill-switch tripped — enforcement is halted for this gateway.")]) : null,
+      h("div.acts", { style: { marginTop: "12px" } }, [
+        toggleBtn, stopBtn,
+        stoppable ? null : h("span.hint", null, "managed outside the UI — stop from its launcher"),
+      ]),
+      actors.length
+        ? h("div.stack", { style: { marginTop: "12px" } }, actors.slice(0, 24).map(defActorRow))
+        : h("div.hint", { style: { marginTop: "12px" } }, "No actors yet — drive some traffic through this gateway."),
+    ]);
   }
 
   function defSetupForm() {
@@ -5807,7 +5956,7 @@
         if (r && r.error) { V.toast(r.error, true); return; }
         V.toast("Defense gateway started.");
         if (r && r.production_command) defShowProdCommand(r.production_command, r.warn_public);
-        loadDefense();
+        defRefreshStatus();   // re-poll (the 4s interval is already running — don't stack another)
       }).catch(function (e) { start.disabled = false; V.toast((e && e.message) || "Could not start", true); });
     } }, [V.icon("shield"), "Start defense"]);
     return [
@@ -5835,15 +5984,18 @@
     ]);
   }
 
-  function defVerdictRow(v) {
+  function defVerdictRow(v, slug) {
     var decision = (v && v.decision) || "clear";
     var cls = decision === "confirmed" ? "danger" : (decision === "lead" ? "warn" : "muted");
     var label = decision === "confirmed" ? "ATTACK PROVEN" : (decision === "lead" ? "lead" : "clear");
     var ac = (v && v.attack_class) || "";
     var conf = (v && typeof v.confidence === "number") ? (" · " + Math.round(v.confidence * 100) + "%") : "";
     var act = (v && v.action && v.action !== "observe" && v.action !== "allow") ? (" · " + v.action) : "";
+    // The feed merges verdicts from EVERY gateway, so tag each row with its source gateway slug.
+    var src = slug || (v && v.slug) || "";
     var row = h("div.feed-row.verdict-" + cls, null, [
       h("span.vbadge." + cls, null, label),
+      src ? h("span.pill.sm", { title: "gateway" }, src) : null,
       h("span.fr-t", null, [ac ? h("b", null, ac) : "activity", conf, act]),
       (v && v.certificate) ? h("span.pill.sm", null, "cert") : null,
     ]);
@@ -5961,11 +6113,12 @@
       V.card("The gated fix ladder", "PROCESS", fixLadder(plan.ladder || []), false),
       h("div.legend", null, [V.icon("shield"), h("span", null, plan.note || "")]),
     ];
+    nodes.push(fixSinkCard(plan));
     if (!fixable.length) {
       nodes.push(h("div.empty", null, "No oracle-confirmed findings to fix in this run. Only proven FACTs are eligible — unproven leads are never auto-fixed."));
     } else {
       nodes.push(V.card("Fixable findings", "CONFIRMED", h("div.stack", null,
-        fixable.map(function (f, i) { return fixFindingCard(f, plan.run_id, i, plan.runnable, plan.why_not); })), false));
+        fixable.map(function (f, i) { return fixFindingCard(f, plan.run_id, i, plan.runnable, plan.why_not, plan.default_dest, plan.source_root); })), false));
     }
     nodes.push(V.card("Highest-impact fix points", "IMPACT", h("div#fx-chokes", null, h("div.empty", null, "Loading…")), false));
     V.mount(view, nodes);
@@ -5981,6 +6134,34 @@
     }));
   }
 
+  // Per-run fix SINK (WHERE a fix goes): ONE primary with a one-line WHY, chosen from the backend's shared
+  // `fix_precondition` (plan.repo_kind / plan.remote_host_only) — the UI never stats paths itself. A git
+  // remote ships a fix as a gated m-of-n PULL REQUEST (the read-only Destruction quorum card on the Defense
+  // screen; `vigil patch --open-pr` fires on the host, keys never in the browser). A local codebase applies
+  // locally (download the verified .patch, or apply it to a confined path) — no PR, because there is no remote.
+  function fixSinkCard(plan) {
+    var toPR = (String(plan.repo_kind) === "git-remote") || plan.remote_host_only;
+    var body;
+    if (toPR) {
+      body = h("div.stack", null, [
+        h("div.legend", null, [V.icon("shield"), h("span", null,
+          "This run targets a git remote — a fix ships as a gated PULL REQUEST, never a local write from here.")]),
+        h("div.hint", null, "Orchestrate it with the m-of-n Destruction quorum (the read-only card on the "
+          + "Defense screen): the signing keys stay on the host and `vigil patch --open-pr` fires only when the "
+          + "quorum is fully armed. No PR is ever opened from the browser."),
+      ]);
+    } else {
+      body = h("div.stack", null, [
+        h("div.legend", null, [V.icon("fixes"), h("span", null,
+          "Your fixes apply LOCALLY — download the verified diff or apply it to a path. No PR, because this is "
+          + "a local codebase, not a git remote.")]),
+        plan.source_root ? h("div.mono.dim", { style: { fontSize: "var(--fs-xs)" } }, "source: " + plan.source_root) : null,
+        plan.default_dest ? h("div.mono.dim", { style: { fontSize: "var(--fs-xs)" } }, "default copy: " + plan.default_dest) : null,
+      ]);
+    }
+    return V.card("Where fixes go", "SINK", body, false);
+  }
+
   function sevClass(sev) {
     var s = String(sev || "").toLowerCase();
     if (s === "critical" || s === "high") return "danger";
@@ -5991,7 +6172,7 @@
   // ladder (`plan.runnable` — the SAME precondition `actions.apply_fix` enforces, served by the one shared
   // helper). Otherwise we show the backend's own `why_not` verbatim and point at the CLI. The UI must never
   // offer an action the backend is guaranteed to refuse.
-  function fixFindingCard(f, runId, idx, runnable, whyNot) {
+  function fixFindingCard(f, runId, idx, runnable, whyNot, defaultDest, sourceRoot) {
     var outId = "fx-out-" + idx, btnId = "fx-btn-" + idx;
     var applyBlock;
     if (!f.ref) {
@@ -6003,12 +6184,12 @@
         + " You can still apply from the CLI with `vigil patch`.");
     } else {
       var vbtnId = "fx-vbtn-" + idx, voutId = "fx-vout-" + idx, dbtnId = "fx-dbtn-" + idx, doutId = "fx-dout-" + idx;
-      var sxId = "fx-strix-" + idx;
+      var sxId = "fx-strix-" + idx, skId = "fx-sink-" + idx;
       applyBlock = h("div", { style: { marginTop: "10px" } }, [
         h("button.btn.sm#" + btnId, { onClick: function () { applyFix(runId, f.ref, btnId, outId); } },
           [V.icon("bolt"), "Apply fix (gated)"]),
         h("button.btn.sm.primary#" + dbtnId, { style: { marginLeft: "8px" },
-          onClick: function () { deepFix(runId, f.ref, dbtnId, doutId, sxId); } },
+          onClick: function () { deepFix(runId, f.ref, dbtnId, doutId, sxId, idx, defaultDest, sourceRoot); } },
           [V.icon("brain"), "Deep fix (iterate + verify)"]),
         h("label.hint", { style: { marginLeft: "8px", cursor: "pointer", userSelect: "none" }, title:
           "Agentic front-end: the vendored Strix agent proposes the diff (needs Docker + a live gated egress "
@@ -6027,6 +6208,11 @@
           + "Then Verify re-runs the deterministic static rule over YOUR source: `cleared` means the rule "
           + "no longer fires anywhere in the tree. It proves the pattern is gone, not that a runtime "
           + "exploit was ever reachable."),
+        // The local SINK controls — gated on a VERIFIED diff (f.has_verified_diff from the plan, OR revealed
+        // in-session when Deep fix returns r.verified). Only an oracle-verified fix is downloadable/appliable;
+        // until then this host holds ONLY the honest hint (the load-bearing safety message). `deepFix` re-mounts
+        // this host by #fx-sink-<idx> on a verified result.
+        h("div#" + skId, { style: { marginTop: "4px" } }, fixSinkContent(runId, f.ref, idx, !!f.has_verified_diff, defaultDest, sourceRoot)),
         h("div#" + outId, { style: { marginTop: "8px" } }),
         h("div#" + doutId, { style: { marginTop: "8px" } }),
         h("div#" + voutId, { style: { marginTop: "8px" } }),
@@ -6091,7 +6277,7 @@
         if (out) V.mount(out, h("div.legend", null, [V.icon("x"), (e && e.message) || "verify failed"]));
       });
   }
-  function deepFix(runId, ref, btnId, outId, strixId) {
+  function deepFix(runId, ref, btnId, outId, strixId, idx, defaultDest, sourceRoot) {
     var btn = V.$("#" + btnId), out = V.$("#" + outId);
     var sx = strixId ? V.$("#" + strixId) : null;
     var agent = (sx && sx.checked) ? "strix" : "none";
@@ -6113,10 +6299,128 @@
           r.note ? h("div.hint", null, r.note) : null,
           h("pre.mono", { style: { marginTop: "6px", maxHeight: "320px", overflow: "auto", fontSize: "var(--fs-xs)", whiteSpace: "pre-wrap" } }, r.output || "(no output)"),
         ]);
+        // IN-SESSION reveal: a verified deep fix just PERSISTED the diff (deep_fix emits it only on a verified
+        // result), so turn on the download/apply-local affordance for THIS finding without a page reload. The
+        // gate is the same on refresh (f.has_verified_diff ⇐ the persisted .patch exists), never UI state.
+        if (r.verified && idx != null) {
+          var sink = V.$("#fx-sink-" + idx);
+          if (sink) V.mount(sink, fixSinkContent(runId, ref, idx, true, defaultDest, sourceRoot));
+        }
       })
       .catch(function (e) {
         if (btn) btn.disabled = false;
         if (out) V.mount(out, h("div.legend", null, [V.icon("x"), (e && e.message) || "deep fix failed"]));
+      });
+  }
+
+  // The verified-fix SINK controls for one finding. VERIFIED ⇒ (a) download the pre-built .patch (pure GET,
+  // no build), (b) apply it to a LOCAL path — a confined fixed COPY by default; in_place patches the source
+  // and is double-gated (a window.confirm NAMING the source here + the backend's own confirm flag). NOT
+  // verified ⇒ ONLY the honest hint — the load-bearing safety message that only an oracle-verified fix can be
+  // downloaded or applied (styled like the !ref / !runnable hints above). Pure builder (no DOM lookup) so the
+  // same call renders at card build AND when `deepFix` re-mounts the sink host in-session.
+  function fixSinkContent(runId, ref, idx, verified, defaultDest, sourceRoot) {
+    if (!verified) {
+      return h("div.hint", { style: { marginTop: "10px" } },
+        "Produce a verified fix first (Deep fix) — only an oracle-verified fix can be downloaded or applied.");
+    }
+    var aBtnId = "fx-applybtn-" + idx, aOutId = "fx-applyout-" + idx;
+    var dest = h("input.input", { type: "text", placeholder: defaultDest || "<source>-fixed",
+      style: { maxWidth: "560px" } });
+    var inplace = h("input", { type: "checkbox", style: { width: "auto", marginRight: "4px" } });
+    return h("div", { style: { marginTop: "10px" } }, [
+      h("div.legend", null, [V.icon("check"), h("span", null,
+        "Oracle-verified fix — downloadable and appliable.")]),
+      h("div.acts", null, [
+        h("button.btn.sm.primary", { onClick: function () { downloadFixDiff(runId, ref); } },
+          [V.icon("fixes"), "Download verified fix (.patch)"]),
+      ]),
+      h("div", { style: { marginTop: "10px" } }, [
+        h("label.hint", { style: { display: "block", marginBottom: "4px" } },
+          "Apply fix to a local path — a confined fixed COPY by default; your source is never touched unless you tick in-place."),
+        h("div.row-flex", { style: { gap: "8px", flexWrap: "wrap" } }, [
+          dest,
+          h("button.btn.sm#" + aBtnId, { onClick: function () {
+            applyFixLocal(runId, ref, dest.value, aBtnId, aOutId, !!inplace.checked, sourceRoot); } },
+            [V.icon("fixes"), "Apply fix to path"]),
+          h("label.hint", { style: { cursor: "pointer", userSelect: "none" }, title:
+            "In-place patches YOUR source tree directly (not a copy). Double-gated: a confirm here AND the "
+            + "backend's own confirm flag — either alone refuses." },
+            [inplace, "in place (patch my source)"]),
+        ]),
+      ]),
+      h("div.hint", { style: { marginTop: "6px" } },
+        "Copy mode writes a fixed tree at the path above (confined under the source's parent dir or the VIGIL "
+        + "apply workspace — never the source, a non-empty dir, or a system path). The CLEARED / STILL-PRESENT "
+        + "verdict below is the deterministic oracle re-run over the WRITTEN tree, not the apply step asserting "
+        + "success."),
+      h("div#" + aOutId, { style: { marginTop: "8px" } }),
+    ]);
+  }
+  // PURE GET download of the PRE-BUILT verified .patch (modeled on downloadDossier, but with NO build POST —
+  // deep_fix already persisted the diff on verifying). The session token rides the query string because a
+  // download navigation cannot set a request header (same carrier the dossier download uses). The backend
+  // 404s until a verified diff exists, so a still-vulnerable finding has nothing to serve.
+  function downloadFixDiff(runId, ref) {
+    if (!runId || !ref) { V.toast("No verified fix to download.", true); return; }
+    var a = document.createElement("a");
+    a.href = V.authUrl(OFF("/api/remediate/" + encodeURIComponent(runId) + "/" + encodeURIComponent(ref) + "/diff"));
+    a.download = "vigil-fix-" + runId + "-" + ref + ".patch";
+    document.body.appendChild(a); a.click(); document.body.removeChild(a);
+    V.toast("Downloading verified fix (.patch).");
+  }
+  // Apply an already-oracle-VERIFIED fix to the operator's LOCAL tree. DEFAULT mode is a confined fixed COPY
+  // at `dest` (the backend path-safety is arbitrary-write-critical). in_place patches the SOURCE and is
+  // double-gated: a window.confirm NAMING the source here AND confirm:true in the body (the backend refuses
+  // in_place without BOTH). The CLEARED/STILL-PRESENT verdict is the deterministic oracle re-run over the
+  // APPLIED tree (r.reverify), never the apply verb asserting success.
+  function applyFixLocal(runId, ref, dest, btnId, outId, inPlace, sourceRoot) {
+    var btn = V.$("#" + btnId), out = V.$("#" + outId);
+    var body = { dest_path: dest || "", mode: inPlace ? "in_place" : "copy", confirm: false };
+    if (inPlace) {
+      // Double gate for the destructive mode: this confirm NAMES the SOURCE tree (the backend patches
+      // source_root in in_place, ignoring dest_path), and the backend separately requires confirm:true.
+      var ok = window.confirm("Apply the fix IN PLACE to your SOURCE tree?\n\n" + (sourceRoot || "(the run's source tree)")
+        + "\n\nThis patches your operator source directly — NOT a copy. Only an oracle-verified fix reaches "
+        + "here, but your working tree will change. Continue?");
+      if (!ok) return;
+      body.confirm = true;
+    }
+    if (btn) btn.disabled = true;
+    if (out) V.mount(out, h("div.dim", null, inPlace
+      ? "Applying the verified fix IN PLACE to your source, then re-running the oracle over the patched tree…"
+      : "Writing a fixed COPY, then re-running the oracle over the written tree…"));
+    V.postJSON(OFF("/api/remediate/" + encodeURIComponent(runId) + "/" + encodeURIComponent(ref) + "/apply-local"), body)
+      .then(function (r) {
+        if (btn) btn.disabled = false;
+        if (!out) return;
+        if (r && r.error) {
+          V.mount(out, [
+            h("div.legend", null, [V.icon("info"), r.error]),
+            r.output ? h("pre.mono", { style: { marginTop: "6px", maxHeight: "260px", overflow: "auto", fontSize: "var(--fs-xs)", whiteSpace: "pre-wrap" } }, r.output) : null,
+          ]);
+          return;
+        }
+        var rv = r.reverify || {};
+        var stillAt = (rv.still_fires_at || []).join(", ");
+        V.mount(out, [
+          h("div.legend", null, [V.icon("check"), (r.mode === "in_place"
+            ? "Fix applied IN PLACE to your source: " : "Fixed copy written to: ") + (r.applied_path || "")]),
+          (r.applied_paths && r.applied_paths.length)
+            ? h("div.mono.dim", { style: { fontSize: "var(--fs-xs)", margin: "4px 0" } }, "files: " + r.applied_paths.join(", ")) : null,
+          h("div.legend", null, [V.icon(rv.cleared ? "check" : "x"),
+            rv.cleared
+              ? "CLEARED — the deterministic rule no longer fires anywhere in the applied tree (the vulnerable pattern is gone)."
+              : ((rv.moved ? "STILL PRESENT (moved) — the rule now fires at a different path"
+                           : "STILL PRESENT — the rule still fires over the applied tree")
+                 + (stillAt ? " at " + stillAt : "")
+                 + ".")]),
+          r.note ? h("div.hint", null, r.note) : null,
+        ]);
+      })
+      .catch(function (e) {
+        if (btn) btn.disabled = false;
+        if (out) V.mount(out, h("div.legend", null, [V.icon("x"), (e && e.message) || "apply-local failed"]));
       });
   }
 
@@ -11168,7 +11472,7 @@
   }
 
   // ---- Charter & Attestation (owner): authorization + who/when/what ledger ----
-  var CHT = { slug: "loopback", auth: null, ledger: null, remoteTarget: "" };
+  var CHT = { slug: "loopback", auth: null, ledger: null, remoteTarget: "", oob: null };
   // Advisory client-side scope check — the AUTHORITATIVE gate is server-side; this only GUIDES the operator.
   // Reduce a URL or bare host to the bare host the engine's gate matches on (strip scheme + path), so the
   // advisory "authorized?" readout agrees with ethics.host_matches_scope — a URL-form scope entry like
@@ -11208,6 +11512,12 @@
     V.getJSON(OFF("/api/charter/" + encodeURIComponent(CHT.slug)))
       .then(function (d) { CHT.auth = d; drawCharter(body); })
       .catch(function () { CHT.auth = null; drawCharter(body); });
+    // The OOB collaborator/arm status for this slug — MEASURED (running/listening/armed/pubkey), never the
+    // poll secret. Nav/button-driven only: this runs on screen load, the Load button, and after each
+    // start/stop/arm/Re-check — there is NO setInterval, so the reading is only ever as fresh as an action.
+    V.getJSON(OFF("/api/oob/status?slug=" + encodeURIComponent(CHT.slug)))
+      .then(function (d) { CHT.oob = d; drawCharter(body); })
+      .catch(function () { CHT.oob = null; drawCharter(body); });
   }
   function drawCharter(body) {
     var a = CHT.auth || {};
@@ -11284,7 +11594,91 @@
             : h("span.st.st-idle", null, [h("span.dot"), "unverified"]))]),
         h("pre", { style: { whiteSpace: "pre-wrap", fontSize: "12px", marginTop: "6px", overflowX: "auto" } },
           String(CHT.ledger.who || CHT.ledger.error || "no records yet"))]) : null)]);
-    V.mount(body, [slugRow, status, provision, remoteCard, ledgerCard,
+    // ---- Out-of-band (OOB) collaborator & arming (reuses CHT.slug) ----
+    // The managed collaborator binds 127.0.0.1 ONLY; Start mints its collector keypair + 0600 poll secret
+    // (the secret is NEVER returned or shown), Stop purges them. "Arm OOB (loopback)" shells the
+    // governance-signed `vigil provision` SOVEREIGN-SIDE (scope hard-fixed to 127.0.0.1) pinning the RUNNING
+    // relay's collector pubkey — the console holds no key and signs nothing (FATAL-2). A REMOTE arm is
+    // GUIDE-ONLY: we render the exact out-of-band `vigil provision` command for the owner to run where the
+    // key lives and POST NOTHING. Every call reuses CHT.slug; the loopback arm also sends host 127.0.0.1 so
+    // the server takes its loopback branch (scope is hard-fixed server-side, so this can never widen it).
+    var oob = CHT.oob || {};
+    var oobUp = !!(oob.running && oob.listening);
+    var oobPin = String(oob.collector_pubkey || "");
+    var relayHost = "";
+    try { relayHost = oob.advertise_url ? (new URL(oob.advertise_url).hostname || "") : ""; } catch (e) { relayHost = ""; }
+    var remoteGuide = "vigil provision --slug " + (CHT.slug || "<slug>")
+      + " --scope " + (CHT.remoteTarget || "<REMOTE-HOST[,HOST2,...]>")
+      + " --oob-collector-pubkey " + (oobPin || "<start-the-collaborator-first>")
+      + " --oob-relay-host " + (relayHost || "<your-relay-host>");
+    var oobCard = h("div.card.owner", null, [
+      h("div.card-h", null, [h("h3", null, "Out-of-band (OOB) collaborator & arming")]),
+      h("div.hint", { style: { marginBottom: "8px" } },
+        "A blind finding (blind SSRF / RCE / XXE, OOB interactions) is CONFIRMED by a real callback to this "
+        + "collaborator. It binds 127.0.0.1 only; its poll secret stays in a 0600 file and is never shown here. "
+        + "Arming pins the running relay's collector PUBLIC key into an owner-signed authority — governance-"
+        + "signed sovereign-side inside `vigil provision`; this console signs nothing."),
+      h("div.kv", null, [h("div.k", null, "Collaborator"),
+        h("div.v", null, oobUp
+          ? h("span.st.st-confirmed", null, [h("span.dot"), "listening on 127.0.0.1" + (oob.port ? (":" + oob.port) : "")])
+          : (oob.running
+              ? h("span.st.st-idle", null, [h("span.dot"), "running — not yet listening"])
+              : h("span.st.st-idle", null, [h("span.dot"), "down"])))]),
+      h("div.kv", null, [h("div.k", null, "Bind"),
+        h("div.v", null, h("span.pill.sm", null, (oob.host || "127.0.0.1") + " (loopback only)"))]),
+      h("div.kv", null, [h("div.k", null, "Collector public key"),
+        h("div.v", null, oobPin
+          ? h("code", { style: { fontSize: "12px", wordBreak: "break-all" } }, oobPin)
+          : h("span.hint", null, "none — start the collaborator"))]),
+      h("div.kv", null, [h("div.k", null, "Armed"),
+        h("div.v", null, oob.armed
+          ? h("span.st.st-confirmed", null, [h("span.dot"), "ARMED — an owner-signed authority pins this collector"])
+          : h("span.st.st-idle", null, [h("span.dot"), "not armed"]))]),
+      // Lifecycle — Start / Stop the managed loopback collaborator (both reuse CHT.slug; RBAC is server-side).
+      h("div", { style: { marginTop: "10px", marginBottom: "6px" } }, [
+        h("button.btn.sm.owner", { onClick: function () {
+          V.postJSON(OFF("/api/oob/collaborator/start"), { slug: CHT.slug }).then(function (r) {
+            if (r && r.ok) { V.toast("OOB collaborator listening on loopback for " + CHT.slug); loadAuthority(body); }
+            else { V.toast((r && r.error) || "could not start the collaborator", true); } })
+            .catch(function () { V.toast("could not start the collaborator", true); }); } },
+          "Start collaborator (loopback)"),
+        h("button.btn.sm", { style: { marginLeft: "8px" }, onClick: function () {
+          V.postJSON(OFF("/api/oob/collaborator/stop"), { slug: CHT.slug }).then(function (r) {
+            if (r && r.ok) { V.toast("OOB collaborator stopped — secret / keypair purged"); loadAuthority(body); }
+            else { V.toast((r && r.error) || "stop failed", true); } })
+            .catch(function () { V.toast("stop failed", true); }); } },
+          "Stop collaborator")]),
+      // LOOPBACK arm — shells the governance-signed `vigil provision` (scope hard-fixed 127.0.0.1) sovereign-
+      // side. Disabled until a collaborator is listening (the pin comes from the RUNNING relay, never a body).
+      h("div.kv", null, [h("div.k", null, "Arm (loopback)"),
+        h("div.v", null, [
+          h("button.btn.sm.owner", { disabled: !oobUp, onClick: function () {
+            V.postJSON(OFF("/api/oob/arm"), { slug: CHT.slug, host: "127.0.0.1" }).then(function (r) {
+              if (r && r.ok && r.armed) { V.toast("Armed a loopback OOB authority (scope 127.0.0.1) for " + CHT.slug); loadAuthority(body); }
+              else { V.toast((r && r.error) || (r && r.note) || "arm did not complete", true); loadAuthority(body); } })
+              .catch(function () { V.toast("arm failed", true); }); } },
+            "Arm OOB (loopback)"),
+          h("div.hint", { style: { marginTop: "4px" } }, oobUp
+            ? "Pins the running collector pubkey into an owner-signed authority — scope hard-fixed to "
+              + "127.0.0.1; signed inside `vigil provision`, never by this console."
+            : "Start the collaborator first — the collector pubkey to pin is read from the running relay.")])]),
+      // REMOTE arm — GUIDE ONLY. The console never signs a remote authority (FATAL-2): it renders the exact
+      // out-of-band command for the owner to run where the key lives, and posts NOTHING. Re-check is a GET.
+      h("div.kv", null, [h("div.k", null, "Arm (remote) — out-of-band"),
+        h("div.v", null, [
+          h("div.hint", { style: { marginBottom: "4px" } },
+            "Remote OOB is armed OUT-OF-BAND on a trusted host that holds the owner key — NOT in this UI. Run "
+            + "this there (scope = your remote target); this console mints nothing for a remote target:"),
+          h("code", { style: { fontSize: "12px", whiteSpace: "pre-wrap", display: "block", wordBreak: "break-all" } },
+            remoteGuide),
+          h("div", { style: { marginTop: "6px" } }, [
+            h("button.btn.sm", { onClick: function () {
+              try { navigator.clipboard.writeText(remoteGuide); V.toast("Copied."); } catch (e) { V.toast(remoteGuide); } } },
+              "Copy command"),
+            h("button.btn.sm", { style: { marginLeft: "8px" }, onClick: function () { loadAuthority(body); } },
+              "Re-check")])])]),
+    ]);
+    V.mount(body, [slugRow, status, provision, remoteCard, oobCard, ledgerCard,
       h("div.hint", { style: { marginTop: "10px" } },
         String(a.note || CHT.ledger && CHT.ledger.note
           || "No attestation, no run. The UI can never widen a charter-signed scope."))]);
@@ -11753,6 +12147,17 @@
     // config comes from the server-injected <body> data-attributes (CSP-native; no inline script).
     const ds = document.body.dataset;
     if (ds.token && ds.token !== "__VIGIL_TOKEN__") CFG.token = ds.token;
+    // Remote access (WireGuard / reverse-proxy / forwarder): the proxy SCRUBS the owner token from the
+    // HTML body for a non-loopback request (so it never rides in cacheable HTML), leaving data-token
+    // empty. The operator's bearer then arrives only as ?token= in the bookmarked URL — adopt it into the
+    // per-tab session (the same store a per-user login uses) and STRIP it from the address bar so it does
+    // not linger in history. data-token (owner, loopback) still takes precedence when present above.
+    if (!V.token()) {
+      try {
+        var _urlTok = new URLSearchParams(location.search || "").get("token");
+        if (_urlTok) { V.setSessionToken(_urlTok); history.replaceState(null, "", location.pathname + location.hash); }
+      } catch (e) { /* no URLSearchParams / storage disabled: fall through to the login gate */ }
+    }
     if (ds.sovereign != null && ds.sovereign !== "__VIGIL_SOVEREIGN__") CFG.api.sovereign = ds.sovereign;
     if (ds.offense != null && ds.offense !== "__VIGIL_OFFENSE__") CFG.api.offense = ds.offense;
     try { const t = localStorage.getItem("vigil-theme"); if (t) document.documentElement.setAttribute("data-theme", t); } catch (e) {}

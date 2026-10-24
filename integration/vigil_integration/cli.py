@@ -80,7 +80,9 @@ def _cmd_provision(args: argparse.Namespace) -> int:
     # `vigil engage --base-dir <same>` reuses the SAME anchor-1 signer and one owner delegation covers it (S7).
     prov = provision_authority(slug=args.slug, scope=scope, environment=args.environment,
                                duration_hours=args.hours, max_actions=args.max_actions,
-                               base_dir=args.base_dir, vault=Vault(Path(args.base_dir) / "vault"))
+                               base_dir=args.base_dir, vault=Vault(Path(args.base_dir) / "vault"),
+                               oob_collector_pubkey=args.oob_collector_pubkey,
+                               oob_relay_host=args.oob_relay_host)
     print(f"provisioned signed authority for {prov.slug!r}")
     print(f"  scope         : {', '.join(scope)}")
     print(f"  authority_path: {prov.authority_path}")
@@ -435,6 +437,14 @@ def _cmd_patch(args: argparse.Namespace) -> int:
         print("vigil patch: --target-repo is required (the local path or git URL to fix)", file=sys.stderr)
         return 2
 
+    # LOCAL SINK: --apply-to / --in-place apply an ALREADY-VERIFIED diff to a confined fixed COPY (or, with
+    # --in-place + an explicit operator opt-in, the source). It short-circuits the disposable-clone ladder
+    # BELOW — it does not re-propose or re-build; it git-applies a diff that was already verified-no-pr and
+    # re-runs the deterministic oracle over the written tree. The finding (--from-spine/--finding-ref) is
+    # still loaded above for provenance + the ref the oracle re-runs on.
+    if str(getattr(args, "apply_to", "") or "").strip() or bool(getattr(args, "in_place", False)):
+        return _patch_apply_local(args, finding)
+
     # (2) the PR-leg m-of-n quorum: DENY by default; only wired when --open-pr is fully provisioned. The
     #     single-use is durable + ATOMIC via the file-backed nonce ledger (one authorization → one PR).
     quorum = None
@@ -626,6 +636,12 @@ def _cmd_patch(args: argparse.Namespace) -> int:
         _att = _mint_deep_fix_attestation(result, finding, args, _plan)
         if _att:
             print(f"attestation    : {_att}")
+    # --emit-diff: PERSIST the portable unified diff + a verification sidecar — but ONLY on an oracle-VERIFIED
+    # result. The file's EXISTENCE is the console's only-verified gate (a still-vulnerable/unverified run
+    # writes NOTHING), so the Fixes screen can offer a download/apply affordance keyed on persistence, never
+    # on UI state. This is the single source of the diff BYTES (vs the truncated stdout echo above).
+    if str(getattr(args, "emit_diff", "") or "").strip():
+        _emit_verified_fix_diff(args.emit_diff, result, finding)
     # Honest exit. Without verification requested: non-zero only on an outright refusal (not-confirmed / gate
     # deny) — a propose-only or applied-in-clone or opened-PR run is a success and a "no proposal" (e.g. no API
     # key) is reported, not crashed. WITH --verify-base-url the caller asked "is it actually fixed?", so ONLY a
@@ -640,6 +656,208 @@ def _cmd_patch(args: argparse.Namespace) -> int:
     if verify_oracle is not None and not bool(result.remediated):
         return 1
     return 0
+
+
+def _patch_result_is_verified(result: Any) -> bool:
+    """A patch result is ORACLE-VERIFIED iff the deterministic deep oracle cleared (`verified-no-pr`) OR a
+    signed live re-drive minted `remediated`. ONLY such a result may have its diff persisted/emitted — a
+    build-failed / verify-still-vulnerable / unverified / propose-only result never is (fail-closed)."""
+    return str(getattr(result, "status", "")) == "verified-no-pr" or bool(getattr(result, "remediated", False))
+
+
+def _emit_verify_sidecar_path(p: Path) -> Path:
+    """The verification sidecar beside an emitted ``.patch``: ``<x>.patch`` → ``<x>.verify.json`` (and any
+    other name → ``<name>.verify.json``). Kept in lockstep with ``actions.fix_verify_path`` so the console's
+    reader and this writer agree on the filename."""
+    name = p.name[:-len(".patch")] if p.name.endswith(".patch") else p.name
+    return p.with_name(name + ".verify.json")
+
+
+def _emit_verified_fix_diff(emit_path: str, result: Any, finding: Any) -> None:
+    """Write the portable unified diff + its verification sidecar to ``emit_path`` — but ONLY when the result
+    is oracle-VERIFIED (see :func:`_patch_result_is_verified`). An unverified result writes NOTHING (and says
+    so on stderr): the FILE'S EXISTENCE is the console's only-verified apply gate, enforced here at
+    persistence time (not in UI state). Fail-closed + total: any write error is reported, never raised."""
+    if not _patch_result_is_verified(result):
+        print(f"emit_diff      : NOT written — result status {str(getattr(result, 'status', '?'))!r} is not "
+              f"oracle-verified (only a verified-no-pr / remediated fix is persisted)", file=sys.stderr)
+        return
+    diff = str(getattr(result, "applied_diff", "") or "")
+    if not diff.strip():
+        print("emit_diff      : NOT written — the verified result carries no applied diff", file=sys.stderr)
+        return
+    try:
+        p = Path(str(emit_path)).expanduser()
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(diff if diff.endswith("\n") else diff + "\n", encoding="utf-8")
+        sidecar = _emit_verify_sidecar_path(p)
+        sidecar.write_text(json.dumps({
+            "status": str(getattr(result, "status", "")),
+            "suite_ran": bool(getattr(result, "suite_ran", False)),
+            "tests_passed": getattr(result, "tests_passed", None),
+            "ref": str(getattr(finding, "ref", "") or ""),
+            "applied_paths": list(getattr(result, "patched_paths", []) or []),
+        }, indent=2), encoding="utf-8")
+        print(f"emit_diff      : wrote verified diff ({len(diff)} B) -> {p}")
+        print(f"emit_verify    : {sidecar}")
+    except OSError as exc:
+        print(f"emit_diff      : FAILED to persist to {emit_path!r}: {exc}", file=sys.stderr)
+
+
+def _diff_target_paths(diff_text: str) -> "list[str]":
+    """The repo-relative files a unified diff touches (its ``+++ b/<path>`` targets), de-duped + order-kept —
+    for an honest ``applied_paths`` report without trusting the apply tool's self-report."""
+    out: list[str] = []
+    for line in str(diff_text or "").splitlines():
+        if line.startswith("+++ "):
+            tgt = line[4:].strip().split("\t", 1)[0].strip()
+            if tgt in ("/dev/null", ""):
+                continue
+            if tgt.startswith("b/"):
+                tgt = tgt[2:]
+            if tgt and tgt not in out:
+                out.append(tgt)
+    return out
+
+
+def _run_codescan_verify_self(root: str, ref: str) -> dict:
+    """Re-run the deterministic DAA fix-verification oracle (``vigil codescan --verify``) over ``root`` by
+    SPAWNING this same CLI as a module (argv list, no shell) — so the local sink's own re-verify is the
+    oracle's verdict, never an assertion by the apply step. Returns the parsed verdict dict (or {})."""
+    import subprocess as _sp
+    cmd = [sys.executable, "-m", "vigil_integration.cli", "codescan", "--verify", "--root", root, "--ref", ref]
+    try:
+        proc = _sp.run(cmd, capture_output=True, text=True, timeout=600)  # noqa: S603
+    except (OSError, _sp.SubprocessError):
+        return {}
+    try:
+        doc = json.loads(proc.stdout) if proc.stdout else {}
+    except (ValueError, TypeError):
+        doc = {}
+    return doc if isinstance(doc, dict) else {}
+
+
+def _patch_apply_local(args: argparse.Namespace, finding: Any) -> int:
+    """LOCAL SINK for ``vigil patch --apply-to``/``--in-place`` — apply an ALREADY-VERIFIED diff to a confined
+    fixed COPY (default) or, with ``--in-place``, the operator source itself.
+
+    Contract (fail-closed, never a partial apply):
+      * the diff comes from ``--proposed-diff`` (the ``.patch`` a verified ``--deep --emit-diff`` / the Fixes
+        screen produced) — this sink NEVER re-proposes or re-builds, so it can only apply a diff that was
+        already oracle-verified;
+      * ``--target-repo`` must be an existing LOCAL directory (a git URL has no local tree to patch);
+      * copy mode copytrees source→dest (ignoring .git/.venv/venv/__pycache__/node_modules) and refuses a
+        dest that equals / is inside the source or a non-empty existing dir; ``--in-place`` patches the source;
+      * ``git apply --check`` first — a failure is DRIFT (``exit 3``), a clean refusal with NOTHING written
+        (in copy mode any fresh copy is rolled back) — never a half-patched tree;
+      * then ``git apply``, then ``codescan --verify`` over the WRITTEN tree, printed as the verdict.
+
+    Exit: 0 applied + oracle cleared · 1 applied but still fires/inconclusive · 2 usage/precondition · 3 drift.
+    """
+    import shutil as _sh
+    import subprocess as _sp
+    import tempfile as _tf
+
+    source = str(getattr(finding, "target_repo", "") or "")
+    if not source or not os.path.isdir(source):
+        print("vigil patch --apply-to: --target-repo must be an existing LOCAL directory (a git URL has no "
+              "local tree to patch)", file=sys.stderr)
+        return 2
+    diff_path = str(getattr(args, "proposed_diff", "") or "").strip()
+    if not diff_path:
+        print("vigil patch --apply-to: pass --proposed-diff <the verified .patch> (from `vigil patch --deep "
+              "--emit-diff <path>` or the Fixes-screen download). The local sink applies an ALREADY-VERIFIED "
+              "diff — it never regenerates one here.", file=sys.stderr)
+        return 2
+    try:
+        diff_text = Path(diff_path).expanduser().read_text(encoding="utf-8", errors="replace")[:2_000_000]
+    except OSError as exc:
+        print(f"vigil patch --apply-to: cannot read --proposed-diff {diff_path!r}: {exc}", file=sys.stderr)
+        return 2
+    if not diff_text.strip():
+        print("vigil patch --apply-to: the --proposed-diff file is empty", file=sys.stderr)
+        return 2
+
+    git = _sh.which("git")
+    if not git:
+        print("vigil patch --apply-to: `git` is required to apply the diff", file=sys.stderr)
+        return 2
+    ref = str(getattr(args, "finding_ref", "") or getattr(finding, "ref", "") or "").strip()
+    in_place = bool(getattr(args, "in_place", False))
+    src_real = os.path.realpath(source)
+
+    def _fail(msg: str, code: int) -> int:
+        print("--- apply-to result ---")
+        print(json.dumps({"ok": False, "drifted": code == 3, "applied_path": "", "error": msg}))
+        print(f"vigil patch --apply-to: {msg}", file=sys.stderr)
+        return code
+
+    # resolve the apply root (copy mode creates it; in-place is the source)
+    made_copy = False
+    if in_place:
+        apply_root = src_real
+    else:
+        dest_raw = str(getattr(args, "apply_to", "") or "").strip()
+        if not dest_raw:
+            return _fail("copy mode needs --apply-to <dest>", 2)
+        dest = Path(dest_raw).expanduser()
+        dest_real = os.path.realpath(str(dest))
+        if dest_real == src_real:
+            return _fail("destination equals the source tree", 2)
+        try:
+            if os.path.commonpath([dest_real, src_real]) == src_real:
+                return _fail("destination is inside the source tree", 2)
+        except ValueError:
+            pass
+        if os.path.isdir(dest_real) and any(os.scandir(dest_real)):
+            return _fail("destination directory exists and is not empty", 2)
+        if os.path.exists(dest_real) and not os.path.isdir(dest_real):
+            return _fail("destination exists and is not a directory", 2)
+        apply_root = dest_real
+
+    # (a) git apply --check against the SOURCE first → drift detection BEFORE any write (never a partial apply)
+    with _tf.NamedTemporaryFile("w", suffix=".patch", delete=False, encoding="utf-8") as fh:
+        fh.write(diff_text if diff_text.endswith("\n") else diff_text + "\n")
+        patch_file = fh.name
+    try:
+        chk = _sp.run([git, "-C", src_real, "apply", "--check", "-p1", patch_file],
+                      capture_output=True, text=True, timeout=180)  # noqa: S603
+        if chk.returncode != 0:
+            return _fail("the verified diff does not apply cleanly to this tree (source drifted since the "
+                         "scan; re-scan)", 3)
+        # (b) copy mode: materialise the fixed copy only AFTER --check passed
+        if not in_place:
+            try:
+                _sh.copytree(src_real, apply_root, symlinks=False,
+                             ignore=_sh.ignore_patterns(".git", ".venv", "venv", "__pycache__", "node_modules"))
+                made_copy = True
+            except (OSError, _sh.Error) as exc:
+                return _fail(f"copy source→dest failed: {exc}", 2)
+        # (c) apply the diff into the written tree
+        ap = _sp.run([git, "-C", apply_root, "apply", "-p1", patch_file],
+                     capture_output=True, text=True, timeout=180)  # noqa: S603
+        if ap.returncode != 0:
+            if made_copy:
+                _sh.rmtree(apply_root, ignore_errors=True)   # roll back the copy — never leave a partial tree
+            return _fail(f"git apply failed after --check passed: {(ap.stderr or '').strip()[:300]}", 3)
+    finally:
+        try:
+            os.unlink(patch_file)
+        except OSError:
+            pass
+
+    applied_paths = _diff_target_paths(diff_text)
+    # (d) re-run the deterministic oracle over the WRITTEN tree — the verdict comes from the oracle, not us
+    reverify = _run_codescan_verify_self(apply_root, ref) if ref else {}
+    cleared = bool(reverify.get("cleared")) if reverify else False
+    print("--- apply-to result ---")
+    print(json.dumps({"ok": True, "drifted": False, "applied_path": apply_root,
+                      "applied_paths": applied_paths, "in_place": in_place,
+                      "reverify": {"cleared": cleared,
+                                   "still_fires_at": reverify.get("still_fires_at", []) if reverify else [],
+                                   "moved": bool(reverify.get("moved")) if reverify else False,
+                                   "ran": bool(reverify)}}))
+    return 0 if (cleared or not ref) else 1
 
 
 def _remediate_safe_ref(ref: str) -> str:
@@ -4324,6 +4542,14 @@ def build_parser() -> argparse.ArgumentParser:
     pp.add_argument("--max-actions", type=int, default=1000)
     pp.add_argument("--base-dir", default=".vigil-live",
                     help="engagement home for the STABLE governance key (shared with `vigil engage`)")
+    pp.add_argument("--oob-collector-pubkey", default="",
+                    help="Base64 Ed25519 PUBLIC key of the OOB relay's independent collector to PIN into the "
+                         "owner-signed authority (VF-2b). Public material only, obtained OUT-OF-BAND from the "
+                         "`collaborator serve` relay — the owner's signature then COVERS the pin so the engine's "
+                         "governed OOB feeder re-derives the verifier pin from the signed document.")
+    pp.add_argument("--oob-relay-host", default="",
+                    help="Bare hostname of the operator-hosted OOB collaborator relay authorized as an OOB "
+                         "EGRESS destination (a SEPARATE gate; NOT a scan target, NOT added to scope).")
     pp.set_defaults(func=_cmd_provision)
 
     pid = sub.add_parser("identity",
@@ -4465,6 +4691,22 @@ def build_parser() -> argparse.ArgumentParser:
     ppatch.add_argument("--attest-key-id", default="owner",
                         help="the signer key_id recorded in the attestation (matches a --trust-root entry at "
                              "verify time). Default: owner.")
+    # LOCAL-APPLY affordance (console Fixes screen backend). Two inert sinks for an ALREADY-VERIFIED diff —
+    # neither relaxes a gate or touches a remote; both are spawned (argv, no shell) by the FATAL-2-thin console.
+    ppatch.add_argument("--emit-diff", default="",
+                        help="on a VERIFIED result (--deep: verified-no-pr; live: remediated), write the exact "
+                             "portable unified diff to <path> and a sibling <path:.patch→.verify.json> "
+                             "{status,suite_ran,tests_passed,ref,applied_paths}. Writes NOTHING on an "
+                             "unverified/still-vulnerable result (the file's EXISTENCE is the only-verified gate).")
+    ppatch.add_argument("--apply-to", default="",
+                        help="LOCAL SINK: apply an ALREADY-VERIFIED diff (pass it via --proposed-diff) to a "
+                             "CONFINED fixed COPY at <dest> — copytree source(--target-repo)→<dest> ignoring "
+                             ".git/.venv, `git apply --check` (a clean refusal on drift — never a partial "
+                             "apply), `git apply`, then `codescan --verify` over the WRITTEN tree. The operator "
+                             "source is NEVER touched. Grounded by --from-spine/--finding-ref.")
+    ppatch.add_argument("--in-place", action="store_true",
+                        help="with the LOCAL SINK: patch the operator SOURCE (--target-repo) directly instead of "
+                             "a copy. Destructive opt-in — the console passes it only on an explicit confirm.")
     ppatch.set_defaults(func=_cmd_patch)
 
     prem = sub.add_parser(
