@@ -13,7 +13,7 @@ TWO KINDS OF PROOF, matched to where each can run:
     including the offense-lock ``sigil-governor`` job that has no ``mcp`` — and would have caught
     the removed-import break by construction.
   * ``test_live_server_registers_eight_tools`` actually constructs the v2 ``MCPServer`` and
-    enumerates its registered tools. It needs the sovereign closure (``mcp`` + fastembed/qdrant),
+    enumerates its registered tools. It needs the sovereign closure (``mcp`` + onnxruntime/tokenizers/qdrant),
     so it ``importorskip``s and SKIPS cleanly where that closure is absent (mirroring the idiom the
     rest of ``apps/sigil/tests`` uses for heavy deps). It PASSES in a sovereign env / local dev.
 
@@ -88,7 +88,7 @@ def test_live_server_registers_eight_tools(tmp_path, monkeypatch) -> None:
     """Construct the real v2 server and confirm it registers exactly the 8 tools, and that a live
     tool call returns a dict (never raises to the client).
 
-    Needs the sovereign closure (``mcp`` + fastembed/qdrant for the module's top-level imports);
+    Needs the sovereign closure (``mcp`` + onnxruntime/tokenizers/qdrant for the module's top-level imports);
     SKIPS where that is absent (e.g. the offense-lock ``sigil-governor`` job).
     """
     import asyncio
