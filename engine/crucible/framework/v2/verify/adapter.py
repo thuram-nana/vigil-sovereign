@@ -2471,17 +2471,22 @@ class FindingContext(BaseModel):
 
     @classmethod
     def from_llm_disclosure(
-        cls, canary: str, llm_output: Any, *, bug_class: str = "system_prompt_disclosure"
+        cls, canary: str, llm_output: Any, *, bug_class: str = "system_prompt_disclosure",
+        margin: int = _DISCLOSURE_MARGIN,
     ) -> "FindingContext":
         """A planted canary sentinel plus the app's own LLM output, for the system-prompt-
         disclosure oracle. Confirms the SECRET LEAKED (the sentinel appeared verbatim) — not
         that an injection caused it. PR1: we retain ONLY a bounded window around the canary
         (sentinel kept verbatim so the certificate re-fires offline), NOT the whole model
-        output — so a transcript that also contains PII/credentials is not over-retained."""
+        output — so a transcript that also contains PII/credentials is not over-retained.
+        ``margin`` bounds the retained context each side of the sentinel; a caller handling a
+        RAW, un-redacted transcript (the inline gateway, whose upstream response is not boundary
+        PII-redacted) passes ``margin=0`` to retain ONLY the sentinel, so no adjacent bytes reach
+        the certificate."""
         return cls(
             bug_class=bug_class,
             canary=_coerce_text(canary),
-            llm_output=_bounded_disclosure_span(canary, llm_output),
+            llm_output=_bounded_disclosure_span(canary, llm_output, margin=margin),
         )
 
     @classmethod
