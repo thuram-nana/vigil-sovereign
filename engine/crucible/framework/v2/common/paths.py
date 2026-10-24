@@ -392,18 +392,55 @@ def authority_dir() -> Path:
     return v2_root() / ".authority"
 
 
+def ensure_authority_dir_secure() -> Path:
+    """Create authority_dir() owner-only (0700) AND tighten it to 0700 if a prior run left it looser — the
+    slug-keyed control + trust root must NEVER be group/other-accessible. secure_dir alone won't
+    re-permission a dir it did not create, but this is a dedicated sensitive store (not a shared parent),
+    so tightening a group/other-accessible one is correct. Best-effort; idempotent."""
+    d = secure_dir(authority_dir())
+    try:
+        if os.stat(d).st_mode & 0o077:        # any group/other permission bit set → tighten to owner-only
+            os.chmod(d, 0o700)
+    except OSError:
+        pass
+    return d
+
+
 def authority_path(slug: str) -> Path:
     return authority_dir() / f"{slug}.authority.json"
 
 
+def _safe_slug(slug: str) -> str:
+    """Filesystem-safe form of a gateway/engagement slug — no path separators, traversal, or control
+    chars, bounded. Used for EVERY slug-keyed control file (mode, kill-switch, registry) so an
+    attacker-chosen slug carried in a self-registration record can never traverse out of the authority dir
+    on a write — the RAW slug that reaches aegis_mode_path/killswitch_path is confined here. Keying all
+    three by the SAME sanitised form keeps the gateway's and console's control channel in sync."""
+    return re.sub(r"[^A-Za-z0-9._-]", "-", str(slug or "").strip())[:120] or "aegis-gateway"
+
+
 def killswitch_path(slug: str) -> Path:
-    return authority_dir() / f"{slug}.halt"
+    return authority_dir() / f"{_safe_slug(slug)}.halt"
 
 
 def aegis_mode_path(slug: str) -> Path:
     """Control file for a LIVE AEGIS observe<->enforce switch. The gateway re-reads it per request
     (mirrors killswitch_path); the console writes 'observe'/'enforce'. Absent -> the startup mode."""
-    return authority_dir() / f"{slug}.mode"
+    return authority_dir() / f"{_safe_slug(slug)}.mode"
+
+
+def aegis_registry_dir() -> Path:
+    """Directory where EVERY running AEGIS gateway self-registers one JSON record per slug, so the
+    console can DISCOVER and track all of them — UI-, CLI-, or cron-launched, observe or enforce.
+    Sits alongside the slug-keyed mode/kill-switch control files under the authority dir."""
+    return authority_dir() / "aegis-gateways"
+
+
+def aegis_registry_path(slug: str) -> Path:
+    """The self-registration record for one gateway, keyed by a filesystem-safe form of its slug.
+    (The record's own ``slug`` field carries the RAW slug; keying by the SAME sanitised form here and in
+    aegis_mode_path/killswitch_path keeps the control channel in sync and inside the authority dir.)"""
+    return aegis_registry_dir() / f"{_safe_slug(slug)}.json"
 
 
 # ---------------------------------------------------------------------------
