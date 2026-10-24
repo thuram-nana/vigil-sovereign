@@ -53,6 +53,23 @@ def test_unhinted_point_falls_back_to_full_set() -> None:
         "an unhinted point must keep full coverage, not be skipped"
 
 
+def test_in_band_injection_classes_reach_their_sinks() -> None:
+    # Regression for the selector-pairing bug that left SSTI / OS-cmdi / error-based-SQLi UNOFFERED
+    # at their own sinks, so a --targeted suite could never promote them. Each MERIDIAN-style sink
+    # must now OFFER the class that confirms it (the in-band reflection/eval classes are added at any
+    # HINTED point; `host` now also maps to command_injection):
+    def offered(name: str) -> set:
+        return {c.bug_class for c in select_checks(_point(name), DEFAULT_CHECKS)}
+    assert "ssti" in offered("title")               # SSTI eval at /reports/run?title= (was dropped)
+    assert "error_based_sqli" in offered("q")       # error-based SQLi at /records/search?q= (was dropped)
+    assert "command_injection" in offered("host")   # OS cmdi at /diagnostics/ping?host= (was dropped)
+    assert "path_traversal" in offered("file")      # traversal at /documents/download?file=
+    assert "xss" in offered("q")                    # reflected XSS at the search param
+    # the fix did not blunt prioritisation: a url param is still SSRF-first, never SQL-first,
+    # and an unhinted point (tested above) still falls back to the full set.
+    assert "ssrf" in offered("url") and "boolean_sqli" not in offered("url")
+
+
 # --- efficiency: targeting sends fewer requests but still finds the bug --------
 
 

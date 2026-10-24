@@ -26,7 +26,7 @@ from typing import Any
 
 # the web classes this wave mints as FACTs (each has a definite, exploitable-condition ACHIEVED_STATE predicate).
 WEB_FACT_CLASSES = ("open_redirect", "cors", "host_header_injection", "graphql_introspection",
-                    "oidc_redirect_uri")
+                    "graphql_batching", "oidc_redirect_uri")
 
 # The subset of WEB_FACT_CLASSES a re-drive may mint from an LLM-SUPPLIED class claim (the autonomous engage
 # seam, wiring._live_web_redrive_fact). oidc_redirect_uri is EXCLUDED: its distinguishing A07 impact (a broken
@@ -45,6 +45,13 @@ LLM_CLAIM_WEB_FACT_CLASSES = tuple(c for c in WEB_FACT_CLASSES if c != "oidc_red
 # is byte-identical to a plain open_redirect, so the OIDC label would rest entirely on the scanner's say-so).
 SCANNER_CLAIM_WEB_FACT_CLASSES = LLM_CLAIM_WEB_FACT_CLASSES
 
+# PASSIVE header-posture re-drive classes — NOT canary-injection classes (WEB_FACT_CLASSES). csp_posture is a
+# SINGLE gated GET + a pure parse of the RETAINED enforced CSP response header (scanner.csp_bypass.
+# capture_csp_posture -> verify.oracles.csp_posture_oracle), admitted to the FACT-capable
+# csp_posture.header_weakness branch. Kept SEPARATE so web_redrive's "inject VIGIL's own canary" contract is
+# untouched; the producer (engine._redrive_spec) and the seam (wiring._live_csp_redrive_fact) gate on THIS set.
+CSP_REDRIVE_CLASSES = ("csp_posture",)
+
 # Common scanner spellings → the canonical WEB_FACT_CLASS. Kept SMALL and EXACT (a fuzzy hint could re-drive
 # an endpoint the report did not implicate — worst case a wasted gated burst, since the oracle must still fire,
 # but keep it precise). Applied AFTER lower-casing and hyphen/space→underscore normalisation.
@@ -59,6 +66,8 @@ _SCANNER_CLASS_SYNONYMS = {
     "host_header_attack": "host_header_injection",
     "graphql_introspection_enabled": "graphql_introspection",
     "introspection": "graphql_introspection",
+    "graphql_batching_abuse": "graphql_batching",
+    "query_batching": "graphql_batching",
 }
 
 
@@ -1372,6 +1381,13 @@ def _branch_outcomes(bug_class: str, context: "dict", overall_fired: bool) -> "l
         # oracle's verdict over that live capture — no per-response decomposition to do (like cors).
         return [("graphql_introspection.schema_returned", overall_fired)]
 
+    if bug_class == "graphql_batching":
+        # Single oracle-driven branch (like graphql_introspection / cors): the EDIT-1 predicate IS the
+        # exploitable proposition — a returned JSON array of >=2 data-bearing results (batch_result_count
+        # reduction > 1) to VIGIL's own array-batch POST — so the branch mirrors the oracle's verdict over
+        # that live capture; no per-response decomposition.
+        return [("graphql_batching.array_batch_executed", overall_fired)]
+
     if bug_class == "host_header_injection":
         # The host-header Location disjunct is itself status-free (checks.py:HostHeaderCheck), so branch and
         # oracle already agree here — do not add a gate the oracle does not have.
@@ -1415,6 +1431,7 @@ def web_redrive(url: str, *, slug: str, engagement_slug: str, signers: "list[tup
         HostHeaderCheck,
         OpenRedirectCheck,
     )
+    from framework.v2.scanner.graphql import GraphQLBatchingCheck  # noqa: PLC0415 (FATAL-2; lives in scanner.graphql)
     from framework.v2.scanner.insertion import HttpRequest, InsertionKind, RequestTemplate  # noqa: PLC0415
     from framework.v2.verify.reachability_cloud import _authorize  # noqa: PLC0415 — the URL-shaped gate
 
@@ -1505,6 +1522,14 @@ def web_redrive(url: str, *, slug: str, engagement_slug: str, signers: "list[tup
         # a well-formed returned schema — a definite proposition, so a single oracle-driven branch (like cors).
         _run(lambda: GraphqlIntrospectionCheck().probe(template, send), "graphql_introspection", url,
              surface="graphql_introspection_query")
+        # graphql BATCHING: CLASS-GATED (run ONLY when the CLAIMED class is exactly "graphql_batching"), like
+        # the oidc gate below — the array-batch POST is an EXTRA gated request that only adjudicates a GraphQL
+        # endpoint, so it must not fire for every web lead. GraphQLBatchingCheck.probe returns the EDIT-1
+        # capture-bound context (raw body + the batch_result_count reduction, PD3 gt[count,1]); a batching-off
+        # origin returns a single object/error (count 0) and the strict gt cannot fire, so it mints nothing.
+        if claimed_class == "graphql_batching":
+            _run(lambda: GraphQLBatchingCheck().probe(template, send), "graphql_batching", url,
+                 surface="graphql_batch_array")
         # oidc redirect_uri: CLASS-GATED (run ONLY when the CLAIMED class is exactly "oidc_redirect_uri").
         # OidcRedirectUriCheck's predicate is observationally IDENTICAL to open_redirect (a 3xx Location to
         # the canary host, or a meta-refresh to it), so running it unconditionally would UPGRADE a plain

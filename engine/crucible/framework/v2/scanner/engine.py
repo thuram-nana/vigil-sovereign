@@ -228,9 +228,41 @@ def probe_verdict(result: VerificationResult) -> tuple[str, tuple[str, ...]]:
     return "inconclusive", ()
 
 
-class BudgetExceeded(RuntimeError):
-    """Raised internally when the request budget is hit; the audit returns what
-    it has confirmed so far rather than sending more traffic."""
+class BudgetExceeded(BaseException):
+    """Terminal stop for the whole audit: the request budget is spent, so the sweep
+    returns what it has confirmed so far rather than sending more traffic.
+
+    Raised for BOTH budgets that bound a sweep: this engine's own ``max_requests``,
+    and — via :func:`_is_request_budget_refusal` in ``_counted_send`` — the gated
+    executor's PER-ENGAGEMENT request budget, whose refusal the injected ``send``
+    returns as a soft ``{"status": 0, "refused": "...request budget N exhausted"}``
+    (never an exception).
+
+    Derives from ``BaseException`` (NOT ``Exception``) ON PURPOSE. The blind OOB checks
+    wrap their ``send`` in ``except Exception: pass`` (a blind payload may make the
+    target error its own response; the out-of-band callback, not the response, is the
+    signal). Budget exhaustion is a control-flow stop, not a target-response error — like
+    ``KeyboardInterrupt`` / ``SystemExit`` it must pass straight through those broad
+    handlers. Otherwise an OOB probe swallows the stop and still pays its full
+    ``poll_deadline`` polling for a callback a refused request can never produce, and the
+    sweep grinds on across every remaining endpoint instead of terminating. Every place
+    that legitimately ends the sweep catches it EXPLICITLY (``except BudgetExceeded``),
+    which works regardless of the base class."""
+
+
+def _is_request_budget_refusal(resp: object) -> bool:
+    """True iff ``resp`` is the gated executor's PER-ENGAGEMENT request-budget refusal.
+
+    The executor funnels every send through its gate chain; when the per-engagement
+    request budget is spent it returns ``{"status": 0, "refused": "per-engagement
+    request budget N exhausted"}`` (``http_executor._run_gates`` / ``gated_fetch``) — a
+    soft refusal, not an exception. Matched SPECIFICALLY: a scope / destructive / egress
+    refusal and a dry-run also carry ``status == 0`` but a DIFFERENT (or absent) note, and
+    must NOT trip the sweep-wide terminal stop (only the global budget is terminal)."""
+    if not isinstance(resp, dict) or resp.get("status") != 0:
+        return False
+    note = str(resp.get("refused", "")).lower()
+    return "request budget" in note and "exhaust" in note
 
 
 class AuditEngine:
@@ -305,6 +337,12 @@ class AuditEngine:
         self.bandit = bandit
         self.bandit_context = bandit_context
         self.requests_sent = 0
+        # Sticky terminal flag: set once the injected send reports the gated executor's
+        # PER-ENGAGEMENT request budget is spent (see _counted_send). After that EVERY send
+        # short-circuits to BudgetExceeded, so the sweep stops issuing refused probes (each
+        # blind OOB probe would otherwise still pay its full poll_deadline) and the run
+        # proceeds to its grounding/finalize pass on the work already done.
+        self._budget_exhausted = False
         # M2 coverage/completeness: every probe that actually adjudicated over
         # observed data leaves a ProbeRecord here (both the positive and the
         # otherwise-discarded negative branch), so a REACHED-and-oracle-cleared
@@ -322,10 +360,21 @@ class AuditEngine:
 
     def _counted_send(self, request: HttpRequest) -> dict:
         with self._send_lock:
-            if self.max_requests and self.requests_sent >= self.max_requests:
+            if self._budget_exhausted or (self.max_requests and self.requests_sent >= self.max_requests):
                 raise BudgetExceeded()
             self.requests_sent += 1
-        return self._send(request)
+        resp = self._send(request)
+        # The gated executor's PER-ENGAGEMENT request budget is a SOFT refusal (status 0 +
+        # a "...request budget N exhausted" note), not an exception. Treat it EXACTLY like
+        # this engine's own max_requests: a hard, STICKY, sweep-wide terminal stop. Without
+        # it the sweep keeps issuing refused probes across every remaining (crawl-expanded)
+        # endpoint — each blind OOB check still paying its full poll_deadline waiting for a
+        # callback a refused request can never make — so the run never reaches grounding/
+        # finalize and promotes zero facts from the work already done.
+        if _is_request_budget_refusal(resp):
+            self._budget_exhausted = True
+            raise BudgetExceeded()
+        return resp
 
     def _record_probe(
         self, *, endpoint: str, insertion_point: str, param: str,

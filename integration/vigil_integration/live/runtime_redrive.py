@@ -98,7 +98,8 @@ RUNTIME_FACT_CLASSES = ("xss", "exposure", "ssi")
 # ``RUNTIME_REDRIVE_CLASSES``), so the engage seam (engine ``_redrive_spec`` → wiring
 # ``_live_runtime_redrive_fact``) now produces a spec and admits them — closing the under-report where the
 # deterministic scanner proved the class but the governed engage/chat seam refused to mint it.
-RUNTIME_STAT_FACT_CLASSES = ("ssti", "boolean_sqli", "time_based_sqli")
+RUNTIME_STAT_FACT_CLASSES = ("ssti", "boolean_sqli", "time_based_sqli", "time_based_command_injection",
+                             "el_injection")
 
 # LEAD-ONLY classes: the runner still probes them end to end and records an admitted verdict, but their
 # registered branch declares ``fact_capable: false``, so ``verdict.admit`` demotes even a fired oracle to a
@@ -139,19 +140,32 @@ RUNTIME_STAT_FACT_CLASSES = ("ssti", "boolean_sqli", "time_based_sqli")
 # article for ``passwd`` but cannot produce a well-formed second file), a size/entropy relation between the
 # response and the file VIGIL asked for, or a per-probe unpredictable target whose content VIGIL already
 # knows. Each also needs a multi-capture oracle row; see the branch's ``blocking_work``.
-RUNTIME_LEAD_CLASSES = ("path_traversal",)
+RUNTIME_LEAD_CLASSES = ("path_traversal", "sensitive_exposure")
 
 # Every class this runner will DISPATCH. A FACT-capable class can reach a signed FACT; a lead-only class
 # runs the identical pipeline and stops at a LEAD. The union spans the INLINE fact classes, the W2
 # STATISTICAL/EVAL fact classes (delegated to their sibling arms), and the LEAD-only classes; the engage
 # seam (engine ``_redrive_spec`` + wiring ``_live_runtime_redrive_fact``) gates on this DISPATCH set.
-RUNTIME_REDRIVE_CLASSES = RUNTIME_FACT_CLASSES + RUNTIME_STAT_FACT_CLASSES + RUNTIME_LEAD_CLASSES
+# command_injection resolves through its OWN in-band arm (``cmdi_reflected_redrive``) — a dedicated
+# response-derived arm like the W2 stat arms, NOT the ``_BRANCH_FOR`` inline body. It is ALSO an
+# ``OOB_REDRIVE_CLASS`` (the blind ``;curl <callback>`` channel, a SEPARATE seam with a pinned collector);
+# the dispatch routes it to the in-band arm FIRST. Its FACT marker is a per-probe UNGUESSABLE computed
+# product, NOT ``id``'s documented ``uid=`` output (which is the path_traversal signature trap).
+RUNTIME_INBAND_ARM_CLASSES = ("command_injection",)
+RUNTIME_REDRIVE_CLASSES = (RUNTIME_FACT_CLASSES + RUNTIME_STAT_FACT_CLASSES + RUNTIME_LEAD_CLASSES
+                           + RUNTIME_INBAND_ARM_CLASSES)
 
 _BRANCH_FOR = {
     "path_traversal": "path_traversal.file_signature",
     "xss": "xss.reflected_execution",
     "exposure": "exposure.secret_signature",
     "ssi": "ssi.evaluation",
+    # sensitive_exposure (CWE-359/CWE-538): the cloud-credential-path dual of exposure. LEAD-ONLY — its branch
+    # sensitive_exposure.secret_signature is declared fact_capable=false / oracle_version="" in the matrix, so
+    # admit() demotes any firing to a LEAD and a signed FACT is IMPOSSIBLE. A bare secret-signature at a fixed
+    # path is placeholder/EXAMPLE-fakeable (weaker than the framework's own credential bar); a sound FACT needs
+    # the INI "key = value" value-shape that exposure uses for /.env (blocking_work on the branch).
+    "sensitive_exposure": "sensitive_exposure.secret_signature",
 }
 
 # Candidate query-parameter names synthesised for the point-check classes when the proposed URL does not
@@ -198,6 +212,27 @@ _TIMING_PARAMS = ("id", "q", "query", "search", "name", "user", "uid", "item", "
 # out and evaluates TRUE vs a false one that evaluates FALSE, over the same insertion point. Timing:
 # (benign, low_sleep, high_sleep, low_ms, high_ms) — a benign value vs two SLEEP doses for the dose-response.
 _SSTI_EXPR_TEMPLATES = ("{{{{{n1}*{n2}}}}}", "${{{n1}*{n2}}}", "#{{{n1}*{n2}}}", "{{{n1}*{n2}}}")
+# EL / SpEL / OGNL expression-language injection (CWE-917): the EL-family subset of the evaluation channel.
+# ${N*M} (JSP-EL), #{N*M} (SpEL / JSF-EL), %{N*M} (OGNL / Struts). SAME sound evaluation_oracle as SSTI: the
+# ONLY way the unguessable per-probe product appears from these is a server-side EXPRESSION EVALUATOR (which
+# IS the vuln); a benign ${VAR} variable-substitution / config interpolation does not COMPUTE arithmetic, so
+# it never produces the product — unlike the cmdi $((N*M)) arithmetic a benign calculator fakes.
+_EL_BRANCH = "el_injection.evaluation"
+_EL_EXPR_TEMPLATES = ("${{{n1}*{n2}}}", "#{{{n1}*{n2}}}", "%{{{n1}*{n2}}}")
+_EL_PARAMS = ("q", "query", "search", "name", "input", "data", "msg", "message", "comment", "lang",
+              "expr", "eval", "tpl", "template", "value", "id")
+
+# --- in-band (reflected-OUTPUT) command injection: the UNGUESSABLE COMPUTED PRODUCT channel ---------------
+_CMDI_REFLECTED_BRANCH = "command_injection.reflected_output"
+# command-sink parameter names (mirrors the targeting cmdi hint group).
+_CMDI_PARAMS = ("host", "hostname", "server", "ip", "addr", "target_host", "cmd", "command", "exec",
+                "execute", "run", "ping")
+# per-probe shell break-outs that make the server COMPUTE $((N1*N2)). $(( )) is POSIX arithmetic; expr the
+# portable fallback. A benign echo reflects the raw $((..)) (the product VALUE is absent); only a shell that
+# EXECUTES produces the value, which — being per-probe random AND absent from the payload — a documentation /
+# search / deny page does not carry (that is the sound distinction from id's documented uid= signature).
+_CMDI_PAYLOAD_TEMPLATES = ("127.0.0.1;echo $(({n1}*{n2}))", "127.0.0.1|echo $(({n1}*{n2}))",
+                           "127.0.0.1;expr {n1} \\* {n2}")
 # The TRUTH-VALUE ATTRIBUTION clause families live in ONE place — ``framework.v2.scanner.checks.
 # boolean_clause_families`` — next to the check that sends them and the invariants they must satisfy
 # (comparison-shape diversity, breakout validity, truth-correctness, index-aligned length matching).
@@ -214,6 +249,18 @@ _TIMING_SLEEP_TEMPLATES = (
     "x' OR SLEEP({s})-- -",                  # MySQL string-literal breakout
     "1 OR SLEEP({s})",                       # MySQL numeric context
     "x'||pg_sleep({s})--",                   # PostgreSQL
+)
+# Shell-sleep templates for IN-BAND command injection confirmed by the SAME dose-response timing_oracle. A
+# benign calculator / reflector / docs-KB computes arithmetic or echoes input but CANNOT delay the response;
+# only shell execution of `sleep` can, and the delay must SCALE with the dose — so this is the SOUND in-band
+# cmdi FACT (the in-band computed-product side_effect is a calculator-fakeable LEAD, not a FACT). Chain /
+# pipe / subshell / backtick break-outs of a benign host; `sleep` takes fractional seconds (coreutils).
+_CMDI_TIMING_BRANCH = "time_based_command_injection.timing_inference"
+_CMDI_SLEEP_TEMPLATES = (
+    "127.0.0.1;sleep {s}",
+    "127.0.0.1|sleep {s}",
+    "127.0.0.1$(sleep {s})",
+    "127.0.0.1`sleep {s}`",
 )
 _STAT_MAX_PARAMS = 4     # blind/statistical arms are expensive — probe at most this many insertion points
 # The BOOLEAN arm is capped tighter than the other statistical arms. Each (param, clause-family) pair is an
@@ -476,6 +523,18 @@ _EXPOSURE_PROBES = (
     ("/.env", "DB_PASSWORD=", (), True),
     ("/actuator/env", "spring.datasource", ("propertySources", '"value"'), False),
     ("/.git/config", "[core]", ("repositoryformatversion",), False),
+)
+
+# CWE-359/CWE-538 sensitive-data dual of _EXPOSURE_PROBES: a cloud CREDENTIAL signature at a fixed credential
+# path. value_shaped=True so even a future FACT upgrade demands a real value — but the current
+# _secret_assignment parses only the dotenv "KEY=value" form, NOT the INI "key = value" (space-separated)
+# form an .aws/credentials file uses, so the value-shape REFUSES every INI value here and this probe mints
+# NOTHING. Combined with the fact_capable=false branch, sensitive_exposure is LEAD-ONLY by construction: the
+# arm DRIVES the AWS probe (a VIGIL-owned capture) but can never mint a FACT. A sound FACT needs the INI
+# value-shape (a surgical separator-skip in _secret_assignment) — named in the branch blocking_work.
+_SENSITIVE_EXPOSURE_PROBES = (
+    # (probe_path, signature, corroborators, value_shaped)
+    ("/.aws/credentials", "aws_secret_access_key", ("aws_access_key_id", "[default]"), True),
 )
 
 
@@ -871,6 +930,14 @@ def runtime_redrive(url: str, *, slug: str, engagement_slug: str, signers: "list
     if bug_class in CREDENTIAL_REDRIVE_CLASSES:
         return credential_acceptance_redrive(url, slug=slug, engagement_slug=engagement_slug,
                                              signers=signers, timeout=timeout)
+    # IN-BAND (reflected-output) command injection — the UNGUESSABLE COMPUTED-PRODUCT channel, response-
+    # derived (VIGIL's own capture, no collector material needed). Routed to its own arm BEFORE the OOB
+    # delegation below, because command_injection is ALSO an ``OOB_REDRIVE_CLASS`` (the blind
+    # ``;curl <callback>`` channel, confirmed by the dedicated ``wiring._live_oob_redrive_fact`` seam with a
+    # pinned collector). ``param=None`` ⇒ the arm walks its candidate command-sink parameter set.
+    if bug_class in RUNTIME_INBAND_ARM_CLASSES:
+        return cmdi_reflected_redrive(url, slug=slug, engagement_slug=engagement_slug,
+                                      signers=signers, timeout=timeout)
     # M-11 OOB-CALLBACK delegation. The blind OOB classes carry TRUSTED collector material (an independent
     # collector keypair + the OUT-OF-BAND-pinned collector pubkey + an optional owner-signed engagement
     # window) this generic (url, claimed_class) dispatch cannot supply, so a generic re-drive DELEGATES to
@@ -896,7 +963,9 @@ def runtime_redrive(url: str, *, slug: str, engagement_slug: str, signers: "list
     # ``boolean_inference_oracle`` SPRT (dynamic-page control), never the single-shot ``DifferentialCheck``.
     if bug_class in RUNTIME_STAT_FACT_CLASSES:
         _arm = {"ssti": ssti_redrive, "boolean_sqli": boolean_redrive,
-                "time_based_sqli": timing_redrive}[bug_class]
+                "time_based_sqli": timing_redrive,
+                "time_based_command_injection": _cmdi_timing_redrive,
+                "el_injection": _el_injection_redrive}[bug_class]
         return _arm(url, slug=slug, engagement_slug=engagement_slug, signers=signers, timeout=timeout)
     branch = _BRANCH_FOR[bug_class]
     if branch not in branch_ids():
@@ -1202,8 +1271,11 @@ def runtime_redrive(url: str, *, slug: str, engagement_slug: str, signers: "list
                                  "differential a signature's presence is not adjudicable → INCONCLUSIVE")
             control_body = _body(control_resp) if control_resp is not None else ""
             control_status = int(control_resp.get("status", 0) or 0) if control_resp is not None else 0
+            # sensitive_exposure (CWE-359/CWE-538) reuses this EXACT exposure machinery with a cloud-credential
+            # probe set; every other class routed here is plain exposure (CWE-200).
+            _probes = _SENSITIVE_EXPOSURE_PROBES if bug_class == "sensitive_exposure" else _EXPOSURE_PROBES
             for probe_path, signature, corroborators, value_shaped in (
-                    _EXPOSURE_PROBES if control_resp is not None else ()):
+                    _probes if control_resp is not None else ()):
                 surface = f"path:{probe_path}"
                 res.surfaces.setdefault(bug_class, set()).add(surface)
                 # CONTROL DIFFERENTIAL, evaluated by the RUNNER over the control BODY.
@@ -1266,7 +1338,7 @@ def runtime_redrive(url: str, *, slug: str, engagement_slug: str, signers: "list
                     observed["secret_assignment"] = assignment
                     observed["secret_value"] = value
                     preds += _secret_value_predicates(signature)
-                fc = FindingContext.from_predicate(observed, {"all": preds}, bug_class="exposure")
+                fc = FindingContext.from_predicate(observed, {"all": preds}, bug_class=bug_class)
                 context = fc.to_verifier_context()
                 signal = predicate_oracle(context.get("observed_evidence", {}), context.get("predicate", {}))
                 _admit(context, f"{url}#{probe_path}", surface,
@@ -1357,11 +1429,20 @@ def _stat_setup(url: str, slug: str, bug_class: str, branch: str, timeout: float
 
 
 def ssti_redrive(url: str, *, slug: str, engagement_slug: str, signers: "list[tuple[str, str]]",
-                 param: "str | None" = None, timeout: float = 8.0) -> "RuntimeRedriveResult":
+                 param: "str | None" = None, timeout: float = 8.0, bug_class: str = "ssti",
+                 branch: "str | None" = None, expr_templates: "tuple[str, ...] | None" = None,
+                 params: "tuple[str, ...] | None" = None) -> "RuntimeRedriveResult":
     """Re-drive ``url`` for SERVER-SIDE TEMPLATE / EXPRESSION-LANGUAGE injection and mint a signed FACT ONLY
     when the deterministic ``evaluation_oracle`` confirms the server EVALUATED a runner-injected expression:
     a PER-PROBE random product ``N1*N2`` present in the FRESH response body, the raw expression ABSENT
     (reflected-verbatim ⇒ a conclusive clean, not a fire), and a benign no-expression CONTROL lacking it.
+
+    Class-agnostic: ``ssti`` (template ``{{N*M}}`` / EL ``${N*M}`` / SpEL ``#{N*M}``) and ``el_injection``
+    (EL/SpEL/OGNL only) share the SAME sound ``evaluation_oracle`` — only the class/branch label and the
+    expression templates differ. The evaluation channel is SOUND for both because the ONLY way the unguessable
+    per-probe product appears from ``${N*M}`` / ``#{N*M}`` is a server-side EXPRESSION EVALUATOR, which IS the
+    vulnerability (a benign ``${VAR}`` variable-substitution / config interpolation does not compute arithmetic,
+    so it never produces the product) — unlike the cmdi ``$((N*M))`` arithmetic a benign calculator fakes.
 
     FP boundary (all → LEAD): a raw expression that survives unevaluated (reflected==sent), a product present
     in the benign control, and an arithmetic coincidence (guarded by the unique per-probe product + raw-absent
@@ -1372,13 +1453,15 @@ def ssti_redrive(url: str, *, slug: str, engagement_slug: str, signers: "list[tu
     from framework.v2.verify.adapter import FindingContext  # noqa: PLC0415
     from framework.v2.verify.oracles import evaluation_oracle  # noqa: PLC0415
 
-    bug_class = "ssti"
-    res, send, state = _stat_setup(url, slug, bug_class, _SSTI_BRANCH, timeout)
+    branch = branch or _SSTI_BRANCH
+    expr_templates = expr_templates or _SSTI_EXPR_TEMPLATES
+    params = params or _SSTI_PARAMS
+    res, send, state = _stat_setup(url, slug, bug_class, branch, timeout)
     if send is None:
         return res
     nonce = _sha(url)
     try:
-        for name in _candidate_names_hint(url, _SSTI_PARAMS, param, _MAX_CANDIDATE_NAMES):
+        for name in _candidate_names_hint(url, params, param, _MAX_CANDIDATE_NAMES):
             probe_url = _url_with_param(url, name)
             tmpl = RequestTemplate(HttpRequest(method="GET", url=probe_url))
             point = next((p for p in tmpl.insertion_points(kinds=(InsertionKind.QUERY_VALUE,))
@@ -1390,14 +1473,14 @@ def ssti_redrive(url: str, *, slug: str, engagement_slug: str, signers: "list[tu
             try:
                 control = send(tmpl.render(point, f"vigilbenign{nonce}"))
             except Exception as e:  # noqa: BLE001
-                res.notes.append(f"ssti control error [{name}]: {type(e).__name__}: {e}")
+                res.notes.append(f"{bug_class} control error [{name}]: {type(e).__name__}: {e}")
                 continue
             if state["channels"] <= before:
                 res.inconclusive.append((bug_class, f"{probe_url}#control"))
                 continue
             control_body = _body_text(control)
             fired_here = False
-            for tpl in _SSTI_EXPR_TEMPLATES:
+            for tpl in expr_templates:
                 n1 = secrets.randbelow(90000) + 10000
                 n2 = secrets.randbelow(90000) + 10000
                 product = str(n1 * n2)
@@ -1406,17 +1489,17 @@ def ssti_redrive(url: str, *, slug: str, engagement_slug: str, signers: "list[tu
                 try:
                     probe = send(tmpl.render(point, payload))
                 except Exception as e:  # noqa: BLE001
-                    res.notes.append(f"ssti probe error [{name}]: {type(e).__name__}: {e}")
+                    res.notes.append(f"{bug_class} probe error [{name}]: {type(e).__name__}: {e}")
                     continue
                 if state["channels"] <= before2:
                     res.inconclusive.append((bug_class, f"{probe_url}#{point.id}"))
                     continue
                 fc = FindingContext.from_evaluation(payload, product, _body_text(probe),
-                                                    control_body=control_body, bug_class="ssti")
+                                                    control_body=control_body, bug_class=bug_class)
                 context = fc.to_verifier_context()
                 signal = evaluation_oracle(context.get("eval_raw", ""), context.get("eval_expected", ""),
                                            context.get("eval_observed", ""), context.get("eval_control"))
-                r = _admit_one(res, branch=_SSTI_BRANCH, bug_class=bug_class,
+                r = _admit_one(res, branch=branch, bug_class=bug_class,
                                engagement_slug=engagement_slug, signers=signers, context=context,
                                item=f"{probe_url}#{point.id}", surface=f"query:{name}",
                                fired=signal.fired, conclusive=signal.conclusive,
@@ -1428,6 +1511,103 @@ def ssti_redrive(url: str, *, slug: str, engagement_slug: str, signers: "list[tu
                 break     # one FACT is decisive for a re-drive — stop (bounded work)
     except Exception as e:  # noqa: BLE001 — a probe error never fabricates a FACT; record + return what held
         res.notes.append(f"ssti_redrive error: {type(e).__name__}: {e}")
+    return res
+
+
+def _el_injection_redrive(url: str, *, slug: str, engagement_slug: str, signers: "list[tuple[str, str]]",
+                          timeout: float = 8.0) -> "RuntimeRedriveResult":
+    """EL / SpEL / OGNL expression-language injection (CWE-917) — the EL-family subset of the SOUND evaluation
+    channel. Delegates to :func:`ssti_redrive` with the EL expression templates (${N*M} / #{N*M} / %{N*M}) and
+    the el_injection class/branch: the SAME evaluation_oracle mints the FACT only when the server COMPUTED the
+    unguessable per-probe product (raw expression absent, benign control lacking it). Sound for the same reason
+    SSTI is — a server-side EXPRESSION EVALUATOR is the only producer of the product — and distinct from ssti
+    only in the class label and the EL-family templates (no Jinja ``{{ }}``)."""
+    return ssti_redrive(url, slug=slug, engagement_slug=engagement_slug, signers=signers, timeout=timeout,
+                        bug_class="el_injection", branch=_EL_BRANCH, expr_templates=_EL_EXPR_TEMPLATES,
+                        params=_EL_PARAMS)
+
+
+def cmdi_reflected_redrive(url: str, *, slug: str, engagement_slug: str, signers: "list[tuple[str, str]]",
+                           param: "str | None" = None, timeout: float = 8.0) -> "RuntimeRedriveResult":
+    """Re-drive ``url`` for IN-BAND (reflected-OUTPUT) OS command injection and mint a signed FACT ONLY when
+    ``side_effect_oracle`` confirms an UNGUESSABLE COMPUTED PRODUCT: a per-probe random ``N1*N2`` the server
+    COMPUTED (``127.0.0.1;echo $((N1*N2))`` + pipe/expr variants) is PRESENT in the FRESH response body,
+    ABSENT from the probe payload (the payload carries the expression, not its value — the anti-reflection
+    invariant), AND ABSENT from a benign ``127.0.0.1`` control on the same parameter.
+
+    WHY THE PRODUCT, NOT ``id``'s ``uid=``: a documented signature is the path_traversal ``root:x:0:0:`` trap
+    — a benign cmdi knowledge-base / search / deny page carries it correlated with the payload and a benign
+    control only catches input-INDEPENDENT emission, so it minted false FACTs at rate 1.0 (which demoted
+    path_traversal to lead-only). The product VALUE is not in the payload and is per-probe random, so a
+    benign echo/KB does not carry it; its presence attributes to EXECUTION. This is the in-band channel; the
+    blind ``;curl <callback>`` channel is the dedicated OOB seam. Never raises."""
+    import secrets  # noqa: PLC0415 — per-probe UNPREDICTABLE product (not learning/reward rng)
+
+    from framework.v2.scanner.insertion import HttpRequest, InsertionKind, RequestTemplate  # noqa: PLC0415
+    from framework.v2.verify.adapter import FindingContext  # noqa: PLC0415
+    from framework.v2.verify.oracles import side_effect_oracle  # noqa: PLC0415
+
+    bug_class = "command_injection"
+    res, send, state = _stat_setup(url, slug, bug_class, _CMDI_REFLECTED_BRANCH, timeout)
+    if send is None:
+        return res
+    try:
+        for name in _candidate_names_hint(url, _CMDI_PARAMS, param, _MAX_CANDIDATE_NAMES):
+            probe_url = _url_with_param(url, name)
+            tmpl = RequestTemplate(HttpRequest(method="GET", url=probe_url))
+            point = next((p for p in tmpl.insertion_points(kinds=(InsertionKind.QUERY_VALUE,))
+                          if p.name.lower() == name.lower()), None)
+            if point is None:
+                continue
+            # CONTROL first: a benign host; its body must NOT already carry the product.
+            before = state["channels"]
+            try:
+                control = send(tmpl.render(point, "127.0.0.1"))
+            except Exception as e:  # noqa: BLE001
+                res.notes.append(f"cmdi control error [{name}]: {type(e).__name__}: {e}")
+                continue
+            if state["channels"] <= before:
+                res.inconclusive.append((bug_class, f"{probe_url}#control"))
+                continue
+            control_body = _body_text(control)
+            fired_here = False
+            for tpl in _CMDI_PAYLOAD_TEMPLATES:
+                n1 = secrets.randbelow(90000) + 10000
+                n2 = secrets.randbelow(90000) + 10000
+                product = str(n1 * n2)
+                payload = tpl.format(n1=n1, n2=n2)
+                before2, before_bodies2 = state["channels"], state["body_unavailable"]
+                try:
+                    probe = send(tmpl.render(point, payload))
+                except Exception as e:  # noqa: BLE001
+                    res.notes.append(f"cmdi probe error [{name}]: {type(e).__name__}: {e}")
+                    continue
+                if state["channels"] <= before2:
+                    res.inconclusive.append((bug_class, f"{probe_url}#{point.id}"))
+                    continue
+                body = _body_text(probe)
+                # The product must be PRESENT in the body (the shell computed it) AND — the anti-reflection
+                # invariant — ABSENT from the payload we sent (which carries the expression, not its value),
+                # so a reflecting endpoint cannot satisfy it. A per-probe random product also keeps a KB /
+                # documentation page from carrying it.
+                if product not in body or product in payload:
+                    continue
+                fc = FindingContext.from_side_effect(product, body, bug_class=bug_class,
+                                                     control_sink=control_body)
+                context = fc.to_verifier_context()
+                signal = side_effect_oracle(product, body, control_body)
+                r = _admit_one(res, branch=_CMDI_REFLECTED_BRANCH, bug_class=bug_class,
+                               engagement_slug=engagement_slug, signers=signers, context=context,
+                               item=f"{probe_url}#{point.id}", surface=f"query:{name}",
+                               fired=signal.fired, conclusive=getattr(signal, "conclusive", False),
+                               body_unreadable=state["body_unavailable"] > before_bodies2)
+                if r.is_fact:
+                    fired_here = True
+                    break
+            if fired_here:
+                break
+    except Exception as e:  # noqa: BLE001 — a probe error never fabricates a FACT; record + return what held
+        res.notes.append(f"cmdi_reflected_redrive error: {type(e).__name__}: {e}")
     return res
 
 
@@ -1559,7 +1739,10 @@ def boolean_redrive(url: str, *, slug: str, engagement_slug: str, signers: "list
 
 
 def timing_redrive(url: str, *, slug: str, engagement_slug: str, signers: "list[tuple[str, str]]",
-                   param: "str | None" = None, timeout: float = 8.0, samples: int = 6) -> "RuntimeRedriveResult":
+                   param: "str | None" = None, timeout: float = 8.0, samples: int = 6,
+                   bug_class: str = "time_based_sqli", branch: "str | None" = None,
+                   sleep_templates: "tuple[str, ...] | None" = None,
+                   params: "tuple[str, ...] | None" = None) -> "RuntimeRedriveResult":
     """Re-drive ``url`` for TIME-BASED blind injection and mint a signed FACT ONLY when the deterministic
     ``timing_oracle`` confirms a delay: a Mann-Whitney U rejection, a Hodges-Lehmann median shift clearing the
     effect-size floor, AND a dose-response that SCALES with the injected delay (a low + a high SLEEP dose).
@@ -1573,8 +1756,15 @@ def timing_redrive(url: str, *, slug: str, engagement_slug: str, signers: "list[
     from framework.v2.scanner.insertion import HttpRequest, InsertionKind, RequestTemplate  # noqa: PLC0415
     from framework.v2.verify.oracles import timing_oracle  # noqa: PLC0415
 
-    bug_class = "time_based_sqli"
-    res, send, state = _stat_setup(url, slug, bug_class, _TIMING_BRANCH, timeout)
+    # Class-agnostic: time_based_sqli (SQL sleep) and time_based_command_injection (shell sleep) share the
+    # SAME sound dose-response ``timing_oracle``; only the sleep templates + the class/branch label differ.
+    # A benign calculator/reflector/KB cannot reproduce a latency that SCALES with the injected sleep, so
+    # this is the sound in-band cmdi FACT (unlike the in-band computed-product side_effect, which a
+    # calculator fakes).
+    branch = branch or _TIMING_BRANCH
+    sleep_templates = sleep_templates or _TIMING_SLEEP_TEMPLATES
+    params = params or _TIMING_PARAMS
+    res, send, state = _stat_setup(url, slug, bug_class, branch, timeout)
     if send is None:
         return res
     low_ms, high_ms = _TIMING_LOW_S * 1000.0, _TIMING_HIGH_S * 1000.0
@@ -1582,7 +1772,7 @@ def timing_redrive(url: str, *, slug: str, engagement_slug: str, signers: "list[
     # the expensive timing arm); a captureless finding with no declared param falls back to the candidate set.
     max_params = 1 if param else _STAT_MAX_PARAMS
     try:
-        for name in _candidate_names_hint(url, _TIMING_PARAMS, param, max_params):
+        for name in _candidate_names_hint(url, params, param, max_params):
             probe_url = _url_with_param(url, name)
             tmpl = RequestTemplate(HttpRequest(method="GET", url=probe_url))
             point = next((p for p in tmpl.insertion_points(kinds=(InsertionKind.QUERY_VALUE,))
@@ -1590,10 +1780,10 @@ def timing_redrive(url: str, *, slug: str, engagement_slug: str, signers: "list[
             if point is None:
                 continue
             fired_here = False
-            for tpl in _TIMING_SLEEP_TEMPLATES:
+            for tpl in sleep_templates:
                 low = tpl.format(s=_TIMING_LOW_S)
                 high = tpl.format(s=_TIMING_HIGH_S)
-                chk = TimingCheck(id="timing-redrive", bug_class="time_based_sqli",
+                chk = TimingCheck(id="timing-redrive", bug_class=bug_class,
                                   benign=f"vigilbenign{_sha(name)}", sleep_payload=low, injected_ms=low_ms,
                                   samples=samples, dose_payload=high, dose_ms=high_ms)
                 before = state["channels"]
@@ -1613,7 +1803,7 @@ def timing_redrive(url: str, *, slug: str, engagement_slug: str, signers: "list[
                                        dose=context.get("timing_dose"))
                 # Timing is service-response (latency) derived, not body-derived — body readability is
                 # irrelevant to this branch, so it never gates the admission.
-                r = _admit_one(res, branch=_TIMING_BRANCH, bug_class=bug_class,
+                r = _admit_one(res, branch=branch, bug_class=bug_class,
                                engagement_slug=engagement_slug, signers=signers, context=context,
                                item=f"{probe_url}#{point.id}", surface=f"query:{name}",
                                fired=signal.fired, conclusive=signal.conclusive, body_unreadable=False)
@@ -1625,6 +1815,17 @@ def timing_redrive(url: str, *, slug: str, engagement_slug: str, signers: "list[
     except Exception as e:  # noqa: BLE001 — a probe error never fabricates a FACT; record + return what held
         res.notes.append(f"timing_redrive error: {type(e).__name__}: {e}")
     return res
+
+
+def _cmdi_timing_redrive(url: str, *, slug: str, engagement_slug: str, signers: "list[tuple[str, str]]",
+                         timeout: float = 8.0) -> "RuntimeRedriveResult":
+    """IN-BAND command injection via the shared dose-response ``timing_redrive`` arm with SHELL-sleep
+    payloads (``;sleep {s}`` + pipe/subshell/backtick) and the command-sink parameter set. The SOUND cmdi
+    FACT: only shell execution delays the response and the delay must SCALE with the injected sleep, which a
+    benign calculator/reflector/KB cannot reproduce (unlike the in-band computed-product side_effect)."""
+    return timing_redrive(url, slug=slug, engagement_slug=engagement_slug, signers=signers, timeout=timeout,
+                          bug_class="time_based_command_injection", branch=_CMDI_TIMING_BRANCH,
+                          sleep_templates=_CMDI_SLEEP_TEMPLATES, params=_CMDI_PARAMS)
 
 
 def injection_redrive(url: str, *, slug: str, engagement_slug: str, signers: "list[tuple[str, str]]",

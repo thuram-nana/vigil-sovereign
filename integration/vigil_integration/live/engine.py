@@ -832,6 +832,19 @@ class VigilEngine:
             full = target if "://" in target else "http://" + target
             return {"kind": "web", "url": full, "bug_class": bug_class}
 
+        # CSP-POSTURE passive re-drive (csp_posture): a PASSIVE header-posture class (one gated GET + a parse of
+        # the retained enforced CSP header), NOT a canary injection — so it is its OWN spec kind + dispatch set,
+        # distinct from the WEB_FACT canary classes above. The seam (wiring._live_csp_redrive_fact) needs only
+        # the URL. normalize_bug_class already folds the CSP spellings (content_security_policy / csp_weakness /
+        # csp_misconfiguration / permissive_csp) onto csp_posture.
+        try:
+            from .web_redrive import CSP_REDRIVE_CLASSES  # noqa: PLC0415 — import-clean tuple (FATAL-2)
+        except Exception:  # noqa: BLE001 — module unavailable ⇒ no csp re-drive (other paths work)
+            CSP_REDRIVE_CLASSES = ()
+        if bug_class in CSP_REDRIVE_CLASSES:
+            full = target if "://" in target else "http://" + target
+            return {"kind": "csp", "url": full, "bug_class": bug_class}
+
         # RUNTIME response-derived classes (path_traversal / reflected xss / exposure / ssi + the W2
         # statistical/eval injection classes ssti / boolean_sqli / time_based_sqli): the runner-owned
         # runtime_redrive engine needs only the URL (it crafts the probe + runs the matching oracle, and for
@@ -896,6 +909,71 @@ class VigilEngine:
         if bug_class in OOB_REDRIVE_CLASSES:
             full = target if "://" in target else "http://" + target
             return {"kind": "oob", "url": full, "bug_class": bug_class}
+
+        # ACCESS-CONTROL re-drive (idor / bola / bfla / mass_assignment): the two-identity achieved-state
+        # ceremony adjudicated by the predicate oracle over VIGIL's OWN gated cross-read capture. The TWO
+        # owner-attested identities (victim + attacker + unauth header bundles), the owner-signed victim-unique
+        # discriminator / cross-specs, and the 0.3-gated mass-assignment write (mutating_send) are NEVER
+        # model-derived, and this router's ONLY inputs are LLM-derived (tool args + the LLM's analysis), so it
+        # emits the class + url ONLY (the triple-lock: the router emits no identity material). The material is
+        # threaded to the arm by the dedicated wiring._live_access_control_redrive_fact seam from a TRUSTED
+        # channel (EngineConfig deployment secret + the owner-signed authority), and the arm + oracle REFUSE
+        # without a distinct attacker identity / the unauthorized-authenticated same-shape baseline / a
+        # victim-unique ref-independent discriminator, so on the LLM-claim path this is fail-closed (no
+        # material, no FACT). ADDITIVE: a separate dispatch set + the "access_control" spec kind, so the
+        # arms above are untouched and make gate stays byte-identical. The seam re-normalizes + re-gates.
+        try:
+            from .access_control_redrive import ACCESS_CONTROL_FACT_CLASSES  # noqa: PLC0415 — tuple (FATAL-2)
+        except Exception:  # noqa: BLE001 — module unavailable ⇒ no access-control re-drive (other paths work)
+            ACCESS_CONTROL_FACT_CLASSES = ()
+        if bug_class in ACCESS_CONTROL_FACT_CLASSES:
+            full = target if "://" in target else "http://" + target
+            return {"kind": "access_control", "url": full, "bug_class": bug_class}
+
+        # WORKFLOW re-drive (request_race / business_logic): the owner-signed-WorkflowSpec ceremony adjudicated
+        # by workflow_abuse_oracle over VIGIL's OWN capture (a COUNT-based limit-overrun burst / a tamper write
+        # whose danger predicate the oracle evaluates over the read_state post-state). The owner-signed
+        # WorkflowSpec + the perform/read_state/mutating_send descriptors are MANDATORY and arrive ONLY via the
+        # dedicated wiring._live_race_bizlogic_redrive_fact seam from a TRUSTED channel (never the model); the
+        # arm REFUSES without a valid owner signature (owner_signed_spec False ⇒ every class INCONCLUSIVE). This
+        # router emits class + url ONLY (the triple-lock). ADDITIVE: a separate dispatch set + the "workflow"
+        # spec kind, so the arms above are untouched and make gate stays byte-identical.
+        try:
+            from .race_bizlogic_redrive import RACE_BIZLOGIC_FACT_CLASSES  # noqa: PLC0415 — tuple (FATAL-2)
+        except Exception:  # noqa: BLE001 — module unavailable ⇒ no workflow re-drive (other paths work)
+            RACE_BIZLOGIC_FACT_CLASSES = ()
+        if bug_class in RACE_BIZLOGIC_FACT_CLASSES:
+            full = target if "://" in target else "http://" + target
+            return {"kind": "workflow", "url": full, "bug_class": bug_class}
+
+        # PASSWORD-RESET invariant re-drive (password_reset_reuse / _collision / _cross_user): the
+        # password_reset_invariant_oracle (private-read reduction / predictable-counter proof) /
+        # cross-user same-shape private-read differential over VIGIL's OWN capture. The reset-flow driver
+        # callables + the operator private-datum baseline + the two-identity cross-read material are MANDATORY
+        # and arrive ONLY via the dedicated wiring._live_reset_invariant_redrive_fact seam from a TRUSTED
+        # channel (never the model). This router emits class + url ONLY (the triple-lock). ADDITIVE: a separate
+        # dispatch set + the "reset" spec kind, so the arms above are untouched.
+        try:
+            from .reset_invariant_redrive import RESET_INVARIANT_FACT_CLASSES  # noqa: PLC0415 — tuple (FATAL-2)
+        except Exception:  # noqa: BLE001 — module unavailable ⇒ no reset re-drive (other paths work)
+            RESET_INVARIANT_FACT_CLASSES = ()
+        if bug_class in RESET_INVARIANT_FACT_CLASSES:
+            full = target if "://" in target else "http://" + target
+            return {"kind": "reset", "url": full, "bug_class": bug_class}
+
+        # DOM ACHIEVED-STATE classes (dom_xss / prototype_pollution): the runner-owned browser arms
+        # (live.dom_redrive) craft VIGIL's OWN canary/gadget and judge VIGIL's OWN egress-gated headless-DOM
+        # capture — the model proposes only url + param. ADDITIVE: a separate dispatch set + the "dom" spec
+        # kind, so the runtime/web/sqli/injection/credential/oob arms above are untouched. The seam re-normalizes
+        # + re-gates (reachability gate before any browser launch), so this is proposal-triage only.
+        try:
+            from .dom_redrive import DOM_REDRIVE_CLASSES  # noqa: PLC0415 — import-clean tuple (FATAL-2)
+        except Exception:  # noqa: BLE001 — module unavailable ⇒ no dom re-drive (other paths work)
+            DOM_REDRIVE_CLASSES = ()
+        if bug_class in DOM_REDRIVE_CLASSES:
+            full = target if "://" in target else "http://" + target
+            param = str(info.get("insertion_point") or octx.get("payload_param") or "").strip() or None
+            return {"kind": "dom", "url": full, "param": param, "bug_class": bug_class}
 
         # error_signature SQLi FAMILY (landmine 1): MERIDIAN labels its error-based plant `sqli`, and the
         # model may say `sqli`/`sql_injection`/`error_based_sqli`. Accept them all — the error_signature
