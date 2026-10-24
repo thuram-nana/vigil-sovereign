@@ -113,31 +113,41 @@ def _compose_verdict_sinks(*sinks):
     return fan
 
 
+def _gateway_snapshot(httpd: object) -> dict:
+    """The gateway's EFFECTIVE mode + per-actor beliefs — the one honest snapshot shared by the
+    --status-out writer and the self-registration (registry) writer. Reads the ActorGraph under the
+    belief lock (consistent). The HONEST enforce snapshot carries downgraded/downgrade_reason so the
+    console renders a 'requested enforce, running observe BECAUSE …' state, never a silent read-only mode."""
+    from .response_policy import graduated_action
+    s = httpd.settings  # type: ignore[attr-defined]
+    with s._belief_lock:
+        actors = [{"id": aid, "mean": b.mean, "lcb": b.lcb, "n": b.n_observations,
+                   "action": graduated_action(b)} for aid, b in s.actor_graph.snapshot()]
+    es = s.enforcement_status() if hasattr(s, "enforcement_status") else {}
+    return {"ts": time.time(),
+            "effective_mode": es.get("effective_mode", "enforce" if s.enforce else "observe"),
+            "requested_mode": es.get("requested_mode",
+                                     s.intended_mode() if hasattr(s, "intended_mode") else s.config.mode),
+            "enforcement": es,
+            "slug": getattr(s, "slug", ""),
+            "actors": actors, "actor_count": len(actors)}
+
+
+def _atomic_write_json(path: str, obj: dict) -> None:
+    """0600, O_TRUNC JSON write — the --status-out snapshot and the gateway self-registration record."""
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        fh.write(json.dumps(obj, ensure_ascii=False))
+
+
 def _start_status_writer(httpd: object, path: str, *, interval: float = 2.0) -> threading.Event:
     """A daemon thread snapshotting the gateway's EFFECTIVE mode + per-actor beliefs to ``path`` (0600)
-    as JSON, so the loopback console (a SEPARATE process) can render a live Defense status. Reads the
-    ActorGraph under the gateway's belief lock (consistent). Telemetry-only; all errors swallowed."""
-    from .response_policy import graduated_action
+    as JSON, so the loopback console (a SEPARATE process) can render a live Defense status.
+    Telemetry-only; all errors swallowed."""
     stop = threading.Event()
 
     def _write_once() -> None:
-        s = httpd.settings  # type: ignore[attr-defined]
-        with s._belief_lock:
-            actors = [{"id": aid, "mean": b.mean, "lcb": b.lcb, "n": b.n_observations,
-                       "action": graduated_action(b)} for aid, b in s.actor_graph.snapshot()]
-        # The HONEST enforce snapshot — carries downgraded/downgrade_reason so the console can render a
-        # "requested enforce, running observe BECAUSE …" state instead of a silent read-only mode.
-        es = s.enforcement_status() if hasattr(s, "enforcement_status") else {}
-        snap = {"ts": time.time(),
-                "effective_mode": es.get("effective_mode", "enforce" if s.enforce else "observe"),
-                "requested_mode": es.get("requested_mode",
-                                         s.intended_mode() if hasattr(s, "intended_mode") else s.config.mode),
-                "enforcement": es,
-                "slug": getattr(s, "slug", ""),
-                "actors": actors, "actor_count": len(actors)}
-        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            fh.write(json.dumps(snap, ensure_ascii=False))
+        _atomic_write_json(path, _gateway_snapshot(httpd))
 
     def _loop() -> None:
         while not stop.wait(interval):
@@ -152,6 +162,44 @@ def _start_status_writer(httpd: object, path: str, *, interval: float = 2.0) -> 
         pass
     threading.Thread(target=_loop, daemon=True).start()
     return stop
+
+
+def _start_registry_writer(httpd: object, meta: dict,
+                           *, interval: float = 2.0) -> "tuple[threading.Event, str] | None":
+    """SELF-REGISTER this gateway so the console DISCOVERS + tracks it regardless of who launched it (UI,
+    CLI, or cron) — the gap that otherwise makes a CLI/cron gateway invisible to the Defense screen. Writes
+    a per-slug record (the ``meta`` identity + a live snapshot) to the shared registry dir, refreshed every
+    ``interval``s; the caller removes it on clean shutdown and the console prunes it by dead-pid. Returns
+    (stop_event, path), or None if the registry path cannot be resolved. Telemetry-only; errors swallowed."""
+    try:
+        from ..common import paths as _paths
+        # SECURITY: create the trust-root + registry dir OWNER-ONLY (0700) — a plain mkdir would create
+        # .authority at the ambient umask (group-writable 0775 on a umask-0002 host), exposing the whole
+        # slug-keyed control plane (kill-switch/mode/authority) to a group peer. ensure_authority_dir_secure
+        # also tightens a pre-existing loose .authority.
+        _paths.ensure_authority_dir_secure()
+        _paths.secure_dir(_paths.aegis_registry_dir())
+        reg_path = str(_paths.aegis_registry_path(meta.get("slug", "")))
+    except Exception:  # noqa: BLE001
+        return None
+    stop = threading.Event()
+
+    def _write_once() -> None:
+        _atomic_write_json(reg_path, {**meta, **_gateway_snapshot(httpd)})
+
+    def _loop() -> None:
+        while not stop.wait(interval):
+            try:
+                _write_once()
+            except Exception:  # noqa: BLE001
+                pass
+
+    try:
+        _write_once()
+    except Exception:  # noqa: BLE001
+        pass
+    threading.Thread(target=_loop, daemon=True).start()
+    return stop, reg_path
 
 
 def _cmd_detect(args: argparse.Namespace) -> int:
@@ -196,10 +244,15 @@ def _cmd_gateway(args: argparse.Namespace) -> int:
         honeypots = [h for h in _hp_env.split("\n") if h]
     verdict_webhook = os.environ.get("AEGIS_GW_VERDICT_WEBHOOK") or args.verdict_webhook
     verdict_sink = os.environ.get("AEGIS_GW_VERDICT_SINK") or args.verdict_sink
+    # The canary is a SECRET (the sentinel the app also plants in its LLM system prompt) — prefer the
+    # env (AEGIS_GW_CANARY) over argv so it is not exposed on /proc/<pid>/cmdline; --canary is the
+    # explicit fallback for a hand-run gateway. A weak canary is rejected at AegisConfig construction.
+    canary = os.environ.get("AEGIS_GW_CANARY") or args.canary
 
     config = AegisConfig(deployment_secret=secret, mode=mode,
                          honeypot_paths=honeypots,
-                         oob_canary=args.oob_canary)
+                         oob_canary=args.oob_canary,
+                         canary=canary)
 
     def _log_verdict(v: object) -> None:
         try:
@@ -218,6 +271,18 @@ def _cmd_gateway(args: argparse.Namespace) -> int:
     httpd = serve_gateway(upstream, config=config, host=host, port=port,
                           slug=slug, on_verdict=on_verdict)
     status_stop = _start_status_writer(httpd, args.status_out) if args.status_out else None
+    # SELF-REGISTER so the console's Defense screen tracks EVERY gateway — UI-, CLI-, or cron-launched,
+    # observe or enforce. The record carries the live snapshot; the console prunes it when the pid dies.
+    _reg_meta = {
+        "schema": 1, "slug": slug, "pid": os.getpid(), "host": host, "port": port,
+        "upstream": upstream, "requested_mode": mode,
+        "launched_by": (os.environ.get("AEGIS_GW_LAUNCHED_BY") or "cli"),
+        "verdicts_file": args.verdicts_out or None,
+        "status_file": args.status_out or None,
+        "started": time.time(),
+    }
+    _reg = _start_registry_writer(httpd, _reg_meta)
+    reg_stop, reg_path = _reg if _reg else (None, None)
     # Read the EFFECTIVE gate state from the one honest source (never infer from the requested mode alone) so
     # a downgrade is reported with its real reason (entitlement and/or kill-switch), never silently. Guard the
     # call (hasattr) like the status writer does, so a minimal settings stub still runs.
@@ -238,6 +303,10 @@ def _cmd_gateway(args: argparse.Namespace) -> int:
     elif args.oob_canary:
         sys.stderr.write("  passive OOB belief elevation requested but DORMANT "
                          "(AEGIS_RESPOND entitlement not available)\n")
+    if config.canary:
+        sys.stderr.write("  prompt-injection canary-disclosure block ON — a proxied LLM response that "
+                         "leaks the planted sentinel VERBATIM is blocked (system_prompt_disclosure); "
+                         "AEGIS never injects the canary\n")
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:
@@ -245,6 +314,12 @@ def _cmd_gateway(args: argparse.Namespace) -> int:
     finally:
         if status_stop is not None:
             status_stop.set()       # stop the status snapshot thread
+        if reg_stop is not None:
+            reg_stop.set()          # stop the registry refresh thread
+            try:
+                os.unlink(reg_path)  # DEREGISTER on clean shutdown (the console also prunes by dead-pid)
+            except OSError:
+                pass
         httpd.settings.stop_oob()   # clean shutdown of the loopback OOB receiver
         httpd.server_close()
     return 0
@@ -317,6 +392,17 @@ def main(argv: list[str] | None = None) -> int:
                         "hit on the canary that correlates to an actor's SSRF/XXE payload ELEVATES that "
                         "actor's belief toward the graduated challenge/throttle, NEVER a block. Needs "
                         "the AEGIS_RESPOND entitlement; the reverse tunnel is your charter responsibility")
+    g.add_argument("--canary", default=None, metavar="SENTINEL",
+                   help="OPT-IN prompt-injection / system-prompt DISCLOSURE block: a SECRET, high-entropy "
+                        "sentinel you ALSO plant in your LLM's system prompt / hidden context (out of band). "
+                        "AEGIS scans each proxied LLM RESPONSE and BLOCKS (confirmed system_prompt_disclosure "
+                        "+ re-runnable certificate) when the sentinel appears VERBATIM — proof the hidden "
+                        "context leaked. AEGIS NEVER injects it; a canary echoed from the client's own request "
+                        "is suppressed (reflection). Prefer AEGIS_GW_CANARY (env) so the secret is not exposed "
+                        "on /proc/<pid>/cmdline. MUST be UNPREDICTABLE and randomly generated — the near-zero-FP "
+                        "property holds only then; a predictable canary can false-block. Generate one with: "
+                        "python3 -c \"import secrets; print('AEGIS-'+secrets.token_urlsafe(18))\". The floor "
+                        "rejects only obvious degeneracy (short / whitespace / sequential). Blocks only under --mode enforce.")
     g.set_defaults(func=_cmd_gateway)
 
     demo = sub.add_parser("demo", help="run the class-1 canary-disclosure flow end-to-end")

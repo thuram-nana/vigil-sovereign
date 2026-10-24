@@ -255,7 +255,7 @@ def test_the_aegis_verdicts_stream_is_a_pure_tail(monkeypatch, tmp_path):
     with verdicts.open("w", encoding="utf-8") as f:
         for i in range(3):
             f.write(json.dumps({"verdict": "allow", "n": i}) + "\n")
-    monkeypatch.setattr(actions, "aegis_verdicts_path", lambda: str(verdicts))
+    monkeypatch.setattr(actions, "aegis_verdicts_path", lambda slug=None: str(verdicts))
     with _serve(monkeypatch, tmp_path) as base:
         evs, ids = _read_events(f"{base}/api/aegis/verdicts?from_start=1",
                                 last_event_id=1, want=1, timeout=2.0)
