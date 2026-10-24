@@ -1,17 +1,20 @@
 """
-scanner.browser — dynamic DOM-XSS confirmation via a headless browser.
+scanner.browser — headless-browser DOM rendering primitives.
 
 Static analysis (``scanner.domxss``) finds source→sink *candidates*; only a real
-DOM can prove one *fires*. This module drives headless Chromium/Chrome to render a
-page with an injected payload and confirms execution by observing the browser's
-post-JavaScript DOM — the dynamic half `domxss` deliberately left to a browser.
+DOM shows what actually renders after JavaScript runs. This module drives headless
+Chromium/Chrome and returns the post-JavaScript DOM (``render_dom``), plus the
+helpers to locate a usable browser (``find_browser``, ``browser_usable``) and the
+shared offline launch flags (``OFFLINE_CHROME_FLAGS``). It is the dynamic
+cross-check input for the static ``scanner.domxss`` candidates.
 
-The confirmation distinguishes execution from mere reflection: the payload is an
-``<img onerror>`` whose handler sets a unique attribute on ``<body>``. The raw
-payload text always appears in the DOM (reflected); the *rendered attribute*
-(``data-<marker>="FIRED"``) appears **only if the handler ran**. The side-effect
-oracle looks for that rendered attribute — so a page that puts input in
-``textContent`` (safe) does not fire.
+This module does NOT confirm DOM-XSS. A marker found in the rendered DOM is
+substring detection — the exact false positive the ``DOM_EXECUTION`` oracle exists
+to refuse (``dom_xss`` maps to ``DOM_EXECUTION`` only; the side-effect oracle is
+never consulted for it). Proven DOM-XSS *execution* is confirmed by
+``scanner.browser_xss``: an injected payload calls a unique CDP binding carrying a
+per-probe canary — unforgeable proof the script ran — adjudicated by the
+``DOM_EXECUTION`` oracle.
 
 Uses only stdlib ``subprocess`` + a Chromium/Chrome binary already on the host; no
 CDP client, no npm, no Python browser SDK. If no browser is present, every entry
@@ -24,10 +27,6 @@ from __future__ import annotations
 import shutil
 import subprocess
 import tempfile
-import urllib.parse
-
-from ..verify.confirmation import ConfirmedFinding, confirm_finding
-from ..verify.adapter import FindingContext
 
 _BROWSERS = ("chromium", "chromium-browser", "google-chrome-stable", "google-chrome", "chrome")
 
@@ -145,50 +144,3 @@ def render_dom(
         except (subprocess.TimeoutExpired, OSError):
             return None
     return result.stdout or None
-
-
-def scan_dom_xss(
-    base_url: str,
-    *,
-    inject: str = "fragment",
-    param: str | None = None,
-    browser: str | None = None,
-    token: str = "c1",
-    timeout: float = 25.0,
-) -> ConfirmedFinding | None:
-    """Confirm DOM-XSS at ``base_url`` by injecting an execution-marker payload
-    (into the URL ``fragment`` or a query ``param``), rendering in a real browser,
-    and firing the side-effect oracle iff the handler's rendered attribute appears
-    in the post-JS DOM. Returns the ConfirmedFinding, or None (not vulnerable / no
-    browser)."""
-    exe = browser or find_browser()
-    if exe is None:
-        return None
-
-    marker = f"cruciblexss{token}"
-    payload = f"<img src=x onerror=\"document.body.setAttribute('data-{marker}','FIRED')\">"
-    encoded = urllib.parse.quote(payload, safe="")
-    if inject == "fragment":
-        url = f"{base_url}#{encoded}"
-    else:
-        if not param:
-            raise ValueError("param is required when inject != 'fragment'")
-        sep = "&" if "?" in base_url else "?"
-        url = f"{base_url}{sep}{param}={encoded}"
-
-    dom = render_dom(url, browser=exe, timeout=timeout)
-    if dom is None:
-        return None
-
-    exec_marker = f'data-{marker}="FIRED"'  # the RENDERED attribute — proof of execution
-    ctx = FindingContext.from_side_effect(exec_marker, dom, bug_class="dom_xss")
-    return confirm_finding(
-        {
-            "bug_class": "dom_xss",
-            "title": "DOM-based XSS (dynamic, browser-confirmed)",
-            "severity": "High",
-            "surface": f"{inject}:{param or 'location.hash'}",
-            "summary": "an injected payload executed in a real browser DOM",
-        },
-        ctx,
-    )
