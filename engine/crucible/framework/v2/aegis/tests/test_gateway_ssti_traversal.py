@@ -173,14 +173,37 @@ def test_ssti_benign_template_variable_is_not_a_candidate(vuln_upstream):
 
 # --------------------------------------------------------------------------- path traversal (1b)
 
-def test_path_traversal_etc_passwd_is_blocked_with_certificate(vuln_upstream):
+def test_path_traversal_leak_in_response_is_blocked_with_certificate(vuln_upstream):
+    """RESPONSE-side leak proof: the request walks a `../` path the request-side allowlist does NOT
+    name (`../../../../private/export` — not a known-sensitive literal, so the request-side
+    `path_traversal_attempt` oracle stays silent and the request is forwarded), the vulnerable app
+    leaks the passwd file anyway, and `inspect_response` blocks on the `/etc/passwd` root-line
+    signature. This keeps the two layers complementary: the request-side parse-proof pre-empts the
+    OBVIOUS traversal-to-sensitive-file (see test_path_traversal_block.py), while this response-side
+    leak-proof still catches a traversal whose requested name the allowlist did not anticipate."""
+    sink: list[Verdict] = []
+    gw, port = _gateway(vuln_upstream, mode="enforce", sink=sink)
+    try:
+        with pytest.raises(urllib.error.HTTPError) as ei:
+            _hit(port, "file=" + _Q("../../../../private/export"))
+        assert ei.value.code == 403 and ei.value.headers.get("X-Aegis-Block") == "path_traversal"
+        v = next(v for v in sink if v.decision == "confirmed" and v.attack_class == "path_traversal")
+        assert v.certificate is not None and v.certificate.reverify() is True
+    finally:
+        gw.shutdown()
+
+
+def test_path_traversal_to_etc_passwd_is_pre_empted_request_side(vuln_upstream):
+    """The OBVIOUS traversal-to-sensitive-file (`../../../../etc/passwd`) is now caught on the REQUEST
+    side — it never reaches the vulnerable upstream — so the block class is the request-side
+    `path_traversal_attempt` (earlier + strictly safer than waiting for the file to leak)."""
     sink: list[Verdict] = []
     gw, port = _gateway(vuln_upstream, mode="enforce", sink=sink)
     try:
         with pytest.raises(urllib.error.HTTPError) as ei:
             _hit(port, "file=" + _Q("../../../../etc/passwd"))
-        assert ei.value.code == 403 and ei.value.headers.get("X-Aegis-Block") == "path_traversal"
-        v = next(v for v in sink if v.decision == "confirmed" and v.attack_class == "path_traversal")
+        assert ei.value.code == 403 and ei.value.headers.get("X-Aegis-Block") == "path_traversal_attempt"
+        v = next(v for v in sink if v.decision == "confirmed" and v.attack_class == "path_traversal_attempt")
         assert v.certificate is not None and v.certificate.reverify() is True
     finally:
         gw.shutdown()

@@ -25,21 +25,23 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # checker. Override the jar entirely with TLA2TOOLS_JAR for offline/air-gapped runs.
 #
 # NOTE: GitHub RELEASE ASSETS are mutable — the tlaplus maintainers re-upload the
-# v1.8.0 tla2tools.jar in place. This has now happened three times, each time correctly
+# v1.8.0 tla2tools.jar in place. This has now happened four times, each time correctly
 # tripping this pin (fail-closed) rather than silently model-checking against a
 # different checker:
 #   * 2026-08-11 -> sha256 ab323b79… (re-verified, pinned)
 #   * 2026-08-21 -> sha256 eabd140a… (re-verified, pinned)
-#   * 2026-09-17 -> sha256 9d36716f… (re-verified, pinned — CURRENT)
+#   * 2026-09-17 -> sha256 9d36716f… (re-verified, pinned)
+#   * 2026-10-24 -> sha256 d15655ee… (re-verified, pinned — CURRENT)
 # The current bytes were re-verified authentic before re-pinning: fetched over TLS
-# from the official tlaplus/tlaplus v1.8.0 release; a valid JAR whose MANIFEST reads
-# "Main-Class: tlc2.TLC / Implementation-Version: 2.0 2026-09-17", containing
-# tlc2/TLC.class (54833 bytes) + tla2sany + pcal; AND functionally confirmed by running
-# THIS script's four faithful specs (all hold) + four mutants (all caught) against it
-# with TLC2 Version 2026.09.17 — a tampered jar could not produce the correct TLC
-# counterexamples. If it drifts again the gate fails loudly for a fresh re-verification.
+# from the official tlaplus/tlaplus v1.8.0 release; its sha256 matches the digest GitHub
+# itself recorded for the asset server-side (an independent attestation of the stored
+# bytes); a valid JAR containing tlc2/TLC.class + tla2sany + pcal that runs as
+# "TLC2 Version 2026.10.24.013619 (rev: 2ef2af8)"; AND functionally confirmed by running
+# THIS script's four faithful specs (all hold) + four mutants (all caught) against it —
+# a tampered jar could not produce the correct TLC counterexamples. If it drifts again
+# the gate fails loudly for a fresh re-verification.
 TLA_URL="${TLA2TOOLS_URL:-https://github.com/tlaplus/tlaplus/releases/download/v1.8.0/tla2tools.jar}"
-TLA_SHA256="9d36716ffb5e49d1ba8fae4651eba59f3189887e12eb90e204a42d2e6e993fef"
+TLA_SHA256="d15655eeaff4b3f7b3d65c46b838bc0f35d131b2ef4b1e473689b62c98d4726f"
 CACHE="${TLA2TOOLS_CACHE:-$HERE/.tla2tools.jar}"
 
 resolve_jar() {
