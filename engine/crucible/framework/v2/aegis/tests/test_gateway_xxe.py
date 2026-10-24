@@ -1,20 +1,28 @@
 """
-AEGIS Gateway — in-band XXE stays a LEAD (never a block).
+AEGIS Gateway — XXE: the request-side ATTEMPT BLOCKS; the RESPONSE-side leak-proof never blocks.
 
-The adversarial review proved a single inline request/response exchange cannot CAUSALLY prove XXE:
-a `/etc/passwd` root line in the response can be REFLECTED user content (a security-KB / paste /
-code-review / Q&A page that documents an XXE example and echoes a sample root line), not a file the
-app read — and once the DTD is HTML-escaped in the response, a whole-body not-reflected guard passes
-on that benign echo, so the block false-positives on benign content and its "confirmed" certificate
-overclaims file disclosure. So — like blind/OOB XXE and ALL SSRF — in-band XXE is emitted only as a
-request-side LEAD (belief-raising, forwarded, never a block). Its only sound block-path is the OOB
-callback oracle (roadmap). These tests pin:
+Two distinct, complementary layers — do not conflate them:
 
-  * an in-band XXE file-disclosure is FORWARDED, never blocked (no false block, no overclaiming cert);
-  * an XXE request body is emitted as a request-side LEAD verdict (observe, no certificate);
-  * the exact review false positive (a code-review comment echoing an XXE example + a passwd line)
-    is FORWARDED;
-  * `inspect_response` never returns an xxe block for ANY input.
+  * REQUEST side (``inspect_request`` -> ``xxe_attempt``): a request BODY declaring a COMPLETE external
+    (SYSTEM/PUBLIC) entity is an UNAMBIGUOUS XXE ATTEMPT — the request-side sibling of
+    ``path_traversal_attempt`` — and is now a real inline BLOCK (403 + re-runnable certificate). It proves
+    an ATTEMPT (the body declares an external entity), NEVER exploitation / file disclosure. Fired/benign
+    corpus + certificate + 403 e2e live in ``test_ssrf_xxe_block.py``; a couple of e2e cases are pinned here
+    too. (A general entity-free / internal-entity-only / truncated body does NOT block; a truncated external
+    entity stays the LEAD — see ``test_ssrf_xxe_leads.py``.)
+
+  * RESPONSE side (``inspect_response``): the adversarial review proved a single inline exchange cannot
+    CAUSALLY prove XXE EXPLOITATION — a `/etc/passwd` root line in the response can be REFLECTED user content
+    (a security-KB / paste / code-review / Q&A page that documents an XXE example and echoes a sample root
+    line), not a file the app read. So ``inspect_response`` NEVER returns an xxe block, for the real leak or
+    for the review FP twin. THIS THESIS IS UNCHANGED by the request-side block (which proves the attempt, not
+    the leak) and is still pinned below by the direct ``inspect_response`` unit tests.
+
+These tests pin:
+  * an external-entity (file-read or blind) XXE REQUEST is BLOCKED request-side (403 + cert), so the upstream
+    leak never happens;
+  * an ordinary entity-free XML request is FORWARDED;
+  * `inspect_response` never returns an xxe block for ANY input (incl. the exact code-review-comment review FP).
 """
 
 from __future__ import annotations
@@ -114,32 +122,41 @@ def _post(port: int, body: str):
 
 # --------------------------------------------------------------------------- end-to-end (enforce)
 
-def test_inband_xxe_file_disclosure_is_forwarded_not_blocked(xxe_upstream):
-    """CORE: even an in-band XXE file-disclosure is FORWARDED, never blocked — a single inline exchange
-    cannot causally prove it, so blocking would false-positive on reflected content. The response is
-    relayed untouched and NO xxe block verdict is emitted."""
+def test_inband_xxe_file_disclosure_request_is_blocked_request_side(xxe_upstream):
+    """CORE: the external-entity REQUEST is now BLOCKED request-side (403 + re-runnable cert) as an
+    unambiguous XXE ATTEMPT — it never reaches the vulnerable upstream, so the file-disclosure leak never
+    happens. The block proves the ATTEMPT (the body declares an external entity), NOT the leak (the
+    response-side leak-proof — which could FP on reflected content — is deliberately never used to block)."""
     sink: list[Verdict] = []
     gw, port = _gateway(xxe_upstream, mode="enforce", sink=sink)
     try:
-        body = _post(port, _XXE_FILE).read().decode()   # 200, relayed (would raise on a 403 block)
-        assert "root:x:0:0:" in body
-        assert not any(v.decision == "confirmed" and v.attack_class == "xxe" for v in sink)
+        with pytest.raises(urllib.error.HTTPError) as ei:
+            _post(port, _XXE_FILE)
+        assert ei.value.code == 403 and ei.value.headers.get("X-Aegis-Block") == "xxe_attempt"
+        v = next(v for v in sink if v.decision == "confirmed" and v.attack_class == "xxe_attempt")
+        assert v.certificate is not None and v.certificate.reverify() is True
     finally:
         gw.shutdown()
 
 
-def test_xxe_request_is_emitted_as_a_lead():
-    """An XXE request body is a request-side LEAD (belief-raising, observe, no certificate) — the honest
-    posture: raise suspicion, never block."""
+def test_xxe_external_entity_request_is_a_block():
+    """An external-entity XXE request body is a request-side BLOCK (confirmed, action=block, re-runnable
+    certificate) — the UNAMBIGUOUS-construct subset promoted from the old LEAD. It proves an ATTEMPT, not
+    exploitation."""
     v = inspect_request("POST", "/upload", _XML, _XXE_FILE, enforce=True)
-    assert v is not None and v.decision == "lead" and v.attack_class == "xxe"
-    assert v.action == "observe" and v.certificate is None
+    assert v is not None and v.decision == "confirmed" and v.attack_class == "xxe_attempt"
+    assert v.action == "block" and v.certificate is not None and v.certificate.reverify() is True
 
 
-def test_blind_xxe_is_forwarded(xxe_upstream):
-    gw, port = _gateway(xxe_upstream, mode="enforce")
+def test_blind_xxe_request_is_also_blocked(xxe_upstream):
+    """Blind/OOB XXE ALSO declares an external SYSTEM entity, so the request-side block fires on it too — the
+    attempt is unambiguous regardless of whether the dereference is in-band or out-of-band."""
+    sink: list[Verdict] = []
+    gw, port = _gateway(xxe_upstream, mode="enforce", sink=sink)
     try:
-        assert "accepted for processing" in _post(port, _XXE_BLIND).read().decode()
+        with pytest.raises(urllib.error.HTTPError) as ei:
+            _post(port, _XXE_BLIND)
+        assert ei.value.code == 403 and ei.value.headers.get("X-Aegis-Block") == "xxe_attempt"
     finally:
         gw.shutdown()
 
