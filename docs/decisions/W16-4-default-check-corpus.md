@@ -12,7 +12,7 @@ There are two check rosters in the scanner:
   `open_redirect`, `ssrf`, `blind_xxe`, `command_injection`, `deserialization`). Every check is
   oracle-anchored and confirms end to end. This roster is the **default check corpus**: it runs on
   every `scan` and `engage` with no flag.
-- **The declarative check library** — `scanner.library`, **~172 entries across 23 bug classes**.
+- **The declarative check library** — `scanner.library`, **173 entries across 23 bug classes**.
   Its POINT checks add 12 bug classes the seed roster does not cover (`nosqli`, `ldap_injection`,
   `xpath_injection`, `el_injection`, `sqli`, `time_based_sqli`, `time_based_command_injection`,
   `time_based`, `lfi`, `xxe`, `rce`, `auth_bypass`); its two REQUEST-level classes

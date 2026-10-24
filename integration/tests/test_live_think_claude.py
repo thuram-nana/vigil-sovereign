@@ -536,6 +536,7 @@ def test_resolve_key_hot_reloads_the_persisted_key_in_the_managed_engine(monkeyp
     """In the managed offense engine (VIGIL_LIVE_KEY_RELOAD=1, set by uiproxy), _resolve_key re-reads the
     CURRENT persisted key from ~/.sigil/sigil.env at CALL time — so a key re-sealed via the UI
     (settings.set_secret -> sigil.env) is picked up on the next think with NO Stop->Start."""
+    pytest.importorskip("framework.v2.common.live_keys")  # the shared hot-reload reader is offense-env (framework) only
     from vigil_integration.live.think_claude import _resolve_key
     monkeypatch.setenv("SIGIL_HOME", str(tmp_path))
     monkeypatch.setenv("VIGIL_LIVE_KEY_RELOAD", "1")

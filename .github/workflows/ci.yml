@@ -391,6 +391,10 @@ jobs:
               --ignore=integration/tests/test_web_fact_tool.py \
               --ignore=integration/tests/test_engine_web_redrive_seam.py \
               --ignore=integration/tests/test_engine_runtime_redrive_seam.py \
+              --ignore=integration/tests/test_engine_access_control_redrive_seam.py \
+              --ignore=integration/tests/test_engine_workflow_reset_redrive_seam.py \
+              --ignore=integration/tests/test_cmdi_reflected_redrive.py \
+              --ignore=integration/tests/test_cmdi_timing_redrive.py \
               --ignore=integration/tests/test_oob_autonomous_feeder.py \
               --ignore=integration/tests/test_stored_xss_redrive.py \
               --ignore=integration/tests/test_proto_pollution_redrive.py \
@@ -537,6 +541,11 @@ jobs:
               integration/tests/test_web_fact_tool.py \
               integration/tests/test_engine_web_redrive_seam.py \
               integration/tests/test_engine_runtime_redrive_seam.py \
+              integration/tests/test_engine_access_control_redrive_seam.py \
+              integration/tests/test_engine_workflow_reset_redrive_seam.py \
+              integration/tests/test_cmdi_reflected_redrive.py \
+              integration/tests/test_cmdi_timing_redrive.py \
+              integration/tests/test_live_think_claude.py \
               integration/tests/test_runtime_redrive_soundness.py \
               integration/tests/test_stored_xss_redrive.py \
               integration/tests/test_proto_pollution_redrive.py \
