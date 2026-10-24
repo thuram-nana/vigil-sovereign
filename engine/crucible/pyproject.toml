@@ -58,7 +58,7 @@ dependencies = [
 # and the default (extras-absent) path is byte-identical + deterministic.
 [project.optional-dependencies]
 anthropic   = ["anthropic>=0.40,<1"]
-embeddings  = ["sentence-transformers>=2,<6"]
+embeddings  = ["sentence-transformers>=6.2.0,<7"]
 analysis    = ["semgrep>=1.100"]
 smt         = ["z3-solver>=4.12,<5"]
 numerics    = ["numpy>=2.4.6,<3"]
