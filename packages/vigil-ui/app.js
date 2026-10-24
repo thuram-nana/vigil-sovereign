@@ -2045,7 +2045,7 @@
     return out;
   }
   function isURL(s) { return /^https?:\/\/.+/i.test(String(s || "").trim()); }
-  function hostOf(u) { try { return new URL(u).hostname.toLowerCase(); } catch (e) { return ""; } }
+  function hostOf(u) { try { var s = String(u || "").trim(); if (s && !/^[a-z][a-z0-9+.-]*:\/\//i.test(s)) s = "https://" + s; return new URL(s).hostname.toLowerCase(); } catch (e) { return ""; } }
   function isLoopbackHost(h) { return h === "127.0.0.1" || h === "localhost" || h === "::1" || /^127\./.test(h); }
   function slugify(s, fb) { const v = String(s || "").toLowerCase().replace(/[^a-z0-9_-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 48); return v || fb; }
 
@@ -2890,13 +2890,14 @@
   }
 
   // ---- Live run view ---------------------------------------------------------
-  let liveES = null, liveTimers = [], liveApprovalModal = null;
+  let liveES = null, liveTimers = [], liveApprovalModal = null, liveRAF = 0;
   let defVerdictStreams = {};   // slug -> EventSource: the AEGIS Defense verdict streams, one per LIVE gateway
   function teardownLive() {
     if (liveES) { try { liveES.close(); } catch (e) {} liveES = null; }
     defCloseAllVerdictStreams();   // close every per-gateway AEGIS verdict stream (a no-op off the Defense screen)
     liveTimers.forEach(function (t) { clearInterval(t); });
     liveTimers = [];
+    if (liveRAF) { try { (window.cancelAnimationFrame || window.clearTimeout)(liveRAF); } catch (e) {} liveRAF = 0; }  // drop any queued Live render frame
     if (liveApprovalModal) { try { liveApprovalModal.close(); } catch (e) {} liveApprovalModal = null; }  // don't leave a proposal popup floating after navigation
   }
 
@@ -3119,7 +3120,7 @@
         liveES = V.sse(OFF("/api/blackboard?slug=" + encodeURIComponent(run.slug)), function (ev) {
           if (!ev || !ev.kind) return;
           if (ev.id != null) { if (L.seen[ev.id]) return; L.seen[ev.id] = 1; }  // dedup any reconnect replay
-          L.events.push(ev); onEvents();
+          L.events.push(ev); scheduleOnEvents();
         }, function () { /* auto-reconnect; the id: cursor prevents gaps/replays */ });
       } else if (run.stream === "progress") {
         // a loopback scan / codebase run writes a progress log (not the reasoning spine) — render it
@@ -3131,7 +3132,7 @@
           // already resumes from Last-Event-ID, so this is defence in depth: without BOTH, a reconnect on a
           // replaying stream would re-count every event and the tiles would read a fabricated total.
           if (ev && ev._seq != null) { if (L.seen["p" + ev._seq]) return; L.seen["p" + ev._seq] = 1; }
-          const norm = progressToEvent(ev); if (norm) { L.events.push(norm); onEvents(); }
+          const norm = progressToEvent(ev); if (norm) { L.events.push(norm); scheduleOnEvents(); }
           // scan.done is the LAST progress row — once it lands, every scan.finding has landed, so it is the
           // safe point to reconcile the streamed (conservative-LEAD) findings against the graded report.
           if (ev && ev.event === "scan.done") { L.scanDone = true; maybeReconcile(); }
@@ -3250,6 +3251,16 @@
     }
 
     function onEvents() { updateHeader(); drawGraph(); drawTimeline(); }
+    // Coalesce a BURST of streamed events into ONE render per animation frame. Previously the Live view
+    // re-rendered synchronously on EVERY event over a growing buffer — O(n^2) across a run — so a few
+    // thousand critic/finding events in seconds would saturate the main thread and freeze the tab. We mark a
+    // frame dirty and render at most once per frame; teardownLive cancels any pending frame. counts()/the
+    // reconcile pass still observe every event — only the RENDER is batched, so the tally stays exact.
+    const _raf = window.requestAnimationFrame || function (cb) { return window.setTimeout(cb, 16); };
+    function scheduleOnEvents() {
+      if (liveRAF) return;                       // a frame is already queued — this event folds into it
+      liveRAF = _raf(function () { liveRAF = 0; onEvents(); });
+    }
 
     // ---- header / stop ----
     function updateHeader() {
@@ -3406,11 +3417,19 @@
         V.mount(host, h("div.empty", null, L.events.length ? "No events match this filter." : liveEmptyText()));
         return;
       }
+      // Cap the RENDERED timeline so a long run rebuilds a BOUNDED list each frame instead of its whole
+      // history (the unbounded per-frame rebuild was the other half of the Live freeze). The tiles/counts
+      // still reflect every event; only the DOM list is bounded. Newest events are what matter live; the
+      // full history is in Findings / the report.
+      const LIVE_TL_CAP = 300;
+      const hidden = rows.length - LIVE_TL_CAP;
+      if (hidden > 0) rows = rows.slice(-LIVE_TL_CAP);
       const out = [];
-      for (let i = rows.length - 1; i >= 0; i--) out.push(timelineRow(rows[i]));   // newest first
+      for (let i = rows.length - 1; i >= 0; i--) out.push(timelineRow(rows[i], i === rows.length - 1));   // newest first; only the newest row animates in
+      if (hidden > 0) out.push(h("div.empty", { style: { opacity: ".6" } }, "… " + hidden + " earlier event" + (hidden === 1 ? "" : "s") + " — full history in Findings / the report."));
       V.mount(host, out);
     }
-    function timelineRow(e) {
+    function timelineRow(e, isNewest) {
       const m = KIND_META[e.kind] || { label: e.kind, sum: function () { return ""; } };
       const p = e.payload || {};
       const meta = [];
@@ -3425,7 +3444,7 @@
         meta.push(h("span.st.st-blocked", null, [h("span.dot"), "refused"]));
       }
       var _muted = (e.kind === "critic_summary" || (e.kind === "critic_verdict" && p.expected)) ? ".pb-muted" : "";
-      return h("div.trow.kind-" + e.kind + ".new" + _muted, { onClick: function () { openEventDrawer(e); } }, [
+      return h("div.trow.kind-" + e.kind + (isNewest ? ".new" : "") + _muted, { onClick: function () { openEventDrawer(e); } }, [
         h("div.ico", null, V.icon(kindIcon(e.kind, p))),
         h("div.body", null, [h("div.k", null, m.label), h("div.m", null, m.sum(p) || "—")]),
         h("div.meta", null, meta.concat([h("span.t", null, e.posted_at ? String(e.posted_at).slice(11, 19) : (e.id != null ? "#" + e.id : ""))])),
@@ -11455,16 +11474,25 @@
   // ---- Charter & Attestation (owner): authorization + who/when/what ledger ----
   var CHT = { slug: "loopback", auth: null, ledger: null, remoteTarget: "", oob: null };
   // Advisory client-side scope check — the AUTHORITATIVE gate is server-side; this only GUIDES the operator.
+  // Reduce a URL or bare host to the bare host the engine's gate matches on (strip scheme + path), so the
+  // advisory "authorized?" readout agrees with ethics.host_matches_scope — a URL-form scope entry like
+  // "https://app.example.com/" was compared literally and never matched the host "app.example.com".
+  function _bareHost(s) {
+    s = String(s || "").trim().toLowerCase().replace(/\.+$/, "");
+    if (!s) return "";
+    s = s.split("://").pop();      // drop a scheme if present
+    return s.split("/")[0];        // drop any path
+  }
   function _scopeCovers(scope, target) {
-    target = String(target || "").trim().toLowerCase();
-    if (!target) return false;
+    var t = _bareHost(target);
+    if (!t) return false;
     return (scope || []).some(function (host) {
-      host = String(host || "").trim().toLowerCase();
-      if (!host) return false;
-      if (host === target) return true;
-      if (host.charAt(0) === "*") {                 // *.example.com — a wildcard grant
-        var suf = host.replace(/^\*\.?/, "");
-        return suf && (target === suf || target.slice(-(suf.length + 1)) === ("." + suf));
+      var e = _bareHost(host);
+      if (!e) return false;
+      if (e === t) return true;
+      if (e.charAt(0) === "*") {                 // *.example.com — a wildcard grant
+        var suf = e.replace(/^\*\.?/, "");
+        return suf && (t === suf || t.slice(-(suf.length + 1)) === ("." + suf));
       }
       return false;
     });

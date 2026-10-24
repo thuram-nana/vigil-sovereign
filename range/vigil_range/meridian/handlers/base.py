@@ -37,6 +37,16 @@ _SERVICES = [
      "Search the public register of issued permits and licences."),
     ("documents", "/documents", "Documents",
      "Download issued permits and import a supporting document by URL or XML."),
+    ("billing", "/billing", "Invoices & payments",
+     "Review your permit and licence invoices and settle any outstanding balance online."),
+    ("messages", "/messages", "Secure messages",
+     "Read private messages between you and the agency and compose a secure reply."),
+    ("reports", "/reports", "Report builder",
+     "Compose a titled report over the public permit register and filter it by status."),
+    ("diagnostics", "/diagnostics", "Network diagnostics",
+     "Operations tool: run a reachability probe against a monitored service node."),
+    ("profile", "/profile", "My profile",
+     "View your account details and update your contact settings."),
     ("assistant", "/assistant", "Ask PermitBot",
      "The MERIDIAN assistant answers questions about permits and application status."),
     ("signin", "/login", "Staff sign in",
@@ -89,6 +99,7 @@ def _robots(_ctx: Ctx) -> Response:
 
 def _sitemap(_ctx: Ctx) -> Response:
     urls = ["/", "/apply", "/track", "/records", "/records/search", "/documents",
+            "/billing", "/messages", "/reports", "/diagnostics", "/profile",
             "/assistant", "/login", "/api/applications"]
     locs = "".join(f"<url><loc>{u}</loc></url>" for u in urls)
     xml = f'<?xml version="1.0" encoding="UTF-8"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">{locs}</urlset>'

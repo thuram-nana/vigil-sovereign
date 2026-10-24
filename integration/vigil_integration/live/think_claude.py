@@ -961,11 +961,37 @@ def _think_via_replay(replay: Any, state: object, prompt_ctx: object) -> LLMDeci
     return _coerce_decision(item)
 
 
+def _read_live_key() -> Optional[str]:
+    """Re-read the CURRENT persisted Anthropic key from ``~/.sigil/sigil.env`` at CALL time — the ONE thing
+    that lets a key re-sealed through the UI reach the RUNNING offense engine without a Stop->Start. Delegates
+    to the shared ``framework.v2.common.live_keys`` reader so the live-think, console-chat and kernel-backend
+    paths share ONE reader (no drift). UNGATED here; ``_resolve_key`` applies the VIGIL_LIVE_KEY_RELOAD gate.
+    Never raises (a reader-unavailable / missing store -> None, so the sealed backends fall back to the spawn
+    env — the offense cannot unseal the sovereign vault). FATAL-2: the framework import is function-local."""
+    try:
+        from framework.v2.common.live_keys import read_persisted_anthropic_key  # noqa: PLC0415
+    except Exception:  # noqa: BLE001 — reader unavailable ⇒ no fresh key → fall back to the env
+        return None
+    return read_persisted_anthropic_key()
+
+
 def _resolve_key(api_key: Optional[str]) -> Optional[str]:
-    """Resolve a usable API key: the explicit ``api_key`` arg, else ``ANTHROPIC_API_KEY``. Returns the
-    key or ``None``. The returned value is only ever forwarded to the SDK client — never logged."""
+    """Resolve a usable API key: the explicit ``api_key`` arg; else — in the MANAGED offense engine only
+    (``VIGIL_LIVE_KEY_RELOAD=1``, set by uiproxy at spawn) — the FRESH persisted key re-read at call time, so a
+    key re-sealed through the UI is picked up on the next think with NO Stop->Start (hot-reload); else the
+    spawn-frozen ``ANTHROPIC_API_KEY`` env. Returns the key or ``None`` — only ever forwarded to the SDK
+    client, never logged.
+
+    The flag SCOPES the re-read to the long-running engine uiproxy spawns, so a test or a bare-shell
+    ``vigil engage`` keeps the plain-env behaviour and never reads a stray ``~/.sigil`` key. A persisted key
+    (the UI's source of truth) wins over the spawn-frozen env (the stale snapshot the engine started with);
+    when nothing is persisted, the frozen env is used unchanged, so a shell-only operator is unaffected."""
     if isinstance(api_key, str) and api_key.strip():
         return api_key
+    if os.environ.get("VIGIL_LIVE_KEY_RELOAD") == "1":
+        fresh = _read_live_key()
+        if isinstance(fresh, str) and fresh.strip():
+            return fresh
     env = os.environ.get("ANTHROPIC_API_KEY")
     if isinstance(env, str) and env.strip():
         return env

@@ -50,6 +50,25 @@ from .runtime_redrive import RuntimeRedriveResult, _admit_one, _candidate_names_
 _DOM_XSS_BRANCH = "dom_xss.dom_execution"
 _PROTO_POLLUTION_BRANCH = "prototype_pollution.achieved_state"
 
+# Governed-engage FACT dispatch set for the two seam-ready browser arms. Canonical classes only
+# (engine._redrive_spec normalizes via verify.normalize_bug_class before dispatch). An import-clean tuple
+# (FATAL-2) so engine/wiring can import it without co-loading the offense engine.
+DOM_REDRIVE_CLASSES = ("dom_xss", "prototype_pollution")
+
+
+def dom_redrive(url: str, *, slug: str, engagement_slug: str, signers: "list[tuple[str, str]]",
+                claimed_class: str, param: "str | None" = None, browser: Any = None) -> "RuntimeRedriveResult":
+    """Seam entry: route a governed-engage DOM claim to the matching browser arm. dom_xss -> dom_xss_redrive,
+    prototype_pollution -> proto_pollution_redrive. A non-DOM class returns an empty result (the seam then
+    keeps the claim a LEAD). Never raises (the arms never raise)."""
+    if claimed_class == "dom_xss":
+        return dom_xss_redrive(url, slug=slug, engagement_slug=engagement_slug, signers=signers,
+                               param=param, browser=browser)
+    if claimed_class == "prototype_pollution":
+        return proto_pollution_redrive(url, slug=slug, engagement_slug=engagement_slug, signers=signers,
+                                       param=param, browser=browser)
+    return RuntimeRedriveResult(url=url, bug_class=claimed_class)
+
 # Candidate query-parameter names a DOM-XSS sink tends to read from when the proposed URL carries no usable
 # parameter (mirrors runtime_redrive._XSS_PARAMS). A CLEAN would be bounded to these + the fragment — but this
 # branch is not clean-capable, so the set only bounds where a FACT is SOUGHT, never a claim of absence.

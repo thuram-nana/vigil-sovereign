@@ -345,8 +345,13 @@ _CAP_BY_ID: dict[str, dict[str, str]] = {c["id"]: c for c in ENGAGE_CAPABILITIES
 
 # scan depth (loopback quick-scan) → bounded page budget + the targeted flag.
 _SCAN_DEPTH = {"quick": (20, True), "standard": (60, False), "deep": (150, False)}
-# engage depth → a bounded request budget (scope/gate still enforce the real ceiling).
-_ENGAGE_DEPTH = {"quick": 60, "standard": 200, "deep": 500}
+# engage depth → a bounded request budget (scope/gate still enforce the real ceiling). Raised +
+# paired with --targeted on the suite path (below): targeting narrows ~160 checks/insertion-point to
+# the param-plausible few, so this budget now REACHES every injection sink across a wide
+# crawl-expanded surface instead of being spent before the serial sweep gets there (the engine's OWN
+# default is 1000; a single injection sink needs ~150 requests to adjudicate). The scan-gate/
+# benchmark path uses neither --library nor --targeted, so its budget/behaviour is unaffected.
+_ENGAGE_DEPTH = {"quick": 150, "standard": 600, "deep": 1500}
 
 
 def console_dir() -> Path:
@@ -3050,7 +3055,7 @@ def launch_assessment(body: dict) -> dict:
         #     still flows through the per-request gate (ex.gated_fetch), and the GET-only NON-DESTRUCTIVE
         #     default holds — a WRITE/mutating/destructive probe still requires the owner-signed per-action
         #     approval (default-deny), so no ungated destructive auto-probe is opened.
-        cmd += ["--autonomous", "--library",
+        cmd += ["--autonomous", "--library", "--targeted",
                 "--autonomous-discover", "--autonomous-crawl-expand"]
         # SAFETY (guarantee e / "human on the ACT trigger"): the read-only crawl-expand breadth AND the
         # discovered-surface probing only RUN under the auto-test posture (Slice-2 is gated on

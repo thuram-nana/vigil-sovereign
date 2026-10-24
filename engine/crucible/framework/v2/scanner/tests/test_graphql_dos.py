@@ -33,11 +33,20 @@ from framework.v2.scanner.graphql import (
 from framework.v2.scanner.insertion import HttpRequest, RequestTemplate
 
 _ALIAS_RE = re.compile(r"a(\d+)\s*:\s*__typename")
+_BATCH_ALIAS_RE = re.compile(r"(\w+)\s*:\s*__typename")
+
+
+def _batch_alias(op: object) -> str:
+    """The alias VIGIL put on ``__typename`` in one batched op (``{ v0: __typename }`` → ``v0``); a real
+    GraphQL server returns that op's result under that alias. Falls back to ``__typename`` for a bare op."""
+    q = op.get("query", "") if isinstance(op, dict) else ""
+    m = _BATCH_ALIAS_RE.search(q)
+    return m.group(1) if m else "__typename"
 
 
 def _make(
     *, introspection: bool = True, depth_guard: bool = False, alias_guard: bool = False,
-    batch_enabled: bool = True, cost_guard: bool = False,
+    batch_enabled: bool = True, cost_guard: bool = False, benign_array: bool = False,
 ) -> type[BaseHTTPRequestHandler]:
     """A configurable GraphQL endpoint. Routes DoS probes by their operationName
     and honours (or rejects) each amplification per the flags."""
@@ -76,8 +85,13 @@ def _make(
 
             # Array-batched request.
             if isinstance(doc, list):
+                if benign_array:
+                    # Same-shape negative control: a benign, non-GraphQL >=2-element data array (a static
+                    # list / REST collection feed) that NEVER carries VIGIL's distinct v{i} aliases.
+                    return [{"id": 1, "data": {"t": "A"}}, {"id": 2, "data": {"t": "B"}}]
                 if batch_enabled:
-                    return [{"data": {"__typename": "Query"}} for _ in doc]
+                    # A real batching server runs each op and echoes its VIGIL-chosen alias v{i}.
+                    return [{"data": {_batch_alias(op): "Query"}} for op in doc]
                 return {"errors": [{"message": "batch requests are not supported"}]}
 
             query = doc.get("query", "") if isinstance(doc, dict) else ""
@@ -149,16 +163,17 @@ def _template(host: str, port: int) -> RequestTemplate:
 # --------------------------------------------------------------------------
 
 
-def test_depth_confirmed_and_clean() -> None:
+def test_depth_accepted_is_a_lead_never_confirmed() -> None:
+    # A bounded depth probe being ACCEPTED proves only 'limit (if any) >= probe', NOT 'limit absent' — so a
+    # benign higher-limit origin would mint a false FACT. Depth is a LEAD, never an oracle-confirmed FACT.
     with _server(introspection=True, depth_guard=False) as (h, p):
-        f = AuditEngine(_send(h, p)).audit(
-            _template(h, p).request, checks=(), request_checks=(GraphQLDepthCheck(),))
-        assert [x for x in f if x.bug_class == "graphql_depth_limit"], "unbounded depth not confirmed"
+        res = GraphQLDepthCheck().probe_dos(_template(h, p), _send(h, p))
+        assert res.context is None, "an accepted depth probe must NOT be a confirmed FACT (acceptance != absence)"
+        assert res.lead, "an accepted depth probe should surface a lead"
 
     with _server(introspection=True, depth_guard=True) as (h, p):
-        f = AuditEngine(_send(h, p)).audit(
-            _template(h, p).request, checks=(), request_checks=(GraphQLDepthCheck(),))
-        assert f == [], "a depth-limited endpoint must be clean"
+        res = GraphQLDepthCheck().probe_dos(_template(h, p), _send(h, p))
+        assert res.context is None and res.lead is None, "a depth-limited endpoint is silent"
 
 
 def test_depth_introspection_off_is_a_lead_not_confirmed() -> None:
@@ -168,36 +183,61 @@ def test_depth_introspection_off_is_a_lead_not_confirmed() -> None:
         assert res.lead, "should surface a depth lead when introspection is off"
 
 
-def test_alias_confirmed_and_clean() -> None:
+def test_alias_accepted_is_a_lead_never_confirmed() -> None:
+    # Same reasoning as depth: an N-alias probe resolving proves only 'limit >= N', never 'limit absent'.
     with _server(alias_guard=False) as (h, p):
-        f = AuditEngine(_send(h, p)).audit(
-            _template(h, p).request, checks=(), request_checks=(GraphQLAliasCheck(),))
-        assert [x for x in f if x.bug_class == "graphql_alias_overloading"], "alias overloading not confirmed"
+        res = GraphQLAliasCheck().probe_dos(_template(h, p), _send(h, p))
+        assert res.context is None, "an accepted alias probe must NOT be a confirmed FACT (acceptance != absence)"
+        assert res.lead, "an accepted alias probe should surface a lead"
 
     with _server(alias_guard=True) as (h, p):
-        f = AuditEngine(_send(h, p)).audit(
-            _template(h, p).request, checks=(), request_checks=(GraphQLAliasCheck(),))
-        assert f == [], "an alias-limited endpoint must be clean"
+        res = GraphQLAliasCheck().probe_dos(_template(h, p), _send(h, p))
+        assert res.context is None and res.lead is None, "an alias-limited endpoint is silent"
 
 
-def test_alias_confirmed_even_when_introspection_disabled() -> None:
-    # __typename is a spec meta-field present even with introspection off.
+def test_alias_lead_even_when_introspection_disabled() -> None:
+    # __typename is a spec meta-field present even with introspection off: the probe still resolves → a LEAD.
     with _server(introspection=False, alias_guard=False) as (h, p):
-        f = AuditEngine(_send(h, p)).audit(
-            _template(h, p).request, checks=(), request_checks=(GraphQLAliasCheck(),))
-        assert [x for x in f if x.bug_class == "graphql_alias_overloading"]
+        res = GraphQLAliasCheck().probe_dos(_template(h, p), _send(h, p))
+        assert res.context is None and res.lead
 
 
 def test_batching_confirmed_and_clean() -> None:
     with _server(batch_enabled=True) as (h, p):
+        res = GraphQLBatchingCheck().probe_dos(_template(h, p), _send(h, p))
+        assert res.context is not None, "batching not confirmed"
+        # F7 capture-bound: the context retains the RAW body and declares the VIGIL reduction as a
+        # provenance-ref (so eq[batch_result_count, sent_batch] is a sound PD3 the verifier re-executes —
+        # the count is of positions echoing VIGIL's distinct v{i} aliases, bound to the ops VIGIL sent).
+        ctx = res.context.to_verifier_context()
+        observed = ctx.get("observed_evidence") or {}
+        assert "response_body" in observed and observed.get("batch_result_count", 0) >= 2
+        assert observed.get("batch_result_count") == observed.get("sent_batch"), (
+            "the fire requires every sent op to have echoed its VIGIL alias (count == sent_batch)")
+        assert (res.context.provenance_refs or {}).get("batch_result_count") == "reduction"
         f = AuditEngine(_send(h, p)).audit(
             _template(h, p).request, checks=(), request_checks=(GraphQLBatchingCheck(),))
-        assert [x for x in f if x.bug_class == "graphql_batching"], "batching not confirmed"
+        assert [x for x in f if x.bug_class == "graphql_batching"], "batching not confirmed via audit"
 
     with _server(batch_enabled=False) as (h, p):
         f = AuditEngine(_send(h, p)).audit(
             _template(h, p).request, checks=(), request_checks=(GraphQLBatchingCheck(),))
         assert f == [], "a non-batching endpoint must be clean"
+
+
+def test_batching_benign_array_mints_nothing() -> None:
+    """DECISIVE same-shape negative control (the one the first batching slice was missing): a benign origin
+    answering VIGIL's IDENTICAL M-op array POST with a static >=2-element JSON array of data-bearing objects
+    that NEVER carry VIGIL's distinct v{i} aliases (a REST/collection feed, a static list) scores
+    batch_result_count 0 — eq[count, sent_batch] cannot fire. The pre-fix gt[count,1]-over-any-data-element
+    form minted a FALSE graphql_batching FACT on exactly this body."""
+    with _server(benign_array=True) as (h, p):
+        res = GraphQLBatchingCheck().probe_dos(_template(h, p), _send(h, p))
+        assert res.context is None, "a benign >=2-element data array must NOT confirm batching"
+        f = AuditEngine(_send(h, p)).audit(
+            _template(h, p).request, checks=(), request_checks=(GraphQLBatchingCheck(),))
+        assert [x for x in f if x.bug_class == "graphql_batching"] == [], (
+            "a benign data array (no VIGIL aliases) must be clean — no graphql_batching FACT")
 
 
 def test_cost_is_a_lead_never_confirmed() -> None:
@@ -249,13 +289,18 @@ def test_campaign_off_yields_no_dos_findings_or_leads() -> None:
                 and f.bug_class in {"graphql_depth_limit", "graphql_alias_overloading", "graphql_batching"}]
 
 
-def test_campaign_on_confirms_amplifications_and_records_cost_lead() -> None:
+def test_campaign_on_confirms_batching_and_records_depth_alias_cost_leads() -> None:
     with _server(introspection=True, batch_enabled=True, cost_guard=False) as (h, p):
         report = _campaign(h, p, dos=True).run(f"http://{h}:{p}/graphql")
     classes = {f.bug_class for f in report.active_findings}
-    assert {"graphql_depth_limit", "graphql_alias_overloading", "graphql_batching"} <= classes
-    # cost stays a LEAD, never an active finding.
+    # batching is the ONLY DoS class that is soundly a FACT (binary capability, same-shape differential).
+    assert "graphql_batching" in classes
+    # depth/alias/cost stay LEADs (acceptance != absence-of-limit), never active findings.
+    assert "graphql_depth_limit" not in classes
+    assert "graphql_alias_overloading" not in classes
     assert "graphql_cost" not in classes
+    assert any("graphql-depth" in lead for lead in report.graphql_leads), report.graphql_leads
+    assert any("graphql-alias" in lead for lead in report.graphql_leads), report.graphql_leads
     assert any("graphql-cost" in lead for lead in report.graphql_leads), report.graphql_leads
 
 

@@ -1664,7 +1664,10 @@ def _has_prior_conversation(chat_id: str) -> bool:
 
 
 def _has_api_key() -> bool:
-    """Whether a model key is present — the same check _reason gates on before any egress."""
+    """Whether a model key is present — the same check _reason gates on before any egress. Re-reads a key
+    re-sealed through the UI (hot-reload) in the managed engine so a freshly-added key is seen with no restart."""
+    from ..common.live_keys import refresh_live_anthropic_key  # noqa: PLC0415
+    refresh_live_anthropic_key()
     key = os.environ.get("ANTHROPIC_API_KEY")
     return isinstance(key, str) and bool(key.strip())
 
@@ -2072,6 +2075,8 @@ def _cloud_gate_and_key() -> dict:
     except Exception as e:  # noqa: BLE001 — "cannot decide" is never "permitted"
         return {"ok": False, "error": f"the sovereignty policy could not be evaluated ({type(e).__name__}); "
                                       f"refusing the model call. The gated assessment still runs."}
+    from ..common.live_keys import refresh_live_anthropic_key  # noqa: PLC0415
+    refresh_live_anthropic_key()                               # hot-reload a UI-sealed key (managed engine)
     key = os.environ.get("ANTHROPIC_API_KEY")
     if not (isinstance(key, str) and key.strip()):
         return {"ok": False, "need_key": True,

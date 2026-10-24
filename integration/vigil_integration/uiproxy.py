@@ -316,6 +316,11 @@ _STATIC_TYPES = {
     ".json": "application/json; charset=utf-8",
     ".webmanifest": "application/manifest+json; charset=utf-8",
 }
+
+# Text assets worth gzipping on the wire: js/css/html/json compress ~5x and dominate time-to-first-
+# paint over a high-latency link. Anything not listed (images, fonts, already-compressed blobs) is
+# served as-is — gzip on those is pure CPU for no gain. Consulted by `_serve_static`.
+_COMPRESSIBLE = {".html", ".css", ".js", ".json", ".webmanifest", ".svg", ".map", ".txt", ".xml"}
 # strict same-origin CSP on the bundle the proxy serves (mirrors the console/cockpit posture). The app
 # is CSP-native (no inline script/handlers): all script + style + XHR/EventSource are same-origin.
 _BUNDLE_CSP = ("default-src 'self'; base-uri 'self'; form-action 'self'; "
@@ -1559,12 +1564,36 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                 self.send_response(304)
                 self.send_header("ETag", etag)
                 self.send_header("Cache-Control", "no-cache")
+                self.send_header("Vary", "Accept-Encoding")
                 self.send_header("Connection", "close")
                 self.end_headers()
                 return
+        # gzip text assets for the client that offers it. The UI bundle (app.js ~750 KB plus css/html/
+        # json) is large and highly compressible, and over a high-latency link — e.g. the WireGuard
+        # tunnel to the VPS — the raw transfer, not the server, dominates time-to-first-paint. We
+        # compress with the SAME window the proxy's decode path expects (`16 + zlib.MAX_WBITS` = the
+        # gzip header/trailer), via zlib, so no extra import is pulled in. The ETag stays over the
+        # UNCOMPRESSED bytes (it names the resource, not the wire encoding, so the 304 revalidation
+        # above still matches); `Vary: Accept-Encoding` stops a shared cache handing a gzipped body to
+        # a client that cannot decode it. On any compressor error we fall back to the raw bytes.
+        body, encoding = data, ""
+        if (
+            candidate.suffix.lower() in _COMPRESSIBLE
+            and len(data) >= 1024
+            and "gzip" in (self.headers.get("Accept-Encoding", "") or "").lower()
+        ):
+            try:
+                _co = zlib.compressobj(6, zlib.DEFLATED, 16 + zlib.MAX_WBITS)
+                body = _co.compress(data) + _co.flush()
+                encoding = "gzip"
+            except (zlib.error, OSError, ValueError):
+                body, encoding = data, ""
         self.send_response(200)
         self.send_header("Content-Type", ctype)
-        self.send_header("Content-Length", str(len(data)))
+        if encoding:
+            self.send_header("Content-Encoding", encoding)
+        self.send_header("Vary", "Accept-Encoding")
+        self.send_header("Content-Length", str(len(body)))
         self.send_header("Connection", "close")
         if is_html:
             self.send_header("Cache-Control", "no-store")
@@ -1576,7 +1605,7 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         self.send_header("Referrer-Policy", "no-referrer")
         self.end_headers()
         if self.command != "HEAD":
-            self.wfile.write(data)
+            self.wfile.write(body)
 
     # -- proxy-local plane control (status + start the offense plane) --------------------------------
     def _plane_control(self, path: str, query: str):
@@ -2246,6 +2275,14 @@ def _child_env() -> dict:
     # serve_forever; with a PIPE (a fresh box), CPython block-buffers that ~200-byte line and _await_token
     # would hang the full cockpit-timeout before aborting. PYTHONUNBUFFERED forces the flush.
     env["PYTHONUNBUFFERED"] = "1"
+    # HOT-RELOAD of the Anthropic key: tell the managed offense engine it may re-read the CURRENT persisted
+    # key (~/.sigil/sigil.env) at think time instead of its spawn-frozen env, so a key re-sealed through the
+    # UI reaches the RUNNING engine with no Stop->Start (think_claude._resolve_key gates on this flag). Scoped
+    # to uiproxy-spawned children only — a test or a bare-shell `vigil engage` never sets it and keeps the
+    # plain-env behaviour. Not a secret and not a settings-plane var, so the config/offense allowlists are
+    # untouched. The plaintext sigil.env backend hot-reloads; a keyring/TPM-vault secret still needs a
+    # Start-offense (the offense cannot unseal the sovereign vault).
+    env["VIGIL_LIVE_KEY_RELOAD"] = "1"
     return env
 
 
