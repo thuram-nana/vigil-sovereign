@@ -180,7 +180,10 @@ def _gw(upstream_port: int, *, mode: str, sink: list | None = None):
     return gw, gw.server_address[1]
 
 
-_SSRF = urllib.parse.quote("http://169.254.169.254/latest/meta-data/", safe="")
+# A SOFTER SSRF probe that stays a LEAD (not the cloud-metadata/dangerous-scheme subset, which now BLOCKS
+# via ssrf_attempt): a general internal/RFC1918 URL — a benign internal-webhook shape — raises the ssrf
+# LEAD without blocking, which is exactly what this graduated-response-on-LEADS test needs.
+_SSRF = urllib.parse.quote("http://10.0.0.5/internal-webhook", safe="")
 
 
 def _get(port: int, path: str):

@@ -506,11 +506,14 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                 self._json(chat.chat_models())
                 return
             if path == "/api/aegis/verdicts":
-                # the live Defense verdict feed — tail the managed gateway's browser-safe verdicts JSONL
-                # (oracle-context already stripped at the sink). EventTailer is robust to a missing file.
-                vpath = actions.aegis_verdicts_path()
+                # the live Defense verdict feed — tail a tracked gateway's browser-safe verdicts JSONL
+                # (oracle-context already stripped at the sink). ?slug=<gateway> selects WHICH gateway's feed
+                # (the UI opens one per gateway card); absent → the single running gateway. EventTailer is
+                # robust to a missing file.
+                _slug = (parse_qs(parts.query).get("slug") or [""])[0]
+                vpath = actions.aegis_verdicts_path(_slug or None)
                 if not vpath:
-                    self._json({"error": "no AEGIS gateway is running"}, status=404)
+                    self._json({"error": "no matching AEGIS gateway is running"}, status=404)
                     return
                 self._sse(vpath)
                 return

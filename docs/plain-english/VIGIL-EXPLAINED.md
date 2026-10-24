@@ -8712,8 +8712,8 @@ credential.
 | Own infrastructure — real bytes from infrastructure the system builds, uses and destroys | 2 |
 | Real local process — real bytes over a real connection or process on the testing machine | 18 |
 | Retained source code — re-derived from retained source-code bytes by a static re-parse — no live process, no runtime observation | 1 |
-| Fixtures only — only ever judged evidence a person wrote by hand | 25 |
-| **Total detector kinds** | **49** |
+| Fixtures only — only ever judged evidence a person wrote by hand | 28 |
+| **Total detector kinds** | **52** |
 <!-- END GENERATED coverage-tiers -->
 
 They sum to 41. If the question asked is instead "how many have ever judged bytes from a real network

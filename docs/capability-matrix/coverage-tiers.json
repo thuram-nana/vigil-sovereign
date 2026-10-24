@@ -261,6 +261,27 @@
       "evidence": "Fixtures only"
     },
     {
+      "kind": "path_traversal_breakout",
+      "name": "Path-traversal break-out",
+      "family": "request-only",
+      "tier": "fixtures",
+      "evidence": "Fixtures only"
+    },
+    {
+      "kind": "ssrf_breakout",
+      "name": "SSRF break-out",
+      "family": "request-only",
+      "tier": "fixtures",
+      "evidence": "Fixtures only"
+    },
+    {
+      "kind": "xxe_breakout",
+      "name": "XXE break-out",
+      "family": "request-only",
+      "tier": "fixtures",
+      "evidence": "Fixtures only"
+    },
+    {
       "kind": "k8s_posture",
       "name": "Platform benchmark",
       "family": "posture",
