@@ -771,3 +771,68 @@ def live_cve_observations(transport, query: str, *, seq: int = 0,
     if not rec.ok:
         return []
     return observations_from_cve(rec.payload, seq=seq)
+
+
+# ---- FIRST.org EPSS (Exploit Prediction Scoring System) ---------------------
+# EPSS is a PREDICTIVE score (probability a CVE is exploited in the wild in the next 30 days) + its
+# percentile, keyed by CVE. It is third-party PREDICTION — an intel LEAD, NEVER a fact — carried on the
+# SAME VULNERABILITY node a CVE advisory uses (``source_kind`` VULN_DB, ``feed`` "first-epss"), so it
+# enriches a known CVE's node with ``{epss, epss_percentile}`` without a new node/edge kind or source_kind.
+
+EPSS_ENDPOINT = "https://api.first.org/data/v1/epss?cve={query}"
+
+# A well-formed CVE id — bounds the node key + attr from an untrusted feed (an absurd/huge/garbage `cve`
+# is dropped, never minted). EPSS only ever keys on real CVE ids, so a strict match is safe.
+_EPSS_CVE_RE = re.compile(r"CVE-\d{4}-\d{3,10}$")
+
+
+def _epss_float(v: Any) -> "float | None":
+    """Parse a first.org EPSS string (e.g. ``"0.00892"``) into a bounded [0,1] float, else ``None`` so
+    the entry is dropped — an untrusted feed value is never trusted to be well-formed."""
+    try:
+        f = float(str(v).strip())
+    except (TypeError, ValueError):
+        return None
+    if f != f or f < 0.0 or f > 1.0:   # NaN / out-of-range → not a usable probability
+        return None
+    return f
+
+
+def observations_from_epss(doc: Any, *, seq: int = 0, source: str = "first-epss") -> list[Observation]:
+    """first.org EPSS response → VULNERABILITY leads carrying ``{epss, epss_percentile}`` on the CVE node.
+
+    A PREDICTION, hence a LEAD (``VULN_DB`` / ``GROUNDING_INTEL``), never a fact — only a fired oracle
+    confirms. Total: a non-dict doc, a missing / non-list ``data``, or an entry with no ``cve`` or an
+    unparseable ``epss`` is DROPPED, never raised. Bounded by ``_MAX_ITEMS``. Pure: a function of
+    ``(doc, seq)`` only — no wallclock / rng."""
+    data = doc.get("data") if isinstance(doc, dict) else None
+    if not isinstance(data, list):
+        return []
+    out: list[Observation] = []
+    for entry in data[:_MAX_ITEMS]:
+        if not isinstance(entry, dict):
+            continue
+        cve = str(entry.get("cve") or "").strip().upper()
+        if not _EPSS_CVE_RE.match(cve):      # missing / malformed / over-long CVE id → drop (untrusted)
+            continue
+        epss = _epss_float(entry.get("epss"))
+        if epss is None:               # EPSS without a usable score is not a claim
+            continue
+        attrs: dict[str, Any] = {"cve": cve, "epss": epss, "feed": "first-epss"}
+        pct = _epss_float(entry.get("percentile"))
+        if pct is not None:
+            attrs["epss_percentile"] = pct
+        out.append(_mint(_vuln_ref(cve), source=source, source_kind=IntelSourceKind.VULN_DB,
+                         seq=seq, confidence=_C_VULN, attrs=attrs))
+    return out
+
+
+def live_epss_observations(transport, query: str, *, seq: int = 0) -> list[Observation]:
+    """Fetch one CVE's EPSS through a gated live transport and parse it — the live seam mirroring
+    ``live_cve_observations``: the transport enforces egress policy (the single apex ``api.first.org``),
+    the SAME offline parser mints the lead-only observations. A not-ok record yields [] (graceful
+    absence)."""
+    rec = transport.fetch(IntelSourceKind.VULN_DB, query, seq=seq)
+    if not rec.ok:
+        return []
+    return observations_from_epss(rec.payload, seq=seq)

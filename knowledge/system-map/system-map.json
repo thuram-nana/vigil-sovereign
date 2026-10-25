@@ -407,6 +407,29 @@
       ]
     },
     {
+      "description": "A read-only analytics projection of the engine's signed FACTs + Certificate(s) of Non-Exploitability — a security score (a declared monotone projection of the signed certificate rollup, never an averaged CVSS), severity + CWE clustering over oracle-confirmed FACTs, oracle-proven exploitability with a KEV/EPSS intel-tier overlay on the CVE-bearing subset, and spine-sourced remediation velocity (MTTR). Fleet rollup across every engagement plus a per-engagement drill-down; every number is a projection of proof, never a fabricated estimate.",
+      "group": "LEARN",
+      "id": "posturedash",
+      "label": "Posture Dashboard",
+      "owner": false,
+      "plane": "unified",
+      "synonyms": [
+        "posture dashboard",
+        "security score",
+        "posture analytics",
+        "kev",
+        "epss",
+        "exploitability",
+        "mttr",
+        "cwe clustering",
+        "severity breakdown",
+        "remediation velocity",
+        "risk dashboard",
+        "posture score",
+        "analytics"
+      ]
+    },
+    {
       "description": "Oracle-confirmed, signed, replayable exploit proofs — a FACT means an oracle re-fired over captured raw bytes.",
       "group": "DO",
       "id": "proof",
@@ -629,5 +652,5 @@
       ]
     }
   ],
-  "source_sha": "925b18e01b915d90fda5d9ea3265465f93d389852c783a58e2e334160ba84c6c"
+  "source_sha": "aa3c7315f6ba3f91c14918edf32882905358082573d1608559f7c7f8fe8cc264"
 }

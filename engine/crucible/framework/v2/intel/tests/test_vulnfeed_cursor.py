@@ -86,8 +86,10 @@ def _factory(log, *, boom=frozenset(), refuse=frozenset(), fail=frozenset(), on_
 
 
 def _plan(cve="CVE-2024-1111"):
-    # nvd(per-cve, seq0) → osv(per-cve, seq1) → cisa-kev(bulk, seq2); last_seq 3.
-    return vulnfeed.plan_for(vulnfeed.TRUSTED_VULN_SOURCES, [cve])
+    # nvd(per-cve, seq0) → osv(per-cve, seq1) → cisa-kev(bulk, seq2); last_seq 3. A FIXED 3-source subset
+    # (not the live registry) so adding a source to TRUSTED_VULN_SOURCES never perturbs these cursor counts.
+    srcs = [vulnfeed.source_by_name(n) for n in ("nvd", "osv", "cisa-kev")]
+    return vulnfeed.plan_for(srcs, [cve])
 
 
 def _ingest(tmp_path: Path, slug="acme"):

@@ -25,8 +25,10 @@ from pathlib import Path
 
 from .from_threatintel import (
     CISA_KEV_ENDPOINT,
+    EPSS_ENDPOINT,
     build_threatintel_live_transport,
     live_cve_observations,
+    live_epss_observations,
     observations_from_kev,
 )
 from .models import IntelSourceKind
@@ -60,6 +62,7 @@ TRUSTED_VULN_SOURCES: tuple[VulnSource, ...] = (
     VulnSource("nvd", "services.nvd.nist.gov", _NVD_ENDPOINT, "per_cve"),
     VulnSource("osv", "api.osv.dev", _OSV_ENDPOINT, "per_cve"),
     VulnSource("cisa-kev", "www.cisa.gov", CISA_KEV_ENDPOINT, "bulk"),
+    VulnSource("epss", "api.first.org", EPSS_ENDPOINT, "per_cve"),
 )
 
 _SOURCE_BY_NAME = {s.name: s for s in TRUSTED_VULN_SOURCES}
@@ -380,7 +383,12 @@ def refresh_vulnintel(plan, *, transport_for, ingest, seq: int = 0, cancel=None)
                     break
                 fetch_seq = cur
                 cur += 1
-                obs = live_cve_observations(transport, q, seq=fetch_seq, source_kind=source.source_kind)
+                # Dispatch the parser by source: EPSS has its own first.org response shape, every other
+                # per-CVE source is NVD/OSV-shaped. Both fetch through the SAME gated transport.
+                if source.name == "epss":
+                    obs = live_epss_observations(transport, q, seq=fetch_seq)
+                else:
+                    obs = live_cve_observations(transport, q, seq=fetch_seq, source_kind=source.source_kind)
                 qrun += 1
                 src_obs.extend(obs)
                 got += len(obs)

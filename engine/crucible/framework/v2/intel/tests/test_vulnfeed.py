@@ -40,7 +40,9 @@ _NVD = {"vulnerabilities": [{"cve": {
     "configurations": []}}]}
 _OSV = {"id": "OSV-2024-9", "aliases": ["CVE-2024-2222"], "summary": "osv bug",
         "affected": [{"package": {"name": "leftpad", "ecosystem": "npm"}}]}
-_PAYLOAD_BY_NAME = {"nvd": _NVD, "osv": _OSV, "cisa-kev": _KEV}
+_EPSS = {"status": "OK", "data": [
+    {"cve": "CVE-2024-1111", "epss": "0.50321", "percentile": "0.90210", "date": "2024-05-05"}]}
+_PAYLOAD_BY_NAME = {"nvd": _NVD, "osv": _OSV, "cisa-kev": _KEV, "epss": _EPSS}
 
 
 class _FakeTransport:
@@ -87,7 +89,7 @@ def _tfor(source):
 def test_sources_are_concrete_apex_hosts_no_wildcards():
     from framework.v2.agents.egress_guard import _collector_host_too_broad
 
-    assert {s.name for s in vulnfeed.TRUSTED_VULN_SOURCES} == {"nvd", "osv", "cisa-kev"}
+    assert {s.name for s in vulnfeed.TRUSTED_VULN_SOURCES} == {"nvd", "osv", "cisa-kev", "epss"}
     for s in vulnfeed.TRUSTED_VULN_SOURCES:
         assert not _collector_host_too_broad(s.host), s.host    # no wildcard / public-suffix host
         assert "*" not in s.host and "/" not in s.host          # concrete, no path/scheme
@@ -134,9 +136,10 @@ def test_refresh_is_deterministic_and_idempotent():
     ing = IntelIngest(WorldModel())
     plan = vulnfeed.plan_for(vulnfeed.TRUSTED_VULN_SOURCES, ["CVE-2024-1111"])
     r1 = vulnfeed.refresh_vulnintel(plan, transport_for=_tfor, ingest=ing, seq=0)
-    assert r1.cancelled is False and r1.queries_run == 3        # nvd + osv (per-cve) + kev (bulk)
-    assert r1.last_seq == 3                                     # one monotonic tick per fetch, seq 0..2
+    assert r1.cancelled is False and r1.queries_run == 4        # nvd + osv + epss (per-cve) + kev (bulk)
+    assert r1.last_seq == 4                                     # one monotonic tick per fetch, seq 0..3
     assert r1.minted_by_source["cisa-kev"] >= 2 and r1.minted_by_source["nvd"] >= 1
+    assert r1.minted_by_source["epss"] >= 1                     # the epss source routed through its parser
     assert r1.applied > 0
     r2 = vulnfeed.refresh_vulnintel(plan, transport_for=_tfor, ingest=ing, seq=0)   # SAME ingest → dedup
     assert r2.applied == 0                                      # idempotent: nothing re-projected
@@ -239,7 +242,7 @@ def test_cli_without_live_fires_no_traffic(capsys):
     out = json.loads(capsys.readouterr().out)
     assert out["live"] is False                                 # offline: nothing fetched
     assert "minted_by_source" not in out                       # no pull happened
-    assert {s["name"] for s in out["sources"]} == {"nvd", "osv", "cisa-kev"}
+    assert {s["name"] for s in out["sources"]} == {"nvd", "osv", "cisa-kev", "epss"}
     assert "offline" in out["note"].lower() and "LEAD" in out["doctrine"]
 
 
