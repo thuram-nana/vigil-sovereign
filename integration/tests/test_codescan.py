@@ -219,3 +219,38 @@ def test_moved_vuln_is_not_reported_cleared(tmp_path):
     os.rename(src / "app.py", src / "renamed.py")   # eval() still present, just moved
     v = codescan.verify_finding_cleared(root=str(src), ref=ref, max_files=20)
     assert v["cleared"] is False and v["moved"] is True
+
+
+def test_include_paths_diff_scopes_the_scan(tmp_path):
+    """repo-connect Slice 3a: include_paths keeps ONLY findings in the PR's changed files (diff-scope),
+    while a full scan (include_paths=None) is byte-identical to before."""
+    src = tmp_path / "src"
+    src.mkdir()
+    for name in ("app.py", "other.py"):
+        (src / name).write_text("def f(x):\n    return eval(x)\n", encoding="utf-8")
+    base = tmp_path / "base"
+    full = codescan.run_codescan(root=str(src), slug="full", base_dir=str(base), max_files=20)
+    full_paths = {f["location"].rsplit(":", 1)[0] for f in full["findings"]}
+    assert "app.py" in full_paths and "other.py" in full_paths          # a full scan flags both files
+    # diff-scope to app.py only → other.py's finding is excluded, the spine snapshot is scoped to the PR
+    scoped = codescan.run_codescan(root=str(src), slug="scoped", base_dir=str(base),
+                                   max_files=20, include_paths={"app.py"})
+    scoped_paths = {f["location"].rsplit(":", 1)[0] for f in scoped["findings"]}
+    assert scoped_paths == {"app.py"} and scoped["total"] < full["total"]
+    # an empty include set scopes to NOTHING (a PR with no in-scope changed files → no findings)
+    none_scoped = codescan.run_codescan(root=str(src), slug="none", base_dir=str(base),
+                                        max_files=20, include_paths=set())
+    assert none_scoped["total"] == 0
+
+
+def test_include_paths_namespace_mismatch_fails_closed(tmp_path):
+    """repo-connect Slice 3a (red-pen HIGH): a non-empty include_paths that resolves to NO file under the
+    scan root is a checkout-root/repo-root namespace MISMATCH (e.g. a tarball-checkout prefix) — it must
+    RAISE (refuse a silent clean), never return an empty 'clean' result on a vulnerable PR."""
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "app.py").write_text("def f(x):\n    return eval(x)\n", encoding="utf-8")
+    base = tmp_path / "base"
+    with pytest.raises(FileNotFoundError):
+        codescan.run_codescan(root=str(src), slug="mm", base_dir=str(base), max_files=20,
+                              include_paths={"owner-repo-deadbeef/app.py"})   # prefixed form → resolves to nothing

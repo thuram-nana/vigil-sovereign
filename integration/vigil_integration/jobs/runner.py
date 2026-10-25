@@ -76,6 +76,10 @@ class JobRunner:
                 result = self.worker(job)
                 return JobOutcome(state="done", job=job, result=result)
             except Exception as e:  # noqa: BLE001 — a worker error is a job outcome, never a loop crash
+                # a FAILED scan was not successfully handled — release its permanent delivery marker so a
+                # re-delivery or the reconciliation safety-net can re-drive the same (repo,pr,commit) rather
+                # than it being permanently suppressed by the shared content-addressed work key.
+                self.queue.release_delivery(claimed)
                 return JobOutcome(state="failed", job=job,
                                   reason=f"worker error: {type(e).__name__}: {e}")
         finally:
@@ -112,4 +116,32 @@ def make_codescan_worker(*, base_dir: str, checkout: Callable[[SecurityJob], str
         from ..codescan import run_codescan
         root = checkout(job)
         return run_codescan(root=root, slug=job.slug, base_dir=base_dir, max_files=max_files)
+    return _worker
+
+
+def make_diff_codescan_worker(*, base_dir: str, checkout: Callable[[SecurityJob], str],
+                              changed_files: Callable[[SecurityJob], "set[str]"],
+                              max_files: int = 5000) -> Worker:
+    """A worker that runs a DIFF-SCOPED codescan over a PR's changed files (the PR-bot's read half).
+
+    ``checkout(job) -> local_root`` resolves the PR head to an on-disk tree (a gated shallow checkout);
+    ``changed_files(job) -> set[str]`` returns the PR's changed repo-relative POSIX paths (from the gated
+    GitHub read client). The worker runs :func:`vigil_integration.codescan.run_codescan` with
+    ``include_paths`` set to those files, so the recorded facts are scoped to the diff. Invoked ONLY by
+    :meth:`JobRunner.run_one` — only after the authorization gate allowed the job. READ/scan only: it
+    records findings on the slug's signed spine and posts NOTHING to GitHub (that is Slice 3b/3c)."""
+    def _worker(job: SecurityJob) -> dict:
+        from ..codescan import run_codescan
+        root = checkout(job)
+        paths = changed_files(job)
+        # FAIL-CLOSED on an undetermined scope: a non-set or EMPTY changed-files result must not fall through
+        # to a silent "clean" (a PR always changes ≥1 file; an empty/odd scope means the diff could not be
+        # determined). Raising surfaces it as a job failure (re-driveable), never a false clean.
+        if not isinstance(paths, (set, frozenset)):
+            raise TypeError(f"changed_files must return a set of paths, got {type(paths).__name__}")
+        if not paths:
+            raise ValueError("diff-scope: changed_files returned an empty set — the PR's changed files could "
+                             "not be determined; refusing a silent clean")
+        return run_codescan(root=root, slug=job.slug, base_dir=base_dir, max_files=max_files,
+                            include_paths=paths)
     return _worker

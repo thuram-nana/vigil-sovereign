@@ -73,16 +73,25 @@ def test_identical_bytes_dedup_at_the_spool(tmp_path):
     assert q.pending_count() == 1                          # enqueued exactly once
 
 
-def test_replayed_delivery_id_is_coalesced_by_the_queue(tmp_path):
+def test_same_work_coalesces_regardless_of_github_delivery_guid(tmp_path):
+    # the QUEUE key is now content-addressed on (repo,pr,commit), NOT the provider GUID — so two deliveries
+    # of the SAME work (different X-GitHub-Delivery GUIDs) coalesce to one scan.
     drain, spool, q = _drain(tmp_path)
-    _spool_file(spool, _env(delivery_id="D-3", commit="aaa"))
+    _spool_file(spool, _env(delivery_id="GUID-1", commit="aaa", pr_number=5))
     assert drain.drain()["enqueued"] == 1
-    # a DIFFERENT file (different commit → different bytes → passes the spool sha256 check) but the SAME
-    # delivery_id must be coalesced by the queue's permanent delivery seen-set, not re-enqueued.
-    _spool_file(spool, _env(delivery_id="D-3", commit="bbb"))
+    _spool_file(spool, _env(delivery_id="GUID-2", commit="aaa", pr_number=5))   # same work, a new GUID
     out = drain.drain()
     assert out["enqueued"] == 0 and out["duplicate"] == 1 and out["deduped"] == 0
     assert q.pending_count() == 1
+
+
+def test_a_new_head_commit_is_a_new_scan(tmp_path):
+    # a PR that gets a NEW head commit is new code → a NEW work key → both scanned (not coalesced).
+    drain, spool, q = _drain(tmp_path)
+    _spool_file(spool, _env(delivery_id="g1", commit="aaa", pr_number=5))
+    assert drain.drain()["enqueued"] == 1
+    _spool_file(spool, _env(delivery_id="g2", commit="bbb", pr_number=5))       # same PR, new head
+    assert drain.drain()["enqueued"] == 1 and q.pending_count() == 2
 
 
 def test_missing_delivery_id_is_quarantined_fail_closed(tmp_path):

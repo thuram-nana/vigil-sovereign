@@ -25,11 +25,11 @@ KNOWN, ACCEPTED PROPERTIES (documented so they are not silent surprises):
     (the code is identical — scanning it twice is waste). The PR-bot worker (Slice 3) is responsible for
     FANNING a single commit-scan's result out to every PR that points at that head; the scan layer stays
     commit-scoped on purpose.
-  * CROSS-PATH dedup is a Slice-3 prerequisite. Today a webhook job's ``delivery_id`` is its provider GUID
-    while a reconciliation job's is content-addressed, so once Slice 3 wires a REAL lister, a webhook-
-    completed commit could be re-listed + re-scanned by reconciliation. v1 uses the inert
-    :func:`empty_lister` (produces nothing), so this is LATENT; Slice 3 MUST unify the two paths on a
-    shared content-addressed work key (or fan-out) when it adds the git-host lister. See the program memo.
+  * CROSS-PATH dedup (RESOLVED in Slice 3a). Both inbound paths now derive their ``delivery_id`` from the
+    SHARED :func:`jobs.model.work_delivery_id` ``(repo, pr, commit)`` — the webhook drain (instead of the
+    provider GUID, kept in ``extra`` for audit) and this poller — so the queue's PERMANENT delivery seen-set
+    coalesces them ACROSS paths: once a webhook-handled commit is enqueued, a reconciliation re-list of the
+    same ``(repo, pr, commit)`` returns ``duplicate_delivery`` and is never re-scanned.
 """
 
 from __future__ import annotations
@@ -43,7 +43,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Optional
 
-from .model import SecurityJob          # pure stdlib — importing the model pulls no framework
+from .model import SecurityJob, work_delivery_id   # pure stdlib — importing the model pulls no framework
 
 _CURSOR_VERSION = 1
 _MAX_CURSOR_BYTES = 64 * 1024           # a checkpoint file is tiny; a larger (planted) file is ignored
@@ -76,22 +76,15 @@ def empty_lister(repo: str, since_cursor: str) -> "tuple[list[ChangedPR], str]":
     return [], since_cursor
 
 
-def _recon_delivery_id(repo: str, pr_number: Any, head_sha: str) -> str:
-    """A STABLE, INJECTIVE exactly-once key per ``(repo, pr, head)``: a re-list of the same PR-head
-    coalesces permanently at the queue's delivery seen-set (the checkpoint is the primary dedup; this is the
-    backstop that also closes the window after a completion clears the work fingerprint). The components are
-    JSON-encoded (not ``|``-joined), so no field value can be mistaken for the delimiter and collide."""
-    canon = json.dumps([str(repo), pr_number, str(head_sha)], separators=(",", ":"), default=str)
-    return "recon-" + hashlib.sha256(canon.encode("utf-8")).hexdigest()[:24]
-
-
 def _job_for(repo: str, pr: ChangedPR) -> SecurityJob:
     """Normalize one changed PR into a reconciliation SecurityJob (the authoritative validator — a bad row
-    raises, which the caller DROPS + counts)."""
+    raises, which the caller DROPS + counts). The ``delivery_id`` is the SHARED content-addressed
+    ``work_delivery_id(repo, pr, head)`` — the SAME key the webhook drain uses — so a webhook-handled head
+    permanently suppresses a reconciliation re-scan of it (cross-path dedup)."""
     return SecurityJob.normalize(
         source="reconciliation", repo=repo, pr_number=pr.pr_number,
         commit=str(pr.head_sha or ""),
-        delivery_id=_recon_delivery_id(repo, pr.pr_number, str(pr.head_sha or "")))
+        delivery_id=work_delivery_id(repo, pr.pr_number, str(pr.head_sha or "")))
 
 
 class ReconciliationCheckpoints:

@@ -34,7 +34,7 @@ from vigil_integration.jobs.model import (
     drain,
 )
 from vigil_integration.jobs.queue import SecurityJobQueue
-from vigil_integration.jobs.runner import JobRunner, make_codescan_worker
+from vigil_integration.jobs.runner import JobRunner, make_codescan_worker, make_diff_codescan_worker
 
 # The queue/runner/gate drive the offense engine (EngagementScheduler, SlugLease, authority gate) via LAZY
 # imports, so this module COLLECTS in the sovereign (framework-free) CI leg but its tests would ERROR there.
@@ -270,6 +270,33 @@ def test_runner_worker_error_is_an_outcome_not_a_crash(tmp_path: Path) -> None:
     out = _authorized_runner(q, _boom).run_one()
     assert out.state == "failed" and "scanner exploded" in out.reason
     assert q.claim_next() is None                                    # still completed (no auto-retry loop)
+
+
+def test_failed_scan_releases_delivery_so_it_is_readmittable(tmp_path: Path) -> None:
+    # repo-connect Slice 3a (red-pen M2): a FAILED scan must not be permanently suppressed by its delivery
+    # marker — releasing it lets a re-delivery / the reconciliation safety-net re-drive the same work.
+    q = SecurityJobQueue(tmp_path)
+    q.enqueue(_job(delivery_id="D-fail", commit="c1"))
+
+    def _boom(job):
+        raise RuntimeError("scanner exploded")
+    assert _authorized_runner(q, _boom).run_one().state == "failed"
+    # the same delivery can be re-enqueued (the marker was released) — a DONE scan would NOT re-admit
+    assert q.enqueue(_job(delivery_id="D-fail", commit="c1")).enqueued is True
+
+
+def test_diff_worker_fails_closed_on_empty_or_nonset_scope(tmp_path: Path) -> None:
+    # make_diff_codescan_worker must refuse a silent clean when the changed-files scope is empty or not a set
+    import pytest as _pytest
+    job = _job(commit="c1")
+    empty = make_diff_codescan_worker(base_dir=str(tmp_path), checkout=lambda j: str(tmp_path),
+                                      changed_files=lambda j: set())
+    with _pytest.raises(ValueError):
+        empty(job)
+    nonset = make_diff_codescan_worker(base_dir=str(tmp_path), checkout=lambda j: str(tmp_path),
+                                       changed_files=lambda j: ["a.py"])   # a list, not a set
+    with _pytest.raises(TypeError):
+        nonset(job)
 
 
 def test_runner_empty_queue_is_empty(tmp_path: Path) -> None:
