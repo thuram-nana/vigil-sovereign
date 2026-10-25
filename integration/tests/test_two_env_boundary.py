@@ -110,6 +110,15 @@ _o = vigil_integration.live.observation
 assert "framework" not in _m, "live.observation must not import framework at module scope (sovereign-loaded)"
 assert "strix" not in _m, "live.observation must not import strix at module scope (sovereign-loaded)"
 assert hasattr(_o, "Observation"), "live.observation must expose the Observation record it is guarding"
+import vigil_integration.jobs.model  # repo-connect Slice 1: the normalized SecurityJob event — PURE STDLIB
+assert "framework" not in _m, "jobs.model must not import framework at module scope (sovereign-loaded, pure stdlib)"
+assert "strix" not in _m, "jobs.model must not import strix at module scope"
+import vigil_integration.jobs.queue  # the durable idempotent queue — framework (EngagementScheduler/SlugLease) LAZY
+assert "framework" not in _m, "jobs.queue must not import framework at module scope"
+import vigil_integration.jobs.authorize  # the hard pre-execution gate — framework (authority) LAZY
+assert "framework" not in _m, "jobs.authorize must not import framework at module scope"
+import vigil_integration.jobs.runner  # the SOLE execution path — framework (run_codescan) LAZY
+assert "framework" not in _m, "jobs.runner must not import framework at module scope"
 print(json.dumps({"res": res, "guard": "passed"}))
 """
 
