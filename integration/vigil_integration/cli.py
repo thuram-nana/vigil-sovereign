@@ -3842,6 +3842,35 @@ def _cmd_webhook_drain(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_reconcile(args: argparse.Namespace) -> int:
+    """`vigil reconcile` — the SAFETY-NET poller (Slice 2b): per connected repo, list the PRs changed since
+    a resume checkpoint and ENQUEUE a SecurityJob for each; it is NEVER executed here (the authorized runner
+    is the sole executor). Deliberately slow (a safety net, not fast polling), idempotent (the checkpoint is
+    the primary dedup + a stable delivery_id the backstop), and durable-before-cursor. v1 uses the inert
+    empty lister (the real git-host client is a later slice), so it is wired + safe but produces nothing
+    until a lister is provided. Imports no framework at module scope (the queue defers it)."""
+    import json
+
+    from .jobs import reconciliation
+
+    repos = [r.strip() for r in (args.repo or []) if r.strip()]
+    if not repos:
+        print("vigil reconcile: at least one --repo is required (e.g. --repo github.com/org/repo)", file=sys.stderr)
+        return 2
+    rec = reconciliation.Reconciler(repos=repos, queue_root=args.queue_root,
+                                    checkpoint_root=(args.checkpoint_root or args.queue_root))
+    if args.watch:
+        print(f"  reconciling {len(repos)} repo(s) every {args.interval}s → SecurityJob queue "
+              f"({args.queue_root}); Ctrl-C to stop")
+        try:
+            rec.watch(interval=args.interval)
+        except KeyboardInterrupt:
+            pass
+        return 0
+    print(json.dumps(rec.once(), indent=2))
+    return 0
+
+
 def _terminal_next_seq(history_path: str) -> int:
     """The next append-only seq coordinate for the terminal history — the count of existing records. Total:
     an absent/unreadable history yields 0 (a fresh log)."""
@@ -5468,6 +5497,21 @@ def build_parser() -> argparse.ArgumentParser:
     pwd.add_argument("--watch", action="store_true", help="keep draining as new deliveries arrive; Ctrl-C to stop")
     pwd.add_argument("--interval", type=float, default=2.0, help="(watch) seconds between drains")
     pwd.set_defaults(func=_cmd_webhook_drain)
+
+    prc = sub.add_parser("reconcile",
+                         help="safety-net reconciliation: per connected repo, list PRs changed since the "
+                              "checkpoint and ENQUEUE a SecurityJob for each (enqueue-only; the authorized "
+                              "runner executes). Idempotent + durable-before-cursor; deliberately slow.")
+    prc.add_argument("--repo", action="append", required=True, metavar="REPO",
+                     help="a connected repo, e.g. github.com/org/repo (repeatable)")
+    prc.add_argument("--queue-root", required=True,
+                     help="the SecurityJob queue root (durable FIFO + delivery/fingerprint dedup markers)")
+    prc.add_argument("--checkpoint-root", default="",
+                     help="where per-repo resume cursors live (default: the queue root)")
+    prc.add_argument("--watch", action="store_true", help="keep reconciling on an interval; Ctrl-C to stop")
+    prc.add_argument("--interval", type=float, default=900.0,
+                     help="(watch) seconds between cycles (default 900 = a safety net, NOT fast polling)")
+    prc.set_defaults(func=_cmd_reconcile)
 
     pt = sub.add_parser(
         "terminal",
