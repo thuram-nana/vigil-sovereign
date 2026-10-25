@@ -201,3 +201,110 @@ def service_observations(
                              attrs={"version": version} if version else None))
             out.append(_mint(svc_ref, rel=EdgeKind.RUNS, obj=app_ref, conf=open_confidence))
     return out
+
+
+# ---------------------------------------------------------------------------
+# evidence_observations — the SHARED minter for external-MCP EVIDENCE leads
+# ---------------------------------------------------------------------------
+#
+# The CONSUME-direction evidence connector (``mcp.evidence.MCPEvidenceSensor``) turns an operator's
+# EXTERNAL MCP server's say-so about a subject's internals — a DB schema (tables/columns), an env
+# keyset, a log stream — into world-model observations. That remote content is a THIRD PARTY's claim,
+# so, exactly like the ``service_observations`` leads a consumed MCP TOOL mints, every entry enters as
+# a LEAD (``IntelSourceKind.MCP_EVIDENCE``, projecting as ``GROUNDING_INTEL`` / the ``intel:`` tier),
+# NEVER a fact: this minter sets ONLY ``source_kind`` for provenance (never an ``oracle:``/``cert:``
+# grounding), writes no Finding, and never promotes. A deterministic CRUCIBLE oracle must later re-fire
+# over a trusted-channel capture to turn a "the schema has table X" lead into a fact.
+
+# The four evidence facets an external-MCP server reports about a subject's internals. An entry whose
+# ``kind`` is not one of these is DROPPED — the untrusted remote cannot invent a new claim kind.
+_EVIDENCE_KINDS = frozenset({"schema_table", "schema_column", "env_key", "log_event"})
+_MAX_EVIDENCE_ENTRIES = 1024   # bound an untrusted remote payload so a giant schema cannot flood intake
+_MAX_EVIDENCE_STR = 256        # bound every string field an untrusted remote supplies
+_EVIDENCE_LEAD_CONFIDENCE = 0.6  # a modest per-datum confidence — a lead to RE-VERIFY, never proof
+
+
+def evidence_observations(
+    subject: EntityRef,
+    entries: Iterable[dict],
+    *,
+    seq: int,
+    source: str,
+    source_kind: IntelSourceKind,
+    reliability: SourceReliability,
+) -> list[Observation]:
+    """Mint one LEAD ``Observation`` per sanitized EVIDENCE entry ABOUT ``subject`` — the SHARED
+    minter the external-MCP evidence connector reuses, so the DB-schema / env / log evidence schema is
+    produced ONE way, exactly as ``service_observations`` is the one way a network-service sensor mints
+    SERVICE leads.
+
+    ``subject`` is the ``EntityRef`` the INTEGRATOR (the gated sensor) resolved for the surface its
+    operator pointed the external MCP at (e.g. a ``DATASTORE`` / ``WEBAPP`` / ``APPLICATION``). Every
+    entry is a node-claim about THAT one subject: the untrusted remote supplies only the per-entry
+    ``(kind, name, detail)`` facet, never a node id — so, mirroring the consumed-tool sensor's
+    scope-tight invariant, a remote payload can NEVER plant a new or off-scope node in the graph, only
+    attach bounded evidence leads under the subject the integrator already gate-validated.
+
+    Each ``entries`` item is a dict ``{"kind": one of "schema_table" | "schema_column" | "env_key" |
+    "log_event", "name": str, "detail": optional str}``. The per-entry ``(evidence_kind, name, detail)``
+    rides in the Observation's ``attrs`` (the authoritative, per-lead structured payload an oracle
+    re-verifies one lead at a time).
+
+    UNTRUSTED INPUT. ``entries`` is a remote third party's say-so, so it is sanitized HERE (this is the
+    shared minter, kept robust for the untrusted CONSUME path): the number of entries examined is
+    bounded (``_MAX_EVIDENCE_ENTRIES``), every string is length-bounded (``_MAX_EVIDENCE_STR``), only
+    the four known evidence kinds survive, and any malformed entry — not a dict, an unknown ``kind``, or
+    a missing/blank/non-str ``name`` — is DROPPED, never raised. A wholly malformed batch degrades to
+    zero leads (no crash, no guess).
+
+    LEAD, NEVER A FACT. Provenance is carried ONLY by ``source_kind`` (the caller passes
+    ``IntelSourceKind.MCP_EVIDENCE``) at the caller's lead ``reliability`` (Admiralty C3 for an external
+    MCP). This mints no oracle/cert grounding and no Finding; promotion to a fact is a later oracle's job.
+
+    PURE / IDEMPOTENT. No wallclock, no rng, no positional counter: ``obs_id`` IS the
+    ``(source, seq, kind, name)`` claim-key under the fixed ``subject`` (``source:seq:subject|kind|name``),
+    so re-ingest, reordering, or an intra-batch duplicate collapse to ONE observation — the Beta belief
+    never inflates from input ordering or duplication, exactly like ``service_observations``.
+
+    NODE REPRESENTATION. Every entry is a claim about the SAME ``subject`` (relation/object ``None``), so
+    the authoritative, complete, order-invariant per-lead record is the SET of claim-keyed Observations
+    this returns — what an oracle re-verifies one lead at a time. When those project onto the shared
+    subject GRAPH node, the projector merges their attrs LAST-WRITE-WINS, so ``node.attrs`` reflects one
+    representative facet (the last processed) and is order-sensitive across differing remote orderings;
+    the Beta belief and the obs_id set stay order-invariant. A consumer that needs every facet reads the
+    Observation stream, not the single node's attrs."""
+    out: list[Observation] = []
+    for idx, entry in enumerate(entries):
+        if idx >= _MAX_EVIDENCE_ENTRIES:        # bound the UNTRUSTED input (examined, not just minted)
+            break
+        if not isinstance(entry, dict):
+            continue
+        kind = entry.get("kind")
+        # Guard the membership test against an UNHASHABLE / non-str remote value: a list/dict ``kind``
+        # would raise ``TypeError: unhashable type`` on the frozenset lookup and void the WHOLE batch.
+        # A non-str kind is simply DROPPED, never raised — the shared firewall's drop-malformed /
+        # never-raise contract must hold for EVERY caller, not only one that wraps it in try/except.
+        if not isinstance(kind, str) or kind not in _EVIDENCE_KINDS:
+            continue
+        name = entry.get("name")
+        if not isinstance(name, str):
+            continue
+        name = name.strip()[:_MAX_EVIDENCE_STR]
+        if not name:                            # a blank name is not a claim
+            continue
+        attrs: dict[str, Any] = {"evidence_kind": kind, "name": name}
+        detail = entry.get("detail")
+        if isinstance(detail, str):
+            detail = detail.strip()[:_MAX_EVIDENCE_STR]
+            if detail:
+                attrs["detail"] = detail
+        # obs_id IS the claim key at this (source, seq): the (kind, name) pair distinguishes the entry
+        # under the fixed subject, so a DISTINCT (kind, name) gets a distinct id and the SAME one —
+        # re-declared, reordered, or duplicated within one batch — gets the SAME id, so IntelIngest
+        # dedups it and the Beta belief is not double-counted. No positional index, no clock, no rng.
+        out.append(Observation(
+            obs_id=f"{source}:{seq}:{subject.node_id}|{kind}|{name}",
+            source=source, source_kind=source_kind, collector=source,
+            subject=subject, relation=None, object=None, attrs=attrs,
+            source_reliability=reliability, confidence=_EVIDENCE_LEAD_CONFIDENCE, seq=seq))
+    return out
