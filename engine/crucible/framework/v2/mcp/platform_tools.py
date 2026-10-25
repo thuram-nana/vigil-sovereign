@@ -31,7 +31,8 @@ without dragging in the whole console.
 """
 from __future__ import annotations
 
-from typing import Callable, Iterable, Optional
+from typing import Optional
+from urllib.parse import quote
 
 from vigil_core.rbac import OFFENSE_ACTION_PERM, offense_perm_for
 
@@ -167,6 +168,7 @@ def _descriptor(method: str, route: str, perm: str, profile: str, schema_kind: s
             "transport": "console-hop",
             "method": method,
             "route": route,
+            "schema_kind": schema_kind,   # exact|scoped|prefix for GET; "" for POST (wildcard derived from route)
             "perm": perm,
             "profile": profile,
             # A platform operation's result is console data for the operator; it is NOT a confirmed FACT
@@ -251,6 +253,57 @@ def registry_routes(
     for route in perms:
         out.add(("POST", route))
     return out
+
+
+# Public alias — the server renders wildcard path args from the route.
+wildcard_path_args = _wildcard_path_args
+
+
+def render_console_request(descriptor: dict, arguments: Optional[dict]) -> dict:
+    """PURE: map a platform tool descriptor + the caller's ``arguments`` to a concrete console HTTP request
+    ``{method, path, query, body}``.
+
+    The ROUTE IS FIXED BY THE DESCRIPTOR (i.e. by the tool name), NEVER by arguments — arguments only fill
+    the DECLARED path args (the ``*`` wildcards and the GET prefix/scoped slot) and the POST body. Every
+    path arg is URL-encoded with ``safe=""`` so a value like ``../../x`` cannot inject extra path segments
+    or escape the route (the server-fixed-scope discipline, mirroring the EXPOSE server's fixed slug). A
+    missing required path arg raises ``ValueError`` (fail-closed) — the server turns that into a refusal,
+    never a malformed request to the gate.
+    """
+    meta = descriptor["_meta"]["vigil"]
+    method = meta["method"]
+    route = meta["route"]
+    kind = meta.get("schema_kind", "")
+    args = dict(arguments or {})
+    query: dict[str, str] = {}
+    body: Optional[dict] = None
+    name = descriptor.get("name", route)
+
+    if method == "GET":
+        if kind == "scoped":
+            slug = args.get("slug")
+            if slug is not None and str(slug).strip():
+                query["slug"] = str(slug)
+            path = route
+        elif kind == "prefix":
+            arg = args.get("arg")
+            if arg is None or not str(arg).strip():
+                raise ValueError(f"{name}: path argument 'arg' is required")
+            path = route + quote(str(arg), safe="")
+        else:  # exact
+            path = route
+    else:  # POST
+        path = route
+        for argname in wildcard_path_args(route):
+            val = args.pop(argname, None)
+            if val is None or not str(val).strip():
+                raise ValueError(f"{name}: path argument {argname!r} is required")
+            path = path.replace("*", quote(str(val), safe=""), 1)
+        if "*" in path:  # defensive: an unfilled wildcard must never reach the gate
+            raise ValueError(f"{name}: unresolved path wildcard after rendering")
+        body = args  # whatever remains is the JSON request body
+
+    return {"method": method, "path": path, "query": query, "body": body}
 
 
 def resolves_through_gate(route: str) -> bool:
