@@ -333,6 +333,19 @@
       "rationale": "Native verb dispatched in-process; parser registered and handler resolves."
     },
     {
+      "id": "cli.webhook-drain",
+      "name": "vigil webhook-drain",
+      "surface": "cli-native",
+      "status": "LIVE",
+      "verb": "webhook-drain",
+      "anchor": {
+        "file": "integration/vigil_integration/cli.py",
+        "symbol": "_cmd_webhook_drain"
+      },
+      "check": "cli-native-verb",
+      "rationale": "Native verb dispatched in-process; drains the inbound webhook spool into the SecurityJob queue (enqueue-only). Parser registered and handler resolves."
+    },
+    {
       "id": "cli.ledger",
       "name": "vigil ledger",
       "surface": "cli-native",

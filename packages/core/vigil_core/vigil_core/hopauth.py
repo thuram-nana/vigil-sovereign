@@ -81,3 +81,36 @@ def verify_hop_assertion(hop_key: str, principal: str, role: str, method: str, p
         return False
     expected = stamp_hop_assertion(hop_key, principal, role, method, path, ts)
     return hmac.compare_digest(expected, sig)
+
+
+def verify_github_signature(raw_body: bytes, header: str, secret: str) -> bool:
+    """Constant-time verification of a GitHub webhook ``X-Hub-Signature-256`` header.
+
+    GitHub signs the EXACT raw request body with HMAC-SHA256 under the webhook's shared secret and sends
+    ``X-Hub-Signature-256: sha256=<lowercase-hex>``. Returns True iff a non-empty ``secret`` is configured
+    AND the header carries the ``sha256=`` prefix AND the HMAC recomputed over ``raw_body`` equals the sent
+    digest (compared constant-time).
+
+    Fail-closed at every branch (mirrors :func:`verify_hop_assertion`): an empty/None secret (nothing to
+    verify with — never MAC under a blank key), a missing/blank header, a non-bytes body, a header without
+    the ``sha256=`` prefix, a non-ASCII (hostile) digest, or a mismatching MAC each return False. This is a
+    sibling of the hop-assertion seam but uses GitHub's wire format: LOWERCASE HEX with a ``sha256=`` prefix
+    (NOT the base64, no-prefix form of :func:`stamp_hop_assertion`), so it is a distinct function, not a
+    reuse. The MAC is over ``raw_body`` VERBATIM — the caller must pass the exact received bytes, never
+    re-serialized JSON, or the signature will not match. NB: GitHub also sends a legacy SHA-1
+    ``X-Hub-Signature``; verify the SHA-256 header only."""
+    if not isinstance(secret, str) or not secret or not header:   # non-str/empty secret ⇒ fail closed, never raise
+        return False
+    if not isinstance(raw_body, (bytes, bytearray)):   # a str body would raise mid-HMAC — fail closed
+        return False
+    prefix = "sha256="
+    if not header.startswith(prefix):
+        return False
+    sent_hex = header[len(prefix):]
+    expected_hex = hmac.new(secret.encode("utf-8"), bytes(raw_body), hashlib.sha256).hexdigest()
+    try:
+        # compare_digest over two str requires BOTH ASCII; a maliciously non-ASCII header must fail
+        # closed (return False), never raise TypeError/UnicodeEncodeError and 500 the endpoint.
+        return hmac.compare_digest(expected_hex.encode("ascii"), sent_hex.encode("ascii"))
+    except UnicodeEncodeError:
+        return False

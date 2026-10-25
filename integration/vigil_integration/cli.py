@@ -3819,6 +3819,29 @@ def _cmd_learn_drain(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_webhook_drain(args: argparse.Namespace) -> int:
+    """`vigil webhook-drain` — drain the inbound GitHub-webhook spool into the SecurityJob queue. Each inert
+    envelope (written by the `vigil up` webhook route) is normalized to a SecurityJob and ENQUEUED; it is
+    NEVER executed here — execution is SOLELY the authorized runner's. Fail-closed: a malformed/invalid
+    envelope is quarantined; a transient enqueue failure DEFERS the file to retry. The drain imports no
+    framework at module scope (the queue defers it), so the two-env boundary holds."""
+    import json
+
+    from . import webhook_drain
+
+    drain = webhook_drain.WebhookSpoolDrain(spool_dir=args.spool, queue_root=args.queue_root)
+    if args.watch:
+        print(f"  draining webhook deliveries from {args.spool}/incoming → SecurityJob queue "
+              f"({args.queue_root}); Ctrl-C to stop")
+        try:
+            drain.watch(interval=args.interval)
+        except KeyboardInterrupt:
+            pass
+        return 0
+    print(json.dumps(drain.drain(), indent=2))
+    return 0
+
+
 def _terminal_next_seq(history_path: str) -> int:
     """The next append-only seq coordinate for the terminal history — the count of existing records. Total:
     an absent/unreadable history yields 0 (a fresh log)."""
@@ -5433,6 +5456,18 @@ def build_parser() -> argparse.ArgumentParser:
     pld.add_argument("--watch", action="store_true", help="keep draining as new grants arrive; Ctrl-C to stop")
     pld.add_argument("--interval", type=float, default=2.0, help="(watch) seconds between drains")
     pld.set_defaults(func=_cmd_learn_drain)
+
+    pwd = sub.add_parser("webhook-drain",
+                         help="drain the inbound GitHub-webhook spool into the SecurityJob queue: normalize "
+                              "each inert delivery to a SecurityJob and ENQUEUE it (enqueue-only; the "
+                              "authorized runner executes). Fail-closed; idempotent by delivery_id.")
+    pwd.add_argument("--spool", required=True,
+                     help="the webhook spool dir whose incoming/ is drained (= the uiproxy VIGIL_GH_WEBHOOK_SPOOL)")
+    pwd.add_argument("--queue-root", required=True,
+                     help="the SecurityJob queue root (durable FIFO + delivery/fingerprint dedup markers)")
+    pwd.add_argument("--watch", action="store_true", help="keep draining as new deliveries arrive; Ctrl-C to stop")
+    pwd.add_argument("--interval", type=float, default=2.0, help="(watch) seconds between drains")
+    pwd.set_defaults(func=_cmd_webhook_drain)
 
     pt = sub.add_parser(
         "terminal",

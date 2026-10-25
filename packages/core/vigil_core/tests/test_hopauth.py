@@ -16,6 +16,7 @@ from vigil_core.hopauth import (
     DEFAULT_HOP_MAX_SKEW_S,
     hop_message,
     stamp_hop_assertion,
+    verify_github_signature,
     verify_hop_assertion,
 )
 
@@ -83,3 +84,61 @@ def test_default_now_uses_wall_clock_for_a_fresh_stamp():
     sig = stamp_hop_assertion(KEY, P, R, M, PATH, ts)
     # no explicit `now` → the wall clock; a just-minted stamp is inside the window.
     assert verify_hop_assertion(KEY, P, R, M, PATH, ts, sig) is True
+
+
+# ---- verify_github_signature: GitHub webhook X-Hub-Signature-256 (sha256=<lowercase-hex>) --------------
+
+_GH_SECRET = "It's a Secret to Everybody"          # GitHub's own docs example secret
+_GH_BODY = b'{"zen":"Keep it logically awesome.","hook_id":1}'
+
+
+def _gh_header(secret: str, body: bytes) -> str:
+    return "sha256=" + hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
+
+
+def test_github_signature_round_trip_verifies():
+    assert verify_github_signature(_GH_BODY, _gh_header(_GH_SECRET, _GH_BODY), _GH_SECRET) is True
+
+
+def test_github_signature_format_is_lowercase_hex_with_prefix():
+    # pin the exact wire format this verifier accepts (GitHub's), distinct from stamp_hop_assertion's base64
+    h = _gh_header(_GH_SECRET, _GH_BODY)
+    assert h.startswith("sha256=") and h[7:] == h[7:].lower()
+    assert all(c in "0123456789abcdef" for c in h[7:]) and len(h[7:]) == 64
+
+
+def test_github_signature_fail_closed_on_empty_secret_or_header():
+    h = _gh_header(_GH_SECRET, _GH_BODY)
+    assert verify_github_signature(_GH_BODY, h, "") is False          # no secret → never MAC under a blank key
+    assert verify_github_signature(_GH_BODY, h, None) is False        # None secret
+    assert verify_github_signature(_GH_BODY, "", _GH_SECRET) is False  # no header
+    assert verify_github_signature(_GH_BODY, None, _GH_SECRET) is False
+
+
+def test_github_signature_fail_closed_on_wrong_secret_or_tampered_body():
+    h = _gh_header(_GH_SECRET, _GH_BODY)
+    assert verify_github_signature(_GH_BODY, h, "wrong-secret") is False
+    assert verify_github_signature(_GH_BODY + b" ", h, _GH_SECRET) is False   # one trailing byte changes the MAC
+
+
+def test_github_signature_rejects_missing_or_legacy_prefix():
+    bare_hex = hmac.new(_GH_SECRET.encode(), _GH_BODY, hashlib.sha256).hexdigest()
+    assert verify_github_signature(_GH_BODY, bare_hex, _GH_SECRET) is False          # no 'sha256=' prefix
+    # the legacy SHA-1 header (X-Hub-Signature) must NOT be accepted by the SHA-256 verifier
+    sha1_hex = hmac.new(_GH_SECRET.encode(), _GH_BODY, hashlib.sha1).hexdigest()
+    assert verify_github_signature(_GH_BODY, "sha1=" + sha1_hex, _GH_SECRET) is False
+
+
+def test_github_signature_non_str_secret_fails_closed_not_raises():
+    # a non-str secret (bytes/int) must return False, never raise AttributeError — fully fail-closed unit
+    h = _gh_header(_GH_SECRET, _GH_BODY)
+    assert verify_github_signature(_GH_BODY, h, b"bytes-secret") is False  # type: ignore[arg-type]
+    assert verify_github_signature(_GH_BODY, h, 12345) is False            # type: ignore[arg-type]
+
+
+def test_github_signature_fail_closed_on_non_bytes_body_and_hostile_header():
+    # a str body would raise mid-HMAC; a non-ASCII digest would raise in compare_digest — both must return
+    # False, never propagate, so a malformed delivery is a clean 4xx rather than a 500.
+    assert verify_github_signature("not-bytes", _gh_header(_GH_SECRET, _GH_BODY), _GH_SECRET) is False  # type: ignore[arg-type]
+    assert verify_github_signature(_GH_BODY, "sha256=café☃", _GH_SECRET) is False
+    assert verify_github_signature(bytearray(_GH_BODY), _gh_header(_GH_SECRET, _GH_BODY), _GH_SECRET) is True  # bytearray ok
