@@ -182,6 +182,32 @@
       ]
     },
     {
+      "id": "graphql_batching.array_batch_executed",
+      "check": "GraphQLBatchingCheck",
+      "evidence": "VIGIL's own single POST of a JSON ARRAY of M (>=2) operations EACH carrying a distinct VIGIL-chosen alias ({ v{i}: __typename }) returns a JSON array whose i-th result echoes alias v{i}; the reduction batch_result_count counts the per-position alias matches and the oracle fires only when it equals M (eq[batch_result_count, sent_batch], sent_batch > 1)",
+      "fact_capable": true,
+      "clean_capable": false,
+      "preconditions": [
+        "channel_established",
+        "body_semantically_available"
+      ],
+      "limitation": "Body-derived + alias-bound: fires ONLY when ALL M (>=2) of VIGIL's distinctly-aliased operations ran in the one request — array position i must carry VIGIL's alias v{i} under a non-null data member (eq[batch_result_count, sent_batch]). A benign >=2-element data array that does NOT carry VIGIL's v{i} aliases (a static list, a REST/collection feed), a wrong-length or wrong-order response, a partial-alias array, and a single object/error all score < M and fail the predicate. Proves array request-batching is ENABLED (one HTTP request ran multiple operations, defeating per-request rate limits); does NOT prove an unbounded batch size. NOT CLEAN-capable (an unreadable body is indistinguishable from batching-off). Named residual (NOT benign- or model-reachable): VIGIL's v{i} alias scheme is predictable, so a deliberately-deceptive in-scope target could hand-echo it to assert a FACT about its OWN endpoint (impact-nil; same class as the access_control compromised-deployment residual). A per-probe high-entropy alias would retire even this residual.",
+      "target_fact_capable": true,
+      "target_clean_capable": true,
+      "evidence_surface": "response_body",
+      "implementation_refs": [
+        "engine/crucible/framework/v2/scanner/graphql.py:GraphQLBatchingCheck",
+        "integration/vigil_integration/live/web_redrive.py:web_redrive"
+      ],
+      "blocking_work": "CLEAN-capability needs the same decode-completeness guarantee as graphql_introspection.schema_returned. The proposition (all M>=2 of VIGIL's distinctly-aliased ops ran in one request) is DEFINITE, so no benign-twin baseline is needed for the FACT.",
+      "oracle_version": "achieved_state",
+      "control_requirements": [
+        "warden_active_recon_gate",
+        "vigil_owned_gated_probe",
+        "response_body_decode"
+      ]
+    },
+    {
       "id": "oidc_redirect_uri.location_header",
       "check": "OidcRedirectUriCheck",
       "evidence": "the authorization endpoint redirects (3xx Location) to the attacker-supplied redirect_uri host",
@@ -1176,6 +1202,35 @@
       ]
     },
     {
+      "id": "sensitive_exposure.secret_signature",
+      "check": "runtime_redrive",
+      "evidence": "a cloud/service CREDENTIAL signature (aws_secret_access_key) is present at a fixed credential path (/.aws/credentials), ABSENT from the BODY of a random CONTROL path, and corroborated by strings a genuine credentials artifact also carries (aws_access_key_id, [default]). CWE-359/CWE-538, the sensitive-data dual of exposure.secret_signature (CWE-200). LEAD-ONLY: a bare secret-signature at a fixed path is a placeholder/EXAMPLE-fakeable artifact (a committed .aws/credentials TEMPLATE with AWS's documented example keys carries the signature + both corroborators at the probed path), so it is WEAKER than the framework's own credential bar and is NOT accepted as a FACT.",
+      "fact_capable": false,
+      "clean_capable": false,
+      "preconditions": [
+        "channel_established",
+        "body_semantically_available"
+      ],
+      "limitation": "LEAD-ONLY (fact_capable: false), body-derived, positive-only, CONTROL-DIFFERENTIAL. The runtime_redrive arm DRIVES the /.aws/credentials probe (a VIGIL-owned gated capture with a random-control-path body differential) but can NEVER mint a signed FACT: fact_capable:false is enforced at live/verdict.py:admit (the sole reader of this registry), so a fired oracle is demoted to a LEAD. WHY LEAD-ONLY: a bare 'aws_secret_access_key' signature + corroborators at the fixed path is satisfied by a benign committed .aws/credentials TEMPLATE serving AWS's documented example keys ('aws_access_key_id = AKIAIOSFODNN7EXAMPLE / aws_secret_access_key = wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY'), which leaks NO real credential — the file announces the FORMAT, it does not prove a live secret. The probe is declared value_shaped=True, but the current _secret_assignment parses only the dotenv 'KEY=value' form, NOT the INI 'key = value' (space-separated) form an .aws/credentials file uses, so the value-shape REFUSES every value here and the arm mints nothing on this path regardless. A non-firing cannot distinguish 'no credential served' from 'served under a path/signature not probed' or an undecodable body. Bounded to the fixed credential-path + signature set. CWE-359 PII (SSN/email/PAN) is a DIFFERENT, unbuilt detector — there is no sound PII oracle and none is implied here.",
+      "target_fact_capable": true,
+      "target_clean_capable": true,
+      "evidence_surface": "response_body",
+      "implementation_refs": [
+        "integration/vigil_integration/live/runtime_redrive.py:runtime_redrive",
+        "integration/vigil_integration/live/runtime_redrive.py:_SENSITIVE_EXPOSURE_PROBES"
+      ],
+      "blocking_work": "A sound sensitive_exposure FACT needs the INI 'key = value' value-shape that exposure.secret_signature already uses for /.env: a surgical separator-skip in _secret_assignment (accept the ' = ' INI separator) so the right-hand side is extracted and the value-shape predicate (non-empty, >=6 chars, free of template/placeholder/EXAMPLE markers — 'example' is already in _SECRET_VALUE_FORBIDDEN, so AWS's documented example key is refused) re-executes OFFLINE. Only once the extractor parses the INI form may this branch be flipped fact_capable:true / oracle_version:achieved_state. It then inherits exposure.secret_signature's value-shape recall residuals, plus the residual that a page reproducing a full .aws/credentials artifact VERBATIM at the exact path with a real-entropy value satisfies the conjunction. Separately, CWE-359 PII detection (SSN/email/PAN) is a NEW oracle, not this branch.",
+      "oracle_version": "",
+      "control_requirements": [
+        "warden_active_recon_gate",
+        "vigil_owned_gated_probe",
+        "vigil_owned_live_redrive",
+        "response_body_decode",
+        "random_control_path_body_differential",
+        "MISSING:ini_key_value_value_shape_in_secret_assignment"
+      ]
+    },
+    {
       "id": "oob_callback.collector_receipt",
       "check": "OOBCheck",
       "evidence": "A blind class (SSRF / OOB-SQLi / blind XXE / deserialization / OS-command / RCE) is proven by an INBOUND out-of-band interaction carrying the finding's per-finding secret token, captured by VIGIL's OWN collaborator (loopback OOBReceiver or the operator-hosted RelayServer). At the VF-2b tier an INDEPENDENT collector signs each hit's receipt over target-observed facts only (token/client_ip/received_at/method/path); the oob_callback oracle re-checks that receipt against a collector public key the verifier PINS OUT-OF-BAND (charter/CLI, never the producer-controlled context), so a fully-dishonest producer that does not hold the collector key cannot forge a firing.",
@@ -2081,6 +2136,35 @@
       ]
     },
     {
+      "id": "el_injection.evaluation",
+      "check": "el_injection_redrive",
+      "evidence": "A per-probe RANDOM product N1*N2 (unguessable, unable to pre-exist) that VIGIL's own gated re-drive injected as an EXPRESSION-LANGUAGE expression (${N1*N2} JSP-EL / #{N1*N2} SpEL / %{N1*N2} OGNL) appears in the target's FRESH response body, the raw expression did NOT survive verbatim (a reflected-but-unevaluated payload is a conclusive clean, not a fire), AND a benign no-expression CONTROL request lacked the product - the ACHIEVED server-side EVALUATION of the expression (EL / SpEL / OGNL injection, CWE-917), re-derived offline by verify/oracles.py:evaluation_oracle over the retained bytes. SOUND for the same reason SSTI is: the ONLY producer of the unguessable product from ${N*M} / #{N*M} / %{N*M} is a server-side EXPRESSION EVALUATOR, which IS the vulnerability - a benign ${VAR} variable-substitution / config interpolation does not COMPUTE arithmetic, so it never produces the product (unlike the cmdi $((N*M)) arithmetic a calculator fakes). The RUNNER crafts the expression; the Strix/LLM payload is never trusted and the report is never proof.",
+      "fact_capable": true,
+      "clean_capable": false,
+      "preconditions": [
+        "channel_established",
+        "body_semantically_available"
+      ],
+      "limitation": "Body-derived, POSITIVE-only and coverage-bounded: a fire is unforgeable (the product is a per-probe random N1*N2 that could not pre-exist, the raw expression provably did not survive, and a benign control attributes the product to THIS probe), but VIGIL only confirms EL injection across the insertion points and EL/SpEL/OGNL expression shapes it actually drives. An expression reflected but NOT evaluated is the honest boundary (reflected, not evaluated) and does not fire; a blind/second-order EL sink VIGIL never renders stays INCONCLUSIVE. This is the EL-family sibling of ssti.evaluation - the SAME sound evaluation_oracle, a distinct CWE-917 class label. NOT CLEAN-capable: a non-firing can never assert the target evaluates no injected expression.",
+      "target_fact_capable": true,
+      "target_clean_capable": false,
+      "target_downgrade_rationale": "Proving the ABSENCE of any server-side expression evaluation is a coverage-complete capability over every insertion point and every EL/SpEL/OGNL expression shape across every reachable page, not this per-probe computed-product re-drive's target, so CLEAN-capability is deliberately not pursued on this branch.",
+      "oracle_version": "evaluation",
+      "control_requirements": [
+        "warden_active_recon_gate",
+        "vigil_owned_gated_probe",
+        "vigil_owned_live_redrive",
+        "vigil_owned_unique_probe_product",
+        "benign_control_attribution",
+        "response_body_decode"
+      ],
+      "evidence_surface": "response_body",
+      "implementation_refs": [
+        "engine/crucible/framework/v2/verify/oracles.py:evaluation_oracle",
+        "integration/vigil_integration/live/runtime_redrive.py:_el_injection_redrive"
+      ]
+    },
+    {
       "id": "boolean_sqli.sprt_inference",
       "check": "boolean_redrive | scanner.checks.BOOLEAN_SQLI_SPRT",
       "evidence": "VIGIL's own gated re-drive sends N runner-crafted true/false probe PAIRS against the finding's {endpoint, param} and the deterministic boolean_inference_oracle re-derives a Wald SEQUENTIAL PROBABILITY RATIO TEST decision offline: each round's Bernoulli signal is (the TRUE clause differs from the FALSE clause) AND (the two FALSE responses AGREE) - the first half is the boolean channel, the second a dynamic-page control - and the SPRT confirms only when the log-likelihood ratio crosses the upper boundary. The RUNNER crafts the clauses; the Strix/LLM payload is never trusted and the report is never proof.",
@@ -2333,6 +2417,63 @@
       "implementation_refs": [
         "engine/crucible/framework/v2/verify/oracles.py:credential_acceptance_oracle",
         "integration/vigil_integration/live/runtime_redrive.py:credential_acceptance_redrive"
+      ]
+    },
+    {
+      "id": "command_injection.reflected_output",
+      "check": "cmdi_reflected_redrive",
+      "evidence": "a runner-injected shell break-out (127.0.0.1;echo $((N1*N2)) with per-probe random N1,N2, plus pipe/expr variants) made the server COMPUTE the arithmetic product, which appeared in the response body VIGIL captured and was ABSENT from a benign 127.0.0.1 control. This is a LEAD, never a FACT: a benign arithmetic evaluator (a calculator / instant-answer / $(( )) config-expander) ALSO computes N1*N2 from the input and emits it while the control lacks it, so an in-band computed product does not distinguish shell execution from ordinary app arithmetic - an adversarial red-pen reproduced a signed false FACT at rate 1.0 against a benign calculator. The sound command_injection FACT is the dose-scaled timing channel (time_based_command_injection.timing_inference) or the blind curl-callback (OOB); a calculator reproduces neither.",
+      "fact_capable": false,
+      "clean_capable": false,
+      "preconditions": [
+        "channel_established",
+        "body_semantically_available"
+      ],
+      "limitation": "LEAD-only, in-band, body-derived. The marker is a per-probe random computed product attributed by a benign 127.0.0.1 control; it defeats pure reflection (the product value is absent from the payload) and a documented-signature KB (the product is random, unlike id's uid=0(root)), but it does NOT defeat a benign ARITHMETIC EVALUATOR, which computes the same product from the input - so the in-band computed product is fundamentally ambiguous between shell math and app math (an adversarial red-pen reproduced a rate-1.0 signed false FACT against a plain calculator). It stays a useful LEAD that flags the command sink with a VIGIL-owned capture; the FACT is minted on the sound sibling channels - time_based_command_injection.timing_inference (a dose-scaled latency only shell execution produces) and the OOB curl-callback. NOT clean-capable: a non-firing probe does not establish the absence of a command sink.",
+      "target_fact_capable": false,
+      "target_clean_capable": false,
+      "target_downgrade_rationale": "An in-band computed arithmetic product is not a sound FACT on this branch: a benign arithmetic evaluator reproduces the product from the input, so no retained (product, body, control) capture distinguishes shell execution from app math (the generic side_effect oracle sees only marker-in-sink). Command-injection FACTs are minted on the execution-provenance channels instead - time_based_command_injection.timing_inference (dose-scaled latency) and the OOB curl-callback - so this in-band branch stays a LEAD by design.",
+      "evidence_surface": "response_body",
+      "implementation_refs": [
+        "engine/crucible/framework/v2/scanner/checks.py:CmdiReflectedCheck",
+        "integration/vigil_integration/live/runtime_redrive.py:cmdi_reflected_redrive"
+      ],
+      "control_requirements": [
+        "warden_active_recon_gate",
+        "vigil_owned_gated_probe",
+        "response_body_decode",
+        "benign_control_attribution",
+        "sink_observation_capture"
+      ],
+      "oracle_version": ""
+    },
+    {
+      "id": "time_based_command_injection.timing_inference",
+      "check": "cmdi_timing_redrive",
+      "evidence": "VIGIL's own gated re-drive injects a SHELL break-out that runs `sleep` (127.0.0.1;sleep {s} plus pipe/subshell/backtick) and measures interleaved baseline vs delay-injected latencies (>= 5 samples each, interleaved so drift biases both equally) at two doses; the deterministic timing_oracle re-derives the decision offline - a one-sided Mann-Whitney U rejects the no-shift null, the Hodges-Lehmann median shift clears the effect-size floor, AND the shift SCALES with the injected sleep (dose-response). A benign calculator / reflector / docs page computes arithmetic or echoes input but does not DELAY the response, and a slow proxy's constant offset does not fake the dose-response scaling - so the delay attributes to SHELL EXECUTION, not to in-band content a non-vulnerable endpoint reproduces. The RUNNER crafts the SLEEP payloads; the LLM/Strix payload is never trusted.",
+      "fact_capable": true,
+      "clean_capable": false,
+      "preconditions": [
+        "channel_established"
+      ],
+      "limitation": "Timing-derived, positive-only, coverage-bounded: a fire requires a rank-sum rejection, an effect-size floor, AND a dose-response that scales with the injected sleep - so a uniformly slow/loaded endpoint, a one-off latency spike, and a constant offset with no dose-response are all refused. This is the SOUND in-band command-injection FACT channel: the in-band computed-product side_effect (command_injection.reflected_output) is not fact-capable because a benign arithmetic evaluator reproduces the product, whereas only shell execution of `sleep` produces a dose-scaled latency. The blind curl-callback channel (OOB) is the other sound FACT, setup-gated on a pinned collector. NOT clean-capable: absence of a timing shift over the driven probes does not assert the target has no command-injection channel.",
+      "target_fact_capable": true,
+      "target_clean_capable": false,
+      "target_downgrade_rationale": "Proving the ABSENCE of a command-injection channel across every parameter and shell primitive is a coverage-complete capability, not this statistical dose-response re-drive over the driven insertion points, so CLEAN-capability is deliberately not pursued on this branch.",
+      "oracle_version": "timing",
+      "control_requirements": [
+        "warden_active_recon_gate",
+        "vigil_owned_gated_probe",
+        "vigil_owned_live_redrive",
+        "runner_crafted_sleep_payloads",
+        "interleaved_paired_sampling",
+        "mann_whitney_effect_floor_dose_response"
+      ],
+      "evidence_surface": "service_response",
+      "implementation_refs": [
+        "engine/crucible/framework/v2/verify/oracles.py:timing_oracle",
+        "engine/crucible/framework/v2/scanner/checks.py:TimingCheck",
+        "integration/vigil_integration/live/runtime_redrive.py:_cmdi_timing_redrive"
       ]
     }
   ]

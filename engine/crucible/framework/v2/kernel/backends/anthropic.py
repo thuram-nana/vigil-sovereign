@@ -151,6 +151,12 @@ class AnthropicBackend(LLMBackend):
         return True, f"ready (model={self.model}){zdr_marker}"
 
     def _client_obj(self) -> object:
+        # HOT-RELOAD: in the managed engine, pick up a key re-sealed through the UI with no restart. The SDK
+        # reads ANTHROPIC_API_KEY from the env at construction, so refresh the env first and INVALIDATE the
+        # cached client when the key actually changed, forcing a rebuild with the fresh key.
+        from ...common.live_keys import refresh_live_anthropic_key  # noqa: PLC0415
+        if refresh_live_anthropic_key():
+            self._client = None
         if self._client is None:
             import anthropic
             # max_retries=0: the SDK's internal retry/backoff is disabled so `_create_with_backoff`

@@ -160,6 +160,32 @@ def test_multi_critic_agent_reviews_each_finding_exactly_once(tmp_path: Path) ->
     bb.close()
 
 
+def test_multi_critic_agent_skips_leads_but_still_reviews_facts(tmp_path: Path) -> None:
+    # Wave-2 flood gate: a LEAD (no oracle_context AND not verified_by_oracle) gets NO advisory panel.
+    # A whole-app run posts HUNDREDS of passive-hygiene leads as finding events; reviewing each (3
+    # verdicts => 3 synchronous spine commits) was the dominant event-flood that lagged the Live UI.
+    # The skip must: leak no verdict, still ADVANCE the cursor (quiesce, no re-review), and NOT
+    # suppress a genuine FACT's panel. (The oracle stays sole authority; the panel never promoted.)
+    bb = open_blackboard(db_path=tmp_path / "bb.sqlite")
+    bb.engagement_id("e")
+    lead = bb.post(engagement="e", kind="finding", agent_name="passive",
+                   payload=_finding(finding_slug="L", verified_by_oracle=False,
+                                    oracle_context=None).model_dump())
+    agent = MultiCriticAgent(bb, "e")
+    assert agent.should_run()                                     # the lead IS unreviewed...
+    assert agent.step() == 0                                      # ...but the panel is skipped — 0 verdicts
+    assert not agent.should_run()                                 # cursor advanced past it; quiesces, no re-review
+    assert bb.read(engagement="e", kinds=["critic_verdict"]) == []
+    assert panel_verdict_for(bb, "e", lead).verdict == "abstain"  # empty panel for a lead — no crash
+    # a genuine FACT posted after is still FULLY reviewed — the gate is selective, not an off-switch.
+    fe = bb.post(engagement="e", kind="finding", agent_name="exploit",
+                 payload=_finding(finding_slug="F").model_dump())
+    assert agent.should_run() and agent.step() == 3
+    assert len(bb.read(engagement="e", kinds=["critic_verdict"])) == 3
+    assert panel_verdict_for(bb, "e", fe).verdict == "endorse"
+    bb.close()
+
+
 def test_panel_verdict_isolates_and_indexes_by_parent(tmp_path: Path) -> None:
     # X3 O(N^2) fix: panel_verdict_for reads ONLY the verdicts about the target finding, via the
     # indexed parent_id — not every verdict in the engagement filtered in Python. Correctness:

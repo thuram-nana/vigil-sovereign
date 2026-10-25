@@ -30,7 +30,8 @@ _HINTS: tuple[tuple[tuple[str, ...], tuple[str, ...]], ...] = (
     (("file", "filename", "path", "filepath", "template", "page", "include",
       "document", "dir", "folder", "download", "read"),
      ("path_traversal",)),
-    (("cmd", "command", "exec", "execute", "run", "ping", "host_cmd"),
+    (("cmd", "command", "exec", "execute", "run", "ping", "host_cmd",
+      "host", "hostname", "server", "ip", "addr", "target_host"),
      ("command_injection",)),
     (("xml", "soap", "xmldata"),
      ("blind_xxe",)),
@@ -68,13 +69,34 @@ def select_checks(
 ) -> list[Check]:
     """The prioritised checks for one insertion point. Falls back to the full set
     when the point matches no hint, so coverage is never silently lost."""
-    by_class: dict[str, Check] = {}
+    # Keep the first check of each (bug_class, CHANNEL) pair — NOT one per bug_class. An OOB
+    # (callback-confirmed) check and an in-band (response-confirmed) check for the SAME class are not
+    # interchangeable: the OOB one self-skips without an OOB receiver and confirms over a callback, the
+    # in-band one reads the response. Collapsing them to the-first-by-class silently SHADOWED the in-band
+    # command-injection check behind the OOB `;curl {callback}` one, leaving an in-band-only cmdi sink
+    # (MERIDIAN's /diagnostics/ping?host=, no OOB receiver) confirmed by NOTHING on the targeted/
+    # autonomous path. `wants_oob` is the channel discriminator (OOBCheck/DNSOOBCheck set it True;
+    # response-based checks do not). Order within a class stays the input (cost-ascending) order.
+    groups: dict[str, list[Check]] = {}
+    seen: set[tuple[str, bool]] = set()
     for c in checks:
-        by_class.setdefault(c.bug_class, c)
+        key = (c.bug_class, bool(getattr(c, "wants_oob", False)))
+        if key in seen:
+            continue
+        seen.add(key)
+        groups.setdefault(c.bug_class, []).append(c)
 
     wanted = likely_classes(point.name)
-    if reflected:
+    # A HINTED point (or one known to reflect input) ALSO gets the in-band reflection/evaluation
+    # classes — reflected XSS, SSTI (server-side template EVAL), error-based SQLi, path traversal —
+    # because a parameter name rarely advertises them (a `title=` is not obviously an SSTI sink).
+    # Previously these were gated behind a `reflected` flag the engine's call site never set, which
+    # SILENTLY DROPPED SSTI / error-based-SQLi at their OWN sinks (SSTI at /reports/run?title=,
+    # error-based SQLi at /records/search?q=). Gated on `wanted` so a TRULY UNHINTED point adds
+    # nothing here and still falls back to the FULL set below — targeting narrows effort where a
+    # param gives a signal, it never silently drops a class at a point it can say nothing about.
+    if reflected or wanted:
         wanted = wanted + list(_REFLECTION_CLASSES)
 
-    selected = [by_class[bc] for bc in dict.fromkeys(wanted) if bc in by_class]
+    selected = [c for bc in dict.fromkeys(wanted) for c in groups.get(bc, [])]
     return selected or list(checks)

@@ -528,3 +528,51 @@ def test_streaming_error_fails_closed_to_safest(state):
         messages = _BoomStream()
     d = think(state, {"x": 1}, client=_C(), model="claude-opus-5")
     assert d.action == ActionType.ASK_USER                                  # a streaming error is a safe pause
+
+
+# --- API-key HOT-RELOAD: a key re-sealed through the UI reaches the RUNNING offense engine, no restart ------
+
+def test_resolve_key_hot_reloads_the_persisted_key_in_the_managed_engine(monkeypatch, tmp_path):
+    """In the managed offense engine (VIGIL_LIVE_KEY_RELOAD=1, set by uiproxy), _resolve_key re-reads the
+    CURRENT persisted key from ~/.sigil/sigil.env at CALL time — so a key re-sealed via the UI
+    (settings.set_secret -> sigil.env) is picked up on the next think with NO Stop->Start."""
+    pytest.importorskip("framework.v2.common.live_keys")  # the shared hot-reload reader is offense-env (framework) only
+    from vigil_integration.live.think_claude import _resolve_key
+    monkeypatch.setenv("SIGIL_HOME", str(tmp_path))
+    monkeypatch.setenv("VIGIL_LIVE_KEY_RELOAD", "1")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-frozen-at-spawn")       # the stale spawn-frozen snapshot
+    sigil_env = tmp_path / "sigil.env"
+    # (1) the UI-sealed key (sigil.env) WINS over the spawn-frozen env — the hot-reload.
+    sigil_env.write_text("ANTHROPIC_API_KEY=sk-fresh-sealed\n", encoding="utf-8")
+    assert _resolve_key(None) == "sk-fresh-sealed"
+    # (2) a later re-seal is picked up on the NEXT call (re-read per call, no cached client).
+    sigil_env.write_text("ANTHROPIC_API_KEY=sk-resealed-again\n", encoding="utf-8")
+    assert _resolve_key(None) == "sk-resealed-again"
+    # (3) SIGIL_ANTHROPIC_API_KEY takes precedence (mirrors sigil.config.effective_config).
+    sigil_env.write_text("ANTHROPIC_API_KEY=sk-a\nSIGIL_ANTHROPIC_API_KEY=sk-sigil\n", encoding="utf-8")
+    assert _resolve_key(None) == "sk-sigil"
+    # (4) nothing persisted -> fall back to the frozen env (a shell-only operator is unaffected).
+    sigil_env.write_text("# no anthropic key here\nOTHER=x\n", encoding="utf-8")
+    assert _resolve_key(None) == "sk-frozen-at-spawn"
+    # (5) an explicit arg always wins.
+    assert _resolve_key("sk-explicit") == "sk-explicit"
+
+
+def test_resolve_key_does_not_re_read_without_the_managed_flag(monkeypatch, tmp_path):
+    """A test / bare-shell `vigil engage` (no VIGIL_LIVE_KEY_RELOAD) keeps the plain-env behaviour and NEVER
+    reads a stray ~/.sigil key — the re-read is scoped to the uiproxy-spawned managed engine."""
+    from vigil_integration.live.think_claude import _resolve_key
+    monkeypatch.setenv("SIGIL_HOME", str(tmp_path))
+    monkeypatch.delenv("VIGIL_LIVE_KEY_RELOAD", raising=False)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-env-only")
+    (tmp_path / "sigil.env").write_text("ANTHROPIC_API_KEY=sk-should-be-ignored\n", encoding="utf-8")
+    assert _resolve_key(None) == "sk-env-only"
+
+
+def test_read_live_key_fails_safe_on_a_missing_store(monkeypatch, tmp_path):
+    """_read_live_key never raises: a missing / unreadable sigil.env (or a keyring/TPM-vault backend whose
+    secret is not in the envfile) returns None, so _resolve_key falls back to the env (no hot-reload for the
+    sealed backends, but never a crash and never a false key)."""
+    from vigil_integration.live.think_claude import _read_live_key
+    monkeypatch.setenv("SIGIL_HOME", str(tmp_path / "does-not-exist"))
+    assert _read_live_key() is None

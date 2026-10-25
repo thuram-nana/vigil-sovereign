@@ -237,6 +237,16 @@ class MultiCriticAgent(_multi_critic_agent_base()):  # type: ignore[misc]
                 finding = FindingPayload.model_validate(ev.payload)
             except Exception:
                 continue
+            # Advise ONLY over oracle-CARRYING findings. A LEAD (no oracle_context and not
+            # verified_by_oracle) can never re-ground, so N critic verdicts over it are pure
+            # advisory noise — and a whole-app run posts HUNDREDS of passive-hygiene leads as
+            # finding events, so reviewing each (default 3 verdicts => 3 synchronous spine
+            # commits) was a dominant event-flood + per-event blocking-commit source. Skipping
+            # them changes NO verdict (the oracle is the sole authority; the panel never promotes)
+            # and costs no fact its panel. The cursor already advanced past this event above, so
+            # the lead is counted-reviewed and never re-examined.
+            if not (finding.oracle_context or finding.verified_by_oracle):
+                continue
             for v in run_panel(finding, self._critics):
                 try:
                     self.bb.post(engagement=self.engagement_id, kind="critic_verdict",

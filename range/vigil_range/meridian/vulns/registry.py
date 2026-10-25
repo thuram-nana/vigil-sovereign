@@ -100,6 +100,58 @@ VULNS: list[Vuln] = [
          "GET", "/assistant", "q", "catalog/manual (web scan does not auto-fire an LLM oracle)", "medium",
          "an injection message makes the mock model leak its system prompt + the internal secret token",
          "a guardrail refuses the injection and the secret never appears in output", "S3"),
+    # --- S5: the expanded citizen-services surface (profile, messaging, reports, billing, diagnostics) ---
+    Vuln("idor-profile", "IDOR / BOLA on the citizen profile", "CWE-639", "bola",
+         "GET", "/profile", "id", "ACHIEVED_STATE", "high",
+         "any caller reads any account's full PII (display name, `LAB-NID-` national id, email, role) by id — "
+         "no ownership check (confirm two-identity via `scan --access-control --ac-ref idor:id:<victim>`)",
+         "the caller may read only the id equal to the server-side session principal; any other id → 403", "S5"),
+    Vuln("mass-assignment-profile", "Mass-assignment privilege escalation in profile update", "CWE-915",
+         "privilege_escalation", "POST", "/profile/update", "role", "ACHIEVED_STATE", "critical",
+         "the update binds EVERY submitted field that is an account attribute, incl. `role`, so a body with "
+         "`role=admin` elevates the caller (the role cell reads `admin` in the response)",
+         "only an allowlist (display_name, email) is bound; a submitted `role` is ignored", "S5"),
+    Vuln("xss-reflected-profile", "Reflected XSS in the profile display name", "CWE-79", "xss",
+         "POST", "/profile/update", "display_name", "REFLECTION_CONTEXT", "high",
+         "the updated `display_name` is echoed into the update response unescaped, in an executable position",
+         "the reflection is HTML-escaped", "S5"),
+    Vuln("xss-stored-messages", "Stored XSS in a secure message body", "CWE-79", "xss",
+         "GET", "/messages/view", "id", "REFLECTION_CONTEXT", "high",
+         "a message `body` posted to /messages/send is stored verbatim and rendered unescaped on the view page",
+         "the stored body is HTML-escaped on render", "S5"),
+    Vuln("idor-messages", "IDOR / BOLA on the message view", "CWE-639", "bola",
+         "GET", "/messages/view", "id", "ACHIEVED_STATE", "high",
+         "any caller reads any message by id — including another user's (exposing a distinctive lab secret such "
+         "as `OTP-LAB-7Q2X`) — with no recipient check",
+         "the caller must be the message recipient; otherwise 403", "S5"),
+    Vuln("ssti-reports", "Server-side template injection in the report title", "CWE-1336", "ssti",
+         "GET", "/reports/run", "title", "EVALUATION (server computes the injected arithmetic; reflection is refused)",
+         "high",
+         "a `{{expr}}` title is evaluated server-side and the RESULT is written into the page — `{{7331*7331}}` "
+         "renders `53743561` (raw payload absent), which the evaluation oracle confirms over mere reflection",
+         "the title is treated as a literal and HTML-escaped; nothing is evaluated", "S5"),
+    Vuln("sqli-reports", "SQL injection in the report status filter", "CWE-89", "sqli",
+         "GET", "/reports/run", "status", "ERROR_SIGNATURE + DIFFERENTIAL_RESPONSE", "critical",
+         "the `status` filter is string-concatenated into a real SQLite query: a broken quote surfaces a "
+         "sqlite3 error, and `' OR '1'='1` returns every report row while `' AND '1'='2` returns none",
+         "the filter is parameterized (WHERE status = ?) and the DB error is never echoed", "S5"),
+    Vuln("idor-billing", "IDOR / BOLA on the invoice detail", "CWE-639", "bola",
+         "GET", "/billing/invoice", "id", "ACHIEVED_STATE", "high",
+         "any caller reads any invoice by id — amount plus payer PII (name, email, `MER-FAKE-` national id) — "
+         "with no ownership check",
+         "the invoice must belong to the signed-in payer; otherwise 403", "S5"),
+    Vuln("bizlogic-billing", "Business-logic flaw in invoice checkout", "CWE-840", "business_logic",
+         "POST", "/billing/checkout", "discount", "ACHIEVED_STATE", "high",
+         "the client-supplied `discount` percent is trusted unbounded, so a discount >= 100 books a zero/negative "
+         "total that is still marked PAID",
+         "the server recomputes from the list price, rejects a discount outside [0,50], and refuses a "
+         "non-positive total", "S5"),
+    Vuln("cmdi-diagnostics", "OS command injection in the network diagnostic", "CWE-78", "command_injection",
+         "GET", "/diagnostics/ping", "host", "OOB_CALLBACK (blind; + response-reflected output for OOB-less confirmation)",
+         "critical",
+         "the `host` value is concatenated into a shell string run with shell=True, so `;curl <callback>;` (the "
+         "engine's rce-oob payload) calls out AND injected output (`;id`) is reflected into the response",
+         "`host` is validated to a strict hostname/IP and run as an argv list with shell=False", "S5"),
 ]
 
 

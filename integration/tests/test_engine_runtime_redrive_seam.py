@@ -25,8 +25,10 @@ oracles; this file proves the routing + live positive + the negative controls en
 from __future__ import annotations
 
 import http.server
+import json
 import re
 import sqlite3
+import subprocess
 import threading
 import time
 import types
@@ -52,6 +54,7 @@ def _decision(bug_class: str, *, url: str) -> types.SimpleNamespace:
     ("path_traversal", "path_traversal"), ("directory_traversal", "path_traversal"),
     ("xss", "xss"), ("reflected_xss", "xss"), ("cross_site_scripting", "xss"),
     ("exposure", "exposure"), ("information_disclosure", "exposure"), ("framework_exposure", "exposure"),
+    ("sensitive_exposure", "sensitive_exposure"), ("sensitive_data_exposure", "sensitive_exposure"),
 ])
 def test_redrive_spec_emits_a_runtime_spec_for_response_derived_classes(claimed, norm):
     from vigil_integration.live.engine import VigilEngine
@@ -72,6 +75,15 @@ def test_redrive_spec_emits_a_runtime_spec_for_response_derived_classes(claimed,
     ("boolean_sqli", "boolean_sqli"), ("blind_sqli", "boolean_sqli"), ("boolean_based_sqli", "boolean_sqli"),
     ("time_based_sqli", "time_based_sqli"), ("time_based_blind_sqli", "time_based_sqli"),
     ("time_sqli", "time_based_sqli"),
+    # the SOUND in-band command-injection FACT is the dose-scaled timing channel — it normalizes to ITSELF
+    # (never to `command_injection`, which would fall through to the OOB/side_effect branches) so the producer
+    # claims it HERE and the seam routes it to the _cmdi_timing_redrive arm.
+    ("time_based_command_injection", "time_based_command_injection"),
+    ("time_based_rce", "time_based_command_injection"), ("time_based_cmdi", "time_based_command_injection"),
+    # EL / SpEL / OGNL expression-language injection (CWE-917) — the EL-family subset of the SOUND evaluation
+    # channel. Normalizes to itself (distinct CWE from ssti); the framework spellings fold onto it.
+    ("el_injection", "el_injection"), ("spel_injection", "el_injection"),
+    ("ognl_injection", "el_injection"), ("expression_language_injection", "el_injection"),
 ])
 def test_redrive_spec_emits_a_runtime_spec_for_injection_classes(claimed, norm):
     from vigil_integration.live.engine import VigilEngine
@@ -308,6 +320,80 @@ def test_non_runtime_class_is_not_handled_here(monkeypatch, tmp_path):
     assert ref is None
 
 
+# -- sensitive_exposure: LEAD-ONLY (fact_capable:false) — DRIVEN, never mints -----------------------
+# A REAL AWS creds file (INI 'key = value' form) and AWS's documented EXAMPLE template both serve the
+# signature + corroborators at the probed path. sensitive_exposure.secret_signature is fact_capable:false,
+# so NEITHER mints a FACT — but the arm is DISPATCHED (a VIGIL-owned gated capture behind the lead).
+_AWS_REAL = ("[default]\naws_access_key_id = AKIADECOYLABKEYID01\n"
+             "aws_secret_access_key = AKIADECOYwJalrXUtnFEMILABdecoykey0123456789\n")
+_AWS_EXAMPLE = ("[default]\naws_access_key_id = AKIAIOSFODNN7EXAMPLE\n"
+                "aws_secret_access_key = wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY\n")
+
+
+class _AwsVulnApp(http.server.BaseHTTPRequestHandler):
+    """Serves a REAL-looking .aws/credentials (INI form) at the probed path; 404s everything else."""
+    body = _AWS_REAL
+
+    def do_GET(self):  # noqa: N802
+        from urllib.parse import urlsplit
+        if urlsplit(self.path).path == "/.aws/credentials":
+            raw = type(self).body.encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.send_header("Content-Length", str(len(raw)))
+            self.end_headers()
+            self.wfile.write(raw)
+            return
+        self.send_response(404)
+        self.send_header("Content-Type", "text/plain; charset=utf-8")
+        self.end_headers()
+        self.wfile.write(b"Not Found")
+
+    def log_message(self, *a):
+        return
+
+
+class _AwsExampleApp(_AwsVulnApp):
+    body = _AWS_EXAMPLE
+
+
+class _AwsCountingApp(_AwsVulnApp):
+    hits = 0
+
+    def do_GET(self):  # noqa: N802
+        type(self).hits += 1
+        return super().do_GET()
+
+
+def test_sensitive_exposure_is_lead_only_in_the_registry():
+    from vigil_integration.live.runtime_redrive import RUNTIME_FACT_CLASSES, RUNTIME_REDRIVE_CLASSES
+    assert "sensitive_exposure" not in RUNTIME_FACT_CLASSES, "sensitive_exposure must NOT be a FACT class"
+    assert "sensitive_exposure" in RUNTIME_REDRIVE_CLASSES, "it is DISPATCHED (demoted), not removed"
+
+
+def test_live_sensitive_exposure_is_DRIVEN_and_never_mints_a_fact(monkeypatch, tmp_path):
+    """A served .aws/credentials with a REAL-looking secret is LEAD-ONLY: the arm is DRIVEN (a VIGIL-owned
+    gated capture — control + probe) but mints NO signed FACT (fact_capable:false)."""
+    _AwsCountingApp.hits = 0
+    ref = _fact(monkeypatch, tmp_path, "http://127.0.0.1:{port}/", "sensitive_exposure",
+                handler=_AwsCountingApp)
+    assert ref is None, "sensitive_exposure is LEAD-ONLY — a bare AWS signature must never mint a signed FACT"
+    assert _AwsCountingApp.hits >= 2, (
+        f"the seam did not DRIVE the lead-only arm — only {_AwsCountingApp.hits} request(s) reached the "
+        f"origin, so there is no VIGIL-owned capture behind the operator's lead")
+
+
+def test_negctl_sensitive_exposure_example_template_mints_nothing(monkeypatch, tmp_path):
+    ref = _fact(monkeypatch, tmp_path, "http://127.0.0.1:{port}/", "sensitive_exposure",
+                handler=_AwsExampleApp)
+    assert ref is None, "AWS's documented EXAMPLE credentials file must NOT mint (LEAD-only, and 'example')"
+
+
+def test_negctl_sensitive_exposure_no_file_mints_nothing(monkeypatch, tmp_path):
+    ref = _fact(monkeypatch, tmp_path, "http://127.0.0.1:{port}/", "sensitive_exposure", handler=_SafeApp)
+    assert ref is None, "a host that 404s /.aws/credentials must not mint"
+
+
 def test_out_of_scope_url_mints_nothing(monkeypatch, tmp_path):
     _grant_active_recon(monkeypatch)
     _charter(tmp_path, "127.0.0.1")   # only 127.0.0.1 is in scope
@@ -403,6 +489,9 @@ def test_negctl_xss_quote_escaped_js_string_mints_nothing(monkeypatch, tmp_path)
 
 _SLEEP_RE = re.compile(r"(?:pg_)?sleep\(\s*(\d*\.?\d+)\s*\)", re.IGNORECASE)
 _ARITH_RE = re.compile(r"(\d{4,})\s*\*\s*(\d{4,})")
+# EL / SpEL / OGNL arithmetic ONLY inside an expression wrapper (${...} / #{...} / %{...}) — so the /el sink
+# evaluates an EL expression (the vuln) but a bare reflected number never fires it.
+_EL_ARITH_RE = re.compile(r"[$#%]\{(\d{4,})\s*\*\s*(\d{4,})\}")
 
 _INJ_DB = sqlite3.connect(":memory:", check_same_thread=False)
 _INJ_DB.execute("CREATE TABLE users(id INTEGER, name TEXT)")
@@ -475,6 +564,30 @@ class _InjApp(http.server.BaseHTTPRequestHandler):
             time.sleep(0.05)
             return self._html("<html><body>ok</body></html>")
 
+        if path == "/cmd-time":                    # VULNERABLE: GENUINE shell execution of the host param
+            # (subprocess shell=True) — a REAL command-injection sink, NOT a simulated timer. The cmdi-timing
+            # arm injects `127.0.0.1;sleep {s}` into `host`, so the shell runs a REAL `sleep` and the latency
+            # SCALES with the injected dose (dose-responsive) → time_based_command_injection.
+            host = (q.get("host") or [""])[0]
+            try:
+                subprocess.run("echo reached " + host, shell=True, capture_output=True, text=True, timeout=5)
+            except Exception:  # noqa: BLE001
+                pass
+            return self._html("<html><body>ok</body></html>")
+
+        if path == "/el":                          # VULNERABLE: EVALUATES an EL/SpEL/OGNL expression and emits
+            # ONLY the product (a server-side expression evaluator — the CWE-917 vuln). Fires on ${N*M}/#{N*M}/
+            # %{N*M}; a bare reflected number does not (the wrapper is required), mirroring /ssti for EL syntax.
+            m = _EL_ARITH_RE.search(value)
+            if m:
+                return self._html(f"<html><body><p>{int(m.group(1)) * int(m.group(2))}</p></body></html>")
+            return self._html(f"<html><body><p>{_esc(value)}</p></body></html>")   # benign echo, no product
+        if path == "/el-safe":                     # BENIGN ${VAR} SUBSTITUTION engine — the decisive EL control:
+            # substitutes KNOWN variables but NEVER computes arithmetic, so ${N*M} (an unknown "var") yields the
+            # empty string, the product never appears, and the evaluation oracle refuses → LEAD, not a FACT.
+            out = re.sub(r"[$#%]\{([^}]*)\}", lambda mo: {"user": "guest", "env": "prod"}.get(mo.group(1), ""), value)
+            return self._html(f"<html><body><p>config: {_esc(out)}</p></body></html>")
+
         self.send_response(404)
         self.end_headers()
 
@@ -488,6 +601,15 @@ def test_live_ssti_mints_a_fact(monkeypatch, tmp_path):
     """A live server that EVALUATES a runner-injected per-probe product must mint a signed SSTI FACT."""
     ref = _fact(monkeypatch, tmp_path, "http://127.0.0.1:{port}/ssti?q=seed", "ssti", handler=_InjApp)
     assert ref, "a live server evaluating the injected expression must mint a signed SSTI FACT via the seam"
+
+
+def test_live_el_injection_mints_a_fact(monkeypatch, tmp_path):
+    """A live server that EVALUATES a runner-injected EL/SpEL/OGNL expression (${N*M} / #{N*M} / %{N*M}) must
+    mint a signed el_injection FACT via the governed seam — the EL-family sibling of SSTI, the SAME sound
+    evaluation_oracle. Proves el_injection reaches the (already EL-capable) evaluation arm and mints under its
+    own CWE-917 class rather than staying a LEAD."""
+    ref = _fact(monkeypatch, tmp_path, "http://127.0.0.1:{port}/el?q=seed", "el_injection", handler=_InjApp)
+    assert ref, "a live EL-evaluating sink must mint a signed el_injection FACT via the seam"
 
 
 def test_live_boolean_sqli_mints_a_fact_via_sprt(monkeypatch, tmp_path):
@@ -525,12 +647,53 @@ def test_live_time_based_sqli_mints_a_fact(monkeypatch, tmp_path):
     assert ref, "a live dose-responsive SLEEP sink must mint a signed time_based_sqli FACT via the seam"
 
 
+def test_live_time_based_command_injection_mints_a_fact(monkeypatch, tmp_path):
+    """The SOUND in-band command-injection FACT: a GENUINE shell sink (subprocess shell=True) that runs the
+    injected `;sleep {s}` makes the latency SCALE with the dose, so the governed engage seam dispatches
+    time_based_command_injection to the _cmdi_timing_redrive arm and the timing oracle mints a signed FACT —
+    the channel the calculator-fakeable in-band computed-product side_effect (now LEAD-only) could not sound."""
+    ref = _fact(monkeypatch, tmp_path, "http://127.0.0.1:{port}/cmd-time?host=seed",
+                "time_based_command_injection", handler=_InjApp)
+    assert ref, "a live dose-responsive shell `sleep` sink must mint a signed time_based_command_injection FACT"
+
+
+def test_cmdi_timing_seam_routes_through_the_timing_oracle_not_the_side_effect():
+    """Correctness-trap pin: the seam dispatches time_based_command_injection to the _cmdi_timing_redrive arm,
+    which adjudicates through the dose-response TimingCheck / timing_oracle over SHELL sleep break-outs — NOT
+    the calculator-fakeable side_effect computed-product channel (command_injection.reflected_output, now
+    LEAD-only). Asserted structurally so a refactor that re-points it at the unsound channel is caught."""
+    import inspect
+
+    from vigil_integration.live import runtime_redrive as rr
+    wrapper = inspect.getsource(rr._cmdi_timing_redrive)
+    assert "timing_redrive" in wrapper and "_CMDI_SLEEP_TEMPLATES" in wrapper, (
+        "_cmdi_timing_redrive must drive the timing arm with the shell sleep break-out templates")
+    assert "cmdi_reflected_redrive(" not in wrapper and "side_effect_oracle" not in wrapper, (
+        "_cmdi_timing_redrive must NOT call the calculator-fakeable side_effect arm/oracle (the docstring may "
+        "name it to contrast; the routing must go through timing_redrive only)")
+    disp = inspect.getsource(rr.runtime_redrive)
+    assert '"time_based_command_injection": _cmdi_timing_redrive' in disp, (
+        "the dispatcher must delegate time_based_command_injection to the _cmdi_timing_redrive arm")
+    # and the shell sleep templates must actually be shell break-outs that run `sleep`
+    assert all("sleep {s}" in t for t in rr._CMDI_SLEEP_TEMPLATES) and len(rr._CMDI_SLEEP_TEMPLATES) >= 3, (
+        "_CMDI_SLEEP_TEMPLATES must be shell break-outs invoking `sleep`")
+
+
 # -- mandatory negative controls: a safe twin mints nothing (stays a LEAD) --------------------------
 
 def test_negctl_ssti_reflected_but_unevaluated_mints_nothing(monkeypatch, tmp_path):
     """FP: the raw expression survives verbatim (reflected, not evaluated) → no product → LEAD, not a FACT."""
     ref = _fact(monkeypatch, tmp_path, "http://127.0.0.1:{port}/ssti-safe?q=seed", "ssti", handler=_InjApp)
     assert ref is None, "a verbatim-reflected (unevaluated) expression must not mint an SSTI FACT"
+
+
+def test_negctl_el_injection_variable_substitution_mints_nothing(monkeypatch, tmp_path):
+    """FP (the decisive EL control): a benign ${VAR} substitution engine substitutes known variables but NEVER
+    computes arithmetic, so the unguessable ${N*M} product never appears → the evaluation oracle refuses →
+    LEAD, not a FACT. This is why the EL evaluation channel is SOUND where the cmdi computed product is not:
+    only a real server-side EXPRESSION EVALUATOR (the vuln) produces the product, not a variable substitution."""
+    ref = _fact(monkeypatch, tmp_path, "http://127.0.0.1:{port}/el-safe?q=seed", "el_injection", handler=_InjApp)
+    assert ref is None, "a benign ${VAR} substitution engine must not mint an el_injection FACT"
 
 
 def test_negctl_boolean_sqli_static_page_mints_nothing(monkeypatch, tmp_path):
@@ -556,3 +719,244 @@ def test_negctl_time_based_sqli_uniformly_slow_mints_nothing(monkeypatch, tmp_pa
     ref = _fact(monkeypatch, tmp_path, "http://127.0.0.1:{port}/time-safe?q=seed", "time_based_sqli",
                 handler=_InjApp)
     assert ref is None, "a uniformly slow endpoint must not mint a time_based_sqli FACT"
+
+
+def test_negctl_time_based_command_injection_uniformly_slow_mints_nothing(monkeypatch, tmp_path):
+    """FP: the same uniformly slow endpoint, claimed as time_based_command_injection — a fixed per-request
+    delay has no dose-response, so the cmdi-timing arm refuses → LEAD, not a FACT (the dose-response gate is
+    what makes the shell-sleep channel sound where a slow/loaded endpoint is not)."""
+    ref = _fact(monkeypatch, tmp_path, "http://127.0.0.1:{port}/time-safe?host=seed",
+                "time_based_command_injection", handler=_InjApp)
+    assert ref is None, "a uniformly slow endpoint must not mint a time_based_command_injection FACT"
+
+
+# --- csp_posture: the PASSIVE header-posture FACT (one gated GET + a parse of the enforced CSP header) ------
+
+def test_redrive_spec_emits_a_csp_spec_for_csp_posture_and_aliases():
+    from vigil_integration.live.engine import VigilEngine
+    for claimed in ("csp_posture", "permissive_csp", "csp_weakness", "content_security_policy"):
+        spec = VigilEngine._redrive_spec(_decision(claimed, url="http://127.0.0.1:19010/"), None)
+        assert spec is not None and spec["kind"] == "csp" and spec["bug_class"] == "csp_posture", \
+            f"{claimed} must route to the csp spec; got {spec}"
+
+
+class _CspApp(http.server.BaseHTTPRequestHandler):
+    CSP = None
+    CSP2 = None
+    REPORT_ONLY = False
+
+    def do_GET(self):  # noqa: N802
+        body = b"<!doctype html><title>x</title>"
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        if self.CSP is not None:
+            self.send_header("Content-Security-Policy-Report-Only" if self.REPORT_ONLY
+                             else "Content-Security-Policy", self.CSP)
+        if self.CSP2 is not None:
+            self.send_header("Content-Security-Policy", self.CSP2)
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *a):  # noqa: ANN002
+        return
+
+
+def _csp_handler(csp, *, csp2=None, report_only=False):
+    return type("_H", (_CspApp,), {"CSP": csp, "CSP2": csp2, "REPORT_ONLY": report_only})
+
+
+def _csp_ref(monkeypatch, tmp_path, handler):
+    _grant_active_recon(monkeypatch)
+    _charter(tmp_path, "127.0.0.1")
+    from vigil_integration.live.wiring import _live_csp_redrive_fact
+    srv = _serve(handler)
+    port = srv.server_address[1]
+    try:
+        return _live_csp_redrive_fact(_prov(), {},
+                                      {"kind": "csp", "url": f"http://127.0.0.1:{port}/", "bug_class": "csp_posture"})
+    finally:
+        srv.shutdown()
+
+
+def test_live_csp_permissive_header_mints_a_fact(monkeypatch, tmp_path):
+    ref = _csp_ref(monkeypatch, tmp_path, _csp_handler("script-src 'unsafe-inline'; object-src 'none'"))
+    assert ref, "an enforced permissive script-src (unsafe-inline, no nonce) must mint a signed csp_posture FACT"
+
+
+def test_negctl_csp_wellformed_nonce_mints_nothing(monkeypatch, tmp_path):
+    ref = _csp_ref(monkeypatch, tmp_path, _csp_handler("script-src 'nonce-staticNonceABC'; object-src 'none'"))
+    assert ref is None, "a well-formed nonce policy must not mint a csp_posture FACT"
+
+
+def test_negctl_csp_neutralized_unsafe_inline_mints_nothing(monkeypatch, tmp_path):
+    ref = _csp_ref(monkeypatch, tmp_path, _csp_handler("script-src 'nonce-staticNonceABC' 'unsafe-inline'"))
+    assert ref is None, "nonce-neutralized unsafe-inline (CSP3) must not mint a csp_posture FACT"
+
+
+def test_negctl_csp_report_only_mints_nothing(monkeypatch, tmp_path):
+    ref = _csp_ref(monkeypatch, tmp_path, _csp_handler("script-src 'unsafe-inline'", report_only=True))
+    assert ref is None, "a report-only header enforces nothing and must not mint a csp_posture FACT"
+
+
+def test_negctl_csp_multiple_enforced_policies_mints_nothing(monkeypatch, tmp_path):
+    # DECISIVE benign-faker control: permissive FIRST policy + restrictive SECOND. The browser enforces the
+    # INTERSECTION (inline blocked by the nonce policy), so the posture is NOT weak → the multi-enforced-header
+    # guard must fail closed. This is the one benign origin that would mint a FALSE FACT without the guard.
+    ref = _csp_ref(monkeypatch, tmp_path,
+                   _csp_handler("script-src 'unsafe-inline'", csp2="script-src 'nonce-staticNonceABC'"))
+    assert ref is None, "two enforced policies (restrictive intersection) must not mint a FALSE csp_posture FACT"
+
+
+def test_negctl_csp_out_of_scope_mints_nothing(monkeypatch, tmp_path):
+    _grant_active_recon(monkeypatch)
+    _charter(tmp_path, "127.0.0.1")
+    from vigil_integration.live.wiring import _live_csp_redrive_fact
+    ref = _live_csp_redrive_fact(_prov(), {},
+                                 {"kind": "csp", "url": "http://10.99.99.99/", "bug_class": "csp_posture"})
+    assert ref is None, "an out-of-scope host is refused by the gate (no channel) → never a FACT"
+
+
+# --- dom_xss / prototype_pollution: the browser-confirmed achieved-state FACTs via the governed seam -------
+# The arms (dom_xss_redrive / proto_pollution_redrive) are already red-penned on the Strix rail; this pins
+# that the governed-engage LLM-claim seam now ROUTES to them and mints under their fact_capable branches.
+# Stub browser replicated from test_strix_dom_redrive.py (patches cdp.cdp_available/CdpBrowser): no real
+# Chromium, deterministic. The arm's own per-probe canary (cxss..) is echoed by the vulnerable stub.
+_XSS_CANARY_RE = re.compile(r"cxss[0-9]{2}[0-9a-f]{8}")
+
+
+class _DomXssStubSession:
+    def __init__(self, *, vulnerable: bool) -> None:
+        self._vulnerable = vulnerable
+        self._url = ""
+
+    def add_binding(self, name: str) -> None:
+        return None
+
+    def navigate(self, url: str, *, settle: float = 0.4, timeout: float = 15.0) -> None:
+        self._url = url
+
+    def binding_calls(self, name: str) -> list:
+        if not self._vulnerable:
+            return []
+        m = _XSS_CANARY_RE.search(self._url)
+        return [m.group(0)] if m else []
+
+
+class _ProtoStubSession:
+    def __init__(self, mode: str) -> None:
+        self._mode = mode
+        self._calls: list = []
+
+    def add_binding(self, name: str) -> None:
+        return None
+
+    def navigate(self, url: str, *, settle: float = 0.4, timeout: float = 15.0) -> None:
+        return None
+
+    def drain_events(self, *, timeout: float = 1.0) -> list:
+        return []
+
+    def evaluate(self, expression: str, **_kw):
+        keys = re.findall(r'"(cpp_[0-9a-f]{12}|benign_[0-9a-f]{12})"', expression)
+        if len(keys) < 2:
+            return None
+        key, benign = keys[0], keys[1]
+        val = f"ppv_{key[len('cpp_'):]}"
+        blob = {
+            "pollute": {"polluted_key": key, "polluted_val": val, "benign_key": benign, "benign_key_undefined": True},
+            "ambient": {"polluted_key": key, "polluted_val": val, "benign_key": benign, "benign_key_undefined": False},
+        }[self._mode]
+        self._calls.append(json.dumps(blob))
+        return None
+
+    def binding_calls(self, name: str) -> list:
+        return list(self._calls) if name == "__crucible_pp" else []
+
+
+class _StubBrowser:
+    def __init__(self, *, session_factory, **_kw) -> None:
+        self._session_factory = session_factory
+
+    def start(self) -> "_StubBrowser":
+        return self
+
+    def session(self):
+        return self._session_factory()
+
+    def stop(self) -> None:
+        return None
+
+
+def _install_stub_browser(monkeypatch, session_factory) -> None:
+    from framework.v2.scanner import cdp
+    monkeypatch.setattr(cdp, "cdp_available", lambda: True)
+    monkeypatch.setattr(cdp, "CdpBrowser", lambda **kw: _StubBrowser(session_factory=session_factory, **kw))
+
+
+def _dom_ref(monkeypatch, tmp_path, bug_class, url="http://127.0.0.1:9/echo?q=seed"):
+    _grant_active_recon(monkeypatch)
+    _charter(tmp_path, "127.0.0.1")
+    from vigil_integration.live.wiring import _live_dom_redrive_fact
+    return _live_dom_redrive_fact(_prov(), {}, {"kind": "dom", "url": url, "param": "q", "bug_class": bug_class})
+
+
+def test_redrive_spec_emits_a_dom_spec_for_dom_classes_and_aliases():
+    from vigil_integration.live.engine import VigilEngine
+    for claimed, norm in [("dom_xss", "dom_xss"), ("dom_based_xss", "dom_xss"),
+                          ("prototype_pollution", "prototype_pollution")]:
+        spec = VigilEngine._redrive_spec(_decision(claimed, url="http://127.0.0.1:19010/echo?q=1"), None)
+        assert spec is not None and spec["kind"] == "dom" and spec["bug_class"] == norm, \
+            f"{claimed} must route to the dom spec; got {spec}"
+
+
+def test_live_dom_xss_executing_mints_a_fact(monkeypatch, tmp_path):
+    _install_stub_browser(monkeypatch, lambda: _DomXssStubSession(vulnerable=True))
+    assert _dom_ref(monkeypatch, tmp_path, "dom_xss"), \
+        "an executing DOM-XSS sink (a __crucible_xss binding call carrying VIGIL's canary) must mint a dom_xss FACT"
+
+
+def test_negctl_dom_xss_reflected_but_inert_mints_nothing(monkeypatch, tmp_path):
+    _install_stub_browser(monkeypatch, lambda: _DomXssStubSession(vulnerable=False))
+    assert _dom_ref(monkeypatch, tmp_path, "dom_xss") is None, \
+        "a reflected-but-inert payload (no execution) must not mint a dom_xss FACT"
+
+
+def test_live_prototype_pollution_mints_a_fact(monkeypatch, tmp_path):
+    _install_stub_browser(monkeypatch, lambda: _ProtoStubSession("pollute"))
+    assert _dom_ref(monkeypatch, tmp_path, "prototype_pollution"), \
+        "a gadget that pollutes Object.prototype (benign control key undefined) must mint a prototype_pollution FACT"
+
+
+def test_negctl_prototype_pollution_ambient_mints_nothing(monkeypatch, tmp_path):
+    # FP: the benign control key is ALSO polluted → cannot attribute to THIS probe → no FACT.
+    _install_stub_browser(monkeypatch, lambda: _ProtoStubSession("ambient"))
+    assert _dom_ref(monkeypatch, tmp_path, "prototype_pollution") is None, \
+        "ambient pollution (benign key also set) must not mint a prototype_pollution FACT"
+
+
+def test_negctl_dom_browserless_mints_nothing(monkeypatch, tmp_path):
+    # Browserless (cdp_available False) → the arm marks inconclusive (a LEAD), never a CLEAN/FACT.
+    from framework.v2.scanner import cdp
+    monkeypatch.setattr(cdp, "cdp_available", lambda: False)
+    assert _dom_ref(monkeypatch, tmp_path, "dom_xss") is None, "a browserless env must not mint a dom_xss FACT"
+
+
+def test_negctl_dom_wrong_class_returns_none(monkeypatch, tmp_path):
+    _install_stub_browser(monkeypatch, lambda: _DomXssStubSession(vulnerable=True))
+    _grant_active_recon(monkeypatch)
+    _charter(tmp_path, "127.0.0.1")
+    from vigil_integration.live.wiring import _live_dom_redrive_fact
+    ref = _live_dom_redrive_fact(_prov(), {},
+                                 {"kind": "dom", "url": "http://127.0.0.1:9/x", "param": "q", "bug_class": "open_redirect"})
+    assert ref is None, "a non-dom class must not be confirmed by the dom seam"
+
+
+def test_negctl_dom_out_of_scope_mints_nothing(monkeypatch, tmp_path):
+    _install_stub_browser(monkeypatch, lambda: _DomXssStubSession(vulnerable=True))
+    _grant_active_recon(monkeypatch)
+    _charter(tmp_path, "127.0.0.1")
+    from vigil_integration.live.wiring import _live_dom_redrive_fact
+    ref = _live_dom_redrive_fact(_prov(), {},
+                                 {"kind": "dom", "url": "http://10.99.99.99/x", "param": "q", "bug_class": "dom_xss"})
+    assert ref is None, "an out-of-scope host is refused by the browser preamble gate → never a FACT"

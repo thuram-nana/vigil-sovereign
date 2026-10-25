@@ -72,6 +72,16 @@ class ResetInvariantRedriveResult:
     def n_facts(self) -> int:
         return len(self.facts)
 
+    def family_verdict(self, bug_class: str) -> str:
+        """The conservative composition over every branch of ``bug_class`` (see verdict.compose). Mirrors
+        RuntimeRedriveResult.family_verdict so the governed-engage seam reads it byte-identically to the
+        credential/oob/access-control seams."""
+        from .verdict import compose  # noqa: PLC0415
+        verdicts = list(self.branch_verdicts.get(bug_class, {}).values())
+        if not verdicts:
+            return "INCONCLUSIVE"
+        return compose(verdicts).value
+
 
 def reset_invariant_redrive(
     url: str,
