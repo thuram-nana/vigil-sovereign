@@ -99,3 +99,15 @@ def test_repo_must_be_exact_org_repo():
 def test_window_validator_refuses_nonpositive_window():
     with pytest.raises(Exception):
         _grant(not_after=_TS - timedelta(hours=1))
+
+
+def test_engagement_slug_rejects_path_traversal():
+    # The slug keys the on-disk grant + epoch-floor paths; a separator / '..' / control char could traverse
+    # out of the per-engagement .authority/ area, so it is rejected at construction (red-pen LOW, parity with
+    # repo's _REPO_RE). The slug is owner-signed — no traversal slug is ever signable.
+    for bad in ("../../etc/evil", "a/b", "a\\b", "a..b", "..", ".", "", "x\x00y", "line\nbreak"):
+        with pytest.raises(Exception):
+            _grant(engagement_slug=bad)
+    # a normal engagement slug is accepted unchanged (identity matters for the content binding)
+    assert _grant(engagement_slug="mrbeanpanel").engagement_slug == "mrbeanpanel"
+    assert _grant(engagement_slug="repo-x_1.2").engagement_slug == "repo-x_1.2"

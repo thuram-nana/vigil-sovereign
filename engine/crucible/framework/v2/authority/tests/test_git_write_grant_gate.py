@@ -174,3 +174,45 @@ def test_store_advance_write_failure_raises_not_swallowed(tmp_path):
     save_signed_git_write_grant(_s(_grant(epoch=1, allow_pr=True), {"owner": kp.private_key_b64}), path=gpath)
     with pytest.raises(OSError):
         load_verified_git_write_grant("repo-x", tr, path=gpath, epoch_path=epath)
+
+
+def test_store_symlink_floor_fails_closed_no_replay(tmp_path):
+    """red-pen CONFIRMED MEDIUM: a dangling/redirecting SYMLINK at the floor path must NOT read as 'absent'
+    (which would reset the floor to bootstrap and RE-ADMIT a superseded grant). _read_floor now inherits the
+    symlink-precedes-``exists`` guard from ``highwater.read_highwater_dict`` — a symlink is tamper ⇒ fail-closed."""
+    kp, tr = _owner_root()
+    gpath, epath = tmp_path / "grant.json", tmp_path / "epoch"
+    from vigil_core.git_write_grant import sign_git_write_grant as _s
+    save_signed_git_write_grant(_s(_grant(epoch=5, allow_pr=True), {"owner": kp.private_key_b64}), path=gpath)
+    assert load_verified_git_write_grant("repo-x", tr, path=gpath, epoch_path=epath) is not None   # floor={5,…}
+    # attacker points the floor at a non-existent target (dangling symlink) and restores an OLD still-signed grant
+    epath.unlink()
+    epath.symlink_to(tmp_path / "does-not-exist")
+    save_signed_git_write_grant(_s(_grant(epoch=1, allow_pr=True), {"owner": kp.private_key_b64}), path=gpath)
+    with pytest.raises(AuthorityUnsigned):   # symlink ⇒ fail-closed, NOT bootstrap, so epoch-1 is NOT re-admitted
+        load_verified_git_write_grant("repo-x", tr, path=gpath, epoch_path=epath)
+
+
+def test_store_bool_epoch_floor_fails_closed(tmp_path):
+    """red-pen Lens-1: a floor whose epoch is a JSON bool must fail closed. bool subclasses int, so it was the
+    one shape that slipped the prior ``isinstance(epoch, int)`` check; the explicit bool rejection closes it."""
+    kp, tr = _owner_root()
+    gpath, epath = tmp_path / "grant.json", tmp_path / "epoch"
+    from vigil_core.git_write_grant import sign_git_write_grant as _s
+    save_signed_git_write_grant(_s(_grant(epoch=1, allow_pr=True), {"owner": kp.private_key_b64}), path=gpath)
+    epath.write_text('{"epoch": true, "grant_id": "g"}')   # bool epoch — must NOT be accepted as int 1
+    with pytest.raises(AuthorityUnsigned):
+        load_verified_git_write_grant("repo-x", tr, path=gpath, epoch_path=epath)
+
+
+def test_gate_fails_closed_on_malformed_window_type():
+    """red-pen LOW: a non-conforming caller passing an object whose window fields are not datetimes must get a
+    clean False, never an AttributeError — authorize_repo_write is a SEPARATE gate, so a raise is not a DENY."""
+    class _DuckStrWindow:
+        revoked = False
+        allow_comment = True
+        allow_pr = False
+        repo = _REPO
+        not_before = "2026-06-01T00:00:00Z"   # a string, not a datetime
+        not_after = "2026-06-02T00:00:00Z"
+    assert authorize_repo_write(_DuckStrWindow(), _REPO, "comment", now=_NOW) is False

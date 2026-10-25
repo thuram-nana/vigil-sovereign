@@ -67,6 +67,20 @@ class GitWriteGrant(BaseModel):
         # the value the gate matches against — no signed-vs-matched drift (red-pen LOW).
         return str(v or "").strip().lower()
 
+    @field_validator("engagement_slug")
+    @classmethod
+    def _check_slug(cls, v: str) -> str:
+        # The slug KEYS the on-disk control-file paths (the signed grant + its epoch-floor), so a path
+        # separator / '..' / control char in an owner-signed slug would let the floor escape the per-engagement
+        # .authority/ area (parity with repo's _REPO_RE — the authority_path derivation uses the raw slug). The
+        # slug is owner-signed, so this is defense-in-depth against a fat-fingered or less-trusted-channel slug,
+        # not a forgery; still rejected at construction so no traversal slug is ever signable. Red-pen LOW.
+        if (not v or v in (".", "..") or "/" in v or "\\" in v or ".." in v
+                or any(ord(c) < 0x20 or ord(c) == 0x7f for c in v)):
+            raise ValueError("engagement_slug must not be empty or contain path separators, '..', or "
+                             "control characters (it keys the on-disk grant + epoch-floor paths)")
+        return v
+
     @model_validator(mode="after")
     def _check(self) -> "GitWriteGrant":
         if self.not_after <= self.not_before:

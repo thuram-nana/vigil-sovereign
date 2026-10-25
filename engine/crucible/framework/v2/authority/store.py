@@ -16,7 +16,7 @@ from pathlib import Path
 from pydantic import ValidationError
 
 from vigil_core.git_write_grant import GitWriteGrant, SignedGitWriteGrant, verify_git_write_grant
-from vigil_core.highwater import highwater_lock
+from vigil_core.highwater import HighWaterError, highwater_lock, read_highwater_dict
 
 from ..common import paths
 from ..common.errors import CrucibleError
@@ -139,18 +139,34 @@ def save_signed_git_write_grant(signed: SignedGitWriteGrant, path: Path | None =
 
 
 def _read_floor(p: Path) -> "dict | None":
-    """The recorded supersession floor ``{epoch, grant_id}``, or None when ABSENT (bootstrap). FAIL-CLOSED on
-    a PRESENT-but-unparseable floor: a corrupt / tampered / partially-written ledger RAISES — it must never
-    silently reset to a lower floor, which would re-admit a superseded or revoked grant (red-pen HIGH)."""
-    if not p.is_file():
-        return None
+    """The recorded supersession floor ``{epoch, grant_id}``, or None when genuinely ABSENT (bootstrap).
+    FAIL-CLOSED on a present-but-untrustworthy floor: a SYMLINK (possible tamper — a dangling/redirecting link
+    must NEVER read as 'absent' and silently skip the rollback check), a corrupt/unparseable/non-object file,
+    or a malformed shape all RAISE rather than resetting to a lower floor (which would re-admit a superseded /
+    revoked grant — red-pen CONFIRMED). The symlink + corrupt + non-object guards are INHERITED from the vetted
+    ``vigil_core.highwater`` primitive (``read_highwater_dict`` — the same module ``highwater_lock`` comes from),
+    so the symlink-precedes-``exists`` class-fix cannot drift from the sibling floor; only the ``{epoch,
+    grant_id}`` SHAPE check is local, and it rejects a bool epoch (``true``/``false``), which — being an int
+    subclass — was the one shape that slipped the prior check.
+
+    HONEST LIMIT (mirrors ``vigil_core.highwater`` §1.3): this is a LOCAL unsigned floor. A same-host attacker
+    with the engagement UID who can DELETE the floor can reset it to bootstrap and replay a still-owner-signed
+    older grant — deleting the floor is as privileged as rewriting it, so that case is the conceded owner-UID-FS
+    model, closed only by an out-of-band witnessed checkpoint, not here. What the floor DOES give
+    unconditionally: downgrade-refusing, crash-safe, symlink-refusing monotonic replay/revocation protection
+    against any attacker who can restore an old signed grant but CANNOT tamper the floor itself."""
     try:
-        data = json.loads(p.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as e:
-        raise AuthorityUnsigned(f"git-write epoch floor at {p} is unreadable/corrupt (refusing to reset): {e}") from e
-    if not (isinstance(data, dict) and isinstance(data.get("epoch"), int) and isinstance(data.get("grant_id"), str)):
+        raw = read_highwater_dict(p)   # None iff ABSENT; RAISES HighWaterError on symlink / corrupt / non-object
+    except HighWaterError as e:
+        raise AuthorityUnsigned(
+            f"git-write epoch floor at {p} is a symlink/corrupt (refusing to reset the replay floor): {e}") from e
+    if raw is None:
+        return None
+    epoch, grant_id = raw.get("epoch"), raw.get("grant_id")
+    # bool is an int subclass — reject it explicitly so a JSON `true`/`false` cannot masquerade as an epoch.
+    if not (isinstance(epoch, int) and not isinstance(epoch, bool) and epoch >= 0 and isinstance(grant_id, str)):
         raise AuthorityUnsigned(f"git-write epoch floor at {p} is malformed (refusing to reset)")
-    return {"epoch": int(data["epoch"]), "grant_id": str(data["grant_id"])}
+    return {"epoch": int(epoch), "grant_id": str(grant_id)}
 
 
 def _write_floor(p: Path, epoch: int, grant_id: str) -> None:
