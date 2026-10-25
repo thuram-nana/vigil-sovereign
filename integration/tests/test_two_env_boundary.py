@@ -119,6 +119,8 @@ import vigil_integration.jobs.authorize  # the hard pre-execution gate — frame
 assert "framework" not in _m, "jobs.authorize must not import framework at module scope"
 import vigil_integration.jobs.runner  # the SOLE execution path — framework (run_codescan) LAZY
 assert "framework" not in _m, "jobs.runner must not import framework at module scope"
+import vigil_integration.webhook_drain  # repo-connect Slice 2: inbound webhook spool → SecurityJob queue drain
+assert "framework" not in _m, "webhook_drain must not import framework at module scope (queue defers it)"
 print(json.dumps({"res": res, "guard": "passed"}))
 """
 

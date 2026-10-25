@@ -177,6 +177,7 @@ a new sub-parser that is not documented here turns the required check red.
 | `vigil upgrade` | Automated crash-safe data migration of the sovereign spine: backup → verify → migrate → verify → report, with rollback. |
 | `vigil knowledge` | Operator-gated sync of the living `knowledge/` folder to git (regenerate + secret-scan + commit). |
 | `vigil learn-drain` | Drain the sovereign→offense learn-grant spool (the K2b→K3 deep-learn bridge; fail-closed). |
+| `vigil webhook-drain` | Drain the inbound GitHub-webhook spool into the SecurityJob queue (enqueue-only; the authorized runner executes). Fail-closed, idempotent by delivery_id. |
 | `vigil sandbox` | Run an arbitrary command inside a network-isolated, workspace-confined bwrap sandbox (A3 → queued for approval). |
 | `vigil terminal` | Run a governed LOCAL read/inspect command through the gate (A2 → queued for approval, never auto). |
 | `vigil fleet` | Cross-VM FLEET operations (WS3): a read-only monitor roll-up over N single-tenant instances (`fleet status`) + an owner-authorized kill-switch fan-out (`fleet kill`). |

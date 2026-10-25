@@ -71,7 +71,7 @@ from typing import Any, Callable, Optional
 from urllib.parse import parse_qs, urlencode, urlsplit
 
 from . import dispatch
-from vigil_core.hopauth import stamp_hop_assertion
+from vigil_core.hopauth import stamp_hop_assertion, verify_github_signature
 from vigil_core.logging_setup import RotatingLineWriter
 from vigil_core.metrics import CONTENT_TYPE as _OPENMETRICS_CT, set_plane
 from vigil_core.posture import is_production_posture
@@ -183,6 +183,16 @@ _ROLE_HDR = "X-VIGIL-Role"
 _ROLE_SIG_HDR = "X-VIGIL-Role-Sig"     # base64(HMAC-SHA256(hop_key, "principal\nrole\nmethod\npath\nts"))
 _ROLE_TS_HDR = "X-VIGIL-Role-Ts"       # the unix seconds `ts` that is inside the signed message
 _CONSOLE_HOP_KEY_ENV = "VIGIL_CONSOLE_HOP_KEY"
+# repo-connect Slice 2 — the INBOUND GitHub webhook adapter (OFF by default, enabled by pointing the spool
+# env at a directory). The route authenticates by HMAC (X-Hub-Signature-256) and SPOOLS one inert event;
+# it never routes/forwards/spawns. The SECRET is resolved per-request from the env (off-spine), never stored.
+_GH_WEBHOOK_SPOOL_ENV = "VIGIL_GH_WEBHOOK_SPOOL"        # set to a spool dir to ENABLE the /webhooks/github route
+_GH_WEBHOOK_SECRET_ENV = "VIGIL_GH_WEBHOOK_SECRET"      # the HMAC secret (off-spine; empty ⇒ the route fails closed)
+_GH_WEBHOOK_ENVELOPE_SCHEMA = "vigil.webhook.github.v1"  # the inert-envelope schema tag the drain validates
+_GH_WEBHOOK_MAX_ENVELOPE = 256 * 1024                   # == inert_finding.MAX_ENVELOPE_BYTES (the spool validator cap)
+_GH_WEBHOOK_MAX_BODY = 5 * 1024 * 1024                  # pre-auth body cap for the webhook route (GitHub payloads are small)
+_WEBHOOK_READ_TIMEOUT_S = 20.0                          # bound the pre-auth body read so a slow/incomplete body can't pin a thread
+_GH_ZERO_SHA = "0" * 40                                 # GitHub's null SHA — a branch delete / no-commit push (nothing to scan)
 # Anti-spoof: strip the WHOLE `X-VIGIL-*` class from inbound requests, normalising case AND hyphen↔
 # underscore — so no variant (`X_VIGIL_ROLE`, which some upstreams / WSGI stacks fold to the header the
 # offense gate would read) survives to be mistaken for a proxy-set identity header.
@@ -1240,6 +1250,49 @@ def plane_status(pc: "Optional[PlaneControl]", backends: "Optional[dict]" = None
     return st
 
 
+def _reject_non_finite(constant: str):
+    """`json.loads(parse_constant=…)` hook: GitHub's wire format never carries ``Infinity`` / ``-Infinity``
+    / ``NaN``, so a non-finite constant is a protocol error — raise so the webhook handler returns 422
+    rather than letting a float ``inf`` reach ``int(...)`` downstream and 502 a validly-signed delivery."""
+    raise ValueError(f"non-finite JSON constant {constant!r} is not allowed")
+
+
+def _clean(value: object, cap: int) -> str:
+    """A bounded, UTF-8-CLEAN string: a lone surrogate (a hostile ``\\uXXXX`` in the signed JSON) is replaced,
+    so the value can never crash a later ``.encode('utf-8')`` (the envelope write, or the SecurityJob slug
+    in the drain), and the length is capped so one huge field cannot bloat the inert envelope."""
+    return str(value or "").encode("utf-8", "replace").decode("utf-8")[:cap]
+
+
+def _github_event_coords(event: str, payload: dict) -> "Optional[dict]":
+    """Extract ``{repo, commit, pr_number}`` from a GitHub webhook payload, or None when there is NOTHING
+    reviewable to scan: the ``ping`` handshake, a repo-less event, a branch-delete / no-commit push (null
+    SHA), or a comment-class event with no head commit. ``repo`` = ``github.com/<full_name>``. TOTAL +
+    defensive: every field is UTF-8-sanitized + bounded and NO input raises (the drain's
+    ``SecurityJob.normalize`` is the authoritative validator; this only shapes the inert envelope)."""
+    repo_obj = payload.get("repository") if isinstance(payload, dict) else None
+    full_name = repo_obj.get("full_name") if isinstance(repo_obj, dict) else None
+    if event == "ping" or not full_name:
+        return None
+    commit, pr_number = "", None
+    pr = payload.get("pull_request")
+    if isinstance(pr, dict):                          # pull_request / pull_request_review events
+        head = pr.get("head")
+        commit = _clean(head.get("sha"), 128) if isinstance(head, dict) else ""
+        try:
+            pr_number = int(pr["number"]) if pr.get("number") is not None else None
+        except (TypeError, ValueError, KeyError, OverflowError):
+            pr_number = None
+    else:                                             # push events name the new tip in `after`
+        after = _clean(payload.get("after"), 128)
+        if after and after != _GH_ZERO_SHA:           # a branch delete carries the null SHA — nothing to scan
+            commit = after
+    if not commit and pr_number is None:              # no concrete commit AND no PR ⇒ nothing reviewable
+        return None
+    return {"repo": _clean("github.com/" + str(full_name).strip().strip("/"), 512),
+            "commit": commit, "pr_number": pr_number}
+
+
 class _ProxyServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
     """Threaded so SSE long-lived streams and normal requests can run concurrently."""
     daemon_threads = True
@@ -1248,7 +1301,7 @@ class _ProxyServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
     def __init__(self, addr, handler, *, serve_dir: Path, token: str = "", hop_key: str = "",
                  allowed_hosts: "tuple[str, ...]" = (), allowed_origins: "tuple[str, ...]" = (),
                  plane_control: "Optional[PlaneControl]" = None, backends: "Optional[dict]" = None,
-                 hop_tls: "Optional[ssl.SSLContext]" = None):
+                 hop_tls: "Optional[ssl.SSLContext]" = None, webhook_spool_dir: "Optional[str]" = None):
         self.serve_dir = serve_dir
         # W8-6: the proxy→backend hop's TLS client context, or None (a plaintext hop — the loopback /
         # non-production default). Resolved by `make_proxy_server` via `resolve_hop_tls`, which ALSO refuses
@@ -1288,6 +1341,11 @@ class _ProxyServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
         # None ⇒ the proxy can still REPORT plane status (a live port probe needs no configuration) but
         # cannot start anything (503). Only `vigil up`'s boot path supplies one.
         self.plane_control = plane_control
+        # repo-connect Slice 2: when set (VIGIL_GH_WEBHOOK_SPOOL), the proxy mounts an INBOUND GitHub webhook
+        # route in the probe-safe band that authenticates by HMAC and SPOOLS one inert event — it never
+        # routes/forwards/spawns. None ⇒ the route is simply absent (falls through to a 404). The webhook
+        # SECRET is resolved per-request from the env, never stored here (off-spine).
+        self.webhook_spool_dir = str(webhook_spool_dir) if webhook_spool_dir else None
         # Claim 6: per-user auth is DELEGATED to the sovereign whoami; this caches the resolution briefly so
         # SSE / polling do not stampede it. Built here so every request handler shares one cache.
         self.auth_cache = _PrincipalCache()
@@ -1389,6 +1447,12 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                 return
             if split.path == "/metrics":
                 self._metrics()
+                return
+            # repo-connect Slice 2: INBOUND GitHub webhook — probe-safe (pre-auth, pre-routing, Host-ungated).
+            # Mounted ONLY when a spool dir is configured; authenticates by HMAC and SPOOLS one inert event,
+            # never routes/forwards/spawns. Absent config ⇒ falls through to route()/static (404).
+            if split.path == "/webhooks/github" and getattr(self.server, "webhook_spool_dir", None):
+                self._webhooks_github()
                 return
             # PROXY-LOCAL: plane control is answered by this process, BEFORE any attempt to route
             # or to serve a file. That ordering is the whole point — a backend that is down cannot answer
@@ -1830,6 +1894,119 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         body = {"ok": ok, "checks": [{"name": "sovereign", "ok": ok}]}
         self._plane_json(body, status=200 if ok else 503)
 
+    def _webhooks_github(self):
+        """INBOUND GitHub webhook — authenticate by HMAC and SPOOL ONE inert event, nothing more.
+
+        Lives in the PROBE-SAFE band (ahead of plane control, routing, per-user auth, and the Host/Origin
+        gate) because a GitHub server-to-server POST carries no session bearer, no ``X-Requested-With``, and
+        an unrelated Origin — the ``X-Hub-Signature-256`` HMAC is the SOLE authenticator (the operator's TLS
+        edge terminates the public hop; the proxy binds loopback/private only). The handler NEVER calls
+        ``route()`` / ``_forward_request`` / ``_plane_control`` / ``plane_control`` / a subprocess — its only
+        side effect is writing a signed, INERT JSON envelope to the webhook spool, which a separate drain
+        worker later turns into an enqueued ``SecurityJob`` (only THEN, through the authorized runner, is
+        anything ever executed). Fail-closed: wrong method, oversized body, unset secret, missing/invalid
+        signature, missing delivery id, or a non-JSON payload all refuse; only a verified delivery spools."""
+        # Bound the pre-auth body read so a slow/incomplete body cannot pin this proxy thread. Safe as a
+        # per-request socket deadline here because the route ALWAYS closes the connection and never streams
+        # (unlike the SSE relay path, which deliberately has no read timeout).
+        try:
+            self.connection.settimeout(_WEBHOOK_READ_TIMEOUT_S)
+        except OSError:
+            pass
+        if self.command != "POST":   # GitHub only POSTs (incl. the ping event); drain + refuse the rest
+            self._plane_json({"ok": False, "error": "method not allowed (POST only)"}, status=405)
+            return
+        # 1) Read the RAW body up front (bounded + deadline-bounded), closing the connection so there is no
+        #    smuggling window.
+        try:
+            clen = int(self.headers.get("Content-Length") or 0)
+        except (TypeError, ValueError):
+            clen = 0
+        self.close_connection = True
+        if clen > _GH_WEBHOOK_MAX_BODY:
+            self._plane_json({"ok": False, "error": "request body too large"}, status=413, drained=True)
+            return
+        try:
+            raw = self.rfile.read(clen) if clen > 0 else b""
+        except (TimeoutError, OSError):   # a slow/incomplete body hit the read deadline — bounded, not a hang
+            self._plane_json({"ok": False, "error": "request body read timed out"}, status=408, drained=True)
+            return
+        # 2) Resolve the secret OFF-SPINE from the env (never the request). Empty ⇒ fail closed: the route
+        #    is enabled (a spool dir is set) but no secret is provisioned, so no delivery can be trusted.
+        secret = os.environ.get(_GH_WEBHOOK_SECRET_ENV, "")
+        if not secret:
+            self._plane_json({"ok": False, "error": "webhook secret not configured"}, status=503, drained=True)
+            return
+        # 3) Verify the HMAC over the EXACT raw bytes (constant-time, fail-closed). The legacy SHA-1
+        #    X-Hub-Signature is ignored — only X-Hub-Signature-256 is trusted.
+        if not verify_github_signature(raw, self.headers.get("X-Hub-Signature-256") or "", secret):
+            self._plane_json({"ok": False, "error": "invalid or missing signature"}, status=401, drained=True)
+            return
+        # 4) A verified delivery MUST carry GitHub's unique delivery id — the exactly-once key the queue
+        #    dedups on. Without it the drain cannot enforce idempotency, so refuse (fail-closed).
+        delivery_id = (self.headers.get("X-GitHub-Delivery") or "").strip()
+        if not delivery_id:
+            self._plane_json({"ok": False, "error": "missing X-GitHub-Delivery"}, status=400, drained=True)
+            return
+        event = (self.headers.get("X-GitHub-Event") or "").strip().lower()
+        # 5) Parse the now-authenticated payload. A non-JSON body from a validly-signed sender is a protocol
+        #    error, not an attack — 422.
+        try:
+            # GitHub's wire format never carries Infinity/-Infinity/NaN; reject them as a protocol error
+            # (422) rather than letting a non-finite number reach int() downstream and 502.
+            payload = json.loads(raw.decode("utf-8"), parse_constant=_reject_non_finite) if raw else {}
+        except (ValueError, UnicodeDecodeError):
+            self._plane_json({"ok": False, "error": "payload is not valid JSON"}, status=422, drained=True)
+            return
+        # 6) The ping handshake and any event without a repository carry nothing to scan — ack 202 WITHOUT
+        #    spooling (the sender still sees success, but no job is produced).
+        coords = _github_event_coords(event, payload if isinstance(payload, dict) else {})
+        if coords is None:
+            self._plane_json({"ok": True, "spooled": False, "event": event or "unknown"},
+                             status=202, drained=True)
+            return
+        # 7) Build the INERT envelope (a bytes-only record the drain validates + normalizes) and spool it.
+        envelope = {
+            "schema": _GH_WEBHOOK_ENVELOPE_SCHEMA, "delivery_id": delivery_id, "event": event,
+            "repo": coords["repo"], "commit": coords.get("commit", ""), "pr_number": coords.get("pr_number"),
+        }
+        try:
+            # ensure_ascii=True so a lone surrogate (a hostile \uXXXX in the signed JSON) is escaped rather
+            # than crashing the envelope's utf-8 encode; the coords are already surrogate-sanitized too.
+            self._spool_webhook_event(json.dumps(envelope, ensure_ascii=True, sort_keys=True))
+        except OSError:   # a spool write failure is retryable (GitHub redelivers) — 503, do NOT 202
+            self._plane_json({"ok": False, "error": "spool write failed"}, status=503, drained=True)
+            return
+        self._plane_json({"ok": True, "spooled": True, "delivery_id": delivery_id}, status=202, drained=True)
+
+    def _spool_webhook_event(self, envelope: str) -> None:
+        """Write one inert envelope to ``<spool>/incoming/<sha256(bytes)[:32]>.json`` atomically (0600 file
+        in a 0700 dir; ``O_EXCL`` temp + fsync + ``os.replace``), matching the on-disk contract the drain
+        reader enforces. Inlined with stdlib only — uiproxy may not import the sibling ``finding_spool``
+        under the pure-stdlib boundary — but kept byte-compatible with ``finding_spool.spool_envelope``.
+        Content-addressed, so re-spooling an identical envelope is idempotent. Raises ``OSError`` on any
+        write failure (the caller turns that into a 503 so GitHub redelivers)."""
+        data = envelope.encode("utf-8")
+        if len(data) > _GH_WEBHOOK_MAX_ENVELOPE:
+            raise OSError("webhook envelope exceeds the spool size cap")
+        incoming = Path(self.server.webhook_spool_dir) / "incoming"
+        incoming.mkdir(parents=True, exist_ok=True)
+        try:
+            os.chmod(incoming, 0o700)
+        except OSError:
+            pass
+        final = incoming / (hashlib.sha256(data).hexdigest()[:32] + ".json")
+        if final.exists():
+            return   # content-addressed idempotency — the identical envelope is already spooled
+        tmp = incoming / (".tmp-" + secrets.token_hex(8))
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        try:
+            os.write(fd, data)
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        os.replace(tmp, final)
+
     def _plane_text(self, text: str, content_type: str, status: int = 200, *, drained: bool = False):
         """Send a plain-text body (e.g. the OpenMetrics exposition) with the probe headers, no-store, and a
         drained request body — the same posture as `_plane_json`, so /metrics leaks no keep-alive smuggling
@@ -2201,7 +2378,8 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
 def make_proxy_server(host: str, port: int, serve_dir: Path, *, token: str = "", hop_key: str = "",
                       allowed_hosts: "tuple[str, ...]" = (), allowed_origins: "tuple[str, ...]" = (),
                       plane_control: "Optional[PlaneControl]" = None,
-                      backends: "Optional[dict]" = None) -> _ProxyServer:
+                      backends: "Optional[dict]" = None,
+                      webhook_spool_dir: "Optional[str]" = None) -> _ProxyServer:
     """Build (do not run) the reverse proxy bound to ``host:port``. Refuses a public/unspecified bind
     (``bind_ok``) — the proxy is the only listener a human points a browser at, so it must never be
     reachable from the open internet.
@@ -2241,7 +2419,8 @@ def make_proxy_server(host: str, port: int, serve_dir: Path, *, token: str = "",
                 "the per-user bearer and the owner console credential are otherwise sent in cleartext\"\n")
     return _ProxyServer((host, port), ProxyHandler, serve_dir=serve_dir, token=token, hop_key=hop_key,
                         allowed_hosts=tuple(allowed_hosts), allowed_origins=tuple(allowed_origins),
-                        plane_control=plane_control, backends=backends, hop_tls=hop_tls)
+                        plane_control=plane_control, backends=backends, hop_tls=hop_tls,
+                        webhook_spool_dir=webhook_spool_dir)
 
 
 # ==================================================================================================
@@ -2982,7 +3161,8 @@ def _run_up_proxy_only(*, host: str, port: int, domain: str, base_dir: str, no_b
         # honestly reports plane status (a live probe of the REMOTE addresses) but offers no start/stop.
         httpd = make_proxy_server(host, port, ui_dir, token=token, hop_key=hop_key,
                                   allowed_hosts=(authority,), allowed_origins=(origin,),
-                                  plane_control=None, backends=backends)
+                                  plane_control=None, backends=backends,
+                                  webhook_spool_dir=(os.environ.get(_GH_WEBHOOK_SPOOL_ENV) or None))
     except (ValueError, OSError) as exc:
         print(f"vigil up --proxy-only: could not bind the UI proxy on {host}:{port}: {exc}", file=sys.stderr)
         return 2
@@ -3343,7 +3523,8 @@ def run_up(*, host: str, port: int, domain: str, base_dir: str, no_browser: bool
         # handed to the backends. One credential, one anti-rebinding rule — not a second, weaker path.
         httpd = make_proxy_server(host, port, ui_dir, token=token, hop_key=hop_key,
                                   allowed_hosts=(authority,), allowed_origins=(origin,),
-                                  plane_control=plane_control)
+                                  plane_control=plane_control,
+                                  webhook_spool_dir=(os.environ.get(_GH_WEBHOOK_SPOOL_ENV) or None))
     except (ValueError, OSError) as exc:
         print(f"vigil up: could not bind the UI proxy on {host}:{port}: {exc}", file=sys.stderr)
         _cleanup()
