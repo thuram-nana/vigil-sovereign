@@ -10,9 +10,13 @@ authority document.
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 from pydantic import ValidationError
+
+from vigil_core.git_write_grant import GitWriteGrant, SignedGitWriteGrant, verify_git_write_grant
+from vigil_core.highwater import highwater_lock
 
 from ..common import paths
 from ..common.errors import CrucibleError
@@ -28,6 +32,8 @@ __all__ = [
     "save_signed_authority",
     "load_signed_authority",
     "load_verified_authority",
+    "save_signed_git_write_grant",
+    "load_verified_git_write_grant",
     "write_authority_root",
     "load_authority_root",
 ]
@@ -102,6 +108,111 @@ def load_verified_authority(
     if not ok:
         raise AuthorityUnsigned(f"authority for {slug!r} failed verification: {reason}")
     return signed.document
+
+
+# ---------------------------------------------------------------------------
+# GitWriteGrant — a SEPARATE owner-signed, repo-EXACT write grant (repo-connect
+# Slice 3-authz). Decoupled from EngagementAuthority (adding a field there would
+# break every existing authority signature). Carries expiration + revocation +
+# an epoch high-water for supersession-REPLAY protection.
+# ---------------------------------------------------------------------------
+
+
+def _git_write_grant_path(slug: str, path: Path | None = None) -> Path:
+    if path is not None:
+        return path
+    ap = paths.authority_path(slug)
+    return ap.parent / (ap.stem + ".git-write-grant.json")
+
+
+def _git_write_epoch_path(slug: str, path: Path | None = None) -> Path:
+    if path is not None:
+        return path
+    ap = paths.authority_path(slug)
+    return ap.parent / (ap.stem + ".git-write-epoch")
+
+
+def save_signed_git_write_grant(signed: SignedGitWriteGrant, path: Path | None = None) -> Path:
+    p = _git_write_grant_path(signed.document.engagement_slug, path)
+    paths.secure_write(p, json.dumps(signed.model_dump(mode="json"), indent=2))  # X2: owner-only
+    return p
+
+
+def _read_floor(p: Path) -> "dict | None":
+    """The recorded supersession floor ``{epoch, grant_id}``, or None when ABSENT (bootstrap). FAIL-CLOSED on
+    a PRESENT-but-unparseable floor: a corrupt / tampered / partially-written ledger RAISES — it must never
+    silently reset to a lower floor, which would re-admit a superseded or revoked grant (red-pen HIGH)."""
+    if not p.is_file():
+        return None
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as e:
+        raise AuthorityUnsigned(f"git-write epoch floor at {p} is unreadable/corrupt (refusing to reset): {e}") from e
+    if not (isinstance(data, dict) and isinstance(data.get("epoch"), int) and isinstance(data.get("grant_id"), str)):
+        raise AuthorityUnsigned(f"git-write epoch floor at {p} is malformed (refusing to reset)")
+    return {"epoch": int(data["epoch"]), "grant_id": str(data["grant_id"])}
+
+
+def _write_floor(p: Path, epoch: int, grant_id: str) -> None:
+    """Atomically advance the supersession floor (temp + fsync + ``os.replace``, 0600). RAISES on failure — a
+    lost monotonic advance must be LOUD, never silently swallowed (red-pen MEDIUM)."""
+    p.parent.mkdir(parents=True, exist_ok=True)
+    tmp = p.with_name(p.name + ".tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        os.write(fd, json.dumps({"epoch": int(epoch), "grant_id": str(grant_id)},
+                                separators=(",", ":")).encode("utf-8"))
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    os.replace(tmp, p)   # atomic — no torn/empty floor on crash
+
+
+def load_verified_git_write_grant(
+    slug: str, trust_root: TrustRoot, *, path: Path | None = None, epoch_path: Path | None = None,
+) -> "GitWriteGrant | None":
+    """Load the SIGNED git-write grant for an engagement and return its document ONLY if the governance
+    threshold signature verifies AND its epoch is not below the recorded high-water (supersession-REPLAY
+    protection). Returns None when there is NO grant (fail-closed default: no write capability).
+
+    Fail-closed: an unsigned / badly-signed grant, or a replayed (below-high-water) grant, RAISES rather than
+    returning an unverified or stale document. When a newer grant verifies, the durable epoch high-water is
+    advanced, so a revoked / superseded grant can never be replayed back into force. NB: this returns the
+    verified CURRENT grant (which may be ``revoked=True``); the capability DECISION is
+    :func:`authority.gate.authorize_repo_write`, which denies a revoked / out-of-window / wrong-repo grant."""
+    p = _git_write_grant_path(slug, path)
+    if not p.is_file():
+        return None
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as e:
+        raise AuthorityError(f"git-write grant for {slug!r} unreadable: {e}") from e
+    try:
+        signed = SignedGitWriteGrant.model_validate(data)
+    except ValidationError as e:
+        raise AuthorityUnsigned(f"document for {slug!r} is not a valid signed git-write grant: {e}") from e
+    ok, reason = verify_git_write_grant(signed, trust_root)
+    if not ok:
+        raise AuthorityUnsigned(f"git-write grant for {slug!r} failed verification: {reason}")
+    grant = signed.document
+    if grant.engagement_slug != slug:   # CONTENT binding — a grant for engagement A must not authorize B
+        raise AuthorityUnsigned(
+            f"git-write grant at {p} is for engagement {grant.engagement_slug!r}, not {slug!r} (refusing)")
+    ep = _git_write_epoch_path(slug, epoch_path)
+    with highwater_lock(ep):   # serialize read→check→advance across processes (no TOCTOU)
+        floor = _read_floor(ep)   # RAISES on a present-but-corrupt floor (fail-closed; never resets)
+        if floor is not None:
+            if grant.epoch < floor["epoch"]:
+                raise AuthorityUnsigned(
+                    f"git-write grant for {slug!r} epoch {grant.epoch} is below the floor {floor['epoch']} "
+                    "(replayed / superseded grant refused)")
+            if grant.epoch == floor["epoch"] and grant.grant_id != floor["grant_id"]:
+                raise AuthorityUnsigned(
+                    f"git-write grant for {slug!r} at epoch {grant.epoch} does not match the recorded grant_id "
+                    "(same-epoch swap refused)")
+        if floor is None or grant.epoch > floor["epoch"]:
+            _write_floor(ep, grant.epoch, grant.grant_id)   # advance; RAISES on write failure (no silent swallow)
+    return grant
 
 
 # ---------------------------------------------------------------------------

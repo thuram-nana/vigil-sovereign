@@ -49,7 +49,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable, Protocol
+from typing import Any, Callable, Protocol
 from urllib.parse import urlparse
 
 from ..common.errors import (
@@ -283,6 +283,39 @@ def authorize_oob_egress(authority: EngagementAuthority, relay_host: str) -> boo
         return False
     got = (_host_of(relay_host) or str(relay_host or "").strip()).lower()
     return bool(got) and got == want
+
+
+def authorize_repo_write(grant: Any, repo: str, capability: str, *, now: "datetime | None" = None) -> bool:
+    """Authorize a GitHub WRITE (``capability`` ``"comment"`` or ``"pr"``) against an owner-signed, repo-EXACT
+    :class:`vigil_core.git_write_grant.GitWriteGrant`.
+
+    A SEPARATE gate from :func:`authorize_action`'s scan-scope matcher, like :func:`authorize_oob_egress`: a
+    writable repo is a capability the owner granted, NEVER a scan target, so authorizing it must not widen
+    ``authority.scope``. The grant is passed already signature-verified + epoch/replay-checked by
+    ``load_verified_git_write_grant``; this is the pure, fail-closed DECISION. Denied at every branch: no
+    grant, a REVOKED grant, an expired/early window (EXPIRATION), a repo that does not match EXACTLY (exact
+    org+repo), or a capability the owner did not separately grant (``allow_comment`` / ``allow_pr``). Duck-
+    typed (getattr) so ``gate.py`` keeps its import-purity and does not depend on the grant model."""
+    if grant is None or getattr(grant, "revoked", False):
+        return False
+    cap = str(capability or "").strip().lower()
+    if cap == "comment":
+        allowed = bool(getattr(grant, "allow_comment", False))
+    elif cap == "pr":
+        allowed = bool(getattr(grant, "allow_pr", False))
+    else:
+        return False                                  # unknown capability ⇒ fail-closed
+    if not allowed:
+        return False
+    want = str(getattr(grant, "repo", "") or "").strip().lower()
+    got = str(repo or "").strip().lower()
+    if not want or got != want:                       # EXACT host/org/repo match — no wildcards
+        return False
+    nb, na = getattr(grant, "not_before", None), getattr(grant, "not_after", None)
+    if nb is None or na is None:
+        return False
+    ref = _as_utc(now) if now is not None else _utcnow()
+    return _as_utc(nb) <= ref <= _as_utc(na)          # EXPIRATION: inside the owner-signed window
 
 
 _DENIAL_ERRORS: dict[str, type[EthicsViolation]] = {
