@@ -346,6 +346,19 @@
       "rationale": "Native verb dispatched in-process; drains the inbound webhook spool into the SecurityJob queue (enqueue-only). Parser registered and handler resolves."
     },
     {
+      "id": "cli.reconcile",
+      "name": "vigil reconcile",
+      "surface": "cli-native",
+      "status": "LIVE",
+      "verb": "reconcile",
+      "anchor": {
+        "file": "integration/vigil_integration/cli.py",
+        "symbol": "_cmd_reconcile"
+      },
+      "check": "cli-native-verb",
+      "rationale": "Native verb dispatched in-process; the safety-net poller lists changed PRs per repo and enqueues a SecurityJob for each (enqueue-only, durable-before-cursor). Parser registered and handler resolves."
+    },
+    {
       "id": "cli.ledger",
       "name": "vigil ledger",
       "surface": "cli-native",

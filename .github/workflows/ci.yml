@@ -527,6 +527,7 @@ jobs:
               integration/tests/test_conjunctive_gate_blast_veto.py \
               integration/tests/test_jobs_securityjob_slice1.py \
               integration/tests/test_webhook_drain.py \
+              integration/tests/test_reconciliation.py \
               integration/tests/test_general_reexecutable.py \
               integration/tests/test_egress_backstop_mirror.py \
               integration/tests/test_external_tool_runner.py \
