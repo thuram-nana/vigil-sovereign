@@ -248,6 +248,14 @@ screens:
     description: The Certificate of Non-Exploitability — a signed, coverage-bounded, offline-verifiable proof that, over the surface the scanner reached, an applicable oracle had a live channel and did not fire; shows CLOSED/OPEN/UNPROVEN claims per surface, the coverage denominator, the honest residual, the out-of-band fingerprint pin, and the exact offline-verify command.
     synonyms: [proof of posture, posture, certificate of non-exploitability, non-exploitability, closed claims, coverage denominator, residual, provable absence, posture certificate, prove it is not vulnerable]
 
+  - id: posturedash
+    label: Posture Dashboard
+    group: LEARN
+    owner: false
+    plane: unified
+    description: A read-only analytics projection of the engine's signed FACTs + Certificate(s) of Non-Exploitability — a security score (a declared monotone projection of the signed certificate rollup, never an averaged CVSS), severity + CWE clustering over oracle-confirmed FACTs, oracle-proven exploitability with a KEV/EPSS intel-tier overlay on the CVE-bearing subset, and spine-sourced remediation velocity (MTTR). Fleet rollup across every engagement plus a per-engagement drill-down; every number is a projection of proof, never a fabricated estimate.
+    synonyms: [posture dashboard, security score, posture analytics, kev, epss, exploitability, mttr, cwe clustering, severity breakdown, remediation velocity, risk dashboard, posture score, analytics]
+
   - id: replay
     label: Replay Proof
     group: DO

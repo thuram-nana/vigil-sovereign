@@ -174,6 +174,10 @@ _SCOPED_ROUTES = {
     # OOB collaborator status, scoped to the engagement slug (`?slug=`). MEASURED (running/listening/armed);
     # read-only; never returns the poll secret. Token + Host gated like every other GET read.
     "/api/oob/status": actions.oob_status,
+    # Posture-analytics dashboard: a read-only projection of the signed FACTs + PostureCertificate(s)
+    # (security score, severity/CWE clusters, oracle-proven + KEV/EPSS exploitability, spine-sourced MTTR).
+    # `?slug=` scopes to one engagement; blank is the fleet rollup. Pure projection — no egress, no keys.
+    "/api/posture-dashboard": api.posture_dashboard,
 }
 
 # Prefixed GET routes: "/api/<name>/<arg>" -> api provider taking one string arg.

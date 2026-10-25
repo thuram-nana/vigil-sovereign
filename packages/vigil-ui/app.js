@@ -142,6 +142,7 @@
     { group: "LEARN", items: [
       { id: "trust", label: "Trust Center", icon: "shield", ready: true },
       { id: "posture", label: "Proof of Posture", icon: "check", ready: true },
+      { id: "posturedash", label: "Posture Dashboard", icon: "find", ready: true },
       { id: "manual", label: "Manual", icon: "book", ready: true },
       { id: "knowledge", label: "Knowledge Engine", icon: "brain", ready: true },
     ]},
@@ -1571,6 +1572,136 @@
     // re-firing the oracle needs VIGIL (the honest residual). Never dress binding up as re-exec.
     var re = String(v || "") === "re-executable";
     return h("span.pill.sm" + (re ? ".ok" : ""), null, [re ? "re-executable" : "binding"]);
+  }
+
+  // ---- Posture Dashboard: a READ-ONLY analytics projection of the signed FACTs + PostureCertificate(s)
+  //      (security score, severity + CWE clusters, oracle-proven + KEV/EPSS exploitability, MTTR). It
+  //      aggregates existing read endpoints via one GET; it mints nothing and sends no other traffic.
+  var PDASH = { data: null };
+  function pdashURL() {
+    var slug = activeEngagement();
+    return OFF("/api/posture-dashboard" + (slug ? ("?slug=" + encodeURIComponent(slug)) : ""));
+  }
+  function renderPostureDashboard(screen) {
+    var refreshBtn = h("button.btn.sm", { onClick: function () { loadPostureDashboard(); } }, [V.icon("live"), "Refresh"]);
+    var dlBtn = h("button.btn.sm", { onClick: function () {
+      if (!PDASH.data) { V.toast("Nothing to export yet.", true); return; }
+      downloadJSON("vigil-posture-dashboard-" + nowStamp() + ".json", PDASH.data);
+    } }, [V.icon("book"), "Download (JSON)"]);
+    var scopeBtn = activeEngagement()
+      ? h("button.btn.sm", { onClick: function () { setEngagement(""); loadPostureDashboard(); } }, [V.icon("book"), "View the whole fleet"])
+      : null;
+    V.mount(screen, [
+      h("div.screen-head", null, [h("h1", null, "Posture Dashboard"),
+        h("span.sub", null, "A read-only projection of the engine's SIGNED FACTs + Certificate(s) of "
+          + "Non-Exploitability — a security score, severity + CWE clustering, oracle-proven (+ KEV/EPSS "
+          + "overlay) exploitability, and remediation velocity. Every number is a projection of proof, "
+          + "never a fabricated estimate.")]),
+      h("div.acts", { style: { margin: "0 0 12px", gap: "8px", display: "flex", flexWrap: "wrap" } },
+        [refreshBtn, dlBtn, scopeBtn]),
+      h("div#pdash-doctrine", { style: { marginBottom: "14px" } }),
+      h("div#pdash-body", null, h("div.empty", null, "Loading posture analytics…")),
+    ]);
+    loadPostureDashboard();
+  }
+  function loadPostureDashboard() {
+    var body = V.$("#pdash-body");
+    if (body) V.mount(body, h("div.empty", null, "Loading posture analytics…"));
+    V.getJSON(pdashURL()).then(function (d) { PDASH.data = d; renderPostureDashboardData(d); }).catch(function (e) {
+      PDASH.data = null;
+      var b = V.$("#pdash-body");
+      if (b) V.mount(b, offlineEmpty(e, "Could not reach the offense console to read posture analytics. Start it (vigil up) and reload."));
+    });
+  }
+  function _pdashScoreTile(score) {
+    var has = score && score.value != null;
+    var foot = has
+      ? ((score.verdicts && score.verdicts.length ? score.verdicts.join(", ") + " · " : "")
+         + score.closed + " closed / " + score.open + " open / " + score.unproven + " unproven")
+      : ((score && score.note) || "no signed certificate yet");
+    var cls = has ? (score.value >= 80 ? "ok" : (score.value < 50 ? "danger" : "warn")) : null;
+    return V.tile("Security score", has ? (score.value + " / 100") : "—", foot, cls);
+  }
+  function renderPostureDashboardData(d) {
+    var doc = V.$("#pdash-doctrine");
+    if (doc && d && d.doctrine) V.mount(doc, h("div.hint", null, d.doctrine));
+    var body = V.$("#pdash-body");
+    if (!body) return;
+    if (!d || !d.ok) { V.mount(body, h("div.empty", null, "No posture analytics available.")); return; }
+    var facts = d.facts || {}, expl = d.exploitability || {}, rem = d.remediation || {}, sev = facts.severity || {};
+    var scopePill = V.pill(d.scope === "engagement" ? ("engagement " + d.slug) : "fleet (all engagements)", null, null);
+    var epss = expl.epss || {};
+
+    var scoreRow = h("div.grid.cols-4", { style: { marginTop: "4px" } }, [
+      _pdashScoreTile(d.score || {}),
+      V.tile("Proven FACTs", String(facts.fact_count != null ? facts.fact_count : 0),
+        (facts.lead_count || 0) + " leads (not counted)", "ok"),
+      V.tile("KEV-listed", String(expl.kev_listed != null ? expl.kev_listed : 0),
+        "known-exploited (intel lead)", (expl.kev_listed ? "warn" : null)),
+      V.tile("EPSS scored", String(epss.scored || 0),
+        (epss.high_ge_0_5 || 0) + " at EPSS ≥ 0.5 (intel lead)", (epss.high_ge_0_5 ? "warn" : null)),
+    ]);
+
+    var sevRow = h("div.grid.cols-4", { style: { marginTop: "12px" } },
+      ["Critical", "High", "Medium", "Low", "Info"].filter(function (k) { return sev[k]; }).map(function (k) {
+        return V.tile(k + " FACTs", String(sev[k]), "oracle-confirmed",
+          (k === "Critical" || k === "High") ? "danger" : (k === "Medium" ? "warn" : null));
+      }));
+
+    var cwe = (facts.cwe_clusters || []).slice(0, 12);
+    var cweCard = h("div.card", { style: { marginTop: "14px" } }, [
+      h("div.card-h", null, [h("span.label", null, "weakness clustering"), h("h3", null, "CWE clusters (FACTs)")]),
+      cwe.length ? h("table.tbl", null, [
+        h("thead", null, h("tr", null, [h("th", null, "CWE"), h("th", null, "FACTs"), h("th", null, "bug classes")])),
+        h("tbody", null, cwe.map(function (c) {
+          return h("tr", null, [h("td", null, c.cwe), h("td", null, String(c.count)),
+            h("td", null, (c.bug_classes || []).join(", "))]);
+        })),
+      ]) : h("div.empty", null, "No oracle-confirmed FACTs yet."),
+    ]);
+
+    var top = epss.top || [];
+    var explCard = top.length ? h("div.card", { style: { marginTop: "14px" } }, [
+      h("div.card-h", null, [h("span.label", null, "intel overlay (leads, not proof)"), h("h3", null, "Top EPSS / KEV (CVE-bearing)")]),
+      h("table.tbl", null, [
+        h("thead", null, h("tr", null, [h("th", null, "CVE"), h("th", null, "EPSS"), h("th", null, "percentile"), h("th", null, "KEV")])),
+        h("tbody", null, top.map(function (v) {
+          return h("tr", null, [h("td", null, String(v.cve || "")),
+            h("td", null, v.epss != null ? String(v.epss) : "—"),
+            h("td", null, v.percentile != null ? String(v.percentile) : "—"),
+            h("td", null, v.kev ? V.pill("KEV", "warn", null) : "—")]);
+        })),
+      ]),
+    ]) : null;
+
+    var remCard = h("div.card", { style: { marginTop: "14px" } }, [
+      h("div.card-h", null, [h("span.label", null, "remediation (spine-sourced)"), h("h3", null, "MTTR / velocity")]),
+      h("div.grid.cols-4", null, [
+        V.tile("Fixed", String(rem.fixed || 0), "oracle-confirmed, cross-run", "ok"),
+        V.tile("Regressions", String(rem.regressions || 0), "newly re-confirmed", (rem.regressions ? "danger" : null)),
+        V.tile("Stable", String(rem.stable || 0), "still proven", null),
+        V.tile("Median TTR", rem.median_days != null ? (rem.median_days + "d") : "—", "run pairs: " + (rem.run_pairs || 0), null),
+      ]),
+      rem.note ? h("div.hint", { style: { marginTop: "8px" } }, rem.note) : null,
+    ]);
+
+    var fleetCard = (d.scope === "fleet" && (d.engagements || []).length) ? h("div.card", { style: { marginTop: "14px" } }, [
+      h("div.card-h", null, [h("span.label", null, "fleet"), h("h3", null, "Engagements")]),
+      h("table.tbl", null, [
+        h("thead", null, h("tr", null, [h("th", null, "Engagement"), h("th", null, "FACTs"), h("th", null, "findings"), h("th", null, "runs"), h("th", null, "last activity")])),
+        h("tbody", null, (d.engagements || []).map(function (e) {
+          return h("tr", { style: { cursor: "pointer" }, onClick: function () { setEngagement(e.slug, e.label || ""); loadPostureDashboard(); } }, [
+            h("td", null, [h("b", null, e.label || e.slug), e.label ? h("div.hint", null, e.slug) : null]),
+            h("td", null, String(e.fact_count || 0)), h("td", null, String(e.finding_count || 0)),
+            h("td", null, String(e.run_count || 0)), h("td", null, e.last_activity || "—")]);
+        })),
+      ]),
+    ]) : null;
+
+    V.mount(body, h("div", null, [
+      h("div.acts", { style: { marginBottom: "8px" } }, [scopePill]),
+      scoreRow, sevRow, cweCard, explCard, remCard, fleetCard,
+    ]));
   }
 
   var PST = { data: null };
@@ -12110,6 +12241,7 @@
     if (id === "tools") { renderTools(screen); return; }
     if (id === "trust") { renderTrust(screen); return; }
     if (id === "posture") { renderPosture(screen); return; }
+    if (id === "posturedash") { renderPostureDashboard(screen); return; }
     if (id === "replay") { renderReplay(screen); return; }
     if (id === "governance") { renderGovernance(screen); return; }
     if (id === "assess") { renderAssess(screen); return; }

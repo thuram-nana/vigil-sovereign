@@ -1695,18 +1695,33 @@ def vulnintel_data(slug: str) -> dict[str, Any]:
         for o in vuln_obs:
             a = o.attrs or {}
             if o.relation is None and o.subject.kind is NodeKind.VULNERABILITY:
-                vulns[o.subject.node_id] = {
+                # MERGE attrs across every observation about this CVE node (a CVE may be reported by
+                # several feeds — e.g. CISA-KEV sets exploit_known, NVD sets cvss/severity, first.org EPSS
+                # sets epss/epss_percentile). A plain assign would be last-write-wins and silently drop a
+                # sibling feed's fields, so accumulate: exploit_known sticks True once ANY feed says so.
+                v = vulns.setdefault(o.subject.node_id, {
                     "id": o.subject.key, "node_id": o.subject.node_id, "source": o.source,
-                    "exploit_known": bool(a.get("exploit_known")),
-                    "severity": a.get("severity"), "cvss": a.get("cvss"),
-                    "summary": a.get("summary"), "feed": a.get("feed"),
-                    "vendor": a.get("vendor"), "product": a.get("product"),
-                }
+                    "exploit_known": False})
+                if a.get("exploit_known"):
+                    v["exploit_known"] = True
+                for k in ("severity", "cvss", "summary", "vendor", "product", "epss", "epss_percentile"):
+                    if a.get(k) is not None:
+                        v[k] = a.get(k)
+                # `feed` is NOT a single last-writer value (that made a KEV CVE show feed="first-epss"
+                # or vice-versa, order-dependent): ACCUMULATE every contributing feed, deterministically.
+                fd = a.get("feed")
+                if fd:
+                    feeds = v.setdefault("_feeds", set())
+                    feeds.add(str(fd))
             elif o.relation is not None and o.subject.kind is NodeKind.VULNERABILITY and o.object is not None:
                 affects.append({"vuln": o.subject.key, "affects": o.object.key,
                                 "kind": o.object.kind.value, "ecosystem": a.get("ecosystem"),
                                 "exploit_known": bool(a.get("exploit_known"))})
 
+        for v in vulns.values():
+            feeds = sorted(v.pop("_feeds", set()))           # order-independent provenance
+            v["feeds"] = feeds
+            v["feed"] = ", ".join(feeds) if feeds else None
         vuln_list = sorted(vulns.values(), key=lambda v: (not v["exploit_known"], v["id"]))
         from ..knowledge_engine.proposals import draft_proposals
         proposals = [p.to_dict() for p in draft_proposals(vuln_list)]
@@ -1715,6 +1730,8 @@ def vulnintel_data(slug: str) -> dict[str, Any]:
                 "catalog": _safe(_vuln_catalog, default=[]), "sources": _vuln_sources(),
                 "counts": {"vulnerabilities": len(vuln_list),
                            "exploit_known": sum(1 for v in vuln_list if v["exploit_known"]),
+                           "epss_scored": sum(1 for v in vuln_list
+                                              if isinstance(v.get("epss"), (int, float))),
                            "affects": len(affects), "proposals": len(proposals)},
                 "doctrine": _VULN_DOCTRINE}
 
@@ -1848,6 +1865,234 @@ def drift_data(arg: str) -> dict[str, Any]:
             "fixed": list(diff.removed) if diff else [],         # disappeared FACT = fixed / no longer proven
             "stable": list(diff.unchanged) if diff else [],
             "has_drift": bool(diff and diff.has_drift), "doctrine": _DRIFT_DOCTRINE}
+
+
+# ---------------------------------------------------------------------------
+# Posture-analytics dashboard — a READ-ONLY projection of the signed FACTs +
+# PostureCertificate(s): a security score, severity + CWE clustering, oracle-proven
+# (+ KEV/EPSS overlay) exploitability, and spine-sourced remediation (MTTR input).
+#
+# SOUNDNESS (load-bearing): every number is a projection of oracle-confirmed signed FACTs
+# (verified_by_oracle) or the signed PostureCertificate summary — NEVER a fabricated or
+# averaged estimate. The score is a DECLARED monotone function of the signed cert rollup and
+# ships the certificate's honest residual. KEV/EPSS are intel-tier LEADS (prioritization of
+# the CVE-bearing subset), never counted as proof. MTTR is spine-sourced (remediation
+# timestamps are not in the signed bytes). No egress, no keys (FATAL-2); _safe + total.
+# ---------------------------------------------------------------------------
+
+_POSTURE_DASH_DOCTRINE = (
+    "Every number is a projection of oracle-confirmed signed FACTs or the signed PostureCertificate "
+    "summary — never a fabricated or averaged estimate. The security SCORE is a declared MONOTONE "
+    "function of the signed certificate rollup {closed, open, unproven} and ships the certificate's honest "
+    "residual. Exploitability is VIGIL's OWN oracle-proven bit — a FACT is PROVEN exploitable; KEV/EPSS are "
+    "intel-tier leads that only PRIORITIZE the CVE-bearing subset, never counted as proof. MTTR is "
+    "spine-sourced (remediation timestamps are not in the signed cert bytes). An un-attested / empty tree "
+    "returns honest nulls, never a fabricated posture."
+)
+
+_DASH_SEVERITY_ORDER = ("Critical", "High", "Medium", "Low", "Info")
+
+
+def _dash_count(x: Any) -> int:
+    """A TOTAL, non-negative count coercion for an UNTRUSTED cert summary value: a real int/float ≥ 0 only;
+    a non-numeric ('oops'), a bool, a NaN, or a negative (all reachable via a partial-write / schema-drift /
+    bit-rot / forged cert that ``posture()`` surfaces verbatim) coerces to 0 — so the score NEVER raises
+    (FATAL-2 totality) and the closed-ratio can never exceed 100 or go negative (clamp + monotonicity)."""
+    if isinstance(x, bool) or not isinstance(x, (int, float)):
+        return 0
+    if x != x or x < 0:        # NaN or negative → not a usable count
+        return 0
+    return int(x)
+
+
+def _dash_latest_certs(certs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Keep only the LATEST present certificate per engagement, so a RE-ATTESTED engagement is not
+    double-counted in the score (an old all-CLOSED cert + a new all-OPEN cert must NOT sum to a misleading
+    50%). ``posture()`` yields certs newest-first (reverse-sorted bundle subdirs + newest-first run dirs),
+    so the FIRST present cert for an engagement key is its latest attestation. A cert with no engagement is
+    keyed by its own id (distinct bundles are kept), never collapsed together."""
+    seen: set[str] = set()
+    out: list[dict[str, Any]] = []
+    for c in certs:
+        if not (c.get("present") and isinstance(c.get("summary"), dict)):
+            continue
+        key = str(c.get("engagement") or "") or ("\x00id:" + str(c.get("id") or len(out)))
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(c)
+    return out
+
+
+def _dash_score(certs: list[dict[str, Any]]) -> dict[str, Any]:
+    """The security score: a DECLARED MONOTONE projection of the signed PostureCertificate summaries — a
+    coverage-weighted closed-ratio over {closed, open, unproven}. It is NOT an average of (human-authored)
+    CVSS and is NEVER computed from LEADs. Aggregates the LATEST attestation PER ENGAGEMENT (never
+    double-counting a re-attested engagement) and ships the residual; no attested certificate ⇒ an honest
+    null score (not a fabricated zero/100). TOTAL: untrusted summary counts coerce via ``_dash_count`` so a
+    corrupt/partial cert can never raise, inflate past 100, or go negative."""
+    present = _dash_latest_certs(certs)
+    closed = sum(_dash_count(c["summary"].get("n_closed")) for c in present)
+    opn = sum(_dash_count(c["summary"].get("n_open")) for c in present)
+    unproven = sum(_dash_count(c["summary"].get("n_unproven")) for c in present)
+    denom = closed + opn + unproven
+    value = max(0, min(100, round(100 * closed / denom))) if denom else None   # closed ↑, open/unproven ↓
+    residuals = sorted({str(c.get("residual") or "") for c in present if c.get("residual")})
+    verdicts = sorted({str((c.get("summary") or {}).get("overall") or "") for c in present
+                       if (c.get("summary") or {}).get("overall")})
+    return {
+        "value": value,
+        "basis": "monotone projection of the signed PostureCertificate summary (latest per engagement): "
+                 "closed / (closed + open + unproven)",
+        "closed": closed, "open": opn, "unproven": unproven, "certificates": len(present),
+        "verdicts": verdicts,
+        "residual": (residuals[0] if len(residuals) == 1 else (residuals or None)),
+        "attested": bool(present),
+        "note": None if present else
+                "no signed PostureCertificate attested yet — the score is null (not zero)",
+    }
+
+
+def _dash_facts(findings: list[dict[str, Any]]) -> dict[str, Any]:
+    """Severity histogram + CWE clustering over oracle-confirmed FACTs ONLY (verified_by_oracle) — a LEAD
+    is never counted as proven posture. CWE clustering is bug_class→CWE (already stamped), i.e. a
+    CWE-labeled bug_class cluster."""
+    facts = [f for f in findings if f.get("verified_by_oracle")]
+    sev: dict[str, int] = {}
+    for f in facts:
+        sev_key = str(f.get("severity") or "Info").title()
+        sev[sev_key] = sev.get(sev_key, 0) + 1
+    # keep the 5-tier order, then an 'Other' bucket for any out-of-vocab severity so a FACT is never
+    # silently dropped from the breakdown (the tiles would otherwise under-count the true FACT total).
+    severity = {k: sev[k] for k in _DASH_SEVERITY_ORDER if sev.get(k)}
+    other = sum(v for k, v in sev.items() if k not in _DASH_SEVERITY_ORDER)
+    if other:
+        severity["Other"] = other
+    clusters: dict[str, dict[str, Any]] = {}
+    for f in facts:
+        # a FACT's cwe is normally a LIST (stamped by _classify_finding); defend against a bare string so
+        # the loop never iterates it character-by-character into bogus single-char clusters.
+        cwes = f.get("cwe")
+        cwes = [cwes] if isinstance(cwes, str) else (cwes or ["(unmapped)"])
+        for cwe in cwes:
+            c = clusters.setdefault(str(cwe), {"cwe": str(cwe), "count": 0, "bug_classes": set()})
+            c["count"] += 1
+            if f.get("bug_class"):
+                c["bug_classes"].add(str(f["bug_class"]))
+    cwe_clusters = sorted(
+        ({"cwe": c["cwe"], "count": c["count"], "bug_classes": sorted(c["bug_classes"])}
+         for c in clusters.values()),
+        key=lambda c: (-c["count"], c["cwe"]))
+    return {"fact_count": len(facts), "lead_count": len(findings) - len(facts),
+            "severity": severity, "cwe_clusters": cwe_clusters}
+
+
+def _dash_exploitability(findings: list[dict[str, Any]], vulns: list[dict[str, Any]]) -> dict[str, Any]:
+    """VIGIL's OWN oracle-proven exploitability (every FACT is PROVEN exploitable — the strongest signal)
+    plus the KEV/EPSS intel-tier overlay on the CVE-bearing subset. KEV/EPSS are LEADS: prioritization,
+    never proof."""
+    facts = [f for f in findings if f.get("verified_by_oracle")]
+    kev = sum(1 for v in vulns if v.get("exploit_known"))
+    scored = [v for v in vulns if isinstance(v.get("epss"), (int, float))]
+    top = sorted(scored, key=lambda v: -float(v["epss"]))[:10]
+    return {
+        "oracle_proven_facts": len(facts),
+        "kev_listed": kev,
+        "epss": {"scored": len(scored),
+                 "high_ge_0_5": sum(1 for v in scored if float(v["epss"]) >= 0.5),
+                 "top": [{"cve": v.get("id"), "epss": v.get("epss"),
+                          "percentile": v.get("epss_percentile"), "kev": bool(v.get("exploit_known"))}
+                         for v in top]},
+        "note": "oracle-proven FACTs are proof of exploitability; KEV/EPSS only PRIORITIZE the "
+                "CVE-bearing (dependency) subset — intel-tier leads, never counted as proof",
+    }
+
+
+def _dash_remediation(slugs: list[str]) -> dict[str, Any]:
+    """Oracle-confirmed cross-run remediation deltas (the MTTR input): drift over each engagement's latest
+    run pair. SPINE-SOURCED — the remediation timestamp is the spine event envelope, NOT in the signed cert
+    bytes — so it is labeled as such and ``median_days`` is left null in this view (a per-finding
+    discovered→fixed timeline needs the retest pipeline); the fixed/regression COUNTS are the honest,
+    oracle-confirmed velocity signal."""
+    runs_by = _safe(_runs_by_slug, default={}) or {}
+    pairs = fixed = regressions = stable = 0
+    for sl in slugs:
+        rs = [r.get("run_id") for r in runs_by.get(sl, []) if r.get("run_id")]
+        if len(rs) < 2:
+            continue
+        d = _safe(lambda c=rs[0], p=rs[1]: drift_data(f"{c}:{p}"), default={}) or {}
+        if d.get("pending"):
+            continue
+        pairs += 1
+        fixed += len(d.get("fixed", []) or [])
+        regressions += len(d.get("regressions", []) or [])
+        stable += len(d.get("stable", []) or [])
+    return {"run_pairs": pairs, "fixed": fixed, "regressions": regressions, "stable": stable,
+            "median_days": None,
+            "note": ("oracle-confirmed cross-run deltas over each engagement's latest run pair; remediation "
+                     "timestamps are spine-sourced (not cert-attested), so median time-to-remediate needs "
+                     "the retest pipeline and is null here"
+                     if pairs else
+                     "no engagement has ≥2 runs yet — remediation velocity needs a retest run pair")}
+
+
+def posture_dashboard(slug: str = "") -> dict[str, Any]:
+    """The posture-analytics dashboard: a READ-ONLY, declared projection of the signed FACTs + the signed
+    PostureCertificate(s) — a security score, a severity + CWE-cluster breakdown, oracle-proven (+ KEV/EPSS
+    overlay) exploitability, and spine-sourced remediation. ``slug=""`` returns the FLEET rollup across every
+    engagement; a slug returns that engagement's drill-down. Total + ``_safe`` — an un-attested / fresh tree
+    returns honest nulls, never a traceback. No egress, no keys (FATAL-2)."""
+    slug = str(slug or "").strip()
+    certs_all = _safe(lambda: posture().get("posture", []), default=[]) or []
+
+    def _gather(sl: str):
+        findings = _safe(lambda: _findings_from_blackboard(sl), default=[]) or []
+        vd = _safe(lambda: vulnintel_data(sl), default={}) or {}
+        return findings, (vd.get("vulnerabilities", []) or [])
+
+    # Every sub-projection is _safe-wrapped with an honest-empty default so the provider is TOTAL — a
+    # corrupt cert / malformed finding can at worst blank ONE panel, never 500 the read (FATAL-2 totality).
+    def _blocks(certs, findings, vulns, slugs):
+        return {
+            "score": _safe(lambda: _dash_score(certs),
+                           default={"value": None, "attested": False, "closed": 0, "open": 0,
+                                    "unproven": 0, "certificates": 0, "verdicts": [], "residual": None,
+                                    "note": "posture summary unreadable"}),
+            "facts": _safe(lambda: _dash_facts(findings),
+                           default={"fact_count": 0, "lead_count": 0, "severity": {}, "cwe_clusters": []}),
+            "exploitability": _safe(lambda: _dash_exploitability(findings, vulns),
+                                    default={"oracle_proven_facts": 0, "kev_listed": 0,
+                                             "epss": {"scored": 0, "high_ge_0_5": 0, "top": []}, "note": ""}),
+            "remediation": _safe(lambda: _dash_remediation(slugs),
+                                 default={"run_pairs": 0, "fixed": 0, "regressions": 0, "stable": 0,
+                                          "median_days": None, "note": "remediation unavailable"}),
+        }
+
+    if slug:
+        certs = [c for c in certs_all if str(c.get("engagement") or "") == slug]
+        findings, vulns = _gather(slug)
+        return {"ok": True, "scope": "engagement", "slug": slug,
+                **_blocks(certs, findings, vulns, [slug]),
+                "doctrine": _POSTURE_DASH_DOCTRINE}
+
+    engs = _safe(lambda: list_engagements().get("engagements", []), default=[]) or []
+    all_findings: list[dict[str, Any]] = []
+    all_vulns: list[dict[str, Any]] = []
+    rows: list[dict[str, Any]] = []
+    for e in engs:
+        sl = str(e.get("slug") or "")
+        if not sl:
+            continue
+        f, v = _gather(sl)
+        all_findings.extend(f)
+        all_vulns.extend(v)
+        rows.append({"slug": sl, "label": e.get("label"), "fact_count": e.get("fact_count"),
+                     "finding_count": e.get("finding_count"), "first_seen": e.get("first_seen"),
+                     "last_activity": e.get("last_activity"), "run_count": e.get("run_count")})
+    return {"ok": True, "scope": "fleet", "slug": None,
+            **_blocks(certs_all, all_findings, all_vulns, [r["slug"] for r in rows]),
+            "engagements": rows,
+            "doctrine": _POSTURE_DASH_DOCTRINE}
 
 
 # ---------------------------------------------------------------------------

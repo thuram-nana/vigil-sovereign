@@ -26,7 +26,7 @@ _NVD_FEED = {"vulnerabilities": [{"cve": {
 def test_vulnintel_data_safe_on_empty_tree():
     d = api.vulnintel_data("no-such-slug-xyz")
     assert d["vulnerabilities"] == [] and d["affects"] == []
-    assert {s["name"] for s in d["sources"]} == {"nvd", "osv", "cisa-kev"}
+    assert {s["name"] for s in d["sources"]} == {"nvd", "osv", "cisa-kev", "epss"}
     assert d["catalog"] and "LEAD" in d["doctrine"]            # catalog present; doctrine states lead-not-fact
 
 
@@ -34,7 +34,7 @@ def test_vulnintel_data_empty_slug_still_has_catalog_and_doctrine():
     d = api.vulnintel_data("")
     assert d["slug"] is None and d["vulnerabilities"] == []
     assert d["catalog"] and "LEAD" in d["doctrine"]
-    assert {s["name"] for s in d["sources"]} == {"nvd", "osv", "cisa-kev"}
+    assert {s["name"] for s in d["sources"]} == {"nvd", "osv", "cisa-kev", "epss"}
 
 
 def test_vulnintel_data_surfaces_ingested_leads(tmp_path, monkeypatch):

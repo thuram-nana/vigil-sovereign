@@ -26,7 +26,7 @@ This audit covers the **enumerable, machine-checkable surface** (87 features, `a
   `integration/vigil_integration/cli.py`;
 - **every subsystem passthrough verb** (5: `sigil`, `crucible`, `aegis`, `strix`, `gateway`) —
   `cli-passthrough-verb`, anchored to the dispatcher's hardcoded `_ENV` table;
-- **every unified-UI screen** (32) — `ui-screen`, each pinned to a real `NAV` id **and** a real `route()`
+- **every unified-UI screen** (35) — `ui-screen`, each pinned to a real `NAV` id **and** a real `route()`
   id in `packages/vigil-ui/app.js`. This is the system-map drift invariant (`NAV == route() ==
   screens.yaml`) re-derived from `app.js` (via `tools/system-map/generate.py`'s own extraction) and pinned
   into the registry — so the dedicated `defense` (AEGIS), `chat`, `brain`, `mcp`, and `strix` screens each

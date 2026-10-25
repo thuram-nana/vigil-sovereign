@@ -307,14 +307,14 @@
       "pending": 0,
       "ui-driven": 40
     },
-    "routes": 191,
+    "routes": 192,
     "routes_by_status": {
       "ORPHAN": 0,
       "headless": 27,
       "pending": 0,
-      "ui-driven": 164
+      "ui-driven": 165
     },
-    "ui_calls": 158
+    "ui_calls": 159
   },
   "generated_from": {
     "console": "engine/crucible/framework/v2/console/server.py",
@@ -1391,6 +1391,14 @@
     },
     {
       "kind": "exact",
+      "method": "GET",
+      "path": "/api/posture-dashboard",
+      "plane": "offense-console",
+      "reason": "",
+      "status": "ui-driven"
+    },
+    {
+      "kind": "exact",
       "method": "POST",
       "path": "/api/posture/attest",
       "plane": "offense-console",
@@ -2293,6 +2301,11 @@
     {
       "method": "GET",
       "path": "/api/posture",
+      "plane": "offense-console"
+    },
+    {
+      "method": "ANY",
+      "path": "/api/posture-dashboard",
       "plane": "offense-console"
     },
     {
