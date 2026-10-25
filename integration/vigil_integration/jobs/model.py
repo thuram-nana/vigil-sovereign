@@ -36,6 +36,26 @@ def _clip(value: Any, limit: int = _MAX_STR) -> str:
     return s[:limit]
 
 
+def _canon_repo(repo: Any) -> str:
+    """Canonical repo identity — trimmed, trailing-slash-stripped, lowercased — so the slug and the shared
+    work-key never diverge on case / trailing-slash spelling drift between the webhook + reconciliation paths."""
+    return str(repo or "").strip().rstrip("/").lower()
+
+
+def work_delivery_id(repo: Any, pr_number: Any, commit: Any) -> str:
+    """The SHARED, content-addressed exactly-once key for one unit of repo work ``(repo, pr, commit)``.
+
+    Both inbound paths derive their ``delivery_id`` from this — the webhook drain (instead of the provider
+    GUID) and the reconciliation poller — so the queue's PERMANENT delivery seen-set coalesces them ACROSS
+    paths: once a webhook-handled commit is enqueued, a later reconciliation re-list of the same
+    ``(repo, pr, commit)`` returns ``duplicate_delivery`` and is never re-scanned (closes the cross-path
+    double-scan). It is INJECTIVE — the components are JSON-encoded, never ``|``-joined, so no value can be
+    mistaken for a delimiter — and stable (a changed ``commit`` yields a NEW key, so new code re-scans)."""
+    canon = json.dumps([_canon_repo(repo), pr_number, str(commit or "")],
+                       separators=(",", ":"), default=str)
+    return "work-" + hashlib.sha256(canon.encode("utf-8")).hexdigest()[:24]
+
+
 @dataclass(frozen=True)
 class SecurityJob:
     """One normalized security-job request. Immutable + canonically hashable so the queue can dedup it.
@@ -85,7 +105,7 @@ class SecurityJob:
         bounded, then a ``sha256`` suffix of the FULL canonical repo makes it COLLISION-RESISTANT — two
         distinct repos (or two tenants' repos) never share a slug, so they never share a verified authority
         or a per-slug run-lease. ``repo/`` and ``repo`` canonicalize identically (the same repo, one slug)."""
-        canon = self.repo.strip().rstrip("/").lower()
+        canon = _canon_repo(self.repo)
         stem = _SLUG_RE.sub("-", canon).strip("-")[:40]
         suffix = hashlib.sha256(canon.encode("utf-8")).hexdigest()[:12]
         return f"repo-{stem}-{suffix}" if stem else f"repo-{suffix}"

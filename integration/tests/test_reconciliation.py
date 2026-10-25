@@ -126,7 +126,7 @@ def test_trigger_poll_produces_jobs(tmp_path):
     trig = ReconciliationTrigger(repos=[repo], lister=_lister({repo: ([ChangedPR(7, "aaa", "c7")], "c7")}))
     jobs = trig.poll()
     assert len(jobs) == 1 and jobs[0].source == "reconciliation" and jobs[0].pr_number == 7
-    assert jobs[0].repo == repo and jobs[0].delivery_id.startswith("recon-")
+    assert jobs[0].repo == repo and jobs[0].delivery_id.startswith("work-")
 
 
 def test_reconciler_once_via_queue_root_builds_the_queue(tmp_path):
@@ -230,14 +230,80 @@ def test_checkpoint_oversized_file_fails_open(tmp_path):
     assert cp.load("repo-big") == ""                    # oversized ⇒ fail-open, never hangs/OOMs
 
 
-def test_recon_delivery_id_is_injective_no_delimiter_collision():
-    from vigil_integration.jobs.reconciliation import _recon_delivery_id
-    # the classic '|'-join collision: ("a|b","c","d") vs ("a","b|c","d") would collapse to one string — the
-    # JSON encoding keeps them distinct.
-    assert _recon_delivery_id("a|b", "c", "d") != _recon_delivery_id("a", "b|c", "d")
-    # a changed head correctly yields a NEW delivery id (so a new commit re-scans)
-    assert _recon_delivery_id("r", 1, "head1") != _recon_delivery_id("r", 1, "head2")
-    assert _recon_delivery_id("r", 1, "h").startswith("recon-")
+def test_cross_path_webhook_completed_commit_is_not_rescanned_by_reconciliation(tmp_path):
+    # THE cross-path dedup (resolved M4): a webhook-handled (repo,pr,commit) that already COMPLETED must not
+    # be re-scanned when the reconciliation poller later lists the same (repo,pr,commit) — the SHARED
+    # content-addressed work key makes the queue's permanent delivery marker coalesce it across paths.
+    import hashlib
+    import json as _json
+
+    from vigil_integration.webhook_drain import WebhookSpoolDrain
+    q = SecurityJobQueue(tmp_path / "queue")
+    cp = ReconciliationCheckpoints(tmp_path / "cp")
+    repo, pr, commit = "github.com/acme/widget", 5, "c0ffee"
+    # (1) a webhook delivery for (repo,pr,commit) → enqueue → complete (fingerprint cleared, delivery marker kept)
+    spool = tmp_path / "wh"
+    incoming = spool / "incoming"
+    incoming.mkdir(parents=True, exist_ok=True)
+    env = {"schema": "vigil.webhook.github.v1", "delivery_id": "GUID-xyz", "event": "pull_request",
+           "repo": repo, "commit": commit, "pr_number": pr}
+    data = _json.dumps(env, sort_keys=True).encode()
+    (incoming / (hashlib.sha256(data).hexdigest()[:32] + ".json")).write_bytes(data)
+    assert WebhookSpoolDrain(spool_dir=spool, queue=q).drain()["enqueued"] == 1
+    q.complete(q.claim_next())
+    # (2) reconciliation lists the SAME (repo,pr,commit) → coalesced by the shared work key, NOT re-scanned
+    lister = _lister({repo: ([ChangedPR(pr, commit, "cur")], "cur")})
+    out = reconcile_once(repos=[repo], lister=lister, checkpoints=cp, queue=q)
+    assert out["enqueued"] == 0 and out["duplicate"] == 1 and q.pending_count() == 0
+
+
+def test_github_lister_drives_reconcile_once_end_to_end(tmp_path):
+    # the REAL gated lister (with a fake HTTP double) satisfies the RepoLister contract: reconcile_once lists
+    # via it, normalizes + enqueues the PRs, and advances the checkpoint to the PR's updated_at.
+    import json as _json
+
+    from vigil_integration.live.github_client import GitHubReadConfig, make_github_lister
+
+    class _Resp:
+        def __init__(self, payload):
+            self.status_code = 200
+            self._p = payload
+            self.content = _json.dumps(payload).encode()
+
+        def json(self):
+            return self._p
+
+    class _Http:
+        def get(self, url, *, headers=None, params=None):
+            if "/pulls" in url and (params or {}).get("page") == 1:
+                return _Resp([{"number": 7, "head": {"sha": "abc"}, "updated_at": "2026-01-01T00:00:00Z"}])
+            return _Resp([])
+
+        def close(self):
+            pass
+
+    q = SecurityJobQueue(tmp_path / "queue")
+    cp = ReconciliationCheckpoints(tmp_path / "cp")
+    lister, _client = make_github_lister(GitHubReadConfig(slug="r", github_token="t"), http=_Http())
+    repo = "github.com/acme/widget"
+    out = reconcile_once(repos=[repo], lister=lister, checkpoints=cp, queue=q)
+    assert out["enqueued"] == 1 and q.pending_count() == 1
+    claimed = q.claim_next()
+    assert claimed.job.source == "reconciliation" and claimed.job.pr_number == 7 and claimed.job.commit == "abc"
+    assert cp.load(SecurityJob(repo=repo).slug) == "2026-01-01T00:00:00Z"
+
+
+def test_work_delivery_id_is_injective_and_shared_across_paths():
+    from vigil_integration.jobs.model import work_delivery_id
+    # the classic '|'-join collision — ("a|b","c","d") vs ("a","b|c","d") would collapse under a |-join; the
+    # JSON encoding keeps them distinct (injective).
+    assert work_delivery_id("a|b", "c", "d") != work_delivery_id("a", "b|c", "d")
+    # a changed head yields a NEW key (new commit re-scans); the SAME (repo,pr,head) is STABLE (cross-path dedup)
+    assert work_delivery_id("r", 1, "head1") != work_delivery_id("r", 1, "head2")
+    assert work_delivery_id("r", 1, "h") == work_delivery_id("r", 1, "h")
+    assert work_delivery_id("r", 1, "h").startswith("work-")
+    # canonicalization: case / trailing-slash drift maps to the SAME key (cross-path dedup robustness)
+    assert work_delivery_id("GitHub.com/Org/Repo/", 1, "h") == work_delivery_id("github.com/org/repo", 1, "h")
 
 
 def test_watch_surfaces_a_stuck_repo_tally(tmp_path, capsys):

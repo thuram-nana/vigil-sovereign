@@ -32,7 +32,7 @@ import stat
 from pathlib import Path
 from typing import Any, Callable, Optional
 
-from .jobs.model import SecurityJob          # pure stdlib — importing the model pulls no framework
+from .jobs.model import SecurityJob, work_delivery_id   # pure stdlib — importing the model pulls no framework
 
 _MAX_BYTES = 256 * 1024                       # mirror the producer's envelope cap; a larger file is rejected unread
 _WEBHOOK_SCHEMA = "vigil.webhook.github.v1"   # must match uiproxy._GH_WEBHOOK_ENVELOPE_SCHEMA
@@ -170,12 +170,25 @@ class WebhookSpoolDrain:
                 self._quarantine(claimed, f"not a {_WEBHOOK_SCHEMA} envelope")
                 rejected += 1
                 continue
+            # Strict envelope contract: a real webhook delivery always carries the provider GUID (the ingress
+            # requires X-GitHub-Delivery). The QUEUE key is content-addressed below, but a missing GUID means
+            # a malformed envelope → quarantine (fail-closed), not a silently-keyed job.
+            if not str(env.get("delivery_id") or "").strip():
+                self._quarantine(claimed, "webhook envelope missing github delivery id")
+                rejected += 1
+                continue
             try:
+                repo = str(env.get("repo") or "")
+                commit = str(env.get("commit") or "")
+                pr_number = env.get("pr_number")
                 job = SecurityJob.normalize(
-                    source="webhook", repo=str(env.get("repo") or ""),
-                    delivery_id=str(env.get("delivery_id") or ""), commit=str(env.get("commit") or ""),
-                    pr_number=env.get("pr_number"), tenant_id=str(env.get("tenant_id") or ""),
-                    extra={"event": str(env.get("event") or "")})
+                    source="webhook", repo=repo, commit=commit, pr_number=pr_number,
+                    # content-addressed on (repo,pr,commit) so a webhook and the reconciliation poller SHARE
+                    # the exactly-once key (cross-path dedup); the provider GUID is kept in extra for audit.
+                    delivery_id=work_delivery_id(repo, pr_number, commit),
+                    tenant_id=str(env.get("tenant_id") or ""),
+                    extra={"event": str(env.get("event") or "")[:512],
+                           "github_delivery": str(env.get("delivery_id") or "")[:512]})
             except (ValueError, TypeError, OverflowError) as exc:   # empty delivery_id, or a non-finite pr_number, …
                 self._quarantine(claimed, f"not a valid SecurityJob (fail-closed): {exc}")
                 rejected += 1

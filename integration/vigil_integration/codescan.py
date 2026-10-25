@@ -191,10 +191,17 @@ def _retain_source_region(root: str, af: Any) -> str:
     return region or text
 
 
-def run_codescan(*, root: str, slug: str, base_dir: str, max_files: int = 5000) -> dict[str, Any]:
+def run_codescan(*, root: str, slug: str, base_dir: str, max_files: int = 5000,
+                 include_paths: "set[str] | None" = None) -> dict[str, Any]:
     """Scan ``root`` with DAA and write each finding into the signed ``<base_dir>/<slug>.spine`` as a
     re-runnable static fact. Returns ``{root, slug, spine, findings:[...], counts}`` — findings carry the
     argv-safe ``ref`` (== the spine record ref), ``bug_class``, ``cwe``, severity, file/line and message.
+
+    ``include_paths`` (repo-root-relative POSIX paths, matching ``finding.path``) DIFF-SCOPES the scan: when
+    given, only findings in those files are kept — the PR-bot passes a PR's changed-files set so the review
+    is scoped to the diff. The analyzers still run over the whole tree (external tools scan wholesale), but
+    the recorded facts are filtered to the changed files, yielding ONE spine snapshot scoped to the PR. None
+    (the default) keeps every finding (a full scan), so existing callers are byte-identical.
 
     Fail-closed: an unreadable root or a spine-write failure raises (the caller surfaces it). NEVER fabricates
     a finding — only DAA matches over the real source are written, each as ``status="fact"`` (a legitimate,
@@ -213,6 +220,16 @@ def run_codescan(*, root: str, slug: str, base_dir: str, max_files: int = 5000) 
         raise FileNotFoundError(f"codescan root does not exist: {root}")
 
     daa = _daa_findings(str(src), max_files=max_files)
+    if include_paths is not None:   # diff-scope: keep only findings in the PR's changed files
+        # FAIL-CLOSED on a namespace mismatch. A non-empty scope that resolves to NO real file under the
+        # scan root means the checkout-root and the changed-files (repo-root-relative) namespaces disagree
+        # (a tarball checkout's "<owner>-<repo>-<sha>/" prefix, a monorepo subdir, …). Filtering to an empty
+        # "clean" result there is a silent false-negative — refuse it LOUDLY instead of reporting clean.
+        if include_paths and not any((src / p).is_file() for p in include_paths):
+            raise FileNotFoundError(
+                f"diff-scope include_paths does not resolve under the scan root {src}: the checkout-root / "
+                f"repo-root path namespaces disagree — refusing a silent clean (sample {sorted(include_paths)[:3]})")
+        daa = [af for af in daa if getattr(af, "path", None) in include_paths]
     state = AgentState(engagement_slug=slug, target=str(src),
                        objective="local codebase static review (DAA deterministic oracle)")
     findings_out: list[dict[str, Any]] = []

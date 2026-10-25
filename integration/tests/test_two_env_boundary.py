@@ -123,6 +123,8 @@ import vigil_integration.webhook_drain  # repo-connect Slice 2: inbound webhook 
 assert "framework" not in _m, "webhook_drain must not import framework at module scope (queue defers it)"
 import vigil_integration.jobs.reconciliation  # repo-connect Slice 2b: the reconciliation safety-net poller
 assert "framework" not in _m, "jobs.reconciliation must not import framework at module scope (queue defers it)"
+import vigil_integration.live.github_client  # repo-connect Slice 3a: the gated READ-only GitHub client
+assert "framework" not in _m, "live.github_client must not import framework at module scope (gated client builds it lazily)"
 print(json.dumps({"res": res, "guard": "passed"}))
 """
 

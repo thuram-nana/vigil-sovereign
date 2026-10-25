@@ -153,6 +153,20 @@ class SecurityJobQueue:
         self._sched.complete(claimed._ej)
         self._clear_fingerprint(claimed.job.fingerprint)
 
+    def release_delivery(self, claimed: ClaimedJob) -> None:
+        """Remove the PERMANENT delivery marker for a job so its work can be RE-ADMITTED. Called when a job
+        FAILED (the worker raised): the delivery seen-set means 'this delivery was handled', but a failed
+        scan was NOT — releasing the marker lets a re-delivery OR the reconciliation safety-net re-drive the
+        same ``(repo, pr, commit)`` rather than permanently suppressing it (content-addressing had otherwise
+        made a re-delivery of the same work coalesce). Best-effort; keyed on the job's delivery_id."""
+        did = getattr(claimed.job, "delivery_id", "")
+        if not did:
+            return
+        try:
+            (self._delivery_dir / _safe_key(did)).unlink(missing_ok=True)
+        except OSError:
+            pass
+
     def requeue(self, claimed: ClaimedJob) -> None:
         """Return a claimed job to the queue (markers kept — it is the SAME job, still in flight)."""
         self._sched.requeue(claimed._ej)
