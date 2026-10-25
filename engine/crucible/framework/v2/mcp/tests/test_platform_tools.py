@@ -150,6 +150,49 @@ def test_wildcard_path_args_named_by_resource() -> None:
     assert pt._wildcard_path_args("/api/status") == []
 
 
+# ---- render_console_request (pure: route+args -> console request; NO /offense here, the server adds it) --
+
+def _desc(name: str) -> dict:
+    return {t["name"]: t for t in pt.build_platform_tools("full")}[name]
+
+
+def test_render_get_exact() -> None:
+    assert pt.render_console_request(_desc("get_status"), {}) == {
+        "method": "GET", "path": "/api/status", "query": {}, "body": None}
+
+
+def test_render_get_scoped_slug_to_query() -> None:
+    r = pt.render_console_request(_desc("get_runs"), {"slug": "x"})
+    assert r["method"] == "GET" and r["path"] == "/api/runs" and r["query"] == {"slug": "x"}
+    # absent slug -> no query (the unscoped listing)
+    assert pt.render_console_request(_desc("get_runs"), {})["query"] == {}
+
+
+def test_render_get_prefix_appends_arg() -> None:
+    assert pt.render_console_request(_desc("get_report"), {"arg": "run1"})["path"] == "/api/report/run1"
+
+
+def test_render_post_wildcard_and_body() -> None:
+    r = pt.render_console_request(_desc("post_run_cancel"), {"run_id": "r1", "extra": 1})
+    assert r["method"] == "POST" and r["path"] == "/api/run/r1/cancel" and r["body"] == {"extra": 1}
+    assert "*" not in r["path"]
+
+
+def test_render_rejects_dotdot_and_dot() -> None:
+    for args in ({"run_id": ".."}, {"run_id": "."}):
+        with pytest.raises(ValueError):
+            pt.render_console_request(_desc("post_run_cancel"), args)
+    with pytest.raises(ValueError):
+        pt.render_console_request(_desc("get_report"), {"arg": ".."})
+
+
+def test_render_missing_required_arg_raises() -> None:
+    with pytest.raises(ValueError):
+        pt.render_console_request(_desc("post_run_cancel"), {})
+    with pytest.raises(ValueError):
+        pt.render_console_request(_desc("get_report"), {})
+
+
 def test_descriptor_shape_is_complete() -> None:
     for t in pt.build_platform_tools("full"):
         assert set(t) >= {"name", "description", "inputSchema", "annotations", "_meta"}

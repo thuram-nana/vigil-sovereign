@@ -259,6 +259,21 @@ def registry_routes(
 wildcard_path_args = _wildcard_path_args
 
 
+def _safe_path_segment(name: str, argname: str, raw: object) -> str:
+    """Validate a value destined for a URL PATH slot: required (not None/blank) and not a ``.``/``..``
+    traversal segment. ``..`` survives ``quote(safe="")`` (``.`` is RFC-3986 unreserved) and an HTTP layer
+    would normalise ``/api/report/..`` → ``/api/`` — a different route. Reject it so a path arg can never
+    traverse; a legitimate run id / slug is never ``.`` or ``..``."""
+    if raw is None:
+        raise ValueError(f"{name}: path argument {argname!r} is required")
+    s = str(raw).strip()
+    if not s:
+        raise ValueError(f"{name}: path argument {argname!r} is required")
+    if s in (".", ".."):
+        raise ValueError(f"{name}: path argument {argname!r} must not be '.' or '..'")
+    return s
+
+
 def render_console_request(descriptor: dict, arguments: Optional[dict]) -> dict:
     """PURE: map a platform tool descriptor + the caller's ``arguments`` to a concrete console HTTP request
     ``{method, path, query, body}``.
@@ -286,19 +301,15 @@ def render_console_request(descriptor: dict, arguments: Optional[dict]) -> dict:
                 query["slug"] = str(slug)
             path = route
         elif kind == "prefix":
-            arg = args.get("arg")
-            if arg is None or not str(arg).strip():
-                raise ValueError(f"{name}: path argument 'arg' is required")
-            path = route + quote(str(arg), safe="")
+            arg = _safe_path_segment(name, "arg", args.get("arg"))
+            path = route + quote(arg, safe="")
         else:  # exact
             path = route
     else:  # POST
         path = route
         for argname in wildcard_path_args(route):
-            val = args.pop(argname, None)
-            if val is None or not str(val).strip():
-                raise ValueError(f"{name}: path argument {argname!r} is required")
-            path = path.replace("*", quote(str(val), safe=""), 1)
+            val = _safe_path_segment(name, argname, args.pop(argname, None))
+            path = path.replace("*", quote(val, safe=""), 1)
         if "*" in path:  # defensive: an unfilled wildcard must never reach the gate
             raise ValueError(f"{name}: unresolved path wildcard after rendering")
         body = args  # whatever remains is the JSON request body

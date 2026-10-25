@@ -56,6 +56,14 @@ HttpForward = Callable[[str, str, dict, Optional[bytes], float], "tuple[int, byt
 _LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "localhost", "ip6-localhost"})
 _MAX_RESP_BYTES = 8 << 20   # 8 MiB response cap — a console read can be large; a stdio line is not the cap here
 
+# The `vigil up` proxy authenticates the operator from the X-SIGIL-Token header (not Authorization) and
+# requires a CSRF custom header (X-Requested-With) on a mutating POST — a cross-site HTML form can set
+# neither. The offense plane is mounted under /offense (/offense/api/v1/* → gated api, /offense/* → console).
+# These mirror integration/vigil_integration/uiproxy.py (_TOKEN_HEADER / _CSRF_HEADER / OFFENSE_BASE).
+_TOKEN_HEADER = "X-SIGIL-Token"
+_CSRF_HEADER = "X-Requested-With"
+_OFFENSE_MOUNT = "/offense"
+
 
 def _require_loopback(base_url: str) -> str:
     """Validate ``base_url`` is a loopback http(s) URL and return it normalised (no trailing slash). Refuses
@@ -63,6 +71,10 @@ def _require_loopback(base_url: str) -> str:
     parsed = urllib.parse.urlparse(base_url)
     if parsed.scheme not in ("http", "https"):
         raise ValueError(f"base URL must be http(s), got {parsed.scheme!r}")
+    if parsed.username or parsed.password:
+        # No legitimate loopback-proxy URL carries userinfo; rejecting it removes the `user@host` ambiguity
+        # (e.g. `evil.com@127.0.0.1` parses to host 127.0.0.1) and any credential-in-URL surprise.
+        raise ValueError("base URL must not contain userinfo (user:pass@)")
     host = (parsed.hostname or "").lower()
     if host not in _LOOPBACK_HOSTS:
         raise ValueError(f"base URL host must be loopback (one of {sorted(_LOOPBACK_HOSTS)}), got {host!r}")
@@ -80,7 +92,11 @@ def _default_forward(method: str, url: str, headers: dict, body: Optional[bytes]
     """Loopback stdlib HTTP transport. No redirects, bounded read, per-call timeout. Returns (status, body)
     even for a 4xx/5xx (surfaced to the operator as the gate's answer) — only a transport failure raises."""
     req = urllib.request.Request(url, data=body, method=method, headers=headers)
-    opener = urllib.request.build_opener(_NoRedirect)
+    # ProxyHandler({}) DISABLES urllib's default proxy handling (http_proxy / ALL_PROXY env, macOS/Windows
+    # system proxy). Without it, a request to the loopback base URL would be sent to the configured PROXY
+    # host instead — off-host, carrying the operator's bearer — defeating the loopback pin. The adapter
+    # dials the loopback target DIRECTLY, always.
+    opener = urllib.request.build_opener(_NoRedirect, urllib.request.ProxyHandler({}))
     try:
         with opener.open(req, timeout=timeout) as resp:
             return resp.status, resp.read(_MAX_RESP_BYTES + 1)[:_MAX_RESP_BYTES]
@@ -170,14 +186,17 @@ class PlatformMCPServer:
         path = rendered["path"]
         query = rendered.get("query") or {}
         body = rendered.get("body")
-        url = self.base_url + path
+        # Prepend the /offense mount so the request can ONLY be served by the `vigil up` proxy (which strips
+        # /offense and routes /offense/api/v1/* → gated api, /offense/* → console). A mispoint at a backend's
+        # DIRECT port serves no /offense/* route → 404 (fail-closed), never the owner-equivalent direct-console
+        # branch. The console route itself (OFFENSE_ACTION_PERM key) is fixed by the tool name, not arguments.
+        url = self.base_url + _OFFENSE_MOUNT + path
         if query:
             url = url + "?" + urllib.parse.urlencode(query)
         headers = {"Accept": "application/json"}
         if self.bearer:
-            headers["Authorization"] = f"Bearer {self.bearer}"
-        # the web UI stamps this on every mutating POST (CSRF / same-origin marker); mirror it
-        headers["X-Requested-With"] = "vigil-mcp"
+            headers[_TOKEN_HEADER] = self.bearer       # the proxy authenticates from X-SIGIL-Token
+        headers[_CSRF_HEADER] = "vigil-mcp"            # CSRF conjunct the proxy requires on a mutating POST
         data: Optional[bytes] = None
         if method == "POST":
             headers["Content-Type"] = "application/json"
@@ -257,14 +276,14 @@ class PlatformMCPServer:
 
 def from_env(env: Optional[dict] = None) -> PlatformMCPServer:
     """Build a PlatformMCPServer from the operator's environment:
-      * VIGIL_MCP_BASE_URL  — the loopback `vigil up` proxy URL (default http://127.0.0.1:8765)
+      * VIGIL_MCP_BASE_URL  — the loopback `vigil up` proxy URL (default http://127.0.0.1:8770)
       * VIGIL_MCP_BEARER    — the operator's session bearer token (forwarded; the proxy decides the role)
       * VIGIL_MCP_PROFILE   — 'core' (default) or 'full'
       * VIGIL_MCP_TIMEOUT   — per-call seconds (default 60)
     The base URL is loopback-validated; a non-loopback value raises (fail-closed)."""
     e = env if env is not None else os.environ
     return PlatformMCPServer(
-        base_url=e.get("VIGIL_MCP_BASE_URL", "http://127.0.0.1:8765"),
+        base_url=e.get("VIGIL_MCP_BASE_URL", "http://127.0.0.1:8770"),
         bearer=e.get("VIGIL_MCP_BEARER") or None,
         profile=e.get("VIGIL_MCP_PROFILE", DEFAULT_PROFILE),
         timeout=float(e.get("VIGIL_MCP_TIMEOUT", "60") or "60"),
