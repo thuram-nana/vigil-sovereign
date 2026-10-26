@@ -529,7 +529,7 @@ def build_engine(config: EngineConfig) -> VigilEngine:
     # Duck-typed so this module need not import the brains layer; a brain without the hook changes nothing.
     _brain_floor = getattr(config.brain, "danger_floor", None) if config.brain is not None else None
     _classify = _brain_floor(default_classify) if callable(_brain_floor) else None
-    gate = _build_gate(prov, ceiling=config.offense_ceiling, classify=_classify)
+    gate = _build_gate(prov, ceiling=config.offense_ceiling, classify=_classify, base_dir=config.base_dir)
 
     # The executor's egress guard is keyed off the SAME signed-authority scope the gate enforces (re-loaded
     # per call). Two distinct fail-closed outcomes: (a) a per-call load/verify failure INSIDE the scope source
@@ -1289,10 +1289,49 @@ def ensure_loopback_charter(slug: str, scope: Sequence[str]) -> Optional[str]:
         return None    # LEAD-only (fail-closed), never a crash in engine construction
 
 
+# --- repo-connect Slice 3-authz-B: the m-of-n threshold-destruction gate for the LIVE offense gate ------
+#
+# conjunctive_decide DENIES any destructive/high-blast action unless a threshold-destruction gate is wired
+# (fail-closed). Until now _build_gate wired NONE, so the live engine could never perform a destructive action
+# (e.g. the repo-connect PR-bot fix-PR write) even with a valid owner quorum. This loads the owner-PROVISIONED
+# destruction authority + its single-use nonce ledger from the engagement base_dir so build_offense_gate can
+# enforce the m-of-n quorum BEFORE a destructive write. Arming the gate is NECESSARY but NOT SUFFICIENT for a
+# write: the write still requires the repo-exact git-write grant (authorize_repo_write, Slice 3-authz-A), the
+# per-capability enable flag + WARDEN owner-approval (3b/3c), AND a per-call owner-signed quorum authorization.
+def _load_destruction_for_gate(base_dir: str) -> "tuple[Any, Any]":
+    """``(DestructionAuthority, NonceLedger)`` when the owner has PROVISIONED a destruction trust root under
+    ``base_dir`` (``destruction-trust-root.json``), else ``(None, None)`` ⇒ the m-of-n gate stays OFF and every
+    destructive action is DENIED — byte-identical to an unprovisioned engagement (OFF BY DEFAULT).
+
+    Fail-closed + fail-soft: ANY load/validation error (unreadable / invalid trust root, under-provisioned
+    quorum, mandatory signer not in the root) ALSO yields ``(None, None)`` — a broken destruction config must
+    NEVER enable a write, only leave it denied. The mandatory signer set follows the provisioning convention
+    (the ``owner`` key_id — what ``destruction_provision.generate_authority`` and the ``vigil … --mandatory-
+    signer`` CLI default produce); a trust root whose owner key_id differs fails closed here (a custom mandatory
+    set is a provisioning follow-up, not a silent weaker quorum)."""
+    try:
+        from ..live import destruction_provision as _dp
+        from ..live.trusted_finding import load_destruction_authority
+        dpaths = _dp.default_paths(base_dir)
+        if not Path(dpaths["trust_root"]).is_file():
+            return None, None                       # unprovisioned ⇒ OFF (byte-identical to before)
+        authority = load_destruction_authority(
+            trust_root_path=dpaths["trust_root"], mandatory_signer_ids=("owner",))
+        return authority, NonceLedger(dpaths["ledger"])
+    except Exception:  # noqa: BLE001 — a broken/absent destruction config leaves writes DENIED, never enables one
+        return None, None
+
+
 def _build_gate(prov: Provisioned, *, ceiling: str = "A1",
-                classify: Optional[Callable[[str], str]] = None) -> Optional[Callable[..., Any]]:
+                classify: Optional[Callable[[str], str]] = None,
+                base_dir: str = ".vigil-live") -> Optional[Callable[..., Any]]:
     """The conjunctive gate over the signed authority. None (⇒ every tool call DENIED) if the framework
-    gate cannot be built. ``ceiling`` is the operator's standing approval tier (see EngineConfig)."""
+    gate cannot be built. ``ceiling`` is the operator's standing approval tier (see EngineConfig).
+
+    ``base_dir`` is the engagement base. When it holds an owner-PROVISIONED destruction trust root the m-of-n
+    threshold-destruction conjunct is wired (see :func:`_load_destruction_for_gate`), so a destructive action
+    carrying a valid per-call owner quorum can be authorized; absent that provisioning every destructive action
+    is DENIED by conjunctive_decide — OFF BY DEFAULT, byte-identical to before this slice."""
     try:
         from ..conjunctive_gate import build_offense_gate
         # Wire the operator KILL-SWITCH into the gate — previously omitted, so the live engine's gate never
@@ -1308,9 +1347,14 @@ def _build_gate(prov: Provisioned, *, ceiling: str = "A1",
             # in that case the CRUCIBLE leg's own lazy authorize_action import fails at call time too, so
             # conjunctive_decide DENIES anyway. So this can never silently drop a *working* kill-switch.
             killswitch = None
+        # Slice 3-authz-B: wire the owner-provisioned m-of-n destruction gate (OFF by default: (None, None) ⇒
+        # conjunctive_decide keeps denying every destructive action, byte-identical to before).
+        destruction_authority, destruction_ledger = _load_destruction_for_gate(base_dir)
         return build_offense_gate(slug=prov.slug, trust_root=prov.trust_root,
                                   classify=classify or default_classify, ceiling=ceiling,
-                                  killswitch=killswitch)
+                                  killswitch=killswitch, base_dir=base_dir,
+                                  destruction_authority=destruction_authority,
+                                  destruction_ledger=destruction_ledger)
     except Exception:  # noqa: BLE001 — no gate wired ⇒ deny-by-default (the engine denies every call)
         return None
 
