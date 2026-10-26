@@ -21,19 +21,23 @@ from __future__ import annotations
 
 from typing import Any, Callable, Optional
 
-from .model import SecurityJob
+from .model import SecurityJob, _clip
 
 Worker = Callable[[SecurityJob], dict]
 
 
 def _finding_comment_body(f: dict) -> str:
     """A factual PR review-comment body for ONE oracle-verified finding. Only fields the scan produced — no
-    prose the oracle did not ground. ``ref`` is the spine record ref (the finding is re-verifiable from it)."""
-    title = str(f.get("title") or "finding")
-    sev = str(f.get("severity") or "")
-    cwe = f.get("cwe")
-    loc = str(f.get("location") or "")
-    ref = str(f.get("ref") or "")
+    prose the oracle did not ground. ``ref`` is the spine record ref (the finding is re-verifiable from it).
+    Every field is run through ``_clip`` (strips NUL/CR/LF, bounds length) BEFORE splicing: a finding's
+    title/location is attacker-influenceable (it is derived from the scanned PR code), so a newline could
+    otherwise inject fabricated bullets/sections into the markdown. The body is also owner-approved before it
+    posts (3b), so this is defense-in-depth (red-pen LOW)."""
+    title = _clip(f.get("title") or "finding")
+    sev = _clip(f.get("severity"))
+    cwe = _clip(f.get("cwe"))
+    loc = _clip(f.get("location"))
+    ref = _clip(f.get("ref"))
     lines = ["**VIGIL** — oracle-verified finding in this PR's changed files", "", f"- **{title}**"]
     if sev:
         lines.append(f"- severity: {sev}")
@@ -88,10 +92,12 @@ def make_pr_bot_worker(
                 from ..live.github_write import post_review_comment   # lazy (framework-free module)
                 post = post_review_comment
             for f in (result.get("findings") or []):
-                if not (isinstance(f, dict) and f.get("verified_by_oracle")):
-                    continue   # NEVER comment a LEAD — only an oracle-verified finding (prove-don't-guess)
-                ref = str(f.get("ref") or "")
+                if not (isinstance(f, dict) and f.get("verified_by_oracle") is True):
+                    continue   # NEVER comment a LEAD — only a genuinely-True oracle-verified finding (`is True`,
+                    #            not truthiness, so a non-bool value can never pass as a fact — prove-don't-guess)
+                ref = ""   # provisional, so a finding that raises even during ref/body prep is RECORDED, not fatal
                 try:
+                    ref = _clip(f.get("ref"))
                     r = post(slug=job.slug, trust_root=trust_root, repo=job.repo, pr_number=job.pr_number,
                              body=_finding_comment_body(f), config=comment_config, approve=approve, audit=audit,
                              now=now, grant_path=grant_path, epoch_path=epoch_path)

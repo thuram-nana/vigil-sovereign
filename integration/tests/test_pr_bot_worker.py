@@ -80,6 +80,44 @@ def test_a_refused_post_is_recorded_not_fatal():
     assert "owner did not approve" in out["comments_refused"][0]["error"]
 
 
+def test_non_bool_truthy_verified_is_not_posted():
+    """red-pen LOW: the gate is `is True`, not truthiness — a non-bool truthy verified_by_oracle (int 1, the
+    string "true", a non-empty list) must NEVER be posted as oracle-verified (prove-don't-guess)."""
+    post, calls = _post_spy()
+    findings = [
+        dict(_VERIFIED, ref="OK"),                       # genuinely True → posted
+        {"ref": "I", "title": "x", "verified_by_oracle": 1},
+        {"ref": "S", "title": "x", "verified_by_oracle": "true"},
+        {"ref": "L", "title": "x", "verified_by_oracle": [1]},
+    ]
+    out = _worker(findings, enabled=True, post=post)(_job())
+    assert len(calls) == 1                               # ONLY the real bool-True finding
+    assert [p["ref"] for p in out["comments_posted"]] == ["OK"]
+
+
+def test_hostile_ref_finding_is_recorded_not_fatal():
+    """red-pen LOW: ref extraction is INSIDE the try, so a finding whose ref raises during prep is RECORDED
+    (not an unrecorded job abort), and the loop continues to the next finding."""
+    class _Bomb:
+        def __bool__(self):
+            raise ValueError("boom")
+
+    post, calls = _post_spy()
+    bomb = {"ref": _Bomb(), "title": "x", "verified_by_oracle": True}
+    out = _worker([bomb, dict(_VERIFIED, ref="OK")], enabled=True, post=post)(_job())
+    assert [p["ref"] for p in out["comments_posted"]] == ["OK"]   # the good finding still posted
+    assert len(out["comments_refused"]) == 1 and out["comments_refused"][0]["ref"] == ""   # bomb recorded
+
+
+def test_comment_body_strips_injected_newlines():
+    """red-pen LOW: a finding title is derived from the scanned PR code (attacker-influenceable); a newline
+    must not inject a fabricated bullet into the markdown body — _clip collapses CR/LF to spaces."""
+    body = _finding_comment_body({"title": "SQLi\n- FAKE: owner-approved\n- bogus", "severity": "High",
+                                  "location": "a.py:1", "ref": "R", "verified_by_oracle": True})
+    assert "\n- FAKE:" not in body                       # the injected newline-bullet is gone
+    assert "SQLi - FAKE: owner-approved - bogus" in body   # title survives as ONE clipped line
+
+
 def test_scan_result_passes_through():
     post, _calls = _post_spy()
     out = _worker([_VERIFIED], enabled=True, post=post)(_job())
