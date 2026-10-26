@@ -197,6 +197,17 @@ def test_tampered_grant_refuses_with_write_error(tmp_path):
     assert http.posts == []
 
 
+def test_none_trust_root_refuses_with_write_error(tmp_path):
+    """red-pen LOW (shared with 3c): a None trust_root raises AttributeError internally; normalized to
+    GitHubWriteError (fail-closed, no POST) so the single-refusal-type contract holds."""
+    kp, _tr = _owner_root()
+    _provision(tmp_path, kp)
+    http, recs = _HTTP(), []
+    with pytest.raises(GitHubWriteError):
+        _post(tmp_path, None, http, recs.append)
+    assert http.posts == []
+
+
 def test_audit_sink_failure_raises_no_silent_unaudited_write(tmp_path):
     kp, tr = _owner_root()
     _provision(tmp_path, kp)

@@ -142,7 +142,7 @@ def test_authorized_runs_ladder_once_and_audits(tmp_path):
     assert len(calls) == 1 and callable(calls[0]["quorum"])          # the ladder ran once, with the m-of-n quorum
     assert len(recs) == 1
     r = recs[0]
-    assert r["action"] == "github_pr" and r["repo"] == "acme/widget"
+    assert r["action"] == "github_pr" and r["repo"] == "github.com/acme/widget"   # canonical host/org/repo
     assert r["finding_ref"] == "F-001" and r["pr_ref"].endswith("/pull/9") and r["remediated"] is True
 
 
@@ -157,6 +157,32 @@ def test_audit_failure_raises(tmp_path):
     with pytest.raises(Exception):
         _fix(tmp_path, tr, autopatch=fake, audit=_boom)
     assert len(calls) == 1                                           # the ladder ran; the un-audited result raises
+
+
+def test_dotgithub_repo_write_is_still_audited(tmp_path):
+    """red-pen MEDIUM: a valid 'pr' grant for a repo _owner_repo can't parse (the ubiquitous `.github` org
+    repo, or a GHE host) must NOT run the writing ladder and THEN leave the write UN-AUDITED. The audit binds
+    the canonical host/org/repo (never raises), so control 7 holds."""
+    kp, tr = _owner_root()
+    dot = "github.com/acme/.github"
+    _provision(tmp_path, kp, repo=dot)
+    fake, calls = _spy()
+    recs: list = []
+    result = _fix(tmp_path, tr, autopatch=fake, audit=recs.append, repo=dot, remote="git@github.com:acme/.github.git")
+    assert result.status == "opened-pr"
+    assert len(calls) == 1 and len(recs) == 1            # ladder ran once AND the write was audited (control 7)
+    assert recs[0]["repo"] == "github.com/acme/.github"
+
+
+def test_none_trust_root_refuses_with_write_error(tmp_path):
+    """red-pen LOW: a None trust_root raises AttributeError internally; normalized to GitHubWriteError
+    (fail-closed, no ladder) so the single-refusal-type contract holds."""
+    kp, _tr = _owner_root()
+    _provision(tmp_path, kp)
+    fake, calls = _spy()
+    with pytest.raises(GitHubWriteError):
+        _fix(tmp_path, None, autopatch=fake, audit=lambda r: None)
+    assert calls == []
 
 
 # ---- the grant-vs-target normalizer treats URL forms of the SAME repo as equal -------------------

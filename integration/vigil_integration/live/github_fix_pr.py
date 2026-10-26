@@ -25,7 +25,7 @@ from __future__ import annotations
 
 from typing import Any, Callable, Optional
 
-from .github_write import AuditSink, GitHubWriteError, _owner_repo   # reuse the write-error type + repo label
+from .github_write import AuditSink, GitHubWriteError   # reuse the write-error type
 
 
 def _normalize_remote(url: str) -> str:
@@ -105,7 +105,10 @@ def authorized_fix_pr(
 
     try:
         grant = load_verified_git_write_grant(slug, trust_root, path=grant_path, epoch_path=epoch_path)
-    except AuthorityError as e:
+    except (AuthorityError, AttributeError, TypeError) as e:
+        # AuthorityError = tampered/replayed/unsigned grant; AttributeError/TypeError = a None / non-TrustRoot
+        # trust_root (unprovisioned authority root or caller bug). All are fail-closed refusals, normalized to
+        # the documented GitHubWriteError so a caller catches ONE refusal type (red-pen LOW).
         raise GitHubWriteError(f"git-write grant for {slug!r} failed verification — refusing: {e}") from e
     if not authorize_repo_write(grant, repo, "pr", now=now):
         raise GitHubWriteError(
@@ -131,7 +134,10 @@ def authorized_fix_pr(
     record = {
         "action": "github_pr",
         "slug": slug,
-        "repo": _owner_repo(repo),
+        # the canonical host/org/repo (NOT _owner_repo, whose github.com-only regex is stricter than the grant's
+        # _REPO_RE): _normalize_remote never raises, so a valid grant for a `.github` / `_internal` / GHE-host
+        # repo cannot leave a POST-ladder write UN-AUDITED (red-pen MEDIUM, control 7).
+        "repo": _normalize_remote(repo),
         "finding_ref": str(getattr(finding, "ref", "") or getattr(finding, "id", "") or ""),
         "status": str(getattr(result, "status", "") or ""),
         "pr_ref": str(getattr(result, "pr_ref", "") or ""),
