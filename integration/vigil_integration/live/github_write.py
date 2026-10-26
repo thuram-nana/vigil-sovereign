@@ -183,7 +183,9 @@ def post_review_comment(
 
     try:
         grant = load_verified_git_write_grant(slug, trust_root, path=grant_path, epoch_path=epoch_path)
-    except AuthorityError as e:
+    except (AuthorityError, AttributeError, TypeError) as e:
+        # AuthorityError = tampered/replayed/unsigned grant; AttributeError/TypeError = a None / non-TrustRoot
+        # trust_root — both fail-closed, normalized to the documented GitHubWriteError (red-pen LOW, shared with 3c).
         raise GitHubWriteError(f"git-write grant for {slug!r} failed verification — refusing: {e}") from e
     if not authorize_repo_write(grant, repo, "comment", now=now):
         raise GitHubWriteError(
