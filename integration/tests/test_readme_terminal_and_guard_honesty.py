@@ -161,19 +161,33 @@ def test_w0_10_code_fact_write_capable_binaries_are_on_the_allowlist():
 
 
 def test_w0_12_code_fact_live_engine_denies_destructive():
-    """The README correction cites two code facts: (1) live.wiring._build_gate wires NO
-    destruction_authority into build_offense_gate; (2) conjunctive_decide DENIES a destructive action when
-    no destruction gate is wired. Both are asserted from source so they cannot silently regress."""
+    """The README correction cites the code facts behind 'destructive tools are denied in the live engine by
+    default' (updated for repo-connect Slice 3-authz-B): (1) live.wiring._build_gate now wires the m-of-n
+    destruction gate OFF BY DEFAULT via ``_load_destruction_for_gate``, which returns ``(None, None)`` for an
+    UNPROVISIONED engagement; (2) conjunctive_decide DENIES a destructive action when no destruction gate is
+    wired. Together the live engine still DENIES every destructive action BY DEFAULT (an unprovisioned
+    engagement arms nothing), and only an owner-provisioned m-of-n quorum can authorize one. Grounded from
+    source AND behaviour so neither can silently regress."""
     wiring = _text(WIRING)
     # isolate the _build_gate function body (from its def to the next top-level def).
     start = wiring.index("def _build_gate(")
     nxt = wiring.index("\ndef ", start + 1)
     body = wiring[start:nxt]
     assert "build_offense_gate(" in body, "sanity: _build_gate must build the offense gate"
-    assert "destruction_authority" not in body, (
-        "_build_gate now passes a destruction_authority — the live-engine claim (destructive DENIED) is "
-        "no longer true; update the README architecture sentence to match"
+    assert "_load_destruction_for_gate(" in body, (
+        "_build_gate must load the destruction gate (OFF by default): the README claims the live engine denies "
+        "destructive BY DEFAULT and authorizes one only via an owner-provisioned m-of-n quorum — keep them in sync"
     )
+    # OFF-BY-DEFAULT behavioural fact: an unprovisioned engagement arms NO destruction authority, so a
+    # destructive action stays DENIED by default. Framework-free (wiring + the loader import clean), so this
+    # runs on the sovereign leg exactly like the rest of this guard.
+    import tempfile
+
+    from vigil_integration.live.wiring import _load_destruction_for_gate
+    with tempfile.TemporaryDirectory() as _d:
+        assert _load_destruction_for_gate(_d) == (None, None), (
+            "an unprovisioned engagement must arm no destruction authority (destructive DENIED by default)"
+        )
     gate = _collapsed(GATE)
     assert "destructive action requires a threshold-destruction gate, but none was wired" in gate, (
         "conjunctive_decide no longer DENIES an unwired destructive action — the live-engine claim changed"
