@@ -3857,8 +3857,19 @@ def _cmd_reconcile(args: argparse.Namespace) -> int:
     if not repos:
         print("vigil reconcile: at least one --repo is required (e.g. --repo github.com/org/repo)", file=sys.stderr)
         return 2
+    # Slice 3-live-b1: when a GitHub token is provisioned, LIST REAL open PRs via the gated, PER-REPO read
+    # client (each repo's api.github.com read rides that repo's own signed-authority egress scope); otherwise
+    # the inert empty lister — discover stays OFF, byte-identical to Slice 2b. Enqueue-only either way.
+    token = (getattr(args, "github_token", "") or os.environ.get("GITHUB_TOKEN", "")).strip()
+    lister_kw: dict = {}
+    if token:
+        from .live.github_client import make_reconcile_github_lister
+        lister_kw["lister"] = make_reconcile_github_lister(token)
     rec = reconciliation.Reconciler(repos=repos, queue_root=args.queue_root,
-                                    checkpoint_root=(args.checkpoint_root or args.queue_root))
+                                    checkpoint_root=(args.checkpoint_root or args.queue_root), **lister_kw)
+    if token:
+        print(f"  reconcile: live GitHub lister ON for {len(repos)} repo(s) (per-repo egress scope)",
+              file=sys.stderr)
     if args.watch:
         print(f"  reconciling {len(repos)} repo(s) every {args.interval}s → SecurityJob queue "
               f"({args.queue_root}); Ctrl-C to stop")
@@ -5511,6 +5522,9 @@ def build_parser() -> argparse.ArgumentParser:
     prc.add_argument("--watch", action="store_true", help="keep reconciling on an interval; Ctrl-C to stop")
     prc.add_argument("--interval", type=float, default=900.0,
                      help="(watch) seconds between cycles (default 900 = a safety net, NOT fast polling)")
+    prc.add_argument("--github-token", default="",
+                     help="list REAL open PRs via the gated per-repo api.github.com read client (else "
+                          "$GITHUB_TOKEN; absent ⇒ the inert empty lister — discover stays off). Off-spine.")
     prc.set_defaults(func=_cmd_reconcile)
 
     pt = sub.add_parser(
