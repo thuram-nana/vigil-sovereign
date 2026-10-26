@@ -1331,7 +1331,16 @@ def _build_gate(prov: Provisioned, *, ceiling: str = "A1",
     ``base_dir`` is the engagement base. When it holds an owner-PROVISIONED destruction trust root the m-of-n
     threshold-destruction conjunct is wired (see :func:`_load_destruction_for_gate`), so a destructive action
     carrying a valid per-call owner quorum can be authorized; absent that provisioning every destructive action
-    is DENIED by conjunctive_decide — OFF BY DEFAULT, byte-identical to before this slice."""
+    is DENIED by conjunctive_decide — OFF BY DEFAULT, byte-identical to before this slice.
+
+    Claim precision (red-pen LOW): ``base_dir`` now also flows into ``build_offense_gate``'s read-path legs — the
+    LIVE-attestation precondition and the eval-capability-grant check — which previously fell back to
+    ``VIGIL_BASE_DIR`` / ``.vigil-live`` and IGNORED ``_build_gate``'s base entirely. For the default base_dir
+    (or when ``VIGIL_BASE_DIR`` already equals it) this is byte-identical; for a NON-default base_dir it CORRECTS
+    those lookups to the engagement's actual base (where its records live) instead of a stale fallback. Strictly
+    fail-closed-preserving: an unattested / ungranted engagement still early-returns DENIED regardless of base, so
+    it can only let a genuinely owner-ATTESTED LIVE engagement arm — never an unauthorized one — and never
+    promotes a read. A latent-mismatch fix, not a new allow surface."""
     try:
         from ..conjunctive_gate import build_offense_gate
         # Wire the operator KILL-SWITCH into the gate — previously omitted, so the live engine's gate never
