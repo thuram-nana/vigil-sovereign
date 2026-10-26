@@ -155,6 +155,48 @@ def test_authorized_post_succeeds_and_audits(tmp_path):
     assert r["comment_id"] == 4242 and len(r["body_sha256"]) == 64
 
 
+def test_body_coerced_once_so_approved_posted_audited_match(tmp_path):
+    """red-pen MEDIUM: a non-idempotent ``__str__`` must NOT make the APPROVED, POSTED, and AUDITED body
+    diverge. ``post_review_comment`` coerces ``body = str(body)`` ONCE, so all three see the same bytes."""
+    import hashlib
+
+    class _Drift:
+        def __init__(self) -> None:
+            self.n = 0
+
+        def __str__(self) -> str:
+            self.n += 1
+            return f"body-{self.n}"           # a DIFFERENT string on each call, if called more than once
+
+    kp, tr = _owner_root()
+    _provision(tmp_path, kp)
+    http, recs = _HTTP(), []
+    seen: dict = {}
+
+    def _capture(tool, target, args):
+        seen["approved"] = args["body"]
+        return True
+
+    drift = _Drift()
+    _post(tmp_path, tr, http, recs.append, approve=_capture, body=drift)
+    posted = http.posts[0]["json"]["body"]
+    assert drift.n == 1                        # __str__ evaluated exactly once (coerced at the top)
+    assert seen["approved"] == posted          # owner approved EXACTLY what was posted
+    assert recs[0]["body_sha256"] == hashlib.sha256(posted.encode("utf-8")).hexdigest()  # audit binds it too
+
+
+def test_tampered_grant_refuses_with_write_error(tmp_path):
+    """red-pen LOW: a grant that fails verification (wrong trust root) raises AuthorityError internally; the
+    executor NORMALIZES the refusal to the documented GitHubWriteError (still fail-closed, no POST escapes)."""
+    kp, _tr = _owner_root()
+    _provision(tmp_path, kp)                   # a validly owner-signed grant on disk …
+    _kp2, wrong_tr = _owner_root()             # … but verified against a DIFFERENT trust root ⇒ AuthorityError
+    http, recs = _HTTP(), []
+    with pytest.raises(GitHubWriteError):
+        _post(tmp_path, wrong_tr, http, recs.append)
+    assert http.posts == []
+
+
 def test_audit_sink_failure_raises_no_silent_unaudited_write(tmp_path):
     kp, tr = _owner_root()
     _provision(tmp_path, kp)
@@ -182,8 +224,12 @@ def test_signed_comment_audit_sink_signature_verifies(tmp_path):
     sink(rec)
     line = _json.loads((tmp_path / "audit.jsonl").read_text().strip())
     assert line["record"] == rec and line["key_id"] == "gov"
-    # the signature verifies over the SAME domain-tagged canonical bytes the sink signed
-    assert verify_one(kp.public_key_b64, b"vigil-git-write-audit-v1\x00" + canonical_json(rec), line["sig"])
-    # a tampered record no longer verifies
-    tampered = dict(rec, pr_number=8)
-    assert not verify_one(kp.public_key_b64, b"vigil-git-write-audit-v1\x00" + canonical_json(tampered), line["sig"])
+    dom = b"vigil-git-write-audit-v1\x00"
+    # the signature verifies over the SAME domain-tagged canonical bytes the sink signed ({key_id, record})
+    assert verify_one(kp.public_key_b64, dom + canonical_json({"key_id": "gov", "record": rec}), line["sig"])
+    # a tampered RECORD no longer verifies
+    assert not verify_one(
+        kp.public_key_b64, dom + canonical_json({"key_id": "gov", "record": dict(rec, pr_number=8)}), line["sig"])
+    # a SWAPPED key_id label no longer verifies — key_id is bound INTO the signature, not just the sidecar (red-pen LOW)
+    assert not verify_one(
+        kp.public_key_b64, dom + canonical_json({"key_id": "attacker", "record": rec}), line["sig"])

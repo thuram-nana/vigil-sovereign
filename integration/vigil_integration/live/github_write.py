@@ -32,7 +32,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Optional
 
-from .github_client import _owner_repo   # REUSE the one REST-traversal guard (no drift)
+from .github_client import GitHubReadError, _owner_repo   # REUSE the one REST-traversal guard (no drift)
 
 _API_BASE = "https://api.github.com"
 _API_VERSION = "2022-11-28"
@@ -104,7 +104,10 @@ class GitHubWriteClient:
         """POST one PR review comment (the GitHub *issue-comment* endpoint, which PRs share). HOST-PINNED to
         api.github.com; the repo is validated to EXACTLY ``owner/repo`` (``_owner_repo`` — no REST-path
         traversal). Returns ``{"id", "html_url"}`` on HTTP 201; any other status raises GitHubWriteError."""
-        owner_repo = _owner_repo(repo)   # raises on an unsafe identity (reused traversal guard)
+        try:
+            owner_repo = _owner_repo(repo)   # reused traversal guard
+        except GitHubReadError as e:         # normalize to THIS module's documented write-error type
+            raise GitHubWriteError(f"refusing a comment to an unsafe repo identity {repo!r}: {e}") from e
         path = f"/repos/{owner_repo}/issues/{int(pr_number)}/comments"
         url = self.config.api_base.rstrip("/") + path
         if not url.startswith("https://api.github.com/"):   # HOST-PIN: writes ONLY ever reach api.github.com
@@ -164,23 +167,37 @@ def post_review_comment(
     if not getattr(config, "comment_enabled", False):
         raise GitHubWriteError("github comment write is OFF by default (comment_enabled=False) — refusing")
 
+    # Coerce `body` to a string ONCE, so the owner-APPROVED body, the POSTED body, and the AUDITED body are the
+    # SAME bytes — a non-idempotent __str__ (adversarial, or a lazy finding-renderer stamping a timestamp /
+    # counter) must never make them diverge (red-pen MEDIUM: approval-binding + audit-faithfulness).
+    body = str(body)
+
     # 2. repo-EXACT git-write grant for the "comment" capability — control (1)+(2), Slice 3-authz-A. Lazy
     #    (framework, offense-side). load_verified_git_write_grant verifies the owner signature + epoch-replay
     #    floor and returns None when unprovisioned; authorize_repo_write denies None/revoked/out-of-window/
-    #    wrong-repo/not-"comment" — so an unauthorized write never reaches the approval step.
+    #    wrong-repo/not-"comment" — so an unauthorized write never reaches the approval step. A verification
+    #    failure (tampered / replayed / unsigned grant) raises AuthorityError, normalized here to the documented
+    #    GitHubWriteError (still fail-closed, no POST) so a caller catches ONE refusal type (red-pen LOW).
     from framework.v2.authority.gate import authorize_repo_write
-    from framework.v2.authority.store import load_verified_git_write_grant
+    from framework.v2.authority.store import AuthorityError, load_verified_git_write_grant
 
-    grant = load_verified_git_write_grant(slug, trust_root, path=grant_path, epoch_path=epoch_path)
+    try:
+        grant = load_verified_git_write_grant(slug, trust_root, path=grant_path, epoch_path=epoch_path)
+    except AuthorityError as e:
+        raise GitHubWriteError(f"git-write grant for {slug!r} failed verification — refusing: {e}") from e
     if not authorize_repo_write(grant, repo, "comment", now=now):
         raise GitHubWriteError(
             f"no owner-signed git-write grant authorizes a COMMENT on {repo!r} for engagement {slug!r} — refusing")
 
     # 3. per-action WARDEN A2 owner approval for THIS comment — control (4). github_comment classifies A2
     #    (default_classify: no danger token) ⇒ QUEUE ⇒ the single-use owner-signed approval broker. The write
-    #    ALWAYS requires an owner approval (>= the A2 posture); a falsy/absent approver refuses.
-    target = f"github:comment:{_owner_repo(repo)}#{int(pr_number)}"
-    if not callable(approve) or not approve("github_comment", target, {"body": str(body)}):
+    #    ALWAYS requires an owner approval (>= the A2 posture); a falsy/absent approver refuses. _owner_repo can
+    #    raise GitHubReadError on a weird (owner-signed-but-unsafe) repo — normalized to GitHubWriteError.
+    try:
+        target = f"github:comment:{_owner_repo(repo)}#{int(pr_number)}"
+    except GitHubReadError as e:
+        raise GitHubWriteError(f"refusing a comment to an unsafe repo identity {repo!r}: {e}") from e
+    if not callable(approve) or not approve("github_comment", target, {"body": body}):
         raise GitHubWriteError(f"no owner approval for the comment on {target} — refusing (WARDEN A2 owner-approval)")
 
     # 4. POST (gated, host-pinned, token off-spine).
@@ -194,7 +211,7 @@ def post_review_comment(
         "slug": slug,
         "repo": _owner_repo(repo),
         "pr_number": int(pr_number),
-        "body_sha256": hashlib.sha256(str(body).encode("utf-8")).hexdigest(),
+        "body_sha256": hashlib.sha256(body.encode("utf-8")).hexdigest(),   # body already coerced once, above
         "comment_id": result.get("id"),
         "comment_url": result.get("html_url"),
     }
@@ -215,7 +232,10 @@ def signed_comment_audit_sink(path: Any, *, key_id: str, private_key_b64: str) -
     p = Path(path)
 
     def _sink(record: dict) -> None:
-        sig = sign(private_key_b64, _AUDIT_DOMAIN + canonical_json(record))
+        # Bind key_id INTO the signed pre-image (like approval_token) so relabeling the signer id invalidates
+        # the signature — not only tampering the record content (red-pen LOW). On-disk JSONL shape is unchanged.
+        signed_obj = {"key_id": str(key_id), "record": record}
+        sig = sign(private_key_b64, _AUDIT_DOMAIN + canonical_json(signed_obj))
         line = json.dumps({"record": record, "key_id": str(key_id), "sig": sig},
                           separators=(",", ":"), sort_keys=True)
         p.parent.mkdir(parents=True, exist_ok=True)
