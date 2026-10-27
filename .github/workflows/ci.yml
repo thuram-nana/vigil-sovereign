@@ -530,6 +530,7 @@ jobs:
               integration/tests/test_reconciliation.py \
               integration/tests/test_repo_write_comment_executor.py \
               integration/tests/test_repo_write_fix_pr_executor.py \
+              integration/tests/test_pr_bot_runner.py \
               integration/tests/test_general_reexecutable.py \
               integration/tests/test_egress_backstop_mirror.py \
               integration/tests/test_external_tool_runner.py \

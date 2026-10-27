@@ -3882,6 +3882,51 @@ def _cmd_reconcile(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_pr_bot(args: argparse.Namespace) -> int:
+    """`vigil pr-bot` — DRAIN the SecurityJob queue through the authorized runner (Slice 3-live-b2): each queued
+    PR job is passed through the hard authorization gate, then (only if allowed) diff-scanned, and each
+    ORACLE-VERIFIED finding is posted as a GATED review comment. The gate is the SOLE executor; the comment leg
+    is OFF unless ``--comment`` AND an owner-signed repo-exact "comment" grant AND a per-action owner approval
+    all hold (each post is also signed-audited). Needs a GitHub token (clone + read + comment). Enqueue is a
+    SEPARATE step (`vigil reconcile` / the webhook drain)."""
+    import json
+
+    from .jobs.pr_bot import make_pr_bot_runner
+    from .live.github_write import GitHubCommentConfig, broker_comment_approver, signed_comment_audit_sink
+    from .live.governance_identity import DEFAULT_GOVERNANCE_KEY_FILE, load_or_create_governance_keypair
+    from .live.pr_checkout import make_pr_bot_changed_files, make_pr_bot_checkout
+
+    token = (getattr(args, "github_token", "") or os.environ.get("GITHUB_TOKEN", "")).strip()
+    if not token:
+        print("vigil pr-bot: a GitHub token is required (--github-token or $GITHUB_TOKEN)", file=sys.stderr)
+        return 2
+    base_dir = args.base_dir
+    # the pinned governance/authority trust root verifies BOTH the engagement authority (the gate) AND the
+    # git-write grant (the comment executor). None ⇒ build_repo_gate refuses every job (fail-closed).
+    from framework.v2.authority.store import load_authority_root
+    trust_root = load_authority_root()
+    # the signed-audit sink is bound to the engagement's offense-governance key (every write is tamper-evidently
+    # recorded; control 7). broker_comment_approver returns None if no approval authority is provisioned ⇒ a
+    # comment post then fail-safe refuses (recorded, never silently posted).
+    gov = load_or_create_governance_keypair(path=str(Path(base_dir) / DEFAULT_GOVERNANCE_KEY_FILE))
+    audit = signed_comment_audit_sink(str(Path(base_dir) / "pr-bot-audit.jsonl"),
+                                      key_id="offense-governance", private_key_b64=gov.private_key_b64)
+    runner = make_pr_bot_runner(
+        queue_root=args.queue_root, base_dir=base_dir, trust_root=trust_root,
+        checkout=make_pr_bot_checkout(github_token=token, base_dir=base_dir),
+        changed_files=make_pr_bot_changed_files(token),
+        comment_config=GitHubCommentConfig(github_token=token, comment_enabled=bool(args.comment)),
+        approve=broker_comment_approver(base_dir),
+        audit=audit,
+    )
+    outcomes = runner.drain(max_jobs=args.max_jobs)
+    print(json.dumps([{"state": o.state, "repo": getattr(o.job, "repo", None),
+                       "denial_code": o.denial_code, "reason": (o.reason or "")[:200]} for o in outcomes],
+                     indent=2))
+    # a worker/gate FAILURE is surfaced as a non-zero exit so a CI/cron driver notices; refused/busy are normal.
+    return 1 if any(o.state == "failed" for o in outcomes) else 0
+
+
 def _terminal_next_seq(history_path: str) -> int:
     """The next append-only seq coordinate for the terminal history — the count of existing records. Total:
     an absent/unreadable history yields 0 (a fresh log)."""
@@ -5526,6 +5571,22 @@ def build_parser() -> argparse.ArgumentParser:
                      help="list REAL open PRs via the gated per-repo api.github.com read client (else "
                           "$GITHUB_TOKEN; absent ⇒ the inert empty lister — discover stays off). Off-spine.")
     prc.set_defaults(func=_cmd_reconcile)
+
+    pb = sub.add_parser("pr-bot",
+                        help="DRAIN the SecurityJob queue through the authorized runner: diff-scan each queued "
+                             "PR and (with --comment) post gated review comments for oracle-verified findings. "
+                             "The authorization gate is the sole executor; requires a GitHub token.")
+    pb.add_argument("--queue-root", required=True,
+                    help="the SecurityJob queue root (shared with `reconcile` / `webhook-drain`)")
+    pb.add_argument("--base-dir", default=".vigil-live",
+                    help="engagement base dir (authority root, governance key, approvals, git-write grant)")
+    pb.add_argument("--github-token", default="",
+                    help="GitHub token for clone + read + comment (else $GITHUB_TOKEN). Off-spine (child env only).")
+    pb.add_argument("--comment", action="store_true",
+                    help="ENABLE posting review comments (OFF by default; still grant + owner-approval + "
+                         "signed-audit gated per post)")
+    pb.add_argument("--max-jobs", type=int, default=0, help="drain at most N jobs (0 = until empty or a busy slug)")
+    pb.set_defaults(func=_cmd_pr_bot)
 
     pt = sub.add_parser(
         "terminal",

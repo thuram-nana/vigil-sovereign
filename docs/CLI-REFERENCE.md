@@ -179,6 +179,7 @@ a new sub-parser that is not documented here turns the required check red.
 | `vigil learn-drain` | Drain the sovereign→offense learn-grant spool (the K2b→K3 deep-learn bridge; fail-closed). |
 | `vigil webhook-drain` | Drain the inbound GitHub-webhook spool into the SecurityJob queue (enqueue-only; the authorized runner executes). Fail-closed, idempotent by delivery_id. |
 | `vigil reconcile` | Safety-net poller: per connected repo, list PRs changed since a checkpoint and enqueue a SecurityJob for each (enqueue-only; durable-before-cursor; deliberately slow). |
+| `vigil pr-bot` | Drain the SecurityJob queue through the authorized runner: diff-scan each queued PR and (with `--comment`) post gated review comments for oracle-verified findings. The authorization gate is the sole executor; requires a GitHub token. |
 | `vigil sandbox` | Run an arbitrary command inside a network-isolated, workspace-confined bwrap sandbox (A3 → queued for approval). |
 | `vigil terminal` | Run a governed LOCAL read/inspect command through the gate (A2 → queued for approval, never auto). |
 | `vigil fleet` | Cross-VM FLEET operations (WS3): a read-only monitor roll-up over N single-tenant instances (`fleet status`) + an owner-authorized kill-switch fan-out (`fleet kill`). |
