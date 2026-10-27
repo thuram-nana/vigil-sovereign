@@ -213,3 +213,27 @@ def make_github_lister(config: GitHubReadConfig, *, http: Any = None):
     returns the client so the caller can reuse it for ``changed_files`` + close it."""
     client = GitHubReadClient(config, http=http)
     return client.list_open_prs, client
+
+
+def make_reconcile_github_lister(github_token: str, *, http: Any = None, api_base: str = _API_BASE):
+    """A MULTI-REPO reconciliation ``RepoLister`` for ``vigil reconcile`` over several connected repos. Unlike
+    :func:`make_github_lister` (one client, one slug), this scopes egress PER REPO: each repo gets its OWN gated
+    read client whose engagement allowlist is keyed on THAT repo's SecurityJob slug — so a repo's api.github.com
+    read rides that repo's own signed-authority egress scope, never a shared/foreign one (api.github.com is
+    host-pinned throughout regardless). Returns ``(repo, since_cursor) -> (list[ChangedPR], new_cursor)`` for
+    ``Reconciler(lister=...)``; a per-repo client is built once and cached. An empty token fails closed inside
+    the client (no unauthenticated read). Egress + httpx + framework stay LAZY (built on first real list)."""
+    from ..jobs.model import SecurityJob   # slug derivation — model does not import this module (no cycle)
+
+    clients: dict[str, GitHubReadClient] = {}
+
+    def _lister(repo: str, since_cursor: str = "") -> "tuple[list[ChangedPR], str]":
+        slug = SecurityJob(repo=repo).slug   # the SAME injective per-repo slug the queue/authority use
+        client = clients.get(slug)
+        if client is None:
+            client = GitHubReadClient(
+                GitHubReadConfig(slug=slug, github_token=github_token, api_base=api_base), http=http)
+            clients[slug] = client
+        return client.list_open_prs(repo, since_cursor)
+
+    return _lister
