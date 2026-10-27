@@ -3887,11 +3887,13 @@ def _cmd_pr_bot(args: argparse.Namespace) -> int:
     PR job is passed through the hard authorization gate, then (only if allowed) diff-scanned, and each
     ORACLE-VERIFIED finding is posted as a GATED review comment. The gate is the SOLE executor; the comment leg
     is OFF unless ``--comment`` AND an owner-signed repo-exact "comment" grant AND a per-action owner approval
-    all hold (each post is also signed-audited). Needs a GitHub token (clone + read + comment). Enqueue is a
-    SEPARATE step (`vigil reconcile` / the webhook drain)."""
+    all hold (each post is also signed-audited). With ``--fix-pr`` it ALSO opens a gated fix PR per
+    oracle-verified finding (OFF by default; needs a repo-exact "pr" git-write grant AND an m-of-n destruction
+    authorization, per-job and single-use ⇒ one authorization opens one fix PR). Needs a GitHub token (clone +
+    read + comment/fix). Enqueue is a SEPARATE step (`vigil reconcile` / the webhook drain)."""
     import json
 
-    from .jobs.pr_bot import make_pr_bot_runner
+    from .jobs.pr_bot import make_pr_bot_fix_pr, make_pr_bot_runner
     from .live.github_write import GitHubCommentConfig, broker_comment_approver, signed_comment_audit_sink
     from .live.governance_identity import DEFAULT_GOVERNANCE_KEY_FILE, load_or_create_governance_keypair
     from .live.pr_checkout import make_pr_bot_changed_files, make_pr_bot_checkout
@@ -3911,6 +3913,57 @@ def _cmd_pr_bot(args: argparse.Namespace) -> int:
     gov = load_or_create_governance_keypair(path=str(Path(base_dir) / DEFAULT_GOVERNANCE_KEY_FILE))
     audit = signed_comment_audit_sink(str(Path(base_dir) / "pr-bot-audit.jsonl"),
                                       key_id="offense-governance", private_key_b64=gov.private_key_b64)
+
+    # OPTIONAL 3c fix-PR leg (OFF by default). Opening a fix PR is the higher-risk write: it needs BOTH the
+    # repo-exact "pr" git-write grant (checked inside authorized_fix_pr) AND an m-of-n destruction authorization
+    # (auto-discovered under --base-dir, exactly like `vigil patch --open-pr`; fail-closed if unprovisioned). The
+    # quorum is PER JOB — the signed authorization binds ONE (slug, target, action) ⇒ ONE fix PR — so we pass a
+    # quorum_factory keyed on job.slug; every other job's quorum DENIES (fail-closed, recorded). NOTE: the
+    # destruction `target` is the ephemeral PR-head clone path (prbot-<slug>-<pr>), the SAME convention as
+    # `vigil patch --open-pr` (target = the local path operated on); the GitHub REPO identity is bound
+    # separately by the repo-exact "pr" grant + the grant-vs-clone-origin check inside authorized_fix_pr.
+    fix_pr = None
+    if getattr(args, "fix_pr", False):
+        from .live.codefix_runner import CodefixConfig, file_backed_quorum
+        from .live.destruction_provision import default_paths
+        from .live.think_claude import resolve_model
+        from .live.trusted_finding import (
+            TrustedFindingError,
+            load_destruction_authority,
+            load_signed_authorization,
+        )
+        dp = default_paths(base_dir)
+        d_trust = args.authority_trust_root or (dp["trust_root"] if Path(dp["trust_root"]).exists() else "")
+        d_signed = args.signed_authorization or (dp["signed"] if Path(dp["signed"]).exists() else "")
+        d_ledger = args.ledger or dp["ledger"]
+        d_missing = [n for n, v in (("--signed-authorization", d_signed),
+                                    ("--authority-trust-root", d_trust)) if not v]
+        if d_missing:
+            print(f"vigil pr-bot: --fix-pr needs {', '.join(d_missing)} — run `vigil provision-destruction` then "
+                  f"`vigil authorize-destruction` (they default under --base-dir {base_dir}), or pass the flags "
+                  "explicitly. A repo-exact 'pr' git-write grant and a GITHUB_TOKEN are also required.",
+                  file=sys.stderr)
+            return 2
+        try:
+            d_authority = load_destruction_authority(trust_root_path=d_trust,
+                                                     mandatory_signer_ids=(args.mandatory_signer or ["owner"]))
+            d_signed_doc = load_signed_authorization(d_signed)
+        except TrustedFindingError as exc:
+            print(f"vigil pr-bot: --fix-pr REFUSED (fail-closed): {exc}", file=sys.stderr)
+            return 2
+
+        def _quorum_factory(job, _auth=d_authority, _signed=d_signed_doc, _ledger=d_ledger):
+            # PER-JOB: the single-use m-of-n quorum is bound to THIS job's slug. The signed authorization matches
+            # exactly one (slug, target, action), so exactly ONE job's ONE finding opens a PR; all others DENY.
+            return file_backed_quorum(authority=_auth, signed=_signed, slug=job.slug, ledger_path=_ledger)
+
+        fix_cfg = CodefixConfig(
+            target_repo="", base_dir=base_dir, pr_enabled=True, apply_edits=True, github_token=token,
+            target_branch=args.target_branch, pr_base=args.pr_base, model=resolve_model(args.model))
+        fix_pr = make_pr_bot_fix_pr(
+            checkout=make_pr_bot_checkout(github_token=token, base_dir=base_dir), spine_base_dir=base_dir,
+            codefix_config=fix_cfg, trust_root=trust_root, audit=audit, quorum_factory=_quorum_factory)
+
     runner = make_pr_bot_runner(
         queue_root=args.queue_root, base_dir=base_dir, trust_root=trust_root,
         checkout=make_pr_bot_checkout(github_token=token, base_dir=base_dir),
@@ -3918,6 +3971,7 @@ def _cmd_pr_bot(args: argparse.Namespace) -> int:
         comment_config=GitHubCommentConfig(github_token=token, comment_enabled=bool(args.comment)),
         approve=broker_comment_approver(base_dir),
         audit=audit,
+        fix_pr=fix_pr,
     )
     outcomes = runner.drain(max_jobs=args.max_jobs)
     print(json.dumps([{"state": o.state, "repo": getattr(o.job, "repo", None),
@@ -5586,6 +5640,26 @@ def build_parser() -> argparse.ArgumentParser:
                     help="ENABLE posting review comments (OFF by default; still grant + owner-approval + "
                          "signed-audit gated per post)")
     pb.add_argument("--max-jobs", type=int, default=0, help="drain at most N jobs (0 = until empty or a busy slug)")
+    # 3c fix-PR leg — OFF by default. The higher-risk write; mirrors `vigil patch --open-pr`'s destruction args.
+    pb.add_argument("--fix-pr", action="store_true",
+                    help="ENABLE opening a gated FIX PR per oracle-verified finding (OFF by default). Requires a "
+                         "repo-exact 'pr' git-write grant AND an m-of-n destruction authorization "
+                         "(--signed-authorization / --authority-trust-root / --mandatory-signer / --ledger, like "
+                         "`vigil patch --open-pr`; auto-discovered under --base-dir) AND a GITHUB_TOKEN. The "
+                         "authorization is PER-JOB and single-use ⇒ one authorization opens exactly one fix PR.")
+    pb.add_argument("--signed-authorization", default="",
+                    help="the m-of-n SignedDestructionAuthorization JSON (--fix-pr; default under --base-dir)")
+    pb.add_argument("--authority-trust-root", default="",
+                    help="the destruction TrustRoot JSON (--fix-pr; default under --base-dir)")
+    pb.add_argument("--mandatory-signer", action="append", default=[],
+                    help="a MANDATORY signer key_id (repeatable; MUST include the owner) (--fix-pr)")
+    pb.add_argument("--ledger", default="",
+                    help="the durable single-use nonce ledger DIRECTORY (--fix-pr; one authorization → one PR)")
+    pb.add_argument("--pr-base", default="", help="the fix PR base branch (--fix-pr; default: the repo default)")
+    pb.add_argument("--target-branch", default="", help="the clone branch for the fix (--fix-pr; default: repo default)")
+    pb.add_argument("--model", default="",
+                    help="the Claude coder model for the fix (--fix-pr; empty ⇒ Settings choice). API key from "
+                         "ANTHROPIC_API_KEY env, never argv.")
     pb.set_defaults(func=_cmd_pr_bot)
 
     pt = sub.add_parser(

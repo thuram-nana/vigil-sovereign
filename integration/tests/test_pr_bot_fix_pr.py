@@ -128,3 +128,36 @@ def test_empty_ref_fails_closed_before_spine_and_clone():
     with pytest.raises(Exception):                                 # GitHubWriteError — fail-closed
         fix_pr(_job(), {"verified_by_oracle": True})               # a finding dict with NO "ref" key
     assert spine_calls == [] and fix_calls == [] and chk_calls == []   # refused before spine, executor AND clone
+
+
+def test_quorum_factory_builds_the_quorum_per_job():
+    """the drain spans many slugs, so the m-of-n quorum is built PER JOB from job.slug — quorum_factory(job) is
+    called and ITS result is the quorum forwarded to the executor, overriding any single `quorum`."""
+    _from_spine, _fix, _sc, fix_calls = _seams()
+    seen: list = []
+    sentinel = object()
+
+    def _qf(job):
+        seen.append(job.slug)
+        return sentinel
+
+    fix_pr = make_pr_bot_fix_pr(
+        checkout=lambda j: "/clone", spine_base_dir="/spine", codefix_config=_Cfg(), trust_root=object(),
+        audit=lambda r: None, quorum=lambda req: "SINGLE", quorum_factory=_qf, _from_spine=_from_spine, _fix=_fix)
+    fix_pr(_job(), {"ref": "R1"})
+    assert seen == [_job().slug]                                   # the factory was called with THIS job
+    assert fix_calls[0]["quorum"] is sentinel                      # its result is forwarded (NOT the single "SINGLE")
+
+
+def test_single_quorum_used_when_no_factory():
+    """with no quorum_factory, the plain `quorum` is forwarded unchanged (the direct-caller / test path)."""
+    _from_spine, _fix, _sc, fix_calls = _seams()
+
+    def _q(req):
+        return "SINGLE"
+
+    fix_pr = make_pr_bot_fix_pr(
+        checkout=lambda j: "/clone", spine_base_dir="/spine", codefix_config=_Cfg(), trust_root=object(),
+        audit=lambda r: None, quorum=_q, _from_spine=_from_spine, _fix=_fix)
+    fix_pr(_job(), {"ref": "R1"})
+    assert fix_calls[0]["quorum"] is _q                            # the single quorum is forwarded unchanged

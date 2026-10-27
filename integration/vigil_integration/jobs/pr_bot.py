@@ -70,6 +70,7 @@ def make_pr_bot_fix_pr(
     trust_root: Any,
     audit: Callable[[dict], None],
     quorum: Optional[Callable[[Any], Any]] = None,
+    quorum_factory: Optional[Callable[[SecurityJob], Any]] = None,
     now: Any = None,
     grant_path: Any = None,
     epoch_path: Any = None,
@@ -90,6 +91,8 @@ def make_pr_bot_fix_pr(
     ladder's WARDEN A3 tier + kill-switch + m-of-n ``quorum`` all pass; every write is signed-audited (control
     7). ``local_root`` lets the worker clone the PR head ONCE per job and reuse it across findings (the ladder
     re-clones ``target_repo`` into its own sandbox per fix anyway); omitted, the leg clones on its own.
+    ``quorum_factory(job)`` supplies the PER-JOB m-of-n quorum — the drain spans many slugs, each needing a
+    quorum bound to its OWN slug; a plain ``quorum`` is the single-quorum path for direct callers/tests.
     ``_fix`` / ``_from_spine`` are offline-test injection seams. FATAL-2: the framework-backed pieces import
     LAZILY, so this module stays import-clean in either venv and the leg is constructed only on the offense plane."""
     def fix_pr(job: SecurityJob, finding: dict, local_root: Optional[str] = None) -> Any:
@@ -118,8 +121,12 @@ def make_pr_bot_fix_pr(
         # rebuild the CONFIRMED fact from the SIGNED spine by this exact ref (unknown/ambiguous ⇒ fail closed)
         fobj = from_spine(base_dir=spine_base_dir, slug=job.slug, target_repo=root, finding_ref=ref)
         cfg = dataclasses.replace(codefix_config, target_repo=root)
+        # the m-of-n destruction quorum is PER JOB: the signed authorization binds (slug, target, action) and the
+        # drain spans many slugs, so a job's quorum must be built for ITS slug — quorum_factory(job) does that.
+        # A plain `quorum` is the single-quorum path for direct callers/tests; absent both ⇒ autopatch's deny.
+        q = quorum_factory(job) if quorum_factory is not None else quorum
         return fix(slug=job.slug, trust_root=trust_root, repo=job.repo, finding=fobj, config=cfg,
-                   audit=audit, quorum=quorum, now=now, grant_path=grant_path, epoch_path=epoch_path)
+                   audit=audit, quorum=q, now=now, grant_path=grant_path, epoch_path=epoch_path)
 
     return fix_pr
 
