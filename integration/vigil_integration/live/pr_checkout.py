@@ -9,8 +9,9 @@ Gated like the codefix clone (``codefix_runner.CodefixSession.clone``), with the
   * the GitHub token is passed ONLY in the child ENV (``GH_TOKEN``/``GITHUB_TOKEN``), NEVER in argv — argv shows
     in ``ps``/logs (``subprocess_runner`` documents this env contract); an empty token FAILS CLOSED (no clone);
   * ``GIT_TERMINAL_PROMPT=0`` so a missing credential FAILS instead of hanging;
-  * argv-list ``gh``/``git`` subprocesses — NO shell, no string interpolation; ``--`` ends option parsing so a
-    repo can never be read as a flag;
+  * argv-list ``gh``/``git`` subprocesses — NO shell, no string interpolation; flag-injection is prevented by the
+    repo/pr/workdir guards (``_owner_repo``'s alphanumeric-leading owner, the abspath workdir, the positive-int
+    pr), NOT by a ``--`` separator (gh's ``--`` only forwards ``--depth`` through to git);
   * the repo is validated to EXACTLY ``owner/repo`` (``github_client._owner_repo`` — no clone-URL traversal);
   * a disposable workdir CONFINED under ``base_dir`` (``_safe_workdir``), rmtree'd + recreated per job (no bleed);
   * the PR head is checked out via ``gh pr checkout`` (resolves a FORK / non-default-branch head).
@@ -72,9 +73,13 @@ def make_pr_bot_checkout(
             owner_repo = _owner_repo(job.repo)          # EXACT owner/repo — no clone-URL traversal
         except GitHubReadError as e:
             raise PrCheckoutError(f"refusing to clone an unsafe repo identity {job.repo!r}: {e}") from e
-        if job.pr_number is None:
-            raise PrCheckoutError(f"job for {job.repo!r} has no pr_number — cannot checkout a PR head")
-        pr = int(job.pr_number)
+        try:
+            pr = int(job.pr_number)   # typed refusal — a non-int (incl. None) is the documented PrCheckoutError
+        except (TypeError, ValueError) as e:
+            raise PrCheckoutError(
+                f"job for {job.repo!r} has a non-integer pr_number {job.pr_number!r} — cannot checkout") from e
+        if pr <= 0:   # a PR number is always positive; this also keeps str(pr) from ever looking like a flag
+            raise PrCheckoutError(f"job for {job.repo!r} has a non-positive pr_number {pr} — refusing")
         wd = _safe_workdir(base_dir, f"prbot-{job.slug}-{pr}")
         if wd is None:
             raise PrCheckoutError("unsafe workdir — refusing to build outside base_dir")
@@ -86,7 +91,10 @@ def make_pr_bot_checkout(
             raise PrCheckoutError(f"workdir prep failed: {exc}") from exc
 
         env = _child_env()                               # raises (fail-closed) if no token; token OFF argv
-        # clone the repo (token off-argv via GH_TOKEN; `--` ends option parsing so owner_repo is never a flag)
+        # clone the repo (token off-argv via GH_TOKEN). The `--` here is gh's separator that FORWARDS `--depth 1`
+        # to the underlying git clone — it does NOT shield the preceding owner_repo/wd positionals. Flag-injection
+        # safety instead rests on: _owner_repo (owner's first char is alphanumeric, never '-'), wd being an
+        # abspath under base_dir (always starts with '/'), and pr being a positive int — all enforced above.
         r = runner([gh_bin, "repo", "clone", owner_repo, wd, "--", "--depth", "1"],
                    timeout=clone_timeout, env=env)
         if getattr(r, "exit_code", None) != 0:
@@ -105,10 +113,14 @@ def make_pr_bot_changed_files(github_token: str, *, http: Any = None) -> Changed
     engagement slug (api.github.com host-pinned; token off-spine). A read error RAISES (the diff worker then
     fails CLOSED rather than scanning an undetermined scope). ``http`` is the injected double (tests)."""
     def changed_files(job: SecurityJob) -> "set[str]":
-        from .github_client import GitHubReadClient, GitHubReadConfig
+        from .github_client import GitHubReadClient, GitHubReadConfig, GitHubReadError
+        try:
+            pr = int(job.pr_number)   # typed refusal (a read error RAISES; never crash oddly / scan an undetermined scope)
+        except (TypeError, ValueError) as e:
+            raise GitHubReadError(f"job for {job.repo!r} has a non-integer pr_number {job.pr_number!r}") from e
         slug = SecurityJob(repo=job.repo).slug
         client = GitHubReadClient(GitHubReadConfig(slug=slug, github_token=github_token), http=http)
-        return client.changed_files(job.repo, int(job.pr_number), str(job.commit or ""))
+        return client.changed_files(job.repo, pr, str(job.commit or ""))
 
     return changed_files
 

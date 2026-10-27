@@ -82,12 +82,13 @@ def test_checkout_rejects_unsafe_repo_identity(tmp_path):
     assert runner.calls == []                                   # never shelled out for an unsafe repo
 
 
-def test_checkout_requires_a_pr_number(tmp_path):
+def test_checkout_fails_closed_on_bad_pr_number(tmp_path):
     runner = _Runner()
     checkout = make_pr_bot_checkout(github_token=_TOKEN, base_dir=str(tmp_path), _runner=runner)
-    with pytest.raises(PrCheckoutError):
-        checkout(_job(pr=None))
-    assert runner.calls == []
+    for bad in (None, "7;rm -rf", "abc", 0, -5):          # non-int / non-positive → documented PrCheckoutError
+        with pytest.raises(PrCheckoutError):
+            checkout(_job(pr=bad))
+    assert runner.calls == []                              # never shelled out for a bad pr
 
 
 def test_checkout_fails_closed_on_clone_error(tmp_path):
@@ -137,3 +138,13 @@ def test_changed_files_reads_the_prs_files(tmp_path):
     files = cf(_job())
     assert files == {"app/db.py", "app/run.py"}
     assert http.calls[0] == "https://api.github.com/repos/acme/widget/pulls/7/files"
+
+
+def test_changed_files_fails_closed_on_bad_pr_number(tmp_path):
+    from vigil_integration.live.github_client import GitHubReadError
+    http = _HTTP([])
+    cf = make_pr_bot_changed_files(_TOKEN, http=http)
+    for bad in (None, "x"):                               # a read error RAISES (typed), never a silent odd crash
+        with pytest.raises(GitHubReadError):
+            cf(_job(pr=bad))
+    assert http.calls == []                               # no HTTP issued for a bad pr
