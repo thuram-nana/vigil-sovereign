@@ -20,7 +20,7 @@ Provision the vault to AEAD-seal it; ``vault.status()`` reports the unsealed sta
 from __future__ import annotations
 
 from vigil_core.crypto import KeyPair
-from vigil_core.keystore import load_or_create_sealed_keypair
+from vigil_core.keystore import _try_load, load_or_create_sealed_keypair
 
 # AEAD purpose-binding for the sealed offense-spine keypair — DISTINCT from the operator key's context
 # (``b"vigil/operator.key"``) so the two sealed identities are cryptographically non-interchangeable.
@@ -43,3 +43,14 @@ def load_or_create_spine_keypair(*, path: str, vault: object = None) -> KeyPair:
     (``VaultLocked``) — never mints a NEW divergent spine identity that would orphan the existing spine.
     See :func:`vigil_core.keystore.load_or_create_sealed_keypair`."""
     return load_or_create_sealed_keypair(path=path, context=SPINE_KEYPAIR_CONTEXT, vault=vault)
+
+
+def try_load_spine_keypair(*, path: str, vault: object = None):
+    """Load-ONLY: return the persisted stable offense-spine keypair, or ``None`` when it is absent/corrupt. A
+    sealed-but-unopenable file propagates ``VaultLocked`` (fail-closed). UNLIKE
+    :func:`load_or_create_spine_keypair`, this NEVER generates or persists a key — it is for READ-ONLY callers
+    (e.g. ``vigil pr-bot --print-fix-authorization``) that must not mint a divergent spine identity (which would
+    pollute the base-dir with a stray private key AND orphan the real spine for a later real write). It reuses
+    the SAME load-only primitive the load-or-create path uses, so there is no behaviour drift."""
+    from pathlib import Path
+    return _try_load(Path(path), SPINE_KEYPAIR_CONTEXT, vault)

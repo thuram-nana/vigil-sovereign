@@ -3882,6 +3882,74 @@ def _cmd_reconcile(args: argparse.Namespace) -> int:
     return 0
 
 
+def _print_fix_authorization(args: argparse.Namespace) -> int:
+    """`vigil pr-bot --print-fix-authorization` — a READ-ONLY dry run (NO token, queue, or network): rebuild the
+    CONFIRMED fact for (--repo, --pr, --finding-ref) from the engagement's OWN signed spine, derive the
+    DETERMINISTIC remediation id and the PR-head clone path the 3c quorum binds, and print the exact
+    ``vigil authorize-destruction`` command the operator runs to authorize ONE fix PR for that finding. Reads the
+    local spine only; a ref with no confirmed fact fails CLOSED (rc=2), so this never fabricates an action."""
+    from vigil_core.vault import Vault, VaultLocked
+
+    from .autopatch.loop import _derive_remediation_id
+    from .jobs.model import SecurityJob
+    from .live.pr_checkout import _safe_workdir
+    from .live.spine_identity import DEFAULT_SPINE_KEY_FILE, try_load_spine_keypair
+    from .live.trusted_finding import TrustedFindingError, finding_from_spine
+
+    base_dir = args.base_dir
+    repo = str(getattr(args, "repo", "") or "").strip()
+    ref = str(getattr(args, "finding_ref", "") or "").strip()
+    pr = int(getattr(args, "pr", 0) or 0)
+    if not repo or not ref or pr <= 0:
+        print("vigil pr-bot --print-fix-authorization: --repo, --pr (positive int), and --finding-ref are all "
+              "required", file=sys.stderr)
+        return 2
+    slug = SecurityJob(repo=repo).slug
+    clone_path = _safe_workdir(base_dir, f"prbot-{slug}-{pr}")   # the SAME path the drain's checkout produces
+    if not clone_path:
+        print("vigil pr-bot --print-fix-authorization: could not resolve a safe clone workdir under "
+              f"{base_dir!r}", file=sys.stderr)
+        return 2
+    # READ-ONLY guard: refuse (fail-closed) unless the engagement's spine signing key is already present AND
+    # openable. finding_from_spine below would otherwise LOAD-OR-CREATE it — minting a fresh divergent key that
+    # pollutes the base-dir with a stray private key AND orphans the real spine for a later real `--fix-pr`. The
+    # drain legitimately creates the key on first engagement; this read-only dry run must never write.
+    try:
+        _kp = try_load_spine_keypair(path=str(Path(base_dir) / DEFAULT_SPINE_KEY_FILE),
+                                     vault=Vault(Path(base_dir) / "vault"))
+    except VaultLocked:
+        _kp = None
+    if _kp is None:
+        print(f"vigil pr-bot --print-fix-authorization: the engagement spine signing key under {base_dir!r} is "
+              "absent or unopenable — refusing (a read-only dry run will not create one; run this in the "
+              "engagement's base-dir after `vigil pr-bot --comment` has recorded facts)", file=sys.stderr)
+        return 2
+    try:
+        # rebuild the signed fact (fail-closed on unknown/ambiguous ref); the DETERMINISTIC rid is a digest over
+        # the fact's signed provenance, so it matches the id the drain derives for the SAME finding.
+        fobj = finding_from_spine(base_dir=base_dir, slug=slug, target_repo=clone_path, finding_ref=ref)
+    except TrustedFindingError as exc:
+        print(f"vigil pr-bot --print-fix-authorization: no confirmed fact for ref {ref!r} on engagement "
+              f"{slug!r} (run `vigil pr-bot --comment` first to record facts): {exc}", file=sys.stderr)
+        return 2
+    action_id = f"pr-{_derive_remediation_id('', fobj)}"
+    print("=== vigil pr-bot — authorize ONE fix PR for this finding ===")
+    print(f"repo         : {repo}")
+    print(f"engagement   : {slug}")
+    print(f"finding ref  : {ref}")
+    print(f"action_id    : {action_id}")
+    print(f"target       : {clone_path}")
+    print("                 (the ephemeral PR-head clone the m-of-n quorum binds; the repo identity itself is")
+    print("                  bound separately by the owner-signed repo-exact 'pr' git-write grant)")
+    print("")
+    print("Then, to authorize exactly this ONE fix PR (m-of-n; one authorization → one PR):")
+    print(f"  vigil provision-destruction --base-dir {base_dir}        # once, if not already provisioned")
+    print(f"  vigil authorize-destruction --base-dir {base_dir} \\")
+    print(f"      --action-id {action_id} --slug {slug} --target {clone_path}")
+    print(f"  vigil pr-bot --queue-root <Q> --base-dir {base_dir} --fix-pr   # opens the gated fix PR")
+    return 0
+
+
 def _cmd_pr_bot(args: argparse.Namespace) -> int:
     """`vigil pr-bot` — DRAIN the SecurityJob queue through the authorized runner (Slice 3-live-b2): each queued
     PR job is passed through the hard authorization gate, then (only if allowed) diff-scanned, and each
@@ -3890,7 +3958,12 @@ def _cmd_pr_bot(args: argparse.Namespace) -> int:
     all hold (each post is also signed-audited). With ``--fix-pr`` it ALSO opens a gated fix PR per
     oracle-verified finding (OFF by default; needs a repo-exact "pr" git-write grant AND an m-of-n destruction
     authorization, per-job and single-use ⇒ one authorization opens one fix PR). Needs a GitHub token (clone +
-    read + comment/fix). Enqueue is a SEPARATE step (`vigil reconcile` / the webhook drain)."""
+    read + comment/fix). Enqueue is a SEPARATE step (`vigil reconcile` / the webhook drain).
+    ``--print-fix-authorization`` is a read-only dry run that prints the m-of-n authorization command for ONE
+    finding (no token/queue/network)."""
+    if getattr(args, "print_fix_authorization", False):
+        return _print_fix_authorization(args)
+
     import json
 
     from .jobs.pr_bot import make_pr_bot_fix_pr, make_pr_bot_runner
@@ -3901,6 +3974,10 @@ def _cmd_pr_bot(args: argparse.Namespace) -> int:
     token = (getattr(args, "github_token", "") or os.environ.get("GITHUB_TOKEN", "")).strip()
     if not token:
         print("vigil pr-bot: a GitHub token is required (--github-token or $GITHUB_TOKEN)", file=sys.stderr)
+        return 2
+    if not str(getattr(args, "queue_root", "") or "").strip():
+        print("vigil pr-bot: --queue-root is required to drain the queue (omit only for "
+              "--print-fix-authorization)", file=sys.stderr)
         return 2
     base_dir = args.base_dir
     # the pinned governance/authority trust root verifies BOTH the engagement authority (the gate) AND the
@@ -5630,8 +5707,9 @@ def build_parser() -> argparse.ArgumentParser:
                         help="DRAIN the SecurityJob queue through the authorized runner: diff-scan each queued "
                              "PR and (with --comment) post gated review comments for oracle-verified findings. "
                              "The authorization gate is the sole executor; requires a GitHub token.")
-    pb.add_argument("--queue-root", required=True,
-                    help="the SecurityJob queue root (shared with `reconcile` / `webhook-drain`)")
+    pb.add_argument("--queue-root", default="",
+                    help="the SecurityJob queue root (shared with `reconcile` / `webhook-drain`); required to "
+                         "DRAIN (omit only for --print-fix-authorization)")
     pb.add_argument("--base-dir", default=".vigil-live",
                     help="engagement base dir (authority root, governance key, approvals, git-write grant)")
     pb.add_argument("--github-token", default="",
@@ -5660,6 +5738,16 @@ def build_parser() -> argparse.ArgumentParser:
     pb.add_argument("--model", default="",
                     help="the Claude coder model for the fix (--fix-pr; empty ⇒ Settings choice). API key from "
                          "ANTHROPIC_API_KEY env, never argv.")
+    # provisioning helper — READ-ONLY dry run (no token, queue, or network): print the exact
+    # `vigil authorize-destruction` command to authorize ONE fix PR for a specific finding.
+    pb.add_argument("--print-fix-authorization", action="store_true",
+                    help="READ-ONLY: print the exact `vigil authorize-destruction` command to authorize ONE fix "
+                         "PR for --repo/--pr/--finding-ref (no token, queue, or network), then run --fix-pr.")
+    pb.add_argument("--repo", default="",
+                    help="the connected repo, e.g. github.com/org/repo (--print-fix-authorization)")
+    pb.add_argument("--pr", type=int, default=0, help="the PR number (--print-fix-authorization)")
+    pb.add_argument("--finding-ref", default="",
+                    help="the oracle-verified finding's spine ref (--print-fix-authorization)")
     pb.set_defaults(func=_cmd_pr_bot)
 
     pt = sub.add_parser(
