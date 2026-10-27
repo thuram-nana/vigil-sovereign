@@ -109,4 +109,43 @@ def make_pr_bot_worker(
     return _worker
 
 
-__all__ = ["make_pr_bot_worker"]
+def make_pr_bot_runner(
+    *,
+    queue_root: str,
+    base_dir: str,
+    trust_root: Any,
+    checkout: Optional[Callable[[SecurityJob], str]] = None,
+    changed_files: Optional[Callable[[SecurityJob], "set[str]"]] = None,
+    comment_config: Any = None,
+    approve: Any = None,
+    audit: Any = None,
+    now: Any = None,
+    max_files: int = 5000,
+    grant_path: Any = None,
+    epoch_path: Any = None,
+    assert_tenant: Any = None,
+    _queue: Any = None,
+    _gate: Any = None,
+    _worker: Any = None,
+) -> Any:
+    """Assemble the PR-bot execution runner (3-live-b2): the durable ``SecurityJob`` queue + the hard per-job
+    authorization gate (``build_repo_gate`` over the pinned authority root — fail-closed) + the PR-bot worker
+    (diff-scan → gated comments). Returns a :class:`jobs.runner.JobRunner` whose ``drain()`` runs each QUEUED job
+    through ``run_one`` — so the authorization gate stays the SOLE executor (no trigger adapter ever runs a
+    worker, and a job that fails the gate is refused WITHOUT running). ``_queue`` / ``_gate`` are injection seams
+    for offline tests; the rest are the live seams the ``vigil pr-bot`` command builds (the gated PR-head
+    ``checkout``, the read-client ``changed_files``, and the comment config / owner approver / signed-audit sink)."""
+    from .authorize import build_repo_gate
+    from .queue import SecurityJobQueue
+    from .runner import JobRunner
+
+    queue = _queue if _queue is not None else SecurityJobQueue(queue_root)
+    gate = _gate if _gate is not None else build_repo_gate(trust_root, now=now)
+    worker = _worker if _worker is not None else make_pr_bot_worker(
+        base_dir=base_dir, checkout=checkout, changed_files=changed_files, comment_config=comment_config,
+        trust_root=trust_root, approve=approve, audit=audit, now=now, max_files=max_files,
+        grant_path=grant_path, epoch_path=epoch_path)
+    return JobRunner(queue=queue, gate=gate, worker=worker, assert_tenant=assert_tenant)
+
+
+__all__ = ["make_pr_bot_worker", "make_pr_bot_runner"]

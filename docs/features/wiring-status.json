@@ -359,6 +359,19 @@
       "rationale": "Native verb dispatched in-process; the safety-net poller lists changed PRs per repo and enqueues a SecurityJob for each (enqueue-only, durable-before-cursor). Parser registered and handler resolves."
     },
     {
+      "id": "cli.pr-bot",
+      "name": "vigil pr-bot",
+      "surface": "cli-native",
+      "status": "LIVE",
+      "verb": "pr-bot",
+      "anchor": {
+        "file": "integration/vigil_integration/cli.py",
+        "symbol": "_cmd_pr_bot"
+      },
+      "check": "cli-native-verb",
+      "rationale": "Native verb dispatched in-process; drains the SecurityJob queue through the authorized JobRunner (the gate is the sole executor), diff-scanning each queued PR and posting gated review comments for oracle-verified findings (comment leg OFF unless --comment + an owner-signed grant + approval). Parser registered and handler resolves."
+    },
+    {
       "id": "cli.ledger",
       "name": "vigil ledger",
       "surface": "cli-native",
