@@ -18,7 +18,7 @@ the EXACT per-repo + PR-write conjuncts land in a later slice.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any, Callable, Optional
 
 from .model import SecurityJob
 
@@ -65,16 +65,70 @@ def _default_assert_tenant() -> None:
         assert_tenant_fleet_isolated()
 
 
+def _active_tenant() -> Optional[str]:
+    """The tenant this process is sharded for (``CRUCIBLE_TENANT``), or ``None`` when unsharded (the
+    single-tenant default). Reads the validated primitive; a set-but-malformed id fails closed upstream."""
+    from framework.v2.common.tenant import tenant_id
+    return tenant_id()
+
+
+def _reconcile_tenant(job: SecurityJob, active_tenant: Callable[[], Optional[str]]) -> Optional[JobAuthorization]:
+    """Fail-closed cross-tenant check: a job TAGGED for an org (``job.tenant_id``) MUST run in THAT org's
+    sharded process. Returns a refusal ``JobAuthorization`` on a mismatch, else ``None`` (ok to proceed).
+
+    The per-tenant root boundary (``assert_tenant_fleet_isolated``) proves the PROCESS is in a dedicated,
+    isolated root; it does NOT prove that root belongs to the tenant THIS job is for — a worker sharded for
+    org B draining a job tagged for org A would pass the boundary yet write A's findings into B's root. This
+    closes that gap: org == ``tenant_id`` (CRUCIBLE_TENANT), so a non-empty ``job.tenant_id`` must equal the
+    process's active tenant. An UNtagged job is left to the boundary check (backward-compatible: today's
+    single-tenant jobs are untagged and run unsharded); the guard engages only once jobs carry a tenant."""
+    jt = str(getattr(job, "tenant_id", "") or "").strip()   # str() so a non-str tag refuses, never crashes
+    if not jt:
+        return None                       # untagged ⇒ no cross-tenant claim to reconcile (boundary still applies)
+    try:
+        active = active_tenant()
+    except Exception as e:  # noqa: BLE001 — cannot resolve the process tenant ⇒ refuse (never assume a match)
+        return JobAuthorization(allowed=False, state="refused",
+                                reason=f"tenant resolution error (fail-closed): {type(e).__name__}: {e}",
+                                denial_code="tenant_mismatch")
+    if active is None:
+        return JobAuthorization(
+            allowed=False, state="refused",
+            reason=f"job is tagged for tenant {jt!r} but this process is not sharded for any tenant — "
+                   "refusing (a tenant-scoped job must run in that tenant's dedicated root, never the "
+                   "shared default store)",
+            denial_code="tenant_mismatch")
+    if str(active) != jt:
+        return JobAuthorization(
+            allowed=False, state="refused",
+            reason=f"job is tagged for tenant {jt!r} but this process is sharded for {str(active)!r} — "
+                   "refusing (cross-tenant)",
+            denial_code="tenant_mismatch")
+    return None
+
+
 def authorize_job(
     job: SecurityJob,
     *,
     gate: Callable[[SecurityJob], GateOutcome],
     assert_tenant: Callable[[], None] = _default_assert_tenant,
+    active_tenant: Callable[[], Optional[str]] = _active_tenant,
 ) -> JobAuthorization:
     """Decide whether ``job`` may run. Order (first failure wins, fail-closed):
+      0. tenant reconciliation — a job TAGGED for an org must run in THAT org's sharded process
+         (``_reconcile_tenant``; org == ``tenant_id``), else it is a cross-tenant leak and is refused;
       1. tenant boundary — a sharded worker must be isolated (``assert_tenant``);
       2. authorization — the injected ``gate`` (the verified-authority / conjunctive decision).
-    ANY exception in either step is a REFUSAL, never a pass (a gate that errors must not run the job)."""
+    ANY exception in any step is a REFUSAL, never a pass (a gate that errors must not run the job).
+    ``active_tenant`` is injectable so offline tests exercise the reconciliation without sharding a process."""
+    try:
+        mismatch = _reconcile_tenant(job, active_tenant)
+    except Exception as e:  # noqa: BLE001 — ANY reconciliation error ⇒ refuse (fail-closed; honors the contract)
+        return JobAuthorization(allowed=False, state="refused",
+                                reason=f"tenant reconciliation error (fail-closed): {type(e).__name__}: {e}",
+                                denial_code="tenant_mismatch")
+    if mismatch is not None:
+        return mismatch
     try:
         assert_tenant()
     except Exception as e:  # noqa: BLE001 — TenantIsolationError (or any boundary failure) ⇒ refuse
