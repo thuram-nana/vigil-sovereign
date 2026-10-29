@@ -316,3 +316,17 @@ def test_host_too_broad_mirrors_evidence_config() -> None:
               "api.github.com", "10.0.0.5", "", "ghe-internal", "*.gov.uk"]
     for h in sample:
         assert TC._host_too_broad(h) == ec._host_too_broad(h), h
+
+
+def test_credentialed_host_refused_without_echoing_the_secret(tmp_path: Path) -> None:
+    """red-pen MED: a host carrying inline credentials is refused (fail-closed) AND the secret is NEVER echoed
+    into the operator-facing issue message (the message lands in the operator UI / log)."""
+    for bad in ("https://ghp_LEAKEDTOKEN12345@api.github.com", "user:SUPERSECRETpw@api.github.com",
+                "api.github.com/?access_token=ghp_QUERYLEAK"):
+        _write(tmp_path, "alpha", [{"id": "gh", "kind": "github_issues", "host": bad,
+                                    "repo": "acme/widgets", "auth_env": "GH_TOKEN"}])
+        targets, issues = TC.load_ticketing_targets_with_issues("alpha", root=tmp_path)
+        assert targets == []                                        # refused (fail-closed)
+        blob = " ".join(i.message for i in issues)
+        for secret in ("LEAKEDTOKEN12345", "SUPERSECRETpw", "QUERYLEAK"):
+            assert secret not in blob                               # the secret is NEVER echoed

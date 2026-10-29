@@ -448,14 +448,16 @@ def push_finding(
             f"no API token resolved from env var {target.auth_env!r} for ticketing target {target_id!r} "
             f"(we never push to a ticketing system unauthenticated)")
 
+    # The egress axis is DISJOINT from the attack scope: a ticketing sink must never be a host under attack.
+    # Enforce this UNCONDITIONALLY — even when the CALLER supplies its own allowlist (which would otherwise
+    # skip the build_engagement_allowlist drop), so a conflicting host ALWAYS fails CLOSED, not just on the
+    # default path.
+    if collector_scope_conflicts([target.host], _target_scope(slug)):
+        raise TicketingPushError(
+            f"ticketing host for {target_id!r} overlaps the engagement attack scope — refusing "
+            f"(a ticketing sink must be disjoint from the target you are attacking)")
     if allowlist is None:
-        # The egress axis is DISJOINT from the attack scope: a ticketing host overlapping the charter is
-        # DROPPED by build_engagement_allowlist (collector_scope_conflicts). We also verify it explicitly
-        # here so a conflicting host fails CLOSED with a clear message rather than a later name refusal.
-        if collector_scope_conflicts([target.host], _target_scope(slug)):
-            raise TicketingPushError(
-                f"ticketing host for {target_id!r} overlaps the engagement attack scope — refusing "
-                f"(a ticketing sink must be disjoint from the target you are attacking)")
+        # No explicit allowlist ⇒ build the floor-pinned default (which also drops a conflicting collector host).
         allowlist = build_engagement_allowlist(slug=slug, collector_hosts=[target.host])
 
     tf = finding if isinstance(finding, TicketFinding) else TicketFinding.from_finding(finding)

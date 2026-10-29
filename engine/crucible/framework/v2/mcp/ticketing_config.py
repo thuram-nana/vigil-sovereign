@@ -255,19 +255,23 @@ def _parse_host(sid: str, entry: dict) -> tuple[str | None, TicketingConfigIssue
         return None, TicketingConfigIssue(target_id=sid, code="missing_host",
                                           message="a ticketing target requires a non-empty 'host' string")
     host = host.strip()
+    # The raw host is NEVER echoed in a message: an operator may paste a credentialed value
+    # (userinfo/token/query), and the message lands in the operator UI / log. The field name + code identify
+    # the problem without disclosing the secret (mirrors evidence_config._parse_http_host).
     if "*" in host:
         return None, TicketingConfigIssue(
             target_id=sid, code="wildcard_host",
-            message=(f"host {host!r} is a wildcard; a ticketing host must be an exact IP literal or a "
-                     f"single hostname so the egress floor can pin it"))
+            message=("the 'host' is a wildcard; a ticketing host must be an exact IP literal or a single "
+                     "hostname so the egress floor can pin it (raw value omitted — it may carry a secret)"))
     if _host_too_broad(host):
         return None, TicketingConfigIssue(
             target_id=sid, code="over_broad_host",
-            message=f"host {host!r} is over-broad (a whole TLD / public-suffix range)")
+            message="the 'host' is over-broad (a whole TLD / public-suffix range); raw value omitted")
     if not (_is_ip_literal(host) or _is_single_hostname(host)):
         return None, TicketingConfigIssue(
             target_id=sid, code="bad_host",
-            message=f"host {host!r} is not an exact IP literal or a single valid hostname (no scheme/port)")
+            message=("the 'host' is not an exact IP literal or a single valid hostname "
+                     "(no scheme/port/userinfo); raw value omitted"))
     return host, None
 
 

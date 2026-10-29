@@ -496,3 +496,33 @@ def test_pusher_exposes_no_promotion_or_sensor_seam() -> None:
     r = TP.PushReceipt(ok=True, target_id="gh", tenant_id=None, slug="s", finding_slug="f")
     assert r.is_fact is False and r.direction == "outbound"
     assert r.audit_record()["is_fact"] is False
+
+
+def test_push_finding_enforces_disjointness_even_with_a_caller_allowlist(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """red-pen MED: the ticketing-sink / attack-scope disjointness refusal now runs UNCONDITIONALLY — a
+    caller-supplied allowlist must NOT bypass it (else a finding could be filed INTO a host under attack)."""
+    monkeypatch.setenv("CRUCIBLE_TENANT", "acme")
+    monkeypatch.setenv("GH_TOKEN", "t")
+    _write_cfg(tmp_path, "alpha", _OK_CFG)
+    monkeypatch.setattr(TP, "_target_scope", lambda slug: (_HOST,))   # attack scope CONTAINS the ticketing host
+
+    def factory(target, allowlist, token, slug):
+        raise AssertionError("the pusher must not be constructed when disjointness refuses")
+
+    with pytest.raises(TP.TicketingPushError, match="attack scope"):
+        TP.push_finding("alpha", "gh", _finding(), root=tmp_path, allowlist=_allow(),
+                        pusher_factory=factory, audit_root=False)      # a caller allowlist no longer bypasses it
+
+
+def test_push_finding_allowlist_none_refuses_a_conflicting_host(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """red-pen MED coverage: the allowlist=None path also refuses a conflicting host (before any default build)."""
+    monkeypatch.setenv("CRUCIBLE_TENANT", "acme")
+    monkeypatch.setenv("GH_TOKEN", "t")
+    _write_cfg(tmp_path, "alpha", _OK_CFG)
+    monkeypatch.setattr(TP, "_target_scope", lambda slug: (_HOST,))
+    with pytest.raises(TP.TicketingPushError, match="attack scope"):
+        TP.push_finding("alpha", "gh", _finding(), root=tmp_path, audit_root=False)   # no explicit allowlist
