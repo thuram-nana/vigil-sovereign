@@ -401,3 +401,120 @@ def test_schema_drift_non_iterable_findings_degrade_not_crash(tmp_path, monkeypa
     c = kb.corpus()                                                 # must not raise
     assert "OK-1" in {f.ref for f in c.findings}                    # the well-formed engagement still aggregates
     assert {e.slug for e in c.engagements} >= {"shop", "ok"}        # drifted slug present, contributes nothing fatal
+
+
+def test_leaf_symlink_inside_a_contained_slug_cannot_escape(tmp_path, monkeypatch) -> None:
+    """re-red-pen HIGH (leaf-symlink leak the dir-level fix missed): a GENUINELY in-root slug dir whose
+    <slug>.report.json, findings/ (whole dir), reports/ (whole dir), charter.md, or an individual *.md is a
+    symlink into ANOTHER org's root must leak NOTHING — every concrete leaf read is containment-checked."""
+    a = tmp_path / "orgA" / "targets"
+    b = tmp_path / "orgB" / "targets"
+    a.mkdir(parents=True)
+    # org B's crown jewels:
+    be = _mk_engagement(b, "beta")
+    _write_report_json(b, "beta",
+                       active=[_active("B-SECRET-rce", "rce", title="orgB CROWN JEWEL", severity="Critical",
+                                       confirmed_by="oob_callback")],
+                       target="https://secret.orgB")
+    _write_finding_file(be, "001-secret.md", title="orgB secret finding doc", severity="Critical")
+    _write_report_doc(be, "technical.md", "orgB secret report")
+
+    # SHAPE (c): a real slug dir whose report.json is a symlink to org B's report
+    (a / "foo").mkdir()
+    (a / "foo" / "foo.report.json").symlink_to(b / "beta" / "beta.report.json")
+    # SHAPE (b): a real slug dir whose findings/ is a symlink to org B's findings/
+    (a / "bar").mkdir()
+    (a / "bar" / "findings").symlink_to(b / "beta" / "findings", target_is_directory=True)
+    (a / "bar" / "reports").mkdir()
+    # SHAPE (b'): a real slug dir whose reports/ is a symlink to org B's reports/
+    (a / "baz").mkdir()
+    (a / "baz" / "findings").mkdir()
+    (a / "baz" / "reports").symlink_to(b / "beta" / "reports", target_is_directory=True)
+    # PER-FILE: a real findings/ dir holding one symlinked finding doc into org B
+    qd = a / "qux"
+    (qd / "findings").mkdir(parents=True)
+    (qd / "reports").mkdir()
+    (qd / "findings" / "001-x.md").symlink_to(b / "beta" / "findings" / "001-secret.md")
+    # CHARTER: a real slug dir whose charter.md is a symlink into org B
+    (a / "cha").mkdir()
+    (a / "cha" / "charter.md").symlink_to(b / "beta" / "charter.md")
+
+    _scope_to(monkeypatch, a, "orgA")
+    c = kb.corpus()
+
+    refs = {f.ref for f in c.findings}
+    titles = {f.title for f in c.findings}
+    targets = {e.target for e in c.engagements}
+    assert "B-SECRET-rce" not in refs                               # report.json leaf symlink refused
+    assert "orgB CROWN JEWEL" not in titles
+    assert "orgB secret finding doc" not in titles                  # findings/ dir + per-file symlink refused
+    assert "https://secret.orgB" not in targets                     # report target never crosses
+    assert all(f.tenant_id == "orgA" for f in c.findings)
+    assert not any(r.title == "orgB secret report" for r in c.reports)  # reports/ dir symlink refused
+    # the symlinked leaves do not even register as "present"
+    cha = next(e for e in c.engagements if e.slug == "cha")
+    assert cha.has_charter is False
+    foo = next(e for e in c.engagements if e.slug == "foo")
+    assert foo.has_scan_report is False
+
+
+def test_scaffold_readme_and_nonlive_status_not_counted_as_confirmed(tmp_path, monkeypatch) -> None:
+    """re-red-pen MED (claim-discipline miscount): findings/README.md (shipped by targets/_template into
+    every engagement) is NOT a finding, and a WITHDRAWN / DRAFT doc is not a live confirmed finding."""
+    a = tmp_path / "orgA" / "targets"
+    # a fresh, zero-work engagement that only carries the scaffold README
+    fresh = _mk_engagement(a, "fresh")
+    (fresh / "findings" / "README.md").write_text("# How to write findings\n", encoding="utf-8")
+    # an engagement with a real Open finding + a WITHDRAWN + a DRAFT + a PLAIN (non-backtick) multi-word
+    # nonconfirming status with trailing prose (must still be classified non-confirmed).
+    work = _mk_engagement(a, "work")
+    _write_finding_file(work, "001-real.md", title="Real bug", severity="High", status="Open")
+    _write_finding_file(work, "002-gone.md", title="Retracted", severity="High", status="WITHDRAWN")
+    _write_finding_file(work, "003-wip.md", title="Not ready", severity="Critical", status="DRAFT")
+    (work / "findings" / "004-fp.md").write_text(                   # plain Status, multi-word + PUNCTUATED prose
+        "# Finding 004 — `maybe`\n\n## Metadata\n\n"
+        "- **Title:** Looks like a bug\n"
+        "- **Severity:** High\n"
+        "- **Status:** False Positive — duplicate of 001, benign\n",
+        encoding="utf-8")
+    (work / "findings" / "005-dup.md").write_text(                  # plain Status, UNPUNCTUATED trailing prose
+        "# Finding 005 — `maybe2`\n\n## Metadata\n\n"
+        "- **Title:** Also not real\n"
+        "- **Severity:** Medium\n"
+        "- **Status:** Duplicate of 003\n",
+        encoding="utf-8")
+    _scope_to(monkeypatch, a, "orgA")
+    c = kb.corpus()
+
+    fresh_eng = next(e for e in c.engagements if e.slug == "fresh")
+    assert fresh_eng.finding_count == 0                             # README is not a confirmed finding
+    assert fresh_eng.lead_count == 0                                # and not a lead either
+    assert not any(f.ref.lower() == "readme" for f in c.findings)   # and not indexed as one at all
+
+    work_eng = next(e for e in c.engagements if e.slug == "work")
+    assert work_eng.finding_count == 1                             # only the Open one counts
+    assert work_eng.lead_count == 0                                # retracted/draft/FP docs are NOT leads
+    confirmed_titles = {f.title for f in c.findings if f.slug == "work" and f.confirmed}
+    assert confirmed_titles == {"Real bug"}
+    # the withdrawn/draft/false-positive/duplicate docs are still indexed (history) but marked not-confirmed
+    # (incl. BOTH punctuated 'False Positive — …' and UNPUNCTUATED 'Duplicate of 003' trailing prose)
+    unconfirmed = {f.title for f in c.findings if f.slug == "work" and not f.confirmed}
+    assert unconfirmed == {"Retracted", "Not ready", "Looks like a bug", "Also not real"}
+    assert c.leads() == []                                          # no passive scan findings here at all
+
+
+def test_oracle_confirmed_requires_a_named_oracle(tmp_path, monkeypatch) -> None:
+    """re-red-pen MED (provenance overclaim): an active finding that NAMES no confirming oracle
+    (confirmed_by empty) must NOT be stamped oracle_confirmed=True (that would assert a confirmation while
+    naming no oracle). A named confirmer still carries oracle_confirmed=True + the oracle_kind."""
+    a = tmp_path / "orgA" / "targets"
+    _mk_engagement(a, "api")
+    _write_report_json(a, "api", active=[
+        _active("named-1", "sqli", title="named", severity="High", confirmed_by="oob_callback"),
+        _active("unnamed-1", "sqli", title="unnamed", severity="High", confirmed_by=""),
+    ])
+    _scope_to(monkeypatch, a, "orgA")
+    by_ref = {f.ref: f for f in kb.corpus().findings}
+    assert by_ref["named-1"].oracle_confirmed is True and by_ref["named-1"].oracle_kind == "oob_callback"
+    assert by_ref["unnamed-1"].oracle_confirmed is False and by_ref["unnamed-1"].oracle_kind == ""
+    assert by_ref["unnamed-1"].confirmed is True                    # still an active finding, just not oracle-grounded here

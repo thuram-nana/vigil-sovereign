@@ -19,15 +19,20 @@ Genuine tenant isolation already means ONE ``CRUCIBLE_ROOT`` per tenant (see ``c
 docstring: ``targets/<slug>`` is per-SLUG, NOT per-tenant-sharded, so the ROOT is the boundary).
 This module therefore enforces the boundary two ways:
 
-  (a) it NEVER reads outside the active tenant's ``targets_root()`` — every path it touches is
-      ``paths.targets_root()`` or a direct child of it (a slug enumerated from ``iterdir()``), and a
-      per-slug read is containment-checked with ``paths.is_within``; and
+  (a) it NEVER reads outside the active tenant's ``targets_root()`` — slugs are enumerated from
+      ``iterdir()`` and the slug dir is containment-checked (``_safe_target_dir``), AND every CONCRETE
+      leaf it then reads (``<slug>.report.json``, ``charter.md``, the ``findings/`` & ``reports/``
+      sub-dirs, and each ``*.md``) is re-checked with ``paths.is_within`` via ``_contained`` — so a
+      symlink planted at a leaf inside a legitimately-contained slug dir cannot escape to another
+      tenant's tree (``Path.resolve()`` follows the symlink; an out-of-root target is refused); and
   (b) it keys every record ``(tenant_id, slug)`` AND fails CLOSED at the API boundary — a caller that
       asks for an explicit org other than the active one (``corpus(tenant="B")`` from an ``A`` process)
       raises :class:`KnowledgeBaseScopeError` rather than ever returning another org's artifacts.
 
-FATAL-2 plane hygiene: imports are stdlib + ``framework.v2.common.paths`` + the sibling model types
-ONLY. No sovereign, no ``vigil_integration``, no ``vigil_core``. (The cryptographically-grounded signed
+FATAL-2 plane hygiene: this module's DIRECT imports are stdlib + ``framework.v2.common.paths`` + the
+sibling model types ONLY — no sovereign and no ``vigil_integration``, and no DIRECT ``vigil_core`` (it
+is pulled transitively by ``common.paths`` via the shared integrity base, which is plane-safe on both
+sides). (The cryptographically-grounded signed
 offense-spine reader — ``vigil_integration.live.trusted_finding._load_confirmed_facts`` — lives on the
 integration plane; folding the signed spine in is a documented follow-up, NOT this slice.)
 """
@@ -81,6 +86,37 @@ _CANON_SEV = {
 
 # A metadata bullet in a finding doc: ``- **Key:** value`` (the OBSIDIAN finding template shape).
 _META_RE = re.compile(r"^\s*[-*]\s*\*\*(?P<key>[^:*]+):\*\*\s*(?P<val>.*?)\s*$")
+
+# Finding-doc Status values that do NOT count as a live confirmed finding: WITHDRAWN means the finding
+# was determined invalid (OBSIDIAN: "mark it Status: WITHDRAWN"), DRAFT means not yet confirmed, and the
+# false-positive/duplicate/invalid family are non-findings. Every other status (Open, Reported, Fix in
+# progress, Verified Fixed, Risk Accepted, Will Not Fix, …) IS a confirmed finding — the vuln was real.
+_NONCONFIRMING_STATUS = {
+    "draft", "withdrawn", "false positive", "false-positive", "falsepositive",
+    "duplicate", "invalid", "not applicable", "n/a", "na", "rejected",
+}
+
+# Scaffolding doc copied into every engagement by intake (targets/_template/findings/README.md): it is a
+# how-to, not a finding, and must never be counted/indexed as one.
+_SCAFFOLD_FINDING_STEMS = {"readme"}
+
+
+def _status_is_confirmed(status: str) -> bool:
+    """A finding doc counts as a CONFIRMED finding unless its Status BEGINS WITH a nonconfirming phrase
+    (withdrawn / draft / false-positive / duplicate / invalid / rejected / n-a). An empty Status is
+    treated as confirmed (OBSIDIAN: a finding file exists only once confirmed).
+
+    The match is a WORD-BOUNDARY PREFIX, not exact set membership, so a hand-written status that trails
+    prose with OR WITHOUT punctuation is classified like its canonical form: ``Duplicate of 003``,
+    ``Withdrawn pending re-test``, ``Not Applicable (out of scope)``, ``False positive — benign`` and a
+    bare ``Invalid`` all read nonconfirming, while ``Open`` / ``Risk Accepted`` / ``Will Not Fix`` /
+    ``Verified Fixed`` (and an unrelated word like ``drafted``) do not. Whitespace is collapsed first."""
+    s = re.sub(r"\s+", " ", str(status or "").strip().lower())
+    if not s:
+        return True
+    # bad phrase must be followed by a non-alphanumeric boundary (end / space / punctuation) so it
+    # matches a leading status word, never the inside of a longer word (e.g. ``draft`` vs ``drafted``).
+    return not any(re.match(re.escape(bad) + r"(?![a-z0-9])", s) for bad in _NONCONFIRMING_STATUS)
 
 
 # ---------------------------------------------------------------------------
@@ -153,6 +189,18 @@ def _safe_target_dir(slug: str) -> Optional[Path]:
     return d if paths.is_within(d, paths.targets_root()) else None
 
 
+def _contained(p: Path) -> bool:
+    """True iff the CONCRETE path ``p`` resolves inside the active tenant's ``targets_root()``.
+
+    ``_safe_target_dir`` only validates the slug DIRECTORY; it does NOT validate the leaf files read
+    inside it. A legitimately-contained slug dir can still hold a symlink at ``<slug>.report.json``,
+    ``charter.md``, ``findings/`` / ``reports/`` (the whole sub-dir), or an individual ``*.md`` that
+    points into ANOTHER tenant's root. ``Path.resolve()`` follows every symlink in ``p``, so gating each
+    concrete read on ``is_within(p, targets_root())`` refuses a leaf escape that the directory check
+    passes — the fix for the cross-tenant leaf-symlink leak."""
+    return paths.is_within(p, paths.targets_root())
+
+
 # ---------------------------------------------------------------------------
 # Artifact readers (defensive — a malformed artifact is skipped, never fatal)
 # ---------------------------------------------------------------------------
@@ -165,6 +213,8 @@ def _load_report_json(slug: str) -> Optional[dict[str, Any]]:
     if _safe_target_dir(slug) is None:
         return None                      # containment: a slug whose dir escapes the active tenant root reads nothing
     p = paths.phase_report_path(slug)
+    if not _contained(p):
+        return None                      # containment: a symlinked <slug>.report.json escaping the root reads nothing
     try:
         if not p.is_file():
             return None
@@ -206,14 +256,20 @@ def _findings_from_report(scope: Optional[str], slug: str,
     for af in _as_list(report.get("active_findings")):
         if not isinstance(af, dict):
             continue
+        # oracle_kind names the oracle the report says fired. We ONLY mark oracle_confirmed when the
+        # report actually NAMES a confirmer — an active finding with no confirmed_by asserts a confirmation
+        # while naming no oracle (contradicting models.py: "oracle_kind names the oracle that fired"), so it
+        # is NOT oracle-grounded here. This reflects the UNSIGNED report.json's own claim; the KB does not
+        # re-fire the oracle (the signed-spine re-read is the documented follow-up noted in the module docstring).
+        oracle_kind = str(af.get("confirmed_by") or "").strip()
         out.append(FindingRecord(
             tenant_id=scope, slug=slug,
             ref=str(af.get("check_id") or ""),
             title=str(af.get("title") or af.get("check_id") or ""),
             severity=_norm_sev(af.get("severity")),
             bug_class=str(af.get("bug_class") or ""),
-            source="scan:active", confirmed=True, oracle_confirmed=True,
-            oracle_kind=str(af.get("confirmed_by") or ""),
+            source="scan:active", confirmed=True, oracle_confirmed=bool(oracle_kind),
+            oracle_kind=oracle_kind,
             endpoint=str(af.get("endpoint") or ""),
             confidence=_as_float(af.get("confidence")),
             path=src_path,
@@ -288,23 +344,28 @@ def _findings_from_files(scope: Optional[str], slug: str) -> list[FindingRecord]
     if d is None:
         return []
     fdir = d / "findings"
+    if not _contained(fdir):
+        return []                        # containment: a symlinked findings/ sub-dir escaping the root reads nothing
     try:
         files = sorted(fdir.glob("*.md"))
     except OSError:
         return []
     out: list[FindingRecord] = []
     for fp in files:
-        if fp.name.startswith(("_", ".")):
-            continue
+        if fp.name.startswith(("_", ".")) or fp.stem.lower() in _SCAFFOLD_FINDING_STEMS:
+            continue                     # skip hidden/scaffold docs (the _template README is not a finding)
+        if not _contained(fp):
+            continue                     # containment: a per-file symlink escaping the root reads nothing
         meta = _parse_finding_file(fp)
+        status = meta.get("status", "")
         out.append(FindingRecord(
             tenant_id=scope, slug=slug,
             ref=fp.stem,
             title=meta.get("title") or fp.stem,
             severity=_norm_sev(meta.get("severity")),
             bug_class=meta.get("bug_class", ""),
-            source="finding-file", confirmed=True, oracle_confirmed=False,
-            status=meta.get("status", ""),
+            source="finding-file", confirmed=_status_is_confirmed(status), oracle_confirmed=False,
+            status=status,
             path=str(fp),
         ))
     return out
@@ -326,6 +387,8 @@ def _reports(scope: Optional[str], slug: str) -> list[ReportRecord]:
     if d is None:
         return []
     rdir = d / "reports"
+    if not _contained(rdir):
+        return []                        # containment: a symlinked reports/ sub-dir escaping the root reads nothing
     try:
         files = sorted(rdir.glob("*.md"))
     except OSError:
@@ -334,6 +397,8 @@ def _reports(scope: Optional[str], slug: str) -> list[ReportRecord]:
     for fp in files:
         if fp.name.startswith(("_", ".")):
             continue
+        if not _contained(fp):
+            continue                     # containment: a per-file symlink escaping the root reads nothing
         try:
             size = fp.stat().st_size
         except OSError:
@@ -355,12 +420,17 @@ def _build_engagement(scope: Optional[str], slug: str, *,
                       findings: list[FindingRecord],
                       reports: list[ReportRecord]) -> Engagement:
     contained = _safe_target_dir(slug) is not None   # an escaping slug (symlink/traversal) exposes no artifacts
+    charter = paths.charter_path(slug)
+    scan_report = paths.phase_report_path(slug)
     return Engagement(
         tenant_id=scope, slug=slug,
-        has_charter=contained and paths.charter_path(slug).is_file(),
-        has_scan_report=contained and paths.phase_report_path(slug).is_file(),
+        # leaf containment too: a symlinked charter.md / <slug>.report.json escaping the root is NOT "present"
+        has_charter=contained and _contained(charter) and charter.is_file(),
+        has_scan_report=contained and _contained(scan_report) and scan_report.is_file(),
         finding_count=sum(1 for f in findings if f.confirmed),
-        lead_count=sum(1 for f in findings if not f.confirmed),
+        # leads are the scanner's unconfirmed passive findings — NOT a withdrawn/draft finding-file
+        # (confirmed=False, source="finding-file"), which is indexed as history but counted as neither.
+        lead_count=sum(1 for f in findings if f.source == "scan:passive"),
         report_count=len(reports),
         target=str((report or {}).get("target") or ""),
     )

@@ -47,8 +47,10 @@ class FindingRecord:
         (``ScanReport.active_findings``). ``oracle_confirmed`` is True; ``oracle_kind`` names the
         oracle that fired.
       * ``finding-file`` — an operator/agent-authored finding doc (``findings/NNN-*.md``). By the
-        OBSIDIAN doctrine a finding file exists only once confirmed, so ``confirmed`` is True — but
-        it is NOT oracle-grounded, so ``oracle_confirmed`` stays False (no overclaim).
+        OBSIDIAN doctrine a finding file exists only once confirmed, so ``confirmed`` is True — UNLESS
+        its Status marks it withdrawn/draft/false-positive/duplicate/invalid (then ``confirmed`` is
+        False: indexed as history, counted as neither a confirmed finding nor a lead). Never
+        oracle-grounded, so ``oracle_confirmed`` stays False (no overclaim).
       * ``scan:passive`` — a passive finding (``ScanReport.passive_findings``): a LEAD, never a
         confirmed fact, so ``confirmed`` is False.
     """
@@ -123,8 +125,9 @@ class ReportRecord:
 @dataclass(frozen=True)
 class Engagement:
     """A per-engagement summary row, keyed ``(tenant_id, slug)``. ``finding_count`` counts CONFIRMED
-    findings (oracle-confirmed active findings + authored finding files); ``lead_count`` counts the
-    unconfirmed passive findings. All derived from the on-disk artifacts under the active root."""
+    findings (oracle-confirmed active findings + authored finding files that are not withdrawn/draft);
+    ``lead_count`` counts the scanner's unconfirmed passive findings (a withdrawn/draft finding-file is
+    neither). All derived from the on-disk artifacts under the active root."""
 
     tenant_id: Optional[str]
     slug: str
@@ -177,12 +180,15 @@ class Corpus:
         return not self.engagements and not self.findings and not self.reports
 
     def confirmed_findings(self) -> list[FindingRecord]:
-        """Findings that are confirmed (oracle-confirmed active findings + authored finding files) —
-        the leads (passive findings) are excluded."""
+        """Findings that are confirmed (oracle-confirmed active findings + authored finding files whose
+        Status is not withdrawn/draft) — the leads (passive findings) are excluded."""
         return [f for f in self.findings if f.confirmed]
 
     def leads(self) -> list[FindingRecord]:
-        return [f for f in self.findings if not f.confirmed]
+        """The scanner's unconfirmed PASSIVE findings. A withdrawn/draft finding-file is NOT a lead (it
+        is a retracted/not-yet-confirmed authored doc): it is indexed as history but is neither a
+        confirmed finding nor a lead."""
+        return [f for f in self.findings if f.source == "scan:passive"]
 
     def by_severity(self) -> dict[str, int]:
         """Severity histogram over CONFIRMED findings. A confirmed finding with no explicit severity is
