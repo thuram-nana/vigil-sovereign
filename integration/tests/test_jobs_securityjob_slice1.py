@@ -189,6 +189,67 @@ def test_authorize_is_fail_closed_on_tenant_boundary_and_skips_the_gate() -> Non
     assert calls["gate"] == 0                                        # tenant boundary fails BEFORE the gate
 
 
+# ---- tenant reconciliation (org == tenant_id): a TAGGED job must run in THAT tenant's process ----
+
+def test_reconcile_allows_a_tagged_job_in_its_own_tenant() -> None:
+    ok = authorize_job(_job(tenant_id="org-a"), gate=_ALLOW, assert_tenant=lambda: None,
+                       active_tenant=lambda: "org-a")
+    assert ok.allowed
+
+
+def test_reconcile_refuses_a_tagged_job_in_a_different_tenant_before_boundary_and_gate() -> None:
+    calls = {"gate": 0, "boundary": 0}
+
+    def _spy_gate(job):
+        calls["gate"] += 1
+        return GateOutcome(True)
+
+    def _spy_boundary():
+        calls["boundary"] += 1
+
+    r = authorize_job(_job(tenant_id="org-a"), gate=_spy_gate, assert_tenant=_spy_boundary,
+                      active_tenant=lambda: "org-b")                 # process is sharded for a DIFFERENT org
+    assert r.refused and r.denial_code == "tenant_mismatch"
+    assert calls == {"gate": 0, "boundary": 0}                      # refused BEFORE the boundary AND the gate
+
+
+def test_reconcile_refuses_a_tagged_job_in_an_unsharded_process() -> None:
+    r = authorize_job(_job(tenant_id="org-a"), gate=_ALLOW, assert_tenant=lambda: None,
+                      active_tenant=lambda: None)                    # a tenant job must NOT run in the shared default
+    assert r.refused and r.denial_code == "tenant_mismatch"
+
+
+def test_reconcile_is_a_noop_for_an_untagged_job() -> None:
+    ok = authorize_job(_job(), gate=_ALLOW, assert_tenant=lambda: None,
+                       active_tenant=lambda: "org-b")                # untagged ⇒ no cross-tenant claim (boundary applies)
+    assert ok.allowed
+
+
+def test_reconcile_is_fail_closed_when_active_tenant_resolution_raises() -> None:
+    def _boom():
+        raise RuntimeError("tenant env unreadable")
+
+    r = authorize_job(_job(tenant_id="org-a"), gate=_ALLOW, assert_tenant=lambda: None, active_tenant=_boom)
+    assert r.refused and r.denial_code == "tenant_mismatch"          # never assume a match on a resolution error
+
+
+def test_reconcile_strips_a_whitespace_padded_tag() -> None:
+    # pins the guard's .strip(): active is always clean (from _TENANT_RE), so stripping a padded-but-equal tag
+    # can only CORRECT it to a match — never a leak. Force a padded tag straight onto the job to exercise the guard.
+    padded = _job()
+    object.__setattr__(padded, "tenant_id", "  org-a  ")
+    assert authorize_job(padded, gate=_ALLOW, assert_tenant=lambda: None, active_tenant=lambda: "org-a").allowed
+
+
+def test_reconcile_non_str_tenant_id_refuses_never_crashes() -> None:
+    # a non-str tenant_id is only reachable by bypassing normalize (which str-coerces via _clip); the guard must
+    # str()-coerce and reconcile, NEVER let an exception escape authorize_job (the "any exception ⇒ refusal" contract).
+    bad = _job()
+    object.__setattr__(bad, "tenant_id", 5)                         # force a non-str
+    assert authorize_job(bad, gate=_ALLOW, assert_tenant=lambda: None, active_tenant=lambda: "6").refused
+    assert authorize_job(bad, gate=_ALLOW, assert_tenant=lambda: None, active_tenant=lambda: "5").allowed  # 5 → "5"
+
+
 def test_build_repo_gate_refuses_without_a_trust_root(monkeypatch) -> None:
     from framework.v2.authority import store as authz_store
     monkeypatch.setattr(authz_store, "load_authority_root", lambda path=None: None)

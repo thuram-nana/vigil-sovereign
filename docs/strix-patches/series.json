@@ -484,6 +484,12 @@
    "file": "036-a14-bump-certifi-aiohttp-graphql-core-filelock-t.patch",
    "sha256": "eab23b9f4c11c6229fccb9fa9e757a5db139e23fea9cb31421c6019dfcdd0438",
    "subject": "A14: bump certifi, aiohttp, graphql-core, filelock to patched versions"
+  },
+  {
+   "commit": "468c6af6a32907648fe509f1b616c474859ca5ac",
+   "file": "037-a14-bump-litellm-1-90-1-1-100-4-in-the-vendored.patch",
+   "sha256": "bc5ca13e4add91065b396b5e1434050172772e207efbbb0d0e72c3af21f33bab",
+   "subject": "A14: bump litellm 1.90.1 -> 1.100.4 in the vendored strix uv.lock"
   }
  ],
  "schema": 1,
@@ -730,7 +736,7 @@
   "vendor/strix/tests_vigil/test_sandbox_hardening.py": "c5a6cbb4e51c5a86d1c9f30785fa7234af47706015222a9323f420b8a2059be8",
   "vendor/strix/tests_vigil/test_vigil_graph_progress.py": "b468b4ab45c317175af0a267f5692984c570b88a5bcf960f0e9f102706ffb337",
   "vendor/strix/tests_vigil/test_vigil_upstream_proxy.py": "5aec4434f994f0cc69b3fc2c6773ed484e2a26450bf6f1dcacfeb27dee63515c",
-  "vendor/strix/uv.lock": "81fa574cad8beb38e34f40953e6b7f10c887238e0cf3e58bf5a4de7abe06ffe2"
+  "vendor/strix/uv.lock": "3f06329fc976da9cd65210927f6cd094680adde4412a3f3b043b9e78fc2796fb"
  },
  "upstream_commit": "230324d2b80a5a27506f85fc521845d8464b04c0",
  "upstream_license": "Apache-2.0",
