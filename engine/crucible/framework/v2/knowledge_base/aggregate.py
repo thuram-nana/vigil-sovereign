@@ -140,7 +140,9 @@ def _engagement_slugs() -> list[str]:
         names = [p.name for p in root.iterdir() if p.is_dir()]
     except OSError:
         return []
-    return sorted(n for n in names if not n.startswith(("_", ".")))
+    # containment: drop any slug whose target_dir escapes the active tenant root (e.g. a symlink planted under
+    # targets/ pointing at another org's root) — _safe_target_dir resolves symlinks via paths.is_within.
+    return sorted(n for n in names if not n.startswith(("_", ".")) and _safe_target_dir(n) is not None)
 
 
 def _safe_target_dir(slug: str) -> Optional[Path]:
@@ -160,6 +162,8 @@ def _load_report_json(slug: str) -> Optional[dict[str, Any]]:
     """The parsed ``<slug>.report.json`` (a serialized ``ScanReport``) as a dict, or ``None`` when absent
     or malformed. Read as plain JSON (not validated through the model) so the corpus stays import-light
     and degrades gracefully across schema drift."""
+    if _safe_target_dir(slug) is None:
+        return None                      # containment: a slug whose dir escapes the active tenant root reads nothing
     p = paths.phase_report_path(slug)
     try:
         if not p.is_file():
@@ -186,6 +190,12 @@ def _as_float(value: Any) -> Optional[float]:
         return None
 
 
+def _as_list(value: Any) -> list:
+    """A list, or ``[]`` for anything else — so a schema-drifted non-iterable (e.g. ``active_findings: 5``)
+    degrades gracefully instead of raising a TypeError that would crash the WHOLE-org corpus when iterated."""
+    return value if isinstance(value, list) else []
+
+
 def _findings_from_report(scope: Optional[str], slug: str,
                           report: Optional[dict[str, Any]]) -> list[FindingRecord]:
     """Confirmed active findings (oracle-confirmed) + passive findings (leads) from a report dict."""
@@ -193,7 +203,7 @@ def _findings_from_report(scope: Optional[str], slug: str,
         return []
     out: list[FindingRecord] = []
     src_path = str(paths.phase_report_path(slug))
-    for af in report.get("active_findings") or []:
+    for af in _as_list(report.get("active_findings")):
         if not isinstance(af, dict):
             continue
         out.append(FindingRecord(
@@ -208,7 +218,7 @@ def _findings_from_report(scope: Optional[str], slug: str,
             confidence=_as_float(af.get("confidence")),
             path=src_path,
         ))
-    for pf in report.get("passive_findings") or []:
+    for pf in _as_list(report.get("passive_findings")):
         if not isinstance(pf, dict):
             continue
         out.append(FindingRecord(
@@ -344,10 +354,11 @@ def _build_engagement(scope: Optional[str], slug: str, *,
                       report: Optional[dict[str, Any]],
                       findings: list[FindingRecord],
                       reports: list[ReportRecord]) -> Engagement:
+    contained = _safe_target_dir(slug) is not None   # an escaping slug (symlink/traversal) exposes no artifacts
     return Engagement(
         tenant_id=scope, slug=slug,
-        has_charter=paths.charter_path(slug).is_file(),
-        has_scan_report=paths.phase_report_path(slug).is_file(),
+        has_charter=contained and paths.charter_path(slug).is_file(),
+        has_scan_report=contained and paths.phase_report_path(slug).is_file(),
         finding_count=sum(1 for f in findings if f.confirmed),
         lead_count=sum(1 for f in findings if not f.confirmed),
         report_count=len(reports),

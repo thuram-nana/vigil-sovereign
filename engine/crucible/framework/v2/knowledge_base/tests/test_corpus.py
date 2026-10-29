@@ -349,3 +349,55 @@ def test_active_org_reflects_env(monkeypatch) -> None:
     assert kb.active_org() == "orgZ"
     monkeypatch.delenv("CRUCIBLE_TENANT", raising=False)
     assert kb.active_org() is None
+
+
+# ---------------------------------------------------------------------------
+# containment (red-pen HIGH + MED): a symlink/traversal must never escape the active tenant's root
+# ---------------------------------------------------------------------------
+
+
+def test_symlinked_slug_cannot_escape_the_tenant_root(tmp_path, monkeypatch) -> None:
+    """red-pen HIGH: a symlink planted under the active tenant's targets/ pointing at ANOTHER org's root must
+    NOT be read on ANY path (report.json included) — org A never pulls org B's findings into its corpus."""
+    a = tmp_path / "orgA" / "targets"
+    b = tmp_path / "orgB" / "targets"
+    a.mkdir(parents=True)
+    b.mkdir(parents=True)
+    _write_report_json(b, "beta", active=[_active("B-SECRET-sqli", "sqli", title="orgB secret", severity="High")])
+    (a / "beta").symlink_to(b / "beta", target_is_directory=True)   # the escape
+    _scope_to(monkeypatch, a, "orgA")
+    c = kb.corpus()
+    assert "B-SECRET-sqli" not in {f.ref for f in c.findings}        # org B's finding never crosses
+    assert all(f.tenant_id == "orgA" for f in c.findings)
+    assert "beta" not in {e.slug for e in c.engagements}             # the escaping slug is not even enumerated
+
+
+def test_safe_target_dir_and_enumeration_refuse_a_symlink_escape(tmp_path, monkeypatch) -> None:
+    """red-pen MED (zero-coverage guard): _safe_target_dir / _engagement_slugs refuse a slug whose dir resolves
+    outside the active root, and admit a genuine in-root slug."""
+    a = tmp_path / "orgA" / "targets"
+    b = tmp_path / "orgB" / "targets"
+    a.mkdir(parents=True)
+    (b / "evil").mkdir(parents=True)
+    (a / "evil").symlink_to(b / "evil", target_is_directory=True)
+    (a / "real").mkdir()
+    _scope_to(monkeypatch, a, "orgA")
+    assert kb._safe_target_dir("evil") is None                      # escapes → refused
+    assert kb._safe_target_dir("real") is not None                  # genuinely inside → allowed
+    slugs = kb._engagement_slugs()
+    assert "evil" not in slugs and "real" in slugs
+
+
+def test_schema_drift_non_iterable_findings_degrade_not_crash(tmp_path, monkeypatch) -> None:
+    """red-pen LOW: a valid-JSON report.json whose active/passive_findings is a truthy NON-iterable scalar must
+    NOT crash the whole-org corpus — it degrades to no findings for that slug."""
+    a = tmp_path / "orgA" / "targets"
+    a.mkdir(parents=True)
+    (a / "shop").mkdir()
+    (a / "shop" / "shop.report.json").write_text(
+        json.dumps({"target": "t", "active_findings": 5, "passive_findings": True}), encoding="utf-8")
+    _write_report_json(a, "ok", active=[_active("OK-1", "xss", severity="Medium")])
+    _scope_to(monkeypatch, a, "orgA")
+    c = kb.corpus()                                                 # must not raise
+    assert "OK-1" in {f.ref for f in c.findings}                    # the well-formed engagement still aggregates
+    assert {e.slug for e in c.engagements} >= {"shop", "ok"}        # drifted slug present, contributes nothing fatal
