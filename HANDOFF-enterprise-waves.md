@@ -37,6 +37,11 @@ Merge all on green (foundation first). Two product DECISIONS deferred for the ow
 
 **MERGE IS CURRENTLY BLOCKED repo-wide** by a supply-chain gate (below), independent of the wave code. Do NOT merge anything unsound; each wave fix must be re-red-penned (the HIGHs especially).
 
+**PROGRESS 2026-10-29 (localized fixes APPLIED + pushed):**
+- KB — HIGH symlink leak + LOW schema-drift FIXED (branch `strix/enterprise-kb` @ `e34f5979`; +3 regression tests, 16 green, ruff clean). Containment now gates the report.json read + `_build_engagement` + `_engagement_slugs`; `_as_list` guards schema drift.
+- Ticketing — both MEDs FIXED (branch `strix/enterprise-ticketing` @ `8ee3386c`; +4 regression tests, 61 green, ruff clean). `_parse_host` no longer echoes the raw host; `collector_scope_conflicts` disjointness now runs unconditionally.
+- REMAINING (NOT rushed — careful work): the **identity HIGH** (prune-replay resurrection; needs the SnapshotState seed + prune-tripwire + docstring correction) and its reactivation MED; the **litellm/A14** vendored bump; then re-red-pen each fixed wave + merge (foundation first, after A14 is green).
+
 ## BLOCKER 0 — A14 supply-chain gate RED on EVERY branch (and main): litellm CVE
 - Trivy flags **`litellm` 1.90.1 → fixed 1.95.0**, GHSA-g5ff-637f-6q2m (HIGH, arbitrary local file read), in **`vendor/strix/uv.lock`** (vendored Strix; `uv` lock, not pip). It is time-dependent (Trivy DB) so it reds main + all 5 branches; A14 is a required check, so NOTHING merges until fixed.
 - Policy = bump, not suppress (there is a `.trivyignore` but the repo's doctrine is no-suppression — memory `vigil-ci-maintenance-a14-formal`). `vendor/strix/pyproject.toml` pins bare `litellm` + `openai-agents[litellm]==0.14.6`. `uv` 0.11.29 is available.
