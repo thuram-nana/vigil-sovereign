@@ -611,6 +611,15 @@ def test_vendored_strix_lock_cleared_the_high_backlog() -> None:
       * aiohttp   >= 3.14.3  (GHSA-cq5v-8q36-5273, out-of-bounds heap read)
       * pyasn1    >= 0.6.4   (CVE-2026-59884/59885/59886, decoder DoS)
       * cryptography >= 50.0.0 (CVE-2026-69247/69249, GHSA-537c-gmf6-5ccf)
+
+    litellm + filelock were added when litellm was bumped 1.90.1 -> 1.100.4. litellm 1.106.6
+    (what an unconstrained `uv lock --upgrade` would pick) pulls in a direct filelock dependency
+    pinned <4, which drags filelock down to 3.32.7 (CVE-2026-112940, HIGH). Pinning litellm at
+    1.100.4 keeps filelock at the clean 4.2.4 AND clears both litellm HIGHs. These floors red CI
+    if a future resolution regresses below either fix, so the regression cannot land silently:
+      * litellm   >= 1.100.4 (GHSA-g5ff-637f-6q2m local file read, fixed 1.95.0; AND
+                              CVE-2026-114612 proxy-admin priv-esc, fixed 1.100.4)
+      * filelock  >= 4.2.1   (CVE-2026-112940, arbitrary file overwrite)
     """
     lock = REPO_ROOT / "vendor" / "strix" / "uv.lock"
     assert lock.is_file(), f"missing {lock}"
@@ -620,6 +629,8 @@ def test_vendored_strix_lock_cleared_the_high_backlog() -> None:
         "aiohttp": (3, 14, 3),
         "pyasn1": (0, 6, 4),
         "cryptography": (50, 0, 0),
+        "litellm": (1, 100, 4),
+        "filelock": (4, 2, 1),
     }
     below = []
     for name, floor in floors.items():
@@ -636,6 +647,10 @@ def test_vendored_strix_lock_cleared_the_high_backlog() -> None:
     assert _ge("3.14.3", (3, 14, 3)) and _ge("3.14.10", (3, 14, 3))
     assert not _ge("3.14.1", (3, 14, 3)), "comparator accepts the vulnerable aiohttp 3.14.1"
     assert not _ge("46.0.7", (50, 0, 0)), "comparator accepts the vulnerable cryptography 46.0.7"
+    assert _ge("1.100.4", (1, 100, 4)) and _ge("1.103.1", (1, 100, 4))
+    assert not _ge("1.90.1", (1, 100, 4)), "comparator accepts the vulnerable litellm 1.90.1"
+    assert not _ge("1.95.0", (1, 100, 4)), "comparator accepts litellm 1.95.0 (still has the priv-esc HIGH)"
+    assert _ge("4.2.4", (4, 2, 1)) and not _ge("3.32.7", (4, 2, 1)), "filelock floor comparator wrong"
 
 
 #: A `uses:` ref is SHA-pinned iff its `@`-ref is exactly 40 lowercase hex (a full commit SHA).
