@@ -226,7 +226,10 @@ def test_missing_auth_env_rejected(tmp_path: Path) -> None:
 
 def test_inline_secret_key_rejected(tmp_path: Path) -> None:
     for secret_key in ("token", "auth", "password", "bearer", "api_key", "apiKey", "authorization",
-                       "auth_token", "authToken", "pat", "client_secret", "x_api_key"):
+                       "auth_token", "authToken", "pat", "client_secret", "x_api_key",
+                       # re-red-pen LOW: connector-specific compound credential names that previously slipped
+                       # the blocklist (gh_pat is THE GitHub-Issues credential; access_key / creds too).
+                       "gh_pat", "github_pat", "access_key", "accessKey", "creds"):
         entry = _ok_entry()
         entry[secret_key] = "sk-SECRET"
         _write(tmp_path, "alpha", [entry])

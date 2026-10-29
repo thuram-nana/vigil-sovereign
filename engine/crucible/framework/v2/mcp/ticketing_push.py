@@ -254,6 +254,12 @@ class GithubIssuesPusher:
             raise TicketingPushError(f"invalid ticketing API URL: {type(e).__name__}") from e
         if parsed.scheme not in ("http", "https") or not parsed.host:
             raise TicketingPushError("ticketing API URL must be an absolute http(s) URL with a host")
+        if parsed.userinfo:
+            # Defence-in-depth: the config layer already rejects a host carrying userinfo, but a DIRECTLY-
+            # constructed target must not compose a URL with embedded credentials — which would otherwise
+            # land in the URL and in an egress-guard refusal message. Refuse WITHOUT echoing the secret.
+            raise TicketingPushError(
+                "ticketing API URL must not contain userinfo/credentials (raw value omitted)")
         return str(parsed)
 
     @staticmethod
@@ -452,7 +458,15 @@ def push_finding(
     # Enforce this UNCONDITIONALLY — even when the CALLER supplies its own allowlist (which would otherwise
     # skip the build_engagement_allowlist drop), so a conflicting host ALWAYS fails CLOSED, not just on the
     # default path.
-    if collector_scope_conflicts([target.host], _target_scope(slug)):
+    scope = _target_scope(slug)
+    if scope is None:
+        # Scope UNKNOWN (charter present but unreadable / parse raised) ⇒ we cannot PROVE the ticketing host
+        # is disjoint from the attack scope. Fail CLOSED (mirrors ethics.require_in_scope), never fail open:
+        # we will not disclose a finding into a host that might be the one under attack.
+        raise TicketingPushError(
+            f"refusing to push finding for {target_id!r}: could not determine the engagement attack scope "
+            f"to prove the ticketing host is disjoint from it (fail-closed)")
+    if collector_scope_conflicts([target.host], scope):
         raise TicketingPushError(
             f"ticketing host for {target_id!r} overlaps the engagement attack scope — refusing "
             f"(a ticketing sink must be disjoint from the target you are attacking)")
@@ -476,11 +490,28 @@ def push_finding(
     return receipt
 
 
-def _target_scope(slug: str) -> tuple[str, ...]:
-    """The engagement's attack-target hosts (for the disjointness check), read defensively — an absent
-    charter yields ``()`` (the check then never conflicts), never a crash."""
+def _target_scope(slug: str) -> "tuple[str, ...] | None":
+    """The engagement's attack-target hosts, for the disjointness check. Three-valued, so the caller can
+    tell "no attack scope" from "scope unknown" and fail CLOSED on the latter:
+
+      * a host tuple           — a clean read of the charter scope table;
+      * ``()``                 — there is legitimately NO attack scope (no charter at all, or a charter with
+                                 no scope table): nothing is under attack, so a ticketing host cannot overlap
+                                 it — benign, the push may proceed;
+      * ``None``               — the scope could NOT be determined (the charter is present but unreadable, or
+                                 parsing raised, or ethics is unimportable). The caller MUST fail closed: we
+                                 will not disclose a finding into a host that MIGHT be the one under attack.
+
+    (The prior version swallowed every exception to ``()``, which fail-OPENED the disjointness control when
+    the charter could not be read — a finding could be filed into the very system under attack.)"""
     try:
         from ..common import ethics
-        return tuple(ethics.parse_scope(slug))
+        from ..common.errors import CharterMissing
     except Exception:
-        return ()
+        return None
+    try:
+        return tuple(ethics.parse_scope(slug))
+    except CharterMissing:
+        return ()        # no charter ⇒ no attack scope ⇒ a ticketing host cannot overlap it (benign)
+    except Exception:
+        return None      # charter present but unreadable / parse raised ⇒ scope UNKNOWN ⇒ fail closed

@@ -526,3 +526,85 @@ def test_push_finding_allowlist_none_refuses_a_conflicting_host(
     monkeypatch.setattr(TP, "_target_scope", lambda slug: (_HOST,))
     with pytest.raises(TP.TicketingPushError, match="attack scope"):
         TP.push_finding("alpha", "gh", _finding(), root=tmp_path, audit_root=False)   # no explicit allowlist
+
+
+# ----------------------------------------------------------- re-red-pen: disjointness fail-OPEN on unknown scope
+
+
+def test_target_scope_is_three_valued_benign_empty_vs_unknown() -> None:
+    """re-red-pen MED: _target_scope distinguishes 'no attack scope' (benign ()) from 'scope unknown'
+    (None → caller fails closed). A missing charter is benign; an unreadable/parse-raising charter is
+    UNKNOWN and must NOT silently become an empty scope (which would fail-open the disjointness control)."""
+    from framework.v2.common import ethics
+    from framework.v2.common.errors import CharterMissing
+    import pytest as _pytest
+
+    def _raise(exc):
+        def _f(_slug):
+            raise exc
+        return _f
+
+    # clean read → the host tuple
+    with _pytest.MonkeyPatch.context() as mp:
+        mp.setattr(ethics, "parse_scope", lambda slug: ["victim.example"])
+        assert TP._target_scope("alpha") == ("victim.example",)
+    # no charter at all → benign empty (a ticketing host cannot overlap a non-existent scope)
+    with _pytest.MonkeyPatch.context() as mp:
+        mp.setattr(ethics, "parse_scope", _raise(CharterMissing("no charter")))
+        assert TP._target_scope("alpha") == ()
+    # charter present but unreadable / parse raised → UNKNOWN → None (caller must fail closed)
+    with _pytest.MonkeyPatch.context() as mp:
+        mp.setattr(ethics, "parse_scope", _raise(OSError("permission denied")))
+        assert TP._target_scope("alpha") is None
+    with _pytest.MonkeyPatch.context() as mp:
+        mp.setattr(ethics, "parse_scope", _raise(ValueError("malformed")))
+        assert TP._target_scope("alpha") is None
+
+
+def test_push_finding_fails_closed_when_attack_scope_is_unknown(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """re-red-pen MED: when the attack scope cannot be determined (_target_scope → None), push_finding must
+    REFUSE (fail-closed) rather than disclose a finding into a host that might be the one under attack. The
+    pusher must never be constructed."""
+    monkeypatch.setenv("CRUCIBLE_TENANT", "acme")
+    monkeypatch.setenv("GH_TOKEN", "t")
+    _write_cfg(tmp_path, "alpha", _OK_CFG)
+    monkeypatch.setattr(TP, "_target_scope", lambda slug: None)   # scope UNKNOWN
+
+    def factory(target, allowlist, token, slug):
+        raise AssertionError("the pusher must not be constructed when the attack scope is unknown")
+
+    with pytest.raises(TP.TicketingPushError, match="could not determine the engagement attack scope"):
+        TP.push_finding("alpha", "gh", _finding(), root=tmp_path, allowlist=_allow(),
+                        pusher_factory=factory, audit_root=False)
+
+
+def test_push_finding_proceeds_when_there_is_no_attack_scope(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """re-red-pen MED (the benign side): an empty attack scope () — no charter / no scope table — does NOT
+    block the push (nothing is under attack, so the ticketing host cannot overlap it)."""
+    monkeypatch.setenv("CRUCIBLE_TENANT", "acme")
+    monkeypatch.setenv("GH_TOKEN", "t")
+    _write_cfg(tmp_path, "alpha", _OK_CFG)
+    monkeypatch.setattr(TP, "_target_scope", lambda slug: ())     # benign: no attack scope
+
+    def factory(target, allowlist, token, slug):
+        return TP.GithubIssuesPusher(target, allowlist, token=token, slug=slug, inner=_mock(_created_resp))
+
+    receipt = TP.push_finding("alpha", "gh", _finding(), root=tmp_path, allowlist=_allow(),
+                              pusher_factory=factory, audit_root=False)
+    assert receipt.ok and receipt.issue_number == 42
+
+
+def test_validate_url_rejects_userinfo_without_echoing_the_secret() -> None:
+    """re-red-pen LOW (defence-in-depth): a directly-constructed target whose host carries userinfo must be
+    refused at construction — the composed URL must never embed credentials — and the refusal must NOT echo
+    the secret (which would otherwise surface in the URL and in an egress-guard refusal message)."""
+    with pytest.raises(TP.TicketingPushError) as ei:
+        TP.GithubIssuesPusher(_target(host="ghp_SECRETVALUE@evil.example"),
+                              _allow("evil.example"), token="t")
+    msg = str(ei.value)
+    assert "userinfo" in msg or "credentials" in msg
+    assert "SECRETVALUE" not in msg                              # the secret is never echoed

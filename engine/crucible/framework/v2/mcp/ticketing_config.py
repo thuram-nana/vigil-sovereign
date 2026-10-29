@@ -104,11 +104,18 @@ _INLINE_SECRET_KEYS: frozenset[str] = frozenset({
     "credential", "credentials", "accesstoken", "privatekey", "pat", "jwt", "cookie",
     "sessiontoken", "key", "authorization",
 })
-# Secret-bearing SUBSTRINGS: a key whose normalised form CONTAINS one of these is ALSO refused (mirrors
-# ``evidence_config._SECRET_STEMS``). Chosen so ``auth_env`` → "authenv" contains none of them.
+# Secret-bearing SUBSTRINGS: a key whose normalised form CONTAINS one of these is ALSO refused (base set
+# mirrors ``evidence_config._SECRET_STEMS``). Chosen so ``auth_env`` → "authenv" contains none of them, and
+# none collide with this entry's legit keys (id/kind/host/repo/auth_env). The last three are a deliberate,
+# CONNECTOR-SPECIFIC hardening over evidence_config (no mirror-drift test pins these): ``pat`` catches a
+# GitHub Personal Access Token inlined as ``gh_pat`` / ``github_pat`` (the native credential for this
+# github_issues connector); ``accesskey`` catches ``access_key`` / ``accessKey``; ``cred`` catches
+# ``creds``. An inlined credential's VALUE is never read/stored/egressed regardless (only ``auth_env`` is),
+# so this is a best-effort operator lint — it just refuses to silently accept a secret-at-rest in the file.
 _SECRET_STEMS: frozenset[str] = frozenset({
     "token", "secret", "password", "passwd", "passphrase", "apikey", "credential", "bearer",
     "privatekey", "sessiontoken", "accesstoken", "jwt", "cookie",
+    "pat", "accesskey", "cred",
 })
 
 # Bounds on the (operator-authored, but still defensively bounded) config.
