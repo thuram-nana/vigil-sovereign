@@ -104,6 +104,7 @@ named so the briefing is not silent about half the system.
 | `intruder` | The request-fuzzing / payload-iteration surface (a Burp-Intruder analogue). |
 | `kernel` | The low-level engine backends and paths (`crucible kernel`). |
 | `knowledge` | The knowledge-base content and assets the engine reads. |
+| `knowledge_base` | The per-org knowledge-base corpus — a read/index/query view over on-disk engagement artifacts (`<slug>.report.json`, finding docs, reports), scoped to the active tenant and keyed `(tenant_id, slug)`. |
 | `knowledge_engine` | The knowledge / grants engine (`crucible knowledge`). |
 | `mcp` | The MCP server exposing engine tools over the Model Context Protocol (`crucible mcp`). |
 | `memory` | The semantic memory store — embeddings + recall (`crucible memory`). |
