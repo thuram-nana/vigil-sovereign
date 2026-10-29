@@ -1,0 +1,351 @@
+"""
+Tests for the per-ORG knowledge-base corpus (enterprise KNOWLEDGE-BASE wave, slice 1).
+
+Proves the load-bearing invariants:
+
+  * (tenant_id, slug) SCOPING. Two fake tenant roots (one CRUCIBLE_ROOT per org — the genuine
+    isolation boundary); a process scoped to org A sees ONLY A's slugs' findings and never B's, and
+    every record is keyed (A, slug). An explicit cross-org request fails CLOSED.
+  * EMPTY / MISSING corpus. No engagements (or no targets/ dir at all) → an empty corpus, never a crash.
+  * AGGREGATION correctness over seeded <slug>.report.json (oracle-confirmed active + passive leads),
+    authored finding files, and report docs — counts, provenance, severity histogram, filters.
+
+Scoping is driven by monkeypatching ``paths.targets_root`` (so target_dir / phase_report_path /
+charter_path all follow) + ``CRUCIBLE_TENANT``, mirroring the D2 sharding tests' convention.
+
+Run (from /home/kali/vigil-wt-kb):
+  PYTHONPATH="packages/core/vigil_core:gateway:engine/crucible:integration:." \
+    python -m pytest engine/crucible/framework/v2/knowledge_base/tests/test_corpus.py -q
+"""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from typing import Optional
+
+import pytest
+
+from framework.v2.common import paths
+from framework.v2.common.errors import CrucibleRootNotFound
+from framework.v2.knowledge_base import KnowledgeBaseScopeError
+from framework.v2.knowledge_base import aggregate as kb
+
+
+# ---------------------------------------------------------------------------
+# seeding helpers
+# ---------------------------------------------------------------------------
+
+
+def _scope_to(monkeypatch, targets_dir: Path, tenant: Optional[str]) -> None:
+    """Point the framework's targets_root() at ``targets_dir`` and set (or clear) the active tenant."""
+    targets_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(paths, "targets_root", lambda: targets_dir)
+    if tenant is None:
+        monkeypatch.delenv("CRUCIBLE_TENANT", raising=False)
+    else:
+        monkeypatch.setenv("CRUCIBLE_TENANT", tenant)
+
+
+def _mk_engagement(targets_dir: Path, slug: str, *, charter: bool = True) -> Path:
+    d = targets_dir / slug
+    (d / "findings").mkdir(parents=True, exist_ok=True)
+    (d / "reports").mkdir(parents=True, exist_ok=True)
+    if charter:
+        (d / "charter.md").write_text("# charter\n", encoding="utf-8")
+    return d
+
+
+def _write_report_json(targets_dir: Path, slug: str, *, active=(), passive=(),
+                       target: str = "https://example.test") -> None:
+    (targets_dir / slug).mkdir(parents=True, exist_ok=True)
+    payload = {"target": target, "active_findings": list(active), "passive_findings": list(passive)}
+    (targets_dir / slug / f"{slug}.report.json").write_text(json.dumps(payload), encoding="utf-8")
+
+
+def _active(check_id: str, bug_class: str, *, title: str = "", severity: str = "",
+            confirmed_by: str = "differential_response", endpoint: str = "/x",
+            confidence: float = 0.9) -> dict:
+    """An AuditFinding-shaped dict (oracle-confirmed active finding)."""
+    return {"check_id": check_id, "bug_class": bug_class, "insertion_point": "query:q",
+            "param": "q", "endpoint": endpoint, "confidence": confidence,
+            "confirmed_by": confirmed_by, "rationale": "r", "title": title, "severity": severity}
+
+
+def _passive(check_id: str, title: str, severity: str = "Low") -> dict:
+    return {"check_id": check_id, "title": title, "severity": severity,
+            "confidence": "Firm", "url": "https://example.test/", "evidence": "e"}
+
+
+def _write_finding_file(engagement_dir: Path, name: str, *, title: str, severity: str,
+                        status: str = "Open", bug_class: Optional[str] = None) -> None:
+    body = [f"# Finding 001 — `{name}`", "", "## Metadata", "",
+            f"- **Title:** {title}",
+            f"- **Severity:** `{severity}`",
+            f"- **Status:** `{status}`"]
+    if bug_class:
+        body.append(f"- **Bug class:** `{bug_class}`")
+    (engagement_dir / "findings" / name).write_text("\n".join(body) + "\n", encoding="utf-8")
+
+
+def _write_report_doc(engagement_dir: Path, name: str, heading: str) -> None:
+    (engagement_dir / "reports" / name).write_text(f"# {heading}\n\nbody\n", encoding="utf-8")
+
+
+# ---------------------------------------------------------------------------
+# (tenant_id, slug) scoping + cross-tenant isolation
+# ---------------------------------------------------------------------------
+
+
+def test_cross_tenant_isolation_two_separate_roots(tmp_path, monkeypatch) -> None:
+    """One CRUCIBLE_ROOT per org (the genuine isolation boundary): org A's process sees ONLY A's slug
+    and findings; org B's only B's. Neither can read the other's secret-titled finding."""
+    root_a = tmp_path / "orgA" / "targets"
+    root_b = tmp_path / "orgB" / "targets"
+    _mk_engagement(root_a, "alpha")
+    _write_report_json(root_a, "alpha",
+                       active=[_active("sqli-1", "sqli", title="alpha-secret-finding", severity="High")])
+    _mk_engagement(root_b, "beta")
+    _write_report_json(root_b, "beta",
+                       active=[_active("xss-1", "xss", title="beta-secret-finding", severity="Medium")])
+
+    _scope_to(monkeypatch, root_a, "orgA")
+    ca = kb.corpus()
+    assert ca.slugs() == ["alpha"]
+    titles_a = {f.title for f in ca.findings}
+    assert "alpha-secret-finding" in titles_a
+    assert "beta-secret-finding" not in titles_a                 # cannot read org B
+    assert all(f.slug == "alpha" and f.tenant_id == "orgA" for f in ca.findings)
+    assert all(e.key == ("orgA", "alpha") for e in ca.engagements)
+
+    _scope_to(monkeypatch, root_b, "orgB")
+    cb = kb.corpus()
+    assert cb.slugs() == ["beta"]
+    titles_b = {f.title for f in cb.findings}
+    assert "beta-secret-finding" in titles_b
+    assert "alpha-secret-finding" not in titles_b                # cannot read org A
+    assert all(f.tenant_id == "orgB" for f in cb.findings)
+
+
+def test_everything_keyed_by_tenant_and_slug(tmp_path, monkeypatch) -> None:
+    t = tmp_path / "orgA" / "targets"
+    e = _mk_engagement(t, "shop")
+    _write_report_json(t, "shop", active=[_active("c1", "idor", title="t", severity="High")],
+                       passive=[_passive("p1", "missing header")])
+    _write_finding_file(e, "001-logic.md", title="Logic flaw", severity="Critical")
+    _write_report_doc(e, "technical.md", "Technical report")
+    _scope_to(monkeypatch, t, "orgA")
+
+    c = kb.corpus()
+    assert c.tenant_id == "orgA" and c.scope == "orgA"
+    assert all(x.key == ("orgA", "shop") for x in c.engagements)
+    assert all(f.key == ("orgA", "shop") for f in c.findings)
+    assert all(r.key == ("orgA", "shop") for r in c.reports)
+
+
+def test_cross_tenant_request_refused_at_api(tmp_path, monkeypatch) -> None:
+    """Naming another org explicitly fails CLOSED on every entrypoint; the active org (or None) is fine."""
+    t = tmp_path / "orgA" / "targets"
+    _mk_engagement(t, "alpha")
+    _scope_to(monkeypatch, t, "orgA")
+
+    assert kb.corpus("orgA").tenant_id == "orgA"
+    assert kb.corpus(None).tenant_id == "orgA"
+    assert kb.corpus().tenant_id == "orgA"
+
+    for call in (lambda: kb.corpus("orgB"),
+                 lambda: kb.list_engagements("orgB"),
+                 lambda: kb.query("orgB"),
+                 lambda: kb.show("alpha", "orgB")):
+        with pytest.raises(KnowledgeBaseScopeError):
+            call()
+
+
+def test_global_scope_when_unsharded(tmp_path, monkeypatch) -> None:
+    """Unsharded (CRUCIBLE_TENANT unset) == the default/global scope: tenant_id is None, label (global);
+    a global process cannot be asked to serve a specific org."""
+    t = tmp_path / "solo" / "targets"
+    _mk_engagement(t, "only")
+    _scope_to(monkeypatch, t, None)
+
+    assert kb.active_org() is None
+    c = kb.corpus()
+    assert c.tenant_id is None and c.scope == "(global)"
+    assert all(e.key == (None, "only") for e in c.engagements)
+    with pytest.raises(KnowledgeBaseScopeError):
+        kb.corpus("orgA")
+
+
+def test_unsafe_tenant_fails_closed(monkeypatch) -> None:
+    """A hostile / mis-set CRUCIBLE_TENANT propagates the fail-closed validation error (never silently
+    falls back to a shared scope)."""
+    monkeypatch.setenv("CRUCIBLE_TENANT", "../evil")
+    with pytest.raises(CrucibleRootNotFound):
+        kb.active_org()
+    with pytest.raises(CrucibleRootNotFound):
+        kb.corpus()
+
+
+# ---------------------------------------------------------------------------
+# empty / missing corpus (never a crash)
+# ---------------------------------------------------------------------------
+
+
+def test_empty_corpus_no_engagements(tmp_path, monkeypatch) -> None:
+    empty = tmp_path / "empty" / "targets"
+    _scope_to(monkeypatch, empty, "orgA")                        # dir exists, but holds no slugs
+    c = kb.corpus()
+    assert c.is_empty()
+    assert c.slugs() == []
+    assert kb.list_engagements() == []
+    assert kb.query() == []
+    assert c.by_severity() == {}
+    assert kb.show("nope")["engagement"] is None
+
+
+def test_missing_targets_dir_never_crashes(tmp_path, monkeypatch) -> None:
+    missing = tmp_path / "ghost" / "targets"                     # never created
+    monkeypatch.setattr(paths, "targets_root", lambda: missing)
+    monkeypatch.setenv("CRUCIBLE_TENANT", "orgA")
+    c = kb.corpus()
+    assert c.is_empty()
+    assert kb.list_engagements() == []
+
+
+def test_scaffolding_and_hidden_dirs_excluded(tmp_path, monkeypatch) -> None:
+    t = tmp_path / "orgA" / "targets"
+    _mk_engagement(t, "real")
+    _mk_engagement(t, "_template")
+    _mk_engagement(t, "_practice")
+    (t / ".git").mkdir(parents=True, exist_ok=True)
+    _scope_to(monkeypatch, t, "orgA")
+    assert kb.corpus().slugs() == ["real"]
+
+
+# ---------------------------------------------------------------------------
+# aggregation correctness
+# ---------------------------------------------------------------------------
+
+
+def test_aggregation_over_seeded_reports_and_findings(tmp_path, monkeypatch) -> None:
+    t = tmp_path / "orgA" / "targets"
+    e = _mk_engagement(t, "shop")
+    _write_report_json(
+        t, "shop",
+        active=[_active("sqli-1", "sqli", title="SQLi in q", severity="High"),
+                _active("idor-1", "idor", title="IDOR on /acct", severity="Critical")],
+        passive=[_passive("hdr-1", "Missing CSP", severity="Low")],
+        target="https://shop.example")
+    _write_finding_file(e, "001-logic.md", title="Coupon stacking", severity="High",
+                        bug_class="business-logic")
+    _write_finding_file(e, "002-auth.md", title="Weak 2FA", severity="Medium")
+    _write_report_doc(e, "technical.md", "Technical report — shop")
+    _write_report_doc(e, "executive.md", "Executive summary")
+    _scope_to(monkeypatch, t, "orgA")
+
+    c = kb.corpus()
+
+    # engagement summary
+    assert len(c.engagements) == 1
+    eng = c.engagements[0]
+    assert eng.slug == "shop" and eng.target == "https://shop.example"
+    assert eng.has_charter and eng.has_scan_report
+    assert eng.finding_count == 4          # 2 oracle-confirmed active + 2 authored finding files
+    assert eng.lead_count == 1             # 1 passive lead
+    assert eng.report_count == 2
+
+    # provenance split
+    by_src: dict[str, int] = {}
+    for f in c.findings:
+        by_src[f.source] = by_src.get(f.source, 0) + 1
+    assert by_src == {"scan:active": 2, "finding-file": 2, "scan:passive": 1}
+    assert len(c.confirmed_findings()) == 4
+    assert len(c.leads()) == 1
+    for f in c.findings:
+        if f.source == "scan:active":
+            assert f.oracle_confirmed and f.oracle_kind == "differential_response"
+        else:
+            assert not f.oracle_confirmed
+
+    # severity histogram over confirmed findings
+    assert c.by_severity() == {"High": 2, "Critical": 1, "Medium": 1}
+
+    # reports indexed (not re-rendered)
+    assert {r.name for r in c.reports} == {"technical", "executive"}
+    tech = next(r for r in c.reports if r.name == "technical")
+    assert tech.title == "Technical report — shop" and tech.size_bytes > 0
+
+    # queries (every filter ANDs)
+    assert {f.title for f in kb.query(severity="High")} == {"SQLi in q", "Coupon stacking"}
+    assert [f.title for f in kb.query(source="scan:passive")] == ["Missing CSP"]
+    assert len(kb.query(confirmed_only=True)) == 4
+    assert len(kb.query(slug="shop")) == 5
+    assert kb.query(slug="does-not-exist") == []
+    assert {f.title for f in kb.query(bug_class="business-logic")} == {"Coupon stacking"}
+
+    # show() for one engagement
+    shown = kb.show("shop")
+    assert shown["engagement"]["slug"] == "shop"
+    assert len(shown["findings"]) == 5 and len(shown["reports"]) == 2
+
+    # to_dict is JSON-serializable and summarizes
+    blob = json.dumps(c.to_dict())
+    assert "shop" in blob
+    assert c.to_dict()["summary"]["confirmed_finding_count"] == 4
+
+
+def test_active_finding_without_severity_buckets_as_confirmed(tmp_path, monkeypatch) -> None:
+    """An oracle-confirmed active finding with no textbook severity bucket is counted as 'Confirmed'
+    (mirrors ScanReport.by_severity) — still confirmed + oracle-grounded."""
+    t = tmp_path / "orgA" / "targets"
+    _mk_engagement(t, "api")
+    _write_report_json(t, "api", active=[_active("c1", "ssrf", title="SSRF", severity="")])
+    _scope_to(monkeypatch, t, "orgA")
+    c = kb.corpus()
+    assert c.by_severity() == {"Confirmed": 1}
+    (f,) = c.findings
+    assert f.confirmed and f.oracle_confirmed and f.severity == ""
+
+
+def test_finding_file_metadata_parsing_contextual_severity(tmp_path, monkeypatch) -> None:
+    """The real OBSIDIAN finding format: a plain-text Title that itself contains inline code, and a
+    backtick-quoted Severity followed by contextual prose."""
+    t = tmp_path / "orgA" / "targets"
+    e = _mk_engagement(t, "mail")
+    (e / "findings" / "001-no-dmarc.md").write_text(
+        "# Finding 001 — `no-dmarc-sender-spoofable`\n\n"
+        "## Metadata\n\n"
+        "- **ID:** `001`\n"
+        "- **Title:** Domain publishes no DMARC, so mail from `@x.com` can be spoofed\n"
+        "- **Severity:** `Medium` *(contextual — base posture is Low)*\n"
+        "- **Status:** `Open`\n",
+        encoding="utf-8")
+    _scope_to(monkeypatch, t, "orgA")
+    (f,) = kb.corpus().findings
+    assert f.source == "finding-file"
+    assert f.title == "Domain publishes no DMARC, so mail from `@x.com` can be spoofed"
+    assert f.severity == "Medium"
+    assert f.status == "Open"
+    assert f.confirmed and not f.oracle_confirmed
+
+
+def test_malformed_report_json_degrades_gracefully(tmp_path, monkeypatch) -> None:
+    """A corrupt <slug>.report.json is skipped (0 scan findings) but the engagement is still enumerated
+    and its authored finding files are still indexed — never a crash."""
+    t = tmp_path / "orgA" / "targets"
+    e = _mk_engagement(t, "shop")
+    (t / "shop" / "shop.report.json").write_text("{ not valid json ", encoding="utf-8")
+    _write_finding_file(e, "001-x.md", title="Still indexed", severity="High")
+    _scope_to(monkeypatch, t, "orgA")
+    c = kb.corpus()
+    assert c.slugs() == ["shop"]
+    assert c.engagements[0].has_scan_report is True
+    assert [f.title for f in c.findings] == ["Still indexed"]
+    assert c.engagements[0].finding_count == 1
+
+
+def test_active_org_reflects_env(monkeypatch) -> None:
+    monkeypatch.setenv("CRUCIBLE_TENANT", "orgZ")
+    assert kb.active_org() == "orgZ"
+    monkeypatch.delenv("CRUCIBLE_TENANT", raising=False)
+    assert kb.active_org() is None
