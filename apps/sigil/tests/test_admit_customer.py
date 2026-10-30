@@ -74,3 +74,30 @@ def test_admit_customer_default_deny_on_unmapped_permission():
     # a revoked membership loses access immediately (resolved live from the fold, never cached)
     orgs.revoke_membership("acme", "cust_alice")
     assert orgs.admit_customer(username="cust_alice", org_id="acme", permission="read") is False
+
+
+def test_assignable_per_org_roles_are_real_rbac_roles():
+    # every per-org grantable role must be a real vigil_core.rbac role (drift guard); org_admin (E0) is the
+    # per-org tenant-admin, deliberately NOT a global account role, and owner is never grantable.
+    from vigil_core.rbac import PERMISSIONS
+
+    from sigil.governor.orgs import _ASSIGNABLE_ROLES
+    assert _ASSIGNABLE_ROLES <= set(PERMISSIONS)
+    assert "org_admin" in _ASSIGNABLE_ROLES and "owner" not in _ASSIGNABLE_ROLES
+
+
+def test_org_admin_membership_is_tenant_billing_members_never_testing_never_cross_org():
+    # The E0 milestone primitive: a customer granted org_admin in THEIR org manages that org's billing +
+    # members via admit_customer — but can NEVER authorize an assessment, and nothing cross-org.
+    s = SpineStore(tempfile.mktemp(suffix=".jsonl"))
+    orgs = OrgRegistry(s, owner_key=OWNER, trusted_pubkey=OP)
+    it = itertools.count(1)
+    orgs.create_org("acme", "Acme", owner="owner", issued_at=float(next(it)))
+    orgs.create_org("other", "Other", owner="owner", issued_at=float(next(it)))
+    orgs.grant_membership("acme", "cust_admin", "org_admin", issued_at=float(next(it)))  # grant_membership ACCEPTS org_admin
+    for p in ("read", "view_billing", "view_invoices", "manage_billing", "manage_members"):
+        assert orgs.admit_customer(username="cust_admin", org_id="acme", permission=p) is True
+    for p in ("offense_authority", "run_engagement", "secrets", "manage_users", "manage_org"):
+        assert orgs.admit_customer(username="cust_admin", org_id="acme", permission=p) is False
+    assert orgs.admit_customer(username="cust_admin", org_id="other", permission="view_billing") is False
+    assert orgs.admit_customer(username="cust_admin", org_id="other", permission="manage_members") is False

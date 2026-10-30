@@ -94,10 +94,14 @@ from ..spine.snapshot import SnapshotState  # noqa: E402  (hard-prune seed — t
 ORG_SIGNAL = "governor.org"
 MEMBERSHIP_SIGNAL = "governor.org_membership"
 
-# "owner" is the trust-root key-holder, never a grantable per-org bearer role (single-owner doctrine), so the
-# assignable per-org roles are exactly viewer / analyst / operator — IDENTICAL to accounts._ASSIGNABLE_ROLES,
-# derived from the SAME shared ROLES ordering so the two can never drift.
-_ASSIGNABLE_ROLES = frozenset(ROLES[:-1])   # viewer / analyst / operator — never "owner"
+# The assignable PER-ORG membership roles. "owner" is the trust-root key-holder, never grantable
+# (single-owner doctrine). The three global-chain roles below owner (viewer / analyst / operator) PLUS the
+# per-org tenant-admin role `org_admin` (Slice E0: billing + member admin for THIS org, never
+# run_engagement/offense_authority — billing-authz != testing-authz). This DELIBERATELY diverges from
+# accounts._ASSIGNABLE_ROLES (the operator plane: viewer/analyst/operator only): `org_admin` is a PER-ORG
+# role, never a global account role, so a customer tenant-admin is an org_admin membership and nothing more.
+# A lockstep test asserts every entry here is a real vigil_core.rbac role (no typo/drift).
+_ASSIGNABLE_ROLES = frozenset(ROLES[:-1]) | {"org_admin"}   # viewer / analyst / operator / org_admin — never "owner"
 
 # A username charset IDENTICAL to accounts._USERNAME_RE (1-64 chars of [A-Za-z0-9._-], alphanumeric start).
 # Replicated here (not imported) so this module stays independently importable; a lockstep test asserts the
