@@ -437,6 +437,30 @@ class Handler(BaseHTTPRequestHandler):
             if not role_can(principal.role, "manage_users"):
                 return self._deny(403, "owner only")
             return self._accounts()
+        if path == "/api/billing/overview":
+            # SaaS billing overview for ONE org (credits / wallet / subscription), tenant-scoped. Authorized via
+            # the Slice-A COMPOSED gate: the global owner/operator reads any tenant (keyholder never locked out),
+            # a per-org member reads ONLY an org they hold `view_billing` in, everyone else 403. A read-only
+            # projection — no mint path, no secret. (billing != testing: this surfaces money, never an authority.)
+            from . import billing as _billing
+            from ..governor.orgs import OrgRegistry
+            org = _billing.valid_org(self._query().get("org", [""])[0])
+            if org is None:
+                return self._deny(400, "missing/invalid org")
+            store = self.server.store()
+            if not OrgRegistry(store).admit(global_role=principal.role, username=principal.username,
+                                            org_id=org, permission="view_billing"):
+                return self._deny(403, "not authorized for this org's billing")
+            import time as _t
+            return self._json(_billing.billing_overview(store, org, now=_t.time()))
+        if path == "/api/billing/orgs":
+            # The billing-admin tenant picker — list active orgs. OWNER-tier (`manage_org`): enumerating every
+            # tenant is a global-owner action, distinct from the per-org overview above.
+            from ..governor.accounts import role_can
+            if not role_can(principal.role, "manage_org"):
+                return self._deny(403, "owner only")
+            from . import billing as _billing
+            return self._json({"orgs": _billing.org_list(self.server.store())})
         if path == "/api/ask":
             # /api/ask DISPATCHES a KERNEL subprocess → it gets the FULL action gate, not just token.
             return self._ask(self._query().get("q", [""])[0]) if self._action_ok() else self._deny(403, "denied")

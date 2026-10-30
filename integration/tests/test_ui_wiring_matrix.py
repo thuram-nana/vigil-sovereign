@@ -133,7 +133,13 @@ INTENTIONALLY_HEADLESS_VERBS = {
 # These are NOT headless: they are treated as UI-driven (post-merge). Tracked separately so the ledger
 # never mislabels an in-flight wiring as "intentionally no button".
 # ==================================================================================================
-PENDING_UI_WIRING = {}
+PENDING_UI_WIRING = {
+    # SaaS billing read API (Slice B): tenant-scoped, admit-gated, READ-ONLY. The owner billing-admin SCREEN
+    # that drives these lands in the frontend-consolidation slice — so they are UI-driven in-flight, not
+    # headless-by-design. (Tracked here rather than INTENTIONALLY_HEADLESS so the ledger does not mislabel them.)
+    (P_SOV, "/api/billing/overview"): "owner billing-admin overview — vigil-ui screen lands in the frontend slice",
+    (P_SOV, "/api/billing/orgs"): "owner billing-admin tenant picker — vigil-ui screen lands in the frontend slice",
+}
 PENDING_UI_WIRING_VERBS = {}
 
 

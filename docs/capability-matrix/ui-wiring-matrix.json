@@ -307,11 +307,11 @@
       "pending": 0,
       "ui-driven": 40
     },
-    "routes": 192,
+    "routes": 194,
     "routes_by_status": {
       "ORPHAN": 0,
       "headless": 27,
-      "pending": 0,
+      "pending": 2,
       "ui-driven": 165
     },
     "ui_calls": 159
@@ -388,6 +388,22 @@
       "plane": "sovereign",
       "reason": "",
       "status": "ui-driven"
+    },
+    {
+      "kind": "exact",
+      "method": "GET",
+      "path": "/api/billing/orgs",
+      "plane": "sovereign",
+      "reason": "owner billing-admin tenant picker \u2014 vigil-ui screen lands in the frontend slice",
+      "status": "pending"
+    },
+    {
+      "kind": "exact",
+      "method": "GET",
+      "path": "/api/billing/overview",
+      "plane": "sovereign",
+      "reason": "owner billing-admin overview \u2014 vigil-ui screen lands in the frontend slice",
+      "status": "pending"
     },
     {
       "kind": "prefix",
