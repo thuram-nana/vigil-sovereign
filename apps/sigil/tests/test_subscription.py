@@ -132,6 +132,25 @@ def test_binding_validation():
         nokeyless.subscribe("acme", "pro", 10, period_start=1.0, period_end=2.0, issued_at=_issue())
 
 
+def test_bare_down_state_for_never_subscribed_org_reads_absent():
+    # A cancel/past_due appended for an org that NEVER had an honored `active` must NOT fabricate a phantom
+    # canceled Subscription (empty plan, allotment 0) — `subscription()` promises None for a never-subscribed
+    # tenant, and the billing roster must not list it. (A plan canceled AFTER subscribing is still retained.)
+    s = _store()
+    r = _reg(s)
+    r.cancel("ghost")                                   # bare safe-direction record, no prior subscribe
+    assert r.subscription("ghost") is None
+    assert "ghost" not in {x.org_id for x in r.subscriptions()}
+    r.mark_past_due("spectre")
+    assert r.subscription("spectre") is None
+    # contrast: a genuine subscribe-then-cancel retains the plan row and is still readable (dunning view)
+    r.subscribe("real", "pro", 6000, period_start=1.0, period_end=2.0, issued_at=_issue())
+    r.cancel("real")
+    sub = r.subscription("real")
+    assert sub is not None and sub.status == STATUS_CANCELED and sub.plan_id == "pro"
+    assert {x.org_id for x in r.subscriptions()} == {"real"}
+
+
 def test_tenants_isolated():
     s = _store()
     r = _reg(s)

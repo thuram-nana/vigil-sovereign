@@ -122,6 +122,30 @@ def test_high_water_survives_the_prune_no_replay_resurrection(monkeypatch):
     assert r2b.subscription("acme").status == STATUS_ACTIVE, "dropping the high-water ⇒ the replayed active resurrects"
 
 
+# ---- (b2) a subscribed-THEN-canceled plan whose grant is pruned STILL reads (row carried, not vanished) --
+def test_canceled_after_subscribe_survives_prune_not_dropped_as_phantom(monkeypatch):
+    # Guards the phantom-filter fix against a false drop: `_fold` now omits a tenant with ONLY a bare
+    # down-state (never subscribed), but a plan canceled AFTER a real subscribe keeps its `row`, which the
+    # seed carries across a hard prune — so it must still read `canceled` with its retained plan, not None.
+    store = _store()
+    r = _reg(store)
+    r.subscribe("acme", "pro", 6000, period_start=1.0, period_end=1e18, issued_at=5.0)   # seq 0 (sets row)
+    r.cancel("acme")                                                                       # seq 1 (down)
+    k = store.append(kind="event", source="governor", actor="WARDEN", payload={"signal": "marker"})  # seq 2
+    prefix = [rec for rec in store.iter_records() if rec.seq < k]
+    snap = build(prefix, trusted_pubkey=OWNER_PUB, base_seq=k, snapshot_seq=k - 1)
+    assert snap.subscription_state_map().get("acme") == STATUS_CANCELED
+    assert any(row[0] == "acme" and row[1] == "pro" for row in snap.subscription_row)   # row carried in seed
+
+    pruned = PrunedView(store, k)
+    monkeypatch.setattr(SnapshotState, "load", classmethod(lambda cls, s: snap))
+    r2 = SubscriptionRegistry(pruned, owner_key=OWNER, trusted_pubkey=OWNER_PUB)
+    sub = r2.subscription("acme")
+    assert sub is not None and sub.status == STATUS_CANCELED and sub.plan_id == "pro", \
+        "a canceled-after-subscribe plan must survive the prune via the carried row (not be dropped as a phantom)"
+    assert r2.active_subscription("acme") is None
+
+
 # ---- (c) empty-load == genesis scan, proven by split == full == known-correct ------------------------
 def _populate(store):
     r = _reg(store)

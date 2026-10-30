@@ -206,7 +206,14 @@ class SubscriptionRegistry:
                             float(as_issued_at(p.get("period_end"))), _as_allotment(p.get("allotment"))]
         out: dict[Any, Subscription] = {}
         for oid, stt in status.items():
-            r = row.get(oid, ["", 0.0, 0.0, 0])
+            r = row.get(oid)
+            if r is None:
+                # A tenant with ONLY a bare safe-direction record (a cancel/mark_past_due appended for an
+                # org_id that never had an honored `active`) never genuinely subscribed — treat it as ABSENT,
+                # honoring `subscription()`'s contract ("None if the tenant never subscribed") and matching
+                # orgs/accounts (which drop non-active reads). `row` is set ONLY by the active branch, so a
+                # plan canceled/past_due AFTER subscribing keeps its row and is still returned (dunning view).
+                continue
             out[oid] = Subscription(org_id=str(oid), plan_id=str(r[0]), period_start=float(r[1]),
                                     period_end=float(r[2]), allotment=int(r[3]), status=str(stt))
         return out
@@ -219,8 +226,15 @@ class SubscriptionRegistry:
         return self._fold().get(org_id)
 
     def active_subscription(self, org_id: str, now: Optional[float] = None) -> Optional[Subscription]:
-        """The Subscription for `org_id` only when it is currently `active` (and the period has not elapsed if
-        `now` is given); otherwise None — the primitive a later gate asks 'is this tenant on a live plan?'."""
+        """The Subscription for `org_id` only when it is currently `active` — the primitive a later gate asks
+        'is this tenant on a live plan?'. None if not active (or, when `now` is given, if the period elapsed).
+
+        FAIL-OPEN-BY-OMISSION WARNING: the billing-period check runs ONLY when `now` is supplied; with the
+        default `now=None` a lapsed-but-not-yet-dunned plan still reads active (status-only liveness). The
+        clock-free sovereign fold deliberately cannot source `now` itself (a wall-clock default would inject
+        nondeterminism into a state-of-record read). So the Slice-6 enforcement gate — the only money-path
+        caller — MUST pass the request `now`; a gate that omits it would grant a lapsed tenant access. Callers
+        wanting a pure status probe (not period liveness) should read `subscription(org).status` explicitly."""
         s = self.subscription(org_id)
         return s if (s is not None and s.is_active(now)) else None
 
