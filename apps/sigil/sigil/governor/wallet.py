@@ -184,6 +184,14 @@ class WalletRegistry:
         snap = SnapshotState.load(self.store)
         resolver = _kh.key_resolver(self.store, current=self.trusted_pubkey)
         if self.trusted_pubkey != snap.trusted_pubkey:
+            # Anchor mismatch (rotated key / empty identity) ⇒ bypass the snapshot and full-scan from genesis,
+            # mirroring accounts._fold. DEFERRED (prune-integration slice): unlike the pubkey-DEPENDENT folds,
+            # the wallet seed is ADDITIVE and was already verified under the key valid at each seq, so a future
+            # prune+rotation path should CARRY this seed (accept a snapshot whose trusted_pubkey is any key in
+            # the succession history) rather than bypass to a rescan — else a pruned tenant's balance would
+            # transiently under-read until the next prune re-commits under the new key. Unreachable today:
+            # SnapshotState.load fails closed on any real prune (the Slice-D/E cutover is unwired), so this
+            # bypass is only taken under the empty (no-prune) snapshot, where genesis-scan == the correct fold.
             granted: dict[Any, int] = {}
             debited: dict[Any, int] = {}
             seen: set = set()
@@ -207,7 +215,12 @@ class WalletRegistry:
             core = _GRANT_CORE if sig == CREDIT_GRANT_SIGNAL else _DEBIT_CORE
             if not verify_signed(p, core, resolver.at(r.seq)):
                 continue                                  # fail-closed: unsigned/forged/wrong-epoch record
-            key = (oid, eid)
+            # Idempotency key is namespaced by SIGNAL (direction), not just (org, entry_id): a grant and a
+            # debit are distinct events even if a caller reuses an entry_id across directions, so they must
+            # occupy DISJOINT dedup spaces — else the second to fold would be silently dropped (free credits,
+            # or lost paid credits). Per-direction replay protection is unchanged (a replayed grant is still an
+            # identical (grant, org, entry_id)).
+            key = (sig, oid, eid)
             if key in seen:
                 continue                                  # idempotent: this entry already counted (replay)
             seen.add(key)

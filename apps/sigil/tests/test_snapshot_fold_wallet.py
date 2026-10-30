@@ -28,7 +28,7 @@ import tempfile
 import pytest
 
 from sigil.governor.authn import signed_payload
-from sigil.governor.wallet import CREDIT_GRANT_SIGNAL, WalletRegistry
+from sigil.governor.wallet import CREDIT_DEBIT_SIGNAL, CREDIT_GRANT_SIGNAL, WalletRegistry
 from sigil.reuse import generate_keypair
 from sigil.spine import prune
 from sigil.spine.manifest import read_manifest
@@ -109,7 +109,7 @@ def test_seen_set_survives_the_prune_no_replay_recredit(monkeypatch):
     prefix = [r for r in store.iter_records() if r.seq < k]
     snap = build(prefix, trusted_pubkey=OWNER_PUB, base_seq=k, snapshot_seq=k - 1)
     assert snap.wallet_granted_map().get("acme") == 100
-    assert ("acme", "g1") in snap.wallet_seen_set()          # the idempotency key is carried
+    assert (CREDIT_GRANT_SIGNAL, "acme", "g1") in snap.wallet_seen_set()   # the idempotency key is carried
 
     # ATTACK: replay the captured grant AFTER the prune boundary (into the live window).
     store.append(kind="event", source="governor", actor="WARDEN", payload=captured)   # seq 2 (live)
@@ -153,6 +153,31 @@ _EXPECTED = {"seeded": 100, "mixed": 60, "live": 190}      # available per tenan
 
 def _avail_map(reg):
     return {b.org_id: b.available for b in reg.balances()}
+
+
+def test_two_prune_fold_of_fold_carries_wallet():
+    """build(seed=prior) across TWO prunes must carry the balance + seen-set forward (fold associativity) ==
+    a single scan of the whole prefix. Mutation-killing: dropping the seed-carry in build() loses acme's
+    below-first-prune grant/debit here — a gap the single-prune survival tests (seed=None) don't exercise."""
+    store = _store()
+    w = _reg(store)
+    w.grant("acme", 100, "trial", issued_at=_iss(), entry_id="g1")              # seq 0
+    w.debit("acme", 30, engagement_id="e", issued_at=_iss(), entry_id="d1")     # seq 1
+    k1 = store.append(kind="event", source="governor", actor="WARDEN", payload={"signal": "m1"})  # seq 2
+    w.grant("acme", 40, "topup", issued_at=_iss(), entry_id="g2")               # seq 3
+    k2 = store.append(kind="event", source="governor", actor="WARDEN", payload={"signal": "m2"})  # seq 4
+
+    recs = list(store.iter_records())
+    snap1 = build([r for r in recs if r.seq < k1], trusted_pubkey=OWNER_PUB, base_seq=k1, snapshot_seq=k1 - 1)
+    snap2 = build([r for r in recs if k1 <= r.seq < k2], trusted_pubkey=OWNER_PUB,
+                  base_seq=k2, snapshot_seq=k2 - 1, seed=snap1)                 # fold-of-fold
+    full = build([r for r in recs if r.seq < k2], trusted_pubkey=OWNER_PUB, base_seq=k2, snapshot_seq=k2 - 1)
+
+    assert snap2.wallet_granted_map() == full.wallet_granted_map() == {"acme": 140}
+    assert snap2.wallet_debited_map() == full.wallet_debited_map() == {"acme": 30}
+    assert snap2.wallet_seen_set() == full.wallet_seen_set()
+    assert (CREDIT_GRANT_SIGNAL, "acme", "g1") in snap2.wallet_seen_set()       # carried across prune #2
+    assert (CREDIT_DEBIT_SIGNAL, "acme", "d1") in snap2.wallet_seen_set()
 
 
 def test_wallet_empty_load_matches_known_correct():

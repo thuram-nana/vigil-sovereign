@@ -134,7 +134,8 @@ class SnapshotState(BaseModel):
     #                                   LIFETIME running total, so (unlike the per-UTC-day budget, which keeps
     #                                   NO sub-state) it MUST cross a prune or the first prune zeroes it.
     wallet_debited: list = []         # [[org_id, debited_total], ...] — Σ honored SaaS credit DEBITS per tenant.
-    wallet_seen: list = []            # [[org_id, entry_id], ...] — consumed wallet idempotency keys, carried
+    wallet_seen: list = []            # [[signal, org_id, entry_id], ...] — consumed wallet idempotency keys,
+    #                                   NAMESPACED BY SIGNAL (grant vs debit are disjoint dedup spaces), carried
     #                                   across a prune so a pruned grant/debit cannot be replayed to re-credit
     #                                   or re-charge (set-union bearer, like consumed_arm_nonces).
     consumed_arm_nonces: list = []    # [[device_pubkey, nonce], ...]  (nonce int OR str, verbatim)
@@ -186,7 +187,7 @@ class SnapshotState(BaseModel):
         return {row[0]: row[1] for row in self.wallet_debited}
 
     def wallet_seen_set(self) -> set:
-        return {(row[0], row[1]) for row in self.wallet_seen}
+        return {(row[0], row[1], row[2]) for row in self.wallet_seen}   # (signal, org_id, entry_id)
     #   `WalletRegistry._fold` seeds (granted, debited, seen) from these; balance = granted - debited, and the
     #   seen-set is the idempotency/anti-replay guard that MUST survive a prune (mirrors accounts._fold).
 
@@ -527,7 +528,7 @@ def build(records: Iterable[SpineRecord], *, trusted_pubkey: Optional[str],
             if isinstance(woid, str) and woid and isinstance(weid, str) and weid:
                 wcore = _WGRANT_CORE if sig == _WGRANT_SIGNAL else _WDEBIT_CORE
                 if verify_signed(p, wcore, vpk):
-                    wkey = (woid, weid)
+                    wkey = (sig, woid, weid)              # namespaced by signal — mirror WalletRegistry._fold
                     if wkey not in w_seen:
                         w_seen.add(wkey)
                         wc = _w_as_credits(p.get("credits"))
@@ -588,7 +589,7 @@ def build(records: Iterable[SpineRecord], *, trusted_pubkey: Optional[str],
         membership_row=[[k[0], k[1], r] for k, r in mem_row.items()],
         wallet_granted=[[o, c] for o, c in w_granted.items()],
         wallet_debited=[[o, c] for o, c in w_debited.items()],
-        wallet_seen=[[o, e] for (o, e) in w_seen],
+        wallet_seen=[[sg, o, e] for (sg, o, e) in w_seen],
         consumed_arm_nonces=[[d, n] for (d, n) in arm],
         device_approval_dedup=[[pk, sg, seq] for (pk, sg), seq in dedup.items()],
         warden_best={k: [c, h, s] for k, (c, h, s) in warden.items()},

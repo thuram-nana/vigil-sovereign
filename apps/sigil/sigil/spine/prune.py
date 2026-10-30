@@ -362,7 +362,7 @@ def stranded_active_wallets(store, archived: list[Segment], K: int) -> list[str]
         core = _GRANT_CORE if sig == CREDIT_GRANT_SIGNAL else _DEBIT_CORE
         if not verify_signed(p, core, resolver.at(r.seq)):
             continue
-        key = (oid, eid)
+        key = (sig, oid, eid)                 # namespaced by signal — mirror WalletRegistry._fold / build()
         if key in seen:
             continue
         seen.add(key)
@@ -380,7 +380,7 @@ def stranded_active_wallets(store, archived: list[Segment], K: int) -> list[str]
     for o in active:
         if sg.get(o, 0) != granted.get(o, 0) or sd.get(o, 0) != debited.get(o, 0):
             stranded.add(str(o))          # a balance the seed fails to carry exactly
-    for (o, _e) in (seen - ss):
+    for (_sig, o, _e) in (seen - ss):
         stranded.add(str(o))              # a consumed entry_id the seed drops (anti-replay durability)
     return sorted(stranded)
 
