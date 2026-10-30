@@ -231,3 +231,15 @@ def test_referential_floor_detects_a_seed_that_omits_an_active_customer(tmp_path
     with pytest.raises(prune.PruneUnsafe) as e:
         prune.check_prune_safe(s, 5)
     assert "strand" in str(e.value).lower() and "customer" in str(e.value).lower()
+
+
+# ---- snapshot schema v2: backward-compat with a pre-E1 (v1) snapshot ---------------------------------
+def test_v1_snapshot_without_customer_rows_still_loads():
+    # Slice E1 bumped the snapshot schema 1->2 (added the governor.customer sub-state). A pre-E1 v1 snapshot
+    # carries NO customer_* keys; the v2 build must still read it (1 <= _MAX), defaulting the customer
+    # sub-state to empty (additive-with-defaults) — never refusing a legitimate older snapshot.
+    st = SnapshotState.from_folded({"schema_version": 1})
+    assert st.schema_version == 1
+    assert st.customer_state_map() == {} and st.customer_issued_map() == {} and st.customer_cred == []
+    # and a snapshot THIS build emits is stamped v2 (it contains the customer keys)
+    assert SnapshotState.empty().schema_version == 2

@@ -51,7 +51,10 @@ from ..reuse import SignedChainHead
 from .models import SpineRecord
 from .schema_guard import refuse_newer
 
-_MAX_SNAPSHOT_SCHEMA = 1   # refuse-newer gate (W5-3): a snapshot schema above this is "upgrade sigil"
+_MAX_SNAPSHOT_SCHEMA = 2   # refuse-newer gate (W5-3): a snapshot schema above this is "upgrade sigil".
+#                            v2 (Slice E1) ADDED the governor.customer sub-state (customer_state/issued/cred).
+#                            A pre-E1 build (max v1) refuses a v2 snapshot cleanly; this build still reads a v1
+#                            snapshot (the customer_* fields default to empty — additive-with-defaults, C1/C3).
 
 
 class SnapshotState(BaseModel):
@@ -59,7 +62,9 @@ class SnapshotState(BaseModel):
     round-trip verbatim); runtime accessors reconstruct the sets / tuple-keyed dicts. Non-secret."""
     model_config = ConfigDict(extra="forbid")
 
-    schema_version: int = 1
+    schema_version: int = 2   # W5-3: bumped 1->2 by Slice E1 (added the governor.customer sub-state). Every
+    #                           snapshot this build emits carries the customer_* keys, so it is a v2 artifact;
+    #                           a pre-E1 build (max v1) refuses it cleanly via the refuse-newer gate.
     base_seq: int = 0                 # first LIVE seq K; pruned prefix is [0..base_seq); 0 = no prune
     snapshot_seq: int = -1            # the committed snapshot record's seq; -1 = no prune (identity)
     trusted_pubkey: str = ""          # owner pubkey the pubkey-dependent folds were computed under
