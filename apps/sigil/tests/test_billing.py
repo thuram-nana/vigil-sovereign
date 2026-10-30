@@ -42,7 +42,7 @@ def _rig():
     w = WalletRegistry(s, owner_key=OWNER, trusted_pubkey=OP)
     subs = SubscriptionRegistry(s, owner_key=OWNER, trusted_pubkey=OP)
     plan = PlanCreditLedger(s, owner_key=OWNER, trusted_pubkey=OP)
-    meter = CreditMeter(w, plan)
+    meter = CreditMeter(w, plan, subs)
     catalog = {
         "price_topup_200": Entitlement(kind=EVENT_TOPUP, credits=200),
         "price_pro": Entitlement(kind=EVENT_SUBSCRIPTION_ACTIVE, plan_id="pro", allotment=6000, period_s=1000.0),
@@ -126,6 +126,19 @@ def test_renewal_advances_the_period():
     assert meter.available("acme", now=1500.0) == 6000          # (old period also live at 1500, pre-expiry)
 
 
+def test_overlapping_active_events_do_not_double_the_allotment():
+    # The Slice-4 red-pen MED, now closed: two DISTINCT subscription_active events whose derived periods overlap
+    # must NOT give the tenant 2x the allotment. The meter counts only the current subscription period's tranche.
+    _s, _w, _subs, _plan, meter, mock, signer = _rig()
+    b1, s1 = _mk(mock, {"event_id": "evt_a", "kind": EVENT_SUBSCRIPTION_ACTIVE, "org_id": "acme",
+                        "created": 100.0, "price_id": "price_pro"})      # period [100,1100]
+    signer.ingest(b1, s1, now=100.0)
+    b2, s2 = _mk(mock, {"event_id": "evt_b", "kind": EVENT_SUBSCRIPTION_ACTIVE, "org_id": "acme",
+                        "created": 600.0, "price_id": "price_pro"})      # period [600,1600] — overlaps [600,1100]
+    signer.ingest(b2, s2, now=600.0)
+    assert meter.available("acme", now=700.0) == 6000, "overlapping tranches must not sum to a double allotment"
+
+
 def test_cancel_and_payment_failed_map_to_safe_direction():
     _s, _w, subs, _plan, _m, mock, signer = _rig()
     bA, sA = _mk(mock, {"event_id": "e1", "kind": EVENT_SUBSCRIPTION_ACTIVE, "org_id": "acme", "created": 100.0,
@@ -153,10 +166,12 @@ def test_mock_provider_rejects_malformed():
 _SECRET = "whsec_test_123"
 
 
-def _stripe_body(etype="invoice.paid", org="acme", price="price_pro", eid="evt_s1", created=1000):
-    return json.dumps({"id": eid, "type": etype, "created": created,
-                       "data": {"object": {"metadata": {"org_id": org},
-                                            "items": {"data": [{"price": {"id": price}}]}}}}).encode()
+def _stripe_body(etype="invoice.paid", org="acme", price="price_pro", eid="evt_s1", created=1000,
+                 billing_reason="subscription_cycle"):
+    obj = {"metadata": {"org_id": org}, "items": {"data": [{"price": {"id": price}}]}}
+    if etype in ("invoice.paid", "invoice.payment_failed"):
+        obj["billing_reason"] = billing_reason
+    return json.dumps({"id": eid, "type": etype, "created": created, "data": {"object": obj}}).encode()
 
 
 def _sig(secret, t, body):
@@ -201,6 +216,20 @@ def test_stripe_ignores_unmapped_and_missing_org():
     body2 = json.dumps({"id": "e", "type": "invoice.paid", "created": 1000,
                         "data": {"object": {"items": {"data": [{"price": {"id": "price_pro"}}]}}}}).encode()
     assert p.verify_and_parse(body2, _sig(_SECRET, 1000, body2), now=1000.0) is None   # no org_id metadata
+
+
+def test_stripe_ignores_mid_cycle_invoice_billing_reason():
+    # Only subscription_create / subscription_cycle invoices advance the period; a mid-cycle proration/update
+    # invoice (which Stripe genuinely emits) must be ignored, or it would mint a second overlapping allotment.
+    p = StripeBillingProvider(_SECRET)
+    for reason in ("subscription_update", "manual", "subscription_threshold", ""):
+        body = _stripe_body(billing_reason=reason)
+        assert p.verify_and_parse(body, _sig(_SECRET, 1000, body), now=1000.0) is None, \
+            f"invoice.paid with billing_reason={reason!r} must be ignored"
+    # the cycle/create reasons DO parse
+    for reason in ("subscription_cycle", "subscription_create"):
+        body = _stripe_body(billing_reason=reason)
+        assert p.verify_and_parse(body, _sig(_SECRET, 1000, body), now=1000.0) is not None
 
 
 def test_stripe_subscription_mode_checkout_is_ignored():

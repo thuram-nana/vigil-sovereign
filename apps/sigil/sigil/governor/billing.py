@@ -190,6 +190,14 @@ def _map_stripe_event(obj: Mapping[str, Any]) -> Optional[BillingEvent]:
     # handled by the invoice.paid event, so a checkout.session in subscription mode is ignored here.
     if kind == EVENT_TOPUP and sub.get("mode") == "subscription":
         return None
+    # Only a NEW-PERIOD invoice advances the plan period: an invoice.paid with billing_reason subscription_create
+    # or subscription_cycle. A MID-CYCLE invoice (subscription_update / proration / a manual or one-off invoice)
+    # must NOT re-grant a full period — it would mint a second allotment for an overlapping window — so it is
+    # ignored here (the period it belongs to was already funded by its cycle invoice).
+    if kind == EVENT_SUBSCRIPTION_ACTIVE:
+        reason = sub.get("billing_reason")
+        if reason not in ("subscription_create", "subscription_cycle"):
+            return None
     return BillingEvent(event_id=event_id, kind=kind, org_id=org_id, created=created, price_id=price_id,
                         data={"raw_type": etype})
 
