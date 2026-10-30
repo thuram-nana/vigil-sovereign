@@ -138,6 +138,14 @@ class SnapshotState(BaseModel):
     #                                   NAMESPACED BY SIGNAL (grant vs debit are disjoint dedup spaces), carried
     #                                   across a prune so a pruned grant/debit cannot be replayed to re-credit
     #                                   or re-charge (set-union bearer, like consumed_arm_nonces).
+    subscription_state: list = []     # [[org_id, "active"|"past_due"|"canceled"], ...] — governor.subscription
+    #                                   LWW per org (active = owner-verified + FRESH; down-states honored on
+    #                                   sight). Keep the down-state.
+    subscription_issued: list = []    # [[org_id, issued_at], ...] — PER-ORG active high-water; MUST cross a
+    #                                   prune or a replayed `active` could resurrect a lapsed plan.
+    subscription_row: list = []       # [[org_id, plan_id, period_start, period_end, allotment], ...] — the plan
+    #                                   fields to REBUILD the Subscription from the seed (status joins from
+    #                                   subscription_state).
     consumed_arm_nonces: list = []    # [[device_pubkey, nonce], ...]  (nonce int OR str, verbatim)
     device_approval_dedup: list = []  # [[pubkey|None, sig|None, min_seq], ...]
     warden_best: dict[str, list] = {} # {pubkey: [max_count, head_hash, tiebreak_seq]}
@@ -188,6 +196,14 @@ class SnapshotState(BaseModel):
 
     def wallet_seen_set(self) -> set:
         return {(row[0], row[1], row[2]) for row in self.wallet_seen}   # (signal, org_id, entry_id)
+
+    def subscription_state_map(self) -> dict[Any, str]:
+        return {row[0]: row[1] for row in self.subscription_state}
+
+    def subscription_issued_map(self) -> dict[Any, float]:
+        return {row[0]: row[1] for row in self.subscription_issued}
+    #   subscription_row stays raw: `SubscriptionRegistry._fold` rebuilds the Subscription (status from
+    #   subscription_state_map), keeping the Subscription import out of this leaf module.
     #   `WalletRegistry._fold` seeds (granted, debited, seen) from these; balance = granted - debited, and the
     #   seen-set is the idempotency/anti-replay guard that MUST survive a prune (mirrors accounts._fold).
 
@@ -339,6 +355,11 @@ def build(records: Iterable[SpineRecord], *, trusted_pubkey: Optional[str],
     from ..governor.wallet import (CREDIT_GRANT_SIGNAL as _WGRANT_SIGNAL, CREDIT_DEBIT_SIGNAL as _WDEBIT_SIGNAL,
                                    _GRANT_CORE as _WGRANT_CORE, _DEBIT_CORE as _WDEBIT_CORE,
                                    _as_credits as _w_as_credits)
+    # subscription signed-core + helpers imported from the live module (never restated — same drift guard);
+    # the fold below carries the per-org status/high-water/plan-row across a prune exactly as it does orgs.
+    from ..governor.subscription import (SUBSCRIPTION_SIGNAL as _SUB_SIGNAL, _SUB_CORE as _SUBS_CORE,
+                                         STATUS_ACTIVE as _SUB_ACTIVE, _DOWN_STATES as _SUB_DOWN,
+                                         _as_allotment as _sub_as_allotment)
 
     # The order-DEPENDENT folds (the kill-switch latch, every last-write-wins map) require ascending seq.
     # iter_records already yields ascending seq, but sort defensively so build() is correct for ANY caller /
@@ -377,6 +398,9 @@ def build(records: Iterable[SpineRecord], *, trusted_pubkey: Optional[str],
     w_granted: dict[Any, int] = dict(s.wallet_granted_map()) if s else {}   # org_id -> Σ grant credits
     w_debited: dict[Any, int] = dict(s.wallet_debited_map()) if s else {}   # org_id -> Σ debit credits
     w_seen: set = set(s.wallet_seen_set()) if s else set()                  # consumed (org_id, entry_id) keys
+    sub_state: dict[Any, str] = dict(s.subscription_state_map()) if s else {}   # org_id -> status (LWW)
+    sub_issued: dict[Any, float] = dict(s.subscription_issued_map()) if s else {}   # org_id -> active high-water
+    sub_row: dict[Any, list] = {r[0]: [r[1], r[2], r[3], r[4]] for r in s.subscription_row} if s else {}
     arm: set = set(s.arm_set()) if s else set()
     dedup: dict[tuple[Optional[str], Optional[str]], int] = dict(s.approval_dedup_map()) if s else {}
     warden: dict[str, tuple[int, str, int]] = ({k: (v[0], v[1], v[2]) for k, v in s.warden_best.items()}
@@ -536,6 +560,23 @@ def build(records: Iterable[SpineRecord], *, trusted_pubkey: Optional[str],
                             w_granted[woid] = w_granted.get(woid, 0) + wc
                         else:
                             w_debited[woid] = w_debited.get(woid, 0) + wc
+        # --- governor.subscription LWW (active = owner-verified + FRESH per-org high-water; past_due/canceled
+        #     honored on sight) — mirrors SubscriptionRegistry._fold EXACTLY so build() == scan. ---
+        if sig == _SUB_SIGNAL:
+            soid = p.get("org_id")
+            if isinstance(soid, str) and soid:
+                sst = p.get("status")
+                if sst in _SUB_DOWN:
+                    sub_state[soid] = sst
+                elif sst == _SUB_ACTIVE and verify_signed(p, _SUBS_CORE, vpk):
+                    at = as_issued_at(p.get("issued_at"))
+                    if at > sub_issued.get(soid, NO_HIGHWATER):
+                        sub_issued[soid] = at
+                        sub_state[soid] = _SUB_ACTIVE
+                        sub_row[soid] = [str(p.get("plan_id") or ""),
+                                         float(as_issued_at(p.get("period_start"))),
+                                         float(as_issued_at(p.get("period_end"))),
+                                         _sub_as_allotment(p.get("allotment"))]
         # --- gesture device-arm replay ledger (set-union) ---
         if sig == "gesture.session_armed" and p.get("armed_by") == "device":
             arm.add((p.get("device_pubkey"), p.get("nonce")))
@@ -590,6 +631,9 @@ def build(records: Iterable[SpineRecord], *, trusted_pubkey: Optional[str],
         wallet_granted=[[o, c] for o, c in w_granted.items()],
         wallet_debited=[[o, c] for o, c in w_debited.items()],
         wallet_seen=[[sg, o, e] for (sg, o, e) in w_seen],
+        subscription_state=[[o, v] for o, v in sub_state.items()],
+        subscription_issued=[[o, i] for o, i in sub_issued.items()],
+        subscription_row=[[o, r[0], r[1], r[2], r[3]] for o, r in sub_row.items()],
         consumed_arm_nonces=[[d, n] for (d, n) in arm],
         device_approval_dedup=[[pk, sg, seq] for (pk, sg), seq in dedup.items()],
         warden_best={k: [c, h, s] for k, (c, h, s) in warden.items()},

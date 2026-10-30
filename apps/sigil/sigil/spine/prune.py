@@ -178,6 +178,13 @@ def check_prune_safe(store, K: int) -> list[Segment]:
         raise PruneUnsafe(f"K={K} would strand credit wallet(s) {stranded_wallets}: a below-K balance or "
                           f"consumed entry_id would not be carried into the snapshot seed (zeroing the balance "
                           f"or re-opening grant replay); lower K or resolve")
+    # (c, SaaS subscription) the SAME floor for governor.subscription: an active subscription whose only
+    # owner-signed grant sits below K must be carried into the seed, or the prune drops the plan + resets the
+    # per-org high-water (re-opening replay of a lapsed plan).
+    stranded_subs = stranded_active_subscriptions(store, archived, K)
+    if stranded_subs:
+        raise PruneUnsafe(f"K={K} would strand active subscription(s) {stranded_subs}: their only owner-signed "
+                          f"grant sits below K and would not be carried into the snapshot seed; lower K or resolve")
     # (e) owner-key succession referential floor (W9-1 / issue #434): a rotation record that ESTABLISHES a key
     # whose seq-window still covers a LIVE record (>= K) — including, always, the current key's open window —
     # must NOT be pruned. Without the whole genesis->current chain present in the live window, post-prune
@@ -383,6 +390,46 @@ def stranded_active_wallets(store, archived: list[Segment], K: int) -> list[str]
     for (_sig, o, _e) in (seen - ss):
         stranded.add(str(o))              # a consumed entry_id the seed drops (anti-replay durability)
     return sorted(stranded)
+
+
+def stranded_active_subscriptions(store, archived: list[Segment], K: int) -> list[str]:
+    """§7(c, SaaS subscription) — the tenants (`governor/subscription.py`) whose subscription is `active` with
+    its only owner-signed grant in the pruned prefix [0..K) yet NOT carried into the snapshot seed: a prune
+    would silently drop the plan (and reset the per-org high-water, re-opening replay of a lapsed plan). EMPTY
+    in the happy path — `SnapshotState.build()` carries each verified-active subscription. Fail-closed tripwire
+    mirroring `stranded_active_accounts`; verified under the owner key valid at each seq; seed round-tripped
+    through `model_dump`/`model_validate`. Read-only."""
+    from ..governor.subscription import (SUBSCRIPTION_SIGNAL, _SUB_CORE, STATUS_ACTIVE, _DOWN_STATES)
+    from ..governor import key_history as _kh
+    from ..governor.authn import NO_HIGHWATER, as_issued_at, verify_signed
+    from ..governor.identity import owner_pubkey
+    tp = owner_pubkey() or ""
+    resolver = _kh.key_resolver(store, current=tp)
+    below: list[SpineRecord] = []
+    for seg in archived:
+        below.extend(read_segment_records(store._layout.seg_path(seg)))
+    status: dict[Any, str] = {}
+    issued: dict[Any, float] = {}
+    for r in sorted(below, key=lambda r: r.seq):
+        p = r.payload
+        if not isinstance(p, dict) or p.get("signal") != SUBSCRIPTION_SIGNAL:
+            continue
+        oid = p.get("org_id")
+        if not isinstance(oid, str) or not oid:
+            continue
+        st = p.get("status")
+        if st in _DOWN_STATES:
+            status[oid] = st
+        elif st == STATUS_ACTIVE and verify_signed(p, _SUB_CORE, resolver.at(r.seq)):
+            at = as_issued_at(p.get("issued_at"))
+            if at > issued.get(oid, NO_HIGHWATER):
+                issued[oid], status[oid] = at, STATUS_ACTIVE
+    active = {o for o, v in status.items() if v == STATUS_ACTIVE}
+    seed = SnapshotState.model_validate(
+        build(below, trusted_pubkey=tp, base_seq=K, snapshot_seq=-1, resolver=resolver).model_dump())
+    seed_state = seed.subscription_state_map()
+    carried = {o for o in active if seed_state.get(o) == STATUS_ACTIVE}
+    return sorted(str(o) for o in (active - carried))
 
 
 # ---- the owner-committed snapshot payload (Merkle accumulator + folded state) ---------------------------
