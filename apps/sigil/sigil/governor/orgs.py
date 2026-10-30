@@ -476,6 +476,30 @@ class OrgRegistry:
         trust-root OWNER principal is not an org member, so an owner-tier global action is NOT granted here —
         the proxy must OR this with the existing GLOBAL account check (`accounts.role_can(principal.role, ...)`)
         so the keyholder is never locked out of their own tenant. Keeping this primitive purely
-        membership-scoped is deliberate (single responsibility, soundly default-deny)."""
+        membership-scoped is deliberate (single responsibility, soundly default-deny). `admit` below is that
+        composition."""
         role = self.membership_role(username, org_id)
         return role_can(role, permission)
+
+    def admit(self, *, global_role: Optional[str], username: str, org_id: str,
+              permission: Optional[str]) -> bool:
+        """The COMPOSED multi-tenant admission gate — the SINGLE enforcement helper a tenant-scoped request
+        boundary calls. True iff the caller's GLOBAL account role carries `permission` (`rbac.role_can`) OR
+        their per-org membership role in `org_id` does (`org_role_can`).
+
+        The global OR is load-bearing: the trust-root OWNER (and any owner-signed global operator) is NOT an
+        org member, so WITHOUT it the keyholder would be locked out of every tenant — exactly the composition
+        the `org_role_can` COMPOSITION NOTE prescribes. DEFAULT-DENY throughout: an unmapped permission
+        (None/""), an unknown global role, a non-member, a member of a DIFFERENT org, and a revoked/unknown org
+        all refuse — the per-org leg inherits `org_role_can`'s fail-closed behaviour and the global leg inherits
+        `role_can`'s.
+
+        SEPARATION OF AUTHORITIES (billing authz != testing authz): per-org roles cap at `operator`
+        (single-owner doctrine) while `offense_authority` and the owner-tier perms live only at `owner`, so NO
+        org membership — however high — can admit a caller to mint a security-assessment authority. A paying
+        tenant-admin may manage their org's billing and members, yet STILL cannot self-authorize a test: that
+        remains the separate, owner-signed, infrastructure-bound target authority (`target_add` /
+        `offense_authority`). Registering/paying is not authorizing an assessment."""
+        if role_can(global_role, permission):
+            return True
+        return self.org_role_can(username, org_id, permission)
