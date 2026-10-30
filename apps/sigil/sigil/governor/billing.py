@@ -6,10 +6,14 @@ owner-signed grant on the spine (the wallet / subscription / plan-credit ledgers
 agent-asserted field decides money: the mapping from a verified event to a sovereign mint is DETERMINISTIC and
 driven by an owner-controlled price→entitlement CATALOG.
 
-  * `BillingProvider` (ABC) + `BillingEvent` (normalised) — a swappable provider interface. `StripeBillingProvider`
-    implements Stripe's webhook signature scheme in the stdlib (HMAC-SHA256 over `"{t}.{payload}"`, constant-time
-    compare, a timestamp tolerance window) — no SDK, no network, no live key beyond the `whsec_` signing secret.
-    `MockBillingProvider` is the deterministic sandbox provider for tests + local dev.
+  * `BillingProvider` (ABC) + `BillingEvent` (normalised) — a swappable, CAPABILITY-DECLARING provider interface
+    (each adapter declares the operations it supports, so an unsupported flow raises `UnsupportedCapability`
+    rather than silently simulating success). `FlutterwaveBillingProvider` is the PRIMARY production adapter
+    (Flutterwave v3: `verif-hash` constant-time compare + MANDATORY server-side transaction re-verify before any
+    mint; card + Francophone Mobile Money; Payment-Plan recurring). `StripeBillingProvider` is an optional
+    REFERENCE adapter, DISABLED BY DEFAULT (prohibited in production unless explicitly enabled), kept only to
+    prove the interface is genuinely swappable. `MockBillingProvider` is the deterministic sandbox for tests.
+    All adapters satisfy one contract: verify → return a normalised `BillingEvent`, or None (mint nothing).
   * `BillingSigner.ingest(raw_body, sig_header, now)` — the crux. It (1) VERIFIES the provider signature and
     REJECTS (mints nothing) on any failure — a forged/tampered/stale webhook cannot credit; (2) maps the verified
     event through the injected catalog into exactly one sovereign mint; (3) is IDEMPOTENT by the provider
@@ -31,9 +35,10 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import os
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Any, Mapping, Optional
+from typing import Any, Callable, Mapping, Optional
 
 from ..reuse import assert_no_offense
 
@@ -54,6 +59,25 @@ _EVENT_KINDS = frozenset({EVENT_TOPUP, EVENT_SUBSCRIPTION_ACTIVE, EVENT_SUBSCRIP
 # Default Stripe signature tolerance: reject an event whose timestamp is more than this many seconds from `now`
 # (replay-window bound, matching Stripe's documented default).
 _DEFAULT_TOLERANCE_S = 300.0
+
+# Provider CAPABILITIES — each adapter DECLARES what it supports, so an unsupported operation is an explicit
+# error (`UnsupportedCapability`), never a silent no-op or a simulated success. Outbound flows call
+# `provider.require(cap)` before an operation; `UNATTENDED_TOPUP` in particular is approval-gated at the provider
+# (Flutterwave NOAUTH, Stripe off-session) and must stay false until the merchant account is approved.
+CAP_VERIFY_WEBHOOK = "verify_webhook"            # inbound webhook verify + parse (every real provider)
+CAP_VERIFY_TRANSACTION = "verify_transaction"    # server-side re-verify of a transaction before granting value
+CAP_HOSTED_CHECKOUT = "hosted_checkout"          # create a hosted payment/checkout URL
+CAP_ONE_TIME_CARD = "one_time_card"              # one-off card payment
+CAP_MOBILE_MONEY = "mobile_money"                # mobile money (e.g. Francophone MoMo — Cameroon XAF)
+CAP_RECURRING_PLAN = "recurring_plan"            # provider-scheduled recurring subscription (auto-renew)
+CAP_UNATTENDED_TOPUP = "unattended_topup"        # unattended subsequent charge (NOAUTH / off-session) — approval-gated
+CAP_REFUND = "refund"                            # refund a transaction
+CAP_RECONCILE = "reconcile"                      # list transactions/settlements / resend missed webhooks
+
+
+class UnsupportedCapability(RuntimeError):
+    """Raised when a billing operation is requested of a provider that does not DECLARE the capability. Surfaced
+    explicitly (never a silent simulation) so an unsupported flow fails loudly rather than appearing to succeed."""
 
 
 @dataclass(frozen=True)
@@ -78,6 +102,20 @@ class BillingProvider(ABC):
     @abstractmethod
     def verify_and_parse(self, raw_body: bytes, sig_header: str, *, now: float) -> Optional[BillingEvent]:
         ...
+
+    def capabilities(self) -> frozenset[str]:
+        """The operations this adapter supports. Default: inbound webhook verification only; adapters override to
+        declare the outbound/provider operations they can actually perform."""
+        return frozenset({CAP_VERIFY_WEBHOOK})
+
+    def supports(self, capability: str) -> bool:
+        return capability in self.capabilities()
+
+    def require(self, capability: str) -> None:
+        """Assert a capability before an operation — raises `UnsupportedCapability` if the adapter does not
+        declare it (so an unsupported operation is explicit, never silently simulated)."""
+        if capability not in self.capabilities():
+            raise UnsupportedCapability(f"{type(self).__name__} does not support capability {capability!r}")
 
 
 def _ct_equal(a: str, b: str) -> bool:
@@ -106,11 +144,26 @@ class StripeBillingProvider(BillingProvider):
     price→entitlement catalog's knowledge of which price is a plan vs a top-up (the signer owns that mapping; the
     provider only needs org_id + price_id + type)."""
 
-    def __init__(self, signing_secret: str, *, tolerance_s: float = _DEFAULT_TOLERANCE_S):
+    def __init__(self, signing_secret: str, *, tolerance_s: float = _DEFAULT_TOLERANCE_S,
+                 enable_reference_adapter: bool = False):
+        # Stripe is an OPTIONAL REFERENCE adapter: DISABLED BY DEFAULT and prohibited in production unless
+        # EXPLICITLY enabled (Flutterwave is the primary production provider). Enable only with an explicit
+        # opt-in — the `enable_reference_adapter=True` flag (contract/parity tests) or env
+        # VIGIL_BILLING_ENABLE_STRIPE in {1,true,yes}. This keeps the second adapter available to prove the
+        # interface is swappable without letting it serve production by accident.
+        if not enable_reference_adapter and \
+                os.environ.get("VIGIL_BILLING_ENABLE_STRIPE", "").strip().lower() not in ("1", "true", "yes"):
+            raise UnsupportedCapability(
+                "StripeBillingProvider is a disabled-by-default reference adapter; Flutterwave is the primary "
+                "provider. Enable explicitly with enable_reference_adapter=True or VIGIL_BILLING_ENABLE_STRIPE=1.")
         if not isinstance(signing_secret, str) or not signing_secret:
             raise ValueError("Stripe signing secret (whsec_...) is required")
         self._secret = signing_secret.encode("utf-8")
         self._tolerance = float(tolerance_s)
+
+    def capabilities(self) -> frozenset[str]:
+        return frozenset({CAP_VERIFY_WEBHOOK, CAP_VERIFY_TRANSACTION, CAP_HOSTED_CHECKOUT, CAP_ONE_TIME_CARD,
+                          CAP_RECURRING_PLAN, CAP_UNATTENDED_TOPUP, CAP_REFUND, CAP_RECONCILE})
 
     def _verify_signature(self, raw_body: bytes, sig_header: str, now: float) -> bool:
         if not isinstance(sig_header, str) or not sig_header:
@@ -229,6 +282,10 @@ class MockBillingProvider(BillingProvider):
     def __init__(self, secret: str = "mock-secret"):
         self._secret = secret.encode("utf-8")
 
+    def capabilities(self) -> frozenset[str]:
+        return frozenset({CAP_VERIFY_WEBHOOK, CAP_VERIFY_TRANSACTION, CAP_HOSTED_CHECKOUT, CAP_ONE_TIME_CARD,
+                          CAP_MOBILE_MONEY, CAP_RECURRING_PLAN, CAP_UNATTENDED_TOPUP, CAP_REFUND, CAP_RECONCILE})
+
     def sign(self, raw_body: bytes) -> str:
         return hmac.new(self._secret, bytes(raw_body), hashlib.sha256).hexdigest()
 
@@ -255,6 +312,153 @@ class MockBillingProvider(BillingProvider):
                             created=_as_float(obj.get("created")),
                             price_id=str(obj.get("price_id") or ""),
                             data=data_raw if isinstance(data_raw, dict) else {})
+
+
+# A server-side transaction re-verifier: given a Flutterwave transaction id, return the authoritative
+# `/v3/transactions/{id}/verify` `data` object (or None). The HTTP call is owner-provisioned infra; it is
+# INJECTED so this module stays offline-testable and the deterministic signer never performs I/O.
+TransactionVerifier = Callable[[str], Optional[Mapping[str, Any]]]
+
+# tx_ref convention: we set it when creating a checkout/charge so the tenant is recoverable from the one field
+# Flutterwave guarantees to echo everywhere. Format: "vigil:<org_id>:<nonce>" (org_id has no ':').
+_TX_REF_PREFIX = "vigil"
+
+
+def _org_from_tx_ref(tx_ref: object) -> Optional[str]:
+    if not isinstance(tx_ref, str):
+        return None
+    parts = tx_ref.split(":")
+    if len(parts) >= 3 and parts[0] == _TX_REF_PREFIX:
+        return _parse_org_id(parts[1])
+    return None
+
+
+def _flw_org_id(data: Mapping[str, Any]) -> Optional[str]:
+    """Recover the validated tenant org_id from a Flutterwave transaction/subscription object, fail-closed.
+    Prefer `tx_ref` (the one field Flutterwave guarantees to echo on webhook + verify), then `meta.org_id`, then
+    a flat `meta_1`. Each candidate is validated via org_tenant_id — an object with no recoverable tenant yields
+    None and is never minted against a guess."""
+    org = _org_from_tx_ref(data.get("tx_ref"))
+    if org is not None:
+        return org
+    meta = data.get("meta")
+    if isinstance(meta, dict):
+        org = _parse_org_id(meta.get("org_id"))
+        if org is not None:
+            return org
+    if isinstance(meta, list):                      # Flutterwave sometimes returns meta as a list of {metaname,metavalue}
+        for row in meta:
+            if isinstance(row, dict) and row.get("metaname") == "org_id":
+                org = _parse_org_id(row.get("metavalue"))
+                if org is not None:
+                    return org
+    return _parse_org_id(data.get("meta_1"))
+
+
+def _flw_price_id(data: Mapping[str, Any]) -> str:
+    """The catalog price id for a one-time charge — carried in `meta.price_id` / `meta_1`-style fields (we set it
+    at checkout). "" when absent (the signer then finds no catalog entry and mints nothing)."""
+    meta = data.get("meta")
+    if isinstance(meta, dict) and isinstance(meta.get("price_id"), str):
+        return meta["price_id"]
+    if isinstance(meta, list):
+        for row in meta:
+            if isinstance(row, dict) and row.get("metaname") == "price_id" and isinstance(row.get("metavalue"), str):
+                return row["metavalue"]
+    pid = data.get("meta_price_id")
+    return pid if isinstance(pid, str) else ""
+
+
+class FlutterwaveBillingProvider(BillingProvider):
+    """Flutterwave v3 webhook verification — the PRIMARY production adapter.
+
+    v3 authenticates a webhook by sending the configured Secret Hash verbatim in the `verif-hash` header
+    (PLAINTEXT equality, NOT an HMAC over the body, no timestamp / replay bound). That header alone is a WEAK
+    authenticator, so this adapter (1) constant-time-compares `verif-hash` to the stored secret hash, then
+    (2) RE-VERIFIES the transaction server-side against `/v3/transactions/{id}/verify` (the injected `verifier`)
+    and only trusts the AUTHORITATIVE verified object — a webhook whose transaction does not independently verify
+    as `status == "successful"` mints nothing. This matches Flutterwave's own documented guidance ("verify before
+    giving value") and makes a forged/replayed/mismatched webhook inert.
+
+    org_id is recovered from the AUTHORITATIVE verified object (tx_ref we set, then meta), validated fail-closed.
+    Idempotency rides the Flutterwave transaction `id` (stable across at-least-once duplicate deliveries), which
+    the signer carries as the ledger entry_id. The verifier does the only I/O; everything here is pure.
+
+    NOTE (sandbox-confirm): exact field shapes (meta echo as dict vs list, `payment_plan` presence on a plan
+    charge, the failed-charge event name) should be confirmed against a Flutterwave sandbox; this handles the
+    documented shapes and fails closed on anything it cannot validate. Mobile Money / card / checkout creation
+    and refunds are declared capabilities exercised by the outbound flows (next slice)."""
+
+    def __init__(self, secret_hash: str, verifier: TransactionVerifier, *, noauth_approved: bool = False):
+        if not isinstance(secret_hash, str) or not secret_hash:
+            raise ValueError("Flutterwave webhook secret hash is required")
+        if not callable(verifier):
+            raise ValueError("a server-side transaction verifier is required — Flutterwave's verif-hash header "
+                             "alone is too weak to grant value; inject a /transactions/{id}/verify caller")
+        self._secret_hash = secret_hash
+        self._verifier = verifier
+        self._noauth_approved = bool(noauth_approved)
+
+    def capabilities(self) -> frozenset[str]:
+        caps = {CAP_VERIFY_WEBHOOK, CAP_VERIFY_TRANSACTION, CAP_HOSTED_CHECKOUT, CAP_ONE_TIME_CARD,
+                CAP_MOBILE_MONEY, CAP_RECURRING_PLAN, CAP_REFUND, CAP_RECONCILE}
+        if self._noauth_approved:
+            caps.add(CAP_UNATTENDED_TOPUP)          # NOAUTH unattended recurring — only once Flutterwave approves
+        return frozenset(caps)
+
+    def verify_and_parse(self, raw_body: bytes, sig_header: str, *, now: float) -> Optional[BillingEvent]:
+        if not isinstance(raw_body, (bytes, bytearray)):
+            return None
+        raw_body = bytes(raw_body)
+        if not isinstance(sig_header, str) or not _ct_equal(self._secret_hash, sig_header):
+            return None                               # verif-hash mismatch/absent -> reject (fail-closed)
+        try:
+            obj = json.loads(raw_body.decode("utf-8"))
+        except (ValueError, UnicodeDecodeError):
+            return None
+        if not isinstance(obj, dict):
+            return None
+        return self._reverify_and_map(obj, now)
+
+    def _reverify_and_map(self, obj: Mapping[str, Any], now: float) -> Optional[BillingEvent]:
+        event = obj.get("event")
+        data_raw = obj.get("data")
+        data: dict[str, Any] = data_raw if isinstance(data_raw, dict) else {}
+        # --- safe direction: a subscription cancellation. Honored without a charge to re-verify; fail-closed on
+        #     an unrecoverable tenant (the plan lapses at period end anyway via the meter's active-sub check). ---
+        if event == "subscription.cancelled":
+            org = _flw_org_id(data)
+            if org is None:
+                return None
+            sid = data.get("id") or data.get("subscription_id")
+            return BillingEvent(event_id=f"flwcancel:{sid}", kind=EVENT_SUBSCRIPTION_CANCELED, org_id=org,
+                                created=_as_float(data.get("created_at")) or now)
+        if event != "charge.completed":
+            return None                               # we mint only on charge.completed (+ the cancel above)
+        txid = data.get("id")
+        if txid is None:
+            return None
+        verified = self._verifier(str(txid))          # AUTHORITATIVE server-side re-verify — the only trust source
+        if not isinstance(verified, dict):
+            return None                               # could not verify -> mint nothing
+        status = verified.get("status")
+        org = _flw_org_id(verified) or _flw_org_id(data)
+        is_plan = bool(verified.get("payment_plan") or data.get("payment_plan"))
+        if status != "successful":
+            # a failed/declined charge on a subscription -> dunning (safe direction); otherwise ignore.
+            if org is not None and is_plan:
+                return BillingEvent(event_id=f"flwfail:{txid}", kind=EVENT_PAYMENT_FAILED, org_id=org,
+                                    created=_as_float(verified.get("created_at")) or now)
+            return None
+        if org is None:
+            return None                               # successful but no recoverable tenant -> never mint on a guess
+        created = _as_float(verified.get("created_at")) or now
+        tx_ref = verified.get("tx_ref")
+        if is_plan:
+            return BillingEvent(event_id=str(txid), kind=EVENT_SUBSCRIPTION_ACTIVE, org_id=org, created=created,
+                                price_id=str(verified.get("payment_plan") or ""), data={"tx_ref": tx_ref})
+        return BillingEvent(event_id=str(txid), kind=EVENT_TOPUP, org_id=org, created=created,
+                            price_id=_flw_price_id(verified), data={"tx_ref": tx_ref})
 
 
 @dataclass(frozen=True)

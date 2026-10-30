@@ -23,9 +23,10 @@ import tempfile
 
 import pytest
 
-from sigil.governor.billing import (EVENT_PAYMENT_FAILED, EVENT_SUBSCRIPTION_ACTIVE, EVENT_SUBSCRIPTION_CANCELED,
-                                     EVENT_TOPUP, BillingSigner, Entitlement, MockBillingProvider,
-                                     StripeBillingProvider)
+from sigil.governor.billing import (CAP_MOBILE_MONEY, CAP_REFUND, CAP_UNATTENDED_TOPUP, CAP_VERIFY_WEBHOOK,
+                                     EVENT_PAYMENT_FAILED, EVENT_SUBSCRIPTION_ACTIVE, EVENT_SUBSCRIPTION_CANCELED,
+                                     EVENT_TOPUP, BillingSigner, Entitlement, FlutterwaveBillingProvider,
+                                     MockBillingProvider, StripeBillingProvider, UnsupportedCapability)
 from sigil.governor.metering import CreditMeter, PlanCreditLedger
 from sigil.governor.subscription import STATUS_CANCELED, STATUS_PAST_DUE, SubscriptionRegistry
 from sigil.governor.wallet import WalletRegistry
@@ -180,7 +181,7 @@ def _sig(secret, t, body):
 
 
 def test_stripe_valid_signature_parses():
-    p = StripeBillingProvider(_SECRET)
+    p = StripeBillingProvider(_SECRET, enable_reference_adapter=True)
     body = _stripe_body()
     ev = p.verify_and_parse(body, _sig(_SECRET, 1000, body), now=1000.0)
     assert ev is not None and ev.kind == EVENT_SUBSCRIPTION_ACTIVE and ev.org_id == "acme" \
@@ -188,7 +189,7 @@ def test_stripe_valid_signature_parses():
 
 
 def test_stripe_rejects_bad_tampered_stale_and_malformed_sig():
-    p = StripeBillingProvider(_SECRET, tolerance_s=300.0)
+    p = StripeBillingProvider(_SECRET, tolerance_s=300.0, enable_reference_adapter=True)
     body = _stripe_body()
     good = _sig(_SECRET, 1000, body)
     assert p.verify_and_parse(body, "t=1000,v1=deadbeef", now=1000.0) is None      # wrong MAC
@@ -202,7 +203,7 @@ def test_stripe_rejects_bad_tampered_stale_and_malformed_sig():
 
 
 def test_stripe_accepts_any_valid_v1_on_rotation():
-    p = StripeBillingProvider(_SECRET)
+    p = StripeBillingProvider(_SECRET, enable_reference_adapter=True)
     body = _stripe_body()
     mac = hmac.new(_SECRET.encode(), b"1000." + body, hashlib.sha256).hexdigest()
     hdr = f"t=1000,v1=deadbeef,v1={mac}"            # one bad + one good v1 (secret rotation) -> accepted
@@ -210,7 +211,7 @@ def test_stripe_accepts_any_valid_v1_on_rotation():
 
 
 def test_stripe_ignores_unmapped_and_missing_org():
-    p = StripeBillingProvider(_SECRET)
+    p = StripeBillingProvider(_SECRET, enable_reference_adapter=True)
     body = _stripe_body(etype="charge.updated")                 # not a minted type
     assert p.verify_and_parse(body, _sig(_SECRET, 1000, body), now=1000.0) is None
     body2 = json.dumps({"id": "e", "type": "invoice.paid", "created": 1000,
@@ -221,7 +222,7 @@ def test_stripe_ignores_unmapped_and_missing_org():
 def test_stripe_ignores_mid_cycle_invoice_billing_reason():
     # Only subscription_create / subscription_cycle invoices advance the period; a mid-cycle proration/update
     # invoice (which Stripe genuinely emits) must be ignored, or it would mint a second overlapping allotment.
-    p = StripeBillingProvider(_SECRET)
+    p = StripeBillingProvider(_SECRET, enable_reference_adapter=True)
     for reason in ("subscription_update", "manual", "subscription_threshold", ""):
         body = _stripe_body(billing_reason=reason)
         assert p.verify_and_parse(body, _sig(_SECRET, 1000, body), now=1000.0) is None, \
@@ -234,7 +235,7 @@ def test_stripe_ignores_mid_cycle_invoice_billing_reason():
 
 def test_stripe_subscription_mode_checkout_is_ignored():
     # a checkout.session.completed in subscription mode is handled by invoice.paid, not as a top-up
-    p = StripeBillingProvider(_SECRET)
+    p = StripeBillingProvider(_SECRET, enable_reference_adapter=True)
     body = json.dumps({"id": "cs1", "type": "checkout.session.completed", "created": 1000,
                        "data": {"object": {"mode": "subscription", "metadata": {"org_id": "acme"}}}}).encode()
     assert p.verify_and_parse(body, _sig(_SECRET, 1000, body), now=1000.0) is None
@@ -242,4 +243,148 @@ def test_stripe_subscription_mode_checkout_is_ignored():
 
 def test_stripe_secret_required():
     with pytest.raises(ValueError):
-        StripeBillingProvider("")
+        StripeBillingProvider("", enable_reference_adapter=True)
+
+
+# ---- Stripe disabled-by-default guard ----------------------------------------------------------------
+def test_stripe_disabled_by_default():
+    with pytest.raises(UnsupportedCapability):
+        StripeBillingProvider("whsec_x")                            # no opt-in -> refuses
+    assert StripeBillingProvider("whsec_x", enable_reference_adapter=True) is not None   # explicit flag
+    import os
+    os.environ["VIGIL_BILLING_ENABLE_STRIPE"] = "1"
+    try:
+        assert StripeBillingProvider("whsec_x") is not None         # env opt-in
+    finally:
+        del os.environ["VIGIL_BILLING_ENABLE_STRIPE"]
+
+
+# ---- Flutterwave provider (primary) — verif-hash + MANDATORY server-side re-verify -------------------
+_FLW_SECRET = "flw-secret-hash-xyz"
+
+
+def _verifier(table):
+    def v(txid):
+        return table.get(str(txid))
+    return v
+
+
+def _flw_rig(table):
+    s, w, subs, plan, meter, _mock, _signer = _rig()
+    flw = FlutterwaveBillingProvider(_FLW_SECRET, _verifier(table))
+    signer = BillingSigner(flw, wallet=w, subscriptions=subs, plan=plan, catalog={
+        "price_topup_200": Entitlement(kind=EVENT_TOPUP, credits=200),
+        "flwplan_pro": Entitlement(kind=EVENT_SUBSCRIPTION_ACTIVE, plan_id="pro", allotment=6000, period_s=1000.0),
+    })
+    return s, w, subs, plan, meter, flw, signer
+
+
+def _flw_wh(event, txid):
+    return json.dumps({"event": event, "data": {"id": txid}}).encode()
+
+
+def test_flutterwave_requires_secret_and_verifier():
+    with pytest.raises(ValueError):
+        FlutterwaveBillingProvider("", _verifier({}))
+    with pytest.raises(ValueError):
+        FlutterwaveBillingProvider(_FLW_SECRET, None)               # a server-side verifier is mandatory
+
+
+def test_flutterwave_topup_via_reverify_and_idempotent():
+    table = {"9911": {"id": 9911, "status": "successful", "tx_ref": "vigil:acme:n1", "currency": "XAF",
+                      "amount": 5000, "created_at": 100.0, "meta": {"price_id": "price_topup_200"}}}
+    _s, w, _subs, _plan, _m, _flw, signer = _flw_rig(table)
+    assert signer.ingest(_flw_wh("charge.completed", 9911), _FLW_SECRET, now=100.0) is not None
+    assert w.available("acme") == 200                               # credits from catalog, not the wire amount
+    signer.ingest(_flw_wh("charge.completed", 9911), _FLW_SECRET, now=100.0)   # duplicate delivery
+    assert w.available("acme") == 200, "duplicate webhook (same transaction id) must not double-credit"
+
+
+def test_flutterwave_forged_hash_mints_nothing():
+    table = {"9911": {"id": 9911, "status": "successful", "tx_ref": "vigil:acme:n1",
+                      "created_at": 100.0, "meta": {"price_id": "price_topup_200"}}}
+    _s, w, _subs, _plan, _m, _flw, signer = _flw_rig(table)
+    assert signer.ingest(_flw_wh("charge.completed", 9911), "WRONG-HASH", now=100.0) is None
+    assert w.available("acme") == 0
+
+
+def test_flutterwave_only_the_reverify_grants_not_the_webhook_body():
+    # THE core trust property: the webhook body is NOT trusted; only the server-side re-verify can grant. The
+    # verifier here reports id 5 as FAILED, yet the webhook body brazenly CLAIMS a successful 999999-credit
+    # top-up for acme. The authoritative re-verify must win -> mint nothing.
+    _s, w, _subs, _plan, _m, _flw, signer = _flw_rig({"5": {"id": 5, "status": "failed", "tx_ref": "vigil:acme:x"}})
+    liar = json.dumps({"event": "charge.completed",
+                       "data": {"id": 5, "status": "successful", "tx_ref": "vigil:acme:x",
+                                "amount": 999999, "meta": {"price_id": "price_topup_200"}}}).encode()
+    assert signer.ingest(liar, _FLW_SECRET, now=1.0) is None, "webhook body claiming success must not grant"
+    assert signer.ingest(_flw_wh("charge.completed", 404), _FLW_SECRET, now=1.0) is None   # verifier returns None
+    assert w.available("acme") == 0, "a webhook whose transaction does not re-verify as successful grants nothing"
+
+
+def test_flutterwave_subscription_active_cancel_and_fail():
+    table = {"9912": {"id": 9912, "status": "successful", "tx_ref": "vigil:acme:n2", "created_at": 100.0,
+                      "payment_plan": "flwplan_pro"},
+             "9913": {"id": 9913, "status": "failed", "tx_ref": "vigil:acme:n3", "payment_plan": "flwplan_pro",
+                      "created_at": 200.0}}
+    _s, _w, subs, _plan, meter, _flw, signer = _flw_rig(table)
+    assert signer.ingest(_flw_wh("charge.completed", 9912), _FLW_SECRET, now=100.0) is not None
+    assert meter.available("acme", now=500.0) == 6000               # subscribe + plan refill
+    # a failed plan charge -> dunning (past_due), safe direction
+    signer.ingest(_flw_wh("charge.completed", 9913), _FLW_SECRET, now=200.0)
+    assert subs.subscription("acme").status == STATUS_PAST_DUE
+    # a cancellation webhook (no charge to re-verify) -> canceled, org from tx_ref on the subscription object
+    body = json.dumps({"event": "subscription.cancelled",
+                       "data": {"id": "sub_1", "tx_ref": "vigil:acme:n2", "created_at": 300.0}}).encode()
+    signer.ingest(body, _FLW_SECRET, now=300.0)
+    assert subs.subscription("acme").status == STATUS_CANCELED
+
+
+def test_flutterwave_unrecoverable_org_is_ignored():
+    table = {"7": {"id": 7, "status": "successful", "tx_ref": "no-org-here", "created_at": 1.0,
+                   "meta": {"price_id": "price_topup_200"}}}
+    _s, w, _subs, _plan, _m, _flw, signer = _flw_rig(table)
+    assert signer.ingest(_flw_wh("charge.completed", 7), _FLW_SECRET, now=1.0) is None
+    assert w.available("acme") == 0
+
+
+def test_flutterwave_capabilities_and_noauth_gate():
+    flw = FlutterwaveBillingProvider(_FLW_SECRET, _verifier({}))
+    assert CAP_MOBILE_MONEY in flw.capabilities()
+    assert CAP_UNATTENDED_TOPUP not in flw.capabilities()           # NOAUTH approval-gated -> off by default
+    flw.require(CAP_REFUND)                                         # declared -> no raise
+    with pytest.raises(UnsupportedCapability):
+        flw.require(CAP_UNATTENDED_TOPUP)
+    approved = FlutterwaveBillingProvider(_FLW_SECRET, _verifier({}), noauth_approved=True)
+    assert CAP_UNATTENDED_TOPUP in approved.capabilities()          # on once the merchant account is approved
+
+
+# ---- CONTRACT TESTS covering BOTH adapters + the mock (provider independence) -------------------------
+def _all_providers():
+    return [
+        ("mock", MockBillingProvider("sek")),
+        ("stripe", StripeBillingProvider("whsec_x", enable_reference_adapter=True)),
+        ("flutterwave", FlutterwaveBillingProvider(_FLW_SECRET, _verifier({}))),
+    ]
+
+
+def test_contract_all_providers_declare_verify_webhook():
+    for name, p in _all_providers():
+        assert CAP_VERIFY_WEBHOOK in p.capabilities(), f"{name} must declare verify_webhook"
+
+
+def test_contract_forged_signature_mints_nothing_every_provider():
+    # The one invariant every adapter must satisfy: an unauthenticated/forged webhook yields no event.
+    body = json.dumps({"event": "charge.completed", "data": {"id": 1},
+                       "kind": EVENT_TOPUP, "event_id": "e", "org_id": "acme", "created": 1.0,
+                       "id": "evt", "type": "invoice.paid"}).encode()
+    for name, p in _all_providers():
+        assert p.verify_and_parse(body, "definitely-not-a-valid-signature", now=1.0) is None, \
+            f"{name} must reject a forged signature"
+        assert p.verify_and_parse(b"not-json", "definitely-not-a-valid-signature", now=1.0) is None
+
+
+def test_contract_require_raises_on_undeclared_capability():
+    for name, p in _all_providers():
+        missing = next(c for c in ("totally_made_up_cap",) if not p.supports(c))
+        with pytest.raises(UnsupportedCapability):
+            p.require(missing)
