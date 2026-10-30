@@ -35,9 +35,11 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import math
 import os
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Any, Callable, Mapping, Optional
 
 from ..reuse import assert_no_offense
@@ -120,8 +122,12 @@ class BillingProvider(ABC):
 
 def _ct_equal(a: str, b: str) -> bool:
     """Constant-time string compare (never short-circuit on the first differing byte — no timing oracle on the
-    signature)."""
-    return hmac.compare_digest(a, b)
+    signature). Fail-CLOSED (False) on a non-ASCII / non-str operand: `hmac.compare_digest` raises TypeError on
+    non-ASCII `str`, so a crafted header must reject cleanly, never raise a 500."""
+    try:
+        return hmac.compare_digest(a, b)
+    except TypeError:
+        return False
 
 
 def _parse_org_id(obj: object) -> Optional[str]:
@@ -162,8 +168,11 @@ class StripeBillingProvider(BillingProvider):
         self._tolerance = float(tolerance_s)
 
     def capabilities(self) -> frozenset[str]:
+        # NOTE: no CAP_UNATTENDED_TOPUP — off-session recurring is approval-gated at the provider, so the reference
+        # adapter does not DECLARE it unconditionally (declaring it would let an outbound flow `require()` it and
+        # believe unattended charging is available when it has not been approved).
         return frozenset({CAP_VERIFY_WEBHOOK, CAP_VERIFY_TRANSACTION, CAP_HOSTED_CHECKOUT, CAP_ONE_TIME_CARD,
-                          CAP_RECURRING_PLAN, CAP_UNATTENDED_TOPUP, CAP_REFUND, CAP_RECONCILE})
+                          CAP_RECURRING_PLAN, CAP_REFUND, CAP_RECONCILE})
 
     def _verify_signature(self, raw_body: bytes, sig_header: str, now: float) -> bool:
         if not isinstance(sig_header, str) or not sig_header:
@@ -369,6 +378,38 @@ def _flw_price_id(data: Mapping[str, Any]) -> str:
     return pid if isinstance(pid, str) else ""
 
 
+def _flw_created(data: Mapping[str, Any]) -> Optional[float]:
+    """Parse a Flutterwave transaction's creation time to a STABLE epoch float, fail-closed (None) when it cannot
+    be parsed. Flutterwave returns `created_at` on the verify object as an ISO-8601 string
+    (e.g. "2024-01-02T03:04:05.000Z"); some shapes carry a numeric epoch. The signer uses this as the
+    deterministic issued_at / subscription-period anchor, so it MUST be stable across at-least-once duplicate
+    deliveries. A wall-clock `now` fallback would make a replay advance the period (orphaning tranches, even
+    resurrecting a lapsed sub), so there is NO `now` fallback here: an unparseable/absent/non-positive timestamp
+    yields None and mints nothing."""
+    raw = data.get("created_at")
+    if isinstance(raw, bool):                           # bool is an int subclass — never a timestamp
+        return None
+    if isinstance(raw, (int, float)):
+        return raw if math.isfinite(raw) and raw > 0 else None
+    if isinstance(raw, str) and raw.strip():
+        s = raw.strip()
+        try:                                            # a numeric epoch rendered as a string (rare but seen)
+            f = float(s)
+            return f if math.isfinite(f) and f > 0 else None
+        except ValueError:
+            pass
+        iso = s[:-1] + "+00:00" if s.endswith("Z") else s   # accept a trailing 'Z' as UTC (defensive on <3.11)
+        try:
+            dt = datetime.fromisoformat(iso)
+        except ValueError:
+            return None
+        if dt.tzinfo is None:                           # a naive stamp -> assume UTC so the epoch is deterministic
+            dt = dt.replace(tzinfo=timezone.utc)
+        ts = dt.timestamp()
+        return ts if math.isfinite(ts) and ts > 0 else None
+    return None
+
+
 class FlutterwaveBillingProvider(BillingProvider):
     """Flutterwave v3 webhook verification — the PRIMARY production adapter.
 
@@ -380,12 +421,23 @@ class FlutterwaveBillingProvider(BillingProvider):
     as `status == "successful"` mints nothing. This matches Flutterwave's own documented guidance ("verify before
     giving value") and makes a forged/replayed/mismatched webhook inert.
 
-    org_id is recovered from the AUTHORITATIVE verified object (tx_ref we set, then meta), validated fail-closed.
-    Idempotency rides the Flutterwave transaction `id` (stable across at-least-once duplicate deliveries), which
-    the signer carries as the ledger entry_id. The verifier does the only I/O; everything here is pure.
+    EVERYTHING that decides money or a tenant — org_id, plan-vs-topup, the event timestamp, the status — is read
+    from the AUTHORITATIVE verified object ONLY, NEVER from the webhook body (the body is trusted solely for the
+    transaction id to go re-verify). org_id is recovered from the verified object's tx_ref (which we set), then
+    meta, validated fail-closed. The event timestamp is parsed to a STABLE epoch; an unparseable one mints nothing
+    (a wall-clock fallback would let a replay advance a subscription period). Idempotency rides the Flutterwave
+    transaction `id` (stable across at-least-once duplicate deliveries), which the signer carries as the ledger
+    entry_id. The verifier does the only I/O; everything here is pure.
+
+    SCOPE (this slice): we mint ONLY on a re-verified successful `charge.completed` (top-up or plan period). We do
+    NOT act on `subscription.cancelled` / failed-charge webhooks — the body cannot name the victim tenant soundly
+    and the verify endpoint is per-transaction, not per-subscription, so there is no authoritative
+    subscription→org mapping yet. A lapsed/cancelled plan EXPIRES at period_end via the meter's active-subscription
+    check (non-rollover) — the safe, body-independent outcome. Webhook-driven cancel/dunning returns in the
+    outbound-surfaces slice once an authoritative subscription→org mapping exists.
 
     NOTE (sandbox-confirm): exact field shapes (meta echo as dict vs list, `payment_plan` presence on a plan
-    charge, the failed-charge event name) should be confirmed against a Flutterwave sandbox; this handles the
+    charge, `created_at` string format) should be confirmed against a Flutterwave sandbox; this handles the
     documented shapes and fails closed on anything it cannot validate. Mobile Money / card / checkout creation
     and refunds are declared capabilities exercised by the outbound flows (next slice)."""
 
@@ -418,43 +470,37 @@ class FlutterwaveBillingProvider(BillingProvider):
             return None
         if not isinstance(obj, dict):
             return None
-        return self._reverify_and_map(obj, now)
+        return self._reverify_and_map(obj)
 
-    def _reverify_and_map(self, obj: Mapping[str, Any], now: float) -> Optional[BillingEvent]:
-        event = obj.get("event")
+    def _reverify_and_map(self, obj: Mapping[str, Any]) -> Optional[BillingEvent]:
+        # Flutterwave's `verif-hash` authenticates ONLY the caller (plaintext secret equality); it does NOT sign
+        # the body, so NOTHING in `obj` is trustworthy here beyond "which transaction id to go re-verify". Every
+        # field that decides money or a tenant (org_id, plan-vs-topup, timestamp, status) is taken from the
+        # AUTHORITATIVE `/v3/transactions/{id}/verify` object only. We therefore mint solely on a `charge.completed`
+        # whose transaction INDEPENDENTLY re-verifies as successful.
+        #
+        # We deliberately do NOT act on `subscription.cancelled` / failed-charge webhooks (no webhook-driven cancel
+        # or dunning): the body cannot name the victim tenant soundly, and the verify endpoint is per-TRANSACTION,
+        # not per-subscription, so there is no authoritative subscription→org mapping yet (that lands in the
+        # outbound-surfaces slice). Until then a lapsed/cancelled plan simply EXPIRES at period_end via the meter's
+        # active-subscription check (non-rollover) — the safe, body-independent outcome.
+        if obj.get("event") != "charge.completed":
+            return None
         data_raw = obj.get("data")
-        data: dict[str, Any] = data_raw if isinstance(data_raw, dict) else {}
-        # --- safe direction: a subscription cancellation. Honored without a charge to re-verify; fail-closed on
-        #     an unrecoverable tenant (the plan lapses at period end anyway via the meter's active-sub check). ---
-        if event == "subscription.cancelled":
-            org = _flw_org_id(data)
-            if org is None:
-                return None
-            sid = data.get("id") or data.get("subscription_id")
-            return BillingEvent(event_id=f"flwcancel:{sid}", kind=EVENT_SUBSCRIPTION_CANCELED, org_id=org,
-                                created=_as_float(data.get("created_at")) or now)
-        if event != "charge.completed":
-            return None                               # we mint only on charge.completed (+ the cancel above)
-        txid = data.get("id")
+        txid = data_raw.get("id") if isinstance(data_raw, dict) else None
         if txid is None:
-            return None
-        verified = self._verifier(str(txid))          # AUTHORITATIVE server-side re-verify — the only trust source
-        if not isinstance(verified, dict):
-            return None                               # could not verify -> mint nothing
-        status = verified.get("status")
-        org = _flw_org_id(verified) or _flw_org_id(data)
-        is_plan = bool(verified.get("payment_plan") or data.get("payment_plan"))
-        if status != "successful":
-            # a failed/declined charge on a subscription -> dunning (safe direction); otherwise ignore.
-            if org is not None and is_plan:
-                return BillingEvent(event_id=f"flwfail:{txid}", kind=EVENT_PAYMENT_FAILED, org_id=org,
-                                    created=_as_float(verified.get("created_at")) or now)
-            return None
+            return None                               # the body is trusted ONLY for the transaction id to verify
+        verified = self._verifier(str(txid))          # AUTHORITATIVE server-side re-verify — the ONLY trust source
+        if not isinstance(verified, dict) or verified.get("status") != "successful":
+            return None                               # unverifiable / not successful -> mint nothing
+        org = _flw_org_id(verified)                   # tenant from the VERIFIED object only (never the body)
         if org is None:
             return None                               # successful but no recoverable tenant -> never mint on a guess
-        created = _as_float(verified.get("created_at")) or now
+        created = _flw_created(verified)              # stable epoch from the VERIFIED object; fail-closed if absent
+        if created is None:
+            return None                               # replay-safety needs a stable timestamp -> no `now` fallback
         tx_ref = verified.get("tx_ref")
-        if is_plan:
+        if verified.get("payment_plan"):              # plan-vs-topup decided by the VERIFIED object only
             return BillingEvent(event_id=str(txid), kind=EVENT_SUBSCRIPTION_ACTIVE, org_id=org, created=created,
                                 price_id=str(verified.get("payment_plan") or ""), data={"tx_ref": tx_ref})
         return BillingEvent(event_id=str(txid), kind=EVENT_TOPUP, org_id=org, created=created,

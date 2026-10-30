@@ -28,7 +28,8 @@ from sigil.governor.billing import (CAP_MOBILE_MONEY, CAP_REFUND, CAP_UNATTENDED
                                      EVENT_TOPUP, BillingSigner, Entitlement, FlutterwaveBillingProvider,
                                      MockBillingProvider, StripeBillingProvider, UnsupportedCapability)
 from sigil.governor.metering import CreditMeter, PlanCreditLedger
-from sigil.governor.subscription import STATUS_CANCELED, STATUS_PAST_DUE, SubscriptionRegistry
+from sigil.governor.subscription import (STATUS_ACTIVE, STATUS_CANCELED, STATUS_PAST_DUE,
+                                          SubscriptionRegistry)
 from sigil.governor.wallet import WalletRegistry
 from sigil.reuse import generate_keypair
 from sigil.spine.store import SpineStore
@@ -252,11 +253,15 @@ def test_stripe_disabled_by_default():
         StripeBillingProvider("whsec_x")                            # no opt-in -> refuses
     assert StripeBillingProvider("whsec_x", enable_reference_adapter=True) is not None   # explicit flag
     import os
+    _prev = os.environ.get("VIGIL_BILLING_ENABLE_STRIPE")
     os.environ["VIGIL_BILLING_ENABLE_STRIPE"] = "1"
     try:
         assert StripeBillingProvider("whsec_x") is not None         # env opt-in
     finally:
-        del os.environ["VIGIL_BILLING_ENABLE_STRIPE"]
+        if _prev is None:
+            os.environ.pop("VIGIL_BILLING_ENABLE_STRIPE", None)
+        else:
+            os.environ["VIGIL_BILLING_ENABLE_STRIPE"] = _prev
 
 
 # ---- Flutterwave provider (primary) — verif-hash + MANDATORY server-side re-verify -------------------
@@ -324,22 +329,102 @@ def test_flutterwave_only_the_reverify_grants_not_the_webhook_body():
     assert w.available("acme") == 0, "a webhook whose transaction does not re-verify as successful grants nothing"
 
 
-def test_flutterwave_subscription_active_cancel_and_fail():
+def test_flutterwave_subscription_active_then_lapses_at_period_end():
+    # A re-verified successful PLAN charge subscribes + refills the period; non-rollover means the plan credits
+    # simply VANISH at period_end (the meter's active-subscription + live-period check), with no webhook needed.
+    table = {"9912": {"id": 9912, "status": "successful", "tx_ref": "vigil:acme:n2", "created_at": 100.0,
+                      "payment_plan": "flwplan_pro"}}
+    _s, _w, _subs, _plan, meter, _flw, signer = _flw_rig(table)
+    assert signer.ingest(_flw_wh("charge.completed", 9912), _FLW_SECRET, now=100.0) is not None
+    assert meter.available("acme", now=500.0) == 6000               # subscribe + plan refill, inside [100, 1100]
+    assert meter.available("acme", now=1500.0) == 0                 # period elapsed -> plan credits lapse
+
+
+def test_flutterwave_does_not_act_on_cancel_or_failed_webhooks():
+    # SECURITY (red-pen #1/#3): Flutterwave's verif-hash authenticates only the caller, NOT the body, so a
+    # `subscription.cancelled` / failed-charge webhook cannot name a victim tenant soundly. This slice therefore
+    # mints NOTHING on those events — a verif-hash holder must not be able to cancel/past_due any named org.
     table = {"9912": {"id": 9912, "status": "successful", "tx_ref": "vigil:acme:n2", "created_at": 100.0,
                       "payment_plan": "flwplan_pro"},
              "9913": {"id": 9913, "status": "failed", "tx_ref": "vigil:acme:n3", "payment_plan": "flwplan_pro",
                       "created_at": 200.0}}
-    _s, _w, subs, _plan, meter, _flw, signer = _flw_rig(table)
-    assert signer.ingest(_flw_wh("charge.completed", 9912), _FLW_SECRET, now=100.0) is not None
-    assert meter.available("acme", now=500.0) == 6000               # subscribe + plan refill
-    # a failed plan charge -> dunning (past_due), safe direction
-    signer.ingest(_flw_wh("charge.completed", 9913), _FLW_SECRET, now=200.0)
-    assert subs.subscription("acme").status == STATUS_PAST_DUE
-    # a cancellation webhook (no charge to re-verify) -> canceled, org from tx_ref on the subscription object
+    _s, _w, subs, _plan, _m, _flw, signer = _flw_rig(table)
+    signer.ingest(_flw_wh("charge.completed", 9912), _FLW_SECRET, now=100.0)
+    assert subs.subscription("acme").status == STATUS_ACTIVE
+    # a failed plan charge -> NOT dunning (we do not act on failed charges) -> still active
+    assert signer.ingest(_flw_wh("charge.completed", 9913), _FLW_SECRET, now=200.0) is None
+    assert subs.subscription("acme").status == STATUS_ACTIVE, "a failed-charge webhook must not past_due in 4b"
+    # a cancellation webhook naming acme in the (unauthenticated) body -> ignored -> still active
     body = json.dumps({"event": "subscription.cancelled",
                        "data": {"id": "sub_1", "tx_ref": "vigil:acme:n2", "created_at": 300.0}}).encode()
-    signer.ingest(body, _FLW_SECRET, now=300.0)
-    assert subs.subscription("acme").status == STATUS_CANCELED
+    assert signer.ingest(body, _FLW_SECRET, now=300.0) is None
+    assert subs.subscription("acme").status == STATUS_ACTIVE, "a cancel webhook must not cancel a named victim"
+
+
+def test_flutterwave_org_comes_from_verified_not_the_body():
+    # SECURITY (red-pen #2): the tenant must come from the AUTHORITATIVE verified object, never the body. The
+    # verified tx belongs to 'honest'; the body smuggles a 'victim' tx_ref. The grant must land on 'honest'.
+    table = {"42": {"id": 42, "status": "successful", "tx_ref": "vigil:honest:n1", "created_at": 10.0,
+                    "meta": {"price_id": "price_topup_200"}}}
+    _s, w, _subs, _plan, _m, _flw, signer = _flw_rig(table)
+    liar = json.dumps({"event": "charge.completed",
+                       "data": {"id": 42, "tx_ref": "vigil:victim:x", "meta": {"org_id": "victim"}}}).encode()
+    assert signer.ingest(liar, _FLW_SECRET, now=10.0) is not None
+    assert w.available("honest") == 200, "org must come from the verified object (honest)"
+    assert w.available("victim") == 0, "the body's smuggled tenant must get nothing"
+    # and the exact old bug (`_flw_org_id(verified) or _flw_org_id(body)`): verified has NO recoverable org, the
+    # body smuggles one -> must mint NOTHING (no body fallback for the tenant of a sovereign mint).
+    table2 = {"43": {"id": 43, "status": "successful", "tx_ref": "no-org", "created_at": 10.0,
+                     "meta": {"price_id": "price_topup_200"}}}      # verified: unrecoverable tenant
+    _s2, w2, _s2b, _p2, _m2, _flw2, signer2 = _flw_rig(table2)
+    smuggle = json.dumps({"event": "charge.completed",
+                          "data": {"id": 43, "tx_ref": "vigil:victim:x"}}).encode()
+    assert signer2.ingest(smuggle, _FLW_SECRET, now=10.0) is None
+    assert w2.available("victim") == 0, "an unrecoverable verified tenant must never fall back to the body"
+
+
+def test_flutterwave_body_injected_payment_plan_cannot_force_the_plan_path():
+    # SECURITY (red-pen #3): plan-vs-topup is decided by the VERIFIED object only. The verified tx is a plain
+    # top-up (no payment_plan); the body injects payment_plan. It must still be minted as a TOPUP, not a plan.
+    table = {"50": {"id": 50, "status": "successful", "tx_ref": "vigil:acme:n1", "created_at": 10.0,
+                    "meta": {"price_id": "price_topup_200"}}}
+    _s, w, subs, _plan, _m, _flw, signer = _flw_rig(table)
+    body = json.dumps({"event": "charge.completed",
+                       "data": {"id": 50, "payment_plan": "flwplan_pro"}}).encode()   # body lies: this is a plan
+    assert signer.ingest(body, _FLW_SECRET, now=10.0) is not None
+    assert w.available("acme") == 200                               # minted as a top-up, from the verified object
+    assert subs.subscription("acme") is None, "a body-injected payment_plan must not create a subscription"
+
+
+def test_flutterwave_iso_created_at_and_replay_inertness():
+    # red-pen #4: created_at is an ISO-8601 STRING; it must parse to a stable epoch (not 0 -> wall-clock), so a
+    # duplicate delivery is inert (same derived period, no re-grant / period extension). period_s=1000.
+    iso = "2024-01-02T03:04:05.000Z"                                # = 1704164645.0 UTC
+    epoch = 1704164645.0
+    table = {"77": {"id": 77, "status": "successful", "tx_ref": "vigil:acme:n1", "created_at": iso,
+                    "payment_plan": "flwplan_pro"}}
+    _s, _w, subs, _plan, meter, _flw, signer = _flw_rig(table)
+    assert signer.ingest(_flw_wh("charge.completed", 77), _FLW_SECRET, now=epoch) is not None
+    sub1 = subs.subscription("acme")
+    assert sub1.period_end == epoch + 1000.0                        # period anchored on the PARSED created_at
+    assert meter.available("acme", now=epoch + 500.0) == 6000
+    # a duplicate delivery (same tx id, same parsed created) -> inert: no new period, still one live tranche
+    signer.ingest(_flw_wh("charge.completed", 77), _FLW_SECRET, now=epoch + 900.0)
+    assert subs.subscription("acme").period_end == epoch + 1000.0, "a replay must not extend the period"
+    assert meter.available("acme", now=epoch + 500.0) == 6000
+
+
+def test_flutterwave_unparseable_created_at_mints_nothing():
+    # red-pen #4 (fail-closed): a verified tx with no parseable timestamp must mint NOTHING — replay-safety needs a
+    # stable period anchor, and a wall-clock fallback would let duplicates advance the period.
+    table = {"78": {"id": 78, "status": "successful", "tx_ref": "vigil:acme:n1", "created_at": "not-a-date",
+                    "payment_plan": "flwplan_pro"},
+             "79": {"id": 79, "status": "successful", "tx_ref": "vigil:acme:n2",
+                    "meta": {"price_id": "price_topup_200"}}}      # created_at absent entirely
+    _s, w, subs, _plan, _m, _flw, signer = _flw_rig(table)
+    assert signer.ingest(_flw_wh("charge.completed", 78), _FLW_SECRET, now=100.0) is None
+    assert signer.ingest(_flw_wh("charge.completed", 79), _FLW_SECRET, now=100.0) is None
+    assert subs.subscription("acme") is None and w.available("acme") == 0
 
 
 def test_flutterwave_unrecoverable_org_is_ignored():
