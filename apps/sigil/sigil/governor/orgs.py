@@ -31,10 +31,16 @@ ASYMMETRIC AUTHENTICATION (mirrors accounts / killswitch / capability / promotio
     FIXED `issued_at` of 0.0 (a replayed revoke merely re-revokes). Gating the fail-safe direction would make
     it fail OPEN.
 
-ANTI-REPLAY (per-record LWW high-water — the same resurrection guard `accounts.py` carries): a revoked org or
-membership cannot be resurrected by re-appending a captured owner-signed `active` grant, because that grant's
-`issued_at <= high-water` -> it is ignored. The high-water is keyed PER-ORG for orgs and PER-(org_id,
-username) for memberships, so the LWW state of org A's membership for `alice` is fully independent of org B's.
+ANTI-REPLAY (per-record LWW high-water — the SAME resurrection guard `accounts.py` carries, INCLUDING its
+hard-prune seed): a revoked org or membership cannot be resurrected by re-appending a captured owner-signed
+`active` grant, because that grant's `issued_at <= high-water` -> it is ignored. The high-water is keyed
+PER-ORG for orgs and PER-(org_id, username) for memberships, so the LWW state of org A's membership for
+`alice` is fully independent of org B's. Crucially the state + high-water SURVIVE A HARD PRUNE: `_fold_orgs` /
+`_fold_memberships` seed them from the committed `spine.snapshot.SnapshotState` (which now carries org +
+membership rows) exactly as `accounts._fold` does, and `spine.prune` refuses any prune that would strand an
+active org/membership the seed does not carry — so a prune below a revoked grant can NOT reset the high-water
+and re-open the replay. (Reactivation is handled too: `revoke_org` cascade-revokes the org's memberships, so
+re-creating a decommissioned org_id does not restore prior members without a fresh owner-signed grant.)
 
 OWNER-KEY SUCCESSION: the fold authenticates each `active` grant under the owner pubkey valid AT ITS SEQ
 (`key_history.key_resolver(...).at(seq)`), identical to `accounts._fold`. With no rotation this is a single
@@ -48,12 +54,14 @@ import). The only shared substrate it reuses is `vigil_core.rbac` (the role voca
 (not imported — importing `engine/crucible/framework/...` would breach FATAL-2) and a test keeps the two
 literals in lockstep.
 
+HARD-PRUNE SEED (BUILT — mirrors `accounts._fold`): the fold seeds the per-org / per-(org_id, username) state
++ anti-replay high-water + active-entity set from the committed `spine.snapshot.SnapshotState` (org +
+membership rows were added to the snapshot leaf module), then folds the live window only. `spine.prune`
+carries a fail-closed tripwire (`stranded_active_orgs` / `stranded_active_memberships`) that refuses a prune
+which would strand an active org/membership the seed does not carry. So a hard prune can neither vanish an
+active org nor reset a revoked one's high-water (the LWW replay-resurrection HIGH stays closed across prunes).
+
 DEFERRED (explicitly OUT of this slice):
-  * HARD-PRUNE SEED: unlike `accounts._fold`, this fold does a full genesis scan and does NOT seed from
-    `spine.snapshot.SnapshotState` (which carries no org rows yet). This is byte-identical to how `accounts`
-    behaved BEFORE its snapshot slice (Claim 6 shipped first; the seed was a later slice). A hard prune below
-    an org's first grant would therefore currently strand it — closing that needs org rows added to the
-    snapshot leaf module + a `spine.prune` safety check, a self-contained follow-up slice.
   * SSO / SCIM: NOT built here, and in direct TENSION with the core invariant "a role is NEVER taken from an
     IdP claim; an identity with no owner-signed account is REFUSED". SCIM auto-provisioning would mint
     memberships/accounts from IdP group claims WITHOUT an owner signature — exactly what this fold refuses.
@@ -79,6 +87,7 @@ from vigil_core.rbac import ROLES, role_can  # noqa: E402
 from . import key_history as _kh  # noqa: E402  (succession-aware owner-key resolver, mirrors accounts._fold)
 from .authn import NO_HIGHWATER, as_issued_at, signed_payload, verify_signed  # noqa: E402
 from .identity import owner_keypair, owner_pubkey  # noqa: E402
+from ..spine.snapshot import SnapshotState  # noqa: E402  (hard-prune seed — the fold mirrors accounts._fold)
 
 # Dedicated payload signals under the generic enforced `kind="event"` record (mirrors accounts' SIGNAL),
 # so a NEW kind need not be registered with the W5-1 write-path guard — the signal disambiguates the fold.
@@ -245,9 +254,22 @@ class OrgRegistry:
     def revoke_org(self, org_id: str) -> int:
         """Revoke an org — the SAFE direction. Owner-signed for provenance/audit, but takes effect regardless
         of the signature (a forged/nuisance revoke is at worst a fail-safe DoS on that org), and carries a
-        FIXED `issued_at` of 0.0 (a replayed revoke merely re-revokes). A revoked org admits NO members: its
-        memberships become inert at the admission primitive (see `org_role_can`)."""
+        FIXED `issued_at` of 0.0 (a replayed revoke merely re-revokes).
+
+        CASCADE-REVOKE (the reactivation guard): this ALSO revokes every CURRENT membership of the org (each a
+        safe-direction revoke). Because `org == tenant_id` and an org_id may be legitimately re-created after
+        revoke (supported reactivation), without the cascade a `revoke_org`→`create_org` on the SAME org_id
+        would silently restore every prior member's role in the NEW incarnation — `membership_role` gates only
+        on the org's CURRENT active state, not on whether the member was re-granted. Cascading leaves each
+        membership in the `revoked` LWW state (durable across a hard prune via the snapshot seed), so a prior
+        member is admitted again ONLY after a FRESH owner-signed grant with a strictly-greater issued_at. The
+        org revoke is appended LAST and its seq is returned (the primary record)."""
         oid = _check_org_id(org_id)
+        # Revoke each current member FIRST so reactivating the org cannot resurrect them. Enumeration uses the
+        # current fold; revoke_membership is idempotent + replay-safe. (A member granted while the org is
+        # revoked is impossible — grant_membership refuses a non-active org — so this set is complete.)
+        for _m in self.memberships(oid):
+            self.revoke_membership(oid, _m.username)
         core = {"signal": ORG_SIGNAL, "org_id": oid, "name": "", "owner": "",
                 "state": "revoked", "issued_at": 0.0}
         payload = {**signed_payload(core, self.owner_key), "by": "owner", "requested_by": "owner",
@@ -304,13 +326,27 @@ class OrgRegistry:
     def _fold_orgs(self) -> dict[str, Org]:
         """Fold the spine into {org_id: Org} for orgs whose latest state is active. Each `active` grant is
         authenticated under the owner pubkey valid AT ITS SEQ (`resolver.at`), and the per-org high-water
-        refuses any stale/replayed re-append (the resurrection guard). Mirrors `accounts._fold` minus the
-        snapshot seed (deferred)."""
+        refuses any stale/replayed re-append (the resurrection guard).
+
+        HARD-PRUNE SEED (mirrors `accounts._fold` EXACTLY): seed the per-org state / high-water / active-Org
+        set from the committed `SnapshotState`, then fold forward over the LIVE window only — so an active org
+        whose only grant was pruned SURVIVES and its per-org anti-replay high-water is NOT reset (else the
+        first hard prune below a revoked org's grant would re-open the LWW replay-resurrection HIGH). The seed
+        is valid only under the pubkey it was folded with: if our anchor differs (rotated key / empty identity)
+        BYPASS the snapshot and full-scan from genesis — byte-identical under the empty snapshot (base_seq==0
+        ⇒ since==-1 ⇒ the genesis scan, empty seed either way)."""
+        snap = SnapshotState.load(self.store)
         resolver = _kh.key_resolver(self.store, current=self.trusted_pubkey)
-        state: dict[str, str] = {}
-        issued: dict[str, float] = {}
-        orgs: dict[str, Org] = {}
-        for r in self.store.iter_records():
+        if self.trusted_pubkey != snap.trusted_pubkey:
+            state, issued, orgs, since = {}, {}, {}, -1
+        else:
+            state = dict(snap.org_state_map())                # org_id -> "active"|"revoked" (LWW; keep revoked)
+            issued = dict(snap.org_issued_map())              # org_id -> per-org high-water
+            orgs = {row[0]: Org(org_id=str(row[0]), name=str(row[1] or ""), owner=str(row[2] or ""),
+                                created_at=issued.get(row[0], 0.0), state="active")
+                    for row in snap.org_row}                  # rebuild the honored-active Orgs from the seed
+            since = snap.base_seq - 1
+        for r in self.store.iter_records(since_seq=since):
             p = r.payload
             if not isinstance(p, dict) or p.get("signal") != ORG_SIGNAL:
                 continue
@@ -336,12 +372,22 @@ class OrgRegistry:
         """Fold the spine into {(org_id, username): Membership} for memberships whose latest state is active.
         The LWW state + anti-replay high-water are keyed PER-(org_id, username), so `alice`'s membership in
         org A is fully independent of her (non-)membership in org B. Owner-key-succession-aware + fail-closed
-        exactly like `_fold_orgs`."""
+        exactly like `_fold_orgs`, including the HARD-PRUNE SEED: seed the per-(org_id, username) state /
+        high-water / active-Membership set from the committed `SnapshotState` so a pruned membership grant
+        survives and its high-water is not reset (same pubkey-dependent bypass as `_fold_orgs`)."""
+        snap = SnapshotState.load(self.store)
         resolver = _kh.key_resolver(self.store, current=self.trusted_pubkey)
-        state: dict[tuple, str] = {}
-        issued: dict[tuple, float] = {}
-        mems: dict[tuple, Membership] = {}
-        for r in self.store.iter_records():
+        if self.trusted_pubkey != snap.trusted_pubkey:
+            state, issued, mems, since = {}, {}, {}, -1
+        else:
+            state = dict(snap.membership_state_map())         # (org_id, username) -> "active"|"revoked" (keep revoked)
+            issued = dict(snap.membership_issued_map())       # (org_id, username) -> per-pair high-water
+            mems = {(row[0], row[1]): Membership(
+                        org_id=str(row[0]), username=str(row[1]), role=str(row[2] or ""),
+                        issued_at=issued.get((row[0], row[1]), 0.0), state="active")
+                    for row in snap.membership_row}            # rebuild honored-active Memberships from the seed
+            since = snap.base_seq - 1
+        for r in self.store.iter_records(since_seq=since):
             p = r.payload
             if not isinstance(p, dict) or p.get("signal") != MEMBERSHIP_SIGNAL:
                 continue

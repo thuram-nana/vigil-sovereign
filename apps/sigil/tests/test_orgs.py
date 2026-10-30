@@ -292,6 +292,34 @@ def test_owner_can_reactivate_org_after_revoke_with_a_fresh_grant():
     assert o is not None and o.name == "Acme v2" and o.created_at == 99.0
 
 
+def test_reactivated_org_does_not_restore_prior_members_without_a_fresh_grant():
+    """The reactivation MED: `revoke_org` CASCADE-revokes the org's memberships, so re-creating the SAME
+    org_id (a supported reactivation) does NOT silently restore a prior member in the NEW incarnation —
+    `membership_role` gates on the org's CURRENT active state, so WITHOUT the cascade a revoke_org→create_org
+    on `acme` would re-admit `alice` the instant the org is active again. A prior member is admitted only
+    after a FRESH owner-signed grant.
+
+    Mutation-sensitive: deleting the cascade loop in `OrgRegistry.revoke_org` flips the first post-reactivation
+    assertion (alice silently restored to operator)."""
+    s = _store()
+    reg = _reg(s)
+    reg.create_org("acme", "Acme", owner="owner", issued_at=1.0)
+    reg.grant_membership("acme", "alice", "operator", issued_at=2.0)
+    assert reg.membership_role("alice", "acme") == "operator"
+    reg.revoke_org("acme")
+    # the cascade revoked alice's membership too (durable LWW `revoked`, not merely org-gated to None):
+    assert reg.memberships("acme") == [], "revoke_org must cascade-revoke the org's memberships"
+    # reactivate the SAME org_id with a fresh owner-signed grant …
+    reg.create_org("acme", "Acme v2", owner="owner", issued_at=99.0)
+    assert reg.org("acme") is not None
+    # … and alice is NOT silently back: her membership stays revoked until re-granted.
+    assert reg.membership_role("alice", "acme") is None, "reactivation must not resurrect prior members"
+    assert reg.org_role_can("alice", "acme", "read") is False
+    # a FRESH membership grant (strictly-greater issued_at) legitimately re-admits her.
+    reg.grant_membership("acme", "alice", "viewer", issued_at=100.0)
+    assert reg.membership_role("alice", "acme") == "viewer"
+
+
 # --- org -> tenant_id mapping (org == tenant_id) ---------------------------------
 
 def test_org_tenant_id_identity_mapping():

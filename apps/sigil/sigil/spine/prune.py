@@ -159,6 +159,16 @@ def check_prune_safe(store, K: int) -> list[Segment]:
     if stranded:
         raise PruneUnsafe(f"K={K} would strand active account(s) {stranded}: their only owner-signed grant "
                           f"sits below K and would not be carried into the snapshot seed; lower K or resolve")
+    # (c, enterprise-identity) the SAME referential floor for owner-signed orgs + memberships (governor/orgs.py):
+    # an active org/membership whose only grant sits below K must be carried into the snapshot seed, or the
+    # prune would vanish it AND reset its anti-replay high-water (re-opening the replay-resurrection HIGH).
+    stranded_orgs, stranded_mems = stranded_active_org_entities(store, archived, K)
+    if stranded_orgs:
+        raise PruneUnsafe(f"K={K} would strand active org(s) {stranded_orgs}: their only owner-signed grant "
+                          f"sits below K and would not be carried into the snapshot seed; lower K or resolve")
+    if stranded_mems:
+        raise PruneUnsafe(f"K={K} would strand active membership(s) {stranded_mems}: their only owner-signed "
+                          f"grant sits below K and would not be carried into the snapshot seed; lower K or resolve")
     # (e) owner-key succession referential floor (W9-1 / issue #434): a rotation record that ESTABLISHES a key
     # whose seq-window still covers a LIVE record (>= K) — including, always, the current key's open window —
     # must NOT be pruned. Without the whole genesis->current chain present in the live window, post-prune
@@ -243,6 +253,68 @@ def stranded_active_accounts(store, archived: list[Segment], K: int) -> list[str
     seed_state = seed.account_state_map()
     carried = {row[0] for row in seed.account_cred if seed_state.get(row[0]) == "active"}
     return sorted(str(u) for u in (active - carried))
+
+
+def stranded_active_org_entities(store, archived: list[Segment], K: int) -> tuple[list[str], list[str]]:
+    """§7(c, enterprise-identity) — the ACTIVE orgs / memberships (`governor/orgs.py`) whose only owner-signed
+    grant sits in the pruned prefix [0..K) yet would NOT be carried into the snapshot seed: the set a hard
+    prune would silently vanish (and whose per-org / per-(org_id,username) anti-replay high-water it would
+    reset — re-opening the LWW replay-resurrection HIGH). EMPTY in the happy path — `SnapshotState.build()`
+    carries every VERIFIED-active org + membership. The fail-closed tripwire that keeps the org fold's
+    prune-survival honest, mirroring `stranded_active_accounts` for both org signals. Returns
+    ``(stranded_orgs, stranded_memberships)`` (membership strings as ``username@org_id``). VERIFIED-active
+    only: a forged/unsigned `active` grant is not counted, so it can never block a prune. Read-only."""
+    from ..governor.orgs import ORG_SIGNAL, MEMBERSHIP_SIGNAL, _ORG_CORE, _MEMBERSHIP_CORE
+    from ..governor import key_history as _kh
+    from ..governor.authn import NO_HIGHWATER, as_issued_at, verify_signed
+    from ..governor.identity import owner_pubkey
+    tp = owner_pubkey() or ""
+    resolver = _kh.key_resolver(store, current=tp)
+    below: list[SpineRecord] = []
+    for seg in archived:
+        below.extend(read_segment_records(store._layout.seg_path(seg)))
+    o_state: dict[Any, str] = {}
+    o_issued: dict[Any, float] = {}
+    m_state: dict[tuple, str] = {}
+    m_issued: dict[tuple, float] = {}
+    for r in sorted(below, key=lambda r: r.seq):
+        p = r.payload
+        if not isinstance(p, dict):
+            continue
+        sig = p.get("signal")
+        if sig == ORG_SIGNAL:
+            oid, rst = p.get("org_id"), p.get("state")
+            if not isinstance(oid, str) or not oid:
+                continue
+            if rst == "revoked":
+                o_state[oid] = "revoked"
+            elif rst == "active" and verify_signed(p, _ORG_CORE, resolver.at(r.seq)):
+                at = as_issued_at(p.get("issued_at"))
+                if at > o_issued.get(oid, NO_HIGHWATER):
+                    o_issued[oid], o_state[oid] = at, "active"
+        elif sig == MEMBERSHIP_SIGNAL:
+            oid, un, rst = p.get("org_id"), p.get("username"), p.get("state")
+            if not (isinstance(oid, str) and oid and isinstance(un, str) and un):
+                continue
+            key = (oid, un)
+            if rst == "revoked":
+                m_state[key] = "revoked"
+            elif rst == "active" and verify_signed(p, _MEMBERSHIP_CORE, resolver.at(r.seq)):
+                at = as_issued_at(p.get("issued_at"))
+                if at > m_issued.get(key, NO_HIGHWATER):
+                    m_issued[key], m_state[key] = at, "active"
+    active_orgs = {o for o, v in o_state.items() if v == "active"}
+    active_mems = {k for k, v in m_state.items() if v == "active"}
+    # the seed the prune will actually persist, round-tripped through the on-disk (JSON) form.
+    seed = SnapshotState.model_validate(
+        build(below, trusted_pubkey=tp, base_seq=K, snapshot_seq=-1, resolver=resolver).model_dump())
+    o_seed_state = seed.org_state_map()
+    orgs_carried = {row[0] for row in seed.org_row if o_seed_state.get(row[0]) == "active"}
+    m_seed_state = seed.membership_state_map()
+    mems_carried = {(row[0], row[1]) for row in seed.membership_row
+                    if m_seed_state.get((row[0], row[1])) == "active"}
+    return (sorted(str(o) for o in (active_orgs - orgs_carried)),
+            sorted(f"{k[1]}@{k[0]}" for k in (active_mems - mems_carried)))
 
 
 # ---- the owner-committed snapshot payload (Merkle accumulator + folded state) ---------------------------
