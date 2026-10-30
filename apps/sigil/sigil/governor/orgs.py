@@ -503,3 +503,22 @@ class OrgRegistry:
         if role_can(global_role, permission):
             return True
         return self.org_role_can(username, org_id, permission)
+
+    def admit_customer(self, *, username: str, org_id: str, permission: Optional[str]) -> bool:
+        """The CUSTOMER admission gate (Slice E1) — like `admit` but with NO GLOBAL LEG. A customer
+        principal has no global role by construction (`global_role=None`): its capability is ONLY its
+        owner-signed per-org membership, so admitting a customer is purely `org_role_can` — default-deny,
+        strictly scoped to THIS `org_id`.
+
+        This is a DISTINCT, named entry point (never `admit`) on purpose. `admit`'s global leg
+        (`role_can(global_role, permission)`) ignores `org_id`, so it admits any caller whose global role
+        carries the permission to ANY org — a cross-tenant skeleton key if a customer ever reached it with
+        a non-None role. By giving customer request paths a gate that takes NO `global_role` parameter at
+        all, a customer can never present a global role (forged, stale, or copy-pasted from the operator
+        idiom `admit(global_role=principal.role, …)`) to cross tenants. A customer therefore NEVER reaches
+        an operator-global permission or `offense_authority`/`target_add` — those live only at the owner
+        key and are absent from the viewer/analyst/operator per-org roles — so billing-authz != testing-authz
+        holds structurally for every customer request. The per-org role is resolved LIVE from the
+        membership fold here, so a revoked/downgraded membership loses access on the very next request
+        (never a stale role cached in a session)."""
+        return self.org_role_can(username, org_id, permission)
