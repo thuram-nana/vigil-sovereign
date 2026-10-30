@@ -493,6 +493,10 @@ class FlutterwaveBillingProvider(BillingProvider):
         verified = self._verifier(str(txid))          # AUTHORITATIVE server-side re-verify — the ONLY trust source
         if not isinstance(verified, dict) or verified.get("status") != "successful":
             return None                               # unverifiable / not successful -> mint nothing
+        vid = verified.get("id")                      # the idempotency anchor is the CANONICAL verified id, NEVER
+        if vid is None:                               # the body's spelling: two body spellings of one real tx that
+            return None                               # /verify maps to the same id must collapse to ONE grant (the
+        event_id = str(vid)                           # body is trusted ONLY to name which tx to fetch); fail-closed.
         org = _flw_org_id(verified)                   # tenant from the VERIFIED object only (never the body)
         if org is None:
             return None                               # successful but no recoverable tenant -> never mint on a guess
@@ -501,9 +505,9 @@ class FlutterwaveBillingProvider(BillingProvider):
             return None                               # replay-safety needs a stable timestamp -> no `now` fallback
         tx_ref = verified.get("tx_ref")
         if verified.get("payment_plan"):              # plan-vs-topup decided by the VERIFIED object only
-            return BillingEvent(event_id=str(txid), kind=EVENT_SUBSCRIPTION_ACTIVE, org_id=org, created=created,
+            return BillingEvent(event_id=event_id, kind=EVENT_SUBSCRIPTION_ACTIVE, org_id=org, created=created,
                                 price_id=str(verified.get("payment_plan") or ""), data={"tx_ref": tx_ref})
-        return BillingEvent(event_id=str(txid), kind=EVENT_TOPUP, org_id=org, created=created,
+        return BillingEvent(event_id=event_id, kind=EVENT_TOPUP, org_id=org, created=created,
                             price_id=_flw_price_id(verified), data={"tx_ref": tx_ref})
 
 

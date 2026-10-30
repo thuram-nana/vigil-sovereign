@@ -305,6 +305,35 @@ def test_flutterwave_topup_via_reverify_and_idempotent():
     assert w.available("acme") == 200, "duplicate webhook (same transaction id) must not double-credit"
 
 
+def test_flutterwave_idempotency_anchors_on_verified_id_not_the_body_spelling():
+    # SECURITY (red-pen follow-up): the idempotency anchor (wallet entry_id) must be the CANONICAL verified id, not
+    # the body's id SPELLING. Two deliveries of ONE real tx under two body-id spellings that /verify collapses to
+    # the same canonical id must grant ONCE — else a verif-hash holder double-credits a real payment by varying
+    # the spelling (e.g. a leading zero) whenever the verify endpoint canonicalizes it.
+    canonical = {"id": 9911, "status": "successful", "tx_ref": "vigil:acme:n1", "created_at": 100.0,
+                 "meta": {"price_id": "price_topup_200"}}
+
+    def verifier(txid):                                 # the endpoint canonicalizes "9911" and "09911" -> tx 9911
+        return canonical if str(txid).lstrip("0") == "9911" else None
+
+    s, w, subs, plan, _meter, _mock, _signer = _rig()
+    flw = FlutterwaveBillingProvider(_FLW_SECRET, verifier)
+    signer = BillingSigner(flw, wallet=w, subscriptions=subs, plan=plan,
+                           catalog={"price_topup_200": Entitlement(kind=EVENT_TOPUP, credits=200)})
+    assert signer.ingest(_flw_wh("charge.completed", "9911"), _FLW_SECRET, now=100.0) is not None
+    signer.ingest(_flw_wh("charge.completed", "09911"), _FLW_SECRET, now=100.0)   # SAME tx, different spelling
+    assert w.available("acme") == 200, "two spellings of one verified tx must collapse to a single grant"
+
+
+def test_flutterwave_missing_verified_id_mints_nothing():
+    # fail-closed: a verified object carrying no canonical id cannot be anchored idempotently -> mint nothing.
+    table = {"9911": {"status": "successful", "tx_ref": "vigil:acme:n1", "created_at": 100.0,
+                      "meta": {"price_id": "price_topup_200"}}}      # no "id" field on the verified object
+    _s, w, _subs, _plan, _m, _flw, signer = _flw_rig(table)
+    assert signer.ingest(_flw_wh("charge.completed", 9911), _FLW_SECRET, now=100.0) is None
+    assert w.available("acme") == 0
+
+
 def test_flutterwave_forged_hash_mints_nothing():
     table = {"9911": {"id": 9911, "status": "successful", "tx_ref": "vigil:acme:n1",
                       "created_at": 100.0, "meta": {"price_id": "price_topup_200"}}}
