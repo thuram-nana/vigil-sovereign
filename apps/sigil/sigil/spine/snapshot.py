@@ -129,6 +129,14 @@ class SnapshotState(BaseModel):
     #                                   Same cross-a-prune invariant as account_issued, per membership key.
     membership_row: list = []         # [[org_id, username, role], ...] — the fields to REBUILD an active
     #                                   `Membership` from the seed (issued_at joins from membership_issued).
+    wallet_granted: list = []         # [[org_id, granted_total], ...] — Σ honored SaaS credit GRANTS per
+    #                                   tenant (governor.credit_grant). balance = granted - debited is a
+    #                                   LIFETIME running total, so (unlike the per-UTC-day budget, which keeps
+    #                                   NO sub-state) it MUST cross a prune or the first prune zeroes it.
+    wallet_debited: list = []         # [[org_id, debited_total], ...] — Σ honored SaaS credit DEBITS per tenant.
+    wallet_seen: list = []            # [[org_id, entry_id], ...] — consumed wallet idempotency keys, carried
+    #                                   across a prune so a pruned grant/debit cannot be replayed to re-credit
+    #                                   or re-charge (set-union bearer, like consumed_arm_nonces).
     consumed_arm_nonces: list = []    # [[device_pubkey, nonce], ...]  (nonce int OR str, verbatim)
     device_approval_dedup: list = []  # [[pubkey|None, sig|None, min_seq], ...]
     warden_best: dict[str, list] = {} # {pubkey: [max_count, head_hash, tiebreak_seq]}
@@ -170,6 +178,17 @@ class SnapshotState(BaseModel):
         return {(row[0], row[1]): row[2] for row in self.membership_issued}
     #   membership_row is a raw list-of-rows: `OrgRegistry._fold_memberships` rebuilds the Membership objects
     #   from it (joining issued_at from membership_issued_map), keyed PER-(org_id, username).
+
+    def wallet_granted_map(self) -> dict[Any, int]:
+        return {row[0]: row[1] for row in self.wallet_granted}
+
+    def wallet_debited_map(self) -> dict[Any, int]:
+        return {row[0]: row[1] for row in self.wallet_debited}
+
+    def wallet_seen_set(self) -> set:
+        return {(row[0], row[1]) for row in self.wallet_seen}
+    #   `WalletRegistry._fold` seeds (granted, debited, seen) from these; balance = granted - debited, and the
+    #   seen-set is the idempotency/anti-replay guard that MUST survive a prune (mirrors accounts._fold).
 
     def capability_latch_map(self) -> dict[Optional[str], bool]:
         return {row[0]: row[1] for row in self.capability_latch}
@@ -313,6 +332,12 @@ def build(records: Iterable[SpineRecord], *, trusted_pubkey: Optional[str],
     # the account core above); the fold below carries them across a prune exactly as it does accounts.
     from ..governor.orgs import (ORG_SIGNAL as _ORG_SIGNAL, MEMBERSHIP_SIGNAL as _MEM_SIGNAL,
                                  _ORG_CORE, _MEMBERSHIP_CORE)
+    # SaaS wallet signed-core tuples + the credits clamp imported from the live module (never restated — same
+    # drift guard as the org cores above); the fold below carries the balance + anti-replay seen-set across a
+    # prune exactly as it does accounts/orgs.
+    from ..governor.wallet import (CREDIT_GRANT_SIGNAL as _WGRANT_SIGNAL, CREDIT_DEBIT_SIGNAL as _WDEBIT_SIGNAL,
+                                   _GRANT_CORE as _WGRANT_CORE, _DEBIT_CORE as _WDEBIT_CORE,
+                                   _as_credits as _w_as_credits)
 
     # The order-DEPENDENT folds (the kill-switch latch, every last-write-wins map) require ascending seq.
     # iter_records already yields ascending seq, but sort defensively so build() is correct for ANY caller /
@@ -348,6 +373,9 @@ def build(records: Iterable[SpineRecord], *, trusted_pubkey: Optional[str],
     mem_state: dict[tuple, str] = dict(s.membership_state_map()) if s else {}
     mem_issued: dict[tuple, float] = dict(s.membership_issued_map()) if s else {}
     mem_row: dict[tuple, Any] = {(row[0], row[1]): row[2] for row in s.membership_row} if s else {}  # ->role
+    w_granted: dict[Any, int] = dict(s.wallet_granted_map()) if s else {}   # org_id -> Σ grant credits
+    w_debited: dict[Any, int] = dict(s.wallet_debited_map()) if s else {}   # org_id -> Σ debit credits
+    w_seen: set = set(s.wallet_seen_set()) if s else set()                  # consumed (org_id, entry_id) keys
     arm: set = set(s.arm_set()) if s else set()
     dedup: dict[tuple[Optional[str], Optional[str]], int] = dict(s.approval_dedup_map()) if s else {}
     warden: dict[str, tuple[int, str, int]] = ({k: (v[0], v[1], v[2]) for k, v in s.warden_best.items()}
@@ -489,6 +517,24 @@ def build(records: Iterable[SpineRecord], *, trusted_pubkey: Optional[str],
                         mem_issued[mkey] = at
                         mem_state[mkey] = "active"
                         mem_row[mkey] = p.get("role")
+        # --- SaaS credit wallet: ADDITIVE grant/debit ledger, idempotent per (org_id, entry_id) — mirrors
+        #     WalletRegistry._fold EXACTLY (verify under the key valid at the seq; a record whose key is already
+        #     in w_seen is ignored, the replay/double-count guard; credits clamped >= 0). Both signals share the
+        #     seen-set (entry_ids are globally unique). Carried across a prune so a pruned grant cannot re-credit. ---
+        if sig == _WGRANT_SIGNAL or sig == _WDEBIT_SIGNAL:
+            woid = p.get("org_id")
+            weid = p.get("entry_id")
+            if isinstance(woid, str) and woid and isinstance(weid, str) and weid:
+                wcore = _WGRANT_CORE if sig == _WGRANT_SIGNAL else _WDEBIT_CORE
+                if verify_signed(p, wcore, vpk):
+                    wkey = (woid, weid)
+                    if wkey not in w_seen:
+                        w_seen.add(wkey)
+                        wc = _w_as_credits(p.get("credits"))
+                        if sig == _WGRANT_SIGNAL:
+                            w_granted[woid] = w_granted.get(woid, 0) + wc
+                        else:
+                            w_debited[woid] = w_debited.get(woid, 0) + wc
         # --- gesture device-arm replay ledger (set-union) ---
         if sig == "gesture.session_armed" and p.get("armed_by") == "device":
             arm.add((p.get("device_pubkey"), p.get("nonce")))
@@ -540,6 +586,9 @@ def build(records: Iterable[SpineRecord], *, trusted_pubkey: Optional[str],
         membership_state=[[k[0], k[1], v] for k, v in mem_state.items()],
         membership_issued=[[k[0], k[1], i] for k, i in mem_issued.items()],
         membership_row=[[k[0], k[1], r] for k, r in mem_row.items()],
+        wallet_granted=[[o, c] for o, c in w_granted.items()],
+        wallet_debited=[[o, c] for o, c in w_debited.items()],
+        wallet_seen=[[o, e] for (o, e) in w_seen],
         consumed_arm_nonces=[[d, n] for (d, n) in arm],
         device_approval_dedup=[[pk, sg, seq] for (pk, sg), seq in dedup.items()],
         warden_best={k: [c, h, s] for k, (c, h, s) in warden.items()},
