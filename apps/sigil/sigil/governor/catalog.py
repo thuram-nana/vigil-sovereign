@@ -25,6 +25,7 @@ FATAL-2: sovereign-side (`assert_no_offense()` at import); imports only the bill
 """
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 
 from ..reuse import assert_no_offense
@@ -32,6 +33,7 @@ from ..reuse import assert_no_offense
 assert_no_offense()
 
 from .billing import EVENT_SUBSCRIPTION_ACTIVE, EVENT_TOPUP, Entitlement  # noqa: E402
+from .subscription import _check_plan_id  # noqa: E402  (mirror the mint-path plan_id validator — fail-closed at import, red-pen D/C2)
 
 _PERIOD_MONTH_S = 30 * 24 * 3600.0          # a monthly subscription period, in seconds
 _KNOWN_KINDS = frozenset({EVENT_TOPUP, EVENT_SUBSCRIPTION_ACTIVE})
@@ -96,14 +98,21 @@ def _validate(catalog: tuple[CatalogEntry, ...]) -> None:
             raise ValueError(f"catalog entry {e.price_id!r}: unknown kind {e.kind!r}")
         if not isinstance(e.amount_minor, int) or e.amount_minor < 0:
             raise ValueError(f"catalog entry {e.price_id!r}: amount_minor must be a non-negative int")
-        if not (isinstance(e.currency, str) and len(e.currency) == 3 and e.currency.isalpha()):
-            raise ValueError(f"catalog entry {e.price_id!r}: currency must be an ISO-4217 alpha-3 code")
+        if not (isinstance(e.currency, str) and len(e.currency) == 3 and e.currency.isalpha()
+                and e.currency.isupper()):
+            raise ValueError(f"catalog entry {e.price_id!r}: currency must be an uppercase ISO-4217 alpha-3 code")
         if e.kind == EVENT_TOPUP:
             if e.credits <= 0 or e.plan_id or e.allotment or e.period_s:
                 raise ValueError(f"top-up {e.price_id!r}: needs credits>0 and no plan/allotment/period")
         else:  # EVENT_SUBSCRIPTION_ACTIVE
-            if not e.plan_id or e.allotment <= 0 or e.period_s <= 0.0 or e.credits:
-                raise ValueError(f"subscription {e.price_id!r}: needs plan_id + allotment>0 + period_s>0, no credits")
+            if not e.plan_id or e.allotment <= 0 or not math.isfinite(e.period_s) or e.period_s <= 0.0 or e.credits:
+                raise ValueError(f"subscription {e.price_id!r}: needs plan_id + allotment>0 + finite period_s>0, no credits")
+            # mirror the mint-path validator (subscription._check_plan_id): a malformed-but-nonempty plan_id must
+            # fail HERE at import, never detonate inside subscribe() at webhook-mint time (red-pen D/C2).
+            try:
+                _check_plan_id(e.plan_id)
+            except ValueError as exc:
+                raise ValueError(f"subscription {e.price_id!r}: {exc}") from exc
 
 
 _validate(_CATALOG)

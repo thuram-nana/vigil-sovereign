@@ -151,6 +151,11 @@ def test_billing_plans_lists_the_catalog():
         assert code == 200 and isinstance(body.get("plans"), list) and len(body["plans"]) >= 1, (code, body)
         assert all({"price_id", "kind", "name", "amount_minor", "currency"} <= set(p) for p in body["plans"])
         assert all("cred_hash" not in p and "salt" not in p for p in body["plans"])   # no secret in a plan row
+        # LOAD-BEARING (red-pen D/A3): assert the viewer+ contract against a REAL low-privilege principal, not
+        # just the owner token — so a regression tightening the guard above `read` reds here instead of green.
+        viewer = _bearer(port, "pricing_viewer", "viewer")
+        vcode, vbody = _get(port, "/api/billing/plans", token=viewer)
+        assert vcode == 200 and isinstance(vbody.get("plans"), list) and len(vbody["plans"]) >= 1, (vcode, vbody)
         assert _get(port, "/api/billing/plans", token=None)[0] == 401                  # auth required
     finally:
         srv.shutdown()

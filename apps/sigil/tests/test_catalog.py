@@ -69,12 +69,20 @@ def test_malformed_catalog_is_rejected_fail_closed():
         CatalogEntry("s", EVENT_SUBSCRIPTION_ACTIVE, "x", 100, "USD"),              # sub w/o plan/allotment/period
         CatalogEntry("s", EVENT_SUBSCRIPTION_ACTIVE, "x", 100, "USD", plan_id="p", allotment=1, period_s=1,
                      credits=5),                                                    # sub w/ credits
+        CatalogEntry("s", EVENT_SUBSCRIPTION_ACTIVE, "x", 100, "USD", plan_id="Pro", allotment=1,
+                     period_s=1),                                                   # plan_id not a lowercase slug (mint-path parity, D/C2)
+        CatalogEntry("s", EVENT_SUBSCRIPTION_ACTIVE, "x", 100, "USD", plan_id="p", allotment=1,
+                     period_s=float("inf")),                                        # non-finite period (inf) — fail-closed (D/A1)
+        CatalogEntry("s", EVENT_SUBSCRIPTION_ACTIVE, "x", 100, "USD", plan_id="p", allotment=1,
+                     period_s=float("nan")),                                        # non-finite period (NaN) — fail-closed (D/A1)
+        CatalogEntry("t", EVENT_TOPUP, "x", 100, "usd", credits=10),                # currency not uppercase (case, D/C2)
     ]
     # the duplicate case needs a pair; the rest each raise on their own
     assert cat._validate.__call__  # present
     with pytest.raises(ValueError):
         cat._validate((bad[1], bad[2]))                                            # duplicate
-    for e in (bad[0], bad[3], bad[4], bad[5], bad[6], bad[7], bad[8], bad[9]):
+    for e in (bad[0], bad[3], bad[4], bad[5], bad[6], bad[7], bad[8], bad[9],
+              bad[10], bad[11], bad[12], bad[13]):
         with pytest.raises(ValueError):
             cat._validate((e,))
 
