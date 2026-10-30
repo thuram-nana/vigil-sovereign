@@ -146,6 +146,28 @@ def test_canceled_after_subscribe_survives_prune_not_dropped_as_phantom(monkeypa
     assert r2.active_subscription("acme") is None
 
 
+# ---- (b3) a never-subscribed bare-down carried in the SEED (pruned prefix, status only, no row) reads absent
+def test_seed_carried_bare_down_never_subscribed_reads_absent(monkeypatch):
+    # The phantom filter must also hold across a prune for a NEVER-subscribed org: a bare cancel in the pruned
+    # prefix is carried in snapshot.subscription_state (status only, NO subscription_row), so the SHARED _fold
+    # output filter (`row is None -> skip`) must still read it absent from the seed alone. This pins the filter
+    # to the shared output loop — a live-only placement would silently re-fabricate the phantom from the seed.
+    store = _store()
+    r = _reg(store)
+    r.cancel("ghost")                                                   # seq 0: bare down, never subscribed
+    k = store.append(kind="event", source="governor", actor="WARDEN", payload={"signal": "marker"})  # seq 1
+    prefix = [rec for rec in store.iter_records() if rec.seq < k]
+    snap = build(prefix, trusted_pubkey=OWNER_PUB, base_seq=k, snapshot_seq=k - 1)
+    assert snap.subscription_state_map().get("ghost") == STATUS_CANCELED           # carried in the seed state...
+    assert not any(row[0] == "ghost" for row in snap.subscription_row)             # ...but NO row (never active)
+
+    pruned = PrunedView(store, k)
+    monkeypatch.setattr(SnapshotState, "load", classmethod(lambda cls, s: snap))
+    r2 = SubscriptionRegistry(pruned, owner_key=OWNER, trusted_pubkey=OWNER_PUB)
+    assert r2.subscription("ghost") is None, "a seed-carried bare-down (no row) must read absent, not a phantom"
+    assert "ghost" not in {x.org_id for x in r2.subscriptions()}
+
+
 # ---- (c) empty-load == genesis scan, proven by split == full == known-correct ------------------------
 def _populate(store):
     r = _reg(store)
