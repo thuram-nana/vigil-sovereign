@@ -25,6 +25,20 @@ BOUNDARY INVARIANTS (mirror ``inbound/spool_watcher.py`` — treat every byte as
     own ``event_id`` idempotency — a duplicate Flutterwave delivery credits exactly once.
   * HOSTILE-FILE-HARDENED: ``O_NOFOLLOW`` + ``O_NONBLOCK`` + ``S_ISREG`` + size cap + UTF-8 decode, so a planted
     symlink / FIFO / device / oversized / non-UTF-8 blob is quarantined, never followed, and never hangs.
+
+VERIFIER CONTRACT (so a genuinely-paid transaction is never silently buried). The proxy 202s a delivery as soon
+as it spools, so the provider will NOT redeliver — this drain is the only thing that will ever try to mint it.
+``ingest`` returns None for TWO very different situations: a DEFINITIVE no-op (the transaction re-verified but is
+not a successful, catalog-mapped mint) and a FAILED verify. The injected transaction verifier MUST therefore
+distinguish them: it RAISES on a transient / ambiguous failure (network error, timeout, 5xx, a rate limit) and
+returns None / a non-"successful" object ONLY for a DEFINITIVE answer. Under that contract a transient failure
+propagates as an exception and this drain QUARANTINES the envelope to ``rejected/`` (recoverable — it can be
+moved back to ``incoming/`` and re-drained once the provider is reachable), whereas a definitive no-op archives
+to ``processed/`` (correctly final). A verifier that instead swallowed a transient error into None would let the
+drain treat a real payment as a final no-op and bury it — which is why the contract is RAISE-on-transient. The
+backstop for any residual gap is periodic RECONCILIATION (sweep recent tx_refs against the provider and mint any
+missed) — the provider's CAP_RECONCILE capability, a later slice. This is a money-SAFE direction either way: the
+failure mode is under-crediting a paid tenant (recoverable), never over-crediting an unpaid one.
 """
 from __future__ import annotations
 

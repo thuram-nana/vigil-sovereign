@@ -117,6 +117,30 @@ def test_wrong_verif_hash_mints_nothing():
     assert w.available("acme") == 0
 
 
+def test_transient_verify_failure_is_quarantined_not_buried():
+    # VERIFIER CONTRACT (red-pen C/A1+B1): a TRANSIENT re-verify failure (the verifier RAISES — network/timeout/
+    # 5xx) must be QUARANTINED to rejected/ (recoverable), NOT archived to processed/ as a final no-op — else a
+    # genuinely-paid transaction the proxy already 202'd would be silently buried. A definitive None is the only
+    # thing that archives as a no-op (covered by the unverifiable/unknown-price tests).
+    def boom(_txid):
+        raise ConnectionError("flutterwave /verify unreachable (transient)")
+
+    s = SpineStore(tempfile.mktemp(suffix=".jsonl"))
+    w = WalletRegistry(s, owner_key=OWNER, trusted_pubkey=OP)
+    subs = SubscriptionRegistry(s, owner_key=OWNER, trusted_pubkey=OP)
+    plan = PlanCreditLedger(s, owner_key=OWNER, trusted_pubkey=OP)
+    signer = BillingSigner(FlutterwaveBillingProvider(_SECRET, boom), wallet=w, subscriptions=subs, plan=plan,
+                           catalog={"price_topup_200": Entitlement(kind=EVENT_TOPUP, credits=200)})
+    spool = Path(tempfile.mkdtemp())
+    watcher = BillingSpoolWatcher(signer, spool_dir=str(spool), verif_hash=_SECRET, now_fn=lambda: 100.0)
+    _spool(spool, _body(9911))
+    res = watcher.drain()
+    assert res["minted"] == 0 and res["rejected"] == 1 and res["noop"] == 0
+    assert len(list((spool / "rejected").glob("*.json"))) == 1       # recoverable, NOT buried in processed/
+    assert list((spool / "processed").glob("*.json")) == []
+    assert w.available("acme") == 0
+
+
 def test_unknown_price_is_a_safe_noop():
     table = {"9911": {"id": 9911, "status": "successful", "tx_ref": "vigil:acme:n1", "created_at": 100.0,
                       "meta": {"price_id": "price_NOT_in_catalog"}}}
