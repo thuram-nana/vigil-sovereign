@@ -107,10 +107,15 @@ class SessionLedger:
         return live
 
     def create(self, username: str, role: str, *, is_owner: bool = False,
-               now: "Optional[float]" = None) -> "Optional[str]":
+               org_id: "Optional[str]" = None, now: "Optional[float]" = None) -> "Optional[str]":
         """Mint a FRESH session id (rotation is inherent — a new id every call, so a caller can never pin a
         pre-chosen id → no session fixation), persist its record 0600, and return the id. Sweeps + caps
-        first. Returns None if the ledger is full or the write failed (the caller then sets no cookie)."""
+        first. Returns None if the ledger is full or the write failed (the caller then sets no cookie).
+
+        `org_id` (Slice E1) binds a CUSTOMER session to its active org, SERVER-side, from the owner-signed
+        membership — never a client field. It is written ONLY when provided, so an operator session (org_id
+        None) keeps a byte-identical record shape; a customer op reads `rec.get("org_id")` and gates via
+        `admit_customer`. It is read-time context only — it never affects TTL or the expiry logic."""
         t = time.time() if now is None else float(now)
         self.dir.mkdir(parents=True, exist_ok=True, mode=0o700)
         if self._sweep(t) >= self.max_sessions:
@@ -118,6 +123,8 @@ class SessionLedger:
         sid = secrets.token_urlsafe(32)
         rec = {"username": str(username), "role": str(role), "is_owner": bool(is_owner),
                "created": t, "last_seen": t, "absolute_deadline": t + self.absolute_ttl}
+        if org_id is not None:
+            rec["org_id"] = str(org_id)                # customer session only; absent ⇒ operator (byte-identical)
         if not self._write_atomic(self._marker(sid), rec):
             return None
         return sid
