@@ -152,3 +152,53 @@ def test_org_list_is_owner_only():
         assert _get(port, "/api/billing/orgs", token=op)[0] == 403
     finally:
         srv.shutdown()
+
+
+def _seed_one(org, *, period_end, past_due=False, topup=200):
+    """A spine with ONE funded org whose subscription period_end / dunning state is controllable, so the
+    now-passed liveness projection can be asserted (a lapsed / past_due plan reads as NOT live)."""
+    path = tempfile.mktemp(suffix=".jsonl")
+    SpineStore(path).append(kind="message", source="x", actor="user", payload={"text": "hi"})
+    owner = ensure_owner_keypair()
+    store = SpineStore(path)
+    orgs = OrgRegistry(store, owner_key=owner)
+    wallet = WalletRegistry(store, owner_key=owner)
+    subs = SubscriptionRegistry(store, owner_key=owner)
+    plan = PlanCreditLedger(store, owner_key=owner)
+    it = iter(range(1, 10_000))
+    orgs.create_org(org, org.upper(), owner="owner", issued_at=float(next(it)))
+    wallet.grant(org, topup, "topup", issued_at=float(next(it)))
+    subs.subscribe(org, "pro", 6000, period_start=0.0, period_end=period_end, issued_at=float(next(it)))
+    refill_active_subscription(subs, plan, org, issued_at=float(next(it)))   # a tranche for this period
+    if past_due:
+        subs.mark_past_due(org)
+    return path
+
+
+def test_lapsed_period_reads_not_live_plan_zero():
+    # SOUND PROJECTION (red-pen B/A1): a subscription whose period has ELAPSED vs the server wall-clock must read
+    # active:false with plan_live 0 (the now-passed liveness) — the persistent wallet still shows. A regression
+    # that dropped `now` from billing_overview would over-report the lapsed tenant's live plan credits.
+    srv, port = _serve(_seed_one("lapsed", period_end=1.0))        # period_end=1.0 is far in the PAST vs now
+    try:
+        code, body = _get(port, "/api/billing/overview?org=lapsed")
+        assert code == 200, (code, body)
+        assert body["active"] is False
+        assert body["credits"]["plan_live"] == 0
+        assert body["credits"]["persistent"] == 200 and body["credits"]["available"] == 200
+    finally:
+        srv.shutdown()
+
+
+def test_dunning_past_due_reads_not_live_plan_zero():
+    # a past_due (dunning) subscription — even inside its period window — reads not-live: plan credits gone,
+    # persistent stays. The display subscription still reports status past_due.
+    srv, port = _serve(_seed_one("dun", period_end=2_000_000_000.0, past_due=True))
+    try:
+        code, body = _get(port, "/api/billing/overview?org=dun")
+        assert code == 200, (code, body)
+        assert body["active"] is False and body["credits"]["plan_live"] == 0
+        assert body["credits"]["available"] == 200
+        assert body["subscription"]["status"] == "past_due"
+    finally:
+        srv.shutdown()
