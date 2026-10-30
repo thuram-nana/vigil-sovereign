@@ -191,6 +191,17 @@ _GH_WEBHOOK_SECRET_ENV = "VIGIL_GH_WEBHOOK_SECRET"      # the HMAC secret (off-s
 _GH_WEBHOOK_ENVELOPE_SCHEMA = "vigil.webhook.github.v1"  # the inert-envelope schema tag the drain validates
 _GH_WEBHOOK_MAX_ENVELOPE = 256 * 1024                   # == inert_finding.MAX_ENVELOPE_BYTES (the spool validator cap)
 _GH_WEBHOOK_MAX_BODY = 5 * 1024 * 1024                  # pre-auth body cap for the webhook route (GitHub payloads are small)
+# SaaS Slice C — the INBOUND Flutterwave BILLING webhook adapter (OFF by default, enabled by pointing the spool
+# env at a directory). Flutterwave authenticates a webhook by echoing the configured Secret Hash verbatim in the
+# `verif-hash` header (PLAINTEXT equality). This route constant-time-compares it as a cheap ANTI-FLOOD pre-filter
+# and SPOOLS one inert event; it NEVER mints/forwards/spawns and — crucially — stores ONLY the raw body, NEVER
+# the verif-hash itself (which equals the secret). The AUTHORITATIVE money check (server-side transaction
+# re-verify + owner-signed mint) is the SOVEREIGN drain's (sigil.inbound.billing_spool), never this proxy's.
+_BILLING_WEBHOOK_SPOOL_ENV = "VIGIL_BILLING_WEBHOOK_SPOOL"    # set to a spool dir to ENABLE /webhooks/billing
+_BILLING_WEBHOOK_SECRET_ENV = "VIGIL_BILLING_WEBHOOK_SECRET"  # the verif-hash secret (off-spine; empty ⇒ fail closed)
+_BILLING_WEBHOOK_ENVELOPE_SCHEMA = "vigil.webhook.billing.v1"
+_BILLING_WEBHOOK_MAX_BODY = 128 * 1024                  # pre-auth body cap (Flutterwave payloads are a few KB); its
+#                                                         base64 envelope stays under _GH_WEBHOOK_MAX_ENVELOPE (256K)
 _WEBHOOK_READ_TIMEOUT_S = 20.0                          # bound the pre-auth body read so a slow/incomplete body can't pin a thread
 _GH_ZERO_SHA = "0" * 40                                 # GitHub's null SHA — a branch delete / no-commit push (nothing to scan)
 # Anti-spoof: strip the WHOLE `X-VIGIL-*` class from inbound requests, normalising case AND hyphen↔
@@ -1301,7 +1312,8 @@ class _ProxyServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
     def __init__(self, addr, handler, *, serve_dir: Path, token: str = "", hop_key: str = "",
                  allowed_hosts: "tuple[str, ...]" = (), allowed_origins: "tuple[str, ...]" = (),
                  plane_control: "Optional[PlaneControl]" = None, backends: "Optional[dict]" = None,
-                 hop_tls: "Optional[ssl.SSLContext]" = None, webhook_spool_dir: "Optional[str]" = None):
+                 hop_tls: "Optional[ssl.SSLContext]" = None, webhook_spool_dir: "Optional[str]" = None,
+                 webhook_billing_spool_dir: "Optional[str]" = None):
         self.serve_dir = serve_dir
         # W8-6: the proxy→backend hop's TLS client context, or None (a plaintext hop — the loopback /
         # non-production default). Resolved by `make_proxy_server` via `resolve_hop_tls`, which ALSO refuses
@@ -1346,6 +1358,11 @@ class _ProxyServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
         # routes/forwards/spawns. None ⇒ the route is simply absent (falls through to a 404). The webhook
         # SECRET is resolved per-request from the env, never stored here (off-spine).
         self.webhook_spool_dir = str(webhook_spool_dir) if webhook_spool_dir else None
+        # SaaS Slice C: when set (VIGIL_BILLING_WEBHOOK_SPOOL), the proxy mounts an INBOUND Flutterwave billing
+        # webhook route in the probe-safe band that verif-hash-authenticates + SPOOLS one inert body-only event —
+        # it never routes/forwards/spawns/mints. None ⇒ the route is absent (falls through to a 404). The secret
+        # is resolved per-request from the env (VIGIL_BILLING_WEBHOOK_SECRET), never stored here.
+        self.webhook_billing_spool_dir = str(webhook_billing_spool_dir) if webhook_billing_spool_dir else None
         # Claim 6: per-user auth is DELEGATED to the sovereign whoami; this caches the resolution briefly so
         # SSE / polling do not stampede it. Built here so every request handler shares one cache.
         self.auth_cache = _PrincipalCache()
@@ -1453,6 +1470,11 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             # never routes/forwards/spawns. Absent config ⇒ falls through to route()/static (404).
             if split.path == "/webhooks/github" and getattr(self.server, "webhook_spool_dir", None):
                 self._webhooks_github()
+                return
+            # SaaS Slice C: INBOUND Flutterwave billing webhook — probe-safe, mounted ONLY when the billing spool
+            # dir is configured; verif-hash-authenticates + SPOOLS one inert body-only event, never mints/forwards.
+            if split.path == "/webhooks/billing" and getattr(self.server, "webhook_billing_spool_dir", None):
+                self._webhooks_billing()
                 return
             # PROXY-LOCAL: plane control is answered by this process, BEFORE any attempt to route
             # or to serve a file. That ordering is the whole point — a backend that is down cannot answer
@@ -2007,6 +2029,89 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             os.close(fd)
         os.replace(tmp, final)
 
+    def _webhooks_billing(self):
+        """INBOUND Flutterwave BILLING webhook — authenticate the ``verif-hash`` header and SPOOL ONE inert
+        event, nothing more. Like ``_webhooks_github`` it lives in the PROBE-SAFE band (a provider POST carries
+        no session bearer and an unrelated Origin); Flutterwave's ``verif-hash`` is PLAINTEXT secret equality,
+        compared constant-time here as an ANTI-FLOOD pre-filter. The handler NEVER routes / forwards / spawns /
+        mints — its only side effect is writing a signed-at-rest-free, INERT JSON envelope carrying ONLY the raw
+        body (base64), NEVER the verif-hash (which equals the secret). The AUTHORITATIVE money check — the
+        server-side transaction re-verify + the owner-signed mint — is the SOVEREIGN drain's
+        (``sigil.inbound.billing_spool``). Fail-closed: wrong method, oversized / slow body, unset secret, or a
+        mismatched / absent verif-hash all refuse; only a pre-authenticated delivery spools (and even then
+        mints nothing until the drain independently re-verifies the transaction)."""
+        try:
+            self.connection.settimeout(_WEBHOOK_READ_TIMEOUT_S)
+        except OSError:
+            pass
+        if self.command != "POST":
+            self._plane_json({"ok": False, "error": "method not allowed (POST only)"}, status=405)
+            return
+        try:
+            clen = int(self.headers.get("Content-Length") or 0)
+        except (TypeError, ValueError):
+            clen = 0
+        self.close_connection = True
+        if clen > _BILLING_WEBHOOK_MAX_BODY:
+            self._plane_json({"ok": False, "error": "request body too large"}, status=413, drained=True)
+            return
+        try:
+            raw = self.rfile.read(clen) if clen > 0 else b""
+        except (TimeoutError, OSError):
+            self._plane_json({"ok": False, "error": "request body read timed out"}, status=408, drained=True)
+            return
+        # Resolve the verif-hash secret OFF-SPINE from the env. Empty ⇒ fail closed (route enabled, no secret).
+        secret = os.environ.get(_BILLING_WEBHOOK_SECRET_ENV, "")
+        if not secret:
+            self._plane_json({"ok": False, "error": "webhook secret not configured"}, status=503, drained=True)
+            return
+        # Flutterwave verif-hash = PLAINTEXT secret equality, compared constant-time. compare_digest raises
+        # TypeError on a non-ASCII str, so a crafted header fails CLOSED (False), never a 500.
+        presented = self.headers.get("verif-hash") or ""
+        try:
+            authentic = hmac.compare_digest(secret, presented)
+        except TypeError:
+            authentic = False
+        if not authentic:
+            self._plane_json({"ok": False, "error": "invalid or missing verif-hash"}, status=401, drained=True)
+            return
+        # Pre-authenticated. Spool ONE inert envelope carrying ONLY the raw body (base64) — NEVER the verif-hash.
+        envelope = {"schema": _BILLING_WEBHOOK_ENVELOPE_SCHEMA,
+                    "body_b64": base64.b64encode(raw).decode("ascii")}
+        try:
+            self._spool_billing_event(json.dumps(envelope, ensure_ascii=True, sort_keys=True))
+        except OSError:   # a spool write failure is retryable (the provider redelivers) — 503, do NOT 202
+            self._plane_json({"ok": False, "error": "spool write failed"}, status=503, drained=True)
+            return
+        self._plane_json({"ok": True, "spooled": True}, status=202, drained=True)
+
+    def _spool_billing_event(self, envelope: str) -> None:
+        """Write one inert billing envelope to ``<billing-spool>/incoming/<sha256(bytes)[:32]>.json`` atomically
+        (0600 file in a 0700 dir; O_EXCL temp + fsync + os.replace), matching the drain reader's on-disk
+        contract. stdlib-only (the pure-stdlib boundary forbids importing the sibling spool writer).
+        Content-addressed ⇒ re-spooling an identical envelope is idempotent. Raises OSError on any write
+        failure (the caller turns that into a 503 so the provider redelivers)."""
+        data = envelope.encode("utf-8")
+        if len(data) > _GH_WEBHOOK_MAX_ENVELOPE:
+            raise OSError("billing webhook envelope exceeds the spool size cap")
+        incoming = Path(self.server.webhook_billing_spool_dir) / "incoming"
+        incoming.mkdir(parents=True, exist_ok=True)
+        try:
+            os.chmod(incoming, 0o700)
+        except OSError:
+            pass
+        final = incoming / (hashlib.sha256(data).hexdigest()[:32] + ".json")
+        if final.exists():
+            return   # content-addressed idempotency — the identical envelope is already spooled
+        tmp = incoming / (".tmp-" + secrets.token_hex(8))
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        try:
+            os.write(fd, data)
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        os.replace(tmp, final)
+
     def _plane_text(self, text: str, content_type: str, status: int = 200, *, drained: bool = False):
         """Send a plain-text body (e.g. the OpenMetrics exposition) with the probe headers, no-store, and a
         drained request body — the same posture as `_plane_json`, so /metrics leaks no keep-alive smuggling
@@ -2379,7 +2484,8 @@ def make_proxy_server(host: str, port: int, serve_dir: Path, *, token: str = "",
                       allowed_hosts: "tuple[str, ...]" = (), allowed_origins: "tuple[str, ...]" = (),
                       plane_control: "Optional[PlaneControl]" = None,
                       backends: "Optional[dict]" = None,
-                      webhook_spool_dir: "Optional[str]" = None) -> _ProxyServer:
+                      webhook_spool_dir: "Optional[str]" = None,
+                      webhook_billing_spool_dir: "Optional[str]" = None) -> _ProxyServer:
     """Build (do not run) the reverse proxy bound to ``host:port``. Refuses a public/unspecified bind
     (``bind_ok``) — the proxy is the only listener a human points a browser at, so it must never be
     reachable from the open internet.
@@ -2420,7 +2526,8 @@ def make_proxy_server(host: str, port: int, serve_dir: Path, *, token: str = "",
     return _ProxyServer((host, port), ProxyHandler, serve_dir=serve_dir, token=token, hop_key=hop_key,
                         allowed_hosts=tuple(allowed_hosts), allowed_origins=tuple(allowed_origins),
                         plane_control=plane_control, backends=backends, hop_tls=hop_tls,
-                        webhook_spool_dir=webhook_spool_dir)
+                        webhook_spool_dir=webhook_spool_dir,
+                        webhook_billing_spool_dir=webhook_billing_spool_dir)
 
 
 # ==================================================================================================
@@ -3162,7 +3269,8 @@ def _run_up_proxy_only(*, host: str, port: int, domain: str, base_dir: str, no_b
         httpd = make_proxy_server(host, port, ui_dir, token=token, hop_key=hop_key,
                                   allowed_hosts=(authority,), allowed_origins=(origin,),
                                   plane_control=None, backends=backends,
-                                  webhook_spool_dir=(os.environ.get(_GH_WEBHOOK_SPOOL_ENV) or None))
+                                  webhook_spool_dir=(os.environ.get(_GH_WEBHOOK_SPOOL_ENV) or None),
+                                  webhook_billing_spool_dir=(os.environ.get(_BILLING_WEBHOOK_SPOOL_ENV) or None))
     except (ValueError, OSError) as exc:
         print(f"vigil up --proxy-only: could not bind the UI proxy on {host}:{port}: {exc}", file=sys.stderr)
         return 2
@@ -3524,7 +3632,8 @@ def run_up(*, host: str, port: int, domain: str, base_dir: str, no_browser: bool
         httpd = make_proxy_server(host, port, ui_dir, token=token, hop_key=hop_key,
                                   allowed_hosts=(authority,), allowed_origins=(origin,),
                                   plane_control=plane_control,
-                                  webhook_spool_dir=(os.environ.get(_GH_WEBHOOK_SPOOL_ENV) or None))
+                                  webhook_spool_dir=(os.environ.get(_GH_WEBHOOK_SPOOL_ENV) or None),
+                                  webhook_billing_spool_dir=(os.environ.get(_BILLING_WEBHOOK_SPOOL_ENV) or None))
     except (ValueError, OSError) as exc:
         print(f"vigil up: could not bind the UI proxy on {host}:{port}: {exc}", file=sys.stderr)
         _cleanup()
