@@ -159,6 +159,13 @@ def check_prune_safe(store, K: int) -> list[Segment]:
     if stranded:
         raise PruneUnsafe(f"K={K} would strand active account(s) {stranded}: their only owner-signed grant "
                           f"sits below K and would not be carried into the snapshot seed; lower K or resolve")
+    # (c, Slice E1) the SAME referential floor for the DISJOINT governor.customer identity namespace: an
+    # active customer whose only owner-signed grant sits below K must be carried into the seed, or the prune
+    # would vanish it AND reset its per-username anti-replay high-water (re-opening the replay-resurrection HIGH).
+    stranded_custs = stranded_active_customers(store, archived, K)
+    if stranded_custs:
+        raise PruneUnsafe(f"K={K} would strand active customer(s) {stranded_custs}: their only owner-signed "
+                          f"grant sits below K and would not be carried into the snapshot seed; lower K or resolve")
     # (c, enterprise-identity) the SAME referential floor for owner-signed orgs + memberships (governor/orgs.py):
     # an active org/membership whose only grant sits below K must be carried into the snapshot seed, or the
     # prune would vanish it AND reset its anti-replay high-water (re-opening the replay-resurrection HIGH).
@@ -277,6 +284,45 @@ def stranded_active_accounts(store, archived: list[Segment], K: int) -> list[str
         build(below, trusted_pubkey=tp, base_seq=K, snapshot_seq=-1, resolver=resolver).model_dump())
     seed_state = seed.account_state_map()
     carried = {row[0] for row in seed.account_cred if seed_state.get(row[0]) == "active"}
+    return sorted(str(u) for u in (active - carried))
+
+
+def stranded_active_customers(store, archived: list[Segment], K: int) -> list[str]:
+    """§7(c, Slice E1) — the SAME referential floor for `governor.customer` (the DISJOINT customer identity
+    namespace): an ACTIVE customer whose only owner-signed grant sits in the pruned prefix [0..K) and would
+    NOT be carried into the snapshot seed is one a hard prune would silently vanish (and whose per-username
+    anti-replay high-water it would reset, re-opening the LWW replay-resurrection HIGH). EMPTY in the happy
+    path; a non-empty result fails the prune CLOSED. Mirrors `stranded_active_accounts` EXACTLY: a
+    VERIFIED-active below-K fold diffed against the seed the prune actually persists (round-tripped through
+    `model_dump`/`model_validate`, so a seed serialization regression is caught too). Read-only."""
+    from ..governor.customers import SIGNAL as _CUST_SIGNAL
+    from ..governor.customers import _core_fields as _cust_core_fields   # conditional password_hash core
+    from ..governor import key_history as _kh
+    from ..governor.authn import NO_HIGHWATER, as_issued_at, verify_signed
+    from ..governor.identity import owner_pubkey
+    tp = owner_pubkey() or ""
+    resolver = _kh.key_resolver(store, current=tp)   # W9-1: verify under the owner key valid at each seq
+    below: list[SpineRecord] = []
+    for seg in archived:
+        below.extend(read_segment_records(store._layout.seg_path(seg)))
+    state: dict[Any, str] = {}
+    issued: dict[Any, float] = {}
+    for r in sorted(below, key=lambda r: r.seq):
+        p = r.payload
+        if not isinstance(p, dict) or p.get("signal") != _CUST_SIGNAL:
+            continue
+        u, rst = p.get("username"), p.get("state")
+        if rst == "revoked":
+            state[u] = "revoked"
+        elif rst == "active" and verify_signed(p, _cust_core_fields(p), resolver.at(r.seq)):
+            at = as_issued_at(p.get("issued_at"))
+            if at > issued.get(u, NO_HIGHWATER):
+                issued[u], state[u] = at, "active"
+    active = {u for u, v in state.items() if v == "active"}
+    seed = SnapshotState.model_validate(
+        build(below, trusted_pubkey=tp, base_seq=K, snapshot_seq=-1, resolver=resolver).model_dump())
+    seed_state = seed.customer_state_map()
+    carried = {row[0] for row in seed.customer_cred if seed_state.get(row[0]) == "active"}
     return sorted(str(u) for u in (active - carried))
 
 

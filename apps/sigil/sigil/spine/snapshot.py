@@ -116,6 +116,17 @@ class SnapshotState(BaseModel):
     #                                   second factor) or its DEADLINE (a pruned account silently never-expiring).
     #                                   Carried for every honored-active username (incl. ones later revoked —
     #                                   dropped at read time by account_state, exactly as the scan).
+    customer_state: list = []         # [[username, "active"|"revoked"], ...] — governor.customer LWW
+    #                                   (revoke=any, active=owner-verified + FRESH). Keep revoked. A DISJOINT
+    #                                   namespace from account_state (a customer is never an operator account).
+    customer_issued: list = []        # [[username, issued_at], ...] — PER-USERNAME active-grant high-water.
+    #                                   Missing row ⇒ -inf bottom. MUST cross a prune, or the first hard prune
+    #                                   resets it and a captured owner-signed `active` customer grant becomes
+    #                                   replay-resurrectable (identical invariant to account_issued).
+    customer_cred: list = []          # [[username, email, password_hash], ...] — the fields to REBUILD an
+    #                                   active `CustomerAccount` from the seed (issued_at joins from
+    #                                   customer_issued; state="active"). password_hash is None for an
+    #                                   OIDC/passkey-only customer; carried so a pruned customer keeps its login.
     org_state: list = []              # [[org_id, "active"|"revoked"], ...] — governor.org LWW (keep revoked).
     org_issued: list = []             # [[org_id, issued_at], ...] — PER-ORG active-grant high-water. Missing
     #                                   row ⇒ the -inf bottom. MUST cross a prune, or the first hard prune
@@ -181,6 +192,14 @@ class SnapshotState(BaseModel):
         return {row[0]: row[1] for row in self.account_issued}
     #   account_cred stays a raw list-of-rows: `AccountsRegistry._fold` rebuilds the Account objects from it
     #   (joining issued_at from account_issued_map), keeping the `Account` import out of this leaf module.
+
+    def customer_state_map(self) -> dict[Any, str]:
+        return {row[0]: row[1] for row in self.customer_state}
+
+    def customer_issued_map(self) -> dict[Any, float]:
+        return {row[0]: row[1] for row in self.customer_issued}
+    #   customer_cred stays a raw list-of-rows: `CustomerRegistry._fold` rebuilds the CustomerAccount objects
+    #   from it (joining issued_at from customer_issued_map), keeping the import out of this leaf module.
 
     def org_state_map(self) -> dict[Any, str]:
         return {row[0]: row[1] for row in self.org_state}
@@ -359,6 +378,10 @@ def build(records: Iterable[SpineRecord], *, trusted_pubkey: Optional[str],
     # derived per-grant from the payload — mirror the SAME helper the live scan uses, else a KEYED grant
     # (signed over 8 fields) would fail a static 7-field verify here and be dropped from the seed.
     from ..governor.accounts import _core_fields as _acct_core_fields
+    # governor.customer — a DISJOINT owner-signed identity namespace (Slice E1). Its signed core is also
+    # CONDITIONAL on password_hash, so mirror the SAME helper the live scan uses (same drift guard as acct).
+    from ..governor.customers import SIGNAL as _CUST_SIGNAL
+    from ..governor.customers import _core_fields as _cust_core_fields
     from ..governor.capability import SIGNAL as _CAPLATCH_SIGNAL
     from ..governor.capability import _CORE as _CAPLATCH_CORE
     from ..governor.killswitch import SIGNAL as _KS_SIGNAL
@@ -415,6 +438,10 @@ def build(records: Iterable[SpineRecord], *, trusted_pubkey: Optional[str],
                                            (row[7] if len(row) > 7 else None)]
                                   for row in s.account_cred} if s else {}   # 5/6/7/8 = user_pubkey / totp_secret /
     #                                                                         password_hash / expires_at (None legacy)
+    cust_state: dict[Any, str] = dict(s.customer_state_map()) if s else {}
+    cust_issued: dict[Any, float] = dict(s.customer_issued_map()) if s else {}
+    cust_cred: dict[Any, list] = {row[0]: [row[1], (row[2] if len(row) > 2 else None)]
+                                  for row in s.customer_cred} if s else {}   # [email, password_hash] (None legacy)
     org_state: dict[Any, str] = dict(s.org_state_map()) if s else {}
     org_issued: dict[Any, float] = dict(s.org_issued_map()) if s else {}
     org_row: dict[Any, list] = {row[0]: [row[1], row[2]] for row in s.org_row} if s else {}  # org_id->[name,owner]
@@ -541,6 +568,20 @@ def build(records: Iterable[SpineRecord], *, trusted_pubkey: Optional[str],
                     acct_cred[ukey] = [p.get("role"), p.get("cred_hash"), p.get("cred_salt"),
                                        p.get("user_pubkey"), p.get("totp_secret"), p.get("password_hash"),
                                        p.get("expires_at")]
+        # --- governor.customer LWW + PER-USERNAME anti-replay high-water (mirrors the ACCT fold above
+        #     EXACTLY — a DISJOINT signal/namespace, so a customer survives a prune with its high-water
+        #     intact and never collides with an operator account). revoke=any; active=owner-verified+FRESH.
+        if sig == _CUST_SIGNAL:
+            cstate = p.get("state")
+            if cstate == "revoked":
+                cust_state[p.get("username")] = "revoked"
+            elif cstate == "active" and verify_signed(p, _cust_core_fields(p), vpk):
+                ckey = p.get("username")
+                at = as_issued_at(p.get("issued_at"))
+                if at > cust_issued.get(ckey, NO_HIGHWATER):   # mirror _fold: stale/replayed active ⇒ no effect
+                    cust_issued[ckey] = at
+                    cust_state[ckey] = "active"
+                    cust_cred[ckey] = [p.get("email"), p.get("password_hash")]   # None pw ⇒ OIDC/passkey-only
         # --- governor.org LWW + PER-ORG anti-replay high-water (mirrors the ACCT fold above EXACTLY, so an
         #     active org whose only grant is pruned survives and its high-water is NOT reset — the fix for the
         #     org replay-resurrection HIGH). revoke=any (safe direction); active=owner-verified + FRESH. ---
@@ -670,6 +711,9 @@ def build(records: Iterable[SpineRecord], *, trusted_pubkey: Optional[str],
         account_cred=[[u, c[0], c[1], c[2], (c[3] if len(c) > 3 else None), (c[4] if len(c) > 4 else None),
                        (c[5] if len(c) > 5 else None), (c[6] if len(c) > 6 else None)]
                       for u, c in acct_cred.items()],
+        customer_state=[[u, v] for u, v in cust_state.items()],
+        customer_issued=[[u, i] for u, i in cust_issued.items()],
+        customer_cred=[[u, c[0], (c[1] if len(c) > 1 else None)] for u, c in cust_cred.items()],
         org_state=[[o, v] for o, v in org_state.items()],
         org_issued=[[o, i] for o, i in org_issued.items()],
         org_row=[[o, r[0], r[1]] for o, r in org_row.items()],
