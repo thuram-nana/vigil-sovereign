@@ -256,6 +256,28 @@ def test_referential_floor_detects_a_seed_that_omits_a_plan_tranche(tmp_path, mo
     assert "strand" in msg and "acme" in msg and "plan" in msg
 
 
+def test_referential_floor_detects_a_dropped_plan_seen_key(tmp_path, monkeypatch):
+    """Isolate the ANTI-REPLAY-DURABILITY branch of stranded_active_plan_tranches (`for (_sig,o,_e) in seen-ss`).
+    Drop ONLY `plan_seen` for acme while KEEPING its granted/debited totals exact: the first loop (balance
+    mismatch) then finds nothing, so ONLY the seen-set branch can flag acme. Mutation-killing: deleting that
+    loop lets a prune drop the consumed entry_ids (re-opening plan-grant replay across a hard prune) UNDETECTED.
+    """
+    monkeypatch.setattr("sigil.governor.identity.owner_pubkey", lambda: OWNER_PUB)
+    s = _plan_segmented_store(tmp_path)
+    real_build = prune.build
+
+    def seen_dropping_build(records, **kw):
+        seed = real_build(records, **kw)
+        return seed.model_copy(update={"plan_seen": [r for r in seed.plan_seen if r[1] != "acme"]})
+
+    monkeypatch.setattr(prune, "build", seen_dropping_build)
+    # balances are intact in the seed, so only the seen-set durability branch can detect the stranded tenant
+    assert prune.stranded_active_plan_tranches(s, _archived_below(s, 5), 5) == ["acme"]
+    with pytest.raises(prune.PruneUnsafe) as e:
+        prune.check_prune_safe(s, 5)
+    assert "strand" in str(e.value).lower() and "acme" in str(e.value)
+
+
 def test_check_prune_safe_reraises_a_nonempty_plan_floor_wiring_only(tmp_path, monkeypatch):
     monkeypatch.setattr("sigil.governor.identity.owner_pubkey", lambda: OWNER_PUB)
     s = _plan_segmented_store(tmp_path)
