@@ -142,6 +142,20 @@ def test_per_org_member_reads_only_their_tenant():
         srv.shutdown()
 
 
+def test_billing_plans_lists_the_catalog():
+    # the pricing catalog projection — any authenticated principal (viewer+) may read it; it is global (not
+    # tenant-scoped), carries no secret, and unauth is refused.
+    srv, port = _serve(_seed())
+    try:
+        code, body = _get(port, "/api/billing/plans")
+        assert code == 200 and isinstance(body.get("plans"), list) and len(body["plans"]) >= 1, (code, body)
+        assert all({"price_id", "kind", "name", "amount_minor", "currency"} <= set(p) for p in body["plans"])
+        assert all("cred_hash" not in p and "salt" not in p for p in body["plans"])   # no secret in a plan row
+        assert _get(port, "/api/billing/plans", token=None)[0] == 401                  # auth required
+    finally:
+        srv.shutdown()
+
+
 def test_org_list_is_owner_only():
     srv, port = _serve(_seed())
     try:
