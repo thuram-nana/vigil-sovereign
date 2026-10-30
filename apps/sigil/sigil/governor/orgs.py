@@ -263,18 +263,32 @@ class OrgRegistry:
         on the org's CURRENT active state, not on whether the member was re-granted. Cascading leaves each
         membership in the `revoked` LWW state (durable across a hard prune via the snapshot seed), so a prior
         member is admitted again ONLY after a FRESH owner-signed grant with a strictly-greater issued_at. The
-        org revoke is appended LAST and its seq is returned (the primary record)."""
+        org revoke is appended FIRST (see below) and its seq is returned (the primary record).
+
+        ORDERING — the org revoke lands BEFORE the membership cascade so the fail-SAFE direction can never be
+        gated on the cascade succeeding: a corrupt/hand-signed folded membership (one the fold accepts but the
+        binding-time `_check_member_username` would reject — only reachable via a direct owner-signed append,
+        the API refuses it) must not abort the org decommission. This mirrors `_derive_tenant_id`'s
+        defence-in-depth against a replayed/corrupt grant; "gating the fail-safe direction would make it fail
+        OPEN" is the same doctrine as the asymmetric-auth note above. The cascade then revokes each member by
+        its RAW folded username (never re-validated) so no single record can break it. NOTE: this compound
+        mutation is not serialized against a concurrent caller — the store serializes a single append, not the
+        whole op; when concurrent org wiring (CLI/proxy `do_action`) lands, wrap this body AND
+        `grant_membership`'s gate-then-append in one operation-level lock keyed on the store."""
         oid = _check_org_id(org_id)
-        # Revoke each current member FIRST so reactivating the org cannot resurrect them. Enumeration uses the
-        # current fold; revoke_membership is idempotent + replay-safe. (A member granted while the org is
-        # revoked is impossible — grant_membership refuses a non-active org — so this set is complete.)
-        for _m in self.memberships(oid):
-            self.revoke_membership(oid, _m.username)
         core = {"signal": ORG_SIGNAL, "org_id": oid, "name": "", "owner": "",
                 "state": "revoked", "issued_at": 0.0}
         payload = {**signed_payload(core, self.owner_key), "by": "owner", "requested_by": "owner",
                    "tier": "A0", "decision": "auto", "reason": f"org {oid} REVOKED (governed latch)"}
-        return self.store.append(kind="event", source="governor", actor="WARDEN", payload=payload)
+        seq = self.store.append(kind="event", source="governor", actor="WARDEN", payload=payload)
+        # Cascade-revoke every CURRENT member so reactivating the org_id cannot resurrect them. Enumeration
+        # uses the current fold (not org-gated); each revoke is the idempotent + replay-safe safe direction,
+        # appended by raw folded username so a corrupt member cannot abort the cascade. (A member granted
+        # while the org is revoked is impossible — grant_membership refuses a non-active org — so this set is
+        # complete.)
+        for _m in self.memberships(oid):
+            self._append_revoked_membership(oid, _m.username)
+        return seq
 
     # -- owner mutations: memberships ---------------------------------------------------------------
     def grant_membership(self, org_id: str, username: str, role: str, *, issued_at: float) -> int:
@@ -320,6 +334,18 @@ class OrgRegistry:
         payload = {**signed_payload(core, self.owner_key), "by": "owner", "requested_by": "owner",
                    "tier": "A0", "decision": "auto",
                    "reason": f"membership {username}@{org_id} -> {role} (owner-signed grant)"}
+        return self.store.append(kind="event", source="governor", actor="WARDEN", payload=payload)
+
+    def _append_revoked_membership(self, org_id: str, username: str) -> int:
+        """Append a safe-direction revoked membership for an ALREADY-FOLDED (org_id, username), skipping the
+        binding-time `_check_member_username` validation (the pair came straight from the fold). Used only by
+        the `revoke_org` cascade so a corrupt/hand-signed folded membership whose username the binding check
+        would reject cannot abort the org decommission. Fixed `issued_at` 0.0 (a replayed revoke re-revokes)."""
+        core = {"signal": MEMBERSHIP_SIGNAL, "org_id": org_id, "username": username, "role": "",
+                "state": "revoked", "issued_at": 0.0}
+        payload = {**signed_payload(core, self.owner_key), "by": "owner", "requested_by": "owner",
+                   "tier": "A0", "decision": "auto",
+                   "reason": f"membership {username}@{org_id} REVOKED (org cascade)"}
         return self.store.append(kind="event", source="governor", actor="WARDEN", payload=payload)
 
     # -- reads (owner-key-succession-aware folds; full genesis scan — see DEFERRED hard-prune note) --

@@ -320,6 +320,33 @@ def test_reactivated_org_does_not_restore_prior_members_without_a_fresh_grant():
     assert reg.membership_role("alice", "acme") == "viewer"
 
 
+def test_revoke_org_decommissions_even_if_a_folded_membership_is_corrupt():
+    """Fail-SAFE hardening: revoke_org appends the org revoke FIRST, then cascades members by their raw folded
+    username — so the org is ALWAYS decommissioned even when the cascade meets a corrupt/hand-signed folded
+    membership whose username the binding-time check (`_check_member_username`, which rejects the reserved
+    'owner') would refuse. Such a membership is only reachable via a direct owner-signed store.append (the
+    `grant_membership` API refuses it), but the fail-safe direction must never be abortable by one bad record.
+
+    Mutation-sensitive: with the pre-hardening order (cascade FIRST via the validating `revoke_membership`),
+    `revoke_membership('acme','owner')` raises ValueError before the org revoke is appended, so the org stays
+    active and the first assertion fails."""
+    s = _store()
+    reg = _reg(s)
+    reg.create_org("acme", "Acme", owner="owner", issued_at=1.0)
+    reg.grant_membership("acme", "alice", "operator", issued_at=2.0)
+    # owner-key bypass: directly append an owner-signed membership whose username the API would reject
+    # ('owner'), crafted so it folds in as ACTIVE (verify_signed passes, high-water fresh).
+    from sigil.governor.authn import signed_payload
+    core = {"signal": og.MEMBERSHIP_SIGNAL, "org_id": "acme", "username": "owner", "role": "operator",
+            "state": "active", "issued_at": 3.0}
+    s.append(kind="event", source="governor", actor="WARDEN", payload={**signed_payload(core, OWNER)})
+    assert any(m.username == "owner" for m in reg.memberships("acme"))   # the poison member folds in active
+    # the fail-safe direction completes regardless of the corrupt member:
+    reg.revoke_org("acme")
+    assert reg.org("acme") is None, "org MUST be decommissioned even with a corrupt folded membership"
+    assert reg.memberships("acme") == [], "cascade revokes every folded member incl. the corrupt one"
+
+
 # --- org -> tenant_id mapping (org == tenant_id) ---------------------------------
 
 def test_org_tenant_id_identity_mapping():
