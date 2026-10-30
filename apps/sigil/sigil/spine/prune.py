@@ -185,6 +185,15 @@ def check_prune_safe(store, K: int) -> list[Segment]:
     if stranded_subs:
         raise PruneUnsafe(f"K={K} would strand active subscription(s) {stranded_subs}: their only owner-signed "
                           f"grant sits below K and would not be carried into the snapshot seed; lower K or resolve")
+    # (c, SaaS plan credits) the SAME floor for governor.plan_grant/plan_debit: a prune must carry every below-K
+    # tenant's per-period tranche totals AND the consumed-entry_id set into the seed, or it would ZERO an
+    # unexpired plan tranche (lose granted allotment) AND drop the anti-replay seen-set (re-opening plan-grant
+    # replay). Fail-closed, like the wallet floor.
+    stranded_plan = stranded_active_plan_tranches(store, archived, K)
+    if stranded_plan:
+        raise PruneUnsafe(f"K={K} would strand plan-credit tranche(s) for tenant(s) {stranded_plan}: a below-K "
+                          f"tranche balance or consumed entry_id would not be carried into the snapshot seed "
+                          f"(zeroing an unexpired tranche or re-opening plan-grant replay); lower K or resolve")
     # (e) owner-key succession referential floor (W9-1 / issue #434): a rotation record that ESTABLISHES a key
     # whose seq-window still covers a LIVE record (>= K) — including, always, the current key's open window —
     # must NOT be pruned. Without the whole genesis->current chain present in the live window, post-prune
@@ -389,6 +398,65 @@ def stranded_active_wallets(store, archived: list[Segment], K: int) -> list[str]
             stranded.add(str(o))          # a balance the seed fails to carry exactly
     for (_sig, o, _e) in (seen - ss):
         stranded.add(str(o))              # a consumed entry_id the seed drops (anti-replay durability)
+    return sorted(stranded)
+
+
+def stranded_active_plan_tranches(store, archived: list[Segment], K: int) -> list[str]:
+    """§7(c, SaaS plan credits) — the tenants (`governor/metering.py`) whose per-(org, period_end) plan-credit
+    tranche totals or anti-replay seen-set sit in the pruned prefix [0..K) yet would NOT be carried exactly into
+    the snapshot seed: the set a hard prune would silently ZERO (an unexpired tranche's credits gone) and/or
+    whose consumed `entry_id`s it would drop (re-opening plan-grant replay). EMPTY in the happy path —
+    `SnapshotState.build()` carries each below-K tranche's granted/debited totals + the full seen-set. Fail-closed
+    tripwire mirroring `stranded_active_wallets`, keyed per (org, period_end); verified under the owner key valid
+    at each seq; the seed round-trips through `model_dump`/`model_validate`. Read-only."""
+    from ..governor.metering import (PLAN_GRANT_SIGNAL, PLAN_DEBIT_SIGNAL, _PLAN_GRANT_CORE, _PLAN_DEBIT_CORE,
+                                      _as_period)
+    from ..governor.wallet import _as_credits
+    from ..governor import key_history as _kh
+    from ..governor.authn import verify_signed
+    from ..governor.identity import owner_pubkey
+    tp = owner_pubkey() or ""
+    resolver = _kh.key_resolver(store, current=tp)
+    below: list[SpineRecord] = []
+    for seg in archived:
+        below.extend(read_segment_records(store._layout.seg_path(seg)))
+    # the per-tranche balance + seen-set a genesis fold of [0..K) yields — the state that MUST survive the prune.
+    granted: dict[Any, int] = {}
+    debited: dict[Any, int] = {}
+    seen: set = set()
+    for r in sorted(below, key=lambda r: r.seq):
+        p = r.payload
+        if not isinstance(p, dict):
+            continue
+        sig = p.get("signal")
+        if sig != PLAN_GRANT_SIGNAL and sig != PLAN_DEBIT_SIGNAL:
+            continue
+        oid, eid = p.get("org_id"), p.get("entry_id")
+        if not (isinstance(oid, str) and oid and isinstance(eid, str) and eid):
+            continue
+        core = _PLAN_GRANT_CORE if sig == PLAN_GRANT_SIGNAL else _PLAN_DEBIT_CORE
+        if not verify_signed(p, core, resolver.at(r.seq)):
+            continue
+        key = (sig, oid, eid)                 # namespaced by signal — mirror PlanCreditLedger._fold / build()
+        if key in seen:
+            continue
+        seen.add(key)
+        tkey = (oid, _as_period(p.get("period_end")))
+        amt = _as_credits(p.get("credits"))
+        if sig == PLAN_GRANT_SIGNAL:
+            granted[tkey] = granted.get(tkey, 0) + amt
+        else:
+            debited[tkey] = debited.get(tkey, 0) + amt
+    active = set(granted) | set(debited)      # (org_id, period_end) tranche keys with activity below K
+    seed = SnapshotState.model_validate(
+        build(below, trusted_pubkey=tp, base_seq=K, snapshot_seq=-1, resolver=resolver).model_dump())
+    sg, sd, ss = seed.plan_granted_map(), seed.plan_debited_map(), seed.plan_seen_set()
+    stranded: set = set()
+    for tk in active:
+        if sg.get(tk, 0) != granted.get(tk, 0) or sd.get(tk, 0) != debited.get(tk, 0):
+            stranded.add(str(tk[0]))          # a tranche balance the seed fails to carry exactly
+    for (_sig, o, _e) in (seen - ss):
+        stranded.add(str(o))                  # a consumed entry_id the seed drops (anti-replay durability)
     return sorted(stranded)
 
 
