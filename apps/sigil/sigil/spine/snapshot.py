@@ -116,6 +116,19 @@ class SnapshotState(BaseModel):
     #                                   second factor) or its DEADLINE (a pruned account silently never-expiring).
     #                                   Carried for every honored-active username (incl. ones later revoked —
     #                                   dropped at read time by account_state, exactly as the scan).
+    org_state: list = []              # [[org_id, "active"|"revoked"], ...] — governor.org LWW (keep revoked).
+    org_issued: list = []             # [[org_id, issued_at], ...] — PER-ORG active-grant high-water. Missing
+    #                                   row ⇒ the -inf bottom. MUST cross a prune, or the first hard prune
+    #                                   resets it and a captured owner-signed `active` org grant becomes
+    #                                   replay-resurrectable (identical invariant to account_issued).
+    org_row: list = []                # [[org_id, name, owner], ...] — the fields to REBUILD an active `Org`
+    #                                   from the seed (created_at joins from org_issued; state="active").
+    membership_state: list = []       # [[org_id, username, "active"|"revoked"], ...] — governor.org_membership
+    #                                   LWW, keyed PER-(org_id, username). Keep revoked.
+    membership_issued: list = []      # [[org_id, username, issued_at], ...] — PER-(org_id, username) high-water.
+    #                                   Same cross-a-prune invariant as account_issued, per membership key.
+    membership_row: list = []         # [[org_id, username, role], ...] — the fields to REBUILD an active
+    #                                   `Membership` from the seed (issued_at joins from membership_issued).
     consumed_arm_nonces: list = []    # [[device_pubkey, nonce], ...]  (nonce int OR str, verbatim)
     device_approval_dedup: list = []  # [[pubkey|None, sig|None, min_seq], ...]
     warden_best: dict[str, list] = {} # {pubkey: [max_count, head_hash, tiebreak_seq]}
@@ -141,6 +154,22 @@ class SnapshotState(BaseModel):
         return {row[0]: row[1] for row in self.account_issued}
     #   account_cred stays a raw list-of-rows: `AccountsRegistry._fold` rebuilds the Account objects from it
     #   (joining issued_at from account_issued_map), keeping the `Account` import out of this leaf module.
+
+    def org_state_map(self) -> dict[Any, str]:
+        return {row[0]: row[1] for row in self.org_state}
+
+    def org_issued_map(self) -> dict[Any, float]:
+        return {row[0]: row[1] for row in self.org_issued}
+    #   org_row stays a raw list-of-rows: `OrgRegistry._fold_orgs` rebuilds the Org objects from it (joining
+    #   created_at from org_issued_map), keeping the `Org` import out of this leaf module.
+
+    def membership_state_map(self) -> dict[tuple, str]:
+        return {(row[0], row[1]): row[2] for row in self.membership_state}
+
+    def membership_issued_map(self) -> dict[tuple, float]:
+        return {(row[0], row[1]): row[2] for row in self.membership_issued}
+    #   membership_row is a raw list-of-rows: `OrgRegistry._fold_memberships` rebuilds the Membership objects
+    #   from it (joining issued_at from membership_issued_map), keyed PER-(org_id, username).
 
     def capability_latch_map(self) -> dict[Optional[str], bool]:
         return {row[0]: row[1] for row in self.capability_latch}
@@ -280,6 +309,10 @@ def build(records: Iterable[SpineRecord], *, trusted_pubkey: Optional[str],
     from ..governor.promotion import SIGNAL as _PROMO_SIGNAL
     from ..governor.promotion import _CORE as _PROMO_CORE
     from ..mesh.registry import CAP_SIGNAL, DEV_SIGNAL, _CAP_CORE, _DEV_CORE, cap_descriptor
+    # org/membership signed-core tuples imported from the live module (never restated — same drift guard as
+    # the account core above); the fold below carries them across a prune exactly as it does accounts.
+    from ..governor.orgs import (ORG_SIGNAL as _ORG_SIGNAL, MEMBERSHIP_SIGNAL as _MEM_SIGNAL,
+                                 _ORG_CORE, _MEMBERSHIP_CORE)
 
     # The order-DEPENDENT folds (the kill-switch latch, every last-write-wins map) require ascending seq.
     # iter_records already yields ascending seq, but sort defensively so build() is correct for ANY caller /
@@ -309,6 +342,12 @@ def build(records: Iterable[SpineRecord], *, trusted_pubkey: Optional[str],
                                            (row[7] if len(row) > 7 else None)]
                                   for row in s.account_cred} if s else {}   # 5/6/7/8 = user_pubkey / totp_secret /
     #                                                                         password_hash / expires_at (None legacy)
+    org_state: dict[Any, str] = dict(s.org_state_map()) if s else {}
+    org_issued: dict[Any, float] = dict(s.org_issued_map()) if s else {}
+    org_row: dict[Any, list] = {row[0]: [row[1], row[2]] for row in s.org_row} if s else {}  # org_id->[name,owner]
+    mem_state: dict[tuple, str] = dict(s.membership_state_map()) if s else {}
+    mem_issued: dict[tuple, float] = dict(s.membership_issued_map()) if s else {}
+    mem_row: dict[tuple, Any] = {(row[0], row[1]): row[2] for row in s.membership_row} if s else {}  # ->role
     arm: set = set(s.arm_set()) if s else set()
     dedup: dict[tuple[Optional[str], Optional[str]], int] = dict(s.approval_dedup_map()) if s else {}
     warden: dict[str, tuple[int, str, int]] = ({k: (v[0], v[1], v[2]) for k, v in s.warden_best.items()}
@@ -420,6 +459,36 @@ def build(records: Iterable[SpineRecord], *, trusted_pubkey: Optional[str],
                     acct_cred[ukey] = [p.get("role"), p.get("cred_hash"), p.get("cred_salt"),
                                        p.get("user_pubkey"), p.get("totp_secret"), p.get("password_hash"),
                                        p.get("expires_at")]
+        # --- governor.org LWW + PER-ORG anti-replay high-water (mirrors the ACCT fold above EXACTLY, so an
+        #     active org whose only grant is pruned survives and its high-water is NOT reset — the fix for the
+        #     org replay-resurrection HIGH). revoke=any (safe direction); active=owner-verified + FRESH. ---
+        if sig == _ORG_SIGNAL:
+            oid = p.get("org_id")
+            if isinstance(oid, str) and oid:
+                ost = p.get("state")
+                if ost == "revoked":
+                    org_state[oid] = "revoked"
+                elif ost == "active" and verify_signed(p, _ORG_CORE, vpk):
+                    at = as_issued_at(p.get("issued_at"))
+                    if at > org_issued.get(oid, NO_HIGHWATER):   # stale/replayed active ⇒ no effect
+                        org_issued[oid] = at
+                        org_state[oid] = "active"
+                        org_row[oid] = [p.get("name"), p.get("owner")]
+        # --- governor.org_membership LWW + PER-(org_id, username) high-water (same carry-across-prune). ---
+        if sig == _MEM_SIGNAL:
+            oid = p.get("org_id")
+            uname = p.get("username")
+            if isinstance(oid, str) and oid and isinstance(uname, str) and uname:
+                mkey = (oid, uname)
+                mst = p.get("state")
+                if mst == "revoked":
+                    mem_state[mkey] = "revoked"
+                elif mst == "active" and verify_signed(p, _MEMBERSHIP_CORE, vpk):
+                    at = as_issued_at(p.get("issued_at"))
+                    if at > mem_issued.get(mkey, NO_HIGHWATER):
+                        mem_issued[mkey] = at
+                        mem_state[mkey] = "active"
+                        mem_row[mkey] = p.get("role")
         # --- gesture device-arm replay ledger (set-union) ---
         if sig == "gesture.session_armed" and p.get("armed_by") == "device":
             arm.add((p.get("device_pubkey"), p.get("nonce")))
@@ -465,6 +534,12 @@ def build(records: Iterable[SpineRecord], *, trusted_pubkey: Optional[str],
         account_cred=[[u, c[0], c[1], c[2], (c[3] if len(c) > 3 else None), (c[4] if len(c) > 4 else None),
                        (c[5] if len(c) > 5 else None), (c[6] if len(c) > 6 else None)]
                       for u, c in acct_cred.items()],
+        org_state=[[o, v] for o, v in org_state.items()],
+        org_issued=[[o, i] for o, i in org_issued.items()],
+        org_row=[[o, r[0], r[1]] for o, r in org_row.items()],
+        membership_state=[[k[0], k[1], v] for k, v in mem_state.items()],
+        membership_issued=[[k[0], k[1], i] for k, i in mem_issued.items()],
+        membership_row=[[k[0], k[1], r] for k, r in mem_row.items()],
         consumed_arm_nonces=[[d, n] for (d, n) in arm],
         device_approval_dedup=[[pk, sg, seq] for (pk, sg), seq in dedup.items()],
         warden_best={k: [c, h, s] for k, (c, h, s) in warden.items()},
