@@ -117,18 +117,49 @@ def test_forged_negative_credit_clamps():
     assert p.available("acme", now=1.0) == 500             # negative grant clamped to 0, cannot cancel balance
 
 
-def test_meter_composes_persistent_and_live_plan():
+def test_meter_composes_persistent_and_current_period_plan():
     s = _store()
-    w, p = _wallet(s), _plan(s)
-    meter = CreditMeter(w, p)
+    w, p, subs = _wallet(s), _plan(s), _subs(s)
+    meter = CreditMeter(w, p, subs)
     w.grant("acme", 200, "topup", issued_at=_issue())
     w.grant("acme", 20, "trial", issued_at=_issue())
-    p.grant("acme", 6000, period_end=2000.0, issued_at=_issue())
-    assert meter.available("acme", now=1500.0) == 6220     # 220 persistent + 6000 live plan
-    assert meter.available("acme", now=2500.0) == 220      # plan expired; persistent (trial+topup) persists
+    subs.subscribe("acme", "pro", 6000, period_start=1.0, period_end=2000.0, issued_at=_issue())
+    p.grant("acme", 6000, period_end=2000.0, issued_at=_issue())     # the current period's tranche
+    assert meter.available("acme", now=1500.0) == 6220     # 220 persistent + 6000 current-period plan
+    assert meter.available("acme", now=2500.0) == 220      # period elapsed -> plan 0; persistent persists
     pos = meter.position("acme", now=1500.0)
     assert pos.persistent == 220 and pos.plan_live == 6000 and pos.available == 6220
     assert meter.available("ghost", now=1.0) == 0          # unknown tenant fail-closed
+
+
+def test_meter_counts_only_the_current_subscription_period_not_overlapping_tranches():
+    # The invariant that closes the Slice-4 red-pen MED: two plan tranches whose windows OVERLAP must NEVER sum
+    # to a double allotment. The meter counts ONLY the tranche for the ACTIVE subscription's current period, so a
+    # prior / stray tranche is ignored even while it is still unexpired in the raw ledger.
+    s = _store()
+    w, p, subs = _wallet(s), _plan(s), _subs(s)
+    meter = CreditMeter(w, p, subs)
+    p.grant("acme", 6000, period_end=1100.0, issued_at=_issue())    # an earlier (overlapping) tranche
+    subs.subscribe("acme", "pro", 6000, period_start=600.0, period_end=1600.0, issued_at=_issue())
+    p.grant("acme", 6000, period_end=1600.0, issued_at=_issue())    # the current period's tranche
+    assert p.available("acme", now=700.0) == 12000                  # raw ledger: BOTH tranches live (diagnostic)
+    assert meter.available("acme", now=700.0) == 6000, "meter must count ONLY the current subscription period"
+
+
+def test_plan_credits_require_an_active_in_period_subscription():
+    # Plan credits come from a subscription: no active, in-period subscription -> no plan credits (fail-closed,
+    # the dunning/cancel behaviour). Persistent top-ups are unaffected.
+    s = _store()
+    w, p, subs = _wallet(s), _plan(s), _subs(s)
+    meter = CreditMeter(w, p, subs)
+    w.grant("acme", 50, "topup", issued_at=_issue())
+    subs.subscribe("acme", "pro", 6000, period_start=1.0, period_end=2000.0, issued_at=_issue())
+    p.grant("acme", 6000, period_end=2000.0, issued_at=_issue())
+    assert meter.available("acme", now=1000.0) == 6050
+    subs.mark_past_due("acme")                                      # dunning -> plan credits gone, top-up stays
+    assert meter.available("acme", now=1000.0) == 50
+    subs.cancel("acme")
+    assert meter.available("acme", now=1000.0) == 50
 
 
 def test_refill_bridge_grants_one_tranche_and_is_idempotent():

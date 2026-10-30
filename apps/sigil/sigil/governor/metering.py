@@ -16,8 +16,11 @@ credit policy: NON-ROLLOVER plan credits + PERSISTENT top-ups.
 
 THE METER — `CreditMeter.available(org, now)` is the single deterministic number a later gate (Slice 6) tests:
     available(org, now) = wallet.available(org)                          # persistent: trial + topup, clamped >=0
-                        + Σ over plan tranches T with T.period_end > now  # only UNEXPIRED tranches count
-                              of max(0, granted[org,T] - debited[org,T])  # per-tranche, clamped >=0 (non-rollover)
+                        + (the ACTIVE subscription's CURRENT-period plan tranche remainder at `now`, else 0)
+Plan credits are SCOPED TO THE SUBSCRIPTION'S CURRENT PERIOD — exactly one allotment is ever live, so an overlapping
+or prior-period tranche can never sum into a double allotment (the subscription is the LWW authority for which
+period is current). The raw `PlanCreditLedger.available` (Σ over all unexpired tranches) is a ledger diagnostic,
+NOT the spendable number.
 `now` is supplied by the clock-bearing caller (the sovereign fold is clock-free and deterministic — a wall-clock
 default would inject nondeterminism, exactly as `subscription.active_subscription` documents). A debit is charged
 to a specific bucket by the gate: a `governor.plan_debit` names the `period_end` tranche it drains; persistent
@@ -221,11 +224,23 @@ class PlanCreditLedger:
                             debited=debited.get((org_id, pe), 0)) for (_o, pe) in keys]
 
     def available(self, org_id: str, now: Optional[float] = None) -> int:
-        """Spendable plan credits for `org_id` right now: Σ over UNEXPIRED tranches (period_end > now) of the
-        per-tranche remainder (granted − debited, clamped >= 0). With `now` omitted every tranche counts
-        (status-only, non-expiry view) — the Slice-6 gate MUST pass `now` or an expired tranche would read as
-        spendable (fail-open-by-omission, same contract as `subscription.active_subscription`)."""
+        """RAW ledger view: Σ over UNEXPIRED tranches (period_end > now) of the per-tranche remainder
+        (granted − debited, clamped >= 0). This is a diagnostic over the ledger ALONE; it is NOT the authoritative
+        spendable number, because a tenant may hold more than one unexpired tranche (e.g. a mid-cycle event that
+        minted a second period). The authoritative 'how much can this tenant spend now' is `CreditMeter.available`,
+        which scopes plan credits to the ACTIVE subscription's CURRENT period (one allotment live at a time). With
+        `now` omitted every tranche counts (status-only); a caller testing spend MUST pass `now`."""
         return sum(t.remaining for t in self.tranches(org_id) if t.is_live(now))
+
+    def remaining_for_period(self, org_id: str, period_end: float) -> int:
+        """The remaining credits of the ONE tranche keyed `(org_id, period_end)` — granted − debited, clamped
+        >= 0. Expiry is NOT applied here (the caller — CreditMeter, via the active subscription — has already
+        established the period is current/unexpired). Fail-closed to 0 on an empty id."""
+        if not isinstance(org_id, str) or not org_id:
+            return 0
+        granted, debited, _ = self._fold()
+        key = (org_id, _as_period(period_end))
+        return max(0, granted.get(key, 0) - debited.get(key, 0))
 
 
 @dataclass(frozen=True)
@@ -233,7 +248,7 @@ class CreditPosition:
     """A tenant's full spendable position at an instant: persistent (wallet) + live plan (unexpired tranches)."""
     org_id: str
     persistent: int     # wallet.available(org): trial + topup, never expiring
-    plan_live: int      # Σ unexpired plan tranche remainders at `now`
+    plan_live: int      # the ACTIVE subscription's current-period plan tranche remainder at `now` (0 if none)
 
     @property
     def available(self) -> int:
@@ -242,21 +257,34 @@ class CreditPosition:
 
 class CreditMeter:
     """The deterministic burn-down meter the Slice-6 gate asks 'how many credits can this tenant spend NOW?'.
-    Pure composition over the persistent wallet + the period-scoped plan ledger; owns no state of its own."""
+    Pure composition over the persistent wallet + the period-scoped plan ledger + the subscription. Owns no state.
 
-    def __init__(self, wallet, plan: PlanCreditLedger):
+    PLAN CREDITS ARE SCOPED TO THE ACTIVE SUBSCRIPTION'S CURRENT PERIOD — exactly ONE allotment is ever live. The
+    subscription (`governor/subscription.py`) is the LWW authority for which period is current; the meter counts
+    the plan tranche keyed to THAT period and only while the subscription is active and in-period. This is what
+    enforces NON-ROLLOVER at the money boundary: a prior period's tranche, or a stray tranche minted by a
+    mid-cycle event, is simply not the current period and is not counted — so overlapping tranches can never sum
+    to a double allotment. A tenant with no active, in-period subscription has no plan credits (fail-closed; this
+    is also the dunning/cancel behaviour). PERSISTENT credits (wallet: trial + top-ups) are independent of any
+    subscription and always spendable."""
+
+    def __init__(self, wallet, plan: PlanCreditLedger, subscriptions):
         self.wallet = wallet
         self.plan = plan
+        self.subscriptions = subscriptions
 
     def position(self, org_id: str, now: Optional[float] = None) -> CreditPosition:
         if not isinstance(org_id, str) or not org_id:
             return CreditPosition(org_id="", persistent=0, plan_live=0)
-        return CreditPosition(org_id=org_id, persistent=self.wallet.available(org_id),
-                              plan_live=self.plan.available(org_id, now))
+        persistent = self.wallet.available(org_id)
+        sub = self.subscriptions.active_subscription(org_id, now)   # active AND in-period, else None (fail-closed)
+        plan_live = self.plan.remaining_for_period(org_id, sub.period_end) if sub is not None else 0
+        return CreditPosition(org_id=org_id, persistent=persistent, plan_live=plan_live)
 
     def available(self, org_id: str, now: Optional[float] = None) -> int:
-        """Total spendable credits for `org_id` at `now` = persistent wallet + live plan tranches. The scalar the
-        gate tests ( > 0 to proceed, fail-closed). Pass `now` so expired plan tranches drop out."""
+        """Total spendable credits for `org_id` at `now` = persistent wallet + the ACTIVE subscription's current
+        plan tranche remainder. The scalar the gate tests ( > 0 to proceed, fail-closed). Pass `now` so a lapsed
+        period / expired tranche drops out (the fail-open-by-omission contract of `active_subscription`)."""
         return self.position(org_id, now).available
 
 
