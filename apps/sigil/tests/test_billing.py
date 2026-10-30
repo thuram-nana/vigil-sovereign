@@ -312,12 +312,15 @@ def test_flutterwave_only_the_reverify_grants_not_the_webhook_body():
     # THE core trust property: the webhook body is NOT trusted; only the server-side re-verify can grant. The
     # verifier here reports id 5 as FAILED, yet the webhook body brazenly CLAIMS a successful 999999-credit
     # top-up for acme. The authoritative re-verify must win -> mint nothing.
+    # Verifier knows NOTHING about id 404 (returns None); the webhook body brazenly CLAIMS a fully-successful
+    # 999999 top-up for acme. The authoritative re-verify (None) must win -> mint nothing. A "trust the body"
+    # regression would mint 200 here.
     _s, w, _subs, _plan, _m, _flw, signer = _flw_rig({"5": {"id": 5, "status": "failed", "tx_ref": "vigil:acme:x"}})
     liar = json.dumps({"event": "charge.completed",
-                       "data": {"id": 5, "status": "successful", "tx_ref": "vigil:acme:x",
+                       "data": {"id": 404, "status": "successful", "tx_ref": "vigil:acme:x",
                                 "amount": 999999, "meta": {"price_id": "price_topup_200"}}}).encode()
-    assert signer.ingest(liar, _FLW_SECRET, now=1.0) is None, "webhook body claiming success must not grant"
-    assert signer.ingest(_flw_wh("charge.completed", 404), _FLW_SECRET, now=1.0) is None   # verifier returns None
+    assert signer.ingest(liar, _FLW_SECRET, now=1.0) is None, "a body claiming success for an unverifiable tx must not grant"
+    assert signer.ingest(_flw_wh("charge.completed", 5), _FLW_SECRET, now=1.0) is None      # verifier says failed
     assert w.available("acme") == 0, "a webhook whose transaction does not re-verify as successful grants nothing"
 
 
