@@ -38,6 +38,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
+from vigil_core.hopauth import verify_hop_assertion
 from vigil_core.metrics import CONTENT_TYPE as _OPENMETRICS_CT, set_plane
 from vigil_core.posture import legacy_owner_token_grants_owner
 from vigil_core.spine_domains import DOMAIN_TAGS
@@ -1271,6 +1272,10 @@ class Handler(BaseHTTPRequestHandler):
             return self._ceremonies_post(path)
         if path.startswith("/api/hostcmd/"):
             return self._hostcmd_post(path)
+        if path.startswith("/api/provision/"):
+            # Slice E1 — the keyless `custui` edge's ONLY door to the owner-signed customer provisioner,
+            # gated SOLELY by the edge→provisioner hop key (NOT operator RBAC, NOT browser Origin/CSRF).
+            return self._provision_post(path)
         if path != "/api/action":
             return self._deny(404, "not found")
         # Anti-CSRF/rebinding (Host+Origin) first, THEN the principal. A per-user bearer or the legacy owner
@@ -1297,6 +1302,78 @@ class Handler(BaseHTTPRequestHandler):
             self._deny(400, f"bad request: {e}")
         except Exception as e:  # noqa: BLE001 — ApprovalError etc. → 400, never 500-leak internals
             self._deny(400, f"action failed: {str(e)[:200]}")
+
+    def _provision_post(self, path: str):
+        """Slice E1 — the ONLY HTTP entry to the owner-signed customer provisioner. Gated SOLELY by the
+        edge→provisioner hop key (`VIGIL_PROVISION_HOP_KEY`), NEVER by operator RBAC or browser Origin/CSRF:
+        the keyless `custui` edge authenticates the customer session itself, then stamps a
+        `vigil_core.hopauth` assertion over (principal=authenticated-requester, role=action, POST, path, ts).
+        The sovereign side therefore trusts the requester CRYPTOGRAPHICALLY (Finding D — the requester is
+        HMAC-bound by the edge's hop key, never a free body field a caller could spoof).
+
+        FAIL-CLOSED at every branch: an unset/blank hop key (nothing to verify with), a stale/forged/
+        incomplete assertion, or an authenticated OPERATOR token WITHOUT a valid hop assertion all 403 — so
+        this surface is unreachable to anyone but the edge. Deliberately NOT a BOOTSTRAP path: the operator
+        proxy never forwards `/api/provision/*`; only the loopback custui edge reaches it."""
+        from .. import config as _config
+        from .provision import ProvisionDenied, ProvisionError, ProvisionRateLimited, build_provisioner
+        action = path[len("/api/provision/"):]
+        principal = self.headers.get("X-VIGIL-Provision-Principal", "") or ""
+        ts = self.headers.get("X-VIGIL-Provision-Ts", "") or ""
+        sig = self.headers.get("X-VIGIL-Provision-Sig", "") or ""
+        # role == action, so a captured assertion cannot be re-aimed at a different provision verb; the
+        # requester (principal) + the backend path are inside the HMAC too. Empty key ⇒ verify ⇒ False ⇒ 403.
+        if not verify_hop_assertion(_config.provision_hop_key(), principal, action, "POST", path, ts, sig):
+            return self._deny(403, "provision denied (hop)")
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+            if length > self._MAX_BODY:
+                return self._deny(413, "body too large")
+            body = json.loads(self.rfile.read(length) or b"{}")
+            if not isinstance(body, dict):
+                return self._deny(400, "bad request: body must be an object")
+        except (ValueError, OSError) as e:
+            return self._deny(400, f"bad request: {str(e)[:200]}")
+        p = build_provisioner(self.server.store(), expose_dev_tokens=_config.provision_expose_dev_tokens())
+        try:
+            result = self._provision_dispatch(p, action, principal, body)
+        except ProvisionRateLimited as e:
+            return self._deny(429, f"rate limited; retry after {e.retry_after:.0f}s")
+        except ProvisionDenied as e:
+            return self._deny(403, f"denied: {str(e)[:200]}")
+        except ProvisionError as e:
+            return self._deny(400, f"provision failed: {str(e)[:200]}")
+        except (ValueError, KeyError) as e:
+            return self._deny(400, f"bad request: {str(e)[:200]}")
+        if result is None:
+            return self._deny(404, "unknown provision action")
+        return self._json(result)
+
+    def _provision_dispatch(self, p, action: str, requester: str, body: dict):
+        """Map a hop-verified provision action to its Provisioner method, over a CLOSED exact-match set
+        (unknown → None → 404). The REQUESTER for member management is the HMAC-bound hop principal — NEVER
+        a body field — so Finding D holds at the transport: a caller cannot name another admin's username to
+        borrow authority. The public actions (signup/login/recover) take no requester (the hop key alone
+        gates them; they are the unauthenticated bootstrap of a customer identity, rate-limited in-service)."""
+        ip = str(body.get("ip", ""))
+        if action == "signup_request":
+            return p.request_signup(str(body.get("email", "")), ip=ip)
+        if action == "signup_confirm":
+            return p.confirm_signup(str(body.get("token", "")), password=str(body.get("password", "")),
+                                    org_name=str(body.get("org_name", "")), ip=ip)
+        if action == "login":
+            return p.login(str(body.get("email", "")), str(body.get("password", "")), ip=ip)
+        if action == "recover_request":
+            return p.request_recover(str(body.get("email", "")), ip=ip)
+        if action == "recover_confirm":
+            return p.confirm_recover(str(body.get("token", "")), new_password=str(body.get("new_password", "")))
+        if action == "member_grant":
+            return p.grant_member(requester, str(body.get("org_id", "")), str(body.get("member_username", "")),
+                                  str(body.get("role", "")), ip=ip)
+        if action == "member_revoke":
+            return p.revoke_member(requester, str(body.get("org_id", "")),
+                                   str(body.get("member_username", "")), ip=ip)
+        return None
 
     def _durability_post(self, path):
         """Wave 3 (durability) — OWNER-ONLY trust-root backup/restore, orchestrated in-process. The operator's

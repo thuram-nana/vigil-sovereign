@@ -166,6 +166,15 @@ def provision_hop_key() -> str:
     return os.environ.get("VIGIL_PROVISION_HOP_KEY", "")
 
 
+def provision_expose_dev_tokens() -> bool:
+    """DEV-ONLY: whether the provision HTTP surface may echo the email verify/recover token in its response
+    (so a sovereign/dev install can complete signup/recovery without an SMTP relay). TRUE only when NO real
+    email sender is configured AND the PRODUCTION posture is not armed — so a production deploy NEVER leaks a
+    token on the wire, and any install with SMTP configured surfaces nothing (the token is emailed)."""
+    from vigil_core.posture import is_production_posture
+    return (not email_enabled()) and (not is_production_posture())
+
+
 def email_enabled() -> bool:
     """True iff an SMTP sender is configured (`SIGIL_EMAIL_HOST` set) — mirrors the OIDC opt-in. OFF by
     default: a dev/sovereign install uses NullEmailSender and surfaces a verify/recover token only on an
