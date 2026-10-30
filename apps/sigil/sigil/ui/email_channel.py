@@ -204,6 +204,25 @@ class EmailTokenLedger:
         self._unlink(claimed)
         return email
 
+    def peek(self, token: str, purpose: str, *, now: "Optional[float]" = None) -> "Optional[str]":
+        """Validate a token and return its bound email WITHOUT consuming it (read-only) — the basis for a
+        commit-marker transaction: a caller peeks, performs its idempotent work, then `consume`s LAST so a
+        crash before the consume leaves the token valid for an idempotent retry. Same TTL + purpose checks
+        as `consume`, but it never claims/reaps the marker."""
+        if not isinstance(token, str) or not token or purpose not in _PURPOSES:
+            return None
+        t = time.time() if now is None else float(now)
+        rec = self._read(self._marker(token))
+        if rec is None:
+            return None
+        exp = rec.get("expires_at")
+        if not isinstance(exp, (int, float)) or isinstance(exp, bool) or t >= float(exp):
+            return None                                # expired (consume will reap; peek stays read-only)
+        if rec.get("purpose") != purpose:
+            return None                                # wrong purpose
+        email = rec.get("email")
+        return email if isinstance(email, str) and email else None
+
     def revoke_for_email(self, email: str) -> int:
         """Invalidate every outstanding token bound to `email` (e.g. on successful verification, or when
         a customer account is revoked). Returns the count removed. Linear scan (the ledger is small)."""
