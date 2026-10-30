@@ -347,7 +347,7 @@ def build(records: Iterable[SpineRecord], *, trusted_pubkey: Optional[str],
     org_row: dict[Any, list] = {row[0]: [row[1], row[2]] for row in s.org_row} if s else {}  # org_id->[name,owner]
     mem_state: dict[tuple, str] = dict(s.membership_state_map()) if s else {}
     mem_issued: dict[tuple, float] = dict(s.membership_issued_map()) if s else {}
-    mem_row: dict[tuple, str] = {(row[0], row[1]): row[2] for row in s.membership_row} if s else {}  # ->role
+    mem_row: dict[tuple, Any] = {(row[0], row[1]): row[2] for row in s.membership_row} if s else {}  # ->role
     arm: set = set(s.arm_set()) if s else set()
     dedup: dict[tuple[Optional[str], Optional[str]], int] = dict(s.approval_dedup_map()) if s else {}
     warden: dict[str, tuple[int, str, int]] = ({k: (v[0], v[1], v[2]) for k, v in s.warden_best.items()}
