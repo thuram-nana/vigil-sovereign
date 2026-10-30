@@ -144,7 +144,16 @@ SCOPE = os.environ.get("SIGIL_SCOPE", "sigil")          # the owner's single sco
 # The keyless customer edge + the owner-signed provisioner live behind these. All default OFF/empty, so a
 # sovereign install is byte-identical until the customer plane is turned on (`vigil up` mints the hop key).
 CUSTOMER_UI_PORT = _int_env("VIGIL_CUSTOMER_PORT", 8734)
+COCKPIT_UI_PORT = _int_env("SIGIL_UI_PORT", 8733)       # the sovereign cockpit port (the edge's hop target)
 _customer = SIGIL_HOME / "customer"
+
+
+def sovereign_provision_base() -> str:
+    """The loopback base URL the keyless customer edge calls to reach the sovereign provisioner routes
+    (`/api/provision/*`) over the hop key. Loopback by construction — the edge and the cockpit run on the
+    same host; the edge holds NO owner key, only `VIGIL_PROVISION_HOP_KEY`. Overridable via
+    `VIGIL_PROVISION_BASE` (e.g. a private-tunnel address) for a split deployment."""
+    return os.environ.get("VIGIL_PROVISION_BASE", f"http://127.0.0.1:{COCKPIT_UI_PORT}")
 CUSTOMER_SESSIONS_DIR = _customer / "sessions"          # the customer cookie-session ledger (disjoint from operator)
 EMAIL_TOKENS_DIR = _customer / "email_tokens"           # single-use, purpose-bound verify/recover tokens
 LOGIN_RATELIMIT_DIR = _customer / "login_ratelimit"     # per-account / per-ip lockout markers

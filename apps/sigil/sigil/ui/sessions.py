@@ -171,3 +171,25 @@ class SessionLedger:
             self._unlink(entry.path)
             n += 1
         return n
+
+    def revoke_all_for_user(self, username: str) -> int:
+        """Invalidate every live session belonging to ONE user — the password-reset / account-compromise
+        response (a reset must sever any session a thief, or a stale attacker, still holds). Scans the ledger
+        and unlinks each marker whose record `username` matches. Returns the count removed. A blank username
+        matches NOTHING (fail-closed — never a wildcard that signs everyone out). Used by the customer edge
+        after `confirm_recover` (the edge half of the second-review session-invalidation seam)."""
+        if not isinstance(username, str) or not username:
+            return 0
+        n = 0
+        try:
+            entries = list(os.scandir(self.dir))
+        except OSError:
+            return 0
+        for entry in entries:
+            if entry.name.endswith(".tmp"):
+                continue
+            rec = self._read(Path(entry.path))
+            if isinstance(rec, dict) and rec.get("username") == username:
+                self._unlink(entry.path)
+                n += 1
+        return n
