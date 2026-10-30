@@ -247,3 +247,29 @@ class Provisioner:
         self._audit("revoke_member", requester=requester, org_id=requester_org_id, target=member_username,
                     outcome="revoked")
         return {"org_id": requester_org_id, "username": member_username, "seq": seq}
+
+
+def build_provisioner(store, *, expose_dev_tokens: bool = False, now_fn=time.time) -> Provisioner:
+    """Wire a production Provisioner over `store`: the owner-signed registries (their owner key defaults to
+    the persisted owner identity — THIS is the only process that holds it), the filesystem email-token +
+    login-rate-limit ledgers rooted under SIGIL_HOME (config), and the configured EmailSender
+    (OFF-by-default NullEmailSender unless SIGIL_EMAIL_* is set). The keyless customer edge NEVER calls
+    this; it reaches the sovereign provisioner routes over loopback + the hop key."""
+    from .. import config
+    from ..governor.customers import CustomerRegistry
+    from ..governor.orgs import OrgRegistry
+    from ..governor.wallet import WalletRegistry
+    from .email_channel import EmailTokenLedger
+    from .login_ratelimit import LoginRateLimiter
+    return Provisioner(
+        store,
+        customers=CustomerRegistry(store),
+        orgs=OrgRegistry(store),
+        wallet=WalletRegistry(store),
+        email_tokens=EmailTokenLedger(config.EMAIL_TOKENS_DIR),
+        rate_limiter=LoginRateLimiter(config.LOGIN_RATELIMIT_DIR),
+        email_sender=config.email_sender(),
+        trial_credits=config.TRIAL_CREDITS,
+        expose_dev_tokens=expose_dev_tokens,
+        now_fn=now_fn,
+    )

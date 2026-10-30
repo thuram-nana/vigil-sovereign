@@ -139,6 +139,42 @@ GRAPH_DIR = SIGIL_HOME / "graph"                          # base; holds current/
 
 # --- identity / scope -----------------------------------------------------------------
 SCOPE = os.environ.get("SIGIL_SCOPE", "sigil")          # the owner's single scope
+
+# ---- SaaS customer plane (Slice E1) -------------------------------------------------------------
+# The keyless customer edge + the owner-signed provisioner live behind these. All default OFF/empty, so a
+# sovereign install is byte-identical until the customer plane is turned on (`vigil up` mints the hop key).
+CUSTOMER_UI_PORT = _int_env("VIGIL_CUSTOMER_PORT", 8734)
+_customer = SIGIL_HOME / "customer"
+CUSTOMER_SESSIONS_DIR = _customer / "sessions"          # the customer cookie-session ledger (disjoint from operator)
+EMAIL_TOKENS_DIR = _customer / "email_tokens"           # single-use, purpose-bound verify/recover tokens
+LOGIN_RATELIMIT_DIR = _customer / "login_ratelimit"     # per-account / per-ip lockout markers
+TRIAL_CREDITS = _int_env("VIGIL_TRIAL_CREDITS", 100)    # server-constant trial grant (never on-the-wire)
+
+
+def provision_hop_key() -> str:
+    """The edge→provisioner shared HMAC hop secret (`VIGIL_PROVISION_HOP_KEY`), minted per `vigil up` and
+    handed to the edge + the sovereign cockpit, NEVER to the browser. Empty ⇒ the provisioner routes fail
+    CLOSED (no customer provisioning until the key is provisioned)."""
+    return os.environ.get("VIGIL_PROVISION_HOP_KEY", "")
+
+
+def email_enabled() -> bool:
+    """True iff an SMTP sender is configured (`SIGIL_EMAIL_HOST` set) — mirrors the OIDC opt-in. OFF by
+    default: a dev/sovereign install uses NullEmailSender and surfaces a verify/recover token only on an
+    explicit dev flag, NEVER in production."""
+    return bool(os.environ.get("SIGIL_EMAIL_HOST", "").strip())
+
+
+def email_sender():
+    """The configured EmailSender: a stdlib SmtpEmailSender behind `SIGIL_EMAIL_*`, else the OFF-by-default
+    NullEmailSender. Lazily imports the (stdlib-only) channel so `config` stays import-light."""
+    from .ui.email_channel import NullEmailSender, SmtpEmailSender
+    if not email_enabled():
+        return NullEmailSender()
+    return SmtpEmailSender(os.environ["SIGIL_EMAIL_HOST"], _int_env("SIGIL_EMAIL_PORT", 587),
+                           from_addr=os.environ.get("SIGIL_EMAIL_FROM", "noreply@vigil.local"),
+                           username=os.environ.get("SIGIL_EMAIL_USER") or None,
+                           password=os.environ.get("SIGIL_EMAIL_PASSWORD") or None)
 OWNER_KEY_ID = os.environ.get("SIGIL_OWNER_KEY_ID", "owner")
 
 

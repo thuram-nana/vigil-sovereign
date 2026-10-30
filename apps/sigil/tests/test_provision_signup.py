@@ -129,3 +129,19 @@ def test_recover_rejects_a_verify_purpose_token():
         p.confirm_recover(vt, new_password="customer-pw-x", now=100.0)
     # and it is still usable for its real purpose afterwards (not burned)
     assert p.email_tokens.consume(vt, PURPOSE_VERIFY, now=100.0) == "dan@acme.com"
+
+
+def test_build_provisioner_production_wiring():
+    # the production factory wires the REAL owner-signed registries (persisted owner key — this process is
+    # the only key holder), the ledgers rooted under SIGIL_HOME, and the OFF-by-default NullEmailSender; a
+    # full signup owner-signs end-to-end through it (email off ⇒ the dev token is surfaced for the test).
+    from sigil.governor.customers import CustomerRegistry
+    from sigil.governor.identity import ensure_owner_keypair
+    from sigil.ui.provision import build_provisioner
+    ensure_owner_keypair()                           # persist an owner identity under the per-test SIGIL_HOME
+    s = SpineStore(tempfile.mktemp(suffix=".jsonl"))
+    p = build_provisioner(s, expose_dev_tokens=True)
+    out = p.confirm_signup(p.request_signup("prod@acme.com", ip="9.9.9.9", now=100.0)["dev_token"],
+                           password="customer-pw-1", org_name="Prod", now=100.0)
+    assert CustomerRegistry(s).by_email("prod@acme.com").username == out["username"]  # owner-signed + verified
+    assert out["org_id"].startswith("org_")
