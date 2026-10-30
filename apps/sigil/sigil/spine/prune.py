@@ -169,6 +169,15 @@ def check_prune_safe(store, K: int) -> list[Segment]:
     if stranded_mems:
         raise PruneUnsafe(f"K={K} would strand active membership(s) {stranded_mems}: their only owner-signed "
                           f"grant sits below K and would not be carried into the snapshot seed; lower K or resolve")
+    # (c, SaaS wallet) the SAME referential floor for the per-tenant credit wallet (governor/wallet.py): a
+    # prune must carry every below-K tenant's running balance AND the consumed-entry_id set into the seed, or
+    # it would ZERO the balance (lose historical grants) AND drop the anti-replay seen-set (re-opening grant
+    # replay — a pruned grant re-appended above K would re-credit). Fail-closed, like the accounts floor.
+    stranded_wallets = stranded_active_wallets(store, archived, K)
+    if stranded_wallets:
+        raise PruneUnsafe(f"K={K} would strand credit wallet(s) {stranded_wallets}: a below-K balance or "
+                          f"consumed entry_id would not be carried into the snapshot seed (zeroing the balance "
+                          f"or re-opening grant replay); lower K or resolve")
     # (e) owner-key succession referential floor (W9-1 / issue #434): a rotation record that ESTABLISHES a key
     # whose seq-window still covers a LIVE record (>= K) — including, always, the current key's open window —
     # must NOT be pruned. Without the whole genesis->current chain present in the live window, post-prune
@@ -315,6 +324,65 @@ def stranded_active_org_entities(store, archived: list[Segment], K: int) -> tupl
                     if m_seed_state.get((row[0], row[1])) == "active"}
     return (sorted(str(o) for o in (active_orgs - orgs_carried)),
             sorted(f"{k[1]}@{k[0]}" for k in (active_mems - mems_carried)))
+
+
+def stranded_active_wallets(store, archived: list[Segment], K: int) -> list[str]:
+    """§7(c, SaaS wallet) — the tenants (`governor/wallet.py`) whose credit balance or anti-replay seen-set sits
+    in the pruned prefix [0..K) yet would NOT be fully carried into the snapshot seed: the set a hard prune
+    would silently ZERO (every historical grant gone) and/or whose consumed `entry_id`s it would drop
+    (re-opening grant replay — a pruned grant re-appended above K would re-credit). EMPTY in the happy path —
+    `SnapshotState.build()` carries each below-K tenant's `granted`/`debited` totals and the full seen-set. The
+    fail-closed tripwire that keeps the wallet fold's prune-survival honest, mirroring `stranded_active_accounts`
+    (verified under the owner key valid at each seq; the seed round-trips through `model_dump`/`model_validate`
+    so a seed emission regression is caught). Read-only."""
+    from ..governor.wallet import (CREDIT_GRANT_SIGNAL, CREDIT_DEBIT_SIGNAL, _GRANT_CORE, _DEBIT_CORE,
+                                   _as_credits)
+    from ..governor import key_history as _kh
+    from ..governor.authn import verify_signed
+    from ..governor.identity import owner_pubkey
+    tp = owner_pubkey() or ""
+    resolver = _kh.key_resolver(store, current=tp)
+    below: list[SpineRecord] = []
+    for seg in archived:
+        below.extend(read_segment_records(store._layout.seg_path(seg)))
+    # the running balance + seen-set a genesis fold of [0..K) yields — the state that MUST survive the prune.
+    granted: dict[Any, int] = {}
+    debited: dict[Any, int] = {}
+    seen: set = set()
+    for r in sorted(below, key=lambda r: r.seq):
+        p = r.payload
+        if not isinstance(p, dict):
+            continue
+        sig = p.get("signal")
+        if sig != CREDIT_GRANT_SIGNAL and sig != CREDIT_DEBIT_SIGNAL:
+            continue
+        oid, eid = p.get("org_id"), p.get("entry_id")
+        if not (isinstance(oid, str) and oid and isinstance(eid, str) and eid):
+            continue
+        core = _GRANT_CORE if sig == CREDIT_GRANT_SIGNAL else _DEBIT_CORE
+        if not verify_signed(p, core, resolver.at(r.seq)):
+            continue
+        key = (sig, oid, eid)                 # namespaced by signal — mirror WalletRegistry._fold / build()
+        if key in seen:
+            continue
+        seen.add(key)
+        amt = _as_credits(p.get("credits"))
+        if sig == CREDIT_GRANT_SIGNAL:
+            granted[oid] = granted.get(oid, 0) + amt
+        else:
+            debited[oid] = debited.get(oid, 0) + amt
+    active = set(granted) | set(debited)
+    # the seed the prune will actually persist, round-tripped through the on-disk (JSON) form.
+    seed = SnapshotState.model_validate(
+        build(below, trusted_pubkey=tp, base_seq=K, snapshot_seq=-1, resolver=resolver).model_dump())
+    sg, sd, ss = seed.wallet_granted_map(), seed.wallet_debited_map(), seed.wallet_seen_set()
+    stranded: set = set()
+    for o in active:
+        if sg.get(o, 0) != granted.get(o, 0) or sd.get(o, 0) != debited.get(o, 0):
+            stranded.add(str(o))          # a balance the seed fails to carry exactly
+    for (_sig, o, _e) in (seen - ss):
+        stranded.add(str(o))              # a consumed entry_id the seed drops (anti-replay durability)
+    return sorted(stranded)
 
 
 # ---- the owner-committed snapshot payload (Merkle accumulator + folded state) ---------------------------
