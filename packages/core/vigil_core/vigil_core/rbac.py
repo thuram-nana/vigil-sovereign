@@ -181,6 +181,15 @@ OFFENSE_ACTION_PERM: dict[str, str] = {
     "/api/aegis/mode": _OWN,
     "/api/tools/install": _OWN,
     "/api/services/up": _OWN,
+    # Ticketing-OUT (enterprise wave): push an oracle-verified finding OUT to an operator-provisioned
+    # ticketing system (GitHub Issues) via the floor-pinned egress transport. It is OWNER-tier because it
+    # (a) EGRESSES finding data to an external third-party system and (b) uses an owner-provisioned API
+    # credential (resolved off-spine by env-var NAME) — a credentialed external DISCLOSURE. Starting the
+    # first slice of this new egress capability at the ceiling is the fail-closed/conservative direction
+    # (an operator can be re-tiered down later). NOTE the counter-precedent: `/api/knowledge/gitsync` is a
+    # credentialed egress-push at operator-tier, so operator-tier (`run_engagement`) is a defensible
+    # alternative if the wave contract prefers it — retiering is a one-line change here.
+    "/api/ticketing/push": _OWN,
     # OOB: standing up the managed collaborator mints a collector keypair + spawns a managed process (infra
     # provisioning — mirrors /api/aegis/setup); arming shells `vigil provision` to mint an owner-signed
     # authority (mirrors /api/authority/provision). Both are owner-tier.
