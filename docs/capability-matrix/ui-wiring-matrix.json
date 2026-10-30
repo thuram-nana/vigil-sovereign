@@ -307,11 +307,11 @@
       "pending": 0,
       "ui-driven": 40
     },
-    "routes": 194,
+    "routes": 195,
     "routes_by_status": {
       "ORPHAN": 0,
       "headless": 27,
-      "pending": 2,
+      "pending": 3,
       "ui-driven": 165
     },
     "ui_calls": 159
@@ -403,6 +403,14 @@
       "path": "/api/billing/overview",
       "plane": "sovereign",
       "reason": "owner billing-admin overview \u2014 vigil-ui screen lands in the frontend slice",
+      "status": "pending"
+    },
+    {
+      "kind": "exact",
+      "method": "GET",
+      "path": "/api/billing/plans",
+      "plane": "sovereign",
+      "reason": "pricing catalog projection \u2014 the pricing page lands in the frontend slice",
       "status": "pending"
     },
     {

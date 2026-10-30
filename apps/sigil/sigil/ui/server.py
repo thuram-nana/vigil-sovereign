@@ -461,6 +461,15 @@ class Handler(BaseHTTPRequestHandler):
                 return self._deny(403, "owner only")
             from . import billing as _billing
             return self._json({"orgs": _billing.org_list(self.server.store())})
+        if path == "/api/billing/plans":
+            # The owner-controlled PRICE->ENTITLEMENT catalog, projected for display (the pricing list). Any
+            # authenticated principal may read it (viewer+); it is global, carries NO tenant data and NO secret
+            # (the customer app serves a public pricing page from the same catalog). Not tenant-scoped.
+            from ..governor.accounts import role_can
+            if not role_can(principal.role, "read"):
+                return self._deny(403, "forbidden")
+            from ..governor import catalog as _catalog
+            return self._json({"plans": _catalog.plans()})
         if path == "/api/ask":
             # /api/ask DISPATCHES a KERNEL subprocess → it gets the FULL action gate, not just token.
             return self._ask(self._query().get("q", [""])[0]) if self._action_ok() else self._deny(403, "denied")
