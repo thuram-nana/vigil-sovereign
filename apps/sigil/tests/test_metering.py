@@ -149,17 +149,22 @@ def test_refill_bridge_refuses_non_active_and_rolls_to_new_period():
     subs, p = _subs(s), _plan(s)
     # no subscription -> nothing to refill
     assert refill_active_subscription(subs, p, "acme", issued_at=_issue()) is None
+    # ACTIVE then past_due with NO prior refill for this period: refusal must be the ACTIVE-check itself, not the
+    # append-level idempotency guard (which would only fire if a tranche already existed for this period_end).
     subs.subscribe("acme", "starter", 1000, period_start=1.0, period_end=100.0, issued_at=_issue())
-    refill_active_subscription(subs, p, "acme", issued_at=_issue())
     subs.mark_past_due("acme")
-    # past_due -> no refill for the (same) period beyond what was granted while active
     assert refill_active_subscription(subs, p, "acme", issued_at=_issue()) is None
-    # recover + renew to a NEW period -> a fresh tranche (the old one simply expires: non-rollover)
+    assert p.tranches("acme") == [], "a past_due tenant must not get a plan tranche (isolates the active-check)"
+    # cancel is likewise non-active -> no refill
+    subs.cancel("acme")
+    assert refill_active_subscription(subs, p, "acme", issued_at=_issue()) is None
+    assert p.tranches("acme") == []
+    # recover + renew to a NEW active period -> a fresh tranche (non-rollover: nothing carried from before)
     subs.subscribe("acme", "pro", 6000, period_start=100.0, period_end=200.0, issued_at=_issue())
     seq = refill_active_subscription(subs, p, "acme", issued_at=_issue())
     assert seq is not None
     assert p.available("acme", now=150.0) == 6000          # only the new period's tranche is live
-    assert {t.period_end for t in p.tranches("acme")} == {100.0, 200.0}
+    assert {t.period_end for t in p.tranches("acme")} == {200.0}
 
 
 def test_binding_validation():
