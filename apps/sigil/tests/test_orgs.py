@@ -404,3 +404,79 @@ def test_tenant_re_in_lockstep_with_engine_paths_literal():
     assert m, "could not locate _TENANT_RE literal in engine paths.py"
     assert m.group(1) == r'r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}"'
     assert og._TENANT_RE.pattern == r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}"
+
+
+# --- Slice A: the composed multi-tenant admission gate `admit` + the SaaS billing/org vocabulary ---------
+# A false-green here would let a tenant member reach an owner-tier money/membership action, lock the keyholder
+# out of their own tenant, leak a perm across tenants, or — worst — let registering/paying self-authorize a
+# security assessment (billing authz MUST NOT imply testing authz).
+
+def _seed_member(reg, org_id="acme", username="alice", role="operator"):
+    reg.create_org(org_id, f"{org_id} Inc", owner="owner", issued_at=_issue())
+    reg.grant_membership(org_id, username, role, issued_at=_issue())
+
+
+def test_admit_owner_global_role_is_never_locked_out_of_any_tenant():
+    reg = _reg(_store())
+    # The trust-root owner is NOT an org member, yet must pass every tenant-scoped perm in ANY org — even one
+    # that does not exist — via the GLOBAL leg of the composition (else the keyholder is locked out).
+    for perm in ("read", "view_billing", "view_invoices", "manage_billing", "manage_members", "manage_org"):
+        assert reg.admit(global_role="owner", username="owner", org_id="acme", permission=perm) is True
+        assert reg.admit(global_role="owner", username="owner", org_id="ghost", permission=perm) is True
+
+
+def test_admit_org_member_reads_own_billing_but_not_another_tenants():
+    reg = _reg(_store())
+    _seed_member(reg, "acme", "alice", "operator")
+    reg.create_org("other", "Other", owner="owner", issued_at=_issue())
+    # A pure CUSTOMER carries global_role=None (ZERO operator-surface perms) — ALL capability comes from the
+    # per-org membership, so even generic `read` is tenant-isolated. alice is operator in acme only.
+    for perm in ("view_billing", "view_usage", "view_invoices", "read"):
+        assert reg.admit(global_role=None, username="alice", org_id="acme", permission=perm) is True
+        assert reg.admit(global_role=None, username="alice", org_id="other", permission=perm) is False, \
+            "a member of acme must not read another tenant's billing/data"
+    # ...but an org `operator` is NOT a tenant-admin: owner-tier money/membership/org actions stay denied.
+    for perm in ("manage_billing", "manage_members", "manage_org"):
+        assert reg.admit(global_role=None, username="alice", org_id="acme", permission=perm) is False
+
+
+def test_admit_default_deny_non_member_wrong_org_revoked_and_unmapped():
+    reg = _reg(_store())
+    _seed_member(reg, "acme", "alice", "operator")
+    assert reg.admit(global_role="viewer", username="bob", org_id="acme", permission="view_billing") is False   # non-member
+    assert reg.admit(global_role="viewer", username="alice", org_id="ghost", permission="view_billing") is False  # unknown org
+    assert reg.admit(global_role="viewer", username="alice", org_id="acme", permission=None) is False            # unmapped
+    assert reg.admit(global_role="viewer", username="alice", org_id="acme", permission="") is False
+    assert reg.admit(global_role="root", username="alice", org_id="acme", permission="read") is True             # org leg still admits
+    reg.revoke_org("acme")                                                                                       # revoked org admits no one
+    assert reg.admit(global_role="viewer", username="alice", org_id="acme", permission="view_billing") is False
+
+
+def test_admit_billing_authority_never_implies_testing_authority():
+    # THE hard requirement: registering/paying/administering billing must NEVER authorize an assessment.
+    # Testing authority is the separate owner-signed, infra-bound target authority (`target_add` /
+    # `offense_authority`). Since per-org roles cap at operator and offense_authority is owner-only, no org
+    # membership — even operator — can ever admit a caller to it; only the GLOBAL owner can.
+    reg = _reg(_store())
+    _seed_member(reg, "acme", "alice", "operator")           # the highest grantable per-org role
+    for perm in ("offense_authority", "approve_a3", "secrets", "manage_users"):
+        assert reg.org_role_can("alice", "acme", perm) is False
+        assert reg.admit(global_role="viewer", username="alice", org_id="acme", permission=perm) is False, \
+            f"a paying tenant member must never self-authorize {perm!r} (billing authz != testing authz)"
+        assert reg.admit(global_role="analyst", username="alice", org_id="acme", permission=perm) is False
+    # a member granted manage_billing-equivalent (none, since capped at operator) still cannot test; only owner:
+    assert reg.admit(global_role="owner", username="owner", org_id="acme", permission="offense_authority") is True
+
+
+def test_saas_vocabulary_is_cumulative_and_fail_closed():
+    from vigil_core.rbac import PERMISSIONS, role_can
+    # the new perms attach at the right tiers and preserve the cumulative ordering.
+    for perm in ("view_billing", "view_usage", "view_invoices"):
+        assert role_can("operator", perm) and role_can("owner", perm)
+        assert not role_can("viewer", perm) and not role_can("analyst", perm)   # fail-closed below operator
+    for perm in ("manage_billing", "manage_members", "manage_org"):
+        assert role_can("owner", perm) and not role_can("operator", perm)       # owner-tier only
+    assert PERMISSIONS["viewer"] <= PERMISSIONS["analyst"] <= PERMISSIONS["operator"] <= PERMISSIONS["owner"]
+    # billing/org perms are DISJOINT from offense_authority (the testing-authority permission).
+    assert "offense_authority" not in (PERMISSIONS["operator"])
+    assert {"manage_billing", "view_invoices"} & {"offense_authority", "target_add"} == set()

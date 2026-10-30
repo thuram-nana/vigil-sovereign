@@ -32,9 +32,19 @@ _ROLE_RANK = {r: i for i, r in enumerate(ROLES)}
 # and this module's `OFFENSE_ACTION_PERM` map to. Keep them in lockstep with any sovereign action mapping.
 _VIEWER = frozenset({"read"})
 _ANALYST = _VIEWER | {"queue_proposal"}
-_OPERATOR = _ANALYST | {"run_engagement", "approve_a2", "toggle_guard", "config_nonsecret"}
+_OPERATOR = _ANALYST | {"run_engagement", "approve_a2", "toggle_guard", "config_nonsecret",
+                        # SaaS tenancy — READ an org's OWN billing surface (credit balance / usage / invoices).
+                        # operator-tier so it is fail-closed below (a viewer/analyst sees no money data), and so
+                        # a per-org `operator` member can read their tenant's billing. Pure reads: no mint path.
+                        "view_billing", "view_usage", "view_invoices"}
 _OWNER = _OPERATOR | {"approve_a3", "kill_release", "promote", "secrets", "offense_authority",
-                      "manage_users", "toggle_protected_guard"}
+                      "manage_users", "toggle_protected_guard",
+                      # SaaS tenancy — MONEY-MOVING + membership + org-lifecycle administration. Owner-tier
+                      # (fail-closed): since per-org membership roles cap at `operator` (single-owner doctrine),
+                      # NO org member can reach these today; a later OWNER-SIGNED org-admin delegation will grant
+                      # them WITHIN one org to a tenant-admin. They are DISJOINT from `offense_authority` on
+                      # purpose — billing/org authority NEVER implies testing authority (see orgs.admit).
+                      "manage_billing", "manage_members", "manage_org"}
 PERMISSIONS: dict[str, frozenset[str]] = {
     "viewer": _VIEWER, "analyst": _ANALYST, "operator": _OPERATOR, "owner": _OWNER,
 }
