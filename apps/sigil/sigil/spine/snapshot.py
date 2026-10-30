@@ -146,6 +146,16 @@ class SnapshotState(BaseModel):
     subscription_row: list = []       # [[org_id, plan_id, period_start, period_end, allotment], ...] — the plan
     #                                   fields to REBUILD the Subscription from the seed (status joins from
     #                                   subscription_state).
+    plan_granted: list = []           # [[org_id, period_end, granted_total], ...] — Σ honored PLAN-credit GRANTS
+    #                                   per (tenant, billing period) (governor.plan_grant). A per-period tranche
+    #                                   remainder (granted - debited) is spendable only until period_end, so (like
+    #                                   the wallet, unlike the per-UTC-day budget) it MUST cross a prune or the
+    #                                   first prune would zero an unexpired tranche.
+    plan_debited: list = []           # [[org_id, period_end, debited_total], ...] — Σ honored PLAN-credit DEBITS
+    #                                   per (tenant, billing period) (governor.plan_debit).
+    plan_seen: list = []              # [[signal, org_id, entry_id], ...] — consumed plan-credit idempotency keys,
+    #                                   NAMESPACED BY SIGNAL (grant vs debit are disjoint), carried across a prune
+    #                                   so a pruned plan grant/debit cannot be replayed (set-union bearer).
     consumed_arm_nonces: list = []    # [[device_pubkey, nonce], ...]  (nonce int OR str, verbatim)
     device_approval_dedup: list = []  # [[pubkey|None, sig|None, min_seq], ...]
     warden_best: dict[str, list] = {} # {pubkey: [max_count, head_hash, tiebreak_seq]}
@@ -206,6 +216,17 @@ class SnapshotState(BaseModel):
     #   subscription_state_map), keeping the Subscription import out of this leaf module.
     #   `WalletRegistry._fold` seeds (granted, debited, seen) from these; balance = granted - debited, and the
     #   seen-set is the idempotency/anti-replay guard that MUST survive a prune (mirrors accounts._fold).
+
+    def plan_granted_map(self) -> dict[Any, int]:
+        return {(row[0], row[1]): row[2] for row in self.plan_granted}   # (org_id, period_end) -> Σ grants
+
+    def plan_debited_map(self) -> dict[Any, int]:
+        return {(row[0], row[1]): row[2] for row in self.plan_debited}   # (org_id, period_end) -> Σ debits
+
+    def plan_seen_set(self) -> set:
+        return {(row[0], row[1], row[2]) for row in self.plan_seen}      # (signal, org_id, entry_id)
+    #   `PlanCreditLedger._fold` seeds (granted, debited, seen) from these, keyed per (org_id, period_end); a
+    #   tranche is spendable only while period_end > now (non-rollover), applied at read time in `available`.
 
     def capability_latch_map(self) -> dict[Optional[str], bool]:
         return {row[0]: row[1] for row in self.capability_latch}
@@ -355,6 +376,11 @@ def build(records: Iterable[SpineRecord], *, trusted_pubkey: Optional[str],
     from ..governor.wallet import (CREDIT_GRANT_SIGNAL as _WGRANT_SIGNAL, CREDIT_DEBIT_SIGNAL as _WDEBIT_SIGNAL,
                                    _GRANT_CORE as _WGRANT_CORE, _DEBIT_CORE as _WDEBIT_CORE,
                                    _as_credits as _w_as_credits)
+    # plan-credit signed-cores + helpers imported from the live module (never restated — same drift guard); the
+    # fold below carries per-(org, period_end) tranche totals + the consumed seen-set across a prune like wallet.
+    from ..governor.metering import (PLAN_GRANT_SIGNAL as _PGRANT_SIGNAL, PLAN_DEBIT_SIGNAL as _PDEBIT_SIGNAL,
+                                     _PLAN_GRANT_CORE as _PGRANT_CORE, _PLAN_DEBIT_CORE as _PDEBIT_CORE,
+                                     _as_period as _p_as_period)
     # subscription signed-core + helpers imported from the live module (never restated — same drift guard);
     # the fold below carries the per-org status/high-water/plan-row across a prune exactly as it does orgs.
     from ..governor.subscription import (SUBSCRIPTION_SIGNAL as _SUB_SIGNAL, _SUB_CORE as _SUBS_CORE,
@@ -398,6 +424,9 @@ def build(records: Iterable[SpineRecord], *, trusted_pubkey: Optional[str],
     w_granted: dict[Any, int] = dict(s.wallet_granted_map()) if s else {}   # org_id -> Σ grant credits
     w_debited: dict[Any, int] = dict(s.wallet_debited_map()) if s else {}   # org_id -> Σ debit credits
     w_seen: set = set(s.wallet_seen_set()) if s else set()                  # consumed (org_id, entry_id) keys
+    p_granted: dict[Any, int] = dict(s.plan_granted_map()) if s else {}     # (org_id, period_end) -> Σ grants
+    p_debited: dict[Any, int] = dict(s.plan_debited_map()) if s else {}     # (org_id, period_end) -> Σ debits
+    p_seen: set = set(s.plan_seen_set()) if s else set()                    # consumed plan (sig, org, entry) keys
     sub_state: dict[Any, str] = dict(s.subscription_state_map()) if s else {}   # org_id -> status (LWW)
     sub_issued: dict[Any, float] = dict(s.subscription_issued_map()) if s else {}   # org_id -> active high-water
     sub_row: dict[Any, list] = {r[0]: [r[1], r[2], r[3], r[4]] for r in s.subscription_row} if s else {}
@@ -560,6 +589,25 @@ def build(records: Iterable[SpineRecord], *, trusted_pubkey: Optional[str],
                             w_granted[woid] = w_granted.get(woid, 0) + wc
                         else:
                             w_debited[woid] = w_debited.get(woid, 0) + wc
+        # --- SaaS PLAN credits: ADDITIVE grant/debit ledger keyed per (org_id, period_end) tranche, idempotent
+        #     per (signal, org_id, entry_id) — mirrors PlanCreditLedger._fold EXACTLY (verify under the key valid
+        #     at the seq; already-seen key ignored; credits clamped >= 0; period_end coerced the same way).
+        #     Carried across a prune so a pruned, still-UNEXPIRED tranche is not zeroed and cannot be re-credited. ---
+        if sig == _PGRANT_SIGNAL or sig == _PDEBIT_SIGNAL:
+            poid = p.get("org_id")
+            peid = p.get("entry_id")
+            if isinstance(poid, str) and poid and isinstance(peid, str) and peid:
+                pcore = _PGRANT_CORE if sig == _PGRANT_SIGNAL else _PDEBIT_CORE
+                if verify_signed(p, pcore, vpk):
+                    pskey = (sig, poid, peid)                # namespaced by signal — mirror PlanCreditLedger._fold
+                    if pskey not in p_seen:
+                        p_seen.add(pskey)
+                        ptkey = (poid, _p_as_period(p.get("period_end")))
+                        pc = _w_as_credits(p.get("credits"))
+                        if sig == _PGRANT_SIGNAL:
+                            p_granted[ptkey] = p_granted.get(ptkey, 0) + pc
+                        else:
+                            p_debited[ptkey] = p_debited.get(ptkey, 0) + pc
         # --- governor.subscription LWW (active = owner-verified + FRESH per-org high-water; past_due/canceled
         #     honored on sight) — mirrors SubscriptionRegistry._fold EXACTLY so build() == scan. ---
         if sig == _SUB_SIGNAL:
@@ -631,6 +679,9 @@ def build(records: Iterable[SpineRecord], *, trusted_pubkey: Optional[str],
         wallet_granted=[[o, c] for o, c in w_granted.items()],
         wallet_debited=[[o, c] for o, c in w_debited.items()],
         wallet_seen=[[sg, o, e] for (sg, o, e) in w_seen],
+        plan_granted=[[o, pe, c] for (o, pe), c in p_granted.items()],
+        plan_debited=[[o, pe, c] for (o, pe), c in p_debited.items()],
+        plan_seen=[[sg, o, e] for (sg, o, e) in p_seen],
         subscription_state=[[o, v] for o, v in sub_state.items()],
         subscription_issued=[[o, i] for o, i in sub_issued.items()],
         subscription_row=[[o, r[0], r[1], r[2], r[3]] for o, r in sub_row.items()],
