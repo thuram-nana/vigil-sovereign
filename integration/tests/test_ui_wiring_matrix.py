@@ -109,6 +109,11 @@ INTENTIONALLY_HEADLESS = {
     (P_SOV, "/api/record/"): "programmatic per-record spine fetch /api/record/<seq> (documented no-UI)",
     # proxy plane-local owner edge: revoke an authenticated edge by hand; CLI/owner-only, never a button.
     (P_PLANE, "/__vigil/plane/auth/purge"): "owner edge-revoke, CLI/hand only (no UI by design)",
+    # Slice E1 — the customer PROVISIONER backend (closed dispatch, unknown action -> 404). It has NO
+    # operator-cockpit button BY DESIGN: it is reached only by the keyless `custui` customer edge over the
+    # loopback hop (VIGIL_PROVISION_HOP_KEY); the CUSTOMER drives signup/login/member-mgmt from the custui
+    # plane's own (future) SPA, never from app.js. Edge-only, hop-gated — no app.js affordance by design.
+    (P_SOV, "/api/provision/"): "customer provisioner backend — keyless custui edge + hop only (no app.js UI)",
 }
 
 # Whole planes that are headless by design (every route on them is exempt).

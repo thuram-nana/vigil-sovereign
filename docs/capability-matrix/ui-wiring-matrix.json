@@ -307,10 +307,10 @@
       "pending": 0,
       "ui-driven": 40
     },
-    "routes": 195,
+    "routes": 196,
     "routes_by_status": {
       "ORPHAN": 0,
-      "headless": 27,
+      "headless": 28,
       "pending": 3,
       "ui-driven": 165
     },
@@ -692,6 +692,14 @@
       "plane": "sovereign",
       "reason": "",
       "status": "ui-driven"
+    },
+    {
+      "kind": "prefix",
+      "method": "POST",
+      "path": "/api/provision/",
+      "plane": "sovereign",
+      "reason": "customer provisioner backend \u2014 keyless custui edge + hop only (no app.js UI)",
+      "status": "headless"
     },
     {
       "kind": "prefix",
