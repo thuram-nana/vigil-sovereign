@@ -1384,6 +1384,14 @@ class Handler(BaseHTTPRequestHandler):
         if action == "member_revoke":
             return p.revoke_member(requester, str(body.get("org_id", "")),
                                    str(body.get("member_username", "")), ip=ip)
+        # Slice G0 — asset-ownership target registration. requester is the HMAC-bound hop principal (Finding
+        # D); org_id comes from the edge's SERVER-side session (never a free body field a customer chose);
+        # host/method are the customer's requested target. Gated in-service on admit_customer(run_engagement).
+        if action == "target_challenge":
+            return p.target_challenge(requester, str(body.get("org_id", "")), str(body.get("host", "")), ip=ip)
+        if action == "target_verify":
+            return p.target_verify(requester, str(body.get("org_id", "")), str(body.get("host", "")),
+                                   str(body.get("method", "")), ip=ip)
         return None
 
     def _durability_post(self, path):

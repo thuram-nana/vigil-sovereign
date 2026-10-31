@@ -295,6 +295,8 @@ class CustomerHandler(BaseHTTPRequestHandler):
             return self._json({"ok": True})
         if action in ("member/grant", "member/revoke"):
             return self._member(action, body)
+        if action in ("target/challenge", "target/verify"):
+            return self._target(action, body)
         return self._deny(404, "unknown action")
 
     def _member(self, action: str, body: dict):
@@ -312,6 +314,25 @@ class CustomerHandler(BaseHTTPRequestHandler):
             c, r = self._provision("member_grant", requester, payload)
         else:
             c, r = self._provision("member_revoke", requester, payload)
+        return self._json(r, c)
+
+    def _target(self, action: str, body: dict):
+        """Asset-ownership target registration (Slice G0). Like `_member`, the acting REQUESTER and the active
+        ORG are taken from the SERVER-side session — NEVER the body (tenant isolation at the edge): a customer
+        proves ownership of a host for THEIR bound org only, and cannot name another org. The `host` (and, on
+        verify, the `method`) are the customer's chosen target, carried in the body; the sovereign provisioner
+        gates on admit_customer(run_engagement) and mints only on a current ownership proof."""
+        rec = self._session()
+        if rec is None or not rec.get("org_id"):
+            return self._deny(401, "login required")
+        requester = str(rec.get("username") or "")
+        payload = {"org_id": str(rec.get("org_id") or ""),      # the session's bound org, never body-supplied
+                   "host": body.get("host", ""), "ip": self._ip()}
+        if action == "target/challenge":
+            c, r = self._provision("target_challenge", requester, payload)
+        else:
+            payload["method"] = body.get("method", "")
+            c, r = self._provision("target_verify", requester, payload)
         return self._json(r, c)
 
 

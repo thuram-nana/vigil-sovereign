@@ -174,6 +174,46 @@ def test_csrf_cross_origin_post_refused(tmp_path, monkeypatch):
         sov.shutdown(); edge.shutdown()
 
 
+def test_target_requires_session(tmp_path, monkeypatch):
+    sov, edge, ep, _ = _stack(tmp_path, monkeypatch)
+    try:
+        c, r = _post(_opener(), ep, "/api/customer/target/challenge", {"host": "apme.cm"})
+        assert c == 401, (c, r)                                   # no customer session → refused before the hop
+    finally:
+        sov.shutdown(); edge.shutdown()
+
+
+def test_target_challenge_gated_on_run_engagement_and_bound_to_session_org(tmp_path, monkeypatch):
+    """Slice G0 over the edge: a billing-only org_admin is DENIED (billing != testing); an operator member
+    gets a challenge; and the challenge binds the SESSION's org, never a body-supplied one (tenant isolation);
+    target/verify is fail-closed when ownership verification is disabled."""
+    from sigil.governor.asset_ownership import AssetOwnershipRegistry
+    from sigil.governor.orgs import OrgRegistry
+    sov, edge, ep, _ = _stack(tmp_path, monkeypatch)
+    try:
+        op = _opener()
+        t = _post(op, ep, "/api/customer/signup/request", {"email": "own@acme.com"})[1]["dev_token"]
+        conf = _post(op, ep, "/api/customer/signup/confirm",
+                     {"token": t, "password": "customer-pw-1", "org_name": "Acme"})[1]
+        u, oid = conf["username"], conf["org_id"]
+        # the default signup role is org_admin (billing) — it may NOT register assessment targets
+        c, r = _post(op, ep, "/api/customer/target/challenge", {"host": "apme.cm"})
+        assert c == 403, (c, r)                                   # billing != testing, enforced at the sovereign gate
+        # the owner promotes the member to operator (carries run_engagement) — an owner act on the sovereign store
+        OrgRegistry(sov.store()).grant_membership(oid, u, "operator", issued_at=time.time() + 1e6)
+        # now a challenge is issued — and a BOGUS body org_id is IGNORED (the session's org is authoritative)
+        c, ch = _post(op, ep, "/api/customer/target/challenge", {"host": "apme.cm", "org_id": "org_EVIL"})
+        assert c == 200 and ch["dns_name"] == "_vigil-challenge.apme.cm", (c, ch)
+        reg = AssetOwnershipRegistry(sov.store())
+        assert reg.challenge(oid, "apme.cm") is not None          # recorded under the SESSION org
+        assert reg.challenge("org_EVIL", "apme.cm") is None       # never the body-supplied org (isolation)
+        # verify is fail-closed while ownership verification is disabled (no fetcher configured)
+        c, r = _post(op, ep, "/api/customer/target/verify", {"host": "apme.cm", "method": "well-known"})
+        assert c == 400, (c, r)                                   # fail-closed through the edge
+    finally:
+        sov.shutdown(); edge.shutdown()
+
+
 def test_password_reset_severs_existing_sessions(tmp_path, monkeypatch):
     sov, edge, ep, _ = _stack(tmp_path, monkeypatch)
     try:
