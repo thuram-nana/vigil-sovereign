@@ -37,6 +37,7 @@ import hmac
 import json
 import math
 import os
+import secrets
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -93,6 +94,8 @@ class BillingEvent:
     org_id: str
     created: float                 # the provider's event timestamp (used as the deterministic issued_at)
     price_id: str = ""             # the paid price/plan id (catalog key); "" when not applicable
+    amount_minor: int = 0          # the VERIFIED paid amount in minor units (Slice F cross-check); 0 if unknown
+    currency: str = ""             # ISO-4217 of the verified amount; "" when the provider did not populate one
     data: Mapping[str, Any] = field(default_factory=dict)   # extra normalised fields (verbatim, untrusted detail)
 
 
@@ -328,6 +331,77 @@ class MockBillingProvider(BillingProvider):
 # INJECTED so this module stays offline-testable and the deterministic signer never performs I/O.
 TransactionVerifier = Callable[[str], Optional[Mapping[str, Any]]]
 
+# A hosted-checkout creator (Slice F): given the Flutterwave /v3/payments request body (which WE build), perform
+# the owner-provisioned outbound HTTPS POST and return the parsed JSON response (or None). INJECTED so this module
+# stays offline-testable and performs NO I/O itself — the exact sibling of TransactionVerifier on the inbound side.
+CheckoutCreator = Callable[[Mapping[str, Any]], Optional[Mapping[str, Any]]]
+
+# ISO-4217 minor-unit exponents that are NOT 2, to convert between the catalog's minor units and the major-unit
+# number a provider `amount` field carries. Everything unlisted is 2 decimals (USD, EUR, NGN, GBP, …).
+_ZERO_DECIMAL_CCY = frozenset({"BIF", "CLP", "DJF", "GNF", "ISK", "JPY", "KMF", "KRW", "PYG", "RWF", "UGX",
+                               "VND", "VUV", "XAF", "XOF", "XPF"})
+_THREE_DECIMAL_CCY = frozenset({"BHD", "IQD", "JOD", "KWD", "LYD", "OMR", "TND"})
+
+
+def _ccy_decimals(ccy: str) -> int:
+    c = (ccy or "").strip().upper()
+    if c in _ZERO_DECIMAL_CCY:
+        return 0
+    if c in _THREE_DECIMAL_CCY:
+        return 3
+    return 2
+
+
+def _to_major(amount_minor: int, ccy: str):
+    """Minor units -> the major-unit number a provider `amount` field carries (an int for a 0-decimal currency)."""
+    d = _ccy_decimals(ccy)
+    return int(amount_minor) if d == 0 else int(amount_minor) / (10 ** d)
+
+
+def _flw_amount_minor(verified: Mapping[str, Any]) -> "tuple[int, str]":
+    """`(amount_minor, currency)` from a Flutterwave VERIFIED object, fail-closed to `(0, ccy_or_"")`. The verified
+    `amount` is in MAJOR units; converted to minor via the ISO exponent so it compares against the owner catalog's
+    `amount_minor`. A non-finite / unparseable amount yields 0 (which the signer's cross-check refuses when an
+    expected price exists for the price_id)."""
+    ccy = verified.get("currency")
+    ccy = ccy.strip().upper() if isinstance(ccy, str) else ""
+    amt = verified.get("amount")
+    if amt is None or not ccy:
+        return 0, ccy
+    try:
+        f = float(amt)
+        if not math.isfinite(f):
+            return 0, ccy
+        return int(round(f * (10 ** _ccy_decimals(ccy)))), ccy
+    except (TypeError, ValueError):
+        return 0, ccy
+
+
+def _flw_checkout_link(resp: object) -> Optional[str]:
+    """The hosted-checkout URL from a Flutterwave /v3/payments response, fail-closed. Success shape:
+    `{"status":"success","data":{"link":"https://checkout.flutterwave.com/..."}}`. ONLY an https link is accepted;
+    a missing / non-https / `data:` / `javascript:` link is refused (never hand the browser a hostile URL)."""
+    if not isinstance(resp, Mapping) or resp.get("status") != "success":
+        return None
+    data = resp.get("data")
+    link = data.get("link") if isinstance(data, Mapping) else None
+    return link if isinstance(link, str) and link.startswith("https://") else None
+
+
+@dataclass(frozen=True)
+class CheckoutSession:
+    """A created hosted-checkout session (Slice F). `tx_ref` (= `vigil:<org>:<nonce>`) binds the tenant into the ONE
+    field Flutterwave echoes on the webhook + verify, so the inbound mint recovers the SAME tenant and can never be
+    re-aimed at another org. `amount_minor`/`currency`/`price_id` are the OWNER-CATALOG values this checkout will
+    collect — never caller-supplied."""
+    tx_ref: str
+    hosted_link: str
+    org_id: str
+    price_id: str
+    amount_minor: int
+    currency: str
+
+
 # tx_ref convention: we set it when creating a checkout/charge so the tenant is recoverable from the one field
 # Flutterwave guarantees to echo everywhere. Format: "vigil:<org_id>:<nonce>" (org_id has no ':').
 _TX_REF_PREFIX = "vigil"
@@ -441,7 +515,8 @@ class FlutterwaveBillingProvider(BillingProvider):
     documented shapes and fails closed on anything it cannot validate. Mobile Money / card / checkout creation
     and refunds are declared capabilities exercised by the outbound flows (next slice)."""
 
-    def __init__(self, secret_hash: str, verifier: TransactionVerifier, *, noauth_approved: bool = False):
+    def __init__(self, secret_hash: str, verifier: TransactionVerifier, *, noauth_approved: bool = False,
+                 checkout_creator: "Optional[CheckoutCreator]" = None):
         if not isinstance(secret_hash, str) or not secret_hash:
             raise ValueError("Flutterwave webhook secret hash is required")
         if not callable(verifier):
@@ -450,6 +525,9 @@ class FlutterwaveBillingProvider(BillingProvider):
         self._secret_hash = secret_hash
         self._verifier = verifier
         self._noauth_approved = bool(noauth_approved)
+        # Slice F: the outbound hosted-checkout poster (owner-provisioned HTTPS). None ⇒ create_checkout refuses
+        # (never silently simulates a checkout). Injected so this module does no I/O and stays offline-testable.
+        self._checkout_creator = checkout_creator
 
     def capabilities(self) -> frozenset[str]:
         caps = {CAP_VERIFY_WEBHOOK, CAP_VERIFY_TRANSACTION, CAP_HOSTED_CHECKOUT, CAP_ONE_TIME_CARD,
@@ -504,11 +582,62 @@ class FlutterwaveBillingProvider(BillingProvider):
         if created is None:
             return None                               # replay-safety needs a stable timestamp -> no `now` fallback
         tx_ref = verified.get("tx_ref")
+        amt_minor, ccy = _flw_amount_minor(verified)  # Slice F: the VERIFIED amount for the signer's price cross-check
         if verified.get("payment_plan"):              # plan-vs-topup decided by the VERIFIED object only
             return BillingEvent(event_id=event_id, kind=EVENT_SUBSCRIPTION_ACTIVE, org_id=org, created=created,
-                                price_id=str(verified.get("payment_plan") or ""), data={"tx_ref": tx_ref})
+                                price_id=str(verified.get("payment_plan") or ""), amount_minor=amt_minor,
+                                currency=ccy, data={"tx_ref": tx_ref})
         return BillingEvent(event_id=event_id, kind=EVENT_TOPUP, org_id=org, created=created,
-                            price_id=_flw_price_id(verified), data={"tx_ref": tx_ref})
+                            price_id=_flw_price_id(verified), amount_minor=amt_minor, currency=ccy,
+                            data={"tx_ref": tx_ref})
+
+    def create_checkout(self, org_id: str, price_id: str, *, expected: Mapping[str, Any],
+                        customer_email: "Optional[str]" = None, redirect_url: "Optional[str]" = None,
+                        nonce: "Optional[str]" = None) -> CheckoutSession:
+        """Create a tenant-bound hosted checkout for `price_id` (Slice F — the outbound money-in surface).
+
+        MONEY DOCTRINE, enforced here: the amount + currency are taken from the OWNER CATALOG (`expected[price_id]`,
+        i.e. `catalog.expected_amounts()`), NEVER from the caller — a customer can name neither a price nor an
+        amount, and an unknown price_id is REFUSED rather than charged at a caller-chosen figure. TENANT BINDING:
+        the org is validated (`org_tenant_id`, fail-closed) and bound into BOTH `tx_ref = vigil:<org>:<nonce>` AND
+        `meta.org_id`, so the inbound webhook recovers the SAME tenant from the authoritative verified object and a
+        checkout can never be re-aimed at another org. Fail-closed throughout: no creator, an invalid org, an
+        unknown/empty price, or a provider response without an https hosted link RAISES — never a half-formed,
+        unpriced, or wrongly-attributed checkout."""
+        self.require(CAP_HOSTED_CHECKOUT)
+        if self._checkout_creator is None:
+            raise UnsupportedCapability("hosted checkout requires an injected checkout_creator (the outbound "
+                                        "HTTPS poster); refusing to simulate a checkout")
+        try:
+            org = org_tenant_id(org_id)               # canonical tenant id; fail-closed on an invalid/foreign org
+        except ValueError as exc:
+            raise ValueError(f"invalid org_id for checkout: {exc}") from None
+        exp = expected.get(price_id) if hasattr(expected, "get") else None
+        if exp is None:
+            raise ValueError(f"unknown price_id {price_id!r}: not in the owner catalog — checkout refused "
+                             "(the catalog, never the caller, decides what may be charged)")
+        amount_minor, currency = int(exp[0]), str(exp[1]).strip().upper()
+        if amount_minor <= 0 or not currency:
+            raise ValueError(f"catalog price {price_id!r} has a non-positive amount / empty currency — refused")
+        n = nonce or secrets.token_urlsafe(18)
+        if not isinstance(n, str) or ":" in n or not n:
+            raise ValueError("checkout nonce must be a non-empty string without ':' (the tx_ref delimiter)")
+        tx_ref = f"{_TX_REF_PREFIX}:{org}:{n}"
+        payload: "dict[str, Any]" = {
+            "tx_ref": tx_ref,
+            "amount": _to_major(amount_minor, currency),   # major units, from the CATALOG (never the caller)
+            "currency": currency,
+            "meta": {"org_id": org, "price_id": price_id},  # redundant tenant+price binding (belt-and-suspenders)
+        }
+        if redirect_url:
+            payload["redirect_url"] = str(redirect_url)
+        if customer_email:
+            payload["customer"] = {"email": str(customer_email)}
+        link = _flw_checkout_link(self._checkout_creator(payload))
+        if not link:
+            raise UnsupportedCapability("checkout creation failed: the provider returned no https hosted link")
+        return CheckoutSession(tx_ref=tx_ref, hosted_link=link, org_id=org, price_id=price_id,
+                               amount_minor=amount_minor, currency=currency)
 
 
 @dataclass(frozen=True)
@@ -529,12 +658,18 @@ class BillingSigner:
     owner-controlled price→entitlement `catalog`. Deterministic + idempotent; never mints from an unverified
     event and never lets an on-the-wire amount decide money (only the catalog does)."""
 
-    def __init__(self, provider: BillingProvider, *, wallet, subscriptions, plan, catalog: Mapping[str, Entitlement]):
+    def __init__(self, provider: BillingProvider, *, wallet, subscriptions, plan, catalog: Mapping[str, Entitlement],
+                 expected: "Optional[Mapping[str, Any]]" = None):
         self.provider = provider
         self.wallet = wallet
         self.subscriptions = subscriptions
         self.plan = plan
         self.catalog = dict(catalog)
+        # Slice F: the owner catalog's EXPECTED (amount_minor, currency) per price_id (= catalog.expected_amounts()),
+        # for the defense-in-depth underpay / wrong-currency cross-check in apply(). Empty ⇒ the cross-check is
+        # skipped (backward-compatible; the primary binding is still "the catalog decides the entitlement for the
+        # price_id we set at checkout").
+        self._expected = {str(k): (int(v[0]), str(v[1]).upper()) for k, v in dict(expected or {}).items()}
 
     def ingest(self, raw_body: bytes, sig_header: str, *, now: float) -> Optional[int]:
         """Verify, then mint. Returns the appended spine seq, or None when the event does not verify, carries no
@@ -556,6 +691,16 @@ class BillingSigner:
         ent = self.catalog.get(event.price_id)
         if ent is None:
             return None                               # unknown price -> no entitlement -> mint nothing
+        # Slice F — DEFENSE-IN-DEPTH underpay / wrong-currency guard. For a value-GRANTING event, refuse a VERIFIED
+        # amount below the owner catalog's expected price (or in the wrong currency): belt-and-suspenders on top of
+        # "the price_id we set at checkout". Fires only when (a) an expected price is configured for this price_id
+        # AND (b) the event carries a verified amount (currency present) — a provider that does not populate the
+        # amount is still bound by the price_id -> entitlement mapping, not silently refused here.
+        if event.kind in (EVENT_TOPUP, EVENT_SUBSCRIPTION_ACTIVE):
+            exp = self._expected.get(event.price_id)
+            if exp is not None and event.currency:
+                if event.currency.upper() != exp[1] or int(event.amount_minor) < exp[0]:
+                    return None                       # underpaid / wrong currency -> mint nothing (fail-closed)
         if event.kind == EVENT_TOPUP and ent.kind == EVENT_TOPUP and ent.credits > 0:
             # idempotent by event_id: a duplicate delivery reuses the same wallet entry_id -> folded once.
             return self.wallet.grant(oid, int(ent.credits), "topup", source_ref=event.event_id,

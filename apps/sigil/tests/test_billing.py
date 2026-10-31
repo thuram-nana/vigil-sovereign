@@ -23,10 +23,11 @@ import tempfile
 
 import pytest
 
-from sigil.governor.billing import (CAP_MOBILE_MONEY, CAP_REFUND, CAP_UNATTENDED_TOPUP, CAP_VERIFY_WEBHOOK,
-                                     EVENT_PAYMENT_FAILED, EVENT_SUBSCRIPTION_ACTIVE, EVENT_SUBSCRIPTION_CANCELED,
-                                     EVENT_TOPUP, BillingSigner, Entitlement, FlutterwaveBillingProvider,
-                                     MockBillingProvider, StripeBillingProvider, UnsupportedCapability)
+from sigil.governor.billing import (CAP_HOSTED_CHECKOUT, CAP_MOBILE_MONEY, CAP_REFUND, CAP_UNATTENDED_TOPUP,
+                                     CAP_VERIFY_WEBHOOK, EVENT_PAYMENT_FAILED, EVENT_SUBSCRIPTION_ACTIVE,
+                                     EVENT_SUBSCRIPTION_CANCELED, EVENT_TOPUP, BillingSigner, CheckoutSession,
+                                     Entitlement, FlutterwaveBillingProvider, MockBillingProvider,
+                                     StripeBillingProvider, UnsupportedCapability)
 from sigil.governor.metering import CreditMeter, PlanCreditLedger
 from sigil.governor.subscription import (STATUS_ACTIVE, STATUS_CANCELED, STATUS_PAST_DUE,
                                           SubscriptionRegistry)
@@ -505,3 +506,114 @@ def test_contract_require_raises_on_undeclared_capability():
         missing = next(c for c in ("totally_made_up_cap",) if not p.supports(c))
         with pytest.raises(UnsupportedCapability):
             p.require(missing)
+
+
+# ================= Slice F — outbound hosted checkout + inbound amount cross-check =================
+_EXPECTED = {"price_topup_200": (20000, "USD"), "flwplan_pro": (5000, "XAF")}
+
+
+def _ok_creator(captured=None, link="https://checkout.flutterwave.com/pay/abc"):
+    def cc(payload):
+        if captured is not None:
+            captured["payload"] = dict(payload)
+        return {"status": "success", "data": {"link": link}}
+    return cc
+
+
+def test_create_checkout_binds_tenant_and_uses_catalog_amount():
+    cap = {}
+    flw = FlutterwaveBillingProvider(_FLW_SECRET, _verifier({}), checkout_creator=_ok_creator(cap))
+    sess = flw.create_checkout("acme-corp", "price_topup_200", expected=_EXPECTED,
+                               customer_email="a@acme.com", redirect_url="https://app.vigil/return", nonce="N1")
+    assert isinstance(sess, CheckoutSession)
+    assert sess.tx_ref == "vigil:acme-corp:N1"                    # tenant bound into the one echoed field
+    assert sess.amount_minor == 20000 and sess.currency == "USD"  # from the CATALOG, never the caller
+    assert sess.hosted_link == "https://checkout.flutterwave.com/pay/abc"
+    p = cap["payload"]
+    assert p["tx_ref"] == "vigil:acme-corp:N1"
+    assert p["amount"] == 200.0                                   # 20000 minor USD -> 200.00 major (catalog, not caller)
+    assert p["currency"] == "USD"
+    assert p["meta"] == {"org_id": "acme-corp", "price_id": "price_topup_200"}   # redundant tenant+price binding
+    assert p["customer"] == {"email": "a@acme.com"} and p["redirect_url"] == "https://app.vigil/return"
+
+
+def test_create_checkout_zero_decimal_currency_amount_is_whole():
+    cap = {}
+    flw = FlutterwaveBillingProvider(_FLW_SECRET, _verifier({}), checkout_creator=_ok_creator(cap))
+    flw.create_checkout("acme", "flwplan_pro", expected=_EXPECTED, nonce="N2")
+    assert cap["payload"]["amount"] == 5000 and cap["payload"]["currency"] == "XAF"   # XAF: 0 decimals, minor == major
+
+
+def test_create_checkout_refuses_unknown_price():
+    flw = FlutterwaveBillingProvider(_FLW_SECRET, _verifier({}), checkout_creator=_ok_creator())
+    with pytest.raises(ValueError):                                # caller cannot price an offering outside the catalog
+        flw.create_checkout("acme", "price_not_in_catalog", expected=_EXPECTED)
+
+
+def test_create_checkout_without_creator_refuses_not_simulates():
+    flw = FlutterwaveBillingProvider(_FLW_SECRET, _verifier({}))   # no checkout_creator injected
+    assert flw.supports(CAP_HOSTED_CHECKOUT)                        # capability is declared...
+    with pytest.raises(UnsupportedCapability):                      # ...but it refuses rather than simulating a checkout
+        flw.create_checkout("acme", "price_topup_200", expected=_EXPECTED)
+
+
+def test_create_checkout_refuses_non_https_or_failed_link():
+    for bad in ({"status": "success", "data": {"link": "http://evil/pay"}},
+                {"status": "success", "data": {"link": "javascript:alert(1)"}},
+                {"status": "success", "data": {}},
+                {"status": "error", "message": "bad", "data": {"link": "https://checkout.flutterwave.com/x"}},
+                None):
+        flw = FlutterwaveBillingProvider(_FLW_SECRET, _verifier({}), checkout_creator=lambda p, r=bad: r)
+        with pytest.raises(UnsupportedCapability):
+            flw.create_checkout("acme", "price_topup_200", expected=_EXPECTED)
+
+
+def test_create_checkout_refuses_invalid_org():
+    flw = FlutterwaveBillingProvider(_FLW_SECRET, _verifier({}), checkout_creator=_ok_creator())
+    for bad_org in ("has:colon", "has space", ""):                 # an invalid/foreign tenant id is refused fail-closed
+        with pytest.raises(ValueError):
+            flw.create_checkout(bad_org, "price_topup_200", expected=_EXPECTED)
+
+
+def _flw_rig_expected(table, expected):
+    _s, w, subs, plan, _m, _mock, _signer = _rig()
+    flw = FlutterwaveBillingProvider(_FLW_SECRET, _verifier(table))
+    signer = BillingSigner(flw, wallet=w, subscriptions=subs, plan=plan,
+                           catalog={"price_topup_200": Entitlement(kind=EVENT_TOPUP, credits=200)},
+                           expected=expected)
+    return w, signer
+
+
+def test_inbound_underpaid_charge_mints_nothing():
+    # verified amount 150.00 USD = 15000 minor < 20000 expected -> refuse (anti-underpay defense-in-depth).
+    table = {"71": {"id": 71, "status": "successful", "tx_ref": "vigil:acme:n", "currency": "USD",
+                    "amount": 150.00, "created_at": 100.0, "meta": {"price_id": "price_topup_200"}}}
+    w, signer = _flw_rig_expected(table, {"price_topup_200": (20000, "USD")})
+    assert signer.ingest(_flw_wh("charge.completed", 71), _FLW_SECRET, now=100.0) is None
+    assert w.available("acme") == 0
+
+
+def test_inbound_wrong_currency_mints_nothing():
+    table = {"72": {"id": 72, "status": "successful", "tx_ref": "vigil:acme:n", "currency": "EUR",
+                    "amount": 200.00, "created_at": 100.0, "meta": {"price_id": "price_topup_200"}}}
+    w, signer = _flw_rig_expected(table, {"price_topup_200": (20000, "USD")})
+    assert signer.ingest(_flw_wh("charge.completed", 72), _FLW_SECRET, now=100.0) is None
+    assert w.available("acme") == 0
+
+
+def test_inbound_exact_catalog_amount_mints():
+    table = {"73": {"id": 73, "status": "successful", "tx_ref": "vigil:acme:n", "currency": "USD",
+                    "amount": 200.00, "created_at": 100.0, "meta": {"price_id": "price_topup_200"}}}
+    w, signer = _flw_rig_expected(table, {"price_topup_200": (20000, "USD")})
+    assert signer.ingest(_flw_wh("charge.completed", 73), _FLW_SECRET, now=100.0) is not None
+    assert w.available("acme") == 200                              # exact catalog amount -> mints the catalog credits
+
+
+def test_inbound_cross_check_skipped_when_no_expected_configured():
+    # backward-compatible: with NO `expected` map, an underpaid charge still mints on the price_id binding alone
+    # (the primary doctrine). The cross-check is a defense-in-depth add, off unless the owner wires expected_amounts.
+    table = {"74": {"id": 74, "status": "successful", "tx_ref": "vigil:acme:n", "currency": "USD",
+                    "amount": 1.00, "created_at": 100.0, "meta": {"price_id": "price_topup_200"}}}
+    w, signer = _flw_rig_expected(table, None)                     # expected=None -> no cross-check
+    assert signer.ingest(_flw_wh("charge.completed", 74), _FLW_SECRET, now=100.0) is not None
+    assert w.available("acme") == 200
