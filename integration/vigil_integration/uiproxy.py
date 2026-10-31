@@ -82,10 +82,19 @@ _MAX_BODY = 16 * 1024 * 1024   # cap a forwarded request body (UI actions are ti
 SOVEREIGN_PORT = 8733     # sigil serve      (the sovereign cockpit)
 CONSOLE_PORT = 8787       # crucible console (offense read + SSE plane)
 API_PORT = 8799           # crucible api     (offense gated /api/v1 action plane)
+CUSTOMER_PORT = 8734      # sigil serve-customer (the keyless customer edge, custui; E1)
 
 # federated mount bases written into index.html (what app.js prepends to every fetch)
 SOVEREIGN_BASE = "/sovereign"
 OFFENSE_BASE = "/offense"
+# The customer plane (E1): a SEPARATE mount for the keyless, self-authenticating customer edge (custui).
+# Unlike the operator planes, custui is NOT gated by the proxy's per-user (operator) whoami — it carries its
+# OWN session cookie (`vigil_customer_session`) + its own Origin/Host CSRF gate + admit_customer. So the
+# whole `/customer/*` branch is a self-contained, self-authenticating origin that the proxy forwards WITHOUT
+# the operator auth gate (see `_forward_request`); cookie isolation across the boundary is enforced in
+# `_forward_request_headers`. In production this plane is a SEPARATE origin (its own vhost); the same-origin
+# `/customer` path is the dev default.
+CUSTOMER_BASE = "/customer"
 
 # ---- proxy-local plane control (answered BY THE PROXY, never forwarded) ---------------------------
 # A backend that is DOWN cannot answer a request to start itself. The proxy is the process that already
@@ -123,6 +132,13 @@ _PLANE_START_GRACE_S = 45.0
 _TOKEN_HEADER = "X-SIGIL-Token"
 _TOKEN_QUERY = "token"
 _CSRF_HEADER = "X-Requested-With"
+# The customer edge's session-cookie NAME (E1). Duplicated here as a stable protocol constant — the proxy
+# must NOT import the sovereign `sigil.ui.custui.CUSTOMER_COOKIE` (FATAL-2: a single interpreter never
+# co-loads the two trust domains; `test_uiproxy_is_pure_stdlib` + `test_two_env_boundary` guard it). It is
+# used ONLY to PARTITION the Cookie header across the plane boundary (never to authenticate — the edge is the
+# authority on its own cookie): the customer cookie is the only one forwarded to the edge, and it is the one
+# cookie never forwarded to the operator (sovereign/offense) backends.
+_CUSTOMER_COOKIE = "vigil_customer_session"
 
 # ==================================================================================================
 # PER-USER AUTHENTICATION at the proxy boundary (Claim 6). See docs/CLAIM-6-RBAC.md.
@@ -237,6 +253,27 @@ def _remount_setcookie_path(setcookie: str, mount: str) -> str:
                 parts[i] = f"{key}={mount}{path_val}"   # `key` keeps the backend's leading space + casing
             break
     return ";".join(parts)
+
+
+def _partition_cookie_header(raw: str, *, to_customer: bool) -> str:
+    """Partition a browser ``Cookie`` header across the plane boundary before it is forwarded to a backend.
+
+    The customer edge authenticates by the ``vigil_customer_session`` cookie; the operator planes never do.
+    So on the customer branch (``to_customer=True``) forward ONLY that cookie (an operator cookie must not
+    reach the edge), and on the operator branches forward everything EXCEPT it (a customer session must not
+    ride an operator request). This is the same-origin hardening behind the production separate-origin split:
+    neither plane's cookie is ever handed to the other backend. Robust to a value that itself contains ``=``
+    (the NAME is everything before the FIRST ``=``). Returns ``""`` when nothing remains (header omitted)."""
+    kept: list[str] = []
+    for seg in raw.split(";"):
+        seg = seg.strip()
+        if not seg:
+            continue
+        name = seg.split("=", 1)[0].strip()
+        is_customer_cookie = (name == _CUSTOMER_COOKIE)
+        if is_customer_cookie == to_customer:            # keep customer cookie iff → customer; else the rest
+            kept.append(seg)
+    return "; ".join(kept)
 # Short-TTL cache of sha256(bearer) → resolved principal (or None). Bounds whoami round-trips under SSE /
 # polling. It is NO LONGER a revocation-lag window (W9-3): the edge REVOCATION SET (`_RevocationSet`) is
 # consulted on EVERY decision BEFORE the cache is trusted, so a revoke takes effect on the very next
@@ -769,12 +806,17 @@ def _default_backends() -> dict:
     time so a test that monkeypatches SOVEREIGN_PORT/CONSOLE_PORT/API_PORT still repoints routing + auth."""
     return {"sovereign": ("127.0.0.1", SOVEREIGN_PORT),
             "console": ("127.0.0.1", CONSOLE_PORT),
-            "api": ("127.0.0.1", API_PORT)}
+            "api": ("127.0.0.1", API_PORT),
+            "customer": ("127.0.0.1", CUSTOMER_PORT)}
 
 
 def _remote_backends(sovereign_addr: str, offense_console_addr: str, offense_api_addr: str) -> dict:
     """Resolve the three configurable federation targets for ``--proxy-only``. Each EMPTY flag falls back
     to the loopback default (a co-located backend); a non-empty flag is parsed host:port (fail-closed)."""
+    # NOTE: no "customer" key here. The keyless customer edge is a spawn-local `vigil up` plane
+    # (see `_default_backends`); the `--proxy-only` HA/k8s profile federates only the sovereign/offense
+    # backends and does NOT serve `/customer` yet (that awaits a `--customer-addr` flag). route()'s
+    # `"customer" in b` guard makes `/customer` fall through to static/404 here rather than 502 a dead edge.
     return {"sovereign": _split_hostport(sovereign_addr, "127.0.0.1", SOVEREIGN_PORT),
             "console": _split_hostport(offense_console_addr, "127.0.0.1", CONSOLE_PORT),
             "api": _split_hostport(offense_api_addr, "127.0.0.1", API_PORT)}
@@ -974,6 +1016,12 @@ def route(path: str, backends: "Optional[dict]" = None) -> Optional[tuple[str, i
     if path == OFFENSE_BASE or path.startswith(OFFENSE_BASE + "/"):
         rest = path[len(OFFENSE_BASE):] or "/"       # → / or /api/status, /api/events, ...
         host, port = b["console"]
+        return (host, port, rest)
+    # E1 customer plane — guarded on the backend being present so a legacy 3-key `backends` dict (or a test
+    # that injects one) simply serves static/404 for `/customer` rather than KeyError-ing.
+    if "customer" in b and (path == CUSTOMER_BASE or path.startswith(CUSTOMER_BASE + "/")):
+        rest = path[len(CUSTOMER_BASE):] or "/"      # → / or /api/customer/login, /api/customer/whoami, ...
+        host, port = b["customer"]
         return (host, port, rest)
     return None
 
@@ -1569,6 +1617,17 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         if path in _UNAUTH_FORWARD:
             self._proxy(host, port, self._with_query(upstream_path, split.query))
             return
+        # 1b) customer plane — the keyless custui edge SELF-AUTHENTICATES (its own `vigil_customer_session`
+        #     cookie + an Origin/Host CSRF gate + admit_customer). The OPERATOR whoami gate does NOT apply:
+        #     the proxy forwards the whole `/customer/*` branch and the edge is the authority on its own
+        #     session. This is a SEPARATE, whole-prefix unauth-forward — deliberately NOT a member of
+        #     `_UNAUTH_FORWARD`, which stays byte-identical to the sovereign BOOTSTRAP_PATHS for its
+        #     cross-check. `route()` has already resolved `target` to the CUSTOMER backend for this prefix, so
+        #     no operator route is reachable through it; cookie isolation across the boundary is enforced in
+        #     `_forward_request_headers` (keyed on the mount).
+        if path == CUSTOMER_BASE or path.startswith(CUSTOMER_BASE + "/"):
+            self._proxy(host, port, self._with_query(upstream_path, split.query))
+            return
         # 2) authenticate, fail-closed. Keep the caller's OWN bearer for W9-3 SSE re-auth (an open stream
         #    re-checks THIS credential against the live authority, not the substituted console token).
         bearer = self._request_bearer(split.query)
@@ -1602,6 +1661,8 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             return SOVEREIGN_BASE
         if p == OFFENSE_BASE or p.startswith(OFFENSE_BASE + "/"):
             return OFFENSE_BASE
+        if p == CUSTOMER_BASE or p.startswith(CUSTOMER_BASE + "/"):
+            return CUSTOMER_BASE               # remount the edge's `Set-Cookie Path=/` into `/customer/…`
         return ""
 
     def _sub_token_query(self, query: str) -> str:
@@ -2208,8 +2269,9 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         out: dict[str, str] = {}
         for key in self.headers.keys():
             lk = key.lower()
+            # Cookie is never copied verbatim — it is partitioned across the plane boundary below.
             if (lk in _HOP_BY_HOP or lk == "content-length" or lk == "accept-encoding"
-                    or _is_vigil_identity_header(key)):
+                    or lk == "cookie" or _is_vigil_identity_header(key)):
                 continue
             out[key] = self.headers[key]
         # BLOCK-A: force IDENTITY encoding on the proxy→backend hop so the response is CLEARTEXT the hop
@@ -2219,6 +2281,16 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         # an nginx sitting IN FRONT of the proxy that gzips the proxy's ALREADY-redacted output is safe (it
         # compresses redacted bytes). Set for BOTH planes and the login bootstrap alike.
         out["Accept-Encoding"] = "identity"
+        # Cookie isolation across the plane boundary (E1): partition the browser Cookie header so the
+        # `vigil_customer_session` cookie reaches ONLY the customer edge and NEVER an operator backend, and
+        # every operator cookie reaches ONLY the operator planes and NEVER the edge. `_relay_mount()` names
+        # this request's branch; "" (non-plane / static-forward) is operator-side (drops the customer cookie).
+        # An empty partition omits the header entirely.
+        raw_cookie = self.headers.get("Cookie", "")
+        if raw_cookie:
+            filtered = _partition_cookie_header(raw_cookie, to_customer=(self._relay_mount() == CUSTOMER_BASE))
+            if filtered:
+                out["Cookie"] = filtered
         if offense_principal is not None:
             # Present the offense CONSOLE's OWN credential (never the user's bearer): the console gates on
             # VIGIL_CONSOLE_TOKEN, the browser must never hold it, and only an already-authenticated request
