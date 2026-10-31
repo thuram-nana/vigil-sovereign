@@ -13,6 +13,7 @@ caller forge the acting requester):
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import tempfile
 import threading
@@ -40,9 +41,11 @@ def _seed():
 
 def _isolate(monkeypatch, tmp_path, *, hop_key=HOP):
     """Set the server's hop key and isolate the provisioner's filesystem ledgers into a per-test tmp dir
-    (so rate-limit / token markers never accumulate under a shared SIGIL_HOME — deterministic + no pollution)."""
+    (so rate-limit / token markers never accumulate under a shared SIGIL_HOME — deterministic + no pollution).
+    Also opt into dev-token exposure (now off-by-default, CO13) so the test can complete signup without SMTP."""
     from sigil import config
     monkeypatch.setenv("VIGIL_PROVISION_HOP_KEY", hop_key)
+    monkeypatch.setenv("VIGIL_PROVISION_DEV_TOKENS", "1")
     for attr in ("EMAIL_TOKENS_DIR", "LOGIN_RATELIMIT_DIR", "SIGNUP_CAP_DIR", "MEMBER_RATELIMIT_DIR"):
         monkeypatch.setattr(config, attr, tmp_path / attr.lower())
 
@@ -60,13 +63,15 @@ def _call(port, hop_key, principal, action, body, *, ts=None, extra_headers=None
     and POST it. `extra_headers` lets a test add e.g. an operator token to prove it does NOT help."""
     path = f"/api/provision/{action}"
     tss = str(int(time.time())) if ts is None else str(ts)
-    sig = stamp_hop_assertion(hop_key, principal, action, "POST", path, tss)
+    data = json.dumps(body).encode()
+    # mirror the edge: role binds the action AND the exact body bytes (NH-1), matching the cockpit's recompute
+    bound_role = f"{action}:{hashlib.sha256(data).hexdigest()}"
+    sig = stamp_hop_assertion(hop_key, principal, bound_role, "POST", path, tss)
     h = {"Content-Type": "application/json", "X-VIGIL-Provision-Principal": principal,
          "X-VIGIL-Provision-Ts": tss, "X-VIGIL-Provision-Sig": sig}
     if extra_headers:
         h.update(extra_headers)
-    req = urllib.request.Request(f"http://127.0.0.1:{port}{path}", data=json.dumps(body).encode(),
-                                 headers=h, method="POST")
+    req = urllib.request.Request(f"http://127.0.0.1:{port}{path}", data=data, headers=h, method="POST")
     try:
         with urllib.request.urlopen(req, timeout=5) as r:
             return r.status, json.loads(r.read().decode())
@@ -166,3 +171,47 @@ def test_provision_paths_are_not_bootstrap_paths():
     for a in ("signup_request", "signup_confirm", "login", "recover_request", "recover_confirm",
               "member_grant", "member_revoke"):
         assert f"/api/provision/{a}" not in BOOTSTRAP_PATHS
+
+
+def test_hop_assertion_is_bound_to_the_body_rejecting_a_swapped_body(tmp_path, monkeypatch):
+    # NH-1: the hop binds sha256(body). A sig stamped over body B1 but POSTed with a DIFFERENT body B2 (a
+    # replay-with-swapped-body) is refused — the recomputed role/MAC no longer matches.
+    _isolate(monkeypatch, tmp_path)
+    srv, port = _serve(_seed())
+    try:
+        action, path, tss = "signup_request", "/api/provision/signup_request", str(int(time.time()))
+        b1 = json.dumps({"email": "real@acme.com"}).encode()
+        bound = f"{action}:{hashlib.sha256(b1).hexdigest()}"       # sig is over B1...
+        sig = stamp_hop_assertion(HOP, "", bound, "POST", path, tss)
+        b2 = json.dumps({"email": "attacker@evil.com"}).encode()   # ...but we POST B2
+        req = urllib.request.Request(f"http://127.0.0.1:{port}{path}", data=b2, method="POST",
+                                     headers={"Content-Type": "application/json",
+                                              "X-VIGIL-Provision-Principal": "",
+                                              "X-VIGIL-Provision-Ts": tss, "X-VIGIL-Provision-Sig": sig})
+        code = None
+        try:
+            with urllib.request.urlopen(req, timeout=5) as r:
+                code = r.status
+        except urllib.error.HTTPError as e:
+            code = e.code
+        assert code == 403, code                                   # body-bound hop refuses the swapped body
+    finally:
+        srv.shutdown()
+
+
+def test_store_or_audit_fault_returns_clean_500_not_a_handler_crash(tmp_path, monkeypatch):
+    # P3 / CO12: Finding B made the critical audit re-raise. A store/audit fault on a provision op must yield
+    # a controlled 500 (the catch-all), never an uncaught exception that aborts the ThreadingHTTPServer thread.
+    _isolate(monkeypatch, tmp_path)
+
+    class _BoomProvisioner:
+        def request_signup(self, *a, **k):
+            raise RuntimeError("simulated audit/store fault")
+
+    monkeypatch.setattr("sigil.ui.provision.build_provisioner", lambda *a, **k: _BoomProvisioner())
+    srv, port = _serve(_seed())
+    try:
+        c, r = _call(port, HOP, "", "signup_request", {"email": "x@acme.com"})
+        assert c == 500, (c, r)                                    # clean 5xx, connection intact (no crash)
+    finally:
+        srv.shutdown()

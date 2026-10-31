@@ -53,6 +53,7 @@ def _stack(tmp_path, monkeypatch):
     """A sovereign cockpit + a custui edge pointed at it over the hop key, with isolated ledgers."""
     from sigil import config
     monkeypatch.setenv("VIGIL_PROVISION_HOP_KEY", HOP)
+    monkeypatch.setenv("VIGIL_PROVISION_DEV_TOKENS", "1")   # dev-token exposure is now off-by-default (CO13)
     for attr in ("EMAIL_TOKENS_DIR", "LOGIN_RATELIMIT_DIR", "SIGNUP_CAP_DIR", "MEMBER_RATELIMIT_DIR"):
         monkeypatch.setattr(config, attr, tmp_path / attr.lower())
     path = tempfile.mktemp(suffix=".jsonl")

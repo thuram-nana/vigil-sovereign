@@ -21,6 +21,7 @@ Stdlib + sovereign `reuse`/`config`/`sessions` + `vigil_core` only — no framew
 """
 from __future__ import annotations
 
+import hashlib
 import ipaddress
 import json
 import socket
@@ -48,6 +49,14 @@ _MAX_BODY = 65536
 # in the session (the design-pass correction); the per-org role is resolved LIVE by the sovereign
 # `admit_customer` on every member op, so a revoked membership dies on the very next request, not at TTL.
 _CUSTOMER_SESSION_ROLE = "customer"
+
+
+def _is_loopback(addr: str) -> bool:
+    """True iff `addr` is a loopback IP (the trusted same-host reverse-proxy hop). Fail-closed on junk."""
+    try:
+        return ipaddress.ip_address(addr).is_loopback
+    except ValueError:
+        return False
 
 
 class CustomerServer(ThreadingHTTPServer):
@@ -158,7 +167,24 @@ class CustomerHandler(BaseHTTPRequestHandler):
         self._pending_set_cookie = f"{CUSTOMER_COOKIE}=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0"
 
     def _ip(self) -> str:
-        return self.client_address[0] if self.client_address else ""
+        """The client IP for the BEST-EFFORT per-IP rate-limit leg. The edge binds loopback/private (bind_ok)
+        and sits behind a reverse proxy, so the raw TCP peer is the PROXY — keying on it would collapse every
+        customer onto ONE rate-limit key, letting a single attacker lock out the entire customer auth surface
+        (the red-pen's CO5). When the immediate peer is loopback (the trusted same-host proxy hop), take the
+        real client IP from `X-Real-IP` / the first `X-Forwarded-For` entry instead. This value feeds ONLY the
+        best-effort per-IP leg (the per-account/email leg is the reliable one), NEVER authz — so a spoofed
+        header lets an attacker evade only their OWN throttle, never impersonate or lock out another."""
+        peer = self.client_address[0] if self.client_address else ""
+        if peer and _is_loopback(peer):
+            xr = (self.headers.get("X-Real-IP", "") or "").strip()
+            if xr:
+                return xr
+            xff = self.headers.get("X-Forwarded-For", "")
+            if xff:
+                first = xff.split(",")[0].strip()
+                if first:
+                    return first
+        return peer
 
     def _read_body(self) -> dict:
         length = int(self.headers.get("Content-Length", "0"))
@@ -175,8 +201,12 @@ class CustomerHandler(BaseHTTPRequestHandler):
         is this edge's ONLY credential — it holds no owner key. A dead provisioner is a 502, never a crash."""
         path = f"/api/provision/{action}"
         ts = str(int(time.time()))
-        sig = stamp_hop_assertion(self.server.hop_key, principal, action, "POST", path, ts)
         data = json.dumps(body).encode("utf-8")
+        # NH-1: bind the EXACT body bytes into the hop (role == "<action>:<sha256(body)>"), matching the
+        # cockpit's recomputation over the bytes it receives — a captured assertion cannot be replayed with a
+        # swapped body to mint an attacker-chosen grant.
+        bound_role = f"{action}:{hashlib.sha256(data).hexdigest()}"
+        sig = stamp_hop_assertion(self.server.hop_key, principal, bound_role, "POST", path, ts)
         req = urllib.request.Request(
             self.server.provision_base + path, data=data, method="POST",
             headers={"Content-Type": "application/json", "X-VIGIL-Provision-Principal": principal,

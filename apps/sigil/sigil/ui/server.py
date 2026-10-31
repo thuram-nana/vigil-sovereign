@@ -1321,18 +1321,27 @@ class Handler(BaseHTTPRequestHandler):
         principal = self.headers.get("X-VIGIL-Provision-Principal", "") or ""
         ts = self.headers.get("X-VIGIL-Provision-Ts", "") or ""
         sig = self.headers.get("X-VIGIL-Provision-Sig", "") or ""
-        # role == action, so a captured assertion cannot be re-aimed at a different provision verb; the
-        # requester (principal) + the backend path are inside the HMAC too. Empty key ⇒ verify ⇒ False ⇒ 403.
-        if not verify_hop_assertion(_config.provision_hop_key(), principal, action, "POST", path, ts, sig):
-            return self._deny(403, "provision denied (hop)")
         try:
             length = int(self.headers.get("Content-Length", "0"))
             if length > self._MAX_BODY:
                 return self._deny(413, "body too large")
-            body = json.loads(self.rfile.read(length) or b"{}")
+            raw = self.rfile.read(length) if length else b""
+        except (ValueError, OSError) as e:
+            return self._deny(400, f"bad request: {str(e)[:200]}")
+        # NH-1: bind the EXACT request body into the hop assertion (role == "<action>:<sha256(raw)>"). The
+        # edge stamps over the bytes it sends; the cockpit recomputes over the bytes it received. So a
+        # captured assertion cannot be replayed within the freshness window with a SWAPPED body (different
+        # member_username/role/org) to mint an attacker-chosen owner-signed grant — the hash, role, and MAC
+        # all change. principal/method/path/ts stay bound as before; an empty/blank key ⇒ verify ⇒ 403, so
+        # the surface is unreachable to anyone but the hop-key-holding edge (never operator RBAC / CSRF).
+        bound_role = f"{action}:{hashlib.sha256(raw).hexdigest()}"
+        if not verify_hop_assertion(_config.provision_hop_key(), principal, bound_role, "POST", path, ts, sig):
+            return self._deny(403, "provision denied (hop)")
+        try:
+            body = json.loads(raw or b"{}")
             if not isinstance(body, dict):
                 return self._deny(400, "bad request: body must be an object")
-        except (ValueError, OSError) as e:
+        except ValueError as e:
             return self._deny(400, f"bad request: {str(e)[:200]}")
         p = build_provisioner(self.server.store(), expose_dev_tokens=_config.provision_expose_dev_tokens())
         try:
@@ -1345,6 +1354,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._deny(400, f"provision failed: {str(e)[:200]}")
         except (ValueError, KeyError) as e:
             return self._deny(400, f"bad request: {str(e)[:200]}")
+        except Exception:  # noqa: BLE001 — P3: a store/audit fault (Finding B's re-raise) → clean 5xx, never
+            return self._deny(500, "provision failed")   # a ThreadingHTTPServer handler crash (mirrors /api/action)
         if result is None:
             return self._deny(404, "unknown provision action")
         return self._json(result)

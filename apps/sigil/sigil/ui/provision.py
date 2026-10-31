@@ -30,7 +30,6 @@ from __future__ import annotations
 import hashlib
 import math
 import secrets
-import threading
 import time
 from typing import Optional
 
@@ -39,6 +38,7 @@ from ..reuse import assert_no_offense
 assert_no_offense()
 
 from .email_channel import PURPOSE_RECOVER, PURPOSE_VERIFY  # noqa: E402
+from ..spine.store import spine_lock  # noqa: E402  (process-wide, path-keyed RE-ENTRANT txn lock)
 
 _DEFAULT_TRIAL_CREDITS = 100              # server constant — NO on-the-wire amount decides the trial grant
 _ORG_ID_PREFIX = "org_"
@@ -114,7 +114,15 @@ class Provisioner:
         self.trial_credits = int(trial_credits)
         self.expose_dev_tokens = bool(expose_dev_tokens)
         self._now = now_fn
-        self._lock = threading.Lock()                  # serializes the compound signup transaction (TOCTOU)
+        # The compound transactions (confirm_signup / confirm_recover / grant_member / revoke_member) run
+        # under the PROCESS-WIDE, path-keyed, RE-ENTRANT spine lock — NOT a per-instance lock. The HTTP
+        # transport builds a fresh Provisioner per request (server.py `_provision_post`), so a per-instance
+        # `threading.Lock()` would serialize NOTHING across concurrent requests (the keystone red-pen
+        # finding): two concurrent confirms could double-mint an account+trial, two concurrent revokes could
+        # orphan an org, and the in-lock `admit_customer` TOCTOU guard would be inert. `spine_lock` is shared
+        # by every Provisioner over this spine, and its inner `store.append` RE-ENTERS the same lock cleanly
+        # (store.py:92), so the read->check->append compound is atomic across request threads.
+        self._lock = spine_lock(self.store.path)
         self._last_issued = 0.0
 
     # -- internals ---------------------------------------------------------------------------------
@@ -219,6 +227,13 @@ class Provisioner:
         if not email:
             raise ProvisionDenied("invalid or expired verification token")
         username, org_id = _signup_username(tok), _signup_org_id(tok)
+        # NH-2: validate EVERY client-supplied input BEFORE the first owner-signed append. Otherwise an
+        # invalid org_name (too long / control chars) would raise inside create_org AFTER customers.create
+        # has already minted the account+email binding — a deterministic partial commit that squats the
+        # email (a fresh signup derives a different username and is refused). Validating here keeps Finding
+        # A's "ONE account / ONE org / ONE trial — or nothing" true for bad input, not only for a crash.
+        from ..governor.orgs import _check_org_name
+        _check_org_name(str(org_name or email))
         with self._lock:
             # GLOBAL signup cap (anti-trial-farming) — checked under the lock, before any mint. A locked cap
             # refuses fail-closed; the token stays valid (peeked, not consumed), so a legitimate retry after
@@ -329,20 +344,24 @@ class Provisioner:
         if role not in _CUSTOMER_GRANTABLE_ROLES:                        # pure input validation (no state)
             raise ProvisionDenied(f"role must be one of {sorted(_CUSTOMER_GRANTABLE_ROLES)}")
         with self._lock:
-            self._member_rate_guard(requester_org_id, now=t)
             if not self.orgs.admit_customer(username=requester, org_id=requester_org_id,
                                             permission="manage_members"):
                 self._audit("grant_member", requester=requester, org_id=requester_org_id,
                             target=member_username, outcome="denied")
                 raise ProvisionDenied("requester is not an administrator of this org")
+            # P6: meter AUTHORIZED churn only — the rate guard records AFTER admit_customer, so a non-admin
+            # cannot burn the per-org member budget and lock the real admin out (the limiter's finding).
+            self._member_rate_guard(requester_org_id, now=t)
             if self.customers.customer(member_username) is None:        # never seat an unknown / foreign id
                 raise ProvisionDenied("target is not an active customer account")
             if role != "org_admin" and self._org_admin_usernames(requester_org_id) == {member_username}:
                 raise ProvisionDenied("cannot remove the last administrator of the org")   # anti-orphan
-            seq = self.orgs.grant_membership(requester_org_id, member_username, role,
-                                             issued_at=self._next_issued())
+            # NH-3: durable audit BEFORE the owner-signed mutation — a critical-audit store failure then fails
+            # CLOSED with no membership change (committed⟹audited), mirroring the signup audit-before-commit.
             self._audit("grant_member", requester=requester, org_id=requester_org_id, target=member_username,
                         outcome=f"role={role}", critical=True)
+            seq = self.orgs.grant_membership(requester_org_id, member_username, role,
+                                             issued_at=self._next_issued())
         return {"org_id": requester_org_id, "username": member_username, "role": role, "seq": seq}
 
     def revoke_member(self, requester: str, requester_org_id: str, member_username: str, *,
@@ -357,19 +376,22 @@ class Provisioner:
         revoke of the requester's own admin membership); and the org's SOLE `org_admin` cannot be revoked
         (anti-orphan — the tenant must retain at least one administrator)."""
         t = self._now() if now is None else float(now)
+        from ..governor.orgs import _check_member_username
+        _check_member_username(member_username)          # NH-3 prep: validate target shape before any audit
         with self._lock:
-            self._member_rate_guard(requester_org_id, now=t)
             if not self.orgs.admit_customer(username=requester, org_id=requester_org_id,
                                             permission="manage_members"):
                 self._audit("revoke_member", requester=requester, org_id=requester_org_id,
                             target=member_username, outcome="denied")
                 raise ProvisionDenied("requester is not an administrator of this org")
+            self._member_rate_guard(requester_org_id, now=t)   # P6: meter AUTHORIZED churn only (after admit)
             admins = self._org_admin_usernames(requester_org_id)
             if member_username in admins and len(admins) <= 1:
                 raise ProvisionDenied("cannot remove the last administrator of the org")   # anti-orphan
-            seq = self.orgs.revoke_membership(requester_org_id, member_username)
+            # NH-3: durable critical audit BEFORE the owner-signed revoke (fail-closed; committed⟹audited).
             self._audit("revoke_member", requester=requester, org_id=requester_org_id, target=member_username,
                         outcome="revoked", critical=True)
+            seq = self.orgs.revoke_membership(requester_org_id, member_username)
         return {"org_id": requester_org_id, "username": member_username, "seq": seq}
 
 
@@ -392,10 +414,14 @@ def build_provisioner(store, *, expose_dev_tokens: bool = False, now_fn=time.tim
         wallet=WalletRegistry(store),
         email_tokens=EmailTokenLedger(config.EMAIL_TOKENS_DIR),
         rate_limiter=LoginRateLimiter(config.LOGIN_RATELIMIT_DIR),
-        # the GLOBAL per-rolling-day signup ceiling (anti-trial-farming) and the per-org member-management
-        # ceiling — separate limiters under disjoint marker dirs (never couple to the login limiter).
+        # the GLOBAL per-day signup ceiling (anti-trial-farming) and the per-org member-management ceiling —
+        # separate limiters under disjoint marker dirs (never couple to the login limiter). The signup cap's
+        # base_lock_s EQUALS its window (86400s): on the CAP-th committed signup the limiter trips and stays
+        # locked for the FULL day, so it enforces a true "<= CAP signups per 24h" ceiling. (A shorter
+        # base_lock_s would let the lock lapse mid-window and the escalate-and-clear limiter would then admit
+        # several times the cap — the red-pen's CO10.)
         signup_cap_limiter=LoginRateLimiter(config.SIGNUP_CAP_DIR, max_fails=config.SIGNUP_DAILY_CAP,
-                                            window_s=86400.0, base_lock_s=3600.0, max_lock_s=86400.0),
+                                            window_s=86400.0, base_lock_s=86400.0, max_lock_s=86400.0),
         member_limiter=LoginRateLimiter(config.MEMBER_RATELIMIT_DIR, max_fails=config.MEMBER_OPS_PER_MIN,
                                         window_s=60.0, base_lock_s=60.0, max_lock_s=600.0),
         email_sender=config.email_sender(),

@@ -164,8 +164,18 @@ TRIAL_CREDITS = _int_env("VIGIL_TRIAL_CREDITS", 100)    # server-constant trial 
 # here under disjoint marker dirs, so they never interfere with the per-account/per-ip login limiter.
 SIGNUP_CAP_DIR = _customer / "signup_cap"               # the global signup-cap limiter's markers
 MEMBER_RATELIMIT_DIR = _customer / "member_ratelimit"   # the per-org member-management limiter's markers
-SIGNUP_DAILY_CAP = _int_env("VIGIL_SIGNUP_DAILY_CAP", 500)      # max self-serve signups per rolling 24h
+SIGNUP_DAILY_CAP = _int_env("VIGIL_SIGNUP_DAILY_CAP", 500)      # <= this many committed signups per 24h window
 MEMBER_OPS_PER_MIN = _int_env("VIGIL_MEMBER_OPS_PER_MIN", 30)   # max grant/revoke ops per org per minute
+
+
+def _bool_env(name: str, default: bool = False) -> bool:
+    """A strict, fail-closed boolean env read: only the affirmative tokens below (case-insensitive) are True;
+    anything else — including a typo — is the default. Used for opt-in DEV escape hatches that must never
+    turn on by accident."""
+    v = os.environ.get(name)
+    if v is None:
+        return default
+    return v.strip().lower() in {"1", "true", "yes", "on", "enabled"}
 
 
 def provision_hop_key() -> str:
@@ -177,11 +187,20 @@ def provision_hop_key() -> str:
 
 def provision_expose_dev_tokens() -> bool:
     """DEV-ONLY: whether the provision HTTP surface may echo the email verify/recover token in its response
-    (so a sovereign/dev install can complete signup/recovery without an SMTP relay). TRUE only when NO real
-    email sender is configured AND the PRODUCTION posture is not armed — so a production deploy NEVER leaks a
-    token on the wire, and any install with SMTP configured surfaces nothing (the token is emailed)."""
-    from vigil_core.posture import is_production_posture
-    return (not email_enabled()) and (not is_production_posture())
+    (so a dev install can complete signup/recovery without an SMTP relay).
+
+    FAIL-CLOSED by default (the red-pen's CO13): echoing the token to the browser lets anyone self-verify
+    WITHOUT mailbox control — i.e. a trial without email verification = Sybil farming, which breaks the
+    NON-NEGOTIABLE anti-Sybil invariant. So this is OFF unless EXPLICITLY opted in with
+    `VIGIL_PROVISION_DEV_TOKENS`, and is suppressed outright under BOTH the production AND the (explicitly
+    hardened) governed posture, and whenever a real SMTP sender is configured (the token is emailed, never
+    surfaced). It must NEVER default open merely because no posture/SMTP is set."""
+    from vigil_core.posture import is_governed_posture, is_production_posture
+    if is_production_posture() or is_governed_posture():
+        return False
+    if email_enabled():
+        return False
+    return _bool_env("VIGIL_PROVISION_DEV_TOKENS", False)
 
 
 def email_enabled() -> bool:

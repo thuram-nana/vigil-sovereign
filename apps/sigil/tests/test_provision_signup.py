@@ -19,6 +19,8 @@ from __future__ import annotations
 
 import itertools
 import tempfile
+import threading
+import time
 
 import pytest
 
@@ -29,7 +31,7 @@ from sigil.reuse import generate_keypair
 from sigil.spine.store import SpineStore
 from sigil.ui.email_channel import PURPOSE_VERIFY, EmailTokenLedger, NullEmailSender
 from sigil.ui.login_ratelimit import LoginRateLimiter
-from sigil.ui.provision import ProvisionDenied, ProvisionRateLimited, Provisioner
+from sigil.ui.provision import ProvisionDenied, ProvisionError, ProvisionRateLimited, Provisioner
 
 OWNER = generate_keypair()
 OP = OWNER.public_key_b64
@@ -342,3 +344,152 @@ def test_password_reset_signals_session_revocation():
     out = p.confirm_recover(rt, new_password="new-password", now=300.0)
     assert out["sessions_must_revoke"] is True           # the edge MUST revoke_all(username) on this signal
     assert p.login("res@acme.com", "new-password", ip="4.4.4.4", now=400.0)["username"]  # reset is owner-signed + live
+
+
+# ---------------------------------------------------------------------------------------------------
+# Concurrency regression (the keystone the 2026-10-30 red-pen caught): the HTTP transport builds a FRESH
+# Provisioner per request, so a per-instance lock serializes NOTHING across concurrent requests. These
+# drive TWO Provisioners over ONE shared spine (exactly as two concurrent /api/provision requests do) and
+# assert the compound transactions stay atomic — they RED if `self._lock` is not the shared per-spine lock.
+# ---------------------------------------------------------------------------------------------------
+
+def _prov_req(spine_path, tokens_dir):
+    """Mimic the per-request `build_provisioner`: a FRESH Provisioner over a fresh SpineStore(spine_path)
+    + EmailTokenLedger(tokens_dir). Two of these share the spine (and its process-wide spine_lock)."""
+    s = SpineStore(spine_path)
+    custs = CustomerRegistry(s, owner_key=OWNER, trusted_pubkey=OP)
+    orgs = OrgRegistry(s, owner_key=OWNER, trusted_pubkey=OP)
+    wallet = WalletRegistry(s, owner_key=OWNER, trusted_pubkey=OP)
+    tokens = EmailTokenLedger(tokens_dir, ttl_s=10_000.0)
+    rl = LoginRateLimiter(tempfile.mkdtemp(), max_fails=100, window_s=10_000.0, base_lock_s=50.0)
+    return Provisioner(s, customers=custs, orgs=orgs, wallet=wallet, email_tokens=tokens, rate_limiter=rl,
+                       email_sender=NullEmailSender(), trial_credits=100, expose_dev_tokens=True,
+                       now_fn=time.time)
+
+
+def test_concurrent_signups_one_email_mint_exactly_one_account_and_one_trial():
+    # Two valid verify tokens for ONE email + two concurrent confirm_signup (each its own per-request
+    # Provisioner over the shared spine). The shared spine_lock serializes the by_email->create->consume
+    # compound, so exactly ONE account + ONE trial result and the second confirm is refused as a duplicate.
+    # A sleep inside by_email widens the TOCTOU window so the outcome is deterministic either way.
+    spine_path = tempfile.mktemp(suffix=".jsonl")
+    SpineStore(spine_path).append(kind="message", source="x", actor="user", payload={"text": "hi"})
+    tokens_dir = tempfile.mkdtemp()
+    issuer = EmailTokenLedger(tokens_dir, ttl_s=10_000.0)
+    email = "race@acme.com"
+    t1 = issuer.issue(email, PURPOSE_VERIFY)
+    t2 = issuer.issue(email, PURPOSE_VERIFY)
+    assert t1 and t2 and t1 != t2
+    results: dict = {}
+
+    def worker(name, tok):
+        p = _prov_req(spine_path, tokens_dir)
+        real = p.customers.by_email
+        def slow(e):                               # widen the window INSIDE the (would-be) locked section
+            r = real(e); time.sleep(0.3); return r
+        p.customers.by_email = slow
+        try:
+            results[name] = ("ok", p.confirm_signup(tok, password="customer-pw-1", org_name="Acme"))
+        except ProvisionError as e:
+            results[name] = ("err", type(e).__name__)
+
+    ths = [threading.Thread(target=worker, args=("A", t1)), threading.Thread(target=worker, args=("B", t2))]
+    for th in ths:
+        th.start()
+    for th in ths:
+        th.join(timeout=30)
+    final = CustomerRegistry(SpineStore(spine_path), owner_key=OWNER, trusted_pubkey=OP)
+    assert len([c for c in final.customers() if c.email == email]) == 1    # exactly ONE account for the email
+    oks = [r for r in results.values() if r[0] == "ok"]
+    assert len(oks) == 1 and len([r for r in results.values() if r[0] == "err"]) == 1, results
+    w = WalletRegistry(SpineStore(spine_path), owner_key=OWNER, trusted_pubkey=OP)
+    assert w.available(oks[0][1]["org_id"]) == 100                         # ONE trial — never doubled
+
+
+def test_concurrent_last_two_admin_revokes_keep_at_least_one_admin():
+    # An org with exactly two org_admins A and B; A revokes B while B revokes A, concurrently (each its own
+    # per-request Provisioner). The shared spine_lock serializes the admit+anti-orphan+revoke compound, so
+    # one revoke wins and the other is refused — the org is NEVER left with zero admins (ungovernable tenant).
+    spine_path = tempfile.mktemp(suffix=".jsonl")
+    SpineStore(spine_path).append(kind="message", source="x", actor="user", payload={"text": "hi"})
+    tokens_dir = tempfile.mkdtemp()
+    setup = _prov_req(spine_path, tokens_dir)
+    a = setup.confirm_signup(setup.email_tokens.issue("a@acme.com", PURPOSE_VERIFY),
+                             password="customer-pw-1", org_name="Acme")
+    au, oid = a["username"], a["org_id"]
+    bu = setup.confirm_signup(setup.email_tokens.issue("b@acme.com", PURPOSE_VERIFY),
+                              password="customer-pw-2", org_name="BOrg")["username"]
+    setup.grant_member(au, oid, bu, "org_admin")                           # Acme now has TWO admins: au, bu
+    orgs0 = OrgRegistry(SpineStore(spine_path), owner_key=OWNER, trusted_pubkey=OP)
+    assert orgs0.membership_role(au, oid) == "org_admin" and orgs0.membership_role(bu, oid) == "org_admin"
+    results: dict = {}
+
+    def worker(name, requester, target):
+        p = _prov_req(spine_path, tokens_dir)
+        real = p._org_admin_usernames
+        def slow(o):
+            r = real(o); time.sleep(0.3); return r
+        p._org_admin_usernames = slow
+        try:
+            p.revoke_member(requester, oid, target); results[name] = "ok"
+        except ProvisionError:
+            results[name] = "denied"
+
+    ths = [threading.Thread(target=worker, args=("A", au, bu)),
+           threading.Thread(target=worker, args=("B", bu, au))]
+    for th in ths:
+        th.start()
+    for th in ths:
+        th.join(timeout=30)
+    final = OrgRegistry(SpineStore(spine_path), owner_key=OWNER, trusted_pubkey=OP)
+    admins = [m.username for m in final.memberships(oid) if m.role == "org_admin"]
+    assert len(admins) >= 1, f"org orphaned to zero admins: {admins} ({results})"
+    assert sorted(results.values()) == ["denied", "ok"], results           # one revoke, one anti-orphan refusal
+
+
+def test_signup_refuses_invalid_org_name_before_minting_anything():
+    # NH-2: an invalid client org_name is refused BEFORE the first owner-signed append, so no account/email
+    # is squatted; the (peeked, unconsumed) token then still completes a retry with a valid name.
+    p, s, custs, orgs, wallet = _prov()
+    tok = p.request_signup("sq@acme.com", ip="1.1.1.1", now=100.0)["dev_token"]
+    with pytest.raises(ValueError):                              # >200 chars → _check_org_name raises
+        p.confirm_signup(tok, password="customer-pw-1", org_name="x" * 500, now=100.0)
+    assert custs.by_email("sq@acme.com") is None                # nothing minted — the email is NOT squatted
+    out = p.confirm_signup(tok, password="customer-pw-1", org_name="Acme", now=100.0)
+    assert custs.by_email("sq@acme.com").username == out["username"]
+
+
+def test_provision_dev_token_exposure_is_fail_closed(monkeypatch):
+    # P5 / CO13: echoing the verify token is OFF unless explicitly opted in, and suppressed under BOTH the
+    # production and the (hardened) governed posture, and whenever SMTP is configured.
+    from sigil import config
+    for v in ("VIGIL_POSTURE", "VIGIL_GOVERNED", "SIGIL_EMAIL_HOST", "VIGIL_PROVISION_DEV_TOKENS"):
+        monkeypatch.delenv(v, raising=False)
+    assert config.provision_expose_dev_tokens() is False        # default OFF — no accidental open
+    monkeypatch.setenv("VIGIL_PROVISION_DEV_TOKENS", "1")
+    assert config.provision_expose_dev_tokens() is True         # explicit opt-in, dev posture, no SMTP
+    monkeypatch.setenv("VIGIL_POSTURE", "production")
+    assert config.provision_expose_dev_tokens() is False        # suppressed under production
+    monkeypatch.delenv("VIGIL_POSTURE")
+    monkeypatch.setenv("VIGIL_GOVERNED", "1")
+    assert config.provision_expose_dev_tokens() is False        # suppressed under the hardened governed posture
+    monkeypatch.delenv("VIGIL_GOVERNED")
+    monkeypatch.setenv("SIGIL_EMAIL_HOST", "smtp.example.com")
+    assert config.provision_expose_dev_tokens() is False        # SMTP set → token is emailed, never echoed
+
+
+def test_non_admin_cannot_drain_the_per_org_member_budget():
+    # P6 / CO14: the member limiter counts only AUTHORIZED ops, so a non-admin's denied attempts cannot burn
+    # the per-org budget and lock the real admin out of member management.
+    p, s, custs, orgs, wallet = _cap_prov(member_cap=3)
+    admin = p.confirm_signup(p.request_signup("adm@acme.com", ip="1.1.1.1", now=100.0)["dev_token"],
+                             password="customer-pw-1", org_name="Adm", now=100.0)
+    au, oid = admin["username"], admin["org_id"]
+    mu = p.confirm_signup(p.request_signup("m@acme.com", ip="1.1.1.2", now=100.0)["dev_token"],
+                          password="customer-pw-2", org_name="MOrg", now=100.0)["username"]
+    p.grant_member(au, oid, mu, "analyst", now=200.0)           # 1 AUTHORIZED op
+    for i in range(6):                                          # a NON-admin hammers denied grants
+        with pytest.raises(ProvisionError):
+            p.grant_member(mu, oid, mu, "analyst", now=201.0 + i)
+    # the admin can STILL manage members — the non-admin's denials never consumed the org budget
+    assert p.grant_member(au, oid, mu, "viewer", now=210.0)["role"] == "viewer"
