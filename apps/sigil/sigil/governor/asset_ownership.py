@@ -66,6 +66,7 @@ from vigil_core.hard_guardrail import HardBlockError, assert_not_hard_blocked  #
 from . import key_history as _kh  # noqa: E402  (owner-key succession resolver, mirrors accounts/orgs)
 from .authn import NO_HIGHWATER, as_issued_at, signed_payload, verify_signed  # noqa: E402
 from .identity import owner_keypair, owner_pubkey  # noqa: E402
+from ..spine.snapshot import SnapshotState  # noqa: E402  (hard-prune seed for the proof fold; mirrors orgs)
 
 # Dedicated payload signals under the generic enforced ``kind="event"`` record (mirrors orgs' signals), so a
 # NEW kind need not be registered with the write-path guard — the signal disambiguates the fold.
@@ -354,12 +355,13 @@ class AssetOwnershipRegistry:
                    "reason": f"ownership proof for {h} (org {oid}) REVOKED (governed latch)"}
         return self.store.append(kind="event", source="governor", actor="WARDEN", payload=payload)
 
-    # -- reads (owner-key-succession-aware folds; genesis scan — see DEFERRED snapshot note) ---------
+    # -- reads (owner-key-succession-aware folds) ---------------------------------------------------
     def _fold(self, signal: str, core_fields):
         """Fold the spine into {(org_id, host): record_dict} for the given signal whose latest state is
         active, authenticating each ``active`` grant under the owner pubkey valid AT ITS SEQ and refusing any
         stale/replayed re-append via the per-(org_id, host) high-water. Revokes (safe direction) are honored
-        regardless of signature. Returns the raw winning core dicts (callers build the dataclass)."""
+        regardless of signature. Returns the raw winning core dicts (callers build the dataclass). Used for the
+        CHALLENGE signal (ephemeral — a plain genesis scan, no snapshot seed; a pruned challenge is re-requested)."""
         resolver = _kh.key_resolver(self.store, current=self.trusted_pubkey)
         state: dict[tuple, str] = {}
         issued: dict[tuple, float] = {}
@@ -387,6 +389,51 @@ class AssetOwnershipRegistry:
                 rows[key] = dict(p)
         return {k: row for k, row in rows.items() if state.get(k) == "active"}
 
+    def _fold_proofs(self) -> dict:
+        """Fold the spine into {(org_id, host): proof-field dict} for proofs whose latest state is active —
+        the HARD-PRUNE-DURABLE fold the mint / launch gate reads (Slice G0 close-out). Mirrors
+        ``orgs._fold_memberships`` EXACTLY, including the snapshot seed: seed the per-(org_id, host) state /
+        anti-replay high-water / row from the committed ``SnapshotState`` (v3), then fold the LIVE window only,
+        so an active proof whose only grant was pruned SURVIVES and its high-water is NOT reset — else the first
+        hard prune below a revoked proof would re-open the LWW replay-resurrection the G0 red-pen flagged. If our
+        trusted anchor differs from the snapshot's (rotated key / empty identity) BYPASS the seed and full-scan
+        from genesis (byte-identical under an empty snapshot)."""
+        snap = SnapshotState.load(self.store)
+        resolver = _kh.key_resolver(self.store, current=self.trusted_pubkey)
+        if self.trusted_pubkey != snap.trusted_pubkey:
+            state, issued, rows, since = {}, {}, {}, -1
+        else:
+            state = dict(snap.ownership_proof_state_map())           # (org,host) -> "active"|"revoked" (keep revoked)
+            issued = dict(snap.ownership_proof_issued_map())         # (org,host) -> per-pair high-water
+            rows = {(row[0], row[1]): {"method": row[2], "token_sha256": row[3], "verified_at": row[4],
+                                       "expires_at": row[5], "issued_at": issued.get((row[0], row[1]), 0.0)}
+                    for row in snap.ownership_proof_row}             # rebuild honored-active proofs from the seed
+            since = snap.base_seq - 1
+        for r in self.store.iter_records(since_seq=since):
+            p = r.payload
+            if not isinstance(p, dict) or p.get("signal") != PROOF_SIGNAL:
+                continue
+            org_id = p.get("org_id")
+            host = p.get("host")
+            if not isinstance(org_id, str) or not org_id or not isinstance(host, str) or not host:
+                continue
+            key = (org_id, host)
+            rec_state = p.get("state")
+            if rec_state == "revoked":
+                state[key] = "revoked"
+            elif rec_state == "active":
+                if not verify_signed(p, _PROOF_CORE, resolver.at(r.seq)):
+                    continue
+                at = as_issued_at(p.get("issued_at"))
+                if at <= issued.get(key, NO_HIGHWATER):
+                    continue
+                issued[key] = at
+                state[key] = "active"
+                rows[key] = {"method": p.get("method"), "token_sha256": p.get("token_sha256"),
+                             "verified_at": p.get("verified_at"), "expires_at": p.get("expires_at"),
+                             "issued_at": at}
+        return {k: row for k, row in rows.items() if state.get(k) == "active"}
+
     def challenge(self, org_id: str, host: str) -> Optional[OwnershipChallenge]:
         """The current active challenge for (org_id, host), or None (fail-closed). The latest owner-signed,
         non-superseded token."""
@@ -403,7 +450,7 @@ class AssetOwnershipRegistry:
         expiry filter — use ``has_current_proof`` for the launch/mint gate (which is time-aware)."""
         if not isinstance(org_id, str) or not org_id or not isinstance(host, str) or not host:
             return None
-        row = self._fold(PROOF_SIGNAL, _PROOF_CORE).get((org_id, host))
+        row = self._fold_proofs().get((org_id, host))
         if row is None:
             return None
         return OwnershipProof(
@@ -429,7 +476,7 @@ class AssetOwnershipRegistry:
         if not isinstance(org_id, str) or not org_id:
             return []
         out = []
-        for (o, h), row in self._fold(PROOF_SIGNAL, _PROOF_CORE).items():
+        for (o, h), row in self._fold_proofs().items():
             if o == org_id and float(now) < float(as_issued_at(row.get("expires_at"))):
                 out.append(h)
         return sorted(out)

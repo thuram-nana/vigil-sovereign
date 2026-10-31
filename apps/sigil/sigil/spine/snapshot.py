@@ -51,7 +51,7 @@ from ..reuse import SignedChainHead
 from .models import SpineRecord
 from .schema_guard import refuse_newer
 
-_MAX_SNAPSHOT_SCHEMA = 2   # refuse-newer gate (W5-3): a snapshot schema above this is "upgrade sigil".
+_MAX_SNAPSHOT_SCHEMA = 3   # refuse-newer gate (W5-3): a snapshot schema above this is "upgrade sigil".
 #                            v2 (Slice E1) ADDED the governor.customer sub-state (customer_state/issued/cred).
 #                            A pre-E1 build (max v1) refuses a v2 snapshot cleanly; this build still reads a v1
 #                            snapshot (the customer_* fields default to empty — additive-with-defaults, C1/C3).
@@ -62,7 +62,7 @@ class SnapshotState(BaseModel):
     round-trip verbatim); runtime accessors reconstruct the sets / tuple-keyed dicts. Non-secret."""
     model_config = ConfigDict(extra="forbid")
 
-    schema_version: int = 2   # W5-3: bumped 1->2 by Slice E1 (added the governor.customer sub-state). Every
+    schema_version: int = 3   # W5-3: 1->2 Slice E1 (governor.customer); 2->3 Slice G0 (asset_ownership_proof). Every
     #                           snapshot this build emits carries the customer_* keys, so it is a v2 artifact;
     #                           a pre-E1 build (max v1) refuses it cleanly via the refuse-newer gate.
     base_seq: int = 0                 # first LIVE seq K; pruned prefix is [0..base_seq); 0 = no prune
@@ -145,6 +145,15 @@ class SnapshotState(BaseModel):
     #                                   Same cross-a-prune invariant as account_issued, per membership key.
     membership_row: list = []         # [[org_id, username, role], ...] — the fields to REBUILD an active
     #                                   `Membership` from the seed (issued_at joins from membership_issued).
+    ownership_proof_state: list = []  # [[org_id, host, "active"|"revoked"], ...] — governor.asset_ownership_proof
+    #                                   LWW, keyed PER-(org_id, host). Keep revoked (Slice G0 schema v3).
+    ownership_proof_issued: list = [] # [[org_id, host, issued_at], ...] — PER-(org_id, host) active high-water.
+    #                                   Same cross-a-prune invariant as account_issued: MUST cross a prune or a
+    #                                   captured owner-signed `active` proof becomes replay-resurrectable, which
+    #                                   would resurrect a REVOKED/expired engagement authorization basis.
+    ownership_proof_row: list = []    # [[org_id, host, method, token_sha256, verified_at, expires_at], ...] — the
+    #                                   fields to REBUILD an active `OwnershipProof` (issued_at joins from
+    #                                   ownership_proof_issued; state="active"). expires_at is owner-signed.
     wallet_granted: list = []         # [[org_id, granted_total], ...] — Σ honored SaaS credit GRANTS per
     #                                   tenant (governor.credit_grant). balance = granted - debited is a
     #                                   LIFETIME running total, so (unlike the per-UTC-day budget, which keeps
@@ -221,6 +230,15 @@ class SnapshotState(BaseModel):
         return {(row[0], row[1]): row[2] for row in self.membership_issued}
     #   membership_row is a raw list-of-rows: `OrgRegistry._fold_memberships` rebuilds the Membership objects
     #   from it (joining issued_at from membership_issued_map), keyed PER-(org_id, username).
+
+    def ownership_proof_state_map(self) -> dict[tuple, str]:
+        return {(row[0], row[1]): row[2] for row in self.ownership_proof_state}
+
+    def ownership_proof_issued_map(self) -> dict[tuple, float]:
+        return {(row[0], row[1]): row[2] for row in self.ownership_proof_issued}
+    #   ownership_proof_row is a raw list-of-rows: `AssetOwnershipRegistry._fold_proofs` rebuilds the
+    #   OwnershipProof objects from it (joining issued_at from ownership_proof_issued_map), keyed
+    #   PER-(org_id, host), so a pruned proof survives and its anti-replay high-water is not reset.
 
     def wallet_granted_map(self) -> dict[Any, int]:
         return {row[0]: row[1] for row in self.wallet_granted}
@@ -398,6 +416,10 @@ def build(records: Iterable[SpineRecord], *, trusted_pubkey: Optional[str],
     # the account core above); the fold below carries them across a prune exactly as it does accounts.
     from ..governor.orgs import (ORG_SIGNAL as _ORG_SIGNAL, MEMBERSHIP_SIGNAL as _MEM_SIGNAL,
                                  _ORG_CORE, _MEMBERSHIP_CORE)
+    # asset-ownership proof signed-core imported from the live module (never restated — same drift guard as the
+    # org cores); the fold carries the per-(org_id, host) proof state + high-water across a prune like memberships
+    # so a captured owner-signed active proof cannot resurrect a revoked one after the first hard prune (Slice G0).
+    from ..governor.asset_ownership import PROOF_SIGNAL as _PROOF_SIGNAL, _PROOF_CORE
     # SaaS wallet signed-core tuples + the credits clamp imported from the live module (never restated — same
     # drift guard as the org cores above); the fold below carries the balance + anti-replay seen-set across a
     # prune exactly as it does accounts/orgs.
@@ -453,6 +475,10 @@ def build(records: Iterable[SpineRecord], *, trusted_pubkey: Optional[str],
     mem_state: dict[tuple, str] = dict(s.membership_state_map()) if s else {}
     mem_issued: dict[tuple, float] = dict(s.membership_issued_map()) if s else {}
     mem_row: dict[tuple, Any] = {(row[0], row[1]): row[2] for row in s.membership_row} if s else {}  # ->role
+    op_state: dict[tuple, str] = dict(s.ownership_proof_state_map()) if s else {}   # (org,host) -> state (LWW)
+    op_issued: dict[tuple, float] = dict(s.ownership_proof_issued_map()) if s else {}   # (org,host) -> high-water
+    op_row: dict[tuple, list] = {(r[0], r[1]): [r[2], r[3], r[4], r[5]]
+                                 for r in s.ownership_proof_row} if s else {}   # ->[method,sha,verified,expires]
     w_granted: dict[Any, int] = dict(s.wallet_granted_map()) if s else {}   # org_id -> Σ grant credits
     w_debited: dict[Any, int] = dict(s.wallet_debited_map()) if s else {}   # org_id -> Σ debit credits
     w_seen: set = set(s.wallet_seen_set()) if s else set()                  # consumed (org_id, entry_id) keys
@@ -617,6 +643,24 @@ def build(records: Iterable[SpineRecord], *, trusted_pubkey: Optional[str],
                         mem_issued[mkey] = at
                         mem_state[mkey] = "active"
                         mem_row[mkey] = p.get("role")
+        # --- governor.asset_ownership_proof LWW + PER-(org_id, host) high-water (mirrors the MEM fold EXACTLY,
+        #     so an active ownership proof whose only grant is pruned survives and its high-water is NOT reset —
+        #     the fix for the proof replay-resurrection flagged by the G0 red-pen). Keep revoked (safe dir). ---
+        if sig == _PROOF_SIGNAL:
+            oid = p.get("org_id")
+            host = p.get("host")
+            if isinstance(oid, str) and oid and isinstance(host, str) and host:
+                opkey = (oid, host)
+                pst = p.get("state")
+                if pst == "revoked":
+                    op_state[opkey] = "revoked"
+                elif pst == "active" and verify_signed(p, _PROOF_CORE, vpk):
+                    at = as_issued_at(p.get("issued_at"))
+                    if at > op_issued.get(opkey, NO_HIGHWATER):
+                        op_issued[opkey] = at
+                        op_state[opkey] = "active"
+                        op_row[opkey] = [p.get("method"), p.get("token_sha256"),
+                                         p.get("verified_at"), p.get("expires_at")]
         # --- SaaS credit wallet: ADDITIVE grant/debit ledger, idempotent per (org_id, entry_id) — mirrors
         #     WalletRegistry._fold EXACTLY (verify under the key valid at the seq; a record whose key is already
         #     in w_seen is ignored, the replay/double-count guard; credits clamped >= 0). Both signals share the
@@ -725,6 +769,9 @@ def build(records: Iterable[SpineRecord], *, trusted_pubkey: Optional[str],
         membership_state=[[k[0], k[1], v] for k, v in mem_state.items()],
         membership_issued=[[k[0], k[1], i] for k, i in mem_issued.items()],
         membership_row=[[k[0], k[1], r] for k, r in mem_row.items()],
+        ownership_proof_state=[[k[0], k[1], v] for k, v in op_state.items()],
+        ownership_proof_issued=[[k[0], k[1], i] for k, i in op_issued.items()],
+        ownership_proof_row=[[k[0], k[1], r[0], r[1], r[2], r[3]] for k, r in op_row.items()],
         wallet_granted=[[o, c] for o, c in w_granted.items()],
         wallet_debited=[[o, c] for o, c in w_debited.items()],
         wallet_seen=[[sg, o, e] for (sg, o, e) in w_seen],

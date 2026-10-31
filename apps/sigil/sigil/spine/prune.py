@@ -176,6 +176,15 @@ def check_prune_safe(store, K: int) -> list[Segment]:
     if stranded_mems:
         raise PruneUnsafe(f"K={K} would strand active membership(s) {stranded_mems}: their only owner-signed "
                           f"grant sits below K and would not be carried into the snapshot seed; lower K or resolve")
+    # (c, Slice G0 asset-ownership) the SAME floor for governor.asset_ownership_proof: an active ownership
+    # proof whose only owner-signed grant sits below K must be carried into the seed, or the prune drops it
+    # AND resets the per-(org,host) anti-replay high-water (re-opening the proof replay-resurrection that would
+    # resurrect a revoked engagement-authorization basis — the G0 red-pen forward-risk).
+    stranded_proofs = stranded_active_ownership_proofs(store, archived, K)
+    if stranded_proofs:
+        raise PruneUnsafe(f"K={K} would strand active ownership proof(s) {stranded_proofs}: their only "
+                          f"owner-signed grant sits below K and would not be carried into the snapshot seed "
+                          f"(resetting the per-(org,host) anti-replay high-water); lower K or resolve")
     # (c, SaaS wallet) the SAME referential floor for the per-tenant credit wallet (governor/wallet.py): a
     # prune must carry every below-K tenant's running balance AND the consumed-entry_id set into the seed, or
     # it would ZERO the balance (lose historical grants) AND drop the anti-replay seen-set (re-opening grant
@@ -386,6 +395,49 @@ def stranded_active_org_entities(store, archived: list[Segment], K: int) -> tupl
                     if m_seed_state.get((row[0], row[1])) == "active"}
     return (sorted(str(o) for o in (active_orgs - orgs_carried)),
             sorted(f"{k[1]}@{k[0]}" for k in (active_mems - mems_carried)))
+
+
+def stranded_active_ownership_proofs(store, archived: list[Segment], K: int) -> list[str]:
+    """§7(c, Slice G0) — the ACTIVE asset-ownership proofs (`governor/asset_ownership.py`) whose only
+    owner-signed grant sits in the pruned prefix [0..K) yet would NOT be carried into the snapshot seed: the
+    set a hard prune would silently vanish, resetting the per-(org_id, host) anti-replay high-water and
+    re-opening the LWW replay-resurrection the G0 red-pen flagged. EMPTY in the happy path —
+    `SnapshotState.build()` carries every VERIFIED-active proof. Mirrors `stranded_active_org_entities`.
+    Returns proof keys as ``host@org_id``. VERIFIED-active only (a forged/unsigned `active` grant is not
+    counted, so it can never block a prune). Read-only."""
+    from ..governor.asset_ownership import PROOF_SIGNAL, _PROOF_CORE
+    from ..governor import key_history as _kh
+    from ..governor.authn import NO_HIGHWATER, as_issued_at, verify_signed
+    from ..governor.identity import owner_pubkey
+    tp = owner_pubkey() or ""
+    resolver = _kh.key_resolver(store, current=tp)
+    below: list[SpineRecord] = []
+    for seg in archived:
+        below.extend(read_segment_records(store._layout.seg_path(seg)))
+    p_state: dict[tuple, str] = {}
+    p_issued: dict[tuple, float] = {}
+    for r in sorted(below, key=lambda r: r.seq):
+        p = r.payload
+        if not isinstance(p, dict) or p.get("signal") != PROOF_SIGNAL:
+            continue
+        oid, host, rst = p.get("org_id"), p.get("host"), p.get("state")
+        if not (isinstance(oid, str) and oid and isinstance(host, str) and host):
+            continue
+        key = (oid, host)
+        if rst == "revoked":
+            p_state[key] = "revoked"
+        elif rst == "active" and verify_signed(p, _PROOF_CORE, resolver.at(r.seq)):
+            at = as_issued_at(p.get("issued_at"))
+            if at > p_issued.get(key, NO_HIGHWATER):
+                p_issued[key], p_state[key] = at, "active"
+    active = {k for k, v in p_state.items() if v == "active"}
+    # the seed the prune will actually persist, round-tripped through the on-disk (JSON) form.
+    seed = SnapshotState.model_validate(
+        build(below, trusted_pubkey=tp, base_seq=K, snapshot_seq=-1, resolver=resolver).model_dump())
+    seed_state = seed.ownership_proof_state_map()
+    carried = {(row[0], row[1]) for row in seed.ownership_proof_row
+               if seed_state.get((row[0], row[1])) == "active"}
+    return sorted(f"{k[1]}@{k[0]}" for k in (active - carried))
 
 
 def stranded_active_wallets(store, archived: list[Segment], K: int) -> list[str]:
