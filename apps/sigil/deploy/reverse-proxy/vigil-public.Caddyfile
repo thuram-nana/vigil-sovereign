@@ -1,0 +1,46 @@
+# VIGIL PUBLIC SITE — Caddy reverse proxy for the keyless marketing/tools/trust/CVE site (automatic HTTPS)
+# ========================================================================================================
+# `sigil serve-public` serves the PUBLIC site (`pubui`) over loopback:
+#
+#     browser ─▶ Caddy (public TLS edge) ─▶ pubui  127.0.0.1:8735
+#                  landing · /vs compare · /tools + CVSS calculator · /trust · /support · /privacy ·
+#                  /cookies · /careers · /blog · /cve browser + read-only /api/cve
+#
+# The pubui listener is NOT public: it binds loopback (or a private/tunnel IP) and FAILS CLOSED on a public
+# bind. This Caddy site is the ONLY thing on a public port — it terminates TLS and forwards over loopback.
+#
+# This is a SEPARATE ORIGIN from the operator cockpit (vigil.Caddyfile → the `vigil up` proxy on :8770) and
+# the customer app (custui on :8734). The public site holds NO key and sets NO cookie, so there is nothing
+# here to protect with a Host allowlist; keeping it on its own hostname is simply the correct layout:
+#
+#     vigil.example.com         → THIS file         → pubui   127.0.0.1:8735  (public: everyone can see)
+#     console.vigil.example.com → vigil.Caddyfile    → vigil up 127.0.0.1:8770 (operator cockpit; keep private)
+#     app.vigil.example.com     → the customer edge   → custui  127.0.0.1:8734 (tenant app; its own vhost — J2)
+#
+# Start it first (optionally populate the CVE catalog with `sigil cve ingest` — the one standing outbound
+# path, never at page-request time), then point DNS A/AAAA for your public host at THIS machine:
+#     sigil serve-public --host 127.0.0.1 --port 8735
+#
+# pubui already sets its own strict 'self' CSP + nosniff + no-referrer + DENY-framing headers and a
+# Cache-Control on every response; this edge only adds HSTS. There are no Server-Sent Events on this plane
+# (static + read-only JSON, GET/HEAD only), so no flush_interval override is needed.
+
+vigil.example.com, www.vigil.example.com {
+	encode zstd gzip
+
+	# Canonicalize www → apex so the marketing site has one public URL.
+	@www host www.vigil.example.com
+	redir @www https://vigil.example.com{uri} permanent
+
+	reverse_proxy 127.0.0.1:8735
+
+	# Belt-and-braces: only serve the two hosts this site is for.
+	@badhost not host vigil.example.com www.vigil.example.com
+	respond @badhost 421
+
+	header {
+		# pubui sets its own CSP/nosniff/referrer/framing headers; add HSTS at the edge and drop the Server banner.
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		-Server
+	}
+}
