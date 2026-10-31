@@ -455,8 +455,13 @@ def test_child_env_never_leaks_owner_signing_key(monkeypatch):
     # ambient env `_child_env` starts from, so the key is hard-excluded at the source.
     monkeypatch.setenv("VIGIL_DESTRUCTION_OWNER_KEY", "ed25519-owner-secret")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-legit-offense-key")
+    # E1: the edge→provisioner hop key is ALSO hard-excluded — it reaches the cockpit + the customer edge
+    # only via an explicit extra_env under --with-saas, never ambient inheritance, and NEVER the offense
+    # children (a keyless offense process must not hold a sovereign provisioning secret).
+    monkeypatch.setenv("VIGIL_PROVISION_HOP_KEY", "edge-provision-hop-secret")
     env = uiproxy._child_env()
     assert "VIGIL_DESTRUCTION_OWNER_KEY" not in env
+    assert "VIGIL_PROVISION_HOP_KEY" not in env
     assert env.get("ANTHROPIC_API_KEY") == "sk-legit-offense-key"   # a legitimate key is not over-stripped
 
 
@@ -620,6 +625,39 @@ def test_spawn_injects_extra_env(tmp_path, monkeypatch):
     out = log.read_text(encoding="utf-8")
     assert "M=claude-opus-5" in out            # injected var reached the child
     assert "K=none" in out                     # a var we did NOT inject is absent (no accidental leak)
+
+
+def test_spawn_capture_injects_extra_env(tmp_path, monkeypatch):
+    # E1: the cockpit receives the per-run VIGIL_PROVISION_HOP_KEY via _spawn_capture's extra_env (never
+    # ambient inheritance — it is hard-excluded). Prove the injected var reaches the child and an
+    # un-injected one does not, mirroring _spawn's contract.
+    monkeypatch.delenv("VIGIL_PROVISION_HOP_KEY", raising=False)   # must come from extra_env, not ambient
+    log = tmp_path / "cockpit.log"
+    argv = [_sys.executable, "-c",
+            "import os;print('HK='+os.environ.get('VIGIL_PROVISION_HOP_KEY','none'))"]
+    proc, _q = uiproxy._spawn_capture(argv, log, extra_env={"VIGIL_PROVISION_HOP_KEY": "per-run-hop"})
+    proc.wait(timeout=10)
+    out = log.read_text(encoding="utf-8")
+    assert "HK=per-run-hop" in out
+
+
+def test_saas_child_specs_wire_the_customer_edge_and_public_site(tmp_path):
+    specs = uiproxy._saas_child_specs(sigil_bin="/venv/bin/sigil", authority="app.example.com",
+                                      origin="https://app.example.com", provision_hop_key="HOPKEY",
+                                      logs=tmp_path)
+    by_name = {name: (argv, env) for name, argv, _log, env in specs}
+    # the customer edge: serve-customer, loopback :8734, the proxy Host/Origin on its allowlist, hop key in env
+    cargv, cenv = by_name["customer-edge"]
+    assert cargv[:4] == ["/venv/bin/sigil", "serve-customer", "--host", "127.0.0.1"]
+    assert "--port" in cargv and "8734" in cargv
+    assert cargv[cargv.index("--allow-host") + 1] == "app.example.com"
+    assert cargv[cargv.index("--allow-origin") + 1] == "https://app.example.com"
+    assert cenv == {"VIGIL_PROVISION_HOP_KEY": "HOPKEY"}        # the hop key rides env, never argv
+    assert "HOPKEY" not in " ".join(cargv)                      # never on the (world-readable) command line
+    # the public site: serve-public, loopback :8735, NO allowlist + NO env (keyless + cookieless)
+    pargv, penv = by_name["public-site"]
+    assert pargv[:4] == ["/venv/bin/sigil", "serve-public", "--host", "127.0.0.1"]
+    assert "8735" in pargv and "--allow-host" not in pargv and penv == {}
 
 
 def test_console_vigil_bin_is_the_offense_sibling(tmp_path):

@@ -3317,6 +3317,7 @@ def _cmd_up(args: argparse.Namespace) -> int:
                   with_gesture=getattr(args, "with_gesture", False),
                   with_telemetry=getattr(args, "with_telemetry", False),
                   telemetry_interval=getattr(args, "telemetry_interval", 15),
+                  with_saas=getattr(args, "with_saas", False),
                   proxy_only=getattr(args, "proxy_only", False),
                   sovereign_addr=getattr(args, "sovereign_addr", ""),
                   offense_console_addr=getattr(args, "offense_console_addr", ""),
@@ -5442,6 +5443,12 @@ def build_parser() -> argparse.ArgumentParser:
                          "OFF by default. Read-only, loopback, no egress — a pure projection of the spine.")
     pu.add_argument("--telemetry-interval", type=int, default=15,
                     help="with --with-telemetry: seconds between spine snapshots (default 15)")
+    pu.add_argument("--with-saas", action="store_true",
+                    help="also run the SaaS planes (E1): the keyless customer edge (custui, the /customer "
+                         "mount's backend) + the keyless public site (pubui, :8735). OFF by default. Mints a "
+                         "per-run provisioning hop key handed ONLY to the cockpit + the edge (never the "
+                         "offense children); binds both loopback. Front the public site on its own public "
+                         "vhost (deploy/reverse-proxy/vigil-public.*).")
     pu.add_argument("--services", action="store_true",
                     help="also bring up the docker egress-gateway topology (create the networks + gateway "
                          "container if none exist; idempotent). The EGRESS-GATE leg fails CLOSED: if it does "

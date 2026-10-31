@@ -83,6 +83,7 @@ SOVEREIGN_PORT = 8733     # sigil serve      (the sovereign cockpit)
 CONSOLE_PORT = 8787       # crucible console (offense read + SSE plane)
 API_PORT = 8799           # crucible api     (offense gated /api/v1 action plane)
 CUSTOMER_PORT = 8734      # sigil serve-customer (the keyless customer edge, custui; E1)
+PUBLIC_PORT = 8735        # sigil serve-public   (the keyless public marketing/tools/CVE site, pubui)
 
 # federated mount bases written into index.html (what app.js prepends to every fetch)
 SOVEREIGN_BASE = "/sovereign"
@@ -2615,7 +2616,12 @@ _PIDS_NAME = "pids"
 # parent `vigil up` shell would otherwise reach offense console/API/Strix children and let one self-authorize a
 # destructive PR. Strip it here at the source. The owner key is only ever used by the operator's OWN shell
 # for `vigil authorize-destruction`, never by a spawned child.
-_CHILD_ENV_HARD_EXCLUDE = frozenset({"VIGIL_DESTRUCTION_OWNER_KEY"})
+# Secrets that must NEVER be inherited by a spawned child from the ambient `vigil up` env — they reach a
+# child ONLY via an explicit, intentional extra_env. The owner signing key (A4). And the edge→provisioner
+# hop key (E1): a per-run provisioning secret that reaches the sovereign cockpit + the customer edge via
+# extra_env under `--with-saas`, and MUST NOT leak into the keyless OFFENSE children (least-privilege: the
+# offense plane is the attack surface and has no business holding a sovereign provisioning secret).
+_CHILD_ENV_HARD_EXCLUDE = frozenset({"VIGIL_DESTRUCTION_OWNER_KEY", "VIGIL_PROVISION_HOP_KEY"})
 
 
 def _child_env() -> dict:
@@ -2949,12 +2955,18 @@ def _console_vigil_bin(crucible_bin: Path) -> "Optional[str]":
     return str(cand) if cand.exists() else None
 
 
-def _spawn_capture(argv: list[str], log_path: Path) -> tuple[subprocess.Popen, "Queue[str]"]:
+def _spawn_capture(argv: list[str], log_path: Path,
+                   *, extra_env: Optional[dict] = None) -> tuple[subprocess.Popen, "Queue[str]"]:
     """Spawn a child whose stdout we both TEE to a SIZE-BOUNDED, rotating log file (W6-5) and scan (for the
     cockpit token). Returns the process and a queue of its stdout lines. The rotating capture is shared
-    with ``_spawn`` via ``_pump_child_output``; ``on_line`` tees each line onto the token queue."""
+    with ``_spawn`` via ``_pump_child_output``; ``on_line`` tees each line onto the token queue.
+    ``extra_env`` augments the clean child env exactly as in ``_spawn`` (E1: the cockpit receives the
+    per-run provisioning hop key this way under ``--with-saas``, never via ambient inheritance)."""
+    env = _child_env()
+    if extra_env:
+        env.update(extra_env)
     proc = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                            env=_child_env(), text=True, bufsize=1, errors="replace")
+                            env=env, text=True, bufsize=1, errors="replace")
     q: "Queue[str]" = Queue()
     _pump_child_output(proc, log_path, on_line=q.put)
     return proc, q
@@ -3400,11 +3412,37 @@ def _run_up_proxy_only(*, host: str, port: int, domain: str, base_dir: str, no_b
     return 0
 
 
+def _saas_child_specs(*, sigil_bin, authority: str, origin: str, provision_hop_key: str,
+                      logs: Path) -> "list[tuple[str, list[str], Path, dict]]":
+    """The opt-in SaaS planes `vigil up --with-saas` also spawns, as (name, argv, log_path, extra_env)
+    tuples — pure, so the wiring is unit-testable without standing up the whole run_up path:
+
+      * customer-edge (custui, :8734) — the backend of the proxy's `/customer` mount. Keyless: it holds NO
+        owner key. It receives the per-run VIGIL_PROVISION_HOP_KEY in its ENV (never argv/log) so it can
+        reach the sovereign provisioner, plus the proxy's Host/Origin for its anti-DNS-rebind allowlist
+        (it sets a session cookie, so it gates Origin/Host like the operator planes do).
+      * public-site (pubui, :8735) — the keyless, cookieless marketing/tools/trust/CVE site. No env and no
+        allowlist: it sets no cookie and holds no key, so there is no session to protect with one.
+
+    The cockpit receives the SAME hop key separately (via its own extra_env) so the provisioner routes
+    verify; the offense children never receive it (`_CHILD_ENV_HARD_EXCLUDE` + no extra_env)."""
+    return [
+        ("customer-edge",
+         [str(sigil_bin), "serve-customer", "--host", "127.0.0.1", "--port", str(CUSTOMER_PORT),
+          "--allow-host", authority, "--allow-origin", origin],
+         logs / "customer-edge.log", {"VIGIL_PROVISION_HOP_KEY": provision_hop_key}),
+        ("public-site",
+         [str(sigil_bin), "serve-public", "--host", "127.0.0.1", "--port", str(PUBLIC_PORT)],
+         logs / "public-site.log", {}),
+    ]
+
+
 def run_up(*, host: str, port: int, domain: str, base_dir: str, no_browser: bool,
            insecure_no_api_key: bool = False, src_dir: Optional[Path] = None,
            with_feed: bool = False, feed_slug: str = "", feed_interval: int = 3600,
            with_voice: bool = False, with_gesture: bool = False,
            with_telemetry: bool = False, telemetry_interval: int = 15,
+           with_saas: bool = False,
            proxy_only: bool = False, sovereign_addr: str = "",
            offense_console_addr: str = "", offense_api_addr: str = "") -> int:
     """Bring the whole unified UI up: refuse a public bind, spawn the three backends in their own
@@ -3468,6 +3506,9 @@ def run_up(*, host: str, port: int, domain: str, base_dir: str, no_browser: bool
                ("127.0.0.1", SOVEREIGN_PORT, "the sovereign cockpit"),
                ("127.0.0.1", CONSOLE_PORT, "the offense console"),
                ("127.0.0.1", API_PORT, "the offense api")]
+    if with_saas:   # E1 — the opt-in customer edge (:8734) + public site (:8735) need free ports too
+        _wanted += [("127.0.0.1", CUSTOMER_PORT, "the customer edge"),
+                    ("127.0.0.1", PUBLIC_PORT, "the public site")]
     _busy = [(h, p, what) for h, p, what in _wanted if not _port_free(h, p)]
     if _busy:
         for h, p, what in _busy:
@@ -3496,10 +3537,18 @@ def run_up(*, host: str, port: int, domain: str, base_dir: str, no_browser: bool
     def _track(name: str, argv: list[str], log_path: Path, *, extra_env: Optional[dict] = None) -> bool:
         return _spawn_tracked(procs, name, argv, log_path, _cleanup, extra_env=extra_env)
 
+    # E1 — mint the edge→provisioner hop secret ONCE per `vigil up --with-saas`, BEFORE the cockpit spawn
+    # so the cockpit's /api/provision/* routes verify under it. Handed ONLY to the cockpit (here) and the
+    # customer edge (its spawn) via env — never argv/log, never to the offense children. Empty without
+    # --with-saas (the provisioner routes then fail closed: no SaaS, no customer provisioning).
+    provision_hop_key = secrets.token_urlsafe(32) if with_saas else ""
+
     # 1) cockpit — capture its printed session token.
     cockpit_argv = [str(sigil_bin), "serve", "--host", "127.0.0.1", "--port", str(SOVEREIGN_PORT),
                     "--allow-host", authority, "--allow-origin", origin]
-    cockpit, cockpit_q = _spawn_capture(cockpit_argv, logs / "sovereign-cockpit.log")
+    cockpit, cockpit_q = _spawn_capture(
+        cockpit_argv, logs / "sovereign-cockpit.log",
+        extra_env=({"VIGIL_PROVISION_HOP_KEY": provision_hop_key} if with_saas else None))
     procs.append(("sovereign-cockpit", cockpit))
     token = _await_token(cockpit_q, cockpit)
     if not token:
@@ -3616,6 +3665,22 @@ def run_up(*, host: str, port: int, domain: str, base_dir: str, no_browser: bool
             print(f"vigil up: WARNING — {_pname} (127.0.0.1:{_pport}) is not up yet; the offense plane may "
                   f"be starting slowly or failed to bind (see {logs}). The UI will still come up, but "
                   "/offense/* may return 502 until it is ready.", file=sys.stderr)
+
+    # 3a') OPTIONAL SaaS planes (E1) — the keyless customer edge (the backend of the proxy's /customer
+    # mount) + the keyless public site. OFF by default; `--with-saas` opts in. The customer edge receives
+    # the per-run provisioning hop key (env only) + the proxy Host/Origin for its anti-rebind allowlist;
+    # the public site is fully keyless. Fire-and-forget + tracked (reaped by Ctrl-C / `vigil down`), the
+    # same discipline as the feed/telemetry sidecars. A backend that fails to spawn cleans up + aborts.
+    if with_saas:
+        for _name, _argv, _log, _extra in _saas_child_specs(
+                sigil_bin=sigil_bin, authority=authority, origin=origin,
+                provision_hop_key=provision_hop_key, logs=logs):
+            if _track(_name, _argv, _log, extra_env=_extra):
+                return 1
+        for _pname, _pport in (("customer edge", CUSTOMER_PORT), ("public site", PUBLIC_PORT)):
+            if not _wait_listening("127.0.0.1", _pport, time.monotonic() + 6.0):
+                print(f"vigil up: WARNING — the {_pname} (127.0.0.1:{_pport}) is not up yet (see {logs}). "
+                      "The UI still comes up; /customer may 502 until the edge binds.", file=sys.stderr)
 
     # 3b) OPTIONAL recurring vuln-intel feed sidecar. OFF by default — a recurring LIVE egress pull is a
     # conscious act, so it needs --with-feed AND an explicit --feed-slug (the persisted store the Knowledge
