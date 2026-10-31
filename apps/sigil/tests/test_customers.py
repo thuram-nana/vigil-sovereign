@@ -24,7 +24,7 @@ from sigil.governor.customers import CustomerRegistry
 from sigil.reuse import generate_keypair
 from sigil.spine import prune
 from sigil.spine.manifest import read_manifest
-from sigil.spine.snapshot import SnapshotState, build
+from sigil.spine.snapshot import _MAX_SNAPSHOT_SCHEMA, SnapshotState, build
 from sigil.spine.store import SpineStore
 
 OWNER = generate_keypair()
@@ -241,5 +241,7 @@ def test_v1_snapshot_without_customer_rows_still_loads():
     st = SnapshotState.from_folded({"schema_version": 1})
     assert st.schema_version == 1
     assert st.customer_state_map() == {} and st.customer_issued_map() == {} and st.customer_cred == []
-    # and a snapshot THIS build emits is stamped v2 (it contains the customer keys)
-    assert SnapshotState.empty().schema_version == 2
+    # and a snapshot THIS build emits is stamped at the build's CURRENT max schema (it contains the customer
+    # keys, plus whatever later slices fold in — G0 bumped to v3, etc.). Track the constant so a schema bump
+    # keeps the "the build emits its own max schema" invariant without this assertion going stale.
+    assert SnapshotState.empty().schema_version == _MAX_SNAPSHOT_SCHEMA

@@ -210,6 +210,14 @@ def check_prune_safe(store, K: int) -> list[Segment]:
         raise PruneUnsafe(f"K={K} would strand plan-credit tranche(s) for tenant(s) {stranded_plan}: a below-K "
                           f"tranche balance or consumed entry_id would not be carried into the snapshot seed "
                           f"(zeroing an unexpired tranche or re-opening plan-grant replay); lower K or resolve")
+    # (c, SaaS invoices) the SAME floor for governor.invoice billing history (Slice H): a prune must carry every
+    # below-K invoice line into the seed, or it would LOSE historical invoices AND drop the consumed invoice_id
+    # set (re-opening invoice replay — a pruned invoice re-appended above K would duplicate the line). Fail-closed.
+    stranded_invs = stranded_invoices(store, archived, K)
+    if stranded_invs:
+        raise PruneUnsafe(f"K={K} would strand invoice(s) for tenant(s) {stranded_invs}: a below-K billing-history "
+                          f"line would not be carried into the snapshot seed (losing the invoice or re-opening "
+                          f"invoice replay); lower K or resolve")
     # (e) owner-key succession referential floor (W9-1 / issue #434): a rotation record that ESTABLISHES a key
     # whose seq-window still covers a LIVE record (>= K) — including, always, the current key's open window —
     # must NOT be pruned. Without the whole genesis->current chain present in the live window, post-prune
@@ -556,6 +564,46 @@ def stranded_active_plan_tranches(store, archived: list[Segment], K: int) -> lis
     for (_sig, o, _e) in (seen - ss):
         stranded.add(str(o))                  # a consumed entry_id the seed drops (anti-replay durability)
     return sorted(stranded)
+
+
+def stranded_invoices(store, archived: list[Segment], K: int) -> list[str]:
+    """§7(c, SaaS invoices) — the tenants (`governor/invoices.py`) whose below-K billing-history line(s) would
+    NOT be carried into the snapshot seed: the set a hard prune would silently LOSE (the invoice gone from the
+    history) and/or whose consumed `invoice_id`s it would drop (re-opening invoice replay — a pruned invoice
+    re-appended above K would duplicate the line). EMPTY in the happy path — `SnapshotState.build()` carries
+    every below-K invoice row. Fail-closed tripwire mirroring `stranded_active_wallets` (append-only rows rather
+    than running totals); verified under the owner key valid at each seq; the seed round-trips through
+    `model_dump`/`model_validate` so a seed-emission regression is caught. Read-only."""
+    from ..governor.invoices import INVOICE_SIGNAL, _INVOICE_CORE
+    from ..governor import key_history as _kh
+    from ..governor.authn import verify_signed
+    from ..governor.identity import owner_pubkey
+    tp = owner_pubkey() or ""
+    resolver = _kh.key_resolver(store, current=tp)
+    below: list[SpineRecord] = []
+    for seg in archived:
+        below.extend(read_segment_records(store._layout.seg_path(seg)))
+    # the (org_id, invoice_id) history keys a genesis fold of [0..K) yields — the lines that MUST survive the prune.
+    keys: dict[tuple, str] = {}               # (org_id, invoice_id) -> org_id, first mint wins (mirror the fold)
+    for r in sorted(below, key=lambda r: r.seq):
+        p = r.payload
+        if not isinstance(p, dict) or p.get("signal") != INVOICE_SIGNAL:
+            continue
+        oid, iid = p.get("org_id"), p.get("invoice_id")
+        if not (isinstance(oid, str) and oid and isinstance(iid, str) and iid):
+            continue
+        key = (oid, iid)
+        if key in keys:
+            continue
+        if not verify_signed(p, _INVOICE_CORE, resolver.at(r.seq)):
+            continue
+        keys[key] = oid
+    seed = SnapshotState.model_validate(
+        build(below, trusted_pubkey=tp, base_seq=K, snapshot_seq=-1, resolver=resolver).model_dump())
+    seed_keys = {(row[0], row[1]) for row in seed.invoice_row
+                 if isinstance(row, (list, tuple)) and len(row) >= 2}
+    stranded: set = {oid for key, oid in keys.items() if key not in seed_keys}   # a line the seed fails to carry
+    return sorted(str(o) for o in stranded)
 
 
 def stranded_active_subscriptions(store, archived: list[Segment], K: int) -> list[str]:

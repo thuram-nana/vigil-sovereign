@@ -51,10 +51,14 @@ from ..reuse import SignedChainHead
 from .models import SpineRecord
 from .schema_guard import refuse_newer
 
-_MAX_SNAPSHOT_SCHEMA = 3   # refuse-newer gate (W5-3): a snapshot schema above this is "upgrade sigil".
-#                            v2 (Slice E1) ADDED the governor.customer sub-state (customer_state/issued/cred).
-#                            A pre-E1 build (max v1) refuses a v2 snapshot cleanly; this build still reads a v1
-#                            snapshot (the customer_* fields default to empty — additive-with-defaults, C1/C3).
+_MAX_SNAPSHOT_SCHEMA = 4   # refuse-newer gate (W5-3): a snapshot schema above this is "upgrade sigil".
+#                            v2 (Slice E1) ADDED governor.customer (customer_state/issued/cred); v3 (Slice G0)
+#                            ADDED asset_ownership_proof (ownership_proof_state/issued/row); v4 (Slice H) ADDED
+#                            the governor.invoice billing-history sub-state (invoice_row). Every bump is
+#                            ADDITIVE-WITH-DEFAULTS: a pre-bump build refuses a newer snapshot cleanly via the
+#                            refuse-newer gate, and this build still reads any older snapshot (the newer fields
+#                            default to empty — e.g. a v1 snapshot loads with customer_*/ownership_*/invoice_*
+#                            all empty).
 
 
 class SnapshotState(BaseModel):
@@ -62,9 +66,9 @@ class SnapshotState(BaseModel):
     round-trip verbatim); runtime accessors reconstruct the sets / tuple-keyed dicts. Non-secret."""
     model_config = ConfigDict(extra="forbid")
 
-    schema_version: int = 3   # W5-3: 1->2 Slice E1 (governor.customer); 2->3 Slice G0 (asset_ownership_proof). Every
-    #                           snapshot this build emits carries the customer_* keys, so it is a v2 artifact;
-    #                           a pre-E1 build (max v1) refuses it cleanly via the refuse-newer gate.
+    schema_version: int = 4   # W5-3: 1->2 Slice E1 (governor.customer); 2->3 Slice G0 (asset_ownership_proof);
+    #                           3->4 Slice H (governor.invoice billing history). Every snapshot this build emits
+    #                           carries the v4 keys; a pre-bump build refuses it cleanly via the refuse-newer gate.
     base_seq: int = 0                 # first LIVE seq K; pruned prefix is [0..base_seq); 0 = no prune
     snapshot_seq: int = -1            # the committed snapshot record's seq; -1 = no prune (identity)
     trusted_pubkey: str = ""          # owner pubkey the pubkey-dependent folds were computed under
@@ -171,6 +175,12 @@ class SnapshotState(BaseModel):
     subscription_row: list = []       # [[org_id, plan_id, period_start, period_end, allotment], ...] — the plan
     #                                   fields to REBUILD the Subscription from the seed (status joins from
     #                                   subscription_state).
+    invoice_row: list = []            # [[org_id, invoice_id, kind, price_id, amount_minor, currency, credits,
+    #                                   period_start, period_end, issued_at], ...] — governor.invoice billing
+    #                                   HISTORY (Slice H schema v4). ADDITIVE append-only (NOT LWW), idempotent
+    #                                   per (org_id, invoice_id). MUST cross a prune or the first hard prune would
+    #                                   LOSE historical invoices AND drop the consumed invoice_id set (re-opening
+    #                                   invoice replay); `InvoiceRegistry._fold` rebuilds the Invoice from it.
     plan_granted: list = []           # [[org_id, period_end, granted_total], ...] — Σ honored PLAN-credit GRANTS
     #                                   per (tenant, billing period) (governor.plan_grant). A per-period tranche
     #                                   remainder (granted - debited) is spendable only until period_end, so (like
@@ -436,6 +446,10 @@ def build(records: Iterable[SpineRecord], *, trusted_pubkey: Optional[str],
     from ..governor.subscription import (SUBSCRIPTION_SIGNAL as _SUB_SIGNAL, _SUB_CORE as _SUBS_CORE,
                                          STATUS_ACTIVE as _SUB_ACTIVE, _DOWN_STATES as _SUB_DOWN,
                                          _as_allotment as _sub_as_allotment)
+    # invoice billing-history signed-core imported from the live module (never restated — same drift guard); the
+    # fold below carries the ADDITIVE per-(org, invoice_id) history rows across a prune like the wallet seen-set.
+    from ..governor.invoices import (INVOICE_SIGNAL as _INV_SIGNAL, _INVOICE_CORE as _INV_CORE,
+                                     _as_nonneg_int as _inv_as_nonneg)
 
     # The order-DEPENDENT folds (the kill-switch latch, every last-write-wins map) require ascending seq.
     # iter_records already yields ascending seq, but sort defensively so build() is correct for ANY caller /
@@ -488,6 +502,10 @@ def build(records: Iterable[SpineRecord], *, trusted_pubkey: Optional[str],
     sub_state: dict[Any, str] = dict(s.subscription_state_map()) if s else {}   # org_id -> status (LWW)
     sub_issued: dict[Any, float] = dict(s.subscription_issued_map()) if s else {}   # org_id -> active high-water
     sub_row: dict[Any, list] = {r[0]: [r[1], r[2], r[3], r[4]] for r in s.subscription_row} if s else {}
+    # invoice history: (org_id, invoice_id) -> [kind, price_id, amount_minor, currency, credits, p_start, p_end,
+    # issued_at]. ADDITIVE append-only (NOT LWW); the key presence IS the idempotency seen-set (mirror wallet).
+    inv_rows: dict[tuple, list] = ({(r[0], r[1]): list(r[2:10]) for r in s.invoice_row
+                                    if isinstance(r, (list, tuple)) and len(r) >= 10} if s else {})
     arm: set = set(s.arm_set()) if s else set()
     dedup: dict[tuple[Optional[str], Optional[str]], int] = dict(s.approval_dedup_map()) if s else {}
     warden: dict[str, tuple[int, str, int]] = ({k: (v[0], v[1], v[2]) for k, v in s.warden_best.items()}
@@ -715,6 +733,21 @@ def build(records: Iterable[SpineRecord], *, trusted_pubkey: Optional[str],
                                          float(as_issued_at(p.get("period_start"))),
                                          float(as_issued_at(p.get("period_end"))),
                                          _sub_as_allotment(p.get("allotment"))]
+        # --- governor.invoice: ADDITIVE append-only billing history, idempotent per (org_id, invoice_id) —
+        #     mirrors InvoiceRegistry._fold EXACTLY (first mint of an invoice_id wins; verify under the key valid
+        #     at the seq). Carried across a prune so a pruned invoice line is not lost and cannot be replayed. ---
+        if sig == _INV_SIGNAL:
+            ioid = p.get("org_id")
+            iid = p.get("invoice_id")
+            if isinstance(ioid, str) and ioid and isinstance(iid, str) and iid:
+                ikey = (ioid, iid)
+                if ikey not in inv_rows and verify_signed(p, _INV_CORE, vpk):
+                    inv_rows[ikey] = [str(p.get("kind") or ""), str(p.get("price_id") or ""),
+                                      _inv_as_nonneg(p.get("amount_minor")), str(p.get("currency") or ""),
+                                      _inv_as_nonneg(p.get("credits")),
+                                      float(as_issued_at(p.get("period_start"))),
+                                      float(as_issued_at(p.get("period_end"))),
+                                      float(as_issued_at(p.get("issued_at")))]
         # --- gesture device-arm replay ledger (set-union) ---
         if sig == "gesture.session_armed" and p.get("armed_by") == "device":
             arm.add((p.get("device_pubkey"), p.get("nonce")))
@@ -781,6 +814,7 @@ def build(records: Iterable[SpineRecord], *, trusted_pubkey: Optional[str],
         subscription_state=[[o, v] for o, v in sub_state.items()],
         subscription_issued=[[o, i] for o, i in sub_issued.items()],
         subscription_row=[[o, r[0], r[1], r[2], r[3]] for o, r in sub_row.items()],
+        invoice_row=[[k[0], k[1], *r] for k, r in inv_rows.items()],
         consumed_arm_nonces=[[d, n] for (d, n) in arm],
         device_approval_dedup=[[pk, sg, seq] for (pk, sg), seq in dedup.items()],
         warden_best={k: [c, h, s] for k, (c, h, s) in warden.items()},
