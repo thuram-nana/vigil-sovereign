@@ -145,10 +145,16 @@ def well_known_url(host: str) -> str:
 
 def _marker_matches(token: str, observed_value: str) -> bool:
     """Constant-time comparison of one observed value (trimmed) against the expected marker. ``compare_digest``
-    is defense-in-depth (the token is high-entropy and public once published); it also tolerates arbitrary
-    observed bytes without a timing side channel."""
-    expected = expected_marker(token)
-    return hmac.compare_digest(str(observed_value or "").strip(), expected)
+    is defense-in-depth (the token is high-entropy and public once published).
+
+    The comparison is over UTF-8 BYTES, not str: ``hmac.compare_digest`` RAISES ``TypeError`` on a non-ASCII
+    ``str``, and the observed value is CUSTOMER-CONTROLLED (a BOM, an accented char, or an invalid-UTF-8
+    ``U+FFFD`` in the published file), so a str comparison would break ``observation_proves``'s fail-closed
+    "never raises" contract and surface as a 500. On bytes it never raises on content and stays constant-time;
+    a non-ASCII body simply does not match the marker (a clean fail-closed refusal, not a crash)."""
+    expected = expected_marker(token).encode("utf-8")
+    observed = str(observed_value or "").strip().encode("utf-8")
+    return hmac.compare_digest(observed, expected)
 
 
 def observation_proves(method: str, token: str, observed: "Union[str, Iterable[str]]") -> bool:

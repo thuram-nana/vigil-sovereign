@@ -480,7 +480,6 @@ def add_customer_target(
     *,
     org_id: str,
     store: Any,
-    slug: Optional[str] = None,
     duration_hours: Any = _DEFAULT_DURATION_HOURS,
     note: str = "",
     now: Optional[Any] = None,
@@ -556,9 +555,7 @@ def add_customer_target(
                                       f"asset (DNS-TXT / .well-known) before an assessment of it can be "
                                       f"authorized — ownership is separate from billing/membership"}
 
-    s = _customer_slug(oid, h) if not slug else _slug_for(slug, None)
-    if not s or all(c == "." for c in s):
-        return {"ok": False, "error": "could not derive a path-safe slug"}
+    s = _customer_slug(oid, h)   # ALWAYS the tenant-namespaced cust_ slug (never an operator-slug collision)
 
     doc = EngagementAuthority(
         engagement_slug=s,

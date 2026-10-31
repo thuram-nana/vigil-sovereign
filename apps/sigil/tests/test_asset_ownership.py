@@ -275,6 +275,30 @@ def test_ttl_must_be_positive():
                               observed=_dns(reg.challenge("acme", "apme.cm").marker), now=1.0, ttl_seconds=0.0)
 
 
+# --- non-ASCII observations fail CLOSED, never raise (red-pen fold) ---------------------------------
+
+@pytest.mark.parametrize("body", ["﻿x", "café", "�", "\U0001f600"])
+def test_non_ascii_well_known_body_never_raises(body):
+    # observation_proves is contractually fail-closed: a customer-controlled non-ASCII body (BOM / accented /
+    # invalid-UTF-8 U+FFFD / emoji) returns False, NEVER a TypeError — the comparison is over bytes, not str.
+    assert observation_proves(METHOD_WELL_KNOWN, "tok", body) is False
+
+
+def test_dns_non_ascii_sibling_does_not_break_match():
+    tok = "tok"; marker = expected_marker(tok)
+    assert observation_proves(METHOD_DNS_TXT, tok, ["café", marker]) is True   # the good value still matches
+    assert observation_proves(METHOD_DNS_TXT, tok, ["café", "�"]) is False
+
+
+def test_bom_prefixed_marker_is_clean_refusal_not_a_crash():
+    s = _store(); reg = _reg(s)
+    ch = reg.issue_challenge("acme", "apme.cm", issued_at=_issue())
+    with pytest.raises(ValueError):            # a clean ValueError (mappable to a 4xx), NOT a TypeError → 500
+        reg.verify_and_record("acme", "apme.cm", method=METHOD_WELL_KNOWN,
+                              observed="﻿" + ch.marker, now=1000.0)
+    assert reg.proof("acme", "apme.cm") is None   # fail-closed: nothing recorded
+
+
 # --- FATAL-2 + lockstep -----------------------------------------------------------------------------
 
 def test_no_offense_imported():

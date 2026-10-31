@@ -81,3 +81,15 @@ def test_fetch_reapplies_host_floor(bad):
     f = WellKnownFetcher(resolver=_res("1.1.1.1"))
     with pytest.raises(OwnershipFetchError):
         f.fetch(METHOD_WELL_KNOWN, bad)
+
+
+def test_total_deadline_caps_per_op_and_fails_closed_when_spent():
+    """The absolute wall-clock budget caps each per-op socket timeout, and refuses once spent (anti slow-drip)."""
+    clock = [0.0]
+    f = WellKnownFetcher(timeout=5.0, total_timeout=8.0, monotonic=lambda: clock[0])
+    assert f._op_timeout(0.0) == 5.0        # at start: full per-op budget (min(5, 8))
+    clock[0] = 6.0
+    assert f._op_timeout(0.0) == 2.0        # 6s of an 8s budget elapsed → 2s remaining caps the per-op 5s
+    clock[0] = 9.0
+    with pytest.raises(OwnershipFetchError):
+        f._op_timeout(0.0)                  # budget exhausted → fail-closed, no further I/O

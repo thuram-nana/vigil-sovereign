@@ -29,6 +29,7 @@ import http.client
 import ipaddress
 import socket
 import ssl
+import time
 from typing import Any, Callable
 
 from ..reuse import assert_no_offense
@@ -39,6 +40,7 @@ from .target_authorization import _validate_host  # noqa: E402  (the ONE host fl
 from ..governor.asset_ownership import METHOD_WELL_KNOWN, well_known_path  # noqa: E402
 
 _DEFAULT_TIMEOUT_S = 5.0
+_DEFAULT_TOTAL_TIMEOUT_S = 10.0  # absolute wall-clock budget for the whole fetch (anti slow-drip thread-hold)
 _DEFAULT_MAX_BYTES = 4096        # a verification marker is tiny; a larger body is refused (anti-DoS)
 
 
@@ -88,12 +90,24 @@ class WellKnownFetcher:
     """Fetch the well-known marker over https, SSRF-hardened. ``resolver`` and ``ssl_context`` are injectable
     (tests inject a resolver to exercise the SSRF gate without real network)."""
 
-    def __init__(self, *, timeout: float = _DEFAULT_TIMEOUT_S, max_bytes: int = _DEFAULT_MAX_BYTES,
-                 resolver: Callable[..., Any] = socket.getaddrinfo, ssl_context: "ssl.SSLContext | None" = None):
+    def __init__(self, *, timeout: float = _DEFAULT_TIMEOUT_S, total_timeout: float = _DEFAULT_TOTAL_TIMEOUT_S,
+                 max_bytes: int = _DEFAULT_MAX_BYTES, resolver: Callable[..., Any] = socket.getaddrinfo,
+                 ssl_context: "ssl.SSLContext | None" = None, monotonic: Callable[[], float] = time.monotonic):
         self._timeout = float(timeout)
+        self._total = float(total_timeout)
         self._max_bytes = int(max_bytes)
         self._resolver = resolver
         self._ctx = ssl_context if ssl_context is not None else ssl.create_default_context()
+        self._monotonic = monotonic
+
+    def _op_timeout(self, start: float) -> float:
+        """Per-operation socket timeout, capped by the REMAINING total budget — an ABSOLUTE wall-clock
+        deadline across connect→handshake→read, so a cooperating public host cannot drip-feed just under the
+        per-op timeout to hold a thread far beyond the budget. Raises (fail-closed) once the budget is spent."""
+        remaining = self._total - (self._monotonic() - start)
+        if remaining <= 0:
+            raise OwnershipFetchError("ownership fetch exceeded its total time budget")
+        return min(self._timeout, remaining)
 
     def fetch(self, method: str, host: str, *, now: Any = None) -> str:
         """Return the well-known body as text, or raise ``OwnershipFetchError`` (fail-closed)."""
@@ -106,22 +120,29 @@ class WellKnownFetcher:
         if not ok:
             raise OwnershipFetchError(f"refused host: {host_or_err}")
         h = host_or_err
+        start = self._monotonic()                                  # anchor the absolute wall-clock deadline
         ip = _resolve_public_ip(h, resolver=self._resolver)        # SSRF gate (raises if any addr internal)
-        raw = socket.create_connection((ip, 443), timeout=self._timeout)
+        raw = socket.create_connection((ip, 443), timeout=self._op_timeout(start))
         try:
+            raw.settimeout(self._op_timeout(start))                # bound the TLS handshake by remaining budget
             tls = self._ctx.wrap_socket(raw, server_hostname=h)    # SNI + cert validation against the HOSTNAME
+        except OwnershipFetchError:
+            raw.close()
+            raise                                                  # budget exhausted setting up the handshake
         except Exception as e:  # noqa: BLE001 — a TLS failure is a fail-closed refusal, not a crash
             raw.close()
             raise OwnershipFetchError(f"TLS to {h!r} failed: {e}") from None
         conn = http.client.HTTPSConnection(h, timeout=self._timeout)
         conn.sock = tls                                            # pinned to the validated IP; no re-resolve
         try:
+            tls.settimeout(self._op_timeout(start))                # bound request+response by remaining budget
             conn.request("GET", well_known_path(),
                          headers={"Host": h, "User-Agent": "VIGIL-ownership-verify", "Accept": "text/plain",
                                   "Connection": "close"})
             resp = conn.getresponse()                              # http.client does NOT auto-follow redirects
             if resp.status != 200:
                 raise OwnershipFetchError(f"well-known returned HTTP {resp.status}")
+            tls.settimeout(self._op_timeout(start))                # bound the body read by remaining budget
             body = resp.read(self._max_bytes + 1)
             if len(body) > self._max_bytes:
                 raise OwnershipFetchError("well-known body too large")

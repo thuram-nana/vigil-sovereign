@@ -447,12 +447,17 @@ class Provisioner:
                 self._audit("target_verify", requester=requester, org_id=requester_org_id,
                             target=host, outcome="denied")
                 raise ProvisionDenied("requester may not register assessment targets for this org")
+        from .ownership_fetch import OwnershipFetchError
         try:
             observed = self.target_fetcher.fetch(method, host, now=t)   # network I/O — NO lock held
-        except Exception as e:  # noqa: BLE001 — a refused/failed fetch is a clean customer error, never a 500
+        except OwnershipFetchError as e:  # the fetcher's OWN controlled, safe reason (404 / SSRF-refused / TLS)
             self._audit("target_verify", requester=requester, org_id=requester_org_id,
                         target=host, outcome="fetch_failed")
             raise ProvisionDenied(f"could not read the published token: {e}") from None
+        except Exception:  # noqa: BLE001 — an unexpected fetcher error fails closed WITHOUT echoing internals
+            self._audit("target_verify", requester=requester, org_id=requester_org_id,
+                        target=host, outcome="fetch_error")
+            raise ProvisionDenied("could not read the published token at the well-known URL") from None
         from ..governor.asset_ownership import AssetOwnershipRegistry
         from .target_authorization import add_customer_target
         with self._lock:
