@@ -617,3 +617,58 @@ def test_inbound_cross_check_skipped_when_no_expected_configured():
     w, signer = _flw_rig_expected(table, None)                     # expected=None -> no cross-check
     assert signer.ingest(_flw_wh("charge.completed", 74), _FLW_SECRET, now=100.0) is not None
     assert w.available("acme") == 200
+
+
+# ---- Slice F red-pen fold (LOW hardening): link sanitizer, fail-closed creator, price guard, binding round-trip
+def test_create_checkout_refuses_crlf_userinfo_and_foreign_host_links():
+    for bad_link in ("https://checkout.flutterwave.com/pay\r\nSet-Cookie: x=y",   # CRLF -> header-split
+                     "https://checkout.flutterwave.com/p ay",                      # embedded whitespace
+                     "https://user:pass@checkout.flutterwave.com/pay",             # embedded credentials
+                     "https://evil.example/pay",                                   # foreign host
+                     "https://flutterwave.com.evil.example/pay",                   # suffix-spoofed host
+                     "https://evilflutterwave.com/pay"):                           # no dot boundary
+        flw = FlutterwaveBillingProvider(_FLW_SECRET, _verifier({}),
+                                         checkout_creator=lambda p, L=bad_link: {"status": "success",
+                                                                                 "data": {"link": L}})
+        with pytest.raises(UnsupportedCapability):
+            flw.create_checkout("acme", "price_topup_200", expected=_EXPECTED)
+
+
+def test_create_checkout_fails_closed_when_creator_raises():
+    def boom(payload):
+        raise RuntimeError("TLS handshake failed: secret-ish internals")                 # outbound POST failure
+    flw = FlutterwaveBillingProvider(_FLW_SECRET, _verifier({}), checkout_creator=boom)
+    with pytest.raises(UnsupportedCapability) as ei:
+        flw.create_checkout("acme", "price_topup_200", expected=_EXPECTED)
+    assert "secret-ish internals" not in str(ei.value)                                   # provider internals NOT leaked
+
+
+def test_create_checkout_refuses_zero_negative_or_empty_catalog_price():
+    flw = FlutterwaveBillingProvider(_FLW_SECRET, _verifier({}), checkout_creator=_ok_creator())
+    for bad in ({"p": (0, "USD")}, {"p": (-100, "USD")}, {"p": (5000, "")}):              # mispriced catalog entry
+        with pytest.raises(ValueError):
+            flw.create_checkout("acme", "p", expected=bad)
+
+
+def test_create_checkout_rejects_colon_in_explicit_nonce():
+    flw = FlutterwaveBillingProvider(_FLW_SECRET, _verifier({}), checkout_creator=_ok_creator())
+    with pytest.raises(ValueError):
+        flw.create_checkout("acme", "price_topup_200", expected=_EXPECTED, nonce="bad:nonce")   # delimiter poison
+
+
+def test_create_checkout_default_nonce_and_binding_round_trip():
+    cap = {}
+    flw = FlutterwaveBillingProvider(_FLW_SECRET, _verifier({}), checkout_creator=_ok_creator(cap))
+    sess = flw.create_checkout("acme-corp", "price_topup_200", expected=_EXPECTED)        # NO explicit nonce
+    prefix, org, nonce = sess.tx_ref.split(":", 2)
+    assert prefix == "vigil" and org == "acme-corp" and nonce and ":" not in nonce        # default nonce well-formed
+    assert cap["payload"]["meta"]["org_id"] == "acme-corp"                                 # tx_ref org == meta org
+    # ROUND-TRIP: a paid charge carrying THIS tx_ref mints to the SAME org, never another.
+    _s, w, subs, plan, _m, _mock, _signer = _rig()
+    table = {"500": {"id": 500, "status": "successful", "tx_ref": sess.tx_ref, "currency": "USD",
+                     "amount": 200.0, "created_at": 100.0, "meta": {"price_id": "price_topup_200"}}}
+    signer = BillingSigner(FlutterwaveBillingProvider(_FLW_SECRET, _verifier(table)), wallet=w,
+                           subscriptions=subs, plan=plan,
+                           catalog={"price_topup_200": Entitlement(kind=EVENT_TOPUP, credits=200)})
+    assert signer.ingest(_flw_wh("charge.completed", 500), _FLW_SECRET, now=100.0) is not None
+    assert w.available("acme-corp") == 200 and w.available("victim-org") == 0

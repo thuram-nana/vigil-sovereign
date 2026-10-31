@@ -42,6 +42,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Callable, Mapping, Optional
+from urllib.parse import urlsplit
 
 from ..reuse import assert_no_offense
 
@@ -379,13 +380,29 @@ def _flw_amount_minor(verified: Mapping[str, Any]) -> "tuple[int, str]":
 
 def _flw_checkout_link(resp: object) -> Optional[str]:
     """The hosted-checkout URL from a Flutterwave /v3/payments response, fail-closed. Success shape:
-    `{"status":"success","data":{"link":"https://checkout.flutterwave.com/..."}}`. ONLY an https link is accepted;
-    a missing / non-https / `data:` / `javascript:` link is refused (never hand the browser a hostile URL)."""
+    `{"status":"success","data":{"link":"https://checkout.flutterwave.com/..."}}`. HARDENED (red-pen): accept ONLY
+    an https link on the Flutterwave hosted-checkout domain, carrying NO whitespace / control characters (so a
+    smuggled CR/LF can never split a later `Location:` header) and NO embedded credentials — a missing / non-https
+    / `data:` / `javascript:` / foreign-host / control-char link is refused (never hand the browser a hostile or
+    header-splitting URL, even from a compromised/MITM'd provider response)."""
     if not isinstance(resp, Mapping) or resp.get("status") != "success":
         return None
     data = resp.get("data")
     link = data.get("link") if isinstance(data, Mapping) else None
-    return link if isinstance(link, str) and link.startswith("https://") else None
+    if not isinstance(link, str) or not link.startswith("https://"):
+        return None
+    if any(ord(c) < 0x21 or ord(c) == 0x7f for c in link):     # whitespace / control chars (CRLF response-split)
+        return None
+    try:
+        u = urlsplit(link)
+    except ValueError:
+        return None
+    host = (u.hostname or "").lower()
+    if u.scheme != "https" or "@" in (u.netloc or "") or not host:   # no userinfo; must have a host
+        return None
+    if host != "flutterwave.com" and not host.endswith(".flutterwave.com"):
+        return None                                            # pin the provider's hosted-checkout domain
+    return link
 
 
 @dataclass(frozen=True)
@@ -598,12 +615,16 @@ class FlutterwaveBillingProvider(BillingProvider):
 
         MONEY DOCTRINE, enforced here: the amount + currency are taken from the OWNER CATALOG (`expected[price_id]`,
         i.e. `catalog.expected_amounts()`), NEVER from the caller — a customer can name neither a price nor an
-        amount, and an unknown price_id is REFUSED rather than charged at a caller-chosen figure. TENANT BINDING:
-        the org is validated (`org_tenant_id`, fail-closed) and bound into BOTH `tx_ref = vigil:<org>:<nonce>` AND
-        `meta.org_id`, so the inbound webhook recovers the SAME tenant from the authoritative verified object and a
-        checkout can never be re-aimed at another org. Fail-closed throughout: no creator, an invalid org, an
-        unknown/empty price, or a provider response without an https hosted link RAISES — never a half-formed,
-        unpriced, or wrongly-attributed checkout."""
+        amount, and an unknown price_id is REFUSED rather than charged at a caller-chosen figure. TENANT BINDING
+        (consistency, NOT authorization): the org is validated for FORMAT (`org_tenant_id`, fail-closed) and bound
+        into BOTH `tx_ref = vigil:<org>:<nonce>` AND `meta.org_id`, so the inbound mint credits exactly the org
+        named at checkout and the two bindings can never disagree. This does NOT authorize the caller to name that
+        org — the CHECKOUT ENDPOINT MUST gate first with `OrgRegistry.admit_customer(requester, org_id, <billing
+        permission>)` (admit-first, as the provisioner does) so a customer cannot open a checkout that funds
+        another tenant. This primitive BINDS; the edge AUTHORIZES. Fail-closed throughout: no creator, an invalid
+        org, an unknown/empty price, a creator that raises, or a response without an https hosted link on the
+        provider domain RAISES (`UnsupportedCapability`/`ValueError`) — never a half-formed, unpriced, or
+        wrongly-attributed checkout."""
         self.require(CAP_HOSTED_CHECKOUT)
         if self._checkout_creator is None:
             raise UnsupportedCapability("hosted checkout requires an injected checkout_creator (the outbound "
@@ -633,7 +654,12 @@ class FlutterwaveBillingProvider(BillingProvider):
             payload["redirect_url"] = str(redirect_url)
         if customer_email:
             payload["customer"] = {"email": str(customer_email)}
-        link = _flw_checkout_link(self._checkout_creator(payload))
+        try:
+            resp = self._checkout_creator(payload)
+        except Exception as exc:  # noqa: BLE001 — any outbound failure (timeout/TLS/connection-reset/5xx) is a
+            raise UnsupportedCapability(                       # REFUSAL, re-raised as the documented contract type;
+                f"checkout creation failed ({type(exc).__name__})") from None   # provider internals are dropped
+        link = _flw_checkout_link(resp)
         if not link:
             raise UnsupportedCapability("checkout creation failed: the provider returned no https hosted link")
         return CheckoutSession(tx_ref=tx_ref, hosted_link=link, org_id=org, price_id=price_id,
