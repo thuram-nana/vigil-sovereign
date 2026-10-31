@@ -685,11 +685,17 @@ class BillingSigner:
     event and never lets an on-the-wire amount decide money (only the catalog does)."""
 
     def __init__(self, provider: BillingProvider, *, wallet, subscriptions, plan, catalog: Mapping[str, Entitlement],
-                 expected: "Optional[Mapping[str, Any]]" = None):
+                 expected: "Optional[Mapping[str, Any]]" = None, invoices=None):
         self.provider = provider
         self.wallet = wallet
         self.subscriptions = subscriptions
         self.plan = plan
+        # Slice H: the optional per-tenant invoice / billing-history ledger. When injected, each value-granting
+        # mint ALSO records one owner-signed billing-history line (idempotent by the SAME provider event_id, so a
+        # webhook replay folds once — no duplicate charge). None keeps every existing caller byte-identical (no
+        # invoice emitted). The money amount on the line is the owner-CATALOG price (`expected`), NEVER the wire
+        # amount — the money doctrine, identical to how the catalog (not the webhook) decides the entitlement.
+        self.invoices = invoices
         self.catalog = dict(catalog)
         # Slice F: the owner catalog's EXPECTED (amount_minor, currency) per price_id (= catalog.expected_amounts()),
         # for the defense-in-depth underpay / wrong-currency cross-check in apply(). Empty ⇒ the cross-check is
@@ -729,8 +735,10 @@ class BillingSigner:
                     return None                       # underpaid / wrong currency -> mint nothing (fail-closed)
         if event.kind == EVENT_TOPUP and ent.kind == EVENT_TOPUP and ent.credits > 0:
             # idempotent by event_id: a duplicate delivery reuses the same wallet entry_id -> folded once.
-            return self.wallet.grant(oid, int(ent.credits), "topup", source_ref=event.event_id,
-                                     entry_id=event.event_id, issued_at=event.created)
+            seq = self.wallet.grant(oid, int(ent.credits), "topup", source_ref=event.event_id,
+                                    entry_id=event.event_id, issued_at=event.created)
+            self._record_invoice(oid, event, "topup", credits=int(ent.credits))   # best-effort history line
+            return seq
         if event.kind == EVENT_SUBSCRIPTION_ACTIVE and ent.kind == EVENT_SUBSCRIPTION_ACTIVE \
                 and ent.plan_id and ent.period_s > 0.0:
             period_end = event.created + float(ent.period_s)
@@ -744,5 +752,28 @@ class BillingSigner:
             # finds the tranche already present and no-ops. A genuine RENEWAL (new event, greater `created`) made
             # the subscribe above fresh -> the period advanced -> the bridge grants the new period's tranche (the
             # prior tranche simply expires: non-rollover).
-            return refill_active_subscription(self.subscriptions, self.plan, oid, issued_at=event.created)
+            seq = refill_active_subscription(self.subscriptions, self.plan, oid, issued_at=event.created)
+            self._record_invoice(oid, event, "subscription", credits=int(ent.allotment),
+                                 period_start=event.created, period_end=period_end)
+            return seq
         return None
+
+    def _record_invoice(self, oid: str, event: BillingEvent, kind: str, *, credits: int,
+                        period_start: float = 0.0, period_end: float = 0.0) -> None:
+        """Record ONE owner-signed billing-history line for a value-granting mint (Slice H). No-op when no
+        invoice ledger is injected. MONEY DOCTRINE: the line's `amount_minor`/`currency` are the owner-CATALOG
+        expected price for `event.price_id` (``self._expected``), NEVER the wire amount — when the catalog does
+        not price it, the line carries amount 0 (the credits/plan are still recorded). Idempotent by the SAME
+        provider `event_id` the money mint used, so a webhook replay folds once. MONEY-FIRST + best-effort: the
+        money mint already succeeded and returned; a malformed history line must NEVER undo or fail-report it, so
+        a (practically unreachable, inputs are pre-validated) ValueError is swallowed and a retry re-records it."""
+        if self.invoices is None:
+            return
+        exp = self._expected.get(event.price_id)
+        amount_minor, currency = (exp[0], exp[1]) if exp is not None else (0, "")
+        try:
+            self.invoices.record(oid, invoice_id=event.event_id, kind=kind, price_id=event.price_id,
+                                 amount_minor=amount_minor, currency=currency, credits=credits,
+                                 period_start=period_start, period_end=period_end, issued_at=event.created)
+        except ValueError:
+            pass   # history is secondary to the (already-committed) money mint; a retry re-records it

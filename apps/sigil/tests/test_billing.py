@@ -28,6 +28,7 @@ from sigil.governor.billing import (CAP_HOSTED_CHECKOUT, CAP_MOBILE_MONEY, CAP_R
                                      EVENT_SUBSCRIPTION_CANCELED, EVENT_TOPUP, BillingSigner, CheckoutSession,
                                      Entitlement, FlutterwaveBillingProvider, MockBillingProvider,
                                      StripeBillingProvider, UnsupportedCapability)
+from sigil.governor.invoices import InvoiceRegistry
 from sigil.governor.metering import CreditMeter, PlanCreditLedger
 from sigil.governor.subscription import (STATUS_ACTIVE, STATUS_CANCELED, STATUS_PAST_DUE,
                                           SubscriptionRegistry)
@@ -58,6 +59,84 @@ def _rig():
 def _mk(mock, d):
     body = json.dumps(d).encode()
     return body, mock.sign(body)
+
+
+def _inv_rig(expected=None):
+    """A mock-provider rig WITH an invoice ledger + the owner catalog's expected amounts, so the signer records
+    one owner-signed billing-history line per value-granting mint (Slice H). `expected` defaults to a priced
+    catalog; pass {} to model an unpriced catalog. Returns (store, invoices, mock, signer)."""
+    s = SpineStore(tempfile.mktemp(suffix=".jsonl"))
+    w = WalletRegistry(s, owner_key=OWNER, trusted_pubkey=OP)
+    subs = SubscriptionRegistry(s, owner_key=OWNER, trusted_pubkey=OP)
+    plan = PlanCreditLedger(s, owner_key=OWNER, trusted_pubkey=OP)
+    inv = InvoiceRegistry(s, owner_key=OWNER, trusted_pubkey=OP)
+    catalog = {
+        "price_topup_200": Entitlement(kind=EVENT_TOPUP, credits=200),
+        "price_pro": Entitlement(kind=EVENT_SUBSCRIPTION_ACTIVE, plan_id="pro", allotment=6000, period_s=1000.0),
+    }
+    exp = {"price_topup_200": (4900, "USD"), "price_pro": (9900, "USD")} if expected is None else expected
+    mock = MockBillingProvider("sek")
+    signer = BillingSigner(mock, wallet=w, subscriptions=subs, plan=plan, catalog=catalog,
+                           expected=exp, invoices=inv)
+    return s, inv, mock, signer
+
+
+# ---- Slice H: a value-granting mint ALSO records an owner-signed invoice (catalog-priced, idempotent) -----
+def test_topup_emits_an_invoice_with_the_catalog_amount():
+    _s, inv, mock, signer = _inv_rig()
+    body, sig = _mk(mock, {"event_id": "evt_1", "kind": EVENT_TOPUP, "org_id": "acme", "created": 100.0,
+                           "price_id": "price_topup_200"})
+    assert signer.ingest(body, sig, now=100.0) is not None
+    invs = inv.invoices("acme")
+    assert len(invs) == 1
+    i = invs[0]
+    # MONEY DOCTRINE: the mock event carries NO amount (amount_minor defaults to 0), yet the line records the
+    # owner-CATALOG price (4900 USD) — the amount is catalog-derived, never read off the wire.
+    assert (i.kind, i.price_id, i.amount_minor, i.currency, i.credits) == \
+        ("topup", "price_topup_200", 4900, "USD", 200)
+    signer.ingest(body, sig, now=100.0)                 # replay (same event_id)
+    assert len(inv.invoices("acme")) == 1, "a replayed webhook must not duplicate the invoice line"
+
+
+def test_subscription_emits_an_invoice_with_the_period():
+    _s, inv, mock, signer = _inv_rig()
+    body, sig = _mk(mock, {"event_id": "sub_1", "kind": EVENT_SUBSCRIPTION_ACTIVE, "org_id": "acme",
+                           "created": 500.0, "price_id": "price_pro"})
+    assert signer.ingest(body, sig, now=500.0) is not None
+    invs = inv.invoices("acme")
+    assert len(invs) == 1
+    i = invs[0]
+    assert (i.kind, i.price_id, i.amount_minor, i.credits) == ("subscription", "price_pro", 9900, 6000)
+    assert (i.period_start, i.period_end) == (500.0, 1500.0)   # created, created + period_s
+
+
+def test_dunning_and_cancel_events_record_no_invoice():
+    _s, inv, mock, signer = _inv_rig()
+    for kind in (EVENT_PAYMENT_FAILED, EVENT_SUBSCRIPTION_CANCELED):
+        body, sig = _mk(mock, {"event_id": f"d_{kind}", "kind": kind, "org_id": "acme", "created": 100.0,
+                               "price_id": ""})
+        signer.ingest(body, sig, now=100.0)
+    assert inv.invoices("acme") == [], "a dunning/cancel event is not a charge — it records no billing line"
+
+
+def test_invoice_amount_is_zero_when_the_catalog_does_not_price_it():
+    # when the owner catalog does not price a price_id (no `expected` entry), the line records amount 0 but STILL
+    # records the credits/plan — the money amount is never guessed from the wire (fail-closed to 0).
+    _s, inv, mock, signer = _inv_rig(expected={})
+    body, sig = _mk(mock, {"event_id": "evt_1", "kind": EVENT_TOPUP, "org_id": "acme", "created": 100.0,
+                           "price_id": "price_topup_200"})
+    signer.ingest(body, sig, now=100.0)
+    i = inv.invoices("acme")[0]
+    assert (i.amount_minor, i.currency, i.credits) == (0, "", 200)
+
+
+def test_no_invoice_ledger_is_backward_compatible():
+    # a signer built WITHOUT an invoice ledger (the pre-H default) still mints money and emits no invoice.
+    _s, w, _subs, _plan, _m, mock, signer = _rig()
+    body, sig = _mk(mock, {"event_id": "evt_1", "kind": EVENT_TOPUP, "org_id": "acme", "created": 100.0,
+                           "price_id": "price_topup_200"})
+    assert signer.ingest(body, sig, now=100.0) is not None and w.available("acme") == 200
+    assert signer.invoices is None
 
 
 # ---- the signer: verify-then-mint, catalog amounts, idempotency, mapping ------------------------------
