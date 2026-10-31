@@ -454,6 +454,23 @@ class Handler(BaseHTTPRequestHandler):
                 return self._deny(403, "not authorized for this org's billing")
             import time as _t
             return self._json(_billing.billing_overview(store, org, now=_t.time()))
+        if path == "/api/billing/invoices":
+            # SaaS billing HISTORY (invoices) for ONE org, tenant-scoped (Slice H). SAME COMPOSED gate as the
+            # overview: the global owner/operator reads any tenant (keyholder never locked out), a per-org member
+            # reads ONLY an org they hold `view_invoices` in, everyone else 403. A read-only projection — no mint,
+            # no secret. THE IDOR class (the competitor's cross-tenant invoice read), defended by the admit gate
+            # resolving the authority for the requested org + the org-scoped fold (a line for another tenant is
+            # structurally never returned). billing != testing: this surfaces money history, never an authority.
+            from . import billing as _billing
+            from ..governor.orgs import OrgRegistry
+            org = _billing.valid_org(self._query().get("org", [""])[0])
+            if org is None:
+                return self._deny(400, "missing/invalid org")
+            store = self.server.store()
+            if not OrgRegistry(store).admit(global_role=principal.role, username=principal.username,
+                                            org_id=org, permission="view_invoices"):
+                return self._deny(403, "not authorized for this org's invoices")
+            return self._json(_billing.billing_invoices(store, org))
         if path == "/api/billing/orgs":
             # The billing-admin tenant picker — list active orgs. OWNER-tier (`manage_org`): enumerating every
             # tenant is a global-owner action, distinct from the per-org overview above.

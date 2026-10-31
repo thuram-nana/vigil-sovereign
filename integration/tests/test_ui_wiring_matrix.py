@@ -145,6 +145,7 @@ PENDING_UI_WIRING = {
     (P_SOV, "/api/billing/overview"): "owner billing-admin overview — vigil-ui screen lands in the frontend slice",
     (P_SOV, "/api/billing/orgs"): "owner billing-admin tenant picker — vigil-ui screen lands in the frontend slice",
     (P_SOV, "/api/billing/plans"): "pricing catalog projection — the pricing page lands in the frontend slice",
+    (P_SOV, "/api/billing/invoices"): "owner billing-admin invoices (Slice H) — vigil-ui screen lands in the frontend slice",
 }
 PENDING_UI_WIRING_VERBS = {}
 
