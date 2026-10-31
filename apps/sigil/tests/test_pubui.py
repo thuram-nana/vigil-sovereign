@@ -11,6 +11,7 @@ Load-bearing invariants:
 """
 from __future__ import annotations
 
+import json
 import threading
 import time
 import urllib.error
@@ -151,3 +152,54 @@ def test_public_site_honors_the_honesty_constraints():
         if freecta_re.search(text):
             offenders.append(f"{rel}: 'start for free' (no hosted signup is shipped)")
     assert not offenders, "public-site honesty violations:\n  " + "\n  ".join(offenders)
+
+
+def test_cve_api_over_a_seeded_catalog(tmp_path):
+    from sigil.cve.catalog import CveCatalogStore
+    from sigil.ui.pubui import PublicHandler, PublicServer
+    db = tmp_path / "cat.db"
+    st = CveCatalogStore(str(db))
+    st.merge_many([
+        {"id": "CVE-2021-44228", "title": "Log4Shell", "cvss_base": 10.0, "kev": True,
+         "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:H/A:H", "cwes": ["CWE-502"]},
+        {"id": "CVE-2023-0001", "title": "lesser", "cvss_base": 5.0},
+    ])
+    srv = PublicServer(("127.0.0.1", 0), PublicHandler, catalog_path=str(db))
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    time.sleep(0.05)
+    port = srv.server_address[1]
+    try:
+        c, h, b = _get(port, "/api/cve?per_page=10")
+        d = json.loads(b)
+        assert c == 200 and h.get("Content-Type", "").startswith("application/json")
+        assert d["populated"] is True and d["total"] == 2
+        assert json.loads(_get(port, "/api/cve?kev=1")[2])["total"] == 1
+        assert json.loads(_get(port, "/api/cve?severity=critical")[2])["total"] == 1
+        rec = json.loads(_get(port, "/api/cve/CVE-2021-44228")[2])
+        assert rec["id"] == "CVE-2021-44228" and rec["kev"] is True and rec["severity"] == "critical"
+        assert json.loads(_get(port, "/api/cve/stats")[2])["kev"] == 1
+        assert any(y["year"] == 2021 for y in json.loads(_get(port, "/api/cve/years")[2])["years"])
+        assert _get(port, "/api/cve/CVE-1999-0000")[0] == 404
+        # pretty dynamic routes serve the static shells (then client JS fills them)
+        c, _, b = _get(port, "/cve/CVE-2021-44228")
+        assert c == 200 and b"cve-detail" in b
+        c, _, b = _get(port, "/cve/year/2021")
+        assert c == 200 and b"cve-year-h1" in b
+        # no cookie on any public-plane response
+        assert "Set-Cookie" not in h
+    finally:
+        srv.shutdown()
+
+
+def test_cve_api_is_honestly_empty_without_a_catalog(tmp_path):
+    from sigil.ui.pubui import PublicHandler, PublicServer
+    srv = PublicServer(("127.0.0.1", 0), PublicHandler, catalog_path=str(tmp_path / "absent.db"))
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    time.sleep(0.05)
+    port = srv.server_address[1]
+    try:
+        d = json.loads(_get(port, "/api/cve")[2])
+        assert d["populated"] is False and d["total"] == 0 and d["items"] == []
+        assert json.loads(_get(port, "/api/cve/stats")[2])["populated"] is False
+    finally:
+        srv.shutdown()

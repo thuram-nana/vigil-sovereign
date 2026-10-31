@@ -15,10 +15,12 @@ carries a strict CSP + `nosniff` + `no-referrer` + `DENY` framing, set as HEADER
 from __future__ import annotations
 
 import ipaddress
+import json
+import re
 import socket
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import unquote, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 from ..reuse import assert_no_offense
 
@@ -48,7 +50,7 @@ _MAX_BYTES = 8 * 1024 * 1024   # a static asset over 8 MiB on a marketing site i
 class PublicServer(ThreadingHTTPServer):
     daemon_threads = True
 
-    def __init__(self, addr, handler, *, root=None):
+    def __init__(self, addr, handler, *, root=None, catalog_path=None):
         host = addr[0]
         if not bind_ok(host):
             raise ValueError(
@@ -60,6 +62,9 @@ class PublicServer(ThreadingHTTPServer):
             self.address_family = socket.AF_INET6
         super().__init__(addr, handler)
         self.root = (Path(root) if root is not None else _PUBLIC_ROOT).resolve()
+        # Optional READ-ONLY public CVE catalog (offense-free SQLite, populated by `sigil cve ingest`). When
+        # the file is absent the /api/cve endpoints answer honestly empty — the marketing pages never need it.
+        self.catalog_path = Path(catalog_path) if catalog_path else None
 
 
 class PublicHandler(BaseHTTPRequestHandler):
@@ -107,13 +112,78 @@ class PublicHandler(BaseHTTPRequestHandler):
         return None
 
     def do_GET(self):
+        path = urlparse(self.path).path
+        if path == "/api/cve" or path.startswith("/api/cve/"):
+            return self._cve_api(path)
+        # pretty dynamic CVE routes map to a static shell that client-side JS then fills from /api/cve.
+        if re.fullmatch(r"/cve/CVE-\d{4}-\d{4,}/?", path, re.IGNORECASE):
+            return self._serve(head=False, override="cve/_detail.html")
+        if re.fullmatch(r"/cve/year/\d{4}/?", path):
+            return self._serve(head=False, override="cve/_year.html")
         self._serve(head=False)
 
     def do_HEAD(self):
         self._serve(head=True)
 
-    def _serve(self, head: bool):
-        hit = self._resolve(self.path)
+    # -- read-only public CVE API (offense-free; reads the local catalog; no egress at request time) ---
+    def _json(self, obj, code: int = 200):
+        body = json.dumps(obj).encode("utf-8")
+        self._send_headers(code, "application/json; charset=utf-8", len(body), cache="public, max-age=300")
+        try:
+            self.wfile.write(body)
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+
+    def _catalog(self):
+        """Open the catalog READ-only if its file exists, else None. Never CREATES it from the public plane
+        (ingest owns creation) and imports the offense-free store lazily so pubui needs neither to run."""
+        cp = self.server.catalog_path
+        if cp is None or not cp.exists():
+            return None
+        try:
+            from ..cve.catalog import CveCatalogStore
+            return CveCatalogStore(str(cp))
+        except Exception:  # noqa: BLE001 — a broken catalog must not 500 the public plane
+            return None
+
+    def _cve_api(self, path: str):
+        store = self._catalog()
+        if store is None:
+            # honest empty responses so the pages render a "catalog not yet populated" state, never an error
+            if path in ("/api/cve", "/api/cve/"):
+                return self._json({"items": [], "total": 0, "page": 1, "per_page": 50, "pages": 1,
+                                   "populated": False})
+            if path == "/api/cve/stats":
+                return self._json({"total": 0, "kev": 0, "by_severity": {}, "vigil_proven": 0,
+                                   "populated": False})
+            if path == "/api/cve/years":
+                return self._json({"years": [], "populated": False})
+            return self._json({"error": "not found"}, 404)
+        if path in ("/api/cve", "/api/cve/"):
+            q = parse_qs(urlparse(self.path).query)
+            one = lambda k: (q.get(k, [""])[0] or "").strip()  # noqa: E731
+            kev = one("kev")
+            res = store.query(
+                page=int(one("page") or 1) if one("page").isdigit() else 1,
+                per_page=int(one("per_page") or 50) if one("per_page").isdigit() else 50,
+                severity=one("severity") or None, q=one("q") or None,
+                year=int(one("year")) if one("year").isdigit() else None,
+                kev=(True if kev in ("1", "true", "yes") else (False if kev in ("0", "false", "no") else None)),
+                order=one("order") or "published_desc")
+            res["populated"] = True
+            return self._json(res)
+        if path == "/api/cve/stats":
+            return self._json({**store.stats(), "populated": True})
+        if path == "/api/cve/years":
+            return self._json({"years": store.years(), "populated": True})
+        m = re.fullmatch(r"/api/cve/(CVE-\d{4}-\d{4,})", path, re.IGNORECASE)
+        if m:
+            rec = store.get(m.group(1))
+            return self._json(rec) if rec is not None else self._json({"error": "not found"}, 404)
+        return self._json({"error": "not found"}, 404)
+
+    def _serve(self, head: bool, override: "str | None" = None):
+        hit = self._resolve("/" + override) if override else self._resolve(self.path)
         if hit is None:
             return self._not_found(head)
         rp, ctype = hit
@@ -147,7 +217,8 @@ def build_public_server(*, host: str = "127.0.0.1", port=None, root=None) -> Pub
     """Wire the public static server. Port defaults to `config.PUBLIC_UI_PORT` (:8735); `root` defaults to
     the packaged `public_site/` tree. No key, no cookie, no API — a static file server behind the edge."""
     from .. import config
-    return PublicServer((host, config.PUBLIC_UI_PORT if port is None else int(port)), PublicHandler, root=root)
+    return PublicServer((host, config.PUBLIC_UI_PORT if port is None else int(port)), PublicHandler,
+                        root=root, catalog_path=config.CVE_CATALOG_PATH)
 
 
 def serve_public(*, host: str = "127.0.0.1", port=None, root=None) -> None:

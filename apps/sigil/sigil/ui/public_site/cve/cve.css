@@ -1,0 +1,36 @@
+/* CVE browser — on the design tokens. */
+.cve-filters { display: flex; flex-wrap: wrap; gap: var(--sp-3); align-items: center; margin: 0 0 var(--sp-5); }
+.cve-input { font: inherit; font-size: var(--fs-sm); padding: 9px 12px; border-radius: var(--r-1);
+  border: 1px solid var(--border-strong); background: var(--bg-2); color: var(--text-0); }
+.cve-input[type="search"] { min-width: 260px; flex: 1; }
+.cve-check { display: inline-flex; align-items: center; gap: 8px; font-size: var(--fs-sm); color: var(--text-1); }
+
+.cve-rows { display: grid; gap: var(--sp-2); }
+.cve-row { display: grid; grid-template-columns: 160px 1fr auto; gap: var(--sp-4); align-items: center;
+  padding: 12px var(--sp-4); border: 1px solid var(--border); border-radius: var(--r-2); background: var(--bg-1);
+  transition: border-color .12s, transform .12s; }
+.cve-row:hover { border-color: var(--border-strong); transform: translateY(-1px); }
+.cve-row__id { font-family: var(--font-mono); font-size: var(--fs-sm); color: var(--text-0); font-weight: 600; }
+.cve-row__title { color: var(--text-1); font-size: var(--fs-sm); overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; }
+.cve-chips { display: inline-flex; flex-wrap: wrap; gap: 6px; justify-content: flex-end; }
+.cve-chips .chip { font-size: var(--fs-micro); padding: 3px 9px; }
+.chip--kev { color: var(--sev-critical); border-color: color-mix(in srgb, var(--sev-critical) 50%, var(--border)); }
+.chip--ransom { color: var(--sev-high); border-color: color-mix(in srgb, var(--sev-high) 50%, var(--border)); }
+@media (max-width: 720px) {
+  .cve-row { grid-template-columns: 1fr; gap: var(--sp-2); }
+  .cve-chips { justify-content: flex-start; }
+  .cve-row__title { white-space: normal; }
+}
+
+.cve-pager { display: flex; gap: var(--sp-3); align-items: center; justify-content: center; margin-top: var(--sp-5); }
+.cve-pg-off { opacity: .4; pointer-events: none; }
+.cve-pg-info { font-size: var(--fs-sm); }
+
+.cve-detail__id { font-size: var(--fs-2xl); letter-spacing: -.02em; margin: var(--sp-2) 0 0; }
+.cve-detail__id-sub { font-family: var(--font-mono); font-size: var(--fs-sm); }
+.cve-detail__desc { color: var(--text-1); max-width: 72ch; }
+.cve-detail__h2 { font-size: var(--fs-lg); margin: var(--sp-5) 0 var(--sp-2); }
+.cve-detail__note { font-size: var(--fs-xs); border-top: 1px solid var(--border); padding-top: var(--sp-4);
+  margin-top: var(--sp-6); max-width: 72ch; }
+.cve-detail__id + .cve-detail__id-sub { margin-top: 2px; }

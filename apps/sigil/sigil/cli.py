@@ -921,6 +921,59 @@ def cmd_serve(a) -> None:
           allowed_hosts=allowed_hosts, allowed_origins=allowed_origins)
 
 
+def cmd_serve_public(a) -> None:
+    """Start the keyless/cookieless PUBLIC site (`pubui`, :8735) — marketing, tools, trust, blog, and the
+    read-only CVE browser. Serves only static files + a read-only /api/cve over the local catalog; holds no
+    key, sets no cookie, makes no outbound request at request time. Binds a bind_ok address (loopback default;
+    a PRIVATE address behind a reverse proxy for a public domain) — FAIL-CLOSED (exit 2) on a public bind."""
+    import os as _os
+
+    from .bridge.daemon import bind_ok
+    host = a.host or _os.environ.get("VIGIL_PUBLIC_BIND", "127.0.0.1")
+    if not bind_ok(host):
+        print(f"  refusing to bind {host!r}: the public site binds loopback or a PRIVATE address only — "
+              f"never 0.0.0.0/public. Front it with a reverse proxy on the marketing vhost "
+              f"(deploy/reverse-proxy).", file=sys.stderr)
+        sys.exit(2)
+    from .ui.pubui import serve_public
+    serve_public(host=host, port=a.port)
+
+
+def cmd_cve(a) -> None:
+    """Build/inspect the PUBLIC CVE catalog that the public site's /cve browser reads.
+
+    `ingest` pulls the public advisory feeds into the catalog (CISA-KEV bulk by default — the fast, complete
+    exploited-in-the-wild set; add --epss for probability overlay, and --nvd-enrich N to enrich the N newest
+    KEV entries with CVSS from NVD, paced for NVD's unauthenticated rate limit). This is the one standing
+    outbound path the public catalog needs; it never runs at page-request time."""
+    from . import config
+    from .cve.catalog import CveCatalogStore
+    store = CveCatalogStore(str(config.CVE_CATALOG_PATH))
+    if a.action == "stats":
+        import json as _json
+        print(_json.dumps(store.stats(), indent=2))
+        return
+    # action == "ingest"
+    from .cve import ingest as _ing
+    print(f"  ingesting public CVE feeds → {config.CVE_CATALOG_PATH}")
+    n = _ing.ingest_kev(store)
+    print(f"  CISA-KEV: {n} records merged (total {store.count()})")
+    if getattr(a, "epss", False):
+        try:
+            e = _ing.ingest_epss_bulk(store)
+            print(f"  EPSS: {e} records overlaid")
+        except Exception as exc:  # noqa: BLE001 — a feed hiccup is not fatal to the rest
+            print(f"  EPSS: skipped ({exc})", file=sys.stderr)
+    if getattr(a, "nvd_enrich", 0):
+        ids = [r["id"] for r in store.query(per_page=int(a.nvd_enrich), order="published_desc")["items"]]
+        try:
+            c = _ing.enrich_nvd(store, ids, limit=int(a.nvd_enrich))
+            print(f"  NVD enrich: {c} of {len(ids)} enriched with CVSS")
+        except Exception as exc:  # noqa: BLE001
+            print(f"  NVD enrich: skipped ({exc})", file=sys.stderr)
+    print(f"  done — catalog holds {store.count()} CVEs ({store.stats().get('kev', 0)} known-exploited)")
+
+
 def cmd_bridge_serve(a) -> None:
     """Phase 9 W1-D — start the WireGuard-bound phone bridge transport. Binds a `bind_ok` address
     (loopback or a PRIVATE WireGuard IP) — FAIL-CLOSED (exit 2) on a public/unspecified addr, minting
@@ -2286,6 +2339,18 @@ def main(argv=None) -> None:
     psv.add_argument("--revoke-token", action="store_true",
                      help="delete the persistent bootstrap token and exit (next start mints a fresh one)")
     psv.set_defaults(fn=cmd_serve)
+    psp = sub.add_parser("serve-public", help="start the keyless public site (marketing/tools/trust/blog/CVE; "
+                                              "loopback default; reverse proxy for a public domain)")
+    psp.add_argument("--port", type=int, default=None, help="bind port (default 8735; $VIGIL_PUBLIC_PORT)")
+    psp.add_argument("--host", default=None, help="bind address ($VIGIL_PUBLIC_BIND; default 127.0.0.1). "
+                     "Loopback or a PRIVATE IP only — never 0.0.0.0/public (fail-closed exit 2)")
+    psp.set_defaults(fn=cmd_serve_public)
+    pcve = sub.add_parser("cve", help="build/inspect the public CVE catalog the /cve browser reads")
+    pcve.add_argument("action", choices=["ingest", "stats"])
+    pcve.add_argument("--epss", action="store_true", help="(ingest) overlay FIRST EPSS exploitation probability")
+    pcve.add_argument("--nvd-enrich", type=int, default=0, metavar="N",
+                      help="(ingest) enrich the N newest entries with CVSS from NVD (paced for its rate limit)")
+    pcve.set_defaults(fn=cmd_cve)
     ph = sub.add_parser("host", help="this host's mesh capability descriptor")
     ph.add_argument("action", nargs="?", default="caps", choices=["caps"])
     ph.set_defaults(fn=cmd_host)
