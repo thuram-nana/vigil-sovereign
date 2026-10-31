@@ -138,10 +138,11 @@ def test_zero_or_negative_amount_refused():
 def test_bad_kind_refused():
     s = _store()
     w = _reg(s)
-    for bad in ("", "owner", "gift", "refund"):
+    for bad in ("", "owner", "gift", "chargeback"):
         with pytest.raises(ValueError):
             w.grant("acme", 10, bad, issued_at=_issue())
     assert "trial" in GRANT_KINDS and "subscription_refill" in GRANT_KINDS and "topup" in GRANT_KINDS
+    assert "refund" in GRANT_KINDS      # Slice G: the unused-reservation refund on launch settlement
 
 
 def test_bad_org_id_refused():

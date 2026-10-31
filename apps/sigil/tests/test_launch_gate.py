@@ -155,3 +155,58 @@ def test_bad_units_refused(units):
     _setup(s, "org_a", "apme.cm", credits=100)
     r = _gate(s).reserve_launch(requester="u", org_id="org_a", host="apme.cm", units=units, now=2000.0)
     assert r["ok"] is False and _avail(s, "org_a") == 100
+
+
+# --- settle / release: refund the unused reservation (net spend == consumption) ---------------------
+
+def _reserve(store, *, units=30):
+    _setup(store, "org_a", "apme.cm", credits=100)
+    r = store and _gate(store).reserve_launch(requester="u", org_id="org_a", host="apme.cm",
+                                              units=units, now=2000.0)
+    assert r["ok"], r
+    return r
+
+
+def test_settle_refunds_the_unused_reservation():
+    s = _store()
+    r = _reserve(s)                                        # 100 - 30 reserved = 70
+    out = _gate(s).settle_launch(org_id="org_a", slug=r["slug"], nonce=r["nonce"],
+                                 units_reserved=r["units_reserved"], consumed_units=10, now=3000.0)
+    assert out["ok"] and out["refunded"] == 20 and out["net_spend"] == 10
+    assert _avail(s, "org_a") == 90                        # net spend 10
+
+
+def test_settle_cancel_is_a_full_refund():
+    s = _store()
+    r = _reserve(s)
+    out = _gate(s).settle_launch(org_id="org_a", slug=r["slug"], nonce=r["nonce"],
+                                 units_reserved=r["units_reserved"], consumed_units=0, now=3000.0)
+    assert out["refunded"] == 30 and _avail(s, "org_a") == 100   # cancel before work -> nothing spent
+
+
+def test_settle_all_consumed_no_refund():
+    s = _store()
+    r = _reserve(s)
+    out = _gate(s).settle_launch(org_id="org_a", slug=r["slug"], nonce=r["nonce"],
+                                 units_reserved=r["units_reserved"], consumed_units=30, now=3000.0)
+    assert out["refunded"] == 0 and _avail(s, "org_a") == 70
+
+
+def test_settle_clamps_consumed_to_reserved():
+    """The offense side can NEVER claw back more than it reserved — consumed is clamped to the cap."""
+    s = _store()
+    r = _reserve(s)
+    out = _gate(s).settle_launch(org_id="org_a", slug=r["slug"], nonce=r["nonce"],
+                                 units_reserved=r["units_reserved"], consumed_units=999, now=3000.0)
+    assert out["refunded"] == 0 and _avail(s, "org_a") == 70     # clamped: no negative refund, no over-claw
+
+
+def test_settle_is_idempotent():
+    s = _store()
+    r = _reserve(s)
+    g = _gate(s)
+    g.settle_launch(org_id="org_a", slug=r["slug"], nonce=r["nonce"],
+                    units_reserved=r["units_reserved"], consumed_units=10, now=3000.0)
+    g.settle_launch(org_id="org_a", slug=r["slug"], nonce=r["nonce"],
+                    units_reserved=r["units_reserved"], consumed_units=10, now=4000.0)   # retry
+    assert _avail(s, "org_a") == 90                        # refunded exactly once, not twice

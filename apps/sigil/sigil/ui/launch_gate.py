@@ -178,3 +178,44 @@ class LaunchGate:
             "lease": signed.model_dump(mode="json"),
             "trust_root": trust_root.model_dump(mode="json"),
         }
+
+    def settle_launch(self, *, org_id: str, slug: str, nonce: str, units_reserved: int,
+                      consumed_units: int, now: Any) -> dict:
+        """Close out a reservation: refund the UNUSED portion so net spend == metered consumption. ``reserve``
+        debited the full ``units_reserved`` cap; this grants back ``units_reserved - consumed_units`` (a
+        ``refund`` grant). ``consumed_units == 0`` is the CANCEL / release case (full refund); a crash before
+        settle simply leaves the cap debited (fail-closed, never over-refunds). Idempotent per (slug, nonce):
+        a re-settle is a no-op (the grant dedups on ``entry_id``), so a retried settlement cannot double-refund.
+        ``consumed_units`` is CLAMPED to ``[0, units_reserved]`` — the offense side can never claw back more
+        than it reserved. Returns ``{ok, refunded, net_spend}``; fail-closed on bad inputs."""
+        from ..governor.orgs import _check_org_id
+        if self.owner_key is None:
+            return {"ok": False, "error": "a refund must be owner-signed (internal: no owner key)"}
+        try:
+            oid = _check_org_id(org_id)
+        except ValueError as e:
+            return {"ok": False, "error": str(e)}
+        try:
+            reserved = int(units_reserved)
+            consumed = int(consumed_units)
+        except (TypeError, ValueError):
+            return {"ok": False, "error": "units_reserved and consumed_units must be integers"}
+        if reserved < 0 or consumed < 0:
+            return {"ok": False, "error": "units_reserved and consumed_units must be non-negative"}
+        s = str(slug or "").strip()
+        non = str(nonce or "").strip()
+        if not s or not non:
+            return {"ok": False, "error": "slug and nonce are required to settle a reservation"}
+        consumed = min(consumed, reserved)                 # offense can never consume past the reserved cap
+        refund = reserved - consumed
+        t = now() if callable(now) else now
+        if isinstance(t, datetime):
+            now_ts = t.timestamp()
+        else:
+            now_ts = float(t)
+        with self._lock:
+            if refund > 0:
+                self.wallet.grant(oid, refund, "refund", source_ref=s,
+                                  entry_id=f"settle:{s}:{non}", issued_at=now_ts)
+        return {"ok": True, "action": "launch_settled", "org_id": oid, "slug": s,
+                "refunded": refund, "net_spend": consumed}
