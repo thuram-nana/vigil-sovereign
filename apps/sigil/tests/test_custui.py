@@ -235,7 +235,41 @@ def test_build_customer_server_is_a_keyless_edge_with_the_distinct_cookie(tmp_pa
         assert srv.provision_base == "http://127.0.0.1:9999"      # trailing slash normalized away
         assert srv.sessions is not None                           # its OWN ledger (not the operator's)
         assert CUSTOMER_COOKIE == "vigil_customer_session"        # distinct from operator `sigil_session`
-        # keyless by construction: the edge object exposes no owner signing key of any name
-        assert not any(k for k in vars(srv) if "owner" in k.lower() or "priv" in k.lower())
+        # KEYLESS BY CONSTRUCTION — stronger than a name scan (red-pen LOW): the custui module must not
+        # import or reference the owner signing key / identity vault AT ALL. Its ONLY credential is the
+        # edge→provisioner HMAC hop key; to hold an owner key it would have to pull in one of these owner-key
+        # entrypoints, so forbid them in the module source. (assert_no_offense blocks the offense plane;
+        # this guards the sovereign OWNER KEY specifically, which must live only in the provisioner.)
+        import inspect
+
+        from sigil.ui import custui as _custui
+        src = inspect.getsource(_custui)
+        for forbidden in ("ensure_owner_keypair", "owner_vault", "OWNER_PRIV", "owner_privkey",
+                          "owner_sign", "sign_policy", "SpineStore", "Ed25519Priv", "private_key"):
+            assert forbidden not in src, f"custui references {forbidden!r} — the edge must hold NO owner key"
+        # and the live object carries the hop key as its only secret — no attribute hints at a signing key.
+        assert srv.hop_key and not any(
+            k for k in vars(srv) if "owner" in k.lower() or "sign" in k.lower() or "privkey" in k.lower())
     finally:
         srv.server_close()
+
+
+def test_serve_customer_cli_unions_allowlist_flags_and_env(monkeypatch):
+    """`cmd_serve_customer` must feed the edge's anti-DNS-rebind allowlist the de-duped UNION of the
+    repeatable --allow-host/--allow-origin flags and the $VIGIL_CUSTOMER_ALLOWED_* env vars — this is the
+    sole gate that lets the edge accept the proxy's forwarded Host/Origin, so pin it (red-pen LOW)."""
+    import types
+
+    from sigil import cli
+    captured = {}
+    monkeypatch.setattr("sigil.ui.custui.serve_customer", lambda **kw: captured.update(kw))
+    monkeypatch.setenv("VIGIL_CUSTOMER_ALLOWED_HOSTS", "app.example.com, app.example.com, env.example")
+    monkeypatch.setenv("VIGIL_CUSTOMER_ALLOWED_ORIGINS", "https://app.example.com")
+    args = types.SimpleNamespace(host="127.0.0.1", port=0,
+                                 allow_host=["flag.example.com", "app.example.com"],
+                                 allow_origin=["https://flag.example.com"])
+    cli.cmd_serve_customer(args)
+    # flags first, then env; de-duped, order-preserving (the _multi contract shared with cmd_serve).
+    assert captured["extra_hosts"] == ("flag.example.com", "app.example.com", "env.example")
+    assert captured["extra_origins"] == ("https://flag.example.com", "https://app.example.com")
+    assert captured["host"] == "127.0.0.1"

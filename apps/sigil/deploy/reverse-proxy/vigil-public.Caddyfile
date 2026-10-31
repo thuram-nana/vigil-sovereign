@@ -40,7 +40,10 @@ vigil.example.com, www.vigil.example.com {
 
 	header {
 		# pubui sets its own CSP/nosniff/referrer/framing headers; add HSTS at the edge and drop the Server banner.
-		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		# No includeSubDomains: the public site owns no subdomains, and the operator cockpit / customer app are
+		# SEPARATE origins that manage their own HSTS — includeSubDomains here could hard-block a private/VPN
+		# console behind an internal-CA cert. Add it only if you control every subdomain with a public cert.
+		Strict-Transport-Security "max-age=31536000"
 		-Server
 	}
 }
