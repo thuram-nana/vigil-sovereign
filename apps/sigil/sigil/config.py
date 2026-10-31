@@ -145,6 +145,7 @@ SCOPE = os.environ.get("SIGIL_SCOPE", "sigil")          # the owner's single sco
 # sovereign install is byte-identical until the customer plane is turned on (`vigil up` mints the hop key).
 CUSTOMER_UI_PORT = _int_env("VIGIL_CUSTOMER_PORT", 8734)
 COCKPIT_UI_PORT = _int_env("SIGIL_UI_PORT", 8733)       # the sovereign cockpit port (the edge's hop target)
+PUBLIC_UI_PORT = _int_env("VIGIL_PUBLIC_PORT", 8735)    # the keyless/cookieless public marketing+tools site
 _customer = SIGIL_HOME / "customer"
 
 
