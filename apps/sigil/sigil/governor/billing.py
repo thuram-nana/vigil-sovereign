@@ -733,11 +733,21 @@ class BillingSigner:
             if exp is not None and event.currency:
                 if event.currency.upper() != exp[1] or int(event.amount_minor) < exp[0]:
                     return None                       # underpaid / wrong currency -> mint nothing (fail-closed)
+            # Red-pen FINDING 1: event_id is the idempotency anchor for the wallet entry_id (top-up) AND the
+            # invoice_id (both value paths), but verify_and_parse only checks it is a non-empty str. Bound it to
+            # the SAME shape the wallet/invoice ledgers require (<= 128, non-control) HERE, so a pathological id
+            # fails the WHOLE value-granting event CLOSED (mint nothing) — symmetric across top-up and
+            # subscription — instead of the asymmetric half-mint (top-up's wallet.grant raised and aborted, but
+            # subscribe/refill never touch event_id, so the subscription committed while only its invoice raised).
+            eid = str(event.event_id or "")
+            if not eid or len(eid) > 128 or any(ord(c) < 0x20 or ord(c) == 0x7f for c in eid):
+                return None
         if event.kind == EVENT_TOPUP and ent.kind == EVENT_TOPUP and ent.credits > 0:
             # idempotent by event_id: a duplicate delivery reuses the same wallet entry_id -> folded once.
             seq = self.wallet.grant(oid, int(ent.credits), "topup", source_ref=event.event_id,
                                     entry_id=event.event_id, issued_at=event.created)
-            self._record_invoice(oid, event, "topup", credits=int(ent.credits))   # best-effort history line
+            if seq is not None:                       # record the history line only for a mint that took effect
+                self._record_invoice(oid, event, "topup", credits=int(ent.credits))
             return seq
         if event.kind == EVENT_SUBSCRIPTION_ACTIVE and ent.kind == EVENT_SUBSCRIPTION_ACTIVE \
                 and ent.plan_id and ent.period_s > 0.0:
@@ -753,27 +763,39 @@ class BillingSigner:
             # the subscribe above fresh -> the period advanced -> the bridge grants the new period's tranche (the
             # prior tranche simply expires: non-rollover).
             seq = refill_active_subscription(self.subscriptions, self.plan, oid, issued_at=event.created)
-            self._record_invoice(oid, event, "subscription", credits=int(ent.allotment),
-                                 period_start=event.created, period_end=period_end)
+            # Red-pen FINDING 2: record the invoice ONLY when the plan refill actually GRANTED (seq is not None).
+            # An out-of-order / stale subscription event (a distinct event_id with a non-increasing `created`)
+            # makes subscribe a LWW no-op and refill a no-op -> seq is None -> NO invoice, so the billing history
+            # never shows a period/credits the plan ledger did not deliver (a true replay dedups by event_id).
+            if seq is not None:
+                self._record_invoice(oid, event, "subscription", credits=int(ent.allotment),
+                                     period_start=event.created, period_end=period_end)
             return seq
         return None
 
     def _record_invoice(self, oid: str, event: BillingEvent, kind: str, *, credits: int,
                         period_start: float = 0.0, period_end: float = 0.0) -> None:
-        """Record ONE owner-signed billing-history line for a value-granting mint (Slice H). No-op when no
-        invoice ledger is injected. MONEY DOCTRINE: the line's `amount_minor`/`currency` are the owner-CATALOG
-        expected price for `event.price_id` (``self._expected``), NEVER the wire amount — when the catalog does
-        not price it, the line carries amount 0 (the credits/plan are still recorded). Idempotent by the SAME
-        provider `event_id` the money mint used, so a webhook replay folds once. MONEY-FIRST + best-effort: the
-        money mint already succeeded and returned; a malformed history line must NEVER undo or fail-report it, so
-        a (practically unreachable, inputs are pre-validated) ValueError is swallowed and a retry re-records it."""
+        """Record ONE owner-signed billing-history line for a value-granting mint that TOOK EFFECT (Slice H).
+        No-op when no invoice ledger is injected. The caller invokes this ONLY after the mint's seq is not None
+        (red-pen FINDING 2), and ``event.event_id`` is already bounded by ``apply`` before the mint (red-pen
+        FINDING 1), so the (org, event_id) line is written for exactly the mints that delivered value.
+
+        MONEY DOCTRINE: the line's ``amount_minor``/``currency`` are the owner-CATALOG expected price for
+        ``event.price_id`` (``self._expected``), NEVER the wire amount — when the catalog does not price it, the
+        line carries amount 0 (the credits/plan are still recorded). The owner-catalog money fields are coerced
+        to ``record()``-safe values here (a malformed expected amount/currency — an owner CONFIG error — DEGRADES
+        the line's money to 0/'' rather than raising after money has already moved), and ``org_id``/``kind``/
+        ``credits`` are valid by construction at this point, so this never raises on validation. A genuine
+        store-IO fault still propagates (it was never a ValueError and never silently swallowed): the money mint
+        has committed, and the provider's at-least-once retry re-records the line idempotently."""
         if self.invoices is None:
             return
         exp = self._expected.get(event.price_id)
         amount_minor, currency = (exp[0], exp[1]) if exp is not None else (0, "")
-        try:
-            self.invoices.record(oid, invoice_id=event.event_id, kind=kind, price_id=event.price_id,
-                                 amount_minor=amount_minor, currency=currency, credits=credits,
-                                 period_start=period_start, period_end=period_end, issued_at=event.created)
-        except ValueError:
-            pass   # history is secondary to the (already-committed) money mint; a retry re-records it
+        # Coerce the owner-catalog money fields to values record() accepts, so an owner misconfiguration degrades
+        # the money on this history line instead of dropping a committed mint's line entirely (FINDING 1 spirit).
+        amount_minor = amount_minor if isinstance(amount_minor, int) and amount_minor >= 0 else 0
+        currency = currency if (isinstance(currency, str) and currency.isalpha() and len(currency) <= 8) else ""
+        self.invoices.record(oid, invoice_id=event.event_id, kind=kind, price_id=event.price_id,
+                             amount_minor=amount_minor, currency=currency, credits=credits,
+                             period_start=period_start, period_end=period_end, issued_at=event.created)

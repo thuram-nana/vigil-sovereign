@@ -130,6 +130,37 @@ def test_invoice_amount_is_zero_when_the_catalog_does_not_price_it():
     assert (i.amount_minor, i.currency, i.credits) == (0, "", 200)
 
 
+def test_pathological_event_id_mints_nothing_on_both_value_paths():
+    # red-pen FINDING 1: an event_id too long / with control chars must fail the WHOLE value-granting event
+    # CLOSED (mint nothing), SYMMETRIC across top-up and subscription — never the half-mint where a subscription
+    # commits (subscribe/refill don't touch event_id) while only its invoice silently drops.
+    from sigil.governor.subscription import SubscriptionRegistry
+    s, inv, mock, signer = _inv_rig()
+    bad = "x" * 200
+    body, sig = _mk(mock, {"event_id": bad, "kind": EVENT_TOPUP, "org_id": "acme", "created": 100.0,
+                           "price_id": "price_topup_200"})
+    assert signer.ingest(body, sig, now=100.0) is None               # top-up: mint nothing
+    body, sig = _mk(mock, {"event_id": bad, "kind": EVENT_SUBSCRIPTION_ACTIVE, "org_id": "acme",
+                           "created": 100.0, "price_id": "price_pro"})
+    assert signer.ingest(body, sig, now=100.0) is None               # subscription: mint nothing (was half-mint)
+    assert SubscriptionRegistry(s, owner_key=OWNER, trusted_pubkey=OP).subscription("acme") is None  # NOT active
+    assert inv.invoices("acme") == []
+
+
+def test_stale_out_of_order_subscription_records_no_invoice():
+    # red-pen FINDING 2: an older subscription event delivered AFTER a newer one (distinct event_id, smaller
+    # created) is a stale LWW no-op mint -> it must record NO invoice line (the history must never show a period
+    # the plan ledger never granted).
+    s, inv, mock, signer = _inv_rig()
+    b1, s1 = _mk(mock, {"event_id": "evt_new", "kind": EVENT_SUBSCRIPTION_ACTIVE, "org_id": "acme",
+                        "created": 200.0, "price_id": "price_pro"})
+    assert signer.ingest(b1, s1, now=200.0) is not None
+    b2, s2 = _mk(mock, {"event_id": "evt_old", "kind": EVENT_SUBSCRIPTION_ACTIVE, "org_id": "acme",
+                        "created": 100.0, "price_id": "price_pro"})      # out of order, distinct id
+    signer.ingest(b2, s2, now=200.0)
+    assert [i.invoice_id for i in inv.invoices("acme")] == ["evt_new"], "the stale event must record no invoice"
+
+
 def test_no_invoice_ledger_is_backward_compatible():
     # a signer built WITHOUT an invoice ledger (the pre-H default) still mints money and emits no invoice.
     _s, w, _subs, _plan, _m, mock, signer = _rig()
