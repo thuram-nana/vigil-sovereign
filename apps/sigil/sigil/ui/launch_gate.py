@@ -8,23 +8,34 @@ the owner key reserve the credits and mint a ``CreditLaunchLease``:
      org_admin, a viewer, and a non-member are all refused. Paying / administering billing is not launching.
   2. OWNERSHIP PROOF (billing != testing): ``AssetOwnershipRegistry.has_current_proof(org_id, host, now)`` —
      a current, infrastructure-bound proof is required. Credits alone never authorize a test.
-  3. TARGET AUTHORITY (testing-authz): a CURRENT, owner-signed ``EngagementAuthority`` for this exact host
-     must be on the seam and VERIFY under THIS owner key (scope == [host], window covers now). The G0 mint
-     is the only producer; ``offense_authority``/``target_add`` stay at the owner key.
-  4. CREDIT BALANCE (spend): ``CreditMeter.available(org_id, now) >= units`` (units >= 1, fail-closed).
+  3. TARGET AUTHORITY (testing-authz): a CURRENT ``EngagementAuthority`` for this exact host must be on the
+     seam and VERIFY against a LOCALLY-PINNED owner trust root (scope == [host], window covers now). The seam
+     is cross-plane and the offense plane is keyless/untrusted, so the bundle's OWN trust_root is discarded
+     for the trust decision — we require that OUR owner key SIGNED it (not merely that it is listed, which a
+     seam-writer could forge with the owner's public key). The G0 mint is the only legitimate producer.
+  4. CREDIT BALANCE (spend): ``CreditMeter.available(org_id, now) >= units`` (units in [1, 1e6], fail-closed).
 
-Only then: RESERVE the credits (an owner-signed debit holds the spend cap) and MINT the owner-signed lease —
-both under the process-wide spine lock so a concurrent reserve cannot double-spend or race a revoked
-membership/proof (TOCTOU: the conjuncts are re-checked INSIDE the lock, immediately before the debit+mint).
+Only then, under the spine lock (all four conjuncts RE-CHECKED inside it — TOCTOU): RESERVE the credits and
+MINT the owner-signed lease. The reservation is bound to OWNER-SIGNED LEDGER RECORDS, never to a wire amount:
+  * reserve SPENDS plan-credits-first then the wallet (``_spend``) and then ENFORCES an availability-delta
+    invariant — ``CreditMeter.available`` MUST have dropped by exactly ``units``, else it refuses and mints
+    NOTHING. This makes the two buckets consistent (a plan-credit tenant is genuinely charged, not under-
+    reserved) AND makes a reused nonce fail-closed (its idempotent debits no-op -> no delta -> refuse).
+  * the minted lease carries the owner-signed ``units_reserved``; settle refunds strictly against THAT signed
+    amount (``settle_launch`` takes the signed lease, verifies it owner-pinned, and refunds
+    ``units_reserved - consumed`` capped so net spend == metered consumption) — no on-the-wire integer ever
+    decides a refund (the money doctrine).
+
 The signed lease is RETURNED for the caller (the provisioner/edge, Slice G commit 3) to drop on the seam;
 the keyless offense launch then verifies it (``vigil_core.verify_credit_launch_lease``) as a separate
-conjunct from the authority. The release/settle (refund the unused reservation) + the offense-side verify +
-the per-unit debit land in commit 3.
+conjunct from the authority.
 
 ``requester``/``org_id`` are AUTHORITATIVE, supplied by trusted sovereign code (the provisioner, after the
-edge's session binding) — never a client-supplied field. FATAL-2: sovereign-side, ``assert_no_offense`` at
-import; the authority broker (integration seam) is imported lazily inside the method, exactly as
-``target_authorization`` does.
+edge's session binding) — never a client-supplied field. KNOWN CAVEAT (LOW, matches the codebase posture for
+compound mutations, e.g. ``orgs.revoke_org``): the available-check -> debit is atomic within a process (the
+spine lock) but the cross-process floor is the per-append flock, so two concurrent SIGIL PROCESSES on one
+spine could over-reserve by at most one launch; the sovereign cockpit is single-process. FATAL-2:
+sovereign-side, ``assert_no_offense`` at import; the authority broker (integration seam) is imported lazily.
 """
 from __future__ import annotations
 
@@ -71,24 +82,38 @@ class LaunchGate:
         from .target_authorization import _base_dir
         return _base_dir()
 
-    def _authority_ok(self, org_id: str, host: str, slug: str, now_dt: datetime) -> bool:
-        """True iff a CURRENT owner-signed EngagementAuthority for exactly ``host`` is on the seam under
-        ``slug`` and verifies under THIS owner key with its window covering ``now``. Fail-closed on any
-        read/verify error (never raises). Mirrors ``target_authorization.authority_status``'s checks."""
+    @staticmethod
+    def _as_dt(now: Any) -> datetime:
+        t = now() if callable(now) else now
+        if not isinstance(t, datetime):
+            t = datetime.fromtimestamp(float(t), tz=timezone.utc)
+        if t.tzinfo is None:
+            t = t.replace(tzinfo=timezone.utc)
+        return t
+
+    def _authority_ok(self, host: str, slug: str, now_dt: datetime) -> bool:
+        """True iff a CURRENT EngagementAuthority for exactly ``host`` is on the seam under ``slug`` and
+        verifies against a LOCALLY-PINNED owner trust root (our owner key SIGNED it), scope == [host], window
+        covers ``now``. Fail-closed on any read/verify error (never raises).
+
+        SECURITY: the seam is cross-plane and written by untrusted code, so the bundle's OWN ``trust_root`` is
+        NEVER trusted for the decision — an attacker who can write the seam could co-list the owner's PUBLIC
+        key beside their own and sign with their own key, satisfying a mere 'owner key is listed' membership
+        test. We instead verify against ``TrustRoot(threshold=1, [owner])`` built from OUR owner pubkey, so a
+        bundle the owner did not sign is refused (the pinned-owner-key guarantee the seam contract requires)."""
         kp = self.owner_key
         if kp is None:
             return False
         try:
-            from vigil_core import verify_engagement_authority
+            from vigil_core import AuthorizerKey, TrustRoot, verify_engagement_authority
             from vigil_integration.live.authorization_broker import read_authorization
             ta = read_authorization(self._seam_base(), slug)
             if ta is None:
                 return False
-            ok, _ = verify_engagement_authority(ta.signed_authority, ta.trust_root)
+            owner_root = TrustRoot(threshold=1, authorizers=[
+                AuthorizerKey(key_id="owner", name="owner", public_key_b64=kp.public_key_b64)])
+            ok, _ = verify_engagement_authority(ta.signed_authority, owner_root)   # PINNED, not ta.trust_root
             if not ok:
-                return False
-            owner_ids = {a.public_key_b64 for a in ta.trust_root.authorizers}
-            if kp.public_key_b64 not in owner_ids:               # must be OUR owner key (not any signer)
                 return False
             doc = ta.signed_authority.document
             if list(doc.scope) != [host]:                        # EXACTLY this host — no parent/wildcard
@@ -97,15 +122,33 @@ class LaunchGate:
         except Exception:  # noqa: BLE001 — a missing/corrupt/foreign bundle is simply "not authorized"
             return False
 
+    def _spend(self, oid: str, units: int, slug: str, nonce: str, now_ts: float) -> None:
+        """Debit ``units`` across PLAN-credits-first then the WALLET, so ``CreditMeter.available`` drops by
+        ``units``. Each bucket debit is idempotent per (slug, nonce), so a reused nonce re-appends the SAME
+        entry_ids and no-ops — the caller's availability-delta invariant then sees no drop and refuses. Never
+        over-debits: ``from_plan`` is clamped to the live plan remainder and the caller already checked
+        ``available >= units``."""
+        pos = self.meter.position(oid, now_ts)
+        from_plan = min(units, max(0, pos.plan_live))
+        if from_plan > 0:
+            sub = self.meter.subscriptions.active_subscription(oid, now_ts)
+            if sub is not None:
+                self.meter.plan.debit(oid, from_plan, period_end=sub.period_end, engagement_id=slug,
+                                      entry_id=f"reserve-plan:{slug}:{nonce}", issued_at=now_ts)
+        from_wallet = units - from_plan
+        if from_wallet > 0:
+            self.wallet.debit(oid, from_wallet, engagement_id=slug,
+                              entry_id=f"reserve-wallet:{slug}:{nonce}", issued_at=now_ts)
+
     def reserve_launch(self, *, requester: str, org_id: str, host: str, units: int, now: Any,
                        duration_hours: Any = _DEFAULT_LEASE_HOURS, nonce: Optional[str] = None) -> dict:
         """Authorize + reserve + mint for ONE launch. Returns ``{ok: True, lease, ...}`` with the signed lease
-        (serialized) on success, or ``{ok: False, error}`` (fail-closed) on any failing conjunct — and on a
-        refusal NOTHING is debited and NO lease is minted. ``units`` is the reservation cap (>= 1)."""
+        on success, or ``{ok: False, error}`` (fail-closed) on any failing conjunct — and on a refusal NOTHING
+        is debited and NO lease is minted. ``units`` is the reservation cap (>= 1)."""
         from ..governor.orgs import _check_org_id
         from ..governor.asset_ownership import _check_host
         from .target_authorization import _customer_slug
-        from vigil_core import CreditLaunchLease, AuthorizerKey, TrustRoot, sign_credit_launch_lease
+        from vigil_core import AuthorizerKey, CreditLaunchLease, TrustRoot, sign_credit_launch_lease
 
         kp = self.owner_key
         if kp is None:
@@ -127,12 +170,10 @@ class LaunchGate:
             return {"ok": False, "error": "duration_hours must be a number"}
         if not (0 < dur <= _MAX_LEASE_HOURS):
             return {"ok": False, "error": f"duration_hours must be in (0, {_MAX_LEASE_HOURS}]"}
-
-        t = now() if callable(now) else now
-        if not isinstance(t, datetime):
-            t = datetime.fromtimestamp(float(t), tz=timezone.utc)
-        if t.tzinfo is None:
-            t = t.replace(tzinfo=timezone.utc)
+        try:
+            t = self._as_dt(now)
+        except (TypeError, ValueError, OSError, OverflowError):
+            return {"ok": False, "error": "now must be a datetime or a POSIX timestamp"}
         now_ts = t.timestamp()
         slug = _customer_slug(oid, h)
         non = str(nonce) if nonce is not None else secrets.token_urlsafe(16)
@@ -146,25 +187,26 @@ class LaunchGate:
             if not self.ownership.has_current_proof(oid, h, now=now_ts):
                 return (f"no current ownership proof for {h} (org {oid}): prove control of the asset before an "
                         f"assessment can be launched — ownership is separate from billing")
-            if not self._authority_ok(oid, h, slug, t):
+            if not self._authority_ok(h, slug, t):
                 return (f"no current owner-signed engagement authority for {h} (org {oid}) — the owner must "
                         f"authorize this target (offense_authority stays at the owner key)")
             if self.meter.available(oid, now_ts) < u:
                 return f"insufficient credits: need {u}, have {self.meter.available(oid, now_ts)}"
             return None
 
-        # Cheap pre-check OUTSIDE the lock (fast refusal without taking the lock).
-        pre = _gated()
+        pre = _gated()                                   # cheap pre-check outside the lock (fast refusal)
         if pre is not None:
             return {"ok": False, "error": pre}
         with self._lock:
-            # TOCTOU: re-check EVERY conjunct inside the lock, immediately before the debit + mint, so a
-            # membership/proof/authority revoked or credits spent concurrently cannot sign through.
-            re = _gated()
+            re = _gated()                                # TOCTOU: re-check every conjunct inside the lock
             if re is not None:
                 return {"ok": False, "error": re}
-            # RESERVE: an owner-signed debit holds the spend cap (idempotent per entry_id on this launch).
-            self.wallet.debit(oid, u, engagement_id=slug, entry_id=f"reserve:{slug}:{non}", issued_at=now_ts)
+            before = self.meter.available(oid, now_ts)
+            self._spend(oid, u, slug, non, now_ts)       # plan-first then wallet (idempotent per slug/nonce)
+            if before - self.meter.available(oid, now_ts) < u:
+                # the spend did NOT consume `u` (a reused nonce's debits no-op'd, or a bucket shortfall) —
+                # refuse and mint NOTHING, so a reservation is ALWAYS backed by a real, incremental debit.
+                return {"ok": False, "error": "this launch reservation did not apply (nonce already used)"}
             doc = CreditLaunchLease(
                 engagement_slug=slug, org_id=oid, scope_host=h, units_reserved=u,
                 not_before=t, not_after=t + timedelta(hours=dur), nonce=non, issued_at=now_ts)
@@ -179,40 +221,42 @@ class LaunchGate:
             "trust_root": trust_root.model_dump(mode="json"),
         }
 
-    def settle_launch(self, *, org_id: str, slug: str, nonce: str, units_reserved: int,
-                      consumed_units: int, now: Any) -> dict:
-        """Close out a reservation: refund the UNUSED portion so net spend == metered consumption. ``reserve``
-        debited the full ``units_reserved`` cap; this grants back ``units_reserved - consumed_units`` (a
-        ``refund`` grant). ``consumed_units == 0`` is the CANCEL / release case (full refund); a crash before
-        settle simply leaves the cap debited (fail-closed, never over-refunds). Idempotent per (slug, nonce):
-        a re-settle is a no-op (the grant dedups on ``entry_id``), so a retried settlement cannot double-refund.
-        ``consumed_units`` is CLAMPED to ``[0, units_reserved]`` — the offense side can never claw back more
-        than it reserved. Returns ``{ok, refunded, net_spend}``; fail-closed on bad inputs."""
-        from ..governor.orgs import _check_org_id
-        if self.owner_key is None:
+    def settle_launch(self, *, signed_lease: Any, consumed_units: int, now: Any) -> dict:
+        """Close out a reservation: refund the UNUSED portion so net spend == metered consumption. The refund
+        is bound to the OWNER-SIGNED LEASE, never to a wire amount — ``signed_lease`` (the object
+        ``reserve_launch`` returned) is VERIFIED under a locally-pinned owner trust root and
+        ``units_reserved`` / ``org_id`` / ``slug`` / ``nonce`` are taken from the VERIFIED document, so a
+        forged or wire-asserted amount cannot mint a refund (the HIGH the red-pen found). Refund =
+        ``units_reserved - clamp(consumed_units, 0, units_reserved)``, granted back to the wallet. Idempotent
+        per the lease's (slug, nonce): a re-settle no-ops. ``consumed_units == 0`` is the cancel/release case
+        (full refund); a crash before settle simply leaves the cap debited (fail-closed, never over-refunds)."""
+        from vigil_core import AuthorizerKey, SignedCreditLaunchLease, TrustRoot, verify_credit_launch_lease
+        kp = self.owner_key
+        if kp is None:
             return {"ok": False, "error": "a refund must be owner-signed (internal: no owner key)"}
         try:
-            oid = _check_org_id(org_id)
-        except ValueError as e:
-            return {"ok": False, "error": str(e)}
+            signed = SignedCreditLaunchLease.model_validate(signed_lease)
+        except Exception:  # noqa: BLE001 — a malformed lease is a fail-closed refusal
+            return {"ok": False, "error": "settle requires the signed launch lease from reserve_launch"}
+        owner_root = TrustRoot(threshold=1, authorizers=[
+            AuthorizerKey(key_id="owner", name="owner", public_key_b64=kp.public_key_b64)])
+        ok, reason = verify_credit_launch_lease(signed, owner_root)
+        if not ok:
+            return {"ok": False, "error": f"lease does not verify under the owner key: {reason}"}
+        doc = signed.document
+        oid, s, non, reserved = doc.org_id, doc.engagement_slug, doc.nonce, int(doc.units_reserved)
         try:
-            reserved = int(units_reserved)
             consumed = int(consumed_units)
         except (TypeError, ValueError):
-            return {"ok": False, "error": "units_reserved and consumed_units must be integers"}
-        if reserved < 0 or consumed < 0:
-            return {"ok": False, "error": "units_reserved and consumed_units must be non-negative"}
-        s = str(slug or "").strip()
-        non = str(nonce or "").strip()
-        if not s or not non:
-            return {"ok": False, "error": "slug and nonce are required to settle a reservation"}
-        consumed = min(consumed, reserved)                 # offense can never consume past the reserved cap
+            return {"ok": False, "error": "consumed_units must be an integer"}
+        if consumed < 0:
+            return {"ok": False, "error": "consumed_units must be non-negative"}
+        consumed = min(consumed, reserved)                 # can never claw back more than the signed reservation
         refund = reserved - consumed
-        t = now() if callable(now) else now
-        if isinstance(t, datetime):
-            now_ts = t.timestamp()
-        else:
-            now_ts = float(t)
+        try:
+            now_ts = self._as_dt(now).timestamp()
+        except (TypeError, ValueError, OSError, OverflowError):
+            return {"ok": False, "error": "now must be a datetime or a POSIX timestamp"}
         with self._lock:
             if refund > 0:
                 self.wallet.grant(oid, refund, "refund", source_ref=s,

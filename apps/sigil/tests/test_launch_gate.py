@@ -157,12 +157,11 @@ def test_bad_units_refused(units):
     assert r["ok"] is False and _avail(s, "org_a") == 100
 
 
-# --- settle / release: refund the unused reservation (net spend == consumption) ---------------------
+# --- settle / release: refund bound to the SIGNED lease (net spend == consumption) ------------------
 
 def _reserve(store, *, units=30):
     _setup(store, "org_a", "apme.cm", credits=100)
-    r = store and _gate(store).reserve_launch(requester="u", org_id="org_a", host="apme.cm",
-                                              units=units, now=2000.0)
+    r = _gate(store).reserve_launch(requester="u", org_id="org_a", host="apme.cm", units=units, now=2000.0)
     assert r["ok"], r
     return r
 
@@ -170,8 +169,7 @@ def _reserve(store, *, units=30):
 def test_settle_refunds_the_unused_reservation():
     s = _store()
     r = _reserve(s)                                        # 100 - 30 reserved = 70
-    out = _gate(s).settle_launch(org_id="org_a", slug=r["slug"], nonce=r["nonce"],
-                                 units_reserved=r["units_reserved"], consumed_units=10, now=3000.0)
+    out = _gate(s).settle_launch(signed_lease=r["lease"], consumed_units=10, now=3000.0)
     assert out["ok"] and out["refunded"] == 20 and out["net_spend"] == 10
     assert _avail(s, "org_a") == 90                        # net spend 10
 
@@ -179,25 +177,22 @@ def test_settle_refunds_the_unused_reservation():
 def test_settle_cancel_is_a_full_refund():
     s = _store()
     r = _reserve(s)
-    out = _gate(s).settle_launch(org_id="org_a", slug=r["slug"], nonce=r["nonce"],
-                                 units_reserved=r["units_reserved"], consumed_units=0, now=3000.0)
+    out = _gate(s).settle_launch(signed_lease=r["lease"], consumed_units=0, now=3000.0)
     assert out["refunded"] == 30 and _avail(s, "org_a") == 100   # cancel before work -> nothing spent
 
 
 def test_settle_all_consumed_no_refund():
     s = _store()
     r = _reserve(s)
-    out = _gate(s).settle_launch(org_id="org_a", slug=r["slug"], nonce=r["nonce"],
-                                 units_reserved=r["units_reserved"], consumed_units=30, now=3000.0)
+    out = _gate(s).settle_launch(signed_lease=r["lease"], consumed_units=30, now=3000.0)
     assert out["refunded"] == 0 and _avail(s, "org_a") == 70
 
 
 def test_settle_clamps_consumed_to_reserved():
-    """The offense side can NEVER claw back more than it reserved — consumed is clamped to the cap."""
+    """The offense side can NEVER claw back more than the signed reservation — consumed is clamped to the cap."""
     s = _store()
     r = _reserve(s)
-    out = _gate(s).settle_launch(org_id="org_a", slug=r["slug"], nonce=r["nonce"],
-                                 units_reserved=r["units_reserved"], consumed_units=999, now=3000.0)
+    out = _gate(s).settle_launch(signed_lease=r["lease"], consumed_units=999, now=3000.0)
     assert out["refunded"] == 0 and _avail(s, "org_a") == 70     # clamped: no negative refund, no over-claw
 
 
@@ -205,8 +200,81 @@ def test_settle_is_idempotent():
     s = _store()
     r = _reserve(s)
     g = _gate(s)
-    g.settle_launch(org_id="org_a", slug=r["slug"], nonce=r["nonce"],
-                    units_reserved=r["units_reserved"], consumed_units=10, now=3000.0)
-    g.settle_launch(org_id="org_a", slug=r["slug"], nonce=r["nonce"],
-                    units_reserved=r["units_reserved"], consumed_units=10, now=4000.0)   # retry
+    g.settle_launch(signed_lease=r["lease"], consumed_units=10, now=3000.0)
+    g.settle_launch(signed_lease=r["lease"], consumed_units=10, now=4000.0)   # retry
     assert _avail(s, "org_a") == 90                        # refunded exactly once, not twice
+
+
+# --- red-pen fold: the refund is bound to the OWNER-SIGNED lease, never a wire amount ---------------
+
+def test_settle_rejects_a_forged_lease_no_free_credits():
+    """HIGH fold: settle verifies the lease under the owner key; a forged/attacker-signed lease asserting a
+    huge units_reserved mints NOTHING (the earlier wire-trusted-units free-credit bug)."""
+    from vigil_core import (AuthorizerKey, CreditLaunchLease, TrustRoot, generate_keypair,
+                            sign_credit_launch_lease)
+    from datetime import datetime, timedelta, timezone
+    s = _store()
+    _setup(s, "org_a", "apme.cm", credits=100)
+    attacker = generate_keypair()
+    t0 = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    forged = sign_credit_launch_lease(
+        CreditLaunchLease(engagement_slug="cust_x", org_id="org_a", scope_host="apme.cm",
+                          units_reserved=1_000_000, not_before=t0, not_after=t0 + timedelta(hours=8),
+                          nonce="n", issued_at=1.0),
+        {"owner": attacker.private_key_b64})                      # signed by the WRONG key
+    out = _gate(s).settle_launch(signed_lease=forged.model_dump(mode="json"), consumed_units=0, now=3000.0)
+    assert out["ok"] is False and _avail(s, "org_a") == 100       # no refund minted
+
+
+def test_settle_rejects_a_bare_wire_amount():
+    """There is NO wire units_reserved parameter any more — a caller cannot assert a refund amount."""
+    s = _store()
+    _setup(s, "org_a", "apme.cm", credits=100)
+    out = _gate(s).settle_launch(signed_lease={"not": "a lease"}, consumed_units=0, now=3000.0)
+    assert out["ok"] is False and _avail(s, "org_a") == 100
+
+
+def test_forged_seam_authority_refused_owner_must_sign():
+    """HIGH fold: _authority_ok verifies against a PINNED owner root, not the seam bundle's own trust_root.
+    An attacker who writes a bundle co-listing the owner PUBLIC key + their own, signed by their own key,
+    is refused (the owner key must have SIGNED, not merely be listed)."""
+    import os
+    from datetime import datetime, timedelta, timezone
+    from vigil_core import (AuthorizerKey, EngagementAuthority, TargetEnvironment, TrustRoot,
+                            generate_keypair, sign_engagement_authority)
+    from vigil_integration.live.authorization_broker import write_authorization
+    from sigil.governor.identity import ensure_owner_keypair
+    from sigil.ui.target_authorization import _customer_slug
+    s = _store()
+    # org_a: operator + proof + credits, but NO legitimately-minted authority (so only the forgery is present)
+    _setup(s, "org_a", "apme.cm", credits=100, authority=False)
+    owner = ensure_owner_keypair()
+    attacker = generate_keypair()
+    # a window that COVERS now=2000.0 (a POSIX ts), so ONLY the owner-pin can refuse — not the window check
+    nb = datetime.fromtimestamp(0, tz=timezone.utc)
+    na = datetime.fromtimestamp(1e9, tz=timezone.utc)
+    slug = _customer_slug("org_a", "apme.cm")
+    doc = EngagementAuthority(engagement_slug=slug, environment=TargetEnvironment("live"), scope=["apme.cm"],
+                              not_before=nb, not_after=na, issued_by="attacker")
+    forged = sign_engagement_authority(doc, {"attacker": attacker.private_key_b64})
+    # trust_root co-lists the owner's PUBLIC key (public info) beside the attacker key; threshold 1
+    forged_root = TrustRoot(threshold=1, authorizers=[
+        AuthorizerKey(key_id="owner", name="owner", public_key_b64=owner.public_key_b64),
+        AuthorizerKey(key_id="attacker", name="attacker", public_key_b64=attacker.public_key_b64)])
+    write_authorization(os.environ["VIGIL_BASE_DIR"], slug, forged, forged_root)
+    r = _gate(s).reserve_launch(requester="u", org_id="org_a", host="apme.cm", units=10, now=2000.0)
+    assert r["ok"] is False and "engagement authority" in r["error"]   # owner never signed -> refused
+    assert _avail(s, "org_a") == 100
+
+
+def test_nonce_reuse_does_not_mint_a_free_lease():
+    """MED fold: re-reserving a (slug, nonce) whose debits already applied yields no delta -> refused, so a
+    settled-then-reused nonce cannot mint a second lease on a swallowed debit."""
+    s = _store()
+    _setup(s, "org_a", "apme.cm", credits=100)
+    g = _gate(s)
+    r1 = g.reserve_launch(requester="u", org_id="org_a", host="apme.cm", units=30, now=2000.0, nonce="fixed")
+    assert r1["ok"] and _avail(s, "org_a") == 70
+    g.settle_launch(signed_lease=r1["lease"], consumed_units=0, now=2500.0)    # refund -> back to 100
+    r2 = g.reserve_launch(requester="u", org_id="org_a", host="apme.cm", units=30, now=3000.0, nonce="fixed")
+    assert r2["ok"] is False and _avail(s, "org_a") == 100     # reused nonce -> no debit, no free lease
