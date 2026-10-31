@@ -1,0 +1,131 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Trust center — VIGIL</title>
+<meta name="description" content="VIGIL's trust center: a proof-first account of how the engine is built — offline-verifiable findings, fail-closed controls, sovereignty tiers, data handling, and an honest roadmap. No badge wall.">
+<link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/assets/tokens.css">
+<link rel="stylesheet" href="/assets/site.css">
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+<header class="nav"><div class="wrap nav__row">
+  <a class="brand" href="/"><img class="brand__mark" src="/assets/favicon.svg" alt="" width="26" height="26"><span>VIGIL</span></a>
+  <nav class="nav__links" aria-label="Primary">
+    <a href="/vs">Compare</a><a href="/tools">Tools</a><a href="/cve">CVEs</a><a href="/trust">Trust</a><a href="/blog">Blog</a>
+  </nav>
+  <span class="nav__spacer"></span>
+  <a class="btn btn--primary" href="/support">Request access</a>
+</div></header>
+
+<main id="main">
+  <section class="hero"><div class="wrap">
+    <p class="eyebrow">Trust center</p>
+    <h1>Trust, by proof — not a badge wall.</h1>
+    <p class="lede">Most trust pages ask you to trust a logo. VIGIL's whole design is that you don't have to:
+      a finding re-verifies offline, controls fail closed, and every public claim traces to source and a
+      test. Here's the honest account — including what we don't yet have.</p>
+  </div></section>
+
+  <section class="section--tight"><div class="wrap">
+    <div class="band" style="text-align:left">
+      <span class="chip chip--fact"><i class="dot"></i>Verify it yourself</span>
+      <h2 style="margin-top:var(--sp-3)">Re-verify a finding offline — with nothing of ours installed</h2>
+      <p style="margin-left:0">Every confirmed finding ships as a signed, proof-carrying <em>certificate</em>:
+        the inputs, the oracle, and the observed result. A third party re-runs the check from that evidence
+        alone and gets the same verdict. The verifier is small, auditable, and content-hash-pinned — trust
+        the math, not our dashboard.</p>
+      <pre class="prose" style="margin-left:0; max-width:none"><code># re-prove a VIGIL finding from its evidence bundle, offline
+python3 -m framework.v2 verify ./evidence/&lt;finding&gt;.json</code></pre>
+    </div>
+  </div></section>
+
+  <section class="section"><div class="wrap">
+    <p class="eyebrow">Security controls</p>
+    <h2 style="font-size:var(--fs-xl); margin:0 0 var(--sp-4)">Fail-closed by default in production posture</h2>
+    <div class="grid grid--2">
+      <div class="card"><h3>Eight production gates</h3><p>In production posture VIGIL refuses to start unless
+        all hold: sealed key vault, non-permissive sovereignty, entitlement enforcement, backup + re-prove
+        timers, a signed engagement charter, the legacy owner-token disabled, the egress supervisor armed,
+        and a witness quorum.</p></div>
+      <div class="card"><h3>Owner-key custody</h3><p>The owner holds the only signing keys, with an
+        HSM/YubiKey option and m-of-n approval for irreversible actions. The key never touches a
+        customer-facing process.</p></div>
+      <div class="card"><h3>Two-plane isolation (FATAL-2)</h3><p>The key-holding governor carries no
+        offensive capability and cannot even load offense code — a formally-stated, test-enforced boundary.</p></div>
+      <div class="card"><h3>Tamper-evident history</h3><p>An append-only, owner-signed event spine with
+        anti-rollback. <span class="muted">(Append-only and anti-rollback are live; the hard-delete/prune
+        step is built but gated off by default.)</span></p></div>
+      <div class="card"><h3>Sovereignty tiers</h3><p>Four enforced tiers from connected to air-gapped.
+        <span class="muted">A tier is not, by itself, a network control — pair it with your firewall.</span></p></div>
+      <div class="card"><h3>Zero telemetry · audited egress</h3><p>No phone-home, no auto-update. The
+        "everything else" outbound bucket is empty and CI-gated; every egress is source-audited.</p></div>
+    </div>
+  </div></section>
+
+  <section class="section"><div class="wrap">
+    <div class="grid grid--2">
+      <div>
+        <p class="eyebrow">Standards VIGIL speaks</p>
+        <h2 style="font-size:var(--fs-lg); margin:0 0 var(--sp-3)">Findings mapped to 10 frameworks</h2>
+        <p class="muted" style="font-size:var(--fs-sm)">A re-proven FACT is mapped to the controls it bears on
+          across 10 security frameworks — so you can speak auditor about <strong>your</strong> systems. This
+          is a mapping of your findings, never a compliance claim about VIGIL itself.</p>
+      </div>
+      <div>
+        <p class="eyebrow">Data handling &amp; residency</p>
+        <dl class="kv" style="margin-top:var(--sp-2)">
+          <dt>Where data lives</dt><dd>On your hardware (self-hosted). Air-gappable.</dd>
+          <dt>Telemetry</dt><dd>None.</dd>
+          <dt>Erasure</dt><dd>Cryptographic shredding of engagement evidence.</dd>
+          <dt>LLM backend</dt><dd>Yours — local or a provider key you choose.</dd>
+        </dl>
+      </div>
+    </div>
+  </div></section>
+
+  <section class="section"><div class="wrap">
+    <p class="eyebrow">Subprocessors</p>
+    <div class="matrix-scroll"><table class="matrix">
+      <thead><tr><th scope="col">Mode</th><th scope="col">Subprocessors</th></tr></thead>
+      <tbody>
+        <tr><th scope="row">Self-hosted / air-gapped (default)</th><td class="yes">None — nothing leaves your perimeter</td></tr>
+        <tr><th scope="row">Hosted billing (when used)</th><td>Flutterwave (primary) · Stripe · an email transport you configure</td></tr>
+        <tr><th scope="row">LLM</th><td>Only the model provider you choose (or a local model — none)</td></tr>
+      </tbody>
+    </table></div>
+    <p class="muted" style="margin-top:var(--sp-3); font-size:var(--fs-xs)">We list only subprocessors that
+      genuinely exist. A self-hosted deployment has none.</p>
+  </div></section>
+
+  <section class="section"><div class="wrap">
+    <div class="grid grid--2">
+      <div class="card">
+        <h3>Independent audit &amp; standards — roadmap</h3>
+        <p>VIGIL holds no third-party attestations today (SOC 2, ISO 27001, GDPR, HIPAA, PCI, FedRAMP). These
+          are on our roadmap, and we will say so only when a report genuinely exists — never before. We make
+          no compliance claim about VIGIL itself in the meantime.</p>
+      </div>
+      <div class="card">
+        <h3>Policies &amp; disclosure</h3>
+        <p>Security policy, privacy, terms, and acceptable-use are published and versioned. Found a flaw in
+          VIGIL? Our coordinated-disclosure process has a 3-day acknowledgement and a 90-day window, with
+          safe harbour for good-faith research.</p>
+        <a class="card__more" href="/support">Report a vulnerability →</a>
+      </div>
+    </div>
+  </div></section>
+
+  <section class="section"><div class="wrap"><div class="band">
+    <h2>Don't take our word for it.</h2>
+    <p>Ask for a finding and re-verify it yourself, offline. That's the whole point.</p>
+    <div class="btn-row" style="justify-content:center">
+      <a class="btn btn--primary" href="/support">Request access</a>
+      <a class="btn btn--ghost" href="/vs">How VIGIL compares</a>
+    </div>
+  </div></div></section>
+</main>
+</body>
+</html>

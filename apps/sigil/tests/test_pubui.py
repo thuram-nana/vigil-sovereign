@@ -124,3 +124,30 @@ def test_public_bind_is_fail_closed():
     for bad in ("0.0.0.0", "::", "8.8.8.8"):
         with pytest.raises(ValueError):
             PublicServer((bad, 0), PublicHandler)
+
+
+def test_public_site_honors_the_honesty_constraints():
+    # Durable guard for the three honesty rules the build spec (and the reviewer-package gate
+    # tools/reviewer-package/assemble.py::assert_no_certification_wording) require on public copy:
+    #   * "source-available", NEVER "open source";
+    #   * no certification word-family claim (certify/certified/certification/...) — "certificate" is allowed;
+    #   * no fabricated "start for free" hosted-signup CTA (SaaS is not shipped).
+    import pathlib
+    import re
+    root = pathlib.Path(__file__).resolve().parents[1] / "sigil" / "ui" / "public_site"
+    cert_re = re.compile(r"\bcertif(?:y|ies|ied|ying|ication|ications|iable|iably)\b", re.IGNORECASE)
+    opensrc_re = re.compile(r"open[\s-]?source", re.IGNORECASE)
+    freecta_re = re.compile(r"start\s+for\s+free", re.IGNORECASE)
+    offenders = []
+    for f in root.rglob("*"):
+        if f.suffix.lower() not in (".html", ".css", ".js", ".txt", ".xml"):
+            continue
+        text = f.read_text(encoding="utf-8", errors="replace")
+        rel = f.relative_to(root)
+        if opensrc_re.search(text):
+            offenders.append(f"{rel}: 'open source' (say 'source-available')")
+        if cert_re.search(text):
+            offenders.append(f"{rel}: certification word-family (negated or not — avoid it)")
+        if freecta_re.search(text):
+            offenders.append(f"{rel}: 'start for free' (no hosted signup is shipped)")
+    assert not offenders, "public-site honesty violations:\n  " + "\n  ".join(offenders)

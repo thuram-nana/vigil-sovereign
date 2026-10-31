@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>VIGIL vs. Burp Suite</title>
+<meta name="description" content="An honest comparison of VIGIL and Burp Suite: the manual tester's standard vs. an autonomous engine that drives the same techniques and proves the hits. Where each wins.">
+<link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/assets/tokens.css">
+<link rel="stylesheet" href="/assets/site.css">
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+<header class="nav"><div class="wrap nav__row">
+  <a class="brand" href="/"><img class="brand__mark" src="/assets/favicon.svg" alt="" width="26" height="26"><span>VIGIL</span></a>
+  <nav class="nav__links" aria-label="Primary">
+    <a href="/vs">Compare</a><a href="/tools">Tools</a><a href="/cve">CVEs</a><a href="/trust">Trust</a><a href="/blog">Blog</a>
+  </nav>
+  <span class="nav__spacer"></span>
+  <a class="btn btn--primary" href="/support">Request access</a>
+</div></header>
+
+<main id="main">
+  <section class="hero">
+    <div class="wrap">
+      <p class="eyebrow"><a href="/vs" class="muted">Compare</a> › Burp Suite</p>
+      <h1>VIGIL vs. Burp Suite</h1>
+      <p class="lede">Burp Suite is the gold standard for hands-on web testing — an expert in the loop with a
+        proxy, Repeater, and a deep extension ecosystem. VIGIL is autonomous: it drives Burp-class techniques
+        at machine scale and, crucially, <strong>proves</strong> each hit with a signed, offline-verifiable
+        exploit. <strong>Many teams run both</strong> — Burp for deep manual work, VIGIL to cover the surface
+        and prove what's real.</p>
+    </div>
+  </section>
+
+  <section class="section--tight"><div class="wrap">
+    <div class="matrix-scroll"><table class="matrix">
+      <thead><tr><th scope="col">Capability</th><th scope="col" class="vigil">VIGIL</th><th scope="col">Burp Suite</th></tr></thead>
+      <tbody>
+        <tr><th scope="row">Primary mode</th><td class="vigil">Autonomous engine</td><td>Human-driven proxy + scanner</td></tr>
+        <tr><th scope="row">Exploit-validated proof per finding</th><td class="vigil yes">Yes — signed, offline re-verifiable</td><td class="partial">Scanner confirms some classes; proof is the tester's</td></tr>
+        <tr><th scope="row">False-positive posture</th><td class="vigil yes">Zero by construction (oracle or it's a LEAD)</td><td class="partial">Low, but triage is on you</td></tr>
+        <tr><th scope="row">Business-logic &amp; access-control chains</th><td class="vigil yes">Multi-hop, modelled &amp; proven</td><td class="partial">Powerful — but you drive it</td></tr>
+        <tr><th scope="row">Interactive manual testing</th><td class="partial">Not the focus</td><td class="yes">Best-in-class (Repeater, Intruder, BApps)</td></tr>
+        <tr><th scope="row">Scope beyond web/API</th><td class="vigil yes">Cloud (S3/IAM paths), K8s &amp; mesh, source/CI</td><td class="no">Web/API focus</td></tr>
+        <tr><th scope="row">Drives other tools</th><td class="vigil yes">Imports/drives 30+ scanners &amp; proves output</td><td class="partial">Extensible via BApps</td></tr>
+        <tr><th scope="row">CI/CD + fix workflow</th><td class="vigil yes">PR review, SARIF 2.1.0, verified fix suggestions</td><td class="partial">Burp CI via enterprise tier</td></tr>
+        <tr><th scope="row">Delivery</th><td class="vigil yes">Self-hosted, air-gappable, BYO-LLM</td><td class="yes">Desktop + enterprise server</td></tr>
+        <tr><th scope="row">Licensing</th><td class="vigil">Source-available (PolyForm + Commercial)</td><td>Commercial</td></tr>
+      </tbody>
+    </table></div>
+    <p class="muted" style="margin-top:var(--sp-3); font-size:var(--fs-xs)">Honesty bounds: a VIGIL
+      deployment tier is not a network control on its own; cloud coverage is S3 exposure, IAM escalation
+      paths, achieved-state exploitation and K8s/mesh posture — not full multi-service CSPM.</p>
+  </div></section>
+
+  <section class="section"><div class="wrap">
+    <div class="grid grid--2">
+      <div class="card"><h3>Where Burp wins</h3><p>Deep, interactive manual testing by an expert; the
+        Repeater/Intruder workflow; a vast extension ecosystem; two decades of maturity. If a human is
+        hands-on-keyboard on one target, Burp is hard to beat.</p></div>
+      <div class="card"><h3>Where VIGIL wins</h3><p>Autonomy and coverage at scale; a signed proof you can
+        re-verify offline with zero VIGIL code installed; zero false positives by construction; reach beyond
+        web into cloud, Kubernetes, source and CI; and a sovereign, BYO-LLM deployment.</p></div>
+    </div>
+  </div></section>
+
+  <section class="section"><div class="wrap">
+    <p class="eyebrow">FAQ</p>
+    <div class="prose">
+      <h3>Does VIGIL replace Burp?</h3>
+      <p>No — and we won't pretend it does. Burp is the best manual web-testing workbench. VIGIL covers the
+        surface autonomously and proves what's exploitable; teams commonly run both.</p>
+      <h3>Can VIGIL prove a finding Burp surfaced?</h3>
+      <p>Yes. VIGIL can take a lead and either mint a signed FACT (an oracle fired) or leave it an honest
+        LEAD — so your triage queue shrinks to things that are actually exploitable.</p>
+      <h3>Is my traffic sent to a cloud?</h3>
+      <p>No. VIGIL is self-hosted and air-gappable; it talks to the LLM backend you configure (including a
+        local one). No telemetry.</p>
+    </div>
+  </div></section>
+
+  <section class="section"><div class="wrap"><div class="band">
+    <h2>Prove it on your own target.</h2>
+    <p>Request access and we'll show a finding verifying itself — offline.</p>
+    <div class="btn-row" style="justify-content:center">
+      <a class="btn btn--primary" href="/support">Request access</a>
+      <a class="btn btn--ghost" href="/vs/nessus">VIGIL vs. Nessus →</a>
+    </div>
+  </div></div></section>
+</main>
+</body>
+</html>

@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Security tools — VIGIL</title>
+<meta name="description" content="Free, no-signup security utilities from VIGIL. Calculators run entirely in your browser; nothing is sent anywhere.">
+<link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/assets/tokens.css">
+<link rel="stylesheet" href="/assets/site.css">
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+<header class="nav"><div class="wrap nav__row">
+  <a class="brand" href="/"><img class="brand__mark" src="/assets/favicon.svg" alt="" width="26" height="26"><span>VIGIL</span></a>
+  <nav class="nav__links" aria-label="Primary">
+    <a href="/vs">Compare</a><a href="/tools">Tools</a><a href="/cve">CVEs</a><a href="/trust">Trust</a><a href="/blog">Blog</a>
+  </nav>
+  <span class="nav__spacer"></span>
+  <a class="btn btn--primary" href="/support">Request access</a>
+</div></header>
+
+<main id="main" class="section">
+  <div class="wrap">
+    <p class="eyebrow">Tools</p>
+    <h1 style="font-size:var(--fs-2xl); letter-spacing:-.02em; margin:0 0 var(--sp-2)">Free security tools</h1>
+    <p class="muted" style="max-width:62ch; margin:0 0 var(--sp-6)">No signup, no tracking. Calculators and
+      decoders run <strong>entirely in your browser</strong> — nothing you paste is sent anywhere.</p>
+
+    <h2 style="font-size:var(--fs-lg); margin:0 0 var(--sp-4)">Calculators &amp; decoders</h2>
+    <div class="grid grid--3">
+      <a class="card card--link" href="/tools/cvss-calculator">
+        <span class="chip chip--fact" style="margin-bottom:var(--sp-2)"><i class="dot"></i>Live</span>
+        <h3>CVSS v3.1 calculator</h3>
+        <p>Base score, severity, and a shareable vector string — computed locally from the FIRST.org spec.</p>
+        <span class="card__more">Open →</span>
+      </a>
+      <div class="card">
+        <span class="chip" style="margin-bottom:var(--sp-2)">In progress</span>
+        <h3>JWT decoder &amp; analyzer</h3>
+        <p>Decode a token and flag forgeable signing choices (<code>alg:none</code>, weak secrets) — client-side.</p>
+      </div>
+      <div class="card">
+        <span class="chip" style="margin-bottom:var(--sp-2)">In progress</span>
+        <h3>CVSS v4.0</h3>
+        <p>The newer scoring model, alongside 3.1 — same local, no-data design.</p>
+      </div>
+    </div>
+
+    <hr class="rule">
+
+    <h2 style="font-size:var(--fs-lg); margin:0 0 var(--sp-2)">Scanners &amp; analyzers</h2>
+    <p class="muted" style="max-width:62ch; margin:0 0 var(--sp-4); font-size:var(--fs-sm)">
+      VIGIL's engine already performs these checks inside an authorized engagement. Standalone public
+      versions are on the roadmap behind a rate-limited, offense-free probe service — we won't ship a
+      "scan any host" box that could be abused.</p>
+    <div class="grid grid--3">
+      <div class="card"><span class="chip" style="margin-bottom:var(--sp-2)">Roadmap</span>
+        <h3>Security headers</h3><p>Grade a site's HTTP response headers and CSP.</p></div>
+      <div class="card"><span class="chip" style="margin-bottom:var(--sp-2)">Roadmap</span>
+        <h3>TLS / PQC readiness</h3><p>Protocol, cipher, and harvest-now-decrypt-later posture.</p></div>
+      <div class="card"><span class="chip" style="margin-bottom:var(--sp-2)">Roadmap</span>
+        <h3>CORS &amp; email auth</h3><p>Misconfigured CORS, and SPF/DKIM/DMARC coverage.</p></div>
+    </div>
+
+    <hr class="rule">
+    <div class="prose">
+      <p>Want the full picture instead of a point check? VIGIL proves exploitability end-to-end and gives you
+        a finding you can re-verify offline. <a href="/vs">See how it compares →</a></p>
+    </div>
+  </div>
+</main>
+</body>
+</html>
