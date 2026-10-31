@@ -1392,6 +1392,12 @@ class Handler(BaseHTTPRequestHandler):
         if action == "target_verify":
             return p.target_verify(requester, str(body.get("org_id", "")), str(body.get("host", "")),
                                    str(body.get("method", "")), ip=ip)
+        # Slice G — offense-launch credit reservation. requester is the hop principal; org from the edge
+        # session; host (reserve) / lease (cancel) from the body. units are server-decided (config.LAUNCH_UNITS).
+        if action == "launch_reserve":
+            return p.launch_reserve(requester, str(body.get("org_id", "")), str(body.get("host", "")), ip=ip)
+        if action == "launch_cancel":
+            return p.launch_cancel(requester, str(body.get("org_id", "")), body.get("lease"), ip=ip)
         return None
 
     def _durability_post(self, path):

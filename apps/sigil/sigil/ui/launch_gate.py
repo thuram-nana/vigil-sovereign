@@ -221,7 +221,8 @@ class LaunchGate:
             "trust_root": trust_root.model_dump(mode="json"),
         }
 
-    def settle_launch(self, *, signed_lease: Any, consumed_units: int, now: Any) -> dict:
+    def settle_launch(self, *, signed_lease: Any, consumed_units: int, now: Any,
+                      expect_org_id: Optional[str] = None) -> dict:
         """Close out a reservation: refund the UNUSED portion so net spend == metered consumption. The refund
         is bound to the OWNER-SIGNED LEASE, never to a wire amount — ``signed_lease`` (the object
         ``reserve_launch`` returned) is VERIFIED under a locally-pinned owner trust root and
@@ -245,6 +246,10 @@ class LaunchGate:
             return {"ok": False, "error": f"lease does not verify under the owner key: {reason}"}
         doc = signed.document
         oid, s, non, reserved = doc.org_id, doc.engagement_slug, doc.nonce, int(doc.units_reserved)
+        # TENANT BINDING: when the caller is a customer (the edge passes its session org), the lease's org
+        # MUST match — so a customer cannot cancel/settle another tenant's reservation by presenting its lease.
+        if expect_org_id is not None and oid != expect_org_id:
+            return {"ok": False, "error": "this lease belongs to a different org"}
         try:
             consumed = int(consumed_units)
         except (TypeError, ValueError):

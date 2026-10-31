@@ -297,6 +297,8 @@ class CustomerHandler(BaseHTTPRequestHandler):
             return self._member(action, body)
         if action in ("target/challenge", "target/verify"):
             return self._target(action, body)
+        if action in ("launch/reserve", "launch/cancel"):
+            return self._launch(action, body)
         return self._deny(404, "unknown action")
 
     def _member(self, action: str, body: dict):
@@ -333,6 +335,29 @@ class CustomerHandler(BaseHTTPRequestHandler):
         else:
             payload["method"] = body.get("method", "")
             c, r = self._provision("target_verify", requester, payload)
+        return self._json(r, c)
+
+    def _launch(self, action: str, body: dict):
+        """Offense-launch credit reservation (Slice G). Like `_target`, the acting REQUESTER and the active
+        ORG are taken from the SERVER-side session — NEVER the body (tenant isolation at the edge): a customer
+        reserves credits + mints a launch lease for THEIR bound org only, and cannot name another tenant. On
+        reserve, the `host` (the customer's already-ownership-proven, owner-authorized target) rides the body;
+        the credit `units` are SERVER-decided (``config.LAUNCH_UNITS`` at the provisioner), NEVER customer-
+        supplied (money doctrine). On cancel, the signed `lease` to release rides the body and the sovereign
+        binds it to the session org (``expect_org_id``) — so a customer can never settle/cancel another
+        tenant's reservation even by presenting that tenant's (owner-signed) lease."""
+        rec = self._session()
+        if rec is None or not rec.get("org_id"):
+            return self._deny(401, "login required")
+        requester = str(rec.get("username") or "")
+        # dict[str, object]: the lease (cancel) is a nested object, not a str — so the payload is not str-valued
+        payload: dict[str, object] = {"org_id": str(rec.get("org_id") or ""), "ip": self._ip()}
+        if action == "launch/reserve":
+            payload["host"] = body.get("host", "")              # session org, never body-supplied
+            c, r = self._provision("launch_reserve", requester, payload)
+        else:
+            payload["lease"] = body.get("lease")
+            c, r = self._provision("launch_cancel", requester, payload)
         return self._json(r, c)
 
 

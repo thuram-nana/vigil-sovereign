@@ -426,6 +426,50 @@ class Provisioner:
         return {"host": ch.host, "dns_name": ch.dns_name, "dns_value": ch.marker,
                 "well_known_url": ch.well_known_url, "well_known_body": ch.marker, "marker": ch.marker}
 
+    def launch_reserve(self, requester: str, requester_org_id: str, host: str, *,
+                       ip: str = "", now: "Optional[float]" = None) -> dict:
+        """Reserve credits + mint a launch lease for ONE offense launch against (org, host). Delegates to the
+        LaunchGate, which composes admit_customer(run_engagement) + a current ownership proof + a verifying
+        owner-signed EngagementAuthority + a sufficient credit balance, then reserves + mints under the spine
+        lock. requester/org are the SERVER-authenticated session principal (never body fields); the credit
+        `units` are SERVER-decided (``config.LAUNCH_UNITS``), never customer-supplied (money doctrine). Returns
+        the signed lease for the edge to relay; the offense launch verifies it before any traffic."""
+        t = self._now() if now is None else float(now)
+        from .. import config
+        from .launch_gate import LaunchGate
+        r = LaunchGate(self.store).reserve_launch(
+            requester=requester, org_id=requester_org_id, host=host, units=config.LAUNCH_UNITS, now=t)
+        if not r.get("ok"):
+            self._audit("launch_reserve", requester=requester, org_id=requester_org_id,
+                        target=host, outcome="denied")
+            raise ProvisionDenied(str(r.get("error") or "launch reservation refused"))
+        self._audit("launch_reserve", requester=requester, org_id=requester_org_id, target=host,
+                    outcome="reserved", critical=True)
+        return {k: r[k] for k in ("slug", "host", "units_reserved", "nonce", "not_before", "not_after",
+                                  "lease", "trust_root") if k in r}
+
+    def launch_cancel(self, requester: str, requester_org_id: str, signed_lease, *,
+                      ip: str = "", now: "Optional[float]" = None) -> dict:
+        """Cancel a reservation (full refund) — the customer releases a launch they will not run. Gated on
+        admit_customer(run_engagement) AND the lease's org MUST match the requester's session org
+        (``expect_org_id`` — a customer cannot cancel another tenant's reservation). The refund is bound to the
+        owner-signed lease, not a wire amount. The METERED settle (consumed > 0) is driven by offense
+        completion, not this customer path."""
+        t = self._now() if now is None else float(now)
+        from .launch_gate import LaunchGate
+        with self._lock:
+            if not self.orgs.admit_customer(username=requester, org_id=requester_org_id,
+                                            permission="run_engagement"):
+                self._audit("launch_cancel", requester=requester, org_id=requester_org_id, outcome="denied")
+                raise ProvisionDenied("requester may not manage launches for this org")
+        r = LaunchGate(self.store).settle_launch(signed_lease=signed_lease, consumed_units=0, now=t,
+                                                 expect_org_id=requester_org_id)
+        if not r.get("ok"):
+            raise ProvisionDenied(str(r.get("error") or "launch cancel refused"))
+        self._audit("launch_cancel", requester=requester, org_id=requester_org_id,
+                    target=str(r.get("slug", "")), outcome="canceled", critical=True)
+        return {"slug": r.get("slug"), "refunded": r.get("refunded")}
+
     def target_verify(self, requester: str, requester_org_id: str, host: str, method: str, *,
                       ip: str = "", now: "Optional[float]" = None) -> dict:
         """Fetch the customer's published token, record the owner-signed ownership PROOF on a pass, and mint

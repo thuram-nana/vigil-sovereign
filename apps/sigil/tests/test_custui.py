@@ -86,6 +86,24 @@ def _get(opener, port, path, *, cookie=None):
         return r.status, json.loads(r.read().decode())
 
 
+def _owner_lease(org_id, host, *, units=5, nonce="edge-nonce-1", now=None):
+    """Mint an owner-signed ``CreditLaunchLease`` directly (no gate) with the SAME owner key the cockpit uses
+    (``ensure_owner_keypair`` in ``_stack``). This exercises the edge's cancel/settle RELAY + its tenant
+    binding without standing up the full 4-conjunct reserve (ownership proof + seam authority + credits) —
+    that success path is ``test_launch_gate.py``'s job; here we pin only what the EDGE adds."""
+    from datetime import datetime, timedelta, timezone
+
+    from sigil.governor.identity import owner_keypair
+    from sigil.ui.target_authorization import _customer_slug
+    from vigil_core import CreditLaunchLease, sign_credit_launch_lease
+    t = datetime.now(timezone.utc) if now is None else now
+    kp = owner_keypair()
+    doc = CreditLaunchLease(
+        engagement_slug=_customer_slug(org_id, host), org_id=org_id, scope_host=host, units_reserved=units,
+        not_before=t - timedelta(hours=1), not_after=t + timedelta(hours=1), nonce=nonce, issued_at=t.timestamp())
+    return sign_credit_launch_lease(doc, {"owner": kp.private_key_b64}).model_dump(mode="json")
+
+
 def test_signup_confirm_login_whoami_logout_over_edge(tmp_path, monkeypatch):
     sov, edge, ep, _ = _stack(tmp_path, monkeypatch)
     try:
@@ -292,6 +310,79 @@ def test_build_customer_server_is_a_keyless_edge_with_the_distinct_cookie(tmp_pa
             k for k in vars(srv) if "owner" in k.lower() or "sign" in k.lower() or "privkey" in k.lower())
     finally:
         srv.server_close()
+
+
+def test_launch_requires_session(tmp_path, monkeypatch):
+    """Both launch edge actions refuse before the hop when there is no customer session — the edge never
+    reaches the owner-signed provisioner for an anonymous caller (mirrors the target/member guards)."""
+    sov, edge, ep, _ = _stack(tmp_path, monkeypatch)
+    try:
+        c, r = _post(_opener(), ep, "/api/customer/launch/reserve", {"host": "acme.example"})
+        assert c == 401, (c, r)
+        c, r = _post(_opener(), ep, "/api/customer/launch/cancel", {"lease": {}})
+        assert c == 401, (c, r)
+    finally:
+        sov.shutdown(); edge.shutdown()
+
+
+def test_launch_reserve_billing_admin_denied_then_body_org_ignored(tmp_path, monkeypatch):
+    """Billing != testing AND tenant isolation at the launch edge (Slice G). A billing-only org_admin is
+    DENIED at reserve — credits/role never authorize a test. Once promoted to operator, membership passes and
+    the next conjunct (ownership proof) fails NAMING the org: assert it is the SESSION org, never the
+    body-supplied `org_EVIL`, proving the edge drops the body org before it can reach the owner-signed gate."""
+    from sigil.governor.orgs import OrgRegistry
+    sov, edge, ep, _ = _stack(tmp_path, monkeypatch)
+    try:
+        op = _opener()
+        t = _post(op, ep, "/api/customer/signup/request", {"email": "launch@acme.com"})[1]["dev_token"]
+        conf = _post(op, ep, "/api/customer/signup/confirm",
+                     {"token": t, "password": "customer-pw-1", "org_name": "Acme"})[1]
+        u, oid = conf["username"], conf["org_id"]
+        # default signup role is org_admin (billing) — it may NOT launch assessments (billing != testing)
+        c, r = _post(op, ep, "/api/customer/launch/reserve", {"host": "acme.example"})
+        assert c == 403, (c, r)
+        # the owner promotes the member to operator (carries run_engagement) — an owner act on the sovereign store
+        OrgRegistry(sov.store()).grant_membership(oid, u, "operator", issued_at=time.time() + 1e6)
+        # membership now passes; the ownership-proof conjunct fails and names the org. A BOGUS body org_id is
+        # IGNORED — the reserve runs against the SESSION's org, so the refusal names it and never the body org.
+        c, r = _post(op, ep, "/api/customer/launch/reserve", {"host": "acme.example", "org_id": "org_EVIL"})
+        assert c == 403, (c, r)
+        assert oid in r["error"] and "org_EVIL" not in r["error"], r   # session org authoritative; body ignored
+    finally:
+        sov.shutdown(); edge.shutdown()
+
+
+def test_launch_cancel_relays_and_is_tenant_bound(tmp_path, monkeypatch):
+    """The cancel/settle RELAY works end-to-end over the edge (a lease for the SESSION's OWN org cancels and
+    refunds the full reserved amount through edge→hop→provisioner→gate), and it is TENANT-BOUND: a lease
+    minted for a DIFFERENT org is refused even when a valid customer presents it (``expect_org_id`` == the
+    session org), so one tenant can never release/settle another tenant's owner-signed reservation."""
+    from sigil.governor.orgs import OrgRegistry
+    sov, edge, ep, _ = _stack(tmp_path, monkeypatch)
+    try:
+        # customer A, promoted to operator so launch_cancel's admit_customer(run_engagement) gate passes
+        a = _opener()
+        ta = _post(a, ep, "/api/customer/signup/request", {"email": "a@acme.com"})[1]["dev_token"]
+        ca = _post(a, ep, "/api/customer/signup/confirm",
+                   {"token": ta, "password": "customer-pw-1", "org_name": "Acme"})[1]
+        OrgRegistry(sov.store()).grant_membership(ca["org_id"], ca["username"], "operator",
+                                                  issued_at=time.time() + 1e6)
+        # a second tenant B (distinct real org id)
+        b = _opener()
+        tb = _post(b, ep, "/api/customer/signup/request", {"email": "b@beta.com"})[1]["dev_token"]
+        cb = _post(b, ep, "/api/customer/signup/confirm",
+                   {"token": tb, "password": "customer-pw-2", "org_name": "Beta"})[1]
+        assert ca["org_id"] != cb["org_id"]
+        # A cancels A's OWN lease → the edge relays it, the gate verifies it owner-signed and refunds in full
+        lease_a = _owner_lease(ca["org_id"], "acme.example", units=5, nonce="edge-a-1")
+        c, r = _post(a, ep, "/api/customer/launch/cancel", {"lease": lease_a})
+        assert c == 200 and r["refunded"] == 5, (c, r)             # positive relay: cancel + refund over the edge
+        # A presents B's lease → refused by the tenant binding (expect_org_id == A's session org)
+        lease_b = _owner_lease(cb["org_id"], "beta.example", units=5, nonce="edge-b-1")
+        c, r = _post(a, ep, "/api/customer/launch/cancel", {"lease": lease_b})
+        assert c == 403 and "different org" in r["error"], (c, r)  # cannot settle another tenant's reservation
+    finally:
+        sov.shutdown(); edge.shutdown()
 
 
 def test_serve_customer_cli_unions_allowlist_flags_and_env(monkeypatch):

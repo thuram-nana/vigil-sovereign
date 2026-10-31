@@ -168,6 +168,10 @@ SIGNUP_CAP_DIR = _customer / "signup_cap"               # the global signup-cap 
 MEMBER_RATELIMIT_DIR = _customer / "member_ratelimit"   # the per-org member-management limiter's markers
 SIGNUP_DAILY_CAP = _int_env("VIGIL_SIGNUP_DAILY_CAP", 500)      # <= this many committed signups per 24h window
 MEMBER_OPS_PER_MIN = _int_env("VIGIL_MEMBER_OPS_PER_MIN", 30)   # max grant/revoke ops per org per minute
+# Slice G — the SERVER-DECIDED credit reservation cap for one offense launch (money doctrine: the amount is
+# decided here, never by the customer's request). A flat per-launch hold; a scope-dependent catalog cost is a
+# later refinement. The unused remainder is refunded on settle, so net spend tracks metered consumption.
+LAUNCH_UNITS = _int_env("VIGIL_LAUNCH_UNITS", 10)
 
 
 def _bool_env(name: str, default: bool = False) -> bool:
