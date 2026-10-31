@@ -939,6 +939,37 @@ def cmd_serve_public(a) -> None:
     serve_public(host=host, port=a.port)
 
 
+def cmd_serve_customer(a) -> None:
+    """Start the keyless CUSTOMER edge (`custui`, :8734) — the self-serve tenant app's self-authenticating
+    front door. Holds NO owner key: it owns the `vigil_customer_session` cookie + its own session ledger and
+    reaches the sovereign provisioner only over loopback + the `VIGIL_PROVISION_HOP_KEY` hop (empty ⇒ every
+    provisioning route fails CLOSED). Binds a bind_ok address (loopback default; a PRIVATE address behind a
+    reverse proxy for a customer domain) — FAIL-CLOSED (exit 2) on a public bind. Because it sets a session
+    cookie, serving a real domain needs that Host/Origin on its anti-rebind allowlist (`--allow-host`/
+    `--allow-origin`, also `$VIGIL_CUSTOMER_ALLOWED_HOSTS`/`$VIGIL_CUSTOMER_ALLOWED_ORIGINS`). Mirrors
+    `cmd_serve` / `cmd_serve_public`."""
+    import os as _os
+
+    from .bridge.daemon import bind_ok
+
+    def _multi(flag_vals, env_name):
+        # union of a repeatable flag and a comma-separated env var; blanks dropped (same as cmd_serve)
+        out: list[str] = list(flag_vals or [])
+        out += [s.strip() for s in _os.environ.get(env_name, "").split(",") if s.strip()]
+        return tuple(dict.fromkeys(out))   # de-dup, order-preserving
+
+    host = a.host or _os.environ.get("VIGIL_CUSTOMER_BIND", "127.0.0.1")
+    if not bind_ok(host):
+        print(f"  refusing to bind {host!r}: the customer edge binds loopback or a PRIVATE address only — "
+              f"never 0.0.0.0/public. Front it with a reverse proxy on the customer vhost "
+              f"(deploy/reverse-proxy).", file=sys.stderr)
+        sys.exit(2)
+    allowed_hosts = _multi(a.allow_host, "VIGIL_CUSTOMER_ALLOWED_HOSTS")
+    allowed_origins = _multi(a.allow_origin, "VIGIL_CUSTOMER_ALLOWED_ORIGINS")
+    from .ui.custui import serve_customer
+    serve_customer(host=host, port=a.port, extra_hosts=allowed_hosts, extra_origins=allowed_origins)
+
+
 def cmd_cve(a) -> None:
     """Build/inspect the PUBLIC CVE catalog that the public site's /cve browser reads.
 
@@ -2345,6 +2376,18 @@ def main(argv=None) -> None:
     psp.add_argument("--host", default=None, help="bind address ($VIGIL_PUBLIC_BIND; default 127.0.0.1). "
                      "Loopback or a PRIVATE IP only — never 0.0.0.0/public (fail-closed exit 2)")
     psp.set_defaults(fn=cmd_serve_public)
+    psc = sub.add_parser("serve-customer", help="start the keyless customer edge (self-serve tenant app; "
+                                                "loopback default; reverse proxy for a customer domain)")
+    psc.add_argument("--port", type=int, default=None, help="bind port (default 8734; $VIGIL_CUSTOMER_PORT)")
+    psc.add_argument("--host", default=None, help="bind address ($VIGIL_CUSTOMER_BIND; default 127.0.0.1). "
+                     "Loopback or a PRIVATE IP only — never 0.0.0.0/public (fail-closed exit 2)")
+    psc.add_argument("--allow-host", action="append", default=[],
+                     help="reverse-proxy Host to accept, e.g. app.example.com (repeatable; also "
+                          "$VIGIL_CUSTOMER_ALLOWED_HOSTS, comma-separated). Anti-DNS-rebinding allowlist")
+    psc.add_argument("--allow-origin", action="append", default=[],
+                     help="reverse-proxy Origin to accept, e.g. https://app.example.com (repeatable; also "
+                          "$VIGIL_CUSTOMER_ALLOWED_ORIGINS, comma-separated)")
+    psc.set_defaults(fn=cmd_serve_customer)
     pcve = sub.add_parser("cve", help="build/inspect the public CVE catalog the /cve browser reads")
     pcve.add_argument("action", choices=["ingest", "stats"])
     pcve.add_argument("--epss", action="store_true", help="(ingest) overlay FIRST EPSS exploitation probability")

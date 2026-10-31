@@ -327,3 +327,22 @@ def build_customer_server(*, host: str = "127.0.0.1", port=None, hop_key=None, p
         provision_base=config.sovereign_provision_base() if provision_base is None else provision_base,
         sessions_dir=config.CUSTOMER_SESSIONS_DIR if sessions_dir is None else sessions_dir,
         extra_hosts=extra_hosts, extra_origins=extra_origins)
+
+
+def serve_customer(*, host: str = "127.0.0.1", port=None, hop_key=None, provision_base=None,
+                   sessions_dir=None, extra_hosts=(), extra_origins=()) -> None:
+    """Build the keyless customer edge from config and serve it (blocking). Mirrors `pubui.serve_public`.
+    The edge holds NO owner key — only the edge→provisioner HMAC hop; an EMPTY hop key means every
+    provisioning route fails CLOSED (login still works for already-provisioned sessions, but no signup /
+    member grant can mint), so the banner says so plainly rather than pretending it is ready."""
+    srv = build_customer_server(host=host, port=port, hop_key=hop_key, provision_base=provision_base,
+                                sessions_dir=sessions_dir, extra_hosts=extra_hosts, extra_origins=extra_origins)
+    bound_port = srv.server_address[1]
+    keyed = ("hop key SET" if srv.hop_key
+             else "hop key UNSET → provisioning FAILS CLOSED (set VIGIL_PROVISION_HOP_KEY)")
+    print(f"  vigil customer edge on http://{host}:{bound_port}  (keyless; cookie=vigil_customer_session; "
+          f"provisioner={srv.provision_base}; {keyed})")
+    try:
+        srv.serve_forever()
+    except KeyboardInterrupt:
+        pass

@@ -206,3 +206,36 @@ def test_dead_provisioner_is_502(tmp_path, monkeypatch):
         assert c == 502, (c, r)                                   # edge stays up; never crashes or mints
     finally:
         edge.shutdown()
+
+
+def test_serve_customer_cli_fails_closed_on_a_public_bind():
+    """The `sigil serve-customer` CLI must REFUSE a public/unspecified bind (exit 2) — the customer edge
+    sets a session cookie, so it may never face the internet directly; it binds loopback/private behind a
+    reverse proxy. This pins the guard durably so a refactor can't silently drop it."""
+    import types
+
+    from sigil.cli import cmd_serve_customer
+    for bad in ("0.0.0.0", "::", "8.8.8.8"):
+        args = types.SimpleNamespace(host=bad, port=0, allow_host=[], allow_origin=[])
+        try:
+            cmd_serve_customer(args)
+        except SystemExit as e:
+            assert e.code == 2, (bad, e.code)
+        else:
+            raise AssertionError(f"serve-customer did NOT fail closed on {bad!r}")
+
+
+def test_build_customer_server_is_a_keyless_edge_with_the_distinct_cookie(tmp_path):
+    """The edge is wired keyless: it carries the edge→provisioner hop secret + a loopback provisioner base
+    and its OWN session cookie name (distinct from the operator plane). No owner key is ever loaded here."""
+    srv = build_customer_server(host="127.0.0.1", port=0, hop_key="hk-123",
+                                provision_base="http://127.0.0.1:9999/", sessions_dir=str(tmp_path / "s"))
+    try:
+        assert srv.hop_key == "hk-123"
+        assert srv.provision_base == "http://127.0.0.1:9999"      # trailing slash normalized away
+        assert srv.sessions is not None                           # its OWN ledger (not the operator's)
+        assert CUSTOMER_COOKIE == "vigil_customer_session"        # distinct from operator `sigil_session`
+        # keyless by construction: the edge object exposes no owner signing key of any name
+        assert not any(k for k in vars(srv) if "owner" in k.lower() or "priv" in k.lower())
+    finally:
+        srv.server_close()
