@@ -222,6 +222,23 @@ def email_sender():
                            from_addr=os.environ.get("SIGIL_EMAIL_FROM", "noreply@vigil.local"),
                            username=os.environ.get("SIGIL_EMAIL_USER") or None,
                            password=os.environ.get("SIGIL_EMAIL_PASSWORD") or None)
+def ownership_verify_enabled() -> bool:
+    """True iff the operator enabled self-serve asset-ownership verification (`VIGIL_OWNERSHIP_VERIFY`). OFF
+    by default — the sovereign plane makes NO outbound fetch to a customer-named host unless the operator
+    explicitly opts into this egress (mirrors the email / OIDC opt-ins). While off, target_verify fail-closed."""
+    return _bool_env("VIGIL_OWNERSHIP_VERIFY", False)
+
+
+def ownership_fetcher():
+    """The configured ownership-proof fetcher: the SSRF-hardened WellKnownFetcher when enabled, else None
+    (fail-closed — the provisioner's target_verify refuses). Lazily imports the stdlib-only fetcher so
+    `config` stays import-light."""
+    if not ownership_verify_enabled():
+        return None
+    from .ui.ownership_fetch import WellKnownFetcher
+    return WellKnownFetcher()
+
+
 OWNER_KEY_ID = os.environ.get("SIGIL_OWNER_KEY_ID", "owner")
 
 

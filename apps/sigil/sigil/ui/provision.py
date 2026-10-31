@@ -94,7 +94,8 @@ class Provisioner:
     email token in the response when no real sender is configured — it must stay False in production."""
 
     def __init__(self, store, *, customers, orgs, wallet, email_tokens, rate_limiter, email_sender,
-                 signup_cap_limiter=None, member_limiter=None, trial_credits: int = _DEFAULT_TRIAL_CREDITS,
+                 signup_cap_limiter=None, member_limiter=None, target_fetcher=None,
+                 trial_credits: int = _DEFAULT_TRIAL_CREDITS,
                  expose_dev_tokens: bool = False, now_fn=time.time):
         self.store = store
         self.customers = customers
@@ -102,6 +103,10 @@ class Provisioner:
         self.wallet = wallet
         self.email_tokens = email_tokens
         self.rate_limiter = rate_limiter
+        # Slice G0 — the ownership-proof FETCHER (reads a customer's published well-known token). None ⇒
+        # self-serve ownership verification is OFF (fail-closed: target_verify refuses), the default sovereign
+        # egress posture; the factory injects the SSRF-hardened WellKnownFetcher only when the operator opts in.
+        self.target_fetcher = target_fetcher
         # A SEPARATE, high-ceiling limiter enforcing a GLOBAL signup cap (per window) on top of per-email
         # uniqueness + the per-ip/email rate-limit — a ceiling on trial-credit farming (Finding: trial
         # abuse). None ⇒ no global cap (tests inject a low-cap one; the factory wires a daily cap).
@@ -394,6 +399,80 @@ class Provisioner:
             seq = self.orgs.revoke_membership(requester_org_id, member_username)
         return {"org_id": requester_org_id, "username": member_username, "seq": seq}
 
+    # -- asset-ownership target registration (Slice G0 — billing != testing) ------------------------
+    def target_challenge(self, requester: str, requester_org_id: str, host: str, *,
+                         ip: str = "", now: "Optional[float]" = None) -> dict:
+        """Issue an owner-signed ownership CHALLENGE for (org, host) and return the placement instructions the
+        customer must publish. Gated on ``admit_customer(requester, org_id, run_engagement)`` — the
+        TESTING-authority axis, NOT billing: a pure billing admin (``org_admin``, no ``run_engagement``)
+        cannot register assessment targets, so registering/paying is not authorizing a test. The requester +
+        org are the SERVER-AUTHENTICATED session principal (never client body fields). A challenge grants
+        nothing — it is only the token the later verdict checks against. (``now`` is accepted for API
+        symmetry with ``target_verify``; a challenge's anti-replay stamp comes from ``_next_issued``.)"""
+        from ..governor.asset_ownership import AssetOwnershipRegistry
+        with self._lock:
+            if not self.orgs.admit_customer(username=requester, org_id=requester_org_id,
+                                            permission="run_engagement"):
+                self._audit("target_challenge", requester=requester, org_id=requester_org_id,
+                            target=host, outcome="denied")
+                raise ProvisionDenied("requester may not register assessment targets for this org")
+            try:
+                ch = AssetOwnershipRegistry(self.store).issue_challenge(
+                    requester_org_id, host, issued_at=self._next_issued())
+            except ValueError as e:
+                raise ProvisionDenied(str(e)) from None
+            self._audit("target_challenge", requester=requester, org_id=requester_org_id,
+                        target=host, outcome="issued")
+        return {"host": ch.host, "dns_name": ch.dns_name, "dns_value": ch.marker,
+                "well_known_url": ch.well_known_url, "well_known_body": ch.marker, "marker": ch.marker}
+
+    def target_verify(self, requester: str, requester_org_id: str, host: str, method: str, *,
+                      ip: str = "", now: "Optional[float]" = None) -> dict:
+        """Fetch the customer's published token, record the owner-signed ownership PROOF on a pass, and mint
+        the owner-signed LIVE non-destructive target authority — the self-serve billing != testing bridge.
+
+        Gated on ``admit_customer(requester, org_id, run_engagement)`` (the testing axis, checked BEFORE the
+        fetch and AGAIN inside the mint lock — TOCTOU: a membership revoked during the network fetch cannot
+        sign through). Fail-closed when no fetcher is configured (ownership verification OFF by default). The
+        FETCH happens OUTSIDE the spine lock (network I/O must not hold it); the verdict + proof + mint are
+        atomic under the lock. The owner key (``add_customer_target``) still signs the authority — the
+        requester holds no key, and the mint is additionally refused unless the just-recorded ownership proof
+        is current. ``requester``/``org`` are the server-authenticated principal (never client fields)."""
+        t = self._now() if now is None else float(now)
+        if self.target_fetcher is None:
+            raise ProvisionError("self-serve ownership verification is not enabled on this deployment")
+        with self._lock:                                            # authorize BEFORE spending a network fetch
+            if not self.orgs.admit_customer(username=requester, org_id=requester_org_id,
+                                            permission="run_engagement"):
+                self._audit("target_verify", requester=requester, org_id=requester_org_id,
+                            target=host, outcome="denied")
+                raise ProvisionDenied("requester may not register assessment targets for this org")
+        try:
+            observed = self.target_fetcher.fetch(method, host, now=t)   # network I/O — NO lock held
+        except Exception as e:  # noqa: BLE001 — a refused/failed fetch is a clean customer error, never a 500
+            self._audit("target_verify", requester=requester, org_id=requester_org_id,
+                        target=host, outcome="fetch_failed")
+            raise ProvisionDenied(f"could not read the published token: {e}") from None
+        from ..governor.asset_ownership import AssetOwnershipRegistry
+        from .target_authorization import add_customer_target
+        with self._lock:
+            if not self.orgs.admit_customer(username=requester, org_id=requester_org_id,
+                                            permission="run_engagement"):
+                raise ProvisionDenied("requester may not register assessment targets for this org")  # TOCTOU
+            try:
+                AssetOwnershipRegistry(self.store).verify_and_record(
+                    requester_org_id, host, method=method, observed=observed, now=t)
+            except ValueError as e:
+                raise ProvisionDenied(str(e)) from None
+            result = add_customer_target(host, org_id=requester_org_id, store=self.store, now=t)
+            if not result.get("ok"):
+                raise ProvisionError(str(result.get("error") or "could not authorize the target"))
+            self._audit("target_verify", requester=requester, org_id=requester_org_id,
+                        target=host, outcome="authorized", critical=True)
+        return {"host": host, "slug": result["slug"], "scope": result["scope"],
+                "environment": result["environment"], "not_before": result["not_before"],
+                "not_after": result["not_after"]}
+
 
 def build_provisioner(store, *, expose_dev_tokens: bool = False, now_fn=time.time) -> Provisioner:
     """Wire a production Provisioner over `store`: the owner-signed registries (their owner key defaults to
@@ -424,6 +503,9 @@ def build_provisioner(store, *, expose_dev_tokens: bool = False, now_fn=time.tim
                                             window_s=86400.0, base_lock_s=86400.0, max_lock_s=86400.0),
         member_limiter=LoginRateLimiter(config.MEMBER_RATELIMIT_DIR, max_fails=config.MEMBER_OPS_PER_MIN,
                                         window_s=60.0, base_lock_s=60.0, max_lock_s=600.0),
+        # Slice G0 — the SSRF-hardened ownership fetcher, injected ONLY when the operator opts in
+        # (config.ownership_fetcher() returns None otherwise ⇒ target_verify fail-closed). No surprise egress.
+        target_fetcher=config.ownership_fetcher(),
         email_sender=config.email_sender(),
         trial_credits=config.TRIAL_CREDITS,
         expose_dev_tokens=expose_dev_tokens,
