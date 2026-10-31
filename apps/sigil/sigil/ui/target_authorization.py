@@ -462,6 +462,133 @@ def add_target(
     return result
 
 
+def _customer_slug(org_id: str, host: str) -> str:
+    """A collision-resistant, tenant-namespaced engagement slug for a CUSTOMER-minted authority:
+    ``cust_<24-hex of sha256(org_id\\x00host)>``. The ``cust_`` prefix (with an UNDERSCORE) can never equal
+    an operator host-derived slug — ``_slug_for`` slugifies a hostname to ``[a-z0-9-]`` only (a DNS label
+    carries no underscore), so a customer authority can never overwrite, or be confused with, an operator
+    one for the same host. The 24-hex (96-bit) digest is stable per (org_id, host) and well under the
+    broker's path-component bound. Given (org_id, host) the launch gate RE-DERIVES this slug, so the
+    deterministic slug + the per-(org_id, host) ownership proof together ARE the tenant binding — no separate
+    mapping record is needed."""
+    from ..reuse import sha256_hex
+    return "cust_" + sha256_hex((str(org_id) + "\x00" + str(host)).encode("utf-8"))[:24]
+
+
+def add_customer_target(
+    host: str,
+    *,
+    org_id: str,
+    store: Any,
+    slug: Optional[str] = None,
+    duration_hours: Any = _DEFAULT_DURATION_HOURS,
+    note: str = "",
+    now: Optional[Any] = None,
+) -> dict:
+    """Owner-sign a LIVE, non-destructive engagement authority for a CUSTOMER's own asset — gated SOLELY on a
+    current, infrastructure-bound OWNERSHIP PROOF for (org_id, host) (Slice G0; the billing != testing
+    linchpin). This is the SELF-SERVE sibling of :func:`add_target`'s operator ``live`` path: where the
+    operator path proves "this live target is mine" with an owner-enrolled EVALUATOR key + the M-11.1
+    EvalOffenseAttestation, the customer path proves it by having published a VIGIL token in the asset's OWN
+    DNS/web infrastructure (``governor.asset_ownership``). Both still END at the OWNER key signing the
+    authority — ``offense_authority``/``target_add`` never move to the customer.
+
+    THE GATE (fail-closed, the tested invariant): the mint is REFUSED unless
+    ``AssetOwnershipRegistry(store).has_current_proof(org_id, host, now)`` holds — an ACTIVE, UNEXPIRED,
+    per-(org_id, host) owner-signed proof. A fully paid, verified-MEMBER customer with NO ownership proof
+    STILL gets nothing here: registering/paying/being an org admin is not authorizing an assessment.
+    Ownership proof is NECESSARY; the owner signature (this function runs only where the owner key lives) is
+    the rest — proof is never, by itself, sufficient.
+
+    HARDCODED SAFETY: the authority is ALWAYS ``environment="live"`` (a customer's asset is real production),
+    ALWAYS ``allow_destructive=False`` / ``live_destructive_acknowledged=False`` (a customer self-serve path
+    never authorizes a write; destructive still needs the separate owner-signed, M-11.1-gated ceremony — the
+    offense arm re-verifies that independently), scope is EXACTLY the proven host (no parent/wildcard), and
+    the duration caps at :data:`_MAX_DURATION_HOURS`. ``org_id`` is baked into the owner-signed authority
+    (``issued_by="customer:<org_id>"``) so the authority bytes themselves record their tenant. The slug is
+    the tenant-namespaced :func:`_customer_slug`, so a customer authority can never collide with an operator
+    one.
+
+    ``org_id`` is AUTHORITATIVE and supplied by trusted sovereign code (the provisioner, after an
+    ``admit_customer`` membership check at the edge) — never a client-supplied field. Fail-closed: an invalid
+    host/org, a missing/expired ownership proof, or a bad window all return ``{ok: False, error}``."""
+    from vigil_core import (
+        AuthorizerKey, EngagementAuthority, TargetEnvironment, TrustRoot, sign_engagement_authority,
+    )
+    from vigil_integration.live.authorization_broker import write_authorization
+
+    from ..governor.asset_ownership import AssetOwnershipRegistry
+    from ..governor.orgs import _check_org_id  # the ONE org_id validator (tenant charset); fail-closed
+
+    try:
+        oid = _check_org_id(org_id)
+    except ValueError as e:
+        return {"ok": False, "error": f"org_id: {e}"}
+    if store is None:
+        return {"ok": False, "error": "a customer target authority must be gated against the spine "
+                                      "(internal: store not supplied)"}
+    # The scope host is validated as a LIVE host (refuses the never-liftable floor AND private/internal
+    # literals AND the categorical .gov/.mil/.edu/.int floor). The ownership flow already guaranteed a DNS
+    # name (not an IP); this is defence-in-depth at the mint chokepoint.
+    ok, host_or_err = _validate_host(host, environment="live")
+    if not ok:
+        return {"ok": False, "error": host_or_err}
+    h = host_or_err
+
+    try:
+        dur = float(duration_hours)
+    except (TypeError, ValueError):
+        return {"ok": False, "error": "duration_hours must be a number"}
+    if not (0 < dur <= _MAX_DURATION_HOURS):
+        return {"ok": False, "error": f"duration_hours must be in (0, {_MAX_DURATION_HOURS}]"}
+
+    t = now() if callable(now) else (now if now is not None else datetime.now(timezone.utc))
+    if not isinstance(t, datetime):
+        t = datetime.fromtimestamp(float(t), tz=timezone.utc)
+    if t.tzinfo is None:
+        t = t.replace(tzinfo=timezone.utc)
+
+    # THE LINCHPIN GATE: no owner-signed, current ownership proof for THIS (org_id, host) -> no authority.
+    # Resolved live from the spine under the owner key (a revoked/expired proof loses access immediately).
+    reg = AssetOwnershipRegistry(store)
+    if not reg.has_current_proof(oid, h, now=t.timestamp()):
+        return {"ok": False, "error": f"no current ownership proof for {h} (org {oid}): prove control of the "
+                                      f"asset (DNS-TXT / .well-known) before an assessment of it can be "
+                                      f"authorized — ownership is separate from billing/membership"}
+
+    s = _customer_slug(oid, h) if not slug else _slug_for(slug, None)
+    if not s or all(c == "." for c in s):
+        return {"ok": False, "error": "could not derive a path-safe slug"}
+
+    doc = EngagementAuthority(
+        engagement_slug=s,
+        environment=TargetEnvironment("live"),
+        scope=[h],                                   # EXACTLY the proven host — no parent/wildcard
+        not_before=t,
+        not_after=t + timedelta(hours=dur),
+        allow_destructive=False,                     # hardcoded: a customer self-serve path never writes
+        live_destructive_acknowledged=False,         # hardcoded: destructive stays on the M-11.1 ceremony
+        issued_by=f"customer:{oid}",                 # tenant baked into the owner-signed canonical bytes
+        note=str(note or ""),
+    )
+    kp = _owner_keypair()
+    signed = sign_engagement_authority(doc, {"owner": kp.private_key_b64})
+    trust_root = TrustRoot(
+        threshold=1,
+        authorizers=[AuthorizerKey(key_id="owner", name="owner", public_key_b64=kp.public_key_b64)],
+    )
+    try:
+        path = write_authorization(_base_dir(), s, signed, trust_root)
+    except ValueError as e:
+        return {"ok": False, "error": f"could not write the authorization ({e})"}
+    return {
+        "ok": True, "action": "customer_target_add", "org_id": oid, "slug": s, "host": h,
+        "environment": "live", "scope": [h], "allow_destructive": False,
+        "not_before": doc.not_before.isoformat(), "not_after": doc.not_after.isoformat(),
+        "signed_path": str(path),
+    }
+
+
 def list_targets() -> dict:
     """Every owner-signed authorization on the seam (public-safe fields only). Read-only; total."""
     from vigil_integration.live.authorization_broker import list_authorizations
