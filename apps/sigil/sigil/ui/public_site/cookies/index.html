@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Cookies &amp; local data — VIGIL</title>
+<meta name="description" content="VIGIL uses only strictly-necessary session cookies. No analytics, no advertising, no tracking, no consent banner — because there is nothing non-essential to consent to.">
+<link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/assets/tokens.css">
+<link rel="stylesheet" href="/assets/site.css">
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+<header class="nav"><div class="wrap nav__row">
+  <a class="brand" href="/"><img class="brand__mark" src="/assets/favicon.svg" alt="" width="26" height="26"><span>VIGIL</span></a>
+  <nav class="nav__links" aria-label="Primary">
+    <a href="/vs">Compare</a><a href="/tools">Tools</a><a href="/cve">CVEs</a><a href="/trust">Trust</a><a href="/blog">Blog</a>
+  </nav>
+  <span class="nav__spacer"></span>
+  <a class="btn btn--primary" href="/support">Request access</a>
+</div></header>
+
+<main id="main" class="section">
+  <div class="wrap prose">
+    <p class="eyebrow">Cookies &amp; local data</p>
+    <h1 style="font-size:var(--fs-2xl); letter-spacing:-.02em">Cookies &amp; local data</h1>
+    <p class="muted">Short version: this public site sets no cookies at all, and the product uses only
+      strictly-necessary session cookies. There is no analytics, no advertising, and no cross-site tracking —
+      so there's nothing to consent to, and no consent banner to click through.</p>
+
+    <h2>This public site</h2>
+    <p>These marketing, tools, and documentation pages are static. They set <strong>no cookies</strong> and
+      load no third-party scripts. The CVSS calculator and other tools run entirely in your browser; anything
+      they remember (if you ask them to) stays in your browser's local storage and is never sent anywhere.</p>
+
+    <h2>The product (strictly-necessary only)</h2>
+    <p>When you sign in to a VIGIL surface, a small number of session cookies are required for
+      authentication and security. They are HttpOnly and <code>SameSite=Strict</code> (and Secure over
+      HTTPS):</p>
+    <div class="matrix-scroll"><table class="matrix">
+      <thead><tr><th scope="col">Cookie</th><th scope="col">Purpose</th><th scope="col">Category</th></tr></thead>
+      <tbody>
+        <tr><th scope="row"><code>sigil_session</code></th><td>Operator/owner console session</td><td>Strictly necessary</td></tr>
+        <tr><th scope="row"><code>vigil_customer_session</code></th><td>Customer-plane session (hosted mode)</td><td>Strictly necessary</td></tr>
+        <tr><th scope="row">OIDC binding cookie</th><td>Binds a "sign in with…" flow to your browser (anti-CSRF), short-lived</td><td>Strictly necessary</td></tr>
+      </tbody>
+    </table></div>
+    <p>That's the entire list. There are no analytics, preference, or marketing cookies, so there is no
+      cookie-preferences panel to manage — turning these off would simply mean you can't stay signed in.</p>
+
+    <h2>Why no banner?</h2>
+    <p>Consent banners exist to get permission for non-essential tracking. We don't do any, so asking would
+      be theatre. This page is the honest disclosure instead. See <a href="/privacy">privacy</a> for the
+      fuller picture and the <a href="/trust">trust center</a> for the controls behind it.</p>
+  </div>
+</main>
+</body>
+</html>

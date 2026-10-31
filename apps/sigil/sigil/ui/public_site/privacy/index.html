@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Privacy — VIGIL</title>
+<meta name="description" content="VIGIL's privacy approach: self-hosted by default (your data never leaves your hardware), with a lean, real-subprocessor-only story for the hosted mode.">
+<link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/assets/tokens.css">
+<link rel="stylesheet" href="/assets/site.css">
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+<header class="nav"><div class="wrap nav__row">
+  <a class="brand" href="/"><img class="brand__mark" src="/assets/favicon.svg" alt="" width="26" height="26"><span>VIGIL</span></a>
+  <nav class="nav__links" aria-label="Primary">
+    <a href="/vs">Compare</a><a href="/tools">Tools</a><a href="/cve">CVEs</a><a href="/trust">Trust</a><a href="/blog">Blog</a>
+  </nav>
+  <span class="nav__spacer"></span>
+  <a class="btn btn--primary" href="/support">Request access</a>
+</div></header>
+
+<main id="main" class="section">
+  <div class="wrap prose">
+    <p class="eyebrow">Privacy</p>
+    <h1 style="font-size:var(--fs-2xl); letter-spacing:-.02em">Privacy</h1>
+    <p class="muted">VIGIL has two modes with genuinely different privacy stories. We describe both plainly.
+      This statement reflects how the software behaves; the hosted-mode terms are finalised as that offering
+      ships.</p>
+
+    <h2>Self-hosted / sovereign mode (the default)</h2>
+    <p>You run VIGIL on your own hardware with your own keys. In this mode:</p>
+    <ul>
+      <li><strong>Your data never leaves your machine.</strong> Scan targets, findings, and evidence stay on
+        your infrastructure.</li>
+      <li><strong>No telemetry, no analytics, no advertising, no auto-update.</strong> There is no phone-home
+        and every outbound path is source-audited and off by default.</li>
+      <li><strong>No third-party processor.</strong> VIGIL talks only to the LLM backend <em>you</em>
+        configure — which can be a model running entirely on your own hardware.</li>
+      <li><strong>Only strictly-necessary cookies</strong> for an operator/console session. No consent banner
+        is required because there is nothing non-essential to consent to. <a href="/cookies">Cookie details →</a></li>
+      <li><strong>Erasure</strong> is by cryptographic shredding: destroy the keys, and the evidence is
+        unrecoverable.</li>
+    </ul>
+
+    <h2>Hosted mode (in development)</h2>
+    <p>If you use a VIGIL-operated hosted offering, the operator acts as a processor for the limited data
+      needed to run your account. That story is deliberately lean, and we will only ever list subprocessors
+      that genuinely exist:</p>
+    <ul>
+      <li><strong>Account &amp; sign-up data</strong> — the email and credentials you provide to create an
+        organisation.</li>
+      <li><strong>Payments</strong> — handled by our payment processors (Flutterwave and Stripe); card data
+        is processed by them, not stored by us.</li>
+      <li><strong>Email delivery</strong> — a transactional email transport you or we configure, for
+        verification and recovery messages.</li>
+      <li><strong>LLM provider</strong> — only the model provider you choose for hosted analysis.</li>
+    </ul>
+    <p>Retention follows documented defaults; you can exercise access and erasure requests, satisfied through
+      the same cryptographic-shredding mechanism. Governing-law and controller-contact details are finalised
+      with counsel before the hosted offering is generally available.</p>
+
+    <h2>What we never do</h2>
+    <p>We don't sell data, we don't run advertising or cross-site tracking, and we don't claim an
+      independent audit or attestation we don't hold. See the <a href="/trust">trust center</a> for the
+      control details and our roadmap.</p>
+
+    <h2>Contact</h2>
+    <p>Privacy or security questions: <code>thuram@thuramnana.com</code>.</p>
+  </div>
+</main>
+</body>
+</html>

@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Support — VIGIL</title>
+<meta name="description" content="Get help with VIGIL: coordinated vulnerability disclosure, self-hosted and billing questions, and how to request access.">
+<link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/assets/tokens.css">
+<link rel="stylesheet" href="/assets/site.css">
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+<header class="nav"><div class="wrap nav__row">
+  <a class="brand" href="/"><img class="brand__mark" src="/assets/favicon.svg" alt="" width="26" height="26"><span>VIGIL</span></a>
+  <nav class="nav__links" aria-label="Primary">
+    <a href="/vs">Compare</a><a href="/tools">Tools</a><a href="/cve">CVEs</a><a href="/trust">Trust</a><a href="/blog">Blog</a>
+  </nav>
+  <span class="nav__spacer"></span>
+  <a class="btn btn--primary" href="/support">Request access</a>
+</div></header>
+
+<main id="main" class="section">
+  <div class="wrap">
+    <p class="eyebrow">Support</p>
+    <h1 style="font-size:var(--fs-2xl); letter-spacing:-.02em; margin:0 0 var(--sp-2)">How can we help?</h1>
+    <p class="muted" style="max-width:62ch; margin:0 0 var(--sp-6)">VIGIL is self-hosted, so most answers
+      live in the product and the docs that ship with it. Here's how to reach a human and resolve the common
+      things.</p>
+
+    <div class="grid grid--2">
+      <div class="card">
+        <h3>Request access or a walkthrough</h3>
+        <p>Want to run VIGIL or see a finding prove itself? Email us and we'll set you up.</p>
+        <p style="margin-top:var(--sp-3)"><a class="btn btn--primary" href="mailto:thuram@thuramnana.com?subject=VIGIL%20access">Email the team</a></p>
+      </div>
+      <div class="card">
+        <h3>Report a security issue in VIGIL</h3>
+        <p>Coordinated disclosure with safe harbour for good-faith research: a 3-day acknowledgement and a
+          90-day window. Email <code>thuram@thuramnana.com</code> or open a private advisory on our
+          repository. Please don't file security reports in public issues.</p>
+      </div>
+    </div>
+
+    <hr class="rule">
+
+    <h2 style="font-size:var(--fs-lg); margin:0 0 var(--sp-4)">Common questions</h2>
+    <div class="prose">
+      <h3>Where is the documentation?</h3>
+      <p>The full operator manual ships inside the product — open it from the cockpit. Deployment and
+        bring-up guides live with the source you run.</p>
+      <h3>Is my data sent anywhere?</h3>
+      <p>No. VIGIL runs on your hardware and talks only to the LLM backend you configure (which can be a
+        local model). There's no telemetry and no auto-update. <a href="/trust">See the trust center →</a></p>
+      <h3>How do I erase an engagement's data?</h3>
+      <p>Evidence is erased by cryptographic shredding — the keys that decrypt it are destroyed, so the data
+        is unrecoverable. It's an operator action on your own deployment.</p>
+      <h3>Self-hosted vs. hosted — which am I using?</h3>
+      <p>The default is sovereign and self-hosted: your keys, your machine. A hosted offering is in
+        development; until it ships, account/billing questions below apply only where you've explicitly
+        enabled them.</p>
+      <h3>Billing &amp; account recovery</h3>
+      <p>Where the hosted billing surface is enabled, manage plans from your account area; password recovery
+        is a single-use emailed link that also signs you out everywhere. These apply only to the hosted mode.</p>
+    </div>
+
+    <hr class="rule">
+    <p class="muted" style="font-size:var(--fs-xs)">We don't run a public chat widget or ticket queue — email
+      reaches a real person, and security reports are triaged first.</p>
+  </div>
+</main>
+</body>
+</html>
