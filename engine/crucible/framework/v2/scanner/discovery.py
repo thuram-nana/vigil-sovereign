@@ -715,12 +715,20 @@ def parse_graphql_operations(introspection: dict | str) -> list[GraphQLOperation
         schema = schema["__schema"]
     if not isinstance(schema, dict):
         return []
-    roots: dict[str, str] = {"Query": "query", "Mutation": "mutation"}   # conventional defaults
-    for decl, kind in (("queryType", "query"), ("mutationType", "mutation")):
+    # Root-type classification is the ONLY destruction-safety signal the dispatch layer has
+    # (a mutation is state-changing, so the wiring must withhold it from auto-fuzzing), and the
+    # introspection response is UNTRUSTED target output — so classify FAIL-CLOSED. A type is a
+    # MUTATION root under ANY signal (the declared mutationType, or the conventional name
+    # "Mutation"), and mutation WINS every conflict: a hostile schema that declares the
+    # mutation-bearing type as its queryType can never relabel a mutation root into a fuzzable
+    # query. A type is a QUERY root only when a query signal names it AND no mutation signal does.
+    query_names: set[str] = {"Query"}
+    mutation_names: set[str] = {"Mutation"}
+    for decl, bucket in (("queryType", query_names), ("mutationType", mutation_names)):
         node = schema.get(decl)
         name = node.get("name") if isinstance(node, dict) else None
         if isinstance(name, str) and name:
-            roots[name] = kind
+            bucket.add(name)
     types = schema.get("types")
     out: list[GraphQLOperation] = []
     if not isinstance(types, list):
@@ -729,7 +737,12 @@ def parse_graphql_operations(introspection: dict | str) -> list[GraphQLOperation
         if not isinstance(t, dict):
             continue
         tname = t.get("name")
-        kind = roots.get(tname) if isinstance(tname, str) else None
+        kind: str | None = None
+        if isinstance(tname, str):
+            if tname in mutation_names:      # mutation wins (fail-closed toward state-changing)
+                kind = "mutation"
+            elif tname in query_names:
+                kind = "query"
         if kind is None:
             continue
         fields = t.get("fields")

@@ -409,31 +409,39 @@ def test_openapi_bridge_lets_the_oracle_confirm_a_planted_bug() -> None:
 #    engine exercises; a mutation is surfaced as a LEAD and NEVER auto-sent.
 # ---------------------------------------------------------------------------
 
-_GQL_INTROSPECTION_RESULT = json.dumps({
-    "data": {"__schema": {
+def _gql_introspection_for(query: str) -> str:
+    """A SELECTION-FAITHFUL introspection response: a spec-compliant server returns ONLY the
+    fields the query selected, so this returns `fields[].args` only when the query selected
+    `args{` and `__schema.mutationType` only when the query selected `mutationType`. This is the
+    guard against the W2 red-pen's HIGH finding — if the production `_GQL_INTROSPECTION` ever
+    regresses to a name-only query, this mock stops returning args/mutationType and the wiring
+    test's `variables`/fuzz assertions fail, instead of certifying an inert feature green."""
+    want_args = "args{" in query
+    want_mut = "mutationType" in query
+    user_field: dict = {"name": "user"}
+    del_field: dict = {"name": "deleteUser"}
+    if want_args:
+        id_arg = [{"name": "id", "type": {"kind": "SCALAR", "name": "ID", "ofType": None}}]
+        user_field["args"] = id_arg
+        del_field["args"] = id_arg
+    schema: dict = {
         "queryType": {"name": "Query"},
-        "mutationType": {"name": "Mutation"},
         "types": [
-            {"name": "Query", "fields": [
-                {"name": "user", "args": [
-                    {"name": "id", "type": {"kind": "SCALAR", "name": "ID", "ofType": None}},
-                ]},
-            ]},
-            {"name": "Mutation", "fields": [
-                {"name": "deleteUser", "args": [
-                    {"name": "id", "type": {"kind": "SCALAR", "name": "ID", "ofType": None}},
-                ]},
-            ]},
+            {"name": "Query", "fields": [user_field]},
+            {"name": "Mutation", "fields": [del_field]},
         ],
-    }},
-})
+    }
+    if want_mut:
+        schema["mutationType"] = {"name": "Mutation"}
+    return json.dumps({"data": {"__schema": schema}})
 
 
 class _GqlApp(BaseHTTPRequestHandler):
-    """A GraphQL endpoint linked from `/`. It answers an introspection POST with a schema
-    declaring a `user(id)` query root field and a `deleteUser(id)` mutation root field, and
-    records every POST body it receives so the test can prove (a) the query op was synthesized
-    and fuzzed through the real audit engine, and (b) the mutation was never auto-sent."""
+    """A GraphQL endpoint linked from `/`. It answers an introspection POST with a
+    SELECTION-FAITHFUL schema (see `_gql_introspection_for`) declaring a `user(id)` query root
+    field and a `deleteUser(id)` mutation root field, and records every POST body it receives so
+    the test can prove (a) the query op was synthesized and fuzzed through the real audit engine,
+    and (b) the mutation was never auto-sent."""
 
     received: list[str] = []
 
@@ -467,7 +475,7 @@ class _GqlApp(BaseHTTPRequestHandler):
         if sp.path == "/graphql":
             type(self).received.append(raw)
             if "__schema" in raw:
-                self._send(_GQL_INTROSPECTION_RESULT, "application/json")
+                self._send(_gql_introspection_for(raw), "application/json")
             else:
                 self._send('{"data":{"user":null}}', "application/json")
         else:
@@ -487,6 +495,17 @@ def _serve_gql() -> Iterator[str]:
         srv.shutdown()
         srv.server_close()
         th.join(timeout=5)
+
+
+def test_production_introspection_query_requests_args_and_mutationtype() -> None:
+    """Regression guard for the W2 red-pen HIGH: the discovery pass's introspection query MUST
+    select `args` and `mutationType`, or a spec-compliant server returns neither and W2 synthesis
+    is inert (no `variables` object, no `/variables/<arg>` points) — a believed-working coverage
+    capability that structurally cannot run. (The e2e test below only exercises the real feature
+    because the mock is selection-faithful; this pins the production query shape directly.)"""
+    from framework.v2.scanner.campaign import _GQL_INTROSPECTION
+    assert "args{" in _GQL_INTROSPECTION, _GQL_INTROSPECTION
+    assert "mutationType" in _GQL_INTROSPECTION, _GQL_INTROSPECTION
 
 
 def test_graphql_discovery_wires_query_ops_into_audit_and_leaves_mutations_as_leads() -> None:

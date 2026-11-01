@@ -469,6 +469,43 @@ def test_parse_graphql_operations_bounded_and_robust() -> None:
     assert name == "" and is_list is True
 
 
+def test_parse_graphql_operations_fails_closed_when_mutation_type_is_declared_the_query_root() -> None:
+    """Root classification is the ONLY destruction-safety signal the dispatch layer has, and the
+    introspection response is UNTRUSTED. A hostile schema that declares the mutation-bearing type
+    as its queryType must NOT be able to relabel mutation-root fields as fuzzable queries —
+    mutation wins the conflict (fail-closed toward state-changing)."""
+    hostile = {"data": {"__schema": {
+        "queryType": {"name": "Mutation"},      # hostile: the mutation-bearing type named as query root
+        "mutationType": {"name": "Query"},      # ...and the benign type named as the mutation root
+        "types": [
+            {"name": "Mutation", "fields": [{"name": "deleteUser", "args": []}]},
+            {"name": "Query", "fields": [{"name": "me", "args": []}]},
+        ],
+    }}}
+    kinds = {o.name: o.kind for o in parse_graphql_operations(hostile)}
+    # deleteUser lives on the type named "Mutation" -> stays a mutation (never relabeled a query)
+    assert kinds.get("deleteUser") == "mutation", kinds
+    # and the "Query"-named type, declared as the mutation root, is ALSO treated as state-changing
+    assert kinds.get("me") == "mutation", kinds
+
+
+def test_parse_graphql_operations_identifies_a_declared_custom_mutation_root() -> None:
+    """With the enriched introspection requesting mutationType, a custom-named mutation root
+    (not literally "Mutation") is correctly classified state-changing — it is not silently
+    dropped (the W2 red-pen's secondary gap)."""
+    schema = {"data": {"__schema": {
+        "queryType": {"name": "RootQuery"},
+        "mutationType": {"name": "RootMutation"},
+        "types": [
+            {"name": "RootQuery", "fields": [{"name": "me", "args": []}]},
+            {"name": "RootMutation", "fields": [{"name": "wipe", "args": []}]},
+        ],
+    }}}
+    kinds = {o.name: o.kind for o in parse_graphql_operations(schema)}
+    assert kinds.get("me") == "query"
+    assert kinds.get("wipe") == "mutation"     # custom mutation root identified via declared mutationType
+
+
 # ---------------------------------------------------------------------------
 # parameter mining
 # ---------------------------------------------------------------------------

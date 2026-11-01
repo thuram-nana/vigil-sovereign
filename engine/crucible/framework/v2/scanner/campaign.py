@@ -96,10 +96,21 @@ _OPENAPI_SPEC_PATHS: tuple[str, ...] = (
     "api-docs", "swagger/v1/swagger.json",
 )
 
-# The minimal GraphQL introspection query (same shape as scanner.graphql's) — enough
-# to recover the schema's type/field names for LEAD surfacing. Sent only to endpoints
-# the crawl already reached that look like a GraphQL endpoint.
-_GQL_INTROSPECTION = '{"query":"query{__schema{queryType{name} types{name fields{name}}}}"}'
+# The GraphQL introspection query the discovery pass sends to each reached GraphQL endpoint.
+# It must request EVERYTHING the structured parser (discovery.parse_graphql_operations) reads,
+# because a spec-compliant server returns ONLY the selected fields: so it asks for the
+# `mutationType` (root classification — a mutation is state-changing and withheld from auto-
+# fuzzing) and, for every root field, its `args{name type{...}}` — otherwise W2 synthesis is
+# inert (no args -> no `variables` object -> no `/variables/<arg>` points to fuzz). The
+# `ofType` chain is nested to peel NON_NULL/LIST wrappers (within `_GQL_UNWRAP_DEPTH`=10). It
+# is a superset of the old name-only query, so `parse_graphql_schema` still recovers the flat
+# type/field names for LEAD surfacing.
+_GQL_INTROSPECTION = (
+    '{"query":"query{__schema{queryType{name} mutationType{name} '
+    'types{name fields{name args{name type{kind name '
+    'ofType{kind name ofType{kind name ofType{kind name '
+    'ofType{kind name ofType{kind name ofType{kind name}}}}}}}}}}}}"}'
+)
 
 
 class ScanReport(BaseModel):
@@ -1346,10 +1357,17 @@ class WebScanCampaign:
                 if n_queries >= self.discovery_max_ops:
                     continue
                 try:
-                    extra.append(request_from_graphql_operation(gop, endpoint, path=gql_path))
-                    n_queries += 1
+                    req = request_from_graphql_operation(gop, endpoint, path=gql_path)
                 except Exception:
                     continue
+                # Re-scope the FINAL synthesized URL (mirrors _queue's defense in depth): never
+                # rely solely on the downstream egress floor, and never trust that the endpoint's
+                # own path round-trips through urljoin unchanged (a `//`-prefixed path would
+                # escape the authority). An out-of-scope synthesized URL is dropped, not sent.
+                if not scope.in_scope(req.url):
+                    continue
+                extra.append(req)
+                n_queries += 1
 
         return extra, leads
 
