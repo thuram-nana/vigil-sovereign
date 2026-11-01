@@ -19,7 +19,7 @@ import socket
 
 import pytest
 
-from sigil.governor.asset_ownership import METHOD_DNS_TXT, METHOD_WELL_KNOWN
+from sigil.governor.asset_ownership import METHOD_DNS_TXT, METHOD_META_TAG, METHOD_WELL_KNOWN
 from sigil.ui.ownership_fetch import (
     OwnershipFetchError,
     WellKnownFetcher,
@@ -79,7 +79,7 @@ def test_fetch_refuses_unsupported_method():
         f.fetch("html-meta", "apme.cm")      # not yet a method (SS-2) — refused, not silently wrong
 
 
-@pytest.mark.parametrize("method", [METHOD_WELL_KNOWN, METHOD_DNS_TXT])
+@pytest.mark.parametrize("method", [METHOD_WELL_KNOWN, METHOD_DNS_TXT, METHOD_META_TAG])
 def test_fetch_refuses_internal_host_before_connecting(method):
     """An internal-resolving host raises at the SSRF gate — the socket connect is never reached. For dns-txt
     the gate falls on the DoH resolver (which the stub resolves internal here)."""
@@ -88,7 +88,7 @@ def test_fetch_refuses_internal_host_before_connecting(method):
         f.fetch(method, "apme.cm")
 
 
-@pytest.mark.parametrize("method", [METHOD_WELL_KNOWN, METHOD_DNS_TXT])
+@pytest.mark.parametrize("method", [METHOD_WELL_KNOWN, METHOD_DNS_TXT, METHOD_META_TAG])
 @pytest.mark.parametrize("bad", ["whitehouse.gov", "https://apme.cm", "apme.cm/x", "apme.cm:443", "203.0.113.9"])
 def test_fetch_reapplies_host_floor(method, bad):
     f = WellKnownFetcher(resolver=_res("1.1.1.1"))
@@ -155,6 +155,25 @@ def test_dns_txt_non_200_resolver_is_failclosed(monkeypatch):
     monkeypatch.setattr(f, "_open_pinned_https", lambda host, start: _FakeConn(302, b""))  # a redirect -> refused
     with pytest.raises(OwnershipFetchError):
         f.fetch(METHOD_DNS_TXT, "apme.cm")
+
+
+# --- HTML meta-tag ----------------------------------------------------------------------------------
+
+def test_meta_tag_fetches_homepage_html(monkeypatch):
+    f = WellKnownFetcher(resolver=_res("1.1.1.1"))
+    html = b"<html><head><meta name='vigil-site-verification' content='TOK'></head></html>"
+    fake = _FakeConn(200, html)
+    monkeypatch.setattr(f, "_open_pinned_https", lambda host, start: fake)
+    out = f.fetch(METHOD_META_TAG, "apme.cm")
+    assert isinstance(out, str) and "vigil-site-verification" in out
+    assert fake.requested[0] == ("GET", "/", fake.requested[0][2])     # GETs the homepage root
+
+
+def test_meta_tag_non_200_is_failclosed(monkeypatch):
+    f = WellKnownFetcher(resolver=_res("1.1.1.1"))
+    monkeypatch.setattr(f, "_open_pinned_https", lambda host, start: _FakeConn(301, b""))  # root redirect -> refused
+    with pytest.raises(OwnershipFetchError):
+        f.fetch(METHOD_META_TAG, "apme.cm")
 
 
 def test_total_deadline_caps_per_op_and_fails_closed_when_spent():

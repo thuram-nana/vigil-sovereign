@@ -78,7 +78,16 @@ PROOF_SIGNAL = "governor.asset_ownership_proof"
 # SAME namespaced marker, so the verdict is one comparison.
 METHOD_DNS_TXT = "dns-txt"
 METHOD_WELL_KNOWN = "well-known"
-_METHODS = frozenset({METHOD_DNS_TXT, METHOD_WELL_KNOWN})
+METHOD_META_TAG = "meta-tag"
+_METHODS = frozenset({METHOD_DNS_TXT, METHOD_WELL_KNOWN, METHOD_META_TAG})
+
+# The HTML meta-tag method (the standard Search-Console shape): the customer places
+# ``<meta name="vigil-site-verification" content="<token>">`` in their homepage <head>. The ``name``
+# attribute namespaces it (a pre-existing meta tag cannot collide — it would need this exact name AND the
+# 256-bit token as content), and the token itself is the secret. Distinct from the DNS/well-known MARKER
+# form (which carries the ``vigil-site-verification=`` prefix) — a meta tag's content is the bare token.
+_META_NAME = "vigil-site-verification"
+_MAX_META_TAGS = 64  # anti-DoS bound on meta tags scanned from a (possibly hostile) homepage
 
 # A conservative default proof validity window: ownership can change hands (a domain is sold, a zone is
 # transferred), so a proof EXPIRES and must be re-proven. 90 days mirrors common ACME/verification cadences;
@@ -120,8 +129,14 @@ _PROOF_CORE = ("signal", "org_id", "host", "method", "token_sha256", "verified_a
 # ---------------------------------------------------------------------------------------------------
 
 def expected_marker(token: str) -> str:
-    """The exact string the customer publishes (and the verdict demands), for BOTH methods."""
+    """The exact string the customer publishes (and the verdict demands) for the DNS-TXT + well-known
+    methods (the meta-tag method's content is the bare token — see :func:`meta_tag`)."""
     return _MARKER_PREFIX + str(token or "")
+
+
+def meta_tag(token: str) -> str:
+    """The exact HTML meta tag the customer places in their homepage ``<head>`` for the meta-tag method."""
+    return f'<meta name="{_META_NAME}" content="{str(token or "")}">'
 
 
 def dns_txt_name(host: str) -> str:
@@ -158,6 +173,36 @@ def _marker_matches(token: str, observed_value: str) -> bool:
     return hmac.compare_digest(observed, expected)
 
 
+def _token_matches(token: str, observed_value: str) -> bool:
+    """Constant-time comparison of a meta-tag ``content`` (trimmed) against the bare token. Over UTF-8 bytes
+    (never raises on customer-controlled non-ASCII content — same fail-closed contract as _marker_matches)."""
+    return hmac.compare_digest(str(observed_value or "").strip().encode("utf-8"),
+                               str(token or "").encode("utf-8"))
+
+
+def _meta_contents(html: str) -> "list[str]":
+    """Every ``content`` value of a ``<meta name="vigil-site-verification" …>`` tag in ``html`` (bounded,
+    fail-closed: a parse error yields what was collected so far, never raises). stdlib HTMLParser lowercases
+    tag + attr names, so the ``name`` match is case-insensitive; a hostile/malformed homepage is tolerated."""
+    from html.parser import HTMLParser
+
+    out: list[str] = []
+
+    class _Scan(HTMLParser):
+        def handle_starttag(self, tag: str, attrs: "list[tuple[str, str | None]]") -> None:
+            if tag != "meta" or len(out) >= _MAX_META_TAGS:
+                return
+            a = {k: (v or "") for k, v in attrs}
+            if a.get("name", "").strip().lower() == _META_NAME and "content" in a:
+                out.append(a["content"])
+
+    try:
+        _Scan().feed(str(html or ""))
+    except Exception:  # noqa: BLE001 — a malformed homepage is a fail-closed non-match, never a crash
+        pass
+    return out
+
+
 def observation_proves(method: str, token: str, observed: "Union[str, Iterable[str]]") -> bool:
     """``True`` iff ``observed`` proves possession of ``token`` under ``method``. FAIL-CLOSED on any unknown
     method, empty token, or malformed observation (never raises).
@@ -178,6 +223,13 @@ def observation_proves(method: str, token: str, observed: "Union[str, Iterable[s
         except TypeError:
             return False
         return any(isinstance(v, str) and _marker_matches(tok, v) for v in values)
+    if method == METHOD_META_TAG:
+        # ``observed`` is the homepage HTML; ANY <meta name="vigil-site-verification"> whose content is the
+        # token proves it. The name attribute namespaces it; a reflected page that merely echoes the token
+        # in body text does NOT satisfy it (only a real meta tag's content attribute does).
+        if not isinstance(observed, str):
+            return False
+        return any(_token_matches(tok, c) for c in _meta_contents(observed))
     # METHOD_WELL_KNOWN
     if not isinstance(observed, str):
         return False
@@ -255,6 +307,10 @@ class OwnershipChallenge:
     @property
     def well_known_url(self) -> str:
         return well_known_url(self.host)
+
+    @property
+    def meta_tag(self) -> str:
+        return meta_tag(self.token)
 
 
 @dataclass(frozen=True)

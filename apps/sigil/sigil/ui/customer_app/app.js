@@ -263,6 +263,9 @@
       VUI.card(".well-known file", "https", [kv("URL", r.well_known_url), kv("Body", r.well_known_body),
         h("div.row", {}, [h("button.btn", { type: "button", text: "Verify via .well-known",
           onClick: function () { doVerify(r.host, "well-known"); } })])]),
+      VUI.card("HTML meta tag", "meta-tag", [kv("In your homepage <head>", r.meta_tag),
+        h("div.row", {}, [h("button.btn", { type: "button", text: "Verify via meta tag",
+          onClick: function () { doVerify(r.host, "meta-tag"); } })])]),
       h("div#asset-verify"),
     ]);
   }

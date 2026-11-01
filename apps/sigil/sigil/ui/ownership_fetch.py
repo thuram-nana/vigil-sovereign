@@ -44,6 +44,7 @@ assert_no_offense()
 from .target_authorization import _validate_host  # noqa: E402  (the ONE host floor; reused, no drift)
 from ..governor.asset_ownership import (  # noqa: E402
     METHOD_DNS_TXT,
+    METHOD_META_TAG,
     METHOD_WELL_KNOWN,
     dns_txt_name,
     well_known_path,
@@ -52,6 +53,7 @@ from ..governor.asset_ownership import (  # noqa: E402
 _DEFAULT_TIMEOUT_S = 5.0
 _DEFAULT_TOTAL_TIMEOUT_S = 10.0  # absolute wall-clock budget for the whole fetch (anti slow-drip thread-hold)
 _DEFAULT_MAX_BYTES = 4096        # a verification marker is tiny; a larger body is refused (anti-DoS)
+_META_MAX_BYTES = 262144         # a homepage is bigger than a marker; bounded read of the first 256 KiB (anti-DoS)
 _DEFAULT_DOH_RESOLVER = "cloudflare-dns.com"  # a PINNED public DoH resolver; operator-overridable, must be public
 _DNS_TYPE_TXT = 16
 _MAX_TXT_ANSWERS = 32            # a sane cap on parsed TXT answers (anti-DoS on a hostile resolver reply)
@@ -162,6 +164,8 @@ class WellKnownFetcher:
             return self._fetch_well_known(h, start)
         if m == METHOD_DNS_TXT:
             return self._fetch_dns_txt(h, start)
+        if m == METHOD_META_TAG:
+            return self._fetch_meta_tag(h, start)
         raise OwnershipFetchError(f"unsupported ownership method {m!r}")
 
     def _fetch_well_known(self, h: str, start: float) -> str:
@@ -183,6 +187,32 @@ class WellKnownFetcher:
             raise
         except Exception as e:  # noqa: BLE001 — any transport error is a fail-closed refusal
             raise OwnershipFetchError(f"well-known fetch failed: {e}") from None
+        finally:
+            _quiet_close(conn)
+
+    def _fetch_meta_tag(self, h: str, start: float) -> str:
+        """GET the homepage ``https://<h>/`` (SSRF-hardened, pinned IP, NO redirect following) and return its
+        HTML (bounded to 256 KiB) for the verdict to scan for the ``<meta name="vigil-site-verification">``
+        tag. A root that 30x-redirects yields a non-200 and is refused (the customer uses DNS-TXT/well-known
+        or places the tag on the exact served root) — never chasing a redirect to an internal URL."""
+        conn = self._open_pinned_https(h, start)
+        try:
+            conn.sock.settimeout(self._op_timeout(start))
+            conn.request("GET", "/",
+                         headers={"Host": h, "User-Agent": "VIGIL-ownership-verify", "Accept": "text/html",
+                                  "Connection": "close"})
+            resp = conn.getresponse()                              # http.client does NOT auto-follow redirects
+            if resp.status != 200:
+                raise OwnershipFetchError(f"homepage returned HTTP {resp.status}")
+            conn.sock.settimeout(self._op_timeout(start))
+            body = resp.read(_META_MAX_BYTES + 1)
+            if len(body) > _META_MAX_BYTES:
+                body = body[:_META_MAX_BYTES]                     # bounded: scan the first 256 KiB (the <head>)
+            return body.decode("utf-8", "replace")
+        except OwnershipFetchError:
+            raise
+        except Exception as e:  # noqa: BLE001 — any transport error is a fail-closed refusal
+            raise OwnershipFetchError(f"meta-tag fetch failed: {e}") from None
         finally:
             _quiet_close(conn)
 

@@ -424,7 +424,8 @@ class Provisioner:
             self._audit("target_challenge", requester=requester, org_id=requester_org_id,
                         target=host, outcome="issued")
         return {"host": ch.host, "dns_name": ch.dns_name, "dns_value": ch.marker,
-                "well_known_url": ch.well_known_url, "well_known_body": ch.marker, "marker": ch.marker}
+                "well_known_url": ch.well_known_url, "well_known_body": ch.marker,
+                "meta_tag": ch.meta_tag, "marker": ch.marker}
 
     def launch_reserve(self, requester: str, requester_org_id: str, host: str, *,
                        ip: str = "", now: "Optional[float]" = None) -> dict:

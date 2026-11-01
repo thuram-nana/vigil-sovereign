@@ -28,9 +28,11 @@ import pytest
 from sigil.governor import asset_ownership as ao
 from sigil.governor.asset_ownership import (
     METHOD_DNS_TXT,
+    METHOD_META_TAG,
     METHOD_WELL_KNOWN,
     AssetOwnershipRegistry,
     expected_marker,
+    meta_tag,
     observation_proves,
 )
 from sigil.reuse import generate_keypair
@@ -264,6 +266,26 @@ def test_observation_proves_pure():
     # fail-closed: unknown method / empty token
     assert not observation_proves("bogus", tok, [m])
     assert not observation_proves(METHOD_DNS_TXT, "", [expected_marker("")])
+
+
+def test_observation_proves_meta_tag():
+    tok = "abc123"
+    tag = meta_tag(tok)                                                   # <meta name=".." content="abc123">
+    assert '<meta name="vigil-site-verification" content="abc123">' == tag
+    # a real meta tag whose content is the token proves it (in a realistic page)
+    assert observation_proves(METHOD_META_TAG, tok, f"<html><head>{tag}</head><body>hi</body></html>")
+    # case-insensitive tag/attr name; unquoted attrs; surrounding whitespace in content trimmed
+    assert observation_proves(METHOD_META_TAG, tok, '<META NAME="vigil-site-verification" CONTENT=" abc123 ">')
+    assert observation_proves(METHOD_META_TAG, tok, "<meta name=vigil-site-verification content=abc123>")
+    # a page that merely REFLECTS the token in body text does NOT prove it (only a meta tag's content attr)
+    assert not observation_proves(METHOD_META_TAG, tok, f"<html><body>the token is {tok} here</body></html>")
+    # wrong token / wrong meta name / missing content -> no
+    assert not observation_proves(METHOD_META_TAG, tok, '<meta name="vigil-site-verification" content="WRONG">')
+    assert not observation_proves(METHOD_META_TAG, tok, '<meta name="other-thing" content="abc123">')
+    assert not observation_proves(METHOD_META_TAG, tok, '<meta name="vigil-site-verification">')
+    # body must be a string; malformed / non-ASCII content fail-closed (never raises)
+    assert not observation_proves(METHOD_META_TAG, tok, ["list"])
+    assert not observation_proves(METHOD_META_TAG, tok, '<meta name="vigil-site-verification" content="café">')
 
 
 def test_ttl_must_be_positive():
