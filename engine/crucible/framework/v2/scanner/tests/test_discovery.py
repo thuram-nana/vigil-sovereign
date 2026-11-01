@@ -29,6 +29,7 @@ from framework.v2.scanner.discovery import (
     discover_content,
     mine_js,
     mine_params,
+    parse_graphql_operations,
     parse_graphql_schema,
     parse_openapi,
     parse_robots,
@@ -412,6 +413,60 @@ def test_parse_graphql_schema_extracts_type_and_field_names() -> None:
 def test_parse_graphql_schema_accepts_json_string() -> None:
     names = parse_graphql_schema(json.dumps(_INTROSPECTION))
     assert "User" in names and "email" in names
+
+
+# ---- W2: structured GraphQL operation surface (roots + fields + typed args) ------------------------------
+_INTROSPECTION_OPS = {
+    "data": {"__schema": {
+        "queryType": {"name": "Query"},
+        "mutationType": {"name": "Mutation"},
+        "types": [
+            {"name": "Query", "fields": [
+                {"name": "user", "args": [
+                    {"name": "id", "type": {"kind": "NON_NULL", "ofType": {"kind": "SCALAR", "name": "ID"}}},
+                    {"name": "verbose", "type": {"kind": "SCALAR", "name": "Boolean"}}]},
+                {"name": "search", "args": [
+                    {"name": "q", "type": {"kind": "SCALAR", "name": "String"}},
+                    {"name": "tags", "type": {"kind": "LIST", "ofType": {"kind": "SCALAR", "name": "String"}}}]},
+            ]},
+            {"name": "Mutation", "fields": [
+                {"name": "deleteUser", "args": [
+                    {"name": "id", "type": {"kind": "NON_NULL", "ofType": {"kind": "SCALAR", "name": "ID"}}}]}]},
+            {"name": "__Type", "fields": [{"name": "name", "args": []}]},   # meta -> skipped
+        ],
+    }},
+}
+
+
+def test_parse_graphql_operations_extracts_roots_fields_args_and_kind() -> None:
+    ops = parse_graphql_operations(_INTROSPECTION_OPS)
+    by = {(o.kind, o.name): o for o in ops}
+    assert ("query", "user") in by and ("query", "search") in by
+    assert ("mutation", "deleteUser") in by                     # the Mutation root is identified as state-changing
+    atypes = {a.name: a.type_name for a in by[("query", "user")].args}
+    assert atypes == {"id": "ID", "verbose": "Boolean"}         # NON_NULL unwrapped to its named scalar
+    tags = next(a for a in by[("query", "search")].args if a.name == "tags")
+    assert tags.type_name == "String" and tags.is_list          # LIST unwrapped + flagged
+    assert not any(o.name == "name" for o in ops)               # meta (__Type) fields are not operations
+
+
+def test_parse_graphql_operations_bounded_and_robust() -> None:
+    from framework.v2.scanner.discovery import _gql_unwrap_type
+    big = {"__schema": {"queryType": {"name": "Query"}, "types": [
+        {"name": "Query", "fields": [{"name": f"f{i}", "args": [
+            {"name": f"a{j}", "type": {"kind": "SCALAR", "name": "String"}} for j in range(200)]}
+            for i in range(2000)]}]}}
+    ops = parse_graphql_operations(big)
+    assert len(ops) <= 500 and all(len(o.args) <= 50 for o in ops)   # _GQL_MAX_OPS / _GQL_MAX_ARGS
+    assert parse_graphql_operations("not json") == [] and parse_graphql_operations({"no": "schema"}) == []
+    # a deeply-wrapped type-ref unwrap terminates (bounded), never hangs
+    node: dict = {"kind": "NON_NULL", "ofType": None}
+    cur = node
+    for _ in range(50):
+        cur["ofType"] = {"kind": "LIST", "ofType": None}
+        cur = cur["ofType"]
+    name, is_list = _gql_unwrap_type(node)
+    assert name == "" and is_list is True
 
 
 # ---------------------------------------------------------------------------

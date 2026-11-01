@@ -654,6 +654,112 @@ def parse_graphql_schema(introspection: dict | str) -> list[str]:
     return out
 
 
+# W2 — structured GraphQL operation surface (roots + fields + typed args), for building typed field/argument
+# queries + mutations. Bounds guard a hostile/huge introspection document (same discipline as the OpenAPI side).
+_GQL_MAX_OPS = 500
+_GQL_MAX_ARGS = 50
+_GQL_UNWRAP_DEPTH = 10                                    # NON_NULL/LIST type-ref nesting is shallow in practice
+
+
+class GraphQLArg(BaseModel):
+    """One argument of a GraphQL root field: its name and the UNWRAPPED named type (NON_NULL/LIST peeled
+    away) — e.g. ``String``/``Int``/``Boolean``/``ID``/``Float`` or an input-object type name."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str
+    type_name: str = ""
+    is_list: bool = False
+
+
+class GraphQLOperation(BaseModel):
+    """One fuzzable GraphQL root operation — a Query or Mutation field with its typed arguments. ``kind`` is
+    ``"query"`` or ``"mutation"`` (a mutation is state-changing, so its probe is destructive-confirm-gated)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str
+    kind: str
+    args: list[GraphQLArg] = Field(default_factory=list)
+
+
+def _gql_unwrap_type(tref: Any) -> "tuple[str, bool]":
+    """Unwrap a GraphQL introspection type-ref (peeling NON_NULL/LIST ``ofType`` wrappers) to ``(named_type,
+    saw_list)``. Bounded nesting; ``("", …)`` when unresolvable. Pure."""
+    node = tref
+    saw_list = False
+    for _ in range(_GQL_UNWRAP_DEPTH):
+        if not isinstance(node, dict):
+            return "", saw_list
+        name = node.get("name")
+        if isinstance(name, str) and name:
+            return name, saw_list
+        if node.get("kind") == "LIST":
+            saw_list = True
+        node = node.get("ofType")
+    return "", saw_list
+
+
+def parse_graphql_operations(introspection: dict | str) -> list[GraphQLOperation]:
+    """Lift a GraphQL introspection result into the structured, fuzzable root operations: for the Query and
+    Mutation ROOT types, each root field with its name, its arguments (name + unwrapped scalar/input type),
+    and whether it is a mutation. Root types are taken from the declared ``queryType``/``mutationType`` plus
+    the conventional ``Query``/``Mutation`` names. Meta (``__``) fields are skipped; bounded (``_GQL_MAX_OPS``
+    / ``_GQL_MAX_ARGS``) and deterministic. ``parse_graphql_schema`` stays the flat name list for its callers."""
+    schema = _as_obj(introspection)
+    if not isinstance(schema, dict):
+        return []
+    if isinstance(schema.get("data"), dict):
+        schema = schema["data"]
+    if isinstance(schema.get("__schema"), dict):
+        schema = schema["__schema"]
+    if not isinstance(schema, dict):
+        return []
+    roots: dict[str, str] = {"Query": "query", "Mutation": "mutation"}   # conventional defaults
+    for decl, kind in (("queryType", "query"), ("mutationType", "mutation")):
+        node = schema.get(decl)
+        name = node.get("name") if isinstance(node, dict) else None
+        if isinstance(name, str) and name:
+            roots[name] = kind
+    types = schema.get("types")
+    out: list[GraphQLOperation] = []
+    if not isinstance(types, list):
+        return out
+    for t in types:
+        if not isinstance(t, dict):
+            continue
+        tname = t.get("name")
+        kind = roots.get(tname) if isinstance(tname, str) else None
+        if kind is None:
+            continue
+        fields = t.get("fields")
+        if not isinstance(fields, list):
+            continue
+        for fld in fields:
+            if not isinstance(fld, dict):
+                continue
+            fname = fld.get("name")
+            if not (isinstance(fname, str) and fname and not fname.startswith("__")):
+                continue
+            args: list[GraphQLArg] = []
+            fargs = fld.get("args")
+            if isinstance(fargs, list):
+                for a in fargs:
+                    if len(args) >= _GQL_MAX_ARGS:
+                        break
+                    if not isinstance(a, dict):
+                        continue
+                    an = a.get("name")
+                    if not (isinstance(an, str) and an):
+                        continue
+                    tn, is_list = _gql_unwrap_type(a.get("type"))
+                    args.append(GraphQLArg(name=an, type_name=tn, is_list=is_list))
+            out.append(GraphQLOperation(name=fname, kind=kind, args=args))
+            if len(out) >= _GQL_MAX_OPS:                 # hostile-introspection bound
+                return out
+    return out
+
+
 def _as_obj(doc: dict | str) -> Any:
     if isinstance(doc, str):
         try:
