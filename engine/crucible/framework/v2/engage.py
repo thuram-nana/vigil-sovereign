@@ -1396,10 +1396,29 @@ def run_engagement(
         # identity's requests still pass the full safety stack. No refs => None (documented no-op).
         ac_config = access_control_config
         if enable_access_control and ac_config is None and access_control_refs:
-            from .scanner.access_control import config_from_cli
-            ac_config = config_from_cli(
-                ex.gated_fetch, access_control_victim_headers, access_control_refs,
-                unauth_headers=access_control_unauth_headers)
+            from .scanner.access_control import (
+                config_from_cli,
+                config_from_signed_credentials,
+                load_signed_target_credentials,
+            )
+            # W3 autoseed: an OWNER-SIGNED test-credential roster (authority dir) supplies the victim +
+            # unauthorized-peer identities — no per-run --ac-victim-header / --ac-unauth-header. It is
+            # VERIFIED against the engagement trust root; a tampered / absent roster falls back to the CLI
+            # headers. The attacker view stays the executor identity, exactly as config_from_cli.
+            _signed = load_signed_target_credentials(slug)
+            _trust_root = _engage_authority_trust_root(slug) if _signed is not None else None
+            # A tampered / out-of-window roster fails CLOSED inside config_from_signed_credentials (returns
+            # None) and falls back to the CLI headers below; with no CLI victim header that yields a
+            # non-firing config (no victim swap => the probe cannot mint), never a FACT from bad creds.
+            _seeded = (
+                config_from_signed_credentials(ex.gated_fetch, _signed, _trust_root, access_control_refs)
+                if _signed is not None and _trust_root is not None else None)
+            if _seeded is not None:
+                ac_config = _seeded.config
+            else:
+                ac_config = config_from_cli(
+                    ex.gated_fetch, access_control_victim_headers, access_control_refs,
+                    unauth_headers=access_control_unauth_headers)
         try:
             return WebScanCampaign(
                 _seed_recording_send,

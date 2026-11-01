@@ -513,6 +513,29 @@ def config_from_signed_credentials(
     return SeededAccessControl(config=config, attacker_headers=attacker_headers)
 
 
+def load_signed_target_credentials(slug: str) -> "SignedTargetCredentials | None":
+    """Load + parse the owner-signed test-credential roster for ``slug``
+    (``common.paths.target_credentials_path``), or ``None`` when it is absent / unreadable / malformed.
+
+    Parsing is NOT verification — the caller (:func:`config_from_signed_credentials`) verifies the parsed
+    roster against the engagement trust root. A missing/garbage file is a quiet ``None`` so an engagement
+    with no roster simply falls back to the operator's CLI headers (``config_from_cli``). Offense-plane
+    (``vigil_core`` + ``common.paths`` imported lazily, FATAL-2-safe)."""
+    from pydantic import ValidationError
+
+    from vigil_core.target_credentials import SignedTargetCredentials
+
+    from ..common import paths as _paths
+    try:
+        raw = _paths.target_credentials_path(slug).read_text(encoding="utf-8")
+    except OSError:
+        return None
+    try:
+        return SignedTargetCredentials.model_validate_json(raw)
+    except (ValidationError, ValueError):
+        return None
+
+
 # ---------------------------------------------------------------------------
 # finding builder — turn a confirmed cross-read / mass-assignment context into
 # the finding dict the admission choke (oracle_adapter.certify_admitted) consumes

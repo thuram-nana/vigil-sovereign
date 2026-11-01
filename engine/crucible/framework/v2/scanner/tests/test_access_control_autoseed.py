@@ -146,6 +146,24 @@ def test_no_usable_ref_seeds_nothing() -> None:
     assert config_from_signed_credentials(_base_send(), signed, tr, ["not-an-access-class:x:y"]) is None
 
 
+def test_load_signed_target_credentials_roundtrip_absent_and_malformed(tmp_path, monkeypatch) -> None:
+    from framework.v2.common import paths as _paths
+    from framework.v2.scanner.access_control import load_signed_target_credentials
+
+    p = tmp_path / "bench.credentials.json"
+    monkeypatch.setattr(_paths, "target_credentials_path", lambda slug: p)
+    # absent -> None (an engagement with no roster falls back to the CLI headers)
+    assert load_signed_target_credentials("bench") is None
+    # a valid signed roster round-trips (parse only — verification is the caller's job)
+    signed, _ = _signed_roster()
+    p.write_text(signed.model_dump_json(), encoding="utf-8")
+    loaded = load_signed_target_credentials("bench")
+    assert loaded is not None and loaded.document.engagement_slug == "bench"
+    # malformed -> None (quiet fallback, never a crash)
+    p.write_text("}{ not json", encoding="utf-8")
+    assert load_signed_target_credentials("bench") is None
+
+
 def test_peer_absent_still_seeds_lead_capable_config() -> None:
     # no unauthorized-peer -> unauth_send is None (LEAD-only), but the config is still produced
     signed, tr = _signed_roster(credentials=[
