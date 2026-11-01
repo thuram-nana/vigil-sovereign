@@ -321,6 +321,8 @@ def test_launch_requires_session(tmp_path, monkeypatch):
         assert c == 401, (c, r)
         c, r = _post(_opener(), ep, "/api/customer/launch/cancel", {"lease": {}})
         assert c == 401, (c, r)
+        c, r = _post(_opener(), ep, "/api/customer/launch/start", {"lease": {}})
+        assert c == 401, (c, r)                                   # K3 start is session-gated before the hop too
     finally:
         sov.shutdown(); edge.shutdown()
 

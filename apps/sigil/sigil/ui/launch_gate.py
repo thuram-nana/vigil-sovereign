@@ -285,3 +285,37 @@ class LaunchGate:
         return {"ok": True, "action": "launch_settled", "org_id": oid, "slug": s,
                 "refunded": refund, "refunded_plan": plan_refund, "refunded_wallet": wallet_refund,
                 "net_spend": consumed}
+
+    def publish_lease(self, *, signed_lease: Any, expect_org_id: Optional[str] = None) -> dict:
+        """Slice K3 (producer): drop an owner-signed lease on the cross-plane seam so the offense plane can
+        read + keyless-verify it before a customer engagement runs. The lease is VERIFIED owner-pinned here
+        (same locally-built owner TrustRoot as settle — a forged/tampered lease never reaches the seam) and
+        TENANT-BOUND (``expect_org_id`` must match the lease's org, so a customer cannot publish another
+        tenant's lease). Writes under the lease's OWN ``engagement_slug`` (== ``_customer_slug(org, host)``),
+        co-located with the G0 EngagementAuthority. Idempotent: re-publishing the same lease re-writes the same
+        bytes. Returns ``{ok: True, slug}`` or ``{ok: False, error}`` (fail-closed). The owner trust root is
+        written alongside for parity with the authority seam; the offense reader PINS its own owner key and
+        never trusts the seam-carried root (K2)."""
+        from vigil_core import AuthorizerKey, SignedCreditLaunchLease, TrustRoot, verify_credit_launch_lease
+        kp = self.owner_key
+        if kp is None:
+            return {"ok": False, "error": "publishing a lease requires the owner key (internal)"}
+        try:
+            signed = SignedCreditLaunchLease.model_validate(signed_lease)
+        except Exception:  # noqa: BLE001 — a malformed lease is a fail-closed refusal
+            return {"ok": False, "error": "publish requires the signed launch lease from reserve_launch"}
+        owner_root = TrustRoot(threshold=1, authorizers=[
+            AuthorizerKey(key_id="owner", name="owner", public_key_b64=kp.public_key_b64)])
+        ok, reason = verify_credit_launch_lease(signed, owner_root)   # PINNED to our owner key, not the wire
+        if not ok:
+            return {"ok": False, "error": f"lease does not verify under the owner key: {reason}"}
+        doc = signed.document
+        if expect_org_id is not None and doc.org_id != expect_org_id:
+            return {"ok": False, "error": "this lease belongs to a different org"}
+        try:
+            from vigil_integration.live.credit_lease_broker import write_credit_lease
+            write_credit_lease(self._seam_base(), doc.engagement_slug, signed, owner_root)
+        except Exception as e:  # noqa: BLE001 — a seam-write failure is a clean refusal, never a half-publish
+            return {"ok": False, "error": f"could not publish the launch lease to the seam: {type(e).__name__}"}
+        return {"ok": True, "action": "launch_published", "org_id": doc.org_id, "slug": doc.engagement_slug,
+                "scope_host": doc.scope_host}

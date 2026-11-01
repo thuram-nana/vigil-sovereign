@@ -470,6 +470,25 @@ class Provisioner:
                     target=str(r.get("slug", "")), outcome="canceled", critical=True)
         return {"slug": r.get("slug"), "refunded": r.get("refunded")}
 
+    def launch_start(self, requester: str, requester_org_id: str, signed_lease, *, ip: str = "") -> dict:
+        """Start a reserved launch — publish the owner-signed lease to the cross-plane seam so the offense
+        plane can run the engagement (Slice K3). Gated on admit_customer(run_engagement) AND the lease's org
+        MUST match the requester's session org (``expect_org_id`` — a customer cannot start another tenant's
+        reservation). The lease is verified owner-pinned before it reaches the seam; the keyless offense plane
+        re-verifies it (K2) before any traffic."""
+        from .launch_gate import LaunchGate
+        with self._lock:
+            if not self.orgs.admit_customer(username=requester, org_id=requester_org_id,
+                                            permission="run_engagement"):
+                self._audit("launch_start", requester=requester, org_id=requester_org_id, outcome="denied")
+                raise ProvisionDenied("requester may not manage launches for this org")
+        r = LaunchGate(self.store).publish_lease(signed_lease=signed_lease, expect_org_id=requester_org_id)
+        if not r.get("ok"):
+            raise ProvisionDenied(str(r.get("error") or "launch start refused"))
+        self._audit("launch_start", requester=requester, org_id=requester_org_id,
+                    target=str(r.get("slug", "")), outcome="started", critical=True)
+        return {"slug": r.get("slug"), "scope_host": r.get("scope_host")}
+
     def target_verify(self, requester: str, requester_org_id: str, host: str, method: str, *,
                       ip: str = "", now: "Optional[float]" = None) -> dict:
         """Fetch the customer's published token, record the owner-signed ownership PROOF on a pass, and mint

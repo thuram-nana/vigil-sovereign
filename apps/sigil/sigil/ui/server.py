@@ -1415,6 +1415,8 @@ class Handler(BaseHTTPRequestHandler):
             return p.launch_reserve(requester, str(body.get("org_id", "")), str(body.get("host", "")), ip=ip)
         if action == "launch_cancel":
             return p.launch_cancel(requester, str(body.get("org_id", "")), body.get("lease"), ip=ip)
+        if action == "launch_start":
+            return p.launch_start(requester, str(body.get("org_id", "")), body.get("lease"), ip=ip)
         return None
 
     def _durability_post(self, path):

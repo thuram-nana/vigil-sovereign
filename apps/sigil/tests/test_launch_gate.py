@@ -332,3 +332,37 @@ def test_mixed_reservation_refunds_plan_and_wallet_to_their_own_buckets():
     out = _gate(s).settle_launch(signed_lease=r["lease"], consumed_units=0, now=2100.0)
     assert out["refunded_plan"] == 5 and out["refunded_wallet"] == 5, out
     assert _pos(s, "org_a", 2000.0).plan_live == 5 and _avail(s, "org_a") == 20   # each bucket restored
+
+
+# --- Slice K3: publish the owner-signed lease to the cross-plane seam (producer half) ----------------
+def test_publish_lease_writes_the_owner_signed_lease_to_the_seam():
+    from sigil.ui.target_authorization import _base_dir
+    from vigil_core import verify_credit_launch_lease
+    from vigil_integration.live.credit_lease_broker import read_credit_lease
+    s = _store()
+    _setup(s, "org_a", "apme.cm", credits=100)
+    r = _gate(s).reserve_launch(requester="u", org_id="org_a", host="apme.cm", units=30, now=2000.0)
+    assert r["ok"], r
+    out = _gate(s).publish_lease(signed_lease=r["lease"], expect_org_id="org_a")
+    assert out["ok"] and out["slug"] == r["slug"] and out["scope_host"] == "apme.cm", out
+    # the lease is now on the seam and verifies owner-pinned (what the offense plane will re-check keyless)
+    bundle = read_credit_lease(_base_dir(), r["slug"])
+    assert bundle is not None
+    ok, reason = verify_credit_launch_lease(bundle.signed_lease, bundle.trust_root)
+    assert ok, reason
+    assert bundle.signed_lease.document.org_id == "org_a" and bundle.signed_lease.document.scope_host == "apme.cm"
+
+
+def test_publish_lease_refuses_foreign_org_and_forged_lease_nothing_written():
+    from sigil.ui.target_authorization import _base_dir
+    from vigil_integration.live.credit_lease_broker import read_credit_lease
+    s = _store()
+    _setup(s, "org_a", "apme.cm", credits=100)
+    r = _gate(s).reserve_launch(requester="u", org_id="org_a", host="apme.cm", units=30, now=2000.0)
+    assert r["ok"], r
+    # TENANT BINDING: a different session org cannot publish org_a's lease -> refused, nothing on the seam
+    out = _gate(s).publish_lease(signed_lease=r["lease"], expect_org_id="org_evil")
+    assert out["ok"] is False and "different org" in out["error"], out
+    assert read_credit_lease(_base_dir(), r["slug"]) is None
+    # a forged/garbage lease -> refused (never reaches the seam)
+    assert _gate(s).publish_lease(signed_lease={"not": "a lease"}, expect_org_id="org_a")["ok"] is False

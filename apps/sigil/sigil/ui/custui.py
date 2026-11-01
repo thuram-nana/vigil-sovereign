@@ -297,7 +297,7 @@ class CustomerHandler(BaseHTTPRequestHandler):
             return self._member(action, body)
         if action in ("target/challenge", "target/verify"):
             return self._target(action, body)
-        if action in ("launch/reserve", "launch/cancel"):
+        if action in ("launch/reserve", "launch/cancel", "launch/start"):
             return self._launch(action, body)
         return self._deny(404, "unknown action")
 
@@ -355,6 +355,9 @@ class CustomerHandler(BaseHTTPRequestHandler):
         if action == "launch/reserve":
             payload["host"] = body.get("host", "")              # session org, never body-supplied
             c, r = self._provision("launch_reserve", requester, payload)
+        elif action == "launch/start":
+            payload["lease"] = body.get("lease")                # publish the signed lease -> run (K3)
+            c, r = self._provision("launch_start", requester, payload)
         else:
             payload["lease"] = body.get("lease")
             c, r = self._provision("launch_cancel", requester, payload)
