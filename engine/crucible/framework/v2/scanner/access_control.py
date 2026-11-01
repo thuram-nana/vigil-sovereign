@@ -31,11 +31,17 @@ numeric id or an admin route is a LEAD, never a fact.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Callable, ClassVar, Iterable
+from typing import TYPE_CHECKING, Callable, ClassVar, Iterable
 
 from ..verify.adapter import FindingContext
 from .checks import Check, IdorCheck, Send
 from .insertion import HttpRequest, InsertionPoint, RequestTemplate
+
+if TYPE_CHECKING:  # annotation-only — the autoseeder imports vigil_core lazily (offense-plane, FATAL-2-safe)
+    from datetime import datetime
+
+    from vigil_core.models import TrustRoot
+    from vigil_core.target_credentials import SignedTargetCredentials
 
 # The seven access-control classes this pack seeds. Each routes to the ACHIEVED-STATE oracle.
 ACCESS_CONTROL_CLASSES: tuple[str, ...] = (
@@ -410,6 +416,101 @@ def config_from_cli(
     unauth_send = victim_send_with_headers(base_send, tuple(unauth_hdrs)) if unauth_hdrs else None
     return AccessControlConfig(victim_send=victim_send, cross_specs=tuple(specs),
                                nocred_send=nocred_send, unauth_send=unauth_send, id_prefix=id_prefix)
+
+
+# ---------------------------------------------------------------------------
+# W3 — autoseed from an OWNER-SIGNED test-credential roster (vigil_core.target_credentials)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class SeededAccessControl:
+    """The autoseeder's output: the :class:`AccessControlConfig` (victim / nocred / unauthorized-peer
+    identities + cross-specs) PLUS the ATTACKER identity's headers. The config carries every identity
+    EXCEPT the attacker, because the attacker view is the campaign's own ``send`` (passed to
+    ``IdorCheck.probe``) — so the caller (engage) swaps ``attacker_headers`` onto that gated send, exactly
+    as it swaps victim headers here. The oracle is unchanged; this only produces, from signed credentials,
+    the config ``config_from_cli`` produces by hand."""
+
+    config: AccessControlConfig
+    attacker_headers: tuple[tuple[str, str], ...] = ()
+
+
+def config_from_signed_credentials(
+    base_send: Send,
+    signed: "SignedTargetCredentials",
+    trust_root: "TrustRoot",
+    refs: Iterable[str],
+    *,
+    now: "datetime | None" = None,
+    id_prefix: str = "ac",
+    on_warn: Callable[[str], None] | None = None,
+) -> "SeededAccessControl | None":
+    """Build a :class:`SeededAccessControl` from an OWNER-SIGNED test-credential roster — the
+    signed-credential replacement for ``config_from_cli``'s hand-passed CLI headers (W3). The autoseeder
+    uses ONLY credentials the owner provisioned + signed:
+
+      * it VERIFIES ``signed`` against ``trust_root`` and FAILS CLOSED (``None``) on an invalid signature,
+        and (when ``now`` is given) on an out-of-window roster — so an unverified / expired roster can
+        never seed a probe;
+      * the VICTIM and ATTACKER roles are MANDATORY (a two-identity experiment is unsound without a
+        distinct victim and an authenticated attacker); UNAUTHORIZED_PEER is optional (its absence
+        downgrades the seeded checks to LEAD-only, exactly like ``config_from_cli`` without an unauth
+        identity);
+      * cross-specs — including the ``victim_discriminator`` + ``control_ref`` that make a FACT sound —
+        come from ``refs`` (operator-provided), NEVER synthesized from observed data (that would weaken
+        the oracle; see the W3 red flag).
+
+    All identities are header-swaps over the SAME gated ``base_send`` (never a safety-stack bypass), and
+    confirmation stays with the UNCHANGED achieved-state oracle. Returns ``None`` (the caller seeds
+    nothing) on a verification/window failure, a missing mandatory role, or no usable ref."""
+    from vigil_core.target_credentials import CredentialRole, verify_target_credentials
+
+    def _warn(msg: str) -> None:
+        if on_warn is not None:
+            on_warn(msg)
+
+    ok, reason = verify_target_credentials(signed, trust_root)
+    if not ok:
+        _warn(f"refusing to autoseed access-control: test-credential roster failed verification ({reason})")
+        return None
+    doc = signed.document
+    if now is not None:
+        if doc.not_before is not None and now < doc.not_before:
+            _warn("refusing to autoseed access-control: test-credential roster is not yet valid (not_before)")
+            return None
+        if doc.not_after is not None and now >= doc.not_after:
+            _warn("refusing to autoseed access-control: test-credential roster has expired (not_after)")
+            return None
+
+    victim_headers = tuple(doc.headers_for(CredentialRole.VICTIM))
+    attacker_headers = tuple(doc.headers_for(CredentialRole.ATTACKER))
+    peer_headers = tuple(doc.headers_for(CredentialRole.UNAUTHORIZED_PEER))
+    if not victim_headers or not attacker_headers:
+        _warn("refusing to autoseed access-control: the signed roster must provide BOTH a victim and an "
+              "attacker identity (a two-identity experiment is unsound without them)")
+        return None
+
+    specs: list[CrossAccessSpec] = []
+    for raw in refs:
+        spec = parse_cross_spec(raw)
+        if spec is None:
+            _warn(f"ignoring malformed ref {raw!r} "
+                  f"(expected bug_class:ref_param:victim_ref[|discriminator[|control_ref]])")
+            continue
+        specs.append(spec)
+    if not specs:
+        return None
+
+    victim_send = victim_send_with_headers(base_send, victim_headers)
+    # Strip ALL provisioned identity header names (attacker/victim/peer) + the common auth headers, so the
+    # logged-out baseline is genuinely credential-free regardless of which header carries each identity.
+    strip_names = tuple({name for name, _ in (*attacker_headers, *victim_headers, *peer_headers)})
+    nocred_send = nocred_send_stripping(base_send, strip_names)
+    unauth_send = victim_send_with_headers(base_send, peer_headers) if peer_headers else None
+    config = AccessControlConfig(victim_send=victim_send, cross_specs=tuple(specs),
+                                 nocred_send=nocred_send, unauth_send=unauth_send, id_prefix=id_prefix)
+    return SeededAccessControl(config=config, attacker_headers=attacker_headers)
 
 
 # ---------------------------------------------------------------------------
