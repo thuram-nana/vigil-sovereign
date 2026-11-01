@@ -424,6 +424,28 @@ def _engage_authority_trust_root(slug: str) -> object | None:
     return trust_root
 
 
+def _engage_launch_lease_precondition(slug: str, seed_url: str) -> None:
+    """K2 (arm site, customer launches): a CUSTOMER engagement (``cust_`` slug) must present a VERIFIED
+    owner-signed credit-launch lease on the cross-plane seam before it arms — a SEPARATE conjunct from the
+    EngagementAuthority (G0). The offense plane VERIFIES the public owner-signed lease against OUR pinned owner
+    key (never the seam-carried root), BINDS it to this engagement / target host / tenant (CRUCIBLE_TENANT) /
+    window, and CONSUMES it single-use (strict issued_at floor) — all keyless, before any traffic. A non-
+    ``cust_`` slug (operator / greenfield) requires NO lease and is byte-identical (no lease consulted).
+    Fail-closed: any missing / forged / wrong-host / wrong-tenant / expired / replayed lease raises."""
+    from .launch_lease import is_customer_slug, verify_customer_launch_lease
+    if not is_customer_slug(slug):
+        return
+    from urllib.parse import urlsplit
+
+    from .common.tenant import tenant_id
+    host = urlsplit(seed_url).hostname or ""
+    ok, reason = verify_customer_launch_lease(slug, host, tenant_id())
+    if not ok:
+        raise EngagementRefused(
+            f"customer launch {slug!r} refused — no verified credit-launch lease covers it (K2): {reason}. "
+            f"The lease is reserved + started on the sovereign plane and re-verified here keyless before traffic.")
+
+
 def _engage_oob_authority(slug: str) -> dict:
     """The OUT-OF-BAND OOB material (collector pins + owner-signed TTL/skew replay policy) from the SIGNED
     engagement authority, as WebScanCampaign kwargs. This CONSUMES ``authority.oob_collector_pubkey`` and
@@ -1193,6 +1215,7 @@ def run_engagement(
     ledger.start(P_PREFLIGHT)
     try:
         preflight(slug, seed_url)
+        _engage_launch_lease_precondition(slug, seed_url)   # K2: a cust_ launch needs a verified credit lease
     except EngagementRefused as e:
         ledger.fail(P_PREFLIGHT)
         if sink is not None:
