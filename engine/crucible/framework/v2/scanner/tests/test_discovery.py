@@ -276,6 +276,59 @@ def test_parse_openapi_bad_input_is_empty() -> None:
     assert parse_openapi({"no": "paths"}) == []
 
 
+_OPENAPI_BODY = {
+    "openapi": "3.0.0",
+    "components": {"schemas": {
+        "Address": {"type": "object",
+                    "properties": {"city": {"type": "string"}, "zip": {"type": "integer"}}},
+        "CreateUser": {"type": "object", "required": ["name"], "properties": {
+            "name": {"type": "string"},
+            "age": {"type": "integer"},
+            "address": {"$ref": "#/components/schemas/Address"},
+            "tags": {"type": "array", "items": {"type": "string"}},
+        }},
+    }},
+    "paths": {"/users": {"post": {
+        "parameters": [{"name": "dry", "in": "query", "schema": {"type": "boolean"}}],
+        "requestBody": {"content": {"application/json": {
+            "schema": {"$ref": "#/components/schemas/CreateUser"}}}},
+    }}},
+}
+
+
+def test_parse_openapi_lifts_requestbody_schema_and_param_types() -> None:
+    op = next(o for o in parse_openapi(_OPENAPI_BODY) if o.method == "POST" and o.path == "/users")
+    # the $ref'd requestBody is resolved into a SELF-CONTAINED nested schema (no $ref left to chase)
+    assert op.request_schema is not None
+    props = op.request_schema["properties"]
+    assert props["name"]["type"] == "string"
+    assert props["address"]["properties"]["city"]["type"] == "string"   # nested $ref inlined
+    assert props["tags"]["items"]["type"] == "string"
+    # the query parameter's declared type is carried; the body is the schema, NOT a flat param
+    assert op.param_types.get("dry") == "boolean"
+    assert op.params == ["dry"] and "name" not in op.params
+
+
+def test_parse_openapi_cyclic_ref_terminates_bounded() -> None:
+    doc = {
+        "openapi": "3.0.0",
+        "components": {"schemas": {"Node": {"type": "object", "properties": {
+            "value": {"type": "string"}, "next": {"$ref": "#/components/schemas/Node"}}}}},
+        "paths": {"/n": {"post": {"requestBody": {"content": {"application/json": {
+            "schema": {"$ref": "#/components/schemas/Node"}}}}}}},
+    }
+    op = next(o for o in parse_openapi(doc) if o.path == "/n")   # must not hang / blow the stack
+    assert isinstance(op.request_schema, dict)                   # bounded: the cycle collapses to {} at the floor
+    assert op.request_schema["properties"]["value"]["type"] == "string"
+
+
+def test_parse_openapi_dangling_ref_is_fail_closed() -> None:
+    doc = {"openapi": "3.0.0", "paths": {"/x": {"post": {"requestBody": {"content": {
+        "application/json": {"schema": {"$ref": "#/components/schemas/Missing"}}}}}}}}
+    op = next(o for o in parse_openapi(doc) if o.path == "/x")
+    assert op.request_schema is None                             # unresolved ref -> no typed body (fail-closed)
+
+
 _INTROSPECTION = {
     "data": {"__schema": {
         "queryType": {"name": "Query"},

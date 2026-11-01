@@ -96,13 +96,24 @@ class JsFindings(BaseModel):
 
 class ApiOperation(BaseModel):
     """One operation lifted from an OpenAPI/Swagger document — a method+path pair
-    plus the declared parameter names, ready to render into fuzzable requests."""
+    plus the declared parameter names, ready to render into fuzzable requests.
+
+    W1 (spec-typed deep fuzzing): beyond the names, it also carries the resolved
+    ``application/json`` requestBody *schema* (body methods) and each declared
+    parameter's OpenAPI *type*. These let :func:`scanner.insertion.request_from_api_operation`
+    render a TYPED, NESTED baseline body (so the insertion engine's JSON decomposer
+    fuzzes every nested leaf, not just a flat ``{name:"1"}``) and spec-typed query/
+    path fills. ``request_schema`` is ``$ref``-resolved and cycle/depth/node-bounded
+    at parse time, so it is self-contained and safe to walk. Both default empty, so
+    an operation with no body/typed params is byte-identical to the old behaviour."""
 
     model_config = ConfigDict(extra="forbid")
 
     method: str
     path: str
     params: list[str] = Field(default_factory=list)
+    request_schema: dict[str, Any] | None = None
+    param_types: dict[str, str] = Field(default_factory=dict)
 
 
 # ---------------------------------------------------------------------------
@@ -447,7 +458,15 @@ def parse_openapi(doc: dict | str) -> list[ApiOperation]:
     """Walk an OpenAPI 3 / Swagger 2 document's ``paths`` into a flat list of
     :class:`ApiOperation`s (method + path + declared parameter names). Path-level
     ``parameters`` are merged into every operation under that path. Accepts a
-    parsed dict or a JSON string; unparseable input yields an empty list."""
+    parsed dict or a JSON string; unparseable input yields an empty list.
+
+    W1 — spec-typed deep fuzzing: it now ALSO lifts, per operation, (a) the
+    ``application/json`` requestBody *schema* for body methods — OAS3
+    ``requestBody.content`` or a Swagger-2 ``in: body`` parameter — ``$ref``-resolved
+    against the document and cycle/depth/node-bounded so the stored schema is
+    self-contained and safe to walk; and (b) each declared parameter's OpenAPI
+    *type* (OAS3 ``schema.type`` or Swagger-2 ``type``). ``params`` (names) is
+    unchanged, so every existing caller sees exactly what it did before."""
     data = _as_obj(doc)
     paths = data.get("paths") if isinstance(data, dict) else None
     if not isinstance(paths, dict):
@@ -456,27 +475,115 @@ def parse_openapi(doc: dict | str) -> list[ApiOperation]:
     for path, item in paths.items():
         if not isinstance(item, dict):
             continue
-        shared = _param_names(item.get("parameters"))
         for method, op in item.items():
             if method.lower() not in _HTTP_METHODS:
                 continue
-            params = list(shared)
-            if isinstance(op, dict):
-                for name in _param_names(op.get("parameters")):
-                    if name not in params:
+            params: list[str] = []
+            types: dict[str, str] = {}
+            body_schema: Any = None
+            # path-level parameters apply to every operation; operation-level override/extend them.
+            for src in (item.get("parameters"), op.get("parameters") if isinstance(op, dict) else None):
+                for name, ptype, is_body, sch in _iter_params(src):
+                    if is_body:
+                        if body_schema is None and isinstance(sch, dict):
+                            body_schema = sch            # Swagger-2 `in: body`
+                    elif name and name not in params:
                         params.append(name)
-            out.append(ApiOperation(method=method.upper(), path=str(path), params=params))
+                        if ptype:
+                            types[name] = ptype
+            if isinstance(op, dict):                     # OAS3 requestBody (takes precedence if present)
+                content = (op.get("requestBody") or {})
+                content = content.get("content") if isinstance(content, dict) else None
+                jschema = ((content or {}).get("application/json") or {}).get("schema") \
+                    if isinstance(content, dict) else None
+                if isinstance(jschema, dict):
+                    body_schema = jschema
+            request_schema = None
+            if isinstance(body_schema, dict):
+                resolved = _deref(data, body_schema, (), 0, [_MAX_SCHEMA_NODES])
+                if isinstance(resolved, dict) and resolved:
+                    request_schema = resolved
+            out.append(ApiOperation(method=method.upper(), path=str(path), params=params,
+                                    request_schema=request_schema, param_types=types))
     return out
 
 
-def _param_names(params: Any) -> list[str]:
-    out: list[str] = []
-    if isinstance(params, list):
-        for p in params:
-            if isinstance(p, dict):
-                name = p.get("name")
-                if isinstance(name, str) and name and name not in out:
-                    out.append(name)
+def _iter_params(params: Any):
+    """Yield ``(name, type, is_body, schema)`` for each declared parameter. Handles OAS3
+    (``name`` + ``schema.type``) and Swagger-2 (``name`` + top-level ``type``, or ``in: body`` carrying a
+    ``schema``). Malformed entries are skipped. ``type`` is None when undeclared."""
+    if not isinstance(params, list):
+        return
+    for p in params:
+        if not isinstance(p, dict):
+            continue
+        if p.get("in") == "body":                        # Swagger-2 body parameter
+            sch = p.get("schema")
+            if isinstance(sch, dict):
+                yield (None, None, True, sch)            # real Swagger-2: the body IS the schema
+            else:
+                name = p.get("name")                     # schema-less shorthand: keep the name as a flat
+                if isinstance(name, str) and name:       # body field (back-compat with the pre-W1 behaviour)
+                    yield (name, None, False, None)
+            continue
+        name = p.get("name")
+        if not (isinstance(name, str) and name):
+            continue
+        ptype = None
+        sch = p.get("schema")
+        if isinstance(sch, dict) and isinstance(sch.get("type"), str):
+            ptype = sch["type"]                          # OAS3
+        elif isinstance(p.get("type"), str):
+            ptype = p["type"]                            # Swagger-2
+        yield (name, ptype, False, None)
+
+
+# Bounds for $ref resolution: a hostile/cyclic/huge spec can never blow the stack or the body.
+_MAX_SCHEMA_DEPTH = 8
+_MAX_SCHEMA_NODES = 512
+
+
+def _ref_target(root: dict, ref: str) -> "dict | None":
+    """Resolve a LOCAL JSON-pointer ``$ref`` (``#/components/schemas/X`` OAS3, ``#/definitions/X``
+    Swagger-2) against ``root``. A remote/non-local/dangling ref returns None (fail-closed — we never
+    fetch, and an unresolved ref simply yields no typed body)."""
+    if not (isinstance(ref, str) and ref.startswith("#/")):
+        return None
+    node: Any = root
+    for part in ref[2:].split("/"):
+        part = part.replace("~1", "/").replace("~0", "~")   # JSON-pointer unescape
+        if isinstance(node, dict) and part in node:
+            node = node[part]
+        else:
+            return None
+    return node if isinstance(node, dict) else None
+
+
+def _deref(root: dict, schema: Any, seen: "tuple[str, ...]", depth: int, budget: list) -> Any:
+    """Return a ``$ref``-free copy of ``schema`` (resolving local refs against ``root``). Cycle-safe (a ref
+    already on the current resolution path becomes ``{}``), depth- and node-bounded (past the cap →
+    ``{}``), pure (no I/O). The result is self-contained so the insertion builder needs no components map."""
+    if depth > _MAX_SCHEMA_DEPTH or budget[0] <= 0:
+        return {}
+    budget[0] -= 1
+    if not isinstance(schema, dict):
+        return schema
+    ref = schema.get("$ref")
+    if isinstance(ref, str):
+        if ref in seen:                                  # cycle on the current path
+            return {}
+        target = _ref_target(root, ref)
+        return {} if target is None else _deref(root, target, (*seen, ref), depth + 1, budget)
+    out: dict = {}
+    for k, v in schema.items():
+        if k == "properties" and isinstance(v, dict):
+            out[k] = {pk: _deref(root, pv, seen, depth + 1, budget) for pk, pv in v.items()}
+        elif k in ("items", "additionalProperties") and isinstance(v, dict):
+            out[k] = _deref(root, v, seen, depth + 1, budget)
+        elif k in ("allOf", "anyOf", "oneOf") and isinstance(v, list):
+            out[k] = [_deref(root, s, seen, depth + 1, budget) for s in v]
+        else:
+            out[k] = v                                   # scalars: type, required, enum, format, …
     return out
 
 

@@ -80,6 +80,46 @@ def test_bridge_no_free_params_is_bare_request() -> None:
     assert req.method == "GET" and req.url == "http://h/ping" and req.body is None
 
 
+def test_bridge_builds_a_typed_nested_body_from_the_request_schema() -> None:
+    """W1 — a requestBody schema renders a TYPED, NESTED baseline body (not a flat {name:"1"}), so the
+    insertion engine fuzzes every nested leaf. Query params ride alongside, spec-typed; it is deterministic."""
+    from framework.v2.scanner.insertion import InsertionKind as _IK
+    from framework.v2.scanner.insertion import RequestTemplate
+
+    schema = {"type": "object", "required": ["name"], "properties": {
+        "name": {"type": "string"},
+        "age": {"type": "integer"},
+        "active": {"type": "boolean"},
+        "address": {"type": "object", "properties": {"city": {"type": "string"}}},
+        "tags": {"type": "array", "items": {"type": "string"}},
+    }}
+    op = ApiOperation(method="POST", path="/api/submit", params=["dry"],
+                      request_schema=schema, param_types={"dry": "boolean"})
+    req = request_from_api_operation(op, "http://h/")
+    # typed + nested, not a flat {name:"1"}
+    assert json.loads(req.body) == {"name": "1", "age": 1, "active": True,
+                                    "address": {"city": "1"}, "tags": ["1"]}
+    assert req.content_type() == "application/json"
+    assert ("Content-Length", str(len(req.body.encode("utf-8")))) in req.headers
+    # the non-body (query) param rides alongside the body, spec-typed (boolean -> "true")
+    assert "dry=true" in req.url
+    # deterministic: same op -> same bytes
+    assert request_from_api_operation(op, "http://h/").body == req.body
+    # the NESTED leaves are now real JSON_VALUE insertion points (the coverage win)
+    names = {p.name for p in RequestTemplate(req).insertion_points(kinds=[_IK.JSON_VALUE])}
+    assert "/name" in names
+    assert any(n.startswith("/address") for n in names), names      # nested object leaf exposed
+    assert any(n.startswith("/tags") for n in names), names         # array element leaf exposed
+
+
+def test_bridge_body_schema_with_no_free_params_still_sends_the_typed_body() -> None:
+    # a documented requestBody with NO query params must NOT fall back to a bare request.
+    op = ApiOperation(method="POST", path="/api/submit", params=[],
+                      request_schema={"type": "object", "properties": {"q": {"type": "string"}}})
+    req = request_from_api_operation(op, "http://h/")
+    assert json.loads(req.body) == {"q": "1"} and req.content_type() == "application/json"
+
+
 def test_bridge_renders_into_real_insertion_points() -> None:
     """The whole point: the bridged request decomposes into the insertion points the
     audit engine fuzzes — a JSON body field becomes a JSON_VALUE point."""

@@ -1036,6 +1036,87 @@ _BODY_METHODS = frozenset({"POST", "PUT", "PATCH"})
 _PATH_TEMPLATE = re.compile(r"\{[^{}/]+\}")
 
 
+# W1 — spec-typed body synthesis. Bounds so a hostile/huge/deep (already $ref-resolved, cycle-safe) schema
+# can never blow the stack or the body; past a bound a node collapses to the benign `fill` token.
+_MAX_EXAMPLE_DEPTH = 8
+_MAX_EXAMPLE_NODES = 256
+
+
+def _fill_for(ptype: "str | None", fill: str) -> str:
+    """A benign, type-appropriate STRING fill for a query/form/path parameter (everything on that wire is a
+    string). Only a declared boolean gets a truthy word; everything else keeps the plain `fill` ("1"), so an
+    operation whose params carry no declared type is byte-identical to the pre-W1 behaviour."""
+    return "true" if ptype == "boolean" else fill
+
+
+def _scalar_example(schema: dict, fill: str) -> Any:
+    """A benign scalar instance of a resolved leaf schema: `enum` -> its first value; else by `type` —
+    integer/number -> 1, boolean -> True, null -> None, string/unknown -> `fill`. Deterministic."""
+    enum = schema.get("enum")
+    if isinstance(enum, list) and enum:
+        return enum[0]
+    t = schema.get("type")
+    if isinstance(t, list):                               # OAS 3.1 type-array: first non-null
+        t = next((x for x in t if x != "null"), None)
+    if t in ("integer", "number"):
+        return 1
+    if t == "boolean":
+        return True
+    if t == "null":
+        return None
+    return fill                                           # string + unknown -> the benign fill token
+
+
+def _example_from_schema(schema: Any, fill: str, *, depth: int, budget: list) -> Any:
+    """A benign, well-formed example instance of an (already ``$ref``-resolved) JSON Schema — the baseline
+    request body the audit engine then mutates ONE insertion point at a time. object -> {required-first
+    props}; array -> [one item]; ``allOf`` shallow-merged; ``anyOf``/``oneOf`` take the first branch; else a
+    typed scalar. Bounded (depth + shared node budget) and deterministic (no clock/rng): the same schema
+    always yields the same bytes. Past a bound a node collapses to `fill`. It only SHAPES the body — the
+    oracle still has to fire over the gated response for anything to be confirmed."""
+    if depth > _MAX_EXAMPLE_DEPTH or budget[0] <= 0 or not isinstance(schema, dict):
+        return fill
+    budget[0] -= 1
+    for key in ("allOf", "anyOf", "oneOf"):
+        branches = schema.get(key)
+        if not (isinstance(branches, list) and branches):
+            continue
+        if key == "allOf":
+            merged: dict = {"properties": {}, "required": []}
+            for b in branches:
+                if not isinstance(b, dict):
+                    continue
+                if isinstance(b.get("properties"), dict):
+                    merged["properties"].update(b["properties"])
+                if isinstance(b.get("required"), list):
+                    merged["required"].extend(b["required"])
+                if b.get("type") and "type" not in merged:
+                    merged["type"] = b["type"]
+            if merged["properties"] or merged.get("type"):
+                return _example_from_schema(merged, fill, depth=depth, budget=budget)
+        else:
+            return _example_from_schema(branches[0], fill, depth=depth + 1, budget=budget)
+    t = schema.get("type")
+    if isinstance(t, list):
+        t = next((x for x in t if x != "null"), None)
+    props = schema.get("properties")
+    if t == "object" or isinstance(props, dict):
+        out: dict = {}
+        if isinstance(props, dict):
+            req = schema.get("required")
+            req = set(req) if isinstance(req, list) else set()
+            ordered = [k for k in props if k in req] + [k for k in props if k not in req]
+            for k in ordered:
+                if budget[0] <= 0:
+                    break
+                out[str(k)] = _example_from_schema(props[k], fill, depth=depth + 1, budget=budget)
+        return out
+    if t == "array":
+        items = schema.get("items")
+        return [_example_from_schema(items, fill, depth=depth + 1, budget=budget)] if isinstance(items, dict) else []
+    return _scalar_example(schema, fill)
+
+
 def request_from_api_operation(
     operation: "ApiOperation",
     base_url: str,
@@ -1078,20 +1159,36 @@ def request_from_api_operation(
         seen.add(p)
         free.append(p)
 
-    if not free:
+    media = body_media_type.split(";", 1)[0].strip().lower()
+    schema = operation.request_schema
+    has_typed_body = (method in _BODY_METHODS and media == "application/json"
+                      and isinstance(schema, dict) and bool(schema))
+
+    # A documented requestBody schema makes a request worth sending even with no free params, so the
+    # bare-request shortcut applies ONLY when there is neither a typed body nor any free param (an op with
+    # no requestBody has request_schema=None, so this is byte-identical to the pre-W1 behaviour there).
+    if not free and not has_typed_body:
         return HttpRequest(method=method, url=url)
 
+    def _q(names: list[str]) -> str:
+        return _encode_pairs([(n, _fill_for(operation.param_types.get(n), fill)) for n in names])
+
     if method in _BODY_METHODS:
-        media = body_media_type.split(";", 1)[0].strip().lower()
-        if media == "application/json":
-            body = json.dumps({name: fill for name in free},
+        if has_typed_body:
+            # the TYPED, NESTED baseline body from the requestBody schema — every leaf becomes a fuzzable
+            # JSON insertion point. Non-body (query) params ride the query string alongside it.
+            example = _example_from_schema(schema, fill, depth=0, budget=[_MAX_EXAMPLE_NODES])
+            body = json.dumps(example, separators=(",", ":"), ensure_ascii=False)
+            if free:
+                url = url + ("&" if "?" in url else "?") + _q(free)
+        elif media == "application/json":
+            body = json.dumps({n: _fill_for(operation.param_types.get(n), fill) for n in free},
                               separators=(",", ":"), ensure_ascii=False)
         else:
-            body = _encode_pairs([(name, fill) for name in free])
+            body = _encode_pairs([(n, _fill_for(operation.param_types.get(n), fill)) for n in free])
         headers = [("Content-Type", body_media_type),
                    ("Content-Length", str(len(body.encode("utf-8"))))]
         return HttpRequest(method=method, url=url, headers=headers, body=body)
 
-    query = _encode_pairs([(name, fill) for name in free])
     sep = "&" if "?" in url else "?"
-    return HttpRequest(method=method, url=url + sep + query)
+    return HttpRequest(method=method, url=url + sep + _q(free))
