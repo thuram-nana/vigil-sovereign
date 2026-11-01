@@ -32,6 +32,18 @@
   }
   function val(id) { var el = VUI.$("#" + id); return el ? String(el.value || "").trim() : ""; }
   function err(msg) { VUI.errorBanner(root, msg); }
+  function kv(k, v) {
+    return h("div.cust-kv", {}, [h("span.k", { text: k }),
+      h("span", { text: (v == null || v === "") ? "—" : String(v) })]);
+  }
+  function money(minor, cur) {
+    var n = (typeof minor === "number") ? minor : parseInt(minor || 0, 10);
+    if (isNaN(n)) n = 0;
+    return (n / 100).toFixed(2) + " " + String(cur || "").toUpperCase();
+  }
+  function fmtDate(ts) {
+    try { return new Date(Number(ts || 0) * 1000).toISOString().slice(0, 10); } catch (e) { return "—"; }
+  }
 
   // ---- API ----------------------------------------------------------------------------------------
   function whoami() {
@@ -130,10 +142,7 @@
     var body = h("div", {}, [
       h("h2", { text: "Overview" }),
       h("div.cust-grid", {}, [
-        VUI.card ? VUI.card({ title: "Account" }, [
-          h("div.cust-kv", {}, [h("span.k", { text: "Signed in as" }), h("span", { text: w.username || "—" })]),
-          h("div.cust-kv", {}, [h("span.k", { text: "Workspace" }), h("span", { text: w.org_id || "—" })]),
-        ]) : h("div.card", {}, [h("div", { text: "Signed in as " + (w.username || "—") })]),
+        VUI.card("Account", null, [kv("Signed in as", w.username), kv("Workspace", w.org_id)]),
       ]),
       h("p.cust-muted", { text: "Billing, invoices, authorized assets and assessments appear here as those "
         + "panels come online. Every panel is scoped to this workspace by the server." }),
@@ -145,6 +154,68 @@
     return shell(h("div", {}, [h("h2", { text: title }),
       h("div.card.cust-soon", { text: title + " is being wired to this workspace and will appear here shortly." })]),
       "#/" + title.toLowerCase());
+  }
+
+  // An async data view: render the shell + a "Loading…" holder NOW, then fetch and fill it. The server
+  // scopes every read to the session org (admit_customer) — this UI never sends an org id. Guards against a
+  // route change mid-flight, routes a 401 to login, and renders an honest card on 403 (role) or any error.
+  function dataView(current, title, path, renderOk) {
+    var holder = h("div#cust-data", {}, h("p.cust-muted", { text: "Loading…" }));
+    (async function () {
+      var data;
+      try { data = await VUI.getJSON(path); }
+      catch (e) {
+        if (here() !== current) return;
+        if (e && e.status === 401) { await refreshWho(); nav("#/login"); return; }
+        if (e && e.status === 403) {
+          return VUI.mount(holder, h("div.card.cust-soon", { text: "Your role does not have access to " + title
+            + ". Billing roles cannot view assessments, and testing roles are granted separately by the owner." }));
+        }
+        return VUI.mount(holder, h("div.card.cust-soon", { text: "Could not load " + title
+          + ((e && e.data && e.data.error) ? ": " + e.data.error : ".") }));
+      }
+      if (here() !== current) return;                 // the customer navigated away before the load resolved
+      VUI.mount(holder, renderOk(data));
+    })();
+    return shell(h("div", {}, [h("h2", { text: title }), holder]), current);
+  }
+  function here() { return (location.hash || "#/").split("?")[0]; }
+
+  function viewBilling() {
+    return dataView("#/billing", "Billing", API + "/billing", function (d) {
+      var c = d.credits || {}, w = d.wallet || {}, s = d.subscription;
+      return h("div.cust-grid", {}, [
+        VUI.card("Credits", null, [
+          kv("Available", c.available), kv("Persistent (wallet)", c.persistent), kv("Plan (this period)", c.plan_live),
+        ]),
+        VUI.card("Wallet", null, [
+          kv("Granted", w.granted), kv("Debited", w.debited), kv("Available", w.available),
+        ]),
+        VUI.card("Subscription", null, s
+          ? [kv("Plan", s.plan_id), kv("Status", s.status), kv("Allotment", s.allotment),
+             kv("Active now", d.active ? "yes" : "no")]
+          : [h("p.cust-muted", { text: "No active subscription." })]),
+      ]);
+    });
+  }
+
+  function viewInvoices() {
+    return dataView("#/invoices", "Invoices", API + "/invoices", function (d) {
+      var invs = (d && d.invoices) || [];
+      if (!invs.length) { return h("div.card.cust-soon", { text: "No invoices yet." }); }
+      var head = h("tr", {}, ["Date", "Type", "Plan", "Amount", "Credits"].map(function (t) { return h("th", { text: t }); }));
+      var rows = invs.map(function (i) {
+        return h("tr", {}, [
+          h("td", { text: fmtDate(i.issued_at) }), h("td", { text: i.kind || "—" }),
+          h("td", { text: i.price_id || "—" }), h("td", { text: money(i.amount_minor, i.currency) }),
+          h("td", { text: (i.credits != null ? String(i.credits) : "—") }),
+        ]);
+      });
+      return h("div.card", {}, [
+        h("table.cust-table", {}, [h("thead", {}, head), h("tbody", {}, rows)]),
+        h("p.cust-muted", { text: (d.count || invs.length) + " invoice(s)." }),
+      ]);
+    });
   }
 
   // ---- shell --------------------------------------------------------------------------------------
@@ -195,8 +266,8 @@
     "#/": function () { return authed() ? viewDashboard() : viewLogin(); },
     "#/login": function () { return authed() ? viewDashboard() : viewLogin(); },
     "#/signup": function () { return authed() ? viewDashboard() : viewSignup(); },
-    "#/billing": function () { return authed() ? viewSoon("Billing") : viewLogin(); },
-    "#/invoices": function () { return authed() ? viewSoon("Invoices") : viewLogin(); },
+    "#/billing": function () { return authed() ? viewBilling() : viewLogin(); },
+    "#/invoices": function () { return authed() ? viewInvoices() : viewLogin(); },
     "#/assets": function () { return authed() ? viewSoon("Assets") : viewLogin(); },
     "#/assessments": function () { return authed() ? viewSoon("Assessments") : viewLogin(); },
     "#/team": function () { return authed() ? viewSoon("Team") : viewLogin(); },

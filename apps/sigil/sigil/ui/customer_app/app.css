@@ -32,3 +32,8 @@
 .cust-kv .k { opacity: 0.7; }
 .cust-muted { opacity: 0.7; }
 .cust-soon { padding: 24px; text-align: center; opacity: 0.7; }
+
+.cust-table { width: 100%; border-collapse: collapse; }
+.cust-table th, .cust-table td { text-align: left; padding: 8px 12px; border-bottom: 1px solid var(--border, #2a2a2a); }
+.cust-table th { font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.04em; opacity: 0.65; }
+.cust-table td { font-variant-numeric: tabular-nums; }
