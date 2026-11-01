@@ -1532,6 +1532,20 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                 self._plane_control(split.path, split.query)
                 return
             target = route(split.path, getattr(self.server, "backends", None))
+            # Slice J2: canonicalize the BARE customer mount to a trailing slash. The customer SPA uses
+            # RELATIVE asset + API refs so it works under /customer/ (dev) and / (the separate prod origin);
+            # a bare /customer with no slash would resolve those relatives against / (e.g. /app.js), which the
+            # proxy does not route to the edge. Gate on route() having RESOLVED the customer edge (target is
+            # not None ⇒ the customer backend exists, via the configured dict OR route()'s default) so a
+            # legacy proxy with no edge still 404s rather than redirecting; GET/HEAD only (a bare-mount POST is
+            # nonsensical and a 301 would downgrade it). route() itself is unchanged — the redirect lives here
+            # because only this layer knows the public mount prefix.
+            if split.path == CUSTOMER_BASE and self.command in ("GET", "HEAD") and target is not None:
+                self.send_response(301)
+                self.send_header("Location", CUSTOMER_BASE + "/")
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
             if target is None:
                 self._serve_static(split.path)
                 return

@@ -305,6 +305,32 @@ def test_route_customer_prefix_is_stripped_and_guarded_on_the_backend():
     assert uiproxy.route("/customer/api/customer/login", legacy) is None
 
 
+def test_bare_customer_mount_301s_to_trailing_slash(proxy):
+    """Slice J2: a BARE /customer (no trailing slash) GET 301s -> /customer/ so the SPA's RELATIVE asset/API
+    refs resolve against the mount (a bare path would resolve them against /). route() still maps both
+    /customer and /customer/ to the edge's "/" (unchanged, pure mapper) — the canonicalizing redirect is
+    emitted by the handler BEFORE route(), GET/HEAD only, and only when the customer edge is present."""
+    base, _serve = proxy
+
+    class _NoRedirect(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, *a, **k):  # do not follow — assert the 301 itself
+            return None
+
+    opener = urllib.request.build_opener(_NoRedirect)
+    try:
+        with opener.open(urllib.request.Request(base + "/customer"), timeout=5) as r:
+            code, loc = r.status, r.headers.get("Location")
+    except urllib.error.HTTPError as e:
+        code, loc = e.code, e.headers.get("Location")
+    assert code == 301, code
+    assert loc == "/customer/", loc
+    # /customer/ (WITH slash) is NOT redirected — it forwards to the edge (echo stand-in), prefix stripped.
+    st, _h, body = _raw(base + "/customer/")
+    assert st == 200 and "UP=customer" in body, (st, body[:60])
+    # a bare-mount POST is NOT redirected (a 301 would downgrade the method) — it forwards to the edge.
+    assert "UP=customer" in _post(base + "/customer", b"{}", token="")
+
+
 def test_partition_cookie_header_splits_on_the_plane_boundary():
     raw = "vigil_customer_session=abc; sigil_session=xyz; other=1"
     assert uiproxy._partition_cookie_header(raw, to_customer=True) == "vigil_customer_session=abc"
