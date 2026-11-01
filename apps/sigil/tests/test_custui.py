@@ -476,6 +476,49 @@ def test_customer_reads_require_a_session(tmp_path, monkeypatch):
         sov.shutdown(); edge.shutdown()
 
 
+# ---- cross-tenant isolation MERGE-GATE (governance R3): two orgs, one edge ----------------------------
+def test_cross_tenant_isolation_two_customer_orgs(tmp_path, monkeypatch):
+    """Two customer orgs on one edge: org A's authenticated session sees ONLY org A across every read and
+    CANNOT reach org B's data by ANY edge path — there is no client-supplied org selector; the edge scopes
+    every read to the SESSION org (admit_customer, no global leg). Org B's own session sees B's seeded
+    credits (positive control). This pins the 'IDOR-safe by construction' guarantee as an explicit two-org
+    gate, the governance-review requirement before any paying customer."""
+    from sigil.governor.wallet import WalletRegistry
+    sov, edge, ep, _ = _stack(tmp_path, monkeypatch)
+    try:
+        # org A (founderA is org_admin of A)
+        opA = _opener()
+        tA = _post(opA, ep, "/api/customer/signup/request", {"email": "a@acme.com"})[1]["dev_token"]
+        orgA = _post(opA, ep, "/api/customer/signup/confirm",
+                     {"token": tA, "password": "customer-pw-A1", "org_name": "Acme A"})[1]["org_id"]
+        # org B (founderB is org_admin of B), SEEDED (owner path) with credits B must keep private
+        opB = _opener()
+        tB = _post(opB, ep, "/api/customer/signup/request", {"email": "b@beta.com"})[1]["dev_token"]
+        orgB = _post(opB, ep, "/api/customer/signup/confirm",
+                     {"token": tB, "password": "customer-pw-B1", "org_name": "Beta B"})[1]["org_id"]
+        assert orgA and orgB and orgA != orgB
+        WalletRegistry(sov.store()).grant(orgB, 1000, "topup", entry_id="seed-b", issued_at=time.time())
+
+        # A's session sees A (same trial baseline as B, but NOT B's +1000 seed)
+        cA, bA = _get(opA, ep, "/api/customer/billing")
+        assert cA == 200 and bA["org_id"] == orgA, (cA, bA)
+        assert _get(opA, ep, "/api/customer/whoami")[1]["org_id"] == orgA
+        # B's own session sees B — and exactly 1000 MORE than A (same trial, plus B's private seed)
+        cB, bB = _get(opB, ep, "/api/customer/billing")
+        assert cB == 200 and bB["org_id"] == orgB, (cB, bB)
+        assert bB["credits"]["available"] == bA["credits"]["available"] + 1000, (bA, bB)
+        # IDOR attempt: A names org B via the query -> IGNORED (path-matched read; org from the session only)
+        cQ, bQ = _get(opA, ep, f"/api/customer/billing?org_id={orgB}")
+        assert cQ == 200 and bQ["org_id"] == orgA, (cQ, bQ)
+        assert bQ["credits"]["available"] == bA["credits"]["available"]      # still A's balance, never B's
+        # every other read is session-scoped to A too (never B)
+        for path in ("/api/customer/invoices", "/api/customer/assessments"):
+            c, r = _get(opA, ep, path)
+            assert c in (200, 403) and (c == 403 or r.get("org_id") == orgA), (path, c, r)
+    finally:
+        sov.shutdown(); edge.shutdown()
+
+
 # ---- Slice I: the keyless edge serves its own hash-routed customer SPA (static, strict-CSP) ----------
 def test_customer_spa_shell_and_assets_served_with_strict_csp(tmp_path):
     # static GETs need no provisioner — build a bare edge (any provision_base; it is never called here)
