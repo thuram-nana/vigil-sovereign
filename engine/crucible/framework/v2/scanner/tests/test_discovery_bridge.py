@@ -31,13 +31,15 @@ from urllib.parse import urlsplit
 from framework.v2.scanner import (
     HttpRequest,
     InsertionKind,
+    RequestTemplate,
     WebScanCampaign,
     request_from_api_operation,
+    request_from_graphql_operation,
 )
 from framework.v2.scanner.campaign import WebScanCampaign as _Camp
 from framework.v2.scanner.cli import loopback_send
 from framework.v2.scanner.crawler import CrawlResult, Page
-from framework.v2.scanner.discovery import ApiOperation
+from framework.v2.scanner.discovery import ApiOperation, GraphQLArg, GraphQLOperation
 
 
 # ---------------------------------------------------------------------------
@@ -399,3 +401,76 @@ def test_openapi_bridge_lets_the_oracle_confirm_a_planted_bug() -> None:
     # the bridged JSON body field, confirmed the same way
     assert any(f.param == "/name" and "/api/submit" in (f.endpoint or "") for f in xss), \
         f"JSON-body bridge did not reach the oracle: {[(f.param, f.endpoint) for f in xss]}"
+
+
+# ---------------------------------------------------------------------------
+# 3. the GraphQLOperation -> HttpRequest bridge (pure) — W2-b
+# ---------------------------------------------------------------------------
+
+
+def test_graphql_bridge_builds_a_parameterized_query_with_fuzzable_variables() -> None:
+    """A discovered Query root field with typed args becomes a parameterized POST whose argument values ride
+    a JSON ``variables`` object — so the EXISTING JSON decomposer exposes each ``/variables/<arg>`` as its own
+    fuzzable point. No GraphQL-aware insertion kind; the injection classes stay LEAD-capped (this bridge adds
+    no oracle). Deterministic: identical bytes every call."""
+    op = GraphQLOperation(
+        name="user",
+        kind="query",
+        args=[
+            GraphQLArg(name="id", type_name="ID"),
+            GraphQLArg(name="n", type_name="Int"),
+            GraphQLArg(name="ok", type_name="Boolean"),
+        ],
+    )
+    req = request_from_graphql_operation(op, "http://h/")
+
+    assert req.method == "POST"
+    assert req.url == "http://h/graphql"
+    assert req.content_type() == "application/json"
+    assert ("Content-Length", str(len(req.body.encode("utf-8")))) in req.headers
+
+    payload = json.loads(req.body)
+    # the query is parameterized: typed $var decls on the op, $var binds on the field, a __typename leaf
+    assert payload["query"] == (
+        "query($id: ID, $n: Int, $ok: Boolean)"
+        "{user(id: $id, n: $n, ok: $ok){__typename}}"
+    )
+    # typed, VIGIL-controlled baseline values (ID/String->fill, Int/Float->1, Boolean->True)
+    assert payload["variables"] == {"id": "1", "n": 1, "ok": True}
+
+    # the whole point: each argument is an independent, fuzzable JSON value point
+    pts = RequestTemplate(req).insertion_points(kinds=[InsertionKind.JSON_VALUE])
+    names = {p.name for p in pts}
+    assert {"/variables/id", "/variables/n", "/variables/ok"} <= names, names
+    # determinism — same operation, same bytes
+    assert request_from_graphql_operation(op, "http://h/").body == req.body
+
+
+def test_graphql_bridge_mutation_and_argless_are_well_formed() -> None:
+    """An argless root field emits no ``variables`` key (nothing to parameterize), and a mutation is rendered
+    as ``mutation{…}`` so the upstream destructive-confirm gate recognizes it as state-changing. Unknown /
+    input-object arg types fall back to a ``String`` variable the string fill satisfies; a list arg is wrapped
+    ``[...]``."""
+    argless = GraphQLOperation(name="deleteUser", kind="mutation")
+    req = request_from_graphql_operation(argless, "http://h/")
+    payload = json.loads(req.body)
+    assert payload == {"query": "mutation{deleteUser{__typename}}"}
+    assert "variables" not in payload  # no args -> no variables object
+
+    # unknown/input-object type -> String variable; list -> [String]; the fill satisfies both
+    typed = GraphQLOperation(
+        name="createOrder",
+        kind="mutation",
+        args=[
+            GraphQLArg(name="input", type_name="OrderInput"),      # input object -> String
+            GraphQLArg(name="tags", type_name="String", is_list=True),  # list -> [String]
+        ],
+    )
+    p2 = json.loads(request_from_graphql_operation(typed, "http://h/").body)
+    assert p2["query"] == (
+        "mutation($input: String, $tags: [String])"
+        "{createOrder(input: $input, tags: $tags){__typename}}"
+    )
+    assert p2["variables"] == {"input": "1", "tags": "1"}
+    # the mutation keyword is present verbatim for the destructive-confirm gate to match
+    assert p2["query"].startswith("mutation")

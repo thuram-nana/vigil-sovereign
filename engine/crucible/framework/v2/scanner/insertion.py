@@ -35,7 +35,7 @@ from urllib.parse import urljoin
 from pydantic import BaseModel, ConfigDict, Field
 
 if TYPE_CHECKING:  # annotation only — importing discovery at runtime would cycle
-    from .discovery import ApiOperation
+    from .discovery import ApiOperation, GraphQLOperation
 
 # Headers whose value the framework owns and must not fuzz (rendering recomputes
 # Content-Length; fuzzing it would only produce malformed requests).
@@ -1194,3 +1194,59 @@ def request_from_api_operation(
 
     sep = "&" if "?" in url else "?"
     return HttpRequest(method=method, url=url + sep + _q(free))
+
+
+# W2 — GraphQL root operation -> a concrete, fuzzable request. ------------------------------------------
+_GQL_SCALARS = frozenset({"ID", "String", "Int", "Float", "Boolean"})
+
+
+def _gql_var_value(type_name: str, fill: str) -> Any:
+    """A benign, VIGIL-controlled baseline for a GraphQL variable of the (unwrapped) named type: Int/Float ->
+    1, Boolean -> True, ID/String/unknown/input-object -> the string `fill`. Deterministic."""
+    t = (type_name or "").strip()
+    if t in ("Int", "Float"):
+        return 1
+    if t == "Boolean":
+        return True
+    return fill
+
+
+def _gql_var_type(arg: Any) -> str:
+    """The GraphQL variable TYPE signature for ``$<arg>``: the declared scalar if known, else ``String`` (a
+    safe default that accepts the string fill); wrapped in ``[...]`` for a list arg."""
+    base = arg.type_name if getattr(arg, "type_name", "") in _GQL_SCALARS else "String"
+    return f"[{base}]" if getattr(arg, "is_list", False) else base
+
+
+def request_from_graphql_operation(
+    operation: "GraphQLOperation",
+    base_url: str,
+    *,
+    path: str = "/graphql",
+    fill: str = "1",
+) -> HttpRequest:
+    """Bridge one discovered GraphQL root operation (``scanner.discovery.parse_graphql_operations``) into a
+    concrete, fuzzable :class:`HttpRequest`: a PARAMETERIZED query/mutation whose argument values ride a JSON
+    ``variables`` object, so the insertion engine's existing JSON decomposer exposes each ``/variables/<arg>``
+    as its own fuzzable point (no GraphQL-aware insertion kind required) and the existing audit checks fuzz
+    the argument values — field/argument injection surfaced as LEADS (the injection classes stay LEAD-capped;
+    this bridge adds NO oracle). A ``mutation`` is state-changing, so its probe is gated by the pre-existing
+    destructive-confirm gate upstream. The field sub-selects ``__typename`` (valid on any object type — the
+    common root-field shape; a scalar-returning field yields a GraphQL error response, itself a signal, and
+    the argument VALUES are fuzzed regardless). Pure + deterministic: the same operation always yields the
+    same bytes. It only SHAPES the request — the oracle still has to fire over the gated response."""
+    name = str(getattr(operation, "name", "") or "")
+    kind = "mutation" if getattr(operation, "kind", "") == "mutation" else "query"
+    args = [a for a in (getattr(operation, "args", None) or []) if getattr(a, "name", "")]
+    decls = ", ".join(f"${a.name}: {_gql_var_type(a)}" for a in args)
+    binds = ", ".join(f"{a.name}: ${a.name}" for a in args)
+    head = kind + (f"({decls})" if decls else "")
+    field = name + (f"({binds})" if binds else "")
+    query = f"{head}{{{field}{{__typename}}}}"
+    payload: dict = {"query": query}
+    if args:
+        payload["variables"] = {a.name: _gql_var_value(getattr(a, "type_name", ""), fill) for a in args}
+    body = json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
+    url = urljoin(base_url, path)
+    headers = [("Content-Type", "application/json"), ("Content-Length", str(len(body.encode("utf-8"))))]
+    return HttpRequest(method="POST", url=url, headers=headers, body=body)
