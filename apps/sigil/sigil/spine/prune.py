@@ -574,17 +574,19 @@ def stranded_invoices(store, archived: list[Segment], K: int) -> list[str]:
     every below-K invoice row. Fail-closed tripwire mirroring `stranded_active_wallets` (append-only rows rather
     than running totals); verified under the owner key valid at each seq; the seed round-trips through
     `model_dump`/`model_validate` so a seed-emission regression is caught. Read-only."""
-    from ..governor.invoices import INVOICE_SIGNAL, _INVOICE_CORE
+    from ..governor.invoices import INVOICE_SIGNAL, _INVOICE_CORE, _as_nonneg_int
     from ..governor import key_history as _kh
-    from ..governor.authn import verify_signed
+    from ..governor.authn import as_issued_at, verify_signed
     from ..governor.identity import owner_pubkey
     tp = owner_pubkey() or ""
     resolver = _kh.key_resolver(store, current=tp)
     below: list[SpineRecord] = []
     for seg in archived:
         below.extend(read_segment_records(store._layout.seg_path(seg)))
-    # the (org_id, invoice_id) history keys a genesis fold of [0..K) yields — the lines that MUST survive the prune.
-    keys: dict[tuple, str] = {}               # (org_id, invoice_id) -> org_id, first mint wins (mirror the fold)
+    # the FULL below-K rows a genesis fold yields, reconstructed with build()'s EXACT coercions so a correct
+    # build round-trips EQUAL (first-mint-wins per (org, invoice_id)). Value-aware — not key-only — so a seed
+    # that keeps the (org, invoice_id) key but corrupts amount/currency/credits/period is still caught.
+    below_rows: dict[tuple, list] = {}
     for r in sorted(below, key=lambda r: r.seq):
         p = r.payload
         if not isinstance(p, dict) or p.get("signal") != INVOICE_SIGNAL:
@@ -593,16 +595,23 @@ def stranded_invoices(store, archived: list[Segment], K: int) -> list[str]:
         if not (isinstance(oid, str) and oid and isinstance(iid, str) and iid):
             continue
         key = (oid, iid)
-        if key in keys:
+        if key in below_rows:
             continue
         if not verify_signed(p, _INVOICE_CORE, resolver.at(r.seq)):
             continue
-        keys[key] = oid
+        below_rows[key] = [oid, iid, str(p.get("kind") or ""), str(p.get("price_id") or ""),
+                           _as_nonneg_int(p.get("amount_minor")), str(p.get("currency") or ""),
+                           _as_nonneg_int(p.get("credits")), float(as_issued_at(p.get("period_start"))),
+                           float(as_issued_at(p.get("period_end"))), float(as_issued_at(p.get("issued_at")))]
     seed = SnapshotState.model_validate(
         build(below, trusted_pubkey=tp, base_seq=K, snapshot_seq=-1, resolver=resolver).model_dump())
-    seed_keys = {(row[0], row[1]) for row in seed.invoice_row
-                 if isinstance(row, (list, tuple)) and len(row) >= 2}
-    stranded: set = {oid for key, oid in keys.items() if key not in seed_keys}   # a line the seed fails to carry
+    # VALUE-AWARE comparison gated to the >=10-field shape the fold actually CONSUMES (invoices._fold / the
+    # build re-seed both require len>=10) — mirrors stranded_active_wallets' value-equality. A key the seed
+    # drops, keeps with a corrupted value, or emits as a short (<10) row the fold would silently discard is all
+    # flagged (key-only + len>=2 before this missed exactly those seed-emission regressions the guard exists for).
+    seed_rows = {(row[0], row[1]): [row[i] for i in range(10)] for row in seed.invoice_row
+                 if isinstance(row, (list, tuple)) and len(row) >= 10}
+    stranded: set = {key[0] for key, full in below_rows.items() if seed_rows.get(key) != full}
     return sorted(str(o) for o in stranded)
 
 

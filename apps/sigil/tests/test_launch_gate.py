@@ -278,3 +278,57 @@ def test_nonce_reuse_does_not_mint_a_free_lease():
     g.settle_launch(signed_lease=r1["lease"], consumed_units=0, now=2500.0)    # refund -> back to 100
     r2 = g.reserve_launch(requester="u", org_id="org_a", host="apme.cm", units=30, now=3000.0, nonce="fixed")
     assert r2["ok"] is False and _avail(s, "org_a") == 100     # reused nonce -> no debit, no free lease
+
+
+# --- red-pen fold: the refund restores the SAME buckets reserve debited (no plan->wallet laundering) -----
+def _plan(store, org, allotment, period_end):
+    """Seat an active subscription + a plan tranche so the meter's plan_live > 0 (reserve debits plan-first)."""
+    from sigil.governor.metering import PlanCreditLedger, refill_active_subscription
+    from sigil.governor.subscription import SubscriptionRegistry
+    subs = SubscriptionRegistry(store)
+    plan = PlanCreditLedger(store)
+    subs.subscribe(org, "pro", allotment, period_start=0.0, period_end=period_end, issued_at=float(next(_iss)))
+    refill_active_subscription(subs, plan, org, issued_at=float(next(_iss)))
+
+
+def _pos(store, org, now):
+    from sigil.governor.metering import CreditMeter, PlanCreditLedger
+    from sigil.governor.subscription import SubscriptionRegistry
+    from sigil.governor.wallet import WalletRegistry
+    return CreditMeter(WalletRegistry(store), PlanCreditLedger(store), SubscriptionRegistry(store)).position(org, now)
+
+
+def test_cancel_restores_plan_credits_not_the_wallet_no_laundering():
+    # reserve debits PLAN-credits-first (non-rollover); a cancel (settle consumed=0) must RESTORE the plan
+    # tranche, never launder expiring plan credits into the permanent wallet (the red-pen money finding).
+    PE = 1e12
+    s = _store()
+    _setup(s, "org_a", "apme.cm", credits=5)                  # tiny PERMANENT wallet
+    _plan(s, "org_a", 100, PE)                                # 100 non-rollover PLAN credits
+    assert _pos(s, "org_a", 2000.0).plan_live == 100 and _avail(s, "org_a") == 5
+    r = _gate(s).reserve_launch(requester="u", org_id="org_a", host="apme.cm", units=10, now=2000.0)
+    assert r["ok"], r
+    assert _pos(s, "org_a", 2000.0).plan_live == 90 and _avail(s, "org_a") == 5   # debited PLAN, not wallet
+    out = _gate(s).settle_launch(signed_lease=r["lease"], consumed_units=0, now=2100.0)
+    assert out["ok"] and out["refunded_plan"] == 10 and out["refunded_wallet"] == 0, out
+    assert _pos(s, "org_a", 2000.0).plan_live == 100          # the PLAN tranche is restored
+    assert _avail(s, "org_a") == 5                            # wallet NOT inflated — laundering closed
+    # and the restored plan credits STILL expire at period_end (non-rollover preserved); nothing went permanent
+    assert _pos(s, "org_a", PE + 1).plan_live == 0 and _avail(s, "org_a") == 5
+
+
+def test_mixed_reservation_refunds_plan_and_wallet_to_their_own_buckets():
+    # plan_live 5 + wallet 20, reserve 10 -> from_plan=5 (expiring), from_wallet=5 (permanent). cancel restores
+    # each bucket to its own total (5 back to the plan tranche, 5 back to the wallet) — split re-derived from
+    # the owner-signed debit records, never a wire amount.
+    PE = 1e12
+    s = _store()
+    _setup(s, "org_a", "apme.cm", credits=20)
+    _plan(s, "org_a", 5, PE)
+    assert _pos(s, "org_a", 2000.0).plan_live == 5 and _avail(s, "org_a") == 20
+    r = _gate(s).reserve_launch(requester="u", org_id="org_a", host="apme.cm", units=10, now=2000.0)
+    assert r["ok"], r
+    assert _pos(s, "org_a", 2000.0).plan_live == 0 and _avail(s, "org_a") == 15   # plan 5 + wallet 5 debited
+    out = _gate(s).settle_launch(signed_lease=r["lease"], consumed_units=0, now=2100.0)
+    assert out["refunded_plan"] == 5 and out["refunded_wallet"] == 5, out
+    assert _pos(s, "org_a", 2000.0).plan_live == 5 and _avail(s, "org_a") == 20   # each bucket restored

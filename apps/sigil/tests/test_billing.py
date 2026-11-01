@@ -147,6 +147,22 @@ def test_pathological_event_id_mints_nothing_on_both_value_paths():
     assert inv.invoices("acme") == []
 
 
+def test_whitespace_only_event_id_mints_nothing_on_both_value_paths():
+    # red-pen completeness-critic: a whitespace-only event_id (" ") must fail CLOSED at apply()'s bound (which
+    # now .strip()s to match the ledgers) — never pass apply() yet strip to "" inside record()/grant() and
+    # half-mint a subscription. Symmetric across top-up and subscription.
+    from sigil.governor.subscription import SubscriptionRegistry
+    s, inv, mock, signer = _inv_rig()
+    body, sig = _mk(mock, {"event_id": "   ", "kind": EVENT_TOPUP, "org_id": "acme", "created": 100.0,
+                           "price_id": "price_topup_200"})
+    assert signer.ingest(body, sig, now=100.0) is None
+    body, sig = _mk(mock, {"event_id": " ", "kind": EVENT_SUBSCRIPTION_ACTIVE, "org_id": "acme",
+                           "created": 100.0, "price_id": "price_pro"})
+    assert signer.ingest(body, sig, now=100.0) is None
+    assert SubscriptionRegistry(s, owner_key=OWNER, trusted_pubkey=OP).subscription("acme") is None  # NOT active
+    assert inv.invoices("acme") == []
+
+
 def test_stale_out_of_order_subscription_records_no_invoice():
     # red-pen FINDING 2: an older subscription event delivered AFTER a newer one (distinct event_id, smaller
     # created) is a stale LWW no-op mint -> it must record NO invoice line (the history must never show a period

@@ -188,3 +188,45 @@ def test_referential_floor_detects_a_seed_that_omits_an_invoice(tmp_path, monkey
     with pytest.raises(prune.PruneUnsafe) as e:
         prune.check_prune_safe(s, 5)
     assert "strand" in str(e.value).lower() and "invoice" in str(e.value).lower()
+
+
+def test_referential_floor_detects_a_value_corrupted_seed_row(tmp_path, monkeypatch):
+    # red-pen hardening: a seed that KEEPS the (org, invoice_id) key but corrupts the row's VALUE (amount /
+    # currency / credits / period) must be flagged — the pre-hardening key-only check missed exactly this
+    # (its wallet/plan siblings assert value-equality). Without the catch, a build regression silently
+    # corrupts durable billing history post-prune.
+    monkeypatch.setattr("sigil.governor.identity.owner_pubkey", lambda: OWNER_PUB)
+    s = _invoice_segmented_store(tmp_path)
+    real_build = prune.build
+
+    def corrupting_build(records, **kw):
+        seed = real_build(records, **kw)
+        rows = [list(r) for r in seed.invoice_row]
+        for r in rows:
+            if r[1] == "evt_below":
+                r[4] = (r[4] or 0) + 1   # flip amount_minor; keep the key
+        return seed.model_copy(update={"invoice_row": rows})
+
+    monkeypatch.setattr(prune, "build", corrupting_build)
+    assert prune.stranded_invoices(s, _archived_below(s, 5), 5) == ["acme"]   # value drift caught
+    with pytest.raises(prune.PruneUnsafe):
+        prune.check_prune_safe(s, 5)
+
+
+def test_referential_floor_detects_a_short_seed_row(tmp_path, monkeypatch):
+    # red-pen hardening: a seed that emits a SHORT (<10-field) row for the key must be flagged — the fold
+    # (_fold / the build re-seed) requires len>=10 and would silently DROP a short row at read time, re-opening
+    # invoice replay. The pre-hardening len>=2 acceptance counted it "carried".
+    monkeypatch.setattr("sigil.governor.identity.owner_pubkey", lambda: OWNER_PUB)
+    s = _invoice_segmented_store(tmp_path)
+    real_build = prune.build
+
+    def short_row_build(records, **kw):
+        seed = real_build(records, **kw)
+        rows = [(r[:2] if r[1] == "evt_below" else list(r)) for r in seed.invoice_row]   # truncate to [org, id]
+        return seed.model_copy(update={"invoice_row": rows})
+
+    monkeypatch.setattr(prune, "build", short_row_build)
+    assert prune.stranded_invoices(s, _archived_below(s, 5), 5) == ["acme"]   # short row not counted carried
+    with pytest.raises(prune.PruneUnsafe):
+        prune.check_prune_safe(s, 5)

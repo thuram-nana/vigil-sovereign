@@ -739,7 +739,11 @@ class BillingSigner:
             # fails the WHOLE value-granting event CLOSED (mint nothing) — symmetric across top-up and
             # subscription — instead of the asymmetric half-mint (top-up's wallet.grant raised and aborted, but
             # subscribe/refill never touch event_id, so the subscription committed while only its invoice raised).
-            eid = str(event.event_id or "")
+            # .strip() to match the ledger validators EXACTLY (_check_entry_id/_check_invoice_id both strip then
+            # require non-empty): a whitespace-only event_id (" ") would otherwise pass this bound yet strip to ""
+            # inside invoice.record() and raise AFTER the subscription mint committed — re-opening the half-mint
+            # this bound closes (red-pen completeness-critic). Stripping fails it CLOSED here, symmetric.
+            eid = str(event.event_id or "").strip()
             if not eid or len(eid) > 128 or any(ord(c) < 0x20 or ord(c) == 0x7f for c in eid):
                 return None
         if event.kind == EVENT_TOPUP and ent.kind == EVENT_TOPUP and ent.credits > 0:

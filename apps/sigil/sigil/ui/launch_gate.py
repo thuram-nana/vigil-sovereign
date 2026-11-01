@@ -262,9 +262,26 @@ class LaunchGate:
             now_ts = self._as_dt(now).timestamp()
         except (TypeError, ValueError, OSError, OverflowError):
             return {"ok": False, "error": "now must be a datetime or a POSIX timestamp"}
+        # BUCKET-SYMMETRIC REFUND (red-pen fix: plan-credit laundering). reserve_launch._spend debits
+        # PLAN-credits-first (non-rollover, expire at period_end) then the WALLET (permanent). Refunding the
+        # whole amount to the wallet would LAUNDER expiring plan credits into the permanent wallet on every
+        # reserve+cancel cycle (defeating use-it-or-lose-it). So restore the SAME buckets: re-derive how much
+        # was debited from the plan tranche (and which period) from the OWNER-SIGNED debit record (never a wire
+        # amount), let consumption eat the expiring plan portion FIRST, refund the unconsumed plan portion back
+        # to that SAME tranche, and only the remainder to the wallet. consumed == 0 (cancel) therefore restores
+        # the reservation exactly — a no-op, with nothing moved plan->wallet.
+        plan_deb = self.meter.plan.debited_entry(oid, f"reserve-plan:{s}:{non}")   # (from_plan, period_end) | None
+        from_plan = plan_deb[0] if plan_deb else 0
+        plan_pe = plan_deb[1] if plan_deb else None
+        plan_refund = max(0, from_plan - consumed)         # consumption eats the plan (expiring) portion first
+        wallet_refund = refund - plan_refund               # the rest (wallet portion + any plan over-consumption)
         with self._lock:
-            if refund > 0:
-                self.wallet.grant(oid, refund, "refund", source_ref=s,
-                                  entry_id=f"settle:{s}:{non}", issued_at=now_ts)
+            if plan_refund > 0 and plan_pe is not None:
+                self.meter.plan.grant(oid, plan_refund, period_end=plan_pe,
+                                      entry_id=f"settle-plan:{s}:{non}", issued_at=now_ts)
+            if wallet_refund > 0:
+                self.wallet.grant(oid, wallet_refund, "refund", source_ref=s,
+                                  entry_id=f"settle-wallet:{s}:{non}", issued_at=now_ts)
         return {"ok": True, "action": "launch_settled", "org_id": oid, "slug": s,
-                "refunded": refund, "net_spend": consumed}
+                "refunded": refund, "refunded_plan": plan_refund, "refunded_wallet": wallet_refund,
+                "net_spend": consumed}

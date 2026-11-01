@@ -167,6 +167,26 @@ class PlanCreditLedger:
                    "reason": f"plan credit debit {c} <- {oid} (period_end {pe}, engagement {engagement_id or '-'})"}
         return self.store.append(kind="event", source="governor", actor="WARDEN", payload=payload)
 
+    def debited_entry(self, org_id: str, entry_id: str) -> "Optional[tuple[int, float]]":
+        """The (credits, period_end) of the owner-signed plan DEBIT recorded under (org_id, entry_id), or None.
+        The launch settle path uses this to re-derive how much a reservation debited from the PLAN bucket, and
+        which period's tranche, so a refund restores the SAME expiring tranche rather than the permanent wallet
+        — the amount comes from the owner-signed record, never a wire value (the plan-credit-laundering fix).
+        Verified under the owner key valid at the seq; fail-closed to None. A live scan is sound here: a
+        reservation is settled well within its lease window, so its debit record is never pruned."""
+        if not (isinstance(org_id, str) and org_id and isinstance(entry_id, str) and entry_id):
+            return None
+        resolver = _kh.key_resolver(self.store, current=self.trusted_pubkey)
+        for r in self.store.iter_records():
+            p = r.payload
+            if not isinstance(p, dict) or p.get("signal") != PLAN_DEBIT_SIGNAL:
+                continue
+            if p.get("org_id") != org_id or p.get("entry_id") != entry_id:
+                continue
+            if verify_signed(p, _PLAN_DEBIT_CORE, resolver.at(r.seq)):
+                return (_as_credits(p.get("credits")), _as_period(p.get("period_end")))
+        return None
+
     # -- reads (owner-key-succession-aware fold; seeded from SnapshotState across a hard prune) -----
     def _fold(self) -> tuple[dict[Any, int], dict[Any, int], set]:
         """Fold the spine into (granted, debited, seen) keyed per `(org_id, period_end)`, where `seen` holds the
